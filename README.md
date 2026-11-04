@@ -14,7 +14,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | Proposal | Status | State | Title |
 | --- | --- | --- | --- |
 | [baseline](design/0000-baseline.md) | implemented |  | Baseline (h9 before proposals) |
-| [#1](design/0001-proposals.md) | accepted | ready | Proposals replace milestones and the design changelog |
+| [#1](design/0001-proposals.md) | implemented |  | Proposals replace milestones and the design changelog |
 | [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [devsrv](design/devsrv.md) | draft |  | devsrv and /srv |
@@ -40,7 +40,7 @@ flowchart LR
   classDef implemented fill:#dfd,stroke:#393
   classDef closed fill:#eee,stroke:#999,color:#777
   p_baseline["baseline<br/>implemented"]:::implemented
-  p_proposals["#35;1 proposals<br/>accepted"]:::accepted
+  p_proposals["#35;1 proposals<br/>implemented"]:::implemented
   p_9p_roots["9p-roots<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_devsrv["devsrv<br/>draft"]:::draft
