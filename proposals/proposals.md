@@ -1,0 +1,265 @@
+---
+slug: proposals
+title: Proposals replace milestones and the design changelog
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+areas: [process, build, tests]
+---
+
+# Proposal: proposals replace milestones and the design changelog
+
+Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
+## Abstract
+
+Design changes to h9 go through proposals: one Markdown file each under `proposals/`, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. Milestones go away; the order of work comes from the dependency graph. DESIGN.md becomes a description of h9 as built, with no milestone list and no changelog. A small Zig tool lists, checks and files proposals, and the integration tests are tagged with proposals instead of milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)).
+
+## Background
+
+DESIGN.md does three jobs at once. It describes how h9 works, it plans what comes next (the Milestones section, and design text for features that don't exist yet, such as 9P roots and host self-sandboxing), and it records why things changed (the Changelog, filed under the milestone in progress). Each job makes the others worse:
+
+- **The plan is a line.** Milestones are numbered, so anything new lands after M10 or forces a renumbering, even when it depends on nothing pending. A Linux personality, for example, needs only what M3 and M4 already provide, but has nowhere to go except "M11".
+- **Milestones bundle unrelated work.** M5 holds devsrv, semaphores, segattach, network policy, ephemeral writes and Go compatibility. They can't be decided, started or finished separately, and Go compatibility's real dependency (semaphores) isn't written down anywhere.
+- **The changelog mixes kinds of entry.** Design decisions (the sandbox becomes a capability policy) sit next to workarounds (`__clear_cache` on Linux arm64, `memccpy` on musl), which belong in code comments and commit messages. The section grows with every change and is read in order, so the doc keeps getting longer and more linear.
+- **There's no place for an idea that isn't accepted yet.** A design that's still being argued either goes into DESIGN.md, as if decided, or lives only in a conversation.
+- **Agents follow the rule they're given.** AGENTS.md tells them to edit DESIGN.md and add a changelog entry, so every agent-driven decision lands in the doc directly, with no point where a person accepts it.
+
+Go solves the same problems with proposals: a proposal is identified by an issue, discussed there, written up as `design/NNNN-shortname.md` only when the discussion asks for detail, and decided after a final comment period. Go keeps its design docs as history and its spec as the description of the current system.
+
+## Proposal
+
+### Layout
+
+```
+DESIGN.md                    h9 as built: architecture, invariants, decisions
+proposals/
+  README.md                  the process
+  TEMPLATE.md
+  proposals.md               this proposal, while it's a draft
+  0042-linux-personality.md  a filed proposal
+tools/
+  proposals.zig              the proposals tool
+  frontmatter.zig            the parser, shared with build.zig
+```
+
+Proposals live in this repository, not a separate one as in Go, so agents see them next to the code and a proposal and its first implementation can land in one PR.
+
+### Identity: slugs, then issue numbers
+
+Every proposal has a `slug`: lowercase words joined by dashes, unique across all proposals, and never changed. A draft has only the slug, and its file is `proposals/<slug>.md`. Filing creates the GitHub issue; from then on the proposal's `id` is the issue number and its file is `proposals/NNNN-<slug>.md`, padded to four digits for looks (sorting is numeric). The slug stays as an alias, so anything that referred to the draft by slug still resolves.
+
+A proposal can't leave `draft` without an `id`: drafting needs no GitHub, but deciding needs an issue to discuss it on. A proposal that starts as a Go-style issue with no doc gets its file with its number from the start, when one is needed. An issue-only proposal can't appear in `depends`, so anything another proposal depends on gets a file, even a short one.
+
+### Frontmatter
+
+```yaml
+---
+id: 42
+slug: linux-personality
+title: Linux personality
+status: accepted
+created: 2026-11-03
+authors: [progrium]
+depends: [43, symlinks-in-root]
+areas: [kern, vmm, cli, sandbox]
+superseded-by:
+---
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | once filed | The GitHub issue number |
+| `slug` | always | Permanent name; an alias for `id` |
+| `title` | always | Also the issue title, after `proposal: ` |
+| `status` | always | See States |
+| `created` | always | `YYYY-MM-DD` |
+| `authors` | always | GitHub logins |
+| `depends` | always, may be `[]` | Proposals that must be implemented before this one can be; ids or slugs |
+| `areas` | no | Free-form tags for filtering: `vmm`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process` and so on |
+| `superseded-by` | when `superseded` | The proposal that replaces it |
+
+The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), no nesting, quoting or multi-line values. That keeps the parser small enough to share between the tool and `build.zig` without a YAML library.
+
+Only facts are stored. Whether a proposal is *ready* (accepted, with every dependency implemented), what it *blocks* (the reverse of `depends`) and what's *in progress* are computed by the tool, so they can't drift.
+
+### States
+
+| Status | Meaning |
+| --- | --- |
+| `draft` | Being written or discussed; the only state allowed without an `id` |
+| `likely-accept`, `likely-decline` | The final comment period: at least three days, announced on the issue, for second thoughts. Significant new discussion moves it back to `draft`. |
+| `accepted` | Decided. Work can start once every dependency is implemented. |
+| `declined` | Decided against; kept, so the reasoning can be found later. The issue is closed. |
+| `hold` | Paused, with a reason on the issue |
+| `implemented` | Built, its "Done when" cases pass, and DESIGN.md describes it |
+| `superseded` | Replaced by `superseded-by` |
+
+Each status change is its own commit (`proposals: 42 likely-accept`), so `git log proposals/` is the record of decisions. The issue's labels may mirror the status, but the frontmatter is authoritative. At most three proposals sit in `likely-accept` or `likely-decline` at a time, so finishing decisions comes before starting new ones (Go's Incoming column does this for a larger group).
+
+### Scope
+
+A proposal is needed for:
+
+- changes to the `vmm` interface, the `Machine` API or `Machine.Options`
+- CLI flags and exit codes
+- sandbox capabilities, profiles and defaults
+- new backends, personalities, devices or root types
+- changes to `third_party/` beyond merging upstream
+- changes to this process
+
+It isn't needed for bug fixes, workarounds, performance work that doesn't change behaviour, or internal refactors; their reasoning goes in code comments and commit messages. If in doubt, draft one: a short proposal costs little.
+
+### Template
+
+`proposals/TEMPLATE.md` follows Go's, with three changes. Compatibility covers what h9 has instead of a Go 1 promise. Security is new, because most of h9's design choices are sandbox choices. And "Done when" replaces the milestone demos.
+
+1. **Abstract:** a short summary.
+2. **Background:** the problem, and what exists today.
+3. **Proposal:** a precise statement of the change.
+4. **Rationale:** alternatives and trade-offs, including the ones rejected, so the question isn't asked again.
+5. **Compatibility:** effects on CLI flags, `Machine.Options`, sandbox defaults, the root tree and `third_party/`.
+6. **Security:** what the guest can newly reach, and how the policy covers it.
+7. **Done when:** the demo commands and the integration cases that prove it, by name.
+8. **Implementation:** the steps, in order.
+9. **Open issues:** questions without answers yet. May be omitted.
+10. **Updates:** dated notes added after acceptance. Omitted until there's one.
+
+### After acceptance
+
+An accepted proposal's body isn't edited. A discovery during implementation that refines the design gets a dated note under Updates; one that changes the design gets a new proposal, which supersedes the old one or is added to its `depends`. A dependency found during implementation is added to `depends` in the same PR, with a line saying so.
+
+The PR that finishes a proposal updates DESIGN.md to describe what was built, tags the passing cases, and sets `status: implemented`. DESIGN.md never describes unbuilt features; proposals never get updated to describe the current system.
+
+### Tests
+
+Integration cases are tagged with the proposal they prove, in brackets at the end of the name: `test "ls /bin | wc -l [baseline]"`, `test "ramfs posts to /srv [devsrv]"`. A tag is an id or a slug. Demo cases keep the word `demo` in the name.
+
+`build.zig` reads the frontmatter through `tools/frontmatter.zig` and passes the tags of proposals that aren't `implemented` to the test binary (`H9_TEST_PENDING_TAGS`), which skips those cases unless `-Dpending` is given. That replaces the `"M5: ..."` naming convention: a case is pending because its proposal is, not because of how it's named, and it stops skipping in the commit that sets `implemented`.
+
+| Today | After |
+| --- | --- |
+| `(M2)`, `(M3)`, `(M4)` in case names | `[baseline]` |
+| `"M5: ..."` pending cases | `[slug]` of the proposal, skipped until implemented |
+| `zig build m1` … `zig build m4` | `zig build proposal -Dp=baseline`, which runs every baseline demo and case |
+| `zig build integration` | unchanged: every case of an implemented proposal |
+| (none) | `zig build proposal -Dp=<id or slug>`: one proposal's cases, pending or not |
+
+### The tool
+
+`zig build proposals -- <command>`, built from `tools/proposals.zig`:
+
+| Command | Does |
+| --- | --- |
+| `list [--status S] [--area A]` | A table of id, slug, title, status, and ready or blocked by what |
+| `ready` | Accepted proposals whose dependencies are all implemented: what can be started now |
+| `graph` | The dependency graph as Mermaid, for the README |
+| `new <slug>` | Copies the template to `proposals/<slug>.md` with the frontmatter filled in |
+| `file <slug>` | Creates the issue with `gh` (title, `Proposal` label, the Abstract and a link to the file as the body), renames the file, sets `id`, rewrites slug references to the number, and commits |
+| `fix` | Rewrites slug references to filed proposals as numbers |
+| `check` | Validates everything below; run in CI and by agents before a PR |
+
+`check` fails on:
+
+- bad frontmatter: a missing required field, an unknown status, a malformed date
+- a duplicate slug or id, or a filename that doesn't match them
+- a status past `draft` without an `id`
+- a reference that doesn't resolve, in `depends`, `superseded-by` or a test tag
+- a dependency cycle
+- an `implemented` proposal with a dependency that isn't
+- an `accepted` proposal that depends on a `declined` one
+- `superseded` without `superseded-by`
+- more than three proposals in a final comment period
+
+It warns on a slug reference to a filed proposal, so a branch drafted before the filing still passes after a rebase; `fix` cleans it up.
+
+### Migration
+
+1. **Baseline.** M0 to M4 are done and described by DESIGN.md as it stands. They become one proposal, `0000-baseline.md` (`slug: baseline`, `status: implemented`, no issue), whose body is a pointer to DESIGN.md and the frozen changelog. Finished work gets no retroactive proposals.
+2. **DESIGN.md.** The Milestones section is removed. The Changelog moves to `docs/history.md` as "History before proposals", unchanged, and DESIGN.md links to it. Design text for unbuilt work moves into proposals, leaving DESIGN.md about what exists. Milestone references in the remaining text ("from M5", "M10") become proposal references or are dropped.
+3. **Remaining milestones become proposals**, split by feature rather than kept as bundles. Each starts as a `draft` with its existing design text, and is filed and accepted as work reaches it:
+
+    | Slug | Depends on |
+    | --- | --- |
+    | `devsrv` | |
+    | `semaphores` (rendezvous, semacquire, tsemacquire, semrelease) | |
+    | `segattach` | |
+    | `net-policy` (outbound by default, `--net-allow`) | |
+    | `ephemeral-writes` (`--write=ephemeral`, private `/tmp`) | |
+    | `go-compat` (`/dev/bintime`, `_NSEC`) | `semaphores` |
+    | `self-host` (compilers, mk, acid's `/proc` files) | `segattach` |
+    | `gfx` (`--gfx`, devdraw) | `devsrv` |
+    | `kvm` | |
+    | `whp` | |
+    | `9p-roots` | `devsrv` |
+    | `image-roots` (cwfs, gefs) | `9p-roots` |
+    | `overlay` (copy-on-write, the root's default) | `ephemeral-writes` |
+    | `host-sandbox` (Seatbelt, Landlock and seccomp, AppContainer) | `kvm`, `whp` |
+
+    The research notes each milestone was meant to record (Seatbelt with `--gfx`, Landlock with KVM, AppContainer with WHP) go into the relevant proposal's Open issues.
+4. **Tests and build.** Case tags and build steps change as in Tests.
+5. **README.** The status checklist is replaced by a table generated by `list`, plus the `graph` output.
+6. **AGENTS.md.** The rule to edit DESIGN.md and add a changelog entry is replaced by:
+
+    > When a task would change anything listed under Scope in `proposals/README.md`, find the accepted proposal that covers it and check that it's ready (`zig build proposals -- ready`). If there's none, don't implement the change: draft one with `zig build proposals -- new <slug>`, leave it as a draft, and stop. Cite the proposal in implementation PRs, and tag new integration cases with it. Never edit an accepted proposal's body: add a dated note under Updates, or draft a new proposal. Add a dependency you discover to `depends` in the same PR, and say so. The PR that finishes a proposal updates DESIGN.md to match and sets `status: implemented`. Run `zig build proposals -- check` before opening a PR.
+
+## Rationale
+
+**Keep milestones and add proposals beside them.** Milestones would still impose a line and bundle unrelated work, and every proposal would need a milestone, which is the decision this replaces. The thing milestones did well, a demo that proves the work done, moves into each proposal's "Done when".
+
+**A separate proposals repository, as in Go.** Go's has many contributors and a review group; h9's main readers are one person and the agents working in this repository. In-repo proposals can land with their first implementation, and agents find them without cloning anything.
+
+**Status on GitHub (labels or a project board) instead of frontmatter.** Agents would need the GitHub API to know what's ready, CI couldn't check the graph offline, and decisions wouldn't be in git history. Labels can still mirror the status.
+
+**Issue numbers only, with no drafts before filing.** Every idea would need an issue before it's written down, and agents drafting offline couldn't. Temporary numbers (`d1`, random hex) collide across branches and mean nothing in a `depends` list. A slug that becomes an alias does neither.
+
+**Sequential local numbers, with issues optional.** Simpler, but discussion would have no fixed home, and two branches would assign the same number. Issue numbers are assigned by GitHub, so they're unique by construction.
+
+**Full YAML frontmatter.** Needs a YAML library in `build.zig` or a second language. The subset covers every field.
+
+**A Python tool, like `scripts/mkroot.py`.** It would need its own frontmatter parser, while `build.zig` needs one in Zig for the test tags. One parser in Zig serves both, and `zig` is already required.
+
+**No final comment period, with one decider.** Many proposals will be drafted by agents. A few days between "this looks right" and "accepted" is where a person reviews them, and it costs nothing when nobody objects.
+
+## Compatibility
+
+No user-visible change to h9: no CLI flags, `Machine.Options` or sandbox defaults change. Developer-facing changes:
+
+- `zig build m1` … `m4` are replaced by `zig build proposal -Dp=baseline`.
+- Integration case names change from `(Mn)` to `[tag]`, which changes `zig build test` filters that match on them.
+- DESIGN.md loses its Milestones and Changelog sections; the changelog is preserved in `docs/history.md`.
+- AGENTS.md's rule for design changes changes, as above.
+
+## Security
+
+None for the guest or the host. `file` runs `gh` with the user's credentials and creates an issue; it prints what it will create and asks before doing it, unless given `--yes`.
+
+## Done when
+
+- `zig build proposals -- check` passes on the migrated tree, and fails on a fixture set under `tools/testdata/` covering each failure listed under The tool.
+- `zig build proposals -- ready` lists the proposals from Migration that are accepted and unblocked.
+- `zig build proposal -Dp=baseline` runs every case formerly tagged `(M2)`, `(M3)` or `(M4)` and every former M0 to M4 demo, and they pass.
+- A case tagged with a draft proposal skips in `zig build integration` and runs with `-Dpending`.
+- `zig build proposals -- new linux-personality` followed by `file linux-personality` (against a test repository, or with `--dry-run`) produces `proposals/NNNN-linux-personality.md` and rewrites a slug reference to it elsewhere.
+- DESIGN.md has no Milestones or Changelog section and no milestone references.
+
+## Implementation
+
+1. `tools/frontmatter.zig` and `tools/proposals.zig` with `list`, `ready`, `graph`, `new` and `check`, and the fixtures.
+2. `proposals/README.md` (the process: States, Scope, After acceptance, the tool) and `proposals/TEMPLATE.md`.
+3. `0000-baseline.md`; DESIGN.md's changelog moved to `docs/history.md`; the Milestones section removed.
+4. The draft proposals from Migration, with their design text moved out of DESIGN.md.
+5. Test tags, `H9_TEST_PENDING_TAGS`, and the `proposal` build step; the `m1`–`m4` steps removed.
+6. `file` and `fix`.
+7. README and AGENTS.md.
+
+This proposal is decided under the current process, since the new one doesn't exist yet: it's filed by hand, and accepted by a commit to this file. It becomes the first proposal to reach `implemented` under its own rules.
+
+## Open issues
+
+- Should the `m1`–`m4` build steps stay for a while as aliases of `proposal -Dp=baseline`, for muscle memory and old instructions?
+- Is three days the right final comment period, or should it scale with the proposal (a week for anything touching the sandbox)?
+- Should `implemented` require the "Done when" cases to exist and pass, checked by the tool, or is that left to review?
+- Should DESIGN.md link each section to the proposals that shaped it, and should the tool check those links?
+- Go wraps design docs at 80 columns with one sentence per line, for reviewable diffs. h9's docs use a line per paragraph. Keep that, or switch for proposals?
