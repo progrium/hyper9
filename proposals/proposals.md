@@ -176,8 +176,8 @@ It warns on a slug reference to a filed proposal, so a branch drafted before the
 
 ### Migration
 
-1. **Baseline.** M0 to M4 are done and described by DESIGN.md as it stands. They become one proposal, `0000-baseline.md` (`slug: baseline`, `status: implemented`, no issue), whose body is a pointer to DESIGN.md and the frozen changelog. Finished work gets no retroactive proposals.
-2. **DESIGN.md.** The Milestones section is removed. The Changelog moves to `docs/history.md` as "History before proposals", unchanged, and DESIGN.md links to it. Design text for unbuilt work moves into proposals, leaving DESIGN.md about what exists. Milestone references in the remaining text ("from M5", "M10") become proposal references or are dropped.
+1. **Baseline.** M0 to M4 are done and described by DESIGN.md as it stands. They become one proposal, `0000-baseline.md` (`slug: baseline`, `status: implemented`, no issue). Its body is the record of how h9 got here: the M0 to M4 entries from the Milestones section, with their demos, and DESIGN.md's Changelog, moved unchanged with its dated entries and milestone headings. The one M5 entry so far (the rename from hp9 to h9) moves with it, since it predates proposals. Like any implemented proposal, it isn't edited afterwards. Finished work gets no retroactive proposals.
+2. **DESIGN.md.** The Milestones and Changelog sections are removed, and DESIGN.md links to the baseline proposal for the history. Design text for unbuilt work moves into proposals, leaving DESIGN.md about what exists. Milestone references in the remaining text ("from M5", "M10") become proposal references or are dropped.
 3. **Remaining milestones become proposals**, split by feature rather than kept as bundles. Each starts as a `draft` with its existing design text, and is filed and accepted as work reaches it:
 
     | Slug | Depends on |
@@ -228,7 +228,7 @@ No user-visible change to h9: no CLI flags, `Machine.Options` or sandbox default
 
 - `zig build m1` … `m4` are replaced by `zig build proposal -Dp=baseline`.
 - Integration case names change from `(Mn)` to `[tag]`, which changes `zig build test` filters that match on them.
-- DESIGN.md loses its Milestones and Changelog sections; the changelog is preserved in `docs/history.md`.
+- DESIGN.md loses its Milestones and Changelog sections; both are preserved in `proposals/0000-baseline.md`.
 - AGENTS.md's rule for design changes changes, as above.
 
 ## Security
@@ -242,13 +242,13 @@ None for the guest or the host. `file` runs `gh` with the user's credentials and
 - `zig build proposal -Dp=baseline` runs every case formerly tagged `(M2)`, `(M3)` or `(M4)` and every former M0 to M4 demo, and they pass.
 - A case tagged with a draft proposal skips in `zig build integration` and runs with `-Dpending`.
 - `zig build proposals -- new linux-personality` followed by `file linux-personality` (against a test repository, or with `--dry-run`) produces `proposals/NNNN-linux-personality.md` and rewrites a slug reference to it elsewhere.
-- DESIGN.md has no Milestones or Changelog section and no milestone references.
+- DESIGN.md has no Milestones or Changelog section and no milestone references, and `0000-baseline.md` holds both, with every Changelog entry unchanged.
 
 ## Implementation
 
 1. `tools/frontmatter.zig` and `tools/proposals.zig` with `list`, `ready`, `graph`, `new` and `check`, and the fixtures.
 2. `proposals/README.md` (the process: States, Scope, After acceptance, the tool) and `proposals/TEMPLATE.md`.
-3. `0000-baseline.md`; DESIGN.md's changelog moved to `docs/history.md`; the Milestones section removed.
+3. `0000-baseline.md`, holding the M0 to M4 milestones and the Changelog moved out of DESIGN.md.
 4. The draft proposals from Migration, with their design text moved out of DESIGN.md.
 5. Test tags, `H9_TEST_PENDING_TAGS`, and the `proposal` build step; the `m1`–`m4` steps removed.
 6. `file` and `fix`.
