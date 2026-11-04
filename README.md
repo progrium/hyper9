@@ -13,7 +13,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 
 | Proposal | Status | State | Title |
 | --- | --- | --- | --- |
-| [baseline](design/0000-baseline.md) | implemented |  | Baseline: h9 before proposals |
+| [baseline](design/0000-baseline.md) | implemented |  | Baseline (h9 before proposals) |
 | [#1](design/0001-proposals.md) | accepted | ready | Proposals replace milestones and the design changelog |
 | [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
 | [ci](design/ci.md) | draft |  | Continuous integration |

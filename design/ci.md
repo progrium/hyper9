@@ -26,3 +26,7 @@ Running on KVM depends on [kvm](kvm.md), which can be added to CI when it lands.
 ## Done when
 
 - Every push runs `zig build test -Demu=unicorn` with a root tree on Linux arm64 and macOS hosted runners, and `zig build design -- check`.
+
+## Open issues
+
+- Running 9front's own regression tests, where they exist, alongside the integration cases. (DESIGN.md's test plan listed them.)

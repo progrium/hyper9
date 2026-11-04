@@ -1,5 +1,6 @@
 Bad frontmatter: a missing field, an unknown status, a malformed date, an
-unknown key, quoting, a scalar where a list goes, and a file with none.
+unknown key, quoting, a scalar where a list goes, a file with none, values
+YAML would read differently, and a list item that isn't a plain word.
 
 error: design/a.md: missing `title`
 error: design/b.md:4: unknown status `done`
@@ -9,6 +10,9 @@ error: design/e.md:3: `title`: quoting, nesting and multi-line values aren't sup
 error: design/f.md:6: `authors` must be a list
 error: design/g.md:1: no frontmatter
 error: design/h.md:2: bad slug `H`
+error: design/i.md:3: `title`: it has a colon followed by a space
+error: design/j.md:3: `title`: it has ` #`, which starts a comment
+error: design/k.md:6: `authors` must be a list
 
 -- design/a.md --
 ---
@@ -73,5 +77,32 @@ title: H
 status: draft
 created: 2026-11-03
 authors: [progrium]
+depends: []
+---
+-- design/i.md --
+---
+slug: i
+title: Baseline: before proposals
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/j.md --
+---
+slug: j
+title: Fine so far, but this #isn't
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/k.md --
+---
+slug: k
+title: K
+status: draft
+created: 2026-11-03
+authors: [progrium: admin]
 depends: []
 ---

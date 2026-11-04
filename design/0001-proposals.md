@@ -266,4 +266,9 @@ This proposal is decided under the current process, since the new one doesn't ex
   - The baseline demos that need a root tree are left out of `zig build proposal -Dp=baseline` when there's no tree, as the integration cases skip, rather than failing; the hello demos always run.
   - Slugs may start with a digit (`9p-roots`), but can't be all digits, which would read as an id. The baseline's id 0 isn't an issue, so references to it keep its slug, and `fix` leaves them alone.
   - Migration added three drafts the table didn't list, for DESIGN.md text with nowhere else to go: `zig-interpreter` (the emulator's second step), `hide-host-paths` (an open question) and `ci` (the CI plan). The `self-host` and `9p-roots` drafts don't depend on `segattach` and `devsrv`: nothing in their design text needs them, and `self-host` notes it may gain a dependency.
-  - Milestone names were also replaced in source comments, and `--print`'s network caveat now reads "the network is not restricted beyond --net=disable".
+  - Milestone names were also replaced in source comments and scripts, and `--print`'s network caveat now reads "the network is not restricted beyond --net=disable".
+  - `image-roots` depends on `devsrv` as well as `9p-roots`, since it posts to `/srv`.
+  - `check` also refuses scalar values that YAML would read differently, since values are never quoted (a `: ` or ` #` inside, or a leading indicator such as `#` or `-` followed by a space), and list items that aren't plain words. That keeps the frontmatter a true subset of YAML; the baseline's title lost its colon for it.
+  - `check` refuses test tags not written as `[a, b]`, since `zig build proposal -Dp` matches them by text, and `fix` rewrites them.
+  - `file` also rewrites links to the draft's old path (`design/<slug>.md` in any tracked file, and `](<slug>.md` within `design/`), refreshes the README table, and commits a draft that was never committed.
+  - The Done when item for `file` is met with `--issue N`, which numbers a draft offline. `--dry-run` changes nothing, as its name says.

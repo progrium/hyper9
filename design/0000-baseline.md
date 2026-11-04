@@ -1,7 +1,7 @@
 ---
 id: 0
 slug: baseline
-title: Baseline: h9 before proposals
+title: Baseline (h9 before proposals)
 status: implemented
 created: 2026-11-03
 authors: [progrium]

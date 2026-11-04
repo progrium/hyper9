@@ -180,14 +180,16 @@ fn tagFilters(b: *std.Build, p: frontmatter.Proposal) []const []const u8 {
     return out.items;
 }
 
-/// The number of entries in the root tree's /arm64/bin and /rc/bin, which
-/// `ls /bin` lists one after the other; null without a tree.
+/// Registers a demo for the proposal with this slug, which
+/// `zig build proposal -Dp=...` runs.
 fn addDemo(b: *std.Build, demos: *std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)), slug: []const u8, step: *std.Build.Step) void {
     const entry = demos.getOrPut(b.allocator, slug) catch @panic("OOM");
     if (!entry.found_existing) entry.value_ptr.* = .empty;
     entry.value_ptr.append(b.allocator, step) catch @panic("OOM");
 }
 
+/// The number of entries in the root tree's /arm64/bin and /rc/bin, which
+/// `ls /bin` lists one after the other; null without a tree.
 fn countBin(b: *std.Build, root: []const u8) ?usize {
     const io = b.graph.io;
     var total: usize = 0;
@@ -475,7 +477,7 @@ pub fn build(b: *std.Build) void {
     const clean_cmd = b.addSystemCommand(&.{ "rm", "-rf", b.pathFromRoot("zig-out"), b.pathFromRoot(".zig-cache") });
     b.step("clean", "Remove zig-out and .zig-cache").dependOn(&clean_cmd.step);
 
-    // M0/M1 fixtures: hand-assembled hello a.outs for arm64 and amd64.
+    // Fixtures: hand-assembled hello a.outs for arm64 and amd64.
     const mkhello = b.addExecutable(.{
         .name = "mkhello",
         .root_module = b.createModule(.{
@@ -565,6 +567,10 @@ pub fn build(b: *std.Build) void {
     // One proposal's demos and integration cases (design/), whatever its
     // status, by id or slug.
     const proposal_step = b.step("proposal", "Run one proposal's demos and integration cases: -Dp=<id or slug>");
+    // A demo registered for a slug that isn't a proposal would never run.
+    var demo_slugs = demos.keyIterator();
+    while (demo_slugs.next()) |slug| if (frontmatter.resolve(proposals(b), slug.*) == null)
+        std.debug.panic("build.zig: addDemo for `{s}`, which isn't a proposal under design/", .{slug.*});
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {

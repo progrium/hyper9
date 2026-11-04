@@ -12,7 +12,7 @@ areas: [kern, vmm]
 
 ## Abstract
 
-Serve `segattach`, `segdetach` and `segfree` with named shared segments, each backed by one set of guest-physical pages mapped into every address space that attaches it.
+Serve `segattach`, `segdetach`, `segfree` and `segbrk` with named shared segments, each backed by one set of guest-physical pages mapped into every address space that attaches it.
 
 ## Background
 
@@ -24,7 +24,7 @@ From DESIGN.md's process model table:
 | --- | --- |
 | `segattach` / `segdetach` / `segfree` | Named shared segments, backed by one set of guest-physical pages |
 
-`rfork(RFMEM)` already shares text, data and bss and would share segattach pages too. Segments are Zig objects in `src/segment.zig`, attached to every address space that shares them.
+`segbrk`, which grows an attached segment as `brk_` grows the data segment, isn't served either (the process model table listed it with `brk_`). `rfork(RFMEM)` already shares text, data and bss and would share segattach pages too. Segments are Zig objects in `src/segment.zig`, attached to every address space that shares them.
 
 ## Done when
 

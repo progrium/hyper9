@@ -65,7 +65,7 @@ emulator. Build them first with the same target as the table above, adding
 zig build install install-tests -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm test linux                  # both sets
 scripts/lima/vm test windows integration    # just one
-H9_TEST_PENDING=1 scripts/lima/vm test macos integration  # include the "M5: ..." cases
+H9_TEST_PENDING=1 scripts/lima/vm test macos integration  # include cases of proposals that aren't implemented
 ```
 
 It pushes `h9` and the test binaries from `zig-out/<os>/bin`, runs

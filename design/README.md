@@ -23,7 +23,7 @@ The sections are Abstract, Background, Proposal, Rationale, Compatibility, Secur
 
 ## Filing and numbering
 
-A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.
+A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number and links to the old path, refreshes the README table, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.
 
 Discussion happens on the issue. The doc is revised in commits. A proposal can't leave `draft` without an `id`: drafting needs no GitHub, but deciding needs an issue to discuss it on. The slug stays as an alias after filing, so a reference written before the number existed still resolves. The [baseline](0000-baseline.md), the work done before proposals, is `id: 0` and has no issue.
 
@@ -55,7 +55,7 @@ superseded-by:
 | `areas` | no | Free-form tags for filtering: `vmm`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process` and so on |
 | `superseded-by` | when `superseded` | The proposal that replaces it |
 
-The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), with no nesting, quoting or multi-line values. Only facts are stored. Whether a proposal is ready (accepted, with every dependency implemented) and what it blocks are computed by the tool.
+The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), with no nesting, quoting or multi-line values. Since nothing is quoted, a value can't contain `: ` or ` #` or start with a YAML indicator such as `#`, and list items are plain words. Only facts are stored. Whether a proposal is ready (accepted, with every dependency implemented) and what it blocks are computed by the tool.
 
 ## States
 
@@ -79,7 +79,7 @@ The PR that finishes a proposal updates DESIGN.md to describe what was built, ta
 
 ## Tests
 
-Integration cases are tagged with the proposal they prove, by slug or id, in brackets at the end of the name: `test "ls /bin | wc -l (demo) [baseline]"`, `test "ramfs posts to /srv [devsrv]"`. A case whose proposal isn't implemented skips in `zig build integration` and `zig build test`, unless `-Dpending` is given, and stops skipping in the commit that marks the proposal implemented. Untagged cases always run.
+Integration cases are tagged with the proposal they prove, by slug or id, in brackets at the end of the name: `test "ls /bin | wc -l (demo) [baseline]"`, `test "ramfs posts to /srv [devsrv]"`. A case whose proposal isn't implemented skips in `zig build integration` and `zig build test`, unless `-Dpending` is given, and stops skipping in the commit that marks the proposal implemented. Untagged cases always run. Write tags as `[a, b]`, with a comma and a space; `check` enforces it, since `zig build proposal` matches them by text.
 
 `zig build proposal -Dp=<id or slug>` runs one proposal's demos and cases, whatever its status. Demos that aren't integration cases are registered for their proposal in `build.zig` (`addDemo`).
 
@@ -98,4 +98,4 @@ Integration cases are tagged with the proposal they prove, by slug or id, in bra
 | `fix` | Rewrites slug references to filed proposals as numbers |
 | `check` | Validates the proposals and test tags; run in CI and before a PR |
 
-`check` fails on bad frontmatter, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by` or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites, and on an out-of-date README table, which `readme` rewrites.
+`check` fails on bad frontmatter (including values YAML would read differently), tags not written as `[a, b]`, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by` or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites, and on an out-of-date README table, which `readme` rewrites.

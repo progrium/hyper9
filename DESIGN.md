@@ -80,6 +80,8 @@ Each backend is a file under `src/vmm/` with the same method set; the unions dis
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
+The interface was shaped around all three hypervisors, so the table and rules below cover KVM and WHP as well. Only HVF is built; [kvm](design/kvm.md) and [whp](design/whp.md) are proposed.
+
 | Operation | macOS: Hypervisor.framework | Linux: KVM | Windows: WHP |
 | --- | --- | --- | --- |
 | Create VM | `hv_vm_create` | `KVM_CREATE_VM` | `WHvCreatePartition` + `WHvSetupPartition` |
@@ -94,7 +96,7 @@ The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather tha
 - **Threads:** a vCPU is created, run and destroyed on one host thread, which is HVF's rule and the strictest of the three. `kick` is the only call allowed from another thread.
 - **Memory:** one large guest-physical region is mapped once at VM creation. A host-side page allocator hands out guest-physical pages from it. We never map per segment, because KVM caps the number of memory slots and mapping calls are slow everywhere.
 - **Page size:** guest page tables use 4K pages on every host, matching 9front's page size on both architectures. hyper-linux shows HVF guests can use 4K pages. Only the single host memory region has to be aligned to the host page size (16K on Apple Silicon).
-- **No hypervisor:** `create` fails cleanly with a clear message. An interpreter backend could implement the same interface later.
+- **No hypervisor:** `create` fails cleanly with a clear message, and `auto` falls back to the emulator when it's built in.
 
 ## Emulator backend (`emu`)
 
@@ -150,7 +152,7 @@ Each guest architecture gets a few hundred lines of assembly that run in guest k
 4. The stack may span \[USTKTOP − 16 MiB, USTKTOP), but as in 9front only its top pages are mapped at first; it grows down on faults below it, and at each syscall to cover the arguments. A zeroed Tos sits at the very top. Below it go the argument strings, then the argv array, then argc at SP.
 5. Tos fields: the host fills `pid` and `cyclefreq` and keeps `kcycles`/`pcycles` current; the profiling pointers stay zero.
 
-**Syscall table.** 9front's `libc/9syscall/sys.h` defines numbers 0–53; 48 and 49 are unused. The underscore entries (`_READ`, `_WRITE`, `_STAT`, `_NSEC` and so on) are old compatibility calls that current libc doesn't use. h9 implements only the current calls; the others post "sys: bad sys call", as the real kernel does for unknown calls. Time comes from `/dev/bintime`, not a syscall. `_NSEC` is proposed as an exception, for Go ([go-compat](design/go-compat.md)).
+**Syscall table.** 9front's `libc/9syscall/sys.h` defines numbers 0–53; 48 and 49 are unused. The underscore entries (`_READ`, `_WRITE`, `_STAT`, `_NSEC` and so on) are old compatibility calls that current libc doesn't use. h9 implements only the current calls; the others post "sys: bad sys call", as the real kernel does for unknown calls. Time comes from `/dev/bintime`, not a syscall; drawterm's devcons serves it, and its clock moves only once a second and returns three of 9front's four words, so `nsec()` sees whole seconds ([go-compat](design/go-compat.md) fixes this). `_NSEC` is proposed as an exception, for Go ([go-compat](design/go-compat.md)).
 
 **Reference:** hyper-linux's `src/shim.S` (648 lines, Apache-2.0) already covers EL1 vectors, MMU setup and W^X page splitting on HVF. Read it before writing ours, and keep its license notice on anything we borrow.
 
@@ -160,7 +162,7 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 | Plan 9 call | Implementation |
 | --- | --- |
-| `rfork(RFPROC)` | New Proc, new thread and vCPU, and an eager copy of the address space |
+| `rfork(RFPROC)` | New Proc, new thread and vCPU, and an eager copy of the address space (no copy-on-write) |
 | `rfork(RFMEM)` | Share the text, data and bss; copy only the stack |
 | `RFNAMEG` / `RFFDG` / `RFENVG` / `RFNOTEG` / `RFREND` | Share or copy drawterm's Pgrp, Fgrp, Egrp, note group and rendezvous group |
 | `exec` | Load the new a.out into fresh segments, rebuild page tables, reset registers, keep the fds (honouring close-on-exec) |
@@ -174,7 +176,7 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 
 **Notes on blocked and running processes.** A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted". A note to a process running guest code kicks its vCPU, and the note is delivered at the exit. Pending notes are queued on h9's process record, not in drawterm's Proc: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag.
 
-**vCPU limits.** v1 is one vCPU per process. Measure each hypervisor's maximum early (`hv_vm_get_max_vcpu_count`, `KVM_CAP_MAX_VCPUS`, WHP's partition property). If a big tree hits the limit, release a process's vCPU while it is blocked in a long host syscall, keep its registers in the Proc, and reacquire a vCPU from a pool when it resumes. On HVF a vCPU is bound to its thread, so the pool has to be pool threads that run the guest on the process's behalf.
+**vCPU limits.** Each process runs on one vCPU at a time, and hypervisors cap the live vCPUs per VM (`hv_vm_get_max_vcpu_count` on HVF). On HVF a vCPU is bound to its thread, so a process past the cap can't simply borrow one: it needs pool threads that run the guest on its behalf.
 
 Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. A Unicorn engine has no limit but costs about 1.3 MiB of host memory and 0.3 ms to create. So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it.
 
@@ -340,7 +342,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 
 - No subcommands. `h9 ls` must run 9front's `ls`, so tool functions such as `--version` and `--check` are flags instead.
 - Flag parsing stops at the first non-flag, as with `env` and `nice`, so `h9 ls -l` passes `-l` to `ls`. `--` ends h9's flags explicitly.
-- Long flags only, so h9's flags are never confused with Plan 9-style short flags. Short aliases come later, and only for the most-used flags. The exception is `-h` as the only argument, which is `--help`: alone it can't be a program's flag, and anywhere else it's a program name or argument.
+- Long flags only, so h9's flags are never confused with Plan 9-style short flags. There are no short aliases. The exception is `-h` as the only argument, which is `--help`: alone it can't be a program's flag, and anywhere else it's a program name or argument.
 
 **Program resolution**
 
@@ -378,7 +380,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` or `--host-cmd` |
 | `--trace[=FILE]` | ratrace-style syscall log, to stderr by default |
 | `--dump-on-fault` | Prints the Ureg and a symbolized PC when the guest faults |
-| `--check` | Runs a test program on each backend built in, or just `--backend`'s (this also checks the entitlement or `/dev/kvm` access), reports the vCPU limit, and runs `/bin/echo` from the root tree. Exits 0, or 125 if h9 can't run programs from the root |
+| `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree. Exits 0, or 125 if h9 can't run programs from the root |
 | `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, and the backends built in |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 

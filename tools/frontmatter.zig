@@ -169,6 +169,12 @@ pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags
             bad.append(arena, key) catch {};
             continue;
         }
+        if (!member(&lists, key)) if (plainScalarProblem(value)) |why| {
+            diags.err("design/{s}:{d}: `{s}`: {s}, which YAML would read differently", .{ file, lineno, key, why });
+            p.ok = false;
+            bad.append(arena, key) catch {};
+            continue;
+        };
         if (member(&lists, key)) {
             const items = parseList(arena, value) orelse {
                 diags.err("design/{s}:{d}: `{s}` must be a list, such as [a, b]", .{ file, lineno, key });
@@ -246,6 +252,17 @@ pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags
     return p;
 }
 
+/// Why a scalar wouldn't read as the same plain string in YAML, or null.
+/// Values are never quoted, so these are refused instead.
+pub fn plainScalarProblem(v: []const u8) ?[]const u8 {
+    if (v.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, "-?:,[]{}#&*!|>'\"%@`", v[0]) != null and !(v[0] == '-' and v.len > 1 and v[1] != ' '))
+        return "it starts with a YAML indicator";
+    if (std.mem.indexOf(u8, v, ": ") != null or v[v.len - 1] == ':') return "it has a colon followed by a space";
+    if (std.mem.indexOf(u8, v, " #") != null) return "it has ` #`, which starts a comment";
+    return null;
+}
+
 /// `[a, b]` to its items, or null if it isn't a flow list.
 fn parseList(arena: std.mem.Allocator, value: []const u8) ?[]const []const u8 {
     if (value.len < 2 or value[0] != '[' or value[value.len - 1] != ']') return null;
@@ -255,7 +272,8 @@ fn parseList(arena: std.mem.Allocator, value: []const u8) ?[]const []const u8 {
     var it = std.mem.splitScalar(u8, inner, ',');
     while (it.next()) |item| {
         const t = std.mem.trim(u8, item, " \t");
-        if (t.len == 0 or std.mem.indexOfAny(u8, t, "[]{}\"'") != null) return null;
+        if (t.len == 0) return null;
+        for (t) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.')) return null;
         out.append(arena, t) catch return null;
     }
     return out.items;
@@ -312,6 +330,19 @@ pub fn pendingTags(arena: std.mem.Allocator, ps: []const Proposal) ![]const u8 {
     return out.items;
 }
 
+/// The tags as they should be written: trimmed, joined by ", ".
+pub fn canonicalTags(arena: std.mem.Allocator, tags: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, tags, ',');
+    var first = true;
+    while (it.next()) |t| {
+        if (!first) try out.appendSlice(arena, ", ");
+        first = false;
+        try out.appendSlice(arena, std.mem.trim(u8, t, " \t"));
+    }
+    return out.items;
+}
+
 /// The tags at the end of a test name: `name [a, b]` gives a and b.
 pub fn testTags(name: []const u8) ?[]const u8 {
     if (name.len == 0 or name[name.len - 1] != ']') return null;
@@ -351,6 +382,18 @@ test "parse a proposal" {
     try std.testing.expect(std.mem.startsWith(u8, p.body, "\n# Proposal"));
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("0042-linux-personality.md", p.expectedFile(&buf));
+}
+
+test "plain scalars" {
+    try std.testing.expect(plainScalarProblem("devsrv and /srv") == null);
+    try std.testing.expect(plainScalarProblem("Graphics (--gfx)") == null);
+    try std.testing.expect(plainScalarProblem("Outbound-only network by default, and --net-allow") == null);
+    try std.testing.expect(plainScalarProblem("-x is fine") == null);
+    try std.testing.expect(plainScalarProblem("Baseline: h9") != null);
+    try std.testing.expect(plainScalarProblem("#1 thing") != null);
+    try std.testing.expect(plainScalarProblem("a #b") != null);
+    try std.testing.expect(plainScalarProblem("- item") != null);
+    try std.testing.expect(plainScalarProblem("ends:") != null);
 }
 
 test "slugs and tags" {

@@ -1,9 +1,11 @@
-References that don't resolve: in depends, superseded-by and a test tag.
+References that don't resolve: in depends, superseded-by and a test tag;
+and tags written without the canonical ", " spacing.
 
 error: design/a.md:7: depends on `nope`, which isn't a proposal
 error: design/a.md:7: depends on `99`, which isn't a proposal
 error: design/0040-b.md:9: superseded by `gone`, which isn't a proposal
 error: tests/integration.zig:3: tag `missing` isn't a proposal
+error: tests/integration.zig:5: write the tags as [a, b2]
 
 -- design/a.md --
 ---
@@ -13,6 +15,15 @@ status: draft
 created: 2026-11-03
 authors: [progrium]
 depends: [nope, 99]
+---
+-- design/b2.md --
+---
+slug: b2
+title: B2
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
 ---
 -- design/0040-b.md --
 ---
@@ -29,4 +40,6 @@ superseded-by: gone
 test "fine [a]" {
 }
 test "lost [missing]" {
+}
+test "squashed [a,b2]" {
 }

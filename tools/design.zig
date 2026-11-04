@@ -33,6 +33,8 @@ const Case = struct {
     line: u32,
     name: []const u8,
     tags: []const []const u8,
+    /// The tags as written, between the brackets.
+    raw: []const u8,
 };
 
 /// The repository as the tool sees it: the proposals and the tagged cases.
@@ -82,7 +84,7 @@ fn scanCases(arena: std.mem.Allocator, io: std.Io, root: std.Io.Dir) ![]Case {
             var list: std.ArrayList([]const u8) = .empty;
             var ts = std.mem.splitScalar(u8, tags, ',');
             while (ts.next()) |t| try list.append(arena, std.mem.trim(u8, t, " "));
-            try out.append(arena, .{ .file = file, .line = lineno, .name = name, .tags = list.items });
+            try out.append(arena, .{ .file = file, .line = lineno, .name = name, .tags = list.items, .raw = tags });
         }
     }
     return out.items;
@@ -155,6 +157,10 @@ fn check(r: Repo, diags: *Diags) !void {
 
     try checkCycles(r, diags);
 
+    for (r.cases) |c| {
+        const canonical = try fm.canonicalTags(r.arena, c.raw);
+        if (!std.mem.eql(u8, canonical, c.raw)) diags.err("{s}:{d}: write the tags as [{s}], so zig build proposal -Dp finds them; zig build design -- fix rewrites them", .{ c.file, c.line, canonical });
+    }
     for (r.cases) |c| for (c.tags) |t| {
         const j = r.resolve(t) orelse {
             diags.err("{s}:{d}: tag `{s}` isn't a proposal", .{ c.file, c.line, t });
@@ -328,6 +334,15 @@ fn checkReadme(r: Repo, diags: *Diags) void {
     if (!std.mem.eql(u8, updated, text)) diags.warn("README.md: the proposal table is out of date; zig build design -- readme rewrites it", .{});
 }
 
+/// Rewrites README.md's block if it has one; true if that changed it.
+fn readmeRefresh(r: Repo) !bool {
+    const text = try r.root.readFileAlloc(r.io, "README.md", r.arena, .limited(1 << 22));
+    const updated = (try readmeUpdated(r, text)) orelse return false;
+    if (std.mem.eql(u8, updated, text)) return false;
+    try r.root.writeFile(r.io, .{ .sub_path = "README.md", .data = updated });
+    return true;
+}
+
 fn readmeCmd(r: Repo) !void {
     const text = try r.root.readFileAlloc(r.io, "README.md", r.arena, .limited(1 << 22));
     const updated = (try readmeUpdated(r, text)) orelse fail("README.md has no {s} ... {s} block", .{ readme_begin, readme_end });
@@ -381,6 +396,7 @@ fn fix(r: Repo, which: ?usize) ![]const []const u8 {
 
 /// Rewrites a list or scalar of references; null if nothing changed.
 fn mapRefs(arena: std.mem.Allocator, items: []const u8, ctx: anytype) !?[]const u8 {
+    if (std.mem.trim(u8, items, " \t").len == 0) return null;
     var out: std.ArrayList(u8) = .empty;
     var any = false;
     var it = std.mem.splitScalar(u8, items, ',');
@@ -406,22 +422,25 @@ fn rewriteFrontmatter(arena: std.mem.Allocator, text: []const u8, ctx: anytype) 
     while (lines.next()) |line| {
         if (!first) try out.append(arena, '\n');
         first = false;
-        if (std.mem.eql(u8, std.mem.trimEnd(u8, line, "\r"), "---")) fences +|= 1;
-        if (fences == 1) {
-            if (std.mem.startsWith(u8, line, "depends: [") and std.mem.endsWith(u8, line, "]")) {
-                if (try mapRefs(arena, line["depends: [".len .. line.len - 1], ctx)) |m| {
-                    try out.print(arena, "depends: [{s}]", .{m});
-                    any = true;
-                    continue;
-                }
-            } else if (std.mem.startsWith(u8, line, "superseded-by: ")) {
-                if (try mapRefs(arena, line["superseded-by: ".len..], ctx)) |m| {
-                    try out.print(arena, "superseded-by: {s}", .{m});
+        const cr = std.mem.endsWith(u8, line, "\r");
+        const bare = std.mem.trimEnd(u8, line, "\r");
+        if (std.mem.eql(u8, bare, "---")) fences +|= 1;
+        // Keys and values are read as frontmatter.parse reads them.
+        if (fences == 1) if (std.mem.indexOfScalar(u8, bare, ':')) |colon| {
+            const key = bare[0..colon];
+            const value = std.mem.trim(u8, bare[colon + 1 ..], " \t");
+            const list = std.mem.eql(u8, key, "depends") and value.len >= 2 and value[0] == '[' and value[value.len - 1] == ']';
+            const scalar = std.mem.eql(u8, key, "superseded-by") and value.len > 0;
+            if (list or scalar) {
+                const items = if (list) value[1 .. value.len - 1] else value;
+                if (try mapRefs(arena, items, ctx)) |m| {
+                    if (list) try out.print(arena, "depends: [{s}]", .{m}) else try out.print(arena, "superseded-by: {s}", .{m});
+                    if (cr) try out.append(arena, '\r');
                     any = true;
                     continue;
                 }
             }
-        }
+        };
         try out.appendSlice(arena, line);
     }
     return if (any) out.items else null;
@@ -436,9 +455,12 @@ fn rewriteTags(arena: std.mem.Allocator, text: []const u8, ctx: anytype) !?[]con
         if (!first) try out.append(arena, '\n');
         first = false;
         if (testName(line)) |name| if (fm.testTags(name)) |tags| {
-            if (try mapRefs(arena, tags, ctx)) |m| {
+            const mapped = try mapRefs(arena, tags, ctx);
+            const canonical = try fm.canonicalTags(arena, tags);
+            const m: ?[]const u8 = mapped orelse if (std.mem.eql(u8, canonical, tags)) null else canonical;
+            if (m) |new_tags| {
                 const start = @intFromPtr(tags.ptr) - @intFromPtr(line.ptr);
-                try out.print(arena, "{s}{s}{s}", .{ line[0..start], m, line[start + tags.len ..] });
+                try out.print(arena, "{s}{s}{s}", .{ line[0..start], new_tags, line[start + tags.len ..] });
                 any = true;
                 continue;
             }
@@ -502,6 +524,7 @@ fn newCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
     if (!fm.validSlug(s)) fail("new: bad slug `{s}`: lowercase words of letters and digits joined by dashes, not all digits", .{s});
     if (r.resolve(s) != null) fail("new: `{s}` is already a proposal", .{s});
     const t = title orelse try titleFromSlug(r.arena, s);
+    if (fm.plainScalarProblem(t)) |why| fail("new: the title can't be used as is: {s}, which YAML would read differently", .{why});
     const a = author orelse (run(gpa, r.io, r.arena, &.{ "gh", "api", "user", "--jq", ".login" }) catch
         fail("new: couldn't get your GitHub login from gh; pass --author LOGIN", .{}));
     const template = r.root.readFileAlloc(r.io, "design/TEMPLATE.md", r.arena, .limited(1 << 20)) catch |err|
@@ -621,25 +644,69 @@ fn number(r: Repo, gpa: std.mem.Allocator, p: Proposal, id: u32) !void {
     const new_file = std.fmt.bufPrint(&name_buf, "{d:0>4}-{s}.md", .{ id, p.slug }) catch unreachable;
     const old_path = try std.fmt.allocPrint(r.arena, "design/{s}", .{p.file});
     const new_path = try std.fmt.allocPrint(r.arena, "design/{s}", .{new_file});
+    // A draft that was never committed has nothing to remove from git.
+    const tracked = blk: {
+        const out = run(gpa, r.io, r.arena, &.{ "git", "ls-files", "--", old_path }) catch break :blk false;
+        break :blk std.mem.trim(u8, out, " \n").len > 0;
+    };
+
     const text = try r.root.readFileAlloc(r.io, old_path, r.arena, .limited(1 << 22));
     try r.root.writeFile(r.io, .{ .sub_path = new_path, .data = try withId(r.arena, text, id), .flags = .{ .exclusive = true } });
     try r.root.deleteFile(r.io, old_path);
 
+    var changed: std.ArrayList([]const u8) = .empty;
+    try changed.append(r.arena, new_path);
+    for (try relinkFiles(r, gpa, p.file, new_file)) |f| try addOnce(r.arena, &changed, f);
+
     // Reload, so the renamed proposal resolves by its number.
     var diags: Diags = .{ .gpa = r.arena };
     const r2 = try Repo.load(r.arena, r.io, r.root, &diags);
-    const changed = try fix(r2, r2.resolve(p.slug));
+    for (try fix(r2, r2.resolve(p.slug))) |f| try addOnce(r.arena, &changed, f);
+    const r3 = try Repo.load(r.arena, r.io, r.root, &diags);
+    if (readmeRefresh(r3) catch false) try addOnce(r.arena, &changed, "README.md");
 
     var add: std.ArrayList([]const u8) = .empty;
-    try add.appendSlice(r.arena, &.{ "git", "add", "-A", "--", old_path, new_path });
-    try add.appendSlice(r.arena, changed);
+    try add.appendSlice(r.arena, &.{ "git", "add", "--" });
+    try add.appendSlice(r.arena, changed.items);
     _ = run(gpa, r.io, r.arena, add.items) catch fail("file: git add failed; the files are changed but not committed", .{});
+    if (tracked) _ = run(gpa, r.io, r.arena, &.{ "git", "rm", "-q", "--cached", "--", old_path }) catch
+        fail("file: git rm of {s} failed; the other changes are staged", .{old_path});
     const msg = try std.fmt.allocPrint(r.arena, "design: file {s} as #{d}", .{ p.slug, id });
     var commit: std.ArrayList([]const u8) = .empty;
-    try commit.appendSlice(r.arena, &.{ "git", "commit", "-m", msg, "--", old_path, new_path });
-    try commit.appendSlice(r.arena, changed);
+    try commit.appendSlice(r.arena, &.{ "git", "commit", "-q", "-m", msg, "--" });
+    if (tracked) try commit.append(r.arena, old_path);
+    try commit.appendSlice(r.arena, changed.items);
     _ = run(gpa, r.io, r.arena, commit.items) catch fail("file: git commit failed; the changes are staged", .{});
     std.debug.print("{s}\n", .{msg});
+}
+
+fn addOnce(arena: std.mem.Allocator, list: *std.ArrayList([]const u8), item: []const u8) !void {
+    for (list.items) |x| if (std.mem.eql(u8, x, item)) return;
+    try list.append(arena, item);
+}
+
+/// Rewrites links to a renamed proposal in the files git tracks:
+/// `design/<old>` anywhere, and `](<old>` in design/ itself. Returns the
+/// files it changed.
+fn relinkFiles(r: Repo, gpa: std.mem.Allocator, old: []const u8, new: []const u8) ![]const []const u8 {
+    var changed: std.ArrayList([]const u8) = .empty;
+    const files = run(gpa, r.io, r.arena, &.{ "git", "ls-files" }) catch return changed.items;
+    const long_old = try std.fmt.allocPrint(r.arena, "design/{s}", .{old});
+    const long_new = try std.fmt.allocPrint(r.arena, "design/{s}", .{new});
+    const short_old = try std.fmt.allocPrint(r.arena, "]({s}", .{old});
+    const short_new = try std.fmt.allocPrint(r.arena, "]({s}", .{new});
+    var it = std.mem.tokenizeScalar(u8, files, '\n');
+    while (it.next()) |path| {
+        if (std.mem.startsWith(u8, path, "third_party/") or std.mem.startsWith(u8, path, "tools/testdata/")) continue;
+        const text = r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 24)) catch continue;
+        if (std.mem.indexOfScalar(u8, text, 0) != null) continue; // binary
+        var out = try std.mem.replaceOwned(u8, r.arena, text, long_old, long_new);
+        if (std.mem.startsWith(u8, path, "design/")) out = try std.mem.replaceOwned(u8, r.arena, out, short_old, short_new);
+        if (std.mem.eql(u8, out, text)) continue;
+        try r.root.writeFile(r.io, .{ .sub_path = path, .data = out });
+        try changed.append(r.arena, path);
+    }
+    return changed.items;
 }
 
 fn confirm(io: std.Io, prompt: []const u8) !bool {
@@ -822,6 +889,12 @@ test "fix rewrites slug references to numbers" {
     const tests = "test \"ramfs posts to /srv [devsrv]\" {\n    const x = 1;\n}\n";
     try std.testing.expectEqualStrings("test \"ramfs posts to /srv [12]\" {\n    const x = 1;\n}\n", (try rewriteTags(arena, tests, Ctx{})).?);
     try std.testing.expect(try rewriteTags(arena, "test \"x [baseline]\" {\n", Ctx{}) == null);
+    // Spacing the parser accepts, and CRLF lines.
+    try std.testing.expectEqualStrings("---\r\ndepends: [12]\r\n---\r\n", (try rewriteFrontmatter(arena, "---\r\ndepends:  [devsrv] \r\n---\r\n", Ctx{})).?);
+    try std.testing.expectEqualStrings("---\nsuperseded-by: 12\n---\n", (try rewriteFrontmatter(arena, "---\nsuperseded-by:devsrv\n---\n", Ctx{})).?);
+    try std.testing.expect(try rewriteFrontmatter(arena, "---\ndepends: []\n---\n", Ctx{}) == null);
+    // Tags are rewritten to the canonical spacing.
+    try std.testing.expectEqualStrings("test \"x [baseline, 12]\" {\n", (try rewriteTags(arena, "test \"x [baseline,devsrv]\" {\n", Ctx{})).?);
 }
 
 test "new fills the template" {
