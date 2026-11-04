@@ -14,7 +14,7 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-Design changes to h9 go through proposals: one Markdown file each under `proposals/`, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. Milestones go away; the order of work comes from the dependency graph. DESIGN.md becomes a description of h9 as built, with no milestone list and no changelog. A small Zig tool lists, checks and files proposals, and the integration tests are tagged with proposals instead of milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)).
+Design changes to h9 go through proposals: one Markdown file each under `design/`, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. Milestones go away; the order of work comes from the dependency graph. DESIGN.md becomes a description of h9 as built, with no milestone list and no changelog. A small Zig tool lists, checks and files proposals, and the integration tests are tagged with proposals instead of milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)).
 
 ## Background
 
@@ -34,13 +34,13 @@ Go solves the same problems with proposals: a proposal is identified by an issue
 
 ```
 DESIGN.md                    h9 as built: architecture, invariants, decisions
-proposals/
+design/
   README.md                  the process
   TEMPLATE.md
   proposals.md               this proposal, while it's a draft
   0042-linux-personality.md  a filed proposal
 tools/
-  proposals.zig              the proposals tool
+  design.zig                 the design tool
   frontmatter.zig            the parser, shared with build.zig
 ```
 
@@ -48,7 +48,7 @@ Proposals live in this repository, not a separate one as in Go, so agents see th
 
 ### Identity: slugs, then issue numbers
 
-Every proposal has a `slug`: lowercase words joined by dashes, unique across all proposals, and never changed. A draft has only the slug, and its file is `proposals/<slug>.md`. Filing creates the GitHub issue; from then on the proposal's `id` is the issue number and its file is `proposals/NNNN-<slug>.md`, padded to four digits for looks (sorting is numeric). The slug stays as an alias, so anything that referred to the draft by slug still resolves.
+Every proposal has a `slug`: lowercase words joined by dashes, unique across all proposals, and never changed. A draft has only the slug, and its file is `design/<slug>.md`. Filing creates the GitHub issue; from then on the proposal's `id` is the issue number and its file is `design/NNNN-<slug>.md`, padded to four digits for looks (sorting is numeric). The slug stays as an alias, so anything that referred to the draft by slug still resolves.
 
 A proposal can't leave `draft` without an `id`: drafting needs no GitHub, but deciding needs an issue to discuss it on. A proposal that starts as a Go-style issue with no doc gets its file with its number from the start, when one is needed. An issue-only proposal can't appear in `depends`, so anything another proposal depends on gets a file, even a short one.
 
@@ -96,7 +96,7 @@ Only facts are stored. Whether a proposal is *ready* (accepted, with every depen
 | `implemented` | Built, its "Done when" cases pass, and DESIGN.md describes it |
 | `superseded` | Replaced by `superseded-by` |
 
-Each status change is its own commit (`proposals: 42 likely-accept`), so `git log proposals/` is the record of decisions. The issue's labels may mirror the status, but the frontmatter is authoritative. At most three proposals sit in `likely-accept` or `likely-decline` at a time, so finishing decisions comes before starting new ones (Go's Incoming column does this for a larger group).
+Each status change is its own commit (`design: 42 likely-accept`), so `git log design/` is the record of decisions. The issue's labels may mirror the status, but the frontmatter is authoritative. At most three proposals sit in `likely-accept` or `likely-decline` at a time, so finishing decisions comes before starting new ones (Go's Incoming column does this for a larger group).
 
 ### Scope
 
@@ -113,7 +113,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 ### Template
 
-`proposals/TEMPLATE.md` follows Go's, with three changes. Compatibility covers what h9 has instead of a Go 1 promise. Security is new, because most of h9's design choices are sandbox choices. And "Done when" replaces the milestone demos.
+`design/TEMPLATE.md` follows Go's, with three changes. Compatibility covers what h9 has instead of a Go 1 promise. Security is new, because most of h9's design choices are sandbox choices. And "Done when" replaces the milestone demos.
 
 1. **Abstract:** a short summary.
 2. **Background:** the problem, and what exists today.
@@ -148,14 +148,14 @@ Integration cases are tagged with the proposal they prove, in brackets at the en
 
 ### The tool
 
-`zig build proposals -- <command>`, built from `tools/proposals.zig`:
+`zig build design -- <command>`, built from `tools/design.zig`:
 
 | Command | Does |
 | --- | --- |
 | `list [--status S] [--area A]` | A table of id, slug, title, status, and ready or blocked by what |
 | `ready` | Accepted proposals whose dependencies are all implemented: what can be started now |
 | `graph` | The dependency graph as Mermaid, for the README |
-| `new <slug>` | Copies the template to `proposals/<slug>.md` with the frontmatter filled in |
+| `new <slug>` | Copies the template to `design/<slug>.md` with the frontmatter filled in |
 | `file <slug>` | Creates the issue with `gh` (title, `Proposal` label, the Abstract and a link to the file as the body), renames the file, sets `id`, rewrites slug references to the number, and commits |
 | `fix` | Rewrites slug references to filed proposals as numbers |
 | `check` | Validates everything below; run in CI and by agents before a PR |
@@ -202,7 +202,7 @@ It warns on a slug reference to a filed proposal, so a branch drafted before the
 5. **README.** The status checklist is replaced by a table generated by `list`, plus the `graph` output.
 6. **AGENTS.md.** The rule to edit DESIGN.md and add a changelog entry is replaced by:
 
-    > When a task would change anything listed under Scope in `proposals/README.md`, find the accepted proposal that covers it and check that it's ready (`zig build proposals -- ready`). If there's none, don't implement the change: draft one with `zig build proposals -- new <slug>`, leave it as a draft, and stop. Cite the proposal in implementation PRs, and tag new integration cases with it. Never edit an accepted proposal's body: add a dated note under Updates, or draft a new proposal. Add a dependency you discover to `depends` in the same PR, and say so. The PR that finishes a proposal updates DESIGN.md to match and sets `status: implemented`. Run `zig build proposals -- check` before opening a PR.
+    > When a task would change anything listed under Scope in `design/README.md`, find the accepted proposal that covers it and check that it's ready (`zig build design -- ready`). If there's none, don't implement the change: draft one with `zig build design -- new <slug>`, leave it as a draft, and stop. Cite the proposal in implementation PRs, and tag new integration cases with it. Never edit an accepted proposal's body: add a dated note under Updates, or draft a new proposal. Add a dependency you discover to `depends` in the same PR, and say so. The PR that finishes a proposal updates DESIGN.md to match and sets `status: implemented`. Run `zig build design -- check` before opening a PR.
 
 ## Rationale
 
@@ -228,7 +228,7 @@ No user-visible change to h9: no CLI flags, `Machine.Options` or sandbox default
 
 - `zig build m1` … `m4` are replaced by `zig build proposal -Dp=baseline`.
 - Integration case names change from `(Mn)` to `[tag]`, which changes `zig build test` filters that match on them.
-- DESIGN.md loses its Milestones and Changelog sections; both are preserved in `proposals/0000-baseline.md`.
+- DESIGN.md loses its Milestones and Changelog sections; both are preserved in `design/0000-baseline.md`.
 - AGENTS.md's rule for design changes changes, as above.
 
 ## Security
@@ -237,17 +237,17 @@ None for the guest or the host. `file` runs `gh` with the user's credentials and
 
 ## Done when
 
-- `zig build proposals -- check` passes on the migrated tree, and fails on a fixture set under `tools/testdata/` covering each failure listed under The tool.
-- `zig build proposals -- ready` lists the proposals from Migration that are accepted and unblocked.
+- `zig build design -- check` passes on the migrated tree, and fails on a fixture set under `tools/testdata/` covering each failure listed under The tool.
+- `zig build design -- ready` lists the proposals from Migration that are accepted and unblocked.
 - `zig build proposal -Dp=baseline` runs every case formerly tagged `(M2)`, `(M3)` or `(M4)` and every former M0 to M4 demo, and they pass.
 - A case tagged with a draft proposal skips in `zig build integration` and runs with `-Dpending`.
-- `zig build proposals -- new linux-personality` followed by `file linux-personality` (against a test repository, or with `--dry-run`) produces `proposals/NNNN-linux-personality.md` and rewrites a slug reference to it elsewhere.
+- `zig build design -- new linux-personality` followed by `file linux-personality` (against a test repository, or with `--dry-run`) produces `design/NNNN-linux-personality.md` and rewrites a slug reference to it elsewhere.
 - DESIGN.md has no Milestones or Changelog section and no milestone references, and `0000-baseline.md` holds both, with every Changelog entry unchanged.
 
 ## Implementation
 
-1. `tools/frontmatter.zig` and `tools/proposals.zig` with `list`, `ready`, `graph`, `new` and `check`, and the fixtures.
-2. `proposals/README.md` (the process: States, Scope, After acceptance, the tool) and `proposals/TEMPLATE.md`.
+1. `tools/frontmatter.zig` and `tools/design.zig` with `list`, `ready`, `graph`, `new` and `check`, and the fixtures.
+2. `design/README.md` (the process: States, Scope, After acceptance, the tool) and `design/TEMPLATE.md`.
 3. `0000-baseline.md`, holding the M0 to M4 milestones and the Changelog moved out of DESIGN.md.
 4. The draft proposals from Migration, with their design text moved out of DESIGN.md.
 5. Test tags, `H9_TEST_PENDING_TAGS`, and the `proposal` build step; the `m1`–`m4` steps removed.
