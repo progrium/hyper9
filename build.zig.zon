@@ -8,7 +8,9 @@
         "build.zig",
         "build.zig.zon",
         "h9.entitlements",
+        "design",
         "src",
         "tests",
+        "tools",
     },
 }

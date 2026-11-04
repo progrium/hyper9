@@ -9,11 +9,13 @@
 //! `zig build install-tests` builds this file for another target, and
 //! `scripts/lima/vm test` runs it in a test VM with the same variables.
 //!
-//! Cases named "M5: ..." (and so on) are for a milestone in progress. They
-//! call `pending`, which skips them unless H9_TEST_PENDING is set; when
-//! the milestone is done, drop the prefix and the call. Cases for a done
-//! milestone are tagged "(M4)" and the like, so `zig build m4` can select
-//! them.
+//! Each case is tagged with the proposal it proves, by slug or id, at the
+//! end of its name: `test "ls /bin | wc -l (demo) [baseline]"`. A case
+//! whose proposal isn't implemented skips unless H9_TEST_PENDING is set;
+//! the build passes those proposals' tags in (`design.pending_tags`, from
+//! design/), so a case stops skipping in the commit that marks its
+//! proposal implemented. `zig build proposal -Dp=<id or slug>` runs one
+//! proposal's cases, and `zig build design -- check` checks the tags.
 //!
 //! Interactive cases run h9 on a terminal from tests/term.zig. Their
 //! timeouts are multiplied by H9_TEST_SLOW (default 1), for emulated VMs.
@@ -21,6 +23,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Term = @import("term.zig").Term;
+const design = @import("design");
 
 const gpa = std.testing.allocator;
 
@@ -43,7 +46,10 @@ fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
     return env_buf[slot][0..v.len];
 }
 
-fn env() !Env {
+/// The case's environment. `src` is the case's @src(), whose tags decide
+/// whether it's pending.
+fn env(comptime src: std.builtin.SourceLocation) !Env {
+    try skipPending(src.fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
     const root = getenv(1, "H9_TEST_ROOT") orelse return error.SkipZigTest;
     // The tree from scripts/mkroot.py is arm64 only, and h9 runs the
@@ -54,9 +60,20 @@ fn env() !Env {
     return .{ .h9 = h9, .root = root, .backends = backends };
 }
 
-/// Skips a case for a milestone that isn't done yet, unless asked for.
-fn pending() !void {
-    if (getenv(3, "H9_TEST_PENDING") == null) return error.SkipZigTest;
+/// Skips a case tagged with a proposal that isn't implemented, unless
+/// H9_TEST_PENDING is set. `name` is the test's name as @src() gives it.
+fn skipPending(name: []const u8) !void {
+    if (name.len == 0 or name[name.len - 1] != ']') return;
+    const open = std.mem.lastIndexOfScalar(u8, name, '[') orelse return;
+    var tags = std.mem.splitScalar(u8, name[open + 1 .. name.len - 1], ',');
+    while (tags.next()) |raw| {
+        const tag = std.mem.trim(u8, raw, " ");
+        var pending = std.mem.tokenizeScalar(u8, design.pending_tags, ' ');
+        while (pending.next()) |p| if (std.mem.eql(u8, p, tag)) {
+            if (getenv(3, "H9_TEST_PENDING") == null) return error.SkipZigTest;
+            return;
+        };
+    }
 }
 
 /// `ms` scaled by H9_TEST_SLOW.
@@ -162,8 +179,8 @@ fn runProcess(argv: []const []const u8, stdin: ?[]const u8) !std.process.RunResu
     return .{ .term = term, .stdout = out, .stderr = try mr.toOwnedSlice(1) };
 }
 
-test "cat /lib/namespace (M2 demo)" {
-    const e = try env();
+test "cat /lib/namespace (demo) [baseline]" {
+    const e = try env(@src());
     const want = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try hostPath(e.root, "lib/namespace"), gpa, .unlimited);
     defer gpa.free(want);
     const r = try run(e, &.{ "/bin/cat", "/lib/namespace" });
@@ -173,16 +190,16 @@ test "cat /lib/namespace (M2 demo)" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "echo" {
-    const e = try env();
+test "echo [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "echo", "hello,", "world" });
     defer r.deinit();
     try std.testing.expectEqualStrings("hello, world\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
-test "--check passes with the root tree, and --version and -h print to stdout" {
-    const e = try env();
+test "--check passes with the root tree, and --version and -h print to stdout [baseline]" {
+    const e = try env(@src());
     var it = std.mem.tokenizeScalar(u8, e.backends, ',');
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -209,38 +226,38 @@ test "--check passes with the root tree, and --version and -h print to stdout" {
     try std.testing.expect(std.mem.startsWith(u8, h.stdout, "usage: h9"));
 }
 
-test "exits string gives status 1 and is printed" {
-    const e = try env();
+test "exits string gives status 1 and is printed [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "/bin/cat", "/does/not/exist" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "/does/not/exist") != null);
 }
 
-test "missing program gives 127" {
-    const e = try env();
+test "missing program gives 127 [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{"no-such-program"});
     defer r.deinit();
     try std.testing.expectEqual(127, r.code);
 }
 
-test "non-a.out program gives 126" {
-    const e = try env();
+test "non-a.out program gives 126 [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{"/lib/namespace"});
     defer r.deinit();
     try std.testing.expectEqual(126, r.code);
 }
 
-test "stdin reaches the guest's console" {
-    const e = try env();
+test "stdin reaches the guest's console [baseline]" {
+    const e = try env(@src());
     const r = try runIn(e, &.{"wc"}, "a b\nc\n");
     defer r.deinit();
     try std.testing.expectEqualStrings("      2       3       6\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
-test "directory reads return every entry" {
-    const e = try env();
+test "directory reads return every entry [baseline]" {
+    const e = try env(@src());
     // More entries than one host readdir buffer holds, so a read split
     // across guest pages, or across kernel calls, would end the listing early.
     const r = try run(e, &.{ "ls", "/arm64/bin" });
@@ -259,8 +276,8 @@ fn countDir(e: Env, rel: []const u8) !usize {
     return n;
 }
 
-test "the host environment isn't imported" {
-    const e = try env();
+test "the host environment isn't imported [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--env", "h9test=yes", "ls", "/env" });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/env/h9test\n") != null);
@@ -270,8 +287,8 @@ test "the host environment isn't imported" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/env/PATH") == null);
 }
 
-test "the host cwd is the guest's cwd" {
-    const e = try env();
+test "the host cwd is the guest's cwd [baseline]" {
+    const e = try env(@src());
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "note", .data = "from the host cwd\n" });
@@ -305,8 +322,8 @@ const Scratch = struct {
     }
 };
 
-test "tight profile: writing to the cwd fails (M2 demo)" {
-    const e = try env();
+test "tight profile: writing to the cwd fails (demo) [baseline]" {
+    const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -316,8 +333,8 @@ test "tight profile: writing to the cwd fails (M2 demo)" {
     try std.testing.expect(!s.exists("f"));
 }
 
-test "default profile: the cwd is writable and the root isn't" {
-    const e = try env();
+test "default profile: the cwd is writable and the root isn't [baseline]" {
+    const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -332,8 +349,8 @@ test "default profile: the cwd is writable and the root isn't" {
     return error.RootWasWritten;
 }
 
-test "--sandbox DIR is writable" {
-    const e = try env();
+test "--sandbox DIR is writable [baseline]" {
+    const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -343,8 +360,8 @@ test "--sandbox DIR is writable" {
     try std.testing.expect(s.exists("f"));
 }
 
-test "--writable under a read-only cwd" {
-    const e = try env();
+test "--writable under a read-only cwd [baseline]" {
+    const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -361,8 +378,8 @@ test "--writable under a read-only cwd" {
     try std.testing.expect(!s.exists("g"));
 }
 
-test "--read-deny hides a path, and symlinks can't escape" {
-    const e = try env();
+test "--read-deny hides a path, and symlinks can't escape [baseline]" {
+    const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -388,8 +405,8 @@ test "--read-deny hides a path, and symlinks can't escape" {
     try std.testing.expectEqualStrings("", l.out);
 }
 
-test "masked devices can't be attached" {
-    const e = try env();
+test "masked devices can't be attached [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "ls", "#U/" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
@@ -399,8 +416,8 @@ test "masked devices can't be attached" {
     try std.testing.expect(std.mem.indexOf(u8, n.err, "mount/attach disallowed") != null);
 }
 
-test "--print shows the plan and doesn't run" {
-    const e = try env();
+test "--print shows the plan and doesn't run [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--print", "--profile=tight", "--memory", "512m", "--timeout", "1m", "no-such-program" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
@@ -410,8 +427,8 @@ test "--print shows the plan and doesn't run" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #U\n") != null);
 }
 
-test "--strict refuses what this build can't enforce" {
-    const e = try env();
+test "--strict refuses what this build can't enforce [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--strict", "--write=overlay", "echo" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
@@ -420,8 +437,8 @@ test "--strict refuses what this build can't enforce" {
     try std.testing.expectEqual(0, ok.code);
 }
 
-test "--memory caps guest memory" {
-    const e = try env();
+test "--memory caps guest memory [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--memory", "64k", "echo", "x" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
@@ -431,16 +448,16 @@ test "--memory caps guest memory" {
     try std.testing.expectEqual(0, ok.code);
 }
 
-test "--timeout stops the program" {
-    const e = try env();
+test "--timeout stops the program [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "200ms", "sleep", "10" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
 }
 
-test "renames and case can't get around the rules" {
-    const e = try env();
+test "renames and case can't get around the rules [baseline]" {
+    const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -463,10 +480,10 @@ test "renames and case can't get around the rules" {
     try std.testing.expectEqualStrings("secret\n", data);
 }
 
-// Process trees (M3).
+// Process trees.
 
-test "ls /bin | wc -l (M3 demo)" {
-    const e = try env();
+test "ls /bin | wc -l (demo) [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--rc", "ls /bin | wc -l" });
     defer r.deinit();
     try std.testing.expectEqualStrings("", r.err);
@@ -476,16 +493,16 @@ test "ls /bin | wc -l (M3 demo)" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a pipeline reads the guest's stdin (M3)" {
-    const e = try env();
+test "a pipeline reads the guest's stdin [baseline]" {
+    const e = try env(@src());
     const r = try runIn(e, &.{ "--rc", "sed s/h/j/ | wc -c" }, "hello\n");
     defer r.deinit();
     try std.testing.expectEqualStrings("6\n", std.mem.trimStart(u8, r.out, " "));
     try std.testing.expectEqual(0, r.code);
 }
 
-test "exit status comes back through await (M3)" {
-    const e = try env();
+test "exit status comes back through await [baseline]" {
+    const e = try env(@src());
     const ok = try run(e, &.{ "--rc", "test -e /lib/namespace" });
     defer ok.deinit();
     try std.testing.expectEqual(0, ok.code);
@@ -498,23 +515,23 @@ test "exit status comes back through await (M3)" {
     try std.testing.expectEqual(0, st.code);
 }
 
-test "exec replaces the process (M3)" {
-    const e = try env();
+test "exec replaces the process [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--rc", "exec echo replaced; echo not reached" });
     defer r.deinit();
     try std.testing.expectEqualStrings("replaced\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
-test "/fd is devdup (M3)" {
-    const e = try env();
+test "/fd is devdup [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--rc", "echo through fd | cat /fd/0" });
     defer r.deinit();
     try std.testing.expectEqualStrings("through fd\n", r.out);
 }
 
-test "many processes, one after another (M3)" {
-    const e = try env();
+test "many processes, one after another [baseline]" {
+    const e = try env(@src());
     // More than HVF's 64 vCPUs in total, so each exit has to free its vCPU.
     const r = try run(e, &.{ "--rc", "for(i in `{seq 100}) echo $i | wc -l >/dev/null; echo done" });
     defer r.deinit();
@@ -522,8 +539,8 @@ test "many processes, one after another (M3)" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "more live processes than HVF has vCPUs (M3)" {
-    const e = try env();
+test "more live processes than HVF has vCPUs [baseline]" {
+    const e = try env(@src());
     // 80 processes alive at once, all but the first blocked reading a pipe.
     // rc builds the pipeline: Windows Defender blocks a host command line
     // of 79 "| cat"s as Trojan:Win32/Commando.A!ml.
@@ -533,8 +550,8 @@ test "more live processes than HVF has vCPUs (M3)" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "--pids caps the process count (M3)" {
-    const e = try env();
+test "--pids caps the process count [baseline]" {
+    const e = try env(@src());
     // rc plus ls and wc is three processes.
     const capped = try run(e, &.{ "--pids", "2", "--rc", "ls /bin | wc -l" });
     defer capped.deinit();
@@ -544,16 +561,16 @@ test "--pids caps the process count (M3)" {
     try std.testing.expectEqual(0, ok.code);
 }
 
-test "--cpus 1 still runs a pipeline (M3)" {
-    const e = try env();
+test "--cpus 1 still runs a pipeline [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--cpus", "1", "--rc", "echo one | cat | cat" });
     defer r.deinit();
     try std.testing.expectEqualStrings("one\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
-test "--ns replays a namespace file (M3)" {
-    const e = try env();
+test "--ns replays a namespace file [baseline]" {
+    const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -587,8 +604,8 @@ fn backendList(e: Env) std.mem.TokenIterator(u8, .scalar) {
     return std.mem.tokenizeScalar(u8, e.backends, ',');
 }
 
-test "an interactive rc reads typed lines" {
-    const e = try env();
+test "an interactive rc reads typed lines [baseline]" {
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -604,10 +621,10 @@ test "an interactive rc reads typed lines" {
     }
 }
 
-// Notes and /proc (M4).
+// Notes and /proc.
 
-test "a write to a closed pipe kills the writer with the note and its pc (M4)" {
-    const e = try env();
+test "a write to a closed pipe kills the writer with the note and its pc [baseline]" {
+    const e = try env(@src());
     // whatis is an rc builtin, so the writer is rc itself; before notes
     // were delivered it ignored the failed write and looped forever.
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "{ while() whatis path } | sed 1q; echo $status" });
@@ -619,8 +636,8 @@ test "a write to a closed pipe kills the writer with the note and its pc (M4)" {
 }
 
 
-test "--timeout stops a console read on a terminal at once (M4)" {
-    const e = try env();
+test "--timeout stops a console read on a terminal at once [baseline]" {
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -634,8 +651,8 @@ test "--timeout stops a console read on a terminal at once (M4)" {
     }
 }
 
-test "kill and ps work in an interactive rc (M4 demo)" {
-    const e = try env();
+test "kill and ps work in an interactive rc (demo) [baseline]" {
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -658,8 +675,8 @@ test "kill and ps work in an interactive rc (M4 demo)" {
     }
 }
 
-test "Ctrl-C interrupts the foreground command and rc carries on (M4)" {
-    const e = try env();
+test "Ctrl-C interrupts the foreground command and rc carries on [baseline]" {
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -677,8 +694,8 @@ test "Ctrl-C interrupts the foreground command and rc carries on (M4)" {
     }
 }
 
-test "a second Ctrl-C within a second tears the machine down (M4)" {
-    const e = try env();
+test "a second Ctrl-C within a second tears the machine down [baseline]" {
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -693,9 +710,9 @@ test "a second Ctrl-C within a second tears the machine down (M4)" {
     }
 }
 
-test "rawon puts the host terminal in raw mode until exit (M4)" {
+test "rawon puts the host terminal in raw mode until exit [baseline]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
-    const e = try env();
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -718,8 +735,8 @@ test "rawon puts the host terminal in raw mode until exit (M4)" {
 /// for sleep to start before hanging up.
 const hangup_wait = "echo ready; sleep 1000; echo after";
 
-test "closing the terminal posts hangup (M4)" {
-    const e = try env();
+test "closing the terminal posts hangup [baseline]" {
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -737,9 +754,9 @@ test "closing the terminal posts hangup (M4)" {
     }
 }
 
-test "SIGTERM posts hangup (M4)" {
+test "SIGTERM posts hangup [baseline]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
-    const e = try env();
+    const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
@@ -753,24 +770,24 @@ test "SIGTERM posts hangup (M4)" {
     }
 }
 
-test "a note handler catches a note and the process continues (M4)" {
-    const e = try env();
+test "a note handler catches a note and the process continues [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup { echo caught }; echo hangup >/proc/$pid/note; echo after" });
     defer r.deinit();
     try std.testing.expectEqualStrings("caught\nafter\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
-test "an unhandled note kills the process with the note as its status (M4)" {
-    const e = try env();
+test "an unhandled note kills the process with the note as its status [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "sleep 1000 & echo die >/proc/$apid/note; wait $apid; echo $status" });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "die") != null);
     try std.testing.expectEqual(0, r.code);
 }
 
-test "--timeout posts hangup before tearing down (M4)" {
-    const e = try env();
+test "--timeout posts hangup before tearing down [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "300ms", "--rc", "fn sighup { echo got hangup }; sleep 10; echo after" });
     defer r.deinit();
     // rc execs a last simple command in place, dropping its handler, so
@@ -778,16 +795,16 @@ test "--timeout posts hangup before tearing down (M4)" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "got hangup") != null);
 }
 
-test "/proc/n/ctl kill stops a process (M4)" {
-    const e = try env();
+test "/proc/n/ctl kill stops a process [baseline]" {
+    const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "sleep 1000 & echo kill >/proc/$apid/ctl; wait; echo done" });
     defer r.deinit();
     try std.testing.expectEqualStrings("done\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
-test "notepg reaches the note group and not a new one (M4)" {
-    const e = try env();
+test "notepg reaches the note group and not a new one [baseline]" {
+    const e = try env(@src());
     // The block in braces makes its own note group (rfork s), so the
     // hangup posted to rc's group doesn't reach it; sleep 1000 is in rc's.
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup {}; { rfork s; sleep 1; echo survived } & sleep 1000 & echo hangup >/proc/$pid/notepg; wait; echo done" });
@@ -795,8 +812,8 @@ test "notepg reaches the note group and not a new one (M4)" {
     try std.testing.expectEqualStrings("survived\ndone\n", r.out);
 }
 
-test "/proc/n has status, fd, ns and args (M4)" {
-    const e = try env();
+test "/proc/n has status, fd, ns and args [baseline]" {
+    const e = try env(@src());
     // The times differ between runs, so only name, user and state; and
     // with awk last, cat isn't exec'd in place of rc.
     const st = try run(e, &.{ "--rc", "cat /proc/$pid/status | awk '{print $1, ($2 == ENVIRON[\"user\"]), $3}'" });

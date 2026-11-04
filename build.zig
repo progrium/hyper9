@@ -1,5 +1,6 @@
 const std = @import("std");
 const unicorn_src = @import("build/unicorn.zig");
+const frontmatter = @import("tools/frontmatter.zig");
 
 const drawterm = "third_party/drawterm";
 
@@ -104,8 +105,8 @@ const kern_flags_win32 = kern_flags ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" }
 /// Zig's own macOS SDK detection runs xcodebuild, which fails in some
 /// environments; SDKROOT (set by scripts/env.sh) is used when present.
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
-/// cases by name; with `pending`, cases for a milestone not yet done (named
-/// "M5: ..." and so on) run instead of skipping.
+/// cases by name; with `pending`, cases tagged with a proposal that isn't
+/// implemented run instead of skipping.
 fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
     run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
@@ -125,13 +126,68 @@ fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .target = target,
             .optimize = optimize,
             .link_libc = target.result.os.tag != .windows,
+            .imports = &.{.{ .name = "design", .module = designModule(b) }},
         }),
         .filters = filters,
     });
 }
 
+/// The proposals under design/, read from their frontmatter at configure
+/// time. Bad files are left out; `zig build design -- check` reports them.
+fn proposals(b: *std.Build) []const frontmatter.Proposal {
+    const S = struct {
+        var ps: ?[]const frontmatter.Proposal = null;
+    };
+    if (S.ps) |ps| return ps;
+    const io = b.graph.io;
+    var diags: frontmatter.Diags = .{ .gpa = b.allocator };
+    var dir = b.build_root.handle.openDir(io, "design", .{ .iterate = true }) catch {
+        S.ps = &.{};
+        return S.ps.?;
+    };
+    defer dir.close(io);
+    S.ps = frontmatter.scan(b.allocator, io, dir, &diags) catch &.{};
+    return S.ps.?;
+}
+
+/// Build options for the integration tests: the tags of proposals that
+/// aren't implemented, whose cases skip (built in, so the binary from
+/// install-tests knows them too).
+fn designModule(b: *std.Build) *std.Build.Module {
+    const S = struct {
+        var m: ?*std.Build.Module = null;
+    };
+    if (S.m) |m| return m;
+    const options = b.addOptions();
+    options.addOption([]const u8, "pending_tags", frontmatter.pendingTags(b.allocator, proposals(b)) catch @panic("OOM"));
+    S.m = options.createModule();
+    return S.m.?;
+}
+
+/// Test-name filters for the cases tagged with a proposal, by its slug or
+/// its id: `[x]`, `[x, `, `, x]` and `, x, ` for each.
+fn tagFilters(b: *std.Build, p: frontmatter.Proposal) []const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var names: [2][]const u8 = .{ p.slug, "" };
+    var n: usize = 1;
+    if (p.id) |id| {
+        names[1] = b.fmt("{d}", .{id});
+        n = 2;
+    }
+    for (names[0..n]) |t| {
+        out.appendSlice(b.allocator, &.{ b.fmt("[{s}]", .{t}), b.fmt("[{s}, ", .{t}), b.fmt(", {s}]", .{t}), b.fmt(", {s}, ", .{t}) }) catch @panic("OOM");
+    }
+    return out.items;
+}
+
 /// The number of entries in the root tree's /arm64/bin and /rc/bin, which
 /// `ls /bin` lists one after the other; null without a tree.
+fn addDemo(b: *std.Build, demos: *std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)), slug: []const u8, step: *std.Build.Step) void {
+    const entry = demos.getOrPut(b.allocator, slug) catch @panic("OOM");
+    if (!entry.found_existing) entry.value_ptr.* = .empty;
+    entry.value_ptr.append(b.allocator, step) catch @panic("OOM");
+}
+
 fn countBin(b: *std.Build, root: []const u8) ?usize {
     const io = b.graph.io;
     var total: usize = 0;
@@ -439,52 +495,58 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(out.*, .{ .custom = "fixtures" }, name).step);
     }
 
-    // The M0 and M1 demos: the host architecture's hello on the default
-    // backend, and on the emulator when it's built in.
+    // Proposal demos that aren't integration cases, by the proposal's slug;
+    // `zig build proposal -Dp=...` runs them along with its tagged cases.
+    var demos: std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)) = .empty;
+
+    // Baseline demos: the host architecture's hello on the default backend,
+    // and on the emulator when it's built in.
     const host_hello = if (target.result.cpu.arch == .x86_64) hellos[1] else hellos[0];
-    const m1_step = b.step("m1", "Run the M0 and M1 demos: h9 ./hello, and h9 --backend emu ./hello with -Demu=unicorn");
-    const m0 = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
-    m0.addFileArg(host_hello);
-    m0.expectStdOutEqual("hello\n");
-    m0.step.dependOn(signed_step);
-    m1_step.dependOn(&m0.step);
+    const hello_demo = b.addSystemCommand(&.{b.getInstallPath(.bin, exe.out_filename)});
+    hello_demo.addFileArg(host_hello);
+    hello_demo.expectStdOutEqual("hello\n");
+    hello_demo.step.dependOn(signed_step);
+    addDemo(b, &demos, "baseline", &hello_demo.step);
     if (emu == .unicorn) {
-        const m1 = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
-        m1.addFileArg(host_hello);
-        m1.expectStdOutEqual("hello\n");
-        m1.step.dependOn(signed_step);
-        m1_step.dependOn(&m1.step);
+        const emu_demo = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
+        emu_demo.addFileArg(host_hello);
+        emu_demo.expectStdOutEqual("hello\n");
+        emu_demo.step.dependOn(signed_step);
+        addDemo(b, &demos, "baseline", &emu_demo.step);
     }
 
-    // M2 and later run real 9front binaries from a host root tree.
-    const root = b.option([]const u8, "root", "9front root tree for the M2 demo and integration tests (default .local/9front/root)") orelse
+    // The rest run real 9front binaries from a host root tree, so they're
+    // left out without one, as the integration cases skip.
+    const root = b.option([]const u8, "root", "9front root tree for the demos and integration tests (default .local/9front/root)") orelse
         b.pathFromRoot(".local/9front/root");
     const h9_bin = b.getInstallPath(.bin, exe.out_filename);
 
-    const m2 = b.addSystemCommand(&.{ h9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
-    m2.expectStdOutEqual(b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20)) catch "(no root tree; run scripts/mkroot.py)");
-    m2.step.dependOn(signed_step);
-    const m2_step = b.step("m2", "Run the M2 demo: h9 /bin/cat /lib/namespace, and a write under --profile=tight fails (needs a root tree)");
-    m2_step.dependOn(&m2.step);
-    // The tight profile's cwd is read-only, so rc's redirection fails. The
-    // cwd is a fresh directory, so nothing is left behind if it doesn't.
-    const m2_cwd = b.addWriteFiles();
-    _ = m2_cwd.add(".keep", "");
-    const m2_tight = b.addSystemCommand(&.{ h9_bin, "--root", root, "--profile=tight", "--cwd" });
-    m2_tight.addDirectoryArg(m2_cwd.getDirectory());
-    m2_tight.addArgs(&.{ "--rc", "echo x > /mnt/term/cwd/f" });
-    m2_tight.expectExitCode(1);
-    m2_tight.expectStdErrMatch("can't create");
-    m2_tight.step.dependOn(signed_step);
-    m2_step.dependOn(&m2_tight.step);
+    if (b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20))) |namespace| {
+        const cat_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
+        cat_demo.expectStdOutEqual(namespace);
+        cat_demo.step.dependOn(signed_step);
+        addDemo(b, &demos, "baseline", &cat_demo.step);
+        // The tight profile's cwd is read-only, so rc's redirection fails. The
+        // cwd is a fresh directory, so nothing is left behind if it doesn't.
+        const tight_cwd = b.addWriteFiles();
+        _ = tight_cwd.add(".keep", "");
+        const tight_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--profile=tight", "--cwd" });
+        tight_demo.addDirectoryArg(tight_cwd.getDirectory());
+        tight_demo.addArgs(&.{ "--rc", "echo x > /mnt/term/cwd/f" });
+        tight_demo.expectExitCode(1);
+        tight_demo.expectStdErrMatch("can't create");
+        tight_demo.step.dependOn(signed_step);
+        addDemo(b, &demos, "baseline", &tight_demo.step);
+    } else |_| {}
 
-    // The M3 demo: ls prints each member of the /bin union, duplicates and
-    // all, so the count is the two directories' entries added together.
-    const m3 = b.addSystemCommand(&.{ h9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
-    m3.expectStdOutEqual(if (countBin(b, root)) |n| b.fmt("{d: >7}\n", .{n}) else "(no root tree; run scripts/mkroot.py)");
-    m3.step.dependOn(signed_step);
-    const m3_step = b.step("m3", "Run the M3 demo, h9 --rc 'ls /bin | wc -l', and the M3 integration cases (needs a root tree)");
-    m3_step.dependOn(&m3.step);
+    // ls prints each member of the /bin union, duplicates and all, so the
+    // count is the two directories' entries added together.
+    if (countBin(b, root)) |n| {
+        const ls_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
+        ls_demo.expectStdOutEqual(b.fmt("{d: >7}\n", .{n}));
+        ls_demo.step.dependOn(signed_step);
+        addDemo(b, &demos, "baseline", &ls_demo.step);
+    }
 
     // Each integration case runs on every backend built in that runs arm64 here.
     var backends: std.ArrayList(u8) = .empty;
@@ -493,22 +555,40 @@ pub fn build(b: *std.Build) void {
     const backend_list = if (backends.items.len > 0) backends.items else "auto";
 
     // Runs real binaries through the h9 CLI; skipped without a root tree.
-    // Cases for the milestone in progress ("M5: ...") skip here until it's
-    // done. zig build m3 runs the M3 cases, tagged "(M3" in their names.
-    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, false);
+    // Cases tagged with a proposal that isn't implemented skip unless
+    // -Dpending is given.
+    const run_pending = b.option(bool, "pending", "Also run integration cases of proposals that aren't implemented yet") orelse false;
+    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
-    const run_m3_cases = addIntegration(b, optimize, &.{"(M3"}, h9_bin, root, backend_list, false);
-    run_m3_cases.step.dependOn(signed_step);
-    m3_step.dependOn(&run_m3_cases.step);
 
-    // The M4 demo is an interactive rc where kill and ps work. It runs on a
-    // pty (ConPTY on Windows) from tests/term.zig, as the other M4 cases,
-    // tagged "(M4" in their names, do, so zig build m4 is those cases.
-    const m4_step = b.step("m4", "Run the M4 demo (kill and ps in an interactive rc, on a pty) and the M4 integration cases (needs a root tree)");
-    const run_m4_cases = addIntegration(b, optimize, &.{"(M4"}, h9_bin, root, backend_list, false);
-    run_m4_cases.step.dependOn(signed_step);
-    m4_step.dependOn(&run_m4_cases.step);
+    // One proposal's demos and integration cases (design/), whatever its
+    // status, by id or slug.
+    const proposal_step = b.step("proposal", "Run one proposal's demos and integration cases: -Dp=<id or slug>");
+    if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
+        const ps = proposals(b);
+        if (frontmatter.resolve(ps, ref)) |i| {
+            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true);
+            run_cases.step.dependOn(signed_step);
+            proposal_step.dependOn(&run_cases.step);
+            if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
+        } else proposal_step.dependOn(&b.addFail(b.fmt("-Dp={s} isn't a proposal under design/", .{ref})).step);
+    } else proposal_step.dependOn(&b.addFail("zig build proposal needs -Dp=<id or slug>").step);
+
+    // The design tool (design/0001-proposals.md), run from the repository
+    // root: zig build design -- check, list, ready and so on.
+    const design_tool = b.addExecutable(.{
+        .name = "design",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/design.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_design = b.addRunArtifact(design_tool);
+    run_design.setCwd(b.path("."));
+    run_design.has_side_effects = true;
+    if (b.args) |args| run_design.addArgs(args);
+    b.step("design", "Run the design tool: zig build design -- <command> (help lists them)").dependOn(&run_design.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
@@ -530,6 +610,10 @@ pub fn build(b: *std.Build) void {
     linkUnicorn(backend_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    // The design tool's tests read tools/testdata from the repository root.
+    const design_tests = b.addRunArtifact(b.addTest(.{ .root_module = design_tool.root_module }));
+    design_tests.setCwd(b.path("."));
+    test_step.dependOn(&design_tests.step);
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
     // HVF needs the entitlement, so the test binary is signed like h9.
     const run_backend_tests = b.addRunArtifact(backend_tests);
