@@ -4,22 +4,70 @@ Run native Plan 9 (9front) executables directly on host hypervisors. See [DESIGN
 
 ## Status
 
-h9 is under active development and isn't ready for general use yet. Work
-proceeds through the milestones below; see [Milestones](DESIGN.md#milestones)
-in the design for the full scope and demo of each.
+h9 is under active development and isn't ready for general use yet. Work is
+planned as proposals under [design/](design/README.md), each with its status
+and the proposals it depends on; the [baseline](design/0000-baseline.md) is
+what's built so far. `zig build design -- ready` lists what can be started now.
 
-- [x] **M0, hello:** HVF backend, arm64 shim and a.out loader run a static binary
-- [x] **M1, emulator:** Unicorn backend for arm64 and amd64
-- [x] **M2, one process:** syscalls through drawterm's kern, host-tree root, terminal, sandbox policy core, Windows build
-- [x] **M3, trees:** rfork, exec, await, devdup and pipes; process and CPU caps
-- [x] **M4, notes and /proc:** notify/noted, Ctrl-C, hangup and raw mode, devproc
-- [ ] **M5, servers:** devsrv, rendezvous, semaphores, segattach, outbound network, Go compatibility
-- [ ] **M6, self-host:** compilers, linkers and mk run inside
-- [ ] **M7, graphics:** `--gfx` with devdraw; rio and acme in a host window
-- [ ] **M8, Linux:** KVM backend
-- [ ] **M9, Windows:** WHP backend
-- [ ] **M10, 9P roots:** `--root` over 9P, disk images, copy-on-write overlay
+<!-- design:begin (zig build design -- readme) -->
 
+| Proposal | Status | State | Title |
+| --- | --- | --- | --- |
+| [baseline](design/0000-baseline.md) | implemented |  | Baseline: h9 before proposals |
+| [#1](design/0001-proposals.md) | accepted | ready | Proposals replace milestones and the design changelog |
+| [9p-roots](design/9p-roots.md) | draft |  | 9P roots |
+| [ci](design/ci.md) | draft |  | Continuous integration |
+| [devsrv](design/devsrv.md) | draft |  | devsrv and /srv |
+| [ephemeral-writes](design/ephemeral-writes.md) | draft |  | Ephemeral writes and a private /tmp |
+| [gfx](design/gfx.md) | draft | needs devsrv | Graphics (--gfx) |
+| [go-compat](design/go-compat.md) | draft | needs semaphores | Go compatibility |
+| [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
+| [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
+| [image-roots](design/image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
+| [kvm](design/kvm.md) | draft |  | KVM backend |
+| [net-policy](design/net-policy.md) | draft |  | Outbound-only network by default, and --net-allow |
+| [overlay](design/overlay.md) | draft | needs ephemeral-writes | Copy-on-write overlay as the root's default |
+| [segattach](design/segattach.md) | draft |  | segattach and shared segments |
+| [self-host](design/self-host.md) | draft |  | Self-hosting |
+| [semaphores](design/semaphores.md) | draft |  | rendezvous and semaphores |
+| [whp](design/whp.md) | draft |  | WHP backend |
+| [zig-interpreter](design/zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
+
+```mermaid
+flowchart LR
+  classDef draft stroke-dasharray: 4 3
+  classDef accepted stroke-width: 2px
+  classDef implemented fill:#dfd,stroke:#393
+  classDef closed fill:#eee,stroke:#999,color:#777
+  p_baseline["baseline<br/>implemented"]:::implemented
+  p_proposals["#35;1 proposals<br/>accepted"]:::accepted
+  p_9p_roots["9p-roots<br/>draft"]:::draft
+  p_ci["ci<br/>draft"]:::draft
+  p_devsrv["devsrv<br/>draft"]:::draft
+  p_ephemeral_writes["ephemeral-writes<br/>draft"]:::draft
+  p_gfx["gfx<br/>draft"]:::draft
+  p_go_compat["go-compat<br/>draft"]:::draft
+  p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
+  p_host_sandbox["host-sandbox<br/>draft"]:::draft
+  p_image_roots["image-roots<br/>draft"]:::draft
+  p_kvm["kvm<br/>draft"]:::draft
+  p_net_policy["net-policy<br/>draft"]:::draft
+  p_overlay["overlay<br/>draft"]:::draft
+  p_segattach["segattach<br/>draft"]:::draft
+  p_self_host["self-host<br/>draft"]:::draft
+  p_semaphores["semaphores<br/>draft"]:::draft
+  p_whp["whp<br/>draft"]:::draft
+  p_zig_interpreter["zig-interpreter<br/>draft"]:::draft
+  p_devsrv --> p_gfx
+  p_semaphores --> p_go_compat
+  p_kvm --> p_host_sandbox
+  p_whp --> p_host_sandbox
+  p_devsrv --> p_image_roots
+  p_9p_roots --> p_image_roots
+  p_ephemeral_writes --> p_overlay
+```
+
+<!-- design:end -->
 
 ## Setup (macOS arm64)
 
@@ -34,9 +82,9 @@ Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 `mkroot.py` boots the pinned image headless in QEMU (`brew install qemu`),
 tars the file system out onto a scratch disk, and unpacks it into
 `.local/9front/root-<release>`, with `.local/9front/root` linked to it. The
-image itself isn't modified. It's the host-tree root that M2 serves as `/`.
+image itself isn't modified. It's the host-tree root h9 serves as `/`.
 Boot kernels, `/sys/doc` and `/sys/src` are left out; pass `--src` to keep
-`/sys/src`, which self-hosting (M6) needs.
+`/sys/src`, which [self-hosting](design/self-host.md) needs.
 
 Pinned upstream versions are in [scripts/pins.sh](scripts/pins.sh).
 
@@ -51,20 +99,19 @@ clean tree; it merges upstream into the subtree and keeps our local changes.
 zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
 zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern and the libraries it uses
-zig build m1       # M0 demo: h9 ./hello must print "hello" (plus the M1 demo with -Demu=unicorn)
-zig build m2       # M2 demos: h9 /bin/cat /lib/namespace, and a write under --profile=tight fails
-zig build m3       # M3 demo, h9 --rc 'ls /bin | wc -l', and the M3 integration cases
-zig build m4       # M4 demo (kill and ps in an interactive rc, on a pty) and the M4 integration cases
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
+zig build proposal -Dp=baseline  # one proposal's demos and integration cases (by slug or id)
+zig build design -- check        # validate design/ and the test tags (also list, ready, graph, new, file)
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
-The M2 to M4 demos and the integration tests use the root tree from
-`scripts/mkroot.py`, or `-Droot=DIR`. The integration tests skip when there's
-no tree. Cases for the milestone in progress are named `M5: ...` and so on, and
-skip in `zig build integration` and `zig build test`. Cases for a finished
-milestone are tagged `(M4)` and so on; `zig build m3` and `zig build m4` run
-those milestones' cases.
+The demos and the integration tests use the root tree from
+`scripts/mkroot.py`, or `-Droot=DIR`. Without a tree, the integration tests
+skip and only the hello demos run. Each case is tagged with the proposal it
+proves (`test "echo [baseline]"`); cases for a proposal that isn't implemented
+yet skip in `zig build integration` and `zig build test` unless `-Dpending` is
+given, and `zig build proposal -Dp=<slug or id>` runs one proposal's cases
+whatever its status.
 Interactive cases run h9 on a terminal the test creates
 ([tests/term.zig](tests/term.zig): a pty, or ConPTY on Windows), so they need
 no human and no `ssh -t`.
@@ -76,7 +123,7 @@ ships separately as `h9-emu` (see [Releases](#releases)):
 ```sh
 zig build -Demu=unicorn                              # macOS arm64
 zig build -Demu=unicorn -Dtarget=aarch64-linux-musl  # Linux arm64 (also x86_64-linux-musl)
-zig build m1 -Demu=unicorn                           # M0 and M1 demos, adding h9 --backend emu ./hello
+zig build proposal -Dp=baseline -Demu=unicorn        # the baseline demos, adding h9 --backend emu ./hello
 zig build bench -Demu=unicorn                        # compute and syscall speed, emu vs the hypervisor
 ```
 
@@ -116,7 +163,7 @@ zig-out/bin/h9 --version                  # version, pinned 9front and drawterm,
 zig-out/bin/h9 [--backend B] [--root DIR] --check
 zig-out/bin/h9 --help                     # or -h alone
 
-zig-out/bin/h9 /bin/cat /lib/namespace    # M2 demo
+zig-out/bin/h9 /bin/cat /lib/namespace    # a baseline demo
 zig-out/bin/h9 ls -l /bin/cat             # bare names search $path: . and /bin
 zig-out/bin/h9 ./hello                    # ./ and ../ are host paths
 ```
@@ -200,7 +247,7 @@ h9 --readable ~/src --read-deny ~/src/.env ls /mnt/term/$HOME/src
 h9 --memory 256m --timeout 30s ls   # resource caps
 h9 --pids 32 --cpus 2 --rc 'mk'     # at most 32 processes, 2 running at once
 h9 --print --profile=tight mk       # print the compiled plan and exit
-h9 --strict --write=overlay mk      # exit 2: not enforceable before M10
+h9 --strict --write=overlay mk      # exit 2: overlay isn't enforced yet
 ```
 
 | Flag | Meaning |
@@ -208,8 +255,8 @@ h9 --strict --write=overlay mk      # exit 2: not enforceable before M10
 | `--profile default\|tight` | Sandbox defaults; explicit flags override them |
 | `--readable PATH`, `--writable PATH` | Bind a host path read-only or read-write; outside the root and cwd it appears at `/mnt/term/PATH` |
 | `--read-deny PATH` | Hide a host path, even inside a bound tree |
-| `--write none\|scope` | Deny all writes, or allow them only in writable paths (`ephemeral` and `overlay` come in M5 and M10, and deny writes until then) |
-| `--net disable\|enable` | Mask `#I`, or leave it (`outbound` comes in M5) |
+| `--write none\|scope` | Deny all writes, or allow them only in writable paths (`ephemeral` and `overlay` are [proposed](design/README.md) and deny writes for now) |
+| `--net disable\|enable` | Mask `#I`, or leave it (`outbound` is [proposed](design/net-policy.md)) |
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |
 | `--pids N`, `--cpus N` | Cap live processes (rfork fails with "no procs"); cap vCPUs running guest code at once |
 | `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd |
