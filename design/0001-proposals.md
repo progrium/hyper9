@@ -2,7 +2,7 @@
 id: 1
 slug: proposals
 title: Proposals replace milestones and the design changelog
-status: draft
+status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: []
