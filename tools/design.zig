@@ -208,14 +208,13 @@ fn state(r: Repo, p: Proposal, out: *std.ArrayList(u8)) !void {
         .implemented, .declined, .superseded => return,
         else => {},
     }
-    var buf: [64]u8 = undefined;
     var first = true;
     for (p.depends) |ref| {
         const j = r.resolve(ref) orelse continue;
         const q = r.ps[j];
         if (q.status == .implemented) continue;
         try out.appendSlice(r.arena, if (first) "needs " else ", ");
-        try out.appendSlice(r.arena, label(q, &buf));
+        try out.appendSlice(r.arena, q.slug);
         first = false;
     }
     if (first and p.status == .accepted) try out.appendSlice(r.arena, "ready");
@@ -309,11 +308,10 @@ fn readmeBlock(r: Repo) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(r.arena);
     const w = &aw.writer;
     try w.print("{s}\n\n| Proposal | Status | State | Title |\n| --- | --- | --- | --- |\n", .{readme_begin});
-    var buf: [64]u8 = undefined;
     for (r.ps) |p| {
         var st: std.ArrayList(u8) = .empty;
         try state(r, p, &st);
-        try w.print("| [{s}](design/{s}) | {t} | {s} | {s} |\n", .{ label(p, &buf), p.file, p.status, st.items, p.title });
+        try w.print("| [{s}](design/{s}) | {t} | {s} | {s} |\n", .{ p.slug, p.file, p.status, st.items, p.title });
     }
     try w.writeAll("\n```mermaid\n");
     try graph(r, w);
