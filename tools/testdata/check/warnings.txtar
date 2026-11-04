@@ -1,0 +1,48 @@
+Warnings only: slug references to a filed proposal, in depends and in a
+test tag, and a README table that's out of date. The baseline (id 0) has
+no issue, so its slug isn't flagged.
+
+warning: design/gfx.md:7: `devsrv` is #12 now
+warning: tests/integration.zig:1: tag `devsrv` is #12 now
+warning: README.md: the proposal table is out of date
+
+-- design/0000-baseline.md --
+---
+id: 0
+slug: baseline
+title: Baseline
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0012-devsrv.md --
+---
+id: 12
+slug: devsrv
+title: devsrv
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: [baseline]
+---
+-- design/gfx.md --
+---
+slug: gfx
+title: Graphics
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: [devsrv]
+---
+-- tests/integration.zig --
+test "ramfs [devsrv]" {
+}
+test "echo [baseline]" {
+}
+-- README.md --
+# h9
+
+<!-- design:begin (zig build design -- readme) -->
+stale
+<!-- design:end -->

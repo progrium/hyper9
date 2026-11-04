@@ -1,0 +1,57 @@
+Identity: a duplicate slug, a duplicate id, a file named for the wrong id,
+and a status past draft without an id.
+
+error: design/0021-dup.md: slug `dup` is also used by design/0020-dup.md
+error: design/0031-b.md: id 30 is also used by design/0030-a.md
+error: design/0031-b.md: should be named design/0030-b.md
+error: design/later.md: status `accepted` needs an id
+
+-- design/0020-dup.md --
+---
+id: 20
+slug: dup
+title: Dup
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0021-dup.md --
+---
+id: 21
+slug: dup
+title: Dup again
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0030-a.md --
+---
+id: 30
+slug: a
+title: A
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0031-b.md --
+---
+id: 30
+slug: b
+title: B
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/later.md --
+---
+slug: later
+title: Later
+status: accepted
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---

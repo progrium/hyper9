@@ -1,0 +1,49 @@
+A valid tree: a baseline, filed and draft proposals with dependencies,
+id and slug references, and tagged cases. No messages.
+
+-- design/README.md --
+The process; not a proposal.
+-- design/TEMPLATE.md --
+---
+slug: [slug]
+---
+-- design/0000-baseline.md --
+---
+id: 0
+slug: baseline
+title: Baseline
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0012-devsrv.md --
+---
+id: 12
+slug: devsrv
+title: devsrv and /srv
+status: accepted
+created: 2026-11-03
+authors: [progrium]
+depends: [baseline]
+areas: [kern]
+---
+-- design/9p-roots.md --
+---
+slug: 9p-roots
+title: 9P roots
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: [12]
+superseded-by:
+---
+-- tests/integration.zig --
+test "echo [baseline]" {
+}
+test "ramfs posts to /srv [12]" {
+}
+test "mount a 9P root [9p-roots, 12]" {
+}
+test "untagged" {
+}

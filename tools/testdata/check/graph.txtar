@@ -1,0 +1,68 @@
+The dependency graph: a cycle, a self-dependency, an implemented proposal
+with an unimplemented dependency, and an accepted one on a declined one.
+
+error: dependency cycle: #1 -> #2 -> #1
+error: design/0003-c.md:8: depends on itself
+error: design/0004-d.md: implemented, but its dependency #1 is `draft`
+error: design/0005-e.md: accepted, but it depends on #6, which was declined
+
+-- design/0001-a.md --
+---
+id: 1
+slug: a
+title: A
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: [2]
+---
+-- design/0002-b.md --
+---
+id: 2
+slug: b
+title: B
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: [1]
+---
+-- design/0003-c.md --
+---
+id: 3
+slug: c
+title: C
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: [3]
+---
+-- design/0004-d.md --
+---
+id: 4
+slug: d
+title: D
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: [1]
+---
+-- design/0005-e.md --
+---
+id: 5
+slug: e
+title: E
+status: accepted
+created: 2026-11-03
+authors: [progrium]
+depends: [6]
+---
+-- design/0006-f.md --
+---
+id: 6
+slug: f
+title: F
+status: declined
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---

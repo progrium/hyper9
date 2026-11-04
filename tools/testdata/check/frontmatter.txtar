@@ -1,0 +1,77 @@
+Bad frontmatter: a missing field, an unknown status, a malformed date, an
+unknown key, quoting, a scalar where a list goes, and a file with none.
+
+error: design/a.md: missing `title`
+error: design/b.md:4: unknown status `done`
+error: design/c.md:5: `created` must be YYYY-MM-DD, not `11/03/2026`
+error: design/d.md:8: unknown key `milestone`
+error: design/e.md:3: `title`: quoting, nesting and multi-line values aren't supported
+error: design/f.md:6: `authors` must be a list
+error: design/g.md:1: no frontmatter
+error: design/h.md:2: bad slug `H`
+
+-- design/a.md --
+---
+slug: a
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/b.md --
+---
+slug: b
+title: B
+status: done
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/c.md --
+---
+slug: c
+title: C
+status: draft
+created: 11/03/2026
+authors: [progrium]
+depends: []
+---
+-- design/d.md --
+---
+slug: d
+title: D
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+milestone: M5
+---
+-- design/e.md --
+---
+slug: e
+title: "E"
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/f.md --
+---
+slug: f
+title: F
+status: draft
+created: 2026-11-03
+authors: progrium
+depends: []
+---
+-- design/g.md --
+# No frontmatter
+-- design/h.md --
+---
+slug: H
+title: H
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---

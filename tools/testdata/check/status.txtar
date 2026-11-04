@@ -1,0 +1,68 @@
+Status rules: superseded without superseded-by, superseded-by without the
+status, and more than three proposals in a final comment period.
+
+error: design/0001-a.md: superseded, but `superseded-by` isn't set
+error: design/0002-b.md:9: `superseded-by` is set, but the status is `draft`
+error: 4 proposals are in a final comment period, more than 3
+
+-- design/0001-a.md --
+---
+id: 1
+slug: a
+title: A
+status: superseded
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0002-b.md --
+---
+id: 2
+slug: b
+title: B
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+superseded-by: 1
+---
+-- design/0003-c.md --
+---
+id: 3
+slug: c
+title: C
+status: likely-accept
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0004-d.md --
+---
+id: 4
+slug: d
+title: D
+status: likely-accept
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0005-e.md --
+---
+id: 5
+slug: e
+title: E
+status: likely-decline
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/0006-f.md --
+---
+id: 6
+slug: f
+title: F
+status: likely-accept
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
