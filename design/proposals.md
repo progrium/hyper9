@@ -93,7 +93,7 @@ Only facts are stored. Whether a proposal is *ready* (accepted, with every depen
 | `accepted` | Decided. Work can start once every dependency is implemented. |
 | `declined` | Decided against; kept, so the reasoning can be found later. The issue is closed. |
 | `hold` | Paused, with a reason on the issue |
-| `implemented` | Built, its "Done when" cases pass, and DESIGN.md describes it |
+| `implemented` | Built, its "Done when" cases exist and pass, and DESIGN.md describes it. The tool doesn't enforce the cases, so a proposal with nothing to test, such as a process change, can still be marked implemented; the PR says why. |
 | `superseded` | Replaced by `superseded-by` |
 
 Each status change is its own commit (`design: 42 likely-accept`), so `git log design/` is the record of decisions. The issue's labels may mirror the status, but the frontmatter is authoritative. At most three proposals sit in `likely-accept` or `likely-decline` at a time, so finishing decisions comes before starting new ones (Go's Incoming column does this for a larger group).
@@ -113,7 +113,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 ### Template
 
-`design/TEMPLATE.md` follows Go's, with three changes. Compatibility covers what h9 has instead of a Go 1 promise. Security is new, because most of h9's design choices are sandbox choices. And "Done when" replaces the milestone demos.
+`design/TEMPLATE.md` follows Go's, with three changes. Compatibility covers what h9 has instead of a Go 1 promise. Security is new, because most of h9's design choices are sandbox choices. And "Done when" replaces the milestone demos. Proposals are written with a line per paragraph, as DESIGN.md is.
 
 1. **Abstract:** a short summary.
 2. **Background:** the problem, and what exists today.
@@ -130,7 +130,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 An accepted proposal's body isn't edited. A discovery during implementation that refines the design gets a dated note under Updates; one that changes the design gets a new proposal, which supersedes the old one or is added to its `depends`. A dependency found during implementation is added to `depends` in the same PR, with a line saying so.
 
-The PR that finishes a proposal updates DESIGN.md to describe what was built, tags the passing cases, and sets `status: implemented`. DESIGN.md never describes unbuilt features; proposals never get updated to describe the current system.
+The PR that finishes a proposal updates DESIGN.md to describe what was built, tags the passing cases, and sets `status: implemented`. DESIGN.md never describes unbuilt features; proposals never get updated to describe the current system. DESIGN.md links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision, not as a rule for every section, and the tool doesn't check those links.
 
 ### Tests
 
@@ -142,7 +142,7 @@ Integration cases are tagged with the proposal they prove, in brackets at the en
 | --- | --- |
 | `(M2)`, `(M3)`, `(M4)` in case names | `[baseline]` |
 | `"M5: ..."` pending cases | `[slug]` of the proposal, skipped until implemented |
-| `zig build m1` … `zig build m4` | `zig build proposal -Dp=baseline`, which runs every baseline demo and case |
+| `zig build m1` … `zig build m4` | removed, with no aliases; `zig build proposal -Dp=baseline` runs every baseline demo and case |
 | `zig build integration` | unchanged: every case of an implemented proposal |
 | (none) | `zig build proposal -Dp=<id or slug>`: one proposal's cases, pending or not |
 
@@ -177,7 +177,7 @@ It warns on a slug reference to a filed proposal, so a branch drafted before the
 ### Migration
 
 1. **Baseline.** M0 to M4 are done and described by DESIGN.md as it stands. They become one proposal, `0000-baseline.md` (`slug: baseline`, `status: implemented`, no issue). Its body is the record of how h9 got here: the M0 to M4 entries from the Milestones section, with their demos, and DESIGN.md's Changelog, moved unchanged with its dated entries and milestone headings. The one M5 entry so far (the rename from hp9 to h9) moves with it, since it predates proposals. Like any implemented proposal, it isn't edited afterwards. Finished work gets no retroactive proposals.
-2. **DESIGN.md.** The Milestones and Changelog sections are removed, and DESIGN.md links to the baseline proposal for the history. Design text for unbuilt work moves into proposals, leaving DESIGN.md about what exists. Milestone references in the remaining text ("from M5", "M10") become proposal references or are dropped.
+2. **DESIGN.md.** The Milestones and Changelog sections are removed, and DESIGN.md links to the baseline proposal for the history. Design text for unbuilt work moves into proposals, leaving DESIGN.md about what exists. Milestone references in the remaining text ("from M5", "M10") are dropped, or become links where the proposal adds context.
 3. **Remaining milestones become proposals**, split by feature rather than kept as bundles. Each starts as a `draft` with its existing design text, and is filed and accepted as work reaches it:
 
     | Slug | Depends on |
@@ -226,7 +226,7 @@ It warns on a slug reference to a filed proposal, so a branch drafted before the
 
 No user-visible change to h9: no CLI flags, `Machine.Options` or sandbox defaults change. Developer-facing changes:
 
-- `zig build m1` … `m4` are replaced by `zig build proposal -Dp=baseline`.
+- `zig build m1` … `m4` are removed, with no aliases; `zig build proposal -Dp=baseline` runs the same demos and cases.
 - Integration case names change from `(Mn)` to `[tag]`, which changes `zig build test` filters that match on them.
 - DESIGN.md loses its Milestones and Changelog sections; both are preserved in `design/0000-baseline.md`.
 - AGENTS.md's rule for design changes changes, as above.
@@ -255,11 +255,3 @@ None for the guest or the host. `file` runs `gh` with the user's credentials and
 7. README and AGENTS.md.
 
 This proposal is decided under the current process, since the new one doesn't exist yet: it's filed by hand, and accepted by a commit to this file. It becomes the first proposal to reach `implemented` under its own rules.
-
-## Open issues
-
-- Should the `m1`–`m4` build steps stay for a while as aliases of `proposal -Dp=baseline`, for muscle memory and old instructions?
-- Is three days the right final comment period, or should it scale with the proposal (a week for anything touching the sandbox)?
-- Should `implemented` require the "Done when" cases to exist and pass, checked by the tool, or is that left to review?
-- Should DESIGN.md link each section to the proposals that shaped it, and should the tool check those links?
-- Go wraps design docs at 80 columns with one sentence per line, for reviewable diffs. h9's docs use a line per paragraph. Keep that, or switch for proposals?
