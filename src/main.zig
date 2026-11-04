@@ -262,7 +262,7 @@ fn resolveAll(arena: std.mem.Allocator, io: std.Io, paths: []const []const u8, m
     return out;
 }
 
-/// The host temp dir, bound at /tmp until M5.
+/// The host temp dir, bound at /tmp.
 fn hostTmp(arena: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) ?[]const u8 {
     const t = env.get("TMPDIR") orelse env.get("TEMP") orelse "/tmp";
     return kernPath(arena, std.Io.Dir.cwd().realPathFileAlloc(io, t, arena) catch return null);

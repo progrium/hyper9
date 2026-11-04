@@ -9,7 +9,7 @@
  *
  * Served: args, ctl (kill, hang, nohang, close, closefiles), fd, note,
  * noteid, notepg, ns, ppid, status and wait. mem, regs, fpregs, segment
- * and text (acid) wait for M6; kregs, kfpregs, proc, profile, syscall,
+ * and text (acid) wait for design/self-host.md; kregs, kfpregs, proc, profile, syscall,
  * trace and watchpt have no meaning here. The CPU times in status are 0.
  *
  * The record's debug QLock stands in for 9front's p->debug: the process

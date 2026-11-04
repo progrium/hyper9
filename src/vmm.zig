@@ -29,7 +29,7 @@ pub const host_arch: ?Arch = switch (builtin.cpu.arch) {
 /// What `--backend` asks for.
 pub const BackendKind = enum { auto, hvf, kvm, whp, emu };
 
-/// A concrete backend. kvm and whp join at M8 and M9.
+/// A concrete backend. kvm and whp are proposed (design/kvm.md, design/whp.md).
 pub const Kind = enum {
     hvf,
     emu,

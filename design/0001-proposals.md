@@ -256,3 +256,14 @@ None for the guest or the host. `file` runs `gh` with the user's credentials and
 7. README and AGENTS.md.
 
 This proposal is decided under the current process, since the new one doesn't exist yet: it's filed by hand, and accepted by a commit to this file. It becomes the first proposal to reach `implemented` under its own rules.
+
+## Updates
+
+- 2026-11-03: Refinements made while implementing it:
+  - `file --issue N` numbers a draft for an issue that already exists, without touching GitHub, as when an issue is opened by hand (this one was).
+  - `readme` rewrites a generated table and graph between markers in the top-level README, and `check` warns when it's out of date.
+  - The tags of proposals that aren't implemented are compiled into the integration tests as a build option (`design.pending_tags`), rather than passed as `H9_TEST_PENDING_TAGS`, so a binary from `zig build install-tests` knows them too. `-Dpending` sets `H9_TEST_PENDING`, as before.
+  - The baseline demos that need a root tree are left out of `zig build proposal -Dp=baseline` when there's no tree, as the integration cases skip, rather than failing; the hello demos always run.
+  - Slugs may start with a digit (`9p-roots`), but can't be all digits, which would read as an id. The baseline's id 0 isn't an issue, so references to it keep its slug, and `fix` leaves them alone.
+  - Migration added three drafts the table didn't list, for DESIGN.md text with nowhere else to go: `zig-interpreter` (the emulator's second step), `hide-host-paths` (an open question) and `ci` (the CI plan). The `self-host` and `9p-roots` drafts don't depend on `segattach` and `devsrv`: nothing in their design text needs them, and `self-host` notes it may gain a dependency.
+  - Milestone names were also replaced in source comments, and `--print`'s network caveat now reads "the network is not restricted beyond --net=disable".

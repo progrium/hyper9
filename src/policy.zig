@@ -16,15 +16,15 @@ pub const WriteMode = enum {
     none,
     /// Persist writes to the writable paths only.
     scope,
-    /// Discard all writes on exit (M5).
+    /// Discard all writes on exit (design/ephemeral-writes.md; not enforced yet).
     ephemeral,
-    /// Copy-on-write over the root (M10).
+    /// Copy-on-write over the root (design/overlay.md; not enforced yet).
     overlay,
 };
 
 pub const NetMode = enum {
     disable,
-    /// Clients work, `announce` is refused (M5).
+    /// Clients work, `announce` is refused (design/net-policy.md; not enforced yet).
     outbound,
     enable,
 };
@@ -60,7 +60,8 @@ pub const Policy = struct {
     host_fs: bool = false,
     /// Leave devcmd (`#C`) unmasked.
     host_cmd: bool = false,
-    /// The host temp dir, bound at /tmp until M5's private ramfs.
+    /// The host temp dir, bound at /tmp (a private ramfs is proposed in
+    /// design/ephemeral-writes.md).
     tmp: ?[]const u8 = null,
 };
 
@@ -216,7 +217,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     var unenforced: CapSet = .initEmpty();
     // Unenforceable modes fall back to the safer choice: writes are denied
-    // rather than persisted, and outbound falls back to the M2 default.
+    // rather than persisted, and outbound leaves the network as it is.
     const write: WriteMode = switch (write_req) {
         .ephemeral => blk: {
             unenforced.insert(.@"fs.write.ephemeral");
@@ -281,7 +282,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
     }
 
-    // The host temp dir until M5's ramfs; the tight profile leaves the
+    // The host temp dir (design/ephemeral-writes.md proposes a ramfs); the tight profile leaves the
     // root's read-only /tmp instead.
     if (in.root != null and tmp_rw) if (pol.tmp) |tmp| {
         try rules.append(arena, .{ .path = tmp, .kind = .allow_rw });
@@ -367,7 +368,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try caveats.append(arena, "writes to writable paths are not capped (no res.disk)");
     }
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
-    if (net != .disable) try caveats.append(arena, "the network is not restricted until M5");
+    if (net != .disable) try caveats.append(arena, "the network is not restricted beyond --net=disable");
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
     try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
