@@ -32,9 +32,9 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
-| [websocket-9p](design/0021-websocket-9p.md) | draft | needs guest-tools | 9P over WebSocket |
+| [websocket-9p](design/0021-websocket-9p.md) | accepted | needs guest-tools | 9P over WebSocket |
 | [dotl](design/0022-dotl.md) | draft | needs serve, guest-tools | 9P2000.L and ZeroFS |
-| [guest-tools](design/0032-guest-tools.md) | draft |  | h9's own commands in the guest |
+| [guest-tools](design/0032-guest-tools.md) | accepted | ready | h9's own commands in the guest |
 | [exit-status](design/0033-exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
 | [symlinks-in-root](design/0034-symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 | [serve](design/0035-serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
@@ -73,9 +73,9 @@ flowchart LR
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
-  p_websocket_9p["#35;21 websocket-9p<br/>draft"]:::draft
+  p_websocket_9p["#35;21 websocket-9p<br/>accepted"]:::accepted
   p_dotl["#35;22 dotl<br/>draft"]:::draft
-  p_guest_tools["#35;32 guest-tools<br/>draft"]:::draft
+  p_guest_tools["#35;32 guest-tools<br/>accepted"]:::accepted
   p_exit_status["#35;33 exit-status<br/>draft"]:::draft
   p_symlinks_in_root["#35;34 symlinks-in-root<br/>draft"]:::draft
   p_serve["#35;35 serve<br/>draft"]:::draft

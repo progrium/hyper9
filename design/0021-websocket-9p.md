@@ -2,7 +2,7 @@
 id: 21
 slug: websocket-9p
 title: 9P over WebSocket
-status: draft
+status: accepted
 created: 2026-11-05
 authors: [progrium]
 depends: [5, 8, 13, 32]

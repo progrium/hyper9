@@ -2,7 +2,7 @@
 id: 32
 slug: guest-tools
 title: h9's own commands in the guest
-status: draft
+status: accepted
 created: 2026-11-06
 authors: [progrium]
 depends: []
