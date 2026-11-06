@@ -204,3 +204,12 @@ Measured: the same workloads (`ls -l /bin`, an rc pipeline, and `mk` on a small 
   - The unix socket connect is `h9_unixdial` in `src/kern/rootdial.c`, which also sets and reads the calling process's user for `--root-user`. On Windows it fails with "unix socket roots need a POSIX host".
   - `--root-user` is cut to the kernel's 27-byte user names.
   - The `--root-spec` and `--root-user` cases, and the authentication case, use a stub server in the test that records the `Tattach` and refuses it, since `exportfs` ignores the attach name and doesn't use `Tauth`.
+- 2026-11-06: Measured on an Apple Silicon Mac with HVF, as seconds per run, the mean of 20 runs of each (the script is in the PR). The server is a second h9 running `exportfs -R` behind `aux/listen1 -t`; the unix socket is relayed to it by socat, so that row includes the relay's hop as well.
+
+  | Root | `ls -l /bin` | `ls -l /bin \| sort \| wc -l` | `mk` (7c and 7l of a small program) |
+  | --- | --- | --- | --- |
+  | Host tree | 0.018 | 0.025 | 0.022 |
+  | `tcp!127.0.0.1!5640` | 0.029 (1.6×) | 0.042 (1.7×) | 0.053 (2.4×) |
+  | Unix socket | 0.030 (1.7×) | 0.045 (1.8×) | 0.057 (2.6×) |
+
+  The unix socket root stays under the 3× bound in Rationale, so no root cache is proposed for now. `mk` is the closest to it, because the compiler and linker read many headers and libraries through devmnt.
