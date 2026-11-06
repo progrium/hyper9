@@ -34,9 +34,9 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](design/0021-websocket-9p.md) | draft | needs guest-tools | 9P over WebSocket |
 | [dotl](design/0022-dotl.md) | draft | needs serve, guest-tools | 9P2000.L and ZeroFS |
+| [guest-tools](design/0032-guest-tools.md) | draft |  | h9's own commands in the guest |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [exit-status](design/exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
-| [guest-tools](design/guest-tools.md) | draft |  | h9's own commands in the guest |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
@@ -75,9 +75,9 @@ flowchart LR
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
   p_websocket_9p["#35;21 websocket-9p<br/>draft"]:::draft
   p_dotl["#35;22 dotl<br/>draft"]:::draft
+  p_guest_tools["#35;32 guest-tools<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_exit_status["exit-status<br/>draft"]:::draft
-  p_guest_tools["guest-tools<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft

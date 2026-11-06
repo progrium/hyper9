@@ -5,7 +5,7 @@ title: 9P over WebSocket
 status: draft
 created: 2026-11-05
 authors: [progrium]
-depends: [5, 8, 13, guest-tools]
+depends: [5, 8, 13, 32]
 areas: [cli, kern, sandbox, web]
 ---
 
@@ -217,7 +217,7 @@ while(~ $1 -*){
   mount $flags /net/ws/$n/data $2 $3 } <>/net/ws/clone
 ```
 
-So the guest example above becomes `wsmount -c wss://fs.example/9p /n/fs`. The root tree is 9front's, and this proposal doesn't add files to it. [guest-tools](guest-tools.md) ships the script in the guest's `/bin`, as `src/guest/bin/wsmount`.
+So the guest example above becomes `wsmount -c wss://fs.example/9p /n/fs`. The root tree is 9front's, and this proposal doesn't add files to it. [guest-tools](0032-guest-tools.md) ships the script in the guest's `/bin`, as `src/guest/bin/wsmount`.
 
 **The device isn't 9P-specific.** Any guest program can use `/net/ws` as a WebSocket client. The file it uses picks the message type: `data` for binary, `text` for text. There's no mode to set, so processes sharing a conversation can't disagree about it.
 

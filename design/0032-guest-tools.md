@@ -1,4 +1,5 @@
 ---
+id: 32
 slug: guest-tools
 title: h9's own commands in the guest
 status: draft
@@ -9,6 +10,8 @@ areas: [kern, sandbox, build]
 ---
 
 # Proposal: h9's own commands in the guest
+
+Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 
