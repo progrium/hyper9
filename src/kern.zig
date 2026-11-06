@@ -280,6 +280,8 @@ pub fn boot() Error!void {
         .failed => return error.Kern,
         .booting => std.atomic.spinLoopHint(),
         .idle => if (boot_state.cmpxchgStrong(.idle, .booting, .acq_rel, .acquire) == null) {
+            // The monotonic clock starts at the wall time of the boot.
+            _ = monoNs();
             const t = std.Thread.spawn(.{}, bootThread, .{}) catch {
                 boot_state.store(.idle, .release);
                 return error.OutOfMemory;
@@ -875,7 +877,67 @@ comptime {
         @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
         @export(&h9_overlay_alloc, .{ .name = "h9_overlay_alloc" });
         @export(&h9_overlay_free, .{ .name = "h9_overlay_free" });
+        @export(&h9_clock_wall, .{ .name = "h9_clock_wall" });
+        @export(&h9_clock_mono, .{ .name = "h9_clock_mono" });
+        @export(&h9_cons_ncpu, .{ .name = "h9_cons_ncpu" });
     }
+}
+
+// The clock (design/0007-go-compat.md): one per host process, in
+// nanoseconds. Wall time is the host's real-time clock. Monotonic time is
+// the host's monotonic clock, offset so it starts at the wall time when
+// the clock is first read, so its values look like wall time but never
+// jump with the host's clock. devcons's ticks are the monotonic
+// nanoseconds, so fasthz is 10^9.
+
+/// Clock reads need no Io state, so any thread can make them through the
+/// global single-threaded Io.
+fn clockIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn clockNow(clock: std.Io.Clock) i64 {
+    return @intCast(std.Io.Timestamp.now(clockIo(), clock).nanoseconds);
+}
+
+/// Wall minus monotonic time at the first read; 0 until then.
+var mono_offset: std.atomic.Value(i64) = .init(0);
+var mono_set: std.atomic.Value(bool) = .init(false);
+
+/// Wall time in nanoseconds since the epoch.
+pub fn wallNs() i64 {
+    return clockNow(.real);
+}
+
+/// Monotonic time in nanoseconds, starting near the wall time.
+pub fn monoNs() i64 {
+    if (!mono_set.load(.acquire)) {
+        const off = clockNow(.real) - clockNow(.awake);
+        // The first reader to set it wins; the others use its offset.
+        _ = mono_offset.cmpxchgStrong(0, off, .acq_rel, .acquire);
+        mono_set.store(true, .release);
+    }
+    return clockNow(.awake) + mono_offset.load(.acquire);
+}
+
+fn h9_clock_wall() callconv(.c) i64 {
+    return wallNs();
+}
+
+fn h9_clock_mono() callconv(.c) i64 {
+    return monoNs();
+}
+
+/// The CPUs the calling thread's machine may use, for /dev/sysstat; set
+/// with the plan. Kernel threads without a machine see one.
+threadlocal var cons_ncpu: u32 = 1;
+
+pub fn setCpus(n: u32) void {
+    cons_ncpu = @max(n, 1);
+}
+
+fn h9_cons_ncpu() callconv(.c) c_int {
+    return @intCast(@min(cons_ncpu, std.math.maxInt(c_int)));
 }
 
 // Leaves called from devoverlay.c. They never raise kernel errors.

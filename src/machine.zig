@@ -202,6 +202,16 @@ pub const Machine = struct {
         m.gpa.destroy(m.arena);
     }
 
+    /// The CPUs the machine may use, as /dev/sysstat lists them: `--cpus`
+    /// when given, else the host's CPU count, capped by the backend's vCPU
+    /// limit.
+    fn cpuCount(m: *const Machine) u32 {
+        const host: u32 = @intCast(@min(std.Thread.getCpuCount() catch 1, std.math.maxInt(u32)));
+        const want = m.plan.cpus orelse host;
+        const max = m.backend.maxVcpus() catch want;
+        return @max(1, @min(want, max));
+    }
+
     /// Runs a program to completion. `argv[0]` is the program's name as it
     /// sees it.
     ///
@@ -229,6 +239,7 @@ pub const Machine = struct {
         };
         job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool };
         job.pool.gpa = m.gpa;
+        job.ncpu = m.cpuCount();
         kern.setNoteKick(Proc.noteKick);
         kern.setProcStatus(Proc.status);
         kern.setProcSegment(Proc.segments);
@@ -343,6 +354,8 @@ pub const Machine = struct {
         trace_lock: std.atomic.Mutex = .unlocked,
         /// vCPUs for the processes.
         pool: cpupool.Pool,
+        /// The CPUs /dev/sysstat lists (design/0007-go-compat.md).
+        ncpu: u32 = 1,
 
         fn allocPages(ctx: *anyopaque, n: usize) ?[*]u8 {
             const j: *Job = @ptrCast(@alignCast(ctx));
@@ -628,6 +641,7 @@ pub const Machine = struct {
         // devfs checks this thread's accesses against the plan.
         kern.setPlan(&m.plan);
         kern.setPages(&j.pages);
+        kern.setCpus(j.ncpu);
         kern.setGuestPid(p.pid);
         p.setKproc();
         j.mach.store(kern.mach(), .release);
@@ -699,6 +713,7 @@ pub const Machine = struct {
         const m = p.job.m;
         kern.setPlan(&m.plan);
         kern.setPages(&p.job.pages);
+        kern.setCpus(p.job.ncpu);
         p.setKproc();
         const st = m.loop(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {t}", .{e}) catch "h9: error" };
         setExits(switch (st) {

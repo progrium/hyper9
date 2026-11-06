@@ -1366,6 +1366,16 @@ h9_kern_gpid(void)
 	return h != nil ? h->pid : 0;
 }
 
+/* The calling process's parent's pid when it was made, as /proc/n/ppid. */
+ulong
+h9_kern_gppid(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	return h != nil ? h->ppid : 0;
+}
+
 void
 h9_kern_setgpid(ulong pid)
 {

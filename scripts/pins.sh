@@ -10,6 +10,10 @@ NINEFRONT_ISO_URL=https://9front.org/iso
 
 HYPERLINUX_REPO=https://github.com/zw3rk/hyper-linux
 
+# Go for the go-compat fixtures and go-stdtest (design/0007-go-compat.md):
+# GOTOOLCHAIN=go$GO_VERSION makes any installed Go fetch this exact release.
+GO_VERSION=1.27.3
+
 # Prebuilt static Unicorn for the emu backend (-Demu=unicorn), taken from the
 # PyPI wheels. GPLv2: dev and CI builds only. No Windows arm64 wheel exists.
 UNICORN_VERSION=2.1.4

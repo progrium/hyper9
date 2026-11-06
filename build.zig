@@ -135,15 +135,44 @@ const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping. `arch`, if given, is passed to h9
 /// as --arch (from -Darch).
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8) *std.Build.Step.Run {
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
     if (arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
+    if (go) |g| {
+        run.setEnvironmentVariable("H9_TEST_GO", g.dir);
+        run.step.dependOn(g.step);
+    }
     run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
     if (pending) run.setEnvironmentVariable("H9_TEST_PENDING", "1");
     run.has_side_effects = true;
     return run;
+}
+
+/// The Go fixtures (tests/fixtures/go, design/0007-go-compat.md): plan9/amd64
+/// binaries built with the pinned Go toolchain into `dir` by `step`.
+const GoFixtures = struct { dir: []const u8, step: *std.Build.Step };
+
+/// The environment for building plan9/amd64 binaries with Go at the
+/// pinned version: GOTOOLCHAIN makes any installed Go fetch that exact
+/// toolchain, so every host builds the same binaries.
+fn goEnv(run: *std.Build.Step.Run, version: []const u8) void {
+    run.setEnvironmentVariable("GOOS", "plan9");
+    run.setEnvironmentVariable("GOARCH", "amd64");
+    run.setEnvironmentVariable("CGO_ENABLED", "0");
+    run.setEnvironmentVariable("GOTOOLCHAIN", run.step.owner.fmt("go{s}", .{version}));
+}
+
+/// `go build` of every program in tests/fixtures/go into zig-out/fixtures/go.
+/// Go's own cache decides what to rebuild, so the step always runs.
+fn addGoFixtures(b: *std.Build, go: []const u8, version: []const u8) GoFixtures {
+    const dir = b.getInstallPath(.prefix, "fixtures/go");
+    const run = b.addSystemCommand(&.{ go, "-C", "tests/fixtures/go", "build", "-trimpath", "-o", b.fmt("{s}{s}", .{ dir, std.fs.path.sep_str }), "./..." });
+    run.setCwd(b.path("."));
+    goEnv(run, version);
+    run.has_side_effects = true;
+    return .{ .dir = dir, .step = &run.step };
 }
 
 /// tests/integration.zig as a test binary. It links libc for the pty in
@@ -417,7 +446,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "fscheck.c", "netcheck.c", "tsleep.c", "sema.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -601,7 +630,28 @@ pub fn build(b: *std.Build) void {
     // Cases tagged with a proposal that isn't implemented skip unless
     // -Dpending is given.
     const run_pending = b.option(bool, "pending", "Also run integration cases of proposals that aren't implemented yet") orelse false;
-    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch);
+    // The Go fixtures run on the emulator, so they're built only with it.
+    const go_version = pin(pins, "GO_VERSION");
+    const go_bin = b.findProgram(&.{"go"}, &.{}) catch null;
+    const go_fixtures: ?GoFixtures = if (go_bin) |g| addGoFixtures(b, g, go_version) else null;
+    const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
+    if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
+    const go_cases: ?GoFixtures = if (emu == .unicorn) go_fixtures else null;
+    // Go's own tests for time, syscall, os and runtime on the emulator, by
+    // hand or on a schedule; nothing depends on it.
+    const go_stdtest = b.step("go-stdtest", "Run Go's time, syscall, os and runtime tests on the emulator (needs -Demu=unicorn and go)");
+    if (emu != .unicorn) {
+        go_stdtest.dependOn(&b.addFail("go-stdtest: needs -Demu=unicorn").step);
+    } else {
+        const run_stdtest = b.addSystemCommand(&.{ "bash", "scripts/go-stdtest.sh", h9_bin, b.getInstallPath(.prefix, "go-stdtest") });
+        run_stdtest.setCwd(b.path("."));
+        if (b.args) |args| run_stdtest.addArgs(args);
+        run_stdtest.has_side_effects = true;
+        run_stdtest.stdio = .inherit;
+        run_stdtest.step.dependOn(signed_step);
+        go_stdtest.dependOn(&run_stdtest.step);
+    }
+    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
@@ -615,7 +665,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch);
+            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases);
             run_cases.step.dependOn(signed_step);
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);

@@ -10,6 +10,7 @@
 #include 	"screen.h"
 
 #include	<authsrv.h>
+#include	"consx.h"	/* h9: devcons hooks */
 
 #undef write
 #undef read
@@ -353,6 +354,8 @@ enum{
 	Qhostowner,
 	Qnull,
 	Qosversion,
+	Qpid,		/* h9 */
+	Qppid,		/* h9 */
 	Qrandom,
 	Qreboot,
 	Qshowfile,
@@ -380,6 +383,8 @@ static Dirtab consdir[]={
 	"kprint",	{Qkprint, 0, QTEXCL},	0,	DMEXCL|0440,
 	"null",		{Qnull},	0,		0666,
 	"osversion",	{Qosversion},	0,		0444,
+	"pid",		{Qpid},		NUMSIZE,	0444,	/* h9 */
+	"ppid",		{Qppid},	NUMSIZE,	0444,	/* h9 */
 	"random",	{Qrandom},	0,		0444,
 	"reboot",	{Qreboot},	0,		0664,
 	"showfile",	{Qshowfile},	0,	0220,
@@ -643,7 +648,13 @@ consread(Chan *c, void *buf, long n, vlong off)
 		return readstr(offset, buf, n, c->aux);
 
 	case Qsysstat:
-		return 0;
+		return h9_cons_sysstat((ulong)offset, buf, n);	/* h9 */
+
+	case Qpid:
+		return h9_cons_pid((ulong)offset, buf, n);	/* h9 */
+
+	case Qppid:
+		return h9_cons_ppid((ulong)offset, buf, n);	/* h9 */
 
 	case Qsysname:
 		if(sysname == nil)
@@ -862,18 +873,7 @@ char *Ebadtimectl = "bad time control";
 static int
 readtime(ulong off, char *buf, int n)
 {
-	vlong nsec;
-	ulong sec;
-	char str[7*NUMSIZE];
-
-	sec = seconds();
-	nsec = (vlong)sec*1000000000LL;
-	snprint(str, sizeof(str), "%*.0lud %*.0llud %*.0llud %*.0llud ",
-		NUMSIZE-1, sec,
-		VLNUMSIZE-1, nsec,
-		VLNUMSIZE-1, ticks(),
-		VLNUMSIZE-1, fasthz);
-	return readstr(off, buf, n, str);
+	return h9_cons_time(off, buf, n);	/* h9: nanosecond clock */
 }
 
 /*
@@ -895,25 +895,7 @@ writetime(char *buf, int n)
 static int
 readbintime(char *buf, int n)
 {
-	int i;
-	vlong nsec;
-	uchar *b = (uchar*)buf;
-
-	i = 0;
-	nsec = (ulong)seconds()*1000000000LL;
-	if(n >= 3*sizeof(uvlong)){
-		vlong2le(b+2*sizeof(uvlong), fasthz);
-		i += sizeof(uvlong);
-	}
-	if(n >= 2*sizeof(uvlong)){
-		vlong2le(b+sizeof(uvlong), ticks());
-		i += sizeof(uvlong);
-	}
-	if(n >= 8){
-		vlong2le(b, nsec);
-		i += sizeof(vlong);
-	}
-	return i;
+	return h9_cons_bintime(buf, n);	/* h9: nanosecond clock, four words */
 }
 
 /*

@@ -207,9 +207,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     switch (status) {
         .exited => |msg| {
-            if (msg.len == 0) return 0;
-            std.debug.print("{s}\n", .{msg});
-            return 1;
+            const s = cli.exitStatus(msg);
+            if (s.print) std.debug.print("{s}\n", .{msg});
+            return s.code;
         },
         .killed => |msg| {
             std.debug.print("h9: {s}: {s}\n", .{ prog_arg, msg });

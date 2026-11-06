@@ -237,3 +237,14 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 ## Open issues
 
 - **An amd64 root tree.** A Go program that execs 9front commands needs `/amd64/bin`. `scripts/mkroot.py` builds an arm64 tree only, so on amd64 those execs fail with "file does not exist". This should be its own proposal. The likely approach is a post-step in `mkroot.py` that runs `objtype=amd64 mk install` inside h9 on the arm64 root, which [self-host](0010-self-host.md) shows working, rather than unpacking a second 9front image. That gives one root tree with both architectures, and it answers [i386](0009-i386.md)'s question about getting 386 binaries the same way. With it, Go fixtures can exec 9front commands, and `go-stdtest` can run more of its tests.
+## Updates
+
+**Nov 6, 2026.** Notes from the implementation:
+
+- **The emulator serializes guest code.** Unicorn translates code for a single-threaded context, so guest atomics aren't atomic across engines, and Go's runtime crashed ("unlock of unlocked lock") as soon as two Ms ran at once. Each emu backend now runs guest code on one engine at a time, passing the turn at exits; kernel calls still run in parallel. Preempting on a timer was tried and dropped, because an engine stopped from another thread can resume at an earlier block and run instructions twice. See DESIGN.md, "Emulator backend".
+- **Memory.** Go reserves several hundred MB of `brk` at start. The emulator no longer zeroes new pages by hand, and rfork's copy skips zero pages, which took a Go hello world from about 3.5 s to 0.3 s. rfork still copies eagerly and the pages count against `--memory`, so the `os/exec` case runs with `--memory 4G`; copy-on-write rfork would remove the need.
+- **`_NSEC` on 386** stores the time through its argument and returns 0, as 9front's `sys_nsec` does on 32-bit machines, instead of using only the return register.
+- **`/dev/time`** keeps drawterm's four fields, as Compatibility says; 9front's current devcons prints a fifth, the monotonic time.
+- **The Go cases don't need the root tree.** Each runs with a scratch root holding only the namespace's mount points, and the fixtures at `/mnt/term/cwd`, so they run wherever Go and the emulator are. The two rc cases still need the tree.
+- **The `spin` fixture yields** with `runtime.Gosched` between rounds: Go doesn't preempt goroutines on Plan 9, so a loop with no calls would hold its P and starve `main` there too.
+- **`go-stdtest` found** that the `mount` syscall isn't served (it kills `syscall`'s `TestPlan9Syserr`) and that the runtime's `TestPageAllocGrow` reserves more than `--memory` allows. Both are in the skip list; other failures are counted, not skipped.
