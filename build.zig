@@ -190,7 +190,10 @@ fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .target = target,
             .optimize = optimize,
             .link_libc = target.result.os.tag != .windows,
-            .imports = &.{.{ .name = "design", .module = designModule(b) }},
+            .imports = &.{
+                .{ .name = "design", .module = designModule(b) },
+                .{ .name = "ws", .module = b.createModule(.{ .root_source_file = b.path("src/ws.zig") }) },
+            },
         }),
         .filters = filters,
     });
@@ -487,7 +490,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -703,6 +706,21 @@ pub fn build(b: *std.Build) void {
     const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases, guest_test);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
+
+    // The WebSocket relay the websocket-9p cases use, as a program for the
+    // demo: zig build wsrelay -- LISTEN_PORT TARGET_PORT.
+    const wsrelay = b.addExecutable(.{
+        .name = "wsrelay",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/wsrelay.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "ws", .module = b.createModule(.{ .root_source_file = b.path("src/ws.zig") }) }},
+        }),
+    });
+    const run_wsrelay = b.addRunArtifact(wsrelay);
+    if (b.args) |args| run_wsrelay.addArgs(args);
+    b.step("wsrelay", "Relay WebSockets to a TCP 9P server: zig build wsrelay -- LISTEN_PORT TARGET_PORT").dependOn(&run_wsrelay.step);
 
     // One proposal's demos and integration cases (design/), whatever its
     // status, by id or slug.

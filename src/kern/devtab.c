@@ -29,6 +29,7 @@ extern Dev procdevtab;
 extern Dev overlaydevtab;
 extern Dev srvdevtab;
 extern Dev htoolsdevtab;
+extern Dev hstreamdevtab;
 
 Dev *devtab[] = {
 	&rootdevtab,
@@ -52,6 +53,7 @@ Dev *devtab[] = {
 	&overlaydevtab,
 	&srvdevtab,
 	&htoolsdevtab,
+	&hstreamdevtab,
 	0
 };
 

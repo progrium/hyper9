@@ -220,7 +220,7 @@ cross-compiles the other targets.
 zig-out/bin/h9 [h9-flags] [--] program [args...]
 zig-out/bin/h9 [h9-flags] --rc 'command' [args...]
 zig-out/bin/h9 --version                  # version, pinned 9front and drawterm, backends built in
-zig-out/bin/h9 [--backend B] [--root DIR|DIAL|SOCKET] --check
+zig-out/bin/h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] --check
 zig-out/bin/h9 --help                     # or -h alone
 
 zig-out/bin/h9 /bin/cat /lib/namespace    # a baseline demo
@@ -276,7 +276,41 @@ Writes to a 9P root go to its server, which decides what's writable, so
 exit 125. Unix socket roots need a POSIX host. The connection is plain 9P,
 so keep a TCP root on a trusted network.
 
-Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET`, `--root-spec NAME`, `--root-user NAME`, `--cwd DIR`, `--env
+A 9P server behind a WebSocket works too
+([websocket-9p](design/0021-websocket-9p.md)): `--root ws://host/path` or
+`wss://host/path`. h9 makes the connection on the host (TCP, TLS for `wss`,
+the handshake offering the `9p` subprotocol), then mounts it as it mounts any
+9P root. `--root-header 'Name: value'` (repeatable) adds a handshake header,
+such as `Authorization: Bearer …`, and `--root-header @FILE` reads one header
+per line from a file, so a token stays out of `ps`. `wss` trusts the host's CA
+bundle; `--root-ca FILE` trusts a PEM file instead. `HTTPS_PROXY`,
+`HTTP_PROXY` and `NO_PROXY` are honored with `CONNECT`, with credentials from
+the proxy URL. After 30 seconds without a frame h9 pings the server, and a
+server silent for 30 more is a hangup. A namespace file can mount a URL too:
+`mount -c 'wss://fs.example/9p' /n/fs`. `--print` shows the URL with its query
+elided and header values as `…`. A demo, with the 9P server above and the
+relay from the tests in front of it:
+
+```sh
+zig build wsrelay -- 8080 5640 &
+h9 --root ws://localhost:8080/9p ls /
+```
+
+The guest can open WebSockets as well: `/net/ws` is laid out like
+`/net/tcp`, and follows `--net` and `--net-allow` as a TCP dial to the URL's
+host and port would. Mounting a 9P server from rc:
+
+```rc
+{ n=`{read}
+  echo connect wss://fs.example/9p 9p >/net/ws/$n/ctl
+  mount -c /net/ws/$n/data /n/fs } <>/net/ws/clone
+```
+
+A conversation's `data` file carries binary messages as a byte stream, and its
+`text` file carries text messages one per read and write, for any WebSocket
+service. Guest connections don't use the host's proxies.
+
+Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,

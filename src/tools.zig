@@ -53,6 +53,10 @@ pub const CheckOptions = struct {
     /// The attach name and uname for a 9P root.
     root_spec: []const u8 = "",
     root_user: ?[]const u8 = null,
+    /// A WebSocket root's headers, `--root-ca` and proxies.
+    root_headers: []const []const u8 = &.{},
+    root_ca: ?[]const u8 = null,
+    proxy: h9.Machine.Proxy = .{},
 };
 
 /// Probes the backends (creating a VM and running a tiny program on each,
@@ -102,7 +106,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
     try w.print("root {s}: ", .{switch (root) {
         .dir => |d| d,
         // A 9P root as given, which is how its errors name it.
-        .tcp, .unix => o.root_arg orelse "",
+        .tcp, .unix, .ws => o.root_arg orelse "",
     }});
     if (failed) {
         try w.writeAll("not checked, no usable backend\n");
@@ -198,6 +202,9 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
         .root = o.root,
         .root_spec = o.root_spec,
         .root_user = o.root_user,
+        .root_headers = o.root_headers,
+        .root_ca = o.root_ca,
+        .proxy = o.proxy,
         .policy = .{ .memory = o.memory, .timeout_ns = 10 * std.time.ns_per_s },
         .stdio = .{ .out = &out.writer, .err = &err.writer },
     }) catch |e| return .{ .err = e };

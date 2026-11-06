@@ -201,6 +201,13 @@ const c_stub = struct {
         return "none";
     }
     fn h9_kern_setuser(_: [*:0]const u8) void {}
+    fn h9_hstream_wake(_: c_ulong) void {}
+    fn h9_hstream_fd(_: c_ulong) c_int {
+        return -1;
+    }
+    fn h9_hstream_wait(_: c_ulong) c_int {
+        return -1;
+    }
 };
 
 const c_real = struct {
@@ -275,6 +282,9 @@ const c_real = struct {
     extern fn h9_unixdial(path: [*:0]const u8) c_int;
     extern fn h9_kern_upuser() [*:0]const u8;
     extern fn h9_kern_setuser(name: [*:0]const u8) void;
+    extern fn h9_hstream_wake(id: c_ulong) void;
+    extern fn h9_hstream_fd(id: c_ulong) c_int;
+    extern fn h9_hstream_wait(id: c_ulong) c_int;
 };
 
 const BootState = enum(u8) { idle, booting, up, failed };
@@ -784,6 +794,35 @@ pub fn unixDial(path: [*:0]const u8) Error!u31 {
     return try check(c.h9_unixdial(path));
 }
 
+/// Wakes guest reads and connects waiting on host stream `id`
+/// (src/kern/devhstream.c). Called from the stream's thread, which isn't
+/// a kernel process, as `wakeConsole` is.
+pub fn hstreamWake(id: u32) void {
+    c.h9_hstream_wake(id);
+}
+
+/// Sleeps in the kernel until host stream `id` has connected or failed;
+/// a note interrupts it.
+pub fn hstreamWait(id: u32) Error!void {
+    _ = try check(c.h9_hstream_wait(id));
+}
+
+/// Makes a channel for host-made stream `id` and returns an fd on it.
+/// The channel holds the stream; no path names it.
+pub fn hstreamFd(id: u32) Error!u31 {
+    return try check(c.h9_hstream_fd(id));
+}
+
+/// The calling thread's plan, for checks made in Zig leaves.
+pub fn currentPlan() ?*const policy.Plan {
+    return fs_plan;
+}
+
+/// The calling thread's machine's pages, or null for host pages.
+pub fn currentPages() ?*const Pages {
+    return fs_pages;
+}
+
 /// The calling process's user, which devmnt sends as an attach's uname.
 pub fn procUser() [:0]const u8 {
     return std.mem.span(c.h9_kern_upuser());
@@ -890,6 +929,8 @@ fn console(id: c_ulong) ?*Console {
 // Leaves called from devhcons.c. They never raise kernel errors.
 
 comptime {
+    // devhstream.c's leaves.
+    _ = @import("hstream.zig");
     if (available) {
         @export(&h9_cons_read, .{ .name = "h9_cons_read" });
         @export(&h9_cons_ready, .{ .name = "h9_cons_ready" });

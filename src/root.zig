@@ -16,6 +16,8 @@ pub const guestmem = @import("guestmem.zig");
 pub const syscall = @import("syscall.zig");
 pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
+pub const ws = @import("ws.zig");
+pub const hstream = @import("hstream.zig");
 
 /// What this h9 was built from, for `--version`.
 pub const build_info = struct {
@@ -39,5 +41,7 @@ test {
     _ = policy;
     _ = newns;
     _ = consin;
+    _ = ws;
+    _ = hstream;
     _ = @import("cpupool.zig");
 }
