@@ -603,6 +603,7 @@ namespace:
   bind '#I' /net
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
+  bind -a '#H/bin' /bin  # h9's commands
   bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
   bind -c '#U/Users/me/tour' /mnt/term/cwd               rw
 access:
@@ -615,7 +616,7 @@ caveats:
 The namespace section is the list of `bind` commands that built the file
 tree you just explored. `#U` is the host's file system, `#c` the console, `#e`
 the environment, `#p` the processes, `#s` the service registry, `#I` the
-network, and `#O` an overlay in memory that keeps `/tmp` private. Each `#`
+network, `#H` h9's own commands, and `#O` an overlay in memory that keeps `/tmp` private. Each `#`
 name is a kernel device, and the `devmask` line says which ones a program
 can't attach again, so it can't reach more of your host than this list
 allows. That's how h9's sandbox works, and chapter 22 explains the rest.
@@ -749,6 +750,7 @@ plain `h9 rc` in `~/tour`, line by line:
   bind '#I' /net
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
+  bind -a '#H/bin' /bin  # h9's commands
   bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
   bind -c '#U/Users/me/tour' /mnt/term/cwd               rw
 ```
@@ -764,6 +766,7 @@ plain `h9 rc` in `~/tour`, line by line:
 | `bind -c '#s' /srv` | The machine's own service registry |
 | `bind '#I' /net` | The network; missing under `--net=disable` |
 | `bind '/arm64/bin' /bin`, `bind -a '/rc/bin' /bin` | The `/bin` union |
+| `bind -a '#H/bin' /bin` | h9's own commands, last in the union, so the root's win; left out under `--no-guest-tools` |
 | `bind -c '#O' /tmp` | A private, writable `/tmp` in memory over the tree's empty `/tmp` |
 | `bind -c '#U/...' /mnt/term/cwd rw` | Your host directory, read-write; it's also the program's working directory |
 
@@ -832,6 +835,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
 | `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 21) |
 | `#C` | cmd | | Runs host commands. Masked unless `--host-cmd`. |
+| `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
 | `#i`, `#m`, `#b`, `#A` | draw, mouse, kbd, audio | | Present, but there's no window or sound to drive yet (*Not yet available ([gfx](design/0015-gfx.md))*) |
@@ -842,7 +846,7 @@ directory or named `#g` segments.
 
 **The device mask.** After building the namespace, h9 tells the kernel that
 this machine may no longer attach some devices by name: `#U` and `#C`
-always, and `#I` when the network is off. That's the `devmask:` line of
+always, `#I` when the network is off, and `#H` under `--no-guest-tools`. That's the `devmask:` line of
 `--print`. Existing binds keep working, so `/mnt/term/cwd` still reaches
 your host directory, but a program can't attach `#U` again to reach the rest
 of your disk:
@@ -1651,6 +1655,7 @@ Files and sandbox (chapters 21 and 22):
 | `--net-allow PATTERN` | Allow connections only to matching dial strings; repeatable (chapter 15) |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
 | `--host-cmd` | Leave `#C`, which runs host commands, unmasked |
+| `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
 | `--strict` | Refuse, with exit 2, anything this build can't enforce |
 | `--print` | Print the compiled sandbox plan and exit without running |
 
@@ -1861,6 +1866,7 @@ namespace:
   bind -c '#s' /srv
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
+  bind -a '#H/bin' /bin  # h9's commands
   bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
   bind '#U/Users/me/src/proj' /mnt/term/cwd              ro
   bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out   rw

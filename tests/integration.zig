@@ -2523,11 +2523,13 @@ test "a root command of the same name wins over #H's [32]" {
 test "#H refuses writes [32]" {
     const e = try env(@src());
     try needGuestTest();
+    // rc gives up on a whole -c script when a redirection fails, so the
+    // writes run in subshells.
     const r = try run(e, &.{
         "--rc",
         \\f='#H/bin/h9-guest-test'
-        \\echo x >$f || echo write
-        \\echo x >>$f || echo append
+        \\@{echo x >$f} || echo write
+        \\@{echo x >>$f} || echo append
         \\touch '#H/bin/new' || echo create
         \\rm $f || echo remove
         \\chmod 777 $f || echo wstat
