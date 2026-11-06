@@ -112,15 +112,25 @@ pub const Bind = struct {
 /// A 9P server as the root (design/0013-9p-roots.md): the machine
 /// connects to it, posts the connection as `#s/root` and mounts that at /.
 pub const NinePRoot = struct {
-    kind: enum { tcp, unix },
-    /// The dial string, `tcp!host!port` or `unix!path`, for the plan and
-    /// errors.
+    kind: enum { tcp, unix, ws },
+    /// The dial string, `tcp!host!port` or `unix!path`, or a `ws://` or
+    /// `wss://` URL (design/0021-websocket-9p.md), for the plan and errors.
     addr: []const u8,
     /// The attach name.
     spec: []const u8 = "",
     /// The attach uname; null means the machine's user.
     user: ?[]const u8 = null,
+    /// A WebSocket root's handshake headers, `Name: value`; the plan
+    /// shows their names only.
+    headers: []const []const u8 = &.{},
+    /// Its `--root-ca` file.
+    ca: ?[]const u8 = null,
+    /// The proxy it goes through, if any.
+    proxy: ?[]const u8 = null,
 };
+
+/// The host-stream device, `#ℏ`, whose tree is the guest's /net/ws.
+pub const hstream_dev = "ℏ";
 
 /// Where a 9P root's connection is posted, and the board name it's under.
 pub const root_srv = "#s/root";
@@ -235,7 +245,9 @@ pub const Plan = struct {
         if (p.cpus) |n| try w.print(" cpus={d}", .{n});
         try w.writeAll("\n");
         try w.writeAll("devmask: ");
-        for (p.devmask) |d| try w.print(" #{c}", .{d});
+        // Device names are runes: #ℏ is three bytes.
+        var dv = (std.unicode.Utf8View.init(p.devmask) catch unreachable).iterator();
+        while (dv.nextCodepointSlice()) |d| try w.print(" #{s}", .{d});
         try w.writeAll("\n");
         if (p.net_allow.len > 0) {
             try w.writeAll("net-allow:\n");
@@ -282,6 +294,46 @@ pub const Plan = struct {
 
 pub const CompileError = error{ OutOfMemory, Conflict };
 
+/// A 9P root's comment in the plan: the dial string or URL, with a URL's
+/// query elided, header names, the proxy and `--root-ca`, and the user.
+fn rootNote(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const w = &out.writer;
+    if (r.kind == .ws) {
+        if (std.mem.indexOfScalar(u8, r.addr, '?')) |q| {
+            w.print("{s}…", .{r.addr[0 .. q + 1]}) catch return error.OutOfMemory;
+        } else w.writeAll(r.addr) catch return error.OutOfMemory;
+        if (r.headers.len > 0) {
+            w.writeAll("  (") catch return error.OutOfMemory;
+            for (r.headers, 0..) |h, i| {
+                const colon = std.mem.indexOfScalar(u8, h, ':') orelse h.len;
+                w.print("{s}{s}: …", .{ if (i > 0) ", " else "", std.mem.trim(u8, h[0..colon], " \t") }) catch return error.OutOfMemory;
+            }
+            w.writeAll(")") catch return error.OutOfMemory;
+        }
+        if (r.proxy) |p| w.print("  via {f}", .{elideUserinfo(p)}) catch return error.OutOfMemory;
+        if (r.ca) |ca| w.print("  --root-ca {s}", .{ca}) catch return error.OutOfMemory;
+    } else w.writeAll(r.addr) catch return error.OutOfMemory;
+    if (r.user) |u| w.print(" as {s}", .{u}) catch return error.OutOfMemory;
+    return out.written();
+}
+
+/// A proxy URL with its userinfo replaced by `…`.
+fn elideUserinfo(url: []const u8) ElidedUserinfo {
+    return .{ .url = url };
+}
+
+const ElidedUserinfo = struct {
+    url: []const u8,
+    pub fn format(e: ElidedUserinfo, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const scheme_end = if (std.mem.indexOf(u8, e.url, "://")) |i| i + 3 else 0;
+        const rest = e.url[scheme_end..];
+        const host_end = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+        const at = std.mem.lastIndexOfScalar(u8, rest[0..host_end], '@') orelse return w.writeAll(e.url);
+        try w.print("{s}…@{s}", .{ e.url[0..scheme_end], rest[at + 1 ..] });
+    }
+};
+
 pub const Inputs = struct {
     /// Host root tree, or null for a 9P root or a machine with devices
     /// only.
@@ -317,7 +369,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // h9 can't make devmnt read-only, so `none` can't be kept for a
     // server it doesn't control.
     if (write == .none and in.root_9p != null) {
-        err_msg.* = "--write=none can't be enforced on a 9P root";
+        err_msg.* = if (in.root_9p.?.kind == .ws) "--write=none can't be enforced on a WebSocket root" else "--write=none can't be enforced on a 9P root";
         return error.Conflict;
     }
     if (write_req == .none and pol.writable.len > 0) {
@@ -388,7 +440,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .mount = true,
         .spec = r.spec,
         .access = .@"9p",
-        .note = if (r.user) |u| try std.fmt.allocPrint(arena, "{s} as {s}", .{ r.addr, u }) else r.addr,
+        .note = try rootNote(arena, r),
     });
     const has_root = in.root != null or in.root_9p != null;
 
@@ -400,7 +452,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // The machine's own service registry (design/0008-devsrv.md): it shows
     // nothing outside the machine, so it's in both profiles.
     try binds.append(arena, .{ .from = "#s", .to = "/srv", .create = true, .optional = true });
-    if (net != .disable) try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
+    if (net != .disable) {
+        try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
+        try binds.append(arena, .{ .from = "#" ++ hstream_dev, .to = "/net", .flag = .after, .optional = true, .note = "WebSockets, under --net" });
+    }
     if (has_root) {
         try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
@@ -469,7 +524,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     var devmask: std.ArrayList(u8) = .empty;
     if (!pol.host_cmd) try devmask.append(arena, 'C');
-    if (net == .disable) try devmask.append(arena, 'I');
+    if (net == .disable) {
+        try devmask.append(arena, 'I');
+        try devmask.appendSlice(arena, hstream_dev);
+    }
     if (!in.guest_tools) try devmask.append(arena, 'H');
     if (!pol.host_fs) try devmask.append(arena, 'U');
 
@@ -505,7 +563,12 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
     if (in.root_9p) |r| {
         try caveats.append(arena, "writes to the 9P root go to its server, which decides what can be written");
-        if (r.kind == .tcp) try caveats.append(arena, "the 9P root's connection isn't encrypted");
+        const plain = switch (r.kind) {
+            .tcp => true,
+            .unix => false,
+            .ws => !std.mem.startsWith(u8, r.addr, "wss://"),
+        };
+        if (plain) try caveats.append(arena, "the 9P root's connection isn't encrypted");
     }
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
     if (net != .disable) {
@@ -982,7 +1045,7 @@ test "compile: default and tight profiles" {
 
     const tt = try compile(arena.allocator(), in, .{ .profile = .tight }, &msg);
     try t.expectEqual(Verdict.read_only, tt.check("/w/f", .create));
-    try t.expectEqualStrings("CIU", tt.devmask);
+    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U", tt.devmask);
     try t.expect(tt.enforces.contains(.@"net.disable"));
     try t.expect(tt.enforces.contains(.@"proc.timeout"));
 

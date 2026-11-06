@@ -20,6 +20,8 @@ const newns = @import("newns.zig");
 const cpupool = @import("cpupool.zig");
 const gm = @import("guestmem.zig");
 const consin = @import("consin.zig");
+const hstream = @import("hstream.zig");
+const ws = @import("ws.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -63,7 +65,14 @@ pub const Machine = struct {
         tcp: []const u8,
         /// A unix-domain socket's host path. Not supported on Windows.
         unix: []const u8,
+        /// A 9P server over a WebSocket: a ws:// or wss:// URL
+        /// (design/0021-websocket-9p.md).
+        ws: []const u8,
     };
+
+    /// Proxies for the connections the machine makes itself: a WebSocket
+    /// root and namespace-file mounts. Guest connections always go direct.
+    pub const Proxy = ws.ProxyConfig;
 
     pub const Options = struct {
         backend: vmm.BackendKind = .auto,
@@ -77,6 +86,14 @@ pub const Machine = struct {
         /// The uname for h9's attaches to a 9P root; null means the
         /// machine's user.
         root_user: ?[]const u8 = null,
+        /// Extra HTTP headers for a `ws` root's handshake, as `Name: value`.
+        root_headers: []const []const u8 = &.{},
+        /// PEM certificates a `wss` root must chain to, instead of the
+        /// host's bundle: a host path.
+        root_ca: ?[]const u8 = null,
+        /// Proxies for host-made connections; null goes direct. The CLI
+        /// fills it from HTTPS_PROXY, HTTP_PROXY and NO_PROXY.
+        proxy: ?Proxy = null,
         /// Host directory bound at /mnt/term/cwd and made the guest's cwd.
         cwd: ?[]const u8 = null,
         /// Guest environment variables, beyond the defaults.
@@ -193,6 +210,15 @@ pub const Machine = struct {
                 .addr = try std.fmt.allocPrint(arena, "unix!{s}", .{path}),
                 .spec = opts.root_spec,
                 .user = opts.root_user,
+            },
+            .ws => |u| in.root_9p = .{
+                .kind = .ws,
+                .addr = u,
+                .spec = opts.root_spec,
+                .user = opts.root_user,
+                .headers = opts.root_headers,
+                .ca = opts.root_ca,
+                .proxy = if (opts.proxy) |px| if (ws.Url.parse(u)) |url| px.pick(url) else |_| null else null,
             },
         };
         return policy.compile(arena, in, opts.policy, err_msg);
@@ -1213,6 +1239,11 @@ pub const Machine = struct {
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         const fd = switch (r) {
             .dir => unreachable,
+            .ws => |u| return m.postStream(try m.connectStream(u, .{
+                .headers = m.opts.root_headers,
+                .ca_file = m.opts.root_ca,
+                .proxy = m.opts.proxy orelse .{},
+            }, "root")),
             .tcp => |a| dialTcp(a),
             .unix => |path| kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("root {s}: name too long", .{addr})),
         } catch return m.fail("root {s}: {s}", .{ addr, kern.errstr() });
@@ -1221,6 +1252,38 @@ pub const Machine = struct {
         defer kern.close(srv) catch {};
         var num: [16]u8 = undefined;
         _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {s}: post {s}: {s}", .{ addr, policy.root_srv, kern.errstr() });
+    }
+
+    /// Connects a host-made WebSocket stream to `url` (`what` names it in
+    /// errors: "root", or a namespace file's mount) and returns an fd on
+    /// its channel. The connect waits in the kernel, so a note or the
+    /// timeout interrupts it.
+    fn connectStream(m: *Machine, url: []const u8, o: hstream.HostOptions, comptime what: []const u8) RunError!u31 {
+        const shown = ws.Url.elide(url);
+        hstream.setIo(m.io);
+        const mc = kern.mach() orelse return m.fail(what ++ " {f}: not a machine process", .{shown});
+        const owner = @intFromPtr(mc);
+        mc.put();
+        const id = hstream.openHost(owner, url, o) catch |e| return m.fail(what ++ " {f}: {s}", .{ shown, switch (e) {
+            error.BadUrl => "bad URL",
+            error.TooManyStreams => "too many streams",
+            error.OutOfMemory => "out of memory",
+            error.SystemResources => "can't start a thread",
+        } });
+        defer hstream.release(id);
+        kern.hstreamWait(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
+        return kern.hstreamFd(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
+    }
+
+    /// Posts a WebSocket root's channel as `#s/root`, as `connectRoot`
+    /// posts a dialed one.
+    fn postStream(m: *Machine, fd: u31) RunError!void {
+        const addr = m.plan.root_9p.?.addr;
+        defer kern.close(fd) catch {};
+        const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
+        defer kern.close(srv) catch {};
+        var num: [16]u8 = undefined;
+        _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
     }
 
     /// Dials `tcp!host!port` through `#I`, as 9front's dial does through
@@ -1264,7 +1327,8 @@ pub const Machine = struct {
         const r = m.plan.root_9p.?;
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
-        const fd = kern.open(try std.fmt.bufPrintZ(&buf, "{s}", .{b.from}), kern.ORDWR) catch return m.fail("root {s}: {s}", .{ r.addr, kern.errstr() });
+        const shown = ws.Url.elide(r.addr);
+        const fd = kern.open(try std.fmt.bufPrintZ(&buf, "{s}", .{b.from}), kern.ORDWR) catch return m.fail("root {f}: {s}", .{ shown, kern.errstr() });
         defer kern.close(fd) catch {};
         var saved: [kern.ERRMAX]u8 = undefined;
         const own = kern.procUser();
@@ -1273,7 +1337,7 @@ pub const Machine = struct {
         if (r.user) |u| kern.setProcUser(try std.fmt.bufPrintZ(&buf2, "{s}", .{u}));
         defer if (r.user != null) kern.setProcUser(saved[0..own.len :0]);
         const spec = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.spec});
-        _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), kern.MREPL, spec) catch return m.fail("root {s}: {s}", .{ r.addr, kern.errstr() });
+        _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), kern.MREPL, spec) catch return m.fail("root {f}: {s}", .{ shown, kern.errstr() });
     }
 
     /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
@@ -1316,7 +1380,15 @@ pub const Machine = struct {
                 const to = try m.nsPath(arena, b.to, con_id);
                 overlay(to, to, mountFlag(b.flag)) catch {};
             } else kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
-            .mount => |mt| {
+            // A WebSocket URL is connected by h9, as a root is; unlike
+            // other failures, one that fails stops the run.
+            .mount => |mt| if (ws.Url.is(mt.file)) {
+                if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a WebSocket mount", .{ws.Url.elide(mt.file)});
+                const fd = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
+                defer kern.close(fd) catch {};
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch
+                    return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+            } else {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
                 defer kern.close(fd) catch {};
                 _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
