@@ -2,7 +2,7 @@
 id: 10
 slug: self-host
 title: Self-hosting
-status: draft
+status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: []

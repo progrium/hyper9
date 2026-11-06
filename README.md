@@ -22,10 +22,10 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [go-compat](design/0007-go-compat.md) | accepted | ready | Go compatibility |
 | [devsrv](design/0008-devsrv.md) | implemented |  | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | implemented |  | 386 binaries |
-| [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
+| [self-host](design/0010-self-host.md) | accepted | ready | Self-hosting |
 | [overlay](design/0011-overlay.md) | accepted | ready | Copy-on-write overlay as the root's default |
-| [browser-host](design/0012-browser-host.md) | draft |  | A browser host on wasm, with v86 |
-| [9p-roots](design/0013-9p-roots.md) | draft |  | 9P roots |
+| [browser-host](design/0012-browser-host.md) | accepted | needs go-compat | A browser host on wasm, with v86 |
+| [9p-roots](design/0013-9p-roots.md) | accepted | ready | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs 9p-roots | Disk-image roots |
 | [gfx](design/0015-gfx.md) | accepted | ready | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
@@ -39,8 +39,10 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
+| [host-srv](design/host-srv.md) | draft | needs 9p-roots | Posting host connections to /srv |
 | [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
+| [root-auth](design/root-auth.md) | draft | needs 9p-roots | Authenticated 9P roots |
 | [symlinks-in-root](design/symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 
 ```mermaid
@@ -58,10 +60,10 @@ flowchart LR
   p_go_compat["#35;7 go-compat<br/>accepted"]:::accepted
   p_devsrv["#35;8 devsrv<br/>implemented"]:::implemented
   p_i386["#35;9 i386<br/>implemented"]:::implemented
-  p_self_host["#35;10 self-host<br/>draft"]:::draft
+  p_self_host["#35;10 self-host<br/>accepted"]:::accepted
   p_overlay["#35;11 overlay<br/>accepted"]:::accepted
-  p_browser_host["#35;12 browser-host<br/>draft"]:::draft
-  p_9p_roots["#35;13 9p-roots<br/>draft"]:::draft
+  p_browser_host["#35;12 browser-host<br/>accepted"]:::accepted
+  p_9p_roots["#35;13 9p-roots<br/>accepted"]:::accepted
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
   p_gfx["#35;15 gfx<br/>accepted"]:::accepted
   p_kvm["#35;16 kvm<br/>draft"]:::draft
@@ -75,14 +77,18 @@ flowchart LR
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
+  p_host_srv["host-srv<br/>draft"]:::draft
   p_linux_net["linux-net<br/>draft"]:::draft
   p_linux_threads["linux-threads<br/>draft"]:::draft
+  p_root_auth["root-auth<br/>draft"]:::draft
   p_symlinks_in_root["symlinks-in-root<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
+  p_go_compat --> p_browser_host
   p_i386 --> p_browser_host
   p_semaphores --> p_9p_roots
+  p_devsrv --> p_9p_roots
   p_devsrv --> p_image_roots
   p_9p_roots --> p_image_roots
   p_devsrv --> p_gfx
@@ -96,8 +102,11 @@ flowchart LR
   p_9p_roots --> p_dotl
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
+  p_devsrv --> p_host_srv
+  p_9p_roots --> p_host_srv
   p_linux_personality --> p_linux_net
   p_linux_personality --> p_linux_threads
+  p_9p_roots --> p_root_auth
 ```
 
 <!-- design:end -->

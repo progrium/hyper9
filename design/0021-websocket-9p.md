@@ -96,6 +96,7 @@ pub const Root = union(enum) {
 };
 root: ?Root = null,
 root_spec: []const u8 = "",
+root_user: ?[]const u8 = null,
 /// Extra HTTP headers for a `ws` root's handshake, as `Name: value`.
 root_headers: []const []const u8 = &.{},
 ```
@@ -105,8 +106,8 @@ root_headers: []const []const u8 = &.{},
 As for a TCP root, in the machine's first Proc, before any other bind and before the device mask is set:
 
 1. **Connect.** `hstream.open(url, headers)` connects, does TLS for `wss`, and does the handshake, returning a stream id.
-2. **Mount** `#ℏ<id>` at `/` with `MREPL` and the spec from `--root-spec`. devmnt sends `Tversion` and `Tattach` over it, with the machine's user as `uname`.
-3. **Keep** the channel for the machine's life, as `<root>`, so `mount '<root>' …` in a namespace file attaches it again.
+2. **Post** `#ℏ<id>`'s channel to the machine's `/srv` board as `root`, as for a TCP root, so `mount '#s/root' …` in a namespace file attaches it again.
+3. **Mount** `#s/root` at `/` with `MREPL` and the spec from `--root-spec`. devmnt sends `Tversion` and `Tattach` over it, with `--root-user` or the machine's user as `uname`.
 
 Then the plan's binds run over it, as over any root.
 
@@ -190,7 +191,7 @@ The 16 MiB limits on messages and buffered bytes apply per conversation, and buf
 $ h9 --print --root 'wss://fs.example/9p?token=abc' --root-header @~/.fs-token ls
 ...
 namespace:
-  mount '<root>' /                                        9p  # wss://fs.example/9p?…  (Authorization: …)
+  mount '#s/root' /                                       9p  # wss://fs.example/9p?…  (Authorization: …)
   bind '#c' /dev
   ...
   bind -a '#I' /net
@@ -252,7 +253,7 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 **No reconnect.** devmnt has no way to re-establish fids on a new connection, so a reconnected stream would be a new server as far as every open file is concerned. A hangup fails operations, as it does on 9front and for 9p-roots.
 
-**Depending on 9p-roots, devsrv and net-policy.** The `Root` union, `--root-spec`, `<root>`, the plan's `mount` line and the write policy are 9p-roots'. This proposal adds a transport to them. Guest mounts need devsrv's `mount` and `fauth` syscalls, and guest connects need net-policy's modes and leaves. The web half also needs [browser-host](0012-browser-host.md), but the native half doesn't, so it's not in `depends`: the web backing is the last implementation step, and lands once browser-host is built.
+**Depending on 9p-roots, devsrv and net-policy.** The `Root` union, `--root-spec`, `--root-user`, the root's post to `#s/root`, the plan's `mount` line and the write policy are 9p-roots'. This proposal adds a transport to them. Guest mounts need devsrv's `mount` and `fauth` syscalls, and guest connects need net-policy's modes and leaves. The web half also needs [browser-host](0012-browser-host.md), but the native half doesn't, so it's not in `depends`: the web backing is the last implementation step, and lands once browser-host is built.
 
 ## Compatibility
 
@@ -273,7 +274,7 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 - **What the guest newly reaches, through host-made connections:** the files the server serves, at `/` or at the mount point. Not the server's network, the WebSocket itself, or any other stream: their channels aren't in `/net/ws` and no attach spec names them.
 - **What the guest newly reaches, through `/net/ws`:** any WebSocket endpoint the network policy allows, the same set of hosts and ports it could already reach with `/net/tcp` natively. A guest that can dial TCP could already speak WebSocket by hand, so natively this adds convenience, not reach. On the web host it's new reach: the guest had no network before, and with `--net=outbound` it can now open WebSockets to anywhere the page's browser rules allow. Embedders that don't want that pass `--net=disable`, and the tight profile does.
 - **Requests the host makes for the guest.** A guest `connect` makes h9 resolve a name, open TCP and, for `wss`, TLS, all with the host's resolver, network and certificate bundle. Names are checked before they're resolved, and addresses before they're connected to, so the guest can't use the host to reach what `--net-allow` refuses, or to send data in DNS queries for names it doesn't cover. Redirects aren't followed and proxies aren't used, so a server can't send h9 somewhere the check didn't see.
-- **What the server sees:** every file operation on the mount, the machine's user as `uname`, the attach spec, the URL and headers, and, on the web host, the page's `Origin` and its cookies for the server's origin. A run trusts a WebSocket root as it trusts any root: it runs the server's binaries, inside the same sandbox.
+- **What the server sees:** every file operation on the mount, `--root-user` or the machine's user as `uname`, the attach spec, the URL and headers, and, on the web host, the page's `Origin` and its cookies for the server's origin. A run trusts a WebSocket root as it trusts any root: it runs the server's binaries, inside the same sandbox.
 - **Transport.** `wss` connections are verified against the host's certificate bundle, or the browser's, with no way to turn verification off in this proposal. `ws` connections are plain, and the plan says so.
 - **Credentials.** Headers and URL queries can carry tokens. `--print` and `--trace` elide queries, userinfo and header values. `--root-header @FILE` keeps a token out of the process listing. A token in a namespace file's URL is as visible as the file.
 - **A hostile server** can send anything. Frames are bounded, the buffered stream is bounded, and devmnt rejects malformed 9P, so the worst it can do is fail the mount, or answer as slowly as it likes, which notes and `--timeout` cut short.
@@ -331,7 +332,7 @@ Demo: `h9 --root ws://localhost:8080/9p ls /` lists the served tree, with the se
 3. `ws` roots: `Root.ws`, `root_headers`, `--root` and `--root-header` in `src/cli.zig` and `src/main.zig`, the connect and mount in `src/machine.zig`, the errors, and the `ws://` cases.
 4. `wss`: TLS in `src/hstream.zig` with the system bundle, and the opt-in case.
 5. Namespace files: URL sources for `mount` in `src/newns.zig` and the replay.
-6. The plan: the `mount '<root>'` line for URLs, the elision, the caveats and the `--write=none` conflict in `src/policy.zig`.
+6. The plan: the `mount '#s/root'` line for URLs, the elision, the caveats and the `--write=none` conflict in `src/policy.zig`.
 7. `/net/ws`: devhstream's guest tree, `clone`, `ctl`, `data`, `remote` and `status`, per-machine conversations, the `bind -a '#ℏ' /net` and the mask under `--net=disable` in `src/policy.zig`, and net-policy's checks in `src/hstream.zig`. Then the guest cases, and the rc snippet in README.
 8. Once [browser-host](0012-browser-host.md) is built: the `h9_ws_*` imports in `h9-web.js`, `hstream.zig`'s web branch, `createMachine`'s URL root, `/net/ws` as the web host's network, and the web cases.
 9. README's `--root` notes, `--root-header` and `/net/ws`. DESIGN.md: the root filesystem paragraph, the kernel's "Added by us" table (devhstream), the boot sequence, the capability table's `net.*` rows, the CLI flag table and `Machine.Options`. Set `status: implemented`.
