@@ -2142,11 +2142,18 @@ const RootServer = struct {
 /// Runs `args` over the 9P root `root` and over the host tree, and checks
 /// that both succeed with the same output.
 fn expectSameAsHost(e: Env, root: []const u8, args: []const []const u8) !void {
+    return expectSameAsHostWith(e, root, &.{}, args);
+}
+
+/// expectSameAsHost, with `root_args` (flags that need the 9P root, such
+/// as --root-header) added to the run over the root only.
+fn expectSameAsHostWith(e: Env, root: []const u8, root_args: []const []const u8, args: []const []const u8) !void {
     const host = try run(e, args);
     defer host.deinit();
     var with_root: std.ArrayList([]const u8) = .empty;
     defer with_root.deinit(gpa);
     try with_root.appendSlice(gpa, &.{ "--root", root });
+    try with_root.appendSlice(gpa, root_args);
     try with_root.appendSlice(gpa, args);
     const r = try run(e, with_root.items);
     defer r.deinit();
@@ -2697,14 +2704,14 @@ test "--root-header is sent, and @FILE reads headers from a file [21]" {
     var w: WsRoot = undefined;
     try w.start(e, .{ .require_header = "Authorization: Bearer s3cret" });
     defer w.stop();
-    try expectSameAsHost(e, w.url(), &.{ "--root-header", "Authorization: Bearer s3cret", "/bin/ls", "/" });
+    try expectSameAsHostWith(e, w.url(), &.{ "--root-header", "Authorization: Bearer s3cret" }, &.{ "/bin/ls", "/" });
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "headers", .data = "Authorization: Bearer s3cret\n\nX-Other: two\n" });
     const file = try std.fmt.allocPrint(gpa, "@{s}/headers", .{s.path});
     defer gpa.free(file);
-    try expectSameAsHost(e, w.url(), &.{ "--root-header", file, "/bin/ls", "/" });
+    try expectSameAsHostWith(e, w.url(), &.{ "--root-header", file }, &.{ "/bin/ls", "/" });
     try std.testing.expectEqualStrings("two", w.relay.header("X-Other") orelse "");
     // Without it, the server refuses the handshake.
     const r = try run(e, &.{ "--root", w.url(), "/bin/echo" });
