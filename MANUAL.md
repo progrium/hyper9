@@ -2215,6 +2215,8 @@ They change faster than this manual, as proposals land.
 - [Embedding h9 in a Zig program](docs/embedding.md): a Zig program that
   runs 9front programs in machines of its own, several at once, with
   captured I/O, a sandbox policy and 9P roots.
+- [Recreating Docker](docs/containers.md): Docker-style images, layers,
+  volumes, ports and limits, from slim root trees to images served over 9P.
 
 ## Appendices
 
