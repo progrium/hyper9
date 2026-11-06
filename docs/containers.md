@@ -38,6 +38,7 @@ to be a few binds.
 14. [Compose: several machines](#14-compose-several-machines)
 15. [Running containers: stop, logs, restart, exec](#15-running-containers-stop-logs-restart-exec)
 16. [What's missing](#16-whats-missing)
+17. [Putting it together: h9box](#17-putting-it-together-h9box)
 
 ## 1. The model
 
@@ -730,3 +731,129 @@ where there is one:
 - **A daemon, an API, Windows and Linux hypervisors.** h9 is a command, not a
   service. On Linux and Windows it runs on the emulator until the
   [kvm](../design/0016-kvm.md) and [whp](../design/0017-whp.md) backends land.
+
+## 17. Putting it together: h9box
+
+Everything above fits in one shell script of about 200 lines,
+[`h9box`](containers/h9box), a docker-like CLI where h9 does all the work.
+Reading it is a good review of this guide, since each command is a few lines
+over a feature from an earlier section. Put it on your `PATH`, with `H9ROOT`
+set to the full root tree:
+
+```text
+h9box build NAME [DIR]              build DIR/Boxfile into the image NAME
+h9box run [OPTS] IMAGE [CMD...]     run a machine from an image
+h9box inspect [OPTS] IMAGE [CMD...] print the plan run would use
+h9box images | tag | rm | save | load | serve
+```
+
+**Images** are root trees in `~/.h9box/images` (or `$H9BOX/images`), as in
+[section 3](#3-images-are-root-trees). Each one has a `/box` directory with
+the config Docker keeps in JSON, as three plain files:
+
+| File | Holds | Used as |
+| --- | --- | --- |
+| `/box/ns` | `bind` and `cd` lines | `--ns /box/ns`: the layers and `WORKDIR` ([sections 5 and 6](#5-entrypoints-environment-and-workdir)) |
+| `/box/env` | `name=value` lines | One `--env` each |
+| `/box/cmd` | The command, one argument per line | The program and its arguments when `run` gets none |
+
+Because the config is inside the tree, it travels with the image: `save`,
+`tag` and `serve` don't need to know about it.
+
+**A Boxfile** is a Dockerfile with fewer instructions. Here's the greeter's,
+which replaces `build.sh` from [section 8](#8-building-images):
+
+```text
+# Boxfile: the greeter
+FROM scratch
+COPY --from=9front rc echo awk cat date aux/listen1
+COPY app /app
+BIND -b /app/bin /bin
+WORKDIR /app
+ENV greeting=hello
+ENV port=8080
+CMD serve
+RUN date > /app/built
+```
+
+```sh
+host$ cd greeter && rm app/ns
+host$ h9box build greeter
+RUN date > /app/built
+greeter
+host$ h9box run -p -e greeting=hi greeter &
+greeter: listening on 8080
+host$ curl -s localhost:8080
+hi from h9
+```
+
+(`app/ns` goes because the Boxfile's `BIND` and `WORKDIR` lines write
+`/box/ns` now.) The `build` function reads the Boxfile line by line:
+
+- `FROM scratch` makes the skeleton from [section 4](#4-from-scratch-slim-images)
+  (`/dev`, `/bin`, `/mnt/term/cwd` and the other mount points), `FROM 9front`
+  clones `$H9ROOT`, and `FROM NAME` clones another image, its `/box` included,
+  so the new image inherits its config as a Docker image does. The `clone`
+  function uses `cp -c` on macOS and `--reflink` on Linux, so a fat base is
+  nearly free ([section 3](#3-images-are-root-trees)).
+- `COPY --from=9front PROGRAM...` copies statically linked programs out of
+  the full tree, and `rc`'s `rcmain` with them. `COPY --from=NAME SRC DEST`
+  copies out of another image, which is a multi-stage build.
+- `RUN` is `h9 --root IMAGE --writable IMAGE --rc '...'`, with the image's
+  namespace and environment, so it writes into the image being built
+  ([section 7](#7-the-containers-writable-layer), "Committing"). Its cwd is
+  the build directory, as Docker's build context is.
+- `BIND` and `WORKDIR` append `bind` and `cd` lines to `/box/ns`, `ENV` a
+  line to `/box/env`, and `CMD` writes `/box/cmd`.
+
+The image is built in `NAME.new` and renamed over the old one at the end, so
+a failed build leaves the previous image in place. There's no build cache.
+
+**`run`** turns Docker's options into h9 flags, adds the image's
+`--ns /box/ns` and `--env` flags in front of yours (so `-e` wins, since the
+last `--env` for a name does), and runs the image's `CMD` if you don't give a
+command:
+
+| `h9box run` | h9 flag | Section |
+| --- | --- | --- |
+| `-e NAME=VALUE` | `--env NAME=VALUE` | [5](#5-entrypoints-environment-and-workdir) |
+| `-v PATH` | `--writable PATH` | [9](#9-volumes) |
+| `-r PATH` | `--readable PATH` | [9](#9-volumes) |
+| `-p` | `--net=enable` | [10](#10-networking-and-published-ports) |
+| `-w` | `--writable IMAGE --write=ephemeral`: the root takes writes, in memory | [7](#7-the-containers-writable-layer) |
+| `--memory=256m`, `--net-allow=...`, any `--flag=value` | Passed through | [11](#11-resource-limits) |
+
+h9 flags have to be written `--flag=value`, so `run` can tell them from the
+image name. `-w` makes the volumes from `-v` ephemeral too, the limitation
+[section 7](#7-the-containers-writable-layer) describes; `--write=overlay`
+will remove it.
+
+**`inspect`** is `run --print`, so it shows exactly the machine `run` would
+start ([section 12](#12-docker-inspect-reading-the-plan)):
+
+```sh
+host$ h9box inspect -p --memory=256m greeter
+```
+
+**The rest** are one or two lines each: `images` is `du -sh` over the image
+directories, `tag` is a clone, `rm` is `rm -rf`, `save` and `load` are `tar`,
+and `serve` is the exportfs registry from [section 13](#13-registries-serving-images-over-9p).
+An image name that's a dial string or a URL is used as `--root` directly, so
+a served image runs like a local one:
+
+```sh
+host$ h9box serve greeter 5640 &
+host$ h9box run -p -e port=8081 'tcp!127.0.0.1!5640'
+host$ h9box run -p -e port=8082 ws://localhost:8080/9p     # with PR #38 and its wsrelay
+```
+
+For a served image, `run` reads `/box/env` and `/box/cmd` by running `cat`
+in a machine on that root, so the image needs `cat`, or you name the command
+yourself.
+
+**What it leaves out** is what [section 16](#16-whats-missing) lists: there's
+no `ps`, `stop`, `logs` or `exec`, because there's no daemon keeping track of
+machines. `run` is the machine, so the host's job control is `ps` and `stop`,
+and its standard output is the log. Adding them means keeping a pid file per
+run in `$H9BOX`, which is a good exercise and the point where a real tool
+would start.
