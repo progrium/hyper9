@@ -2075,3 +2075,407 @@ fn checkBintime(e: Env, backend: []const u8) !void {
     try std.testing.expect(word(b, 3) - word(a, 3) >= std.time.ns_per_s);
     try std.testing.expect(word(b, 0) > word(a, 0));
 }
+
+// 9P roots (design/0013-9p-roots.md). The server is a second h9 serving
+// the test root tree read-only with exportfs behind aux/listen1 -t, so no
+// host 9P server is needed. Cases compare a run over the 9P root with the
+// same run over the host tree, whose namespace is otherwise the same.
+
+/// A second h9 serving the root tree on a loopback port, on the first
+/// backend, for the life of a case.
+const RootServer = struct {
+    child: std.process.Child,
+    port: u16,
+    dial_buf: [64]u8 = undefined,
+
+    fn start(s: *RootServer, e: Env) !void {
+        const io = std.testing.io;
+        var probe = try listenLocal();
+        s.port = probe.socket.address.getPort();
+        probe.deinit(io);
+        var listen_buf: [64]u8 = undefined;
+        const listen = try std.fmt.bufPrint(&listen_buf, "tcp!127.0.0.1!{d}", .{s.port});
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", e.root, "--net=enable" });
+        if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+        try argv.appendSlice(gpa, &.{ "aux/listen1", "-t", listen, "/bin/exportfs", "-R", "-r", "/" });
+        s.child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .create_no_window = true });
+        errdefer s.child.kill(io);
+        // Ready when it accepts; listen1 runs an exportfs for the probe,
+        // which ends at EOF.
+        const ip = try std.Io.net.IpAddress.parse("127.0.0.1", s.port);
+        var tries: u32 = 0;
+        while (true) : (tries += 1) {
+            const c = ip.connect(io, .{ .mode = .stream }) catch |err| {
+                if (tries >= slow(100)) return err;
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            };
+            c.close(io);
+            break;
+        }
+    }
+
+    fn dial(s: *RootServer) []const u8 {
+        return std.fmt.bufPrint(&s.dial_buf, "tcp!127.0.0.1!{d}", .{s.port}) catch unreachable;
+    }
+
+    fn stop(s: *RootServer) void {
+        s.child.kill(std.testing.io);
+    }
+};
+
+/// Runs `args` over the 9P root `root` and over the host tree, and checks
+/// that both succeed with the same output.
+fn expectSameAsHost(e: Env, root: []const u8, args: []const []const u8) !void {
+    const host = try run(e, args);
+    defer host.deinit();
+    var with_root: std.ArrayList([]const u8) = .empty;
+    defer with_root.deinit(gpa);
+    try with_root.appendSlice(gpa, &.{ "--root", root });
+    try with_root.appendSlice(gpa, args);
+    const r = try run(e, with_root.items);
+    defer r.deinit();
+    errdefer std.debug.print("over {s}: stdout: {s}\nstderr: {s}\n", .{ root, r.out, r.err });
+    try std.testing.expectEqual(0, host.code);
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(host.out, r.out);
+}
+
+/// A 9P server on a loopback port that answers Tversion, records the
+/// first Tattach's uname and aname, and refuses it with `refusal`.
+const FakeAttach = struct {
+    srv: std.Io.net.Server,
+    refusal: []const u8,
+    thread: std.Thread = undefined,
+    uname: [64]u8 = undefined,
+    uname_len: usize = 0,
+    aname: [64]u8 = undefined,
+    aname_len: usize = 0,
+    attached: bool = false,
+    dial_buf: [64]u8 = undefined,
+
+    fn start(f: *FakeAttach, refusal: []const u8) !void {
+        f.* = .{ .srv = try listenLocal(), .refusal = refusal };
+        f.thread = try std.Thread.spawn(.{}, serve, .{f});
+    }
+
+    fn dial(f: *FakeAttach) []const u8 {
+        return std.fmt.bufPrint(&f.dial_buf, "tcp!127.0.0.1!{d}", .{f.srv.socket.address.getPort()}) catch unreachable;
+    }
+
+    /// Waits for the server's one connection to end.
+    fn finish(f: *FakeAttach) void {
+        f.thread.join();
+        f.srv.deinit(std.testing.io);
+    }
+
+    fn uname_(f: *const FakeAttach) []const u8 {
+        return f.uname[0..f.uname_len];
+    }
+
+    fn aname_(f: *const FakeAttach) []const u8 {
+        return f.aname[0..f.aname_len];
+    }
+
+    fn serve(f: *FakeAttach) void {
+        const io = std.testing.io;
+        const s = f.srv.accept(io) catch return;
+        defer s.close(io);
+        var rbuf: [8192]u8 = undefined;
+        var wbuf: [256]u8 = undefined;
+        var r = s.reader(io, &rbuf);
+        var w = s.writer(io, &wbuf);
+        while (true) {
+            const size = r.interface.takeInt(u32, .little) catch return;
+            if (size < 7 or size > rbuf.len) return;
+            const m = r.interface.take(size - 4) catch return;
+            const typ = m[0];
+            const tag = m[1..3];
+            switch (typ) {
+                100 => { // Tversion: msize[4] version[s]
+                    const msize = std.mem.readInt(u32, m[3..7], .little);
+                    reply(&w.interface, 101, tag, &.{ std.mem.asBytes(&std.mem.nativeToLittle(u32, @min(msize, 8192))), "\x06\x009P2000" }) catch return;
+                },
+                104 => { // Tattach: fid[4] afid[4] uname[s] aname[s]
+                    var o: usize = 11;
+                    const un = str(m, &o) orelse return;
+                    const an = str(m, &o) orelse return;
+                    f.uname_len = @min(un.len, f.uname.len);
+                    @memcpy(f.uname[0..f.uname_len], un[0..f.uname_len]);
+                    f.aname_len = @min(an.len, f.aname.len);
+                    @memcpy(f.aname[0..f.aname_len], an[0..f.aname_len]);
+                    f.attached = true;
+                    const len = std.mem.nativeToLittle(u16, @intCast(f.refusal.len));
+                    reply(&w.interface, 107, tag, &.{ std.mem.asBytes(&len), f.refusal }) catch return;
+                    return;
+                },
+                else => return,
+            }
+        }
+    }
+
+    fn str(m: []const u8, o: *usize) ?[]const u8 {
+        if (o.* + 2 > m.len) return null;
+        const n = std.mem.readInt(u16, m[o.*..][0..2], .little);
+        if (o.* + 2 + n > m.len) return null;
+        defer o.* += 2 + n;
+        return m[o.* + 2 ..][0..n];
+    }
+
+    fn reply(w: *std.Io.Writer, typ: u8, tag: []const u8, parts: []const []const u8) !void {
+        var size: u32 = 7;
+        for (parts) |p| size += @intCast(p.len);
+        try w.writeInt(u32, size, .little);
+        try w.writeByte(typ);
+        try w.writeAll(tag);
+        for (parts) |p| try w.writeAll(p);
+        try w.flush();
+    }
+};
+
+test "a TCP 9P root runs /bin/ls [13]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    try expectSameAsHost(e, srv.dial(), &.{ "/bin/ls", "/", "/bin/ls" });
+}
+
+/// Relays connections to a unix socket at `path` to the TCP port `port`.
+const UnixRelay = struct {
+    srv: std.Io.net.Server,
+    port: u16,
+    thread: std.Thread = undefined,
+
+    fn start(u: *UnixRelay, path: []const u8, port: u16) !void {
+        const ua = try std.Io.net.UnixAddress.init(path);
+        u.* = .{ .srv = try ua.listen(std.testing.io, .{}), .port = port };
+        u.thread = try std.Thread.spawn(.{}, accept, .{u});
+        u.thread.detach();
+    }
+
+    fn accept(u: *UnixRelay) void {
+        const io = std.testing.io;
+        while (true) {
+            const c = u.srv.accept(io) catch return;
+            const ip = std.Io.net.IpAddress.parse("127.0.0.1", u.port) catch unreachable;
+            const s = ip.connect(io, .{ .mode = .stream }) catch {
+                c.close(io);
+                continue;
+            };
+            const t = std.Thread.spawn(.{}, copy, .{ s, c }) catch return;
+            t.detach();
+            const t2 = std.Thread.spawn(.{}, copy, .{ c, s }) catch return;
+            t2.detach();
+        }
+    }
+
+    /// Copies `from` to `to` until EOF, then shuts both down.
+    fn copy(from: std.Io.net.Stream, to: std.Io.net.Stream) void {
+        const io = std.testing.io;
+        var rbuf: [8192]u8 = undefined;
+        var r = from.reader(io, &rbuf);
+        var w = to.writer(io, &.{});
+        while (true) {
+            const data = r.interface.peekGreedy(1) catch break;
+            w.interface.writeAll(data) catch break;
+            r.interface.toss(data.len);
+        }
+        to.shutdown(io, .both) catch {};
+        from.shutdown(io, .both) catch {};
+    }
+};
+
+test "a unix socket 9P root runs /bin/ls [13]" {
+    if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const sock = try std.fs.path.join(gpa, &.{ s.path, "fs.sock" });
+    defer gpa.free(sock);
+    var relay: UnixRelay = undefined;
+    try relay.start(sock, srv.port);
+    // Both spellings: unix!path, and the socket's path.
+    const dial = try std.fmt.allocPrint(gpa, "unix!{s}", .{sock});
+    defer gpa.free(dial);
+    try expectSameAsHost(e, dial, &.{ "/bin/ls", "/", "/bin/ls" });
+    try expectSameAsHost(e, sock, &.{ "/bin/ls", "/" });
+}
+
+test "rc pipelines and exec run from a 9P root [13]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    try expectSameAsHost(e, srv.dial(), &.{ "--rc", "ls /bin | grep -c '/cat$'; echo a b c | wc -w; exec /bin/echo done" });
+}
+
+test "the host cwd is bound over a 9P root [13]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "from the host\n" });
+    const r = try run(e, &.{ "--root", srv.dial(), "--cwd", s.path, "--rc", "cat f; pwd; echo new > g" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("from the host\n/mnt/term/cwd\n", r.out);
+    try std.testing.expect(s.exists("g"));
+}
+
+test "a 9P root works under --net=disable [13]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    try expectSameAsHost(e, srv.dial(), &.{ "--net=disable", "/bin/ls", "/bin/cat" });
+    // #I is still masked from the guest.
+    const r = try run(e, &.{ "--root", srv.dial(), "--net=disable", "--rc", "ls '#I'" });
+    defer r.deinit();
+    try std.testing.expect(r.code != 0);
+}
+
+test "--root-spec is sent as the attach name [13]" {
+    const e = try env(@src());
+    var f: FakeAttach = undefined;
+    try f.start("no such tree");
+    // One backend: the server takes one connection.
+    const r = runOn(e, firstBackend(e), &.{ "--root", f.dial(), "--root-spec", "other", "/bin/echo" }, null) catch |err| {
+        f.finish();
+        return err;
+    };
+    defer r.deinit();
+    f.finish();
+    try std.testing.expect(f.attached);
+    try std.testing.expectEqualStrings("other", f.aname_());
+    try std.testing.expectEqual(125, r.code);
+}
+
+test "--root-user is sent as the attach uname [13]" {
+    const e = try env(@src());
+    for ([_]?[]const u8{ "glenda", null }) |user| {
+        var f: FakeAttach = undefined;
+        try f.start("no");
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, &.{ "--root", f.dial() });
+        if (user) |u| try args.appendSlice(gpa, &.{ "--root-user", u });
+        try args.append(gpa, "/bin/echo");
+        // One backend: the server takes one connection.
+        const r = runOn(e, firstBackend(e), args.items, null) catch |err| {
+            f.finish();
+            return err;
+        };
+        defer r.deinit();
+        f.finish();
+        try std.testing.expect(f.attached);
+        if (user) |u| {
+            try std.testing.expectEqualStrings(u, f.uname_());
+        } else {
+            // The machine's user, the host user's name.
+            try std.testing.expect(f.uname_().len > 0);
+            try std.testing.expect(!std.mem.eql(u8, f.uname_(), "glenda"));
+        }
+    }
+}
+
+test "the guest mounts /srv/root at a second path [13]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    const r = try run(e, &.{ "--root", srv.dial(), "--rc", "ls /srv/root && mkdir /tmp/r && mount /srv/root /tmp/r && ls /tmp/r/rc/bin/lc" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/srv/root\n/tmp/r/rc/bin/lc\n", r.out);
+}
+
+test "an unreachable 9P root exits 125 [13]" {
+    const e = try env(@src());
+    var probe = try listenLocal();
+    const port = probe.socket.address.getPort();
+    probe.deinit(std.testing.io);
+    var buf: [64]u8 = undefined;
+    const dial = try std.fmt.bufPrint(&buf, "tcp!127.0.0.1!{d}", .{port});
+    const r = try run(e, &.{ "--root", dial, "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    var want: [96]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, r.err, try std.fmt.bufPrint(&want, "root {s}: ", .{dial})) != null);
+}
+
+test "a 9P root that wants authentication exits 125 [13]" {
+    const e = try env(@src());
+    var f: FakeAttach = undefined;
+    try f.start("authentication required");
+    const r = runOn(e, firstBackend(e), &.{ "--root", f.dial(), "/bin/echo" }, null) catch |err| {
+        f.finish();
+        return err;
+    };
+    defer r.deinit();
+    f.finish();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, ": authentication required") != null);
+}
+
+test "--write=none with a 9P root is a usage error [13]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--root", "tcp!127.0.0.1!1", "--write=none", "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "--write=none can't be enforced on a 9P root") != null);
+}
+
+test "a unix socket root on Windows exits 125 [13]" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    const r = try run(e, &.{ "--root", "unix!C:/fs.sock", "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "unix socket roots need a POSIX host") != null);
+}
+
+test "--print shows a 9P root, and its output replays with --ns [13]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const p = try run(e, &.{ "--root", srv.dial(), "--cwd", s.path, "--print", "ls" });
+    defer p.deinit();
+    try std.testing.expectEqual(0, p.code);
+    var want: [96]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "  mount '#s/root' / ''") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}\n", .{srv.dial()})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") != null);
+    // The namespace section, replayed after the plan's own.
+    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
+    const end = std.mem.indexOfPos(u8, p.out, start, "\naccess:") orelse std.mem.indexOfPos(u8, p.out, start, "\ncaveats:") orelse return error.NoNamespace;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start .. end + 1] });
+    try expectSameAsHost(e, srv.dial(), &.{ "--cwd", s.path, "--ns", "ns", "/bin/ls", "/", "/bin/ls" });
+}
+
+test "--check runs /bin/echo from a 9P root [13]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    const r = try run(e, &.{ "--root", srv.dial(), "--check" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\n", .{r.out});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
+}

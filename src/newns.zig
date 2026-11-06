@@ -5,8 +5,8 @@
 //! Supported: `bind`, `mount`, `unmount`, `cd` and `clear`, with the flags
 //! `-a`, `-b`, `-c` and `-C`, `#` comments, and `'` quoting (`''` is a
 //! literal quote). As in newns, a failed operation doesn't stop the replay.
-//! `--print`'s trailing ro/rw/eph column and `<id>` console placeholder are
-//! accepted, so its output replays as-is. A `bind` from a bare `#O` makes
+//! `--print`'s trailing ro/rw/eph/9p column and `<id>` console placeholder
+//! are accepted, so its output replays as-is. A `bind` from a bare `#O` makes
 //! a fresh copy-on-write overlay over whatever its target is at that point
 //! in the replay (design/0006-ephemeral-writes.md); the machine does that. `.` (include) and `chdev`, and
 //! `$var` expansion, aren't supported.
@@ -60,8 +60,12 @@ fn parseLine(argv: []const []const u8) Error!Op {
         };
     }
     var rest = argv[i..];
-    // --print's access column.
+    // --print's access column. --print always writes a mount's spec, ''
+    // when empty, so a mount's column is its fourth word.
     if (rest.len == 3 and std.mem.eql(u8, cmd, "bind") and isAccess(rest[2])) {
+        rest = rest[0 .. rest.len - 1];
+    }
+    if (rest.len == 4 and std.mem.eql(u8, cmd, "mount") and isAccess(rest[3])) {
         rest = rest[0 .. rest.len - 1];
     }
     if (std.mem.eql(u8, cmd, "bind") and rest.len == 2) return .{ .bind = .{ .from = rest[0], .to = rest[1], .flag = flag } };
@@ -75,7 +79,7 @@ fn parseLine(argv: []const []const u8) Error!Op {
 }
 
 fn isAccess(s: []const u8) bool {
-    for ([_][]const u8{ "ro", "rw", "eph" }) |a| if (std.mem.eql(u8, s, a)) return true;
+    for ([_][]const u8{ "ro", "rw", "eph", "9p" }) |a| if (std.mem.eql(u8, s, a)) return true;
     return false;
 }
 
@@ -145,6 +149,24 @@ test "parse binds, mounts and the rest" {
     try t.expectEqualStrings("#O", ops[10].bind.from);
     try t.expectEqualStrings("/mnt/term/cwd", ops[10].bind.to);
     try t.expect(ops[10].bind.flag.create);
+}
+
+test "a 9P root's mount line from --print" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var line: usize = 0;
+    const ops = try parse(arena.allocator(),
+        \\  mount '#s/root' / ''                                  9p  # tcp!fs!564
+        \\  mount '#s/root' /n/other other                        9p
+        \\mount /srv/x /n/x 9p
+    , &line);
+    try t.expectEqual(@as(usize, 3), ops.len);
+    try t.expectEqualStrings("#s/root", ops[0].mount.file);
+    try t.expectEqualStrings("/", ops[0].mount.to);
+    try t.expectEqualStrings("", ops[0].mount.spec);
+    try t.expectEqualStrings("other", ops[1].mount.spec);
+    // Three words: the third is the spec, as in newns.
+    try t.expectEqualStrings("9p", ops[2].mount.spec);
 }
 
 test "syntax errors name the line" {

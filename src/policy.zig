@@ -67,9 +67,10 @@ pub const Policy = struct {
     host_cmd: bool = false,
 };
 
-/// How a bound host tree can be changed: not at all, on the host, or in
-/// an overlay in memory (`eph`), which never writes the host.
-pub const Access = enum { ro, rw, eph };
+/// How a bound tree can be changed: not at all, on the host, in an
+/// overlay in memory (`eph`), which never writes the host, or as a 9P
+/// root's server decides (`9p`, design/0013-9p-roots.md).
+pub const Access = enum { ro, rw, eph, @"9p" };
 
 /// An allow or deny rule on a host path and everything beneath it.
 /// `allow_eph` is a tree under an overlay: read-only to devfs, since the
@@ -98,9 +99,31 @@ pub const Bind = struct {
     /// with the host path in a comment; in a namespace file a bare `#O`
     /// overlays whatever `to` is at that point (src/newns.zig).
     lower: ?[]const u8 = null,
+    /// A mount of the 9P server posted at `from` (`#s/root`), rather than
+    /// a bind, with the attach name `spec`.
+    mount: bool = false,
+    spec: []const u8 = "",
+    /// Shown as a comment in the plan when there's no `lower`.
+    note: ?[]const u8 = null,
 
     pub const Flag = enum { repl, before, after };
 };
+
+/// A 9P server as the root (design/0013-9p-roots.md): the machine
+/// connects to it, posts the connection as `#s/root` and mounts that at /.
+pub const NinePRoot = struct {
+    kind: enum { tcp, unix },
+    /// The dial string, `tcp!host!port` or `unix!path`, for the plan and
+    /// errors.
+    addr: []const u8,
+    /// The attach name.
+    spec: []const u8 = "",
+    /// The attach uname; null means the machine's user.
+    user: ?[]const u8 = null,
+};
+
+/// Where a 9P root's connection is posted, and the board name it's under.
+pub const root_srv = "#s/root";
 
 /// Capabilities this build knows, in the order the plan prints them.
 pub const Capability = enum {
@@ -153,6 +176,8 @@ pub const Plan = struct {
     caveats: []const []const u8,
     /// Where the cwd lands in the guest; null without a root or cwd.
     guest_cwd: ?[]const u8,
+    /// The 9P root to connect before the namespace is built, if any.
+    root_9p: ?NinePRoot = null,
 
     /// Checks `op` on the resolved host path `path`.
     pub fn check(p: *const Plan, path: []const u8, op: Op) Verdict {
@@ -221,7 +246,7 @@ pub const Plan = struct {
             var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
             defer line.deinit();
             const lw = &line.writer;
-            lw.writeAll("  bind") catch return error.WriteFailed;
+            lw.writeAll(if (b.mount) "  mount" else "  bind") catch return error.WriteFailed;
             switch (b.flag) {
                 .repl => {},
                 .before => lw.writeAll(" -b") catch return error.WriteFailed,
@@ -229,13 +254,16 @@ pub const Plan = struct {
             }
             if (b.create) lw.writeAll(if (b.flag == .repl) " -c" else "c") catch return error.WriteFailed;
             lw.print(" '{s}{s}' {s}", .{ b.from, if (b.console) "<id>" else "", b.to }) catch return error.WriteFailed;
+            // Always written for a mount, '' when empty, so newns can tell
+            // the spec from the access column.
+            if (b.mount) lw.print(" '{s}'", .{b.spec}) catch return error.WriteFailed;
             try w.writeAll(line.written());
             if (b.access) |a| {
                 const pad = 56 -| line.written().len;
                 try w.splatByteAll(' ', pad + 1);
                 try w.print("{t}", .{a});
             }
-            if (b.lower) |l| try w.print("  # {s}", .{l});
+            if (b.lower orelse b.note) |l| try w.print("  # {s}", .{l});
             try w.writeAll("\n");
         }
         if (p.rules.len > 0) {
@@ -255,8 +283,11 @@ pub const Plan = struct {
 pub const CompileError = error{ OutOfMemory, Conflict };
 
 pub const Inputs = struct {
-    /// Host root tree, or null for a machine with devices only.
+    /// Host root tree, or null for a 9P root or a machine with devices
+    /// only.
     root: ?[]const u8,
+    /// A 9P server as the root, instead of a host tree.
+    root_9p: ?NinePRoot = null,
     /// Host directory bound at /mnt/term/cwd.
     cwd: ?[]const u8,
     arch: aout.Arch,
@@ -280,6 +311,12 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         else => write_req,
     };
 
+    // h9 can't make devmnt read-only, so `none` can't be kept for a
+    // server it doesn't control.
+    if (write == .none and in.root_9p != null) {
+        err_msg.* = "--write=none can't be enforced on a 9P root";
+        return error.Conflict;
+    }
     if (write_req == .none and pol.writable.len > 0) {
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
@@ -340,6 +377,17 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try rules.append(arena, .{ .path = root, .kind = acc.rule(root_rw) });
         try binds.append(arena, try acc.bind(arena, root, "/", root_rw));
     }
+    // A 9P root isn't a host path, so it has no access rule: its server
+    // decides what can be written.
+    if (in.root_9p) |r| try binds.append(arena, .{
+        .from = root_srv,
+        .to = "/",
+        .mount = true,
+        .spec = r.spec,
+        .access = .@"9p",
+        .note = if (r.user) |u| try std.fmt.allocPrint(arena, "{s} as {s}", .{ r.addr, u }) else r.addr,
+    });
+    const has_root = in.root != null or in.root_9p != null;
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
@@ -350,7 +398,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // nothing outside the machine, so it's in both profiles.
     try binds.append(arena, .{ .from = "#s", .to = "/srv", .create = true, .optional = true });
     if (net != .disable) try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
-    if (in.root != null) {
+    if (has_root) {
         try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
     }
@@ -367,6 +415,11 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             .optional = true,
         });
     };
+    // Over a 9P root, the overlay's lower tree is the root's own /tmp: a
+    // bare #O, as in a namespace file.
+    if (in.root_9p != null and write != .none) {
+        try binds.append(arena, .{ .from = "#O", .to = "/tmp", .create = true, .access = .eph, .optional = true });
+    }
 
     // Readable and writable paths outside the root and cwd appear under
     // /mnt/term at their host path, as in drawterm: the host's / is
@@ -378,14 +431,14 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     };
     // --host-fs shows the whole host read-only; --writable still applies.
     if (pol.host_fs) try rules.append(arena, .{ .path = "/", .kind = .allow_ro });
-    if (in.root != null and need_mnt_term) {
+    if (has_root and need_mnt_term) {
         try binds.append(arena, .{ .from = "#U/", .to = "/mnt/term", .flag = .after, .access = if (pol.host_fs) .ro else null });
     }
 
     var guest_cwd: ?[]const u8 = null;
     if (in.cwd) |cwd| {
         try rules.append(arena, .{ .path = cwd, .kind = acc.rule(cwd_rw) });
-        if (in.root != null) {
+        if (has_root) {
             var b = try acc.bind(arena, cwd, "/mnt/term/cwd", cwd_rw);
             b.fallback = "/mnt/term";
             try binds.append(arena, b);
@@ -396,7 +449,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     for ([_][]const []const u8{ pol.readable, pol.writable }, [_]bool{ false, true }) |list, want_rw| for (list) |p| {
         const rw = want_rw and can_write;
         try rules.append(arena, .{ .path = p, .kind = acc.rule(rw) });
-        if (in.root == null) continue;
+        if (!has_root) continue;
         const to: []const u8 = switch (guestPlace(in, p)) {
             .root_top, .cwd_top => continue,
             .root => |rel| try std.fmt.allocPrint(arena, "/{s}", .{rel}),
@@ -443,6 +496,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try caveats.append(arena, "hardlinks under writable paths can modify host files outside them");
         try caveats.append(arena, "writes to writable paths are not capped (no res.disk)");
     }
+    if (in.root_9p) |r| {
+        try caveats.append(arena, "writes to the 9P root go to its server, which decides what can be written");
+        if (r.kind == .tcp) try caveats.append(arena, "the 9P root's connection isn't encrypted");
+    }
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
     if (net != .disable) {
         if (net_allow.len == 0) {
@@ -475,6 +532,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .unenforced = unenforced,
         .caveats = caveats.items,
         .guest_cwd = guest_cwd,
+        .root_9p = in.root_9p,
     };
 }
 

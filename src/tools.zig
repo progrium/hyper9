@@ -45,8 +45,14 @@ pub const CheckOptions = struct {
     memory: ?u64 = null,
     /// The root tree as given (for messages), or null if none was found.
     root_arg: ?[]const u8 = null,
-    /// The root resolved for #U, or null if it doesn't exist.
-    root: ?[]const u8 = null,
+    /// The root resolved (a host directory for #U, or a 9P server), or
+    /// null if it couldn't be.
+    root: ?h9.Root = null,
+    /// Why `root_arg` couldn't be resolved.
+    root_err: []const u8 = "not found",
+    /// The attach name and uname for a 9P root.
+    root_spec: []const u8 = "",
+    root_user: ?[]const u8 = null,
 };
 
 /// Probes the backends (creating a VM and running a tiny program on each,
@@ -82,7 +88,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
                 try w.print("{s}\n", .{explain(k, e)});
                 if (k == o.backend) failed = true;
             },
-            .wrong => |msg| {
+            .wrong, .failed => |msg| {
                 try w.print("ran, but {s}\n", .{msg});
                 if (k == o.backend) failed = true;
             },
@@ -90,15 +96,20 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
     }
 
     const root = o.root orelse {
-        if (o.root_arg) |r| try w.print("root {s}: not found\n", .{r}) else try w.writeAll("root: none (use --root DIR or $H9ROOT; scripts/mkroot.py builds one)\n");
+        if (o.root_arg) |r| try w.print("root {s}: {s}\n", .{ r, o.root_err }) else try w.writeAll("root: none (use --root DIR or $H9ROOT; scripts/mkroot.py builds one)\n");
         return exit_failed;
     };
-    try w.print("root {s}: ", .{root});
+    try w.print("root {s}: ", .{switch (root) {
+        .dir => |d| d,
+        // A 9P root as given, which is how its errors name it.
+        .tcp, .unix => o.root_arg orelse "",
+    }});
     if (failed) {
         try w.writeAll("not checked, no usable backend\n");
         return exit_failed;
     }
-    const echo = runRoot(gpa, io, o, arch);
+    var why: [256]u8 = undefined;
+    const echo = runRoot(gpa, io, o, arch, &why);
     switch (echo) {
         .ok => try w.print("ok, /bin/echo runs ({t})\n", .{arch}),
         .err => |e| {
@@ -113,6 +124,14 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
             try w.print("/bin/echo ran, but {s}\n", .{msg});
             failed = true;
         },
+        // The namespace couldn't be built: a 9P root's connection or
+        // attach failed, say.
+        .failed => |msg| {
+            // A 9P root's errors already start "root <dial string>: ".
+            const colon = if (std.mem.startsWith(u8, msg, "root ")) std.mem.indexOf(u8, msg, ": ") else null;
+            try w.print("{s}\n", .{if (colon) |c| msg[c + 2 ..] else msg});
+            failed = true;
+        },
     }
     return if (failed) exit_failed else 0;
 }
@@ -122,6 +141,8 @@ const Probe = union(enum) {
     err: anyerror,
     /// The program ran with the wrong result.
     wrong: []const u8,
+    /// The machine's namespace couldn't be built, and why.
+    failed: []const u8,
 };
 
 /// Creates a machine on backend `k` and runs the hello fixture on it.
@@ -165,7 +186,8 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
 }
 
 /// Runs `/bin/echo ok` from the root tree on the backend `o.backend` picks.
-fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch) Probe {
+/// A `.failed` message is in `why`.
+fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, why: []u8) Probe {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var err: std.Io.Writer.Allocating = .init(gpa);
@@ -174,11 +196,18 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch) 
         .backend = o.backend,
         .arch = arch,
         .root = o.root,
+        .root_spec = o.root_spec,
+        .root_user = o.root_user,
         .policy = .{ .memory = o.memory, .timeout_ns = 10 * std.time.ns_per_s },
         .stdio = .{ .out = &out.writer, .err = &err.writer },
     }) catch |e| return .{ .err = e };
     defer m.deinit();
-    const st = m.run(.{ .guest = "/bin/echo" }, &.{ "echo", "ok" }) catch |e| return .{ .err = e };
+    const st = m.run(.{ .guest = "/bin/echo" }, &.{ "echo", "ok" }) catch |e| {
+        if (e != error.NamespaceFailed) return .{ .err = e };
+        const n = @min(m.err_msg.len, why.len);
+        @memcpy(why[0..n], m.err_msg[0..n]);
+        return .{ .failed = why[0..n] };
+    };
     // A stuck machine still uses `out`; don't free it under the process.
     if (m.stuck) std.process.exit(exit_failed);
     if (st != .exited or st.exited.len != 0) return .{ .wrong = "it failed" };

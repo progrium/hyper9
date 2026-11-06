@@ -29,7 +29,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | --- | --- | --- |
 | Product shape | A library plus a thin CLI; each invocation is one machine | One machine can hold a whole process tree. Keep the machine API free of CLI-global state. |
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
-| Root filesystem | Direct host tree | 9P mounts (remote servers, cwfs or gefs as guests) are proposed ([9p-roots](design/0013-9p-roots.md), [image-roots](design/0014-image-roots.md)); devmnt already exists |
+| Root filesystem | Direct host tree, or a 9P server over TCP or a unix socket | A 9P root is mounted through devmnt ([9p-roots](design/0013-9p-roots.md)); disk images are proposed ([image-roots](design/0014-image-roots.md)) |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/0010-self-host.md)), and a source of test binaries |
 | Language | Zig, latest stable (0.16.x as of writing) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; graphics behind a flag is proposed ([gfx](design/0015-gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
@@ -244,12 +244,12 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ## Filesystem, boot and I/O
 
-**Root filesystem.** A directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32). This is the fastest path: no 9P round trips. Roots served over 9P and from disk images are proposed ([9p-roots](design/0013-9p-roots.md), [image-roots](design/0014-image-roots.md)).
+**Root filesystem.** Either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([9p-roots](design/0013-9p-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, or the path of a unix socket. h9 connects to a 9P root before the program runs: a TCP root is dialed through devip by device path (`#I/cs` and `#I/tcp/clone`), outside the network policy, since h9 makes the connection and the guest can't dial anything through it; a unix socket root is connected on the host and wrapped as a channel with devlfd's `lfdchan` (`src/kern/rootdial.c`), on POSIX hosts only. The connection is posted on the machine's `/srv` board as `root`, which holds it for the machine's life, and `#s/root` is mounted at `/` with no auth fd and `--root-spec` as the attach name. devmnt sends the calling process's user as the attach uname, so the first Proc takes on `--root-user` for the mount when one is given. Everything else is bound over the mount as over a host tree. A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks another dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, and h9 doesn't reconnect. Disk images are proposed ([image-roots](design/0014-image-roots.md)).
 
 **Boot sequence**
 
 1. The kernel boots once per host process, on its own thread (see Process model).
-2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the root at `/`, the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp`, and `#c`, `#p`, `#d`, `#e`, `#s` (the machine's own `/srv`, with `-c`) and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. For a 9P root it first connects, posts the connection as `#s/root` and mounts it at `/`; a host root is bound at `/`. Then it binds the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp` (the guest's `/tmp` for a 9P root), and `#c`, `#p`, `#d`, `#e`, `#s` (the machine's own `/srv`, with `-c`) and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
 
@@ -292,7 +292,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 
 | Area | Default |
 | --- | --- |
-| Root tree (`/`) | Read-only. Installing into the root needs `--writable "$H9ROOT"`. |
+| Root tree (`/`) | Read-only. Installing into the root needs `--writable "$H9ROOT"`. A 9P root is as writable as its server allows |
 | Host cwd (`/mnt/term/cwd`) | Read-write |
 | Rest of the host filesystem | Not visible |
 | `/tmp` | Private and writable, in memory (an overlay over the root tree's empty `/tmp`); read-only under `--write=none` |
@@ -337,6 +337,8 @@ caveats:
   - /proc/n/ns shows the host paths of bound host trees
   - the h9 process itself is not host-sandboxed
 ```
+
+A 9P root is printed as `mount '#s/root' / '<spec>'` with `9p` in the access column and the dial string (and `--root-user`, as `as NAME`) in a comment. The spec is always written, `''` when empty, so a replay can tell it from the column; the line replays with `--ns` as an ordinary mount of the posted channel, a new attach on the same connection. A 9P root has no access rule, since its server decides what can be written, and the plan says so in a caveat, with another for a TCP root's unencrypted connection. `--write=none` with a 9P root is exit 2, because h9 can't make devmnt read-only.
 
 `--net-allow` patterns are printed in a `net-allow:` section after `devmask:`. Requested capabilities the build can't enforce yet are listed on an `unenforced:` line, and the setting falls back to the safer choice: `--write=overlay` denies writes. `--strict` refuses them with exit 2 instead.
 
@@ -407,7 +409,9 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|emu` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning |
 | `--arch arm64\|amd64\|386` | The architecture of the binaries to run, which also picks `/$cputype/bin`. Without it a host program runs as its header says, and a guest one as the host's architecture |
-| `--root DIR` | The root tree. If omitted, use `$H9ROOT`, then the default install location (`.local/9front/root` in development builds until there's an installer). With none found, only a host a.out runs; anything else is exit 125 |
+| `--root DIR\|DIAL\|SOCKET` | The root tree: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host` for port 564, or `unix!path`), or the path of a unix socket. If omitted, use `$H9ROOT` (same forms), then the default install location (`.local/9front/root` in development builds until there's an installer). With none found, only a host a.out runs; anything else is exit 125. A path that's neither a directory nor a socket, a failed connection or attach, and a unix socket root on Windows are exit 125 |
+| `--root-spec NAME` | The attach name sent to a 9P root. Empty by default |
+| `--root-user NAME` | The uname sent in h9's attaches to a 9P root. The machine's user by default |
 | `--env name=value` (repeatable) | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
 | `--rc 'cmd'` | See program resolution |
@@ -443,7 +447,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | 1–255 | An `exits` string that's that number in decimal: digits only, no sign, leading zero or spaces. Nothing is printed, so rc's `exit 3` and Go's `os.Exit(3)` exit 3 ([go-compat](design/0007-go-compat.md)) |
 | 1 | Any other `exits` string, including `"0"`, which is also printed to stderr |
 | 2 | Usage error |
-| 125 | h9 itself failed: no hypervisor, VM creation failed, or the root wasn't found |
+| 125 | h9 itself failed: no hypervisor, VM creation failed, the root wasn't found, or a 9P root's connection or attach failed |
 | 126 | The program was found but isn't a runnable a.out (bad magic or wrong architecture) |
 | 127 | The program wasn't found |
 
@@ -479,7 +483,9 @@ The CLI's handlers (`src/hostsig.zig`) only record the event: on POSIX a signal 
 pub const Options = struct {
     backend: vmm.BackendKind = .auto,
     arch: ?vmm.Arch = null,             // null: the host's
-    root: ?[]const u8 = null,           // host directory served as /
+    root: ?Root = null,                 // .dir (host directory), .tcp (dial string) or .unix (socket path)
+    root_spec: []const u8 = "",         // attach name for a 9P root
+    root_user: ?[]const u8 = null,      // attach uname for a 9P root; null: the machine's user
     cwd: ?[]const u8 = null,
     env: []const EnvVar = &.{},
     policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs, host_cmd

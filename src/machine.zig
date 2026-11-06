@@ -54,13 +54,29 @@ pub const RunError = error{
 } || kern.Error || vmm.CreateError || loader.Error;
 
 pub const Machine = struct {
+    /// The root tree (design/0013-9p-roots.md): a host directory, or a 9P
+    /// server the machine connects to and mounts at /.
+    pub const Root = union(enum) {
+        /// A host directory, absolute and resolved, served through #U.
+        dir: []const u8,
+        /// A TCP 9P server: a dial string, `tcp!host!port`.
+        tcp: []const u8,
+        /// A unix-domain socket's host path. Not supported on Windows.
+        unix: []const u8,
+    };
+
     pub const Options = struct {
         backend: vmm.BackendKind = .auto,
         /// Architecture of the binaries this machine runs; null means the host's.
         arch: ?vmm.Arch = null,
-        /// Host directory served as the guest's /. Without one the machine
-        /// has only devices, so only host-path programs can run.
-        root: ?[]const u8 = null,
+        /// The guest's /: a host directory or a 9P server. Without one the
+        /// machine has only devices, so only host-path programs can run.
+        root: ?Root = null,
+        /// The attach name for a 9P root.
+        root_spec: []const u8 = "",
+        /// The uname for h9's attaches to a 9P root; null means the
+        /// machine's user.
+        root_user: ?[]const u8 = null,
         /// Host directory bound at /mnt/term/cwd and made the guest's cwd.
         cwd: ?[]const u8 = null,
         /// Guest environment variables, beyond the defaults.
@@ -165,7 +181,18 @@ pub const Machine = struct {
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
-        return policy.compile(arena, .{ .root = opts.root, .cwd = opts.cwd, .arch = arch }, opts.policy, err_msg);
+        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch };
+        if (opts.root) |r| switch (r) {
+            .dir => |d| in.root = d,
+            .tcp => |a| in.root_9p = .{ .kind = .tcp, .addr = a, .spec = opts.root_spec, .user = opts.root_user },
+            .unix => |path| in.root_9p = .{
+                .kind = .unix,
+                .addr = try std.fmt.allocPrint(arena, "unix!{s}", .{path}),
+                .spec = opts.root_spec,
+                .user = opts.root_user,
+            },
+        };
+        return policy.compile(arena, in, opts.policy, err_msg);
     }
 
     /// On PolicyConflict, `conflict` (if given) explains it.
@@ -1127,7 +1154,12 @@ pub const Machine = struct {
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
         var cwd_at: ?[:0]const u8 = null;
+        if (m.opts.root) |r| if (r != .dir) try m.connectRoot(r);
         for (m.plan.binds) |b| {
+            if (b.mount) {
+                try m.mountRoot(b);
+                continue;
+            }
             const from = if (b.console)
                 try std.fmt.bufPrintZ(&buf, "{s}{d}", .{ b.from, con_id })
             else
@@ -1166,10 +1198,86 @@ pub const Machine = struct {
         if (m.plan.devmask.len > 0) kern.devmask(try std.fmt.bufPrintZ(&buf, "{s}", .{m.plan.devmask}));
     }
 
+    /// Connects to a 9P root and posts the connection as `#s/root`
+    /// (design/0013-9p-roots.md), where the board holds it for the
+    /// machine's life. h9 makes the connection, not the guest, so the
+    /// network policy doesn't apply to it, and a TCP root is dialed through
+    /// devip by device path whether or not `#I` is bound or masked later.
+    fn connectRoot(m: *Machine, r: Root) RunError!void {
+        const addr = m.plan.root_9p.?.addr;
+        kern.setPlan(null);
+        defer kern.setPlan(&m.plan);
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        const fd = switch (r) {
+            .dir => unreachable,
+            .tcp => |a| dialTcp(a),
+            .unix => |path| kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("root {s}: name too long", .{addr})),
+        } catch return m.fail("root {s}: {s}", .{ addr, kern.errstr() });
+        defer kern.close(fd) catch {};
+        const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {s}: post {s}: {s}", .{ addr, policy.root_srv, kern.errstr() });
+        defer kern.close(srv) catch {};
+        var num: [16]u8 = undefined;
+        _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {s}: post {s}: {s}", .{ addr, policy.root_srv, kern.errstr() });
+    }
+
+    /// Dials `tcp!host!port` through `#I`, as 9front's dial does through
+    /// /net: cs translates the address, and each translation is tried in
+    /// turn. Returns an fd on the connection's data file.
+    fn dialTcp(addr: []const u8) kern.Error!u31 {
+        var buf: [512]u8 = undefined;
+        const cs = try kern.open("#I/cs", kern.ORDWR);
+        defer kern.close(cs) catch {};
+        _ = try kern.pwrite(cs, addr, 0);
+        const n = try kern.pread(cs, &buf, 0);
+        // Lines of "/net/tcp/clone ip!port".
+        var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
+        var last: kern.Error = error.Kern;
+        while (lines.next()) |line| {
+            const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+            if (dialOne(line[sp + 1 ..])) |fd| return fd else |e| last = e;
+        }
+        return last;
+    }
+
+    fn dialOne(ipport: []const u8) kern.Error!u31 {
+        var buf: [128]u8 = undefined;
+        const ctl = try kern.open("#I/tcp/clone", kern.ORDWR);
+        defer kern.close(ctl) catch {};
+        const n = try kern.pread(ctl, &buf, 0);
+        const conv = std.mem.trim(u8, buf[0..n], " \n");
+        var cmd: [160]u8 = undefined;
+        _ = try kern.pwrite(ctl, std.fmt.bufPrint(&cmd, "connect {s}", .{ipport}) catch return error.Kern, 0);
+        return kern.open(std.fmt.bufPrintZ(&cmd, "#I/tcp/{s}/data", .{conv}) catch return error.Kern, kern.ORDWR);
+    }
+
+    /// Mounts the 9P root's posted connection (`b.from`) at `b.to`. devmnt
+    /// sends the calling process's user as the attach uname, so the first
+    /// Proc takes on --root-user for the attach and gets its own back after.
+    fn mountRoot(m: *Machine, b: policy.Bind) RunError!void {
+        const r = m.plan.root_9p.?;
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
+        const fd = kern.open(try std.fmt.bufPrintZ(&buf, "{s}", .{b.from}), kern.ORDWR) catch return m.fail("root {s}: {s}", .{ r.addr, kern.errstr() });
+        defer kern.close(fd) catch {};
+        var saved: [kern.ERRMAX]u8 = undefined;
+        const own = kern.procUser();
+        @memcpy(saved[0..own.len], own);
+        saved[own.len] = 0;
+        if (r.user) |u| kern.setProcUser(try std.fmt.bufPrintZ(&buf2, "{s}", .{u}));
+        defer if (r.user != null) kern.setProcUser(saved[0..own.len :0]);
+        const spec = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.spec});
+        _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), kern.MREPL, spec) catch return m.fail("root {s}: {s}", .{ r.addr, kern.errstr() });
+    }
+
     /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
-    /// overlay over `#U<lower>`. `buf` is scratch, and may hold `from`.
+    /// overlay over `#U<lower>`. A bare `#O` with no `lower` is a fresh
+    /// overlay over what `to` is now, as in a namespace file. `buf` is
+    /// scratch, and may hold `from`.
     fn bindOrOverlay(from: [:0]const u8, lower: ?[]const u8, to: [:0]const u8, flag: c_int, buf: []u8) kern.Error!void {
-        const l = lower orelse return kern.bind(from, to, flag);
+        const l = lower orelse {
+            if (std.mem.eql(u8, from, "#O")) return overlay(to, to, flag);
+            return kern.bind(from, to, flag);
+        };
         return overlay(std.fmt.bufPrintZ(buf, "#U{s}", .{l}) catch return error.Kern, to, flag);
     }
 

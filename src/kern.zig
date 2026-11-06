@@ -194,6 +194,13 @@ const c_stub = struct {
     }
     fn h9_overlay_drop(_: c_int) void {}
     fn h9_kern_release() void {}
+    fn h9_unixdial(_: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_kern_upuser() [*:0]const u8 {
+        return "none";
+    }
+    fn h9_kern_setuser(_: [*:0]const u8) void {}
 };
 
 const c_real = struct {
@@ -265,6 +272,9 @@ const c_real = struct {
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
     extern fn h9_kern_release() void;
+    extern fn h9_unixdial(path: [*:0]const u8) c_int;
+    extern fn h9_kern_upuser() [*:0]const u8;
+    extern fn h9_kern_setuser(name: [*:0]const u8) void;
 };
 
 const BootState = enum(u8) { idle, booting, up, failed };
@@ -766,6 +776,22 @@ pub fn mount(fd: u31, afd: i32, new: [*:0]const u8, flag: c_int, spec: [*:0]cons
 /// when it needs no authentication.
 pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
     return try check(c.h9_fauth(fd, aname));
+}
+
+/// Connects to the unix-domain socket at host path `path` and returns an
+/// fd on a channel for it (design/0013-9p-roots.md). Fails on Windows.
+pub fn unixDial(path: [*:0]const u8) Error!u31 {
+    return try check(c.h9_unixdial(path));
+}
+
+/// The calling process's user, which devmnt sends as an attach's uname.
+pub fn procUser() [:0]const u8 {
+    return std.mem.span(c.h9_kern_upuser());
+}
+
+/// Sets the calling process's user, cut to the kernel's 27 bytes.
+pub fn setProcUser(name: [*:0]const u8) void {
+    c.h9_kern_setuser(name);
 }
 
 /// Undoes binds and mounts on `new`: only `old`'s, or all with null.
