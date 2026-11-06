@@ -2190,10 +2190,8 @@ memory. Write to the host cwd to keep files.
 Guides that put many of the features above together to build something.
 They change faster than this manual, as proposals land.
 
-- [Recipes](docs/recipes.md): short, copyable answers for sandboxing
-  scripts and CI jobs, scratch space, serving 9P from Go and over
-  WebSocket, building 9front software, wrapping 9front tools, and Go
-  programs.
+- [Recipes](docs/recipes.md): quick one-liners for everyday use,
+  sandboxing, mounts, serving 9P, building, and Go.
 
 ## Appendices
 
