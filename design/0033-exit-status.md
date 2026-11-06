@@ -1,4 +1,5 @@
 ---
+id: 33
 slug: exit-status
 title: Numeric exit statuses at the host boundary
 status: draft

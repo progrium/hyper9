@@ -5,7 +5,7 @@ title: Linux personality
 status: draft
 created: 2026-11-04
 authors: [progrium]
-depends: [symlinks-in-root, exit-status]
+depends: [symlinks-in-root, 33]
 areas: [kern, vmm, cli, sandbox]
 ---
 
@@ -101,7 +101,7 @@ Inside the Linux root, the machine's user is uid 0 and gid 0, as in a rootless c
 - **`clone` with `CLONE_VM` and without `CLONE_VFORK`** is `-ENOSYS` until [linux-threads](linux-threads.md).
 - **`wait4` and `waitid`** map onto `await`, filtered by pid in h9 since `await` takes any child. Process groups (`setpgid`, `TIOCSPGRP`) are kept on the process for `wait4(-pgid)` and for job control's foreground group; the console's Ctrl-C still goes to the note group.
 - **Exit statuses** map both ways. Linux `exit(0)` is `exits("")`, and `exit(n)` is `exits("n")` in decimal, as APE's `_exit` writes. A death by signal N is `exits("linux: signal N")`. For `wait4`, the reverse: `""` is status 0, a decimal string is that number modulo 256, `linux: signal N` is killed by signal N, a fault note is killed by `SIGSEGV`, and any other string is status 1.
-- **The CLI** exits with a Linux program's status unchanged, through [exit-status](exit-status.md). How a death by signal reaches the host is that proposal's open issue.
+- **The CLI** exits with a Linux program's status unchanged, through [exit-status](0033-exit-status.md). How a death by signal reaches the host is that proposal's open issue.
 
 ### Memory
 
@@ -182,7 +182,7 @@ Without `--linux-root`, a Linux binary run from a host path (`h9 ./prog`) gets t
 - **`--linux-root DIR`**: the Linux root.
 - **`Machine.Options.linux_root`**: the same, for embedders.
 - **Program resolution:** an absolute path or a bare name is resolved in the Linux view when `--linux-root` is given, through `PATH`, and in the 9front view otherwise. `--rc` always means 9front's rc. So `h9 --linux-root alpine ls` runs busybox's `ls`, `h9 --linux-root alpine /9/bin/ls` runs 9front's, and `h9 ls` is unchanged. After that, each personality searches only its own path.
-- **Exit codes:** through [exit-status](exit-status.md).
+- **Exit codes:** through [exit-status](0033-exit-status.md).
 
 ## Rationale
 
@@ -204,7 +204,7 @@ h9's host process already sits where the Sentry would.
 
 **uid 0, not 1000.** Alpine's `apk`, Debian's `dpkg` and many install scripts refuse to run as non-root. Linux ids mean nothing to h9's access checks, so being 0 grants nothing beyond what the policy allows. Rootless containers make the same choice.
 
-**Numeric exit statuses.** Linux programs and their callers, shell scripts and build tools, depend on exit codes. Carrying them as decimal strings is what APE already does, so `rc`'s `$status` reads the same either way, and APE's `wait` reads a Linux child's status correctly. The CLI side isn't Linux-specific, so it's [exit-status](exit-status.md).
+**Numeric exit statuses.** Linux programs and their callers, shell scripts and build tools, depend on exit codes. Carrying them as decimal strings is what APE already does, so `rc`'s `$status` reads the same either way, and APE's `wait` reads a Linux child's status correctly. The CLI side isn't Linux-specific, so it's [exit-status](0033-exit-status.md).
 
 **Splitting threads and networking out.** Each stage of the original plan was a step toward a different goal: dynamic binaries, then Go, then servers. Threads need cross-vCPU TLB shootdown and per-thread signals; readiness needs host-socket polling and `O_NONBLOCK`. Both are larger and riskier than the rest, and neither is needed to run busybox, Python scripts or compilers. So stages 1 to 3 can be accepted, built and used first. `vfork` stays here, because busybox can't run without it.
 
@@ -216,7 +216,7 @@ h9's host process already sits where the Sentry would.
 
 - **New CLI flag** `--linux-root DIR`, and a new `Machine.Options` field.
 - **New device** `#λ`. It's never masked: it serves nothing from the host itself, and what's bound into it is under the policy.
-- **Exit codes:** an ELF binary for the wrong architecture is exit 126, like a bad a.out. Numeric statuses come from [exit-status](exit-status.md).
+- **Exit codes:** an ELF binary for the wrong architecture is exit 126, like a bad a.out. Numeric statuses come from [exit-status](0033-exit-status.md).
 - **vmm interface:** `unmap` takes a length, and `protect` and `hwcaps` are new (see vmm changes). The `none` backend gains stubs.
 - **9front processes** see no change unless they exec a Linux binary or use `#λ`.
 
