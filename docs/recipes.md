@@ -1,7 +1,7 @@
 # h9 recipes
 
 Quick things to do with h9. The [manual](../MANUAL.md) explains how they
-work. Recipes marked *#38* need [websocket-9p](https://github.com/progrium/hyper9/pull/38).
+work.
 
 ## Everyday
 
@@ -101,7 +101,7 @@ Mount a remote 9P server, allowing nothing else on the network:
 h9 --net-allow 'tcp!fs.example.com!564' --rc 'srv tcp!fs.example.com!564 fs && mkdir /tmp/fs && mount /srv/fs /tmp/fs && ls /tmp/fs'
 ```
 
-Mount a 9P server over WebSocket *(#38)*:
+Mount a 9P server over WebSocket:
 
 ```sh
 h9 --rc 'mkdir /tmp/fs && wsmount -h $1 wss://fs.example/9p /tmp/fs && ls /tmp/fs' "Authorization: Bearer $TOKEN"
@@ -123,11 +123,23 @@ go run github.com/Harvey-OS/ninep/cmd/ufs@latest -root /tmp/rootcopy -addr 127.0
 h9 --root 'tcp!127.0.0.1!5640' ls /
 ```
 
-Put any of those behind a WebSocket *(#38)*:
+Put any of those behind a WebSocket:
 
 ```sh
 zig build wsrelay -- 8080 5640 &
 h9 --root ws://localhost:8080/9p ls /
+```
+
+Use a root over `wss://` with a token kept out of `ps`:
+
+```sh
+echo "Authorization: Bearer $TOKEN" > hdr && h9 --root wss://fs.example/9p --root-header @hdr ls /
+```
+
+Keep a project's mounts in a namespace file next to its code:
+
+```sh
+echo 'mount -c wss://fs.example/9p /n' > ns && h9 --ns ns ls /n
 ```
 
 If you write your own 9P server, answer partial walks with the qids found so
