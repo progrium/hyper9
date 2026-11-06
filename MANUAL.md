@@ -2376,6 +2376,8 @@ They change faster than this manual, as proposals land.
   served over 9P or WebSocket.
 - [How h9 compares](docs/comparison.md): h9 next to containers, gVisor,
   microVMs, WSL, Wine, WASI runtimes and other ways to run Plan 9.
+- [Recreating Docker](docs/containers.md): Docker-style images, layers,
+  volumes, ports, and limits, from slim root trees to images served over 9P.
 
 ## Appendices
 
