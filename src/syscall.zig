@@ -50,6 +50,8 @@ pub const Nr = enum(u64) {
     semacquire = 37,
     semrelease = 38,
     tsemacquire = 52,
+    /// The only underscore call h9 serves (design/0007-go-compat.md).
+    _nsec = 53,
     _,
 };
 
@@ -462,6 +464,19 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             p.note("0x{x} {d}", .{ try a.u(0), try a.int(1) });
             const w = try semWord(p, try a.u(0)) orelse return fail;
             return ok(kern.semrelease(w, try a.int(1)) catch return fail);
+        },
+        ._nsec => {
+            // _nsec(vlong*): wall nanoseconds in the return register on
+            // 64-bit machines, as 9front's sys_nsec. On 386 it returns 0
+            // and stores the time through the pointer, as 9front does there.
+            const now = kern.wallNs();
+            if (a.word == 8) return .{ .ret = @bitCast(now) };
+            const ptr = try a.u(0);
+            if (ptr & 3 != 0) return sysNote(p, "sys: odd address");
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(i64, &b, now, .little);
+            try gm.write(p.as, ptr, &b);
+            return ok(0);
         },
         _ => return sysNote(p, "sys: bad sys call"),
     }

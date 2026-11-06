@@ -223,6 +223,22 @@ fn value(args: []const []const u8, i: *usize, comptime name: []const u8) ??[]con
     return args[i.*];
 }
 
+/// The exit code for a program's `exits` string (design/0007-go-compat.md):
+/// 0 for an empty one, n for a decimal number from 1 to 255 (digits only,
+/// no sign or leading zero), and 1 for anything else. `print` says whether
+/// h9 writes the string to stderr, which it does only in the last case.
+pub fn exitStatus(msg: []const u8) struct { code: u8, print: bool } {
+    if (msg.len == 0) return .{ .code = 0, .print = false };
+    numeric: {
+        if (msg.len > 3 or msg[0] == '0') break :numeric;
+        for (msg) |c| if (!std.ascii.isDigit(c)) break :numeric;
+        const n = std.fmt.parseInt(u16, msg, 10) catch break :numeric;
+        if (n > 255) break :numeric;
+        return .{ .code = @intCast(n), .print = false };
+    }
+    return .{ .code = 1, .print = true };
+}
+
 const t = std.testing;
 
 test "flags stop at the first non-flag" {
@@ -365,4 +381,28 @@ test "program kinds" {
     try t.expectEqual(ProgramKind.guest, programKind("/bin/cat"));
     try t.expectEqual(ProgramKind.guest, programKind("cat"));
     try t.expectEqual(ProgramKind.guest, programKind("aux/vga"));
+}
+
+test "exits strings to exit codes" {
+    const cases = [_]struct { []const u8, u8, bool }{
+        .{ "", 0, false },
+        .{ "3", 3, false },
+        .{ "1", 1, false },
+        .{ "125", 125, false },
+        .{ "255", 255, false },
+        .{ "0", 1, true },
+        .{ "03", 1, true },
+        .{ "256", 1, true },
+        .{ "1000", 1, true },
+        .{ "-1", 1, true },
+        .{ "+3", 1, true },
+        .{ " 3", 1, true },
+        .{ "3 ", 1, true },
+        .{ "failed", 1, true },
+    };
+    for (cases) |c| {
+        const s = exitStatus(c[0]);
+        try t.expectEqual(c[1], s.code);
+        try t.expectEqual(c[2], s.print);
+    }
 }

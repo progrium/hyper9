@@ -223,9 +223,18 @@ build), `/bin` is `/$cputype/bin` (`/arm64/bin` on arm64) plus `/rc/bin`, and th
 is at `/mnt/term/cwd` and is the guest's cwd. The host environment isn't
 imported: the guest gets `user`, `home`, `cputype`, `objtype`, `sysname`,
 `service`, `path` and `timezone`, plus any `--env`. Exit codes: 0 for an empty
-`exits` string, 1 for any other (printed to stderr), 2 for a usage error, 125
-when h9 itself fails, 126 when the program isn't a runnable a.out and 127
-when it isn't found.
+`exits` string; the number itself for an `exits` string that's a decimal
+number from 1 to 255 (no sign, leading zero or spaces), so rc's `exit 3` and
+Go's `os.Exit(3)` exit 3; and 1 for any other string, which is printed to
+stderr. h9's own failures are 2 for a usage error, 125 when h9 itself fails,
+126 when the program isn't a runnable a.out and 127 when it isn't found, and
+h9 prints a message for each, so a guest that exits with one of those
+numbers can still be told apart.
+
+Go's `GOOS=plan9 GOARCH=amd64` binaries run on the emulator (`--backend emu`,
+or `--arch amd64` with h9-emu): goroutines on several processes, timers,
+`os/exec`, `net/http` and `os/signal`. A Go program reserves several hundred MB
+of memory at start, so one that uses `os/exec` needs `--memory 4G`.
 
 `--check` creates a VM on each backend built in (or just `--backend`'s) and
 runs a test program on it, which on macOS also checks the hypervisor
@@ -337,6 +346,19 @@ h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these na
 `zig-out/fixtures/hello-amd64`. They're hand-assembled a.outs (see
 [tests/fixtures/hello.zig](tests/fixtures/hello.zig)) because Zig no longer
 links Plan 9 a.out.
+
+The Go programs in [tests/fixtures/go](tests/fixtures/go) are built by `zig
+build go-fixtures` into `zig-out/fixtures/go`, as `GOOS=plan9 GOARCH=amd64`
+with `GOTOOLCHAIN=go$GO_VERSION` from [scripts/pins.sh](scripts/pins.sh), so
+any installed Go fetches the same toolchain. `zig build test` and `zig build
+integration` build them when `go` is on `PATH` and h9 is built with
+`-Demu=unicorn`, and their cases run on the emulator; without Go they skip.
+They don't need the root tree. `zig build go-stdtest -Demu=unicorn` runs Go's
+own tests for `time`, `syscall`, `os` and `runtime` on the emulator and prints
+pass, skip and fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh),
+with the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest --
+os` runs one package). It's for finding gaps, not a gate, and nothing depends
+on it.
 
 [tests/backends.zig](tests/backends.zig) runs small programs on every backend
 built in and checks that each gives the same output and syscall trace.
