@@ -2212,6 +2212,8 @@ They change faster than this manual, as proposals land.
 
 - [Recipes](docs/recipes.md): quick one-liners for everyday use,
   sandboxing, mounts, serving 9P, building, and Go.
+- [Recreating Docker](docs/containers.md): Docker-style images, layers,
+  volumes, ports and limits, from slim root trees to images served over 9P.
 
 ## Appendices
 
