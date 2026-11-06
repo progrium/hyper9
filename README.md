@@ -19,12 +19,12 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [segattach](design/0004-segattach.md) | implemented |  | segattach and shared segments |
 | [net-policy](design/0005-net-policy.md) | implemented |  | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | implemented |  | Ephemeral writes and a private /tmp |
-| [go-compat](design/0007-go-compat.md) | accepted | ready | Go compatibility |
+| [go-compat](design/0007-go-compat.md) | implemented |  | Go compatibility |
 | [devsrv](design/0008-devsrv.md) | implemented |  | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | implemented |  | 386 binaries |
 | [self-host](design/0010-self-host.md) | accepted | ready | Self-hosting |
 | [overlay](design/0011-overlay.md) | accepted | ready | Copy-on-write overlay as the root's default |
-| [browser-host](design/0012-browser-host.md) | accepted | needs go-compat | A browser host on wasm, with v86 |
+| [browser-host](design/0012-browser-host.md) | accepted | ready | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | accepted | ready | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft | needs 9p-roots | Disk-image roots |
 | [gfx](design/0015-gfx.md) | accepted | ready | Graphics (--gfx) |
@@ -57,7 +57,7 @@ flowchart LR
   p_segattach["#35;4 segattach<br/>implemented"]:::implemented
   p_net_policy["#35;5 net-policy<br/>implemented"]:::implemented
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>implemented"]:::implemented
-  p_go_compat["#35;7 go-compat<br/>accepted"]:::accepted
+  p_go_compat["#35;7 go-compat<br/>implemented"]:::implemented
   p_devsrv["#35;8 devsrv<br/>implemented"]:::implemented
   p_i386["#35;9 i386<br/>implemented"]:::implemented
   p_self_host["#35;10 self-host<br/>accepted"]:::accepted
