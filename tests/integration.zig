@@ -1574,8 +1574,9 @@ test "a posted pipe is a named pipe [8]" {
 test "mount without auth works through fauth [8]" {
     const e = try env(@src());
     // Not mount -n: amount calls fauth, the server answers that it needs
-    // no authentication, and mount goes on without an auth fd.
-    const r = try run(e, &.{ "--trace", "--timeout", "20s", "--rc", "ramfs -S r && mkdir /tmp/r && mount /srv/r /tmp/r && echo ok >/tmp/r/f && cat /tmp/r/f" });
+    // no authentication, and mount goes on without an auth fd. (-c only
+    // allows the create.)
+    const r = try run(e, &.{ "--trace", "--timeout", "20s", "--rc", "ramfs -S r && mkdir /tmp/r && mount -c /srv/r /tmp/r && echo ok >/tmp/r/f && cat /tmp/r/f" });
     defer r.deinit();
     try std.testing.expectEqualStrings("ok\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -1604,7 +1605,10 @@ test "exportfs -S serves a posted channel [8]" {
     const e = try env(@src());
     // exportfs reads and writes 9P on fds 0 and 1, one end of a pipe; the
     // other end is posted as /srv/e, and exportfs passes it to /srv/r.
+    // Each attach mounts /srv/r on /mnt/exportfs/<n>, mntexport's on
+    // 9front, so /mnt/exportfs/0 is made in /tmp if the root lacks it.
     const script =
+        \\mkdir -p /tmp/m/exportfs/0 && bind -a /tmp/m /mnt && bind -a /tmp/m/exportfs /mnt/exportfs || exit mtpt
         \\ramfs -S r && mkdir /tmp/a /tmp/b && mount -c /srv/r /tmp/a && echo through >/tmp/a/x || exit setup
         \\exportfs -S /srv/r <[0=1] | { echo 0 >/srv/e } &
         \\n=0
@@ -1630,16 +1634,16 @@ test "a server's /srv entry goes when it exits [8]" {
     // ramfs posts /srv/r with ORCLOSE, and its server process holds that
     // fd; killing the server closes it, which removes the entry.
     const script =
-        \\ramfs -S r && ls /srv || exit setup
+        \\ramfs -S r && test -e /srv/r && echo posted || exit setup
         \\for(p in `{awk 'FNR==1 && $1=="ramfs" {split(FILENAME, a, "/"); print a[3]}' /proc/*/status >[2]/dev/null}) echo kill >/proc/$p/ctl
         \\n=0
         \\while(test -e /srv/r && test $n -lt 100){ sleep 0.1; n=`{echo $n+1 | hoc} }
-        \\ls /srv
-        \\echo done
+        \\test -e /srv/r || echo gone
     ;
     const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
     defer r.deinit();
-    try std.testing.expectEqualStrings("/srv/r\ndone\n", r.out);
+    // (ls /srv would list clone too, as on 9front.)
+    try std.testing.expectEqualStrings("posted\ngone\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
