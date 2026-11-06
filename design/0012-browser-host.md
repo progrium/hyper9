@@ -258,3 +258,7 @@ Nothing in the page is reachable except through those imports.
 
 - **A full root in the browser.** Beyond the trimmed archive: a manifest of paths, sizes and hashes, with files fetched on demand through `Suspending` WASI calls and cached in OPFS, or a Wanix filesystem. [websocket-9p](0021-websocket-9p.md) covers a remote 9P root, and a [9P root](0013-9p-roots.md) over a MessagePort to the page is another option. Each would be its own proposal.
 - **The memory layout, if the spike fails.** If v86's allocator or a later release doesn't fit the order in "One memory", v86 is built from source with `--import-memory` and a fixed base instead, which puts cargo in the build.
+
+## Updates
+
+- 2026-11-06: [websocket-9p](0021-websocket-9p.md) is implemented natively, and its step 8 is now this proposal's work: the `h9_ws_*` imports in `h9-web.js`, `hstream.zig`'s web branch, `createMachine`'s URL root, `/net/ws` as the web host's network, and websocket-9p's `[websocket-9p, browser-host]` cases.

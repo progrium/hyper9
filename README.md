@@ -33,12 +33,12 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
-| [websocket-9p](design/0021-websocket-9p.md) | accepted | ready | 9P over WebSocket |
+| [websocket-9p](design/0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
 | [dotl](design/0022-dotl.md) | draft | needs serve | 9P2000.L and ZeroFS |
 | [guest-tools](design/0032-guest-tools.md) | implemented |  | h9's own commands in the guest |
 | [exit-status](design/0033-exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
 | [symlinks-in-root](design/0034-symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
-| [serve](design/0035-serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
+| [serve](design/0035-serve.md) | draft |  | Serving the namespace over 9P |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
@@ -74,7 +74,7 @@ flowchart LR
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
-  p_websocket_9p["#35;21 websocket-9p<br/>accepted"]:::accepted
+  p_websocket_9p["#35;21 websocket-9p<br/>implemented"]:::implemented
   p_dotl["#35;22 dotl<br/>draft"]:::draft
   p_guest_tools["#35;32 guest-tools<br/>implemented"]:::implemented
   p_exit_status["#35;33 exit-status<br/>draft"]:::draft

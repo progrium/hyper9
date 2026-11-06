@@ -2,7 +2,7 @@
 id: 21
 slug: websocket-9p
 title: 9P over WebSocket
-status: accepted
+status: implemented
 created: 2026-11-05
 authors: [progrium]
 depends: [5, 8, 13, 32]
@@ -465,3 +465,4 @@ Demo: `h9 --root ws://localhost:8080/9p ls /` lists the served tree, with the se
   - `tests/wsrelay.zig` also builds as a program, `zig build wsrelay -- LISTEN_PORT TARGET_PORT`, for the demo.
   - `wsmount`'s case is tagged `[21, 32]`, since the script reaches the guest through guest-tools. The browser-host cases aren't written yet; they come with step 8.
   - A TLS 1.3 key update that the server asks to be answered is answered by `std.crypto.tls.Client` from the reader thread, outside the stream's write lock, so it could interleave with a guest's send. Servers rarely ask for one; it's noted here until one does.
+- 2026-11-06: Marked implemented with steps 1 to 7 and 9 done. Step 8, the browser host's side (the `h9_ws_*` imports, `hstream.zig`'s web branch, `createMachine`'s URL root, `/net/ws` as the web host's network, and the five `[websocket-9p, browser-host]` cases under Done when), moves to [browser-host](0012-browser-host.md), which builds it with the rest of the web host.
