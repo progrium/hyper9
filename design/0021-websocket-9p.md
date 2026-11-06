@@ -453,7 +453,7 @@ Demo: `h9 --root ws://localhost:8080/9p ls /` lists the served tree, with the se
 
 ## Updates
 
-- 2026-11-06: Steps 1 to 7 and 9 are implemented; step 8 waits for [browser-host](0012-browser-host.md). The status stays `accepted` until then, and until [guest-tools](0032-guest-tools.md), a dependency, is implemented, since `wsmount` reaches the guest's `/bin` through it. Refinements made while implementing it:
+- 2026-11-06: Steps 1 to 7 and 9 are implemented; step 8 waits for [browser-host](0012-browser-host.md). The status stays `accepted` until then. `wsmount` reaches the guest's `/bin` through [guest-tools](0032-guest-tools.md)'s `#H/bin`. Refinements made while implementing it:
   - `Machine.Options.proxy` null means direct. The CLI fills it from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (either case); a library caller passes its own. Only `http://` proxies are supported, with credentials from the proxy URL's userinfo sent as `Proxy-Authorization: Basic`.
   - A `ws://` or `wss://` URL with userinfo (`ws://user:pass@host/`) is refused as a bad URL, at `--root` (exit 2) and in `ctl`, since browsers drop it and it would put a secret in the plan and `remote`. `--root-header 'Authorization: …'` covers it.
   - `--write=none` with a namespace file that mounts a URL is found during the replay, so it exits 125 with "mount URL: --write=none can't be enforced on a WebSocket mount" rather than 2: the file is a guest path, read by the kernel after the policy is compiled.
