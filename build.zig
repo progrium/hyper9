@@ -817,11 +817,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_backend_tests.step);
     test_step.dependOn(&run_integration.step);
 
-    // examples/embed.zig, docs/embedding.md's example of embedding h9.
+    // docs/embedding/embed.zig, docs/embedding.md's example of embedding h9.
     const embed_example = b.addExecutable(.{
         .name = "embed",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/embed.zig"),
+            .root_source_file = b.path("docs/embedding/embed.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "h9", .module = mod }},
@@ -833,7 +833,7 @@ pub fn build(b: *std.Build) void {
     }
     linkUnicorn(embed_example);
     const install_embed = b.addInstallArtifact(embed_example, .{});
-    b.step("examples", "Build examples/embed.zig as zig-out/bin/embed").dependOn(&install_embed.step);
+    b.step("embed", "Build docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed").dependOn(&install_embed.step);
     // zig build test runs it on the hello fixture where a backend can: HVF
     // on an arm64 Mac (signed like h9) for one machine, and the emulator for
     // the second. HVF allows one VM per host process.

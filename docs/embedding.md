@@ -10,8 +10,8 @@ It assumes you've read the [manual](../MANUAL.md) up to chapter 3 and know
 what a root tree is. Everything here is checked against the source as of
 this writing: [src/root.zig](../src/root.zig) is the public surface, and
 [src/machine.zig](../src/machine.zig) has the `Machine` API with its doc
-comments. A complete program, [examples/embed.zig](../examples/embed.zig),
-builds with `zig build examples` and runs in `zig build test`.
+comments. A complete program, [embedding/embed.zig](embedding/embed.zig),
+builds with `zig build embed` and runs in `zig build test`.
 
 ## Contents
 
@@ -189,7 +189,7 @@ The result is a `Status`:
 
 The status's message and `err_msg` point into a buffer inside the machine.
 They're valid until the next `run` or `deinit`, so copy them first if you
-need them later. [examples/embed.zig](../examples/embed.zig) does this.
+need them later. [embedding/embed.zig](embedding/embed.zig) does this.
 
 ### Timeouts and stuck machines
 
@@ -337,11 +337,11 @@ const Job = struct {
 };
 ```
 
-[examples/embed.zig](../examples/embed.zig) is the full version, with
+[embedding/embed.zig](embedding/embed.zig) is the full version, with
 `$machine` set per job and results printed in order:
 
 ```
-$ zig build examples -Demu=unicorn
+$ zig build embed -Demu=unicorn
 $ zig-out/bin/embed -j 3 --root .local/9front/root rc -c 'echo $machine'
 machine 0 (hvf): exited ""
   0

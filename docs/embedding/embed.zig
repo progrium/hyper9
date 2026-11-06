@@ -9,7 +9,7 @@
 //! the CLI, or is any path and there's no root tree; it's a 9front a.out.
 //! Otherwise it's a guest path or name (`rc`, `/bin/ls`) in the root tree. Each machine sees its
 //! index in `$machine`, so `embed -j 3 --root R rc -c 'echo $machine'`
-//! prints 0, 1 and 2. `zig build examples` builds it, and `zig build test`
+//! prints 0, 1 and 2. `zig build embed` builds it, and `zig build test`
 //! runs it on the hello fixture.
 
 const std = @import("std");
