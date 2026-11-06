@@ -1,6 +1,7 @@
 const std = @import("std");
 const unicorn_src = @import("build/unicorn.zig");
 const frontmatter = @import("tools/frontmatter.zig");
+const guesttree = @import("tools/guesttree.zig");
 
 const drawterm = "third_party/drawterm";
 
@@ -120,6 +121,8 @@ const segattach_fixtures = [_][]const u8{
 const overlay_fixtures = [_][]const u8{ "tmp_own", "tmp_absent", "copyup_reader" };
 /// Programs in tests/fixtures/srv, for tests/backends.zig, with the same lib.S.
 const srv_fixtures = [_][]const u8{ "board", "hold", "absent", "orclose" };
+/// Programs in tests/fixtures/htools, for tests/backends.zig, with the same lib.S.
+const htools_fixtures = [_][]const u8{ "tree", "masked" };
 
 /// Programs in tests/fixtures/sema, for tests/backends.zig; they include
 /// the segattach fixtures' lib.S.
@@ -134,9 +137,12 @@ const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping. `arch`, if given, is passed to h9
-/// as --arch (from -Darch).
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures) *std.Build.Step.Run {
+/// as --arch (from -Darch). `guest_test` says h9 was built with
+/// -Dguest-test.
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures, guest_test: bool) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
+    // h9 serves tests/fixtures/guest in #H (design/0032-guest-tools.md).
+    if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
     if (arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
     if (go) |g| {
         run.setEnvironmentVariable("H9_TEST_GO", g.dir);
@@ -378,6 +384,35 @@ fn zonVersion(b: *std.Build) []const u8 {
     return rest[0 .. std.mem.indexOfScalar(u8, rest, '"') orelse return "unknown"];
 }
 
+/// The table of src/guest/ (and tests/fixtures/guest with `with_test`)
+/// as a generated Zig file. A file the tree can't hold fails the build.
+fn guestTree(b: *std.Build, with_test: bool) std.Build.LazyPath {
+    const io = b.graph.io;
+    const wf = b.addWriteFiles();
+    var inputs: std.ArrayList(guesttree.Input) = .empty;
+    for ([_][]const u8{ "src/guest", "tests/fixtures/guest" }, [_]bool{ true, with_test }) |sub, want| {
+        if (!want) continue;
+        var dir = b.build_root.handle.openDir(io, sub, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        const found = guesttree.scan(b.allocator, io, dir) catch |err| {
+            wf.step.dependOn(&b.addFail(b.fmt("{s}: {t}", .{ sub, err })).step);
+            return wf.add("guest_tree.zig", "");
+        };
+        inputs.appendSlice(b.allocator, found) catch @panic("OOM");
+    }
+    var why: []const u8 = "";
+    const entries = guesttree.build(b.allocator, inputs.items, &why) catch |err| switch (err) {
+        error.Rejected => {
+            wf.step.dependOn(&b.addFail(b.fmt("guest tree: {s}", .{why})).step);
+            return wf.add("guest_tree.zig", "");
+        },
+        error.OutOfMemory => @panic("OOM"),
+    };
+    var out: std.Io.Writer.Allocating = .init(b.allocator);
+    guesttree.render(&out.writer, entries) catch @panic("OOM");
+    return wf.add("guest_tree.zig", out.written());
+}
+
 /// The value of `NAME=value` in scripts/pins.sh, without a trailing
 /// comment, or "unknown".
 fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
@@ -446,7 +481,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -479,6 +514,12 @@ pub fn build(b: *std.Build) void {
     kern_step.dependOn(&kern.step);
     // Everything that imports the h9 module links kern.
     mod.linkLibrary(kern);
+
+    // h9's own guest commands, served by #H (design/0032-guest-tools.md).
+    // Debug builds also serve tests/fixtures/guest, for the integration
+    // cases; release builds leave it out.
+    const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .Debug);
+    mod.addAnonymousImport("guest_tree", .{ .root_source_file = guestTree(b, guest_test) });
 
     const options = b.addOptions();
     options.addOption(Emu, "emu", emu);
@@ -651,7 +692,7 @@ pub fn build(b: *std.Build) void {
         run_stdtest.step.dependOn(signed_step);
         go_stdtest.dependOn(&run_stdtest.step);
     }
-    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases);
+    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases, guest_test);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
@@ -665,7 +706,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases);
+            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases, guest_test);
             run_cases.step.dependOn(signed_step);
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
@@ -705,12 +746,13 @@ pub fn build(b: *std.Build) void {
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(backend_tests);
-    // The segattach, overlay, srv, sema and net fixtures, assembled freestanding as the shim is, and
+    // The segattach, overlay, srv, htools, sema and net fixtures, assembled freestanding as the shim is, and
     // embedded as raw text for tests/backends.zig to wrap in an a.out.
     for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
         .{ .dir = "segattach", .prefix = "seg", .names = &segattach_fixtures },
         .{ .dir = "overlay", .prefix = "ov", .names = &overlay_fixtures },
         .{ .dir = "srv", .prefix = "srv", .names = &srv_fixtures },
+        .{ .dir = "htools", .prefix = "htools", .names = &htools_fixtures },
         .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
         .{ .dir = "net", .prefix = "net", .names = &net_fixtures },
     }) |set| for (set.names) |name| {
@@ -728,6 +770,11 @@ pub fn build(b: *std.Build) void {
     };
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/guesttree.zig"),
+        .target = b.graph.host,
+    }) })).step);
     // The design tool's tests read tools/testdata from the repository root.
     const design_tests = b.addRunArtifact(b.addTest(.{ .root_module = design_tool.root_module }));
     design_tests.setCwd(b.path("."));

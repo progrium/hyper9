@@ -291,6 +291,9 @@ pub const Inputs = struct {
     /// Host directory bound at /mnt/term/cwd.
     cwd: ?[]const u8,
     arch: aout.Arch,
+    /// Bind h9's own commands (`#H/bin`) after /bin; false leaves out
+    /// the bind and masks `#H` (design/0032-guest-tools.md).
+    guest_tools: bool = true,
 };
 
 /// Compiles a policy. Allocations go in `arena`. `err_msg` explains a
@@ -401,6 +404,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (has_root) {
         try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
+        // h9's own commands (design/0032-guest-tools.md), after the root's
+        // so a root command of the same name wins.
+        if (in.guest_tools) try binds.append(arena, .{ .from = "#H/bin", .to = "/bin", .flag = .after, .optional = true, .note = "h9's commands" });
     }
 
     // A private /tmp in memory, over the root tree's own empty /tmp, in
@@ -464,6 +470,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     var devmask: std.ArrayList(u8) = .empty;
     if (!pol.host_cmd) try devmask.append(arena, 'C');
     if (net == .disable) try devmask.append(arena, 'I');
+    if (!in.guest_tools) try devmask.append(arena, 'H');
     if (!pol.host_fs) try devmask.append(arena, 'U');
 
     var enforces: CapSet = .initMany(&.{ .@"env.scrub", .@"ipc.restrict", .@"kernel.isolation", .@"fs.write.scope" });
@@ -1302,5 +1309,35 @@ test "compile: #s at /srv in both profiles, and never masked" {
         defer out.deinit();
         try p.print(&out.writer);
         try t.expect(std.mem.indexOf(u8, out.written(), "  bind -c '#s' /srv\n") != null);
+    }
+}
+
+test "compile: #H/bin after /rc/bin in both profiles, and guest_tools = false masks #H" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    for ([_]Profile{ .default, .tight }) |prof| {
+        const p = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64 }, .{ .profile = prof }, &msg);
+        var rc_at: ?usize = null;
+        var h_at: ?usize = null;
+        for (p.binds, 0..) |b, i| {
+            if (std.mem.eql(u8, b.from, "/rc/bin")) rc_at = i;
+            if (std.mem.eql(u8, b.from, "#H/bin")) {
+                try t.expectEqualStrings("/bin", b.to);
+                try t.expectEqual(Bind.Flag.after, b.flag);
+                h_at = i;
+            }
+        }
+        try t.expect(h_at.? > rc_at.?);
+        try t.expect(std.mem.indexOfScalar(u8, p.devmask, 'H') == null);
+
+        var out: std.Io.Writer.Allocating = .init(t.allocator);
+        defer out.deinit();
+        try p.print(&out.writer);
+        try t.expect(std.mem.indexOf(u8, out.written(), "  bind -a '#H/bin' /bin  # h9's commands\n") != null);
+
+        const off = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .guest_tools = false }, .{ .profile = prof }, &msg);
+        for (off.binds) |b| try t.expect(!std.mem.startsWith(u8, b.from, "#H"));
+        try t.expect(std.mem.indexOfScalar(u8, off.devmask, 'H') != null);
     }
 }

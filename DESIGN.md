@@ -231,6 +231,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 | devsrv `#s`, from 9front (`src/kern/devsrv.c`), per machine | Guest file servers post themselves in `/srv` (lib9p's `postsrv`, `srvfs`, factotum, plumber), and clients open the posted channel and mount it. 9front's code is ported closely, but each machine has its own root board, hung off its `Hmach` and made on first attach, with its own lock, so machines in one host process can't see each other's services; `clone` boards hang off the machine's root, so `#s/id` addressing works within a machine. A write of an fd number goes through `fdtochan`, then the post itself (the in-use and auth checks, holding the reference) is shared with `h9_srvpost`, which posts a host-side channel without a guest fd. Posting sets the channel's `srvname` to its `/srv` path, which `/proc/n/ns` prints for a mount of it, as 9front does. The machine's last process to release its groups (`h9_kern_release` in `src/kern/proc.c`) closes every posted channel, as closing a lease does, while the machine is still there; the boards go with the machine. |
 | devcons hooks (`src/kern/consx.c`, `consx.h`) | drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat` and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/0007-go-compat.md)). So devcons calls hooks: `#c/pid` and `#c/ppid` (machine-local pids, as `$pid` and `/proc` have them, in 9front's 12-character format); `bintime` (wall nanoseconds, ticks, `fasthz` and monotonic nanoseconds, big-endian, with a short read getting the leading words that fit); `time` (seconds, nanoseconds, ticks and `fasthz`, in drawterm's text format); and `sysstat`, a line per CPU the machine may use, in 9front's ten columns with zeros for the counters h9 doesn't keep, so Go's `runtime.NumCPU` counts them. The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The clock is one per host process (`src/kern.zig`): wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot; ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail. |
 | Overlay device `#O` (`src/kern/devoverlay.c`) | Copy-on-write trees in memory over a lower directory, for `--write=ephemeral` and the private `/tmp` (see Sandbox policy). A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it. |
+| h9's guest commands `#H` (`src/kern/devhtools.c`) | Commands that wrap h9's own devices (websocket-9p's `wsmount`, say) can't come from 9front, and h9 never writes into the root ([guest-tools](design/0032-guest-tools.md)). `src/guest/` holds them, laid out as the guest sees them, and the build embeds it in the binary as a generated table (`tools/guesttree.zig`): only rc scripts and data, so an executable that doesn't start with `#!/bin/rc` fails the build, and names starting with `.` are left out. Executables are 0555, other files 0444, directories 0555, all owned by the machine's user; `#H/bin` always exists. The device gets the table once at reset from one leaf, `h9_tools_table` (`src/kern.zig`), and is plain C over constant memory after that. An entry's index is its qid path, so qids are the same on every run of one build. Attach takes no spec; writes, creates, removes, `OTRUNC` and `ORCLOSE` opens and `wstat` fail with "permission denied". Debug builds also serve `tests/fixtures/guest/` (`-Dguest-test`), for the integration cases. |
 
 **Zig/C seam rules**
 
@@ -249,7 +250,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 **Boot sequence**
 
 1. The kernel boots once per host process, on its own thread (see Process model).
-2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. For a 9P root it first connects, posts the connection as `#s/root` and mounts it at `/`; a host root is bound at `/`. Then it binds the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp` (the guest's `/tmp` for a 9P root), and `#c`, `#p`, `#d`, `#e`, `#s` (the machine's own `/srv`, with `-c`) and (unless the network is off) `#I` to their usual places. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), and `#I` when the network is off. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. For a 9P root it first connects, posts the connection as `#s/root` and mounts it at `/`; a host root is bound at `/`. Then it binds the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp` (the guest's `/tmp` for a 9P root), and `#c`, `#p`, `#d`, `#e`, `#s` (the machine's own `/srv`, with `-c`) and (unless the network is off) `#I` to their usual places, and `#H/bin` after the root's `/bin`, so h9's own commands are on the path and a root command of the same name wins. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), `#I` when the network is off, and `#H` under `--no-guest-tools`, which also leaves out its bind. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
 
@@ -323,6 +324,7 @@ namespace:
   bind -c '#s' /srv
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
+  bind -a '#H/bin' /bin  # h9's commands
   bind -c '#O' /tmp                                       eph  # /Users/me/h9root/tmp
   bind '#U/Users/me/src/proj' /mnt/term/cwd                ro
   bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out     rw
@@ -430,6 +432,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--print` | Prints the compiled policy and namespace, then exits |
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
 | `--host-cmd` | Enables devcmd |
+| `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` or `--host-cmd` |
 | `--trace[=FILE]` | ratrace-style syscall log, to stderr by default |
 | `--dump-on-fault` | Prints the Ureg and a symbolized PC when the guest faults |
@@ -489,6 +492,7 @@ pub const Options = struct {
     cwd: ?[]const u8 = null,
     env: []const EnvVar = &.{},
     policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs, host_cmd
+    guest_tools: bool = true,           // bind #H/bin, h9's own commands, after /bin; false masks #H
     trace: ?*std.Io.Writer = null,
     dump_on_fault: bool = false,
     ns: ?[]const u8 = null,             // newns file to replay

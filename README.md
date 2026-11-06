@@ -33,9 +33,9 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
-| [websocket-9p](design/0021-websocket-9p.md) | accepted | needs guest-tools | 9P over WebSocket |
-| [dotl](design/0022-dotl.md) | draft | needs serve, guest-tools | 9P2000.L and ZeroFS |
-| [guest-tools](design/0032-guest-tools.md) | accepted | ready | h9's own commands in the guest |
+| [websocket-9p](design/0021-websocket-9p.md) | accepted | ready | 9P over WebSocket |
+| [dotl](design/0022-dotl.md) | draft | needs serve | 9P2000.L and ZeroFS |
+| [guest-tools](design/0032-guest-tools.md) | implemented |  | h9's own commands in the guest |
 | [exit-status](design/0033-exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
 | [symlinks-in-root](design/0034-symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 | [serve](design/0035-serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
@@ -76,7 +76,7 @@ flowchart LR
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
   p_websocket_9p["#35;21 websocket-9p<br/>accepted"]:::accepted
   p_dotl["#35;22 dotl<br/>draft"]:::draft
-  p_guest_tools["#35;32 guest-tools<br/>accepted"]:::accepted
+  p_guest_tools["#35;32 guest-tools<br/>implemented"]:::implemented
   p_exit_status["#35;33 exit-status<br/>draft"]:::draft
   p_symlinks_in_root["#35;34 symlinks-in-root<br/>draft"]:::draft
   p_serve["#35;35 serve<br/>draft"]:::draft
@@ -320,6 +320,17 @@ without `fauth`: `h9 --rc 'ramfs -S tmp && mkdir /tmp/n && mount -c
 factotum and plumber run. Machines in one host process can't see each
 other's `/srv`, and what's posted is closed when the machine ends.
 
+h9's own commands, the small rc scripts that wrap h9's devices (such as
+`wsmount` for 9P over WebSocket), are built into the h9 binary from
+[src/guest/](src/guest) and served read-only by `#H`. The namespace binds
+`#H/bin` after the root's `/bin`, so they're on the path, and a root command
+of the same name wins. `--no-guest-tools` leaves the bind out and masks
+`#H`. The root tree itself is never changed. Only rc scripts and data go in
+`src/guest/`: the build fails on an executable that doesn't start with
+`#!/bin/rc`. Debug builds also serve the test-only scripts in
+`tests/fixtures/guest/` for the integration cases; release builds don't
+(`-Dguest-test` overrides it).
+
 At the terminal, Ctrl-C posts `interrupt` to the foreground note group (rc
 abandons the command and prompts again); a second Ctrl-C within a second
 stops the machine. Closing the terminal or SIGTERM posts `hangup` to every
@@ -373,6 +384,7 @@ h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these na
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |
 | `--pids N`, `--cpus N` | Cap live processes (rfork fails with "no procs"); cap vCPUs running guest code at once |
 | `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd |
+| `--no-guest-tools` | Leave out `#H/bin`, h9's own commands, and mask `#H` |
 | `--print`, `--strict` | Print the plan and exit; refuse (exit 2) capabilities this build can't enforce |
 
 `zig build` also writes the test binaries `zig-out/fixtures/hello` (arm64) and
@@ -427,7 +439,8 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), and the devfs policy hooks (`fscheck.c`) |
+| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
+| `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig` |
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |

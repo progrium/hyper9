@@ -137,6 +137,7 @@ pub fn main(init: std.process.Init) !u8 {
         .root_user = cfg.root_user,
         .cwd = cwd,
         .policy = pol,
+        .guest_tools = cfg.guest_tools,
         .stdio = undefined,
     };
 

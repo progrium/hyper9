@@ -84,6 +84,9 @@ pub const Machine = struct {
         /// The sandbox policy (DESIGN.md, "Sandbox policy"). Host paths in
         /// it, like `root` and `cwd`, must be absolute and resolved.
         policy: policy.Policy = .{},
+        /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
+        /// bind out and masks `#H` (design/0032-guest-tools.md).
+        guest_tools: bool = true,
         /// Receives a ratrace-style line per syscall.
         trace: ?*std.Io.Writer = null,
         /// On a fault, print the Ureg and a symbolized PC to `stdio.err`.
@@ -181,7 +184,7 @@ pub const Machine = struct {
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
-        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch };
+        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools };
         if (opts.root) |r| switch (r) {
             .dir => |d| in.root = d,
             .tcp => |a| in.root_9p = .{ .kind = .tcp, .addr = a, .spec = opts.root_spec, .user = opts.root_user },

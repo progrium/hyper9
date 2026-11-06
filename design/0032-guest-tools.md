@@ -2,7 +2,7 @@
 id: 32
 slug: guest-tools
 title: h9's own commands in the guest
-status: accepted
+status: implemented
 created: 2026-11-06
 authors: [progrium]
 depends: []
@@ -119,3 +119,13 @@ The build check that rejects a non-rc executable is a `zig build test` case.
 ## Open issues
 
 - **Man pages.** `man wsmount` would need `/sys/man` entries. A `#H/sys/man/1` bound after the root's `/sys/man/1` would work the same way, if commands grow enough to need them.
+
+## Updates
+
+- 2026-11-06: Refinements made while implementing it:
+  - The table is generated at configure time: build.zig reads `src/guest/` with `tools/guesttree.zig`, which applies the rc rule and writes a Zig file that `src/kern.zig` turns into constant C structs. The rule is unit-tested there, under `zig build test`. Names starting with `.` are left out, so `src/guest/bin/.gitkeep` holds the empty directory in git. On a host without executable bits (Windows), a file is executable when it starts with `#!`.
+  - The test-only scripts live in `tests/fixtures/guest/` (`h9-guest-test`, and an `echo` the root's must beat). Debug builds serve them in `#H` too and release builds don't; `-Dguest-test` overrides that. The integration build sets `H9_TEST_GUEST_TOOLS` when they're served, and the cases that need them skip otherwise.
+  - The bind is only made with a root, since without one there's no `/bin` to add to. Like the root's `/bin` binds, it's optional.
+  - `#H` is masked only under `--no-guest-tools`; otherwise it stays attachable, since it shows nothing but the table.
+  - Opens with `OTRUNC` or `ORCLOSE` fail with "permission denied" too, as do writes, creates, removes and `wstat`.
+  - The cases are tagged `[32]`, as `zig build design -- check` asks. Two backend cases in `tests/backends.zig` check the device on hand-written arm64 programs without the root tree: the script on `/bin` reads back, `#H/bin` lists, every change is refused with "permission denied", and with `guest_tools` false the script is off `/bin` and `#H` can't be attached.

@@ -906,6 +906,7 @@ comptime {
         @export(&h9_clock_wall, .{ .name = "h9_clock_wall" });
         @export(&h9_clock_mono, .{ .name = "h9_clock_mono" });
         @export(&h9_cons_ncpu, .{ .name = "h9_cons_ncpu" });
+        @export(&h9_tools_table, .{ .name = "h9_tools_table" });
     }
 }
 
@@ -964,6 +965,40 @@ pub fn setCpus(n: u32) void {
 
 fn h9_cons_ncpu() callconv(.c) c_int {
     return @intCast(@min(cons_ncpu, std.math.maxInt(c_int)));
+}
+
+// h9's own guest commands (design/0032-guest-tools.md): the table build.zig
+// generates from src/guest/, as constant C structs. devhtools.c reads it
+// once at reset and never calls back into Zig.
+
+/// One entry, as src/kern/devhtools.c's `Htool`.
+const Htool = extern struct {
+    name: [*:0]const u8,
+    parent: u32,
+    mode: u32,
+    data: [*]const u8,
+    len: u32,
+};
+
+const dmdir: u32 = 0x80000000;
+
+const tools_table = blk: {
+    const es = @import("guest_tree").entries;
+    var out: [es.len]Htool = undefined;
+    for (es, &out) |e, *h| h.* = .{
+        .name = e.name.ptr,
+        .parent = e.parent,
+        .mode = if (e.dir) dmdir | 0o555 else if (e.exec) 0o555 else 0o444,
+        .data = e.data.ptr,
+        .len = e.data.len,
+    };
+    const final = out;
+    break :blk final;
+};
+
+fn h9_tools_table(n: *c_int) callconv(.c) [*]const Htool {
+    n.* = tools_table.len;
+    return &tools_table;
 }
 
 // Leaves called from devoverlay.c. They never raise kernel errors.

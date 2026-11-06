@@ -14,7 +14,7 @@ pub const usage =
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
     \\           [--net-allow PATTERN]...
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
-    \\           [--ns FILE] [--host-fs] [--host-cmd]
+    \\           [--ns FILE] [--host-fs] [--host-cmd] [--no-guest-tools]
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
@@ -73,6 +73,9 @@ pub const Config = struct {
     ns: ?[]const u8 = null,
     host_fs: bool = false,
     host_cmd: bool = false,
+    /// --no-guest-tools: leave out `#H/bin` and mask `#H`
+    /// (design/0032-guest-tools.md).
+    guest_tools: bool = true,
     strict: bool = false,
     print: bool = false,
     /// --rc: the command line for /bin/rc -c.
@@ -127,6 +130,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.host_fs = true;
         } else if (flag(a, "--host-cmd")) {
             c.host_cmd = true;
+        } else if (flag(a, "--no-guest-tools")) {
+            c.guest_tools = false;
         } else if (flag(a, "--strict")) {
             c.strict = true;
         } else if (flag(a, "--print")) {
@@ -401,6 +406,14 @@ test "--sandbox and --rc" {
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--memory", "lots", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--timeout", "0", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--write", "maybe", "ls" }));
+}
+
+test "--no-guest-tools" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expect((try parse(a, &.{ "h9", "ls" })).guest_tools);
+    try t.expect(!(try parse(a, &.{ "h9", "--no-guest-tools", "ls" })).guest_tools);
 }
 
 test "--pids, --cpus and --ns" {
