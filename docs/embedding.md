@@ -122,12 +122,16 @@ Every field but `stdio` has a default:
 | --- | --- | --- | --- |
 | `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.emu`; `.kvm` and `.whp` are proposed and fail with `BackendNotBuilt`. See [Backends](#backends). |
 | `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64` or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
-| `root` | `?Root` | none | `.{ .dir = path }`, `.{ .tcp = "tcp!host!564" }` or `.{ .unix = path }`. Without one, only `.bytes` programs run. |
+| `root` | `?Root` | none | `.{ .dir = path }`, `.{ .tcp = "tcp!host!564" }`, `.{ .unix = path }` or `.{ .ws = "wss://host/9p" }`. Without one, only `.bytes` programs run. |
 | `root_spec` | `[]const u8` | `""` | The attach name for a 9P root. |
 | `root_user` | `?[]const u8` | machine's user | The uname h9 attaches to a 9P root with. |
+| `root_headers` | `[]const []const u8` | `&.{}` | Extra handshake headers for a `.ws` root, as `"Name: value"`. |
+| `root_ca` | `?[]const u8` | host's bundle | A PEM file a `wss://` root must chain to: a host path. |
+| `proxy` | `?Machine.Proxy` | direct | Proxies for connections h9 makes itself (a `.ws` root, WebSocket mounts in `ns`): `.{ .http = ..., .https = ..., .no_proxy = ... }`. The CLI fills it from `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`; the library never reads the environment. Guest connections always go direct. |
 | `cwd` | `?[]const u8` | none | A host directory bound at `/mnt/term/cwd` and made the guest's cwd. |
 | `env` | `[]const EnvVar` | `&.{}` | Guest environment variables, beyond the defaults (`user`, `sysname`, `path` and so on). |
 | `policy` | `Policy` | `.{}` | The sandbox: binds, write mode, network, limits. See [The sandbox policy](#the-sandbox-policy). |
+| `guest_tools` | `bool` | `true` | Binds h9's own commands (`#H/bin`, such as `wsmount`) after `/bin`. `false` leaves them out and masks `#H`, as `--no-guest-tools` does. |
 | `trace` | `?*std.Io.Writer` | none | Receives a ratrace-style line per syscall. |
 | `dump_on_fault` | `bool` | `false` | On a fault, prints the registers and a symbolized PC to `stdio.err`. |
 | `ns` | `?[]const u8` | none | A namespace file (newns syntax) to replay after the policy's namespace is built. It's a *guest* path, so a relative one is in the guest's cwd. |
@@ -372,7 +376,7 @@ The limits:
 
 There's no API for adding a kernel device in Zig yet: the device table is
 drawterm's, compiled in ([src/kern/devtab.c](../src/kern/devtab.c)). What a
-machine can see comes from four places, all set in `Options`:
+machine can see comes from these places, all set in `Options`:
 
 **Host directories.** `root = .{ .dir = ... }`, `cwd`, and the policy's
 `readable` and `writable` paths are served by drawterm's devfs (`#U`). The
@@ -387,18 +391,42 @@ machine mounts it at `/` ([9p-roots](../design/0013-9p-roots.md)):
 .root_user = "glenda",                 // the attach uname
 ```
 
-The machine dials the server once per run, posts the connection as
+or, for a server behind a WebSocket
+([websocket-9p](../design/0021-websocket-9p.md)):
+
+```zig
+.root = .{ .ws = "wss://fs.example/9p" },
+.root_headers = &.{"Authorization: Bearer ..."},
+.root_ca = "/etc/myca.pem", // only if it isn't signed by a CA the host trusts
+```
+
+The machine connects to the server once per run, posts the connection as
 `/srv/root`, and mounts it at `/`. This is the way to give a machine files
 that come from your program rather than from disk: serve them with any 9P
 library, in-process on a thread or in another process, and the guest sees
 them as ordinary files. `.unix` isn't supported on Windows; use `.tcp`.
 
-**More 9P servers.** A guest can dial a 9P server on your host and mount
-it, when the policy lets it connect: `net = .outbound` (the default
-profile's) with a `net_allow` pattern for just that server, and in rc
-`srv tcp!127.0.0.1!5640 myfs; mount /srv/myfs /n/myfs`. To rearrange
-what's already there before the program starts, set `ns` to a namespace
-file (`bind`, `mount`, `unmount`, `cd`; manual chapter 24).
+**More 9P servers, mounted before the program starts.** Set `ns` to a
+namespace file (manual chapter 24). Its `mount` lines can name a
+WebSocket URL, which h9 connects on the host, as it does a root, using
+`proxy`:
+
+```
+mount -c wss://fs.example/9p /n/fs
+```
+
+A WebSocket mount that fails stops the run with `NamespaceFailed`, unlike
+other namespace-file lines. It's refused under `write = .none`, which h9
+can't enforce on a server it doesn't control. The file's `bind`,
+`unmount` and `cd` lines rearrange the rest of the namespace.
+
+**More 9P servers, mounted by the guest.** When the policy lets it connect
+(`net = .outbound`, the default profile's, ideally with a `net_allow`
+pattern for just that server), a guest can dial a server itself: over TCP
+with `srv tcp!127.0.0.1!5640 myfs; mount /srv/myfs /n/myfs`, or over a
+WebSocket with `wsmount ws://127.0.0.1:8080/9p /n/myfs`, which is one of
+h9's guest tools and needs `guest_tools`. Guest connections don't use
+`proxy`.
 
 **The console.** `stdio` is the machine's `/dev/cons`, so a pair of
 `std.Io` streams of your own is a device of sorts: whatever you implement
