@@ -45,6 +45,7 @@ pub fn main(init: std.process.Init) !u8 {
                 root_err = rootError(e);
                 break :blk null;
             } else null;
+            const wo = wsOptions(arena, io, cfg, root, init.environ_map) catch |e| return wsExit(e);
             var buf: [1024]u8 = undefined;
             var w = std.Io.File.stdout().writerStreaming(io, &buf);
             const code = tools.check(init.gpa, io, &w.interface, .{
@@ -55,6 +56,9 @@ pub fn main(init: std.process.Init) !u8 {
                 .root_err = root_err,
                 .root_spec = cfg.root_spec,
                 .root_user = cfg.root_user,
+                .root_headers = wo.headers,
+                .root_ca = wo.ca,
+                .proxy = wo.proxy,
             }) catch exit_failed;
             w.interface.flush() catch {};
             return code;
@@ -102,6 +106,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("h9: no root tree found; pass --root or set H9ROOT\n", .{});
         return exit_failed;
     }
+    const wo = wsOptions(arena, io, cfg, root, init.environ_map) catch |e| return wsExit(e);
     const cwd_arg = cfg.sandbox orelse cfg.cwd orelse ".";
     const cwd = kernPath(arena, std.Io.Dir.cwd().realPathFileAlloc(io, cwd_arg, arena) catch {
         std.debug.print("h9: cwd {s}: not found\n", .{cwd_arg});
@@ -135,6 +140,9 @@ pub fn main(init: std.process.Init) !u8 {
         .root = root,
         .root_spec = cfg.root_spec,
         .root_user = cfg.root_user,
+        .root_headers = wo.headers,
+        .root_ca = wo.ca,
+        .proxy = wo.proxy,
         .cwd = cwd,
         .policy = pol,
         .guest_tools = cfg.guest_tools,
@@ -258,6 +266,7 @@ fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!
     switch (try cli.rootArg(arena, arg)) {
         .tcp => |a| return .{ .tcp = a },
         .unix => |p| return .{ .unix = p },
+        .ws => |u| return .{ .ws = u },
         .path => |p| {
             const real = std.Io.Dir.cwd().realPathFileAlloc(io, p, arena) catch return error.NotFound;
             const st = std.Io.Dir.cwd().statFile(io, real, .{}) catch return error.NotFound;
@@ -274,8 +283,80 @@ fn rootError(err: RootError) []const u8 {
     return switch (err) {
         error.NotFound => "not found",
         error.NotDirOrSocket => "not a directory or socket",
-        error.BadDial => "bad dial string",
+        error.BadDial => "bad dial string or URL",
         error.OutOfMemory => "out of memory",
+    };
+}
+
+const WsOptions = struct {
+    headers: []const []const u8 = &.{},
+    ca: ?[]const u8 = null,
+    proxy: h9.Machine.Proxy = .{},
+};
+
+const WsError = error{ Usage, NotFound, OutOfMemory };
+
+/// Reads the WebSocket root's flags (design/0021-websocket-9p.md):
+/// --root-header lines, from @FILE where given, checked; --root-ca,
+/// resolved; and the proxy environment, as curl reads it.
+fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Root, env: *const std.process.Environ.Map) WsError!WsOptions {
+    const url: ?h9.ws.Url = if (root) |r| switch (r) {
+        .ws => |u| h9.ws.Url.parse(u) catch null,
+        else => null,
+    } else null;
+    if (cfg.root_headers.len > 0 and url == null) {
+        std.debug.print("h9: --root-header needs a ws:// or wss:// root\n", .{});
+        return error.Usage;
+    }
+    if (cfg.root_ca != null and (url == null or !url.?.tls)) {
+        std.debug.print("h9: --root-ca needs a wss:// root\n", .{});
+        return error.Usage;
+    }
+    var o: WsOptions = .{};
+    var headers: std.ArrayList([]const u8) = .empty;
+    for (cfg.root_headers) |h| {
+        if (h[0] == '@') {
+            const text = std.Io.Dir.cwd().readFileAlloc(io, h[1..], arena, .limited(1 << 20)) catch {
+                std.debug.print("h9: --root-header {s}: not found\n", .{h});
+                return error.NotFound;
+            };
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            while (lines.next()) |l| {
+                if (std.mem.trim(u8, l, " \t\r").len == 0) continue;
+                try headers.append(arena, try checkHeader(l, h));
+            }
+        } else try headers.append(arena, try checkHeader(h, h));
+    }
+    o.headers = headers.items;
+    if (cfg.root_ca) |ca| {
+        o.ca = std.Io.Dir.cwd().realPathFileAlloc(io, ca, arena) catch {
+            std.debug.print("h9: --root-ca {s}: not found\n", .{ca});
+            return error.NotFound;
+        };
+    }
+    o.proxy = .{
+        .http = env.get("HTTP_PROXY") orelse env.get("http_proxy"),
+        .https = env.get("HTTPS_PROXY") orelse env.get("https_proxy"),
+        .no_proxy = env.get("NO_PROXY") orelse env.get("no_proxy") orelse "",
+    };
+    return o;
+}
+
+fn checkHeader(line: []const u8, given: []const u8) WsError![]const u8 {
+    return h9.ws.checkHeader(line) catch |e| {
+        const name = h9.ws.headerName(line);
+        switch (e) {
+            error.ReservedHeader => std.debug.print("h9: --root-header{s}{s}: {s} changes the handshake\n", .{ if (given[0] == '@') " " else "", if (given[0] == '@') given else "", name }),
+            error.BadHeader => std.debug.print("h9: --root-header{s}{s}: '{s}' isn't a 'Name: value' header\n", .{ if (given[0] == '@') " " else "", if (given[0] == '@') given else "", line }),
+        }
+        return error.Usage;
+    };
+}
+
+fn wsExit(e: WsError) u8 {
+    return switch (e) {
+        error.Usage => 2,
+        error.NotFound, error.OutOfMemory => exit_failed,
     };
 }
 

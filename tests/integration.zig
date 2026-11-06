@@ -24,6 +24,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Term = @import("term.zig").Term;
+const wsrelay = @import("wsrelay.zig");
 const design = @import("design");
 
 const gpa = std.testing.allocator;
@@ -161,13 +162,20 @@ fn runOn(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const 
 /// std.process.run, with `stdin` written to a pipe (closed at the end) or,
 /// if null, the null device.
 fn runProcess(argv: []const []const u8, stdin: ?[]const u8) !std.process.RunResult {
+    return runProcessWith(argv, stdin, null, 30_000);
+}
+
+/// runProcess, with the environment `environ` (if not null) and a
+/// timeout of `ms`, scaled by H9_TEST_SLOW.
+fn runProcessWith(argv: []const []const u8, stdin: ?[]const u8, environ: ?*const std.process.Environ.Map, ms: u32) !std.process.RunResult {
     const io = std.testing.io;
-    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(slow(30_000)), .clock = .awake } };
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(slow(ms)), .clock = .awake } };
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .stdin = if (stdin != null) .pipe else .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
+        .environ_map = environ,
         .create_no_window = true,
     });
     defer child.kill(io);
@@ -487,7 +495,7 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #U\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U\n") != null);
 }
 
 test "--strict refuses what this build can't enforce [baseline]" {
@@ -2134,11 +2142,18 @@ const RootServer = struct {
 /// Runs `args` over the 9P root `root` and over the host tree, and checks
 /// that both succeed with the same output.
 fn expectSameAsHost(e: Env, root: []const u8, args: []const []const u8) !void {
+    return expectSameAsHostWith(e, root, &.{}, args);
+}
+
+/// expectSameAsHost, with `root_args` (flags that need the 9P root, such
+/// as --root-header) added to the run over the root only.
+fn expectSameAsHostWith(e: Env, root: []const u8, root_args: []const []const u8, args: []const []const u8) !void {
     const host = try run(e, args);
     defer host.deinit();
     var with_root: std.ArrayList([]const u8) = .empty;
     defer with_root.deinit(gpa);
     try with_root.appendSlice(gpa, &.{ "--root", root });
+    try with_root.appendSlice(gpa, root_args);
     try with_root.appendSlice(gpa, args);
     const r = try run(e, with_root.items);
     defer r.deinit();
@@ -2576,4 +2591,605 @@ test "--print shows the #H bind [32]" {
         const h_at = std.mem.indexOf(u8, p.out, "  bind -a '#H/bin' /bin  # h9's commands\n") orelse return error.NoHBin;
         try std.testing.expect(h_at > rc_at);
     }
+}
+
+// 9P over WebSocket (design/0021-websocket-9p.md). The server is 9p-roots'
+// RootServer with tests/wsrelay.zig in front of it, relaying WebSocket
+// messages to its TCP port. /net/ws cases use the relay in echo mode.
+
+/// A RootServer behind a WebSocket relay, for the life of a case.
+const WsRoot = struct {
+    srv: RootServer,
+    relay: wsrelay.Relay,
+
+    fn start(w: *WsRoot, e: Env, opts: wsrelay.Options) !void {
+        try w.srv.start(e);
+        errdefer w.srv.stop();
+        var o = opts;
+        o.target_port = w.srv.port;
+        try w.relay.start(std.testing.io, 0, o);
+    }
+
+    fn url(w: *WsRoot) []const u8 {
+        return w.relay.url();
+    }
+
+    fn stop(w: *WsRoot) void {
+        w.relay.stop();
+        w.srv.stop();
+    }
+};
+
+/// An echo relay, for /net/ws cases.
+fn startEcho(rl: *wsrelay.Relay, opts: wsrelay.Options) !void {
+    var o = opts;
+    o.echo = true;
+    try rl.start(std.testing.io, 0, o);
+}
+
+/// An rc command that opens a /net/ws conversation, connects it to `url`
+/// (with `extra` after the URL, such as a subprotocol), and runs `body`
+/// with the conversation's number in $n.
+fn rcWs(buf: []u8, url: []const u8, extra: []const u8, body: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{{ n=`{{read}}; echo connect {s}{s} >/net/ws/$n/ctl && {s} }} <>/net/ws/clone", .{ url, extra, body });
+}
+
+/// Runs `h9 args...` on `backend` with `vars` (pairs of name and value)
+/// added to the environment, and a timeout of `ms`.
+fn runEnv(e: Env, backend: []const u8, args: []const []const u8, vars: []const [2][]const u8, ms: u32) !Result {
+    var map = try std.testing.environ.createMap(gpa);
+    defer map.deinit();
+    for (vars) |v| try map.put(v[0], v[1]);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, args);
+    const r = try runProcessWith(argv.items, null, &map, ms);
+    const code = switch (r.term) {
+        .exited => |c| c,
+        else => {
+            gpa.free(r.stdout);
+            gpa.free(r.stderr);
+            return error.Crashed;
+        },
+    };
+    return .{ .code = code, .out = r.stdout, .err = r.stderr };
+}
+
+fn expectIn(haystack: []const u8, needle: []const u8) !void {
+    if (std.mem.indexOf(u8, haystack, needle) == null) {
+        std.debug.print("expected {s} in:\n{s}\n", .{ needle, haystack });
+        return error.TestExpectedEqual;
+    }
+}
+
+test "a ws:// root runs /bin/ls [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    try expectSameAsHost(e, w.url(), &.{ "/bin/ls", "/", "/bin/ls" });
+    try std.testing.expectEqualStrings("/9p", w.relay.target());
+}
+
+test "rc pipelines and exec run from a ws:// root [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    try expectSameAsHost(e, w.url(), &.{ "--rc", "ls /bin | grep -c '/cat$'; echo a b c | wc -w; exec /bin/echo done" });
+}
+
+test "a ws:// root works when the server splits and coalesces 9P messages [21]" {
+    const e = try env(@src());
+    for ([_]wsrelay.Options{ .{ .split = true }, .{ .coalesce = true }, .{ .split = true, .coalesce = true } }) |o| {
+        var w: WsRoot = undefined;
+        try w.start(e, o);
+        defer w.stop();
+        try expectSameAsHost(e, w.url(), &.{ "--rc", "ls / /bin/ls; cat /lib/namespace | wc -l" });
+    }
+}
+
+test "a ws:// root works with a server that selects no subprotocol [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .subprotocol = false });
+    defer w.stop();
+    try expectSameAsHost(e, w.url(), &.{ "/bin/ls", "/" });
+}
+
+test "--root-header is sent, and @FILE reads headers from a file [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .require_header = "Authorization: Bearer s3cret" });
+    defer w.stop();
+    try expectSameAsHostWith(e, w.url(), &.{ "--root-header", "Authorization: Bearer s3cret" }, &.{ "/bin/ls", "/" });
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "headers", .data = "Authorization: Bearer s3cret\n\nX-Other: two\n" });
+    const file = try std.fmt.allocPrint(gpa, "@{s}/headers", .{s.path});
+    defer gpa.free(file);
+    try expectSameAsHostWith(e, w.url(), &.{ "--root-header", file }, &.{ "/bin/ls", "/" });
+    try std.testing.expectEqualStrings("two", w.relay.header("X-Other") orelse "");
+    // Without it, the server refuses the handshake.
+    const r = try run(e, &.{ "--root", w.url(), "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try expectIn(r.err, "server answered 401 Unauthorized");
+}
+
+test "a handshake answered with 401 exits 125 with the status [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{ .status = 401 });
+    defer rl.stop();
+    const r = try run(e, &.{ "--root", rl.url(), "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    var want: [128]u8 = undefined;
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: server answered 401 Unauthorized", .{rl.url()}));
+}
+
+test "an unreachable ws:// root exits 125 [21]" {
+    const e = try env(@src());
+    var probe = try listenLocal();
+    const port = probe.socket.address.getPort();
+    probe.deinit(std.testing.io);
+    var buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&buf, "ws://127.0.0.1:{d}/9p", .{port});
+    const r = try run(e, &.{ "--root", url, "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    var want: [128]u8 = undefined;
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: connection refused", .{url}));
+}
+
+test "a server close makes guest file operations fail [21]" {
+    const e = try env(@src());
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var w: WsRoot = undefined;
+        try w.start(e, .{});
+        defer w.stop();
+        var t = try spawnTerm(e, backend, &.{ "--root", w.url(), "--timeout", "60s", "--rc", "echo ready; sleep 2; /bin/echo after" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        w.relay.hangupAll();
+        try std.testing.expect(try t.wait(slow(20_000)) != 0);
+    }
+}
+
+test "an idle ws:// root pings, and a server that stops answering fails it [21]" {
+    const e = try env(@src());
+    // The keepalive pings after 30 s without a frame and fails the
+    // connection 30 s after that, so this case takes over a minute.
+    {
+        var w: WsRoot = undefined;
+        try w.start(e, .{});
+        defer w.stop();
+        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", "sleep 40; /bin/echo still" }, &.{}, 90_000);
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqual(0, r.code);
+        try std.testing.expectEqualStrings("still\n", r.out);
+        try std.testing.expect(w.relay.pings.load(.acquire) >= 1);
+    }
+    {
+        var w: WsRoot = undefined;
+        try w.start(e, .{ .no_pong = true });
+        defer w.stop();
+        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", "sleep 70; /bin/echo still" }, &.{}, 120_000);
+        defer r.deinit();
+        try std.testing.expect(r.code != 0);
+        try std.testing.expect(std.mem.indexOf(u8, r.out, "still") == null);
+        try std.testing.expect(w.relay.pings.load(.acquire) >= 1);
+    }
+}
+
+test "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var p: wsrelay.Proxy = undefined;
+    try p.start(std.testing.io, null);
+    const via = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "/bin/ls", "/bin/ls" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    defer via.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{via.err});
+    try std.testing.expectEqual(0, via.code);
+    try std.testing.expectEqualStrings("/bin/ls\n", via.out);
+    try std.testing.expectEqual(1, p.connects.load(.acquire));
+    const direct = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "/bin/ls", "/bin/ls" }, &.{ .{ "http_proxy", p.url() }, .{ "NO_PROXY", "localhost,127.0.0.1" } }, 30_000);
+    defer direct.deinit();
+    try std.testing.expectEqual(0, direct.code);
+    try std.testing.expectEqual(1, p.connects.load(.acquire));
+}
+
+test "a proxy answering 407 exits 125 with the status [21]" {
+    const e = try env(@src());
+    var p: wsrelay.Proxy = undefined;
+    try p.start(std.testing.io, 407);
+    const r = try runEnv(e, firstBackend(e), &.{ "--root", "ws://127.0.0.1:1/9p", "/bin/echo" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try expectIn(r.err, "root ws://127.0.0.1:1/9p: proxy answered 407 Proxy Authentication Required");
+}
+
+test "a /net/ws connect ignores HTTP_PROXY [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var p: wsrelay.Proxy = undefined;
+    try p.start(std.testing.io, null);
+    var cmd: [512]u8 = undefined;
+    const r = try runEnv(e, firstBackend(e), &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo hi >/net/ws/$n/data && read </net/ws/$n/data") }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    try std.testing.expectEqual(0, p.connects.load(.acquire));
+}
+
+test "--root-ca with a ws:// root is a usage error [21]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ca.pem", .data = "" });
+    const ca = try std.fs.path.join(gpa, &.{ s.path, "ca.pem" });
+    defer gpa.free(ca);
+    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--root-ca", ca, "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try expectIn(r.err, "--root-ca needs a wss:// root");
+}
+
+test "a note interrupts a read waiting on a ws:// root [21]" {
+    const e = try env(@src());
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var w: WsRoot = undefined;
+        try w.start(e, .{});
+        defer w.stop();
+        var t = try spawnTerm(e, backend, &.{ "--root", w.url(), "--timeout", "60s", "rc", "-i" });
+        defer t.deinit();
+        try t.expect(prompt, slow(10_000));
+        // The server stops answering, so the exec's reads wait.
+        w.relay.paused.store(true, .release);
+        try t.send("cat /lib/namespace" ++ enter);
+        try t.drain(slow(500));
+        try t.send("\x03");
+        try t.drain(slow(500));
+        w.relay.paused.store(false, .release);
+        try t.expect(prompt, slow(10_000));
+        try t.send("echo x^y" ++ enter);
+        try t.expect("xy", slow(10_000));
+        try t.send("exit" ++ enter);
+        _ = try t.wait(slow(10_000));
+    }
+}
+
+test "a namespace file mounts a ws:// URL [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var ns: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}?k=v' /n\n", .{w.url()}) });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "/bin/ls", "/n/rc/bin/lc" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/n/rc/bin/lc\n", r.out);
+    try std.testing.expectEqualStrings("/9p?k=v", w.relay.target());
+    // Under --write=none, the mount can't be kept read-only.
+    const none = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--write=none", "/bin/echo" });
+    defer none.deinit();
+    try std.testing.expectEqual(125, none.code);
+    try expectIn(none.err, "--write=none can't be enforced on a WebSocket mount");
+}
+
+test "a host-made stream isn't reachable through /net/ws or an attach spec [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    const r = try run(e, &.{ "--root", w.url(), "--rc", "ls /net/ws; for(i in 0 1 2 256 257) ls '#ℏ'$i >[2]/dev/null && echo reached $i; echo done" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/net/ws/clone\ndone\n", r.out);
+}
+
+test "the guest connects /net/ws and mounts its data [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var cmd: [512]u8 = undefined;
+    const snippet = try std.fmt.bufPrint(&cmd, "mkdir /tmp/fs && {{ n=`{{read}}; echo connect {s} 9p >/net/ws/$n/ctl; mount -c /net/ws/$n/data /tmp/fs }} <>/net/ws/clone && ls /tmp/fs/rc/bin/lc", .{w.url()});
+    const r = try run(e, &.{ "--rc", snippet });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/tmp/fs/rc/bin/lc\n", r.out);
+}
+
+test "wsmount mounts a ws:// URL with flags and headers [21, 32]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .require_header = "X-Token: t0k" });
+    defer w.stop();
+    var cmd: [256]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try std.fmt.bufPrint(&cmd, "mkdir /tmp/fs && wsmount -c -h 'X-Token: t0k' {s} /tmp/fs && ls /tmp/fs/rc/bin/lc", .{w.url()}) });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/tmp/fs/rc/bin/lc\n", r.out);
+}
+
+test "a /net/ws conversation reports its URL and status [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try rcWs(&cmd, rl.url(), " 9p", "cat /net/ws/$n/remote /net/ws/$n/status; echo hangup >/net/ws/$n/ctl; cat /net/ws/$n/status") });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    var want: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}\nEstablished 9p\nClosed 1000 \n", .{rl.url()}), r.out);
+}
+
+test "a guest WebSocket mount can be posted to /srv and mounted again [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var post: [256]u8 = undefined;
+    var cmd: [512]u8 = undefined;
+    const body = "{ echo 5 >/srv/wsfs } <>[5] /net/ws/$n/data";
+    const r = try run(e, &.{ "--rc", try std.fmt.bufPrint(&cmd, "{s} && mkdir /tmp/a /tmp/b && mount -c /srv/wsfs /tmp/a && mount -c /srv/wsfs /tmp/b && ls /tmp/a/rc/bin/lc /tmp/b/rc/bin/lc", .{try rcWs(&post, w.url(), " 9p", body)}) });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/tmp/a/rc/bin/lc\n/tmp/b/rc/bin/lc\n", r.out);
+}
+
+test "header in ctl is sent with the handshake [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{ .require_header = "X-Token: t0k" });
+    defer rl.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try std.fmt.bufPrint(&cmd, "{{ n=`{{read}}; echo header X-Token: t0k >/net/ws/$n/ctl; echo connect {s} >/net/ws/$n/ctl && echo ok }} <>/net/ws/clone", .{rl.url()}) });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("ok\n", r.out);
+    try std.testing.expectEqualStrings("t0k", rl.header("X-Token") orelse "");
+    // A header that changes the handshake is refused.
+    const bad = try run(e, &.{ "--rc", "{ n=`{read}; echo header Upgrade: no >/net/ws/$n/ctl } <>/net/ws/clone" });
+    defer bad.deinit();
+    try std.testing.expect(bad.code != 0);
+}
+
+/// Reads one text message from conversation $n, as rc runs it.
+const read_text = "dd -bs 8192 -count 1 </net/ws/$n/text >[2]/dev/null; echo";
+
+test "text writes are sent as text messages and text reads return one message each [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo -n hello >/net/ws/$n/text; echo -n 'two words' >/net/ws/$n/text; " ++ read_text ++ "; " ++ read_text) });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hello\ntwo words\n", r.out);
+}
+
+test "a text read with a short buffer fails and leaves the message queued [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo -n hello >/net/ws/$n/text; dd -bs 2 -count 1 </net/ws/$n/text; " ++ read_text) });
+    defer r.deinit();
+    try expectIn(r.err, "message too long");
+    try std.testing.expect(std.mem.endsWith(u8, r.out, "hello\n"));
+}
+
+test "a text write that isn't valid utf-8 fails and sends nothing [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad", .data = "a\xff\xfeb" });
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", try rcWs(&cmd, rl.url(), "", "cat bad >/net/ws/$n/text; echo -n ok >/net/ws/$n/text; " ++ read_text) });
+    defer r.deinit();
+    try expectIn(r.err, "invalid utf-8");
+    try std.testing.expectEqualStrings("ok\n", r.out);
+}
+
+test "text from the server doesn't appear on data, nor binary on text [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{ .send_text = "greeting" });
+    defer rl.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo bin >/net/ws/$n/data; read </net/ws/$n/data; " ++ read_text) });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("bin\ngreeting\n", r.out);
+}
+
+test "a ws:// root fails on a text message from the server [21]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .send_text = "hello" });
+    defer w.stop();
+    const r = try run(e, &.{ "--root", w.url(), "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    var want: [128]u8 = undefined;
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: ", .{w.url()}));
+}
+
+test "--net=disable leaves /net/ws unbound and #ℏ masked [21]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--net=disable", "--rc", "ls /net/ws >[2]/dev/null || echo unbound; ls '#ℏ' >[2]/dev/null || echo masked" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("unbound\nmasked\n", r.out);
+}
+
+test "--net-allow refuses a /net/ws connect to a host it doesn't cover [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--net-allow", "tcp!10.0.0.0/8!*", "--rc", try rcWs(&cmd, rl.url(), "", "echo connected") });
+    defer r.deinit();
+    try expectIn(r.err, "permission denied");
+    try std.testing.expectEqualStrings("", r.out);
+    try std.testing.expectEqual(0, rl.accepted.load(.acquire));
+}
+
+test "--net-allow refuses a name before it's resolved [21]" {
+    const e = try env(@src());
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var url: [64]u8 = undefined;
+    var cmd: [512]u8 = undefined;
+    // The pattern names an address, not localhost, so the name isn't
+    // looked up at all.
+    const r = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!80", "--rc", try rcWs(&cmd, try std.fmt.bufPrint(&url, "ws://localhost:{d}/", .{rl.port}), "", "echo connected") });
+    defer r.deinit();
+    try expectIn(r.err, "permission denied");
+    try std.testing.expectEqual(0, rl.accepted.load(.acquire));
+}
+
+test "a /net/ws connect to a link-local address is refused without patterns [21]" {
+    const e = try env(@src());
+    var cmd: [512]u8 = undefined;
+    const c = try rcWs(&cmd, "ws://169.254.169.254/", "", "echo connected");
+    for ([_][]const u8{ "--net=outbound", "--net=enable" }) |mode| {
+        const r = try run(e, &.{ mode, "--rc", c });
+        defer r.deinit();
+        try expectIn(r.err, "permission denied");
+        try std.testing.expect(r.code != 0);
+    }
+}
+
+test "a note interrupts a /net/ws connect [21]" {
+    const e = try env(@src());
+    // It takes the TCP connection but never answers the handshake.
+    var srv = try listenLocal();
+    defer srv.deinit(std.testing.io);
+    var url: [64]u8 = undefined;
+    var cmd: [512]u8 = undefined;
+    const c = try rcWs(&cmd, try std.fmt.bufPrint(&url, "ws://127.0.0.1:{d}/", .{srv.socket.address.getPort()}), "", "echo connected");
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "rc", "-i" });
+        defer t.deinit();
+        try t.expect(prompt, slow(10_000));
+        try t.send(c);
+        try t.send(enter);
+        try t.drain(slow(1000));
+        try t.send("\x03");
+        try t.expect(prompt, slow(10_000));
+        try t.send("echo x^y" ++ enter);
+        try t.expect("xy", slow(10_000));
+        try t.send("exit" ++ enter);
+        _ = try t.wait(slow(10_000));
+    }
+}
+
+test "a machine can't open more than 32 conversations [21]" {
+    const e = try env(@src());
+    for ([_]u32{ 32, 33 }) |count| {
+        var cmd: std.ArrayList(u8) = .empty;
+        defer cmd.deinit(gpa);
+        try cmd.appendSlice(gpa, "{ ls /net/ws | wc -l }");
+        for (0..count) |i| try cmd.print(gpa, " <>[{d}] /net/ws/clone", .{i + 3});
+        const r = try run(e, &.{ "--rc", cmd.items });
+        defer r.deinit();
+        if (count == 32) {
+            try std.testing.expectEqual(0, r.code);
+            try std.testing.expectEqualStrings("33", std.mem.trim(u8, r.out, " \t\n"));
+        } else {
+            try std.testing.expect(r.code != 0);
+            try expectIn(r.err, "no free devices");
+        }
+    }
+}
+
+test "--print elides a ws:// root's query and header values [21]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p?token=s3cret", "--root-header", "Authorization: Bearer s3cret", "--print", "ls" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "# ws://127.0.0.1:1/9p?…  (Authorization: …)");
+    try expectIn(r.out, "bind -a '#ℏ' /net");
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "s3cret") == null);
+}
+
+test "--write=none with a ws:// root is a usage error [21]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--write=none", "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try expectIn(r.err, "--write=none can't be enforced on a WebSocket root");
+}
+
+/// H9_TEST_WSS_URL, a wss:// 9P server the host can reach, or a skip.
+fn wssUrl(buf: []u8) ![]const u8 {
+    const v = getenv(3, "H9_TEST_WSS_URL") orelse return error.SkipZigTest;
+    if (v.len > buf.len) return error.SkipZigTest;
+    @memcpy(buf[0..v.len], v);
+    return buf[0..v.len];
+}
+
+test "a wss:// root runs /bin/ls [21]" {
+    const e = try env(@src());
+    var buf: [1024]u8 = undefined;
+    const url = try wssUrl(&buf);
+    if (getenv(3, "H9_TEST_WSS_CA") != null) return error.SkipZigTest; // the next case's
+    const r = try run(e, &.{ "--root", url, "/bin/ls", "/bin/ls" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/bin/ls\n", r.out);
+}
+
+test "--root-ca trusts a private CA, and the host bundle doesn't [21]" {
+    const e = try env(@src());
+    var buf: [1024]u8 = undefined;
+    const url = try wssUrl(&buf);
+    var ca_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const v = getenv(3, "H9_TEST_WSS_CA") orelse return error.SkipZigTest;
+    @memcpy(ca_buf[0..v.len], v);
+    const ca = ca_buf[0..v.len];
+    const ok = try run(e, &.{ "--root", url, "--root-ca", ca, "/bin/ls", "/bin/ls" });
+    defer ok.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{ok.err});
+    try std.testing.expectEqual(0, ok.code);
+    const refused = try run(e, &.{ "--root", url, "/bin/echo" });
+    defer refused.deinit();
+    try std.testing.expectEqual(125, refused.code);
+    try expectIn(refused.err, "certificate: unknown authority");
 }

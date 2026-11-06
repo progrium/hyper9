@@ -450,3 +450,18 @@ Demo: `h9 --root ws://localhost:8080/9p ls /` lists the served tree, with the se
 ## Open issues
 
 - **The subprotocol name.** `9p` is offered, and a server that selects none is accepted, since most WebSocket servers don't use subprotocols. If a name other than `9p` becomes common among 9P-over-WebSocket servers, h9 adds it to what it offers.
+
+## Updates
+
+- 2026-11-06: Steps 1 to 7 and 9 are implemented; step 8 waits for [browser-host](0012-browser-host.md). The status stays `accepted` until then. `wsmount` reaches the guest's `/bin` through [guest-tools](0032-guest-tools.md)'s `#H/bin`. Refinements made while implementing it:
+  - `Machine.Options.proxy` null means direct. The CLI fills it from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (either case); a library caller passes its own. Only `http://` proxies are supported, with credentials from the proxy URL's userinfo sent as `Proxy-Authorization: Basic`.
+  - A `ws://` or `wss://` URL with userinfo (`ws://user:pass@host/`) is refused as a bad URL, at `--root` (exit 2) and in `ctl`, since browsers drop it and it would put a secret in the plan and `remote`. `--root-header 'Authorization: …'` covers it.
+  - `--write=none` with a namespace file that mounts a URL is found during the replay, so it exits 125 with "mount URL: --write=none can't be enforced on a WebSocket mount" rather than 2: the file is a guest path, read by the kernel after the policy is compiled.
+  - `--trace` prints no write data, so a URL or header written to `ctl` doesn't appear in a trace, and nothing more was needed to keep it out.
+  - Raw (unframed) host-made streams, step 2's "and raw", aren't built: nothing uses them yet. [serve](0035-serve.md) adds them with its listeners.
+  - Received text on a host-made stream fails the connection with 1007, "text message on a 9P stream", as the root's case expects; on a guest conversation it's queued on `text`.
+  - A machine's 33rd conversation fails `clone`'s open with "no free devices", devip's error for a full protocol directory.
+  - The keepalive is one host thread for every stream, ticking at a quarter of the idle time (at most a second), rather than a timer per stream.
+  - `tests/wsrelay.zig` also builds as a program, `zig build wsrelay -- LISTEN_PORT TARGET_PORT`, for the demo.
+  - `wsmount`'s case is tagged `[21, 32]`, since the script reaches the guest through guest-tools. The browser-host cases aren't written yet; they come with step 8.
+  - A TLS 1.3 key update that the server asks to be answered is answered by `std.crypto.tls.Client` from the reader thread, outside the stream's write lock, so it could interleave with a guest's send. Servers rarely ask for one; it's noted here until one does.

@@ -1219,8 +1219,10 @@ h9_kern_release(void)
 	lock(&m->lk);
 	last = --m->nlive == 0;
 	unlock(&m->lk);
-	if(last)
+	if(last){
 		h9_srvmachclose(m);
+		h9_hstream_machend(m);
+	}
 }
 
 /*

@@ -129,6 +129,9 @@ int	h9_pids(Hmach*, ulong*, int);
 void	h9_srvmachclose(Hmach*);
 void	h9_srvmachfree(Hmach*);
 
+/* src/hstream.zig: closes the machine's host streams */
+void	h9_hstream_machend(void*);
+
 /*
  * Set by the Zig side: the state (a syscall's name, "Running"...) and the
  * mapped memory in KiB of Zig process aux. Called with the record's nlk

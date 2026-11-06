@@ -1,0 +1,24 @@
+#!/bin/rc
+# wsmount [-abcC] [-h 'Name: value']... url mountpoint [spec]
+rfork e
+fn usage { echo 'usage: wsmount [-abcC] [-h header]... url mountpoint [spec]' >[1=2]; exit usage }
+flags=()
+headers=()
+while(~ $1 -*){
+	switch($1){
+	case -h
+		~ $#* 1 && usage
+		headers=($headers $2)
+		shift
+	case -[abcC]*
+		flags=($flags $1)
+	case *
+		usage
+	}
+	shift
+}
+~ $#* 2 3 || usage
+{ n=`{read}
+  for(h in $headers) echo header $h >/net/ws/$n/ctl || exit header
+  echo connect $1 9p >/net/ws/$n/ctl || exit connect
+  mount $flags /net/ws/$n/data $2 $3 } <>/net/ws/clone
