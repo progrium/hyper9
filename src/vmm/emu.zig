@@ -61,6 +61,12 @@ fn prot(p: vmm.Perms) u32 {
     return r;
 }
 
+/// Frees pages from `Backend.allocPages` without free's 0xaa fill in safe
+/// builds, which would touch every page first.
+fn freeRaw(mem: []align(vmm.page_size) u8) void {
+    std.heap.page_allocator.rawFree(mem, .fromByteUnits(vmm.page_size), @returnAddress());
+}
+
 pub const Backend = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -71,6 +77,7 @@ pub const Backend = struct {
     /// Bytes handed out, against the cap in `limit`.
     used: u64 = 0,
     limit: u64,
+    guest: GuestLock = .{},
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*Backend {
         // Fail here, not at the first vCPU, if Unicorn lacks the architecture.
@@ -84,7 +91,7 @@ pub const Backend = struct {
 
     pub fn destroy(b: *Backend) void {
         var it = b.allocs.iterator();
-        while (it.next()) |e| std.heap.page_allocator.free(@as([*]align(vmm.page_size) u8, @ptrFromInt(e.key_ptr.*))[0..e.value_ptr.*]);
+        while (it.next()) |e| freeRaw(@as([*]align(vmm.page_size) u8, @ptrFromInt(e.key_ptr.*))[0..e.value_ptr.*]);
         b.allocs.deinit(b.gpa);
         b.gpa.destroy(b);
     }
@@ -108,15 +115,18 @@ pub const Backend = struct {
             b.used -= n * vmm.page_size;
             b.lock.unlock(b.io);
         }
-        const mem = std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(vmm.page_size), n * vmm.page_size) catch
+        // rawAlloc skips the 0xaa fill that alignedAlloc does in safe
+        // builds. Fresh pages from the OS are zero, and pages nothing
+        // touches stay unbacked on the host: a Go program reserves several
+        // hundred MB of brk at start, and zeroing it by hand cost seconds.
+        const len = n * vmm.page_size;
+        const raw = std.heap.page_allocator.rawAlloc(len, .fromByteUnits(vmm.page_size), @returnAddress()) orelse
             return error.OutOfGuestMemory;
-        // Fresh pages from the OS are zero, but Zig's allocators fill new
-        // memory with 0xaa in safe builds, so zero them explicitly.
-        @memset(mem, 0);
+        const mem: []align(vmm.page_size) u8 = @alignCast(raw[0..len]);
         b.lock.lockUncancelable(b.io);
         defer b.lock.unlock(b.io);
         b.allocs.put(b.gpa, @intFromPtr(mem.ptr), mem.len) catch {
-            std.heap.page_allocator.free(mem);
+            freeRaw(mem);
             return error.OutOfGuestMemory;
         };
         return mem;
@@ -131,7 +141,7 @@ pub const Backend = struct {
             std.debug.assert(len == mem.len);
             b.used -= len;
         }
-        std.heap.page_allocator.free(mem);
+        freeRaw(mem);
     }
 
     pub fn newAddressSpace(b: *Backend) vmm.CreateError!*AddressSpace {
@@ -191,6 +201,42 @@ pub const AddressSpace = struct {
     pub fn destroy(as: *AddressSpace) void {
         as.regions.deinit(as.backend.gpa);
         as.backend.gpa.destroy(as);
+    }
+};
+
+/// Unicorn generates code for a single-threaded context (its
+/// `curr_cflags` never sets CF_PARALLEL), so a guest's atomic instructions
+/// (x86 LOCK-prefixed ones, arm64 exclusives and LSE atomics) become plain
+/// loads and stores. Engines running at once on memory they share, such as
+/// a Go program's processes, race through them: Go's runtime fails with
+/// "unlock of unlocked lock". So a backend runs guest code on one engine at
+/// a time, through a fair (ticket) lock held across each `uc_emu_start`.
+/// Kernel calls run outside it, so processes still block and wait in the
+/// kernel in parallel.
+///
+/// The lock is only passed on at an exit (a syscall, a fault or a kick),
+/// not on a timer: stopping an engine from another thread with
+/// `uc_emu_stop` can leave its PC at an earlier block than the one it
+/// stopped at, so resuming would run instructions twice. A guest that
+/// spins without syscalls holds the others off until it makes one, as Go
+/// and libc do between short bursts of spinning.
+const GuestLock = struct {
+    next: std.atomic.Value(u32) = .init(0),
+    serving: std.atomic.Value(u32) = .init(0),
+
+    fn acquire(g: *GuestLock, io: std.Io) void {
+        const ticket = g.next.fetchAdd(1, .acq_rel);
+        while (true) {
+            const cur = g.serving.load(.acquire);
+            if (cur == ticket) return;
+            io.futexWaitUncancelable(u32, &g.serving.raw, cur);
+        }
+    }
+
+    fn release(g: *GuestLock, io: std.Io) void {
+        _ = g.serving.fetchAdd(1, .acq_rel);
+        // Tickets are served in order, so every waiter has to look.
+        if (g.next.load(.acquire) -% g.serving.load(.acquire) > 0) io.futexWake(u32, &g.serving.raw, std.math.maxInt(u32));
     }
 };
 
@@ -333,7 +379,15 @@ const State = struct {
         try s.sync();
         try s.writeRegs();
         s.stop = .none;
+        s.backend.guest.acquire(s.backend.io);
+        // A kick while this waited for the lock may have stopped nothing,
+        // since `kick` stops repeating its request after a while.
+        if (s.kicked.swap(false, .seq_cst)) {
+            s.backend.guest.release(s.backend.io);
+            return .interrupted;
+        }
         const err = uc.uc_emu_start(s.engine, s.ureg.pc(), std.math.maxInt(u64), 0, 0);
+        s.backend.guest.release(s.backend.io);
         s.in_run.store(false, .release);
         try s.readRegs();
         const stop = s.stop;

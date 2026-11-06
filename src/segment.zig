@@ -20,6 +20,25 @@ const vmm = @import("vmm.zig");
 
 const page = vmm.page_size;
 
+/// Copies `src` into `dst`, which is freshly allocated and so zero, a page
+/// at a time, skipping pages of `src` that are zero. A Go program reserves
+/// several hundred MB of brk it never touches, which rfork would otherwise
+/// write in full; reading an untouched page costs the host next to nothing.
+fn copySparse(dst: []u8, src: []const u8) void {
+    std.debug.assert(dst.len == src.len and src.len % page == 0);
+    var off: usize = 0;
+    while (off < src.len) : (off += page) {
+        const p: []const u8 = src[off..][0..page];
+        const words: []const u64 = @alignCast(std.mem.bytesAsSlice(u64, p));
+        for (words) |w| {
+            if (w != 0) {
+                @memcpy(dst[off..][0..page], p);
+                break;
+            }
+        }
+    }
+}
+
 pub const Kind = enum {
     text,
     data,
@@ -144,7 +163,7 @@ pub const Segment = struct {
         const n = try create(s.gpa, s.backend, s.kind, s.perms, s.base, s.top - s.base);
         n.brk = s.brk;
         n.cexec = s.cexec;
-        for (s.chunks.items) |c| @memcpy(n.chunks.items[0].mem[c.va - s.base ..][0..c.mem.len], c.mem);
+        for (s.chunks.items) |c| copySparse(n.chunks.items[0].mem[c.va - s.base ..][0..c.mem.len], c.mem);
         return n;
     }
 
