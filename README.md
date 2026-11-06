@@ -25,15 +25,15 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [self-host](design/0010-self-host.md) | accepted | ready | Self-hosting |
 | [overlay](design/0011-overlay.md) | accepted | ready | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | accepted | ready | A browser host on wasm, with v86 |
-| [9p-roots](design/0013-9p-roots.md) | accepted | ready | 9P roots |
-| [image-roots](design/0014-image-roots.md) | draft | needs 9p-roots | Disk-image roots |
+| [9p-roots](design/0013-9p-roots.md) | implemented |  | 9P roots |
+| [image-roots](design/0014-image-roots.md) | draft |  | Disk-image roots |
 | [gfx](design/0015-gfx.md) | accepted | ready | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
-| [websocket-9p](design/0021-websocket-9p.md) | draft | needs 9p-roots, guest-tools | 9P over WebSocket |
-| [dotl](design/0022-dotl.md) | draft | needs 9p-roots, serve, guest-tools | 9P2000.L and ZeroFS |
+| [websocket-9p](design/0021-websocket-9p.md) | draft | needs guest-tools | 9P over WebSocket |
+| [dotl](design/0022-dotl.md) | draft | needs serve, guest-tools | 9P2000.L and ZeroFS |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [exit-status](design/exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
 | [guest-tools](design/guest-tools.md) | draft |  | h9's own commands in the guest |
@@ -41,10 +41,10 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](design/host-scripts.md) | draft |  | Running host scripts as the program |
-| [host-srv](design/host-srv.md) | draft | needs 9p-roots | Posting host connections to /srv |
+| [host-srv](design/host-srv.md) | draft |  | Posting host connections to /srv |
 | [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
-| [root-auth](design/root-auth.md) | draft | needs 9p-roots | Authenticated 9P roots |
+| [root-auth](design/root-auth.md) | draft |  | Authenticated 9P roots |
 | [serve](design/serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
 | [symlinks-in-root](design/symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 
@@ -66,7 +66,7 @@ flowchart LR
   p_self_host["#35;10 self-host<br/>accepted"]:::accepted
   p_overlay["#35;11 overlay<br/>accepted"]:::accepted
   p_browser_host["#35;12 browser-host<br/>accepted"]:::accepted
-  p_9p_roots["#35;13 9p-roots<br/>accepted"]:::accepted
+  p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
   p_gfx["#35;15 gfx<br/>accepted"]:::accepted
   p_kvm["#35;16 kvm<br/>draft"]:::draft
@@ -219,12 +219,13 @@ cross-compiles the other targets.
 zig-out/bin/h9 [h9-flags] [--] program [args...]
 zig-out/bin/h9 [h9-flags] --rc 'command' [args...]
 zig-out/bin/h9 --version                  # version, pinned 9front and drawterm, backends built in
-zig-out/bin/h9 [--backend B] [--root DIR] --check
+zig-out/bin/h9 [--backend B] [--root DIR|DIAL|SOCKET] --check
 zig-out/bin/h9 --help                     # or -h alone
 
 zig-out/bin/h9 /bin/cat /lib/namespace    # a baseline demo
 zig-out/bin/h9 ls -l /bin/cat             # bare names search $path: . and /bin
 zig-out/bin/h9 ./hello                    # ./ and ../ are host paths
+zig-out/bin/h9 --root 'tcp!localhost!5640' ls /   # a 9P server as the root
 ```
 
 A program starting with `./` or `../` is read from the host. Anything else is
@@ -254,7 +255,27 @@ tree. It exits 0 if h9 can run programs from the root, and 125 otherwise.
 Release builds report the release's version; development builds report `git
 describe` (`-Dversion=V` overrides it).
 
-Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR`, `--cwd DIR`, `--env
+`--root` also takes a 9P server ([9p-roots](design/0013-9p-roots.md)): a
+dial string, `tcp!host!port` (`tcp!host` means port 564) or `unix!path`, or
+the path of a unix socket. h9 connects before the program runs, posts the
+connection in the guest's `/srv` as `root`, and mounts it at `/`; everything
+else is bound over it as over a host tree, and programs run from the server.
+`--root-spec NAME` sets the attach name and `--root-user NAME` the attach
+uname (the machine's user by default). The server must not want
+authentication: u9fs with `-a none`, or `exportfs` behind `aux/listen1 -t`,
+such as a second h9 serving a root tree read-only:
+
+```sh
+h9 --net=enable aux/listen1 -t 'tcp!127.0.0.1!5640' /bin/exportfs -R -r / &
+h9 --root 'tcp!127.0.0.1!5640' ls /
+```
+
+Writes to a 9P root go to its server, which decides what's writable, so
+`--write=none` with one is a usage error. A failed connection or attach is
+exit 125. Unix socket roots need a POSIX host. The connection is plain 9P,
+so keep a TCP root on a trusted network.
+
+Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET`, `--root-spec NAME`, `--root-user NAME`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,

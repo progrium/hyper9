@@ -1061,7 +1061,7 @@ fn expectRun(text: []const u8, root: ?[]const u8, timeout_ns: u64, want_status: 
         var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = .arm64,
-            .root = root,
+            .root = if (root) |d| .{ .dir = d } else null,
             .policy = .{ .timeout_ns = timeout_ns },
             .stdio = .{ .out = &out.writer, .err = &err.writer },
         }) catch |e| switch (e) {
@@ -1473,7 +1473,7 @@ fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.
     var m = h9.Machine.init(gpa, std.testing.io, .{
         .backend = kind,
         .arch = .arm64,
-        .root = r.path,
+        .root = .{ .dir = r.path },
         .cwd = r.cwd,
         .policy = p,
         .stdio = .{ .out = &out.writer, .err = &err.writer },

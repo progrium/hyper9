@@ -40,7 +40,11 @@ pub fn main(init: std.process.Init) !u8 {
         },
         .check => {
             const root_arg = cfg.root orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
-            const root = if (root_arg) |r| if (std.Io.Dir.cwd().realPathFileAlloc(io, r, arena)) |p| kernPath(arena, p) else |_| null else null;
+            var root_err: []const u8 = "";
+            const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| blk: {
+                root_err = rootError(e);
+                break :blk null;
+            } else null;
             var buf: [1024]u8 = undefined;
             var w = std.Io.File.stdout().writerStreaming(io, &buf);
             const code = tools.check(init.gpa, io, &w.interface, .{
@@ -48,6 +52,9 @@ pub fn main(init: std.process.Init) !u8 {
                 .memory = cfg.memory,
                 .root_arg = root_arg,
                 .root = root,
+                .root_err = root_err,
+                .root_spec = cfg.root_spec,
+                .root_user = cfg.root_user,
             }) catch exit_failed;
             w.interface.flush() catch {};
             return code;
@@ -84,12 +91,11 @@ pub fn main(init: std.process.Init) !u8 {
         .guest => .{ .guest = prog_arg },
     };
 
-    // #U takes absolute host paths, with symlinks resolved.
     const root_arg = cfg.root orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
-    const root = if (root_arg) |r| kernPath(arena, std.Io.Dir.cwd().realPathFileAlloc(io, r, arena) catch {
-        std.debug.print("h9: root {s}: not found\n", .{r});
+    const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| {
+        std.debug.print("h9: root {s}: {s}\n", .{ r, rootError(e) });
         return exit_failed;
-    }) else null;
+    } else null;
     // Without a root tree only a host a.out can run; anything resolved in
     // the guest namespace would fail later as a misleading "not found".
     if (root == null and (prog == .guest or cfg.ns != null)) {
@@ -127,6 +133,8 @@ pub fn main(init: std.process.Init) !u8 {
         .backend = cfg.backend,
         .arch = arch,
         .root = root,
+        .root_spec = cfg.root_spec,
+        .root_user = cfg.root_user,
         .cwd = cwd,
         .policy = pol,
         .stdio = undefined,
@@ -238,6 +246,36 @@ fn defaultRoot(arena: std.mem.Allocator, io: std.Io) ?[]const u8 {
     const root = std.fs.path.join(arena, &.{ dir, "..", "..", ".local", "9front", "root" }) catch return null;
     std.Io.Dir.cwd().access(io, root, .{}) catch return null;
     return root;
+}
+
+const RootError = error{ NotFound, NotDirOrSocket, BadDial, OutOfMemory };
+
+/// Reads a --root or $H9ROOT value (design/0013-9p-roots.md): a dial
+/// string, or a host path that's a directory (served through #U, which
+/// takes absolute paths with symlinks resolved) or a unix socket.
+fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!h9.Root {
+    switch (try cli.rootArg(arena, arg)) {
+        .tcp => |a| return .{ .tcp = a },
+        .unix => |p| return .{ .unix = p },
+        .path => |p| {
+            const real = std.Io.Dir.cwd().realPathFileAlloc(io, p, arena) catch return error.NotFound;
+            const st = std.Io.Dir.cwd().statFile(io, real, .{}) catch return error.NotFound;
+            return switch (st.kind) {
+                .directory => .{ .dir = kernPath(arena, real) },
+                .unix_domain_socket => .{ .unix = real },
+                else => error.NotDirOrSocket,
+            };
+        },
+    }
+}
+
+fn rootError(err: RootError) []const u8 {
+    return switch (err) {
+        error.NotFound => "not found",
+        error.NotDirOrSocket => "not a directory or socket",
+        error.BadDial => "bad dial string",
+        error.OutOfMemory => "out of memory",
+    };
 }
 
 const PathError = error{ NotFound, OutOfMemory };

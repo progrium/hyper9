@@ -2,7 +2,7 @@
 id: 13
 slug: 9p-roots
 title: 9P roots
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: [3, 8]
@@ -193,3 +193,14 @@ Measured: the same workloads (`ls -l /bin`, an rc pipeline, and `mk` on a small 
 4. The plan: the `mount '#s/root'` line, `9p` access, the caveats and the `--write=none` conflict in `src/policy.zig`.
 5. The speed measurement, recorded under Updates.
 6. README's `--root` notes. DESIGN.md: the Decisions table's root row, the root filesystem paragraph, the boot sequence, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
+
+## Updates
+
+- 2026-11-06: Refinements made while implementing it:
+  - The connection is posted the way a guest posts one, by creating `#s/root` (mode 0666) and writing the connection's fd number into it, rather than with `h9_srvpost`, which needs the board's chan. The effect is the same.
+  - A TCP root is dialed by writing the dial string to `#I/cs` and trying each translation through `#I/tcp/clone`, so `tcp!host!port` takes names as well as addresses. The machine's plan is cleared on the first Proc's thread for the dial, so neither the network policy nor `--net-allow` sees it.
+  - `--print` writes the spec of the root's mount even when it's empty, as `mount '#s/root' / ''`, so newns can tell a spec from the `9p` column: a mount's access column is its fourth word. A replayed root mount is an ordinary mount from the namespace file, so it sends the machine's user, not `--root-user`.
+  - The private `/tmp` over a 9P root is a bare `#O` over the root's own `/tmp`, printed as `bind -c '#O' /tmp` with no host path, as in a namespace file.
+  - The unix socket connect is `h9_unixdial` in `src/kern/rootdial.c`, which also sets and reads the calling process's user for `--root-user`. On Windows it fails with "unix socket roots need a POSIX host".
+  - `--root-user` is cut to the kernel's 27-byte user names.
+  - The `--root-spec` and `--root-user` cases, and the authentication case, use a stub server in the test that records the `Tattach` and refuses it, since `exportfs` ignores the attach name and doesn't use `Tauth`.

@@ -7,7 +7,8 @@ const policy = @import("h9").policy;
 
 pub const usage =
     \\usage: h9 [--backend auto|hvf|kvm|whp|emu] [--arch arm64|amd64|386]
-    \\           [--root DIR] [--cwd DIR]
+    \\           [--root DIR|DIAL|SOCKET] [--root-spec NAME] [--root-user NAME]
+    \\           [--cwd DIR]
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
@@ -17,7 +18,7 @@ pub const usage =
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
-    \\       h9 [--backend B] [--root DIR] [--memory SIZE] --check
+    \\       h9 [--backend B] [--root DIR|DIAL|SOCKET] [--memory SIZE] --check
     \\       h9 --version
     \\       h9 --help
     \\
@@ -43,8 +44,12 @@ pub const Config = struct {
     /// --trace: null for none, "" for stderr, else a file.
     trace: ?[]const u8 = null,
     dump_on_fault: bool = false,
-    /// --root; null means $H9ROOT, then the default.
+    /// --root; null means $H9ROOT, then the default. See `rootArg`.
     root: ?[]const u8 = null,
+    /// --root-spec: the attach name sent to a 9P root.
+    root_spec: []const u8 = "",
+    /// --root-user: the uname sent in attaches to a 9P root.
+    root_user: ?[]const u8 = null,
     /// --cwd: the host directory bound at /mnt/term/cwd; null means the
     /// host cwd.
     cwd: ?[]const u8 = null,
@@ -139,6 +144,11 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.backend = try enumValue(vmm.BackendKind, v);
         } else if (value(args, &i, "--arch")) |v| {
             c.arch = vmm.Arch.fromName(v orelse return error.Usage) orelse return error.Usage;
+        } else if (value(args, &i, "--root-spec")) |v| {
+            c.root_spec = v orelse return error.Usage;
+        } else if (value(args, &i, "--root-user")) |v| {
+            c.root_user = v orelse return error.Usage;
+            if (c.root_user.?.len == 0) return error.Usage;
         } else if (value(args, &i, "--root")) |v| {
             c.root = v orelse return error.Usage;
         } else if (value(args, &i, "--cwd")) |v| {
@@ -196,6 +206,40 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     c.net_allow = try net_allow.toOwnedSlice(gpa);
     c.argv = args[i..];
     return c;
+}
+
+/// What a --root or $H9ROOT value names (design/0013-9p-roots.md).
+pub const RootArg = union(enum) {
+    /// `tcp!host!port`, with `tcp!host` given port 564 (9fs).
+    tcp: []const u8,
+    /// `unix!path`: the socket's host path.
+    unix: []const u8,
+    /// Anything else: a host path, a directory or a socket, which the
+    /// caller tells apart with stat.
+    path: []const u8,
+};
+
+/// Reads a --root value. `tcp!` and `unix!` with nothing after them, or
+/// a TCP dial string with more than a host and a port, are errors.
+pub fn rootArg(arena: std.mem.Allocator, arg: []const u8) error{ OutOfMemory, BadDial }!RootArg {
+    if (std.mem.startsWith(u8, arg, "tcp!")) {
+        const rest = arg["tcp!".len..];
+        var parts = std.mem.splitScalar(u8, rest, '!');
+        const host = parts.next().?;
+        const port = parts.next();
+        if (host.len == 0 or parts.next() != null) return error.BadDial;
+        if (port) |p| {
+            if (p.len == 0) return error.BadDial;
+            return .{ .tcp = arg };
+        }
+        return .{ .tcp = try std.fmt.allocPrint(arena, "{s}!564", .{arg}) };
+    }
+    if (std.mem.startsWith(u8, arg, "unix!")) {
+        const path = arg["unix!".len..];
+        if (path.len == 0) return error.BadDial;
+        return .{ .unix = path };
+    }
+    return .{ .path = arg };
 }
 
 fn flag(a: []const u8, comptime name: []const u8) bool {
@@ -263,6 +307,34 @@ test "--backend=value and --" {
     defer t.allocator.free(c.env);
     try t.expectEqual(vmm.BackendKind.hvf, c.backend);
     try t.expectEqualStrings("--weird", c.argv[0]);
+}
+
+test "--root-spec and --root-user" {
+    const c = try parse(t.allocator, &.{ "h9", "--root", "tcp!fs!564", "--root-spec=other", "--root-user", "glenda", "ls" });
+    defer t.allocator.free(c.env);
+    try t.expectEqualStrings("tcp!fs!564", c.root.?);
+    try t.expectEqualStrings("other", c.root_spec);
+    try t.expectEqualStrings("glenda", c.root_user.?);
+    const d = try parse(t.allocator, &.{ "h9", "ls" });
+    defer t.allocator.free(d.env);
+    try t.expectEqualStrings("", d.root_spec);
+    try t.expectEqual(@as(?[]const u8, null), d.root_user);
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-user=", "ls" }));
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-spec" }));
+}
+
+test "rootArg reads dial strings and paths" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expectEqualStrings("tcp!fs.example!5640", (try rootArg(a, "tcp!fs.example!5640")).tcp);
+    try t.expectEqualStrings("tcp!fs.example!564", (try rootArg(a, "tcp!fs.example")).tcp);
+    try t.expectEqualStrings("/run/fs.sock", (try rootArg(a, "unix!/run/fs.sock")).unix);
+    try t.expectEqualStrings("/r", (try rootArg(a, "/r")).path);
+    try t.expectEqualStrings("tcpdir", (try rootArg(a, "tcpdir")).path);
+    for ([_][]const u8{ "tcp!", "tcp!!564", "tcp!h!", "tcp!h!1!x", "unix!" }) |bad| {
+        try t.expectError(error.BadDial, rootArg(a, bad));
+    }
 }
 
 test "--root, --cwd and repeated --env" {
