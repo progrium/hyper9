@@ -89,7 +89,7 @@ Guest conversations always go direct, whatever the environment. A proxy resolves
 
 ### The host-stream device
 
-`src/kern/devhstream.c` turns a host connection into a channel devmnt can mount. It's devhcons's design applied to a connection instead of a console. A stream is either framed, a WebSocket whose binary payloads are the bytes, or raw, a host connection whose bytes go through unchanged. This proposal makes framed streams; raw ones are for other host-made connections, such as [serve](serve.md)'s unix and TCP listeners and, later, 9p-roots' unix-socket roots on Windows, which devlfd can't carry. Both kinds share everything below:
+`src/kern/devhstream.c` turns a host connection into a channel devmnt can mount. It's devhcons's design applied to a connection instead of a console. A stream is either framed, a WebSocket whose binary payloads are the bytes, or raw, a host connection whose bytes go through unchanged. This proposal makes framed streams; raw ones are for other host-made connections, such as [serve](0035-serve.md)'s unix and TCP listeners and, later, 9p-roots' unix-socket roots on Windows, which devlfd can't carry. Both kinds share everything below:
 
 - **Leaves** in `src/kern.zig`: `h9_hstream_read(id, buf, n)`, `h9_hstream_ready(id)`, `h9_hstream_write(id, buf, n)` and `h9_hstream_close(id)`. They return a status and never raise kernel errors; the C side raises them.
 - **Reads** never block in a host call. A reader thread per stream, `src/hstream.zig`, reads frames and queues payload bytes, and calls `h9_hstream_wake(id)` when it queues some or the stream ends. A guest read sleeps on the stream's Rendez until the queue has bytes, so notes, `--timeout` and teardown interrupt it as they do a devmnt RPC on any channel.
@@ -289,7 +289,7 @@ On the [browser host](0012-browser-host.md), `hstream.zig`'s native connect is r
 - **`h9_ws_recv(id, kind, buf, n)`** is `Suspending`. It takes from the binary or text queue the page's `message` handler fills, by `typeof event.data`, and parks while that queue is empty. Text is encoded to UTF-8 with `TextEncoder`.
 - **`h9_ws_close(id)`.**
 
-The browser does the handshake, TLS, masking and pongs, so `ws.zig` isn't used there. A page can't send pings, so h9's keepalive doesn't run on the web host; browsers answer a server's pings, so a server that pings keeps the connection open, as [serve](serve.md)'s listeners do. The browser uses its own proxy settings and trust, so `--root-ca` and `Proxy` are errors on the web host, as `root_headers` is. There's no reader thread either: a guest read calls `h9_ws_recv` from its own coroutine, which parks, and a note wakes it as it wakes any park. devhstream is the same file on both hosts.
+The browser does the handshake, TLS, masking and pongs, so `ws.zig` isn't used there. A page can't send pings, so h9's keepalive doesn't run on the web host; browsers answer a server's pings, so a server that pings keeps the connection open, as [serve](0035-serve.md)'s listeners do. The browser uses its own proxy settings and trust, so `--root-ca` and `Proxy` are errors on the web host, as `root_headers` is. There's no reader thread either: a guest read calls `h9_ws_recv` from its own coroutine, which parks, and a note wakes it as it wakes any park. devhstream is the same file on both hosts.
 
 The page can't set headers on a `WebSocket`, so `root_headers` is an error on the web host. Authentication is a cookie for the server's origin, or a token in the URL's query. The browser sends the page's `Origin`, which the server should check. A page served over `https` can only open `wss://` URLs.
 
@@ -327,7 +327,7 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 **No TCP for the guest on the web host.** `/net/ws` gives a browser guest WebSockets, not `/net/tcp`. Tunnelling TCP over a WebSocket, as websockify does in reverse, would need a relay server someone runs and a policy for it, which is a browser-host networking question, not this transport's. It's a proposal of its own if it's wanted.
 
-**Serving is its own proposal.** [serve](serve.md) listens on WebSockets as well as unix sockets and TCP, with `ws.zig`'s server side and devhstream's streams from this proposal. Listeners raise questions this proposal doesn't, of who may connect and what they see, and they're the same for every transport, so they're decided there.
+**Serving is its own proposal.** [serve](0035-serve.md) listens on WebSockets as well as unix sockets and TCP, with `ws.zig`'s server side and devhstream's streams from this proposal. Listeners raise questions this proposal doesn't, of who may connect and what they see, and they're the same for every transport, so they're decided there.
 
 **Headers natively, cookies and query on the web.** Bearer tokens are how most HTTP services authenticate, and `@FILE` keeps one out of `ps`. The browser forbids custom headers on a WebSocket, so the web host can't offer them, and says so rather than dropping them.
 

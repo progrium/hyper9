@@ -37,6 +37,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [guest-tools](design/0032-guest-tools.md) | draft |  | h9's own commands in the guest |
 | [exit-status](design/0033-exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
 | [symlinks-in-root](design/0034-symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
+| [serve](design/0035-serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
@@ -46,7 +47,6 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
 | [root-auth](design/root-auth.md) | draft |  | Authenticated 9P roots |
-| [serve](design/serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
 
 ```mermaid
 flowchart LR
@@ -78,6 +78,7 @@ flowchart LR
   p_guest_tools["#35;32 guest-tools<br/>draft"]:::draft
   p_exit_status["#35;33 exit-status<br/>draft"]:::draft
   p_symlinks_in_root["#35;34 symlinks-in-root<br/>draft"]:::draft
+  p_serve["#35;35 serve<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
@@ -87,7 +88,6 @@ flowchart LR
   p_linux_net["linux-net<br/>draft"]:::draft
   p_linux_threads["linux-threads<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
-  p_serve["serve<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
@@ -109,6 +109,8 @@ flowchart LR
   p_9p_roots --> p_dotl
   p_serve --> p_dotl
   p_guest_tools --> p_dotl
+  p_devsrv --> p_serve
+  p_websocket_9p --> p_serve
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
@@ -116,8 +118,6 @@ flowchart LR
   p_linux_personality --> p_linux_net
   p_linux_personality --> p_linux_threads
   p_9p_roots --> p_root_auth
-  p_devsrv --> p_serve
-  p_websocket_9p --> p_serve
 ```
 
 <!-- design:end -->
