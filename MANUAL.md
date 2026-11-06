@@ -2078,8 +2078,8 @@ processes.
 cwd, environment, sandbox `Policy`, standard I/O and an optional trace
 writer), and `Machine.run` runs a program and returns its exit string
 unchanged; the mapping to exit codes is the CLI's. Several machines can run
-in one host process. See [DESIGN.md](DESIGN.md), "CLI", and
-[src/root.zig](src/root.zig).
+in one host process. [Embedding h9 in a Zig program](docs/embedding.md)
+walks through all of it with an example that builds.
 
 ### 26. Backends and performance
 
@@ -2212,6 +2212,9 @@ They change faster than this manual, as proposals land.
 
 - [Recipes](docs/recipes.md): quick one-liners for everyday use,
   sandboxing, mounts, serving 9P, building, and Go.
+- [Embedding h9 in a Zig program](docs/embedding.md): a Zig program that
+  runs 9front programs in machines of its own, several at once, with
+  captured I/O, a sandbox policy and 9P roots.
 
 ## Appendices
 

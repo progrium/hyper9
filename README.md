@@ -158,6 +158,7 @@ clean tree; it merges upstream into the subtree and keeps our local changes.
 zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
 zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern and the libraries it uses
+zig build examples # builds examples/embed.zig, docs/embedding.md's library example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos and integration cases (by slug or id)
 zig build design -- check        # validate design/ and the test tags (also list, ready, graph, new, file)
@@ -469,7 +470,8 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | Path | Contents |
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup and raw mode on the host terminal, and `--check`/`--version` |
-| `src/root.zig` | library root |
+| `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
+| `examples/embed.zig` | an example program on the library: one program in several machines at once |
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
