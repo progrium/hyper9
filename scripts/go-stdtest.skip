@@ -2,5 +2,4 @@
 # regexps are -test.skip patterns, joined with | for each package.
 # Only tests that stop the whole package run are listed; other failures
 # are counted and left in the output.
-syscall	^TestPlan9Syserr$	# mount (46) isn't served: "sys: bad sys call" kills the test binary
 runtime	^TestPageAllocGrow$	# reserves more address space than --memory 4G allows, which is fatal
