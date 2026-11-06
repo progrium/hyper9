@@ -32,10 +32,11 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
-| [websocket-9p](design/0021-websocket-9p.md) | draft | needs 9p-roots | 9P over WebSocket |
-| [dotl](design/0022-dotl.md) | draft | needs 9p-roots | 9P2000.L and ZeroFS |
+| [websocket-9p](design/0021-websocket-9p.md) | draft | needs 9p-roots, guest-tools | 9P over WebSocket |
+| [dotl](design/0022-dotl.md) | draft | needs 9p-roots, serve, guest-tools | 9P2000.L and ZeroFS |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [exit-status](design/exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
+| [guest-tools](design/guest-tools.md) | draft |  | h9's own commands in the guest |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
@@ -44,6 +45,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
 | [root-auth](design/root-auth.md) | draft | needs 9p-roots | Authenticated 9P roots |
+| [serve](design/serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
 | [symlinks-in-root](design/symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 
 ```mermaid
@@ -75,6 +77,7 @@ flowchart LR
   p_dotl["#35;22 dotl<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_exit_status["exit-status<br/>draft"]:::draft
+  p_guest_tools["guest-tools<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
@@ -83,6 +86,7 @@ flowchart LR
   p_linux_net["linux-net<br/>draft"]:::draft
   p_linux_threads["linux-threads<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
+  p_serve["serve<br/>draft"]:::draft
   p_symlinks_in_root["symlinks-in-root<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
@@ -100,8 +104,11 @@ flowchart LR
   p_net_policy --> p_websocket_9p
   p_devsrv --> p_websocket_9p
   p_9p_roots --> p_websocket_9p
+  p_guest_tools --> p_websocket_9p
   p_devsrv --> p_dotl
   p_9p_roots --> p_dotl
+  p_serve --> p_dotl
+  p_guest_tools --> p_dotl
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
@@ -109,6 +116,8 @@ flowchart LR
   p_linux_personality --> p_linux_net
   p_linux_personality --> p_linux_threads
   p_9p_roots --> p_root_auth
+  p_devsrv --> p_serve
+  p_websocket_9p --> p_serve
 ```
 
 <!-- design:end -->
