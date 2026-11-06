@@ -21,11 +21,6 @@
 9. [h9's own commands in your userland](#9-h9s-own-commands-in-your-userland)
 10. [Shipping it](#10-shipping-it)
 
-Sections 8 and 9 describe pull requests that haven't merged yet:
-[#38](https://github.com/progrium/hyper9/pull/38) (websocket-9p) and
-[#36](https://github.com/progrium/hyper9/pull/36) (guest-tools). Each says so
-at the top.
-
 ## 1. What h9 takes from a root
 
 Nothing boots in h9. There's no init process, no `/lib/namespace` run at
@@ -569,14 +564,11 @@ under `aux/listen1` in one h9 and uses it as the root of another. And with
 
 ## 8. Serving it over WebSocket
 
-> Depends on [#38](https://github.com/progrium/hyper9/pull/38)
-> (websocket-9p), which isn't merged. Tried on that branch.
-
-With websocket-9p, `--root` also takes `ws://` and `wss://` URLs, so a
+`--root` also takes `ws://` and `wss://` URLs, so a
 userland can be served by a web server, through proxies, and to an h9 in a
 browser tab once [browser-host](../design/0012-browser-host.md) exists.
 Any 9P server can sit behind a relay that carries 9P in binary WebSocket
-messages. The PR has one for testing, `zig build wsrelay`, which listens for
+messages. h9 has one for testing, `zig build wsrelay`, which listens for
 WebSocket connections on one port and relays each to a TCP 9P server on
 another. With `rootfs` from section 7:
 
@@ -607,10 +599,7 @@ dial one itself through `/net/ws`, subject to `--net` and `--net-allow`;
 
 ## 9. h9's own commands in your userland
 
-> Depends on [#36](https://github.com/progrium/hyper9/pull/36)
-> (guest-tools), which isn't merged.
-
-With guest-tools, h9 serves a small read-only tree of its own rc scripts from
+h9 serves a small read-only tree of its own rc scripts from
 its binary, as the device `#H`, and binds `#H/bin` after everything else in
 `/bin`. `wsmount` is the first of them. For your userland that means:
 
