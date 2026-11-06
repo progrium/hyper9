@@ -817,6 +817,43 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_backend_tests.step);
     test_step.dependOn(&run_integration.step);
 
+    // examples/embed.zig, docs/embedding.md's example of embedding h9.
+    const embed_example = b.addExecutable(.{
+        .name = "embed",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/embed.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "h9", .module = mod }},
+        }),
+    });
+    if (os == .macos) {
+        addSdkPaths(b, embed_example.root_module);
+        embed_example.root_module.linkFramework("Hypervisor", .{});
+    }
+    linkUnicorn(embed_example);
+    const install_embed = b.addInstallArtifact(embed_example, .{});
+    b.step("examples", "Build examples/embed.zig as zig-out/bin/embed").dependOn(&install_embed.step);
+    // zig build test runs it on the hello fixture where a backend can: HVF
+    // on an arm64 Mac (signed like h9) for one machine, and the emulator for
+    // the second. HVF allows one VM per host process.
+    const hvf_host = os == .macos and target.result.cpu.arch == .aarch64 and b.graph.host.result.os.tag == .macos;
+    if (hvf_host or emu == .unicorn) {
+        const run_embed = b.addRunArtifact(embed_example);
+        if (hvf_host) {
+            const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
+            sign.addFileArg(b.path("h9.entitlements"));
+            sign.addFileArg(embed_example.getEmittedBin());
+            run_embed.step.dependOn(&sign.step);
+        }
+        const machines: []const u8 = if (emu == .unicorn) "2" else "1";
+        run_embed.addArgs(&.{ "-j", machines });
+        run_embed.addFileArg(host_hello);
+        const first = b.fmt("machine 0 ({s}): exited \"\"\n  hello\n", .{if (hvf_host) "hvf" else "emu"});
+        run_embed.expectStdOutEqual(if (emu == .unicorn) b.fmt("{s}machine 1 (emu): exited \"\"\n  hello\n", .{first}) else first);
+        test_step.dependOn(&run_embed.step);
+    }
+
     // The speed numbers in DESIGN.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
     const bench = b.addExecutable(.{
