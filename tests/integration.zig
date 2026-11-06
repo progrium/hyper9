@@ -552,7 +552,12 @@ test "ls /bin | wc -l (demo) [baseline]" {
     try std.testing.expectEqualStrings("", r.err);
     var bin_buf: [32]u8 = undefined;
     const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{e.arch orelse "arm64"});
-    const want = try countDir(e, bin) + try countDir(e, "rc/bin");
+    // #H/bin, h9's own commands, is in the union too
+    // (design/0032-guest-tools.md); the guest counts it.
+    const h = try run(e, &.{ "--rc", "ls '#H/bin' | wc -l" });
+    defer h.deinit();
+    const in_h = try std.fmt.parseInt(usize, std.mem.trim(u8, h.out, " \n"), 10);
+    const want = try countDir(e, bin) + try countDir(e, "rc/bin") + in_h;
     const got = try std.fmt.parseInt(usize, std.mem.trim(u8, r.out, " \n"), 10);
     try std.testing.expectEqual(want, got);
     try std.testing.expectEqual(0, r.code);
