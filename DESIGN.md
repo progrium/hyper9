@@ -378,7 +378,8 @@ The CLI is a thin wrapper: it parses argv into `Machine.Options`, runs one machi
 ```
 h9 [h9-flags] [--] program [args...]
 h9 [h9-flags] --rc 'command line'
-h9 [h9-flags]                       # interactive rc if stdin is a TTY, otherwise a usage error
+h9 [h9-flags] rc                    # interactive shell
+h9 [h9-flags]                       # no program: prints the usage to stderr, exit 2
 h9 --version | --check | --help      # tool functions; -h alone is --help
 ```
 
@@ -395,6 +396,8 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | Starts with `./` or `../` (`./hello`, `../out/x`) | A host path relative to the host cwd, read on the host. It doesn't need to be in the guest namespace. |
 | Absolute (`/bin/cat`) | A guest path, resolved in the guest namespace. To run an absolute host path, use the guest view of it (`/mnt/term/...`) or a relative path. |
 | Bare name or other relative path (`ls`, `aux/vga`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
+
+A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
 | `--ns file` | Runs `newns` with the file before the program |
 
@@ -404,7 +407,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|emu` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning |
 | `--arch arm64\|amd64\|386` | The architecture of the binaries to run, which also picks `/$cputype/bin`. Without it a host program runs as its header says, and a guest one as the host's architecture |
-| `--root DIR` | The root tree. If omitted, use `$H9ROOT`, then the default install location (`.local/9front/root` in development builds until there's an installer) |
+| `--root DIR` | The root tree. If omitted, use `$H9ROOT`, then the default install location (`.local/9front/root` in development builds until there's an installer). With none found, only a host a.out runs; anything else is exit 125 |
 | `--env name=value` (repeatable) | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
 | `--rc 'cmd'` | See program resolution |

@@ -239,6 +239,27 @@ test "--check passes with the root tree, and --version and -h print to stdout [b
     try std.testing.expect(std.mem.startsWith(u8, h.stdout, "usage: h9"));
 }
 
+test "no root tree gives 125 for a guest program [baseline]" {
+    const e = try env(@src());
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // A copy of h9 has no .local/9front/root two levels up to default to.
+    const name = std.fs.path.basename(e.h9);
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), e.h9, s.tmp.dir, name, io, .{});
+    const h9 = try std.fs.path.join(gpa, &.{ s.path, name });
+    defer gpa.free(h9);
+    var environ = try std.testing.environ.createMap(gpa);
+    defer environ.deinit();
+    _ = environ.swapRemove("H9ROOT");
+    for ([_][]const []const u8{ &.{ h9, "echo", "x" }, &.{ h9, "--rc", "echo x" } }) |argv| {
+        var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .environ_map = &environ, .create_no_window = true });
+        defer child.kill(io);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 125 }, try child.wait(io));
+    }
+}
+
 test "exits string gives status 1 and is printed [baseline]" {
     const e = try env(@src());
     const r = try run(e, &.{ "/bin/cat", "/does/not/exist" });
@@ -259,6 +280,35 @@ test "non-a.out program gives 126 [baseline]" {
     const r = try run(e, &.{"/lib/namespace"});
     defer r.deinit();
     try std.testing.expectEqual(126, r.code);
+}
+
+test "a guest #! script runs as the first program [baseline]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "greet", .data = "#!/bin/rc\necho $0 $*\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nointerp", .data = "#!/no/such/rc\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty", .data = "#!\n" });
+
+    // By $path: /rc/bin is bound on /bin, and lc is an rc script.
+    const lc = try run(e, &.{ "lc", "-d", "/rc" });
+    defer lc.deinit();
+    try std.testing.expectEqual(0, lc.code);
+    try std.testing.expectEqualStrings("rc/\n", lc.out);
+
+    // By guest path; argv is built as exec builds it.
+    const r = try run(e, &.{ "--cwd", s.path, "/mnt/term/cwd/greet", "a", "b" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/mnt/term/cwd/greet a b\n", r.out);
+
+    const ni = try run(e, &.{ "--cwd", s.path, "/mnt/term/cwd/nointerp" });
+    defer ni.deinit();
+    try std.testing.expectEqual(127, ni.code);
+    const em = try run(e, &.{ "--cwd", s.path, "/mnt/term/cwd/empty" });
+    defer em.deinit();
+    try std.testing.expectEqual(126, em.code);
 }
 
 test "stdin reaches the guest's console [baseline]" {

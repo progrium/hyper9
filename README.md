@@ -39,6 +39,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
+| [host-scripts](design/host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](design/host-srv.md) | draft | needs 9p-roots | Posting host connections to /srv |
 | [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
@@ -77,6 +78,7 @@ flowchart LR
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
+  p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
   p_linux_net["linux-net<br/>draft"]:::draft
   p_linux_threads["linux-threads<br/>draft"]:::draft
@@ -219,7 +221,7 @@ zig-out/bin/h9 ./hello                    # ./ and ../ are host paths
 A program starting with `./` or `../` is read from the host. Anything else is
 a guest path or name in the machine's namespace: `/` is the root tree
 (`--root`, else `$H9ROOT`, else `.local/9front/root` next to a development
-build), `/bin` is `/$cputype/bin` (`/arm64/bin` on arm64) plus `/rc/bin`, and the host cwd (or `--cwd`)
+build; with none found, a guest program is an error, exit 125), `/bin` is `/$cputype/bin` (`/arm64/bin` on arm64) plus `/rc/bin`, and the host cwd (or `--cwd`)
 is at `/mnt/term/cwd` and is the guest's cwd. The host environment isn't
 imported: the guest gets `user`, `home`, `cputype`, `objtype`, `sysname`,
 `service`, `path` and `timezone`, plus any `--env`. Exit codes: 0 for an empty

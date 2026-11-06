@@ -90,6 +90,12 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("h9: root {s}: not found\n", .{r});
         return exit_failed;
     }) else null;
+    // Without a root tree only a host a.out can run; anything resolved in
+    // the guest namespace would fail later as a misleading "not found".
+    if (root == null and (prog == .guest or cfg.ns != null)) {
+        std.debug.print("h9: no root tree found; pass --root or set H9ROOT\n", .{});
+        return exit_failed;
+    }
     const cwd_arg = cfg.sandbox orelse cfg.cwd orelse ".";
     const cwd = kernPath(arena, std.Io.Dir.cwd().realPathFileAlloc(io, cwd_arg, arena) catch {
         std.debug.print("h9: cwd {s}: not found\n", .{cwd_arg});

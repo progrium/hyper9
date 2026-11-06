@@ -675,9 +675,24 @@ pub const Machine = struct {
 
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
+        // A guest program goes through #! as exec does, so `h9 man` runs
+        // the rc script /rc/bin/man (bound on /bin) like a binary.
+        var argv = j.argv;
         const bytes = switch (j.prog) {
             .bytes => |b| b,
-            .guest => |name| try m.readGuest(arena.allocator(), name),
+            .guest => |name| blk: {
+                const g = try m.readGuest(arena.allocator(), name);
+                const img = interpret(arena.allocator(), g.path, g.bytes, argv) catch |err| {
+                    m.err_msg = switch (err) {
+                        error.NotFound => kern.errstr(),
+                        error.OutOfMemory => "no memory",
+                        else => ebadexec,
+                    };
+                    return if (err == error.NotFound) error.NotFound else error.NotExecutable;
+                };
+                argv = img.argv;
+                break :blk img.bytes;
+            },
         };
         const hdr = aout.parse(bytes) catch {
             m.err_msg = "not a 9front executable";
@@ -695,7 +710,7 @@ pub const Machine = struct {
         kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(name)}) catch "a.out");
 
         p.as = try m.backend.newAddressSpace();
-        const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, j.argv, p.pid);
+        const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, argv, p.pid);
         // Under the lock, since /proc/n/segment may be read already.
         p.segs.replace(p.as.?, img.segs);
         p.tos = img.tos;
@@ -704,7 +719,7 @@ pub const Machine = struct {
         p.keepImage(bytes);
         p.initSys();
         p.noteMem();
-        kern.setArgs(j.argv);
+        kern.setArgs(argv);
         return m.loop(p);
     }
 
@@ -986,42 +1001,17 @@ pub const Machine = struct {
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        // The last path element names the process, and is argv[0] for a script.
+        // The last path element names the process.
         const elem = basename(e.path);
 
-        var pre: std.ArrayList([]const u8) = .empty;
-        var bytes = readFile(arena, e.path) catch |err| return execError(err);
-        var indir: usize = 0;
-        while (std.mem.startsWith(u8, bytes, "#!")) : (indir += 1) {
-            if (indir >= max_indir) return failWith(ebadexec);
-            const head = bytes[0..@min(bytes.len, 256)];
-            const nl = std.mem.indexOfScalar(u8, head, '\n') orelse return failWith(ebadexec);
-            var toks: std.ArrayList([]const u8) = .empty;
-            var it = std.mem.tokenizeAny(u8, head[2..nl], " \t\r");
-            while (it.next()) |t| toks.append(arena, t) catch return failWith("no memory");
-            if (toks.items.len < 1 or toks.items.len >= 32) return failWith(ebadexec);
-            if (indir == 0) pre.append(arena, e.path) catch return failWith("no memory");
-            pre.insertSlice(arena, 0, toks.items) catch return failWith("no memory");
-            const interp = std.fmt.allocPrintSentinel(arena, "{s}", .{toks.items[0]}, 0) catch return failWith("no memory");
-            bytes = readFile(arena, interp) catch |err| return execError(err);
-        }
+        const first = readFile(arena, e.path) catch |err| return execError(err);
+        const prog = interpret(arena, e.path, first, @ptrCast(e.argv)) catch |err| return execError(err);
+        const bytes = prog.bytes;
         const hdr = aout.parse(bytes) catch return failWith(ebadexec);
         if (hdr.arch != m.arch) return failWith(ebadexec);
 
-        // For a script, as 9front builds it: the interpreters' arguments
-        // (the outermost's first) and the script's full name, with the
-        // first interpreter's name swapped for `elem`, then the caller's
-        // arguments after argv[0]. So `#!/bin/rc` running /bin/x with argv
-        // `x a` gets `x /bin/x a`.
-        var argv: std.ArrayList([]const u8) = .empty;
-        if (indir > 0) {
-            argv.append(arena, elem) catch return failWith("no memory");
-            argv.appendSlice(arena, pre.items[1..]) catch return failWith("no memory");
-            argv.appendSlice(arena, @ptrCast(e.argv[1..])) catch return failWith("no memory");
-        } else argv.appendSlice(arena, @ptrCast(e.argv)) catch return failWith("no memory");
-
         const nas = m.backend.newAddressSpace() catch return failWith("virtual memory allocation failed");
-        var img = loader.load(m.gpa, m.backend, nas, bytes, argv.items, p.pid) catch |err| {
+        var img = loader.load(m.gpa, m.backend, nas, bytes, prog.argv, p.pid) catch |err| {
             nas.destroy();
             return failWith(switch (err) {
                 error.BadExec, error.Truncated, error.BadMagic => ebadexec,
@@ -1055,10 +1045,48 @@ pub const Machine = struct {
         p.extra = .initExec(img.arch);
         p.keepImage(bytes);
         p.noteMem();
-        kern.setArgs(argv.items);
+        kern.setArgs(prog.argv);
         kern.closeExec();
         var name_buf: [kern.ERRMAX]u8 = undefined;
         kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{elem}) catch "a.out");
+    }
+
+    const Image = struct { bytes: []const u8, argv: []const []const u8 };
+
+    /// Follows up to 8 levels of #! interpreters from the file at `path`,
+    /// whose contents are `bytes`, and returns the binary to load and its
+    /// argv. Shared by exec and the first process. A failed stat or open
+    /// sets the error string and gives NotFound or NotExecutable; a bad
+    /// #! line gives BadExec.
+    fn interpret(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, argv: []const []const u8) RunError!Image {
+        var pre: std.ArrayList([]const u8) = .empty;
+        var cur = bytes;
+        var indir: usize = 0;
+        while (std.mem.startsWith(u8, cur, "#!")) : (indir += 1) {
+            if (indir >= max_indir) return error.BadExec;
+            const head = cur[0..@min(cur.len, 256)];
+            const nl = std.mem.indexOfScalar(u8, head, '\n') orelse return error.BadExec;
+            var toks: std.ArrayList([]const u8) = .empty;
+            var it = std.mem.tokenizeAny(u8, head[2..nl], " \t\r");
+            while (it.next()) |t| try toks.append(arena, t);
+            if (toks.items.len < 1 or toks.items.len >= 32) return error.BadExec;
+            if (indir == 0) try pre.append(arena, path);
+            try pre.insertSlice(arena, 0, toks.items);
+            const interp = try std.fmt.allocPrintSentinel(arena, "{s}", .{toks.items[0]}, 0);
+            cur = try readFile(arena, interp);
+        }
+        if (indir == 0) return .{ .bytes = cur, .argv = argv };
+
+        // As 9front builds it: the interpreters' arguments (the outermost's
+        // first) and the script's full name, with the first interpreter's
+        // name swapped for the script's last path element, then the
+        // caller's arguments after argv[0]. So `#!/bin/rc` running /bin/x
+        // with argv `x a` gets `x /bin/x a`.
+        var out: std.ArrayList([]const u8) = .empty;
+        try out.append(arena, basename(path));
+        try out.appendSlice(arena, pre.items[1..]);
+        if (argv.len > 1) try out.appendSlice(arena, argv[1..]);
+        return .{ .bytes = cur, .argv = out.items };
     }
 
     fn execError(err: RunError) error{Failed} {
@@ -1240,20 +1268,22 @@ pub const Machine = struct {
         _ = kern.pwrite(out, buf[0..n], 0) catch {};
     }
 
-    /// Reads a guest program, searching $path for bare names.
-    fn readGuest(m: *Machine, gpa: std.mem.Allocator, name: []const u8) RunError![]u8 {
-        var buf: [1024]u8 = undefined;
+    /// Reads a guest program, searching $path for bare names, and returns
+    /// the path it was found at with its contents.
+    fn readGuest(m: *Machine, arena: std.mem.Allocator, name: []const u8) RunError!struct { path: []const u8, bytes: []u8 } {
         const direct = name.len > 0 and (name[0] == '/' or std.mem.startsWith(u8, name, "./") or std.mem.startsWith(u8, name, "../"));
         if (direct) {
-            return readFile(gpa, std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return error.NotFound) catch |e| {
+            const path = try std.fmt.allocPrintSentinel(arena, "{s}", .{name}, 0);
+            const b = readFile(arena, path) catch |e| {
                 m.err_msg = kern.errstr();
                 return e;
             };
+            return .{ .path = path, .bytes = b };
         }
         var last: RunError = error.NotFound;
         for ([_][]const u8{ ".", "/bin" }) |dir| {
-            const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch continue;
-            if (readFile(gpa, path)) |b| return b else |e| last = e;
+            const path = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, name }, 0);
+            if (readFile(arena, path)) |b| return .{ .path = path, .bytes = b } else |e| last = e;
         }
         m.err_msg = "file does not exist";
         return last;
