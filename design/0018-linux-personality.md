@@ -5,7 +5,7 @@ title: Linux personality
 status: draft
 created: 2026-11-04
 authors: [progrium]
-depends: [symlinks-in-root, 33]
+depends: [34, 33]
 areas: [kern, vmm, cli, sandbox]
 ---
 
@@ -75,7 +75,7 @@ Every entry is one of three kinds, so `-ENOSYS` always means "not known to h9":
 
 | Area | Calls | Served by |
 | --- | --- | --- |
-| Files | `openat`, `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`, `lseek`, `close`, `dup`, `dup3`, `fcntl`, `pipe2`, `getdents64`, `newfstatat`, `fstat`, `statx`, `faccessat`, `faccessat2`, `mkdirat`, `unlinkat`, `renameat`, `renameat2` (flags 0), `fchmod`, `fchmodat`, `fchownat`, `utimensat`, `ftruncate`, `truncate`, `fsync`, `fdatasync`, `getcwd`, `chdir`, `fchdir`, `readlinkat`, `statfs`, `fstatfs` | drawterm's file calls. Relative paths with a dirfd are joined to the dirfd's path from `fd2path`. `stat` is built from a Plan 9 `Dir` (see Users and `stat`). `readlinkat` and `lstat`-style calls see links in trees resolved by [symlinks-in-root](symlinks-in-root.md), and `EINVAL` elsewhere. `utimensat` and `fchownat` become a `wstat`. |
+| Files | `openat`, `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`, `lseek`, `close`, `dup`, `dup3`, `fcntl`, `pipe2`, `getdents64`, `newfstatat`, `fstat`, `statx`, `faccessat`, `faccessat2`, `mkdirat`, `unlinkat`, `renameat`, `renameat2` (flags 0), `fchmod`, `fchmodat`, `fchownat`, `utimensat`, `ftruncate`, `truncate`, `fsync`, `fdatasync`, `getcwd`, `chdir`, `fchdir`, `readlinkat`, `statfs`, `fstatfs` | drawterm's file calls. Relative paths with a dirfd are joined to the dirfd's path from `fd2path`. `stat` is built from a Plan 9 `Dir` (see Users and `stat`). `readlinkat` and `lstat`-style calls see links in trees resolved by [symlinks-in-root](0034-symlinks-in-root.md), and `EINVAL` elsewhere. `utimensat` and `fchownat` become a `wstat`. |
 | Processes | `clone` (without `CLONE_VM`, or with `CLONE_VM` and `CLONE_VFORK`), `fork`, `vfork`, `execve`, `execveat`, `exit`, `exit_group`, `wait4`, `waitid`, `getpid`, `getppid`, `gettid`, `set_tid_address`, `kill`, `tgkill`, `tkill`, `setsid`, `setpgid`, `getpgid`, `getsid` | h9's process model (see Processes) |
 | Memory | `brk`, `mmap`, `munmap`, `mprotect`, `madvise` (`DONTNEED` zeroes, the rest are hints), `mremap` | The VMA layer (see Memory) |
 | Signals | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `rt_sigpending`, `rt_sigsuspend`, `rt_sigtimedwait`, `sigaltstack` | See Signals |
@@ -167,7 +167,7 @@ bind /mnt/term '#λ/mnt/term'
 
 exec of an ELF sets the process's `slash` to `#λ`'s root, and exec of an a.out sets it back to the machine's root. The mount table is shared, so a bind or mount made by either personality is seen by both. `dot` is kept across exec, so the working directory survives a change of personality. Paths under `/tmp`, `/mnt/term` (which includes the cwd at `/mnt/term/cwd`) and `/dev/fd` name the same files in both views. The rest of the 9front tree is at `/9` in the Linux view, so `/9/bin/ls` is 9front's `ls`, and a 9front process reaches the Linux tree as `'#λ'`, quoted in rc, or binds it where it likes. The 9front root is read-only, so h9 doesn't bind it anywhere by default. A `getcwd` whose directory is only in the 9front tree is reported under `/9`.
 
-- **The Linux root.** `--linux-root DIR` names it. It's read-only by default and under the same access rules as the 9front root: `--writable DIR` makes it writable, and [overlay](0011-overlay.md)'s `--write=overlay` covers it once that's built. It's a contained tree under [symlinks-in-root](symlinks-in-root.md), so Alpine's absolute links, such as `/bin/ls` to `/bin/busybox`, resolve inside it.
+- **The Linux root.** `--linux-root DIR` names it. It's read-only by default and under the same access rules as the 9front root: `--writable DIR` makes it writable, and [overlay](0011-overlay.md)'s `--write=overlay` covers it once that's built. It's a contained tree under [symlinks-in-root](0034-symlinks-in-root.md), so Alpine's absolute links, such as `/bin/ls` to `/bin/busybox`, resolve inside it.
 - **`/dev`:** `null`, `zero`, `full`, `random`, `urandom`, served by devlinux; `tty` and `console`, which open the machine's console; `fd`, which is devdup; and `stdin`, `stdout` and `stderr` as `fd/0` to `fd/2`.
 - **`/proc`:** `/proc/self`, `/proc/thread-self` and `/proc/<pid>/{exe,cwd,maps,fd,stat,status,cmdline,environ}`, plus `/proc/cpuinfo`, `/proc/meminfo`, `/proc/stat`, `/proc/uptime`, `/proc/mounts` (a single root entry) and `/proc/sys/kernel/random/uuid`. Pids are the machine's pids, so `/proc/<pid>` shows 9front processes too, with their a.out as `exe`. The `exe`, `cwd` and `fd/N` entries read as symlinks to guest paths.
 - **`/sys`:** absent.
@@ -224,7 +224,7 @@ h9's host process already sits where the Sentry would.
 
 - **The guest reaches nothing new on the host.** Every Linux call is served by drawterm's kernel through the same namespace, device mask and policy hooks. The Linux root is under the access rules like the 9front root.
 - **`rt_sigreturn`** must sanitize the restored state exactly as `noted` does (see Signals). It gets its own tests, including a forged frame that asks for EL1, or for kernel selectors on amd64.
-- **The Linux root's symlinks** are resolved by [symlinks-in-root](symlinks-in-root.md), which never steps above the tree and still checks the resolved path.
+- **The Linux root's symlinks** are resolved by [symlinks-in-root](0034-symlinks-in-root.md), which never steps above the tree and still checks the resolved path.
 - **devlinux's `/proc`** must not reveal host details beyond what the policy already does. `/proc/cpuinfo` and `/proc/meminfo` report the machine's limits (`--cpus`, `--memory`) and the guest-visible features, not the host's. `/proc/<pid>/exe` and the other links show guest paths. `/proc/mounts` doesn't list host paths. Pids are the machine's, so another machine's processes aren't visible, as with devproc.
 - **uid 0 inside the Linux root** grants nothing: no h9 check reads Linux ids.
 - **New attack surface:** the ELF loader and the VMA layer turn guest-supplied sizes and offsets into host mappings. Both validate against the address-space limits before mapping, as the a.out loader does, and the vmm's range `unmap` and `protect` refuse ranges outside the user half. Lazy faults allocate only inside VMAs, and count against `--memory`.
@@ -255,7 +255,7 @@ Cases:
 ## Implementation
 
 1. A personality on the process record, the dispatch switch in `Machine.loop`, the ELF loader, the stack and auxv, `Backend.hwcaps`. Static musl hello, on arm64 and then amd64.
-2. File, process and terminal calls; the errno and `stat` mapping; exit statuses; `wait4`; `vfork`; signals for the common notes; devlinux and the Linux view; `--linux-root`. busybox and the mixed pipelines. Needs [symlinks-in-root](symlinks-in-root.md).
+2. File, process and terminal calls; the errno and `stat` mapping; exit statuses; `wait4`; `vfork`; signals for the common notes; devlinux and the Linux view; `--linux-root`. busybox and the mixed pipelines. Needs [symlinks-in-root](0034-symlinks-in-root.md).
 3. The vmm range `unmap` and `protect`, sorted regions and the emulator's incremental sync; the VMA layer with lazy pages; `PT_INTERP`. Dynamic binaries.
 4. DESIGN.md gets a "Linux personality" section.
 

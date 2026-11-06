@@ -36,6 +36,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [dotl](design/0022-dotl.md) | draft | needs serve, guest-tools | 9P2000.L and ZeroFS |
 | [guest-tools](design/0032-guest-tools.md) | draft |  | h9's own commands in the guest |
 | [exit-status](design/0033-exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
+| [symlinks-in-root](design/0034-symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
@@ -46,7 +47,6 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
 | [root-auth](design/root-auth.md) | draft |  | Authenticated 9P roots |
 | [serve](design/serve.md) | draft | needs websocket-9p | Serving the namespace over 9P |
-| [symlinks-in-root](design/symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
 
 ```mermaid
 flowchart LR
@@ -77,6 +77,7 @@ flowchart LR
   p_dotl["#35;22 dotl<br/>draft"]:::draft
   p_guest_tools["#35;32 guest-tools<br/>draft"]:::draft
   p_exit_status["#35;33 exit-status<br/>draft"]:::draft
+  p_symlinks_in_root["#35;34 symlinks-in-root<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
@@ -87,7 +88,6 @@ flowchart LR
   p_linux_threads["linux-threads<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
   p_serve["serve<br/>draft"]:::draft
-  p_symlinks_in_root["symlinks-in-root<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
