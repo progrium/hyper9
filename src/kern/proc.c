@@ -206,9 +206,14 @@ pushnote(Hproc *h, Hnote *n)
 		return 0;
 	}
 	h->note[h->nnote++] = n;
-	procinterrupt(h->p);
+	/*
+	 * The kick first: the exit loop interrupts a call it starts with the
+	 * kick's flag set, and a call started before the flag is set sees
+	 * this interrupt.
+	 */
 	if(h->aux != nil && h9_notekick != nil)
 		h9_notekick(h->aux);
+	procinterrupt(h->p);
 	unlock(&h->nlk);
 	return 1;
 }
@@ -496,9 +501,10 @@ h9_killproc(Hproc *h)
 	lock(&h->nlk);
 	if(h->p != nil){
 		h->killed = 1;
-		procinterrupt(h->p);
+		/* The kick first, as in pushnote. */
 		if(h->aux != nil && h9_notekick != nil)
 			h9_notekick(h->aux);
+		procinterrupt(h->p);
 	}
 	unlock(&h->nlk);
 }

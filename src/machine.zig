@@ -754,6 +754,14 @@ pub const Machine = struct {
             vcpu.getUreg(&u);
             switch (exit) {
                 .syscall => switch (blk: {
+                    // A note posted during the last call had its interrupt
+                    // cleared when that call returned (drawterm's wrappers
+                    // clear it after every call). If the guest's next exit
+                    // is this call, it must still be interrupted, as in
+                    // 9front, where notepending holds until the note is
+                    // delivered. `noteKick` sets the flag before the
+                    // interrupt, so a note missed here interrupts the call.
+                    if (p.note_flag.load(.acquire)) kern.interrupt(kern.self());
                     p.in_sys.store(u.syscallNumber() +% 1, .release);
                     defer p.in_sys.store(0, .release);
                     const out = syscall.dispatch(&p.sys, &u);

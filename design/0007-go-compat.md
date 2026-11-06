@@ -2,7 +2,7 @@
 id: 7
 slug: go-compat
 title: Go compatibility
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: [3]
@@ -248,4 +248,5 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 - **The Go cases don't need the root tree.** Each runs with a scratch root holding only the namespace's mount points, and the fixtures at `/mnt/term/cwd`, so they run wherever Go and the emulator are. The two rc cases still need the tree.
 - **The `spin` fixture yields** with `runtime.Gosched` between rounds: Go doesn't preempt goroutines on Plan 9, so a loop with no calls would hold its P and starve `main` there too.
 - **`go-stdtest` found** that the `mount` syscall isn't served (it kills `syscall`'s `TestPlan9Syserr`) and that the runtime's `TestPageAllocGrow` reserves more than `--memory` allows. Both are in the skip list; other failures are counted, not skipped.
+- **A note could miss a blocking call.** drawterm's call wrappers clear the "interrupt this call" flag when a call returns, so a note posted while one call was finishing was lost if the guest's next exit was a blocking call, such as Go's `semacquire` while `go: exit` notes go round; the program then hung about one run in four under load. The exit loop now interrupts a call it starts with a note flagged, and the note's kick is posted before its interrupt, so one of the two always reaches the call.
 - **rc's `exit 0` exits 0.** rc counts a status of only `0` and `|` as true and calls `exits("")` for it, so the rc case checks that `exit 0` gives 0; `exits("0")` itself still gives 1, which `src/cli.zig`'s tests cover. `exit 256` and `exit 03` give 1 and print, as Done when says.
