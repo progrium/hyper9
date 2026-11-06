@@ -2241,6 +2241,10 @@ test "a TCP 9P root runs /bin/ls [13]" {
     try srv.start(e);
     defer srv.stop();
     try expectSameAsHost(e, srv.dial(), &.{ "/bin/ls", "/", "/bin/ls" });
+    // A name: localhost is ::1 before 127.0.0.1 on macOS, and the server
+    // is only on 127.0.0.1, so every address cs returns is tried.
+    var buf: [64]u8 = undefined;
+    try expectSameAsHost(e, try std.fmt.bufPrint(&buf, "tcp!localhost!{d}", .{srv.port}), &.{ "/bin/ls", "/" });
 }
 
 /// Relays connections to a unix socket at `path` to the TCP port `port`.

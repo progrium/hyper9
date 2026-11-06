@@ -1228,15 +1228,19 @@ pub const Machine = struct {
         const cs = try kern.open("#I/cs", kern.ORDWR);
         defer kern.close(cs) catch {};
         _ = try kern.pwrite(cs, addr, 0);
-        const n = try kern.pread(cs, &buf, 0);
-        // Lines of "/net/tcp/clone ip!port".
-        var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
+        // cs returns one "/net/tcp/clone ip!port" line per read, so a name
+        // with several addresses (::1 and 127.0.0.1 for localhost) takes
+        // several reads.
+        var off: i64 = 0;
         var last: kern.Error = error.Kern;
-        while (lines.next()) |line| {
+        while (true) {
+            const n = try kern.pread(cs, &buf, off);
+            if (n == 0) return last;
+            off += @intCast(n);
+            const line = std.mem.trimEnd(u8, buf[0..n], "\n");
             const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
             if (dialOne(line[sp + 1 ..])) |fd| return fd else |e| last = e;
         }
-        return last;
     }
 
     fn dialOne(ipport: []const u8) kern.Error!u31 {
