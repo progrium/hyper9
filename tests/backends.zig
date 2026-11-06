@@ -1445,7 +1445,7 @@ const OverlayRoot = struct {
     fn init(r: *OverlayRoot) !void {
         const io = std.testing.io;
         r.tmp = std.testing.tmpDir(.{});
-        for ([_][]const u8{ "dev", "tmp", "srv", "mnt/term/cwd", "cwd" }) |d| try r.tmp.dir.createDirPath(io, d);
+        for ([_][]const u8{ "dev", "tmp", "srv", "bin", "mnt/term/cwd", "cwd" }) |d| try r.tmp.dir.createDirPath(io, d);
         r.path = r.buf[0..try r.tmp.dir.realPath(io, &r.buf)];
         r.cwd = try std.fmt.bufPrint(&r.cwd_buf, "{s}/cwd", .{r.path});
     }
@@ -1461,6 +1461,11 @@ const OverlayRoot = struct {
 /// Runs fixture `text` on backend `kind` with the root and cwd of `r`;
 /// null if the backend can't run here. The status goes in `sb`.
 fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, sb: []u8) !?[]const u8 {
+    return runOverlayTools(kind, r, text, pol, true, sb);
+}
+
+/// `runOverlay`, with `guest_tools` (design/0032-guest-tools.md) as given.
+fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, guest_tools: bool, sb: []u8) !?[]const u8 {
     const gpa = std.testing.allocator;
     const bytes = try image(gpa, .arm64, text);
     defer gpa.free(bytes);
@@ -1476,6 +1481,7 @@ fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.
         .root = .{ .dir = r.path },
         .cwd = r.cwd,
         .policy = p,
+        .guest_tools = guest_tools,
         .stdio = .{ .out = &out.writer, .err = &err.writer },
     }) catch |e| switch (e) {
         error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
@@ -1605,6 +1611,41 @@ test "a machine's posted channels are closed when it ends [8]" {
         try std.testing.expectEqualStrings("exited ", got);
         // The posted chan was opened ORCLOSE: closing it removed the file.
         try std.testing.expect(!r.exists("cwd/f"));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+// #H (design/0032-guest-tools.md), with the test-only script that Debug
+// builds serve from tests/fixtures/guest.
+
+test "#H/bin is on /bin, reads back, and refuses every change [32]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        var sb: [300]u8 = undefined;
+        const got = try runOverlay(kind, &r, @embedFile("htools_tree"), .{}, &sb) orelse continue;
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        try std.testing.expectEqualStrings("exited ", got);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "guest_tools = false leaves #H/bin off /bin and masks #H [32]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        var sb: [300]u8 = undefined;
+        const got = try runOverlayTools(kind, &r, @embedFile("htools_masked"), .{}, false, &sb) orelse continue;
+        errdefer std.debug.print("backend {t}: {s}\n", .{ kind, got });
+        try std.testing.expect(std.mem.startsWith(u8, got, "exited "));
+        try std.testing.expect(got.len > "exited ".len);
+        try std.testing.expect(!std.mem.eql(u8, got, "exited a"));
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;

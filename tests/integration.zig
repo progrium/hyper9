@@ -2483,3 +2483,89 @@ test "--check runs /bin/echo from a 9P root [13]" {
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
 }
+
+// h9's own commands in #H (design/0032-guest-tools.md). Debug builds serve
+// tests/fixtures/guest in #H too: `h9-guest-test` and an `echo` that the
+// root's must beat. The build sets H9_TEST_GUEST_TOOLS when it served them.
+
+/// Skips a case that needs the test-only scripts when h9 was built without
+/// them (-Dguest-test=false, the default for release builds).
+fn needGuestTest() !void {
+    if (getenv(3, "H9_TEST_GUEST_TOOLS") == null) return error.SkipZigTest;
+}
+
+test "#H/bin is bound after /bin and its scripts run [32]" {
+    const e = try env(@src());
+    try needGuestTest();
+    const r = try run(e, &.{ "--rc", "h9-guest-test a b" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("h9 guest tools a b\n", r.out);
+    // The guest's own view of its namespace: #H/bin comes after /rc/bin.
+    const ns = try run(e, &.{ "--rc", "cat /proc/$pid/ns" });
+    defer ns.deinit();
+    errdefer std.debug.print("ns: {s}\n", .{ns.out});
+    const rc_at = std.mem.indexOf(u8, ns.out, "rc/bin") orelse return error.NoRcBin;
+    const h_at = std.mem.indexOf(u8, ns.out, "#H/bin") orelse return error.NoHBin;
+    try std.testing.expect(h_at > rc_at);
+}
+
+test "a root command of the same name wins over #H's [32]" {
+    const e = try env(@src());
+    try needGuestTest();
+    const r = try run(e, &.{ "--rc", "echo hi; grep -s 'echo from' '#H/bin/echo' && echo shadowed" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hi\nshadowed\n", r.out);
+}
+
+test "#H refuses writes [32]" {
+    const e = try env(@src());
+    try needGuestTest();
+    const r = try run(e, &.{
+        "--rc",
+        \\f='#H/bin/h9-guest-test'
+        \\echo x >$f || echo write
+        \\echo x >>$f || echo append
+        \\touch '#H/bin/new' || echo create
+        \\rm $f || echo remove
+        \\chmod 777 $f || echo wstat
+        \\sed 1q $f
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("write\nappend\ncreate\nremove\nwstat\n#!/bin/rc\n", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") != null);
+}
+
+test "--no-guest-tools leaves out the bind and masks #H [32]" {
+    const e = try env(@src());
+    const p = try run(e, &.{ "--no-guest-tools", "--print", "ls" });
+    defer p.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "devmask:  #C #H #U\n") != null);
+    const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "mount/attach disallowed") != null);
+    if (getenv(3, "H9_TEST_GUEST_TOOLS") != null) {
+        const t = try run(e, &.{ "--no-guest-tools", "--rc", "h9-guest-test" });
+        defer t.deinit();
+        try std.testing.expect(t.code != 0);
+        try std.testing.expectEqualStrings("", t.out);
+    }
+}
+
+test "--print shows the #H bind [32]" {
+    const e = try env(@src());
+    for ([_][]const u8{ "--profile=default", "--profile=tight" }) |prof| {
+        const p = try run(e, &.{ prof, "--print", "ls" });
+        defer p.deinit();
+        errdefer std.debug.print("{s}\n", .{p.out});
+        try std.testing.expectEqual(0, p.code);
+        const rc_at = std.mem.indexOf(u8, p.out, "  bind -a '/rc/bin' /bin\n") orelse return error.NoRcBin;
+        const h_at = std.mem.indexOf(u8, p.out, "  bind -a '#H/bin' /bin  # h9's commands\n") orelse return error.NoHBin;
+        try std.testing.expect(h_at > rc_at);
+    }
+}
