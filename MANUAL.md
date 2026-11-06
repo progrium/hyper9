@@ -96,6 +96,9 @@ instead: slower for heavy computation, but otherwise identical (chapter 26).
 | plan9port | plan9port is Plan 9's tools rewritten to run on Unix. h9 runs the actual, unmodified 9front binaries. |
 | 9vx | 9vx is h9's closest ancestor: 9front binaries on a host, in a software sandbox. h9 uses the hardware hypervisor instead, and runs on current hosts. |
 
+[How h9 compares](docs/comparison.md) goes wider, to containers, sandboxes
+and compatibility layers.
+
 #### What h9 doesn't do
 
 - It doesn't run the 9front kernel, so there are no hardware drivers and no
@@ -2218,6 +2221,8 @@ They change faster than this manual, as proposals land.
 - [Building your own userland](docs/userland.md): a root of your own, from
   one Go program to a slim 9front, a layer over the stock root, or a tree
   served over 9P or WebSocket.
+- [How h9 compares](docs/comparison.md): h9 next to containers, gVisor,
+  microVMs, WSL, Wine, WASI runtimes and other ways to run Plan 9.
 
 ## Appendices
 
