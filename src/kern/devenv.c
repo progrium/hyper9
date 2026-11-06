@@ -4,7 +4,7 @@
  * drawterm's, which has one machine-wide environment and imports the host
  * process's environment on first attach (DESIGN.md, env.scrub).
  *
- * drawterm's Proc has no egrp, and kern/dat.h stays unmodified, so a Proc's
+ * drawterm's Proc has no egrp, and stays as it is, so a Proc's
  * group is kept on its h9 process record (src/kern/proc.c). drawterm's own Egrp
  * and Evalue types don't match 9front's, so this file uses its own (HEgrp,
  * HEvalue). #ec (the kernel configuration group) isn't supported.

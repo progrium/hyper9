@@ -1153,7 +1153,7 @@ pub const Machine = struct {
             .mount => |mt| {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
                 defer kern.close(fd) catch {};
-                kern.mount(fd, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
             },
             .unmount => |u| kern.unmount(if (u.from) |f| try m.nsPath(arena, f, con_id) else null, try m.nsPath(arena, u.to, con_id)) catch {},
             .cd => |d| kern.chdir(try m.nsPath(arena, d, con_id)) catch {},

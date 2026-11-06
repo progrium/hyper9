@@ -164,6 +164,9 @@ const c_stub = struct {
     fn sysunmount(_: ?[*:0]const u8, _: [*:0]const u8) c_int {
         return -1;
     }
+    fn h9_fauth(_: c_int, _: [*:0]const u8) c_int {
+        return -1;
+    }
     fn h9_kern_chdir(_: [*:0]const u8) c_int {
         return -1;
     }
@@ -248,6 +251,7 @@ const c_real = struct {
     extern fn sysbind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) c_int;
     extern fn sysmount(fd: c_int, afd: c_int, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) c_int;
     extern fn sysunmount(old: ?[*:0]const u8, new: [*:0]const u8) c_int;
+    extern fn h9_fauth(fd: c_int, aname: [*:0]const u8) c_int;
     extern fn h9_kern_chdir(name: [*:0]const u8) c_int;
     extern fn h9_kern_setargs(args: [*]const u8, n: c_int) void;
     extern var h9_procstatus: ?*const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void;
@@ -748,9 +752,18 @@ pub fn bind(old: [*:0]const u8, new: [*:0]const u8, flag: c_int) Error!void {
     _ = try check(c.sysbind(old, new, flag));
 }
 
-/// Mounts the 9P server on `fd` at `new`.
-pub fn mount(fd: u31, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) Error!void {
-    _ = try check(c.sysmount(fd, -1, new, flag, spec));
+/// Mounts the 9P server on `fd` at `new`, authenticated with the auth
+/// fd `afd` from `fauth`, or -1 for none. Closes `fd`, as 9front's does.
+/// Returns the mount's id.
+pub fn mount(fd: u31, afd: i32, new: [*:0]const u8, flag: c_int, spec: [*:0]const u8) Error!u31 {
+    return try check(c.sysmount(fd, afd, new, flag, spec));
+}
+
+/// Starts authenticating to the 9P server on `fd` as `aname` (Tauth),
+/// returning an fd on the auth channel. Fails with the server's error
+/// when it needs no authentication.
+pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
+    return try check(c.h9_fauth(fd, aname));
 }
 
 /// Undoes binds and mounts on `new`: only `old`'s, or all with null.

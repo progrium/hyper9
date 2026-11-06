@@ -46,7 +46,7 @@ int clipwrite(char *s) { USED(s); return 0; }
 /* Compose sequences only matter for GUI keyboard input. */
 long latin1(Rune *k, int n) { USED(k, n); return -1; }
 
-/* devtls's factotum path; there's no factotum until devsrv (design/0008-devsrv.md). */
+/* devtls's in-kernel factotum path, unused: a guest runs its own factotum and posts it in /srv (design/0008-devsrv.md). */
 void *auth_allocrpc(int afd) { USED(afd); werrstr("no factotum"); return nil; }
 void auth_freerpc(void *rpc) { USED(rpc); }
 int auth_rpc(void *rpc, char *verb, void *a, int n) { USED(rpc, verb, a, n); return -1; }
@@ -192,6 +192,56 @@ h9_fd2path(int fd, char *buf, uint nbuf)
 	cclose(c);
 	poperror();
 	return 0;
+}
+
+/*
+ * fauth(fd, aname), as 9front's sysfauth (port/auth.c): sends Tauth over
+ * the 9P channel on fd with devmnt's mntauth, and returns a new fd, close
+ * on exec, on the auth channel; or -1 with the error string set, which is
+ * the server's ("authentication not required", say) when it refuses.
+ * design/0008-devsrv.md.
+ */
+int
+h9_fauth(int fd, char *aname)
+{
+	Chan *c, *ac;
+
+	if(waserror()){
+		char *p = up->syserrstr;
+		up->syserrstr = up->errstr;
+		up->errstr = p;
+		return -1;
+	}
+	aname = validnamedup(aname, 1);
+	if(waserror()){
+		free(aname);
+		nexterror();
+	}
+	c = fdtochan(fd, ORDWR, 0, 1);
+	if(waserror()){
+		cclose(c);
+		nexterror();
+	}
+
+	ac = mntauth(c, aname);
+	/* at this point ac is responsible for keeping c alive */
+	poperror();	/* c */
+	cclose(c);
+	poperror();	/* aname */
+	free(aname);
+
+	if(waserror()){
+		cclose(ac);
+		nexterror();
+	}
+	/* always mark it close on exec */
+	fd = newfd(ac, OCEXEC);
+	if(fd < 0)
+		error(Enofd);
+	poperror();	/* ac */
+	poperror();
+	up->notepending = 0;
+	return fd;
 }
 
 #ifndef WINDOWS

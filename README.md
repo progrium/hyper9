@@ -20,20 +20,20 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [net-policy](design/0005-net-policy.md) | implemented |  | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](design/0006-ephemeral-writes.md) | implemented |  | Ephemeral writes and a private /tmp |
 | [go-compat](design/0007-go-compat.md) | accepted | ready | Go compatibility |
-| [devsrv](design/0008-devsrv.md) | accepted | ready | devsrv, /srv and mount |
+| [devsrv](design/0008-devsrv.md) | implemented |  | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | implemented |  | 386 binaries |
 | [self-host](design/0010-self-host.md) | draft |  | Self-hosting |
 | [overlay](design/0011-overlay.md) | accepted | ready | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | draft |  | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | draft |  | 9P roots |
-| [image-roots](design/0014-image-roots.md) | draft | needs devsrv, 9p-roots | Disk-image roots |
-| [gfx](design/0015-gfx.md) | accepted | needs devsrv | Graphics (--gfx) |
+| [image-roots](design/0014-image-roots.md) | draft | needs 9p-roots | Disk-image roots |
+| [gfx](design/0015-gfx.md) | accepted | ready | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
-| [websocket-9p](design/0021-websocket-9p.md) | draft | needs devsrv, 9p-roots | 9P over WebSocket |
-| [dotl](design/0022-dotl.md) | draft | needs devsrv, 9p-roots | 9P2000.L and ZeroFS |
+| [websocket-9p](design/0021-websocket-9p.md) | draft | needs 9p-roots | 9P over WebSocket |
+| [dotl](design/0022-dotl.md) | draft | needs 9p-roots | 9P2000.L and ZeroFS |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [exit-status](design/exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
@@ -56,7 +56,7 @@ flowchart LR
   p_net_policy["#35;5 net-policy<br/>implemented"]:::implemented
   p_ephemeral_writes["#35;6 ephemeral-writes<br/>implemented"]:::implemented
   p_go_compat["#35;7 go-compat<br/>accepted"]:::accepted
-  p_devsrv["#35;8 devsrv<br/>accepted"]:::accepted
+  p_devsrv["#35;8 devsrv<br/>implemented"]:::implemented
   p_i386["#35;9 i386<br/>implemented"]:::implemented
   p_self_host["#35;10 self-host<br/>draft"]:::draft
   p_overlay["#35;11 overlay<br/>accepted"]:::accepted
@@ -242,7 +242,8 @@ says, and a guest one as the host's, so `h9 --arch 386 /bin/echo hi` runs
 `/386/bin/echo` from a root that has it.
 
 Syscalls go through drawterm's kern: open, create, close, dup, pread, pwrite,
-seek, stat, fstat, wstat, fwstat, fd2path, bind, chdir, remove, errstr, brk_,
+seek, stat, fstat, wstat, fwstat, fd2path, bind, mount, unmount, fauth, chdir,
+remove, errstr, brk_,
 sleep, notify, noted, exits, and for process trees rfork, exec (including `#!`
 scripts), await and pipe, and the segment calls segattach, segdetach,
 segbrk, segfree and segflush for `shared` and `memory` segments (so `seg`
@@ -260,6 +261,13 @@ to each sleep. Each process has `args`, `ctl` (`kill`, `close`, `closefiles`),
 `fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `segment`, `status` and `wait`; the CPU
 times in `status` read 0 for now, and `ns` shows the host paths of bound
 host trees.
+
+`/srv` is the machine's own service registry (`#s`, from 9front), so guest
+file servers post themselves and other processes mount them, with or
+without `fauth`: `h9 --rc 'ramfs -S tmp && mkdir /tmp/n && mount -c
+/srv/tmp /tmp/n && touch /tmp/n/a && ls /tmp/n'`. ramfs, srvfs, exportfs,
+factotum and plumber run. Machines in one host process can't see each
+other's `/srv`, and what's posted is closed when the machine ends.
 
 At the terminal, Ctrl-C posts `interrupt` to the foreground note group (rc
 abandons the command and prompts again); a second Ctrl-C within a second

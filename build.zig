@@ -118,6 +118,8 @@ const segattach_fixtures = [_][]const u8{
 /// Programs in tests/fixtures/overlay, for tests/backends.zig. They use the
 /// segattach fixtures' lib.S.
 const overlay_fixtures = [_][]const u8{ "tmp_own", "tmp_absent", "copyup_reader" };
+/// Programs in tests/fixtures/srv, for tests/backends.zig, with the same lib.S.
+const srv_fixtures = [_][]const u8{ "board", "hold", "absent", "orclose" };
 
 /// Programs in tests/fixtures/sema, for tests/backends.zig; they include
 /// the segattach fixtures' lib.S.
@@ -415,7 +417,7 @@ pub fn build(b: *std.Build) void {
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "fscheck.c", "netcheck.c", "tsleep.c", "sema.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "fscheck.c", "netcheck.c", "tsleep.c", "sema.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
@@ -653,11 +655,12 @@ pub fn build(b: *std.Build) void {
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(backend_tests);
-    // The segattach, overlay, sema and net fixtures, assembled freestanding as the shim is, and
+    // The segattach, overlay, srv, sema and net fixtures, assembled freestanding as the shim is, and
     // embedded as raw text for tests/backends.zig to wrap in an a.out.
     for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
         .{ .dir = "segattach", .prefix = "seg", .names = &segattach_fixtures },
         .{ .dir = "overlay", .prefix = "ov", .names = &overlay_fixtures },
+        .{ .dir = "srv", .prefix = "srv", .names = &srv_fixtures },
         .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
         .{ .dir = "net", .prefix = "net", .names = &net_fixtures },
     }) |set| for (set.names) |name| {

@@ -363,10 +363,12 @@ readns1(Chan *c, Groups *g, char *buf, int nbuf)
 	} else {
 		c->nrock = i;
 		int2flag(f->mflag, flag);
+		/* A posted channel prints as its /srv name, as on 9front (design/0008-devsrv.md). */
 		if(strcmp(chanpath(f->to), "#M") == 0)
 			i = snprint(buf, nbuf, *f->spec?
 				"mount %s %q %q %q\n": "mount %s %q %q\n", flag,
-				chanpath(f->to->mchan), chanpath(f->umh->from), f->spec);
+				f->to->mchan->srvname != nil ? f->to->mchan->srvname : chanpath(f->to->mchan),
+				chanpath(f->umh->from), f->spec);
 		else
 			i = snprint(buf, nbuf, "bind %s %q %q\n", flag,
 				chanpath(f->to), chanpath(f->umh->from));

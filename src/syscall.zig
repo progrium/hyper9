@@ -20,6 +20,9 @@ pub const Nr = enum(u64) {
     await = 47,
     bind = 2,
     chdir = 3,
+    fauth = 10,
+    unmount = 35,
+    mount = 46,
     close = 4,
     dup = 5,
     exits = 8,
@@ -97,6 +100,8 @@ pub const Process = struct {
     msg: [kern.ERRMAX + 64]u8 = undefined,
     name_buf: [1024]u8 = undefined,
     name2_buf: [1024]u8 = undefined,
+    /// mount's and fauth's attach name (aname).
+    spec_buf: [1024]u8 = undefined,
     /// The current call's arguments, formatted for the trace.
     targs: [256]u8 = undefined,
     targs_len: usize = 0,
@@ -330,6 +335,33 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
             const old = try gm.string(p.as, try a.u(0), &p.name_buf);
             const new = try gm.string(p.as, try a.u(1), &p.name2_buf);
             return result0(kern.bind(old, new, try a.int(2)));
+        },
+        .mount => {
+            // mount(int fd, int afd, char *old, int flag, char *aname)
+            // (design/0008-devsrv.md): drawterm's sysmount, which closes fd.
+            const old = try gm.string(p.as, try a.u(2), &p.name_buf);
+            const spec_va = try a.u(4);
+            const spec: [:0]const u8 = if (spec_va == 0) "" else try gm.string(p.as, spec_va, &p.spec_buf);
+            const flag = try a.int(3);
+            p.note("{d} {d} \"{s}\" {d} \"{s}\"", .{ try a.int(0), try a.int(1), old, flag, spec });
+            const fd = fdArg(try a.int(0)) orelse return badFd();
+            return result(kern.mount(fd, try a.int(1), old, flag, spec));
+        },
+        .unmount => {
+            // unmount(char *name, char *old): name may be nil.
+            const name_va = try a.u(0);
+            const name: ?[:0]const u8 = if (name_va == 0) null else try gm.string(p.as, name_va, &p.name2_buf);
+            const old = try gm.string(p.as, try a.u(1), &p.name_buf);
+            p.note("\"{s}\" \"{s}\"", .{ name orelse "nil", old });
+            return result0(kern.unmount(if (name) |n| n.ptr else null, old));
+        },
+        .fauth => {
+            // fauth(int fd, char *aname)
+            const spec_va = try a.u(1);
+            const spec: [:0]const u8 = if (spec_va == 0) "" else try gm.string(p.as, spec_va, &p.spec_buf);
+            p.note("{d} \"{s}\"", .{ try a.int(0), spec });
+            const fd = fdArg(try a.int(0)) orelse return badFd();
+            return result(kern.fauth(fd, spec));
         },
         .remove => return result0(kern.remove(try gm.string(p.as, try a.u(0), &p.name_buf))),
         .wstat, .fwstat => {

@@ -1539,3 +1539,161 @@ test "--strict accepts --net=outbound [5]" {
     try std.testing.expectEqualStrings("ok\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
+
+// devsrv, /srv and mount (design/0008-devsrv.md). Mount points are made
+// in the machine's private /tmp, since the root tree's /n and /mnt are
+// mostly mntgen's on 9front and may lack the names a case wants.
+
+test "ramfs posts to /srv and another process mounts it [8]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S r && mkdir /tmp/r && mount -c /srv/r /tmp/r && echo hi >/tmp/r/x && cat /tmp/r/x" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "ramfs -S tmp, mount and ls (demo) [8]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S tmp && mkdir /tmp/n && mount -c /srv/tmp /tmp/n && touch /tmp/n/a && ls /tmp/n" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/tmp/n/a\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a posted pipe is a named pipe [8]" {
+    const e = try env(@src());
+    // srv(3)'s example in rc: the right side posts its fd 0, the read end
+    // of the pipe, and exits; the data waits in the pipe until it's read
+    // through /srv.
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "echo hello | { echo 0 >/srv/namedpipe }; cat /srv/namedpipe" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hello\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "mount without auth works through fauth [8]" {
+    const e = try env(@src());
+    // Not mount -n: amount calls fauth, the server answers that it needs
+    // no authentication, and mount goes on without an auth fd.
+    const r = try run(e, &.{ "--trace", "--timeout", "20s", "--rc", "ramfs -S r && mkdir /tmp/r && mount /srv/r /tmp/r && echo ok >/tmp/r/f && cat /tmp/r/f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("ok\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, " fauth ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "authentication not required") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, " mount ") != null);
+}
+
+test "unmount takes a mount out of the namespace [8]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S r && mkdir /tmp/r && mount -c /srv/r /tmp/r && touch /tmp/r/x && ls /tmp/r && unmount /tmp/r && ls /tmp/r && echo done" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/tmp/r/x\ndone\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "srvfs reexports a directory through /srv [8]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "mkdir /tmp/d /tmp/m && echo exported >/tmp/d/f && srvfs sfs /tmp/d && mount -c /srv/sfs /tmp/m && cat /tmp/m/f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("exported\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "exportfs -S serves a posted channel [8]" {
+    const e = try env(@src());
+    // exportfs reads and writes 9P on fds 0 and 1, one end of a pipe; the
+    // other end is posted as /srv/e, and exportfs passes it to /srv/r.
+    const script =
+        \\ramfs -S r && mkdir /tmp/a /tmp/b && mount -c /srv/r /tmp/a && echo through >/tmp/a/x || exit setup
+        \\exportfs -S /srv/r <[0=1] | { echo 0 >/srv/e } &
+        \\n=0
+        \\while(! test -e /srv/e && test $n -lt 100){ sleep 0.1; n=`{echo $n+1 | hoc} }
+        \\mount -c /srv/e /tmp/b && cat /tmp/b/x
+    ;
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("through\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "/proc/n/ns prints a mount of /srv/x as /srv/x [8]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S x && mkdir /tmp/x && mount -c /srv/x /tmp/x && grep /tmp/x /proc/$pid/ns" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("mount -c /srv/x /tmp/x\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a server's /srv entry goes when it exits [8]" {
+    const e = try env(@src());
+    // ramfs posts /srv/r with ORCLOSE, and its server process holds that
+    // fd; killing the server closes it, which removes the entry.
+    const script =
+        \\ramfs -S r && ls /srv || exit setup
+        \\for(p in `{awk 'FNR==1 && $1=="ramfs" {split(FILENAME, a, "/"); print a[3]}' /proc/*/status >[2]/dev/null}) echo kill >/proc/$p/ctl
+        \\n=0
+        \\while(test -e /srv/r && test $n -lt 100){ sleep 0.1; n=`{echo $n+1 | hoc} }
+        \\ls /srv
+        \\echo done
+    ;
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/srv/r\ndone\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a second create of a /srv name fails [8]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S r && ! ramfs -S r && echo refused" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("refused\n", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "exists") != null);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "clone makes a private board, and closing it clears it [8]" {
+    const e = try env(@src());
+    // The board lives while fd 3, its lease, is open; a pipe end posted on
+    // it is reachable as /srv/<board>/p, and goes with the board.
+    const script =
+        \\<[3]/srv/clone {
+        \\    b=`{cat /fd/3}
+        \\    echo hello | { echo 0 >/srv/$b/p }
+        \\    cat /srv/$b/p
+        \\    echo $b >/tmp/board
+        \\}
+        \\b=`{cat /tmp/board}
+        \\test -e /srv/$b || echo cleared
+    ;
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hello\ncleared\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "factotum starts and serves /mnt/factotum [8]" {
+    const e = try env(@src());
+    // -n skips secstore. The mount point comes from /tmp if the root
+    // tree's /mnt lacks it, as without 9front's mntgen.
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "mkdir -p /tmp/m/factotum && bind -a /tmp/m /mnt && auth/factotum -n >[2]/dev/null && ls /mnt/factotum" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/mnt/factotum/ctl\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/mnt/factotum/rpc\n") != null);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "plumber starts and serves /mnt/plumb [8]" {
+    const e = try env(@src());
+    const script =
+        \\mkdir -p /tmp/m/plumb /tmp/m/temp && bind -a /tmp/m /mnt || exit setup
+        \\echo 'editor = acme' >/tmp/rules
+        \\home=/tmp plumber -p /tmp/rules
+        \\ls /mnt/plumb
+    ;
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/mnt/plumb/rules\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/mnt/plumb/send\n") != null);
+    try std.testing.expectEqual(0, r.code);
+}
