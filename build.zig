@@ -385,8 +385,9 @@ fn zonVersion(b: *std.Build) []const u8 {
 }
 
 /// The table of src/guest/ (and tests/fixtures/guest with `with_test`)
-/// as a generated Zig file. A file the tree can't hold fails the build.
-fn guestTree(b: *std.Build, with_test: bool) std.Build.LazyPath {
+/// as a generated Zig file, and the number of entries in its bin. A file
+/// the tree can't hold fails the build.
+fn guestTree(b: *std.Build, with_test: bool) struct { file: std.Build.LazyPath, bin: usize } {
     const io = b.graph.io;
     const wf = b.addWriteFiles();
     var inputs: std.ArrayList(guesttree.Input) = .empty;
@@ -396,7 +397,7 @@ fn guestTree(b: *std.Build, with_test: bool) std.Build.LazyPath {
         defer dir.close(io);
         const found = guesttree.scan(b.allocator, io, dir) catch |err| {
             wf.step.dependOn(&b.addFail(b.fmt("{s}: {t}", .{ sub, err })).step);
-            return wf.add("guest_tree.zig", "");
+            return .{ .file = wf.add("guest_tree.zig", ""), .bin = 0 };
         };
         inputs.appendSlice(b.allocator, found) catch @panic("OOM");
     }
@@ -404,13 +405,18 @@ fn guestTree(b: *std.Build, with_test: bool) std.Build.LazyPath {
     const entries = guesttree.build(b.allocator, inputs.items, &why) catch |err| switch (err) {
         error.Rejected => {
             wf.step.dependOn(&b.addFail(b.fmt("guest tree: {s}", .{why})).step);
-            return wf.add("guest_tree.zig", "");
+            return .{ .file = wf.add("guest_tree.zig", ""), .bin = 0 };
         },
         error.OutOfMemory => @panic("OOM"),
     };
     var out: std.Io.Writer.Allocating = .init(b.allocator);
     guesttree.render(&out.writer, entries) catch @panic("OOM");
-    return wf.add("guest_tree.zig", out.written());
+    var bin: usize = 0;
+    for (entries) |e| {
+        if (e.parent == 0 or entries[e.parent].parent != 0) continue;
+        if (std.mem.eql(u8, entries[e.parent].name, "bin")) bin += 1;
+    }
+    return .{ .file = wf.add("guest_tree.zig", out.written()), .bin = bin };
 }
 
 /// The value of `NAME=value` in scripts/pins.sh, without a trailing
@@ -519,7 +525,8 @@ pub fn build(b: *std.Build) void {
     // Debug builds also serve tests/fixtures/guest, for the integration
     // cases; release builds leave it out.
     const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .Debug);
-    mod.addAnonymousImport("guest_tree", .{ .root_source_file = guestTree(b, guest_test) });
+    const guest_tree = guestTree(b, guest_test);
+    mod.addAnonymousImport("guest_tree", .{ .root_source_file = guest_tree.file });
 
     const options = b.addOptions();
     options.addOption(Emu, "emu", emu);
@@ -647,10 +654,11 @@ pub fn build(b: *std.Build) void {
     } else |_| {}
 
     // ls prints each member of the /bin union, duplicates and all, so the
-    // count is the two directories' entries added together.
+    // count is the root's two directories' entries and #H/bin's added
+    // together (design/0032-guest-tools.md).
     if (countBin(b, root)) |n| {
         const ls_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
-        ls_demo.expectStdOutEqual(b.fmt("{d: >7}\n", .{n}));
+        ls_demo.expectStdOutEqual(b.fmt("{d: >7}\n", .{n + guest_tree.bin}));
         ls_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &ls_demo.step);
     }
