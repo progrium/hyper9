@@ -1410,12 +1410,24 @@ devices in Plan 9.
   a usage error. A refused connection or attach is exit 125. The connection
   is plain, unencrypted 9P, so keep a TCP root on a trusted network. Unix
   socket roots need a macOS or Linux host.
-- Not yet available: 9P over WebSockets, as `--root wss://...` and
-  `/net/ws` (*Not yet available ([websocket-9p](design/0021-websocket-9p.md))*),
-  h9's own helper commands in the guest such as `wsmount`
-  (*Not yet available ([guest-tools](design/0032-guest-tools.md))*), roots
-  that need authentication ([root-auth](design/root-auth.md)), and disk
-  images as roots ([image-roots](design/0014-image-roots.md)).
+- **9P over WebSocket** ([websocket-9p](design/0021-websocket-9p.md)).
+  `--root ws://host/path` or `wss://host/path` uses a 9P server behind a
+  WebSocket as the root. h9 makes the connection on the host, offering the
+  `9p` subprotocol, and mounts it like any 9P root. `--root-header 'Name:
+  value'` adds a handshake header, and `--root-header @FILE` reads them from
+  a file, so a token stays out of `ps`. `wss` trusts the host's CA bundle,
+  or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY` and
+  `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
+  wss://fs.example/9p /n`.
+- **WebSockets in the guest.** `/net/ws` is laid out like `/net/tcp` and
+  follows `--net` and `--net-allow` as a TCP dial to the URL's host and port
+  would. A conversation's `data` file carries binary messages as a byte
+  stream, and its `text` file text messages, one per read and write.
+  `wsmount [-h 'Name: value'] url mountpoint` dials a 9P server and mounts
+  it. Guest connections don't use the host's proxies.
+- Not yet available: roots that need authentication
+  ([root-auth](design/root-auth.md)), and disk images as roots
+  ([image-roots](design/0014-image-roots.md)).
 
 **Try it**
 
@@ -1438,6 +1450,15 @@ One h9 serving its root tree, read-only, and another using it as its root:
 ```sh
 host$ h9 --net=enable aux/listen1 -t 'tcp!127.0.0.1!5640' /bin/exportfs -R -r / &
 host$ h9 --root 'tcp!127.0.0.1!5640' ls /
+```
+
+A root over a WebSocket, with the relay from h9's tests in front of the
+server above, and a guest mount over one:
+
+```sh
+host$ zig build wsrelay -- 8080 5640 &
+host$ h9 --root ws://localhost:8080/9p ls /
+host$ h9 --rc 'mkdir /tmp/fs && wsmount ws://localhost:8080/9p /tmp/fs && ls /tmp/fs'
 ```
 
 Mounting a remote 9P server the network policy allows:
@@ -1591,7 +1612,7 @@ hello, world
 ```text
 h9 [flags] [--] program [args...]
 h9 [flags] --rc 'command' [args...]
-h9 [--backend B] [--root DIR|DIAL|SOCKET] [--memory SIZE] --check
+h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] [--memory SIZE] --check
 h9 --version
 h9 --help          (or -h alone)
 ```
@@ -1633,9 +1654,11 @@ Machine:
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|emu` | What runs guest code. `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. `kvm` and `whp` aren't built yet (*Not yet available ([kvm](design/0016-kvm.md), [whp](design/0017-whp.md))*). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
-| `--root DIR\|DIAL\|SOCKET` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`) or a unix socket's path. Default: `$H9ROOT`, then `.local/9front/root` for a development build. |
+| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16). Default: `$H9ROOT`, then `.local/9front/root` for a development build. |
 | `--root-spec NAME` | The attach name sent to a 9P root. Default: empty. |
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
+| `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
+| `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
 | `--rc 'command'` | Run an rc command line instead of a program |
@@ -1683,10 +1706,7 @@ Tools:
 | `--version` | Print the version, the pinned 9front and drawterm revisions and the backends built in |
 | `--help`, `-h` | Print the usage to standard output |
 
-Coming with proposals in progress: `--root ws://...` and `wss://...`
-(*Not yet available ([websocket-9p](design/0021-websocket-9p.md))*),
-`--no-guest-tools` (*Not yet available ([guest-tools](design/0032-guest-tools.md))*)
-and `--gfx` (*Not yet available ([gfx](design/0015-gfx.md))*).
+Coming with a proposal in progress: `--gfx` (*Not yet available ([gfx](design/0015-gfx.md))*).
 
 **Exit codes**
 
