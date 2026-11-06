@@ -4,7 +4,7 @@ title: A multi-call 9front userland binary
 status: draft
 created: 2026-11-06
 authors: [progrium]
-depends: [self-host]
+depends: [10]
 areas: [build, tests, docs]
 ---
 
