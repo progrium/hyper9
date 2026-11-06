@@ -633,4 +633,4 @@ its binary, as the device `#H`, and binds `#H/bin` after everything else in
   [image-roots](../design/0014-image-roots.md) draft.
 - **From a Zig program.** `Machine.Options` takes the root and
   `guest_tools`, so an embedder can run its own userland without the CLI.
-  See the manual's chapter 25.
+  See [Embedding h9 in a Zig program](embedding.md).
