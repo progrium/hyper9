@@ -1,6 +1,7 @@
 # h9 - Hyper9
 
-Run native Plan 9 (9front) executables directly on host hypervisors. See [DESIGN.md](DESIGN.md).
+Run native Plan 9 (9front) executables directly on host hypervisors. See
+[MANUAL.md](MANUAL.md) for using h9, and [DESIGN.md](DESIGN.md) for how it works.
 
 ## Status
 
