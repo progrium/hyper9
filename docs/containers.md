@@ -93,8 +93,8 @@ something the runtime does for you.
 | `docker run --stop-timeout`, job deadlines | `--timeout DURATION` | main |
 | `docker inspect` | `h9 --print` | main |
 | Pulling from a registry | `--root tcp!host!port` (a 9P server) | main |
-| The same, over HTTPS | `--root wss://host/path` | *Needs [websocket-9p](../design/0021-websocket-9p.md), [PR #38](https://github.com/progrium/hyper9/pull/38)* |
-| Pulling a layer at run time | `mount 'wss://…' /dir` in the namespace file | *Needs PR #38* |
+| The same, over HTTPS | `--root wss://host/path` ([websocket-9p](../design/0021-websocket-9p.md)) | main |
+| Pulling a layer at run time | `mount 'wss://…' /dir` in the namespace file, or `wsmount` in the guest | main |
 | `docker save`, `docker load` | `tar` the root tree | main |
 | Multi-platform images | One tree with `/arm64/bin` and `/amd64/bin`; `--arch` picks | main |
 | `docker compose` | A shell script that starts several `h9`s ([section 14](#14-compose-several-machines)) | main |
@@ -341,10 +341,10 @@ host$ echo 'bind -b /mnt/term/Users/me/src/plugins/bin /bin' > plugins.ns
 host$ h9 --readable ~/src/plugins --ns plugins.ns ls /bin
 ```
 
-**Layers from the network** *(needs [websocket-9p](../design/0021-websocket-9p.md),
-[PR #38](https://github.com/progrium/hyper9/pull/38))*. With PR #38 a
-namespace file can mount a 9P server behind a WebSocket, and then bind from
-it like any other directory. The mount point has to exist in the image:
+**Layers from the network.** With
+[websocket-9p](../design/0021-websocket-9p.md), a namespace file can mount a
+9P server behind a WebSocket, and then bind from it like any other
+directory. The mount point has to exist in the image:
 
 ```text
 mount 'wss://layers.example.com/tools' /layers/tools
@@ -352,7 +352,10 @@ bind -b /layers/tools/arm64/bin /bin
 ```
 
 h9 makes that connection itself during the replay, before the device mask is
-set, and it's outside the network policy, like a 9P root.
+set, and it's outside the network policy, like a 9P root. A program inside
+the machine can do the same later with `wsmount URL DIR`, one of h9's own
+guest commands; that connection goes through `/net/ws` and is checked against
+`--net` and `--net-allow` like any other dial.
 
 ## 7. The container's writable layer
 
@@ -592,8 +595,7 @@ registry serves `name:tag`. `exportfs -r` serves one tree; a server that
 switches on the attach name would have to be written (`9p(2)`) or come from
 elsewhere.
 
-**Over HTTPS** *(needs [websocket-9p](../design/0021-websocket-9p.md),
-[PR #38](https://github.com/progrium/hyper9/pull/38))*. PR #38 adds
+**Over HTTPS.** [websocket-9p](../design/0021-websocket-9p.md) adds
 WebSocket roots, which go through HTTP proxies and TLS and can carry an
 `Authorization` header, as a registry pull does:
 
@@ -602,7 +604,7 @@ host$ h9 --root wss://registry.example.com/greeter \
 	--root-header "Authorization: Bearer $TOKEN" --ns /app/ns --net=enable serve
 ```
 
-To try it locally, PR #38's relay forwards WebSocket connections to the
+To try it locally, the repo's test relay forwards WebSocket connections to the
 exportfs above:
 
 ```sh
@@ -720,7 +722,7 @@ where there is one:
   draft.
 - **Authenticated registries.** 9P roots can't ask for authentication yet
   ([root-auth](../design/root-auth.md), a draft). WebSocket roots can send a
-  bearer token in a header (PR #38).
+  bearer token in a header.
 - **A build cache, image IDs and digests.** Build scripts start over each
   time; `tar | shasum` gives a digest if you need one.
 - **Network isolation between machines.** There's no private network: guests
@@ -844,7 +846,7 @@ a served image runs like a local one:
 ```sh
 host$ h9box serve greeter 5640 &
 host$ h9box run -p -e port=8081 'tcp!127.0.0.1!5640'
-host$ h9box run -p -e port=8082 ws://localhost:8080/9p     # with PR #38 and its wsrelay
+host$ h9box run -p -e port=8082 ws://localhost:8080/9p     # through zig build wsrelay
 ```
 
 For a served image, `run` reads `/box/env` and `/box/cmd` by running `cat`
