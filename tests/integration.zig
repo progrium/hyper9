@@ -1918,7 +1918,15 @@ test "a numeric exits string becomes the exit code [7]" {
         try std.testing.expectEqualStrings("", r.err);
         try std.testing.expectEqual(3, r.code);
     }
-    for ([_][]const u8{ "0", "256", "03" }) |s| {
+    {
+        // rc counts "0" as a true status and exits with "" for it, so this
+        // is 0 before the CLI sees it. cli.zig's tests cover exits("0").
+        const r = try run(e, &.{ "--rc", "exit 0" });
+        defer r.deinit();
+        try std.testing.expectEqualStrings("", r.err);
+        try std.testing.expectEqual(0, r.code);
+    }
+    for ([_][]const u8{ "256", "03" }) |s| {
         var buf: [16]u8 = undefined;
         const r = try run(e, &.{ "--rc", try std.fmt.bufPrint(&buf, "exit {s}", .{s}) });
         defer r.deinit();
@@ -1976,7 +1984,17 @@ test "syscall.Gettimeofday has microsecond resolution [7]" {
 
 test "/dev/bintime has four words and a monotonic clock [7]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--rc", "dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x; sleep 1; dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x" });
+    // The clock differs from run to run, so each backend is checked on its
+    // own rather than compared with the others.
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        try checkBintime(e, backend);
+    }
+}
+
+fn checkBintime(e: Env, backend: []const u8) !void {
+    const r = try runOn(e, backend, &.{ "--rc", "dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x; sleep 1; dd -if /dev/bintime -bs 32 -count 1 >[2]/dev/null | xd -1x" }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
