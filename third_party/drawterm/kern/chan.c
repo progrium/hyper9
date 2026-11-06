@@ -405,6 +405,9 @@ chanfree(Chan *c)
 	pathclose(c->path);
 	c->path = nil;
 
+	free(c->srvname);	/* h9, as 9front */
+	c->srvname = nil;
+
 	lock(&chanalloc.lk);
 	c->next = chanalloc.free;
 	chanalloc.free = c;

@@ -50,6 +50,8 @@ struct Hmach
 	Ref	ref;		/* one per record */
 	Lock	lk;
 	ulong	nextnoteid;
+	int	nlive;		/* processes not yet released (h9_kern_release); under lk */
+	void	*srv;		/* devsrv.c's registry, made on first attach; under lk */
 };
 
 /* 9front's Note. One note posted to a group is shared by its queues. */
@@ -88,6 +90,7 @@ struct Hproc
 	void	*egrp;		/* devenv.c's HEgrp */
 	void	*aux;		/* the Zig process */
 	Hmach	*mach;
+	int	released;	/* h9_kern_release has run; only its own thread looks */
 	QLock	debug;		/* held to swap or drop p's fgrp, pgrp and dot, and to read them from devproc */
 
 	Lock	nlk;		/* guards the note fields below */
@@ -121,6 +124,10 @@ int	h9_setnoteid(Hproc*, ulong);
 void	h9_killproc(Hproc*);
 void	h9_fgrpclose(Fgrp*);
 int	h9_pids(Hmach*, ulong*, int);
+
+/* devsrv.c */
+void	h9_srvmachclose(Hmach*);
+void	h9_srvmachfree(Hmach*);
 
 /*
  * Set by the Zig side: the state (a syscall's name, "Running"...) and the

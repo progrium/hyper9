@@ -1445,7 +1445,7 @@ const OverlayRoot = struct {
     fn init(r: *OverlayRoot) !void {
         const io = std.testing.io;
         r.tmp = std.testing.tmpDir(.{});
-        for ([_][]const u8{ "dev", "tmp", "mnt/term/cwd", "cwd" }) |d| try r.tmp.dir.createDirPath(io, d);
+        for ([_][]const u8{ "dev", "tmp", "srv", "mnt/term/cwd", "cwd" }) |d| try r.tmp.dir.createDirPath(io, d);
         r.path = r.buf[0..try r.tmp.dir.realPath(io, &r.buf)];
         r.cwd = try std.fmt.bufPrint(&r.cwd_buf, "{s}/cwd", .{r.path});
     }
@@ -1538,6 +1538,73 @@ test "a copy-up while another process has the lower file open leaves that reader
         try std.testing.expectEqualStrings("exited ", got);
         var hb: [8]u8 = undefined;
         try std.testing.expectEqualStrings("old", try r.tmp.dir.readFile(std.testing.io, "cwd/f", &hb));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "posting, opening and removing in /srv, and clone boards [8]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        var sb: [300]u8 = undefined;
+        const got = try runOverlay(kind, &r, @embedFile("srv_board"), .{}, &sb) orelse continue;
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        try std.testing.expectEqualStrings("exited ", got);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "two machines in one process have separate /srv [8]" {
+    // HVF allows one VM per host process, so the second machine is always
+    // the emulator.
+    var ran: usize = 0;
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .emu, .emu } }) |kinds| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        // A posts /srv/m and holds it for 3 s; B looks for it meanwhile.
+        const A = struct {
+            r: *OverlayRoot,
+            kind: vmm.BackendKind,
+            sb: [300]u8 = undefined,
+            got: anyerror!?[]const u8 = null,
+            fn run(a: *@This()) void {
+                a.got = runOverlay(a.kind, a.r, @embedFile("srv_hold"), .{}, &a.sb);
+            }
+        };
+        var a: A = .{ .r = &r, .kind = kinds[0] };
+        const th = try std.Thread.spawn(.{}, A.run, .{&a});
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1000), .awake) catch {};
+        var sb: [300]u8 = undefined;
+        const b = runOverlay(kinds[1], &r, @embedFile("srv_absent"), .{}, &sb);
+        th.join();
+        errdefer std.debug.print("backends {t} and {t}\n", .{ kinds[0], kinds[1] });
+        const got_a = try a.got orelse continue;
+        const got_b = try b orelse continue;
+        try std.testing.expectEqualStrings("exited ", got_a);
+        try std.testing.expect(std.mem.startsWith(u8, got_b, "exited "));
+        try std.testing.expect(std.mem.indexOf(u8, got_b, "does not exist") != null);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "a machine's posted channels are closed when it ends [8]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        var sb: [300]u8 = undefined;
+        const got = try runOverlay(kind, &r, @embedFile("srv_orclose"), .{}, &sb) orelse continue;
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        try std.testing.expectEqualStrings("exited ", got);
+        // The posted chan was opened ORCLOSE: closing it removed the file.
+        try std.testing.expect(!r.exists("cwd/f"));
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;

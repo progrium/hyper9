@@ -1,7 +1,7 @@
 /*
  * h9's per-process records: what 9front keeps in its Proc and drawterm's
  * lacks (parent, children, wait queue, Egrp, the machine-local pid and a
- * pointer to the Zig process). kern/dat.h stays unmodified, so a record is
+ * pointer to the Zig process). drawterm's Proc stays as it is, so a record is
  * found from its Proc through a table here. See DESIGN.md, "Process model".
  *
  * Also here, ported from 9front at the pinned release: the group handling
@@ -103,8 +103,10 @@ freenotes(Hproc *h)
 static void
 putmach(Hmach *m)
 {
-	if(m != nil && decref(&m->ref) == 0)
+	if(m != nil && decref(&m->ref) == 0){
+		h9_srvmachfree(m);
 		free(m);
+	}
 }
 
 static void
@@ -886,6 +888,7 @@ h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
 		return -1;
 	}
 	h->mach->ref.ref = 1;
+	h->mach->nlive = 1;
 	h->noteid = newnoteid(h->mach);
 	p->fn = spawntramp;
 	p->arg = s;
@@ -1024,6 +1027,10 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 		ph->nchild++;
 		unlock(&ph->exl);
 	}
+
+	lock(&h->mach->lk);
+	h->mach->nlive++;
+	unlock(&h->mach->lk);
 
 	p->fn = forktramp;
 	p->arg = s;
@@ -1172,12 +1179,16 @@ h9_kern_rfork(int flag)
  * before it ends, so that what they hold (an overlay's pages, say) is
  * freed while the machine that owns it is still there: the process's
  * thread can outlive the machine's wait for it. dot and slash become #/,
- * since pexit closes them.
+ * since pexit closes them. The machine's last process to get here also
+ * closes what's posted in its /srv (devsrv.c), which nothing else holds.
  */
 void
 h9_kern_release(void)
 {
 	Chan *c;
+	Hproc *h;
+	Hmach *m;
+	int last;
 
 	if(up->fgrp != nil){
 		fgrpclose(up->fgrp);
@@ -1193,6 +1204,17 @@ h9_kern_release(void)
 	c = up->slash;
 	up->slash = cclone(bootproc->slash);
 	cclose(c);
+
+	h = lookup(up);
+	if(h == nil || h->released)
+		return;
+	h->released = 1;
+	m = h->mach;
+	lock(&m->lk);
+	last = --m->nlive == 0;
+	unlock(&m->lk);
+	if(last)
+		h9_srvmachclose(m);
 }
 
 /*

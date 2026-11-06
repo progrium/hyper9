@@ -168,6 +168,7 @@ struct Chan
 	Chan*	mchan;			/* channel to mounted server */
 	Qid	mqid;			/* qid of root of mount point */
 	Path*	path;
+	char*	srvname;		/* the /srv name it was posted as, for devproc (h9, as 9front) */
 };
 
 struct Path

@@ -2,7 +2,7 @@
 id: 8
 slug: devsrv
 title: devsrv, /srv and mount
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: [3]
@@ -185,3 +185,14 @@ Demo: `h9 --rc 'ramfs -S tmp && mount -c /srv/tmp /n/tmp && touch /n/tmp/a && ls
    - the syscall paragraph: `mount`, `unmount` and `fauth` are served
    
    Then set `status: implemented`.
+
+## Updates
+
+- 2026-11-06: Refinements made while implementing it:
+  - `srvname` is set when an fd is posted, from the path the entry was created by, as 9front's `srvwrite` does, rather than when the entry is opened. Every open of a posted entry returns the same channel, so the name it prints is the same.
+  - The machine's posted channels are closed by its last process, in `h9_kern_release`, rather than when its `Hmach` is freed: `Hmach` can outlive the processes (the host side holds a reference), and its last reference can go on a thread that isn't a kernel process. The machine counts its live processes for this. The boards are freed with the `Hmach`.
+  - `h9_srvpost(board, name, chan, perm)` makes the entry, owned by the caller with mode `perm`, and fails with "file already exists" if the name is in use. `srvwrite` shares the rest of the post with it.
+  - drawterm's `iseve` is always true, so the owner checks on `remove` and `wstat` pass for every process, as the Security section expects of a single-user machine.
+  - `kern.mount` takes the auth fd and returns the mount's id; `--ns` replay passes -1.
+  - The root tree's `/n` and `/mnt` are mntgen's on 9front, and the names the cases wanted (`/n/r`, `/n/tmp`, `/mnt/factotum`) may not be in it, so the cases mount in the machine's private `/tmp`, and the factotum and plumber cases union directories from `/tmp` after `/mnt`. The demo is `h9 --rc 'ramfs -S tmp && mkdir /tmp/n && mount -c /srv/tmp /tmp/n && touch /tmp/n/a && ls /tmp/n'`.
+  - A third backend case, "posting, opening and removing in /srv, and clone boards", checks the device's own rules (a second post or create refused, `ORCLOSE`, a clone board cleared with its lease) with a hand-written arm64 program, so they're covered without the root tree.

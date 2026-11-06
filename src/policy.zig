@@ -346,6 +346,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     try binds.append(arena, .{ .from = "#e", .to = "/env", .create = true, .optional = true });
     try binds.append(arena, .{ .from = "#d", .to = "/fd", .optional = true });
     try binds.append(arena, .{ .from = "#p", .to = "/proc", .optional = true });
+    // The machine's own service registry (design/0008-devsrv.md): it shows
+    // nothing outside the machine, so it's in both profiles.
+    try binds.append(arena, .{ .from = "#s", .to = "/srv", .create = true, .optional = true });
     if (net != .disable) try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
     if (in.root != null) {
         try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
@@ -1219,4 +1222,27 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     try t.expect(std.mem.indexOf(u8, text, " eph  # /r/tmp\n") != null);
     try t.expect(std.mem.indexOf(u8, text, "  eph  /w\n") != null);
     try t.expect(std.mem.indexOf(u8, text, "ephemeral files count against --memory") != null);
+}
+
+test "compile: #s at /srv in both profiles, and never masked" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
+    for ([_]Profile{ .default, .tight }) |prof| {
+        const p = try compile(arena.allocator(), in, .{ .profile = prof }, &msg);
+        var found = false;
+        for (p.binds) |b| if (std.mem.eql(u8, b.to, "/srv")) {
+            try t.expectEqualStrings("#s", b.from);
+            try t.expect(b.create);
+            found = true;
+        };
+        try t.expect(found);
+        try t.expect(std.mem.indexOfScalar(u8, p.devmask, 's') == null);
+
+        var out: std.Io.Writer.Allocating = .init(t.allocator);
+        defer out.deinit();
+        try p.print(&out.writer);
+        try t.expect(std.mem.indexOf(u8, out.written(), "  bind -c '#s' /srv\n") != null);
+    }
 }
