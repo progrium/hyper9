@@ -197,4 +197,5 @@ Already done and untagged, as bug fixes: `test "concurrent processes contending 
   - **Errors.** Missing register state fails with drawterm's `Enoreg` string rather than 9front's "no register set"; acid only checks that the read fails.
   - **Self-stop.** A process may write `stop` to its own `ctl` while a debugger waits on it with `waitstop`. 9front refuses that with `Einuse`; the integration fixture stops itself at known points this way, and acid never does it.
   - **The read-only install case** runs under `--write=scope`. Since [overlay](0011-overlay.md) became the default, `mk install` succeeds into the run's overlay and is discarded; `--write=scope` gives the read-only root the case means.
+  - **KVM** ([kvm](0016-kvm.md)) landed first, so it gets the breakpoint exit too: EC 0x3C/0x30/0x31 on arm64, and on amd64 vector 3, whose IDT gate is now DPL 3 so a user-mode `INT3` reaches it instead of raising `#GP`. `codeChanged` bumps the same flush epoch as on hvf.
   - **Code caches on emu.** Unicorn's whole-cache flush is used. acid's `step` and `next` over `sleep`'s `main` stayed interactive on the emulator, so the per-range flush wasn't needed.
