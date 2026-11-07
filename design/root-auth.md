@@ -58,3 +58,4 @@ A [9P root](0013-9p-roots.md) can be a server that wants `p9any` authentication,
 
 - Whether the guest should also get a factotum holding the same key, so its own `mount /srv/root …` attaches can authenticate.
 - A Windows equivalent of `factotum`.
+- **The server side, for [serve](0035-serve.md).** serve's TCP listeners are unauthenticated: a guest-side factotum for `exportfs` would put the key in the guest. h9 could instead run the server side of `p9any` on the host, in front of the connection, before handing it to exportfs, with a key given as `--root-auth` gives one. That needs the server half of dp9ik and p9sk1 (drawterm has only clients) and an auth server reachable from the host. A follow-up proposal, if a use appears that a WebSocket token or a unix socket's permissions can't serve.

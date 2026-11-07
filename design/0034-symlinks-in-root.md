@@ -2,7 +2,7 @@
 id: 34
 slug: symlinks-in-root
 title: Symlinks resolved inside a bound tree
-status: draft
+status: accepted
 created: 2026-11-05
 authors: [progrium]
 depends: []
@@ -10,6 +10,8 @@ areas: [kern, sandbox]
 ---
 
 # Proposal: Symlinks resolved inside a bound tree
+
+Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 

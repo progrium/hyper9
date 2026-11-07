@@ -1,7 +1,7 @@
 ---
 id: 33
 slug: exit-status
-title: Numeric exit statuses at the host boundary
+title: Host exit statuses for processes killed by notes
 status: draft
 created: 2026-11-05
 authors: [progrium]
@@ -9,85 +9,102 @@ depends: []
 areas: [cli]
 ---
 
-# Proposal: Numeric exit statuses at the host boundary
+# Proposal: Host exit statuses for processes killed by notes
+
+Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 
-When the guest's `exits` string is a decimal number from 1 to 255, the h9 CLI exits with that number and doesn't print the string. That's the convention APE and rc already use inside 9front, so `rc -c 'exit 3'`, an APE program's `exit(3)` and, under the [Linux personality](0018-linux-personality.md), a Linux program's `exit(3)` all reach the host as status 3. Any other non-empty string still prints and exits 1. The `Machine` API doesn't change: library callers still get the string.
+When the first process is killed by a note, the h9 CLI exits with a status a host shell would recognise instead of always exiting 1: 128+N for a note APE maps to signal N, so Ctrl-C under h9 exits 130 like Ctrl-C anywhere else; 139 for a fault; 124 for `--timeout`; and 1 for any other note. The `Machine` API doesn't change: library callers still get the note.
 
 ## Background
 
-A 9front process ends with an `exits` string: empty for success, anything else for failure. The h9 CLI maps that onto a host exit status (DESIGN.md, Exit codes): 0 for an empty string, 1 for any other, with the string printed to stderr. A process killed by a note also exits 1. h9's own failures use 2 (usage), 125, 126 and 127, which follow `env` and `docker run` so that scripts can tell h9's failures from the guest's.
+A 9front process ends with an `exits` string, or is killed by a note it didn't handle. The h9 CLI maps that onto a host exit status (DESIGN.md, Exit codes). [go-compat](0007-go-compat.md) already made a decimal `exits` string from 1 to 255 that status, in `cli.exitStatus` in `src/cli.zig`, so `h9 --rc 'exit 3'` exits 3. That's APE's convention: `_exit(n)` writes `n` in decimal, and APE's `wait` reads it back.
 
-Inside 9front there's already a numeric convention:
-
-- **APE's `_exit(n)`** (`/sys/src/ape/lib/ap/plan9/_exit.c`) writes `n & 0xff` as a decimal `exits` string.
-- **APE's `wait`** (`wait.c`, `waitstatus`) reads it back: a decimal string from 0 to 255 is that status, a string that starts with a known note (`interrupt`, `hangup`, `kill`, `sys: write on closed pipe`, … from `signal.c`'s `sigtab`) is death by that signal, and anything else is status 1.
-- **rc's `exit 3`** ends with `exits("3")`.
-
-h9 ignores this at the host boundary. Today:
+A killed process is still a flat 1. `src/main.zig` prints `h9: prog: note` and exits 1 for every `.killed` status, whether the note was `interrupt` from Ctrl-C, `hangup` from SIGTERM, a fault, h9's own `h9: timeout` or `h9: machine stopped`, or an internal failure such as `halted`.
 
 ```text
-$ h9 --rc 'exit 3'; echo $?
-3
+$ h9 --rc 'sleep 100'      # then Ctrl-C
+h9: rc: interrupt
+$ echo $?
 1
 ```
 
-So host scripts and build tools that run an APE port or an rc script under h9 lose the real status, and see a stray number on stderr. The Linux personality makes this much more common: every Linux program reports its status as a number, and its callers depend on it.
+Host shells report a death by signal N as 128+N, and scripts depend on it: 130 means the user pressed Ctrl-C, 141 a closed pipe, 124 a `timeout`. APE's `wait` already maps notes to signals with `sigtab` in `/sys/src/ape/lib/ap/plan9/signal.c`, so the mapping exists inside 9front. The [Linux personality](0018-linux-personality.md) adds `linux: signal N` notes, and its `wait4` treats a fault note as `SIGSEGV`; the host boundary should agree with both.
 
 ## Proposal
 
-The CLI's mapping from a guest's end to a host exit status becomes:
+The CLI's mapping for a killed first process becomes:
 
-| The first process ended with | Host exit status | Printed to stderr |
+| The first process was killed by | Host exit status | Printed to stderr |
 | --- | --- | --- |
-| `exits(nil)` or `exits("")` | 0 | nothing |
-| `exits("N")`, where N is a decimal from 1 to 255 | N | nothing |
-| Any other `exits` string | 1 | the string |
-| Killed by a note | 1 (see Open issues) | `h9: prog: note`, as today |
+| A note APE's `sigtab` maps to signal S, such as `interrupt` (S = SIGINT) | 128 + the host's number for S, so 130 | nothing for `interrupt` and `sys: write on closed pipe`; otherwise `h9: prog: note` |
+| `linux: signal N` | 128 + the host's number for Linux signal N | as above, by signal |
+| Another fault note (`sys: trap: …`, `sys: fp: …`, `sys: bad address …`) | 139 (`SIGSEGV`) | `h9: prog: note`, as today |
+| `h9: timeout` (from `--timeout`) | 124 | `h9: prog: h9: timeout`, as today |
+| `h9: machine stopped` (the run was torn down after a host signal) | 128 + that host signal: 130 for a second Ctrl-C, 129 for SIGHUP, 143 for SIGTERM | as today |
+| `halted`, `sys: trap: unexpected exit …`, `h9: <error>` | 125 | as today |
+| Any other note | 1 | `h9: prog: note`, as today |
 
-"A decimal" means the whole string is one or more ASCII digits with no sign, no leading zeros and no surrounding space, so `"3"` counts and `"03"`, `"+3"` and `"3 "` don't. That's stricter than APE's `strtol`, so that h9 never turns a message that only starts with digits into a status.
+Notes match `sigtab` as APE's `wait` matches them, so `sys: trap: …` notes that `sigtab` lists, such as an illegal instruction, take their own signal, and the rest fall to the fault row. The note names are the ones in the pinned 9front's `sigtab`; the implementation checks the table against it.
 
-`Machine.Status` keeps the string. The mapping is the CLI's, in `src/main.zig`, so embedders choose their own.
+Signal numbers are the host's, from `std.posix.SIG`, not APE's or Linux's: most agree, but some, such as `SIGBUS`, `SIGUSR1` and `SIGUSR2`, differ between Linux and macOS, and the status should be what a host shell would show for that signal. A Linux signal number is translated by name, and one with no host equivalent exits 1. Windows hosts use the Linux numbers, which is what Git Bash and MSYS expect.
 
-The README's and DESIGN.md's exit-code tables gain the new row.
+The mapping sits beside `exitStatus` in `src/cli.zig`. To tell a teardown by SIGHUP or SIGTERM from one by Ctrl-C, the CLI records which host signal started it in `src/hostsig.zig`; `Machine.Status` doesn't change.
+
+The DESIGN.md and README exit-code tables gain 124 and the killed rows, and DESIGN.md's Signals and TTY section says what each host signal exits with.
 
 ## Rationale
 
-**APE's convention, not a new one.** APE and rc already write decimal statuses, and APE's `wait` already reads them, so the convention is 9front's. h9 only stops discarding it at the edge.
+**128+N, as shells and `docker run` do.** A script that wraps h9 should see the same status as when it wraps the program directly. Ctrl-C exiting 1 looks like an ordinary failure, so a build loop carries on past it.
 
-**Strict decimals.** APE accepts anything `strtol` parses to the end, which includes a leading sign and spaces. A 9front program's message is more likely than a status to start with digits by accident, so the stricter rule loses nothing real and avoids surprises.
+**APE's `sigtab`, not a new table.** APE's `wait` already decides which notes are which signals, so an APE parent inside the guest and a host parent outside agree.
 
-**Not printing the number.** The printed string exists to explain a failure that has no other channel. A numeric status is the explanation, in the form the caller wants, and a program that exits 3 has usually already printed its own message.
+**Host signal numbers.** The status is read by a host shell, which decodes it with the host's numbers. Using APE's or Linux's numbers on macOS would make `kill -l $((status-128))` name the wrong signal.
 
-**In the CLI, not `Machine`.** Exit codes are a host-process idea. Library callers already get the string and can apply APE's rules, or their own.
+**Faults as `SIGSEGV`.** A 9front fault note doesn't say which Unix signal it would be, and 139 is what a crashed program usually reports. It matches the Linux personality's `wait4`. The alternative, 1, makes a crash look like an ordinary failure.
 
-**Its own proposal, not part of the Linux personality.** Nothing in it is Linux-specific, it's useful today for rc and APE, and it changes behaviour for existing 9front users. The personality depends on it, so a Linux program's `exit(n)` reaches the host unchanged.
+**Unknown notes stay 1.** A note that isn't a signal is a message, as an `exits` string is, so it gets the same status as an `exits` string that isn't a number.
+
+**124 for `--timeout`.** That's coreutils `timeout`, and it says something more specific than SIGHUP's 129, which is what the `hangup` note `--timeout` posts would otherwise give. It's h9's first own code below 125; DESIGN.md's table lists it.
+
+**125 for h9's own failures mid-run.** `halted`, an unexpected VM exit and an internal error are h9 or hypervisor failures, not the guest's, and 125 already means "h9 itself failed".
+
+**Not printing for `interrupt` and closed pipes.** Shells are silent for both: the user knows they pressed Ctrl-C, and `h9 cat big | head` shouldn't print noise. Other signals still print, as shells print `Killed` or `Hangup`.
+
+**Exiting, not re-raising.** h9 could kill itself with the signal so its parent sees `WIFSIGNALED`, which is more exact: bash stops a loop when a child dies of SIGINT, but not when it exits 130. But it doesn't exist on Windows, would have to reset the handler and raw mode first, and `docker run` exits 130 too. A later proposal can add it.
+
+**Collisions with h9's own codes.** A guest can exit 2, 124, 125, 126 or 127 itself, as with `env` or `docker run`. That's already the documented rule (DESIGN.md, Exit codes; [go-compat](0007-go-compat.md)): h9 prints a message whenever it fails itself, and a numeric `exits` prints nothing, so scripts can still tell them apart. Remapping those statuses to 1 would hide real ones, such as `grep` or `diff` exiting 2. 124 keeps the same rule, because `--timeout` prints `h9: prog: h9: timeout`.
+
+**In the CLI, not `Machine`.** Exit codes are a host-process idea. Library callers already get the note and can apply their own rules.
 
 ## Compatibility
 
-- **Exit codes:** a guest that ends with a decimal string from 1 to 255 now exits with that number instead of 1, and the string is no longer printed. Scripts that only test for zero are unaffected. Scripts that test for exactly 1, or read the printed number, change.
+- **Exit codes:** a killed program now exits 124, 125 or 128+N instead of 1, and Ctrl-C and closed pipes no longer print. Scripts that only test for zero are unaffected. Scripts that test for exactly 1 after a kill or a timeout change.
+- A serve-only run ended by a note still exits 0 ([serve](0035-serve.md)).
 - No flags, `Machine.Options` or vendored code change.
 
 ## Security
 
-None. The guest already chooses its `exits` string; this only changes which host status it becomes. A guest could already make h9 exit 1; it can now pick any status from 1 to 255, including h9's own (see Open issues), which tells a script nothing it could trust anyway.
+None. The guest could already pick any status from 1 to 255 with a numeric `exits` string; this only changes how notes, which the guest or the host sends, become a status.
 
 ## Done when
 
-- `test "rc exit 3 is h9's exit 3, with nothing printed [exit-status]"`
-- `test "exits with a word still exits 1 and prints it [exit-status]"`
-- `test "exits 03 is not a status: exit 1, printed [exit-status]"`
-- `test "exits 256 is not a status: exit 1, printed [exit-status]"`
+- `test "a program killed by interrupt exits 130, with nothing printed [exit-status]"`
+- `test "a program killed by hangup exits 129 and prints the note [exit-status]"`
+- `test "a fault exits 139 and prints the note [exit-status]"`
+- `test "--timeout exits 124 [exit-status]"`
+- `test "a note that isn't a signal exits 1 and prints it [exit-status]"`
 
-Demo: `h9 --rc 'exit 3'; echo $?` prints `3`.
+Demo: `h9 --rc 'sleep 100'`, press Ctrl-C, then `echo $?` prints `130`.
 
 ## Implementation
 
-1. The mapping in `src/main.zig`, with unit tests for the decimal rule. The cases above.
-2. The exit-code tables in README.md and DESIGN.md.
+1. The note mapping in `src/cli.zig`, beside `exitStatus`, with unit tests for each row, checked against the pinned `sigtab`.
+2. Record the host signal that started a teardown in `src/hostsig.zig`, and use the mapping in `src/main.zig`'s `.killed` branch.
+3. The cases above.
+4. The exit-code tables in README.md and DESIGN.md, and DESIGN.md's Signals and TTY section.
 
 ## Open issues
 
-- **Killed processes.** Today a process killed by a note exits 1. Shells report a death by signal N as 128+N, and APE's `sigtab` already maps notes to signals (`interrupt` to `SIGINT`, so 130; `hangup`, 129; `kill`, 137; `sys: write on closed pipe`, 141). Should h9 do the same, so Ctrl-C under h9 looks to the host like Ctrl-C anywhere else? A note that isn't in the table, such as a fault, would need a choice: 1, or a fixed signal such as `SIGSEGV` (139). The Linux personality's `linux: signal N` notes would map to 128+N either way.
-- **Collisions with h9's own codes.** A guest that exits `"2"`, `"125"`, `"126"` or `"127"` would be indistinguishable from an h9 usage error or failure, which DESIGN.md currently says scripts can tell apart. `env` and `docker run` accept the same overlap. The alternatives are to pass those statuses through anyway, and weaken that promise to "h9 never uses 1 or 3 to 124 for itself"; or to remap them to 1, which keeps h9's codes unique but hides real statuses, such as a Linux tool's 2 for misuse, which is common.
+- **`h9: machine stopped` after `--timeout`.** If a timed-out program ignores `hangup` and the machine is torn down, `Machine` reports `h9: timeout`, so it exits 124. That seems right; check that no path reports `machine stopped` instead.

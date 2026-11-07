@@ -36,8 +36,8 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [websocket-9p](design/0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
 | [dotl](design/0022-dotl.md) | draft | needs serve | 9P2000.L and ZeroFS |
 | [guest-tools](design/0032-guest-tools.md) | implemented |  | h9's own commands in the guest |
-| [exit-status](design/0033-exit-status.md) | draft |  | Numeric exit statuses at the host boundary |
-| [symlinks-in-root](design/0034-symlinks-in-root.md) | draft |  | Symlinks resolved inside a bound tree |
+| [exit-status](design/0033-exit-status.md) | draft |  | Host exit statuses for processes killed by notes |
+| [symlinks-in-root](design/0034-symlinks-in-root.md) | accepted | ready | Symlinks resolved inside a bound tree |
 | [serve](design/0035-serve.md) | draft |  | Serving the namespace over 9P |
 | [linux-threads](design/0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](design/0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
@@ -80,7 +80,7 @@ flowchart LR
   p_dotl["#35;22 dotl<br/>draft"]:::draft
   p_guest_tools["#35;32 guest-tools<br/>implemented"]:::implemented
   p_exit_status["#35;33 exit-status<br/>draft"]:::draft
-  p_symlinks_in_root["#35;34 symlinks-in-root<br/>draft"]:::draft
+  p_symlinks_in_root["#35;34 symlinks-in-root<br/>accepted"]:::accepted
   p_serve["#35;35 serve<br/>draft"]:::draft
   p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
