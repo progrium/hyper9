@@ -46,7 +46,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [host-scripts](design/host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](design/host-srv.md) | draft |  | Posting host connections to /srv |
 | [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
-| [linux-threads](design/linux-threads.md) | draft | needs linux-personality | Linux threads |
+| [linux-threads](design/linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [root-auth](design/root-auth.md) | draft |  | Authenticated 9P roots |
 
 ```mermaid
@@ -118,6 +118,7 @@ flowchart LR
   p_9p_roots --> p_host_srv
   p_linux_personality --> p_linux_net
   p_linux_personality --> p_linux_threads
+  p_linux_net --> p_linux_threads
   p_9p_roots --> p_root_auth
 ```
 
