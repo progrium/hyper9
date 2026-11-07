@@ -86,6 +86,7 @@ const c_stub = struct {
         return null;
     }
     fn h9_kern_putmach(_: ?*anyopaque) void {}
+    fn h9_hostcmd_machend(_: ?*anyopaque) void {}
     fn h9_kern_postmach(_: ?*anyopaque, _: c_int, _: [*:0]const u8, _: c_int) c_int {
         return 0;
     }
@@ -237,6 +238,7 @@ const c_real = struct {
     extern fn h9_kern_execnotes() void;
     extern fn h9_kern_mach() ?*anyopaque;
     extern fn h9_kern_putmach(m: ?*anyopaque) void;
+    extern fn h9_hostcmd_machend(m: ?*anyopaque) void;
     extern fn h9_kern_postmach(m: ?*anyopaque, all: c_int, msg: [*:0]const u8, flag: c_int) c_int;
     extern fn syspipe(fd: *[2]c_int) c_int;
     extern fn h9_kern_user() [*:0]const u8;
@@ -558,6 +560,12 @@ pub const Mach = opaque {
     /// Releases the reference from `mach`.
     pub fn put(m: *Mach) void {
         c.h9_kern_putmach(m);
+    }
+
+    /// Kills every host command (#C) the machine started, and any it
+    /// starts later. Safe from any thread.
+    pub fn endHostCmds(m: *Mach) void {
+        c.h9_hostcmd_machend(m);
     }
 
     /// Who a host-side note goes to.
