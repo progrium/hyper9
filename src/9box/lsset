@@ -2,7 +2,7 @@
 # lsset SET: prints SET's commands, one "name dir" line each, in order and
 # once each. A set file has a command per line: its name and the directory
 # under /sys/src/cmd its mkfile is in, or . for a single-file command (the
-# default). # starts a comment, and <OTHER includes the set OTHER.
+# default), and # starts a comment.
 rfork e
 awk '
 function rd(f,	l, a, n) {
@@ -11,9 +11,7 @@ function rd(f,	l, a, n) {
 		n = split(l, a)
 		if(n == 0)
 			continue
-		if(a[1] ~ /^</)
-			rd(substr(a[1], 2))
-		else if(!(a[1] in seen)){
+		if(!(a[1] in seen)){
 			seen[a[1]] = 1
 			print a[1], (n > 1 ? a[2] : ".")
 		}

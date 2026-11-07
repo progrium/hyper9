@@ -3,7 +3,8 @@
 //!
 //! The build runs inside h9, against the stock root: src/9box/ is copied
 //! into a fresh build directory, which is the machine's cwd and the only
-//! thing it can write, and its mkfile builds the set's commands with their
+//! thing it can write, and its mkfile builds the commands listed in
+//! src/9box/slim with their
 //! globals renamed and links them into one binary (src/9box/mkfile). The
 //! source is the root's /sys/src (scripts/mkroot.py --src) or, without one,
 //! the fetched checkout, shared read-only and bound at /sys/src.
@@ -18,14 +19,14 @@
 //!
 //! and its size is reported against the same commands copied from the
 //! stock root. With `copy` for the links, nothing is built: the tree has
-//! the set's commands copied from the stock root instead, the separate
+//! the same commands copied from the stock root instead, the separate
 //! binaries the box is measured against.
 //!
-//! usage: slim H9 ROOT SRC9BOX SYSSRC SET ARCH hard|stub|copy BUILD OUT
+//! usage: slim H9 ROOT SRC9BOX SYSSRC ARCH hard|stub|copy BUILD OUT
 
 const std = @import("std");
 
-const usage = "usage: slim H9 ROOT SRC9BOX SYSSRC SET ARCH hard|stub|copy BUILD OUT\n";
+const usage = "usage: slim H9 ROOT SRC9BOX SYSSRC ARCH hard|stub|copy BUILD OUT\n";
 
 /// What a stub holds: 9box takes the command from the stub's own path,
 /// argv[2] (src/9box/9box.c).
@@ -63,24 +64,22 @@ fn guestPath(arena: std.mem.Allocator, host: []const u8) ![]const u8 {
 
 const Links = enum { hard, stub, copy };
 
+/// The set file in src/9box: the commands 9box is built from.
+const set = "slim";
+
 /// The commands in the set file `name` in `dir`, in order and once each,
-/// as src/9box/lsset reads it: a name (and a directory) per line, # to the
-/// end of a line a comment, and <OTHER including the set OTHER.
-fn readSet(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, names: *std.ArrayList([]const u8), depth: u32) !void {
-    if (depth > 8) fail("set {s}: includes nest too deep", .{name});
+/// as src/9box/lsset reads it: a name (and a directory) per line, and # to
+/// the end of a line a comment.
+fn readSet(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, names: *std.ArrayList([]const u8)) !void {
     const text = dir.readFileAlloc(io, name, arena, .limited(1 << 20)) catch |e| fail("set {s}: {t}", .{ name, e });
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const l = if (std.mem.indexOfScalar(u8, raw, '#')) |h| raw[0..h] else raw;
         var f = std.mem.tokenizeAny(u8, l, " \t");
         const w = f.next() orelse continue;
-        if (w[0] == '<') {
-            try readSet(arena, io, dir, w[1..], names, depth + 1);
-        } else {
-            for (names.items) |n| {
-                if (std.mem.eql(u8, n, w)) break;
-            } else try names.append(arena, w);
-        }
+        for (names.items) |n| {
+            if (std.mem.eql(u8, n, w)) break;
+        } else try names.append(arena, w);
     }
 }
 
@@ -88,7 +87,7 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const io = init.io;
     const argv = try init.minimal.args.toSlice(arena);
-    if (argv.len != 10) {
+    if (argv.len != 9) {
         std.debug.print(usage, .{});
         return 2;
     }
@@ -96,11 +95,10 @@ pub fn main(init: std.process.Init) !u8 {
     const root = argv[2];
     const src9box = argv[3];
     const syssrc = argv[4];
-    const set = argv[5];
-    const arch = argv[6];
-    const links = argv[7];
-    const build = argv[8];
-    const out = argv[9];
+    const arch = argv[5];
+    const links = argv[6];
+    const build = argv[7];
+    const out = argv[8];
     const mode = std.meta.stringToEnum(Links, links) orelse fail("-Dslim-links is hard, stub or copy, not {s}", .{links});
     _ = objLetter(arch);
     const cwd = std.Io.Dir.cwd();
@@ -112,10 +110,10 @@ pub fn main(init: std.process.Init) !u8 {
     defer root_dir.close(io);
     var names: std.ArrayList([]const u8) = .empty;
     if (mode == .copy) {
-        try readSet(arena, io, src_dir, set, &names, 0);
+        try readSet(arena, io, src_dir, set, &names);
     } else {
-        try build9box(arena, io, h9, root, root_dir, src_dir, syssrc, set, arch, build);
-        // The set's commands, as the build expanded it.
+        try build9box(arena, io, h9, root, root_dir, src_dir, syssrc, arch, build);
+        // The commands, as the build listed them.
         const set_list = try cwd.readFileAlloc(io, try std.fmt.allocPrint(arena, "{s}/obj/{s}/set", .{ build, arch }), arena, .limited(1 << 20));
         var lines = std.mem.tokenizeScalar(u8, set_list, '\n');
         while (lines.next()) |l| {
@@ -176,8 +174,8 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
-/// Builds 9box for `set` in a fresh `build`, inside h9 (src/9box/mkfile).
-fn build9box(arena: std.mem.Allocator, io: std.Io, h9: []const u8, root: []const u8, root_dir: std.Io.Dir, src_dir: std.Io.Dir, syssrc: []const u8, set: []const u8, arch: []const u8, build: []const u8) !void {
+/// Builds 9box in a fresh `build`, inside h9 (src/9box/mkfile).
+fn build9box(arena: std.mem.Allocator, io: std.Io, h9: []const u8, root: []const u8, root_dir: std.Io.Dir, src_dir: std.Io.Dir, syssrc: []const u8, arch: []const u8, build: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
     const o = objLetter(arch);
     const own_src = if (root_dir.access(io, "sys/src/cmd/mkfile", .{})) true else |_| false;
@@ -206,9 +204,9 @@ fn build9box(arena: std.mem.Allocator, io: std.Io, h9: []const u8, root: []const
     // mk runs one recipe at a time (no NPROC): the emulator runs one
     // process's guest code at a time, and several compilers taking turns
     // on it are slower than one after another.
-    try script.print(arena, "cd /mnt/term/cwd && objtype={s} mk -k 'SET={s}' && test -f {s}.9box", .{ arch, set, o });
+    try script.print(arena, "cd /mnt/term/cwd && objtype={s} mk -k && test -f {s}.9box", .{ arch, o });
     try args.appendSlice(arena, &.{ "--rc", script.items });
-    std.debug.print("slim: building 9box ({s}, {s}) inside h9 in {s}\n", .{ set, arch, build });
+    std.debug.print("slim: building 9box ({s}) inside h9 in {s}\n", .{ arch, build });
     var child = std.process.spawn(io, .{ .argv = args.items }) catch |e| fail("running {s}: {t}", .{ h9, e });
     const term = try child.wait(io);
     switch (term) {

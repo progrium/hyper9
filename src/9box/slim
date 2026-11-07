@@ -1,82 +1,53 @@
-# slim: min, and the rest of each kind of command min has a few of, without
-# compilers, typesetting, games, hardware tools or graphics
-# (design/multicall.md).
-<min
+# slim: the commands 9box builds, what basic operation needs
+# (design/multicall.md). One command per line: its name, and its directory
+# under /sys/src/cmd (. for a single-file command, the default).
 
-# Files and text
-chgrp
-dd
-comm
-split
-strings
-sum
-md5sum
-sha1sum
-crc32
-seq
-cleanname
-time
-fmt
-col
-p
-pr
-look
-idiff
-merge3		diff
-file
-mtime
-seconds
-tput
-ascii
-unicode
-urlencode
-tcs		tcs
-ecp
-fcp
-xd
-ed
-patch
+# Shell and files
+rc		rc
+echo
+cat
+ls
+cp
+mv
+rm
+mkdir
+pwd
+test
+date
+sleep
+touch
+chmod
+du
+basename
+read
+
+# Text
+wc
+sort
+uniq
+tr
+sed
+awk		awk
+grep		grep
+cmp
+diff		diff
+tail
+tee
+xargs
 
 # Archives
-zip		gzip
-mkpaqfs		paqfs
-paqfs		paqfs
+tar
+gzip		gzip
+gunzip		gzip
+unzip		gzip
 
-# Namespace and system
-mntgen
-aan
-cec		cec
-con		con
-rx
-ratrace
-plumb		plumb
-plumber		plumb
-execnet		execnet
-pipefile
-passwd		auth
-netkey		auth
-
-# File servers
-archfs
-9660srv		9660srv
-dossrv		dossrv
-webfs		webfs
-sshfs
-ftpfs		ip/ftpfs
-
-# Network
-ssh
-sshnet
-telnet		ip
-tlsclient
-tlssrv
-webcookies
-
-# Calculators and the rest
-bc
-dc
-hoc		hoc
-pc
-factor
-primes
-cal
+# Namespace, processes and serving
+bind
+mount
+unmount
+ns
+ps
+srv
+srvfs
+exportfs	exportfs
+ramfs
