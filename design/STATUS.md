@@ -23,13 +23,13 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
 | [kvm](0016-kvm.md) | draft |  | KVM backend |
 | [whp](0017-whp.md) | draft | needs kvm | WHP backend |
-| [linux-personality](0018-linux-personality.md) | draft | needs symlinks-in-root | Linux personality |
+| [linux-personality](0018-linux-personality.md) | draft |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
 | [dotl](0022-dotl.md) | draft | needs serve | 9P2000.L and ZeroFS |
 | [guest-tools](0032-guest-tools.md) | implemented |  | h9's own commands in the guest |
 | [exit-status](0033-exit-status.md) | implemented |  | Host exit statuses for processes killed by notes |
-| [symlinks-in-root](0034-symlinks-in-root.md) | accepted | ready | Symlinks resolved inside a bound tree |
+| [symlinks-in-root](0034-symlinks-in-root.md) | implemented |  | Symlinks resolved inside a bound tree |
 | [serve](0035-serve.md) | draft |  | Serving the namespace over 9P |
 | [linux-threads](0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
@@ -78,7 +78,7 @@ flowchart LR
   p_dotl["#35;22 dotl<br/>draft"]:::draft
   p_guest_tools["#35;32 guest-tools<br/>implemented"]:::implemented
   p_exit_status["#35;33 exit-status<br/>implemented"]:::implemented
-  p_symlinks_in_root["#35;34 symlinks-in-root<br/>accepted"]:::accepted
+  p_symlinks_in_root["#35;34 symlinks-in-root<br/>implemented"]:::implemented
   p_serve["#35;35 serve<br/>draft"]:::draft
   p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
