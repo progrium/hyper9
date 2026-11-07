@@ -228,6 +228,11 @@ pub fn main(init: std.process.Init) !u8 {
             else => exit_failed,
         };
     };
+    // Only on a terminal: scripts rarely have one (design/0011-overlay.md).
+    if (machine.root_changes.changed and (std.Io.File.stderr().isTty(io) catch false)) {
+        var nb: [512]u8 = undefined;
+        std.debug.print("{s}\n", .{cli.discardNotice(&nb, &machine.root_changes, root != null and root.? != .dir)});
+    }
     switch (status) {
         .exited => |msg| {
             const s = cli.exitStatus(msg);

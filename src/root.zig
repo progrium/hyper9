@@ -8,6 +8,7 @@ pub const kern = @import("kern.zig");
 pub const Machine = @import("machine.zig").Machine;
 pub const Root = Machine.Root;
 pub const Status = @import("machine.zig").Status;
+pub const RootChanges = @import("machine.zig").RootChanges;
 pub const Program = @import("machine.zig").Program;
 pub const EnvVar = @import("machine.zig").EnvVar;
 pub const policy = @import("policy.zig");

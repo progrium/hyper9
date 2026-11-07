@@ -193,6 +193,7 @@ const c_stub = struct {
         return -1;
     }
     fn h9_overlay_drop(_: c_int) void {}
+    fn h9_overlay_track(_: c_int, _: ?*anyopaque) void {}
     fn h9_kern_release() void {}
     fn h9_unixdial(_: [*:0]const u8) c_int {
         return -1;
@@ -278,6 +279,7 @@ const c_real = struct {
     extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
+    extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
     extern fn h9_unixdial(path: [*:0]const u8) c_int;
     extern fn h9_kern_upuser() [*:0]const u8;
@@ -698,6 +700,21 @@ pub fn overlayDrop(id: u32) void {
     c.h9_overlay_drop(@intCast(id));
 }
 
+/// Told of each change to an overlay instance after `overlayTrack`: a
+/// create, copy-up, remove or wstat, with the changed path relative to
+/// the instance's root (`lib/x`), on the changing process's thread with
+/// the instance locked. It must not call into the kernel.
+pub const OverlayTrack = struct {
+    ctx: *anyopaque,
+    changed: *const fn (ctx: *anyopaque, path: []const u8) void,
+};
+
+/// Reports later changes to overlay `id`, of the calling thread's
+/// machine, to `track`, which must outlive the instance (null stops).
+pub fn overlayTrack(id: u32, track: ?*const OverlayTrack) void {
+    c.h9_overlay_track(@intCast(id), @ptrCast(@constCast(track)));
+}
+
 /// Closes the calling process's fds and namespace and moves its current
 /// directory to #/, ahead of its exit. The kernel's exit runs after the
 /// process's function returns, which may be after its machine is gone; what
@@ -944,6 +961,7 @@ comptime {
         @export(&h9_overlay_pool, .{ .name = "h9_overlay_pool" });
         @export(&h9_overlay_alloc, .{ .name = "h9_overlay_alloc" });
         @export(&h9_overlay_free, .{ .name = "h9_overlay_free" });
+        @export(&h9_overlay_changed, .{ .name = "h9_overlay_changed" });
         @export(&h9_clock_wall, .{ .name = "h9_clock_wall" });
         @export(&h9_clock_mono, .{ .name = "h9_clock_mono" });
         @export(&h9_cons_ncpu, .{ .name = "h9_cons_ncpu" });
@@ -1069,6 +1087,11 @@ fn h9_overlay_free(pool: ?*anyopaque, ptr: ?*anyopaque, n: c_uint) callconv(.c) 
     }
     const a: [*]align(Pages.page_size) u8 = @alignCast(q);
     std.heap.page_allocator.free(a[0..n]);
+}
+
+fn h9_overlay_changed(track: ?*anyopaque, path: [*:0]const u8) callconv(.c) void {
+    const tr: *const OverlayTrack = @ptrCast(@alignCast(track orelse return));
+    tr.changed(tr.ctx, std.mem.span(path));
 }
 
 fn h9_policy_active() callconv(.c) c_int {

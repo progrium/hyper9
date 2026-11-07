@@ -2,7 +2,7 @@
 id: 11
 slug: overlay
 title: Copy-on-write overlay as the root's default
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: [6]
@@ -178,3 +178,14 @@ Demo: `h9 --rc 'echo hi > /lib/x && cat /lib/x'` prints `hi`, and the root tree 
 4. `overlay` as the default of `Policy.write` in both profiles, the run status's `RootChanges` summary, and the CLI's notice.
 5. README's sandbox table, and DESIGN.md: the capability table, the default profile's root row, the tight profile's paragraph, the CLI table's `--write` row, and the plan example. Set `status: implemented`.
  
+
+## Updates
+
+- 2026-11-07: Refinements made while implementing it:
+  - The summary is `Machine.root_changes`, a `RootChanges` value set by each `run`, rather than a field of `Status`, which is a tagged union every embedder switches on. It holds whether the guest changed the root outside `$home`, the changed top-level names (up to 16, sorted, with a flag for more) and whether it changed `$home`. `#O` reports each create, copy-up, remove and wstat to the machine once tracking starts (`h9_overlay_track`), after the namespace and any `--ns` replay are built.
+  - For a 9P root the notice says to rerun with `--write=scope`, since `--writable "$H9ROOT"` names a host tree.
+  - A bare `#O` over `/` used to take the root device under the mount as its lower tree (namec's `Atodir` stops before a mount point); `h9_overlay_newpath` now resolves the target through its mounts, so an overlay over a bind or mount point overlays what's bound there. This also fixes the manual's known issue for `#O` lines on `/mnt/term/cwd`.
+  - Replaying `--print` output with the root overlay line into a machine whose namespace is already built put the builder's binds below it out of reach, since mount points are matched by device as well as qid. `findmount` now also matches an overlay's lower directory's mounts (only when a mount hash bucket has an entry with the same qid path), a small change to the vendored `chan.c`, and after a replay without a `cd` the cwd is set again, so it lands on the replayed binds.
+  - The measurement was made on the emulator (DESIGN.md, "The root overlay's cost"): within noise. It should be repeated on HVF.
+  - The `--strict` baseline case can no longer show a refusal: this build enforces every capability it knows.
+

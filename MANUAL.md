@@ -437,7 +437,9 @@ greet
 ...
 ```
 
-`/` is the 9front root tree, read-only. Your host directory is mounted inside
+`/` is the 9front root tree, under a copy-on-write overlay: you can change
+it, but the changes live in memory and are gone when h9 exits, and the tree on
+your host is never written. Your host directory is mounted inside
 it at `/mnt/term/cwd`, read-write; `/mnt/term` is where Plan 9 traditionally
 puts the files of the terminal you're sitting at. Nothing else on your host is
 visible.
@@ -577,8 +579,8 @@ them. Plan 9's signals are text messages called notes.
 `ramfs` is an ordinary program that serves an in-memory file tree over 9P. It
 posts its connection in `/srv`, and `mount` attaches it to the namespace. Every
 service in Plan 9, from the window system to FTP sites to mail, is a program
-like this. (On 9front you'd mount it on `/n/scratch`; in h9 the root tree's
-`/n` is read-only and empty, so the tour uses the machine's private `/tmp`.)
+like this. (On 9front `mntgen` makes `/n/scratch` for you; h9 has no
+`mntgen`, so the tour uses the machine's private `/tmp`.)
 
 **10. The view from outside.** ([Namespaces](#6-namespaces), [Sandboxing](#22-sandboxing))
 
@@ -589,11 +591,12 @@ running anything:
 % exit
 host$ h9 --print rc
 profile:  default
-enforces: env.scrub fs.read.scope fs.write.scope ipc.restrict kernel.isolation net.outbound
-limits:   write=scope net=outbound
+enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.outbound
+limits:   write=overlay net=outbound
 devmask:  #C #U
 namespace:
   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
+  bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
   bind '#c' /dev
   bind -b '#y<id>' /dev
   bind -c '#e' /env
@@ -607,7 +610,7 @@ namespace:
   bind -c '#O' /tmp                                      eph  # /Users/me/src/hyper9/.local/9front/root-11952/tmp
   bind -c '#U/Users/me/tour' /mnt/term/cwd               rw
 access:
-  ro   /Users/me/src/hyper9/.local/9front/root-11952
+  eph  /Users/me/src/hyper9/.local/9front/root-11952
   rw   /Users/me/tour
 caveats:
   ...
@@ -616,7 +619,7 @@ caveats:
 The namespace section is the list of `bind` commands that built the file
 tree you just explored. `#U` is the host's file system, `#c` the console, `#e`
 the environment, `#p` the processes, `#s` the service registry, `#I` the
-network, `#H` h9's own commands, and `#O` an overlay in memory that keeps `/tmp` private. Each `#`
+network, `#H` h9's own commands, and `#O` an overlay in memory, over the root and over `/tmp`, that keeps your changes off the host. Each `#`
 name is a kernel device, and the `devmask` line says which ones a program
 can't attach again, so it can't reach more of your host than this list
 allows. That's how h9's sandbox works, and chapter 22 explains the rest.
@@ -758,6 +761,7 @@ plain `h9 rc` in `~/tour`, line by line:
 | Line | What it does |
 | --- | --- |
 | `bind '#U/...' / ro` | The root tree, from the host file system device `#U`, is `/`, read-only. (A 9P root is a `mount` here instead; chapter 16.) |
+| `bind -c '#O' /` | A copy-on-write overlay in memory over the root, before every other bind, so writes to `/` succeed and vanish when the machine ends. Not there under `--write=scope` or `--write=none`, or when the root is `--writable`. |
 | `bind '#c' /dev` | The kernel's console device: `time`, `sysname`, `random`, `null` and the rest |
 | `bind -b '#y<id>' /dev` | h9's console for this machine, before `#c`, so `/dev/cons`, `/dev/consctl` and `/dev/stderr` are your terminal |
 | `bind -c '#e' /env` | The environment, writable |
@@ -1191,7 +1195,7 @@ protocols, with `secstore` keeping them encrypted.
 
 | Cause | Typical message | How to tell |
 | --- | --- | --- |
-| A read-only bind: the root, a `--readable` path, the cwd under `--profile=tight` | `mounted directory forbids creation` for a new file, `permission denied` for an existing one | `--print` shows `ro` on that bind |
+| A read-only bind: the root under `--write=scope`, a `--readable` path, the cwd under `--profile=tight` | `mounted directory forbids creation` for a new file, `permission denied` for an existing one | `--print` shows `ro` on that bind |
 | The sandbox's access rules: a path read-only by policy, a rename that would move a protected path | `permission denied` | `--print`'s `access:` section; `--trace` shows the failing call |
 | The host's own permissions | `permission denied` | The same operation fails outside h9 |
 
@@ -1395,9 +1399,9 @@ devices in Plan 9.
   server the guest has a descriptor for: a `/srv` entry, a pipe, or a
   network connection the network policy allowed.
 - 9front fills `/n` and `/mnt` with directories on demand (`mntgen`); h9
-  doesn't, and the root tree is read-only, so make mount points in `/tmp`,
-  or make one in `/tmp` and union it onto `/mnt` with `bind -a` as in
-  chapter 15.
+  doesn't, so make the mount point first: `mkdir /n/x` works in the root's
+  overlay, or make one in `/tmp` and union it onto `/mnt` with `bind -a` as
+  in chapter 15.
 - **9P roots.** `--root` can be a 9P server instead of a directory: a dial
   string `tcp!host!port` (`tcp!host` means port 564), `unix!/path`, or the
   path of a unix socket. h9 connects before the program runs, posts the
@@ -1405,9 +1409,10 @@ devices in Plan 9.
   it as usual. `--root-spec NAME` sets the attach name and `--root-user NAME`
   the user name sent to the server (your user by default). The server must
   not ask for authentication: `u9fs -a none`, or `exportfs` behind
-  `aux/listen1 -t`, such as another h9 serving its tree. Writes go to the
-  server, which decides what's writable, so `--write=none` with a 9P root is
-  a usage error. A refused connection or attach is exit 125. The connection
+  `aux/listen1 -t`, such as another h9 serving its tree. By default writes
+  stay in the root's overlay and never reach the server; under
+  `--write=scope` they go to the server, which decides what's writable.
+  `--write=none` with a 9P root is a usage error. A refused connection or attach is exit 125. The connection
   is plain, unencrypted 9P, so keep a TCP root on a trusted network. Unix
   socket roots need a macOS or Linux host.
 - **9P over WebSocket** ([websocket-9p](design/0021-websocket-9p.md)).
@@ -1515,11 +1520,12 @@ process, is the [self-host](design/0010-self-host.md) proposal.
   rebuild 9front itself: build the tree with `mkroot.py --src`. For your own
   programs, `/$objtype/lib` and `/sys/include`, which every tree has, are
   enough.
-- The root is read-only by default. Build in your host cwd, and install with
-  `--writable "$H9ROOT"`, or try it first with `--write=ephemeral --writable
-  "$H9ROOT"`, which keeps the installed files in memory for the run only.
-  Copy-on-write over the root by default is *Not yet available
-  ([overlay](design/0011-overlay.md))*.
+- The root is a copy-on-write overlay by default, so `mk install` works and
+  the installed files are there for the rest of the run, then gone: try an
+  install that way first. To keep it, install with `--writable "$H9ROOT"`.
+  On a terminal, h9 tells you when a run's changes to the root were
+  discarded: `h9: changes to the root under /arm64, /sys were discarded
+  (rerun with --writable "$H9ROOT" to keep them)`.
 - `$objtype` is the machine's architecture; set it to cross-compile, as in
   `objtype=386 mk`.
 
@@ -1673,7 +1679,7 @@ Files and sandbox (chapters 21 and 22):
 | `--readable PATH` | Share a host path read-only; repeatable |
 | `--writable PATH` | Share a host path read-write; repeatable |
 | `--read-deny PATH` | Hide a host path, even inside a shared tree; repeatable. The path needn't exist. |
-| `--write none\|scope\|ephemeral\|overlay` | `none`: deny every write. `scope` (the default): writes go to the writable paths on the host. `ephemeral`: writable paths are copy-on-write overlays in memory, thrown away at exit. `overlay` is *Not yet available ([overlay](design/0011-overlay.md))* and denies writes for now. |
+| `--write none\|scope\|ephemeral\|overlay` | `none`: deny every write. `scope`: writes go to the writable paths on the host, and the root is read-only. `overlay` (the default, in both profiles): as `scope`, with a copy-on-write overlay over the root, thrown away at exit. `ephemeral`: the root and the writable paths are copy-on-write overlays in memory, thrown away at exit. |
 | `--net disable\|outbound\|enable` | No network; clients only (the default); clients and servers |
 | `--net-allow PATTERN` | Allow connections only to matching dial strings; repeatable (chapter 15) |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
@@ -1857,7 +1863,7 @@ tight with a network.
 | `fs.write.scope` | Only writable paths can be written | Always |
 | `fs.read.deny` | Denied paths are hidden even in shared trees | `--read-deny` |
 | `fs.write.ephemeral` | Writable paths are overlays in memory | `--write=ephemeral` |
-| `fs.write.overlay` | Copy-on-write over the root | `--write=overlay`; not enforceable yet |
+| `fs.write.overlay` | The root is an overlay in memory | `--write=overlay` (the default), `--write=ephemeral` |
 | `net.disable` | No network device | `--net=disable`, `tight` |
 | `net.outbound` | Connects allowed, listening refused | `--net=outbound`, `default` |
 | `net.allow` | Connects only to allowed dial strings | `--net-allow` |
@@ -1873,11 +1879,12 @@ running anything:
 host$ cd ~/src/proj
 host$ h9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
 profile:  tight
-enforces: env.scrub fs.read.scope fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
-limits:   write=scope net=disable memory=512M timeout=1m
+enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
+limits:   write=overlay net=disable memory=512M timeout=1m
 devmask:  #C #I #U
 namespace:
   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
+  bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
   bind '#c' /dev
   bind -b '#y<id>' /dev
   bind -c '#e' /env
@@ -1891,10 +1898,12 @@ namespace:
   bind '#U/Users/me/src/proj' /mnt/term/cwd              ro
   bind -c '#U/Users/me/src/proj/out' /mnt/term/cwd/out   rw
 access:
-  ro   /Users/me/src/hyper9/.local/9front/root-11952
+  eph  /Users/me/src/hyper9/.local/9front/root-11952
   ro   /Users/me/src/proj
   rw   /Users/me/src/proj/out
 caveats:
+  - writes to the root are kept in memory, count against --memory, and are lost when the machine ends; when memory runs out they fail with "file system full"
+  - a file opened for writing is copied into memory whole the first time
   - hardlinks under writable paths can modify host files outside them
   - writes to writable paths are not capped (no res.disk)
   - paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check
@@ -1915,14 +1924,9 @@ caveats:
 | `caveats:` | What the sandbox doesn't cover in this configuration |
 
 **`--strict`.** When you ask for something this build can't enforce, h9 falls
-back to the safer choice and lists it as `unenforced`: today that's only
-`--write=overlay`, which denies writes instead. `--strict` refuses to run
-instead, with exit 2:
-
-```sh
-host$ h9 --strict --write=overlay mk
-h9: --strict: this build can't enforce: fs.write.overlay
-```
+back to the safer choice and lists it as `unenforced`, and `--strict` refuses
+to run instead, with exit 2. This build enforces every capability it knows,
+so today `--strict` always runs.
 
 **Recipes**
 
@@ -2010,12 +2014,10 @@ bind h9 already made stays. That's why replaying `--print` output is
 harmless: only the lines you add, or that differ, change anything. A
 `bind -c '#O'` line, on the other hand, does take effect: it puts a fresh
 overlay in memory over its target, so the target becomes writable for the
-run, even under `--write=none`.
-
-> **Known issue:** an `#O` line whose target is itself a bind or mount
-> point, such as `/mnt/term/cwd`, currently overlays the empty directory
-> underneath instead of the bound tree, so the target looks empty. Overlays
-> of ordinary directories in the root, and `--write=ephemeral` itself, work.
+run, even under `--write=none`. An `#O` line whose target is a bind or
+mount point, such as `/mnt/term/cwd`, overlays the tree bound there. One
+over `/` keeps what was bound below it before: `/mnt/term/cwd` still shows
+your directory, and the program starts in it.
 
 Simpler files are fine too:
 
@@ -2194,9 +2196,9 @@ terminal escape codes, and there's no full-screen terminal interface. Use
 `p` to page, `sam -d` or `ed` to edit, and `lc` for columns. acme and rio
 need graphics (*Not yet available ([gfx](design/0015-gfx.md))*).
 
-**Why can't I mount on `/n/something`?** The root tree's `/n` is read-only
-and there's no `mntgen` filling it in. Make the mount point in `/tmp`
-(chapter 16).
+**Why can't I mount on `/n/something`?** There's no `mntgen` filling `/n`
+in. Make the mount point first, `mkdir /n/something`, which the root's
+overlay allows (chapter 16).
 
 **My changes to `/tmp` are gone.** Each machine's `/tmp` is private and in
 memory. Write to the host cwd to keep files.
@@ -2433,8 +2435,9 @@ Commands marked † aren't usable in h9 yet; the notes say why.
 ### C. The root tree
 
 The root tree is a 9front file system extracted from the pinned release image
-(9front 11952) by `scripts/mkroot.py`. h9 serves it read-only as `/`, so a
-guest can't change it unless you pass `--writable "$H9ROOT"`. It's about
+(9front 11952) by `scripts/mkroot.py`. h9 serves it read-only as `/`, under
+a copy-on-write overlay in memory, so a guest's changes vanish with the
+machine and the tree changes only if you pass `--writable "$H9ROOT"`. It's about
 250 MB.
 
 **Left out:** `/dist` (installer payloads), the kernels and boot files for
@@ -2459,12 +2462,13 @@ are arm64; `/386` and `/amd64` are empty skeletons unless `mkroot.py --arch
 | `/adm/timezone` | Time zone files; h9 copies `local` into `$timezone` |
 | `/acme`, `/mail`, `/cfg` | acme's tools, upas mail, per-system configuration |
 | `/usr/glenda` | The default user's home directory |
-| `/dev`, `/env`, `/fd`, `/proc`, `/srv`, `/net`, `/n`, `/mnt`, `/mnt/term`, `/tmp` | Empty mount points for devices and binds. `/tmp` becomes the machine's private overlay; `/n` and `/mnt` stay empty and read-only, since nothing runs 9front's `mntgen` to fill them. |
+| `/dev`, `/env`, `/fd`, `/proc`, `/srv`, `/net`, `/n`, `/mnt`, `/mnt/term`, `/tmp` | Empty mount points for devices and binds. `/tmp` becomes the machine's private overlay; `/n` and `/mnt` stay empty, since nothing runs 9front's `mntgen` to fill them. |
 
 **Home directories.** h9 sets `$home` to `/usr/$user`, using your host user
-name, but the tree only has `/usr/glenda`, so `$home` usually doesn't exist and
-the root is read-only anyway. Work in the host cwd or `/tmp` instead, or pass
-`--env home=/mnt/term/cwd`.
+name. The tree only has `/usr/glenda`, so h9 makes `/usr/$user` in the root's
+overlay: it exists and is writable, and is gone at exit. Under
+`--write=scope` it doesn't exist; work in the host cwd or `/tmp` instead, or
+pass `--env home=/mnt/term/cwd` to keep files in your host directory.
 
 **Updating.** Each tree is unpacked to `.local/9front/root-<release>`, with
 `.local/9front/root` linked to it, so a new release gets its own tree and the

@@ -404,7 +404,7 @@ test "tight profile: writing to the cwd fails (demo) [baseline]" {
     try std.testing.expect(!s.exists("f"));
 }
 
-test "default profile: the cwd is writable and the root isn't [baseline]" {
+test "default profile: the cwd is writable and the root tree isn't written [baseline]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -413,9 +413,14 @@ test "default profile: the cwd is writable and the root isn't [baseline]" {
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(s.exists("f"));
+    // The write succeeds in the root's overlay (design/0011-overlay.md);
+    // --write=scope makes it fail.
     const ro = try run(e, &.{ "--cwd", s.path, "touch", "/lib/h9-test" });
     defer ro.deinit();
-    try std.testing.expectEqual(1, ro.code);
+    try std.testing.expectEqual(0, ro.code);
+    const sc = try run(e, &.{ "--cwd", s.path, "--write=scope", "touch", "/lib/h9-test" });
+    defer sc.deinit();
+    try std.testing.expectEqual(1, sc.code);
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "lib/h9-test"), .{}) catch return;
     return error.RootWasWritten;
 }
@@ -500,9 +505,9 @@ test "--print shows the plan and doesn't run [baseline]" {
 
 test "--strict refuses what this build can't enforce [baseline]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--strict", "--write=overlay", "echo" });
-    defer r.deinit();
-    try std.testing.expectEqual(2, r.code);
+    // This build enforces every capability it knows, since
+    // design/0011-overlay.md made --write=overlay enforceable, so there's
+    // nothing left to refuse.
     const ok = try run(e, &.{ "--strict", "--profile=tight", "echo", "ok" });
     defer ok.deinit();
     try std.testing.expectEqual(0, ok.code);
@@ -946,6 +951,225 @@ test "removing every .c file in a source tree leaves the host unchanged (demo) [
     defer r.deinit();
     try std.testing.expectEqualStrings("mkfile\nx\n", r.out);
     try std.testing.expect(s.exists("cat.c") and s.exists("ls.c") and !s.exists("x"));
+}
+
+// The root's overlay (design/0011-overlay.md).
+
+/// Fails if the root tree on the host has `rel`.
+fn expectRootLacks(e: Env, rel: []const u8) !void {
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, rel), .{}) catch return;
+    std.debug.print("root tree has {s}\n", .{rel});
+    return error.RootWasWritten;
+}
+
+test "a write to the root under the default profile succeeds and leaves the root tree unchanged [11]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", "echo hi > /lib/h9-overlay && cat /lib/h9-overlay" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try expectRootLacks(e, "lib/h9-overlay");
+}
+
+test "a file written in /lib reads back and isn't in the root tree (demo) [11]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--rc", "echo hi > /lib/x && cat /lib/x" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try expectRootLacks(e, "lib/x");
+}
+
+test "mk install into the root works and leaves the root tree unchanged (demo) [11]" {
+    const e = try env(@src());
+    // Needs /sys/src (scripts/mkroot.py --src).
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "sys/src/cmd/cat.c"), .{}) catch return error.SkipZigTest;
+    var bin_buf: [64]u8 = undefined;
+    const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin/cat", .{e.arch orelse "arm64"});
+    const host_before = try std.Io.Dir.cwd().statFile(std.testing.io, try hostPath(e.root, bin), .{});
+    // A cat that exits with a status of its own, so the run shows which
+    // binary /bin/cat is.
+    const r = try run(e, &.{ "--timeout", "300s", "--rc", "cd /sys/src/cmd && sed 's/exits\\(0\\)/exits(\"newcat\")/' cat.c > /tmp/c && cp /tmp/c cat.c && mk cat.install >/dev/null && echo x | /bin/cat; echo $status" });
+    defer r.deinit();
+    errdefer std.debug.print("{s}", .{r.err});
+    try std.testing.expect(std.mem.startsWith(u8, r.out, "x\ncat "));
+    try std.testing.expect(std.mem.endsWith(u8, r.out, ": newcat\n"));
+    // The root tree's cat and source are as they were.
+    const host_after = try std.Io.Dir.cwd().statFile(std.testing.io, try hostPath(e.root, bin), .{});
+    try std.testing.expectEqual(host_before.size, host_after.size);
+    try std.testing.expectEqual(host_before.mtime, host_after.mtime);
+    var src: [4096]u8 = undefined;
+    const text = try std.Io.Dir.cwd().readFile(std.testing.io, try hostPath(e.root, "sys/src/cmd/cat.c"), &src);
+    try std.testing.expect(std.mem.indexOf(u8, text, "newcat") == null);
+    try expectRootLacks(e, "sys/src/cmd/cat.7");
+}
+
+test "removing a root file hides it in the guest only [11]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--rc", "rm /lib/namespace && ls /lib/namespace; ls /lib | grep -c '^namespace$'" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("0\n", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "/lib/namespace") != null);
+    try std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "lib/namespace"), .{});
+}
+
+test "$home exists and is writable when the root has no /usr/$user [11]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--rc", "echo $user; test -d $home && echo x > $home/f && cat $home/f" });
+    defer r.deinit();
+    var lines = std.mem.splitScalar(u8, r.out, '\n');
+    const user = lines.next().?;
+    var rel: [128]u8 = undefined;
+    const home = try std.fmt.bufPrint(&rel, "usr/{s}", .{user});
+    // The root tree has /usr/glenda; any other user's home is made.
+    if (std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, home), .{})) |_| return error.SkipZigTest else |_| {}
+    try std.testing.expectEqualStrings("x", lines.next().?);
+    try std.testing.expectEqual(0, r.code);
+    try expectRootLacks(e, home);
+}
+
+test "the cwd still writes the host under --write=overlay [11]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--write=overlay", "--rc", "echo x > f && echo y > /lib/h9-overlay-cwd" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(s.exists("f"));
+    try expectRootLacks(e, "lib/h9-overlay-cwd");
+}
+
+test "--write=scope keeps the root read-only [11]" {
+    const e = try env(@src());
+    for ([_][]const u8{ "--profile=default", "--profile=tight" }) |prof| {
+        const r = try run(e, &.{ prof, "--write=scope", "--rc", "echo x > /lib/h9-overlay-scope" });
+        defer r.deinit();
+        try std.testing.expectEqual(1, r.code);
+        try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") != null);
+    }
+    try expectRootLacks(e, "lib/h9-overlay-scope");
+}
+
+test "--writable on the root writes the host, with no overlay [11]" {
+    const e = try env(@src());
+    const name = "lib/h9-overlay-writable";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, hostPath(e.root, name) catch unreachable) catch {};
+    const p = try run(e, &.{ "--writable", e.root, "--print", "echo" });
+    defer p.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "'#O' / ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "fs.write.overlay") != null);
+    const r = try run(e, &.{ "--writable", e.root, "--rc", "echo kept > /" ++ name });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("kept\n", try std.Io.Dir.cwd().readFile(std.testing.io, try hostPath(e.root, name), &buf));
+}
+
+test "--write=ephemeral overlays the root as well [11]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try runEph(e, &s, &.{ "--rc", "echo hi > /lib/h9-overlay-eph && echo x > f && cat /lib/h9-overlay-eph f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hi\nx\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(!s.exists("f"));
+    try expectRootLacks(e, "lib/h9-overlay-eph");
+}
+
+test "--strict --write=overlay is accepted [11]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--strict", "--write=overlay", "echo", "ok" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("ok\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    const p = try run(e, &.{ "--strict", "--print", "echo" });
+    defer p.deinit();
+    try std.testing.expectEqual(0, p.code);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "fs.write.overlay") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "unenforced") == null);
+}
+
+test "--print output with the root overlay replays with --ns [11]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const p = try run(e, &.{ "--cwd", s.path, "--print", "echo" });
+    defer p.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "  bind -c '#O' / ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the root are kept in memory") != null);
+    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
+    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    // Under --write=scope the root is read-only until the replay's overlay.
+    const r = try run(e, &.{ "--cwd", s.path, "--write=scope", "--ns", "ns", "--rc", "echo x > /lib/h9-overlay-ns && cat /lib/h9-overlay-ns" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("x\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try expectRootLacks(e, "lib/h9-overlay-ns");
+}
+
+test "the tight profile's root is an overlay [11]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--profile=tight", "--rc", "echo hi > /lib/h9-overlay-tight && cat /lib/h9-overlay-tight; echo x > f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    // The cwd stays read-only.
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(!s.exists("f"));
+    try expectRootLacks(e, "lib/h9-overlay-tight");
+}
+
+test "a write to the root fails with file system full when memory runs out [11]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--memory", "32m", "--rc", "dd -if /dev/zero -of /lib/big -bs 4194304 -count 16; rm /lib/big; echo small > /lib/s && cat /lib/s" });
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
+    try std.testing.expectEqualStrings("small\n", r.out);
+    try expectRootLacks(e, "lib/big");
+}
+
+const notice = "h9: changes to the root under ";
+
+test "the discarded-changes notice is printed on a terminal and not otherwise [11]" {
+    const e = try env(@src());
+    const script = "echo x > /lib/h9-notice; mkdir /sys/h9-notice; echo done";
+    const r = try run(e, &.{ "--rc", script });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("done\n", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, notice) == null);
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--rc", script });
+        defer t.deinit();
+        try t.expect(notice ++ "/lib, /sys were discarded (rerun with --writable \"$H9ROOT\" to keep them)", slow(20_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    }
+}
+
+test "changes only under $home, or only by the namespace builder, print no notice [11]" {
+    const e = try env(@src());
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // The builder may make $home; the guest writes only there.
+        var t = try spawnTerm(e, backend, &.{ "--rc", "echo x > $home/h9-notice; echo done" });
+        defer t.deinit();
+        try t.expect("done", slow(20_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+        t.drain(200) catch {};
+        try std.testing.expect(std.mem.indexOf(u8, t.out.items, notice) == null);
+    }
 }
 
 // The terminal. These run h9 on a pty or pseudoconsole from tests/term.zig.
@@ -2484,12 +2708,40 @@ test "--print shows a 9P root, and its output replays with --ns [13]" {
     var want: [96]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, p.out, "  mount '#s/root' / ''") != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}\n", .{srv.dial()})) != null);
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") != null);
+    // Under the root's overlay (design/0011-overlay.md) nothing reaches
+    // the server; under --write=scope its server decides.
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") == null);
+    const sp = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--print", "ls" });
+    defer sp.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, sp.out, "writes to the 9P root go to its server") != null);
     // The namespace section, replayed after the plan's own.
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "\naccess:") orelse std.mem.indexOfPos(u8, p.out, start, "\ncaveats:") orelse return error.NoNamespace;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start .. end + 1] });
     try expectSameAsHost(e, srv.dial(), &.{ "--cwd", s.path, "--ns", "ns", "/bin/ls", "/", "/bin/ls" });
+}
+
+test "a write to a 9P root under the default profile doesn't reach the server [11]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    // The server is a machine of its own, whose namespace outlives each
+    // connection: a write that reached it would show in the next one.
+    const r = try run(e, &.{ "--root", srv.dial(), "--rc", "echo hi > /lib/h9-overlay-9p && cat /lib/h9-overlay-9p" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    const after = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--rc", "test -e /lib/h9-overlay-9p && echo reached" });
+    defer after.deinit();
+    try std.testing.expectEqualStrings("", after.out);
+    // Under --write=scope the write goes to the server, whose export is
+    // read-only (exportfs -R).
+    const sc = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--rc", "echo x > /lib/h9-overlay-9p" });
+    defer sc.deinit();
+    try std.testing.expectEqual(1, sc.code);
+    try std.testing.expect(std.mem.indexOf(u8, sc.err, "read only") != null);
+    try expectRootLacks(e, "lib/h9-overlay-9p");
 }
 
 test "--check runs /bin/echo from a 9P root [13]" {

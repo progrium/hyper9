@@ -1461,11 +1461,12 @@ const OverlayRoot = struct {
 /// Runs fixture `text` on backend `kind` with the root and cwd of `r`;
 /// null if the backend can't run here. The status goes in `sb`.
 fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, sb: []u8) !?[]const u8 {
-    return runOverlayTools(kind, r, text, pol, true, sb);
+    return runOverlayTools(kind, r, text, pol, true, sb, null);
 }
 
-/// `runOverlay`, with `guest_tools` (design/0032-guest-tools.md) as given.
-fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, guest_tools: bool, sb: []u8) !?[]const u8 {
+/// `runOverlay`, with `guest_tools` (design/0032-guest-tools.md) as given,
+/// and the run's root changes (design/0011-overlay.md) in `changes`.
+fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, guest_tools: bool, sb: []u8, changes: ?*h9.RootChanges) !?[]const u8 {
     const gpa = std.testing.allocator;
     const bytes = try image(gpa, .arm64, text);
     defer gpa.free(bytes);
@@ -1489,6 +1490,7 @@ fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol
     };
     defer m.deinit();
     const status = try m.run(.{ .bytes = bytes }, &.{"t"});
+    if (changes) |c| c.* = m.root_changes;
     return switch (status) {
         .exited => |t| try std.fmt.bufPrint(sb, "exited {s}", .{t}),
         .killed => |t| try std.fmt.bufPrint(sb, "killed {s}", .{t}),
@@ -1526,6 +1528,49 @@ test "two machines in one host process each get their own /tmp [6]" {
         try std.testing.expect(std.mem.startsWith(u8, got_b, "exited "));
         try std.testing.expect(std.mem.indexOf(u8, got_b, "does not exist") != null);
         try std.testing.expect(!r.exists("tmp/f"));
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "two machines in one host process each see only their own root changes [11]" {
+    // HVF allows one VM per host process, so the second machine is always
+    // the emulator.
+    var ran: usize = 0;
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .emu, .emu } }) |kinds| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        // A writes /f and holds it for 3 s; B looks for it meanwhile.
+        const A = struct {
+            r: *OverlayRoot,
+            kind: vmm.BackendKind,
+            sb: [300]u8 = undefined,
+            changes: h9.RootChanges = .{},
+            got: anyerror!?[]const u8 = null,
+            fn run(a: *@This()) void {
+                a.got = runOverlayTools(a.kind, a.r, @embedFile("ov_root_own"), .{}, true, &a.sb, &a.changes);
+            }
+        };
+        var a: A = .{ .r = &r, .kind = kinds[0] };
+        const th = try std.Thread.spawn(.{}, A.run, .{&a});
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1000), .awake) catch {};
+        var sb: [300]u8 = undefined;
+        var b_changes: h9.RootChanges = .{};
+        const b = runOverlayTools(kinds[1], &r, @embedFile("ov_root_absent"), .{}, true, &sb, &b_changes);
+        th.join();
+        errdefer std.debug.print("backends {t} and {t}\n", .{ kinds[0], kinds[1] });
+        const got_a = try a.got orelse continue;
+        const got_b = try b orelse continue;
+        try std.testing.expectEqualStrings("exited ", got_a);
+        try std.testing.expect(std.mem.startsWith(u8, got_b, "exited "));
+        try std.testing.expect(std.mem.indexOf(u8, got_b, "does not exist") != null);
+        try std.testing.expect(!r.exists("f"));
+        // Each machine's summary has only its own changes.
+        try std.testing.expect(a.changes.changed);
+        try std.testing.expectEqual(@as(usize, 1), a.changes.dirs().len);
+        try std.testing.expectEqualStrings("f", a.changes.dirs()[0].slice());
+        try std.testing.expect(!b_changes.changed);
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;
@@ -1641,7 +1686,7 @@ test "guest_tools = false leaves #H/bin off /bin and masks #H [32]" {
         try r.init();
         defer r.deinit();
         var sb: [300]u8 = undefined;
-        const got = try runOverlayTools(kind, &r, @embedFile("htools_masked"), .{}, false, &sb) orelse continue;
+        const got = try runOverlayTools(kind, &r, @embedFile("htools_masked"), .{}, false, &sb, null) orelse continue;
         errdefer std.debug.print("backend {t}: {s}\n", .{ kind, got });
         try std.testing.expect(std.mem.startsWith(u8, got, "exited "));
         try std.testing.expect(got.len > "exited ".len);
