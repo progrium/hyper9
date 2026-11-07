@@ -4403,3 +4403,165 @@ test "--gfx on a build without graphics exits 125 [15]" {
     try std.testing.expectEqualStrings("", r.out);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "graphics aren't built into this h9") != null);
 }
+
+// Contained trees (design/0034-symlinks-in-root.md). The root for these is
+// a small tree in a scratch directory: a few of the root's commands,
+// copied, the mount points the namespace builder binds onto, and links.
+
+/// Makes a root tree with links in `s`, at `s.path/tree`, and returns
+/// that path in `out`.
+fn linkTree(e: Env, s: *Scratch, out: []u8) ![]const u8 {
+    const io = std.testing.io;
+    const d = s.tmp.dir;
+    const arch = e.arch orelse "arm64";
+    var b: [64]u8 = undefined;
+    for ([_][]const u8{ "dev", "env", "proc", "fd", "srv", "tmp", "net", "bin", "mnt/term/cwd", "usr", "rc/bin", "lib", "etc", "deny" }) |p|
+        try d.createDirPath(io, try std.fmt.bufPrint(&b, "tree/{s}", .{p}));
+    try d.createDirPath(io, try std.fmt.bufPrint(&b, "tree/{s}/bin", .{arch}));
+    for ([_][]const u8{ "cat", "ls" }) |cmd| {
+        var src: [64]u8 = undefined;
+        const rel = try std.fmt.bufPrint(&src, "{s}/bin/{s}", .{ arch, cmd });
+        try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try hostPath(e.root, rel), d, try std.fmt.bufPrint(&b, "tree/{s}", .{rel}), io, .{});
+    }
+    try d.writeFile(io, .{ .sub_path = "tree/lib/hello", .data = "tree hello\n" });
+    try d.writeFile(io, .{ .sub_path = "tree/deny/secret", .data = "secret\n" });
+    // Absolute, climbing past the top, a loop, a link to a denied file,
+    // and a link to the cat binary.
+    try d.symLink(io, "/lib/hello", "tree/etc/hello", .{});
+    try d.symLink(io, "../../../../../../lib/hello", "tree/etc/up", .{});
+    try d.symLink(io, "loop", "tree/etc/loop", .{});
+    try d.symLink(io, "/deny/secret", "tree/etc/pub", .{});
+    var t: [64]u8 = undefined;
+    try d.symLink(io, try std.fmt.bufPrint(&t, "/{s}/bin/cat", .{arch}), try std.fmt.bufPrint(&b, "tree/{s}/bin/kitty", .{arch}), .{});
+    return std.fmt.bufPrint(out, "{s}/tree", .{s.path});
+}
+
+test "absolute symlink in a contained tree resolves inside it [34]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "cat", "/etc/hello" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("tree hello\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    // A command reached through a link runs, and lists as its target.
+    const k = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "kitty", "/lib/hello" });
+    defer k.deinit();
+    try std.testing.expectEqualStrings("tree hello\n", k.out);
+    try std.testing.expectEqual(0, k.code);
+}
+
+test "symlink with .. stops at the top of a contained tree [34]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "cat", "/etc/up" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("tree hello\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "symlink loop is too many symbolic links [34]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "cat", "/etc/loop" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
+}
+
+test "contained tree still honours --read-deny [34]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&db, "{s}/deny", .{tree});
+    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "--read-deny", deny, "cat", "/etc/pub" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+    const l = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "--read-deny", deny, "ls", "/", "/etc" });
+    defer l.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, l.out, "deny") == null);
+    try std.testing.expect(std.mem.indexOf(u8, l.out, "/etc/pub") == null);
+    try std.testing.expect(std.mem.indexOf(u8, l.out, "/etc/hello") != null);
+}
+
+test "uncontained bind follows host symlinks as before [34]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    // A link to a host file in a readable directory outside the tree.
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "host\n" });
+    var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/f", .{other.path}), "tree/lib/host", .{});
+    const u = try runRoot(e, tree, &.{ "--cwd", s.path, "--readable", other.path, "cat", "/lib/host" });
+    defer u.deinit();
+    try std.testing.expectEqualStrings("host\n", u.out);
+    try std.testing.expectEqual(0, u.code);
+    // Without containment, /lib/hello's absolute link goes to the host.
+    const h = try runRoot(e, tree, &.{ "--cwd", s.path, "cat", "/etc/hello" });
+    defer h.deinit();
+    try std.testing.expectEqual(1, h.code);
+    // Contained, the same link is read inside the tree, where that host
+    // path doesn't exist.
+    const c = try runRoot(e, tree, &.{ "--cwd", s.path, "--readable", other.path, "--root-contained", "cat", "/lib/host" });
+    defer c.deinit();
+    try std.testing.expectEqual(1, c.code);
+    try std.testing.expectEqualStrings("", c.out);
+}
+
+test "--print's #U!c bind replays with --ns [34]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    const p = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "--print", "cat" });
+    defer p.deinit();
+    var want: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  bind '#U!c{s}' /", .{tree})) != null);
+    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
+    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    // Replayed over an uncontained root, the #U!c bind makes it contained
+    // (--host-fs leaves #U unmasked, so the replay can attach it).
+    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--host-fs", "--write=scope", "--ns", "ns", "cat", "/etc/hello" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("tree hello\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "ls -l /bin in a contained tree with links (demo) [34]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "ls", "-l", "/bin" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/kitty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/cat") != null);
+}

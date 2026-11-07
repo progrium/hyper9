@@ -101,6 +101,9 @@ pub const Bind = struct {
     /// with the host path in a comment; in a namespace file a bare `#O`
     /// overlays whatever `to` is at that point (src/newns.zig).
     lower: ?[]const u8 = null,
+    /// `lower` is a contained tree, through `#U!c`
+    /// (design/0034-symlinks-in-root.md).
+    contained: bool = false,
     /// A mount of the 9P server posted at `from` (`#s/root`), rather than
     /// a bind, with the attach name `spec`.
     mount: bool = false,
@@ -357,6 +360,9 @@ pub const Inputs = struct {
     root: ?[]const u8,
     /// A 9P server as the root, instead of a host tree.
     root_9p: ?NinePRoot = null,
+    /// Resolve the root tree's symlinks inside it, through `#U!c`
+    /// (`--root-contained`, design/0034-symlinks-in-root.md).
+    root_contained: bool = false,
     /// Host directory bound at /mnt/term/cwd.
     cwd: ?[]const u8,
     arch: aout.Arch,
@@ -384,6 +390,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // server it doesn't control.
     if (write == .none and in.root_9p != null) {
         err_msg.* = if (in.root_9p.?.kind == .ws) "--write=none can't be enforced on a WebSocket root" else "--write=none can't be enforced on a 9P root";
+        return error.Conflict;
+    }
+    if (in.root_contained and in.root == null) {
+        err_msg.* = "--root-contained needs a host directory as the root";
         return error.Conflict;
     }
     if (write_req == .none and pol.writable.len > 0) {
@@ -456,7 +466,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         // The overlay never writes its lower tree, so devfs keeps the
         // root read-only (`allow_eph`).
         try rules.append(arena, .{ .path = root, .kind = if (root_overlay) .allow_eph else if (root_rw) .allow_rw else .allow_ro });
-        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "#U{s}", .{root}), .to = "/", .create = root_rw, .access = if (root_rw) .rw else .ro });
+        // A contained root's links resolve inside it (#U!c).
+        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "#U{s}{s}", .{ if (in.root_contained) "!c" else "", root }), .to = "/", .create = root_rw, .access = if (root_rw) .rw else .ro });
     }
     // A 9P root isn't a host path, so it has no access rule: its server
     // decides what can be written.
@@ -472,7 +483,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // only the root's own files and everything else is bound over it.
     // Over a host tree the lower tree is the root's path through `#U`;
     // over a 9P root it's the mount, a bare `#O`.
-    if (root_overlay) try binds.append(arena, .{ .from = "#O", .to = "/", .create = true, .access = .eph, .lower = in.root });
+    if (root_overlay) try binds.append(arena, .{ .from = "#O", .to = "/", .create = true, .access = .eph, .lower = in.root, .contained = in.root_contained });
     const has_root = in.root != null or in.root_9p != null;
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
@@ -1121,6 +1132,34 @@ test "compile: --write=none conflicts with --writable" {
     try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .write = .none, .writable = &.{"/w"} }, &msg));
 }
 
+test "compile: --root-contained (design/0034-symlinks-in-root.md)" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var msg: []const u8 = "";
+    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64, .root_contained = true };
+    const p = try compile(a, in, .{}, &msg);
+    // The root's bind and its overlay's lower tree are contained; the rest
+    // aren't.
+    try t.expectEqualStrings("#U!c/r", p.binds[0].from);
+    try t.expectEqualStrings("/", p.binds[0].to);
+    try t.expectEqualStrings("#O", p.binds[1].from);
+    try t.expect(p.binds[1].contained);
+    for (p.binds[2..]) |b| try t.expect(!b.contained and !std.mem.startsWith(u8, b.from, "#U!c"));
+    // The access rules are on host paths, as before.
+    try t.expectEqual(Verdict.allow, p.check("/r/lib/x", .read));
+    var out: std.Io.Writer.Allocating = .init(a);
+    try p.print(&out.writer);
+    try t.expect(std.mem.indexOf(u8, out.written(), "  bind '#U!c/r' /") != null);
+    // Under --write=scope, there's no overlay.
+    const s = try compile(a, in, .{ .write = .scope }, &msg);
+    try t.expectEqualStrings("#U!c/r", s.binds[0].from);
+    try t.expect(!s.root_overlay);
+    // A 9P root isn't a host tree.
+    try t.expectError(error.Conflict, compile(a, .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!fs!564" }, .cwd = "/w", .arch = .arm64, .root_contained = true }, .{}, &msg));
+    try t.expect(std.mem.indexOf(u8, msg, "--root-contained") != null);
+}
+
 test "compile: the root's overlay (design/0011-overlay.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
@@ -1482,7 +1521,6 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     // The tight profile's cwd is an overlay too.
     const te = try compile(arena.allocator(), in, .{ .profile = .tight, .write = .ephemeral }, &msg);
     try t.expectEqualStrings("#O", Find.bind(te, "/mnt/term/cwd").?.from);
-
 
     var out: std.Io.Writer.Allocating = .init(t.allocator);
     defer out.deinit();

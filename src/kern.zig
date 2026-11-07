@@ -207,6 +207,9 @@ const c_stub = struct {
     fn h9_overlay_newpath(_: ?[*:0]const u8) c_int {
         return -1;
     }
+    fn h9_fs_readlinkpath(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
     fn h9_overlay_drop(_: c_int) void {}
     fn h9_overlay_track(_: c_int, _: ?*anyopaque) void {}
     fn h9_kern_release() void {}
@@ -302,6 +305,7 @@ const c_real = struct {
     extern fn syswstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
     extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
+    extern fn h9_fs_readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
@@ -788,6 +792,16 @@ pub fn setPages(p: ?*const Pages) void {
 /// never attached must be dropped.
 pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
     return try check(c.h9_overlay_newpath(lower));
+}
+
+/// The target of the host link that `path`'s last name is, through `#U`
+/// and an overlay over it, as the link has it written
+/// (design/0034-symlinks-in-root.md). Fails with "not a symbolic link"
+/// for anything else. For the Linux personality's readlinkat; Plan 9
+/// programs never see links.
+pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
+    const n = try check(c.h9_fs_readlinkpath(path, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int)))));
+    return buf[0..@intCast(n)];
 }
 
 /// Frees an overlay made by `overlayNew` that was never attached.
@@ -2020,4 +2034,140 @@ test "#O finds, removes and lists the children of a large directory" {
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try std.testing.expectEqual(@as(usize, count / 2), t.listed);
+}
+
+test "#U!c resolves symlinks inside the tree it's bound from [34]" {
+    if (!available or @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    // top is the tree; outside is a sibling an uncontained link reaches.
+    try tmp.dir.createDirPath(io, "top/bin");
+    try tmp.dir.createDirPath(io, "top/etc");
+    try tmp.dir.createDirPath(io, "mnt");
+    try tmp.dir.writeFile(io, .{ .sub_path = "top/bin/busybox", .data = "tree busybox\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "top/outside", .data = "inside\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside", .data = "host\n" });
+    try tmp.dir.symLink(io, "/bin/busybox", "top/bin/ls", .{});
+    try tmp.dir.symLink(io, "../../../../../outside", "top/etc/up", .{});
+    try tmp.dir.symLink(io, "../outside", "top/rel", .{});
+    try tmp.dir.symLink(io, "/bin", "top/bindir", .{});
+    try tmp.dir.symLink(io, "loop2", "top/loop", .{});
+    try tmp.dir.symLink(io, "loop", "top/loop2", .{});
+    try tmp.dir.symLink(io, "/nonexistent", "top/dangling", .{});
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buf);
+    buf[n] = 0;
+
+    const T = struct {
+        root: [:0]u8,
+        err: ?anyerror = null,
+        where: []const u8 = "",
+        done: std.atomic.Value(bool) = .init(false),
+        names: [256]u8 = undefined,
+        names_len: usize = 0,
+        loop_err: [ERRMAX]u8 = undefined,
+        loop_err_len: usize = 0,
+
+        fn run(t: *@This()) void {
+            defer t.done.store(true, .release);
+            t.body() catch |e| {
+                t.err = e;
+            };
+        }
+        fn expectRead(path: [*:0]const u8, want: []const u8) !void {
+            const fd = try open(path, OREAD);
+            defer close(fd) catch {};
+            var b: [64]u8 = undefined;
+            try std.testing.expectEqualStrings(want, b[0..try pread(fd, &b, 0)]);
+        }
+        fn body(t: *@This()) !void {
+            var spec: [std.fs.max_path_bytes + 16]u8 = undefined;
+            try bind(try std.fmt.bufPrintZ(&spec, "#U{s}", .{t.root}), "/", MREPL);
+            try bind(try std.fmt.bufPrintZ(&spec, "#U!c{s}/top", .{t.root}), "/mnt", MREPL);
+
+            t.where = "absolute link";
+            try expectRead("/mnt/bin/ls", "tree busybox\n");
+            t.where = ".. stops at the top";
+            try expectRead("/mnt/etc/up", "inside\n");
+            try expectRead("/mnt/rel", "inside\n");
+            t.where = "uncontained bind follows the host";
+            try expectRead("/top/rel", "host\n");
+            t.where = "link to a directory";
+            try expectRead("/mnt/bindir/busybox", "tree busybox\n");
+
+            t.where = "stat shows the link's own name";
+            var st: [256]u8 = undefined;
+            const sn = try stat("/mnt/bin/ls", &st);
+            const nl = std.mem.readInt(u16, st[41..][0..2], .little);
+            try std.testing.expect(sn >= 43 + nl);
+            try std.testing.expectEqualStrings("ls", st[43..][0..nl]);
+
+            t.where = "readlink";
+            var lb: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("/bin/busybox", try readlink("/mnt/bin/ls", &lb));
+            if (readlink("/mnt/bin/busybox", &lb)) |_| return error.NotALink else |_| {}
+
+            t.where = "dangling";
+            if (open("/mnt/dangling", OREAD)) |fd| {
+                close(fd) catch {};
+                return error.DanglingOpened;
+            } else |_| {}
+            try std.testing.expect(std.mem.indexOf(u8, errstr(), "does not exist") != null);
+
+            t.where = "loop";
+            if (open("/mnt/loop", OREAD)) |fd| {
+                close(fd) catch {};
+                return error.LoopOpened;
+            } else |_| {}
+            const e = errstr();
+            @memcpy(t.loop_err[0..e.len], e);
+            t.loop_err_len = e.len;
+
+            t.where = "list";
+            const d = try open("/mnt", OREAD);
+            defer close(d) catch {};
+            var dbuf: [4096]u8 = undefined;
+            var off: i64 = 0;
+            while (true) {
+                const k = try pread(d, &dbuf, off);
+                if (k == 0) break;
+                off += @intCast(k);
+                var j: usize = 0;
+                while (j + 2 <= k) {
+                    const sz = std.mem.readInt(u16, dbuf[j..][0..2], .little) + 2;
+                    const l = std.mem.readInt(u16, dbuf[j + 41 ..][0..2], .little);
+                    const name = dbuf[j + 43 ..][0..l];
+                    @memcpy(t.names[t.names_len..][0..name.len], name);
+                    t.names_len += name.len;
+                    t.names[t.names_len] = ' ';
+                    t.names_len += 1;
+                    j += sz;
+                }
+            }
+
+            t.where = "remove a link, not its target";
+            try remove("/mnt/bin/ls");
+            try expectRead("/mnt/bin/busybox", "tree busybox\n");
+        }
+    };
+    var t: T = .{ .root = buf[0..n :0] };
+    try spawn("test", T, T.run, &t);
+    while (!t.done.load(.acquire)) std.Thread.yield() catch {};
+    if (t.err) |e| {
+        std.debug.print("failed in {s}\n", .{t.where});
+        return e;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, t.loop_err[0..t.loop_err_len], "too many symbolic links") != null);
+    // Links listed as their targets; the dangling one and the loop aren't.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(std.testing.allocator);
+    var it = std.mem.tokenizeScalar(u8, t.names[0..t.names_len], ' ');
+    while (it.next()) |name| try seen.put(std.testing.allocator, name, {});
+    for ([_][]const u8{ "bin", "etc", "outside", "rel", "bindir" }) |want| try std.testing.expect(seen.contains(want));
+    for ([_][]const u8{ "dangling", "loop", "loop2" }) |gone| try std.testing.expect(!seen.contains(gone));
+    // The link went; its target stayed.
+    var hb: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("tree busybox\n", try tmp.dir.readFile(io, "top/bin/busybox", &hb));
+    if (tmp.dir.readLink(io, "top/bin/ls", &hb)) |_| return error.LinkStillThere else |_| {}
 }

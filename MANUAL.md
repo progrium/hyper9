@@ -1752,6 +1752,7 @@ Machine:
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
+| `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For Linux roots, container images and 9front trees with links. |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
 | `--rc 'command'` | Run an rc command line instead of a program |
@@ -1901,6 +1902,10 @@ read-only.
   them, so a link inside a shared tree that points outside it fails as if
   the target didn't exist. Creating, removing or renaming acts on the link
   itself.
+  With `--root-contained`, the root tree's links are read inside it
+  instead: an absolute target starts at the tree's top, and `..` stops
+  there, so a Linux root's `/bin/ls -> /bin/busybox` works as it does in
+  that system. A loop of links is "too many symbolic links".
 - **Hardlinks** can't be detected that way: a hardlink inside a writable
   path to a file outside it lets the guest change that file. `--print` lists
   this as a caveat.

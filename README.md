@@ -268,7 +268,7 @@ A conversation's `data` file carries binary messages as a byte stream, and its
 `text` file carries text messages one per read and write, for any WebSocket
 service. Guest connections don't use the host's proxies.
 
-Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--cwd DIR`, `--env
+Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--root-contained`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,
@@ -392,7 +392,9 @@ writes the root tree instead, and `--write=scope` makes the root
 read-only. `--write=ephemeral` makes every writable path a copy-on-write
 overlay as well, so nothing reaches the host. `#U` and `#C` are masked, so the guest can't attach more of the host,
 and symlinks are resolved before access is checked, so a link inside a bound
-tree can't reach outside it. See [DESIGN.md](DESIGN.md), "Sandbox policy".
+tree can't reach outside it. `--root-contained` resolves the root tree's
+links inside it instead, as `chroot` would, for Linux roots and container
+images whose links are absolute. See [DESIGN.md](DESIGN.md), "Sandbox policy".
 
 ```sh
 h9 --profile=tight ls -l            # read-only cwd, no network, 10m timeout

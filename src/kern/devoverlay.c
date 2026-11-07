@@ -1219,6 +1219,32 @@ h9_overlay_newpath(char *path)
 	return n;
 }
 
+/*
+ * The lower chan for c's name, for h9_fs_readlinkpath (src/kern/fscheck.c),
+ * or nil if c isn't an overlay chan or its name is in memory: a link
+ * copied up is a file now.
+ */
+Chan*
+h9_overlay_lower(Chan *c)
+{
+	Ovc *o;
+
+	if(devtab[c->type]->dc != 'O')
+		return nil;
+	o = c->aux;
+	qlock(&o->inst->ql);
+	if(waserror()){
+		qunlock(&o->inst->ql);
+		nexterror();
+	}
+	c = nil;
+	if(adopt(o) == 0 && (o->node == nil || o->node->kind == Nmark))
+		c = lowerfor(o);
+	qunlock(&o->inst->ql);
+	poperror();
+	return c;
+}
+
 /* Frees an instance that was made but never attached. */
 void
 h9_overlay_drop(int id)
