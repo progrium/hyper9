@@ -2,7 +2,7 @@
 id: 33
 slug: exit-status
 title: Host exit statuses for processes killed by notes
-status: draft
+status: implemented
 created: 2026-11-05
 authors: [progrium]
 depends: []
@@ -108,3 +108,13 @@ Demo: `h9 --rc 'sleep 100'`, press Ctrl-C, then `echo $?` prints `130`.
 ## Open issues
 
 - **`h9: machine stopped` after `--timeout`.** If a timed-out program ignores `hangup` and the machine is torn down, `Machine` reports `h9: timeout`, so it exits 124. That seems right; check that no path reports `machine stopped` instead.
+
+## Updates
+
+- 2026-11-07: Implemented. Choices made where this doc was open or silent:
+  - `h9: machine stopped` with no host signal behind it (an embedder's own stop) exits 125, as h9's own failure.
+  - On Windows, closing the console counts as SIGHUP and logoff or shutdown as SIGTERM. When several host signals arrive, the first one to start a teardown names it.
+  - SIGTERM gets its own event in `src/hostsig.zig`'s self-pipe, so it can be told from SIGHUP.
+  - `Killed`, from `/proc/n/ctl kill`, isn't in `sigtab` (which matches case-sensitively), so it exits 1, as APE's `wait` would decide.
+  - The open issue holds: `Machine.run` reports `h9: timeout` on every teardown path of a run that timed out, and the `--timeout exits 124` case uses an rc that ignores the hangup to cover the teardown path.
+  - An extra case, `a run torn down after SIGTERM exits 143`, covers the host-signal record.
