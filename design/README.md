@@ -29,7 +29,7 @@ The signature is added by hand by the person it names, never by a tool or an age
 
 ## Filing and numbering
 
-A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number and links to the old path, refreshes the README table, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.
+A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number and links to the old path, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.
 
 Discussion happens on the issue. The doc is revised in commits. A proposal can't leave `draft` without an `id`: drafting needs no GitHub, but deciding needs an issue to discuss it on. The slug stays as an alias after filing, so a reference written before the number existed still resolves. The [baseline](0000-baseline.md), the work done before proposals, is `id: 0` and has no issue.
 
@@ -98,10 +98,12 @@ Integration cases are tagged with the proposal they prove, by slug or id, in bra
 | `list [--status S] [--area A]` | A table of id, slug, status, ready or what it needs, and title |
 | `ready` | Accepted proposals whose dependencies are all implemented: what can be started now |
 | `graph` | The dependency graph, as Mermaid |
-| `readme` | Rewrites the proposal table and graph in the top-level README, between its `design:begin` and `design:end` markers |
+| `status` | Rewrites [STATUS.md](STATUS.md), the proposal table and graph; run on main after each merge, not in PRs |
 | `new <slug> [--title T] [--author LOGIN]` | Starts a draft from the template |
 | `file <slug> [--yes] [--dry-run] [--issue N]` | Files a draft, as above |
 | `fix` | Rewrites slug references to filed proposals as numbers |
 | `check` | Validates the proposals and test tags; run in CI and before a PR |
 
-`check` fails on bad frontmatter (including values YAML would read differently), tags not written as `[a, b]`, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by` or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites, and on an out-of-date README table, which `readme` rewrites.
+[STATUS.md](STATUS.md) is generated, and only main commits it: after each push to main that touches `design/` or the tool, [.github/workflows/design-status.yml](../.github/workflows/design-status.yml) runs `status` and commits the result if it changed. PRs leave it alone, even when they change a proposal's status or dependencies, so two open PRs never conflict over it, and it catches up within a minute or so of a merge. `list` and `ready` give the current state on any branch.
+
+`check` fails on bad frontmatter (including values YAML would read differently), tags not written as `[a, b]`, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by` or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites.

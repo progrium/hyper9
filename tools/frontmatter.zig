@@ -282,7 +282,8 @@ fn parseList(arena: std.mem.Allocator, value: []const u8) ?[]const []const u8 {
 /// Files in the design directory that aren't proposals.
 pub fn isProposalFile(name: []const u8) bool {
     return std.mem.endsWith(u8, name, ".md") and
-        !std.mem.eql(u8, name, "README.md") and !std.mem.eql(u8, name, "TEMPLATE.md");
+        !std.mem.eql(u8, name, "README.md") and !std.mem.eql(u8, name, "TEMPLATE.md") and
+        !std.mem.eql(u8, name, "STATUS.md");
 }
 
 /// Reads and parses every proposal in `dir`, sorted by file name.

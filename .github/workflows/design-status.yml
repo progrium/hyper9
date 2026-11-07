@@ -1,0 +1,46 @@
+# Regenerates design/STATUS.md (the proposal table and graph) on main after
+# each merge. PRs never commit it, so they can't conflict over it
+# (design/README.md, The tool).
+name: design status
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "design/**"
+      - "tools/design.zig"
+      - "tools/frontmatter.zig"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One run at a time, always on the newest main.
+concurrency:
+  group: design-status
+  cancel-in-progress: true
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build design -- status
+      - name: Commit if changed
+        run: |
+          git diff --quiet -- design/STATUS.md && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "design: regenerate STATUS.md" -- design/STATUS.md
+          # main may have moved since checkout; only this job writes
+          # STATUS.md, so rebasing onto it can't conflict.
+          for i in 1 2 3; do
+            git pull -q --rebase origin main && git push -q origin HEAD:main && exit 0
+            sleep 5
+          done
+          exit 1
