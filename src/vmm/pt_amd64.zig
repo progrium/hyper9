@@ -44,17 +44,26 @@ pub fn userAttrs(perms: vmm.Perms) u64 {
 
 /// A user root shares the kernel half's PML4 entry.
 pub fn newRoot(ram: *gphys.Ram, kernel_root: u64) vmm.Error!u64 {
+    if (ram.takeRoot()) |root| return root;
     const root = try ram.allocTable();
     ram.table(root)[kernel_slot] = ram.table(kernel_root)[kernel_slot];
     return root;
 }
 
-/// Frees a user root and its tables, leaving the kernel half's.
+/// Frees a user root's tables, leaving the kernel half's, and keeps the
+/// root itself as a root. A vCPU's CR3 can still hold a dead space's root
+/// when it next runs: it enters the shim, which runs from the kernel half,
+/// and only then loads the next space's root. So a root page must never
+/// become anything but a root with the kernel half in it.
 pub fn freeRoot(ram: *gphys.Ram, root: u64) void {
-    for (ram.table(root)[0..kernel_slot]) |e| {
-        if (e & PTE_P != 0) freeTables(ram, e & PTE_ADDR, 1);
+    const t = ram.table(root);
+    for (t[0..kernel_slot]) |*e| {
+        const v = e.*;
+        if (v & PTE_P == 0) continue;
+        @atomicStore(u64, e, 0, .release);
+        freeTables(ram, v & PTE_ADDR, 1);
     }
-    ram.freeTable(root);
+    ram.keepRoot(root);
 }
 
 /// The caller serializes changes to the tables under `root`.

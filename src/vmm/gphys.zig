@@ -20,6 +20,9 @@ pub const Ram = struct {
     next: usize = 0,
     /// Freed ranges below `next`, sorted and coalesced.
     free: std.ArrayList(Range) = .empty,
+    /// Root tables kept for reuse as roots only, by formats that need a
+    /// dead root to stay one (pt_amd64.zig).
+    spare_roots: std.ArrayList(u64) = .empty,
     lock: std.Io.Mutex = .init,
 
     const Range = struct { off: usize, len: usize };
@@ -39,6 +42,7 @@ pub const Ram = struct {
     pub fn deinit(r: *Ram) void {
         std.posix.munmap(r.mem);
         r.free.deinit(r.gpa);
+        r.spare_roots.deinit(r.gpa);
     }
 
     /// Returns zeroed pages backed by guest-physical memory.
@@ -118,6 +122,20 @@ pub const Ram = struct {
 
     pub fn freeTable(r: *Ram, pa: u64) void {
         r.freePages(r.page(pa));
+    }
+
+    /// Keeps a root table for `takeRoot`. On allocation failure it's
+    /// leaked rather than freed.
+    pub fn keepRoot(r: *Ram, pa: u64) void {
+        r.lock.lockUncancelable(r.io);
+        defer r.lock.unlock(r.io);
+        r.spare_roots.append(r.gpa, pa) catch {};
+    }
+
+    pub fn takeRoot(r: *Ram) ?u64 {
+        r.lock.lockUncancelable(r.io);
+        defer r.lock.unlock(r.io);
+        return r.spare_roots.pop();
     }
 };
 
