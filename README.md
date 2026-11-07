@@ -221,7 +221,7 @@ commands copied from the root, to measure the box against
 needs `/sys/src`, from `mkroot.py --src` or the checkout `fetch.sh` makes,
 and takes a few minutes on the emulator. The tree is `9box`, its links,
 `rcmain` and the mount points, and runs with
-`h9 --root .local/9front/slim-11952-arm64`. The `[multicall]` cases use it,
+`h9 --root .local/9front/slim-11952-arm64`. The `[64]` cases use it,
 and skip without it.
 
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
