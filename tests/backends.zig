@@ -1744,4 +1744,325 @@ test "KVM reuses destroyed vCPUs past its limit, with none of the last user's st
 
 fn arm64Zero() vmm.arm64.Ureg {
     return .{};
+
+// Graphics (design/0015-gfx.md), on the headless backend: a screen in
+// memory that the test acts on as a window system would.
+
+const gfx = h9.gfx;
+
+/// A run with a window, on a thread of its own, while the test acts on
+/// the window. Pinned: the machine writes to `out` and `err`.
+const GfxRun = struct {
+    out: std.Io.Writer.Allocating = .init(std.testing.allocator),
+    err: std.Io.Writer.Allocating = .init(std.testing.allocator),
+    m: h9.Machine = undefined,
+    bytes: ?[]u8 = null,
+    prog: h9.Program = undefined,
+    argv: []const []const u8 = &.{"t"},
+    sb: [300]u8 = undefined,
+    status: anyerror![]const u8 = error.NotRun,
+    done: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+    started: bool = false,
+
+    const Opts = struct {
+        /// An arm64 fixture's text, or else a guest program from `root`.
+        text: ?[]const u8 = null,
+        guest: ?[]const u8 = null,
+        argv: []const []const u8 = &.{"t"},
+        root: ?[]const u8 = null,
+        clipboard: bool = true,
+        timeout_s: u64 = 20,
+    };
+
+    /// Starts the run; false if backend `kind` can't run here.
+    fn start(g: *GfxRun, kind: vmm.BackendKind, o: Opts) !bool {
+        const gpa = std.testing.allocator;
+        if (o.text) |t| {
+            g.bytes = try image(gpa, .arm64, t);
+            g.prog = .{ .bytes = g.bytes.? };
+        } else g.prog = .{ .guest = o.guest.? };
+        g.argv = o.argv;
+        g.m = h9.Machine.init(gpa, std.testing.io, .{
+            .backend = kind,
+            .arch = .arm64,
+            .root = if (o.root) |r| .{ .dir = r } else null,
+            .policy = .{ .timeout_ns = o.timeout_s * std.time.ns_per_s },
+            .gfx = .{ .clipboard = o.clipboard },
+            .stdio = .{ .out = &g.out.writer, .err = &g.err.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return false,
+            else => return e,
+        };
+        g.started = true;
+        g.thread = try std.Thread.spawn(.{}, run, .{g});
+        return true;
+    }
+
+    fn run(g: *GfxRun) void {
+        g.status = if (g.m.run(g.prog, g.argv)) |st| switch (st) {
+            .exited => |t| std.fmt.bufPrint(&g.sb, "exited {s}", .{t}),
+            .killed => |t| std.fmt.bufPrint(&g.sb, "killed {s}", .{t}),
+        } else |e| e;
+        g.done.store(true, .release);
+    }
+
+    fn running(g: *GfxRun) bool {
+        return !g.done.load(.acquire);
+    }
+
+    /// Waits for the run to end, and returns its status.
+    fn wait(g: *GfxRun) ![]const u8 {
+        if (g.thread) |t| t.join();
+        g.thread = null;
+        return g.status;
+    }
+
+    fn deinit(g: *GfxRun) void {
+        if (g.thread) |t| t.join();
+        if (g.started) g.m.deinit();
+        if (g.bytes) |b| std.testing.allocator.free(b);
+        g.out.deinit();
+        g.err.deinit();
+    }
+};
+
+fn sleepMs(ms: u64) void {
+    std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(ms)), .awake) catch {};
+}
+
+/// Runs gfx fixture `text` on each backend that can, calling `act`
+/// every 20 ms while it runs, and checks it exits cleanly; `check` then
+/// looks at its output.
+fn expectGfx(text: []const u8, clipboard: bool, act: ?*const fn () void, check: *const fn (out: []const u8) anyerror!void) !void {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var g: GfxRun = .{};
+        defer g.deinit();
+        if (!try g.start(kind, .{ .text = text, .clipboard = clipboard })) continue;
+        if (act) |f| while (g.running()) {
+            f();
+            sleepMs(20);
+        };
+        const st = try g.wait();
+        errdefer std.debug.print("backend {t}: {s}\nstderr: {s}\n", .{ kind, st, g.err.written() });
+        try std.testing.expectEqualStrings("exited ", st);
+        try check(g.out.written());
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+fn noCheck(_: []const u8) anyerror!void {}
+
+test "--gfx binds /dev/draw, /dev/mouse, /dev/cursor and /dev/kbd [15]" {
+    try expectGfx(@embedFile("gfx_binds"), true, null, noCheck);
+}
+
+test "reading /dev/draw/new reports the screen's size [15]" {
+    try expectGfx(@embedFile("gfx_drawnew"), true, null, struct {
+        fn check(out: []const u8) !void {
+            // Twelve fields of 12 bytes: client, image id, chan, repl,
+            // the rectangle and the clip rectangle.
+            try std.testing.expectEqual(144, out.len);
+            var f: [12][]const u8 = undefined;
+            for (&f, 0..) |*x, i| x.* = std.mem.trim(u8, out[i * 12 ..][0..12], " ");
+            const sz = gfx.headless.size().?;
+            try std.testing.expectEqualStrings("0", f[1]);
+            try std.testing.expectEqualStrings("x8r8g8b8", f[2]);
+            for ([_]usize{ 4, 5 }) |i| try std.testing.expectEqualStrings("0", f[i]);
+            try std.testing.expectEqual(sz.dx, try std.fmt.parseInt(u32, f[6], 10));
+            try std.testing.expectEqual(sz.dy, try std.fmt.parseInt(u32, f[7], 10));
+        }
+    }.check);
+}
+
+/// The screen's pixel at x, y, as 0xRRGGBB.
+fn pixelAt(px: []const u8, dx: u32, x: u32, y: u32) u32 {
+    return std.mem.readInt(u32, px[(y * dx + x) * 4 ..][0..4], .little) & 0xFFFFFF;
+}
+
+test "a draw client's image reaches the screen [15]" {
+    try expectGfx(@embedFile("gfx_draw"), true, null, struct {
+        fn check(_: []const u8) !void {
+            const sz = gfx.headless.size().?;
+            const px = try std.testing.allocator.alloc(u8, sz.dx * sz.dy * 4);
+            defer std.testing.allocator.free(px);
+            try std.testing.expect(gfx.headless.pixels(px));
+            // Red inside (10,10)-(60,60), the background around it.
+            try std.testing.expectEqual(0xFF0000, pixelAt(px, sz.dx, 10, 10));
+            try std.testing.expectEqual(0xFF0000, pixelAt(px, sz.dx, 59, 59));
+            try std.testing.expect(pixelAt(px, sz.dx, 5, 5) != 0xFF0000);
+            try std.testing.expect(pixelAt(px, sz.dx, 60, 60) != 0xFF0000);
+        }
+    }.check);
+}
+
+test "a key injected into the window reaches /dev/kbd [15]" {
+    try expectGfx(@embedFile("gfx_kbd"), true, struct {
+        fn act() void {
+            gfx.headless.key('a');
+        }
+    }.act, struct {
+        fn check(out: []const u8) !void {
+            // kbdfs's format: 'k' and the keys held for a press, 'c' and
+            // the character typed, 'K' and the keys still held for a
+            // release, each ending in a NUL.
+            errdefer std.debug.print("kbd: {any}\n", .{out});
+            try std.testing.expectEqualStrings("ka\x00", out);
+        }
+    }.check);
+}
+
+test "a mouse event injected into the window reaches /dev/mouse [15]" {
+    try expectGfx(@embedFile("gfx_mouse"), true, struct {
+        fn act() void {
+            gfx.headless.mouse(100, 200, 1);
+        }
+    }.act, struct {
+        fn check(out: []const u8) !void {
+            errdefer std.debug.print("mouse: {s}\n", .{out});
+            try std.testing.expectEqual(49, out.len);
+            try std.testing.expectEqual('m', out[0]);
+            var it = std.mem.tokenizeScalar(u8, out[1..], ' ');
+            try std.testing.expectEqualStrings("100", it.next().?);
+            try std.testing.expectEqualStrings("200", it.next().?);
+            try std.testing.expectEqualStrings("1", it.next().?);
+        }
+    }.check);
+}
+
+test "/dev/snarf reads and writes the host clipboard [15]" {
+    gfx.headless.setClipboard("host");
+    try expectGfx(@embedFile("gfx_snarf"), true, null, struct {
+        fn check(out: []const u8) !void {
+            var buf: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("guest", gfx.headless.clipboard(&buf));
+            try std.testing.expectEqualStrings("host|guest", out);
+            gfx.headless.setClipboard("host");
+        }
+    }.check);
+}
+
+test "with --gfx=noclip, /dev/snarf keeps its text but leaves the host clipboard alone [15]" {
+    gfx.headless.setClipboard("host");
+    try expectGfx(@embedFile("gfx_snarf"), false, null, struct {
+        fn check(out: []const u8) !void {
+            var buf: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("host", gfx.headless.clipboard(&buf));
+            // The private buffer starts empty, and holds what's written;
+            // a second backend's run sees the first's.
+            try std.testing.expect(std.mem.eql(u8, "|guest", out) or std.mem.eql(u8, "guest|guest", out));
+        }
+    }.check);
+}
+
+test "closing the window posts hangup and ends the run [15]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var g: GfxRun = .{};
+        defer g.deinit();
+        if (!try g.start(kind, .{ .text = @embedFile("gfx_sleep"), .timeout_s = 50 })) continue;
+        sleepMs(500);
+        try std.testing.expect(g.running());
+        gfx.headless.close();
+        const st = try g.wait();
+        errdefer std.debug.print("backend {t}: {s}\n", .{ kind, st });
+        try std.testing.expectEqualStrings("killed hangup", st);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "a second machine in the process gets GfxInUse [15]" {
+    const gpa = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    const opts: h9.Machine.Options = .{ .backend = .emu, .arch = .arm64, .gfx = .{}, .stdio = .{ .out = &out.writer, .err = &out.writer } };
+    var a = h9.Machine.init(gpa, std.testing.io, opts) catch |e| switch (e) {
+        error.BackendNotBuilt, error.WrongArch => return error.SkipZigTest,
+        else => return e,
+    };
+    try std.testing.expectError(error.GfxInUse, h9.Machine.init(gpa, std.testing.io, opts));
+    // A machine without a window is fine alongside it.
+    var plain = try h9.Machine.init(gpa, std.testing.io, .{ .backend = .emu, .arch = .arm64, .stdio = opts.stdio });
+    plain.deinit();
+    a.deinit();
+    var b = try h9.Machine.init(gpa, std.testing.io, opts);
+    b.deinit();
+}
+
+/// The root tree for the cases that run rio and acme, from
+/// H9_TEST_ROOT (zig build test sets it), or null to skip them.
+fn gfxRoot(buf: []u8) ?[]const u8 {
+    var map = std.testing.environ.createMap(std.testing.allocator) catch return null;
+    defer map.deinit();
+    const v = map.get("H9_TEST_ROOT") orelse return null;
+    const path = std.Io.Dir.cwd().realPathFile(std.testing.io, v, buf) catch return null;
+    const p = buf[0..path];
+    var lb: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const rio = std.fmt.bufPrint(&lb, "{s}/arm64/bin/rio", .{p}) catch return null;
+    std.Io.Dir.cwd().access(std.testing.io, rio, .{}) catch return null;
+    return p;
+}
+
+test "rio starts, and a window's rc runs a command typed into it [15]" {
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = gfxRoot(&rb) orelse return error.SkipZigTest;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        gfx.headless.setClipboard("");
+        var g: GfxRun = .{};
+        defer g.deinit();
+        if (!try g.start(kind, .{ .guest = "/bin/rio", .argv = &.{ "rio", "-i", "window rc" }, .root = root, .timeout_s = 120 })) continue;
+        // Keys typed before rio reads /dev/kbd are dropped, so the line
+        // is typed again until the clipboard has what it writes.
+        var buf: [64]u8 = undefined;
+        var waited: u32 = 0;
+        while (g.running() and waited < 90_000) : (waited += 100) {
+            if (waited % 3000 == 0) for ("echo hi > /dev/snarf\n") |ch| gfx.headless.key(ch);
+            if (std.mem.eql(u8, gfx.headless.clipboard(&buf), "hi\n")) break;
+            sleepMs(100);
+        }
+        errdefer std.debug.print("backend {t}: stderr: {s}\n", .{ kind, g.err.written() });
+        try std.testing.expectEqualStrings("hi\n", gfx.headless.clipboard(&buf));
+        gfx.headless.close();
+        _ = try g.wait();
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+test "acme starts inside rio [15]" {
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = gfxRoot(&rb) orelse return error.SkipZigTest;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var g: GfxRun = .{};
+        defer g.deinit();
+        if (!try g.start(kind, .{ .guest = "/bin/rio", .argv = &.{ "rio", "-i", "window -r 0 0 640 480 acme" }, .root = root, .timeout_s = 120 })) continue;
+        // acme's body is pale yellow, a color nothing else here draws.
+        const sz_wait = 90_000;
+        var waited: u32 = 0;
+        var yellow: usize = 0;
+        while (g.running() and waited < sz_wait) : (waited += 500) {
+            sleepMs(500);
+            const sz = gfx.headless.size() orelse continue;
+            const px = try std.testing.allocator.alloc(u8, sz.dx * sz.dy * 4);
+            defer std.testing.allocator.free(px);
+            if (!gfx.headless.pixels(px)) continue;
+            yellow = 0;
+            var i: usize = 0;
+            while (i < px.len) : (i += 4) {
+                if (std.mem.readInt(u32, px[i..][0..4], .little) & 0xFFFFFF == 0xFFFFEA) yellow += 1;
+            }
+            if (yellow > 10_000) break;
+        }
+        errdefer std.debug.print("backend {t}: {d} acme-yellow pixels; stderr: {s}\n", .{ kind, yellow, g.err.written() });
+        try std.testing.expect(yellow > 10_000);
+        gfx.headless.close();
+        _ = try g.wait();
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
 }

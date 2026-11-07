@@ -22,6 +22,7 @@ const gm = @import("guestmem.zig");
 const consin = @import("consin.zig");
 const hstream = @import("hstream.zig");
 const ws = @import("ws.zig");
+const gfx = @import("gfx.zig");
 
 pub const Status = union(enum) {
     /// The `exits` string; empty means success.
@@ -174,8 +175,15 @@ pub const Machine = struct {
         /// Host events to deliver while a run is in progress (Ctrl-C,
         /// hangup); see `Signals`.
         signals: ?*Signals = null,
+        /// A host window (design/0015-gfx.md): `#i`, `#m` and `#b` on
+        /// /dev, drawn by the GUI backend built in. One machine in the
+        /// process can have it at a time; closing the window is a hangup.
+        /// On macOS the program must run `h9.gfx.main` on its main thread.
+        gfx: ?Gfx = null,
         stdio: Stdio,
     };
+
+    pub const Gfx = gfx.Options;
 
     /// Host events an embedder delivers to a running machine, from any
     /// thread, including a signal handler's watcher (DESIGN.md, "Signals
@@ -213,7 +221,7 @@ pub const Machine = struct {
         }
     };
 
-    pub const InitError = vmm.CreateError || error{PolicyConflict};
+    pub const InitError = vmm.CreateError || gfx.Error || error{PolicyConflict};
 
     /// Host streams behind the guest's console: reads from `in` (none means
     /// EOF), writes to fd 1 go to `out` and to fd 2 to `err`.
@@ -253,12 +261,15 @@ pub const Machine = struct {
     /// What the last run's guest changed in the root's overlay, discarded
     /// with it (design/0011-overlay.md); empty without one.
     root_changes: RootChanges = .{},
+    /// The machine's claim on the screen, with `Options.gfx`; in `arena`.
+    gfx_claim: ?*gfx.Claim = null,
 
     /// Compiles a policy for a machine with these options, as `init` does,
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
         var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools };
+        if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
         if (opts.root) |r| switch (r) {
             .dir => |d| in.root = d,
             .tcp => |a| in.root_9p = .{ .kind = .tcp, .addr = a, .spec = opts.root_spec, .user = opts.root_user },
@@ -302,14 +313,44 @@ pub const Machine = struct {
                 return error.PolicyConflict;
             },
         };
+        var o = opts;
+        var claim: ?*gfx.Claim = null;
+        if (opts.gfx) |g| {
+            // Closing the window is a hangup, so a machine without
+            // Signals gets its own.
+            const sig = o.signals orelse blk: {
+                const s = try arena.allocator().create(Signals);
+                s.* = .{};
+                break :blk s;
+            };
+            o.signals = sig;
+            const cl = try arena.allocator().create(GfxClose);
+            cl.* = .{ .signals = sig, .io = io, .claim = .{ .ctx = cl, .close = GfxClose.close } };
+            try gfx.acquire(io, &cl.claim, g);
+            claim = &cl.claim;
+        }
+        errdefer if (claim) |cl| gfx.release(cl);
         const backend = try vmm.create(gpa, io, opts.backend, .{ .arch = arch, .memory = plan.memory });
-        return .{ .gpa = gpa, .io = io, .opts = opts, .arch = arch, .backend = backend, .plan = plan, .arena = arena };
+        return .{ .gpa = gpa, .io = io, .opts = o, .arch = arch, .backend = backend, .plan = plan, .arena = arena, .gfx_claim = claim };
     }
+
+    /// What closing the window does: a hangup, as for a closed terminal.
+    const GfxClose = struct {
+        signals: *Signals,
+        io: std.Io,
+        claim: gfx.Claim,
+
+        fn close(ctx: *anyopaque) void {
+            const g: *GfxClose = @ptrCast(@alignCast(ctx));
+            g.signals.hangup(g.io);
+        }
+    };
 
     pub fn deinit(m: *Machine) void {
         // A stuck process still uses the backend and the plan, so they're
         // leaked rather than freed under it.
         if (m.stuck) return;
+        if (m.gfx_claim) |cl| gfx.release(cl);
         m.backend.destroy();
         m.arena.deinit();
         m.gpa.destroy(m.arena);

@@ -189,6 +189,8 @@ pub const Plan = struct {
     guest_cwd: ?[]const u8,
     /// The 9P root to connect before the namespace is built, if any.
     root_9p: ?NinePRoot = null,
+    /// The machine's window, with --gfx (design/0015-gfx.md).
+    gfx: ?Gfx = null,
     /// Whether the root is under a copy-on-write overlay
     /// (design/0011-overlay.md): the bind of `#O` onto `/`. The builder
     /// makes `$home` in it, and the machine reports the guest's changes.
@@ -254,6 +256,7 @@ pub const Plan = struct {
         var dv = (std.unicode.Utf8View.init(p.devmask) catch unreachable).iterator();
         while (dv.nextCodepointSlice()) |d| try w.print(" #{s}", .{d});
         try w.writeAll("\n");
+        if (p.gfx) |g| try w.print("gfx:      {s} scale={d} clipboard={s}\n", .{ g.backend, g.scale, if (g.clipboard) "host" else "private" });
         if (p.net_allow.len > 0) {
             try w.writeAll("net-allow:\n");
             for (p.net_allow) |pat| try w.print("  {s}\n", .{pat.text});
@@ -339,6 +342,15 @@ const ElidedUserinfo = struct {
     }
 };
 
+/// A machine's window (design/0015-gfx.md), as the plan shows it.
+pub const Gfx = struct {
+    /// The GUI backend's name: cocoa, win32, x11 or headless.
+    backend: []const u8,
+    /// Whether /dev/snarf is the host clipboard (not `--gfx=noclip`).
+    clipboard: bool = true,
+    scale: u8 = 1,
+};
+
 pub const Inputs = struct {
     /// Host root tree, or null for a 9P root or a machine with devices
     /// only.
@@ -351,6 +363,9 @@ pub const Inputs = struct {
     /// Bind h9's own commands (`#H/bin`) after /bin; false leaves out
     /// the bind and masks `#H` (design/0032-guest-tools.md).
     guest_tools: bool = true,
+    /// A host window: `#i`, `#m` and `#b` on /dev. Without one they're
+    /// masked (design/0015-gfx.md).
+    gfx: ?Gfx = null,
 };
 
 /// Compiles a policy. Allocations go in `arena`. `err_msg` explains a
@@ -462,6 +477,11 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
+    // The window's devices (design/0015-gfx.md), after the console so
+    // /dev/cons stays the terminal.
+    if (in.gfx != null) for ([_][]const u8{ "#i", "#m", "#b" }) |d| {
+        try binds.append(arena, .{ .from = d, .to = "/dev", .flag = .after });
+    };
     try binds.append(arena, .{ .from = "#e", .to = "/env", .create = true, .optional = true });
     try binds.append(arena, .{ .from = "#d", .to = "/fd", .optional = true });
     try binds.append(arena, .{ .from = "#p", .to = "/proc", .optional = true });
@@ -546,6 +566,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
     if (!in.guest_tools) try devmask.append(arena, 'H');
     if (!pol.host_fs) try devmask.append(arena, 'U');
+    // Without a window, a guest can neither open one nor reach the screen
+    // another machine in the process has.
+    if (in.gfx == null) try devmask.appendSlice(arena, "bim");
 
     var enforces: CapSet = .initMany(&.{ .@"env.scrub", .@"ipc.restrict", .@"kernel.isolation", .@"fs.write.scope" });
     if (write == .overlay or eph) enforces.insert(.@"fs.write.overlay");
@@ -600,6 +623,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (name_patterns) try caveats.append(arena, "name patterns trust the host's resolver: a name is allowed to reach whatever address it resolves to");
         if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
     }
+    if (in.gfx) |g| {
+        if (g.clipboard) try caveats.append(arena, "the guest can read and write the host clipboard through /dev/snarf");
+        try caveats.append(arena, "the guest can draw anything in its window, including what looks like a host dialog");
+    }
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
     try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
@@ -624,6 +651,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .guest_cwd = guest_cwd,
         .root_9p = in.root_9p,
         .root_overlay = root_overlay,
+        .gfx = in.gfx,
     };
 }
 
@@ -1060,13 +1088,13 @@ test "compile: default and tight profiles" {
     const d = try compile(arena.allocator(), in, .{}, &msg);
     try t.expectEqual(Verdict.allow, d.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, d.check("/r/f", .create));
-    try t.expectEqualStrings("CU", d.devmask);
+    try t.expectEqualStrings("CUbim", d.devmask);
     try t.expect(!d.enforces.contains(.@"net.disable"));
     try t.expectEqual(@as(?u64, null), d.timeout_ns);
 
     const tt = try compile(arena.allocator(), in, .{ .profile = .tight }, &msg);
     try t.expectEqual(Verdict.read_only, tt.check("/w/f", .create));
-    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U", tt.devmask);
+    try t.expectEqualStrings("CI" ++ hstream_dev ++ "Ubim", tt.devmask);
     try t.expect(tt.enforces.contains(.@"net.disable"));
     try t.expect(tt.enforces.contains(.@"proc.timeout"));
 
@@ -1519,5 +1547,49 @@ test "compile: #H/bin after /rc/bin in both profiles, and guest_tools = false ma
         const off = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .guest_tools = false }, .{ .profile = prof }, &msg);
         for (off.binds) |b| try t.expect(!std.mem.startsWith(u8, b.from, "#H"));
         try t.expect(std.mem.indexOfScalar(u8, off.devmask, 'H') != null);
+    }
+}
+
+test "compile: --gfx binds #i, #m and #b after the console, and masks them without it" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    for ([_]Profile{ .default, .tight }) |prof| {
+        const off = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64 }, .{ .profile = prof }, &msg);
+        for ("bim") |d| try t.expect(std.mem.indexOfScalar(u8, off.devmask, d) != null);
+        for (off.binds) |b| for ([_][]const u8{ "#i", "#m", "#b" }) |d| try t.expect(!std.mem.eql(u8, b.from, d));
+        try t.expect(off.gfx == null);
+
+        const on = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .gfx = .{ .backend = "x11" } }, .{ .profile = prof }, &msg);
+        for ("bim") |d| try t.expect(std.mem.indexOfScalar(u8, on.devmask, d) == null);
+        var y_at: ?usize = null;
+        var want: usize = 0;
+        for (on.binds, 0..) |b, i| {
+            if (std.mem.eql(u8, b.from, "#y")) y_at = i;
+            for ([_][]const u8{ "#i", "#m", "#b" }, 0..) |d, k| if (std.mem.eql(u8, b.from, d)) {
+                try t.expectEqual(want, k);
+                try t.expectEqual(y_at.? + 1 + k, i);
+                try t.expectEqualStrings("/dev", b.to);
+                try t.expectEqual(Bind.Flag.after, b.flag);
+                want += 1;
+            };
+        }
+        try t.expectEqual(3, want);
+
+        var out: std.Io.Writer.Allocating = .init(t.allocator);
+        defer out.deinit();
+        try on.print(&out.writer);
+        const text = out.written();
+        try t.expect(std.mem.indexOf(u8, text, "gfx:      x11 scale=1 clipboard=host\n") != null);
+        try t.expect(std.mem.indexOf(u8, text, "  bind -a '#i' /dev\n  bind -a '#m' /dev\n  bind -a '#b' /dev\n") != null);
+        try t.expect(std.mem.indexOf(u8, text, "host clipboard through /dev/snarf") != null);
+        try t.expect(std.mem.indexOf(u8, text, "looks like a host dialog") != null);
+
+        const noclip = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .gfx = .{ .backend = "cocoa", .clipboard = false, .scale = 2 } }, .{ .profile = prof }, &msg);
+        out.clearRetainingCapacity();
+        try noclip.print(&out.writer);
+        try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      cocoa scale=2 clipboard=private\n") != null);
+        try t.expect(std.mem.indexOf(u8, out.written(), "/dev/snarf") == null);
+        try t.expect(std.mem.indexOf(u8, out.written(), "looks like a host dialog") != null);
     }
 }

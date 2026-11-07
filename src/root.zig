@@ -19,6 +19,7 @@ pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
 pub const hstream = @import("hstream.zig");
+pub const gfx = @import("gfx.zig");
 
 /// What this h9 was built from, for `--version`.
 pub const build_info = struct {
@@ -31,6 +32,8 @@ pub const build_info = struct {
     pub const drawterm_rev: []const u8 = o.drawterm_rev;
     /// Built with -Dhost-cmd: #C, --host-cmd and hcmd.
     pub const host_cmd: bool = o.host_cmd;
+    /// The GUI backend for --gfx (design/0015-gfx.md), or "none".
+    pub const gfx: []const u8 = o.gfx;
 };
 
 test {
@@ -46,5 +49,6 @@ test {
     _ = consin;
     _ = ws;
     _ = hstream;
+    _ = gfx;
     _ = @import("cpupool.zig");
 }

@@ -64,6 +64,32 @@ pub fn main(init: std.process.Init) !u8 {
             return code;
         },
     }
+    // --gfx: on macOS AppKit needs the main thread, so the run goes on
+    // another (design/0015-gfx.md). Elsewhere this runs it directly.
+    if (cfg.gfx != null) {
+        var ctx: GfxRun = .{ .init = init, .cfg = cfg };
+        h9.gfx.main(GfxRun.work, &ctx);
+    }
+    return run(init, cfg);
+}
+
+const GfxRun = struct {
+    init: std.process.Init,
+    cfg: cli.Config,
+
+    fn work(p: ?*anyopaque) u8 {
+        const g: *GfxRun = @ptrCast(@alignCast(p.?));
+        return run(g.init, g.cfg) catch |err| {
+            std.debug.print("h9: {t}\n", .{err});
+            return 1;
+        };
+    }
+};
+
+/// Runs the program, and returns h9's exit code.
+fn run(init: std.process.Init, cfg: cli.Config) !u8 {
+    const arena = init.arena.allocator();
+    const io = init.io;
     // --rc runs /bin/rc -c; the remaining arguments become $*.
     const argv: []const []const u8 = if (cfg.rc) |cmd| blk: {
         const v = try arena.alloc([]const u8, 3 + cfg.argv.len);
@@ -146,6 +172,7 @@ pub fn main(init: std.process.Init) !u8 {
         .cwd = cwd,
         .policy = pol,
         .guest_tools = cfg.guest_tools,
+        .gfx = cfg.gfx,
         .stdio = undefined,
     };
 
@@ -206,6 +233,21 @@ pub fn main(init: std.process.Init) !u8 {
         .raw = host.raw(),
     };
     var machine = h9.Machine.init(init.gpa, io, opts) catch |err| {
+        switch (err) {
+            error.GfxNotBuilt => {
+                std.debug.print("h9: graphics aren't built into this h9\n", .{});
+                return exit_failed;
+            },
+            error.GfxInUse => {
+                std.debug.print("h9: --gfx: another machine in this process has the screen\n", .{});
+                return exit_failed;
+            },
+            error.GfxUnavailable => {
+                std.debug.print("h9: --gfx: no display: {s}\n", .{h9.gfx.unavailable() orelse "the window didn't open"});
+                return exit_failed;
+            },
+            else => {},
+        }
         const a: h9.vmm.Arch = arch orelse h9.vmm.host_arch orelse .arm64;
         std.debug.print("h9: cannot create {t} machine for {s}: {s}\n", .{ cfg.backend, a.name(), tools.explain(cfg.backend, err) });
         return exit_failed;

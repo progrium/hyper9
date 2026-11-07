@@ -6,6 +6,7 @@ const vmm = @import("h9").vmm;
 const policy = @import("h9").policy;
 const ws = @import("h9").ws;
 const RootChanges = @import("h9").RootChanges;
+const gfx = @import("h9").gfx;
 
 pub const usage =
     \\usage: h9 [--backend auto|hvf|kvm|whp|emu] [--arch arm64|amd64|386]
@@ -17,6 +18,7 @@ pub const usage =
     \\           [--net-allow PATTERN]...
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
     \\           [--ns FILE] [--host-fs] [--host-cmd] [--no-guest-tools]
+    \\           [--gfx[=noclip]] [--gfx-scale N]
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
@@ -83,6 +85,9 @@ pub const Config = struct {
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
     /// (design/0032-guest-tools.md).
     guest_tools: bool = true,
+    /// --gfx, --gfx=noclip and --gfx-scale: a host window
+    /// (design/0015-gfx.md); null without --gfx.
+    gfx: ?gfx.Options = null,
     strict: bool = false,
     print: bool = false,
     /// --rc: the command line for /bin/rc -c.
@@ -117,6 +122,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var read_deny: std.ArrayList([]const u8) = .empty;
     var net_allow: std.ArrayList([]const u8) = .empty;
     var root_headers: std.ArrayList([]const u8) = .empty;
+    var gfx_scale: ?u8 = null;
     // Long flags only (DESIGN.md, "Parsing rules"); -h is accepted alone,
     // where it can't be a program's flag.
     if (args.len == 2 and std.mem.eql(u8, args[1], "-h")) return .{ .mode = .help, .argv = &.{} };
@@ -140,6 +146,15 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.host_cmd = true;
         } else if (flag(a, "--no-guest-tools")) {
             c.guest_tools = false;
+        } else if (flag(a, "--gfx")) {
+            const clipboard = if (c.gfx) |g| g.clipboard else true;
+            c.gfx = .{ .clipboard = clipboard };
+        } else if (flag(a, "--gfx=noclip")) {
+            c.gfx = .{ .clipboard = false };
+        } else if (std.mem.startsWith(u8, a, "--gfx=")) {
+            return error.Usage;
+        } else if (value(args, &i, "--gfx-scale")) |v| {
+            gfx_scale = std.fmt.parseInt(u8, v orelse return error.Usage, 10) catch return error.Usage;
         } else if (flag(a, "--strict")) {
             c.strict = true;
         } else if (flag(a, "--print")) {
@@ -210,6 +225,11 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else {
             return error.Usage;
         }
+    }
+    // --gfx-scale is the window's, so it needs one.
+    if (gfx_scale) |n| {
+        if (c.gfx == null) return error.Usage;
+        c.gfx.?.scale = n;
     }
     if (c.sandbox != null) {
         if (c.host_fs or c.host_cmd or c.cwd != null) return error.Usage;
@@ -469,6 +489,26 @@ test "--no-guest-tools" {
     const a = arena.allocator();
     try t.expect((try parse(a, &.{ "h9", "ls" })).guest_tools);
     try t.expect(!(try parse(a, &.{ "h9", "--no-guest-tools", "ls" })).guest_tools);
+}
+
+test "--gfx, --gfx=noclip and --gfx-scale" {
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    const off = try parse(a.allocator(), &.{ "h9", "rio" });
+    try std.testing.expect(off.gfx == null);
+    const on = try parse(a.allocator(), &.{ "h9", "--gfx", "rio" });
+    try std.testing.expectEqual(gfx.Options{}, on.gfx.?);
+    try std.testing.expectEqualStrings("rio", on.argv[0]);
+    const noclip = try parse(a.allocator(), &.{ "h9", "--gfx=noclip", "--gfx-scale", "0", "rio" });
+    try std.testing.expectEqual(gfx.Options{ .clipboard = false, .scale = 0 }, noclip.gfx.?);
+    const scaled = try parse(a.allocator(), &.{ "h9", "--gfx-scale=2", "--gfx", "rio" });
+    try std.testing.expectEqual(gfx.Options{ .scale = 2 }, scaled.gfx.?);
+    for ([_][]const []const u8{
+        &.{ "h9", "--gfx=yes", "rio" },
+        &.{ "h9", "--gfx-scale", "2", "rio" },
+        &.{ "h9", "--gfx", "--gfx-scale", "x", "rio" },
+        &.{ "h9", "--gfx", "--gfx-scale", "256", "rio" },
+    }) |args| try std.testing.expectError(error.Usage, parse(a.allocator(), args));
 }
 
 test "--pids, --cpus and --ns" {

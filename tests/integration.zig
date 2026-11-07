@@ -500,7 +500,7 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #b #i #m\n") != null);
 }
 
 test "--strict refuses what this build can't enforce [baseline]" {
@@ -2923,7 +2923,7 @@ test "--no-guest-tools leaves out the bind and masks #H [32]" {
     const p = try run(e, &.{ "--no-guest-tools", "--print", "ls" });
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "devmask:  #C #H #U\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "devmask:  #C #H #U #b #i #m\n") != null);
     const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
@@ -3887,4 +3887,27 @@ test "a 9P root serving 9box under every name [64]" {
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings(host.out, r.out);
     try std.testing.expectEqualStrings("/bin/9box\n/bin/sed\nx b\nboxed\n", r.out);
+
+test "without --gfx, #i, #m and #b are masked [15]" {
+    const e = try env(@src());
+    for ([_][]const u8{ "#i", "#m", "#b" }) |dev| {
+        const r = try run(e, &.{ "ls", dev });
+        defer r.deinit();
+        errdefer std.debug.print("ls {s}: {s}", .{ dev, r.err });
+        try std.testing.expectEqual(1, r.code);
+        try std.testing.expect(std.mem.indexOf(u8, r.err, "mount/attach disallowed") != null);
+    }
+}
+
+test "--gfx on a build without graphics exits 125 [15]" {
+    const e = try env(@src());
+    const v = try runProcess(&.{ e.h9, "--version" }, null);
+    defer gpa.free(v.stdout);
+    defer gpa.free(v.stderr);
+    if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return error.SkipZigTest;
+    const r = try run(e, &.{ "--gfx", "echo", "hi" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "graphics aren't built into this h9") != null);
 }

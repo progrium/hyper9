@@ -843,7 +843,8 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
-| `#i`, `#m`, `#b`, `#A` | draw, mouse, kbd, audio | | Present, but there's no window or sound to drive yet (*Not yet available ([gfx](design/0015-gfx.md))*) |
+| `#i`, `#m`, `#b` | draw, mouse, kbd | `/dev`, with `--gfx` | The window, its mouse and cursor, and its keyboard (chapter 17). Masked without `--gfx`. |
+| `#A` | audio | | Present, but there's no sound to drive |
 
 9front's hardware devices aren't there: no `#S` disks, `#l` Ethernet, `#t`
 serial lines, `#v` VGA or `#P` architecture, and no `#σ` shared-memory
@@ -1508,7 +1509,7 @@ Mounting a remote 9P server the network policy allows:
 host$ h9 --rc 'srv tcp!fs.example.com!564 fs && mkdir /tmp/fs && mount /srv/fs /tmp/fs && ls /tmp/fs'
 ```
 
-### 17. Graphics: rio, acme and the plumber *Not yet available ([gfx](design/0015-gfx.md))*
+### 17. Graphics: rio, acme and the plumber
 
 **In Plan 9**
 
@@ -1524,14 +1525,50 @@ programs, such as opening a file name you clicked in the right editor.
 
 **In h9**
 
-None of the window part works yet. The [gfx](design/0015-gfx.md) proposal
-adds `--gfx`, which will open one host window for the machine, drawn by
-drawterm's own window code, with rio and acme running in it, `/dev/snarf`
-mapped to the host clipboard and the console still on the host terminal.
+`--gfx` gives the machine one host window, drawn by drawterm's own window
+code: Cocoa on macOS, Win32 on Windows and X11 on Linux. Its namespace gets
+`#i`, `#m` and `#b` on `/dev`, so `/dev/draw`, `/dev/mouse`, `/dev/cursor` and
+`/dev/kbd` are the window's, and `/dev/snarf` is the host clipboard. Run rio
+in it and the window is a 9front screen. The window opens when a program
+first uses the screen, not before. Closing it posts `hangup` to the machine,
+as closing the terminal does.
 
-What does work today: the plumber starts and serves `/mnt/plumb`, so
-programs that only send plumb messages can run, and `sam -d` and `ed` edit
-text without graphics.
+The console stays on the host terminal: `/dev/cons` is still the terminal you
+ran h9 from, so messages and anything rio's own console prints appear there.
+rio writes `rawon` to the console, so the terminal stays in raw mode until
+the run ends.
+
+- `--gfx=noclip` keeps `/dev/snarf` inside the h9 process, shared by the
+  guest's programs only, so the guest can't read what you last copied on the
+  host or put text on the clipboard.
+- `--gfx-scale N` is drawterm's `-x`, on macOS only: 1 (the default) draws in
+  points, 0 in the display's backing pixels, and N in backing pixels divided
+  by N.
+- Only one machine in an h9 process has a window. Without `--gfx`, `#i`, `#m`
+  and `#b` are masked, so a guest can't open one.
+- Linux builds have no window code unless built with `-Dgfx=x11`; `h9
+  --version` says which (`gfx:`), and `h9 --check` says whether `$DISPLAY`
+  opens. Without it, or without a display, `--gfx` exits 125.
+- rio needs `/mnt/temp` in the root tree; `scripts/mkroot.py` makes it, and
+  adds it to a tree it built before.
+- `--print` shows a `gfx:` line, and lists the clipboard and the guest's
+  freedom to draw anything in its window (including what looks like a host
+  dialog) as caveats.
+
+The plumber starts and serves `/mnt/plumb`, and `sam -d` and `ed` edit text
+without graphics.
+
+**Try it**
+
+```
+host$ h9 --gfx rio
+host$ h9 --gfx rio -i 'window acme'
+host$ h9 --gfx=noclip rio
+```
+
+In rio, hold button 3 on the grey background and choose New, then sweep out
+a window with button 3; it runs rc. Type `echo hi > /dev/snarf` in it, then
+paste in a host program.
 
 ### 18. Building software inside h9
 
@@ -1740,16 +1777,17 @@ Debugging (chapter 27):
 | --- | --- |
 | `--trace[=FILE]` | Log every system call, to standard error or to `FILE` |
 | `--dump-on-fault` | Print the registers and the symbolized PC when a program faults |
+| `--gfx[=noclip]` | Give the machine a host window, with `/dev/snarf` as the host clipboard, or private with `=noclip` (chapter 17) |
+| `--gfx-scale N` | The window's scale on macOS: 1 points, 0 backing pixels, N backing pixels divided by N |
 
 Tools:
 
 | Flag | Meaning |
 | --- | --- |
 | `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user` and `--memory`. |
-| `--version` | Print the version, the pinned 9front and drawterm revisions and the backends built in |
+| `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in and the window code (`gfx:`) |
 | `--help`, `-h` | Print the usage to standard output |
 
-Coming with a proposal in progress: `--gfx` (*Not yet available ([gfx](design/0015-gfx.md))*).
 
 **Exit codes**
 
@@ -2231,7 +2269,7 @@ host environment (chapter 11). Use `--env` for what you want to pass.
 **Why don't colours, `less` or `vi` work?** Plan 9 programs don't use
 terminal escape codes, and there's no full-screen terminal interface. Use
 `p` to page, `sam -d` or `ed` to edit, and `lc` for columns. acme and rio
-need graphics (*Not yet available ([gfx](design/0015-gfx.md))*).
+need a window: `h9 --gfx rio` (chapter 17).
 
 **Why can't I mount on `/n/something`?** There's no `mntgen` filling `/n`
 in. Make the mount point first, `mkdir /n/something`, which the root's
@@ -2369,7 +2407,7 @@ They change faster than this manual, as proposals land.
   with its parent and what it gets a copy of. See `fork(2)`.
 
 - **rio**: Plan 9's window system, which is also a file server for the programs in its
-  windows. *Not yet available ([gfx](design/0015-gfx.md)).*
+  windows. Run it with `h9 --gfx rio`; see chapter 17.
 
 - **root tree**: The directory holding an extracted 9front file system, which h9 serves as
   the guest's `/`. Chosen with `--root` or `$H9ROOT`; see Appendix C.
@@ -2400,7 +2438,7 @@ Commands marked † aren't usable in h9 yet; the notes say why.
 | --- | --- | --- |
 | `ls --color`, `ls -C` | `ls`, `lc` | `lc` lists in columns; there are no colours |
 | `less`, `more` | `p` | Pages by screenfuls; type Enter for the next one, `q` to quit |
-| `vi`, `nano` | `sam`, `ed`, `acme` | `sam -d` runs sam without graphics; acme† needs graphics ([gfx](design/0015-gfx.md)). 9front's `vi` is a MIPS emulator. |
+| `vi`, `nano` | `sam`, `ed`, `acme` | `sam -d` runs sam without graphics; acme needs a window, `h9 --gfx acme` or acme in rio (chapter 17). 9front's `vi` is a MIPS emulator. |
 | `make` | `mk` | mkfiles; see `mk(1)` |
 | `cc`, `gcc` | `7c`/`7l` (arm64), `6c`/`6l` (amd64), `8c`/`8l` (386), `pcc` | Compile and link are separate steps (chapter 18) |
 | `ps`, `kill PID` | `ps`, `kill name \| rc`, `slay name \| rc` | `kill` prints commands that write to `/proc/n/note`; pipe them to rc |

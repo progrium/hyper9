@@ -1,6 +1,7 @@
 /*
- * h9's replacement for drawterm's main.c, cpu.c and GUI backend: boots
- * drawterm's kern without a window or a cpu connection. See DESIGN.md,
+ * h9's replacement for drawterm's main.c and cpu.c: boots drawterm's kern
+ * without a cpu connection. The screen is src/kern/gfx.c with a GUI
+ * backend, or src/kern/nogfx.c without one (design/0015-gfx.md). See DESIGN.md,
  * "Kernel: drawterm kern/ and the Zig seam".
  */
 
@@ -29,19 +30,6 @@
 
 char *argv0;
 extern ulong kerndate;
-
-/* No GUI until --gfx (design/0015-gfx.md): devdraw, devmouse and snarf see no screen. */
-Memimage *gscreen;
-void screeninit(void) {}
-void screensize(Rectangle r, ulong chan) { USED(r, chan); }
-Memdata *attachscreen(Rectangle *r, ulong *chan, int *depth, int *width, int *softscreen) { return nil; }
-void flushmemscreen(Rectangle r) { USED(r); }
-void getcolor(ulong i, ulong *r, ulong *g, ulong *b) { *r = *g = *b = 0; }
-void setcolor(ulong i, ulong r, ulong g, ulong b) { USED(i, r, g, b); }
-void setcursor(void) {}
-void mouseset(Point p) { USED(p); }
-char *clipread(void) { return nil; }
-int clipwrite(char *s) { USED(s); return 0; }
 
 /* Compose sequences only matter for GUI keyboard input. */
 long latin1(Rune *k, int n) { USED(k, n); return -1; }

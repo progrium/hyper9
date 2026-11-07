@@ -931,6 +931,87 @@ h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
 	return 0;
 }
 
+/*
+ * Makes the calling thread, which isn't a Proc, a kernel process for good:
+ * h9_kern_spawn's cloning from the boot Proc, without a new thread. It
+ * has no machine, so notes never reach it. For macOS --gfx, where AppKit
+ * runs on the process's main thread and drawterm's Cocoa delegate sleeps
+ * and starts kprocs there (design/0015-gfx.md). Returns 0, or -1 if
+ * allocation fails.
+ */
+int
+h9_kern_adopt(char *name)
+{
+	Proc *p;
+
+	p = newproc();
+	if(p == nil)
+		return -1;
+	strecpy(p->text, p->text+sizeof p->text, name);
+	_setproc(p);
+	if(waserror())
+		panic("h9_kern_adopt: %s", up->errstr);
+	up->slash = cclone(bootproc->slash);
+	up->dot = cclone(bootproc->slash);
+	up->pgrp = newpgrp();
+	up->fgrp = dupfgrp(nil);
+	up->rgrp = newrgrp();
+	poperror();
+	return 0;
+}
+
+/*
+ * Runs fn(arg) in the calling Proc with a fresh namespace, no fds and its
+ * own rendezvous group, as a spawned process starts, and puts the Proc's
+ * own back after. The kprocs fn starts share these, not the caller's: a
+ * GUI backend's event and resize kprocs outlive the guest process whose
+ * attach of #i started them (src/kern/gfx.c).
+ */
+void
+h9_kern_isolated(void (*fn)(void*), void *arg)
+{
+	Pgrp *pg;
+	Fgrp *fg;
+	Rgrp *rg;
+	Chan *slash, *dot;
+
+	pg = up->pgrp;
+	fg = up->fgrp;
+	rg = up->rgrp;
+	slash = up->slash;
+	dot = up->dot;
+	up->pgrp = newpgrp();
+	up->fgrp = dupfgrp(nil);
+	up->rgrp = newrgrp();
+	up->slash = cclone(bootproc->slash);
+	up->dot = cclone(bootproc->slash);
+	if(waserror()){
+		closepgrp(up->pgrp);
+		closefgrp(up->fgrp);
+		closergrp(up->rgrp);
+		cclose(up->slash);
+		cclose(up->dot);
+		up->pgrp = pg;
+		up->fgrp = fg;
+		up->rgrp = rg;
+		up->slash = slash;
+		up->dot = dot;
+		nexterror();
+	}
+	fn(arg);
+	poperror();
+	closepgrp(up->pgrp);
+	closefgrp(up->fgrp);
+	closergrp(up->rgrp);
+	cclose(up->slash);
+	cclose(up->dot);
+	up->pgrp = pg;
+	up->fgrp = fg;
+	up->rgrp = rg;
+	up->slash = slash;
+	up->dot = dot;
+}
+
 static void
 forktramp(void *v)
 {

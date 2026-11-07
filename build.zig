@@ -134,6 +134,10 @@ const sema_fixtures = [_][]const u8{
 /// tests/fixtures/segattach/lib.S.
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
 
+/// Programs in tests/fixtures/gfx, for tests/backends.zig's [gfx] cases on
+/// the headless backend, with the same lib.S.
+const gfx_fixtures = [_][]const u8{ "binds", "drawnew", "draw", "kbd", "mouse", "snarf", "sleep" };
+
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping. `arch`, if given, is passed to h9
@@ -441,51 +445,72 @@ fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
     return "unknown";
 }
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
-    const os = target.result.os.tag;
-    // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
-    // while design/host-cmd rethinks them.
-    const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the h9-emu release only)") orelse .none;
-    // No wheel exists for Windows, so it always builds from source.
-    const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
-        if (os == .windows) UnicornFrom.source else .prebuilt;
+/// The GUI backend behind --gfx (design/0015-gfx.md), from -Dgfx.
+pub const Gfx = enum {
+    /// No screen: src/kern/nogfx.c, and --gfx fails with GfxNotBuilt.
+    none,
+    /// A screen in memory, for tests (src/kern/gfx-headless.c).
+    headless,
+    /// drawterm's gui-x11, against a glibc target and the system's libX11.
+    x11,
+    /// drawterm's gui-win32.
+    win32,
+    /// drawterm's gui-cocoa, built with the macOS SDK.
+    cocoa,
 
-    const mod = b.addModule("h9", .{
+    fn default(t: std.Target) Gfx {
+        return switch (t.os.tag) {
+            .macos => .cocoa,
+            .windows => .win32,
+            else => .none,
+        };
+    }
+
+    /// Why this backend can't be built for `t`, if it can't.
+    fn unsupported(g: Gfx, t: std.Target) ?[]const u8 {
+        return switch (g) {
+            .none, .headless => null,
+            .cocoa => if (t.os.tag != .macos) "Cocoa is macOS only" else null,
+            .win32 => if (t.os.tag != .windows) "Win32 is Windows only" else null,
+            .x11 => if (t.os.tag != .linux) "X11 is built for Linux only" else if (t.abi.isMusl()) "X11 needs a glibc target, such as -Dtarget=x86_64-linux-gnu, to link the system's libX11" else null,
+        };
+    }
+};
+
+/// What every h9 module shares; `addH9Module` makes one per GUI backend.
+const ModuleParts = struct {
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    emu: Emu,
+    unicorn: ?*std.Build.Module,
+    shim: std.Build.LazyPath,
+    shim_amd64: std.Build.LazyPath,
+    host_cmd: bool,
+    guest_tree: std.Build.LazyPath,
+    have_drawterm: bool,
+    version: []const u8,
+    pins: []const u8,
+};
+
+const H9Module = struct { mod: *std.Build.Module, kern: *std.Build.Step.Compile };
+
+/// The h9 module and the drawterm kern it links, with GUI backend `gfx`.
+/// `exported` makes it the package's `h9` module, for embedders.
+fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module {
+    const target = p.target;
+    const optimize = p.optimize;
+    const os = target.result.os.tag;
+    const opts: std.Build.Module.CreateOptions = .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-    });
-    if (emu == .unicorn) {
-        // On failure addUnicorn has already made the install step fail.
-        if (addUnicorn(b, target, optimize, unicorn_from)) |uc| mod.addImport("unicorn", uc) else emu = .none;
-    }
-    // The arm64 guest shim, assembled freestanding and embedded as raw bytes.
-    const shim_obj = b.addObject(.{
-        .name = "shim_arm64",
-        .root_module = b.createModule(.{
-            .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .freestanding }),
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    shim_obj.root_module.addAssemblyFile(b.path("src/arch/arm64/shim.S"));
-    const shim_bin = b.addObjCopy(shim_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
-    mod.addAnonymousImport("shim_arm64", .{ .root_source_file = shim_bin.getOutput() });
-    // The amd64 shim, for KVM on x86_64 (design/0016-kvm.md).
-    const shim_amd64_obj = b.addObject(.{
-        .name = "shim_amd64",
-        .root_module = b.createModule(.{
-            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .freestanding }),
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
-    const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
-    mod.addAnonymousImport("shim_amd64", .{ .root_source_file = shim_amd64_bin.getOutput() });
+    };
+    const mod = if (exported) b.addModule("h9", opts) else b.createModule(opts);
+    if (p.unicorn) |uc| mod.addImport("unicorn", uc);
+    mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
+    mod.addAnonymousImport("shim_amd64", .{ .root_source_file = p.shim_amd64 });
 
     const kern = b.addLibrary(.{
-        .name = "kern",
+        .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
         .linkage = .static,
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
     });
@@ -504,11 +529,11 @@ pub fn build(b: *std.Build) void {
         .files = &kern_notes,
         .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
     });
-    // oscmd and friends are renamed so src/kern/hostcmd.c can wrap them:
-    // a machine's host commands die with it.
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
         .files = if (os == .windows) &kern_win32 else &kern_posix,
+        // oscmd and friends are renamed so src/kern/hostcmd.c can wrap them:
+        // a machine's host commands die with it.
         .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-Doscmd=h9_dt_oscmd", "-Doscmdkill=h9_dt_oscmdkill", "-Doscmdfree=h9_dt_oscmdfree" } }) catch @panic("OOM"),
     });
     kern.root_module.addCSourceFiles(.{
@@ -516,6 +541,7 @@ pub fn build(b: *std.Build) void {
         .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "hostcmd.c" },
         .flags = flags,
     });
+    addGfxSources(b, kern, gfx, flags);
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
         .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
         .files = l.files,
@@ -531,43 +557,148 @@ pub fn build(b: *std.Build) void {
         kern.root_module.linkSystemLibrary("ws2_32", .{});
         kern.root_module.linkSystemLibrary("advapi32", .{});
     }
+    if (os == .macos) addSdkPaths(b, kern.root_module);
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/posix-port"),
         .files = &kern_port,
         .flags = flags,
     });
     // devtab.c lists devcmd (#C) only under -Dhost-cmd.
-    if (host_cmd) kern.root_module.addCMacro("H9_HOSTCMD", "1");
-    const kern_step = b.step("kern", "Compile drawterm's kern");
-    const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
-    if (!have_drawterm) {
+    if (p.host_cmd) kern.root_module.addCMacro("H9_HOSTCMD", "1");
+    if (!p.have_drawterm) {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
         kern.step.dependOn(&fail.step);
     }
-    const build_kern = have_drawterm;
-    kern_step.dependOn(&kern.step);
     // Everything that imports the h9 module links kern.
     mod.linkLibrary(kern);
+
+    mod.addAnonymousImport("guest_tree", .{ .root_source_file = p.guest_tree });
+
+    const options = b.addOptions();
+    options.addOption(Emu, "emu", p.emu);
+    options.addOption(bool, "kern", p.have_drawterm);
+    options.addOption(bool, "host_cmd", p.host_cmd);
+    options.addOption([]const u8, "gfx", @tagName(gfx));
+    options.addOption([]const u8, "version", p.version);
+    options.addOption([]const u8, "ninefront_release", pin(p.pins, "NINEFRONT_RELEASE"));
+    options.addOption([]const u8, "ninefront_rev", pin(p.pins, "NINEFRONT_REV"));
+    options.addOption([]const u8, "drawterm_rev", pin(p.pins, "DRAWTERM_REV"));
+    mod.addOptions("build_options", options);
+    return .{ .mod = mod, .kern = kern };
+}
+
+/// The screen for kern: src/kern/nogfx.c, or src/kern/gfx.c with a
+/// backend. drawterm's backends compile unmodified, with
+/// src/kern/gfx-gui.h included first to rename what gfx.c wraps and to
+/// send their exits through the machine's hangup path.
+fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: []const []const u8) void {
+    const m = kern.root_module;
+    if (gfx == .none) {
+        m.addCMacro("H9_GFX_NONE", "1");
+        m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"nogfx.c"}, .flags = flags });
+        return;
+    }
+    m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx.c"}, .flags = flags });
+    const gui = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-include", b.pathFromRoot("src/kern/gfx-gui.h") } }) catch @panic("OOM");
+    const gui_exit = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-DH9_GUI_EXIT"} }) catch @panic("OOM");
+    switch (gfx) {
+        .none => unreachable,
+        .headless => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-headless.c"}, .flags = flags }),
+        .x11 => {
+            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-x11"), .files = &.{"x11.c"}, .flags = gui_exit });
+            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-x11"), .files = &.{"keysym2ucs-x11.c"}, .flags = flags });
+            m.linkSystemLibrary("X11", .{});
+        },
+        .win32 => {
+            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-win32"), .files = &.{"screen.c"}, .flags = gui_exit });
+            m.linkSystemLibrary("gdi32", .{});
+            m.linkSystemLibrary("user32", .{});
+        },
+        .cocoa => {
+            const objc = std.mem.concat(b.allocator, []const u8, &.{ gui, &.{"-fobjc-arc"} }) catch @panic("OOM");
+            m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-cocoa"), .files = &.{"screen.m"}, .flags = objc, .language = .objective_c });
+            m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-cocoa.m"}, .flags = &.{"-fobjc-arc"}, .language = .objective_c });
+            m.linkFramework("Cocoa", .{});
+            m.linkFramework("Metal", .{});
+            m.linkFramework("QuartzCore", .{});
+        },
+    }
+}
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const os = target.result.os.tag;
+    // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
+    // while design/host-cmd rethinks them.
+    const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the h9-emu release only)") orelse .none;
+    // No wheel exists for Windows, so it always builds from source.
+    const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
+        if (os == .windows) UnicornFrom.source else .prebuilt;
+
+    const gfx = b.option(Gfx, "gfx", "GUI backend for --gfx (design/0015-gfx.md): cocoa, win32, x11, headless (tests) or none (default: cocoa on macOS, win32 on Windows, none elsewhere)") orelse Gfx.default(target.result);
+    if (gfx.unsupported(target.result)) |why| b.getInstallStep().dependOn(&b.addFail(b.fmt("-Dgfx={t}: {s}", .{ gfx, why })).step);
+
+    // Unicorn's translated header, shared by every h9 module.
+    var unicorn_mod: ?*std.Build.Module = null;
+    if (emu == .unicorn) {
+        // On failure addUnicorn has already made the install step fail.
+        if (addUnicorn(b, target, optimize, unicorn_from)) |uc| unicorn_mod = uc else emu = .none;
+    }
+    // The arm64 guest shim, assembled freestanding and embedded as raw bytes.
+    const shim_obj = b.addObject(.{
+        .name = "shim_arm64",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .freestanding }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    shim_obj.root_module.addAssemblyFile(b.path("src/arch/arm64/shim.S"));
+    const shim_bin = b.addObjCopy(shim_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+    // The amd64 shim, for KVM on x86_64 (design/0016-kvm.md).
+    const shim_amd64_obj = b.addObject(.{
+        .name = "shim_amd64",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .freestanding }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
+    const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+
+    const kern_step = b.step("kern", "Compile drawterm's kern");
+    const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
 
     // h9's own guest commands, served by #H (design/0032-guest-tools.md).
     // Debug builds also serve tests/fixtures/guest, for the integration
     // cases; release builds leave it out.
     const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .Debug);
     const guest_tree = guestTree(b, guest_test, host_cmd);
-    mod.addAnonymousImport("guest_tree", .{ .root_source_file = guest_tree.file });
 
-    const options = b.addOptions();
-    options.addOption(Emu, "emu", emu);
-    options.addOption(bool, "kern", build_kern);
-    options.addOption(bool, "host_cmd", host_cmd);
     // For --version: scripts/release.sh passes -Dversion; otherwise git
     // describe, or build.zig.zon's version where there's no git checkout.
-    options.addOption([]const u8, "version", b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b));
+    const version = b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b);
     const pins = b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
-    options.addOption([]const u8, "ninefront_release", pin(pins, "NINEFRONT_RELEASE"));
-    options.addOption([]const u8, "ninefront_rev", pin(pins, "NINEFRONT_REV"));
-    options.addOption([]const u8, "drawterm_rev", pin(pins, "DRAWTERM_REV"));
-    mod.addOptions("build_options", options);
+
+    const parts: ModuleParts = .{
+        .target = target,
+        .optimize = optimize,
+        .emu = emu,
+        .unicorn = unicorn_mod,
+        .shim = shim_bin.getOutput(),
+        .shim_amd64 = shim_amd64_bin.getOutput(),
+        .host_cmd = host_cmd,
+        .guest_tree = guest_tree.file,
+        .have_drawterm = have_drawterm,
+        .version = version,
+        .pins = pins,
+    };
+    // The h9 module, with the -Dgfx backend: h9, embedders and the tools.
+    const mod = addH9Module(b, parts, gfx, true);
+    kern_step.dependOn(&mod.kern.step);
+    // The tests' module, with the headless backend for the [gfx] cases.
+    const test_mod = if (gfx == .headless) mod else addH9Module(b, parts, .headless, false);
 
     const exe = b.addExecutable(.{
         .name = "h9",
@@ -576,7 +707,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "h9", .module = mod },
+                .{ .name = "h9", .module = mod.mod },
                 // --check runs the hello fixture on each backend.
                 .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
             },
@@ -584,7 +715,6 @@ pub fn build(b: *std.Build) void {
     });
     if (os == .macos) {
         addSdkPaths(b, exe.root_module);
-        addSdkPaths(b, kern.root_module);
         exe.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(exe);
@@ -825,7 +955,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_design.addArgs(args);
     b.step("design", "Run the design tool: zig build design -- <command> (help lists them)").dependOn(&run_design.step);
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     linkUnicorn(mod_tests); // exe_tests shares exe's root module, already linked
     // Runs the same programs on every backend built in and compares them.
@@ -834,7 +964,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "h9", .module = mod },
+            .{ .name = "h9", .module = test_mod.mod },
             .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
         },
     }) });
@@ -843,7 +973,7 @@ pub fn build(b: *std.Build) void {
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(backend_tests);
-    // The segattach, overlay, srv, htools, sema and net fixtures, assembled freestanding as the shim is, and
+    // The segattach, overlay, srv, htools, sema, net and gfx fixtures, assembled freestanding as the shim is, and
     // embedded as raw text for tests/backends.zig to wrap in an a.out.
     for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
         .{ .dir = "segattach", .prefix = "seg", .names = &segattach_fixtures },
@@ -852,6 +982,7 @@ pub fn build(b: *std.Build) void {
         .{ .dir = "htools", .prefix = "htools", .names = &htools_fixtures },
         .{ .dir = "sema", .prefix = "sema", .names = &sema_fixtures },
         .{ .dir = "net", .prefix = "net", .names = &net_fixtures },
+        .{ .dir = "gfx", .prefix = "gfx", .names = &gfx_fixtures },
     }) |set| for (set.names) |name| {
         const obj = b.addObject(.{
             .name = name,
@@ -879,6 +1010,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
     // HVF needs the entitlement, so the test binary is signed like h9.
     const run_backend_tests = b.addRunArtifact(backend_tests);
+    // The [gfx] cases that run rio and acme take them from the root tree.
+    run_backend_tests.setEnvironmentVariable("H9_TEST_ROOT", root);
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
@@ -895,7 +1028,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("docs/embedding/embed.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "h9", .module = mod }},
+            .imports = &.{.{ .name = "h9", .module = mod.mod }},
         }),
     });
     if (os == .macos) {
@@ -933,7 +1066,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
-            .imports = &.{.{ .name = "h9", .module = mod }},
+            .imports = &.{.{ .name = "h9", .module = mod.mod }},
         }),
     });
     if (os == .macos) {

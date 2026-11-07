@@ -32,6 +32,24 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
     }
     if (!any) try w.writeAll(" none");
     try w.writeAll("\n");
+    try w.print("gfx: {s}\n", .{build_options.gfx});
+}
+
+/// The --check line for the GUI backend (design/0015-gfx.md). On X11 it
+/// opens and closes `$DISPLAY`, without a window. A missing display isn't
+/// a failure: only --gfx needs one.
+fn checkGfx(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (h9.gfx.backend) {
+        .none => try w.writeAll("gfx: not built in\n"),
+        .headless => try w.writeAll("gfx headless: ok (a screen in memory, for tests)\n"),
+        .x11 => if (h9.gfx.unavailable()) |why|
+            try w.print("gfx x11: {s}\n", .{why})
+        else if (h9.gfx.probeDisplay().?)
+            try w.writeAll("gfx x11: ok, $DISPLAY opens\n")
+        else
+            try w.writeAll("gfx x11: can't open $DISPLAY\n"),
+        .win32, .cocoa => try w.print("gfx {t}: built in\n", .{h9.gfx.backend}),
+    }
 }
 
 fn short(rev: []const u8) []const u8 {
@@ -98,6 +116,8 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
             },
         }
     }
+
+    try checkGfx(w);
 
     const root = o.root orelse {
         if (o.root_arg) |r| try w.print("root {s}: {s}\n", .{ r, o.root_err }) else try w.writeAll("root: none (use --root DIR or $H9ROOT; scripts/mkroot.py builds one)\n");

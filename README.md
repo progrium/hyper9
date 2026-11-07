@@ -28,7 +28,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [browser-host](design/0012-browser-host.md) | accepted | ready | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | implemented |  | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft |  | Disk-image roots |
-| [gfx](design/0015-gfx.md) | accepted | ready | Graphics (--gfx) |
+| [gfx](design/0015-gfx.md) | implemented |  | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
@@ -73,7 +73,7 @@ flowchart LR
   p_browser_host["#35;12 browser-host<br/>accepted"]:::accepted
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
-  p_gfx["#35;15 gfx<br/>accepted"]:::accepted
+  p_gfx["#35;15 gfx<br/>implemented"]:::implemented
   p_kvm["#35;16 kvm<br/>draft"]:::draft
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
@@ -243,6 +243,13 @@ from source. kern
 builds for Windows with drawterm's win32 files, so h9.exe runs programs on
 the emulator, and host paths are `/C:/...` in `#U`.
 
+`-Dgfx` picks the GUI backend for `--gfx` ([gfx](design/0015-gfx.md)):
+drawterm's Cocoa on macOS and Win32 on Windows by default, `none` on Linux.
+`-Dgfx=x11` builds the X11 backend for Linux, which links the host's libX11
+(and needs the libXt headers), so it builds natively against glibc, not for
+a musl target. `-Dgfx=none` leaves graphics out; `-Dgfx=headless` is a screen
+in memory, which the backend tests use whatever `-Dgfx` is.
+
 ## Releases
 
 Each GitHub release has two sets of binaries, built by
@@ -268,7 +275,7 @@ cross-compiles the other targets.
 ```sh
 zig-out/bin/h9 [h9-flags] [--] program [args...]
 zig-out/bin/h9 [h9-flags] --rc 'command' [args...]
-zig-out/bin/h9 --version                  # version, pinned 9front and drawterm, backends built in
+zig-out/bin/h9 --version                  # version, pinned 9front and drawterm, backends and gfx built in
 zig-out/bin/h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] --check
 zig-out/bin/h9 --help                     # or -h alone
 
@@ -276,6 +283,7 @@ zig-out/bin/h9 /bin/cat /lib/namespace    # a baseline demo
 zig-out/bin/h9 ls -l /bin/cat             # bare names search $path: . and /bin
 zig-out/bin/h9 ./hello                    # ./ and ../ are host paths
 zig-out/bin/h9 --root 'tcp!localhost!5640' ls /   # a 9P server as the root
+zig-out/bin/h9 --gfx rio                  # rio in a host window
 ```
 
 A program starting with `./` or `../` is read from the host. Anything else is
@@ -431,6 +439,24 @@ the rest share a pool of 8 vCPUs, which costs a thread handoff per syscall.
 to stderr, or to a file with `--trace=FILE`. `--dump-on-fault` prints the
 registers and the symbolized PC when the guest faults.
 
+### Graphics
+
+`--gfx` gives the machine one host window, drawn by drawterm's own GUI code,
+and binds `/dev/draw`, `/dev/mouse`, `/dev/cursor` and `/dev/kbd` from it, with
+`/dev/snarf` as the host clipboard. rio and acme run in it; the console stays
+the host terminal. `--gfx=noclip` keeps `/dev/snarf` inside h9 instead of the
+host clipboard, and `--gfx-scale N` sets the scale on macOS (drawterm's `-x`).
+Closing the window posts `hangup` to the machine. Only one machine in a
+process has the window. Without `--gfx`, `#i`, `#m` and `#b` are masked. A
+build without a GUI backend, or with no display (`$DISPLAY` unset for X11),
+exits 125 on `--gfx`; `--check` reports a `gfx` line. rio needs `/mnt/temp` in
+the root tree, which `scripts/mkroot.py` makes (and adds to an existing tree).
+
+```sh
+h9 --gfx rio
+h9 --gfx rio -i 'window acme'
+```
+
 ### Sandbox
 
 > **Warning!** This is a ~~stable~~ in-development research prototype, but it has not been through any formal security audits or any other verification. Such a review would be essential before trusting h9 to handle malicious code in the wild. USE AT YOUR OWN RISK!
@@ -527,6 +553,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | Path | Contents |
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup and raw mode on the host terminal, and `--check`/`--version` |
+| `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, the clipboard), the headless test backend, and the stubs for builds without graphics |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
@@ -544,7 +571,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `tests/backends.zig` | backend conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
-| `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases, assembled at build time |
+| `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
 | `scripts/mkroot.py` | builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source) into `dist/` |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |
