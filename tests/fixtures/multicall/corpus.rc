@@ -33,14 +33,6 @@ fig 2
 banana 7
 X
 seq 1 500 >nums >[2]/dev/null || awk 'BEGIN { for(i = 1; i <= 500; i++) print i }' >nums
-cat >c.c <<'X'
-#include <u.h>
-int
-main(void)
-{
-	return 0;
-}
-X
 cp lines lines2
 echo 'kiwi 1' >>lines2
 
@@ -89,80 +81,6 @@ fn c_exportfs {
 	@{ rfork s; exportfs -z >[2=1] | sed 's/^exportfs [0-9]+:/exportfs:/' }
 }
 fn c_ramfs { mkdir -p /tmp/r; t ramfs -m /tmp/r; echo inram >/tmp/r/f; cat /tmp/r/f; unmount /tmp/r }
-
-fn c_chgrp { echo x >e/g; t chgrp nonexistentgroup e/g }
-fn c_dd { t dd -if nums -bs 10 -count 2 -quiet 1 }
-fn c_comm { sort lines >e/s1; sort lines2 >e/s2; t comm e/s1 e/s2 }
-fn c_split { t split -n 200 nums e/sp; ls e | grep sp }
-fn c_strings { t strings nums | sed 3q }
-fn c_sum { t sum lines; t sum -5 lines }
-fn c_md5sum { t md5sum lines }
-fn c_sha1sum { t sha1sum lines; t sha1sum -2 256 lines }
-fn c_crc32 { t crc32 lines }
-fn c_seq { t seq 3; t seq -w 8 11; t seq 1 0.5 3 }
-fn c_cleanname { t cleanname /a/./b/../c//d }
-fn c_time { time echo x >[2]/dev/null; st }
-fn c_fmt { t fmt -l 20 lines }
-fn c_col { echo 'a	b' | t col -x }
-fn c_p { t p -z }
-fn c_pr { t pr -h head lines | sed 1,3d }
-fn c_look { sort lines | t look -f app /fd/0 }
-fn c_idiff { t idiff }
-fn c_merge3 { t merge3 lines lines lines2 }
-fn c_file { t file lines c.c d }
-fn c_mtime { touch -t 1000 e/mt; t mtime e/mt | awk '{print $1}' }
-fn c_seconds { t seconds '1 jan 2000 00:00:00 gmt' }
-fn c_tput { t tput -h }
-fn c_ascii { t ascii -n 65; t ascii -x a }
-fn c_unicode { t unicode 263a; t unicode 41-45 }
-fn c_urlencode { t urlencode 'a b&c'; t urlencode -d 'a%20b' }
-fn c_tcs { echo abc | t tcs -f utf -t latin1 | xd -c }
-fn c_ecp { t ecp }
-# fcp: none. Its eight RFMEM workers hang h9 now and then (the stock binary,
-# 2 runs in 10 copying /lib/namespace), which is h9's bug, not 9box's.
-fn c_fcp { echo skipped }
-fn c_xd { t xd -c d/a }
-fn c_ed { t ed - lines <<'X'
-/fig/s/fig/FIG/
-1,$p
-q
-X
-}
-fn c_patch { diff -u lines lines2 >e/p.diff; cp lines e/lp; t patch -p0 e/lp e/p.diff }
-fn c_zip { t zip -h }
-fn c_mkpaqfs { mkpaqfs -o e/x.paq d >/dev/null >[2=1]; st; test -s e/x.paq && echo made; t mkpaqfs -b 1 -o e/y.paq d }
-fn c_paqfs { t paqfs -z }
-fn c_mntgen { t mntgen -z }
-fn c_aan { t aan }
-fn c_cec { t cec -z }
-fn c_con { t con }
-fn c_rx { t rx }
-fn c_ratrace { t ratrace }
-fn c_plumb { t plumb -z }
-fn c_plumber { t plumber -z }
-fn c_execnet { t execnet -z }
-fn c_pipefile { t pipefile }
-fn c_passwd { t passwd -z }
-fn c_netkey { t netkey -z }
-fn c_archfs { t archfs }
-fn c_9660srv { t 9660srv -z }
-fn c_dossrv { t dossrv -z }
-fn c_webfs { t webfs -z }
-fn c_sshfs { t sshfs }
-fn c_ftpfs { t ftpfs -z }
-fn c_ssh { t ssh }
-fn c_sshnet { t sshnet -z }
-fn c_telnet { t telnet }
-fn c_tlsclient { t tlsclient }
-fn c_tlssrv { t tlssrv -z }
-fn c_webcookies { t webcookies -z }
-fn c_dc { echo '2 3 + p 10 3 / p' | t dc }
-fn c_hoc { echo '2^10; sqrt(2)' | t hoc }
-fn c_factor { t factor 91 }
-fn c_primes { t primes 10 30 }
-fn c_cal { t cal 1 2026 }
-fn c_bc { echo '2+3; scale=3; 1/7' | t bc }
-fn c_pc { echo '2+3*4; 0x10; 7/2' | t pc }
 
 for(c){
 	echo '#' $c

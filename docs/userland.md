@@ -306,10 +306,9 @@ a root tree, builds the same kind of tree around
 source, in one binary that picks the command by the name it runs as.
 
 ```sh
-host$ zig build slim                    # .local/9front/min-11952-arm64: 42 commands
-host$ zig build slim -Dslim-set=slim    # 108: archives, checksums, file servers, network clients
-host$ h9 --root .local/9front/min-11952-arm64 --rc 'ls /bin | wc -l'
-host$ du -sh .local/9front/min-11952-arm64
+host$ zig build slim    # .local/9front/slim-11952-arm64: 42 commands
+host$ h9 --root .local/9front/slim-11952-arm64 --rc 'ls /bin | wc -l'
+host$ du -sh .local/9front/slim-11952-arm64
 ```
 
 The commands are hard links to `/$cputype/bin/9box`. A tree that can't have
@@ -318,8 +317,8 @@ hard links (a copy onto another file server, say) takes
 the same tree also lets you bind over one command, which in a hard-link
 tree covers them all, since hard links share a qid. `9box` alone lists its
 commands, and `9box CMD ARGS` runs one. Add your own commands and scripts to
-the tree as above; to box more of 9front's, add a line to a set in
-`src/9box/` (its name and its directory under `/sys/src/cmd`).
+the tree as above; to box more of 9front's, add a line to `src/9box/slim`
+(its name and its directory under `/sys/src/cmd`).
 
 ## 5. Layering on the stock root instead of copying it
 

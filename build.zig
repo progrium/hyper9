@@ -153,11 +153,10 @@ fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []
     run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
-    // The trees `zig build slim` makes, for the multicall cases, which
-    // skip without them (design/multicall.md).
+    // The tree `zig build slim` makes, for the multicall cases, which skip
+    // without it (design/multicall.md).
     const release = pin(b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
-    inline for (.{ "min", "slim" }, .{ "H9_TEST_MIN_ROOT", "H9_TEST_SLIM_ROOT" }) |set, key|
-        run.setEnvironmentVariable(key, b.pathFromRoot(b.fmt(".local/9front/{s}-{s}-{s}", .{ set, release, arch orelse "arm64" })));
+    run.setEnvironmentVariable("H9_TEST_SLIM_ROOT", b.pathFromRoot(b.fmt(".local/9front/slim-{s}-{s}", .{ release, arch orelse "arm64" })));
     if (pending) run.setEnvironmentVariable("H9_TEST_PENDING", "1");
     run.has_side_effects = true;
     return run;
@@ -749,8 +748,7 @@ pub fn build(b: *std.Build) void {
     // 9box and a slim root around it (design/multicall.md), built inside
     // the h9 just built, against the root tree. -Darch picks the
     // architecture, as for the integration cases.
-    const slim_set = b.option([]const u8, "slim-set", "With zig build slim: the set of commands in src/9box/, min (default) or slim") orelse "min";
-    const slim_links = b.option([]const u8, "slim-links", "With zig build slim: hard (hard links to 9box, the default), stub (#!/bin/9box -! files) or copy (no 9box: the set's binaries copied, in <set>-copy-*)") orelse "hard";
+    const slim_links = b.option([]const u8, "slim-links", "With zig build slim: hard (hard links to 9box, the default), stub (#!/bin/9box -! files) or copy (no 9box: the same commands' binaries copied, in slim-copy-*)") orelse "hard";
     const slim_arch = test_arch orelse switch (target.result.cpu.arch) {
         .x86_64 => "amd64",
         .x86 => "386",
@@ -770,16 +768,15 @@ pub fn build(b: *std.Build) void {
         root,
         b.pathFromRoot("src/9box"),
         b.pathFromRoot(".local/src/9front/sys/src"),
-        slim_set,
         slim_arch,
         slim_links,
-        b.pathFromRoot(b.fmt(".local/build/9box/{s}-{s}", .{ slim_set, slim_arch })),
+        b.pathFromRoot(b.fmt(".local/build/9box/{s}", .{slim_arch})),
         // -Dslim-links=copy is the separate binaries the box is measured
         // against, in a tree of its own.
-        b.pathFromRoot(b.fmt(".local/9front/{s}{s}-{s}-{s}", .{ slim_set, if (std.mem.eql(u8, slim_links, "copy")) "-copy" else "", release, slim_arch })),
+        b.pathFromRoot(b.fmt(".local/9front/slim{s}-{s}-{s}", .{ if (std.mem.eql(u8, slim_links, "copy")) "-copy" else "", release, slim_arch })),
     });
     run_slim.step.dependOn(signed_step);
-    b.step("slim", "Build 9box and a slim root in .local/9front/<set>-<release>-<arch>: -Dslim-set=min|slim, -Dslim-links=hard|stub|copy, -Darch").dependOn(&run_slim.step);
+    b.step("slim", "Build 9box and a slim root in .local/9front/slim-<release>-<arch>: -Dslim-links=hard|stub|copy, -Darch").dependOn(&run_slim.step);
 
     // The WebSocket relay the websocket-9p cases use, as a program for the
     // demo: zig build wsrelay -- LISTEN_PORT TARGET_PORT.

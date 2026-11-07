@@ -195,7 +195,7 @@ zig build integration  # real 9front binaries from the root tree through the h9 
 zig build proposal -Dp=baseline  # one proposal's demos and integration cases (by slug or id)
 zig build design -- check        # validate design/ and the test tags (also list, ready, graph, new, file)
 zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
-zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/min-<release>-<arch>
+zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
@@ -213,17 +213,17 @@ no human and no `ssh -t`.
 `zig build slim` builds [9box](design/multicall.md) inside the h9 it just
 built, against the root tree: 9front's own commands, compiled from the pinned
 source with their globals renamed so they share one link, chosen by the name
-they run as. `-Dslim-set=min` (the default, 42 commands) or `slim` (108),
-`-Dslim-links=hard` (hard links to `9box`, the default) or `stub`
+they run as: the 42 commands basic operation needs. `-Dslim-links=hard`
+(hard links to `9box`, the default) or `stub`
 (`#!/bin/9box -!` files, for trees without hard links), and `-Darch`;
-`-Dslim-links=copy` builds nothing and makes `<set>-copy-*` with the same
+`-Dslim-links=copy` builds nothing and makes `slim-copy-*` with the same
 commands copied from the root, to measure the box against
 ([tests/fixtures/multicall/execloop.rc](tests/fixtures/multicall/execloop.rc)). It
 needs `/sys/src`, from `mkroot.py --src` or the checkout `fetch.sh` makes,
-and takes a few minutes for `min` and about ten for `slim` on the emulator.
-The tree is `9box`, its links, `rcmain` and the mount points, and runs with
-`h9 --root .local/9front/min-11952-arm64`. The `[multicall]` cases use the
-`min` and `slim` trees, and skip without them.
+and takes a few minutes on the emulator. The tree is `9box`, its links,
+`rcmain` and the mount points, and runs with
+`h9 --root .local/9front/slim-11952-arm64`. The `[multicall]` cases use it,
+and skip without it.
 
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
 `scripts/fetch.sh`, so it's opt-in and never part of the MIT `h9` build. It

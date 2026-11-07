@@ -23,7 +23,6 @@
 #	objs	the objects to link, one per line, relative to obj/$objtype/NAME
 #	libs	local libraries on the link line (auth's lib.$O.a), likewise
 #	syms	the globals the objects define, renamed or not
-#	main	main, threadmain and mainstacksize, those the command has
 #	log	mk's output
 # and it exits with a status naming what failed.
 rfork en
@@ -124,11 +123,15 @@ if(cat $csrc | awk '/ARGBEGIN/ {a=1} a && /case .!.:/ {f=1} /ARGEND/ {a=0} END {
 	echo mkcmd: $name: takes -! as a flag >[1=2]
 	exit bang
 }
+# The box calls each command's main. A thread program's main is
+# libthread's, so boxing one would need a private libthread, which 9box
+# doesn't build.
+if(grep -s '^threadmain$' $out/syms || ! grep -s '^main$' $out/syms){
+	echo mkcmd: $name: no main of its own, or a thread program >[1=2]
+	exit nomain
+}
 
 flags=`{{comm -23 $out/syms $L/libsyms; cat $out/overrides} | sort -u | grep '^[A-Za-z_][A-Za-z0-9_]*$' | awk -v 'p=bx_'$name'_' '{printf "-D%s=%s%s\n", $1, p, $1}'}
-for(s in main threadmain mainstacksize)
-	if(grep -s '^'$s'$' $out/syms)
-		echo $s >>$out/main
 rm -f $objs
 if(! mk 'CC='$CC' '$"flags $objs >>$log >[2=1]){
 	echo mkcmd: $name: recompiling with the renaming failed, see $log >[1=2]

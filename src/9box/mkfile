@@ -1,10 +1,10 @@
-# Builds 9box, a multi-call binary of the commands in $SET, for $objtype,
+# Builds 9box, a multi-call binary of the commands in ./slim, for $objtype,
 # from /sys/src (design/multicall.md). Run it in a writable copy of this
-# directory: mk SET=min (or slim). Each command builds in
-# obj/$objtype/NAME (see mkcmd), and the box is $O.9box.
+# directory. Each command builds in obj/$objtype/NAME (see mkcmd), and the
+# box is $O.9box.
 </$objtype/mkfile
 
-SET=min
+SET=slim
 W=obj/$objtype
 NAMES=`{rc ./lsset $SET | awk '{print $1}'}
 
@@ -34,25 +34,7 @@ cmds.h: $W/set ${NAMES:%=$W/%/objs}
 9box.$O: 9box.c cmds.h
 	$CC -FVw 9box.c
 
-# A private libthread whose main is _threadlibmain, so 9box keeps main and
-# starts thread commands through it. Built like mkcmd's commands, behind a
-# writable layer over /sys/src/libthread.
-$W/libthread.a:
-	top=`{pwd}
-	rm -rf $W/libthread $target
-	mkdir -p $W/libthread
-	@{
-		rfork n
-		bind -bc $W/libthread /sys/src/libthread
-		cd /sys/src/libthread
-		mk 'CC='$CC' -Dmain=_threadlibmain' 'LIB='$top/$target all
-	} >$W/libthread/log >[2=1] || {
-		echo mk: the private libthread failed, see $W/libthread/log >[1=2]
-		exit libthread
-	}
-
-# The link: 9box.$O, every command's objects, the private libthread if a
-# command needs it, and the local libraries their headers name with
+# The link: 9box.$O, every command's objects, and the local libraries their headers name with
 # #pragma lib (auth's ./lib.$O.a), which are found here.
 $W/link: cmds.h
 	rc ./genlink $W >$target
