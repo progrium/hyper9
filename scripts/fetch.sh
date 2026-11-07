@@ -71,3 +71,19 @@ if [ "$(cat "$src/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
 	rm -f "$tgz"
 fi
 echo "src/unicorn: $UNICORN_VERSION + ${#patches[@]} patches"
+
+# v86: v86.wasm and its license into .local/v86, for zig build web.
+dir="$H9_LOCAL/v86"
+if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$V86_SHA256" ]; then
+	tgz="$H9_LOCAL/cache/v86-$V86_VERSION.tgz"
+	curl -fsSL -o "$tgz" "$V86_URL"
+	echo "$V86_SHA256  $tgz" | shasum -a 256 -c --quiet
+	rm -rf "$dir" "$dir.tmp" && mkdir -p "$dir.tmp"
+	tar -xzf "$tgz" -C "$dir.tmp" --strip-components 1 package/build/v86.wasm package/LICENSE
+	mv "$dir.tmp/build/v86.wasm" "$dir.tmp/v86.wasm" && rmdir "$dir.tmp/build"
+	echo "$V86_WASM_SHA256  $dir.tmp/v86.wasm" | shasum -a 256 -c --quiet
+	echo "$V86_SHA256" >"$dir.tmp/.h9-stamp"
+	mv "$dir.tmp" "$dir"
+	rm -f "$tgz"
+fi
+echo "v86: $V86_VERSION"

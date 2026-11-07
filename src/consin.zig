@@ -9,6 +9,7 @@
 //! next read, and dropped when the run ends.
 
 const std = @import("std");
+const web = @import("web.zig");
 
 /// Makes a read blocked in a `Stdio.in` on `thread` return, with any
 /// result, so a run can end while a console read is pending. Called
@@ -16,7 +17,7 @@ const std = @import("std");
 /// that hasn't started yet.
 pub const Cancel = struct {
     ctx: *anyopaque,
-    func: *const fn (ctx: *anyopaque, thread: std.Thread) void,
+    func: *const fn (ctx: *anyopaque, thread: web.Thread) void,
     /// Clears a cancel left over from an earlier run on the same stream;
     /// called on the reader thread before its first read.
     reset: *const fn (ctx: *anyopaque) void,
@@ -39,7 +40,7 @@ pub const ConsoleInput = struct {
     len: usize = 0,
     /// Bumped to wake the thread.
     seq: std.atomic.Value(u32) = .init(0),
-    thread: ?std.Thread = null,
+    thread: ?web.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
 
@@ -85,7 +86,7 @@ pub const ConsoleInput = struct {
             .want => return would_block,
             .idle => {
                 if (c.thread == null) {
-                    c.thread = std.Thread.spawn(.{}, run, .{c}) catch return -1;
+                    c.thread = web.Thread.spawn(.{}, run, .{c}) catch return -1;
                 }
                 c.state.store(.want, .release);
                 _ = c.seq.fetchAdd(1, .release);

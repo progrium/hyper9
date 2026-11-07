@@ -22,6 +22,10 @@ const kern_notes = [_][]const u8{"devpipe.c"};
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
 const kern_win32 = [_][]const u8{ "devfs-win32.c", "devip-win32.c", "devlfd-win32.c", "win32.c" };
+// The web host (design/0012-browser-host.md): devfs and devlfd build
+// against wasi-libc; posix.c and devip-posix.c are replaced by
+// src/kern/os-wasm.c and devip-wasm.c.
+const kern_web = [_][]const u8{ "devfs-posix.c", "devlfd-posix.c" };
 
 /// The drawterm libraries kern needs, with each Makefile's OFILES. The GUI,
 /// exportfs, libauth and drawterm's own main/cpu code are left out.
@@ -105,6 +109,19 @@ const kern_flags_common = [_][]const u8{
 // thread can take the lock before seeing the writes made under it, which
 // corrupted QLock queues and hung processes under contention.
 const kern_flags = kern_flags_common ++ [_][]const u8{"-DPTHREAD"};
+// The web host's: drawterm's dtos.h needs a named OS, and wasi-libc
+// hides signals, process clocks, mmap and getpid behind these. setjmp and
+// longjmp (waserror) use wasm exception handling (webTarget).
+const kern_flags_web = kern_flags_common ++ [_][]const u8{
+    "-Dlinux",
+    "-DH9_WEB",
+    "-D_WASI_EMULATED_SIGNAL",
+    "-D_WASI_EMULATED_PROCESS_CLOCKS",
+    "-D_WASI_EMULATED_MMAN",
+    "-D_WASI_EMULATED_GETPID",
+    "-mllvm",
+    "-wasm-enable-sjlj",
+};
 // Make.win64's CFLAGS.
 const kern_flags_win32 = kern_flags_common ++ [_][]const u8{ "-DWINDOWS", "-DUNICODE" };
 
@@ -138,23 +155,41 @@ const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// the headless backend, with the same lib.S.
 const gfx_fixtures = [_][]const u8{ "binds", "drawnew", "draw", "kbd", "mouse", "snarf", "sleep" };
 
+/// The h9 the integration cases run: the native binary, or h9-node for
+/// the web host (-Dweb). `step` builds it.
+const Integration = struct {
+    bin: []const u8,
+    arch: ?[]const u8,
+    web: bool,
+    step: *std.Build.Step,
+    /// With `web`: a native h9 that runs the root's 386 binaries, for the
+    /// cases' 9P servers (H9_TEST_SERVER), since the web host can't listen.
+    server: ?[]const u8 = null,
+    server_step: *std.Build.Step = undefined,
+};
+
 /// Runs tests/integration.zig against the h9 binary. `filters` selects
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
-/// implemented run instead of skipping. `arch`, if given, is passed to h9
-/// as --arch (from -Darch). `guest_test` says h9 was built with
+/// implemented run instead of skipping. `it.arch`, if given, is passed to
+/// h9 as --arch (from -Darch). `guest_test` says h9 was built with
 /// -Dguest-test, and `host_cmd` that it was built with -Dhost-cmd. `src`,
 /// if given, is a 9front checkout's `sys` directory, which the self-host
 /// cases bind over /sys when the root lacks /sys/src.
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) *std.Build.Step.Run {
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
     // The self-host cases' source when the root has no /sys/src
     // (design/0010-self-host.md).
     if (src) |dir| run.setEnvironmentVariable("H9_TEST_SRC", dir);
+    run.step.dependOn(it.step);
+    if (it.server != null) run.step.dependOn(it.server_step);
+    const h9_bin = it.bin;
     // h9 serves tests/fixtures/guest in #H (design/0032-guest-tools.md).
     if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
     // Built with -Dhost-cmd: the host command cases run.
     if (host_cmd) run.setEnvironmentVariable("H9_TEST_HOST_CMD", "1");
-    if (arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
+    if (it.arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
+    if (it.web) run.setEnvironmentVariable("H9_TEST_WEB", "1");
+    if (it.server) |sv| run.setEnvironmentVariable("H9_TEST_SERVER", sv);
     if (go) |g| {
         run.setEnvironmentVariable("H9_TEST_GO", g.dir);
         run.step.dependOn(g.step);
@@ -165,7 +200,7 @@ fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []
     // The tree `zig build slim` makes, for the multicall cases, which skip
     // without it (design/0064-multicall.md).
     const release = pin(b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
-    run.setEnvironmentVariable("H9_TEST_SLIM_ROOT", b.pathFromRoot(b.fmt(".local/9front/slim-{s}-{s}", .{ release, arch orelse "arm64" })));
+    run.setEnvironmentVariable("H9_TEST_SLIM_ROOT", b.pathFromRoot(b.fmt(".local/9front/slim-{s}-{s}", .{ release, it.arch orelse "arm64" })));
     if (pending) run.setEnvironmentVariable("H9_TEST_PENDING", "1");
     run.has_side_effects = true;
     return run;
@@ -438,6 +473,165 @@ fn guestTree(b: *std.Build, with_test: bool, host_cmd: bool) struct { file: std.
     return .{ .file = wf.add("guest_tree.zig", out.written()), .bin = bin };
 }
 
+/// drawterm's kern and the libraries it uses, as a static library for
+/// `target`. `web` builds it for the browser host
+/// (design/0012-browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
+/// place of posix.c, the coroutines it runs on (src/web/coro.c), and
+/// setjmp/longjmp on wasm exception handling.
+fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, web: bool, host_cmd: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
+    const os = target.result.os.tag;
+    const kern = b.addLibrary(.{
+        .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    kern.root_module.addIncludePath(b.path(drawterm));
+    kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
+    kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
+    kern.root_module.addIncludePath(b.path("src/kern")); // fscheck.h and netcheck.h, for devfs and devip
+    const flags: []const []const u8 = if (web) &kern_flags_web else if (os == .windows) &kern_flags_win32 else &kern_flags;
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/kern"),
+        .files = &kern_sources,
+        .flags = flags,
+    });
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/kern"),
+        .files = &kern_notes,
+        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
+    });
+    // oscmd and friends are renamed so src/kern/hostcmd.c can wrap them:
+    // a machine's host commands die with it. The web host has none, and
+    // os-wasm.c stubs them.
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/kern"),
+        .files = if (web) &kern_web else if (os == .windows) &kern_win32 else &kern_posix,
+        .flags = if (web) flags else std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-Doscmd=h9_dt_oscmd", "-Doscmdkill=h9_dt_oscmdkill", "-Doscmdfree=h9_dt_oscmdfree" } }) catch @panic("OOM"),
+    });
+    kern.root_module.addCSourceFiles(.{
+        .root = b.path("src/kern"),
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c" },
+        .flags = flags,
+    });
+    if (!web) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostcmd.c"}, .flags = flags });
+    addGfxSources(b, kern, gfx, flags);
+    for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
+        .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
+        .files = l.files,
+        .flags = flags,
+    });
+    // Zig's bundled musl memccpy is broken; see src/kern/memccpy.c.
+    if (target.result.abi.isMusl()) {
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"memccpy.c"}, .flags = flags });
+        kern.root_module.addCMacro("memccpy", "h9_memccpy");
+    }
+    if (os == .windows) {
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
+        kern.root_module.linkSystemLibrary("ws2_32", .{});
+        kern.root_module.linkSystemLibrary("advapi32", .{});
+    }
+    if (os == .macos) addSdkPaths(b, kern.root_module);
+    if (web) {
+        // No __builtin_return_address on wasm: os-wasm.c has getcallerpc.
+        kern.root_module.addCSourceFiles(.{ .root = b.path(drawterm ++ "/posix-port"), .files = &.{"tas.c"}, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "os-wasm.c", "devip-wasm.c" }, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/web"), .files = &.{"coro.c"}, .flags = flags });
+        kern.root_module.addAssemblyFile(b.path("src/web/stack.S"));
+        // wasi-libc's setjmp/longjmp runtime for wasm exception handling,
+        // which Zig's wasi-libc doesn't build.
+        kern.root_module.addCSourceFile(.{
+            .file = .{ .cwd_relative = b.pathJoin(&.{ b.graph.zig_lib_directory.path orelse ".", "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c" }) },
+            .flags = &.{ "-mllvm", "-wasm-enable-sjlj" },
+        });
+        for ([_][]const u8{ "wasi-emulated-signal", "wasi-emulated-process-clocks", "wasi-emulated-mman", "wasi-emulated-getpid" }) |l|
+            kern.root_module.linkSystemLibrary(l, .{});
+    } else kern.root_module.addCSourceFiles(.{
+        .root = b.path(drawterm ++ "/posix-port"),
+        .files = &kern_port,
+        .flags = flags,
+    });
+    // devtab.c lists devcmd (#C) only under -Dhost-cmd.
+    if (host_cmd and !web) kern.root_module.addCMacro("H9_HOSTCMD", "1");
+    return kern;
+}
+
+/// The web target. kern alone turns on wasm exception handling, for
+/// setjmp and longjmp: wasi-libc doesn't build with it.
+fn webTarget(b: *std.Build, eh: bool) std.Build.ResolvedTarget {
+    return b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+        .cpu_features_add = if (eh) std.Target.wasm.featureSet(&.{.exception_handling}) else .empty,
+    });
+}
+
+/// Where h9.wasm's data, stack and heap start: above v86.wasm's own
+/// region in the memory they share (design/0012-browser-host.md, "One
+/// memory"). v86's data ends near 36 KiB and its stack near 9.1 MiB.
+const web_global_base = 16 << 20;
+
+const Web = struct {
+    exe: *std.Build.Step.Compile,
+    /// Installs everything into zig-out/web.
+    install: *std.Build.Step,
+};
+
+/// h9.wasm, the JS host, v86.wasm and the demo page, installed in
+/// zig-out/web.
+fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts) Web {
+    const target = webTarget(b, false);
+    var p = parts;
+    p.target = target;
+    p.optimize = optimize;
+    p.emu = .none;
+    p.unicorn = null;
+    p.host_cmd = false;
+    const mod = addH9Module(b, p, .none, false).mod;
+    const exe = b.addExecutable(.{
+        .name = "h9",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "h9", .module = mod },
+                .{ .name = "hello", .module = b.createModule(.{ .root_source_file = b.path("tests/fixtures/hello.zig"), .target = target }) },
+            },
+        }),
+    });
+    exe.import_memory = true;
+    exe.global_base = web_global_base;
+    // The main coroutine's stack; kernel processes get their own.
+    exe.stack_size = 1 << 20;
+    exe.rdynamic = true;
+    exe.use_lld = true;
+    const dir: std.Build.InstallDir = .{ .custom = "web" };
+    const all = b.step("web-install", "");
+    all.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dir } }).step);
+    for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "index.html", "package.json" }) |f|
+        all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
+    // v86.wasm and its license, as scripts/fetch.sh left them.
+    if (b.build_root.handle.access(b.graph.io, ".local/v86/v86.wasm", .{})) {
+        all.dependOn(&b.addInstallFileWithDir(b.path(".local/v86/v86.wasm"), dir, "v86.wasm").step);
+        all.dependOn(&b.addInstallFileWithDir(b.path(".local/v86/LICENSE"), dir, "LICENSE.v86").step);
+    } else |_| all.dependOn(&b.addFail("web: no .local/v86/v86.wasm; run scripts/fetch.sh").step);
+    return .{ .exe = exe, .install = all };
+}
+
+/// The 386 guest shim for the v86 backend, assembled freestanding and
+/// embedded as raw bytes, loaded at a fixed guest-physical address.
+fn shimI386(b: *std.Build) std.Build.LazyPath {
+    const obj = b.addObject(.{
+        .name = "shim_i386",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86, .os_tag = .freestanding }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    obj.root_module.addAssemblyFile(b.path("src/arch/i386/shim.S"));
+    return b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" }).getOutput();
+}
+
 /// The value of `NAME=value` in scripts/pins.sh, without a trailing
 /// comment, or "unknown".
 fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
@@ -514,62 +708,11 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
     mod.addAnonymousImport("shim_amd64", .{ .root_source_file = p.shim_amd64 });
 
-    const kern = b.addLibrary(.{
-        .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
-        .linkage = .static,
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
-    });
-    kern.root_module.addIncludePath(b.path(drawterm));
-    kern.root_module.addIncludePath(b.path(drawterm ++ "/include"));
-    kern.root_module.addIncludePath(b.path(drawterm ++ "/kern"));
-    kern.root_module.addIncludePath(b.path("src/kern")); // fscheck.h and netcheck.h, for devfs and devip
-    const flags: []const []const u8 = if (os == .windows) &kern_flags_win32 else &kern_flags;
-    kern.root_module.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/kern"),
-        .files = &kern_sources,
-        .flags = flags,
-    });
-    kern.root_module.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/kern"),
-        .files = &kern_notes,
-        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
-    });
-    kern.root_module.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/kern"),
-        .files = if (os == .windows) &kern_win32 else &kern_posix,
-        // oscmd and friends are renamed so src/kern/hostcmd.c can wrap them:
-        // a machine's host commands die with it.
-        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-Doscmd=h9_dt_oscmd", "-Doscmdkill=h9_dt_oscmdkill", "-Doscmdfree=h9_dt_oscmdfree" } }) catch @panic("OOM"),
-    });
-    kern.root_module.addCSourceFiles(.{
-        .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "hostcmd.c" },
-        .flags = flags,
-    });
-    addGfxSources(b, kern, gfx, flags);
-    for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
-        .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
-        .files = l.files,
-        .flags = flags,
-    });
-    // Zig's bundled musl memccpy is broken; see src/kern/memccpy.c.
-    if (target.result.abi.isMusl()) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"memccpy.c"}, .flags = flags });
-        kern.root_module.addCMacro("memccpy", "h9_memccpy");
-    }
-    if (os == .windows) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
-        kern.root_module.linkSystemLibrary("ws2_32", .{});
-        kern.root_module.linkSystemLibrary("advapi32", .{});
-    }
-    if (os == .macos) addSdkPaths(b, kern.root_module);
-    kern.root_module.addCSourceFiles(.{
-        .root = b.path(drawterm ++ "/posix-port"),
-        .files = &kern_port,
-        .flags = flags,
-    });
-    // devtab.c lists devcmd (#C) only under -Dhost-cmd.
-    if (p.host_cmd) kern.root_module.addCMacro("H9_HOSTCMD", "1");
+    const web = os == .wasi;
+    // The web host's kern turns on wasm exception handling, for setjmp
+    // and longjmp, and has no GUI or host commands.
+    const kern = addKern(b, if (web) webTarget(b, true) else target, optimize, web, p.host_cmd and !web, if (web) .none else gfx, exported);
+    if (web) mod.addAnonymousImport("shim_i386", .{ .root_source_file = shimI386(b) });
     if (!p.have_drawterm) {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
         kern.step.dependOn(&fail.step);
@@ -704,6 +847,34 @@ pub fn build(b: *std.Build) void {
     kern_step.dependOn(&mod.kern.step);
     // The tests' module, with the headless backend for the [gfx] cases.
     const test_mod = if (gfx == .headless) mod else addH9Module(b, parts, .headless, false);
+
+    // The browser host (design/0012-browser-host.md): h9 for wasm32-wasi
+    // with its JS host, v86.wasm and a demo page, in zig-out/web.
+    const web_step = b.step("web", "Build the browser host into zig-out/web (design/0012-browser-host.md)");
+    const web = addWeb(b, optimize, parts);
+    web_step.dependOn(web.install);
+    // The demo page's root archive, from a 386 root tree and the paths
+    // src/web/root.list names; left out without one.
+    const web_root = b.option([]const u8, "web-root", "386 root tree for the browser host's root archive (default .local/9front/root386)") orelse
+        b.pathFromRoot(".local/9front/root386");
+    if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_root, "386/bin/rc" }), .{})) {
+        const webroot = b.addExecutable(.{
+            .name = "webroot",
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        });
+        const mk = b.addRunArtifact(webroot);
+        mk.addArg(web_root);
+        mk.addFileArg(b.path("src/web/root.list"));
+        const archive = mk.addOutputFileArg("root.h9a");
+        web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "root.h9a").step);
+    } else |_| {}
+    // The demo page in Chromium through Playwright (tests/web/browser.mjs).
+    const web_test = b.addSystemCommand(&.{ "node", "tests/web/browser.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
+    web_test.setCwd(b.path("."));
+    web_test.has_side_effects = true;
+    web_test.expectExitCode(0);
+    web_test.step.dependOn(web.install);
+    b.step("web-test", "Run the browser host's demo page in Chromium with Playwright (needs a 386 root for root.h9a)").dependOn(&web_test.step);
 
     const exe = b.addExecutable(.{
         .name = "h9",
@@ -900,7 +1071,20 @@ pub fn build(b: *std.Build) void {
         else |_| {}
     }
     if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
-    const backend_list = if (backends.items.len > 0) backends.items else "auto";
+    // -Dweb runs them on the web host under Node instead: h9-node on the v86
+    // backend, with the root's 386 binaries (design/0012-browser-host.md).
+    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (v86, 386)") orelse false;
+    const backend_list = if (test_web) "v86" else if (backends.items.len > 0) backends.items else "auto";
+    const it: Integration = if (test_web) .{
+        .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
+        .arch = "386",
+        .web = true,
+        .step = web.install,
+        // With -Demu=unicorn, the native h9 serves the WebSocket cases'
+        // roots on the emulator.
+        .server = if (emu == .unicorn) h9_bin else null,
+        .server_step = signed_step,
+    } else .{ .bin = h9_bin, .arch = test_arch, .web = false, .step = signed_step };
 
     // Runs real binaries through the h9 CLI; skipped without a root tree.
     // Cases tagged with a proposal that isn't implemented skip unless
@@ -927,8 +1111,15 @@ pub fn build(b: *std.Build) void {
         run_stdtest.step.dependOn(signed_step);
         go_stdtest.dependOn(&run_stdtest.step);
     }
-    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases, guest_test, host_cmd, src_dir);
-    run_integration.step.dependOn(signed_step);
+    const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
+    const run_integration = addIntegration(b, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
+    if (test_web) {
+        // The pinned v86 layout, checked against v86.wasm.
+        const layout = b.addSystemCommand(&.{ "node", "tests/web/v86-layout.mjs", ".local/v86/v86.wasm" });
+        layout.setCwd(b.path("."));
+        layout.expectExitCode(0);
+        run_integration.step.dependOn(&layout.step);
+    }
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
     // 9box and a slim root around it (design/0064-multicall.md), built inside
@@ -989,8 +1180,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases, guest_test, host_cmd, src_dir);
-            run_cases.step.dependOn(signed_step);
+            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
         } else proposal_step.dependOn(&b.addFail(b.fmt("-Dp={s} isn't a proposal under design/", .{ref})).step);

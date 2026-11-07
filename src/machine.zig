@@ -20,6 +20,7 @@ const newns = @import("newns.zig");
 const cpupool = @import("cpupool.zig");
 const gm = @import("guestmem.zig");
 const consin = @import("consin.zig");
+const web = @import("web.zig");
 const hstream = @import("hstream.zig");
 const ws = @import("ws.zig");
 const gfx = @import("gfx.zig");
@@ -705,8 +706,8 @@ pub const Machine = struct {
         note_extra: ?vmm.Extra = null,
         /// For /proc/n/status: the syscall being served plus 1, or 0 while
         /// running guest code, and the mapped memory in KiB.
-        in_sys: std.atomic.Value(u64) = .init(0),
-        mem_kb: std.atomic.Value(u64) = .init(0),
+        in_sys: web.Atomic(u64) = .init(0),
+        mem_kb: web.Atomic(u64) = .init(0),
         /// Set by the stop kick hook when a debugger asks the process to
         /// stop, so the exit loop asks the kernel at its next stop point.
         stop_flag: std.atomic.Value(bool) = .init(false),
@@ -1232,7 +1233,7 @@ pub const Machine = struct {
         _ = p.segs.growStack(f.sp);
         if (!p.segs.writable(f.sp, end -% f.sp)) return p.keepNote(&msg);
         const as = p.as.?;
-        const w = u.wordSize();
+        const w: usize = @intCast(u.wordSize());
         var words: [3 * 8]u8 = undefined;
         putWords(&words, w, &.{ 0, f.nureg, f.msg });
         var prev: [8]u8 = undefined;
@@ -1294,7 +1295,7 @@ pub const Machine = struct {
                 var words: [2 * 8]u8 = undefined;
                 putWords(&words, w, &.{ 0, nureg });
                 if (as.translate(r.pc(), 1) == null or sp % w != 0 or !p.segs.writable(sp, 4 * w)) return suicide;
-                gm.write(as, sp, words[0 .. 2 * w]) catch return suicide;
+                gm.write(as, sp, words[0 .. 2 * @as(usize, @intCast(w))]) catch return suicide;
                 r.setNoteSave(sp, nureg);
             },
             // kern.noted kills for every other argument.
@@ -1862,7 +1863,7 @@ pub const Machine = struct {
         if (len > 1 << 30) return error.NotExecutable;
         const fd = kern.open(path, kern.OREAD) catch return error.NotExecutable;
         defer kern.close(fd) catch {};
-        const bytes = try gpa.alloc(u8, len);
+        const bytes = try gpa.alloc(u8, @intCast(len));
         var off: usize = 0;
         while (off < len) {
             const got = kern.pread(fd, bytes[off..], @intCast(off)) catch return error.NotExecutable;

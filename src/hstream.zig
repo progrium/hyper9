@@ -17,6 +17,11 @@
 //! the machine's page allocator (kern.Pages), so they count against
 //! `--memory`; data and text together are capped at `ws.max_message`.
 //!
+//! On the web host (design/0021-websocket-9p.md, "On the browser host")
+//! the JS host's WebSocket connects, does TLS and frames, through the
+//! `h9_ws_*` imports below; each stream's reader is a coroutine parked
+//! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
+//!
 //! The leaves called from devhstream.c never raise kernel errors: they
 //! return -1 with the error in the caller's ERRMAX buffer, and the C side
 //! raises it.
@@ -30,7 +35,9 @@ const Io = std.Io;
 const net = std.Io.net;
 const tls = std.crypto.tls;
 
-const gpa = std.heap.smp_allocator;
+const web = @import("web.zig");
+
+const gpa = web.gpa;
 
 /// Streams in the host process, across machines.
 pub const max_streams = 256;
@@ -56,6 +63,29 @@ fn theIo() Io {
 }
 
 pub const Kind = enum(c_int) { data = 0, text = 1 };
+
+/// The JS host's WebSockets (src/web/h9-web.js), on the web host only.
+/// `ws_opened` and `ws_recv` are Suspending, so they're called through
+/// `web.coro.blocking`.
+const js = struct {
+    /// Starts a WebSocket to `url` offering the comma-separated
+    /// `protocols`; its id, or -1 if the URL is refused.
+    extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32) i32;
+    /// Waits for the open: the selected subprotocol's length (in `sel`),
+    /// or -1 if it failed or closed first.
+    extern "h9" fn ws_opened(id: i32, sel: [*]u8, n: u32) i32;
+    /// Waits for received bytes: up to `n` of the current message, with
+    /// `info` bit 0 set for text and bit 1 on its last piece; -1 once the
+    /// socket has closed and nothing is left.
+    extern "h9" fn ws_recv(id: i32, buf: [*]u8, n: u32, info: *u32) i32;
+    /// Sends a binary (kind 0) or text (1) message; -1 if not open.
+    extern "h9" fn ws_send(id: i32, kind: u32, buf: [*]const u8, n: u32) i32;
+    extern "h9" fn ws_close(id: i32, code: u32, reason: [*]const u8, n: u32) void;
+    /// A closed socket's code (1006 for a failure) and its reason or
+    /// error in `buf` (length in `len`).
+    extern "h9" fn ws_status(id: i32, buf: [*]u8, n: u32, len: *u32) u32;
+    extern "h9" fn ws_free(id: i32) void;
+};
 
 pub const State = enum(u8) { idle, connecting, established, closed };
 
@@ -291,9 +321,18 @@ pub const Stream = struct {
     /// Set under `wlock` (and `lock`) once connected; cleared under both
     /// when the thread ends.
     conn: ?*Conn = null,
+    /// The JS host's socket, on the web host, under the same rules as
+    /// `conn`.
+    sock: i32 = -1,
     close_sent: bool = false,
     keepalive: ws.Keepalive = .{ .last_rx = 0 },
-    thread: ?std.Thread = null,
+    thread: ?web.Thread = null,
+
+    /// Unblocks the reader: shuts the connection, or closes the socket.
+    fn shutdownConn(s: *Stream) void {
+        if (s.conn) |c| c.shutdown();
+        if (web.enabled and s.sock >= 0) js.ws_close(s.sock, ws.Close.normal, "", 0);
+    }
 
     fn lockS(s: *Stream) void {
         while (!s.lock.tryLock()) std.atomic.spinLoopHint();
@@ -335,7 +374,7 @@ pub const Stream = struct {
             s.ended = true;
         }
         s.state.store(.closed, .release);
-        if (s.conn) |c| c.shutdown();
+        s.shutdownConn();
     }
 
     fn fail(s: *Stream, comptime fmt: []const u8, args: anytype) void {
@@ -350,6 +389,7 @@ pub const Stream = struct {
         const io = theIo();
         s.wlock.lockUncancelable(io);
         defer s.wlock.unlock(io);
+        if (web.enabled) return s.webSend(op, payload);
         const c = s.conn orelse return false;
         if (s.close_sent) return false;
         if (op == .close) s.close_sent = true;
@@ -363,6 +403,26 @@ pub const Stream = struct {
             s.fail("i/o on hungup channel", .{});
             return false;
         };
+        return true;
+    }
+
+    /// `send` on the web host: the JS host frames, and answers pings
+    /// itself. Called under `wlock`.
+    fn webSend(s: *Stream, op: ws.Opcode, payload: []const u8) bool {
+        if (s.sock < 0 or s.close_sent) return false;
+        switch (op) {
+            .binary, .text => if (js.ws_send(s.sock, @intFromBool(op == .text), payload.ptr, @intCast(payload.len)) < 0) {
+                s.fail("i/o on hungup channel", .{});
+                return false;
+            },
+            .close => {
+                s.close_sent = true;
+                const code: u32 = if (payload.len >= 2) std.mem.readInt(u16, payload[0..2], .big) else ws.Close.normal;
+                const reason = if (payload.len > 2) payload[2..] else "";
+                js.ws_close(s.sock, code, reason.ptr, @intCast(reason.len));
+            },
+            else => {},
+        }
         return true;
     }
 
@@ -386,7 +446,7 @@ pub const Stream = struct {
             s.close_reason_len = n;
         }
         s.state.store(.closed, .release);
-        if (s.conn) |c| c.shutdown();
+        s.shutdownConn();
         s.lock.unlock();
         wake(s.id);
     }
@@ -492,7 +552,7 @@ fn start(s: *Stream) OpenError!void {
     lockTable();
     s.refs += 1;
     table_lock.unlock();
-    s.thread = std.Thread.spawn(.{}, run, .{s}) catch {
+    s.thread = web.Thread.spawn(.{}, run, .{s}) catch {
         s.fail("can't start a thread", .{});
         unref(s);
         return error.SystemResources;
@@ -546,7 +606,7 @@ fn run(s: *Stream) void {
         finish(s);
         return;
     };
-    readLoop(s);
+    if (web.enabled) webReadLoop(s) else readLoop(s);
     finish(s);
 }
 
@@ -565,9 +625,12 @@ fn finish(s: *Stream) void {
     s.lockS();
     const c = s.conn;
     s.conn = null;
+    const sock = s.sock;
+    s.sock = -1;
     s.lock.unlock();
     s.wlock.unlock(io);
     if (c) |cn| cn.destroy();
+    if (web.enabled and sock >= 0) js.ws_free(sock);
     wake(s.id);
 }
 
@@ -594,6 +657,7 @@ fn adopt(s: *Stream, c: *Conn) error{Canceled}!void {
 }
 
 fn connect(s: *Stream) ConnectError!void {
+    if (web.enabled) return webConnect(s);
     const io = theIo();
     const url = ws.Url.parse(s.url) catch unreachable;
     const proxy: ?ws.Proxy = if (s.proxy) |p| ws.Proxy.parse(p) catch return error.BadProxy else null;
@@ -652,6 +716,115 @@ fn connect(s: *Stream) ConnectError!void {
     s.state.store(.established, .release);
     wake(s.id);
     startKeepalive();
+}
+
+/// `connect` on the web host: the JS host's WebSocket connects, does TLS
+/// and the handshake. Failing, it sets the error itself, since the
+/// browser says no more than that it failed.
+fn webConnect(s: *Stream) ConnectError!void {
+    var protos: std.ArrayList(u8) = .empty;
+    defer protos.deinit(gpa);
+    for (s.protocols.items, 0..) |p, i| {
+        if (i > 0) try protos.append(gpa, ',');
+        try protos.appendSlice(gpa, p);
+    }
+    const id = js.ws_open(s.url.ptr, @intCast(s.url.len), protos.items.ptr, @intCast(protos.items.len));
+    if (id < 0) {
+        s.lockS();
+        s.failLocked("this host refuses the url", .{});
+        s.lock.unlock();
+        return error.Canceled;
+    }
+    {
+        const io = theIo();
+        s.wlock.lockUncancelable(io);
+        defer s.wlock.unlock(io);
+        s.lockS();
+        defer s.lock.unlock();
+        if (s.cancel) {
+            js.ws_free(id);
+            return error.Canceled;
+        }
+        s.sock = id;
+    }
+    // From here `finish` frees the socket.
+    var sel: [32]u8 = undefined;
+    const n = web.coro.blocking(js.ws_opened, .{ id, &sel, @as(u32, sel.len) });
+    s.lockS();
+    defer s.lock.unlock();
+    if (s.cancel) return error.Canceled;
+    if (n < 0) {
+        var why: [96]u8 = undefined;
+        var len: u32 = 0;
+        _ = js.ws_status(id, &why, why.len, &len);
+        s.failLocked("{s}", .{if (len > 0) why[0..len] else "connection failed"});
+        return error.Canceled;
+    }
+    const got = sel[0..@intCast(n)];
+    if (s.conv == null and !std.mem.eql(u8, got, ws.subprotocol)) {
+        s.failLocked("server didn't select the 9p subprotocol", .{});
+        return error.Canceled;
+    }
+    if (got.len > 0) {
+        @memcpy(s.selected[0..got.len], got);
+        s.selected_len = got.len;
+    }
+    s.opened = true;
+    s.state.store(.established, .release);
+    wake(s.id);
+}
+
+/// `readLoop` on the web host: takes what the JS host's socket received
+/// until it closes.
+fn webReadLoop(s: *Stream) void {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        var info: u32 = 0;
+        const n = web.coro.blocking(js.ws_recv, .{ s.sock, &buf, @as(u32, buf.len), &info });
+        if (n < 0) {
+            var reason: [123]u8 = undefined;
+            var len: u32 = 0;
+            const code = js.ws_status(s.sock, &reason, reason.len, &len);
+            s.lockS();
+            if (!s.ended) {
+                if (code == 1006 or code == 0) {
+                    s.failLocked("i/o on hungup channel", .{});
+                } else {
+                    s.ended = true;
+                    s.close_code = @intCast(code);
+                    @memcpy(s.close_reason[0..len], reason[0..len]);
+                    s.close_reason_len = len;
+                }
+            }
+            s.state.store(.closed, .release);
+            s.lock.unlock();
+            wake(s.id);
+            return;
+        }
+        const chunk = buf[0..@intCast(n)];
+        if (info & 1 == 0) {
+            s.lockS();
+            const ok = s.queueLocked(&s.data, chunk);
+            s.lock.unlock();
+            wake(s.id);
+            if (!ok) return;
+            continue;
+        }
+        if (s.conv == null) return protocolError(s, ws.Close.invalid_data, "text message on a 9P stream");
+        text.appendSlice(gpa, chunk) catch return s.fail("out of memory for received data", .{});
+        if (text.items.len > ws.max_message) return protocolError(s, ws.Close.too_big, "message over 16 MiB");
+        if (info & 2 == 0) continue;
+        var lenb: [4]u8 = undefined;
+        std.mem.writeInt(u32, &lenb, @intCast(text.items.len), .little);
+        s.lockS();
+        const ok = s.queueLocked(&s.text, &lenb) and s.queueLocked(&s.text, text.items);
+        s.lock.unlock();
+        text.clearRetainingCapacity();
+        wake(s.id);
+        if (!ok) return;
+    }
 }
 
 /// Keeps an HTTP status for the error message, in the close fields.
@@ -832,7 +1005,7 @@ var keepalive_started: std.atomic.Value(bool) = .init(false);
 
 fn startKeepalive() void {
     if (keepalive_started.swap(true, .acq_rel)) return;
-    const t = std.Thread.spawn(.{}, keepaliveLoop, .{}) catch {
+    const t = web.Thread.spawn(.{}, keepaliveLoop, .{}) catch {
         keepalive_started.store(false, .release);
         return;
     };
@@ -978,6 +1151,10 @@ fn h9_hstream_ctl(id: c_ulong, buf: [*]const u8, n: c_long, err: [*]u8) callconv
         return -1;
     }
     if (std.mem.eql(u8, verb, "header")) {
+        if (web.enabled) {
+            putErr(err, "headers can't be set on the web host");
+            return -1;
+        }
         const h = ws.checkHeader(arg) catch |e| {
             putErr(err, if (e == error.ReservedHeader) "header changes the handshake" else "bad header");
             return -1;
@@ -1035,6 +1212,7 @@ fn h9_hstream_ctl(id: c_ulong, buf: [*]const u8, n: c_long, err: [*]u8) callconv
 /// used. Null with the error in `err` when none may be.
 fn guestAddrs(url: ws.Url, err: [*]u8) ?[]net.IpAddress {
     const plan = kern.currentPlan();
+    if (web.enabled) return webCheck(plan, url, err);
     var list: std.ArrayList(net.IpAddress) = .empty;
     defer list.deinit(gpa);
     if (net.IpAddress.parse(url.host, url.port)) |a| {
@@ -1080,6 +1258,24 @@ fn guestAddrs(url: ws.Url, err: [*]u8) ?[]net.IpAddress {
         return null;
     }
     return allowed.toOwnedSlice(gpa) catch noMem(err);
+}
+
+/// `guestAddrs` on the web host, where the JS host's WebSocket resolves
+/// names and says nothing of what to: a name is checked before it's
+/// used, a literal address as devip would check it, and the stream
+/// connects by URL. Returns no addresses, or null with the error.
+fn webCheck(plan: ?*const policy.Plan, url: ws.Url, err: [*]u8) ?[]net.IpAddress {
+    const none = gpa.alloc(net.IpAddress, 0) catch return noMem(err);
+    const p = plan orelse return none;
+    const ok = if (net.IpAddress.parse(url.host, url.port)) |a| blk: {
+        const f = addr16(a);
+        break :blk p.netCheck(.connect, .tcp, &f, url.port);
+    } else |_| p.netLookup(.tcp, url.host, url.port);
+    if (!ok) {
+        putErr(err, "permission denied");
+        return null;
+    }
+    return none;
 }
 
 fn noMem(err: [*]u8) ?[]net.IpAddress {
@@ -1272,7 +1468,7 @@ const testing = std.testing;
 const Echo = struct {
     server: net.Server,
     port: u16,
-    thread: std.Thread = undefined,
+    thread: web.Thread = undefined,
     /// Close each connection right after the handshake.
     close_after: bool = false,
     pings: std.atomic.Value(u32) = .init(0),
@@ -1282,14 +1478,14 @@ const Echo = struct {
         const addr: net.IpAddress = .{ .ip4 = .loopback(0) };
         e.server = try addr.listen(io, .{ .reuse_address = true });
         e.port = e.server.socket.address.getPort();
-        e.thread = try std.Thread.spawn(.{}, serve, .{e});
+        e.thread = try web.Thread.spawn(.{}, serve, .{e});
         e.thread.detach();
     }
 
     fn serve(e: *Echo) void {
         while (true) {
             const st = e.server.accept(testing.io) catch return;
-            const t = std.Thread.spawn(.{}, conn, .{ e, st }) catch {
+            const t = web.Thread.spawn(.{}, conn, .{ e, st }) catch {
                 st.close(testing.io);
                 continue;
             };

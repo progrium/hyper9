@@ -82,6 +82,9 @@ zig build design -- check        # validate design/ and the test tags (also list
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
+zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, v86.wasm, h9-node, the demo page)
+zig build integration -Dweb   # the integration cases through h9-node on v86 (Node 24 or later)
+zig build web-test # the demo page in Chromium, with Playwright
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
@@ -143,6 +146,36 @@ drawterm's Cocoa on macOS and Win32 on Windows by default, `none` on Linux.
 a musl target. `-Dgfx=none` leaves graphics out; `-Dgfx=headless` is a screen
 in memory, which the backend tests use whatever `-Dgfx` is.
 
+### Browser host
+
+`zig build web` builds h9 for wasm32-wasi
+([browser-host](design/0012-browser-host.md)). It runs 9front's 386 binaries
+on v86, needs JavaScript Promise Integration (Chrome 137 or later, Node 24 or
+later), and takes `v86.wasm` from `scripts/fetch.sh`. With a 386 root tree
+(`scripts/mkroot.py --arch 386`, linked or copied as `.local/9front/root386`,
+or `-Dweb-root=DIR`) it also packs the demo page's root archive, `root.h9a`,
+from the paths in `src/web/root.list`.
+
+```sh
+zig-out/web/h9-node --root .local/9front/root386 --rc 'ls /bin | wc -l'   # the CLI under Node
+zig-out/web/h9-node --root ws://localhost:8080/9p ls /   # over a WebSocket 9P server
+(cd zig-out/web && python3 -m http.server)   # then open http://localhost:8000 for an interactive rc
+zig build integration -Dweb -Droot=$PWD/.local/9front/root386
+```
+
+The demo page runs over a WebSocket 9P server with `?root=ws://…/9p`. The
+integration run's WebSocket cases need `-Demu=unicorn` too (with
+`-Dtarget=x86_64-linux-musl` on Linux), since their 9P server is a native h9.
+
+The web host's only network is WebSockets: `#I` is masked, and `--net`
+(outbound by default) binds `/net/ws` alone at `/net`. The browser does the
+handshake, TLS and proxies, so `--root-header`, `--root-ca` and `header` in
+`ctl` are errors there, and `--net-allow` can't check what a name resolves
+to. `#C` is masked and `--host-cmd` is a usage error. A page embeds a
+machine with `createMachine({ root, memory, policy, terminal })` from
+`h9-web.js`, where `root` is a root archive's URL or a `ws://` or `wss://`
+URL; each machine runs in its own Worker.
+
 ## Releases
 
 Each GitHub release has two sets of binaries, built by
@@ -153,6 +186,7 @@ Each GitHub release has two sets of binaries, built by
 | `h9-<version>-<target>` | MIT | `h9` with the hypervisor backends only (macOS arm64 for now) |
 | `h9-emu-<version>-<target>` | GPLv2 | `h9-emu`: h9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static) and Windows arm64 and x86_64 |
 | `h9-emu-<version>-source.tar.gz` | GPLv2 and MIT | complete corresponding source for `h9-emu`: the h9 tree plus Unicorn's patched source in `.local/src/unicorn` |
+| `h9-web-<version>.tar.gz` | MIT and BSD-2 | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, `v86.wasm` (BSD-2, `LICENSE.v86`), the demo page and its root archive |
 | `SHA256SUMS` | | checksums |
 
 `h9-emu` takes the same flags as `h9` and runs on hosts without a usable
@@ -485,7 +519,8 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, and emu on Unicorn), with the guest-physical allocator and page tables the hypervisor backends share |
+| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, emu on Unicorn, and v86 for the browser host), with the guest-physical allocator and page tables the hypervisor backends share |
+| `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
 | `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |
@@ -494,5 +529,6 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
 | `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
-| `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source) into `dist/` |
+| `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source, `h9-web`) into `dist/` |
+| `tests/web/` | the browser host's Playwright check and the v86 layout check |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |

@@ -72,10 +72,10 @@ fn spanAt(as: vmm.AddressSpace, va: u64, len: u64) ?[]u8 {
     while (n < len) {
         const step = @min(len - n, vmm.page_size);
         const next = as.translate(va + n, step) orelse break;
-        if (next.ptr != head.ptr + n) break;
+        if (next.ptr != head.ptr + @as(usize, @intCast(n))) break;
         n += step;
     }
-    return head.ptr[0..n];
+    return head.ptr[0..@intCast(n)];
 }
 
 /// Copies a NUL-terminated guest string into `buf`. Fails with BadAddress

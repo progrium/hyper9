@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const vmm = @import("vmm.zig");
+const web = @import("web.zig");
 
 /// Pooled vCPUs kept back from the backend's limit for processes that
 /// can't own one.
@@ -41,7 +42,7 @@ pub const Pool = struct {
     /// Work for pool threads; `work_seq` is bumped on each push.
     queue: std.ArrayList(*Lease) = .empty,
     work_seq: std.atomic.Value(u32) = .init(0),
-    workers: std.ArrayList(std.Thread) = .empty,
+    workers: std.ArrayList(web.Thread) = .empty,
     worker_count: u32 = 0,
     stopping: std.atomic.Value(bool) = .init(false),
 
@@ -49,7 +50,7 @@ pub const Pool = struct {
     /// (for tests of the pool).
     pub fn init(gpa: std.mem.Allocator, io: std.Io, backend: vmm.Backend, cpus: ?u32, own_limit_override: ?u32) vmm.Error!Pool {
         const own_limit: ?u32 = switch (backend.kind()) {
-            .emu => null,
+            .emu, .v86 => null,
             .hvf, .kvm, .whp => blk: {
                 const max = try backend.maxVcpus();
                 break :blk if (max > reserve) max - reserve else 1;
@@ -103,7 +104,7 @@ pub const Pool = struct {
         p.lockSpin();
         defer p.lock.unlock();
         if (p.worker_count < reserve) {
-            const t = std.Thread.spawn(.{}, worker, .{p}) catch return error.OutOfMemory;
+            const t = web.Thread.spawn(.{}, worker, .{p}) catch return error.OutOfMemory;
             p.workers.append(p.gpa, t) catch {
                 p.stopping.store(true, .release);
                 t.detach();

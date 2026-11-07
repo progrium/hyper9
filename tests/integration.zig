@@ -55,6 +55,7 @@ fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
 /// whether it's pending.
 fn env(comptime src: std.builtin.SourceLocation) !Env {
     try skipPending(src.fn_name);
+    try skipWeb(src.fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
     const root = getenv(1, "H9_TEST_ROOT") orelse return error.SkipZigTest;
     // The tree from zig build mkroot is arm64, plus the host's architecture
@@ -67,6 +68,61 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, cat), .{}) catch return error.SkipZigTest;
     const backends = getenv(2, "H9_TEST_BACKENDS") orelse "auto";
     return .{ .h9 = h9, .root = root, .backends = backends, .arch = arch };
+}
+
+/// Cases the web host can't run (design/0012-browser-host.md), skipped
+/// when H9_TEST_WEB is set (-Dweb): by name, those that need a host TTY,
+/// POSIX signals, or what a page's WebSocket can't do; by tag, the
+/// network's and 9P roots' proposals, since the web host has only
+/// WebSockets.
+const web_skips = [_][]const u8{
+    "the discarded-changes notice is printed on a terminal and not otherwise",
+    "--timeout stops a console read on a terminal at once",
+    "Ctrl-C interrupts the foreground command and rc carries on",
+    "a second Ctrl-C within a second tears the machine down",
+    "rawon puts the host terminal in raw mode until exit",
+    "closing the terminal posts hangup",
+    "SIGTERM posts hangup",
+    // A copy of h9-node alone has no h9.wasm beside it.
+    "no root tree gives 125 for a guest program",
+    // A 9P root over TCP.
+    "a write to a 9P root under the default profile doesn't reach the server",
+    // A page's WebSocket can't set headers or a CA, use a proxy, or ping;
+    // the browser does those (design/0021-websocket-9p.md).
+    "--root-header is sent, and @FILE reads headers from a file",
+    "header in ctl is sent with the handshake",
+    "wsmount mounts a ws:// URL with flags and headers",
+    "--print elides a ws:// root's query and header values",
+    "--root-ca with a ws:// root is a usage error",
+    "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it",
+    "a proxy answering 407 exits 125 with the status",
+    "an idle ws:// root pings, and a server that stops answering fails it",
+    // self-host's debugger cases that write to text or read acid's frames:
+    // v86 hasn't the private text pages and breakpoint trap they need yet.
+    "/proc/n/mem reads a variable and a write to text doesn't reach a sibling",
+    "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address",
+    "a BRK posts sys: breakpoint",
+    "acid attaches and prints registers and a stack trace",
+    // Browsers and Node fail a handshake that offered subprotocols and got none.
+    "a ws:// root works with a server that selects no subprotocol",
+};
+const web_skip_tags = [_][]const u8{ "5", "13" };
+
+/// Whether the cases run on the web host (-Dweb).
+fn onWeb() bool {
+    return getenv(3, "H9_TEST_WEB") != null;
+}
+
+fn skipWeb(name: []const u8) !void {
+    if (!onWeb()) return;
+    const test_name = if (std.mem.indexOf(u8, name, "test.")) |i| name[i + 5 ..] else name;
+    for (web_skips) |n| if (std.mem.startsWith(u8, test_name, n)) return error.SkipZigTest;
+    if (name.len == 0 or name[name.len - 1] != ']') return;
+    const open = std.mem.lastIndexOfScalar(u8, name, '[') orelse return;
+    var tags = std.mem.splitScalar(u8, name[open + 1 .. name.len - 1], ',');
+    while (tags.next()) |raw| for (web_skip_tags) |t| {
+        if (std.mem.eql(u8, std.mem.trim(u8, raw, " "), t)) return error.SkipZigTest;
+    };
 }
 
 /// Skips a case tagged with a proposal that isn't implemented, unless
@@ -2044,16 +2100,21 @@ test "--memory caps segattach [4]" {
 
 // rendezvous and semaphores (design/0003-semaphores.md). The programs are
 // tests/fixtures/sema/sema.c, one per argument, built inside the guest
-// with the test architecture's compiler and loader (7c and 7l on arm64)
-// into a scratch directory given with --sandbox.
+// with the architecture's compiler and loader (7c and 7l on arm64) into
+// a scratch directory given with --sandbox.
 
 /// Builds sema.c into `s` as `sema`, on each backend.
 fn buildSema(e: Env, s: *Scratch) !void {
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sema.c", .data = @embedFile("fixtures/sema/sema.c") });
-    const arch = e.arch orelse "arm64";
-    const o: u8 = if (std.mem.eql(u8, arch, "amd64")) '6' else if (std.mem.eql(u8, arch, "386")) '8' else '7';
-    var cmd_buf: [64]u8 = undefined;
-    const cmd = try std.fmt.bufPrint(&cmd_buf, "{c}c sema.c && {c}l -o sema sema.{c}", .{ o, o, o });
+    try buildC(e, s, "sema", @embedFile("fixtures/sema/sema.c"));
+}
+
+/// Writes `src` into `s` as `name`.c and builds it there as `name`, with
+/// the compiler for the case's architecture.
+fn buildC(e: Env, s: *Scratch, comptime name: []const u8, src: []const u8) !void {
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name ++ ".c", .data = src });
+    const c: u8 = if (e.arch) |a| (if (std.mem.eql(u8, a, "386")) '8' else if (std.mem.eql(u8, a, "amd64")) '6' else '7') else '7';
+    var buf: [128]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&buf, "{c}c {s}.c && {c}l -o {s} {s}.{c}", .{ c, name, c, name, name, c });
     const r = try run(e, &.{ "--sandbox", s.path, "--rc", cmd });
     defer r.deinit();
     errdefer std.debug.print("{s}: {s}{s}", .{ cmd, r.out, r.err });
@@ -2920,7 +2981,12 @@ const RootServer = struct {
         const listen = try std.fmt.bufPrint(&listen_buf, "tcp!127.0.0.1!{d}", .{s.port});
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
-        try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", e.root, "--net=enable" });
+        // The web host can't listen, so on it a native h9 serves
+        // (H9_TEST_SERVER, from -Dweb -Demu=unicorn), or the case skips.
+        if (onWeb()) {
+            const server = getenv(6, "H9_TEST_SERVER") orelse return error.SkipZigTest;
+            try argv.appendSlice(gpa, &.{ server, "--backend", "auto", "--root", e.root, "--net=enable" });
+        } else try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", e.root, "--net=enable" });
         if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
         // The tree is the server's cwd, so it's /mnt/term/cwd wherever
         // it is on the host.
@@ -3414,7 +3480,9 @@ test "--no-guest-tools leaves out the bind and masks #H [32]" {
     const p = try run(e, &.{ "--no-guest-tools", "--print", "ls" });
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "devmask:  #C #H #U #b #i #m\n") != null);
+    // The web host also masks #I, having no sockets.
+    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #b #i #m\n" else "devmask:  #C #H #U #b #i #m\n";
+    try std.testing.expect(std.mem.indexOf(u8, p.out, want) != null);
     const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
@@ -3730,7 +3798,9 @@ test "a handshake answered with 401 exits 125 with the status [21]" {
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [128]u8 = undefined;
-    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: server answered 401 Unauthorized", .{rl.url()}));
+    // A browser doesn't say why a WebSocket failed.
+    const why = if (onWeb()) "connection failed" else "server answered 401 Unauthorized";
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: {s}", .{ rl.url(), why }));
 }
 
 test "an unreachable ws:// root exits 125 [21]" {
@@ -3744,7 +3814,8 @@ test "an unreachable ws:// root exits 125 [21]" {
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [128]u8 = undefined;
-    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: connection refused", .{url}));
+    const why = if (onWeb()) "connection failed" else "connection refused";
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: {s}", .{ url, why }));
 }
 
 test "a server close makes guest file operations fail [21]" {
@@ -4165,6 +4236,70 @@ fn wssUrl(buf: []u8) ![]const u8 {
     return buf[0..v.len];
 }
 
+// websocket-9p on the browser host: the cases above run there too, under
+// -Dweb with -Demu=unicorn for their servers; these check what's
+// particular to it.
+
+test "a ws:// root runs /bin/ls on the web host [21, 12]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    try expectSameAsHost(e, w.url(), &.{ "/bin/ls", "/", "/bin/ls" });
+}
+
+test "root_headers is an error on the web host [21, 12]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--root-header", "Authorization: Bearer x", "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try expectIn(r.err, "--root-header isn't available on the web host");
+}
+
+test "the guest mounts a /net/ws conversation on the web host [21, 12]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try rcWs(&cmd, w.url(), " 9p", "mkdir /tmp/fs && mount -c /net/ws/$n/data /tmp/fs && cat /tmp/fs/lib/namespace | wc -l") });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    const host = try run(e, &.{ "--rc", "cat /lib/namespace | wc -l" });
+    defer host.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(host.out, r.out);
+}
+
+test "text messages round-trip through /net/ws on the web host [21, 12]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{});
+    defer rl.stop();
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--rc", try rcWs(&cmd, rl.url(), "", "echo -n héllo >/net/ws/$n/text; " ++ read_text) });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("héllo\n", r.out);
+}
+
+test "--net=outbound binds only /net/ws on the web host [21, 12]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    const r = try run(e, &.{ "--net=outbound", "--rc", "ls /net; ls '#I' >[2]/dev/null || echo no ip" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/net/ws\nno ip\n", r.out);
+    const p = try run(e, &.{ "--net=outbound", "--print", "/bin/echo" });
+    defer p.deinit();
+    try expectIn(p.out, "bind '#ℏ' /net");
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "unenforced") == null);
+}
+
 test "a wss:// root runs /bin/ls [21]" {
     const e = try env(@src());
     var buf: [1024]u8 = undefined;
@@ -4564,4 +4699,117 @@ test "ls -l /bin in a contained tree with links (demo) [34]" {
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/kitty") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/cat") != null);
+}
+
+// The browser host's cases (design/0012-browser-host.md). They run on
+// every backend; what they guard is the web host's: coroutines that park
+// for the event loop, a JIT over recycled pages, and stacks without
+// guard pages.
+
+test "a spinning process doesn't starve a pipeline [12]" {
+    const e = try env(@src());
+    // The spinner makes no system calls, so only preemption lets the
+    // pipeline run.
+    const r = try run(e, &.{ "--timeout", "60s", "--rc", "{while(){}} & spin=$apid; echo hello | tr h H | wc -c; echo kill >/proc/$spin/note" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("      6\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a console read parks and resumes on input [12]" {
+    const e = try env(@src());
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // While read waits for a line, the background process still runs.
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "{sleep 1; echo ti^ck} & echo rea^dy; x=`{read}; echo got $x" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        try t.expect("tick", slow(10_000));
+        try t.send("line" ++ enter);
+        try t.expect("got line", slow(10_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    }
+}
+
+test "a note interrupts a parked console read [12]" {
+    const e = try env(@src());
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // Nothing is typed, so read stays parked until the note.
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "read </dev/cons & r=$apid; sleep 1; echo interrupt >/proc/$r/note; wait; echo af^ter" });
+        defer t.deinit();
+        try t.expect("after", slow(10_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    }
+}
+
+test "errno survives a park [12]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // Each rm fails in the host's rmdir with ENOTEMPTY, which devfs reads
+    // from errno, while other processes fail other host calls with ENOENT
+    // and park in between.
+    var cmd: std.ArrayList(u8) = .empty;
+    defer cmd.deinit(gpa);
+    for (0..8) |i| {
+        var buf: [16]u8 = undefined;
+        const d = try std.fmt.bufPrint(&buf, "d{d}", .{i});
+        try s.tmp.dir.createDirPath(std.testing.io, d);
+        const f = try std.fmt.bufPrint(&buf, "d{d}/f", .{i});
+        try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = f, .data = "" });
+    }
+    try cmd.appendSlice(gpa, "for(i in 0 1 2 3 4 5 6 7){ rm d$i >[2=1] & ls nosuch$i >[2]/dev/null & }; wait");
+    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--rc", cmd.items });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(8, std.mem.count(u8, r.out, "not empty"));
+    try std.testing.expectEqual(8, std.mem.count(u8, r.out, "\n"));
+}
+
+test "exec into recycled pages doesn't run stale JIT code [12]" {
+    const e = try env(@src());
+    // Each program's pages are freed when it exits and handed to the
+    // next, so echo's compiled text would run in basename's place.
+    const r = try run(e, &.{ "--timeout", "120s", "--rc", "for(i in `{seq 1 40}){ /bin/echo a; /bin/basename /x/b }" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("a\nb\n" ** 40, r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "RFMEM processes see each other's writes [12]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "rfmem", @embedFile("fixtures/rfmem/rfmem.c"));
+    // Two CPUs at least: with one, the first to spin keeps it.
+    for ([_][]const u8{ "2", "4" }) |cpus| {
+        const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--cpus", cpus, "--rc", "./rfmem" });
+        defer r.deinit();
+        errdefer std.debug.print("--cpus {s}: {s}\n", .{ cpus, r.err });
+        try std.testing.expectEqualStrings("100 100\n", r.out);
+        try std.testing.expectEqual(0, r.code);
+    }
+}
+
+test "a coroutine stack overflow panics instead of corrupting [12]" {
+    const e = try env(@src());
+    // Coroutines are the web host's; native kernel processes are threads
+    // with guard pages.
+    if (getenv(3, "H9_TEST_WEB") == null) return error.SkipZigTest;
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        // Every coroutine gets an 8 KiB stack, which running a command overflows.
+        const r = try runEnv(e, backend, &.{ "--rc", "ls /bin >/dev/null" }, &.{.{ "H9_TEST_KSTACK", "8192" }}, slow(30_000));
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try expectIn(r.err, "kernel stack overflow in ");
+        try std.testing.expect(r.code != 0);
+    }
 }

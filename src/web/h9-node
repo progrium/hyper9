@@ -1,0 +1,98 @@
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
+// h9 on the web host's build, under Node 24 or later (JSPI on by default):
+// the same flags as the native h9, with v86 as the backend. The host
+// file system is WASI's, preopened at /. design/0012-browser-host.md.
+
+import fs from 'node:fs';
+import { WASI } from 'node:wasi';
+import { run, haveJSPI, Panic } from './h9-web.js';
+
+const dir = new URL('.', import.meta.url);
+if (!haveJSPI) {
+  console.error('h9: this Node lacks JavaScript Promise Integration (Node 24 or later has it)');
+  process.exit(125);
+}
+
+// Console input, one read per request, as the native console reader does.
+const stdin = process.stdin;
+let chunks = [], ended = false, waiting = null;
+const deliver = () => {
+  if (!waiting) return;
+  const w = waiting;
+  if (chunks.length) {
+    let c = chunks.shift();
+    if (c.length > w.n) { chunks.unshift(c.subarray(w.n)); c = c.subarray(0, w.n); }
+    waiting = null;
+    stdin.pause();
+    w.res(c);
+  } else if (ended) {
+    waiting = null;
+    w.res(null);
+  }
+};
+stdin.on('data', (b) => { chunks.push(new Uint8Array(b)); deliver(); });
+stdin.on('end', () => { ended = true; deliver(); });
+stdin.on('error', () => { ended = true; deliver(); });
+stdin.pause();
+
+// Signals: Ctrl-C posts interrupt; SIGHUP and SIGTERM post hangup (2 and
+// 3, so the exit status can name the signal).
+const sigq = [];
+let sigwait = null;
+const raise = (n) => { if (sigwait) { const r = sigwait; sigwait = null; r(n); } else sigq.push(n); };
+process.on('SIGINT', () => raise(1));
+process.on('SIGHUP', () => raise(2));
+process.on('SIGTERM', () => raise(3));
+
+const host = {
+  readStdin: (n) => new Promise((res) => {
+    waiting = { n, res };
+    if (!chunks.length && !ended) stdin.resume();
+    deliver();
+  }),
+  cancelStdin: () => { if (waiting) { const w = waiting; waiting = null; stdin.pause(); w.res('cancelled'); } },
+  waitSignal: () => sigq.length ? sigq.shift() : new Promise((res) => { sigwait = res; }),
+  stopSignals: () => raise(0),
+  setRaw: (on) => { if (stdin.isTTY) stdin.setRawMode(on); },
+};
+
+const env = { ...process.env, PWD: process.cwd() };
+const wasi = new WASI({
+  version: 'preview1',
+  args: ['h9', ...process.argv.slice(2)],
+  env,
+  preopens: { '/': '/' },
+  returnOnExit: true,
+});
+let code;
+try {
+  code = await run({
+    h9: fs.readFileSync(new URL('h9.wasm', dir)),
+    v86: fs.readFileSync(new URL('v86.wasm', dir)),
+    wasi: (memory) => {
+      const imports = wasi.getImportObject().wasi_snapshot_preview1;
+      // WASI needs the memory, which h9 imports rather than exports.
+      wasi.initialize({ exports: { memory } });
+      // Called through a JS function each: wasm calling Node's WASI
+      // functions directly takes V8's fast API path, which crashes Node
+      // on a JSPI coroutine's stack (it must run on the central stack).
+      const out = {};
+      for (const [k, f] of Object.entries(imports)) out[k] = (...a) => f(...a);
+      return out;
+    },
+    host,
+    // The integration suite's stack depths, for the default stack size.
+    stats: process.env.H9_TEST_STACK_LOG ? ({ maxStack }) => fs.appendFileSync(process.env.H9_TEST_STACK_LOG, `${maxStack}\n`) : undefined,
+  });
+} catch (e) {
+  console.error(e instanceof Panic ? `h9: panic: ${e.message}` : e);
+  code = 125;
+}
+if (stdin.isTTY) stdin.setRawMode(false);
+// Ends by letting the event loop run out rather than by process.exit,
+// which can deadlock in V8 when a background compile is waiting for a GC
+// as the process exits. Whatever still holds the loop open, such as a
+// parked coroutine's timer, gets a moment and is then cut off.
+process.exitCode = code;
+stdin.destroy();
+setTimeout(() => process.exit(code), 1000).unref();

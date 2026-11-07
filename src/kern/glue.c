@@ -7,7 +7,7 @@
 
 #include "u.h"
 
-#ifndef WINDOWS
+#if !defined(WINDOWS) && !defined(H9_WEB)
 #include <pthread.h>
 #include <time.h>
 #endif
@@ -24,7 +24,7 @@
 #include "screen.h"
 #include "tsleep.h"
 
-#ifndef WINDOWS
+#if !defined(WINDOWS) && !defined(H9_WEB)
 #include <pwd.h>
 #endif
 
@@ -39,8 +39,8 @@ void *auth_allocrpc(int afd) { USED(afd); werrstr("no factotum"); return nil; }
 void auth_freerpc(void *rpc) { USED(rpc); }
 int auth_rpc(void *rpc, char *verb, void *a, int n) { USED(rpc, verb, a, n); return -1; }
 
-#ifdef WINDOWS
-extern char *h9_hostuser(void);	/* glue-win32.c */
+#if defined(WINDOWS) || defined(H9_WEB)
+extern char *h9_hostuser(void);	/* glue-win32.c, os-wasm.c */
 #define hostuser h9_hostuser
 #else
 static char*
@@ -232,11 +232,11 @@ h9_fauth(int fd, char *aname)
 	return fd;
 }
 
-#ifndef WINDOWS
+#if !defined(WINDOWS) && !defined(H9_WEB)
 /*
  * The host side of tsleep's timer kproc (tsleep.c): a lock, and a wait on
  * a condition variable until a deadline on the monotonic clock. The
- * Windows version is in glue-win32.c.
+ * Windows version is in glue-win32.c, and the web host's in os-wasm.c.
  */
 static pthread_mutex_t tmu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t tcond;
