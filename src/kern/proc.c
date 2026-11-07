@@ -1445,9 +1445,10 @@ h9_kern_rfork(int flag)
 }
 
 /*
- * Lets go of the calling process's fds, namespace and current directory
- * before it ends, so that what they hold (an overlay's pages, say) is
- * freed while the machine that owns it is still there: the process's
+ * Lets go of the calling process's fds, namespace, current directory and
+ * image (for /proc/n/text) before it ends, so that what they hold (an
+ * overlay's pages, say) is freed while the machine that owns it is still
+ * there: the process's
  * thread can outlive the machine's wait for it. dot and slash become #/,
  * since pexit closes them. The machine's last process to get here also
  * closes what's posted in its /srv (devsrv.c), which nothing else holds.
@@ -1476,6 +1477,15 @@ h9_kern_release(void)
 	cclose(c);
 
 	h = lookup(up);
+	/* The image's channel (/proc/n/text) can hold an overlay too. */
+	if(h != nil){
+		lock(&h->nlk);
+		c = h->textc;
+		h->textc = nil;
+		unlock(&h->nlk);
+		if(c != nil)
+			cclose(c);
+	}
 	if(h == nil || h->released)
 		return;
 	h->released = 1;
@@ -1507,6 +1517,13 @@ h9_kern_exit(void)
 		pexit("", 1);
 		return;
 	}
+	/* Normally gone already, with h9_kern_release. */
+	lock(&h->nlk);
+	c = h->textc;
+	h->textc = nil;
+	unlock(&h->nlk);
+	if(c != nil)
+		cclose(c);
 	leave(h);
 	/* Notes posted from now on are dropped; the Proc goes with pexit. */
 	qlock(&h->debug);
@@ -1516,15 +1533,11 @@ h9_kern_exit(void)
 	h->killed = 0;
 	h->stopped = 0;
 	h->procctl = 0;
-	c = h->textc;
-	h->textc = nil;
 	freenotes(h);
 	unlock(&h->nlk);
 	qunlock(&h->debug);
 	/* A debugger waiting for it to stop finds it gone (9front's pexit). */
 	wakeup(&h->stopr);
-	if(c != nil)
-		cclose(c);
 
 	ph = h->parent;
 	if(ph != nil){
