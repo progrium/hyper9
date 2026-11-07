@@ -2945,6 +2945,32 @@ test "a hangup kills hcmd's host command [baseline, 32]" {
     try std.testing.expect(!s.exists("late"));
 }
 
+test "a machine's host commands die with it [baseline]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // Started in the background and left running when rc exits.
+    const bg = try run(e, &.{ "--host-cmd", "--cwd", s.path, "--rc", "hcmd sh -c 'sleep 1; touch bg' & sleep 0" });
+    defer bg.deinit();
+    try std.testing.expectEqual(0, bg.code);
+    // Read with no handler to kill it: the reader waits in a host read
+    // that the timeout's hangup can't interrupt.
+    var t: [16]u8 = undefined;
+    const raw = try run(e, &.{ "--host-cmd", "--cwd", s.path, "--timeout", slowTimeout(&t, 300), "--rc",
+        \\<>[3]'#C/cmd/clone' {
+        \\    echo 'exec sh -c ''sleep 3; touch raw''' >[1=3]
+        \\    cat '#C/cmd/'`{read <[0=3]}^/data
+        \\}
+    });
+    defer raw.deinit();
+    try std.testing.expectEqual(1, raw.code);
+    try std.testing.io.sleep(.fromMilliseconds(2000), .awake);
+    try std.testing.expect(!s.exists("bg"));
+    try std.testing.expect(!s.exists("raw"));
+}
+
 // 9P over WebSocket (design/0021-websocket-9p.md). The server is 9p-roots'
 // RootServer with tests/wsrelay.zig in front of it, relaying WebSocket
 // messages to its TCP port. /net/ws cases use the relay in echo mode.

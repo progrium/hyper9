@@ -483,14 +483,16 @@ pub fn build(b: *std.Build) void {
         .files = &kern_notes,
         .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
     });
+    // oscmd and friends are renamed so src/kern/hostcmd.c can wrap them:
+    // a machine's host commands die with it.
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
         .files = if (os == .windows) &kern_win32 else &kern_posix,
-        .flags = flags,
+        .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-Doscmd=h9_dt_oscmd", "-Doscmdkill=h9_dt_oscmdkill", "-Doscmdfree=h9_dt_oscmdfree" } }) catch @panic("OOM"),
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "hostcmd.c" },
         .flags = flags,
     });
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{

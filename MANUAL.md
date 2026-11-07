@@ -876,6 +876,10 @@ host directory (`/tmp`, the root, an overlay), it runs in h9's own. `-d dir`
 names the host directory, and `-n` gives the command an empty standard
 input. An interrupt or a hangup kills the host command.
 
+Host commands die with the machine: when it ends, normally or at a timeout,
+any still running are killed, with their process groups, however they were
+started.
+
 ```text
 $ h9 --host-cmd hcmd uname -s
 Linux
