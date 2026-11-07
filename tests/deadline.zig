@@ -28,6 +28,9 @@ pub fn waitReadable(handle: net.Socket.Handle, ms: i32) !void {
     if (builtin.os.tag == .windows) return;
     var fds = [_]std.posix.pollfd{.{ .fd = handle, .events = std.posix.POLL.IN, .revents = 0 }};
     if (try std.posix.poll(&fds, ms) == 0) return error.Timeout;
+    // Closed under us, as a relay's `stop` does while its thread waits:
+    // accepting on it would be a use after close.
+    if (fds[0].revents & std.posix.POLL.NVAL != 0) return error.Closed;
 }
 
 fn listen(io: Io) !net.Server {

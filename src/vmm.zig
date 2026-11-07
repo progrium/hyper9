@@ -16,11 +16,15 @@ const hvf = if (have_hvf) @import("vmm/hvf.zig") else @import("vmm/none.zig");
 const kvm = if (have_kvm) @import("vmm/kvm.zig") else @import("vmm/none.zig");
 const whp = if (have_whp) @import("vmm/whp.zig") else @import("vmm/none.zig");
 const emu = if (have_emu) @import("vmm/emu.zig") else @import("vmm/none.zig");
+const v86 = if (have_v86) @import("vmm/v86.zig") else @import("vmm/none.zig");
 
 const have_hvf = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
 const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
-const have_emu = build_options.emu != .none;
+const have_emu = build_options.emu != .none and !web;
+/// The web host (design/0012-browser-host.md) has only v86.
+const web = builtin.os.tag == .wasi;
+const have_v86 = web;
 
 pub const Arch = aout.Arch;
 
@@ -28,11 +32,13 @@ pub const Arch = aout.Arch;
 pub const host_arch: ?Arch = switch (builtin.cpu.arch) {
     .aarch64 => .arm64,
     .x86_64 => .amd64,
+    // The web host runs 386 binaries on v86 (design/0012-browser-host.md).
+    .wasm32 => .i386,
     else => null,
 };
 
 /// What `--backend` asks for.
-pub const BackendKind = enum { auto, hvf, kvm, whp, emu };
+pub const BackendKind = enum { auto, hvf, kvm, whp, emu, v86 };
 
 /// A concrete backend.
 pub const Kind = enum {
@@ -40,6 +46,8 @@ pub const Kind = enum {
     kvm,
     whp,
     emu,
+    /// v86's 386 CPU, on the web host only (design/0012-browser-host.md).
+    v86,
 
     pub fn built(k: Kind) bool {
         return switch (k) {
@@ -47,6 +55,7 @@ pub const Kind = enum {
             .kvm => have_kvm,
             .whp => have_whp,
             .emu => have_emu,
+            .v86 => have_v86,
         };
     }
 };
@@ -317,8 +326,10 @@ pub fn create(gpa: std.mem.Allocator, io: std.Io, want: BackendKind, opts: Optio
         .hvf => createKind(gpa, io, .hvf, opts),
         .kvm => createKind(gpa, io, .kvm, opts),
         .emu => createKind(gpa, io, .emu, opts),
+        .v86 => createKind(gpa, io, .v86, opts),
         .whp => createKind(gpa, io, .whp, opts),
         .auto => {
+            if (web) return createKind(gpa, io, .v86, opts);
             if (native()) |k| {
                 if (createKind(gpa, io, k, opts)) |b| return b else |err| switch (err) {
                     error.HypervisorUnavailable, error.WrongArch => if (!have_emu) return err,
@@ -336,6 +347,7 @@ fn createKind(gpa: std.mem.Allocator, io: std.Io, k: Kind, opts: Options) Create
         .kvm => .{ .kvm = try kvm.Backend.create(gpa, io, opts) },
         .whp => .{ .whp = try whp.Backend.create(gpa, io, opts) },
         .emu => .{ .emu = try emu.Backend.create(gpa, io, opts) },
+        .v86 => .{ .v86 = try v86.Backend.create(gpa, io, opts) },
     };
 }
 
@@ -344,6 +356,7 @@ pub const Backend = union(Kind) {
     kvm: *kvm.Backend,
     whp: *whp.Backend,
     emu: *emu.Backend,
+    v86: *v86.Backend,
 
     pub fn kind(b: Backend) Kind {
         return b;
@@ -389,6 +402,7 @@ pub const AddressSpace = union(enum) {
     kvm: *kvm.AddressSpace,
     whp: *whp.AddressSpace,
     emu: *emu.AddressSpace,
+    v86: *v86.AddressSpace,
     /// A translate-only stand-in for unit tests of guest-memory code.
     fake: Fake,
 
@@ -476,6 +490,7 @@ pub const Vcpu = union(Kind) {
     kvm: kvm.Vcpu,
     whp: whp.Vcpu,
     emu: emu.Vcpu,
+    v86: v86.Vcpu,
 
     pub fn destroy(v: *Vcpu) void {
         switch (v.*) {

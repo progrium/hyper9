@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h9 in the browser</title>
+<!-- No favicon request, whose 404 desktop Chrome logs as an error. -->
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg: #fdfdf6; --fg: #1d1d1d; --dim: #6b6b6b; --accent: #2a5db0; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161616; --fg: #e8e8e0; --dim: #9a9a9a; --accent: #7aa7ee; } }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+  body { display: flex; flex-direction: column; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  header { padding: 8px 16px; color: var(--dim); border-bottom: 1px solid color-mix(in srgb, var(--fg) 15%, transparent); }
+  header button { font: inherit; margin-left: 8px; }
+  #term { flex: 1; overflow: auto; margin: 0; padding: 8px 16px; white-space: pre-wrap; word-break: break-all; outline: none; }
+  #term .cursor { background: var(--accent); color: var(--bg); }
+</style>
+</head>
+<body>
+<header>h9: 9front's 386 programs on v86, in a Web Worker. Type to rc; <button id="intr">interrupt</button> or Ctrl-C stops a command.</header>
+<pre id="term" tabindex="0" aria-label="terminal"></pre>
+<script type="module">
+import { createMachine, haveJSPI } from './h9-web.js';
+
+const term = document.getElementById('term');
+const dec = new TextDecoder();
+let out = '';       // everything printed
+let line = '';      // the line being typed, in cooked mode
+let raw = false;
+
+const render = () => {
+  term.textContent = out + (raw ? '' : line);
+  const c = document.createElement('span');
+  c.className = 'cursor';
+  c.textContent = ' ';
+  term.append(c);
+  term.scrollTop = term.scrollHeight;
+};
+const print = (s) => {
+  for (const ch of s.replace(/\r\n?/g, '\n')) {
+    if (ch === '\b') out = out.slice(0, -1);
+    else out += ch;
+  }
+  render();
+};
+
+if (!haveJSPI) {
+  print('This browser lacks JavaScript Promise Integration, which h9 needs (Chrome 137 or later).\n');
+} else {
+  // ?root=ws://host/9p runs over a 9P server instead of root.h9a.
+  const m = await createMachine({
+    root: new URLSearchParams(location.search).get('root') ?? undefined,
+    terminal: { write: (b) => print(dec.decode(b, { stream: true })), setRaw: (on) => { raw = on; render(); } },
+  });
+  document.getElementById('intr').onclick = () => { m.interrupt(); term.focus(); };
+  term.addEventListener('keydown', (e) => {
+    if (e.metaKey || (e.ctrlKey && e.key === 'v')) return;
+    let s = null;
+    if (e.ctrlKey && e.key.length === 1) {
+      const k = e.key.toLowerCase();
+      if (k === 'c' && !raw) { m.interrupt(); line = ''; print('\n'); e.preventDefault(); return; }
+      if (k === 'd' && !raw) { m.input(line + '\x04'); line = ''; e.preventDefault(); return; }
+      s = String.fromCharCode(k.charCodeAt(0) - 96);
+    } else if (e.key === 'Enter') s = '\n';
+    else if (e.key === 'Backspace') s = '\b';
+    else if (e.key === 'Tab') s = '\t';
+    else if (e.key === 'Escape') s = '\x1b';
+    else if (e.key.length === 1) s = e.key;
+    if (s === null) return;
+    e.preventDefault();
+    if (raw) { m.input(s); return; }
+    // Cooked mode: the page edits the line and echoes it, as a host
+    // terminal would, and sends it whole.
+    if (s === '\b') line = line.slice(0, -1);
+    else if (s === '\n') { out += line + '\n'; m.input(line + '\n'); line = ''; }
+    else line += s;
+    render();
+  });
+  term.addEventListener('paste', (e) => {
+    const t = e.clipboardData.getData('text');
+    e.preventDefault();
+    if (raw) { m.input(t); return; }
+    const parts = (line + t).split('\n');
+    line = parts.pop();
+    for (const p of parts) { out += p + '\n'; m.input(p + '\n'); }
+    render();
+  });
+  term.focus();
+  render();
+  const code = await m.run(['rc', '-i']).catch((e) => { print(`\n${e.message}\n`); return null; });
+  if (code !== null) print(`\n[h9 exited ${code}]\n`);
+}
+</script>
+</body>
+</html>

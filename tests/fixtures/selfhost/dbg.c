@@ -62,7 +62,7 @@ main(int argc, char **argv)
 	char buf[8192];
 	uchar brk[4];
 	uvlong base, top;
-	Ureg u;
+	struct Ureg u;	/* 386's ureg.h has no typedef */
 	ulong l;
 	int fd, pid, n, nbrk;
 

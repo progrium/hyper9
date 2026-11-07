@@ -62,13 +62,15 @@ pub const Relay = struct {
     last_target_len: usize = 0,
     /// Open connections, so `hangupAll` can close them.
     conns: [16]?net.Stream = @splat(null),
+    /// The accepting thread, which `stop` ends before closing the socket.
+    thread: ?std.Thread = null,
+    stopping: std.atomic.Value(bool) = .init(false),
 
     pub fn start(rl: *Relay, io: Io, port: u16, opts: Options) !void {
         const addr: net.IpAddress = .{ .ip4 = .loopback(port) };
         rl.* = .{ .io = io, .opts = opts, .server = try addr.listen(io, .{ .reuse_address = true }), .port = 0 };
         rl.port = rl.server.socket.address.getPort();
-        const t = try std.Thread.spawn(.{}, serve, .{rl});
-        t.detach();
+        rl.thread = try std.Thread.spawn(.{}, serve, .{rl});
     }
 
     /// `ws://127.0.0.1:PORT/9p`.
@@ -103,7 +105,17 @@ pub const Relay = struct {
     }
 
     /// Stops accepting. Open connections run on until their peers end.
+    /// The accepting thread is woken with a connection of its own and
+    /// joined first: closing the socket under it would have it accept on
+    /// a closed (or reused) descriptor, after the Relay is gone.
     pub fn stop(rl: *Relay) void {
+        rl.stopping.store(true, .release);
+        if (rl.thread) |t| {
+            const addr: net.IpAddress = .{ .ip4 = .loopback(rl.port) };
+            if (addr.connect(rl.io, .{ .mode = .stream })) |c| c.close(rl.io) else |_| {}
+            t.join();
+            rl.thread = null;
+        }
         rl.server.socket.close(rl.io);
     }
 
@@ -114,6 +126,11 @@ pub const Relay = struct {
     fn serve(rl: *Relay) void {
         while (true) {
             const st = (if (rl.opts.forever) rl.server.accept(rl.io) else deadline.accept(&rl.server, rl.io)) catch return;
+            if (rl.stopping.load(.acquire)) {
+                st.close(rl.io);
+                return;
+            }
+            noDelay(st);
             const t = std.Thread.spawn(.{}, conn, .{ rl, st }) catch {
                 st.close(rl.io);
                 continue;
@@ -175,6 +192,7 @@ pub const Relay = struct {
             };
         };
         defer if (backend) |b| b.close(io);
+        if (backend) |b| noDelay(b);
         var c: Conn = .{ .rl = rl, .w = &sw.interface };
         ws.writeAccept(c.w, q.key, if (rl.opts.subprotocol and q.offers(ws.subprotocol)) ws.subprotocol else null) catch return;
         _ = rl.accepted.fetchAdd(1, .acq_rel);
@@ -295,6 +313,14 @@ const Conn = struct {
         }
     }
 };
+
+/// Turns off Nagle's algorithm on `st`: `split` writes messages of a few
+/// bytes, each of which would otherwise wait for the last one's ACK.
+fn noDelay(st: net.Stream) void {
+    if (@import("builtin").os.tag == .windows) return;
+    const one: c_int = 1;
+    std.posix.setsockopt(st.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
+}
 
 /// What the target has written and `coalesce` hasn't sent yet.
 const Pending = struct {

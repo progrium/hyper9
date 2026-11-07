@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const aout = @import("aout.zig");
+const web = @import("web.zig").enabled;
 
 pub const Profile = enum { default, tight };
 
@@ -382,7 +383,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     const net = pol.net orelse (if (tight) NetMode.disable else .outbound);
 
     // Every mode is enforceable now; `unenforced` stays for capabilities a
-    // future build knows but can't enforce.
+    // future build knows but can't enforce. On the web host the network
+    // is WebSockets only (`/net/ws`), which the modes govern as natively.
     const unenforced: CapSet = .initEmpty();
     const write = write_req;
 
@@ -400,8 +402,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
     }
-    if (pol.host_cmd and !@import("build_options").host_cmd) {
-        err_msg.* = "--host-cmd: this h9 was built without host commands (zig build -Dhost-cmd)";
+    // The web host never has them (design/0012-browser-host.md).
+    if (pol.host_cmd and (web or !@import("build_options").host_cmd)) {
+        err_msg.* = if (web) "--host-cmd: the web host has no host commands (zig build -Dhost-cmd builds them natively)" else "--host-cmd: this h9 was built without host commands (zig build -Dhost-cmd)";
         return error.Conflict;
     }
     if (net == .disable and pol.net_allow.len > 0) {
@@ -499,7 +502,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // The machine's own service registry (design/0008-devsrv.md): it shows
     // nothing outside the machine, so it's in both profiles.
     try binds.append(arena, .{ .from = "#s", .to = "/srv", .create = true, .optional = true });
-    if (net != .disable) {
+    if (net != .disable and web) {
+        // No sockets on the web host: WebSockets are its whole network.
+        try binds.append(arena, .{ .from = "#" ++ hstream_dev, .to = "/net", .optional = true, .note = "WebSockets, under --net" });
+    } else if (net != .disable) {
         try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
         try binds.append(arena, .{ .from = "#" ++ hstream_dev, .to = "/net", .flag = .after, .optional = true, .note = "WebSockets, under --net" });
     }
@@ -570,11 +576,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     for (pol.read_deny) |p| try rules.append(arena, .{ .path = p, .kind = .deny });
 
     var devmask: std.ArrayList(u8) = .empty;
-    if (!pol.host_cmd) try devmask.append(arena, 'C');
-    if (net == .disable) {
-        try devmask.append(arena, 'I');
-        try devmask.appendSlice(arena, hstream_dev);
-    }
+    if (!pol.host_cmd or web) try devmask.append(arena, 'C');
+    if (net == .disable or web) try devmask.append(arena, 'I');
+    if (net == .disable) try devmask.appendSlice(arena, hstream_dev);
     if (!in.guest_tools) try devmask.append(arena, 'H');
     if (!pol.host_fs) try devmask.append(arena, 'U');
     // Without a window, a guest can neither open one nor reach the screen
@@ -625,7 +629,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (plain) try caveats.append(arena, "the 9P root's connection isn't encrypted");
     }
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
-    if (net != .disable) {
+    if (net != .disable and web) {
+        try caveats.append(arena, "the web host's network is WebSockets only, at /net/ws, to anywhere the browser's own rules allow");
+        if (net_allow.len > 0) try caveats.append(arena, "the browser resolves names itself, so --net-allow checks a name, not the addresses it resolves to, and link-local names aren't refused");
+    } else if (net != .disable) {
         if (net_allow.len == 0) {
             try caveats.append(arena, "outbound connections can reach any address the host can except link-local, including its loopback and local network");
             try caveats.append(arena, "refusing link-local doesn't cover every cloud metadata endpoint: some, such as fd00:ec2::254 and 100.100.100.200, use other ranges");

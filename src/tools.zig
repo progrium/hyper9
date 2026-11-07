@@ -91,7 +91,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
 
     var failed = false;
     const kinds: []const vmm.BackendKind = switch (o.backend) {
-        .auto => &.{ .hvf, .kvm, .whp, .emu, .auto },
+        .auto => &.{ .hvf, .kvm, .whp, .emu, .v86, .auto },
         else => &.{o.backend},
     };
     for (kinds) |k| {

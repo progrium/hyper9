@@ -8,7 +8,7 @@
  * devlfd-win32's ReadFile and WriteFile, so it isn't supported there.
  */
 
-#ifndef WINDOWS
+#if !defined(WINDOWS) && !defined(H9_WEB)
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -42,7 +42,7 @@ h9_unixdial(char *path)
 		up->errstr = p;
 		return -1;
 	}
-#ifdef WINDOWS
+#if defined(WINDOWS) || defined(H9_WEB)
 	USED(path);
 	USED(c);
 	fd = -1;

@@ -86,7 +86,7 @@ pub const Segment = struct {
         errdefer s.free();
         if (len > 0) {
             try s.chunks.ensureUnusedCapacity(gpa, 1);
-            s.chunks.appendAssumeCapacity(.{ .va = base, .mem = try backend.allocPages(len / page) });
+            s.chunks.appendAssumeCapacity(.{ .va = base, .mem = try backend.allocPages(@intCast(len / page)) });
         }
         return s;
     }
@@ -163,7 +163,7 @@ pub const Segment = struct {
         const n = try create(s.gpa, s.backend, s.kind, s.perms, s.base, s.top - s.base);
         n.brk = s.brk;
         n.cexec = s.cexec;
-        for (s.chunks.items) |c| copySparse(n.chunks.items[0].mem[c.va - s.base ..][0..c.mem.len], c.mem);
+        for (s.chunks.items) |c| copySparse(n.chunks.items[0].mem[@intCast(c.va - s.base)..][0..c.mem.len], c.mem);
         return n;
     }
 
@@ -172,7 +172,7 @@ pub const Segment = struct {
     /// contiguous.
     fn addChunkLocked(s: *Segment, va: u64, len: u64, at: usize) Error!void {
         try s.chunks.ensureUnusedCapacity(s.gpa, 1);
-        const mem = try s.backend.allocPages(len / page);
+        const mem = try s.backend.allocPages(@intCast(len / page));
         for (s.attached.items, 0..) |as, i| {
             as.map(va, mem, s.perms) catch |e| {
                 for (s.attached.items[0..i]) |m| m.unmap(va);
@@ -200,7 +200,7 @@ pub const Segment = struct {
         for (s.chunks.items) |c| {
             const lo = @max(from, c.va);
             const hi = @min(to, c.va + c.mem.len);
-            if (lo < hi) @memset(c.mem[lo - c.va .. hi - c.va], 0);
+            if (lo < hi) @memset(c.mem[@intCast(lo - c.va)..@intCast(hi - c.va)], 0);
         }
     }
 
@@ -228,7 +228,7 @@ pub const Segment = struct {
         if (s.top > top) {
             const at = s.chunks.items.len - 1;
             const old = s.chunks.items[at];
-            const mem = try s.backend.allocPages((top - old.va) / page);
+            const mem = try s.backend.allocPages(@intCast((top - old.va) / page));
             @memcpy(mem, old.mem[0..mem.len]);
             for (s.attached.items, 0..) |as, i| {
                 as.unmap(old.va);

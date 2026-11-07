@@ -20,6 +20,7 @@ pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
 pub const hstream = @import("hstream.zig");
 pub const gfx = @import("gfx.zig");
+pub const web = @import("web.zig");
 
 /// What this h9 was built from, for `--version`.
 pub const build_info = struct {

@@ -381,7 +381,9 @@ pub const Signal = enum(u8) {
     }
 
     fn hostNumber(comptime os: std.Target.Os.Tag, s: Signal) ?u8 {
-        if (os == .windows) return @intFromEnum(s);
+        // The web host's runtime gives no signal numbers of its own; Linux's
+        // match macOS's for the signals that stop a machine (HUP, INT, TERM).
+        if (os == .windows or os == .wasi) return @intFromEnum(s);
         const SIG = std.posix.SIG;
         switch (s) {
             inline else => |tag| {

@@ -11,6 +11,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const policy = @import("policy.zig");
 const consin = @import("consin.zig");
+const web = @import("web.zig");
 
 /// False where kern isn't built (a checkout without drawterm).
 pub const available = build_options.kern;
@@ -328,11 +329,12 @@ pub fn boot() Error!void {
     while (true) switch (boot_state.load(.acquire)) {
         .up => return,
         .failed => return error.Kern,
-        .booting => std.atomic.spinLoopHint(),
+        // On the web host the boot runs on a coroutine, which needs a turn.
+        .booting => if (web.enabled) web.yield() else std.atomic.spinLoopHint(),
         .idle => if (boot_state.cmpxchgStrong(.idle, .booting, .acq_rel, .acquire) == null) {
             // The monotonic clock starts at the wall time of the boot.
             _ = monoNs();
-            const t = std.Thread.spawn(.{}, bootThread, .{}) catch {
+            const t = web.Thread.spawn(.{}, bootThread, .{}) catch {
                 boot_state.store(.idle, .release);
                 return error.OutOfMemory;
             };
@@ -1096,7 +1098,7 @@ fn clockNow(clock: std.Io.Clock) i64 {
 }
 
 /// Wall minus monotonic time at the first read; 0 until then.
-var mono_offset: std.atomic.Value(i64) = .init(0);
+var mono_offset: web.Atomic(i64) = .init(0);
 var mono_set: std.atomic.Value(bool) = .init(false);
 
 /// Wall time in nanoseconds since the epoch.
@@ -1126,6 +1128,24 @@ fn h9_clock_mono() callconv(.c) i64 {
 /// The CPUs the calling thread's machine may use, for /dev/sysstat; set
 /// with the plan. Kernel threads without a machine see one.
 threadlocal var cons_ncpu: u32 = 1;
+
+// On the web host, where threadlocals are plain globals, a coroutine's
+// park saves and restores them (src/web/coro.c).
+comptime {
+    if (web.enabled) @export(&h9_web_locals, .{ .name = "h9_web_locals" });
+}
+
+fn h9_web_locals(save: c_int, slots: *[4]usize) callconv(.c) void {
+    if (save != 0) {
+        slots[0] = @intFromPtr(fs_plan);
+        slots[1] = @intFromPtr(fs_pages);
+        slots[2] = cons_ncpu;
+    } else {
+        fs_plan = @ptrFromInt(slots[0]);
+        fs_pages = @ptrFromInt(slots[1]);
+        cons_ncpu = if (slots[2] == 0) 1 else @intCast(slots[2]);
+    }
+}
 
 pub fn setCpus(n: u32) void {
     cons_ncpu = @max(n, 1);

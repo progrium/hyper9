@@ -2,9 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const h9 = @import("h9");
 const cli = @import("cli.zig");
-const Stdin = @import("stdin.zig").Stdin;
 const tools = @import("tools.zig");
-const hostsig = @import("hostsig.zig");
+/// The web host (design/0012-browser-host.md) has its stdin, signals and
+/// terminal from the JS host.
+const web = h9.web.enabled;
+const web_cli = @import("web/cli.zig");
+const Stdin = if (web) web_cli.Stdin else @import("stdin.zig").Stdin;
+const hostsig = if (web) web_cli else @import("hostsig.zig");
 
 /// Restores the host terminal before the default panic output, so a crash
 /// in raw mode doesn't leave the user's terminal raw.
@@ -22,8 +26,9 @@ const exit_not_found = 127;
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
-    const io = init.io;
+    const io = if (web) h9.web.io() else init.io;
     const args = try init.minimal.args.toSlice(arena);
+    if (web) web_pwd = init.environ_map.get("PWD") orelse "/";
 
     const cfg = cli.parse(arena, args) catch {
         std.debug.print(cli.usage, .{});
@@ -89,7 +94,7 @@ const GfxRun = struct {
 /// Runs the program, and returns h9's exit code.
 fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     const arena = init.arena.allocator();
-    const io = init.io;
+    const io = if (web) h9.web.io() else init.io;
     // --rc runs /bin/rc -c; the remaining arguments become $*.
     const argv: []const []const u8 = if (cfg.rc) |cmd| blk: {
         const v = try arena.alloc([]const u8, 3 + cfg.argv.len);
@@ -107,7 +112,8 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     var arch: ?h9.vmm.Arch = cfg.arch;
     const prog: h9.Program = switch (cli.programKind(prog_arg)) {
         .host => blk: {
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, prog_arg, arena, .limited(1 << 30)) catch |err| {
+            const path = if (web) std.fs.path.resolvePosix(arena, &.{ web_pwd, prog_arg }) catch prog_arg else prog_arg;
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |err| {
                 std.debug.print("h9: {s}: {t}\n", .{ prog_arg, err });
                 return if (err == error.FileNotFound) exit_not_found else exit_failed;
             };
@@ -134,7 +140,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     }
     const wo = wsOptions(arena, io, cfg, root, init.environ_map) catch |e| return wsExit(e);
     const cwd_arg = cfg.sandbox orelse cfg.cwd orelse ".";
-    const cwd = kernPath(arena, std.Io.Dir.cwd().realPathFileAlloc(io, cwd_arg, arena) catch {
+    const cwd = kernPath(arena, realPath(io, arena, cwd_arg) catch {
         std.debug.print("h9: cwd {s}: not found\n", .{cwd_arg});
         return exit_failed;
     });
@@ -299,6 +305,40 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     }
 }
 
+/// The host's working directory on the web host, where WASI has none of
+/// its own: the JS host passes it as $PWD.
+var web_pwd: []const u8 = "/";
+
+/// An absolute host path for `p`, with symlinks resolved. WASI has no
+/// realpath, so the web host resolves one component at a time with
+/// readlink.
+fn realPath(io: std.Io, arena: std.mem.Allocator, p: []const u8) ![]u8 {
+    if (!web) return std.Io.Dir.cwd().realPathFileAlloc(io, p, arena);
+    var path = try std.fs.path.resolvePosix(arena, &.{ web_pwd, p });
+    var links: usize = 0;
+    var i: usize = 1;
+    // path[0..i] is resolved; each turn takes the next component.
+    while (i < path.len) {
+        const end = std.mem.indexOfScalarPos(u8, path, i, '/') orelse path.len;
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const n = std.Io.Dir.cwd().readLink(io, path[0..end], &buf) catch |err| switch (err) {
+            error.NotLink => {
+                i = end + 1;
+                continue;
+            },
+            else => |e| return e,
+        };
+        links += 1;
+        if (links > 40) return error.SymLinkLoop;
+        const dir = path[0 .. std.mem.lastIndexOfScalar(u8, path[0..end], '/').? + 1];
+        const rest = if (end < path.len) path[end + 1 ..] else "";
+        path = try std.fs.path.resolvePosix(arena, &.{ dir, buf[0..n], rest });
+        i = 1;
+    }
+    try std.Io.Dir.cwd().access(io, path, .{});
+    return path;
+}
+
 /// The default root: .local/9front/root beside the h9 binary's source tree
 /// in development builds (zig-out/bin/h9 -> ../../.local/9front/root).
 fn defaultRoot(arena: std.mem.Allocator, io: std.Io) ?[]const u8 {
@@ -320,7 +360,7 @@ fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!
         .unix => |p| return .{ .unix = p },
         .ws => |u| return .{ .ws = u },
         .path => |p| {
-            const real = std.Io.Dir.cwd().realPathFileAlloc(io, p, arena) catch return error.NotFound;
+            const real = realPath(io, arena, p) catch return error.NotFound;
             const st = std.Io.Dir.cwd().statFile(io, real, .{}) catch return error.NotFound;
             return switch (st.kind) {
                 .directory => .{ .dir = kernPath(arena, real) },
@@ -356,6 +396,12 @@ fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Ro
         .ws => |u| h9.ws.Url.parse(u) catch null,
         else => null,
     } else null;
+    // The page's (or Node's) WebSocket does the handshake and TLS, with
+    // its own trust and proxy, and can't set headers.
+    if (web and (cfg.root_headers.len > 0 or cfg.root_ca != null)) {
+        std.debug.print("h9: {s} isn't available on the web host\n", .{if (cfg.root_ca != null) "--root-ca" else "--root-header"});
+        return error.Usage;
+    }
     if (cfg.root_headers.len > 0 and url == null) {
         std.debug.print("h9: --root-header needs a ws:// or wss:// root\n", .{});
         return error.Usage;
@@ -381,11 +427,12 @@ fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Ro
     }
     o.headers = headers.items;
     if (cfg.root_ca) |ca| {
-        o.ca = std.Io.Dir.cwd().realPathFileAlloc(io, ca, arena) catch {
+        o.ca = realPath(io, arena, ca) catch {
             std.debug.print("h9: --root-ca {s}: not found\n", .{ca});
             return error.NotFound;
         };
     }
+    if (web) return o;
     o.proxy = .{
         .http = env.get("HTTP_PROXY") orelse env.get("http_proxy"),
         .https = env.get("HTTPS_PROXY") orelse env.get("https_proxy"),
@@ -427,10 +474,10 @@ fn pathError(err: PathError) u8 {
 fn resolveAll(arena: std.mem.Allocator, io: std.Io, paths: []const []const u8, may_miss: bool) PathError![]const []const u8 {
     const out = try arena.alloc([]const u8, paths.len);
     for (paths, out) |p, *o| {
-        const resolved = std.Io.Dir.cwd().realPathFileAlloc(io, p, arena) catch blk: {
+        const resolved = realPath(io, arena, p) catch blk: {
             if (may_miss) {
                 const dir = std.fs.path.dirname(p) orelse ".";
-                if (std.Io.Dir.cwd().realPathFileAlloc(io, dir, arena)) |parent| {
+                if (realPath(io, arena, dir)) |parent| {
                     break :blk try std.fs.path.join(arena, &.{ parent, std.fs.path.basename(p) });
                 } else |_| {}
             }

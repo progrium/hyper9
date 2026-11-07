@@ -4,6 +4,9 @@
 #   h9-<version>-<target>.tar.gz|zip      MIT: h9 without the emulator
 #   h9-emu-<version>-<target>.tar.gz|zip  GPLv2: h9 with Unicorn (-Demu=unicorn)
 #   h9-emu-<version>-source.tar.gz        complete corresponding source for h9-emu
+#   h9-web-<version>.tar.gz               MIT and BSD-2: the browser host
+#                                         (h9.wasm, h9-web.js, v86.wasm, h9-node,
+#                                         the demo page and its root archive)
 #   SHA256SUMS
 #
 # Every binary is built from the unpacked source tarball, not the checkout,
@@ -12,8 +15,9 @@
 #
 #   scripts/release.sh [version]    (default: git describe --tags --always)
 #
-# Needs a clean checkout (tracked files) and the patched Unicorn source from
-# scripts/fetch.sh. Runs on macOS, which can build every target.
+# Needs a clean checkout (tracked files), and the patched Unicorn source and
+# v86.wasm from scripts/fetch.sh. The browser host's root archive comes from
+# the 386 root tree (scripts/mkroot.py --arch 386), when there is one. Runs on macOS, which can build every target.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -37,6 +41,9 @@ patches=("$H9_ROOT"/third_party/unicorn/patches/*.patch)
 stamp="$UNICORN_SRC_SHA256 $(cat "${patches[@]}" | shasum -a 256 | cut -d' ' -f1)"
 [ "$(cat "$uc_src/.h9-stamp" 2>/dev/null || true)" = "$stamp" ] ||
 	die "$uc_src is missing or stale; run scripts/fetch.sh"
+
+[ "$(cat "$H9_LOCAL/v86/.h9-stamp" 2>/dev/null || true)" = "$V86_SHA256" ] ||
+	die "$H9_LOCAL/v86 is missing or stale; run scripts/fetch.sh"
 
 out="$H9_ROOT/dist/$version"
 work="$out/.work"
@@ -97,6 +104,20 @@ for t in $H9_TARGETS; do
 	cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
 	archive "$work/$name" "$name"
 done
+
+# The browser host (design/0012-browser-host.md): one archive for every
+# platform, with v86.wasm (BSD-2) beside h9.wasm.
+name="h9-web-$version"
+mkdir -p "$src/.local/v86"
+cp -R "$H9_LOCAL/v86/." "$src/.local/v86/"
+web_root=()
+[ -f "$H9_LOCAL/9front/root386/386/bin/rc" ] && web_root=(-Dweb-root="$H9_LOCAL/9front/root386")
+(cd "$src" && zig build web -p "$work/build-web" -Doptimize=ReleaseSafe -Dversion="$version" "${web_root[@]}")
+rm -rf "$src/.local/v86"
+cp -R "$work/build-web/web" "$work/$name"
+cp "$src/LICENSE" "$work/$name/LICENSE"
+cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
+archive "$work/$name" "$name"
 
 for t in $EMU_TARGETS; do
 	name="h9-emu-$version-$t"

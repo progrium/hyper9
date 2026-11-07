@@ -1,0 +1,75 @@
+# The browser host's root archive (design/0012-browser-host.md): the
+# paths, relative to the 386 root tree, that `zig build web` packs into
+# zig-out/web/root.h9a for the demo page. A path ending in / is an empty
+# directory, such as a mount point. tools/webroot.zig reads this.
+
+# Mount points the namespace binds over.
+bin/
+boot/
+dev/
+env/
+fd/
+mnt/term/cwd/
+mnt/wsys/
+n/
+net/
+net.alt/
+proc/
+root/
+shr/
+srv/
+tmp/
+usr/glenda/
+
+# rc, its profile and its scripts.
+rc
+386/bin/rc
+lib/namespace
+adm/timezone/local
+adm/timezone/GMT
+
+# Commands for the demo.
+386/bin/awk
+386/bin/basename
+386/bin/bind
+386/bin/cal
+386/bin/cat
+386/bin/chmod
+386/bin/cmp
+386/bin/cp
+386/bin/date
+386/bin/dd
+386/bin/diff
+386/bin/du
+386/bin/echo
+386/bin/ed
+386/bin/factor
+386/bin/fmt
+386/bin/grep
+386/bin/hoc
+386/bin/ls
+386/bin/mkdir
+386/bin/mount
+386/bin/mv
+386/bin/ns
+386/bin/primes
+386/bin/ps
+386/bin/pwd
+386/bin/ramfs
+386/bin/read
+386/bin/rm
+386/bin/sed
+386/bin/seq
+386/bin/sleep
+386/bin/sort
+386/bin/strings
+386/bin/sum
+386/bin/tail
+386/bin/tee
+386/bin/test
+386/bin/touch
+386/bin/tr
+386/bin/uniq
+386/bin/unmount
+386/bin/wc
+386/bin/xd

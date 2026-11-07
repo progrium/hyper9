@@ -12,7 +12,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 
 - Start and run a 9front binary as fast as a native process: no VM image, no boot, no guest kernel.
 - One invocation can hold a whole process tree (rc pipelines, servers posting to /srv, rio and its clients).
-- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, for the browser host ([i386](design/0009-i386.md)).
+- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, and on the browser host, which has no CPU to run natively on, on v86 ([i386](design/0009-i386.md), [browser-host](design/0012-browser-host.md)).
 - One host backend each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows).
 - Self-hosting: the 9front compilers and mk run inside and can rebuild the 9front userland.
 
@@ -35,6 +35,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/0015-gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
 | Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/0019-zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
+| Browser host | h9 on wasm32-wasi, with coroutines on JSPI and 386 binaries on v86 | One machine per Web Worker; the same build runs under Node for the tests |
 
 ## Architecture
 
@@ -134,6 +135,25 @@ The emulator lets the system run anywhere, including VMs without nested virtuali
 - Conformance: one test suite runs against every backend, and each backend must produce the same syscall traces.
 
 **Limits and selection.** Measured with `zig build bench -Demu=unicorn` ([tests/bench.zig](tests/bench.zig)) on an M3 Max (macOS, release build of Unicorn 2.1.4): a 2-instruction loop of 10⁹ iterations takes 0.27 s on HVF, 1.4 s on emu for arm64 (about 1.5 G instructions/s; Unicorn's code generation, not our hooks) and 1.9 s on emu for amd64. A `pwrite` syscall round trip costs about 0.8 µs on emu, a little less than HVF's 1.1 µs: a bare exit and re-entry takes about 0.35 µs on emu, which never leaves the process, and about 0.8 µs on HVF, which goes through the shim, EL2 and the macOS kernel each way. On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loop takes 0.35 s for amd64, and a `pwrite` round trip about 28 µs, of which about 19 µs is the bare `OUT` exit and re-entry, each going through both hypervisors; KVM on bare metal is far cheaper. So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds. By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning. `--backend emu|hvf|kvm|whp` forces a choice.
+
+## Browser host (`web`, `v86`)
+
+`zig build web` builds h9 for wasm32-wasi into `zig-out/web/` ([browser-host](design/0012-browser-host.md)). The kernel, the machine and the CLI are the same code; what differs is underneath them. Native hosts are unchanged.
+
+| Piece | Web host |
+| --- | --- |
+| Threads | Coroutines on JavaScript Promise Integration (`src/web/coro.c`): each kernel process, and each of h9's own threads (`web.Thread`), has its own shadow stack and its own suspendable wasm stack, started through the exported, `promising`-wrapped `h9_coro_entry`. Blocking parks through a `Suspending` import whose Promise the JS host resolves, so the event loop is the scheduler. Every Suspending import (park, yield, sleep, the console read and the signal wait) saves and restores what's per thread natively: `__stack_pointer` (`src/web/stack.S`), `errno`, h9's Zig threadlocals and drawterm's `up`. |
+| OS layer | `src/kern/os-wasm.c` instead of `posix.c`: `procsleep` and `procwakeup` park and unpark, `osyield` yields through a `MessageChannel`, timers park with a timeout, `#C` raises an error, and `devip-wasm.c` stubs the sockets. |
+| Stacks | wasm has no guard pages, so each stack has a canary at its low end, and every park and coroutine exit also checks the stack pointer against it; either failing panics the machine with the coroutine's name. Kernel processes and h9's own coroutines get 320 KiB: the integration suite's deepest use at a park (149 KiB, in a guest process's syscall path, Debug build), doubled and rounded up. Stacks go on a free list when their coroutine ends. |
+| `std.Io` | `src/web/io.zig`: std's single-threaded implementation over WASI, with futex waits and sleeps that park. 64-bit atomics become plain values (`web.Atomic`), since wasm32 has no 64-bit atomic RMW. |
+| Files | WASI. Under Node, `h9-node` preopens `/`, so roots and `--cwd` are real host directories, resolved with readlink one component at a time since WASI has no realpath. In the browser, `src/web/wasi-mem.js` serves a read-only tree from `root.h9a`, which `tools/webroot.zig` packs from the 386 root and `src/web/root.list`. WASI has no permission bits, so `#U` (devfs, wrapped in `src/kern/devtab.c`) gives files and directories `rwxrwxr-x`; the policy, not the mode, decides access. |
+| Console | `src/web/cli.zig`: stdin, interrupt, hangup and raw mode are imports the JS host serves, from Node's process or from the page's messages. |
+| Policy | `#C` and `#I` are always masked. `--host-cmd` is a usage error. The network is WebSockets only: `--net=outbound` (the default) and `enable` bind `#ℏ` alone at `/net`, and `disable` masks it. |
+| WebSockets | `hstream.zig`'s web branch calls `h9-web.js`'s `h9_ws_*` imports, over the runtime's `WebSocket` ([websocket-9p](design/0021-websocket-9p.md)): `ws_open` and `ws_send` return at once, `ws_opened` and `ws_recv` are Suspending, and a stream's reader is a coroutine parked in `ws_recv`, which hands over as many queued binary messages as fit. The browser does the handshake, TLS, proxies and pongs, so `--root-header`, `--root-ca` and `header` in `ctl` are errors, there's no keepalive, and a failed connection says only "connection failed". `--net-allow` checks a connect's name or literal address but can't check what a name resolves to, which the plan lists as a caveat. |
+
+**The v86 backend** (`src/vmm/v86.zig`) runs 386 binaries on v86's CPU, the only backend in web builds. `v86.wasm` (0.5.473, pinned in `scripts/pins.sh` with its register-block offsets, fetched by `scripts/fetch.sh`, checked by `tests/web/v86-layout.mjs`) and `h9.wasm` share one linear memory: v86 owns the low part, h9 is linked with `--import-memory` at a 16 MiB base, and guest RAM is one `allocate_memory` from v86, made after h9 is instantiated. `src/arch/i386/shim.S`, loaded at guest-physical 0x1000, sets up 9front's GDT (kernel and user code and data, a TSS), an IDT whose every vector pushes a 386 Ureg on the kernel stack and halts, and paging with the kernel at `KZERO`. A halt ends `main_loop`, and the backend reads the Ureg from the stack; a resume writes it back, clears `in_hlt` and jumps to the shim's restore path. An address space is a 386 page directory in guest RAM. A slice that ends without a halt is preemption: `run` builds the Ureg from v86's registers, returns the CPU to ring 0, yields to the event loop and returns `.interrupted`. Freed pages and executable mappings call `jit_dirty_cache`, so recycled pages never run stale compiled code. `h9-web.js` provides v86's imports: a clock, JIT glue (compile the generated module and set it in the shared table, deferring `codegen_finalize_finished` until `main_loop` returns), and stubs for ports and MMIO, which ring 3 can't reach.
+
+**Hosts.** `h9-node` runs the CLI under Node 24 or later, with the same flags as `h9`; it's how the integration suite tests the web host. In a page, `createMachine({ root, memory, policy, terminal })` from `h9-web.js` starts one machine in its own Worker (`src/web/worker.js`) and `machine.run(argv)` resolves to the exit status. `root` is a root archive's URL, or a `ws://` or `wss://` URL of a 9P server, under which WASI sees an empty tree; the page edits and echoes lines in cooked mode, passes keys in raw mode, and sends the interrupt key as `Machine.Signals.interrupt`. The demo page (`index.html`) runs an interactive rc, over `?root=` when given.
 
 ## Guest shims and ABI
 
@@ -405,6 +425,7 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 - Unit tests in Zig for the a.out loader, the page allocator and the syscall decoders.
 - Integration tests run real 9front binaries from a pinned root tree. Each case is tagged with the proposal it proves, and skips while that proposal isn't implemented ([design/README.md](design/README.md#tests)).
 - `zig build integration` runs real binaries from the root tree through the `h9` CLI as subprocesses, so each case gets a fresh kernel and checks exit codes end to end; it skips when there's no tree. `zig build proposal -Dp=baseline` runs the baseline's demos and cases. The Lima test VMs get the tree with `scripts/lima/vm push-root`.
+- `zig build integration -Dweb` runs the same cases through `h9-node` on v86 with the 386 root; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
 - CI isn't set up yet ([ci](design/ci.md)).
 
 ## CLI
