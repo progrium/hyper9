@@ -1,7 +1,7 @@
 #!/bin/rc
 # mkcmd NAME DIR: builds the command NAME from /sys/src/cmd/DIR (. for a
 # single-file command in /sys/src/cmd) with its globals renamed, for 9box
-# (design/multicall.md).
+# (design/0064-multicall.md).
 #
 # It builds NAME as 9front does, with mk, and reads the objects off the link
 # line that `mk -n -a` prints. nm lists the globals those objects define

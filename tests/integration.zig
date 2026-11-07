@@ -3704,7 +3704,7 @@ test "--root-ca trusts a private CA, and the host bundle doesn't [21]" {
     try expectIn(refused.err, "certificate: unknown authority");
 }
 
-// 9box, the multi-call binary (design/multicall.md). The tree comes from
+// 9box, the multi-call binary (design/0064-multicall.md). The tree comes from
 // `zig build slim`, in .local/9front/slim-*, whose path the build passes as
 // H9_TEST_SLIM_ROOT; the cases skip without it. They run with `--root`
 // after the test root's.
@@ -3742,7 +3742,7 @@ fn expectSameAsStock(e: Env, root: []const u8, args: []const []const u8) !void {
     try std.testing.expectEqual(stock.code, r.code);
 }
 
-test "9box runs a command through a hard link [multicall]" {
+test "9box runs a command through a hard link [64]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     // The tree's commands are hard links to 9box, unless it was built with
@@ -3755,7 +3755,7 @@ test "9box runs a command through a hard link [multicall]" {
     try expectSameAsStock(e, slim, &.{ "--rc", "echo hello world | wc; echo a b | sed 's/a/x/'" });
 }
 
-test "9box runs a command through a #! stub [multicall]" {
+test "9box runs a command through a #! stub [64]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     var s: Scratch = undefined;
@@ -3780,7 +3780,7 @@ test "9box runs a command through a #! stub [multicall]" {
     try expectIn(no.err, "9box: no command nope");
 }
 
-test "an rc script runs when /bin/rc is a stub [multicall]" {
+test "an rc script runs when /bin/rc is a stub [64]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     const io = std.testing.io;
@@ -3809,7 +3809,7 @@ test "an rc script runs when /bin/rc is a stub [multicall]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "9box CMD ARGS and an unknown command [multicall]" {
+test "9box CMD ARGS and an unknown command [64]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     const r = try runRoot(e, slim, &.{ "/bin/9box", "echo", "a", "b" });
@@ -3827,7 +3827,7 @@ test "9box CMD ARGS and an unknown command [multicall]" {
     try expectIn(no.err, "no command nope");
 }
 
-test "ramfs runs from the box [multicall]" {
+test "ramfs runs from the box [64]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     const r = try runRoot(e, slim, &.{ "--rc", "ramfs -m /n && echo inram >/n/f && ls /n && cat /n/f" });
@@ -3836,7 +3836,7 @@ test "ramfs runs from the box [multicall]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "argv0 is the command's own name [multicall]" {
+test "argv0 is the command's own name [64]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     // Usage lines print argv0, which ARGBEGIN sets from the command's argv;
@@ -3865,12 +3865,12 @@ fn expectCorpus(e: Env, tree: []const u8) !void {
     try expectSameAsStock(e, tree, args.items);
 }
 
-test "each boxed command matches its stock binary on the corpus [multicall]" {
+test "each boxed command matches its stock binary on the corpus [64]" {
     const e = try env(@src());
     try expectCorpus(e, try slimTree(e));
 }
 
-test "a 9P root serving 9box under every name [multicall]" {
+test "a 9P root serving 9box under every name [64]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     // exportfs serves the slim tree's hard links as they are: 9box's bytes

@@ -154,7 +154,7 @@ fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
     // The tree `zig build slim` makes, for the multicall cases, which skip
-    // without it (design/multicall.md).
+    // without it (design/0064-multicall.md).
     const release = pin(b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
     run.setEnvironmentVariable("H9_TEST_SLIM_ROOT", b.pathFromRoot(b.fmt(".local/9front/slim-{s}-{s}", .{ release, arch orelse "arm64" })));
     if (pending) run.setEnvironmentVariable("H9_TEST_PENDING", "1");
@@ -745,7 +745,7 @@ pub fn build(b: *std.Build) void {
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
-    // 9box and a slim root around it (design/multicall.md), built inside
+    // 9box and a slim root around it (design/0064-multicall.md), built inside
     // the h9 just built, against the root tree. -Darch picks the
     // architecture, as for the integration cases.
     const slim_links = b.option([]const u8, "slim-links", "With zig build slim: hard (hard links to 9box, the default), stub (#!/bin/9box -! files) or copy (no 9box: the same commands' binaries copied, in slim-copy-*)") orelse "hard";

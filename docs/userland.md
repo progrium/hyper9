@@ -302,7 +302,7 @@ included, so keep anything there quick.
 **Built as one binary.** Every 9front binary is a static link, so each
 copy above carries its own libc. `zig build slim`, from an h9 checkout with
 a root tree, builds the same kind of tree around
-[9box](../design/multicall.md): 9front's own commands, from the pinned
+[9box](../design/0064-multicall.md): 9front's own commands, from the pinned
 source, in one binary that picks the command by the name it runs as.
 
 ```sh
