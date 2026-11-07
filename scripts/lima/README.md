@@ -1,14 +1,18 @@
 # Test VMs
 
 Lima VMs for running h9 with the emu backend (`--backend emu`) on Linux,
-macOS and Windows. None has a usable hypervisor (no `/dev/kvm`, no nested
-Hypervisor.framework, no WHP), which is the case emu is for. Nothing is
+macOS and Windows. None but `linux-kvm` has a usable hypervisor (no
+`/dev/kvm`, no nested Hypervisor.framework, no WHP), which is the case emu
+is for. `linux-kvm` has nested virtualization, for the KVM backend
+([kvm](../../design/0016-kvm.md)): `vm test linux-kvm` runs the tests with
+`H9_TEST_BACKENDS=kvm,emu`. Nothing is
 installed for building: cross-compile h9 on the host and copy it in.
 
 | OS | Build |
 | --- | --- |
 | `linux` | `zig build -Demu=unicorn -Dtarget=aarch64-linux-musl` |
 | `linux-amd64` | `zig build -Demu=unicorn -Dtarget=x86_64-linux-musl` |
+| `linux-kvm` | `zig build -Demu=unicorn -Dtarget=aarch64-linux-musl` |
 | `macos` | `zig build -Demu=unicorn` |
 | `windows` | `zig build -Demu=unicorn -Dtarget=aarch64-windows` (Unicorn from source), or `x86_64-windows`, which runs under Windows' x64 emulation; add `H9_TEST_ARCH=arm64` for its integration tests |
 
@@ -18,6 +22,7 @@ Use `--prefix zig-out/<os>` to keep the builds apart.
 | --- | --- | --- | --- |
 | `linux` | `linux` | Ubuntu 24.04 | vz |
 | `linux-amd64` | `linux-amd64` | Ubuntu 24.04 x86\_64 | qemu (emulated, slow) |
+| `linux-kvm` | `linux-kvm` | Ubuntu 24.04, with `/dev/kvm` | vz, nested virtualization (M3 or later, macOS 15) |
 | `macos` | `macos` | macOS 15.6.1 | vz |
 | `windows` | `windows` | Windows 11 25H2 | qemu (hvf) |
 

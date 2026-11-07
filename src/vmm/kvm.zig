@@ -238,8 +238,9 @@ pub const Backend = struct {
         const kick = kickSet();
         var old: linux.sigset_t = undefined;
         _ = linux.sigprocmask(linux.SIG.BLOCK, &kick, &old);
+        // Not linux.sigdelset, which toggles the bit (Zig 0.16).
         var during_run = old;
-        linux.sigdelset(&during_run, @enumFromInt(kickSignal()));
+        for (&during_run, kick) |*w, k| w.* &= ~k;
 
         const parked = blk: {
             b.lockSpin();
@@ -482,36 +483,39 @@ const State = struct {
         try s.enterX86();
     }
 
+    /// The x87 and SSE state, through the XSAVE image, whose legacy
+    /// region is FXSAVE's layout. KVM_GET_FPU would be the obvious call,
+    /// but recent kernels leave MXCSR out of what it returns.
     fn setFpu(s: *State, fx: *const vmm.Fxsave) vmm.Error!void {
-        var f: abi.Fpu = std.mem.zeroes(abi.Fpu);
-        f.fcw = fx.fcw;
-        f.fsw = fx.fsw;
-        f.ftwx = fx.ftw;
-        f.last_opcode = fx.fop;
-        f.last_ip = fx.fip;
-        f.last_dp = fx.fdp;
-        for (&f.fpr, fx.st) |*d, st| d.* = st;
-        for (&f.xmm, fx.xmm) |*d, q| d.* = @bitCast(q);
+        var x: abi.Xsave = .{ .region = @splat(0) };
+        const bytes = std.mem.asBytes(&x.region);
+        var legacy = fx.*;
         // Reserved MXCSR bits would make the load fail.
-        f.mxcsr = fx.mxcsr & 0xffff;
-        _ = try ioctl(s.fd, abi.SET_FPU, @intFromPtr(&f));
+        legacy.mxcsr &= 0xffff;
+        legacy.mxcsr_mask = 0;
+        @memcpy(bytes[0..@sizeOf(vmm.Fxsave)], std.mem.asBytes(&legacy));
+        // XSTATE_BV: x87 and SSE come from the image.
+        std.mem.writeInt(u64, bytes[abi.xstate_bv_off..][0..8], 3, .little);
+        _ = try ioctl(s.fd, abi.SET_XSAVE, @intFromPtr(&x));
     }
 
     fn getFpu(s: *State, fx: *vmm.Fxsave) vmm.Error!void {
-        var f: abi.Fpu = undefined;
-        _ = try ioctl(s.fd, abi.GET_FPU, @intFromPtr(&f));
-        fx.* = .{
-            .fcw = f.fcw,
-            .fsw = f.fsw,
-            .ftw = f.ftwx,
-            .fop = f.last_opcode,
-            .fip = f.last_ip,
-            .fdp = f.last_dp,
-            .mxcsr = f.mxcsr,
-            .mxcsr_mask = 0xffff,
-        };
-        for (&fx.st, f.fpr) |*d, st| d.* = st;
-        for (&fx.xmm, f.xmm) |*d, q| d.* = @bitCast(q);
+        var x: abi.Xsave = undefined;
+        _ = try ioctl(s.fd, abi.GET_XSAVE, @intFromPtr(&x));
+        const bytes = std.mem.asBytes(&x.region);
+        @memcpy(std.mem.asBytes(fx), bytes[0..@sizeOf(vmm.Fxsave)]);
+        const bv = std.mem.readInt(u64, bytes[abi.xstate_bv_off..][0..8], .little);
+        // A component in its initial state may not be written out.
+        if (bv & 1 == 0) {
+            const mxcsr = fx.mxcsr;
+            const xmm = fx.xmm;
+            fx.* = vmm.X86Extra.init.fx;
+            fx.mxcsr = mxcsr;
+            fx.xmm = xmm;
+        }
+        if (bv & 2 == 0) fx.xmm = @splat(0);
+        fx.mxcsr_mask = 0xffff;
+        fx._r2 = @splat(0);
     }
 
     fn getMsr(s: *State, index: u32) vmm.Error!u64 {
