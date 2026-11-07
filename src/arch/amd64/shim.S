@@ -194,4 +194,3 @@ restore:
 	movq %gs:U_AX, %rax
 	swapgs
 	iretq
-
