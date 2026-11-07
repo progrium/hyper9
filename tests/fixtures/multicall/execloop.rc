@@ -1,0 +1,9 @@
+#!/bin/rc
+# The exec loop design/multicall.md measures: 1600 execs of echo, wc, ls
+# and sed from one rc. Time it with a box tree and with the same commands
+# as separate binaries, from the repository root:
+#	time h9 --root .local/9front/min-11952-arm64 rc tests/fixtures/multicall/execloop.rc
+#	time h9 --root .local/9front/min-copy-11952-arm64 rc tests/fixtures/multicall/execloop.rc
+# (zig build slim, and zig build slim -Dslim-links=copy for the second).
+n=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)
+for(i in $n) for(j in $n) { echo x | wc -c >/dev/null; ls / >/dev/null; sed 1q /rc/lib/rcmain >/dev/null }

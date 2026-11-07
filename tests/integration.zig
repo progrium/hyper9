@@ -37,10 +37,10 @@ const Env = struct {
     arch: ?[]const u8,
 };
 
-var env_buf: [5][std.Io.Dir.max_path_bytes]u8 = undefined;
+var env_buf: [7][std.Io.Dir.max_path_bytes]u8 = undefined;
 
 /// An environment variable, on every host (getPosix doesn't build on
-/// Windows). Values live in one of five slots, chosen by the caller.
+/// Windows). Values live in one of seven slots, chosen by the caller.
 fn getenv(comptime slot: usize, key: []const u8) ?[]const u8 {
     var map = std.testing.environ.createMap(gpa) catch return null;
     defer map.deinit();
@@ -2417,6 +2417,12 @@ const RootServer = struct {
     dial_buf: [64]u8 = undefined,
 
     fn start(s: *RootServer, e: Env) !void {
+        return s.startTree(e, null);
+    }
+
+    /// Serves the host tree `tree` instead, from a machine that still runs
+    /// from the test root.
+    fn startTree(s: *RootServer, e: Env, tree: ?[]const u8) !void {
         const io = std.testing.io;
         var probe = try listenLocal();
         s.port = probe.socket.address.getPort();
@@ -2427,7 +2433,14 @@ const RootServer = struct {
         defer argv.deinit(gpa);
         try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", e.root, "--net=enable" });
         if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
-        try argv.appendSlice(gpa, &.{ "aux/listen1", "-t", listen, "/bin/exportfs", "-R", "-r", "/" });
+        // The tree is the server's cwd, so it's /mnt/term/cwd wherever
+        // it is on the host.
+        var served: []const u8 = "/";
+        if (tree) |t| {
+            try argv.appendSlice(gpa, &.{ "--cwd", t });
+            served = "/mnt/term/cwd";
+        }
+        try argv.appendSlice(gpa, &.{ "aux/listen1", "-t", listen, "/bin/exportfs", "-R", "-r", served });
         s.child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .create_no_window = true });
         errdefer s.child.kill(io);
         // Ready when it accepts; listen1 runs an exportfs for the probe,
@@ -3689,4 +3702,213 @@ test "--root-ca trusts a private CA, and the host bundle doesn't [21]" {
     defer refused.deinit();
     try std.testing.expectEqual(125, refused.code);
     try expectIn(refused.err, "certificate: unknown authority");
+}
+
+// 9box, the multi-call binary (design/multicall.md). The trees come from
+// `zig build slim` (-Dslim-set=min, and slim), in .local/9front/<set>-*,
+// whose paths the build passes as H9_TEST_MIN_ROOT and H9_TEST_SLIM_ROOT;
+// a case skips without its tree. Cases run against the min tree, with
+// `--root` after the test root's, unless they say otherwise.
+
+/// A slim tree from H9_TEST_<set>_ROOT, in env slot `slot`, or a skip if
+/// it hasn't been built.
+fn boxTree(e: Env, comptime slot: usize, key: []const u8) ![]const u8 {
+    const t = getenv(slot, key) orelse return error.SkipZigTest;
+    var buf: [64]u8 = undefined;
+    const box = try std.fmt.bufPrint(&buf, "{s}/bin/9box", .{e.arch orelse "arm64"});
+    var pbuf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const p = try std.fmt.bufPrint(&pbuf, "{s}/{s}", .{ t, box });
+    std.Io.Dir.cwd().access(std.testing.io, p, .{}) catch return error.SkipZigTest;
+    return t;
+}
+
+fn minTree(e: Env) ![]const u8 {
+    return boxTree(e, 5, "H9_TEST_MIN_ROOT");
+}
+
+fn slimTree(e: Env) ![]const u8 {
+    return boxTree(e, 6, "H9_TEST_SLIM_ROOT");
+}
+
+/// Runs `args` with the root `root`.
+fn runRoot(e: Env, root: []const u8, args: []const []const u8) !Result {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "--root", root });
+    try argv.appendSlice(gpa, args);
+    return run(e, argv.items);
+}
+
+/// Runs `args` in the tree `root` and in the stock tree, and checks that
+/// both give the same output, errors and exit code.
+fn expectSameAsStock(e: Env, root: []const u8, args: []const []const u8) !void {
+    const stock = try run(e, args);
+    defer stock.deinit();
+    const r = try runRoot(e, root, args);
+    defer r.deinit();
+    errdefer std.debug.print("in {s}: {s}\nstdout: {s}\nstderr: {s}\nstock stdout: {s}\nstock stderr: {s}\n", .{ root, args[args.len - 1], r.out, r.err, stock.out, stock.err });
+    try std.testing.expectEqualStrings(stock.out, r.out);
+    try std.testing.expectEqualStrings(stock.err, r.err);
+    try std.testing.expectEqual(stock.code, r.code);
+}
+
+test "9box runs a command through a hard link [multicall]" {
+    const e = try env(@src());
+    const min = try minTree(e);
+    // The tree's commands are hard links to 9box, unless it was built with
+    // -Dslim-links=stub.
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const ls = try std.fmt.bufPrint(&buf, "{s}/{s}/bin/ls", .{ min, e.arch orelse "arm64" });
+    const st = try std.Io.Dir.cwd().statFile(std.testing.io, ls, .{});
+    if (st.nlink <= 2) return error.SkipZigTest;
+    try expectSameAsStock(e, min, &.{ "/bin/ls", "-d", "/rc/lib", "/adm" });
+    try expectSameAsStock(e, min, &.{ "--rc", "echo hello world | wc; echo a b | sed 's/a/x/'" });
+}
+
+test "9box runs a command through a #! stub [multicall]" {
+    const e = try env(@src());
+    const min = try minTree(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const x: std.Io.Dir.CreateFileOptions = .{ .permissions = .executable_file };
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ls", .data = "#!/bin/9box -!\n", .flags = x });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nope", .data = "#!/bin/9box -!\n", .flags = x });
+    const r = try runRoot(e, min, &.{ "--cwd", s.path, "/mnt/term/cwd/ls", "-d", "/rc/lib", "/adm" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/adm\n/rc/lib\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    // By hard link, a first argument of -! that isn't followed by a stub is
+    // the command's own: echo prints it.
+    const echo = try runRoot(e, min, &.{ "--cwd", s.path, "/bin/echo", "-!", "/mnt/term/cwd", "x" });
+    defer echo.deinit();
+    try std.testing.expectEqualStrings("-! /mnt/term/cwd x\n", echo.out);
+    // A stub for a command the box doesn't have.
+    const no = try runRoot(e, min, &.{ "--cwd", s.path, "/mnt/term/cwd/nope" });
+    defer no.deinit();
+    try std.testing.expectEqual(1, no.code);
+    try expectIn(no.err, "9box: no command nope");
+}
+
+test "an rc script runs when /bin/rc is a stub [multicall]" {
+    const e = try env(@src());
+    const min = try minTree(e);
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // A /bin of its own, bound before the tree's: a copy of 9box and an rc
+    // stub. Not a bind over the tree's /bin/rc, which is a hard link to
+    // 9box: hard links share a qid, so that bind would cover every
+    // command, 9box included.
+    const x: std.Io.Dir.CreateFileOptions = .{ .permissions = .executable_file };
+    try s.tmp.dir.createDirPath(io, "bin");
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const box = try std.fmt.bufPrint(&buf, "{s}/{s}/bin/9box", .{ min, e.arch orelse "arm64" });
+    try std.Io.Dir.cwd().copyFile(box, s.tmp.dir, "bin/9box", io, .{});
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "bin/rc", .data = "#!/bin/9box -!\n", .flags = x });
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "greet", .data = "#!/bin/rc\necho $0 $*\n", .flags = x });
+    // The script's #! runs the stub, which runs 9box with
+    // greet -! /bin/rc /mnt/term/cwd/greet a b, and rc gets what it would
+    // as the interpreter itself.
+    const script = "bind -b /mnt/term/cwd/bin /bin && /mnt/term/cwd/greet a b";
+    const r = try runRoot(e, min, &.{ "--cwd", s.path, "--rc", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/mnt/term/cwd/greet a b\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "9box CMD ARGS and an unknown command [multicall]" {
+    const e = try env(@src());
+    const min = try minTree(e);
+    const r = try runRoot(e, min, &.{ "/bin/9box", "echo", "a", "b" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("a b\n", r.out);
+    const list = try runRoot(e, min, &.{"/bin/9box"});
+    defer list.deinit();
+    try std.testing.expectEqual(0, list.code);
+    try expectIn(list.out, "\nls\n");
+    try expectIn(list.out, "\nramfs\n");
+    const no = try runRoot(e, min, &.{ "/bin/9box", "nope", "x" });
+    defer no.deinit();
+    try std.testing.expectEqual(1, no.code);
+    try expectIn(no.err, "9box: no command nope");
+    try expectIn(no.err, "no command nope");
+}
+
+test "ramfs runs from the min box [multicall]" {
+    const e = try env(@src());
+    const min = try minTree(e);
+    const r = try runRoot(e, min, &.{ "--rc", "ramfs -m /n && echo inram >/n/f && ls /n && cat /n/f" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/n/f\ninram\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "plumber, a thread program, runs from the slim box [multicall]" {
+    const e = try env(@src());
+    const slim = try slimTree(e);
+    // plumber starts through 9box's private libthread, with its own
+    // mainstacksize, and serves /mnt/plumb.
+    const script = "mkdir -p /mnt/plumb /mnt/temp; echo >/tmp/rules; plumber -p /tmp/rules && ls /mnt/plumb | sed 2q";
+    const r = try runRoot(e, slim, &.{ "--rc", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/mnt/plumb/rules\n/mnt/plumb/send\n", r.out);
+    try expectSameAsStock(e, slim, &.{ "--rc", "plumber -z" });
+}
+
+test "argv0 is the command's own name [multicall]" {
+    const e = try env(@src());
+    const min = try minTree(e);
+    // Usage lines print argv0, which ARGBEGIN sets from the command's argv;
+    // rc initialises argv0, which mustn't leak into the others.
+    for ([_][]const u8{ "ls", "cat", "tee", "sort", "srvfs", "ramfs", "grep", "rc" }) |c| {
+        var buf: [64]u8 = undefined;
+        try expectSameAsStock(e, min, &.{ "--rc", try std.fmt.bufPrint(&buf, "{s} -Z </dev/null >[2=1] | sed 1q", .{c}) });
+    }
+}
+
+/// The corpus, run in `tree` and in the stock tree over the commands the
+/// tree's 9box has, compared.
+fn expectCorpus(e: Env, tree: []const u8) !void {
+    const list = try runRoot(e, tree, &.{"/bin/9box"});
+    defer list.deinit();
+    try std.testing.expectEqual(0, list.code);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "corpus.rc", .data = @embedFile("fixtures/multicall/corpus.rc") });
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(gpa);
+    try args.appendSlice(gpa, &.{ "--cwd", s.path, "rc", "/mnt/term/cwd/corpus.rc" });
+    var it = std.mem.tokenizeScalar(u8, list.out, '\n');
+    while (it.next()) |c| try args.append(gpa, c);
+    try expectSameAsStock(e, tree, args.items);
+}
+
+test "each boxed command matches its stock binary on the corpus [multicall]" {
+    const e = try env(@src());
+    try expectCorpus(e, try minTree(e));
+    try expectCorpus(e, slimTree(e) catch return);
+}
+
+test "a 9P root serving 9box under every name [multicall]" {
+    const e = try env(@src());
+    const min = try minTree(e);
+    // exportfs serves the min tree's hard links as they are: 9box's bytes
+    // under every name.
+    var srv: RootServer = undefined;
+    try srv.startTree(e, min);
+    defer srv.stop();
+    const args: []const []const u8 = &.{ "--rc", "ls /bin/9box /bin/sed; echo a b | sed s/a/x/; 9box echo boxed" };
+    const host = try runRoot(e, min, args);
+    defer host.deinit();
+    const r = try runRoot(e, srv.dial(), args);
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(host.out, r.out);
+    try std.testing.expectEqualStrings("/bin/9box\n/bin/sed\nx b\nboxed\n", r.out);
 }

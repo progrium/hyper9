@@ -299,6 +299,28 @@ slim% pwd
 '...'` when you want it. Editing `rcmain` itself changes every rc, scripts
 included, so keep anything there quick.
 
+**Built as one binary.** Every 9front binary is a static link, so each
+copy above carries its own libc. `zig build slim`, from an h9 checkout with
+a root tree, builds the same kind of tree around
+[9box](../design/multicall.md): 9front's own commands, from the pinned
+source, in one binary that picks the command by the name it runs as.
+
+```sh
+host$ zig build slim                    # .local/9front/min-11952-arm64: 42 commands
+host$ zig build slim -Dslim-set=slim    # 108: archives, checksums, file servers, network clients
+host$ h9 --root .local/9front/min-11952-arm64 --rc 'ls /bin | wc -l'
+host$ du -sh .local/9front/min-11952-arm64
+```
+
+The commands are hard links to `/$cputype/bin/9box`. A tree that can't have
+hard links (a copy onto another file server, say) takes
+`-Dslim-links=stub`, where each command is a file holding `#!/bin/9box -!`;
+the same tree also lets you bind over one command, which in a hard-link
+tree covers them all, since hard links share a qid. `9box` alone lists its
+commands, and `9box CMD ARGS` runs one. Add your own commands and scripts to
+the tree as above; to box more of 9front's, add a line to a set in
+`src/9box/` (its name and its directory under `/sys/src/cmd`).
+
 ## 5. Layering on the stock root instead of copying it
 
 > Needs the 9front root tree. Not yet run.

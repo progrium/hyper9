@@ -1,0 +1,173 @@
+#!/bin/rc
+# The differential corpus for 9box (design/multicall.md): runs each command
+# named in $* over small fixed inputs, with output, errors and exit status
+# on stdout. The integration case runs it in a slim tree and in the stock
+# tree, with the commands the box has, and compares the two. Nothing here
+# depends on the time, pids or the host.
+#
+# The inputs are in a ramfs, so their files come from a mount (type M) as
+# on 9front; diff, for one, copies anything else to /tmp first.
+rfork e
+mkdir -p /tmp/w
+ramfs -m /tmp/w || exit ramfs
+cd /tmp/w
+fn st {
+	# The exit status, without the process name and pid in front.
+	echo status `{echo $status | sed 's/^[^ ]+ [0-9]+: //'}
+}
+fn t {
+	# t CMD ARGS: runs it with stderr on stdout, then its status.
+	$* >[2=1]
+	st
+}
+
+# Inputs.
+mkdir -p d/sub e
+echo hello world >d/a
+echo second >d/sub/b
+cat >lines <<'X'
+pear 3
+apple 10
+apple 10
+fig 2
+banana 7
+X
+seq 1 500 >nums >[2]/dev/null || awk 'BEGIN { for(i = 1; i <= 500; i++) print i }' >nums
+cat >c.c <<'X'
+#include <u.h>
+int
+main(void)
+{
+	return 0;
+}
+X
+cp lines lines2
+echo 'kiwi 1' >>lines2
+
+fn c_rc { t rc -c 'x=(a b c); echo $#x $x(2); fn f { echo f $* }; f 1 2; ~ abc a* && echo match' }
+fn c_echo { t echo -n no newline; echo; t echo a b c }
+fn c_cat { t cat d/a lines; t cat nonexistent }
+fn c_ls { t ls d; t ls -l d/a | awk '{print $1, $6, $NF}'; t ls -p d/sub/b; t ls nonexistent }
+fn c_cp { t cp d/a e/a; cat e/a; t cp nonexistent e/x }
+fn c_mv { cp d/a e/m; t mv e/m e/n; ls e }
+fn c_rm { echo x >e/r; t rm e/r; t rm e/r }
+fn c_mkdir { t mkdir -p e/p/q; ls -d e/p/q; t mkdir e/p }
+fn c_pwd { cd d; t pwd; cd .. }
+fn c_test { t test -d d; t test -f d; t test 3 -gt 2; t test abc '=' abd }
+fn c_date { t date -u 0; t date -n 0 }
+fn c_sleep { t sleep 0 }
+fn c_touch { t touch -t 1 e/t; ls -l e/t | awk '{print $6}' }
+fn c_chmod { echo x >e/c; t chmod 600 e/c; ls -l e/c | awk '{print $1}'; t chmod zz e/c }
+fn c_du { t du -a d | sort }
+fn c_basename { t basename /a/b/c.c .c; t basename -d /a/b/c.c }
+fn c_read { t read -n 2 <lines }
+fn c_wc { t wc lines; t wc -l <nums }
+fn c_sort { t sort lines; t sort -n -k2 lines; t sort -r -u lines }
+fn c_uniq { t uniq lines; t uniq -c lines }
+fn c_tr { echo Hello World | t tr a-z A-Z; echo aabbcc | t tr -s abc; echo abc | t tr -d b }
+fn c_sed { t sed -n '2,3p' lines; t sed 's/apple/APPLE/g; /fig/d' lines; t sed -n '$=' nums }
+fn c_awk { t awk '{ s += $2 } END { print s, NR }' lines; t awk -F' ' '$2 > 5 { print $1 }' lines }
+fn c_grep { t grep apple lines; t grep -c 1 nums; t grep -v -n a lines; t grep zzz lines }
+fn c_cmp { t cmp lines lines; t cmp lines lines2 }
+fn c_diff { t diff lines lines2; t diff -c lines lines2 | sed 1,2d }
+fn c_tail { t tail -3 nums; t tail +498 nums }
+fn c_tee { echo teed | t tee e/tee; cat e/tee }
+fn c_xargs { echo a b c d | t xargs -n2 echo x }
+fn c_tar { t tar cf e/x.tar d; t tar tf e/x.tar | sort }
+fn c_gzip { gzip <nums >e/g.gz; st; gunzip <e/g.gz >e/g; cmp e/g nums && echo same }
+fn c_gunzip { gzip <d/a >e/h.gz; t gunzip <e/h.gz; t gunzip -z }
+fn c_unzip { t unzip -h }
+fn c_bind { t bind d e; ls e; unmount e }
+fn c_mount { t mount }
+fn c_unmount { t unmount /nonexistent }
+fn c_ns { ns | grep -c bind >/dev/null; st }
+fn c_ps { ps >/dev/null; st }
+fn c_srv { t srv }
+fn c_srvfs { t srvfs }
+fn c_exportfs {
+	# exportfs's fatal errors kill its note group.
+	@{ rfork s; exportfs -z >[2=1] | sed 's/^exportfs [0-9]+:/exportfs:/' }
+}
+fn c_ramfs { mkdir -p /tmp/r; t ramfs -m /tmp/r; echo inram >/tmp/r/f; cat /tmp/r/f; unmount /tmp/r }
+
+fn c_chgrp { echo x >e/g; t chgrp nonexistentgroup e/g }
+fn c_dd { t dd -if nums -bs 10 -count 2 -quiet 1 }
+fn c_comm { sort lines >e/s1; sort lines2 >e/s2; t comm e/s1 e/s2 }
+fn c_split { t split -n 200 nums e/sp; ls e | grep sp }
+fn c_strings { t strings nums | sed 3q }
+fn c_sum { t sum lines; t sum -5 lines }
+fn c_md5sum { t md5sum lines }
+fn c_sha1sum { t sha1sum lines; t sha1sum -2 256 lines }
+fn c_crc32 { t crc32 lines }
+fn c_seq { t seq 3; t seq -w 8 11; t seq 1 0.5 3 }
+fn c_cleanname { t cleanname /a/./b/../c//d }
+fn c_time { time echo x >[2]/dev/null; st }
+fn c_fmt { t fmt -l 20 lines }
+fn c_col { echo 'a	b' | t col -x }
+fn c_p { t p -z }
+fn c_pr { t pr -h head lines | sed 1,3d }
+fn c_look { sort lines | t look -f app /fd/0 }
+fn c_idiff { t idiff }
+fn c_merge3 { t merge3 lines lines lines2 }
+fn c_file { t file lines c.c d }
+fn c_mtime { touch -t 1000 e/mt; t mtime e/mt | awk '{print $1}' }
+fn c_seconds { t seconds '1 jan 2000 00:00:00 gmt' }
+fn c_tput { t tput -h }
+fn c_ascii { t ascii -n 65; t ascii -x a }
+fn c_unicode { t unicode 263a; t unicode 41-45 }
+fn c_urlencode { t urlencode 'a b&c'; t urlencode -d 'a%20b' }
+fn c_tcs { echo abc | t tcs -f utf -t latin1 | xd -c }
+fn c_ecp { t ecp }
+# fcp: none. Its eight RFMEM workers hang h9 now and then (the stock binary,
+# 2 runs in 10 copying /lib/namespace), which is h9's bug, not 9box's.
+fn c_fcp { echo skipped }
+fn c_xd { t xd -c d/a }
+fn c_ed { t ed - lines <<'X'
+/fig/s/fig/FIG/
+1,$p
+q
+X
+}
+fn c_patch { diff -u lines lines2 >e/p.diff; cp lines e/lp; t patch -p0 e/lp e/p.diff }
+fn c_zip { t zip -h }
+fn c_mkpaqfs { mkpaqfs -o e/x.paq d >/dev/null >[2=1]; st; test -s e/x.paq && echo made; t mkpaqfs -b 1 -o e/y.paq d }
+fn c_paqfs { t paqfs -z }
+fn c_mntgen { t mntgen -z }
+fn c_aan { t aan }
+fn c_cec { t cec -z }
+fn c_con { t con }
+fn c_rx { t rx }
+fn c_ratrace { t ratrace }
+fn c_plumb { t plumb -z }
+fn c_plumber { t plumber -z }
+fn c_execnet { t execnet -z }
+fn c_pipefile { t pipefile }
+fn c_passwd { t passwd -z }
+fn c_netkey { t netkey -z }
+fn c_archfs { t archfs }
+fn c_9660srv { t 9660srv -z }
+fn c_dossrv { t dossrv -z }
+fn c_webfs { t webfs -z }
+fn c_sshfs { t sshfs }
+fn c_ftpfs { t ftpfs -z }
+fn c_ssh { t ssh }
+fn c_sshnet { t sshnet -z }
+fn c_telnet { t telnet }
+fn c_tlsclient { t tlsclient }
+fn c_tlssrv { t tlssrv -z }
+fn c_webcookies { t webcookies -z }
+fn c_dc { echo '2 3 + p 10 3 / p' | t dc }
+fn c_hoc { echo '2^10; sqrt(2)' | t hoc }
+fn c_factor { t factor 91 }
+fn c_primes { t primes 10 30 }
+fn c_cal { t cal 1 2026 }
+fn c_bc { echo '2+3; scale=3; 1/7' | t bc }
+fn c_pc { echo '2+3*4; 0x10; 7/2' | t pc }
+
+for(c){
+	echo '#' $c
+	if(whatis c_$c >/dev/null >[2=1])
+		c_$c
+	if not
+		echo no corpus for $c
+}

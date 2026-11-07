@@ -1,0 +1,64 @@
+# Builds 9box, a multi-call binary of the commands in $SET, for $objtype,
+# from /sys/src (design/multicall.md). Run it in a writable copy of this
+# directory: mk SET=min (or slim). Each command builds in
+# obj/$objtype/NAME (see mkcmd), and the box is $O.9box.
+</$objtype/mkfile
+
+SET=min
+W=obj/$objtype
+NAMES=`{rc ./lsset $SET | awk '{print $1}'}
+
+default:V: $O.9box
+
+$W/set:
+	mkdir -p $W
+	rc ./lsset $SET >$target
+
+# Globals libc and libbio define, which commands' objects don't rename,
+# and the names their own code refers to (see mkcmd).
+$W/libsyms: $W/set
+	nm /$objtype/lib/libc.a /$objtype/lib/libbio.a | awk '$(NF-1) ~ /^[TDB]$/ {print $NF}' | sort -u >$target
+
+$W/libcalls: $W/set
+	nm /$objtype/lib/libc.a /$objtype/lib/libbio.a | awk '$(NF-1) == "U" {print $NF}' | sort -u >$target
+
+$W/%/objs: $W/set $W/libsyms $W/libcalls
+	rc ./mkcmd $stem `{awk -v 'c='$stem '$1 == c {print $2}' $W/set}
+
+cmds.h: $W/set ${NAMES:%=$W/%/objs}
+	rc ./gencmds $W >$target
+
+# Without -T: cmds.h declares every main as void main(int, char**), and
+# some are int main or main(void), whose type signatures the linker would
+# refuse to match. The calls are the same either way.
+9box.$O: 9box.c cmds.h
+	$CC -FVw 9box.c
+
+# A private libthread whose main is _threadlibmain, so 9box keeps main and
+# starts thread commands through it. Built like mkcmd's commands, behind a
+# writable layer over /sys/src/libthread.
+$W/libthread.a:
+	top=`{pwd}
+	rm -rf $W/libthread $target
+	mkdir -p $W/libthread
+	@{
+		rfork n
+		bind -bc $W/libthread /sys/src/libthread
+		cd /sys/src/libthread
+		mk 'CC='$CC' -Dmain=_threadlibmain' 'LIB='$top/$target all
+	} >$W/libthread/log >[2=1] || {
+		echo mk: the private libthread failed, see $W/libthread/log >[1=2]
+		exit libthread
+	}
+
+# The link: 9box.$O, every command's objects, the private libthread if a
+# command needs it, and the local libraries their headers name with
+# #pragma lib (auth's ./lib.$O.a), which are found here.
+$W/link: cmds.h
+	rc ./genlink $W >$target
+
+$O.9box: 9box.$O $W/link
+	$LD -o $target 9box.$O `{cat $W/link}
+
+clean:V:
+	rm -rf obj cmds.h *.$O *.a [$OS].9box
