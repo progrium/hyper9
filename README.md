@@ -41,8 +41,8 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [serve](design/0035-serve.md) | draft |  | Serving the namespace over 9P |
 | [linux-threads](design/0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](design/0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
-| [multicall](design/0064-multicall.md) | draft | needs self-host | A multi-call 9front userland binary |
-| [builtin-root](design/builtin-root.md) | draft | needs multicall | A built-in root |
+| [multicall](design/0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
+| [builtin-root](design/builtin-root.md) | draft |  | A built-in root |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
@@ -86,7 +86,7 @@ flowchart LR
   p_serve["#35;35 serve<br/>draft"]:::draft
   p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
-  p_multicall["#35;64 multicall<br/>draft"]:::draft
+  p_multicall["#35;64 multicall<br/>implemented"]:::implemented
   p_builtin_root["builtin-root<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
@@ -123,7 +123,6 @@ flowchart LR
   p_linux_personality --> p_linux_threads
   p_linux_net --> p_linux_threads
   p_linux_personality --> p_linux_net
-  p_self_host --> p_multicall
   p_multicall --> p_builtin_root
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
