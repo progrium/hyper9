@@ -39,6 +39,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [builtin-root](builtin-root.md) | draft |  | A built-in root |
 | [ci](ci.md) | draft |  | Continuous integration |
 | [credential-helpers](credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
+| [default-command](default-command.md) | draft |  | A default command from the root |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-cmd](host-cmd.md) | draft |  | Rethinking host commands |
@@ -87,6 +88,7 @@ flowchart LR
   p_builtin_root["builtin-root<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_credential_helpers["credential-helpers<br/>draft"]:::draft
+  p_default_command["default-command<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
