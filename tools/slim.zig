@@ -1,5 +1,5 @@
 //! `zig build slim`: builds 9box, a multi-call binary of 9front's commands,
-//! and a slim root around it (design/multicall.md).
+//! and a slim root around it (design/0064-multicall.md).
 //!
 //! The build runs inside h9, against the stock root: src/9box/ is copied
 //! into a fresh build directory, which is the machine's cwd and the only

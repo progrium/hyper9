@@ -41,6 +41,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [serve](design/0035-serve.md) | draft |  | Serving the namespace over 9P |
 | [linux-threads](design/0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](design/0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
+| [multicall](design/0064-multicall.md) | draft | needs self-host | A multi-call 9front userland binary |
 | [builtin-root](design/builtin-root.md) | draft | needs multicall | A built-in root |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
@@ -49,7 +50,6 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](design/host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](design/host-srv.md) | draft |  | Posting host connections to /srv |
-| [multicall](design/multicall.md) | draft | needs self-host | A multi-call 9front userland binary |
 | [overlay-export](design/overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](design/root-auth.md) | draft |  | Authenticated 9P roots |
 
@@ -86,6 +86,7 @@ flowchart LR
   p_serve["#35;35 serve<br/>draft"]:::draft
   p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
+  p_multicall["#35;64 multicall<br/>draft"]:::draft
   p_builtin_root["builtin-root<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
@@ -94,7 +95,6 @@ flowchart LR
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
-  p_multicall["multicall<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
   p_semaphores --> p_go_compat
@@ -123,12 +123,12 @@ flowchart LR
   p_linux_personality --> p_linux_threads
   p_linux_net --> p_linux_threads
   p_linux_personality --> p_linux_net
+  p_self_host --> p_multicall
   p_multicall --> p_builtin_root
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
   p_9p_roots --> p_host_srv
-  p_self_host --> p_multicall
   p_ephemeral_writes --> p_overlay_export
   p_9p_roots --> p_root_auth
 ```
@@ -210,7 +210,7 @@ Interactive cases run h9 on a terminal the test creates
 ([tests/term.zig](tests/term.zig): a pty, or ConPTY on Windows), so they need
 no human and no `ssh -t`.
 
-`zig build slim` builds [9box](design/multicall.md) inside the h9 it just
+`zig build slim` builds [9box](design/0064-multicall.md) inside the h9 it just
 built, against the root tree: 9front's own commands, compiled from the pinned
 source with their globals renamed so they share one link, chosen by the name
 they run as: the 42 commands basic operation needs. `-Dslim-links=hard`

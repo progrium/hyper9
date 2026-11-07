@@ -1,5 +1,5 @@
 #!/bin/rc
-# The exec loop design/multicall.md measures: 1600 execs of echo, wc, ls
+# The exec loop design/0064-multicall.md measures: 1600 execs of echo, wc, ls
 # and sed from one rc. Time it with a box tree and with the same commands
 # as separate binaries, from the repository root:
 #	time h9 --root .local/9front/min-11952-arm64 rc tests/fixtures/multicall/execloop.rc

@@ -1,5 +1,5 @@
 #!/bin/rc
-# The differential corpus for 9box (design/multicall.md): runs each command
+# The differential corpus for 9box (design/0064-multicall.md): runs each command
 # named in $* over small fixed inputs, with output, errors and exit status
 # on stdout. The integration case runs it in a slim tree and in the stock
 # tree, with the commands the box has, and compares the two. Nothing here
