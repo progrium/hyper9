@@ -50,7 +50,7 @@ pub const Pool = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io, backend: vmm.Backend, cpus: ?u32, own_limit_override: ?u32) vmm.Error!Pool {
         const own_limit: ?u32 = switch (backend.kind()) {
             .emu => null,
-            .hvf, .kvm => blk: {
+            .hvf, .kvm, .whp => blk: {
                 const max = try backend.maxVcpus();
                 break :blk if (max > reserve) max - reserve else 1;
             },
