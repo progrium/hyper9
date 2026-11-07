@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const ws = @import("ws");
+const deadline = @import("deadline.zig");
 const net = std.Io.net;
 const Io = std.Io;
 
@@ -36,6 +37,9 @@ pub const Options = struct {
     send_text: ?[]const u8 = null,
     /// Echo each message back with its type instead of relaying.
     echo: bool = false,
+    /// Wait for connections without a time limit, as the demo does until
+    /// it's killed. Otherwise accepting gives up after deadline.limit_ms.
+    forever: bool = false,
 };
 
 pub const Relay = struct {
@@ -109,7 +113,7 @@ pub const Relay = struct {
 
     fn serve(rl: *Relay) void {
         while (true) {
-            const st = rl.server.accept(rl.io) catch return;
+            const st = (if (rl.opts.forever) rl.server.accept(rl.io) else deadline.accept(&rl.server, rl.io)) catch return;
             const t = std.Thread.spawn(.{}, conn, .{ rl, st }) catch {
                 st.close(rl.io);
                 continue;
@@ -352,7 +356,7 @@ pub const Proxy = struct {
 
     fn serve(p: *Proxy) void {
         while (true) {
-            const st = p.server.accept(p.io) catch return;
+            const st = deadline.accept(&p.server, p.io) catch return;
             const t = std.Thread.spawn(.{}, conn, .{ p, st }) catch {
                 st.close(p.io);
                 continue;
@@ -430,7 +434,7 @@ pub fn main(init: std.process.Init) !u8 {
     const listen = std.fmt.parseInt(u16, args[1], 10) catch return 2;
     const to = std.fmt.parseInt(u16, args[2], 10) catch return 2;
     var rl: Relay = undefined;
-    try rl.start(init.io, listen, .{ .target_port = to });
+    try rl.start(init.io, listen, .{ .target_port = to, .forever = true });
     std.debug.print("relaying {s} to 127.0.0.1:{d}\n", .{ rl.url(), to });
     while (true) try init.io.sleep(.fromSeconds(3600), .awake);
 }

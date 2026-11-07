@@ -878,7 +878,9 @@ pub fn build(b: *std.Build) void {
     };
     const cases_arch = test_arch orelse native_arch orelse "arm64";
     var backends: std.ArrayList(u8) = .empty;
-    if (os == .macos and std.mem.eql(u8, cases_arch, "arm64") and target.result.cpu.arch == .aarch64)
+    // A macOS VM has no HVF (kern.hv_support is 0), so h9 can't run there on hvf.
+    if (os == .macos and std.mem.eql(u8, cases_arch, "arm64") and target.result.cpu.arch == .aarch64 and
+        (b.graph.host.result.os.tag != .macos or hostHasHvf(b)))
         backends.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
     // KVM runs the host's architecture, when this user can open /dev/kvm.
     if (os == .linux and b.graph.host.result.os.tag == .linux and native_arch != null and std.mem.eql(u8, cases_arch, native_arch.?) and
@@ -1048,6 +1050,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tools/guesttree.zig"),
         .target = b.graph.host,
     }) })).step);
+    // The time limits on the tests' listeners (tests/deadline.zig).
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/deadline.zig"),
+        .target = b.graph.host,
+    }) })).step);
     // The design tool's tests read tools/testdata from the repository root.
     const design_tests = b.addRunArtifact(b.addTest(.{ .root_module = design_tool.root_module }));
     design_tests.setCwd(b.path("."));
@@ -1083,9 +1090,10 @@ pub fn build(b: *std.Build) void {
     linkUnicorn(embed_example);
     const install_embed = b.addInstallArtifact(embed_example, .{});
     b.step("embed", "Build docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed").dependOn(&install_embed.step);
-    // zig build test runs it on the hello fixture where a backend can: HVF
-    // on an arm64 Mac (signed like h9) for one machine, and the emulator for
-    // the second. HVF allows one VM per host process.
+    // zig build test runs it on the hello fixture where a backend can: the
+    // default backend (auto: HVF on an arm64 Mac that has it, signed like h9,
+    // else the emulator) for one machine, and the emulator for the second.
+    // HVF allows one VM per host process.
     const hvf_host = os == .macos and target.result.cpu.arch == .aarch64 and b.graph.host.result.os.tag == .macos;
     if (hvf_host or emu == .unicorn) {
         const run_embed = b.addRunArtifact(embed_example);
@@ -1098,8 +1106,11 @@ pub fn build(b: *std.Build) void {
         const machines: []const u8 = if (emu == .unicorn) "2" else "1";
         run_embed.addArgs(&.{ "-j", machines });
         run_embed.addFileArg(host_hello);
-        const first = b.fmt("machine 0 ({s}): exited \"\"\n  hello\n", .{if (hvf_host) "hvf" else "emu"});
-        run_embed.expectStdOutEqual(if (emu == .unicorn) b.fmt("{s}machine 1 (emu): exited \"\"\n  hello\n", .{first}) else first);
+        // Machine 0's backend isn't named: auto picks it when it runs.
+        run_embed.addCheck(.{ .expect_stdout_match = "machine 0 (" });
+        run_embed.addCheck(.{ .expect_stdout_match = "): exited \"\"\n  hello\n" });
+        if (emu == .unicorn) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (emu): exited \"\"\n  hello\n" });
+        run_embed.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_embed.step);
     }
 
@@ -1134,4 +1145,14 @@ pub fn build(b: *std.Build) void {
     const install_tests_step = b.step("install-tests", "Install the backend and integration tests as zig-out/bin/backend-tests and integration-tests");
     install_tests_step.dependOn(&b.addInstallArtifact(backend_tests, .{ .dest_sub_path = b.fmt("backend-tests{s}", .{target.result.exeFileExt()}) }).step);
     install_tests_step.dependOn(&b.addInstallArtifact(integrationTests(b, target, optimize, &.{}), .{ .dest_sub_path = b.fmt("integration-tests{s}", .{target.result.exeFileExt()}) }).step);
+}
+
+/// Whether this Mac can run HVF: a macOS VM reports kern.hv_support 0.
+fn hostHasHvf(b: *std.Build) bool {
+    const r = std.process.run(b.allocator, b.graph.io, .{ .argv = &.{ "sysctl", "-n", "kern.hv_support" } }) catch return false;
+    const ok = switch (r.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
 }

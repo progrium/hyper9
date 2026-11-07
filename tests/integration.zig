@@ -25,6 +25,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Term = @import("term.zig").Term;
 const wsrelay = @import("wsrelay.zig");
+const deadline = @import("deadline.zig");
 const design = @import("design");
 
 const gpa = std.testing.allocator;
@@ -2130,7 +2131,7 @@ fn rcDial(buf: []u8, addr: []const u8, line: []const u8) ![]const u8 {
 /// `buf.len` bytes, so the peer must have closed it.
 fn acceptLine(srv: *std.Io.net.Server, buf: []u8) ![]const u8 {
     const io = std.testing.io;
-    const s = try srv.accept(io);
+    const s = try deadline.accept(srv, io);
     defer s.close(io);
     var rbuf: [256]u8 = undefined;
     var r = s.reader(io, &rbuf);
@@ -2199,6 +2200,7 @@ test "--net=enable allows a server [5]" {
         var w = c.writer(io, &wbuf);
         try w.interface.writeAll("ping\n");
         try w.interface.flush();
+        try deadline.waitReadable(c.socket.handle, deadline.limit_ms);
         var rbuf: [64]u8 = undefined;
         var r = c.reader(io, &rbuf);
         var got: [64]u8 = undefined;
@@ -2763,7 +2765,7 @@ test "net/http fetches from a listener the test opens [7]" {
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/x", .{srv.socket.address.getPort()});
     const Server = struct {
         fn serve(s: *std.Io.net.Server) void {
-            const c = s.accept(io) catch return;
+            const c = deadline.accept(s, io) catch return;
             defer c.close(io);
             var rbuf: [1024]u8 = undefined;
             var r = c.reader(io, &rbuf);
@@ -2967,13 +2969,15 @@ const FakeAttach = struct {
 
     fn serve(f: *FakeAttach) void {
         const io = std.testing.io;
-        const s = f.srv.accept(io) catch return;
+        const s = deadline.accept(&f.srv, io) catch return;
         defer s.close(io);
         var rbuf: [8192]u8 = undefined;
         var wbuf: [256]u8 = undefined;
         var r = s.reader(io, &rbuf);
         var w = s.writer(io, &wbuf);
         while (true) {
+            if (r.interface.bufferedLen() == 0)
+                deadline.waitReadable(s.socket.handle, deadline.limit_ms) catch return;
             const size = r.interface.takeInt(u32, .little) catch return;
             if (size < 7 or size > rbuf.len) return;
             const m = r.interface.take(size - 4) catch return;
@@ -3049,7 +3053,7 @@ const UnixRelay = struct {
     fn accept(u: *UnixRelay) void {
         const io = std.testing.io;
         while (true) {
-            const c = u.srv.accept(io) catch return;
+            const c = deadline.accept(&u.srv, io) catch return;
             const ip = std.Io.net.IpAddress.parse("127.0.0.1", u.port) catch unreachable;
             const s = ip.connect(io, .{ .mode = .stream }) catch {
                 c.close(io);
