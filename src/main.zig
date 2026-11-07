@@ -142,6 +142,7 @@ pub fn main(init: std.process.Init) !u8 {
         .root_user = cfg.root_user,
         .root_headers = wo.headers,
         .root_ca = wo.ca,
+        .root_contained = cfg.root_contained,
         .proxy = wo.proxy,
         .cwd = cwd,
         .policy = pol,

@@ -145,6 +145,10 @@ pub const Machine = struct {
         /// PEM certificates a `wss` root must chain to, instead of the
         /// host's bundle: a host path.
         root_ca: ?[]const u8 = null,
+        /// Resolve a host root tree's symlinks inside it: an absolute
+        /// target starts at the tree's top, and `..` stops there
+        /// (design/0034-symlinks-in-root.md).
+        root_contained: bool = false,
         /// Proxies for host-made connections; null goes direct. The CLI
         /// fills it from HTTPS_PROXY, HTTP_PROXY and NO_PROXY.
         proxy: ?Proxy = null,
@@ -258,7 +262,7 @@ pub const Machine = struct {
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
-        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools };
+        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .root_contained = opts.root_contained };
         if (opts.root) |r| switch (r) {
             .dir => |d| in.root = d,
             .tcp => |a| in.root_9p = .{ .kind = .tcp, .addr = a, .spec = opts.root_spec, .user = opts.root_user },
@@ -1303,13 +1307,13 @@ pub const Machine = struct {
             };
             if (b.create) flag |= kern.MCREATE;
             const to = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.to});
-            if (bindOrOverlay(from, b.lower, to, flag, &buf)) |id| {
+            if (bindOrOverlay(from, b.lower, b.contained, to, flag, &buf)) |id| {
                 if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term/cwd";
                 if (std.mem.eql(u8, b.to, "/") and id != null) root_ov = id;
                 continue;
             } else |_| {}
             if (b.fallback) |fb| {
-                if (bindOrOverlay(from, b.lower, try std.fmt.bufPrintZ(&buf2, "{s}", .{fb}), flag, &buf)) |_| {
+                if (bindOrOverlay(from, b.lower, b.contained, try std.fmt.bufPrintZ(&buf2, "{s}", .{fb}), flag, &buf)) |_| {
                     if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term";
                     continue;
                 } else |_| {}
@@ -1464,17 +1468,17 @@ pub const Machine = struct {
     }
 
     /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
-    /// overlay over `#U<lower>`. A bare `#O` with no `lower` is a fresh
-    /// overlay over what `to` is now, as in a namespace file. `buf` is
-    /// scratch, and may hold `from`.
+    /// overlay over `#U<lower>` (`#U!c<lower>` when `contained`). A bare
+    /// `#O` with no `lower` is a fresh overlay over what `to` is now, as in
+    /// a namespace file. `buf` is scratch, and may hold `from`.
     /// Returns the overlay's instance, or null for a plain bind.
-    fn bindOrOverlay(from: [:0]const u8, lower: ?[]const u8, to: [:0]const u8, flag: c_int, buf: []u8) kern.Error!?u32 {
+    fn bindOrOverlay(from: [:0]const u8, lower: ?[]const u8, contained: bool, to: [:0]const u8, flag: c_int, buf: []u8) kern.Error!?u32 {
         const l = lower orelse {
             if (std.mem.eql(u8, from, "#O")) return try overlay(to, to, flag);
             try kern.bind(from, to, flag);
             return null;
         };
-        return try overlay(std.fmt.bufPrintZ(buf, "#U{s}", .{l}) catch return error.Kern, to, flag);
+        return try overlay(std.fmt.bufPrintZ(buf, "#U{s}{s}", .{ if (contained) "!c" else "", l }) catch return error.Kern, to, flag);
     }
 
     /// Binds a fresh `#O` overlay over the directory `lower` at `to`, and

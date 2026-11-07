@@ -44,7 +44,23 @@ struct Ufsinfo
 	vlong	offset;
 	QLock	oq;
 	wchar_t	*path;
+	/*
+	 * h9: a contained attach (#U!c, design/0034-symlinks-in-root.md)
+	 * resolves links inside top once namec's walk has set it
+	 * (h9_fs_anchor). path is then always resolved, and lpath, if set,
+	 * is the link the last name was, in its resolved directory.
+	 */
+	int	contained;
+	wchar_t	*top;
+	wchar_t	*lpath;
 };
+
+/* h9: the chan's own name on the host: the link, not its target. */
+static wchar_t*
+ownpath(Ufsinfo *uif)
+{
+	return uif->lpath != nil ? uif->lpath : uif->path;
+}
 
 static	wchar_t *catpath(wchar_t *, char *, wchar_t *);
 static	ulong	fsdirread(Chan*, uchar*, int, vlong);
@@ -228,9 +244,18 @@ fsattach(char *spec)
 	static int devno;
 	Ufsinfo *uif;
 	Chan *c;
+	int contained;
 
+	/* h9: the only spec is !c, a contained tree. */
+	contained = 0;
+	if(spec != nil && spec[0] != 0){
+		if(strcmp(spec, "!c") != 0)
+			error(Ebadspec);
+		contained = 1;
+	}
 	uif = mallocz(sizeof(Ufsinfo), 1);
 	uif->path = wstrdup(L"");
+	uif->contained = contained;
 
 	c = devattach('U', spec);
 	c->aux = uif;
@@ -248,9 +273,54 @@ fsclone(Chan *c, Chan *nc)
 	uif = mallocz(sizeof(Ufsinfo), 1);
 	*uif = *(Ufsinfo*)c->aux;
 	uif->path = wstrdup(uif->path);
+	if(uif->top != nil)
+		uif->top = wstrdup(uif->top);
+	if(uif->lpath != nil)
+		uif->lpath = wstrdup(uif->lpath);
 	nc->aux = uif;
 
 	return nc;
+}
+
+/*
+ * h9: a walk in a contained tree, resolved by fscheck.c inside it.
+ * Returns 1, 0 if name doesn't exist, or -1 for too many links.
+ */
+static int
+fswalkin(Chan *c, char *name)
+{
+	wchar_t buf[MAX_PATH*4], *lpath;
+	WIN32_FIND_DATA wfd;
+	Ufsinfo *uif;
+	HANDLE h;
+	int r;
+
+	uif = c->aux;
+	r = h9_fs_resolveinw(uif->top, uif->path, name, buf, nelem(buf));
+	if(r == H9_RESLOOP)
+		return -1;
+	if(r < 0 || h9_fs_checkw(buf, H9_FSWALK) < 0)
+		return 0;
+	if(pathtype(buf) == TPATH_FILE){
+		if((h = FindFirstFile(buf, &wfd)) == INVALID_HANDLE_VALUE)
+			return 0;
+		FindClose(h);
+		c->qid = wfdtoqid(buf, &wfd);
+	}else
+		c->qid = wfdtoqid(buf, nil);
+	lpath = nil;
+	if(strcmp(name, "..") != 0){
+		lpath = catpath(uif->path, name, nil);
+		if(wcscmp(lpath, buf) == 0){
+			free(lpath);
+			lpath = nil;
+		}
+	}
+	free(uif->path);
+	uif->path = wstrdup(buf);
+	free(uif->lpath);
+	uif->lpath = lpath;
+	return 1;
 }
 
 static int
@@ -262,6 +332,8 @@ fswalk1(Chan *c, char *name)
 	Ufsinfo *uif;
 	
 	uif = c->aux;
+	if(uif->top != nil)
+		return fswalkin(c, name);
 	p = catpath(uif->path, name, nil);
 	if(h9_fs_checkw(p, H9_FSWALK) < 0){
 		free(p);
@@ -294,7 +366,7 @@ fswalk1(Chan *c, char *name)
 static Walkqid*
 fswalk(Chan *c, Chan *nc, char **name, int nname)
 {
-	int i;
+	int i, loop;
 	Walkqid *wq;
 
 	if(nc != nil)
@@ -303,14 +375,20 @@ fswalk(Chan *c, Chan *nc, char **name, int nname)
 	nc = devclone(c);
 	fsclone(c, nc);
 	wq->clone = nc;
+	loop = 0;
 	for(i=0; i<nname; i++){
-		if(fswalk1(nc, name[i]) == 0)
+		if((loop = fswalk1(nc, name[i])) <= 0)
 			break;
 		wq->qid[i] = nc->qid;
 	}
 	if(i != nname){
 		cclose(nc);
 		wq->clone = nil;
+	}
+	/* h9: a link loop in a contained tree is an error, not a missing name. */
+	if(loop < 0){
+		free(wq);
+		error(H9_ELOOP);
 	}
 	wq->nqid = i;
 	/* h9: as devwalk does, so namec tries the rest of a union. */
@@ -468,6 +546,8 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 	poperror();
 	free(uif->path);
 	uif->path = newpath;
+	free(uif->lpath);
+	uif->lpath = nil;
 	uif->offset = 0;
 	poperror();
 
@@ -503,6 +583,8 @@ fsclose(Chan *c)
 		}
 	}
 	free(uif->path);
+	free(uif->top);
+	free(uif->lpath);
 	free(uif);
 }
 
@@ -584,8 +666,20 @@ fsremove(Chan *c)
 		nexterror();
 	}
 	uif = c->aux;
-	h9_fs_allow(uif->path, H9_FSREMOVE);
-	if(c->qid.type & QTDIR){
+	/* h9: a link is removed, not its target. */
+	h9_fs_allow(ownpath(uif), H9_FSREMOVE);
+	if(uif->lpath != nil){
+		DWORD attr;
+
+		attr = GetFileAttributesW(uif->lpath);
+		if(attr == INVALID_FILE_ATTRIBUTES)
+			oserror();
+		if(attr & FILE_ATTRIBUTE_DIRECTORY){
+			if(!RemoveDirectory(uif->lpath))
+				oserror();
+		}else if(!DeleteFile(uif->lpath))
+			oserror();
+	} else if(c->qid.type & QTDIR){
 		if(!RemoveDirectory(uif->path))
 			oserror();
 	} else {
@@ -637,7 +731,8 @@ fswstat(Chan *c, uchar *buf, int n)
 		wchar_t *base, *newpath;
 		int l;
 
-		base = wstrdup(uif->path);
+		/* h9: a link is renamed, not its target. */
+		base = wstrdup(ownpath(uif));
 		if(waserror()){
 			free(base);
 			nexterror();
@@ -660,14 +755,19 @@ fswstat(Chan *c, uchar *buf, int n)
 			free(newpath);
 			nexterror();
 		}
-		if(wcscmp(uif->path, newpath)!=0){
+		if(wcscmp(ownpath(uif), newpath)!=0){
 			h9_fs_allow(newpath, H9_FSCREATE);
-			h9_fs_allow(uif->path, H9_FSRENAME);
-			if(!MoveFile(uif->path, newpath))
+			h9_fs_allow(ownpath(uif), H9_FSRENAME);
+			if(!MoveFile(ownpath(uif), newpath))
 				oserror();
 		}
-		free(uif->path);
-		uif->path = newpath;
+		if(uif->lpath != nil){
+			free(uif->lpath);
+			uif->lpath = newpath;
+		}else{
+			free(uif->path);
+			uif->path = newpath;
+		}
 		poperror();
 	}
 
@@ -772,6 +872,37 @@ fsdirread(Chan *c, uchar *va, int count, vlong offset)
 		if(de[0]==0 || isdots(de))
 			continue;
 		d.name = de;
+		/*
+		 * h9: in a contained tree, an entry is listed as its walk
+		 * resolves it, and a link whose target is missing isn't.
+		 */
+		if(uif->top != nil && t != TPATH_ROOT){
+			wchar_t buf[MAX_PATH*4];
+			WIN32_FIND_DATA f;
+			HANDLE h;
+
+			if(h9_fs_resolveinw(uif->top, uif->path, de, buf, nelem(buf)) < 0)
+				continue;
+			if(h9_fs_checkw(buf, H9_FSWALK) < 0)
+				continue;
+			if(pathtype(buf) == TPATH_FILE){
+				if((h = FindFirstFile(buf, &f)) == INVALID_HANDLE_VALUE)
+					continue;
+				FindClose(h);
+				wfdtodir(buf, &d, &f);
+			}else
+				wfdtodir(buf, &d, nil);
+			d.name = de;
+			d.type = 'U';
+			d.dev = c->dev;
+			n = convD2M(&d, (uchar*)va+i, count-i);
+			if(n == BIT16SZ){
+				uif->dir->keep = 1;
+				break;
+			}
+			i += n;
+			continue;
+		}
 		if(t == TPATH_ROOT)
 			p = catpath(uif->path, nil, uif->dir->drivep);
 		else
@@ -797,6 +928,65 @@ fsdirread(Chan *c, uchar *va, int count, vlong offset)
 out:
 	uif->offset += i;
 	return i;
+}
+
+/*
+ * h9: called by namec once a walk from a #U attach is done. A contained
+ * attach's tree is where the walk ended, by its final path. The list of
+ * drives can't be a tree, so a contained attach left there isn't one.
+ */
+void
+h9_fs_anchor(Chan *c)
+{
+	wchar_t w[MAX_PATH*4], *p;
+	Ufsinfo *uif;
+	HANDLE h;
+	DWORD n;
+
+	uif = c->aux;
+	if(!uif->contained || uif->top != nil)
+		return;
+	if(pathtype(uif->path) == TPATH_ROOT){
+		uif->contained = 0;
+		return;
+	}
+	p = uif->path;
+	if(pathtype(p) == TPATH_VOLUME){
+		uif->top = wstrdup(p);
+		return;
+	}
+	h = CreateFileW(p, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nil);
+	if(h == INVALID_HANDLE_VALUE)
+		oserror();
+	n = GetFinalPathNameByHandleW(h, w, nelem(w), FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
+	CloseHandle(h);
+	/* Only drive paths, \\?\C:\..., are allowed; not UNC or devices. */
+	if(n == 0 || n >= nelem(w) || wcsncmp(w, L"\\\\?\\", 4) != 0 || w[5] != L':')
+		error(Enonexist);
+	p = w+4;
+	n = wcslen(p);
+	if(n > 2 && p[n-1] == L'\\')
+		p[n-1] = 0;
+	uif->top = wstrdup(p);
+	free(uif->path);
+	uif->path = wstrdup(p);
+	free(uif->lpath);
+	uif->lpath = nil;
+}
+
+/* h9: the target of the link c's last name was, as it's written. */
+int
+h9_fs_readlink(Chan *c, char *buf, int nbuf)
+{
+	Ufsinfo *uif;
+
+	if(devtab[c->type]->dc != 'U' || nbuf <= 0)
+		return -1;
+	uif = c->aux;
+	if(pathtype(ownpath(uif)) != TPATH_FILE || h9_fs_checknamew(ownpath(uif), H9_FSWALK) < 0)
+		return -1;
+	return h9_fs_readlinkw(ownpath(uif), buf, nbuf);
 }
 
 static ulong
