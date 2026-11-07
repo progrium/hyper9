@@ -838,7 +838,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
 | `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 21) |
-| `#C` | cmd | | Runs host commands. Masked unless `--host-cmd`. |
+| `#C` | cmd | | Runs host commands. Only in builds with `-Dhost-cmd`, and masked unless `--host-cmd`. |
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
@@ -866,7 +866,10 @@ This is the core of the sandbox (chapter 22): the namespace h9 built is the
 whole of the host a program can reach. `--host-fs` leaves `#U` unmasked, and
 `--host-cmd` leaves `#C` unmasked.
 
-**Host commands.** Under `--host-cmd`, `hcmd cmd args...` runs `cmd` on the
+**Host commands.** *Only in an h9 built with `zig build -Dhost-cmd`; release
+builds leave them out while [host-cmd](design/host-cmd.md) rethinks them. In
+other builds `#C` and `hcmd` don't exist and `--host-cmd` exits 2.* Under
+`--host-cmd`, `hcmd cmd args...` runs `cmd` on the
 host, as you, with h9's host environment. Its standard input, output and
 error are the guest's, and `hcmd` exits with its status: empty on success,
 the exit code (`3`), `killed`, or `signal: N`. It runs in the host directory
@@ -1715,7 +1718,7 @@ Files and sandbox (chapters 21 and 22):
 | `--net disable\|outbound\|enable` | No network; clients only (the default); clients and servers |
 | `--net-allow PATTERN` | Allow connections only to matching dial strings; repeatable (chapter 15) |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
-| `--host-cmd` | Leave `#C`, which runs host commands, unmasked |
+| `--host-cmd` | Leave `#C`, which runs host commands, unmasked. Only in builds with `-Dhost-cmd`; otherwise exit 2. |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
 | `--strict` | Refuse, with exit 2, anything this build can't enforce |
 | `--print` | Print the compiled sandbox plan and exit without running |

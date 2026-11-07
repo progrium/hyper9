@@ -139,10 +139,12 @@ const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// implemented run instead of skipping. `arch`, if given, is passed to h9
 /// as --arch (from -Darch). `guest_test` says h9 was built with
 /// -Dguest-test.
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures, guest_test: bool) *std.Build.Step.Run {
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures, guest_test: bool, host_cmd: bool) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
     // h9 serves tests/fixtures/guest in #H (design/0032-guest-tools.md).
     if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
+    // Built with -Dhost-cmd: the host command cases run.
+    if (host_cmd) run.setEnvironmentVariable("H9_TEST_HOST_CMD", "1");
     if (arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
     if (go) |g| {
         run.setEnvironmentVariable("H9_TEST_GO", g.dir);
@@ -387,14 +389,15 @@ fn zonVersion(b: *std.Build) []const u8 {
     return rest[0 .. std.mem.indexOfScalar(u8, rest, '"') orelse return "unknown"];
 }
 
-/// The table of src/guest/ (and tests/fixtures/guest with `with_test`)
+/// The table of src/guest/ (with src/guest-hostcmd/ under -Dhost-cmd, and
+/// tests/fixtures/guest with `with_test`)
 /// as a generated Zig file, and the number of entries in its bin. A file
 /// the tree can't hold fails the build.
-fn guestTree(b: *std.Build, with_test: bool) struct { file: std.Build.LazyPath, bin: usize } {
+fn guestTree(b: *std.Build, with_test: bool, host_cmd: bool) struct { file: std.Build.LazyPath, bin: usize } {
     const io = b.graph.io;
     const wf = b.addWriteFiles();
     var inputs: std.ArrayList(guesttree.Input) = .empty;
-    for ([_][]const u8{ "src/guest", "tests/fixtures/guest" }, [_]bool{ true, with_test }) |sub, want| {
+    for ([_][]const u8{ "src/guest", "src/guest-hostcmd", "tests/fixtures/guest" }, [_]bool{ true, host_cmd, with_test }) |sub, want| {
         if (!want) continue;
         var dir = b.build_root.handle.openDir(io, sub, .{ .iterate = true }) catch continue;
         defer dir.close(io);
@@ -438,6 +441,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
+    // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
+    // while design/host-cmd rethinks them.
+    const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
     var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the h9-emu release only)") orelse .none;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
@@ -515,6 +521,8 @@ pub fn build(b: *std.Build) void {
         .files = &kern_port,
         .flags = flags,
     });
+    // devtab.c lists devcmd (#C) only under -Dhost-cmd.
+    if (host_cmd) kern.root_module.addCMacro("H9_HOSTCMD", "1");
     const kern_step = b.step("kern", "Compile drawterm's kern");
     const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
     if (!have_drawterm) {
@@ -530,12 +538,13 @@ pub fn build(b: *std.Build) void {
     // Debug builds also serve tests/fixtures/guest, for the integration
     // cases; release builds leave it out.
     const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .Debug);
-    const guest_tree = guestTree(b, guest_test);
+    const guest_tree = guestTree(b, guest_test, host_cmd);
     mod.addAnonymousImport("guest_tree", .{ .root_source_file = guest_tree.file });
 
     const options = b.addOptions();
     options.addOption(Emu, "emu", emu);
     options.addOption(bool, "kern", build_kern);
+    options.addOption(bool, "host_cmd", host_cmd);
     // For --version: scripts/release.sh passes -Dversion; otherwise git
     // describe, or build.zig.zon's version where there's no git checkout.
     options.addOption([]const u8, "version", b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b));
@@ -705,7 +714,7 @@ pub fn build(b: *std.Build) void {
         run_stdtest.step.dependOn(signed_step);
         go_stdtest.dependOn(&run_stdtest.step);
     }
-    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases, guest_test);
+    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases, guest_test, host_cmd);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
@@ -734,7 +743,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases, guest_test);
+            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases, guest_test, host_cmd);
             run_cases.step.dependOn(signed_step);
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);

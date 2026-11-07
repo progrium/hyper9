@@ -2846,9 +2846,31 @@ test "--print shows the #H bind [32]" {
 }
 
 // Host commands: #C, unmasked by --host-cmd, and hcmd, h9's command that
-// drives it. The host side is sh, so they skip on Windows.
+// drives it. They're built in only with -Dhost-cmd, which sets
+// H9_TEST_HOST_CMD; the cases skip otherwise. The host side is sh, so
+// they skip on Windows too.
+
+fn needHostCmd() !void {
+    if (getenv(3, "H9_TEST_HOST_CMD") == null) return error.SkipZigTest;
+}
+
+test "without -Dhost-cmd, --host-cmd is refused and #C and hcmd are absent [baseline]" {
+    if (getenv(3, "H9_TEST_HOST_CMD") != null) return error.SkipZigTest;
+    const e = try env(@src());
+    const r = try run(e, &.{ "--host-cmd", "--print", "ls" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "-Dhost-cmd") != null);
+    const c = try run(e, &.{ "ls", "#C" });
+    defer c.deinit();
+    try std.testing.expectEqual(1, c.code);
+    const h = try run(e, &.{ "--rc", "test -e /bin/hcmd || echo absent" });
+    defer h.deinit();
+    try std.testing.expectEqualStrings("absent\n", h.out);
+}
 
 test "--host-cmd unmasks #C and says so in the plan [baseline]" {
+    try needHostCmd();
     const e = try env(@src());
     const m = try run(e, &.{ "ls", "#C" });
     defer m.deinit();
@@ -2861,6 +2883,7 @@ test "--host-cmd unmasks #C and says so in the plan [baseline]" {
 }
 
 test "#C runs a host command and reports its exit status [baseline]" {
+    try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     // The wait file is opened before exec: devcmd keeps the status only
@@ -2884,6 +2907,7 @@ test "#C runs a host command and reports its exit status [baseline]" {
 }
 
 test "hcmd passes stdin, output, errors, arguments and the exit status [baseline, 32]" {
+    try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     const r = try run(e, &.{ "--host-cmd", "hcmd", "sh", "-c", "echo out; echo err >&2; exit 3" });
@@ -2905,6 +2929,7 @@ test "hcmd passes stdin, output, errors, arguments and the exit status [baseline
 }
 
 test "hcmd runs in the host directory the guest's comes from [baseline, 32]" {
+    try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     var s: Scratch = undefined;
@@ -2924,6 +2949,7 @@ test "hcmd runs in the host directory the guest's comes from [baseline, 32]" {
 }
 
 test "hcmd without --host-cmd says how to turn host commands on [32]" {
+    try needHostCmd();
     const e = try env(@src());
     const r = try run(e, &.{ "hcmd", "true" });
     defer r.deinit();
@@ -2932,6 +2958,7 @@ test "hcmd without --host-cmd says how to turn host commands on [32]" {
 }
 
 test "a hangup kills hcmd's host command [baseline, 32]" {
+    try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     var s: Scratch = undefined;
@@ -2946,6 +2973,7 @@ test "a hangup kills hcmd's host command [baseline, 32]" {
 }
 
 test "a machine's host commands die with it [baseline]" {
+    try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     var s: Scratch = undefined;

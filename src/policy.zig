@@ -375,6 +375,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
     }
+    if (pol.host_cmd and !@import("build_options").host_cmd) {
+        err_msg.* = "--host-cmd: this h9 was built without host commands (zig build -Dhost-cmd)";
+        return error.Conflict;
+    }
     if (net == .disable and pol.net_allow.len > 0) {
         err_msg.* = "--net-allow conflicts with --net=disable";
         return error.Conflict;
