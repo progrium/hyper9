@@ -45,7 +45,9 @@ Dev *devtab[] = {
 	&lfddevtab,
 	&audiodevtab,
 	&kbddevtab,
-	&cmddevtab,
+#ifdef H9_HOSTCMD
+	&cmddevtab,	/* -Dhost-cmd only */
+#endif
 	&envdevtab,
 	&hconsdevtab,
 	&dupdevtab,

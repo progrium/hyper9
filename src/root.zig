@@ -29,6 +29,8 @@ pub const build_info = struct {
     pub const ninefront_release: []const u8 = o.ninefront_release;
     pub const ninefront_rev: []const u8 = o.ninefront_rev;
     pub const drawterm_rev: []const u8 = o.drawterm_rev;
+    /// Built with -Dhost-cmd: #C, --host-cmd and hcmd.
+    pub const host_cmd: bool = o.host_cmd;
 };
 
 test {
