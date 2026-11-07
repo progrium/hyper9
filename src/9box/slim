@@ -1,0 +1,82 @@
+# slim: min, and the rest of each kind of command min has a few of, without
+# compilers, typesetting, games, hardware tools or graphics
+# (design/multicall.md).
+<min
+
+# Files and text
+chgrp
+dd
+comm
+split
+strings
+sum
+md5sum
+sha1sum
+crc32
+seq
+cleanname
+time
+fmt
+col
+p
+pr
+look
+idiff
+merge3		diff
+file
+mtime
+seconds
+tput
+ascii
+unicode
+urlencode
+tcs		tcs
+ecp
+fcp
+xd
+ed
+patch
+
+# Archives
+zip		gzip
+mkpaqfs		paqfs
+paqfs		paqfs
+
+# Namespace and system
+mntgen
+aan
+cec		cec
+con		con
+rx
+ratrace
+plumb		plumb
+plumber		plumb
+execnet		execnet
+pipefile
+passwd		auth
+netkey		auth
+
+# File servers
+archfs
+9660srv		9660srv
+dossrv		dossrv
+webfs		webfs
+sshfs
+ftpfs		ip/ftpfs
+
+# Network
+ssh
+sshnet
+telnet		ip
+tlsclient
+tlssrv
+webcookies
+
+# Calculators and the rest
+bc
+dc
+hoc		hoc
+pc
+factor
+primes
+cal

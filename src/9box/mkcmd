@@ -1,0 +1,149 @@
+#!/bin/rc
+# mkcmd NAME DIR: builds the command NAME from /sys/src/cmd/DIR (. for a
+# single-file command in /sys/src/cmd) with its globals renamed, for 9box
+# (design/multicall.md).
+#
+# It builds NAME as 9front does, with mk, and reads the objects off the link
+# line that `mk -n -a` prints. nm lists the globals those objects define
+# (T, D and B), and each one that libc and libbio don't also define gets a
+# -D flag with a bx_NAME_ prefix: -Dmain=bx_ls_main. The objects are then
+# compiled again with the flags, as mk 'CC=$CC FLAGS' OBJECTS, so a
+# directory's yacc steps and CFLAGS still apply.
+#
+# /sys/src is never written: each run forks its namespace and binds a fresh
+# directory in front of the command's directory and each directory under it
+# (bind -bc), so mk's output lands there while ../ paths and #includes still
+# resolve. Commands build in parallel without seeing each other's objects.
+# The layers are siblings (l/d. for the command's directory, l/dlib for its
+# lib), since a layer holding another would hide the source directory of
+# the same name behind it.
+#
+# Output, in obj/$objtype/NAME (relative to where it's run):
+#	l/	the layers, holding the objects (and any local library)
+#	objs	the objects to link, one per line, relative to obj/$objtype/NAME
+#	libs	local libraries on the link line (auth's lib.$O.a), likewise
+#	syms	the globals the objects define, renamed or not
+#	main	main, threadmain and mainstacksize, those the command has
+#	log	mk's output
+# and it exits with a status naming what failed.
+rfork en
+if(! ~ $#* 2){
+	echo usage: mkcmd name dir >[1=2]
+	exit usage
+}
+name=$1
+dir=$2
+O=`{sed -n 's/^O=//p' /$objtype/mkfile}
+CC=`{sed -n 's/^CC=//p' /$objtype/mkfile}
+LD=`{sed -n 's/^LD=//p' /$objtype/mkfile}
+top=`{pwd}
+out=$top/obj/$objtype/$name
+src=/sys/src/cmd
+if(! ~ $dir .)
+	src=$src/$dir
+if(! test -f $src/mkfile){
+	echo mkcmd: $name: no $src/mkfile >[1=2]
+	exit nosrc
+}
+rm -rf $out
+mkdir -p $out/l
+log=$out/log
+
+# The layer for directory $1, relative to the command's.
+fn layer {
+	echo $out/l/d^`{cleanname $1 | sed 's,/,+,g'}
+}
+
+# A writable layer over each directory mk may write in: the command's own
+# and, for a directory command, every directory under it (auth's lib).
+if(~ $dir .)
+	subs=.
+if not
+	subs=`{cd $src && du -a | awk '{print $2}' | sort -u}
+for(d in $subs){
+	if(test -d $src/$d){
+		mkdir -p `{layer $d}
+		bind -bc `{layer $d} $src/$d
+	}
+}
+cd $src
+
+# The program's target: $O.NAME, or $O.out for a mkone directory.
+targ=$O.$name
+if(! ~ $dir . && grep -s '^<.*/mkone' mkfile)
+	targ=$O.out
+if(! mk $targ >$log >[2=1]){
+	echo mkcmd: $name: mk $targ failed, see $log >[1=2]
+	exit mk
+}
+link=`{mk -n -a $targ | grep '^'$LD' ' | sed 1q}
+if(~ $#link 0){
+	echo mkcmd: $name: no link line from mk -n -a $targ >[1=2]
+	exit nolink
+}
+objs=`{echo $link | tr ' ' '\012' | grep '\.'$O'$'}
+libs=`{echo $link | tr ' ' '\012' | grep '\.a$' | grep -v '^/'}
+if(~ $#objs 0){
+	echo mkcmd: $name: no objects on the link line >[1=2]
+	exit noobjs
+}
+
+# Globals libc and libbio define (the mkfile's $W/libsyms) stay as they
+# are: a command can't rename what the libraries' own code refers to.
+# $W/libcalls are the names their code refers to.
+if(! test -f $top/obj/$objtype/libsyms || ! test -f $top/obj/$objtype/libcalls){
+	echo mkcmd: no $top/obj/$objtype/libsyms or libcalls >[1=2]
+	exit nolibsyms
+}
+nm $objs | awk '$(NF-1) ~ /^[TDB]$/ {print $(NF-1), $NF}' | sort -u -k2 >$out/defs
+awk '{print $2}' $out/defs | sort -u >$out/syms
+
+# A command that defines a function libc or libbio also defines (ed's
+# mktemp, dossrv's cistrcmp) overrides it in its own link. In the box the
+# override is renamed like the rest, so the command calls its own and the
+# others call the library's: the same, unless the library's own code calls
+# it too, which only an override could change. That, and initialising a
+# library's global (data, which one link holds one of), can't be boxed.
+# argv0 is the exception: rc initialises it, and 9box resets it before
+# running any command.
+L=$top/obj/$objtype
+awk '$1 == "T" {print $2}' $out/defs | sort -u | comm -12 - $L/libsyms >$out/overrides
+bad=`{comm -12 $out/overrides $L/libcalls}
+bad=($bad `{awk '$1 == "D" {print $2}' $out/defs | sort -u | comm -12 - $L/libsyms | grep -v '^argv0$'})
+if(! ~ $#bad 0){
+	echo mkcmd: $name: overrides what libc or libbio use or define: $bad >[1=2]
+	exit override
+}
+# A -!-first argument would be read as a stub's (9box.c), so a command whose
+# flags include ! can't be boxed.
+if(~ $dir .)
+	csrc=`{ls $name.c $name.y >[2]/dev/null}
+if not
+	csrc=`{ls *.c *.y >[2]/dev/null}
+if(cat $csrc | awk '/ARGBEGIN/ {a=1} a && /case .!.:/ {f=1} /ARGEND/ {a=0} END {exit !f}' >[2]/dev/null){
+	echo mkcmd: $name: takes -! as a flag >[1=2]
+	exit bang
+}
+
+flags=`{{comm -23 $out/syms $L/libsyms; cat $out/overrides} | sort -u | grep '^[A-Za-z_][A-Za-z0-9_]*$' | awk -v 'p=bx_'$name'_' '{printf "-D%s=%s%s\n", $1, p, $1}'}
+for(s in main threadmain mainstacksize)
+	if(grep -s '^'$s'$' $out/syms)
+		echo $s >>$out/main
+rm -f $objs
+if(! mk 'CC='$CC' '$"flags $objs >>$log >[2=1]){
+	echo mkcmd: $name: recompiling with the renaming failed, see $log >[1=2]
+	exit rename
+}
+# Paths relative to obj/$objtype/NAME, through the layers. A library's
+# line also has its path under /sys/src/cmd, so commands sharing one (auth's
+# lib.$O.a) link it once.
+fn inlayer {
+	for(f){
+		l=`{layer `{basename -d $f}}
+		echo l/`{basename $l}^/`{basename $f}
+	}
+}
+inlayer $objs >$out/objs
+for(f in $libs)
+	echo `{inlayer $f} `{cleanname $dir/$f} >>$out/libs
+exit ''

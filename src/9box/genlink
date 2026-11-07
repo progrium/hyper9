@@ -1,0 +1,39 @@
+#!/bin/rc
+# genlink W: prints what 9box links besides 9box.$O, one per line: each
+# command's objects, in the set's order; the private libthread, built here
+# if cmds.h has a thread command; and each command's local libraries,
+# copied here as well, since #pragma lib "./lib.$O.a" names them relative
+# to the link. Commands sharing a library (passwd and netkey, auth's) link
+# it once; two different libraries with one name can't share a link.
+rfork e
+w=$1
+O=`{sed -n 's/^O=//p' /$objtype/mkfile}
+for(c in `{awk '{print $1}' $w/set})
+	for(f in `{cat $w/$c/objs})
+		echo $w/$c/$f
+if(grep -s '^#define THREADS' cmds.h){
+	mk $w/libthread.a >[1=2] || exit libthread
+	echo $w/libthread.a
+}
+seen=()
+copied=()
+for(c in `{awk '{print $1}' $w/set}){
+	if(test -f $w/$c/libs){
+		for(l in `{awk '{print $1 "!" $2}' $w/$c/libs}){
+			f=`{echo $l | sed 's/!.*//'}
+			from=`{echo $l | sed 's/.*!//'}
+			b=`{basename $f}
+			if(! ~ $from $seen){
+				if(~ $b $copied){
+					echo genlink: $c: $from and another $b cannot share a link >[1=2]
+					exit libclash
+				}
+				cp $w/$c/$f $b
+				echo $b
+				seen=($seen $from)
+				copied=($copied $b)
+			}
+		}
+	}
+}
+exit ''
