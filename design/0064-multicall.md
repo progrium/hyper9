@@ -2,10 +2,10 @@
 id: 64
 slug: multicall
 title: A multi-call 9front userland binary
-status: draft
+status: implemented
 created: 2026-11-06
 authors: [progrium]
-depends: [10]
+depends: []
 areas: [build, tests, docs]
 ---
 
@@ -193,6 +193,7 @@ Integration cases tagged `[multicall]`, run against the slim tree:
 
 ## Updates
 
+- 2026-11-07: Filed as #64 and marked implemented. The Done-when checks that need a hypervisor host (the exec loop within 10% of separate binaries, and `--check` on the arm64 tree) are still to be run on one. The dependency on [self-host](0010-self-host.md), still `accepted`, is dropped: what this needs from it, `mk` building 9front's commands inside h9, works today, and the build here does it.
 - 2026-11-07: One set. The proposal had `min`, `slim` and `dev`; `slim` ran the exec loop 44% slower than separate binaries, so there's only the basic set, now named `slim`, and no `-Dslim-set`. The private libthread went with it, since the set has no thread program, and `mkcmd` refuses one. The notes below about `plumber`, `ed`, `dossrv`, `passwd`, `bc` and the larger set's numbers are from building the larger set before it was dropped.
 - 2026-11-07: Implemented as proposed (`src/9box/`, `tools/slim.zig`, `zig build slim`), except the `dev` set, with these refinements:
   - **Stubs are checked.** `9box` takes `-!` as a stub's marker only when `argv[2]` is a file whose first line is `#!…/9box -!`, so a command run by name with a first argument of `-!` (`echo -! x`) gets it as its own. The build still refuses a command whose `ARGBEGIN` takes `-!`.
