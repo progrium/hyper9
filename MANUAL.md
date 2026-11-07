@@ -866,6 +866,34 @@ This is the core of the sandbox (chapter 22): the namespace h9 built is the
 whole of the host a program can reach. `--host-fs` leaves `#U` unmasked, and
 `--host-cmd` leaves `#C` unmasked.
 
+**Host commands.** Under `--host-cmd`, `hcmd cmd args...` runs `cmd` on the
+host, as you, with h9's host environment. Its standard input, output and
+error are the guest's, and `hcmd` exits with its status: empty on success,
+the exit code (`3`), `killed`, or `signal: N`. It runs in the host directory
+the guest's current directory comes from, so `cd sub; hcmd make` under
+`/mnt/term/cwd` runs in `sub` of your host directory; where that isn't a
+host directory (`/tmp`, the root, an overlay), it runs in h9's own. `-d dir`
+names the host directory, and `-n` gives the command an empty standard
+input. An interrupt or a hangup kills the host command.
+
+```text
+$ h9 --host-cmd hcmd uname -s
+Linux
+$ echo hello | h9 --host-cmd --rc 'hcmd tr a-z A-Z'
+HELLO
+$ h9 hcmd true
+hcmd: host commands are off; run h9 with --host-cmd
+```
+
+`hcmd` drives `#C` as a program can directly: open `#C/cmd/clone` and read
+the connection number `n`, open `#C/cmd/n/wait` (the exit status is kept only
+while it's open), write `dir /host/path` and `exec cmd args...` to the clone
+file, which is the connection's `ctl`, then use `data` for standard input and
+output and `stderr`. `wait` holds one message, `pid 0 0 0 'exit string'`,
+with no newline. Writing `kill` to `ctl` stops the command. A process reading
+`data` or `stderr` waits on a host pipe, and a note can't interrupt that,
+which is why `hcmd` reads them in the background.
+
 ### 8. Processes
 
 **In Plan 9**

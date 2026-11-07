@@ -2845,6 +2845,106 @@ test "--print shows the #H bind [32]" {
     }
 }
 
+// Host commands: #C, unmasked by --host-cmd, and hcmd, h9's command that
+// drives it. The host side is sh, so they skip on Windows.
+
+test "--host-cmd unmasks #C and says so in the plan [baseline]" {
+    const e = try env(@src());
+    const m = try run(e, &.{ "ls", "#C" });
+    defer m.deinit();
+    try std.testing.expectEqual(1, m.code);
+    try std.testing.expect(std.mem.indexOf(u8, m.err, "mount/attach disallowed") != null);
+    const p = try run(e, &.{ "--host-cmd", "--print", "ls" });
+    defer p.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "devmask:  #U\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "#C runs host commands with the host user's rights") != null);
+}
+
+test "#C runs a host command and reports its exit status [baseline]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    // The wait file is opened before exec: devcmd keeps the status only
+    // for an open one. It's one message with no newline, so dd reads it.
+    const r = try run(e, &.{ "--host-cmd", "--rc",
+        \\<>[3]'#C/cmd/clone' {
+        \\    n=`{read <[0=3]}
+        \\    d='#C/cmd/'$n
+        \\    <[4]$d/wait {
+        \\        echo 'exec sh -c ''echo out; echo err >&2; exit 3''' >[1=3]
+        \\        cat $d/data $d/stderr
+        \\        dd -bs 512 -count 1 -quiet 1 <[0=4]
+        \\    }
+        \\}
+    });
+    defer r.deinit();
+    errdefer std.debug.print("out: {s}\nerr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.startsWith(u8, r.out, "out\nerr\n"));
+    try std.testing.expect(std.mem.endsWith(u8, r.out, " 0 0 0 'exit: 3'"));
+}
+
+test "hcmd passes stdin, output, errors, arguments and the exit status [baseline, 32]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    const r = try run(e, &.{ "--host-cmd", "hcmd", "sh", "-c", "echo out; echo err >&2; exit 3" });
+    defer r.deinit();
+    try std.testing.expectEqual(3, r.code);
+    try std.testing.expectEqualStrings("out\n", r.out);
+    try std.testing.expectEqualStrings("err\n", r.err);
+    const in = try runIn(e, &.{ "--host-cmd", "hcmd", "tr", "a-z", "A-Z" }, "from the guest\n");
+    defer in.deinit();
+    try std.testing.expectEqual(0, in.code);
+    try std.testing.expectEqualStrings("FROM THE GUEST\n", in.out);
+    const a = try run(e, &.{ "--host-cmd", "hcmd", "printf", "[%s]", "a  b", "it's", "" });
+    defer a.deinit();
+    try std.testing.expectEqualStrings("[a  b][it's][]", a.out);
+    const n = try runIn(e, &.{ "--host-cmd", "hcmd", "-n", "cat" }, "not read\n");
+    defer n.deinit();
+    try std.testing.expectEqual(0, n.code);
+    try std.testing.expectEqualStrings("", n.out);
+}
+
+test "hcmd runs in the host directory the guest's comes from [baseline, 32]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "sub");
+    var want: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&want, "{s}/sub", .{s.path});
+    const r = try run(e, &.{ "--host-cmd", "--cwd", s.path, "--rc", "cd sub && hcmd pwd -P" });
+    defer r.deinit();
+    errdefer std.debug.print("err: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(sub, std.mem.trimEnd(u8, r.out, "\n"));
+    const d = try run(e, &.{ "--host-cmd", "hcmd", "-d", sub, "pwd", "-P" });
+    defer d.deinit();
+    try std.testing.expectEqualStrings(sub, std.mem.trimEnd(u8, d.out, "\n"));
+}
+
+test "hcmd without --host-cmd says how to turn host commands on [32]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "hcmd", "true" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "--host-cmd") != null);
+}
+
+test "a hangup kills hcmd's host command [baseline, 32]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var t: [16]u8 = undefined;
+    const r = try run(e, &.{ "--host-cmd", "--cwd", s.path, "--timeout", slowTimeout(&t, 300), "hcmd", "sh", "-c", "sleep 2; touch late" });
+    defer r.deinit();
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.io.sleep(.fromMilliseconds(3000), .awake);
+    try std.testing.expect(!s.exists("late"));
+}
+
 // 9P over WebSocket (design/0021-websocket-9p.md). The server is 9p-roots'
 // RootServer with tests/wsrelay.zig in front of it, relaying WebSocket
 // messages to its TCP port. /net/ws cases use the relay in echo mode.
