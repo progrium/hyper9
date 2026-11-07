@@ -890,6 +890,15 @@ pub fn build(b: *std.Build) void {
             backends.appendSlice(b.allocator, "kvm,") catch @panic("OOM")
         else |_| {}
     }
+    // WHP runs amd64 on Windows x86_64, when the Windows Hypervisor Platform
+    // feature is on, which is when its DLL is in System32.
+    if (os == .windows and b.graph.host.result.os.tag == .windows and target.result.cpu.arch == .x86_64 and
+        std.mem.eql(u8, cases_arch, "amd64"))
+    {
+        if (std.Io.Dir.accessAbsolute(b.graph.io, "C:\\Windows\\System32\\WinHvPlatform.dll", .{})) |_|
+            backends.appendSlice(b.allocator, "whp,") catch @panic("OOM")
+        else |_| {}
+    }
     if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
     const backend_list = if (backends.items.len > 0) backends.items else "auto";
 

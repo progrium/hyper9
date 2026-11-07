@@ -14,10 +14,12 @@ pub const ia32 = @import("arch/i386.zig"); // `i386` is a primitive type name
 
 const hvf = if (have_hvf) @import("vmm/hvf.zig") else @import("vmm/none.zig");
 const kvm = if (have_kvm) @import("vmm/kvm.zig") else @import("vmm/none.zig");
+const whp = if (have_whp) @import("vmm/whp.zig") else @import("vmm/none.zig");
 const emu = if (have_emu) @import("vmm/emu.zig") else @import("vmm/none.zig");
 
 const have_hvf = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
+const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
 const have_emu = build_options.emu != .none;
 
 pub const Arch = aout.Arch;
@@ -32,16 +34,18 @@ pub const host_arch: ?Arch = switch (builtin.cpu.arch) {
 /// What `--backend` asks for.
 pub const BackendKind = enum { auto, hvf, kvm, whp, emu };
 
-/// A concrete backend. whp is proposed (design/0017-whp.md).
+/// A concrete backend.
 pub const Kind = enum {
     hvf,
     kvm,
+    whp,
     emu,
 
     pub fn built(k: Kind) bool {
         return switch (k) {
             .hvf => have_hvf,
             .kvm => have_kvm,
+            .whp => have_whp,
             .emu => have_emu,
         };
     }
@@ -292,7 +296,7 @@ pub fn emuVersion(buf: []u8) ?[]const u8 {
 
 /// The native hypervisor backend for this host, if there is one.
 fn native() ?Kind {
-    return if (have_hvf) .hvf else if (have_kvm) .kvm else null;
+    return if (have_hvf) .hvf else if (have_kvm) .kvm else if (have_whp) .whp else null;
 }
 
 /// Why the native hypervisor can't be used here, when the backend can
@@ -313,7 +317,7 @@ pub fn create(gpa: std.mem.Allocator, io: std.Io, want: BackendKind, opts: Optio
         .hvf => createKind(gpa, io, .hvf, opts),
         .kvm => createKind(gpa, io, .kvm, opts),
         .emu => createKind(gpa, io, .emu, opts),
-        .whp => error.BackendNotBuilt,
+        .whp => createKind(gpa, io, .whp, opts),
         .auto => {
             if (native()) |k| {
                 if (createKind(gpa, io, k, opts)) |b| return b else |err| switch (err) {
@@ -330,6 +334,7 @@ fn createKind(gpa: std.mem.Allocator, io: std.Io, k: Kind, opts: Options) Create
     return switch (k) {
         .hvf => .{ .hvf = try hvf.Backend.create(gpa, io, opts) },
         .kvm => .{ .kvm = try kvm.Backend.create(gpa, io, opts) },
+        .whp => .{ .whp = try whp.Backend.create(gpa, io, opts) },
         .emu => .{ .emu = try emu.Backend.create(gpa, io, opts) },
     };
 }
@@ -337,6 +342,7 @@ fn createKind(gpa: std.mem.Allocator, io: std.Io, k: Kind, opts: Options) Create
 pub const Backend = union(Kind) {
     hvf: *hvf.Backend,
     kvm: *kvm.Backend,
+    whp: *whp.Backend,
     emu: *emu.Backend,
 
     pub fn kind(b: Backend) Kind {
@@ -381,6 +387,7 @@ pub const Backend = union(Kind) {
 pub const AddressSpace = union(enum) {
     hvf: *hvf.AddressSpace,
     kvm: *kvm.AddressSpace,
+    whp: *whp.AddressSpace,
     emu: *emu.AddressSpace,
     /// A translate-only stand-in for unit tests of guest-memory code.
     fake: Fake,
@@ -467,6 +474,7 @@ test {
 pub const Vcpu = union(Kind) {
     hvf: hvf.Vcpu,
     kvm: kvm.Vcpu,
+    whp: whp.Vcpu,
     emu: emu.Vcpu,
 
     pub fn destroy(v: *Vcpu) void {

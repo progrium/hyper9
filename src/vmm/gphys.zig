@@ -1,4 +1,4 @@
-//! Guest-physical memory for the hypervisor backends (HVF, KVM): one RAM
+//! Guest-physical memory for the hypervisor backends (HVF, KVM, WHP): one RAM
 //! region, mapped into the VM once at `base`, handed out in 4K pages for
 //! user pages, page tables and shared pages alike, first-fit from a list of
 //! freed ranges and otherwise from the end.
@@ -8,7 +8,10 @@
 //! `unmapPage`, `newRoot`, `freeRoot` and `userAttrs`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
+
+const is_windows = builtin.os.tag == .windows;
 
 pub const Ram = struct {
     gpa: std.mem.Allocator,
@@ -34,13 +37,18 @@ pub const Ram = struct {
         if (size > vmm.max_memory) return error.OutOfGuestMemory;
         const len = std.mem.alignForward(usize, @intCast(size), vmm.page_size);
         if (len < 16 * vmm.page_size) return error.OutOfGuestMemory;
-        const mem = std.posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0) catch
-            return error.OutOfGuestMemory;
+        // Zeroed either way: fresh anonymous pages, or VirtualAlloc's.
+        const mem = if (is_windows)
+            std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), len) catch
+                return error.OutOfGuestMemory
+        else
+            std.posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0) catch
+                return error.OutOfGuestMemory;
         return .{ .gpa = gpa, .io = io, .base = base, .mem = mem };
     }
 
     pub fn deinit(r: *Ram) void {
-        std.posix.munmap(r.mem);
+        if (is_windows) std.heap.page_allocator.free(r.mem) else std.posix.munmap(r.mem);
         r.free.deinit(r.gpa);
         r.spare_roots.deinit(r.gpa);
     }

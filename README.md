@@ -128,7 +128,13 @@ fetches it. The prebuilt libraries exist for macOS arm64 and Linux musl only,
 so Windows (`-Dtarget=aarch64-windows` or `x86_64-windows`) always builds
 from source. kern
 builds for Windows with drawterm's win32 files, so h9.exe runs programs on
-the emulator, and host paths are `/C:/...` in `#U`.
+the emulator, and host paths are `/C:/...` in `#U`. On Windows x86\_64,
+h9.exe also has the WHP backend ([whp](design/0017-whp.md), a draft): it
+needs the Windows Hypervisor Platform feature (Settings >
+Optional features, or `DISM /Online /Enable-Feature
+/FeatureName:HypervisorPlatform`, then restart), and loads
+`WinHvPlatform.dll` only when it's used, so h9.exe still starts, and `auto`
+falls back to the emulator, without it.
 
 `-Dgfx` picks the GUI backend for `--gfx` ([gfx](design/0015-gfx.md)):
 drawterm's Cocoa on macOS and Win32 on Windows by default, `none` on Linux.
@@ -272,9 +278,10 @@ saved and replayed as is. A `bind -c '#O' PATH` line in it puts a fresh
 copy-on-write overlay over whatever PATH is at that point in the replay.
 
 `--backend auto` (the default) uses the host hypervisor (HVF on macOS, KVM on
-Linux) and otherwise falls back to the emulator with a warning that says why.
+Linux, WHP on Windows x86\_64) and otherwise falls back to the emulator with a warning that says why.
 The emulator also runs amd64 binaries on arm64 hosts, for testing, and 386
-binaries on every host; HVF runs arm64 only, and KVM the host's architecture.
+binaries on every host; HVF runs arm64 only, KVM the host's architecture, and
+WHP amd64 only.
 `--arch` picks the architecture: a host program otherwise runs as its header
 says, and a guest one as the host's, so `h9 --arch 386 /bin/echo hi` runs
 `/386/bin/echo` from a root that has it.
@@ -476,7 +483,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, and emu on Unicorn), with the guest-physical allocator and page tables the hypervisor backends share |
+| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, and emu on Unicorn), with the guest-physical allocator and page tables the hypervisor backends share |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
 | `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |

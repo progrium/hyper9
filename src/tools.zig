@@ -203,7 +203,7 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
         .ok = .{
             .kind = kind,
             // The emulator has no vCPU limit.
-            .max_vcpus = if (kind == .hvf or kind == .kvm) m.backend.maxVcpus() catch null else null,
+            .max_vcpus = if (kind != .emu) m.backend.maxVcpus() catch null else null,
             .us = us,
         },
     };
@@ -245,10 +245,11 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
 /// Why backend `want` can't be used, for the CLI's messages.
 pub fn explain(want: vmm.BackendKind, err: anyerror) []const u8 {
     return switch (err) {
-        error.HypervisorUnavailable => if (vmm.whyUnavailable(want)) |why| why else if (builtin.os.tag == .macos)
-            "no usable hypervisor (is h9 signed with h9.entitlements?)"
-        else
-            "no usable hypervisor",
+        error.HypervisorUnavailable => if (vmm.whyUnavailable(want)) |why| why else switch (builtin.os.tag) {
+            .macos => "no usable hypervisor (is h9 signed with h9.entitlements?)",
+            .windows => "no usable hypervisor (enable the Windows Hypervisor Platform feature: Settings > Optional features, or `DISM /Online /Enable-Feature /FeatureName:HypervisorPlatform`, then restart)",
+            else => "no usable hypervisor",
+        },
         error.BackendNotBuilt => switch (want) {
             .emu, .auto => "the emulator isn't built into this h9 (use h9-emu from the releases, or build with -Demu=unicorn)",
             else => "not built into this h9",

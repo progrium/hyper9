@@ -730,6 +730,55 @@ test "more processes over a machine's life than KVM's vCPU limit [16]" {
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
 }
 
+/// Skips unless WHP is built into this h9 and usable here (Windows x86_64
+/// with the Windows Hypervisor Platform feature enabled).
+fn requireWhp(e: Env) !void {
+    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    const r = try runOn(e, "whp", &.{"--check"}, null);
+    defer r.deinit();
+    if (std.mem.indexOf(u8, r.out, "backend whp: ok") == null) return error.SkipZigTest;
+}
+
+test "--check reports whp and its vCPU limit [17]" {
+    const e = try env(@src());
+    try requireWhp(e);
+    const r = try runOn(e, "auto", &.{"--check"}, null);
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend whp: ok, 64 vCPUs") != null);
+}
+
+test "auto uses whp when the feature is enabled [17]" {
+    const e = try env(@src());
+    try requireWhp(e);
+    const r = try runOn(e, "auto", &.{"--check"}, null);
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses whp)") != null);
+}
+
+test "more live processes than WHP's owned vCPUs run on the pool [17]" {
+    const e = try env(@src());
+    try requireWhp(e);
+    // 80 processes alive at once, past the 56 that own a vCPU.
+    const r = try runOn(e, "whp", &.{ "--rc", "c='echo deep'; for(i in `{seq 79}) c=$c^' | cat'; eval $c" }, null);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("deep\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "h9.exe starts and falls back to the emulator without the WHP feature [17]" {
+    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    const e = try env(@src());
+    const r = try runOn(e, "auto", &.{"--check"}, null);
+    defer r.deinit();
+    // For a machine without the feature; with it, the cases above apply.
+    if (std.mem.indexOf(u8, r.out, "backend whp: ok") != null) return error.SkipZigTest;
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend whp: no usable hypervisor (enable the Windows Hypervisor Platform feature") != null);
+    if (std.mem.indexOf(u8, r.out, "backend emu: ok") != null) {
+        try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses emu)") != null);
+    }
+}
+
 test "concurrent processes contending for one environment don't hang" {
     const e = try env(@src());
     // 8 processes sharing /env, each creating 150 variables, then running
