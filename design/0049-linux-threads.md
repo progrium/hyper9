@@ -1,4 +1,5 @@
 ---
+id: 49
 slug: linux-threads
 title: Linux threads
 status: draft
@@ -9,6 +10,8 @@ areas: [kern, vmm]
 ---
 
 # Proposal: Linux threads
+
+Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 
