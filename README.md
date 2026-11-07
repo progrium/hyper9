@@ -176,10 +176,16 @@ overrides them. Exit codes: 0 for an empty
 `exits` string; the number itself for an `exits` string that's a decimal
 number from 1 to 255 (no sign, leading zero or spaces), so rc's `exit 3` and
 Go's `os.Exit(3)` exit 3; and 1 for any other string, which is printed to
-stderr. h9's own failures are 2 for a usage error, 125 when h9 itself fails,
-126 when the program isn't a runnable a.out and 127 when it isn't found, and
-h9 prints a message for each, so a guest that exits with one of those
-numbers can still be told apart.
+stderr. A program killed by a note exits as a host shell reports a signal
+([exit-status](design/0033-exit-status.md)): 128 plus the host's signal number for
+a note APE maps to a signal, so Ctrl-C exits 130 and a closed pipe 141, both
+silently; 139 for a fault; 124 for `--timeout`; 128 plus the host signal
+(130, 129 or 143) when a second Ctrl-C, SIGHUP or SIGTERM tears the machine
+down; and 1, with the note printed, for any other note. h9's own failures
+are 2 for a usage error, 125 when h9 itself fails, 126 when the program isn't
+a runnable a.out and 127 when it isn't found, and h9 prints a message for
+each, so a guest that exits with one of those numbers can still be told
+apart.
 
 Go's `GOOS=plan9 GOARCH=amd64` binaries run on the emulator (`--backend emu`,
 or `--arch amd64` with h9-emu): goroutines on several processes, timers,

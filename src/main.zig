@@ -283,14 +283,17 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             return s.code;
         },
         .killed => |msg| {
-            std.debug.print("h9: {s}: {s}\n", .{ prog_arg, msg });
+            // 128+N for a signal, 124 for --timeout, 125 for h9's own
+            // failures (design/0033-exit-status.md).
+            const s = cli.killedStatus(msg, host.stoppedBy());
+            if (s.print) std.debug.print("h9: {s}: {s}\n", .{ prog_arg, msg });
             // The timed-out process is stuck in a host call; don't wait
             // for it or free what it's using.
             if (machine.stuck) {
                 host.deinit();
-                std.process.exit(1);
+                std.process.exit(s.code);
             }
-            return 1;
+            return s.code;
         },
     }
 }
