@@ -366,7 +366,8 @@ factotum and plumber run. Machines in one host process can't see each
 other's `/srv`, and what's posted is closed when the machine ends.
 
 h9's own commands, the small rc scripts that wrap h9's devices (such as
-`wsmount` for 9P over WebSocket), are built into the h9 binary from
+`wsmount` for 9P over WebSocket, and `hcmd`, which runs a host command
+through `#C` under `--host-cmd`), are built into the h9 binary from
 [src/guest/](src/guest) and served read-only by `#H`. The namespace binds
 `#H/bin` after the root's `/bin`, so they're on the path, and a root command
 of the same name wins. `--no-guest-tools` leaves the bind out and masks
