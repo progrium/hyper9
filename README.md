@@ -24,7 +24,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [devsrv](design/0008-devsrv.md) | implemented |  | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | implemented |  | 386 binaries |
 | [self-host](design/0010-self-host.md) | accepted | ready | Self-hosting |
-| [overlay](design/0011-overlay.md) | accepted | ready | Copy-on-write overlay as the root's default |
+| [overlay](design/0011-overlay.md) | implemented |  | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | accepted | ready | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | implemented |  | 9P roots |
 | [image-roots](design/0014-image-roots.md) | draft |  | Disk-image roots |
@@ -68,7 +68,7 @@ flowchart LR
   p_devsrv["#35;8 devsrv<br/>implemented"]:::implemented
   p_i386["#35;9 i386<br/>implemented"]:::implemented
   p_self_host["#35;10 self-host<br/>accepted"]:::accepted
-  p_overlay["#35;11 overlay<br/>accepted"]:::accepted
+  p_overlay["#35;11 overlay<br/>implemented"]:::implemented
   p_browser_host["#35;12 browser-host<br/>accepted"]:::accepted
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
@@ -395,12 +395,17 @@ registers and the symbolized PC when the guest faults.
 
 > **Warning!** This is a ~~stable~~ in-development research prototype, but it has not been through any formal security audits or any other verification. Such a review would be essential before trusting h9 to handle malicious code in the wild. USE AT YOUR OWN RISK!
 
-By default the guest sees the root tree read-only, the host cwd read-write
-at `/mnt/term/cwd`, a private `/tmp` in memory, and nothing else of the
-host. `--write=ephemeral` makes every writable path a copy-on-write
-overlay instead: the guest can change, remove and rename files there, the
-changes live in memory (counted against `--memory`) and are gone when the
-machine ends, and the host is never written. `#U` and `#C` are masked, so the guest can't attach more of the host,
+By default the guest sees the root tree under a copy-on-write overlay
+([overlay](design/0011-overlay.md)), the host cwd read-write at
+`/mnt/term/cwd`, a private `/tmp` in memory, and nothing else of the host.
+Writes to the root succeed, live in memory (counted against `--memory`)
+and are gone when the machine ends; the root tree on the host is never
+written. `$home` exists, made in the overlay when the root has no
+`/usr/$user`. When a run on a terminal changed the root outside `$home`,
+h9 says which top-level directories it discarded. `--writable "$H9ROOT"`
+writes the root tree instead, and `--write=scope` makes the root
+read-only. `--write=ephemeral` makes every writable path a copy-on-write
+overlay as well, so nothing reaches the host. `#U` and `#C` are masked, so the guest can't attach more of the host,
 and symlinks are resolved before access is checked, so a link inside a bound
 tree can't reach outside it. See [DESIGN.md](DESIGN.md), "Sandbox policy".
 
@@ -413,7 +418,9 @@ h9 --memory 256m --timeout 30s ls   # resource caps
 h9 --pids 32 --cpus 2 --rc 'mk'     # at most 32 processes, 2 running at once
 h9 --write=ephemeral --rc 'mk clean && mk'   # build in place; the host cwd is unchanged
 h9 --print --profile=tight mk       # print the compiled plan and exit
-h9 --strict --write=overlay mk      # exit 2: overlay isn't enforced yet
+h9 --rc 'echo hi > /lib/x && cat /lib/x'    # the root is writable; /lib/x is gone at exit
+h9 --writable "$H9ROOT" --rc 'cd /sys/src/cmd && mk install'   # install into the root tree
+h9 --write=scope mk                 # a read-only root, as a build check
 h9 --net=enable aux/listen1 -t tcp!*!8080 /bin/cat     # servers need --net=enable
 h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these names
 ```
@@ -423,7 +430,7 @@ h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these na
 | `--profile default\|tight` | Sandbox defaults; explicit flags override them |
 | `--readable PATH`, `--writable PATH` | Bind a host path read-only or read-write; outside the root and cwd it appears at `/mnt/term/PATH` |
 | `--read-deny PATH` | Hide a host path, even inside a bound tree |
-| `--write none\|scope\|ephemeral` | Deny all writes, allow them only in writable paths, or make the writable paths overlays in memory that are discarded at exit (`overlay` is [proposed](design/0011-overlay.md) and denies writes for now) |
+| `--write none\|scope\|overlay\|ephemeral` | Deny all writes; allow them only in writable paths (`scope`, with a read-only root); `scope` plus a copy-on-write overlay over the root, discarded at exit (`overlay`, the default in both profiles); or make the root and the writable paths overlays in memory that are discarded at exit (`ephemeral`) |
 | `--net disable\|outbound\|enable` | Mask `#I`; allow clients but refuse `announce` (the default, except under `--profile=tight`, which disables); or allow servers too. Without `--net-allow`, connects to link-local addresses (169.254.0.0/16, fe80::/10) are refused |
 | `--net-allow PATTERN` | Repeatable egress allowlist of dial strings, `proto!host!port`: `tcp!10.0.0.0/8!564`, `udp!10.0.0.53!53`, `tcp!*.example.com!443`. With any pattern, every connect and every `/net/cs` name lookup must match one |
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |

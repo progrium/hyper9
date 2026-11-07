@@ -30,6 +30,60 @@ pub const Status = union(enum) {
     killed: []const u8,
 };
 
+/// What a run's guest changed in the root's overlay, which is discarded
+/// when the machine ends (design/0011-overlay.md). Counting starts once
+/// the namespace is built, so the `$home` the builder makes isn't a
+/// change. A value type: it holds its names.
+pub const RootChanges = struct {
+    /// Whether the guest changed the root outside `$home`.
+    changed: bool = false,
+    /// Whether it changed `$home` (`/usr/$user`).
+    home: bool = false,
+    /// The top-level names it changed outside `$home`, in byte order:
+    /// `lib` for `/lib/x`; empty for `/` itself.
+    names: [max_names]Name = undefined,
+    count: u8 = 0,
+    /// More top-level names changed than `names` holds.
+    more: bool = false,
+
+    pub const max_names = 16;
+    pub const Name = struct {
+        buf: [64]u8 = undefined,
+        len: u8 = 0,
+        pub fn slice(n: *const Name) []const u8 {
+            return n.buf[0..n.len];
+        }
+    };
+
+    /// The changed top-level names (see `names`).
+    pub fn dirs(r: *const RootChanges) []const Name {
+        return r.names[0..r.count];
+    }
+
+    /// Records a change at `path`, relative to the root, with `home` the
+    /// home directory's path relative to the root (`usr/glenda`).
+    pub fn note(r: *RootChanges, path: []const u8, home: []const u8) void {
+        if (home.len > 0 and std.mem.startsWith(u8, path, home) and (path.len == home.len or path[home.len] == '/')) {
+            r.home = true;
+            return;
+        }
+        r.changed = true;
+        const top = path[0 .. std.mem.indexOfScalar(u8, path, '/') orelse path.len];
+        for (r.dirs()) |*n| if (std.mem.eql(u8, n.slice(), top)) return;
+        if (r.count == max_names or top.len > @as(Name, .{}).buf.len) {
+            r.more = true;
+            return;
+        }
+        var i: usize = r.count;
+        while (i > 0 and std.mem.order(u8, r.names[i - 1].slice(), top) == .gt) : (i -= 1) r.names[i] = r.names[i - 1];
+        const n = &r.names[i];
+        n.* = .{};
+        @memcpy(n.buf[0..top.len], top);
+        n.len = @intCast(top.len);
+        r.count += 1;
+    }
+};
+
 /// What to run.
 pub const Program = union(enum) {
     /// The bytes of an a.out read on the host (`./prog`).
@@ -196,6 +250,9 @@ pub const Machine = struct {
     stuck: bool = false,
     /// Holds a returned status message or `err_msg`.
     out_buf: [256]u8 = undefined,
+    /// What the last run's guest changed in the root's overlay, discarded
+    /// with it (design/0011-overlay.md); empty without one.
+    root_changes: RootChanges = .{},
 
     /// Compiles a policy for a machine with these options, as `init` does,
     /// without creating one (for `--print`).
@@ -286,6 +343,7 @@ pub const Machine = struct {
     /// exit, as the CLI does.
     pub fn run(m: *Machine, prog: Program, argv: []const []const u8) RunError!Status {
         if (m.stuck) return error.Stuck;
+        m.root_changes = .{};
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
         const job = try m.gpa.create(Job);
@@ -334,12 +392,14 @@ pub const Machine = struct {
         job.stopAll();
         if (!job.waitAll()) {
             m.stuck = true;
+            m.root_changes = job.rootChanges();
             kern.removeConsole(job.con_id);
             job.con.setRaw(false);
             return .{ .killed = if (timed_out) timeout_note else stopped_note };
         }
         kern.removeConsole(job.con_id);
         job.con.setRaw(false);
+        m.root_changes = job.rootChanges();
         if (job.mach.load(.acquire)) |mc| mc.put();
         // No process reads the console now. A reader thread still in a
         // host read that can't be cancelled keeps the Job, leaked.
@@ -412,6 +472,27 @@ pub const Machine = struct {
         pool: cpupool.Pool,
         /// The CPUs /dev/sysstat lists (design/0007-go-compat.md).
         ncpu: u32 = 1,
+        /// The guest's changes to the root's overlay, reported by #O once
+        /// the namespace is built. Guarded by `changes_lock`.
+        changes: RootChanges = .{},
+        changes_lock: std.atomic.Mutex = .unlocked,
+        /// `$home` relative to the root, `usr/<user>`, for `changes`.
+        home_buf: [96]u8 = undefined,
+        home: []const u8 = "",
+        track: kern.OverlayTrack = undefined,
+
+        fn rootChanged(ctx: *anyopaque, path: []const u8) void {
+            const j: *Job = @ptrCast(@alignCast(ctx));
+            while (!j.changes_lock.tryLock()) std.atomic.spinLoopHint();
+            defer j.changes_lock.unlock();
+            j.changes.note(path, j.home);
+        }
+
+        fn rootChanges(j: *Job) RootChanges {
+            while (!j.changes_lock.tryLock()) std.atomic.spinLoopHint();
+            defer j.changes_lock.unlock();
+            return j.changes;
+        }
 
         fn allocPages(ctx: *anyopaque, n: usize) ?[*]u8 {
             const j: *Job = @ptrCast(@alignCast(ctx));
@@ -720,13 +801,27 @@ pub const Machine = struct {
     fn startFirst(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
         if (j.stopping.load(.acquire)) return .{ .killed = timeout_note };
-        try m.buildNamespace(j.con_id);
+        const built = try m.buildNamespace(j.con_id);
+        const root_ov = built.root_overlay;
         if (m.opts.ns) |path| {
             var buf: [1024]u8 = undefined;
             const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("--ns: name too long", .{});
             const text = readFile(m.gpa, z) catch return m.fail("--ns {s}: {s}", .{ path, kern.errstr() });
             defer m.gpa.free(text);
-            try m.replayNamespace(text, j.con_id);
+            const cd = try m.replayNamespace(text, j.con_id);
+            // The cwd is a chan from before the replay. Without a `cd` of
+            // its own, the replay ends in the cwd as its binds left it: an
+            // overlay over / (design/0011-overlay.md) puts the cwd's
+            // mount point under the overlay, and the replay's binds onto
+            // it are made there.
+            if (!cd) if (built.cwd) |at| kern.chdir(at) catch {};
+        }
+        // The guest's changes to the root count from here
+        // (design/0011-overlay.md).
+        if (root_ov) |id| {
+            j.home = std.fmt.bufPrint(&j.home_buf, "usr/{s}", .{kern.user()}) catch "";
+            j.track = .{ .ctx = j, .changed = Job.rootChanged };
+            kern.overlayTrack(id, &j.track);
         }
 
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
@@ -1177,9 +1272,17 @@ pub const Machine = struct {
         return error.NamespaceFailed;
     }
 
+    const Built = struct {
+        /// The root overlay's instance, if the plan has one.
+        root_overlay: ?u32 = null,
+        /// Where the cwd was set, if anywhere.
+        cwd: ?[:0]const u8 = null,
+    };
+
     /// Builds the first Proc's namespace from the plan (DESIGN.md, "Boot
     /// sequence"), then sets the device mask.
-    fn buildNamespace(m: *Machine, con_id: u32) RunError!void {
+    fn buildNamespace(m: *Machine, con_id: u32) RunError!Built {
+        var root_ov: ?u32 = null;
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
         var cwd_at: ?[:0]const u8 = null;
@@ -1200,8 +1303,9 @@ pub const Machine = struct {
             };
             if (b.create) flag |= kern.MCREATE;
             const to = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.to});
-            if (bindOrOverlay(from, b.lower, to, flag, &buf)) |_| {
+            if (bindOrOverlay(from, b.lower, to, flag, &buf)) |id| {
                 if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term/cwd";
+                if (std.mem.eql(u8, b.to, "/") and id != null) root_ov = id;
                 continue;
             } else |_| {}
             if (b.fallback) |fb| {
@@ -1213,6 +1317,7 @@ pub const Machine = struct {
             if (!b.optional) return m.fail("bind {s} {s}: {s}", .{ b.from, b.to, kern.errstr() });
         }
         if (cwd_at) |at| kern.chdir(at) catch return m.fail("cwd: {s}", .{kern.errstr()});
+        if (m.plan.root_overlay) makeHome();
 
         // fds 0-2 on the console.
         const in = kern.open("/dev/cons", kern.OREAD) catch return m.fail("open /dev/cons: {s}", .{kern.errstr()});
@@ -1225,7 +1330,25 @@ pub const Machine = struct {
         // Existing binds keep working, but masked devices can't be attached
         // again to reach more of the host.
         if (m.plan.devmask.len > 0) kern.devmask(try std.fmt.bufPrintZ(&buf, "{s}", .{m.plan.devmask}));
+        return .{ .root_overlay = root_ov, .cwd = cwd_at };
     }
+
+    /// Makes `$home`, `/usr/$user`, in the root's overlay if the root
+    /// doesn't have it (design/0011-overlay.md). Best effort: a run
+    /// without it works as it did with a read-only root.
+    fn makeHome() void {
+        var buf: [128]u8 = undefined;
+        var st: [512]u8 = undefined;
+        const home = std.fmt.bufPrintZ(&buf, "/usr/{s}", .{kern.user()}) catch return;
+        if (kern.stat(home, &st)) |_| return else |_| {}
+        for ([_][:0]const u8{ "/usr", home }) |dir| {
+            if (kern.stat(dir, &st)) |_| continue else |_| {}
+            const fd = kern.create(dir, kern.OREAD, dmdir | 0o775) catch return;
+            kern.close(fd) catch {};
+        }
+    }
+
+    const dmdir: u32 = 0x80000000;
 
     /// Connects to a 9P root and posts the connection as `#s/root`
     /// (design/0013-9p-roots.md), where the board holds it for the
@@ -1344,28 +1467,34 @@ pub const Machine = struct {
     /// overlay over `#U<lower>`. A bare `#O` with no `lower` is a fresh
     /// overlay over what `to` is now, as in a namespace file. `buf` is
     /// scratch, and may hold `from`.
-    fn bindOrOverlay(from: [:0]const u8, lower: ?[]const u8, to: [:0]const u8, flag: c_int, buf: []u8) kern.Error!void {
+    /// Returns the overlay's instance, or null for a plain bind.
+    fn bindOrOverlay(from: [:0]const u8, lower: ?[]const u8, to: [:0]const u8, flag: c_int, buf: []u8) kern.Error!?u32 {
         const l = lower orelse {
-            if (std.mem.eql(u8, from, "#O")) return overlay(to, to, flag);
-            return kern.bind(from, to, flag);
+            if (std.mem.eql(u8, from, "#O")) return try overlay(to, to, flag);
+            try kern.bind(from, to, flag);
+            return null;
         };
-        return overlay(std.fmt.bufPrintZ(buf, "#U{s}", .{l}) catch return error.Kern, to, flag);
+        return try overlay(std.fmt.bufPrintZ(buf, "#U{s}", .{l}) catch return error.Kern, to, flag);
     }
 
-    /// Binds a fresh `#O` overlay over the directory `lower` at `to`.
-    fn overlay(lower: [:0]const u8, to: [:0]const u8, flag: c_int) kern.Error!void {
+    /// Binds a fresh `#O` overlay over the directory `lower` at `to`, and
+    /// returns its instance.
+    fn overlay(lower: [:0]const u8, to: [:0]const u8, flag: c_int) kern.Error!u32 {
         const id = try kern.overlayNew(lower);
         var spec: [16]u8 = undefined;
         kern.bind(std.fmt.bufPrintZ(&spec, "#O{d}", .{id}) catch unreachable, to, flag) catch |e| {
             kern.overlayDrop(id);
             return e;
         };
+        return id;
     }
 
     /// Runs a namespace file's operations, as newns does: a failed bind or
     /// mount is skipped, and only a syntax error fails the run. The device
-    /// mask is already set, so it can't reach masked devices.
-    fn replayNamespace(m: *Machine, text: []const u8, con_id: u32) RunError!void {
+    /// mask is already set, so it can't reach masked devices. Returns
+    /// whether the file has a `cd`.
+    fn replayNamespace(m: *Machine, text: []const u8, con_id: u32) RunError!bool {
+        var cd = false;
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -1378,7 +1507,7 @@ pub const Machine = struct {
             // A bare #O is a fresh overlay over what the target is now.
             .bind => |b| if (std.mem.eql(u8, b.from, "#O")) {
                 const to = try m.nsPath(arena, b.to, con_id);
-                overlay(to, to, mountFlag(b.flag)) catch {};
+                _ = overlay(to, to, mountFlag(b.flag)) catch {};
             } else kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
             // A WebSocket URL is connected by h9, as a root is; unlike
             // other failures, one that fails stops the run.
@@ -1394,10 +1523,14 @@ pub const Machine = struct {
                 _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
             },
             .unmount => |u| kern.unmount(if (u.from) |f| try m.nsPath(arena, f, con_id) else null, try m.nsPath(arena, u.to, con_id)) catch {},
-            .cd => |d| kern.chdir(try m.nsPath(arena, d, con_id)) catch {},
+            .cd => |d| {
+                cd = true;
+                kern.chdir(try m.nsPath(arena, d, con_id)) catch {};
+            },
             // newns's rfork(RFCNAMEG): an empty namespace, keeping the mask.
             .clear => kern.rfork(kern.RF.CNAMEG) catch {},
         };
+        return cd;
     }
 
     /// A namespace-file path, with --print's `<id>` console placeholder

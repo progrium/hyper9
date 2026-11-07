@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const vmm = @import("h9").vmm;
 const policy = @import("h9").policy;
 const ws = @import("h9").ws;
+const RootChanges = @import("h9").RootChanges;
 
 pub const usage =
     \\usage: h9 [--backend auto|hvf|kvm|whp|emu] [--arch arm64|amd64|386]
@@ -309,6 +310,24 @@ pub fn exitStatus(msg: []const u8) struct { code: u8, print: bool } {
     return .{ .code = 1, .print = true };
 }
 
+/// The line h9 prints on a terminal when a run's changes to the root's
+/// overlay are discarded (design/0011-overlay.md): the changed top-level
+/// directories, and how to keep them. A 9P root keeps writes under
+/// `--write=scope`, since its server decides; a host tree takes
+/// `--writable` on the root.
+pub fn discardNotice(buf: []u8, c: *const RootChanges, ninep: bool) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    noticeTo(&w, c, ninep) catch {};
+    return w.buffered();
+}
+
+fn noticeTo(w: *std.Io.Writer, c: *const RootChanges, ninep: bool) std.Io.Writer.Error!void {
+    try w.writeAll("h9: changes to the root under ");
+    for (c.dirs(), 0..) |*n, i| try w.print("{s}/{s}", .{ if (i > 0) ", " else "", n.slice() });
+    if (c.more) try w.writeAll(if (c.count > 0) ", ..." else "...");
+    try w.print(" were discarded (rerun with {s} to keep them)", .{if (ninep) "--write=scope" else "--writable \"$H9ROOT\""});
+}
+
 const t = std.testing;
 
 test "flags stop at the first non-flag" {
@@ -526,4 +545,24 @@ test "exits strings to exit codes" {
         try t.expectEqual(c[1], s.code);
         try t.expectEqual(c[2], s.print);
     }
+}
+
+test "the discarded-changes notice names the top-level directories" {
+    var rc: RootChanges = .{};
+    rc.note("usr/glenda/lib/profile", "usr/glenda");
+    try t.expect(rc.home and !rc.changed);
+    rc.note("386/bin/cat", "usr/glenda");
+    rc.note("lib/x", "usr/glenda");
+    rc.note("386/lib", "usr/glenda");
+    rc.note("usr/glendax", "usr/glenda");
+    try t.expect(rc.changed);
+    var buf: [512]u8 = undefined;
+    try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (rerun with --writable \"$H9ROOT\" to keep them)", discardNotice(&buf, &rc, false));
+    try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (rerun with --write=scope to keep them)", discardNotice(&buf, &rc, true));
+    var many: RootChanges = .{};
+    var nb: [8]u8 = undefined;
+    for (0..RootChanges.max_names + 2) |i| many.note(try std.fmt.bufPrint(&nb, "d{d}/x", .{i}), "");
+    try t.expect(many.more);
+    try t.expectEqual(@as(usize, RootChanges.max_names), many.dirs().len);
+    try t.expect(std.mem.endsWith(u8, discardNotice(&buf, &many, false), "/d9, ... were discarded (rerun with --writable \"$H9ROOT\" to keep them)"));
 }

@@ -31,6 +31,12 @@
  * machines in one host process can't reach each other's. The last close
  * of the last chan on an instance frees it.
  *
+ * Tracking: once h9_overlay_track gives an instance a tracker, each
+ * create, copy-up, remove and wstat calls h9_overlay_changed with the
+ * changed path, for the root overlay's discarded-changes notice
+ * (design/0011-overlay.md). Writes to a file already in memory aren't
+ * reported again: its create or copy-up was.
+ *
  * Locking: each instance's tree is guarded by its QLock, held across
  * lower-device calls made for walks, copy-ups and directory reads. The
  * instance table is guarded by a Lock, which also guards instance
@@ -47,6 +53,7 @@
 extern void *h9_overlay_pool(void);
 extern void *h9_overlay_alloc(void *pool, ulong n);
 extern void h9_overlay_free(void *pool, void *p, ulong n);
+extern void h9_overlay_changed(void *track, char *path);
 
 enum
 {
@@ -125,6 +132,7 @@ struct Inst
 	uvlong	qidgen;
 	Pg	*pages;		/* the small allocator's pages */
 	Chunk	*free[Nclass];
+	void	*track;	/* told of each change once set (h9_overlay_track), or nil */
 };
 
 /* A chan's state. */
@@ -823,6 +831,14 @@ ovperm(ulong mode, int omode)
 		error(Eperm);
 }
 
+/* Reports a change at path to the instance's tracker, if it has one. */
+static void
+changed(Inst *in, char *path)
+{
+	if(in->track != nil)
+		h9_overlay_changed(in->track, path);
+}
+
 /*
  * The directory node for the first n names of path, making markers for
  * lower directories that have none yet.
@@ -941,6 +957,7 @@ copyup(Chan *c, int trunc)
 	n->ref++;
 	if((c->flag & COPEN) == 0)
 		c->qid = n->qid;
+	changed(in, o->path);
 }
 
 /* Packs the merged directory into the chan's snapshot. */
@@ -1192,7 +1209,7 @@ h9_overlay_newpath(char *path)
 	}
 	c = nil;
 	if(path != nil)
-		c = namec(path, Atodir, 0, 0);
+		c = namec(path, Aaccess, 0, 0);
 	n = h9_overlay_new(c);
 	if(c != nil)
 		cclose(c);
@@ -1217,6 +1234,52 @@ h9_overlay_drop(int id)
 	in->pinned = 0;
 	unlock(&instlock);
 	instdecref(in);
+}
+
+/*
+ * Gives an instance of the calling thread's machine a tracker (nil: none)
+ * for h9_overlay_changed. Changes before this aren't reported.
+ */
+void
+h9_overlay_track(int id, void *track)
+{
+	Inst *in;
+
+	lock(&instlock);
+	in = instlookup(id);
+	if(in != nil && in->pool == h9_overlay_pool())
+		in->track = track;
+	unlock(&instlock);
+}
+
+/*
+ * For findmount (chan.c): a directory an instance shows from its lower
+ * tree, or a marker for one, has the lower qid, so a mount on that lower
+ * directory, made before the instance, shows through it as well. Returns 1
+ * and the lower device's type and dev for (type, dev, qid) on an
+ * instance with a lower tree, unless qid is a copy's own.
+ */
+int
+h9_overlay_lowerdev(int type, int dev, Qid qid, int *ltype, int *ldev)
+{
+	static int ovtype = -2;
+	Inst *in;
+	int r;
+
+	if(ovtype == -2)
+		ovtype = devno('O');
+	if(type != ovtype || (qid.type & QTDIR) == 0 || (qid.path & Copybit) != 0)
+		return 0;
+	r = 0;
+	lock(&instlock);
+	in = instlookup(dev);
+	if(in != nil && in->lower != nil){
+		*ltype = in->lower->type;
+		*ldev = in->lower->dev;
+		r = 1;
+	}
+	unlock(&instlock);
+	return r;
 }
 
 /*
@@ -1631,6 +1694,7 @@ ovcreate(Chan *c, char *name, int omode, ulong perm)
 	nodeunref(in, o->node);
 	o->node = ch;
 	c->qid = ch->qid;
+	changed(in, o->path);
 	if(omode & ORCLOSE)
 		c->flag |= CRCLOSE;
 	c->mode = openmode(omode);
@@ -1670,6 +1734,7 @@ removelocked(Chan *c)
 			w->inlower = 1;
 			ovlink(dir, w);
 		}
+		changed(in, o->path);
 		return;
 	}
 	if((c->qid.type & QTDIR) && !dirempty(c))
@@ -1681,6 +1746,7 @@ removelocked(Chan *c)
 	w = newnode(in, Nwhite, name);
 	w->inlower = 1;
 	ovlink(dir, w);
+	changed(in, o->path);
 }
 
 static void
@@ -1930,8 +1996,11 @@ ovwstat(Chan *c, uchar *db, int n)
 			nd->length = d.length;
 			nd->qid.vers++;
 		}
-		if(chname)
+		changed(in, o->path);
+		if(chname){
 			ovrename(c, nd, d.name);
+			changed(in, o->path);
+		}
 		if(chmode)
 			nd->mode = (nd->mode & DMDIR) | (d.mode & ~DMDIR);
 		if(chmtime)

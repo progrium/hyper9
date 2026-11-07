@@ -756,6 +756,9 @@ cclone(Chan *c)
 	return nc;
 }
 
+/* h9: src/kern/devoverlay.c */
+extern int h9_overlay_lowerdev(int, int, Qid, int*, int*);
+
 /* also used by sysfile.c:/^mountfix */
 int
 findmount(Chan **cp, Mhead **mp, int type, int dev, Qid qid)
@@ -763,10 +766,14 @@ findmount(Chan **cp, Mhead **mp, int type, int dev, Qid qid)
 	Chan *to;
 	Pgrp *pg;
 	Mhead *m;
+	int samepath;
 
 	pg = up->pgrp;
+	samepath = 0;
 	rlock(&pg->ns);
 	for(m = MOUNTH(pg, qid); m != nil; m = m->hash){
+		if(m->from->qid.path == qid.path)
+			samepath = 1;
 		if(eqchantdqid(m->from, type, dev, qid, 1)){
 			if(mp != nil)
 				incref(&m->ref);
@@ -786,6 +793,13 @@ findmount(Chan **cp, Mhead **mp, int type, int dev, Qid qid)
 		}
 	}
 	runlock(&pg->ns);
+	/*
+	 * h9: a lower directory seen through a #O overlay keeps the mounts
+	 * made on it before the overlay (src/kern/devoverlay.c), as when a
+	 * namespace file's overlay goes over / after other binds.
+	 */
+	if(samepath && h9_overlay_lowerdev(type, dev, qid, &type, &dev))
+		return findmount(cp, mp, type, dev, qid);
 	return 0;
 }
 
