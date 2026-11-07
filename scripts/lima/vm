@@ -77,13 +77,13 @@ cmd_push() {
 	scp_ "$os" "$@" "lima-$os:h9/" </dev/null
 }
 
-# The root tree from scripts/mkroot.py, streamed as one tar over ssh (it's
+# The root tree from zig build mkroot, streamed as one tar over ssh (it's
 # ~250 MB in ~10k files, too many for scp). A stamp in the guest copy names
 # the tree and its build time, so an unchanged tree isn't copied again.
 cmd_push_root() {
 	local os=$1 force=${2:-}
 	local root="$ROOT/.local/9front/root"
-	[[ -d "$root/arm64" ]] || die "no root tree at $root (run scripts/mkroot.py)"
+	[[ -d "$root/arm64" ]] || die "no root tree at $root (run zig build mkroot)"
 	[[ -z "$force" || "$force" == -f ]] || die "usage: scripts/lima/vm push-root <os> [-f]"
 	need_running "$os"
 	local real; real="$(cd "$root" && pwd -P)"

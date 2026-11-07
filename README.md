@@ -19,20 +19,27 @@ Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 ```sh
 . scripts/env.sh               # Zig cache and tools live in .local/ (gitignored); puts zig-out/bin (h9) on PATH
 ./scripts/fetch.sh             # reference sources (9front at the pinned release), 9front arm64 image, prebuilt and patched-source Unicorn into .local/
-./scripts/mkroot.py            # extracts the 9front root tree into .local/9front/root (~1 min, ~250 MB)
+zig build mkroot               # extracts the 9front root tree into .local/9front/root (~1 min, ~250 MB)
 ```
 
-`mkroot.py` boots the pinned image headless in QEMU (`brew install qemu`),
-tars the file system out onto a scratch disk, and unpacks it into
+`zig build mkroot` ([tools/mkroot.zig](tools/mkroot.zig)) boots the pinned
+image headless in QEMU (`brew install qemu`), tars the file system out onto a
+scratch disk, and unpacks it into
 `.local/9front/root-<release>`, with `.local/9front/root` linked to it. The
 image itself isn't modified. It's the host-tree root h9 serves as `/`.
 Boot kernels, `/sys/doc` and `/sys/src` are left out; pass `--src` to keep
-`/sys/src`, which [self-hosting](design/0010-self-host.md) needs.
-`--arch 386,amd64` also fills `/386` or `/amd64` by cross-compiling
-`/sys/src` inside h9 (`objtype=386 mk install`), which takes a built
-`zig-out/bin/h9` (or `$H9`) and a few minutes per architecture; on an existing
-tree it only adds them. `zig build integration -Darch=386` then runs the
-integration cases with the 386 binaries on the emulator.
+`/sys/src`, which [self-hosting](design/0010-self-host.md) needs. Options go
+after `--`: `zig build mkroot -- --src`.
+The tree has the host's architecture's binaries unless `--arch` names
+others (`--arch arm64`, `--arch 386,amd64`). The image's binaries are arm64;
+`/386` and `/amd64` are filled by cross-compiling `/sys/src` inside h9
+(`objtype=386 mk install`), which takes a built `zig-out/bin/h9` (or `$H9`).
+Each architecture takes a few minutes on an arm64 hypervisor, but about an
+hour on the emulator, which x86\_64 hosts need because the compilers are
+arm64. On an existing tree it builds the host's
+architecture only if it's missing, and what `--arch` names again.
+`zig build integration -Darch=386` then runs the integration cases with the
+386 binaries on the emulator.
 
 Pinned upstream versions are in [scripts/pins.sh](scripts/pins.sh).
 
@@ -41,15 +48,16 @@ Pinned upstream versions are in [scripts/pins.sh](scripts/pins.sh).
 On Linux, h9 uses KVM ([kvm](design/0016-kvm.md)) on arm64 and x86\_64. It
 needs read and write access to `/dev/kvm`, usually through the `kvm` group
 (`sudo usermod -aG kvm $USER`, then log in again), and inside a VM, nested
-virtualization. `h9 --check` says which is missing. `mkroot.py` needs
+virtualization. `h9 --check` says which is missing. `zig build mkroot` needs
 `qemu-system-aarch64`, `qemu-img` and `bsdtar` (Debian and Ubuntu:
 `qemu-system-arm qemu-utils libarchive-tools`). KVM runs the host's
-architecture, so on x86\_64 the root needs `/amd64`, which `--arch amd64`
-builds with an emulator h9 running the tree's arm64 compilers:
+architecture, so on x86\_64 the root needs `/amd64`, which `zig build mkroot`
+builds there by default, with an emulator h9 running the tree's arm64
+compilers:
 
 ```sh
 zig build -Demu=unicorn -Dtarget=x86_64-linux-musl --prefix .local/h9-emu
-H9=.local/h9-emu/bin/h9 ./scripts/mkroot.py --arch amd64
+H9=.local/h9-emu/bin/h9 zig build mkroot     # /amd64 on x86_64 hosts
 zig build integration -Darch=amd64     # the cases on KVM (and emu, if built in)
 ```
 
@@ -71,13 +79,14 @@ zig build embed    # builds docs/embedding/embed.zig, the embedding guide's exam
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos and integration cases (by slug or id)
 zig build design -- check        # validate design/ and the test tags (also list, ready, graph, new, file)
+zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
 The demos and the integration tests use the root tree from
-`scripts/mkroot.py`, or `-Droot=DIR`. Without a tree, the integration tests
+`zig build mkroot`, or `-Droot=DIR`. Without a tree, the integration tests
 skip and only the hello demos run. Each case is tagged with the proposal it
 proves (`test "echo [baseline]"`); cases for a proposal that isn't implemented
 yet skip in `zig build integration` and `zig build test` unless `-Dpending` is
@@ -96,7 +105,7 @@ they run as: the 42 commands basic operation needs. `-Dslim-links=hard`
 `-Dslim-links=copy` builds nothing and makes `slim-copy-*` with the same
 commands copied from the root, to measure the box against
 ([tests/fixtures/multicall/execloop.rc](tests/fixtures/multicall/execloop.rc)). It
-needs `/sys/src`, from `mkroot.py --src` or the checkout `fetch.sh` makes,
+needs `/sys/src`, from `zig build mkroot -- --src` or the checkout `fetch.sh` makes,
 and takes a few minutes on the emulator. The tree is `9box`, its links,
 `rcmain` and the mount points, and runs with
 `h9 --root .local/9front/slim-11952-arm64`. The `[64]` cases use it,
@@ -295,7 +304,7 @@ debugs a live process (`h9 --rc 'sleep 5 & sleep 1; acid $apid'`, then
 `stk()`), and a `BRK` or `INT3` posts `sys: breakpoint`
 ([self-host](design/0010-self-host.md)).
 
-**Building from source.** With `/sys/src` in the root (`mkroot.py --src`), or
+**Building from source.** With `/sys/src` in the root (`zig build mkroot -- --src`), or
 bound in with `--readable`, the compilers, linkers and mk run as on 9front:
 
 ```sh
@@ -353,7 +362,7 @@ Closing the window posts `hangup` to the machine. Only one machine in a
 process has the window. Without `--gfx`, `#i`, `#m` and `#b` are masked. A
 build without a GUI backend, or with no display (`$DISPLAY` unset for X11),
 exits 125 on `--gfx`; `--check` reports a `gfx` line. rio needs `/mnt/temp` in
-the root tree, which `scripts/mkroot.py` makes (and adds to an existing tree).
+the root tree, which `zig build mkroot` makes (and adds to an existing tree).
 
 ```sh
 h9 --gfx rio
@@ -475,6 +484,6 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
 | `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
-| `scripts/mkroot.py` | builds the 9front root tree from the pinned image |
+| `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source) into `dist/` |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |

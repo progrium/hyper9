@@ -57,8 +57,8 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
     try skipPending(src.fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
     const root = getenv(1, "H9_TEST_ROOT") orelse return error.SkipZigTest;
-    // The tree from scripts/mkroot.py is arm64, plus the architectures its
-    // --arch adds. Without H9_TEST_ARCH, h9 runs the host's architecture,
+    // The tree from zig build mkroot is arm64, plus the host's architecture
+    // or the ones its --arch names. Without H9_TEST_ARCH, h9 runs the host's architecture,
     // so x86_64 hosts (linux-amd64) skip these.
     const arch = getenv(4, "H9_TEST_ARCH");
     if (arch == null and builtin.cpu.arch != .aarch64) return error.SkipZigTest;
@@ -1082,7 +1082,7 @@ test "a file written in /lib reads back and isn't in the root tree (demo) [11]" 
 
 test "mk install into the root works and leaves the root tree unchanged (demo) [11]" {
     const e = try env(@src());
-    // Needs /sys/src (scripts/mkroot.py --src).
+    // Needs /sys/src (zig build mkroot -- --src).
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "sys/src/cmd/cat.c"), .{}) catch return error.SkipZigTest;
     var bin_buf: [64]u8 = undefined;
     const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin/cat", .{e.arch orelse "arm64"});
@@ -1271,7 +1271,7 @@ test "changes only under $home, or only by the namespace builder, print no notic
 
 // Self-hosting (design/0010-self-host.md): the root's compilers and mk
 // build 9front's own source, and acid debugs live processes. The builds
-// use the root's /sys/src (scripts/mkroot.py --src), or else H9_TEST_SRC,
+// use the root's /sys/src (zig build mkroot -- --src), or else H9_TEST_SRC,
 // a checkout's sys directory, bound over /sys; they skip without either.
 // They write into a scratch cwd, never into the root.
 

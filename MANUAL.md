@@ -140,7 +140,7 @@ to `h9-emu` too. (When you build `h9-emu` from source it's still called
 | --- | --- | --- |
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | ✓ |
 | Linux arm64 | ✓ (KVM) | ✓ |
-| Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`mkroot.py --arch amd64`) | ✓, with an amd64 root tree |
+| Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
 | Windows on ARM | *Not yet available ([whp](design/0017-whp.md))* | ✓ |
 | Windows x86\_64 | *Not yet available ([whp](design/0017-whp.md))* | ✓, with an amd64 root tree |
 
@@ -171,17 +171,21 @@ and Windows.
 
 ```sh
 host$ brew install qemu
-host$ ./scripts/mkroot.py    # about a minute; ~250 MB in .local/9front/root
+host$ zig build mkroot      # about a minute; ~250 MB in .local/9front/root
 ```
 
-`mkroot.py` boots the pinned 9front release image in QEMU, without a window,
-copies its file system out and unpacks it into `.local/9front/root`. It leaves
-out the hardware kernels, `/sys/doc` and the source code; pass `--src` to keep
-`/sys/src`, which you need to build 9front programs inside h9 (chapter 18).
-`--arch 386,amd64` adds `/386` or `/amd64` binaries by compiling `/sys/src`
-inside h9, which takes a built `zig-out/bin/h9` and a few minutes per
-architecture; on an existing tree it only adds them. Appendix C describes
-what's in the tree.
+`zig build mkroot` boots the pinned 9front release image in QEMU, without a
+window, copies its file system out and unpacks it into `.local/9front/root`.
+It leaves out the hardware kernels, `/sys/doc` and the source code; pass
+`--src` (`zig build mkroot -- --src`) to keep `/sys/src`, which you need to
+build 9front programs inside h9 (chapter 18). The tree has binaries for
+your machine's architecture unless `--arch` names others (`--arch arm64`,
+`--arch 386,amd64`). The image's binaries are arm64; `/386` and `/amd64` are
+built by compiling `/sys/src` inside h9, which takes a built
+`zig-out/bin/h9`. Each architecture takes a few minutes on an arm64
+hypervisor, but about an hour on the emulator, which x86\_64 hosts need
+because the compilers are arm64. On an existing tree it
+only adds what's missing. Appendix C describes what's in the tree.
 
 h9 looks for its root in this order:
 
@@ -234,7 +238,7 @@ host$ h9 --check
 h9 fe6c65f on linux x86_64
 backend emu: ok, hello in 11.9 ms
 backend auto: ok (uses emu), hello in 3.0 ms
-root: none (use --root DIR or $H9ROOT; scripts/mkroot.py builds one)
+root: none (use --root DIR or $H9ROOT; zig build mkroot builds one)
 host$ echo $?
 125
 ```
@@ -264,7 +268,7 @@ If this fails, the message says why:
 
 | Message | Exit | Fix |
 | --- | --- | --- |
-| `h9: root DIR: not found` | 125 | Check `--root` or `H9ROOT`, or run `mkroot.py` |
+| `h9: root DIR: not found` | 125 | Check `--root` or `H9ROOT`, or run `zig build mkroot` |
 | `h9: root DIR: not a directory or socket` | 125 | `--root` names a plain file |
 | `h9: no root tree found; pass --root or set H9ROOT` | 125 | See the lookup order above |
 | `h9: cannot create auto machine for arm64: no usable hypervisor (is h9 signed with h9.entitlements?)` | 125 | Build with `zig build`, which signs it, or use `h9-emu` |
@@ -1557,7 +1561,7 @@ the run ends.
 - Linux builds have no window code unless built with `-Dgfx=x11`; `h9
   --version` says which (`gfx:`), and `h9 --check` says whether `$DISPLAY`
   opens. Without it, or without a display, `--gfx` exits 125.
-- rio needs `/mnt/temp` in the root tree; `scripts/mkroot.py` makes it, and
+- rio needs `/mnt/temp` in the root tree; `zig build mkroot` makes it, and
   adds it to a tree it built before.
 - `--print` shows a `gfx:` line, and lists the clipboard and the guest's
   freedom to draw anything in its window (including what looks like a host
@@ -1593,13 +1597,13 @@ live in `/sys/src`, and `mk install` copies results into `/$objtype/bin`.
 **In h9**
 
 The compilers, linkers and `mk` run, and rebuild 9front's userland from
-`/sys/src` byte for byte; that's how `mkroot.py --arch` adds `/386` and
+`/sys/src` byte for byte; that's how `zig build mkroot -- --arch` adds `/386` and
 `/amd64`. `acid` debugs a live process ([self-host](design/0010-self-host.md)).
 
 - You need `/sys/src` in the root tree for the headers and libraries to
-  rebuild 9front itself: build the tree with `mkroot.py --src`. For your own
-  programs, `/$objtype/lib` and `/sys/include`, which every tree has, are
-  enough.
+  rebuild 9front itself: build the tree with `zig build mkroot -- --src`.
+  For your own programs, `/$objtype/lib` and `/sys/include`, which every
+  tree has, are enough.
 - The root is a copy-on-write overlay by default, so `mk install` works and
   the installed files are there for the rest of the run, then gone: try an
   install that way first. To keep it, install with `--writable "$H9ROOT"`.
@@ -1684,8 +1688,8 @@ hello, world
   1 GB. A program that uses `os/exec` needs `--memory 4G`, because `rfork`
   copies the parent's memory eagerly.
 - **Not yet:** `os.Executable`, and running 9front commands from Go with
-  `os/exec` unless your root tree has `/amd64/bin` (`mkroot.py --arch
-  amd64`).
+  `os/exec` unless your root tree has `/amd64/bin` (`zig build mkroot`
+  on x86\_64, or `--arch amd64`).
 - A Go program doesn't need a root tree to run, but without one it has no
   `/bin`, no `/tmp` and no access to your files; give it a root or at least
   `--root` pointing at a directory with the usual mount points.
@@ -2523,17 +2527,18 @@ Commands marked † aren't usable in h9 yet; the notes say why.
 ### C. The root tree
 
 The root tree is a 9front file system extracted from the pinned release image
-(9front 11952) by `scripts/mkroot.py`. h9 serves it read-only as `/`, under
+(9front 11952) by `zig build mkroot`. h9 serves it read-only as `/`, under
 a copy-on-write overlay in memory, so a guest's changes vanish with the
 machine and the tree changes only if you pass `--writable "$H9ROOT"`. It's about
 250 MB.
 
 **Left out:** `/dist` (installer payloads), the kernels and boot files for
 real hardware (`/arm64/9*`, `/386/9boot*` and similar) and `/sys/doc`.
-`/sys/src` is left out too unless `mkroot.py --src` is used; rebuilding
-9front programs from source (chapter 18) needs it. The binaries in the image
-are arm64; `/386` and `/amd64` are empty skeletons unless `mkroot.py --arch
-386,amd64` filled them by compiling `/sys/src` inside h9.
+`/sys/src` is left out too unless `zig build mkroot -- --src` is used;
+rebuilding 9front programs from source (chapter 18) needs it. The binaries in
+the image are arm64; `/386` and `/amd64` are empty skeletons unless `zig build
+mkroot` filled them by compiling `/sys/src` inside h9, which it does for your
+machine's architecture or the ones `--arch` names.
 
 **Where things are**
 

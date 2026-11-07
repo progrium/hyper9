@@ -46,7 +46,7 @@ scripts/lima/vm shell windows 'cd h9 && h9.exe --root root /bin/cat /lib/namespa
 scripts/lima/vm down linux
 ```
 
-`push-root` copies `.local/9front/root` (from `scripts/mkroot.py`, about
+`push-root` copies `.local/9front/root` (from `zig build mkroot`, about
 250 MB in 10k files) as one tar stream over ssh, which takes seconds where
 `push` would take minutes. It writes `h9/root/.h9-root` with the tree's
 name and build time, and skips the copy when that matches; `-f` forces it.
