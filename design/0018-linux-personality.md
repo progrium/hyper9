@@ -13,7 +13,7 @@ areas: [kern, vmm, cli, sandbox]
 
 ## Abstract
 
-h9 runs Linux ELF binaries next to 9front ones, in the same machine. A process's personality is chosen at exec by its binary format. A Linux process's syscalls are served by a second syscall table in the host, translated onto the same drawterm kernel. So Linux processes share the machine's mount table, file descriptors, pipes, notes and sandbox policy with 9front processes, and the two can pipe to each other and exec each other. Each process has its own root: a Linux process's `/` is a Linux root tree, such as Alpine's minirootfs, with the 9front tree at `/9`. This proposal covers single-threaded programs, static and dynamic. Threads ([linux-threads](linux-threads.md)) and readiness with sockets ([linux-net](linux-net.md)) are their own proposals, built on this one.
+h9 runs Linux ELF binaries next to 9front ones, in the same machine. A process's personality is chosen at exec by its binary format. A Linux process's syscalls are served by a second syscall table in the host, translated onto the same drawterm kernel. So Linux processes share the machine's mount table, file descriptors, pipes, notes and sandbox policy with 9front processes, and the two can pipe to each other and exec each other. Each process has its own root: a Linux process's `/` is a Linux root tree, such as Alpine's minirootfs, with the 9front tree at `/9` when the machine has one. `--root` takes either kind of tree and h9 tells them apart, so there's no Linux-specific flag. This proposal covers single-threaded programs, static and dynamic. Threads ([linux-threads](linux-threads.md)) and readiness with sockets ([linux-net](linux-net.md)) are their own proposals, built on this one.
 
 ## Background
 
@@ -38,6 +38,9 @@ What doesn't fit yet:
 
 - **The vmm interface** maps and unmaps whole regions by their start address, and both backends search regions linearly. The emulator remaps every region into its engine, and flushes its translation cache, on any change. Linux programs make thousands of mappings and change parts of them with `munmap` and `mprotect`.
 - **Exit statuses** are strings in Plan 9 and small integers in Linux, and the CLI exits 1 for any non-empty string.
+- **The emulator's regions are expensive to change.** Unicorn rebuilds its memory map on every map, unmap or protect, at a cost that grows with the number of regions. With 64 KiB chunks, about 840 regions cost 2.9 ms per protect that splits a region, and about 1,600 cost 28 ms. Mapping 2,048 regions takes 1.9 s. `pip --version` makes about 12,000 `mmap`/`munmap` pairs and 17,000 page faults, so it took 88 s on a prototype built this way.
+
+A prototype of this proposal, in Python on Unicorn 2.1.4 (the version h9's emulator links), ran Alpine's busybox shell pipelines, `apk` and CPython, static and dynamic, on arm64 and amd64, with about 110 calls and no vDSO. The findings it turned up are folded into the sections below.
 
 ## Proposal
 
@@ -59,13 +62,19 @@ For a static or dynamic ELF64 executable of the host's architecture:
 - Map the `PT_LOAD` segments with their permissions. For a dynamic one, load the `PT_INTERP` interpreter at a fixed high base. `PT_GNU_STACK` is honoured: the stack is never executable unless it asks.
 - Build the Linux initial stack: argc, argv, envp, then the auxv with `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ` (4096), `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, `AT_HWCAP`, `AT_HWCAP2`, `AT_CLKTCK` (100), `AT_SECURE` (0), `AT_UID` and friends, and `AT_EXECFN`.
 - `AT_HWCAP` and `AT_HWCAP2` report what the guest can actually use, which differs between HVF and the emulator. The backend reports them (see vmm changes).
-- Give no vDSO (`AT_SYSINFO_EHDR`). musl and glibc fall back to real syscalls without one.
+- Give a minimal vDSO (`AT_SYSINFO_EHDR`): one read-only, executable page with an ELF header, a dynamic symbol table and a single symbol, `__kernel_rt_sigreturn` on arm64 (`mov x8, #139; svc #0`). It's the signal return address for handlers installed without `SA_RESTORER`, which Go's `linux/arm64` runtime relies on (see Signals). It exports no clock or `getrandom`, so musl, glibc and Go still make real syscalls for those.
+- Validate everything before tearing down the caller's image: the ELF header, the architecture, the interpreter, and every segment's bounds. A failed `execve` returns its error to the caller, as Linux's does; busybox's `PATH` search depends on that.
+- A file starting with `#!` runs its interpreter, with the script's path as an argument, as Linux's `binfmt_script` does. Alpine ships shell-script tools.
 
 Linux processes have no Tos.
 
 ### Syscalls
 
 `src/linux/` holds the table, one entry per Linux syscall number per architecture. Calls map onto drawterm's `sys*` wrappers on the calling Proc, as `syscall.zig`'s do. Results are Linux's: a value, or `-errno`.
+
+Arguments the ABI types as `int` (fds, flags, modes, `AT_FDCWD`) are narrowed to 32 bits on entry. On arm64 their upper halves aren't defined, and `AT_FDCWD` arrived sign-extended to 64 bits in the prototype, where busybox `tar` failed with `EBADF` until it was narrowed.
+
+The table below names the calls by their arm64 (generic) names. musl on amd64 uses the older forms for many of them, so the amd64 table serves those too, onto the same code: `open`, `stat`, `lstat`, `access`, `readlink`, `dup2`, `pipe`, `rename`, `unlink`, `mkdir`, `rmdir`, `chmod`, `chown`, `link`, `symlink`, `getdents`, `select` and `poll` (the last two from [linux-net](linux-net.md)). In the prototype's runs on amd64, `stat`, `lstat`, `open` and `readlink` were about 5,700 of the file calls.
 
 Every entry is one of three kinds, so `-ENOSYS` always means "not known to h9":
 
@@ -75,7 +84,7 @@ Every entry is one of three kinds, so `-ENOSYS` always means "not known to h9":
 
 | Area | Calls | Served by |
 | --- | --- | --- |
-| Files | `openat`, `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`, `lseek`, `close`, `dup`, `dup3`, `fcntl`, `pipe2`, `getdents64`, `newfstatat`, `fstat`, `statx`, `faccessat`, `faccessat2`, `mkdirat`, `unlinkat`, `renameat`, `renameat2` (flags 0), `fchmod`, `fchmodat`, `fchownat`, `utimensat`, `ftruncate`, `truncate`, `fsync`, `fdatasync`, `getcwd`, `chdir`, `fchdir`, `readlinkat`, `statfs`, `fstatfs` | drawterm's file calls. Relative paths with a dirfd are joined to the dirfd's path from `fd2path`. `stat` is built from a Plan 9 `Dir` (see Users and `stat`). `readlinkat` and `lstat`-style calls see links in trees resolved by [symlinks-in-root](0034-symlinks-in-root.md), and `EINVAL` elsewhere. `utimensat` and `fchownat` become a `wstat`. |
+| Files | `openat`, `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`, `sendfile` (as a read and a write, for busybox `cat` and `tar`), `lseek`, `close`, `dup`, `dup3`, `fcntl`, `pipe2`, `getdents64`, `newfstatat`, `fstat`, `statx`, `faccessat`, `faccessat2`, `mkdirat`, `unlinkat`, `renameat`, `renameat2` (flags 0), `fchmod`, `fchmodat`, `fchownat`, `utimensat`, `ftruncate`, `truncate`, `fsync`, `fdatasync`, `getcwd`, `chdir`, `fchdir`, `readlinkat`, `statfs`, `fstatfs` | drawterm's file calls. A relative path with a dirfd is walked from the dirfd's Chan, through a `namec` variant in `src/kern/` that starts at a given Chan, not joined onto the dirfd's `fd2path` string: an fd inherited across a change of personality carries the other view's name, and a string join would resolve it in the wrong view. `stat` is built from a Plan 9 `Dir` (see Users and `stat`). `readlinkat` and `lstat`-style calls see links in trees resolved by [symlinks-in-root](0034-symlinks-in-root.md), and `EINVAL` elsewhere. `utimensat` and `fchownat` become a `wstat`. |
 | Processes | `clone` (without `CLONE_VM`, or with `CLONE_VM` and `CLONE_VFORK`), `fork`, `vfork`, `execve`, `execveat`, `exit`, `exit_group`, `wait4`, `waitid`, `getpid`, `getppid`, `gettid`, `set_tid_address`, `kill`, `tgkill`, `tkill`, `setsid`, `setpgid`, `getpgid`, `getsid` | h9's process model (see Processes) |
 | Memory | `brk`, `mmap`, `munmap`, `mprotect`, `madvise` (`DONTNEED` zeroes, the rest are hints), `mremap` | The VMA layer (see Memory) |
 | Signals | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `rt_sigpending`, `rt_sigsuspend`, `rt_sigtimedwait`, `sigaltstack` | See Signals |
@@ -84,7 +93,7 @@ Every entry is one of three kinds, so `-ENOSYS` always means "not known to h9":
 | Other | `uname`, `getrandom`, `sysinfo`, `getuid` and the other id calls, `umask`, `prctl` (`PR_SET_NAME`, `PR_GET_NAME`, `PR_SET_PDEATHSIG`), `arch_prctl` (amd64 `ARCH_SET_FS`, `ARCH_GET_FS`) | Fixed answers, or the host where it's safe. `uname` is `Linux`, release `6.1.0-h9`, with the machine's architecture; the node name is `sysname`. |
 | Stubbed | `prlimit64` and `getrlimit` (the machine's limits: `--memory` for `RLIMIT_AS`, 1024 files), `setrlimit` (accepted, ignored), `sched_getaffinity` (the `--cpus` count), `sched_yield`, `getpriority`/`setpriority`, `membarrier` (`-EINVAL` for every command but query), `rseq` (`-ENOSYS`, which glibc expects), `set_robust_list` (accepted; see [linux-threads](linux-threads.md)), `setuid` and the other set-id calls (success when the id is unchanged, else `-EPERM`), `chroot`, `mount`, `umount2`, `pivot_root`, `unshare` (`-EPERM`; [dotl](0022-dotl.md) adds `mount -t 9p`), `linkat`, `symlinkat` (`-EPERM`) | |
 
-Calls that need readiness (`poll`, `ppoll`, `pselect6`, `epoll_*`, `eventfd2`) and sockets come in [linux-net](linux-net.md). `fcntl` accepts and records `O_NONBLOCK` here, but reads and writes block until that proposal is built.
+Calls that need readiness (`poll`, `ppoll`, `pselect6`, `epoll_*`, `eventfd2`) and sockets come in [linux-net](linux-net.md). `fcntl` accepts and records `O_NONBLOCK` here, but reads and writes block until that proposal is built. That leaves out more than servers: CPython's `subprocess` with `capture_output` or `communicate()` waits on its pipes with `poll` (`ppoll` on arm64), and Go's runtime opens an epoll fd and an eventfd at its first timer, so both need linux-net.
 
 Error strings map to errno: "file does not exist" is `ENOENT`, "permission denied" is `EACCES`, "interrupted" is `EINTR`, "file already exists" is `EEXIST`, "not a directory" is `ENOTDIR`, "is a directory" is `EISDIR`, "write on closed pipe" is `EPIPE`, and unknown strings are `EIO`. The table lives in one place, shared with [dotl](0022-dotl.md) (see Rationale), and is tested on its own.
 
@@ -108,9 +117,10 @@ Inside the Linux root, the machine's user is uid 0 and gid 0, as in a rootless c
 A Linux address space is a list of VMAs, kept sorted, alongside the existing segments.
 
 - **Lazy pages.** Anonymous VMAs, the heap and the stack get their pages on first touch: a `.fault` exit inside a VMA that allows the access allocates a page, maps it and resumes, as the stack grows today. A fault outside any VMA, or against its permissions, is `SIGSEGV`. A `PROT_NONE` reservation, however large, costs no guest-physical memory. Pages are mapped in chunks of up to 64 KiB where the VMA allows, to keep the backend's region count down.
+- **The host's own copies fault in too.** A `read` into a fresh heap page writes to memory that's inside a VMA but not mapped yet. `guestmem` pages it in before copying, and only a range outside every VMA, or against its permissions, is `EFAULT`.
 - **`brk`** grows a heap VMA after the executable's last segment.
 - **Private file mappings** are read through the kernel into fresh pages: eagerly for small files, or chunk by chunk on fault. `MAP_FIXED` replaces what's there, as musl's and glibc's loaders need.
-- **Shared anonymous mappings** stay shared across `fork`, like segattach's `shared` segments.
+- **Shared anonymous mappings** stay shared across `fork`, like segattach's `shared` segments. None of the prototype's runs (busybox, apk, CPython, pip, Go) made any `MAP_SHARED` mapping at all.
 - **Shared writable mappings of files** are refused with `ENODEV`. drawterm has no page cache to write them back through. Read-only shared file mappings are treated as private.
 - **`fork`** copies the VMAs eagerly, as `rfork` copies segments. Copy-on-write is later performance work.
 - **Limits.** Pages count against `--memory` when they're allocated, not when they're reserved, so a fault past the limit is `SIGSEGV` with a "virtual memory allocation failed" note under `--debug`. Virtual reservations are capped at the 47-bit user range.
@@ -121,8 +131,8 @@ The `vmm` interface (`src/vmm.zig`) and both backends gain:
 
 - **`AddressSpace.unmap(va, len)`** removes any page-aligned range, splitting regions as needed. Today's whole-region `unmap(va)` becomes a call with the region's length.
 - **`AddressSpace.protect(va, len, perms)`** changes the permissions of any page-aligned range of mapped pages, splitting regions as needed.
-- **Region lookup** in both backends is a sorted structure with logarithmic lookup, not a linear scan.
-- **The emulator syncs incrementally:** a change maps, unmaps or re-protects only the affected ranges in each engine, and flushes translated blocks only for ranges that lost execute permission or changed contents under it.
+- **Region lookup** in the HVF backend is a sorted structure with logarithmic lookup, not a linear scan.
+- **The emulator keeps its own page table and runs Unicorn in virtual-TLB mode** (`UC_TLB_VIRTUAL` with a `UC_HOOK_TLB_FILL` hook), over one Unicorn region for all of the backend's guest-physical pages. A change to the address space is an edit to that page table and a TLB flush, not a change to Unicorn's memory map, and translated blocks are flushed only for ranges that lost execute permission or changed contents under it. A first touch inside a VMA can be served in the fill hook, without an exit. The page table has the shape of HVF's guest page tables, so both backends share the address-space code. In the prototype's benchmark, one change plus a pass over every chunk took 1.1 ms with 1,024 chunks and 2.0 ms with 2,048 (against 19 ms and 70 ms with one Unicorn region per chunk), and it grew linearly to 24 ms at 16,384, with a Python fill hook. [zig-interpreter](0019-zig-interpreter.md) needs the same: its software TLB fills from a page table, not a scan of regions.
 - **`Backend.hwcaps()`** returns the guest-visible CPU features, for `AT_HWCAP`, `AT_HWCAP2` and `/proc/cpuinfo`.
 
 A change that removes or narrows access must take effect before the host reuses the pages. With this proposal at most one vCPU runs in a Linux address space at a time (a `vfork` parent waits), so the existing epoch flush at the next run is enough. [linux-threads](linux-threads.md) adds the shootdown that concurrent threads need.
@@ -145,9 +155,9 @@ Notes and signals map both ways:
 
 Linux processes signal each other with `linux: signal N` notes, so a 9front process can also signal one by writing to `/proc/n/note`. A Linux process whose child exits gets `SIGCHLD`, synthesized by h9 when the wait record is queued, unless its `SIGCHLD` action is `SIG_IGN`. A note posted to a 9front process from a Linux one is the note's string for the known signals (`interrupt` for `SIGINT`) and `linux: signal N` otherwise.
 
-`rt_sigaction` handlers, the signal mask and the alternate stack are kept on the process. Delivery happens where notes are delivered today: at the top of the exit loop, and when a blocking call is interrupted, which returns `-EINTR` unless the handler has `SA_RESTART`. Delivery builds an `rt_sigframe` on the user stack, or the alternate stack, and enters the handler with the restorer as the return address. The frame is laid out exactly as Linux's, since libc and debuggers read it:
+`rt_sigaction` handlers, the signal mask and the alternate stack are kept on the process. Delivery happens where notes are delivered today: at the top of the exit loop, and when a blocking call is interrupted, which returns `-EINTR` unless the handler has `SA_RESTART`. Delivery builds an `rt_sigframe` on the user stack, or the alternate stack, and enters the handler with the restorer as the return address: the handler's `sa_restorer` when it set `SA_RESTORER`, and otherwise the vDSO's `__kernel_rt_sigreturn`. musl sets `SA_RESTORER` itself; Go on arm64 doesn't (`_SA_RESTORER = 0` in its runtime), so without the vDSO every Go signal handler would return to address 0. The frame is laid out exactly as Linux's, since libc and debuggers read it:
 
-- **arm64:** `siginfo`, then `ucontext` with the general registers in `sigcontext` and, in its `__reserved` area, an `fpsimd_context` record, an `esr_context` record for faults, and the terminating null record.
+- **arm64:** `siginfo`, then `ucontext` with the general registers in `sigcontext` and, in its `__reserved` area, an `fpsimd_context` record, an `esr_context` record for faults, and the terminating null record, with a frame record (`x29`, `x30`) above it. The prototype built this frame and returned through it, with FP state intact, for musl handlers and for Go's SIGURG preemption.
 - **amd64:** `siginfo`, then `ucontext` with `sigcontext` and a pointer to an `fxsave`-format FP state.
 
 Default actions follow Linux: terminate, ignore (`SIGCHLD`, `SIGURG`, `SIGWINCH`), or stop. Stop and continue (`SIGSTOP`, `SIGTSTP`, `SIGCONT`) are recorded and reported through `wait4` with `WUNTRACED`, but the process keeps running; real job-control stops are an open issue.
@@ -165,23 +175,25 @@ bind /tmp '#λ/tmp'
 bind /mnt/term '#λ/mnt/term'
 ```
 
-exec of an ELF sets the process's `slash` to `#λ`'s root, and exec of an a.out sets it back to the machine's root. The mount table is shared, so a bind or mount made by either personality is seen by both. `dot` is kept across exec, so the working directory survives a change of personality. Paths under `/tmp`, `/mnt/term` (which includes the cwd at `/mnt/term/cwd`) and `/dev/fd` name the same files in both views. The rest of the 9front tree is at `/9` in the Linux view, so `/9/bin/ls` is 9front's `ls`, and a 9front process reaches the Linux tree as `'#λ'`, quoted in rc, or binds it where it likes. The 9front root is read-only, so h9 doesn't bind it anywhere by default. A `getcwd` whose directory is only in the 9front tree is reported under `/9`.
+exec of an ELF sets the process's `slash` to `#λ`'s root, and exec of an a.out sets it back to the machine's root. `slash` is a reference-counted Chan that `rfork` shares (`src/kern/proc.c`), so replacing it at exec changes only the exec'ing process. The `#λ` attach has its path renamed to `/`, as `procinit.c` does for `#/`, so `fd2path` and `getcwd` give Linux paths in the Linux view with no translation. `walk` applies mounts to its starting Chan (`kern/chan.c`), so the union on `#λ`'s root works from `slash`. The mount table is shared, so a bind or mount made by either personality is seen by both. `dot` is kept across exec, so the working directory survives a change of personality. A Chan's path is the name it was reached by in the view that opened it, so an exec that changes personality renames `dot`'s path for the new view: going to Linux, a path under `/tmp` or `/mnt/term` is kept and any other gets a `/9` prefix; going to 9front, `/9` is stripped and any other path gets a `#λ` prefix. Paths under `/tmp`, `/mnt/term` (which includes the cwd at `/mnt/term/cwd`) and `/dev/fd` name the same files in both views. The rest of the 9front tree is at `/9` in the Linux view, so `/9/bin/ls` is 9front's `ls`, and a 9front process reaches the Linux tree as `'#λ'`, quoted in rc, or binds it where it likes. The 9front root is read-only, so h9 doesn't bind it anywhere by default. A `getcwd` whose directory is only in the 9front tree is reported under `/9`.
 
-- **The Linux root.** `--linux-root DIR` names it. It's read-only by default and under the same access rules as the 9front root: `--writable DIR` makes it writable, and [overlay](0011-overlay.md)'s `--write=overlay` covers it once that's built. It's a contained tree under [symlinks-in-root](0034-symlinks-in-root.md), so Alpine's absolute links, such as `/bin/ls` to `/bin/busybox`, resolve inside it.
+- **The Linux root.** `--root DIR` names it, as for a 9front root (see CLI and API). It's read-only by default and under the same access rules as the 9front root: `--writable DIR` makes it writable, and [overlay](0011-overlay.md)'s `--write=overlay` covers it once that's built. It's a contained tree under [symlinks-in-root](0034-symlinks-in-root.md), so Alpine's absolute links, such as `/bin/ls` to `/bin/busybox`, resolve inside it.
 - **`/dev`:** `null`, `zero`, `full`, `random`, `urandom`, served by devlinux; `tty` and `console`, which open the machine's console; `fd`, which is devdup; and `stdin`, `stdout` and `stderr` as `fd/0` to `fd/2`.
-- **`/proc`:** `/proc/self`, `/proc/thread-self` and `/proc/<pid>/{exe,cwd,maps,fd,stat,status,cmdline,environ}`, plus `/proc/cpuinfo`, `/proc/meminfo`, `/proc/stat`, `/proc/uptime`, `/proc/mounts` (a single root entry) and `/proc/sys/kernel/random/uuid`. Pids are the machine's pids, so `/proc/<pid>` shows 9front processes too, with their a.out as `exe`. The `exe`, `cwd` and `fd/N` entries read as symlinks to guest paths.
+- **`/proc`:** `/proc/self`, `/proc/thread-self` and `/proc/<pid>/{exe,cwd,maps,fd,stat,status,cmdline,environ}`, plus `/proc/cpuinfo`, `/proc/meminfo`, `/proc/stat`, `/proc/uptime`, `/proc/mounts` (a single root entry), `/proc/sys/kernel/random/uuid` and `/proc/sys/vm/overcommit_memory` (`0`). `/proc/<pid>/fd` is listable, since CPython lists `/proc/self/fd` to close fds before exec. Pids are the machine's pids, so `/proc/<pid>` shows 9front processes too, with their a.out as `exe`. The `exe`, `cwd` and `fd/N` entries read as symlinks to guest paths.
 - **`/sys`:** absent.
 - **`--print`** shows the Linux view's binds, and the Linux root under `access:`.
 
-Without `--linux-root`, a Linux binary run from a host path (`h9 ./prog`) gets the same view over an empty tree: `/9`, `/dev`, `/proc`, `/tmp` and `/mnt/term`.
+Without a Linux root, a Linux binary run from a host path (`h9 ./prog`) gets the same view over an empty tree: `/9`, `/dev`, `/proc`, `/tmp` and `/mnt/term`.
+
+- **`/9` is there only when the machine has a 9front root.** Nothing in the personality reads the 9front tree: the Linux view's devices come from devlinux and the kernel. A machine with only a Linux root has no `/9`, and execing a 9front binary fails with `ENOENT` like any missing file. `/9` is what mixed pipelines and execing `rc` need.
 
 **Environment.** A Linux process keeps its environment in its own memory, as Linux does. Going from 9front to Linux, execve builds envp from `/env`, turning rc lists into space-separated strings. Going from Linux to 9front, it writes envp into a new Egrp, so `rc` sees `$path` and friends as usual. `PATH` and `path` are kept separately: a Linux process starts with `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` unless the 9front side set `PATH`.
 
 ### CLI and API
 
-- **`--linux-root DIR`**: the Linux root.
-- **`Machine.Options.linux_root`**: the same, for embedders.
-- **Program resolution:** an absolute path or a bare name is resolved in the Linux view when `--linux-root` is given, through `PATH`, and in the 9front view otherwise. `--rc` always means 9front's rc. So `h9 --linux-root alpine ls` runs busybox's `ls`, `h9 --linux-root alpine /9/bin/ls` runs 9front's, and `h9 ls` is unchanged. After that, each personality searches only its own path.
+- **`--root DIR` takes either kind of tree,** and h9 tells which by looking: a Linux tree has `/etc/os-release` or a `/lib/ld-*` loader, and a 9front tree has `/rc/bin` or `/$objtype/bin`. A 9P root costs a walk or two to check. `--root` may be given twice, once for each kind. When only a Linux tree is given, the 9front root comes from the usual lookup (`H9ROOT`, then the source tree's), and the machine has none if that finds nothing. A tree that's neither is used as a 9front root, as today.
+- **`Machine.Options.linux_root`**: the Linux root, for embedders, who name it rather than having it detected.
+- **Program resolution:** an absolute path or a bare name is resolved in the Linux view when the machine has a Linux root, through `PATH`, and in the 9front view otherwise. `--rc` always means 9front's rc. So `h9 --root alpine ls` runs busybox's `ls`, `h9 --root alpine /9/bin/ls` runs 9front's, and `h9 ls` is unchanged. After that, each personality searches only its own path.
 - **Exit codes:** through [exit-status](0033-exit-status.md).
 
 ## Rationale
@@ -198,6 +210,10 @@ h9's host process already sits where the Sentry would.
 
 **A Linux microVM beside h9.** It's the simplest way to run Linux, and Linux processes there are complete. But they aren't part of the machine: no shared namespace, no pipes to 9front processes, no 9P mounts in their file tree, and none of h9's sandbox policy. If that's all that's wanted, a microVM is the better tool, and h9 doesn't need this proposal.
 
+**Detecting the root's kind, rather than a `--linux-root` flag.** A Linux tree and a 9front tree are easy to tell apart, and most runs want one or the other, so `h9 --root alpine sh` needs nothing more. A separate `--linux DIR` flag was the alternative: it's explicit, but it's a second way to name a root, and the two-root case is covered by giving `--root` twice.
+
+**A real Linux kernel in a VM, beside the personality.** A sibling mode could boot a stock kernel on the same hypervisor, with its root served from h9's namespace over 9P2000.L ([dotl](0022-dotl.md)). It would get exact semantics for everything this proposal and its successors stub or leave out (io_uring, writable shared mappings, `/sys`), but its processes would be outside h9's process model, and it needs a full-guest vmm (EL1, a timer, an interrupt controller, virtio-mmio) that Unicorn can't provide. It's left for its own proposal, as a fallback for programs the personality can't serve rather than a replacement.
+
 **One namespace, two roots, rather than binding the Linux root over `/`.** A bind over `/` in the shared Pgrp would change `/` for 9front processes too, so `rc` would find busybox's tools instead of its own and lose `/bin/rc` itself. A separate Pgrp for Linux processes (`RFNAMEG`) would keep 9front's view intact, but then a mount made by either personality would be invisible to the other, which loses the point. A per-process `slash`, as `chroot` gives, keeps one mount table and two views of it. devlinux's mount points mean the view's binds never need directories to exist in a read-only Linux root.
 
 **`/tmp` and `/mnt/term` shared by path.** A pipeline that writes a file in one personality and reads it in the other needs the path to mean the same thing in both. The cwd lives under `/mnt/term`, so it survives a change of personality.
@@ -210,14 +226,16 @@ h9's host process already sits where the Sentry would.
 
 **The `stat` and errno mapping, shared with dotl.** [dotl](0022-dotl.md) needs the same mapping for 9P2000.L. Whichever is built first creates it as `src/dotl/attr.zig`, the path dotl names, and the other uses it. Neither depends on the other.
 
-**No vDSO, for now.** Every `clock_gettime` is an exit. A vDSO that reads the counter at EL0 would remove that, but it's an optimisation, and it fixes the clock's layout into guest memory. It's left for later work.
+**A vDSO with only `__kernel_rt_sigreturn`, for now.** Go's arm64 runtime needs a signal return trampoline from the kernel, and a vDSO is where gdb and libunwind expect it; a bare trampoline page would work for Go but not for them. Every `clock_gettime` is still an exit, and Go makes a lot of them (594 of about 1,400 calls in the prototype's Go hello). Exporting `__kernel_clock_gettime` that reads the counter at EL0 would remove those, but it fixes the clock's layout into guest memory, so it's left for later work.
+
+**The emulator in virtual-TLB mode, not incremental region sync.** Syncing only the changed ranges was the first plan, but the cost is inside Unicorn: every region change rebuilds its memory map, so changing fewer regions still pays for all of them.
 
 ## Compatibility
 
-- **New CLI flag** `--linux-root DIR`, and a new `Machine.Options` field.
+- **`--root` accepts a Linux tree,** and may be given twice; a new `Machine.Options` field. A tree that's neither kind is a 9front root, as today.
 - **New device** `#λ`. It's never masked: it serves nothing from the host itself, and what's bound into it is under the policy.
 - **Exit codes:** an ELF binary for the wrong architecture is exit 126, like a bad a.out. Numeric statuses come from [exit-status](0033-exit-status.md).
-- **vmm interface:** `unmap` takes a length, and `protect` and `hwcaps` are new (see vmm changes). The `none` backend gains stubs.
+- **vmm interface:** `unmap` takes a length, and `protect` and `hwcaps` are new (see vmm changes). The `none` backend gains stubs. The emulator's switch to virtual-TLB mode is internal to it.
 - **9front processes** see no change unless they exec a Linux binary or use `#λ`.
 
 ## Security
@@ -234,8 +252,9 @@ h9's host process already sits where the Sentry would.
 Integration cases tagged `[linux-personality]`. The fixtures are static and dynamic musl binaries and an Alpine minirootfs, fetched by `scripts/fetch.sh` at a pinned release.
 
 1. **Static binaries:** `h9 ./hello-musl` prints hello on HVF and on the emulator, for arm64, and for amd64 on the emulator.
-2. **busybox:** `h9 --linux-root alpine sh -c 'ls / | wc -l'` runs busybox's shell, which uses `vfork`. A mixed pipeline works both ways: `h9 --linux-root alpine sh -c '/9/bin/ls /9/bin | wc -l'` and `h9 --linux-root alpine --rc "ls /bin | '#λ/bin/busybox' wc -l"`.
-3. **Dynamic binaries:** Alpine's dynamically linked tools (`apk --version`, `python3 -c 'print(1)'`) run.
+2. **busybox:** `h9 --root alpine sh -c 'ls / | wc -l'` runs busybox's shell, which uses `vfork`. A mixed pipeline works both ways: `h9 --root alpine sh -c '/9/bin/ls /9/bin | wc -l'` and `h9 --root alpine --rc "ls /bin | '#λ/bin/busybox' wc -l"`.
+3. **Dynamic binaries:** Alpine's dynamically linked tools (`apk --version`, `python3 -c 'print(1)'`) run. CPython scripts that use `subprocess` with pipes need [linux-net](linux-net.md)'s `poll`.
+4. **The emulator is usable for allocation-heavy programs:** `python3 -m pip --version` runs on the emulator within a few times its HVF time.
 
 Cases:
 
@@ -251,12 +270,16 @@ Cases:
 - `test "a bind made by a 9front process is seen by a Linux one [linux-personality]"`
 - `test "cwd survives exec across personalities [linux-personality]"`
 - `test "/proc/cpuinfo reports --cpus, not the host [linux-personality]"`
+- `test "--root detects a Linux tree; no /9 without a 9front root [linux-personality]"`
+- `test "openat with a dirfd inherited from a 9front process [linux-personality]"`
+- `test "failed execve returns ENOENT to the caller [linux-personality]"`
+- `test "arm64 handler without SA_RESTORER returns through the vDSO [linux-personality]"`
 
 ## Implementation
 
-1. A personality on the process record, the dispatch switch in `Machine.loop`, the ELF loader, the stack and auxv, `Backend.hwcaps`. Static musl hello, on arm64 and then amd64.
-2. File, process and terminal calls; the errno and `stat` mapping; exit statuses; `wait4`; `vfork`; signals for the common notes; devlinux and the Linux view; `--linux-root`. busybox and the mixed pipelines. Needs [symlinks-in-root](0034-symlinks-in-root.md).
-3. The vmm range `unmap` and `protect`, sorted regions and the emulator's incremental sync; the VMA layer with lazy pages; `PT_INTERP`. Dynamic binaries.
+1. A personality on the process record, the dispatch switch in `Machine.loop`, the ELF loader, the stack and auxv, the minimal vDSO, `Backend.hwcaps`. Static musl hello, on arm64 and then amd64.
+2. File, process and terminal calls, with amd64's older forms; the errno and `stat` mapping; exit statuses; `wait4`; `vfork`; signals for the common notes; devlinux and the Linux view, with Chan-relative dirfd walks; root detection in `--root`. busybox and the mixed pipelines. Needs [symlinks-in-root](0034-symlinks-in-root.md).
+3. The vmm range `unmap` and `protect`, sorted regions on HVF and the emulator's virtual-TLB mode; the VMA layer with lazy pages, faulted in by `guestmem` too; `PT_INTERP`. Dynamic binaries, and `pip --version` on the emulator.
 4. DESIGN.md gets a "Linux personality" section.
 
 ## Open issues
