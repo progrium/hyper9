@@ -42,6 +42,8 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [linux-threads](design/0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](design/0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [multicall](design/0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
+| [audio](design/audio.md) | draft | needs browser-host | Audio (--audio) |
+| [browser-gfx](design/browser-gfx.md) | draft | needs browser-host | Graphics on the browser host |
 | [builtin-root](design/builtin-root.md) | draft |  | A built-in root |
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
@@ -87,6 +89,8 @@ flowchart LR
   p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
   p_multicall["#35;64 multicall<br/>implemented"]:::implemented
+  p_audio["audio<br/>draft"]:::draft
+  p_browser_gfx["browser-gfx<br/>draft"]:::draft
   p_builtin_root["builtin-root<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
@@ -123,6 +127,9 @@ flowchart LR
   p_linux_personality --> p_linux_threads
   p_linux_net --> p_linux_threads
   p_linux_personality --> p_linux_net
+  p_browser_host --> p_audio
+  p_browser_host --> p_browser_gfx
+  p_gfx --> p_browser_gfx
   p_multicall --> p_builtin_root
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
