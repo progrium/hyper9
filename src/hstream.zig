@@ -416,7 +416,8 @@ fn newStream(owner: usize, conv: ?u8) ?*Stream {
     for (&table, 0..) |*slot, i| {
         if (slot.* != null) continue;
         gens[i] +%= 1;
-        s.id = gens[i] *% max_streams + @as(u32, @intCast(i));
+        // Kept below 2^31, since C sees an id as a long, which is 32 bits on Windows.
+        s.id = (gens[i] *% max_streams + @as(u32, @intCast(i))) & 0x7fff_ffff;
         slot.* = s;
         return s;
     }
@@ -896,7 +897,7 @@ fn h9_hstream_clone(mach: ?*anyopaque, err: [*]u8) callconv(.c) c_long {
     lockTable();
     s.opens = 1;
     table_lock.unlock();
-    return s.id;
+    return @intCast(s.id);
 }
 
 fn h9_hstream_convno(id: c_ulong) callconv(.c) c_int {
@@ -909,7 +910,7 @@ fn h9_hstream_conv(mach: ?*anyopaque, n: c_int) callconv(.c) c_long {
     const owner = @intFromPtr(mach);
     lockTable();
     defer table_lock.unlock();
-    for (table) |slot| if (slot) |s| if (s.owner == owner and s.listed and s.conv != null and s.conv.? == n) return s.id;
+    for (table) |slot| if (slot) |s| if (s.owner == owner and s.listed and s.conv != null and s.conv.? == n) return @intCast(s.id);
     return -1;
 }
 
