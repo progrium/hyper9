@@ -3887,6 +3887,7 @@ test "a 9P root serving 9box under every name [64]" {
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings(host.out, r.out);
     try std.testing.expectEqualStrings("/bin/9box\n/bin/sed\nx b\nboxed\n", r.out);
+}
 
 test "without --gfx, #i, #m and #b are masked [15]" {
     const e = try env(@src());
