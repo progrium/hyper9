@@ -136,6 +136,7 @@ Every field but `stdio` has a default:
 | `dump_on_fault` | `bool` | `false` | On a fault, prints the registers and a symbolized PC to `stdio.err`. |
 | `ns` | `?[]const u8` | none | A namespace file (newns syntax) to replay after the policy's namespace is built. It's a *guest* path, so a relative one is in the guest's cwd. |
 | `owned_vcpus` | `?u32` | backend's | For tests of the vCPU pool; leave it alone. |
+| `gfx` | `?Machine.Gfx` | none | A host window for this machine, as `--gfx` gives: `.{}`, or `.{ .clipboard = false }` for `--gfx=noclip` and `.scale` for `--gfx-scale`. Only one machine in the process can have it. See [Graphics](#graphics). |
 | `signals` | `?*Machine.Signals` | none | Lets you deliver Ctrl-C and hangup to a running machine. |
 | `stdio` | `Machine.Stdio` | required | The console's host side: `in`, `out`, `err` and callbacks. |
 
@@ -144,7 +145,7 @@ it (paths, `env`, policy lists) must outlive the machine, not just `init`.
 
 `Machine.init` fails with `vmm.CreateError` (the backend couldn't make a VM:
 `HypervisorUnavailable`, `BackendNotBuilt`, `WrongArch`, `OutOfGuestMemory`
-and so on) or `PolicyConflict`. For the reason behind a conflict, call
+and so on), `PolicyConflict`, or one of `h9.gfx.Error` for `gfx` (`GfxNotBuilt`, `GfxInUse`, `GfxUnavailable`). For the reason behind a conflict, call
 `Machine.initExplained(gpa, io, opts, &msg)` instead.
 
 To see what a set of options will build without making a VM, which is what
@@ -316,6 +317,18 @@ fall back on any other failure. Check
 
 `h9.vmm.Kind.built(.hvf)`, `.built(.kvm)` and `.built(.emu)` tell you at run time what's
 compiled in, and `h9.vmm.host_arch` is the architecture that runs natively.
+
+### Graphics
+
+`Options.gfx` gives the machine the process's one window, drawn by the GUI
+backend built in with `-Dgfx` (`h9.gfx.backend`; Cocoa on macOS and Win32 on
+Windows by default). Closing the window calls `signals.hangup`, so pass
+`signals` if you want to handle it; without them the machine gets its own.
+On macOS AppKit needs the main thread, so call `h9.gfx.main(work, ctx)` from
+`main` and create machines in `work`, which runs on another thread; the
+process exits with `work`'s return value. Elsewhere `h9.gfx.main` just calls
+`work`. `h9.gfx.unavailable()` says why there's no display, if there isn't
+one.
 
 ## Several machines in one process
 
