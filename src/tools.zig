@@ -120,7 +120,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
     try checkGfx(w);
 
     const root = o.root orelse {
-        if (o.root_arg) |r| try w.print("root {s}: {s}\n", .{ r, o.root_err }) else try w.writeAll("root: none (use --root DIR or $H9ROOT; scripts/mkroot.py builds one)\n");
+        if (o.root_arg) |r| try w.print("root {s}: {s}\n", .{ r, o.root_err }) else try w.writeAll("root: none (use --root DIR or $H9ROOT; zig build mkroot builds one)\n");
         return exit_failed;
     };
     try w.print("root {s}: ", .{switch (root) {

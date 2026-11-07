@@ -159,7 +159,7 @@ Compile a POSIX C program:
 h9 pcc -o hello hello.c && h9 ./hello
 ```
 
-Build for every architecture (needs a root made with `mkroot.py --arch 386,amd64`):
+Build for every architecture (needs a root made with `zig build mkroot -- --arch 386,amd64`):
 
 ```sh
 h9 --rc 'for(objtype in arm64 amd64 386) mk'

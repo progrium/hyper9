@@ -6,7 +6,7 @@
 //! thing it can write, and its mkfile builds the commands listed in
 //! src/9box/slim with their
 //! globals renamed and links them into one binary (src/9box/mkfile). The
-//! source is the root's /sys/src (scripts/mkroot.py --src) or, without one,
+//! source is the root's /sys/src (zig build mkroot -- --src) or, without one,
 //! the fetched checkout, shared read-only and bound at /sys/src.
 //!
 //! Then the tree is assembled on the host:
@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !u8 {
     var src_dir = cwd.openDir(io, src9box, .{ .iterate = true }) catch |e| fail("{s}: {t}", .{ src9box, e });
     defer src_dir.close(io);
     src_dir.access(io, set, .{}) catch fail("no set {s} in {s}", .{ set, src9box });
-    var root_dir = cwd.openDir(io, root, .{}) catch |e| fail("no root tree at {s} ({t}); run scripts/mkroot.py or pass -Droot", .{ root, e });
+    var root_dir = cwd.openDir(io, root, .{}) catch |e| fail("no root tree at {s} ({t}); run zig build mkroot or pass -Droot", .{ root, e });
     defer root_dir.close(io);
     var names: std.ArrayList([]const u8) = .empty;
     if (mode == .copy) {
@@ -180,7 +180,7 @@ fn build9box(arena: std.mem.Allocator, io: std.Io, h9: []const u8, root: []const
     const o = objLetter(arch);
     const own_src = if (root_dir.access(io, "sys/src/cmd/mkfile", .{})) true else |_| false;
     if (!own_src) cwd.access(io, try std.fs.path.join(arena, &.{ syssrc, "cmd/mkfile" }), .{}) catch
-        fail("the root has no /sys/src and there's no checkout at {s}; run scripts/fetch.sh, or scripts/mkroot.py --src", .{syssrc});
+        fail("the root has no /sys/src and there's no checkout at {s}; run scripts/fetch.sh, or zig build mkroot -- --src", .{syssrc});
 
     // A fresh build directory holding a copy of src/9box.
     cwd.deleteTree(io, build) catch {};

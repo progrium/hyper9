@@ -28,7 +28,7 @@ This was part of milestone M10 in DESIGN.md, before milestones became proposals 
 2. **Partitions:** `diskparts` runs `fdisk -p` on each disk's `data` (the MBR or GPT) and `prep -p` on its `plan9` partition (9front's own partition table, in the partition's second sector), and writes the resulting `part name start end` lines to the disk's `ctl`. devsd then serves each partition as a file beside `data`: `plan9`, `9fat`, `fs`, `fscache`, `fsworm`, `nvram`.
 3. **The file server** runs over a partition and posts to `/srv`: gefs or hjfs over `fs`, cwfs over `fscache` and `fsworm`.
 4. **The root** is a mount of the posted service.
-The pinned release's arm64 image, which `scripts/fetch.sh` downloads and `scripts/mkroot.py` boots in QEMU to build the root tree, is such a disk: `mkroot.py` boots it with `nobootprompt=local!/dev/sdF0/fs`.
+The pinned release's arm64 image, which `scripts/fetch.sh` downloads and `zig build mkroot` boots in QEMU to build the root tree, is such a disk: `tools/mkroot.zig` boots it with `nobootprompt=local!/dev/sdF0/fs`.
  
 ### h9 today
  

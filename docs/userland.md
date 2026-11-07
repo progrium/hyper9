@@ -249,7 +249,7 @@ Two things to know:
 
 ## 4. A slim 9front
 
-> Needs the 9front root tree, from `scripts/mkroot.py`. Not yet run.
+> Needs the 9front root tree, from `zig build mkroot`. Not yet run.
 
 The stock tree is about 250 MB. If you only need rc and a handful of
 commands, copy them into a tree of their own. 9front's programs are

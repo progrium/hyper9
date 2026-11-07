@@ -798,8 +798,8 @@ pub fn build(b: *std.Build) void {
     const root = b.option([]const u8, "root", "9front root tree for the demos and integration tests (default .local/9front/root)") orelse
         b.pathFromRoot(".local/9front/root");
     const h9_bin = b.getInstallPath(.bin, exe.out_filename);
-    // The self-host demos and cases need /sys/src: the root's (scripts/mkroot.py
-    // --src), or else this checkout's, which scripts/fetch.sh makes at the
+    // The self-host demos and cases need /sys/src: the root's (zig build
+    // mkroot -- --src), or else this checkout's, which scripts/fetch.sh makes at the
     // root's revision.
     const src_dir: ?[]const u8 = b.option([]const u8, "src", "9front source's sys directory for the self-host cases when the root has no /sys/src (default .local/src/9front/sys)") orelse blk: {
         const d = b.pathFromRoot(".local/src/9front/sys");
@@ -1000,6 +1000,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_design.addArgs(args);
     b.step("design", "Run the design tool: zig build design -- <command> (help lists them)").dependOn(&run_design.step);
 
+    // Builds the 9front root tree from the pinned image (tools/mkroot.zig),
+    // run from the repository root: zig build mkroot -- [--force] [--src]
+    // [--arch arm64,386,amd64].
+    const mkroot_tool = b.addExecutable(.{
+        .name = "mkroot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mkroot.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_mkroot = b.addRunArtifact(mkroot_tool);
+    run_mkroot.setCwd(b.path("."));
+    run_mkroot.has_side_effects = true;
+    run_mkroot.stdio = .inherit;
+    if (b.args) |args| run_mkroot.addArgs(args);
+    b.step("mkroot", "Build the 9front root tree in .local/9front/root: zig build mkroot -- [--force] [--src] [--arch arm64,386,amd64]").dependOn(&run_mkroot.step);
+
     const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     linkUnicorn(mod_tests); // exe_tests shares exe's root module, already linked
@@ -1052,6 +1069,7 @@ pub fn build(b: *std.Build) void {
     const design_tests = b.addRunArtifact(b.addTest(.{ .root_module = design_tool.root_module }));
     design_tests.setCwd(b.path("."));
     test_step.dependOn(&design_tests.step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mkroot_tool.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
     // HVF needs the entitlement, so the test binary is signed like h9.
     const run_backend_tests = b.addRunArtifact(backend_tests);
