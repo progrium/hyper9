@@ -1,12 +1,12 @@
 Warnings only: slug references to a filed proposal, in depends and in a
-test tag, a draft slug starting with a digit, and a README table that's
-out of date. The baseline (id 0) has no issue, so its slug isn't flagged,
+test tag, and a draft slug starting with a digit. A stale design/STATUS.md
+isn't read as a proposal or warned about, since only main regenerates it.
+The baseline (id 0) has no issue, so its slug isn't flagged,
 and a filed proposal's slug may start with a digit.
 
 warning: design/gfx.md:7: `devsrv` is #12 now
 warning: tests/integration.zig:1: tag `devsrv` is #12 now
 warning: design/9p-websocket.md: slug `9p-websocket` starts with a digit, so the draft sorts among the filed proposals; start it with a letter
-warning: README.md: the proposal table is out of date
 
 -- design/0000-baseline.md --
 ---
@@ -61,9 +61,7 @@ test "ramfs [devsrv]" {
 }
 test "echo [baseline]" {
 }
--- README.md --
-# h9
+-- design/STATUS.md --
+# Proposal status
 
-<!-- design:begin (zig build design -- readme) -->
-stale
-<!-- design:end -->
+stale, with no frontmatter

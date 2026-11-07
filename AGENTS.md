@@ -24,7 +24,7 @@
 - Add a dependency you discover to the proposal's `depends` in the same PR, and say so.
 - The PR that finishes a proposal updates `DESIGN.md` to describe what was built and sets `status: implemented`. `DESIGN.md` describes only what's built.
 - Bug fixes, workarounds and refactors that don't change behavior need no proposal; explain them in code comments and commit messages.
-- Run `zig build design -- check` before opening a PR, and `zig build design -- readme` when a proposal's status or dependencies change.
+- Run `zig build design -- check` before opening a PR. Don't run `zig build design -- status` or commit `design/STATUS.md` in a PR: a workflow regenerates it on main after each merge, so PRs don't conflict over it.
 
 ## Validate changes
 
