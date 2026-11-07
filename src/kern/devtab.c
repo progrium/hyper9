@@ -14,7 +14,17 @@ extern Dev pipedevtab;
 extern Dev ssldevtab;
 extern Dev tlsdevtab;
 extern Dev mousedevtab;
+#ifdef H9_GFX_NONE
 extern Dev drawdevtab;
+#define h9drawdevtab drawdevtab
+#define h9consdevtab consdevtab
+#define h9kbddevtab kbddevtab
+#else
+/* devdraw opening the screen lazily, and devcons's snarf limited to the machine with it (gfx.c) */
+extern Dev h9drawdevtab;
+extern Dev h9consdevtab;
+extern Dev h9kbddevtab;	/* devkbd, serving kbdfs's format */
+#endif
 extern Dev ipdevtab;
 extern Dev fsdevtab;
 extern Dev mntdevtab;
@@ -33,18 +43,18 @@ extern Dev hstreamdevtab;
 
 Dev *devtab[] = {
 	&rootdevtab,
-	&consdevtab,
+	&h9consdevtab,
 	&pipedevtab,
 	&ssldevtab,
 	&tlsdevtab,
 	&mousedevtab,
-	&drawdevtab,
+	&h9drawdevtab,
 	&ipdevtab,
 	&fsdevtab,
 	&mntdevtab,
 	&lfddevtab,
 	&audiodevtab,
-	&kbddevtab,
+	&h9kbddevtab,
 #ifdef H9_HOSTCMD
 	&cmddevtab,	/* -Dhost-cmd only */
 #endif

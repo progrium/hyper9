@@ -40,8 +40,8 @@ LOCAL = os.path.join(REPO, ".local")
 # Top-level directories the 9front kernel supplies through #/ rather than the
 # disk. h9 binds devices onto them, so they must exist in the host tree.
 MOUNT_POINTS = [
-    "bin", "boot", "dev", "env", "fd", "mnt", "mnt/term", "mnt/term/cwd", "mnt/wsys", "n",
-    "net", "net.alt", "proc", "root", "shr", "srv", "tmp",
+    "bin", "boot", "dev", "env", "fd", "mnt", "mnt/temp", "mnt/term", "mnt/term/cwd", "mnt/wsys",
+    "n", "net", "net.alt", "proc", "root", "shr", "srv", "tmp",
 ]
 # On-disk directories left out of the export: dist holds installer payloads.
 EXCLUDE = ["dist"]
@@ -251,8 +251,12 @@ def main():
         if not shutil.which(tool):
             die("%s not found" % tool)
     if os.path.exists(dest) and not force:
+        # An existing tree may predate a mount point (rio's /mnt/temp,
+        # design/0015-gfx.md).
+        for d in MOUNT_POINTS:
+            os.makedirs(os.path.join(dest, d), exist_ok=True)
         if not arches:
-            log("%s exists (--force to rebuild)" % os.path.relpath(dest, REPO))
+            log("%s exists (--force to rebuild); mount points added" % os.path.relpath(dest, REPO))
             return
         log("%s exists; adding %s" % (os.path.relpath(dest, REPO), ",".join(arches)))
         for a in arches:
