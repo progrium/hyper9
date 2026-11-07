@@ -45,6 +45,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [ci](design/ci.md) | draft |  | Continuous integration |
 | [hide-host-paths](design/hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](design/host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
+| [host-cmd](design/host-cmd.md) | draft |  | Rethinking host commands |
 | [host-sandbox](design/host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](design/host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](design/host-srv.md) | draft |  | Posting host connections to /srv |
@@ -89,6 +90,7 @@ flowchart LR
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
+  p_host_cmd["host-cmd<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
@@ -172,6 +174,7 @@ zig build embed    # builds docs/embedding/embed.zig, the embedding guide's exam
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
 zig build proposal -Dp=baseline  # one proposal's demos and integration cases (by slug or id)
 zig build design -- check        # validate design/ and the test tags (also list, ready, graph, new, file)
+zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
@@ -382,7 +385,8 @@ factotum and plumber run. Machines in one host process can't see each
 other's `/srv`, and what's posted is closed when the machine ends.
 
 h9's own commands, the small rc scripts that wrap h9's devices (such as
-`wsmount` for 9P over WebSocket), are built into the h9 binary from
+`wsmount` for 9P over WebSocket, and `hcmd`, which runs a host command
+through `#C` under `--host-cmd` in builds with `-Dhost-cmd`), are built into the h9 binary from
 [src/guest/](src/guest) and served read-only by `#H`. The namespace binds
 `#H/bin` after the root's `/bin`, so they're on the path, and a root command
 of the same name wins. `--no-guest-tools` leaves the bind out and masks
@@ -451,7 +455,7 @@ h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these na
 | `--net-allow PATTERN` | Repeatable egress allowlist of dial strings, `proto!host!port`: `tcp!10.0.0.0/8!564`, `udp!10.0.0.53!53`, `tcp!*.example.com!443`. With any pattern, every connect and every `/net/cs` name lookup must match one |
 | `--memory SIZE`, `--timeout DURATION` | Cap guest memory (`512m`); post `hangup` after a deadline (`30s`, `1m`) and stop the machine 2 s later |
 | `--pids N`, `--cpus N` | Cap live processes (rfork fails with "no procs"); cap vCPUs running guest code at once |
-| `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd |
+| `--host-fs`, `--host-cmd` | Show the whole host read-only at `/mnt/term`; unmask devcmd (`-Dhost-cmd` builds only) |
 | `--no-guest-tools` | Leave out `#H/bin`, h9's own commands, and mask `#H` |
 | `--print`, `--strict` | Print the plan and exit; refuse (exit 2) capabilities this build can't enforce |
 
@@ -509,7 +513,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
 | `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
-| `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig` |
+| `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. `src/guest-hostcmd/` adds `hcmd` under `-Dhost-cmd` |
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |

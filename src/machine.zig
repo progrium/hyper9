@@ -599,6 +599,9 @@ pub const Machine = struct {
         /// kernel calls. Safe from any thread.
         fn stopAll(j: *Job) void {
             j.stopping.store(true, .release);
+            // Host commands die with the machine. A process reading one's
+            // output waits in a host read no interrupt reaches; this ends it.
+            if (j.mach.load(.acquire)) |mc| mc.endHostCmds();
             j.lockSpin();
             defer j.lock.unlock();
             for (j.procs.items) |p| {
