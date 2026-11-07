@@ -212,7 +212,8 @@ pub fn main(init: std.process.Init) !u8 {
     };
     defer machine.deinit();
     if (cfg.backend == .auto and machine.backend.kind() == .emu) {
-        std.debug.print("h9: warning: no usable hypervisor; using the emulator\n", .{});
+        const why = h9.vmm.whyUnavailable(.auto) orelse "no usable hypervisor";
+        std.debug.print("h9: warning: {s}; using the emulator\n", .{why});
     }
 
     const status = machine.run(prog, argv) catch |err| {

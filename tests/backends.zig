@@ -1695,3 +1695,53 @@ test "guest_tools = false leaves #H/bin off /bin and masks #H [32]" {
     }
     if (ran == 0) return error.SkipZigTest;
 }
+
+test "KVM reuses destroyed vCPUs past its limit, with none of the last user's state [16]" {
+    const gpa = std.testing.allocator;
+    const arch = vmm.host_arch orelse return error.SkipZigTest;
+    var b = vmm.create(gpa, std.testing.io, .kvm, .{ .arch = arch }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return error.SkipZigTest,
+        else => return e,
+    };
+    defer b.destroy();
+    const max = try b.maxVcpus();
+    // KVM counts every vCPU a VM ever created against its limit.
+    var i: u32 = 0;
+    while (i < max + 4) : (i += 1) {
+        var v = try b.createVcpu();
+        defer v.destroy();
+        var x: vmm.Extra = undefined;
+        try v.getExtra(&x);
+        const init: vmm.Extra = .initExec(arch);
+        var u: vmm.Ureg = undefined;
+        v.getUreg(&u);
+        switch (x) {
+            .arm64 => |*a| {
+                try std.testing.expectEqualDeep(init.arm64, a.*);
+                try std.testing.expectEqualDeep(arm64Zero(), u.arm64);
+                a.v[3] = 0x1234;
+                a.fpcr = 1 << 24;
+                a.tls = 0xdead0000;
+                u.arm64.r[5] = 77;
+            },
+            .amd64 => |*a| {
+                try std.testing.expectEqual(init.amd64.fx.fcw, a.fx.fcw);
+                try std.testing.expectEqual(init.amd64.fx.mxcsr, a.fx.mxcsr);
+                try std.testing.expectEqualDeep(init.amd64.fx.xmm, a.fx.xmm);
+                try std.testing.expectEqual(@as(u64, 0), a.tls);
+                try std.testing.expectEqual(@as(u64, 0), u.amd64.bx);
+                a.fx.xmm[3] = 0x1234;
+                a.fx.fcw = 0x027f;
+                a.tls = 0xdead0000;
+                u.amd64.bx = 77;
+            },
+            .i386 => unreachable,
+        }
+        try v.setExtra(&x);
+        v.setUreg(&u);
+    }
+}
+
+fn arm64Zero() vmm.arm64.Ureg {
+    return .{};
+}

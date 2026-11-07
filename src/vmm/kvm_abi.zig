@@ -47,6 +47,8 @@ pub const SET_SIGNAL_MASK = iow(0x8b, SignalMask);
 pub const GET_FPU = ior(0x8c, Fpu);
 pub const SET_FPU = iow(0x8d, Fpu);
 pub const SET_CPUID2 = iow(0x90, Cpuid2);
+pub const GET_XSAVE = ior(0xa4, Xsave);
+pub const SET_XSAVE = iow(0xa5, Xsave);
 pub const GET_ONE_REG = iow(0xab, OneReg);
 pub const SET_ONE_REG = iow(0xac, OneReg);
 pub const ARM_VCPU_INIT = iow(0xae, VcpuInit);
@@ -220,6 +222,14 @@ pub const Fpu = extern struct {
         std.debug.assert(@sizeOf(Fpu) == 416);
     }
 };
+
+/// struct kvm_xsave: the XSAVE image, its first 512 bytes in FXSAVE's
+/// layout and XSTATE_BV at 512. KVM_GET_FPU doesn't report MXCSR on
+/// recent kernels, so h9 uses this instead.
+pub const Xsave = extern struct {
+    region: [1024]u32 align(16),
+};
+pub const xstate_bv_off = 512;
 
 pub const MsrEntry = extern struct {
     index: u32,

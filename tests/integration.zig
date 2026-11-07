@@ -633,6 +633,92 @@ test "more live processes than HVF has vCPUs [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+/// The KVM vCPU limit `h9 --backend kvm --check` reports, or null when
+/// KVM can't be used here.
+fn kvmLimit(e: Env) !?u32 {
+    const r = runOn(e, "kvm", &.{"--check"}, null) catch return null;
+    defer r.deinit();
+    const at = std.mem.indexOf(u8, r.out, "backend kvm: ok, ") orelse return null;
+    var it = std.mem.tokenizeScalar(u8, r.out[at + "backend kvm: ok, ".len ..], ' ');
+    return try std.fmt.parseInt(u32, it.next() orelse return null, 10);
+}
+
+test "--check reports kvm and its vCPU limit [16]" {
+    const e = try env(@src());
+    const n = try kvmLimit(e) orelse return error.SkipZigTest;
+    try std.testing.expect(n > 8);
+    const r = try runOn(e, "kvm", &.{"--check"}, null);
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/echo runs") != null);
+}
+
+test "auto uses kvm when /dev/kvm is usable [16]" {
+    const e = try env(@src());
+    _ = try kvmLimit(e) orelse return error.SkipZigTest;
+    const r = try runOn(e, "auto", &.{"--check"}, null);
+    defer r.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses kvm)") != null);
+    const w = try runOn(e, "auto", &.{ "/bin/echo", "hi" }, null);
+    defer w.deinit();
+    try std.testing.expectEqualStrings("hi\n", w.out);
+    try std.testing.expectEqualStrings("", w.err);
+}
+
+test "without access to /dev/kvm, auto falls back to the emulator with a warning [16]" {
+    const e = try env(@src());
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    // Runs where this user can't open /dev/kvm (not in the kvm group).
+    if (try kvmLimit(e) != null) return error.SkipZigTest;
+    std.Io.Dir.accessAbsolute(std.testing.io, "/dev/kvm", .{}) catch return error.SkipZigTest;
+    const k = try runOn(e, "kvm", &.{ "/bin/echo", "hi" }, null);
+    defer k.deinit();
+    try std.testing.expectEqual(125, k.code);
+    try std.testing.expect(std.mem.indexOf(u8, k.err, "no access to /dev/kvm (is your user in the kvm group?)") != null);
+    const r = try runOn(e, "auto", &.{ "/bin/echo", "hi" }, null);
+    defer r.deinit();
+    // Without the emulator built in, auto fails with the same reason.
+    if (r.code == 125) return error.SkipZigTest;
+    try std.testing.expectEqualStrings("hi\n", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the emulator") != null);
+}
+
+test "more live processes than KVM's owned vCPUs run on the pool [16]" {
+    const e = try env(@src());
+    _ = try kvmLimit(e) orelse return error.SkipZigTest;
+    // KVM's limit is capped by the file descriptors left: with 330 of
+    // them, 74, so processes own 66 and the 80 alive at once in this
+    // pipeline need the pool.
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "/bin/sh", "-c", "ulimit -n 330 && exec \"$@\"", "sh", e.h9, "--backend", "kvm", "--root", e.root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, &.{ "--rc", "c='echo deep'; for(i in `{seq 79}) c=$c^' | cat'; eval $c" });
+    const r = try runProcess(argv.items, null);
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    errdefer std.debug.print("{s}", .{r.stderr});
+    try std.testing.expectEqualStrings("deep\n", r.stdout);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+}
+
+test "more processes over a machine's life than KVM's vCPU limit [16]" {
+    const e = try env(@src());
+    const n = try kvmLimit(e) orelse return error.SkipZigTest;
+    var buf: [128]u8 = undefined;
+    const script = try std.fmt.bufPrint(&buf, "for(i in `{{seq {d}}}) /bin/true; echo done", .{n + 16});
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", "kvm", "--root", e.root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, &.{ "--rc", script });
+    const r = try runProcessWith(argv.items, null, null, 120_000);
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    try std.testing.expectEqualStrings("done\n", r.stdout);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+}
+
 test "concurrent processes contending for one environment don't hang" {
     const e = try env(@src());
     // 8 processes sharing /env, each creating 150 variables, then running

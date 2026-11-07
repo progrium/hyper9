@@ -157,6 +157,26 @@ integration cases with the 386 binaries on the emulator.
 
 Pinned upstream versions are in [scripts/pins.sh](scripts/pins.sh).
 
+### Linux (KVM)
+
+On Linux, h9 uses KVM ([kvm](design/0016-kvm.md)) on arm64 and x86\_64. It
+needs read and write access to `/dev/kvm`, usually through the `kvm` group
+(`sudo usermod -aG kvm $USER`, then log in again), and inside a VM, nested
+virtualization. `h9 --check` says which is missing. `mkroot.py` needs
+`qemu-system-aarch64`, `qemu-img` and `bsdtar` (Debian and Ubuntu:
+`qemu-system-arm qemu-utils libarchive-tools`). KVM runs the host's
+architecture, so on x86\_64 the root needs `/amd64`, which `--arch amd64`
+builds with an emulator h9 running the tree's arm64 compilers:
+
+```sh
+zig build -Demu=unicorn -Dtarget=x86_64-linux-musl --prefix .local/h9-emu
+H9=.local/h9-emu/bin/h9 ./scripts/mkroot.py --arch amd64
+zig build integration -Darch=amd64     # the cases on KVM (and emu, if built in)
+```
+
+The KVM backend blocks `SIGRTMIN + 1` in the threads that run vCPUs and uses
+it to kick them; an embedder must leave it to h9.
+
 drawterm is committed under `third_party/drawterm` as a squashed git subtree,
 so a fresh checkout builds without network access. To move to a new upstream
 revision, bump `DRAWTERM_REV` and run `./scripts/vendor-drawterm.sh` on a
@@ -262,7 +282,7 @@ of memory at start, so one that uses `os/exec` needs `--memory 4G`.
 
 `--check` creates a VM on each backend built in (or just `--backend`'s) and
 runs a test program on it, which on macOS also checks the hypervisor
-entitlement. It reports HVF's vCPU limit, then runs `/bin/echo` from the root
+entitlement. It reports the hypervisor's vCPU limit, then runs `/bin/echo` from the root
 tree. It exits 0 if h9 can run programs from the root, and 125 otherwise.
 Release builds report the release's version; development builds report `git
 describe` (`-Dversion=V` overrides it).
@@ -330,9 +350,10 @@ relative one is in the guest's cwd, and `--print`'s namespace section can be
 saved and replayed as is. A `bind -c '#O' PATH` line in it puts a fresh
 copy-on-write overlay over whatever PATH is at that point in the replay.
 
-`--backend auto` (the default) uses the host hypervisor and otherwise falls
-back to the emulator with a warning. The emulator also runs amd64 binaries on
-arm64 hosts, for testing, and 386 binaries on every host; HVF runs arm64 only.
+`--backend auto` (the default) uses the host hypervisor (HVF on macOS, KVM on
+Linux) and otherwise falls back to the emulator with a warning that says why.
+The emulator also runs amd64 binaries on arm64 hosts, for testing, and 386
+binaries on every host; HVF runs arm64 only, and KVM the host's architecture.
 `--arch` picks the architecture: a host program otherwise runs as its header
 says, and a guest one as the host's, so `h9 --arch 386 /bin/echo hi` runs
 `/386/bin/echo` from a root that has it.
@@ -497,7 +518,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, and emu on Unicorn) |
+| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, and emu on Unicorn), with the guest-physical allocator and page tables the hypervisor backends share |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
 | `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |

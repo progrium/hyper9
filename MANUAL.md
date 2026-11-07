@@ -76,15 +76,15 @@ of running programs never outlive the h9 invocation.
 ```
 
 Each Plan 9 program runs as real machine code on a virtual CPU from your
-host's hypervisor (Hypervisor.framework on macOS; KVM and the Windows
-Hypervisor Platform are proposed). When a program makes a system call, it
+host's hypervisor (Hypervisor.framework on macOS, KVM on Linux; the Windows
+Hypervisor Platform is proposed). When a program makes a system call, it
 doesn't reach your host's kernel. It's answered by a Plan 9 kernel that runs
 inside the h9 process: the kernel from drawterm, Plan 9's remote terminal
 program. That kernel decides which of your host's files, and how much of the
 network, the program can see. Chapter 22 covers that sandbox.
 
-On hosts without a usable hypervisor, such as Linux and Windows today, many
-cloud VMs and CI runners, `h9-emu` runs the same programs in a CPU emulator
+On hosts without a usable hypervisor, such as Windows today, many cloud VMs
+and CI runners, `h9-emu` runs the same programs in a CPU emulator
 instead: slower for heavy computation, but otherwise identical (chapter 26).
 
 #### How h9 differs from other ways to run Plan 9
@@ -131,24 +131,25 @@ server on the network (chapter 16).
 
 The two take the same flags and behave the same way; `h9-emu` is a separate
 program because Unicorn is GPL-licensed. Use `h9` where it works, and
-`h9-emu` on Linux and Windows, and in VMs, containers and CI runners without
-nested virtualization. This manual says `h9` throughout; everything applies
+`h9-emu` on Windows, and in VMs, containers and CI runners without nested
+virtualization. This manual says `h9` throughout; everything applies
 to `h9-emu` too. (When you build `h9-emu` from source it's still called
 `zig-out/bin/h9`; the release scripts rename it.)
 
 | Host | `h9` | `h9-emu` |
 | --- | --- | --- |
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | ✓ |
-| Linux arm64 | *Not yet available ([kvm](design/0016-kvm.md))* | ✓ |
-| Linux x86\_64 | *Not yet available ([kvm](design/0016-kvm.md))* | ✓, with an amd64 root tree (`mkroot.py --arch amd64`) |
+| Linux arm64 | ✓ (KVM) | ✓ |
+| Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`mkroot.py --arch amd64`) | ✓, with an amd64 root tree |
 | Windows on ARM | *Not yet available ([whp](design/0017-whp.md))* | ✓ |
 | Windows x86\_64 | *Not yet available ([whp](design/0017-whp.md))* | ✓, with an amd64 root tree |
 
 **Host requirements.** On macOS, h9 must be signed with the hypervisor
 entitlement in `h9.entitlements`; `zig build` does that, and release binaries
-will come signed. `h9-emu` needs nothing special. Once the KVM and WHP
-backends exist, Linux will need read and write access to `/dev/kvm` (usually
-by being in the `kvm` group), and Windows the optional Windows Hypervisor
+will come signed. `h9-emu` needs nothing special. On Linux, h9 needs read
+and write access to `/dev/kvm` (usually by being in the `kvm` group), and in
+a VM, nested virtualization; `h9 --check` tells you which is missing. Once
+the WHP backend exists, Windows will need the optional Windows Hypervisor
 Platform feature.
 
 #### Building from source
@@ -1588,9 +1589,10 @@ hello, world
   `plan9/arm64`. So on an Apple Silicon Mac a Go program runs on the
   emulator, which needs `h9-emu`; `h9-emu` picks the emulator by itself,
   with the warning above, and `--backend emu` picks it silently. On an
-  x86\_64 Linux or Windows host, `h9-emu` runs it on the emulator too, until
-  KVM and WHP backends exist. Compute-heavy Go code runs several times
-  slower there than natively (chapter 26).
+  x86\_64 Linux host, h9 runs it on KVM (Go's own test suite has been run
+  on the emulator only), and on Windows `h9-emu` runs it on the emulator
+  until the WHP backend exists. Compute-heavy Go code runs several times
+  slower on the emulator than natively (chapter 26).
 - **What works:** goroutines on several processes, timers and `time.Now`,
   files, `os/exec` and `os.Getpid`/`Getppid`, `net` and `net/http`,
   `os/signal` (Ctrl-C arrives as `os.Interrupt`), panics from faults such as
