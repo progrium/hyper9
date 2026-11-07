@@ -744,6 +744,8 @@ pub const Vcpu = struct {
                         .access = if (s.ureg.@"error" & 0x10 != 0) .exec else if (s.ureg.@"error" & 2 != 0) .write else .read,
                         .syndrome = s.ureg.@"error",
                     } }
+                else if (s.ureg.type == x86.vector_bp)
+                    .breakpoint
                 else
                     .{ .fault = .{ .addr = s.ureg.pc, .access = .exec, .syndrome = s.ureg.type } },
                 else => .{ .other = s.ureg.type },
@@ -757,6 +759,7 @@ pub const Vcpu = struct {
         const esr = s.ureg.type;
         return switch (esr >> 26) {
             arm64.EC_SVC64 => .syscall,
+            arm64.EC_BRK64, arm64.EC_BKPT_LOWER, arm64.EC_BKPT_SAME => .breakpoint,
             arm64.EC_IABT_LOWER => .{ .fault = .{ .addr = s.far, .access = .exec, .syndrome = esr } },
             arm64.EC_DABT_LOWER => .{ .fault = .{ .addr = s.far, .access = if (esr & (1 << 6) != 0) .write else .read, .syndrome = esr } },
             else => .{ .fault = .{ .addr = s.ureg.pc, .access = .exec, .syndrome = esr } },

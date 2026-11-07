@@ -23,7 +23,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [go-compat](design/0007-go-compat.md) | implemented |  | Go compatibility |
 | [devsrv](design/0008-devsrv.md) | implemented |  | devsrv, /srv and mount |
 | [i386](design/0009-i386.md) | implemented |  | 386 binaries |
-| [self-host](design/0010-self-host.md) | accepted | ready | Self-hosting |
+| [self-host](design/0010-self-host.md) | implemented |  | Self-hosting |
 | [overlay](design/0011-overlay.md) | implemented |  | Copy-on-write overlay as the root's default |
 | [browser-host](design/0012-browser-host.md) | accepted | ready | A browser host on wasm, with v86 |
 | [9p-roots](design/0013-9p-roots.md) | implemented |  | 9P roots |
@@ -70,7 +70,7 @@ flowchart LR
   p_go_compat["#35;7 go-compat<br/>implemented"]:::implemented
   p_devsrv["#35;8 devsrv<br/>implemented"]:::implemented
   p_i386["#35;9 i386<br/>implemented"]:::implemented
-  p_self_host["#35;10 self-host<br/>accepted"]:::accepted
+  p_self_host["#35;10 self-host<br/>implemented"]:::implemented
   p_overlay["#35;11 overlay<br/>implemented"]:::implemented
   p_browser_host["#35;12 browser-host<br/>accepted"]:::accepted
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
@@ -299,7 +299,9 @@ a guest path or name in the machine's namespace: `/` is the root tree
 build; with none found, a guest program is an error, exit 125), `/bin` is `/$cputype/bin` (`/arm64/bin` on arm64) plus `/rc/bin`, and the host cwd (or `--cwd`)
 is at `/mnt/term/cwd` and is the guest's cwd. The host environment isn't
 imported: the guest gets `user`, `home`, `cputype`, `objtype`, `sysname`,
-`service`, `path` and `timezone`, plus any `--env`. Exit codes: 0 for an empty
+`service`, `path`, `timezone` and `NPROC` (the vCPUs the machine can run
+at once: `--cpus`, else the host's CPU count), plus any `--env`, which
+overrides them. Exit codes: 0 for an empty
 `exits` string; the number itself for an `exits` string that's a decimal
 number from 1 to 255 (no sign, leading zero or spaces), so rc's `exit 3` and
 Go's `os.Exit(3)` exit 3; and 1 for any other string, which is printed to
@@ -407,10 +409,27 @@ bad syscall can be caught.
 
 `/proc` lists the machine's own processes by their machine-local pids, as
 on 9front, so `ps` and `kill` work: `kill sleep | rc` posts a `kill` note
-to each sleep. Each process has `args`, `ctl` (`kill`, `close`, `closefiles`),
-`fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `segment`, `status` and `wait`; the CPU
-times in `status` read 0 for now, and `ns` shows the host paths of bound
-host trees.
+to each sleep. Each process has `args`, `ctl`, `fd`, `fpregs`, `mem`,
+`note`, `noteid`, `notepg`, `ns`, `ppid`, `regs`, `segment`, `status`, `text`
+and `wait`; the CPU times in `status` read 0 for now, and `ns` shows the host
+paths of bound host trees. `ctl` takes `kill`, `close`, `closefiles`, and
+acid's `stop`, `start`, `waitstop`, `startstop`, `hang` and `nohang`, so acid
+debugs a live process (`h9 --rc 'sleep 5 & sleep 1; acid $apid'`, then
+`stk()`), and a `BRK` or `INT3` posts `sys: breakpoint`
+([self-host](design/0010-self-host.md)).
+
+**Building from source.** With `/sys/src` in the root (`mkroot.py --src`), or
+bound in with `--readable`, the compilers, linkers and mk run as on 9front:
+
+```sh
+cp "$H9ROOT/sys/src/cmd/ls.c" . && h9 --rc '7c ls.c && 7l -o 7.ls ls.7 && ./7.ls'   # build in the cwd
+cp -cR "$H9ROOT" /tmp/root     # a disposable copy (an APFS clone on macOS, about a second)
+h9 --root /tmp/root --writable /tmp/root --rc 'cd /sys/src && mk install'   # rebuild the userland in place
+h9 --root /tmp/root --writable /tmp/root --rc 'cd /sys/src && objtype=amd64 mk libs'  # once, before cross-building for amd64
+```
+
+Without `--writable`, `mk install` writes to the run's overlay and is
+discarded at exit (or fails with "permission denied" under `--write scope`).
 
 `/srv` is the machine's own service registry (`#s`, from 9front), so guest
 file servers post themselves and other processes mount them, with or

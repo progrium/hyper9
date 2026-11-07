@@ -356,7 +356,8 @@ pub const Machine = struct {
         m.gpa.destroy(m.arena);
     }
 
-    /// The CPUs the machine may use, as /dev/sysstat lists them: `--cpus`
+    /// The CPUs the machine may use, as /dev/sysstat lists them and
+    /// `$NPROC` says: `--cpus`
     /// when given, else the host's CPU count, capped by the backend's vCPU
     /// limit.
     fn cpuCount(m: *const Machine) u32 {
@@ -398,6 +399,8 @@ pub const Machine = struct {
         kern.setNoteKick(Proc.noteKick);
         kern.setProcStatus(Proc.status);
         kern.setProcSegment(Proc.segments);
+        kern.setStopKick(Proc.stopKick);
+        kern.setProcDebug(Proc.debug);
         job.m = &job.mc;
         job.pages = .{ .ctx = job, .alloc = Job.allocPages, .free = Job.freePages };
         job.mc.err_msg = "";
@@ -700,6 +703,27 @@ pub const Machine = struct {
         /// running guest code, and the mapped memory in KiB.
         in_sys: std.atomic.Value(u64) = .init(0),
         mem_kb: std.atomic.Value(u64) = .init(0),
+        /// Set by the stop kick hook when a debugger asks the process to
+        /// stop, so the exit loop asks the kernel at its next stop point.
+        stop_flag: std.atomic.Value(bool) = .init(false),
+        /// Debugging state (design/0010-self-host.md), guarded by
+        /// `dbg_lock`, which /proc/n/mem, regs and fpregs take on the
+        /// reading thread. It also guards `as` against exec swapping it.
+        dbg_lock: std.atomic.Mutex = .unlocked,
+        /// The registers at the last syscall entry, or at the stop while
+        /// `dbg_stopped`; /proc/n/regs serves them in a syscall
+        /// (`in_sys`) or stopped, as 9front serves its dbgreg.
+        dbg_ureg: vmm.Ureg = undefined,
+        /// The FP registers while `dbg_stopped`.
+        dbg_extra: vmm.Extra = undefined,
+        dbg_stopped: bool = false,
+        /// A debugger wrote `dbg_ureg` or `dbg_extra` while stopped.
+        dbg_ureg_set: bool = false,
+        dbg_extra_set: bool = false,
+
+        fn dbgLock(p: *Proc) void {
+            while (!p.dbg_lock.tryLock()) std.atomic.spinLoopHint();
+        }
 
         fn noteMem(p: *Proc) void {
             p.mem_kb.store(p.segs.mapped() / 1024, .release);
@@ -749,6 +773,95 @@ pub const Machine = struct {
             p.job.lockSpin();
             defer p.job.lock.unlock();
             if (p.lease) |l| l.kick();
+        }
+
+        /// The kernel's hook for ctl stop and startstop: flags process
+        /// `aux` to check for a stop request, and kicks it out of guest
+        /// code. Runs on the debugger's thread, as `noteKick` does.
+        fn stopKick(aux: ?*anyopaque) callconv(.c) void {
+            const p: *Proc = @ptrCast(@alignCast(aux orelse return));
+            p.stop_flag.store(true, .release);
+            p.job.lockSpin();
+            defer p.job.lock.unlock();
+            if (p.lease) |l| l.kick();
+        }
+
+        /// The kernel's hook for /proc/n/mem, regs and fpregs. Runs on the
+        /// reading or writing thread with the target's note lock held,
+        /// and only while it's set as `aux`, so the Proc is alive.
+        fn debug(aux: ?*anyopaque, file: c_int, write: c_int, off: u64, buf: ?*anyopaque, n: c_long) callconv(.c) c_long {
+            const p: *Proc = @ptrCast(@alignCast(aux orelse return 0));
+            const b: [*]u8 = @ptrCast(buf orelse return 0);
+            const data = b[0..@intCast(@max(n, 0))];
+            p.dbgLock();
+            defer p.dbg_lock.unlock();
+            const r: kern.DebugError!usize = switch (@as(kern.DebugFile, @enumFromInt(file))) {
+                .mem => p.memIo(off, data, write != 0),
+                .regs => p.regsIo(off, data, write != 0),
+                .fpregs => p.fpregsIo(off, data, write != 0),
+            };
+            return if (r) |got| @intCast(got) else |e| kern.debugCode(e);
+        }
+
+        /// /proc/n/mem: the process's memory at `addr`, as 9front's
+        /// procctlmemio, through its address space, so only what's mapped
+        /// there. A write into text first gives the process its own copy
+        /// of the text (9front's txt2data), then makes its vCPU fetch the
+        /// new code. Called with `dbg_lock` held.
+        fn memIo(p: *Proc, addr: u64, data: []u8, write: bool) kern.DebugError!usize {
+            const as = p.as orelse return error.BadAddress;
+            const text = write and (p.segs.ownText(as, addr, data.len) catch return error.NoMemory);
+            var done: usize = 0;
+            while (done < data.len) {
+                const va = addr +% done;
+                if (va < addr) break;
+                const chunk = @min(data.len - done, vmm.page_size - va % vmm.page_size);
+                if (!as.copy(va, data[done..][0..chunk], if (write) .write else .read)) break;
+                done += chunk;
+            }
+            if (done == 0 and data.len > 0) return error.BadAddress;
+            if (text) as.codeChanged(addr, done);
+            return done;
+        }
+
+        /// /proc/n/regs: the saved Ureg, in a syscall or stopped. A write
+        /// (only while stopped) goes through the architecture's sanitize,
+        /// as noted's does, so it can't set privileged state.
+        fn regsIo(p: *Proc, off: u64, data: []u8, write: bool) kern.DebugError!usize {
+            if (!p.dbg_stopped and p.in_sys.load(.acquire) == 0) return error.NoRegs;
+            const cur = p.dbg_ureg.bytes();
+            if (off >= cur.len) return 0;
+            const o: usize = @intCast(off);
+            const n = @min(data.len, cur.len - o);
+            if (!write) {
+                @memcpy(data[0..n], cur[o..][0..n]);
+                return n;
+            }
+            var tmp: [@sizeOf(vmm.Ureg)]u8 = undefined;
+            @memcpy(tmp[0..cur.len], cur);
+            @memcpy(tmp[o..][0..n], data[0..n]);
+            p.dbg_ureg = p.dbg_ureg.restored(tmp[0..cur.len]);
+            p.dbg_ureg_set = true;
+            return n;
+        }
+
+        /// /proc/n/fpregs: the FP registers in 9front's FPsave layout,
+        /// while stopped.
+        fn fpregsIo(p: *Proc, off: u64, data: []u8, write: bool) kern.DebugError!usize {
+            if (!p.dbg_stopped) return error.NoRegs;
+            var buf: [fpsave_max]u8 = undefined;
+            const img = fpsave(&p.dbg_extra, &buf);
+            if (off >= img.len) return 0;
+            const o: usize = @intCast(off);
+            const n = @min(data.len, img.len - o);
+            if (!write) {
+                @memcpy(data[0..n], img[o..][0..n]);
+                return n;
+            }
+            @memcpy(img[o..][0..n], data[0..n]);
+            setFpsave(&p.dbg_extra, img);
+            p.dbg_extra_set = true;
+            return n;
         }
 
         fn setLease(p: *Proc, l: ?*cpupool.Lease) void {
@@ -873,6 +986,8 @@ pub const Machine = struct {
         // A guest program goes through #! as exec does, so `h9 man` runs
         // the rc script /rc/bin/man (bound on /bin) like a binary.
         var argv = j.argv;
+        // The guest path of the binary, for /proc/n/text.
+        var text_path: ?[]const u8 = null;
         const bytes = switch (j.prog) {
             .bytes => |b| b,
             .guest => |name| blk: {
@@ -886,6 +1001,7 @@ pub const Machine = struct {
                     return if (err == error.NotFound) error.NotFound else error.NotExecutable;
                 };
                 argv = img.argv;
+                text_path = img.path;
                 break :blk img.bytes;
             },
         };
@@ -915,6 +1031,7 @@ pub const Machine = struct {
         p.initSys();
         p.noteMem();
         kern.setArgs(argv);
+        if (text_path) |t| kern.setTextPath(arena.allocator().dupeZ(u8, t) catch null);
         return m.loop(p);
     }
 
@@ -957,6 +1074,9 @@ pub const Machine = struct {
         vcpu.setUreg(&u);
         while (true) {
             if (j.stopping.load(.acquire)) return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
+            // 9front stops a debugged process on its way back to user
+            // mode, before delivering a note.
+            if (try stopPoint(p, vcpu, &u)) |st| return st;
             if (p.note_flag.swap(false, .acq_rel)) {
                 if (try deliver(p, vcpu, &u)) |msg| return .{ .killed = msg };
             }
@@ -964,6 +1084,11 @@ pub const Machine = struct {
             vcpu.getUreg(&u);
             switch (exit) {
                 .syscall => switch (blk: {
+                    // /proc/n/regs serves these while the call runs.
+                    p.dbgLock();
+                    p.dbg_ureg = u;
+                    p.dbg_lock.unlock();
+                    if (try stopPoint(p, vcpu, &u)) |st| return st;
                     // A note posted during the last call had its interrupt
                     // cleared when that call returned (drawterm's wrappers
                     // clear it after every call). If the guest's next exit
@@ -1024,11 +1149,66 @@ pub const Machine = struct {
                         return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "{s} pc=0x{x}", .{ note, u.pc() }) };
                     }
                 },
+                .breakpoint => {
+                    // 9front's trap table posts this for BRK and INT3; a
+                    // debugger stops the process at the next stop point
+                    // before it's delivered.
+                    const note = "sys: breakpoint";
+                    if (!(kern.postNote(p.pid, note, .debug) catch false)) {
+                        return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "{s} pc=0x{x}", .{ note, u.pc() }) };
+                    }
+                },
                 .interrupted => {},
                 .halted => return .{ .killed = "halted" },
                 .other => |code| return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "sys: trap: unexpected exit 0x{x} pc=0x{x}", .{ code, u.pc() }) },
             }
         }
+    }
+
+    /// A stop point (design/0010-self-host.md): if a debugger asked the
+    /// process to stop here, saves its registers for /proc/n/regs and
+    /// fpregs, and parks on the process's own thread until ctl start,
+    /// holding no vCPU. Registers the debugger wrote are loaded back
+    /// before it runs on. Returns the status it ends with if the machine
+    /// is torn down meanwhile. A note doesn't end the stop; ctl kill does,
+    /// and the note delivery after it kills the process.
+    fn stopPoint(p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg) RunError!?Status {
+        // A stop request flags the process, and Ptraceme waits for a note,
+        // which flags it too; the kernel decides.
+        if (!p.stop_flag.swap(false, .acq_rel) and !p.note_flag.load(.acquire)) return null;
+        if (!kern.wantStop()) return null;
+        const j = p.job;
+        var x: vmm.Extra = undefined;
+        try vcpu.getExtra(&x);
+        p.dbgLock();
+        p.dbg_ureg = u.*;
+        p.dbg_extra = x;
+        p.dbg_ureg_set = false;
+        p.dbg_extra_set = false;
+        p.dbg_stopped = true;
+        p.dbg_lock.unlock();
+        defer {
+            p.dbgLock();
+            p.dbg_stopped = false;
+            if (p.dbg_ureg_set) {
+                u.* = p.dbg_ureg;
+                vcpu.setUreg(u);
+            }
+            if (p.dbg_extra_set) vcpu.setExtra(&p.dbg_extra);
+            p.dbg_lock.unlock();
+        }
+        while (!kern.stopWait()) {
+            if (j.stopping.load(.acquire)) {
+                kern.unstop();
+                return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
+            }
+            if (kern.killed()) {
+                kern.unstop();
+                p.note_flag.store(true, .release);
+                break;
+            }
+        }
+        return null;
     }
 
     /// Delivers the process's next note, as 9front's donotify does: with a
@@ -1228,8 +1408,11 @@ pub const Machine = struct {
         // Committed.
         const old = p.as.?;
         p.segs.replace(old, img.segs);
+        // /proc/n/mem may be reading through the old space.
+        p.dbgLock();
         old.destroy();
         p.as = nas;
+        p.dbg_lock.unlock();
         p.tos = img.tos;
         p.sys.as = nas;
         p.sys.notify = 0;
@@ -1244,9 +1427,14 @@ pub const Machine = struct {
         kern.closeExec();
         var name_buf: [kern.ERRMAX]u8 = undefined;
         kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{elem}) catch "a.out");
+        kern.setTextPath(arena.dupeZ(u8, prog.path) catch null);
+        // With ctl hang, it stops before its first instruction.
+        if (kern.execHang()) p.stop_flag.store(true, .release);
     }
 
-    const Image = struct { bytes: []const u8, argv: []const []const u8 };
+    /// A loaded program: the binary's bytes, the path it was read from
+    /// (the last interpreter's for a #! script), and its argv.
+    const Image = struct { bytes: []const u8, path: []const u8, argv: []const []const u8 };
 
     /// Follows up to 8 levels of #! interpreters from the file at `path`,
     /// whose contents are `bytes`, and returns the binary to load and its
@@ -1256,6 +1444,7 @@ pub const Machine = struct {
     fn interpret(arena: std.mem.Allocator, path: []const u8, bytes: []const u8, argv: []const []const u8) RunError!Image {
         var pre: std.ArrayList([]const u8) = .empty;
         var cur = bytes;
+        var bin = path;
         var indir: usize = 0;
         while (std.mem.startsWith(u8, cur, "#!")) : (indir += 1) {
             if (indir >= max_indir) return error.BadExec;
@@ -1269,8 +1458,9 @@ pub const Machine = struct {
             try pre.insertSlice(arena, 0, toks.items);
             const interp = try std.fmt.allocPrintSentinel(arena, "{s}", .{toks.items[0]}, 0);
             cur = try readFile(arena, interp);
+            bin = interp;
         }
-        if (indir == 0) return .{ .bytes = cur, .argv = argv };
+        if (indir == 0) return .{ .bytes = cur, .path = path, .argv = argv };
 
         // As 9front builds it: the interpreters' arguments (the outermost's
         // first) and the script's full name, with the first interpreter's
@@ -1281,7 +1471,7 @@ pub const Machine = struct {
         try out.append(arena, basename(path));
         try out.appendSlice(arena, pre.items[1..]);
         if (argv.len > 1) try out.appendSlice(arena, argv[1..]);
-        return .{ .bytes = cur, .argv = out.items };
+        return .{ .bytes = cur, .path = bin, .argv = out.items };
     }
 
     fn execError(err: RunError) error{Failed} {
@@ -1611,6 +1801,10 @@ pub const Machine = struct {
         copyFile("/adm/timezone/local", "/env/timezone");
         // rc lists end each element with a NUL: path=(. /bin).
         try putEnv("path", ".\x00/bin\x00");
+        // mk's job count, as 9front's termrc sets it from /dev/sysstat:
+        // the CPUs the machine may use (design/0010-self-host.md).
+        var nproc_buf: [16]u8 = undefined;
+        try putEnv("NPROC", std.fmt.bufPrint(&nproc_buf, "{d}", .{m.cpuCount()}) catch unreachable);
         for (m.opts.env) |e| try putEnv(e.name, e.value);
     }
 
@@ -1674,6 +1868,44 @@ pub const Machine = struct {
         return bytes[0..off];
     }
 };
+
+/// The largest FPsave: arm64's, 32 128-bit registers then FPCR and FPSR
+/// as 32-bit words (libmach's FPREGSIZE, 520 bytes).
+const fpsave_max = 32 * 16 + 8;
+
+/// The FP registers in 9front's FPsave layout, as /proc/n/fpregs serves
+/// them: on arm64 `regs[32][2]`, `control`, `status`; on amd64 and 386
+/// the FXSAVE area.
+fn fpsave(x: *const vmm.Extra, buf: *[fpsave_max]u8) []u8 {
+    switch (x.*) {
+        .arm64 => |a| {
+            for (a.v, 0..) |q, i| std.mem.writeInt(u128, buf[i * 16 ..][0..16], q, .little);
+            std.mem.writeInt(u32, buf[512..516], @truncate(a.fpcr), .little);
+            std.mem.writeInt(u32, buf[516..520], @truncate(a.fpsr), .little);
+            return buf[0..fpsave_max];
+        },
+        .amd64, .i386 => |t| {
+            @memcpy(buf[0..@sizeOf(vmm.Fxsave)], std.mem.asBytes(&t.fx));
+            return buf[0..@sizeOf(vmm.Fxsave)];
+        },
+    }
+}
+
+/// Takes back an FPsave image from `fpsave`, keeping the thread pointer.
+fn setFpsave(x: *vmm.Extra, img: []const u8) void {
+    switch (x.*) {
+        .arm64 => |*a| {
+            for (&a.v, 0..) |*q, i| q.* = std.mem.readInt(u128, img[i * 16 ..][0..16], .little);
+            a.fpcr = std.mem.readInt(u32, img[512..516], .little);
+            a.fpsr = std.mem.readInt(u32, img[516..520], .little);
+        },
+        .amd64, .i386 => |*t| {
+            @memcpy(std.mem.asBytes(&t.fx), img[0..@sizeOf(vmm.Fxsave)]);
+            // MXCSR's reserved bits would make FXRSTOR fault.
+            t.fx.mxcsr &= 0xffff;
+        },
+    }
+}
 
 /// Prints a fault for `--dump-on-fault`: the Ureg, the faulting address and
 /// the PC symbolized from the a.out symbol table.

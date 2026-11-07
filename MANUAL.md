@@ -832,7 +832,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#y` | hcons | `/dev`, before `#c` | h9's per-machine console: `cons`, `consctl` and `stderr`. Each machine gets its own, as `#y<id>`. |
 | `#e` | env | `/env` | 9front's environment device, one environment per group. No `#ec` (the config environment). |
 | `#d` | dup | `/fd` | Open file descriptors |
-| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine. `mem`, `regs`, `fpregs` and `text` aren't served yet (*Not yet available ([self-host](design/0010-self-host.md))*). |
+| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine, with 9front's debugging files `mem`, `regs`, `fpregs` and `text` for acid ([self-host](design/0010-self-host.md)). |
 | `#s` | srv | `/srv` | 9front's service registry, one per machine |
 | `#\|` | pipe | | Pipes |
 | `#I` | ip | `/net` | The network, through the host's own stack: `cs`, `tcp`, `udp`. Masked under `--net=disable`. |
@@ -934,9 +934,11 @@ processes. Pids are per machine and start at 1 with the program you ran, so
 first process exits; any others are sent `hangup`, then stopped. The first
 process's exit string becomes h9's exit status (chapter 3).
 
-`/proc/n` has `args`, `ctl`, `fd`, `note`, `noteid`, `notepg`, `ns`,
-`ppid`, `segment`, `status` and `wait`, so `ps`, `kill`, `slay` and
-`pstree` work. The CPU times in `status` read 0 for now, and `ns` shows host
+`/proc/n` has `args`, `ctl`, `fd`, `fpregs`, `mem`, `note`, `noteid`,
+`notepg`, `ns`, `ppid`, `regs`, `segment`, `status`, `text` and `wait`, so
+`ps`, `kill`, `slay`, `pstree` and `acid` work. `ctl` takes `stop`, `start`,
+`waitstop`, `startstop` and `hang` as well as `kill`, and a stopped process
+reads `Stopped` in `status`. The CPU times in `status` read 0 for now, and `ns` shows host
 paths of bound host trees (a caveat `--print` lists).
 
 Limits: `--pids N` caps how many processes can be alive at once (`rfork`
@@ -1169,6 +1171,7 @@ their Plan 9 meanings differ anyway. Each machine starts with:
 | `service` | `terminal` |
 | `path` | `(. /bin)` |
 | `timezone` | Copied from the root tree's `/adm/timezone/local`, when it has one |
+| `NPROC` | The vCPUs the machine can run at once: `--cpus`, else the host's CPU count. `mk` runs this many jobs. |
 
 plus whatever you pass with `--env name=value`, which can repeat and
 overrides the defaults. A value is passed as one word; it isn't split into a
@@ -1584,10 +1587,9 @@ live in `/sys/src`, and `mk install` copies results into `/$objtype/bin`.
 
 **In h9**
 
-The compilers, linkers and `mk` run, and can rebuild 9front's userland from
-`/sys/src`; that's how `mkroot.py --arch` adds `/386` and `/amd64`. Making
-that a tested, documented capability, with `acid` able to debug a live
-process, is the [self-host](design/0010-self-host.md) proposal.
+The compilers, linkers and `mk` run, and rebuild 9front's userland from
+`/sys/src` byte for byte; that's how `mkroot.py --arch` adds `/386` and
+`/amd64`. `acid` debugs a live process ([self-host](design/0010-self-host.md)).
 
 - You need `/sys/src` in the root tree for the headers and libraries to
   rebuild 9front itself: build the tree with `mkroot.py --src`. For your own
@@ -1600,7 +1602,9 @@ process, is the [self-host](design/0010-self-host.md) proposal.
   discarded: `h9: changes to the root under /arm64, /sys were discarded
   (rerun with --writable "$H9ROOT" to keep them)`.
 - `$objtype` is the machine's architecture; set it to cross-compile, as in
-  `objtype=386 mk`.
+  `objtype=386 mk`. The arm64 root has no `/amd64/lib`, so run
+  `objtype=amd64 mk libs` in `/sys/src` once, on a writable root, first.
+- `mk` runs `$NPROC` jobs at once, the machine's vCPU limit.
 
 **Try it**
 
@@ -2209,9 +2213,11 @@ the program counter, named by the a.out's symbol table, when a program takes
 a fault it doesn't handle.
 
 **`/proc`.** `ps`, `pstree`, `/proc/n/status`, `/proc/n/fd` (open files),
-`/proc/n/ns` (the namespace) and `/proc/n/segment` (memory) work. `acid` and
-`db`, Plan 9's debuggers, need `/proc/n/mem` and `regs`
-(*Not yet available ([self-host](design/0010-self-host.md))*).
+`/proc/n/ns` (the namespace) and `/proc/n/segment` (memory) work, and so
+does `acid`, Plan 9's debugger: `h9 --rc 'sleep 5 & sleep 1; acid $apid'`,
+then `stk()` for a stack trace; `new()`, `bpset`, `cont`, `step` and `next`
+work too
+([self-host](design/0010-self-host.md)).
 
 **Whose error is it?**
 
@@ -2457,7 +2463,7 @@ Commands marked † aren't usable in h9 yet; the notes say why.
 | `find` | `walk`, `du -a` | |
 | `tar`, `gzip`, `unzip` | `tar`, `gzip`, `unzip` | |
 | `strace` | `ratrace`, or `h9 --trace` | |
-| `gdb` | `acid`, `db` | † Need `/proc/n/mem` and `regs` ([self-host](design/0010-self-host.md)) |
+| `gdb` | `acid`, `db` | |
 | `tmpfs` | `ramfs` | Or just `/tmp`, private and in memory in h9 |
 | `sshfs`, NFS | `9fs`, `srv` and `mount`, `sshfs` | Mount points go in `/tmp` in h9 (chapter 16) |
 | `git` | `git` | 9front has its own git client |

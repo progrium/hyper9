@@ -72,3 +72,8 @@ comptime {
 pub const EC_SVC64 = 0x15;
 pub const EC_IABT_LOWER = 0x20;
 pub const EC_DABT_LOWER = 0x24;
+/// Hardware breakpoints (lower and same EL) and BRK, which 9front's trap
+/// table all posts as `sys: breakpoint`.
+pub const EC_BKPT_LOWER = 0x30;
+pub const EC_BKPT_SAME = 0x31;
+pub const EC_BRK64 = 0x3c;

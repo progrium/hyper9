@@ -82,6 +82,20 @@ const c_stub = struct {
         return -1;
     }
     fn h9_kern_execnotes() void {}
+    fn h9_kern_wantstop() c_int {
+        return 0;
+    }
+    fn h9_kern_stopwait() c_int {
+        return 0;
+    }
+    fn h9_kern_unstop() void {}
+    fn h9_kern_killed() c_int {
+        return 0;
+    }
+    fn h9_kern_exechang() c_int {
+        return 0;
+    }
+    fn h9_kern_settextpath(_: ?[*:0]const u8) void {}
     fn h9_kern_mach() ?*anyopaque {
         return null;
     }
@@ -236,6 +250,14 @@ const c_real = struct {
     extern fn h9_kern_popnote(msg: [*]u8, pc: u64) c_int;
     extern fn h9_kern_noted(arg: c_int, msg: [*]u8) c_int;
     extern fn h9_kern_execnotes() void;
+    extern fn h9_kern_wantstop() c_int;
+    extern fn h9_kern_stopwait() c_int;
+    extern fn h9_kern_unstop() void;
+    extern fn h9_kern_killed() c_int;
+    extern fn h9_kern_exechang() c_int;
+    extern fn h9_kern_settextpath(path: ?[*:0]const u8) void;
+    extern var h9_stopkick: ?*const fn (?*anyopaque) callconv(.c) void;
+    extern var h9_procdebug: ?*const fn (?*anyopaque, c_int, c_int, u64, ?*anyopaque, c_long) callconv(.c) c_long;
     extern fn h9_kern_mach() ?*anyopaque;
     extern fn h9_kern_putmach(m: ?*anyopaque) void;
     extern fn h9_hostcmd_machend(m: ?*anyopaque) void;
@@ -433,6 +455,71 @@ pub fn setProcStatus(f: *const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv
 /// held, and only while `aux` is set.
 pub fn setProcSegment(f: *const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_int) void {
     if (available) c.h9_procsegment = f;
+}
+
+/// Sets the hook ctl stop and startstop call, with the process's `aux`,
+/// so it checks for a stop request at its next stop point
+/// (design/0010-self-host.md). Called as the note kick hook is.
+pub fn setStopKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
+    if (available) c.h9_stopkick = f;
+}
+
+/// /proc/n/mem, regs and fpregs (`DebugFile`): the hook moves bytes
+/// between the process with this `aux` and a buffer, and returns how many,
+/// or a negative `DebugError`. Called as the status hook is, on the reading
+/// or writing thread; a write comes only while the process is stopped.
+pub const DebugFn = fn (aux: ?*anyopaque, file: c_int, write: c_int, off: u64, buf: ?*anyopaque, n: c_long) callconv(.c) c_long;
+
+pub const DebugFile = enum(c_int) { mem, regs, fpregs };
+pub const DebugError = error{ BadAddress, NoRegs, NoMemory };
+
+/// The hook's return for a `DebugError` (hproc.h's D errors).
+pub fn debugCode(e: DebugError) c_long {
+    return switch (e) {
+        error.BadAddress => -1,
+        error.NoRegs => -2,
+        error.NoMemory => -3,
+    };
+}
+
+pub fn setProcDebug(f: *const DebugFn) void {
+    if (available) c.h9_procdebug = f;
+}
+
+/// At a stop point: whether a debugger asked the calling process to stop
+/// here (ctl stop, startstop with a note queued, or exec with hang). Takes
+/// the request.
+pub fn wantStop() bool {
+    return c.h9_kern_wantstop() != 0;
+}
+
+/// Stops the calling process until ctl start; false if interrupted while
+/// still stopped (by a note, ctl kill or the machine's teardown), when the
+/// caller either waits again or calls `unstop`.
+pub fn stopWait() bool {
+    return c.h9_kern_stopwait() == 0;
+}
+
+/// Ends a stop without ctl start, for a process about to die.
+pub fn unstop() void {
+    c.h9_kern_unstop();
+}
+
+/// Whether ctl kill has been written for the calling process.
+pub fn killed() bool {
+    return c.h9_kern_killed() != 0;
+}
+
+/// exec's ctl hang: whether the process now stops before its first
+/// instruction (`wantStop` will say so).
+pub fn execHang() bool {
+    return c.h9_kern_exechang() != 0;
+}
+
+/// Keeps the image the calling process runs, opened from `path` in its
+/// namespace, for /proc/n/text; null drops it.
+pub fn setTextPath(path: ?[:0]const u8) void {
+    c.h9_kern_settextpath(if (path) |p| p.ptr else null);
 }
 
 /// The most of exec's argv /proc/n/args keeps, as 9front's exec.

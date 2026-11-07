@@ -657,6 +657,31 @@ pub const Segs = struct {
         return false;
     }
 
+    /// Before a host write to [va, va+len) (a debugger's breakpoint
+    /// through /proc/n/mem): if it touches text that other processes
+    /// share (rfork), gives this process, running in `as`, its own copy
+    /// of the text segment, so the write reaches no one else, as
+    /// 9front's txt2data does. The host file is never written; text is
+    /// read into pages at exec. Returns whether the range touches text.
+    /// Called on another thread while the process is stopped.
+    pub fn ownText(s: *Segs, as: vmm.AddressSpace, va: u64, len: u64) Error!bool {
+        s.lockSpin();
+        defer s.lock.unlock();
+        const t = s.text orelse return false;
+        const sp = t.span();
+        if (!(va < sp.hi and va +% len > sp.lo)) return false;
+        if (t.refs() <= 1) return true;
+        const n = try t.copy();
+        t.detach(as);
+        n.attach(as) catch |e| {
+            // `attach` freed the copy; put the shared text back.
+            t.attach(as) catch {};
+            return e;
+        };
+        s.text = n;
+        return true;
+    }
+
     /// Bytes mapped for the process, for /proc/n/status.
     pub fn mapped(s: *const Segs) u64 {
         var n: u64 = 0;

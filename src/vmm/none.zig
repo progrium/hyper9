@@ -41,6 +41,12 @@ pub const AddressSpace = struct {
     pub fn translate(_: *AddressSpace, _: u64, _: u64) ?[]u8 {
         unreachable;
     }
+    pub fn copy(_: *AddressSpace, _: u64, _: []u8, _: bool) bool {
+        unreachable;
+    }
+    pub fn codeChanged(_: *AddressSpace, _: u64, _: u64) void {
+        unreachable;
+    }
 };
 
 pub const Vcpu = struct {

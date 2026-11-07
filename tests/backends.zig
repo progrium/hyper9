@@ -181,6 +181,64 @@ test "fault on unmapped memory 386 [9]" {
     }, 2);
 }
 
+/// Runs `text`, which ends in a breakpoint instruction at `bp_off`: the
+/// vCPU exits with `.breakpoint`, the PC left at a BRK and past an INT3
+/// (`pc_off`), and a process with no debugger or note handler dies with
+/// `sys: breakpoint` (design/0010-self-host.md).
+fn expectBreakpoint(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const bytes = try image(gpa, arch, text);
+    defer gpa.free(bytes);
+    const pc = aout.layout(arch).utzero + arch.headerSize() + pc_off;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+        var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer b.destroy();
+        const as = try b.newAddressSpace();
+        defer as.destroy();
+        var img = try h9.loader.load(gpa, b, as, bytes, &.{"brk"}, 1);
+        defer img.segs.release(as);
+        var v = try b.createVcpu();
+        defer v.destroy();
+        try v.setAddressSpace(as);
+        var u: vmm.Ureg = .initExec(arch, img.entry, img.sp, img.tos);
+        v.setUreg(&u);
+        errdefer std.debug.print("backend {t}, {t} binary\n", .{ kind, arch });
+        try std.testing.expectEqual(vmm.Exit.breakpoint, try v.run());
+        v.getUreg(&u);
+        try std.testing.expectEqual(pc, u.pc());
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+    var buf: [128]u8 = undefined;
+    try expectAll(arch, bytes, .{
+        .status = try std.fmt.bufPrint(&buf, "killed \"sys: breakpoint pc=0x{x}\"", .{pc}),
+        .out = "",
+        .trace = "",
+    });
+}
+
+test "BRK exits as a breakpoint on every backend [10]" {
+    try expectBreakpoint(.arm64, &words(&.{
+        0xd503201f, // nop
+        0xd4200000, // brk  #0 (libmach's bpinst64)
+    }), 4);
+    try expectBreakpoint(.amd64, &[_]u8{
+        0x90, // nop
+        0xcc, // int3
+        0xeb, 0xfe, // jmp  .
+    }, 2);
+    try expectBreakpoint(.i386, &[_]u8{
+        0x90, // nop
+        0xcc, // int3
+        0xeb, 0xfe, // jmp  .
+    }, 2);
+}
+
 /// Loops until kicked from another thread; `run` must return `.interrupted`.
 fn expectKick(arch: aout.Arch, text: []const u8) !void {
     const gpa = std.testing.allocator;

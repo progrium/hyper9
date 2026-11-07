@@ -110,7 +110,7 @@ pub fn kernelRoot(ram: *gphys.Ram) vmm.Error!u64 {
     try mapPage(ram, root, kva_shim, ram.gpaOf(shim), pteAttrs(false, .{ .exec = true }));
     const idt = try ram.allocPages(1);
     const gates: *[x86.nvectors][2]u64 = @ptrCast(idt.ptr);
-    for (gates, 0..) |*g, i| g.* = x86.idtGate(kva_shim + x86.shim_vectors + i * 16);
+    for (gates, 0..) |*g, i| g.* = x86.idtGate(kva_shim + x86.shim_vectors + i * 16, i == x86.vector_bp);
     try mapPage(ram, root, kva_idt, ram.gpaOf(idt), pteAttrs(false, .{}));
     return root;
 }

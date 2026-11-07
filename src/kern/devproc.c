@@ -7,10 +7,14 @@
  * the caller's machine, by machine-local pid, and the pid in a qid is
  * looked up in the caller's machine on every open, read and write.
  *
- * Served: args, ctl (kill, hang, nohang, close, closefiles), fd, note,
- * noteid, notepg, ns, ppid, segment, status and wait. mem, regs, fpregs
- * and text (acid) wait for design/0010-self-host.md; kregs, kfpregs, proc, profile, syscall,
- * trace and watchpt have no meaning here. The CPU times in status are 0.
+ * Served: args, ctl (kill, hang, nohang, close, closefiles, stop, start,
+ * waitstop, startstop), fd, fpregs, mem, note, noteid, notepg, ns, ppid,
+ * regs, segment, status, text and wait. The debugging files and ctl
+ * messages, which acid uses, are design/0010-self-host.md's: memory and
+ * registers come from the Zig process through h9_procdebug, and the
+ * stopping is proc.c's. kregs, kfpregs, proc, profile, syscall, trace and
+ * watchpt have no meaning here, nor do traceme, startsyscall, profile,
+ * wired, pri and the real-time messages. The CPU times in status are 0.
  *
  * The record's debug QLock stands in for 9front's p->debug: the process
  * takes it to swap its groups (rfork, chdir) and to mark itself gone at
@@ -31,13 +35,17 @@ enum
 	Qargs,
 	Qctl,
 	Qfd,
+	Qfpregs,
+	Qmem,
 	Qnote,
 	Qnoteid,
 	Qnotepg,
 	Qns,
 	Qppid,
+	Qregs,
 	Qsegment,
 	Qstatus,
+	Qtext,
 	Qwait,
 };
 
@@ -48,6 +56,10 @@ enum
 	CMhang,
 	CMkill,
 	CMnohang,
+	CMstart,
+	CMstartstop,
+	CMstop,
+	CMwaitstop,
 };
 
 enum
@@ -66,13 +78,17 @@ Dirtab procdir[] =
 	"args",		{Qargs},	0,			0660,
 	"ctl",		{Qctl},		0,			0000,
 	"fd",		{Qfd},		0,			0444,
+	"fpregs",	{Qfpregs},	0,			0000,
+	"mem",		{Qmem},		0,			0000,
 	"note",		{Qnote},	0,			0000,
 	"noteid",	{Qnoteid},	0,			0664,
 	"notepg",	{Qnotepg},	0,			0000,
 	"ns",		{Qns},		0,			0444,
 	"ppid",		{Qppid},	0,			0444,
+	"regs",		{Qregs},	0,			0000,
 	"segment",	{Qsegment},	0,			0444,
 	"status",	{Qstatus},	0,			0444,
+	"text",		{Qtext},	0,			0000,
 	"wait",		{Qwait},	0,			0400,
 };
 
@@ -83,6 +99,10 @@ Cmdtab proccmd[] = {
 	CMhang,			"hang",			1,
 	CMkill,			"kill",			1,
 	CMnohang,		"nohang",		1,
+	CMstart,		"start",		1,
+	CMstartstop,		"startstop",		1,
+	CMstop,			"stop",			1,
+	CMwaitstop,		"waitstop",		1,
 };
 
 extern int procfdprint(Chan*, int, int, char*, int);
@@ -219,7 +239,26 @@ procopen(Chan *c, int omode0)
 	case Qwait:
 	case Qnoteid:
 	case Qnote:
+	case Qmem:
+	case Qregs:
+	case Qfpregs:
 		break;
+
+	case Qtext:
+		/* As 9front's proctext: the open is the image's own channel. */
+		if(omode != OREAD)
+			error(Eperm);
+		lock(&h->nlk);
+		if((tc = h->textc) != nil)
+			incref(&tc->ref);
+		unlock(&h->nlk);
+		if(tc == nil)
+			error(Eprocdied);
+		tc->offset = 0;
+		poperror();
+		h9_putproc(h);
+		cclose(c);
+		return tc;
 
 	case Qnotepg:
 		if(omode != OWRITE)
@@ -426,6 +465,10 @@ statusread(Hproc *h, char *buf, int nbuf)
 	lock(&h->nlk);
 	if(h->p == nil)
 		strcpy(state, "Moribund");
+	else if(h->stopped)
+		strcpy(state, "Stopped");
+	else if(h->stopwait)
+		strcpy(state, "Stopwait");
 	else if(h->aux != nil && h9_procstatus != nil)
 		h9_procstatus(h->aux, state, sizeof state, &mem);
 	unlock(&h->nlk);
@@ -438,6 +481,40 @@ statusread(Hproc *h, char *buf, int nbuf)
 		0UL, 0UL, (ulong)(ticks() - h->start),
 		0UL, 0UL, 0UL,
 		mem, (ulong)PriNormal, (ulong)PriNormal);
+}
+
+/*
+ * Moves n bytes of process h's memory or registers at off through the Zig
+ * side, raising the error for a failure. Writes need it stopped, as on
+ * 9front.
+ */
+static long
+procdebugio(Hproc *h, int what, int write, uvlong off, void *va, long n)
+{
+	long r;
+
+	lock(&h->nlk);
+	if(write && !h->stopped){
+		unlock(&h->nlk);
+		error(Ebadctl);
+	}
+	r = Dnoreg;
+	if(h->p == nil)
+		r = 0;
+	else if(h->aux != nil && h9_procdebug != nil)
+		r = h9_procdebug(h->aux, what, write, off, va, n);
+	unlock(&h->nlk);
+	if(h->p == nil)
+		error(Eprocdied);
+	switch(r){
+	case Dbadaddr:
+		error("bad address");
+	case Dnoreg:
+		error(Enoreg);
+	case Dnomem:
+		error(Enomem);
+	}
+	return r;
 }
 
 static long
@@ -467,6 +544,18 @@ procread(Chan *c, void *va, long n, vlong off)
 
 	case Qnoteid:
 		n = readnum(offset, va, n, h->noteid, NUMSIZE);
+		break;
+
+	case Qmem:
+		n = procdebugio(h, Dmem, 0, off, va, n);
+		break;
+
+	case Qregs:
+		n = procdebugio(h, Dregs, 0, off, va, n);
+		break;
+
+	case Qfpregs:
+		n = procdebugio(h, Dfpregs, 0, off, va, n);
 		break;
 
 	case Qppid:
@@ -622,6 +711,84 @@ procctlclosefiles(Hproc *h, int all, int fd)
 	dropgroups(&g);
 }
 
+static int
+stoppedorgone(void *a)
+{
+	Hproc *h;
+
+	h = a;
+	return h->stopped || h->p == nil;
+}
+
+/*
+ * 9front's procstopwait: asks h to stop with ctl (Pstopme, Ptraceme; 0
+ * only waits) and waits until it has, unless it's the caller, which
+ * stops at its next stop point. A process spinning in guest code is
+ * kicked; one blocked in a syscall stops when the call returns.
+ */
+static void
+procstopwait(Hproc *h, int ctl)
+{
+	Hproc *me;
+
+	me = h9_uphproc();
+	lock(&h->nlk);
+	/*
+	 * Unlike 9front, a process may stop itself while a debugger waits
+	 * for it to: it doesn't wait, so they don't conflict.
+	 */
+	if(h->pdbg && h != me){
+		unlock(&h->nlk);
+		error(Einuse);
+	}
+	if(h->stopped || h->p == nil){
+		unlock(&h->nlk);
+		return;
+	}
+	if(ctl != 0){
+		h->procctl = ctl;
+		if(h->aux != nil && h9_stopkick != nil)
+			h9_stopkick(h->aux);
+	}
+	if(h == me){
+		unlock(&h->nlk);
+		return;
+	}
+	h->pdbg = 1;
+	unlock(&h->nlk);
+	me->stopwait = 1;
+	if(waserror()){
+		me->stopwait = 0;
+		lock(&h->nlk);
+		h->pdbg = 0;
+		unlock(&h->nlk);
+		nexterror();
+	}
+	sleep(&h->stopr, stoppedorgone, h);
+	poperror();
+	me->stopwait = 0;
+	lock(&h->nlk);
+	h->pdbg = 0;
+	unlock(&h->nlk);
+	if(h->p == nil)
+		error(Eprocdied);
+}
+
+/* Resumes a stopped process, for ctl start and startstop. */
+static void
+procstart(Hproc *h, int ctl)
+{
+	lock(&h->nlk);
+	if(!h->stopped){
+		unlock(&h->nlk);
+		error(Ebadctl);
+	}
+	h->procctl = ctl;
+	h->stopped = 0;
+	unlock(&h->nlk);
+	wakeup(&h->startr);
+}
+
 static void
 procctlreq(Hproc *h, char *va, int n)
 {
@@ -649,6 +816,19 @@ procctlreq(Hproc *h, char *va, int n)
 		break;
 	case CMnohang:
 		h->hang = 0;
+		break;
+	case CMstart:
+		procstart(h, 0);
+		break;
+	case CMstartstop:
+		procstart(h, Ptraceme);
+		procstopwait(h, Ptraceme);
+		break;
+	case CMstop:
+		procstopwait(h, Pstopme);
+		break;
+	case CMwaitstop:
+		procstopwait(h, 0);
 		break;
 	default:
 		error(Ebadctl);
@@ -698,6 +878,18 @@ procwrite(Chan *c, void *va, long n, vlong off)
 
 	case Qctl:
 		procctlreq(h, va, n);
+		break;
+
+	case Qmem:
+		n = procdebugio(h, Dmem, 1, off, va, n);
+		break;
+
+	case Qregs:
+		n = procdebugio(h, Dregs, 1, off, va, n);
+		break;
+
+	case Qfpregs:
+		n = procdebugio(h, Dfpregs, 1, off, va, n);
 		break;
 
 	case Qnote:

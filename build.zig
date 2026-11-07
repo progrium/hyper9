@@ -142,9 +142,14 @@ const gfx_fixtures = [_][]const u8{ "binds", "drawnew", "draw", "kbd", "mouse", 
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping. `arch`, if given, is passed to h9
 /// as --arch (from -Darch). `guest_test` says h9 was built with
-/// -Dguest-test.
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures, guest_test: bool, host_cmd: bool) *std.Build.Step.Run {
+/// -Dguest-test, and `host_cmd` that it was built with -Dhost-cmd. `src`,
+/// if given, is a 9front checkout's `sys` directory, which the self-host
+/// cases bind over /sys when the root lacks /sys/src.
+fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, h9_bin: []const u8, root: []const u8, backends: []const u8, pending: bool, arch: ?[]const u8, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
+    // The self-host cases' source when the root has no /sys/src
+    // (design/0010-self-host.md).
+    if (src) |dir| run.setEnvironmentVariable("H9_TEST_SRC", dir);
     // h9 serves tests/fixtures/guest in #H (design/0032-guest-tools.md).
     if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
     // Built with -Dhost-cmd: the host command cases run.
@@ -793,6 +798,14 @@ pub fn build(b: *std.Build) void {
     const root = b.option([]const u8, "root", "9front root tree for the demos and integration tests (default .local/9front/root)") orelse
         b.pathFromRoot(".local/9front/root");
     const h9_bin = b.getInstallPath(.bin, exe.out_filename);
+    // The self-host demos and cases need /sys/src: the root's (scripts/mkroot.py
+    // --src), or else this checkout's, which scripts/fetch.sh makes at the
+    // root's revision.
+    const src_dir: ?[]const u8 = b.option([]const u8, "src", "9front source's sys directory for the self-host cases when the root has no /sys/src (default .local/src/9front/sys)") orelse blk: {
+        const d = b.pathFromRoot(".local/src/9front/sys");
+        b.build_root.handle.access(b.graph.io, ".local/src/9front/sys/src", .{}) catch break :blk null;
+        break :blk d;
+    };
 
     if (b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20))) |namespace| {
         const cat_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
@@ -820,6 +833,38 @@ pub fn build(b: *std.Build) void {
         ls_demo.expectStdOutEqual(b.fmt("{d: >7}\n", .{n + guest_tree.bin}));
         ls_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &ls_demo.step);
+    }
+
+    // Self-host demos (design/0010-self-host.md), with the root's arm64
+    // binaries: they need /sys/src, the root's or `src_dir` bound over
+    // /sys.
+    const root_src = if (b.build_root.handle.access(b.graph.io, b.pathJoin(&.{ root, "sys/src/cmd/ls.c" }), .{})) |_| true else |_| false;
+    if (root_src or src_dir != null) {
+        // A scratch cwd unioned before /sys/src/cmd, so mk reads the stock
+        // mkfile and source there and writes into the scratch directory,
+        // and the symbols name /sys/src/cmd as the shipped binary's do.
+        const bind_src = if (root_src) "" else b.fmt("bind -a /mnt/term{s} /sys && ", .{src_dir.?});
+        const ls_cwd = b.addWriteFiles();
+        _ = ls_cwd.add(".keep", "");
+        const ls_build = b.addSystemCommand(&.{ h9_bin, "--root", root, "--arch", "arm64", "--timeout", "600s" });
+        if (!root_src) ls_build.addArgs(&.{ "--readable", src_dir.? });
+        ls_build.addArg("--cwd");
+        ls_build.addDirectoryArg(ls_cwd.getDirectory());
+        ls_build.addArgs(&.{ "--rc", b.fmt("{s}bind -bc /mnt/term/cwd /sys/src/cmd && cd /sys/src/cmd && mk 7.ls >/dev/null && ./7.ls -d / && cmp 7.ls /arm64/bin/ls && echo identical", .{bind_src}) });
+        ls_build.expectStdOutEqual("/\nidentical\n");
+        ls_build.has_side_effects = true;
+        ls_build.step.dependOn(signed_step);
+        addDemo(b, &demos, "self-host", &ls_build.step);
+    }
+    if (countBin(b, root) != null) {
+        // acid attaches to a sleeping process and prints its stack.
+        const acid_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--arch", "arm64", "--timeout", "60s", "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" });
+        acid_demo.setStdIn(.{ .bytes = "stk()\n" });
+        acid_demo.expectStdOutMatch("main(argv=");
+        acid_demo.expectStdOutMatch("/sys/src/cmd/sleep.c:");
+        acid_demo.has_side_effects = true;
+        acid_demo.step.dependOn(signed_step);
+        addDemo(b, &demos, "self-host", &acid_demo.step);
     }
 
     // Each integration case runs on every backend built in that runs the
@@ -871,7 +916,7 @@ pub fn build(b: *std.Build) void {
         run_stdtest.step.dependOn(signed_step);
         go_stdtest.dependOn(&run_stdtest.step);
     }
-    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases, guest_test, host_cmd);
+    const run_integration = addIntegration(b, optimize, &.{}, h9_bin, root, backend_list, run_pending, test_arch, go_cases, guest_test, host_cmd, src_dir);
     run_integration.step.dependOn(signed_step);
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
@@ -933,7 +978,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases, guest_test, host_cmd);
+            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), h9_bin, root, backend_list, true, test_arch, go_cases, guest_test, host_cmd, src_dir);
             run_cases.step.dependOn(signed_step);
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
