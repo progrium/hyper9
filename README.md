@@ -31,13 +31,13 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [gfx](design/0015-gfx.md) | accepted | ready | Graphics (--gfx) |
 | [kvm](design/0016-kvm.md) | draft |  | KVM backend |
 | [whp](design/0017-whp.md) | draft | needs kvm | WHP backend |
-| [linux-personality](design/0018-linux-personality.md) | draft | needs symlinks-in-root, exit-status | Linux personality |
+| [linux-personality](design/0018-linux-personality.md) | draft | needs exit-status | Linux personality |
 | [zig-interpreter](design/0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](design/0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
 | [dotl](design/0022-dotl.md) | draft | needs serve | 9P2000.L and ZeroFS |
 | [guest-tools](design/0032-guest-tools.md) | implemented |  | h9's own commands in the guest |
 | [exit-status](design/0033-exit-status.md) | draft |  | Host exit statuses for processes killed by notes |
-| [symlinks-in-root](design/0034-symlinks-in-root.md) | accepted | ready | Symlinks resolved inside a bound tree |
+| [symlinks-in-root](design/0034-symlinks-in-root.md) | implemented |  | Symlinks resolved inside a bound tree |
 | [serve](design/0035-serve.md) | draft |  | Serving the namespace over 9P |
 | [linux-threads](design/0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](design/0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
@@ -81,7 +81,7 @@ flowchart LR
   p_dotl["#35;22 dotl<br/>draft"]:::draft
   p_guest_tools["#35;32 guest-tools<br/>implemented"]:::implemented
   p_exit_status["#35;33 exit-status<br/>draft"]:::draft
-  p_symlinks_in_root["#35;34 symlinks-in-root<br/>accepted"]:::accepted
+  p_symlinks_in_root["#35;34 symlinks-in-root<br/>implemented"]:::implemented
   p_serve["#35;35 serve<br/>draft"]:::draft
   p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
@@ -321,7 +321,7 @@ A conversation's `data` file carries binary messages as a byte stream, and its
 `text` file carries text messages one per read and write, for any WebSocket
 service. Guest connections don't use the host's proxies.
 
-Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--cwd DIR`, `--env
+Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--root-contained`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,
@@ -407,7 +407,9 @@ writes the root tree instead, and `--write=scope` makes the root
 read-only. `--write=ephemeral` makes every writable path a copy-on-write
 overlay as well, so nothing reaches the host. `#U` and `#C` are masked, so the guest can't attach more of the host,
 and symlinks are resolved before access is checked, so a link inside a bound
-tree can't reach outside it. See [DESIGN.md](DESIGN.md), "Sandbox policy".
+tree can't reach outside it. `--root-contained` resolves the root tree's
+links inside it instead, as `chroot` would, for Linux roots and container
+images whose links are absolute. See [DESIGN.md](DESIGN.md), "Sandbox policy".
 
 ```sh
 h9 --profile=tight ls -l            # read-only cwd, no network, 10m timeout

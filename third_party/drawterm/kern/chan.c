@@ -758,6 +758,8 @@ cclone(Chan *c)
 
 /* h9: src/kern/devoverlay.c */
 extern int h9_overlay_lowerdev(int, int, Qid, int*, int*);
+/* h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h) */
+extern void h9_fs_anchor(Chan*);
 
 /* also used by sysfile.c:/^mountfix */
 int
@@ -1309,6 +1311,10 @@ namec(char *aname, int amode, int omode, ulong perm)
 		}
 		nexterror();
 	}
+
+	/* h9: a contained #U attach's tree is where its walk ends (devfs). */
+	if(nomount && devtab[c->type]->dc == 'U')
+		h9_fs_anchor(c);
 
 	if(e.mustbedir && (c->qid.type&QTDIR) == 0)
 		error("not a directory");
