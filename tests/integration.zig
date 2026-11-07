@@ -2104,7 +2104,7 @@ test "--timeout stops processes blocked in rendezvous and semacquire [3]" {
     defer r.deinit();
     const took = t0.untilNow(io, .awake).toMilliseconds();
     errdefer std.debug.print("took {d} ms: {s}", .{ took, r.err });
-    try std.testing.expectEqual(1, r.code);
+    try std.testing.expectEqual(124, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
     // Hangup or the teardown 2 s later; one run per backend.
     try std.testing.expect(took < 10_000 * @as(i64, @intCast(std.mem.count(u8, e.backends, ",") + 1)));
