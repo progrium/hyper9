@@ -2,7 +2,7 @@
 id: 10
 slug: self-host
 title: Self-hosting
-status: accepted
+status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: []
@@ -188,3 +188,13 @@ Already done and untagged, as bug fixes: `test "concurrent processes contending 
 ## Open issues
 
 - **Code-cache invalidation cost on emu.** Unicorn's whole-cache flush is the simple way to drop stale translated blocks after a text write. If stepping through hot code makes that too slow, emu could flush only the blocks for the written range (`uc_ctl_remove_cache`). Measure it with the acid case before choosing.
+
+## Updates
+
+- 2026-11-07: Implemented. Details settled during implementation:
+  - **Stop points.** A process stops at syscall entry, at note delivery (which `stop`'s kick forces for a process spinning in guest code), on a breakpoint exit, and after `exec` with `hang`. Syscall return isn't a separate point: the next one is the following syscall entry or kick, which acid can't tell apart.
+  - **`fpregs`** reads only while the process is stopped, since a running process's FP state lives in its vCPU. On 386 it's the 512-byte FXSAVE image, as on amd64.
+  - **Errors.** Missing register state fails with drawterm's `Enoreg` string rather than 9front's "no register set"; acid only checks that the read fails.
+  - **Self-stop.** A process may write `stop` to its own `ctl` while a debugger waits on it with `waitstop`. 9front refuses that with `Einuse`; the integration fixture stops itself at known points this way, and acid never does it.
+  - **The read-only install case** runs under `--write=scope`. Since [overlay](0011-overlay.md) became the default, `mk install` succeeds into the run's overlay and is discarded; `--write=scope` gives the read-only root the case means.
+  - **Code caches on emu.** Unicorn's whole-cache flush is used. acid's `step` and `next` over `sleep`'s `main` stayed interactive on the emulator, so the per-range flush wasn't needed.

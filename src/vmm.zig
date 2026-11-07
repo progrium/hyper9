@@ -87,6 +87,11 @@ pub const Fault = struct {
 pub const Exit = union(enum) {
     syscall,
     fault: Fault,
+    /// A breakpoint instruction: BRK on arm64 (ESR class 0x3C, or the
+    /// breakpoint classes 0x30 and 0x31), INT3 on amd64 and 386. The PC
+    /// is left at the BRK, and after the INT3, as 9front leaves it
+    /// (design/0010-self-host.md).
+    breakpoint,
     interrupted,
     halted,
     other: u64,
@@ -422,6 +427,36 @@ pub const AddressSpace = union(enum) {
             .fake => |f| f.translate(f.ctx, va, len),
             inline else => |p| p.translate(va, len),
         };
+    }
+
+    /// Copies between `buf` and [va, va+buf.len), which must lie within
+    /// one mapping, holding the space's lock across the copy, so an
+    /// `unmap` on another thread (after which the caller may free the
+    /// pages) waits for it. For reading another process's memory
+    /// (/proc/n/mem); page permissions don't apply. Returns false if
+    /// the range isn't mapped.
+    pub fn copy(as: AddressSpace, va: u64, buf: []u8, dir: enum { read, write }) bool {
+        return switch (as) {
+            .fake => |f| {
+                const mem = f.translate(f.ctx, va, buf.len) orelse return false;
+                switch (dir) {
+                    .read => @memcpy(buf, mem),
+                    .write => @memcpy(mem, buf),
+                }
+                return true;
+            },
+            inline else => |p| p.copy(va, buf, dir == .write),
+        };
+    }
+
+    /// Says the host wrote code at [va, va+len) (a breakpoint through
+    /// /proc/n/mem): vCPUs running the space drop what they cached of
+    /// the old code before their next run. Safe from any thread.
+    pub fn codeChanged(as: AddressSpace, va: u64, len: u64) void {
+        switch (as) {
+            .fake => {},
+            inline else => |p| p.codeChanged(va, len),
+        }
     }
 };
 

@@ -37,7 +37,7 @@ const Env = struct {
     arch: ?[]const u8,
 };
 
-var env_buf: [6][std.Io.Dir.max_path_bytes]u8 = undefined;
+var env_buf: [7][std.Io.Dir.max_path_bytes]u8 = undefined;
 
 /// An environment variable, on every host (getPosix doesn't build on
 /// Windows). Values live in one of seven slots, chosen by the caller.
@@ -120,11 +120,16 @@ fn run(e: Env, args: []const []const u8) !Result {
 
 /// Like `run`, with `stdin` (if not null) on the guest's console.
 fn runIn(e: Env, args: []const []const u8, stdin: ?[]const u8) !Result {
+    return runInFor(e, args, stdin, 30_000);
+}
+
+/// Like `runIn`, with a harness timeout of `ms` instead of 30 s.
+fn runInFor(e: Env, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Result {
     var first: ?Result = null;
     errdefer if (first) |f| f.deinit();
     var it = std.mem.tokenizeScalar(u8, e.backends, ',');
     while (it.next()) |backend| {
-        const r = try runOn(e, backend, args, stdin);
+        const r = try runOnFor(e, backend, args, stdin, ms);
         if (first) |f| {
             defer r.deinit();
             errdefer std.debug.print("backend {s} differs from {s} for h9 {s}\n", .{ backend, firstBackend(e), args[0] });
@@ -141,12 +146,16 @@ fn firstBackend(e: Env) []const u8 {
 }
 
 fn runOn(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const u8) !Result {
+    return runOnFor(e, backend, args, stdin, 30_000);
+}
+
+fn runOnFor(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
-    const r = try runProcess(argv.items, stdin);
+    const r = try runProcessWith(argv.items, stdin, null, ms);
     const code = switch (r.term) {
         .exited => |c| c,
         else => {
@@ -1256,6 +1265,335 @@ test "changes only under $home, or only by the namespace builder, print no notic
         t.drain(200) catch {};
         try std.testing.expect(std.mem.indexOf(u8, t.out.items, notice) == null);
     }
+}
+
+// Self-hosting (design/0010-self-host.md): the root's compilers and mk
+// build 9front's own source, and acid debugs live processes. The builds
+// use the root's /sys/src (scripts/mkroot.py --src), or else H9_TEST_SRC,
+// a checkout's sys directory, bound over /sys; they skip without either.
+// They write into a scratch cwd, never into the root.
+
+/// How a case reaches /sys/src: extra h9 flags, and an rc prefix that
+/// binds it.
+const Src = struct {
+    flags: []const []const u8,
+    bind: []const u8,
+};
+
+var src_flags: [2][]const u8 = undefined;
+var src_bind_buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+
+fn selfSrc(e: Env) !Src {
+    if (std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "sys/src/cmd/ls.c"), .{})) |_| {
+        return .{ .flags = &.{}, .bind = "" };
+    } else |_| {}
+    const dir = getenv(6, "H9_TEST_SRC") orelse return error.SkipZigTest;
+    var path_tmp: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const ls = std.fmt.bufPrint(&path_tmp, "{s}/src/cmd/ls.c", .{dir}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, ls, .{}) catch return error.SkipZigTest;
+    src_flags = .{ "--readable", dir };
+    return .{ .flags = &src_flags, .bind = try std.fmt.bufPrint(&src_bind_buf, "bind -a /mnt/term{s} /sys && ", .{dir}) };
+}
+
+/// The architecture the case's binaries are for, and its compiler's letter.
+fn selfArch(e: Env) struct { name: []const u8, o: []const u8 } {
+    const a = e.arch orelse "arm64";
+    const o: []const u8 = if (std.mem.eql(u8, a, "amd64")) "6" else if (std.mem.eql(u8, a, "386")) "8" else "7";
+    return .{ .name = a, .o = o };
+}
+
+/// Runs rc `script` with the scratch dir `s` as the cwd and `/sys/src`
+/// from `src` bound first, under `flags` and a 600 s timeout.
+fn runSelf(e: Env, s: *Scratch, src: Src, flags: []const []const u8, script: []const u8, stdin: ?[]const u8) !Result {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    var tb: [16]u8 = undefined;
+    try argv.appendSlice(gpa, &.{ "--cwd", s.path, "--timeout", slowTimeout(&tb, 600_000) });
+    try argv.appendSlice(gpa, src.flags);
+    try argv.appendSlice(gpa, flags);
+    const cmd = try std.mem.concat(gpa, u8, &.{ src.bind, script });
+    defer gpa.free(cmd);
+    try argv.appendSlice(gpa, &.{ "--rc", cmd });
+    return runInFor(e, argv.items, stdin, 660_000);
+}
+
+fn expectOk(r: Result, want: []const u8) !void {
+    errdefer std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings(want, r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "7c and 7l build ls in the cwd, and it runs [10]" {
+    const e = try env(@src());
+    const src = try selfSrc(e);
+    const a = selfArch(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var buf: [256]u8 = undefined;
+    const r = try runSelf(e, &s, src, &.{}, try std.fmt.bufPrint(&buf, "cp /sys/src/cmd/ls.c . && {0s}c ls.c && {0s}l -o {0s}.ls ls.{0s} && ./{0s}.ls -d /", .{a.o}), null);
+    defer r.deinit();
+    try expectOk(r, "/\n");
+    try std.testing.expect(s.exists(try std.fmt.bufPrint(&buf, "{s}.ls", .{a.o})));
+}
+
+test "mk builds ls and cat with the stock cmd/mkfile, byte-identical to the root's [10]" {
+    const e = try env(@src());
+    const src = try selfSrc(e);
+    const a = selfArch(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // The scratch dir goes before /sys/src/cmd in a union, so mk reads the
+    // stock mkfile and source and creates its files in the scratch dir,
+    // and the symbols name /sys/src/cmd as the shipped binaries' do.
+    var buf: [512]u8 = undefined;
+    const r = try runSelf(e, &s, src, &.{}, try std.fmt.bufPrint(&buf,
+        \\bind -bc /mnt/term/cwd /sys/src/cmd && cd /sys/src/cmd &&
+        \\mk ls.{0s} cat.{0s} >/dev/null && mk {0s}.ls {0s}.cat >/dev/null &&
+        \\cmp {0s}.ls /{1s}/bin/ls && cmp {0s}.cat /{1s}/bin/cat && echo identical
+    , .{ a.o, a.name }), null);
+    defer r.deinit();
+    try expectOk(r, "identical\n");
+    try std.testing.expect(s.exists(try std.fmt.bufPrint(&buf, "{s}.ls", .{a.o})));
+    try expectRootLacks(e, try std.fmt.bufPrint(&buf, "sys/src/cmd/{s}.ls", .{a.o}));
+}
+
+test "mk builds a library into the cwd against the read-only root [10]" {
+    const e = try env(@src());
+    const src = try selfSrc(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try runSelf(e, &s, src, &.{"--write=scope"},
+        \\bind -bc /mnt/term/cwd /sys/src/libbio && cd /sys/src/libbio &&
+        \\mk 'LIB=/mnt/term/cwd/libbio.a' >/dev/null && ar t /mnt/term/cwd/libbio.a | grep -c '^bprint\.'
+    , null);
+    defer r.deinit();
+    try expectOk(r, "1\n");
+    try std.testing.expect(s.exists("libbio.a"));
+}
+
+test "mk install into a read-only root fails with permission denied [10]" {
+    const e = try env(@src());
+    const src = try selfSrc(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // --write=scope keeps the root read-only; the default profile's
+    // overlay would take the install in memory (design/0011-overlay.md).
+    const r = try runSelf(e, &s, src, &.{"--write=scope"}, "bind -bc /mnt/term/cwd /sys/src/cmd && cd /sys/src/cmd && mk cat.install >/dev/null", null);
+    defer r.deinit();
+    errdefer std.debug.print("stderr:\n{s}\n", .{r.err});
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") != null);
+}
+
+test "NPROC defaults to the vCPU limit, and --env overrides it [10]" {
+    const e = try env(@src());
+    const two = try run(e, &.{ "--cpus", "2", "--rc", "echo $NPROC" });
+    defer two.deinit();
+    try expectOk(two, "2\n");
+    const set = try run(e, &.{ "--cpus", "2", "--env", "NPROC=5", "--rc", "echo $NPROC" });
+    defer set.deinit();
+    try expectOk(set, "5\n");
+    // Without --cpus, the host's CPU count, capped by the backend's limit.
+    const def = try run(e, &.{ "--rc", "echo $NPROC" });
+    defer def.deinit();
+    const n = try std.fmt.parseInt(u32, std.mem.trim(u8, def.out, "\n"), 10);
+    try std.testing.expect(n >= 1 and n <= @max(1, try std.Thread.getCpuCount()));
+}
+
+test "parallel mk builds 7c repeatedly without hanging [10]" {
+    const e = try env(@src());
+    const src = try selfSrc(e);
+    const a = selfArch(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // Before kern's locks were ordered (-DPTHREAD), mk with NPROC > 1
+    // hung in about 1 run in 8.
+    var buf: [512]u8 = undefined;
+    const r = try runSelf(e, &s, src, &.{}, try std.fmt.bufPrint(&buf,
+        \\bind -bc /mnt/term/cwd /sys/src/cmd/7c && cd /sys/src/cmd/7c &&
+        \\for(i in 1 2 3){{
+        \\    rm -f *.{0s}
+        \\    NPROC=4 mk cgen.{0s} enam.{0s} list.{0s} machcap.{0s} mul.{0s} peep.{0s} pgen.{0s} pswt.{0s} reg.{0s} sgen.{0s} swt.{0s} txt.{0s} >/dev/null || echo failed
+        \\}}
+        \\ls *.{0s} | wc -l
+    , .{a.o}), null);
+    defer r.deinit();
+    try expectOk(r, "     12\n");
+}
+
+test "/proc/n/segment lists Stack first [10]" {
+    const e = try env(@src());
+    // libmach's stacktop reads the first line.
+    const r = try run(e, &.{ "--rc", "sed 1q /proc/$pid/segment | awk '{print $1}'" });
+    defer r.deinit();
+    try expectOk(r, "Stack\n");
+}
+
+/// Builds tests/fixtures/selfhost's target and dbg into the scratch dir.
+fn buildDebug(e: Env, s: *Scratch) !void {
+    const a = selfArch(e);
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target.c", .data = @embedFile("fixtures/selfhost/target.c") });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dbg.c", .data = @embedFile("fixtures/selfhost/dbg.c") });
+    var buf: [256]u8 = undefined;
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", try std.fmt.bufPrint(&buf, "for(f in target dbg) {0s}c -FTVw $f.c && {0s}l -o $f $f.{0s} || exit build", .{a.o}) });
+    defer r.deinit();
+    errdefer std.debug.print("build: {s}{s}", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+}
+
+/// rc functions for the debugging cases: `addr sym` is a symbol's address
+/// in target, and `run mode` starts `./target mode` in the background,
+/// sets $p to its pid, and prints its exit status when it ends, without
+/// the pid.
+const debug_rc =
+    \\fn addr { nm target | awk '$3 == "'$1'" { print $1 }' }
+    \\fn run { rm -f pid child; { ./target $*; echo status $status | sed 's/^status target [0-9]+:/status target:/' } & while(! test -s pid) sleep 0.05; p=`{cat pid} }
+    \\
+;
+
+/// Builds the debugging fixtures and runs rc `script` after `debug_rc`.
+fn runDebug(e: Env, script: []const u8, stdin: ?[]const u8) !Result {
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildDebug(e, &s);
+    const cmd = try std.mem.concat(gpa, u8, &.{ debug_rc, script });
+    defer gpa.free(cmd);
+    var tb: [16]u8 = undefined;
+    return runInFor(e, &.{ "--cwd", s.path, "--timeout", slowTimeout(&tb, 60_000), "--rc", cmd }, stdin, 90_000);
+}
+
+test "/proc/n/regs and fpregs read a stopped process's registers [10]" {
+    const e = try env(@src());
+    const r = try runDebug(e,
+        \\run thrice
+        \\echo waitstop >/proc/$p/ctl
+        \\awk '{print $3}' /proc/$p/status
+        \\./dbg regs $p
+        \\echo kill >/proc/$p/ctl
+        \\wait
+    , null);
+    defer r.deinit();
+    // arm64's FPsave (libmach's FPREGSIZE), else the FXSAVE area.
+    const fp: usize = if (std.mem.eql(u8, selfArch(e).name, "arm64")) 520 else 512;
+    var buf: [128]u8 = undefined;
+    try expectOk(r, try std.fmt.bufPrint(&buf, "1\nStopped\nregs: a Ureg\npc in text 1\nfpregs {d}\nstatus target: Killed\n", .{fp}));
+}
+
+test "/proc/n/mem reads a variable and a write to text doesn't reach a sibling [10]" {
+    const e = try env(@src());
+    // The parent and child share text until the write, which gives the
+    // parent its own copy.
+    const r = try runDebug(e,
+        \\n=`{echo 16 i `{addr three} `{addr two} - p | dc}
+        \\run pair >out
+        \\echo waitstop >/proc/$p/ctl
+        \\c=`{cat child}
+        \\echo waitstop >/proc/$c/ctl
+        \\./dbg peek $p `{addr magic}
+        \\./dbg copy $p `{addr two} `{addr answer} $n
+        \\awk '$1 == "Text" {print $5}' /proc/$p/segment /proc/$c/segment
+        \\echo start >/proc/$c/ctl
+        \\echo start >/proc/$p/ctl
+        \\wait
+        \\sort out
+    , null);
+    defer r.deinit();
+    try expectOk(r, "0x5eedf00d\n1\n1\nchild 1\nparent 2\nstatus \n");
+}
+
+test "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address [10]" {
+    const e = try env(@src());
+    // target isn't sharing its text, so the writes go to the same pages
+    // each time, and only the code-cache invalidation makes them seen.
+    const r = try runDebug(e,
+        \\n=`{echo 16 i `{addr three} `{addr two} - p | dc}
+        \\run thrice
+        \\echo waitstop >/proc/$p/ctl
+        \\./dbg copy $p `{addr two} `{addr answer} $n
+        \\echo start >/proc/$p/ctl
+        \\echo waitstop >/proc/$p/ctl
+        \\./dbg copy $p `{addr three} `{addr answer} $n
+        \\echo start >/proc/$p/ctl
+        \\echo waitstop >/proc/$p/ctl
+        \\echo start >/proc/$p/ctl
+        \\wait
+    , null);
+    defer r.deinit();
+    try expectOk(r, "1\n2\n3\nstatus \n");
+}
+
+test "ctl hang stops a process at exec, and start runs it [10]" {
+    const e = try env(@src());
+    const r = try runDebug(e,
+        \\run hang
+        \\echo waitstop >/proc/$p/ctl
+        \\awk '{print $1, $3}' /proc/$p/status
+        \\echo start >/proc/$p/ctl
+        \\wait
+    , null);
+    defer r.deinit();
+    try expectOk(r, "echo Stopped\nhang\nstatus \n");
+}
+
+test "ctl stop stops a process spinning in guest code [10]" {
+    const e = try env(@src());
+    // The emulator passes the CPU on only at an exit, so target spin makes
+    // a syscall every few milliseconds; on a hypervisor, stop kicks the
+    // vCPU out of the loop.
+    const r = try runDebug(e,
+        \\run spin
+        \\echo stop >/proc/$p/ctl
+        \\awk '{print $3}' /proc/$p/status
+        \\echo start >/proc/$p/ctl
+        \\awk '{print $3}' /proc/$p/status | grep -c Stopped
+        \\echo kill >/proc/$p/ctl
+        \\wait
+    , null);
+    defer r.deinit();
+    try expectOk(r, "Stopped\n0\nstatus target: Killed\n");
+}
+
+test "a BRK posts sys: breakpoint [10]" {
+    const e = try env(@src());
+    const r = try runDebug(e,
+        \\run thrice
+        \\echo waitstop >/proc/$p/ctl
+        \\./dbg brk $p `{addr answer}
+        \\echo start >/proc/$p/ctl
+        \\wait
+        \\echo answer `{addr answer}
+    , null);
+    defer r.deinit();
+    errdefer std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ r.out, r.err });
+    // The PC is the BRK's on arm64 and past the INT3 on x86.
+    const nl = std.mem.lastIndexOfScalar(u8, r.out[0 .. r.out.len - 1], '\n').?;
+    const answer = try std.fmt.parseInt(u64, std.mem.trim(u8, r.out[nl + 1 + "answer ".len ..], "\n"), 16);
+    const a = selfArch(e);
+    var buf: [128]u8 = undefined;
+    const pc = if (std.mem.eql(u8, a.name, "arm64")) answer else answer + 1;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "1\nstatus target: sys: breakpoint pc=0x{x}\n", .{pc}), r.out[0 .. nl + 1]);
+}
+
+test "acid attaches and prints registers and a stack trace [10]" {
+    const e = try env(@src());
+    var tb: [16]u8 = undefined;
+    const r = try runIn(e, &.{ "--timeout", slowTimeout(&tb, 60_000), "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" }, "regs()\nstk()\n");
+    defer r.deinit();
+    errdefer std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ r.out, r.err });
+    // acid prints its registers by name: R0 on arm64, AX on x86.
+    const a = selfArch(e);
+    const reg = if (std.mem.eql(u8, a.name, "arm64")) "R0\t0x" else "AX\t0x";
+    try std.testing.expect(std.mem.indexOf(u8, r.out, reg) != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "sleep()+") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/sys/src/cmd/sleep.c:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "warning") == null);
 }
 
 // The terminal. These run h9 on a pty or pseudoconsole from tests/term.zig.

@@ -169,11 +169,21 @@ pub const AddressSpace = struct {
     regions: std.ArrayList(Region) = .empty,
     /// Bumped on every change, so vCPUs know to remap.
     generation: u64 = 1,
+    /// Bumped by `codeChanged`, so vCPUs drop their translated blocks.
+    code: std.atomic.Value(u64) = .init(0),
+    /// Guards `regions` against `copy` on another thread (/proc/n/mem).
+    lock: std.atomic.Mutex = .unlocked,
 
     const Region = struct { va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms };
 
+    fn lockSpin(as: *AddressSpace) void {
+        while (!as.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
     pub fn map(as: *AddressSpace, va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms) vmm.CreateError!void {
         if (va % vmm.page_size != 0 or mem.len % vmm.page_size != 0 or mem.len == 0) return error.BadAddress;
+        as.lockSpin();
+        defer as.lock.unlock();
         for (as.regions.items) |r| {
             if (va < r.va + r.mem.len and r.va < va + mem.len) return error.BadAddress;
         }
@@ -182,6 +192,8 @@ pub const AddressSpace = struct {
     }
 
     pub fn unmap(as: *AddressSpace, va: u64) void {
+        as.lockSpin();
+        defer as.lock.unlock();
         for (as.regions.items, 0..) |r, i| if (r.va == va) {
             _ = as.regions.swapRemove(i);
             as.generation += 1;
@@ -190,12 +202,36 @@ pub const AddressSpace = struct {
     }
 
     pub fn translate(as: *AddressSpace, va: u64, len: u64) ?[]u8 {
+        as.lockSpin();
+        defer as.lock.unlock();
+        return as.find(va, len);
+    }
+
+    fn find(as: *AddressSpace, va: u64, len: u64) ?[]u8 {
         for (as.regions.items) |r| {
             if (va >= r.va and va - r.va <= r.mem.len and len <= r.mem.len - (va - r.va)) {
                 return r.mem[va - r.va ..][0..len];
             }
         }
         return null;
+    }
+
+    /// `translate` and a copy under the lock; see vmm.AddressSpace.copy.
+    pub fn copy(as: *AddressSpace, va: u64, buf: []u8, write: bool) bool {
+        as.lockSpin();
+        defer as.lock.unlock();
+        const mem = as.find(va, buf.len) orelse return false;
+        if (write) @memcpy(mem, buf) else @memcpy(buf, mem);
+        return true;
+    }
+
+    /// The host wrote code: vCPUs running this space flush their
+    /// translated blocks before their next run. The whole cache goes, as
+    /// `sync` flushes it; design/0010-self-host.md leaves flushing only
+    /// the written range (uc_ctl_remove_cache) until stepping shows the
+    /// need.
+    pub fn codeChanged(as: *AddressSpace, _: u64, _: u64) void {
+        _ = as.code.fetchAdd(1, .release);
     }
 
     pub fn destroy(as: *AddressSpace) void {
@@ -245,6 +281,8 @@ const Stop = union(enum) {
     none,
     syscall,
     fault: vmm.Fault,
+    /// A breakpoint instruction (BRK, INT3).
+    breakpoint,
     /// A CPU exception other than a syscall (arm64 EXCP_* or x86 vector).
     exception: u32,
 };
@@ -258,6 +296,8 @@ const State = struct {
     as: ?*AddressSpace = null,
     mapped: std.ArrayList(AddressSpace.Region) = .empty,
     generation: u64 = 0,
+    /// The space's `code` when this engine last flushed its blocks.
+    code: u64 = 0,
     stop: Stop = .none,
     kicked: std.atomic.Value(bool) = .init(false),
     /// Set from just before `kicked` is checked until uc_emu_start returns.
@@ -282,6 +322,9 @@ const State = struct {
         if (s.arch == .arm64 and intno == arm64_excp_swi) return s.halt(.syscall);
         // INT $64; Unicorn has already moved EIP past it.
         if (s.arch == .i386 and intno == ia32.vector_syscall) return s.halt(.syscall);
+        // BRK, with the PC left at it; INT3, with EIP past it as for INT $64.
+        if (s.arch == .arm64 and intno == arm64_excp_bkpt) return s.halt(.breakpoint);
+        if (s.arch != .arm64 and intno == x86_vector_bp) return s.halt(.breakpoint);
         s.halt(.{ .exception = intno });
     }
 
@@ -304,7 +347,17 @@ const State = struct {
     /// Makes the engine's mappings match the address space.
     fn sync(s: *State) vmm.Error!void {
         const as = s.as orelse return;
-        if (s.generation == as.generation) return;
+        const code = as.code.load(.acquire);
+        if (s.generation == as.generation) {
+            if (s.code != code) {
+                // The host wrote code (codeChanged).
+                try check(uc.uc_ctl(s.engine, uc_ctl_tb_flush));
+                s.code = code;
+            }
+            return;
+        }
+        as.lockSpin();
+        defer as.lock.unlock();
         for (s.mapped.items) |r| try check(uc.uc_mem_unmap(s.engine, r.va, r.mem.len));
         s.mapped.clearRetainingCapacity();
         for (as.regions.items) |r| {
@@ -314,6 +367,7 @@ const State = struct {
         // Translated blocks may hold code from the old mappings.
         try check(uc.uc_ctl(s.engine, uc_ctl_tb_flush));
         s.generation = as.generation;
+        s.code = code;
     }
 
     fn writeRegs(s: *State) vmm.Error!void {
@@ -398,6 +452,10 @@ const State = struct {
                 return .syscall;
             },
             .fault => |f| return .{ .fault = f },
+            .breakpoint => {
+                s.setBreakpointType();
+                return .breakpoint;
+            },
             .exception => |n| return s.exception(n),
             .none => {},
         }
@@ -419,6 +477,17 @@ const State = struct {
             .arm64 => |*u| u.type = @as(u64, arm64.EC_SVC64) << 26,
             .amd64 => |*u| u.type = amd64_vector_syscall,
             .i386 => |*u| u.trap = ia32.vector_syscall,
+        }
+    }
+
+    /// Fills Ureg.type as the real kernel does for a breakpoint: the
+    /// ESR on arm64 (class BRK64, the BRK's immediate unknown here), the
+    /// vector on x86.
+    fn setBreakpointType(s: *State) void {
+        switch (s.ureg) {
+            .arm64 => |*u| u.type = @as(u64, arm64.EC_BRK64) << 26,
+            .amd64 => |*u| u.type = x86_vector_bp,
+            .i386 => |*u| u.trap = x86_vector_bp,
         }
     }
 
@@ -480,6 +549,9 @@ const uc_ctl_tb_flush: c_uint = uc.UC_CTL_TB_FLUSH | (1 << 30);
 
 // QEMU's arm64 exception numbers, as passed to UC_HOOK_INTR.
 const arm64_excp_swi = 2;
+const arm64_excp_bkpt = 7;
+// x86 #BP, which INT3 raises.
+const x86_vector_bp = 3;
 const arm64_nzcv: u64 = 0xf000_0000;
 // pc/io.h VectorSYSCALL, which 9front puts in Ureg.type for syscalls.
 const amd64_vector_syscall = 64;

@@ -403,6 +403,8 @@ h9_kern_postmach(void *v, int all, char *msg, int flag)
 
 void	(*h9_procstatus)(void*, char*, int, ulong*);
 int	(*h9_procsegment)(void*, char*, int);
+void	(*h9_stopkick)(void*);
+long	(*h9_procdebug)(void*, int, int, uvlong, void*, long);
 
 Hproc*
 h9_uphproc(void)
@@ -712,6 +714,152 @@ h9_kern_execnotes(void)
 	h->notify = 0;
 	h->notified = 0;
 	unlock(&h->nlk);
+}
+
+/*
+ * Debugging (design/0010-self-host.md): the process side of 9front's
+ * procctl. A debugger's ctl stop, startstop or an exec with hang set
+ * makes a stop request; the Zig exit loop checks for one at each stop
+ * point (entering a syscall, before running guest code again after a
+ * syscall, a kick, a fault or a breakpoint, and before delivering a
+ * note). Stopped, the process sleeps on its own kernel thread until ctl
+ * start, holding no vCPU.
+ */
+
+/*
+ * Whether the calling process should stop here, as 9front's procctl
+ * decides: for Pstopme always, for Ptraceme only with a note queued.
+ * Takes the request.
+ */
+int
+h9_kern_wantstop(void)
+{
+	Hproc *h;
+	int r;
+
+	h = lookup(up);
+	if(h == nil)
+		return 0;
+	r = 0;
+	lock(&h->nlk);
+	switch(h->procctl){
+	case Ptraceme:
+		if(h->nnote == 0 && !h->killed)
+			break;
+		/* fall through */
+	case Pstopme:
+		h->procctl = 0;
+		r = 1;
+		break;
+	}
+	unlock(&h->nlk);
+	return r;
+}
+
+static int
+notstopped(void *a)
+{
+	return !((Hproc*)a)->stopped;
+}
+
+/*
+ * Stops the calling process, waking a debugger waiting for that, and
+ * sleeps until ctl start. Returns 0 when started; -1 when interrupted (a
+ * note, a kill or the machine's teardown), still stopped, so the caller
+ * can decide whether to sleep again or h9_kern_unstop. The caller saves
+ * its registers for /proc/n/regs before calling.
+ */
+int
+h9_kern_stopwait(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h == nil)
+		return 0;
+	lock(&h->nlk);
+	h->stopped = 1;
+	unlock(&h->nlk);
+	wakeup(&h->stopr);
+	if(waserror())
+		return -1;
+	sleep(&h->startr, notstopped, h);
+	poperror();
+	return 0;
+}
+
+/* Ends a stop without ctl start, for a process that's going to die. */
+void
+h9_kern_unstop(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h == nil)
+		return;
+	lock(&h->nlk);
+	h->stopped = 0;
+	unlock(&h->nlk);
+}
+
+/* Whether ctl kill has been written for the calling process. */
+int
+h9_kern_killed(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	return h != nil && h->killed;
+}
+
+/*
+ * exec's part, as 9front's sysexec: with ctl hang set, the process stops
+ * before its first instruction. Returns whether it will.
+ */
+int
+h9_kern_exechang(void)
+{
+	Hproc *h;
+	int r;
+
+	h = lookup(up);
+	if(h == nil)
+		return 0;
+	lock(&h->nlk);
+	r = h->hang;
+	if(r)
+		h->procctl = Pstopme;
+	unlock(&h->nlk);
+	return r;
+}
+
+/*
+ * Keeps the image the calling process just executed, opened from path,
+ * for /proc/n/text (9front serves the image's channel). Best effort: on
+ * an error the process has no text.
+ */
+void
+h9_kern_settextpath(char *path)
+{
+	Hproc *h;
+	Chan *c, *old;
+
+	h = lookup(up);
+	if(h == nil)
+		return;
+	c = nil;
+	if(path != nil){
+		if(!waserror()){
+			c = namec(path, Aopen, OREAD, 0);
+			poperror();
+		}
+	}
+	lock(&h->nlk);
+	old = h->textc;
+	h->textc = c;
+	unlock(&h->nlk);
+	if(old != nil)
+		cclose(old);
 }
 
 /* The calling process's Egrp, for devenv; raises an error if it has none. */
@@ -1056,6 +1204,8 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 			free(p);
 		}
 		if(h != nil){
+			if(h->textc != nil)
+				cclose(h->textc);
 			if(h->egrp != nil)
 				h9_egrpclose(h->egrp);
 			putmach(h->mach);
@@ -1084,6 +1234,12 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	incref(&h->mach->ref);
 	h->notify = ph->notify;
 	h->noteid = (flag & RFNOTEG) ? newnoteid(h->mach) : ph->noteid;
+	/* As 9front's sysrfork: the child inherits hang, and runs the same image. */
+	h->hang = ph->hang;
+	lock(&ph->nlk);
+	if((h->textc = ph->textc) != nil)
+		incref(&h->textc->ref);
+	unlock(&ph->nlk);
 	strecpy(p->text, p->text+sizeof p->text, up->text);
 
 	p->slash = up->slash;
@@ -1344,6 +1500,7 @@ h9_kern_exit(void)
 {
 	Hproc *h, *ph;
 	Hwait *w;
+	Chan *c;
 
 	h = lookup(up);
 	if(h == nil){
@@ -1357,9 +1514,17 @@ h9_kern_exit(void)
 	h->p = nil;
 	h->aux = nil;
 	h->killed = 0;
+	h->stopped = 0;
+	h->procctl = 0;
+	c = h->textc;
+	h->textc = nil;
 	freenotes(h);
 	unlock(&h->nlk);
 	qunlock(&h->debug);
+	/* A debugger waiting for it to stop finds it gone (9front's pexit). */
+	wakeup(&h->stopr);
+	if(c != nil)
+		cclose(c);
 
 	ph = h->parent;
 	if(ph != nil){

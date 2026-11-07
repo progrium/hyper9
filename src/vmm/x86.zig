@@ -60,6 +60,8 @@ pub const why_shim = 3;
 /// 9front's pc64 VectorSYSCALL, which the shim puts in Ureg.type.
 pub const vector_syscall = 64;
 pub const vector_pf = 14;
+/// INT3, whose gate user mode may reach (design/0010-self-host.md).
+pub const vector_bp = 3;
 
 // pc64/mem.h's GDT: the same selectors as 9front's, so user code sees
 // UESEL and UDSEL.
@@ -145,12 +147,12 @@ pub const Tss = extern struct {
 
 /// An IDT entry: an interrupt gate to `handler` in the kernel code
 /// segment, on IST1, reachable only from ring 0 (so INT n from user mode
-/// is a #GP).
-pub fn idtGate(handler: u64) [2]u64 {
+/// is a #GP), except with `user`, for INT3.
+pub fn idtGate(handler: u64, user: bool) [2]u64 {
     const lo = (handler & 0xffff) |
         (@as(u64, kesel) << 16) |
         (@as(u64, 1) << 32) | // IST1
-        (@as(u64, 0x8e) << 40) | // present, DPL 0, 64-bit interrupt gate
+        (@as(u64, if (user) 0xee else 0x8e) << 40) | // present, DPL 3 or 0, 64-bit interrupt gate
         ((handler >> 16 & 0xffff) << 48);
     return .{ lo, handler >> 32 };
 }

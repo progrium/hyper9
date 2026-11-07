@@ -22,6 +22,10 @@ enum
 	TEXTLEN		= 64,
 	ARGSLEN		= 128,	/* args kept for /proc, as 9front's exec */
 	NNOTE		= 5,	/* queued notes, as 9front */
+
+	/* procctl, as 9front's Proc_stopme and Proc_traceme */
+	Pstopme		= 1,	/* stop at the next stop point */
+	Ptraceme	= 2,	/* stop at the next stop point with a note queued */
 };
 
 /* h9_kern_popnote's results. */
@@ -85,7 +89,7 @@ struct Hproc
 	char	args[ARGSLEN];	/* exec's argv, NUL-separated, as 9front's p->args */
 	int	nargs;
 	int	setargs;	/* args was written through /proc */
-	int	hang;		/* ctl hang: stop at exec (kept, not acted on) */
+	int	hang;		/* ctl hang: exec stops the process before it runs */
 	int	killed;		/* ctl kill: die with "Killed" at the next delivery; under nlk */
 	char	exitstr[ERRMAX];
 	void	*egrp;		/* devenv.c's HEgrp */
@@ -101,6 +105,15 @@ struct Hproc
 	int	nnote;
 	Hnote	*note[NNOTE];
 	Hnote	*lastnote;	/* the note being handled, or that killed it */
+
+	/* Debugging (design/0010-self-host.md); under nlk. */
+	int	procctl;	/* Pstopme or Ptraceme: stop at the next stop point */
+	int	stopped;	/* parked at a stop point until ctl start */
+	int	pdbg;		/* a debugger waits in stopr for it to stop */
+	int	stopwait;	/* this process waits for another to stop, for status */
+	Rendez	startr;		/* the stopped process sleeps here */
+	Rendez	stopr;		/* its debugger sleeps here */
+	Chan	*textc;		/* the executed image, open, for /proc/n/text; or nil */
 
 	Hproc	*parent;	/* nil with RFNOWAIT or for a machine's first process */
 	Lock	exl;		/* guards the fields below */
@@ -148,3 +161,31 @@ extern void	(*h9_procstatus)(void*, char*, int, ulong*);
  * 9front's format; returns its length. Called as h9_procstatus is.
  */
 extern int	(*h9_procsegment)(void*, char*, int);
+
+/*
+ * Set by the Zig side: makes Zig process aux check for a stop request at
+ * its next stop point, kicking it out of guest code. Called as
+ * h9_notekick is.
+ */
+extern void	(*h9_stopkick)(void*);
+
+/* h9_procdebug's files and errors. */
+enum
+{
+	Dmem,
+	Dregs,
+	Dfpregs,
+
+	Dbadaddr	= -1,	/* nothing mapped there */
+	Dnoreg		= -2,	/* no saved registers: not stopped or in a syscall */
+	Dnomem		= -3,	/* out of memory copying text for a write */
+};
+
+/*
+ * Set by the Zig side: reads or writes n bytes of Zig process aux's
+ * memory (Dmem, at address off), registers (Dregs, its Ureg) or FP
+ * registers (Dfpregs, its FPsave) at off. Returns the bytes moved, or a
+ * negative D error. Writes come only while it's stopped. Called as
+ * h9_procstatus is.
+ */
+extern long	(*h9_procdebug)(void*, int, int, uvlong, void*, long);

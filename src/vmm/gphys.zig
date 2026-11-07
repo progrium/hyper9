@@ -218,6 +218,27 @@ pub fn AddressSpace(comptime pt: type) type {
             return null;
         }
 
+        /// `translate` and a copy under the lock; see vmm.AddressSpace.copy.
+        pub fn copy(as: *Self, va: u64, buf: []u8, write: bool) bool {
+            as.lockSpin();
+            defer as.lock.unlock();
+            for (as.regions.items) |g| {
+                if (va >= g.va and va - g.va <= g.mem.len and buf.len <= g.mem.len - (va - g.va)) {
+                    const mem = g.mem[va - g.va ..][0..buf.len];
+                    if (write) @memcpy(mem, buf) else @memcpy(buf, mem);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// The host wrote code: vCPUs that ran this space flush their TLB
+        /// and I-cache (the shim's flush) before their next run, as after
+        /// an unmap.
+        pub fn codeChanged(as: *Self, _: u64, _: u64) void {
+            _ = as.epoch.fetchAdd(1, .release);
+        }
+
         /// Frees the page tables; the mapped pages belong to the caller.
         pub fn destroy(as: *Self) void {
             pt.freeRoot(as.ram, as.root);

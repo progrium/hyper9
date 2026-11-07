@@ -230,6 +230,7 @@ pub const Vcpu = struct {
         const esr = s.ureg.type;
         return switch (esr >> 26) {
             arm64.EC_SVC64 => .syscall,
+            arm64.EC_BRK64, arm64.EC_BKPT_LOWER, arm64.EC_BKPT_SAME => .breakpoint,
             arm64.EC_IABT_LOWER => .{ .fault = .{ .addr = s.far, .access = .exec, .syndrome = esr } },
             arm64.EC_DABT_LOWER => .{ .fault = .{ .addr = s.far, .access = if (esr & (1 << 6) != 0) .write else .read, .syndrome = esr } },
             else => .{ .fault = .{ .addr = s.ureg.pc, .access = .exec, .syndrome = esr } },
