@@ -13,7 +13,7 @@ areas: [kern, vmm, cli, sandbox]
 
 ## Abstract
 
-h9 runs Linux ELF binaries next to 9front ones, in the same machine. A process's personality is chosen at exec by its binary format. A Linux process's syscalls are served by a second syscall table in the host, translated onto the same drawterm kernel. So Linux processes share the machine's mount table, file descriptors, pipes, notes and sandbox policy with 9front processes, and the two can pipe to each other and exec each other. Each process has its own root: a Linux process's `/` is a Linux root tree, such as Alpine's minirootfs, with the 9front tree at `/9` when the machine has one. `--root` takes either kind of tree and h9 tells them apart, so there's no Linux-specific flag. This proposal covers single-threaded programs, static and dynamic. Threads ([linux-threads](0049-linux-threads.md)) and readiness with sockets ([linux-net](linux-net.md)) are their own proposals, built on this one.
+h9 runs Linux ELF binaries next to 9front ones, in the same machine. A process's personality is chosen at exec by its binary format. A Linux process's syscalls are served by a second syscall table in the host, translated onto the same drawterm kernel. So Linux processes share the machine's mount table, file descriptors, pipes, notes and sandbox policy with 9front processes, and the two can pipe to each other and exec each other. Each process has its own root: a Linux process's `/` is a Linux root tree, such as Alpine's minirootfs, with the 9front tree at `/9` when the machine has one. `--root` takes either kind of tree and h9 tells them apart, so there's no Linux-specific flag. This proposal covers single-threaded programs, static and dynamic. Threads ([linux-threads](0049-linux-threads.md)) and readiness with sockets ([linux-net](0050-linux-net.md)) are their own proposals, built on this one.
 
 ## Background
 
@@ -74,7 +74,7 @@ Linux processes have no Tos.
 
 Arguments the ABI types as `int` (fds, flags, modes, `AT_FDCWD`) are narrowed to 32 bits on entry. On arm64 their upper halves aren't defined, and `AT_FDCWD` arrived sign-extended to 64 bits in the prototype, where busybox `tar` failed with `EBADF` until it was narrowed.
 
-The table below names the calls by their arm64 (generic) names. musl on amd64 uses the older forms for many of them, so the amd64 table serves those too, onto the same code: `open`, `stat`, `lstat`, `access`, `readlink`, `dup2`, `pipe`, `rename`, `unlink`, `mkdir`, `rmdir`, `chmod`, `chown`, `link`, `symlink`, `getdents`, `select` and `poll` (the last two from [linux-net](linux-net.md)). In the prototype's runs on amd64, `stat`, `lstat`, `open` and `readlink` were about 5,700 of the file calls.
+The table below names the calls by their arm64 (generic) names. musl on amd64 uses the older forms for many of them, so the amd64 table serves those too, onto the same code: `open`, `stat`, `lstat`, `access`, `readlink`, `dup2`, `pipe`, `rename`, `unlink`, `mkdir`, `rmdir`, `chmod`, `chown`, `link`, `symlink`, `getdents`, `select` and `poll` (the last two from [linux-net](0050-linux-net.md)). In the prototype's runs on amd64, `stat`, `lstat`, `open` and `readlink` were about 5,700 of the file calls.
 
 Every entry is one of three kinds, so `-ENOSYS` always means "not known to h9":
 
@@ -93,7 +93,7 @@ Every entry is one of three kinds, so `-ENOSYS` always means "not known to h9":
 | Other | `uname`, `getrandom`, `sysinfo`, `getuid` and the other id calls, `umask`, `prctl` (`PR_SET_NAME`, `PR_GET_NAME`, `PR_SET_PDEATHSIG`), `arch_prctl` (amd64 `ARCH_SET_FS`, `ARCH_GET_FS`) | Fixed answers, or the host where it's safe. `uname` is `Linux`, release `6.1.0-h9`, with the machine's architecture; the node name is `sysname`. |
 | Stubbed | `prlimit64` and `getrlimit` (the machine's limits: `--memory` for `RLIMIT_AS`, 1024 files), `setrlimit` (accepted, ignored), `sched_getaffinity` (the `--cpus` count), `sched_yield`, `getpriority`/`setpriority`, `membarrier` (`-EINVAL` for every command but query), `rseq` (`-ENOSYS`, which glibc expects), `set_robust_list` (accepted; see [linux-threads](0049-linux-threads.md)), `setuid` and the other set-id calls (success when the id is unchanged, else `-EPERM`), `chroot`, `mount`, `umount2`, `pivot_root`, `unshare` (`-EPERM`; [dotl](0022-dotl.md) adds `mount -t 9p`), `linkat`, `symlinkat` (`-EPERM`) | |
 
-Calls that need readiness (`poll`, `ppoll`, `pselect6`, `epoll_*`, `eventfd2`) and sockets come in [linux-net](linux-net.md). `fcntl` accepts and records `O_NONBLOCK` here, but reads and writes block until that proposal is built. That leaves out more than servers: CPython's `subprocess` with `capture_output` or `communicate()` waits on its pipes with `poll` (`ppoll` on arm64), and Go's runtime opens an epoll fd and an eventfd at its first timer, so both need linux-net.
+Calls that need readiness (`poll`, `ppoll`, `pselect6`, `epoll_*`, `eventfd2`) and sockets come in [linux-net](0050-linux-net.md). `fcntl` accepts and records `O_NONBLOCK` here, but reads and writes block until that proposal is built. That leaves out more than servers: CPython's `subprocess` with `capture_output` or `communicate()` waits on its pipes with `poll` (`ppoll` on arm64), and Go's runtime opens an epoll fd and an eventfd at its first timer, so both need linux-net.
 
 Error strings map to errno: "file does not exist" is `ENOENT`, "permission denied" is `EACCES`, "interrupted" is `EINTR`, "file already exists" is `EEXIST`, "not a directory" is `ENOTDIR`, "is a directory" is `EISDIR`, "write on closed pipe" is `EPIPE`, and unknown strings are `EIO`. The table lives in one place, shared with [dotl](0022-dotl.md) (see Rationale), and is tested on its own.
 
@@ -253,7 +253,7 @@ Integration cases tagged `[linux-personality]`. The fixtures are static and dyna
 
 1. **Static binaries:** `h9 ./hello-musl` prints hello on HVF and on the emulator, for arm64, and for amd64 on the emulator.
 2. **busybox:** `h9 --root alpine sh -c 'ls / | wc -l'` runs busybox's shell, which uses `vfork`. A mixed pipeline works both ways: `h9 --root alpine sh -c '/9/bin/ls /9/bin | wc -l'` and `h9 --root alpine --rc "ls /bin | '#λ/bin/busybox' wc -l"`.
-3. **Dynamic binaries:** Alpine's dynamically linked tools (`apk --version`, `python3 -c 'print(1)'`) run. CPython scripts that use `subprocess` with pipes need [linux-net](linux-net.md)'s `poll`.
+3. **Dynamic binaries:** Alpine's dynamically linked tools (`apk --version`, `python3 -c 'print(1)'`) run. CPython scripts that use `subprocess` with pipes need [linux-net](0050-linux-net.md)'s `poll`.
 4. **The emulator is usable for allocation-heavy programs:** `python3 -m pip --version` runs on the emulator within a few times its HVF time.
 
 Cases:

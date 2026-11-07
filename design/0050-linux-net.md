@@ -1,4 +1,5 @@
 ---
+id: 50
 slug: linux-net
 title: Linux readiness and sockets
 status: draft
@@ -9,6 +10,8 @@ areas: [kern, sandbox]
 ---
 
 # Proposal: Linux readiness and sockets
+
+Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 

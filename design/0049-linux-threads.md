@@ -5,7 +5,7 @@ title: Linux threads
 status: draft
 created: 2026-11-05
 authors: [progrium]
-depends: [18, linux-net]
+depends: [18, 50]
 areas: [kern, vmm]
 ---
 
@@ -82,7 +82,7 @@ This also fixes 9front programs on the emulator that spin without syscalls today
 
 **Threads as processes.** Linux itself models threads as tasks sharing an address space, and h9's process record already has everything a task needs: its own vCPU lease, Ureg, Extra and kernel Proc. A second kind of record would duplicate all of that.
 
-**Go needs [linux-net](linux-net.md).** Go's runtime opens an epoll fd and an eventfd at its first timer, before any networking, and dies with `netpollinit failed` without them. So this proposal's Go cases depend on linux-net's epoll and eventfd, even though nothing else here does. Moving those two calls for non-socket fds into this proposal was the alternative; it would split epoll across two proposals.
+**Go needs [linux-net](0050-linux-net.md).** Go's runtime opens an epoll fd and an eventfd at its first timer, before any networking, and dies with `netpollinit failed` without them. So this proposal's Go cases depend on linux-net's epoll and eventfd, even though nothing else here does. Moving those two calls for non-socket fds into this proposal was the alternative; it would split epoll across two proposals.
 
 **Time-slicing with an in-engine stop.** A stop from another thread is simpler, and a tight loop test (1,233 stops) showed no replayed instructions, but Go's runtime failed under cross-thread stops every time. A block hook costs a callback per translated block; the alternative of counting instructions (`uc_emu_start`'s `count`) installs a per-instruction hook, which costs more.
 
