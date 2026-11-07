@@ -12,7 +12,7 @@ areas: [build, tests, docs]
 
 ## Abstract
 
-h9 gains a build of 9front's own commands as one statically linked multi-call binary, `9box`, in the spirit of busybox. The commands are 9front's sources, unmodified, compiled inside h9 by 9front's compilers; a generated header per command renames its global symbols so they can share one link. `9box` picks the command from the name it runs as, through hard links in a host tree or two-line `#!` stubs anywhere else. A new build step assembles a slim root around it: `9box`, its links or stubs, `rcmain`, the mount points h9 binds onto, and nothing else. Nothing changes in h9 itself: no flags, no `Machine.Options`, no devices.
+h9 gains a build of 9front's own commands as one statically linked multi-call binary, `9box`, in the spirit of busybox. The commands are 9front's sources, unmodified, compiled inside h9 by 9front's compilers; generated `-D` flags per command rename its global symbols so they can share one link. `9box` picks the command from the name it runs as, through hard links in a host tree or two-line `#!` stubs anywhere else. A new build step assembles a slim root around it: `9box`, its links or stubs, `rcmain`, the mount points h9 binds onto, and nothing else. Nothing changes in h9 itself: no flags, no `Machine.Options`, no devices.
 
 ## Background
 
@@ -20,6 +20,19 @@ h9 gains a build of 9front's own commands as one statically linked multi-call bi
 - **9front builds itself in h9.** [self-host](0010-self-host.md) measured `mk` in `/sys/src/cmd` rebuilding the shipped binaries byte for byte, and `cd /sys/src && mk install` in about a minute. So h9 can build a 9front program without a 9front machine, and this proposal relies on that.
 - **Commands collide when linked together.** A scan of 9front's `sys/src/cmd/*.c` at HEAD (a regular-expression pass, so approximate) finds 1233 non-static top-level functions across the single-file commands, of which 114 names are defined in more than one file: `main` in 136, `usage` in 75, `error` in 15, `emalloc` in 14, `erealloc` in 9. 9front's linkers reject a second definition of a function (`redefinition:` in `7l/obj.c`), merge uninitialised globals of the same name, and have no relocatable output (no `ld -r`), so renaming has to happen in the source, before compiling.
 - **`#!` keeps the script's name.** 9front's `sysexec` (`port/sysproc.c`) follows up to 8 levels of interpreters and builds argv as the interpreters' arguments, outermost first, then the script's full path, with `argv[0]` replaced by the script's last path element, then the caller's arguments. h9's `interpret` in `src/machine.zig` builds the same argv. So a two-line stub can turn any file into a command of a multi-call binary, on h9 and on 9front alike.
+- **A prototype.** On 2026-11-07 a prototype built 31 commands (`rc echo cat ls grep sed awk wc sort uniq tr test mkdir rm cp mv touch tee date sleep basename cmp xd du bind mount unmount ns ps pwd chmod`) from the pinned 11952 source into one binary inside h9, with the `-D` renaming done by passing the flags to `7c` (and to `mk` as `CC`) rather than through wrapper files. Measured on an x86_64 Linux host on the Unicorn emulator, as it has no hypervisor:
+
+  | | 31 separate binaries | `9box` |
+  | --- | --- | --- |
+  | Size, as shipped (with symbols) | 2,347,308 bytes | 570,630 bytes (24%) |
+  | Size, stripped | 1,503,160 bytes | 400,384 bytes (27%) |
+  | Stripped, gzipped | 716,373 bytes (tar) | 177,686 bytes |
+  | `h9 ls /`, mean of 50 | 13 ms | 12 ms |
+  | `h9 rc -c 'ls /'`, mean of 50 | 58 ms | 51 ms |
+  | 1600 execs in one rc loop (`echo`, `wc`, `ls`, `sed`), 3 runs | 15.4 to 17.1 s | 16.3 to 16.7 s |
+  | Data and BSS per process (`size`) | 4 KB (`echo`) to 550 KB (`sed`) | 1.33 MB for every command |
+
+  Hard links and `#!` stubs ran the same. A script with `#!/bin/rc`, where `/bin/rc` is a stub, ran with the right argv. The cost the size doesn't show is BSS: the commands' static buffers all land in one BSS, so every process gets 1.28 MB of it, led by `sed` (543 KB), `tr` (288 KB) and `awk` (108 KB). `ps` shows 2468K for a boxed `ps` against 348K for the stock one.
 - **h9 reads the whole binary on each exec.** `readFile` in `src/machine.zig` stats the program and reads all of it; there's no text cache. A bigger binary costs more per exec, which matters most on [9P](0013-9p-roots.md) and [WebSocket](0021-websocket-9p.md) roots.
 
 ## Proposal
@@ -33,7 +46,7 @@ src/9box/
   9box.c      # the dispatcher
   cmds        # the command set: name, sources, libraries
   mkfile      # builds 9box for $objtype against /sys/src
-  mkcmd       # rc: makes one command's wrapper and header
+  mkcmd       # rc: builds one command with its globals renamed
 ```
 
 `cmds` lists one command per line: its name, its sources relative to `/sys/src/cmd`, and any libraries beyond libc. Single-file commands give one source; directory commands such as `rc`, `grep`, `awk` and `mk` give the files from their own mkfile's `OFILES`.
@@ -49,8 +62,8 @@ rc       rc/code.c rc/exec.c rc/getflags.c ... rc/plan9.c
 For each command, `mkcmd` does three things:
 
 1. Compiles its sources as they are, and runs `nm` over the objects to list the global symbols they define (`T`, `D` and `B`).
-2. Writes `CMD.h`, a `#define` per symbol that isn't also defined by a library in the link, giving each a `CMD_` prefix: `#define main ls_main`, `#define usage ls_usage`, `#define errs ls_errs`.
-3. Writes a wrapper per source, `#include "CMD.h"` followed by `#include "/sys/src/cmd/SRC"`, and compiles it.
+2. Makes a `-D` flag per symbol that isn't also defined by a library in the link (libc and libbio, not every library: libthread defines `main`), giving each a `CMD_` prefix: `-Dmain=ls_main`, `-Dusage=ls_usage`, `-Derrs=ls_errs`.
+3. Compiles the sources again with those flags: `7c` for single files, and `mk 'CC=7c FLAGS'` on the objects for directory commands, so their yacc steps and `CFLAGS` still apply. Helper programs a mkfile builds for itself, like awk's `maketab`, are left out of the link.
 
 A command that defines a symbol a library also defines (an override of a libc function, say) is reported and left out, since one link can only hold one. The set is checked for that at build time.
 
@@ -98,7 +111,7 @@ The default set covers the guide's slim list and what h9's own scripts in `#H` u
 
 **9front's source, not a rewrite.** The point of a 9front userland is that it is 9front: flags, output and quirks match the stock tree and the manual. A Go userland like u-root, or a fresh one in Zig, would be a different userland, and Go has no `plan9/arm64` port. The guide already shows how to write your own; this proposal is for when you want 9front's, smaller.
 
-**Rename in the preprocessor, not the linker.** 9front's linkers can't rename symbols or make relocatable objects, and changing them would mean a patched toolchain. A `#define` per symbol, generated from `nm`, needs neither, and leaves 9front's sources untouched so the set follows upstream when the pin moves. Renaming every defined global, not only the ones that collide today, means adding a command never breaks another.
+**Rename in the preprocessor, not the linker.** 9front's linkers can't rename symbols or make relocatable objects, and changing them would mean a patched toolchain. A `-D` flag per symbol, generated from `nm`, needs neither, and leaves 9front's sources untouched so the set follows upstream when the pin moves. Renaming every defined global, not only the ones that collide today, means adding a command never breaks another.
 
 **Not merging uninitialised globals.** The linkers would merge, say, every command's `Biobuf bout` into one, and since only one command runs per process, that would even work. But initialised data and functions still collide, and relying on the merge makes the result depend on which commands are in the set. Renaming everything is one rule.
 
@@ -146,7 +159,8 @@ Integration cases tagged `[multicall]`, run against the slim tree:
 
 ## Open issues
 
-- **Is it worth it?** The saving is libc and libbio linked once instead of once per command, and one file instead of dozens. Nobody has measured it for the 9front set. If the saving turns out small, the guide's copy recipe may be enough and this can be declined.
+- **BSS.** Every boxed process carries every command's static buffers (Background). Since h9 copies memory eagerly on `rfork`, and rc forks for each command, that's 1.28 MB more to allocate and copy per command when rc is boxed. Options: leave out or patch the few commands with big static arrays (`sed`, `tr`), have the dispatcher run large commands as separate binaries, or make h9 back BSS with zero pages on demand, which would help every program. The prototype's exec loop didn't show it as a clear slowdown on the emulator, but a hypervisor run with larger sets should check.
+- **Is it worth it?** On the prototype's 31 commands the binary is a quarter of the size, and execs cost about the same on the emulator. A hypervisor host and a 9P root are still unmeasured.
 - **Exec cost on remote roots.** h9 reads the whole program on every exec, so a script that runs `sed` in a loop reads all of `9box` each time. On a host tree that's a page-cache read, but over 9P or WebSocket it's a full transfer per exec. A text cache keyed by qid and version would make one binary cheaper than many instead of dearer; that's a proposal of its own, and this one should measure an exec-heavy loop on both kinds of root first. The browser host, which fetches binaries over the network, has the same trade-off.
 - **libthread commands.** Programs with `threadmain` get their `main` from libthread, which conflicts with `9box`'s. They're left out of the first set; one way in is a `9box` that calls libthread's start-up with the command's renamed `threadmain`.
 - **Graphical commands.** `rio`, `acme` and anything using libdraw are out of scope until [gfx](0015-gfx.md), and are large enough that they may be better as their own binaries.
