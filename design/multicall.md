@@ -12,7 +12,7 @@ areas: [build, tests, docs]
 
 ## Abstract
 
-h9 gains a build of 9front's own commands as one statically linked multi-call binary, `9box`, in the spirit of busybox. The commands are 9front's sources, unmodified, compiled inside h9 by 9front's compilers; generated `-D` flags per command rename its global symbols so they can share one link. `9box` picks the command from the name it runs as, through hard links in a host tree or two-line `#!` stubs anywhere else. A new build step assembles a slim root around it: `9box`, its links or stubs, `rcmain`, the mount points h9 binds onto, and nothing else. Nothing changes in h9 itself: no flags, no `Machine.Options`, no devices.
+h9 gains a build of 9front's own commands as one statically linked multi-call binary, `9box`, in the spirit of busybox. The commands are 9front's sources, unmodified, compiled inside h9 by 9front's compilers; generated `-D` flags per command rename its global symbols so they can share one link. `9box` picks the command from the name it runs as, through hard links in a host tree or two-line `#!` stubs anywhere else. A new build step assembles a root around it in one of two sizes: `min`, the 35 commands needed for basic operation, and `slim`, 106 commands that cover the same ground completely (archives, checksums, file servers, network clients) without compilers, typesetting or graphics. Each tree is `9box`, its links or stubs, `rcmain`, the mount points h9 binds onto, and nothing else. Nothing changes in h9 itself: no flags, no `Machine.Options`, no devices.
 
 ## Background
 
@@ -20,19 +20,26 @@ h9 gains a build of 9front's own commands as one statically linked multi-call bi
 - **9front builds itself in h9.** [self-host](0010-self-host.md) measured `mk` in `/sys/src/cmd` rebuilding the shipped binaries byte for byte, and `cd /sys/src && mk install` in about a minute. So h9 can build a 9front program without a 9front machine, and this proposal relies on that.
 - **Commands collide when linked together.** A scan of 9front's `sys/src/cmd/*.c` at HEAD (a regular-expression pass, so approximate) finds 1233 non-static top-level functions across the single-file commands, of which 114 names are defined in more than one file: `main` in 136, `usage` in 75, `error` in 15, `emalloc` in 14, `erealloc` in 9. 9front's linkers reject a second definition of a function (`redefinition:` in `7l/obj.c`), merge uninitialised globals of the same name, and have no relocatable output (no `ld -r`), so renaming has to happen in the source, before compiling.
 - **`#!` keeps the script's name.** 9front's `sysexec` (`port/sysproc.c`) follows up to 8 levels of interpreters and builds argv as the interpreters' arguments, outermost first, then the script's full path, with `argv[0]` replaced by the script's last path element, then the caller's arguments. h9's `interpret` in `src/machine.zig` builds the same argv. So a two-line stub can turn any file into a command of a multi-call binary, on h9 and on 9front alike.
-- **A prototype.** On 2026-11-07 a prototype built 31 commands (`rc echo cat ls grep sed awk wc sort uniq tr test mkdir rm cp mv touch tee date sleep basename cmp xd du bind mount unmount ns ps pwd chmod`) from the pinned 11952 source into one binary inside h9, with the `-D` renaming done by passing the flags to `7c` (and to `mk` as `CC`) rather than through wrapper files. Measured on an x86_64 Linux host on the Unicorn emulator, as it has no hypervisor:
+- **A prototype.** On 2026-11-07 a prototype built both sets from the pinned 11952 source inside h9, with `-D` flags passed to `7c`, and to `mk` as `CC` for directory commands. Measured on an x86_64 Linux host on the Unicorn emulator, as it has no hypervisor:
 
-  | | 31 separate binaries | `9box` |
-  | --- | --- | --- |
-  | Size, as shipped (with symbols) | 2,347,308 bytes | 570,630 bytes (24%) |
-  | Size, stripped | 1,503,160 bytes | 400,384 bytes (27%) |
-  | Stripped, gzipped | 716,373 bytes (tar) | 177,686 bytes |
-  | `h9 ls /`, mean of 50 | 13 ms | 12 ms |
-  | `h9 rc -c 'ls /'`, mean of 50 | 58 ms | 51 ms |
-  | 1600 execs in one rc loop (`echo`, `wc`, `ls`, `sed`), 3 runs | 15.4 to 17.1 s | 16.3 to 16.7 s |
-  | Data and BSS per process (`size`) | 4 KB (`echo`) to 550 KB (`sed`) | 1.33 MB for every command |
+  | | `min`, 35 binaries | `min` `9box` | `slim`, 106 binaries | `slim` `9box` |
+  | --- | --- | --- | --- | --- |
+  | Size as shipped (with symbols) | 2.68 MB | 610 KB | 12.99 MB | 2.50 MB |
+  | Size stripped | 1.71 MB | 425 KB | 8.89 MB | 1.91 MB |
+  | Stripped, gzipped | 814 KB (tar) | 191 KB | 4.02 MB (tar) | 847 KB |
+  | Data and BSS in every process | per command, 4 KB (`echo`) to 550 KB (`sed`) | 1.4 MB | per command | 4.4 MB |
+  | `ps` size of a running `ps` | 348K | 2536K | 348K | 7764K |
+  | 1600 execs in one rc loop (`echo`, `wc`, `ls`, `sed`), 2 runs | 14.1, 14.3 s | 15.1, 15.1 s (+7%) | 14.2, 14.3 s | 20.3, 20.5 s (+43%) |
 
-  Hard links and `#!` stubs ran the same. A script with `#!/bin/rc`, where `/bin/rc` is a stub, ran with the right argv. The cost the size doesn't show is BSS: the commands' static buffers all land in one BSS, so every process gets 1.28 MB of it, led by `sed` (543 KB), `tr` (288 KB) and `awk` (108 KB). `ps` shows 2468K for a boxed `ps` against 348K for the stock one.
+  An earlier 31-command build measured single runs too: `h9 ls /` took 13 ms with separate binaries and 12 ms boxed, and `h9 rc -c 'ls /'` 58 ms and 51 ms. Hard links and `#!` stubs ran the same, a script starting `#!/bin/rc` ran right when `/bin/rc` was a stub, and a smoke script over the `slim` set (tar and gzip round trips, checksums, `ramfs`, `hoc`, `tcs`, `ed`, `file`, usage lines of `ssh` and `tlsclient`) printed the same output from the box and from the separate binaries.
+
+  The cost is BSS. Every command's static buffers land in one BSS, so every process gets all of them: led by `sed` (543 KB), `tr` (288 KB), `tcs` (377 KB, plus 489 KB of tables in data), `ftpfs` (174 KB) and `dossrv` (145 KB). `freq` alone has 8.9 MB, so it was left out of `slim`. h9 allocates and copies all of it on every `rfork` and exec, which is why the `slim` box runs the exec loop 43% slower. That makes BSS the main open issue (below).
+- **What else the prototype found.**
+  - A prefix has to make a valid identifier, and `9660srv_` doesn't, so it's `bx_9660srv_`.
+  - A command that initialises a global a library also defines leaks the value into every other command: rc's `char *argv0 = "rc"` merged with libc's `argv0`, and since `ARGBEGIN` only sets `argv0` when it's nil, `ssh` printed `usage: rc ...`. The dispatcher now sets `argv0` to nil before running a command, and the build should report any other such symbol.
+  - Programs with `threadmain` work through a private copy of libthread compiled with `-Dmain=_threadlibmain`. The dispatcher defines `threadmain` to call the chosen command's, and copies the command's `mainstacksize`, which is renamed like any other global, into libthread's before starting it. `ramfs`, `webfs`, `sshfs`, `mntgen`, `plumber` and the rest of the thread programs in `slim` linked this way.
+  - A directory command's objects come from its own mkfile: the prototype runs `mk`, reads the link line from `mk -n -a`, and rebuilds those objects with the flags. A local library named by `#pragma lib`, like `auth`'s `lib.7.a`, is linked once, unrenamed, since only the commands' own objects are renamed.
+  - `sam` failed: a `-D` flag for its global `left` collided with a macro of the same name in another of its headers. `join`, `bzip2` and `compress` are APE programs, linked against a different libc, and `bc`, `pc` and `units` are single-file yacc programs the prototype didn't handle, so all of these are out of both sets for now.
 - **h9 reads the whole binary on each exec.** `readFile` in `src/machine.zig` stats the program and reads all of it; there's no text cache. A bigger binary costs more per exec, which matters most on [9P](0013-9p-roots.md) and [WebSocket](0021-websocket-9p.md) roots.
 
 ## Proposal
@@ -44,37 +51,39 @@ h9 gains a build of 9front's own commands as one statically linked multi-call bi
 ```text
 src/9box/
   9box.c      # the dispatcher
-  cmds        # the command set: name, sources, libraries
+  min slim dev  # the sets: name and source directory per line
   mkfile      # builds 9box for $objtype against /sys/src
   mkcmd       # rc: builds one command with its globals renamed
 ```
 
-`cmds` lists one command per line: its name, its sources relative to `/sys/src/cmd`, and any libraries beyond libc. Single-file commands give one source; directory commands such as `rc`, `grep`, `awk` and `mk` give the files from their own mkfile's `OFILES`.
+The set files (`min`, `slim`) list one command per line: its name, and the directory under `/sys/src/cmd` its mkfile is in, or `.` for a single-file command.
 
 ```text
-# name   sources                                             libs
-ls       ls.c
-sed      sed.c                                               bio
-grep     grep/main.c grep/comp.c grep/dfa.c grep/sub.c       bio
-rc       rc/code.c rc/exec.c rc/getflags.c ... rc/plan9.c
+ls       .
+grep     grep
+gunzip   gzip
+telnet   ip
+ftpfs    ip/ftpfs
 ```
 
 For each command, `mkcmd` does three things:
 
-1. Compiles its sources as they are, and runs `nm` over the objects to list the global symbols they define (`T`, `D` and `B`).
-2. Makes a `-D` flag per symbol that isn't also defined by a library in the link (libc and libbio, not every library: libthread defines `main`), giving each a `CMD_` prefix: `-Dmain=ls_main`, `-Dusage=ls_usage`, `-Derrs=ls_errs`.
-3. Compiles the sources again with those flags: `7c` for single files, and `mk 'CC=7c FLAGS'` on the objects for directory commands, so their yacc steps and `CFLAGS` still apply. Helper programs a mkfile builds for itself, like awk's `maketab`, are left out of the link.
+1. Builds it as 9front does: `7c` for a single file, or `mk` on its target in a copy of its directory, and reads the objects off the link line from `mk -n -a`.
+2. Runs `nm` over those objects for the globals they define (`T`, `D` and `B`), and makes a `-D` flag for each that libc and libbio don't also define, with a `bx_CMD_` prefix: `-Dmain=bx_ls_main`, `-Dusage=bx_ls_usage`, `-Derrs=bx_ls_errs`. Other libraries' names are renamed too: libthread defines `main`, and a command's `mainstacksize` has to stay its own.
+3. Compiles the objects again with those flags: `7c` for single files, and `mk 'CC=7c FLAGS' OBJECTS` for directory commands, so their yacc steps and `CFLAGS` still apply. Helper programs a mkfile builds for itself, like awk's `maketab`, aren't on the link line and stay out.
 
-A command that defines a symbol a library also defines (an override of a libc function, say) is reported and left out, since one link can only hold one. The set is checked for that at build time.
+A command that defines a symbol libc or libbio also defines (an override of a libc function, or an initialised `argv0`) is reported, since one link can hold only one; the set is checked for that at build time. A `-D` flag that collides with a macro, as in `sam`, fails the command's compile and is reported the same way.
 
-`9box.c` is a table of `{name, CMD_main}` generated from `cmds`, and a `main` that chooses the command:
+If any command in the set has `threadmain`, the build compiles a private libthread with its `main` renamed `_threadlibmain`, and links it in place of the system one.
+
+`9box.c` is a table generated from the set, `{name, main, threadmain, &mainstacksize}` with nil for what a command doesn't have, and a `main` that chooses the command:
 
 - **By name.** The command is the last path element of `argv[0]`, and argv is passed on as it is. This is how hard links work.
 - **By stub.** When `argv[1]` is `-!`, the command is the last path element of `argv[2]`, and `argv[1]` and `argv[2]` are removed. This is how stubs work (below).
 - **As `9box CMD ARGS`.** When the name is `9box`, the first argument names the command.
 - **Bare.** `9box` with no arguments lists its commands.
 
-An unknown command prints `9box: no command NAME` and exits with that status. The chosen `CMD_main` then runs as the program; it ends with `exits` as it would on its own, and `argv0` is set by its own `ARGBEGIN`.
+An unknown command prints `9box: no command NAME` and exits with that status. Before running the command, `9box` sets `argv0` to nil, so the command's own `ARGBEGIN` sets it. A plain command's `main` then runs as the program, and ends with `exits` as it would on its own. A thread command's `threadmain` runs through `_threadlibmain`, with the command's `mainstacksize`.
 
 ### Links and stubs
 
@@ -91,9 +100,9 @@ A command gets its name in one of two ways, chosen when the tree is assembled:
 
 A served root doesn't need either: a 9P server like the guide's `rootfs` can serve `9box`'s bytes under every name.
 
-### The slim root
+### The trees
 
-`zig build slim -Darch=arm64` (or `amd64`, `386`) builds `9box` by running the built h9 against the stock root, with `/sys/src` from a root made with `scripts/mkroot.py --src` or from the fetched checkout at `NINEFRONT_REV`, bound in with `--readable`. The output is written to a directory shared with `--writable`; the root stays read-only. It then assembles `.local/9front/slim-<release>-<arch>/`:
+`zig build slim -Dslim-set=min -Darch=arm64` (or `slim`, `dev`; `amd64`, `386`) builds `9box` by running the built h9 against the stock root, with `/sys/src` from a root made with `scripts/mkroot.py --src` or from the fetched checkout at `NINEFRONT_REV`, bound in with `--readable`. The output is written to a directory shared with `--writable`; the root stays read-only. It then assembles `.local/9front/<set>-<release>-<arch>/`:
 
 ```text
 <arch>/bin/9box
@@ -103,9 +112,26 @@ adm/timezone/local
 dev env fd mnt/term/cwd net proc srv tmp
 ```
 
-That's the tree the guide's section 4 describes, built rather than copied. The rc scripts in `/rc/bin` are left out by default; `cmds` can name ones to copy, such as `kill` and `lc`, along with what they run.
+That's the tree the guide's section 4 describes, built rather than copied. The rc scripts in `/rc/bin` are left out by default; a set can name ones to copy, such as `kill` and `lc`, along with what they run.
 
-The default set covers the guide's slim list and what h9's own scripts in `#H` use: `rc echo cat ls grep sed awk wc sort uniq tr test mkdir rm cp mv touch tee date sleep basename cmp xd du bind mount unmount ns ps`. `mk` and the compilers are a second, larger set (`-Dslim-set=dev`) for building inside a slim root.
+### The sets
+
+**`min`**, the minimal set for basic operation and the default: a shell, the file and text commands scripts lean on, and the namespace and process commands that make it 9front. That's what h9's own scripts in `#H` use, too. 35 commands:
+
+`rc`, `echo`, `cat`, `ls`, `cp`, `mv`, `rm`, `mkdir`, `pwd`, `test`, `date`, `sleep`, `touch`, `chmod`, `du`, `wc`, `sort`, `uniq`, `tr`, `sed`, `awk`, `grep`, `cmp`, `diff`, `tail`, `tee`, `xargs`, `basename`, `read`, `bind`, `mount`, `unmount`, `ns`, `ps`, `srv`.
+
+**`slim`**: `min`, plus the rest of each kind of command `min` has a few of, so nothing common is missing, but still without compilers, typesetting, games, hardware tools or graphics. 106 commands; `min` and:
+
+- Files and text: `chgrp`, `dd`, `comm`, `split`, `strings`, `sum`, `md5sum`, `sha1sum`, `crc32`, `seq`, `cleanname`, `time`, `fmt`, `col`, `p`, `pr`, `look`, `idiff`, `merge3`, `file`, `mtime`, `seconds`, `tput`, `ascii`, `unicode`, `urlencode`, `tcs`, `ecp`, `fcp`, `xd`, `ed`, `patch`.
+- Archives: `tar`, `gzip`, `gunzip`, `zip`, `unzip`, `mkpaqfs`, `paqfs`.
+- Namespace and system: `srvfs`, `exportfs`, `mntgen`, `aan`, `cec`, `con`, `rx`, `ratrace`, `plumb`, `plumber`, `execnet`, `pipefile`, `passwd`, `netkey`.
+- File servers: `ramfs`, `archfs`, `9660srv`, `dossrv`, `webfs`, `sshfs`, `ftpfs`.
+- Network: `ssh`, `sshnet`, `telnet`, `tlsclient`, `tlssrv`, `webcookies`.
+- Calculators and the rest: `dc`, `hoc`, `factor`, `primes`, `cal`.
+
+Left out for now, with reasons under Open issues: `sam`, `join`, `bzip2`, `bunzip2`, `compress`, `bc`, `pc`, `units` and `freq`.
+
+**`dev`**: `slim` plus `mk`, the compilers, assemblers and linkers for building inside the tree.
 
 ## Rationale
 
@@ -121,7 +147,9 @@ The default set covers the guide's slim list and what h9's own scripts in `#H` u
 
 **Not built into h9.** [guest-tools](0032-guest-tools.md) kept binaries out of `#H` so h9 wouldn't become a distributor of 9front programs built per architecture. The same holds here: `9box` is a build product in `.local/`, like the root tree, made by the user's own h9 from the pinned source. Shipping prebuilt slim roots is an open issue, not part of this proposal.
 
-**Keep copying as the simple path.** The guide's section 4 stays: copying a handful of binaries needs no build at all. `9box` earns its place only if it's clearly smaller, and Done when measures that.
+**Keep copying as the simple path.** The guide's section 4 stays: copying a handful of binaries needs no build at all. `9box` earns its place only if it's clearly smaller without being slower, and Done when measures both.
+
+**Two sets, not one or a menu.** `min` is what most uses of a slim root need, and is the size of the guide's copied list. `slim` answers "but where's `tar`" without pulling in the 250 MB tree. A menu of per-command options would make every tree different, and harder to test.
 
 ## Compatibility
 
@@ -137,32 +165,39 @@ None. `9box` is ordinary 9front code running in the guest under the same policy 
 
 ## Done when
 
-- `zig build slim -Darch=arm64` builds the tree from a clean checkout and root, and the PR reports the slim tree's size against the guide's copied tree with the same commands.
-- `h9 --root .local/9front/slim-11952-arm64 --check` passes, and `h9 --root ... --rc 'ls /bin | wc -l'` runs.
+- `zig build slim -Dslim-set=min` and `-Dslim-set=slim` build their trees from a clean checkout and root, and the PR reports each tree's size against the same commands copied.
+- The prototype's exec loop runs within 10% of the separate binaries' time on both sets, on a hypervisor host.
+- `h9 --root .local/9front/min-11952-arm64 --check` passes, and `h9 --root ... --rc 'ls /bin | wc -l'` runs.
 
-Integration cases tagged `[multicall]`, run against the slim tree:
+Integration cases tagged `[multicall]`, run against the `min` tree unless they say otherwise:
 
 - `test "9box runs a command through a hard link [multicall]"`
 - `test "9box runs a command through a #! stub [multicall]"`
 - `test "an rc script runs when /bin/rc is a stub [multicall]"`
 - `test "9box CMD ARGS and an unknown command [multicall]"`
-- `test "each boxed command matches its stock binary on the corpus [multicall]"`: every command in the set run over a small fixed corpus of inputs and flags, in the slim tree and the stock tree, with output and exit status compared.
+- `test "a thread program runs from the slim box [multicall]"`
+- `test "argv0 is the command's own name [multicall]"`
+- `test "each boxed command matches its stock binary on the corpus [multicall]"`: every command in both sets run over a small fixed corpus of inputs and flags, in the slim tree and the stock tree, with output and exit status compared.
 - `test "a 9P root serving 9box under every name [multicall]"`
 
 ## Implementation
 
-1. `src/9box/`: `9box.c`, `mkcmd` and the mkfile, with `cmds` holding a few single-file commands, to prove the renaming.
-2. The rest of the default set, including the directory commands `rc`, `grep` and `awk`, and the build-time checks: library overrides and `-!` as a first argument.
-3. `zig build slim`, with hard links and stubs.
-4. The integration cases and the differential corpus.
-5. docs/userland.md section 4 and the README's build commands. DESIGN.md: the slim tree under "Filesystem, boot and I/O". Set `status: implemented`.
+1. `src/9box/`: `9box.c`, `mkcmd` and the mkfile, with a set of a few single-file commands, to prove the renaming.
+2. The `min` set, including the directory commands `rc`, `grep`, `awk` and `diff`, and the build-time checks: library overrides, initialised library globals, and `-!` as a first argument.
+3. Whatever the BSS issue needs, then the `slim` set with the private libthread.
+4. `zig build slim`, with hard links and stubs.
+5. The integration cases and the differential corpus.
+6. docs/userland.md section 4 and the README's build commands. DESIGN.md: the slim tree under "Filesystem, boot and I/O". Set `status: implemented`.
 
 ## Open issues
 
-- **BSS.** Every boxed process carries every command's static buffers (Background). Since h9 copies memory eagerly on `rfork`, and rc forks for each command, that's 1.28 MB more to allocate and copy per command when rc is boxed. Options: leave out or patch the few commands with big static arrays (`sed`, `tr`), have the dispatcher run large commands as separate binaries, or make h9 back BSS with zero pages on demand, which would help every program. The prototype's exec loop didn't show it as a clear slowdown on the emulator, but a hypervisor run with larger sets should check.
-- **Is it worth it?** On the prototype's 31 commands the binary is a quarter of the size, and execs cost about the same on the emulator. A hypervisor host and a 9P root are still unmeasured.
+- **BSS.** Every boxed process carries every command's static buffers: 1.4 MB for `min` and 4.4 MB for `slim` (Background). h9 allocates and copies it on every exec and `rfork`, and rc forks for each command it runs, so `slim` ran the exec loop 43% slower and `min` 7%. Options, best first:
+  - Make h9 back BSS, and memory copied on `rfork`, with zero pages and copy-on-write on demand, so a process pays only for the pages it touches. That helps every program, not only `9box`, and is its own proposal; `slim` probably depends on it.
+  - Leave out or patch the few commands with big static arrays. `sed`, `tr` and `tcs` are 1.2 MB of `slim`'s 4.4, and `min` without `sed` and `tr` would carry about 0.5 MB. Patching 9front's sources is what this proposal was meant to avoid, though.
+  - Run the heavy commands as their own binaries beside the box, chosen per set.
+- **Is it worth it?** By size, clearly: a quarter of the bytes for `min`, a fifth for `slim`. By speed, only for `min` today, and for `slim` once BSS is fixed. A hypervisor host and a 9P root are still unmeasured.
+- **Commands left out.** `sam` needs the renaming to skip names that are macros in its headers. `join`, `bzip2` and `compress` are APE programs; they could go in a second, APE box, or in the same one only if APE's libc and the native one can share a link, which they can't today. `bc`, `pc` and `units` need the single-file path to run yacc. `freq` has 8.9 MB of BSS and stays a separate binary whatever happens.
 - **Exec cost on remote roots.** h9 reads the whole program on every exec, so a script that runs `sed` in a loop reads all of `9box` each time. On a host tree that's a page-cache read, but over 9P or WebSocket it's a full transfer per exec. A text cache keyed by qid and version would make one binary cheaper than many instead of dearer; that's a proposal of its own, and this one should measure an exec-heavy loop on both kinds of root first. The browser host, which fetches binaries over the network, has the same trade-off.
-- **libthread commands.** Programs with `threadmain` get their `main` from libthread, which conflicts with `9box`'s. They're left out of the first set; one way in is a `9box` that calls libthread's start-up with the command's renamed `threadmain`.
 - **Graphical commands.** `rio`, `acme` and anything using libdraw are out of scope until [gfx](0015-gfx.md), and are large enough that they may be better as their own binaries.
 - **Shipping prebuilt slim roots.** A release tarball per architecture would save users the build, at the cost of h9 distributing 9front binaries. 9front's MIT licence allows it; whether the project wants to is a separate decision.
 - **amd64 and 386.** The pinned arm64 root has no `/amd64/lib`, so a cross build starts with `objtype=amd64 mk libs` on a writable copy of the root, as self-host describes.
