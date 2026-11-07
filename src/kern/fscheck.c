@@ -142,6 +142,119 @@ h9_fs_check(char *path, int op)
 	return check(path, op, op == H9_FSCREATE || op == H9_FSREMOVE || op == H9_FSRENAME);
 }
 
+int
+h9_fs_checkname(char *path, int op)
+{
+	return check(path, op, 1);
+}
+
+/*
+ * Contained trees (design/0034-symlinks-in-root.md). The walk is done here
+ * one element at a time with lstat, instead of by the host's stat, so a
+ * link is read relative to the tree as openat2's RESOLVE_IN_ROOT reads it:
+ * an absolute target starts again at top, and ".." stops there. top is
+ * canonical; dir is top or a path the resolver made beneath it, so it
+ * holds no links, and neither does the result.
+ */
+
+static int
+isdotdot(char *s, int n)
+{
+	return n == 2 && s[0] == '.' && s[1] == '.';
+}
+
+int
+h9_fs_resolvein(char *top, char *dir, char *rel, char *buf, int nbuf)
+{
+	char cur[PATH_MAX], pend[2*PATH_MAX], rest[2*PATH_MAX], next[PATH_MAX], target[PATH_MAX];
+	char *p, *e, *slash;
+	int toplen, links, n, len, last;
+	struct stat st;
+
+	toplen = strlen(top);
+	if(toplen > 1 && top[toplen-1] == '/')
+		toplen--;
+	n = strlen(dir);
+	if(n >= sizeof cur || strlen(rel) >= sizeof pend)
+		return H9_RESTOOLONG;
+	memmove(cur, dir, n+1);
+	strcpy(pend, rel);
+	links = 0;
+	p = pend;
+	for(;;){
+		while(*p == '/')
+			p++;
+		if(*p == 0)
+			break;
+		e = strchr(p, '/');
+		len = e != nil ? e - p : strlen(p);
+		/* The last element is the one with nothing but slashes after it. */
+		last = 1;
+		if(e != nil)
+			for(slash = e; *slash; slash++)
+				if(*slash != '/'){
+					last = 0;
+					break;
+				}
+		if(len == 1 && p[0] == '.'){
+			p += len;
+			continue;
+		}
+		if(isdotdot(p, len)){
+			/* At the top, ".." is the top. */
+			n = strlen(cur);
+			if(n > toplen){
+				slash = strrchr(cur, '/');
+				if(slash == cur)
+					cur[1] = 0;
+				else
+					*slash = 0;
+			}
+			p += len;
+			continue;
+		}
+		n = strlen(cur);
+		if(n + 1 + len + 1 > sizeof next)
+			return H9_RESTOOLONG;
+		memmove(next, cur, n);
+		if(n == 0 || next[n-1] != '/')
+			next[n++] = '/';
+		memmove(next+n, p, len);
+		next[n+len] = 0;
+		if(lstat(next, &st) < 0)
+			return errno == ENOTDIR ? H9_RESNOTDIR : errno == ENAMETOOLONG ? H9_RESTOOLONG : H9_RESNONEXIST;
+		if(S_ISLNK(st.st_mode)){
+			if(++links > H9_MAXLINKS)
+				return H9_RESLOOP;
+			n = readlink(next, target, sizeof target - 1);
+			if(n <= 0)
+				return H9_RESNONEXIST;
+			target[n] = 0;
+			/* The rest of the walk goes on from the link's target. */
+			p += len;
+			if(n + 1 + strlen(p) + 1 > sizeof pend)
+				return H9_RESTOOLONG;
+			strcpy(rest, p);
+			snprint(pend, sizeof pend, "%s/%s", target, rest);
+			p = pend;
+			if(target[0] == '/'){
+				memmove(cur, top, toplen);
+				cur[toplen] = 0;
+			}
+			continue;
+		}
+		if(!last && !S_ISDIR(st.st_mode))
+			return H9_RESNOTDIR;
+		strcpy(cur, next);
+		p += len;
+	}
+	n = strlen(cur);
+	if(n >= nbuf)
+		return H9_RESTOOLONG;
+	memmove(buf, cur, n+1);
+	return 0;
+}
+
 #else
 
 /*
@@ -251,6 +364,196 @@ h9_fs_checkw(wchar_t *path, int op)
 	return checkw(path, op, op == H9_FSCREATE || op == H9_FSREMOVE || op == H9_FSRENAME);
 }
 
+/*
+ * Contained trees on Windows (design/0034-symlinks-in-root.md): as on
+ * POSIX, with a reparse point's target in place of readlink. Symlinks and
+ * junctions are followed; other reparse points are refused. An absolute
+ * target, "C:\x", "\x" or a junction's "\??\C:\x", starts again at top:
+ * its drive is dropped. A UNC or device target is refused.
+ */
+
+/* A reparse point's data, as FSCTL_GET_REPARSE_POINT returns it. */
+typedef struct {
+	ULONG	tag;
+	USHORT	len;
+	USHORT	reserved;
+	USHORT	subst_off;
+	USHORT	subst_len;
+	USHORT	print_off;
+	USHORT	print_len;
+	/* then, for a symlink, ULONG flags; then the names */
+} Reparse;
+
+enum {
+	Reparsebuf = 16*1024,	/* MAXIMUM_REPARSE_DATA_BUFFER_SIZE */
+	Symrelative = 1,	/* SYMLINK_FLAG_RELATIVE */
+};
+
+/*
+ * The target of the reparse point at path, in target (nul-terminated),
+ * and whether it's relative. Returns 0, or -1 if it isn't a symlink or a
+ * junction, or can't be read. print picks the name as it was written
+ * rather than the substitute name.
+ */
+static int
+reparsetarget(wchar_t *path, wchar_t *target, int ntarget, int *relative, int print)
+{
+	uchar buf[Reparsebuf];
+	Reparse *r;
+	wchar_t *names;
+	HANDLE h;
+	DWORD n;
+	USHORT off, len;
+
+	h = CreateFileW(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT, nil);
+	if(h == INVALID_HANDLE_VALUE)
+		return -1;
+	if(!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, nil, 0, buf, sizeof buf, &n, nil)){
+		CloseHandle(h);
+		return -1;
+	}
+	CloseHandle(h);
+	r = (Reparse*)buf;
+	if(r->tag == IO_REPARSE_TAG_SYMLINK){
+		*relative = (*(ULONG*)(r+1) & Symrelative) != 0;
+		names = (wchar_t*)((uchar*)(r+1) + sizeof(ULONG));
+	}else if(r->tag == IO_REPARSE_TAG_MOUNT_POINT){
+		*relative = 0;
+		names = (wchar_t*)(r+1);
+	}else
+		return -1;
+	off = print ? r->print_off : r->subst_off;
+	len = print ? r->print_len : r->subst_len;
+	if(print && len == 0){
+		off = r->subst_off;
+		len = r->subst_len;
+	}
+	if((uchar*)names + off + len > buf + n || len/sizeof(wchar_t) >= ntarget)
+		return -1;
+	memmove(target, (uchar*)names + off, len);
+	target[len/sizeof(wchar_t)] = 0;
+	return 0;
+}
+
+int
+h9_fs_readlinkw(wchar_t *path, char *buf, int nbuf)
+{
+	wchar_t target[MAX_PATH*4];
+	int relative;
+
+	if(reparsetarget(path, target, nelem(target), &relative, 1) < 0)
+		return -1;
+	if(WideCharToMultiByte(CP_UTF8, 0, target, -1, buf, nbuf, nil, nil) == 0)
+		return -1;
+	return strlen(buf);
+}
+
+int
+h9_fs_resolveinw(wchar_t *top, wchar_t *dir, char *rel, wchar_t *buf, int nbuf)
+{
+	wchar_t cur[MAX_PATH*4], pend[MAX_PATH*8], rest[MAX_PATH*8], next[MAX_PATH*4], target[MAX_PATH*4];
+	wchar_t *p, *e, *slash, *t;
+	int toplen, links, n, len, last, relative;
+	DWORD attr;
+
+	toplen = wcslen(top);
+	n = wcslen(dir);
+	if(n >= nelem(cur))
+		return H9_RESTOOLONG;
+	memmove(cur, dir, (n+1)*sizeof(wchar_t));
+	if(MultiByteToWideChar(CP_UTF8, 0, rel, -1, pend, nelem(pend)) == 0)
+		return H9_RESTOOLONG;
+	links = 0;
+	p = pend;
+	for(;;){
+		while(*p == L'/' || *p == L'\\')
+			p++;
+		if(*p == 0)
+			break;
+		for(e = p; *e && *e != L'/' && *e != L'\\'; e++)
+			;
+		len = e - p;
+		last = 1;
+		for(slash = e; *slash; slash++)
+			if(*slash != L'/' && *slash != L'\\'){
+				last = 0;
+				break;
+			}
+		if(len == 1 && p[0] == L'.'){
+			p = e;
+			continue;
+		}
+		if(len == 2 && p[0] == L'.' && p[1] == L'.'){
+			n = wcslen(cur);
+			if(n > toplen){
+				slash = wcsrchr(cur, L'\\');
+				if(slash == nil || slash - cur < toplen)
+					cur[toplen] = 0;
+				else
+					*slash = 0;
+			}
+			p = e;
+			continue;
+		}
+		n = wcslen(cur);
+		if(n + 1 + len + 1 > nelem(next))
+			return H9_RESTOOLONG;
+		memmove(next, cur, n*sizeof(wchar_t));
+		if(n == 0 || next[n-1] != L'\\')
+			next[n++] = L'\\';
+		memmove(next+n, p, len*sizeof(wchar_t));
+		next[n+len] = 0;
+		attr = GetFileAttributesW(next);
+		if(attr == INVALID_FILE_ATTRIBUTES)
+			return H9_RESNONEXIST;
+		if(attr & FILE_ATTRIBUTE_REPARSE_POINT){
+			if(++links > H9_MAXLINKS)
+				return H9_RESLOOP;
+			if(reparsetarget(next, target, nelem(target), &relative, 0) < 0)
+				return H9_RESNONEXIST;
+			t = target;
+			if(!relative){
+				/* \??\C:\x, C:\x or \x: from top. */
+				if(wcsncmp(t, L"\\??\\", 4) == 0 || wcsncmp(t, L"\\\\?\\", 4) == 0)
+					t += 4;
+				if(wcsncmp(t, L"UNC\\", 4) == 0 || wcsncmp(t, L"\\\\", 2) == 0)
+					return H9_RESNONEXIST;
+				if(t[0] != 0 && t[1] == L':')
+					t += 2;
+			}
+			p = e;
+			if(wcslen(t) + 1 + wcslen(p) + 1 > nelem(pend))
+				return H9_RESTOOLONG;
+			wcscpy(rest, p);
+			wcscpy(pend, t);
+			wcscat(pend, L"\\");
+			wcscat(pend, rest);
+			p = pend;
+			if(!relative){
+				memmove(cur, top, toplen*sizeof(wchar_t));
+				cur[toplen] = 0;
+			}
+			continue;
+		}
+		if(!last && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+			return H9_RESNOTDIR;
+		wcscpy(cur, next);
+		p = e;
+	}
+	n = wcslen(cur);
+	if(n >= nbuf)
+		return H9_RESTOOLONG;
+	memmove(buf, cur, (n+1)*sizeof(wchar_t));
+	return 0;
+}
+
+int
+h9_fs_checknamew(wchar_t *path, int op)
+{
+	return checkw(path, op, 1);
+}
+
 void
 h9_fs_allow(wchar_t *path, int op)
 {
@@ -280,3 +583,42 @@ h9_fs_allow(char *path, int op)
 	}
 }
 #endif
+
+/* src/kern/devoverlay.c */
+extern Chan *h9_overlay_lower(Chan*);
+
+/*
+ * The target of the link that path's last name is, through #U and an
+ * overlay over it, for the Linux personality's readlinkat and lstat
+ * (design/0034-symlinks-in-root.md). Plan 9 programs never see links,
+ * so it's a leaf, not a 9P message. Returns the target's length, with
+ * it in buf, or -1 with the error in errstr, as the sys* wrappers do.
+ */
+int
+h9_fs_readlinkpath(char *path, char *buf, int nbuf)
+{
+	Chan *c, *l;
+	char *p;
+	int n;
+
+	c = nil;
+	if(waserror()){
+		if(c != nil)
+			cclose(c);
+		p = up->syserrstr;
+		up->syserrstr = up->errstr;
+		up->errstr = p;
+		return -1;
+	}
+	c = namec(path, Aaccess, 0, 0);
+	if((l = h9_overlay_lower(c)) != nil){
+		cclose(c);
+		c = l;
+	}
+	n = h9_fs_readlink(c, buf, nbuf);
+	if(n < 0)
+		error("not a symbolic link");
+	cclose(c);
+	poperror();
+	return n;
+}

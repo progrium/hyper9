@@ -15,7 +15,7 @@ pub const usage =
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
-    \\           [--net-allow PATTERN]...
+    \\           [--net-allow PATTERN]... [--root-contained]
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
     \\           [--ns FILE] [--host-fs] [--host-cmd] [--no-guest-tools]
     \\           [--gfx[=noclip]] [--gfx-scale N]
@@ -59,6 +59,9 @@ pub const Config = struct {
     root_headers: []const []const u8 = &.{},
     /// --root-ca: PEM certificates a wss:// root must chain to.
     root_ca: ?[]const u8 = null,
+    /// --root-contained: the root tree's symlinks resolve inside it
+    /// (design/0034-symlinks-in-root.md).
+    root_contained: bool = false,
     /// --cwd: the host directory bound at /mnt/term/cwd; null means the
     /// host cwd.
     cwd: ?[]const u8 = null,
@@ -155,6 +158,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             return error.Usage;
         } else if (value(args, &i, "--gfx-scale")) |v| {
             gfx_scale = std.fmt.parseInt(u8, v orelse return error.Usage, 10) catch return error.Usage;
+        } else if (flag(a, "--root-contained")) {
+            c.root_contained = true;
         } else if (flag(a, "--strict")) {
             c.strict = true;
         } else if (flag(a, "--print")) {
@@ -386,6 +391,15 @@ test "--root-spec and --root-user" {
     try t.expectEqual(@as(?[]const u8, null), d.root_user);
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-user=", "ls" }));
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-spec" }));
+}
+
+test "--root-contained" {
+    const c = try parse(t.allocator, &.{ "h9", "--root", "/tree", "--root-contained", "ls" });
+    defer t.allocator.free(c.env);
+    try t.expect(c.root_contained);
+    const d = try parse(t.allocator, &.{ "h9", "ls" });
+    defer t.allocator.free(d.env);
+    try t.expect(!d.root_contained);
 }
 
 test "--root-header and --root-ca" {

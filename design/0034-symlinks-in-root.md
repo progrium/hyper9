@@ -2,7 +2,7 @@
 id: 34
 slug: symlinks-in-root
 title: Symlinks resolved inside a bound tree
-status: accepted
+status: implemented
 created: 2026-11-05
 authors: [progrium]
 depends: []
@@ -103,3 +103,15 @@ Demo: `h9 --root-contained --root ./tree-with-links ls -l /bin`.
 ## Open issues
 
 - **Hardlinks** inside a contained, writable tree can still reach host files outside it, as today's caveat says. Containment doesn't change that.
+
+## Updates
+
+- 2026-11-07: Refinements made while implementing it:
+  - **Where the tree's top is set.** The attach spec is only `!c`; namec walks the rest of `#U!c/path/to/tree` as for any device, and devfs can't tell that walk from a later one. So namec calls `h9_fs_anchor` once a walk from a `#U` attach is done, which makes the chan's (canonical) path the top. That's a three-line change to the vendored `chan.c`. A create from `#U!c/...` anchors at the parent, and on Windows a contained attach left at the list of drives isn't contained.
+  - **The link's own name.** Besides the resolved path, the chan keeps the link's own path in its resolved directory: stat shows the link's name, as `stat` of the walked name would, and remove and rename act on the link.
+  - **Listings** leave out a link whose target is missing or loops, the same as a failed walk, rather than show it with an empty `Dir` as an uncontained listing does.
+  - **Other attach specs** (`#Ufoo/...`, ignored until now) are "bad attach specifier".
+  - **`h9_fs_readlink`** takes a devfs chan; `h9_fs_readlinkpath` (Zig: `kern.readlink`) takes a guest path and goes through the root overlay to its lower devfs chan when the name hasn't been copied up. A link that was copied up is a file in the overlay, and isn't a link any more.
+  - **Only the root's bind and the root overlay's lower tree** are contained under `--root-contained`; the root's `/tmp` overlay and writable paths inside the root stay uncontained, since their top would be the subdirectory.
+  - **Windows** reads a symlink's or junction's substitute name with `FSCTL_GET_REPARSE_POINT`; an absolute target's drive is dropped and the rest starts at the top, and UNC targets are refused. It's built for Windows but not yet run there.
+  - The demo is also an integration case, `ls -l /bin in a contained tree with links (demo)`.
