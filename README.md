@@ -47,6 +47,7 @@ what's built so far. `zig build design -- ready` lists what can be started now.
 | [host-srv](design/host-srv.md) | draft |  | Posting host connections to /srv |
 | [linux-net](design/linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [linux-threads](design/linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
+| [overlay-export](design/overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](design/root-auth.md) | draft |  | Authenticated 9P roots |
 
 ```mermaid
@@ -88,6 +89,7 @@ flowchart LR
   p_host_srv["host-srv<br/>draft"]:::draft
   p_linux_net["linux-net<br/>draft"]:::draft
   p_linux_threads["linux-threads<br/>draft"]:::draft
+  p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
@@ -119,6 +121,7 @@ flowchart LR
   p_linux_personality --> p_linux_net
   p_linux_personality --> p_linux_threads
   p_linux_net --> p_linux_threads
+  p_ephemeral_writes --> p_overlay_export
   p_9p_roots --> p_root_auth
 ```
 
