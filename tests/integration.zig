@@ -3509,7 +3509,7 @@ test "a hangup kills hcmd's host command [baseline, 32]" {
     var t: [16]u8 = undefined;
     const r = try run(e, &.{ "--host-cmd", "--cwd", s.path, "--timeout", slowTimeout(&t, 300), "hcmd", "sh", "-c", "sleep 2; touch late" });
     defer r.deinit();
-    try std.testing.expectEqual(1, r.code);
+    try std.testing.expectEqual(124, r.code);
     try std.testing.io.sleep(.fromMilliseconds(3000), .awake);
     try std.testing.expect(!s.exists("late"));
 }
