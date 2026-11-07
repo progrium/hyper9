@@ -1744,6 +1744,7 @@ test "KVM reuses destroyed vCPUs past its limit, with none of the last user's st
 
 fn arm64Zero() vmm.arm64.Ureg {
     return .{};
+}
 
 // Graphics (design/0015-gfx.md), on the headless backend: a screen in
 // memory that the test acts on as a window system would.
