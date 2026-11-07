@@ -60,8 +60,8 @@ pub const CheckOptions = struct {
 };
 
 /// Probes the backends (creating a VM and running a tiny program on each,
-/// which on macOS also checks the hypervisor entitlement), reports HVF's
-/// vCPU limit, and checks the root tree by running /bin/echo from it.
+/// which on macOS also checks the hypervisor entitlement), reports the
+/// hypervisor's vCPU limit, and checks the root tree by running /bin/echo from it.
 /// Prints one line per item and returns 0, or `exit_failed` if h9 can't
 /// run 9front programs from the root here.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOptions) std.Io.Writer.Error!u8 {
@@ -183,7 +183,7 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
         .ok = .{
             .kind = kind,
             // The emulator has no vCPU limit.
-            .max_vcpus = if (kind == .hvf) m.backend.maxVcpus() catch null else null,
+            .max_vcpus = if (kind == .hvf or kind == .kvm) m.backend.maxVcpus() catch null else null,
             .us = us,
         },
     };
@@ -225,7 +225,7 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
 /// Why backend `want` can't be used, for the CLI's messages.
 pub fn explain(want: vmm.BackendKind, err: anyerror) []const u8 {
     return switch (err) {
-        error.HypervisorUnavailable => if (builtin.os.tag == .macos)
+        error.HypervisorUnavailable => if (vmm.whyUnavailable(want)) |why| why else if (builtin.os.tag == .macos)
             "no usable hypervisor (is h9 signed with h9.entitlements?)"
         else
             "no usable hypervisor",

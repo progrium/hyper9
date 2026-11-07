@@ -64,7 +64,7 @@ fn expectAll(arch: aout.Arch, bytes: []const u8, want: Result) !void {
     defer arena.deinit();
     const gpa = arena.allocator();
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         const got = try runOn(gpa, kind, arch, bytes) orelse continue;
         ran += 1;
         errdefer std.debug.print("backend {t}, {t} binary\n", .{ kind, arch });
@@ -188,7 +188,7 @@ fn expectKick(arch: aout.Arch, text: []const u8) !void {
     const bytes = try image(gpa, arch, text);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
             else => return e,
@@ -240,7 +240,7 @@ fn expectKickRace(arch: aout.Arch, text: []const u8) !void {
     const bytes = try image(gpa, arch, text);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
             else => return e,
@@ -295,7 +295,7 @@ test "a kick racing the start of a run isn't lost 386 [9]" {
 fn runPolicy(arch: aout.Arch, bytes: []const u8, pol: h9.Policy, want: []const u8) !void {
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -353,7 +353,7 @@ test "a timeout interrupts sleep arm64" {
 fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want_out: []const u8) !void {
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for ([_]?u32{ null, 0 }) |own| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| for ([_]?u32{ null, 0 }) |own| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var err: std.Io.Writer.Allocating = .init(gpa);
@@ -606,7 +606,7 @@ test "a timeout interrupts a console read, and its reader thread is cancelled" {
     const img = try image(gpa, .arm64, &read_echo_arm64);
     defer gpa.free(img);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var in_buf: [64]u8 = undefined;
         var in: BlockingInput = undefined;
         in.init(std.testing.io, "", &in_buf);
@@ -642,7 +642,7 @@ test "a console read returns input from the reader thread, and a later run sees 
     const img = try image(gpa, .arm64, &read_echo_arm64);
     defer gpa.free(img);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var src: std.Io.Reader = .fixed("one\ntwo\n");
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
@@ -674,7 +674,7 @@ test "the memory cap is exact" {
     // HVF, the kernel's page tables count too).
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -696,7 +696,7 @@ test "the memory cap is exact" {
 /// Runs `f(backend)` on each backend that can run arm64 here.
 fn eachBackend(comptime f: fn (vmm.Backend) anyerror!void) !void {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var b = vmm.create(std.testing.allocator, std.testing.io, kind, .{ .arch = .arm64, .memory = 64 << 20 }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
             else => return e,
@@ -1014,7 +1014,7 @@ fn expectPooled(arch: aout.Arch, code: []const u8) !void {
     const bytes = try image(gpa, arch, code);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for ([_]u32{ 0, 1 }) |own| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| for ([_]u32{ 0, 1 }) |own| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -1053,7 +1053,7 @@ fn expectRun(text: []const u8, root: ?[]const u8, timeout_ns: u64, want_status: 
     const bytes = try image(gpa, .arm64, text);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var err: std.Io.Writer.Allocating = .init(gpa);
@@ -1361,7 +1361,7 @@ fn expectNet(text: []const u8, argv: []const []const u8, pol: h9.Policy, want_st
     var p = pol;
     p.timeout_ns = 10 * std.time.ns_per_s;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -1498,10 +1498,10 @@ fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol
 }
 
 test "two machines in one host process each get their own /tmp [6]" {
-    // HVF allows one VM per host process, so the second machine is always
-    // the emulator.
+    // HVF allows one VM per host process, so its second machine is the
+    // emulator. KVM allows several.
     var ran: usize = 0;
-    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .emu, .emu } }) |kinds| {
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .emu, .emu } }) |kinds| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1534,10 +1534,10 @@ test "two machines in one host process each get their own /tmp [6]" {
 }
 
 test "two machines in one host process each see only their own root changes [11]" {
-    // HVF allows one VM per host process, so the second machine is always
-    // the emulator.
+    // HVF allows one VM per host process, so its second machine is the
+    // emulator. KVM allows several.
     var ran: usize = 0;
-    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .emu, .emu } }) |kinds| {
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .emu, .emu } }) |kinds| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1578,7 +1578,7 @@ test "two machines in one host process each see only their own root changes [11]
 
 test "a copy-up while another process has the lower file open leaves that reader on the old contents [6]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1596,7 +1596,7 @@ test "a copy-up while another process has the lower file open leaves that reader
 
 test "posting, opening and removing in /srv, and clone boards [8]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1610,10 +1610,10 @@ test "posting, opening and removing in /srv, and clone boards [8]" {
 }
 
 test "two machines in one process have separate /srv [8]" {
-    // HVF allows one VM per host process, so the second machine is always
-    // the emulator.
+    // HVF allows one VM per host process, so its second machine is the
+    // emulator. KVM allows several.
     var ran: usize = 0;
-    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .emu, .emu } }) |kinds| {
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .emu, .emu } }) |kinds| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1646,7 +1646,7 @@ test "two machines in one process have separate /srv [8]" {
 
 test "a machine's posted channels are closed when it ends [8]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1666,7 +1666,7 @@ test "a machine's posted channels are closed when it ends [8]" {
 
 test "#H/bin is on /bin, reads back, and refuses every change [32]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1681,7 +1681,7 @@ test "#H/bin is on /bin, reads back, and refuses every change [32]" {
 
 test "guest_tools = false leaves #H/bin off /bin and masks #H [32]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();

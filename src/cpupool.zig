@@ -1,7 +1,8 @@
 //! vCPUs for a machine's processes. See DESIGN.md, "vCPU limits".
 //!
 //! A process normally owns a vCPU, created on its own thread, as HVF
-//! requires. HVF allows only 64 live vCPUs per VM, so once all but a small
+//! requires. HVF allows only 64 live vCPUs per VM (KVM a few hundred, or
+//! fewer with few file descriptors), so once all but a small
 //! reserve are owned, further processes run guest code on a shared pool
 //! of `reserve` vCPUs instead: the process thread hands its registers to a
 //! pool thread, which runs the guest until the next exit and hands them
@@ -49,7 +50,7 @@ pub const Pool = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io, backend: vmm.Backend, cpus: ?u32, own_limit_override: ?u32) vmm.Error!Pool {
         const own_limit: ?u32 = switch (backend.kind()) {
             .emu => null,
-            .hvf => blk: {
+            .hvf, .kvm => blk: {
                 const max = try backend.maxVcpus();
                 break :blk if (max > reserve) max - reserve else 1;
             },

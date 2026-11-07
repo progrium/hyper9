@@ -468,6 +468,17 @@ pub fn build(b: *std.Build) void {
     shim_obj.root_module.addAssemblyFile(b.path("src/arch/arm64/shim.S"));
     const shim_bin = b.addObjCopy(shim_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = shim_bin.getOutput() });
+    // The amd64 shim, for KVM on x86_64 (design/0016-kvm.md).
+    const shim_amd64_obj = b.addObject(.{
+        .name = "shim_amd64",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .freestanding }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
+    const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+    mod.addAnonymousImport("shim_amd64", .{ .root_source_file = shim_amd64_bin.getOutput() });
 
     const kern = b.addLibrary(.{
         .name = "kern",
