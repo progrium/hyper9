@@ -472,6 +472,17 @@ pub fn build(b: *std.Build) void {
     shim_obj.root_module.addAssemblyFile(b.path("src/arch/arm64/shim.S"));
     const shim_bin = b.addObjCopy(shim_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = shim_bin.getOutput() });
+    // The amd64 shim, for KVM on x86_64 (design/0016-kvm.md).
+    const shim_amd64_obj = b.addObject(.{
+        .name = "shim_amd64",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .freestanding }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
+    const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
+    mod.addAnonymousImport("shim_amd64", .{ .root_source_file = shim_amd64_bin.getOutput() });
 
     const kern = b.addLibrary(.{
         .name = "kern",
@@ -681,17 +692,29 @@ pub fn build(b: *std.Build) void {
         addDemo(b, &demos, "baseline", &ls_demo.step);
     }
 
-    // Each integration case runs on every backend built in that runs arm64 here.
-    var backends: std.ArrayList(u8) = .empty;
-    if (os == .macos and target.result.cpu.arch == .aarch64) backends.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
-    if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
-    // -Darch runs the cases with another architecture's binaries from the
-    // root (/386/bin, /amd64/bin). HVF runs arm64 only, so it's left out
-    // for the others.
+    // Each integration case runs on every backend built in that runs the
+    // cases' architecture here. -Darch runs them with another
+    // architecture's binaries from the root (/386/bin, /amd64/bin).
     const test_arch = b.option([]const u8, "arch", "Architecture of the root's binaries for the integration cases: arm64, amd64 or 386 (default the host's)");
-    const backend_list = if (test_arch != null and !std.mem.eql(u8, test_arch.?, "arm64"))
-        (if (emu == .unicorn) "emu" else "auto")
-    else if (backends.items.len > 0) backends.items else "auto";
+    const native_arch: ?[]const u8 = switch (target.result.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => null,
+    };
+    const cases_arch = test_arch orelse native_arch orelse "arm64";
+    var backends: std.ArrayList(u8) = .empty;
+    if (os == .macos and std.mem.eql(u8, cases_arch, "arm64") and target.result.cpu.arch == .aarch64)
+        backends.appendSlice(b.allocator, "hvf,") catch @panic("OOM");
+    // KVM runs the host's architecture, when this user can open /dev/kvm.
+    if (os == .linux and b.graph.host.result.os.tag == .linux and native_arch != null and std.mem.eql(u8, cases_arch, native_arch.?) and
+        target.result.cpu.arch == b.graph.host.result.cpu.arch)
+    {
+        if (std.Io.Dir.accessAbsolute(b.graph.io, "/dev/kvm", .{ .read = true, .write = true })) |_|
+            backends.appendSlice(b.allocator, "kvm,") catch @panic("OOM")
+        else |_| {}
+    }
+    if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
+    const backend_list = if (backends.items.len > 0) backends.items else "auto";
 
     // Runs real binaries through the h9 CLI; skipped without a root tree.
     // Cases tagged with a proposal that isn't implemented skip unless

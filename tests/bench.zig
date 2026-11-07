@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     const w = &stdout.interface;
 
     try w.print("{s: <7} {s: <6} {s: <4} {s: >8}  {s}\n", .{ "case", "arch", "vmm", "time", "rate" });
-    for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .kvm, .emu }) |kind| {
         const ns = try runOne(gpa, io, kind, c) orelse continue;
         const s = @as(f64, @floatFromInt(ns)) / 1e9;
         try w.print("{s: <7} {t: <6} {t: <4} {d: >7.2}s  ", .{ c.name, c.arch, kind, s });

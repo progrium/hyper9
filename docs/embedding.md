@@ -120,7 +120,7 @@ Every field but `stdio` has a default:
 
 | Field | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.emu`; `.kvm` and `.whp` are proposed and fail with `BackendNotBuilt`. See [Backends](#backends). |
+| `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.emu`; `.whp` is proposed and fails with `BackendNotBuilt`. See [Backends](#backends). |
 | `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64` or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
 | `root` | `?Root` | none | `.{ .dir = path }`, `.{ .tcp = "tcp!host!564" }`, `.{ .unix = path }` or `.{ .ws = "wss://host/9p" }`. Without one, only `.bytes` programs run. |
 | `root_spec` | `[]const u8` | `""` | The attach name for a 9P root. |
@@ -299,8 +299,13 @@ it's not empty, which is what `h9 --strict` does.
 | `BackendKind` | Host | Runs | Built |
 | --- | --- | --- | --- |
 | `.hvf` | macOS on Apple Silicon | arm64 | always, on that host |
+| `.kvm` | Linux on arm64 or x86\_64, with access to `/dev/kvm` | the host's: arm64 or amd64 | always, on those hosts ([kvm](../design/0016-kvm.md)) |
 | `.emu` | any | arm64, amd64, 386 | with `-Demu=unicorn` (GPLv2) |
-| `.kvm`, `.whp` | Linux, Windows | | not yet ([kvm](../design/0016-kvm.md), [whp](../design/0017-whp.md)) |
+| `.whp` | Windows | | not yet ([whp](../design/0017-whp.md)) |
+
+On KVM, h9 blocks `SIGRTMIN + 1` in the threads that run vCPUs and sends it
+to kick them out of the guest. Leave that signal to h9: don't unblock it or
+install a handler for it in threads that call into a machine.
 
 `.auto` uses the host's hypervisor if it's built in and can run `arch`. When
 the hypervisor is unavailable or can't run `arch`, it falls back to the
@@ -309,7 +314,7 @@ fall back on any other failure. Check
 `m.backend.kind()` after `init` to see which one you got; the CLI warns when
 `.auto` lands on `.emu`.
 
-`h9.vmm.Kind.built(.hvf)` and `.built(.emu)` tell you at run time what's
+`h9.vmm.Kind.built(.hvf)`, `.built(.kvm)` and `.built(.emu)` tell you at run time what's
 compiled in, and `h9.vmm.host_arch` is the architecture that runs natively.
 
 ## Several machines in one process

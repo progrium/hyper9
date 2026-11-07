@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Lima VMs for testing h9's emu backend: linux, macos and windows (arm64)
-# and linux-amd64 (emulated x86_64). Instances live in .local/lima (their
+# and linux-amd64 (emulated x86_64); and its KVM backend: linux-kvm (arm64,
+# nested virtualization). Instances live in .local/lima (their
 # LIMA_HOME).
 #
 #   scripts/lima/vm up <os>            create (first time), start and provision
@@ -22,13 +23,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 # Lima's UNIX socket paths are limited to 104 characters, so keep this short.
 export LIMA_HOME="$ROOT/.local/lima"
-OSES=(linux linux-amd64 macos windows)
+OSES=(linux linux-amd64 linux-kvm macos windows)
 
 die() { echo "vm: $*" >&2; exit 1; }
 log() { echo "vm: $*" >&2; }
 
 check_os() {
-	case "${1:-}" in linux|linux-amd64|macos|windows) ;; *) die "unknown os '${1:-}' (want: ${OSES[*]})" ;; esac
+	case "${1:-}" in linux|linux-amd64|linux-kvm|macos|windows) ;; *) die "unknown os '${1:-}' (want: ${OSES[*]})" ;; esac
 }
 
 field() { limactl list "$1" --format "{{.$2}}" 2>/dev/null || true; }
@@ -59,6 +60,8 @@ cmd_up() {
 
 provision_linux() { :; }
 provision_linux-amd64() { :; }
+# The guest user opens /dev/kvm through the kvm group.
+provision_linux-kvm() { ssh_ linux-kvm 'sudo usermod -aG kvm "$USER"' </dev/null; }
 provision_macos() { :; }
 
 provision_windows() {
@@ -150,7 +153,9 @@ cmd_test() {
 			[[ -n "$arch" ]] && set+=" set H9_TEST_ARCH=$arch&&"
 			ssh_ "$os" "$set cd h9 && $w-tests.exe" </dev/null || status=1
 		else
-			local vars="H9_TEST_BIN=\$HOME/h9/h9 H9_TEST_ROOT=\$HOME/h9/root H9_TEST_BACKENDS=emu H9_TEST_SLOW=$slow"
+			local backends=emu
+			[[ "$os" == linux-kvm ]] && backends=kvm,emu
+			local vars="H9_TEST_BIN=\$HOME/h9/h9 H9_TEST_ROOT=\$HOME/h9/root H9_TEST_BACKENDS=$backends H9_TEST_SLOW=$slow"
 			[[ -n "$pend" ]] && vars+=" H9_TEST_PENDING=1"
 			[[ -n "$arch" ]] && vars+=" H9_TEST_ARCH=$arch"
 			ssh_ "$os" "cd h9 && env $vars ./$w-tests" </dev/null || status=1
