@@ -1556,14 +1556,19 @@ test "--memory caps segattach [4]" {
 
 // rendezvous and semaphores (design/0003-semaphores.md). The programs are
 // tests/fixtures/sema/sema.c, one per argument, built inside the guest
-// with 7c and 7l into a scratch directory given with --sandbox.
+// with the test architecture's compiler and loader (7c and 7l on arm64)
+// into a scratch directory given with --sandbox.
 
 /// Builds sema.c into `s` as `sema`, on each backend.
 fn buildSema(e: Env, s: *Scratch) !void {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sema.c", .data = @embedFile("fixtures/sema/sema.c") });
-    const r = try run(e, &.{ "--sandbox", s.path, "--rc", "7c sema.c && 7l -o sema sema.7" });
+    const arch = e.arch orelse "arm64";
+    const o: u8 = if (std.mem.eql(u8, arch, "amd64")) '6' else if (std.mem.eql(u8, arch, "386")) '8' else '7';
+    var cmd_buf: [64]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "{c}c sema.c && {c}l -o sema sema.{c}", .{ o, o, o });
+    const r = try run(e, &.{ "--sandbox", s.path, "--rc", cmd });
     defer r.deinit();
-    errdefer std.debug.print("7c and 7l: {s}{s}", .{ r.out, r.err });
+    errdefer std.debug.print("{s}: {s}{s}", .{ cmd, r.out, r.err });
     try std.testing.expectEqual(0, r.code);
 }
 
