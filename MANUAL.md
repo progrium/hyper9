@@ -1003,8 +1003,13 @@ notes:
 | Ctrl-C at the terminal | `interrupt` to the foreground note group; rc abandons the command and prompts again |
 | A second Ctrl-C within a second | The machine is stopped |
 | SIGTERM, or closing the terminal (SIGHUP); on Windows, closing the console, logoff or shutdown | `hangup` to every process, then the machine is stopped 2 s later if it hasn't exited |
-| `--timeout` reached | `hangup` to every process, then the machine is stopped 2 s later, and h9 prints `h9: PROG: h9: timeout` and exits 1 |
+| `--timeout` reached | `hangup` to every process, then the machine is stopped 2 s later, and h9 prints `h9: PROG: h9: timeout` and exits 124 |
 | Ctrl-Break on Windows | `interrupt` |
+
+If the first process dies of one of these notes, h9 exits as a shell would
+for the matching signal: 130 for `interrupt`, 129 for `hangup`. A stopped
+machine exits 130 after a second Ctrl-C, 129 after SIGHUP and 143 after
+SIGTERM (chapter 20 lists every exit code).
 
 When a program has put the console in raw mode (chapter 13), Ctrl-C isn't
 an interrupt: it reaches the program as a key, as Del does on 9front.
@@ -1799,11 +1804,13 @@ Tools:
 | --- | --- | --- |
 | 0 | The program's exit string was empty | Nothing |
 | 1–255 | The exit string was that number in decimal (digits only: no sign, leading zero or spaces) | Nothing |
-| 1 | Any other exit string, including `0`; or the machine was stopped (timeout, second Ctrl-C) | The string, or `h9: PROG: h9: timeout` |
+| 1 | Any other exit string, including `0`; or the program was killed by a note that isn't a signal | The string, or `h9: PROG: NOTE` |
 | 2 | Usage error or refused combination | The usage, or `h9: ...` |
-| 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached | `h9: ...` |
+| 124 | `--timeout` was reached | `h9: PROG: h9: timeout` |
+| 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, or the machine failed mid-run | `h9: ...` |
 | 126 | The program isn't a runnable a.out for this machine | `h9: PROG: not a 9front executable...` |
 | 127 | The program wasn't found | `h9: PROG: ...` |
+| 128+N | The program was killed by a note that's signal N, as a shell reports it: 130 for Ctrl-C (`interrupt`), 129 for `hangup`, 137 for `kill`, 141 for a closed pipe, 139 for a fault; or a second Ctrl-C (130), SIGHUP (129) or SIGTERM (143) stopped the machine. N is the host's number for the signal | Nothing for Ctrl-C and a closed pipe; otherwise `h9: PROG: NOTE` |
 
 **Signals and the terminal**
 
@@ -2036,7 +2043,7 @@ host$ h9 --net-allow 'tcp!api.example.com!443' ./client
 | `--memory SIZE` | Bytes, or `k`, `m`, `g`, `t` | 1 GB, at most 32 GB | Memory is allocated on demand from one region of this size. If the program doesn't fit at all, h9 exits 125 (`OutOfGuestMemory`). Later, growing memory fails (`malloc` returns nil) and creating `/tmp` or ephemeral files fails with `file system full`. |
 | `--pids N` | A count | Unlimited | `rfork` fails with `no procs`, and the program that tried gets the error |
 | `--cpus N` | A count | Unlimited (the host's CPUs, and 64 on macOS) | Nothing fails: past `N` running at once, processes wait their turn. `/dev/sysstat` and Go's `runtime.NumCPU` report `N`. |
-| `--timeout DURATION` | `ms`, `s`, `m`, `h`; a plain number is seconds | None (`tight`: 10 minutes) | Every process gets a `hangup` note; 2 s later the machine is stopped, and h9 prints `h9: PROG: h9: timeout` and exits 1 |
+| `--timeout DURATION` | `ms`, `s`, `m`, `h`; a plain number is seconds | None (`tight`: 10 minutes) | Every process gets a `hangup` note; 2 s later the machine is stopped, and h9 prints `h9: PROG: h9: timeout` and exits 124 |
 
 Memory counts everything the machine uses for guests: each process's
 memory, the stacks, shared segments, and the files in `/tmp` and ephemeral

@@ -314,11 +314,14 @@ fn value(args: []const []const u8, i: *usize, comptime name: []const u8) ??[]con
     return args[i.*];
 }
 
+/// A host exit code, and whether h9 prints the message behind it.
+pub const Exit = struct { code: u8, print: bool };
+
 /// The exit code for a program's `exits` string (design/0007-go-compat.md):
 /// 0 for an empty one, n for a decimal number from 1 to 255 (digits only,
 /// no sign or leading zero), and 1 for anything else. `print` says whether
 /// h9 writes the string to stderr, which it does only in the last case.
-pub fn exitStatus(msg: []const u8) struct { code: u8, print: bool } {
+pub fn exitStatus(msg: []const u8) Exit {
     if (msg.len == 0) return .{ .code = 0, .print = false };
     numeric: {
         if (msg.len > 3 or msg[0] == '0') break :numeric;
@@ -328,6 +331,144 @@ pub fn exitStatus(msg: []const u8) struct { code: u8, print: bool } {
         return .{ .code = @intCast(n), .print = false };
     }
     return .{ .code = 1, .print = true };
+}
+
+/// Signals by name, in Linux's order on x86 and arm, so a Linux signal
+/// number N is the field with value N.
+pub const Signal = enum(u8) {
+    HUP = 1,
+    INT,
+    QUIT,
+    ILL,
+    TRAP,
+    ABRT,
+    BUS,
+    FPE,
+    KILL,
+    USR1,
+    SEGV,
+    USR2,
+    PIPE,
+    ALRM,
+    TERM,
+    STKFLT,
+    CHLD,
+    CONT,
+    STOP,
+    TSTP,
+    TTIN,
+    TTOU,
+    URG,
+    XCPU,
+    XFSZ,
+    VTALRM,
+    PROF,
+    WINCH,
+    IO,
+    PWR,
+    SYS,
+
+    /// The host's number for the signal, as a host shell decodes an exit
+    /// status of 128+N, or null if the host has no such signal. Windows has
+    /// no signals to speak of, and Git Bash and MSYS expect Linux's numbers.
+    pub fn host(s: Signal) ?u8 {
+        return hostNumber(builtin.os.tag, s);
+    }
+
+    fn hostNumber(comptime os: std.Target.Os.Tag, s: Signal) ?u8 {
+        if (os == .windows) return @intFromEnum(s);
+        const SIG = std.posix.SIG;
+        switch (s) {
+            inline else => |tag| {
+                const name = @tagName(tag);
+                if (!@hasField(SIG, name)) return null;
+                return @intCast(@intFromEnum(@field(SIG, name)));
+            },
+        }
+    }
+
+    pub fn fromLinux(n: u32) ?Signal {
+        return std.enums.fromInt(Signal, n);
+    }
+};
+
+/// APE's `sigtab` (/sys/src/ape/lib/ap/plan9/signal.c in the pinned
+/// 9front), in its order: a note that starts with `msg` is signal `sig`, as
+/// APE's `wait` and note handler decide. The test below checks it against
+/// the pinned source when it's been fetched.
+pub const sigtab = [_]struct { msg: []const u8, sig: Signal }{
+    .{ .msg = "hangup", .sig = .HUP },
+    .{ .msg = "interrupt", .sig = .INT },
+    .{ .msg = "quit", .sig = .QUIT },
+    .{ .msg = "alarm", .sig = .ALRM },
+    .{ .msg = "sys: trap: illegal instruction", .sig = .ILL },
+    .{ .msg = "sys: trap: reserved instruction", .sig = .ILL },
+    .{ .msg = "sys: trap: reserved", .sig = .ILL },
+    .{ .msg = "sys: trap: arithmetic overflow", .sig = .FPE },
+    .{ .msg = "abort", .sig = .ABRT },
+    .{ .msg = "sys: fp:", .sig = .FPE },
+    .{ .msg = "exit", .sig = .KILL },
+    .{ .msg = "die", .sig = .KILL },
+    .{ .msg = "kill", .sig = .KILL },
+    .{ .msg = "sys: trap: bus error", .sig = .SEGV },
+    .{ .msg = "sys: trap: address error", .sig = .SEGV },
+    .{ .msg = "sys: trap: TLB", .sig = .SEGV },
+    .{ .msg = "sys: write on closed pipe", .sig = .PIPE },
+    .{ .msg = "term", .sig = .TERM },
+    .{ .msg = "usr1", .sig = .USR1 },
+    .{ .msg = "usr2", .sig = .USR2 },
+    .{ .msg = "virtual alarm", .sig = .VTALRM },
+    .{ .msg = "profiling alarm", .sig = .PROF },
+};
+
+/// The signal APE's `sigtab` maps a note to, by prefix, or null.
+pub fn noteSignal(note: []const u8) ?Signal {
+    for (sigtab) |e| if (std.mem.startsWith(u8, note, e.msg)) return e.sig;
+    return null;
+}
+
+/// The exit code for a first process killed by a note
+/// (design/0033-exit-status.md). `stopped_by` is the host signal that started a
+/// teardown, for `h9: machine stopped`. `print` says whether h9 writes
+/// `h9: prog: note` to stderr: always, except for an interrupt or a
+/// closed pipe, which shells don't report either.
+pub fn killedStatus(note: []const u8, stopped_by: ?Signal) Exit {
+    const exit_timeout = 124;
+    const exit_failed = 125;
+    if (std.mem.eql(u8, note, "h9: timeout")) return .{ .code = exit_timeout, .print = true };
+    if (std.mem.eql(u8, note, "h9: machine stopped")) {
+        // Stopped with no host signal to blame: an embedder's or h9's own
+        // stop, so h9's failure.
+        const s = stopped_by orelse return .{ .code = exit_failed, .print = true };
+        return .{ .code = signalCode(s) orelse 1, .print = true };
+    }
+    // h9's or the hypervisor's failures, not the guest's (src/machine.zig).
+    if (std.mem.eql(u8, note, "halted") or
+        std.mem.startsWith(u8, note, "sys: trap: unexpected exit") or
+        std.mem.startsWith(u8, note, "h9: "))
+        return .{ .code = exit_failed, .print = true };
+    // The Linux personality's notes (design/0018-linux-personality.md).
+    if (std.mem.startsWith(u8, note, "linux: signal ")) {
+        const n = std.fmt.parseInt(u32, note["linux: signal ".len..], 10) catch return .{ .code = 1, .print = true };
+        const s = Signal.fromLinux(n) orelse return .{ .code = 1, .print = true };
+        return signalStatus(s);
+    }
+    if (noteSignal(note)) |s| return signalStatus(s);
+    // A fault sigtab doesn't name: what a crashed program usually reports.
+    // (sigtab already has `sys: fp:`.)
+    if (std.mem.startsWith(u8, note, "sys: trap: ") or
+        std.mem.startsWith(u8, note, "sys: bad address"))
+        return signalStatus(.SEGV);
+    return .{ .code = 1, .print = true };
+}
+
+fn signalCode(s: Signal) ?u8 {
+    const n = s.host() orelse return null;
+    return 128 + n;
+}
+
+fn signalStatus(s: Signal) Exit {
+    return .{ .code = signalCode(s) orelse 1, .print = s != .INT and s != .PIPE };
 }
 
 /// The line h9 prints on a terminal when a run's changes to the root's
@@ -585,6 +726,98 @@ test "exits strings to exit codes" {
         try t.expectEqual(c[1], s.code);
         try t.expectEqual(c[2], s.print);
     }
+}
+
+test "notes that kill the first process to exit codes" {
+    const linux = builtin.os.tag == .linux or builtin.os.tag == .windows;
+    const cases = [_]struct { []const u8, ?Signal, u8, bool }{
+        // sigtab, with nothing printed for interrupt and a closed pipe.
+        .{ "interrupt", null, 130, false },
+        .{ "sys: write on closed pipe pc=0x1234", null, 141, false },
+        .{ "hangup", null, 129, true },
+        .{ "term", null, 143, true },
+        .{ "kill", null, 137, true },
+        .{ "die", null, 137, true },
+        .{ "alarm", null, 142, true },
+        .{ "abort", null, 134, true },
+        .{ "sys: trap: illegal instruction pc=0x10", null, 132, true },
+        .{ "sys: fp: divide by zero pc=0x10", null, 136, true },
+        .{ "usr1", null, if (linux) 138 else 158, true },
+        .{ "usr2", null, if (linux) 140 else 159, true },
+        // Other faults are SIGSEGV.
+        .{ "sys: trap: fault read addr=0x0 pc=0x1000", null, 139, true },
+        .{ "sys: trap: misaligned pc pc=0x1001", null, 139, true },
+        .{ "sys: bad address in syscall pc=0x1000", null, 139, true },
+        // h9's own.
+        .{ "h9: timeout", null, 124, true },
+        .{ "h9: timeout", .INT, 124, true },
+        .{ "h9: machine stopped", .INT, 130, true },
+        .{ "h9: machine stopped", .HUP, 129, true },
+        .{ "h9: machine stopped", .TERM, 143, true },
+        .{ "h9: machine stopped", null, 125, true },
+        .{ "halted", null, 125, true },
+        .{ "sys: trap: unexpected exit 0x5 pc=0x1000", null, 125, true },
+        .{ "h9: OutOfMemory", null, 125, true },
+        // The Linux personality's, by name on the host.
+        .{ "linux: signal 2", null, 130, false },
+        .{ "linux: signal 13", null, 141, false },
+        .{ "linux: signal 9", null, 137, true },
+        .{ "linux: signal 7", null, if (linux) 135 else 138, true },
+        .{ "linux: signal 10", null, if (linux) 138 else 158, true },
+        .{ "linux: signal 16", null, if (linux) 144 else 1, true },
+        .{ "linux: signal 0", null, 1, true },
+        .{ "linux: signal 64", null, 1, true },
+        .{ "linux: signal x", null, 1, true },
+        // Anything else is a message.
+        .{ "something", null, 1, true },
+        .{ "", null, 1, true },
+        .{ "Killed", null, 1, true },
+        .{ "h9", null, 1, true },
+    };
+    for (cases) |c| {
+        errdefer std.debug.print("note {s}\n", .{c[0]});
+        const s = killedStatus(c[0], c[1]);
+        try t.expectEqual(c[2], s.code);
+        try t.expectEqual(c[3], s.print);
+    }
+}
+
+test "host signal numbers" {
+    if (builtin.os.tag.isDarwin()) {
+        try t.expectEqual(@as(?u8, 10), Signal.BUS.host());
+        try t.expectEqual(@as(?u8, 30), Signal.USR1.host());
+        try t.expectEqual(@as(?u8, null), Signal.STKFLT.host());
+    } else if (builtin.os.tag == .linux) {
+        try t.expectEqual(@as(?u8, 7), Signal.BUS.host());
+        try t.expectEqual(@as(?u8, 10), Signal.USR1.host());
+    }
+    // Windows uses Linux's numbers, wherever the test runs.
+    try t.expectEqual(@as(?u8, 7), Signal.hostNumber(.windows, .BUS));
+    try t.expectEqual(@as(?Signal, .SYS), Signal.fromLinux(31));
+    try t.expectEqual(@as(?Signal, null), Signal.fromLinux(32));
+}
+
+test "sigtab matches the pinned 9front's" {
+    // Fetched by scripts/fetch.sh; zig build test runs from the repo root.
+    const io = t.io;
+    const src = std.Io.Dir.cwd().readFileAlloc(io, ".local/src/9front/sys/src/ape/lib/ap/plan9/signal.c", t.allocator, .limited(1 << 20)) catch return error.SkipZigTest;
+    defer t.allocator.free(src);
+    const start = std.mem.indexOf(u8, src, "} sigtab[] = {") orelse return error.TestUnexpectedResult;
+    const end = std.mem.indexOfPos(u8, src, start, "};") orelse return error.TestUnexpectedResult;
+    var lines = std.mem.tokenizeScalar(u8, src[start..end], '\n');
+    _ = lines.next();
+    var i: usize = 0;
+    while (lines.next()) |line| {
+        const q0 = std.mem.indexOfScalar(u8, line, '"') orelse continue;
+        const q1 = std.mem.indexOfScalarPos(u8, line, q0 + 1, '"') orelse return error.TestUnexpectedResult;
+        const sig = std.mem.trim(u8, line[q1 + 1 ..], ", \t}");
+        try t.expect(i < sigtab.len);
+        try t.expectEqualStrings(line[q0 + 1 .. q1], sigtab[i].msg);
+        var nb: [16]u8 = undefined;
+        try t.expectEqualStrings(sig, try std.fmt.bufPrint(&nb, "SIG{t}", .{sigtab[i].sig}));
+        i += 1;
+    }
+    try t.expectEqual(sigtab.len, i);
 }
 
 test "the discarded-changes notice names the top-level directories" {

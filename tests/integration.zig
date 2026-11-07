@@ -537,7 +537,8 @@ test "--timeout stops the program [baseline]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "200ms", "sleep", "10" });
     defer r.deinit();
-    try std.testing.expectEqual(1, r.code);
+    // 124, as coreutils timeout (design/0033-exit-status.md).
+    try std.testing.expectEqual(124, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
 }
 
@@ -1661,7 +1662,7 @@ test "--timeout stops a console read on a terminal at once [baseline]" {
         try t.expect("ready", slow(10_000));
         // Before the reader thread, the read held the machine until a
         // 500 ms grace period ran out, and h9 exited without freeing it.
-        try std.testing.expectEqual(1, try t.wait(slow(1_500)));
+        try std.testing.expectEqual(124, try t.wait(slow(1_500)));
         try t.expect("h9: timeout", slow(1_000));
     }
 }
@@ -1721,8 +1722,89 @@ test "a second Ctrl-C within a second tears the machine down [baseline]" {
         try t.send("\x03");
         try t.drain(100);
         try t.send("\x03");
-        try std.testing.expect(try t.wait(slow(5_000)) != 0);
+        // 128 + SIGINT (design/0033-exit-status.md).
+        try std.testing.expectEqual(130, try t.wait(slow(5_000)));
     }
+}
+
+test "a program killed by interrupt exits 130, with nothing printed [33]" {
+    const e = try env(@src());
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // rc execs sleep in place, so sleep is the first process.
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "echo ready; sleep 1000" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        try t.drain(slow(500));
+        try t.send("\x03");
+        try std.testing.expectEqual(130, try t.wait(slow(5_000)));
+        try std.testing.expect(std.mem.indexOf(u8, t.out.items[t.mark..], "interrupt") == null);
+        try std.testing.expect(std.mem.indexOf(u8, t.out.items[t.mark..], "h9:") == null);
+    }
+}
+
+/// Posts NOTE to the first process once it's become sleep: rc execs sleep in
+/// its place, keeping its pid, and a background block waits for that before
+/// writing the note, since rc itself would catch it.
+fn noteToSleep(buf: []u8, note: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf,
+        \\p=$pid
+        \\{{ while(! ~ `{{awk '{{print $1; exit}}' /proc/$p/status}} sleep) sleep 0; echo -n '{s}' >/proc/$p/note }} &
+        \\exec sleep 1000
+    , .{note});
+}
+
+test "a program killed by hangup exits 129 and prints the note [33]" {
+    const e = try env(@src());
+    var buf: [512]u8 = undefined;
+    const r = try run(e, &.{ "--timeout", "30s", "--rc", try noteToSleep(&buf, "hangup") });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(129, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "rc: hangup") != null);
+}
+
+test "a fault exits 139 and prints the note [33]" {
+    const e = try env(@src());
+    // A program that writes through a nil pointer, built in the guest.
+    const script =
+        \\switch($objtype){
+        \\case arm64; O=7
+        \\case amd64; O=6
+        \\case 386; O=8
+        \\}
+        \\cd /tmp
+        \\echo '#include <u.h>' >f.c
+        \\echo '#include <libc.h>' >>f.c
+        \\echo 'void main(void){ *(int*)0 = 1; exits(nil); }' >>f.c
+        \\$O^c f.c && $O^l -o f f.$O && exec ./f
+    ;
+    const r = try run(e, &.{ "--timeout", "60s", "--rc", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(139, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "rc: sys: trap: fault") != null);
+}
+
+test "--timeout exits 124 [33]" {
+    const e = try env(@src());
+    // rc catches the hangup --timeout posts, so the machine is torn down
+    // after the grace period: still a timeout, not "machine stopped".
+    const r = try run(e, &.{ "--timeout", "200ms", "--rc", "fn sighup {}; while() sleep 1" });
+    defer r.deinit();
+    try std.testing.expectEqual(124, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "rc: h9: timeout") != null);
+}
+
+test "a note that isn't a signal exits 1 and prints it [33]" {
+    const e = try env(@src());
+    var buf: [512]u8 = undefined;
+    const r = try run(e, &.{ "--timeout", "30s", "--rc", try noteToSleep(&buf, "goodbye") });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(1, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "rc: goodbye") != null);
 }
 
 test "rawon puts the host terminal in raw mode until exit [baseline]" {
@@ -1782,6 +1864,24 @@ test "SIGTERM posts hangup [baseline]" {
         t.signal(.TERM);
         try t.expect("got hangup", slow(5_000));
         _ = try t.wait(slow(5_000));
+    }
+}
+
+test "a run torn down after SIGTERM exits 143 [33]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // rc ignores the hangup, so the machine is stopped after the grace
+        // period, and the exit code names the host signal that started it.
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--rc", "fn sighup {}; echo ready; while() sleep 1" });
+        defer t.deinit();
+        try t.expect("ready", slow(10_000));
+        try t.drain(slow(500));
+        t.signal(.TERM);
+        try std.testing.expectEqual(143, try t.wait(slow(10_000)));
+        try t.expect("h9: machine stopped", slow(1_000));
     }
 }
 

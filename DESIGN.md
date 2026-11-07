@@ -272,7 +272,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 The host's working directory is bound at the guest's `/mnt/term/cwd` and set as the guest's cwd, so that `h9 ls` lists what the user expects.
 
-**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed. That host read happens on a reader thread for the machine run (`src/consin.zig`), never on the guest's thread: the guest sleeps in the kernel (`src/kern/devhcons.c`) until the thread has input, so a note or a teardown interrupts a console read as it does any other blocking call. Nothing is read ahead of a guest's request. At the end of a run the thread is stopped through `Stdio.in_cancel` (the CLI's stdin polls with a wake pipe on POSIX and uses `CancelSynchronousIo` on Windows). Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group (see the CLI section's Signals and TTY for each host). Exit status: an empty `exits` string gives 0, a decimal number from 1 to 255 gives that number, and any other string gives 1 and is printed to stderr (see the CLI's exit codes).
+**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed. That host read happens on a reader thread for the machine run (`src/consin.zig`), never on the guest's thread: the guest sleeps in the kernel (`src/kern/devhcons.c`) until the thread has input, so a note or a teardown interrupts a console read as it does any other blocking call. Nothing is read ahead of a guest's request. At the end of a run the thread is stopped through `Stdio.in_cancel` (the CLI's stdin polls with a wake pipe on POSIX and uses `CancelSynchronousIo` on Windows). Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group (see the CLI section's Signals and TTY for each host). Exit status: an empty `exits` string gives 0, a decimal number from 1 to 255 gives that number, and any other string gives 1 and is printed to stderr; a process killed by a note exits 128+N for a signal (see the CLI's exit codes).
 
 **Graphics (`--gfx`).** A machine with `Machine.Options.gfx` claims the process's one window (`src/gfx.zig`; a second machine gets `GfxInUse`). The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, X11 on Linux only with `-Dgfx=x11` (glibc), and `headless`, a screen in memory with hooks to inject keys and mouse events and read pixels, for `tests/backends.zig`. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead. The backend files are compiled unchanged; `src/kern/gfx-gui.h`, force-included before them, renames `screeninit`, `clipread`, `clipwrite` and `kbdkey` to h9's wrappers in `src/kern/gfx.c`, and turns the backend's `exit` (or `ExitProcess`) on a closed window into `h9_gfx_exit`, which posts `hangup` to the machine with the window (as for a closed terminal) and parks the backend's thread. The window opens lazily, on the first walk below `#i` or open of `/dev/snarf`, so a program that never draws gets no window; the backend's kprocs run in an empty namespace of their own. `/dev/kbd` serves kbdfs's format (`k`/`K` for keys held, `c` for a key typed), which rio reads, and drops keys while it isn't open. `/dev/snarf` is the host clipboard, or under `--gfx=noclip` a buffer in the h9 process; machines without `#i` can't open it. The console stays the host terminal, so `/dev/cons` and kernel prints still go there. On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same.
 
@@ -482,18 +482,34 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | --- | --- |
 | 0 | `exits(nil)` or `exits("")` |
 | 1–255 | An `exits` string that's that number in decimal: digits only, no sign, leading zero or spaces. Nothing is printed, so rc's `exit 3` and Go's `os.Exit(3)` exit 3 ([go-compat](design/0007-go-compat.md)) |
-| 1 | Any other `exits` string, including `"0"`, which is also printed to stderr |
+| 1 | Any other `exits` string, including `"0"`, which is also printed to stderr; or the first process was killed by a note that isn't a signal |
 | 2 | Usage error |
-| 125 | h9 itself failed: no hypervisor, VM creation failed, the root wasn't found, a 9P root's connection, handshake or attach failed, or a namespace file's WebSocket mount failed |
+| 124 | `--timeout` stopped the program (`h9: prog: h9: timeout`), as coreutils `timeout` |
+| 125 | h9 itself failed: no hypervisor, VM creation failed, the root wasn't found, a 9P root's connection, handshake or attach failed, or a namespace file's WebSocket mount failed; or the run ended with `halted`, an unexpected VM exit or an internal error |
 | 126 | The program was found but isn't a runnable a.out (bad magic or wrong architecture) |
 | 127 | The program wasn't found |
+| 128+N | The first process was killed by a note that's signal N ([exit-status](design/0033-exit-status.md)): see below |
 
 The 125–127 codes follow `env` and `docker run`. A guest can exit with them too, but h9 prints a message whenever it fails itself and a numeric `exits` prints nothing, so scripts can still tell h9 failures from guest failures. The mapping is in `src/cli.zig` and applies to every program; `Machine` returns the `exits` string unchanged, so library callers decide for themselves.
 
+A first process killed by a note exits as a host shell reports a death by signal, 128 plus the host's number for the signal (`cli.killedStatus`):
+
+| Note | Exit code | Printed |
+| --- | --- | --- |
+| One APE's `sigtab` (`/sys/src/ape/lib/ap/plan9/signal.c`) maps to a signal, by prefix: `interrupt` is SIGINT, `hangup` SIGHUP, `kill` and `die` SIGKILL, `sys: write on closed pipe` SIGPIPE, `sys: fp:` SIGFPE and so on | 128 + the host's number, so 130 for `interrupt` | Nothing for `interrupt` and a closed pipe; otherwise `h9: prog: note` |
+| `linux: signal N` (from the Linux personality) | 128 + the host's number for Linux signal N, matched by name; 1 if the host has no such signal | As above |
+| Another `sys: trap: …` or `sys: bad address …` fault | 139 (SIGSEGV) | `h9: prog: note` |
+| `h9: timeout` | 124 | `h9: prog: h9: timeout` |
+| `h9: machine stopped` | 128 + the host signal that started the teardown (130, 129 or 143), or 125 if none did | `h9: prog: h9: machine stopped` |
+| `halted`, `sys: trap: unexpected exit …`, `h9: <error>` | 125 | `h9: prog: note` |
+| Anything else | 1 | `h9: prog: note` |
+
+Signal numbers are the host's (`std.posix.SIG`), since a host shell decodes the status, so `usr1` is 138 on Linux and 158 on macOS; Windows uses Linux's numbers, as Git Bash and MSYS expect. A unit test checks the copy of `sigtab` in `src/cli.zig` against the pinned 9front source when it's been fetched. h9 exits with the status rather than re-raising the signal on itself.
+
 **Signals and TTY**
 
-- **Ctrl-C:** posts an `interrupt` note to the foreground note group. A second Ctrl-C within a second tears down the machine.
-- **SIGTERM and SIGHUP:** post a `hangup` note to every process, then tear down the machine 2 s later, or sooner if it has exited by then.
+- **Ctrl-C:** posts an `interrupt` note to the foreground note group; a program it kills exits 130. A second Ctrl-C within a second tears down the machine, which exits 130 too.
+- **SIGTERM and SIGHUP:** post a `hangup` note to every process, then tear down the machine 2 s later, or sooner if it has exited by then. A program the note kills exits 129; a teardown exits 143 after SIGTERM and 129 after SIGHUP. `src/hostsig.zig` records which host signal started a teardown (the first one wins); on Windows, closing the console counts as SIGHUP, and logoff and shutdown as SIGTERM.
 - **Raw mode:** the host TTY goes raw only when the guest writes `rawon` to `/dev/consctl`, and goes back on `rawoff`, on the last close of `/dev/consctl` (as on 9front), at the end of the run, and on a panic.
 
 How each host delivers these:

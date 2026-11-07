@@ -20,6 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const h9 = @import("h9");
+const Signal = @import("cli.zig").Signal;
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -32,6 +33,11 @@ pub const Host = struct {
     /// When the last Ctrl-C came, for the "second within a second" rule;
     /// in ms on the awake clock, 0 for none.
     last_interrupt_ms: i64 = 0,
+    /// The host signal that started a teardown, for the exit code of a
+    /// run that ends `h9: machine stopped` (design/0033-exit-status.md): INT for
+    /// a second Ctrl-C, HUP or TERM for a hangup. 0 until one does; the
+    /// first one wins.
+    stop_signal: std.atomic.Value(u8) = .init(0),
     sys: Sys = .{},
 
     /// Installs the handlers and starts the watcher. Call `deinit` before
@@ -58,9 +64,19 @@ pub const Host = struct {
         h.sys.setRaw(on);
     }
 
+    /// The host signal that started the machine's teardown, if any.
+    pub fn stoppedBy(h: *const Host) ?Signal {
+        return std.enums.fromInt(Signal, h.stop_signal.load(.acquire));
+    }
+
+    fn recordStop(h: *Host, sig: Signal) void {
+        _ = h.stop_signal.cmpxchgStrong(0, @intFromEnum(sig), .acq_rel, .acquire);
+    }
+
     fn interrupt(h: *Host) void {
         const now = std.Io.Timestamp.now(h.io, .awake).toMilliseconds();
         if (h.last_interrupt_ms != 0 and now - h.last_interrupt_ms < std.time.ms_per_s) {
+            h.recordStop(.INT);
             h.signals.stop(h.io);
         } else {
             h.signals.interrupt(h.io);
@@ -68,7 +84,9 @@ pub const Host = struct {
         h.last_interrupt_ms = now;
     }
 
-    fn hangup(h: *Host) void {
+    /// `sig` is HUP or TERM.
+    fn hangup(h: *Host, sig: Signal) void {
+        h.recordStop(sig);
         h.signals.hangup(h.io);
     }
 };
@@ -95,6 +113,7 @@ const Posix = struct {
     const sigs = [_]posix.SIG{ .INT, .HUP, .TERM };
     const ev_interrupt = 'i';
     const ev_hangup = 'h';
+    const ev_term = 't';
     const ev_quit = 'q';
 
     var wake_fd: posix.fd_t = -1;
@@ -141,7 +160,11 @@ const Posix = struct {
     }
 
     fn handler(sig: posix.SIG) callconv(.c) void {
-        const ev: u8 = if (sig == .INT) ev_interrupt else ev_hangup;
+        const ev: u8 = switch (sig) {
+            .INT => ev_interrupt,
+            .TERM => ev_term,
+            else => ev_hangup,
+        };
         const fd = wake_fd;
         if (fd >= 0) {
             const e = c._errno().*;
@@ -161,7 +184,8 @@ const Posix = struct {
             if (n == 0) return;
             for (buf[0..@intCast(n)]) |ev| switch (ev) {
                 ev_interrupt => h.interrupt(),
-                ev_hangup => h.hangup(),
+                ev_hangup => h.hangup(.HUP),
+                ev_term => h.hangup(.TERM),
                 ev_quit => return,
                 else => {},
             };
@@ -237,7 +261,9 @@ const Windows = struct {
         switch (ev) {
             CTRL_C_EVENT, CTRL_BREAK_EVENT => h.interrupt(),
             CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT => {
-                h.hangup();
+                // Closing the console is a terminal hangup; logoff and
+                // shutdown are what SIGTERM is for on POSIX.
+                h.hangup(if (ev == CTRL_CLOSE_EVENT) .HUP else .TERM);
                 // Returning lets Windows end the process at once, so wait
                 // here for the grace period, while the machine handles the
                 // hangup; Windows allows about 5 s.
