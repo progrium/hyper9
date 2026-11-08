@@ -34,6 +34,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [linux-threads](0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [multicall](0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
+| [schemeless-roots](0076-schemeless-roots.md) | implemented |  | Schemeless roots |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [builtin-root](builtin-root.md) | draft |  | A built-in root |
@@ -84,6 +85,7 @@ flowchart LR
   p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
   p_multicall["#35;64 multicall<br/>implemented"]:::implemented
+  p_schemeless_roots["#35;76 schemeless-roots<br/>implemented"]:::implemented
   p_audio["audio<br/>draft"]:::draft
   p_browser_gfx["browser-gfx<br/>draft"]:::draft
   p_builtin_root["builtin-root<br/>draft"]:::draft
@@ -125,6 +127,8 @@ flowchart LR
   p_linux_personality --> p_linux_threads
   p_linux_net --> p_linux_threads
   p_linux_personality --> p_linux_net
+  p_9p_roots --> p_schemeless_roots
+  p_websocket_9p --> p_schemeless_roots
   p_browser_host --> p_audio
   p_browser_host --> p_browser_gfx
   p_gfx --> p_browser_gfx
