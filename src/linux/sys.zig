@@ -295,6 +295,13 @@ pub const Group = struct {
         return true;
     }
 
+    /// Whether the group is ending (exit_group or a fatal signal).
+    pub fn ending(g: *Group) bool {
+        g.lockSpin();
+        defer g.lock.unlock();
+        return g.end != null;
+    }
+
     /// The members' tids other than `self`, into `buf`.
     pub fn others(g: *Group, self: u32, buf: []u32) []u32 {
         g.lockSpin();
