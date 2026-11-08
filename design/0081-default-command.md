@@ -133,3 +133,7 @@ Unit cases in `src/cli.zig`: `--rc` as the last argument parses as a login rc, a
 
 - Should `--check` say whether the root has a default command (an `rcmain.local`) and whether `/bin/test` is present? Missing `/bin/test` is the one way the hook fails silently.
 - Should [browser-host](0012-browser-host.md)'s page, which starts an interactive rc, start a login rc instead, so a root's default runs in the browser too?
+
+## Updates
+
+**Nov 8, 2026.** The integration cases don't use `--builtin=before`, since [builtin-root](builtin-root.md) isn't built yet. They run over the stock tree, which has no `rcmain.local`, and union a scratch directory's `rcmain.local` onto `/rc/lib` with `--ns`, so `rcmain` and `/bin/test` come from the root. The plain-rc case runs on the stock tree rather than the built-in root.

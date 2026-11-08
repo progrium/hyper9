@@ -103,8 +103,19 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         v[2] = cmd;
         @memcpy(v[3..], cfg.argv);
         break :blk v;
-    } else cfg.argv;
-    const prog_arg = if (cfg.rc != null) "/bin/rc" else argv[0];
+    } else if (cfg.rc_login)
+        // --rc alone is a login rc, which sources /rc/lib/rcmain.local, the
+        // root's default command, and then $home/lib/profile
+        // (design/0081-default-command.md). rcmain reads them only with -i or
+        // -c, and rc can't tell the guest's stdin is a terminal, so h9 asks
+        // the host: -i on one, and otherwise -c reading stdin as a script.
+        if (std.Io.File.stdin().isTty(io) catch false)
+            &.{ "rc", "-l", "-i" }
+        else
+            &.{ "rc", "-l", "-c", ". /fd/0" }
+    else
+        cfg.argv;
+    const prog_arg = if (cfg.rc != null or cfg.rc_login) "/bin/rc" else argv[0];
 
     // A host program is read here; a guest one is resolved in the machine.
     // --arch picks the architecture; without it, a host program's header

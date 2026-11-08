@@ -890,6 +890,92 @@ test "--ns replays a namespace file [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+// A root's default command (design/0081-default-command.md). The stock tree
+// has no /rc/lib/rcmain.local, so these union one from a scratch dir onto
+// /rc/lib with --ns; rcmain and /bin/test come from the root.
+
+/// A scratch dir holding lib/rcmain.local with `script`, and an `ns` file
+/// that binds lib after /rc/lib.
+fn defaultCommand(s: *Scratch, script: []const u8) !void {
+    try s.init();
+    errdefer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "lib");
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/rcmain.local", .data = script });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = "bind -a /mnt/term/cwd/lib /rc/lib\n" });
+}
+
+test "--rc alone runs the root's rcmain.local, then stdin [81]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try defaultCommand(&s, "echo hello from the root\n");
+    defer s.deinit();
+    const r = try runIn(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc" }, "echo from stdin $service\n");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("hello from the root\nfrom stdin terminal\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "an exec in rcmain.local sets the exit status [81]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try defaultCommand(&s, "exec test -e /no/such/file\n");
+    defer s.deinit();
+    // The exec replaces the login rc, so stdin is never read.
+    const r = try runIn(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc" }, "echo not reached\n");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("", r.out);
+    try std.testing.expectEqual(1, r.code);
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/rcmain.local", .data = "exec echo hello from the root\n" });
+    const ok = try runIn(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc" }, "echo not reached\n");
+    defer ok.deinit();
+    try std.testing.expectEqualStrings("hello from the root\n", ok.out);
+    try std.testing.expectEqual(0, ok.code);
+}
+
+test "--rc alone without rcmain.local is a plain rc [81]" {
+    const e = try env(@src());
+    const r = try runIn(e, &.{"--rc"}, "echo plain; test -e /no/such/file\n");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("plain\n", r.out);
+    try std.testing.expectEqual(1, r.code);
+    const none = try run(e, &.{"--rc"});
+    defer none.deinit();
+    try std.testing.expectEqualStrings("", none.out);
+    try std.testing.expectEqual(0, none.code);
+}
+
+test "--rc alone on a terminal is an interactive login rc [81]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try defaultCommand(&s, "echo hello from the root\n");
+    defer s.deinit();
+    var it = backendList(e);
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--ns", "ns", "--rc" });
+        defer t.deinit();
+        try t.expect("hello from the root", slow(10_000));
+        try t.expect(prompt, slow(10_000));
+        // The output, xy, isn't in the echoed input, echo x^y.
+        try t.send("echo x^y" ++ enter);
+        try t.expect("xy", slow(10_000));
+        try t.expect(prompt, slow(10_000));
+        try t.send("exit" ++ enter);
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    }
+}
+
+test "--rc 'cmd' doesn't read rcmain.local [81]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try defaultCommand(&s, "echo hello from the root\n");
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc", "echo cmd" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("cmd\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 // Ephemeral writes and a private /tmp (design/0006-ephemeral-writes.md).
 
 /// `h9 --cwd <s> --write=ephemeral args...`.
