@@ -81,7 +81,7 @@ That's exit 125, as for any root that can't be reached. A tilde root with no `$H
 
 ### The shell
 
-A shell expands `~NAME` at the start of a word to the home directory of user `NAME`, and `~` and `~/…` to `$HOME`. So the spelling that's documented is `--root=~alpine`: bash and zsh don't expand `~` after `=` in an argument that isn't an assignment (zsh only does with `MAGIC_EQUAL_SUBST`). The space-separated form needs quotes, `--root '~alpine'`, because:
+Tilde expansion is done by the shell, before h9 starts: a program receives `/home/jeff/…`, never `~/…`, and h9 doesn't expand `~` itself. Some programs expand `~/` in their own config files (OpenSSH, git), but none sees it in an argument the shell has already expanded. A shell expands `~NAME` at the start of a word to the home directory of user `NAME`, and `~` and `~/…` to `$HOME`. So the spelling that's documented is `--root=~alpine`: bash and zsh don't expand `~` after `=` in an argument that isn't an assignment (zsh only does with `MAGIC_EQUAL_SUBST`). The space-separated form needs quotes, `--root '~alpine'`, because:
 
 - bash expands `~alpine` only when a user `alpine` exists, but users like `root`, `bin`, `daemon`, `git`, and `nobody` exist on most systems, so `--root ~root` becomes `--root /root`.
 - zsh, the default shell on macOS, fails the command with "no such user or named directory: alpine" when there's no such user, and also expands names from `hash -d`.
@@ -104,7 +104,20 @@ A shell expands `~NAME` at the start of a word to the home directory of user `NA
 
 **Read before the path check.** schemeless-roots reads a path first, so that no value that works today changes meaning. A tilde root can't change any value's meaning unless the user sets `$H9ROOTPATH`, so that care isn't needed here, and checking the path first would make `~alpine` mean a stray directory in the working directory before the user's own prefixes.
 
-**The marker.** `~` is short, reads as "relative to my roots" the way it reads as "relative to my home" in a shell, and `schemelessRoot` already refuses it, so it can't collide with a URL or a schemeless one. Its cost is the shell, above. Other characters were considered: `@` is a URL's userinfo, `%` and `^` are special in some shells, `+` and `:` collide with nothing in a shell but read less clearly. The `--root=` spelling makes the shell problem go away for the flag, which is where it's typed most.
+**The marker.** `~` is short, reads as "relative to my roots" the way it reads as "relative to my home" in a shell, and `schemelessRoot` already refuses it, so it can't collide with a URL or a schemeless one. Its cost is the shell, above. The `--root=` spelling makes that go away for the flag, which is where it's typed most. The alternatives, and why each wasn't chosen:
+
+| Marker | Example | For | Against |
+|---|---|---|---|
+| `~` (proposed) | `--root=~alpine` | Short; reads as "relative to a base", as in a shell; already refused by `schemelessRoot` | Expanded or rejected by the shell unless written with `=` or quoted; `~root` silently becomes `/root` in bash |
+| `+` | `--root +alpine` | No shell expands it, so no quoting anywhere, `H9ROOT` included; never starts a root value today | Reads as "add" or as an option (`set +x`), not as "look up" |
+| `:` | `--root :alpine` | Shell-safe; reads like a URL with its scheme taken from somewhere else | Easy to miss; looks like a typo for `host:port` |
+| `@` | `--root @alpine` | Shell-safe in POSIX shells; reads as "at one of my places", like npm's `@scope/` | PowerShell splats `@name`; `schemelessRoot` already treats `@` as userinfo; `--root-header @FILE` uses `@` to mean a file |
+| `%`, `^`, `=`, `#` | `--root %alpine` | Short | Each is special somewhere: `^` is negation under zsh's `EXTENDED_GLOB`, `=cmd` is a command's path in zsh, `#` starts a comment, and `%` is a job spec and reads as a format |
+| A scheme-like prefix | `--root root:alpine` | Self-describing and shell-safe; fits the way `tcp!`, `unix!`, and `ws://` already mark kinds of root, and the `oci:` prefix schemeless-roots anticipates | Five characters to save typing; a new pseudo-scheme to learn; `root:alpine` has to be recognized before `schemelessRoot`, which would otherwise see a host and a port |
+| A bare name | `--root alpine` | Shortest; the way `PATH` finds a command with no `/` | Ambiguous with a relative path; a missing directory would turn into network lookups, which schemeless-roots deliberately kept bare names out of |
+| A flag | `--root-name alpine` | Unambiguous; no new syntax in root values | Longer than what it replaces for short URLs; `$H9ROOT` can't use it; one more flag |
+
+`~` wins on reading naturally and costs nothing to parse, provided the docs lead with `--root=~name`. If the shell turns out to bite in practice, `+` is the next choice: it gives up the reading for a marker no shell touches.
 
 **Literal concatenation.** h9 doesn't add a `/` between prefix and rest, so a prefix can be the start of a name (`wss://host/root-`). Adding one would be friendlier for a prefix that leaves it off, but would make `wss://host/r` and `wss://host/r/` the same, and couldn't express the name-prefix case at all.
 
@@ -149,6 +162,6 @@ Demo: `H9ROOTPATH="localhost:8080/ $HOME/roots/" h9 --print --root=~9front ls` s
 
 ## Open issues
 
-- **Another marker as well.** `--root=~alpine` avoids the shell, but `H9ROOT` needs quotes. A second marker no shell touches, such as `+alpine`, would avoid that, at the cost of two spellings for one thing.
+- **The marker.** `~`, as proposed, or `+`, which no shell touches (see the table under Rationale). Accepting both would avoid the shell problem for `$H9ROOT` too, at the cost of two spellings for one thing.
 - **Other places a root is named.** The `--layer` flag of [recursive unions](https://github.com/progrium/hyper9/issues/102) would read tilde values the same way. Namespace files and `wsmount` could too, but their sources are guest names, and the guest has no `$H9ROOTPATH`. The browser host has no environment; `createMachine` could take a `rootPath` list, and the demo page could read it from its query.
 - **Keeping the probe's connection.** Handing the matched handshake's connection to the machine would save the extra handshake, but would need `Machine.Options` to take an open connection rather than a URL.
