@@ -17,7 +17,7 @@ const real = struct {
     extern fn h9_linux_setcexec(fd: c_int, on: c_int) c_int;
     extern fn h9_linux_maxfd() c_int;
     extern fn h9_linux_fds(fds: [*]c_int, n: c_int) c_int;
-    extern fn h9_linux_await(buf: [*]u8, n: c_int, block: c_int) c_int;
+    extern fn h9_linux_await(buf: [*]u8, n: c_int, block: c_int, want: c_long, peek: c_int) c_int;
     extern fn h9_linux_ppid() c_ulong;
     extern fn h9_linux_getcwd(buf: [*]u8, n: c_int) c_int;
     extern fn h9_linux_fchdir(fd: c_int) c_int;
@@ -74,7 +74,7 @@ const stub = struct {
     fn h9_linux_fds(_: [*]c_int, _: c_int) c_int {
         return 0;
     }
-    fn h9_linux_await(_: [*]u8, _: c_int, _: c_int) c_int {
+    fn h9_linux_await(_: [*]u8, _: c_int, _: c_int, _: c_long, _: c_int) c_int {
         return -1;
     }
     fn h9_linux_ppid() c_ulong {
@@ -313,9 +313,12 @@ pub fn fds(buf: []c_int) usize {
     return @intCast(c.h9_linux_fds(buf.ptr, @intCast(buf.len)));
 }
 
-/// await, or with `block` false, 0 when no child has exited yet.
-pub fn await(buf: []u8, block: bool) Error!usize {
-    return try check(c.h9_linux_await(buf.ptr, @intCast(buf.len), @intFromBool(block)));
+/// await for child `want`, or any child when `want` <= 0; with `block`
+/// false, 0 when no such child has exited yet. With `peek` the record
+/// stays to be waited for again (WNOWAIT). A thread waits on its group
+/// leader's children.
+pub fn await(buf: []u8, block: bool, want: i32, peek: bool) Error!usize {
+    return try check(c.h9_linux_await(buf.ptr, @intCast(buf.len), @intFromBool(block), want, @intFromBool(peek)));
 }
 
 pub fn ppid() u32 {

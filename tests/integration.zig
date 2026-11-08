@@ -5412,6 +5412,13 @@ test "/proc lists a thread group once, with its threads under task, and statm re
     try threadCase(&le, "proc_threads");
 }
 
+test "Go os/exec waits for a child from another thread, and RemoveAll empties a /tmp directory [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    try netCase(&le, &.{"/mnt/term/cwd/go/goexec"}, "ok goexec\n");
+}
+
 test "munmap while another thread reads: no stale access after return [49]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
