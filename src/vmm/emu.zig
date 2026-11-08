@@ -38,6 +38,15 @@ const phys_base: u64 = 1 << 32;
 const trap_base: u64 = 0;
 const trap_slots = 8;
 
+/// Where a 386 engine's GDT is, in every address space: the top page,
+/// above any user mapping (9front's stack ends at 0xDFFFF000 and a Linux
+/// process's address space at 0xC0000000). It holds the TLS segment Linux
+/// programs load %gs with (design/linux-i386.md, "TLS"). Each engine has
+/// its own page, which the fill hook maps here read-only.
+const gdt_va: u64 = 0xFFFF_F000;
+/// Its entries: the null one, then up to Linux's TLS entry.
+const gdt_entries = 7;
+
 fn open(arch: vmm.Arch) vmm.Error!*uc.uc_engine {
     const a: uc.uc_arch, const mode: uc.uc_mode = switch (arch) {
         .arm64 => .{ uc.UC_ARCH_ARM64, uc.UC_MODE_ARM },
@@ -175,9 +184,30 @@ pub const Backend = struct {
             inline else => |a| @unionInit(vmm.Ureg, @tagName(a), .{}),
         } };
         errdefer _ = uc.uc_close(s.engine);
+        errdefer if (s.gdt) |g| b.freePages(g);
+        if (b.arch == .i386) {
+            s.gdt = try b.allocPages(1);
+            // Flat 32-bit ring-0 code and data, which the engine runs
+            // with (see below).
+            std.mem.writeInt(u64, s.gdt.?[8..16], 0x00cf9b00_0000ffff, .little);
+            std.mem.writeInt(u64, s.gdt.?[16..24], 0x00cf9300_0000ffff, .little);
+            s.setTlsDesc(0);
+            var gdtr: uc.uc_x86_mmr = .{ .selector = 0, .base = gdt_va, .limit = gdt_entries * 8 - 1, .flags = 0 };
+            try check(uc.uc_reg_write(s.engine, uc.UC_X86_REG_GDTR, &gdtr));
+        }
         try check(uc.uc_ctl(s.engine, uc_ctl_tlb_type, @as(c_int, uc.UC_TLB_VIRTUAL)));
         try check(uc.uc_mem_map_ptr(s.engine, phys_base, b.arena.mem.len, uc.UC_PROT_ALL, b.arena.mem.ptr));
         try s.addHooks();
+        if (b.arch == .i386) {
+            // Unicorn's 32-bit mode leaves the segment caches empty and
+            // sets the 32-bit flags by hand, but any segment load (as of
+            // %gs) recomputes them from the caches, which would make the
+            // stack 16-bit. Loading real descriptors makes them stick.
+            inline for (.{ .{ uc.UC_X86_REG_CS, 0x08 }, .{ uc.UC_X86_REG_SS, 0x10 }, .{ uc.UC_X86_REG_DS, 0x10 }, .{ uc.UC_X86_REG_ES, 0x10 } }) |r| {
+                var v: u16 = r[1];
+                try check(uc.uc_reg_write(s.engine, r[0], &v));
+            }
+        }
         if (b.arch == .arm64) {
             // CNTKCTL_EL1: EL0 may read the counter and its frequency, as
             // Linux allows (Go's procyield reads both).
@@ -344,6 +374,14 @@ const State = struct {
     /// The space's `code` when this engine last flushed its blocks.
     code: u64 = 0,
     stop: Stop = .none,
+    /// The vector of the last syscall exit on 386: INT $64 (9front's) or
+    /// int 0x80 (Linux's).
+    sys_vector: u32 = ia32.vector_syscall,
+    /// 386: this engine's GDT page (see `gdt_va`), the TLS base its entry
+    /// holds, and the %gs selector last loaded, or null to load it again.
+    gdt: ?[]align(vmm.page_size) u8 = null,
+    tls: u32 = 0,
+    gs: ?u32 = null,
     kicked: std.atomic.Value(bool) = .init(false),
     /// Asks the engine to stop at its next block: set by a kick and by a
     /// guest-lock waiter whose slice is up, and seen by `onBlock` on the
@@ -370,8 +408,11 @@ const State = struct {
     fn onIntr(_: ?*uc.uc_engine, intno: u32, data: ?*anyopaque) callconv(.c) void {
         const s: *State = @ptrCast(@alignCast(data));
         if (s.arch == .arm64 and intno == arm64_excp_swi) return s.halt(.syscall);
-        // INT $64; Unicorn has already moved EIP past it.
-        if (s.arch == .i386 and intno == ia32.vector_syscall) return s.halt(.syscall);
+        // INT $64, or Linux's int 0x80; Unicorn has already moved EIP past it.
+        if (s.arch == .i386 and (intno == ia32.vector_syscall or intno == ia32.vector_linux)) {
+            s.sys_vector = intno;
+            return s.halt(.syscall);
+        }
         // BRK, with the PC left at it; INT3, with EIP past it as for INT $64.
         if (s.arch == .arm64 and intno == arm64_excp_bkpt) return s.halt(.breakpoint);
         if (s.arch != .arm64 and intno == x86_vector_bp) return s.halt(.breakpoint);
@@ -394,6 +435,11 @@ const State = struct {
     /// access this way gets a trap page instead (see `trap_base`).
     fn onTlbFill(_: ?*uc.uc_engine, va: u64, kind: uc.uc_mem_type, out: *uc.uc_tlb_entry, data: ?*anyopaque) callconv(.c) bool {
         const s: *State = @ptrCast(@alignCast(data));
+        if (s.gdt) |g| if (va & ~@as(u64, vmm.page_size - 1) == gdt_va and kind == uc.UC_MEM_READ) {
+            out.paddr = phys_base + s.backend.arena.offsetOf(g.ptr) + (va - gdt_va);
+            out.perms = uc.UC_PROT_READ;
+            return true;
+        };
         if (s.find(va)) |r| {
             const ok = switch (kind) {
                 uc.UC_MEM_WRITE => r.perms.write,
@@ -492,6 +538,31 @@ const State = struct {
         s.generation = as.generation.load(.acquire);
     }
 
+    /// Sets the TLS entry's base: a flat 4 GiB, 32-bit, writable data
+    /// segment for user mode, already accessed (so the CPU never writes
+    /// the read-only page), as set_thread_area makes it.
+    fn setTlsDesc(s: *State, base: u32) void {
+        const g = s.gdt orelse return;
+        const d: u64 = 0xffff | (@as(u64, base & 0xffffff) << 16) | (@as(u64, 0xf3) << 40) | (@as(u64, 0xcf) << 48) | (@as(u64, base >> 24) << 56);
+        std.mem.writeInt(u64, g[8 * sig_tls_entry ..][0..8], d, .little);
+        s.tls = base;
+        // A loaded %gs keeps the old base until it's loaded again.
+        s.gs = null;
+    }
+
+    /// Loads %gs from the Ureg, which reads its descriptor from the GDT:
+    /// the null selector, or the TLS one. Anything else would fault the
+    /// load, so it becomes null.
+    fn loadGs(s: *State, sel: u32) vmm.Error!void {
+        if (s.gs == sel) return;
+        var v: u16 = if (sel == (sig_tls_entry << 3) | 3) @intCast(sel) else 0;
+        if (uc.uc_reg_write(s.engine, uc.UC_X86_REG_GS, &v) != uc.UC_ERR_OK) {
+            v = 0;
+            try check(uc.uc_reg_write(s.engine, uc.UC_X86_REG_GS, &v));
+        }
+        s.gs = v;
+    }
+
     fn writeRegs(s: *State) vmm.Error!void {
         switch (s.ureg) {
             .arm64 => |*u| {
@@ -515,6 +586,7 @@ const State = struct {
                 inline for (i386_fields, 0..) |f, i| vals[i] = @field(u, f);
                 vals[i386_fields.len] = u.flags | @as(u32, @truncate(amd64_flags_res1));
                 try writeBatch32(s.engine, &i386_regs, &vals);
+                try s.loadGs(u.gs);
             },
         }
     }
@@ -540,6 +612,11 @@ const State = struct {
                 try readBatch32(s.engine, &i386_regs, &vals);
                 inline for (i386_fields, 0..) |f, i| @field(u, f) = vals[i];
                 u.flags = vals[i386_fields.len];
+                // A Linux program loads %gs itself.
+                var gs: u16 = 0;
+                try check(uc.uc_reg_read(s.engine, uc.UC_X86_REG_GS, &gs));
+                u.gs = gs;
+                s.gs = gs;
             },
         }
     }
@@ -600,7 +677,7 @@ const State = struct {
         switch (s.ureg) {
             .arm64 => |*u| u.type = @as(u64, arm64.EC_SVC64) << 26,
             .amd64 => |*u| u.type = amd64_vector_syscall,
-            .i386 => |*u| u.trap = ia32.vector_syscall,
+            .i386 => |*u| u.trap = s.sys_vector,
         }
     }
 
@@ -680,6 +757,8 @@ const uc_ctl_tlb_type: c_uint = uc.UC_CTL_TLB_TYPE | (1 << 26) | (1 << 30);
 // QEMU's arm64 exception numbers, as passed to UC_HOOK_INTR.
 const arm64_excp_swi = 2;
 const arm64_excp_bkpt = 7;
+// i386 Linux's TLS entry in the GDT (linux/signal.zig).
+const sig_tls_entry = 6;
 // x86 #BP, which INT3 raises.
 const x86_vector_bp = 3;
 const arm64_nzcv: u64 = 0xf000_0000;
@@ -803,6 +882,7 @@ pub const Vcpu = struct {
     pub fn destroy(v: *Vcpu) void {
         const s = v.s;
         _ = uc.uc_close(s.engine);
+        if (s.gdt) |g| s.backend.freePages(g);
         s.mapped.deinit(s.backend.gpa);
         s.backend.gpa.destroy(s);
     }
@@ -838,6 +918,7 @@ pub const Vcpu = struct {
                 const t = &@field(x, @tagName(a));
                 try getFxsave(e, a, &t.fx);
                 if (a == .amd64) try check(uc.uc_reg_read(e, uc.UC_X86_REG_FS_BASE, &t.tls));
+                if (a == .i386) t.tls = v.s.tls;
             },
         }
     }
@@ -855,6 +936,7 @@ pub const Vcpu = struct {
             inline .amd64, .i386 => |*t, a| {
                 try setFxsave(e, a, &t.fx);
                 if (a == .amd64) try check(uc.uc_reg_write(e, uc.UC_X86_REG_FS_BASE, &t.tls));
+                if (a == .i386 and t.tls != v.s.tls) v.s.setTlsDesc(@truncate(t.tls));
             },
         }
     }

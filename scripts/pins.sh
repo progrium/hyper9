@@ -43,6 +43,7 @@ ALPINE_REGISTRY=https://registry-1.docker.io
 ALPINE_LAYERS="
 arm64 6b59a28fa20117e6048ad0616b8d8c901877ef15ff4c7f18db04e4f01f43bc39
 amd64 2d35ebdb57d9971fea0cac1582aa78935adf8058b2cc32db163c98822e5dfa1b
+386 13c6e95c06ae06f126f5e940d6d88c2fec0da715c80878ad225c76ad48d0a31e
 "
 
 # v86 for the browser host's x86 backend (design/0012-browser-host.md):

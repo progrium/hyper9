@@ -8,7 +8,7 @@
 //! instantiates v86 and passes its exports through as imports.
 //!
 //! A small guest kernel, src/arch/i386/shim.S, runs at ring 0. Every
-//! trap and INT $64 pushes a 9front Ureg on its stack and halts, which
+//! trap, INT $64, and Linux's int 0x80 pushes a 9front Ureg on its stack and halts, which
 //! ends v86's run loop; the backend reads the Ureg there. Resuming writes
 //! the Ureg back and runs the shim's iret path. One v86 CPU runs every
 //! vCPU: a vCPU is a context (Ureg, FXSAVE image, address space) that
@@ -72,6 +72,19 @@ fn reg32(i: usize) *volatile u32 {
 // The shim's layout in guest-physical memory (src/arch/i386/shim.S).
 const shim_base = 0x1000;
 const kzero = 0xF000_0000;
+/// How long `run` keeps the CPU across exits before it lets the other
+/// coroutines run: about one of main_loop's slices.
+const slice_ns = 2 * std.time.ns_per_ms;
+
+fn monoNs() u64 {
+    var t: std.os.wasi.timestamp_t = 0;
+    _ = std.os.wasi.clock_time_get(.MONOTONIC, 1, &t);
+    return t;
+}
+
+/// The shim's GDT entry for Linux TLS, as linux/signal.zig's
+/// i386_tls_entry: selector 0x33.
+const tls_entry = 6;
 const cr2_slot = 0x500;
 const fx_area = 0x6800;
 const kstack_top = 0x8000;
@@ -114,6 +127,12 @@ pub const Backend = struct {
     restore: u32,
     fxsave: u32,
     fxrstor: u32,
+    /// The shim's GDT, and the TLS base its Linux TLS entry holds
+    /// (design/linux-i386.md, "TLS").
+    gdt: u32,
+    gdt_tls: u32 = 0,
+    /// When `run` last let the other coroutines run, in monotonic ns.
+    yielded: u64 = 0,
 
     const Range = struct { start: usize, len: usize };
 
@@ -133,6 +152,7 @@ pub const Backend = struct {
             .restore = kzero + shim_base + std.mem.readInt(u32, shim[4..8], .little),
             .fxsave = kzero + shim_base + std.mem.readInt(u32, shim[8..12], .little),
             .fxrstor = kzero + shim_base + std.mem.readInt(u32, shim[12..16], .little),
+            .gdt = shim_base + std.mem.readInt(u32, shim[16..20], .little),
         };
         try b.free.append(gpa, .{ .start = reserved, .len = b.ram.len - reserved });
         try b.boot();
@@ -278,6 +298,15 @@ pub const Backend = struct {
         b.cur_gen = as.generation;
     }
 
+    /// Sets the Linux TLS entry's base. The restore path reloads %gs, so
+    /// the next run sees it.
+    fn setTls(b: *Backend, base: u32) void {
+        if (b.gdt_tls == base) return;
+        const d: u64 = 0xffff | (@as(u64, base & 0xffffff) << 16) | (@as(u64, 0xf3) << 40) | (@as(u64, 0xcf) << 48) | (@as(u64, base >> 24) << 56);
+        std.mem.writeInt(u64, b.ram[b.gdt + 8 * tls_entry ..][0..8], d, .little);
+        b.gdt_tls = base;
+    }
+
     /// Writes the Ureg at the top of the kernel stack and points the CPU
     /// at the shim's restore path, which pops it and returns to user mode.
     fn writeUreg(b: *Backend, u: *const ia32.Ureg) void {
@@ -297,7 +326,7 @@ pub const Backend = struct {
         @memcpy(std.mem.asBytes(&s.ureg), b.ram[ureg_at..][0..ureg_size]);
         const u = &s.ureg;
         return switch (u.trap) {
-            ia32.vector_syscall => .syscall,
+            ia32.vector_syscall, ia32.vector_linux => .syscall,
             // Without PAE's NX bit a fetch fault looks like a read, except
             // that it faults at the PC.
             14 => blk: {
@@ -464,6 +493,8 @@ const State = struct {
     as: ?*AddressSpace = null,
     ureg: ia32.Ureg = .{},
     fx: vmm.Fxsave = vmm.X86Extra.init.fx,
+    /// The Linux TLS entry's base for this context.
+    tls: u32 = 0,
     kicked: bool = false,
 };
 
@@ -491,7 +522,7 @@ pub const Vcpu = struct {
     pub fn getExtra(v: *Vcpu, x: *vmm.Extra) vmm.Error!void {
         const s = v.s;
         if (s.backend.fp_owner == s) try s.backend.saveFp(s);
-        x.* = .{ .i386 = .{ .fx = s.fx } };
+        x.* = .{ .i386 = .{ .fx = s.fx, .tls = s.tls } };
     }
 
     pub fn setExtra(v: *Vcpu, x: *const vmm.Extra) vmm.Error!void {
@@ -499,6 +530,7 @@ pub const Vcpu = struct {
         s.fx = x.i386.fx;
         // FXRSTOR faults on MXCSR's reserved bits.
         s.fx.mxcsr &= 0xffff;
+        s.tls = @truncate(x.i386.tls);
         if (s.backend.fp_owner == s) s.backend.fp_owner = null;
     }
 
@@ -517,11 +549,25 @@ pub const Vcpu = struct {
             return .interrupted;
         }
         const as = s.as orelse return error.BadAddress;
+        // A context that makes a syscall every few instructions (a loop
+        // around sigsetjmp, say) halts long before its slice ends, so it's
+        // never preempted below: let the others run once a slice has
+        // passed, as a timer interrupt would.
+        const now = monoNs();
+        if (now -% b.yielded > slice_ns) {
+            coro.yield();
+            b.yielded = monoNs();
+            if (s.kicked) {
+                s.kicked = false;
+                return .interrupted;
+            }
+        }
         if (b.fp_owner != s) {
             if (b.fp_owner) |o| try b.saveFp(o);
             try b.loadFp(s);
         }
         b.install(as);
+        b.setTls(s.tls);
         b.writeUreg(&s.ureg);
         js.main_loop();
         if (reg(u8, regs.in_hlt).* != 0) return b.exit(s);
@@ -529,6 +575,7 @@ pub const Vcpu = struct {
         // would, and let everything else run before it goes on.
         b.preempt(s);
         coro.yield();
+        b.yielded = monoNs();
         s.kicked = false;
         return .interrupted;
     }

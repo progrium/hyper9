@@ -264,6 +264,8 @@ export function wasiImports({ memory, root, args, env, write }) {
       return E.SUCCESS;
     },
     fd_sync: () => E.SUCCESS,
+    // Nothing blocks here (see poll_oneoff), so O_NONBLOCK changes nothing.
+    fd_fdstat_set_flags: (fd) => (fd <= 2 || fds.has(fd) ? E.SUCCESS : E.BADF),
     fd_filestat_set_size: () => E.ROFS,
     fd_filestat_set_times: () => E.ROFS,
     path_filestat_set_times: () => E.ROFS,

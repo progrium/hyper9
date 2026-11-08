@@ -5143,6 +5143,39 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
     try std.testing.expectEqualStrings("dns\nsize\netc\n1\nmade\n0\n", r.out);
 }
 
+// 32-bit x86 Linux programs (design/linux-i386.md): Alpine's x86 root
+// and the 386 fixtures on the emulator, whatever the host. With
+// -Darch=386 the cases above run them too.
+test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [linux-i386]" {
+    try skipPending(@src().fn_name);
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
+    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
+    var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&rb, "{s}/alpine-386", .{lr});
+    const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "etc/os-release"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "threads"), .{}) catch return error.SkipZigTest;
+    // busybox is a dynamic PIE, so the loader's TLS is set up through
+    // set_thread_area; the trap runs a handler and returns through
+    // sigreturn; the pipeline and $(...) fork; threads gives each thread
+    // its own TLS base, and forks from one.
+    const script =
+        \\uname -m
+        \\trap 'echo usr1' USR1; kill -USR1 $$
+        \\echo $(ls /etc | grep -c release)
+        \\/mnt/term/cwd/threads timed_tls fork_thread
+    ;
+    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--root", root, "--cwd", fixtures, "/bin/sh", "-c", script }, null, null, 120_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
+    errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
+    try std.testing.expectEqualStrings("i686\nusr1\n2\nok timed_tls\nok fork_thread\n", p.stdout);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
+}
+
 test "9front and Linux programs share pipelines both ways (demo) [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

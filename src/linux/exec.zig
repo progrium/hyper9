@@ -35,8 +35,9 @@ pub const Args = struct {
 /// The CPU features a Linux program is told about (AT_HWCAP): on arm64,
 /// FP and ASIMD, which every backend has, and CPUID, the emulated ID
 /// registers that say the same; the rest are left for the program to
-/// discover by trying (design/0018, "Loading"). On amd64,
-/// AT_HWCAP is CPUID.1:EDX, the baseline x86-64 features.
+/// discover by trying (design/0018, "Loading"). On amd64 and i386,
+/// AT_HWCAP is CPUID.1:EDX, the baseline x86-64 features, which both the
+/// emulator and v86 have (design/linux-i386.md).
 pub fn hwcap(arch: vmm.Arch) u64 {
     return switch (arch) {
         .arm64 => (1 << 0) | (1 << 1) | hwcap_cpuid, // HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID
@@ -45,10 +46,10 @@ pub fn hwcap(arch: vmm.Arch) u64 {
 }
 
 pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Program {
-    const m = try mm.Mm.create(gpa, backend);
+    const m = try mm.Mm.create(gpa, backend, .of(a.arch));
     errdefer m.put();
     // The stack: 8 MiB below the top, growing down within it.
-    try m.insert(.{ .start = mm.stack_top - mm.stack_size, .end = mm.stack_top, .prot = .rw, .kind = .stack });
+    try m.insert(.{ .start = m.lay.stack_top - m.lay.stack_size, .end = m.lay.stack_top, .prot = .rw, .kind = .stack });
     // The vDSO, on arm64 only: it holds __kernel_rt_sigreturn.
     var vdso: u64 = 0;
     if (a.arch == .arm64) {
@@ -57,7 +58,7 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
         const img = elf.vdsoImage();
         try m.hostWrite(vdso, &img);
     }
-    const base: ?u64 = if (a.exe.ehdr.type == 3) mm.pie_base else null;
+    const base: ?u64 = if (a.exe.ehdr.type == 3) m.lay.pie_base else null;
     const exe = try elf.load(m, a.exe, base, a.path);
     m.brk_start = std.mem.alignForward(u64, exe.end, vmm.page_size);
     // A little randomness-free gap, as Linux leaves one, so a heap that
@@ -73,6 +74,7 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
     const sp = try elf.buildStack(m, a.argv, a.envp, .{
         .exe = exe,
         .phnum = a.exe.ehdr.phnum,
+        .phent = a.exe.ehdr.phentsize,
         .interp_base = interp_base,
         .vdso = vdso,
         .hwcap = if (a.hwcap != 0) a.hwcap else hwcap(a.arch),
@@ -85,11 +87,12 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
 }
 
 /// The registers a Linux program starts with: zero but for the stack and
-/// the entry point (and on amd64 the user selectors).
+/// the entry point (and on x86 the user selectors).
 pub fn initRegs(arch: vmm.Arch, entry: u64, sp: u64) vmm.Ureg {
     var u = vmm.Ureg.initExec(arch, entry, sp, 0);
     switch (u) {
         .amd64 => |*r| r.flags = 0x202,
+        .i386 => |*r| r.flags = 0x202,
         else => {},
     }
     return u;

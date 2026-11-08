@@ -36,16 +36,35 @@ const page = vmm.page_size;
 pub const chunk_size: u64 = 1 << 20;
 pub const pages_per_chunk = chunk_size / page;
 
-/// The top of the user address space: 47 bits, as on amd64 Linux, which
-/// arm64's 48-bit space also holds.
-pub const user_top: u64 = 1 << 47;
-/// Where the stack ends (exclusive), and how much of it is reserved.
-pub const stack_top: u64 = user_top - page;
-pub const stack_size: u64 = 8 << 20;
-/// mmap allocates downward from here, below the stack and a gap.
-pub const mmap_base: u64 = stack_top - stack_size - (128 << 20);
-/// Where a PIE executable is loaded, as amd64 Linux's ELF_ET_DYN_BASE.
-pub const pie_base: u64 = 0x5555_5555_4000 & ~(chunk_size - 1);
+/// Where things go in a Linux address space, by architecture.
+pub const Layout = struct {
+    /// The top of the user address space.
+    user_top: u64,
+    /// Where the stack ends (exclusive), and how much of it is reserved.
+    stack_top: u64,
+    stack_size: u64 = 8 << 20,
+    /// mmap allocates downward from here, below the stack and a gap.
+    mmap_base: u64,
+    /// Where a PIE executable is loaded (Linux's ELF_ET_DYN_BASE).
+    pie_base: u64,
+
+    /// 47 bits on arm64 and amd64, as on amd64 Linux, which arm64's 48-bit
+    /// space also holds. i386 gets Linux's 3 GiB, below the v86 shim's
+    /// kernel at 0xF0000000 and the emulator's descriptor table at the
+    /// top (design/linux-i386.md), with PIEs at 4 MiB as Linux puts them.
+    pub fn of(arch: vmm.Arch) Layout {
+        const top: u64 = if (arch == .i386) 0xC000_0000 else 1 << 47;
+        return .{
+            .user_top = top,
+            .stack_top = top - page,
+            .mmap_base = top - page - (8 << 20) - (128 << 20),
+            .pie_base = if (arch == .i386) 0x40_0000 else 0x5555_5555_4000 & ~(chunk_size - 1),
+        };
+    }
+};
+
+/// The 64-bit layout, the largest: what a Linux address may be at most.
+pub const user_top: u64 = Layout.of(.amd64).user_top;
 /// Nothing is mapped below this, so a null pointer always faults.
 pub const min_addr: u64 = 0x10000;
 
@@ -138,6 +157,8 @@ pub const Error = error{ OutOfMemory, BadAddress, NoSpace };
 pub const Mm = struct {
     gpa: std.mem.Allocator,
     backend: vmm.Backend,
+    /// Where things go, for the process's architecture.
+    lay: Layout,
     as: vmm.AddressSpace,
     refs: std.atomic.Value(u32) = .init(1),
     /// Sorted by start, not overlapping.
@@ -172,10 +193,10 @@ pub const Mm = struct {
         m.op.unlock(io);
     }
 
-    pub fn create(gpa: std.mem.Allocator, backend: vmm.Backend) (Error || vmm.CreateError)!*Mm {
+    pub fn create(gpa: std.mem.Allocator, backend: vmm.Backend, lay: Layout) (Error || vmm.CreateError)!*Mm {
         const m = try gpa.create(Mm);
         errdefer gpa.destroy(m);
-        m.* = .{ .gpa = gpa, .backend = backend, .as = try backend.newAddressSpace() };
+        m.* = .{ .gpa = gpa, .backend = backend, .lay = lay, .as = try backend.newAddressSpace() };
         return m;
     }
 
@@ -312,7 +333,7 @@ pub const Mm = struct {
 
     /// A free range of `len` bytes, as high as possible below `mmap_base`.
     pub fn findFree(m: *const Mm, len: u64) ?u64 {
-        var top: u64 = mmap_base;
+        var top: u64 = m.lay.mmap_base;
         var i = m.indexAfter(top);
         // A VMA straddling mmap_base (a stack that grew) lowers the top.
         if (i > 0 and m.vmas.items[i - 1].end > top) top = m.vmas.items[i - 1].start;
@@ -749,7 +770,7 @@ pub const Mm = struct {
         const old_end = std.mem.alignForward(u64, m.brk, page);
         const new_end = std.mem.alignForward(u64, want, page);
         if (new_end > old_end) {
-            if (!m.isFree(old_end, new_end) or new_end > mmap_base) return m.brk;
+            if (!m.isFree(old_end, new_end) or new_end > m.lay.mmap_base) return m.brk;
             m.lockSpin();
             const v = m.find(old_end -| 1);
             if (v != null and v.?.kind == .heap and v.?.end == old_end) {
@@ -775,7 +796,7 @@ pub const Mm = struct {
     /// copied, except MAP_SHARED ones, whose pages are shared. (mmap
     /// aligns shared mappings to chunks, so a chunk is all shared or not.)
     pub fn fork(m: *Mm) (Error || vmm.CreateError)!*Mm {
-        const n = try create(m.gpa, m.backend);
+        const n = try create(m.gpa, m.backend, m.lay);
         errdefer n.put();
         m.lockSpin();
         defer m.lock.unlock();

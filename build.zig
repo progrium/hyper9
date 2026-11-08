@@ -1050,9 +1050,9 @@ pub fn build(b: *std.Build) void {
     }
 
     // Linux fixtures (tests/fixtures/linux, design/0018-linux-personality.md):
-    // static musl programs for arm64 and amd64, in fixtures/linux/<arch>.
-    const linux_fixtures = b.step("linux-fixtures", "Build the Linux fixtures in tests/fixtures/linux (static musl, arm64 and amd64)");
-    for ([_][]const u8{ "arm64", "amd64" }, [_]std.Target.Cpu.Arch{ .aarch64, .x86_64 }) |arch, cpu| {
+    // static musl programs for arm64, amd64, and 386, in fixtures/linux/<arch>.
+    const linux_fixtures = b.step("linux-fixtures", "Build the Linux fixtures in tests/fixtures/linux (static musl, arm64, amd64, and 386)");
+    for ([_][]const u8{ "arm64", "amd64", "386" }, [_]std.Target.Cpu.Arch{ .aarch64, .x86_64, .x86 }) |arch, cpu| {
         const lt = b.resolveTargetQuery(.{ .cpu_arch = cpu, .os_tag = .linux, .abi = .musl });
         for (linux_fixture_names) |name| {
             const m = b.createModule(.{ .target = lt, .optimize = .ReleaseSmall, .link_libc = true });
@@ -1225,7 +1225,7 @@ pub fn build(b: *std.Build) void {
     const go_cases: ?GoFixtures = if (emu == .unicorn) go_fixtures else null;
     // The Linux Go fixtures (design/0049-linux-threads.md), with the same
     // toolchain, into fixtures/linux/<arch>/go.
-    if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64" }) |arch| {
+    if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64", "386" }) |arch| {
         const dir = b.getInstallPath(.prefix, b.fmt("fixtures/linux/{s}/go", .{arch}));
         const run = b.addSystemCommand(&.{ g, "-C", "tests/fixtures/linux/go", "build", "-trimpath", "-o", b.fmt("{s}{s}", .{ dir, std.fs.path.sep_str }), "./..." });
         run.setCwd(b.path("."));
