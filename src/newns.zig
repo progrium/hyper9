@@ -5,7 +5,7 @@
 //! Supported: `bind`, `mount`, `unmount`, `cd` and `clear`, with the flags
 //! `-a`, `-b`, `-c` and `-C`, `#` comments, and `'` quoting (`''` is a
 //! literal quote). As in newns, a failed operation doesn't stop the replay.
-//! `--print`'s trailing ro/rw/eph/9p column and `<id>` console placeholder
+//! `--print`'s trailing ro/rw/eph/9p/builtin column and `<id>` console placeholder
 //! are accepted, so its output replays as-is. A `bind` from a bare `#O` makes
 //! a fresh copy-on-write overlay over whatever its target is at that point
 //! in the replay (design/0006-ephemeral-writes.md); the machine does that. `.` (include) and `chdev`, and
@@ -79,7 +79,7 @@ fn parseLine(argv: []const []const u8) Error!Op {
 }
 
 fn isAccess(s: []const u8) bool {
-    for ([_][]const u8{ "ro", "rw", "eph", "9p" }) |a| if (std.mem.eql(u8, s, a)) return true;
+    for ([_][]const u8{ "ro", "rw", "eph", "9p", "builtin" }) |a| if (std.mem.eql(u8, s, a)) return true;
     return false;
 }
 

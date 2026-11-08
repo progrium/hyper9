@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         },
         .check => {
-            const root_arg = cfg.root2 orelse cfg.root orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
+            const root_arg = rootArg(arena, io, cfg, cfg.root2 orelse cfg.root, init.environ_map);
             var root_err: []const u8 = "";
             const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| blk: {
                 root_err = rootError(e);
@@ -56,6 +56,7 @@ pub fn main(init: std.process.Init) !u8 {
             const code = tools.check(init.gpa, io, &w.interface, .{
                 .backend = cfg.backend,
                 .memory = cfg.memory,
+                .builtin = builtinFor(cfg.builtin, root_arg != null),
                 .root_arg = root_arg,
                 .root = root,
                 .root_err = root_err,
@@ -103,8 +104,19 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         v[2] = cmd;
         @memcpy(v[3..], cfg.argv);
         break :blk v;
-    } else cfg.argv;
-    const prog_arg = if (cfg.rc != null) "/bin/rc" else argv[0];
+    } else if (cfg.rc_login)
+        // --rc alone is a login rc, which sources /rc/lib/rcmain.local, the
+        // root's default command, and then $home/lib/profile
+        // (design/0081-default-command.md). rcmain reads them only with -i or
+        // -c, and rc can't tell the guest's stdin is a terminal, so h9 asks
+        // the host: -i on one, and otherwise -c reading stdin as a script.
+        if (std.Io.File.stdin().isTty(io) catch false)
+            &.{ "rc", "-l", "-i" }
+        else
+            &.{ "rc", "-l", "-c", ". /fd/0" }
+    else
+        cfg.argv;
+    const prog_arg = if (cfg.rc != null or cfg.rc_login) "/bin/rc" else argv[0];
 
     // A host program is read here; a guest one is resolved in the machine.
     // --arch picks the architecture; without it, a host program's header
@@ -141,14 +153,17 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             linux_root = real;
         } else nine_arg = r; // a later 9front root replaces an earlier one, as before
     }
-    const root_arg = nine_arg orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
+    const root_arg = rootArg(arena, io, cfg, nine_arg, init.environ_map);
     const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| {
         std.debug.print("h9: root {s}: {s}\n", .{ r, rootError(e) });
         return exit_failed;
     } else null;
+    // Only a 9front root counts for `auto`: a Linux root alone gets the
+    // built-in root as its /9, which --builtin=off leaves out.
+    const builtin_root = builtinFor(cfg.builtin, root != null);
     // Without a root tree only a host a.out can run; anything resolved in
     // the guest namespace would fail later as a misleading "not found".
-    if (root == null and linux_root == null and (prog == .guest or cfg.ns != null)) {
+    if (root == null and linux_root == null and builtin_root == .off and (prog == .guest or cfg.ns != null)) {
         std.debug.print("h9: no root tree found; pass --root or set H9ROOT\n", .{});
         return exit_failed;
     }
@@ -196,6 +211,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .cwd = cwd,
         .policy = pol,
         .guest_tools = cfg.guest_tools,
+        .builtin = builtin_root,
         .gfx = cfg.gfx,
         .stdio = undefined,
     };
@@ -289,7 +305,13 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             std.process.exit(exit_failed);
         }
         const why = if (machine.err_msg.len > 0) machine.err_msg else @errorName(err);
-        std.debug.print("h9: {s}: {s}\n", .{ prog_arg, why });
+        // Over the built-in root alone, the fix for a missing command is
+        // the full tree (design/0087-builtin-root.md).
+        const hint = if (err == error.NotFound and prog == .guest and root == null and builtin_root != .off)
+            " (not in the built-in root; pass --root or set H9ROOT for the full 9front tree)"
+        else
+            "";
+        std.debug.print("h9: {s}: {s}{s}\n", .{ prog_arg, why, hint });
         // A schemeless root's errors name its URL; say how h9 got there.
         if (err == error.NamespaceFailed and root != null and root.? == .ws and !std.mem.eql(u8, root.?.ws, root_arg.?)) {
             std.debug.print("h9: root {f}: no such path, so h9 read it as {f}\n", .{ h9.ws.Url.elide(root_arg.?), h9.ws.Url.elide(root.?.ws) });
@@ -359,6 +381,27 @@ fn realPath(io: std.Io, arena: std.mem.Allocator, p: []const u8) ![]u8 {
     }
     try std.Io.Dir.cwd().access(io, path, .{});
     return path;
+}
+
+/// The root as given or found: --root, $H9ROOT, then the development
+/// tree. `--builtin=only` skips the last two (design/0087-builtin-root.md);
+/// --root with it is a usage error.
+fn rootArg(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, given: ?[]const u8, env: *const std.process.Environ.Map) ?[]const u8 {
+    if (cfg.builtin == .only) return null;
+    return given orelse env.get("H9ROOT") orelse defaultRoot(arena, io);
+}
+
+/// How the built-in root takes part, given --builtin and whether another
+/// root was found: `auto` is `only` without one and `off` with one, and
+/// `before` and `after` without one are `only`.
+fn builtinFor(mode: cli.BuiltinMode, have_root: bool) h9.policy.Builtin {
+    return switch (mode) {
+        .auto => if (have_root) .off else .only,
+        .only => .only,
+        .before => if (have_root) .before else .only,
+        .after => if (have_root) .after else .only,
+        .off => .off,
+    };
 }
 
 /// The default root: .local/9front/root beside the h9 binary's source tree

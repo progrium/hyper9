@@ -114,6 +114,14 @@ and takes a few minutes on the emulator. The tree is `9box`, its links,
 `h9 --root .local/9front/slim-11952-arm64`. The `[64]` cases use it,
 and skip without it.
 
+`zig build` embeds the same trees as h9's [built-in root](design/0087-builtin-root.md),
+`#Hroot`, which h9 uses when it finds no root tree, so `h9 --rc 'ls'` works
+with nothing but the binary. It takes `slim-<release>-<arch>` for each
+architecture the build runs (the target's, and with `-Demu=unicorn` also
+`amd64` and `386`) from `-Dbuiltin-root` (default `.local/9front`). An
+architecture without a tree for the pinned release gets the built-in root's
+directories only, and `zig build` warns; `-Drelease` fails instead.
+
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
 `scripts/fetch.sh`, so it's opt-in and never part of the MIT `h9` build. It
 ships separately as `h9-emu` (see [Releases](#releases)):
@@ -209,7 +217,7 @@ cross-compiles the other targets.
 
 ```sh
 zig-out/bin/h9 [h9-flags] [--] program [args...]
-zig-out/bin/h9 [h9-flags] --rc 'command' [args...]
+zig-out/bin/h9 [h9-flags] --rc ['command' [args...]]   # alone: a login rc, the root's default command
 zig-out/bin/h9 --version                  # version, pinned 9front and drawterm, backends and gfx built in
 zig-out/bin/h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] --check
 zig-out/bin/h9 --help                     # or -h alone
@@ -319,6 +327,8 @@ service. Guest connections don't use the host's proxies.
 Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--root-contained`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
+As the last argument, `--rc` alone runs a login rc, which sources the root's
+`/rc/lib/rcmain.local`, so a root sets its default command there.
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,
 `unmount`, `cd`, `clear`) before the program runs; it's a guest path, so a
 relative one is in the guest's cwd, and `--print`'s namespace section can be
