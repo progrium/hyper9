@@ -149,6 +149,16 @@ const Posix = struct {
     extern "c" fn grantpt(fd: c_int) c_int;
     extern "c" fn unlockpt(fd: c_int) c_int;
     extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
+    // std.c declares ioctl's request as c_int, which can't hold Darwin's
+    // TIOCSWINSZ (its top bit of 32 is set); Darwin's libc takes an
+    // unsigned long.
+    extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+
+    /// TIOCSWINSZ: _IOW('t', 103, struct winsize) on macOS and the BSDs.
+    const TIOCSWINSZ: c_ulong = switch (builtin.os.tag) {
+        .linux => 0x5414,
+        else => 0x80087467,
+    };
 
     const TIOCSCTTY: c_int = switch (builtin.os.tag) {
         .linux => 0x540E,
@@ -174,9 +184,11 @@ const Posix = struct {
         if (grantpt(master) != 0 or unlockpt(master) != 0) return error.TermFailed;
         const name = try arena.dupeZ(u8, std.mem.span(ptsname(master) orelse return error.TermFailed));
         _ = c.fcntl(master, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
-        // 80x25, as the Windows pseudoconsole is.
+        // 80x25, as the Windows pseudoconsole is. It's set on the slave
+        // once the child has opened it: macOS resets a pty's size at the
+        // slave's first open, so a size set on the master before that is
+        // lost.
         var ws: std.posix.winsize = .{ .row = 25, .col = 80, .xpixel = 0, .ypixel = 0 };
-        _ = c.ioctl(master, c.T.IOCSWINSZ, &ws);
 
         const pid = c.fork();
         if (pid < 0) return error.TermFailed;
@@ -184,6 +196,7 @@ const Posix = struct {
             _ = c.setsid();
             const slave = c.open(name, .{ .ACCMODE = .RDWR });
             if (slave < 0) c._exit(126);
+            _ = ioctl(slave, TIOCSWINSZ, &ws);
             _ = c.ioctl(slave, TIOCSCTTY, @as(c_int, 0));
             for (0..3) |fd| _ = c.dup2(slave, @intCast(fd));
             if (slave > 2) _ = c.close(slave);
