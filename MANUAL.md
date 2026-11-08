@@ -193,6 +193,7 @@ h9 looks for its root in this order:
 2. The `H9ROOT` environment variable.
 3. `.local/9front/root` in the source tree, when you run the `h9` that
    `zig build` put in `zig-out/bin`.
+4. The built-in root, a small read-only tree inside the h9 binary.
 
 `--root` and `H9ROOT` take a directory, or a 9P server: a dial string such
 as `tcp!fs.example.com!564`, `unix!/path/to/socket`, or the path of a unix
@@ -205,9 +206,40 @@ somewhere else, such as onto your `PATH`, set `H9ROOT` in your shell profile:
 host$ export H9ROOT=~/src/hyper9/.local/9front/root
 ```
 
-Without a root, h9 can still run a program from a host path (`h9 ./prog`),
-but the program sees only the kernel's devices: nothing in `/bin`, and not
-your files either. Anything else is an error (exit 125).
+The built-in root is what lets a fresh install work with nothing but the
+h9 binary. It holds 42 of 9front's commands, built from the pinned
+release's own source into one program, `9box`: rc, the file and text tools
+(`ls`, `cat`, `sed`, `awk`, `grep`, `diff`, and so on), `tar` and `gzip`, and
+the namespace tools (`bind`, `mount`, `ns`, `ps`, `srv`, `exportfs`,
+`ramfs`). Everything else in the namespace, your cwd, `/tmp`, and the
+sandbox, is the same as over a full tree:
+
+```sh
+host$ h9 --rc 'echo hi | sed s/hi/ho/; pwd'
+ho
+/mnt/term/cwd
+```
+
+Compilers, `mk`, `rio`, fonts, the manual, and sources are only in the full
+tree. A command that isn't in the built-in root says so:
+
+```sh
+host$ h9 mk
+h9: mk: not found (not in the built-in root; pass --root or set H9ROOT for the full 9front tree)
+```
+
+`--builtin` changes how the built-in root is used. `--builtin=only` uses it
+even when `H9ROOT` or the development tree would give a root. With a root,
+`--builtin=before` puts its commands in `/bin` ahead of the root's, which
+saves reading them from a slow 9P or WebSocket root, and `--builtin=after`
+puts them behind, to fill in commands a slim root lacks. `--builtin=off`
+turns it off: then, without a root, h9 can still run a program from a host
+path (`h9 ./prog`), but the program sees only the kernel's devices, and
+anything else is an error (exit 125).
+
+A development build embeds the commands only if `zig build slim` has made
+them for the architecture (chapter 18); otherwise `zig build` warns, and the
+built-in root has its directories but no commands.
 
 #### Checking the install
 
@@ -231,16 +263,15 @@ and the release's version for a release. The root line shows the root with
 symlinks resolved, so `root` appears as `root-11952`, the release it came
 from.
 
-On a host with no hypervisor and no root, `h9-emu --check` looks like this:
+On a host with no hypervisor and no root tree, `h9-emu --check` looks like
+this:
 
 ```sh
 host$ h9 --check
 h9 fe6c65f on linux x86_64
 backend emu: ok, hello in 11.9 ms
 backend auto: ok (uses emu), hello in 3.0 ms
-root: none (use --root DIR or $H9ROOT; zig build mkroot builds one)
-host$ echo $?
-125
+root: built-in (9front 11952 slim, amd64; no tree found): ok, /bin/echo runs (amd64)
 ```
 
 `h9 --version` prints the h9 version, the 9front release, and drawterm
@@ -270,7 +301,8 @@ If this fails, the message says why:
 | --- | --- | --- |
 | `h9: root DIR: not found` | 125 | Check `--root` or `H9ROOT`, or run `zig build mkroot` |
 | `h9: root DIR: not a directory or socket` | 125 | `--root` names a plain file |
-| `h9: no root tree found; pass --root or set H9ROOT` | 125 | See the lookup order above |
+| `h9: no root tree found; pass --root or set H9ROOT` | 125 | Only with `--builtin=off`; see the lookup order above |
+| `h9: mk: not found (not in the built-in root; ...)` | 127 | The command is only in the full tree: pass `--root` or set `H9ROOT` |
 | `h9: cannot create auto machine for arm64: no usable hypervisor (is h9 signed with h9.entitlements?)` | 125 | Build with `zig build`, which signs it, or use `h9-emu` |
 | `h9: cannot create emu machine for arm64: the emulator isn't built into this h9 (use h9-emu from the releases, or build with -Demu=unicorn)` | 125 | Use `h9-emu` |
 | `h9: warning: no usable hypervisor; using the emulator` | | Not an error: `h9-emu` fell back to the emulator |
@@ -1762,7 +1794,8 @@ Machine:
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|emu` | What runs guest code. `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. `kvm` and `whp` aren't built yet (*Not yet available ([kvm](design/0016-kvm.md), [whp](design/0017-whp.md))*). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
-| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. Default: `$H9ROOT`, then `.local/9front/root` for a development build. |
+| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
+| `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no root is found. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it. |
 | `--root-spec NAME` | The attach name sent to a 9P root. Default: empty. |
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
@@ -1814,7 +1847,7 @@ Tools:
 
 | Flag | Meaning |
 | --- | --- |
-| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, and `--memory`. |
+| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, `--builtin`, and `--memory`. |
 | `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in, and the window code (`gfx:`) |
 | `--help`, `-h` | Print the usage to standard output |
 

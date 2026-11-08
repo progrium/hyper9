@@ -72,8 +72,27 @@ pub const Policy = struct {
 
 /// How a bound tree can be changed: not at all, on the host, in an
 /// overlay in memory (`eph`), which never writes the host, or as a 9P
-/// root's server decides (`9p`, design/0013-9p-roots.md).
-pub const Access = enum { ro, rw, eph, @"9p" };
+/// root's server decides (`9p`, design/0013-9p-roots.md), or never, as
+/// constant data in the h9 binary (`builtin`, design/builtin-root.md).
+pub const Access = enum { ro, rw, eph, @"9p", builtin };
+
+/// How the built-in root (design/builtin-root.md), `#Hroot`, takes part in
+/// the namespace.
+pub const Builtin = enum {
+    /// Not at all.
+    off,
+    /// It's the root: `bind '#Hroot' /`. There must be no other root.
+    only,
+    /// Over another root, its `/$cputype/bin` is bound before the root's
+    /// `/bin`, so its commands win. Without another root, as `only`.
+    before,
+    /// Over another root, its `/$cputype/bin` is bound after the root's
+    /// `/bin` and `/rc/bin`, to fill gaps. Without another root, as `only`.
+    after,
+};
+
+/// The built-in root's device path.
+pub const builtin_dev = "#Hroot";
 
 /// An allow or deny rule on a host path and everything beneath it.
 /// `allow_eph` is a tree under an overlay: read-only to devfs, since the
@@ -391,6 +410,10 @@ pub const Inputs = struct {
     /// A host window: `#i`, `#m` and `#b` on /dev. Without one they're
     /// masked (design/0015-gfx.md).
     gfx: ?Gfx = null,
+    /// The built-in root (design/builtin-root.md).
+    builtin: Builtin = .off,
+    /// What the plan says about the built-in root beside its bind.
+    builtin_note: ?[]const u8 = null,
 };
 
 /// Whether host path `path` is one `--writable` names, and writing is allowed.
@@ -427,6 +450,15 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         err_msg.* = "--root-contained needs a host directory as the root";
         return error.Conflict;
     }
+    const other_root = in.root != null or in.root_9p != null;
+    if (in.builtin == .only and other_root) {
+        err_msg.* = "--builtin=only conflicts with a root";
+        return error.Conflict;
+    }
+    // The built-in root is `/` when there's no other; over one it only
+    // adds its commands to /bin.
+    const builtin_is_root = in.builtin != .off and !other_root;
+    const builtin_bin: ?Builtin = if (other_root and in.builtin != .off and in.builtin != .only) in.builtin else null;
     if (write_req == .none and pol.writable.len > 0) {
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
@@ -492,7 +524,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     };
     // The root's overlay (design/0011-overlay.md): under overlay and
     // ephemeral, over any kind of root, unless the root writes the host.
-    const root_overlay = (write == .overlay or eph) and !root_rw and (in.root != null or in.root_9p != null);
+    const root_overlay = (write == .overlay or eph) and !root_rw and (other_root or builtin_is_root);
 
     if (in.root) |root| {
         // The overlay never writes its lower tree, so devfs keeps the
@@ -511,12 +543,15 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .access = .@"9p",
         .note = try rootNote(arena, r),
     });
+    // The built-in root is constant data, so it has no access rule either,
+    // and is read-only whatever the flags.
+    if (builtin_is_root) try binds.append(arena, .{ .from = builtin_dev, .to = "/", .access = .builtin, .note = in.builtin_note });
     // Right after the root, before every other bind, so the device sees
     // only the root's own files and everything else is bound over it.
     // Over a host tree the lower tree is the root's path through `#U`;
-    // over a 9P root it's the mount, a bare `#O`.
+    // over a 9P or the built-in root it's the bind, a bare `#O`.
     if (root_overlay) try binds.append(arena, .{ .from = "#O", .to = "/", .create = true, .access = .eph, .lower = in.root, .contained = in.root_contained });
-    const has_root = in.root != null or in.root_9p != null;
+    const has_root = other_root or builtin_is_root;
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
@@ -539,8 +574,13 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "#" ++ hstream_dev, .to = "/net", .flag = .after, .optional = true, .note = "WebSockets, under --net" });
     }
     if (has_root) {
-        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
+        const boxed = try std.fmt.allocPrint(arena, "{s}/{s}/bin", .{ builtin_dev, in.arch.name() });
+        // --builtin=before: the box's commands first, then the root's.
+        if (builtin_bin == .before) try binds.append(arena, .{ .from = boxed, .to = "/bin", .access = .builtin, .optional = true });
+        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .flag = if (builtin_bin == .before) .after else .repl, .optional = true });
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
+        // --builtin=after: the box fills what the root lacks.
+        if (builtin_bin == .after) try binds.append(arena, .{ .from = boxed, .to = "/bin", .flag = .after, .access = .builtin, .optional = true });
         // h9's own commands (design/0032-guest-tools.md), after the root's
         // so a root command of the same name wins.
         if (in.guest_tools) try binds.append(arena, .{ .from = "#H/bin", .to = "/bin", .flag = .after, .optional = true, .note = "h9's commands" });
@@ -558,9 +598,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             .optional = true,
         });
     };
-    // Over a 9P root, the overlay's lower tree is the root's own /tmp: a
-    // bare #O, as in a namespace file.
-    if (in.root_9p != null and write != .none) {
+    // Over a 9P or the built-in root, the overlay's lower tree is the
+    // root's own /tmp: a bare #O, as in a namespace file.
+    if ((in.root_9p != null or builtin_is_root) and write != .none) {
         try binds.append(arena, .{ .from = "#O", .to = "/tmp", .create = true, .access = .eph, .optional = true });
     }
 
@@ -1349,6 +1389,90 @@ test "compile: the root's overlay (design/0011-overlay.md)" {
     try t.expect(std.mem.indexOf(u8, text, "  eph  /r\n") != null);
     try t.expect(std.mem.indexOf(u8, text, "writes to the root are kept in memory") != null);
     try t.expect(std.mem.indexOf(u8, text, "ephemeral files count against --memory") == null);
+}
+
+/// The plan's binds, `from to` with the flag, one per line, for tests.
+fn bindList(arena: std.mem.Allocator, p: Plan) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(arena);
+    for (p.binds) |b| try out.writer.print("{s}{s} {s}\n", .{ switch (b.flag) {
+        .repl => "",
+        .before => "-b ",
+        .after => "-a ",
+    }, b.from, b.to });
+    return out.written();
+}
+
+test "compile: the built-in root as / (design/builtin-root.md)" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var msg: []const u8 = "";
+    const in: Inputs = .{ .root = null, .cwd = "/w", .arch = .arm64, .builtin = .only, .builtin_note = "h9 v0, 9front 11952 slim" };
+    const p = try compile(a, in, .{}, &msg);
+    // Read-only constant data with no access rule, under the root's
+    // overlay, then the usual namespace, with /tmp a bare #O and the cwd
+    // bound as over a host root.
+    try t.expectEqualStrings("#Hroot", p.binds[0].from);
+    try t.expectEqualStrings("/", p.binds[0].to);
+    try t.expectEqual(Access.builtin, p.binds[0].access.?);
+    try t.expectEqualStrings("#O", p.binds[1].from);
+    try t.expect(p.binds[1].lower == null);
+    try t.expect(p.root_overlay);
+    try t.expectEqualStrings("/mnt/term/cwd", p.guest_cwd.?);
+    const list = try bindList(a, p);
+    try t.expect(std.mem.indexOf(u8, list, "/arm64/bin /bin\n-a /rc/bin /bin\n-a #H/bin /bin\n") != null);
+    try t.expect(std.mem.indexOf(u8, list, "#O /tmp\n") != null);
+    for (p.rules) |r| try t.expect(!std.mem.eql(u8, r.path, "/"));
+    var out: std.Io.Writer.Allocating = .init(a);
+    try p.print(&out.writer);
+    const at = std.mem.indexOf(u8, out.written(), "  bind '#Hroot' / ") orelse return error.NoBind;
+    const line = out.written()[at..std.mem.indexOfScalarPos(u8, out.written(), at, '\n').?];
+    try t.expect(std.mem.endsWith(u8, line, " builtin  # h9 v0, 9front 11952 slim"));
+
+    // --write=none: no overlays, and the root stays read-only.
+    const none = try compile(a, in, .{ .write = .none }, &msg);
+    for (none.binds) |b| try t.expect(!std.mem.eql(u8, b.from, "#O"));
+    // Paths outside the cwd go under /mnt/term, as over any root.
+    const rd = try compile(a, in, .{ .readable = &.{"/src"} }, &msg);
+    try t.expect(std.mem.indexOf(u8, try bindList(a, rd), "#U/src /mnt/term/src\n") != null);
+    // before and after without another root are the same as only.
+    for ([_]Builtin{ .before, .after }) |m| {
+        var in2 = in;
+        in2.builtin = m;
+        try t.expectEqualStrings(list, try bindList(a, try compile(a, in2, .{}, &msg)));
+    }
+    // .off without a root: devices only.
+    var off = in;
+    off.builtin = .off;
+    const bare = try compile(a, off, .{}, &msg);
+    try t.expect(bare.guest_cwd == null);
+    try t.expect(std.mem.indexOf(u8, try bindList(a, bare), "/bin") == null);
+}
+
+test "compile: --builtin=only conflicts with another root (design/builtin-root.md)" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    try t.expectError(error.Conflict, compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .builtin = .only }, .{}, &msg));
+    try t.expectEqualStrings("--builtin=only conflicts with a root", msg);
+    try t.expectError(error.Conflict, compile(arena.allocator(), .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!h!564" }, .cwd = "/w", .arch = .arm64, .builtin = .only }, .{}, &msg));
+}
+
+test "compile: --builtin=before and after layer the box's /bin (design/builtin-root.md)" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var msg: []const u8 = "";
+    const nine: NinePRoot = .{ .kind = .tcp, .addr = "tcp!fs.example.com!564" };
+    const before = try bindList(a, try compile(a, .{ .root = null, .root_9p = nine, .cwd = "/w", .arch = .arm64, .builtin = .before }, .{}, &msg));
+    try t.expect(std.mem.indexOf(u8, before, "#Hroot/arm64/bin /bin\n-a /arm64/bin /bin\n-a /rc/bin /bin\n-a #H/bin /bin\n") != null);
+    // The root is unchanged.
+    try t.expect(std.mem.indexOf(u8, before, "#Hroot /\n") == null);
+    const after = try bindList(a, try compile(a, .{ .root = "/r", .cwd = "/w", .arch = .amd64, .builtin = .after }, .{}, &msg));
+    try t.expect(std.mem.indexOf(u8, after, "/amd64/bin /bin\n-a /rc/bin /bin\n-a #Hroot/amd64/bin /bin\n-a #H/bin /bin\n") != null);
+    // .off over a root is today's plan.
+    const off = try bindList(a, try compile(a, .{ .root = "/r", .cwd = "/w", .arch = .arm64, .builtin = .off }, .{}, &msg));
+    try t.expect(std.mem.indexOf(u8, off, "#Hroot") == null);
 }
 
 test "compile: paths outside the root and cwd go under /mnt/term" {

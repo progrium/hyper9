@@ -480,6 +480,86 @@ fn guestTree(b: *std.Build, with_test: bool, host_cmd: bool) struct { file: std.
     return .{ .file = wf.add("guest_tree.zig", out.written()), .bin = bin };
 }
 
+/// The built-in root `#Hroot` serves (design/builtin-root.md), as a
+/// generated Zig file with its contents embedded beside it: the skeleton,
+/// and multicall's tree (`zig build slim`, design/0064-multicall.md) for
+/// each of `arches` found in `dir` for the pinned `release`. A missing or
+/// stale tree is left out with a warning (none when `quiet`), or fails the
+/// build when `required`.
+fn builtinRoot(b: *std.Build, dir: []const u8, release: []const u8, arches: []const []const u8, missing: enum { warn, quiet, required }) std.Build.LazyPath {
+    const io = b.graph.io;
+    const wf = b.addWriteFiles();
+    var names: std.ArrayList([]const u8) = .empty;
+    if (std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true })) |d| {
+        var dd = d;
+        defer dd.close(io);
+        var it = dd.iterate();
+        while (it.next(io) catch null) |e| names.append(b.allocator, b.dupe(e.name)) catch @panic("OOM");
+    } else |_| {}
+    var inputs: std.ArrayList(guesttree.Input) = .empty;
+    var found: std.ArrayList([]const u8) = .empty;
+    for (arches) |arch| {
+        var nb: [128]u8 = undefined;
+        const name = guesttree.treeName(&nb, release, arch);
+        const why: []const u8 = switch (guesttree.findTree(names.items, release, arch)) {
+            .found => {
+                var tree = std.Io.Dir.cwd().openDir(io, b.pathJoin(&.{ dir, name }), .{ .iterate = true }) catch |err| {
+                    wf.step.dependOn(&b.addFail(b.fmt("built-in root: {s}: {t}", .{ name, err })).step);
+                    continue;
+                };
+                defer tree.close(io);
+                const got = guesttree.scanLimited(b.allocator, io, tree, 64 << 20) catch |err| {
+                    wf.step.dependOn(&b.addFail(b.fmt("built-in root: {s}: {t}", .{ name, err })).step);
+                    continue;
+                };
+                inputs.appendSlice(b.allocator, got) catch @panic("OOM");
+                found.append(b.allocator, arch) catch @panic("OOM");
+                continue;
+            },
+            .stale => |other| b.fmt("{s} is from another 9front release than the pinned {s}", .{ other, release }),
+            .missing => b.fmt("no {s} in {s}", .{ name, dir }),
+        };
+        const msg = b.fmt("built-in root: {s}, so {s} gets the skeleton only; zig build slim -Darch={s} makes it", .{ why, arch, arch });
+        switch (missing) {
+            .required => wf.step.dependOn(&b.addFail(msg).step),
+            .warn => std.log.warn("{s}", .{msg}),
+            .quiet => {},
+        }
+    }
+    var why: []const u8 = "";
+    const entries = guesttree.buildRoot(b.allocator, inputs.items, &why) catch |err| switch (err) {
+        error.Rejected => {
+            wf.step.dependOn(&b.addFail(b.fmt("built-in root: {s}", .{why})).step);
+            return wf.add("builtin_root.zig", "");
+        },
+        error.OutOfMemory => @panic("OOM"),
+    };
+    const blobs = guesttree.share(b.allocator, entries) catch @panic("OOM");
+    for (blobs, 0..) |data, i| {
+        var nb: [32]u8 = undefined;
+        _ = wf.add(b.dupe(guesttree.blobName(&nb, @intCast(i))), data);
+    }
+    var commands: usize = 0;
+    for (found.items) |arch| commands = @max(commands, guesttree.countCommands(entries, arch));
+    var out: std.Io.Writer.Allocating = .init(b.allocator);
+    guesttree.renderRoot(&out.writer, entries, blobs.len, .{ .release = release, .arches = found.items, .commands = commands }) catch @panic("OOM");
+    return wf.add("builtin_root.zig", out.written());
+}
+
+/// The architectures a build's built-in root embeds: those it can run.
+fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
+    const native: ?[]const u8 = switch (target.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => null,
+    };
+    if (emu == .unicorn) {
+        return if (native != null and std.mem.eql(u8, native.?, "arm64")) &.{ "arm64", "amd64", "386" } else &.{ "amd64", "386" };
+    }
+    if (native) |n| return if (std.mem.eql(u8, n, "arm64")) &.{"arm64"} else &.{"amd64"};
+    return &.{};
+}
+
 /// drawterm's kern and the libraries it uses, as a static library for
 /// `target`. `web` builds it for the browser host
 /// (design/0012-browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
@@ -599,6 +679,9 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
     p.emu = .none;
     p.unicorn = null;
     p.host_cmd = false;
+    // The browser runs 386 only (design/builtin-root.md, Open issues: every
+    // byte is downloaded per page load).
+    p.builtin_root = builtinRoot(b, p.builtin_dir, pin(p.pins, "NINEFRONT_RELEASE"), &.{"386"}, .quiet);
     const mod = addH9Module(b, p, .none, false).mod;
     const exe = b.addExecutable(.{
         .name = "h9",
@@ -699,6 +782,10 @@ const ModuleParts = struct {
     shim_amd64: std.Build.LazyPath,
     host_cmd: bool,
     guest_tree: std.Build.LazyPath,
+    /// The built-in root (design/builtin-root.md).
+    builtin_root: std.Build.LazyPath,
+    /// Where its trees are, for the web host's.
+    builtin_dir: []const u8,
     have_drawterm: bool,
     version: []const u8,
     pins: []const u8,
@@ -734,6 +821,7 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     mod.linkLibrary(kern);
 
     mod.addAnonymousImport("guest_tree", .{ .root_source_file = p.guest_tree });
+    mod.addAnonymousImport("builtin_root", .{ .root_source_file = p.builtin_root });
 
     const options = b.addOptions();
     options.addOption(Emu, "emu", p.emu);
@@ -842,6 +930,14 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b);
     const pins = b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
 
+    // The built-in root (design/builtin-root.md): multicall's trees for
+    // the architectures this build runs, from `zig build slim`. A release
+    // fails without them; a development build gets the skeleton only.
+    const builtin_dir = b.option([]const u8, "builtin-root", "Directory of zig build slim's trees for the built-in root (default .local/9front)") orelse
+        b.pathFromRoot(".local/9front");
+    const release_build = b.option(bool, "release", "A release build: fail if the built-in root is missing an architecture's commands (design/builtin-root.md)") orelse false;
+    const builtin_root = builtinRoot(b, builtin_dir, pin(pins, "NINEFRONT_RELEASE"), builtinArches(target.result, emu), if (release_build) .required else .warn);
+
     const parts: ModuleParts = .{
         .target = target,
         .optimize = optimize,
@@ -851,6 +947,8 @@ pub fn build(b: *std.Build) void {
         .shim_amd64 = shim_amd64_bin.getOutput(),
         .host_cmd = host_cmd,
         .guest_tree = guest_tree.file,
+        .builtin_root = builtin_root,
+        .builtin_dir = builtin_dir,
         .have_drawterm = have_drawterm,
         .version = version,
         .pins = pins,

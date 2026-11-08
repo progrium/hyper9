@@ -10,6 +10,11 @@
  * on every run of one h9 build. Entry 0 is the top directory, and every
  * entry comes after its parent.
  *
+ * The attach spec "root" serves a second table the same way: the
+ * built-in root (design/builtin-root.md), multicall's 9front commands and
+ * the directories h9 binds onto. A channel's dev is the table it's on, so
+ * the two trees' qids, which overlap, never compare equal as mount points.
+ *
  * Writes, creates, removes and wstats fail with "permission denied".
  */
 
@@ -25,21 +30,34 @@ struct Htool
 {
 	char	*name;
 	u32int	parent;
-	u32int	mode;	/* DMDIR|0555, 0555 or 0444 */
+	u32int	mode;	/* DMDIR|0555, 0555 or 0444; 0775 and 0664 in the root */
 	uchar	*data;
 	u32int	len;
 };
 
 /* Implemented in Zig (src/kern.zig). */
 extern Htool *h9_tools_table(int *n);
+extern Htool *h9_root_table(int *n);
 
-static Htool *tools;
-static int ntools;
+enum
+{
+	Ttools,	/* #H: guest-tools' scripts */
+	Troot,	/* #Hroot: the built-in root */
+	Ntab,
+};
+
+static Htool *tabs[Ntab];
+static int ntabs[Ntab];
+
+/* The table c is on, by its dev, and its length. */
+#define TAB(c)	tabs[(c)->dev < Ntab ? (c)->dev : Ttools]
+#define NTAB(c)	ntabs[(c)->dev < Ntab ? (c)->dev : Ttools]
 
 static void
 htoolsreset(void)
 {
-	tools = h9_tools_table(&ntools);
+	tabs[Ttools] = h9_tools_table(&ntabs[Ttools]);
+	tabs[Troot] = h9_root_table(&ntabs[Troot]);
 }
 
 static void
@@ -48,9 +66,9 @@ mkentry(Chan *c, int i, Dir *dp)
 	Qid q;
 	Htool *t;
 
-	t = &tools[i];
+	t = &TAB(c)[i];
 	mkqid(&q, i, 0, (t->mode & DMDIR) ? QTDIR : QTFILE);
-	devdir(c, q, i == 0 ? "#H" : t->name, (t->mode & DMDIR) ? 0 : t->len, up->user, t->mode & ~DMDIR, dp);
+	devdir(c, q, i == 0 ? (c->dev == Troot ? "/" : "#H") : t->name, (t->mode & DMDIR) ? 0 : t->len, up->user, t->mode & ~DMDIR, dp);
 }
 
 /*
@@ -63,15 +81,18 @@ htoolsgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 	int i;
 	ulong d;
 
+	Htool *tools;
+
 	USED(tab, ntab);
+	tools = TAB(c);
 	d = c->qid.path;
-	if(d >= ntools)
+	if(d >= NTAB(c))
 		return -1;
 	if(s == DEVDOTDOT){
 		mkentry(c, tools[d].parent, dp);
 		return 1;
 	}
-	for(i = 1; i < ntools; i++){
+	for(i = 1; i < NTAB(c); i++){
 		if(tools[i].parent != d)
 			continue;
 		if(name != nil ? strcmp(tools[i].name, name) == 0 : s-- == 0){
@@ -85,11 +106,20 @@ htoolsgen(Chan *c, char *name, Dirtab *tab, int ntab, int s, Dir *dp)
 static Chan*
 htoolsattach(char *spec)
 {
-	if(*spec != 0)
+	Chan *c;
+	int t;
+
+	if(*spec == 0)
+		t = Ttools;
+	else if(strcmp(spec, "root") == 0)
+		t = Troot;
+	else
 		error(Ebadspec);
-	if(ntools == 0)
+	if(ntabs[t] == 0)
 		error(Enonexist);
-	return devattach('H', spec);
+	c = devattach('H', spec);
+	c->dev = t;
+	return c;
 }
 
 static Walkqid*
@@ -103,7 +133,7 @@ htoolsstat(Chan *c, uchar *db, int n)
 {
 	Dir d;
 
-	if(c->qid.path >= ntools)
+	if(c->qid.path >= NTAB(c))
 		error(Enonexist);
 	mkentry(c, c->qid.path, &d);
 	n = convD2M(&d, db, n);
@@ -145,9 +175,9 @@ htoolsread(Chan *c, void *va, long n, vlong off)
 
 	if(c->qid.type & QTDIR)
 		return devdirread(c, va, n, nil, 0, htoolsgen);
-	if(c->qid.path >= ntools)
+	if(c->qid.path >= NTAB(c))
 		error(Enonexist);
-	t = &tools[c->qid.path];
+	t = &TAB(c)[c->qid.path];
 	if(off < 0)
 		error(Ebadarg);
 	if(off >= t->len)

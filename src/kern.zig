@@ -1194,6 +1194,7 @@ comptime {
         @export(&h9_clock_mono, .{ .name = "h9_clock_mono" });
         @export(&h9_cons_ncpu, .{ .name = "h9_cons_ncpu" });
         @export(&h9_tools_table, .{ .name = "h9_tools_table" });
+        @export(&h9_root_table, .{ .name = "h9_root_table" });
     }
 }
 
@@ -1287,23 +1288,42 @@ const Htool = extern struct {
 
 const dmdir: u32 = 0x80000000;
 
-const tools_table = blk: {
-    const es = @import("guest_tree").entries;
+/// A table's permissions for directories, executables and other files.
+const Modes = struct { dir: u32 = 0o555, exec: u32 = 0o555, data: u32 = 0o444 };
+
+/// A generated table's entries as `Htool`s.
+fn htable(comptime es: anytype, comptime modes: Modes) [es.len]Htool {
+    @setEvalBranchQuota(100_000);
     var out: [es.len]Htool = undefined;
     for (es, &out) |e, *h| h.* = .{
         .name = e.name.ptr,
         .parent = e.parent,
-        .mode = if (e.dir) dmdir | 0o555 else if (e.exec) 0o555 else 0o444,
+        .mode = if (e.dir) dmdir | modes.dir else if (e.exec) modes.exec else modes.data,
         .data = e.data.ptr,
         .len = e.data.len,
     };
-    const final = out;
-    break :blk final;
-};
+    return out;
+}
+
+const tools_table = htable(@import("guest_tree").entries, .{});
 
 fn h9_tools_table(n: *c_int) callconv(.c) [*]const Htool {
     n.* = tools_table.len;
     return &tools_table;
+}
+
+/// The built-in root (design/builtin-root.md), `#Hroot`: the same kind of
+/// table, from multicall's trees. It has a 9front tree's modes, 0775 and
+/// 0664, though the device refuses every write, because an overlay over it
+/// (the root's, and `/tmp`'s) takes its permissions from the tree below:
+/// with 0555 directories, nothing could be made in them.
+pub const builtin_root = @import("builtin_root");
+
+const root_table = htable(builtin_root.entries, .{ .dir = 0o775, .exec = 0o775, .data = 0o664 });
+
+fn h9_root_table(n: *c_int) callconv(.c) [*]const Htool {
+    n.* = root_table.len;
+    return &root_table;
 }
 
 // Leaves called from devoverlay.c. They never raise kernel errors.

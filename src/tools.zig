@@ -33,6 +33,14 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
     if (!any) try w.writeAll(" none");
     try w.writeAll("\n");
     try w.print("gfx: {s}\n", .{build_options.gfx});
+    const br = build_options.builtin_root;
+    if (br.arches.len == 0) {
+        try w.writeAll("built-in root: skeleton only\n");
+    } else {
+        try w.print("built-in root: 9front {s} {s},", .{ br.release, br.set });
+        for (br.arches) |a| try w.print(" {s}", .{a});
+        try w.print(" ({d} commands)\n", .{br.commands});
+    }
 }
 
 /// The --check line for the GUI backend (design/0015-gfx.md). On X11 it
@@ -61,6 +69,10 @@ pub const CheckOptions = struct {
     /// the one `auto` picks.
     backend: vmm.BackendKind = .auto,
     memory: ?u64 = null,
+    /// The built-in root, as the CLI resolved --builtin
+    /// (design/builtin-root.md): without a root, anything but `.off`
+    /// checks it instead.
+    builtin: h9.policy.Builtin = .off,
     /// The root tree as given (for messages), or null if none was found.
     root_arg: ?[]const u8 = null,
     /// The root resolved (a host directory for #U, or a 9P server), or
@@ -119,17 +131,26 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
 
     try checkGfx(w);
 
-    const root = o.root orelse {
-        if (o.root_arg) |r| try w.print("root {s}: {s}\n", .{ r, o.root_err }) else try w.writeAll("root: none (use --root DIR or $H9ROOT; zig build mkroot builds one)\n");
-        return exit_failed;
-    };
-    try w.print("root {s}: ", .{switch (root) {
-        .dir => |d| d,
-        // A 9P root as given, which is how its errors name it; a
-        // WebSocket root as its URL, which a schemeless root gains.
-        .tcp, .unix => o.root_arg orelse "",
-        .ws => |u| u,
-    }});
+    if (o.root == null and o.root_arg == null and o.builtin != .off) {
+        const br = build_options.builtin_root;
+        if (!br.has(arch)) {
+            try w.print("root: built-in, skeleton only, with no commands for {s} (use --root DIR or $H9ROOT; zig build slim adds them)\n", .{arch.name()});
+            return exit_failed;
+        }
+        try w.print("root: built-in (9front {s} {s}, {s}; {s}): ", .{ br.release, br.set, arch.name(), if (o.builtin == .only) "--builtin=only" else "no tree found" });
+    } else {
+        const root = o.root orelse {
+            if (o.root_arg) |r| try w.print("root {s}: {s}\n", .{ r, o.root_err }) else try w.writeAll("root: none (use --root DIR or $H9ROOT; zig build mkroot builds one)\n");
+            return exit_failed;
+        };
+        try w.print("root {s}: ", .{switch (root) {
+            .dir => |d| d,
+            // A 9P root as given, which is how its errors name it; a
+            // WebSocket root as its URL, which a schemeless root gains.
+            .tcp, .unix => o.root_arg orelse "",
+            .ws => |u| u,
+        }});
+    }
     if (failed) {
         try w.writeAll("not checked, no usable backend\n");
         return exit_failed;
@@ -222,6 +243,7 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
         .backend = o.backend,
         .arch = arch,
         .root = o.root,
+        .builtin = if (o.root == null) o.builtin else .off,
         .root_spec = o.root_spec,
         .root_user = o.root_user,
         .root_headers = o.root_headers,
