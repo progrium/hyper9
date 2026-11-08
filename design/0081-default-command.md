@@ -1,7 +1,8 @@
 ---
+id: 81
 slug: default-command
 title: A default command from the root
-status: draft
+status: implemented
 created: 2026-11-07
 authors: [progrium]
 depends: []
@@ -113,11 +114,11 @@ Demo: a slim root built as in the userland guide, with `/rc/lib/rcmain.local` ho
 
 Integration cases, with a root in a temporary directory that holds `rc/lib/rcmain` and `rc/lib/rcmain.local` and gets its commands from `--builtin=before`:
 
-- `test "--rc alone runs the root's rcmain.local, then stdin [default-command]"`
-- `test "an exec in rcmain.local sets the exit status [default-command]"`
-- `test "--rc alone without rcmain.local is a plain rc [default-command]"` on the built-in root
-- `test "--rc alone on a terminal is an interactive login rc [default-command]"`, through `spawnTerm`
-- `test "--rc 'cmd' doesn't read rcmain.local [default-command]"`
+- `test "--rc alone runs the root's rcmain.local, then stdin [81]"`
+- `test "an exec in rcmain.local sets the exit status [81]"`
+- `test "--rc alone without rcmain.local is a plain rc [81]"` on the built-in root
+- `test "--rc alone on a terminal is an interactive login rc [81]"`, through `spawnTerm`
+- `test "--rc 'cmd' doesn't read rcmain.local [81]"`
 
 Unit cases in `src/cli.zig`: `--rc` as the last argument parses as a login rc, and `--rc=` parses as an empty command line.
 
@@ -132,3 +133,7 @@ Unit cases in `src/cli.zig`: `--rc` as the last argument parses as a login rc, a
 
 - Should `--check` say whether the root has a default command (an `rcmain.local`) and whether `/bin/test` is present? Missing `/bin/test` is the one way the hook fails silently.
 - Should [browser-host](0012-browser-host.md)'s page, which starts an interactive rc, start a login rc instead, so a root's default runs in the browser too?
+
+## Updates
+
+**Nov 8, 2026.** The integration cases don't use `--builtin=before`, since [builtin-root](builtin-root.md) isn't built yet. They run over the stock tree, which has no `rcmain.local`, and union a scratch directory's `rcmain.local` onto `/rc/lib` with `--ns`, so `rcmain` and `/bin/test` come from the root. The plain-rc case runs on the stock tree rather than the built-in root.

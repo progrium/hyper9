@@ -21,7 +21,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [9p-roots](0013-9p-roots.md) | implemented |  | 9P roots |
 | [image-roots](0014-image-roots.md) | draft |  | Disk-image roots |
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
-| [kvm](0016-kvm.md) | draft |  | KVM backend |
+| [kvm](0016-kvm.md) | accepted | ready | KVM backend |
 | [whp](0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](0018-linux-personality.md) | draft |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
@@ -35,13 +35,13 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [linux-net](0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [multicall](0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
 | [schemeless-roots](0076-schemeless-roots.md) | implemented |  | Schemeless roots |
+| [default-command](0081-default-command.md) | implemented |  | A default command from the root |
+| [builtin-root](0087-builtin-root.md) | implemented |  | A built-in root |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
-| [builtin-root](builtin-root.md) | draft |  | A built-in root |
 | [ci](ci.md) | draft |  | Continuous integration |
 | [cow-fork](cow-fork.md) | draft | needs linux-personality, linux-threads | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [credential-helpers](credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
-| [default-command](default-command.md) | draft |  | A default command from the root |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-cmd](host-cmd.md) | draft |  | Rethinking host commands |
@@ -73,7 +73,7 @@ flowchart LR
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
-  p_kvm["#35;16 kvm<br/>draft"]:::draft
+  p_kvm["#35;16 kvm<br/>accepted"]:::accepted
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
@@ -87,13 +87,13 @@ flowchart LR
   p_linux_net["#35;50 linux-net<br/>draft"]:::draft
   p_multicall["#35;64 multicall<br/>implemented"]:::implemented
   p_schemeless_roots["#35;76 schemeless-roots<br/>implemented"]:::implemented
+  p_default_command["#35;81 default-command<br/>implemented"]:::implemented
+  p_builtin_root["#35;87 builtin-root<br/>implemented"]:::implemented
   p_audio["audio<br/>draft"]:::draft
   p_browser_gfx["browser-gfx<br/>draft"]:::draft
-  p_builtin_root["builtin-root<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_cow_fork["cow-fork<br/>draft"]:::draft
   p_credential_helpers["credential-helpers<br/>draft"]:::draft
-  p_default_command["default-command<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
@@ -131,10 +131,10 @@ flowchart LR
   p_linux_personality --> p_linux_net
   p_9p_roots --> p_schemeless_roots
   p_websocket_9p --> p_schemeless_roots
+  p_multicall --> p_builtin_root
   p_browser_host --> p_audio
   p_browser_host --> p_browser_gfx
   p_gfx --> p_browser_gfx
-  p_multicall --> p_builtin_root
   p_linux_personality --> p_cow_fork
   p_linux_threads --> p_cow_fork
   p_websocket_9p --> p_credential_helpers

@@ -290,14 +290,34 @@ prompt=('slim% ' '	')
 bind -c /mnt/term/cwd $home
 cd
 EOF
-host$ h9 --root ~/slim rc -l
+host$ h9 --root ~/slim --rc
 slim% pwd
 /usr/me
 ```
 
-`h9 --rc` runs `rc -c`, which doesn't read the profile; use `h9 rc -l -c
-'...'` when you want it. Editing `rcmain` itself changes every rc, scripts
-included, so keep anything there quick.
+`--rc` with nothing after it is a login rc: interactive on a terminal, and
+otherwise reading commands from stdin after the profile. `h9 --rc 'cmd'`
+runs `rc -c`, which doesn't read the profile; use `h9 rc -l -c '...'` when
+you want it. Editing `rcmain` itself changes every rc, scripts included, so
+keep anything there quick.
+
+**A default command.** `rcmain.local` is also where a root says how it
+wants to be run, the way a 9front profile starts `rio`. End it with `exec`
+and `h9 --rc` runs that program instead of a shell, with its exit status as
+h9's:
+
+```sh
+host$ cat > ~/slim/rc/lib/rcmain.local <<'EOF'
+bind -c /mnt/term/cwd $home
+exec ls -l $home
+EOF
+host$ h9 --root ~/slim --rc
+```
+
+A program named on the command line still overrides it: `h9 --root ~/slim
+ls` and `h9 --root ~/slim --rc 'cmd'` run only what they name. rcmain
+checks each profile file with `/bin/test -r`, so a root without `/bin/test`
+skips them silently.
 
 **Built as one binary.** Every 9front binary is a static link, so each
 copy above carries its own libc. `zig build slim`, from an h9 checkout with
@@ -319,6 +339,12 @@ tree covers them all, since hard links share a qid. `9box` alone lists its
 commands, and `9box CMD ARGS` runs one. Add your own commands and scripts to
 the tree as above; to box more of 9front's, add a line to `src/9box/slim`
 (its name and its directory under `/sys/src/cmd`).
+
+This tree is also built into h9 itself, as the built-in root h9 uses when it
+finds no other ([builtin-root](../design/0087-builtin-root.md)). `h9
+--builtin=only` runs over it even when you have a root, and `h9 --root
+~/slim --builtin=after` fills in any of its 42 commands your own tree
+leaves out.
 
 ## 5. Layering on the stock root instead of copying it
 
@@ -354,7 +380,7 @@ hi from the layer, on h9
   with the same name as one of 9front's wins. `bind -a` would put it after.
 - The second line unions the layer's `rc/lib` after the stock one, which
   adds `rcmain.local` (the stock tree has none) and keeps 9front's
-  `rcmain`. So `h9 --readable ~/layer --ns ... rc -l` gets the layer's
+  `rcmain`. So `h9 --readable ~/layer --ns ... --rc` gets the layer's
   prompt.
 - To replace a file that does exist, bind a file over it:
   `bind /mnt/term/Users/me/layer/lib/motd /lib/motd`. A bind's target must
