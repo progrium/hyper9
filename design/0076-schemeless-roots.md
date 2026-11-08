@@ -2,7 +2,7 @@
 id: 76
 slug: schemeless-roots
 title: Schemeless roots
-status: draft
+status: accepted
 created: 2026-11-08
 authors: [progrium]
 depends: [13, 21]
