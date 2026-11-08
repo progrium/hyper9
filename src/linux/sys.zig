@@ -1288,6 +1288,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .recvfrom => return ret(try recvCall(p, c.int(0), c.a[1], c.a[2], c.uint(3), c.a[4], c.a[5])),
         .sendmsg => return ret(try sendmsg(p, c.int(0), c.a[1], c.uint(2))),
         .recvmsg => return ret(try recvmsg(p, c.int(0), c.a[1], c.uint(2))),
+        .sendmmsg => return ret(try sendmmsg(p, c.int(0), c.a[1], c.uint(2), c.uint(3))),
+        .recvmmsg => return ret(try recvmmsg(p, c.int(0), c.a[1], c.uint(2), c.uint(3))),
         .signalfd => return ret(try signalfd(p, c.int(0), c.a[1], c.a[2], 0)),
         .signalfd4 => return ret(try signalfd(p, c.int(0), c.a[1], c.a[2], c.uint(3))),
         .eventfd => return ret(try eventfd(p, c.uint(0), 0)),
@@ -3865,6 +3867,7 @@ fn shutdownCall(p: *Process, fd: i32, how: u32) Err!i64 {
 fn setsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, len: u64) Err!i64 {
     if (unixOf(p, fd) != null) return 0;
     const so = sockOf(p, fd) orelse return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
+    if (udpOffload(level, name)) return -E.NOPROTOOPT;
     var v: i32 = 0;
     if (len >= 4) {
         var b: [4]u8 = undefined;
@@ -3902,6 +3905,7 @@ fn setsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, len: u64) Er
 fn getsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, lenp: u64) Err!i64 {
     if (unixOf(p, fd)) |u| return unixGetsockopt(p, u, level, name, va, lenp);
     const so = sockOf(p, fd) orelse return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
+    if (udpOffload(level, name)) return -E.NOPROTOOPT;
     const v: i32 = switch (level) {
         SOL_SOCKET => switch (name) {
             SO_ERROR => @intCast(kc.soError(fd)),
@@ -4120,6 +4124,53 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     try p.writeU32(m.flags_va, 0);
     return r;
 }
+
+/// UDP segmentation offload (UDP_SEGMENT) and receive coalescing
+/// (UDP_GRO). sendmsg and recvmsg carry no control messages, so a sender
+/// that set a segment size would have its batch sent as one oversized
+/// datagram. Refusing the options makes QUIC stacks (quinn, quic-go)
+/// probe them, see ENOPROTOOPT and send one datagram per call.
+fn udpOffload(level: u32, name: u32) bool {
+    return level == IPPROTO_UDP and (name == UDP_SEGMENT or name == UDP_GRO);
+}
+const IPPROTO_UDP = 17;
+const UDP_SEGMENT = 103;
+const UDP_GRO = 104;
+
+/// The size of a struct mmsghdr: a msghdr and the count it moved, padded.
+const mmsghdr_size = 64;
+
+/// sendmmsg as a loop over sendmsg: the count sent, or the first message's
+/// error. A later message's error ends the batch, as on Linux.
+fn sendmmsg(p: *Process, fd: i32, vec: u64, vlen: u32, flags: u32) Err!i64 {
+    const n = @min(vlen, 1024);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const hdr = vec + @as(u64, i) * mmsghdr_size;
+        const r = try sendmsg(p, fd, hdr, flags);
+        if (r < 0) return if (i == 0) r else i;
+        try p.writeU32(hdr + 56, @intCast(r));
+    }
+    return n;
+}
+
+/// recvmmsg as a loop over recvmsg. The first message waits as the socket
+/// and flags say; the rest take only what's already queued, as with
+/// MSG_WAITFORONE. The timeout isn't honoured: on Linux it's checked only
+/// between messages, and callers that batch use non-blocking sockets.
+fn recvmmsg(p: *Process, fd: i32, vec: u64, vlen: u32, flags: u32) Err!i64 {
+    const n = @min(vlen, 1024);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const hdr = vec + @as(u64, i) * mmsghdr_size;
+        const f = (flags & ~@as(u32, MSG_WAITFORONE)) | @as(u32, if (i > 0) MSG_DONTWAIT else 0);
+        const r = try recvmsg(p, fd, hdr, f);
+        if (r < 0) return if (i == 0) r else i;
+        try p.writeU32(hdr + 56, @intCast(r));
+    }
+    return n;
+}
+const MSG_WAITFORONE = 0x10000;
 
 // Named AF_UNIX sockets, on pipes and /srv (devsrv, design/0008). A
 // socket is a pipe end in its fd from the start, so poll and epoll see

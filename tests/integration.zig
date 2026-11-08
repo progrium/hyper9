@@ -5366,6 +5366,12 @@ test "UDP sendto and recvfrom on an unconnected socket [50]" {
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp" }, "ok udp\n");
 }
 
+test "sendmmsg and recvmmsg batch datagrams, and UDP_SEGMENT and UDP_GRO are refused, as QUIC stacks need [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp_mmsg" }, "ok udp_mmsg\n");
+}
+
 test "two sendtos to one peer from a socket bound to port 0, under --net outbound, as musl's resolver does [50]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
