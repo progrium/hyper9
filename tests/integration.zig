@@ -5918,6 +5918,26 @@ test "--check passes with only the built-in root [builtin-root]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
 }
 
+test "a Linux root alone gets the built-in root as its /9, and --builtin=off leaves it out [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // The smallest tree h9 takes for a Linux root.
+    try s.tmp.dir.createDirPath(std.testing.io, "lin/etc");
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lin/etc/os-release", .data = "ID=test\n" });
+    const lin = try std.fs.path.join(gpa, &.{ s.path, "lin" });
+    defer gpa.free(lin);
+    const r = try runNoRoot(e, e.h9, &.{ "--root", lin, "--cwd", s.path, "--rc", "test -x '#\u{3bb}/9/bin/ls' && echo boxed" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("boxed\n", r.out);
+    const off = try runNoRoot(e, e.h9, &.{ "--root", lin, "--cwd", s.path, "--builtin=off", "--print", "--rc", "echo" });
+    defer off.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, off.out, "#Hroot") == null);
+}
+
 test "a missing command names the built-in root in its error [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);

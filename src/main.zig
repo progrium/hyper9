@@ -158,10 +158,9 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         std.debug.print("h9: root {s}: {s}\n", .{ r, rootError(e) });
         return exit_failed;
     } else null;
-    // A Linux root counts as one for `auto`: whether its /9 should be the
-    // built-in root is linux-personality's call (design/builtin-root.md,
-    // Open issues), so it takes --builtin=only.
-    const builtin_root = builtinFor(cfg.builtin, root != null or linux_root != null);
+    // Only a 9front root counts for `auto`: a Linux root alone gets the
+    // built-in root as its /9, which --builtin=off leaves out.
+    const builtin_root = builtinFor(cfg.builtin, root != null);
     // Without a root tree only a host a.out can run; anything resolved in
     // the guest namespace would fail later as a misleading "not found".
     if (root == null and linux_root == null and builtin_root == .off and (prog == .guest or cfg.ns != null)) {
