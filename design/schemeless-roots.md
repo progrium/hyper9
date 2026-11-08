@@ -12,7 +12,7 @@ areas: [cli]
 
 ## Abstract
 
-`--root example.com/9p` means `--root wss://example.com/9p`. A `--root` or `$H9ROOT` value that has no scheme or dial-string prefix, isn't a host path that exists, and is shaped like `host[:port]/path` is read as a `wss://` URL. Every value that works today keeps its meaning, because an existing path is always checked first. `ws://` stays explicit.
+`--root example.com/9p` means `--root wss://example.com/9p`, and `--root localhost:8080/9p` means `--root ws://localhost:8080/9p`. A `--root` or `$H9ROOT` value that has no scheme or dial-string prefix, isn't a host path that exists, and is shaped like `host[:port][/path]` is read as a URL: `ws://` for a loopback host, and `wss://` for any other. Every value that works today keeps its meaning, because an existing path is always checked first.
 
 ## Background
 
@@ -35,7 +35,7 @@ A value without a scheme is also a legal relative path, so the question is wheth
 1. **`ws://…` or `wss://…`:** a WebSocket URL, as now.
 2. **`tcp!…` or `unix!…`:** a dial string, as now.
 3. **A host path that exists:** a directory, a socket (or, with image-roots, an image), as now. A path that exists but is none of these is still "not a directory or socket", and is never retried as a URL.
-4. **A value shaped like a URL without its scheme** (below): the URL `wss://` followed by the value.
+4. **A value shaped like a URL without its scheme** (below): the URL `ws://` followed by the value if its host is loopback, and `wss://` followed by the value otherwise.
 5. **Anything else:** "not found", as now.
 
 ### The shape
@@ -44,15 +44,17 @@ A value is shaped like a URL without its scheme when all of these hold:
 
 - It doesn't start with `.`, `/`, `~`, or `-`, and doesn't contain `\`, `!`, `@`, or whitespace. That leaves out relative paths written with `./` or `../`, absolute paths, home-relative paths, Windows paths, dial strings, and userinfo, which `ws.Url.parse` refuses anyway.
 - Its authority, the part before the first `/` or `?`, is `host` or `host:port`, where `port` is 1 to 65535 in decimal and `host` is either a bracketed IPv6 literal or a name of letters, digits, `-`, and `.`, with no empty label and no label starting or ending with `-`.
-- The host has a `.` in it, or is bracketed, or the authority has a port. `fs.example.com/9p`, `10.0.0.5/9p`, `[::1]:8443/9p`, and `localhost:8443/9p` qualify; `root/9p` and `localhost/9p` don't.
-- The authority is followed by a `/` or a `?`, or has a port. `fs.example.com/` and `fs.example.com:443` qualify; a bare `fs.example.com` doesn't, so that a missing file named `9front.img` or `root.tar` is still "not found" and is never sent to a resolver.
-- `ws.Url.parse` accepts `wss://` followed by the value.
+- The host is `localhost`, has a `.` in it, or is bracketed, or the authority has a port. `fs.example.com`, `fs.example.com/9p`, `10.0.0.5/9p`, `[::1]:8443/9p`, `localhost/9p`, and `fs:8443` qualify; `root`, `root/9p`, and `dist/root` don't.
+- Nothing has to follow the authority: a bare host is a URL for `/`, so `fs.example.com` is `wss://fs.example.com/`.
+- `ws.Url.parse` accepts the URL.
 
-The rule is `cli.schemelessRoot(arena, arg) ?[]const u8`, which returns the `wss://` URL or null, and has no I/O. `resolveRoot` calls it only when the path in step 3 doesn't exist.
+The host is loopback, and the scheme `ws://`, when it's `localhost`, an IPv4 address in `127.0.0.0/8`, or `[::1]`. A local server rarely has a certificate, so that's the scheme it's most often reached with. A local TLS server is written with `wss://`.
+
+The rule is `cli.schemelessRoot(arena, arg) ?[]const u8`, which returns the URL or null, and has no I/O. `resolveRoot` calls it only when the path in step 3 doesn't exist.
 
 ### What the user sees
 
-The URL is what h9 uses from then on: `Root.ws` holds `wss://…`, `--root-header` and `--root-ca` accept the root as they accept a `wss://` one, and `--print`, `--check`, and errors show the `wss://` URL, so the reading h9 chose is always visible. A failed connection names both readings:
+The URL is what h9 uses from then on: `Root.ws` holds `wss://…` or `ws://…`, `--root-header` and `--root-ca` accept the root as they accept one written with its scheme (so `--root-ca` with a loopback root is a usage error, as with `ws://`), and `--print`, `--check`, and errors show the URL, so the reading h9 chose is always visible. A failed connection names both readings:
 
 ```
 $ h9 --root fs.example.com/9p ls
@@ -71,11 +73,13 @@ The exit code is 125, as for any root that can't be reached.
 
 **Path first, then URL.** Checking for an existing path first means every value that works today keeps working, including a directory someone named `fs.example.com`. The cost is that the reading depends on the filesystem: the same `--root` can be a directory in one place and a URL in another. That's already true of 9p-roots' directory and socket, and `--print` shows which reading was taken. A URL-first rule would break relative paths with a dot in their first component, like `build.d/root`, for a small saving.
 
-**Only a value that's shaped like a URL.** Without a shape check, every missing path would turn into a TLS connection to somewhere, and a typo would become a DNS query and a confusing TLS error rather than "not found". Requiring a dotted host (or a port) and a path (or a port) keeps nearly every mistyped local path out: `root`, `9front.img`, `.local/9front/root`, and `dist/root` all stay paths. What's left are missing relative paths whose first component has a dot, such as `build.d/root`; those dial, and the error says so.
+**Only a value that's shaped like a URL.** Without a shape check, every missing path would turn into a connection to somewhere, and a typo would become a DNS query and a confusing TLS error rather than "not found". Requiring a dotted host (or `localhost`, brackets, or a port) keeps most mistyped local paths out: `root`, `.local/9front/root`, `./9front.img`, and `dist/root` all stay paths. What's left are missing relative paths whose first component has a dot, such as `build.d/root`, `9front.img`, or `root.tar`; those dial, and the error says so.
+
+**A bare host.** `fs.example.com` is the most natural thing to type, so it's accepted, as `/`. The cost is that a missing file in the working directory with a dot in its name, like `9front.img`, is now looked up as a host before it fails. The error names both readings, and `./9front.img` is always a path.
 
 **No list of top-level domains.** Telling `example.com` from `build.d` by its last label would need the public suffix list, which changes, and would still read `notes.md/x` as a host. A missing path is rare enough, and the error clear enough, that the simpler rule wins.
 
-**`wss://`, never `ws://`, even for localhost.** Defaulting to plaintext would make the shortest form the unsafe one, and a page served over `https` can't open `ws://` at all. A local test server is the one place `ws://` is common, and there it's worth typing. Loopback is an open issue below.
+**`wss://` by default, `ws://` for loopback.** Defaulting to plaintext would make the shortest form the unsafe one for a remote server, and a page served over `https` can't open `ws://` at all. A local test server is the one place `ws://` is common, and plaintext to loopback never leaves the host, so there the default is `ws://`. Only literal loopback names count: a name that resolves to `127.0.0.1` isn't checked, since that would make the scheme depend on DNS.
 
 **Not a new prefix.** A `ws!host!port` dial string was rejected by websocket-9p because a path and a query don't fit in it. A shorter scheme, like `9p:`, would still need typing and would be one more form to learn.
 
@@ -83,16 +87,16 @@ The exit code is 125, as for any root that can't be reached.
 
 ## Compatibility
 
-- **`--root` and `$H9ROOT`:** every value that resolved before resolves to the same root. A value that failed with "not found" and has the shape above now connects to a `wss://` URL.
+- **`--root` and `$H9ROOT`:** every value that resolved before resolves to the same root. A value that failed with "not found" and has the shape above now connects to a `wss://` URL, or a `ws://` one for loopback.
 - **Exit codes:** unchanged. A schemeless root that can't be reached is 125, as "not found" was.
-- **`--root-header` and `--root-ca`:** accepted with a schemeless root, which is a `wss://` root.
-- **`--print` and `--check`:** show the `wss://` URL.
+- **`--root-header` and `--root-ca`:** accepted with a schemeless root as with the URL it reads as. `--root-ca` with a loopback root is exit 2, as with `ws://`.
+- **`--print` and `--check`:** show the URL.
 - **`Machine.Options`, namespace files, `wsmount`, the browser host's JS API, the sandbox defaults, and `third_party/`:** unchanged.
 
 ## Security
 
-- **New requests from the host.** A missing path that has the shape above makes h9 resolve its first component and open a TLS connection to it, so a mistyped path of that shape goes to the host's resolver and, if it resolves, to a server. The shape check keeps this to values with a dotted host and a path, and the connection is made before the program runs, as every root's is.
-- **Transport:** always TLS, verified against the host's bundle or `--root-ca`'s, as for any `wss://` root. Nothing is ever sent in plaintext unless `ws://` is typed.
+- **New requests from the host.** A missing path that has the shape above makes h9 resolve its first component and open a TLS connection to it, so a mistyped path of that shape goes to the host's resolver and, if it resolves, to a server. The shape check keeps this to values with a dotted host, and the connection is made before the program runs, as every root's is.
+- **Transport:** TLS, verified against the host's bundle or `--root-ca`'s, as for any `wss://` root, for every host but loopback. A loopback root is plaintext, as `ws://` is, and the plan's unencrypted caveat applies; that traffic doesn't leave the host. Nothing goes over the network in plaintext unless `ws://` is typed.
 - **The guest** reaches nothing new. The root is a host-made connection, outside `--net`, as websocket-9p's roots are.
 - **Shadowing.** A directory in the working directory named like a host takes precedence over the URL. Anyone who can create that directory can already choose what a relative `--root` means, so this adds no new control, but a script that wants the server for certain writes `wss://`.
 
@@ -100,12 +104,13 @@ The exit code is 125, as for any root that can't be reached.
 
 The unit test in `src/cli.zig`, `test "schemelessRoot reads host/path as wss:// and leaves paths alone"`, covers the shapes above, both ways. Integration cases tagged `[schemeless-roots]`:
 
-- `test "a schemeless --root prints as its wss:// URL [schemeless-roots]"`: `--print --root fs.example.com/9p` shows `wss://fs.example.com/9p` without connecting.
+- `test "a schemeless --root prints as its wss:// URL [schemeless-roots]"`: `--print --root fs.example.com/9p` shows `wss://fs.example.com/9p` without connecting, and `--print --root fs.example.com` shows `wss://fs.example.com/`.
+- `test "a schemeless loopback root is ws:// and runs /bin/ls [schemeless-roots]"`: `--root 127.0.0.1:PORT/9p` against websocket-9p's relay.
 - `test "an existing directory with a dotted name is a host root, not a URL [schemeless-roots]"`
 - `test "an unreachable schemeless root exits 125 naming both readings [schemeless-roots]"`
 - `test "$H9ROOT is read as a schemeless root [schemeless-roots]"`
 - `test "--root-ca is accepted with a schemeless root [schemeless-roots]"`
-- `test "a missing path without a dotted host is still not found [schemeless-roots]"`: `root`, `9front.img`, and `dist/root`.
+- `test "a missing path without a dotted host is still not found [schemeless-roots]"`: `root`, `./9front.img`, and `dist/root`.
 
 Demo: `h9 --print --root fs.example.com/9p ls` shows the `wss://` URL in the plan's root comment.
 
@@ -115,8 +120,3 @@ Demo: `h9 --print --root fs.example.com/9p ls` shows the `wss://` URL in the pla
 2. `resolveRoot`'s fallback, and the two-reading error in `rootError`.
 3. The integration cases.
 4. README's and MANUAL.md's `--root` notes, and DESIGN.md's root filesystem paragraph and CLI flag table. Set `status: implemented`.
-
-## Open issues
-
-- **Loopback.** Should `localhost:port/…`, `127.0.0.1:port/…`, and `[::1]:port/…` imply `ws://` instead, since a local server rarely has a certificate? It's friendlier for tests, but it makes the default depend on the host, and a local TLS server would then need its scheme typed.
-- **A bare host.** Should `fs.example.com`, with no path or port, be accepted as `wss://fs.example.com/`? It's the most natural thing to type, but it's also the shape of a missing file named `root.tar` or `9front.img`.
