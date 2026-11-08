@@ -2,7 +2,7 @@
 id: 87
 slug: builtin-root
 title: A built-in root
-status: accepted
+status: implemented
 created: 2026-11-06
 authors: [progrium]
 depends: [64]
@@ -207,3 +207,7 @@ The content sharing, the release check, and the build failure on a stale tree ar
 - **Compressing the table.** The box gzips from 535 KB to 247 KB. Decompressing into the machine's pages on first open would halve the binary's growth but give up `#H`'s constant-memory reads. At these sizes it's probably not worth it.
 - **The browser host's download.** Only `386` applies there, but every byte is downloaded per page load. It may want the table fetched separately and cached.
 - **Before multicall lands.** Step 1 is useful on its own. If multicall stalls, step 2 could embed the same 42 commands as separate binaries copied from the stock tree, at about four times the size, and switch to the box later without changing anything else here.
+
+## Updates
+
+**2026-11-08.** Implemented in #86. `zig build` reads multicall's `slim-<release>-<arch>` trees, the one 42-command set multicall ships. Steps 1 to 3 and 5 are built. Still to do: step 4, running `zig build slim` for each architecture in `scripts/release.sh` and adding 9front's licence notice to the archives; the binary's measured growth; and the Done when cases for `--builtin=before` over a 9P root, `wsmount` over the built-in root, and the differential corpus over `#Hroot`.
