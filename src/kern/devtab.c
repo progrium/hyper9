@@ -40,6 +40,8 @@ extern Dev overlaydevtab;
 extern Dev srvdevtab;
 extern Dev htoolsdevtab;
 extern Dev hstreamdevtab;
+extern Dev linuxdevtab;
+extern Dev evdevtab;
 
 #ifdef H9_WEB
 /*
@@ -148,6 +150,8 @@ Dev *devtab[] = {
 	&srvdevtab,
 	&htoolsdevtab,
 	&hstreamdevtab,
+	&linuxdevtab,
+	&evdevtab,
 	0
 };
 

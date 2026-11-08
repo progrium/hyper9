@@ -35,6 +35,7 @@ pub const AddressSpace = struct {
     pub fn map(_: *AddressSpace, _: u64, _: []align(vmm.page_size) u8, _: vmm.Perms) vmm.CreateError!void {
         unreachable;
     }
+    pub fn shootdown(_: *AddressSpace) void {}
     pub fn unmap(_: *AddressSpace, _: u64) void {
         unreachable;
     }

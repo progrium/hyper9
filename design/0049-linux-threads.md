@@ -131,3 +131,20 @@ Demo: a Go program built with `GOOS=linux GOARCH=arm64` runs natively on HVF.
 
 - **Per-thread CPU time** for `CLOCK_THREAD_CPUTIME_ID`, which Go's profiler reads.
 - **The vCPU cap.** A Go program can have more threads than HVF has vCPUs. The pool handles it, at the cost of two thread wake-ups per syscall for threads past the cap; whether that matters for Go's scheduler needs measuring.
+
+## Updates
+
+- 2026-11-07: Choices made in the first implementation, on the emulator (arm64 and amd64):
+  - A thread group is a Linux-layer object (`lsys.Group`), not a kernel one. The kernel sees each thread as an `RFNOWAIT` process; the group holds the tgid, the members, the signal actions and the fd-side state Linux keeps per process (fd flags, directory buffers, sockets and epoll sets). Without `CLONE_FILES` the thread gets `RFFDG`.
+  - `CLONE_FS` is accepted but dot isn't shared; each thread keeps its own.
+  - Futex queues are in C (`src/kern/linux.c`), 64 buckets keyed by the `Mm` and the address, using `sleep` and `tsleep`, so notes interrupt a wait. Shared futexes across `fork` key on the `Mm` too, not the segment and offset, so they don't work across processes yet. `FUTEX_WAKE_OP` is `ENOSYS` with the PI ops; neither musl nor Go needs it.
+  - The shootdown is a vmm call, `AddressSpace.shootdown`. On the emulator it takes and passes on the guest lock, and engines copy the regions after taking it. On HVF it kicks each vCPU running in that address space (`hv_vcpus_exit`) and waits for each to finish its run. `Mm` keeps the pages a narrowing change drops on a list and frees them only after the shootdown, and only shoots down when other threads share the `Mm`. Memory syscalls are serialised per `Mm`.
+  - Time-slicing: the waiter for the guest lock asks the holder to stop after 1 ms, only while it waits. `tgkill`'s kick and every other kick are the same in-engine stop request.
+  - `exit_group` and fatal signals set the group's end and post a kill note to the others; the leader returns the group's status once it's alone. `execve` from a non-leader kills the others and passes the exec to the leader by a note; an exec after the leader has called `pthread_exit` isn't handled.
+  - A process-directed signal blocked by the receiving thread is redirected to a member that doesn't block it, as a note naming the signal. `kill` to a tid that isn't a leader reaches nothing, as `kill -1` skips the caller's own group.
+  - arm64 Go needed two things the personality lacked: version tables in the vDSO (`LINUX_2.6.39`), and `CNTKCTL_EL1` set so EL0 can read `CNTVCT` and `CNTFRQ` (Go's `procyield` reads both), on the emulator and HVF.
+  - `/proc/<pid>/status` shows `Tgid` and `Threads`, and `stat` the thread count. `/proc/<pid>/task` and hiding non-leader threads from `/proc` are still to do, as is `CLOCK_THREAD_CPUTIME_ID`.
+  - A thread's children are its own for `wait`, not the group's.
+  - The HVF shootdown and `CNTKCTL_EL1` are built but haven't run on a Mac yet, nor has the native Go demo.
+  - The block hook is always installed. A busybox `sh` loop counting to 300,000 on arm64 took 96–102 s with it and 83–86 s without, about 15% slower; installing it only while a process has more than one thread is the follow-up named in Open issues.
+  - The 9front Go case that spins four goroutines on `--cpus 1` is slow on the emulator before and after this work (13–50 s here against its 30 s limit): the `--cpus` slot, unlike the guest lock, isn't time-sliced, so a spinner holds it until its next syscall.

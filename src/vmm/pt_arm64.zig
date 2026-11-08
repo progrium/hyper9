@@ -39,6 +39,24 @@ comptime {
 pub const shim_enter = 0x800;
 /// EL1h with DAIF masked, for entering the shim.
 pub const psr_el1h: u64 = 0x3c5;
+/// Where shim.S's save path starts: past `enter`'s three instructions.
+const shim_save = shim_enter + 12;
+/// The save path's doorbell store (`str x0, [x1]`); `restore` follows it.
+const shim_doorbell: usize = blk: {
+    @setEvalBranchQuota(10000);
+    var i: usize = shim_save;
+    while (i + 4 <= shim_code.len) : (i += 4) {
+        if (std.mem.readInt(u32, shim_code[i..][0..4], .little) == 0xf9000020) break :blk i;
+    }
+    @compileError("shim.S: no doorbell store");
+};
+
+/// Whether a vCPU stopped at shim offset `off` (by a kick) was in the
+/// middle of saving a Ureg, which the shim finishes by ringing the
+/// doorbell. Anywhere else in the shim, the shared page's Ureg is current.
+pub fn shimSaving(off: u64) bool {
+    return off < shim_enter or (off >= shim_save and off <= shim_doorbell);
+}
 pub const why_el0 = 1;
 pub const why_irq = 3;
 
@@ -54,6 +72,7 @@ pub const SYS_SP_EL0: u16 = 0xc208;
 pub const SYS_MAIR_EL1: u16 = 0xc510;
 pub const SYS_VBAR_EL1: u16 = 0xc600;
 pub const SYS_SP_EL1: u16 = 0xe208;
+pub const SYS_CNTKCTL_EL1: u16 = 0xc708;
 
 /// The IPA size the tables and the VM use: HVF's default.
 pub const ipa_bits = 36;
@@ -75,7 +94,7 @@ pub const CPACR: u64 = 3 << 20;
 
 /// The system registers the host sets on every vCPU, given its shared
 /// page, and the kernel tables' root.
-pub fn sysregs(kernel_root: u64, shared_kva: u64) [7]struct { u16, u64 } {
+pub fn sysregs(kernel_root: u64, shared_kva: u64) [8]struct { u16, u64 } {
     return .{
         .{ SYS_VBAR_EL1, kva_shim },
         .{ SYS_MAIR_EL1, MAIR },
@@ -84,6 +103,9 @@ pub fn sysregs(kernel_root: u64, shared_kva: u64) [7]struct { u16, u64 } {
         .{ SYS_CPACR_EL1, CPACR },
         .{ SYS_SP_EL1, shared_kva },
         .{ SYS_SCTLR_EL1, SCTLR },
+        // EL0 may read the counter and its frequency, as Linux allows
+        // (Go's procyield reads both).
+        .{ SYS_CNTKCTL_EL1, 3 },
     };
 }
 

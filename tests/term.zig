@@ -101,6 +101,23 @@ pub const Term = struct {
         return t.sys.cooked();
     }
 
+    /// Whether the terminal keeps its lines with echo off, as a password
+    /// prompt sets it (POSIX only; always true on Windows).
+    pub fn noEcho(t: *Term) bool {
+        return t.sys.noEcho();
+    }
+
+    /// Whether the terminal is in raw mode, with or without echo (POSIX
+    /// only; always true on Windows).
+    pub fn raw(t: *Term) bool {
+        return t.sys.raw();
+    }
+
+    /// Whether the terminal echoes (POSIX only; always true on Windows).
+    pub fn echo(t: *Term) bool {
+        return t.sys.echo();
+    }
+
     fn pump(t: *Term, ms: u32) !void {
         var buf: [4096]u8 = undefined;
         const n = try t.sys.read(&buf, ms);
@@ -157,6 +174,9 @@ const Posix = struct {
         if (grantpt(master) != 0 or unlockpt(master) != 0) return error.TermFailed;
         const name = try arena.dupeZ(u8, std.mem.span(ptsname(master) orelse return error.TermFailed));
         _ = c.fcntl(master, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
+        // 80x25, as the Windows pseudoconsole is.
+        var ws: std.posix.winsize = .{ .row = 25, .col = 80, .xpixel = 0, .ypixel = 0 };
+        _ = c.ioctl(master, c.T.IOCSWINSZ, &ws);
 
         const pid = c.fork();
         if (pid < 0) return error.TermFailed;
@@ -227,6 +247,24 @@ const Posix = struct {
         var t: c.termios = undefined;
         if (c.tcgetattr(p.master, &t) != 0) return false;
         return t.lflag.ICANON and t.lflag.ECHO;
+    }
+
+    fn noEcho(p: *Posix) bool {
+        var t: c.termios = undefined;
+        if (c.tcgetattr(p.master, &t) != 0) return false;
+        return t.lflag.ICANON and !t.lflag.ECHO;
+    }
+
+    fn raw(p: *Posix) bool {
+        var t: c.termios = undefined;
+        if (c.tcgetattr(p.master, &t) != 0) return false;
+        return !t.lflag.ICANON;
+    }
+
+    fn echo(p: *Posix) bool {
+        var t: c.termios = undefined;
+        if (c.tcgetattr(p.master, &t) != 0) return false;
+        return t.lflag.ECHO;
     }
 
     fn sleepMs(ms: u32) void {
@@ -407,6 +445,18 @@ const Windows = struct {
     }
 
     fn cooked(_: *Windows) bool {
+        return true;
+    }
+
+    fn noEcho(_: *Windows) bool {
+        return true;
+    }
+
+    fn raw(_: *Windows) bool {
+        return true;
+    }
+
+    fn echo(_: *Windows) bool {
         return true;
     }
 };

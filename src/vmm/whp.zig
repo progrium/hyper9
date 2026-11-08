@@ -142,6 +142,7 @@ pub const Backend = struct {
         const s = parked orelse try b.newVcpu();
         errdefer b.park(s);
         try s.reset();
+        s.runner = try b.ram.runners.take(kickState, @intFromPtr(s));
         return .{ .s = s };
     }
 
@@ -228,10 +229,20 @@ const user_names = blk: {
 };
 
 /// A vCPU's state, kept across its users.
+/// Kicks the vCPU whose State is at `arg`, from any thread; also a
+/// shootdown's kick (gphys.Runners).
+fn kickState(arg: u64) void {
+    const s: *State = @ptrFromInt(arg);
+    s.kicked.store(true, .seq_cst);
+    _ = s.backend.api.WHvCancelRunVirtualProcessor(s.backend.partition, s.slot, 0);
+}
+
 const State = struct {
     backend: *Backend,
     /// The processor index, which is also the shared-page slot.
     slot: u32,
+    /// Its slot in the backend's gphys.Runners, while in use.
+    runner: gphys.Runners.Index = 0,
     shared: *x86.Shared,
     /// Set by `kick`, checked before entering the guest: a cancel that
     /// arrives while the vCPU isn't running may not stop the next run.
@@ -365,6 +376,7 @@ pub const Vcpu = struct {
 
     /// Parks the vCPU for reuse, keeping its processor and shared page.
     pub fn destroy(v: *Vcpu) void {
+        v.s.backend.ram.runners.release(v.s.runner);
         v.s.backend.park(v.s);
     }
 
@@ -417,16 +429,17 @@ pub const Vcpu = struct {
 
     /// Safe to call from any thread.
     pub fn kick(v: *Vcpu) void {
-        const s = v.s;
-        s.kicked.store(true, .seq_cst);
-        _ = s.backend.api.WHvCancelRunVirtualProcessor(s.backend.partition, s.slot, 0);
+        kickState(@intFromPtr(v.s));
     }
 
     pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {
         const s = v.s;
         const b = s.backend;
         const as = s.as orelse return error.BadAddress;
-        const epoch = as.epoch.load(.acquire);
+        const rs = &b.ram.runners;
+        rs.enter(s.runner, as);
+        defer rs.leave(s.runner);
+        const epoch = as.epoch.load(.seq_cst);
         if (epoch != s.epoch) {
             s.epoch = epoch;
             s.shared.next_cr3 = as.root;

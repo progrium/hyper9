@@ -256,6 +256,7 @@ pub const Backend = struct {
         @memcpy(mask[4..], std.mem.asBytes(&during_run));
         _ = try ioctl(s.fd, abi.SET_SIGNAL_MASK, @intFromPtr(&mask));
         s.tid = linux.gettid();
+        s.runner = try b.ram.runners.take(kickState, @intFromPtr(s));
         return .{ .s = s };
     }
 
@@ -356,6 +357,14 @@ fn maskCpuid(list: *abi.CpuidList, a: *Backend.X86) void {
 pub const AddressSpace = gphys.AddressSpace(pt);
 
 /// A vCPU's state, kept across its users.
+/// Kicks the vCPU whose State is at `arg`, from any thread; also a
+/// shootdown's kick (gphys.Runners).
+fn kickState(arg: u64) void {
+    const s: *State = @ptrFromInt(arg);
+    @atomicStore(u8, &s.run.immediate_exit, 1, .seq_cst);
+    _ = linux.tgkill(s.backend.pid, s.tid, @enumFromInt(kickSignal()));
+}
+
 const State = struct {
     backend: *Backend,
     fd: i32,
@@ -365,6 +374,8 @@ const State = struct {
     shared: *Shared,
     /// The thread running it, for kicks.
     tid: i32 = 0,
+    /// Its slot in the backend's gphys.Runners, while in use.
+    runner: gphys.Runners.Index = 0,
     /// The address space last run, and its epoch then; a change means a
     /// TLB flush before the next run.
     as: ?*AddressSpace = null,
@@ -562,32 +573,13 @@ const State = struct {
     }
 };
 
-/// arm64 shim.S offsets: the vectors and the save path run up to the
-/// doorbell store (`str x0, [x1]`); `enter` and `restore` follow it.
-const arm_shim = if (is_x86) struct {} else struct {
-    const save_start = pt.shim_enter + 12; // past `enter`'s three instructions
-    const doorbell: usize = blk: {
-        @setEvalBranchQuota(10000);
-        var i: usize = save_start;
-        while (i + 4 <= pt.shim_code.len) : (i += 4) {
-            if (std.mem.readInt(u32, pt.shim_code[i..][0..4], .little) == 0xf9000020) break :blk i;
-        }
-        @compileError("shim.S: no doorbell store");
-    };
-
-    /// Whether a stop at shim offset `off` was in the middle of saving a
-    /// Ureg, which the shim finishes by ringing the doorbell.
-    fn saving(off: u64) bool {
-        return off < pt.shim_enter or (off >= save_start and off <= doorbell);
-    }
-};
-
 pub const Vcpu = struct {
     s: *State,
 
     /// Parks the vCPU for reuse: KVM can't destroy one alone.
     pub fn destroy(v: *Vcpu) void {
         eatKicks();
+        v.s.backend.ram.runners.release(v.s.runner);
         v.s.backend.park(v.s);
     }
 
@@ -645,15 +637,16 @@ pub const Vcpu = struct {
 
     /// Safe to call from any thread.
     pub fn kick(v: *Vcpu) void {
-        const s = v.s;
-        @atomicStore(u8, &s.run.immediate_exit, 1, .seq_cst);
-        _ = linux.tgkill(s.backend.pid, s.tid, @enumFromInt(kickSignal()));
+        kickState(@intFromPtr(v.s));
     }
 
     pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {
         const s = v.s;
         const as = s.as orelse return error.BadAddress;
-        const epoch = as.epoch.load(.acquire);
+        const rs = &s.backend.ram.runners;
+        rs.enter(s.runner, as);
+        defer rs.leave(s.runner);
+        const epoch = as.epoch.load(.seq_cst);
         if (epoch != s.epoch) {
             s.epoch = epoch;
             if (is_x86) s.shared.next_cr3 = as.root else s.shared.flush = 1;
@@ -719,7 +712,7 @@ pub const Vcpu = struct {
             const pc = try s.getReg(abi.ARM_PC, u64);
             if (pc >= pt.kva_shim) {
                 const off = pc - pt.kva_shim;
-                if (arm_shim.saving(off)) return false;
+                if (pt.shimSaving(off)) return false;
                 if (off != pt.shim_enter) s.reenter = true;
                 return true;
             }

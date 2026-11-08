@@ -449,6 +449,17 @@ pub const AddressSpace = union(enum) {
             inline else => |p| p.translate(va, len),
         };
     }
+    /// Returns once no vCPU other than the caller's can still reach what
+    /// `unmap` removed (design/0049-linux-threads.md, "TLB shootdown"):
+    /// each one running the space has stopped and will see the change
+    /// before its next guest instruction. Only then may the host reuse
+    /// the pages.
+    pub fn shootdown(as: AddressSpace) void {
+        switch (as) {
+            .fake => {},
+            inline else => |p| p.shootdown(),
+        }
+    }
 
     /// Copies between `buf` and [va, va+buf.len), which must lie within
     /// one mapping, holding the space's lock across the copy, so an

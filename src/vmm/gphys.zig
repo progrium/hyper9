@@ -27,6 +27,8 @@ pub const Ram = struct {
     /// dead root to stay one (pt_amd64.zig).
     spare_roots: std.ArrayList(u64) = .empty,
     lock: std.Io.Mutex = .init,
+    /// The backend's vCPUs, for `AddressSpace.shootdown`.
+    runners: Runners = .{},
 
     const Range = struct { off: usize, len: usize };
 
@@ -148,6 +150,81 @@ pub const Ram = struct {
 };
 
 /// One process's address space over page tables of format `pt`.
+/// What each of a backend's vCPUs is running, so an `unmap` can wait until
+/// none still reaches the pages it removed (design/0049-linux-threads.md,
+/// "TLB shootdown"). A vCPU takes a slot when it's made, says which space
+/// it's entering before it reads the space's epoch, and counts each run
+/// as it leaves. Everything is sequentially consistent, so a vCPU that
+/// enters after a shootdown has looked reads the epoch `unmap` bumped.
+pub const Runners = struct {
+    taken: std.atomic.Value(u64) = .init(0),
+    slots: [64]Slot = @splat(.{}),
+
+    pub const Index = u6;
+
+    const Slot = struct {
+        as: std.atomic.Value(?*const anyopaque) = .init(null),
+        runs: std.atomic.Value(u64) = .init(0),
+        /// The backend's kick for this vCPU, and its argument.
+        kick: ?*const fn (u64) void = null,
+        arg: u64 = 0,
+    };
+
+    pub fn take(rs: *Runners, kick: *const fn (u64) void, arg: u64) vmm.CreateError!Index {
+        while (true) {
+            const t = rs.taken.load(.seq_cst);
+            if (t == std.math.maxInt(u64)) return error.HypervisorFailed;
+            const i: Index = @intCast(@ctz(~t));
+            if (rs.taken.cmpxchgWeak(t, t | (@as(u64, 1) << i), .seq_cst, .seq_cst) == null) {
+                rs.slots[i].kick = kick;
+                rs.slots[i].arg = arg;
+                return i;
+            }
+        }
+    }
+
+    /// Sets the argument once the vCPU's own handle exists.
+    pub fn setArg(rs: *Runners, i: Index, arg: u64) void {
+        rs.slots[i].arg = arg;
+    }
+
+    pub fn release(rs: *Runners, i: Index) void {
+        rs.slots[i].as.store(null, .seq_cst);
+        _ = rs.taken.fetchAnd(~(@as(u64, 1) << i), .seq_cst);
+    }
+
+    /// Call before reading the space's epoch for a run.
+    pub fn enter(rs: *Runners, i: Index, as: *const anyopaque) void {
+        rs.slots[i].as.store(as, .seq_cst);
+    }
+
+    /// Call once the hypervisor's run has returned.
+    pub fn leave(rs: *Runners, i: Index) void {
+        _ = rs.slots[i].runs.fetchAdd(1, .seq_cst);
+        rs.slots[i].as.store(null, .seq_cst);
+    }
+
+    /// Kicks every vCPU running `as` and waits until each has left its
+    /// run; the next one flushes its TLB first.
+    fn shootdown(rs: *Runners, as: *const anyopaque) void {
+        var wait: [64]struct { i: Index, runs: u64 } = undefined;
+        var n: usize = 0;
+        for (&rs.slots, 0..) |*sl, i| {
+            if (sl.as.load(.seq_cst) != as) continue;
+            const runs = sl.runs.load(.seq_cst);
+            // Checked again: it may have finished that run already.
+            if (sl.as.load(.seq_cst) != as) continue;
+            if (sl.kick) |k| k(sl.arg);
+            wait[n] = .{ .i = @intCast(i), .runs = runs };
+            n += 1;
+        }
+        for (wait[0..n]) |w| {
+            const sl = &rs.slots[w.i];
+            while (sl.as.load(.seq_cst) == as and sl.runs.load(.seq_cst) == w.runs) std.atomic.spinLoopHint();
+        }
+    }
+};
+
 pub fn AddressSpace(comptime pt: type) type {
     return struct {
         const Self = @This();
@@ -161,9 +238,31 @@ pub fn AddressSpace(comptime pt: type) type {
         /// Bumped by `unmap`, so vCPUs that ran this space flush their TLBs.
         epoch: std.atomic.Value(u64) = .init(0),
         lock: std.atomic.Mutex = .unlocked,
+        /// Sorted by va and disjoint, so lookups are binary searches: a
+        /// Linux process can have thousands of mappings, and a linear scan
+        /// per map made allocation-heavy programs quadratic.
         regions: std.ArrayList(Region) = .empty,
 
         const Region = struct { va: u64, mem: []u8 };
+
+        /// The number of regions that start at or below `va`.
+        fn upperBound(as: *const Self, va: u64) usize {
+            var lo: usize = 0;
+            var hi: usize = as.regions.items.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (as.regions.items[mid].va <= va) lo = mid + 1 else hi = mid;
+            }
+            return lo;
+        }
+
+        /// The region holding `va`, if one does.
+        fn find(as: *const Self, va: u64) ?Region {
+            const i = as.upperBound(va);
+            if (i == 0) return null;
+            const g = as.regions.items[i - 1];
+            return if (va - g.va <= g.mem.len) g else null;
+        }
 
         /// `kernel_root` is the kernel half's root, for formats whose user
         /// and kernel halves share one root table.
@@ -185,9 +284,12 @@ pub fn AddressSpace(comptime pt: type) type {
             const r = as.ram;
             as.lockSpin();
             defer as.lock.unlock();
-            for (as.regions.items) |g| {
-                if (va < g.va + g.mem.len and g.va < va + mem.len) return error.BadAddress;
+            const at = as.upperBound(va);
+            if (at > 0) {
+                const g = as.regions.items[at - 1];
+                if (va < g.va + g.mem.len) return error.BadAddress;
             }
+            if (at < as.regions.items.len and as.regions.items[at].va < va + mem.len) return error.BadAddress;
             try as.regions.ensureUnusedCapacity(r.gpa, 1);
             const pa = r.gpaOf(mem);
             var off: u64 = 0;
@@ -198,46 +300,47 @@ pub fn AddressSpace(comptime pt: type) type {
                     return e;
                 };
             }
-            as.regions.appendAssumeCapacity(.{ .va = va, .mem = mem });
+            as.regions.insertAssumeCapacity(at, .{ .va = va, .mem = mem });
         }
 
         /// Removes the mapping made by `map` at `va`. The pages stay allocated.
         pub fn unmap(as: *Self, va: u64) void {
             as.lockSpin();
             defer as.lock.unlock();
-            for (as.regions.items, 0..) |g, i| if (g.va == va) {
-                var off: u64 = 0;
-                while (off < g.mem.len) : (off += vmm.page_size) pt.unmapPage(as.ram, as.root, va + off);
-                _ = as.regions.swapRemove(i);
-                _ = as.epoch.fetchAdd(1, .release);
-                return;
-            };
+            const i = as.upperBound(va);
+            if (i == 0) return;
+            const g = as.regions.items[i - 1];
+            if (g.va != va) return;
+            var off: u64 = 0;
+            while (off < g.mem.len) : (off += vmm.page_size) pt.unmapPage(as.ram, as.root, va + off);
+            _ = as.regions.orderedRemove(i - 1);
+            _ = as.epoch.fetchAdd(1, .seq_cst);
+        }
+
+        /// Returns once no vCPU other than the caller's can still reach
+        /// what `unmap` removed: see `Runners`.
+        pub fn shootdown(as: *Self) void {
+            as.ram.runners.shootdown(as);
         }
 
         /// Host view of [va, va+len) if it lies within one mapping.
         pub fn translate(as: *Self, va: u64, len: u64) ?[]u8 {
             as.lockSpin();
             defer as.lock.unlock();
-            for (as.regions.items) |g| {
-                if (va >= g.va and va - g.va <= g.mem.len and len <= g.mem.len - (va - g.va)) {
-                    return g.mem[va - g.va ..][0..len];
-                }
-            }
-            return null;
+            const g = as.find(va) orelse return null;
+            if (len > g.mem.len - (va - g.va)) return null;
+            return g.mem[va - g.va ..][0..len];
         }
 
         /// `translate` and a copy under the lock; see vmm.AddressSpace.copy.
         pub fn copy(as: *Self, va: u64, buf: []u8, write: bool) bool {
             as.lockSpin();
             defer as.lock.unlock();
-            for (as.regions.items) |g| {
-                if (va >= g.va and va - g.va <= g.mem.len and buf.len <= g.mem.len - (va - g.va)) {
-                    const mem = g.mem[va - g.va ..][0..buf.len];
-                    if (write) @memcpy(mem, buf) else @memcpy(buf, mem);
-                    return true;
-                }
-            }
-            return false;
+            const g = as.find(va) orelse return false;
+            if (buf.len > g.mem.len - (va - g.va)) return false;
+            const mem = g.mem[va - g.va ..][0..buf.len];
+            if (write) @memcpy(mem, buf) else @memcpy(buf, mem);
+            return true;
         }
 
         /// The host wrote code: vCPUs that ran this space flush their TLB

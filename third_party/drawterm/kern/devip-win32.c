@@ -199,12 +199,15 @@ so_bind(int fd, int su, unsigned short port, unsigned char *addr)
 	memset(&ss, 0, sizeof(ss));
 	ss.ss_family = family(addr);
 
+	/* h9: bind the address asked for (zero is any), not always any */
 	switch(ss.ss_family){
 	case AF_INET:
 		hnputs(&((struct sockaddr_in*)&ss)->sin_port, port);
+		v6tov4((unsigned char*)&((struct sockaddr_in*)&ss)->sin_addr.s_addr, addr);
 		break;
 	case AF_INET6:
 		hnputs(&((struct sockaddr_in6*)&ss)->sin6_port, port);
+		memcpy(&((struct sockaddr_in6*)&ss)->sin6_addr.s6_addr, addr, sizeof(struct in6_addr));
 		break;
 	}
 

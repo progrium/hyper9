@@ -115,9 +115,12 @@ pub const Backend = struct {
         const index, const shared = try b.slots.take(&b.ram, b.kernel_root);
         errdefer b.slots.release(&b.ram, b.kernel_root, index, shared);
 
-        var v: Vcpu = .{ .id = 0, .exit = undefined, .shared = shared, .backend = b, .slot = index };
+        const runner = try b.ram.runners.take(kickId, 0);
+        errdefer b.ram.runners.release(runner);
+        var v: Vcpu = .{ .id = 0, .exit = undefined, .shared = shared, .backend = b, .slot = index, .runner = runner };
         try check(hv_vcpu_create(&v.id, &v.exit, null));
         errdefer _ = hv_vcpu_destroy(v.id);
+        b.ram.runners.setArg(runner, v.id);
         for (pt.sysregs(b.kernel_root, pt.sharedKva(index))) |r| try check(hv_vcpu_set_sys_reg(v.id, r[0], r[1]));
         return v;
     }
@@ -125,12 +128,19 @@ pub const Backend = struct {
 
 pub const AddressSpace = gphys.AddressSpace(pt);
 
+/// A shootdown's kick (gphys.Runners): the vCPU's id.
+fn kickId(id: u64) void {
+    var x = id;
+    _ = hv_vcpus_exit(@ptrCast(&x), 1);
+}
+
 pub const Vcpu = struct {
     id: u64,
     exit: *HvExit,
     shared: *Shared,
     backend: *Backend,
     slot: pt.Slots.Index,
+    runner: gphys.Runners.Index,
     fresh: bool = true,
     /// The address space last run, and its epoch then; a change means a
     /// TLB flush before the next run.
@@ -141,6 +151,7 @@ pub const Vcpu = struct {
     pub fn destroy(v: *Vcpu) void {
         _ = hv_vcpu_destroy(v.id);
         const b = v.backend;
+        b.ram.runners.release(v.runner);
         b.slots.release(&b.ram, b.kernel_root, v.slot, v.shared);
     }
 
@@ -189,7 +200,10 @@ pub const Vcpu = struct {
 
     pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {
         const as = v.as orelse return error.BadAddress;
-        const epoch = as.epoch.load(.acquire);
+        const rs = &v.backend.ram.runners;
+        rs.enter(v.runner, as);
+        defer rs.leave(v.runner);
+        const epoch = as.epoch.load(.seq_cst);
         if (epoch != v.epoch) {
             v.epoch = epoch;
             v.shared.flush = 1;
@@ -203,7 +217,10 @@ pub const Vcpu = struct {
         while (true) {
             try check(hv_vcpu_run(v.id));
             switch (v.exit.reason) {
-                EXIT_CANCELED => return .interrupted,
+                EXIT_CANCELED => {
+                    if (try v.stopped()) return .interrupted;
+                    continue;
+                },
                 EXIT_VTIMER => continue,
                 EXIT_EXCEPTION => {
                     const ec = v.exit.syndrome >> 26;
@@ -218,6 +235,32 @@ pub const Vcpu = struct {
                 else => return .{ .other = v.exit.reason },
             }
         }
+    }
+
+    /// After a kick stopped the vCPU: works out where. In user mode its
+    /// registers are live in HVF, not in the shared page, so they go to
+    /// the Ureg and the next run re-enters the shim; otherwise a changed
+    /// Ureg (a signal frame) would be ignored, and a pool vCPU would run
+    /// on in the last process's registers under the next one's tables,
+    /// with no TLB flush. In the shim's restore path the Ureg is already
+    /// current. In its save path it's half written, so returns false: the
+    /// caller runs on to the doorbell instead.
+    fn stopped(v: *Vcpu) vmm.Error!bool {
+        var pc: u64 = 0;
+        try check(hv_vcpu_get_reg(v.id, REG_PC, &pc));
+        if (pc >= pt.kva_shim) {
+            const off = pc - pt.kva_shim;
+            if (pt.shimSaving(off)) return false;
+            if (off != pt.shim_enter) v.fresh = true;
+            return true;
+        }
+        const u = &v.shared.ureg;
+        for (&u.r, 0..) |*x, i| try check(hv_vcpu_get_reg(v.id, REG_X0 + @as(u32, @intCast(i)), x));
+        try check(hv_vcpu_get_sys_reg(v.id, pt.SYS_SP_EL0, &u.sp));
+        u.pc = pc;
+        try check(hv_vcpu_get_reg(v.id, REG_CPSR, &u.psr));
+        v.fresh = true;
+        return true;
     }
 
     fn decode(v: *Vcpu) vmm.Exit {

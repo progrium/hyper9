@@ -394,3 +394,24 @@ Dev pipedevtab = {
 	devremove,
 	devwstat,
 };
+
+/*
+ * h9: the queue a read of c takes from (wr == 0) or a write to c adds
+ * to, for Linux poll (src/kern/linuxnet.c); nil if c isn't a data file.
+ */
+Queue*
+h9_pipeq(Chan *c, int wr)
+{
+	Pipe *p;
+
+	p = c->aux;
+	if(p == nil)
+		return nil;
+	switch(NETTYPE(c->qid.path)){
+	case Qdata0:
+		return p->q[wr ? 1 : 0];
+	case Qdata1:
+		return p->q[wr ? 0 : 1];
+	}
+	return nil;
+}

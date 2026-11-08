@@ -10,6 +10,8 @@
  *  IO queues
  */
 typedef struct Queue	Queue;
+void	h9_qwake(Queue*);	/* h9: wakes Linux pollers (src/kern/linuxnet.c) */
+
 struct Queue
 {
 	Lock	lk;
@@ -451,6 +453,7 @@ iunlock_consumer(Queue *q)
 		q->state = s & ~Qflow;
 
 	iunlock(&q->lk);
+	h9_qwake(q);	/* h9 */
 
 	if(s & Qflow){
 		/*
@@ -498,6 +501,7 @@ iunlock_producer(Queue *q)
 
 	q->state = s & ~Qstarve;
 	iunlock(&q->lk);
+	h9_qwake(q);	/* h9 */
 
 	if(s & Qstarve)
 		wakeup(&q->rr);
@@ -1209,6 +1213,7 @@ qclose(Queue *q)
 	/* wake up readers/writers */
 	wakeup(&q->rr);
 	wakeup(&q->wr);
+	h9_qwake(q);	/* h9 */
 
 	/* free queued blocks */
 	freeblist(tofree);
@@ -1242,6 +1247,7 @@ qhangup(Queue *q, char *msg)
 	/* wake up readers/writers */
 	wakeup(&q->rr);
 	wakeup(&q->wr);
+	h9_qwake(q);	/* h9 */
 }
 
 /*

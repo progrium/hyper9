@@ -69,6 +69,13 @@ const c_stub = struct {
         return -1;
     }
     fn h9_kern_postnotepg(_: c_ulong, _: [*:0]const u8, _: c_int) void {}
+    fn h9_kern_selfref() ?*anyopaque {
+        return null;
+    }
+    fn h9_kern_postnoteref(_: ?*anyopaque, _: [*:0]const u8, _: c_int) c_int {
+        return 0;
+    }
+    fn h9_kern_unref(_: ?*anyopaque) void {}
     fn h9_kern_noteid() c_ulong {
         return 0;
     }
@@ -211,6 +218,12 @@ const c_stub = struct {
     fn h9_fs_readlinkpath(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
         return -1;
     }
+    fn h9_fs_symlinkpath(_: [*:0]const u8, _: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_fs_renamepath(_: [*:0]const u8, _: [*:0]const u8) c_int {
+        return 1;
+    }
     fn h9_overlay_drop(_: c_int) void {}
     fn h9_overlay_track(_: c_int, _: ?*anyopaque) void {}
     fn h9_kern_release() void {}
@@ -248,6 +261,9 @@ const c_real = struct {
     extern var h9_notekick: ?*const fn (?*anyopaque) callconv(.c) void;
     extern fn h9_kern_postnote(pid: c_ulong, msg: [*:0]const u8, flag: c_int) c_int;
     extern fn h9_kern_postnotepg(noteid: c_ulong, msg: [*:0]const u8, flag: c_int) void;
+    extern fn h9_kern_selfref() ?*anyopaque;
+    extern fn h9_kern_postnoteref(ref: ?*anyopaque, msg: [*:0]const u8, flag: c_int) c_int;
+    extern fn h9_kern_unref(ref: ?*anyopaque) void;
     extern fn h9_kern_noteid() c_ulong;
     extern fn h9_kern_setnotify(on: c_int) void;
     extern fn h9_kern_notepending() c_int;
@@ -297,7 +313,12 @@ const c_real = struct {
     extern fn h9_fauth(fd: c_int, aname: [*:0]const u8) c_int;
     extern fn h9_kern_chdir(name: [*:0]const u8) c_int;
     extern fn h9_kern_setargs(args: [*]const u8, n: c_int) void;
-    extern var h9_procstatus: ?*const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void;
+    // drawterm's ulong and long are 32 bits (include/lib.h), so a ulong*
+    // the kernel passes is a *c_uint here, never a *c_ulong: writing 8
+    // bytes through it overran pstat's locals and crashed h9.
+    extern var h9_procstatus: ?*const fn (?*anyopaque, [*]u8, c_int, *c_uint) callconv(.c) void;
+    extern var h9_procthreads: ?*const fn (?*anyopaque, *c_uint, *c_uint) callconv(.c) void;
+    extern var h9_wantchld: ?*const fn (?*anyopaque) callconv(.c) c_int;
     extern var h9_procsegment: ?*const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_int;
     extern fn sysdup(fd0: c_int, fd1: c_int) c_int;
     extern fn sysstat(name: [*:0]const u8, buf: [*]u8, n: c_int) c_int;
@@ -307,6 +328,8 @@ const c_real = struct {
     extern fn sysfwstat(fd: c_int, buf: [*]u8, n: c_int) c_int;
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
     extern fn h9_fs_readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
+    extern fn h9_fs_symlinkpath(path: [*:0]const u8, target: [*:0]const u8) c_int;
+    extern fn h9_fs_renamepath(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
@@ -451,8 +474,21 @@ pub fn setNoteKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
 /// state (into a buffer of the given size) and its memory in KiB. It runs
 /// on the reading thread with the target's note lock held, and only while
 /// `aux` is set; it must not block or make kernel calls.
-pub fn setProcStatus(f: *const fn (?*anyopaque, [*]u8, c_int, *c_ulong) callconv(.c) void) void {
+pub fn setProcStatus(f: *const fn (?*anyopaque, [*]u8, c_int, *c_uint) callconv(.c) void) void {
     if (available) c.h9_procstatus = f;
+}
+
+/// Sets the hook Linux's /proc/n/status and stat call, with the process's
+/// `aux`, for its thread group and how many threads it has. It runs as the
+/// status hook does.
+pub fn setProcThreads(f: *const fn (?*anyopaque, *c_uint, *c_uint) callconv(.c) void) void {
+    if (available) c.h9_procthreads = f;
+}
+
+/// Sets the hook a child's exit calls, with the parent's `aux` and its
+/// note lock held, to ask whether the parent wants SIGCHLD.
+pub fn setWantChld(f: *const fn (?*anyopaque) callconv(.c) c_int) void {
+    if (available) c.h9_wantchld = f;
 }
 
 /// Sets the hook /proc/n/segment calls, with the process's `aux`, for its
@@ -588,6 +624,22 @@ pub const NoteFlag = enum(c_int) { user = 0, exit = 1, debug = 2 };
 /// exited" as the error string, if there's no such process.
 pub fn postNote(to: u32, msg: [*:0]const u8, flag: NoteFlag) Error!bool {
     return try check(c.h9_kern_postnote(to, msg, @intFromEnum(flag))) != 0;
+}
+
+/// A reference to the calling process, for notes posted later from any
+/// kernel process (`postNoteRef`); null outside an h9 process.
+pub fn selfRef() ?*anyopaque {
+    return c.h9_kern_selfref();
+}
+
+/// Posts a note to a `selfRef` process; false if it wasn't queued (a full
+/// queue, or the process ended).
+pub fn postNoteRef(ref: *anyopaque, msg: [*:0]const u8, flag: NoteFlag) bool {
+    return c.h9_kern_postnoteref(ref, msg, @intFromEnum(flag)) != 0;
+}
+
+pub fn unref(ref: *anyopaque) void {
+    c.h9_kern_unref(ref);
 }
 
 /// Posts a note to every process but the caller in note group `noteid` of
@@ -806,6 +858,21 @@ pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
     return buf[0..@intCast(n)];
 }
 
+/// Makes `path` a symbolic link to `target`: in memory in an overlay, or
+/// on the host in a devfs tree, where the new name is checked like a
+/// create. For the Linux personality's symlinkat; Plan 9 programs never
+/// see links.
+pub fn symlink(path: [*:0]const u8, target: [*:0]const u8) Error!void {
+    _ = try check(c.h9_fs_symlinkpath(path, target));
+}
+
+/// Moves `old` to `new` in another directory with the host's rename,
+/// when both are in host (devfs) trees; false if either isn't. For the
+/// Linux personality's renameat.
+pub fn renameAcross(old: [*:0]const u8, new: [*:0]const u8) Error!bool {
+    return try check(c.h9_fs_renamepath(old, new)) == 0;
+}
+
 /// Frees an overlay made by `overlayNew` that was never attached.
 pub fn overlayDrop(id: u32) void {
     c.h9_overlay_drop(@intCast(id));
@@ -1011,10 +1078,24 @@ pub const Console = struct {
     raw: ?Raw = null,
     mutex: std.atomic.Mutex = .unlocked,
     raw_on: bool = false,
+    echo_off: bool = false,
+    crnl_off: bool = false,
 
     pub const Raw = struct {
         ctx: *anyopaque,
         set: *const fn (ctx: *anyopaque, on: bool) void,
+        /// Turns the host terminal's echo on or off with its line
+        /// discipline kept (`echooff` on consctl, a Linux `TCSETS`
+        /// without `ECHO`); null if the host can't.
+        echo: ?*const fn (ctx: *anyopaque, on: bool) void = null,
+        /// Turns the host terminal's CR to NL input mapping on or off
+        /// for raw mode (a Linux `TCSETS` with or without `ICRNL`), so
+        /// Enter reaches the program as CR when it asks; null if the
+        /// host can't.
+        crnl: ?*const fn (ctx: *anyopaque, on: bool) void = null,
+        /// The host terminal's size, rows then columns, for a Linux
+        /// `TIOCGWINSZ`; null, or a null result, if the host can't say.
+        size: ?*const fn (ctx: *anyopaque) ?[2]u16 = null,
     };
 
     /// Turns raw mode on or off, if it isn't already.
@@ -1024,6 +1105,38 @@ pub const Console = struct {
         if (con.raw_on == on) return;
         con.raw_on = on;
         if (con.raw) |r| r.set(r.ctx, on);
+    }
+
+    /// Turns echo on or off, if it isn't already.
+    pub fn setEcho(con: *Console, on: bool) void {
+        while (!con.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer con.mutex.unlock();
+        if (con.echo_off == !on) return;
+        con.echo_off = !on;
+        if (con.raw) |r| if (r.echo) |f| f(r.ctx, on);
+    }
+
+    /// Turns raw mode's CR to NL mapping on or off, if it isn't already.
+    pub fn setCrnl(con: *Console, on: bool) void {
+        while (!con.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer con.mutex.unlock();
+        if (con.crnl_off == !on) return;
+        con.crnl_off = !on;
+        if (con.raw) |r| if (r.crnl) |f| f(r.ctx, on);
+    }
+
+    /// The host terminal's rows and columns, if it knows them.
+    pub fn size(con: *Console) ?[2]u16 {
+        const r = con.raw orelse return null;
+        const f = r.size orelse return null;
+        return f(r.ctx);
+    }
+
+    /// Back to cooked mode with echo, as at the end of a run.
+    pub fn reset(con: *Console) void {
+        con.setRaw(false);
+        con.setEcho(true);
+        con.setCrnl(true);
     }
 };
 
@@ -1064,6 +1177,8 @@ comptime {
         @export(&h9_cons_ready, .{ .name = "h9_cons_ready" });
         @export(&h9_cons_write, .{ .name = "h9_cons_write" });
         @export(&h9_cons_raw, .{ .name = "h9_cons_raw" });
+        @export(&h9_cons_echo, .{ .name = "h9_cons_echo" });
+        @export(&h9_cons_poll, .{ .name = "h9_cons_poll" });
         @export(&h9_policy_active, .{ .name = "h9_policy_active" });
         @export(&h9_policy_check, .{ .name = "h9_policy_check" });
         @export(&h9_net_check, .{ .name = "h9_net_check" });
@@ -1277,15 +1392,46 @@ fn h9_cons_read(id: c_ulong, buf: [*]u8, n: c_long) callconv(.c) c_long {
     return @intCast(in.read(buf[0..@intCast(n)]));
 }
 
+/// For poll: ready, or a read is asked for, whose input wakes pollers.
+fn h9_cons_poll(id: c_ulong) callconv(.c) c_int {
+    const con = console(id) orelse return 1;
+    const in = con.in orelse return 1;
+    return @intFromBool(in.request());
+}
+
 fn h9_cons_ready(id: c_ulong) callconv(.c) c_int {
     const con = console(id) orelse return 1;
     const in = con.in orelse return 1;
     return @intFromBool(in.ready());
 }
 
+/// consctl's rawon and rawoff: 9front's raw mode has no echo, since the
+/// program echoes what it wants.
 fn h9_cons_raw(id: c_ulong, on: c_int) callconv(.c) void {
     const con = console(id) orelse return;
+    con.setEcho(on == 0);
     con.setRaw(on != 0);
+}
+
+fn h9_cons_echo(id: c_ulong, on: c_int) callconv(.c) void {
+    const con = console(id) orelse return;
+    con.setEcho(on != 0);
+}
+
+/// Sets console `id`'s raw mode, echo and CR to NL mapping, for a Linux
+/// `TCSETS`. The mapping goes first, so raw mode starts with it.
+pub fn setConsoleMode(id: u64, raw: bool, echo: bool, crnl: bool) void {
+    const con = console(@intCast(id)) orelse return;
+    con.setCrnl(crnl);
+    con.setRaw(raw);
+    con.setEcho(echo);
+}
+
+/// Console `id`'s host terminal size, rows then columns, for a Linux
+/// `TIOCGWINSZ`; null if the host can't say.
+pub fn consoleSize(id: u64) ?[2]u16 {
+    const con = console(@intCast(id)) orelse return null;
+    return con.size();
 }
 
 fn h9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.c) c_long {

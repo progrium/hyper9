@@ -103,6 +103,27 @@ fi
 echo "src/unicorn: $UNICORN_VERSION + ${#patches[@]} patches"
 fi
 
+# Alpine roots for the Linux personality's tests: each a layer blob from
+# Docker Hub checked against its pinned digest, unpacked once.
+mkdir -p "$H9_LOCAL/linux"
+echo "$ALPINE_LAYERS" | while read -r arch sha; do
+	[ -n "$arch" ] || continue
+	dir="$H9_LOCAL/linux/alpine-$arch"
+	if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$sha" ]; then
+		tok=$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" |
+			sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+		tgz="$H9_LOCAL/cache/alpine-$ALPINE_VERSION-$arch.tar.gz"
+		curl -fsSL -H "Authorization: Bearer $tok" -o "$tgz" "$ALPINE_REGISTRY/v2/library/alpine/blobs/sha256:$sha"
+		echo "$sha  $tgz" | shasum -a 256 -c --quiet
+		rm -rf "$dir" "$dir.tmp" && mkdir -p "$dir.tmp"
+		tar -xzf "$tgz" -C "$dir.tmp"
+		echo "$sha" >"$dir.tmp/.h9-stamp"
+		mv "$dir.tmp" "$dir"
+		rm -f "$tgz"
+	fi
+	echo "linux/alpine-$arch: $ALPINE_VERSION"
+done
+
 # v86: v86.wasm and its license into .local/v86, for zig build web.
 if want v86; then
 dir="$H9_LOCAL/v86"

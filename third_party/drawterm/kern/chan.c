@@ -1250,6 +1250,13 @@ namec(char *aname, int amode, int omode, ulong perm)
 			error(Enoattach);
 
 		c = devtab[t]->attach(up->genbuf+n);
+		/*
+		 * h9: #λ, the Linux view's root (src/kern/devlinux.c), is a
+		 * union with the Linux root tree bound after it, so a walk from
+		 * it crosses mounts, as one from / does.
+		 */
+		if(r == 0x3BB)
+			nomount = 0;
 		break;
 
 	default:

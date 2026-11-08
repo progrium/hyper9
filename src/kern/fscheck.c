@@ -586,6 +586,9 @@ h9_fs_allow(char *path, int op)
 
 /* src/kern/devoverlay.c */
 extern Chan *h9_overlay_lower(Chan*);
+extern int h9_overlay_readlink(Chan*, char*, int);
+extern void h9_overlay_symlink(Chan*, char*, char*);
+extern int h9_overlay_move(Chan*, Chan*, char*);
 
 /*
  * The target of the link that path's last name is, through #U and an
@@ -611,6 +614,11 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 		return -1;
 	}
 	c = namec(path, Aaccess, 0, 0);
+	if((n = h9_overlay_readlink(c, buf, nbuf)) >= 0){
+		cclose(c);
+		poperror();
+		return n;
+	}
 	if((l = h9_overlay_lower(c)) != nil){
 		cclose(c);
 		c = l;
@@ -621,4 +629,116 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 	cclose(c);
 	poperror();
 	return n;
+}
+
+/*
+ * Moves old to new in another directory, for the Linux personality's
+ * renameat: a host rename when both are in devfs trees (fscheck.h), and
+ * a move in memory when both are in one overlay (devoverlay.c).
+ */
+int
+h9_fs_renamepath(char *old, char *new)
+{
+	Chan *volatile oc, *volatile nc;
+	char *volatile dir;
+	char *name, *p;
+	int r;
+
+	oc = nil;
+	nc = nil;
+	dir = nil;
+	if(waserror()){
+		if(oc != nil)
+			cclose(oc);
+		if(nc != nil)
+			cclose(nc);
+		free(dir);
+		p = up->syserrstr;
+		up->syserrstr = up->errstr;
+		up->errstr = p;
+		return -1;
+	}
+	oc = namec(old, Aaccess, 0, 0);
+	dir = strdup(new);
+	if(dir == nil)
+		error(Enomem);
+	name = strrchr(dir, '/');
+	if(name == nil){
+		name = dir;
+		nc = namec(".", Aaccess, 0, 0);
+	}else{
+		*name++ = '\0';
+		nc = namec(dir[0] != '\0' ? dir : "/", Aaccess, 0, 0);
+	}
+	if(name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+		error(Eexist);
+	if((nc->qid.type & QTDIR) == 0)
+		error(Enotdir);
+	r = 1;
+	if(devtab[oc->type]->dc == 'U' && devtab[nc->type]->dc == 'U')
+		r = h9_fs_rename(oc, nc, name);
+	else if(devtab[oc->type]->dc == 'O' && devtab[nc->type]->dc == 'O')
+		r = h9_overlay_move(oc, nc, name);
+	cclose(oc);
+	cclose(nc);
+	free(dir);
+	poperror();
+	return r;
+}
+
+/*
+ * Makes path a symbolic link to target, for the Linux personality's
+ * symlinkat: in memory in an overlay, or on the host in a devfs tree,
+ * where the new name is checked like a create. Anywhere else it's
+ * "permission denied". Returns 0, or -1 with the error in errstr.
+ */
+int
+h9_fs_symlinkpath(char *path, char *target)
+{
+	Chan *volatile c;
+	char *dir, *name, *p;
+
+	c = nil;
+	dir = nil;
+	if(waserror()){
+		if(c != nil)
+			cclose(c);
+		free(dir);
+		p = up->syserrstr;
+		up->syserrstr = up->errstr;
+		up->errstr = p;
+		return -1;
+	}
+	dir = strdup(path);
+	if(dir == nil)
+		error(Enomem);
+	name = strrchr(dir, '/');
+	if(name == nil){
+		name = dir;
+		c = namec(".", Aaccess, 0, 0);
+	}else{
+		*name++ = '\0';
+		c = namec(dir[0] != '\0' ? dir : "/", Aaccess, 0, 0);
+	}
+	if(name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+		error(Eexist);
+	if((c->qid.type & QTDIR) == 0)
+		error(Enotdir);
+	switch(devtab[c->type]->dc){
+	case 'O':
+		p = (char*)c;
+		c = nil;
+		h9_overlay_symlink((Chan*)p, name, target);
+		break;
+	case 'U':
+		h9_fs_symlink(c, name, target);
+		break;
+	default:
+		error(Eperm);
+	}
+	if(c != nil)
+		cclose(c);
+	free(dir);
+	poperror();
+	return 0;
 }

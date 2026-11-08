@@ -61,3 +61,20 @@ void	h9_fs_anchor(Chan *c);
 int	h9_fs_readlink(Chan *c, char *buf, int nbuf);
 /* The same by a path in the caller's namespace, through an overlay (fscheck.c). */
 int	h9_fs_readlinkpath(char *path, char *buf, int nbuf);
+/*
+ * h9_fs_symlink makes name in the devfs directory c a link to target.
+ * h9_fs_symlinkpath does it by a path in the caller's namespace, in an
+ * overlay or a devfs tree (fscheck.c); 0, or -1 with the error in errstr.
+ */
+void	h9_fs_symlink(Chan *c, char *name, char *target);
+int	h9_fs_symlinkpath(char *path, char *target);
+/*
+ * h9_fs_rename moves the devfs file c to name in the devfs directory dir
+ * with the host's rename, checked as a rename of c and a create of name;
+ * 1 if the host can't (Windows, for now). h9_fs_renamepath does it by
+ * paths in the caller's namespace, for renameat across directories,
+ * also moving within one overlay (h9_overlay_move): 0, 1 if it can't
+ * (the caller's EXDEV), or -1 with the error in errstr.
+ */
+int	h9_fs_rename(Chan *c, Chan *dir, char *name);
+int	h9_fs_renamepath(char *old, char *new);

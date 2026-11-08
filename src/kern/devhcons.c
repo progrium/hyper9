@@ -27,6 +27,7 @@ extern long h9_cons_read(ulong machine, void *buf, long n);
 extern int h9_cons_ready(ulong machine);
 extern long h9_cons_write(ulong machine, int fd, void *buf, long n);
 extern void h9_cons_raw(ulong machine, int on);
+extern void h9_cons_echo(ulong machine, int on);
 
 enum {
 	Maxcons	= 64,	/* src/kern.zig's max_consoles */
@@ -51,11 +52,14 @@ ready(void *a)
 }
 
 /* Called by the reader thread (not a Proc) when input arrives. */
+extern void h9_pollwake(void);
+
 void
 h9_cons_wake(ulong id)
 {
 	if(id < Maxcons)
 		wakeup(&hcons[id].r);
+	h9_pollwake();	/* a Linux poll or epoll on the console (linuxnet.c) */
 }
 
 static void
@@ -164,7 +168,7 @@ hconsopen(Chan *c, int omode)
 	return c;
 }
 
-/* As drawterm's and 9front's: the last close of consctl turns raw off. */
+/* As drawterm's and 9front's: the last close of consctl turns raw off, and echo back on. */
 static void
 hconsclose(Chan *c)
 {
@@ -177,11 +181,16 @@ hconsclose(Chan *c)
 	lock(&h->lk);
 	last = --h->nctl == 0;
 	unlock(&h->lk);
-	if(last)
+	if(last){
 		h9_cons_raw(c->dev, 0);
+		h9_cons_echo(c->dev, 1);
+	}
 }
 
-/* consctl: rawon and rawoff, separated by spaces, as drawterm's. */
+/*
+ * consctl: rawon and rawoff, separated by spaces, as drawterm's, and
+ * h9's echooff and echoon, which keep the line discipline.
+ */
 static void
 consctl(ulong id, char *a, long n)
 {
@@ -196,6 +205,10 @@ consctl(ulong id, char *a, long n)
 			h9_cons_raw(id, 1);
 		else if(strncmp(a, "rawoff", 6) == 0)
 			h9_cons_raw(id, 0);
+		else if(strncmp(a, "echooff", 7) == 0)
+			h9_cons_echo(id, 0);
+		else if(strncmp(a, "echoon", 6) == 0)
+			h9_cons_echo(id, 1);
 		if((a = strchr(a, ' ')) != nil)
 			a++;
 	}

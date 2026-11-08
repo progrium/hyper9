@@ -1924,7 +1924,7 @@ test "rawon puts the host terminal in raw mode until exit [baseline]" {
         // consctl is on fd 3: rc execs read in place, and closing the last
         // consctl (as >/dev/null over it would) turns raw off.
         try t.expect("ready", slow(10_000));
-        try std.testing.expect(!t.cooked());
+        try std.testing.expect(t.raw() and !t.echo());
         // Raw mode doesn't turn \r into \n, so read needs a newline.
         try t.send("x\n");
         try std.testing.expectEqual(0, try t.wait(slow(10_000)));
@@ -3551,7 +3551,8 @@ test "#C runs a host command and reports its exit status [baseline]" {
     const e = try env(@src());
     // The wait file is opened before exec: devcmd keeps the status only
     // for an open one. It's one message with no newline, so dd reads it.
-    const r = try run(e, &.{ "--host-cmd", "--rc",
+    const r = try run(e, &.{
+        "--host-cmd", "--rc",
         \\<>[3]'#C/cmd/clone' {
         \\    n=`{read <[0=3]}
         \\    d='#C/cmd/'$n
@@ -3649,7 +3650,8 @@ test "a machine's host commands die with it [baseline]" {
     // Read with no handler to kill it: the reader waits in a host read
     // that the timeout's hangup can't interrupt.
     var t: [16]u8 = undefined;
-    const raw = try run(e, &.{ "--host-cmd", "--cwd", s.path, "--timeout", slowTimeout(&t, 300), "--rc",
+    const raw = try run(e, &.{
+        "--host-cmd", "--cwd", s.path, "--timeout", slowTimeout(&t, 300), "--rc",
         \\<>[3]'#C/cmd/clone' {
         \\    echo 'exec sh -c ''sleep 3; touch raw''' >[1=3]
         \\    cat '#C/cmd/'`{read <[0=3]}^/data
@@ -4846,6 +4848,630 @@ test "ls -l /bin in a contained tree with links (demo) [34]" {
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/kitty") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/cat") != null);
+}
+
+// The Linux personality (design/0018-linux-personality.md): static Linux
+// programs from tests/fixtures/linux (H9_TEST_LINUX) and an Alpine root
+// from scripts/fetch.sh (H9_TEST_LINUX_ROOT/alpine-<arch>).
+
+const LinuxEnv = struct {
+    h9: []const u8,
+    /// The Alpine root for `arch`.
+    root: []const u8,
+    /// The fixtures built for `arch`, the guest's cwd.
+    fixtures: []const u8,
+    /// The 9front root, for the cases that mix the two; null if there's none.
+    nine: ?[]const u8,
+    arch: []const u8,
+    backends: []const u8,
+    buf: [2][std.Io.Dir.max_path_bytes]u8 = undefined,
+};
+
+fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
+    try skipPending(src.fn_name);
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
+    const arch = getenv(4, "H9_TEST_ARCH") orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => return error.SkipZigTest,
+    };
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
+    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
+    le.* = .{ .h9 = h9, .root = undefined, .fixtures = undefined, .nine = null, .arch = arch, .backends = "auto" };
+    le.root = try std.fmt.bufPrint(&le.buf[0], "{s}/alpine-{s}", .{ lr, arch });
+    le.fixtures = try std.fmt.bufPrint(&le.buf[1], "{s}/{s}", .{ fx, arch });
+    const io = std.testing.io;
+    std.Io.Dir.cwd().access(io, try hostPath(le.root, "etc/os-release"), .{}) catch return error.SkipZigTest;
+    std.Io.Dir.cwd().access(io, try hostPath(le.fixtures, "hello"), .{}) catch return error.SkipZigTest;
+    // The backends and the 9front root go in slots 2 and 1, read last.
+    le.backends = getenv(2, "H9_TEST_BACKENDS") orelse "auto";
+    // The 9front root counts only if it has this architecture's programs.
+    if (getenv(1, "H9_TEST_ROOT")) |n| {
+        var cat_buf: [32]u8 = undefined;
+        const cat = try std.fmt.bufPrint(&cat_buf, "{s}/bin/cat", .{arch});
+        if (std.Io.Dir.cwd().access(io, try hostPath(n, cat), .{})) |_| le.nine = n else |_| {}
+    }
+}
+
+/// Runs `h9 --root <alpine> [--root <9front>] --cwd <fixtures> args...` on
+/// each backend, checking they agree, as `run` does.
+fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Result {
+    if (with_nine and le.nine == null) return error.SkipZigTest;
+    var first: ?Result = null;
+    errdefer if (first) |f| f.deinit();
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    while (it.next()) |backend| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--root", le.root });
+        if (with_nine) try argv.appendSlice(gpa, &.{ "--root", le.nine.? });
+        try argv.appendSlice(gpa, &.{ "--cwd", le.fixtures });
+        try argv.appendSlice(gpa, args);
+        const p = try runProcessWith(argv.items, null, null, 120_000);
+        const code = switch (p.term) {
+            .exited => |c| c,
+            else => {
+                std.debug.print("h9 {s}: {any}\n{s}", .{ args[0], p.term, p.stderr });
+                gpa.free(p.stdout);
+                gpa.free(p.stderr);
+                return error.Crashed;
+            },
+        };
+        const r: Result = .{ .code = code, .out = p.stdout, .err = p.stderr };
+        if (first) |f| {
+            defer r.deinit();
+            errdefer std.debug.print("backend {s} differs for h9 {s}\n", .{ backend, args[0] });
+            try std.testing.expectEqualStrings(f.out, r.out);
+            try std.testing.expectEqual(f.code, r.code);
+        } else first = r;
+    }
+    return first orelse error.SkipZigTest;
+}
+
+test "a static Linux program runs and exits with its status (demo) [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{ "/mnt/term/cwd/hello", "x", "y" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hello from linux, argc=3\narg x\narg y\n", r.out);
+    try std.testing.expectEqual(3, r.code);
+}
+
+test "files, fork, vfork, exec, pipes, signals and mmap work for a Linux program [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{"/mnt/term/cwd/probe"});
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(!std.mem.startsWith(u8, r.out, "FAIL ") and std.mem.indexOf(u8, r.out, "\nFAIL ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "exec child status 5\n") != null);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a Linux program killed by a signal exits 128+N, and a handler can catch a fault [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const term = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "term" });
+    defer term.deinit();
+    try std.testing.expectEqual(143, term.code);
+    try std.testing.expect(std.mem.indexOf(u8, term.err, "linux: signal 15") != null);
+    const segv = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "segv" });
+    defer segv.deinit();
+    try std.testing.expectEqual(139, segv.code);
+    const caught = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "handled" });
+    defer caught.deinit();
+    try std.testing.expectEqualStrings("caught SIGSEGV at 0x20\n", caught.out);
+    try std.testing.expectEqual(4, caught.code);
+}
+
+test "rt_sigreturn can't raise a Linux program's privilege [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{"/mnt/term/cwd/sigreturn"});
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("handled 1, selectors kept\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "busybox sh runs a pipeline from the Linux root, and /proc describes it (demo) [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{ "sh", "-c", "echo a b c | wc -w; cat /proc/self/comm; grep -c ^processor /proc/cpuinfo >/dev/null && echo cpuinfo; ./hello | head -1; exit 7" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("3\ncat\ncpuinfo\nhello from linux, argc=1\n", r.out);
+    try std.testing.expectEqual(7, r.code);
+}
+
+test "/proc/self/stat and status describe a Linux process [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // Redis reads /proc/self/stat every second; reading it overran the
+    // kernel's stack (a 32-bit ulong written as 64).
+    const r = try runLinux(&le, false, &.{ "sh", "-c", "cut -d' ' -f2-3 /proc/self/stat; grep -E '^(Name|Threads):' /proc/self/status" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("(cut) R\nName:\tgrep\nThreads:\t1\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "ln -s makes links a Linux program follows, renames and removes, and sh waits on a background job [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // /usr/lib is in the root's overlay; a relative link resolves from its
+    // directory, an absolute one from the root, and a dangling one is still
+    // a link to lstat, readlink, rename and remove.
+    const script =
+        \\set -e
+        \\cd /usr/lib; echo hi > f; ln -s f l; cat l; readlink l
+        \\ln -s /etc/alpine-release abs; cat abs >/dev/null; echo abs
+        \\mkdir d; echo x > d/in; ln -s d dl; cat dl/in
+        \\ln -s nowhere dang; [ -L dang ]; ! cat dang 2>/dev/null; mv dang dang2; readlink dang2
+        \\rm l dang2; cat f; ! ln -s f abs 2>/dev/null
+        \\sleep 0.1 & wait $!; echo waited
+    ;
+    const r = try runLinux(&le, false, &.{ "sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hi\nf\nabs\nx\nnowhere\nhi\nwaited\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "/proc/self/exe is the file a Linux program runs, its links followed [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // Zig finds its lib directory beside /proc/self/exe, so a link to it
+    // (/usr/bin/zig -> /opt/zig/zig) must name the target, as Linux does.
+    // readlink is a link to busybox, and so is the relative one made here.
+    const r = try runLinux(&le, false, &.{ "sh", "-c", "readlink /proc/self/exe; mkdir -p /root/d; cd /root/d; ln -s ../../bin/busybox readlink; ./readlink /proc/self/exe" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/bin/busybox\n/bin/busybox\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP client may bind port 0 [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // Alpine's minirootfs has no /etc/resolv.conf: devlinux's is unioned
+    // after the root's /etc, which keeps the rest. busybox nslookup binds
+    // its UDP socket to port 0 before connecting, which --net outbound
+    // can't announce; it goes on to query (nothing answers on 127.0.0.1).
+    // resolv.conf's stat length is its text's: c-ares (curl) sizes it
+    // first, and took a 0-length one as empty.
+    const script =
+        \\grep -q '^nameserver ' /etc/resolv.conf && echo dns
+        \\[ "$(stat -c %s /etc/resolv.conf)" -eq "$(wc -c < /etc/resolv.conf)" ] && echo size
+        \\[ -f /etc/alpine-release ] && echo etc
+        \\ls /etc | grep -c '^resolv.conf$'
+        \\echo made > /etc/h9-new && cat /etc/h9-new && rm /etc/h9-new
+        \\nslookup -timeout=1 -retry=0 h9.invalid 127.0.0.1 2>&1 | grep -c 'bind:'
+    ;
+    const r = try runLinux(&le, false, &.{ "--net", "outbound", "sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("dns\nsize\netc\n1\nmade\n0\n", r.out);
+}
+
+test "9front and Linux programs share pipelines both ways (demo) [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // Linux sh runs 9front programs under /9 ...
+    const lx = try runLinux(&le, true, &.{ "sh", "-c", "echo x y | /9/bin/wc -w | tr -d ' '; /9/bin/rc -c 'exit oops'; echo $?" });
+    defer lx.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{lx.err});
+    try std.testing.expectEqualStrings("2\n1\n", lx.out);
+    try std.testing.expectEqual(0, lx.code);
+    // ... and rc runs Linux programs through #λ.
+    const nine = try runLinux(&le, true, &.{ "--rc", "echo hi | '#λ/usr/bin/wc' -c; '#λ/bin/sh' -c 'kill -TERM $$'; echo $status" });
+    defer nine.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{nine.err});
+    try std.testing.expect(std.mem.startsWith(u8, nine.out, "3\n"));
+    try std.testing.expect(std.mem.indexOf(u8, nine.out, "linux: signal 15") != null);
+}
+
+// What databases need of files (design/0018-linux-personality.md),
+// through tests/fixtures/linux/files.c, which prints "ok NAME" per case.
+
+test "fcntl record locks conflict across processes, wait, and go when the owner closes an fd or exits [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "posix_locks" }, "ok posix_locks\n");
+}
+
+test "OFD locks belong to the open file, and flock shares, excludes and follows dup [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "ofd_flock" }, "ok ofd_flock\n");
+}
+
+test "exec closing a child's last close-on-exec fd of a file releases its flock [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "flock_exec" }, "ok flock_exec\n");
+}
+
+test "processes mapping a file MAP_SHARED see each other's stores, read and write agree, and the file keeps them [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "shared_map" }, "ok shared_map\n");
+}
+
+test "fsync works, and wait4 and getrusage report CPU time [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "fsync_rusage" }, "ok fsync_rusage\n");
+}
+
+test "page-by-page preads read ahead, and see writes and truncates at once [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "read_cache" }, "ok read_cache\n");
+}
+
+test "fallocate grows a file, KEEP_SIZE doesn't, and holes are EOPNOTSUPP [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "falloc" }, "ok falloc\n");
+}
+
+test "rename across directories moves in an overlay, and is the host's rename in a host tree [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "rename_across" }, "ok rename_across\n");
+    // In a writable host directory, as Redis's AOF dir is.
+    var sc: Scratch = undefined;
+    try sc.init();
+    defer sc.deinit();
+    var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try std.fmt.bufPrint(&fb, "{s}/files", .{le.fixtures}), sc.tmp.dir, "files", std.testing.io, .{});
+    var bit = std.mem.tokenizeScalar(u8, le.backends, ',');
+    const p = try runProcessWith(&.{ le.h9, "--backend", bit.next() orelse "auto", "--arch", le.arch, "--root", le.root, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files rename_across" }, null, null, 120_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
+    try std.testing.expectEqualStrings("ok rename_across\n", p.stdout);
+}
+
+test "an arm64 Linux program can read the ID registers, as HWCAP_CPUID says [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "id_regs" }, "ok id_regs\n");
+}
+
+test "madvise MADV_FREE is EINVAL, and MADV_DONTNEED zeroes [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "madv_free" }, "ok madv_free\n");
+}
+
+test "System V shared memory: a keyed segment, shared across fork, its attach count, and removal [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "sysv_shm" }, "ok sysv_shm\n");
+}
+
+test "a process that exits with a file mapped shared writes it back on the way out [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "map_exit" }, "ok map_exit\n");
+}
+
+test "process-shared semaphores in MAP_SHARED memory work across fork, on pages touched only after it [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "shared_sem" }, "ok shared_sem\n");
+}
+
+test "signalfd turns blocked signals into reads, and wakes epoll from itself and another process [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "signal_fd" }, "ok signal_fd\n");
+}
+
+test "setitimer and alarm deliver SIGALRM, once or repeating [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "itimer" }, "ok itimer\n");
+}
+
+test "root can become another user and its groups, and can't come back [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "creds" }, "ok creds\n");
+}
+
+// Readiness and sockets (design/0050-linux-net.md), through
+// tests/fixtures/linux/net.c, which prints "ok NAME" per case.
+
+fn netCase(le: *const LinuxEnv, args: []const []const u8, want: []const u8) !void {
+    const r = try runLinux(le, false, args);
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings(want, r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "poll on a pipe wakes when the writer writes [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "poll_pipe" }, "ok poll_pipe\n");
+}
+
+test "O_NONBLOCK read on an empty pipe is EAGAIN, and select agrees [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "nonblock_pipe" }, "ok nonblock_pipe\n");
+}
+
+test "readv from a pipe returns what's there once a buffer fills [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "readv_pipe" }, "ok readv_pipe\n");
+}
+
+test "epoll edge-triggered on a pipe [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "epoll_et" }, "ok epoll_et\n");
+}
+
+test "eventfd counts and wakes epoll [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd" }, "ok eventfd\n");
+}
+
+test "named and abstract Unix sockets: bind, listen, epoll, accept, connect, and refused once closed [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "unix_sock" }, "ok unix_sock\nok unix_abstract\n");
+}
+
+test "socket under --net=disable is EACCES [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=disable", "/mnt/term/cwd/net", "disabled" }, "ok disabled\n");
+}
+
+test "TCP echo between a Linux client and server, with getpeername [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "tcp_echo" }, "ok tcp_echo\n");
+}
+
+test "non-blocking connect is EINPROGRESS, then writable, then SO_ERROR 0 [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "nb_connect" }, "ok nb_connect\n");
+}
+
+test "shutdown(SHUT_WR) shows the peer EOF and EPOLLRDHUP [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "half_close" }, "ok half_close\n");
+}
+
+test "a Linux process that exits holding a TCP connection closes it [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "exit_eof" }, "ok exit_eof\n");
+}
+
+test "IPv4 and IPV6_V6ONLY IPv6 wildcard listeners share a port, or IPv6 is EAFNOSUPPORT without it [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "dual_bind" }, "ok dual_bind\n");
+}
+
+test "netlink lists loopback for getifaddrs, and a listener on 127.0.0.1 reports it [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "ifaddrs" }, "ok ifaddrs\n");
+}
+
+test "UDP sendto and recvfrom on an unconnected socket [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp" }, "ok udp\n");
+}
+
+test "two sendtos to one peer from a socket bound to port 0, under --net outbound, as musl's resolver does [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    const sock = try addr.bind(std.testing.io, .{ .mode = .dgram });
+    defer sock.close(std.testing.io);
+    var port_buf: [8]u8 = undefined;
+    const port = try std.fmt.bufPrint(&port_buf, "{d}", .{sock.address.getPort()});
+    try netCase(&le, &.{ "--net=outbound", "/mnt/term/cwd/net", "udp_twice", port }, "ok udp_twice\n");
+    var buf: [16]u8 = undefined;
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(slow(5000)), .clock = .awake } };
+    const first = try sock.receiveTimeout(std.testing.io, &buf, timeout);
+    try std.testing.expectEqualStrings("A", first.data);
+    const second = try sock.receiveTimeout(std.testing.io, &buf, timeout);
+    try std.testing.expectEqualStrings("B", second.data);
+}
+
+test "more than 30 TCP connections at once [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "many" }, "ok many\n");
+}
+
+test "TCP echo between a Linux client and a 9front server [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // aux/listen1 runs cat (a 9front path: listen1 is a 9front program)
+    // for one connection; busybox nc talks to it.
+    const r = try runLinux(&le, true, &.{ "--net=enable", "sh", "-c", "/9/bin/aux/listen1 -1 -t tcp!127.0.0.1!17007 /bin/cat & sleep 1; echo ping | nc -w 2 127.0.0.1 17007" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("ping\n", r.out);
+}
+
+test "Go net/http server and client in one Linux program [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/go/nethttp" }, "ok nethttp\n");
+}
+
+// Threads (design/0049-linux-threads.md), through
+// tests/fixtures/linux/threads.c, which prints "ok NAME" per case, and the
+// Go programs in tests/fixtures/linux/go (built when go is on PATH).
+
+/// Skips unless the Linux Go fixtures were built.
+fn goLinux(le: *const LinuxEnv) !void {
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "go/goroutines"), .{}) catch return error.SkipZigTest;
+}
+
+fn threadCase(le: *const LinuxEnv, name: []const u8) !void {
+    var want_buf: [64]u8 = undefined;
+    try netCase(le, &.{ "/mnt/term/cwd/threads", name }, try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name}));
+}
+
+test "pthreads program with 8 threads and a mutex [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "mutex");
+    try threadCase(&le, "condvar");
+}
+
+test "thread-local storage, timed waits and fork from a thread [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "timed_tls");
+    try threadCase(&le, "fork_thread");
+}
+
+test "a Linux program's termios reaches the host terminal: echo off keeps lines, ICANON off is raw and keeps echo [18]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--root", le.root, "--timeout", "120s", "/bin/sh", "-c", "stty -echo; echo ready1; read x; echo got=$x; stty echo raw; echo ready2; dd bs=1 count=1 2>/dev/null; stty sane; echo; echo done" });
+        defer t.deinit();
+        try t.expect("ready1", slow(30_000));
+        try std.testing.expect(t.noEcho());
+        // A password isn't echoed, and the line is still edited.
+        try t.send("pw\x7fW\n");
+        try t.expect("got=pW", slow(10_000));
+        try std.testing.expect(std.mem.indexOf(u8, t.out.items, "pw") == null);
+        try t.expect("ready2", slow(10_000));
+        // Raw with ECHO on, as `read -n1` asks for: the key shows.
+        try std.testing.expect(t.raw() and t.echo());
+        // Raw: one key, no newline.
+        try t.send("k");
+        try t.expect("done", slow(10_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+        try std.testing.expect(t.cooked());
+    }
+}
+
+test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMIN 0, and sees the terminal's size [18]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    while (it.next()) |backend| {
+        errdefer std.debug.print("backend {s}\n", .{backend});
+        // fzf tells Enter (CR) from Ctrl-J, and btop reads with VMIN 0
+        // until a read returns nothing.
+        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--root", le.root, "--timeout", "120s", "/bin/sh", "-c", "echo size=$(stty size); stty raw -echo; echo ready; dd bs=1 count=2 2>/dev/null | od -An -c; stty min 0 time 0; echo poll=$(dd bs=1 count=1 2>/dev/null | wc -c); stty sane; echo done" });
+        defer t.deinit();
+        try t.expect("size=25 80", slow(30_000));
+        try t.expect("ready", slow(10_000));
+        try t.send("\r\n");
+        try t.expect("\\r  \\n", slow(10_000));
+        try t.expect("poll=0", slow(10_000));
+        try t.expect("done", slow(10_000));
+        try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+        try std.testing.expect(t.cooked());
+    }
+}
+
+test "Go linux binary starts goroutines and sleeps [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    const r = try runLinux(&le, false, &.{"/mnt/term/cwd/go/goroutines"});
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(std.mem.startsWith(u8, r.out, "ok goroutines "));
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "/proc lists a thread group once, with its threads under task, and statm reads, as htop needs [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "proc_threads");
+}
+
+test "munmap while another thread reads: no stale access after return [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "munmap");
+}
+
+test "a store or read(2) racing another thread's mprotect in the same chunk neither faults nor EFAULTs [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "remap_race");
+}
+
+test "exit_group kills every thread [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // From the main thread, with threads blocked and spinning ...
+    const main_exit = try runLinux(&le, false, &.{ "/mnt/term/cwd/threads", "exit_main" });
+    defer main_exit.deinit();
+    try std.testing.expectEqualStrings("exiting\n", main_exit.out);
+    try std.testing.expectEqual(5, main_exit.code);
+    // ... and from another thread, while main waits to join it.
+    const thread_exit = try runLinux(&le, false, &.{ "/mnt/term/cwd/threads", "exit_thread" });
+    defer thread_exit.deinit();
+    try std.testing.expectEqualStrings("", thread_exit.out);
+    try std.testing.expectEqual(7, thread_exit.code);
+}
+
+test "execve from a non-leader thread [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/threads", "exec_thread" }, "ok exec_thread\n");
+}
+
+test "tgkill interrupts a thread in a busy loop [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "tgkill_busy");
+    try threadCase(&le, "tgkill_wait");
+}
+
+test "CLONE_CHILD_CLEARTID wakes pthread_join [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // Each join waits on the thread's clear-tid word; the leader's own
+    // exit waits for the last thread.
+    try threadCase(&le, "timed_tls");
+    try netCase(&le, &.{ "/mnt/term/cwd/threads", "leader_exit" }, "ok leader_exit\n");
+}
+
+test "a thread spinning without syscalls doesn't starve the others on the emulator [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "spin");
+}
+
+test "Go GC with a goroutine in a call-free loop, at 1 ms slices [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try goLinux(&le);
+    try netCase(&le, &.{"/mnt/term/cwd/go/gcloop"}, "ok gcloop 20\n");
 }
 
 // The browser host's cases (design/0012-browser-host.md). They run on

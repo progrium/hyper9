@@ -47,6 +47,11 @@ pub fn Atomic(comptime T: type) type {
             s.raw +%= v;
             return old;
         }
+        pub fn fetchSub(s: *Self, v: T, comptime _: std.builtin.AtomicOrder) T {
+            const old = s.raw;
+            s.raw -%= v;
+            return old;
+        }
         pub fn cmpxchgStrong(s: *Self, expected: T, new: T, comptime _: std.builtin.AtomicOrder, comptime _: std.builtin.AtomicOrder) ?T {
             if (s.raw != expected) return s.raw;
             s.raw = new;

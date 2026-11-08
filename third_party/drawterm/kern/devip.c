@@ -7,6 +7,7 @@
 
 #include "devip.h"
 #include "netcheck.h"	/* h9: sandbox hooks */
+#include "hostsock.h"	/* h9: Linux sockets (design/0050-linux-net.md) */
 
 void	csclose(Chan*);
 long	csread(Chan*, void*, long, vlong);
@@ -61,6 +62,7 @@ struct Conv
 	ulong	ctime;
 	char	cerr[KNAMELEN];
 	Proto*	p;
+	int	h9opts[H9nopt];	/* h9: socket options, applied when sfd is made (src/kern/hostsock.h) */
 };
 
 struct Proto
@@ -257,8 +259,9 @@ ipinit(void)
 {
 	osipinit();
 
-	newproto("udp", S_UDP, 10);
-	newproto("tcp", S_TCP, 30);
+	/* h9: 10 and 30 were too few for a Linux program's connection pool */
+	newproto("udp", S_UDP, 1024);
+	newproto("tcp", S_TCP, 4096);
 
 	fmtinstall('I', eipfmt);
 	fmtinstall('E', eipfmt);
@@ -410,6 +413,8 @@ ipclose(Chan *c)
 		cc->lport = 0;
 		cc->rport = 0;
 		close(cc->sfd);
+		cc->sfd = -1;	/* h9: not closed twice, nor watched once closed */
+		memset(cc->h9opts, 0, sizeof cc->h9opts);
 		break;
 	}
 }
@@ -477,7 +482,7 @@ setlport(Conv *c)
 		return;
 
 	if(c->sfd == -1)
-		c->sfd = so_socket(c->p->stype, c->laddr);
+		c->sfd = h9so_socket(c->p->stype, c->laddr, c->h9opts);	/* h9: with its options */
 
 	so_bind(c->sfd, c->restricted, c->lport, c->laddr);
 }
@@ -575,10 +580,46 @@ ipwrite(Chan *ch, void *a, long n, vlong offset)
 				break;
 			}
 			if(c->sfd == -1)
-				c->sfd = so_socket(c->p->stype, c->raddr);
+				c->sfd = h9so_socket(c->p->stype, c->raddr, c->h9opts);	/* h9: with its options */
 			so_connect(c->sfd, c->raddr, c->rport);
 			setladdr(c);
 			c->state = "Established";
+			return n;
+		}
+		/*
+		 * h9: a connect that doesn't wait (Linux's O_NONBLOCK
+		 * connect): the conversation reports writable when it
+		 * completes, and SO_ERROR says how (src/kern/linuxnet.c).
+		 */
+		if(strcmp(fields[0], "nbconnect") == 0){
+			if(nf != 2)
+				error("bad args to nbconnect");
+			p = setraddrport(c, fields[1]);
+			if(p != 0)
+				error(p);
+			if(c->sfd == -1)
+				c->sfd = h9so_socket(c->p->stype, c->raddr, c->h9opts);
+			if(h9so_connect_nb(c->sfd, c->raddr, c->rport) == 0)
+				c->state = "Established";
+			else
+				c->state = "Connecting";
+			setladdr(c);
+			return n;
+		}
+		/* h9: half-close, served by the host's shutdown */
+		if(strcmp(fields[0], "shutdown") == 0){
+			if(nf != 2)
+				error("bad args to shutdown");
+			if(c->sfd == -1)
+				error("not connected");
+			h9so_shutdown(c->sfd, fields[1]);
+			return n;
+		}
+		/* h9: socket options, kept for a socket made later */
+		if(strcmp(fields[0], "sockopt") == 0){
+			if(nf != 3)
+				error("bad args to sockopt");
+			h9so_setopt(c->sfd, c->h9opts, fields[1], atoi(fields[2]));
 			return n;
 		}
 		if(strcmp(fields[0], "announce") == 0) {
@@ -589,7 +630,18 @@ ipwrite(Chan *ch, void *a, long n, vlong offset)
 				setladdrport(c, fields[1]);
 				break;
 			}
+			/* h9: port 0 (any) needs a socket too, and UDP doesn't listen */
+			if(c->sfd == -1){
+				c->sfd = h9so_socket(c->p->stype, c->laddr, c->h9opts);
+				so_bind(c->sfd, 0, 0, c->laddr);
+			}
+			if(c->p->stype == S_UDP){
+				setladdr(c);
+				c->state = "Announced";
+				return n;
+			}
 			so_listen(c->sfd);
+			setladdr(c);	/* h9: getsockname after an ephemeral port */
 			c->state = "Announced";
 			return n;
 		}
@@ -915,3 +967,45 @@ Dev ipdevtab =
 	devwstat,
 };
 
+
+/*
+ * h9: a conversation's host socket, for readiness and the Linux calls
+ * that pass flags (src/kern/linuxnet.c). -1 if c isn't a conversation's
+ * file or it has no socket yet. *udp says whether it's a datagram one.
+ */
+int
+h9_ip_sfd(Chan *c, int *udp)
+{
+	Conv *cv;
+
+	switch(TYPE(c->qid)){
+	case Qctl:
+	case Qdata:
+	case Qlisten:
+		break;
+	default:
+		return -1;
+	}
+	if(PROTO(c->qid) >= np)
+		return -1;
+	cv = proto[PROTO(c->qid)].conv[CONV(c->qid)];
+	if(cv == nil)
+		return -1;
+	if(udp != nil)
+		*udp = cv->p->stype == S_UDP;
+	return cv->sfd;
+}
+
+/*
+ * h9: writes a control message to the conversation behind any of its
+ * files, as a write to its ctl would, for the Linux socket calls.
+ */
+long
+h9_ip_ctl(Chan *c, char *msg)
+{
+	Chan t;
+
+	t = *c;
+	t.qid.path = QID(PROTO(c->qid), CONV(c->qid), Qctl);
+	return ipwrite(&t, msg, strlen(msg), 0);
+}

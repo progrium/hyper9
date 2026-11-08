@@ -307,6 +307,39 @@ h9_kern_postnote(ulong pid, char *msg, int flag)
 }
 
 /*
+ * The calling process's record, with a reference, which h9_kern_unref
+ * releases; for a note posted later from anywhere, as an interval
+ * timer's (src/linux/itimer.zig). nil if the caller isn't an h9 process.
+ */
+void*
+h9_kern_selfref(void)
+{
+	Hproc *h;
+
+	h = lookup(up);
+	if(h != nil)
+		incref(&h->ref);
+	return h;
+}
+
+/* Posts a note to the process of a h9_kern_selfref reference: 1 if queued. */
+int
+h9_kern_postnoteref(void *v, char *msg, int flag)
+{
+	Hnote *n;
+
+	if((n = mknote(msg, flag)) == nil)
+		return 0;
+	return pushnote(v, n);
+}
+
+void
+h9_kern_unref(void *v)
+{
+	putproc(v);
+}
+
+/*
  * The calling process's machine, with a reference for the caller, which
  * h9_kern_putmach releases. nil if the caller isn't an h9 process.
  */
@@ -402,6 +435,14 @@ h9_kern_postmach(void *v, int all, char *msg, int flag)
 /* For devproc.c (hproc.h). */
 
 void	(*h9_procstatus)(void*, char*, int, ulong*);
+void	(*h9_procthreads)(void*, ulong*, ulong*);
+
+/*
+ * Set by the Zig side: whether the process with this aux wants a
+ * "linux: signal 17" note (SIGCHLD) when a child leaves a wait record.
+ * Called with the parent's nlk held, and only while its aux is set.
+ */
+int	(*h9_wantchld)(void*);
 int	(*h9_procsegment)(void*, char*, int);
 void	(*h9_stopkick)(void*);
 long	(*h9_procdebug)(void*, int, int, uvlong, void*, long);
@@ -962,6 +1003,24 @@ void
 h9_fgrpclose(Fgrp *f)
 {
 	fgrpclose(f);
+}
+
+/*
+ * For a kproc that a guest process starts lazily, such as hostpoll
+ * (hostsock-*.c): drops the fd table and namespace that kproc() shares
+ * with that process. Kept, they outlived it, so the first process to poll
+ * a host socket never had its sockets closed at exit and their peers
+ * never saw EOF.
+ */
+void
+h9_kprocdetach(void)
+{
+	fgrpclose(up->fgrp);
+	up->fgrp = nil;
+	if(up->pgrp != nil){
+		closepgrp(up->pgrp);
+		up->pgrp = nil;
+	}
 }
 
 /* Code using RFNOMNT expects to block all but these devices. */
@@ -1544,6 +1603,8 @@ h9_kern_exit(void)
 		w = mallocz(sizeof *w, 1);
 		if(w != nil){
 			w->pid = h->pid;
+			w->time[0] = h->cputime[0];
+			w->time[1] = h->cputime[1];
 			w->time[2] = ticks() - h->start;
 			if(h->exitstr[0])
 				snprint(w->msg, sizeof w->msg, "%s %lud: %s", h->text, h->pid, h->exitstr);
@@ -1562,6 +1623,17 @@ h9_kern_exit(void)
 		unlock(&ph->exl);
 		free(w);
 		h->parent = nil;
+		/* A Linux parent gets SIGCHLD (design/0018-linux-personality.md). */
+		if(h9_wantchld != nil){
+			int want;
+			Hnote *n;
+
+			lock(&ph->nlk);
+			want = ph->aux != nil && h9_wantchld(ph->aux);
+			unlock(&ph->nlk);
+			if(want && (n = mknote("linux: signal 17", NUser)) != nil)
+				pushnote(ph, n);
+		}
 		putproc(ph);
 	}
 
