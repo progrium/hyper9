@@ -68,7 +68,7 @@ it to kick them; an embedder must leave it to h9.
 
 On x86\_64 Linux hosts without a usable KVM (containers, CI, and cloud VMs
 without nested virtualization), h9 runs amd64 binaries on the native backend
-([native-backend](design/native-backend.md)): guest code runs directly on the
+([native-backend](design/0095-native-backend.md)): guest code runs directly on the
 host CPU in a small stub process per address space (with a thread per thread
 of a Linux program), and the kernel turns every guest syscall into a signal the
 stub hands to h9 (Syscall User Dispatch, Linux
@@ -95,7 +95,7 @@ clean tree; it merges upstream into the subtree and keeps our local changes.
 
 ```sh
 zig build          # builds and ad-hoc signs zig-out/bin/h9 with h9.entitlements
-zig build test     # unit tests, and the backend tests on every backend built in
+zig build test     # unit tests, and the backend tests on every backend built in (not the integration cases)
 zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
@@ -114,7 +114,7 @@ The demos and the integration tests use the root tree from
 `zig build mkroot`, or `-Droot=DIR`. Without a tree, the integration tests
 skip and only the hello demos run. Each case is tagged with the proposal it
 proves (`test "echo [baseline]"`); cases for a proposal that isn't implemented
-yet skip in `zig build integration` and `zig build test` unless `-Dpending` is
+yet skip in `zig build integration` unless `-Dpending` is
 given, and `zig build proposal -Dp=<slug or id>` runs one proposal's cases
 whatever its status.
 Interactive cases run h9 on a terminal the test creates
@@ -517,10 +517,10 @@ links Plan 9 a.out.
 The Go programs in [tests/fixtures/go](tests/fixtures/go) are built by `zig
 build go-fixtures` into `zig-out/fixtures/go`, as `GOOS=plan9 GOARCH=amd64`
 with `GOTOOLCHAIN=go$GO_VERSION` from [scripts/pins.sh](scripts/pins.sh), so
-any installed Go fetches the same toolchain. `zig build test` and `zig build
-integration` build them when `go` is on `PATH` and h9 is built with
-`-Demu=unicorn` or the cases run on the native backend, and their cases run
-on native when it's in the list, else on the emulator; without Go they skip.
+any installed Go fetches the same toolchain. `zig build integration` builds
+them when `go` is on `PATH` and h9 is built with `-Demu=unicorn` or the cases
+run on the native backend, and their cases run on native when it's in the
+list, else on the emulator; without Go they skip.
 They don't need the root tree. `zig build go-stdtest -Demu=unicorn` runs Go's
 own tests for `time`, `syscall`, `os`, and `runtime` on the emulator and prints
 pass, skip, and fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh),

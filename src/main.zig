@@ -443,7 +443,9 @@ const RootError = error{ NotFound, NotDirOrSocket, BadDial, OutOfMemory };
 /// 9front /$objtype/bin.
 fn linuxTree(arena: std.mem.Allocator, io: std.Io, arg: []const u8) ?[]const u8 {
     const cwd = std.Io.Dir.cwd();
-    const real = cwd.realPathFileAlloc(io, arg, arena) catch return null;
+    // realPath, as resolveRoot does: WASI has no realpath, and the web
+    // host's root (its archive, at /) can be a Linux tree too.
+    const real = realPath(io, arena, arg) catch return null;
     var dir = cwd.openDir(io, real, .{ .iterate = true }) catch return null;
     defer dir.close(io);
     for ([_][]const u8{ "rc/bin", "arm64/bin", "amd64/bin", "386/bin" }) |p| {

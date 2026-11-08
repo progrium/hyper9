@@ -1,7 +1,7 @@
 //! The ELF loader for the Linux personality (design/0018-linux-personality.md,
 //! "The ELF loader"): static and dynamic ELF64 executables of the
-//! machine's architecture, the Linux initial stack and auxv, and a minimal
-//! vDSO on arm64.
+//! machine's architecture, or ELF32 ones for i386 (design/linux-i386.md),
+//! the Linux initial stack and auxv, and a minimal vDSO on arm64.
 //!
 //! `check` validates an image, and the interpreter's, before exec tears
 //! down anything, so a failed execve returns to its caller.
@@ -27,6 +27,7 @@ const PT_PHDR = 6;
 const PT_GNU_STACK = 0x6474e551;
 const ET_EXEC = 2;
 const ET_DYN = 3;
+const EM_386 = 3;
 const EM_X86_64 = 62;
 const EM_AARCH64 = 183;
 
@@ -58,17 +59,50 @@ pub const Phdr = extern struct {
     @"align": u64,
 };
 
+/// ELF32's headers, which `check` widens to the ELF64 ones.
+const Ehdr32 = extern struct {
+    ident: [16]u8,
+    type: u16,
+    machine: u16,
+    version: u32,
+    entry: u32,
+    phoff: u32,
+    shoff: u32,
+    flags: u32,
+    ehsize: u16,
+    phentsize: u16,
+    phnum: u16,
+    shentsize: u16,
+    shnum: u16,
+    shstrndx: u16,
+};
+
+const Phdr32 = extern struct {
+    type: u32,
+    offset: u32,
+    vaddr: u32,
+    paddr: u32,
+    filesz: u32,
+    memsz: u32,
+    flags: u32,
+    @"align": u32,
+};
+
+/// The most program headers an image may have.
+const max_phdrs = 128;
+
 pub fn isElf(bytes: []const u8) bool {
     return bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "\x7fELF");
 }
 
 /// The architecture an ELF binary is for, or null if it isn't one h9
-/// runs (design/0018: arm64 and amd64).
+/// runs (design/0018: arm64 and amd64; design/linux-i386.md: i386).
 pub fn machineArch(bytes: []const u8) ?vmm.Arch {
-    if (!isElf(bytes) or bytes.len < @sizeOf(Ehdr)) return null;
+    if (!isElf(bytes) or bytes.len < @sizeOf(Ehdr32)) return null;
     return switch (std.mem.readInt(u16, bytes[18..20], .little)) {
-        EM_AARCH64 => .arm64,
-        EM_X86_64 => .amd64,
+        EM_AARCH64 => if (bytes[4] == 2) .arm64 else null,
+        EM_X86_64 => if (bytes[4] == 2) .amd64 else null,
+        EM_386 => if (bytes[4] == 1) .i386 else null,
         else => null,
     };
 }
@@ -76,42 +110,83 @@ pub fn machineArch(bytes: []const u8) ?vmm.Arch {
 /// A validated image: its header and program headers, copied out.
 pub const Image = struct {
     bytes: []const u8,
+    /// The header, widened to ELF64's for an ELF32 image.
     ehdr: Ehdr,
-    phdrs: []align(1) const Phdr,
+    /// The program headers, widened too; `phdrs` gives them.
+    phbuf: [max_phdrs]Phdr = undefined,
     /// PT_INTERP's path, without the NUL.
     interp: ?[]const u8 = null,
     /// The span of its PT_LOAD segments, page-aligned, before the bias.
     lo: u64,
     hi: u64,
     exec_stack: bool = false,
+
+    pub fn phdrs(img: *const Image) []const Phdr {
+        return img.phbuf[0..img.ehdr.phnum];
+    }
 };
 
-/// Validates an ELF64 executable or shared object for `arch`.
+/// The ELF header in ELF64's form, from either class.
+fn readEhdr(bytes: []const u8, class64: bool) error{BadElf}!Ehdr {
+    if (class64) {
+        if (bytes.len < @sizeOf(Ehdr)) return error.BadElf;
+        return std.mem.bytesToValue(Ehdr, bytes[0..@sizeOf(Ehdr)]);
+    }
+    if (bytes.len < @sizeOf(Ehdr32)) return error.BadElf;
+    const e = std.mem.bytesToValue(Ehdr32, bytes[0..@sizeOf(Ehdr32)]);
+    return .{
+        .ident = e.ident,
+        .type = e.type,
+        .machine = e.machine,
+        .version = e.version,
+        .entry = e.entry,
+        .phoff = e.phoff,
+        .shoff = e.shoff,
+        .flags = e.flags,
+        .ehsize = e.ehsize,
+        .phentsize = e.phentsize,
+        .phnum = e.phnum,
+        .shentsize = e.shentsize,
+        .shnum = e.shnum,
+        .shstrndx = e.shstrndx,
+    };
+}
+
+fn readPhdr(b: []const u8, class64: bool) Phdr {
+    if (class64) return std.mem.bytesToValue(Phdr, b[0..@sizeOf(Phdr)]);
+    const p = std.mem.bytesToValue(Phdr32, b[0..@sizeOf(Phdr32)]);
+    return .{ .type = p.type, .flags = p.flags, .offset = p.offset, .vaddr = p.vaddr, .paddr = p.paddr, .filesz = p.filesz, .memsz = p.memsz, .@"align" = p.@"align" };
+}
+
+/// Validates an executable or shared object for `arch`: ELF64 for arm64
+/// and amd64, ELF32 for i386.
 pub fn check(bytes: []const u8, arch: vmm.Arch) Error!Image {
     if (!isElf(bytes)) return error.NotElf;
-    if (bytes.len < @sizeOf(Ehdr)) return error.BadElf;
-    const eh = std.mem.bytesToValue(Ehdr, bytes[0..@sizeOf(Ehdr)]);
-    if (eh.ident[4] != 2 or eh.ident[5] != 1) return error.BadElf; // ELFCLASS64, little-endian
+    const class64 = arch != .i386;
+    if (bytes.len < 6 or bytes[4] != @as(u8, if (class64) 2 else 1) or bytes[5] != 1) return error.BadElf; // ELFCLASS64 or 32, little-endian
+    const eh = try readEhdr(bytes, class64);
     const machine: u16 = switch (arch) {
         .arm64 => EM_AARCH64,
         .amd64 => EM_X86_64,
-        .i386 => return error.BadElf,
+        .i386 => EM_386,
     };
     if (eh.machine != machine) return error.BadElf;
     if (eh.type != ET_EXEC and eh.type != ET_DYN) return error.BadElf;
-    if (eh.phentsize != @sizeOf(Phdr) or eh.phnum == 0 or eh.phnum > 128) return error.BadElf;
-    const ph_end = std.math.add(u64, eh.phoff, @as(u64, eh.phnum) * @sizeOf(Phdr)) catch return error.BadElf;
+    const phent: u64 = if (class64) @sizeOf(Phdr) else @sizeOf(Phdr32);
+    if (eh.phentsize != phent or eh.phnum == 0 or eh.phnum > max_phdrs) return error.BadElf;
+    const ph_end = std.math.add(u64, eh.phoff, @as(u64, eh.phnum) * phent) catch return error.BadElf;
     if (ph_end > bytes.len) return error.BadElf;
-    const phdrs = std.mem.bytesAsSlice(Phdr, bytes[@intCast(eh.phoff)..@intCast(ph_end)]);
-    var img: Image = .{ .bytes = bytes, .ehdr = eh, .phdrs = phdrs, .lo = std.math.maxInt(u64), .hi = 0 };
-    for (phdrs) |ph| switch (ph.type) {
+    const lay: mm.Layout = .of(arch);
+    var img: Image = .{ .bytes = bytes, .ehdr = eh, .lo = std.math.maxInt(u64), .hi = 0 };
+    for (img.phbuf[0..eh.phnum], 0..) |*ph, i| ph.* = readPhdr(bytes[@intCast(eh.phoff + i * phent)..], class64);
+    for (img.phdrs()) |ph| switch (ph.type) {
         PT_LOAD => {
             if (ph.filesz > ph.memsz) return error.BadElf;
             const fend = std.math.add(u64, ph.offset, ph.filesz) catch return error.BadElf;
             if (fend > bytes.len) return error.BadElf;
             if (ph.vaddr % page != ph.offset % page) return error.BadElf;
             const vend = std.math.add(u64, ph.vaddr, ph.memsz) catch return error.BadElf;
-            if (vend > mm.user_top) return error.BadElf;
+            if (vend > lay.user_top) return error.BadElf;
             img.lo = @min(img.lo, ph.vaddr - ph.vaddr % page);
             img.hi = @max(img.hi, std.mem.alignForward(u64, vend, page));
         },
@@ -127,7 +202,7 @@ pub fn check(bytes: []const u8, arch: vmm.Arch) Error!Image {
     };
     if (img.hi == 0) return error.BadElf;
     if (eh.type == ET_EXEC and img.lo < mm.min_addr) return error.BadElf;
-    if (img.hi - img.lo > mm.mmap_base / 2) return error.BadElf;
+    if (img.hi - img.lo > lay.mmap_base / 2) return error.BadElf;
     return img;
 }
 
@@ -151,7 +226,8 @@ pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8) Error!Lo
     };
     var phdr: u64 = 0;
     var prev_end: u64 = 0;
-    for (img.phdrs) |ph| {
+    const phsize = @as(u64, img.ehdr.phnum) * img.ehdr.phentsize;
+    for (img.phdrs()) |ph| {
         if (ph.type == PT_PHDR) phdr = bias + ph.vaddr;
         if (ph.type != PT_LOAD or ph.memsz == 0) continue;
         const prot: mm.Prot = .{ .read = ph.flags & 4 != 0, .write = ph.flags & 2 != 0, .exec = ph.flags & 1 != 0 };
@@ -177,7 +253,7 @@ pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8) Error!Lo
         if (ph.filesz > 0) try m.hostWrite(bias + ph.vaddr, img.bytes[@intCast(ph.offset)..][0..@intCast(ph.filesz)]);
         // The file's tail of the last page (the start of the bss) may
         // hold bytes past filesz in a page that's zero already.
-        if (phdr == 0 and ph.offset <= img.ehdr.phoff and img.ehdr.phoff + @as(u64, img.ehdr.phnum) * @sizeOf(Phdr) <= ph.offset + ph.filesz) {
+        if (phdr == 0 and ph.offset <= img.ehdr.phoff and img.ehdr.phoff + phsize <= ph.offset + ph.filesz) {
             phdr = bias + ph.vaddr + (img.ehdr.phoff - ph.offset);
         }
     }
@@ -209,6 +285,8 @@ const AT_SYSINFO_EHDR = 33;
 pub const StackInfo = struct {
     exe: Loaded,
     phnum: u64,
+    /// The size of a program header: AT_PHENT.
+    phent: u64,
     interp_base: u64,
     vdso: u64,
     hwcap: u64,
@@ -219,21 +297,24 @@ pub const StackInfo = struct {
 };
 
 /// Builds the initial stack at the top of the stack VMA and returns SP.
+/// Its words are the architecture's: 8 bytes, or 4 on i386.
 pub fn buildStack(m: *mm.Mm, argv: []const []const u8, envp: []const []const u8, info: StackInfo) Error!u64 {
     const platform = switch (info.arch) {
         .arm64 => "aarch64",
-        else => "x86_64",
+        .amd64 => "x86_64",
+        .i386 => "i686",
     };
+    const ws: usize = @intCast(info.arch.wordSize());
     // Strings, from the top down: execfn, envp, argv, platform, random.
     var size: u64 = info.execfn.len + 1 + platform.len + 1 + 16;
     for (argv) |a| size += a.len + 1;
     for (envp) |e| size += e.len + 1;
     const nauxv = 20;
     const words = 1 + argv.len + 1 + envp.len + 1 + 2 * nauxv;
-    const total = std.mem.alignForward(u64, size, 16) + words * 8 + 16;
-    if (total > mm.stack_size / 4) return error.NoSpace;
+    const total = std.mem.alignForward(u64, size, 16) + words * ws + 16;
+    if (total > m.lay.stack_size / 4) return error.NoSpace;
 
-    const top = mm.stack_top;
+    const top = m.lay.stack_top;
     var buf = try m.gpa.alloc(u8, @intCast(std.mem.alignForward(u64, total, page)));
     defer m.gpa.free(buf);
     @memset(buf, 0);
@@ -278,7 +359,7 @@ pub fn buildStack(m: *mm.Mm, argv: []const []const u8, envp: []const []const u8,
         }
     };
     av.add(&auxv, &n, AT_PHDR, info.exe.phdr);
-    av.add(&auxv, &n, AT_PHENT, @sizeOf(Phdr));
+    av.add(&auxv, &n, AT_PHENT, info.phent);
     av.add(&auxv, &n, AT_PHNUM, info.phnum);
     av.add(&auxv, &n, AT_PAGESZ, page);
     av.add(&auxv, &n, AT_BASE, info.interp_base);
@@ -299,22 +380,22 @@ pub fn buildStack(m: *mm.Mm, argv: []const []const u8, envp: []const []const u8,
     av.add(&auxv, &n, AT_NULL, 0);
 
     const nwords = 1 + argv.len + 1 + envp.len + 1 + n;
-    at -= nwords * 8;
+    at -= nwords * ws;
     at &= ~@as(usize, 15);
     const sp_off = at;
     var w = sp_off;
     const wr = struct {
-        fn word(b: []u8, pos: *usize, v: u64) void {
-            std.mem.writeInt(u64, b[pos.*..][0..8], v, .little);
-            pos.* += 8;
+        fn word(b: []u8, pos: *usize, size_: usize, v: u64) void {
+            if (size_ == 4) std.mem.writeInt(u32, b[pos.*..][0..4], @truncate(v), .little) else std.mem.writeInt(u64, b[pos.*..][0..8], v, .little);
+            pos.* += size_;
         }
     };
-    wr.word(buf, &w, argv.len);
-    for (arg_ptrs) |p| wr.word(buf, &w, p);
-    wr.word(buf, &w, 0);
-    for (env_ptrs) |p| wr.word(buf, &w, p);
-    wr.word(buf, &w, 0);
-    for (auxv[0..n]) |v| wr.word(buf, &w, v);
+    wr.word(buf, &w, ws, argv.len);
+    for (arg_ptrs) |p| wr.word(buf, &w, ws, p);
+    wr.word(buf, &w, ws, 0);
+    for (env_ptrs) |p| wr.word(buf, &w, ws, p);
+    wr.word(buf, &w, ws, 0);
+    for (auxv[0..n]) |v| wr.word(buf, &w, ws, v);
 
     try m.hostWrite(base, buf);
     return base + sp_off;

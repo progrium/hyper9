@@ -388,6 +388,9 @@ pub const Process = struct {
     trace_lock: ?*std.atomic.Mutex = null,
     /// Set when the last call returned -EINTR, with what restarts it.
     restart: ?Restart = null,
+    /// The current call's timespecs are 32-bit: i386's calls other than
+    /// the *_time64 ones (design/linux-i386.md).
+    time32: bool = false,
     name_buf: [4096]u8 = undefined,
     name2_buf: [4096]u8 = undefined,
     msg: [kern.ERRMAX + 32]u8 = undefined,
@@ -522,13 +525,14 @@ pub const Process = struct {
     /// entry being taken or released, if any.
     fn walkRobust(p: *Process) Err!void {
         const head = p.robust_list;
-        const off: i64 = @bitCast(try p.readU64(head + 8));
-        const pending = try p.readU64(head + 16);
-        var entry = try p.readU64(head);
+        const w = p.longSize();
+        const off: i64 = try p.readLong(head + w);
+        const pending = try p.readPtr(head + 2 * w);
+        var entry = try p.readPtr(head);
         var n: usize = 0;
         while (entry != head and entry != 0 and n < 2048) : (n += 1) {
             // The next one first: waking a waiter may free this one.
-            const next = try p.readU64(entry);
+            const next = try p.readPtr(entry);
             if (entry != pending) p.robustDied(entry +% @as(u64, @bitCast(off)));
             entry = next;
         }
@@ -637,6 +641,42 @@ pub const Process = struct {
         try p.writeMem(va, &b);
     }
 
+    pub fn readU32(p: *Process, va: u64) Err!u32 {
+        var b: [4]u8 = undefined;
+        try p.readMem(va, &b);
+        return std.mem.readInt(u32, &b, .little);
+    }
+
+    /// Whether the process's longs and pointers are 32-bit (i386).
+    pub fn is32(p: *const Process) bool {
+        return p.arch == .i386;
+    }
+
+    /// Bytes in a pointer or a long.
+    pub fn longSize(p: *const Process) usize {
+        return if (p.is32()) 4 else 8;
+    }
+
+    /// A pointer or unsigned long.
+    pub fn readPtr(p: *Process, va: u64) Err!u64 {
+        return if (p.is32()) @as(u64, try p.readU32(va)) else try p.readU64(va);
+    }
+
+    pub fn writePtr(p: *Process, va: u64, v: u64) Err!void {
+        if (p.is32()) try p.writeU32(va, @truncate(v)) else try p.writeU64(va, v);
+    }
+
+    /// A signed long.
+    pub fn readLong(p: *Process, va: u64) Err!i64 {
+        return if (p.is32()) @as(i32, @bitCast(try p.readU32(va))) else @bitCast(try p.readU64(va));
+    }
+
+    /// The `i`th iovec of the array at `va`: {base, len}.
+    pub fn iovec(p: *Process, va: u64, i: u64) Err![2]u64 {
+        const w = p.longSize();
+        return .{ try p.readPtr(va + 2 * w * i), try p.readPtr(va + 2 * w * i + w) };
+    }
+
     /// A NUL-terminated string at `va`, into `buf`.
     pub fn string(p: *Process, va: u64, buf: []u8) Err![:0]u8 {
         if (va == 0) return error.Fault;
@@ -700,7 +740,9 @@ const Call = struct {
         return switch (u.*) {
             .arm64 => |r| .{ .nr = r.r[8], .a = r.r[0..6].* },
             .amd64 => |r| .{ .nr = r.ax, .a = .{ r.di, r.si, r.dx, r.r10, r.r8, r.r9 } },
-            .i386 => .{ .nr = std.math.maxInt(u64), .a = @splat(0) },
+            // int 0x80: the number in eax, arguments in ebx, ecx, edx, esi,
+            // edi and ebp.
+            .i386 => |r| .{ .nr = r.ax, .a = .{ r.bx, r.cx, r.dx, r.si, r.di, r.bp } },
         };
     }
     fn int(c: Call, i: usize) i32 {
@@ -715,7 +757,7 @@ pub fn setReturn(u: *vmm.Ureg, v: u64) void {
     switch (u.*) {
         .arm64 => |*r| r.r[0] = v,
         .amd64 => |*r| r.ax = v,
-        .i386 => {},
+        .i386 => |*r| r.ax = @truncate(v),
     }
 }
 
@@ -723,18 +765,23 @@ pub fn lookup(arch: vmm.Arch, number: u64) ?Sys {
     return switch (arch) {
         .arm64 => nr.lookup(.arm64, number),
         .amd64 => nr.lookup(.amd64, number),
-        .i386 => null,
+        .i386 => nr.lookup(.i386, number),
     };
 }
 
 pub fn dispatch(p: *Process, u: *const vmm.Ureg) Outcome {
-    const c = Call.of(u);
+    var c = Call.of(u);
     p.restart = null;
-    const s = lookup(p.arch, c.nr) orelse {
+    var s = lookup(p.arch, c.nr) orelse {
         p.traceLine("syscall {d} = -ENOSYS (unknown)", .{c.nr});
         return ret(-E.NOSYS);
     };
-    const out = serve(p, s, c, u) catch |e| ret(errnoOf(e));
+    var direct: ?Outcome = null;
+    if (p.is32()) {
+        p.time32 = true;
+        direct = ia32.serve(p, &s, &c) catch |e| ret(errnoOf(e));
+    }
+    const out = direct orelse (serve(p, s, c, u) catch |e| ret(errnoOf(e)));
     switch (out) {
         .ret => |r| {
             const v: i64 = @bitCast(r);
@@ -767,7 +814,7 @@ fn memCall(p: *Process, s: Sys, c: Call) Err!Outcome {
             const a = c.a[0];
             if (a % page != 0 or c.a[1] == 0) return ret(-E.INVAL);
             const len = std.mem.alignForward(u64, c.a[1], page);
-            if (a >= mm.user_top or len > mm.user_top - a) return ret(-E.INVAL);
+            if (a >= p.mm.lay.user_top or len > p.mm.lay.user_top - a) return ret(-E.INVAL);
             p.mm.unmap(a, a + len) catch return ret(-E.NOMEM);
             return ret(0);
         },
@@ -867,23 +914,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .writev => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], -1, .write)),
         .preadv => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .read)),
         .pwritev => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write)),
-        .sendfile => return ret(try sendfile(p, c.int(0), c.int(1), c.a[2], c.a[3])),
-        .lseek => {
-            const fd = c.int(0);
-            if (fd < 0) return ret(-E.BADF);
-            const whence = c.int(2);
-            if (whence < 0 or whence > 2) return ret(-E.INVAL);
-            const r = kern.seek(@intCast(fd), @bitCast(c.a[1]), whence) catch return ret(kerr());
-            p.g.lockSpin();
-            defer p.g.lock.unlock();
-            if (p.g.dirbufs.get(fd)) |b| if (r == 0) {
-                b.len = 0;
-                b.off = 0;
-                b.eof = false;
-                b.seen.clearRetainingCapacity();
-            };
-            return ret(r);
-        },
+        .sendfile => return ret(try sendfile(p, c.int(0), c.int(1), c.a[2], c.a[3], p.is32())),
+        .lseek => return ret(lseek(p, c.int(0), @bitCast(c.a[1]), c.int(2))),
         .dup => {
             const fd = c.int(0);
             if (fd < 0) return ret(-E.BADF);
@@ -1028,8 +1060,9 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             // in the opposite order (CLONE_BACKWARDS on arm64).
             const flags = c.a[0];
             if (cloneCheck(flags)) |e| return ret(e);
-            const tls, const ctid = if (p.arch == .arm64) .{ c.a[3], c.a[4] } else .{ c.a[4], c.a[3] };
-            return .{ .clone = .{ .flags = flags, .stack = c.a[1], .ptid = c.a[2], .ctid = ctid, .tls = tls } };
+            // i386 has arm64's order, and its tls is a struct user_desc.
+            const tls, const ctid = if (p.arch != .amd64) .{ c.a[3], c.a[4] } else .{ c.a[4], c.a[3] };
+            return .{ .clone = .{ .flags = flags, .stack = c.a[1], .ptid = c.a[2], .ctid = ctid, .tls = try cloneTls(p, flags, tls) } };
         },
         .clone3 => {
             // struct clone_args: flags, pidfd, child_tid, parent_tid,
@@ -1047,7 +1080,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             const stack = w(&b, 5);
             const size = w(&b, 6);
             if ((stack == 0) != (size == 0)) return ret(-E.INVAL);
-            return .{ .clone = .{ .flags = flags, .stack = if (stack != 0) stack + size else 0, .ptid = w(&b, 3), .ctid = w(&b, 2), .tls = w(&b, 7) } };
+            return .{ .clone = .{ .flags = flags, .stack = if (stack != 0) stack + size else 0, .ptid = w(&b, 3), .ctid = w(&b, 2), .tls = try cloneTls(p, flags, w(&b, 7)) } };
         },
         .execve => return execve(p, AT_FDCWD, c.a[0], c.a[1], c.a[2], 0),
         .execveat => return execve(p, c.int(0), c.a[1], c.a[2], c.a[3], c.uint(4)),
@@ -1133,16 +1166,15 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .gettimeofday => {
             if (c.a[0] != 0) {
                 const ns: u64 = @intCast(kern.wallNs());
-                var b: [16]u8 = undefined;
-                std.mem.writeInt(u64, b[0..8], ns / std.time.ns_per_s, .little);
-                std.mem.writeInt(u64, b[8..16], ns % std.time.ns_per_s / 1000, .little);
-                try p.writeMem(c.a[0], &b);
+                const w = p.longSize();
+                try p.writePtr(c.a[0], ns / std.time.ns_per_s);
+                try p.writePtr(c.a[0] + w, ns % std.time.ns_per_s / 1000);
             }
             return ret(0);
         },
         .time => {
             const t: u64 = @intCast(@divTrunc(kern.wallNs(), std.time.ns_per_s));
-            if (c.a[0] != 0) try p.writeU64(c.a[0], t);
+            if (c.a[0] != 0) try p.writePtr(c.a[0], t);
             return ret(@intCast(t));
         },
         .nanosleep => return ret(try nanosleep(p, c.a[0], c.a[1], false)),
@@ -1153,7 +1185,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         },
         .times => {
             const ticks: u64 = @intCast(@divTrunc(kern.monoNs(), 10 * std.time.ns_per_ms));
-            if (c.a[0] != 0) try p.writeMem(c.a[0], &@as([32]u8, @splat(0)));
+            // struct tms: four clock_t longs.
+            if (c.a[0] != 0) try p.writeMem(c.a[0], (&@as([32]u8, @splat(0)))[0 .. 4 * p.longSize()]);
             return ret(@intCast(ticks));
         },
 
@@ -1178,6 +1211,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             return ret(@intCast(n));
         },
         .sysinfo => {
+            if (p.is32()) return ret(try ia32.sysinfo(p, c.a[0]));
             var b: [112]u8 = @splat(0);
             const up_s: u64 = @intCast(@divTrunc(kern.monoNs(), std.time.ns_per_s));
             std.mem.writeInt(u64, b[0..8], up_s, .little);
@@ -1235,7 +1269,15 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             try p.writeU64(c.a[2], mask);
             return ret(8);
         },
-        .sched_setaffinity, .sched_yield, .setpriority, .sched_setscheduler, .sched_setparam => return ret(0),
+        .sched_setaffinity, .setpriority, .sched_setscheduler, .sched_setparam => return ret(0),
+        // The kernel's sleep(0), as 9front's: the host's sched_yield, or
+        // on the web host, where every vCPU is a coroutine on one thread,
+        // a coroutine switch. Without one, a thread spinning on
+        // sched_yield there never lets another run.
+        .sched_yield => {
+            kern.sleep(0) catch {};
+            return ret(0);
+        },
         .getpriority => return ret(20),
         .sched_getscheduler => return ret(0),
         .getcpu => {
@@ -1246,14 +1288,15 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .membarrier => return ret(if (c.int(0) == 0) 0 else -E.INVAL),
         .rseq => return ret(-E.NOSYS),
         .set_robust_list => {
-            if (c.a[1] != 24) return ret(-E.INVAL);
+            // struct robust_list_head: three longs.
+            if (c.a[1] != 3 * p.longSize()) return ret(-E.INVAL);
             p.robust_list = c.a[0];
             return ret(0);
         },
         .get_robust_list => {
             if (c.int(0) != 0 and c.uint(0) != p.pid) return ret(-E.PERM);
-            try p.writeU64(c.a[1], p.robust_list);
-            try p.writeU64(c.a[2], 24);
+            try p.writePtr(c.a[1], p.robust_list);
+            try p.writePtr(c.a[2], 3 * p.longSize());
             return ret(0);
         },
         .futex => return ret(try futex(p, c.a[0], c.uint(1), c.uint(2), c.a[3], c.a[4], c.uint(5))),
@@ -1288,6 +1331,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .recvfrom => return ret(try recvCall(p, c.int(0), c.a[1], c.a[2], c.uint(3), c.a[4], c.a[5])),
         .sendmsg => return ret(try sendmsg(p, c.int(0), c.a[1], c.uint(2))),
         .recvmsg => return ret(try recvmsg(p, c.int(0), c.a[1], c.uint(2))),
+        .sendmmsg => return ret(try sendmmsg(p, c.int(0), c.a[1], c.uint(2), c.uint(3))),
+        .recvmmsg => return ret(try recvmmsg(p, c.int(0), c.a[1], c.uint(2), c.uint(3))),
         .signalfd => return ret(try signalfd(p, c.int(0), c.a[1], c.a[2], 0)),
         .signalfd4 => return ret(try signalfd(p, c.int(0), c.a[1], c.a[2], c.uint(3))),
         .eventfd => return ret(try eventfd(p, c.uint(0), 0)),
@@ -1300,6 +1345,338 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         else => return ret(-E.NOSYS),
     }
 }
+
+fn lseek(p: *Process, fd: i32, off: i64, whence: i32) i64 {
+    if (fd < 0) return -E.BADF;
+    if (whence < 0 or whence > 2) return -E.INVAL;
+    const r = kern.seek(@intCast(fd), off, whence) catch return kerr();
+    p.g.lockSpin();
+    defer p.g.lock.unlock();
+    if (p.g.dirbufs.get(fd)) |b| if (r == 0) {
+        b.len = 0;
+        b.off = 0;
+        b.eof = false;
+        b.seen.clearRetainingCapacity();
+    };
+    return r;
+}
+
+/// i386's calls (design/linux-i386.md). Most are the generic calls with
+/// 32-bit longs and pointers, which the helpers lay out by `Process.is32`;
+/// these are the ones whose numbering or arguments differ.
+const ia32 = struct {
+    /// Serves one of i386's own calls, or rewrites the call in place into
+    /// the generic form `serve` takes and returns null: a *_time64 call as
+    /// its generic name with 64-bit timespecs, and 64-bit arguments that
+    /// arrive split over two registers, low half first, joined.
+    fn serve(p: *Process, s: *Sys, c: *Call) Err!?Outcome {
+        const a = &c.a;
+        switch (s.*) {
+            .clock_gettime64, .clock_settime64, .clock_adjtime64, .clock_getres_time64, .clock_nanosleep_time64, .timer_gettime64, .timer_settime64, .timerfd_gettime64, .timerfd_settime64, .utimensat_time64, .pselect6_time64, .ppoll_time64, .io_pgetevents_time64, .recvmmsg_time64, .mq_timedsend_time64, .mq_timedreceive_time64, .semtimedop_time64, .rt_sigtimedwait_time64, .futex_time64, .sched_rr_get_interval_time64 => {
+                p.time32 = false;
+                s.* = time64Generic(s.*);
+            },
+            .pread64, .pwrite64, .preadv, .pwritev => a[3] = pair(a[3], a[4]),
+            .truncate64, .ftruncate64 => {
+                s.* = if (s.* == .truncate64) .truncate else .ftruncate;
+                a[1] = pair(a[1], a[2]);
+            },
+            .fallocate => {
+                a[2] = pair(a[2], a[3]);
+                a[3] = pair(a[4], a[5]);
+            },
+            .fadvise64_64 => s.* = .fadvise64,
+            .lseek => a[1] = signExtend(a[1]),
+            ._llseek => {
+                const r = lseek(p, c.int(0), @bitCast(pair(a[2], a[1])), c.int(4));
+                if (r < 0) return ret(r);
+                try p.writeU64(a[3], @bitCast(r));
+                return ret(0);
+            },
+            .mmap2 => {
+                s.* = .mmap;
+                a[5] *= page;
+            },
+            // struct mmap_arg_struct: the six arguments, in memory.
+            .old_mmap => {
+                var w: [6]u32 = undefined;
+                try p.readMem(a[0], std.mem.sliceAsBytes(&w));
+                for (0..6) |i| a[i] = w[i];
+                s.* = .mmap;
+            },
+            // struct sel_arg_struct: the five arguments, in memory.
+            .old_select => {
+                var w: [5]u32 = undefined;
+                try p.readMem(a[0], std.mem.sliceAsBytes(&w));
+                for (0..5) |i| a[i] = w[i];
+                s.* = .select;
+            },
+            .fstat64 => return ret(try statFd(p, c.int(0), a[1], .stat64)),
+            .stat64 => return ret(try statAt(p, AT_FDCWD, a[0], a[1], 0, .stat64)),
+            .lstat64 => return ret(try statAt(p, AT_FDCWD, a[0], a[1], AT_SYMLINK_NOFOLLOW, .stat64)),
+            .fstatat64 => return ret(try statAt(p, c.int(0), a[1], a[2], c.uint(3), .stat64)),
+            .oldfstat32 => return ret(try statFd(p, c.int(0), a[1], .old32)),
+            .oldstat32 => return ret(try statAt(p, AT_FDCWD, a[0], a[1], 0, .old32)),
+            .oldlstat32 => return ret(try statAt(p, AT_FDCWD, a[0], a[1], AT_SYMLINK_NOFOLLOW, .old32)),
+            .statfs64, .fstatfs64 => {
+                if (s.* == .statfs64) _ = try p.string(a[0], &p.name_buf) else _ = kc.fdInfo(c.int(0)) catch return ret(-E.BADF);
+                if (a[1] < 84) return ret(-E.INVAL);
+                try p.writeMem(a[2], &statfs(true));
+                return ret(0);
+            },
+            .statfs32, .fstatfs32 => {
+                if (s.* == .statfs32) _ = try p.string(a[0], &p.name_buf) else _ = kc.fdInfo(c.int(0)) catch return ret(-E.BADF);
+                try p.writeMem(a[1], statfs(false)[0..64]);
+                return ret(0);
+            },
+            .fcntl64 => s.* = .fcntl,
+            .sendfile64 => return ret(try sendfile(p, c.int(0), c.int(1), a[2], a[3], false)),
+            .waitpid => {
+                s.* = .wait4;
+                a[3] = 0;
+            },
+            .getrlimit, .old_getrlimit => {
+                // Two unsigned longs; the old call caps them at 2^31 - 1.
+                const lim = rlimit(p, c.uint(0)) orelse return ret(-E.INVAL);
+                const max: u64 = if (s.* == .old_getrlimit) 0x7fffffff else 0xffffffff;
+                try p.writeU32(a[1], @intCast(@min(lim[0], max)));
+                try p.writeU32(a[1] + 4, @intCast(@min(lim[1], max)));
+                return ret(0);
+            },
+            .getuid16 => s.* = .getuid,
+            .geteuid16 => s.* = .geteuid,
+            .getgid16 => s.* = .getgid,
+            .getegid16 => s.* = .getegid,
+            .setuid16 => s.* = .setuid,
+            .setgid16 => s.* = .setgid,
+            .chown16, .lchown16, .fchown16 => return ret(0),
+            .nice => return ret(0),
+            .sigreturn => return .sigreturn,
+            .socketcall => return try socketcall(p, s, c),
+            .ipc => return try ipc(p, c),
+            else => {},
+        }
+        return null;
+    }
+
+    fn pair(lo: u64, hi: u64) u64 {
+        return (hi << 32) | (lo & 0xffffffff);
+    }
+
+    fn signExtend(v: u64) u64 {
+        return @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, @truncate(v))))));
+    }
+
+    fn time64Generic(s: Sys) Sys {
+        return switch (s) {
+            .clock_gettime64 => .clock_gettime,
+            .clock_settime64 => .clock_settime,
+            .clock_adjtime64 => .clock_adjtime,
+            .clock_getres_time64 => .clock_getres,
+            .clock_nanosleep_time64 => .clock_nanosleep,
+            .timer_gettime64 => .timer_gettime,
+            .timer_settime64 => .timer_settime,
+            .timerfd_gettime64 => .timerfd_gettime,
+            .timerfd_settime64 => .timerfd_settime,
+            .utimensat_time64 => .utimensat,
+            .pselect6_time64 => .pselect6,
+            .ppoll_time64 => .ppoll,
+            .io_pgetevents_time64 => .io_pgetevents,
+            .recvmmsg_time64 => .recvmmsg,
+            .mq_timedsend_time64 => .mq_timedsend,
+            .mq_timedreceive_time64 => .mq_timedreceive,
+            .semtimedop_time64 => .semtimedop,
+            .rt_sigtimedwait_time64 => .rt_sigtimedwait,
+            .futex_time64 => .futex,
+            .sched_rr_get_interval_time64 => .sched_rr_get_interval,
+            else => s,
+        };
+    }
+
+    /// statfs64's struct (84 bytes, 64-bit counts at 4-byte alignment),
+    /// or with `wide` false the old one's first 64 bytes, all 32-bit:
+    /// the same answers as the other architectures' statfs.
+    fn statfs(wide: bool) [84]u8 {
+        var b: [84]u8 = @splat(0);
+        const w = struct {
+            fn u32_(x: *[84]u8, o: usize, v: u32) void {
+                std.mem.writeInt(u32, x[o..][0..4], v, .little);
+            }
+            fn u64_(x: *[84]u8, o: usize, v: u64) void {
+                std.mem.writeInt(u64, x[o..][0..8], v, .little);
+            }
+        };
+        w.u32_(&b, 0, 0x01021994); // TMPFS_MAGIC
+        w.u32_(&b, 4, 4096); // f_bsize
+        const counts = [_]u64{ 1 << 24, 1 << 23, 1 << 23, 1 << 20, 1 << 19 }; // blocks, bfree, bavail, files, ffree
+        if (wide) {
+            for (counts, 0..) |v, i| w.u64_(&b, 8 + 8 * i, v);
+            w.u32_(&b, 56, 255); // f_namelen
+            w.u32_(&b, 60, 4096); // f_frsize
+        } else {
+            for (counts, 0..) |v, i| w.u32_(&b, 8 + 4 * i, @intCast(v));
+            w.u32_(&b, 36, 255);
+            w.u32_(&b, 40, 4096);
+        }
+        return b;
+    }
+
+    /// struct sysinfo with 32-bit longs: memory in pages of mem_unit
+    /// bytes when it doesn't fit in bytes.
+    fn sysinfo(p: *Process, va: u64) Err!i64 {
+        var b: [64]u8 = @splat(0);
+        const up_s: u64 = @intCast(@divTrunc(kern.monoNs(), std.time.ns_per_s));
+        const unit: u64 = if (p.mem_limit > std.math.maxInt(u32)) page else 1;
+        std.mem.writeInt(u32, b[0..4], @truncate(up_s), .little);
+        std.mem.writeInt(u32, b[16..20], @intCast(p.mem_limit / unit), .little); // totalram
+        std.mem.writeInt(u32, b[20..24], @intCast((p.mem_limit -| p.mm.bytes()) / unit), .little); // freeram
+        std.mem.writeInt(u16, b[40..42], 1, .little); // procs
+        std.mem.writeInt(u32, b[52..56], @intCast(unit), .little); // mem_unit
+        try p.writeMem(va, &b);
+        return 0;
+    }
+
+    /// struct sigaction as i386's kernel takes it: handler, flags and
+    /// restorer (32-bit), then the 64-bit mask, unaligned.
+    fn sigaction(p: *Process, signo: u32, act_va: u64, old_va: u64) Err!i64 {
+        if (old_va != 0) {
+            const a = p.sig.actions[signo];
+            var b: [20]u8 = undefined;
+            std.mem.writeInt(u32, b[0..4], @truncate(a.handler), .little);
+            std.mem.writeInt(u32, b[4..8], @truncate(a.flags), .little);
+            std.mem.writeInt(u32, b[8..12], @truncate(a.restorer), .little);
+            std.mem.writeInt(u64, b[12..20], a.mask, .little);
+            try p.writeMem(old_va, &b);
+        }
+        if (act_va != 0) {
+            if (signo == sig.SIGKILL or signo == sig.SIGSTOP) return -E.INVAL;
+            var b: [20]u8 = undefined;
+            try p.readMem(act_va, &b);
+            p.g.setAction(signo, .{
+                .handler = std.mem.readInt(u32, b[0..4], .little),
+                .flags = std.mem.readInt(u32, b[4..8], .little),
+                .restorer = std.mem.readInt(u32, b[8..12], .little),
+                .mask = std.mem.readInt(u64, b[12..20], .little),
+            });
+            if (p.sig.actions[signo].handler == sig.SIG_IGN) p.sig.pending &= ~sig.bit(signo);
+        }
+        return 0;
+    }
+
+    /// stack_t: ss_sp, ss_flags and ss_size, 32 bits each.
+    fn sigaltstack(p: *Process, ss_va: u64, old_va: u64) Err!i64 {
+        if (old_va != 0) {
+            const w = [3]u32{ @truncate(p.sig.altstack.sp), if (p.sig.altstack.size == 0) sig.SS_DISABLE else 0, @truncate(p.sig.altstack.size) };
+            try p.writeMem(old_va, std.mem.sliceAsBytes(&w));
+        }
+        if (ss_va != 0) {
+            var w: [3]u32 = undefined;
+            try p.readMem(ss_va, std.mem.sliceAsBytes(&w));
+            if (w[1] & sig.SS_DISABLE != 0) {
+                p.sig.altstack = .{};
+            } else {
+                if (w[2] < 2048) return -E.NOMEM;
+                p.sig.altstack = .{ .sp = w[0], .size = w[2] };
+            }
+        }
+        return 0;
+    }
+
+    /// socketcall(call, args): the socket calls through one number, with
+    /// their arguments in memory. Rewritten into the direct calls, which
+    /// i386 has had since Linux 4.3 and which serve the same way.
+    fn socketcall(p: *Process, s: *Sys, c: *Call) Err!?Outcome {
+        const Entry = struct { s: Sys, n: u8 };
+        const calls = [_]Entry{
+            .{ .s = .socket, .n = 3 },      .{ .s = .bind, .n = 3 },        .{ .s = .connect, .n = 3 },
+            .{ .s = .listen, .n = 2 },      .{ .s = .accept, .n = 3 },      .{ .s = .getsockname, .n = 3 },
+            .{ .s = .getpeername, .n = 3 }, .{ .s = .socketpair, .n = 4 },  .{ .s = .sendto, .n = 4 }, // send
+            .{ .s = .recvfrom, .n = 4 }, // recv
+            .{ .s = .sendto, .n = 6 },      .{ .s = .recvfrom, .n = 6 },    .{ .s = .shutdown, .n = 2 },
+            .{ .s = .setsockopt, .n = 5 },  .{ .s = .getsockopt, .n = 5 },  .{ .s = .sendmsg, .n = 3 },
+            .{ .s = .recvmsg, .n = 3 },     .{ .s = .accept4, .n = 4 },     .{ .s = .recvmmsg, .n = 5 },
+            .{ .s = .sendmmsg, .n = 4 },
+        };
+        const call = c.uint(0);
+        if (call == 0 or call > calls.len) return ret(-E.INVAL);
+        const e = calls[call - 1];
+        var w: [6]u32 = @splat(0);
+        try p.readMem(c.a[1], std.mem.sliceAsBytes(w[0..e.n]));
+        for (0..6) |i| c.a[i] = w[i];
+        s.* = e.s;
+        return null;
+    }
+
+    /// ipc(call, first, second, third, ptr, fifth): System V IPC through
+    /// one number. Shared memory is served, as its own calls are; the
+    /// semaphore and message queue calls aren't, on any architecture.
+    fn ipc(p: *Process, c: *Call) Err!?Outcome {
+        const SHMAT = 21;
+        const SHMDT = 22;
+        const SHMGET = 23;
+        const SHMCTL = 24;
+        switch (c.uint(0) & 0xffff) {
+            SHMAT => {
+                p.mm.opLock(p.io);
+                defer p.mm.opUnlock(p.io);
+                const r = shmat(p, @truncate(c.int(1)), c.a[4], c.uint(2));
+                if (r < 0) return ret(r);
+                // The address goes through `third`.
+                try p.writeU32(c.a[3], @intCast(r));
+                return ret(0);
+            },
+            SHMDT => {
+                p.mm.opLock(p.io);
+                defer p.mm.opUnlock(p.io);
+                return try memCall(p, .shmdt, .{ .nr = c.nr, .a = .{ c.a[4], 0, 0, 0, 0, 0 } });
+            },
+            SHMGET => return ret(shmget(p, @truncate(c.int(1)), c.a[2], c.uint(3))),
+            SHMCTL => return ret(try shmctl32(p, @truncate(c.int(1)), c.uint(2), c.a[4])),
+            else => return ret(-E.NOSYS),
+        }
+    }
+
+    /// shmctl with i386's structs: struct shmid64_ds is 84 bytes, its
+    /// times and sizes 32-bit, after the same ipc64_perm; the info structs
+    /// are unsigned longs.
+    fn shmctl32(p: *Process, id: i32, cmd_in: u32, buf: u64) Err!i64 {
+        const IPC_STAT = 2;
+        const IPC_INFO = 3;
+        const SHM_STAT = 13;
+        const SHM_INFO = 14;
+        const SHM_STAT_ANY = 15;
+        const cmd = cmd_in & 0xff;
+        switch (cmd) {
+            IPC_INFO => {
+                const v = [9]u32{ 0xffffffff, 1, 4096, 4096, 1 << 28, 0, 0, 0, 0 }; // shmmax, shmmin, shmmni, shmseg, shmall
+                if (buf != 0) try p.writeMem(buf, std.mem.sliceAsBytes(&v));
+                return 0;
+            },
+            SHM_INFO => {
+                if (buf != 0) try p.writeMem(buf, &@as([24]u8, @splat(0)));
+                return 0;
+            },
+            IPC_STAT, SHM_STAT, SHM_STAT_ANY => {
+                var w: [112]u8 = undefined;
+                sysvshm.lock();
+                const sg = sysvshm.find(p.mm.backend, id) orelse {
+                    sysvshm.unlock();
+                    return -E.INVAL;
+                };
+                sysvshm.stat(sg, &w);
+                sysvshm.unlock();
+                var b: [84]u8 = @splat(0);
+                @memcpy(b[0..24], w[0..24]);
+                for ([_][2]usize{ .{ 36, 48 }, .{ 40, 56 }, .{ 48, 64 }, .{ 56, 72 }, .{ 64, 80 }, .{ 68, 84 }, .{ 72, 88 } }) |m| {
+                    @memcpy(b[m[0]..][0..4], w[m[1]..][0..4]);
+                }
+                try p.writeMem(buf, &b);
+                return if (cmd == IPC_STAT) 0 else id;
+            },
+            else => return shmctl(p, id, cmd_in, buf),
+        }
+    }
+};
 
 // Files.
 
@@ -1642,8 +2019,7 @@ fn rwv(p: *Process, fd: i32, iov: u64, cnt: u64, off_in: i64, comptime dir: Dir)
     var stream: ?bool = null;
     var i: u64 = 0;
     while (i < cnt) : (i += 1) {
-        const base = try p.readU64(iov + 16 * i);
-        const len = try p.readU64(iov + 16 * i + 8);
+        const base, const len = try p.iovec(iov, i);
         if (len == 0) continue;
         if (dir == .read and total > 0) {
             if (stream == null) stream = if (kc.fdInfo(fd)) |info| switch (info.dc) {
@@ -1661,10 +2037,11 @@ fn rwv(p: *Process, fd: i32, iov: u64, cnt: u64, off_in: i64, comptime dir: Dir)
     return total;
 }
 
-fn sendfile(p: *Process, out: i32, in: i32, offp: u64, count: u64) Err!i64 {
+/// sendfile; on i386 its offset is a 32-bit off_t unless it's sendfile64.
+fn sendfile(p: *Process, out: i32, in: i32, offp: u64, count: u64, off32: bool) Err!i64 {
     if (out < 0 or in < 0) return -E.BADF;
     var off: i64 = -1;
-    if (offp != 0) off = @bitCast(try p.readU64(offp));
+    if (offp != 0) off = if (off32) @as(i32, @bitCast(try p.readU32(offp))) else @bitCast(try p.readU64(offp));
     var buf: [65536]u8 = undefined;
     var total: u64 = 0;
     while (total < count) {
@@ -1676,7 +2053,9 @@ fn sendfile(p: *Process, out: i32, in: i32, offp: u64, count: u64) Err!i64 {
         if (off != -1) off += @intCast(n);
         if (w < n) break;
     }
-    if (offp != 0) try p.writeU64(offp, @bitCast(off));
+    if (offp != 0) {
+        if (off32) try p.writeU32(offp, @truncate(@as(u64, @bitCast(off)))) else try p.writeU64(offp, @bitCast(off));
+    }
     return @intCast(total);
 }
 
@@ -1735,7 +2114,15 @@ fn fcntl(p: *Process, fd: i32, cmd: i32, arg: u64) Err!i64 {
         },
         F_SETLK, F_SETLKW, F_OFD_SETLK, F_OFD_SETLKW, F_GETLK, F_OFD_GETLK => {
             const ofd = cmd == F_OFD_SETLK or cmd == F_OFD_SETLKW or cmd == F_OFD_GETLK;
-            return recordLock(p, fd, arg, ofd, cmd == F_GETLK or cmd == F_OFD_GETLK, cmd == F_SETLKW or cmd == F_OFD_SETLKW);
+            // i386's F_GETLK, F_SETLK and F_SETLKW take a 32-bit struct
+            // flock; its OFD locks take a flock64.
+            const lay: FlockLayout = if (!p.is32()) .wide else if (ofd) .i386_64 else .i386_32;
+            return recordLock(p, fd, arg, ofd, cmd == F_GETLK or cmd == F_OFD_GETLK, cmd == F_SETLKW or cmd == F_OFD_SETLKW, lay);
+        },
+        // i386's F_GETLK64, F_SETLK64 and F_SETLKW64.
+        12, 13, 14 => {
+            if (!p.is32()) return -E.INVAL;
+            return recordLock(p, fd, arg, false, cmd == 12, cmd == 14, .i386_64);
         },
         else => return -E.INVAL,
     }
@@ -1752,18 +2139,72 @@ fn posixOwner(p: *Process) locks.Owner {
     return .{ .id = m *% 0x9e3779b97f4a7c15 ^ p.g.tgid, .posix = true, .pid = @intCast(p.g.tgid) };
 }
 
+/// Where struct flock keeps l_start, l_len and l_pid, and its size: the
+/// 64-bit one, and i386's flock64 (packed) and 32-bit flock.
+const FlockLayout = enum {
+    wide,
+    i386_64,
+    i386_32,
+
+    fn size(l: FlockLayout) usize {
+        return switch (l) {
+            .wide => 32,
+            .i386_64 => 24,
+            .i386_32 => 16,
+        };
+    }
+    fn start(l: FlockLayout, b: []const u8) i64 {
+        return switch (l) {
+            .wide => std.mem.readInt(i64, b[8..16], .little),
+            .i386_64 => std.mem.readInt(i64, b[4..12], .little),
+            .i386_32 => std.mem.readInt(i32, b[4..8], .little),
+        };
+    }
+    fn len(l: FlockLayout, b: []const u8) i64 {
+        return switch (l) {
+            .wide => std.mem.readInt(i64, b[16..24], .little),
+            .i386_64 => std.mem.readInt(i64, b[12..20], .little),
+            .i386_32 => std.mem.readInt(i32, b[8..12], .little),
+        };
+    }
+    fn pidOff(l: FlockLayout) usize {
+        return switch (l) {
+            .wide => 24,
+            .i386_64 => 20,
+            .i386_32 => 12,
+        };
+    }
+    fn put(l: FlockLayout, b: []u8, st: i64, ln: i64) void {
+        switch (l) {
+            .wide => {
+                std.mem.writeInt(i64, b[8..16], st, .little);
+                std.mem.writeInt(i64, b[16..24], ln, .little);
+            },
+            .i386_64 => {
+                std.mem.writeInt(i64, b[4..12], st, .little);
+                std.mem.writeInt(i64, b[12..20], ln, .little);
+            },
+            .i386_32 => {
+                std.mem.writeInt(i32, b[4..8], std.math.cast(i32, st) orelse std.math.maxInt(i32), .little);
+                std.mem.writeInt(i32, b[8..12], std.math.cast(i32, ln) orelse 0, .little);
+            },
+        }
+    }
+};
+
 /// fcntl's record locks (locks.zig), from a struct flock: l_type and
-/// l_whence (shorts), then l_start, l_len (64-bit) and l_pid.
-fn recordLock(p: *Process, fd: i32, arg: u64, ofd: bool, get: bool, wait: bool) Err!i64 {
+/// l_whence (shorts), then l_start, l_len and l_pid, laid out as `lay`.
+fn recordLock(p: *Process, fd: i32, arg: u64, ofd: bool, get: bool, wait: bool, lay: FlockLayout) Err!i64 {
     const info = kc.fdInfo(fd) catch return -E.BADF;
-    var b: [32]u8 = undefined;
-    try p.readMem(arg, &b);
+    var buf: [32]u8 = @splat(0);
+    const b = buf[0..lay.size()];
+    try p.readMem(arg, b);
     const t = std.enums.fromInt(locks.Type, std.mem.readInt(u16, b[0..2], .little)) orelse return -E.INVAL;
     const whence = std.mem.readInt(u16, b[2..4], .little);
-    const l_start = std.mem.readInt(i64, b[8..16], .little);
-    const l_len = std.mem.readInt(i64, b[16..24], .little);
+    const l_start = lay.start(b);
+    const l_len = lay.len(b);
     // OFD locks need l_pid 0.
-    if (ofd and std.mem.readInt(i32, b[24..28], .little) != 0) return -E.INVAL;
+    if (ofd and std.mem.readInt(i32, b[lay.pidOff()..][0..4], .little) != 0) return -E.INVAL;
     const base: i64 = switch (whence) {
         0 => 0,
         1 => kern.seek(@intCast(fd), 0, 1) catch return kerr(),
@@ -1794,15 +2235,15 @@ fn recordLock(p: *Process, fd: i32, arg: u64, ofd: bool, get: bool, wait: bool) 
     if (get) {
         if (t == .unlock) return -E.INVAL;
         const r = locks.conflicting(key, .{ .owner = owner, .type = t, .start = start, .end = end });
-        var out: [32]u8 = b;
+        var outb: [32]u8 = buf;
+        const out = outb[0..lay.size()];
         if (r) |c| {
             std.mem.writeInt(u16, out[0..2], @intFromEnum(c.type), .little);
             std.mem.writeInt(u16, out[2..4], 0, .little);
-            std.mem.writeInt(i64, out[8..16], @intCast(c.start), .little);
-            std.mem.writeInt(i64, out[16..24], if (c.end == std.math.maxInt(u64)) 0 else @intCast(c.end - c.start), .little);
-            std.mem.writeInt(i32, out[24..28], c.owner.pid, .little);
+            lay.put(out, @intCast(c.start), if (c.end == std.math.maxInt(u64)) 0 else @intCast(c.end - c.start));
+            std.mem.writeInt(i32, out[lay.pidOff()..][0..4], c.owner.pid, .little);
         } else std.mem.writeInt(u16, out[0..2], @intFromEnum(locks.Type.unlock), .little);
-        try p.writeMem(arg, &out);
+        try p.writeMem(arg, out);
         return 0;
     }
     if (t == .read and info.mode == kern.OWRITE) return -E.BADF;
@@ -1949,7 +2390,9 @@ fn kindOfDir(d: *const attr.Dir) attr.Kind {
 pub const devlinux_dc: u16 = 0x3bb; // 'λ'
 pub const devlinux_chr_bit: u64 = 1 << 40;
 
-const StatFmt = enum { native, statx };
+/// `native` is the architecture's struct stat; `stat64` and `old32` are
+/// i386's struct stat64 and its old 32-bit struct stat.
+const StatFmt = enum { native, statx, stat64, old32 };
 
 fn putStat(p: *Process, buf: u64, st_in: *const attr.Stat, fmt: StatFmt) Err!void {
     // Every file is the caller's (`Cred`).
@@ -1958,6 +2401,9 @@ fn putStat(p: *Process, buf: u64, st_in: *const attr.Stat, fmt: StatFmt) Err!voi
     st.gid = p.cred.gid[1];
     switch (fmt) {
         .statx => try p.writeMem(buf, &st.statx()),
+        .stat64 => try p.writeMem(buf, &st.i386Stat64()),
+        // Its fields are 32-bit (16 for the ids and mode), truncated.
+        .old32 => try p.writeMem(buf, &st.i386Old()),
         .native => switch (p.arch) {
             .amd64 => try p.writeMem(buf, &st.x86()),
             else => try p.writeMem(buf, &st.generic()),
@@ -2247,11 +2693,13 @@ fn utimens(p: *Process, dirfd: i32, path_va: u64, times: u64) Err!i64 {
     var ws: Wstat = .{ .atime = now, .mtime = now };
     if (times != 0) {
         var b: [32]u8 = undefined;
-        try p.readMem(times, &b);
+        // Two timespecs, 32-bit for i386's utimensat (not _time64).
+        const t32 = p.is32() and p.time32;
+        try p.readMem(times, if (t32) b[0..16] else &b);
         const fields = [2]*?u32{ &ws.atime, &ws.mtime };
         for (fields, 0..) |f, i| {
-            const sec = std.mem.readInt(i64, b[i * 16 ..][0..8], .little);
-            const nsec = std.mem.readInt(i64, b[i * 16 + 8 ..][0..8], .little);
+            const sec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 ..][0..8], .little);
+            const nsec: i64 = if (t32) std.mem.readInt(i32, b[i * 8 + 4 ..][0..4], .little) else std.mem.readInt(i64, b[i * 16 + 8 ..][0..8], .little);
             f.* = if (nsec == UTIME_OMIT) null else if (nsec == UTIME_NOW) now else @intCast(std.math.clamp(sec, 0, std.math.maxInt(u32) - 1));
         }
     }
@@ -2504,6 +2952,13 @@ fn defaultTermios() [60]u8 {
 /// -errno for clone flags h9 doesn't serve, or null. Threads need
 /// CLONE_THREAD, CLONE_SIGHAND and CLONE_VM together, as Linux does; memory
 /// is shared only with threads and vfork (design/0049-linux-threads.md).
+/// clone's thread pointer: the value itself, or on i386 the base of the
+/// struct user_desc it points at (design/linux-i386.md, "TLS").
+fn cloneTls(p: *Process, flags: u64, tls: u64) Err!u64 {
+    if (!p.is32() or flags & CLONE_SETTLS == 0) return tls;
+    return try p.readU32(tls + 4);
+}
+
 fn cloneCheck(flags: u64) ?i64 {
     if (flags & CLONE_NEW_ANY != 0) return -E.PERM;
     if (flags & CLONE_THREAD != 0 and flags & CLONE_SIGHAND == 0) return -E.INVAL;
@@ -2546,7 +3001,7 @@ fn strings(p: *Process, va: u64) Err![][:0]u8 {
     var total: usize = 0;
     var i: u64 = 0;
     while (true) : (i += 1) {
-        const ptr = try p.readU64(va + 8 * i);
+        const ptr = try p.readPtr(va + p.longSize() * i);
         if (ptr == 0) break;
         const s = try p.stringAlloc(ptr, 128 << 10);
         total += s.len + 1;
@@ -2724,6 +3179,16 @@ fn getrusage(p: *Process, who: i32, ru_va: u64) Err!i64 {
 /// struct rusage: ru_utime and ru_stime as timevals, then 14 longs, of
 /// which only ru_maxrss (KiB) is kept.
 fn writeRusage(p: *Process, va: u64, t: cputime.Times, maxrss_kb: u64) Err!void {
+    if (p.is32()) {
+        // i386: 32-bit timevals and longs, 72 bytes.
+        var n: [72]u8 = @splat(0);
+        std.mem.writeInt(u32, n[0..4], @truncate(t.user_ns / std.time.ns_per_s), .little);
+        std.mem.writeInt(u32, n[4..8], @truncate(t.user_ns % std.time.ns_per_s / std.time.ns_per_us), .little);
+        std.mem.writeInt(u32, n[8..12], @truncate(t.sys_ns / std.time.ns_per_s), .little);
+        std.mem.writeInt(u32, n[12..16], @truncate(t.sys_ns % std.time.ns_per_s / std.time.ns_per_us), .little);
+        std.mem.writeInt(u32, n[16..20], @truncate(maxrss_kb), .little);
+        return p.writeMem(va, &n);
+    }
     var b: [144]u8 = @splat(0);
     std.mem.writeInt(u64, b[0..8], t.user_ns / std.time.ns_per_s, .little);
     std.mem.writeInt(u64, b[8..16], t.user_ns % std.time.ns_per_s / std.time.ns_per_us, .little);
@@ -2765,8 +3230,10 @@ fn waitid(p: *Process, idtype: u32, id: u32, info_va: u64, options: u32, ru_va: 
         std.mem.writeInt(u32, b[0..4], sig.SIGCHLD, .little);
         const killed = w.status & 0x7f != 0;
         std.mem.writeInt(u32, b[8..12], if (killed) CLD_KILLED else CLD_EXITED, .little);
-        std.mem.writeInt(u32, b[16..20], w.pid, .little);
-        std.mem.writeInt(u32, b[24..28], if (killed) w.status & 0x7f else (w.status >> 8) & 0xff, .little);
+        // The union starts after a pad on 64-bit (at 16), at 12 on i386.
+        const u: usize = if (p.is32()) 12 else 16;
+        std.mem.writeInt(u32, b[u..][0..4], w.pid, .little);
+        std.mem.writeInt(u32, b[u + 8 ..][0..4], if (killed) w.status & 0x7f else (w.status >> 8) & 0xff, .little);
         try p.writeMem(info_va, &b);
     }
     if (ru_va != 0) try writeRusage(p, ru_va, waitTimes(w), 0);
@@ -2785,7 +3252,8 @@ const MAP_FIXED_NOREPLACE = 0x100000;
 fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32, off: u64) Err!i64 {
     if (len_in == 0) return -E.INVAL;
     const len = std.mem.alignForward(u64, len_in, page);
-    if (len > mm.user_top or len < len_in) return -E.NOMEM;
+    const top = p.mm.lay.user_top;
+    if (len > top or len < len_in) return -E.NOMEM;
     if (off % page != 0) return -E.INVAL;
     const shared = flags & 3 == MAP_SHARED or flags & 3 == 3;
     if (flags & 3 == 0) return -E.INVAL;
@@ -2809,7 +3277,7 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
     var start: u64 = undefined;
     if (fixed) {
         if (addr % page != 0) return -E.INVAL;
-        if (addr < mm.min_addr or addr >= mm.user_top or len > mm.user_top - addr) return -E.NOMEM;
+        if (addr < mm.min_addr or addr >= top or len > top - addr) return -E.NOMEM;
         if (flags & MAP_FIXED_NOREPLACE != 0 and !p.mm.isFree(addr, addr + len)) return -E.EXIST;
         // A shared file mapping can only go where the file's chunks fit.
         if (shared and !anon and addr % mm.chunk_size != delta) return -E.NODEV;
@@ -2817,7 +3285,7 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
         start = addr;
     } else {
         const hint = std.mem.alignBackward(u64, addr, page);
-        if (hint >= mm.min_addr and hint < mm.user_top and len <= mm.user_top - hint and !shared and p.mm.isFree(hint, hint + len)) {
+        if (hint >= mm.min_addr and hint < top and len <= top - hint and !shared and p.mm.isFree(hint, hint + len)) {
             start = hint;
         } else {
             const at_ = p.mm.findFree(span + if (shared) mm.chunk_size else 0) orelse return -E.NOMEM;
@@ -3028,7 +3496,7 @@ fn mremap(p: *Process, old: u64, old_len_in: u64, new_len_in: u64, flags: u32, n
         return @intCast(old);
     }
     // Grow in place when the space after it is free.
-    if (old + old_len == vma.end and p.mm.isFree(old + old_len, old + new_len) and old + new_len <= mm.user_top) {
+    if (old + old_len == vma.end and p.mm.isFree(old + old_len, old + new_len) and old + new_len <= p.mm.lay.user_top) {
         var ext = vma;
         ext.start = old + old_len;
         ext.end = old + new_len;
@@ -3057,6 +3525,7 @@ fn sigaction(p: *Process, signo_raw: u64, act_va: u64, old_va: u64, size: u64) E
     if (size != 8) return -E.INVAL;
     const signo: u32 = @truncate(signo_raw);
     if (signo == 0 or signo > sig.nsig) return -E.INVAL;
+    if (p.is32()) return ia32.sigaction(p, signo, act_va, old_va);
     if (old_va != 0) {
         const a = p.sig.actions[signo];
         var b: [32]u8 = undefined;
@@ -3100,6 +3569,7 @@ fn sigprocmask(p: *Process, how: u32, set_va: u64, old_va: u64, size: u64) Err!i
 }
 
 fn sigaltstack(p: *Process, ss_va: u64, old_va: u64) Err!i64 {
+    if (p.is32()) return ia32.sigaltstack(p, ss_va, old_va);
     if (old_va != 0) {
         var b: [24]u8 = @splat(0);
         std.mem.writeInt(u64, b[0..8], p.sig.altstack.sp, .little);
@@ -3161,21 +3631,21 @@ fn clockNs(id: u32) ?i64 {
 // accepted and never fire.
 
 fn readTimeval(p: *Process, va: u64) (Err || error{Invalid})!i64 {
-    const sec: i64 = @bitCast(try p.readU64(va));
-    const usec: i64 = @bitCast(try p.readU64(va + 8));
+    // Two longs: 32-bit on i386, which has no 64-bit timeval calls.
+    const sec: i64 = try p.readLong(va);
+    const usec: i64 = try p.readLong(va + p.longSize());
     if (sec < 0 or usec < 0 or usec >= 1000000) return error.Invalid;
     return sec * std.time.ns_per_s + usec * std.time.ns_per_us;
 }
 
 fn writeItimerval(p: *Process, va: u64, v: itimer.Value) Err!void {
-    var b: [32]u8 = undefined;
+    const w = p.longSize();
     const tv = [2]i64{ v.interval_ns, v.left_ns };
     for (tv, 0..) |ns, i| {
         const us = @divTrunc(ns + std.time.ns_per_us - 1, std.time.ns_per_us);
-        std.mem.writeInt(i64, b[16 * i ..][0..8], @divTrunc(us, 1000000), .little);
-        std.mem.writeInt(i64, b[16 * i + 8 ..][0..8], @mod(us, 1000000), .little);
+        try p.writePtr(va + 2 * w * i, @bitCast(@divTrunc(us, 1000000)));
+        try p.writePtr(va + 2 * w * i + w, @bitCast(@mod(us, 1000000)));
     }
-    try p.writeMem(va, &b);
 }
 
 fn setitimer(p: *Process, which: i32, new_va: u64, old_va: u64) Err!i64 {
@@ -3183,7 +3653,7 @@ fn setitimer(p: *Process, which: i32, new_va: u64, old_va: u64) Err!i64 {
     var v: itimer.Value = .{};
     if (new_va != 0) {
         v.interval_ns = readTimeval(p, new_va) catch |e| return if (e == error.Invalid) -E.INVAL else @as(Err, @errorCast(e));
-        v.left_ns = readTimeval(p, new_va + 16) catch |e| return if (e == error.Invalid) -E.INVAL else @as(Err, @errorCast(e));
+        v.left_ns = readTimeval(p, new_va + 2 * p.longSize()) catch |e| return if (e == error.Invalid) -E.INVAL else @as(Err, @errorCast(e));
     }
     if (which != 0) {
         if (old_va != 0) try writeItimerval(p, old_va, .{});
@@ -3201,6 +3671,13 @@ fn getitimer(p: *Process, which: i32, va: u64) Err!i64 {
 }
 
 fn writeTimespec(p: *Process, va: u64, ns: i64) Err!void {
+    if (p.is32() and p.time32) {
+        // i386's 32-bit timespec (calls other than the *_time64 ones).
+        var t: [8]u8 = undefined;
+        std.mem.writeInt(i32, t[0..4], std.math.cast(i32, @divFloor(ns, std.time.ns_per_s)) orelse std.math.maxInt(i32), .little);
+        std.mem.writeInt(i32, t[4..8], @intCast(@mod(ns, std.time.ns_per_s)), .little);
+        return p.writeMem(va, &t);
+    }
     var b: [16]u8 = undefined;
     std.mem.writeInt(i64, b[0..8], @divFloor(ns, std.time.ns_per_s), .little);
     std.mem.writeInt(i64, b[8..16], @mod(ns, std.time.ns_per_s), .little);
@@ -3209,9 +3686,12 @@ fn writeTimespec(p: *Process, va: u64, ns: i64) Err!void {
 
 fn readTimespec(p: *Process, va: u64) Err!i64 {
     var b: [16]u8 = undefined;
-    try p.readMem(va, &b);
-    const s = std.mem.readInt(i64, b[0..8], .little);
-    const ns = std.mem.readInt(i64, b[8..16], .little);
+    const t32 = p.is32() and p.time32;
+    try p.readMem(va, if (t32) b[0..8] else &b);
+    const s: i64 = if (t32) std.mem.readInt(i32, b[0..4], .little) else std.mem.readInt(i64, b[0..8], .little);
+    // A time64 nsec is a long long, of which a 32-bit kernel reads only
+    // the low half.
+    const ns: i64 = if (t32 or p.is32()) std.mem.readInt(i32, b[if (t32) 4 else 8 ..][0..4], .little) else std.mem.readInt(i64, b[8..16], .little);
     if (s < 0 or ns < 0 or ns >= std.time.ns_per_s) return -1;
     return std.math.add(i64, std.math.mul(i64, s, std.time.ns_per_s) catch std.math.maxInt(i64), ns) catch std.math.maxInt(i64);
 }
@@ -3396,19 +3876,24 @@ fn prctl(p: *Process, op: i32, arg: u64) Err!i64 {
     }
 }
 
-fn prlimit(p: *Process, pid: i32, res: u32, new: u64, old: u64) Err!i64 {
-    _ = new;
-    if (pid != 0 and pid != p.pid) return -E.PERM;
+/// A resource's soft and hard limits, or null if there's no such one.
+fn rlimit(p: *Process, res: u32) ?[2]u64 {
     const inf = std.math.maxInt(u64);
     const RLIMIT_STACK = 3;
     const RLIMIT_NOFILE = 7;
     const RLIMIT_AS = 9;
-    const lim: [2]u64 = switch (res) {
-        RLIMIT_STACK => .{ mm.stack_size, inf },
+    return switch (res) {
+        RLIMIT_STACK => .{ p.mm.lay.stack_size, inf },
         RLIMIT_NOFILE => .{ 1024, 1024 },
         RLIMIT_AS => .{ if (p.mem_limit > 0) p.mem_limit else inf, if (p.mem_limit > 0) p.mem_limit else inf },
-        else => if (res < 16) .{ inf, inf } else return -E.INVAL,
+        else => if (res < 16) .{ inf, inf } else null,
     };
+}
+
+fn prlimit(p: *Process, pid: i32, res: u32, new: u64, old: u64) Err!i64 {
+    _ = new;
+    if (pid != 0 and pid != p.pid) return -E.PERM;
+    const lim = rlimit(p, res) orelse return -E.INVAL;
     if (old != 0) {
         var b: [16]u8 = undefined;
         std.mem.writeInt(u64, b[0..8], lim[0], .little);
@@ -3865,6 +4350,7 @@ fn shutdownCall(p: *Process, fd: i32, how: u32) Err!i64 {
 fn setsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, len: u64) Err!i64 {
     if (unixOf(p, fd) != null) return 0;
     const so = sockOf(p, fd) orelse return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
+    if (udpOffload(level, name)) return -E.NOPROTOOPT;
     var v: i32 = 0;
     if (len >= 4) {
         var b: [4]u8 = undefined;
@@ -3902,6 +4388,7 @@ fn setsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, len: u64) Er
 fn getsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, lenp: u64) Err!i64 {
     if (unixOf(p, fd)) |u| return unixGetsockopt(p, u, level, name, va, lenp);
     const so = sockOf(p, fd) orelse return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
+    if (udpOffload(level, name)) return -E.NOPROTOOPT;
     const v: i32 = switch (level) {
         SOL_SOCKET => switch (name) {
             SO_ERROR => @intCast(kc.soError(fd)),
@@ -3934,11 +4421,22 @@ const MsgHdr = struct {
     control: u64,
     controllen: u64,
     flags_va: u64,
+    /// Where msg_namelen and msg_controllen are, to write them back.
+    namelen_va: u64,
+    controllen_va: u64,
 
     fn read(p: *Process, va: u64) Err!MsgHdr {
+        if (p.is32()) {
+            // i386: seven 32-bit fields.
+            var w: [7]u32 = undefined;
+            try p.readMem(va, std.mem.sliceAsBytes(&w));
+            return .{ .name = w[0], .namelen = w[1], .iov = w[2], .iovlen = w[3], .control = w[4], .controllen = w[5], .flags_va = va + 24, .namelen_va = va + 4, .controllen_va = va + 20 };
+        }
         var b: [56]u8 = undefined;
         try p.readMem(va, &b);
         return .{
+            .namelen_va = va + 8,
+            .controllen_va = va + 40,
             .name = std.mem.readInt(u64, b[0..8], .little),
             .namelen = std.mem.readInt(u32, b[8..12], .little),
             .iov = std.mem.readInt(u64, b[16..24], .little),
@@ -3953,7 +4451,7 @@ const MsgHdr = struct {
         if (m.iovlen > 1024) return error.TooBig;
         var n: u64 = 0;
         var i: u64 = 0;
-        while (i < m.iovlen) : (i += 1) n += try p.readU64(m.iov + 16 * i + 8);
+        while (i < m.iovlen) : (i += 1) n += (try p.iovec(m.iov, i))[1];
         return n;
     }
 };
@@ -4059,8 +4557,8 @@ fn sendmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
                 var off: usize = 0;
                 var i: u64 = 0;
                 while (i < m.iovlen and off < total) : (i += 1) {
-                    const base = try p.readU64(m.iov + 16 * i);
-                    const l = @min(try p.readU64(m.iov + 16 * i + 8), total - off);
+                    const base, const l0 = try p.iovec(m.iov, i);
+                    const l = @min(l0, total - off);
                     try p.readMem(base, tmp[off .. off + l]);
                     off += l;
                 }
@@ -4077,8 +4575,8 @@ fn sendmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     var off: usize = 0;
     var i: u64 = 0;
     while (i < m.iovlen and off < total) : (i += 1) {
-        const base = try p.readU64(m.iov + 16 * i);
-        const l = @min(try p.readU64(m.iov + 16 * i + 8), total - off);
+        const base, const l0 = try p.iovec(m.iov, i);
+        const l = @min(l0, total - off);
         try p.readMem(base, tmp[off .. off + l]);
         off += l;
     }
@@ -4089,9 +4587,9 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     const so = sockOf(p, fd) orelse {
         if (kc.fdInfo(fd) catch null) |info| if (info.dc == '|') {
             const m = try MsgHdr.read(p, msg_va);
-            try p.writeU64(msg_va + 40, 0); // no control data
+            try p.writePtr(m.controllen_va, 0); // no control data
             const r = try rwv(p, fd, m.iov, m.iovlen, -1, .read);
-            if (r >= 0 and m.name != 0) if (unixOf(p, fd)) |u| if (u.netlink) try writeNlAddr(p, m.name, msg_va + 8, 0);
+            if (r >= 0 and m.name != 0) if (unixOf(p, fd)) |u| if (u.netlink) try writeNlAddr(p, m.name, m.namelen_va, 0);
             return r;
         };
         return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
@@ -4107,19 +4605,66 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     var off: usize = 0;
     var i: u64 = 0;
     while (i < m.iovlen and off < n) : (i += 1) {
-        const base = try p.readU64(m.iov + 16 * i);
-        const l = @min(try p.readU64(m.iov + 16 * i + 8), n - off);
+        const base, const l0 = try p.iovec(m.iov, i);
+        const l = @min(l0, n - off);
         try p.writeMem(base, tmp[off .. off + l]);
         off += l;
     }
     if (m.name != 0) {
         // msg_namelen is in the msghdr itself.
-        try writeSockaddr(p, m.name, msg_va + 8, so.s.family, from);
+        try writeSockaddr(p, m.name, m.namelen_va, so.s.family, from);
     }
-    try p.writeU64(msg_va + 40, 0); // msg_controllen: no control data
+    try p.writePtr(m.controllen_va, 0); // msg_controllen: no control data
     try p.writeU32(m.flags_va, 0);
     return r;
 }
+
+/// UDP segmentation offload (UDP_SEGMENT) and receive coalescing
+/// (UDP_GRO). sendmsg and recvmsg carry no control messages, so a sender
+/// that set a segment size would have its batch sent as one oversized
+/// datagram. Refusing the options makes QUIC stacks (quinn, quic-go)
+/// probe them, see ENOPROTOOPT and send one datagram per call.
+fn udpOffload(level: u32, name: u32) bool {
+    return level == IPPROTO_UDP and (name == UDP_SEGMENT or name == UDP_GRO);
+}
+const IPPROTO_UDP = 17;
+const UDP_SEGMENT = 103;
+const UDP_GRO = 104;
+
+/// The size of a struct mmsghdr: a msghdr and the count it moved, padded.
+const mmsghdr_size = 64;
+
+/// sendmmsg as a loop over sendmsg: the count sent, or the first message's
+/// error. A later message's error ends the batch, as on Linux.
+fn sendmmsg(p: *Process, fd: i32, vec: u64, vlen: u32, flags: u32) Err!i64 {
+    const n = @min(vlen, 1024);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const hdr = vec + @as(u64, i) * mmsghdr_size;
+        const r = try sendmsg(p, fd, hdr, flags);
+        if (r < 0) return if (i == 0) r else i;
+        try p.writeU32(hdr + 56, @intCast(r));
+    }
+    return n;
+}
+
+/// recvmmsg as a loop over recvmsg. The first message waits as the socket
+/// and flags say; the rest take only what's already queued, as with
+/// MSG_WAITFORONE. The timeout isn't honoured: on Linux it's checked only
+/// between messages, and callers that batch use non-blocking sockets.
+fn recvmmsg(p: *Process, fd: i32, vec: u64, vlen: u32, flags: u32) Err!i64 {
+    const n = @min(vlen, 1024);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const hdr = vec + @as(u64, i) * mmsghdr_size;
+        const f = (flags & ~@as(u32, MSG_WAITFORONE)) | @as(u32, if (i > 0) MSG_DONTWAIT else 0);
+        const r = try recvmsg(p, fd, hdr, f);
+        if (r < 0) return if (i == 0) r else i;
+        try p.writeU32(hdr + 56, @intCast(r));
+    }
+    return n;
+}
+const MSG_WAITFORONE = 0x10000;
 
 // Named AF_UNIX sockets, on pipes and /srv (devsrv, design/0008). A
 // socket is a pipe end in its fd from the start, so poll and epoll see
@@ -4563,10 +5108,8 @@ fn selectCall(p: *Process, s: Sys, c: Call) Err!i64 {
     var ms: i64 = -1;
     if (c.a[4] != 0) {
         if (s == .select) {
-            var b: [16]u8 = undefined;
-            try p.readMem(c.a[4], &b);
-            const sec = std.mem.readInt(i64, b[0..8], .little);
-            const usec = std.mem.readInt(i64, b[8..16], .little);
+            const sec = try p.readLong(c.a[4]);
+            const usec = try p.readLong(c.a[4] + p.longSize());
             if (sec < 0 or usec < 0) return -E.INVAL;
             ms = sec * 1000 + @divTrunc(usec + 999, 1000);
         } else {
@@ -4596,7 +5139,8 @@ fn selectCall(p: *Process, s: Sys, c: Call) Err!i64 {
     }
     var old_mask: ?u64 = null;
     if (s == .pselect6 and c.a[5] != 0) {
-        const sigset = try p.readU64(c.a[5]);
+        // {const sigset_t *ss; size_t ss_len}
+        const sigset = try p.readPtr(c.a[5]);
         if (sigset != 0) {
             old_mask = p.sig.mask;
             p.sig.mask = (try p.readU64(sigset)) & ~sig.unblockable;
@@ -4807,7 +5351,7 @@ fn epollCtl(p: *Process, epfd: i32, op: u32, fd: i32, ev_va: u64) Err!i64 {
         // struct epoll_event is packed on amd64 (12 bytes) and padded to 16 on arm64.
         try p.readMem(ev_va, b[0..4]);
         events = std.mem.readInt(u32, b[0..4], .little);
-        data = try p.readU64(ev_va + if (p.arch == .amd64) @as(u64, 4) else 8);
+        data = try p.readU64(ev_va + if (p.arch != .arm64) @as(u64, 4) else 8);
     }
     p.g.lockSpin();
     defer p.g.lock.unlock();
@@ -4845,7 +5389,7 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
     defer if (old_mask) |m| {
         p.sig.mask = m;
     };
-    const ev_size: u64 = if (p.arch == .amd64) 12 else 16;
+    const ev_size: u64 = if (p.arch != .arm64) 12 else 16;
     const deadline: ?i64 = if (timeout_ms >= 0) kern.monoNs() + @as(i64, timeout_ms) * std.time.ns_per_ms else null;
     // The entries are copied out under the group's lock, since other
     // threads change them while this waits (Go's netpoller does).
@@ -4900,7 +5444,7 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
                 if (out >= @as(usize, @intCast(maxevents))) break;
                 var b: [16]u8 = @splat(0);
                 std.mem.writeInt(u32, b[0..4], rev & (e.events | EPOLLERR | EPOLLHUP), .little);
-                if (p.arch == .amd64) std.mem.writeInt(u64, b[4..12], e.data, .little) else std.mem.writeInt(u64, b[8..16], e.data, .little);
+                if (p.arch != .arm64) std.mem.writeInt(u64, b[4..12], e.data, .little) else std.mem.writeInt(u64, b[8..16], e.data, .little);
                 out_buf.appendSlice(p.gpa, b[0..@intCast(ev_size)]) catch return -E.NOMEM;
                 out += 1;
                 if (e.events & EPOLLONESHOT != 0) e.disarmed = true;

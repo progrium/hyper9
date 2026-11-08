@@ -318,6 +318,47 @@ pub const Stat = struct {
         return b;
     }
 
+    /// i386's `struct stat64`, 96 bytes: 64-bit dev, ino, rdev, size and
+    /// blocks at 4-byte alignment, with the old 32-bit inode at 12.
+    pub fn i386Stat64(s: *const Stat) [96]u8 {
+        var b: [96]u8 = @splat(0);
+        std.mem.writeInt(u64, b[0..8], s.dev, .little);
+        std.mem.writeInt(u32, b[12..16], @truncate(s.ino), .little);
+        std.mem.writeInt(u32, b[16..20], s.mode, .little);
+        std.mem.writeInt(u32, b[20..24], s.nlink, .little);
+        std.mem.writeInt(u32, b[24..28], s.uid, .little);
+        std.mem.writeInt(u32, b[28..32], s.gid, .little);
+        std.mem.writeInt(u64, b[32..40], s.rdev, .little);
+        std.mem.writeInt(u64, b[44..52], s.size, .little);
+        std.mem.writeInt(u32, b[52..56], s.blksize, .little);
+        std.mem.writeInt(u64, b[56..64], s.blocks(), .little);
+        std.mem.writeInt(u32, b[64..68], s.atime, .little);
+        std.mem.writeInt(u32, b[72..76], s.mtime, .little);
+        std.mem.writeInt(u32, b[80..84], s.mtime, .little);
+        std.mem.writeInt(u64, b[88..96], s.ino, .little);
+        return b;
+    }
+
+    /// i386's old `struct stat`, 64 bytes, every field 32 bits but the
+    /// mode, link count and ids, which are 16; wider values are truncated.
+    pub fn i386Old(s: *const Stat) [64]u8 {
+        var b: [64]u8 = @splat(0);
+        std.mem.writeInt(u32, b[0..4], @truncate(s.dev), .little);
+        std.mem.writeInt(u32, b[4..8], @truncate(s.ino), .little);
+        std.mem.writeInt(u16, b[8..10], @truncate(s.mode), .little);
+        std.mem.writeInt(u16, b[10..12], @truncate(s.nlink), .little);
+        std.mem.writeInt(u16, b[12..14], @truncate(s.uid), .little);
+        std.mem.writeInt(u16, b[14..16], @truncate(s.gid), .little);
+        std.mem.writeInt(u32, b[16..20], @truncate(s.rdev), .little);
+        std.mem.writeInt(u32, b[20..24], @truncate(s.size), .little);
+        std.mem.writeInt(u32, b[24..28], s.blksize, .little);
+        std.mem.writeInt(u32, b[28..32], @truncate(s.blocks()), .little);
+        std.mem.writeInt(u32, b[32..36], s.atime, .little);
+        std.mem.writeInt(u32, b[40..44], s.mtime, .little);
+        std.mem.writeInt(u32, b[48..52], s.mtime, .little);
+        return b;
+    }
+
     /// `struct statx`, 256 bytes, with the basic fields.
     pub fn statx(s: *const Stat) [256]u8 {
         var b: [256]u8 = @splat(0);

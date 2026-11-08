@@ -85,7 +85,7 @@ The PR that finishes a proposal updates DESIGN.md to describe what was built, ta
 
 ## Tests
 
-Integration cases are tagged with the proposal they prove, by slug or id, in brackets at the end of the name: `test "ls /bin | wc -l (demo) [baseline]"`, `test "ramfs posts to /srv [devsrv]"`. A case whose proposal isn't implemented skips in `zig build integration` and `zig build test`, unless `-Dpending` is given, and stops skipping in the commit that marks the proposal implemented. Untagged cases always run. Write tags as `[a, b]`, with a comma and a space; `check` enforces it, since `zig build proposal` matches them by text.
+Integration cases are tagged with the proposal they prove, by slug or id, in brackets at the end of the name: `test "ls /bin | wc -l (demo) [baseline]"`, `test "ramfs posts to /srv [devsrv]"`. A case whose proposal isn't implemented skips in `zig build integration`, unless `-Dpending` is given, and stops skipping in the commit that marks the proposal implemented. Untagged cases always run. Write tags as `[a, b]`, with a comma and a space; `check` enforces it, since `zig build proposal` matches them by text.
 
 `zig build proposal -Dp=<id or slug>` runs one proposal's demos and cases, whatever its status. Demos that aren't integration cases are registered for their proposal in `build.zig` (`addDemo`).
 

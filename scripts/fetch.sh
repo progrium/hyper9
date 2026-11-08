@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
 # libraries, the patched Unicorn source and v86 into .local, and on request
-# the release's 386 ISO.
+# the release's 386 ISO and the browser host's Linux demo root.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src v86
-#                                 iso386; default all but iso386)
+#                                 iso386 alpine386web; default all but
+#                                 iso386 and alpine386web)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -13,7 +14,7 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn unicorn-src v86} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|v86|iso386) ;; *) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
+	case $p in src|image|unicorn|unicorn-src|v86|iso386|alpine386web) ;; *) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
 done
 want() { [[ $parts == *" $1 "* ]]; }
 
@@ -123,6 +124,30 @@ echo "$ALPINE_LAYERS" | while read -r arch sha; do
 	fi
 	echo "linux/alpine-$arch: $ALPINE_VERSION"
 done
+
+# The browser host's Linux demo root: the 386 Alpine root with the pinned
+# packages unpacked over a copy of it, for src/web/linux.list.
+if want alpine386web; then
+dir="$H9_LOCAL/linux/alpine-386-web"
+stamp=$(echo "$ALPINE_386_WEB_PKGS" | shasum -a 256 | cut -d' ' -f1)
+if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
+	rm -rf "$dir" "$dir.tmp"
+	cp -a "$H9_LOCAL/linux/alpine-386" "$dir.tmp"
+	echo "$ALPINE_386_WEB_PKGS" | while read -r f sha; do
+		[ -n "$f" ] || continue
+		apk="$H9_LOCAL/cache/$f"
+		curl -fsSL -o "$apk" "$ALPINE_PKG_URL/$f"
+		echo "$sha  $apk" | shasum -a 256 -c --quiet
+		# An .apk is gzipped tars one after another, which tar reads as
+		# one; the signature and .PKGINFO are left out.
+		tar -xzf "$apk" -C "$dir.tmp" --exclude='.SIGN.*' --exclude=.PKGINFO
+		rm -f "$apk"
+	done
+	echo "$stamp" >"$dir.tmp/.h9-stamp"
+	mv "$dir.tmp" "$dir"
+fi
+echo "linux/alpine-386-web: $(echo "$ALPINE_386_WEB_PKGS" | awk 'NF{printf "%s ", $1}')"
+fi
 
 # v86: v86.wasm and its license into .local/v86, for zig build web.
 if want v86; then

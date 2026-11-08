@@ -354,6 +354,60 @@ static void udp(void) {
 	printf("ok udp\n");
 }
 
+/* QUIC stacks (quinn, quic-go): probe UDP_SEGMENT and UDP_GRO, which h9
+ * refuses so they send a datagram per call, then batch with sendmmsg and
+ * recvmmsg. recvmmsg returns what's queued without waiting for the rest. */
+static void udp_mmsg(void) {
+	int r = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK("udp_mmsg", r >= 0 && bind(r, (void *)&a, sizeof a) == 0);
+	socklen_t n = sizeof a;
+	CHECK("udp_mmsg", getsockname(r, (void *)&a, &n) == 0);
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	int one = 1, v = 0;
+	socklen_t vl = sizeof v;
+	CHECK("udp_mmsg", setsockopt(s, IPPROTO_UDP, 103 /* UDP_SEGMENT */, &one, sizeof one) < 0 && errno == ENOPROTOOPT);
+	CHECK("udp_mmsg", getsockopt(s, IPPROTO_UDP, 103, &v, &vl) < 0 && errno == ENOPROTOOPT);
+	CHECK("udp_mmsg", setsockopt(r, IPPROTO_UDP, 104 /* UDP_GRO */, &one, sizeof one) < 0 && errno == ENOPROTOOPT);
+	char out[3][8] = {"one", "two", "three"};
+	struct iovec oiov[3];
+	struct mmsghdr om[3];
+	memset(om, 0, sizeof om);
+	for (int i = 0; i < 3; i++) {
+		oiov[i] = (struct iovec){out[i], strlen(out[i])};
+		om[i].msg_hdr = (struct msghdr){.msg_name = &a, .msg_namelen = sizeof a, .msg_iov = &oiov[i], .msg_iovlen = 1};
+	}
+	CHECK("udp_mmsg", sendmmsg(s, om, 3, 0) == 3);
+	CHECK("udp_mmsg", om[0].msg_len == 3 && om[1].msg_len == 3 && om[2].msg_len == 5);
+	char in[4][16];
+	struct iovec iiov[4];
+	struct sockaddr_in from[4];
+	struct mmsghdr im[4];
+	memset(im, 0, sizeof im);
+	for (int i = 0; i < 4; i++) {
+		iiov[i] = (struct iovec){in[i], sizeof in[i]};
+		im[i].msg_hdr = (struct msghdr){.msg_name = &from[i], .msg_namelen = sizeof from[i], .msg_iov = &iiov[i], .msg_iovlen = 1};
+	}
+	/* Wait for all three to arrive, then take them in one call; the
+	 * fourth slot finds the queue empty and ends the batch. */
+	struct pollfd pf = {r, POLLIN, 0};
+	CHECK("udp_mmsg", poll(&pf, 1, 2000) == 1);
+	usleep(100000);
+	int got = 0;
+	while (got < 3) {
+		int k = recvmmsg(r, im + got, 4 - got, MSG_DONTWAIT, NULL);
+		CHECK("udp_mmsg", k > 0 || (k < 0 && errno == EAGAIN && poll(&pf, 1, 2000) == 1));
+		if (k > 0) got += k;
+	}
+	CHECK("udp_mmsg", im[0].msg_len == 3 && memcmp(in[0], "one", 3) == 0);
+	CHECK("udp_mmsg", im[1].msg_len == 3 && memcmp(in[1], "two", 3) == 0);
+	CHECK("udp_mmsg", im[2].msg_len == 5 && memcmp(in[2], "three", 5) == 0);
+	CHECK("udp_mmsg", from[2].sin_family == AF_INET && from[2].sin_port != 0);
+	errno = 0;
+	CHECK("udp_mmsg", recvmmsg(r, im, 4, MSG_DONTWAIT, NULL) < 0 && errno == EAGAIN);
+	printf("ok udp_mmsg\n");
+}
+
 /* musl's resolver: bind to any address and port 0, then two sendtos to
  * the same server (the A and AAAA queries). Under --net outbound the
  * bind can't announce, so the first sendto connects the socket and the
@@ -502,6 +556,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "exit_eof") || !strcmp(n, "net")) exit_eof();
 		if (!strcmp(n, "dual_bind") || !strcmp(n, "net")) dual_bind();
 		if (!strcmp(n, "udp") || !strcmp(n, "net")) udp();
+		if (!strcmp(n, "udp_mmsg") || !strcmp(n, "net")) udp_mmsg();
 		if (!strcmp(n, "many") || !strcmp(n, "net")) many();
 		if (!strcmp(n, "disabled")) disabled();
 		if (!strcmp(n, "ifaddrs")) ifaddrs();

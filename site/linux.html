@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h9: Linux programs next to 9front ones</title>
+<link rel="icon" href="data:,">
+<!-- Reached only from the λ in the corner of index.html, after the π in
+     The Net. Same plain style as the project page. -->
+<style>
+  body { max-width: 46em; margin: 1em auto; padding: 0 1em; background: #fff; color: #000; }
+  h1, .authors { text-align: center; }
+  .authors { font-size: 1.2em; font-weight: bold; margin-bottom: 0; }
+  .nav { text-align: center; }
+  abbr { text-decoration: none; border-bottom: 1px dotted; cursor: help; }
+  pre { margin-left: 2em; overflow-x: auto; }
+  iframe { width: 100%; height: 26em; border: 1px solid #888; }
+</style>
+</head>
+<body>
+
+<p class="nav">[
+<a href="./">h9</a> |
+<a href="#about">about</a> |
+<a href="#demo">demo</a> |
+<a href="#trying">trying it</a> |
+<a href="#runs">what runs</a> |
+<a href="#how">how it works</a> |
+<a href="#gaps">gaps</a> ]</p>
+
+<h1>h9: Linux programs next to 9front ones</h1>
+
+<p class="authors"><a href="https://github.com/progrium">Jeff Lindsay</a>, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr></p>
+
+<h2 id="about">About</h2>
+
+<p>
+h9 runs Linux ELF binaries in the same machine as 9front ones.
+A process's personality is picked when it execs, by the binary's format:
+an a.out is a 9front process, and an ELF is a Linux process.
+A Linux process's system calls go to a second syscall table in h9,
+translated onto the same drawterm kernel that serves 9front's.
+</p>
+
+<p>
+So the two kinds of process share one mount table,
+one set of file descriptors, pipes, and notes,
+and one sandbox policy.
+They pipe to each other and exec each other, both ways,
+and the environment goes across with them.
+A Linux process sees its own root, such as Alpine's minirootfs,
+with the 9front tree at <tt>/9</tt>.
+</p>
+
+<p>
+There is no Linux kernel and no VM image here.
+Each Linux process runs in hardware-isolated user mode
+on the host's hypervisor, as 9front processes do,
+or on h9's emulator where there is none.
+</p>
+
+<h2 id="demo">Demo</h2>
+
+<p>
+Below is h9's browser host running Alpine Linux's own 386 binaries:
+busybox's shell, jq, and sqlite3, unchanged, on
+<a href="https://github.com/copy/v86">v86</a> in a Web Worker,
+with a small Linux root loaded into memory.
+Try <tt>uname -a</tt>, <tt>ps</tt>, <tt>ls /proc</tt>,
+<tt>seq 5 | jq -s add</tt>, or
+<tt>echo 'select sqlite_version();' | sqlite3</tt>.
+It needs JavaScript Promise Integration, which Chrome and Edge have from version 137.
+The demo can also be <a href="demo/?linux">opened on its own page</a>.
+</p>
+
+<iframe src="demo/?linux" title="h9 running Alpine Linux's busybox sh in the browser"></iframe>
+
+<p>
+The browser has no amd64 or arm64 CPU to run on,
+so this uses the Linux personality's 32-bit x86 support
+(<a href="https://github.com/progrium/hyper9/blob/main/design/linux-i386.md">linux-i386</a>),
+the same syscall table decoded for <tt>int 0x80</tt>.
+</p>
+
+<h2 id="trying">Trying it</h2>
+
+<p>
+<tt>--root</tt> takes a Linux tree as well as a 9front one,
+and h9 tells them apart by looking, so there is no Linux flag.
+Given a Linux root, a bare program name is found on the Linux <tt>PATH</tt>:
+</p>
+
+<pre>
+h9 --root alpine ls            # busybox's ls
+h9 --root alpine /9/bin/ls     # 9front's ls, from the same Linux root
+h9 --root alpine sh            # an Alpine shell
+h9 --root alpine --writable alpine apk add jq
+</pre>
+
+<p>
+<tt>--root</tt> can be given twice, once for each kind of tree.
+<tt>--rc</tt> still runs 9front's rc,
+and a 9front process runs a Linux program by its <tt>#λ</tt> path.
+<tt>scripts/fetch.sh</tt> fetches an Alpine root, pinned by digest,
+into <tt>.local/linux</tt>.
+</p>
+
+<h2 id="runs">What runs</h2>
+
+<p>
+Static and dynamic programs, for arm64 and amd64, and 386 on the emulator and in the browser,
+with threads, sockets, and signals.
+Each of these has been run in h9, most of them from Alpine's packages:
+</p>
+
+<ul>
+<li>busybox, <tt>apk</tt>, and CPython;</li>
+<li>jq, ripgrep, bat, fzf, htop, and btop;</li>
+<li>ffmpeg;</li>
+<li>git, over the network as well as locally, and age with passage;</li>
+<li>SQLite, with WAL mode across processes and concurrent writers;</li>
+<li>PostgreSQL 17: <tt>initdb</tt>, the server, and psql over TCP and its Unix socket;</li>
+<li>Redis 8, with <tt>redis-benchmark</tt>, BGSAVE, and AOF rewrites;</li>
+<li>the Go toolchain: <tt>go build</tt>, <tt>go test</tt>, and module downloads;</li>
+<li>Zig 0.16: <tt>zig cc</tt>, <tt>zig build</tt>, and <tt>zig test</tt>;</li>
+<li>esbuild, including <tt>--serve</tt>.</li>
+</ul>
+
+<p>
+Each one turned up something missing,
+and the <a href="https://github.com/progrium/hyper9/blob/main/design/0018-linux-personality.md#updates">proposal's Updates</a>
+say what each needed.
+</p>
+
+<h2 id="how">How it works</h2>
+
+<p>
+Linux traps with the same instructions as 9front:
+<tt>SVC</tt> on arm64 and <tt>SYSCALL</tt> on amd64.
+So a Linux system call already reaches h9 as the same vCPU exit,
+with every register the Linux ABI uses,
+and h9 dispatches it by the process's personality.
+</p>
+
+<ul>
+<li><b>Loading.</b> An ELF loader for static and dynamic programs,
+  with musl's <tt>ld-musl</tt> read from the Linux view,
+  and a stack of argv, envp, and auxv.</li>
+<li><b>Memory.</b> VMAs over the vmm's regions, with pages faulted in on first touch,
+  <tt>mmap</tt>, <tt>mprotect</tt>, and <tt>mremap</tt>,
+  and shared file mappings that stay coherent with <tt>read</tt> and <tt>write</tt>.</li>
+<li><b>Signals are notes.</b> <tt>interrupt</tt> is <tt>SIGINT</tt>,
+  a fault is <tt>SIGSEGV</tt>, and a Linux <tt>kill</tt> posts a note
+  a 9front process can print.</li>
+<li><b>Threads.</b> Each thread is its own kernel process sharing the address space,
+  with futexes as kernel wait queues.</li>
+<li><b>Sockets</b> are <tt>/net</tt> conversations,
+  so <tt>--net</tt> and the sandbox apply to them as they do to 9front programs.
+  <tt>poll</tt>, <tt>select</tt>, and <tt>epoll</tt> are kernel code.</li>
+<li><b>The Linux view, <tt>#λ</tt>.</b> A Linux process's <tt>/</tt> is <tt>#λ</tt>,
+  a small tree of mount points with the Linux root unioned after it:
+  <tt>/9</tt>, <tt>/tmp</tt>, and <tt>/mnt/term</tt> are 9front's,
+  so files pass between the two by the same names,
+  and <tt>/dev</tt>, <tt>/proc</tt>, and <tt>/sys</tt>
+  serve what libc, busybox, and Python read.</li>
+</ul>
+
+<p>
+The <a href="https://github.com/progrium/hyper9/blob/main/design/0018-linux-personality.md">Linux personality proposal</a>
+has the design, with
+<a href="https://github.com/progrium/hyper9/blob/main/design/0049-linux-threads.md">threads</a> and
+<a href="https://github.com/progrium/hyper9/blob/main/design/0050-linux-net.md">networking</a>
+in proposals of their own.
+The <a href="https://github.com/progrium/hyper9/blob/main/DESIGN.md#linux-personality">design document</a>
+describes what's built.
+</p>
+
+<h2 id="gaps">Gaps</h2>
+
+<p>
+The three proposals are still drafts while these close:
+</p>
+
+<ul>
+<li>Job control: <tt>SIGSTOP</tt> and <tt>SIGTSTP</tt> are ignored.</li>
+<li><tt>link</tt> makes a copy, since 9P has no hard links.</li>
+<li><tt>fork</tt> and exec copy memory eagerly, so a big program,
+  such as Zig spawning clang, needs a larger <tt>--memory</tt>.
+  Copy-on-write fork is proposed.</li>
+<li>CPU times in <tt>/proc</tt> read zero, so htop shows 0%.</li>
+<li>The emulator is much slower than a hypervisor for CPU-bound work.</li>
+</ul>
+
+</body>
+</html>

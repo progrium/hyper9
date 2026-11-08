@@ -1004,6 +1004,22 @@ pub fn build(b: *std.Build) void {
         const archive = mk.addOutputFileArg("root.h9a");
         web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "root.h9a").step);
     } else |_| {}
+    // The demo page's Linux root archive for ?linux, from the 386 Alpine
+    // root `scripts/fetch.sh alpine386web` makes and src/web/linux.list;
+    // left out without one.
+    const web_linux_root = b.option([]const u8, "web-linux-root", "386 Linux root tree for the browser host's Linux archive (default .local/linux/alpine-386-web)") orelse
+        b.pathFromRoot(".local/linux/alpine-386-web");
+    if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_linux_root, "bin/busybox" }), .{})) {
+        const webroot = b.addExecutable(.{
+            .name = "webroot",
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        });
+        const mk = b.addRunArtifact(webroot);
+        mk.addArg(web_linux_root);
+        mk.addFileArg(b.path("src/web/linux.list"));
+        const archive = mk.addOutputFileArg("linux.h9a");
+        web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "linux.h9a").step);
+    } else |_| {}
     // The demo page in Chromium through Playwright (tests/web/browser.mjs).
     const web_test = b.addSystemCommand(&.{ "node", "tests/web/browser.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
     web_test.setCwd(b.path("."));
@@ -1075,9 +1091,9 @@ pub fn build(b: *std.Build) void {
     }
 
     // Linux fixtures (tests/fixtures/linux, design/0018-linux-personality.md):
-    // static musl programs for arm64 and amd64, in fixtures/linux/<arch>.
-    const linux_fixtures = b.step("linux-fixtures", "Build the Linux fixtures in tests/fixtures/linux (static musl, arm64 and amd64)");
-    for ([_][]const u8{ "arm64", "amd64" }, [_]std.Target.Cpu.Arch{ .aarch64, .x86_64 }) |arch, cpu| {
+    // static musl programs for arm64, amd64, and 386, in fixtures/linux/<arch>.
+    const linux_fixtures = b.step("linux-fixtures", "Build the Linux fixtures in tests/fixtures/linux (static musl, arm64, amd64, and 386)");
+    for ([_][]const u8{ "arm64", "amd64", "386" }, [_]std.Target.Cpu.Arch{ .aarch64, .x86_64, .x86 }) |arch, cpu| {
         const lt = b.resolveTargetQuery(.{ .cpu_arch = cpu, .os_tag = .linux, .abi = .musl });
         for (linux_fixture_names) |name| {
             const m = b.createModule(.{ .target = lt, .optimize = .ReleaseSmall, .link_libc = true });
@@ -1259,7 +1275,7 @@ pub fn build(b: *std.Build) void {
     const go_cases: ?GoFixtures = if (emu == .unicorn or std.mem.indexOf(u8, backend_list, "native") != null) go_fixtures else null;
     // The Linux Go fixtures (design/0049-linux-threads.md), with the same
     // toolchain, into fixtures/linux/<arch>/go.
-    if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64" }) |arch| {
+    if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64", "386" }) |arch| {
         const dir = b.getInstallPath(.prefix, b.fmt("fixtures/linux/{s}/go", .{arch}));
         const run = b.addSystemCommand(&.{ g, "-C", "tests/fixtures/linux/go", "build", "-trimpath", "-o", b.fmt("{s}{s}", .{ dir, std.fs.path.sep_str }), "./..." });
         run.setCwd(b.path("."));
@@ -1450,7 +1466,7 @@ pub fn build(b: *std.Build) void {
         const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
         backend_tests.root_module.addAnonymousImport(b.fmt("{s}_{s}", .{ set.prefix, name }), .{ .root_source_file = bin.getOutput() });
     };
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
@@ -1481,7 +1497,9 @@ pub fn build(b: *std.Build) void {
         run_backend_tests.step.dependOn(&sign.step);
     }
     test_step.dependOn(&run_backend_tests.step);
-    test_step.dependOn(&run_integration.step);
+    // The integration cases are their own step, `zig build integration`, so
+    // running both doesn't run them twice; `zig build test integration`
+    // runs everything.
 
     // docs/embedding/embed.zig, docs/embedding.md's example of embedding h9.
     const embed_example = b.addExecutable(.{

@@ -21,7 +21,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [9p-roots](0013-9p-roots.md) | implemented |  | 9P roots |
 | [image-roots](0014-image-roots.md) | draft |  | Disk-image roots |
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
-| [kvm](0016-kvm.md) | draft |  | KVM backend |
+| [kvm](0016-kvm.md) | accepted | ready | KVM backend |
 | [whp](0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](0018-linux-personality.md) | draft |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
@@ -37,6 +37,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [schemeless-roots](0076-schemeless-roots.md) | implemented |  | Schemeless roots |
 | [default-command](0081-default-command.md) | implemented |  | A default command from the root |
 | [builtin-root](0087-builtin-root.md) | implemented |  | A built-in root |
+| [login-shell](0089-login-shell.md) | draft | needs host-cmd | h9 as a login shell |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [ci](ci.md) | draft |  | Continuous integration |
@@ -48,6 +49,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [host-sandbox](host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](host-srv.md) | draft |  | Posting host connections to /srv |
+| [linux-i386](linux-i386.md) | draft | needs linux-personality, linux-threads, linux-net | 32-bit x86 Linux programs |
 | [native-backend](native-backend.md) | draft |  | Native backend |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
@@ -73,7 +75,7 @@ flowchart LR
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
-  p_kvm["#35;16 kvm<br/>draft"]:::draft
+  p_kvm["#35;16 kvm<br/>accepted"]:::accepted
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
@@ -89,6 +91,7 @@ flowchart LR
   p_schemeless_roots["#35;76 schemeless-roots<br/>implemented"]:::implemented
   p_default_command["#35;81 default-command<br/>implemented"]:::implemented
   p_builtin_root["#35;87 builtin-root<br/>implemented"]:::implemented
+  p_login_shell["#35;89 login-shell<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
   p_browser_gfx["browser-gfx<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
@@ -100,6 +103,7 @@ flowchart LR
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
+  p_linux_i386["linux-i386<br/>draft"]:::draft
   p_native_backend["native-backend<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
@@ -132,6 +136,8 @@ flowchart LR
   p_9p_roots --> p_schemeless_roots
   p_websocket_9p --> p_schemeless_roots
   p_multicall --> p_builtin_root
+  p_default_command --> p_login_shell
+  p_host_cmd --> p_login_shell
   p_browser_host --> p_audio
   p_browser_host --> p_browser_gfx
   p_gfx --> p_browser_gfx
@@ -143,6 +149,10 @@ flowchart LR
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
   p_9p_roots --> p_host_srv
+  p_linux_personality --> p_linux_i386
+  p_linux_threads --> p_linux_i386
+  p_linux_net --> p_linux_i386
+  p_browser_host --> p_linux_i386
   p_ephemeral_writes --> p_overlay_export
   p_9p_roots --> p_root_auth
 ```
