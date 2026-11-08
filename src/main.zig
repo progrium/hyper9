@@ -272,6 +272,10 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         }
         const why = if (machine.err_msg.len > 0) machine.err_msg else @errorName(err);
         std.debug.print("h9: {s}: {s}\n", .{ prog_arg, why });
+        // A schemeless root's errors name its URL; say how h9 got there.
+        if (err == error.NamespaceFailed and root != null and root.? == .ws and !std.mem.eql(u8, root.?.ws, root_arg.?)) {
+            std.debug.print("h9: root {f}: no such path, so h9 read it as {f}\n", .{ h9.ws.Url.elide(root_arg.?), h9.ws.Url.elide(root.?.ws) });
+        }
         return switch (err) {
             error.NotFound => exit_not_found,
             error.NotExecutable => exit_not_executable,
@@ -360,7 +364,12 @@ fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!
         .unix => |p| return .{ .unix = p },
         .ws => |u| return .{ .ws = u },
         .path => |p| {
-            const real = realPath(io, arena, p) catch return error.NotFound;
+            // A missing path shaped like a URL is one without its scheme
+            // (design/0076-schemeless-roots.md).
+            const real = realPath(io, arena, p) catch {
+                if (try cli.schemelessRoot(arena, p)) |u| return .{ .ws = u };
+                return error.NotFound;
+            };
             const st = std.Io.Dir.cwd().statFile(io, real, .{}) catch return error.NotFound;
             return switch (st.kind) {
                 .directory => .{ .dir = kernPath(arena, real) },

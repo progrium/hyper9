@@ -1472,7 +1472,15 @@ devices in Plan 9.
   a file, so a token stays out of `ps`. `wss` trusts the host's CA bundle,
   or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY`, and
   `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
-  wss://fs.example/9p /n`.
+  wss://fs.example/9p /n`. On the command line the scheme can be left off
+  ([schemeless-roots](design/0076-schemeless-roots.md)): a `--root` or
+  `$H9ROOT` that isn't an existing path and looks like
+  `host[:port][/path]`, with a dotted host, a bracketed address, a port, or
+  `localhost`, is read as `wss://` plus the value, or `ws://` for
+  `localhost`, `127.x.x.x`, and `[::1]`. `--root fs.example.com/9p` is
+  `wss://fs.example.com/9p`, and `--root fs.example.com` is
+  `wss://fs.example.com/`. An existing path always wins, and `--print`
+  shows the URL h9 chose.
 - **WebSockets in the guest.** `/net/ws` is laid out like `/net/tcp` and
   follows `--net` and `--net-allow` as a TCP dial to the URL's host and port
   would. A conversation's `data` file carries binary messages as a byte
@@ -1747,7 +1755,7 @@ Machine:
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|emu` | What runs guest code. `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. `kvm` and `whp` aren't built yet (*Not yet available ([kvm](design/0016-kvm.md), [whp](design/0017-whp.md))*). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
-| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16). Default: `$H9ROOT`, then `.local/9front/root` for a development build. |
+| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. Default: `$H9ROOT`, then `.local/9front/root` for a development build. |
 | `--root-spec NAME` | The attach name sent to a 9P root. Default: empty. |
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |

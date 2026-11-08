@@ -286,14 +286,20 @@ per line from a file, so a token stays out of `ps`. `wss` trusts the host's CA
 bundle; `--root-ca FILE` trusts a PEM file instead. `HTTPS_PROXY`,
 `HTTP_PROXY`, and `NO_PROXY` are honored with `CONNECT`, with credentials from
 the proxy URL. After 30 seconds without a frame h9 pings the server, and a
-server silent for 30 more is a hangup. A namespace file can mount a URL too:
+server silent for 30 more is a hangup. The scheme can be left off
+([schemeless-roots](design/0076-schemeless-roots.md)): a `--root` or `$H9ROOT`
+that isn't an existing path and looks like `host[:port][/path]` is read as
+`wss://host/path`, or `ws://` for `localhost`, `127.x.x.x`, and `[::1]`, so
+`--root fs.example.com/9p` means `wss://fs.example.com/9p`. The host needs a
+dot, brackets, or a port, or must be `localhost`; anything starting with `.`,
+`/`, or `~` stays a path. A namespace file can mount a URL too:
 `mount -c 'wss://fs.example/9p' /n/fs`. `--print` shows the URL with its query
 elided and header values as `…`. A demo, with the 9P server above and the
 relay from the tests in front of it:
 
 ```sh
 zig build wsrelay -- 8080 5640 &
-h9 --root ws://localhost:8080/9p ls /
+h9 --root localhost:8080/9p ls /   # the same as ws://localhost:8080/9p
 ```
 
 The guest can open WebSockets as well: `/net/ws` is laid out like
