@@ -2,7 +2,7 @@
 id: 76
 slug: schemeless-roots
 title: Schemeless roots
-status: accepted
+status: implemented
 created: 2026-11-08
 authors: [progrium]
 depends: [13, 21]
@@ -121,3 +121,11 @@ Demo: `h9 --print --root fs.example.com/9p ls` shows the `wss://` URL in the pla
 2. `resolveRoot`'s fallback, and the two-reading error in `rootError`.
 3. The integration cases.
 4. README's and MANUAL.md's `--root` notes, and DESIGN.md's root filesystem paragraph and CLI flag table. Set `status: implemented`.
+
+## Updates
+
+- 2026-11-08: Implemented. Refinements made while implementing it:
+  - A schemeless root that can't be reached keeps the connection error as every WebSocket root gives it (`h9: PROG: root wss://fs.example.com/9p: connection refused`), and a second line says how h9 got there: `h9: root fs.example.com/9p: no such path, so h9 read it as wss://fs.example.com/9p`. The Machine names the root by its URL and doesn't know the CLI's spelling, so the CLI adds the line rather than the Machine joining both readings into one.
+  - A bare host gains a trailing `/` (`fs.example.com` is `wss://fs.example.com/`), and a host is followed by `?` with no `/` as written (`fs.example.com?t=1` is `wss://fs.example.com?t=1`).
+  - `--check` names a WebSocket root by its URL rather than the argument, so it shows the reading too.
+  - The missing-path case uses `no-such-root` rather than `root`, so a file of that name in the working directory can't make it pass for the wrong reason.

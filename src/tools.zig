@@ -125,8 +125,10 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
     };
     try w.print("root {s}: ", .{switch (root) {
         .dir => |d| d,
-        // A 9P root as given, which is how its errors name it.
-        .tcp, .unix, .ws => o.root_arg orelse "",
+        // A 9P root as given, which is how its errors name it; a
+        // WebSocket root as its URL, which a schemeless root gains.
+        .tcp, .unix => o.root_arg orelse "",
+        .ws => |u| u,
     }});
     if (failed) {
         try w.writeAll("not checked, no usable backend\n");

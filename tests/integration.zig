@@ -4228,6 +4228,153 @@ test "--write=none with a ws:// root is a usage error [21]" {
     try expectIn(r.err, "--write=none can't be enforced on a WebSocket root");
 }
 
+// schemeless-roots: a --root or $H9ROOT without a scheme.
+
+/// Runs `h9 args...` on the first backend without the case's --root, in
+/// `cwd` (if not null), with `vars` added to the environment.
+fn runBare(e: Env, cwd: ?[]const u8, args: []const []const u8, vars: []const [2][]const u8) !Result {
+    var map = try std.testing.environ.createMap(gpa);
+    defer map.deinit();
+    for (vars) |v| try map.put(v[0], v[1]);
+    var h9_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, e.h9, &h9_buf);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ h9_buf[0..n], "--backend", firstBackend(e) });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, args);
+    const io = std.testing.io;
+    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(slow(30_000)), .clock = .awake } };
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .environ_map = &map,
+        .cwd = if (cwd) |c| .{ .path = c } else .inherit,
+        .create_no_window = true,
+    });
+    defer child.kill(io);
+    var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var mr: std.Io.File.MultiReader = undefined;
+    mr.init(gpa, io, mr_buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer mr.deinit();
+    while (mr.fill(64, timeout)) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |x| return x,
+    }
+    try mr.checkAnyError();
+    const term = try child.wait(io);
+    const out = try mr.toOwnedSlice(0);
+    errdefer gpa.free(out);
+    const err_out = try mr.toOwnedSlice(1);
+    const code = switch (term) {
+        .exited => |c| c,
+        else => {
+            gpa.free(out);
+            gpa.free(err_out);
+            return error.Crashed;
+        },
+    };
+    return .{ .code = code, .out = out, .err = err_out };
+}
+
+test "a schemeless --root prints as its wss:// URL [76]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--root", "fs.example.com/9p?token=s3cret", "--print", "ls" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "# wss://fs.example.com/9p?…");
+    const b = try run(e, &.{ "--root", "fs.example.com", "--print", "ls" });
+    defer b.deinit();
+    try std.testing.expectEqual(0, b.code);
+    try expectIn(b.out, "# wss://fs.example.com/");
+}
+
+test "a schemeless loopback root is ws:// and runs /bin/ls [76]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    const url = w.url();
+    try std.testing.expect(std.mem.startsWith(u8, url, "ws://127.0.0.1:"));
+    try expectSameAsHost(e, url["ws://".len..], &.{ "/bin/ls", "/" });
+}
+
+test "an existing directory with a dotted name is a host root, not a URL [76]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, e.root, &root_buf);
+    try s.tmp.dir.symLink(std.testing.io, root_buf[0..n], "fs.example.com", .{ .is_directory = true });
+    const r = try runBare(e, s.path, &.{ "--root", "fs.example.com", "--print", "ls" }, &.{});
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "wss://") == null);
+    const echo = try runBare(e, s.path, &.{ "--root", "fs.example.com", "/bin/echo", "hi" }, &.{});
+    defer echo.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{echo.err});
+    try std.testing.expectEqual(0, echo.code);
+    try std.testing.expectEqualStrings("hi\n", echo.out);
+}
+
+test "an unreachable schemeless root exits 125 naming both readings [76]" {
+    const e = try env(@src());
+    var probe = try listenLocal();
+    const port = probe.socket.address.getPort();
+    probe.deinit(std.testing.io);
+    var buf: [64]u8 = undefined;
+    const arg = try std.fmt.bufPrint(&buf, "127.0.0.1:{d}/9p", .{port});
+    const r = try run(e, &.{ "--root", arg, "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    var want: [160]u8 = undefined;
+    const why = if (onWeb()) "connection failed" else "connection refused";
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root ws://{s}: {s}", .{ arg, why }));
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: no such path, so h9 read it as ws://{s}", .{ arg, arg }));
+}
+
+test "$H9ROOT is read as a schemeless root [76]" {
+    const e = try env(@src());
+    const r = try runBare(e, null, &.{ "--print", "ls" }, &.{.{ "H9ROOT", "fs.example.com/9p" }});
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "# wss://fs.example.com/9p");
+}
+
+test "--root-ca is accepted with a schemeless root [76]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ca.pem", .data = "" });
+    const ca = try std.fs.path.join(gpa, &.{ s.path, "ca.pem" });
+    defer gpa.free(ca);
+    const r = try run(e, &.{ "--root", "fs.example.com/9p", "--root-ca", ca, "--print", "ls" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "wss://fs.example.com/9p");
+    // A loopback root is ws://, which takes no CA.
+    const l = try run(e, &.{ "--root", "localhost:8080/9p", "--root-ca", ca, "--print", "ls" });
+    defer l.deinit();
+    try std.testing.expectEqual(2, l.code);
+    try expectIn(l.err, "--root-ca needs a wss:// root");
+}
+
+test "a missing path without a dotted host is still not found [76]" {
+    const e = try env(@src());
+    for ([_][]const u8{ "no-such-root", "./9front.img", "dist/root" }) |arg| {
+        const r = try run(e, &.{ "--root", arg, "/bin/echo" });
+        defer r.deinit();
+        try std.testing.expectEqual(125, r.code);
+        var want: [96]u8 = undefined;
+        try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: not found", .{arg}));
+        try std.testing.expect(std.mem.indexOf(u8, r.err, "read it as") == null);
+    }
+}
+
 /// H9_TEST_WSS_URL, a wss:// 9P server the host can reach, or a skip.
 fn wssUrl(buf: []u8) ![]const u8 {
     const v = getenv(3, "H9_TEST_WSS_URL") orelse return error.SkipZigTest;

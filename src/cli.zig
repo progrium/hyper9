@@ -294,6 +294,72 @@ pub fn rootArg(arena: std.mem.Allocator, arg: []const u8) error{ OutOfMemory, Ba
     return .{ .path = arg };
 }
 
+/// The URL a --root value without a scheme names
+/// (design/0076-schemeless-roots.md), or null if it isn't shaped like
+/// one: `host[:port][/path][?query]`, where the host is `localhost`, a
+/// dotted name, or a bracketed IPv6 address, or there's a port. A
+/// loopback host (`localhost`, 127.0.0.0/8, `[::1]`) is `ws://`, any
+/// other `wss://`. The caller tries the value as a host path first.
+pub fn schemelessRoot(arena: std.mem.Allocator, arg: []const u8) error{OutOfMemory}!?[]const u8 {
+    if (arg.len == 0) return null;
+    switch (arg[0]) {
+        '.', '/', '~', '-' => return null,
+        else => {},
+    }
+    for (arg) |c| switch (c) {
+        '\\', '!', '@' => return null,
+        else => if (c <= ' ' or c == 0x7f) return null,
+    };
+    const end = std.mem.indexOfAny(u8, arg, "/?#") orelse arg.len;
+    const authority = arg[0..end];
+    var host = authority;
+    var has_port = false;
+    if (authority.len > 0 and authority[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
+        host = authority[1..close];
+        if (host.len == 0) return null;
+        for (host) |c| if (!std.ascii.isHex(c) and c != ':' and c != '.') return null;
+        const after = authority[close + 1 ..];
+        if (after.len > 0) {
+            if (after[0] != ':') return null;
+            has_port = true;
+        }
+    } else {
+        if (std.mem.indexOfScalar(u8, authority, ':')) |colon| {
+            host = authority[0..colon];
+            has_port = true;
+        }
+        if (!hostName(host)) return null;
+        if (!has_port and !std.ascii.eqlIgnoreCase(host, "localhost") and std.mem.indexOfScalar(u8, host, '.') == null) return null;
+    }
+    const scheme = if (loopback(host)) "ws://" else "wss://";
+    const slash = if (end == arg.len) "/" else "";
+    const url = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ scheme, arg, slash });
+    _ = ws.Url.parse(url) catch return null;
+    return url;
+}
+
+/// Letters, digits, `-`, and `.`, with no empty label and no label that
+/// starts or ends with `-`.
+fn hostName(h: []const u8) bool {
+    if (h.len == 0) return false;
+    var labels = std.mem.splitScalar(u8, h, '.');
+    while (labels.next()) |l| {
+        if (l.len == 0 or l.len > 63 or l[0] == '-' or l[l.len - 1] == '-') return false;
+        for (l) |c| if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
+    }
+    return true;
+}
+
+/// A literal loopback host: `localhost`, an IPv4 address in 127.0.0.0/8,
+/// or `::1`. Names aren't resolved, so the scheme never depends on DNS.
+fn loopback(h: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(h, "localhost")) return true;
+    if (std.mem.eql(u8, h, "::1") or std.mem.eql(u8, h, "0:0:0:0:0:0:0:1")) return true;
+    const a = std.Io.net.Ip4Address.parse(h, 0) catch return false;
+    return a.bytes[0] == 127;
+}
+
 fn flag(a: []const u8, comptime name: []const u8) bool {
     return std.mem.eql(u8, a, name);
 }
@@ -571,6 +637,44 @@ test "rootArg reads dial strings and paths" {
     try t.expectEqualStrings("ws://127.0.0.1:8080", (try rootArg(a, "ws://127.0.0.1:8080")).ws);
     for ([_][]const u8{ "tcp!", "tcp!!564", "tcp!h!", "tcp!h!1!x", "unix!", "ws://", "wss://h:0/" }) |bad| {
         try t.expectError(error.BadDial, rootArg(a, bad));
+    }
+}
+
+test "schemelessRoot reads host/path as wss:// and leaves paths alone" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_][2][]const u8{
+        .{ "fs.example.com/9p", "wss://fs.example.com/9p" },
+        .{ "fs.example.com", "wss://fs.example.com/" },
+        .{ "fs.example.com:8443", "wss://fs.example.com:8443/" },
+        .{ "fs.example.com/9p?t=1", "wss://fs.example.com/9p?t=1" },
+        .{ "fs.example.com?t=1", "wss://fs.example.com?t=1" },
+        .{ "10.0.0.5/9p", "wss://10.0.0.5/9p" },
+        .{ "fs:8443/9p", "wss://fs:8443/9p" },
+        .{ "[2001:db8::1]:8443/9p", "wss://[2001:db8::1]:8443/9p" },
+        .{ "localhost:8080/9p", "ws://localhost:8080/9p" },
+        .{ "localhost/9p", "ws://localhost/9p" },
+        .{ "LOCALHOST", "ws://LOCALHOST/" },
+        .{ "127.0.0.1:8080/9p", "ws://127.0.0.1:8080/9p" },
+        .{ "127.1.2.3/9p", "ws://127.1.2.3/9p" },
+        .{ "[::1]:8080/9p", "ws://[::1]:8080/9p" },
+        .{ "localhost.example.com/9p", "wss://localhost.example.com/9p" },
+    };
+    for (cases) |c| {
+        const got = (try schemelessRoot(a, c[0])) orelse return error.TestExpectedUrl;
+        try t.expectEqualStrings(c[1], got);
+    }
+    for ([_][]const u8{
+        "",               "root",          "root/9p",       "dist/root",     "./9front.img", "../r",
+        "/abs/root",      "~/root",        "-x.y",          ".local/9front", "C:\\root",    "C:/root",
+        "tcp!h.x!564",    "u@fs.example",  "fs .example/x", "fs..example/x", "-fs.example",  "fs-.example/x",
+        "fs.example:0/x", "fs.example:x/", "[::1/x",        "[]:80/",        "[::1]x/",      "fs_x.example/",
+    }) |bad| {
+        if (try schemelessRoot(a, bad)) |u| {
+            std.debug.print("{s} -> {s}\n", .{ bad, u });
+            return error.TestUnexpectedUrl;
+        }
     }
 }
 
