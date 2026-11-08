@@ -15,7 +15,9 @@ network policy, limits, and images they can move between machines. Plan 9
 gets them from per-process namespaces and 9P instead of from Linux
 namespaces, cgroups, and union file systems, so most Docker features turn out
 to be a few binds. And since h9 also runs Linux programs, an image can be a
-real Linux root, such as Alpine's, pulled from Docker Hub.
+real Linux root, such as Alpine's, pulled from Docker Hub. [How h9
+compares](comparison.md#containers-and-sandboxes) sets h9 beside containers
+in general; this guide is the hands-on version.
 
 > **Warning.** h9 is an in-development research prototype and its sandbox
 > hasn't been audited ([manual, chapter 22](../MANUAL.md#22-sandboxing)).
@@ -297,8 +299,9 @@ host$ h9 --root ./images/alpine sh -c '/9/bin/ls /9/bin | wc -l'
 - **Symlinks** resolve inside the tree, as `chroot` would, so Alpine's
   `/bin/ls -> /bin/busybox` reads the image's busybox.
 - **The architecture** should be the host's: arm64 images on Apple Silicon
-  and amd64 ones on x86\_64 Linux run on the hypervisor. An image for another
-  architecture runs only on the emulator, and much more slowly.
+  run on the hypervisor, and amd64 ones on x86\_64 Linux on KVM or the
+  native backend. An image for another architecture runs only on the
+  emulator, and much more slowly.
 - **A Linux root** has to be a local directory: 9P and WebSocket roots are
   9front trees.
 
