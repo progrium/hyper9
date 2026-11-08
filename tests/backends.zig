@@ -4,6 +4,7 @@
 //! skipped; the test fails if none can.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const h9 = @import("h9");
 const hello = @import("hello");
 const vmm = h9.vmm;
@@ -64,7 +65,7 @@ fn expectAll(arch: aout.Arch, bytes: []const u8, want: Result) !void {
     defer arena.deinit();
     const gpa = arena.allocator();
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         const got = try runOn(gpa, kind, arch, bytes) orelse continue;
         ran += 1;
         errdefer std.debug.print("backend {t}, {t} binary\n", .{ kind, arch });
@@ -130,6 +131,184 @@ test "exits with a message amd64" {
     try expectAll(.amd64, bytes, exits_result);
 }
 
+test "a guest syscall with any value in AX traps to h9 [95]" {
+    // 9front takes the number from BP and ignores AX, so a guest may leave
+    // anything there; on native, the host kernel mustn't act on any of
+    // them (a patched kernel ran 335 and 336 before seccomp saw them).
+    // Each value goes in AX for a pwrite of one byte.
+    const ax = [_]u64{ 0, 39, 60, 231, 335, 336, 0x4000_0027, 0x7fff_ffff, 0x1_0000_0027, std.math.maxInt(u64) };
+    const code = [_]u8{
+        0x48, 0x83, 0xec, 0x30, // subq  $0x30, %rsp
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x01, 0x00, 0x00, 0x00, // movq  $1, 8(%rsp)       fd
+        0x48, 0x8d, 0x05, 0x4c, 0x00, 0x00, 0x00, // leaq  msg(%rip), %rax
+        0x48, 0x89, 0x44, 0x24, 0x10, // movq  %rax, 16(%rsp)     buf
+        0x48, 0xc7, 0x44, 0x24, 0x18, 0x01, 0x00, 0x00, 0x00, // movq  $1, 24(%rsp)      n
+        0x48, 0xc7, 0x44, 0x24, 0x20, 0xff, 0xff, 0xff, 0xff, // movq  $-1, 32(%rsp)     offset
+        0x48, 0x8d, 0x1d, 0x36, 0x00, 0x00, 0x00, // leaq  table(%rip), %rbx
+        0x41, 0xbc, 0x0a, 0x00, 0x00, 0x00, // movl  $10, %r12d
+        0x48, 0x8b, 0x03, // 1: movq  (%rbx), %rax     AX from the table
+        0xbd, 0x33, 0x00, 0x00, 0x00, // movl  $51, %ebp          PWRITE
+        0x0f, 0x05, // syscall
+        0x48, 0x83, 0xc3, 0x08, // addq  $8, %rbx
+        0x41, 0xff, 0xcc, // decl  %r12d
+        0x75, 0xed, // jnz   1b
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)       nil
+        0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
+        0x0f, 0x05, // syscall
+        0xeb, 0xfe, // jmp   .
+        0x90, 0x90, 0x90, // to msg, 8-aligned
+    };
+    comptime std.debug.assert(code.len == 96);
+    var text: [code.len + 8 + 8 * ax.len]u8 = undefined;
+    @memcpy(text[0..code.len], &code);
+    @memcpy(text[code.len..][0..8], "x" ++ "\x00" ** 7);
+    for (ax, 0..) |v, i| std.mem.writeInt(u64, text[code.len + 8 + 8 * i ..][0..8], v, .little);
+    const bytes = try image(std.testing.allocator, .amd64, &text);
+    defer std.testing.allocator.free(bytes);
+    try expectAll(.amd64, bytes, .{
+        .status = "exited \"\"",
+        .out = "x" ** ax.len,
+        .trace = "1 pwrite 1 1 = 1\n" ** ax.len ++ "1 exits \"\"\n",
+    });
+}
+
+test "a guest that jumps into the stub can't open a host file [95]" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var b = vmm.create(gpa, io, .native, .{ .arch = .amd64 }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return error.SkipZigTest,
+        else => return e,
+    };
+    defer b.destroy();
+    // Finds a SYSCALL in the stub's code (linked at 0x600000000000,
+    // vmm/native_abi.zig) and jumps to it to create `path`. The stub's
+    // seccomp filter must kill it there.
+    const code = [_]u8{
+        0x48, 0xbf, 0x00, 0x10, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, // movabsq $0x600000001000, %rdi
+        0x66, 0x81, 0x3f, 0x0f, 0x05, // 1: cmpw  $0x050f, (%rdi)
+        0x74, 0x05, // je    2f
+        0x48, 0xff, 0xc7, // incq  %rdi
+        0xeb, 0xf4, // jmp   1b
+        0x49, 0x89, 0xfb, // 2: movq  %rdi, %r11
+        0x48, 0x8d, 0x35, 0x1a, 0x00, 0x00, 0x00, // leaq  path(%rip), %rsi
+        0x48, 0xc7, 0xc7, 0x9c, 0xff, 0xff, 0xff, // movq  $-100, %rdi        AT_FDCWD
+        0xba, 0x41, 0x00, 0x00, 0x00, // movl  $0x41, %edx        O_WRONLY|O_CREAT
+        0x41, 0xba, 0xa4, 0x01, 0x00, 0x00, // movl  $0644, %r10d
+        0xb8, 0x01, 0x01, 0x00, 0x00, // movl  $257, %eax         openat
+        0x41, 0xff, 0xe3, // jmp   *%r11
+    };
+    comptime std.debug.assert(code.len == 58);
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/h9-native-escape-{d}", .{std.os.linux.getpid()});
+    const page = try b.allocPages(1);
+    defer b.freePages(page);
+    @memcpy(page[0..code.len], &code);
+    @memcpy(page[code.len..][0..path.len], path);
+    page[code.len + path.len] = 0;
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    try as.map(0x200000, page, .{ .exec = true });
+    defer as.unmap(0x200000);
+    var v = try b.createVcpu();
+    defer v.destroy();
+    try v.setAddressSpace(as);
+    const u: vmm.Ureg = .{ .amd64 = .{ .pc = 0x200000, .flags = 0x202 } };
+    v.setUreg(&u);
+    try std.testing.expectError(error.HypervisorFailed, v.run());
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, path, .{}));
+}
+
+test "two vCPUs run one address space at once, and a shootdown reaches both [95]" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // A sets the first word of data and waits for the second; B waits for
+    // the first and sets the second. Run one after the other, neither
+    // ends; a watchdog kicks them after 5 s, which fails the test.
+    const code = [_]u8{
+        0x48, 0xbb, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // A: movabsq $0x400000, %rbx
+        0xc7, 0x03, 0x01, 0x00, 0x00, 0x00, // movl  $1, (%rbx)
+        0x83, 0x7b, 0x04, 0x01, // 1: cmpl  $1, 4(%rbx)
+        0x75, 0xfa, // jne   1b
+        0x0f, 0x05, // syscall
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // to B, at 0x20
+        0x48, 0xbb, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // B: movabsq $0x400000, %rbx
+        0x83, 0x3b, 0x01, // 1: cmpl  $1, (%rbx)
+        0x75, 0xfb, // jne   1b
+        0xc7, 0x43, 0x04, 0x01, 0x00, 0x00, 0x00, // movl  $1, 4(%rbx)
+        0x0f, 0x05, // syscall
+    };
+    const text_va = 0x200000;
+    const data_va = 0x400000;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .kvm, .native }) |kind| {
+        var b = vmm.create(gpa, io, kind, .{ .arch = .amd64 }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer b.destroy();
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        const text = try b.allocPages(1);
+        defer b.freePages(text);
+        @memcpy(text[0..code.len], &code);
+        const data = try b.allocPages(1);
+        defer b.freePages(data);
+        @memset(data, 0);
+        const as = try b.newAddressSpace();
+        defer as.destroy();
+        try as.map(text_va, text, .{ .read = true, .exec = true });
+        defer as.unmap(text_va);
+        try as.map(data_va, data, .{ .read = true, .write = true });
+        var va = try b.createVcpu();
+        defer va.destroy();
+        var vb = try b.createVcpu();
+        defer vb.destroy();
+        try va.setAddressSpace(as);
+        try vb.setAddressSpace(as);
+        const ua: vmm.Ureg = .{ .amd64 = .{ .pc = text_va, .flags = 0x202, .sp = data_va + 0x800 } };
+        const ub: vmm.Ureg = .{ .amd64 = .{ .pc = text_va + 0x20, .flags = 0x202, .sp = data_va + 0x800 } };
+        va.setUreg(&ua);
+        vb.setUreg(&ub);
+
+        var done: std.atomic.Value(bool) = .init(false);
+        const Watchdog = struct {
+            fn run(d: *std.atomic.Value(bool), x: *vmm.Vcpu, y: *vmm.Vcpu, i: std.Io) void {
+                var n: usize = 0;
+                while (!d.load(.acquire) and n < 500) : (n += 1) std.Io.sleep(i, .fromMilliseconds(10), .awake) catch {};
+                if (d.load(.acquire)) return;
+                x.kick();
+                y.kick();
+            }
+        };
+        const Runner = struct {
+            fn run(x: *vmm.Vcpu, out: *vmm.Error!vmm.Exit) void {
+                out.* = x.run();
+            }
+        };
+        const dog = try std.Thread.spawn(.{}, Watchdog.run, .{ &done, &va, &vb, io });
+        var exit_a: vmm.Error!vmm.Exit = undefined;
+        const ta = try std.Thread.spawn(.{}, Runner.run, .{ &va, &exit_a });
+        const exit_b = vb.run();
+        ta.join();
+        done.store(true, .release);
+        dog.join();
+        try std.testing.expectEqual(vmm.Exit.syscall, try exit_a);
+        try std.testing.expectEqual(vmm.Exit.syscall, try exit_b);
+
+        // Gone for both once the shootdown returns.
+        as.unmap(data_va);
+        as.shootdown();
+        for ([_]*vmm.Vcpu{ &va, &vb }) |v| {
+            v.setUreg(&ua);
+            const exit = try v.run();
+            try std.testing.expect(exit == .fault);
+            try std.testing.expectEqual(data_va, exit.fault.addr);
+        }
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
 test "exits with a message 386 [9]" {
     // The syscall number in AX, arguments from SP+4; call/pop finds msg.
     const code = [_]u8{
@@ -192,7 +371,7 @@ fn expectBreakpoint(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
     defer gpa.free(bytes);
     const pc = aout.layout(arch).utzero + arch.headerSize() + pc_off;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .native, .emu }) |kind| {
         var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
             else => return e,
@@ -246,7 +425,7 @@ fn expectKick(arch: aout.Arch, text: []const u8) !void {
     const bytes = try image(gpa, arch, text);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
             else => return e,
@@ -298,7 +477,7 @@ fn expectKickRace(arch: aout.Arch, text: []const u8) !void {
     const bytes = try image(gpa, arch, text);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
             else => return e,
@@ -353,7 +532,7 @@ test "a kick racing the start of a run isn't lost 386 [9]" {
 fn runPolicy(arch: aout.Arch, bytes: []const u8, pol: h9.Policy, want: []const u8) !void {
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -411,7 +590,7 @@ test "a timeout interrupts sleep arm64" {
 fn expectNotes(arch: aout.Arch, bytes: []const u8, want_status: []const u8, want_out: []const u8) !void {
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| for ([_]?u32{ null, 0 }) |own| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| for ([_]?u32{ null, 0 }) |own| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var err: std.Io.Writer.Allocating = .init(gpa);
@@ -664,7 +843,7 @@ test "a timeout interrupts a console read, and its reader thread is cancelled" {
     const img = try image(gpa, .arm64, &read_echo_arm64);
     defer gpa.free(img);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var in_buf: [64]u8 = undefined;
         var in: BlockingInput = undefined;
         in.init(std.testing.io, "", &in_buf);
@@ -700,7 +879,7 @@ test "a console read returns input from the reader thread, and a later run sees 
     const img = try image(gpa, .arm64, &read_echo_arm64);
     defer gpa.free(img);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var src: std.Io.Reader = .fixed("one\ntwo\n");
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
@@ -732,7 +911,7 @@ test "the memory cap is exact" {
     // HVF, the kernel's page tables count too).
     const gpa = std.testing.allocator;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -754,7 +933,7 @@ test "the memory cap is exact" {
 /// Runs `f(backend)` on each backend that can run arm64 here.
 fn eachBackend(comptime f: fn (vmm.Backend) anyerror!void) !void {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var b = vmm.create(std.testing.allocator, std.testing.io, kind, .{ .arch = .arm64, .memory = 64 << 20 }) catch |e| switch (e) {
             error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
             else => return e,
@@ -1072,7 +1251,7 @@ fn expectPooled(arch: aout.Arch, code: []const u8) !void {
     const bytes = try image(gpa, arch, code);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| for ([_]u32{ 0, 1 }) |own| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| for ([_]u32{ 0, 1 }) |own| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -1111,7 +1290,7 @@ fn expectRun(text: []const u8, root: ?[]const u8, timeout_ns: u64, want_status: 
     const bytes = try image(gpa, .arm64, text);
     defer gpa.free(bytes);
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var err: std.Io.Writer.Allocating = .init(gpa);
@@ -1419,7 +1598,7 @@ fn expectNet(text: []const u8, argv: []const []const u8, pol: h9.Policy, want_st
     var p = pol;
     p.timeout_ns = 10 * std.time.ns_per_s;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var m = h9.Machine.init(gpa, std.testing.io, .{
@@ -1559,7 +1738,7 @@ test "two machines in one host process each get their own /tmp [6]" {
     // HVF allows one VM per host process, so its second machine is the
     // emulator. KVM allows several.
     var ran: usize = 0;
-    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .whp, .emu }, .{ .emu, .emu } }) |kinds| {
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .whp, .emu }, .{ .native, .native }, .{ .emu, .emu } }) |kinds| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1595,7 +1774,7 @@ test "two machines in one host process each see only their own root changes [11]
     // HVF allows one VM per host process, so its second machine is the
     // emulator. KVM allows several.
     var ran: usize = 0;
-    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .whp, .emu }, .{ .emu, .emu } }) |kinds| {
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .whp, .emu }, .{ .native, .native }, .{ .emu, .emu } }) |kinds| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1636,7 +1815,7 @@ test "two machines in one host process each see only their own root changes [11]
 
 test "a copy-up while another process has the lower file open leaves that reader on the old contents [6]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1654,7 +1833,7 @@ test "a copy-up while another process has the lower file open leaves that reader
 
 test "posting, opening and removing in /srv, and clone boards [8]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1671,7 +1850,7 @@ test "two machines in one process have separate /srv [8]" {
     // HVF allows one VM per host process, so its second machine is the
     // emulator. KVM allows several.
     var ran: usize = 0;
-    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .whp, .emu }, .{ .emu, .emu } }) |kinds| {
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .whp, .emu }, .{ .native, .native }, .{ .emu, .emu } }) |kinds| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1704,7 +1883,7 @@ test "two machines in one process have separate /srv [8]" {
 
 test "a machine's posted channels are closed when it ends [8]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1724,7 +1903,7 @@ test "a machine's posted channels are closed when it ends [8]" {
 
 test "#H/bin is on /bin, reads back, and refuses every change [32]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1739,7 +1918,7 @@ test "#H/bin is on /bin, reads back, and refuses every change [32]" {
 
 test "guest_tools = false leaves #H/bin off /bin and masks #H [32]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
         try r.init();
         defer r.deinit();
@@ -1895,7 +2074,7 @@ fn sleepMs(ms: u64) void {
 /// looks at its output.
 fn expectGfx(text: []const u8, clipboard: bool, act: ?*const fn () void, check: *const fn (out: []const u8) anyerror!void) !void {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .native, .emu }) |kind| {
         var g: GfxRun = .{};
         defer g.deinit();
         if (!try g.start(kind, .{ .text = text, .clipboard = clipboard })) continue;
@@ -2018,7 +2197,7 @@ test "with --gfx=noclip, /dev/snarf keeps its text but leaves the host clipboard
 
 test "closing the window posts hangup and ends the run [15]" {
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .native, .emu }) |kind| {
         var g: GfxRun = .{};
         defer g.deinit();
         if (!try g.start(kind, .{ .text = @embedFile("gfx_sleep"), .timeout_s = 50 })) continue;
@@ -2069,7 +2248,7 @@ test "rio starts, and a window's rc runs a command typed into it [15]" {
     var rb: [std.fs.max_path_bytes]u8 = undefined;
     const root = gfxRoot(&rb) orelse return error.SkipZigTest;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .native, .emu }) |kind| {
         gfx.headless.setClipboard("");
         var g: GfxRun = .{};
         defer g.deinit();
@@ -2096,7 +2275,7 @@ test "acme starts inside rio [15]" {
     var rb: [std.fs.max_path_bytes]u8 = undefined;
     const root = gfxRoot(&rb) orelse return error.SkipZigTest;
     var ran: usize = 0;
-    for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| {
+    for ([_]vmm.BackendKind{ .hvf, .native, .emu }) |kind| {
         var g: GfxRun = .{};
         defer g.deinit();
         if (!try g.start(kind, .{ .guest = "/bin/rio", .argv = &.{ "rio", "-i", "window -r 0 0 640 480 acme" }, .root = root, .timeout_s = 120 })) continue;

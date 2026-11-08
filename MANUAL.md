@@ -309,6 +309,7 @@ If this fails, the message says why:
 | `h9: cannot create auto machine for arm64: no usable hypervisor (is h9 signed with h9.entitlements?)` | 125 | Build with `zig build`, which signs it, or use `h9-emu` |
 | `h9: cannot create emu machine for arm64: the emulator isn't built into this h9 (use h9-emu from the releases, or build with -Demu=unicorn)` | 125 | Use `h9-emu` |
 | `h9: warning: no usable hypervisor; using the emulator` | | Not an error: `h9-emu` fell back to the emulator |
+| `h9: warning: no /dev/kvm (...); using the native backend` | | Not an error: on Linux x86\_64 without KVM, h9 runs amd64 programs on the native backend |
 
 ### 3. First run
 
@@ -1795,7 +1796,7 @@ Machine:
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|whp\|emu` | What runs guest code. `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. `kvm` and `whp` aren't built yet (*Not yet available ([kvm](design/0016-kvm.md), [whp](design/0017-whp.md))*). |
+| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code. `auto` (the default) uses the host's hypervisor when it can run the program's architecture, then on Linux x86\_64 the native backend, and otherwise the emulator, with a warning. `kvm` and `whp` aren't built yet (*Not yet available ([kvm](design/0016-kvm.md), [whp](design/0017-whp.md))*). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
 | `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
 | `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
@@ -2239,12 +2240,16 @@ A **backend** is what runs guest code:
 | `hvf` | macOS on Apple Silicon (Hypervisor.framework) | arm64 |
 | `kvm` | Linux | *Not yet available ([kvm](design/0016-kvm.md))* |
 | `whp` | Windows | *Not yet available ([whp](design/0017-whp.md))* |
+| `native` | Linux x86\_64, 5.11 or later, without a hypervisor | amd64 |
 | `emu` | Any, in `h9-emu` only (Unicorn) | arm64, amd64, and 386 |
 
 `--backend auto`, the default, uses the host's hypervisor if it's built in,
-usable, and can run the program's architecture, and otherwise the emulator,
-printing `h9: warning: no usable hypervisor; using the emulator`. Naming a
-backend uses that one or fails with exit 125.
+usable, and can run the program's architecture; then, on Linux x86\_64, the
+native backend, which runs amd64 guest code directly on the CPU in a stub
+process and traps its system calls with the kernel's Syscall User Dispatch
+and seccomp ([native-backend](design/0095-native-backend.md)); and otherwise the
+emulator, printing `h9: warning: no usable hypervisor; using the emulator`.
+Naming a backend uses that one or fails with exit 125.
 
 **The emulator.** Use it where there's no hypervisor (Linux and Windows
 today, VMs without nested virtualization, CI), for Go programs on Apple
@@ -2392,7 +2397,8 @@ They change faster than this manual, as proposals land.
   server's tree. Attaching a kernel device is what a `#` name does.
 
 - **backend**: h9's name for what runs guest code: a hypervisor (`hvf` on macOS; `kvm`
-  and `whp` are proposed) or the emulator (`emu`). Chosen with `--backend`.
+  and `whp` are proposed), the host CPU in a stub process (`native`, on Linux
+  x86\_64), or the emulator (`emu`). Chosen with `--backend`.
 
 - **bind**: Make one name in the namespace refer to another file or directory, like a
   symlink that lives in the process's namespace rather than on disk. See

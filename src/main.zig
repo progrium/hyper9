@@ -294,9 +294,10 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         return exit_failed;
     };
     defer machine.deinit();
-    if (cfg.backend == .auto and machine.backend.kind() == .emu) {
+    if (cfg.backend == .auto and (machine.backend.kind() == .emu or machine.backend.kind() == .native)) {
         const why = h9.vmm.whyUnavailable(.auto) orelse "no usable hypervisor";
-        std.debug.print("h9: warning: {s}; using the emulator\n", .{why});
+        const what = if (machine.backend.kind() == .emu) "the emulator" else "the native backend";
+        std.debug.print("h9: warning: {s}; using {s}\n", .{ why, what });
     }
 
     const status = machine.run(prog, argv) catch |err| {

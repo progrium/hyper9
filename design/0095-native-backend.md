@@ -1,7 +1,8 @@
 ---
+id: 95
 slug: native-backend
 title: Native backend
-status: draft
+status: implemented
 created: 2026-11-08
 authors: [progrium]
 depends: []
@@ -12,7 +13,7 @@ areas: [vmm, cli, sandbox, tests]
 
 ## Abstract
 
-A vmm backend, `src/vmm/native.zig`, that runs guest code directly on the host CPU with no hypervisor and no emulator, on Linux (x86\_64 first, then arm64). Each address space is a small stub process whose memory comes from one shared memfd, and the stub's thread is the vCPU. The host kernel turns every guest syscall into a SIGSYS in the stub, through Syscall User Dispatch with a seccomp filter behind it, and the stub hands the registers to h9 over a shared page. Compute runs at native speed, the backend is MIT so it ships in `h9`, and it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. macOS and Windows aren't covered; Rationale says why.
+A vmm backend, `src/vmm/native.zig`, that runs guest code directly on the host CPU with no hypervisor and no emulator, on Linux (x86\_64 first, then arm64). Each address space is a small stub process whose memory comes from one shared memfd, and each of the stub's threads runs one vCPU. The host kernel turns every guest syscall into a SIGSYS in the stub, through Syscall User Dispatch with a seccomp filter behind it, and the stub hands the registers to h9 over a shared page. Compute runs at native speed, the backend is MIT so it ships in `h9`, and it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. macOS and Windows aren't covered; Rationale says why.
 
 ## Background
 
@@ -58,8 +59,8 @@ The handler copies the signal frame's registers and FP state into the control pa
 
 - **Backend** owns one memfd sized to the machine's memory cap (sparse), and hands out pages from it with `gphys.zig`'s allocator, as HVF and KVM do from their RAM region. h9 maps the whole memfd once, so `translate` and `copy` read guest memory in place.
 - **AddressSpace** is a stub process plus a list of regions. `map` and `unmap` queue requests the stub carries out before it next runs guest code; an address space that isn't running gets them at its next `run`. `codeChanged` queues an I-cache flush (a no-op on x86).
-- **Vcpu** is the stub's thread as seen from one h9 thread. `setAddressSpace` binds it to a stub. `run` resumes the stub and waits for its next exit. `getUreg` and `setUreg` convert between the signal frame and `vmm.Ureg`, keeping the selectors and system flags as the shim does today (`arch.sanitize`); `getExtra` and `setExtra` use the frame's FXSAVE/XSAVE area on x86 and its FP/SIMD record on arm64, and the thread pointer is `FS_BASE` or `TPIDR_EL0`, set through the stub. `kick` sends the stub `SIGURG` with `tgkill`; the handler reports `interrupted` with the registers where the guest stopped, which is simpler than KVM's shim cases since there's no shim path to be in.
-- **Processes.** One stub per address space, so 9front's fixed layout works and `rfork` without `RFMEM` gets a new stub. `RFMEM` shares data and bss by mapping the same memfd ranges into both stubs, with a private copy of the stack segment, as 9front shares segments. A Plan 9 process whose address space has more than one thread at a time doesn't exist, so one stub runs one guest thread.
+- **Vcpu** is a stub thread as seen from one h9 thread. `setAddressSpace` binds it to a stub, and its first run there takes a thread of the stub, which it keeps while it's free. `run` resumes the stub and waits for its next exit. `getUreg` and `setUreg` convert between the signal frame and `vmm.Ureg`, keeping the selectors and system flags as the shim does today (`arch.sanitize`); `getExtra` and `setExtra` use the frame's FXSAVE/XSAVE area on x86 and its FP/SIMD record on arm64, and the thread pointer is `FS_BASE` or `TPIDR_EL0`, set through the stub. `kick` sends the stub `SIGURG` with `tgkill`; the handler reports `interrupted` with the registers where the guest stopped, which is simpler than KVM's shim cases since there's no shim path to be in.
+- **Processes.** One stub per address space, so 9front's fixed layout works and `rfork` without `RFMEM` gets a new stub. `RFMEM` shares data and bss by mapping the same memfd ranges into both stubs, with a private copy of the stack segment, as 9front shares segments. A Plan 9 process has one thread, but a Linux program under the Linux personality has as many as it starts, each on its own vCPU in the same address space (design/0049-linux-threads.md). So a stub has a control thread, which never runs guest code, and starts another thread for each vCPU that runs the space; they run guest code in parallel, as on a hypervisor. `shootdown` has the control thread carry out the queued unmaps: its `munmap` is the host kernel's, which shoots down the other threads' TLBs before it returns.
 - **Limits.** There's no hardware vCPU cap, so `maxVcpus` is the stubs the host's `RLIMIT_NPROC` and file descriptors allow, and every process owns its vCPU; `cpupool.zig` isn't needed. `--cpus` still caps how many run at once.
 
 ### Selection and CLI
@@ -124,3 +125,13 @@ So a guest gets no host filesystem, network or process access that the sandbox `
 - How long to spin before sleeping on the futex, and whether h9 should spin at all when the host has fewer CPUs than running guests. Bare-metal numbers are needed.
 - Whether auto should prefer native over the emulator from the start, or only after it has run the full suite in CI for a while.
 - Whether the empty namespaces are worth their setup cost per stub, given seccomp already confines it.
+
+## Updates
+
+- 2026-11-08: Choices made in the first implementation, on x86\_64:
+  - Linux threads ([linux-threads](0049-linux-threads.md)) landed before this, so a stub isn't one guest thread. It has a control thread that never runs guest code, and starts a thread for each vCPU that runs the space, so a Linux program's threads run in parallel. A vCPU goes back to the stub thread it last ran on while that one is free, which keeps the AVX state `Extra` doesn't carry with it. `AddressSpace.shootdown` has the control thread carry out the queued unmaps, and its host `munmap` shoots down the other threads' TLBs.
+  - Each stub thread has its own control page, signal stack, and FS base, and the handler finds its thread from the signal stack it runs on. The seccomp filter also lets through `clone` with exactly the thread flags, `gettid`, `sigaltstack`, and `prctl`, still only from the stub's range.
+  - The empty namespaces aren't used: the stub runs in its own session (so the terminal's signals go to h9 alone) with no file descriptors but the RAM file and its control pages, behind dispatch and the filter.
+  - CPUID can't be hidden, so guests see the host's AVX and AVX-512, unlike under KVM's shim.
+  - arm64 isn't built. It's step 7, and the arm64 Open issue still stands.
+  - "os/signal receives interrupt on Ctrl-C" fails in about 3% of runs on native, with the program hanging or crashing when the note lands just after a Go M's `rfork(RFMEM)`. It isn't root-caused yet.

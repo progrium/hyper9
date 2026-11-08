@@ -64,6 +64,28 @@ zig build integration -Darch=amd64     # the cases on KVM (and emu, if built in)
 The KVM backend blocks `SIGRTMIN + 1` in the threads that run vCPUs and uses
 it to kick them; an embedder must leave it to h9.
 
+### Linux without KVM (native)
+
+On x86\_64 Linux hosts without a usable KVM (containers, CI, and cloud VMs
+without nested virtualization), h9 runs amd64 binaries on the native backend
+([native-backend](design/0095-native-backend.md)): guest code runs directly on the
+host CPU in a small stub process per address space (with a thread per thread
+of a Linux program), and the kernel turns every guest syscall into a signal the
+stub hands to h9 (Syscall User Dispatch, Linux
+5.11 or later, with a seccomp filter behind it). It's built into every Linux
+x86\_64 `h9`, and `auto` uses it after KVM and before the emulator. Compute
+runs at native speed, many times faster than the emulator. Before using it, h9
+checks that a guest syscall traps with each of a list of values in AX, and
+`h9 --check` says why it can't run where it can't. A root built on such a host
+(or unpacked from the release's amd64 ISO) runs the integration cases quickly:
+
+```sh
+zig build integration -Darch=amd64 -Dbackends=native
+```
+
+`-Dbackends` picks the backends the cases run on (by default every one built in
+that runs here), and the Go cases run on native when it's among them.
+
 drawterm is committed under `third_party/drawterm` as a squashed git subtree,
 so a fresh checkout builds without network access. To move to a new upstream
 revision, bump `DRAWTERM_REV` and run `./scripts/vendor-drawterm.sh` on a
@@ -253,7 +275,8 @@ each, so a guest that exits with one of those numbers can still be told
 apart.
 
 Go's `GOOS=plan9 GOARCH=amd64` binaries run on the emulator (`--backend emu`,
-or `--arch amd64` with h9-emu): goroutines on several processes, timers,
+or `--arch amd64` with h9-emu), and on Linux x86\_64 on KVM or the native
+backend: goroutines on several processes, timers,
 `os/exec`, `net/http`, and `os/signal`. A Go program reserves several hundred MB
 of memory at start, so one that uses `os/exec` needs `--memory 4G`.
 
@@ -324,7 +347,7 @@ A conversation's `data` file carries binary messages as a byte stream, and its
 `text` file carries text messages one per read and write, for any WebSocket
 service. Guest connections don't use the host's proxies.
 
-Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--root-contained`, `--cwd DIR`, `--env
+Flags: `--backend auto|hvf|kvm|whp|native|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--root-contained`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
 As the last argument, `--rc` alone runs a login rc, which sources the root's
@@ -336,7 +359,9 @@ saved and replayed as is. A `bind -c '#O' PATH` line in it puts a fresh
 copy-on-write overlay over whatever PATH is at that point in the replay.
 
 `--backend auto` (the default) uses the host hypervisor (HVF on macOS, KVM on
-Linux, WHP on Windows x86\_64) and otherwise falls back to the emulator with a warning that says why.
+Linux, WHP on Windows x86\_64), then on Linux x86\_64 the native backend, and
+otherwise falls back to the emulator, with a warning that says why it didn't
+use the hypervisor.
 The emulator also runs amd64 binaries on arm64 hosts, for testing, and 386
 binaries on every host; HVF runs arm64 only, KVM the host's architecture, and
 WHP amd64 only.
@@ -492,9 +517,10 @@ links Plan 9 a.out.
 The Go programs in [tests/fixtures/go](tests/fixtures/go) are built by `zig
 build go-fixtures` into `zig-out/fixtures/go`, as `GOOS=plan9 GOARCH=amd64`
 with `GOTOOLCHAIN=go$GO_VERSION` from [scripts/pins.sh](scripts/pins.sh), so
-any installed Go fetches the same toolchain. `zig build integration`
-builds them when `go` is on `PATH` and h9 is built with
-`-Demu=unicorn`, and their cases run on the emulator; without Go they skip.
+any installed Go fetches the same toolchain. `zig build integration` builds
+them when `go` is on `PATH` and h9 is built with `-Demu=unicorn` or the cases
+run on the native backend, and their cases run on native when it's in the
+list, else on the emulator; without Go they skip.
 They don't need the root tree. `zig build go-stdtest -Demu=unicorn` runs Go's
 own tests for `time`, `syscall`, `os`, and `runtime` on the emulator and prints
 pass, skip, and fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh),
@@ -543,7 +569,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, emu on Unicorn, and v86 for the browser host), with the guest-physical allocator and page tables the hypervisor backends share |
+| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, emu on Unicorn, and v86 for the browser host), with the guest-physical allocator and page tables the hypervisor backends share |
 | `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |

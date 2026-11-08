@@ -734,7 +734,7 @@ test "auto uses kvm when /dev/kvm is usable [16]" {
     try std.testing.expectEqualStrings("", w.err);
 }
 
-test "without access to /dev/kvm, auto falls back to the emulator with a warning [16]" {
+test "without access to /dev/kvm, auto falls back to native or the emulator with a warning [16]" {
     const e = try env(@src());
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // Runs where this user can't open /dev/kvm (not in the kvm group).
@@ -749,7 +749,8 @@ test "without access to /dev/kvm, auto falls back to the emulator with a warning
     // Without the emulator built in, auto fails with the same reason.
     if (r.code == 125) return error.SkipZigTest;
     try std.testing.expectEqualStrings("hi\n", r.out);
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the emulator") != null);
+    // Native on x86_64 (design/0095-native-backend.md), else the emulator.
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the ") != null);
 }
 
 test "more live processes than KVM's owned vCPUs run on the pool [16]" {
@@ -835,6 +836,55 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [17]"
     if (std.mem.indexOf(u8, r.out, "backend emu: ok") != null) {
         try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses emu)") != null);
     }
+}
+
+/// Skips unless the native backend runs here (design/0095-native-backend.md):
+/// Linux x86_64 with Syscall User Dispatch and seccomp, and amd64 binaries.
+fn requireNative(e: Env) !void {
+    if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    if (e.arch == null or !std.mem.eql(u8, e.arch.?, "amd64")) return error.SkipZigTest;
+    const r = try runOn(e, "native", &.{"--check"}, null);
+    defer r.deinit();
+    if (std.mem.indexOf(u8, r.out, "backend native: ok") == null) return error.SkipZigTest;
+}
+
+test "--check reports native and runs its trap probe [95]" {
+    const e = try env(@src());
+    try requireNative(e);
+    // The backend runs its probe (a guest syscall with each of a list of
+    // values in AX must trap) before it says it's usable.
+    const r = try runOn(e, "native", &.{"--check"}, null);
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "backend native: ok, hello in ");
+    try expectIn(r.out, "/bin/echo runs (amd64)");
+}
+
+test "auto uses native when KVM is unavailable [95]" {
+    const e = try env(@src());
+    try requireNative(e);
+    if (try kvmLimit(e) != null) return error.SkipZigTest;
+    const r = try runOn(e, "auto", &.{"--check"}, null);
+    defer r.deinit();
+    try expectIn(r.out, "backend auto: ok (uses native)");
+    const w = try runOn(e, "auto", &.{ "/bin/echo", "hi" }, null);
+    defer w.deinit();
+    try std.testing.expectEqualStrings("hi\n", w.out);
+    try expectIn(w.err, "; using the native backend");
+}
+
+test "rfork with RFMEM shares data and bss but not the stack [95]" {
+    const e = try env(@src());
+    try requireNative(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "rfstack", @embedFile("fixtures/rfmem/rfstack.c"));
+    const r = try runOn(e, "native", &.{ "--sandbox", s.path, "--rc", "./rfstack" }, null);
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("2 3 1\n", r.out);
+    try std.testing.expectEqual(0, r.code);
 }
 
 test "concurrent processes contending for one environment don't hang" {
@@ -2720,10 +2770,12 @@ test "plumber starts and serves /mnt/plumb [8]" {
 
 // Go compatibility (design/0007-go-compat.md). The Go cases run the
 // plan9/amd64 programs from tests/fixtures/go, which `zig build
-// go-fixtures` builds into H9_TEST_GO, on the emulator. They don't need
-// the root tree: each gets a scratch root holding only the directories
-// the namespace binds onto, and the fixtures at /mnt/term/cwd. Without Go
-// or the emulator, H9_TEST_GO is unset and they skip.
+// go-fixtures` builds into H9_TEST_GO, on the native backend where the
+// build runs the cases on it (H9_TEST_GO_BACKEND), else on the emulator.
+// They don't need the root tree: each gets a scratch root holding only
+// the directories the namespace binds onto, and the fixtures at
+// /mnt/term/cwd. Without Go, or either backend, H9_TEST_GO is unset and
+// they skip.
 
 const GoEnv = struct {
     h9: []const u8,
@@ -2749,9 +2801,17 @@ fn goEnv(comptime src: std.builtin.SourceLocation, g: *GoEnv) !void {
     for (go_root_dirs) |d| try g.root.tmp.dir.createDirPath(std.testing.io, d);
 }
 
+/// The backend the Go cases run on: the native backend when the build
+/// says it's in the list (Linux x86_64, design/0095-native-backend.md), else
+/// the emulator.
+fn goBackend() []const u8 {
+    const v = getenv(3, "H9_TEST_GO_BACKEND") orelse return "emu";
+    return if (std.mem.eql(u8, v, "native")) "native" else "emu";
+}
+
 /// The argv for running fixture `prog` with h9 flags `flags` and arguments `args`.
 fn goArgv(g: *const GoEnv, argv: *std.ArrayList([]const u8), flags: []const []const u8, prog: []const u8, args: []const []const u8) !void {
-    try argv.appendSlice(gpa, &.{ g.h9, "--backend", "emu", "--arch", "amd64", "--root", g.root.path, "--cwd", g.dir, "--timeout", "60s" });
+    try argv.appendSlice(gpa, &.{ g.h9, "--backend", goBackend(), "--arch", "amd64", "--root", g.root.path, "--cwd", g.dir, "--timeout", "60s" });
     try argv.appendSlice(gpa, flags);
     try argv.append(gpa, try std.fmt.allocPrint(gpa, "/mnt/term/cwd/{s}", .{prog}));
     try argv.appendSlice(gpa, args);

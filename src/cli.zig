@@ -9,7 +9,7 @@ const RootChanges = @import("h9").RootChanges;
 const gfx = @import("h9").gfx;
 
 pub const usage =
-    \\usage: h9 [--backend auto|hvf|kvm|whp|emu] [--arch arm64|amd64|386]
+    \\usage: h9 [--backend auto|hvf|kvm|whp|native|emu] [--arch arm64|amd64|386]
     \\           [--root DIR|DIAL|SOCKET|URL] [--root-spec NAME] [--root-user NAME]
     \\           [--root-header 'NAME: VALUE'|@FILE]... [--root-ca FILE] [--cwd DIR]
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
