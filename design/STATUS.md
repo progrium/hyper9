@@ -49,6 +49,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [host-sandbox](host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](host-srv.md) | draft |  | Posting host connections to /srv |
+| [linux-i386](linux-i386.md) | draft | needs linux-personality, linux-threads, linux-net | 32-bit x86 Linux programs |
 | [native-backend](native-backend.md) | draft |  | Native backend |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
@@ -102,6 +103,7 @@ flowchart LR
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
+  p_linux_i386["linux-i386<br/>draft"]:::draft
   p_native_backend["native-backend<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
@@ -147,6 +149,10 @@ flowchart LR
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
   p_9p_roots --> p_host_srv
+  p_linux_personality --> p_linux_i386
+  p_linux_threads --> p_linux_i386
+  p_linux_net --> p_linux_i386
+  p_browser_host --> p_linux_i386
   p_ephemeral_writes --> p_overlay_export
   p_9p_roots --> p_root_auth
 ```
