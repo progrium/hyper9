@@ -307,6 +307,33 @@ static void remap_race(void) {
 	printf("ok remap_race\n");
 }
 
+/* Threads that fault pages in while others unmap: one thread's munmap
+ * flushes the stub's queued mappings, other threads' faults included,
+ * and a thread whose mapping was in that flush mustn't run before it's
+ * done, or it faults again on a page h9 has mapped, which is SIGSEGV. */
+static void *faulter(void *a) {
+	(void)a;
+	for (int i = 0; i < 1000; i++) {
+		char *p = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (p == MAP_FAILED) return (void *)1;
+		for (int j = 0; j < 16; j++) p[j * 65536 + (i % 16) * 4096] = 1;
+		munmap(p, 1 << 20);
+	}
+	return 0;
+}
+
+static void fault_race(void) {
+	for (int round = 0; round < 5; round++) {
+		pthread_t t[4];
+		void *r;
+		int bad = 0;
+		for (int i = 0; i < 4; i++) CHECK("fault_race", pthread_create(&t[i], 0, faulter, 0) == 0);
+		for (int i = 0; i < 4; i++) bad |= pthread_join(t[i], &r) != 0 || r != 0;
+		CHECK("fault_race", !bad);
+	}
+	printf("ok fault_race\n");
+}
+
 /* fork from a thread: the child has one thread, and the parent waits. */
 static void *forker(void *a) {
 	(void)a;
@@ -463,6 +490,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "spin")) spin();
 		if (all || !strcmp(n, "munmap")) munmap_case();
 		if (all || !strcmp(n, "remap_race")) remap_race();
+		if (all || !strcmp(n, "fault_race")) fault_race();
 		if (all || !strcmp(n, "proc_threads")) proc_threads();
 		if (!strcmp(n, "exit_main")) exit_main();
 		if (!strcmp(n, "exit_thread")) exit_thread();
