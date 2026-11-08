@@ -77,8 +77,13 @@ fn c_ps { ps >/dev/null; st }
 fn c_srv { t srv }
 fn c_srvfs { t srvfs }
 fn c_exportfs {
-	# exportfs's fatal errors kill its note group.
-	@{ rfork s; exportfs -z >[2=1] | sed 's/^exportfs [0-9]+:/exportfs:/' }
+	# exportfs's fatal errors post a kill to its note group, which spares
+	# exportfs but not the rest of the group, so it runs alone in a group
+	# of its own. Its errors go to a file, not a pipe: a reader in the
+	# group could be killed before it had read and printed them, a race
+	# that more than one CPU loses now and then.
+	@{ rfork s; exec exportfs -z >[2]e/exportfs.err }
+	sed 's/^exportfs [0-9]+:/exportfs:/' e/exportfs.err
 }
 fn c_ramfs { mkdir -p /tmp/r; t ramfs -m /tmp/r; echo inram >/tmp/r/f; cat /tmp/r/f; unmount /tmp/r }
 
