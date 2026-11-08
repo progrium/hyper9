@@ -979,6 +979,22 @@ pub fn build(b: *std.Build) void {
         const archive = mk.addOutputFileArg("root.h9a");
         web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "root.h9a").step);
     } else |_| {}
+    // The demo page's Linux root archive for ?linux, from the 386 Alpine
+    // root `scripts/fetch.sh alpine386web` makes and src/web/linux.list;
+    // left out without one.
+    const web_linux_root = b.option([]const u8, "web-linux-root", "386 Linux root tree for the browser host's Linux archive (default .local/linux/alpine-386-web)") orelse
+        b.pathFromRoot(".local/linux/alpine-386-web");
+    if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_linux_root, "bin/busybox" }), .{})) {
+        const webroot = b.addExecutable(.{
+            .name = "webroot",
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        });
+        const mk = b.addRunArtifact(webroot);
+        mk.addArg(web_linux_root);
+        mk.addFileArg(b.path("src/web/linux.list"));
+        const archive = mk.addOutputFileArg("linux.h9a");
+        web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "linux.h9a").step);
+    } else |_| {}
     // The demo page in Chromium through Playwright (tests/web/browser.mjs).
     const web_test = b.addSystemCommand(&.{ "node", "tests/web/browser.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
     web_test.setCwd(b.path("."));

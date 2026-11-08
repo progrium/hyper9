@@ -5,8 +5,9 @@
 # The demo's root archive needs a 386 root. Building one with
 # `zig build mkroot -- --arch 386` cross-compiles the userland on the
 # emulator, about an hour on x86_64, so this unpacks the release's 386 ISO
-# instead (tools/isoroot.zig). The demo page's browser test gates the
-# deploy.
+# instead (tools/isoroot.zig). The Linux page's demo runs the same build
+# over linux.h9a, Alpine's 386 busybox, jq, and sqlite3
+# (src/web/linux.list). The demo page's browser test gates the deploy.
 name: pages
 
 on:
@@ -42,7 +43,7 @@ jobs:
             .local/9front/*.386.iso
             .local/v86
           key: pages-fetch-${{ hashFiles('scripts/pins.sh') }}
-      - run: scripts/fetch.sh v86 iso386
+      - run: scripts/fetch.sh v86 iso386 alpine386web
       - name: 386 root from the ISO
         run: |
           . scripts/pins.sh
@@ -57,7 +58,7 @@ jobs:
         run: |
           mkdir -p _site/demo
           cp site/*.html _site/
-          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,v86.wasm,root.h9a,package.json,LICENSE.v86} _site/demo/
+          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,v86.wasm,root.h9a,linux.h9a,package.json,LICENSE.v86} _site/demo/
           cp LICENSE _site/demo/LICENSE
           cp third_party/drawterm/LICENSE _site/demo/LICENSE.drawterm
       - uses: actions/upload-pages-artifact@v3
