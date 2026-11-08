@@ -4644,8 +4644,15 @@ const IPPROTO_UDP = 17;
 const UDP_SEGMENT = 103;
 const UDP_GRO = 104;
 
-/// The size of a struct mmsghdr: a msghdr and the count it moved, padded.
-const mmsghdr_size = 64;
+/// A struct mmsghdr: a msghdr and the count it moved, padded to the word.
+/// i386's msghdr is 28 bytes, so its mmsghdr is 32 with msg_len at 28;
+/// the 64-bit one is 64 with msg_len at 56.
+fn mmsghdrSize(p: *const Process) u64 {
+    return if (p.is32()) 32 else 64;
+}
+fn mmsgLenOff(p: *const Process) u64 {
+    return if (p.is32()) 28 else 56;
+}
 
 /// sendmmsg as a loop over sendmsg: the count sent, or the first message's
 /// error. A later message's error ends the batch, as on Linux.
@@ -4653,10 +4660,10 @@ fn sendmmsg(p: *Process, fd: i32, vec: u64, vlen: u32, flags: u32) Err!i64 {
     const n = @min(vlen, 1024);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
-        const hdr = vec + @as(u64, i) * mmsghdr_size;
+        const hdr = vec + @as(u64, i) * mmsghdrSize(p);
         const r = try sendmsg(p, fd, hdr, flags);
         if (r < 0) return if (i == 0) r else i;
-        try p.writeU32(hdr + 56, @intCast(r));
+        try p.writeU32(hdr + mmsgLenOff(p), @intCast(r));
     }
     return n;
 }
@@ -4669,11 +4676,11 @@ fn recvmmsg(p: *Process, fd: i32, vec: u64, vlen: u32, flags: u32) Err!i64 {
     const n = @min(vlen, 1024);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
-        const hdr = vec + @as(u64, i) * mmsghdr_size;
+        const hdr = vec + @as(u64, i) * mmsghdrSize(p);
         const f = (flags & ~@as(u32, MSG_WAITFORONE)) | @as(u32, if (i > 0) MSG_DONTWAIT else 0);
         const r = try recvmsg(p, fd, hdr, f);
         if (r < 0) return if (i == 0) r else i;
-        try p.writeU32(hdr + 56, @intCast(r));
+        try p.writeU32(hdr + mmsgLenOff(p), @intCast(r));
     }
     return n;
 }
