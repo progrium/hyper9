@@ -328,7 +328,7 @@ test "no root tree gives 125 for a guest program [baseline]" {
     defer environ.deinit();
     _ = environ.swapRemove("H9ROOT");
     // Without --builtin=off, the built-in root is used instead
-    // (design/builtin-root.md).
+    // (design/0087-builtin-root.md).
     for ([_][]const []const u8{ &.{ h9, "--builtin=off", "echo", "x" }, &.{ h9, "--builtin=off", "--rc", "echo x" } }) |argv| {
         var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .environ_map = &environ, .create_no_window = true });
         defer child.kill(io);
@@ -5682,7 +5682,7 @@ test "a coroutine stack overflow panics instead of corrupting [12]" {
     }
 }
 
-// The built-in root (design/builtin-root.md): `#Hroot`, multicall's tree
+// The built-in root (design/0087-builtin-root.md): `#Hroot`, multicall's tree
 // of 9front's commands built into h9. Cases that run its commands skip
 // when the build embedded none for the architecture under test (a
 // development build without `zig build slim`'s tree).
@@ -5742,7 +5742,7 @@ fn h9Copy(e: Env, s: *Scratch) ![]const u8 {
     return std.fs.path.join(gpa, &.{ s.path, name });
 }
 
-test "with no root found, --rc runs from the built-in root [builtin-root]" {
+test "with no root found, --rc runs from the built-in root [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -5758,7 +5758,7 @@ test "with no root found, --rc runs from the built-in root [builtin-root]" {
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}\n/mnt/term/cwd\n", .{testArch(e)}), r.out);
 }
 
-test "--builtin=only ignores H9ROOT [builtin-root]" {
+test "--builtin=only ignores H9ROOT [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     var argv: std.ArrayList([]const u8) = .empty;
@@ -5778,7 +5778,7 @@ test "--builtin=only ignores H9ROOT [builtin-root]" {
     try std.testing.expectEqualStrings("builtin\n", r.stdout);
 }
 
-test "--builtin=only with --root is a usage error [builtin-root]" {
+test "--builtin=only with --root is a usage error [87]" {
     const e = try env(@src());
     const r = try runProcess(&.{ e.h9, "--builtin=only", "--root", e.root, "--rc", "echo x" }, null);
     defer gpa.free(r.stdout);
@@ -5786,7 +5786,7 @@ test "--builtin=only with --root is a usage error [builtin-root]" {
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, r.term);
 }
 
-test "--builtin=off without a root is exit 125 as before [builtin-root]" {
+test "--builtin=off without a root is exit 125 as before [87]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5799,7 +5799,7 @@ test "--builtin=off without a root is exit 125 as before [builtin-root]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "no root tree found") != null);
 }
 
-test "--builtin=before runs the box's ls and the root's other commands [builtin-root]" {
+test "--builtin=before runs the box's ls and the root's other commands [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     const r = try run(e, &.{ "--builtin=before", "--rc", "cmp -s /bin/ls /bin/9box && echo boxed; test -x /bin/mk && echo mk" });
@@ -5808,7 +5808,7 @@ test "--builtin=before runs the box's ls and the root's other commands [builtin-
     try std.testing.expectEqualStrings("boxed\nmk\n", r.out);
 }
 
-test "--builtin=after leaves the root's ls and fills a missing command [builtin-root]" {
+test "--builtin=after leaves the root's ls and fills a missing command [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     const io = std.testing.io;
@@ -5836,7 +5836,7 @@ test "--builtin=after leaves the root's ls and fills a missing command [builtin-
     try std.testing.expectEqualStrings("own\n      1\n", r.out);
 }
 
-test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [builtin-root]" {
+test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [87]" {
     const e = try env(@src());
     const io = std.testing.io;
     var s: Scratch = undefined;
@@ -5858,7 +5858,7 @@ test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [buil
         try std.testing.expect(std.mem.indexOf(u8, r.out, want) != null);
 }
 
-test "the built-in root refuses writes and /tmp is writable in memory [builtin-root]" {
+test "the built-in root refuses writes and /tmp is writable in memory [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -5870,7 +5870,7 @@ test "the built-in root refuses writes and /tmp is writable in memory [builtin-r
     try std.testing.expectEqualStrings("refused\ny\n", r.out);
 }
 
-test "--print shows the #Hroot bind as builtin [builtin-root]" {
+test "--print shows the #Hroot bind as builtin [87]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5887,7 +5887,7 @@ test "--print shows the #Hroot bind as builtin [builtin-root]" {
     try std.testing.expect(std.mem.indexOf(u8, b.out, try std.fmt.bufPrint(&want, "  bind '#Hroot/{s}/bin' /bin ", .{testArch(e)})) != null);
 }
 
-test "--ns replays a plan printed over the built-in root [builtin-root]" {
+test "--ns replays a plan printed over the built-in root [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -5905,7 +5905,7 @@ test "--ns replays a plan printed over the built-in root [builtin-root]" {
     try std.testing.expectEqualStrings("builtin\n", r.out);
 }
 
-test "--check passes with only the built-in root [builtin-root]" {
+test "--check passes with only the built-in root [87]" {
     const e = try env(@src());
     // --check runs the host's architecture.
     if (e.arch != null) return error.SkipZigTest;
@@ -5918,7 +5918,7 @@ test "--check passes with only the built-in root [builtin-root]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
 }
 
-test "a Linux root alone gets the built-in root as its /9, and --builtin=off leaves it out [builtin-root]" {
+test "a Linux root alone gets the built-in root as its /9, and --builtin=off leaves it out [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -5938,7 +5938,7 @@ test "a Linux root alone gets the built-in root as its /9, and --builtin=off lea
     try std.testing.expect(std.mem.indexOf(u8, off.out, "#Hroot") == null);
 }
 
-test "a missing command names the built-in root in its error [builtin-root]" {
+test "a missing command names the built-in root in its error [87]" {
     const e = try env(@src());
     try needBuiltin(e);
     const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "mk" });

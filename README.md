@@ -114,7 +114,7 @@ and takes a few minutes on the emulator. The tree is `9box`, its links,
 `h9 --root .local/9front/slim-11952-arm64`. The `[64]` cases use it,
 and skip without it.
 
-`zig build` embeds the same trees as h9's [built-in root](design/builtin-root.md),
+`zig build` embeds the same trees as h9's [built-in root](design/0087-builtin-root.md),
 `#Hroot`, which h9 uses when it finds no root tree, so `h9 --rc 'ls'` works
 with nothing but the binary. It takes `slim-<release>-<arch>` for each
 architecture the build runs (the target's, and with `-Demu=unicorn` also

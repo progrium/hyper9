@@ -480,7 +480,7 @@ fn guestTree(b: *std.Build, with_test: bool, host_cmd: bool) struct { file: std.
     return .{ .file = wf.add("guest_tree.zig", out.written()), .bin = bin };
 }
 
-/// The built-in root `#Hroot` serves (design/builtin-root.md), as a
+/// The built-in root `#Hroot` serves (design/0087-builtin-root.md), as a
 /// generated Zig file with its contents embedded beside it: the skeleton,
 /// and multicall's tree (`zig build slim`, design/0064-multicall.md) for
 /// each of `arches` found in `dir` for the pinned `release`. A missing or
@@ -679,7 +679,7 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
     p.emu = .none;
     p.unicorn = null;
     p.host_cmd = false;
-    // The browser runs 386 only (design/builtin-root.md, Open issues: every
+    // The browser runs 386 only (design/0087-builtin-root.md, Open issues: every
     // byte is downloaded per page load).
     p.builtin_root = builtinRoot(b, p.builtin_dir, pin(p.pins, "NINEFRONT_RELEASE"), &.{"386"}, .quiet);
     const mod = addH9Module(b, p, .none, false).mod;
@@ -782,7 +782,7 @@ const ModuleParts = struct {
     shim_amd64: std.Build.LazyPath,
     host_cmd: bool,
     guest_tree: std.Build.LazyPath,
-    /// The built-in root (design/builtin-root.md).
+    /// The built-in root (design/0087-builtin-root.md).
     builtin_root: std.Build.LazyPath,
     /// Where its trees are, for the web host's.
     builtin_dir: []const u8,
@@ -930,12 +930,12 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b);
     const pins = b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
 
-    // The built-in root (design/builtin-root.md): multicall's trees for
+    // The built-in root (design/0087-builtin-root.md): multicall's trees for
     // the architectures this build runs, from `zig build slim`. A release
     // fails without them; a development build gets the skeleton only.
     const builtin_dir = b.option([]const u8, "builtin-root", "Directory of zig build slim's trees for the built-in root (default .local/9front)") orelse
         b.pathFromRoot(".local/9front");
-    const release_build = b.option(bool, "release", "A release build: fail if the built-in root is missing an architecture's commands (design/builtin-root.md)") orelse false;
+    const release_build = b.option(bool, "release", "A release build: fail if the built-in root is missing an architecture's commands (design/0087-builtin-root.md)") orelse false;
     const builtin_root = builtinRoot(b, builtin_dir, pin(pins, "NINEFRONT_RELEASE"), builtinArches(target.result, emu), if (release_build) .required else .warn);
 
     const parts: ModuleParts = .{

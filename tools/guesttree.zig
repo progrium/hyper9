@@ -8,7 +8,7 @@
 //! with `.` are left out, so a `.gitkeep` can hold an empty directory.
 //!
 //! The same table, built with `buildRoot` and written with `renderRoot`,
-//! is the built-in root `#Hroot` serves (design/builtin-root.md): the mount
+//! is the built-in root `#Hroot` serves (design/0087-builtin-root.md): the mount
 //! points h9 binds onto, and for each architecture the build embeds,
 //! multicall's tree of 9front's commands (design/0064-multicall.md). Its
 //! executables are 9front binaries rather than rc scripts, entries with

@@ -1312,7 +1312,7 @@ fn h9_tools_table(n: *c_int) callconv(.c) [*]const Htool {
     return &tools_table;
 }
 
-/// The built-in root (design/builtin-root.md), `#Hroot`: the same kind of
+/// The built-in root (design/0087-builtin-root.md), `#Hroot`: the same kind of
 /// table, from multicall's trees. It has a 9front tree's modes, 0775 and
 /// 0664, though the device refuses every write, because an overlay over it
 /// (the root's, and `/tmp`'s) takes its permissions from the tree below:

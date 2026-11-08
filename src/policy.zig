@@ -73,10 +73,10 @@ pub const Policy = struct {
 /// How a bound tree can be changed: not at all, on the host, in an
 /// overlay in memory (`eph`), which never writes the host, or as a 9P
 /// root's server decides (`9p`, design/0013-9p-roots.md), or never, as
-/// constant data in the h9 binary (`builtin`, design/builtin-root.md).
+/// constant data in the h9 binary (`builtin`, design/0087-builtin-root.md).
 pub const Access = enum { ro, rw, eph, @"9p", builtin };
 
-/// How the built-in root (design/builtin-root.md), `#Hroot`, takes part in
+/// How the built-in root (design/0087-builtin-root.md), `#Hroot`, takes part in
 /// the namespace.
 pub const Builtin = enum {
     /// Not at all.
@@ -410,7 +410,7 @@ pub const Inputs = struct {
     /// A host window: `#i`, `#m` and `#b` on /dev. Without one they're
     /// masked (design/0015-gfx.md).
     gfx: ?Gfx = null,
-    /// The built-in root (design/builtin-root.md).
+    /// The built-in root (design/0087-builtin-root.md).
     builtin: Builtin = .off,
     /// What the plan says about the built-in root beside its bind.
     builtin_note: ?[]const u8 = null,
@@ -1402,7 +1402,7 @@ fn bindList(arena: std.mem.Allocator, p: Plan) ![]const u8 {
     return out.written();
 }
 
-test "compile: the built-in root as / (design/builtin-root.md)" {
+test "compile: the built-in root as / (design/0087-builtin-root.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1449,7 +1449,7 @@ test "compile: the built-in root as / (design/builtin-root.md)" {
     try t.expect(std.mem.indexOf(u8, try bindList(a, bare), "/bin") == null);
 }
 
-test "compile: --builtin=only conflicts with another root (design/builtin-root.md)" {
+test "compile: --builtin=only conflicts with another root (design/0087-builtin-root.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
@@ -1458,7 +1458,7 @@ test "compile: --builtin=only conflicts with another root (design/builtin-root.m
     try t.expectError(error.Conflict, compile(arena.allocator(), .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!h!564" }, .cwd = "/w", .arch = .arm64, .builtin = .only }, .{}, &msg));
 }
 
-test "compile: --builtin=before and after layer the box's /bin (design/builtin-root.md)" {
+test "compile: --builtin=before and after layer the box's /bin (design/0087-builtin-root.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();

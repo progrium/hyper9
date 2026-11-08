@@ -41,7 +41,7 @@ pub const Mode = enum {
     help,
 };
 
-/// --builtin (design/builtin-root.md): how the built-in root takes part.
+/// --builtin (design/0087-builtin-root.md): how the built-in root takes part.
 /// `auto` is `only` when no root is found and `off` otherwise; the rest
 /// are `policy.Builtin`'s.
 pub const BuiltinMode = enum { auto, only, before, after, off };
