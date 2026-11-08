@@ -2,7 +2,7 @@
 id: 81
 slug: default-command
 title: A default command from the root
-status: accepted
+status: implemented
 created: 2026-11-07
 authors: [progrium]
 depends: []
