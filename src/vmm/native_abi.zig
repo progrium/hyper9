@@ -11,14 +11,14 @@
 /// map can only reach it by asking for that address.
 pub const stub_base: u64 = 0x6000_0000_0000;
 pub const stub_end: u64 = stub_base + (1 << 32);
-/// The control page's address in the stub.
+/// The control pages' address in the stub: one per stub thread.
 pub const ctl_addr: u64 = stub_base + 0xC000_0000;
 /// The top of Linux's x86_64 user address space (TASK_SIZE), which is
 /// also 9front's amd64 USTKTOP.
 pub const user_top: u64 = 0x7FFF_FFFF_F000;
 
 /// The stub's file descriptors: the machine's guest RAM, which map
-/// requests name offsets in, and its control page.
+/// requests name offsets in, and its control pages.
 pub const ram_fd = 3;
 pub const ctl_fd = 4;
 
@@ -41,11 +41,17 @@ pub const Why = enum(u32) {
     ops_done = 4,
 };
 
-pub const OpKind = enum(u32) { map = 1, unmap = 2 };
+/// Threads in a stub, the first of which (the control thread) never runs
+/// guest code: it starts the others and carries out requests for a TLB
+/// shootdown. Each of the rest runs one vCPU's guest code at a time.
+pub const max_threads = 256;
+
+pub const OpKind = enum(u32) { map = 1, unmap = 2, thread = 3, _ };
 
 /// A request the stub carries out before it next runs guest code: map
-/// [off, off+len) of the RAM file at `va` with `prot` (PROT_* bits), or
-/// unmap [va, va+len).
+/// [off, off+len) of the RAM file at `va` with `prot` (PROT_* bits),
+/// unmap [va, va+len), or (on the control thread) start thread `va`,
+/// which reports `ready` on its own control page.
 pub const Op = extern struct {
     va: u64,
     len: u64,
@@ -55,8 +61,10 @@ pub const Op = extern struct {
 };
 
 pub const ctl_size = 8192;
+/// All the threads' control pages, thread i's at `ctl_addr + i * ctl_size`.
+pub const ctls_size = max_threads * ctl_size;
 
-/// The control page, at `ctl_addr` in the stub and mapped shared in h9.
+/// A thread's control page, mapped shared in h9.
 pub const Ctl = extern struct {
     state: u32 = 0,
     /// Set by a kick: the stub reports a SIGURG as `interrupted` only if
@@ -81,7 +89,8 @@ pub const Ctl = extern struct {
     /// the x87 and SSE state was in its initial state and isn't in `fx`.
     xstate_bv: u64 = 0,
     nops: u32 = 0,
-    _pad: u32 = 0,
+    /// The stub thread's id, for kicks: set before it reports `ready`.
+    tid: u32 = 0,
     /// The FXSAVE image's first 416 bytes (through XMM15). The rest of
     /// the 512 is software's, where the kernel keeps its XSAVE marker.
     fx: [fx_len]u8 align(16) = @splat(0),
@@ -116,5 +125,5 @@ pub const max_ops = (ctl_size - ctl_head) / @sizeOf(Op);
 
 comptime {
     if (@sizeOf(Ctl) > ctl_size) @compileError("Ctl doesn't fit");
-    if (ctl_addr + ctl_size > stub_end) @compileError("control page outside the stub's range");
+    if (ctl_addr + ctls_size > stub_end) @compileError("control pages outside the stub's range");
 }

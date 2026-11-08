@@ -69,8 +69,9 @@ it to kick them; an embedder must leave it to h9.
 On x86\_64 Linux hosts without a usable KVM (containers, CI, and cloud VMs
 without nested virtualization), h9 runs amd64 binaries on the native backend
 ([native-backend](design/native-backend.md)): guest code runs directly on the
-host CPU in a small stub process per Plan 9 process, and the kernel turns every
-guest syscall into a signal the stub hands to h9 (Syscall User Dispatch, Linux
+host CPU in a small stub process per address space (with a thread per thread
+of a Linux program), and the kernel turns every guest syscall into a signal the
+stub hands to h9 (Syscall User Dispatch, Linux
 5.11 or later, with a seccomp filter behind it). It's built into every Linux
 x86\_64 `h9`, and `auto` uses it after KVM and before the emulator. Compute
 runs at native speed, many times faster than the emulator. Before using it, h9

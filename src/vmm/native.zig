@@ -10,14 +10,17 @@
 //! Map and unmap requests queue on the address space and the stub
 //! carries them out before it next runs guest code.
 //!
-//! A vCPU is a view of whichever stub its address space has: `run` writes
-//! the registers to the stub's control page, lets it return into guest
+//! A vCPU is a view of a thread in its address space's stub: `run` takes
+//! a stub thread (the one it ran on last, if it's free, so FP state
+//! beyond what `Extra` carries, AVX's upper halves, stays with it), writes
+//! the registers to that thread's control page, lets it return into guest
 //! code, and waits for the next exit (a syscall, a CPU exception or a
-//! kick), which the stub's signal handler reports there. Each address
-//! space has its own stub, so its FP state beyond what `Extra` carries
-//! (AVX's upper halves) stays with the process.
+//! kick), which the stub's signal handler reports there. A Linux
+//! program's threads are vCPUs in one space, so they run in parallel on
+//! the stub's threads. The stub's control thread starts the others and
+//! carries out the queued requests for `shootdown`.
 //!
-//! Kicks send the stub SIGURG; the stub reports it as `interrupted` only
+//! Kicks send the stub thread SIGURG; it reports it as `interrupted` only
 //! while `Ctl.kick` is set, so a signal that arrives after the run it was
 //! meant for has ended just resumes the guest.
 
@@ -269,19 +272,19 @@ fn spawnChild(arg: usize) callconv(.c) u8 {
 /// One running stub, as h9 sees it.
 const Stub = struct {
     pid: i32,
-    ctl: *abi.Ctl,
+    ctls: *[abi.max_threads]abi.Ctl,
 
-    /// Starts a stub and waits until it's ready for its first run.
+    /// Starts a stub and waits until its control thread is ready.
     fn start(b: *Backend) vmm.Error!Stub {
         const ctl_rc = linux.memfd_create("h9-ctl", linux.MFD.CLOEXEC);
         if (failed(ctl_rc)) return error.HypervisorFailed;
         const ctl_fd: i32 = @intCast(ctl_rc);
         defer closeFd(ctl_fd);
-        if (failed(linux.ftruncate(ctl_fd, abi.ctl_size))) return error.HypervisorFailed;
-        const map = std.posix.mmap(null, abi.ctl_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, ctl_fd, 0) catch
+        if (failed(linux.ftruncate(ctl_fd, abi.ctls_size))) return error.HypervisorFailed;
+        const map = std.posix.mmap(null, abi.ctls_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, ctl_fd, 0) catch
             return error.HypervisorFailed;
-        const ctl: *abi.Ctl = @ptrCast(map.ptr);
-        @atomicStore(u32, &ctl.state, @intFromEnum(abi.State.guest), .release);
+        const ctls: *[abi.max_threads]abi.Ctl = @ptrCast(map.ptr);
+        @atomicStore(u32, &ctls[0].state, @intFromEnum(abi.State.guest), .release);
 
         var args: SpawnArgs = .{ .stub = b.stub_fd, .ram = b.ram_fd, .ctl = ctl_fd };
         var stack: [16 * 1024]u8 align(16) = undefined;
@@ -291,15 +294,15 @@ const Stub = struct {
             std.posix.munmap(map);
             return error.HypervisorFailed;
         }
-        // From here `stop` frees the control page.
-        var s: Stub = .{ .pid = @intCast(rc), .ctl = ctl };
-        s.wait() catch {
+        // From here `stop` frees the control pages.
+        var s: Stub = .{ .pid = @intCast(rc), .ctls = ctls };
+        s.wait(0) catch {
             s.stop();
-            // It never got as far as its handler: the kernel refused it
-            // something (dispatch, the filter, the exec).
+            // It never got as far as its control loop: the kernel refused
+            // it something (dispatch, the filter, the exec).
             return error.HypervisorUnavailable;
         };
-        if (ctl.why != .ready) {
+        if (ctls[0].why != .ready) {
             s.stop();
             return error.HypervisorFailed;
         }
@@ -314,7 +317,7 @@ const Stub = struct {
             const rc = linux.syscall5(.waitid, @intFromEnum(linux.P.PID), @intCast(s.pid), @intFromPtr(&info), linux.W.EXITED | __WALL, 0);
             if (linux.errno(rc) != .INTR) break;
         }
-        std.posix.munmap(@as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(s.ctl)))[0..abi.ctl_size]);
+        std.posix.munmap(@as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(s.ctls)))[0..abi.ctls_size]);
     }
 
     /// Whether the stub process has ended (killed by its filter, say).
@@ -327,48 +330,76 @@ const Stub = struct {
         return std.mem.readInt(i32, info[16..20], .little) != 0;
     }
 
-    /// Hands the stub `state` (run or ops).
-    fn go(s: *Stub, state: abi.State) void {
-        @atomicStore(u32, &s.ctl.state, @intFromEnum(state), .seq_cst);
-        if (@atomicLoad(u32, &s.ctl.stub_waiting, .seq_cst) != 0)
-            _ = linux.futex_3arg(&s.ctl.state, .{ .cmd = .WAKE, .private = false }, 1);
+    /// Hands thread `k` `state` (run or ops).
+    fn go(s: *Stub, k: usize, state: abi.State) void {
+        const ctl = &s.ctls[k];
+        @atomicStore(u32, &ctl.state, @intFromEnum(state), .seq_cst);
+        if (@atomicLoad(u32, &ctl.stub_waiting, .seq_cst) != 0)
+            _ = linux.futex_3arg(&ctl.state, .{ .cmd = .WAKE, .private = false }, 1);
     }
 
-    /// Waits for the stub to stop and report. Fails if it died.
-    fn wait(s: *Stub) vmm.Error!void {
+    /// Waits for thread `k` to stop and report. Fails if the stub died.
+    fn wait(s: *Stub, k: usize) vmm.Error!void {
+        const ctl = &s.ctls[k];
         const exited = @intFromEnum(abi.State.exited);
         var i: usize = 0;
         while (i < spin_rounds) : (i += 1) {
-            if (@atomicLoad(u32, &s.ctl.state, .seq_cst) == exited) return;
+            if (@atomicLoad(u32, &ctl.state, .seq_cst) == exited) return;
             std.atomic.spinLoopHint();
         }
         const ts: linux.timespec = .{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
         while (true) {
-            @atomicStore(u32, &s.ctl.host_waiting, 1, .seq_cst);
-            const cur = @atomicLoad(u32, &s.ctl.state, .seq_cst);
+            @atomicStore(u32, &ctl.host_waiting, 1, .seq_cst);
+            const cur = @atomicLoad(u32, &ctl.state, .seq_cst);
             if (cur == exited) break;
-            const rc = linux.futex_4arg(&s.ctl.state, .{ .cmd = .WAIT, .private = false }, cur, &ts);
+            const rc = linux.futex_4arg(&ctl.state, .{ .cmd = .WAIT, .private = false }, cur, &ts);
             if (linux.errno(rc) == .TIMEDOUT and s.dead()) {
-                @atomicStore(u32, &s.ctl.host_waiting, 0, .seq_cst);
+                @atomicStore(u32, &ctl.host_waiting, 0, .seq_cst);
                 return error.HypervisorFailed;
             }
         }
-        @atomicStore(u32, &s.ctl.host_waiting, 0, .seq_cst);
+        @atomicStore(u32, &ctl.host_waiting, 0, .seq_cst);
     }
 };
 
+/// A lock held across round trips to the stub (microseconds) or its
+/// start (an exec): spins briefly, then yields.
+fn lockSlow(l: *std.atomic.Mutex) void {
+    var i: usize = 0;
+    while (!l.tryLock()) : (i += 1) {
+        if (i < 1000) std.atomic.spinLoopHint() else _ = linux.sched_yield();
+    }
+}
+
 pub const AddressSpace = struct {
     backend: *Backend,
-    /// Guards everything below against `copy`, `map` and `unmap` from
-    /// other threads.
+    /// Guards `regions`, `ops` and `threads` against other threads.
     lock: std.atomic.Mutex = .unlocked,
     regions: std.ArrayList(Region) = .empty,
     /// Requests the stub hasn't carried out yet.
     ops: std.ArrayList(abi.Op) = .empty,
-    /// Started on the first run.
+    /// Held while starting the stub, and while a stub thread carries out
+    /// requests, so they're carried out in order.
+    ctl_lock: std.atomic.Mutex = .unlocked,
+    /// Started on the first run; set once, under `ctl_lock`.
     stub: ?Stub = null,
+    /// The stub's threads, by control page: 0 is the control thread, and
+    /// [1, nthreads) have been started.
+    threads: [abi.max_threads]Thread = @splat(.{}),
+    nthreads: u32 = 1,
 
     const Region = struct { va: u64, mem: []align(vmm.page_size) u8 };
+
+    /// A stub thread: who ran it last, so a vCPU goes back to the same
+    /// one and keeps the FP state `Extra` doesn't carry (AVX's upper
+    /// halves), and whether it's running now.
+    const Thread = struct {
+        owner: ?*const State = null,
+        busy: bool = false,
+        /// Started and ready; false while starting, and for good if
+        /// starting it failed.
+        ready: bool = false,
+    };
 
     fn lockSpin(as: *AddressSpace) void {
         while (!as.lock.tryLock()) std.atomic.spinLoopHint();
@@ -441,6 +472,17 @@ pub const AddressSpace = struct {
     /// maps the same pages h9 wrote, so there's nothing to drop.
     pub fn codeChanged(_: *AddressSpace, _: u64, _: u64) void {}
 
+    /// Has the control thread carry out the queued requests now. Its
+    /// munmap is the host kernel's, which shoots down the other stub
+    /// threads' TLBs before it returns, so nothing more is needed for
+    /// guest threads running meanwhile.
+    pub fn shootdown(as: *AddressSpace) void {
+        lockSlow(&as.ctl_lock);
+        defer as.ctl_lock.unlock();
+        // No stub, no mappings: the first run carries them all out.
+        if (as.stub) |*s| as.flushOps(s, 0) catch {};
+    }
+
     pub fn destroy(as: *AddressSpace) void {
         if (as.stub) |*s| s.stop();
         const gpa = as.backend.gpa;
@@ -449,24 +491,92 @@ pub const AddressSpace = struct {
         gpa.destroy(as);
     }
 
-    /// Hands the stub the queued requests, in as many rounds as the
-    /// control page needs. Called with the stub stopped. Requests already
-    /// on the page (from a run that a kick ended before it started) stay
-    /// ahead of the new ones.
-    fn flushOps(as: *AddressSpace, s: *Stub) vmm.Error!void {
+    fn startStub(as: *AddressSpace) vmm.Error!*Stub {
+        lockSlow(&as.ctl_lock);
+        defer as.ctl_lock.unlock();
+        if (as.stub == null) as.stub = try Stub.start(as.backend);
+        return &as.stub.?;
+    }
+
+    /// Has thread `k` carry out the queued requests, in as many rounds as
+    /// its control page needs. Called with `ctl_lock` held and the thread
+    /// stopped.
+    fn flushOps(as: *AddressSpace, s: *Stub, k: usize) vmm.Error!void {
+        const ctl = &s.ctls[k];
         while (true) {
             as.lockSpin();
-            const have = s.ctl.nops;
-            const n = @min(as.ops.items.len, abi.max_ops - have);
-            @memcpy(s.ctl.ops[have..][0..n], as.ops.items[0..n]);
-            s.ctl.nops = @intCast(have + n);
-            const more = as.ops.items.len > n;
+            const n = @min(as.ops.items.len, abi.max_ops);
+            @memcpy(ctl.ops[0..n], as.ops.items[0..n]);
+            ctl.nops = @intCast(n);
             as.ops.replaceRangeAssumeCapacity(0, n, &.{});
             as.lock.unlock();
-            if (!more) return;
-            s.go(.ops);
-            try s.wait();
+            if (n == 0) return;
+            s.go(k, .ops);
+            try s.wait(k);
         }
+    }
+
+    /// The stub thread for vCPU `v` to run on: the one it ran last if
+    /// that's free, else an unowned one, a new one, or any free one, in
+    /// that order.
+    fn takeThread(as: *AddressSpace, s: *Stub, v: *State) vmm.Error!usize {
+        as.lockSpin();
+        const k = pick: {
+            const last = v.thread;
+            if (last > 0 and last < as.nthreads) {
+                const t = &as.threads[last];
+                if (t.owner == v and t.ready and !t.busy) break :pick last;
+            }
+            for (as.threads[1..as.nthreads], 1..) |t, i| {
+                if (t.owner == null and t.ready) break :pick i;
+            }
+            if (as.nthreads < abi.max_threads) {
+                const i = as.nthreads;
+                as.nthreads += 1;
+                as.threads[i] = .{ .owner = v, .busy = true };
+                as.lock.unlock();
+                try as.startThread(s, i);
+                as.lockSpin();
+                as.threads[i].ready = true;
+                as.lock.unlock();
+                v.thread = i;
+                return i;
+            }
+            for (as.threads[1..as.nthreads], 1..) |t, i| {
+                if (t.ready and !t.busy) break :pick i;
+            }
+            as.lock.unlock();
+            return error.HypervisorFailed;
+        };
+        as.threads[k].owner = v;
+        as.threads[k].busy = true;
+        as.lock.unlock();
+        v.thread = k;
+        return k;
+    }
+
+    fn putThread(as: *AddressSpace, k: usize) void {
+        as.lockSpin();
+        defer as.lock.unlock();
+        as.threads[k].busy = false;
+    }
+
+    /// Has the control thread start thread `k`, and waits until it's
+    /// ready. On failure the slot stays busy, and unused.
+    fn startThread(as: *AddressSpace, s: *Stub, k: usize) vmm.Error!void {
+        const ctl0 = &s.ctls[0];
+        @atomicStore(u32, &s.ctls[k].state, @intFromEnum(abi.State.guest), .release);
+        {
+            lockSlow(&as.ctl_lock);
+            defer as.ctl_lock.unlock();
+            ctl0.ops[0] = .{ .va = k, .len = 0, .off = 0, .prot = 0, .kind = .thread };
+            ctl0.nops = 1;
+            s.go(0, .ops);
+            try s.wait(0);
+            if (failed(ctl0.err)) return error.HypervisorFailed;
+        }
+        try s.wait(k);
+        if (s.ctls[k].why != .ready) return error.HypervisorFailed;
     }
 };
 
@@ -475,11 +585,15 @@ const State = struct {
     as: ?*AddressSpace = null,
     ureg: amd64.Ureg = .{},
     extra: vmm.X86Extra = .init,
+    /// The stub thread it last ran on, in whichever space; 0 for none.
+    thread: usize = 0,
     /// Guards `kicked` and `running` between `run` and `kick`.
     lock: std.atomic.Mutex = .unlocked,
     kicked: bool = false,
-    /// The stub running guest code for this vCPU, for `kick`.
-    running: ?*Stub = null,
+    /// The stub thread running guest code for this vCPU, for `kick`.
+    running: ?Running = null,
+
+    const Running = struct { pid: i32, tid: i32, ctl: *abi.Ctl };
 
     fn lockSpin(s: *State) void {
         while (!s.lock.tryLock()) std.atomic.spinLoopHint();
@@ -520,20 +634,25 @@ pub const Vcpu = struct {
         s.lockSpin();
         defer s.lock.unlock();
         s.kicked = true;
-        if (s.running) |stub| {
-            @atomicStore(u32, &stub.ctl.kick, 1, .seq_cst);
-            _ = linux.tgkill(stub.pid, stub.pid, @enumFromInt(SIGURG));
+        if (s.running) |r| {
+            @atomicStore(u32, &r.ctl.kick, 1, .seq_cst);
+            _ = linux.tgkill(r.pid, r.tid, @enumFromInt(SIGURG));
         }
     }
 
     pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {
         const s = v.s;
         const as = s.as orelse return error.BadAddress;
-        if (as.stub == null) as.stub = try Stub.start(s.backend);
-        const stub = &as.stub.?;
-        const ctl = stub.ctl;
+        const stub = try as.startStub();
+        const k = try as.takeThread(stub, s);
+        defer as.putThread(k);
+        const ctl = &stub.ctls[k];
 
-        try as.flushOps(stub);
+        if (as.ops.items.len != 0) {
+            lockSlow(&as.ctl_lock);
+            defer as.ctl_lock.unlock();
+            try as.flushOps(stub, k);
+        }
         writeRegs(ctl, &s.ureg, &s.extra);
         {
             s.lockSpin();
@@ -543,10 +662,10 @@ pub const Vcpu = struct {
                 return .interrupted;
             }
             @atomicStore(u32, &ctl.kick, 0, .seq_cst);
-            s.running = stub;
+            s.running = .{ .pid = stub.pid, .tid = @intCast(ctl.tid), .ctl = ctl };
         }
-        stub.go(.run);
-        const result = stub.wait();
+        stub.go(k, .run);
+        const result = stub.wait(k);
         {
             s.lockSpin();
             defer s.lock.unlock();

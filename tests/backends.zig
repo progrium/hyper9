@@ -219,6 +219,96 @@ test "a guest that jumps into the stub can't open a host file [native-backend]" 
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, path, .{}));
 }
 
+test "two vCPUs run one address space at once, and a shootdown reaches both [native-backend]" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // A sets the first word of data and waits for the second; B waits for
+    // the first and sets the second. Run one after the other, neither
+    // ends; a watchdog kicks them after 5 s, which fails the test.
+    const code = [_]u8{
+        0x48, 0xbb, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // A: movabsq $0x400000, %rbx
+        0xc7, 0x03, 0x01, 0x00, 0x00, 0x00, // movl  $1, (%rbx)
+        0x83, 0x7b, 0x04, 0x01, // 1: cmpl  $1, 4(%rbx)
+        0x75, 0xfa, // jne   1b
+        0x0f, 0x05, // syscall
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // to B, at 0x20
+        0x48, 0xbb, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // B: movabsq $0x400000, %rbx
+        0x83, 0x3b, 0x01, // 1: cmpl  $1, (%rbx)
+        0x75, 0xfb, // jne   1b
+        0xc7, 0x43, 0x04, 0x01, 0x00, 0x00, 0x00, // movl  $1, 4(%rbx)
+        0x0f, 0x05, // syscall
+    };
+    const text_va = 0x200000;
+    const data_va = 0x400000;
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .kvm, .native }) |kind| {
+        var b = vmm.create(gpa, io, kind, .{ .arch = .amd64 }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => continue,
+            else => return e,
+        };
+        defer b.destroy();
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        const text = try b.allocPages(1);
+        defer b.freePages(text);
+        @memcpy(text[0..code.len], &code);
+        const data = try b.allocPages(1);
+        defer b.freePages(data);
+        @memset(data, 0);
+        const as = try b.newAddressSpace();
+        defer as.destroy();
+        try as.map(text_va, text, .{ .read = true, .exec = true });
+        defer as.unmap(text_va);
+        try as.map(data_va, data, .{ .read = true, .write = true });
+        var va = try b.createVcpu();
+        defer va.destroy();
+        var vb = try b.createVcpu();
+        defer vb.destroy();
+        try va.setAddressSpace(as);
+        try vb.setAddressSpace(as);
+        const ua: vmm.Ureg = .{ .amd64 = .{ .pc = text_va, .flags = 0x202, .sp = data_va + 0x800 } };
+        const ub: vmm.Ureg = .{ .amd64 = .{ .pc = text_va + 0x20, .flags = 0x202, .sp = data_va + 0x800 } };
+        va.setUreg(&ua);
+        vb.setUreg(&ub);
+
+        var done: std.atomic.Value(bool) = .init(false);
+        const Watchdog = struct {
+            fn run(d: *std.atomic.Value(bool), x: *vmm.Vcpu, y: *vmm.Vcpu, i: std.Io) void {
+                var n: usize = 0;
+                while (!d.load(.acquire) and n < 500) : (n += 1) std.Io.sleep(i, .fromMilliseconds(10), .awake) catch {};
+                if (d.load(.acquire)) return;
+                x.kick();
+                y.kick();
+            }
+        };
+        const Runner = struct {
+            fn run(x: *vmm.Vcpu, out: *vmm.Error!vmm.Exit) void {
+                out.* = x.run();
+            }
+        };
+        const dog = try std.Thread.spawn(.{}, Watchdog.run, .{ &done, &va, &vb, io });
+        var exit_a: vmm.Error!vmm.Exit = undefined;
+        const ta = try std.Thread.spawn(.{}, Runner.run, .{ &va, &exit_a });
+        const exit_b = vb.run();
+        ta.join();
+        done.store(true, .release);
+        dog.join();
+        try std.testing.expectEqual(vmm.Exit.syscall, try exit_a);
+        try std.testing.expectEqual(vmm.Exit.syscall, try exit_b);
+
+        // Gone for both once the shootdown returns.
+        as.unmap(data_va);
+        as.shootdown();
+        for ([_]*vmm.Vcpu{ &va, &vb }) |v| {
+            v.setUreg(&ua);
+            const exit = try v.run();
+            try std.testing.expect(exit == .fault);
+            try std.testing.expectEqual(data_va, exit.fault.addr);
+        }
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
 test "exits with a message 386 [9]" {
     // The syscall number in AX, arguments from SP+4; call/pop finds msg.
     const code = [_]u8{

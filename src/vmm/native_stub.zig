@@ -1,7 +1,7 @@
 //! The native backend's stub (design/native-backend.md): a tiny static
 //! x86_64 Linux program, linked at `abi.stub_base`, that hosts one guest
 //! address space. h9 starts one per address space, with the guest's RAM
-//! file and its control page as file descriptors 3 and 4.
+//! file and its control pages as file descriptors 3 and 4.
 //!
 //! At startup the stub unmaps everything outside its own range (the
 //! kernel's stack, vDSO and vvar), so the whole of 9front's amd64 layout
@@ -9,32 +9,53 @@
 //! signals guest code raises; turns on Syscall User Dispatch, so every
 //! syscall made outside its own range raises SIGSYS; and installs a
 //! seccomp filter that lets through only the few calls the stub itself
-//! makes, from its own range. Then it traps once (UD2) to enter the
-//! handler, which is the only way in or out of guest code.
+//! makes, from its own range.
+//!
+//! That first thread is the control thread: it never runs guest code,
+//! and carries out what h9 asks on control page 0 (start a thread, or map
+//! and unmap ranges for a TLB shootdown). Each other thread runs one of
+//! h9's vCPUs at a time, so a guest's threads run in parallel in one
+//! address space, as on a hypervisor. A new thread turns on dispatch for
+//! itself, then traps once (UD2) to enter the handler, which is the only
+//! way in or out of guest code.
 //!
 //! The handler writes the guest's registers and why it stopped to the
-//! control page, tells h9, and waits. When h9 resumes it, it carries out
-//! the map and unmap requests h9 queued, loads the registers back into
-//! the signal frame, and returns into the guest through rt_sigreturn.
-//!
-//! The stub has no libc and no thread-local storage, so FS belongs to the
+//! thread's control page, tells h9, and waits. When h9 resumes it, it
+//! carries out the map and unmap requests h9 queued, loads the registers
+//! back into the signal frame, and returns into the guest through
+//! rt_sigreturn. It finds its thread from its alternate stack, since the
+//! stub has no libc and no thread-local storage: FS belongs to the
 //! guest.
 
 const std = @import("std");
 const linux = std.os.linux;
 const abi = @import("native_abi.zig");
 
-const ctl: *volatile abi.Ctl = @ptrFromInt(abi.ctl_addr);
+const ctls: *volatile [abi.max_threads]abi.Ctl = @ptrFromInt(abi.ctl_addr);
+
+comptime {
+    if (@sizeOf(abi.Ctl) > abi.ctl_size) @compileError("Ctl doesn't fit");
+}
 
 export var stub_stack: [16 * 1024]u8 align(16) = undefined;
-var alt_stack: [64 * 1024]u8 align(16) = undefined;
+/// Each thread's stack until it first traps, and its signal stack, which
+/// the handler runs on and finds the thread from.
+const thread_stack_size = 4096;
+var thread_stacks: [abi.max_threads][thread_stack_size]u8 align(16) = undefined;
+const alt_size = 32 * 1024;
+var alt_stacks: [abi.max_threads][alt_size]u8 align(16) = undefined;
 /// Syscall User Dispatch's selector, read-only so the guest can't flip it
 /// (SYSCALL_DISPATCH_FILTER_BLOCK).
 const selector: u8 = 1;
-var starting: bool = true;
-/// The FS base as last set or read.
-var fs_base: u64 = 0;
+/// Per thread: whether it has yet to report `ready`, and its FS base as
+/// last set or read.
+var starting: [abi.max_threads]bool = @splat(true);
+var fs_bases: [abi.max_threads]u64 = @splat(0);
 var parent: usize = 0;
+
+/// CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+/// CLONE_SYSVSEM: the only clone the filter lets through.
+const clone_flags = 0x100 | 0x200 | 0x400 | 0x800 | 0x10000 | 0x40000;
 
 pub export fn _start() callconv(.naked) noreturn {
     asm volatile (
@@ -90,11 +111,10 @@ export fn stubMain() callconv(.c) noreturn {
     check(sys(.munmap, abi.stub_end, abi.user_top - abi.stub_end, 0, 0, 0, 0), 11);
     const PROT_RW = 3; // PROT_READ | PROT_WRITE
     const MAP_SHARED_FIXED = 0x01 | 0x10;
-    check(sys(.mmap, abi.ctl_addr, abi.ctl_size, PROT_RW, MAP_SHARED_FIXED, abi.ctl_fd, 0), 12);
+    check(sys(.mmap, abi.ctl_addr, abi.ctls_size, PROT_RW, MAP_SHARED_FIXED, abi.ctl_fd, 0), 12);
     _ = sys(.close, abi.ctl_fd, 0, 0, 0, 0, 0);
 
-    const ss: linux.stack_t = .{ .sp = &alt_stack, .flags = 0, .size = alt_stack.len };
-    check(sys(.sigaltstack, @intFromPtr(&ss), 0, 0, 0, 0, 0), 13);
+    altStack(0);
     const act: KSigaction = .{
         .handler = @intFromPtr(&handler),
         .flags = SA_SIGINFO | SA_ONSTACK | SA_RESTORER,
@@ -109,9 +129,59 @@ export fn stubMain() callconv(.c) noreturn {
     check(sys(.rt_sigprocmask, linux.SIG.SETMASK, @intFromPtr(&none), 0, 8, 0, 0), 15);
 
     check(sys(.prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0, 0), 16);
-    check(sys(.prctl, PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, abi.stub_base, abi.stub_end - abi.stub_base, @intFromPtr(&selector), 0), 17);
+    dispatchOn();
     installFilter();
 
+    // The control thread: requests on page 0, until h9 goes away.
+    const c = &ctls[0];
+    c.tid = @intCast(sys(.gettid, 0, 0, 0, 0, 0, 0));
+    exited(c, .ready);
+    while (true) {
+        _ = waitHost(c);
+        doOps(c);
+        exited(c, .ops_done);
+    }
+}
+
+fn altStack(k: usize) void {
+    const ss: linux.stack_t = .{ .sp = &alt_stacks[k], .flags = 0, .size = alt_size };
+    check(sys(.sigaltstack, @intFromPtr(&ss), 0, 0, 0, 0, 0), 13);
+}
+
+/// Per thread: a new thread doesn't inherit it.
+fn dispatchOn() void {
+    check(sys(.prctl, PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, abi.stub_base, abi.stub_end - abi.stub_base, @intFromPtr(&selector), 0), 17);
+}
+
+/// Starts thread `k` on its own stack, in `threadMain`. Returns clone's
+/// result, which h9 reads from `err`.
+fn startThread(k: usize) usize {
+    if (k == 0 or k >= abi.max_threads) return @bitCast(@as(isize, -22));
+    const top = @intFromPtr(&thread_stacks[k]) + thread_stack_size;
+    const rc = asm volatile (
+        \\ syscall
+        \\ testq %%rax, %%rax
+        \\ jnz 1f
+        \\ movq %%r12, %%rdi
+        \\ call threadMain
+        \\ ud2
+        \\ 1:
+        : [ret] "={rax}" (-> usize),
+        : [number] "{rax}" (@intFromEnum(linux.SYS.clone)),
+          [flags] "{rdi}" (clone_flags),
+          [stack] "{rsi}" (top),
+          [ptid] "{rdx}" (0),
+          [ctid] "{r10}" (0),
+          [tls] "{r8}" (0),
+          [k] "{r12}" (k),
+        : .{ .rcx = true, .r11 = true, .memory = true });
+    return rc;
+}
+
+export fn threadMain(k: usize) callconv(.c) noreturn {
+    altStack(k);
+    dispatchOn();
+    ctls[k].tid = @intCast(sys(.gettid, 0, 0, 0, 0, 0, 0));
     // Into the handler, which reports `ready` and enters the guest.
     asm volatile ("ud2");
     unreachable;
@@ -122,67 +192,78 @@ export fn stubMain() callconv(.c) noreturn {
 const SockFilter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
 const SockFprog = extern struct { len: u16, filter: [*]const SockFilter };
 
-fn stmt(code: u16, k: u32) SockFilter {
-    return .{ .code = code, .jt = 0, .jf = 0, .k = k };
-}
-fn jump(code: u16, k: u32, jt: u8, jf: u8) SockFilter {
-    return .{ .code = code, .jt = jt, .jf = jf, .k = k };
-}
-
 const BPF_LD_W_ABS = 0x20;
 const BPF_JEQ_K = 0x15;
-const BPF_JGE_K = 0x35;
 const BPF_RET_K = 0x06;
 const RET_ALLOW = 0x7fff_0000;
 const RET_KILL_PROCESS = 0x8000_0000;
 const AUDIT_ARCH_X86_64 = 0xc000_003e;
 
-/// The calls the stub makes after this point.
-const allowed = [_]linux.SYS{ .futex, .rt_sigreturn, .munmap, .exit_group, .getppid, .arch_prctl };
+/// The calls the stub makes after this point, besides `mmap` and `clone`.
+const allowed = [_]linux.SYS{ .futex, .rt_sigreturn, .munmap, .exit_group, .getppid, .arch_prctl, .gettid, .sigaltstack, .prctl };
 
-/// Allows `allowed`, and `mmap` of the RAM file, from the stub's range
-/// only; kills the stub on anything else. Syscall User Dispatch already
-/// turns every syscall from outside the range into SIGSYS, so this is
-/// the backstop: it holds if the guest finds a way past dispatch, or
-/// jumps into the stub's code.
+const Label = enum { next, kill, allow, mmap, clone };
+const Ins = struct { code: u16, k: u32, jt: Label = .next, jf: Label = .next };
+
+/// Allows `allowed`, `mmap` of the RAM file, and `clone` of a thread,
+/// from the stub's range only; kills the stub on anything else. Syscall
+/// User Dispatch already turns every syscall from outside the range into
+/// SIGSYS, so this is the backstop: it holds if the guest finds a way
+/// past dispatch, or jumps into the stub's code.
 fn installFilter() void {
-    const n = allowed.len;
     const f = comptime blk: {
-        var p: [9 + n + 4]SockFilter = undefined;
-        var i: usize = 0;
-        p[i] = stmt(BPF_LD_W_ABS, 4); // arch
-        i += 1;
-        p[i] = jump(BPF_JEQ_K, AUDIT_ARCH_X86_64, 1, 0);
-        i += 1;
-        p[i] = stmt(BPF_RET_K, RET_KILL_PROCESS);
-        i += 1;
-        p[i] = stmt(BPF_LD_W_ABS, 12); // instruction_pointer, high half
-        i += 1;
-        p[i] = jump(BPF_JEQ_K, @intCast(abi.stub_base >> 32), 1, 0);
-        i += 1;
-        p[i] = stmt(BPF_RET_K, RET_KILL_PROCESS);
-        i += 1;
-        p[i] = stmt(BPF_LD_W_ABS, 0); // nr
-        i += 1;
-        // n allowed calls, then mmap, each jumping to the ALLOW at the end.
-        for (allowed, 0..) |s, j| {
-            p[i] = jump(BPF_JEQ_K, @intFromEnum(s), @intCast(n - j + 4), 0);
-            i += 1;
-        }
-        p[i] = jump(BPF_JEQ_K, @intFromEnum(linux.SYS.mmap), 1, 0);
-        i += 1;
-        p[i] = stmt(BPF_RET_K, RET_KILL_PROCESS);
-        i += 1;
+        var p: [64]Ins = undefined;
+        var n: usize = 0;
+        const add = struct {
+            fn f(q: *[64]Ins, i: *usize, ins: Ins) void {
+                q[i.*] = ins;
+                i.* += 1;
+            }
+        }.f;
+        add(&p, &n, .{ .code = BPF_LD_W_ABS, .k = 4 }); // arch
+        add(&p, &n, .{ .code = BPF_JEQ_K, .k = AUDIT_ARCH_X86_64, .jf = .kill });
+        add(&p, &n, .{ .code = BPF_LD_W_ABS, .k = 12 }); // instruction_pointer, high half
+        add(&p, &n, .{ .code = BPF_JEQ_K, .k = @intCast(abi.stub_base >> 32), .jf = .kill });
+        add(&p, &n, .{ .code = BPF_LD_W_ABS, .k = 0 }); // nr
+        for (allowed) |sc| add(&p, &n, .{ .code = BPF_JEQ_K, .k = @intFromEnum(sc), .jt = .allow });
+        add(&p, &n, .{ .code = BPF_JEQ_K, .k = @intFromEnum(linux.SYS.mmap), .jt = .mmap });
+        add(&p, &n, .{ .code = BPF_JEQ_K, .k = @intFromEnum(linux.SYS.clone), .jt = .clone, .jf = .kill });
+        const mmap_at = n;
         // mmap: only of the RAM file (args[4], at 16 + 4 * 8).
-        p[i] = stmt(BPF_LD_W_ABS, 48);
-        i += 1;
-        p[i] = jump(BPF_JEQ_K, abi.ram_fd, 1, 0);
-        i += 1;
-        p[i] = stmt(BPF_RET_K, RET_KILL_PROCESS);
-        i += 1;
-        p[i] = stmt(BPF_RET_K, RET_ALLOW);
-        i += 1;
-        break :blk p[0..i].*;
+        add(&p, &n, .{ .code = BPF_LD_W_ABS, .k = 48 });
+        add(&p, &n, .{ .code = BPF_JEQ_K, .k = abi.ram_fd, .jt = .allow, .jf = .kill });
+        const clone_at = n;
+        // clone: only these flags (args[0], both halves).
+        add(&p, &n, .{ .code = BPF_LD_W_ABS, .k = 16 });
+        add(&p, &n, .{ .code = BPF_JEQ_K, .k = clone_flags, .jf = .kill });
+        add(&p, &n, .{ .code = BPF_LD_W_ABS, .k = 20 });
+        add(&p, &n, .{ .code = BPF_JEQ_K, .k = 0, .jt = .allow, .jf = .kill });
+        const kill_at = n;
+        add(&p, &n, .{ .code = BPF_RET_K, .k = RET_KILL_PROCESS });
+        const allow_at = n;
+        add(&p, &n, .{ .code = BPF_RET_K, .k = RET_ALLOW });
+        var out: [n]SockFilter = undefined;
+        for (p[0..n], 0..) |ins, i| {
+            const at = struct {
+                fn f(l: Label, j: usize, m: usize, c: usize, k: usize, a: usize) u8 {
+                    const t = switch (l) {
+                        .next => j + 1,
+                        .mmap => m,
+                        .clone => c,
+                        .kill => k,
+                        .allow => a,
+                    };
+                    return @intCast(t - (j + 1));
+                }
+            }.f;
+            out[i] = .{
+                .code = ins.code,
+                .k = ins.k,
+                .jt = at(ins.jt, i, mmap_at, clone_at, kill_at, allow_at),
+                .jf = at(ins.jf, i, mmap_at, clone_at, kill_at, allow_at),
+            };
+        }
+        break :blk out;
     };
     const prog: SockFprog = .{ .len = f.len, .filter = &f };
     const PR_SET_SECCOMP = 22;
@@ -263,7 +344,7 @@ const spin_rounds = 4000;
 
 /// Waits for h9 to hand the stub something other than `exited`. If h9
 /// goes away, the stub follows.
-fn waitHost() u32 {
+fn waitHost(ctl: *volatile abi.Ctl) u32 {
     var i: usize = 0;
     while (i < spin_rounds) : (i += 1) {
         const s = load(&ctl.state);
@@ -284,25 +365,27 @@ fn waitHost() u32 {
     }
 }
 
-fn exited(why: abi.Why) void {
+fn exited(ctl: *volatile abi.Ctl, why: abi.Why) void {
     ctl.why = why;
     store(&ctl.state, @intFromEnum(abi.State.exited));
     if (load(&ctl.host_waiting) != 0) futexWake(&ctl.state);
 }
 
-fn doOps() void {
+fn doOps(ctl: *volatile abi.Ctl) void {
     const n = @min(ctl.nops, abi.max_ops);
     for (0..n) |i| {
         const op = ctl.ops[i];
         switch (op.kind) {
             .map => _ = sys(.mmap, op.va, op.len, op.prot, 0x01 | 0x10, abi.ram_fd, op.off),
             .unmap => _ = sys(.munmap, op.va, op.len, 0, 0, 0, 0),
+            .thread => ctl.err = startThread(@intCast(op.va)),
+            _ => {},
         }
     }
     ctl.nops = 0;
 }
 
-fn saveRegs(mc: *const Mcontext) void {
+fn saveRegs(ctl: *volatile abi.Ctl, k: usize, mc: *const Mcontext) void {
     const r = &ctl.regs;
     r.ax = mc.ax;
     r.bx = mc.bx;
@@ -327,12 +410,13 @@ fn saveRegs(mc: *const Mcontext) void {
         const magic = std.mem.readInt(u32, fp[464..468], .little);
         ctl.xstate_bv = if (magic == FP_XSTATE_MAGIC1) std.mem.readInt(u64, fp[512..520], .little) else 3;
     }
-    fs_base = 0;
-    _ = sys(.arch_prctl, ARCH_GET_FS, @intFromPtr(&fs_base), 0, 0, 0, 0);
-    ctl.fs_base = fs_base;
+    var fs: u64 = 0;
+    _ = sys(.arch_prctl, ARCH_GET_FS, @intFromPtr(&fs), 0, 0, 0, 0);
+    fs_bases[k] = fs;
+    ctl.fs_base = fs;
 }
 
-fn loadRegs(mc: *Mcontext) void {
+fn loadRegs(ctl: *volatile abi.Ctl, k: usize, mc: *Mcontext) void {
     const r = &ctl.regs;
     mc.ax = r.ax;
     mc.bx = r.bx;
@@ -363,18 +447,22 @@ fn loadRegs(mc: *Mcontext) void {
             std.mem.writeInt(u64, fp[512..520], bv | 3, .little);
         }
     }
-    if (ctl.fs_base != fs_base) {
-        fs_base = ctl.fs_base;
-        _ = sys(.arch_prctl, ARCH_SET_FS, fs_base, 0, 0, 0, 0);
+    if (ctl.fs_base != fs_bases[k]) {
+        fs_bases[k] = ctl.fs_base;
+        _ = sys(.arch_prctl, ARCH_SET_FS, fs_bases[k], 0, 0, 0, 0);
     }
 }
 
 fn handler(sig: i32, info: *const Siginfo, ucp: *anyopaque) callconv(.c) void {
     const uc: *Ucontext = @ptrCast(@alignCast(ucp));
     const mc = &uc.mc;
-    if (starting) {
-        starting = false;
-        exited(.ready);
+    // The thread, from the signal stack this frame is on.
+    const k = (@intFromPtr(uc) - @intFromPtr(&alt_stacks)) / alt_size;
+    if (k >= abi.max_threads) die(19);
+    const ctl = &ctls[k];
+    if (starting[k]) {
+        starting[k] = false;
+        exited(ctl, .ready);
     } else {
         const why: abi.Why = switch (sig) {
             31 => .syscall,
@@ -386,23 +474,23 @@ fn handler(sig: i32, info: *const Siginfo, ucp: *anyopaque) callconv(.c) void {
             },
             else => .trap,
         };
-        saveRegs(mc);
+        saveRegs(ctl, k, mc);
         ctl.signo = @intCast(sig);
         ctl.trapno = mc.trapno;
         ctl.err = mc.err;
         ctl.addr = if (sig == 11 or sig == 7) info.addr else mc.ip;
-        exited(why);
+        exited(ctl, why);
     }
     while (true) {
-        const s = waitHost();
-        doOps();
+        const s = waitHost(ctl);
+        doOps(ctl);
         if (s == @intFromEnum(abi.State.ops)) {
-            exited(.ops_done);
+            exited(ctl, .ops_done);
             continue;
         }
         break;
     }
-    loadRegs(mc);
+    loadRegs(ctl, k, mc);
     store(&ctl.state, @intFromEnum(abi.State.guest));
 }
 

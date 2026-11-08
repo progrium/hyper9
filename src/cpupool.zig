@@ -15,8 +15,8 @@
 //! in ticket order, and a waiter kicks the longest run after a slice.
 //!
 //! On the emulator there's no vCPU limit (each engine is host memory), nor
-//! on the native backend (each process has its own stub process), so
-//! every process owns one.
+//! on the native backend (each vCPU is a thread in its address space's
+//! stub process), so every process owns one.
 
 const std = @import("std");
 const vmm = @import("vmm.zig");
