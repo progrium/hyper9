@@ -23,7 +23,7 @@ const have_hvf = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
 const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
 const have_emu = build_options.emu != .none and !web;
-/// The native backend (design/native-backend.md): Linux x86_64 for now.
+/// The native backend (design/0095-native-backend.md): Linux x86_64 for now.
 const have_native = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
 /// The web host (design/0012-browser-host.md) has only v86.
 const web = builtin.os.tag == .wasi;
@@ -52,7 +52,7 @@ pub const Kind = enum {
     /// v86's 386 CPU, on the web host only (design/0012-browser-host.md).
     v86,
     /// Guest code on the host CPU in a stub process, with no hypervisor
-    /// (design/native-backend.md).
+    /// (design/0095-native-backend.md).
     native,
 
     pub fn built(k: Kind) bool {

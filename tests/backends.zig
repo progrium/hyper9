@@ -131,7 +131,7 @@ test "exits with a message amd64" {
     try expectAll(.amd64, bytes, exits_result);
 }
 
-test "a guest syscall with any value in AX traps to h9 [native-backend]" {
+test "a guest syscall with any value in AX traps to h9 [95]" {
     // 9front takes the number from BP and ignores AX, so a guest may leave
     // anything there; on native, the host kernel mustn't act on any of
     // them (a patched kernel ran 335 and 336 before seccomp saw them).
@@ -172,7 +172,7 @@ test "a guest syscall with any value in AX traps to h9 [native-backend]" {
     });
 }
 
-test "a guest that jumps into the stub can't open a host file [native-backend]" {
+test "a guest that jumps into the stub can't open a host file [95]" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -219,7 +219,7 @@ test "a guest that jumps into the stub can't open a host file [native-backend]" 
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, path, .{}));
 }
 
-test "two vCPUs run one address space at once, and a shootdown reaches both [native-backend]" {
+test "two vCPUs run one address space at once, and a shootdown reaches both [95]" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // A sets the first word of data and waits for the second; B waits for

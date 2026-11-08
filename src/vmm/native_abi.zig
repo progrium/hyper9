@@ -1,7 +1,7 @@
 //! What the native backend (native.zig) and its stub process
 //! (native_stub.zig) share: where the stub sits, the file descriptors it
 //! inherits, and the control page they talk through. See
-//! design/native-backend.md.
+//! design/0095-native-backend.md.
 
 /// The stub's image is linked here, and it keeps [stub_base, stub_end)
 /// for itself: its code and data, and the control page. Everything else

@@ -2244,7 +2244,7 @@ A **backend** is what runs guest code:
 usable, and can run the program's architecture; then, on Linux x86\_64, the
 native backend, which runs amd64 guest code directly on the CPU in a stub
 process and traps its system calls with the kernel's Syscall User Dispatch
-and seccomp ([native-backend](design/native-backend.md)); and otherwise the
+and seccomp ([native-backend](design/0095-native-backend.md)); and otherwise the
 emulator, printing `h9: warning: no usable hypervisor; using the emulator`.
 Naming a backend uses that one or fails with exit 125.
 

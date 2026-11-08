@@ -39,7 +39,7 @@ What h9 does today, measured with a ReleaseSafe `h9` built with `-Demu=unicorn -
 | The guest's `/env` | `user`, `home=/usr/$user`, `path=(. /bin)`, and h9's other defaults; no `TERM`, `LANG`, or `PATH` |
 | `--host-fs`, then `cd /mnt/term/home/user; hcmd pwd` | `/home/user`: hcmd maps the guest's directory to the host's |
 
-On HVF, `--check` reports a hello in 1.1 ms, so startup is a non-issue on a hypervisor; the native backend ([native-backend](native-backend.md)) would bring Linux hosts without KVM close to that.
+On HVF, `--check` reports a hello in 1.1 ms, so startup is a non-issue on a hypervisor; the native backend ([native-backend](0095-native-backend.md)) would bring Linux hosts without KVM close to that.
 
 Related work:
 

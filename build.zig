@@ -922,7 +922,7 @@ pub fn build(b: *std.Build) void {
     shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
     const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
 
-    // The native backend's stub (design/native-backend.md): a freestanding
+    // The native backend's stub (design/0095-native-backend.md): a freestanding
     // static program, linked high so the guest's whole layout is free, and
     // embedded in h9.
     const native_stub = b.addExecutable(.{
@@ -1237,7 +1237,7 @@ pub fn build(b: *std.Build) void {
             backends.appendSlice(b.allocator, "whp,") catch @panic("OOM")
         else |_| {}
     }
-    // The native backend (design/native-backend.md) runs amd64 on Linux
+    // The native backend (design/0095-native-backend.md) runs amd64 on Linux
     // x86_64 when the kernel has Syscall User Dispatch and seccomp; h9
     // skips it where it can't run, as it does a backend that isn't built.
     if (os == .linux and b.graph.host.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and

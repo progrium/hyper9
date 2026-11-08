@@ -1,4 +1,4 @@
-//! The native backend's stub (design/native-backend.md): a tiny static
+//! The native backend's stub (design/0095-native-backend.md): a tiny static
 //! x86_64 Linux program, linked at `abi.stub_base`, that hosts one guest
 //! address space. h9 starts one per address space, with the guest's RAM
 //! file and its control pages as file descriptors 3 and 4.

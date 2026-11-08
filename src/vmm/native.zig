@@ -1,6 +1,6 @@
 //! Native backend (Linux x86_64): guest code runs on the host CPU in a
 //! stub process, with no hypervisor and no emulator. See
-//! design/native-backend.md.
+//! design/0095-native-backend.md.
 //!
 //! Guest memory is one shared memory file (memfd), mapped once in h9 and
 //! handed out in pages by gphys.Ram, so `translate` and `copy` read guest

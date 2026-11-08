@@ -749,7 +749,7 @@ test "without access to /dev/kvm, auto falls back to native or the emulator with
     // Without the emulator built in, auto fails with the same reason.
     if (r.code == 125) return error.SkipZigTest;
     try std.testing.expectEqualStrings("hi\n", r.out);
-    // Native on x86_64 (design/native-backend.md), else the emulator.
+    // Native on x86_64 (design/0095-native-backend.md), else the emulator.
     try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the ") != null);
 }
 
@@ -838,7 +838,7 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [17]"
     }
 }
 
-/// Skips unless the native backend runs here (design/native-backend.md):
+/// Skips unless the native backend runs here (design/0095-native-backend.md):
 /// Linux x86_64 with Syscall User Dispatch and seccomp, and amd64 binaries.
 fn requireNative(e: Env) !void {
     if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
@@ -848,7 +848,7 @@ fn requireNative(e: Env) !void {
     if (std.mem.indexOf(u8, r.out, "backend native: ok") == null) return error.SkipZigTest;
 }
 
-test "--check reports native and runs its trap probe [native-backend]" {
+test "--check reports native and runs its trap probe [95]" {
     const e = try env(@src());
     try requireNative(e);
     // The backend runs its probe (a guest syscall with each of a list of
@@ -860,7 +860,7 @@ test "--check reports native and runs its trap probe [native-backend]" {
     try expectIn(r.out, "/bin/echo runs (amd64)");
 }
 
-test "auto uses native when KVM is unavailable [native-backend]" {
+test "auto uses native when KVM is unavailable [95]" {
     const e = try env(@src());
     try requireNative(e);
     if (try kvmLimit(e) != null) return error.SkipZigTest;
@@ -873,7 +873,7 @@ test "auto uses native when KVM is unavailable [native-backend]" {
     try expectIn(w.err, "; using the native backend");
 }
 
-test "rfork with RFMEM shares data and bss but not the stack [native-backend]" {
+test "rfork with RFMEM shares data and bss but not the stack [95]" {
     const e = try env(@src());
     try requireNative(e);
     var s: Scratch = undefined;
@@ -2802,7 +2802,7 @@ fn goEnv(comptime src: std.builtin.SourceLocation, g: *GoEnv) !void {
 }
 
 /// The backend the Go cases run on: the native backend when the build
-/// says it's in the list (Linux x86_64, design/native-backend.md), else
+/// says it's in the list (Linux x86_64, design/0095-native-backend.md), else
 /// the emulator.
 fn goBackend() []const u8 {
     const v = getenv(3, "H9_TEST_GO_BACKEND") orelse return "emu";
