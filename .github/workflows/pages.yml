@@ -1,4 +1,4 @@
-# Publishes the project page (site/index.html) to GitHub Pages, with the
+# Publishes the project pages (site/*.html) to GitHub Pages, with the
 # browser host (design/0012-browser-host.md) built from main in demo/ as
 # the page's live demo.
 #
@@ -56,7 +56,7 @@ jobs:
       - name: Assemble the site
         run: |
           mkdir -p _site/demo
-          cp site/index.html _site/
+          cp site/*.html _site/
           cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,v86.wasm,root.h9a,package.json,LICENSE.v86} _site/demo/
           cp LICENSE _site/demo/LICENSE
           cp third_party/drawterm/LICENSE _site/demo/LICENSE.drawterm
