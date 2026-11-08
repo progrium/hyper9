@@ -5618,6 +5618,12 @@ test "a store or read(2) racing another thread's mprotect in the same chunk neit
     try threadCase(&le, "remap_race");
 }
 
+test "threads faulting pages in while others munmap don't fault twice on a mapped page [95]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "fault_race");
+}
+
 test "exit_group kills every thread [49]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

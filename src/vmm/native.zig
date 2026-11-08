@@ -387,6 +387,9 @@ pub const AddressSpace = struct {
     regions: std.ArrayList(Region) = .empty,
     /// Requests the stub hasn't carried out yet.
     ops: std.ArrayList(abi.Op) = .empty,
+    /// Requests taken off `ops` that a stub thread is carrying out now.
+    /// They aren't in `ops`, but aren't done either.
+    inflight: usize = 0,
     /// Held while starting the stub, and while a stub thread carries out
     /// requests, so they're carried out in order.
     ctl_lock: std.atomic.Mutex = .unlocked,
@@ -518,11 +521,25 @@ pub const AddressSpace = struct {
             @memcpy(ctl.ops[0..n], as.ops.items[0..n]);
             ctl.nops = @intCast(n);
             as.ops.replaceRangeAssumeCapacity(0, n, &.{});
+            as.inflight += n;
             as.lock.unlock();
             if (n == 0) return;
+            defer {
+                as.lockSpin();
+                as.inflight -= n;
+                as.lock.unlock();
+            }
             s.go(k, .ops);
             try s.wait(k);
         }
+    }
+
+    /// Whether requests are queued, or being carried out on another
+    /// thread, so that guest code mustn't run until they're done.
+    fn opsPending(as: *AddressSpace) bool {
+        as.lockSpin();
+        defer as.lock.unlock();
+        return as.ops.items.len != 0 or as.inflight != 0;
     }
 
     /// The stub thread for vCPU `v` to run on: the one it ran last if
@@ -657,7 +674,12 @@ pub const Vcpu = struct {
         defer as.putThread(k);
         const ctl = &stub.ctls[k];
 
-        if (as.ops.items.len != 0) {
+        // Another vCPU's flush may have taken this one's requests (a page
+        // its last fault mapped) off the queue without carrying them out
+        // yet. Waiting on `ctl_lock` waits for that flush, so the guest
+        // doesn't run against the stub's old mappings and fault again on
+        // a page h9 has already mapped, which is SIGSEGV.
+        if (as.opsPending()) {
             lockSlow(&as.ctl_lock);
             defer as.ctl_lock.unlock();
             try as.flushOps(stub, k);
