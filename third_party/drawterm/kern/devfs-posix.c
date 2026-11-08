@@ -589,9 +589,15 @@ fswstat(Chan *c, uchar *buf, int n)
 		t[0].tv_usec = 0;
 		t[1].tv_sec = ~d.mtime != 0 ? d.mtime : stbuf.st_mtime;
 		t[1].tv_usec = 0;
-		if(byfd)
-			futimes(uif->fd, t);
-		else
+		if(byfd){
+			/* h9: futimens, which every libc h9 builds with has. */
+			struct timespec ts[2];
+			ts[0].tv_sec = t[0].tv_sec;
+			ts[0].tv_nsec = 0;
+			ts[1].tv_sec = t[1].tv_sec;
+			ts[1].tv_nsec = 0;
+			futimens(uif->fd, ts);
+		}else
 			utimes(uif->path, t);
 	}
 	if(d.name[0] && strcmp(d.name, lastelem(ownpath(uif))) != 0) {
