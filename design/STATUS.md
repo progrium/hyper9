@@ -21,7 +21,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [9p-roots](0013-9p-roots.md) | implemented |  | 9P roots |
 | [image-roots](0014-image-roots.md) | draft |  | Disk-image roots |
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
-| [kvm](0016-kvm.md) | draft |  | KVM backend |
+| [kvm](0016-kvm.md) | accepted | ready | KVM backend |
 | [whp](0017-whp.md) | draft | needs kvm | WHP backend |
 | [linux-personality](0018-linux-personality.md) | draft |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
@@ -73,7 +73,7 @@ flowchart LR
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
-  p_kvm["#35;16 kvm<br/>draft"]:::draft
+  p_kvm["#35;16 kvm<br/>accepted"]:::accepted
   p_whp["#35;17 whp<br/>draft"]:::draft
   p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
