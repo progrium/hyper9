@@ -81,7 +81,7 @@ That's exit 125, as for any root that can't be reached. A tilde root with no `$H
 
 ### The shell
 
-Tilde expansion is done by the shell, before h9 starts: a program receives `/home/jeff/…`, never `~/…`, and h9 doesn't expand `~` itself. Some programs expand `~/` in their own config files (OpenSSH, git), but none sees it in an argument the shell has already expanded. A shell expands `~NAME` at the start of a word to the home directory of user `NAME`, and `~` and `~/…` to `$HOME`. So the spelling that's documented is `--root=~alpine`: bash and zsh don't expand `~` after `=` in an argument that isn't an assignment (zsh only does with `MAGIC_EQUAL_SUBST`). The space-separated form needs quotes, `--root '~alpine'`, because:
+Tilde expansion is done by the shell, before h9 starts: for an unquoted `~/roots`, a program receives `/home/jeff/roots`, and h9 doesn't expand `~` itself. Some programs expand `~/` in their own config files (OpenSSH, git), which is where expansion "in the program" is usually seen, but on a command line the shell has done it first. A shell expands `~NAME` at the start of a word to the home directory of user `NAME`, and `~` and `~/…` to `$HOME`. So the spelling that's documented is `--root=~alpine`: bash and zsh don't expand `~` after `=` in an argument that isn't an assignment (zsh only does with `MAGIC_EQUAL_SUBST`). The space-separated form needs quotes, `--root '~alpine'`, because:
 
 - bash expands `~alpine` only when a user `alpine` exists, but users like `root`, `bin`, `daemon`, `git`, and `nobody` exist on most systems, so `--root ~root` becomes `--root /root`.
 - zsh, the default shell on macOS, fails the command with "no such user or named directory: alpine" when there's no such user, and also expands names from `hash -d`.
