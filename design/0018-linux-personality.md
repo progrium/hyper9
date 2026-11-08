@@ -2,7 +2,7 @@
 id: 18
 slug: linux-personality
 title: Linux personality
-status: draft
+status: implemented
 created: 2026-11-04
 authors: [progrium]
 depends: [34, 33]

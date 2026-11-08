@@ -11,6 +11,8 @@ areas: [build, tests, docs]
 
 # Proposal: A multi-call 9front userland binary
 
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 h9 gains a build of 9front's own commands as one statically linked multi-call binary, `9box`, in the spirit of busybox. The commands are 9front's sources, unmodified, compiled inside h9 by 9front's compilers; generated `-D` flags per command rename its global symbols so they can share one link. `9box` picks the command from the name it runs as, through hard links in a host tree or two-line `#!` stubs anywhere else. A new build step assembles a slim root around it: the 42 commands needed for basic operation, one set and no menu. Each tree is `9box`, its links or stubs, `rcmain`, the mount points h9 binds onto, and nothing else. Nothing changes in h9 itself: no flags, no `Machine.Options`, no devices.

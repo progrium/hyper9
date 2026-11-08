@@ -11,6 +11,8 @@ areas: [cli]
 
 # Proposal: Schemeless roots
 
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 `--root example.com/9p` means `--root wss://example.com/9p`, and `--root localhost:8080/9p` means `--root ws://localhost:8080/9p`. A `--root` or `$H9ROOT` value that has no scheme or dial-string prefix, isn't a host path that exists, and is shaped like `host[:port][/path]` is read as a URL: `ws://` for a loopback host, and `wss://` for any other. Every value that works today keeps its meaning, because an existing path is always checked first.

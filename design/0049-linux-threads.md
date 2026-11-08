@@ -2,7 +2,7 @@
 id: 49
 slug: linux-threads
 title: Linux threads
-status: draft
+status: implemented
 created: 2026-11-05
 authors: [progrium]
 depends: [18, 50]

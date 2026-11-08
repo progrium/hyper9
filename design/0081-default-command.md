@@ -11,6 +11,8 @@ areas: [cli, docs, tests]
 
 # Proposal: A default command from the root
 
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 `h9 --rc` with no command line runs a login rc, `rc -l`, interactive on a terminal. 9front's `rcmain` already gives a login shell a hook: it sources `/rc/lib/rcmain.local` and then `$home/lib/profile` before reading commands. So a root sets its own default command in `/rc/lib/rcmain.local`, the way a 9front profile starts `rio`. Ending it with `exec prog` works like Docker's `CMD`, and leaving out the `exec` runs setup and then an rc. Nothing new is defined: no file, flag, variable, or root metadata. A root that has no `rcmain.local` gets a plain rc, so the built-in root works unchanged. Bare `h9` still prints the usage, so the feature is opt-in.

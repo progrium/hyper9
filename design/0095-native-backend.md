@@ -11,6 +11,8 @@ areas: [vmm, cli, sandbox, tests]
 
 # Proposal: Native backend
 
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 A vmm backend, `src/vmm/native.zig`, that runs guest code directly on the host CPU with no hypervisor and no emulator, on Linux (x86\_64 first, then arm64). Each address space is a small stub process whose memory comes from one shared memfd, and each of the stub's threads runs one vCPU. The host kernel turns every guest syscall into a SIGSYS in the stub, through Syscall User Dispatch with a seccomp filter behind it, and the stub hands the registers to h9 over a shared page. Compute runs at native speed, the backend is MIT so it ships in `h9`, and it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. macOS and Windows aren't covered; Rationale says why.

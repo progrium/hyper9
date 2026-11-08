@@ -1,7 +1,7 @@
 ---
 slug: linux-i386
 title: 32-bit x86 Linux programs
-status: draft
+status: accepted
 created: 2026-11-08
 authors: [progrium]
 depends: [18, 49, 50, 12]
@@ -9,6 +9,8 @@ areas: [linux, vmm, web]
 ---
 
 # Proposal: 32-bit x86 Linux programs
+
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 

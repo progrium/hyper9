@@ -2,7 +2,7 @@
 id: 50
 slug: linux-net
 title: Linux readiness and sockets
-status: draft
+status: implemented
 created: 2026-11-05
 authors: [progrium]
 depends: [18]
