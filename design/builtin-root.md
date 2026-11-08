@@ -14,14 +14,14 @@ areas: [kern, cli, build, sandbox]
 
 ## Abstract
 
-h9 builds a small read-only root into its binary: [multicall](0064-multicall.md)'s `min` tree, which is one `9box` binary per architecture serving 42 of 9front's commands, plus `rcmain`, the timezone file and the directories h9's namespace binds onto. `#H`, the device that serves [guest-tools](0032-guest-tools.md)' commands, serves it under the attach spec `root`. When h9 finds no root tree, it uses this built-in root instead of exiting 125. With a root, `--builtin=before` puts the box's commands in `/bin` ahead of the root's, so a 9P root supplies everything else, and `--builtin=only` uses the built-in root alone. Everything else in the namespace (devices, the cwd, `/mnt/term`, the private `/tmp`, the policy) is built over it as over any other root. So `h9 --rc 'echo hi'` and `h9 ./prog` work on a fresh install with nothing but the h9 binary, which grows by about half a megabyte per architecture. A full 9front tree becomes what you add for compilers, sources and graphics, not what you need to start.
+h9 builds a small read-only root into its binary: [multicall](0064-multicall.md)'s `min` tree, which is one `9box` binary per architecture serving 42 of 9front's commands, plus `rcmain`, the timezone file, and the directories h9's namespace binds onto. `#H`, the device that serves [guest-tools](0032-guest-tools.md)' commands, serves it under the attach spec `root`. When h9 finds no root tree, it uses this built-in root instead of exiting 125. With a root, `--builtin=before` puts the box's commands in `/bin` ahead of the root's, so a 9P root supplies everything else, and `--builtin=only` uses the built-in root alone. Everything else in the namespace (devices, the cwd, `/mnt/term`, the private `/tmp`, the policy) is built over it as over any other root. So `h9 --rc 'echo hi'` and `h9 ./prog` work on a fresh install with nothing but the h9 binary, which grows by about half a megabyte per architecture. A full 9front tree becomes what you add for compilers, sources, and graphics, not what you need to start.
 
 ## Background
 
 - **h9 needs a tree to do almost anything.** Getting one means `scripts/fetch.sh` and `zig build mkroot`, which boots the release image in QEMU and unpacks about 250 MB into `.local/9front/root`. An installed `h9` then needs `H9ROOT` set. Without a root, `h9 ./prog` runs, but the program sees only the kernel's devices: no `/bin`, no cwd, no `/tmp` (MANUAL chapter 2). Anything else is exit 125, `no root tree found`.
-- **The CLI enforces it up front.** `src/main.zig` refuses a guest program name or `--ns` without a root, since lookup would fail later as a misleading "not found". `src/policy.zig` skips the `/bin` binds, the cwd bind and `/mnt/term` when there's no root, because their targets don't exist on bare devroot.
+- **The CLI enforces it up front.** `src/main.zig` refuses a guest program name or `--ns` without a root, since lookup would fail later as a misleading "not found". `src/policy.zig` skips the `/bin` binds, the cwd bind, and `/mnt/term` when there's no root, because their targets don't exist on bare devroot.
 - **A root is only a file tree to h9.** Nothing boots. h9 builds the namespace itself and reads one file, `/adm/timezone/local`, if it's there. The [userland guide](../docs/userland.md) shows a working root made of nine empty directories and one Go binary.
-- **multicall makes a small 9front tree.** [multicall](0064-multicall.md) compiles 9front's own commands, unmodified, into one statically linked `9box` inside h9, and `zig build slim` assembles a tree around it: `9box`, a name per command, `rcmain`, `adm/timezone/local` and the mount points. Its `min` set is 42 commands (a shell, file and text tools, `tar` and `gzip`, and `bind`, `mount`, `ns`, `ps`, `srv`, `exportfs`, `ramfs`), and its prototype's arm64 `9box` was 535 KB stripped, against 2.28 MB for the same commands as separate binaries. multicall leaves shipping prebuilt trees open, as a separate decision about h9 distributing 9front binaries.
+- **multicall makes a small 9front tree.** [multicall](0064-multicall.md) compiles 9front's own commands, unmodified, into one statically linked `9box` inside h9, and `zig build slim` assembles a tree around it: `9box`, a name per command, `rcmain`, `adm/timezone/local`, and the mount points. Its `min` set is 42 commands (a shell, file and text tools, `tar` and `gzip`, and `bind`, `mount`, `ns`, `ps`, `srv`, `exportfs`, `ramfs`), and its prototype's arm64 `9box` was 535 KB stripped, against 2.28 MB for the same commands as separate binaries. multicall leaves shipping prebuilt trees open, as a separate decision about h9 distributing 9front binaries.
 - **`#H` already serves an embedded tree.** [guest-tools](0032-guest-tools.md) generates a table from `src/guest/` at configure time (`tools/guesttree.zig`) and serves it read-only from constant memory through `src/kern/devhtools.c`. It allows only rc scripts, so its commands run only when the root has `rc`. It declined binaries because they're per architecture and "would make h9 a distributor of 9front programs", and said a proposal that needs them can propose that. This is that proposal, and the decision multicall left open.
 - **An overlay with no lower tree already exists.** [ephemeral-writes](0006-ephemeral-writes.md) keeps a `#O` instance with no lower tree available "for runs without a root tree", and a 9P root's `/tmp` is a bare `#O` today.
 - **Other work wants the 9front tree to be optional.** The linux-personality spike found nothing in the personality reads the 9front tree, and suggested `/9` exist only when one is found; mixed pipelines and execing `rc` are what need it. The browser host has no host file system to hold a tree at all.
@@ -45,7 +45,7 @@ Its contents are multicall's `min` tree for each architecture the build embeds, 
 
 Each command name is its own table entry with its own qid, but the entries share `9box`'s bytes, so a name costs a few bytes of table rather than a copy. That's the table's equivalent of multicall's hard links: `9box` sees the name it was run as in `argv[0]` and needs neither links nor `#!` stubs. Where the `min` tree's directory list and h9's skeleton differ, the build adds what h9 binds onto (`usr`, so `home` has a parent).
 
-Compilers, `mk`, `rio`, fonts, `/sys/src`, `/sys/man` and `/lib/ndb` stay in the full tree. Proposals still add h9's own commands as rc scripts in `src/guest/`, not as binaries here.
+Compilers, `mk`, `rio`, fonts, `/sys/src`, `/sys/man`, and `/lib/ndb` stay in the full tree. Proposals still add h9's own commands as rc scripts in `src/guest/`, not as binaries here.
 
 ### Where the binaries come from
 
@@ -96,7 +96,7 @@ Over the built-in root, the plan is the usual one with one change, the root bind
 - **`builtin`** is a new access column value, like `9p`: the root has no host path, so it has no access rule, and it's read-only whatever the flags. `--writable` can't name it.
 - **`/rc/bin`** doesn't exist in the `min` tree, so its bind is skipped as it already is when a root lacks it.
 - **`/tmp`** is a bare `#O`, as over a 9P root, since the root's own `/tmp` is empty and read-only. `--write=none` leaves it read-only.
-- **The cwd, `--readable`, `--writable` and `/mnt/term`** are bound as over a host root. `has_root` in `src/policy.zig` becomes true for the built-in root, which is all the plan needs.
+- **The cwd, `--readable`, `--writable`, and `/mnt/term`** are bound as over a host root. `has_root` in `src/policy.zig` becomes true for the built-in root, which is all the plan needs.
 - **`--write=overlay`**, once [overlay](0011-overlay.md) is built, covers the built-in root like any other, so `mkdir /usr/me` works for the run.
 - **`--ns`** replays `#Hroot` as an ordinary bind, so a plan printed over the built-in root replays on any h9 of the same version. The same bind in a namespace file layers the box by hand without the flag: `bind -b '#Hroot/arm64/bin' /bin`.
 
@@ -111,7 +111,7 @@ Over a 9P root with `--builtin=before`, the root is unchanged and `/bin` gains o
   bind -a '#H/bin' /bin                                   # h9's commands
 ```
 
-`ls`, `grep` and `rc` then come from h9's memory, and `mk` or `acme` from the server.
+`ls`, `grep`, and `rc` then come from h9's memory, and `mk` or `acme` from the server.
 
 ### What h9 reports
 
@@ -124,11 +124,11 @@ Over a 9P root with `--builtin=before`, the root is unchanged and `/bin` gains o
 
 - **A Linux root** under [linux-personality](0018-linux-personality.md): when no 9front tree is found, `/9` is the built-in root, so a Linux process can exec `/9/bin/rc` and pipe through 9front's `grep` without the full tree.
 - **The browser host** has no host tree to find, so it uses the built-in root's `386` tree when no 9P or WebSocket root is given (see Open issues for size).
-- **A 9P, WebSocket or image root** is unchanged.
+- **A 9P, WebSocket, or image root** is unchanged.
 
 ## Rationale
 
-**Built into the binary, not a downloaded tree.** A tree beside the binary, or a cache h9 fills on first run, would have to be found, kept in step with the binary and allowed through the sandbox, which guest-tools already weighed for its scripts. A download also needs the network on first run. Embedding keeps h9 one file and makes the first run work offline.
+**Built into the binary, not a downloaded tree.** A tree beside the binary, or a cache h9 fills on first run, would have to be found, kept in step with the binary, and allowed through the sandbox, which guest-tools already weighed for its scripts. A download also needs the network on first run. Embedding keeps h9 one file and makes the first run work offline.
 
 **multicall's `min` box, not separate binaries.** The first draft of this proposal embedded about 30 separate binaries, estimated at 2 to 3 MB per architecture. The `min` box is 42 commands in 535 KB stripped, measured, so the built-in root covers more (`tar`, `gzip`, `awk`, `diff`, `exportfs`, `ramfs`) for a quarter of the bytes. It's also exactly the tree multicall already tests, so the built-in root adds no second set to keep working. The cost is multicall's BSS: about 1.6 MB of static buffers in every process, and execs about 7% slower in its prototype (Open issues).
 
@@ -136,19 +136,19 @@ Over a 9P root with `--builtin=before`, the root is unchanged and `/bin` gains o
 
 **Exec cost is lowest here.** h9 reads the whole program on each exec, which multicall flags as the cost of one big binary on 9P and WebSocket roots. `#H` serves constant memory in the h9 process, so that read is a copy with no I/O, cheaper than from a host tree.
 
-**In `#H`, not a new device.** It's the same kind of thing: a constant read-only tree generated at build time. One device keeps one generator, one table format and one C file. `--no-guest-tools` still masks `#H` after the namespace is built, which leaves the root bind working, as with every masked device.
+**In `#H`, not a new device.** It's the same kind of thing: a constant read-only tree generated at build time. One device keeps one generator, one table format, and one C file. `--no-guest-tools` still masks `#H` after the namespace is built, which leaves the root bind working, as with every masked device.
 
 **Shipping 9front's binaries after all.** guest-tools declined it, and multicall left it open, to keep h9 from becoming a distribution. Running without a tree isn't possible otherwise: an rc reimplementation would be a second shell to maintain, and an rc-less root runs nothing by name. What ships is built from the pinned release's source, unmodified apart from multicall's symbol renaming, under 9front's MIT licence, whose notice goes in each release archive beside h9's. The set is multicall's `min`, fixed and tested, so h9 ships a starter kit, not a userland.
 
 **Automatic, not only behind a flag.** The point is that a fresh install works. Exit 125 for a missing tree is a dead end the user has to read the manual to get past, and nothing depends on it: the integration suite checks for the tree itself and skips, rather than relying on h9's exit. `--builtin=only` covers the opposite case, testing the built-in root on a machine that has a tree, and `off` gets the old behaviour back.
 
-**A layer, not only a replacement.** An earlier draft had `--rootless`, which chose the built-in root instead of any other. But the built-in commands are useful with a root too. Over a 9P or WebSocket root, every exec reads the whole binary over the connection (multicall's exec-cost issue), and `before` turns the common ones into reads from h9's memory while the server still supplies compilers, sources and everything else. Over a slim or custom root, `after` fills the gaps. One flag with a mode covers both and the no-root case, where a separate `--rootless` would have been a third concept.
+**A layer, not only a replacement.** An earlier draft had `--rootless`, which chose the built-in root instead of any other. But the built-in commands are useful with a root too. Over a 9P or WebSocket root, every exec reads the whole binary over the connection (multicall's exec-cost issue), and `before` turns the common ones into reads from h9's memory while the server still supplies compilers, sources, and everything else. Over a slim or custom root, `after` fills the gaps. One flag with a mode covers both and the no-root case, where a separate `--rootless` would have been a third concept.
 
 **`/bin` only, not a union at `/`.** Binding the whole built-in tree before or after the root at `/` would union every directory, and its empty mount points and `rcmain` would shadow or mix with the root's. The commands are the only part worth layering, and `/bin` is already a union.
 
 **`before` isn't the default with a root.** The root's own commands are what the user chose, and a root built from another 9front release, or a custom userland, may depend on its own versions. Shadowing them silently would be a surprise.
 
-**`--builtin`, not `--root builtin`.** `--root` takes paths, dial strings and URLs, so any word could be a directory. A separate flag can't be confused with one.
+**`--builtin`, not `--root builtin`.** `--root` takes paths, dial strings, and URLs, so any word could be a directory. A separate flag can't be confused with one.
 
 **Embedders default to `.off`.** An embedder that passes no root today gets the bare namespace and may depend on it, such as a host a.out that wants no files at all.
 
@@ -157,20 +157,20 @@ Over a 9P root with `--builtin=before`, the root is unchanged and `/bin` gains o
 - **CLI:** new `--builtin`. With no root found, a guest program or `--ns` runs over the built-in root instead of exiting 125 with `no root tree found`, and `h9 ./prog` gets the full namespace instead of the bare one; `--builtin=off` restores both. `--check` exits 0 with only the built-in root. `--builtin=only` with `--root` is exit 2. With a root, nothing changes unless `before` or `after` is given.
 - **`Machine.Options`:** new `builtin`, `.off` by default, so embedders see no change.
 - **`--print` and `--ns`:** the `builtin` access value and the `#Hroot` bind.
-- **The binary:** grows by about 0.6 MB for `h9` (one `9box`, `rcmain`, the timezone file and the table) and three times that for `h9-emu`, before any compression.
+- **The binary:** grows by about 0.6 MB for `h9` (one `9box`, `rcmain`, the timezone file, and the table) and three times that for `h9-emu`, before any compression.
 - **Building h9:** a release build needs multicall's `min` trees first. A development build without them still builds, with the skeleton only.
 - **Release archives:** gain 9front's licence notice.
 - **The root tree and `third_party/`:** unchanged.
 
 ## Security
 
-The built-in root is constant, read-only data in the h9 binary, the same as `#H`'s scripts, so it gives the guest nothing on the host. The commands run under the same policy, device mask and sandbox as the same commands from a tree.
+The built-in root is constant, read-only data in the h9 binary, the same as `#H`'s scripts, so it gives the guest nothing on the host. The commands run under the same policy, device mask, and sandbox as the same commands from a tree.
 
 One change is visible: `h9 ./prog` with no root used to see no host files, because there was nowhere to bind them, and now sees its cwd and the paths the policy allows, as it would with a root. That's the policy working as documented rather than a gap closing by accident, but a script that relied on rootless runs being blind should pass `--sandbox` or `--write=none`. Embedders see no change unless they set `builtin`. `before` lets the box's commands shadow a root's, but only commands the guest could run anyway, and `--print` shows the bind.
 
 ## Done when
 
-`env -u H9ROOT h9 --builtin=only --rc 'ls /bin | wc -l; echo $cputype; pwd'` on a host with no tree prints the command count, the architecture and `/mnt/term/cwd`.
+`env -u H9ROOT h9 --builtin=only --rc 'ls /bin | wc -l; echo $cputype; pwd'` on a host with no tree prints the command count, the architecture, and `/mnt/term/cwd`.
 
 Integration cases tagged `[builtin-root]`. Those that need commands skip in a skeleton-only build, as guest-tools' cases do with `H9_TEST_GUEST_TOOLS`:
 
@@ -190,15 +190,15 @@ Integration cases tagged `[builtin-root]`. Those that need commands skip in a sk
 - `test "guest-tools' wsmount runs over the built-in root [builtin-root]"`
 - `test "the built-in root's commands match the min tree's [builtin-root, multicall]"`: multicall's differential corpus run over `#Hroot`, so the embedded box and the built tree can't drift.
 
-The content sharing, the release check and the build failure on a stale tree are `zig build test` cases in `tools/guesttree.zig`. A `tests/backends.zig` case attaches `#Hroot` on the emulator with a test table and runs a command from it.
+The content sharing, the release check, and the build failure on a stale tree are `zig build test` cases in `tools/guesttree.zig`. A `tests/backends.zig` case attaches `#Hroot` on the emulator with a test table and runs a command from it.
 
 ## Implementation
 
-1. The skeleton: the second table in `tools/guesttree.zig`, the `root` spec in `devhtools.c`, `builtin` in `Machine.Options`, the plan changes in `src/policy.zig` for all four modes, the lookup step and `--builtin` in `src/main.zig` and `src/cli.zig`. On its own this gives `h9 ./prog` the full namespace without a tree, and needs nothing from multicall.
+1. The skeleton: the second table in `tools/guesttree.zig`, the `root` spec in `devhtools.c`, `builtin` in `Machine.Options`, the plan changes in `src/policy.zig` for all four modes, the lookup step, and `--builtin` in `src/main.zig` and `src/cli.zig`. On its own this gives `h9 ./prog` the full namespace without a tree, and needs nothing from multicall.
 2. Embedding the `min` trees: `-Dbuiltin-root`, content sharing, the release and staleness checks, and the binary's measured growth recorded under Updates. This step waits for multicall's `min` set.
-3. Reporting: `--check`, `--version` and the missing-command hint.
+3. Reporting: `--check`, `--version`, and the missing-command hint.
 4. Release: run `zig build slim -Dslim-set=min` for each architecture before building `h9` and `h9-emu`, and add 9front's notice to the archives.
-5. Docs: MANUAL chapter 2 (getting started no longer needs a tree first), the userland guide's sections 1 and 4, README. DESIGN.md: the root lookup, `#H`'s second table, the namespace listing, the flag and `Machine.Options`. Set `status: implemented`.
+5. Docs: MANUAL chapter 2 (getting started no longer needs a tree first), the userland guide's sections 1 and 4, README. DESIGN.md: the root lookup, `#H`'s second table, the namespace listing, the flag, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 

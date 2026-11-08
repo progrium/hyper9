@@ -15,7 +15,7 @@ Nov 5, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A 9P server can be reached over a WebSocket: `--root ws://host/path` or `wss://host/path`, and `mount 'wss://…' /n/x` in namespace files. h9 makes the connection on the host, before the program starts, and devmnt mounts it as it mounts a [9P root](9p-roots.md)'s connection. The WebSocket is carried into the kernel by a new host-stream device, `src/kern/devhstream.c`, built on the pattern devhcons uses for the console: leaf calls into Zig, a host reader thread, and the guest sleeping in the kernel. Natively, Zig does the TCP, TLS and WebSocket framing. On the [browser host](0012-browser-host.md), the page's own `WebSocket` does, which makes this the browser host's only way to reach a file server over the network.
+A 9P server can be reached over a WebSocket: `--root ws://host/path` or `wss://host/path`, and `mount 'wss://…' /n/x` in namespace files. h9 makes the connection on the host, before the program starts, and devmnt mounts it as it mounts a [9P root](9p-roots.md)'s connection. The WebSocket is carried into the kernel by a new host-stream device, `src/kern/devhstream.c`, built on the pattern devhcons uses for the console: leaf calls into Zig, a host reader thread, and the guest sleeping in the kernel. Natively, Zig does the TCP, TLS, and WebSocket framing. On the [browser host](0012-browser-host.md), the page's own `WebSocket` does, which makes this the browser host's only way to reach a file server over the network.
 
 The guest can open WebSockets too. The same device is bound at `/net/ws`, laid out like devip's `/net/tcp`, so a guest writes `connect wss://…` to a conversation's `ctl` and mounts its `data` with the ordinary `mount` command. A conversation's `text` file, beside `data`, sends and receives text messages, so guest programs can use it for any WebSocket service, not only 9P. [net-policy](0005-net-policy.md)'s `--net` and `--net-allow` decide which URLs it may connect to. On the browser host, `/net/ws` is the guest's only network.
 
@@ -24,7 +24,7 @@ The guest can open WebSockets too. The same device is bound at `/net/ws`, laid o
 ### Why WebSocket
 
 - **The browser host has no sockets.** [browser-host](0012-browser-host.md) masks `#I`, since a Worker can't open TCP connections. A WebSocket is the only bidirectional network transport a page has, so without it a browser h9 can only run what's in its root archive or what the embedder lends it through WASI.
-- **Natively, it's 9P that crosses the web's infrastructure.** A WebSocket goes through HTTP proxies, load balancers and TLS terminators that plain TCP on port 564 doesn't, and `wss` gives the connection TLS and the HTTP layer's authentication (a bearer token, a cookie, a signed URL) without a factotum. [9p-roots](9p-roots.md) lists "the 9P root's connection isn't encrypted" as a caveat and leaves authentication open. For a root reached over `wss`, both have an answer.
+- **Natively, it's 9P that crosses the web's infrastructure.** A WebSocket goes through HTTP proxies, load balancers, and TLS terminators that plain TCP on port 564 doesn't, and `wss` gives the connection TLS and the HTTP layer's authentication (a bearer token, a cookie, a signed URL) without a factotum. [9p-roots](9p-roots.md) lists "the 9P root's connection isn't encrypted" as a caveat and leaves authentication open. For a root reached over `wss`, both have an answer.
 - **One URL for both hosts.** A server that speaks 9P over WebSocket can be the root of an h9 in a terminal and of an h9 in a browser tab, from the same `wss://` URL.
 
 There's no standard for 9P over WebSocket, but existing servers and bridges agree on the essentials: binary messages, with 9P's own size-prefixed messages as the payload.
@@ -32,10 +32,10 @@ There's no standard for 9P over WebSocket, but existing servers and bridges agre
 ### h9 today
 
 - **9P roots** are proposed in [9p-roots](9p-roots.md): `--root tcp!host!port` dials through devip and `--root unix!path` wraps a host socket with devlfd's `lfdchan`. Either way devmnt mounts the connection at `/` before any other bind, and the root's connection isn't subject to `--net`, since h9 makes it, not the guest.
-- **devmnt reads a byte stream.** `mntrpcread` in drawterm's `kern/devmnt.c` reads the size, type and tag, then reads until it has the whole message, through the channel's `bread`. It doesn't need a message per read, so any channel that delivers the server's bytes in order can carry 9P.
+- **devmnt reads a byte stream.** `mntrpcread` in drawterm's `kern/devmnt.c` reads the size, type, and tag, then reads until it has the whole message, through the channel's `bread`. It doesn't need a message per read, so any channel that delivers the server's bytes in order can carry 9P.
 - **devhcons** (`src/kern/devhcons.c`) is a kernel device whose reads and writes are leaf calls into Zig (DESIGN.md, seam rule 3). A Zig reader thread (`src/consin.zig`) does the host reads, and a guest read sleeps on a Rendez until there's input, so a note or a teardown interrupts it with `Eintr`.
-- **Guest mounts** come with [devsrv](0008-devsrv.md), which serves the `mount`, `unmount` and `fauth` syscalls. `mount` takes any open fd that speaks 9P, and the `mount` command opens any path, not only `/srv` entries.
-- **Guest networking** is devip (`#I`) at `/net`, governed by [net-policy](0005-net-policy.md): `--net=disable` masks `#I`, `outbound` refuses `announce`, and `--net-allow` patterns are checked on every `connect` and at `/net/cs`, through the Zig leaves `h9_net_check`, `h9_net_lookup` and `h9_net_resolved`. The browser host masks `#I`, so a guest there has no network at all.
+- **Guest mounts** come with [devsrv](0008-devsrv.md), which serves the `mount`, `unmount`, and `fauth` syscalls. `mount` takes any open fd that speaks 9P, and the `mount` command opens any path, not only `/srv` entries.
+- **Guest networking** is devip (`#I`) at `/net`, governed by [net-policy](0005-net-policy.md): `--net=disable` masks `#I`, `outbound` refuses `announce`, and `--net-allow` patterns are checked on every `connect` and at `/net/cs`, through the Zig leaves `h9_net_check`, `h9_net_lookup`, and `h9_net_resolved`. The browser host masks `#I`, so a guest there has no network at all.
 - **No WebSocket client** exists in the 9front userland. webfs speaks HTTP but doesn't do the upgrade, and nothing else in the pinned root tree does.
 - **No WebSocket code** exists in h9 or drawterm. Zig's standard library has a TLS client (`std.crypto.tls.Client`) and the system's certificate bundle (`std.crypto.Certificate.Bundle`), but no WebSocket client.
 
@@ -66,7 +66,7 @@ They're accepted wherever [9p-roots](9p-roots.md) accepts a dial string: `--root
 | `--root-header 'NAME: VALUE'` | Repeatable. An HTTP header sent with a WebSocket root's handshake, such as `Authorization: Bearer …` |
 | `--root-header @FILE` | Reads headers from a host file, one per line, so a token isn't in the process listing |
 
-A header that would change the handshake itself (`Host`, `Upgrade`, `Connection` or any `Sec-WebSocket-*`) is a usage error, exit 2. `--root-header` with a root that isn't a URL is a usage error too. `mount` lines in namespace files send no extra headers; a token for one goes in its URL's query.
+A header that would change the handshake itself (`Host`, `Upgrade`, `Connection`, or any `Sec-WebSocket-*`) is a usage error, exit 2. `--root-header` with a root that isn't a URL is a usage error too. `mount` lines in namespace files send no extra headers; a token for one goes in its URL's query.
 
 ### Trust
 
@@ -91,8 +91,8 @@ Guest conversations always go direct, whatever the environment. A proxy resolves
 
 `src/kern/devhstream.c` turns a host connection into a channel devmnt can mount. It's devhcons's design applied to a connection instead of a console. A stream is either framed, a WebSocket whose binary payloads are the bytes, or raw, a host connection whose bytes go through unchanged. This proposal makes framed streams; raw ones are for other host-made connections, such as [serve](0035-serve.md)'s unix and TCP listeners and, later, 9p-roots' unix-socket roots on Windows, which devlfd can't carry. Both kinds share everything below:
 
-- **Leaves** in `src/kern.zig`: `h9_hstream_read(id, buf, n)`, `h9_hstream_ready(id)`, `h9_hstream_write(id, buf, n)` and `h9_hstream_close(id)`. They return a status and never raise kernel errors; the C side raises them.
-- **Reads** never block in a host call. A reader thread per stream, `src/hstream.zig`, reads frames and queues payload bytes, and calls `h9_hstream_wake(id)` when it queues some or the stream ends. A guest read sleeps on the stream's Rendez until the queue has bytes, so notes, `--timeout` and teardown interrupt it as they do a devmnt RPC on any channel.
+- **Leaves** in `src/kern.zig`: `h9_hstream_read(id, buf, n)`, `h9_hstream_ready(id)`, `h9_hstream_write(id, buf, n)`, and `h9_hstream_close(id)`. They return a status and never raise kernel errors; the C side raises them.
+- **Reads** never block in a host call. A reader thread per stream, `src/hstream.zig`, reads frames and queues payload bytes, and calls `h9_hstream_wake(id)` when it queues some or the stream ends. A guest read sleeps on the stream's Rendez until the queue has bytes, so notes, `--timeout`, and teardown interrupt it as they do a devmnt RPC on any channel.
 - **Writes** frame and send on the caller's thread, under a lock per stream, since the payload is small and a send that blocks holds back only devmnt's writer.
 - **Host-made streams aren't reachable by the guest.** The namespace builder gets a host-made stream's channel from a kernel call, `hstreamchan(id)`, not through an attach spec, so no path names it. The guest-facing tree (`/net/ws`, below) lists only the conversations the guest made, and its attach takes no spec. A host-made stream is reachable only as the channel under its mount.
 - **Lifetime.** A stream belongs to its machine. When the machine ends, its streams are closed with a WebSocket close (1001, going away) and their reader threads stopped.
@@ -164,7 +164,7 @@ Attached with no spec, devhstream serves a tree laid out like devip's protocol d
 | File | Use |
 | --- | --- |
 | `/net/ws/clone` | Opening it makes a new conversation and returns its `ctl`, open. Reading gives the conversation's number |
-| `/net/ws/N/ctl` | Takes control messages (below). Closing the last fd on `ctl`, `data` and `text` closes the conversation |
+| `/net/ws/N/ctl` | Takes control messages (below). Closing the last fd on `ctl`, `data`, and `text` closes the conversation |
 | `/net/ws/N/data` | The binary stream. Each write is sent as one binary message, and reads return received binary payload bytes in order, whatever the message boundaries |
 | `/net/ws/N/text` | Text messages. Each write is sent as one text message, and each read returns one received text message whole |
 | `/net/ws/N/remote` | The URL, as given to `connect` |
@@ -176,7 +176,7 @@ Attached with no spec, devhstream serves a tree laid out like devip's protocol d
 - **`connect url [subprotocol …]`** connects, does TLS for `wss`, and does the handshake, offering the listed subprotocols, or none. The write returns when the server has answered `101`, or fails with the cause, as the root's errors read. A note interrupts it.
 - **`hangup`** sends a close (1000) and ends the stream.
 
-A conversation is a guest-made stream: the same table, reader thread, framing and limits as a host-made one, owned by the machine. A machine has at most 32 conversations, like devip's 30 TCP conversations, and they're counted against nothing else. Each machine's tree lists only its own, found through the caller's `Hproc.mach` as devsrv and devproc do.
+A conversation is a guest-made stream: the same table, reader thread, framing, and limits as a host-made one, owned by the machine. A machine has at most 32 conversations, like devip's 30 TCP conversations, and they're counted against nothing else. Each machine's tree lists only its own, found through the caller's `Hproc.mach` as devsrv and devproc do.
 
 **Mounting** is then the ordinary `mount`, which [devsrv](0008-devsrv.md) serves:
 
@@ -289,7 +289,7 @@ On the [browser host](0012-browser-host.md), `hstream.zig`'s native connect is r
 - **`h9_ws_recv(id, kind, buf, n)`** is `Suspending`. It takes from the binary or text queue the page's `message` handler fills, by `typeof event.data`, and parks while that queue is empty. Text is encoded to UTF-8 with `TextEncoder`.
 - **`h9_ws_close(id)`.**
 
-The browser does the handshake, TLS, masking and pongs, so `ws.zig` isn't used there. A page can't send pings, so h9's keepalive doesn't run on the web host; browsers answer a server's pings, so a server that pings keeps the connection open, as [serve](0035-serve.md)'s listeners do. The browser uses its own proxy settings and trust, so `--root-ca` and `Proxy` are errors on the web host, as `root_headers` is. There's no reader thread either: a guest read calls `h9_ws_recv` from its own coroutine, which parks, and a note wakes it as it wakes any park. devhstream is the same file on both hosts.
+The browser does the handshake, TLS, masking, and pongs, so `ws.zig` isn't used there. A page can't send pings, so h9's keepalive doesn't run on the web host; browsers answer a server's pings, so a server that pings keeps the connection open, as [serve](0035-serve.md)'s listeners do. The browser uses its own proxy settings and trust, so `--root-ca` and `Proxy` are errors on the web host, as `root_headers` is. There's no reader thread either: a guest read calls `h9_ws_recv` from its own coroutine, which parks, and a note wakes it as it wakes any park. devhstream is the same file on both hosts.
 
 The page can't set headers on a `WebSocket`, so `root_headers` is an error on the web host. Authentication is a cookie for the server's origin, or a token in the URL's query. The browser sends the page's `Origin`, which the server should check. A page served over `https` can only open `wss://` URLs.
 
@@ -305,7 +305,7 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 **A host-stream device, not devip plus devtls plus a WebSocket device in the kernel.** That would keep the transport in the guest's kind of code, but it's three layers of C for one connection, it needs a WebSocket implementation written against drawterm's kernel, and none of it works on the browser host, where there's no devip and the browser insists on doing WebSocket itself. The host-stream device is one small device with one leaf interface, and each host implements the leaves the way it can: Zig natively, the browser's `WebSocket` on the web.
 
-**devhcons's pattern.** It's already how h9 gives the kernel a host stream that must not block a guest thread in a host call. Reusing it means interruption, teardown and the seam rules work the way they already do for the console.
+**devhcons's pattern.** It's already how h9 gives the kernel a host stream that must not block a guest thread in a host call. Reusing it means interruption, teardown, and the seam rules work the way they already do for the console.
 
 **Not devlfd and a socketpair.** A relay thread copying between a WebSocket and one end of a socketpair, with the other end in `lfdchan`, would reuse drawterm code, but it adds a copy and a socket per connection, and devlfd's handle I/O doesn't suit sockets on Windows (see 9p-roots' Open issues). Leaves into Zig work the same on every host.
 
@@ -329,11 +329,11 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 **Serving is its own proposal.** [serve](0035-serve.md) listens on WebSockets as well as unix sockets and TCP, with `ws.zig`'s server side and devhstream's streams from this proposal. Listeners raise questions this proposal doesn't, of who may connect and what they see, and they're the same for every transport, so they're decided there.
 
-**Headers natively, cookies and query on the web.** Bearer tokens are how most HTTP services authenticate, and `@FILE` keeps one out of `ps`. The browser forbids custom headers on a WebSocket, so the web host can't offer them, and says so rather than dropping them.
+**Headers natively, cookies, and query on the web.** Bearer tokens are how most HTTP services authenticate, and `@FILE` keeps one out of `ps`. The browser forbids custom headers on a WebSocket, so the web host can't offer them, and says so rather than dropping them.
 
-**A kernel device for the guest, not a userspace client.** No 9front program speaks WebSocket, and writing one means TLS, HTTP and framing in guest code, plus a pipe or `/srv` dance to hand the stream to `mount`. On the browser host it couldn't exist at all: a guest has no sockets, so a WebSocket can only come from the page. Exposing devhstream, which h9 needs anyway for roots, gives the guest the same transport on both hosts for the cost of a directory tree and a `ctl` parser.
+**A kernel device for the guest, not a userspace client.** No 9front program speaks WebSocket, and writing one means TLS, HTTP, and framing in guest code, plus a pipe or `/srv` dance to hand the stream to `mount`. On the browser host it couldn't exist at all: a guest has no sockets, so a WebSocket can only come from the page. Exposing devhstream, which h9 needs anyway for roots, gives the guest the same transport on both hosts for the cost of a directory tree and a `ctl` parser.
 
-**Under `/net`, shaped like devip.** `clone`, `ctl`, `data`, `remote` and `status` are what Plan 9 programs and people already expect of a network protocol directory, so `/net/ws` reads like `/net/tcp`, and the policy that governs `/net` governs it. A dial string (`ws!host!port`) for libc's `dial` was rejected for the same reason URLs were: a path and query don't fit, and `cs` would have to learn a URL syntax.
+**Under `/net`, shaped like devip.** `clone`, `ctl`, `data`, `remote`, and `status` are what Plan 9 programs and people already expect of a network protocol directory, so `/net/ws` reads like `/net/tcp`, and the policy that governs `/net` governs it. A dial string (`ws!host!port`) for libc's `dial` was rejected for the same reason URLs were: a path and query don't fit, and `cs` would have to learn a URL syntax.
 
 **A write per message.** devmnt writes a whole 9P message per write, so this sends one frame per 9P message, and lets other binary protocols keep their own message boundaries when sending. Reads stay a stream, as devmnt and most programs want.
 
@@ -345,17 +345,17 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 **No reconnect.** devmnt has no way to re-establish fids on a new connection, so a reconnected stream would be a new server as far as every open file is concerned. A hangup fails operations, as it does on 9front and for 9p-roots.
 
-**Depending on 9p-roots, devsrv and net-policy.** The `Root` union, `--root-spec`, `--root-user`, the root's post to `#s/root`, the plan's `mount` line and the write policy are 9p-roots'. This proposal adds a transport to them. Guest mounts need devsrv's `mount` and `fauth` syscalls, and guest connects need net-policy's modes and leaves. The web half also needs [browser-host](0012-browser-host.md), but the native half doesn't, so it's not in `depends`: the web backing is the last implementation step, and lands once browser-host is built.
+**Depending on 9p-roots, devsrv, and net-policy.** The `Root` union, `--root-spec`, `--root-user`, the root's post to `#s/root`, the plan's `mount` line, and the write policy are 9p-roots'. This proposal adds a transport to them. Guest mounts need devsrv's `mount` and `fauth` syscalls, and guest connects need net-policy's modes and leaves. The web half also needs [browser-host](0012-browser-host.md), but the native half doesn't, so it's not in `depends`: the web backing is the last implementation step, and lands once browser-host is built.
 
 ## Compatibility
 
 - **`--root` and `$H9ROOT`** accept `ws://` and `wss://` URLs. Every form 9p-roots accepts means what it did.
 - **`--root-header`** and **`--root-ca`** are new.
-- **`Machine.Options`:** `Root` gains `ws`, and `root_headers`, `root_ca` and `proxy` are new.
-- **Environment:** `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` now affect WebSocket roots and namespace-file mounts. Nothing else h9 connects to uses them.
+- **`Machine.Options`:** `Root` gains `ws`, and `root_headers`, `root_ca`, and `proxy` are new.
+- **Environment:** `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` now affect WebSocket roots and namespace-file mounts. Nothing else h9 connects to uses them.
 - **Namespace files:** `mount` accepts a URL as its source. Lines that parsed before mean what they did.
 - **`--print`** shows WebSocket roots and mounts as above.
-- **Exit codes:** connection, proxy, TLS and handshake failures are 125; header or `--root-ca` misuse and `--write=none` with a WebSocket root are 2.
+- **Exit codes:** connection, proxy, TLS, and handshake failures are 125; header or `--root-ca` misuse and `--write=none` with a WebSocket root are 2.
 - **Sandbox defaults:** the default profile's `--net=outbound` now also binds `/net/ws`, so a guest can open outbound WebSockets wherever it can open TCP connections. The tight profile's `--net=disable` masks it. A run whose guest makes no connection, and has no URL root, makes no WebSocket connection.
 - **The namespace:** `/net` gains `ws` whenever `#I` is bound, and on the web host whenever `--net` isn't `disable`.
 - **Build:** no new dependencies. TLS and the certificate bundle are Zig's standard library.
@@ -366,11 +366,11 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 - **What the guest newly reaches, through host-made connections:** the files the server serves, at `/` or at the mount point. Not the server's network, the WebSocket itself, or any other stream: their channels aren't in `/net/ws` and no attach spec names them.
 - **What the guest newly reaches, through `/net/ws`:** any WebSocket endpoint the network policy allows, the same set of hosts and ports it could already reach with `/net/tcp` natively. A guest that can dial TCP could already speak WebSocket by hand, so natively this adds convenience, not reach. On the web host it's new reach: the guest had no network before, and with `--net=outbound` it can now open WebSockets to anywhere the page's browser rules allow. Embedders that don't want that pass `--net=disable`, and the tight profile does.
-- **Requests the host makes for the guest.** A guest `connect` makes h9 resolve a name, open TCP and, for `wss`, TLS, all with the host's resolver, network and certificate bundle. Names are checked before they're resolved, and addresses before they're connected to, so the guest can't use the host to reach what `--net-allow` refuses, or to send data in DNS queries for names it doesn't cover. Redirects aren't followed and proxies aren't used for guest connections, so a server or the host's environment can't send h9 somewhere the check didn't see.
+- **Requests the host makes for the guest.** A guest `connect` makes h9 resolve a name, open TCP and, for `wss`, TLS, all with the host's resolver, network, and certificate bundle. Names are checked before they're resolved, and addresses before they're connected to, so the guest can't use the host to reach what `--net-allow` refuses, or to send data in DNS queries for names it doesn't cover. Redirects aren't followed and proxies aren't used for guest connections, so a server or the host's environment can't send h9 somewhere the check didn't see.
 - **What the server sees:** every file operation on the mount, `--root-user` or the machine's user as `uname`, the attach spec, the URL and headers, and, on the web host, the page's `Origin` and its cookies for the server's origin. A run trusts a WebSocket root as it trusts any root: it runs the server's binaries, inside the same sandbox.
 - **Transport.** `wss` connections are verified against the host's certificate bundle, `--root-ca`'s, or the browser's, with no way to turn verification off. `ws` connections are plain, and the plan says so. A proxy sees a `wss` connection's host and port, not its contents; for `ws` it sees everything, as on any network path.
 - **The proxy environment** applies only to connections the operator named: the root and namespace-file mounts. It's the host's environment, the same trust as the host's resolver, and the plan shows which proxy each uses.
-- **Credentials.** Headers, URL queries and proxy URLs can carry tokens. `--print` and `--trace` elide queries, userinfo and header values. `--root-header @FILE` keeps a token out of the process listing. A token in a namespace file's URL is as visible as the file.
+- **Credentials.** Headers, URL queries, and proxy URLs can carry tokens. `--print` and `--trace` elide queries, userinfo, and header values. `--root-header @FILE` keeps a token out of the process listing. A token in a namespace file's URL is as visible as the file.
 - **A hostile server** can send anything. Frames are bounded, both queues are bounded together, text is checked as UTF-8 before a guest reads it, and devmnt rejects malformed 9P, so the worst it can do is fail the mount, or answer as slowly as it likes, which notes and `--timeout` cut short.
 - **Host-made connections bypass `--net`,** as 9p-roots' do. They're named in the plan, made before the program runs, and fixed for the run. The guest's own connections never bypass it.
 - **Resources.** A machine has at most 32 conversations, buffered bytes count against `--memory`, and a `connect` blocks only its caller, interrupted by notes and `--timeout`.
@@ -442,10 +442,10 @@ Demo: `h9 --root ws://localhost:8080/9p ls /` lists the served tree, with the se
 3. `ws` roots: `Root.ws`, `root_headers`, `--root` and `--root-header` in `src/cli.zig` and `src/main.zig`, the connect and mount in `src/machine.zig`, the errors, and the `ws://` cases.
 4. `wss`: TLS in `src/hstream.zig` with the system bundle, `--root-ca`, and the opt-in cases. Then proxies: the environment, `Machine.Options.proxy`, `CONNECT`, and the proxy cases.
 5. Namespace files: URL sources for `mount` in `src/newns.zig` and the replay.
-6. The plan: the `mount '#s/root'` line for URLs, the elision, the caveats and the `--write=none` conflict in `src/policy.zig`.
-7. `/net/ws`: devhstream's guest tree, `clone`, `ctl`, `data`, `text`, `remote` and `status`, per-machine conversations, the `bind -a '#ℏ' /net` and the mask under `--net=disable` in `src/policy.zig`, and net-policy's checks in `src/hstream.zig`. Then the guest cases, `wsmount` in `src/guest/bin`, and the rc snippet in README.
+6. The plan: the `mount '#s/root'` line for URLs, the elision, the caveats, and the `--write=none` conflict in `src/policy.zig`.
+7. `/net/ws`: devhstream's guest tree, `clone`, `ctl`, `data`, `text`, `remote`, and `status`, per-machine conversations, the `bind -a '#ℏ' /net` and the mask under `--net=disable` in `src/policy.zig`, and net-policy's checks in `src/hstream.zig`. Then the guest cases, `wsmount` in `src/guest/bin`, and the rc snippet in README.
 8. Once [browser-host](0012-browser-host.md) is built: the `h9_ws_*` imports in `h9-web.js`, `hstream.zig`'s web branch, `createMachine`'s URL root, `/net/ws` as the web host's network, and the web cases.
-9. README's `--root` notes, `--root-header`, `--root-ca`, proxies and `/net/ws`. DESIGN.md: the root filesystem paragraph, the kernel's "Added by us" table (devhstream), the boot sequence, the capability table's `net.*` rows, the CLI flag table and `Machine.Options`. Set `status: implemented`.
+9. README's `--root` notes, `--root-header`, `--root-ca`, proxies, and `/net/ws`. DESIGN.md: the root filesystem paragraph, the kernel's "Added by us" table (devhstream), the boot sequence, the capability table's `net.*` rows, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 
@@ -454,7 +454,7 @@ Demo: `h9 --root ws://localhost:8080/9p ls /` lists the served tree, with the se
 ## Updates
 
 - 2026-11-06: Steps 1 to 7 and 9 are implemented; step 8 waits for [browser-host](0012-browser-host.md). The status stays `accepted` until then. `wsmount` reaches the guest's `/bin` through [guest-tools](0032-guest-tools.md)'s `#H/bin`. Refinements made while implementing it:
-  - `Machine.Options.proxy` null means direct. The CLI fills it from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (either case); a library caller passes its own. Only `http://` proxies are supported, with credentials from the proxy URL's userinfo sent as `Proxy-Authorization: Basic`.
+  - `Machine.Options.proxy` null means direct. The CLI fills it from `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` (either case); a library caller passes its own. Only `http://` proxies are supported, with credentials from the proxy URL's userinfo sent as `Proxy-Authorization: Basic`.
   - A `ws://` or `wss://` URL with userinfo (`ws://user:pass@host/`) is refused as a bad URL, at `--root` (exit 2) and in `ctl`, since browsers drop it and it would put a secret in the plan and `remote`. `--root-header 'Authorization: …'` covers it.
   - `--write=none` with a namespace file that mounts a URL is found during the replay, so it exits 125 with "mount URL: --write=none can't be enforced on a WebSocket mount" rather than 2: the file is a guest path, read by the kernel after the policy is compiled.
   - `--trace` prints no write data, so a URL or header written to `ctl` doesn't appear in a trace, and nothing more was needed to keep it out.

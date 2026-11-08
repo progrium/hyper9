@@ -15,7 +15,7 @@ Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-`--root` takes a 9P server as well as a host directory: a dial string (`tcp!fs.example!564`) or a unix socket (`unix!/run/fs.sock`, or the socket's path). h9 connects before the program starts and mounts the server through devmnt as the guest's `/`. Everything else in the namespace, the cwd, `/mnt/term`, `/dev` and the rest, is bound over it as over a host tree. Programs are looked up and loaded through the kernel, so they run from the server unchanged.
+`--root` takes a 9P server as well as a host directory: a dial string (`tcp!fs.example!564`) or a unix socket (`unix!/run/fs.sock`, or the socket's path). h9 connects before the program starts and mounts the server through devmnt as the guest's `/`. Everything else in the namespace, the cwd, `/mnt/term`, `/dev`, and the rest, is bound over it as over a host tree. Programs are looked up and loaded through the kernel, so they run from the server unchanged.
 
 ## Background
 
@@ -138,7 +138,7 @@ caveats:
 
 **`--root-user`, not always the host user or always `none`.** The machine's user is the right default: it's the guest's `$user`, and u9fs and exportfs map permissions by it. But it tells the server who's on the host, so a run that doesn't want that, or a server that expects a different name, can set it. Sending `none` by default would break servers that check the name.
 
-**Speed is measured, not designed for.** A 9P root costs a round trip per walk, open and read, and drawterm's devmnt has no cache. Done when measures it. If a unix socket root is more than about 3× slower than a host root on those workloads, the remedy is a read-only cache for roots served with `exportfs -R`, keyed by qid version, in project code rather than in devmnt, and it's a proposal of its own. The numbers go under Updates.
+**Speed is measured, not designed for.** A 9P root costs a round trip per walk, open, and read, and drawterm's devmnt has no cache. Done when measures it. If a unix socket root is more than about 3× slower than a host root on those workloads, the remedy is a read-only cache for roots served with `exportfs -R`, keyed by qid version, in project code rather than in devmnt, and it's a proposal of its own. The numbers go under Updates.
 
 **Depending on semaphores.** The test server is 9front's `exportfs`, whose procs share qlocks, and contended qlocks park on `rendezvous`. Without [semaphores](0003-semaphores.md) the cases below would fail at random, not because of anything here. [devsrv](0008-devsrv.md) holds the root's channel.
 
@@ -151,7 +151,7 @@ caveats:
 - **`/srv`** has a `root` entry when the root is a 9P server, and not otherwise.
 - **Exit codes:** connection and attach failures, a server that isn't `9P2000`, and a unix socket root on Windows are 125. `--write=none` with a 9P root is 2.
 - **Sandbox defaults** for host roots are unchanged.
-- **Vendored tree:** unchanged. devip, devmnt and devlfd are used as they are.
+- **Vendored tree:** unchanged. devip, devmnt, and devlfd are used as they are.
 
 ## Security
 
@@ -183,14 +183,14 @@ Integration cases tagged `[9p-roots]`. The server is a second h9 serving the tes
 
 Demo: `h9 --root tcp!localhost!5640 ls /` lists the served tree, with the server started as above.
 
-Measured: the same workloads (`ls -l /bin`, an rc pipeline, and `mk` on a small tree) timed over a host root, a loopback TCP root and a unix socket root, with the numbers in a dated note under Updates.
+Measured: the same workloads (`ls -l /bin`, an rc pipeline, and `mk` on a small tree) timed over a host root, a loopback TCP root, and a unix socket root, with the numbers in a dated note under Updates.
 
 ## Implementation
 
-1. `Machine.Options.Root`, `root_spec` and `root_user`, with `dir` behaving exactly as `root` did. `src/main.zig` and `src/tools.zig` updated.
-2. TCP roots: the dial, the post to `#s/root` and the mount in `src/machine.zig`'s namespace builder, the errors, and `--root`, `--root-spec` and `--root-user` in `src/cli.zig` and `src/main.zig`. The TCP cases pass.
+1. `Machine.Options.Root`, `root_spec`, and `root_user`, with `dir` behaving exactly as `root` did. `src/main.zig` and `src/tools.zig` updated.
+2. TCP roots: the dial, the post to `#s/root`, and the mount in `src/machine.zig`'s namespace builder, the errors, and `--root`, `--root-spec`, and `--root-user` in `src/cli.zig` and `src/main.zig`. The TCP cases pass.
 3. Unix socket roots on POSIX hosts: the host connect and `lfdchan`, and the error on Windows.
-4. The plan: the `mount '#s/root'` line, `9p` access, the caveats and the `--write=none` conflict in `src/policy.zig`.
+4. The plan: the `mount '#s/root'` line, `9p` access, the caveats, and the `--write=none` conflict in `src/policy.zig`.
 5. The speed measurement, recorded under Updates.
 6. README's `--root` notes. DESIGN.md: the Decisions table's root row, the root filesystem paragraph, the boot sequence, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 

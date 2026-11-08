@@ -15,7 +15,7 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-Serve 9front's segment calls: `segattach`, `segdetach`, `segfree`, `segbrk` and `segflush`. A process can then attach memory segments of the two classes every 9front system has, `shared` and `memory`, beside its text, data and stack. They follow 9front's rules for placement, fork and exec. Segments are Zig objects already, so this extends `src/segment.zig` and `syscall.zig`, and serves `/proc/n/segment`. Named global segments (`#g`) and device memory stay out of scope.
+Serve 9front's segment calls: `segattach`, `segdetach`, `segfree`, `segbrk`, and `segflush`. A process can then attach memory segments of the two classes every 9front system has, `shared` and `memory`, beside its text, data, and stack. They follow 9front's rules for placement, fork, and exec. Segments are Zig objects already, so this extends `src/segment.zig` and `syscall.zig`, and serves `/proc/n/segment`. Named global segments (`#g`) and device memory stay out of scope.
 
 ## Background
 
@@ -33,15 +33,15 @@ From the pinned revision (`602faae9`), mostly `port/segment.c` and `port/sysproc
 
 | Call | Number | Behaviour |
 | --- | --- | --- |
-| `segattach(attr, class, va, len)` | 30 | `va` is rounded down to a page, and `len` up so the segment ends on one. With `va` 0, the kernel picks a hole: it starts at the stack segment's base minus `len` and steps below each overlapping segment until one fits. The segment may not overlap another, may not reach `USTKTOP`, and may not start at 0. `class` is looked up among `shared` (`SG_SHARED`) and `memory` (`SG_BSS`), each at most `SEGMAXSIZE`: 8 GiB on arm64 and 64 GiB on amd64. The attributes keep `SG_RONLY`, `SG_CEXEC` and the few others a class allows. Returns the base. |
+| `segattach(attr, class, va, len)` | 30 | `va` is rounded down to a page, and `len` up so the segment ends on one. With `va` 0, the kernel picks a hole: it starts at the stack segment's base minus `len` and steps below each overlapping segment until one fits. The segment may not overlap another, may not reach `USTKTOP`, and may not start at 0. `class` is looked up among `shared` (`SG_SHARED`) and `memory` (`SG_BSS`), each at most `SEGMAXSIZE`: 8 GiB on arm64 and 64 GiB on amd64. The attributes keep `SG_RONLY`, `SG_CEXEC`, and the few others a class allows. Returns the base. |
 | `segdetach(addr)` | 31 | Detaches the segment containing `addr` (or starting at it, if empty) from the caller. The stack can't be detached. The pages are freed when the last process using them lets go. |
 | `segfree(va, len)` | 32 | May free the physical pages in the span while leaving the addresses valid. They read as zeros again for `memory` and `shared` segments, and are reloaded from the file for data and text. "May not free all or even any", says the manual. |
-| `segbrk(saddr, addr)` | 12 | Moves the top of the segment containing `saddr` to `addr`, as `brk_` moves the bss. Refused for text, data and stack. Shrinking a segment others share fails with `Einuse`. |
+| `segbrk(saddr, addr)` | 12 | Moves the top of the segment containing `saddr` to `addr`, as `brk_` moves the bss. Refused for text, data, and stack. Shrinking a segment others share fails with `Einuse`. |
 | `segflush(va, len)` | 33 | Flushes caches for the span. |
 
 - **fork:** `rfork` gives the child the parent's `shared` segments, the same pages. It copies `memory` segments, or shares them with `RFMEM`, exactly as it treats bss.
 - **exec:** keeps every attached segment except those with `SG_CEXEC`. segattach(2) says exec also releases a segment that overlaps the new image. The pinned `sysexec` doesn't check, because the image goes at `UTZERO` and segments are placed below the stack, so the two don't meet in practice.
-- **Slots:** a process has ten, of which text, data, bss, stack and exec's temporary stack use five, so five attached segments at most.
+- **Slots:** a process has ten, of which text, data, bss, stack, and exec's temporary stack use five, so five attached segments at most.
 - **Errors:**
 
 | Error | String |
@@ -51,7 +51,7 @@ From the pinned revision (`602faae9`), mostly `port/segment.c` and `port/sysproc
 | `Esoverlap` | "segments overlap" |
 | `Einuse` | "device or object already in use" |
 
-- **`/proc/n/segment`** prints a line per segment: the type name, an `R` for read-only, a `P` for profiling, base, top and reference count, as `"%-6s %c%c %8p %8p %4ld\n"`.
+- **`/proc/n/segment`** prints a line per segment: the type name, an `R` for read-only, a `P` for profiling, base, top, and reference count, as `"%-6s %c%c %8p %8p %4ld\n"`.
 
 ### Who uses it
 
@@ -81,7 +81,7 @@ The rest want hardware: `aux/vga`'s MMIO classes, `reform/pm`'s SoC registers, a
 1. Copy `class` out of guest memory as other strings are (at most 32 bytes). Anything but `shared` or `memory` is `Ebadarg`.
 2. Round `va` and `len` as 9front does. A `len` of 0 after rounding is `Ebadarg`.
 3. With `va` 0, find a hole the way 9front does: start at `stack_floor - len` and step below any overlapping segment. The text, the data up to its break rounded up to a page, the stack from `stack_floor` to `USTKTOP`, and the extras all count as overlapping. Running out of address space is `Enovmem`.
-4. Check `va != 0`, `va + len <= USTKTOP` and no overlap, or fail with `Ebadarg` or `Esoverlap`. Check `len <= SEGMAXSIZE` for the architecture, or fail with `Enovmem`. If the segment overlaps only the data segment's headroom, trim the headroom (see `brk_` and the extras).
+4. Check `va != 0`, `va + len <= USTKTOP`, and no overlap, or fail with `Ebadarg` or `Esoverlap`. Check `len <= SEGMAXSIZE` for the architecture, or fail with `Enovmem`. If the segment overlaps only the data segment's headroom, trim the headroom (see `brk_` and the extras).
 5. Take a free slot, or fail with `Enovmem`.
 6. Create the segment with zeroed pages, all of them now (see Rationale), so `--memory` counts them. Running out is `Enovmem`.
 7. Map it read-write, or read-only with `SG_RONLY`, and never executable. Return `va`.
@@ -90,9 +90,9 @@ Attribute bits other than `SG_RONLY` and `SG_CEXEC` are ignored, as 9front ignor
 
 ### `segdetach`, `segfree`, `segbrk`, `segflush`
 
-- **`segdetach(addr)`:** find the extra containing `addr`, or starting at it. Text, data and stack are `Ebadarg`; 9front refuses only the stack, but h9's text and data aren't separable from the image (see Open issues). Detach it from the caller's address space, which frees it if the caller was the last user. Free its slot.
-- **`segfree(va, len)`:** for spans inside an extra, zero the pages in place. They stay allocated, so `--memory` doesn't change, and every process sharing a `shared` extra sees the zeros, as on 9front. For text, data and stack it does nothing, which the manual allows. Return 0. A span outside every segment is `Ebadarg`.
-- **`segbrk(saddr, addr)`:** for the extra containing `saddr`, move its top to `addr`, rounded up. It can grow only into free address space, below the next segment above it or `USTKTOP`, else `Esoverlap`. It can shrink unless other address spaces share it, else `Einuse`. `addr` 0 returns the base. `saddr` in text, data or stack is `Ebadarg`; 9front allows its bss here, which `brk_` covers. This is `Segs.brk`'s logic, moved into `Segment` so both use it.
+- **`segdetach(addr)`:** find the extra containing `addr`, or starting at it. Text, data, and stack are `Ebadarg`; 9front refuses only the stack, but h9's text and data aren't separable from the image (see Open issues). Detach it from the caller's address space, which frees it if the caller was the last user. Free its slot.
+- **`segfree(va, len)`:** for spans inside an extra, zero the pages in place. They stay allocated, so `--memory` doesn't change, and every process sharing a `shared` extra sees the zeros, as on 9front. For text, data, and stack it does nothing, which the manual allows. Return 0. A span outside every segment is `Ebadarg`.
+- **`segbrk(saddr, addr)`:** for the extra containing `saddr`, move its top to `addr`, rounded up. It can grow only into free address space, below the next segment above it or `USTKTOP`, else `Esoverlap`. It can shrink unless other address spaces share it, else `Einuse`. `addr` 0 returns the base. `saddr` in text, data, or stack is `Ebadarg`; 9front allows its bss here, which `brk_` covers. This is `Segs.brk`'s logic, moved into `Segment` so both use it.
 - **`segflush(va, len)`:** check the span is inside a segment, then return 0. Guest code never runs from these segments, and the vmm backends keep the data side coherent across vCPUs.
 
 ### `brk_` and the extras
@@ -139,7 +139,7 @@ The reference count is the number of address spaces it's attached to. That takes
 
 **No `#g`.** Named global segments need devsegment, a new device with its own namespace semantics and the `sticky` class, which pins pages. In the tree its user is `vmx`, plus anything that shares memory between unrelated processes by name. `segattach` would consult it first, as 9front's does through `_globalsegattach`, so adding it later doesn't change this design. It would be a proposal of its own if something needs it.
 
-**No device classes.** `aux/vga`, `reform/pm` and `seg`'s hardware uses want physical device memory. A guest has none to offer, and h9 won't map host device memory into one. Those classes fail with `Ebadarg`, as an unknown class does on 9front.
+**No device classes.** `aux/vga`, `reform/pm`, and `seg`'s hardware uses want physical device memory. A guest has none to offer, and h9 won't map host device memory into one. Those classes fail with `Ebadarg`, as an unknown class does on 9front.
 
 **Never executable.** h9 maps data and stack without execute permission, and these segments the same. Nothing in the tree executes from an attached segment, and keeping writable memory non-executable means a guest can't build code at run time and jump into it on HVF. 9front's default is executable unless `SG_NOEXEC`. A program that relies on that faults with an exec fault and its note, which a backend test checks so the difference is easy to diagnose.
 - **If one is ever needed:** executable segments would be a host policy opt-in, not the guest's choice by leaving out `SG_NOEXEC`. Otherwise any guest could turn off W^X.
@@ -159,12 +159,12 @@ The reference count is the number of address spaces it's attached to. That takes
 - **Executing from a segment:** faults with an exec fault, where 9front allows it unless `SG_NOEXEC`.
 - **`brk_`:** stops below an attached segment as well as at the stack. Programs without extras see no change.
 - **`/proc/n/segment`:** a new file, in 9front's format.
-- **CLI, `Machine.Options`, the vmm interface, sandbox defaults, the root tree and `third_party/`:** unchanged. `src/kern/devproc.c` is h9's own copy, not the vendored tree.
+- **CLI, `Machine.Options`, the vmm interface, sandbox defaults, the root tree, and `third_party/`:** unchanged. `src/kern/devproc.c` is h9's own copy, not the vendored tree.
 
 ## Security
 
 - **No host memory is exposed.** Extras are backend pages from the same allocator as every other guest page, counted against `--memory`, and mapped only into guest address spaces. No class maps host or device memory.
-- **Range checks on guest input:** `va`, `len`, `addr` and `saddr` are guest values, checked for wraparound and against `USTKTOP` and `SEGMAXSIZE` before any arithmetic is used to map or zero. `segfree` and `segflush` spans are checked against the segment they name, so a span can't zero pages outside it. The unit tests cover each wraparound case.
+- **Range checks on guest input:** `va`, `len`, `addr`, and `saddr` are guest values, checked for wraparound and against `USTKTOP` and `SEGMAXSIZE` before any arithmetic is used to map or zero. `segfree` and `segflush` spans are checked against the segment they name, so a span can't zero pages outside it. The unit tests cover each wraparound case.
 - **Sharing:** a `shared` segment is shared only with the attacher's own descendants, as on 9front, and only within one machine. Machines in one host process never share segments.
 - **Teardown:** detaching or exec frees an extra only when its last address space lets go, and unmapping flushes the backend's TLB as it does for other segments today. A test detaches a segment that a sibling still uses, and checks the sibling still reads it while the detacher faults.
 - **W^X:** extras are never executable (see Rationale).
@@ -203,7 +203,7 @@ APE `select` end to end isn't a case here: nothing in the pinned userland calls 
 
 1. `Kind.shared` and `Kind.memory`, the `cexec` attribute, `Segs.extra`, and the shared break logic moved from `Segs.brk` into `Segment`, with its unit tests.
 2. `segattach` and `segdetach` in `syscall.zig`, with the placement rules, trimming the headroom, and errors. The `seg` cases pass.
-3. `Segs.fork` and exec carrying extras, `brk_`'s new limit, and `Segs.writable`. The fork, exec and brk backend cases pass.
-4. `segbrk`, `segfree` and `segflush`.
+3. `Segs.fork` and exec carrying extras, `brk_`'s new limit, and `Segs.writable`. The fork, exec, and brk backend cases pass.
+4. `segbrk`, `segfree`, and `segflush`.
 5. `/proc/n/segment` in devproc, and its case. Remove `segment` from [self-host](0010-self-host.md)'s list.
 6. DESIGN.md's process model table gets rows for the segment calls, `/proc/n/segment` joins devproc's row, and `status: implemented`.

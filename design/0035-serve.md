@@ -19,7 +19,7 @@ areas: [cli, kern, sandbox, web]
 
 - **h9 is a client only.** It mounts servers: host trees through devfs, 9P roots from [9p-roots](0013-9p-roots.md), WebSocket roots and `/net/ws` from websocket-9p. It can't share a machine's namespace with anything outside the machine.
 - **Inside the machine, serving already works.** `exportfs` is in the root tree, and [devsrv](0008-devsrv.md) notes that it needs nothing more than h9 already serves. A guest can run `aux/listen1 tcp!*!564 exportfs` itself under `--net=enable`. But the listener is then the guest's, on devip, subject to `--net` (`outbound` refuses `announce`). It can't take a unix socket or a WebSocket, and the plan doesn't show it.
-- **Two drafts each wanted a server.** websocket-9p listed `h9 --serve wss://…` as its other half. dotl had a `--serve` of its own for Linux clients. Both needed the same listener, the same exportfs-per-connection model and the same policy, so this proposal is that shared part.
+- **Two drafts each wanted a server.** websocket-9p listed `h9 --serve wss://…` as its other half. dotl had a `--serve` of its own for Linux clients. Both needed the same listener, the same exportfs-per-connection model, and the same policy, so this proposal is that shared part.
 - **devhstream** (websocket-9p) carries a host connection into the kernel as a channel, with a Zig reader thread and leaves that never block a guest thread. It is the device for host-made streams that no guest path names.
 
 ## Proposal
@@ -28,7 +28,7 @@ areas: [cli, kern, sandbox, web]
 
 | Flag | Meaning |
 | --- | --- |
-| `--serve ADDR` | Repeatable. Listen on `unix!PATH`, `tcp!HOST!PORT` or `ws://HOST:PORT[/PATH]` while the program runs. Port `0` picks a free port |
+| `--serve ADDR` | Repeatable. Listen on `unix!PATH`, `tcp!HOST!PORT`, or `ws://HOST:PORT[/PATH]` while the program runs. Port `0` picks a free port |
 | `--serve-root PATH` | The guest path each connection exports. `/` by default |
 | `--serve-token @FILE` | WebSocket listeners require this token, as `Authorization: Bearer TOKEN` or `?token=TOKEN` |
 | `--serve-origin ORIGIN` | Repeatable. An `Origin` a WebSocket listener accepts, such as `https://app.example`. `*` accepts any |
@@ -36,7 +36,7 @@ areas: [cli, kern, sandbox, web]
 These are usage errors (exit 2):
 - an address in none of the three forms;
 - `ws://` without an explicit host, or `wss://`;
-- `--serve-root`, `--serve-token` or `--serve-origin` without a `--serve` they apply to;
+- `--serve-root`, `--serve-token`, or `--serve-origin` without a `--serve` they apply to;
 - `--serve` on the browser host.
 
 A listen that fails before the program runs, such as an address in use or a socket path that can't be created, exits 125 with the cause (`serve tcp!127.0.0.1!5640: address in use`).
@@ -49,7 +49,7 @@ A listen that fails before the program runs, such as an address in use or a sock
 
 The listeners open after the namespace is built and before the program starts. They close when the program exits, and open connections are hung up. h9 exits with the program's status, as it always does. `--timeout` and notes end the run as they end any run.
 
-**Serving only.** `--serve` with no program is a run that only serves: `h9 --serve unix!/tmp/h9.sock`. It's otherwise a usage error (exit 2), so this changes no existing invocation. The first Proc doesn't exec anything. It sleeps in the kernel until a note arrives, so Ctrl-C, SIGTERM, SIGHUP and `--timeout` end it as they end any run, with the same grace period for open connections. The console isn't read, so a serve-only run can be started in the background without stopping on terminal input. A serve-only run ended by a note exits 0, as a server its operator stops does, whatever [exit-status](0033-exit-status.md) decides for programs killed by notes: there's no program to have been killed. The plan shows `program: none (serve only)`.
+**Serving only.** `--serve` with no program is a run that only serves: `h9 --serve unix!/tmp/h9.sock`. It's otherwise a usage error (exit 2), so this changes no existing invocation. The first Proc doesn't exec anything. It sleeps in the kernel until a note arrives, so Ctrl-C, SIGTERM, SIGHUP, and `--timeout` end it as they end any run, with the same grace period for open connections. The console isn't read, so a serve-only run can be started in the background without stopping on terminal input. A serve-only run ended by a note exits 0, as a server its operator stops does, whatever [exit-status](0033-exit-status.md) decides for programs killed by notes: there's no program to have been killed. The plan shows `program: none (serve only)`.
 
 ### Each connection
 
@@ -117,11 +117,11 @@ A machine serves at most 32 connections at once, across all its listeners. Beyon
 
 ## Rationale
 
-**Serving in one proposal, with WebSocket in it.** websocket-9p's client and dotl's .L each wanted a server, and the parts they'd both need are the listener, the exportfs model, the lifetime and the policy, not anything about framing or dialect. Putting those in one place means one security story: who may connect, what they see, and how the plan shows it. WebSocket is the listener with the most policy (origins, tokens, HTTP), and leaving it out would decide the policy for unix and TCP only, then revisit it. It depends on websocket-9p for `ws.zig` and devhstream, both of which are written first there.
+**Serving in one proposal, with WebSocket in it.** websocket-9p's client and dotl's .L each wanted a server, and the parts they'd both need are the listener, the exportfs model, the lifetime, and the policy, not anything about framing or dialect. Putting those in one place means one security story: who may connect, what they see, and how the plan shows it. WebSocket is the listener with the most policy (origins, tokens, HTTP), and leaving it out would decide the policy for unix and TCP only, then revisit it. It depends on websocket-9p for `ws.zig` and devhstream, both of which are written first there.
 
 **Listening on the host, not through devip.** A guest can already serve with `aux/listen1` on `/net/tcp`. But a unix socket or a WebSocket has to be the host's, and a listener the plan opens belongs to the plan, as a 9P root's connection does. That's also why `--net` doesn't govern it: `--net=outbound` refuses the guest's `announce`, not the operator's `--serve`. The operator names each address, and the plan prints it.
 
-**exportfs, not a server in Zig.** exportfs is 9front's namespace server, already correct for every device the machine has, and it serves through the guest's namespace, so devfs's access rules, `--read-deny` and the write policy hold without a second implementation. Serving from Zig straight off kernel channels would save a process and a copy per message, but it would be a second 9P server to keep correct.
+**exportfs, not a server in Zig.** exportfs is 9front's namespace server, already correct for every device the machine has, and it serves through the guest's namespace, so devfs's access rules, `--read-deny`, and the write policy hold without a second implementation. Serving from Zig straight off kernel channels would save a process and a copy per message, but it would be a second 9P server to keep correct.
 
 **A namespace snapshot, not the program's live namespace.** The program can `rfork n` and change its namespace at any time. A server that followed one process's namespace would race with it, and would end when that process does. The plan's namespace is what `--print` shows, so it's what a client gets.
 
@@ -147,8 +147,8 @@ A machine serves at most 32 connections at once, across all its listeners. Beyon
 
 ## Compatibility
 
-- **CLI:** new `--serve`, `--serve-root`, `--serve-token` and `--serve-origin`. Exit 2 for misuse, 125 for a listen that fails. No program, an error today, is a serve-only run when `--serve` is given, and still an error without it.
-- **`Machine.Options`:** new `serve`, `serve_root`, `serve_token` and `serve_origins`, and `Machine.serving()`.
+- **CLI:** new `--serve`, `--serve-root`, `--serve-token`, and `--serve-origin`. Exit 2 for misuse, 125 for a listen that fails. No program, an error today, is a serve-only run when `--serve` is given, and still an error without it.
+- **`Machine.Options`:** new `serve`, `serve_root`, `serve_token`, and `serve_origins`, and `Machine.serving()`.
 - **Limits:** `--pids` counts serving processes separately, so a run with `--serve` can have up to twice as many live processes. Without `--serve`, unchanged.
 - **Sandbox defaults:** unchanged. Nothing listens without `--serve`.
 - **The root tree:** unchanged. `/bin/exportfs` is already in it.
@@ -157,7 +157,7 @@ A machine serves at most 32 connections at once, across all its listeners. Beyon
 
 ## Security
 
-- **What a client reaches.** The plan's namespace from `--serve-root` down, as the machine's user, through exportfs. devfs's access rules apply: `--read-deny` paths are hidden, read-only paths refuse writes, and `--write=none` adds exportfs's `-R`. A client reaches nothing the guest couldn't. But it does reach everything the guest could, including `/mnt/term`, `/srv` and `/net`. `--serve-root` narrows it.
+- **What a client reaches.** The plan's namespace from `--serve-root` down, as the machine's user, through exportfs. devfs's access rules apply: `--read-deny` paths are hidden, read-only paths refuse writes, and `--write=none` adds exportfs's `-R`. A client reaches nothing the guest couldn't. But it does reach everything the guest could, including `/mnt/term`, `/srv`, and `/net`. `--serve-root` narrows it.
 - **Who can connect.** Unix sockets are created mode 0600. TCP and WebSocket listeners take whatever host the operator names, including non-loopback addresses. Those without a token, which is every TCP listener, are listed in the plan as served without authentication. There's no default address, so h9 never listens anywhere unasked.
 - **Browsers.** WebSocket listeners refuse requests carrying an `Origin` that `--serve-origin` doesn't list, so a page the user visits can't reach a loopback listener. DNS rebinding gets a page's own origin, which is refused the same way.
 - **`/net` through a client.** A client that walks to `/net` in the export reaches devip as the guest does, under the guest's `--net` policy, since `/net` is served through the guest's namespace. Under `--net=disable`, `#I` is masked and there's nothing there.
@@ -167,7 +167,7 @@ A machine serves at most 32 connections at once, across all its listeners. Beyon
 
 ## Done when
 
-Integration cases tagged `[serve]`. The client is a second h9, which mounts with a 9P root, a websocket-9p root or `/net/ws`. HTTP-level cases use a small Zig client from `ws.zig`.
+Integration cases tagged `[serve]`. The client is a second h9, which mounts with a 9P root, a websocket-9p root, or `/net/ws`. HTTP-level cases use a small Zig client from `ws.zig`.
 
 - `test "an h9 root over --serve unix! lists the served tree [serve]"`
 - `test "an h9 root over --serve tcp! lists the served tree [serve]"`
@@ -200,9 +200,9 @@ Demos:
 1. The server Proc and the per-connection fork and exec of `exportfs`, with a test-only stream source.
 2. `src/serve.zig` with unix and TCP listeners (stale sockets, port 0, `Machine.serving()`), devhstream's raw streams, `--serve` and `--serve-root`, `Machine.Options`, serve-only runs, and the limits, with the separate `--pids` count.
 3. `ws.zig`'s server side (written for websocket-9p's test relay) wired to WebSocket listeners, with the HTTP checks, `--serve-origin` and `--serve-token`.
-4. The plan's `serve` heading, caveats, elision and `pids` line in `src/policy.zig`, the `--write=none` `-R`, and `--trace`'s connection lines.
+4. The plan's `serve` heading, caveats, elision, and `pids` line in `src/policy.zig`, the `--write=none` `-R`, and `--trace`'s connection lines.
 5. The dialect slot, empty, ready for [dotl](0022-dotl.md).
-6. README: the flags and the demos. DESIGN.md: a Serving section, the CLI flag table and `Machine.Options`. Set `status: implemented`.
+6. README: the flags and the demos. DESIGN.md: a Serving section, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 

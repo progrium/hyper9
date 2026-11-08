@@ -34,7 +34,7 @@ With it, the default profile's root row was to become: read-only underneath, wit
 - **Programs that write the root** fail. 9front programs expect a writable root, as on a 9front terminal: `$home` (`/usr/$user`, which a root tree doesn't have for the host user), `/sys/log`, `/lib/ndb/local` edits, `mk install` into `/$objtype/bin`, and `acme`'s dump file and `rio`'s settings under `$home`.
 ### What [ephemeral-writes](0006-ephemeral-writes.md) provides
  
-- **`#O`,** a kernel device in `src/kern/devoverlay.c`: an instance is a tree in memory over a lower chan, with copy-up, whiteouts and directory markers, and memory from the machine's page allocator, counted against `--memory`.
+- **`#O`,** a kernel device in `src/kern/devoverlay.c`: an instance is a tree in memory over a lower chan, with copy-up, whiteouts, and directory markers, and memory from the machine's page allocator, counted against `--memory`.
 - **Binds:** `bind -c '#O' <target>` in a plan or namespace file makes a fresh instance over what `<target>` is at that point.
 - **Its write modes:** `--write=ephemeral` overlays every path that `scope` would make writable, and a private `/tmp` replaces the host's temp directory. It leaves the root read-only, and says putting an overlay over the root is this proposal's.
 ## Proposal
@@ -64,7 +64,7 @@ The namespace builder makes the overlay right after the root itself, before ever
 ```
  
 - **Any root:** the lower tree is whatever `/` is at that point: a host tree from `#U`, a [9P root](0013-9p-roots.md)'s mount, or an [image root](0014-image-roots.md)'s mount. So writes to a 9P root don't reach its server, and writes to an image root stay above its file server.
-- **Binds over the root still work.** `/dev`, `/bin`, `/mnt/term/cwd` and the rest are bound onto directories reached through the overlay. A directory that's only in the lower tree keeps its lower qid, and so does a directory marker, which is what a lower directory becomes when its children change, so the mount table keeps matching it. Only a copied-up file gets a new qid, and nothing is bound onto files of the root.
+- **Binds over the root still work.** `/dev`, `/bin`, `/mnt/term/cwd`, and the rest are bound onto directories reached through the overlay. A directory that's only in the lower tree keeps its lower qid, and so does a directory marker, which is what a lower directory becomes when its children change, so the mount table keeps matching it. Only a copied-up file gets a new qid, and nothing is bound onto files of the root.
 - **Writable paths inside the root** (`--writable "$H9ROOT"/usr/glenda`) are bound from `#U` over the overlay, so writes there go to the host, as the longest rule decides today.
 - **`$home`.** If the root has no `/usr/$user`, the builder creates it in the overlay, so a guest's home directory exists and is writable, and vanishes with the run.
 - **When memory runs out,** copy-up and creation in the root fail with "file system full" and change nothing, as [ephemeral-writes](0006-ephemeral-writes.md) specifies for every `#O` instance.
@@ -120,7 +120,7 @@ Scripts, whose stderr is rarely a terminal, don't see the notice.
  
 **Creating `$home` in the overlay.** The default environment sets `home=/usr/$user`, and root trees have only `/usr/glenda`. With a writable root the directory can exist without touching the host tree, which removes a common first failure.
  
-**The tight profile takes the overlay too.** A profile decides how much of the host a guest reaches; `--write` decides what writes do. Tight's differences, a read-only cwd, a masked `#I` and a timeout, all keep the guest away from the host, and the overlay never writes the host, so it doesn't weaken them. This is the reasoning [ephemeral-writes](0006-ephemeral-writes.md) uses for tight's cwd under `ephemeral` and for its private `/tmp`. Tight is also where a read-only root fails most: untrusted or one-off programs are the ones that try to write `$home` or `/sys/log`. `--write=scope` keeps a read-only root available in either profile, so the two settings stay independent.
+**The tight profile takes the overlay too.** A profile decides how much of the host a guest reaches; `--write` decides what writes do. Tight's differences, a read-only cwd, a masked `#I`, and a timeout, all keep the guest away from the host, and the overlay never writes the host, so it doesn't weaken them. This is the reasoning [ephemeral-writes](0006-ephemeral-writes.md) uses for tight's cwd under `ephemeral` and for its private `/tmp`. Tight is also where a read-only root fails most: untrusted or one-off programs are the ones that try to write `$home` or `/sys/log`. `--write=scope` keeps a read-only root available in either profile, so the two settings stay independent.
 
 **A notice only on a terminal.** Silent loss of `mk install` output is the cost of this default. A line on an interactive stderr is enough to catch it; anything more, such as a nonzero exit, would turn an ordinary run into a failure. It names the directories that changed so a user can tell an install from noise, and it says to rerun, since nothing from the finished run can be recovered.
 
@@ -172,7 +172,7 @@ Demo: `h9 --rc 'echo hi > /lib/x && cat /lib/x'` prints `hi`, and the root tree 
  
 ## Implementation
  
-1. With [ephemeral-writes](0006-ephemeral-writes.md) implemented: the root overlay under `--write=overlay` and `ephemeral` in `src/policy.zig`, after the root's bind or mount, with `eph` access, `enforces:`, caveats and `--strict`.
+1. With [ephemeral-writes](0006-ephemeral-writes.md) implemented: the root overlay under `--write=overlay` and `ephemeral` in `src/policy.zig`, after the root's bind or mount, with `eph` access, `enforces:`, caveats, and `--strict`.
 2. `$home` in the overlay when the root lacks it.
 3. The measurement, and a fast path in `#O` if it's needed.
 4. `overlay` as the default of `Policy.write` in both profiles, the run status's `RootChanges` summary, and the CLI's notice.
@@ -182,7 +182,7 @@ Demo: `h9 --rc 'echo hi > /lib/x && cat /lib/x'` prints `hi`, and the root tree 
 ## Updates
 
 - 2026-11-07: Refinements made while implementing it:
-  - The summary is `Machine.root_changes`, a `RootChanges` value set by each `run`, rather than a field of `Status`, which is a tagged union every embedder switches on. It holds whether the guest changed the root outside `$home`, the changed top-level names (up to 16, sorted, with a flag for more) and whether it changed `$home`. `#O` reports each create, copy-up, remove and wstat to the machine once tracking starts (`h9_overlay_track`), after the namespace and any `--ns` replay are built.
+  - The summary is `Machine.root_changes`, a `RootChanges` value set by each `run`, rather than a field of `Status`, which is a tagged union every embedder switches on. It holds whether the guest changed the root outside `$home`, the changed top-level names (up to 16, sorted, with a flag for more) and whether it changed `$home`. `#O` reports each create, copy-up, remove, and wstat to the machine once tracking starts (`h9_overlay_track`), after the namespace and any `--ns` replay are built.
   - For a 9P root the notice says to rerun with `--write=scope`, since `--writable "$H9ROOT"` names a host tree.
   - A bare `#O` over `/` used to take the root device under the mount as its lower tree (namec's `Atodir` stops before a mount point); `h9_overlay_newpath` now resolves the target through its mounts, so an overlay over a bind or mount point overlays what's bound there. This also fixes the manual's known issue for `#O` lines on `/mnt/term/cwd`.
   - Replaying `--print` output with the root overlay line into a machine whose namespace is already built put the builder's binds below it out of reach, since mount points are matched by device as well as qid. `findmount` now also matches an overlay's lower directory's mounts (only when a mount hash bucket has an entry with the same qid path), a small change to the vendored `chan.c`, and after a replay without a `cd` the cwd is set again, so it lands on the replayed binds.

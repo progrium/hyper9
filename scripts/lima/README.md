@@ -1,7 +1,7 @@
 # Test VMs
 
 Lima VMs for running h9 with the emu backend (`--backend emu`) on Linux,
-macOS and Windows. None but `linux-kvm` has a usable hypervisor (no
+macOS, and Windows. None but `linux-kvm` has a usable hypervisor (no
 `/dev/kvm`, no nested Hypervisor.framework, no WHP), which is the case emu
 is for. `linux-kvm` has nested virtualization, for the KVM backend
 ([kvm](../../design/0016-kvm.md)): `vm test linux-kvm` runs the tests with
@@ -76,7 +76,7 @@ H9_TEST_ARCH=arm64 scripts/lima/vm test windows  # an x86_64 h9 running the arm6
 
 It pushes `h9` and the test binaries from `zig-out/<os>/bin`, runs
 `push-root`, then runs each set over ssh with `H9_TEST_BIN`,
-`H9_TEST_ROOT` and `H9_TEST_BACKENDS=emu`. The root tree is arm64 only, so
+`H9_TEST_ROOT`, and `H9_TEST_BACKENDS=emu`. The root tree is arm64 only, so
 `linux-amd64` runs just the backend tests. `H9_TEST_SLOW` multiplies the
 interactive cases' timeouts; it defaults to 10 on `linux-amd64` and 3 on
 `windows`, where each guest process takes about 0.4 s to start.
@@ -108,7 +108,7 @@ build them inside rc instead.
   https://www.microsoft.com/en-us/software-download/windows11, saved as
   `~/Downloads/Win11_25H2_English_Arm64_v2.iso`, or set `WIN_ISO`. The install
   is unattended and takes about 15 minutes. At first logon, Lima's
-  `first_logon.ps1` installs OpenSSH, adds Lima's ssh key and saves a random
+  `first_logon.ps1` installs OpenSSH, adds Lima's ssh key, and saves a random
   password in `C:\Users\<you>\password.txt`. `vm up` returns once ssh works and
   `provision.ps1` has run. Watch the VM display, but don't touch it unless the
   install gets stuck.
@@ -131,7 +131,7 @@ If the Windows install gets stuck:
    Then run `scripts/lima/vm up windows` again.
 
 [provision.ps1](provision.ps1) is idempotent. It disables Windows Update,
-sleep and hibernation, excludes `~\h9` from Defender scanning, and runs
+sleep, and hibernation, excludes `~\h9` from Defender scanning, and runs
 `ngen` on the .NET Framework to speed up PowerShell startup (about 20s
 before; on a fresh install it dropped to about 15s, because Windows is still
 busy with first-boot work).

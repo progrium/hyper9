@@ -2468,7 +2468,7 @@ test "--strict accepts --net=outbound [5]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// devsrv, /srv and mount (design/0008-devsrv.md). Mount points are made
+// devsrv, /srv, and mount (design/0008-devsrv.md). Mount points are made
 // in the machine's private /tmp, since the root tree's /n and /mnt are
 // mostly mntgen's on 9front and may lack the names a case wants.
 

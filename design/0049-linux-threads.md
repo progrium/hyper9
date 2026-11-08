@@ -37,7 +37,7 @@ Other pieces already fit:
 
 ### clone
 
-- **`clone(CLONE_VM | CLONE_THREAD | CLONE_SIGHAND | …)`** creates a process that shares the whole address space, stack included, and the VMA list. That's unlike `RFMEM`, which copies the stack. The child gets the new stack pointer, and with `CLONE_SETTLS` its thread pointer in `vmm.Extra.tls`. `CLONE_FILES`, `CLONE_FS` and `CLONE_SIGHAND` share the fd group, the namespace and dot, and the signal actions; without them they're copied, as `rfork` does.
+- **`clone(CLONE_VM | CLONE_THREAD | CLONE_SIGHAND | …)`** creates a process that shares the whole address space, stack included, and the VMA list. That's unlike `RFMEM`, which copies the stack. The child gets the new stack pointer, and with `CLONE_SETTLS` its thread pointer in `vmm.Extra.tls`. `CLONE_FILES`, `CLONE_FS`, and `CLONE_SIGHAND` share the fd group, the namespace, and dot, and the signal actions; without them they're copied, as `rfork` does.
 - **`CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, `CLONE_CHILD_CLEARTID`:** the tid is written where asked. At thread exit, the clear-tid word is zeroed and its futex woken.
 - **`clone3`** with the same flags.
 - **Thread groups:** a thread group is the processes created with `CLONE_THREAD` from one leader. `getpid` is the leader's pid, `gettid` the thread's own. `/proc/<pid>/task/<tid>` lists the group.
@@ -45,14 +45,14 @@ Other pieces already fit:
 
 ### futex
 
-`futex` wait and wake are host-side queues keyed on the address space and the guest address, built on drawterm's sleep and wakeup, so notes and timeouts interrupt them like any other wait. `FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`, `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE` are served, with and without `FUTEX_PRIVATE_FLAG`. Shared futexes across `fork` key on the shared segment and offset instead. PI futexes are `-ENOSYS`. `set_robust_list` records the list, and thread exit walks it, marking each held lock's owner died and waking a waiter.
+`futex` wait and wake are host-side queues keyed on the address space and the guest address, built on drawterm's sleep and wakeup, so notes and timeouts interrupt them like any other wait. `FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`, `FUTEX_REQUEUE`, and `FUTEX_CMP_REQUEUE` are served, with and without `FUTEX_PRIVATE_FLAG`. Shared futexes across `fork` key on the shared segment and offset instead. PI futexes are `-ENOSYS`. `set_robust_list` records the list, and thread exit walks it, marking each held lock's owner died and waking a waiter.
 
 ### TLB shootdown
 
 The vmm gains a shootdown for address spaces with several vCPUs:
 
 - Every `unmap` or `protect` that removes or narrows access, in an address space with other running vCPUs, kicks each of them and waits until each has acknowledged it'll flush before its next guest instruction. Only then does `munmap` return and the host free the pages.
-- On HVF, a kicked vCPU exits, sees the changed epoch at its next run and has the shim flush, as today; the waiter only needs to know it has exited. On the emulator no other engine is in guest code while the change is made, since one engine runs at a time, so there's nothing to wait for: each engine applies the change at its next run.
+- On HVF, a kicked vCPU exits, sees the changed epoch at its next run, and has the shim flush, as today; the waiter only needs to know it has exited. On the emulator no other engine is in guest code while the change is made, since one engine runs at a time, so there's nothing to wait for: each engine applies the change at its next run.
 - Widening changes (`mmap` of new pages, `mprotect` that adds access) need no shootdown; a stale TLB entry for an unmapped page faults, and the fault handler retries after checking the VMA.
 - Pages freed by a shootdown that hasn't finished are never reused.
 
@@ -80,7 +80,7 @@ This also fixes 9front programs on the emulator that spin without syscalls today
 
 ## Rationale
 
-**Threads as processes.** Linux itself models threads as tasks sharing an address space, and h9's process record already has everything a task needs: its own vCPU lease, Ureg, Extra and kernel Proc. A second kind of record would duplicate all of that.
+**Threads as processes.** Linux itself models threads as tasks sharing an address space, and h9's process record already has everything a task needs: its own vCPU lease, Ureg, Extra, and kernel Proc. A second kind of record would duplicate all of that.
 
 **Go needs [linux-net](0050-linux-net.md).** Go's runtime opens an epoll fd and an eventfd at its first timer, before any networking, and dies with `netpollinit failed` without them. So this proposal's Go cases depend on linux-net's epoll and eventfd, even though nothing else here does. Moving those two calls for non-socket fds into this proposal was the alternative; it would split epoll across two proposals.
 

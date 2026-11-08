@@ -20,13 +20,13 @@ This lets you keep what a run did without writing the host. You can read the arc
 
 ### h9 today
 
-- **[ephemeral-writes](0006-ephemeral-writes.md)** added `#O` (`src/kern/devoverlay.c`). An instance is a tree in memory over a lower chan, made up of copies, whiteouts and directory markers. `--write=ephemeral` puts one over the cwd and each `--writable` path, and every machine has one over `/tmp`.
+- **[ephemeral-writes](0006-ephemeral-writes.md)** added `#O` (`src/kern/devoverlay.c`). An instance is a tree in memory over a lower chan, made up of copies, whiteouts, and directory markers. `--write=ephemeral` puts one over the cwd and each `--writable` path, and every machine has one over `/tmp`.
 - **[overlay](0011-overlay.md)** puts one over the root by default and adds a count of discarded root changes to the run's status, so the CLI can print a notice on a terminal.
 - **Changes are lost at exit.** DESIGN.md says "Ephemeral changes can't be exported yet". An instance is freed when the last chan on it closes, which happens when the run's last process tears down its namespace. The only way to keep a change is to make its path `--writable`, which writes the host as the guest goes, with no review step and no undo.
 
 ### What people want from a run's changes
 
-- **See what a run changed.** After a build, an install script or an unknown program runs under `--write=ephemeral`, you want to know which files it created, changed or removed.
+- **See what a run changed.** After a build, an install script, or an unknown program runs under `--write=ephemeral`, you want to know which files it created, changed, or removed.
 - **Keep an install without letting the guest write the root.** For example, run `mk install` against the overlay, check the result, then apply it to `$H9ROOT` yourself.
 - **Make a layer.** [image-roots](0014-image-roots.md) and container tooling think in layers, and the memory tree already *is* a layer: copies are the files the layer adds, whiteouts are its deletions, and directory markers are the directories it passes through.
 
@@ -40,7 +40,7 @@ ephemeral-writes said this already: "the memory tree … already is that diff, s
 
 - **When FILE is opened:** FILE is created, or truncated, before the machine starts. A path that can't be opened for writing is a usage error (exit 2) and nothing runs. FILE can also be a pipe or a `/dev/fd/N` path. Truncating doesn't apply to those, and they're written as a stream.
 - **No `-` for stdout.** The guest owns stdout, so an archive written there could be mixed with the guest's own output. To stream the archive, give a `/dev/fd/N` path (`--export-changes /dev/fd/3 3>&1 >/dev/null`) or a pipe, or use `Machine.Options.export_changes`.
-- **When it's written:** after the run's last process exits, whether it exited normally, was killed or timed out, and before the overlays are freed. A run with no changes writes an empty archive, which is just the end-of-archive blocks.
+- **When it's written:** after the run's last process exits, whether it exited normally, was killed, or timed out, and before the overlays are freed. A run with no changes writes an empty archive, which is just the end-of-archive blocks.
 - **Combining with other flags:** it works with every `--write` mode that has overlays (`overlay`, `ephemeral`, and `scope`, which still overlays `/tmp`). Under `--write=none` there are no overlays, so the flag is a usage error. It also works with `--ns`.
 
 ### What's exported
@@ -55,7 +55,7 @@ The archive is POSIX tar (pax), using the [OCI image layer](https://github.com/o
 
 | Node | Entry |
 | --- | --- |
-| Copy (file) | A regular file with the copy's data, mode and mtime |
+| Copy (file) | A regular file with the copy's data, mode, and mtime |
 | Copy (directory) with nothing of that name in the lower tree | A directory with its own mode and mtime |
 | Copy (directory) that replaced a lower name (removed, then created again) | A directory, followed by `<dir>/.wh..wh..opq`: an opaque directory, so nothing from the lower tree shows through |
 | Whiteout | An empty file `<parent>/.wh.<name>` |
@@ -71,7 +71,7 @@ A guest could create a file that's literally named `.wh.foo` or `.wh..wh..opq`, 
 
 ### The library
 
-- **`Machine.Options.export_changes: ?*std.Io.Writer`.** When it's set, `run` writes the archive to it after the run's last process exits and before the run returns. An embedder can stream the archive anywhere: a file, a buffer or a socket.
+- **`Machine.Options.export_changes: ?*std.Io.Writer`.** When it's set, `run` writes the archive to it after the run's last process exits and before the run returns. An embedder can stream the archive anywhere: a file, a buffer, or a socket.
 - **`Machine.Options.export_tmp: bool`.** This includes `/tmp`.
 - **The run's status** reports how many entries were exported and how many names were skipped, next to [overlay](0011-overlay.md)'s count of discarded root changes. If writing to the writer fails, the run returns the guest's status anyway, and the status also carries the error, so a failed export never hides how the guest ended.
 
@@ -86,7 +86,7 @@ A new C leaf in `devoverlay.c` walks an instance under its QLock and calls back 
 int h9_overlay_walkchanges(int id, int (*fn)(void *arg, OvEntry *e), void *arg);
 ```
 
-`OvEntry` gives the node's kind (copy, whiteout or marker), its path relative to the instance, whether it's opaque, its `Dir`, and a read function for a copy's blocks. The tar is built in Zig, in a new `src/changes.zig`, so the C side knows nothing about the archive format.
+`OvEntry` gives the node's kind (copy, whiteout, or marker), its path relative to the instance, whether it's opaque, its `Dir`, and a read function for a copy's blocks. The tar is built in Zig, in a new `src/changes.zig`, so the C side knows nothing about the archive format.
 
 If a machine is left `stuck` after a timeout, its processes still hold the namespace, so it isn't exported. The run's status says so, and the CLI prints "h9: export: machine is stuck, changes not exported".
 
@@ -114,11 +114,11 @@ namespace:
 
 **A file written by the host, not by the guest.** The guest only sees the merged tree. It can't tell a copied-up file from an unchanged one, and it can't see whiteouts at all. The device can, because its memory tree is the diff. Exporting from the host also means the guest never gets a host path to write to: the user picks FILE, and the guest only decides what goes in it.
 
-**Tar, and the OCI layer format in particular.** Tar is the one archive format every host has a reader for, including Windows' `tar.exe`. Plain tar can't represent a deletion. OCI's `.wh.` whiteouts and opaque markers are the standard way to do it: Docker, Podman, `umoci` and `crane` all read them, and they map one-to-one onto `#O`'s nodes. A layer h9 writes can be stacked by those tools, and [image-roots](0014-image-roots.md) can take one later.
+**Tar, and the OCI layer format in particular.** Tar is the one archive format every host has a reader for, including Windows' `tar.exe`. Plain tar can't represent a deletion. OCI's `.wh.` whiteouts and opaque markers are the standard way to do it: Docker, Podman, `umoci`, and `crane` all read them, and they map one-to-one onto `#O`'s nodes. A layer h9 writes can be stacked by those tools, and [image-roots](0014-image-roots.md) can take one later.
 
 **Rejected: writing a directory tree.** A plain directory is easy to browse, but it can't hold whiteouts unless it uses the same `.wh.` files. Writing many files on the host also means more ways to fail halfway, and it raises the question of what happens if the target directory already has files in it. An archive is one file, written in one pass.
 
-**Rejected: a diff (`diff -r` output or a patch).** A diff can't carry binaries, modes or empty directories. It's also only useful for text and for review, and it can't be applied as a layer.
+**Rejected: a diff (`diff -r` output or a patch).** A diff can't carry binaries, modes, or empty directories. It's also only useful for text and for review, and it can't be applied as a layer.
 
 **Rejected: exposing the upper tree to the guest, as `#O<n>/changes`.** The guest could then run its own `tar`. But 9P has no way to represent a whiteout or an opaque directory, so the guest would need a convention anyway, and the guest's tar would decide the format. This would also make a run's changes visible inside the run, which is a new thing for the guest to reach.
 
@@ -130,7 +130,7 @@ namespace:
 
 **No `-` for stdout.** Writing the archive to stdout would mean promising that nothing else reaches stdout for the whole run, while the guest owns it. If anything did, the archive would be corrupted without any error. A `/dev/fd/N` path or a pipe streams the archive just as well on Unix, and the library takes any writer.
 
-**`/tmp` left out by default.** Every machine has a `/tmp` overlay, and compilers, `mk` and editors leave files there. It has no host tree under it, so there's nothing to apply its changes to. Including it would make most archives mostly noise.
+**`/tmp` left out by default.** Every machine has a `/tmp` overlay, and compilers, `mk`, and editors leave files there. It has no host tree under it, so there's nothing to apply its changes to. Including it would make most archives mostly noise.
 
 **Export even when the guest fails or is killed.** A failed build or install is exactly the case where you want to see what it changed. The guest's status is reported unchanged next to the archive.
 
@@ -150,8 +150,8 @@ namespace:
 
 ## Security
 
-- **The guest gains no new reach.** It can't name, open or see FILE. The archive is written by the host after the guest's processes have exited.
-- **The guest controls the archive's contents,** and that's the point. Anyone extracting it should treat it like any untrusted layer. Names are guest names, which can't contain `/`, `.` or `..`, and the exporter checks for those anyway. Whiteout-like names are skipped (see above), so an archive can't encode a deletion the guest didn't make through `#O`.
+- **The guest gains no new reach.** It can't name, open, or see FILE. The archive is written by the host after the guest's processes have exited.
+- **The guest controls the archive's contents,** and that's the point. Anyone extracting it should treat it like any untrusted layer. Names are guest names, which can't contain `/`, `.`, or `..`, and the exporter checks for those anyway. Whiteout-like names are skipped (see above), so an archive can't encode a deletion the guest didn't make through `#O`.
 - **Size is bounded.** Everything exported is in the overlays' memory, which counts against `--memory`. So the archive can't be much larger than `--memory` plus tar headers.
 - **Reads aren't widened.** The exporter only reads memory nodes. It never reads the lower tree, so a file hidden by `--read-deny` can't get into the archive. A directory marker's `Dir` is the snapshot devfs had already allowed the guest to stat.
 - **Between machines:** each machine exports only its own instances. The walk leaf checks that the instance belongs to the calling machine's pool, as attaching does.

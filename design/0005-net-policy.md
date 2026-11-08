@@ -30,7 +30,7 @@ Its vendor-hooks paragraph planned `h9_net_check(op, addr, port)` in devip, a le
 
 ### h9 today
 
-`--net` takes `disable`, `outbound` or `enable` (`src/policy.zig`):
+`--net` takes `disable`, `outbound`, or `enable` (`src/policy.zig`):
 
 - **`disable`** masks `#I` in the device mask after the namespace is built, so the guest can't attach it again. The tight profile's default.
 - **`enable`** binds `#I` at `/net` with nothing else restricted. The default profile's default.
@@ -40,7 +40,7 @@ Its vendor-hooks paragraph planned `h9_net_check(op, addr, port)` in devip, a le
 
 ### drawterm's devip
 
-drawterm's `#I` (`third_party/drawterm/kern/devip.c`) serves `/net/tcp` (30 conversations) and `/net/udp` (10). Each is the usual clone, ctl, data, listen, local, remote and status files, backed by host sockets through `devip-posix.c` or `devip-win32.c`. Everything a guest does with the network passes through two functions:
+drawterm's `#I` (`third_party/drawterm/kern/devip.c`) serves `/net/tcp` (30 conversations) and `/net/udp` (10). Each is the usual clone, ctl, data, listen, local, remote, and status files, backed by host sockets through `devip-posix.c` or `devip-win32.c`. Everything a guest does with the network passes through two functions:
 
 - **`ipwrite` on a ctl file** handles three text messages:
   - `connect addr!port[!r] [lport]`: parse, bind the local port if given, create the socket, then `so_connect`.
@@ -216,7 +216,7 @@ The second example needs [devsrv](0008-devsrv.md) for `srv` to post to `/srv`; t
 - **Peer addresses are weak.** Filtering by source address is undone by NAT, and by spoofing for UDP.
 - **The control that matters is what's announced.** If inbound control is wanted, a separate `--net-listen PATTERN` checked against the local address and port at `announce` would do it. `h9_net_check(H9_NETANNOUNCE, …)` already gets both, so it needs no fourth hook. It can come in a follow-up when there's a use.
 
-**Service names in patterns.** Only numbers, ranges and `*` are accepted. Service names would have to be resolved by the host's services database at compile time, and the result would differ between hosts. A plan should mean the same thing everywhere.
+**Service names in patterns.** Only numbers, ranges, and `*` are accepted. Service names would have to be resolved by the host's services database at compile time, and the result would differ between hosts. A plan should mean the same thing everywhere.
 
 ## Compatibility
 
@@ -259,11 +259,11 @@ Integration cases tagged `[net-policy]`. They run h9 against listeners the test 
 - `test "--print shows net-allow patterns and caveats [net-policy]"`
 - `test "--strict accepts --net=outbound [net-policy]"`
 
-Unit tests in `src/policy.zig` for pattern parsing and matching: IPv4 and IPv6 CIDR edges, IPv4-mapped addresses matching IPv4 patterns and the link-local refusal but not IPv6 ones, port ranges, name wildcards at label boundaries (`*.example.com` matches `a.example.com` but not `example.com` or `badexample.com`), and the table's eviction.
+Unit tests in `src/policy.zig` for pattern parsing and matching: IPv4 and IPv6 CIDR edges, IPv4-mapped addresses matching IPv4 patterns, and the link-local refusal but not IPv6 ones, port ranges, name wildcards at label boundaries (`*.example.com` matches `a.example.com` but not `example.com` or `badexample.com`), and the table's eviction.
 
 ## Implementation
 
-1. Pattern parsing and matching in `src/policy.zig`, `Policy.net_allow`, the `outbound` default, the link-local refusal without patterns, `net.outbound` and `net.allow` in `enforces:`, the new caveats, `--print`'s section, and the usage errors. Unit tests.
+1. Pattern parsing and matching in `src/policy.zig`, `Policy.net_allow`, the `outbound` default, the link-local refusal without patterns, `net.outbound`, and `net.allow` in `enforces:`, the new caveats, `--print`'s section, and the usage errors. Unit tests.
 2. `src/kern/netcheck.h` and `netcheck.c`, the leaves in `src/kern.zig`, and the per-machine resolved-name table.
 3. The three hook calls in `third_party/drawterm/kern/devip.c`.
 4. `--net-allow` in `src/cli.zig` and the README's sandbox table.

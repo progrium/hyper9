@@ -38,14 +38,14 @@
 
 <p>
 h9 runs native <a href="https://9front.org/">9front</a> executables
-directly on macOS, Linux and Windows, using each host's hypervisor API.
-There is no VM image, no boot and no guest kernel:
+directly on macOS, Linux, and Windows, using each host's hypervisor API.
+There is no VM image, no boot, and no guest kernel:
 each guest process runs in hardware-isolated user mode,
 and its system calls are served by
 <a href="https://drawterm.9front.org/">drawterm</a>'s Plan 9 kernel,
 running in the host process.
 One invocation can hold a whole process tree:
-rc pipelines, servers posting to <tt>/srv</tt>, rio and its clients.
+rc pipelines, servers posting to <tt>/srv</tt>, rio, and its clients.
 </p>
 
 <p>

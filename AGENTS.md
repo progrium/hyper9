@@ -20,10 +20,10 @@
 - When a task would change anything listed under "When a proposal is needed" in `design/README.md`, find the accepted proposal that covers it and check that it's ready (`zig build design -- ready`). If there's none, don't implement the change: draft one with `zig build design -- new <slug>`, leave it as a draft, and stop.
 - Cite the proposal in implementation PRs, and tag new integration cases with it: `test "name [slug]"`.
 - Never edit an accepted proposal's body: add a dated note under its Updates section, or draft a new proposal.
-- Never add, copy or re-date a signature line (`Mon D, YYYY · Name, h.d.a.`) in a proposal or `DESIGN.md`; only the named person adds it, after reviewing the doc (see Signature in `design/README.md`). Don't remove an existing one either. If you substantially change a signed doc, tell the user it may need re-signing.
+- Never add, copy, or re-date a signature line (`Mon D, YYYY · Name, h.d.a.`) in a proposal or `DESIGN.md`; only the named person adds it, after reviewing the doc (see Signature in `design/README.md`). Don't remove an existing one either. If you substantially change a signed doc, tell the user it may need re-signing.
 - Add a dependency you discover to the proposal's `depends` in the same PR, and say so.
 - The PR that finishes a proposal updates `DESIGN.md` to describe what was built and sets `status: implemented`. `DESIGN.md` describes only what's built.
-- Bug fixes, workarounds and refactors that don't change behavior need no proposal; explain them in code comments and commit messages.
+- Bug fixes, workarounds, and refactors that don't change behavior need no proposal; explain them in code comments and commit messages.
 - Run `zig build design -- check` before opening a PR. Don't run `zig build design -- status` or commit `design/STATUS.md` in a PR: a workflow regenerates it on main after each merge, so PRs don't conflict over it.
 
 ## Validate changes

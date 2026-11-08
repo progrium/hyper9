@@ -12,7 +12,7 @@ areas: [kern, build, tests]
 
 ## Abstract
 
-The [browser host](0012-browser-host.md) gains the [gfx](0015-gfx.md) devices. A page passes a `<canvas>` to `createMachine({ gfx: { canvas } })`, and the machine's `/dev/draw`, `/dev/mouse`, `/dev/cursor` and `/dev/kbd` are that canvas, so rio and acme run in the page. The canvas moves into the Worker as an `OffscreenCanvas`, and a new GUI backend, `src/kern/gfx-web.c`, copies drawn rectangles from the screen image in wasm memory straight onto it. Input comes from the page's pointer and keyboard events. `/dev/snarf` is a buffer in the machine that the page fills on a paste event and copies out with the async clipboard API, so the guest can never read the clipboard without a paste by the user. Everything above the backend, including the lazy screen, the kbdfs `/dev/kbd`, closing and the device mask, is gfx's code, unchanged.
+The [browser host](0012-browser-host.md) gains the [gfx](0015-gfx.md) devices. A page passes a `<canvas>` to `createMachine({ gfx: { canvas } })`, and the machine's `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` are that canvas, so rio and acme run in the page. The canvas moves into the Worker as an `OffscreenCanvas`, and a new GUI backend, `src/kern/gfx-web.c`, copies drawn rectangles from the screen image in wasm memory straight onto it. Input comes from the page's pointer and keyboard events. `/dev/snarf` is a buffer in the machine that the page fills on a paste event and copies out with the async clipboard API, so the guest can never read the clipboard without a paste by the user. Everything above the backend, including the lazy screen, the kbdfs `/dev/kbd`, closing, and the device mask, is gfx's code, unchanged.
 
 ## Background
 
@@ -26,9 +26,9 @@ The [browser host](0012-browser-host.md) gains the [gfx](0015-gfx.md) devices. A
 - `clipread` and `clipwrite` are the clipboard
 - input goes in through `absmousetrack(x, y, buttons, msec)` and `kbdkey(rune, down)`, from the backend's event thread
 
-gfx also defines `h9.gfx`, `Machine.Options.gfx` and the `GfxNotBuilt`, `GfxInUse` and `GfxUnavailable` errors, and its headless backend is a screen in memory with test hooks.
+gfx also defines `h9.gfx`, `Machine.Options.gfx` and the `GfxNotBuilt`, `GfxInUse`, and `GfxUnavailable` errors, and its headless backend is a screen in memory with test hooks.
 
-The [browser host](0012-browser-host.md) runs h9 in a Web Worker on wasm32-wasi, with kernel processes as JSPI coroutines and 9front's 386 binaries on v86. Its Compatibility section leaves graphics out of scope: "a canvas backend for gfx in its own proposal". The page talks to the Worker by `postMessage`. A Worker has no DOM, so it can't see the page's events, set a CSS cursor or use `navigator.clipboard`, but it can draw on an `OffscreenCanvas` that the page transferred to it.
+The [browser host](0012-browser-host.md) runs h9 in a Web Worker on wasm32-wasi, with kernel processes as JSPI coroutines and 9front's 386 binaries on v86. Its Compatibility section leaves graphics out of scope: "a canvas backend for gfx in its own proposal". The page talks to the Worker by `postMessage`. A Worker has no DOM, so it can't see the page's events, set a CSS cursor, or use `navigator.clipboard`, but it can draw on an `OffscreenCanvas` that the page transferred to it.
 
 ## Proposal
 
@@ -48,7 +48,7 @@ const m = await createMachine({
 await m.run(["rio"]);
 ```
 
-Without `gfx`, the machine is as today, and `#i`, `#m` and `#b` are masked. `h9-node` has no canvas, so `--gfx` there exits 125 with "graphics aren't built into this h9", the CLI's message for a build without a backend. One page can run several machines, one per Worker, and each can have its own canvas: `GfxInUse` is per process, and each Worker is a process.
+Without `gfx`, the machine is as today, and `#i`, `#m`, and `#b` are masked. `h9-node` has no canvas, so `--gfx` there exits 125 with "graphics aren't built into this h9", the CLI's message for a build without a backend. One page can run several machines, one per Worker, and each can have its own canvas: `GfxInUse` is per process, and each Worker is a process.
 
 ### Build
 
@@ -56,11 +56,11 @@ Without `gfx`, the machine is as today, and `#i`, `#m` and `#b` are masked. `h9-
 
 ### The canvas
 
-`createMachine` calls `canvas.transferControlToOffscreen()` and posts the `OffscreenCanvas` to the Worker with the machine's options. The page keeps the element, for its events, its CSS cursor and its size.
+`createMachine` calls `canvas.transferControlToOffscreen()` and posts the `OffscreenCanvas` to the Worker with the machine's options. The page keeps the element, for its events, its CSS cursor, and its size.
 
 `gfx-web.c` implements the screen interface:
 
-- **`screeninit`** asks the page for the canvas's size and allocates `gscreen` at that size as `XBGR32`, whose little-endian bytes are R, G, B and X, the order of an `ImageData` row. Then it calls `terminit`, as the other backends do.
+- **`screeninit`** asks the page for the canvas's size and allocates `gscreen` at that size as `XBGR32`, whose little-endian bytes are R, G, B, and X, the order of an `ImageData` row. Then it calls `terminit`, as the other backends do.
 - **`flushmemscreen(r)`** adds `r` to a dirty rectangle and, if no flush is pending, schedules one with the Worker's `requestAnimationFrame`. The flush runs in JavaScript, outside any coroutine. It takes the dirty rectangle's rows of `gscreen` from wasm memory, sets each pixel's X byte to 255 in a copy, and draws it with `putImageData`. So drawing is batched to the display's frame rate, and the kernel never waits for the canvas.
 - **`screensize(r, chan)`** reallocates `gscreen` at the new size, as the X11 backend does.
 - **`setcursor`** converts drawterm's 16×16 `Cursor` (its `set` and `clr` bitmaps and hot spot) into a PNG data URL and posts it to the page, which sets it as the canvas's CSS `cursor`. The arrow cursor is `default`.
@@ -90,16 +90,16 @@ The default scale is 0, device pixels, which is what the X11 and Win32 backends 
 
 **Keyboard.** The canvas gets `tabindex="0"` and receives keys only while it has focus, so the guest sees nothing typed into the rest of the page.
 
-- `keydown` and `keyup` map `KeyboardEvent.key` to a Plan 9 rune: a single character is itself, and named keys map to `keyboard.h`'s (`Enter` is `\n`, `Backspace` `\b`, `Tab` `\t`, `Escape` `Kesc`, arrows `Kup` and so on, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete` 0x7f, `F1` to `F12`, and `Shift`, `Control`, `Alt` and `Meta` as `Kshift`, `Kctl`, `Kalt` and `Kmod4`). `h9_kbdkey` then applies Ctrl, as on native hosts.
+- `keydown` and `keyup` map `KeyboardEvent.key` to a Plan 9 rune: a single character is itself, and named keys map to `keyboard.h`'s (`Enter` is `\n`, `Backspace` `\b`, `Tab` `\t`, `Escape` `Kesc`, arrows `Kup`, and so on, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete` 0x7f, `F1` to `F12`, and `Shift`, `Control`, `Alt`, and `Meta` as `Kshift`, `Kctl`, `Kalt`, and `Kmod4`). `h9_kbdkey` then applies Ctrl, as on native hosts.
 - Composed text (`isComposing`, or `key` longer than one character that isn't named) is taken from `compositionend` or `beforeinput`, rune by rune.
-- `preventDefault` is called for every key the canvas handles, so Backspace, Tab and Ctrl-letter reach the guest instead of the page. Keys the browser reserves, such as Ctrl-W and Ctrl-T, never reach the page at all; those are documented. Cmd- and Ctrl-V are let through, so the paste event below fires.
+- `preventDefault` is called for every key the canvas handles, so Backspace, Tab, and Ctrl-letter reach the guest instead of the page. Keys the browser reserves, such as Ctrl-W and Ctrl-T, never reach the page at all; those are documented. Cmd- and Ctrl-V are let through, so the paste event below fires.
 - When the canvas loses focus, every key still held is released, as `keyup` for each, so rio's `/dev/kbd` doesn't see a key stuck down.
 
 ### The clipboard
 
 A Worker can't use `navigator.clipboard`, and in a page reading it needs the user's permission or a user gesture. So `/dev/snarf` is always a buffer in the machine, `gfx.c`'s `noclip` buffer, and the page moves text across at the user's request:
 
-- **In:** a `paste` event on the focused canvas (Ctrl-V or Cmd-V, or the browser's Paste menu) reads `clipboardData.getData("text/plain")` and posts it to the Worker, which replaces the snarf buffer. Then rio's or acme's own paste, button 2's menu or a 1-3 chord, pastes it. No permission prompt is involved, since the page reads only what the paste event hands it.
+- **In:** a `paste` event on the focused canvas (Ctrl-V or Cmd-V, or the browser's Paste menu) reads `clipboardData.getData("text/plain")` and posts it to the Worker, which replaces the snarf buffer. Then rio's or acme's own paste, button 2's menu, or a 1-3 chord, pastes it. No permission prompt is involved, since the page reads only what the paste event hands it.
 - **Out:** a write to `/dev/snarf` posts the text to the page, which calls `navigator.clipboard.writeText`. Browsers allow that while the page has focus. If it's refused, the text stays in the snarf buffer and the page fires a `snarf` event with the text, so an embedder can offer its own copy button.
 - `clipboard: "private"` skips both, as `--gfx=noclip` does.
 
@@ -115,15 +115,15 @@ A page has no close button for a canvas. `h9-web.js` gains `machine.hangup()`, b
 
 ### Fonts in the root archive
 
-rio and acme need their default fonts, which the browser host's trimmed root archive doesn't hold, and the 386 root's `/lib/font/bit` is 43 MB. The archive's list in the build gains rio, acme and the commands their windows run, and the fonts they open by default: 9front's `/lib/font/bit/vga` (about 0.5 MB), `lucsans/euro.8.font` and `lucm/unicode.9.font` with the subfonts they name. It also gains `/mnt/temp`, which rio needs. Other fonts come with a full root, which is browser-host's open issue.
+rio and acme need their default fonts, which the browser host's trimmed root archive doesn't hold, and the 386 root's `/lib/font/bit` is 43 MB. The archive's list in the build gains rio, acme, and the commands their windows run, and the fonts they open by default: 9front's `/lib/font/bit/vga` (about 0.5 MB), `lucsans/euro.8.font`, and `lucm/unicode.9.font` with the subfonts they name. It also gains `/mnt/temp`, which rio needs. Other fonts come with a full root, which is browser-host's open issue.
 
 ## Rationale
 
 **Why `OffscreenCanvas` in the Worker.** It lets `flushmemscreen` draw straight from wasm memory with no copy to another thread, and it's in every browser that has JSPI. Without it, each flush would post the rectangle's pixels to the page, a structured clone of up to 8 MB a frame at full screen on a high-DPI display, or need `SharedArrayBuffer` and cross-origin isolation, which browser-host avoids.
 
-**Why `putImageData` rather than WebGL or WebGPU.** devdraw composites in memory, so the backend only uploads rectangles. `putImageData` of a dirty rectangle once a frame is enough for rio, acme and similar programs, and it has no context to lose. A GPU texture upload can replace it inside `gfx-web.c` if profiling ever shows a need, without changing anything above it.
+**Why `putImageData` rather than WebGL or WebGPU.** devdraw composites in memory, so the backend only uploads rectangles. `putImageData` of a dirty rectangle once a frame is enough for rio, acme, and similar programs, and it has no context to lose. A GPU texture upload can replace it inside `gfx-web.c` if profiling ever shows a need, without changing anything above it.
 
-**Why a kernel process for input.** `kbdkey` and `absmousetrack` lock, queue and wake, and drawterm's code assumes they run with `up` set. Calling them from the message handler would run kernel code outside any coroutine. `gfxinput` gives them the same context the native backends' event threads have, through browser-host's ordinary `h9_park`.
+**Why a kernel process for input.** `kbdkey` and `absmousetrack` lock, queue, and wake, and drawterm's code assumes they run with `up` set. Calling them from the message handler would run kernel code outside any coroutine. `gfxinput` gives them the same context the native backends' event threads have, through browser-host's ordinary `h9_park`.
 
 **Why the clipboard is paste-driven.** The alternatives were:
 
@@ -147,8 +147,8 @@ The paste event gives the user an explicit action, the shortcut they already use
 - **API.** `createMachine` gains `gfx`, which passes `--gfx` (or `--gfx=noclip`) and `--gfx-scale` with the run's flags and posts the canvas, and the machine gains `hangup()`. `Machine.Options.gfx` and `h9.gfx` are unchanged; `h9.gfx.Backend` gains `web`, and `h9.gfx.main` calls `work` directly on the web host, as on non-macOS hosts.
 - **CLI.** Unchanged. `h9-node --gfx` exits 125 as a build without graphics does.
 - **Build.** `-Dgfx=web` is new, and is the default for wasm targets. Native builds are unchanged.
-- **Root archive.** It gains rio, acme, their default fonts and `/mnt/temp`, about 1.5 MB.
-- **Sandbox defaults.** As gfx: `#b`, `#i` and `#m` are masked without `gfx`.
+- **Root archive.** It gains rio, acme, their default fonts, and `/mnt/temp`, about 1.5 MB.
+- **Sandbox defaults.** As gfx: `#b`, `#i`, and `#m` are masked without `gfx`.
 - **Browsers.** `OffscreenCanvas` with a 2D context and `requestAnimationFrame` in Workers are required with `gfx`. Every browser with JSPI has both. `createMachine` rejects with "this browser can't draw from a Worker" if either is missing.
 - **`third_party/`.** Unchanged. `gfx-web.c` is h9's own, written against `kern/screen.h`, and drawterm's devices are used as gfx uses them.
 
@@ -156,12 +156,12 @@ The paste event gives the user an explicit action, the shortcut they already use
 
 - **What the guest newly reaches,** only with `gfx`: one canvas it draws in, the pointer over it, the keyboard while it has focus, and the page's clipboard as described above. It can't read keys typed into the rest of the page, or the clipboard unless the user pastes into its canvas. It can write the clipboard while the page has focus, as any page script can.
 - **Drawing.** The guest can draw anything in its canvas, including what looks like the page's own UI or a browser dialog. The canvas's size and place, and what frames it, are the embedder's. The docs say so, as gfx's caveat does for native windows.
-- **No new imports reach the guest.** The canvas, events and clipboard are reached only by `gfx-web.c` and `h9-web.js`, through the screen interface and the input queue, as devdraw and the native backends reach a window.
+- **No new imports reach the guest.** The canvas, events, and clipboard are reached only by `gfx-web.c` and `h9-web.js`, through the screen interface and the input queue, as devdraw and the native backends reach a window.
 - **Without `gfx`,** nothing changes: the devices are masked, and the Worker gets no canvas.
 
 ## Done when
 
-- `zig build web` builds `gfx-web.c` by default, and the root archive holds rio, acme, their fonts and `/mnt/temp`.
+- `zig build web` builds `gfx-web.c` by default, and the root archive holds rio, acme, their fonts, and `/mnt/temp`.
 - gfx's `[gfx]` backend cases pass under Node on v86 with the headless backend, as they do natively.
 - Playwright cases in Chromium on the demo page, tagged `[browser-gfx]`:
   - `test "a draw client's image reaches the canvas [browser-gfx]"`: the canvas's pixels show the rectangle the `draw` fixture draws.
@@ -174,11 +174,11 @@ The paste event gives the user an explicit action, the shortcut they already use
 
 ## Implementation
 
-1. **Fonts and the archive.** Add rio, acme, their default fonts and `/mnt/temp` to the root archive's list, and run gfx's headless `[gfx]` cases under Node on v86. This checks the kernel side, lazy screen and kbdfs keys included, on coroutines before any browser work.
+1. **Fonts and the archive.** Add rio, acme, their default fonts, and `/mnt/temp` to the root archive's list, and run gfx's headless `[gfx]` cases under Node on v86. This checks the kernel side, lazy screen and kbdfs keys included, on coroutines before any browser work.
 2. **The canvas backend.** `gfx-web.c`: `screeninit`, `flushmemscreen` with the frame-batched flush, `screensize`, colour maps, and `-Dgfx=web` in the build. The draw fixture's case passes.
 3. **Input.** The `gfxinput` kernel process, the page's pointer and keyboard handlers, focus and key release, and composition. The rio case passes.
 4. **The clipboard and cursor.** Paste in, `writeText` out with the `snarf` event fallback, and `setcursor` as a CSS cursor. The paste case passes.
-5. **Resize, close and the plan.** The `ResizeObserver` path, `machine.hangup`, and the `gfx:` line and caveats. The remaining cases pass.
+5. **Resize, close, and the plan.** The `ResizeObserver` path, `machine.hangup`, and the `gfx:` line and caveats. The remaining cases pass.
 6. **Docs.** The demo page's rio button, the README's browser section, and DESIGN.md's graphics and web host sections. Set `status: implemented`.
 
 ## Open issues

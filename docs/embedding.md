@@ -1,7 +1,7 @@
 # Embedding h9 in a Zig program
 
 The `h9` command is a thin layer over a Zig library. The library runs 9front
-programs in **machines**: one VM, one private namespace, one console and one
+programs in **machines**: one VM, one private namespace, one console, and one
 process tree each. This guide shows how to build a program on that library,
 configure a machine, run programs in it, run several at once, and connect it
 to your own files and 9P servers.
@@ -19,11 +19,11 @@ builds with `zig build embed` and runs in `zig build test`.
 2. [Depending on h9 from your project](#depending-on-h9-from-your-project)
 3. [Machine.Options](#machineoptions)
 4. [Running programs](#running-programs)
-5. [Standard I/O, traces and signals](#standard-io-traces-and-signals)
+5. [Standard I/O, traces, and signals](#standard-io-traces-and-signals)
 6. [The sandbox policy](#the-sandbox-policy)
 7. [Backends](#backends)
 8. [Several machines in one process](#several-machines-in-one-process)
-9. [Connecting files, devices and 9P servers](#connecting-files-devices-and-9p-servers)
+9. [Connecting files, devices, and 9P servers](#connecting-files-devices-and-9p-servers)
 10. [Rules for embedders](#rules-for-embedders)
 
 ## A first program
@@ -121,15 +121,15 @@ Every field but `stdio` has a default:
 | Field | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.emu`; `.whp` is proposed and fails with `BackendNotBuilt`. See [Backends](#backends). |
-| `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64` or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
-| `root` | `?Root` | none | `.{ .dir = path }`, `.{ .tcp = "tcp!host!564" }`, `.{ .unix = path }` or `.{ .ws = "wss://host/9p" }`. Without one, only `.bytes` programs run. |
+| `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64`, or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
+| `root` | `?Root` | none | `.{ .dir = path }`, `.{ .tcp = "tcp!host!564" }`, `.{ .unix = path }`, or `.{ .ws = "wss://host/9p" }`. Without one, only `.bytes` programs run. |
 | `root_spec` | `[]const u8` | `""` | The attach name for a 9P root. |
 | `root_user` | `?[]const u8` | machine's user | The uname h9 attaches to a 9P root with. |
 | `root_headers` | `[]const []const u8` | `&.{}` | Extra handshake headers for a `.ws` root, as `"Name: value"`. |
 | `root_ca` | `?[]const u8` | host's bundle | A PEM file a `wss://` root must chain to: a host path. |
-| `proxy` | `?Machine.Proxy` | direct | Proxies for connections h9 makes itself (a `.ws` root, WebSocket mounts in `ns`): `.{ .http = ..., .https = ..., .no_proxy = ... }`. The CLI fills it from `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`; the library never reads the environment. Guest connections always go direct. |
+| `proxy` | `?Machine.Proxy` | direct | Proxies for connections h9 makes itself (a `.ws` root, WebSocket mounts in `ns`): `.{ .http = ..., .https = ..., .no_proxy = ... }`. The CLI fills it from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; the library never reads the environment. Guest connections always go direct. |
 | `cwd` | `?[]const u8` | none | A host directory bound at `/mnt/term/cwd` and made the guest's cwd. |
-| `env` | `[]const EnvVar` | `&.{}` | Guest environment variables, beyond the defaults (`user`, `sysname`, `path` and so on). |
+| `env` | `[]const EnvVar` | `&.{}` | Guest environment variables, beyond the defaults (`user`, `sysname`, `path`, and so on). |
 | `policy` | `Policy` | `.{}` | The sandbox: binds, write mode, network, limits. See [The sandbox policy](#the-sandbox-policy). |
 | `guest_tools` | `bool` | `true` | Binds h9's own commands (`#H/bin`, such as `wsmount`) after `/bin`. `false` leaves them out and masks `#H`, as `--no-guest-tools` does. |
 | `trace` | `?*std.Io.Writer` | none | Receives a ratrace-style line per syscall. |
@@ -138,13 +138,13 @@ Every field but `stdio` has a default:
 | `owned_vcpus` | `?u32` | backend's | For tests of the vCPU pool; leave it alone. |
 | `gfx` | `?Machine.Gfx` | none | A host window for this machine, as `--gfx` gives: `.{}`, or `.{ .clipboard = false }` for `--gfx=noclip` and `.scale` for `--gfx-scale`. Only one machine in the process can have it. See [Graphics](#graphics). |
 | `signals` | `?*Machine.Signals` | none | Lets you deliver Ctrl-C and hangup to a running machine. |
-| `stdio` | `Machine.Stdio` | required | The console's host side: `in`, `out`, `err` and callbacks. |
+| `stdio` | `Machine.Stdio` | required | The console's host side: `in`, `out`, `err`, and callbacks. |
 
 The machine keeps the `Options` value as you passed it, so every slice in
 it (paths, `env`, policy lists) must outlive the machine, not just `init`.
 
 `Machine.init` fails with `vmm.CreateError` (the backend couldn't make a VM:
-`HypervisorUnavailable`, `BackendNotBuilt`, `WrongArch`, `OutOfGuestMemory`
+`HypervisorUnavailable`, `BackendNotBuilt`, `WrongArch`, `OutOfGuestMemory`,
 and so on), `PolicyConflict`, or one of `h9.gfx.Error` for `gfx` (`GfxNotBuilt`, `GfxInUse`, `GfxUnavailable`). For the reason behind a conflict, call
 `Machine.initExplained(gpa, io, opts, &msg)` instead.
 
@@ -169,7 +169,7 @@ pub fn run(m: *Machine, prog: Program, argv: []const []const u8) RunError!Status
   memory). This is what the CLI does for `./prog`. Set `Options.arch` to
   match it, since there's no header sniffing in `run`.
 - `.{ .guest = name }`: a path or name looked up in the machine's
-  namespace. Names without a leading `/`, `./` or `../` are searched along
+  namespace. Names without a leading `/`, `./`, or `../` are searched along
   `$path`, as rc does.
 
 `argv[0]` is the name the program sees for itself.
@@ -204,13 +204,13 @@ interrupts blocking kernel calls, and returns `.killed = "h9: timeout"`.
 
 A process can be in a host call that can't be interrupted, such as a read of
 `stdio.in` with no `in_cancel`. Then `run` returns anyway after a short
-grace period and sets `m.stuck`. The backend, the plan and the run's state
+grace period and sets `m.stuck`. The backend, the plan, and the run's state
 are leaked rather than freed under the process, and that process may still
-touch `argv`, the program bytes, the `Stdio` streams and the trace writer
+touch `argv`, the program bytes, the `Stdio` streams, and the trace writer
 when its call returns. Keep those alive, or exit the host process, which is
 what the CLI does. `deinit` on a stuck machine is safe and frees nothing.
 
-## Standard I/O, traces and signals
+## Standard I/O, traces, and signals
 
 ```zig
 pub const Stdio = struct {
@@ -261,7 +261,7 @@ sig.stop(io);      // tear the machine down now
 Each call only sets a flag and wakes `run`'s thread, which posts the notes.
 Calls while nothing is running are dropped.
 [src/hostsig.zig](../src/hostsig.zig) shows how the CLI wires SIGINT,
-SIGTERM, SIGHUP and the Windows console handler to these.
+SIGTERM, SIGHUP, and the Windows console handler to these.
 
 ## The sandbox policy
 
@@ -270,14 +270,14 @@ flags (manual chapter 22):
 
 | Field | Flag | Default |
 | --- | --- | --- |
-| `profile` | `--profile` | `.default`; `.tight` has no network, a read-only cwd and a 10 minute timeout. |
+| `profile` | `--profile` | `.default`; `.tight` has no network, a read-only cwd, and a 10 minute timeout. |
 | `readable` | `--readable` | Host paths bound read-only. |
 | `writable` | `--writable` | Host paths bound read-write. |
 | `read_deny` | `--read-deny` | Host paths hidden even inside a bound tree. |
-| `write` | `--write` | `.none`, `.scope` or `.ephemeral` (copy-on-write in memory). Null: the profile's. |
-| `net` | `--net` | `.disable`, `.outbound` or `.enable`. Null: outbound, or disable for tight. |
+| `write` | `--write` | `.none`, `.scope`, or `.ephemeral` (copy-on-write in memory). Null: the profile's. |
+| `net` | `--net` | `.disable`, `.outbound`, or `.enable`. Null: outbound, or disable for tight. |
 | `net_allow` | `--net-allow` | Dial-string patterns every connect must match. |
-| `memory` | `--memory` | Bytes of guest memory, page tables and ephemeral files included. |
+| `memory` | `--memory` | Bytes of guest memory, page tables, and ephemeral files included. |
 | `timeout_ns` | `--timeout` | The machine's deadline. |
 | `pids` | `--pids` | Cap on live processes. |
 | `cpus` | `--cpus` | Cap on vCPUs running guest code at once. |
@@ -315,7 +315,7 @@ fall back on any other failure. Check
 `m.backend.kind()` after `init` to see which one you got; the CLI warns when
 `.auto` lands on `.emu`.
 
-`h9.vmm.Kind.built(.hvf)`, `.built(.kvm)` and `.built(.emu)` tell you at run time what's
+`h9.vmm.Kind.built(.hvf)`, `.built(.kvm)`, and `.built(.emu)` tell you at run time what's
 compiled in, and `h9.vmm.host_arch` is the architecture that runs natively.
 
 ### Graphics
@@ -333,8 +333,8 @@ one.
 ## Several machines in one process
 
 Machines are independent values. Each one's first process starts with a
-fresh namespace, environment, file descriptor table and console, so one
-machine never sees another's `/tmp`, `/srv`, binds or environment
+fresh namespace, environment, file descriptor table, and console, so one
+machine never sees another's `/tmp`, `/srv`, binds, or environment
 variables. They share drawterm's kernel, which boots once per host process
 on first use.
 
@@ -390,7 +390,7 @@ The limits:
   them, but set `memory` when you run many, so one runaway guest can't take
   them all.
 
-## Connecting files, devices and 9P servers
+## Connecting files, devices, and 9P servers
 
 There's no API for adding a kernel device in Zig yet: the device table is
 drawterm's, compiled in ([src/kern/devtab.c](../src/kern/devtab.c)). What a
@@ -436,7 +436,7 @@ mount -c wss://fs.example/9p /n/fs
 A WebSocket mount that fails stops the run with `NamespaceFailed`, unlike
 other namespace-file lines. It's refused under `write = .none`, which h9
 can't enforce on a server it doesn't control. The file's `bind`,
-`unmount` and `cd` lines rearrange the rest of the namespace.
+`unmount`, and `cd` lines rearrange the rest of the namespace.
 
 **More 9P servers, mounted by the guest.** When the policy lets it connect
 (`net = .outbound`, the default profile's, ideally with a `net_allow`
@@ -461,5 +461,5 @@ writes.
 - Don't share a `Machine` between threads while it runs.
 - Run at most one HVF machine per host process.
 - Exit codes are yours to decide; the library returns `exits` strings.
-- The library never reads the process's stdin, environment or terminal,
+- The library never reads the process's stdin, environment, or terminal,
   and never writes to stdout itself. Everything goes through `Options`.

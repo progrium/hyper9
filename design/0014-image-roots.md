@@ -13,7 +13,7 @@ areas: [cli, kern, sandbox]
  
 ## Abstract
  
-`--root` takes a raw 9front disk image. h9 serves the image to the guest as a disk, `#S`, partitions it with 9front's own `diskparts`, and runs 9front's file server for it (gefs, cwfs or hjfs) as a guest process, from the host root tree. The server posts itself to `/srv`, and h9 mounts it at `/`, as [9p-roots](0013-9p-roots.md) mounts a server, before the program runs. Writes the file server makes land in memory unless the image is `--writable`, so the image is never changed by default.
+`--root` takes a raw 9front disk image. h9 serves the image to the guest as a disk, `#S`, partitions it with 9front's own `diskparts`, and runs 9front's file server for it (gefs, cwfs, or hjfs) as a guest process, from the host root tree. The server posts itself to `/srv`, and h9 mounts it at `/`, as [9p-roots](0013-9p-roots.md) mounts a server, before the program runs. Writes the file server makes land in memory unless the image is `--writable`, so the image is never changed by default.
  
 ## Background
  
@@ -35,7 +35,7 @@ The pinned release's arm64 image, which `scripts/fetch.sh` downloads and `zig bu
 - **No disk device.** There's no `#S`, and devfs can only serve a host file as a file, without partitions.
 - **No posting or mounting from the guest** until [devsrv](0008-devsrv.md).
 - **[9p-roots](0013-9p-roots.md)** makes `--root` a union and mounts a 9P connection at `/` before the plan's other binds. A posted service is a 9P connection.
-- **The file servers** are in the root tree: `/arm64/bin/gefs`, `cwfs64x` and `hjfs`. They use `semacquire`, `rendezvous` and many procs, which is why [semaphores](0003-semaphores.md), and through it devsrv, come first.
+- **The file servers** are in the root tree: `/arm64/bin/gefs`, `cwfs64x`, and `hjfs`. They use `semacquire`, `rendezvous`, and many procs, which is why [semaphores](0003-semaphores.md), and through it devsrv, come first.
 ## Proposal
  
 ### `--root IMAGE`
@@ -52,10 +52,10 @@ Images in other formats (qcow2) are converted first (`qemu-img convert -O raw`).
  
 ### The disk device, `#S`
  
-`src/kern/devhsd.c` is h9's own kernel device. It serves each of the machine's images as `/dev/sdH0`, `/dev/sdH1` and so on, in devsd's layout and `ctl` format, so 9front's tools work on it unchanged:
+`src/kern/devhsd.c` is h9's own kernel device. It serves each of the machine's images as `/dev/sdH0`, `/dev/sdH1`, and so on, in devsd's layout and `ctl` format, so 9front's tools work on it unchanged:
  
 - **`data`:** the whole image, in 512-byte sectors.
-- **`ctl`:** reading gives devsd's `inquiry`, `geometry` and one `part` line per partition. Writing takes devsd's `part name start end` and `delpart name`, as `diskparts`, `fdisk -p` and `prep -p` write them.
+- **`ctl`:** reading gives devsd's `inquiry`, `geometry`, and one `part` line per partition. Writing takes devsd's `part name start end` and `delpart name`, as `diskparts`, `fdisk -p`, and `prep -p` write them.
 - **Partitions:** a file per `part` line, reading and writing its sector range of `data`.
 Images are added by the namespace builder with `h9_disk_add`, and belong to the machine. I/O goes to the host file through Zig leaves (seam rule 3), with the fd that h9 opened when the machine was set up:
  
@@ -73,7 +73,7 @@ For an image root, the machine boots its file server once, on its first `run`, a
 
 1. **The boot namespace:** the boot tree at `/`, read-only, from `#U`, with `#c` and `#y` on `/dev`, `#S` appended to `/dev`, `#s` at `/srv`, and `/$cputype/bin` and `/rc/bin` on `/bin`. `NPROC` is set from `/dev/sysstat`, as `bootrc` sets it (gefs sizes its reader pool by it).
 2. **Partitions:** run `diskparts` from the boot tree.
-3. **The file system type:** with `--root-fs auto`, run 9front's `fstype` on each of the disk's partitions, as `local.rc` does, and take the first that names a server h9 runs: `fs` first, then `fscache`. `fstype` reads the magic in the partition's first block (`011ce50d` is hjfs, `67656673`, "gefs", is gefs) and recognizes cwfs, cwfs64 and cwfs64x by its config block. If none does: "root IMAGE: no 9front file system found", exit 125. The pinned release's image is hjfs (`sys/lib/dist/mkfile` formats it with `hjfs -r`).
+3. **The file system type:** with `--root-fs auto`, run 9front's `fstype` on each of the disk's partitions, as `local.rc` does, and take the first that names a server h9 runs: `fs` first, then `fscache`. `fstype` reads the magic in the partition's first block (`011ce50d` is hjfs, `67656673`, "gefs", is gefs) and recognizes cwfs, cwfs64, and cwfs64x by its config block. If none does: "root IMAGE: no 9front file system found", exit 125. The pinned release's image is hjfs (`sys/lib/dist/mkfile` formats it with `hjfs -r`).
 4. **The file server:** run it from the boot tree, posting as `root`, so that every server's 9P service is `/srv/root` and its console is `/srv/root.cmd`:
 
    | Server | Command line |
@@ -89,9 +89,9 @@ For an image root, the machine boots its file server once, on its first `run`, a
 6. **Each run's namespace:** a fresh Pgrp, as `newns`'s `clear` gives, in which `/srv/root` is mounted at `/` with `MREPL`. The rest of the plan's binds follow, as over a 9P root. The attach `uname` is [9p-roots](0013-9p-roots.md)'s `--root-user`, which for an image root defaults to `glenda` rather than the machine's user (below).
 7. **The device mask** gains `S`, so the program can't reach the raw image under its file server.
 
-**The server's processes** belong to the machine, not to a run: they show up in `ps`, keep running in their own namespace, which the server's `rfork(RFNAMEG)` gives it, and outlive each run. A run's end, its `--timeout` and its `hangup` reach only the run's processes. The boot step's time doesn't count against the first run's `--timeout`; the 30 s wait bounds it instead.
+**The server's processes** belong to the machine, not to a run: they show up in `ps`, keep running in their own namespace, which the server's `rfork(RFNAMEG)` gives it, and outlive each run. A run's end, its `--timeout`, and its `hangup` reach only the run's processes. The boot step's time doesn't count against the first run's `--timeout`; the 30 s wait bounds it instead.
 
-**The boot step's output** (`diskparts`, `fstype` and the server's stdout and stderr) goes to a buffer the machine keeps, capped at 64 KiB with the oldest lines dropped. It's printed to stderr when the boot fails (exit 125), and streamed as it comes with `--trace`. Otherwise a successful boot is silent, so the program's output is the run's output.
+**The boot step's output** (`diskparts`, `fstype`, and the server's stdout and stderr) goes to a buffer the machine keeps, capped at 64 KiB with the oldest lines dropped. It's printed to stderr when the boot fails (exit 125), and streamed as it comes with `--trace`. Otherwise a successful boot is silent, so the program's output is the run's output.
 
 **The attach user.** hjfs and gefs look the attach `uname` up in the file system's own user table and refuse a name that isn't there ("no such user", "user does not exist"). The host user's name usually isn't, so the default for an image root is `glenda`: the user the release's image is made for (`sys/lib/dist/mkfile` adds `glenda` to `adm` and `sys`), who owns `/usr/glenda`, and who is in hjfs's built-in table too. `--root-user` overrides it, for images with other users.
 
@@ -124,9 +124,9 @@ The `boot:` section isn't part of the namespace, so `--ns` doesn't replay it. A 
  
 ## Rationale
  
-**Run 9front's file server, don't write one.** gefs, cwfs and hjfs are the file systems 9front installs, and reading their on-disk formats from the host would mean reimplementing each. Running them as guest processes is what the original design text asked for, and exercises the process model with real multi-proc servers.
+**Run 9front's file server, don't write one.** gefs, cwfs, and hjfs are the file systems 9front installs, and reading their on-disk formats from the host would mean reimplementing each. Running them as guest processes is what the original design text asked for, and exercises the process model with real multi-proc servers.
  
-**A disk device, not the image as a file.** The servers expect a partition, and the image is a whole disk with an MBR or GPT and 9front's own partition table. devsd's layout and `ctl` format let `diskparts`, `fdisk` and `prep` do the partitioning, so h9 parses no partition tables itself. Binding the image from `#U` and running the servers on byte ranges of it would need offsets passed to each server, which none of them takes.
+**A disk device, not the image as a file.** The servers expect a partition, and the image is a whole disk with an MBR or GPT and 9front's own partition table. devsd's layout and `ctl` format let `diskparts`, `fdisk`, and `prep` do the partitioning, so h9 parses no partition tables itself. Binding the image from `#U` and running the servers on byte ranges of it would need offsets passed to each server, which none of them takes.
  
 **`#S`, devsd's letter, with `sdH` units.** 9front's tools look for `/dev/sd*`, and the letter matches what 9front users expect. `H` keeps the units from looking like real controllers' (`sdE`, `sdF`).
  
@@ -182,7 +182,7 @@ Integration cases tagged `[image-roots]`, using the pinned release's image conve
 - `test "filling the copy-on-write disk fails the write, not the machine [image-roots]"`, under `--memory 64m`.
 - `test "a successful boot prints nothing, and a failed one prints the boot output [image-roots]"`
 - `test "the default attach user is glenda, and --root-user overrides it [image-roots]"`
-- `test "a gefs image root runs /bin/ls [image-roots]"`: a gefs image the case makes itself, by running `disk/fdisk`, `disk/prep` and `gefs -r` over an empty `--writable` file and copying a few files in.
+- `test "a gefs image root runs /bin/ls [image-roots]"`: a gefs image the case makes itself, by running `disk/fdisk`, `disk/prep`, and `gefs -r` over an empty `--writable` file and copying a few files in.
 Backend cases in `tests/backends.zig`:
 - `test "two machines in one process with the same image get separate disks [image-roots]"`
 - `test "a machine's runs share one file server, and a later run sees an earlier run's write [image-roots]"`
@@ -192,12 +192,12 @@ Demo: `h9 --root .local/9front/9front.img --rc 'ls /usr/glenda && cat /dev/sysna
  
 ## Implementation
  
-1. `src/kern/devhsd.c` with `data`, `ctl` and partitions, read-only, the leaves in `src/kern.zig`, and `S` in `src/kern/devtab.c` and the device mask. A case that reads `data` passes.
+1. `src/kern/devhsd.c` with `data`, `ctl`, and partitions, read-only, the leaves in `src/kern.zig`, and `S` in `src/kern/devtab.c` and the device mask. A case that reads `data` passes.
 2. Copy-on-write blocks on the page allocator, and `--writable` images.
-3. `Root.image`, `--root-fs` and `--boot-root`, and the boot step in `src/machine.zig`: the boot namespace, `diskparts`, `fstype`, the server's command line, waiting for `/srv/root`, the boot output buffer, and each run's fresh namespace with `glenda` as the default attach user. hjfs first, since it's the pinned image's.
+3. `Root.image`, `--root-fs`, and `--boot-root`, and the boot step in `src/machine.zig`: the boot namespace, `diskparts`, `fstype`, the server's command line, waiting for `/srv/root`, the boot output buffer, and each run's fresh namespace with `glenda` as the default attach user. hjfs first, since it's the pinned image's.
 4. The server's processes on the machine rather than the run, and `halt` at `deinit`.
 5. gefs's `-A` and `-m`, and cwfs's device map.
-6. The plan's `boot:` section, access kinds, conflict and caveats; `--check` with an image root.
+6. The plan's `boot:` section, access kinds, conflict, and caveats; `--check` with an image root.
 7. `scripts/fetch.sh`'s raw image, the cases, README's `--root` notes, and DESIGN.md: the root filesystem paragraph, the Decisions table's root row, the kernel's "Added by us" table, the boot sequence, and the CLI flag table. Set `status: implemented`.
 ## Open issues
  

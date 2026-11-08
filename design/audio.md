@@ -25,10 +25,10 @@ areas: [cli, kern, build, sandbox, tests]
 
 `kern/devaudio.c` serves a directory with two files:
 
-- **`audio`**: 16-bit little-endian stereo PCM at 44100 Hz, 9front's default format, the one `play`, `audio/pcmconv` and the decoders write. A write plays samples, and a read records them. It can be open once at a time, in one mode, process-wide: a second open fails with `Einuse`.
-- **`volume`**: text, in 9front's format (`audio out 50`, `speed 44100`). Reads list each level the backend reports, and writes parse `audio 70`, `left 30` and so on.
+- **`audio`**: 16-bit little-endian stereo PCM at 44100 Hz, 9front's default format, the one `play`, `audio/pcmconv`, and the decoders write. A write plays samples, and a read records them. It can be open once at a time, in one mode, process-wide: a second open fails with `Einuse`.
+- **`volume`**: text, in 9front's format (`audio out 50`, `speed 44100`). Reads list each level the backend reports, and writes parse `audio 70`, `left 30`, and so on.
 
-The device calls a small interface (`kern/devaudio.h`) that each backend implements: `audiodevopen`, `audiodevclose`, `audiodevread`, `audiodevwrite`, `audiodevgetvol` and `audiodevsetvol`. Its state is global to the host process, like devdraw's.
+The device calls a small interface (`kern/devaudio.h`) that each backend implements: `audiodevopen`, `audiodevclose`, `audiodevread`, `audiodevwrite`, `audiodevgetvol`, and `audiodevsetvol`. Its state is global to the host process, like devdraw's.
 
 The backends in `third_party/drawterm/kern` and what they do:
 
@@ -46,7 +46,7 @@ Things to note:
 
 - **No macOS backend.** drawterm's `Make.osx-cocoa` sets `AUDIO=none`.
 - **ALSA opens the microphone on every open.** `audiodevopen` opens both the playback and capture PCMs, whatever mode `/dev/audio` is opened in, so a program that only plays still opens the host's capture device.
-- **Writes can't always be interrupted.** ALSA, OSS and sndio block in a host call, and Win32 polls with a host sleep. drawterm's `sleep` raises `Eintr` when a note is pending, but these never reach it, so a large write runs to the end before a note is seen. Only the PipeWire backend waits in the kernel.
+- **Writes can't always be interrupted.** ALSA, OSS, and sndio block in a host call, and Win32 polls with a host sleep. drawterm's `sleep` raises `Eintr` when a note is pending, but these never reach it, so a large write runs to the end before a note is seen. Only the PipeWire backend waits in the kernel.
 - **Linking.** PipeWire and ALSA are shared libraries, so, like X11 for [gfx](0015-gfx.md), they need a glibc target. h9's Linux releases are static musl.
 - **A PipeWire bug.** `on_process` returns with `pwstate.lk` held when `pw_stream_dequeue_buffer` gives no buffer, so the next write deadlocks. It's an upstream fix to send.
 
@@ -82,7 +82,7 @@ Without `--audio`, `A` joins the device mask, so a guest can't attach `#A`, even
 - **Refuses recording without the grant.** An open of `audio` for reading or `ORDWR` fails with `Eperm` unless the machine has `record`. The backend never sees it.
 - **Chooses which host streams open.** Before `audiodevopen`, it records the open's mode. ALSA's backend is compiled with a forced-include header, `src/kern/audio-alsa.h`, that redirects `snd_pcm_open` to `h9_snd_pcm_open`. That opens ALSA's `null` PCM for whichever direction the open doesn't use. So an open for writing never opens the host's capture device, and an open for reading never opens playback. The vendored file stays unmodified, as with gfx's `gfx-gui.h`.
 - **Writes in slices.** It passes a write to `audiodevwrite` in slices of 4096 bytes, about 23 ms of sound, and checks for a pending note between slices, raising `Eintr` if there is one. A note then reaches a writer within a slice and a backend buffer's time, whatever the backend, and a write that's interrupted returns an error with the earlier slices already played, as 9front's driver does.
-- **Keeps the volume itself.** `/dev/volume` is served by the wrapper, not the backend. It keeps `audio` and `pcm` levels for the machine, from 0 to 100, both 100 at first, and scales samples in the write path before they reach the backend. A read reports them, along with `speed 44100`. A write of `speed` other than 44100 fails, and the other names in devaudio's table (`treb`, `bass`, `mic` and so on) are accepted and ignored. The guest never changes the host's mixer or system volume, and `/dev/volume` reads the same on every backend, including PipeWire, whose own `audiodevgetvol` raises an error.
+- **Keeps the volume itself.** `/dev/volume` is served by the wrapper, not the backend. It keeps `audio` and `pcm` levels for the machine, from 0 to 100, both 100 at first, and scales samples in the write path before they reach the backend. A read reports them, along with `speed 44100`. A write of `speed` other than 44100 fails, and the other names in devaudio's table (`treb`, `bass`, `mic`, and so on) are accepted and ignored. The guest never changes the host's mixer or system volume, and `/dev/volume` reads the same on every backend, including PipeWire, whose own `audiodevgetvol` raises an error.
 - **Drains on close.** Closing `/dev/audio` after writing waits, interruptibly, until what's buffered has played, as ALSA's `snd_pcm_drain` does, so `play x; echo done` prints after the sound ends. The buffer is short, so this takes at most a fraction of a second.
 
 ### Build
@@ -121,7 +121,7 @@ const m = await createMachine({
 });
 ```
 
-`createMachine` creates an `AudioContext({ sampleRate: 44100 })` in the page and adds an `AudioWorkletNode` running `h9-audio-worklet.js`, which `h9-web.js` ships alongside it and loads with `audioWorklet.addModule`. It connects the node to the context's destination. Then it creates a `MessageChannel`, gives one port to the worklet and transfers the other to the Worker, so samples go from the Worker to the audio thread directly, without passing through the page's main thread. A page can pass its own `context` in the option to share an `AudioContext` it already has.
+`createMachine` creates an `AudioContext({ sampleRate: 44100 })` in the page and adds an `AudioWorkletNode` running `h9-audio-worklet.js`, which `h9-web.js` ships alongside it and loads with `audioWorklet.addModule`. It connects the node to the context's destination. Then it creates a `MessageChannel`, gives one port to the worklet, and transfers the other to the Worker, so samples go from the Worker to the audio thread directly, without passing through the page's main thread. A page can pass its own `context` in the option to share an `AudioContext` it already has.
 
 **The backend,** `src/kern/audio-web.c`, implements `devaudio.h`:
 
@@ -182,7 +182,7 @@ Audio doesn't depend on [gfx](0015-gfx.md) or [browser-gfx](browser-gfx.md) (pro
 - **Sandbox defaults:** `#A` is masked in every machine without `--audio`. Nothing could use it before, since every backend call failed.
 - **Build and releases:** macOS and Windows builds gain an audio backend by default, with AudioToolbox and CoreAudio, or `winmm`. Linux builds and releases are unchanged unless `-Daudio` is given. Web builds gain the worklet file.
 - **Browser API:** `createMachine` gains `audio`, and the machine gains `audio.resume()` and the `audioblocked` event.
-- **Vendored tree:** unchanged. `devaudio-pipewire.c`, `devaudio-alsa.c` and `devaudio-win32.c` are compiled as they are, ALSA's with a forced-include redirect.
+- **Vendored tree:** unchanged. `devaudio-pipewire.c`, `devaudio-alsa.c`, and `devaudio-win32.c` are compiled as they are, ALSA's with a forced-include redirect.
 
 ## Security
 
@@ -217,13 +217,13 @@ The backend cases also run under Node on v86 with the headless backend, and Play
 - `test "samples written to /dev/audio reach the AudioWorklet [audio]"`: the worklet's test hook counts the frames it played.
 - `test "writes park until the AudioContext is resumed [audio]"`: with the context suspended, a write doesn't finish and `audioblocked` fires. After `m.audio.resume()`, it finishes.
 
-Demos, by hand, one per backend: `h9 --audio play song.mp3` plays on macOS, Windows and Linux (PipeWire), and Ctrl-C stops it at once. `h9 --audio=record rc -c 'dd -if /dev/audio -of /tmp/r -count 400; cat /tmp/r > /dev/audio'` plays back what was recorded, on macOS and on Linux with `-Daudio=alsa`. On the demo page, a "play" button plays a WAV in Chrome after one click.
+Demos, by hand, one per backend: `h9 --audio play song.mp3` plays on macOS, Windows, and Linux (PipeWire), and Ctrl-C stops it at once. `h9 --audio=record rc -c 'dd -if /dev/audio -of /tmp/r -count 400; cat /tmp/r > /dev/audio'` plays back what was recorded, on macOS and on Linux with `-Daudio=alsa`. On the demo page, a "play" button plays a WAV in Chrome after one click.
 
 ## Implementation
 
 1. `src/kern/audio.c` with `h9audiodevtab`: the recording check, sliced writes, the volume, draining. `-Daudio`, the masking of `#A` without `--audio`, and `devaudio-none.c` as `none`. The masking case passes.
-2. `src/kern/audio-headless.c` and `src/audio.zig`'s test hooks, `Machine.Options.audio`, the `/dev` bind and `AudioInUse`. The headless cases pass.
-3. `--audio` and `--audio=record` in `src/cli.zig`, the plan's `audio:` line and caveats, `--sandbox`'s refusal, `--version` and `--check`.
+2. `src/kern/audio-headless.c` and `src/audio.zig`'s test hooks, `Machine.Options.audio`, the `/dev` bind, and `AudioInUse`. The headless cases pass.
+3. `--audio` and `--audio=record` in `src/cli.zig`, the plan's `audio:` line and caveats, `--sandbox`'s refusal, `--version`, and `--check`.
 4. Win32: `-Daudio=win32` as the Windows default. The Windows demo works.
 5. macOS: `audio-coreaudio.c`, the frameworks, and the entitlement. The macOS demos work.
 6. Linux: `-Daudio=pipewire` and `-Daudio=alsa` with `audio-alsa.h`. The Linux demos work. Send drawterm the `on_process` fix.
