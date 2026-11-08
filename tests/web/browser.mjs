@@ -81,6 +81,18 @@ try {
     await page.keyboard.type('{while(){}} & s=$apid; echo hello | tr h H; echo kill >/proc/$s/note\n');
     await expect(/Hello\n(.|\n)*% $/, at);
   });
+  await step('on-screen keyboard input reaches rc', async () => {
+    // A phone's keyboard comes up for the focused textarea, and inserts
+    // text and deletes without key events.
+    await page.evaluate(() => document.activeElement.blur());
+    await term.click();
+    if (await page.evaluate(() => document.activeElement.id) !== 'kbd') throw new Error('a tap on the terminal does not focus its input');
+    const at = (await text()).length;
+    await page.keyboard.insertText('echo helo');
+    await page.locator('#kbd').evaluate((k) => { k.value = ''; k.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward' })); });
+    await page.keyboard.insertText('lo\n');
+    await expect(/echo hello\nhello\n% $/, at);
+  });
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
 
   // With H9_TEST_WS_ROOT, a ws:// URL of a 9P server serving a 386 root,
