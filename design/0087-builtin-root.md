@@ -2,7 +2,7 @@
 id: 87
 slug: builtin-root
 title: A built-in root
-status: draft
+status: accepted
 created: 2026-11-06
 authors: [progrium]
 depends: [64]
