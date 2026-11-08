@@ -497,6 +497,26 @@ static void creds(void) {
 	printf("ok creds\n");
 }
 
+static void many_fds(void) {
+	/* Past 100 fds, as zig does compiling musl: nothing on stderr, which
+	 * Plan 9 would warn on, and zig build takes for a failed compile. */
+	int p[2], fds[250], n = 0, saved = dup(2);
+	CHECK("many_fds", saved >= 0 && pipe(p) == 0 && dup2(p[1], 2) == 2);
+	while (n < 250 && (fds[n] = dup(p[1])) >= 0) n++;
+	int top = n ? fds[n - 1] : -1;
+	for (int i = 0; i < n; i++) close(fds[i]);
+	dup2(saved, 2);
+	close(saved);
+	close(p[1]);
+	char b[256];
+	ssize_t r = read(p[0], b, sizeof b);
+	close(p[0]);
+	CHECK("many_fds", n == 250 && top > 200);
+	if (r > 0) fprintf(stderr, "%.*s", (int)r, b);
+	CHECK("many_fds", r == 0);
+	printf("ok many_fds\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -519,6 +539,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "signal_fd")) signal_fd();
 		if (all || !strcmp(n, "itimer")) itimer();
 		if (all || !strcmp(n, "creds")) creds();
+		if (all || !strcmp(n, "many_fds")) many_fds();
 	}
 	return failed;
 }
