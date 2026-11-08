@@ -46,6 +46,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [host-sandbox](host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](host-srv.md) | draft |  | Posting host connections to /srv |
+| [native-backend](native-backend.md) | draft |  | Native backend |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
 
@@ -95,6 +96,7 @@ flowchart LR
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
+  p_native_backend["native-backend<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
   p_semaphores --> p_go_compat
