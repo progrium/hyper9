@@ -126,6 +126,20 @@ putproc(Hproc *h)
 	free(h);
 }
 
+/*
+ * Wakes the Linux waits sleeping for h's children (h9_linux_await), after
+ * a change to its wait records, children or deadness. Called with h->exl.
+ */
+void
+wakewaits(Hproc *h)
+{
+	Hproc *s;
+
+	h->wgen++;
+	for(s = h->wsleep; s != nil; s = s->wnext)
+		wakeup(&s->lwaitr);
+}
+
 static Hproc*
 newhproc(Proc *p, char *text)
 {
@@ -1242,7 +1256,7 @@ int
 h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 {
 	Proc *p;
-	Hproc *h, *ph;
+	Hproc *h, *ph, *wp;
 	Spawn *s;
 
 	p = nil;
@@ -1277,6 +1291,8 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 		error(Ebadarg);
 	checkflags(flag);
 	ph = uphproc();
+	/* A Linux thread's children are its group leader's. */
+	wp = ph->waiter != nil ? ph->waiter : ph;
 
 	s = malloc(sizeof *s);
 	if(s == nil)
@@ -1288,7 +1304,7 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 	if(h == nil)
 		error(Enomem);
 	h->pid = pid;
-	h->ppid = ph->pid;
+	h->ppid = wp->pid;
 	h->mach = ph->mach;
 	incref(&h->mach->ref);
 	h->notify = ph->notify;
@@ -1350,11 +1366,16 @@ h9_kern_fork(int flag, ulong pid, void (*fn)(void*), void *arg)
 		devmask(p->pgrp, 1, nomntdevs);
 
 	if((flag & RFNOWAIT) == 0){
-		incref(&ph->ref);
-		h->parent = ph;
-		lock(&ph->exl);
-		ph->nchild++;
-		unlock(&ph->exl);
+		incref(&wp->ref);
+		h->parent = wp;
+		lock(&wp->exl);
+		wp->nchild++;
+		wp->wgen++;
+		unlock(&wp->exl);
+	}
+	if(flag & RFLXTHREAD){
+		incref(&wp->ref);
+		h->waiter = wp;
 	}
 
 	lock(&h->mach->lk);
@@ -1619,6 +1640,7 @@ h9_kern_exit(void)
 				w = nil;
 				wakeup(&ph->waitr);
 			}
+			wakewaits(ph);
 		}
 		unlock(&ph->exl);
 		free(w);
@@ -1637,10 +1659,16 @@ h9_kern_exit(void)
 		putproc(ph);
 	}
 
+	if(h->waiter != nil){
+		putproc(h->waiter);
+		h->waiter = nil;
+	}
+
 	/* Prevent my children from leaving waits; wake /proc/n/wait readers. */
 	lock(&h->exl);
 	h->dead = 1;
 	wakeup(&h->waitr);
+	wakewaits(h);
 	h->nchild = h->nwait = 0;
 	while((w = h->waitq) != nil){
 		h->waitq = w->next;

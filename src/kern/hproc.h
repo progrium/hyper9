@@ -117,6 +117,14 @@ struct Hproc
 	Chan	*textc;		/* the executed image, open, for /proc/n/text; or nil */
 
 	Hproc	*parent;	/* nil with RFNOWAIT or for a machine's first process */
+	/*
+	 * A Linux thread's group leader (RFLXTHREAD), or nil: its forks are
+	 * the leader's children, and its Linux waits read the leader's wait
+	 * records, as a Linux process's threads share its children.
+	 */
+	Hproc	*waiter;
+	Hproc	*wnext;		/* on the waiter's wsleep list */
+	Rendez	lwaitr;		/* a Linux wait sleeps here */
 	Lock	exl;		/* guards the fields below */
 	int	dead;		/* exited; children leave no wait records */
 	int	nchild;
@@ -124,11 +132,20 @@ struct Hproc
 	Hwait	*waitq;
 	QLock	qwaitr;		/* one waiter at a time */
 	Rendez	waitr;
+	Hproc	*wsleep;	/* Linux waits sleeping for this process's children */
+	ulong	wgen;		/* bumped when waitq, nchild or dead change, for them */
 };
+
+/*
+ * h9_kern_fork's flag for a Linux thread (with RFNOWAIT): the child's
+ * waiter is the caller's group leader. Not a 9front flag.
+ */
+enum { RFLXTHREAD = 1<<30 };
 
 
 /* proc.c, for devproc.c. Lookups take a reference; release it with h9_putproc. */
 Hproc*	h9_uphproc(void);
+void	wakewaits(Hproc*);
 Hproc*	h9_pidlookup(Hmach*, ulong);
 void	h9_putproc(Hproc*);
 Hnote*	h9_mknote(char*, int);

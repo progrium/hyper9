@@ -139,6 +139,31 @@ h9_linux_inview(void)
  * The fd's Chan is open and an open Chan can't be cloned, so dot is a
  * fresh walk to the fd's path, checked to reach the same directory.
  */
+static int
+samedir(Chan *a, Chan *b)
+{
+	return a->type == b->type && a->dev == b->dev && a->qid.path == b->qid.path;
+}
+
+/*
+ * Whether c is what's mounted on the mount point d. Atodir leaves a chan
+ * before its mount point, as cd does, so a directory with something
+ * bound on it, such as the Linux view's /tmp, walks to #λ's own entry,
+ * while the fd is the overlay's. Walks from d cross the mount.
+ */
+static int
+mountedon(Chan *d, Chan *c)
+{
+	Chan *t;
+	int ok;
+
+	t = d;
+	incref(&t->ref);
+	ok = findmount(&t, nil, d->type, d->dev, d->qid) && samedir(t, c);
+	cclose(t);
+	return ok;
+}
+
 void*
 h9_linux_dotfd(int fd)
 {
@@ -156,7 +181,7 @@ h9_linux_dotfd(int fd)
 	if((c->qid.type & QTDIR) == 0)
 		error(Enotdir);
 	d = namec(chanpath(c), Atodir, 0, 0);
-	if(d->type != c->type || d->dev != c->dev || d->qid.path != c->qid.path){
+	if(!samedir(d, c) && !mountedon(d, c)){
 		cclose(d);
 		error("directory moved");
 	}
@@ -292,52 +317,104 @@ h9_linux_fds(int *fds, int n)
 	return count;
 }
 
-static int
-haswait(void *a)
+typedef struct Wsleep Wsleep;
+struct Wsleep
 {
-	Hproc *h;
+	Hproc	*ph;
+	ulong	gen;
+};
 
-	h = a;
-	return h->waitq != nil || h->nchild == 0;
+static int
+waitchanged(void *a)
+{
+	Wsleep *x;
+
+	x = a;
+	return x->ph->wgen != x->gen;
+}
+
+static void
+unsleep(Hproc *ph, Hproc *h)
+{
+	Hproc **l;
+
+	for(l = &ph->wsleep; *l != nil; l = &(*l)->wnext)
+		if(*l == h){
+			*l = h->wnext;
+			break;
+		}
+	h->wnext = nil;
 }
 
 /*
- * await without blocking (block == 0): returns 0 when children are alive
- * but none has exited, as wait4's WNOHANG. With block set, it's await.
- * Fails with Enochild when there are no children, and is interrupted by
- * notes.
+ * await for the Linux personality: the wait record of the child `want`,
+ * or of any child when want <= 0. Without block, returns 0 when there are
+ * children but no such record yet, as wait4's WNOHANG. With peek, the
+ * record stays, as waitid's WNOWAIT. Fails with Enochild when no child
+ * could match, and is interrupted by notes.
+ *
+ * A Linux thread's children are its group leader's (RFLXTHREAD), so any
+ * thread waits on the leader's records: Go's os/exec waits for a child
+ * on whichever thread the goroutine runs on. Each waiter sleeps on its
+ * own Rendez, on the leader's wsleep list, since several threads can
+ * wait at once.
  */
 int
-h9_linux_await(char *buf, int n, int block)
+h9_linux_await(char *buf, int n, int block, long want, int peek)
 {
-	Hproc *h;
-	Hwait *w;
+	Hproc *h, *ph;
+	Hwait *w, **l, copy;
+	Wsleep x;
 	int len;
 
 	if(waserror())
 		return syserr();
 	h = h9_uphproc();
-	lock(&h->exl);
-	while(h->waitq == nil){
-		if(h->nchild == 0){
-			unlock(&h->exl);
+	ph = h->waiter != nil ? h->waiter : h;
+	lock(&ph->exl);
+	for(;;){
+		for(l = &ph->waitq; (w = *l) != nil; l = &w->next)
+			if(want <= 0 || w->pid == want)
+				break;
+		if(w != nil)
+			break;
+		if(ph->nchild == 0 || ph->dead){
+			unlock(&ph->exl);
 			error(Enochild);
 		}
-		unlock(&h->exl);
 		if(!block){
+			unlock(&ph->exl);
 			poperror();
 			return 0;
 		}
-		sleep(&h->waitr, haswait, h);
-		lock(&h->exl);
+		x.ph = ph;
+		x.gen = ph->wgen;
+		h->wnext = ph->wsleep;
+		ph->wsleep = h;
+		unlock(&ph->exl);
+		if(waserror()){
+			lock(&ph->exl);
+			unsleep(ph, h);
+			unlock(&ph->exl);
+			nexterror();
+		}
+		sleep(&h->lwaitr, waitchanged, &x);
+		poperror();
+		lock(&ph->exl);
+		unsleep(ph, h);
 	}
-	w = h->waitq;
-	h->waitq = w->next;
-	h->nwait--;
-	unlock(&h->exl);
+	if(peek){
+		copy = *w;
+		w = &copy;
+	}else{
+		*l = w->next;
+		ph->nwait--;
+	}
+	unlock(&ph->exl);
 	poperror();
 	len = snprint(buf, n, "%lud %lud %lud %lud %q", w->pid, w->time[0], w->time[1], w->time[2], w->msg);
-	free(w);
+	if(!peek)
+		free(w);
 	return len;
 }
 

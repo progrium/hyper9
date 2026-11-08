@@ -2108,7 +2108,8 @@ pub const Machine = struct {
         var flag: c_int = kern.RF.PROC;
         if (cl.flags & lsys.CLONE_FILES == 0) flag |= kern.RF.FDG;
         // A thread's exit leaves no wait record: the group's is the leader's.
-        if (thread) flag |= kern.RF.NOWAIT;
+        // Its children are the leader's too, for any thread to wait for.
+        if (thread) flag |= kern.RF.NOWAIT | kern.RF.LXTHREAD;
         const pid = c.pid;
         kern.fork(flag, pid, Proc, childMain, c) catch {
             c.dropLinux();

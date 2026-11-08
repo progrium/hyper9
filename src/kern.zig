@@ -395,6 +395,8 @@ pub const RF = struct {
     pub const PROC = 1 << 4;
     pub const MEM = 1 << 5;
     pub const NOWAIT = 1 << 6;
+    /// Not 9front's: a Linux thread, whose children are its group leader's (hproc.h).
+    pub const LXTHREAD = 1 << 30;
     pub const CNAMEG = 1 << 10;
     pub const CENVG = 1 << 11;
     pub const CFDG = 1 << 12;

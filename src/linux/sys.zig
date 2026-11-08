@@ -1437,9 +1437,13 @@ fn rw(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Dir) 
     };
     if (dir == .write and off == -1 and flagsOf(p, fd).append) _ = kern.seek(@intCast(fd), 0, 2) catch {};
     if (len == 0) {
+        // A real address: `&.{}` isn't one, and a host file's write(2)
+        // can fail an empty write with EFAULT for it (Go's os.WriteFile
+        // of nothing, which `go mod download` makes).
+        var none: [1]u8 = undefined;
         const n = switch (dir) {
-            .read => kern.pread(@intCast(fd), &.{}, off),
-            .write => kern.pwrite(@intCast(fd), &.{}, off),
+            .read => kern.pread(@intCast(fd), none[0..0], off),
+            .write => kern.pwrite(@intCast(fd), none[0..0], off),
         } catch return kerr();
         return @intCast(n);
     }
@@ -2611,27 +2615,33 @@ fn matches(p: *Process, want: i32, w: WaitRec) bool {
 /// A wait record, none yet (only without `block`), or no children at all.
 const Reaped = union(enum) { rec: WaitRec, none, nochild };
 
-fn reap(p: *Process, want: i32, block: bool) Err!Reaped {
+fn reap(p: *Process, want: i32, block: bool, peek: bool) Err!Reaped {
     for (p.waits.items, 0..) |w, i| if (matches(p, want, w)) {
-        return .{ .rec = p.waits.orderedRemove(i) };
+        return .{ .rec = if (peek) w else p.waits.orderedRemove(i) };
     };
     var buf: [kern.ERRMAX + 128]u8 = undefined;
     while (true) {
-        const n = kc.await(&buf, block) catch {
+        // The kernel picks a pid; a process group is matched here, and
+        // other records kept for a later wait.
+        const n = kc.await(&buf, block, want, peek and want > 0) catch {
             const e = kerr();
             if (e == -E.INTR) return error.Fault; // see wait4
             return .nochild;
         };
         if (n == 0) return .none;
         const w = parseWait(buf[0..n]) orelse continue;
+        if (peek and want > 0) return .{ .rec = w };
         countChild(p, w);
-        if (matches(p, want, w)) return .{ .rec = w };
+        if (matches(p, want, w)) {
+            if (peek) p.waits.append(p.gpa, w) catch return error.NoMem;
+            return .{ .rec = w };
+        }
         p.waits.append(p.gpa, w) catch return error.NoMem;
     }
 }
 
 fn wait4(p: *Process, pid: i32, status_va: u64, options: u32, ru_va: u64) Err!i64 {
-    const w = switch (reap(p, pid, options & WNOHANG == 0) catch |e| switch (e) {
+    const w = switch (reap(p, pid, options & WNOHANG == 0, false) catch |e| switch (e) {
         error.Fault => return -E.INTR,
         else => return e,
     }) {
@@ -2722,6 +2732,7 @@ fn waitid(p: *Process, idtype: u32, id: u32, info_va: u64, options: u32, ru_va: 
     const P_PGID = 2;
     const WEXITED = 4;
     const WNOHANG_ID = 1;
+    const WNOWAIT = 0x01000000;
     if (options & WEXITED == 0) return -E.INVAL;
     const want: i32 = switch (idtype) {
         P_ALL => -1,
@@ -2729,7 +2740,7 @@ fn waitid(p: *Process, idtype: u32, id: u32, info_va: u64, options: u32, ru_va: 
         P_PGID => if (id == 0) 0 else -@as(i32, @intCast(id)),
         else => return -E.INVAL,
     };
-    const w = switch (reap(p, want, options & WNOHANG_ID == 0) catch |e| switch (e) {
+    const w = switch (reap(p, want, options & WNOHANG_ID == 0, options & WNOWAIT != 0) catch |e| switch (e) {
         error.Fault => return -E.INTR,
         else => return e,
     }) {
