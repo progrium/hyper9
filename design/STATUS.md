@@ -39,6 +39,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [builtin-root](builtin-root.md) | draft |  | A built-in root |
 | [ci](ci.md) | draft |  | Continuous integration |
+| [cow-fork](cow-fork.md) | draft | needs linux-personality, linux-threads | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [credential-helpers](credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
 | [default-command](default-command.md) | draft |  | A default command from the root |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
@@ -90,6 +91,7 @@ flowchart LR
   p_browser_gfx["browser-gfx<br/>draft"]:::draft
   p_builtin_root["builtin-root<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
+  p_cow_fork["cow-fork<br/>draft"]:::draft
   p_credential_helpers["credential-helpers<br/>draft"]:::draft
   p_default_command["default-command<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
@@ -133,6 +135,8 @@ flowchart LR
   p_browser_host --> p_browser_gfx
   p_gfx --> p_browser_gfx
   p_multicall --> p_builtin_root
+  p_linux_personality --> p_cow_fork
+  p_linux_threads --> p_cow_fork
   p_websocket_9p --> p_credential_helpers
   p_dotl --> p_credential_helpers
   p_kvm --> p_host_sandbox
