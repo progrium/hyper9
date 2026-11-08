@@ -209,7 +209,7 @@ cross-compiles the other targets.
 
 ```sh
 zig-out/bin/h9 [h9-flags] [--] program [args...]
-zig-out/bin/h9 [h9-flags] --rc 'command' [args...]
+zig-out/bin/h9 [h9-flags] --rc ['command' [args...]]   # alone: a login rc, the root's default command
 zig-out/bin/h9 --version                  # version, pinned 9front and drawterm, backends and gfx built in
 zig-out/bin/h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] --check
 zig-out/bin/h9 --help                     # or -h alone
@@ -319,6 +319,8 @@ service. Guest connections don't use the host's proxies.
 Flags: `--backend auto|hvf|kvm|whp|emu`, `--arch arm64|amd64|386`, `--root DIR|DIAL|SOCKET|URL`, `--root-spec NAME`, `--root-user NAME`, `--root-header 'NAME: VALUE'|@FILE`, `--root-ca FILE`, `--root-contained`, `--cwd DIR`, `--env
 name=value` (repeatable), `--rc 'cmd'`, `--ns FILE`, `--trace[=FILE]`,
 `--dump-on-fault`, and the sandbox flags below. `--rc` runs `/bin/rc -c`.
+As the last argument, `--rc` alone runs a login rc, which sources the root's
+`/rc/lib/rcmain.local`, so a root sets its default command there.
 `--ns FILE` replays a namespace file in newns syntax (`bind`, `mount`,
 `unmount`, `cd`, `clear`) before the program runs; it's a guest path, so a
 relative one is in the guest's cwd, and `--print`'s namespace section can be

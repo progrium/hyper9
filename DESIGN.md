@@ -453,6 +453,7 @@ The CLI is a thin wrapper: it parses argv into `Machine.Options`, runs one machi
 ```
 h9 [h9-flags] [--] program [args...]
 h9 [h9-flags] --rc 'command line'
+h9 [h9-flags] --rc                  # login rc: the root's default command
 h9 [h9-flags] rc                    # interactive shell
 h9 [h9-flags]                       # no program: prints the usage to stderr, exit 2
 h9 --version | --check | --help      # tool functions; -h alone is --help
@@ -474,6 +475,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 
 A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
+| `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell (design/0081-default-command.md). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
 | `--ns file` | Runs `newns` with the file before the program |
 
 **Flags**

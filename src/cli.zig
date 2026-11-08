@@ -22,6 +22,7 @@ pub const usage =
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
+    \\       h9 [flags] --rc
     \\       h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] [--memory SIZE] --check
     \\       h9 --version
     \\       h9 --help
@@ -98,6 +99,10 @@ pub const Config = struct {
     print: bool = false,
     /// --rc: the command line for /bin/rc -c.
     rc: ?[]const u8 = null,
+    /// --rc as the last argument: a login rc, which runs the root's
+    /// /rc/lib/rcmain.local, its default command
+    /// (design/0081-default-command.md).
+    rc_login: bool = false,
     /// The program followed by its arguments; with --rc, the arguments
     /// that become $*.
     argv: []const []const u8,
@@ -235,7 +240,9 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (value(args, &i, "--ns")) |v| {
             c.ns = v orelse return error.Usage;
         } else if (value(args, &i, "--rc")) |v| {
-            c.rc = v orelse return error.Usage;
+            // With no value, --rc is the last argument: a login rc.
+            c.rc = v;
+            c.rc_login = v == null;
         } else {
             return error.Usage;
         }
@@ -250,9 +257,10 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         c.profile = .tight;
     }
     // The tool functions take no program, so `h9 --check ls` is a mistake.
+    const rc = c.rc != null or c.rc_login;
     if (c.mode != .run) {
-        if (c.rc != null or i < args.len) return error.Usage;
-    } else if (c.rc == null and i >= args.len) return error.Usage;
+        if (rc or i < args.len) return error.Usage;
+    } else if (!rc and i >= args.len) return error.Usage;
     c.env = try env.toOwnedSlice(gpa);
     c.readable = try readable.toOwnedSlice(gpa);
     c.writable = try writable.toOwnedSlice(gpa);
@@ -751,6 +759,30 @@ test "--sandbox and --rc" {
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--memory", "lots", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--timeout", "0", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--write", "maybe", "ls" }));
+}
+
+test "--rc alone is a login rc" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const login = try parse(a, &.{ "h9", "--root", "r", "--rc" });
+    try t.expect(login.rc_login);
+    try t.expectEqual(@as(?[]const u8, null), login.rc);
+    try t.expectEqual(@as(usize, 0), login.argv.len);
+    // --rc= is an empty command line, not a login rc.
+    const empty = try parse(a, &.{ "h9", "--rc=" });
+    try t.expect(!empty.rc_login);
+    try t.expectEqualStrings("", empty.rc.?);
+    // --rc takes the next argument as its value, wherever it is.
+    const flag_cmd = try parse(a, &.{ "h9", "--rc", "--root", "x" });
+    try t.expect(!flag_cmd.rc_login);
+    try t.expectEqualStrings("--root", flag_cmd.rc.?);
+    try t.expectEqualStrings("x", flag_cmd.argv[0]);
+    // The last --rc wins.
+    const last = try parse(a, &.{ "h9", "--rc", "ls", "--rc" });
+    try t.expect(last.rc_login);
+    try t.expectEqual(@as(?[]const u8, null), last.rc);
+    try t.expectError(error.Usage, parse(a, &.{ "h9", "--check", "--rc" }));
 }
 
 test "--no-guest-tools" {

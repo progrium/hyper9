@@ -377,6 +377,7 @@ Run it through rc instead, as `h9 rc script.rc`, or by its guest path,
 | `h9 ls`, `h9 aux/vga` | A program found through the machine's `$path`, which is `(. /bin)`: the current directory, then `/bin`. |
 | `h9 /bin/ls` | A path **inside the machine**. `/Users/me/prog` isn't a host path here; inside, your cwd is `/mnt/term/cwd`. |
 | `h9 --rc 'cmd'` | `/bin/rc -c 'cmd'` |
+| `h9 --rc` | A login rc, which runs the root's default command from `/rc/lib/rcmain.local` |
 
 On Windows, `.\hello` is a host path too. Chapter 20 has the complete rules.
 
@@ -1718,6 +1719,7 @@ hello, world
 ```text
 h9 [flags] [--] program [args...]
 h9 [flags] --rc 'command' [args...]
+h9 [flags] --rc
 h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] [--memory SIZE] --check
 h9 --version
 h9 --help          (or -h alone)
@@ -1769,6 +1771,7 @@ Machine:
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
 | `--rc 'command'` | Run an rc command line instead of a program |
+| `--rc` (last) | Run a login rc: the root's default command from `/rc/lib/rcmain.local`, then an interactive rc on a terminal, or commands from stdin otherwise |
 | `--ns FILE` | Replay a namespace file before running the program (chapter 24). `FILE` is a guest path; a relative one is in `/mnt/term/cwd`. |
 
 Files and sandbox (chapters 21 and 22):
