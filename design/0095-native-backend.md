@@ -2,7 +2,7 @@
 id: 95
 slug: native-backend
 title: Native backend
-status: accepted
+status: implemented
 created: 2026-11-08
 authors: [progrium]
 depends: []
@@ -125,3 +125,13 @@ So a guest gets no host filesystem, network or process access that the sandbox `
 - How long to spin before sleeping on the futex, and whether h9 should spin at all when the host has fewer CPUs than running guests. Bare-metal numbers are needed.
 - Whether auto should prefer native over the emulator from the start, or only after it has run the full suite in CI for a while.
 - Whether the empty namespaces are worth their setup cost per stub, given seccomp already confines it.
+
+## Updates
+
+- 2026-11-08: Choices made in the first implementation, on x86\_64:
+  - Linux threads ([linux-threads](0049-linux-threads.md)) landed before this, so a stub isn't one guest thread. It has a control thread that never runs guest code, and starts a thread for each vCPU that runs the space, so a Linux program's threads run in parallel. A vCPU goes back to the stub thread it last ran on while that one is free, which keeps the AVX state `Extra` doesn't carry with it. `AddressSpace.shootdown` has the control thread carry out the queued unmaps, and its host `munmap` shoots down the other threads' TLBs.
+  - Each stub thread has its own control page, signal stack, and FS base, and the handler finds its thread from the signal stack it runs on. The seccomp filter also lets through `clone` with exactly the thread flags, `gettid`, `sigaltstack`, and `prctl`, still only from the stub's range.
+  - The empty namespaces aren't used: the stub runs in its own session (so the terminal's signals go to h9 alone) with no file descriptors but the RAM file and its control pages, behind dispatch and the filter.
+  - CPUID can't be hidden, so guests see the host's AVX and AVX-512, unlike under KVM's shim.
+  - arm64 isn't built. It's step 7, and the arm64 Open issue still stands.
+  - "os/signal receives interrupt on Ctrl-C" fails in about 3% of runs on native, with the program hanging or crashing when the note lands just after a Go M's `rfork(RFMEM)`. It isn't root-caused yet.
