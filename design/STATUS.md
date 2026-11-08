@@ -13,7 +13,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [net-policy](0005-net-policy.md) | implemented |  | Outbound-only network by default, and --net-allow |
 | [ephemeral-writes](0006-ephemeral-writes.md) | implemented |  | Ephemeral writes and a private /tmp |
 | [go-compat](0007-go-compat.md) | implemented |  | Go compatibility |
-| [devsrv](0008-devsrv.md) | implemented |  | devsrv, /srv and mount |
+| [devsrv](0008-devsrv.md) | implemented |  | devsrv, /srv, and mount |
 | [i386](0009-i386.md) | implemented |  | 386 binaries |
 | [self-host](0010-self-host.md) | implemented |  | Self-hosting |
 | [overlay](0011-overlay.md) | implemented |  | Copy-on-write overlay as the root's default |
