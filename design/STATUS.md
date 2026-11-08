@@ -23,7 +23,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
 | [kvm](0016-kvm.md) | accepted | ready | KVM backend |
 | [whp](0017-whp.md) | draft | needs kvm | WHP backend |
-| [linux-personality](0018-linux-personality.md) | draft |  | Linux personality |
+| [linux-personality](0018-linux-personality.md) | implemented |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
 | [dotl](0022-dotl.md) | draft | needs serve | 9P2000.L and ZeroFS |
@@ -31,8 +31,8 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [exit-status](0033-exit-status.md) | implemented |  | Host exit statuses for processes killed by notes |
 | [symlinks-in-root](0034-symlinks-in-root.md) | implemented |  | Symlinks resolved inside a bound tree |
 | [serve](0035-serve.md) | draft |  | Serving the namespace over 9P |
-| [linux-threads](0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
-| [linux-net](0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
+| [linux-threads](0049-linux-threads.md) | implemented |  | Linux threads |
+| [linux-net](0050-linux-net.md) | implemented |  | Linux readiness and sockets |
 | [multicall](0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
 | [schemeless-roots](0076-schemeless-roots.md) | implemented |  | Schemeless roots |
 | [default-command](0081-default-command.md) | implemented |  | A default command from the root |
@@ -42,7 +42,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [ci](ci.md) | draft |  | Continuous integration |
-| [cow-fork](cow-fork.md) | draft | needs linux-personality, linux-threads | Copy-on-write fork and demand-loaded file pages for Linux processes |
+| [cow-fork](cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [credential-helpers](credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
@@ -50,7 +50,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [host-sandbox](host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](host-srv.md) | draft |  | Posting host connections to /srv |
-| [linux-i386](linux-i386.md) | draft | needs linux-personality, linux-threads, linux-net | 32-bit x86 Linux programs |
+| [linux-i386](linux-i386.md) | accepted | ready | 32-bit x86 Linux programs |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
 
@@ -77,7 +77,7 @@ flowchart LR
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
   p_kvm["#35;16 kvm<br/>accepted"]:::accepted
   p_whp["#35;17 whp<br/>draft"]:::draft
-  p_linux_personality["#35;18 linux-personality<br/>draft"]:::draft
+  p_linux_personality["#35;18 linux-personality<br/>implemented"]:::implemented
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
   p_websocket_9p["#35;21 websocket-9p<br/>implemented"]:::implemented
   p_dotl["#35;22 dotl<br/>draft"]:::draft
@@ -85,8 +85,8 @@ flowchart LR
   p_exit_status["#35;33 exit-status<br/>implemented"]:::implemented
   p_symlinks_in_root["#35;34 symlinks-in-root<br/>implemented"]:::implemented
   p_serve["#35;35 serve<br/>draft"]:::draft
-  p_linux_threads["#35;49 linux-threads<br/>draft"]:::draft
-  p_linux_net["#35;50 linux-net<br/>draft"]:::draft
+  p_linux_threads["#35;49 linux-threads<br/>implemented"]:::implemented
+  p_linux_net["#35;50 linux-net<br/>implemented"]:::implemented
   p_multicall["#35;64 multicall<br/>implemented"]:::implemented
   p_schemeless_roots["#35;76 schemeless-roots<br/>implemented"]:::implemented
   p_default_command["#35;81 default-command<br/>implemented"]:::implemented
@@ -104,7 +104,7 @@ flowchart LR
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
-  p_linux_i386["linux-i386<br/>draft"]:::draft
+  p_linux_i386["linux-i386<br/>accepted"]:::accepted
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
   p_semaphores --> p_go_compat
