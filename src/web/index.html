@@ -79,9 +79,17 @@ if (!haveJSPI) {
   };
   const interrupt = () => { m.interrupt(); if (!raw) { line = ''; print('\n'); } };
   document.getElementById('intr').onclick = () => { interrupt(); kbd.focus(); };
-  term.addEventListener('focus', () => kbd.focus());
-  term.addEventListener('click', () => { if (!getSelection()?.toString()) kbd.focus(); });
-  kbd.addEventListener('keydown', (e) => {
+  // A click gives the keyboard to the input, unless it made a selection,
+  // which stays so it can be copied. (Moving focus on mousedown would clear
+  // it.) Typing with the terminal focused goes to the input, except a copy.
+  const selected = () => !!getSelection()?.toString();
+  term.addEventListener('click', () => { if (!selected()) kbd.focus(); });
+  term.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && selected()) return;
+    kbd.focus();
+    onKey(e);
+  });
+  const onKey = (e) => {
     if (e.metaKey || e.isComposing || (e.ctrlKey && e.key === 'v')) return;
     let s = null;
     if (e.ctrlKey && e.key.length === 1) {
@@ -99,7 +107,8 @@ if (!haveJSPI) {
     if (s === null) return;
     e.preventDefault();
     send(s);
-  });
+  };
+  kbd.addEventListener('keydown', onKey);
   // On-screen keyboards insert text rather than sending keys. The textarea
   // keeps one space, so a backspace has something to delete and shows up
   // as a shorter value; what's typed is whatever follows the space. Text

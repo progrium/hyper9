@@ -45,7 +45,10 @@ const host = {
 
 async function start({ argv, env = {}, root }) {
   const fetchBytes = async (url) => {
-    const r = await fetch(url);
+    // Revalidated, not taken from the HTTP cache unchecked: GitHub Pages
+    // lets browsers cache for 10 minutes, and a stale h9.wasm with a new
+    // page or archive fails in confusing ways.
+    const r = await fetch(url, { cache: 'no-cache' });
     if (!r.ok) throw new Error(`${url}: ${r.status} ${r.statusText}`);
     return new Uint8Array(await r.arrayBuffer());
   };

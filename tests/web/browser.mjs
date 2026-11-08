@@ -111,6 +111,18 @@ try {
       await page.keyboard.type(`seq 3 | jq -s add; echo 'select 6*7;' | sqlite3\n`);
       await expect(/6\n42\n.*# $/, at);
     });
+    await step('dragging over the terminal selects its text, and typing still works', async () => {
+      const box = await term.boundingBox();
+      await page.mouse.move(box.x + 20, box.y + 15);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 300, box.y + 60, { steps: 10 });
+      await page.mouse.up();
+      const sel = await page.evaluate(() => getSelection().toString());
+      if (!sel) throw new Error('nothing selected');
+      const at = (await text()).length;
+      await page.keyboard.type('echo typed\n');
+      await expect(/typed\n.*# $/, at);
+    });
     if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
   }
 
