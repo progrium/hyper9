@@ -22,7 +22,7 @@
 </style>
 </head>
 <body>
-<header>h9: 9front's 386 programs on v86, in a Web Worker. Type to rc; <button id="intr">interrupt</button> or Ctrl-C stops a command.</header>
+<header><span id="about">h9: 9front's 386 programs on v86, in a Web Worker. Type to rc;</span> <button id="intr">interrupt</button> or Ctrl-C stops a command.</header>
 <pre id="term" tabindex="-1" aria-hidden="true"></pre>
 <textarea id="kbd" aria-label="terminal input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
 <script type="module">
@@ -54,9 +54,14 @@ const print = (s) => {
 if (!haveJSPI) {
   print('This browser lacks JavaScript Promise Integration, which h9 needs (Chrome 137 or later).\n');
 } else {
-  // ?root=ws://host/9p runs over a 9P server instead of root.h9a.
+  // ?root=ws://host/9p runs over a 9P server instead of root.h9a, and
+  // ?linux runs Alpine's 386 busybox sh over linux.h9a, a Linux root
+  // (design/0018-linux-personality.md).
+  const params = new URLSearchParams(location.search);
+  const linux = params.has('linux');
+  if (linux) document.getElementById('about').textContent = "h9: Alpine Linux's 386 programs on v86, in a Web Worker. Type to busybox sh;";
   const m = await createMachine({
-    root: new URLSearchParams(location.search).get('root') ?? undefined,
+    root: linux ? 'linux.h9a' : params.get('root') ?? undefined,
     terminal: { write: (b) => print(dec.decode(b, { stream: true })), setRaw: (on) => { raw = on; render(); } },
   });
   const kbd = document.getElementById('kbd');
@@ -124,7 +129,10 @@ if (!haveJSPI) {
   reset();
   kbd.focus();
   render();
-  const code = await m.run(['rc', '-i']).catch((e) => { print(`\n${e.message}\n`); return null; });
+  // The archive keeps no links, so busybox makes its applets' links at
+  // the start, in the root's overlay.
+  const argv = linux ? ['/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
+  const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
   if (code !== null) print(`\n[h9 exited ${code}]\n`);
 }
 </script>

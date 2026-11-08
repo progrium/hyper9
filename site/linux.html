@@ -14,6 +14,7 @@
   .nav { text-align: center; }
   abbr { text-decoration: none; border-bottom: 1px dotted; cursor: help; }
   pre { margin-left: 2em; overflow-x: auto; }
+  iframe { width: 100%; height: 26em; border: 1px solid #888; }
 </style>
 </head>
 <body>
@@ -21,6 +22,7 @@
 <p class="nav">[
 <a href="./">h9</a> |
 <a href="#about">about</a> |
+<a href="#demo">demo</a> |
 <a href="#trying">trying it</a> |
 <a href="#runs">what runs</a> |
 <a href="#how">how it works</a> |
@@ -57,6 +59,29 @@ on the host's hypervisor, as 9front processes do,
 or on h9's emulator where there is none.
 </p>
 
+<h2 id="demo">Demo</h2>
+
+<p>
+Below is h9's browser host running Alpine Linux's own 386 binaries:
+busybox's shell, jq, and sqlite3, unchanged, on
+<a href="https://github.com/copy/v86">v86</a> in a Web Worker,
+with a small Linux root loaded into memory.
+Try <tt>uname -a</tt>, <tt>ps</tt>, <tt>ls /proc</tt>,
+<tt>seq 5 | jq -s add</tt>, or
+<tt>echo 'select sqlite_version();' | sqlite3</tt>.
+It needs JavaScript Promise Integration, which Chrome and Edge have from version 137.
+The demo can also be <a href="demo/?linux">opened on its own page</a>.
+</p>
+
+<iframe src="demo/?linux" title="h9 running Alpine Linux's busybox sh in the browser"></iframe>
+
+<p>
+The browser has no amd64 or arm64 CPU to run on,
+so this uses the Linux personality's 32-bit x86 support
+(<a href="https://github.com/progrium/hyper9/blob/main/design/linux-i386.md">linux-i386</a>),
+the same syscall table decoded for <tt>int 0x80</tt>.
+</p>
+
 <h2 id="trying">Trying it</h2>
 
 <p>
@@ -83,7 +108,7 @@ into <tt>.local/linux</tt>.
 <h2 id="runs">What runs</h2>
 
 <p>
-Static and dynamic programs, for arm64 and amd64,
+Static and dynamic programs, for arm64 and amd64, and 386 on the emulator and in the browser,
 with threads, sockets, and signals.
 Each of these has been run in h9, most of them from Alpine's packages:
 </p>

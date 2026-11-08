@@ -1,0 +1,37 @@
+# The browser host's Linux root archive (design/0018-linux-personality.md,
+# design/linux-i386.md): the paths, relative to the 386 Alpine root that
+# `scripts/fetch.sh alpine386web` makes, that `zig build web` packs into
+# zig-out/web/linux.h9a for the demo page's ?linux mode. A path ending in
+# / is an empty directory. tools/webroot.zig copies files rather than
+# links, so busybox's applets are made by the page at start.
+
+# Mount points the Linux view binds over, and where busybox --install
+# puts its links.
+dev/
+proc/
+sys/
+tmp/
+9/
+mnt/term/cwd/
+root/
+sbin/
+usr/sbin/
+
+etc/os-release
+etc/passwd
+etc/group
+
+# musl and busybox.
+lib/ld-musl-i386.so.1
+lib/libc.musl-x86.so.1
+bin/busybox
+
+# jq.
+usr/bin/jq
+usr/lib/libjq.so.1
+usr/lib/libonig.so.5
+
+# sqlite3.
+usr/bin/sqlite3
+usr/lib/libreadline.so.8
+usr/lib/libncursesw.so.6

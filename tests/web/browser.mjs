@@ -4,7 +4,7 @@
 //     node tests/web/browser.mjs [zig-out/web]
 //
 // Needs Playwright with Chromium, and `zig build web` with a 386 root for
-// root.h9a. With H9_TEST_WS_ROOT=ws://..., it also runs over that 9P
+// root.h9a. With linux.h9a, it also runs the page's ?linux mode. With H9_TEST_WS_ROOT=ws://..., it also runs over that 9P
 // server.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -94,6 +94,25 @@ try {
     await expect(/echo hello\nhello\n% $/, at);
   });
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
+
+  // With linux.h9a, ?linux runs Alpine's 386 busybox sh, jq and sqlite3
+  // (design/linux-i386.md).
+  if (await readFile(path.join(dir, 'linux.h9a')).then(() => true, () => false)) {
+    await page.goto(`${url}?linux`);
+    await step('busybox sh prompts over linux.h9a', () => expect(/# $/, 0, 60_000));
+    await term.focus();
+    await step('uname -m says i686', async () => {
+      const at = (await text()).length;
+      await page.keyboard.type('uname -m\n');
+      await expect(/i686\n.*# $/, at);
+    });
+    await step('jq and sqlite3 run', async () => {
+      const at = (await text()).length;
+      await page.keyboard.type(`seq 3 | jq -s add; echo 'select 6*7;' | sqlite3\n`);
+      await expect(/6\n42\n.*# $/, at);
+    });
+    if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
+  }
 
   // With H9_TEST_WS_ROOT, a ws:// URL of a 9P server serving a 386 root,
   // the page runs over it (design/0021-websocket-9p.md).
