@@ -38,6 +38,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [default-command](0081-default-command.md) | implemented |  | A default command from the root |
 | [builtin-root](0087-builtin-root.md) | implemented |  | A built-in root |
 | [login-shell](0089-login-shell.md) | draft | needs host-cmd | h9 as a login shell |
+| [native-backend](0095-native-backend.md) | implemented |  | Native backend |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [ci](ci.md) | draft |  | Continuous integration |
@@ -50,7 +51,6 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [host-scripts](host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](host-srv.md) | draft |  | Posting host connections to /srv |
 | [linux-i386](linux-i386.md) | draft | needs linux-personality, linux-threads, linux-net | 32-bit x86 Linux programs |
-| [native-backend](native-backend.md) | draft |  | Native backend |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
 
@@ -92,6 +92,7 @@ flowchart LR
   p_default_command["#35;81 default-command<br/>implemented"]:::implemented
   p_builtin_root["#35;87 builtin-root<br/>implemented"]:::implemented
   p_login_shell["#35;89 login-shell<br/>draft"]:::draft
+  p_native_backend["#35;95 native-backend<br/>implemented"]:::implemented
   p_audio["audio<br/>draft"]:::draft
   p_browser_gfx["browser-gfx<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
@@ -104,7 +105,6 @@ flowchart LR
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
   p_linux_i386["linux-i386<br/>draft"]:::draft
-  p_native_backend["native-backend<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
   p_semaphores --> p_go_compat
