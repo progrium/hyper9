@@ -39,4 +39,6 @@ zig build kern
 zig build design -- check
 ```
 
+`zig build test` runs the unit and backend tests, and `zig build integration` runs the integration cases. They don't overlap, so `zig build test integration` runs both, each once.
+
 The README documents setup, including `scripts/env.sh` and `scripts/fetch.sh`.
