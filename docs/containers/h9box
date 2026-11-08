@@ -1,7 +1,8 @@
 #!/bin/sh
 # h9box: a small docker-like CLI over h9, built in docs/containers.md,
-# section 17. Images are root trees in $H9BOX/images (default ~/.h9box).
+# section 18. Images are root trees in $H9BOX/images (default ~/.h9box).
 #
+#   h9box pull REF [NAME]              pull a Linux image from Docker Hub
 #   h9box build NAME [DIR]             build DIR/Boxfile into the image NAME
 #   h9box run [OPTS] IMAGE [CMD...]    run a machine from an image
 #   h9box inspect [OPTS] IMAGE [CMD...] print the plan run would use
@@ -10,24 +11,25 @@
 #   h9box rm NAME...                   remove images
 #   h9box save NAME >FILE.tgz          write an image as a tarball
 #   h9box load NAME <FILE.tgz          read one back
-#   h9box serve NAME [PORT]            serve an image over 9P on 127.0.0.1
+#   h9box serve NAME [PORT]            serve a 9front image over 9P on 127.0.0.1
 #
 # run options: -e NAME=VALUE, -v PATH (share read-write), -r PATH (share
-# read-only), -p (allow listening on host ports), -w (a writable root,
-# thrown away at exit), and any h9 flag written as --flag or --flag=value.
-# IMAGE is a name, or a dial string (tcp!host!port) or ws:// URL that
-# serves one.
+# read-only), -p (allow listening on host ports), --read-only (no writes to
+# the root, even in memory), and any h9 flag written as --flag or
+# --flag=value. IMAGE is a name, or a dial string (tcp!host!port) or
+# ws:// URL that serves a 9front image.
 #
 # Boxfile instructions, one per line, # for comments:
-#   FROM scratch|9front|IMAGE
+#   FROM scratch|9front|IMAGE|REF  REF is pulled from Docker Hub if no image has that name
 #   COPY SRC DEST                  from the build directory
 #   COPY --from=IMAGE SRC DEST     from another image
 #   COPY --from=9front PROGRAM...  9front programs from $H9ROOT, with rcmain
-#   RUN rc-command                 run in the image, writing to it
-#   BIND [-abc] NEW OLD            a namespace line: a layer
-#   WORKDIR DIR                    the directory to start in
+#   RUN command                    run in the image, writing to it: rc, or sh in a Linux image
+#   BIND [-abc] NEW OLD            a namespace line: a layer (9front images)
+#   WORKDIR DIR                    the directory to start in (9front images)
 #   ENV NAME=VALUE                 a default for the environment
-#   CMD PROGRAM [ARGS...]          what run runs with no command
+#   CMD PROGRAM [ARGS...]          what run runs with no command; or a JSON array,
+#                                  CMD ["sh", "-c", "echo $X"], for arguments with spaces
 set -eu
 
 BOX=${H9BOX:-$HOME/.h9box}
@@ -45,6 +47,14 @@ rootof() {
 	if remote "$1"; then echo "$1"; return; fi
 	[ -d "$(image "$1")" ] || die "no image $1"
 	image "$1"
+}
+
+# linux DIR: is the tree a Linux root? h9 asks the same questions.
+linux() {
+	[ ! -d "$1/rc/bin" ] && [ ! -d "$1/$ARCH/bin" ] && {
+		[ -f "$1/etc/os-release" ] || [ -f "$1/usr/lib/os-release" ] ||
+			ls "$1"/lib/ld-* >/dev/null 2>&1
+	}
 }
 
 # clone SRC DST: copy a tree, sharing blocks where the file system can
@@ -71,19 +81,77 @@ config() {
 h9run() (
 	root=$1
 	shift
+	ns=--ns$nl/box/ns
+	remote "$root" || ! linux "$root" || ns=
 	IFS=$nl
 	set -f
-	exec "$H9" --root "$root" --ns /box/ns \
+	exec "$H9" --root "$root" $ns \
 		$(config "$root" env | while IFS= read -r kv; do printf -- '--env\n%s\n' "$kv"; done) \
 		"$@"
 )
+
+# registry REPO PATH [ACCEPT]: a GET from Docker Hub's registry
+registry() {
+	curl -fsSL -H "Authorization: Bearer $token" -H "Accept: ${3:-*/*}" \
+		"https://registry-1.docker.io/v2/$1/$2"
+}
+
+# pull DIR REF: a Linux image from Docker Hub, its layers applied in order
+pull() {
+	command -v jq >/dev/null || die "pull needs jq"
+	ref=$2
+	case $ref in */*) ;; *) ref=library/$ref ;; esac
+	case $ref in *:*) repo=${ref%:*} tag=${ref##*:} ;; *) repo=$ref tag=latest ;; esac
+	token=$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$repo:pull" | jq -r .token)
+	index='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json'
+	single='application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+	m=$(registry "$repo" "manifests/$tag" "$index,$single")
+	if [ "$(echo "$m" | jq 'has("manifests")')" = true ]; then
+		d=$(echo "$m" | jq -r --arg a "$ARCH" \
+			'[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a)][0].digest')
+		[ "$d" != null ] || die "pull: $2 has no linux/$ARCH image"
+		m=$(registry "$repo" "manifests/$d" "$single")
+	fi
+	mkdir -p "$1/box"
+	for layer in $(echo "$m" | jq -r '.layers[].digest'); do
+		echo "pull: $repo $layer" >&2
+		registry "$repo" "blobs/$layer" >"$1.tgz"
+		apply "$1" "$1.tgz"
+	done
+	rm -f "$1.tgz"
+	c=$(registry "$repo" "blobs/$(echo "$m" | jq -r .config.digest)")
+	echo "$c" | jq -r '.config.Env // [] | .[]' >"$1/box/env"
+	echo "$c" | jq -r '(.config.Entrypoint // []) + (.config.Cmd // []) | .[]' >"$1/box/cmd"
+	touch "$1/box/ns"
+}
+
+# apply DIR LAYER.tgz: unpack a layer over a tree, honoring its whiteouts
+apply() {
+	l=$1.layer
+	rm -rf "$l" && mkdir -p "$l"
+	tar -xzf "$2" -C "$l"
+	find "$l" -name .wh..wh..opq | while IFS= read -r f; do
+		d=$1${f#"$l"}
+		find "${d%/*}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+		rm -f "$f"
+	done
+	find "$l" -name '.wh.*' | while IFS= read -r f; do
+		r=${f#"$l"}
+		rm -rf "$1${r%/*}/${r##*/.wh.}" "$f"
+	done
+	(cd "$l" && tar -cf - .) | (cd "$1" && tar -xpf -)
+	rm -rf "$l"
+}
 
 # from DIR SOURCE: start an image
 from() {
 	case $2 in
 	scratch) ;;
 	9front) clone "${H9ROOT:?set H9ROOT to the full root tree}" "$1" ;;
-	*) clone "$(rootof "$2")" "$1" ;;
+	*)
+		if [ -d "$(image "$2")" ]; then clone "$(image "$2")" "$1"; else pull "$1" "$2"; fi
+		linux "$1" && return
+		;;
 	esac
 	for d in dev bin env proc fd srv net tmp mnt/term/cwd "$ARCH/bin" box; do
 		mkdir -p "$1/$d"
@@ -133,12 +201,21 @@ build() {
 			;;
 		RUN)
 			echo "RUN $args" >&2
-			h9run "$new" --writable "$new" --cwd "$dir" --rc "$args" </dev/null
+			if linux "$new"; then
+				h9run "$new" --writable "$new" --cwd "$dir" /bin/sh -c "$args" </dev/null
+			else
+				h9run "$new" --writable "$new" --cwd "$dir" --rc "$args" </dev/null
+			fi
 			;;
 		BIND) echo "bind $args" >>"$new/box/ns" ;;
 		WORKDIR) echo "cd $args" >>"$new/box/ns" ;;
 		ENV) echo "$args" >>"$new/box/env" ;;
-		CMD) printf '%s\n' $args >"$new/box/cmd" ;;
+		CMD)
+			case $args in
+			\[*) echo "$args" | jq -r '.[]' >"$new/box/cmd" ;;
+			*) printf '%s\n' $args >"$new/box/cmd" ;;
+			esac
+			;;
 		*) die "Boxfile: unknown instruction $op" ;;
 		esac
 	done <"$dir/Boxfile"
@@ -156,7 +233,7 @@ run() (
 		-v) flags=$flags--writable$nl$2$nl; shift 2 ;;
 		-r) flags=$flags--readable$nl$2$nl; shift 2 ;;
 		-p) flags=$flags--net=enable$nl; shift ;;
-		-w) w=1; shift ;;
+		--read-only) flags=$flags--write=scope$nl; shift ;;
 		--*) flags=$flags$1$nl; shift ;;
 		*) break ;;
 		esac
@@ -164,10 +241,6 @@ run() (
 	[ $# -gt 0 ] || die "run: no image"
 	root=$(rootof "$1")
 	shift
-	if [ -n "${w-}" ]; then
-		remote "$root" && die "run: -w needs a local image"
-		flags=$flags--writable$nl$root$nl--write=ephemeral$nl
-	fi
 	IFS=$nl
 	set -f
 	[ $# -gt 0 ] || set -- $(config "$root" cmd)
@@ -177,6 +250,7 @@ run() (
 
 serve() {
 	[ -d "$(image "$1")" ] || die "serve: no image $1"
+	linux "$(image "$1")" && die "serve: $1 is a Linux image, which h9 runs only from a local directory"
 	port=${2:-5640}
 	echo "h9box: serving $1 at tcp!127.0.0.1!$port" >&2
 	cd "$BOX/images"
@@ -184,10 +258,19 @@ serve() {
 		aux/listen1 -t "tcp!127.0.0.1!$port" /bin/exportfs -R -r "/mnt/term/cwd/$1"
 }
 
-[ $# -gt 0 ] || die "usage: h9box build|run|inspect|images|tag|rm|save|load|serve ..."
+[ $# -gt 0 ] || die "usage: h9box pull|build|run|inspect|images|tag|rm|save|load|serve ..."
 cmd=$1
 shift
 case $cmd in
+pull)
+	[ $# -ge 1 ] || die "usage: h9box pull REF [NAME]"
+	name=${2:-$(echo "${1%:*}" | tr / -)}
+	new=$(image "$name").new
+	rm -rf "$new" && mkdir -p "$new"
+	pull "$new" "$1"
+	rm -rf "$(image "$name")" && mv "$new" "$(image "$name")"
+	echo "$name"
+	;;
 build) [ $# -ge 1 ] || die "usage: h9box build NAME [DIR]"; build "$@" ;;
 run) run "$@" ;;
 inspect) run --print "$@" ;;
