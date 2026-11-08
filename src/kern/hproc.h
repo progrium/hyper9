@@ -92,6 +92,7 @@ struct Hproc
 	int	hang;		/* ctl hang: exec stops the process before it runs */
 	int	killed;		/* ctl kill: die with "Killed" at the next delivery; under nlk */
 	char	exitstr[ERRMAX];
+	ulong	cputime[2];	/* user and sys ms for the wait record, set by the Linux personality */
 	void	*egrp;		/* devenv.c's HEgrp */
 	void	*aux;		/* the Zig process */
 	Hmach	*mach;

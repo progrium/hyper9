@@ -11,7 +11,8 @@
 //! always makes progress.
 //!
 //! `--cpus` caps how many vCPUs run guest code at the same moment, owned
-//! or pooled, on every backend: a process waits for a slot before each run.
+//! or pooled, on every backend: a process waits for a slot before each run,
+//! in ticket order, and a waiter kicks the longest run after a slice.
 //!
 //! On the emulator there's no vCPU limit (each engine is host memory), so
 //! every process owns one.
@@ -24,6 +25,10 @@ const web = @import("web.zig");
 /// can't own one.
 pub const reserve: u32 = 8;
 
+/// How long a run waiting for a `--cpus` slot waits for one to come free
+/// before it kicks the runs in progress.
+const slice_ns = 5 * std.time.ns_per_ms;
+
 pub const Pool = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -34,17 +39,29 @@ pub const Pool = struct {
     /// Guards the counts and the queue below.
     lock: std.atomic.Mutex = .unlocked,
     owned: u32 = 0,
-    /// Cap on vCPUs running guest code at once (`--cpus`), and how many do.
+    /// Cap on vCPUs running guest code at once (`--cpus`). Slots go in
+    /// ticket order: a run with ticket `t` may start once `t < run_seq +
+    /// cap`, so a run that ends and starts again waits behind the others.
     cpus: ?u32,
-    running: u32 = 0,
+    next_ticket: std.atomic.Value(u32) = .init(0),
     /// Bumped on every release of a running slot, to wake waiters.
     run_seq: std.atomic.Value(u32) = .init(0),
+    /// The leases running under the cap, which a waiter whose slice is up
+    /// kicks, so guest code that never makes a kernel call (a spinning
+    /// goroutine) can't keep the others out. Guarded by `lock`.
+    runners: std.ArrayList(Runner) = .empty,
     /// Work for pool threads; `work_seq` is bumped on each push.
     queue: std.ArrayList(*Lease) = .empty,
     work_seq: std.atomic.Value(u32) = .init(0),
     workers: std.ArrayList(web.Thread) = .empty,
     worker_count: u32 = 0,
     stopping: std.atomic.Value(bool) = .init(false),
+
+    const Runner = struct { l: *Lease, since_ns: i96 };
+
+    fn nowNs(p: *Pool) i96 {
+        return std.Io.Timestamp.now(p.io, .awake).toNanoseconds();
+    }
 
     /// `own_limit`, if given, overrides how many vCPUs processes may own
     /// (for tests of the pool).
@@ -67,6 +84,7 @@ pub const Pool = struct {
         for (p.workers.items) |t| t.join();
         p.workers.deinit(p.gpa);
         p.queue.deinit(p.gpa);
+        p.runners.deinit(p.gpa);
     }
 
     fn lockSpin(p: *Pool) void {
@@ -114,29 +132,53 @@ pub const Pool = struct {
         }
     }
 
-    /// Waits for a running slot under `--cpus`.
-    fn enter(p: *Pool) void {
+    /// Waits for a running slot under `--cpus`. A waiter that sees no run
+    /// end for a whole slice kicks the runs in progress, which end with
+    /// `.interrupted` and queue again.
+    fn enter(p: *Pool, l: *Lease) void {
         const cap = p.cpus orelse return;
+        const ticket = p.next_ticket.fetchAdd(1, .acq_rel);
         while (true) {
             const seq = p.run_seq.load(.acquire);
+            // Ahead of `seq` by less than the cap; at or behind it once
+            // later tickets ran while this one was waking.
+            if (@as(i32, @bitCast(ticket -% seq)) < @as(i32, @intCast(cap))) break;
+            p.io.futexWaitTimeout(u32, &p.run_seq.raw, seq, .{ .duration = .{ .raw = .fromNanoseconds(slice_ns), .clock = .awake } }) catch {};
+            if (p.run_seq.load(.acquire) != seq) continue;
+            // Kick the run that has had its slot longest, if that's a whole
+            // slice; it counts from now, so other waiters kick another.
+            const now = p.nowNs();
             p.lockSpin();
-            if (p.running < cap) {
-                p.running += 1;
-                p.lock.unlock();
-                return;
+            defer p.lock.unlock();
+            var oldest: ?*Runner = null;
+            for (p.runners.items) |*r| {
+                if (oldest == null or r.since_ns < oldest.?.since_ns) oldest = r;
             }
-            p.lock.unlock();
-            p.io.futexWaitUncancelable(u32, &p.run_seq.raw, seq);
+            if (oldest) |r| if (now - r.since_ns >= slice_ns) {
+                r.since_ns = now;
+                r.l.kick();
+            };
         }
+        const now = p.nowNs();
+        p.lockSpin();
+        defer p.lock.unlock();
+        // On no memory the run goes unlisted: it can't be time-sliced,
+        // which only delays the others.
+        p.runners.append(p.gpa, .{ .l = l, .since_ns = now }) catch {};
     }
 
-    fn leave(p: *Pool) void {
+    fn leave(p: *Pool, l: *Lease) void {
         if (p.cpus == null) return;
-        p.lockSpin();
-        p.running -= 1;
-        p.lock.unlock();
+        {
+            p.lockSpin();
+            defer p.lock.unlock();
+            for (p.runners.items, 0..) |r, i| if (r.l == l) {
+                _ = p.runners.swapRemove(i);
+                break;
+            };
+        }
         _ = p.run_seq.fetchAdd(1, .release);
-        p.io.futexWake(u32, &p.run_seq.raw, 1);
+        p.io.futexWake(u32, &p.run_seq.raw, std.math.maxInt(u32));
     }
 
     fn worker(p: *Pool) void {
@@ -234,8 +276,8 @@ pub const Lease = struct {
     /// Runs the guest until its next exit.
     pub fn run(l: *Lease) vmm.Error!vmm.Exit {
         const p = l.pool;
-        p.enter();
-        defer p.leave();
+        p.enter(l);
+        defer p.leave(l);
         if (l.owned) {
             if (l.extra_dirty) {
                 try l.vcpu.setExtra(&l.extra);

@@ -1,0 +1,511 @@
+/* Readiness and sockets (design/0050-linux-net.md): each case named on
+ * the command line prints "ok NAME" or "FAIL NAME: why". "all" runs the
+ * ones that need no network; the socket cases need --net=enable. */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <signal.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static int failed;
+
+#define CHECK(name, cond) do { if (!(cond)) { printf("FAIL %s: %s (errno %d %s)\n", name, #cond, errno, strerror(errno)); failed = 1; return; } } while (0)
+
+static long ms_since(struct timespec *t0) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+static void poll_pipe(void) {
+	int p[2];
+	CHECK("poll_pipe", pipe(p) == 0);
+	struct pollfd f = {p[0], POLLIN, 0};
+	CHECK("poll_pipe", poll(&f, 1, 0) == 0);
+	pid_t c = fork();
+	if (c == 0) { usleep(100000); write(p[1], "x", 1); _exit(0); }
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	CHECK("poll_pipe", poll(&f, 1, 5000) == 1 && (f.revents & POLLIN));
+	CHECK("poll_pipe", ms_since(&t0) < 4000);
+	waitpid(c, 0, 0);
+	close(p[1]);
+	char b;
+	read(p[0], &b, 1);
+	CHECK("poll_pipe", poll(&f, 1, 1000) == 1 && (f.revents & POLLHUP));
+	/* select sees it the same way */
+	close(p[0]);
+	printf("ok poll_pipe\n");
+}
+
+/* readv from a pipe returns what's there, not waiting to fill the
+ * second buffer once the first is full (Zig's test runner). */
+static void readv_pipe(void) {
+	int p[2];
+	CHECK("readv_pipe", pipe(p) == 0);
+	CHECK("readv_pipe", write(p[1], "12345678", 8) == 8);
+	char a[8], b[64];
+	struct iovec v[2] = {{a, sizeof a}, {b, sizeof b}};
+	alarm(10);
+	CHECK("readv_pipe", readv(p[0], v, 2) == 8 && memcmp(a, "12345678", 8) == 0);
+	alarm(0);
+	close(p[0]);
+	close(p[1]);
+	printf("ok readv_pipe\n");
+}
+
+static void nonblock_pipe(void) {
+	int p[2];
+	CHECK("nonblock_pipe", pipe2(p, O_NONBLOCK) == 0);
+	char b[4];
+	CHECK("nonblock_pipe", read(p[0], b, 4) < 0 && errno == EAGAIN);
+	write(p[1], "ab", 2);
+	CHECK("nonblock_pipe", read(p[0], b, 4) == 2);
+	fd_set r;
+	FD_ZERO(&r);
+	FD_SET(p[0], &r);
+	struct timeval tv = {0, 0};
+	CHECK("nonblock_pipe", select(p[0] + 1, &r, 0, 0, &tv) == 0);
+	write(p[1], "c", 1);
+	FD_SET(p[0], &r);
+	CHECK("nonblock_pipe", select(p[0] + 1, &r, 0, 0, &tv) == 1 && FD_ISSET(p[0], &r));
+	close(p[0]);
+	close(p[1]);
+	printf("ok nonblock_pipe\n");
+}
+
+static void epoll_et(void) {
+	int p[2];
+	CHECK("epoll_et", pipe2(p, O_NONBLOCK) == 0);
+	int ep = epoll_create1(EPOLL_CLOEXEC);
+	CHECK("epoll_et", ep >= 0);
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLET, .data.u64 = 42};
+	CHECK("epoll_et", epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) == 0);
+	struct epoll_event out[4];
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 0) == 0);
+	write(p[1], "a", 1);
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 1000) == 1 && out[0].data.u64 == 42 && (out[0].events & EPOLLIN));
+	/* Edge-triggered: still readable, but no new edge. */
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 100) == 0);
+	write(p[1], "b", 1);
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 1000) == 1);
+	/* Level-triggered reports until drained. */
+	ev.events = EPOLLIN;
+	CHECK("epoll_et", epoll_ctl(ep, EPOLL_CTL_MOD, p[0], &ev) == 0);
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 0) == 1);
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 0) == 1);
+	char b[4];
+	read(p[0], b, 4);
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 0) == 0);
+	/* A wait that a writer ends. */
+	pid_t c = fork();
+	if (c == 0) { usleep(100000); write(p[1], "z", 1); _exit(0); }
+	CHECK("epoll_et", epoll_wait(ep, out, 4, 5000) == 1);
+	waitpid(c, 0, 0);
+	close(ep);
+	close(p[0]);
+	close(p[1]);
+	printf("ok epoll_et\n");
+}
+
+static void eventfd_epoll(void) {
+	int e = eventfd(0, EFD_NONBLOCK);
+	CHECK("eventfd", e >= 0);
+	uint64_t v;
+	CHECK("eventfd", read(e, &v, 8) < 0 && errno == EAGAIN);
+	int ep = epoll_create1(0);
+	struct epoll_event ev = {.events = EPOLLIN, .data.fd = e};
+	CHECK("eventfd", epoll_ctl(ep, EPOLL_CTL_ADD, e, &ev) == 0);
+	pid_t c = fork();
+	if (c == 0) { usleep(100000); uint64_t one = 3; write(e, &one, 8); _exit(0); }
+	struct epoll_event out;
+	CHECK("eventfd", epoll_wait(ep, &out, 1, 5000) == 1 && out.data.fd == e);
+	waitpid(c, 0, 0);
+	v = 1;
+	write(e, &v, 8);
+	CHECK("eventfd", read(e, &v, 8) == 8 && v == 4);
+	int s = eventfd(2, EFD_SEMAPHORE);
+	CHECK("eventfd", read(s, &v, 8) == 8 && v == 1);
+	CHECK("eventfd", read(s, &v, 8) == 8 && v == 1);
+	printf("ok eventfd\n");
+}
+
+static int listener(int *port) {
+	int l = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (l < 0) return -1;
+	int one = 1;
+	setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	if (bind(l, (void *)&a, sizeof a) < 0 || listen(l, 64) < 0) return -1;
+	socklen_t n = sizeof a;
+	getsockname(l, (void *)&a, &n);
+	*port = ntohs(a.sin_port);
+	return l;
+}
+
+static int dial(int port, int flags) {
+	int s = socket(AF_INET, SOCK_STREAM | flags, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	int r = connect(s, (void *)&a, sizeof a);
+	if (r < 0 && errno != EINPROGRESS) { close(s); return -1; }
+	return s;
+}
+
+static void tcp_echo(void) {
+	int port;
+	int l = listener(&port);
+	CHECK("tcp_echo", l >= 0 && port > 0);
+	pid_t c = fork();
+	if (c == 0) {
+		int s = accept(l, 0, 0);
+		char b[64];
+		int n;
+		while ((n = read(s, b, sizeof b)) > 0) write(s, b, n);
+		_exit(0);
+	}
+	int s = dial(port, 0);
+	CHECK("tcp_echo", s >= 0);
+	int one = 1;
+	CHECK("tcp_echo", setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one) == 0);
+	CHECK("tcp_echo", send(s, "hello", 5, 0) == 5);
+	char b[16] = {0};
+	CHECK("tcp_echo", recv(s, b, sizeof b, 0) == 5 && memcmp(b, "hello", 5) == 0);
+	struct sockaddr_in peer;
+	socklen_t pl = sizeof peer;
+	CHECK("tcp_echo", getpeername(s, (void *)&peer, &pl) == 0 && ntohs(peer.sin_port) == port);
+	close(s);
+	waitpid(c, 0, 0);
+	close(l);
+	printf("ok tcp_echo\n");
+}
+
+/* Edge-triggered epoll on a connected TCP socket that can be written at
+ * once: the wait that follows the first report still sees it become
+ * readable (Go's netpoller waits so). */
+static void tcp_et(void) {
+	int port;
+	int l = listener(&port);
+	CHECK("tcp_et", l >= 0);
+	pid_t c = fork();
+	if (c == 0) {
+		int s = accept(l, 0, 0);
+		usleep(200000);
+		write(s, "x", 1);
+		usleep(200000);
+		_exit(0);
+	}
+	int s = dial(port, 0);
+	CHECK("tcp_et", s >= 0);
+	fcntl(s, F_SETFL, O_NONBLOCK);
+	int ep = epoll_create1(0);
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.u64 = 7};
+	CHECK("tcp_et", epoll_ctl(ep, EPOLL_CTL_ADD, s, &ev) == 0);
+	struct epoll_event out[4];
+	CHECK("tcp_et", epoll_wait(ep, out, 4, 1000) == 1 && (out[0].events & EPOLLOUT) && !(out[0].events & EPOLLIN));
+	char b[4];
+	CHECK("tcp_et", read(s, b, 1) < 0 && errno == EAGAIN);
+	int n = epoll_wait(ep, out, 4, 3000);
+	CHECK("tcp_et", n == 1 && (out[0].events & EPOLLIN));
+	CHECK("tcp_et", read(s, b, 1) == 1 && b[0] == 'x');
+	close(ep);
+	close(s);
+	waitpid(c, 0, 0);
+	close(l);
+	printf("ok tcp_et\n");
+}
+
+static void nb_connect(void) {
+	int port;
+	int l = listener(&port);
+	CHECK("nb_connect", l >= 0);
+	int s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK("nb_connect", connect(s, (void *)&a, sizeof a) < 0 && errno == EINPROGRESS);
+	struct pollfd f = {s, POLLOUT, 0};
+	CHECK("nb_connect", poll(&f, 1, 5000) == 1 && (f.revents & POLLOUT));
+	int err = -1;
+	socklen_t el = sizeof err;
+	CHECK("nb_connect", getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0);
+	/* Non-blocking accept: one pending, then none. */
+	fcntl(l, F_SETFL, O_NONBLOCK);
+	int a1 = accept4(l, 0, 0, SOCK_NONBLOCK);
+	CHECK("nb_connect", a1 >= 0);
+	CHECK("nb_connect", accept(l, 0, 0) < 0 && errno == EAGAIN);
+	char b[4];
+	CHECK("nb_connect", recv(a1, b, 4, 0) < 0 && errno == EAGAIN);
+	close(a1);
+	close(s);
+	close(l);
+	printf("ok nb_connect\n");
+}
+
+static void half_close(void) {
+	int port;
+	int l = listener(&port);
+	CHECK("half_close", l >= 0);
+	int s = dial(port, 0);
+	int a = accept(l, 0, 0);
+	CHECK("half_close", s >= 0 && a >= 0);
+	int ep = epoll_create1(0);
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLRDHUP | EPOLLET, .data.fd = a};
+	epoll_ctl(ep, EPOLL_CTL_ADD, a, &ev);
+	CHECK("half_close", shutdown(s, SHUT_WR) == 0);
+	struct epoll_event out;
+	CHECK("half_close", epoll_wait(ep, &out, 1, 5000) == 1 && (out.events & EPOLLRDHUP));
+	char b[4];
+	CHECK("half_close", read(a, b, 4) == 0);
+	/* The other way still works. */
+	CHECK("half_close", write(a, "x", 1) == 1 && read(s, b, 1) == 1 && b[0] == 'x');
+	close(a);
+	close(s);
+	close(l);
+	printf("ok half_close\n");
+}
+
+/* A process that exits holding a socket closes it, so its peer reads EOF.
+ * The child is the first process to poll a host socket, which starts h9's
+ * host poller; that poller held on to the child's fds, so the connection
+ * outlived it. */
+static void exit_eof(void) {
+	int port;
+	int l = listener(&port);
+	CHECK("exit_eof", l >= 0);
+	pid_t c = fork();
+	if (c == 0) {
+		int a = accept(l, 0, 0);
+		struct pollfd f = {a, POLLIN, 0};
+		poll(&f, 1, 50);
+		_exit(a >= 0 ? 0 : 1);
+	}
+	int s = dial(port, 0);
+	CHECK("exit_eof", s >= 0);
+	int st;
+	CHECK("exit_eof", waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+	alarm(10);
+	char b[4];
+	CHECK("exit_eof", read(s, b, sizeof b) == 0);
+	alarm(0);
+	close(s);
+	close(l);
+	printf("ok exit_eof\n");
+}
+
+/* An IPv6 socket with IPV6_V6ONLY and an IPv4 one listen on one port,
+ * as Redis's default "bind * -::*" does; without IPv6 on the host, the
+ * IPv6 socket is EAFNOSUPPORT, so Redis skips it. */
+static void dual_bind(void) {
+	int l4 = socket(AF_INET, SOCK_STREAM, 0);
+	int one = 1;
+	setsockopt(l4, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	struct sockaddr_in any = {.sin_family = AF_INET};
+	CHECK("dual_bind", bind(l4, (void *)&any, sizeof any) == 0 && listen(l4, 8) == 0);
+	/* An IPv4 wildcard socket is IPv4. */
+	struct sockaddr_in got;
+	socklen_t n = sizeof got;
+	CHECK("dual_bind", getsockname(l4, (void *)&got, &n) == 0 && got.sin_family == AF_INET && got.sin_port != 0);
+	int l6 = socket(AF_INET6, SOCK_STREAM, 0);
+	if (l6 < 0) {
+		CHECK("dual_bind", errno == EAFNOSUPPORT);
+	} else {
+		setsockopt(l6, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+		CHECK("dual_bind", setsockopt(l6, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one) == 0);
+		struct sockaddr_in6 a = {.sin6_family = AF_INET6, .sin6_port = got.sin_port, .sin6_addr = IN6ADDR_ANY_INIT};
+		CHECK("dual_bind", bind(l6, (void *)&a, sizeof a) == 0 && listen(l6, 8) == 0);
+		close(l6);
+	}
+	close(l4);
+	printf("ok dual_bind\n");
+}
+
+static void udp(void) {
+	int r = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK("udp", r >= 0 && bind(r, (void *)&a, sizeof a) == 0);
+	socklen_t n = sizeof a;
+	CHECK("udp", getsockname(r, (void *)&a, &n) == 0 && a.sin_port != 0);
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK("udp", sendto(s, "ping", 4, 0, (void *)&a, sizeof a) == 4);
+	char b[16];
+	struct sockaddr_in from;
+	socklen_t fl = sizeof from;
+	CHECK("udp", recvfrom(r, b, sizeof b, 0, (void *)&from, &fl) == 4 && memcmp(b, "ping", 4) == 0);
+	CHECK("udp", from.sin_family == AF_INET && from.sin_addr.s_addr == htonl(INADDR_LOOPBACK) && from.sin_port != 0);
+	/* And a reply to the sender's address. */
+	CHECK("udp", sendto(r, "pong", 4, 0, (void *)&from, fl) == 4);
+	CHECK("udp", recv(s, b, sizeof b, 0) == 4 && memcmp(b, "pong", 4) == 0);
+	printf("ok udp\n");
+}
+
+/* musl's resolver: bind to any address and port 0, then two sendtos to
+ * the same server (the A and AAAA queries). Under --net outbound the
+ * bind can't announce, so the first sendto connects the socket and the
+ * second, to the same address, must still send. */
+static void udp_twice(int port) {
+	int s = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+	struct sockaddr_in any = {.sin_family = AF_INET};
+	CHECK("udp_twice", s >= 0 && bind(s, (void *)&any, sizeof any) == 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	CHECK("udp_twice", sendto(s, "A", 1, MSG_NOSIGNAL, (void *)&a, sizeof a) == 1);
+	CHECK("udp_twice", sendto(s, "B", 1, MSG_NOSIGNAL, (void *)&a, sizeof a) == 1);
+	close(s);
+	printf("ok udp_twice\n");
+}
+
+static void many(void) {
+	int port;
+	int l = listener(&port);
+	CHECK("many", l >= 0);
+	enum { N = 40 };
+	int c[N], a[N];
+	for (int i = 0; i < N; i++) {
+		c[i] = dial(port, 0);
+		CHECK("many", c[i] >= 0);
+		a[i] = accept(l, 0, 0);
+		CHECK("many", a[i] >= 0);
+	}
+	for (int i = 0; i < N; i++) {
+		char b = 'a' + i % 26, r;
+		CHECK("many", write(c[i], &b, 1) == 1 && read(a[i], &r, 1) == 1 && r == b);
+	}
+	for (int i = 0; i < N; i++) { close(c[i]); close(a[i]); }
+	close(l);
+	printf("ok many\n");
+}
+
+static void disabled(void) {
+	int s = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK("disabled", s < 0 && errno == EACCES);
+	printf("ok disabled\n");
+}
+
+/* A server and client over a named and an abstract Unix socket, as
+ * PostgreSQL's local connections are; no network needed. */
+static void unix_one(const char *name, struct sockaddr_un *a, socklen_t alen) {
+	int l = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	CHECK(name, l >= 0);
+	CHECK(name, connect(l, (struct sockaddr *)a, alen) < 0);
+	close(l);
+	l = socket(AF_UNIX, SOCK_STREAM, 0);
+	CHECK(name, bind(l, (struct sockaddr *)a, alen) == 0 && listen(l, 8) == 0);
+	int again = socket(AF_UNIX, SOCK_STREAM, 0);
+	CHECK(name, bind(again, (struct sockaddr *)a, alen) < 0 && errno == EADDRINUSE);
+	close(again);
+	struct sockaddr_un got;
+	socklen_t gl = sizeof got;
+	CHECK(name, getsockname(l, (struct sockaddr *)&got, &gl) == 0 && gl == alen && memcmp(&got, a, alen) == 0);
+	pid_t c = fork();
+	if (c == 0) {
+		for (int i = 0; i < 2; i++) {
+			int s = socket(AF_UNIX, SOCK_STREAM, 0);
+			if (connect(s, (struct sockaddr *)a, alen) != 0) _exit(1);
+			char b[16] = {0};
+			if (send(s, "ping", 4, 0) != 4 || recv(s, b, sizeof b, 0) != 4 || strcmp(b, "pong") != 0) _exit(2);
+			close(s);
+		}
+		_exit(0);
+	}
+	/* The listener wakes epoll, as PostgreSQL's postmaster waits. */
+	int ep = epoll_create1(0);
+	struct epoll_event ev = {.events = EPOLLIN, .data.fd = l}, out;
+	CHECK(name, epoll_ctl(ep, EPOLL_CTL_ADD, l, &ev) == 0);
+	for (int i = 0; i < 2; i++) {
+		CHECK(name, epoll_wait(ep, &out, 1, 5000) == 1 && out.data.fd == l);
+		struct sockaddr_un peer;
+		socklen_t pl = sizeof peer;
+		int s = accept4(l, (struct sockaddr *)&peer, &pl, SOCK_CLOEXEC);
+		CHECK(name, s >= 0 && pl == sizeof(sa_family_t));
+		int type = 0;
+		socklen_t tl = sizeof type;
+		CHECK(name, getsockopt(s, SOL_SOCKET, SO_TYPE, &type, &tl) == 0 && type == SOCK_STREAM);
+		char b[16] = {0};
+		CHECK(name, recv(s, b, sizeof b, 0) == 4 && strcmp(b, "ping") == 0 && send(s, "pong", 4, 0) == 4);
+		close(s);
+	}
+	CHECK(name, waitpid(c, 0, 0) == c);
+	close(ep);
+	close(l);
+	/* With the listener gone, a connect is refused. */
+	int s = socket(AF_UNIX, SOCK_STREAM, 0);
+	CHECK(name, connect(s, (struct sockaddr *)a, alen) < 0 && errno == ECONNREFUSED);
+	close(s);
+	printf("ok %s\n", name);
+}
+
+static void unix_sock(void) {
+	struct sockaddr_un a = {.sun_family = AF_UNIX};
+	const char *d = getenv("DIR");
+	snprintf(a.sun_path, sizeof a.sun_path, "%s/.s.test", d ? d : "/tmp");
+	unlink(a.sun_path);
+	unix_one("unix_sock", &a, offsetof(struct sockaddr_un, sun_path) + strlen(a.sun_path) + 1);
+	unlink(a.sun_path);
+	struct sockaddr_un b = {.sun_family = AF_UNIX};
+	memcpy(b.sun_path, "\0h9-abstract", 12);
+	unix_one("unix_abstract", &b, offsetof(struct sockaddr_un, sun_path) + 12);
+}
+
+/* getifaddrs (netlink's link and address dumps) lists loopback, up,
+ * with 127.0.0.1; a listener bound to 127.0.0.1 reports that address,
+ * not the wildcard. */
+static void ifaddrs(void) {
+	struct ifaddrs *ifs, *i;
+	int lo = 0;
+	CHECK("ifaddrs", getifaddrs(&ifs) == 0);
+	for (i = ifs; i; i = i->ifa_next)
+		if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET &&
+		    ((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr == htonl(INADDR_LOOPBACK))
+			lo = !strcmp(i->ifa_name, "lo") && (i->ifa_flags & 1);
+	freeifaddrs(ifs);
+	CHECK("ifaddrs", lo);
+	int l = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	socklen_t n = sizeof a;
+	CHECK("ifaddrs", bind(l, (void *)&a, sizeof a) == 0 && listen(l, 1) == 0);
+	CHECK("ifaddrs", getsockname(l, (void *)&a, &n) == 0 && a.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+	close(l);
+	printf("ok ifaddrs\n");
+}
+
+int main(int argc, char **argv) {
+	signal(SIGPIPE, SIG_IGN);
+	setvbuf(stdout, 0, _IONBF, 0);
+	for (int i = 1; i < argc; i++) {
+		const char *n = argv[i];
+		int all = strcmp(n, "all") == 0;
+		if (all || !strcmp(n, "poll_pipe")) poll_pipe();
+		if (all || !strcmp(n, "nonblock_pipe")) nonblock_pipe();
+		if (all || !strcmp(n, "readv_pipe")) readv_pipe();
+		if (all || !strcmp(n, "epoll_et")) epoll_et();
+		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
+		if (all || !strcmp(n, "unix_sock")) unix_sock();
+		if (!strcmp(n, "tcp_echo") || !strcmp(n, "net")) tcp_echo();
+		if (!strcmp(n, "nb_connect") || !strcmp(n, "net")) nb_connect();
+		if (!strcmp(n, "tcp_et") || !strcmp(n, "net")) tcp_et();
+		if (!strcmp(n, "half_close") || !strcmp(n, "net")) half_close();
+		if (!strcmp(n, "exit_eof") || !strcmp(n, "net")) exit_eof();
+		if (!strcmp(n, "dual_bind") || !strcmp(n, "net")) dual_bind();
+		if (!strcmp(n, "udp") || !strcmp(n, "net")) udp();
+		if (!strcmp(n, "many") || !strcmp(n, "net")) many();
+		if (!strcmp(n, "disabled")) disabled();
+		if (!strcmp(n, "ifaddrs")) ifaddrs();
+		if (!strcmp(n, "udp_twice") && i + 1 < argc) udp_twice(atoi(argv[++i]));
+	}
+	return failed;
+}

@@ -700,6 +700,12 @@ fswstat(Chan *c, uchar *buf, int n)
 	if (convM2D(buf, n, &d, strs) != n)
 		error(Ebadstat);
 	uif = c->aux;
+	/* h9: a wstat that changes nothing syncs the file (fsync(2) for Linux programs) */
+	if(~d.mode == 0 && ~d.atime == 0 && ~d.mtime == 0 && (uvlong)d.length == (uvlong)~0 && d.name[0] == 0){
+		if(uif->fh != INVALID_HANDLE_VALUE && uif->fh != NULL)
+			FlushFileBuffers(uif->fh);	/* fails on a read-only handle, which has nothing to sync */
+		return n;
+	}
 	if(pathtype(uif->path) != TPATH_FILE)
 		error(Ebadstat);
 	h9_fs_allow(uif->path, H9_FSWRITE);
@@ -973,6 +979,26 @@ h9_fs_anchor(Chan *c)
 	uif->path = wstrdup(p);
 	free(uif->lpath);
 	uif->lpath = nil;
+}
+
+/* h9: symbolic links aren't made on Windows hosts. */
+void
+h9_fs_symlink(Chan *c, char *name, char *target)
+{
+	USED(c);
+	USED(name);
+	USED(target);
+	error(Eperm);
+}
+
+/* h9: renameat across directories stays EXDEV here for now. */
+int
+h9_fs_rename(Chan *c, Chan *dir, char *name)
+{
+	USED(c);
+	USED(dir);
+	USED(name);
+	return 1;
 }
 
 /* h9: the target of the link c's last name was, as it's written. */

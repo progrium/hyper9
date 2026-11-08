@@ -430,6 +430,10 @@ pub const AddressSpace = struct {
         };
     }
 
+    /// Nothing to wait for: the web host has one vCPU, which is the caller
+    /// (design/0049-linux-threads.md, "TLB shootdown").
+    pub fn shootdown(_: *AddressSpace) void {}
+
     pub fn translate(as: *AddressSpace, va: u64, len: u64) ?[]u8 {
         for (as.regions.items) |r| {
             if (va >= r.va and va - r.va <= r.mem.len and len <= r.mem.len - (va - r.va)) {

@@ -56,12 +56,27 @@ pub const Host = struct {
 
     /// For `Machine.Stdio.raw`.
     pub fn raw(h: *Host) h9.Machine.Raw {
-        return .{ .ctx = h, .set = setRaw };
+        return .{ .ctx = h, .set = setRaw, .echo = setEcho, .crnl = setCrnl, .size = size };
+    }
+
+    fn setCrnl(ctx: *anyopaque, on: bool) void {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        h.sys.setCrnl(on);
+    }
+
+    fn size(ctx: *anyopaque) ?[2]u16 {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        return h.sys.size();
     }
 
     fn setRaw(ctx: *anyopaque, on: bool) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.sys.setRaw(on);
+    }
+
+    fn setEcho(ctx: *anyopaque, on: bool) void {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        h.sys.setEcho(on);
     }
 
     /// The host signal that started the machine's teardown, if any.
@@ -91,10 +106,13 @@ pub const Host = struct {
     }
 };
 
-/// Restores the terminal if raw mode is on. Called from the panic handler,
+/// Restores the terminal if raw mode or echo off is on. Called from the panic handler,
 /// so a crash never leaves the user's terminal raw.
 pub fn restoreTerminal() void {
-    if (current) |h| h.sys.setRaw(false);
+    if (current) |h| {
+        h.sys.setRaw(false);
+        h.sys.setEcho(true);
+    }
 }
 
 const Sys = if (is_windows) Windows else Posix;
@@ -105,8 +123,12 @@ const Posix = struct {
 
     pipe: [2]posix.fd_t = .{ -1, -1 },
     thread: ?std.Thread = null,
-    /// The terminal's mode before raw mode, while raw mode is on.
+    /// The terminal's mode before raw mode or echo off, while either is on.
     saved: ?c.termios = null,
+    raw: bool = false,
+    no_echo: bool = false,
+    /// Raw mode without ICRNL: Enter reaches the guest as CR.
+    no_crnl: bool = false,
     lock: std.atomic.Mutex = .unlocked,
     old: [3]posix.Sigaction = undefined,
 
@@ -149,6 +171,7 @@ const Posix = struct {
 
     fn deinit(s: *Posix) void {
         s.setRaw(false);
+        s.setEcho(true);
         if (s.thread) |t| {
             for (sigs, &s.old) |sig, *o| posix.sigaction(sig, o, null);
             _ = c.write(s.pipe[1], &[_]u8{ev_quit}, 1);
@@ -199,23 +222,64 @@ const Posix = struct {
     fn setRaw(s: *Posix, on: bool) void {
         s.lockSpin();
         defer s.lock.unlock();
+        s.raw = on;
+        s.apply(.FLUSH);
+    }
+
+    /// Echo off with the line discipline kept, as `stty -echo` and
+    /// password prompts ask for.
+    fn setEcho(s: *Posix, on: bool) void {
+        s.lockSpin();
+        defer s.lock.unlock();
+        s.no_echo = !on;
+        s.apply(.NOW);
+    }
+
+    /// CR to NL mapping in raw mode, as the guest's ICRNL asks.
+    fn setCrnl(s: *Posix, on: bool) void {
+        s.lockSpin();
+        defer s.lock.unlock();
+        s.no_crnl = !on;
+        if (s.raw) s.apply(.NOW);
+    }
+
+    /// The terminal's rows and columns, from stdout or else stdin.
+    fn size(_: *Posix) ?[2]u16 {
+        for ([_]posix.fd_t{ posix.STDOUT_FILENO, posix.STDIN_FILENO }) |fd| {
+            var ws: posix.winsize = undefined;
+            if (c.ioctl(fd, c.T.IOCGWINSZ, &ws) == 0 and ws.row != 0 and ws.col != 0) return .{ ws.row, ws.col };
+        }
+        return null;
+    }
+
+    /// Sets the terminal from the mode it had before h9 changed it.
+    fn apply(s: *Posix, when: c.TCSA) void {
         const fd = posix.STDIN_FILENO;
-        if (on) {
-            if (s.saved != null) return;
+        if (!s.raw and !s.no_echo) {
+            if (s.saved) |t| {
+                var tt = t;
+                _ = c.tcsetattr(fd, when, &tt);
+                s.saved = null;
+            }
+            return;
+        }
+        if (s.saved == null) {
             var t: c.termios = undefined;
             if (c.tcgetattr(fd, &t) != 0) return;
             s.saved = t;
+        }
+        var t = s.saved.?;
+        // Raw mode keeps echo unless it's off too: 9front's rawon turns
+        // both off (src/kern.zig), a Linux program can ask for either.
+        t.lflag.ECHO = !s.no_echo;
+        if (s.raw) {
             t.lflag.ICANON = false;
-            t.lflag.ECHO = false;
             t.lflag.ISIG = false;
+            if (s.no_crnl) t.iflag.ICRNL = false;
             t.cc[@intFromEnum(c.V.MIN)] = 1;
             t.cc[@intFromEnum(c.V.TIME)] = 0;
-            _ = c.tcsetattr(fd, .FLUSH, &t);
-        } else if (s.saved) |t| {
-            var tt = t;
-            _ = c.tcsetattr(fd, .FLUSH, &tt);
-            s.saved = null;
         }
+        _ = c.tcsetattr(fd, when, &t);
     }
 };
 
@@ -241,6 +305,8 @@ const Windows = struct {
 
     installed: bool = false,
     saved: ?DWORD = null,
+    raw: bool = false,
+    no_echo: bool = false,
     lock: std.atomic.Mutex = .unlocked,
 
     fn init(s: *Windows, _: *Host) void {
@@ -252,6 +318,7 @@ const Windows = struct {
 
     fn deinit(s: *Windows) void {
         s.setRaw(false);
+        s.setEcho(true);
         if (s.installed) _ = SetConsoleCtrlHandler(handler, .FALSE);
     }
 
@@ -275,6 +342,15 @@ const Windows = struct {
         return .TRUE;
     }
 
+    /// The console's input mode isn't changed for ICRNL; Windows passes
+    /// Enter as CR in raw mode already.
+    fn setCrnl(_: *Windows, _: bool) void {}
+
+    /// Not known here yet: TIOCGWINSZ answers 80x24.
+    fn size(_: *Windows) ?[2]u16 {
+        return null;
+    }
+
     fn lockSpin(s: *Windows) void {
         while (!s.lock.tryLock()) std.atomic.spinLoopHint();
     }
@@ -282,17 +358,36 @@ const Windows = struct {
     fn setRaw(s: *Windows, on: bool) void {
         s.lockSpin();
         defer s.lock.unlock();
+        s.raw = on;
+        s.apply();
+    }
+
+    fn setEcho(s: *Windows, on: bool) void {
+        s.lockSpin();
+        defer s.lock.unlock();
+        s.no_echo = !on;
+        s.apply();
+    }
+
+    fn apply(s: *Windows) void {
         const in = w.peb().ProcessParameters.hStdInput;
-        if (on) {
-            if (s.saved != null) return;
+        if (!s.raw and !s.no_echo) {
+            if (s.saved) |mode| {
+                _ = SetConsoleMode(in, mode);
+                s.saved = null;
+            }
+            return;
+        }
+        if (s.saved == null) {
             var mode: DWORD = 0;
             if (!GetConsoleMode(in, &mode).toBool()) return;
             s.saved = mode;
-            const raw = (mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT;
-            _ = SetConsoleMode(in, raw);
-        } else if (s.saved) |mode| {
-            _ = SetConsoleMode(in, mode);
-            s.saved = null;
         }
+        const mode = s.saved.?;
+        const m = if (s.raw)
+            (mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT
+        else
+            mode & ~ENABLE_ECHO_INPUT;
+        _ = SetConsoleMode(in, m);
     }
 };

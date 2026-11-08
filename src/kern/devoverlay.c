@@ -16,6 +16,13 @@
  *	Nwhite	a name removed from the lower tree
  *	Nmark	a lower directory with changed children in memory; its Dir is
  *		a snapshot of the lower one's and its qid is the lower qid
+ *	Nlink	a symbolic link made by the Linux personality (h9_overlay_symlink),
+ *		holding its target. A walk follows it, as devfs follows a contained
+ *		tree's links: an absolute target from the instance root, a
+ *		relative one from the link's directory. The chan keeps the link
+ *		beside the target, so remove and rename act on the link, and
+ *		h9_overlay_readlink reads it. A final link whose target is
+ *		missing is walked to as itself, and opening it fails.
  *
  * Memory: data blocks, nodes, names and strings all come from the
  * machine's guest-physical page allocator through Zig leaves
@@ -70,6 +77,9 @@ enum
 	Ncopy	= 0,
 	Nwhite,
 	Nmark,
+	Nlink,
+
+	Maxlinks	= 40,	/* links followed in one walk, as Linux allows */
 };
 
 #define Maxfile	((vlong)(Ndirect + Perpage*Perpage) * Pgsize)
@@ -118,6 +128,7 @@ struct Node
 	vlong	length;
 	uchar	*direct[Ndirect];
 	uchar	***ind;		/* Perpage pointers to pages of Perpage block pointers */
+	char	*link;		/* an Nlink's target */
 };
 
 struct Inst
@@ -145,6 +156,9 @@ struct Ovc
 	int	lopen;		/* lower is open; I/O goes to it */
 	uchar	*dir;		/* directory snapshot */
 	long	ndir;
+	Node	*lnk;		/* with a ref: the link the walk's last name followed, or nil */
+	char	*lpath;		/* lnk's path */
+	int	nlinks;		/* links followed in this walk */
 };
 
 static Lock instlock;
@@ -395,6 +409,7 @@ nodefree(Inst *in, Node *n)
 	free(n->htab);
 	n->htab = nil;
 	trimblocks(in, n, 0);
+	ovstrfree(in, n->link);
 	ovstrfree(in, n->name);
 	ovstrfree(in, n->uid);
 	ovstrfree(in, n->gid);
@@ -705,8 +720,10 @@ ovcfree(Ovc *o)
 		cclose(o->lower);
 	qlock(&in->ql);
 	nodeunref(in, o->node);
+	nodeunref(in, o->lnk);
 	qunlock(&in->ql);
 	free(o->dir);
+	free(o->lpath);
 	free(o->path);
 	free(o);
 	instdecref(in);
@@ -1245,6 +1262,83 @@ h9_overlay_lower(Chan *c)
 	return c;
 }
 
+static Chan *ovcreate(Chan*, char*, int, ulong);
+static void removelocked(Chan*);
+
+/*
+ * Makes name in the directory c a symbolic link to target, for the
+ * Linux personality's symlinkat. c is an overlay chan, which this closes.
+ */
+void
+h9_overlay_symlink(Chan *c, char *name, char *target)
+{
+	Ovc *o;
+	Inst *in;
+	Node *n;
+	char *s;
+
+	if(waserror()){
+		cclose(c);
+		nexterror();
+	}
+	if(strlen(target) >= 2048)
+		error(Etoolong);
+	c = ovcreate(c, name, OREAD, 0666);
+	poperror();
+	o = c->aux;
+	in = o->inst;
+	qlock(&in->ql);
+	if(waserror()){
+		qunlock(&in->ql);
+		cclose(c);
+		nexterror();
+	}
+	n = o->node;
+	s = ovstrdup(in, target);
+	if(s == nil){
+		removelocked(c);
+		error(Efull);
+	}
+	n->kind = Nlink;
+	n->link = s;
+	n->mode = 0777;
+	n->length = strlen(target);
+	qunlock(&in->ql);
+	poperror();
+	cclose(c);
+}
+
+/*
+ * The target of the link c was walked through as its last name, into buf;
+ * its length, or -1 if c isn't an overlay chan on a link of its own (a
+ * lower name's link is devfs's, through h9_overlay_lower).
+ */
+int
+h9_overlay_readlink(Chan *c, char *buf, int nbuf)
+{
+	Ovc *o;
+	Node *l;
+	int n;
+
+	if(devtab[c->type]->dc != 'O' || nbuf <= 0)
+		return -1;
+	o = c->aux;
+	qlock(&o->inst->ql);
+	l = o->lnk;
+	if(l == nil && o->node != nil && o->node->kind == Nlink)
+		l = o->node;
+	n = -1;
+	if(l != nil && l->parent != nil){
+		n = strlen(l->link);
+		if(n > nbuf-1)
+			n = nbuf-1;
+		memmove(buf, l->link, n);
+		buf[n] = 0;
+	}
+	qunlock(&o->inst->ql);
+	return n;
+}
+
 /* Frees an instance that was made but never attached. */
 void
 h9_overlay_drop(int id)
@@ -1361,7 +1455,7 @@ ovattach(char *spec)
 }
 
 /* Re-resolves o from the instance root along path, for "..". */
-static int ovstep(Ovc*, Chan*, char*);
+static int ovstep(Ovc*, Chan*, char*, int);
 
 static void
 ovreroot(Ovc *o, Chan *nc, char *path)
@@ -1389,7 +1483,7 @@ ovreroot(Ovc *o, Chan *nc, char *path)
 	n = npathelem(path);
 	for(i = 0; i < n; i++){
 		pathelem(path, i, buf);
-		if(!ovstep(o, nc, buf)){
+		if(!ovstep(o, nc, buf, 0)){
 			free(p);
 			error(Enonexist);
 		}
@@ -1397,9 +1491,113 @@ ovreroot(Ovc *o, Chan *nc, char *path)
 	free(p);
 }
 
-/* Walks o (and nc's qid) by one name; returns 0 if it isn't there. */
+/* Forgets the link a walk's last name followed. */
+static void
+droplink(Ovc *o)
+{
+	nodeunref(o->inst, o->lnk);
+	o->lnk = nil;
+	free(o->lpath);
+	o->lpath = nil;
+}
+
+/*
+ * o is at an Nlink: walks it to the link's target. last says this was
+ * the walk's last name: then the chan keeps the link beside the target,
+ * or stays on the link if the target is missing.
+ */
+static void
+follow(Ovc *o, Chan *nc, int last)
+{
+	Node *l;
+	char *lpath, *tp, *s;
+	int n;
+
+	l = o->node;
+	if(++o->nlinks > Maxlinks)
+		error("too many symbolic links");
+	lpath = strdup(o->path);
+	if(lpath == nil)
+		error(Enomem);
+	if(l->link[0] == '/'){
+		for(s = l->link; *s == '/'; s++)
+			;
+		tp = strdup(s);
+	}else{
+		s = strrchr(lpath, '/');
+		n = s != nil ? s - lpath : 0;
+		tp = malloc(n + 1 + strlen(l->link) + 1);
+		if(tp != nil){
+			if(n > 0)
+				sprint(tp, "%.*s/%s", n, lpath, l->link);
+			else
+				strcpy(tp, l->link);
+		}
+	}
+	if(tp == nil){
+		free(lpath);
+		error(Enomem);
+	}
+	/* Empty names (a//b, a trailing /) are dropped. */
+	for(s = tp; (s = strstr(s, "//")) != nil; )
+		memmove(s, s+1, strlen(s));
+	n = strlen(tp);
+	if(n > 0 && tp[n-1] == '/')
+		tp[n-1] = '\0';
+	l->ref++;
+	if(waserror()){
+		free(tp);
+		if(!last){
+			nodeunref(o->inst, l);
+			free(lpath);
+			nexterror();
+		}
+		/* A dangling link, walked to as itself. */
+		if(o->lower != nil)
+			cclose(o->lower);
+		o->lower = nil;
+		nodeunref(o->inst, o->node);
+		o->node = l;
+		free(o->path);
+		o->path = lpath;
+		nc->qid = l->qid;
+		return;
+	}
+	ovreroot(o, nc, tp);
+	poperror();
+	free(tp);
+	if(last){
+		o->lnk = l;
+		o->lpath = lpath;
+	}else{
+		nodeunref(o->inst, l);
+		free(lpath);
+	}
+}
+
+/* Puts a chan that followed a link back on the link itself, for remove and rename. */
+static void
+onlink(Ovc *o)
+{
+	if(o->lnk == nil)
+		return;
+	if(o->lower != nil)
+		cclose(o->lower);
+	o->lower = nil;
+	nodeunref(o->inst, o->node);
+	o->node = o->lnk;
+	o->lnk = nil;
+	free(o->path);
+	o->path = o->lpath;
+	o->lpath = nil;
+}
+
+/*
+ * Walks o (and nc's qid) by one name; returns 0 if it isn't there. A link
+ * is followed; last says the name is the walk's last (see follow).
+ */
 static int
-ovstep(Ovc *o, Chan *nc, char *name)
+ovstep(Ovc *o, Chan *nc, char *name, int last)
 {
 	Node *ch, *nn;
 	Chan *nl;
@@ -1407,6 +1605,7 @@ ovstep(Ovc *o, Chan *nc, char *name)
 
 	if(strcmp(name, ".") == 0)
 		return 1;
+	droplink(o);
 	if(strcmp(name, "..") == 0){
 		if(o->path[0] == '\0')
 			return 1;
@@ -1470,6 +1669,12 @@ ovstep(Ovc *o, Chan *nc, char *name)
 	nodeunref(o->inst, o->node);
 	o->node = nn;
 	nc->qid = nn != nil ? nn->qid : nl->qid;
+	if(nn != nil && nn->kind == Nlink){
+		if(waserror())
+			return 0;	/* the error is in up->errstr */
+		follow(o, nc, last);
+		poperror();
+	}
 	return 1;
 }
 
@@ -1507,8 +1712,16 @@ ovwalk(Chan *c, Chan *nc, char **name, int nname)
 	no = ovcnew(in, o->node, nil, o->path);
 	if(o->lower != nil)
 		no->lower = cclone(o->lower);
+	if(o->lnk != nil){
+		no->lpath = strdup(o->lpath);
+		if(no->lpath == nil)
+			error(Enomem);
+		no->lnk = o->lnk;
+		no->lnk->ref++;
+	}
 	for(i = 0; i < nname; i++){
-		if(!ovstep(no, nc, name[i]))
+		no->nlinks = 0;
+		if(!ovstep(no, nc, name[i], i == nname-1))
 			break;
 		wq->qid[i] = nc->qid;
 	}
@@ -1589,6 +1802,8 @@ ovopen(Chan *c, int omode)
 		nexterror();
 	}
 	refresh(c);
+	if(o->node != nil && o->node->kind == Nlink)
+		error(Enonexist);	/* a link whose target is missing */
 	if(c->qid.type & QTDIR){
 		if(mode != OREAD || (omode & OTRUNC))
 			error(Eisdir);
@@ -1743,6 +1958,7 @@ removelocked(Chan *c)
 
 	o = c->aux;
 	in = o->inst;
+	onlink(o);
 	refresh(c);
 	if(o->node == in->root)
 		error(Eperm);
@@ -1964,6 +2180,141 @@ ovrename(Chan *c, Node *n, char *name)
 		ovlink(dir, w);
 }
 
+/*
+ * Moves c's name into the directory dc as name, for the Linux
+ * personality's renameat across directories (h9_fs_renamepath in
+ * src/kern/fscheck.c), as ovrename does within one. Both are overlay
+ * chans; returns 1 if they're in different instances, or c is a
+ * directory still in the lower tree (Linux's overlayfs refuses that
+ * with EXDEV too, and mv copies), and 0 once moved. A file or link
+ * named name in dc is replaced, as rename(2) replaces it, and so is an
+ * empty directory in memory; a directory beneath c can't be the
+ * target. Zig's cache, for one, makes each entry in tmp/ and renames
+ * it into place.
+ */
+int
+h9_overlay_move(Chan *c, Chan *dc, char *name)
+{
+	Ovc *o, *od;
+	Inst *in;
+	Node *n, *odir, *dir, *ex, *d, *w;
+	Chan *dl, *lc;
+	char *nm, *np, *oldpath;
+	int isdir, lowerex;
+
+	o = c->aux;
+	od = dc->aux;
+	in = o->inst;
+	if(od->inst != in)
+		return 1;
+	if(!ovname(name))
+		error(strlen(name) >= Maxname ? Etoolong : Ebadchar);
+	qlock(&in->ql);
+	if(waserror()){
+		qunlock(&in->ql);
+		nexterror();
+	}
+	onlink(o);
+	refresh(c);
+	refresh(dc);
+	if(o->node == in->root)
+		error(Eperm);
+	isdir = (c->qid.type & QTDIR) != 0;
+	if(isdir && (o->node == nil || o->node->kind == Nmark)){
+		qunlock(&in->ql);
+		poperror();
+		return 1;
+	}
+	if((dc->qid.type & QTDIR) == 0)
+		error(Enotdir);
+	if(o->node == nil)
+		copyup(c, 0);
+	n = o->node;
+	odir = n->parent;
+	if(odir == nil)
+		error(Enonexist);
+	ovperm(odir->mode, OWRITE);
+	dir = od->node;
+	if(dir == nil || dir->kind == Nwhite)
+		dir = markpath(in, od->path, npathelem(od->path));
+	if(dir->kind == Nlink || (dir->qid.type & QTDIR) == 0)
+		error(Enotdir);
+	ovperm(dir->mode, OWRITE);
+	for(d = dir; d != nil; d = d->parent)
+		if(d == n)
+			error(Ebadarg);	/* into itself: EINVAL */
+	ex = findchild(dir, name);
+	if(ex == n){
+		qunlock(&in->ql);
+		poperror();
+		return 0;
+	}
+	lowerex = 0;
+	if(ex != nil && ex->kind != Nwhite){
+		if((ex->qid.type & QTDIR) && (ex->kind != Ncopy || ex->nchild != 0))
+			error(Enotempty);
+		lowerex = ex->inlower;
+	}else if(ex != nil)
+		lowerex = 1;	/* a whiteout: the lower name stays hidden under n */
+	else if(dir->kind == Nmark){
+		dl = lowerwalk(in, od->path, npathelem(od->path));
+		if(dl != nil){
+			lc = lowerwalk1(dl, name);
+			cclose(dl);
+			if(lc != nil){
+				lowerex = 1;
+				if(lc->qid.type & QTDIR){
+					cclose(lc);
+					error(Enotempty);
+				}
+				cclose(lc);
+			}
+		}
+	}
+	w = nil;
+	if(n->inlower){
+		w = newnode(in, Nwhite, n->name);
+		w->inlower = 1;
+	}
+	nm = ovstrdup(in, name);
+	if(nm == nil){
+		if(w != nil)
+			nodefree(in, w);
+		error(Efull);
+	}
+	np = malloc((od->path[0] != '\0' ? strlen(od->path) + 1 : 0) + strlen(name) + 1);
+	if(np == nil){
+		ovstrfree(in, nm);
+		if(w != nil)
+			nodefree(in, w);
+		error(Enomem);
+	}
+	if(od->path[0] != '\0')
+		sprint(np, "%s/%s", od->path, name);
+	else
+		strcpy(np, name);
+	/* The path for this chan; others holding n keep theirs, unused while they hold n. */
+	oldpath = o->path;
+	o->path = np;
+	n->ref++;
+	ovunlink(in, n);
+	if(w != nil)
+		ovlink(odir, w);
+	if(ex != nil)
+		ovunlink(in, ex);
+	ovstrfree(in, n->name);
+	n->name = nm;
+	n->inlower = lowerex;
+	ovlink(dir, n);
+	dir->mtime = odir->mtime = seconds();
+	changed(in, oldpath);
+	changed(in, o->path);
+	free(oldpath);
+	qunlock(&in->ql);
+	poperror();
+	return 0;
+}
+
 static int
 ovwstat(Chan *c, uchar *db, int n)
 {
@@ -1987,6 +2338,11 @@ ovwstat(Chan *c, uchar *db, int n)
 	if(waserror()){
 		qunlock(&in->ql);
 		nexterror();
+	}
+	/* A rename renames the link; other changes go to its target. */
+	if(o->lnk != nil && d.name[0] != '\0' && strcmp(d.name, o->lnk->name) != 0){
+		onlink(o);
+		c->qid = o->node->qid;
 	}
 	refresh(c);
 	isdir = (c->qid.type & QTDIR) != 0;

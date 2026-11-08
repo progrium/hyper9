@@ -118,6 +118,37 @@ fsclone(Chan *c, Chan *nc)
 }
 
 /*
+ * h9: a final name that's a link to nothing is walked to as the link
+ * itself, so it can be renamed, removed and lstat'd (an open of it still
+ * fails, following it). Returns 1, or 0 if name isn't such a link.
+ */
+static int
+danglingwalk(Chan *c, char *name)
+{
+	struct stat stbuf;
+	Ufsinfo *uif;
+	char *path;
+
+	uif = c->aux;
+	if(strcmp(name, "..") == 0 || strcmp(name, ".") == 0)
+		return 0;
+	path = catpath(uif->path, name);
+	if(h9_fs_checkname(path, H9_FSWALK) < 0 || lstat(path, &stbuf) < 0 || !S_ISLNK(stbuf.st_mode)){
+		free(path);
+		return 0;
+	}
+	free(uif->path);
+	uif->path = path;
+	free(uif->lpath);
+	uif->lpath = nil;
+	uif->mode = stbuf.st_mode;
+	uif->uid = stbuf.st_uid;
+	uif->gid = stbuf.st_gid;
+	c->qid = fsqid(&stbuf);
+	return 1;
+}
+
+/*
  * h9: a walk in a contained tree, resolved by fscheck.c inside it.
  * Returns 1, 0 if name doesn't exist, or -1 for too many links.
  */
@@ -135,7 +166,7 @@ fswalkin(Chan *c, char *name)
 	if(r == H9_RESLOOP)
 		return -1;
 	if(r < 0 || h9_fs_check(buf, H9_FSWALK) < 0 || stat(buf, &stbuf) < 0)
-		return 0;
+		return danglingwalk(c, name);
 	lpath = nil;
 	if(strcmp(name, "..") != 0){
 		lpath = catpath(uif->path, name);
@@ -173,7 +204,7 @@ fswalk1(Chan *c, char *name)
 	path = catpath(uif->path, name);
 	if(h9_fs_check(path, H9_FSWALK) < 0 || stat(path, &stbuf) < 0){
 		free(path);
-		return 0;
+		return danglingwalk(c, name);
 	}
 	free(uif->path);
 	uif->path = path;
@@ -224,6 +255,13 @@ fswalk(Chan *c, Chan *nc, char **name, int nname)
 	return wq;
 }
 	
+/* h9: c is an open file, with a host fd (uif->fd is 0, not -1, before open). */
+static int
+openfile(Chan *c)
+{
+	return (c->flag & COPEN) != 0 && (c->qid.type & QTDIR) == 0 && ((Ufsinfo*)c->aux)->fd >= 0;
+}
+
 static int
 fsstat(Chan *c, uchar *buf, int n)
 {
@@ -235,7 +273,14 @@ fsstat(Chan *c, uchar *buf, int n)
 		error(Eshortstat);
 
 	uif = c->aux;
-	if(stat(uif->path, &stbuf) < 0)
+	/*
+	 * h9: an open file is the one its fd has, which a rename since may
+	 * have moved from its path (fswstat); a dangling link (danglingwalk)
+	 * has only its own stat.
+	 */
+	if(openfile(c) && fstat(uif->fd, &stbuf) == 0)
+		;
+	else if(stat(uif->path, &stbuf) < 0 && lstat(ownpath(uif), &stbuf) < 0)
 		error(strerror(errno));
 
 	d.name = lastelem(ownpath(uif));
@@ -261,6 +306,9 @@ fsopen(Chan *c, int mode)
 	omode = openmode(mode);
 
 	uif = c->aux;
+	/* h9: a link walked to as itself has no target to open (danglingwalk). */
+	if(S_ISLNK(uif->mode))
+		error(Enonexist);
 	h9_fs_allow(uif->path, omode == OREAD && !(mode&OTRUNC) ? H9_FSREAD : H9_FSWRITE);
 	if(mode & ORCLOSE)
 		h9_fs_allow(uif->path, H9_FSREMOVE);
@@ -486,13 +534,41 @@ fswstat(Chan *c, uchar *buf, int n)
 	 * one works, we're screwed.  in such cases we leave things
 	 * half broken and return an error.  it's hardly perfect.
 	 */
+	struct stat fdst;
+	int byfd, fl;
+
 	if(convM2D(buf, n, &d, strs) != n)
 		error(Ebadstat);
 	
 	uif = c->aux;
-	h9_fs_allow(uif->path, H9_FSWRITE);
-	if(stat(uif->path, &stbuf) < 0)
-		error(strerror(errno));
+	/* h9: a wstat that changes nothing syncs the file (fsync(2) for Linux programs) */
+	if(~d.mode == 0 && ~d.atime == 0 && ~d.mtime == 0 && (uvlong)d.length == (uvlong)~0 && d.name[0] == 0){
+		if(uif->fd >= 0 && fsync(uif->fd) < 0 && errno != EINVAL)
+			error(strerror(errno));
+		return n;
+	}
+	/*
+	 * h9: an open file may have been renamed since (Zig renames its
+	 * cache entries into place, then truncates the output it still has
+	 * open), so its path is stale: one open for writing is changed
+	 * through its fd, as Linux's ftruncate and fchmod change the file.
+	 */
+	byfd = 0;
+	if(openfile(c) && fstat(uif->fd, &fdst) == 0
+	&& (stat(uif->path, &stbuf) < 0 || stbuf.st_dev != fdst.st_dev || stbuf.st_ino != fdst.st_ino)){
+		fl = fcntl(uif->fd, F_GETFL);
+		if(fl < 0 || (fl & O_ACCMODE) == O_RDONLY || d.name[0] != 0)
+			error(strerror(ENOENT));
+		byfd = 1;
+		stbuf = fdst;
+	}else if(stat(uif->path, &stbuf) < 0){
+		/* h9: a dangling link (danglingwalk) is checked and renamed as itself */
+		if(lstat(ownpath(uif), &stbuf) < 0 || !S_ISLNK(stbuf.st_mode))
+			error(strerror(errno));
+		if(h9_fs_checkname(ownpath(uif), H9_FSWRITE) < 0)
+			error(Eperm);
+	}else
+		h9_fs_allow(uif->path, H9_FSWRITE);
 
 	/*
 	 * try things in increasing order of harm to the file.
@@ -502,7 +578,7 @@ fswstat(Chan *c, uchar *buf, int n)
 	 * (see above comment about atomicity).
 	 */
 	if(~d.mode != 0 && (int)(d.mode&0777) != (int)(stbuf.st_mode&0777)) {
-		if(chmod(uif->path, d.mode&0777) < 0)
+		if((byfd ? fchmod(uif->fd, d.mode&0777) : chmod(uif->path, d.mode&0777)) < 0)
 			error(strerror(errno));
 		uif->mode &= ~0777;
 		uif->mode |= d.mode&0777;
@@ -513,7 +589,10 @@ fswstat(Chan *c, uchar *buf, int n)
 		t[0].tv_usec = 0;
 		t[1].tv_sec = ~d.mtime != 0 ? d.mtime : stbuf.st_mtime;
 		t[1].tv_usec = 0;
-		utimes(uif->path, t);
+		if(byfd)
+			futimes(uif->fd, t);
+		else
+			utimes(uif->path, t);
 	}
 	if(d.name[0] && strcmp(d.name, lastelem(ownpath(uif))) != 0) {
 		char *base, *newpath;
@@ -556,7 +635,7 @@ fswstat(Chan *c, uchar *buf, int n)
 	}
 */
 
-	if((uvlong)d.length != (uvlong)~0 && truncate(uif->path, d.length) < 0)
+	if((uvlong)d.length != (uvlong)~0 && (byfd ? ftruncate(uif->fd, d.length) : truncate(uif->path, d.length)) < 0)
 		error(strerror(errno));
 
 	return n;
@@ -750,6 +829,57 @@ h9_fs_readlink(Chan *c, char *buf, int nbuf)
 		return -1;
 	buf[n] = 0;
 	return n;
+}
+
+/*
+ * h9: makes name in the directory c a symbolic link to target, for the
+ * Linux personality's symlinkat. The new name is checked like a create;
+ * the target is checked whenever a walk follows the link.
+ */
+void
+h9_fs_symlink(Chan *c, char *name, char *target)
+{
+	Ufsinfo *uif;
+	char *path;
+
+	if(devtab[c->type]->dc != 'U')
+		error(Eperm);
+	uif = c->aux;
+	path = catpath(uif->path, name);
+	if(waserror()){
+		free(path);
+		nexterror();
+	}
+	h9_fs_allow(path, H9_FSCREATE);
+	if(symlink(target, path) < 0)
+		error(strerror(errno));
+	poperror();
+	free(path);
+}
+
+/* h9: c moved to name in directory dir, for renameat across directories */
+int
+h9_fs_rename(Chan *c, Chan *dir, char *name)
+{
+	Ufsinfo *uif, *duif;
+	char *newpath;
+
+	if(devtab[c->type]->dc != 'U' || devtab[dir->type]->dc != 'U')
+		error(Eperm);
+	uif = c->aux;
+	duif = dir->aux;
+	newpath = catpath(duif->path, name);
+	if(waserror()){
+		free(newpath);
+		nexterror();
+	}
+	h9_fs_allow(newpath, H9_FSCREATE);
+	h9_fs_allow(ownpath(uif), H9_FSRENAME);
+	if(rename(ownpath(uif), newpath) < 0)
+		error(strerror(errno));
+	poperror();
+	free(newpath);
+	return 0;
 }
 
 static int

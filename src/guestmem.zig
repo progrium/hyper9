@@ -27,7 +27,9 @@ pub fn each(as: vmm.AddressSpace, va: u64, len: u64, ctx: anytype, comptime f: a
     var total: usize = 0;
     off = 0;
     while (off < len) {
-        const piece = spanAt(as, va + off, len - off).?;
+        // Checked above, but a Linux thread's remap can unmap the range
+        // for a moment since: fail, don't trust the first look.
+        const piece = spanAt(as, va + off, len - off) orelse return error.BadAddress;
         var p: usize = 0;
         while (p < piece.len) {
             const chunk = piece[p..][0..@min(piece.len - p, max_chunk)];

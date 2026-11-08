@@ -111,6 +111,8 @@ pub const Bind = struct {
     spec: []const u8 = "",
     /// Shown as a comment in the plan when there's no `lower`.
     note: ?[]const u8 = null,
+    /// With `console`: bind the console's `cons` file, not its directory.
+    cons_file: bool = false,
 
     pub const Flag = enum { repl, before, after };
 };
@@ -199,6 +201,9 @@ pub const Plan = struct {
     /// (design/0011-overlay.md): the bind of `#O` onto `/`. The builder
     /// makes `$home` in it, and the machine reports the guest's changes.
     root_overlay: bool = false,
+    /// The host's DNS servers: a connect to port 53 on one is allowed
+    /// even when it's link-local, as a cloud VM's resolver is.
+    nameservers: []const [16]u8 = &.{},
 
     /// Checks `op` on the resolved host path `path`.
     pub fn check(p: *const Plan, path: []const u8, op: Op) Verdict {
@@ -213,11 +218,16 @@ pub const Plan = struct {
             .announce => return p.net == .enable,
             .connect => {},
         }
-        if (p.net_allow.len == 0) return !isLinkLocal(addr);
+        if (p.net_allow.len == 0) return !isLinkLocal(addr) or (port == 53 and p.isNameserver(addr));
         const pr = proto orelse return false;
         for (p.net_allow) |pat| if (pat.matchAddr(pr, addr, port)) return true;
         const names = p.names orelse return false;
         return names.allows(p.net_allow, pr, addr, port);
+    }
+
+    fn isNameserver(p: *const Plan, addr: *const [16]u8) bool {
+        for (p.nameservers) |*ns| if (std.mem.eql(u8, ns, addr)) return true;
+        return false;
     }
 
     /// Whether devip's cs may resolve `name` for proto and port.
@@ -277,7 +287,10 @@ pub const Plan = struct {
                 .after => lw.writeAll(" -a") catch return error.WriteFailed,
             }
             if (b.create) lw.writeAll(if (b.flag == .repl) " -c" else "c") catch return error.WriteFailed;
-            lw.print(" '{s}{s}' {s}", .{ b.from, if (b.console) "<id>" else "", b.to }) catch return error.WriteFailed;
+            // A target in #λ is quoted, since newns reads a word starting
+            // with # as a comment.
+            const q = if (b.to.len > 0 and b.to[0] == '#') "'" else "";
+            lw.print(" '{s}{s}{s}' {s}{s}{s}", .{ b.from, if (b.console) "<id>" else "", if (b.cons_file) "/cons" else "", q, b.to, q }) catch return error.WriteFailed;
             // Always written for a mount, '' when empty, so newns can tell
             // the spec from the access column.
             if (b.mount) lw.print(" '{s}'", .{b.spec}) catch return error.WriteFailed;
@@ -370,10 +383,26 @@ pub const Inputs = struct {
     /// Bind h9's own commands (`#H/bin`) after /bin; false leaves out
     /// the bind and masks `#H` (design/0032-guest-tools.md).
     guest_tools: bool = true,
+    /// A Linux root tree, the Linux view's / (design/0018-linux-personality.md).
+    linux_root: ?[]const u8 = null,
+    /// The host's DNS servers, which port 53 may reach even when they're
+    /// link-local (design/0050-linux-net.md).
+    nameservers: []const []const u8 = &.{},
     /// A host window: `#i`, `#m` and `#b` on /dev. Without one they're
     /// masked (design/0015-gfx.md).
     gfx: ?Gfx = null,
 };
+
+/// Whether host path `path` is one `--writable` names, and writing is allowed.
+fn hostWritable(writable: []const []const u8, path: []const u8, allowed: bool) bool {
+    if (!allowed) return false;
+    for (writable) |w| if (std.mem.eql(u8, w, path)) return true;
+    return false;
+}
+
+/// The Linux view's device (design/0018-linux-personality.md, "The Linux
+/// view"): `#λ`, devlinux.
+pub const linux_view = "#\u{3bb}";
 
 /// Compiles a policy. Allocations go in `arena`. `err_msg` explains a
 /// Conflict.
@@ -575,6 +604,47 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     for (pol.read_deny) |p| try rules.append(arena, .{ .path = p, .kind = .deny });
 
+    // The Linux view (design/0018-linux-personality.md): the Linux root
+    // after devlinux's own directories, and the shared trees on its mount
+    // points, only with a Linux root: without one, a Linux binary from a
+    // host path sees devlinux's own tree.
+    const lv = linux_view;
+    if (in.linux_root) |lr| {
+        const lr_overlay = (write == .overlay or eph) and !hostWritable(pol.writable, lr, can_write and !eph);
+        const lr_rw = !lr_overlay and hostWritable(pol.writable, lr, can_write and !eph);
+        try rules.append(arena, .{ .path = lr, .kind = if (lr_overlay) .allow_eph else if (lr_rw) .allow_rw else .allow_ro });
+        if (lr_overlay) {
+            try binds.append(arena, .{ .from = "#O", .to = lv, .flag = .after, .create = true, .access = .eph, .lower = lr, .contained = true });
+        } else {
+            try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "#U!c{s}", .{lr}), .to = lv, .flag = .after, .create = lr_rw, .access = if (lr_rw) .rw else .ro });
+        }
+    }
+    if (in.linux_root != null) {
+        if (has_root) {
+            try binds.append(arena, .{ .from = "/", .to = lv ++ "/9", .note = "the 9front root" });
+            if (write != .none) try binds.append(arena, .{ .from = "/tmp", .to = lv ++ "/tmp", .create = true, .optional = true });
+            try binds.append(arena, .{ .from = "/mnt/term", .to = lv ++ "/mnt/term", .optional = true });
+        } else {
+            if (write != .none) try binds.append(arena, .{ .from = "#O", .to = lv ++ "/tmp", .create = true, .access = .eph, .optional = true });
+            if (guest_cwd == null) if (in.cwd) |cwd| {
+                var b = try acc.bind(arena, cwd, lv ++ "/mnt/term/cwd", cwd_rw);
+                b.fallback = lv ++ "/mnt/term";
+                try binds.append(arena, b);
+            };
+        }
+        try binds.append(arena, .{ .from = "#d", .to = lv ++ "/dev/fd", .optional = true });
+        // /dev/shm is a tmpfs on Linux: an empty writable tree of its
+        // own, kept in memory, for shm_open and for scripts that keep
+        // secrets off the disk (passage, pass).
+        if (write != .none) try binds.append(arena, .{ .from = "#O", .to = lv ++ "/dev/shm", .create = true, .access = .eph, .optional = true });
+        for ([_][]const u8{ "stdin", "stdout", "stderr" }, 0..) |name, fd| {
+            try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "#d/{d}", .{fd}), .to = try std.fmt.allocPrint(arena, lv ++ "/dev/{s}", .{name}), .optional = true });
+        }
+        for ([_][]const u8{ "tty", "console" }) |name| {
+            try binds.append(arena, .{ .from = "#y", .to = try std.fmt.allocPrint(arena, lv ++ "/dev/{s}", .{name}), .console = true, .optional = true, .cons_file = true });
+        }
+    }
+
     var devmask: std.ArrayList(u8) = .empty;
     if (!pol.host_cmd or web) try devmask.append(arena, 'C');
     if (net == .disable or web) try devmask.append(arena, 'I');
@@ -629,12 +699,21 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (plain) try caveats.append(arena, "the 9P root's connection isn't encrypted");
     }
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
+    // A Linux program resolves names itself, through the host's DNS
+    // servers (design/0050-linux-net.md).
+    var nameservers: std.ArrayList([16]u8) = .empty;
+    if (in.linux_root != null and net != .disable) for (in.nameservers) |ns| {
+        if (parseIp(ns)) |a| try nameservers.append(arena, a);
+    };
+    var ll_dns = false;
+    for (nameservers.items) |*a| ll_dns = ll_dns or isLinkLocal(a);
     if (net != .disable and web) {
         try caveats.append(arena, "the web host's network is WebSockets only, at /net/ws, to anywhere the browser's own rules allow");
         if (net_allow.len > 0) try caveats.append(arena, "the browser resolves names itself, so --net-allow checks a name, not the addresses it resolves to, and link-local names aren't refused");
     } else if (net != .disable) {
         if (net_allow.len == 0) {
             try caveats.append(arena, "outbound connections can reach any address the host can except link-local, including its loopback and local network");
+            if (ll_dns) try caveats.append(arena, "a Linux program can reach the host's link-local DNS server on port 53");
             try caveats.append(arena, "refusing link-local doesn't cover every cloud metadata endpoint: some, such as fd00:ec2::254 and 100.100.100.200, use other ranges");
             try caveats.append(arena, "the guest can make the host resolve any name");
         }
@@ -669,6 +748,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .guest_cwd = guest_cwd,
         .root_9p = in.root_9p,
         .root_overlay = root_overlay,
+        .nameservers = nameservers.items,
         .gfx = in.gfx,
     };
 }
@@ -1413,6 +1493,20 @@ test "net: the plan's checks" {
     const e = try compile(arena.allocator(), in, .{ .net = .enable }, &msg);
     try t.expect(e.netCheck(.announce, .udp, &tip("0.0.0.0"), 53));
     try t.expect(!e.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
+
+    // A Linux program's DNS may reach the host's link-local resolver on
+    // port 53 alone; without a Linux root nothing changes.
+    var lin = in;
+    lin.linux_root = "/l";
+    lin.nameservers = &.{ "169.254.169.254", "not an address" };
+    const dns = try compile(arena.allocator(), lin, .{}, &msg);
+    try t.expect(dns.netCheck(.connect, .udp, &tip("169.254.169.254"), 53));
+    try t.expect(dns.netCheck(.connect, .tcp, &tip("169.254.169.254"), 53));
+    try t.expect(!dns.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
+    try t.expect(!dns.netCheck(.connect, .udp, &tip("169.254.169.253"), 53));
+    lin.linux_root = null;
+    const nodns = try compile(arena.allocator(), lin, .{}, &msg);
+    try t.expect(!nodns.netCheck(.connect, .udp, &tip("169.254.169.254"), 53));
 
     // Patterns are the whole policy.
     const ll = try compile(arena.allocator(), in, .{ .net_allow = &.{"tcp!169.254.0.0/16!*"} }, &msg);

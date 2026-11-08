@@ -1274,6 +1274,11 @@ system, rio, not to the program or the shell.
 - Writing `rawon` to `/dev/consctl` puts the host terminal in raw mode, until
   `rawoff`, the last close of `consctl`, or the end of the run (or a crash).
   In raw mode Ctrl-C reaches the program as a key, as Del does on 9front.
+- Writing `echooff` to `/dev/consctl` (an h9 addition) turns the host
+  terminal's echo off and keeps its line editing, for password prompts,
+  until `echoon`, the last close of `consctl`, or the end of the run. A Linux
+  program's `tcsetattr` sets both: `ICANON` off is raw mode, and `ECHO` off is
+  `echooff`, so `stty -echo` and `read -s` work as on Linux.
 - Standard error is separate. On 9front, fd 2 is the console like fd 1; in
   h9 it's `/dev/stderr`, which goes to the host's standard error, so `h9 prog
   2>err.log` works as you'd expect.

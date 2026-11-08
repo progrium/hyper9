@@ -1,6 +1,8 @@
 //! h9: run 9front executables on host hypervisors.
 
 pub const aout = @import("aout.zig");
+/// Linux ELF binaries (design/0018-linux-personality.md).
+pub const linux_elf = @import("linux/elf.zig");
 pub const vmm = @import("vmm.zig");
 pub const loader = @import("loader.zig");
 pub const segment = @import("segment.zig");
@@ -52,4 +54,13 @@ test {
     _ = hstream;
     _ = gfx;
     _ = @import("cpupool.zig");
+    _ = @import("linux/nr.zig");
+    _ = @import("linux/mm.zig");
+    _ = @import("linux/elf.zig");
+    _ = @import("linux/signal.zig");
+    _ = @import("linux/sys.zig");
+    _ = @import("linux/locks.zig");
+    _ = @import("linux/cputime.zig");
+    _ = @import("linux/netlink.zig");
+    _ = @import("dotl/attr.zig");
 }

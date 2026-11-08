@@ -150,6 +150,9 @@ const sema_fixtures = [_][]const u8{
 /// Programs in tests/fixtures/net, for tests/backends.zig. They share
 /// tests/fixtures/segattach/lib.S.
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
+/// C programs in tests/fixtures/linux, built static for Linux on arm64 and
+/// amd64, for the linux-personality cases in tests/integration.zig.
+const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files" };
 
 /// Programs in tests/fixtures/gfx, for tests/backends.zig's [gfx] cases on
 /// the headless backend, with the same lib.S.
@@ -197,6 +200,10 @@ fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []
     run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
+    // The Linux fixtures and the Alpine roots from scripts/fetch.sh
+    // (design/0018-linux-personality.md).
+    run.setEnvironmentVariable("H9_TEST_LINUX", b.getInstallPath(.prefix, "fixtures/linux"));
+    run.setEnvironmentVariable("H9_TEST_LINUX_ROOT", b.pathFromRoot(".local/linux"));
     // The tree `zig build slim` makes, for the multicall cases, which skip
     // without it (design/0064-multicall.md).
     const release = pin(b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
@@ -514,6 +521,12 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .flags = flags,
     });
     if (!web) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostcmd.c"}, .flags = flags });
+    // The Linux personality (design/0018-linux-personality.md) and its host
+    // sockets (design/0050-linux-net.md).
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c" }, .flags = flags });
+    if (web) {
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
+    } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
     addGfxSources(b, kern, gfx, flags);
     for (kern_libs) |l| kern.root_module.addCSourceFiles(.{
         .root = b.path(b.pathJoin(&.{ drawterm, l.dir })),
@@ -526,7 +539,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         kern.root_module.addCMacro("memccpy", "h9_memccpy");
     }
     if (os == .windows) {
-        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"glue-win32.c"}, .flags = flags });
+        kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "glue-win32.c", "hostsock-win32.c" }, .flags = flags });
         kern.root_module.linkSystemLibrary("ws2_32", .{});
         kern.root_module.linkSystemLibrary("advapi32", .{});
     }
@@ -938,6 +951,21 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(out.*, .{ .custom = "fixtures" }, name).step);
     }
 
+    // Linux fixtures (tests/fixtures/linux, design/0018-linux-personality.md):
+    // static musl programs for arm64 and amd64, in fixtures/linux/<arch>.
+    const linux_fixtures = b.step("linux-fixtures", "Build the Linux fixtures in tests/fixtures/linux (static musl, arm64 and amd64)");
+    for ([_][]const u8{ "arm64", "amd64" }, [_]std.Target.Cpu.Arch{ .aarch64, .x86_64 }) |arch, cpu| {
+        const lt = b.resolveTargetQuery(.{ .cpu_arch = cpu, .os_tag = .linux, .abi = .musl });
+        for (linux_fixture_names) |name| {
+            const m = b.createModule(.{ .target = lt, .optimize = .ReleaseSmall, .link_libc = true });
+            m.addCSourceFile(.{ .file = b.path(b.fmt("tests/fixtures/linux/{s}.c", .{name})), .flags = &.{ "-std=c11", "-D_GNU_SOURCE" } });
+            const fx = b.addExecutable(.{ .name = name, .root_module = m, .linkage = .static });
+            const inst = b.addInstallArtifact(fx, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("fixtures/linux/{s}", .{arch}) } } });
+            linux_fixtures.dependOn(&inst.step);
+        }
+    }
+    b.getInstallStep().dependOn(linux_fixtures);
+
     // Proposal demos that aren't integration cases, by the proposal's slug;
     // `zig build proposal -Dp=...` runs them along with its tagged cases.
     var demos: std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)) = .empty;
@@ -1097,6 +1125,18 @@ pub fn build(b: *std.Build) void {
     const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
     if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
     const go_cases: ?GoFixtures = if (emu == .unicorn) go_fixtures else null;
+    // The Linux Go fixtures (design/0049-linux-threads.md), with the same
+    // toolchain, into fixtures/linux/<arch>/go.
+    if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64" }) |arch| {
+        const dir = b.getInstallPath(.prefix, b.fmt("fixtures/linux/{s}/go", .{arch}));
+        const run = b.addSystemCommand(&.{ g, "-C", "tests/fixtures/linux/go", "build", "-trimpath", "-o", b.fmt("{s}{s}", .{ dir, std.fs.path.sep_str }), "./..." });
+        run.setCwd(b.path("."));
+        goEnv(run, go_version);
+        run.setEnvironmentVariable("GOOS", "linux");
+        run.setEnvironmentVariable("GOARCH", arch);
+        run.has_side_effects = true;
+        linux_fixtures.dependOn(&run.step);
+    };
     // Go's own tests for time, syscall, os and runtime on the emulator, by
     // hand or on a schedule; nothing depends on it.
     const go_stdtest = b.step("go-stdtest", "Run Go's time, syscall, os and runtime tests on the emulator (needs -Demu=unicorn and go)");
@@ -1113,6 +1153,7 @@ pub fn build(b: *std.Build) void {
     }
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const run_integration = addIntegration(b, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
+    if (!test_web) run_integration.step.dependOn(linux_fixtures);
     if (test_web) {
         // The pinned v86 layout, checked against v86.wasm.
         const layout = b.addSystemCommand(&.{ "node", "tests/web/v86-layout.mjs", ".local/v86/v86.wasm" });
@@ -1181,6 +1222,7 @@ pub fn build(b: *std.Build) void {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
             const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
+            if (!test_web) run_cases.step.dependOn(linux_fixtures);
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
         } else proposal_step.dependOn(&b.addFail(b.fmt("-Dp={s} isn't a proposal under design/", .{ref})).step);
@@ -1278,6 +1320,7 @@ pub fn build(b: *std.Build) void {
     };
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tools/guesttree.zig"),

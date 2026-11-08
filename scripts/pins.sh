@@ -34,6 +34,17 @@ x86_64-linux-musl musllinux_1_2_x86_64 73d2eb557cc0255f18c55b15951c46dff1c07f996
 UNICORN_SRC_URL=https://github.com/unicorn-engine/unicorn/archive/refs/tags/$UNICORN_VERSION.tar.gz
 UNICORN_SRC_SHA256=ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4
 
+# An Alpine root for the Linux personality's tests (design/0018-linux-personality.md):
+# the alpine:3.22.2 image's single layer from Docker Hub, by digest, unpacked
+# into .local/linux/alpine-<arch>.
+ALPINE_VERSION=3.22.2
+ALPINE_REGISTRY=https://registry-1.docker.io
+# arch  layer-digest (sha256 of the gzipped tarball)
+ALPINE_LAYERS="
+arm64 6b59a28fa20117e6048ad0616b8d8c901877ef15ff4c7f18db04e4f01f43bc39
+amd64 2d35ebdb57d9971fea0cac1582aa78935adf8058b2cc32db163c98822e5dfa1b
+"
+
 # v86 for the browser host's x86 backend (design/0012-browser-host.md):
 # v86.wasm from the npm release, loaded beside h9.wasm. BSD-2-Clause.
 V86_VERSION=0.5.473

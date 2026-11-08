@@ -50,6 +50,9 @@ pub const Config = struct {
     dump_on_fault: bool = false,
     /// --root; null means $H9ROOT, then the default. See `rootArg`.
     root: ?[]const u8 = null,
+    /// A second --root, for a machine with a 9front and a Linux root
+    /// (design/0018-linux-personality.md, "CLI and API").
+    root2: ?[]const u8 = null,
     /// --root-spec: the attach name sent to a 9P root.
     root_spec: []const u8 = "",
     /// --root-user: the uname sent in attaches to a 9P root.
@@ -190,7 +193,13 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.root_ca = v orelse return error.Usage;
             if (c.root_ca.?.len == 0) return error.Usage;
         } else if (value(args, &i, "--root")) |v| {
-            c.root = v orelse return error.Usage;
+            const r = v orelse return error.Usage;
+            // The last two count: one may be a 9front tree and one a Linux
+            // tree, and a later one of a kind replaces an earlier one.
+            if (c.root == null) c.root = r else if (c.root2 == null) c.root2 = r else {
+                c.root = c.root2;
+                c.root2 = r;
+            }
         } else if (value(args, &i, "--cwd")) |v| {
             c.cwd = v orelse return error.Usage;
         } else if (value(args, &i, "--env")) |v| {

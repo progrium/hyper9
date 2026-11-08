@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         },
         .check => {
-            const root_arg = cfg.root orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
+            const root_arg = cfg.root2 orelse cfg.root orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
             var root_err: []const u8 = "";
             const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| blk: {
                 root_err = rootError(e);
@@ -117,6 +117,10 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
                 std.debug.print("h9: {s}: {t}\n", .{ prog_arg, err });
                 return if (err == error.FileNotFound) exit_not_found else exit_failed;
             };
+            if (h9.linux_elf.machineArch(bytes)) |a| {
+                if (arch == null) arch = a;
+                break :blk .{ .bytes = bytes };
+            }
             const hdr = h9.aout.parse(bytes) catch |err| {
                 std.debug.print("h9: {s}: not a 9front executable: {t}\n", .{ prog_arg, err });
                 return exit_not_executable;
@@ -127,14 +131,24 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .guest => .{ .guest = prog_arg },
     };
 
-    const root_arg = cfg.root orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
+    // --root takes a 9front or a Linux tree, or one of each, and h9 tells
+    // them apart (design/0018-linux-personality.md, "CLI and API").
+    var nine_arg: ?[]const u8 = null;
+    var linux_root: ?[]const u8 = null;
+    for ([_]?[]const u8{ cfg.root, cfg.root2 }) |given| {
+        const r = given orelse continue;
+        if (linuxTree(arena, io, r)) |real| {
+            linux_root = real;
+        } else nine_arg = r; // a later 9front root replaces an earlier one, as before
+    }
+    const root_arg = nine_arg orelse init.environ_map.get("H9ROOT") orelse defaultRoot(arena, io);
     const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| {
         std.debug.print("h9: root {s}: {s}\n", .{ r, rootError(e) });
         return exit_failed;
     } else null;
     // Without a root tree only a host a.out can run; anything resolved in
     // the guest namespace would fail later as a misleading "not found".
-    if (root == null and (prog == .guest or cfg.ns != null)) {
+    if (root == null and linux_root == null and (prog == .guest or cfg.ns != null)) {
         std.debug.print("h9: no root tree found; pass --root or set H9ROOT\n", .{});
         return exit_failed;
     }
@@ -175,6 +189,9 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .root_headers = wo.headers,
         .root_ca = wo.ca,
         .root_contained = cfg.root_contained,
+        .linux_root = linux_root,
+        .nameservers = if (linux_root != null) try hostNameservers(arena, io) else &.{},
+        .nine_prog = cfg.rc != null,
         .proxy = wo.proxy,
         .cwd = cwd,
         .policy = pol,
@@ -232,6 +249,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
     opts.dump_on_fault = cfg.dump_on_fault;
     opts.ns = cfg.ns;
+    opts.console_tty = (std.Io.File.stdin().isTty(io) catch false) and (std.Io.File.stdout().isTty(io) catch false);
     opts.stdio = .{
         .in = in.reader(),
         .in_cancel = .{ .ctx = &in, .func = Stdin.cancel, .reset = Stdin.reset },
@@ -353,7 +371,50 @@ fn defaultRoot(arena: std.mem.Allocator, io: std.Io) ?[]const u8 {
     return root;
 }
 
+/// The host's DNS servers, from its /etc/resolv.conf, for a Linux root
+/// (design/0050-linux-net.md). A host without one (Windows) or naming
+/// none gets Google's public servers, as Docker does.
+fn hostNameservers(arena: std.mem.Allocator, io: std.Io) error{OutOfMemory}![]const []const u8 {
+    const fallback: []const []const u8 = &.{ "8.8.8.8", "8.8.4.4" };
+    const text = std.Io.Dir.cwd().readFileAlloc(io, "/etc/resolv.conf", arena, .limited(64 << 10)) catch return fallback;
+    var out: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |l| {
+        var f = std.mem.tokenizeAny(u8, l, " \t\r");
+        const key = f.next() orelse continue;
+        if (!std.mem.eql(u8, key, "nameserver")) continue;
+        const a = f.next() orelse continue;
+        // A scoped IPv6 address (fe80::1%eth0) means nothing in the guest.
+        if (std.mem.indexOfScalar(u8, a, '%') != null) continue;
+        if (h9.policy.parseIp(a) == null) continue;
+        try out.append(arena, a);
+    }
+    return if (out.items.len > 0) out.items else fallback;
+}
+
 const RootError = error{ NotFound, NotDirOrSocket, BadDial, OutOfMemory };
+
+/// The kern path of `arg` if it's a Linux root tree: a host directory
+/// with /etc/os-release or a /lib/ld-* loader, and neither /rc/bin nor a
+/// 9front /$objtype/bin.
+fn linuxTree(arena: std.mem.Allocator, io: std.Io, arg: []const u8) ?[]const u8 {
+    const cwd = std.Io.Dir.cwd();
+    const real = cwd.realPathFileAlloc(io, arg, arena) catch return null;
+    var dir = cwd.openDir(io, real, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    for ([_][]const u8{ "rc/bin", "arm64/bin", "amd64/bin", "386/bin" }) |p| {
+        if (dir.access(io, p, .{})) |_| return null else |_| {}
+    }
+    if (dir.access(io, "etc/os-release", .{})) |_| return kernPath(arena, real) else |_| {}
+    if (dir.access(io, "usr/lib/os-release", .{})) |_| return kernPath(arena, real) else |_| {}
+    var lib = dir.openDir(io, "lib", .{ .iterate = true }) catch return null;
+    defer lib.close(io);
+    var it = lib.iterate();
+    while (it.next(io) catch null) |e| {
+        if (std.mem.startsWith(u8, e.name, "ld-")) return kernPath(arena, real);
+    }
+    return null;
+}
 
 /// Reads a --root or $H9ROOT value (design/0013-9p-roots.md): a dial
 /// string, or a host path that's a directory (served through #U, which

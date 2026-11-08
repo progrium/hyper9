@@ -5,9 +5,13 @@
 //! flat 64-bit mode (amd64) or in flat 32-bit protected mode (386), with no
 //! MMU and no guest kernel. Hooks turn
 //! syscall instructions, invalid memory accesses and CPU exceptions into
-//! vmm exits, doing the shim's job. Address-space pages are host memory
-//! mapped straight into the engine with uc_mem_map_ptr, so the host and the
-//! guest share them.
+//! vmm exits, doing the shim's job. Guest pages come from one reserved
+//! range of host memory (arena.zig), mapped into each engine once as its
+//! physical memory, so the host and the guest share them. Engines run in
+//! Unicorn's virtual-TLB mode: a fill hook translates a guest address
+//! through the address space's regions, so a change to the address space
+//! never changes Unicorn's memory map, whose every change rebuilds it
+//! (design/0018-linux-personality.md, "The emulator in virtual-TLB mode").
 
 const std = @import("std");
 const vmm = @import("../vmm.zig");
@@ -15,6 +19,7 @@ const arm64 = @import("../arch/arm64.zig");
 const amd64 = @import("../arch/amd64.zig");
 const ia32 = @import("../arch/i386.zig");
 const uc = @import("unicorn");
+const Arena = @import("arena.zig");
 
 /// Unicorn's runtime version, e.g. "2.1".
 pub fn version(buf: []u8) []const u8 {
@@ -23,6 +28,15 @@ pub fn version(buf: []u8) []const u8 {
     _ = uc.uc_version(&major, &minor);
     return std.fmt.bufPrint(buf, "{d}.{d}", .{ major, minor }) catch buf[0..0];
 }
+
+/// Where the arena sits in each engine's physical address space.
+const phys_base: u64 = 1 << 32;
+/// Physical pages with nothing behind them, which a fill hook hands out
+/// for an address the guest may not touch: the access then reaches the
+/// unmapped-memory hook with its offset in the page intact, which the
+/// fill hook alone can't give (it sees only the page).
+const trap_base: u64 = 0;
+const trap_slots = 8;
 
 fn open(arch: vmm.Arch) vmm.Error!*uc.uc_engine {
     const a: uc.uc_arch, const mode: uc.uc_mode = switch (arch) {
@@ -46,6 +60,10 @@ fn open(arch: vmm.Arch) vmm.Error!*uc.uc_engine {
 }
 
 const tcg_buffer_size: u32 = 32 << 20;
+
+/// How long an engine runs guest code while another waits for the guest
+/// lock, before it's asked to stop (design/0049-linux-threads.md).
+const slice_ns = 1 * std.time.ns_per_ms;
 // uc_ctl_set_tcg_buffer_size is a macro: UC_CTL_WRITE(UC_CTL_TCG_BUFFER_SIZE, 1).
 const uc_ctl_set_tcg_buffer_size: c_uint = uc.UC_CTL_TCG_BUFFER_SIZE | (1 << 26) | (1 << 30);
 
@@ -61,38 +79,59 @@ fn prot(p: vmm.Perms) u32 {
     return r;
 }
 
-/// Frees pages from `Backend.allocPages` without free's 0xaa fill in safe
-/// builds, which would touch every page first.
-fn freeRaw(mem: []align(vmm.page_size) u8) void {
-    std.heap.page_allocator.rawFree(mem, .fromByteUnits(vmm.page_size), @returnAddress());
-}
-
 pub const Backend = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     arch: vmm.Arch,
     lock: std.Io.Mutex = .init,
-    /// Live allocations: address to length.
-    allocs: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    /// Where guest pages come from, under `lock`.
+    arena: Arena,
     /// Bytes handed out, against the cap in `limit`.
     used: u64 = 0,
     limit: u64,
     guest: GuestLock = .{},
+    /// The engine holding `guest`, which a waiter asks to stop when its
+    /// slice is up.
+    holder: std.atomic.Value(?*State) = .init(null),
+
+    /// Takes the guest lock for `s` (null: for a shootdown). A waiter that
+    /// sees the same holder for a whole slice asks it to stop at its next
+    /// block (design/0049-linux-threads.md, "Time-slicing").
+    fn acquireGuest(b: *Backend, s: ?*State) void {
+        const g = &b.guest;
+        const ticket = g.next.fetchAdd(1, .acq_rel);
+        while (true) {
+            const cur = g.serving.load(.acquire);
+            if (cur == ticket) break;
+            b.io.futexWaitTimeout(u32, &g.serving.raw, cur, .{ .duration = .{ .raw = .fromNanoseconds(slice_ns), .clock = .awake } }) catch {};
+            if (g.serving.load(.acquire) == cur) {
+                if (b.holder.load(.acquire)) |h| h.stop_req.store(true, .release);
+            }
+        }
+        b.holder.store(s, .release);
+    }
+
+    fn releaseGuest(b: *Backend) void {
+        b.holder.store(null, .release);
+        b.guest.release(b.io);
+    }
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*Backend {
         // Fail here, not at the first vCPU, if Unicorn lacks the architecture.
         _ = uc.uc_close(try open(opts.arch));
-        const b = try gpa.create(Backend);
         const limit = opts.memory orelse vmm.default_memory;
         if (limit > vmm.max_memory) return error.OutOfGuestMemory;
-        b.* = .{ .gpa = gpa, .io = io, .arch = opts.arch, .limit = limit };
+        // Twice the cap in address space, so freed ranges scattered
+        // through it don't run allocations out before the cap does.
+        var arena = Arena.init(std.mem.alignForward(usize, @intCast(2 * limit), vmm.page_size)) catch return error.OutOfGuestMemory;
+        errdefer arena.deinit(gpa);
+        const b = try gpa.create(Backend);
+        b.* = .{ .gpa = gpa, .io = io, .arch = opts.arch, .limit = limit, .arena = arena };
         return b;
     }
 
     pub fn destroy(b: *Backend) void {
-        var it = b.allocs.iterator();
-        while (it.next()) |e| freeRaw(@as([*]align(vmm.page_size) u8, @ptrFromInt(e.key_ptr.*))[0..e.value_ptr.*]);
-        b.allocs.deinit(b.gpa);
+        b.arena.deinit(b.gpa);
         b.gpa.destroy(b);
     }
 
@@ -101,47 +140,26 @@ pub const Backend = struct {
         return 64;
     }
 
-    /// Returns zeroed pages.
+    /// Returns zeroed pages. Pages nothing touches stay unbacked on the
+    /// host: a Go program reserves several hundred MB of brk at start.
     pub fn allocPages(b: *Backend, n: usize) vmm.Error![]align(vmm.page_size) u8 {
-        {
-            b.lock.lockUncancelable(b.io);
-            defer b.lock.unlock(b.io);
-            const len = n * vmm.page_size;
-            if (b.used + len > b.limit) return error.OutOfGuestMemory;
-            b.used += len;
-        }
-        errdefer {
-            b.lock.lockUncancelable(b.io);
-            b.used -= n * vmm.page_size;
-            b.lock.unlock(b.io);
-        }
-        // rawAlloc skips the 0xaa fill that alignedAlloc does in safe
-        // builds. Fresh pages from the OS are zero, and pages nothing
-        // touches stay unbacked on the host: a Go program reserves several
-        // hundred MB of brk at start, and zeroing it by hand cost seconds.
         const len = n * vmm.page_size;
-        const raw = std.heap.page_allocator.rawAlloc(len, .fromByteUnits(vmm.page_size), @returnAddress()) orelse
-            return error.OutOfGuestMemory;
-        const mem: []align(vmm.page_size) u8 = @alignCast(raw[0..len]);
+        if (len == 0) return error.BadAddress;
         b.lock.lockUncancelable(b.io);
         defer b.lock.unlock(b.io);
-        b.allocs.put(b.gpa, @intFromPtr(mem.ptr), mem.len) catch {
-            freeRaw(mem);
-            return error.OutOfGuestMemory;
-        };
+        if (b.used + len > b.limit) return error.OutOfGuestMemory;
+        const mem = b.arena.alloc(b.gpa, len) catch return error.OutOfGuestMemory;
+        b.used += len;
         return mem;
     }
 
-    /// Returns a whole allocation from `allocPages`.
+    /// Returns pages from `allocPages`, no longer mapped.
     pub fn freePages(b: *Backend, mem: []align(vmm.page_size) u8) void {
-        {
-            b.lock.lockUncancelable(b.io);
-            defer b.lock.unlock(b.io);
-            const len = (b.allocs.fetchRemove(@intFromPtr(mem.ptr)) orelse return).value;
-            std.debug.assert(len == mem.len);
-            b.used -= len;
-        }
-        freeRaw(mem);
+        if (mem.len == 0) return;
+        b.lock.lockUncancelable(b.io);
+        defer b.lock.unlock(b.io);
+        b.used -= mem.len;
+        b.arena.freePages(b.gpa, mem);
     }
 
     pub fn newAddressSpace(b: *Backend) vmm.CreateError!*AddressSpace {
@@ -157,21 +175,32 @@ pub const Backend = struct {
             inline else => |a| @unionInit(vmm.Ureg, @tagName(a), .{}),
         } };
         errdefer _ = uc.uc_close(s.engine);
+        try check(uc.uc_ctl(s.engine, uc_ctl_tlb_type, @as(c_int, uc.UC_TLB_VIRTUAL)));
+        try check(uc.uc_mem_map_ptr(s.engine, phys_base, b.arena.mem.len, uc.UC_PROT_ALL, b.arena.mem.ptr));
         try s.addHooks();
+        if (b.arch == .arm64) {
+            // CNTKCTL_EL1: EL0 may read the counter and its frequency, as
+            // Linux allows (Go's procyield reads both).
+            var r: uc.uc_arm64_cp_reg = .{ .crn = 14, .crm = 1, .op0 = 3, .op1 = 0, .op2 = 0, .val = 3 };
+            try check(uc.uc_reg_write(s.engine, uc.UC_ARM64_REG_CP_REG, &r));
+        }
         return .{ .s = s };
     }
 };
 
 /// The emulator keeps the mappings itself; vCPUs copy them into their
-/// engines when they switch to the address space or it changes.
+/// engines when they switch to the address space or it changes, under the
+/// guest lock, so no engine runs with mappings older than a change made
+/// before it took the lock.
 pub const AddressSpace = struct {
     backend: *Backend,
     regions: std.ArrayList(Region) = .empty,
     /// Bumped on every change, so vCPUs know to remap.
-    generation: u64 = 1,
+    generation: std.atomic.Value(u64) = .init(1),
     /// Bumped by `codeChanged`, so vCPUs drop their translated blocks.
     code: std.atomic.Value(u64) = .init(0),
-    /// Guards `regions` against `copy` on another thread (/proc/n/mem).
+    /// Guards `regions`: threads of one process change and read them at
+    /// once (design/0049-linux-threads.md).
     lock: std.atomic.Mutex = .unlocked,
 
     const Region = struct { va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms };
@@ -188,7 +217,7 @@ pub const AddressSpace = struct {
             if (va < r.va + r.mem.len and r.va < va + mem.len) return error.BadAddress;
         }
         try as.regions.append(as.backend.gpa, .{ .va = va, .mem = mem, .perms = perms });
-        as.generation += 1;
+        _ = as.generation.fetchAdd(1, .release);
     }
 
     pub fn unmap(as: *AddressSpace, va: u64) void {
@@ -196,7 +225,7 @@ pub const AddressSpace = struct {
         defer as.lock.unlock();
         for (as.regions.items, 0..) |r, i| if (r.va == va) {
             _ = as.regions.swapRemove(i);
-            as.generation += 1;
+            _ = as.generation.fetchAdd(1, .release);
             return;
         };
     }
@@ -226,12 +255,19 @@ pub const AddressSpace = struct {
     }
 
     /// The host wrote code: vCPUs running this space flush their
-    /// translated blocks before their next run. The whole cache goes, as
-    /// `sync` flushes it; design/0010-self-host.md leaves flushing only
-    /// the written range (uc_ctl_remove_cache) until stepping shows the
-    /// need.
+    /// translated blocks before their next run. The whole cache goes;
+    /// design/0010-self-host.md leaves flushing only the written range
+    /// (uc_ctl_remove_cache) until stepping shows the need.
     pub fn codeChanged(as: *AddressSpace, _: u64, _: u64) void {
         _ = as.code.fetchAdd(1, .release);
+    }
+
+    /// One engine runs at a time, under the guest lock, and syncs its
+    /// mappings after taking it: so once this has taken and passed on the
+    /// lock, no engine still runs with the old ones.
+    pub fn shootdown(as: *AddressSpace) void {
+        as.backend.acquireGuest(null);
+        as.backend.releaseGuest();
     }
 
     pub fn destroy(as: *AddressSpace) void {
@@ -250,12 +286,13 @@ pub const AddressSpace = struct {
 /// Kernel calls run outside it, so processes still block and wait in the
 /// kernel in parallel.
 ///
-/// The lock is only passed on at an exit (a syscall, a fault or a kick),
-/// not on a timer: stopping an engine from another thread with
-/// `uc_emu_stop` can leave its PC at an earlier block than the one it
-/// stopped at, so resuming would run instructions twice. A guest that
-/// spins without syscalls holds the others off until it makes one, as Go
-/// and libc do between short bursts of spinning.
+/// The lock is passed on at an exit (a syscall, a fault or a kick), and
+/// when a waiter has waited a slice (`Backend.acquireGuest`), so a guest
+/// that spins without syscalls doesn't hold the others off. The holder
+/// stops itself, from a block hook on its own thread: stopping an engine
+/// from another thread with `uc_emu_stop` can leave its PC at an earlier
+/// block than the one it stopped at, so resuming would run instructions
+/// twice (design/0049-linux-threads.md, "Time-slicing on the emulator").
 const GuestLock = struct {
     next: std.atomic.Value(u32) = .init(0),
     serving: std.atomic.Value(u32) = .init(0),
@@ -285,6 +322,8 @@ const Stop = union(enum) {
     breakpoint,
     /// A CPU exception other than a syscall (arm64 EXCP_* or x86 vector).
     exception: u32,
+    /// A kick, or the end of the engine's slice.
+    preempted,
 };
 
 /// Heap state behind a Vcpu, so the hooks have a stable pointer.
@@ -294,18 +333,29 @@ const State = struct {
     engine: *uc.uc_engine,
     ureg: vmm.Ureg,
     as: ?*AddressSpace = null,
+    /// The address space's regions as of the last sync, sorted by
+    /// address, which the fill hook searches.
     mapped: std.ArrayList(AddressSpace.Region) = .empty,
+    /// The pages of the trap entries handed out since the TLB was last
+    /// flushed, by slot.
+    trap_va: [trap_slots]u64 = @splat(0),
+    ntrap: u32 = 0,
     generation: u64 = 0,
     /// The space's `code` when this engine last flushed its blocks.
     code: u64 = 0,
     stop: Stop = .none,
     kicked: std.atomic.Value(bool) = .init(false),
-    /// Set from just before `kicked` is checked until uc_emu_start returns.
-    in_run: std.atomic.Value(bool) = .init(false),
+    /// Asks the engine to stop at its next block: set by a kick and by a
+    /// guest-lock waiter whose slice is up, and seen by `onBlock` on the
+    /// engine's own thread. Stopping from another thread with
+    /// uc_emu_stop can leave the PC at an earlier block.
+    stop_req: std.atomic.Value(bool) = .init(false),
 
     fn addHooks(s: *State) vmm.Error!void {
         var h: uc.uc_hook = 0;
+        try check(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_BLOCK, @ptrCast(@constCast(&onBlock)), s, 1, 0));
         try check(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_MEM_INVALID, @ptrCast(@constCast(&onMemInvalid)), s, 1, 0));
+        try check(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_TLB_FILL, @ptrCast(@constCast(&onTlbFill)), s, 1, 0));
         try check(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_INTR, @ptrCast(@constCast(&onIntr)), s, 1, 0));
         if (s.arch == .amd64) {
             try check(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_INSN, @ptrCast(@constCast(&onSyscall)), s, 1, 0, @as(c_int, uc.UC_X86_INS_SYSCALL)));
@@ -328,46 +378,118 @@ const State = struct {
         s.halt(.{ .exception = intno });
     }
 
+    fn onBlock(_: ?*uc.uc_engine, _: u64, _: u32, data: ?*anyopaque) callconv(.c) void {
+        const s: *State = @ptrCast(@alignCast(data));
+        if (!s.stop_req.load(.monotonic)) return;
+        s.stop_req.store(false, .monotonic);
+        if (s.stop == .none) s.halt(.preempted);
+    }
+
     fn onSyscall(_: ?*uc.uc_engine, data: ?*anyopaque) callconv(.c) void {
         const s: *State = @ptrCast(@alignCast(data));
         s.halt(.syscall);
     }
 
-    fn onMemInvalid(_: ?*uc.uc_engine, kind: uc.uc_mem_type, addr: u64, _: c_int, _: i64, data: ?*anyopaque) callconv(.c) bool {
+    /// Translates a guest page for the TLB. An address the guest may not
+    /// access this way gets a trap page instead (see `trap_base`).
+    fn onTlbFill(_: ?*uc.uc_engine, va: u64, kind: uc.uc_mem_type, out: *uc.uc_tlb_entry, data: ?*anyopaque) callconv(.c) bool {
+        const s: *State = @ptrCast(@alignCast(data));
+        if (s.find(va)) |r| {
+            const ok = switch (kind) {
+                uc.UC_MEM_WRITE => r.perms.write,
+                uc.UC_MEM_FETCH => r.perms.exec,
+                else => r.perms.read,
+            };
+            if (ok) {
+                out.paddr = phys_base + s.backend.arena.offsetOf(r.mem.ptr) + (va - r.va);
+                out.perms = @intCast(prot(r.perms));
+                return true;
+            }
+        }
+        const slot: u64 = @min(s.ntrap, trap_slots - 1);
+        s.trap_va[slot] = va;
+        s.ntrap += 1;
+        out.paddr = trap_base + slot * vmm.page_size;
+        out.perms = uc.UC_PROT_ALL;
+        return true;
+    }
+
+    /// The region holding `va`, by binary search.
+    fn find(s: *State, va: u64) ?*const AddressSpace.Region {
+        const items = s.mapped.items;
+        var lo: usize = 0;
+        var hi: usize = items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const r = &items[mid];
+            if (va < r.va) hi = mid else if (va - r.va >= r.mem.len) lo = mid + 1 else return r;
+        }
+        return null;
+    }
+
+    /// An access to a trap page: `paddr` is the trap page's address with
+    /// the access's offset in the page.
+    fn onMemInvalid(_: ?*uc.uc_engine, kind: uc.uc_mem_type, paddr: u64, _: c_int, _: i64, data: ?*anyopaque) callconv(.c) bool {
         const s: *State = @ptrCast(@alignCast(data));
         const access: @FieldType(vmm.Fault, "access") = switch (kind) {
             uc.UC_MEM_WRITE_UNMAPPED, uc.UC_MEM_WRITE_PROT => .write,
             uc.UC_MEM_FETCH_UNMAPPED, uc.UC_MEM_FETCH_PROT => .exec,
             else => .read,
         };
+        const off = paddr -% trap_base;
+        const slot = off / vmm.page_size;
+        const addr = if (slot < trap_slots) s.trap_va[slot] + off % vmm.page_size else paddr;
         s.stop = .{ .fault = .{ .addr = addr, .access = access, .syndrome = @intCast(kind) } };
         return false; // Unicorn stops with an error, leaving the PC at the access
     }
 
-    /// Makes the engine's mappings match the address space.
+    /// Makes the engine's view match the address space: the regions the
+    /// fill hook searches, and its TLB and translated blocks where a
+    /// change could leave them stale.
     fn sync(s: *State) vmm.Error!void {
+        // Trap entries name their slots, which start over after a flush.
+        if (s.ntrap > 0) {
+            try check(uc.uc_ctl(s.engine, uc_ctl_tlb_flush));
+            s.ntrap = 0;
+        }
         const as = s.as orelse return;
         const code = as.code.load(.acquire);
-        if (s.generation == as.generation) {
-            if (s.code != code) {
-                // The host wrote code (codeChanged).
-                try check(uc.uc_ctl(s.engine, uc_ctl_tb_flush));
-                s.code = code;
-            }
-            return;
+        if (s.code != code) {
+            // The host wrote code (codeChanged).
+            try check(uc.uc_ctl(s.engine, uc_ctl_tb_flush));
+            s.code = code;
         }
+        if (s.generation == as.generation.load(.acquire)) return;
         as.lockSpin();
         defer as.lock.unlock();
-        for (s.mapped.items) |r| try check(uc.uc_mem_unmap(s.engine, r.va, r.mem.len));
-        s.mapped.clearRetainingCapacity();
-        for (as.regions.items) |r| {
-            try check(uc.uc_mem_map_ptr(s.engine, r.va, r.mem.len, prot(r.perms), r.mem.ptr));
-            s.mapped.append(s.backend.gpa, r) catch return error.OutOfGuestMemory;
+        const gpa = s.backend.gpa;
+        // A region gone or changed may be in the TLB; a new one can't be.
+        // Translated blocks are keyed by physical address, so only an
+        // executable region's own are dropped with it, found through the
+        // old mappings while the fill hook still has them.
+        var dropped = false;
+        {
+            var have: std.AutoHashMapUnmanaged(u64, AddressSpace.Region) = .empty;
+            defer have.deinit(gpa);
+            have.ensureTotalCapacity(gpa, @intCast(as.regions.items.len)) catch return error.OutOfGuestMemory;
+            for (as.regions.items) |r| have.putAssumeCapacity(r.va, r);
+            for (s.mapped.items) |r| {
+                if (have.get(r.va)) |w| {
+                    if (w.mem.ptr == r.mem.ptr and w.mem.len == r.mem.len and w.perms == r.perms) continue;
+                }
+                dropped = true;
+                if (r.perms.exec) try check(uc.uc_ctl(s.engine, uc_ctl_tb_remove, r.va, r.va + r.mem.len));
+            }
         }
-        // Translated blocks may hold code from the old mappings.
-        try check(uc.uc_ctl(s.engine, uc_ctl_tb_flush));
-        s.generation = as.generation;
-        s.code = code;
+        s.mapped.clearRetainingCapacity();
+        s.mapped.appendSlice(gpa, as.regions.items) catch return error.OutOfGuestMemory;
+        std.mem.sortUnstable(AddressSpace.Region, s.mapped.items, {}, struct {
+            fn lt(_: void, a: AddressSpace.Region, b: AddressSpace.Region) bool {
+                return a.va < b.va;
+            }
+        }.lt);
+        if (dropped) try check(uc.uc_ctl(s.engine, uc_ctl_tlb_flush));
+        s.generation = as.generation.load(.acquire);
     }
 
     fn writeRegs(s: *State) vmm.Error!void {
@@ -424,25 +546,22 @@ const State = struct {
 
     fn run(s: *State) vmm.Error!vmm.Exit {
         if (s.as == null) return error.BadAddress;
-        // `in_run` is set before `kicked` is checked, so a kick either is
-        // seen here or finds `in_run` set and repeats its stop request
-        // until this run ends (see `kick`).
-        s.in_run.store(true, .seq_cst);
-        defer s.in_run.store(false, .release);
         if (s.kicked.swap(false, .seq_cst)) return .interrupted;
-        try s.sync();
         try s.writeRegs();
         s.stop = .none;
-        s.backend.guest.acquire(s.backend.io);
-        // A kick while this waited for the lock may have stopped nothing,
-        // since `kick` stops repeating its request after a while.
+        const b = s.backend;
+        b.acquireGuest(s);
+        // A kick from here on sets `stop_req`, which the first block sees.
         if (s.kicked.swap(false, .seq_cst)) {
-            s.backend.guest.release(s.backend.io);
+            b.releaseGuest();
             return .interrupted;
         }
+        s.sync() catch |e| {
+            b.releaseGuest();
+            return e;
+        };
         const err = uc.uc_emu_start(s.engine, s.ureg.pc(), std.math.maxInt(u64), 0, 0);
-        s.backend.guest.release(s.backend.io);
-        s.in_run.store(false, .release);
+        b.releaseGuest();
         try s.readRegs();
         const stop = s.stop;
         s.stop = .none;
@@ -457,6 +576,11 @@ const State = struct {
                 return .breakpoint;
             },
             .exception => |n| return s.exception(n),
+            .preempted => {
+                // A kick's request is taken here; a slice's needs no more.
+                _ = s.kicked.swap(false, .acquire);
+                return .interrupted;
+            },
             .none => {},
         }
         if (err != uc.UC_ERR_OK) {
@@ -546,6 +670,12 @@ fn clearCache(start: usize, end: usize) callconv(.c) void {
 
 // uc_ctl_flush_tb is a macro: UC_CTL_WRITE(UC_CTL_TB_FLUSH, 0).
 const uc_ctl_tb_flush: c_uint = uc.UC_CTL_TB_FLUSH | (1 << 30);
+// uc_ctl_remove_cache: UC_CTL_WRITE(UC_CTL_TB_REMOVE_CACHE, 2).
+const uc_ctl_tb_remove: c_uint = uc.UC_CTL_TB_REMOVE_CACHE | (2 << 26) | (1 << 30);
+// uc_ctl_flush_tlb: UC_CTL_WRITE(UC_CTL_TLB_FLUSH, 0).
+const uc_ctl_tlb_flush: c_uint = uc.UC_CTL_TLB_FLUSH | (1 << 30);
+// uc_ctl_tlb_mode: UC_CTL_WRITE(UC_CTL_TLB_TYPE, 1).
+const uc_ctl_tlb_type: c_uint = uc.UC_CTL_TLB_TYPE | (1 << 26) | (1 << 30);
 
 // QEMU's arm64 exception numbers, as passed to UC_HOOK_INTR.
 const arm64_excp_swi = 2;
@@ -730,20 +860,12 @@ pub const Vcpu = struct {
     }
 
     /// Safe from any thread. A kick before `run` makes the next run return
-    /// `.interrupted` at once.
+    /// `.interrupted` at once; during one, the engine stops at its next
+    /// block (`onBlock`).
     pub fn kick(v: *Vcpu) void {
         const s = v.s;
         s.kicked.store(true, .seq_cst);
-        _ = uc.uc_emu_stop(s.engine);
-        // uc_emu_start clears Unicorn's stop request, so a stop landing
-        // just before it is lost. Repeat it until the run has seen the kick
-        // (taking `kicked`) or ended. The bound only guards against a run
-        // stuck outside Unicorn; a running engine stops within microseconds.
-        var tries: u32 = 0;
-        while (s.in_run.load(.seq_cst) and s.kicked.load(.seq_cst) and tries < 10_000) : (tries += 1) {
-            std.Thread.yield() catch {};
-            if (tries % 16 == 15) _ = uc.uc_emu_stop(s.engine);
-        }
+        s.stop_req.store(true, .seq_cst);
     }
 
     pub fn run(v: *Vcpu) vmm.Error!vmm.Exit {

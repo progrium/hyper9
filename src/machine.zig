@@ -23,6 +23,13 @@ const consin = @import("consin.zig");
 const web = @import("web.zig");
 const hstream = @import("hstream.zig");
 const ws = @import("ws.zig");
+const lsys = @import("linux/sys.zig");
+const lsig = @import("linux/signal.zig");
+const lexec = @import("linux/exec.zig");
+const lmm = @import("linux/mm.zig");
+const elf = @import("linux/elf.zig");
+const kc = @import("linux/kc.zig");
+const attr = @import("dotl/attr.zig");
 const gfx = @import("gfx.zig");
 
 pub const Status = union(enum) {
@@ -151,6 +158,21 @@ pub const Machine = struct {
         /// target starts at the tree's top, and `..` stops there
         /// (design/0034-symlinks-in-root.md).
         root_contained: bool = false,
+        /// A Linux root tree, absolute and resolved: the Linux view's /
+        /// (design/0018-linux-personality.md).
+        linux_root: ?[]const u8 = null,
+        /// The host's DNS servers, as addresses: a Linux root without an
+        /// /etc/resolv.conf gets one naming them, and the network policy
+        /// lets port 53 reach them even when they're link-local
+        /// (design/0050-linux-net.md). The CLI reads the host's
+        /// resolv.conf.
+        nameservers: []const []const u8 = &.{},
+        /// Resolve a guest program in the 9front view even with a Linux
+        /// root: `--rc` always means 9front's rc.
+        nine_prog: bool = false,
+        /// Whether the console is a terminal, for a Linux program's
+        /// isatty: the CLI sets it when its stdin and stdout both are.
+        console_tty: bool = true,
         /// Proxies for host-made connections; null goes direct. The CLI
         /// fills it from HTTPS_PROXY, HTTP_PROXY and NO_PROXY.
         proxy: ?Proxy = null,
@@ -238,9 +260,10 @@ pub const Machine = struct {
         out: *std.Io.Writer,
         err: *std.Io.Writer,
         /// Called when the guest turns raw mode on or off (writing `rawon`
-        /// or `rawoff` to /dev/consctl, or closing its last consctl). The
-        /// CLI puts the host terminal in raw mode. The machine turns raw
-        /// mode off when a run ends.
+        /// or `rawoff` to /dev/consctl, or closing its last consctl), and
+        /// echo (`echooff`, `echoon`). The CLI puts the host terminal in
+        /// raw mode or turns its echo off. The machine turns both back
+        /// when a run ends.
         raw: ?Raw = null,
     };
 
@@ -273,7 +296,7 @@ pub const Machine = struct {
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
-        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .root_contained = opts.root_contained };
+        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .root_contained = opts.root_contained, .linux_root = opts.linux_root, .nameservers = opts.nameservers };
         if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
         if (opts.root) |r| switch (r) {
             .dir => |d| in.root = d,
@@ -403,9 +426,13 @@ pub const Machine = struct {
         job.ncpu = m.cpuCount();
         kern.setNoteKick(Proc.noteKick);
         kern.setProcStatus(Proc.status);
+        kern.setProcThreads(Proc.threads);
+        kern.setWantChld(Proc.wantChld);
         kern.setProcSegment(Proc.segments);
         kern.setStopKick(Proc.stopKick);
         kern.setProcDebug(Proc.debug);
+        kc.setGen(linuxGen);
+        job.start_ns = kern.monoNs();
         job.m = &job.mc;
         job.pages = .{ .ctx = job, .alloc = Job.allocPages, .free = Job.freePages };
         job.mc.err_msg = "";
@@ -443,11 +470,11 @@ pub const Machine = struct {
             m.stuck = true;
             m.root_changes = job.rootChanges();
             kern.removeConsole(job.con_id);
-            job.con.setRaw(false);
+            job.con.reset();
             return .{ .killed = if (timed_out) timeout_note else stopped_note };
         }
         kern.removeConsole(job.con_id);
-        job.con.setRaw(false);
+        job.con.reset();
         m.root_changes = job.rootChanges();
         if (job.mach.load(.acquire)) |mc| mc.put();
         // No process reads the console now. A reader thread still in a
@@ -477,6 +504,9 @@ pub const Machine = struct {
     const timeout_note = "h9: timeout";
     const stopped_note = "h9: machine stopped";
     const grace_ms = 500;
+    /// How long, past `grace_ms`, the machine waits for processes that
+    /// are only tearing down.
+    const teardown_ms = 30_000;
     /// How long processes have to handle `hangup` (at a timeout, a closed
     /// terminal or SIGTERM) before the machine is torn down. Shorter than
     /// the 5 s Windows gives a console process after CTRL_CLOSE_EVENT.
@@ -521,6 +551,8 @@ pub const Machine = struct {
         pool: cpupool.Pool,
         /// The CPUs /dev/sysstat lists (design/0007-go-compat.md).
         ncpu: u32 = 1,
+        /// When the run started, for /proc/uptime.
+        start_ns: i64 = 0,
         /// The guest's changes to the root's overlay, reported by #O once
         /// the namespace is built. Guarded by `changes_lock`.
         changes: RootChanges = .{},
@@ -667,7 +699,21 @@ pub const Machine = struct {
                 const tick: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(10), .clock = .awake };
                 if (j.all_done.waitTimeout(j.m.io, .{ .duration = tick })) |_| return true else |_| j.stopAll();
             }
+            // Processes already tearing down aren't stuck, only slow: an
+            // emulator engine with thousands of regions takes seconds to
+            // close. Wait for those, up to a bound.
+            while (waited < teardown_ms and j.allExiting()) : (waited += 10) {
+                const tick: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(10), .clock = .awake };
+                if (j.all_done.waitTimeout(j.m.io, .{ .duration = tick })) |_| return true else |_| {}
+            }
             return j.all_done.isSet();
+        }
+
+        fn allExiting(j: *Job) bool {
+            j.lockSpin();
+            defer j.lock.unlock();
+            for (j.procs.items) |p| if (!p.exiting) return false;
+            return true;
         }
     };
 
@@ -693,6 +739,9 @@ pub const Machine = struct {
         /// The a.out, for symbolizing faults with dump_on_fault.
         image: ?[]u8 = null,
         msg_buf: [256]u8 = undefined,
+        /// Set under `job.lock` once the process is tearing down
+        /// (`Job.waitAll`).
+        exiting: bool = false,
         /// Set when a note may be waiting: by the kernel's kick hook when a
         /// note is posted to the process, and after noted. The exit loop
         /// checks it before each run.
@@ -708,6 +757,12 @@ pub const Machine = struct {
         /// running guest code, and the mapped memory in KiB.
         in_sys: web.Atomic(u64) = .init(0),
         mem_kb: web.Atomic(u64) = .init(0),
+        /// The Linux personality's state, while the process runs a Linux
+        /// binary (design/0018-linux-personality.md). Its Mm owns `as`.
+        lx: ?*lsys.Process = null,
+        /// Set in a vfork child: its parent waits on it until the child
+        /// execs or exits.
+        vfork_done: ?*std.Io.Event = null,
         /// Set by the stop kick hook when a debugger asks the process to
         /// stop, so the exit loop asks the kernel at its next stop point.
         stop_flag: std.atomic.Value(bool) = .init(false),
@@ -731,7 +786,29 @@ pub const Machine = struct {
         }
 
         fn noteMem(p: *Proc) void {
-            p.mem_kb.store(p.segs.mapped() / 1024, .release);
+            const n = if (p.lx) |l| l.mm.bytes() else p.segs.mapped();
+            p.mem_kb.store(n / 1024, .release);
+        }
+
+        /// Wakes a vfork parent.
+        fn vforkRelease(p: *Proc) void {
+            if (p.vfork_done) |ev| {
+                p.vfork_done = null;
+                ev.set(p.job.m.io);
+            }
+        }
+
+        /// Drops the Linux state and its address space.
+        fn dropLinux(p: *Proc) void {
+            const l = p.lx orelse return;
+            p.job.lockSpin();
+            p.lx = null;
+            p.job.lock.unlock();
+            const m = l.mm;
+            l.deinit();
+            p.job.m.gpa.destroy(l);
+            m.put();
+            p.as = null;
         }
 
         /// The kernel's hook for /proc/n/segment. Runs on the reading
@@ -744,9 +821,9 @@ pub const Machine = struct {
         /// The kernel's hook for /proc/n/status: the state, as 9front's
         /// psstate (the syscall's name, capitalized, or Running), and the
         /// memory. Runs on the reading thread.
-        fn status(aux: ?*anyopaque, buf: [*]u8, n: c_int, mem: *c_ulong) callconv(.c) void {
+        fn status(aux: ?*anyopaque, buf: [*]u8, n: c_int, mem: *c_uint) callconv(.c) void {
             const p: *Proc = @ptrCast(@alignCast(aux orelse return));
-            mem.* = @intCast(p.mem_kb.load(.acquire));
+            mem.* = @truncate(p.mem_kb.load(.acquire));
             const out = buf[0..@intCast(n)];
             const nr = p.in_sys.load(.acquire);
             var name: []const u8 = "Running";
@@ -755,6 +832,25 @@ pub const Machine = struct {
             @memcpy(out[0..len], name[0..len]);
             if (nr != 0 and len > 0) out[0] = std.ascii.toUpper(out[0]);
             out[len] = 0;
+        }
+
+        /// The kernel's hook for Linux's /proc/n/status: the thread group
+        /// and its size (design/0049-linux-threads.md).
+        fn threads(aux: ?*anyopaque, tgid: *c_uint, n: *c_uint) callconv(.c) void {
+            const p: *Proc = @ptrCast(@alignCast(aux orelse return));
+            p.job.lockSpin();
+            defer p.job.lock.unlock();
+            const l = p.lx orelse return;
+            tgid.* = @intCast(l.tgid());
+            n.* = @intCast(l.g.count());
+        }
+
+        /// A Linux parent gets SIGCHLD when a child exits, unless it
+        /// ignores it.
+        fn wantChld(aux: ?*anyopaque) callconv(.c) c_int {
+            const p: *Proc = @ptrCast(@alignCast(aux orelse return 0));
+            const l = p.lx orelse return 0;
+            return @intFromBool(lsys.load64(&l.sig.actions[lsig.SIGCHLD].handler) != lsig.SIG_IGN);
         }
 
         fn setKproc(p: *Proc) void {
@@ -906,19 +1002,27 @@ pub const Machine = struct {
             const j = p.job;
             const gpa = j.m.gpa;
             const io = j.m.io;
-            // The namespace and fds can hold overlays, whose pages are the
-            // machine's: they go now, not after the machine stops waiting.
-            kern.release();
+            j.lockSpin();
+            p.exiting = true;
+            j.lock.unlock();
             // No kick hook may run on the Proc once it's freed.
             kern.setAux(null);
             if (p.lease) |l| {
                 p.setLease(null);
                 l.release();
             }
-            if (p.as) |as| {
+            p.vforkRelease();
+            if (p.lx != null) {
+                p.dropLinux();
+            } else if (p.as) |as| {
                 p.segs.release(as);
                 as.destroy();
             }
+            // The namespace and fds can hold overlays, whose pages are the
+            // machine's: they go now, not after the machine stops waiting.
+            // After the memory, since the last unmap of a shared file
+            // mapping writes it back by path, through the namespace.
+            kern.release();
             if (p.image) |b| gpa.free(b);
             j.lockSpin();
             for (j.procs.items, 0..) |q, i| if (q == p) {
@@ -960,6 +1064,24 @@ pub const Machine = struct {
         p.exit();
     }
 
+    /// Reads the first process's 9front program, following #!, and
+    /// returns its bytes, with argv updated.
+    fn loadNine(m: *Machine, p: *Proc, arena: std.mem.Allocator, name: []const u8, argv: *[]const []const u8, text_path: *?[]const u8) RunError![]const u8 {
+        _ = p;
+        const g = try m.readGuest(arena, name);
+        const img = interpret(arena, g.path, g.bytes, argv.*) catch |err| {
+            m.err_msg = switch (err) {
+                error.NotFound => kern.errstr(),
+                error.OutOfMemory => "no memory",
+                else => ebadexec,
+            };
+            return if (err == error.NotFound) error.NotFound else error.NotExecutable;
+        };
+        argv.* = img.argv;
+        text_path.* = img.path;
+        return img.bytes;
+    }
+
     fn startFirst(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
         if (j.stopping.load(.acquire)) return .{ .killed = timeout_note };
@@ -996,20 +1118,46 @@ pub const Machine = struct {
         const bytes = switch (j.prog) {
             .bytes => |b| b,
             .guest => |name| blk: {
-                const g = try m.readGuest(arena.allocator(), name);
-                const img = interpret(arena.allocator(), g.path, g.bytes, argv) catch |err| {
-                    m.err_msg = switch (err) {
-                        error.NotFound => kern.errstr(),
-                        error.OutOfMemory => "no memory",
-                        else => ebadexec,
+                if (m.opts.linux_root != null and !m.opts.nine_prog) {
+                    // In the Linux view (design/0018, "CLI and API").
+                    const a = arena.allocator();
+                    const envp = linuxEnv(a) catch return error.OutOfMemory;
+                    var path_var: []const u8 = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+                    for (envp) |e| if (std.mem.startsWith(u8, e, "PATH=")) {
+                        path_var = e[5..];
                     };
-                    return if (err == error.NotFound) error.NotFound else error.NotExecutable;
-                };
-                argv = img.argv;
-                text_path = img.path;
-                break :blk img.bytes;
+                    const found = findLinux(a, name, path_var) orelse {
+                        m.err_msg = "file does not exist";
+                        return error.NotFound;
+                    };
+                    // A 9front program named by its Linux path (/9/bin/ls)
+                    // runs as it would from the 9front view.
+                    const head = readLinux(a, found) catch "";
+                    const nine = head.len > 0 and !elf.isElf(head) and !std.mem.startsWith(u8, head, "#!");
+                    if (nine and std.mem.startsWith(u8, found, "/9/")) break :blk try m.loadNine(p, a, found[2..], &argv, &text_path);
+                    var name_buf: [kern.ERRMAX]u8 = undefined;
+                    kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(found)}) catch "a.out");
+                    m.linuxExecPath(p, null, found, argv, envp) catch {
+                        m.err_msg = kern.errstr();
+                        return if (attr.errno(m.err_msg) == attr.E.NOENT) error.NotFound else error.NotExecutable;
+                    };
+                    return m.loop(p);
+                }
+                break :blk try m.loadNine(p, arena.allocator(), name, &argv, &text_path);
             },
         };
+        if (elf.isElf(bytes)) {
+            const path = switch (j.prog) {
+                .guest => |n| n,
+                .bytes => if (j.argv.len > 0) j.argv[0] else "a.out",
+            };
+            const envp = linuxEnv(arena.allocator()) catch return error.OutOfMemory;
+            m.execLinux(p, null, arena.allocator(), path, bytes, argv, envp) catch {
+                m.err_msg = kern.errstr();
+                return error.NotExecutable;
+            };
+            return m.loop(p);
+        }
         const hdr = aout.parse(bytes) catch {
             m.err_msg = "not a 9front executable";
             return error.NotExecutable;
@@ -1047,6 +1195,7 @@ pub const Machine = struct {
         kern.setPages(&p.job.pages);
         kern.setCpus(p.job.ncpu);
         p.setKproc();
+        if (p.lx != null) kern.setNotify(true);
         const st = m.loop(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {t}", .{e}) catch "h9: error" };
         setExits(switch (st) {
             .exited => |t| t,
@@ -1069,6 +1218,47 @@ pub const Machine = struct {
     /// 9front delivers them on the way back to user mode. Runs on the
     /// process's thread.
     fn loop(m: *Machine, p: *Proc) RunError!Status {
+        const st = m.runLoop(p) catch |e| {
+            if (p.lx) |l| _ = m.linuxEnd(p, l, .{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {t}", .{e}) catch "h9: error" });
+            return e;
+        };
+        const l = p.lx orelse return st;
+        return m.linuxEnd(p, l, st);
+    }
+
+    /// How a Linux thread's end ends its group (design/0049-linux-
+    /// threads.md). exit ends only the thread, but the leader waits for
+    /// the others, since its wait record is the group's. exit_group and a
+    /// fatal signal end the group: the first sets the status, the other
+    /// threads are killed, and the leader exits with it once they're gone.
+    fn linuxEnd(m: *Machine, p: *Proc, l: *lsys.Process, st: Status) Status {
+        _ = m;
+        lsys.threadExiting(l);
+        lsys.threadCpuEnd(l);
+        const g = l.g;
+        const group_ends = switch (st) {
+            .exited => |t| if (l.thread_exit) false else g.setEnd(t, false),
+            .killed => |t| g.setEnd(t, true),
+        };
+        if (group_ends) {
+            var buf: [256]u32 = undefined;
+            for (g.others(l.pid, &buf)) |tid| _ = kern.postNote(tid, "kill", .user) catch {};
+        }
+        if (!l.isLeader()) return st;
+        // The leader goes last. A kill while it waits (another thread's
+        // exit_group) only ends the wait early.
+        while (g.count() > 1 and !p.job.stopping.load(.acquire)) kern.sleep(5) catch {};
+        lsys.reportCpu(l);
+        lsys.releaseAllLocks(l);
+        g.lockSpin();
+        defer g.lock.unlock();
+        const e = g.end orelse return st;
+        const n = @min(e.msg.len, p.msg_buf.len);
+        @memcpy(p.msg_buf[0..n], e.msg[0..n]);
+        return if (e.killed) .{ .killed = p.msg_buf[0..n] } else .{ .exited = p.msg_buf[0..n] };
+    }
+
+    fn runLoop(m: *Machine, p: *Proc) RunError!Status {
         const j = p.job;
         try j.pool.acquire(&p.lease_store);
         p.setLease(&p.lease_store);
@@ -1077,16 +1267,74 @@ pub const Machine = struct {
         vcpu.setExtra(&p.extra);
         var u = p.ureg;
         vcpu.setUreg(&u);
+        // A clone or fork child's time starts here, on its own thread.
+        if (p.lx) |l| l.cpu0 = lsys.cputime.thread();
+        var last_fault: struct { addr: u64 = 0, access: @FieldType(vmm.Fault, "access") = .read, pc: u64 = 0, gen: u64 = 0 } = .{};
         while (true) {
             if (j.stopping.load(.acquire)) return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
-            // 9front stops a debugged process on its way back to user
-            // mode, before delivering a note.
-            if (try stopPoint(p, vcpu, &u)) |st| return st;
-            if (p.note_flag.swap(false, .acq_rel)) {
+            if (p.lx) |l| {
+                const flagged = p.note_flag.swap(false, .acq_rel);
+                if (flagged or l.restart != null or l.sig.deliverable()) {
+                    if (try m.deliverLinux(p, vcpu, &u, flagged)) |msg| return .{ .killed = msg };
+                }
+            } else if (try stopPoint(p, vcpu, &u)) |st| {
+                // 9front stops a debugged process on its way back to user
+                // mode, before delivering a note.
+                return st;
+            } else if (p.note_flag.swap(false, .acq_rel)) {
                 if (try deliver(p, vcpu, &u)) |msg| return .{ .killed = msg };
             }
             const exit = try vcpu.run();
             vcpu.getUreg(&u);
+            if (exit != .fault) last_fault = .{};
+            if (p.lx) |l| switch (exit) {
+                .syscall => {
+                    if (try m.linuxSyscall(p, l, vcpu, &u)) |st| return st;
+                    continue;
+                },
+                .fault => |f| {
+                    // An EL0 read of an ID register, which Linux emulates
+                    // (lexec.emulateIdRead): HVF reports it as a system
+                    // register trap, the emulator as an invalid instruction.
+                    if (m.arch == .arm64 and f.access == .exec and f.addr == u.pc()) {
+                        var w: [4]u8 = undefined;
+                        if (l.readMem(f.addr, &w)) |_| {
+                            if (lexec.emulateIdRead(std.mem.readInt(u32, &w, .little))) |r| {
+                                if (r.rt != 31) u.arm64.r[r.rt] = r.value;
+                                u.arm64.pc += 4;
+                                vcpu.setUreg(&u);
+                                last_fault = .{};
+                                continue;
+                            }
+                        } else |_| {}
+                    }
+                    // The same fault again at once, with no remap of the
+                    // address space in between, means the retry didn't
+                    // help: it's real. A remap between them (another
+                    // thread's mmap or mprotect in the same chunk) may have
+                    // caught the retry with the page briefly unmapped.
+                    const same = f.addr == last_fault.addr and f.access == last_fault.access and u.pc() == last_fault.pc;
+                    if (l.mm.fault(f.addr, switch (f.access) {
+                        .read => .read,
+                        .write => .write,
+                        .exec => .exec,
+                    }) catch null) |gen| if (!same or gen != last_fault.gen) {
+                        last_fault = .{ .addr = f.addr, .access = f.access, .pc = u.pc(), .gen = gen };
+                        p.noteMem();
+                        continue;
+                    };
+                    if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, "");
+                    // A fault while the signal is blocked or ignored kills,
+                    // as Linux's force_sig does.
+                    const a = l.sig.actions[lsig.SIGSEGV];
+                    if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(lsig.SIGSEGV) != 0) {
+                        return .{ .killed = lsig.deathNote(lsig.SIGSEGV, &p.msg_buf) };
+                    }
+                    _ = l.sig.post(lsig.SIGSEGV, .{ .code = if (!l.mm.mapped(f.addr)) lsig.SEGV_MAPERR else lsig.SEGV_ACCERR, .addr = f.addr });
+                    continue;
+                },
+                else => {},
+            };
             switch (exit) {
                 .syscall => switch (blk: {
                     // /proc/n/regs serves these while the call runs.
@@ -1320,6 +1568,791 @@ pub const Machine = struct {
     /// 9front's exit status for a broken noted.
     const suicide = "Suicide";
 
+    // The Linux personality (design/0018-linux-personality.md): exec of an
+    // ELF binary, the exit loop's calls and signals, and clone.
+
+    /// The environment a Linux program starts with, from /env: rc lists
+    /// joined with spaces, `user` also as USER and LOGNAME, and rc's
+    /// per-process variables left out. 9front's own (`path`, `home`) stay,
+    /// so a 9front program the Linux one runs gets them back. PATH and
+    /// HOME get Linux defaults when they aren't set.
+    fn linuxEnv(arena: std.mem.Allocator) error{OutOfMemory}![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        var have_path = false;
+        var have_home = false;
+        const skip = [_][]const u8{ "prompt", "status", "pid", "apid", "timezone", "ifs", "rcname", "cflag", "0", "*" };
+        const fd = kern.open("/env", kern.OREAD) catch return out.items;
+        defer kern.close(fd) catch {};
+        var buf: [8192]u8 = undefined;
+        var off: i64 = 0;
+        while (true) {
+            const n = kern.pread(fd, &buf, off) catch break;
+            if (n == 0) break;
+            off += @intCast(n);
+            var i: usize = 0;
+            while (i + 2 <= n) {
+                const size = @as(usize, std.mem.readInt(u16, buf[i..][0..2], .little)) + 2;
+                if (i + size > n or size < 43) break;
+                const nlen = std.mem.readInt(u16, buf[i + 41 ..][0..2], .little);
+                const name = buf[i + 43 ..][0..nlen];
+                i += size;
+                if (std.mem.indexOfScalar(u8, name, '#') != null or std.mem.indexOfScalar(u8, name, '=') != null) continue;
+                var skipped = false;
+                for (skip) |sk| if (std.mem.eql(u8, sk, name)) {
+                    skipped = true;
+                };
+                if (skipped) continue;
+                var pbuf: [kern.ERRMAX + 8]u8 = undefined;
+                const path = std.fmt.bufPrintZ(&pbuf, "/env/{s}", .{name}) catch continue;
+                const vfd = kern.open(path, kern.OREAD) catch continue;
+                defer kern.close(vfd) catch {};
+                var vbuf: [16384]u8 = undefined;
+                const vn = kern.pread(vfd, &vbuf, 0) catch continue;
+                var v = vbuf[0..vn];
+                if (v.len > 0 and v[v.len - 1] == 0) v = v[0 .. v.len - 1];
+                for (v) |*ch| if (ch.* == 0) {
+                    ch.* = ' ';
+                };
+                if (std.mem.eql(u8, name, "user")) {
+                    try out.append(arena, try std.fmt.allocPrint(arena, "USER={s}", .{v}));
+                    try out.append(arena, try std.fmt.allocPrint(arena, "LOGNAME={s}", .{v}));
+                }
+                if (std.mem.eql(u8, name, "PATH")) have_path = true;
+                if (std.mem.eql(u8, name, "HOME")) have_home = true;
+                try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ name, v }));
+            }
+        }
+        if (!have_path) try out.append(arena, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        if (!have_home) try out.append(arena, "HOME=/root");
+        return out.items;
+    }
+
+    /// Loads Linux program `bytes`, found at `path`, into a new address
+    /// space and makes it the process's, as exec does for an a.out: the
+    /// process is unchanged until the image is built. With `vcpu` null
+    /// (the first process) the exit loop sets the address space.
+    fn execLinux(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, arena: std.mem.Allocator, path: []const u8, bytes: []const u8, argv: []const []const u8, envp: []const []const u8) error{Failed}!void {
+        const exe = elf.check(bytes, m.arch) catch return failWith(ebadexec);
+        var interp: ?elf.Image = null;
+        if (exe.interp) |ip| {
+            // The loader's path is in the Linux view.
+            const ib = readLinux(arena, ip) catch |err| return execError(err);
+            interp = elf.check(ib, m.arch) catch return failWith(ebadexec);
+        }
+        var random: [16]u8 = undefined;
+        m.io.random(&random);
+        const prog = lexec.build(m.gpa, m.backend, .{
+            .arch = m.arch,
+            .exe = &exe,
+            .interp = if (interp) |*ii| ii else null,
+            .path = path,
+            .argv = argv,
+            .envp = envp,
+            .random = random,
+        }) catch |err| return failWith(switch (err) {
+            error.BadElf, error.NotElf => ebadexec,
+            else => "virtual memory allocation failed",
+        });
+        if (vcpu) |v| v.setAddressSpace(prog.mm.as) catch {
+            prog.mm.put();
+            return failWith("virtual memory allocation failed");
+        };
+
+        // Committed.
+        const j = p.job;
+        if (p.lx) |l| {
+            const old = l.mm;
+            l.mm = prog.mm;
+            // /proc/n/mem may be reading through the old space.
+            p.dbgLock();
+            p.as = prog.mm.as;
+            old.put();
+            p.dbg_lock.unlock();
+            l.sig.execReset();
+            l.execFds();
+            l.vdso = prog.vdso;
+        } else {
+            const l = m.gpa.create(lsys.Process) catch {
+                prog.mm.put();
+                return failWith("no memory");
+            };
+            l.* = .{
+                .gpa = m.gpa,
+                .io = m.io,
+                .arch = m.arch,
+                .pid = p.pid,
+                .mm = prog.mm,
+                .host = .{ .ctx = j, .kill = linuxKill, .pgidOf = linuxPgid },
+                .pgid = p.pid,
+                .sid = p.pid,
+                .hwcap = lexec.hwcap(m.arch),
+                .vdso = prog.vdso,
+                .ncpu = j.ncpu,
+                .mem_limit = m.plan.memory orelse vmm.default_memory,
+                .console_tty = m.opts.console_tty,
+                .trace = m.opts.trace,
+                .trace_lock = &j.trace_lock,
+            };
+            l.newGroup() catch {
+                m.gpa.destroy(l);
+                prog.mm.put();
+                return failWith("no memory");
+            };
+            p.dbgLock();
+            if (p.as) |old| {
+                p.segs.release(old);
+                old.destroy();
+            }
+            l.cpu0 = lsys.cputime.thread();
+            j.lockSpin();
+            p.lx = l;
+            p.as = prog.mm.as;
+            j.lock.unlock();
+            p.dbg_lock.unlock();
+            p.noteureg = 0;
+            p.note_extra = null;
+        }
+        const l = p.lx.?;
+        l.setExe(realLinux(arena, path));
+        if (!kc.inView()) kc.setSlash(true) catch {};
+        kern.execNotes();
+        kern.setNotify(true);
+        p.ureg = lexec.initRegs(m.arch, prog.entry, prog.sp);
+        p.extra = .initExec(m.arch);
+        if (p.image) |b| m.gpa.free(b);
+        p.image = null;
+        p.noteMem();
+        kern.setArgs(argv);
+        kern.closeExec();
+        var name_buf: [kern.ERRMAX]u8 = undefined;
+        kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(path)}) catch "a.out");
+        p.vforkRelease();
+    }
+
+    /// Reads a file by its path in the Linux view, from either view. A
+    /// `#λ` path doesn't cross the mounts on #λ, as no `#` path does, so
+    /// from the 9front view the process's root is the Linux view's for
+    /// the read.
+    fn readLinux(arena: std.mem.Allocator, path: []const u8) RunError![]u8 {
+        const swap = !kc.inView();
+        if (swap) kc.setSlash(true) catch return error.NotFound;
+        defer if (swap) kc.setSlash(false) catch {};
+        return readFile(arena, try arena.dupeZ(u8, path));
+    }
+
+    /// `path` in the Linux view made absolute with its symbolic links
+    /// followed, as Linux's /proc/self/exe names the file it runs:
+    /// programs such as zig find their installation from it, and run
+    /// through a link (/usr/bin/zig -> /opt/zig/zig) they'd look beside
+    /// the link. `path` itself if it can't be resolved.
+    fn realLinux(arena: std.mem.Allocator, path: []const u8) []const u8 {
+        const swap = !kc.inView();
+        if (swap) kc.setSlash(true) catch return path;
+        defer if (swap) kc.setSlash(false) catch {};
+        var cwd_buf: [4096]u8 = undefined;
+        var todo: []const u8 = if (path.len > 0 and path[0] == '/') path else blk: {
+            const cwd = kc.getcwd(&cwd_buf) catch return path;
+            break :blk std.fmt.allocPrint(arena, "{s}/{s}", .{ cwd, path }) catch return path;
+        };
+        var out: std.ArrayList(u8) = .empty;
+        var link_buf: [4096]u8 = undefined;
+        var links: usize = 0;
+        var i: usize = 0;
+        while (i < todo.len) {
+            while (i < todo.len and todo[i] == '/') i += 1;
+            const j = std.mem.indexOfScalarPos(u8, todo, i, '/') orelse todo.len;
+            const elem = todo[i..j];
+            i = j;
+            if (elem.len == 0 or std.mem.eql(u8, elem, ".")) continue;
+            if (std.mem.eql(u8, elem, "..")) {
+                out.shrinkRetainingCapacity(std.mem.lastIndexOfScalar(u8, out.items, '/') orelse 0);
+                continue;
+            }
+            const save = out.items.len;
+            out.append(arena, '/') catch return path;
+            out.appendSlice(arena, elem) catch return path;
+            const z = arena.dupeZ(u8, out.items) catch return path;
+            const target = kern.readlink(z, &link_buf) catch continue;
+            links += 1;
+            if (links > 40 or target.len == 0) return path;
+            out.shrinkRetainingCapacity(if (target[0] == '/') 0 else save);
+            todo = std.fmt.allocPrint(arena, "{s}/{s}", .{ target, todo[i..] }) catch return path;
+            i = 0;
+        }
+        return if (out.items.len == 0) "/" else out.items;
+    }
+
+    /// Finds a program in the Linux view as a Linux shell would: a name
+    /// with a slash as it is, and a bare name along PATH.
+    fn findLinux(arena: std.mem.Allocator, name: []const u8, path_var: []const u8) ?[]const u8 {
+        if (std.mem.indexOfScalar(u8, name, '/') != null) return name;
+        const swap = !kc.inView();
+        if (swap) kc.setSlash(true) catch return null;
+        defer if (swap) kc.setSlash(false) catch {};
+        var it = std.mem.tokenizeScalar(u8, path_var, ':');
+        while (it.next()) |dir| {
+            const full = std.fmt.allocPrint(arena, "{s}/{s}", .{ dir, name }) catch return null;
+            const z = arena.dupeZ(u8, full) catch return null;
+            var st: [512]u8 = undefined;
+            const n = kern.stat(z, &st) catch continue;
+            if (n >= 25 and std.mem.readInt(u32, st[21..25], .little) & 0x80000000 == 0) return full;
+        }
+        return null;
+    }
+
+    /// execve from a Linux process: follows #! lines as Linux does (the
+    /// interpreter, its one optional argument, the script's path, then
+    /// the caller's arguments after argv[0]) and loads the ELF binary.
+    fn linuxExec(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, e: lsys.Exec) error{Failed}!void {
+        return m.linuxExecPath(p, vcpu, e.path, @ptrCast(e.argv), @ptrCast(e.envp));
+    }
+
+    fn linuxExecPath(m: *Machine, p: *Proc, vcpu: ?*cpupool.Lease, path0: []const u8, argv0: []const []const u8, envp: []const []const u8) error{Failed}!void {
+        var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var path: []const u8 = path0;
+        var bytes = readLinux(arena, path) catch |err| return execError(err);
+        var argv: []const []const u8 = argv0;
+        var depth: usize = 0;
+        while (std.mem.startsWith(u8, bytes, "#!")) : (depth += 1) {
+            if (depth >= 4) return failWith("too many levels of interpreters");
+            const head = bytes[0..@min(bytes.len, 256)];
+            const nl = std.mem.indexOfScalar(u8, head, '\n') orelse head.len;
+            const line = std.mem.trim(u8, head[2..nl], " \t\r");
+            if (line.len == 0) return failWith(ebadexec);
+            const sp = std.mem.indexOfAny(u8, line, " \t") orelse line.len;
+            const interp = line[0..sp];
+            const arg = std.mem.trim(u8, line[sp..], " \t");
+            var next: std.ArrayList([]const u8) = .empty;
+            next.append(arena, interp) catch return failWith("no memory");
+            if (arg.len > 0) next.append(arena, arg) catch return failWith("no memory");
+            next.append(arena, path) catch return failWith("no memory");
+            if (argv.len > 1) next.appendSlice(arena, argv[1..]) catch return failWith("no memory");
+            argv = next.items;
+            path = interp;
+            bytes = readLinux(arena, path) catch |err| return execError(err);
+        }
+        if (!elf.isElf(bytes)) {
+            // A 9front program: exec it as a 9front process does, back in
+            // the 9front view, with the environment written to a new
+            // Egrp (design/0018, "Environment").
+            _ = aout.parse(bytes) catch return failWith(ebadexec);
+            const v = vcpu orelse return failWith(ebadexec);
+            const zargv = arena.alloc([:0]u8, argv0.len) catch return failWith("no memory");
+            for (argv0, zargv) |a, *z| z.* = arena.dupeZ(u8, a) catch return failWith("no memory");
+            try m.exec(p, v, .{ .path = arena.dupeZ(u8, path0) catch return failWith("no memory"), .argv = zargv });
+            nineEnv(envp);
+            return;
+        }
+        return m.execLinux(p, vcpu, arena, path, bytes, argv, envp);
+    }
+
+    /// Writes a Linux process's environment into a new, clean Egrp for
+    /// the 9front program it execs. `path` is an rc list again.
+    fn nineEnv(envp: []const []const u8) void {
+        kern.rfork(kern.RF.CENVG) catch return;
+        var have_path = false;
+        for (envp) |e| {
+            const eq = std.mem.indexOfScalar(u8, e, '=') orelse continue;
+            const name = e[0..eq];
+            if (name.len == 0 or name.len > 64 or std.mem.indexOfScalar(u8, name, '/') != null) continue;
+            if (std.mem.eql(u8, name, "path")) {
+                have_path = true;
+                var buf: [4096]u8 = undefined;
+                var n: usize = 0;
+                var it = std.mem.tokenizeScalar(u8, e[eq + 1 ..], ' ');
+                while (it.next()) |el| {
+                    if (n + el.len + 1 > buf.len) break;
+                    @memcpy(buf[n..][0..el.len], el);
+                    buf[n + el.len] = 0;
+                    n += el.len + 1;
+                }
+                putEnv(name, buf[0..n]) catch {};
+                continue;
+            }
+            putEnv(name, e[eq + 1 ..]) catch {};
+        }
+        if (!have_path) putEnv("path", ".\x00/bin\x00") catch {};
+    }
+
+    /// Serves a Linux process's syscall exit. Returns the status when the
+    /// process exits.
+    fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, u: *vmm.Ureg) RunError!?Status {
+        // See the 9front branch of `loop`.
+        if (p.note_flag.load(.acquire)) kern.interrupt(kern.self());
+        // amd64's arch_prctl sets the thread pointer, which is the vCPU's.
+        if (u.* == .amd64 and u.amd64.ax == 158) {
+            const ARCH_SET_FS = 0x1002;
+            const ARCH_GET_FS = 0x1003;
+            const r = &u.amd64;
+            try vcpu.getExtra(&p.extra);
+            const v: i64 = switch (r.di) {
+                ARCH_SET_FS => blk: {
+                    if (r.si >= lmm.user_top) break :blk -attr.E.PERM;
+                    p.extra.amd64.tls = r.si;
+                    vcpu.setExtra(&p.extra);
+                    break :blk 0;
+                },
+                ARCH_GET_FS => if (l.writeU64(r.si, p.extra.amd64.tls)) 0 else |_| -attr.E.FAULT,
+                else => -attr.E.INVAL,
+            };
+            r.ax = @bitCast(v);
+            vcpu.setUreg(u);
+            return null;
+        }
+        const out = lsys.dispatch(l, u);
+        p.noteMem();
+        switch (out) {
+            .ret => |r| {
+                lsys.setReturn(u, r);
+                vcpu.setUreg(u);
+            },
+            .exits => |s| {
+                // linuxEnd releases the thread's futexes.
+                setExits(s);
+                return .{ .exited = s };
+            },
+            .clone => |cl| {
+                try vcpu.getExtra(&p.extra);
+                const r = m.linuxClone(p, l, u, cl);
+                lsys.setReturn(u, @bitCast(r));
+                vcpu.setUreg(u);
+            },
+            .exec => |e| {
+                defer e.deinit(m.gpa);
+                if (l.g.count() > 1) switch (m.groupExec(p, l, vcpu, e)) {
+                    // The leader runs the new image; this thread is gone.
+                    .handed_off => {
+                        l.thread_exit = true;
+                        return .{ .exited = "" };
+                    },
+                    .failed => {
+                        const r = lsys.kerr();
+                        l.traceLine("execve = {d} '{s}'", .{ r, kern.errstr() });
+                        lsys.setReturn(u, @bitCast(r));
+                        vcpu.setUreg(u);
+                        return null;
+                    },
+                    .alone => {},
+                };
+                if (m.linuxExec(p, vcpu, e)) |_| {
+                    // A 9front program has replaced the Linux state.
+                    if (p.lx) |nl| nl.traceLine("execve = 0", .{}) else p.sys.traceRet("exec", 0);
+                    u.* = p.ureg;
+                    vcpu.setExtra(&p.extra);
+                } else |_| {
+                    const r = lsys.kerr();
+                    l.traceLine("execve = {d} '{s}'", .{ r, kern.errstr() });
+                    lsys.setReturn(u, @bitCast(r));
+                }
+                vcpu.setUreg(u);
+            },
+            .sigreturn => {
+                var x: vmm.Extra = undefined;
+                try vcpu.getExtra(&x);
+                lsig.restore(l, &l.sig, u, &x) catch return .{ .killed = lsig.deathNote(lsig.SIGSEGV, &p.msg_buf) };
+                vcpu.setExtra(&x);
+                vcpu.setUreg(u);
+                // A signal the handler held back can go now.
+                if (l.sig.deliverable()) p.note_flag.store(true, .release);
+            },
+        }
+        return null;
+    }
+
+    /// Sets the stack pointer of a Linux call's registers.
+    fn setSp(u: *vmm.Ureg, sp: u64) void {
+        switch (u.*) {
+            inline else => |*r| r.sp = @truncate(sp),
+        }
+    }
+
+    fn setTls(x: *vmm.Extra, v: u64) void {
+        switch (x.*) {
+            inline else => |*e| e.tls = v,
+        }
+    }
+
+    /// An execve handed from a thread to its leader (design/0049-linux-
+    /// threads.md): the new image runs with the leader's pid, as Linux
+    /// gives it.
+    const ExecReq = struct {
+        e: lsys.Exec,
+        done: std.Io.Event = .unset,
+        ok: bool = false,
+        err: [kern.ERRMAX]u8 = undefined,
+    };
+
+    const exec_note = "h9: execve";
+
+    /// execve in a process with other threads: they're killed first. The
+    /// leader execs itself once it's alone (`.alone`); another thread
+    /// hands the exec to the leader and ends (`.handed_off`). A path that
+    /// doesn't name a file fails before any thread is killed, so execvp's
+    /// search along PATH leaves them be.
+    fn groupExec(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, e: lsys.Exec) enum { alone, handed_off, failed } {
+        _ = vcpu;
+        {
+            const swap = !kc.inView();
+            if (swap) kc.setSlash(true) catch {};
+            defer if (swap) kc.setSlash(false) catch {};
+            var st: [512]u8 = undefined;
+            _ = kern.stat(e.path, &st) catch return .failed;
+        }
+        const g = l.g;
+        if (!g.beginExec(l.pid)) return .failed;
+        var buf: [256]u32 = undefined;
+        for (g.others(l.pid, &buf)) |tid| {
+            if (tid != g.tgid) _ = kern.postNote(tid, "kill", .user) catch {};
+        }
+        if (l.isLeader()) {
+            m.waitAlone(p, g, 1);
+            g.endExec();
+            return .alone;
+        }
+        var req: ExecReq = .{ .e = e };
+        g.exec_req = &req;
+        _ = kern.postNote(g.tgid, exec_note, .user) catch {};
+        req.done.waitUncancelable(m.io);
+        if (req.ok) return .handed_off;
+        kern.setErrstr(std.mem.sliceTo(&req.err, 0));
+        return .failed;
+    }
+
+    /// Waits until the group has `n` members, or the job stops.
+    fn waitAlone(m: *Machine, p: *Proc, g: *lsys.Group, n: usize) void {
+        _ = m;
+        while (g.count() > n and !p.job.stopping.load(.acquire)) kern.sleep(2) catch {};
+    }
+
+    /// The leader's side of a thread's execve: once only it and the
+    /// thread are left, runs the exec, and tells the thread how it went.
+    /// Returns whether there was one.
+    fn leaderExec(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg) bool {
+        const l = p.lx.?;
+        const g = l.g;
+        const req: *ExecReq = @ptrCast(@alignCast(g.exec_req orelse return false));
+        g.exec_req = null;
+        m.waitAlone(p, g, 2);
+        if (m.linuxExec(p, vcpu, req.e)) |_| {
+            req.ok = true;
+            if (p.lx) |nl| {
+                nl.restart = null;
+                nl.traceLine("execve = 0 (from a thread)", .{});
+            }
+            u.* = p.ureg;
+            vcpu.setExtra(&p.extra);
+            vcpu.setUreg(u);
+        } else |_| {
+            const t = kern.errstr();
+            const n = @min(t.len, req.err.len - 1);
+            @memcpy(req.err[0..n], t[0..n]);
+            req.err[n] = 0;
+        }
+        g.endExec();
+        req.done.set(m.io);
+        return true;
+    }
+
+    /// fork, vfork and clone: a child with a copy of the address space
+    /// or, for vfork, the same one, while the parent waits for the child
+    /// to exec or exit; or, with CLONE_THREAD, a thread: a process in the
+    /// caller's thread group, sharing its memory (design/0049-linux-
+    /// threads.md). Returns 0 in the child, and the child's pid (tid) or
+    /// -errno in the caller.
+    fn linuxClone(m: *Machine, p: *Proc, l: *lsys.Process, u: *const vmm.Ureg, cl: lsys.Clone) i64 {
+        const vfork = cl.flags & lsys.CLONE_VFORK != 0;
+        const thread = cl.flags & lsys.CLONE_THREAD != 0;
+        const share = cl.flags & lsys.CLONE_VM != 0;
+        const j = p.job;
+        const c = j.newProc() catch return -attr.E.AGAIN;
+        const cx = m.gpa.create(lsys.Process) catch {
+            j.dropProc(c);
+            return -attr.E.NOMEM;
+        };
+        if (thread) {
+            cx.* = l.threadChild(c.pid);
+        } else {
+            const cm = if (share) l.mm.get() else l.mm.fork() catch {
+                m.gpa.destroy(cx);
+                j.dropProc(c);
+                return -attr.E.NOMEM;
+            };
+            cx.* = l.forkChild(c.pid, cm) catch {
+                m.gpa.destroy(cx);
+                cm.put();
+                j.dropProc(c);
+                return -attr.E.NOMEM;
+            };
+        }
+        cx.joinGroup() catch {
+            cx.mm.put();
+            m.gpa.destroy(cx);
+            j.dropProc(c);
+            return -attr.E.NOMEM;
+        };
+        c.lx = cx;
+        c.as = cx.mm.as;
+        c.ureg = u.*;
+        lsys.setReturn(&c.ureg, 0);
+        if (cl.stack != 0) setSp(&c.ureg, cl.stack);
+        c.extra = p.extra;
+        if (cl.flags & lsys.CLONE_SETTLS != 0) setTls(&c.extra, cl.tls);
+        if (cl.flags & lsys.CLONE_CHILD_CLEARTID != 0) cx.clear_tid = cl.ctid;
+        if (cl.flags & lsys.CLONE_CHILD_SETTID != 0) cx.writeU32(cl.ctid, c.pid) catch {};
+        if (cl.flags & lsys.CLONE_PARENT_SETTID != 0) l.writeU32(cl.ptid, c.pid) catch {};
+        var done: std.Io.Event = .unset;
+        if (vfork) c.vfork_done = &done;
+        c.noteMem();
+        var flag: c_int = kern.RF.PROC;
+        if (cl.flags & lsys.CLONE_FILES == 0) flag |= kern.RF.FDG;
+        // A thread's exit leaves no wait record: the group's is the leader's.
+        if (thread) flag |= kern.RF.NOWAIT;
+        const pid = c.pid;
+        kern.fork(flag, pid, Proc, childMain, c) catch {
+            c.dropLinux();
+            j.dropProc(c);
+            return -attr.E.AGAIN;
+        };
+        if (vfork) done.waitUncancelable(m.io);
+        return pid;
+    }
+
+    /// Delivers a Linux process's signals (design/0018, "Signals"): turns
+    /// its queued notes into pending signals, then runs the default action
+    /// of the next deliverable one or enters its handler with a frame on
+    /// the stack. A call that returned EINTR is restarted when no handler
+    /// ran, or when the handler has SA_RESTART. Returns the note the
+    /// process dies with, if it does.
+    fn deliverLinux(m: *Machine, p: *Proc, vcpu: *cpupool.Lease, u: *vmm.Ureg, flagged: bool) vmm.Error!?[]const u8 {
+        const l = p.lx.?;
+        if (flagged) {
+            var msg: [kern.ERRMAX]u8 = undefined;
+            while (true) {
+                switch (kern.popNote(&msg, u.pc())) {
+                    .none => break,
+                    .kill, .kill_debug => return lsig.deathNote(lsig.SIGKILL, &p.msg_buf),
+                    .handle => {},
+                }
+                var tmp: [kern.ERRMAX]u8 = undefined;
+                _ = kern.noted(.cont, &tmp) catch {};
+                const text = std.mem.sliceTo(&msg, 0);
+                if (std.mem.eql(u8, text, exec_note)) {
+                    if (m.leaderExec(p, vcpu, u)) {
+                        // A 9front program may have replaced the Linux state.
+                        if (p.lx == null) return null;
+                        l.sig.pending = 0;
+                    }
+                    continue;
+                }
+                // A note no signal stands for kills, as it does a 9front
+                // process without a handler.
+                const ns = lsig.noteSignal(text) orelse return p.keepNote(&msg);
+                // A process's signal that this thread blocks goes to one
+                // that doesn't, if there is one (design/0049-linux-threads.md).
+                if (ns.signo != lsig.SIGKILL and l.sig.mask & lsig.bit(ns.signo) != 0 and !lsig.isThreadNote(text)) {
+                    if (l.g.unblocked(l.pid, ns.signo)) |tid| {
+                        var nb: [32]u8 = undefined;
+                        if (kern.postNote(tid, lsig.threadNote(ns.signo, &nb), .user) catch false) continue;
+                    }
+                }
+                _ = l.sig.post(ns.signo, ns.info);
+            }
+        }
+        lsys.signalPosted(l);
+        while (l.sig.next()) |signo| {
+            const a = l.sig.actions[signo];
+            if (a.handler == lsig.SIG_IGN) continue;
+            if (a.handler == lsig.SIG_DFL) switch (lsig.defaultAction(signo)) {
+                // Stops are job control's: until then they're ignored.
+                .ignore, .cont, .stop => continue,
+                .term, .core => return lsig.deathNote(signo, &p.msg_buf),
+            };
+            if (l.restart) |r| {
+                l.restart = null;
+                if (a.flags & lsig.SA_RESTART != 0 and !r.always_eintr) rewind(u, r);
+            }
+            const saved = l.sig.suspend_mask orelse l.sig.mask;
+            l.sig.suspend_mask = null;
+            var x: vmm.Extra = undefined;
+            try vcpu.getExtra(&x);
+            lsig.setup(l, &l.sig, u, &x, .{
+                .signo = signo,
+                .info = l.sig.info[signo],
+                .act = a,
+                .saved_mask = saved,
+                .vdso = l.vdso,
+                .vdso_sigreturn = elf.vdso_sigreturn_off,
+            }) catch return lsig.deathNote(lsig.SIGSEGV, &p.msg_buf);
+            l.sig.mask |= a.mask | (if (a.flags & lsig.SA_NODEFER != 0) 0 else lsig.bit(signo));
+            l.sig.mask &= ~lsig.unblockable;
+            if (a.flags & lsig.SA_RESETHAND != 0) l.sig.actions[signo] = .{};
+            vcpu.setUreg(u);
+            return null;
+        }
+        if (l.restart) |r| {
+            l.restart = null;
+            if (l.sig.suspend_mask) |sm| {
+                l.sig.mask = sm;
+                l.sig.suspend_mask = null;
+            }
+            rewind(u, r);
+            vcpu.setUreg(u);
+        }
+        return null;
+    }
+
+    /// Backs the registers up to the syscall instruction, with its number
+    /// and first argument as they were, so it runs again.
+    fn rewind(u: *vmm.Ureg, r: lsys.Process.Restart) void {
+        switch (u.*) {
+            .arm64 => |*a| {
+                a.pc = r.pc - 4;
+                a.r[0] = r.arg0;
+            },
+            .amd64 => |*a| {
+                a.pc = r.pc - 2;
+                a.ax = r.nr;
+            },
+            .i386 => {},
+        }
+    }
+
+    /// devlinux's text files (src/kern/devlinux.c): /proc and /sys files
+    /// made from the machine's state. `aux` is the process, for /proc/n
+    /// files; the machine is the reader's. Runs on the reading thread,
+    /// with the process's note lock held, so it doesn't block.
+    fn linuxGen(aux: ?*anyopaque, name_z: [*:0]const u8, pid: c_ulong, buf: [*]u8, n: c_int) callconv(.c) c_int {
+        _ = pid;
+        var w: std.Io.Writer = .fixed(buf[0..@intCast(n)]);
+        const name = std.mem.span(name_z);
+        const eq = std.mem.eql;
+        if (aux) |a| {
+            const p: *Proc = @ptrCast(@alignCast(a));
+            if (eq(u8, name, "maps")) {
+                if (p.lx) |l| l.mm.mapsText(&w);
+            } else if (eq(u8, name, "mounts")) {
+                w.writeAll("rootfs / rootfs rw 0 0\n") catch {};
+            } else return -1;
+            return @intCast(w.end);
+        }
+        const reader: *Proc = @ptrCast(@alignCast(kern.aux() orelse return -1));
+        const j = reader.job;
+        const ncpu = j.ncpu;
+        const arm = j.m.arch == .arm64;
+        if (eq(u8, name, "cpuinfo")) {
+            for (0..ncpu) |i| {
+                if (arm) {
+                    w.print("processor\t: {d}\nBogoMIPS\t: 48.00\nFeatures\t: fp asimd cpuid\nCPU implementer\t: 0x00\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0x000\nCPU revision\t: 0\n\n", .{i}) catch {};
+                } else {
+                    w.print("processor\t: {d}\nvendor_id\t: h9\ncpu family\t: 6\nmodel\t\t: 0\nmodel name\t: h9 virtual CPU\ncpu cores\t: {d}\nflags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2\n\n", .{ i, ncpu }) catch {};
+                }
+            }
+        } else if (eq(u8, name, "meminfo")) {
+            const total_kb = (j.m.plan.memory orelse vmm.default_memory) / 1024;
+            var used_kb: u64 = 0;
+            {
+                j.lockSpin();
+                defer j.lock.unlock();
+                for (j.procs.items) |q| used_kb += q.mem_kb.load(.acquire);
+            }
+            const free_kb = total_kb -| used_kb;
+            w.print("MemTotal:       {d: >8} kB\nMemFree:        {d: >8} kB\nMemAvailable:   {d: >8} kB\nBuffers:               0 kB\nCached:                0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n", .{ total_kb, free_kb, free_kb }) catch {};
+        } else if (eq(u8, name, "stat")) {
+            w.writeAll("cpu  0 0 0 0 0 0 0 0 0 0\n") catch {};
+            for (0..ncpu) |i| w.print("cpu{d} 0 0 0 0 0 0 0 0 0 0\n", .{i}) catch {};
+            const boot = @divTrunc(kern.wallNs() - (kern.monoNs() - j.start_ns), std.time.ns_per_s);
+            w.print("intr 0\nctxt 0\nbtime {d}\nprocesses {d}\nprocs_running 1\nprocs_blocked 0\n", .{ boot, j.next_pid -| 1 }) catch {};
+        } else if (eq(u8, name, "uptime")) {
+            const up_ns = kern.monoNs() - j.start_ns;
+            const cs = @divTrunc(up_ns, 10 * std.time.ns_per_ms);
+            const ucs: u64 = @intCast(@max(cs, 0));
+            w.print("{d}.{d:0>2} 0.00\n", .{ ucs / 100, ucs % 100 }) catch {};
+        } else if (eq(u8, name, "mounts")) {
+            w.writeAll("rootfs / rootfs rw 0 0\n") catch {};
+        } else if (eq(u8, name, "loadavg")) {
+            w.print("0.00 0.00 0.00 1/{d} {d}\n", .{ j.procs.items.len, j.next_pid -| 1 }) catch {};
+        } else if (eq(u8, name, "version")) {
+            w.writeAll("Linux version 6.1.0-h9 (h9) #1 SMP h9\n") catch {};
+        } else if (eq(u8, name, "filesystems")) {
+            w.writeAll("nodev\tproc\nnodev\ttmpfs\n") catch {};
+        } else if (eq(u8, name, "uuid") or eq(u8, name, "boot_id")) {
+            var r: [16]u8 = undefined;
+            j.m.io.random(&r);
+            r[6] = (r[6] & 0x0f) | 0x40;
+            r[8] = (r[8] & 0x3f) | 0x80;
+            const x = std.fmt.bytesToHex(r, .lower);
+            w.print("{s}-{s}-{s}-{s}-{s}\n", .{ x[0..8], x[8..12], x[12..16], x[16..20], x[20..32] }) catch {};
+        } else if (eq(u8, name, "osrelease")) {
+            w.writeAll("6.1.0-h9\n") catch {};
+        } else if (eq(u8, name, "hostname")) {
+            w.writeAll("h9\n") catch {};
+        } else if (eq(u8, name, "resolv.conf")) {
+            for (j.m.opts.nameservers) |ns| w.print("nameserver {s}\n", .{ns}) catch {};
+        } else if (eq(u8, name, "online") or eq(u8, name, "possible")) {
+            if (ncpu <= 1) w.writeAll("0\n") catch {} else w.print("0-{d}\n", .{ncpu - 1}) catch {};
+        } else return -1;
+        return @intCast(w.end);
+    }
+
+    /// Host.kill: posts signal `signo` as a note (design/0018, "Signals")
+    /// to the processes `pid` names. Stops and continues aren't posted to
+    /// 9front processes, which never stop. A process's signal goes to its
+    /// thread group's leader, which passes it on to a thread that doesn't
+    /// block it (`deliverLinux`); a thread's (tgkill) goes to that thread
+    /// alone (design/0049-linux-threads.md).
+    fn linuxKill(ctx: *anyopaque, from: *lsys.Process, pid: i64, signo: u8, thread: ?lsys.ThreadKill) i64 {
+        const j: *Job = @ptrCast(@alignCast(ctx));
+        const Target = struct { pid: u32, linux: bool };
+        var targets: [256]Target = undefined;
+        var n: usize = 0;
+        {
+            j.lockSpin();
+            defer j.lock.unlock();
+            for (j.procs.items) |q| {
+                const ql = q.lx;
+                const qg: ?u32 = if (ql) |x| x.pgid else null;
+                // Only a group's leader stands for the process.
+                const leader = if (ql) |x| x.isLeader() else true;
+                const want = if (thread) |t|
+                    q.pid == pid and (t.tgid == 0 or (ql != null and ql.?.tgid() == t.tgid))
+                else if (pid > 0)
+                    q.pid == pid
+                else if (pid == -1)
+                    leader and q.pid != from.tgid()
+                else if (pid == 0)
+                    leader and qg != null and qg.? == from.pgid
+                else
+                    leader and qg != null and qg.? == @as(u64, @intCast(-pid));
+                if (!want or q.kproc == null) continue;
+                if (n == targets.len) break;
+                targets[n] = .{ .pid = q.pid, .linux = ql != null };
+                n += 1;
+            }
+        }
+        if (n == 0) return -attr.E.SRCH;
+        if (signo == 0) return 0;
+        var buf: [32]u8 = undefined;
+        const note = if (signo == lsig.SIGKILL) "kill" else if (thread != null) lsig.threadNote(signo, &buf) else lsig.signalNote(signo, &buf);
+        for (targets[0..n]) |t| {
+            if (!t.linux) switch (lsig.defaultAction(signo)) {
+                .stop, .cont => continue,
+                else => {},
+            };
+            _ = kern.postNote(t.pid, note, .user) catch {};
+        }
+        return 0;
+    }
+
+    fn linuxPgid(ctx: *anyopaque, pid: u32) ?u32 {
+        const j: *Job = @ptrCast(@alignCast(ctx));
+        j.lockSpin();
+        defer j.lock.unlock();
+        for (j.procs.items) |q| if (q.pid == pid) return if (q.lx) |ql| ql.pgid else q.pid;
+        return null;
+    }
+
     /// rfork. With RF.PROC, starts a child that resumes from `u` with 0
     /// returned, and returns its pid; without, changes the caller's groups.
     /// On error the error string is set.
@@ -1387,6 +2420,10 @@ pub const Machine = struct {
         const first = readFile(arena, e.path) catch |err| return execError(err);
         const prog = interpret(arena, e.path, first, @ptrCast(e.argv)) catch |err| return execError(err);
         const bytes = prog.bytes;
+        if (elf.isElf(bytes)) {
+            const envp = linuxEnv(arena) catch return failWith("no memory");
+            return m.execLinux(p, vcpu, arena, e.path, bytes, prog.argv, envp);
+        }
         const hdr = aout.parse(bytes) catch return failWith(ebadexec);
         if (hdr.arch != m.arch) return failWith(ebadexec);
 
@@ -1411,13 +2448,27 @@ pub const Machine = struct {
         };
 
         // Committed.
-        const old = p.as.?;
-        p.segs.replace(old, img.segs);
-        // /proc/n/mem may be reading through the old space.
-        p.dbgLock();
-        old.destroy();
+        const was_linux = p.lx != null;
+        if (was_linux) {
+            p.segs.replace(nas, img.segs);
+            // /proc/n/mem may be reading through the old space.
+            p.dbgLock();
+            p.dropLinux();
+        } else {
+            const old = p.as.?;
+            p.segs.replace(old, img.segs);
+            p.dbgLock();
+            old.destroy();
+        }
         p.as = nas;
         p.dbg_lock.unlock();
+        if (was_linux) {
+            // From the Linux personality back to 9front's, whose state
+            // was never made.
+            kern.setNotify(false);
+            if (kc.inView()) kc.setSlash(false) catch {};
+            p.initSys();
+        }
         p.tos = img.tos;
         p.sys.as = nas;
         p.sys.notify = 0;
@@ -1532,7 +2583,7 @@ pub const Machine = struct {
                 continue;
             }
             const from = if (b.console)
-                try std.fmt.bufPrintZ(&buf, "{s}{d}", .{ b.from, con_id })
+                try std.fmt.bufPrintZ(&buf, "{s}{d}{s}", .{ b.from, con_id, if (b.cons_file) "/cons" else "" })
             else
                 try std.fmt.bufPrintZ(&buf, "{s}", .{b.from});
             var flag: c_int = switch (b.flag) {
@@ -1544,12 +2595,14 @@ pub const Machine = struct {
             const to = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.to});
             if (bindOrOverlay(from, b.lower, b.contained, to, flag, &buf)) |id| {
                 if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term/cwd";
+                if (std.mem.eql(u8, b.to, policy.linux_view ++ "/mnt/term/cwd")) cwd_at = policy.linux_view ++ "/mnt/term/cwd";
                 if (std.mem.eql(u8, b.to, "/") and id != null) root_ov = id;
                 continue;
             } else |_| {}
             if (b.fallback) |fb| {
                 if (bindOrOverlay(from, b.lower, b.contained, try std.fmt.bufPrintZ(&buf2, "{s}", .{fb}), flag, &buf)) |_| {
                     if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term";
+                    if (std.mem.eql(u8, b.to, policy.linux_view ++ "/mnt/term/cwd")) cwd_at = policy.linux_view ++ "/mnt/term";
                     continue;
                 } else |_| {}
             }
@@ -1557,6 +2610,7 @@ pub const Machine = struct {
         }
         if (cwd_at) |at| kern.chdir(at) catch return m.fail("cwd: {s}", .{kern.errstr()});
         if (m.plan.root_overlay) makeHome();
+        if (m.opts.linux_root != null) linuxEtc();
 
         // fds 0-2 on the console.
         const in = kern.open("/dev/cons", kern.OREAD) catch return m.fail("open /dev/cons: {s}", .{kern.errstr()});
@@ -1588,6 +2642,20 @@ pub const Machine = struct {
     }
 
     const dmdir: u32 = 0x80000000;
+
+    /// Binds devlinux's /etc files after the Linux root's /etc when the
+    /// root has no resolv.conf, as Alpine's minirootfs hasn't
+    /// (design/0050-linux-net.md). Best effort: a root without /etc is
+    /// left as it is.
+    fn linuxEtc() void {
+        var st: [512]u8 = undefined;
+        const lv = policy.linux_view;
+        if (kern.stat(lv ++ "/etc/resolv.conf", &st)) |_| return else |_| {}
+        // /etc over itself first, creatable, so a file made in /etc (apk's
+        // own, say) goes to the root's directory, not to #λetc.
+        kern.bind(lv ++ "/etc", lv ++ "/etc", kern.MREPL | kern.MCREATE) catch return;
+        kern.bind(lv ++ "etc", lv ++ "/etc", kern.MAFTER) catch {};
+    }
 
     /// Connects to a 9P root and posts the connection as `#s/root`
     /// (design/0013-9p-roots.md), where the board holds it for the

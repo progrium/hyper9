@@ -96,6 +96,22 @@ pub const ConsoleInput = struct {
         }
     }
 
+    /// Asks the thread for a read if there's no request and nothing
+    /// buffered, as `read` does, for a guest that polls before it reads
+    /// (busybox `read`). Returns whether input is there now.
+    pub fn request(c: *ConsoleInput) bool {
+        c.lock();
+        defer c.mutex.unlock();
+        if (c.state.raw != .idle) return c.state.raw != .want;
+        if (c.thread == null) {
+            c.thread = web.Thread.spawn(.{}, run, .{c}) catch return true;
+        }
+        c.state.store(.want, .release);
+        _ = c.seq.fetchAdd(1, .release);
+        c.io.futexWake(u32, &c.seq.raw, 1);
+        return false;
+    }
+
     /// Whether a guest read waiting for input can go on.
     pub fn ready(c: *const ConsoleInput) bool {
         return switch (c.state.load(.acquire)) {
