@@ -9,7 +9,7 @@
      .github/workflows/pages.yml with the browser host's build in demo/.
      Plain on purpose, after the vx32 page. -->
 <style>
-  body { max-width: 46em; margin: 1em auto; padding: 0 1em 4em; background: #fff; color: #000; }
+  body { max-width: 46em; margin: 1em auto; padding: 0 1em calc(0.7em + env(safe-area-inset-bottom, 0px)); background: #fff; color: #000; }
   h1, .authors { text-align: center; }
   .authors { font-size: 1.2em; font-weight: bold; margin-bottom: 0; }
   .affil { text-align: center; margin-top: 0.3em; }
@@ -17,11 +17,11 @@
   abbr { text-decoration: none; border-bottom: 1px dotted; cursor: help; }
   pre { margin-left: 2em; }
   iframe { width: 100%; height: 26em; border: 1px solid #888; }
-  /* The λ in the page's bottom-right corner, after the π in The Net: #λ
-     is h9's Linux view. The page's bottom padding keeps it clear of a
-     phone's rounded corners. */
-  .lambda { display: block; width: max-content; margin: 3em 0.6em 0 auto;
-    font-family: monospace; font-size: 1.3em; color: #bbb; text-decoration: none; }
+  /* The λ at the bottom of the page, after the π in The Net: #λ is h9's
+     Linux view. Its line reaches past the column to the viewport's right
+     edge, less a margin that keeps it clear of a phone's rounded corners. */
+  .corner { margin: 3em calc(50% - 50vw + 1.2em + env(safe-area-inset-right, 0px)) 0 0; text-align: right; }
+  .lambda { font-family: monospace; font-size: 1.3em; color: #bbb; text-decoration: none; }
   .lambda:hover { color: #000; }
 </style>
 </head>
@@ -148,7 +148,7 @@ Please report bugs and send questions through
 <li><a href="https://github.com/copy/v86">v86</a></li>
 </ul>
 
-<a class="lambda" href="linux.html" aria-label="Linux programs in h9">λ</a>
+<div class="corner"><a class="lambda" href="linux.html" aria-label="Linux programs in h9">λ</a></div>
 
 </body>
 </html>
