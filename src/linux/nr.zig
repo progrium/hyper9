@@ -1,12 +1,18 @@
-//! Linux syscall numbers for arm64 (the generic table) and amd64, from the
-//! kernel's headers (include/uapi/asm-generic/unistd.h and
-//! arch/x86/entry/syscalls/syscall_64.tbl). Generated; see
-//! design/0018-linux-personality.md.
+//! Linux syscall numbers for arm64 (the generic table), amd64 and i386, from
+//! the kernel's headers (include/uapi/asm-generic/unistd.h,
+//! arch/x86/entry/syscalls/syscall_64.tbl and syscall_32.tbl). Generated;
+//! see design/0018-linux-personality.md and design/linux-i386.md.
+//!
+//! i386 names that the other tables use for a different call are renamed:
+//! its old `select`, `mmap`, `getrlimit`, `stat`, `statfs` and 16-bit id
+//! calls get suffixes, and `_newselect`, `ugetrlimit` and the `*32` id
+//! calls take the generic names, since they're the same calls.
 
 const std = @import("std");
 
-/// Every call either architecture has, by name.
+/// Every call any of the architectures has, by name.
 pub const Sys = enum(u16) {
+    _llseek,
     _sysctl,
     accept,
     accept4,
@@ -18,8 +24,10 @@ pub const Sys = enum(u16) {
     alarm,
     arch_prctl,
     arch_specific_syscall,
+    bdflush,
     bind,
     bpf,
+    @"break",
     brk,
     cachestat,
     capget,
@@ -27,12 +35,18 @@ pub const Sys = enum(u16) {
     chdir,
     chmod,
     chown,
+    chown16,
     chroot,
     clock_adjtime,
+    clock_adjtime64,
     clock_getres,
+    clock_getres_time64,
     clock_gettime,
+    clock_gettime64,
     clock_nanosleep,
+    clock_nanosleep_time64,
     clock_settime,
+    clock_settime64,
     clone,
     clone3,
     close,
@@ -62,6 +76,7 @@ pub const Sys = enum(u16) {
     faccessat,
     faccessat2,
     fadvise64,
+    fadvise64_64,
     fallocate,
     fanotify_init,
     fanotify_mark,
@@ -70,8 +85,10 @@ pub const Sys = enum(u16) {
     fchmodat,
     fchmodat2,
     fchown,
+    fchown16,
     fchownat,
     fcntl,
+    fcntl64,
     fdatasync,
     fgetxattr,
     finit_module,
@@ -85,11 +102,18 @@ pub const Sys = enum(u16) {
     fsopen,
     fspick,
     fstat,
+    fstat64,
+    fstatat64,
     fstatfs,
+    fstatfs32,
+    fstatfs64,
     fsync,
+    ftime,
     ftruncate,
+    ftruncate64,
     futex,
     futex_requeue,
+    futex_time64,
     futex_wait,
     futex_waitv,
     futex_wake,
@@ -103,9 +127,13 @@ pub const Sys = enum(u16) {
     getdents,
     getdents64,
     getegid,
+    getegid16,
     geteuid,
+    geteuid16,
     getgid,
+    getgid16,
     getgroups,
+    getgroups16,
     getitimer,
     getpeername,
     getpgid,
@@ -116,7 +144,9 @@ pub const Sys = enum(u16) {
     getpriority,
     getrandom,
     getresgid,
+    getresgid16,
     getresuid,
+    getresuid16,
     getrlimit,
     getrusage,
     getsid,
@@ -125,7 +155,10 @@ pub const Sys = enum(u16) {
     gettid,
     gettimeofday,
     getuid,
+    getuid16,
     getxattr,
+    gtty,
+    idle,
     init_module,
     inotify_add_watch,
     inotify_init,
@@ -135,6 +168,7 @@ pub const Sys = enum(u16) {
     io_destroy,
     io_getevents,
     io_pgetevents,
+    io_pgetevents_time64,
     io_setup,
     io_submit,
     io_uring_enter,
@@ -145,6 +179,7 @@ pub const Sys = enum(u16) {
     iopl,
     ioprio_get,
     ioprio_set,
+    ipc,
     kcmp,
     kexec_file_load,
     kexec_load,
@@ -154,6 +189,7 @@ pub const Sys = enum(u16) {
     landlock_create_ruleset,
     landlock_restrict_self,
     lchown,
+    lchown16,
     lgetxattr,
     link,
     linkat,
@@ -161,6 +197,7 @@ pub const Sys = enum(u16) {
     listmount,
     listxattr,
     llistxattr,
+    lock,
     lookup_dcookie,
     lremovexattr,
     lseek,
@@ -169,6 +206,7 @@ pub const Sys = enum(u16) {
     lsm_list_modules,
     lsm_set_self_attr,
     lstat,
+    lstat64,
     madvise,
     map_shadow_stack,
     mbind,
@@ -185,17 +223,21 @@ pub const Sys = enum(u16) {
     mlock2,
     mlockall,
     mmap,
+    mmap2,
     modify_ldt,
     mount,
     mount_setattr,
     move_mount,
     move_pages,
     mprotect,
+    mpx,
     mq_getsetattr,
     mq_notify,
     mq_open,
     mq_timedreceive,
+    mq_timedreceive_time64,
     mq_timedsend,
+    mq_timedsend_time64,
     mq_unlink,
     mremap,
     msgctl,
@@ -210,6 +252,19 @@ pub const Sys = enum(u16) {
     nanosleep,
     newfstatat,
     nfsservctl,
+    nice,
+    old_getrlimit,
+    old_mmap,
+    old_readdir,
+    old_select,
+    oldfstat,
+    oldfstat32,
+    oldlstat,
+    oldlstat32,
+    oldolduname,
+    oldstat,
+    oldstat32,
+    olduname,
     open,
     open_by_handle_at,
     open_tree,
@@ -229,6 +284,7 @@ pub const Sys = enum(u16) {
     pkey_mprotect,
     poll,
     ppoll,
+    ppoll_time64,
     prctl,
     pread64,
     preadv,
@@ -238,7 +294,10 @@ pub const Sys = enum(u16) {
     process_mrelease,
     process_vm_readv,
     process_vm_writev,
+    prof,
+    profil,
     pselect6,
+    pselect6_time64,
     ptrace,
     putpmsg,
     pwrite64,
@@ -255,6 +314,7 @@ pub const Sys = enum(u16) {
     reboot,
     recvfrom,
     recvmmsg,
+    recvmmsg_time64,
     recvmsg,
     remap_file_pages,
     removexattr,
@@ -272,6 +332,7 @@ pub const Sys = enum(u16) {
     rt_sigreturn,
     rt_sigsuspend,
     rt_sigtimedwait,
+    rt_sigtimedwait_time64,
     rt_tgsigqueueinfo,
     sched_get_priority_max,
     sched_get_priority_min,
@@ -280,6 +341,7 @@ pub const Sys = enum(u16) {
     sched_getparam,
     sched_getscheduler,
     sched_rr_get_interval,
+    sched_rr_get_interval_time64,
     sched_setaffinity,
     sched_setattr,
     sched_setparam,
@@ -287,12 +349,14 @@ pub const Sys = enum(u16) {
     sched_yield,
     seccomp,
     security,
-    @"select",
+    select,
     semctl,
     semget,
     semop,
     semtimedop,
+    semtimedop_time64,
     sendfile,
+    sendfile64,
     sendmmsg,
     sendmsg,
     sendto,
@@ -303,39 +367,62 @@ pub const Sys = enum(u16) {
     set_tid_address,
     setdomainname,
     setfsgid,
+    setfsgid16,
     setfsuid,
+    setfsuid16,
     setgid,
+    setgid16,
     setgroups,
+    setgroups16,
     sethostname,
     setitimer,
     setns,
     setpgid,
     setpriority,
     setregid,
+    setregid16,
     setresgid,
+    setresgid16,
     setresuid,
+    setresuid16,
     setreuid,
+    setreuid16,
     setrlimit,
     setsid,
     setsockopt,
     settimeofday,
     setuid,
+    setuid16,
     setxattr,
+    sgetmask,
     shmat,
     shmctl,
     shmdt,
     shmget,
     shutdown,
+    sigaction,
     sigaltstack,
+    signal,
     signalfd,
     signalfd4,
+    sigpending,
+    sigprocmask,
+    sigreturn,
+    sigsuspend,
     socket,
+    socketcall,
     socketpair,
     splice,
+    ssetmask,
     stat,
+    stat64,
     statfs,
+    statfs32,
+    statfs64,
     statmount,
     statx,
+    stime,
+    stty,
     swapoff,
     swapon,
     symlink,
@@ -353,15 +440,22 @@ pub const Sys = enum(u16) {
     timer_delete,
     timer_getoverrun,
     timer_gettime,
+    timer_gettime64,
     timer_settime,
+    timer_settime64,
     timerfd_create,
     timerfd_gettime,
+    timerfd_gettime64,
     timerfd_settime,
+    timerfd_settime64,
     times,
     tkill,
     truncate,
+    truncate64,
     tuxcall,
+    ulimit,
     umask,
+    umount,
     umount2,
     uname,
     unlink,
@@ -372,13 +466,17 @@ pub const Sys = enum(u16) {
     ustat,
     utime,
     utimensat,
+    utimensat_time64,
     utimes,
     vfork,
     vhangup,
+    vm86,
+    vm86old,
     vmsplice,
     vserver,
     wait4,
     waitid,
+    waitpid,
     write,
     writev,
     _,
@@ -1088,11 +1186,470 @@ pub const amd64 = blk: {
     break :blk t;
 };
 
+/// i386's numbers (int 0x80), indexed by number; null where there's no call.
+pub const ia32 = blk: {
+    @setEvalBranchQuota(100000);
+    var t: [462]?Sys = @splat(null);
+    t[0] = .@"restart_syscall";
+    t[1] = .@"exit";
+    t[2] = .@"fork";
+    t[3] = .@"read";
+    t[4] = .@"write";
+    t[5] = .@"open";
+    t[6] = .@"close";
+    t[7] = .@"waitpid";
+    t[8] = .@"creat";
+    t[9] = .@"link";
+    t[10] = .@"unlink";
+    t[11] = .@"execve";
+    t[12] = .@"chdir";
+    t[13] = .@"time";
+    t[14] = .@"mknod";
+    t[15] = .@"chmod";
+    t[16] = .@"lchown16";
+    t[17] = .@"break";
+    t[18] = .@"oldstat";
+    t[19] = .@"lseek";
+    t[20] = .@"getpid";
+    t[21] = .@"mount";
+    t[22] = .@"umount";
+    t[23] = .@"setuid16";
+    t[24] = .@"getuid16";
+    t[25] = .@"stime";
+    t[26] = .@"ptrace";
+    t[27] = .@"alarm";
+    t[28] = .@"oldfstat";
+    t[29] = .@"pause";
+    t[30] = .@"utime";
+    t[31] = .@"stty";
+    t[32] = .@"gtty";
+    t[33] = .@"access";
+    t[34] = .@"nice";
+    t[35] = .@"ftime";
+    t[36] = .@"sync";
+    t[37] = .@"kill";
+    t[38] = .@"rename";
+    t[39] = .@"mkdir";
+    t[40] = .@"rmdir";
+    t[41] = .@"dup";
+    t[42] = .@"pipe";
+    t[43] = .@"times";
+    t[44] = .@"prof";
+    t[45] = .@"brk";
+    t[46] = .@"setgid16";
+    t[47] = .@"getgid16";
+    t[48] = .@"signal";
+    t[49] = .@"geteuid16";
+    t[50] = .@"getegid16";
+    t[51] = .@"acct";
+    t[52] = .@"umount2";
+    t[53] = .@"lock";
+    t[54] = .@"ioctl";
+    t[55] = .@"fcntl";
+    t[56] = .@"mpx";
+    t[57] = .@"setpgid";
+    t[58] = .@"ulimit";
+    t[59] = .@"oldolduname";
+    t[60] = .@"umask";
+    t[61] = .@"chroot";
+    t[62] = .@"ustat";
+    t[63] = .@"dup2";
+    t[64] = .@"getppid";
+    t[65] = .@"getpgrp";
+    t[66] = .@"setsid";
+    t[67] = .@"sigaction";
+    t[68] = .@"sgetmask";
+    t[69] = .@"ssetmask";
+    t[70] = .@"setreuid16";
+    t[71] = .@"setregid16";
+    t[72] = .@"sigsuspend";
+    t[73] = .@"sigpending";
+    t[74] = .@"sethostname";
+    t[75] = .@"setrlimit";
+    t[76] = .@"old_getrlimit";
+    t[77] = .@"getrusage";
+    t[78] = .@"gettimeofday";
+    t[79] = .@"settimeofday";
+    t[80] = .@"getgroups16";
+    t[81] = .@"setgroups16";
+    t[82] = .@"old_select";
+    t[83] = .@"symlink";
+    t[84] = .@"oldlstat";
+    t[85] = .@"readlink";
+    t[86] = .@"uselib";
+    t[87] = .@"swapon";
+    t[88] = .@"reboot";
+    t[89] = .@"old_readdir";
+    t[90] = .@"old_mmap";
+    t[91] = .@"munmap";
+    t[92] = .@"truncate";
+    t[93] = .@"ftruncate";
+    t[94] = .@"fchmod";
+    t[95] = .@"fchown16";
+    t[96] = .@"getpriority";
+    t[97] = .@"setpriority";
+    t[98] = .@"profil";
+    t[99] = .@"statfs32";
+    t[100] = .@"fstatfs32";
+    t[101] = .@"ioperm";
+    t[102] = .@"socketcall";
+    t[103] = .@"syslog";
+    t[104] = .@"setitimer";
+    t[105] = .@"getitimer";
+    t[106] = .@"oldstat32";
+    t[107] = .@"oldlstat32";
+    t[108] = .@"oldfstat32";
+    t[109] = .@"olduname";
+    t[110] = .@"iopl";
+    t[111] = .@"vhangup";
+    t[112] = .@"idle";
+    t[113] = .@"vm86old";
+    t[114] = .@"wait4";
+    t[115] = .@"swapoff";
+    t[116] = .@"sysinfo";
+    t[117] = .@"ipc";
+    t[118] = .@"fsync";
+    t[119] = .@"sigreturn";
+    t[120] = .@"clone";
+    t[121] = .@"setdomainname";
+    t[122] = .@"uname";
+    t[123] = .@"modify_ldt";
+    t[124] = .@"adjtimex";
+    t[125] = .@"mprotect";
+    t[126] = .@"sigprocmask";
+    t[127] = .@"create_module";
+    t[128] = .@"init_module";
+    t[129] = .@"delete_module";
+    t[130] = .@"get_kernel_syms";
+    t[131] = .@"quotactl";
+    t[132] = .@"getpgid";
+    t[133] = .@"fchdir";
+    t[134] = .@"bdflush";
+    t[135] = .@"sysfs";
+    t[136] = .@"personality";
+    t[137] = .@"afs_syscall";
+    t[138] = .@"setfsuid16";
+    t[139] = .@"setfsgid16";
+    t[140] = .@"_llseek";
+    t[141] = .@"getdents";
+    t[142] = .@"select";
+    t[143] = .@"flock";
+    t[144] = .@"msync";
+    t[145] = .@"readv";
+    t[146] = .@"writev";
+    t[147] = .@"getsid";
+    t[148] = .@"fdatasync";
+    t[149] = .@"_sysctl";
+    t[150] = .@"mlock";
+    t[151] = .@"munlock";
+    t[152] = .@"mlockall";
+    t[153] = .@"munlockall";
+    t[154] = .@"sched_setparam";
+    t[155] = .@"sched_getparam";
+    t[156] = .@"sched_setscheduler";
+    t[157] = .@"sched_getscheduler";
+    t[158] = .@"sched_yield";
+    t[159] = .@"sched_get_priority_max";
+    t[160] = .@"sched_get_priority_min";
+    t[161] = .@"sched_rr_get_interval";
+    t[162] = .@"nanosleep";
+    t[163] = .@"mremap";
+    t[164] = .@"setresuid16";
+    t[165] = .@"getresuid16";
+    t[166] = .@"vm86";
+    t[167] = .@"query_module";
+    t[168] = .@"poll";
+    t[169] = .@"nfsservctl";
+    t[170] = .@"setresgid16";
+    t[171] = .@"getresgid16";
+    t[172] = .@"prctl";
+    t[173] = .@"rt_sigreturn";
+    t[174] = .@"rt_sigaction";
+    t[175] = .@"rt_sigprocmask";
+    t[176] = .@"rt_sigpending";
+    t[177] = .@"rt_sigtimedwait";
+    t[178] = .@"rt_sigqueueinfo";
+    t[179] = .@"rt_sigsuspend";
+    t[180] = .@"pread64";
+    t[181] = .@"pwrite64";
+    t[182] = .@"chown16";
+    t[183] = .@"getcwd";
+    t[184] = .@"capget";
+    t[185] = .@"capset";
+    t[186] = .@"sigaltstack";
+    t[187] = .@"sendfile";
+    t[188] = .@"getpmsg";
+    t[189] = .@"putpmsg";
+    t[190] = .@"vfork";
+    t[191] = .@"getrlimit";
+    t[192] = .@"mmap2";
+    t[193] = .@"truncate64";
+    t[194] = .@"ftruncate64";
+    t[195] = .@"stat64";
+    t[196] = .@"lstat64";
+    t[197] = .@"fstat64";
+    t[198] = .@"lchown";
+    t[199] = .@"getuid";
+    t[200] = .@"getgid";
+    t[201] = .@"geteuid";
+    t[202] = .@"getegid";
+    t[203] = .@"setreuid";
+    t[204] = .@"setregid";
+    t[205] = .@"getgroups";
+    t[206] = .@"setgroups";
+    t[207] = .@"fchown";
+    t[208] = .@"setresuid";
+    t[209] = .@"getresuid";
+    t[210] = .@"setresgid";
+    t[211] = .@"getresgid";
+    t[212] = .@"chown";
+    t[213] = .@"setuid";
+    t[214] = .@"setgid";
+    t[215] = .@"setfsuid";
+    t[216] = .@"setfsgid";
+    t[217] = .@"pivot_root";
+    t[218] = .@"mincore";
+    t[219] = .@"madvise";
+    t[220] = .@"getdents64";
+    t[221] = .@"fcntl64";
+    t[224] = .@"gettid";
+    t[225] = .@"readahead";
+    t[226] = .@"setxattr";
+    t[227] = .@"lsetxattr";
+    t[228] = .@"fsetxattr";
+    t[229] = .@"getxattr";
+    t[230] = .@"lgetxattr";
+    t[231] = .@"fgetxattr";
+    t[232] = .@"listxattr";
+    t[233] = .@"llistxattr";
+    t[234] = .@"flistxattr";
+    t[235] = .@"removexattr";
+    t[236] = .@"lremovexattr";
+    t[237] = .@"fremovexattr";
+    t[238] = .@"tkill";
+    t[239] = .@"sendfile64";
+    t[240] = .@"futex";
+    t[241] = .@"sched_setaffinity";
+    t[242] = .@"sched_getaffinity";
+    t[243] = .@"set_thread_area";
+    t[244] = .@"get_thread_area";
+    t[245] = .@"io_setup";
+    t[246] = .@"io_destroy";
+    t[247] = .@"io_getevents";
+    t[248] = .@"io_submit";
+    t[249] = .@"io_cancel";
+    t[250] = .@"fadvise64";
+    t[252] = .@"exit_group";
+    t[253] = .@"lookup_dcookie";
+    t[254] = .@"epoll_create";
+    t[255] = .@"epoll_ctl";
+    t[256] = .@"epoll_wait";
+    t[257] = .@"remap_file_pages";
+    t[258] = .@"set_tid_address";
+    t[259] = .@"timer_create";
+    t[260] = .@"timer_settime";
+    t[261] = .@"timer_gettime";
+    t[262] = .@"timer_getoverrun";
+    t[263] = .@"timer_delete";
+    t[264] = .@"clock_settime";
+    t[265] = .@"clock_gettime";
+    t[266] = .@"clock_getres";
+    t[267] = .@"clock_nanosleep";
+    t[268] = .@"statfs64";
+    t[269] = .@"fstatfs64";
+    t[270] = .@"tgkill";
+    t[271] = .@"utimes";
+    t[272] = .@"fadvise64_64";
+    t[273] = .@"vserver";
+    t[274] = .@"mbind";
+    t[275] = .@"get_mempolicy";
+    t[276] = .@"set_mempolicy";
+    t[277] = .@"mq_open";
+    t[278] = .@"mq_unlink";
+    t[279] = .@"mq_timedsend";
+    t[280] = .@"mq_timedreceive";
+    t[281] = .@"mq_notify";
+    t[282] = .@"mq_getsetattr";
+    t[283] = .@"kexec_load";
+    t[284] = .@"waitid";
+    t[286] = .@"add_key";
+    t[287] = .@"request_key";
+    t[288] = .@"keyctl";
+    t[289] = .@"ioprio_set";
+    t[290] = .@"ioprio_get";
+    t[291] = .@"inotify_init";
+    t[292] = .@"inotify_add_watch";
+    t[293] = .@"inotify_rm_watch";
+    t[294] = .@"migrate_pages";
+    t[295] = .@"openat";
+    t[296] = .@"mkdirat";
+    t[297] = .@"mknodat";
+    t[298] = .@"fchownat";
+    t[299] = .@"futimesat";
+    t[300] = .@"fstatat64";
+    t[301] = .@"unlinkat";
+    t[302] = .@"renameat";
+    t[303] = .@"linkat";
+    t[304] = .@"symlinkat";
+    t[305] = .@"readlinkat";
+    t[306] = .@"fchmodat";
+    t[307] = .@"faccessat";
+    t[308] = .@"pselect6";
+    t[309] = .@"ppoll";
+    t[310] = .@"unshare";
+    t[311] = .@"set_robust_list";
+    t[312] = .@"get_robust_list";
+    t[313] = .@"splice";
+    t[314] = .@"sync_file_range";
+    t[315] = .@"tee";
+    t[316] = .@"vmsplice";
+    t[317] = .@"move_pages";
+    t[318] = .@"getcpu";
+    t[319] = .@"epoll_pwait";
+    t[320] = .@"utimensat";
+    t[321] = .@"signalfd";
+    t[322] = .@"timerfd_create";
+    t[323] = .@"eventfd";
+    t[324] = .@"fallocate";
+    t[325] = .@"timerfd_settime";
+    t[326] = .@"timerfd_gettime";
+    t[327] = .@"signalfd4";
+    t[328] = .@"eventfd2";
+    t[329] = .@"epoll_create1";
+    t[330] = .@"dup3";
+    t[331] = .@"pipe2";
+    t[332] = .@"inotify_init1";
+    t[333] = .@"preadv";
+    t[334] = .@"pwritev";
+    t[335] = .@"rt_tgsigqueueinfo";
+    t[336] = .@"perf_event_open";
+    t[337] = .@"recvmmsg";
+    t[338] = .@"fanotify_init";
+    t[339] = .@"fanotify_mark";
+    t[340] = .@"prlimit64";
+    t[341] = .@"name_to_handle_at";
+    t[342] = .@"open_by_handle_at";
+    t[343] = .@"clock_adjtime";
+    t[344] = .@"syncfs";
+    t[345] = .@"sendmmsg";
+    t[346] = .@"setns";
+    t[347] = .@"process_vm_readv";
+    t[348] = .@"process_vm_writev";
+    t[349] = .@"kcmp";
+    t[350] = .@"finit_module";
+    t[351] = .@"sched_setattr";
+    t[352] = .@"sched_getattr";
+    t[353] = .@"renameat2";
+    t[354] = .@"seccomp";
+    t[355] = .@"getrandom";
+    t[356] = .@"memfd_create";
+    t[357] = .@"bpf";
+    t[358] = .@"execveat";
+    t[359] = .@"socket";
+    t[360] = .@"socketpair";
+    t[361] = .@"bind";
+    t[362] = .@"connect";
+    t[363] = .@"listen";
+    t[364] = .@"accept4";
+    t[365] = .@"getsockopt";
+    t[366] = .@"setsockopt";
+    t[367] = .@"getsockname";
+    t[368] = .@"getpeername";
+    t[369] = .@"sendto";
+    t[370] = .@"sendmsg";
+    t[371] = .@"recvfrom";
+    t[372] = .@"recvmsg";
+    t[373] = .@"shutdown";
+    t[374] = .@"userfaultfd";
+    t[375] = .@"membarrier";
+    t[376] = .@"mlock2";
+    t[377] = .@"copy_file_range";
+    t[378] = .@"preadv2";
+    t[379] = .@"pwritev2";
+    t[380] = .@"pkey_mprotect";
+    t[381] = .@"pkey_alloc";
+    t[382] = .@"pkey_free";
+    t[383] = .@"statx";
+    t[384] = .@"arch_prctl";
+    t[385] = .@"io_pgetevents";
+    t[386] = .@"rseq";
+    t[393] = .@"semget";
+    t[394] = .@"semctl";
+    t[395] = .@"shmget";
+    t[396] = .@"shmctl";
+    t[397] = .@"shmat";
+    t[398] = .@"shmdt";
+    t[399] = .@"msgget";
+    t[400] = .@"msgsnd";
+    t[401] = .@"msgrcv";
+    t[402] = .@"msgctl";
+    t[403] = .@"clock_gettime64";
+    t[404] = .@"clock_settime64";
+    t[405] = .@"clock_adjtime64";
+    t[406] = .@"clock_getres_time64";
+    t[407] = .@"clock_nanosleep_time64";
+    t[408] = .@"timer_gettime64";
+    t[409] = .@"timer_settime64";
+    t[410] = .@"timerfd_gettime64";
+    t[411] = .@"timerfd_settime64";
+    t[412] = .@"utimensat_time64";
+    t[413] = .@"pselect6_time64";
+    t[414] = .@"ppoll_time64";
+    t[416] = .@"io_pgetevents_time64";
+    t[417] = .@"recvmmsg_time64";
+    t[418] = .@"mq_timedsend_time64";
+    t[419] = .@"mq_timedreceive_time64";
+    t[420] = .@"semtimedop_time64";
+    t[421] = .@"rt_sigtimedwait_time64";
+    t[422] = .@"futex_time64";
+    t[423] = .@"sched_rr_get_interval_time64";
+    t[424] = .@"pidfd_send_signal";
+    t[425] = .@"io_uring_setup";
+    t[426] = .@"io_uring_enter";
+    t[427] = .@"io_uring_register";
+    t[428] = .@"open_tree";
+    t[429] = .@"move_mount";
+    t[430] = .@"fsopen";
+    t[431] = .@"fsconfig";
+    t[432] = .@"fsmount";
+    t[433] = .@"fspick";
+    t[434] = .@"pidfd_open";
+    t[435] = .@"clone3";
+    t[436] = .@"close_range";
+    t[437] = .@"openat2";
+    t[438] = .@"pidfd_getfd";
+    t[439] = .@"faccessat2";
+    t[440] = .@"process_madvise";
+    t[441] = .@"epoll_pwait2";
+    t[442] = .@"mount_setattr";
+    t[443] = .@"quotactl_fd";
+    t[444] = .@"landlock_create_ruleset";
+    t[445] = .@"landlock_add_rule";
+    t[446] = .@"landlock_restrict_self";
+    t[447] = .@"memfd_secret";
+    t[448] = .@"process_mrelease";
+    t[449] = .@"futex_waitv";
+    t[450] = .@"set_mempolicy_home_node";
+    t[451] = .@"cachestat";
+    t[452] = .@"fchmodat2";
+    t[453] = .@"map_shadow_stack";
+    t[454] = .@"futex_wake";
+    t[455] = .@"futex_wait";
+    t[456] = .@"futex_requeue";
+    t[457] = .@"statmount";
+    t[458] = .@"listmount";
+    t[459] = .@"lsm_get_self_attr";
+    t[460] = .@"lsm_set_self_attr";
+    t[461] = .@"lsm_list_modules";
+    break :blk t;
+};
+
 /// The call `nr` names on `arch`, or null.
-pub fn lookup(comptime arch: enum { arm64, amd64 }, nr: u64) ?Sys {
+pub fn lookup(comptime arch: enum { arm64, amd64, i386 }, nr: u64) ?Sys {
     const t = switch (arch) {
         .arm64 => &arm64,
         .amd64 => &amd64,
+        .i386 => &ia32,
     };
     return if (nr < t.len) t[@intCast(nr)] else null;
 }
@@ -1103,4 +1660,9 @@ test "numbers" {
     try std.testing.expectEqual(Sys.openat, lookup(.arm64, 56).?);
     try std.testing.expectEqual(Sys.exit_group, lookup(.amd64, 231).?);
     try std.testing.expectEqual(Sys.rt_sigreturn, lookup(.arm64, 139).?);
+    try std.testing.expectEqual(Sys.write, lookup(.i386, 4).?);
+    try std.testing.expectEqual(Sys.select, lookup(.i386, 142).?);
+    try std.testing.expectEqual(Sys.getuid, lookup(.i386, 199).?);
+    try std.testing.expectEqual(Sys.set_thread_area, lookup(.i386, 243).?);
+    try std.testing.expectEqual(Sys.clock_gettime64, lookup(.i386, 403).?);
 }

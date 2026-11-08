@@ -39,6 +39,7 @@ start:
 	.long restore - start
 	.long fxsave - start
 	.long fxrstor - start
+	.long gdt - start
 boot:
 	cli
 	xorw %ax, %ax
@@ -59,8 +60,9 @@ pm32:
 	movw %ax, %ss
 	movl $KSTACK, %esp
 
-	// The IDT: 256 interrupt gates, vector i to stubs + 16*i. INT $64 is
-	// a trap gate reachable from ring 3; the rest only from hardware.
+	// The IDT: 256 interrupt gates, vector i to stubs + 16*i. INT $64
+	// (9front's syscall) and int 0x80 (Linux's) are reachable from ring 3;
+	// the rest only from hardware.
 	xorl %ecx, %ecx
 1:
 	movl %ecx, %eax
@@ -74,7 +76,10 @@ pm32:
 	movb $0, 4(%edi)
 	movb $0x8E, 5(%edi)
 	cmpl $64, %ecx
+	je 3f
+	cmpl $0x80, %ecx
 	jne 2f
+3:
 	movb $0xEE, 5(%edi)
 2:
 	shrl $16, %eax
@@ -170,6 +175,7 @@ gdt:
 	.quad 0x00CFF2000000FFFF	// 0x18 UDSEG (0x1b)
 	.quad 0x00CFFA000000FFFF	// 0x20 UESEG (0x23)
 	.quad 0x0000890000000067	// 0x28 TSS, base set at boot
+	.quad 0x00CFF3000000FFFF	// 0x30 Linux TLS (0x33), base set per run
 gdtend:
 	.balign 4
 	.word 0

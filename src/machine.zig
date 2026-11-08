@@ -1339,6 +1339,16 @@ pub const Machine = struct {
                 },
                 else => {},
             };
+            // On 386, int 0x80 (Linux's call) is a general protection
+            // fault for a 9front process, as its IDT gate allows only
+            // INT $64 from user mode (design/linux-i386.md).
+            if (exit == .syscall and u == .i386 and u.i386.trap != vmm.ia32.vector_syscall) {
+                const note = "sys: trap: general protection violation";
+                if (!(kern.postNote(p.pid, note, .debug) catch false)) {
+                    return .{ .killed = try std.fmt.bufPrint(&p.msg_buf, "{s} pc=0x{x}", .{ note, u.pc() }) };
+                }
+                continue;
+            }
             switch (exit) {
                 .syscall => switch (blk: {
                     // /proc/n/regs serves these while the call runs.
@@ -1885,6 +1895,30 @@ pub const Machine = struct {
     fn linuxSyscall(m: *Machine, p: *Proc, l: *lsys.Process, vcpu: *cpupool.Lease, u: *vmm.Ureg) RunError!?Status {
         // See the 9front branch of `loop`.
         if (p.note_flag.load(.acquire)) kern.interrupt(kern.self());
+        if (u.* == .i386) {
+            const r = &u.i386;
+            // On 386 only int 0x80 is a Linux call: INT $64, 9front's, is
+            // a general protection fault, SIGSEGV (design/linux-i386.md).
+            if (r.trap != vmm.ia32.vector_linux) {
+                const a = l.sig.actions[lsig.SIGSEGV];
+                if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(lsig.SIGSEGV) != 0) {
+                    return .{ .killed = lsig.deathNote(lsig.SIGSEGV, &p.msg_buf) };
+                }
+                _ = l.sig.post(lsig.SIGSEGV, .{ .code = lsig.SI_KERNEL });
+                return null;
+            }
+            // set_thread_area and get_thread_area: the TLS segment's base,
+            // which is the vCPU's, as amd64's FS base is.
+            if (r.ax == 243 or r.ax == 244) {
+                try vcpu.getExtra(&p.extra);
+                const v = threadArea(l, &p.extra.i386, r.ax == 243, r.bx);
+                l.traceLine("{s}(0x{x}) = {d}", .{ if (r.ax == 243) "set_thread_area" else "get_thread_area", r.bx, v });
+                if (r.ax == 243 and v == 0) vcpu.setExtra(&p.extra);
+                r.ax = @truncate(@as(u64, @bitCast(v)));
+                vcpu.setUreg(u);
+                return null;
+            }
+        }
         // amd64's arch_prctl sets the thread pointer, which is the vCPU's.
         if (u.* == .amd64 and u.amd64.ax == 158) {
             const ARCH_SET_FS = 0x1002;
@@ -1963,6 +1997,28 @@ pub const Machine = struct {
             },
         }
         return null;
+    }
+
+    /// set_thread_area (`set`) or get_thread_area of a struct user_desc:
+    /// i386 Linux's one TLS segment, GDT entry 6, whose base is the thread
+    /// pointer that `Extra.tls` carries (design/linux-i386.md, "TLS").
+    /// Entry -1 asks for a free one, and gets 6; entries 7 and 8, which
+    /// Linux also has, aren't there.
+    fn threadArea(l: *lsys.Process, x: *vmm.X86Extra, set: bool, desc_va: u64) i64 {
+        var d: [4]u32 = undefined;
+        l.readMem(desc_va, std.mem.sliceAsBytes(&d)) catch return -attr.E.FAULT;
+        const entry = d[0];
+        if (set) {
+            if (entry != lsig.i386_tls_entry and entry != 0xffff_ffff) return -attr.E.INVAL;
+            if (entry == 0xffff_ffff) l.writeU32(desc_va, lsig.i386_tls_entry) catch return -attr.E.FAULT;
+            x.tls = d[1];
+            return 0;
+        }
+        if (entry != lsig.i386_tls_entry) return -attr.E.INVAL;
+        // A flat, 32-bit, writable data segment in pages, as set.
+        d = .{ entry, @truncate(x.tls), 0xfffff, 0x51 };
+        l.writeMem(desc_va, std.mem.sliceAsBytes(&d)) catch return -attr.E.FAULT;
+        return 0;
     }
 
     /// Sets the stack pointer of a Linux call's registers.
@@ -2220,7 +2276,11 @@ pub const Machine = struct {
                 a.pc = r.pc - 2;
                 a.ax = r.nr;
             },
-            .i386 => {},
+            // int 0x80, two bytes.
+            .i386 => |*a| {
+                a.pc = @truncate(r.pc - 2);
+                a.ax = @truncate(r.nr);
+            },
         }
     }
 

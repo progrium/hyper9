@@ -229,16 +229,22 @@ pub fn deathNote(signo: u32, buf: []u8) []const u8 {
 /// Guest memory for frames: `p.readMem(va, []u8)` and
 /// `p.writeMem(va, []const u8)`, failing with any error.
 fn siginfo(signo: u32, info: Info) [128]u8 {
+    return siginfoAt(signo, info, 16, 8);
+}
+
+/// siginfo with its union at `u` and pointers of `ptr` bytes: at 16 and
+/// 8 on 64-bit, at 12 and 4 on i386.
+fn siginfoAt(signo: u32, info: Info, u: usize, ptr: usize) [128]u8 {
     var b: [128]u8 = @splat(0);
     std.mem.writeInt(i32, b[0..4], @intCast(signo), .little);
     std.mem.writeInt(i32, b[8..12], info.code, .little);
     switch (signo) {
-        SIGSEGV, SIGBUS, SIGILL, SIGFPE => std.mem.writeInt(u64, b[16..24], info.addr, .little),
+        SIGSEGV, SIGBUS, SIGILL, SIGFPE => if (ptr == 8) std.mem.writeInt(u64, b[u..][0..8], info.addr, .little) else std.mem.writeInt(u32, b[u..][0..4], @truncate(info.addr), .little),
         SIGCHLD => {
-            std.mem.writeInt(u32, b[16..20], info.pid, .little);
-            std.mem.writeInt(i32, b[24..28], info.status, .little);
+            std.mem.writeInt(u32, b[u..][0..4], info.pid, .little);
+            std.mem.writeInt(i32, b[u + 8 ..][0..4], info.status, .little);
         },
-        else => std.mem.writeInt(u32, b[16..20], info.pid, .little),
+        else => std.mem.writeInt(u32, b[u..][0..4], info.pid, .little),
     }
     return b;
 }
@@ -285,7 +291,7 @@ pub fn setup(p: anytype, s: *State, u: *vmm.Ureg, x: *const vmm.Extra, f: Frame)
     switch (u.*) {
         .arm64 => |*r| try setupArm64(p, s, r, &x.arm64, f),
         .amd64 => |*r| try setupAmd64(p, s, r, &x.amd64, f),
-        .i386 => return error.Fault,
+        .i386 => |*r| try setupI386(p, s, r, &x.i386, f),
     }
 }
 
@@ -396,6 +402,119 @@ fn setupAmd64(p: anytype, s: *State, r: *vmm.amd64.Ureg, x: *const vmm.X86Extra,
     r.flags &= ~@as(u64, 0x500);
 }
 
+// i386's frames (arch/x86/include/asm/sigframe.h, design/linux-i386.md).
+// A handler with SA_SIGINFO gets an rt_sigframe: pretcode, sig, pinfo and
+// puc (the handler's arguments), siginfo at 16, then the ucontext at 144
+// (uc_flags, uc_link, uc_stack, the sigcontext at 20 and the mask at 108)
+// and retcode. One without gets the old sigframe, which musl's sigreturn
+// restorer pops: pretcode, sig, the sigcontext at 8, an unused fpstate,
+// the mask's high word at 720 and retcode. The FP state goes above
+// either as a struct _fpstate_32, the FXSAVE image at its 112.
+const i32_rt_info = 16;
+const i32_rt_uc = 144;
+const i32_rt_mc = i32_rt_uc + 20;
+const i32_rt_mask = i32_rt_uc + 108;
+const i32_rt_ret = i32_rt_uc + 116;
+const i32_rt_size = i32_rt_ret + 8;
+const i32_mc = 8;
+const i32_extramask = 720;
+const i32_ret = 724;
+const i32_size = 732;
+const i32_fp_size = 112 + 512;
+const i32_flags_user: u32 = 0xcd5; // CF PF AF ZF SF DF OF (and the kernel's AC, which it allows, is left out)
+
+/// The TLS selector: i386 Linux programs load %gs with it, from the GDT
+/// entry set_thread_area gives them (design/linux-i386.md, "TLS").
+pub const i386_tls_entry = 6;
+pub const i386_tls_sel: u32 = (i386_tls_entry << 3) | 3;
+
+fn setupI386(p: anytype, s: *State, r: *vmm.ia32.Ureg, x: *const vmm.X86Extra, f: Frame) FrameError!void {
+    const rt = f.act.flags & SA_SIGINFO != 0;
+    const where = frameTop(s, f.act, r.sp);
+    const fp = (where.top -% i32_fp_size) & ~@as(u64, 63);
+    const size: u64 = if (rt) i32_rt_size else i32_size;
+    // As Linux's get_sigframe: 16-aligned, less the return address a call
+    // would have pushed.
+    const sp = ((fp -% size) & ~@as(u64, 15)) -% 4;
+    if (sp > 0xffff_ffff) return error.Fault;
+    var fpb: [i32_fp_size]u8 = @splat(0);
+    // The legacy header: cw, sw, tag; magic 0 at 110 says FXSR follows.
+    put32(&fpb, 0, 0xffff0000 | @as(u32, x.fx.fcw));
+    put32(&fpb, 4, 0xffff0000 | @as(u32, x.fx.fsw));
+    put32(&fpb, 8, 0xffffffff);
+    @memcpy(fpb[112..][0..512], std.mem.asBytes(&x.fx));
+    p.writeMem(fp, &fpb) catch return error.Fault;
+
+    // The return trampoline, for a handler without a restorer: Linux's
+    // retcode, `movl $nr, %eax; int $0x80` (with a `popl %eax` first for
+    // the old frame).
+    var b: [i32_size]u8 = @splat(0);
+    const mc: usize = if (rt) i32_rt_mc else i32_mc;
+    const ret_off: usize = if (rt) i32_rt_ret else i32_ret;
+    const trampoline = if (rt) [8]u8{ 0xb8, 173, 0, 0, 0, 0xcd, 0x80, 0 } else [8]u8{ 0x58, 0xb8, 119, 0, 0, 0, 0xcd, 0x80 };
+    @memcpy(b[ret_off..][0..8], &trampoline);
+    const restorer = if (f.act.flags & SA_RESTORER != 0) f.act.restorer else sp + ret_off;
+    put32(&b, 0, @truncate(restorer));
+    put32(&b, 4, f.signo);
+    // sigcontext: gs, fs, es, ds, edi, esi, ebp, esp, ebx, edx, ecx, eax,
+    // trapno, err, eip, cs, eflags, esp_at_signal, ss, fpstate, oldmask, cr2.
+    const regs = [_]u32{ r.gs, r.fs, r.es, r.ds, r.di, r.si, r.bp, r.sp, r.bx, r.dx, r.cx, r.ax, if (f.signo == SIGSEGV) 14 else 0, 0, r.pc, r.cs, r.flags, r.sp, r.ss, @intCast(fp), @truncate(f.saved_mask), @truncate(f.info.addr) };
+    for (regs, 0..) |v, i| put32(&b, mc + 4 * i, v);
+    if (rt) {
+        put32(&b, 8, @intCast(sp + i32_rt_info));
+        put32(&b, 12, @intCast(sp + i32_rt_uc));
+        @memcpy(b[i32_rt_info..][0..128], &siginfoAt(f.signo, f.info, 12, 4));
+        // uc_stack: ss_sp, ss_flags, ss_size.
+        put32(&b, i32_rt_uc + 8, @truncate(s.altstack.sp));
+        put32(&b, i32_rt_uc + 12, if (s.altstack.size == 0) SS_DISABLE else if (onStack(s, r.sp)) SS_ONSTACK else 0);
+        put32(&b, i32_rt_uc + 16, @truncate(s.altstack.size));
+        put64(&b, i32_rt_mask, f.saved_mask);
+    } else put32(&b, i32_extramask, @truncate(f.saved_mask >> 32));
+    p.writeMem(sp, b[0..@intCast(size)]) catch return error.Fault;
+
+    r.sp = @intCast(sp);
+    r.pc = @truncate(f.act.handler);
+    // The handler's arguments are on the stack; Linux also passes them in
+    // eax, edx and ecx (regparm(3) handlers).
+    r.ax = f.signo;
+    r.dx = if (rt) @intCast(sp + i32_rt_info) else 0;
+    r.cx = if (rt) @intCast(sp + i32_rt_uc) else 0;
+    // The handler starts with DF and TF clear, as Linux's does.
+    r.flags &= ~@as(u32, 0x500);
+}
+
+/// i386's sigreturn (rt or not, by the call's number, still in eax):
+/// the registers, the FP state and the mask from the frame. The
+/// selectors stay the kernel's, but for %gs, which may be null or the
+/// TLS one.
+fn restoreI386(p: anytype, r: *vmm.ia32.Ureg, x: *vmm.Extra) FrameError!u64 {
+    const rt = r.ax == 173;
+    // The handler's `ret` popped pretcode; the old restorer popped sig too.
+    const frame: u64 = r.sp -% @as(u32, if (rt) 4 else 8);
+    var b: [i32_size]u8 = undefined;
+    const size: usize = if (rt) i32_rt_size else i32_size;
+    p.readMem(frame, b[0..size]) catch return error.Fault;
+    const mc: usize = if (rt) i32_rt_mc else i32_mc;
+    const mask: u64 = if (rt) get64(&b, i32_rt_mask) else get32(&b, mc + 80) | @as(u64, get32(&b, i32_extramask)) << 32;
+    var n = r.*;
+    const gs = get32(&b, mc) & 0xffff;
+    n.gs = if (gs == i386_tls_sel) gs else 0;
+    const dst = [_]*u32{ &n.di, &n.si, &n.bp, &n.sp, &n.bx, &n.dx, &n.cx, &n.ax };
+    for (dst, 0..) |d, i| d.* = get32(&b, mc + 16 + 4 * i);
+    n.pc = get32(&b, mc + 56);
+    const fl = get32(&b, mc + 64);
+    n.flags = (fl & i32_flags_user) | (r.flags & ~i32_flags_user);
+    const fp = get32(&b, mc + 76);
+    if (fp != 0) {
+        var fx: vmm.Fxsave = undefined;
+        p.readMem(fp + 112, std.mem.asBytes(&fx)) catch return error.Fault;
+        fx.mxcsr &= 0xffff;
+        x.i386.fx = fx;
+    } else x.i386.fx = vmm.X86Extra.init.fx;
+    r.* = n;
+    return mask;
+}
+
 /// rt_sigreturn: restores the registers, FP state and mask from the frame
 /// the handler was entered with, sanitized as noted's are: on arm64 only
 /// NZCV comes from the frame, on amd64 only the arithmetic flags, and the
@@ -458,7 +577,7 @@ pub fn restore(p: anytype, s: *State, u: *vmm.Ureg, x: *vmm.Extra) FrameError!vo
             } else x.amd64.fx = vmm.X86Extra.init.fx;
             r.* = n;
         },
-        .i386 => return error.Fault,
+        .i386 => |*r| mask = try restoreI386(p, r, x),
     }
     s.mask = mask & ~unblockable;
     s.on_altstack = onStack(s, u.stackPointer());
