@@ -1269,6 +1269,10 @@ pub const Machine = struct {
         vcpu.setUreg(&u);
         // A clone or fork child's time starts here, on its own thread.
         if (p.lx) |l| l.cpu0 = lsys.cputime.thread();
+        // A thread joins its group before its kernel process exists, so an
+        // exit_group in between posts it a kill note that's lost. It looks
+        // here, once it exists: a later exit_group's note reaches it.
+        if (p.lx) |l| if (!l.isLeader() and l.g.ending()) return .{ .killed = "kill" };
         var last_fault: struct { addr: u64 = 0, access: @FieldType(vmm.Fault, "access") = .read, pc: u64 = 0, gen: u64 = 0 } = .{};
         while (true) {
             if (j.stopping.load(.acquire)) return .{ .killed = if (j.timed_out.load(.acquire)) timeout_note else stopped_note };
