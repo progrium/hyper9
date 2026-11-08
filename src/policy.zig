@@ -446,7 +446,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         err_msg.* = if (in.root_9p.?.kind == .ws) "--write=none can't be enforced on a WebSocket root" else "--write=none can't be enforced on a 9P root";
         return error.Conflict;
     }
-    if (in.root_contained and in.root == null) {
+    // A Linux root is always contained, so the flag changes nothing there,
+    // as the manual's "for Linux roots" promises.
+    if (in.root_contained and in.root == null and in.linux_root == null) {
         err_msg.* = "--root-contained needs a host directory as the root";
         return error.Conflict;
     }
@@ -1285,6 +1287,8 @@ test "compile: --root-contained (design/0034-symlinks-in-root.md)" {
     // A 9P root isn't a host tree.
     try t.expectError(error.Conflict, compile(a, .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!fs!564" }, .cwd = "/w", .arch = .arm64, .root_contained = true }, .{}, &msg));
     try t.expect(std.mem.indexOf(u8, msg, "--root-contained") != null);
+    // A Linux root alone is a host tree, already contained.
+    _ = try compile(a, .{ .root = null, .linux_root = "/l", .cwd = "/w", .arch = .amd64, .root_contained = true }, .{}, &msg);
 }
 
 test "compile: the root's overlay (design/0011-overlay.md)" {
