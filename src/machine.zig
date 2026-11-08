@@ -118,6 +118,34 @@ pub const RunError = error{
     Stuck,
 } || kern.Error || vmm.CreateError || loader.Error;
 
+/// The built-in root `#Hroot` serves (design/builtin-root.md): what it
+/// was built from, for the plan, `--version` and `--check`.
+pub const builtin_root = struct {
+    const t = kern.builtin_root;
+    /// The 9front release multicall's trees were built from.
+    pub const release: []const u8 = t.release;
+    /// multicall's set (src/9box).
+    pub const set: []const u8 = t.set;
+    /// The architectures with commands, in 9front's names; empty for the
+    /// skeleton only.
+    pub const arches: []const []const u8 = &t.arches;
+    /// Commands per architecture.
+    pub const commands: usize = t.commands;
+
+    /// Whether `arch` has commands in it.
+    pub fn has(arch: vmm.Arch) bool {
+        for (arches) |a| if (std.mem.eql(u8, a, arch.name())) return true;
+        return false;
+    }
+
+    /// `h9 <version>, 9front <release> <set>`, or `skeleton only`.
+    pub fn describe(arena: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+        const v = @import("build_options").version;
+        if (arches.len == 0) return std.fmt.allocPrint(arena, "h9 {s}, skeleton only", .{v});
+        return std.fmt.allocPrint(arena, "h9 {s}, 9front {s} {s}", .{ v, release, set });
+    }
+};
+
 pub const Machine = struct {
     /// The root tree (design/0013-9p-roots.md): a host directory, or a 9P
     /// server the machine connects to and mounts at /.
@@ -186,6 +214,12 @@ pub const Machine = struct {
         /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
         /// bind out and masks `#H` (design/0032-guest-tools.md).
         guest_tools: bool = true,
+        /// The built-in root, `#Hroot` (design/builtin-root.md): `.only`
+        /// makes it the root, and needs `root` null; `.before` and
+        /// `.after` bind its commands before or after another root's
+        /// /bin, and without one make it the root. `.off` leaves a machine
+        /// without `root` with devices only.
+        builtin: policy.Builtin = .off,
         /// Receives a ratrace-style line per syscall.
         trace: ?*std.Io.Writer = null,
         /// On a fault, print the Ureg and a symbolized PC to `stdio.err`.
@@ -296,7 +330,8 @@ pub const Machine = struct {
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
-        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .root_contained = opts.root_contained, .linux_root = opts.linux_root, .nameservers = opts.nameservers };
+        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .root_contained = opts.root_contained, .linux_root = opts.linux_root, .nameservers = opts.nameservers, .builtin = opts.builtin };
+        if (opts.builtin != .off) in.builtin_note = try builtin_root.describe(arena);
         if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
         if (opts.root) |r| switch (r) {
             .dir => |d| in.root = d,

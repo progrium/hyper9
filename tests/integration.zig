@@ -327,7 +327,9 @@ test "no root tree gives 125 for a guest program [baseline]" {
     var environ = try std.testing.environ.createMap(gpa);
     defer environ.deinit();
     _ = environ.swapRemove("H9ROOT");
-    for ([_][]const []const u8{ &.{ h9, "echo", "x" }, &.{ h9, "--rc", "echo x" } }) |argv| {
+    // Without --builtin=off, the built-in root is used instead
+    // (design/builtin-root.md).
+    for ([_][]const []const u8{ &.{ h9, "--builtin=off", "echo", "x" }, &.{ h9, "--builtin=off", "--rc", "echo x" } }) |argv| {
         var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .environ_map = &environ, .create_no_window = true });
         defer child.kill(io);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 125 }, try child.wait(io));
@@ -5678,4 +5680,249 @@ test "a coroutine stack overflow panics instead of corrupting [12]" {
         try expectIn(r.err, "kernel stack overflow in ");
         try std.testing.expect(r.code != 0);
     }
+}
+
+// The built-in root (design/builtin-root.md): `#Hroot`, multicall's tree
+// of 9front's commands built into h9. Cases that run its commands skip
+// when the build embedded none for the architecture under test (a
+// development build without `zig build slim`'s tree).
+
+/// The architecture under test, by its 9front name.
+fn testArch(e: Env) []const u8 {
+    return e.arch orelse "arm64";
+}
+
+/// Skips a case that needs the built-in root's commands for the
+/// architecture under test, when `h9 --version` says it has none.
+fn needBuiltin(e: Env) !void {
+    const v = try runProcess(&.{ e.h9, "--version" }, null);
+    defer gpa.free(v.stdout);
+    defer gpa.free(v.stderr);
+    const at = std.mem.indexOf(u8, v.stdout, "built-in root: ") orelse return error.SkipZigTest;
+    const line = v.stdout[at..(std.mem.indexOfScalarPos(u8, v.stdout, at, '\n') orelse v.stdout.len)];
+    var it = std.mem.tokenizeAny(u8, line, " ,()");
+    while (it.next()) |w| if (std.mem.eql(u8, w, testArch(e))) return;
+    return error.SkipZigTest;
+}
+
+/// The environment without H9ROOT.
+fn noRootEnv() !std.process.Environ.Map {
+    var environ = try std.testing.environ.createMap(gpa);
+    _ = environ.swapRemove("H9ROOT");
+    return environ;
+}
+
+/// Runs `h9 args...` on the first backend, with no --root and no H9ROOT,
+/// in `cwd` if given.
+fn runNoRoot(e: Env, h9: []const u8, args: []const []const u8) !Result {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ h9, "--backend", firstBackend(e) });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, args);
+    var environ = try noRootEnv();
+    defer environ.deinit();
+    const r = try runProcessWith(argv.items, null, &environ, 30_000);
+    const code = switch (r.term) {
+        .exited => |c| c,
+        else => {
+            gpa.free(r.stdout);
+            gpa.free(r.stderr);
+            return error.Crashed;
+        },
+    };
+    return .{ .code = code, .out = r.stdout, .err = r.stderr };
+}
+
+/// A copy of h9 in `s`, which has no .local/9front/root two levels up to
+/// default to.
+fn h9Copy(e: Env, s: *Scratch) ![]const u8 {
+    const name = std.fs.path.basename(e.h9);
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), e.h9, s.tmp.dir, name, std.testing.io, .{});
+    return std.fs.path.join(gpa, &.{ s.path, name });
+}
+
+test "with no root found, --rc runs from the built-in root [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const h9 = try h9Copy(e, &s);
+    defer gpa.free(h9);
+    const r = try runNoRoot(e, h9, &.{ "--cwd", s.path, "--rc", "ls /bin/ls >/dev/null && echo $cputype; pwd" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    var want: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}\n/mnt/term/cwd\n", .{testArch(e)}), r.out);
+}
+
+test "--builtin=only ignores H9ROOT [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--builtin=only" });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    // The full tree has /sys/src; the built-in root doesn't.
+    try argv.appendSlice(gpa, &.{ "--rc", "test -d /sys || echo builtin" });
+    var environ = try std.testing.environ.createMap(gpa);
+    defer environ.deinit();
+    try environ.put("H9ROOT", e.root);
+    const r = try runProcessWith(argv.items, null, &environ, 30_000);
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    errdefer std.debug.print("stderr: {s}\n", .{r.stderr});
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+    try std.testing.expectEqualStrings("builtin\n", r.stdout);
+}
+
+test "--builtin=only with --root is a usage error [builtin-root]" {
+    const e = try env(@src());
+    const r = try runProcess(&.{ e.h9, "--builtin=only", "--root", e.root, "--rc", "echo x" }, null);
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, r.term);
+}
+
+test "--builtin=off without a root is exit 125 as before [builtin-root]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const h9 = try h9Copy(e, &s);
+    defer gpa.free(h9);
+    const r = try runNoRoot(e, h9, &.{ "--builtin=off", "--rc", "echo x" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "no root tree found") != null);
+}
+
+test "--builtin=before runs the box's ls and the root's other commands [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    const r = try run(e, &.{ "--builtin=before", "--rc", "cmp -s /bin/ls /bin/9box && echo boxed; test -x /bin/mk && echo mk" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("boxed\nmk\n", r.out);
+}
+
+test "--builtin=after leaves the root's ls and fills a missing command [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // A slim root of its own: rc, ls and rcmain from the full tree, and
+    // nothing else.
+    var bin: [64]u8 = undefined;
+    const arch_bin = try std.fmt.bufPrint(&bin, "root/{s}/bin", .{testArch(e)});
+    for ([_][]const u8{ arch_bin, "root/rc/lib", "root/dev", "root/env", "root/fd", "root/proc", "root/srv", "root/tmp", "root/bin", "root/net", "root/mnt/term/cwd" }) |d| try s.tmp.dir.createDirPath(io, d);
+    var from: [64]u8 = undefined;
+    var to: [96]u8 = undefined;
+    for ([_][]const u8{ "rc", "ls" }) |cmd| {
+        const src = try hostPath(e.root, try std.fmt.bufPrint(&from, "{s}/bin/{s}", .{ testArch(e), cmd }));
+        try std.Io.Dir.copyFile(std.Io.Dir.cwd(), src, s.tmp.dir, try std.fmt.bufPrint(&to, "{s}/{s}", .{ arch_bin, cmd }), io, .{});
+    }
+    const rcmain = try hostPath(e.root, "rc/lib/rcmain");
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), rcmain, s.tmp.dir, "root/rc/lib/rcmain", io, .{});
+    const root = try std.fs.path.join(gpa, &.{ s.path, "root" });
+    defer gpa.free(root);
+    const r = try runNoRoot(e, e.h9, &.{ "--root", root, "--builtin=after", "--rc", "cmp -s /bin/ls /bin/9box || echo own; echo filled | wc -l" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("own\n      1\n", r.out);
+}
+
+test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [builtin-root]" {
+    const e = try env(@src());
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var from: [64]u8 = undefined;
+    const ls = try hostPath(e.root, try std.fmt.bufPrint(&from, "{s}/bin/ls", .{testArch(e)}));
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), ls, s.tmp.dir, "ls", io, .{});
+    const h9 = try h9Copy(e, &s);
+    defer gpa.free(h9);
+    // A host program's path is relative to the host's cwd, and the
+    // scratch directory is under it.
+    var prog: [128]u8 = undefined;
+    const r = try runNoRoot(e, h9, &.{ "--cwd", s.path, try std.fmt.bufPrint(&prog, "./.zig-cache/tmp/{s}/ls", .{&s.tmp.sub_path}), "-d", "/dev/cons", "/env", "/proc", "/tmp", "/mnt/term/cwd/ls" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    for ([_][]const u8{ "/dev/cons\n", "/env\n", "/mnt/term/cwd/ls\n", "/proc\n", "/tmp\n" }) |want|
+        try std.testing.expect(std.mem.indexOf(u8, r.out, want) != null);
+}
+
+test "the built-in root refuses writes and /tmp is writable in memory [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--cwd", s.path, "--write=scope", "--rc", "touch /usr/f >[2]/dev/null || echo refused; echo y >/tmp/f && cat /tmp/f" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("refused\ny\n", r.out);
+}
+
+test "--print shows the #Hroot bind as builtin [builtin-root]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--cwd", s.path, "--print", "--rc", "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    const at = std.mem.indexOf(u8, r.out, "  bind '#Hroot' / ") orelse return error.NoBind;
+    const line = r.out[at..std.mem.indexOfScalarPos(u8, r.out, at, '\n').?];
+    try std.testing.expect(std.mem.indexOf(u8, line, " builtin  # h9 ") != null);
+    const b = try run(e, &.{ "--builtin=before", "--print", "--rc", "echo" });
+    defer b.deinit();
+    var want: [64]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, b.out, try std.fmt.bufPrint(&want, "  bind '#Hroot/{s}/bin' /bin ", .{testArch(e)})) != null);
+}
+
+test "--ns replays a plan printed over the built-in root [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const p = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--cwd", s.path, "--print", "--rc", "echo" });
+    defer p.deinit();
+    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
+    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    // Replayed over the full tree, the plan makes the built-in root `/`.
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc", "test -d /sys || echo builtin" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("builtin\n", r.out);
+}
+
+test "--check passes with only the built-in root [builtin-root]" {
+    const e = try env(@src());
+    // --check runs the host's architecture.
+    if (e.arch != null) return error.SkipZigTest;
+    try needBuiltin(e);
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--check" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\n", .{r.out});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "root: built-in (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
+}
+
+test "a missing command names the built-in root in its error [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "mk" });
+    defer r.deinit();
+    try std.testing.expectEqual(127, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "not in the built-in root; pass --root or set H9ROOT") != null);
 }

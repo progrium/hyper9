@@ -340,6 +340,12 @@ commands, and `9box CMD ARGS` runs one. Add your own commands and scripts to
 the tree as above; to box more of 9front's, add a line to `src/9box/slim`
 (its name and its directory under `/sys/src/cmd`).
 
+This tree is also built into h9 itself, as the built-in root h9 uses when it
+finds no other ([builtin-root](../design/builtin-root.md)). `h9
+--builtin=only` runs over it even when you have a root, and `h9 --root
+~/slim --builtin=after` fills in any of its 42 commands your own tree
+leaves out.
+
 ## 5. Layering on the stock root instead of copying it
 
 > Needs the 9front root tree. Not yet run.

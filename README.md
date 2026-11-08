@@ -114,6 +114,14 @@ and takes a few minutes on the emulator. The tree is `9box`, its links,
 `h9 --root .local/9front/slim-11952-arm64`. The `[64]` cases use it,
 and skip without it.
 
+`zig build` embeds the same trees as h9's [built-in root](design/builtin-root.md),
+`#Hroot`, which h9 uses when it finds no root tree, so `h9 --rc 'ls'` works
+with nothing but the binary. It takes `slim-<release>-<arch>` for each
+architecture the build runs (the target's, and with `-Demu=unicorn` also
+`amd64` and `386`) from `-Dbuiltin-root` (default `.local/9front`). An
+architecture without a tree for the pinned release gets the built-in root's
+directories only, and `zig build` warns; `-Drelease` fails instead.
+
 The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
 `scripts/fetch.sh`, so it's opt-in and never part of the MIT `h9` build. It
 ships separately as `h9-emu` (see [Releases](#releases)):
