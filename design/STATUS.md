@@ -17,7 +17,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [i386](0009-i386.md) | implemented |  | 386 binaries |
 | [self-host](0010-self-host.md) | implemented |  | Self-hosting |
 | [overlay](0011-overlay.md) | implemented |  | Copy-on-write overlay as the root's default |
-| [browser-host](0012-browser-host.md) | accepted | ready | A browser host on wasm, with v86 |
+| [browser-host](0012-browser-host.md) | implemented |  | A browser host on wasm, with v86 |
 | [9p-roots](0013-9p-roots.md) | implemented |  | 9P roots |
 | [image-roots](0014-image-roots.md) | draft |  | Disk-image roots |
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
@@ -34,8 +34,8 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [linux-threads](0049-linux-threads.md) | draft | needs linux-personality, linux-net | Linux threads |
 | [linux-net](0050-linux-net.md) | draft | needs linux-personality | Linux readiness and sockets |
 | [multicall](0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
-| [audio](audio.md) | draft | needs browser-host | Audio (--audio) |
-| [browser-gfx](browser-gfx.md) | draft | needs browser-host | Graphics on the browser host |
+| [audio](audio.md) | draft |  | Audio (--audio) |
+| [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [builtin-root](builtin-root.md) | draft |  | A built-in root |
 | [ci](ci.md) | draft |  | Continuous integration |
 | [credential-helpers](credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
@@ -66,7 +66,7 @@ flowchart LR
   p_i386["#35;9 i386<br/>implemented"]:::implemented
   p_self_host["#35;10 self-host<br/>implemented"]:::implemented
   p_overlay["#35;11 overlay<br/>implemented"]:::implemented
-  p_browser_host["#35;12 browser-host<br/>accepted"]:::accepted
+  p_browser_host["#35;12 browser-host<br/>implemented"]:::implemented
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
   p_image_roots["#35;14 image-roots<br/>draft"]:::draft
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
