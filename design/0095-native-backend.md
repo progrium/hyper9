@@ -2,7 +2,7 @@
 id: 95
 slug: native-backend
 title: Native backend
-status: draft
+status: accepted
 created: 2026-11-08
 authors: [progrium]
 depends: []
