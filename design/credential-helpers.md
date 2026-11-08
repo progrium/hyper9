@@ -12,7 +12,7 @@ areas: [cli, kern, sandbox, web]
 
 ## Abstract
 
-Before each WebSocket handshake it makes, h9 can run a host command, a credential helper, chosen by matching the URL against patterns given with `--cred`, and send the headers it prints with the handshake. The helper runs on every handshake: the root's, a namespace file's mounts, and every reconnect [dotl](0022-dotl.md) makes under `9P2000.L.Z`. So short-lived tokens work for runs of any length, and namespace files hold no secrets. The guest never sees the helper, its output or the headers. A server can also name the uid it serves files as, and dotl maps that uid to the machine's user without a `--user-map`.
+Before each WebSocket handshake it makes, h9 can run a host command, a credential helper, chosen by matching the URL against patterns given with `--cred`, and send the headers it prints with the handshake. The helper runs on every handshake: the root's, a namespace file's mounts, and every reconnect [dotl](0022-dotl.md) makes under `9P2000.L.Z`. So short-lived tokens work for runs of any length, and namespace files hold no secrets. The guest never sees the helper, its output, or the headers. A server can also name the uid it serves files as, and dotl maps that uid to the machine's user without a `--user-map`.
 
 ## Background
 
@@ -27,15 +27,15 @@ Before each WebSocket handshake it makes, h9 can run a host command, a credentia
 
 Credential helpers are an established pattern. These are the ones this proposal borrows naming and ergonomics from, and where it departs from them.
 
-- **[git credential helpers](https://git-scm.com/docs/gitcredentials).** `credential.helper` names a helper, and a bare name runs as the git subcommand `git credential-NAME`. Config can be scoped by URL (`[credential "https://example.com"]`), and the path is ignored by default, since most people have one credential per host. The protocol is `key=value` lines with `fill`, `approve` and `reject` actions. Taken from git: the name *credential helper*, matching on URL at host granularity by default, and telling the helper when a credential was rejected.
+- **[git credential helpers](https://git-scm.com/docs/gitcredentials).** `credential.helper` names a helper, and a bare name runs as the git subcommand `git credential-NAME`. Config can be scoped by URL (`[credential "https://example.com"]`), and the path is ignored by default, since most people have one credential per host. The protocol is `key=value` lines with `fill`, `approve`, and `reject` actions. Taken from git: the name *credential helper*, matching on URL at host granularity by default, and telling the helper when a credential was rejected.
 - **[Docker credential helpers](https://github.com/docker/cli/blob/master/docs/reference/commandline/login.md).** `credsStore` sets a global helper, and `credHelpers` maps a registry host to a helper, run as `docker-credential-SUFFIX`. A registry with its own helper never falls back to the global store. Taken from Docker: a pattern-to-command map in which the most specific match wins outright.
 - **Go's [`GOAUTH`](https://pkg.go.dev/cmd/go#hdr-GOAUTH_environment_variable)** (Go 1.24). A list of commands and built-in methods (`off`, `netrc`, `git`). A command prints URL prefixes, a blank line, then MIME headers to send to URLs under those prefixes. After a failed request the command runs again with the response on stdin. Cloud providers ship commands for it, such as `gcloud artifacts go auth`. Taken from GOAUTH: headers as the output format, which is also what `--root-header @FILE` reads, and the retry with the failed response on stdin.
 - **[Kubernetes exec credential plugins](https://kubernetes.io/docs/reference/config-api/client-authentication.v1/).** kubectl runs a plugin that returns an `ExecCredential`: a bearer token and an optional expiry. The request can carry the server's response to a 401, so the plugin knows the last credential failed. The docs ask that tokens only pass in memory between the client and the plugin. Kubernetes also keeps per-cluster plugin config apart from secrets, so the kubeconfig needs none, which is this proposal's argument for namespace files.
 - **[AWS `credential_process`](https://docs.aws.amazon.com/sdkref/latest/guide/feature-process-credentials.html).** The SDK runs a command and reads JSON from stdout. An `Expiration` field makes the SDK refresh when it passes; without one, the credentials are treated as long-lived.
-- **[Cargo credential providers](https://doc.rust-lang.org/cargo/reference/registry-authentication.html).** The simplest, `cargo:token-from-stdout CMD`, takes a token from a command's stdout. The full [protocol](https://doc.rust-lang.org/cargo/reference/credential-provider-protocol.html) is JSON over stdin and stdout, with a cache hint of `never`, `session` or `expires`, and the token is sent as the `Authorization` header.
-- **Plan 9 factotum.** The native precedent. Programs don't handle secrets: they ask factotum to run a protocol, and keys are chosen by attributes such as `proto`, `dom` and `server`, not by the program. root-auth applies this to p9any. This proposal applies the same separation to HTTP: the helper holds the secret, and h9 carries headers it doesn't interpret.
+- **[Cargo credential providers](https://doc.rust-lang.org/cargo/reference/registry-authentication.html).** The simplest, `cargo:token-from-stdout CMD`, takes a token from a command's stdout. The full [protocol](https://doc.rust-lang.org/cargo/reference/credential-provider-protocol.html) is JSON over stdin and stdout, with a cache hint of `never`, `session`, or `expires`, and the token is sent as the `Authorization` header.
+- **Plan 9 factotum.** The native precedent. Programs don't handle secrets: they ask factotum to run a protocol, and keys are chosen by attributes such as `proto`, `dom`, and `server`, not by the program. root-auth applies this to p9any. This proposal applies the same separation to HTTP: the helper holds the secret, and h9 carries headers it doesn't interpret.
 
-This proposal takes the name from git and Docker, the most-specific-wins pattern map from Docker, header blocks as output from GOAUTH, and the retry with the failure on stdin from GOAUTH and kubectl. It leaves out client-side caching, which AWS, kubectl and Cargo do, and the multi-action protocols of git, Docker and Cargo. Rationale says why.
+This proposal takes the name from git and Docker, the most-specific-wins pattern map from Docker, header blocks as output from GOAUTH, and the retry with the failure on stdin from GOAUTH and kubectl. It leaves out client-side caching, which AWS, kubectl, and Cargo do, and the multi-action protocols of git, Docker, and Cargo. Rationale says why.
 
 ## Proposal
 
@@ -57,7 +57,7 @@ This proposal takes the name from git and Docker, the most-specific-wins pattern
 
 ### The exchange
 
-h9 runs `COMMAND get URL`, with the full URL, path and query included.
+h9 runs `COMMAND get URL`, with the full URL, path, and query included.
 
 - **stdin:** empty on a first attempt. On a retry, the failed handshake's status line and response headers (below).
 - **stdout:** zero or more `Name: value` lines, the format of `--root-header @FILE`, checked by `ws.checkHeader`. A header that would change the handshake (`Host`, `Upgrade`, `Connection`, `Sec-WebSocket-*`) is an error, as it is for `--root-header`. A blank line or EOF ends the output.
@@ -126,9 +126,9 @@ mount '#s/root' / ''	# wss://progrium.wanix.io/data, cred *.wanix.io=wanix token
 
 ## Rationale
 
-**Run on every handshake rather than cache.** AWS, kubectl and Cargo cache by an expiry the helper reports. h9 handshakes are rare, one per mount plus reconnects, and a helper that wants caching can do it itself, as git's `credential-cache` does. Not caching keeps secrets out of h9 between handshakes and keeps expiry and clock-skew rules out of h9. Revisit if a helper turns out slow enough to stall reconnects.
+**Run on every handshake rather than cache.** AWS, kubectl, and Cargo cache by an expiry the helper reports. h9 handshakes are rare, one per mount plus reconnects, and a helper that wants caching can do it itself, as git's `credential-cache` does. Not caching keeps secrets out of h9 between handshakes and keeps expiry and clock-skew rules out of h9. Revisit if a helper turns out slow enough to stall reconnects.
 
-**Headers as output, not JSON or `key=value`.** Headers are what h9 sends and what `--root-header @FILE` already reads, so `cat tokenfile` is a valid helper. Bearer tokens, cookies and custom headers need no schema, and GOAUTH shows the format is enough in a widely used tool.
+**Headers as output, not JSON or `key=value`.** Headers are what h9 sends and what `--root-header @FILE` already reads, so `cat tokenfile` is a valid helper. Bearer tokens, cookies, and custom headers need no schema, and GOAUTH shows the format is enough in a widely used tool.
 
 **One action, `get`.** h9 never stores credentials: logging in is the helper's own command (`wanix login`, `gh auth login`), and the retry's stdin carries the rejection. Naming the action leaves room for more later without breaking helpers.
 
@@ -140,7 +140,7 @@ mount '#s/root' / ''	# wss://progrium.wanix.io/data, cred *.wanix.io=wanix token
 
 **Rejected:**
 
-- **Tokens in the query.** They leak into logs, `--print` and the guest.
+- **Tokens in the query.** They leak into logs, `--print`, and the guest.
 - **`$VAR` expansion in namespace files.** The guest reads those files, and it puts secrets in the environment.
 - **A static header file per pattern.** It can't refresh, which is the problem this proposal solves.
 
@@ -158,7 +158,7 @@ mount '#s/root' / ''	# wss://progrium.wanix.io/data, cred *.wanix.io=wanix token
 - **Guest conversations get no credentials.** Otherwise a guest whose root is `wss://progrium.wanix.io/data/projects` could open `wss://progrium.wanix.io/data` with the host's credential and reach all of the user's data. Opting guests in, per pattern, is an open issue.
 - **Helpers are trusted code.** A pattern sends whatever its helper prints to every matching host, so patterns should be narrow. `*.` must be followed by a domain.
 - **Cleartext:** a match on a `ws://` URL warns, since the credential crosses the network unencrypted.
-- **Secrets in memory:** helper output lives in h9's memory for one handshake, then is zeroed and freed, following kubectl's in-memory guidance. It never reaches `--print`, logs or test output; the plan names headers only.
+- **Secrets in memory:** helper output lives in h9's memory for one handshake, then is zeroed and freed, following kubectl's in-memory guidance. It never reaches `--print`, logs, or test output; the plan names headers only.
 - **`9P-User` is the server's claim about the client's name.** It only changes names shown inside the guest. It never selects a key, or a uid on any other connection.
 
 ## Done when

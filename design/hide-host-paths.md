@@ -20,7 +20,7 @@ This was an open question in DESIGN.md, before milestones became proposals ([#1]
 
 > `/proc/n/ns` shows the host paths of bound host trees (`bind '#U/Users/…' /mnt/term/cwd`), which tells the guest the host's layout. The stricter profiles should hide them, or show the guest path or a placeholder instead; which one, and whether `--ns` can still replay the result, is open.
 
-`--print` lists this as a caveat today. Rationale, Compatibility, Security and Implementation are to be written before filing.
+`--print` lists this as a caveat today. Rationale, Compatibility, Security, and Implementation are to be written before filing.
 
 ## Done when
 

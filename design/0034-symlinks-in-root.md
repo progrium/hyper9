@@ -15,7 +15,7 @@ Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A host tree bound into the namespace can be marked *contained*. In a contained tree, devfs resolves symlinks itself, relative to the tree's top, as `openat2`'s `RESOLVE_IN_ROOT` does: an absolute target starts at the tree's top, and `..` stops there. Linux root trees, container images and 9front trees with links then work as their authors meant, instead of having their absolute links point at the host or get hidden by the policy. The resolved host path is still checked against the plan's access rules. Containment is a property of the bind, so other binds keep today's behaviour.
+A host tree bound into the namespace can be marked *contained*. In a contained tree, devfs resolves symlinks itself, relative to the tree's top, as `openat2`'s `RESOLVE_IN_ROOT` does: an absolute target starts at the tree's top, and `..` stops there. Linux root trees, container images, and 9front trees with links then work as their authors meant, instead of having their absolute links point at the host or get hidden by the policy. The resolved host path is still checked against the plan's access rules. Containment is a property of the bind, so other binds keep today's behaviour.
 
 ## Background
 
@@ -25,7 +25,7 @@ devfs-posix follows a symlink with `stat`, so the host kernel resolves it agains
 - Container image layers, extracted to a directory, are full of absolute links.
 - `..` in a relative link can climb out of the tree into a host directory that happens to be allowed for another reason, and the guest sees a file it didn't expect.
 
-The [Linux personality](0018-linux-personality.md) needs this for its Linux root, and [dotl](0022-dotl.md) resolves links in a .L mount by the same rule. Both proposals described the devfs change as part of themselves; it's here so it can be built, tested and reasoned about once.
+The [Linux personality](0018-linux-personality.md) needs this for its Linux root, and [dotl](0022-dotl.md) resolves links in a .L mount by the same rule. Both proposals described the devfs change as part of themselves; it's here so it can be built, tested, and reasoned about once.
 
 devfs-posix and devfs-win32 are vendored, and already carry h9's sandbox hooks (`h9_fs_check`, `h9_fs_allow`).
 
@@ -51,7 +51,7 @@ For a contained attach, devfs keeps the tree's top as a host path and resolves e
 - The resolved host path is passed to `h9_fs_check`, so the access rules still decide, as today.
 - On Windows, junctions and symlinks are both reparse points with a target; both are resolved this way. Other reparse points are refused.
 
-The resolved path is kept on the chan, as today's `uif->path` is, so later operations act on it without resolving again. Create, remove and rename act on the final name, as today, after resolving its parent.
+The resolved path is kept on the chan, as today's `uif->path` is, so later operations act on it without resolving again. Create, remove, and rename act on the final name, as today, after resolving its parent.
 
 ### For the Linux personality
 

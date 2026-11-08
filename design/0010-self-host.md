@@ -15,7 +15,7 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-The 9front compilers, linkers and mk already run inside h9 and rebuild all of `/sys/src`. This proposal makes that a tested, documented capability. It also adds what acid needs to debug a live process: `/proc/n/mem`, `regs`, `fpregs` and `text`, the `ctl` stop and start messages, and breakpoint traps.
+The 9front compilers, linkers, and mk already run inside h9 and rebuild all of `/sys/src`. This proposal makes that a tested, documented capability. It also adds what acid needs to debug a live process: `/proc/n/mem`, `regs`, `fpregs`, and `text`, the `ctl` stop and start messages, and breakpoint traps.
 
 ## Background
 
@@ -43,7 +43,7 @@ After the full rebuild, 701 of the root's 704 arm64 binaries are byte-identical 
 - `kern.setArgs` overflowed when an argv filled the 128-byte `/proc/n/args` buffer exactly and more arguments followed. That panicked h9 on libc's `ar vu` line. A test now covers the exact fit.
 - drawterm's `libc/lock.c` was built without `PTHREAD`. Its non-pthread `unlock` is a plain store with no release ordering. On arm64 another thread could take a `Lock` before seeing the writes made under it, which corrupted QLock wait queues. Under contention a process then slept forever: `mk` with `NPROC` greater than 1 hung in about 1 run in 8, and 8 processes writing a shared `/env` hung in about 3 runs in 4. `build.zig` now passes `-DPTHREAD`, as drawterm's `Make.linux` does, and an integration case runs that `/env` workload. Windows keeps drawterm's `Make.win64` flags.
 
-So the compilers, linkers and mk need no syscall that h9 lacks, and no dependency on [segattach](0004-segattach.md) or [semaphores](0003-semaphores.md).
+So the compilers, linkers, and mk need no syscall that h9 lacks, and no dependency on [segattach](0004-segattach.md) or [semaphores](0003-semaphores.md).
 
 **Gaps left:**
 
@@ -51,8 +51,8 @@ So the compilers, linkers and mk need no syscall that h9 lacks, and no dependenc
 2. **The source tree isn't in the root.** `scripts/mkroot.py` leaves out `/sys/src` unless given `--src`. The fetched checkout at `.local/src/9front/sys/src` is the same revision, and it can be bound in, as the experiments did with `bind -a /mnt/term/<checkout>/sys /sys`.
 3. **Installing needs a writable root.** `mk install` writes `/arm64/bin` and `/arm64/lib`, so it needs `--writable "$H9ROOT"`. Building without installing works against the read-only root, with output in the cwd.
 4. **The root has no amd64 libraries.** The arm64 root ships `/amd64/include` and `/amd64/mkfile` but no `/amd64/lib`. So `objtype=amd64` builds have to start with `mk libs`, which works.
-5. **acid can't attach.** With a binary alone it reads symbols (`symbols("main")` works). Attaching to a process fails at `setproc: open /proc/2/mem: file does not exist`. h9's devproc serves `args`, `ctl`, `fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `segment` ([segattach](0004-segattach.md)), `status` and `wait`. acid and libmach also open `mem`, `regs`, `fpregs` and `text` (`cmd/acid/proc.c`, `libmach/map.c`). They write `ctl` messages h9 doesn't take (`stop`, `start`, `waitstop`, `startstop`), and `hang` is recorded but ignored.
-6. **Breakpoints kill the process.** A `BRK` (libmach's arm64 breakpoint is `0xD4200000`) arrives at h9 as an unclassified exception. h9 reports it as `sys: trap: fault exec addr=…` and the process dies. 9front posts `sys: breakpoint` for exception classes 0x30, 0x31 and 0x3C. The amd64 equivalent is `INT3` (vector 3).
+5. **acid can't attach.** With a binary alone it reads symbols (`symbols("main")` works). Attaching to a process fails at `setproc: open /proc/2/mem: file does not exist`. h9's devproc serves `args`, `ctl`, `fd`, `note`, `noteid`, `notepg`, `ns`, `ppid`, `segment` ([segattach](0004-segattach.md)), `status`, and `wait`. acid and libmach also open `mem`, `regs`, `fpregs`, and `text` (`cmd/acid/proc.c`, `libmach/map.c`). They write `ctl` messages h9 doesn't take (`stop`, `start`, `waitstop`, `startstop`), and `hang` is recorded but ignored.
+6. **Breakpoints kill the process.** A `BRK` (libmach's arm64 breakpoint is `0xD4200000`) arrives at h9 as an unclassified exception. h9 reports it as `sys: trap: fault exec addr=…` and the process dies. 9front posts `sys: breakpoint` for exception classes 0x30, 0x31, and 0x3C. The amd64 equivalent is `INT3` (vector 3).
 
 ## Proposal
 
@@ -68,7 +68,7 @@ So the compilers, linkers and mk need no syscall that h9 lacks, and no dependenc
 
 No new flag binds source; `--readable` and `--ns` already can.
 
-**Build products.** Nothing here changes `exec` or devfs. The compilers' syscall mix is file I/O. Building `cmd/rc` makes 9931 calls: 3193 `pread`, 2399 `close`, 1282 `open`, 1175 `create` and 1119 `pwrite`, with 64 `exec`s. At these speeds devfs isn't the bottleneck (see Rationale).
+**Build products.** Nothing here changes `exec` or devfs. The compilers' syscall mix is file I/O. Building `cmd/rc` makes 9931 calls: 3193 `pread`, 2399 `close`, 1282 `open`, 1175 `create`, and 1119 `pwrite`, with 64 `exec`s. At these speeds devfs isn't the bottleneck (see Rationale).
 
 ### Debugging
 
@@ -94,7 +94,7 @@ devproc gains 9front's debugging files. They're served from h9's process records
 | `startstop` | Resume, then wait for the next stop. |
 | `hang` / `nohang` | Already recorded; now `exec` stops the process before its first instruction when set, as 9front's `sysexec` does. acid's `new()` depends on it. |
 
-The status state of a stopped process reads `Stopped`, and of a waiting debugger `Stopwait`, as on 9front. A note posted to a stopped process is queued, and `kill`, `--timeout` and machine teardown still end it. A stopped process can't hold up teardown, because `procinterrupt` wakes the sleep. 9front's `traceme`, `startsyscall`, `profile`, `wired`, `pri` and real-time messages aren't added; they fail with "bad control message", as now.
+The status state of a stopped process reads `Stopped`, and of a waiting debugger `Stopwait`, as on 9front. A note posted to a stopped process is queued, and `kill`, `--timeout`, and machine teardown still end it. A stopped process can't hold up teardown, because `procinterrupt` wakes the sleep. 9front's `traceme`, `startsyscall`, `profile`, `wired`, `pri`, and real-time messages aren't added; they fail with "bad control message", as now.
 
 **Breakpoints.** The hvf and emu backends classify `BRK` (ESR class 0x3C on arm64) and `INT3` (vector 3 on amd64) as a new `vmm.Exit.breakpoint`. The KVM and WHP backend proposals get the same exit. The machine posts `sys: breakpoint` with the debug flag, as 9front's trap table does. Without a debugger or a note handler, the process dies with that note, so `acid -l truss` and acid's `bpset` work. The PC is left at the `BRK` instruction on arm64, and after `INT3` on amd64, as on 9front, since acid's per-architecture code adjusts it.
 
@@ -124,15 +124,15 @@ The integration tests use the root tree, which normally has no `/sys/src`. The s
 
 **No gdb stub.** acid is the native debugger and needs only devproc. A gdb remote stub is a separate interface that isn't needed for this proposal; DESIGN.md already lists it as absent.
 
-**Not fixing the build-date differences.** `gs`, `cwfs64x` and `mp3enc` embed `__DATE__`. Reproducible builds would mean changing the compiler's notion of the date, which belongs in 9front, not h9. The test compares binaries that don't embed dates.
+**Not fixing the build-date differences.** `gs`, `cwfs64x`, and `mp3enc` embed `__DATE__`. Reproducible builds would mean changing the compiler's notion of the date, which belongs in 9front, not h9. The test compares binaries that don't embed dates.
 
 ## Compatibility
 
 - **Guest environment:** gains `NPROC`. A guest that read an empty `$NPROC` and treated it as 1 now runs jobs in parallel. `--env NPROC=1` restores the old behaviour.
-- **`/proc/n`:** gains `mem`, `regs`, `fpregs` and `text`. `ctl` gains `stop`, `start`, `waitstop` and `startstop`, and `hang` takes effect.
+- **`/proc/n`:** gains `mem`, `regs`, `fpregs`, and `text`. `ctl` gains `stop`, `start`, `waitstop`, and `startstop`, and `hang` takes effect.
 - **Notes:** a `BRK` or `INT3` posts `sys: breakpoint` instead of `sys: trap: fault exec addr=…`. Programs that matched the old string weren't matching 9front's.
 - **vmm interface:** gains `Exit.breakpoint` and `AddressSpace.codeChanged`, which need a proposal per README.md; it's this one. Each backend maps its own exception class and invalidates its own code cache, and every backend proposal (kvm, whp) inherits both.
-- **CLI flags, exit codes and `Machine.Options`:** unchanged.
+- **CLI flags, exit codes, and `Machine.Options`:** unchanged.
 - **Sandbox defaults:** unchanged. The root stays read-only by default, so `mk install` fails with "permission denied" unless the user passes `--writable "$H9ROOT"`.
 - **Root tree:** unchanged; `--src` stays optional.
 - **`third_party/`:** unchanged. The `PTHREAD` fix is a build flag, not a vendor edit.
@@ -143,7 +143,7 @@ The integration tests use the root tree, which normally has no `/sys/src`. The s
 - **Register writes** pass through `arch.sanitize`, so a guest can't set privileged PSTATE or RFLAGS bits, or segment selectors, through `regs`. This is the same filter `noted` applies.
 - **Permissions:** as on 9front, any process in the machine can open another's debug files, since every process runs as the machine's single user. A sandboxed guest could already kill its siblings through `ctl`. Reading their memory adds nothing outside the machine.
 - **Writing text** copies the segment first, so an image shared by siblings is never modified for them, and the host file is never written. Images are read once into guest pages.
-- **Stopped processes** can't outlive the machine. `--timeout`, `kill` and teardown interrupt the sleep, and the `--pids` and `--memory` caps still count them.
+- **Stopped processes** can't outlive the machine. `--timeout`, `kill`, and teardown interrupt the sleep, and the `--pids` and `--memory` caps still count them.
 - **Writable root:** `--writable "$H9ROOT"` lets the guest replace any binary in the root, which later runs then execute. That's the user's explicit choice. The README recommends a disposable copy, and `--print` shows the writable path.
 
 ## Done when
@@ -181,9 +181,9 @@ Already done and untagged, as bug fixes: `test "concurrent processes contending 
 3. `H9_TEST_SRC` and `-Dsrc` in `build.zig`, and the build cases (cwd, stock mkfile, library, read-only install, parallel mk). These pass today, so they land with the plumbing.
 4. `vmm.Exit.breakpoint` in hvf and emu, `sys: breakpoint` in the machine loop, and the backend and integration cases.
 5. devproc `text` (read-only, no stopping needed), and the `Stack`-first check on `segment`, which [segattach](0004-segattach.md) serves.
-6. Stop points and the record's saved Ureg and Extra, then `ctl` `stop`, `start`, `waitstop`, `startstop` and `hang`, and the `Stopped` and `Stopwait` states.
-7. `AddressSpace.codeChanged` in hvf and emu, then devproc `regs`, `fpregs` and `mem`, including copy-on-write text.
-8. The acid case and demo. DESIGN.md: devproc's row, the Debugging section and the process model table. Then `status: implemented`.
+6. Stop points and the record's saved Ureg and Extra, then `ctl` `stop`, `start`, `waitstop`, `startstop`, and `hang`, and the `Stopped` and `Stopwait` states.
+7. `AddressSpace.codeChanged` in hvf and emu, then devproc `regs`, `fpregs`, and `mem`, including copy-on-write text.
+8. The acid case and demo. DESIGN.md: devproc's row, the Debugging section, and the process model table. Then `status: implemented`.
 
 ## Open issues
 

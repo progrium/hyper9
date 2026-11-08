@@ -21,7 +21,7 @@ When the first process is killed by a note, the h9 CLI exits with a status a hos
 
 A 9front process ends with an `exits` string, or is killed by a note it didn't handle. The h9 CLI maps that onto a host exit status (DESIGN.md, Exit codes). [go-compat](0007-go-compat.md) already made a decimal `exits` string from 1 to 255 that status, in `cli.exitStatus` in `src/cli.zig`, so `h9 --rc 'exit 3'` exits 3. That's APE's convention: `_exit(n)` writes `n` in decimal, and APE's `wait` reads it back.
 
-A killed process is still a flat 1. `src/main.zig` prints `h9: prog: note` and exits 1 for every `.killed` status, whether the note was `interrupt` from Ctrl-C, `hangup` from SIGTERM, a fault, h9's own `h9: timeout` or `h9: machine stopped`, or an internal failure such as `halted`.
+A killed process is still a flat 1. `src/main.zig` prints `h9: prog: note` and exits 1 for every `.killed` status, whether the note was `interrupt` from Ctrl-C, `hangup` from SIGTERM, a fault, h9's own `h9: timeout`, or `h9: machine stopped`, or an internal failure such as `halted`.
 
 ```text
 $ h9 --rc 'sleep 100'      # then Ctrl-C
@@ -48,7 +48,7 @@ The CLI's mapping for a killed first process becomes:
 
 Notes match `sigtab` as APE's `wait` matches them, so `sys: trap: …` notes that `sigtab` lists, such as an illegal instruction, take their own signal, and the rest fall to the fault row. The note names are the ones in the pinned 9front's `sigtab`; the implementation checks the table against it.
 
-Signal numbers are the host's, from `std.posix.SIG`, not APE's or Linux's: most agree, but some, such as `SIGBUS`, `SIGUSR1` and `SIGUSR2`, differ between Linux and macOS, and the status should be what a host shell would show for that signal. A Linux signal number is translated by name, and one with no host equivalent exits 1. Windows hosts use the Linux numbers, which is what Git Bash and MSYS expect.
+Signal numbers are the host's, from `std.posix.SIG`, not APE's or Linux's: most agree, but some, such as `SIGBUS`, `SIGUSR1`, and `SIGUSR2`, differ between Linux and macOS, and the status should be what a host shell would show for that signal. A Linux signal number is translated by name, and one with no host equivalent exits 1. Windows hosts use the Linux numbers, which is what Git Bash and MSYS expect.
 
 The mapping sits beside `exitStatus` in `src/cli.zig`. To tell a teardown by SIGHUP or SIGTERM from one by Ctrl-C, the CLI records which host signal started it in `src/hostsig.zig`; `Machine.Status` doesn't change.
 
@@ -68,21 +68,21 @@ The DESIGN.md and README exit-code tables gain 124 and the killed rows, and DESI
 
 **124 for `--timeout`.** That's coreutils `timeout`, and it says something more specific than SIGHUP's 129, which is what the `hangup` note `--timeout` posts would otherwise give. It's h9's first own code below 125; DESIGN.md's table lists it.
 
-**125 for h9's own failures mid-run.** `halted`, an unexpected VM exit and an internal error are h9 or hypervisor failures, not the guest's, and 125 already means "h9 itself failed".
+**125 for h9's own failures mid-run.** `halted`, an unexpected VM exit, and an internal error are h9 or hypervisor failures, not the guest's, and 125 already means "h9 itself failed".
 
 **Not printing for `interrupt` and closed pipes.** Shells are silent for both: the user knows they pressed Ctrl-C, and `h9 cat big | head` shouldn't print noise. Other signals still print, as shells print `Killed` or `Hangup`.
 
 **Exiting, not re-raising.** h9 could kill itself with the signal so its parent sees `WIFSIGNALED`, which is more exact: bash stops a loop when a child dies of SIGINT, but not when it exits 130. But it doesn't exist on Windows, would have to reset the handler and raw mode first, and `docker run` exits 130 too. A later proposal can add it.
 
-**Collisions with h9's own codes.** A guest can exit 2, 124, 125, 126 or 127 itself, as with `env` or `docker run`. That's already the documented rule (DESIGN.md, Exit codes; [go-compat](0007-go-compat.md)): h9 prints a message whenever it fails itself, and a numeric `exits` prints nothing, so scripts can still tell them apart. Remapping those statuses to 1 would hide real ones, such as `grep` or `diff` exiting 2. 124 keeps the same rule, because `--timeout` prints `h9: prog: h9: timeout`.
+**Collisions with h9's own codes.** A guest can exit 2, 124, 125, 126, or 127 itself, as with `env` or `docker run`. That's already the documented rule (DESIGN.md, Exit codes; [go-compat](0007-go-compat.md)): h9 prints a message whenever it fails itself, and a numeric `exits` prints nothing, so scripts can still tell them apart. Remapping those statuses to 1 would hide real ones, such as `grep` or `diff` exiting 2. 124 keeps the same rule, because `--timeout` prints `h9: prog: h9: timeout`.
 
 **In the CLI, not `Machine`.** Exit codes are a host-process idea. Library callers already get the note and can apply their own rules.
 
 ## Compatibility
 
-- **Exit codes:** a killed program now exits 124, 125 or 128+N instead of 1, and Ctrl-C and closed pipes no longer print. Scripts that only test for zero are unaffected. Scripts that test for exactly 1 after a kill or a timeout change.
+- **Exit codes:** a killed program now exits 124, 125, or 128+N instead of 1, and Ctrl-C and closed pipes no longer print. Scripts that only test for zero are unaffected. Scripts that test for exactly 1 after a kill or a timeout change.
 - A serve-only run ended by a note still exits 0 ([serve](0035-serve.md)).
-- No flags, `Machine.Options` or vendored code change.
+- No flags, `Machine.Options`, or vendored code change.
 
 ## Security
 

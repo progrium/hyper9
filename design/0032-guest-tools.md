@@ -37,7 +37,7 @@ src/guest/
     dotlfs      # from dotl
 ```
 
-The build embeds the tree in the h9 binary as a generated Zig table of paths, modes and contents. A file's mode comes from its repository mode: executable files are 0555, others 0444. Directories are 0555.
+The build embeds the tree in the h9 binary as a generated Zig table of paths, modes, and contents. A file's mode comes from its repository mode: executable files are 0555, others 0444. Directories are 0555.
 
 Only rc scripts and data are allowed. Binaries are per architecture, would need building for each root, and would make h9 a distributor of 9front programs, so they aren't in scope (Rationale). The build fails on a file in `src/guest/` that doesn't start with `#!/bin/rc` and is executable.
 
@@ -47,8 +47,8 @@ Each proposal that adds a command lists it in its Implementation and Done when, 
 
 `src/kern/devhtools.c` serves the table read-only:
 
-- Attach takes no spec. Walks, `stat` and reads come from the table through one leaf, `h9_tools_table`, which returns the table's address and length once at reset. After that the device is plain C over constant memory, so it never calls into Zig on a guest thread.
-- Every write, create, remove and `wstat` fails with "permission denied".
+- Attach takes no spec. Walks, `stat`, and reads come from the table through one leaf, `h9_tools_table`, which returns the table's address and length once at reset. After that the device is plain C over constant memory, so it never calls into Zig on a guest thread.
+- Every write, create, remove, and `wstat` fails with "permission denied".
 - Files are owned by the machine's user, with qids fixed at build time, so `ls -l` and caches see the same file on every run of one h9 version.
 
 The device character is `H`, for h9.
@@ -113,8 +113,8 @@ The build check that rejects a non-rc executable is a `zig build test` case.
 
 1. The build step that embeds `src/guest/` as a table, with the rc check.
 2. `src/kern/devhtools.c`, its `devtab.c` entry, and `h9_tools_table` in `src/kern.zig`.
-3. The bind and `--no-guest-tools` in `src/policy.zig`, `src/cli.zig` and `Machine.Options`.
-4. README: the flag, and a line on where `wsmount` and the like come from. DESIGN.md: `#H` in the "Added by us" table, the namespace listing, the CLI flag table and `Machine.Options`. Set `status: implemented`.
+3. The bind and `--no-guest-tools` in `src/policy.zig`, `src/cli.zig`, and `Machine.Options`.
+4. README: the flag, and a line on where `wsmount` and the like come from. DESIGN.md: `#H` in the "Added by us" table, the namespace listing, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 
@@ -127,6 +127,6 @@ The build check that rejects a non-rc executable is a `zig build test` case.
   - The test-only scripts live in `tests/fixtures/guest/` (`h9-guest-test`, and an `echo` the root's must beat). Debug builds serve them in `#H` too and release builds don't; `-Dguest-test` overrides that. The integration build sets `H9_TEST_GUEST_TOOLS` when they're served, and the cases that need them skip otherwise.
   - The bind is only made with a root, since without one there's no `/bin` to add to. Like the root's `/bin` binds, it's optional.
   - `#H` is masked only under `--no-guest-tools`; otherwise it stays attachable, since it shows nothing but the table.
-  - Opens with `OTRUNC` or `ORCLOSE` fail with "permission denied" too, as do writes, creates, removes and `wstat`.
+  - Opens with `OTRUNC` or `ORCLOSE` fail with "permission denied" too, as do writes, creates, removes, and `wstat`.
   - The cases are tagged `[32]`, as `zig build design -- check` asks. Two backend cases in `tests/backends.zig` check the device on hand-written arm64 programs without the root tree: the script on `/bin` reads back, `#H/bin` lists, every change is refused with "permission denied", and with `guest_tools` false the script is off `/bin` and `#H` can't be attached.
-- 2026-11-07: `hcmd` joins `wsmount`: it runs a host command through `#C` under `--host-cmd`, with the guest's standard input, output and error, exits with the command's status, and runs it in the host directory the guest's current directory comes from (from the `#U` binds in `/proc/$pid/ns`). An interrupt or hangup kills the host command. Its cases are tagged `[baseline, 32]`, since `#C` is baseline's.
+- 2026-11-07: `hcmd` joins `wsmount`: it runs a host command through `#C` under `--host-cmd`, with the guest's standard input, output, and error, exits with the command's status, and runs it in the host directory the guest's current directory comes from (from the `#U` binds in `/proc/$pid/ns`). An interrupt or hangup kills the host command. Its cases are tagged `[baseline, 32]`, since `#C` is baseline's.

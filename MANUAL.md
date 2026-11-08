@@ -12,7 +12,7 @@
 - `host$` is a prompt on the host shell (bash, zsh, PowerShell); `%` is rc
   inside h9.
 - Every Plan 9 concept chapter has the same three parts: **In Plan 9** (how the
-  real system works), **In h9** (what h9 does the same, differently or not
+  real system works), **In h9** (what h9 does the same, differently, or not
   yet) and **Try it** (commands to paste).
 - Badges: *Not yet available ([gfx](design/0015-gfx.md))* marks something
   that isn't built yet, linked to the [proposal](design/README.md) that adds
@@ -22,7 +22,7 @@
   [man.9front.org](https://man.9front.org/).
 - Output shown for host paths uses a Mac with the user `me`, h9 checked out
   at `~/src/hyper9`, and the default root tree in
-  `~/src/hyper9/.local/9front/root`. Your paths, pids and counts will differ.
+  `~/src/hyper9/.local/9front/root`. Your paths, pids, and counts will differ.
 
 ---
 
@@ -30,7 +30,7 @@
 
 ### 1. What h9 is
 
-h9 runs 9front programs on macOS, Linux and Windows as if they were host
+h9 runs 9front programs on macOS, Linux, and Windows as if they were host
 programs. There's no virtual machine image to download, nothing boots, and no
 Plan 9 kernel runs inside a guest. You type `h9 ls`, and 9front's own `ls`
 binary runs and prints your directory, in a few milliseconds.
@@ -47,14 +47,14 @@ The one idea to carry through this manual:
 
 > **Each time you run h9, you start a small, complete Plan 9 machine.** It
 > has its own namespace (its view of the file tree), its own environment, its
-> own console, its own processes and its own `/srv`. It exists only as long
+> own console, its own processes, and its own `/srv`. It exists only as long
 > as the program you started, and when that program exits, the machine and
 > everything in it disappear.
 
 So `h9 rc` gives you a shell in a fresh machine, and every command you run
 in that shell runs in the same machine. Two `h9` commands in a row, on the
 other hand, are two separate machines that share nothing but the files on your
-disk. Changes you make to the namespace, the environment, `/tmp` or the set
+disk. Changes you make to the namespace, the environment, `/tmp`, or the set
 of running programs never outlive the h9 invocation.
 
 #### How it works, briefly
@@ -83,7 +83,7 @@ inside the h9 process: the kernel from drawterm, Plan 9's remote terminal
 program. That kernel decides which of your host's files, and how much of the
 network, the program can see. Chapter 22 covers that sandbox.
 
-On hosts without a usable hypervisor, such as Windows today, many cloud VMs
+On hosts without a usable hypervisor, such as Windows today, many cloud VMs,
 and CI runners, `h9-emu` runs the same programs in a CPU emulator
 instead: slower for heavy computation, but otherwise identical (chapter 26).
 
@@ -131,7 +131,7 @@ server on the network (chapter 16).
 
 The two take the same flags and behave the same way; `h9-emu` is a separate
 program because Unicorn is GPL-licensed. Use `h9` where it works, and
-`h9-emu` on Windows, and in VMs, containers and CI runners without nested
+`h9-emu` on Windows, and in VMs, containers, and CI runners without nested
 virtualization. This manual says `h9` throughout; everything applies
 to `h9-emu` too. (When you build `h9-emu` from source it's still called
 `zig-out/bin/h9`; the release scripts rename it.)
@@ -175,8 +175,8 @@ host$ zig build mkroot      # about a minute; ~250 MB in .local/9front/root
 ```
 
 `zig build mkroot` boots the pinned 9front release image in QEMU, without a
-window, copies its file system out and unpacks it into `.local/9front/root`.
-It leaves out the hardware kernels, `/sys/doc` and the source code; pass
+window, copies its file system out, and unpacks it into `.local/9front/root`.
+It leaves out the hardware kernels, `/sys/doc`, and the source code; pass
 `--src` (`zig build mkroot -- --src`) to keep `/sys/src`, which you need to
 build 9front programs inside h9 (chapter 18). The tree has binaries for
 your machine's architecture unless `--arch` names others (`--arch arm64`,
@@ -243,7 +243,7 @@ host$ echo $?
 125
 ```
 
-`h9 --version` prints the h9 version, the 9front release and drawterm
+`h9 --version` prints the h9 version, the 9front release, and drawterm
 revision it was built against, and the backends built in:
 
 ```sh
@@ -302,7 +302,7 @@ explains how these two worlds are joined into one file tree, and chapter 21
 how to share more host directories.
 
 Everything after the program name goes to the program, so `h9 ls -l` passes
-`-l` to `ls`. h9's own options are long flags (`--root`, `--rc` and so on)
+`-l` to `ls`. h9's own options are long flags (`--root`, `--rc`, and so on)
 and must come *before* the program name:
 
 ```sh
@@ -331,13 +331,13 @@ interrupts the command you're running and rc prompts again; a second Ctrl-C
 within a second ends the whole machine.
 
 Line editing at the prompt is your host terminal's: Backspace works, but
-there's no history, arrow keys or tab completion. In Plan 9 those belong to
+there's no history, arrow keys, or tab completion. In Plan 9 those belong to
 the window system, not the shell. Chapter 10 is an rc primer for bash and zsh
 users, and chapter 13 explains the console.
 
 #### Running a shell command line
 
-`--rc` runs one rc command line in the machine, so pipes, redirections and
+`--rc` runs one rc command line in the machine, so pipes, redirections, and
 `;` happen inside Plan 9:
 
 ```sh
@@ -347,7 +347,7 @@ host$ h9 --rc 'echo $1 and $2' first second
 first and second
 ```
 
-Use single quotes on the host so your host shell leaves `$`, `|` and `;`
+Use single quotes on the host so your host shell leaves `$`, `|`, and `;`
 alone. Arguments after the command line become rc's `$*`.
 
 Compare these two:
@@ -362,7 +362,7 @@ standard error like any host program, so it fits into host pipelines and
 scripts.
 
 **Scripts.** rc scripts (files starting with `#!/bin/rc`) in the machine,
-including many 9front commands such as `man`, `lc`, `kill` and `hget`,
+including many 9front commands such as `man`, `lc`, `kill`, and `hget`,
 run directly: `h9 man 1 bind`. A script named by a host path
 (`./script.rc`) can't be run directly yet: h9 reports `not a 9front
 executable` (*Not yet available ([host-scripts](design/host-scripts.md))*).
@@ -466,7 +466,7 @@ hello
 ```
 
 There are no device nodes or ioctls in Plan 9. `/dev/cons` is the console,
-here your host terminal, and the clock, the machine's name and the random
+here your host terminal, and the clock, the machine's name, and the random
 number generator are files you read. (`/dev/cons` is listed twice because
 `/dev` is a union of two devices that both have one; the first wins.)
 
@@ -488,7 +488,7 @@ hello, again
 
 `greet` ran at first because `$path` includes `.`. After `cd /` it didn't, so
 `bind -a` added your directory to the *end* of `/bin`. `/bin` is now a union
-of three directories: 9front's programs, its rc scripts and yours. Plan 9 has
+of three directories: 9front's programs, its rc scripts, and yours. Plan 9 has
 no long `$PATH`; it has one `/bin` that each process can assemble as it likes,
 and the change affects only this machine, and only this shell and the
 programs it starts.
@@ -525,7 +525,7 @@ arm64
 rc variables are lists, and every variable is a file in `/env`, its elements
 separated by NUL bytes. h9 doesn't pass your host's environment in: the
 machine starts with a few standard variables such as `user`, `home`,
-`cputype` and `path`, plus any you give with `--env`.
+`cputype`, and `path`, plus any you give with `--env`.
 
 **6. Exit strings.** ([Processes](#8-processes))
 
@@ -638,15 +638,15 @@ allows. That's how h9's sandbox works, and chapter 22 explains the rest.
 **In Plan 9**
 
 Plan 9 has one way to reach a resource: a file tree served over one protocol,
-9P. Devices, the network, windows, the environment, process control and
-remote machines are all files you open, read and write. To control something
+9P. Devices, the network, windows, the environment, process control, and
+remote machines are all files you open, read, and write. To control something
 you write a text command to its `ctl` file; to ask about it you read a text
-file. There's no `ioctl`, no socket API and no binary `/proc`.
+file. There's no `ioctl`, no socket API, and no binary `/proc`.
 
 | Unix mechanism | Plan 9 equivalent |
 | --- | --- |
 | `ioctl(fd, ...)` | `echo command > .../ctl` |
-| Sockets, `connect`, `bind`, `listen` | `/net/tcp/clone`, `ctl` and `data` files (chapter 15) |
+| Sockets, `connect`, `bind`, `listen` | `/net/tcp/clone`, `ctl`, and `data` files (chapter 15) |
 | Signals | Notes, written to `/proc/n/note` (chapter 9) |
 | `/proc` (binary, OS-specific) | `/proc/n/status`, `ctl`, `note`, `ns`, `fd`: plain text |
 | `getenv`, `setenv` | Files in `/env` (chapter 11) |
@@ -658,7 +658,7 @@ file: **attach** to a server's root, **walk** to a name, **open** it,
 **read** and **write** it, **stat** and **wstat** its metadata, and
 **clunk** it (close). Anything that answers those messages is a file server,
 and any file server can be attached anywhere in any process's namespace. A
-kernel device is a file server built into the kernel; `ramfs`, `exportfs` and
+kernel device is a file server built into the kernel; `ramfs`, `exportfs`, and
 the window system are file servers that are ordinary programs. The protocol
 is described in `intro(5)`.
 
@@ -666,9 +666,9 @@ is described in `intro(5)`.
 
 The same. The kernel inside h9 is drawterm's, and its devices are compiled
 in: the console, environment, processes, pipes, the network, the host file
-system and a few of h9's own (chapter 7). User-level file servers such as
-`ramfs`, `srvfs`, `exportfs`, `factotum` and `plumber` run as guest
-processes, post themselves in the machine's `/srv` and are mounted with
+system, and a few of h9's own (chapter 7). User-level file servers such as
+`ramfs`, `srvfs`, `exportfs`, `factotum`, and `plumber` run as guest
+processes, post themselves in the machine's `/srv`, and are mounted with
 `mount`, as on 9front (chapter 16).
 
 **Try it**
@@ -689,7 +689,7 @@ me
 ...
 ```
 
-`/dev/time` is seconds, nanoseconds, clock ticks and ticks per second, as
+`/dev/time` is seconds, nanoseconds, clock ticks, and ticks per second, as
 text; `/dev/bintime` is the same clock as binary words, for programs.
 `/dev/drivers` lists the kernel's devices. 9front's `/dev/user` isn't served
 in h9; `$user` and `/dev/hostowner` give the same name.
@@ -767,10 +767,10 @@ plain `h9 rc` in `~/tour`, line by line:
 | --- | --- |
 | `bind '#U/...' / ro` | The root tree, from the host file system device `#U`, is `/`, read-only. (A 9P root is a `mount` here instead; chapter 16.) |
 | `bind -c '#O' /` | A copy-on-write overlay in memory over the root, before every other bind, so writes to `/` succeed and vanish when the machine ends. Not there under `--write=scope` or `--write=none`, or when the root is `--writable`. |
-| `bind '#c' /dev` | The kernel's console device: `time`, `sysname`, `random`, `null` and the rest |
-| `bind -b '#y<id>' /dev` | h9's console for this machine, before `#c`, so `/dev/cons`, `/dev/consctl` and `/dev/stderr` are your terminal |
+| `bind '#c' /dev` | The kernel's console device: `time`, `sysname`, `random`, `null`, and the rest |
+| `bind -b '#y<id>' /dev` | h9's console for this machine, before `#c`, so `/dev/cons`, `/dev/consctl`, and `/dev/stderr` are your terminal |
 | `bind -c '#e' /env` | The environment, writable |
-| `bind '#d' /fd` | `/fd/0`, `/fd/1` and so on: this process's open files |
+| `bind '#d' /fd` | `/fd/0`, `/fd/1`, and so on: this process's open files |
 | `bind '#p' /proc` | The machine's processes |
 | `bind -c '#s' /srv` | The machine's own service registry |
 | `bind '#I' /net` | The network; missing under `--net=disable` |
@@ -786,14 +786,14 @@ for the terminal's files on a cpu server, and the host is h9's terminal.
 
 You can change the namespace two ways:
 
-- **Inside a session**, with `bind`, `mount` and `unmount` in rc. The change
+- **Inside a session**, with `bind`, `mount`, and `unmount` in rc. The change
   affects that process and the processes it starts afterwards, and ends with
   the machine.
 - **At startup**, with `--ns FILE`: h9 replays a namespace file after
   building its own namespace and before looking up the program (chapter 24).
 
 Because `--print`'s namespace section is in namespace-file syntax, you can
-save it, edit it and replay it with `--ns`.
+save it, edit it, and replay it with `--ns`.
 
 **Try it**
 
@@ -824,7 +824,7 @@ whatever the namespace says: `#c` is the console device, `#e` the
 environment, `#p` the processes. A namespace is built by binding devices
 into place (`bind '#c' /dev`), and `/dev/drivers` lists the devices this
 kernel has. `intro(3)` introduces them, and each has its own page in section
-3: `cons(3)`, `env(3)`, `proc(3)` and so on. Quote `#` names in rc, since
+3: `cons(3)`, `env(3)`, `proc(3)`, and so on. Quote `#` names in rc, since
 `#` starts a comment.
 
 **In h9**
@@ -832,11 +832,11 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | Name | Device | Bound at | In h9 |
 | --- | --- | --- | --- |
 | `#/` | root | | The kernel's skeleton of mount points, under the root tree |
-| `#c` | cons | `/dev` | drawterm's console device: `time`, `bintime`, `sysname`, `hostowner`, `random`, `null`, `zero`, `pid`, `ppid`, `sysstat` and more. No `user` file. |
-| `#y` | hcons | `/dev`, before `#c` | h9's per-machine console: `cons`, `consctl` and `stderr`. Each machine gets its own, as `#y<id>`. |
+| `#c` | cons | `/dev` | drawterm's console device: `time`, `bintime`, `sysname`, `hostowner`, `random`, `null`, `zero`, `pid`, `ppid`, `sysstat`, and more. No `user` file. |
+| `#y` | hcons | `/dev`, before `#c` | h9's per-machine console: `cons`, `consctl`, and `stderr`. Each machine gets its own, as `#y<id>`. |
 | `#e` | env | `/env` | 9front's environment device, one environment per group. No `#ec` (the config environment). |
 | `#d` | dup | `/fd` | Open file descriptors |
-| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine, with 9front's debugging files `mem`, `regs`, `fpregs` and `text` for acid ([self-host](design/0010-self-host.md)). |
+| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine, with 9front's debugging files `mem`, `regs`, `fpregs`, and `text` for acid ([self-host](design/0010-self-host.md)). |
 | `#s` | srv | `/srv` | 9front's service registry, one per machine |
 | `#\|` | pipe | | Pipes |
 | `#I` | ip | `/net` | The network, through the host's own stack: `cs`, `tcp`, `udp`. Masked under `--net=disable`. |
@@ -851,7 +851,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#A` | audio | | Present, but there's no sound to drive |
 
 9front's hardware devices aren't there: no `#S` disks, `#l` Ethernet, `#t`
-serial lines, `#v` VGA or `#P` architecture, and no `#σ` shared-memory
+serial lines, `#v` VGA, or `#P` architecture, and no `#σ` shared-memory
 directory or named `#g` segments.
 
 **The device mask.** After building the namespace, h9 tells the kernel that
@@ -876,7 +876,7 @@ whole of the host a program can reach. `--host-fs` leaves `#U` unmasked, and
 builds leave them out while [host-cmd](design/host-cmd.md) rethinks them. In
 other builds `#C` and `hcmd` don't exist and `--host-cmd` exits 2.* Under
 `--host-cmd`, `hcmd cmd args...` runs `cmd` on the
-host, as you, with h9's host environment. Its standard input, output and
+host, as you, with h9's host environment. Its standard input, output, and
 error are the guest's, and `hcmd` exits with its status: empty on success,
 the exit code (`3`), `killed`, or `signal: N`. It runs in the host directory
 the guest's current directory comes from, so `cd sub; hcmd make` under
@@ -939,9 +939,9 @@ first process exits; any others are sent `hangup`, then stopped. The first
 process's exit string becomes h9's exit status (chapter 3).
 
 `/proc/n` has `args`, `ctl`, `fd`, `fpregs`, `mem`, `note`, `noteid`,
-`notepg`, `ns`, `ppid`, `regs`, `segment`, `status`, `text` and `wait`, so
-`ps`, `kill`, `slay`, `pstree` and `acid` work. `ctl` takes `stop`, `start`,
-`waitstop`, `startstop` and `hang` as well as `kill`, and a stopped process
+`notepg`, `ns`, `ppid`, `regs`, `segment`, `status`, `text`, and `wait`, so
+`ps`, `kill`, `slay`, `pstree`, and `acid` work. `ctl` takes `stop`, `start`,
+`waitstop`, `startstop`, and `hang` as well as `kill`, and a stopped process
 reads `Stopped` in `status`. The CPU times in `status` read 0 for now, and `ns` shows host
 paths of bound host trees (a caveat `--print` lists).
 
@@ -1006,13 +1006,13 @@ notes:
 | --- | --- |
 | Ctrl-C at the terminal | `interrupt` to the foreground note group; rc abandons the command and prompts again |
 | A second Ctrl-C within a second | The machine is stopped |
-| SIGTERM, or closing the terminal (SIGHUP); on Windows, closing the console, logoff or shutdown | `hangup` to every process, then the machine is stopped 2 s later if it hasn't exited |
+| SIGTERM, or closing the terminal (SIGHUP); on Windows, closing the console, logoff, or shutdown | `hangup` to every process, then the machine is stopped 2 s later if it hasn't exited |
 | `--timeout` reached | `hangup` to every process, then the machine is stopped 2 s later, and h9 prints `h9: PROG: h9: timeout` and exits 124 |
 | Ctrl-Break on Windows | `interrupt` |
 
 If the first process dies of one of these notes, h9 exits as a shell would
 for the matching signal: 130 for `interrupt`, 129 for `hangup`. A stopped
-machine exits 130 after a second Ctrl-C, 129 after SIGHUP and 143 after
+machine exits 130 after a second Ctrl-C, 129 after SIGHUP, and 143 after
 SIGTERM (chapter 20 lists every exit code).
 
 When a program has put the console in raw mode (chapter 13), Ctrl-C isn't
@@ -1099,7 +1099,7 @@ while(! test -e done) sleep 1
 
 | rc | Meaning |
 | --- | --- |
-| `` `{date} `` | Command substitution, split on spaces, tabs and newlines |
+| `` `{date} `` | Command substitution, split on spaces, tabs, and newlines |
 | `<{cmd}` | `cmd`'s output as a file name (`/fd/N`), for programs that want a file |
 | `>[2] file` | Redirect fd 2 |
 | `>[2=1]` | Make fd 2 a copy of fd 1 |
@@ -1113,17 +1113,17 @@ first. Functions are exported through `/env` like variables, so child shells
 have them.
 
 **What's missing compared to POSIX sh.** No `$(( ))` arithmetic (use
-`hoc`, `awk` or `seq`), no `[[ ]]` (use `test` and `~`), no `export` (every
+`hoc`, `awk`, or `seq`), no `[[ ]]` (use `test` and `~`), no `export` (every
 variable is exported), no `local` (use `@{ }` or `rfork e`), no `set -e`
 (test `$status`, or use `||`), no `trap` (use `fn sigint` and friends), no
-job control beyond `&`, `wait` and `$apid`, and no history or line editing.
+job control beyond `&`, `wait`, and `$apid`, and no history or line editing.
 
 **In h9**
 
 - `h9 --rc 'cmd' a b c` runs `rc -c 'cmd'` with `$*` set to `a b c`.
 - Host quoting and rc quoting nest. The host shell sees the outer single
   quotes; rc sees what's inside them. To give rc a quoted word inside a
-  host single-quoted string, end the host quote, add an escaped quote and
+  host single-quoted string, end the host quote, add an escaped quote, and
   reopen it, or put the command in a file:
 
   ```sh
@@ -1167,7 +1167,7 @@ Conventional variables:
 
 **In h9**
 
-h9 never imports the host's environment: your `HOME`, `PATH`, tokens and
+h9 never imports the host's environment: your `HOME`, `PATH`, tokens, and
 other secrets stay out of the guest (`env.scrub` in the sandbox's terms), and
 their Plan 9 meanings differ anyway. Each machine starts with:
 
@@ -1214,13 +1214,13 @@ bye
 The last line shows sharing: without `rfork e`, the child's assignment
 changed the parent's `/env/greeting`.
 
-### 12. Users, ownership and permissions
+### 12. Users, ownership, and permissions
 
 **In Plan 9**
 
 There's no root user and no uid 0. The **hostowner** owns the machine's
 kernel and devices, which gives far fewer powers than root does. Files have
-an owner, a group and permissions for user, group and other, as on Unix, but
+an owner, a group, and permissions for user, group, and other, as on Unix, but
 there's no setuid, and users and groups are *names* that each file server
 defines for itself. Proving who you are to a file server is the job of
 `factotum`, an agent that holds your keys and runs the authentication
@@ -1258,10 +1258,10 @@ telling these apart.
 
 `/dev/cons` is the console, and it's line-oriented: a program reads whole
 lines and writes plain text. Programs don't send terminal escape codes, and
-there's no termcap, curses or terminal size. Writing `rawon` to
+there's no termcap, curses, or terminal size. Writing `rawon` to
 `/dev/consctl` turns off line editing and echo, so a program reads each key
 as it's typed, until it writes `rawoff` or closes `consctl`. The interrupt
-key is Del. Line editing, scrollback and cut and paste belong to the window
+key is Del. Line editing, scrollback, and cut and paste belong to the window
 system, rio, not to the program or the shell.
 
 **In h9**
@@ -1290,7 +1290,7 @@ host$ h9 --rc 'grep -n TODO *.c' > todo.txt
 ### 14. Text tools and the 9front userland
 
 9front's tools look like the Unix ones and mostly do the same jobs, but
-they're older, smaller and more consistent. The differences that catch people:
+they're older, smaller, and more consistent. The differences that catch people:
 
 - **Fewer flags.** `ls` has no colours, no columns (`lc` lists in columns)
   and no `-h`; `ls -l` shows sizes in bytes. `du -a` walks a tree, since
@@ -1298,9 +1298,9 @@ they're older, smaller and more consistent. The differences that catch people:
   `tail -n 3` doesn't. `date` takes no format string. `seq` exists; `tr` has
   no character classes.
 - **One regular expression syntax**, described in `regexp(6)`, used by
-  `grep`, `sed`, `awk`, `sam` and the C library. It's what GNU calls
-  extended: `+`, `?`, `|` and `()` work unescaped, and there are no
-  backreferences or `\d`, `\w` or `{n,m}`. `grep -s` is silent, for tests,
+  `grep`, `sed`, `awk`, `sam`, and the C library. It's what GNU calls
+  extended: `+`, `?`, `|`, and `()` work unescaped, and there are no
+  backreferences or `\d`, `\w`, or `{n,m}`. `grep -s` is silent, for tests,
   and `grep -n` numbers lines.
 - **Structural regular expressions.** `sam`, Plan 9's editor, describes
   edits as nested `x/regexp/ command` loops that work on any text structure,
@@ -1336,7 +1336,7 @@ The network is a file tree, usually at `/net`. Each protocol is a directory
 (`/net/tcp`, `/net/udp`); opening its `clone` file reserves a new
 connection, numbered `n`, and returns its `ctl` file, whose first read gives
 `n`. Writing `connect 10.0.0.1!80` to `ctl` dials; then `/net/tcp/n/data`
-is the byte stream, and `status`, `local` and `remote` describe it. Servers
+is the byte stream, and `status`, `local`, and `remote` describe it. Servers
 write `announce *!8080` and open `listen` to wait for calls.
 
 Addresses are **dial strings**, `network!host!service`, such as
@@ -1351,9 +1351,9 @@ connect to other machines, and `9fs` mounts remote file servers.
 **In h9**
 
 - `#I` is drawterm's network device, which uses the host's network stack:
-  connections come from your host's addresses, through its routing, VPN and
-  firewall. It has `tcp`, `udp` and `cs` only; there's no `/net/ipifc`,
-  `/net/ether` or `/net/dns`, and nothing to configure.
+  connections come from your host's addresses, through its routing, VPN, and
+  firewall. It has `tcp`, `udp`, and `cs` only; there's no `/net/ipifc`,
+  `/net/ether`, or `/net/dns`, and nothing to configure.
 - `/net/cs` is built into the device and resolves names with the host's
   resolver, so there's no `ndb/cs` or `ndb/dns` to start. `ndb/csquery`
   works against it.
@@ -1418,7 +1418,7 @@ A server, which needs `--net=enable`:
 host$ h9 --net=enable aux/listen1 -t 'tcp!*!8080' /bin/cat
 ```
 
-### 16. File servers, `/srv` and 9P mounts
+### 16. File servers, `/srv`, and 9P mounts
 
 **In Plan 9**
 
@@ -1442,7 +1442,7 @@ devices in Plan 9.
 
 - `/srv` is the machine's own registry (9front's `#s`), so file servers post
   themselves and other processes mount them as on 9front. `ramfs`, `srvfs`,
-  `exportfs`, `factotum` and `plumber` run. Machines can't see each other's
+  `exportfs`, `factotum`, and `plumber` run. Machines can't see each other's
   `/srv`, and everything posted is closed when the machine ends.
 - `mount` works with or without authentication through `fauth`, for any
   server the guest has a descriptor for: a `/srv` entry, a pipe, or a
@@ -1454,7 +1454,7 @@ devices in Plan 9.
 - **9P roots.** `--root` can be a 9P server instead of a directory: a dial
   string `tcp!host!port` (`tcp!host` means port 564), `unix!/path`, or the
   path of a unix socket. h9 connects before the program runs, posts the
-  connection as `/srv/root`, mounts it at `/` and binds everything else over
+  connection as `/srv/root`, mounts it at `/`, and binds everything else over
   it as usual. `--root-spec NAME` sets the attach name and `--root-user NAME`
   the user name sent to the server (your user by default). The server must
   not ask for authentication: `u9fs -a none`, or `exportfs` behind
@@ -1470,7 +1470,7 @@ devices in Plan 9.
   `9p` subprotocol, and mounts it like any 9P root. `--root-header 'Name:
   value'` adds a handshake header, and `--root-header @FILE` reads them from
   a file, so a token stays out of `ps`. `wss` trusts the host's CA bundle,
-  or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY` and
+  or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY`, and
   `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
   wss://fs.example/9p /n`.
 - **WebSockets in the guest.** `/net/ws` is laid out like `/net/tcp` and
@@ -1521,14 +1521,14 @@ Mounting a remote 9P server the network policy allows:
 host$ h9 --rc 'srv tcp!fs.example.com!564 fs && mkdir /tmp/fs && mount /srv/fs /tmp/fs && ls /tmp/fs'
 ```
 
-### 17. Graphics: rio, acme and the plumber
+### 17. Graphics: rio, acme, and the plumber
 
 **In Plan 9**
 
-Graphics are files too: `/dev/draw` for drawing, `/dev/mouse`, `/dev/kbd`
+Graphics are files too: `/dev/draw` for drawing, `/dev/mouse`, `/dev/kbd`,
 and `/dev/cursor` for input, and `/dev/snarf` for the clipboard. rio, the
 window system, is a file server that gives each window its own `/dev/cons`,
-`/dev/mouse` and `/dev/draw`, so programs inside a window don't know they're
+`/dev/mouse`, and `/dev/draw`, so programs inside a window don't know they're
 in one. Text is edited with three mouse buttons: button 1 selects, button 2
 runs commands (cut, paste, snarf) and button 3 opens or plumbs; chords such
 as 1-2 cut and 1-3 paste. acme is a programmer's environment built on that
@@ -1538,8 +1538,8 @@ programs, such as opening a file name you clicked in the right editor.
 **In h9**
 
 `--gfx` gives the machine one host window, drawn by drawterm's own window
-code: Cocoa on macOS, Win32 on Windows and X11 on Linux. Its namespace gets
-`#i`, `#m` and `#b` on `/dev`, so `/dev/draw`, `/dev/mouse`, `/dev/cursor` and
+code: Cocoa on macOS, Win32 on Windows, and X11 on Linux. Its namespace gets
+`#i`, `#m`, and `#b` on `/dev`, so `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and
 `/dev/kbd` are the window's, and `/dev/snarf` is the host clipboard. Run rio
 in it and the window is a 9front screen. The window opens when a program
 first uses the screen, not before. Closing it posts `hangup` to the machine,
@@ -1556,7 +1556,7 @@ the run ends.
 - `--gfx-scale N` is drawterm's `-x`, on macOS only: 1 (the default) draws in
   points, 0 in the display's backing pixels, and N in backing pixels divided
   by N.
-- Only one machine in an h9 process has a window. Without `--gfx`, `#i`, `#m`
+- Only one machine in an h9 process has a window. Without `--gfx`, `#i`, `#m`,
   and `#b` are masked, so a guest can't open one.
 - Linux builds have no window code unless built with `-Dgfx=x11`; `h9
   --version` says which (`gfx:`), and `h9 --check` says whether `$DISPLAY`
@@ -1586,9 +1586,9 @@ paste in a host program.
 
 **In Plan 9**
 
-Each architecture has its own compiler, assembler and linker, named by a
-letter: `7c`, `7a` and `7l` for arm64, `6c`, `6a` and `6l` for amd64, `8c`,
-`8a` and `8l` for 386. Object files are named by the same letter (`ls.7`),
+Each architecture has its own compiler, assembler, and linker, named by a
+letter: `7c`, `7a`, and `7l` for arm64, `6c`, `6a`, and `6l` for amd64, `8c`,
+`8a`, and `8l` for 386. Object files are named by the same letter (`ls.7`),
 and `$objtype` picks the target. `pcc` is a cc-like driver for ANSI and POSIX
 code (APE). Programs are built with `mk`, Plan 9's make, from a `mkfile`
 that includes shared rules from `/sys/src/cmd/mkone` and friends. Sources
@@ -1596,7 +1596,7 @@ live in `/sys/src`, and `mk install` copies results into `/$objtype/bin`.
 
 **In h9**
 
-The compilers, linkers and `mk` run, and rebuild 9front's userland from
+The compilers, linkers, and `mk` run, and rebuild 9front's userland from
 `/sys/src` byte for byte; that's how `zig build mkroot -- --arch` adds `/386` and
 `/amd64`. `acid` debugs a live process ([self-host](design/0010-self-host.md)).
 
@@ -1691,7 +1691,7 @@ hello, world
   `os/exec` unless your root tree has `/amd64/bin` (`zig build mkroot`
   on x86\_64, or `--arch amd64`).
 - A Go program doesn't need a root tree to run, but without one it has no
-  `/bin`, no `/tmp` and no access to your files; give it a root or at least
+  `/bin`, no `/tmp`, and no access to your files; give it a root or at least
   `--root` pointing at a directory with the usual mount points.
 
 ---
@@ -1721,7 +1721,7 @@ h9 --help          (or -h alone)
 - A flag's value can be the next argument or follow `=`: `--root DIR` or
   `--root=DIR`. Flags marked *repeatable* can be given more than once.
 - `-h` is `--help` only when it's the only argument.
-- Running `h9` with no program, an unknown flag or a bad value prints the
+- Running `h9` with no program, an unknown flag, or a bad value prints the
   usage to standard error and exits 2. A combination h9 refuses (such as
   `--write=none --writable DIR`) prints `h9: ...` and exits 2.
 
@@ -1752,7 +1752,7 @@ Machine:
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
-| `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For Linux roots, container images and 9front trees with links. |
+| `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For Linux roots, container images, and 9front trees with links. |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
 | `--rc 'command'` | Run an rc command line instead of a program |
@@ -1763,7 +1763,7 @@ Files and sandbox (chapters 21 and 22):
 | Flag | Meaning |
 | --- | --- |
 | `--profile default\|tight` | The sandbox defaults; other flags override them |
-| `--sandbox DIR` | `--profile=tight` with only `DIR` bound, read-write, as the cwd. Can't be combined with `--cwd`, `--host-fs` or `--host-cmd`. |
+| `--sandbox DIR` | `--profile=tight` with only `DIR` bound, read-write, as the cwd. Can't be combined with `--cwd`, `--host-fs`, or `--host-cmd`. |
 | `--readable PATH` | Share a host path read-only; repeatable |
 | `--writable PATH` | Share a host path read-write; repeatable |
 | `--read-deny PATH` | Hide a host path, even inside a shared tree; repeatable. The path needn't exist. |
@@ -1781,7 +1781,7 @@ Limits (chapter 23):
 | Flag | Meaning |
 | --- | --- |
 | `--memory SIZE` | Cap guest memory: a byte count or `k`, `m`, `g`, `t` (`512m`, `4G`). Default 1 GB, at most 32 GB. |
-| `--timeout DURATION` | Post `hangup` after `ms`, `s`, `m` or `h` (`30s`, `500ms`; a plain number is seconds), and stop the machine 2 s later |
+| `--timeout DURATION` | Post `hangup` after `ms`, `s`, `m`, or `h` (`30s`, `500ms`; a plain number is seconds), and stop the machine 2 s later |
 | `--pids N` | Cap live processes |
 | `--cpus N` | Cap processes running guest code at the same moment |
 
@@ -1798,8 +1798,8 @@ Tools:
 
 | Flag | Meaning |
 | --- | --- |
-| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user` and `--memory`. |
-| `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in and the window code (`gfx:`) |
+| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, and `--memory`. |
+| `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in, and the window code (`gfx:`) |
 | `--help`, `-h` | Print the usage to standard output |
 
 
@@ -1808,7 +1808,7 @@ Tools:
 | Code | Meaning | Printed on standard error |
 | --- | --- | --- |
 | 0 | The program's exit string was empty | Nothing |
-| 1–255 | The exit string was that number in decimal (digits only: no sign, leading zero or spaces) | Nothing |
+| 1–255 | The exit string was that number in decimal (digits only: no sign, leading zero, or spaces) | Nothing |
 | 1 | Any other exit string, including `0`; or the program was killed by a note that isn't a signal | The string, or `h9: PROG: NOTE` |
 | 2 | Usage error or refused combination | The usage, or `h9: ...` |
 | 124 | `--timeout` was reached | `h9: PROG: h9: timeout` |
@@ -1823,8 +1823,8 @@ Tools:
 | --- | --- | --- |
 | Ctrl-C | `interrupt` to the foreground note group; a second within a second stops the machine | The same, and Ctrl-Break posts `interrupt` too |
 | Ctrl-C in raw mode | Reaches the program as a key | The same |
-| Hangup | SIGHUP or SIGTERM: `hangup` to every process, stop 2 s later | Closing the console, logoff or shutdown: the same, with a shorter grace period because Windows ends the process soon after |
-| Raw mode | termios: no line editing, echo or signals | Console mode: the same |
+| Hangup | SIGHUP or SIGTERM: `hangup` to every process, stop 2 s later | Closing the console, logoff, or shutdown: the same, with a shorter grace period because Windows ends the process soon after |
+| Raw mode | termios: no line editing, echo, or signals | Console mode: the same |
 
 ### 21. Sharing files with the host
 
@@ -1868,7 +1868,7 @@ at `/mnt/term` (and unmasks `#U`). `--writable` paths are still writable.
 
 **Ephemeral writes.** `--write=ephemeral` makes every path that would be
 writable (the cwd, each `--writable` path) a copy-on-write overlay in memory
-instead. The program can create, change, remove and rename files there and
+instead. The program can create, change, remove, and rename files there and
 sees its changes, but they're thrown away when the machine ends, and the host
 is never written. That's the way to let a program mess with a directory
 safely:
@@ -1900,7 +1900,7 @@ read-only.
   name, so `.ENV` can't be used to reach a denied `.env`.
 - **Symlinks** are followed, and every path is checked *after* resolving
   them, so a link inside a shared tree that points outside it fails as if
-  the target didn't exist. Creating, removing or renaming acts on the link
+  the target didn't exist. Creating, removing, or renaming acts on the link
   itself.
   With `--root-contained`, the root tree's links are read inside it
   instead: an absolute target starts at the tree's top, and `..` stops
@@ -2011,7 +2011,7 @@ caveats:
 | `profile:` | The profile the defaults came from |
 | `enforces:` | The capabilities in force |
 | `unenforced:` | Shown only when you asked for something this build can't enforce yet |
-| `limits:` | The write and network modes, and any memory, timeout, process and CPU caps |
+| `limits:` | The write and network modes, and any memory, timeout, process, and CPU caps |
 | `devmask:` | Devices a program can't attach by name after startup |
 | `net-allow:` | Shown only with `--net-allow`: the patterns |
 | `namespace:` | The namespace, in namespace-file syntax, with each host tree's access (`ro`, `rw`, `eph`, `9p`) at the end of its line; `<id>` stands for the machine's console number |
@@ -2062,7 +2062,7 @@ hundred MB, or about 4 GB if it starts other processes.
 ### 24. Namespace files with `--ns`
 
 `--ns FILE` replays a namespace file after h9 has built the machine's
-namespace and before it looks up the program, so the file can add, replace
+namespace and before it looks up the program, so the file can add, replace,
 or remove anything h9 set up, and the program can come from a directory the
 file binds.
 
@@ -2081,7 +2081,7 @@ Quote with single quotes, doubling a quote inside one. `--print`'s extra
 column (`ro`, `rw`, `eph`, `9p`) and its `<id>` placeholder are accepted, so
 its output replays unchanged. A bind from a bare `#O` creates a fresh
 copy-on-write overlay in memory over whatever its target is at that point.
-`.` (include), `chdev` and `$variable` expansion aren't supported.
+`.` (include), `chdev`, and `$variable` expansion aren't supported.
 
 **Errors.** As in 9front's `newns`, a line that fails (a missing directory,
 a masked device) is skipped and the replay goes on; `--trace` shows which
@@ -2124,7 +2124,7 @@ host$ h9 --ns ns ls -d /lib/acid
 
 ### 25. Using h9 from host scripts and tools
 
-h9 behaves like a host program: standard input, output and error are its
+h9 behaves like a host program: standard input, output, and error are its
 own, and its exit status follows the table in chapter 20.
 
 ```sh
@@ -2143,7 +2143,7 @@ case $? in 125|126|127) echo "h9 itself failed";; esac
 **Arguments through two shells.** With a program, arguments pass through
 untouched: `h9 grep -n 'a b' file` gives grep exactly `a b`. With `--rc`,
 rc parses the command line again, so put values in arguments rather than in
-the command text, where they arrive safely as `$1`, `$2` and `$*`:
+the command text, where they arrive safely as `$1`, `$2`, and `$*`:
 
 ```sh
 host$ h9 --rc 'grep -n $1 $2 | sed 5q' "$pattern" "$file"
@@ -2167,12 +2167,12 @@ exec h9 sed "$@"
 costs a few milliseconds on a hypervisor (`--check` prints the time for a
 tiny program). That's cheap enough to run per command. Use one `--rc`
 command line, or an rc script, when the commands need to share state:
-environment variables, binds, `/tmp` files, posted servers or background
+environment variables, binds, `/tmp` files, posted servers, or background
 processes.
 
 **Embedding h9 in a Zig program.** The CLI is a thin layer over a library.
 `Machine.init` takes `Machine.Options` (the backend, architecture, root,
-cwd, environment, sandbox `Policy`, standard I/O and an optional trace
+cwd, environment, sandbox `Policy`, standard I/O, and an optional trace
 writer), and `Machine.run` runs a program and returns its exit string
 unchanged; the mapping to exit codes is the CLI's. Several machines can run
 in one host process. [Embedding h9 in a Zig program](docs/embedding.md)
@@ -2187,10 +2187,10 @@ A **backend** is what runs guest code:
 | `hvf` | macOS on Apple Silicon (Hypervisor.framework) | arm64 |
 | `kvm` | Linux | *Not yet available ([kvm](design/0016-kvm.md))* |
 | `whp` | Windows | *Not yet available ([whp](design/0017-whp.md))* |
-| `emu` | Any, in `h9-emu` only (Unicorn) | arm64, amd64 and 386 |
+| `emu` | Any, in `h9-emu` only (Unicorn) | arm64, amd64, and 386 |
 
 `--backend auto`, the default, uses the host's hypervisor if it's built in,
-usable and can run the program's architecture, and otherwise the emulator,
+usable, and can run the program's architecture, and otherwise the emulator,
 printing `h9: warning: no usable hypervisor; using the emulator`. Naming a
 backend uses that one or fails with exit 125.
 
@@ -2224,14 +2224,14 @@ host$ h9 --trace cat /lib/nosuch
 ...
 ```
 
-**Faults.** `--dump-on-fault` prints the registers, the faulting address and
+**Faults.** `--dump-on-fault` prints the registers, the faulting address, and
 the program counter, named by the a.out's symbol table, when a program takes
 a fault it doesn't handle.
 
 **`/proc`.** `ps`, `pstree`, `/proc/n/status`, `/proc/n/fd` (open files),
 `/proc/n/ns` (the namespace) and `/proc/n/segment` (memory) work, and so
 does `acid`, Plan 9's debugger: `h9 --rc 'sleep 5 & sleep 1; acid $apid'`,
-then `stk()` for a stack trace; `new()`, `bpset`, `cont`, `step` and `next`
+then `stk()` for a stack trace; `new()`, `bpset`, `cont`, `step`, and `next`
 work too
 ([self-host](design/0010-self-host.md)).
 
@@ -2273,7 +2273,7 @@ host denies the operation outside h9 too, it's the host's permissions.
 Chapter 12 has the table.
 
 **"sys: bad sys call".** The program used a system call h9 doesn't
-implement. The old compatibility calls (`_READ`, `_STAT` and so on) aren't
+implement. The old compatibility calls (`_READ`, `_STAT`, and so on) aren't
 served, as they're not used by current 9front. Please report others.
 
 **"no procs".** `--pids` is too low for what the program starts. A pipeline
@@ -2288,7 +2288,7 @@ program gets end of file when the pipe closes.
 **Why doesn't `$HOME` or `$PATH` from my host show up?** h9 never imports the
 host environment (chapter 11). Use `--env` for what you want to pass.
 
-**Why don't colours, `less` or `vi` work?** Plan 9 programs don't use
+**Why don't colours, `less`, or `vi` work?** Plan 9 programs don't use
 terminal escape codes, and there's no full-screen terminal interface. Use
 `p` to page, `sam -d` or `ed` to edit, and `lc` for columns. acme and rio
 need a window: `h9 --gfx rio` (chapter 17).
@@ -2313,7 +2313,7 @@ They change faster than this manual, as proposals land.
   sandboxing, mounts, serving 9P, building, and Go.
 - [Embedding h9 in a Zig program](docs/embedding.md): a Zig program that
   runs 9front programs in machines of its own, several at once, with
-  captured I/O, a sandbox policy and 9P roots.
+  captured I/O, a sandbox policy, and 9P roots.
 - [Building your own userland](docs/userland.md): a root of your own, from
   one Go program to a slim 9front, a layer over the stock root, or a tree
   served over 9P or WebSocket.
@@ -2323,7 +2323,7 @@ They change faster than this manual, as proposals land.
 ### A. Glossary
 
 - **9P**: The protocol Plan 9 uses for all file access, local or remote. A program
-  that answers 9P messages (attach, walk, open, read, write, stat, clunk and a
+  that answers 9P messages (attach, walk, open, read, write, stat, clunk, and a
   few more) is a *file server*, and its tree can be mounted anywhere in a
   namespace. See `intro(5)`.
 
@@ -2331,7 +2331,7 @@ They change faster than this manual, as proposals land.
   directory, given with `--root tcp!host!port`. See chapter 16.
 
 - **a.out**: Plan 9's executable format: a short header, then text, then data, then a
-  symbol table. h9 loads a.outs itself; it doesn't run ELF, Mach-O or PE
+  symbol table. h9 loads a.outs itself; it doesn't run ELF, Mach-O, or PE
   programs. A program in the wrong architecture's a.out exits 126.
 
 - **attach**: The first 9P message on a connection, which gives a client the root of a
@@ -2344,7 +2344,7 @@ They change faster than this manual, as proposals land.
   symlink that lives in the process's namespace rather than on disk. See
   `bind(1)` and `bind(2)`.
 
-- **chan**: The kernel's handle on an open or walked file: a file server, a path in it
+- **chan**: The kernel's handle on an open or walked file: a file server, a path in it,
   and an offset. File descriptors refer to chans.
 
 - **cpu server**: A Plan 9 machine that runs other users' programs, reached with `rcpu` (or
@@ -2352,7 +2352,7 @@ They change faster than this manual, as proposals land.
   h9 borrows for the host's files.
 
 - **cputype, objtype**: Environment variables naming the architecture programs run on (`cputype`)
-  and the one the compilers build for (`objtype`): `arm64`, `amd64` or `386`.
+  and the one the compilers build for (`objtype`): `arm64`, `amd64`, or `386`.
   `/bin` is built from `/$cputype/bin`.
 
 - **devmask**: The set of kernel devices a process may no longer attach with a `#` name.
@@ -2367,11 +2367,11 @@ They change faster than this manual, as proposals land.
 - **dial string**: A network address in Plan 9 form: `network!host!service`, such as
   `tcp!9front.org!443` or `net!example.com!http`. See `dial(2)`.
 
-- **drawterm**: A program that connects a Unix, macOS or Windows host to a Plan 9 cpu
+- **drawterm**: A program that connects a Unix, macOS, or Windows host to a Plan 9 cpu
   server, with a small Plan 9 kernel inside it. h9 runs that kernel locally
   to serve its guests' system calls.
 
-- **Egrp, Fgrp, Pgrp**: The kernel's environment group, file descriptor group and namespace (process
+- **Egrp, Fgrp, Pgrp**: The kernel's environment group, file descriptor group, and namespace (process
   group). `rfork` chooses whether a child shares or copies each one.
 
 - **ephemeral**: h9's `--write=ephemeral` mode, where writable host paths become
@@ -2395,7 +2395,7 @@ They change faster than this manual, as proposals land.
 
 - **Hyper9**: The project; `h9` is its command and library.
 
-- **machine**: One h9 invocation: one namespace, console, environment, `/srv` and process
+- **machine**: One h9 invocation: one namespace, console, environment, `/srv`, and process
   tree, which disappears when its first process exits. A library user can run
   several machines in one host process.
 
@@ -2405,10 +2405,10 @@ They change faster than this manual, as proposals land.
   servers. Each process has one, inherited by its children and changeable
   without affecting anyone else. See chapter 6.
 
-- **newns, namespace file**: A script of `bind`, `mount` and similar commands that builds a namespace,
+- **newns, namespace file**: A script of `bind`, `mount`, and similar commands that builds a namespace,
   such as `/lib/namespace`. h9 replays one with `--ns`. See `namespace(6)`.
 
-- **note, note group**: Plan 9's signals: strings such as `interrupt`, `hangup` or `sys: trap: ...`
+- **note, note group**: Plan 9's signals: strings such as `interrupt`, `hangup`, or `sys: trap: ...`
   posted to a process. A note group is the set of processes an interrupt is
   posted to, usually a shell and its foreground job. See `notify(2)`.
 
@@ -2445,7 +2445,7 @@ They change faster than this manual, as proposals land.
   member bound with `-c`. `/bin` is one.
 
 - **Ureg**: The saved user registers of a process, as the kernel sees them at a system
-  call, fault or note.
+  call, fault, or note.
 
 - **vCPU**: A virtual CPU from the host hypervisor, or an engine in the emulator. Each
   guest process normally has its own.
@@ -2481,7 +2481,7 @@ Commands marked † aren't usable in h9 yet; the notes say why.
 | `strace` | `ratrace`, or `h9 --trace` | |
 | `gdb` | `acid`, `db` | |
 | `tmpfs` | `ramfs` | Or just `/tmp`, private and in memory in h9 |
-| `sshfs`, NFS | `9fs`, `srv` and `mount`, `sshfs` | Mount points go in `/tmp` in h9 (chapter 16) |
+| `sshfs`, NFS | `9fs`, `srv`, and `mount`, `sshfs` | Mount points go in `/tmp` in h9 (chapter 16) |
 | `git` | `git` | 9front has its own git client |
 
 **Concepts**
@@ -2538,7 +2538,7 @@ machine and the tree changes only if you pass `--writable "$H9ROOT"`. It's about
 250 MB.
 
 **Left out:** `/dist` (installer payloads), the kernels and boot files for
-real hardware (`/arm64/9*`, `/386/9boot*` and similar) and `/sys/doc`.
+real hardware (`/arm64/9*`, `/386/9boot*`, and similar) and `/sys/doc`.
 `/sys/src` is left out too unless `zig build mkroot -- --src` is used;
 rebuilding 9front programs from source (chapter 18) needs it. The binaries in
 the image are arm64; `/386` and `/amd64` are empty skeletons unless `zig build
@@ -2555,7 +2555,7 @@ machine's architecture or the ones `--arch` names.
 | `/sys/include` | Portable C headers (`u.h`, `libc.h`, ...) |
 | `/sys/lib` | Support files for programs: `acid`, `plumb` rules, `kbmap`, `newuser`, `tls`, ... |
 | `/sys/man` | Manual pages, sections 1–8; read with `man` |
-| `/lib` | Data files: `namespace`, `ndb` (network database), `font`, `keyboard`, the dictionary, `rfc` and more |
+| `/lib` | Data files: `namespace`, `ndb` (network database), `font`, `keyboard`, the dictionary, `rfc`, and more |
 | `/lib/namespace` | 9front's standard namespace file. h9 doesn't run it; it builds its own (see `h9 --print`) |
 | `/adm/timezone` | Time zone files; h9 copies `local` into `$timezone` |
 | `/acme`, `/mail`, `/cfg` | acme's tools, upas mail, per-system configuration |
@@ -2611,7 +2611,7 @@ originals.
 | --- | --- |
 | `intro(1)` | Commands, and the conventions they share |
 | `rc(1)` | The shell |
-| `bind(1)`, `bind(2)` | Binds, mounts and unions |
+| `bind(1)`, `bind(2)` | Binds, mounts, and unions |
 | `namespace(4)`, `namespace(6)` | The conventional namespace, and namespace files |
 | `intro(3)` | Kernel devices; each device has its own page in section 3 |
 | `intro(5)` | 9P |
@@ -2620,11 +2620,11 @@ originals.
 | `srv(3)`, `ramfs(4)`, `exportfs(4)` | Posting and serving file systems |
 | `dial(2)`, `ip(3)`, `ndb(6)` | Networking |
 | `regexp(6)` | Regular expression syntax |
-| `cons(3)` | `/dev/cons`, `consctl` and the other console files |
+| `cons(3)` | `/dev/cons`, `consctl`, and the other console files |
 
 **h9 itself**
 
-- [README.md](README.md): building, testing and the flags in brief.
+- [README.md](README.md): building, testing, and the flags in brief.
 - [DESIGN.md](DESIGN.md): how h9 works inside.
 - [design/](design/README.md): proposals, including the ones this manual's
   badges point to.

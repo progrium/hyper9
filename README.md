@@ -27,7 +27,7 @@ image headless in QEMU (`brew install qemu`), tars the file system out onto a
 scratch disk, and unpacks it into
 `.local/9front/root-<release>`, with `.local/9front/root` linked to it. The
 image itself isn't modified. It's the host-tree root h9 serves as `/`.
-Boot kernels, `/sys/doc` and `/sys/src` are left out; pass `--src` to keep
+Boot kernels, `/sys/doc`, and `/sys/src` are left out; pass `--src` to keep
 `/sys/src`, which [self-hosting](design/0010-self-host.md) needs. Options go
 after `--`: `zig build mkroot -- --src`.
 The tree has the host's architecture's binaries unless `--arch` names
@@ -49,7 +49,7 @@ On Linux, h9 uses KVM ([kvm](design/0016-kvm.md)) on arm64 and x86\_64. It
 needs read and write access to `/dev/kvm`, usually through the `kvm` group
 (`sudo usermod -aG kvm $USER`, then log in again), and inside a VM, nested
 virtualization. `h9 --check` says which is missing. `zig build mkroot` needs
-`qemu-system-aarch64`, `qemu-img` and `bsdtar` (Debian and Ubuntu:
+`qemu-system-aarch64`, `qemu-img`, and `bsdtar` (Debian and Ubuntu:
 `qemu-system-arm qemu-utils libarchive-tools`). KVM runs the host's
 architecture, so on x86\_64 the root needs `/amd64`, which `zig build mkroot`
 builds there by default, with an emulator h9 running the tree's arm64
@@ -110,7 +110,7 @@ commands copied from the root, to measure the box against
 ([tests/fixtures/multicall/execloop.rc](tests/fixtures/multicall/execloop.rc)). It
 needs `/sys/src`, from `zig build mkroot -- --src` or the checkout `fetch.sh` makes,
 and takes a few minutes on the emulator. The tree is `9box`, its links,
-`rcmain` and the mount points, and runs with
+`rcmain`, and the mount points, and runs with
 `h9 --root .local/9front/slim-11952-arm64`. The `[64]` cases use it,
 and skip without it.
 
@@ -177,7 +177,7 @@ integration run's WebSocket cases need `-Demu=unicorn` too (with
 
 The web host's only network is WebSockets: `#I` is masked, and `--net`
 (outbound by default) binds `/net/ws` alone at `/net`. The browser does the
-handshake, TLS and proxies, so `--root-header`, `--root-ca` and `header` in
+handshake, TLS, and proxies, so `--root-header`, `--root-ca`, and `header` in
 `ctl` are errors there, and `--net-allow` can't check what a name resolves
 to. `#C` is masked and `--host-cmd` is a usage error. A page embeds a
 machine with `createMachine({ root, memory, policy, terminal })` from
@@ -192,14 +192,14 @@ Each GitHub release has two sets of binaries, built by
 | Asset | License | Contents |
 | --- | --- | --- |
 | `h9-<version>-<target>` | MIT | `h9` with the hypervisor backends only (macOS arm64 for now) |
-| `h9-emu-<version>-<target>` | GPLv2 | `h9-emu`: h9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static) and Windows arm64 and x86_64 |
+| `h9-emu-<version>-<target>` | GPLv2 | `h9-emu`: h9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static), and Windows arm64 and x86_64 |
 | `h9-emu-<version>-source.tar.gz` | GPLv2 and MIT | complete corresponding source for `h9-emu`: the h9 tree plus Unicorn's patched source in `.local/src/unicorn` |
-| `h9-web-<version>.tar.gz` | MIT and BSD-2 | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, `v86.wasm` (BSD-2, `LICENSE.v86`), the demo page and its root archive |
+| `h9-web-<version>.tar.gz` | MIT and BSD-2 | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, `v86.wasm` (BSD-2, `LICENSE.v86`), the demo page, and its root archive |
 | `SHA256SUMS` | | checksums |
 
 `h9-emu` takes the same flags as `h9` and runs on hosts without a usable
 hypervisor. It links Unicorn Engine, so the binary as a whole is GPLv2, with
-`COPYING`, `NOTICE` and the MIT notices in each archive; see [LICENSE](LICENSE).
+`COPYING`, `NOTICE`, and the MIT notices in each archive; see [LICENSE](LICENSE).
 The script builds every binary from the unpacked source tarball, with Unicorn
 from source (`-Dunicorn=source`), so the tarball is exactly what was built. It
 needs `scripts/fetch.sh` to have been run and runs on macOS, which
@@ -227,17 +227,17 @@ a guest path or name in the machine's namespace: `/` is the root tree
 build; with none found, a guest program is an error, exit 125), `/bin` is `/$cputype/bin` (`/arm64/bin` on arm64) plus `/rc/bin`, and the host cwd (or `--cwd`)
 is at `/mnt/term/cwd` and is the guest's cwd. The host environment isn't
 imported: the guest gets `user`, `home`, `cputype`, `objtype`, `sysname`,
-`service`, `path`, `timezone` and `NPROC` (the vCPUs the machine can run
+`service`, `path`, `timezone`, and `NPROC` (the vCPUs the machine can run
 at once: `--cpus`, else the host's CPU count), plus any `--env`, which
 overrides them. Exit codes: 0 for an empty
 `exits` string; the number itself for an `exits` string that's a decimal
-number from 1 to 255 (no sign, leading zero or spaces), so rc's `exit 3` and
+number from 1 to 255 (no sign, leading zero, or spaces), so rc's `exit 3` and
 Go's `os.Exit(3)` exit 3; and 1 for any other string, which is printed to
 stderr. A program killed by a note exits as a host shell reports a signal
 ([exit-status](design/0033-exit-status.md)): 128 plus the host's signal number for
 a note APE maps to a signal, so Ctrl-C exits 130 and a closed pipe 141, both
 silently; 139 for a fault; 124 for `--timeout`; 128 plus the host signal
-(130, 129 or 143) when a second Ctrl-C, SIGHUP or SIGTERM tears the machine
+(130, 129, or 143) when a second Ctrl-C, SIGHUP, or SIGTERM tears the machine
 down; and 1, with the note printed, for any other note. h9's own failures
 are 2 for a usage error, 125 when h9 itself fails, 126 when the program isn't
 a runnable a.out and 127 when it isn't found, and h9 prints a message for
@@ -246,7 +246,7 @@ apart.
 
 Go's `GOOS=plan9 GOARCH=amd64` binaries run on the emulator (`--backend emu`,
 or `--arch amd64` with h9-emu): goroutines on several processes, timers,
-`os/exec`, `net/http` and `os/signal`. A Go program reserves several hundred MB
+`os/exec`, `net/http`, and `os/signal`. A Go program reserves several hundred MB
 of memory at start, so one that uses `os/exec` needs `--memory 4G`.
 
 `--check` creates a VM on each backend built in (or just `--backend`'s) and
@@ -284,7 +284,7 @@ the handshake offering the `9p` subprotocol), then mounts it as it mounts any
 such as `Authorization: Bearer …`, and `--root-header @FILE` reads one header
 per line from a file, so a token stays out of `ps`. `wss` trusts the host's CA
 bundle; `--root-ca FILE` trusts a PEM file instead. `HTTPS_PROXY`,
-`HTTP_PROXY` and `NO_PROXY` are honored with `CONNECT`, with credentials from
+`HTTP_PROXY`, and `NO_PROXY` are honored with `CONNECT`, with credentials from
 the proxy URL. After 30 seconds without a frame h9 pings the server, and a
 server silent for 30 more is a hangup. A namespace file can mount a URL too:
 `mount -c 'wss://fs.example/9p' /n/fs`. `--print` shows the URL with its query
@@ -332,10 +332,10 @@ Syscalls go through drawterm's kern: open, create, close, dup, pread, pwrite,
 seek, stat, fstat, wstat, fwstat, fd2path, bind, mount, unmount, fauth, chdir,
 remove, errstr, brk_,
 sleep, notify, noted, exits, and for process trees rfork, exec (including `#!`
-scripts), await and pipe, and the segment calls segattach, segdetach,
-segbrk, segfree and segflush for `shared` and `memory` segments (so `seg`
+scripts), await, and pipe, and the segment calls segattach, segdetach,
+segbrk, segfree, and segflush for `shared` and `memory` segments (so `seg`
 works; named `#g` segments and device memory aren't served), and rendezvous,
-semacquire, tsemacquire and semrelease, so contended `qlock`s and libthread
+semacquire, tsemacquire, and semrelease, so contended `qlock`s and libthread
 park as on 9front; `/fd` is devdup. Notes are delivered as on 9front:
 a handler set with notify gets the note and a saved Ureg on its stack, and a
 process without one dies with the note as its status, so a write to a closed
@@ -345,16 +345,16 @@ bad syscall can be caught.
 `/proc` lists the machine's own processes by their machine-local pids, as
 on 9front, so `ps` and `kill` work: `kill sleep | rc` posts a `kill` note
 to each sleep. Each process has `args`, `ctl`, `fd`, `fpregs`, `mem`,
-`note`, `noteid`, `notepg`, `ns`, `ppid`, `regs`, `segment`, `status`, `text`
+`note`, `noteid`, `notepg`, `ns`, `ppid`, `regs`, `segment`, `status`, `text`,
 and `wait`; the CPU times in `status` read 0 for now, and `ns` shows the host
 paths of bound host trees. `ctl` takes `kill`, `close`, `closefiles`, and
-acid's `stop`, `start`, `waitstop`, `startstop`, `hang` and `nohang`, so acid
+acid's `stop`, `start`, `waitstop`, `startstop`, `hang`, and `nohang`, so acid
 debugs a live process (`h9 --rc 'sleep 5 & sleep 1; acid $apid'`, then
 `stk()`), and a `BRK` or `INT3` posts `sys: breakpoint`
 ([self-host](design/0010-self-host.md)).
 
 **Building from source.** With `/sys/src` in the root (`zig build mkroot -- --src`), or
-bound in with `--readable`, the compilers, linkers and mk run as on 9front:
+bound in with `--readable`, the compilers, linkers, and mk run as on 9front:
 
 ```sh
 cp "$H9ROOT/sys/src/cmd/ls.c" . && h9 --rc '7c ls.c && 7l -o 7.ls ls.7 && ./7.ls'   # build in the cwd
@@ -370,7 +370,7 @@ discarded at exit (or fails with "permission denied" under `--write scope`).
 file servers post themselves and other processes mount them, with or
 without `fauth`: `h9 --rc 'ramfs -S tmp && mkdir /tmp/n && mount -c
 /srv/tmp /tmp/n && touch /tmp/n/a && ls /tmp/n'`. ramfs, srvfs, exportfs,
-factotum and plumber run. Machines in one host process can't see each
+factotum, and plumber run. Machines in one host process can't see each
 other's `/srv`, and what's posted is closed when the machine ends.
 
 h9's own commands, the small rc scripts that wrap h9's devices (such as
@@ -403,12 +403,12 @@ registers and the symbolized PC when the guest faults.
 ### Graphics
 
 `--gfx` gives the machine one host window, drawn by drawterm's own GUI code,
-and binds `/dev/draw`, `/dev/mouse`, `/dev/cursor` and `/dev/kbd` from it, with
+and binds `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` from it, with
 `/dev/snarf` as the host clipboard. rio and acme run in it; the console stays
 the host terminal. `--gfx=noclip` keeps `/dev/snarf` inside h9 instead of the
 host clipboard, and `--gfx-scale N` sets the scale on macOS (drawterm's `-x`).
 Closing the window posts `hangup` to the machine. Only one machine in a
-process has the window. Without `--gfx`, `#i`, `#m` and `#b` are masked. A
+process has the window. Without `--gfx`, `#i`, `#m`, and `#b` are masked. A
 build without a GUI backend, or with no display (`$DISPLAY` unset for X11),
 exits 125 on `--gfx`; `--check` reports a `gfx` line. rio needs `/mnt/temp` in
 the root tree, which `zig build mkroot` makes (and adds to an existing tree).
@@ -480,8 +480,8 @@ any installed Go fetches the same toolchain. `zig build test` and `zig build
 integration` build them when `go` is on `PATH` and h9 is built with
 `-Demu=unicorn`, and their cases run on the emulator; without Go they skip.
 They don't need the root tree. `zig build go-stdtest -Demu=unicorn` runs Go's
-own tests for `time`, `syscall`, `os` and `runtime` on the emulator and prints
-pass, skip and fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh),
+own tests for `time`, `syscall`, `os`, and `runtime` on the emulator and prints
+pass, skip, and fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh),
 with the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest --
 os` runs one package). It's for finding gaps, not a gate, and nothing depends
 on it.
@@ -496,7 +496,7 @@ VM.
 
 ## Test VMs
 
-[scripts/lima](scripts/lima/README.md) has Lima VMs (arm64 Linux, macOS and
+[scripts/lima](scripts/lima/README.md) has Lima VMs (arm64 Linux, macOS, and
 Windows, plus emulated x86\_64 Linux) for testing the emu backend on hosts
 without a usable hypervisor:
 
@@ -515,14 +515,14 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 
 | Path | Contents |
 | --- | --- |
-| `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup and raw mode on the host terminal, and `--check`/`--version` |
+| `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
 | `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, the clipboard), the headless test backend, and the stubs for builds without graphics |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
-| `src/machine.zig` | one machine: builds its namespace, runs a process and serves its syscalls |
+| `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
-| `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print` and the access rules devfs checks |
-| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
+| `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print`, and the access rules devfs checks |
+| `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
 | `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. `src/guest-hostcmd/` adds `hcmd` under `-Dhost-cmd` |
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
@@ -531,7 +531,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
-| `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |
+| `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers, and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |
 | `tests/backends.zig` | backend conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |

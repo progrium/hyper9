@@ -15,14 +15,14 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-Design changes to h9 go through proposals: one Markdown file each under `design/`, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. Milestones go away; the order of work comes from the dependency graph. DESIGN.md becomes a description of h9 as built, with no milestone list and no changelog. A small Zig tool lists, checks and files proposals, and the integration tests are tagged with proposals instead of milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)).
+Design changes to h9 go through proposals: one Markdown file each under `design/`, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. Milestones go away; the order of work comes from the dependency graph. DESIGN.md becomes a description of h9 as built, with no milestone list and no changelog. A small Zig tool lists, checks, and files proposals, and the integration tests are tagged with proposals instead of milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)).
 
 ## Background
 
 DESIGN.md does three jobs at once. It describes how h9 works, it plans what comes next (the Milestones section, and design text for features that don't exist yet, such as 9P roots and host self-sandboxing), and it records why things changed (the Changelog, filed under the milestone in progress). Each job makes the others worse:
 
 - **The plan is a line.** Milestones are numbered, so anything new lands after M10 or forces a renumbering, even when it depends on nothing pending. A Linux personality, for example, needs only what M3 and M4 already provide, but has nowhere to go except "M11".
-- **Milestones bundle unrelated work.** M5 holds devsrv, semaphores, segattach, network policy, ephemeral writes and Go compatibility. They can't be decided, started or finished separately, and Go compatibility's real dependency (semaphores) isn't written down anywhere.
+- **Milestones bundle unrelated work.** M5 holds devsrv, semaphores, segattach, network policy, ephemeral writes, and Go compatibility. They can't be decided, started, or finished separately, and Go compatibility's real dependency (semaphores) isn't written down anywhere.
 - **The changelog mixes kinds of entry.** Design decisions (the sandbox becomes a capability policy) sit next to workarounds (`__clear_cache` on Linux arm64, `memccpy` on musl), which belong in code comments and commit messages. The section grows with every change and is read in order, so the doc keeps getting longer and more linear.
 - **There's no place for an idea that isn't accepted yet.** A design that's still being argued either goes into DESIGN.md, as if decided, or lives only in a conversation.
 - **Agents follow the rule they're given.** AGENTS.md tells them to edit DESIGN.md and add a changelog entry, so every agent-driven decision lands in the doc directly, with no point where a person accepts it.
@@ -78,10 +78,10 @@ superseded-by:
 | `created` | always | `YYYY-MM-DD` |
 | `authors` | always | GitHub logins |
 | `depends` | always, may be `[]` | Proposals that must be implemented before this one can be; ids or slugs |
-| `areas` | no | Free-form tags for filtering: `vmm`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process` and so on |
+| `areas` | no | Free-form tags for filtering: `vmm`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process`, and so on |
 | `superseded-by` | when `superseded` | The proposal that replaces it |
 
-The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), no nesting, quoting or multi-line values. That keeps the parser small enough to share between the tool and `build.zig` without a YAML library.
+The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), no nesting, quoting, or multi-line values. That keeps the parser small enough to share between the tool and `build.zig` without a YAML library.
 
 Only facts are stored. Whether a proposal is *ready* (accepted, with every dependency implemented), what it *blocks* (the reverse of `depends`) and what's *in progress* are computed by the tool, so they can't drift.
 
@@ -103,10 +103,10 @@ Each status change is its own commit (`design: 42 likely-accept`), so `git log d
 
 A proposal is needed for:
 
-- changes to the `vmm` interface, the `Machine` API or `Machine.Options`
+- changes to the `vmm` interface, the `Machine` API, or `Machine.Options`
 - CLI flags and exit codes
-- sandbox capabilities, profiles and defaults
-- new backends, personalities, devices or root types
+- sandbox capabilities, profiles, and defaults
+- new backends, personalities, devices, or root types
 - changes to `third_party/` beyond merging upstream
 - changes to this process
 
@@ -120,7 +120,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 2. **Background:** the problem, and what exists today.
 3. **Proposal:** a precise statement of the change.
 4. **Rationale:** alternatives and trade-offs, including the ones rejected, so the question isn't asked again.
-5. **Compatibility:** effects on CLI flags, `Machine.Options`, sandbox defaults, the root tree and `third_party/`.
+5. **Compatibility:** effects on CLI flags, `Machine.Options`, sandbox defaults, the root tree, and `third_party/`.
 6. **Security:** what the guest can newly reach, and how the policy covers it.
 7. **Done when:** the demo commands and the integration cases that prove it, by name.
 8. **Implementation:** the steps, in order.
@@ -157,7 +157,7 @@ Integration cases are tagged with the proposal they prove, in brackets at the en
 | `ready` | Accepted proposals whose dependencies are all implemented: what can be started now |
 | `graph` | The dependency graph as Mermaid, for the README |
 | `new <slug>` | Copies the template to `design/<slug>.md` with the frontmatter filled in |
-| `file <slug>` | Creates the issue with `gh` (title, `Proposal` label, the Abstract and a link to the file as the body), renames the file, sets `id`, rewrites slug references to the number, and commits |
+| `file <slug>` | Creates the issue with `gh` (title, `Proposal` label, the Abstract, and a link to the file as the body), renames the file, sets `id`, rewrites slug references to the number, and commits |
 | `fix` | Rewrites slug references to filed proposals as numbers |
 | `check` | Validates everything below; run in CI and by agents before a PR |
 
@@ -166,7 +166,7 @@ Integration cases are tagged with the proposal they prove, in brackets at the en
 - bad frontmatter: a missing required field, an unknown status, a malformed date
 - a duplicate slug or id, or a filename that doesn't match them
 - a status past `draft` without an `id`
-- a reference that doesn't resolve, in `depends`, `superseded-by` or a test tag
+- a reference that doesn't resolve, in `depends`, `superseded-by`, or a test tag
 - a dependency cycle
 - an `implemented` proposal with a dependency that isn't
 - an `accepted` proposal that depends on a `declined` one
@@ -225,7 +225,7 @@ It warns on a slug reference to a filed proposal, so a branch drafted before the
 
 ## Compatibility
 
-No user-visible change to h9: no CLI flags, `Machine.Options` or sandbox defaults change. Developer-facing changes:
+No user-visible change to h9: no CLI flags, `Machine.Options`, or sandbox defaults change. Developer-facing changes:
 
 - `zig build m1` … `m4` are removed, with no aliases; `zig build proposal -Dp=baseline` runs the same demos and cases.
 - Integration case names change from `(Mn)` to `[tag]`, which changes `zig build test` filters that match on them.
@@ -240,14 +240,14 @@ None for the guest or the host. `file` runs `gh` with the user's credentials and
 
 - `zig build design -- check` passes on the migrated tree, and fails on a fixture set under `tools/testdata/` covering each failure listed under The tool.
 - `zig build design -- ready` lists the proposals from Migration that are accepted and unblocked.
-- `zig build proposal -Dp=baseline` runs every case formerly tagged `(M2)`, `(M3)` or `(M4)` and every former M0 to M4 demo, and they pass.
+- `zig build proposal -Dp=baseline` runs every case formerly tagged `(M2)`, `(M3)`, or `(M4)` and every former M0 to M4 demo, and they pass.
 - A case tagged with a draft proposal skips in `zig build integration` and runs with `-Dpending`.
 - `zig build design -- new linux-personality` followed by `file linux-personality` (against a test repository, or with `--dry-run`) produces `design/NNNN-linux-personality.md` and rewrites a slug reference to it elsewhere.
 - DESIGN.md has no Milestones or Changelog section and no milestone references, and `0000-baseline.md` holds both, with every Changelog entry unchanged.
 
 ## Implementation
 
-1. `tools/frontmatter.zig` and `tools/design.zig` with `list`, `ready`, `graph`, `new` and `check`, and the fixtures.
+1. `tools/frontmatter.zig` and `tools/design.zig` with `list`, `ready`, `graph`, `new`, and `check`, and the fixtures.
 2. `design/README.md` (the process: States, Scope, After acceptance, the tool) and `design/TEMPLATE.md`.
 3. `0000-baseline.md`, holding the M0 to M4 milestones and the Changelog moved out of DESIGN.md.
 4. The draft proposals from Migration, with their design text moved out of DESIGN.md.
@@ -272,5 +272,5 @@ This proposal is decided under the current process, since the new one doesn't ex
   - `check` refuses test tags not written as `[a, b]`, since `zig build proposal -Dp` matches them by text, and `fix` rewrites them.
   - `file` also rewrites links to the draft's old path (`design/<slug>.md` in any tracked file, and `](<slug>.md` within `design/`), refreshes the README table, and commits a draft that was never committed.
   - The Done when item for `file` is met with `--issue N`, which numbers a draft offline. `--dry-run` changes nothing, as its name says.
-- 2026-11-04: The signature line under a proposal's title (`date · name, h.d.a.`) is documented under Signature in [README.md](README.md): it's the named person's hand-added sign-off that they reviewed the doc, understand it and take responsibility for it. It isn't enforced by tools, but unsigned proposals are unlikely to be accepted, and agents never add it.
+- 2026-11-04: The signature line under a proposal's title (`date · name, h.d.a.`) is documented under Signature in [README.md](README.md): it's the named person's hand-added sign-off that they reviewed the doc, understand it, and take responsibility for it. It isn't enforced by tools, but unsigned proposals are unlikely to be accepted, and agents never add it.
 - 2026-11-07: The generated proposal table and graph moved out of the top-level README into `design/STATUS.md`, written by `status` (which replaces `readme`). Every PR that changed a status or dependency regenerated the README block, so open PRs conflicted with each other over it whenever one merged. Now PRs never touch it: a workflow on main (`.github/workflows/design-status.yml`) regenerates and commits it after each merge. `check` no longer warns that the table is out of date, and `file` no longer refreshes it.

@@ -6,10 +6,10 @@ Design changes to h9 go through proposals: one Markdown file each in this direct
 
 A proposal is needed for:
 
-- changes to the `vmm` interface, the `Machine` API or `Machine.Options`
+- changes to the `vmm` interface, the `Machine` API, or `Machine.Options`
 - CLI flags and exit codes
-- sandbox capabilities, profiles and defaults
-- new backends, personalities, devices or root types
+- sandbox capabilities, profiles, and defaults
+- new backends, personalities, devices, or root types
 - changes to `third_party/` beyond merging upstream
 - changes to this process
 
@@ -19,7 +19,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 `zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `host-sandbox`), unique, and never changed. Start it with a letter: a draft's file is named by its slug alone, so one starting with a digit sorts among the filed `NNNN-` files instead of after them (`websocket-9p`, not `9p-websocket`). `new` refuses such a slug and `check` warns on an unfiled one; filed proposals that already have one, like `9p-roots`, keep it. Write a line per paragraph.
 
-The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done when, Implementation and Open issues, and, after acceptance, Updates. Rationale should cover the alternatives that were rejected, so the question isn't asked again. Done when names the demo commands and the integration cases that prove the proposal, the way the old milestone demos did.
+The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done when, Implementation, and Open issues, and, after acceptance, Updates. Rationale should cover the alternatives that were rejected, so the question isn't asked again. Done when names the demo commands and the integration cases that prove the proposal, the way the old milestone demos did.
 
 ## Signature
 
@@ -29,7 +29,7 @@ The signature is added by hand by the person it names, never by a tool or an age
 
 ## Filing and numbering
 
-A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number and links to the old path, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.
+A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract, and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number and links to the old path, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.
 
 Discussion happens on the issue. The doc is revised in commits. A proposal can't leave `draft` without an `id`: drafting needs no GitHub, but deciding needs an issue to discuss it on. The slug stays as an alias after filing, so a reference written before the number existed still resolves. The [baseline](0000-baseline.md), the work done before proposals, is `id: 0` and has no issue.
 
@@ -58,10 +58,10 @@ superseded-by:
 | `created` | always | `YYYY-MM-DD` |
 | `authors` | always | GitHub logins |
 | `depends` | always, may be `[]` | Proposals that must be implemented before this one can be, by id or slug |
-| `areas` | no | Free-form tags for filtering: `vmm`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process` and so on |
+| `areas` | no | Free-form tags for filtering: `vmm`, `kern`, `cli`, `sandbox`, `build`, `tests`, `process`, and so on |
 | `superseded-by` | when `superseded` | The proposal that replaces it |
 
-The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), with no nesting, quoting or multi-line values. Since nothing is quoted, a value can't contain `: ` or ` #` or start with a YAML indicator such as `#`, and list items are plain words. Only facts are stored. Whether a proposal is ready (accepted, with every dependency implemented) and what it blocks are computed by the tool.
+The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), with no nesting, quoting, or multi-line values. Since nothing is quoted, a value can't contain `: ` or ` #` or start with a YAML indicator such as `#`, and list items are plain words. Only facts are stored. Whether a proposal is ready (accepted, with every dependency implemented) and what it blocks are computed by the tool.
 
 ## States
 
@@ -106,4 +106,4 @@ Integration cases are tagged with the proposal they prove, by slug or id, in bra
 
 [STATUS.md](STATUS.md) is generated, and only main commits it: after each push to main that touches `design/` or the tool, [.github/workflows/design-status.yml](../.github/workflows/design-status.yml) runs `status` and commits the result if it changed. PRs leave it alone, even when they change a proposal's status or dependencies, so two open PRs never conflict over it, and it catches up within a minute or so of a merge. `list` and `ready` give the current state on any branch.
 
-`check` fails on bad frontmatter (including values YAML would read differently), tags not written as `[a, b]`, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by` or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites.
+`check` fails on bad frontmatter (including values YAML would read differently), tags not written as `[a, b]`, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by`, or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites.

@@ -28,9 +28,9 @@ The CLI also maps an `exits` string that's a plain decimal number from 1 to 255 
 
 ## Background
 
-This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's Go compatibility section, which moved here, was written from Go 1.25. This proposal is checked against Go 1.27.3, the current release, and its `runtime/os_plan9.go`, `runtime/sys_plan9_amd64.s`, `syscall/syscall_plan9.go`, `syscall/exec_plan9.go`, `os/sys_plan9.go` and `os/exec_plan9.go`.
+This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's Go compatibility section, which moved here, was written from Go 1.25. This proposal is checked against Go 1.27.3, the current release, and its `runtime/os_plan9.go`, `runtime/sys_plan9_amd64.s`, `syscall/syscall_plan9.go`, `syscall/exec_plan9.go`, `os/sys_plan9.go`, and `os/exec_plan9.go`.
 
-Go has ports for `plan9/386`, `plan9/amd64` and `plan9/arm`, but not `plan9/arm64`. HVF runs arm64 only, so a Go binary on an arm64 Mac runs as amd64 on the emulator (`--backend emu`, Unicorn). On Linux x86\_64 it runs on the emulator too, until [kvm](0016-kvm.md) gives it hardware.
+Go has ports for `plan9/386`, `plan9/amd64`, and `plan9/arm`, but not `plan9/arm64`. HVF runs arm64 only, so a Go binary on an arm64 Mac runs as amd64 on the emulator (`--backend emu`, Unicorn). On Linux x86\_64 it runs on the emulator too, until [kvm](0016-kvm.md) gives it hardware.
 
 ### What the runtime does
 
@@ -105,14 +105,14 @@ h9 keeps one clock per host process, read through a Zig leaf. It has two parts, 
 
 drawterm's devcons is vendored. Go reads `#c/pid` by device path, so serving it from h9's own console device, `#y`, which is bound over `/dev`, wouldn't reach it. So devcons gains leaf hooks, as devfs and devip carry h9's sandbox hooks. The leaves are in `src/kern/consx.c` and `src/kern.zig`; `third_party/drawterm/kern/devcons.c` gains:
 
-1. Two `Dirtab` entries, `pid` and `ppid`, mode 0444. Their reads return `h9_cons_pid()` and `h9_cons_ppid()` as 9front formats them: right-justified in `NUMSIZE` (12) characters, plus a space. The pids are the machine-local ones from h9's process record, the same as `$pid`, `_tos->pid` and `/proc`.
+1. Two `Dirtab` entries, `pid` and `ppid`, mode 0444. Their reads return `h9_cons_pid()` and `h9_cons_ppid()` as 9front formats them: right-justified in `NUMSIZE` (12) characters, plus a space. The pids are the machine-local ones from h9's process record, the same as `$pid`, `_tos->pid`, and `/proc`.
 2. `readbintime` returns `h9_cons_bintime(buf, n)`: up to four big-endian words, as 9front's does. The words are wall nanoseconds, ticks, `fasthz`, and monotonic nanoseconds, and a short read gets the leading words that fit.
-3. `readtime` returns `h9_cons_time(…)`: seconds, nanoseconds, ticks and `fasthz`, in 9front's text format.
-4. `Qsysstat`'s read returns `h9_cons_sysstat(…)`: one line per CPU the machine may use, in 9front's column layout. Each line has its index and zeros for the counters h9 doesn't keep (context switches, interrupts, syscalls, faults, TLB and load). The count is `--cpus` when given, else the host's CPU count, capped by the backend's vCPU limit.
+3. `readtime` returns `h9_cons_time(…)`: seconds, nanoseconds, ticks, and `fasthz`, in 9front's text format.
+4. `Qsysstat`'s read returns `h9_cons_sysstat(…)`: one line per CPU the machine may use, in 9front's column layout. Each line has its index and zeros for the counters h9 doesn't keep (context switches, interrupts, syscalls, faults, TLB, and load). The count is `--cpus` when given, else the host's CPU count, capped by the backend's vCPU limit.
 
 Writes are unchanged: drawterm refuses writes to `time` and `bintime` with "Egreg", and `sysstat` writes are a no-op.
 
-Each hook is a one-line call. The leaves can't fail and raise no kernel errors (seam rule 3). With the hooks, `#c` and `/dev`, which `#y` shadows only for `cons`, `consctl` and `stderr`, give the same answers.
+Each hook is a one-line call. The leaves can't fail and raise no kernel errors (seam rule 3). With the hooks, `#c` and `/dev`, which `#y` shadows only for `cons`, `consctl`, and `stderr`, give the same answers.
 
 ### `_NSEC`
 
@@ -130,7 +130,7 @@ Go's `os.Exit(n)` calls `exits` with `n` in decimal, and `exits("")` for 0. The 
 
 The rule applies to every program, not just Go binaries, and lives in `src/cli.zig`, where a run's result becomes an exit code. `Machine` still returns the `exits` string unchanged, so library callers see what the program wrote.
 
-A guest can now exit 2, 125, 126 or 127, the codes h9 uses for its own failures, as with `env` or `docker run`. h9 prints a message to stderr whenever it fails itself, and a numeric exit prints nothing, so the two can be told apart.
+A guest can now exit 2, 125, 126, or 127, the codes h9 uses for its own failures, as with `env` or `docker run`. h9 prints a message to stderr whenever it fails itself, and a numeric exit prints nothing, so the two can be told apart.
 
 ### Fixtures and the Go toolchain
 
@@ -144,7 +144,7 @@ The tests need Go binaries.
 
 ### Go's standard library tests
 
-`zig build go-stdtest` builds the test binaries for `time`, `syscall`, `os` and `runtime`. It uses `go test -c` on the host, with the same toolchain and environment as the fixtures. It runs each one on the emulator with `--cwd` set to its package directory in the toolchain's `GOROOT`, so `testdata` is reachable through `/mnt/term/cwd`, and reports pass, skip and fail counts for each package. These tests don't need a Go source tree or an amd64 root in the guest. Tests that exec `go` or 9front commands can't pass yet, so the step skips them with `-test.skip`, using a list kept next to the step.
+`zig build go-stdtest` builds the test binaries for `time`, `syscall`, `os`, and `runtime`. It uses `go test -c` on the host, with the same toolchain and environment as the fixtures. It runs each one on the emulator with `--cwd` set to its package directory in the toolchain's `GOROOT`, so `testdata` is reachable through `/mnt/term/cwd`, and reports pass, skip, and fail counts for each package. These tests don't need a Go source tree or an amd64 root in the guest. Tests that exec `go` or 9front commands can't pass yet, so the step skips them with `-test.skip`, using a list kept next to the step.
 
 The step is run by hand or on a schedule. It isn't part of `zig build test`, and it isn't one of the Done when cases: its job is to find gaps the fixtures miss.
 
@@ -152,7 +152,7 @@ The step is run by hand or on a schedule. It isn't part of `zig build test`, and
 
 **Hooks in devcons, not a shadow file in `#y`.**
 - **The old plan:** DESIGN.md planned to serve `bintime` from h9's console device, bound over `/dev` before `#c`, keeping the vendored tree unmodified. That works for `/dev/bintime`.
-- **Why it isn't enough:** Go reads `#c/pid`, `#c/ppid` and `#c/sysname` by device path, which no bind can change. So devcons has to change for `pid` and `ppid` anyway.
+- **Why it isn't enough:** Go reads `#c/pid`, `#c/ppid`, and `#c/sysname` by device path, which no bind can change. So devcons has to change for `pid` and `ppid` anyway.
 - **Why the clocks go there too:** putting them in devcons through the same hooks means `#c/bintime` and `/dev/bintime` can't disagree.
 - **The cost:** the change is four call sites and two table entries, which `scripts/vendor-drawterm.sh` carries across upstream merges like the devfs and devip hooks.
 
@@ -188,7 +188,7 @@ Neither is a dependency. And [i386](0009-i386.md) would let `plan9/386` binaries
 - **`/dev/sysstat`:** now has content. `runtime.NumCPU()` in Go, and any 9front tool that counts CPUs, see the machine's limit rather than 1.
 - **`_NSEC`:** stops posting "sys: bad sys call".
 - **Exit codes:** a program that exits with a decimal number from 1 to 255 now gives that code instead of 1, and the number is no longer printed. Scripts that check for exactly 1 see a different code, and ones that capture stderr no longer get the number. All other `exits` strings behave as before.
-- **CLI flags, `Machine.Options`, `Machine`'s result, the vmm interface and sandbox defaults:** unchanged.
+- **CLI flags, `Machine.Options`, `Machine`'s result, the vmm interface, and sandbox defaults:** unchanged.
 - **Vendored tree:** devcons gains the hooks above.
 - **Build:** a `go-fixtures` step, which `zig build test` depends on when `go` is available, and a `go-stdtest` step, which nothing depends on.
 
@@ -213,7 +213,7 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 - `test "a nil dereference becomes a panic that recover catches [go-compat]"`
 - `test "os/signal receives interrupt on Ctrl-C [go-compat]"`, on a pty as the existing Ctrl-C cases are.
 - `test "os.Exit(3) exits with status 3 [go-compat]"`: h9 exits 3 and prints nothing to stderr.
-- `test "a numeric exits string becomes the exit code [go-compat]"`: an rc case, so it doesn't need Go. `exit 3` gives 3 with an empty stderr, while `exit 0`, `exit 256` and `exit 03` give 1 and print the string.
+- `test "a numeric exits string becomes the exit code [go-compat]"`: an rc case, so it doesn't need Go. `exit 3` gives 3 with an empty stderr, while `exit 0`, `exit 256`, and `exit 03` give 1 and print the string.
 - `test "net/http fetches from a listener the test opens [go-compat]"`
 - `test "syscall.Gettimeofday has microsecond resolution [go-compat]"`, through `_NSEC`.
 - `test "/dev/bintime has four words and a monotonic clock [go-compat]"`: an rc case reads 32 bytes from `/dev/bintime` twice, and the fourth word grows by at least the time slept between the reads.

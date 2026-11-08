@@ -18,7 +18,7 @@ Host commands run a program on the host from inside the machine. Today that's dr
 
 What exists today:
 
-- **devcmd** (`third_party/drawterm/kern/devcmd.c`): a guest opens `#C/cmd/clone`, writes `dir path` and `exec cmd args...` to `ctl`, uses `data` for stdin and stdout and `stderr` for stderr, and reads `wait` for the status. `oscmd` in `posix.c` forks, calls `setsid`, `chdir`s and runs `execvp`. `win32.c` has a `CreateProcess` version.
+- **devcmd** (`third_party/drawterm/kern/devcmd.c`): a guest opens `#C/cmd/clone`, writes `dir path` and `exec cmd args...` to `ctl`, uses `data` for stdin and stdout and `stderr` for stderr, and reads `wait` for the status. `oscmd` in `posix.c` forks, calls `setsid`, `chdir`s, and runs `execvp`. `win32.c` has a `CreateProcess` version.
 - **`--host-cmd`** leaves `#C` out of the device mask. The plan adds the caveat "#C runs host commands with the host user's rights". `--sandbox` refuses the flag.
 - **`hcmd`** (`src/guest-hostcmd/bin/hcmd`) wraps the protocol: it passes standard I/O through, exits with the command's status, maps the guest's cwd to a host directory from the `#U` binds in `/proc/$pid/ns`, and kills the command on an interrupt or hangup.
 - **`src/kern/hostcmd.c`** kills a machine's commands when the machine stops. It does this by renaming `oscmd` in the vendored `posix.c` and `win32.c`.
@@ -40,9 +40,9 @@ Replace devcmd with an h9 device, `#C` still, in `src/kern/devhcmd.c` with its h
 - **Per machine.** Conversations belong to the machine that made them, as `/net/ws`'s do. A machine lists and opens only its own.
 - **Interruptible.** Zig starts the process (`std.process.Child`) and has a host thread per pipe that queues output in the machine's pages. A guest read sleeps on a Rendez, so a note interrupts it with `Eintr`. A write to stdin is queued the same way. The machine's end kills its commands and their process groups, as `hostcmd.c` does now.
 - **Commands the policy names.** `--host-cmd NAME` (repeatable) allows `NAME`. The plan resolves it to a host path from the host `PATH` when it's compiled, and `--print` lists each one under `host-cmd:`. `exec` takes a name from that list and nothing else, so `exec sh` fails unless `sh` was allowed. `--host-cmd '*'` keeps today's behaviour and says so as a caveat. A bare `--host-cmd` is a usage error, so nobody gets "everything" by accident.
-- **A scrubbed environment.** A command starts with the guest's `--env` values plus `PATH`, `HOME`, `USER`, `LANG` and `TMPDIR` from the host. `--host-cmd-env NAME` passes another one through.
-- **Directories the policy shares.** `dir` takes a guest path. The host translates it through the policy's binds: the cwd, `--readable` and `--writable` trees, and `--host-fs`. A path that isn't in a shared host tree (`/tmp`, the root, an overlay) is refused. `hcmd` then stops parsing `/proc/$pid/ns`.
-- **A simpler protocol.** `wait` keeps the status whether or not it's open, and gives it as one line: `pid 0 0 0 'msg'\n`, the same on every host. `ctl` takes `exec`, `dir`, `kill` and `close-stdin`. The command is killed when the last fd on the conversation closes, never on a `ctl` close alone.
+- **A scrubbed environment.** A command starts with the guest's `--env` values plus `PATH`, `HOME`, `USER`, `LANG`, and `TMPDIR` from the host. `--host-cmd-env NAME` passes another one through.
+- **Directories the policy shares.** `dir` takes a guest path. The host translates it through the policy's binds: the cwd, `--readable`, and `--writable` trees, and `--host-fs`. A path that isn't in a shared host tree (`/tmp`, the root, an overlay) is refused. `hcmd` then stops parsing `/proc/$pid/ns`.
+- **A simpler protocol.** `wait` keeps the status whether or not it's open, and gives it as one line: `pid 0 0 0 'msg'\n`, the same on every host. `ctl` takes `exec`, `dir`, `kill`, and `close-stdin`. The command is killed when the last fd on the conversation closes, never on a `ctl` close alone.
 - **Capability.** The plan gains `proc.host`, "the guest can run the named host programs", which `--strict` refuses unless `--host-cmd` is given. That makes host commands an explicit grant, like `--gfx`.
 - **`hcmd`** keeps its interface (`-n`, `-d`, standard I/O, the exit status) and becomes shorter.
 
@@ -50,10 +50,10 @@ When this lands, `-Dhost-cmd` goes away and host commands are built in everywher
 
 ## Rationale
 
-- **Keep devcmd and patch it.** Each fix touches `third_party/`: interruptible reads, per-machine tables, the status format and an allowlist. That's most of the device, and AGENTS.md asks for project-owned code when the change is this large. The rename trick in `hostcmd.c` is fine for one hook but not for five.
-- **Remove host commands entirely.** A host shell can already drive h9 from outside (`h9 ... | host-cmd | h9 ...`), and [host-binfmt](host-binfmt.md) goes the other way. Running host tools from inside, such as a host compiler, `git` or `open`, is still the request people make most, and `mk` recipes need it in-line. Keeping it behind a build flag until it's safe costs little.
+- **Keep devcmd and patch it.** Each fix touches `third_party/`: interruptible reads, per-machine tables, the status format, and an allowlist. That's most of the device, and AGENTS.md asks for project-owned code when the change is this large. The rename trick in `hostcmd.c` is fine for one hook but not for five.
+- **Remove host commands entirely.** A host shell can already drive h9 from outside (`h9 ... | host-cmd | h9 ...`), and [host-binfmt](host-binfmt.md) goes the other way. Running host tools from inside, such as a host compiler, `git`, or `open`, is still the request people make most, and `mk` recipes need it in-line. Keeping it behind a build flag until it's safe costs little.
 - **Run commands under the host sandbox.** [host-sandbox](host-sandbox.md) would confine h9 itself. Children inherit Seatbelt and Landlock, so commands would get the same limits for free, but only on hosts where that lands. The allowlist and the environment scrub are needed either way.
-- **A 9P server on the host instead of a device** (as in [host-srv](host-srv.md)). That's workable, but a device gives notes, per-machine lifetime and the policy hook in one place, as devhstream did for WebSockets.
+- **A 9P server on the host instead of a device** (as in [host-srv](host-srv.md)). That's workable, but a device gives notes, per-machine lifetime, and the policy hook in one place, as devhstream did for WebSockets.
 - **Arguments as a list instead of `tokenize`.** Writing one argument per line after `exec` would avoid quoting, but rc's `echo` and the wider 9front tools already speak `tokenize`, so the quoting stays.
 
 ## Compatibility
@@ -88,7 +88,7 @@ The guest can run only the host programs the user names, with the scrubbed envir
 2. `src/kern/devhcmd.c`: the device over it, following devhstream. Swap it into devtab for devcmd and drop `hostcmd.c` and the `-Doscmd` renames.
 3. Policy: `host_cmds`, `host_cmd_env`, `proc.host`, resolving names at compile time, `--print`'s `host-cmd:` line, and the caveats. Update the CLI flags.
 4. `hcmd`: drop the `/proc/$pid/ns` parsing and use `wait`'s new format.
-5. Remove `-Dhost-cmd`. Update README, MANUAL, DESIGN.md and `docs/embedding.md`.
+5. Remove `-Dhost-cmd`. Update README, MANUAL, DESIGN.md, and `docs/embedding.md`.
 
 ## Open issues
 

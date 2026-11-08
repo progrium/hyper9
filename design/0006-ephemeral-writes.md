@@ -15,7 +15,7 @@ Nov 4, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-Enforce `--write=ephemeral` with a copy-on-write overlay device, `#O`, in h9's own kernel code. Under it, every path the plan would make writable is an overlay: reads come from the host tree, while creates, writes, removes and renames land in memory and are gone when the machine ends. The host tree is never written.
+Enforce `--write=ephemeral` with a copy-on-write overlay device, `#O`, in h9's own kernel code. Under it, every path the plan would make writable is an overlay: reads come from the host tree, while creates, writes, removes, and renames land in memory and are gone when the machine ends. The host tree is never written.
 
 The same device over the root tree's empty `/tmp` gives every machine a private in-memory `/tmp`, replacing the host's temp directory. Overlay memory, data and bookkeeping both, counts against `--memory`. [overlay](0011-overlay.md) can then put the same device over the root.
 
@@ -29,13 +29,13 @@ This was part of milestone M5 ("servers") in DESIGN.md, before milestones became
 
 ### h9 today
 
-`--write` takes `none`, `scope`, `ephemeral` or `overlay` (`src/policy.zig`):
+`--write` takes `none`, `scope`, `ephemeral`, or `overlay` (`src/policy.zig`):
 
 - **`scope`** is the default. Paths the plan allows read-write are bound from `#U` with `MCREATE`: the cwd in the default profile, each `--writable` path, and `/tmp`. Writes go to the host.
 - **`none`** binds everything read-only.
 - **`ephemeral` and `overlay`** are accepted but not enforced. They fall back to `none`, are listed as `unenforced`, and `--strict` refuses them with exit 2.
 
-`/tmp` depends on the profile. In the default profile it's the host's temp directory (`$TMPDIR`, `$TEMP` or `/tmp`, from `hostTmp` in `src/main.zig`), bound read-write. In the tight profile it's the root tree's own `/tmp`, read-only. So a default-profile guest's temporary files land on the host, beside the host's own, and the tight profile has no writable scratch space at all.
+`/tmp` depends on the profile. In the default profile it's the host's temp directory (`$TMPDIR`, `$TEMP`, or `/tmp`, from `hostTmp` in `src/main.zig`), bound read-write. In the tight profile it's the root tree's own `/tmp`, read-only. So a default-profile guest's temporary files land on the host, beside the host's own, and the tight profile has no writable scratch space at all.
 
 ### Why a ramfs union doesn't do it
 
@@ -82,7 +82,7 @@ Walks look in memory first. A whiteout ends the walk with "file does not exist".
 | `open` with `OTRUNC` | A new, empty copy with the lower file's `Dir`, without reading the lower data | The copy, truncated |
 | `create` | A new copy, replacing a whiteout if there is one | Fails as `create` does on an existing file, or truncates it as 9front does |
 | `remove` | A whiteout | The copy is freed; a whiteout is left if the lower tree has the name |
-| `wstat` of mode, mtime or length | Copy up, then apply | Apply |
+| `wstat` of mode, mtime, or length | Copy up, then apply | Apply |
 | `wstat` renaming a file | Copy up, rename the copy, and whiteout the old name | Rename; whiteout the old name if the lower tree has it |
 | `wstat` renaming a directory | Refused with "permission denied" | Rename a copy; refused with "permission denied" for a directory marker, which stands for a lower directory |
 | Directory read | The lower directory | Memory entries, then lower entries that aren't hidden by a whiteout or shadowed by a copy |
@@ -108,7 +108,7 @@ So the guest's own memory and its ephemeral files share one cap, `--memory`, exa
 
 **Blocks.** A copy's data is a list of page-sized blocks, not one contiguous buffer. Growing a file adds blocks and never moves its data, and a big file needs no big contiguous run of pages.
 
-**Bookkeeping.** Nodes, names and `Dir`s come from a small allocator inside the device that takes its pages from the same leaf, so they count against `--memory` too. There's no separate limit on names: a guest that creates empty files or whiteouts until memory runs out gets "file system full", as one that writes a big file does. A directory marker or whiteout costs a node and no data blocks.
+**Bookkeeping.** Nodes, names, and `Dir`s come from a small allocator inside the device that takes its pages from the same leaf, so they count against `--memory` too. There's no separate limit on names: a guest that creates empty files or whiteouts until memory runs out gets "file system full", as one that writes a big file does. A directory marker or whiteout costs a node and no data blocks.
 
 ### `--write=ephemeral`
 
@@ -163,7 +163,7 @@ caveats:
 
 **A kernel device, not a guest ramfs.** A device needs no `mount` syscall, no process per machine, and no 9P round trip per operation. It can count its memory against the machine's cap through the page allocator, where a guest ramfs would count against it as ordinary heap but only as far as its own process can grow. It also gives [overlay](0011-overlay.md) the device it needs for the root and image-backed roots.
 
-**In C, in `src/kern/`.** A device is chans, qids, walks and `waserror`, which is drawterm's world. Zig on the inside would cross the seam on every operation and break seam rule 1 at every lower-device call that can raise. h9's devproc and devhcons are C for the same reason, with Zig leaves for what Zig owns: here, the pages.
+**In C, in `src/kern/`.** A device is chans, qids, walks, and `waserror`, which is drawterm's world. Zig on the inside would cross the seam on every operation and break seam rule 1 at every lower-device call that can raise. h9's devproc and devhcons are C for the same reason, with Zig leaves for what Zig owns: here, the pages.
 
 **Whole-file copy-up.** It's simple, and correct for the common writers: compilers, editors, `mk`, and tools that rewrite a file through a temporary. Those truncate or rewrite whole files anyway, and `OTRUNC` skips the copy entirely. The cost is that appending to a large host file copies all of it first, and a file bigger than the free memory can't be opened for writing. Block-level copy-on-write, filling each block from the lower file the first time it's touched, would make that cheap. Storing copies as blocks from the start means it can come later inside the device, without changing its interface or the plan.
 
@@ -173,11 +173,11 @@ caveats:
 
 **Bookkeeping against `--memory` too, not a node limit.** A fixed limit on names per instance would be a number with no right value: too low for a source tree's worth of object files, or too high to bound the heap on a small machine. Deriving it from `--memory` still leaves the heap outside the cap. Taking the device's nodes from the same pages as its data puts one bound on all of it, with one failure, "file system full", and one code path.
 
-**Refusing directory renames of lower directories.** Renaming one means copying up or re-parenting its whole subtree, and whiteouts for every name under the old path. In 9front a rename only changes a name within its directory, and the tools h9 runs, compilers, `mk` and editors, rename files, not directories. Refusing is honest. A file rename is supported. If a workload ever needs directory renames, the device can re-parent the subtree in memory with a whiteout at the old name, without changing its interface.
+**Refusing directory renames of lower directories.** Renaming one means copying up or re-parenting its whole subtree, and whiteouts for every name under the old path. In 9front a rename only changes a name within its directory, and the tools h9 runs, compilers, `mk`, and editors, rename files, not directories. Refusing is honest. A file rename is supported. If a workload ever needs directory renames, the device can re-parent the subtree in memory with a whiteout at the old name, without changing its interface.
 
 **`#O` without a number in namespace files, not a new directive.** An `overlay <path>` directive would be one more thing `--ns` parses that newns doesn't. A bare `#O` source keeps every line an ordinary `bind`, says what the line does, and follows the console's `<id>` placeholder, which already stands in for a per-machine name. Overlaying the chan the target walks to at that point in the replay is what the plan did when it was built.
 
-**Not in this proposal: keeping the changes.** A run could export its changes at exit, as a tar or a diff, for a caller that wants to inspect them. The memory tree, copies, whiteouts and directory markers, already is that diff, so the device keeps it walkable until the instance is freed. The export is its own proposal.
+**Not in this proposal: keeping the changes.** A run could export its changes at exit, as a tar or a diff, for a caller that wants to inspect them. The memory tree, copies, whiteouts, and directory markers, already is that diff, so the device keeps it walkable until the instance is freed. The export is its own proposal.
 
 ## Compatibility
 
@@ -191,9 +191,9 @@ caveats:
 
 ## Security
 
-- **No host writes.** Under `ephemeral`, the overlaid host trees are opened through devfs read-only, and the access rules make them read-only too, so a write that somehow reached devfs would still be refused. Whiteouts, copies and renames exist only in memory.
-- **The policy still decides reads.** Every lower lookup and copy-up goes through the lower chan's device, so `--read-deny`, hidden paths and symlink resolution apply to overlaid trees exactly as to bound ones. A whiteout can hide a host file from the guest, never reveal one.
-- **Memory is capped.** Copy data comes from the machine's page allocator, so a guest can't use more host memory through files than `--memory` allows. A full overlay fails the write with an error rather than the machine. Nodes, names and `Dir`s come from the same pages, so a guest can't grow the kernel heap by creating empty files or whiteouts either.
+- **No host writes.** Under `ephemeral`, the overlaid host trees are opened through devfs read-only, and the access rules make them read-only too, so a write that somehow reached devfs would still be refused. Whiteouts, copies, and renames exist only in memory.
+- **The policy still decides reads.** Every lower lookup and copy-up goes through the lower chan's device, so `--read-deny`, hidden paths, and symlink resolution apply to overlaid trees exactly as to bound ones. A whiteout can hide a host file from the guest, never reveal one.
+- **Memory is capped.** Copy data comes from the machine's page allocator, so a guest can't use more host memory through files than `--memory` allows. A full overlay fails the write with an error rather than the machine. Nodes, names, and `Dir`s come from the same pages, so a guest can't grow the kernel heap by creating empty files or whiteouts either.
 - **Isolation between machines.** Instances belong to one machine's namespace, so machines in one host process can't see each other's `/tmp` or ephemeral files.
 - **Caveats that go away.** For overlaid paths, the hardlink and uncapped-writes caveats no longer apply, since nothing reaches the host. They stay for `--write=scope`.
 
@@ -226,17 +226,17 @@ Demo: in a copy of a 9front source directory, `h9 --write=ephemeral --rc 'rm -f 
 ## Implementation
 
 1. `src/kern/devoverlay.c` with in-memory instances only (no lower tree), the page leaves in `src/kern.zig`, block storage for copies, and the node allocator on the same pages.
-2. Lower trees: walk, open and directory-read fall-through, copy-up, whiteouts, `OTRUNC`, renames. `/tmp` as an instance over the root's `/tmp` in both profiles; remove `hostTmp` and `Policy.tmp`. The `/tmp` cases pass.
+2. Lower trees: walk, open, and directory-read fall-through, copy-up, whiteouts, `OTRUNC`, renames. `/tmp` as an instance over the root's `/tmp` in both profiles; remove `hostTmp` and `Policy.tmp`. The `/tmp` cases pass.
 3. `--write=ephemeral` in `src/policy.zig`: overlay binds, the `eph` access kind, `enforces:`, caveats, `--print`, and `--strict`.
 4. `--ns`: the `eph` column in `src/newns.zig`, and a bare `#O` source in the replay in `src/machine.zig`. The `ephemeral-writes` cases pass.
-5. README's sandbox table and `--ns` notes, and DESIGN.md: the capability table, the default profile's `/tmp` row and the tight profile's paragraph, `devoverlay.c` in the kernel's "Added by us" table, and the CLI table's `--write` row. Set `status: implemented`.
+5. README's sandbox table and `--ns` notes, and DESIGN.md: the capability table, the default profile's `/tmp` row, and the tight profile's paragraph, `devoverlay.c` in the kernel's "Added by us" table, and the CLI table's `--write` row. Set `status: implemented`.
 
 ## Updates
 
 - 2026-11-05: Refinements made while implementing it:
   - The page leaves take the machine's pool explicitly: `h9_overlay_alloc(void *pool, ulong n)` and `h9_overlay_free(void *pool, void *p, ulong n)`, with `h9_overlay_pool()` giving the calling thread's. An instance records its pool when it's made, because its last chan can be closed on any of the machine's threads. The pool also tells machines apart: attaching `#O<n>` from another machine fails with "file does not exist".
   - Zig makes instances with `h9_overlay_newpath(path)`, which resolves the lower directory with `namec` and reports errors as the `sys*` wrappers do, and frees one that's never attached with `h9_overlay_drop(n)`. The namespace builder resolves each overlay's lower tree from `#U<host path>`, the path in the plan's comment; a namespace file's bare `#O` overlays its target, as proposed.
-  - Copies, and directories in memory, are checked by their owner permission bits, as devfs presents every host file as the guest's own: a file without write permission can't be opened for writing, and creating, removing or renaming needs write permission on the directory.
+  - Copies, and directories in memory, are checked by their owner permission bits, as devfs presents every host file as the guest's own: a file without write permission can't be opened for writing, and creating, removing, or renaming needs write permission on the directory.
   - A file in memory is limited to about 1 GiB (8 blocks in the node and two levels of index pages), and a name to 1023 bytes.
   - A directory with more than 64 entries keeps a hash table of them in host memory, so filling `/tmp` with empty files isn't quadratic.
   - A process closes its fds and namespace before it tells the machine it's done, so an overlay's last chan is closed while the machine's pages are still there.

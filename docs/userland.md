@@ -24,7 +24,7 @@
 ## 1. What h9 takes from a root
 
 Nothing boots in h9. There's no init process, no `/lib/namespace` run at
-login and no `/cfg` read at startup. h9 builds the machine's namespace
+login, and no `/cfg` read at startup. h9 builds the machine's namespace
 itself (`h9 --print` shows it), binds the root at `/`, and runs your program.
 So a userland, to h9, is just a file tree, and the root needs only what that
 namespace binds onto and what your programs read.
@@ -54,7 +54,7 @@ the root works.
 
 **The environment.** h9 sets `user` (your host user name), `home`
 (`/usr/$user`, whether or not it exists), `cputype` and `objtype` (the
-machine's architecture), `sysname=h9`, `service=terminal`, `path=(. /bin)`
+machine's architecture), `sysname=h9`, `service=terminal`, `path=(. /bin)`,
 and `timezone`, then your `--env` values. Nothing from the host environment
 comes in.
 
@@ -71,7 +71,7 @@ Go cross-compiles to Plan 9, so a userland can be built entirely on the
 host. Go has `plan9/amd64` and `plan9/386` ports but no `plan9/arm64`, so
 these examples are amd64 and need `h9-emu` on a Mac (the manual's chapter 2
 covers building it). On a Mac, add `--arch amd64` to every `h9` command in
-sections 2, 3 and 7; it's left out below. h9 also prints `h9: warning: no
+sections 2, 3, and 7; it's left out below. h9 also prints `h9: warning: no
 usable hypervisor; using the emulator`, which is left out of the output
 shown.
 
@@ -120,10 +120,10 @@ A real userland has more than one command. The usual trick for small ones
 is a multi-call binary that picks its command from the name it was run as.
 Host hard links give it several names, since h9 serves a host tree as it is.
 
-This one has `echo`, `cat`, `ls` and `put` (copy standard input to a file),
+This one has `echo`, `cat`, `ls`, and `put` (copy standard input to a file),
 and an `init` that sets up the namespace the way the userland wants it and
 then runs a command in it. Here `init` makes your host directory the home
-directory: it binds `/mnt/term/cwd` over `/usr/$user`, sets `$home` and
+directory: it binds `/mnt/term/cwd` over `/usr/$user`, sets `$home`, and
 starts the command there.
 
 ```go
@@ -378,7 +378,7 @@ The root is read-only unless you say otherwise. Three ways to change that,
 from safest to least safe:
 
 - **In memory, for one run.** `--write=ephemeral --writable ROOT` puts a
-  copy-on-write overlay over the whole root. Programs can install, edit and
+  copy-on-write overlay over the whole root. Programs can install, edit, and
   delete anything, see their changes for the rest of the run, and the host
   tree is never written. `--print` shows it as `bind -c '#O' / eph`. Under
   `--write=ephemeral` your cwd is an overlay too, so nothing reaches the host
@@ -640,14 +640,14 @@ its binary, as the device `#H`, and binds `#H/bin` after everything else in
   as in section 3, survive `tar`.
 - **One binary.** `rootfs` from section 7 is the whole userland in one
   host program, for any host Go builds for.
-- **A wrapper.** A short script that sets `--root`, `--arch` and any
+- **A wrapper.** A short script that sets `--root`, `--arch`, and any
   `--ns` turns your userland into a command, as in section 5.
 - **Check it.** `h9 --root DIR --check` runs `/bin/echo` from the root,
   so include an `echo` if you want the check to pass.
 - **Symlinks.** h9 follows symlinks in a host tree on the host and checks
   where they land. A relative link that stays inside the tree works, but an
   absolute one points into the host's file system, not your tree, and fails
-  as if its target didn't exist. Use relative links, hard links or copies. The
+  as if its target didn't exist. Use relative links, hard links, or copies. The
   [symlinks-in-root](../design/0034-symlinks-in-root.md) draft would resolve
   them inside the tree.
 - **Disk images.** A 9front disk image as the root is the

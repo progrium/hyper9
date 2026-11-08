@@ -12,7 +12,7 @@ areas: [cli, docs, tests]
 
 ## Abstract
 
-`h9 --rc` with no command line runs a login rc, `rc -l`, interactive on a terminal. 9front's `rcmain` already gives a login shell a hook: it sources `/rc/lib/rcmain.local` and then `$home/lib/profile` before reading commands. So a root sets its own default command in `/rc/lib/rcmain.local`, the way a 9front profile starts `rio`. Ending it with `exec prog` works like Docker's `CMD`, and leaving out the `exec` runs setup and then an rc. Nothing new is defined: no file, flag, variable or root metadata. A root that has no `rcmain.local` gets a plain rc, so the built-in root works unchanged. Bare `h9` still prints the usage, so the feature is opt-in.
+`h9 --rc` with no command line runs a login rc, `rc -l`, interactive on a terminal. 9front's `rcmain` already gives a login shell a hook: it sources `/rc/lib/rcmain.local` and then `$home/lib/profile` before reading commands. So a root sets its own default command in `/rc/lib/rcmain.local`, the way a 9front profile starts `rio`. Ending it with `exec prog` works like Docker's `CMD`, and leaving out the `exec` runs setup and then an rc. Nothing new is defined: no file, flag, variable, or root metadata. A root that has no `rcmain.local` gets a plain rc, so the built-in root works unchanged. Bare `h9` still prints the usage, so the feature is opt-in.
 
 ## Background
 
@@ -78,17 +78,17 @@ exec myserver -p 8080
 | `/rc/lib/rcmain.local` | Optional: the default command. Without it, `h9 --rc` is a plain rc. |
 | Whatever the default runs | As for any program |
 
-The built-in root, the stock 9front tree and slim roots need no changes. None of them has an `rcmain.local`. The stock tree's only profile is glenda's, which runs only when the host user is named `glenda`.
+The built-in root, the stock 9front tree, and slim roots need no changes. None of them has an `rcmain.local`. The stock tree's only profile is glenda's, which runs only when the host user is named `glenda`.
 
 **Docs.** The README's usage line becomes `--rc ['command']`, and DESIGN.md's CLI section gains `h9 [h9-flags] --rc   # login rc: the root's default command`. Section 4 of the userland guide replaces `rc -l` with `--rc` and adds the `exec` form.
 
 ## Rationale
 
-**Reuse rc's login hook, not new metadata.** Docker needs `CMD` because an image has no shell convention of its own. A 9front root already has one, and it's what 9front itself uses to pick a session's program. A root that's also a real 9front tree behaves the same way under h9 as on a terminal. No h9 code has to read a manifest, and `--print`, `--check` and the sandbox don't change.
+**Reuse rc's login hook, not new metadata.** Docker needs `CMD` because an image has no shell convention of its own. A 9front root already has one, and it's what 9front itself uses to pick a session's program. A root that's also a real 9front tree behaves the same way under h9 as on a terminal. No h9 code has to read a manifest, and `--print`, `--check`, and the sandbox don't change.
 
 **`rcmain.local` over `$home/lib/profile`.** h9 sets `$user` to the host user, so a root can't ship a profile at a path that works for everyone. Changing that by fixing `$user` for a root would mean inventing something new. `rcmain.local` is the 9front file for site-wide login setup, and it's absent from the stock tree, so a root that adds one changes nothing for other users.
 
-**`/bin/init`, `termrc` and `cpurc` were rejected.** On 9front, `init` runs `termrc` or `cpurc` to bring the machine up: devices, network, `aux/timesync`, the mouse and the screen. h9 builds the namespace and devices itself, and a stock `termrc` would start programs that don't belong in a machine like h9's. Those files configure a computer, not a session, and nobody looks there for a program's default command.
+**`/bin/init`, `termrc`, and `cpurc` were rejected.** On 9front, `init` runs `termrc` or `cpurc` to bring the machine up: devices, network, `aux/timesync`, the mouse, and the screen. h9 builds the namespace and devices itself, and a stock `termrc` would start programs that don't belong in a machine like h9's. Those files configure a computer, not a session, and nobody looks there for a program's default command.
 
 **Opt-in through `--rc`, not bare `h9`.** Making bare `h9` run the default would change a usage error into a running machine. A typo in a script would then start a shell that waits on stdin. `--rc` alone reads as "an rc, the way the root sets it up", and it's the flag that already means rc.
 
@@ -101,7 +101,7 @@ The built-in root, the stock 9front tree and slim roots need no changes. None of
 - **CLI:** `h9 --rc` with nothing after it was a usage error and now runs. Since `--rc` takes the next argument as its value, the bare form works only as the last argument: in `h9 --rc --root x`, `--root` is the command line, as it is today. `--rc=` (empty) stays `rc -c ''`. Exit codes are unchanged. A default that `exec`s a program exits with that program's status. Otherwise rc's `$status` maps as for `--rc 'cmd'`.
 - **`Machine.Options`:** unchanged. The CLI builds the argv, as it already does for `--rc`.
 - **`h9-binfmt`** ([host-binfmt](host-binfmt.md)) still refuses `--rc` in `H9FLAGS`.
-- **Sandbox defaults, the root tree and `third_party/`:** unchanged.
+- **Sandbox defaults, the root tree, and `third_party/`:** unchanged.
 
 ## Security
 
@@ -126,7 +126,7 @@ Unit cases in `src/cli.zig`: `--rc` as the last argument parses as a login rc, a
 1. `src/cli.zig`: when `value` returns no value for `--rc`, set `c.rc_login = true` instead of returning `error.Usage`, and count it as a program in the run-mode check. Add the unit cases.
 2. `src/main.zig`: when `rc_login` is set, build `rc -l -i` or `rc -l -c '. /fd/0'`, depending on `isatty` of the host's stdin. Then run `/bin/rc` as `--rc` does.
 3. The integration cases.
-4. The README usage, DESIGN.md's CLI section, the usage text in `src/cli.zig` and section 4 of `docs/userland.md`.
+4. The README usage, DESIGN.md's CLI section, the usage text in `src/cli.zig`, and section 4 of `docs/userland.md`.
 
 ## Open issues
 

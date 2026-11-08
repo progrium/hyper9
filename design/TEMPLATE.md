@@ -32,7 +32,7 @@ areas: []
 
 ## Compatibility
 
-[Effects on CLI flags and exit codes, `Machine.Options`, sandbox defaults, the root tree and `third_party/`.]
+[Effects on CLI flags and exit codes, `Machine.Options`, sandbox defaults, the root tree, and `third_party/`.]
 
 ## Security
 

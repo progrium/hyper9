@@ -18,7 +18,7 @@ A [9P root](0013-9p-roots.md) can be a server that wants `p9any` authentication,
 
 - **9p-roots** mounts with no auth fd. A server that answers `Tauth` with a fid, rather than an error, gets "authentication required", exit 125.
 - **devmnt** already has `mntauth`, which sends `Tauth` and returns the auth fid as a channel, and drawterm's `bindmount` takes an auth channel. [devsrv](0008-devsrv.md) serves the guest's `fauth` through `mntauth`.
-- **drawterm's `cpu.c`** has a `p9any` client: the negotiation, dp9ik and p9sk1, ticket requests to an auth server (`authdial`, `gettickets`), and key lookup from a secstore-style list (`findkey`) or a prompt (`getkey`). It uses `libauthsrv` and `libsec`, which h9 already builds, and isn't itself built: `build.zig` leaves out `cpu.c` and `libauth`.
+- **drawterm's `cpu.c`** has a `p9any` client: the negotiation, dp9ik, and p9sk1, ticket requests to an auth server (`authdial`, `gettickets`), and key lookup from a secstore-style list (`findkey`) or a prompt (`getkey`). It uses `libauthsrv` and `libsec`, which h9 already builds, and isn't itself built: `build.zig` leaves out `cpu.c` and `libauth`.
 
 ## Proposal
 
