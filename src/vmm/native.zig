@@ -289,7 +289,16 @@ const Stub = struct {
         var args: SpawnArgs = .{ .stub = b.stub_fd, .ram = b.ram_fd, .ctl = ctl_fd };
         var stack: [16 * 1024]u8 align(16) = undefined;
         const SIGCHLD = 17;
+        // Every signal blocked until the exec, which resets the handlers:
+        // the child shares h9's memory, so one of h9's handlers running
+        // there (Ctrl-C's, before setsid takes it out of the terminal's
+        // process group) would count the signal twice. The stub sets its
+        // own mask.
+        const all: linux.sigset_t = linux.sigfillset();
+        var old: linux.sigset_t = undefined;
+        _ = linux.sigprocmask(linux.SIG.SETMASK, &all, &old);
         const rc = linux.clone(spawnChild, @intFromPtr(&stack) + stack.len, linux.CLONE.VM | linux.CLONE.VFORK | SIGCHLD, @intFromPtr(&args), null, 0, null);
+        _ = linux.sigprocmask(linux.SIG.SETMASK, &old, null);
         if (failed(rc)) {
             std.posix.munmap(map);
             return error.HypervisorFailed;
