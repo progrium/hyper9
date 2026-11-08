@@ -5203,10 +5203,10 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
     try std.testing.expectEqualStrings("dns\nsize\netc\n1\nmade\n0\n", r.out);
 }
 
-// 32-bit x86 Linux programs (design/linux-i386.md): Alpine's x86 root
+// 32-bit x86 Linux programs (design/0105-linux-i386.md): Alpine's x86 root
 // and the 386 fixtures on the emulator, whatever the host. With
 // -Darch=386 the cases above run them too.
-test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [linux-i386]" {
+test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [105]" {
     try skipPending(@src().fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
     const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;

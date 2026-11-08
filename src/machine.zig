@@ -1376,7 +1376,7 @@ pub const Machine = struct {
             };
             // On 386, int 0x80 (Linux's call) is a general protection
             // fault for a 9front process, as its IDT gate allows only
-            // INT $64 from user mode (design/linux-i386.md).
+            // INT $64 from user mode (design/0105-linux-i386.md).
             if (exit == .syscall and u == .i386 and u.i386.trap != vmm.ia32.vector_syscall) {
                 const note = "sys: trap: general protection violation";
                 if (!(kern.postNote(p.pid, note, .debug) catch false)) {
@@ -1933,7 +1933,7 @@ pub const Machine = struct {
         if (u.* == .i386) {
             const r = &u.i386;
             // On 386 only int 0x80 is a Linux call: INT $64, 9front's, is
-            // a general protection fault, SIGSEGV (design/linux-i386.md).
+            // a general protection fault, SIGSEGV (design/0105-linux-i386.md).
             if (r.trap != vmm.ia32.vector_linux) {
                 const a = l.sig.actions[lsig.SIGSEGV];
                 if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(lsig.SIGSEGV) != 0) {
@@ -2036,7 +2036,7 @@ pub const Machine = struct {
 
     /// set_thread_area (`set`) or get_thread_area of a struct user_desc:
     /// i386 Linux's one TLS segment, GDT entry 6, whose base is the thread
-    /// pointer that `Extra.tls` carries (design/linux-i386.md, "TLS").
+    /// pointer that `Extra.tls` carries (design/0105-linux-i386.md, "TLS").
     /// Entry -1 asks for a free one, and gets 6; entries 7 and 8, which
     /// Linux also has, aren't there.
     fn threadArea(l: *lsys.Process, x: *vmm.X86Extra, set: bool, desc_va: u64) i64 {

@@ -128,7 +128,7 @@ pub const Backend = struct {
     fxsave: u32,
     fxrstor: u32,
     /// The shim's GDT, and the TLS base its Linux TLS entry holds
-    /// (design/linux-i386.md, "TLS").
+    /// (design/0105-linux-i386.md, "TLS").
     gdt: u32,
     gdt_tls: u32 = 0,
     /// When `run` last let the other coroutines run, in monotonic ns.

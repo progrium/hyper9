@@ -1,5 +1,5 @@
 # The browser host's Linux root archive (design/0018-linux-personality.md,
-# design/linux-i386.md): the paths, relative to the 386 Alpine root that
+# design/0105-linux-i386.md): the paths, relative to the 386 Alpine root that
 # `scripts/fetch.sh alpine386web` makes, that `zig build web` packs into
 # zig-out/web/linux.h9a for the demo page's ?linux mode. A path ending in
 # / is an empty directory. tools/webroot.zig copies files rather than

@@ -96,7 +96,7 @@ try {
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
 
   // With linux.h9a, ?linux runs Alpine's 386 busybox sh, jq and sqlite3
-  // (design/linux-i386.md).
+  // (design/0105-linux-i386.md).
   if (await readFile(path.join(dir, 'linux.h9a')).then(() => true, () => false)) {
     await page.goto(`${url}?linux`);
     await step('busybox sh prompts over linux.h9a', () => expect(/# $/, 0, 60_000));

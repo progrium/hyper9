@@ -41,7 +41,7 @@ const trap_slots = 8;
 /// Where a 386 engine's GDT is, in every address space: the top page,
 /// above any user mapping (9front's stack ends at 0xDFFFF000 and a Linux
 /// process's address space at 0xC0000000). It holds the TLS segment Linux
-/// programs load %gs with (design/linux-i386.md, "TLS"). Each engine has
+/// programs load %gs with (design/0105-linux-i386.md, "TLS"). Each engine has
 /// its own page, which the fill hook maps here read-only.
 const gdt_va: u64 = 0xFFFF_F000;
 /// Its entries: the null one, then up to Linux's TLS entry.
