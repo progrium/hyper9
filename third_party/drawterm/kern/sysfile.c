@@ -22,6 +22,8 @@
  * The sys*() routines needn't poperror() as they return directly to syscall().
  */
 
+int	h9_linux_inview(void);	/* h9: src/kern/linux.c */
+
 static void
 unlockfgrp(Fgrp *f)
 {
@@ -30,7 +32,12 @@ unlockfgrp(Fgrp *f)
 	ex = f->exceed;
 	f->exceed = 0;
 	unlock(&f->ref.lk);
-	if(ex)
+	/*
+	 * h9: not for a Linux process, whose fd 2 is its own stderr: Linux
+	 * prints nothing past 100 fds, and zig build fails a compile that
+	 * writes anything there (design/0018-linux-personality.md).
+	 */
+	if(ex && !h9_linux_inview())
 		pprint("warning: process exceeds %d file descriptors\n", ex);
 }
 

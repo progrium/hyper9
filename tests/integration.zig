@@ -5364,6 +5364,12 @@ test "root can become another user and its groups, and can't come back [18]" {
     try netCase(&le, &.{ "/mnt/term/cwd/files", "creds" }, "ok creds\n");
 }
 
+test "a process past 100 fds gets no Plan 9 warning on its stderr [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "many_fds" }, "ok many_fds\n");
+}
+
 // Readiness and sockets (design/0050-linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 
