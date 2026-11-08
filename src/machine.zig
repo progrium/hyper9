@@ -118,7 +118,7 @@ pub const RunError = error{
     Stuck,
 } || kern.Error || vmm.CreateError || loader.Error;
 
-/// The built-in root `#Hroot` serves (design/builtin-root.md): what it
+/// The built-in root `#Hroot` serves (design/0087-builtin-root.md): what it
 /// was built from, for the plan, `--version` and `--check`.
 pub const builtin_root = struct {
     const t = kern.builtin_root;
@@ -214,7 +214,7 @@ pub const Machine = struct {
         /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
         /// bind out and masks `#H` (design/0032-guest-tools.md).
         guest_tools: bool = true,
-        /// The built-in root, `#Hroot` (design/builtin-root.md): `.only`
+        /// The built-in root, `#Hroot` (design/0087-builtin-root.md): `.only`
         /// makes it the root, and needs `root` null; `.before` and
         /// `.after` bind its commands before or after another root's
         /// /bin, and without one make it the root. `.off` leaves a machine

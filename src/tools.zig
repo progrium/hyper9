@@ -70,7 +70,7 @@ pub const CheckOptions = struct {
     backend: vmm.BackendKind = .auto,
     memory: ?u64 = null,
     /// The built-in root, as the CLI resolved --builtin
-    /// (design/builtin-root.md): without a root, anything but `.off`
+    /// (design/0087-builtin-root.md): without a root, anything but `.off`
     /// checks it instead.
     builtin: h9.policy.Builtin = .off,
     /// The root tree as given (for messages), or null if none was found.

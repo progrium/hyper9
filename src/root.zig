@@ -37,7 +37,7 @@ pub const build_info = struct {
     pub const host_cmd: bool = o.host_cmd;
     /// The GUI backend for --gfx (design/0015-gfx.md), or "none".
     pub const gfx: []const u8 = o.gfx;
-    /// The built-in root (design/builtin-root.md).
+    /// The built-in root (design/0087-builtin-root.md).
     pub const builtin_root = @import("machine.zig").builtin_root;
 };
 

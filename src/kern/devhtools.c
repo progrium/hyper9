@@ -11,7 +11,7 @@
  * entry comes after its parent.
  *
  * The attach spec "root" serves a second table the same way: the
- * built-in root (design/builtin-root.md), multicall's 9front commands and
+ * built-in root (design/0087-builtin-root.md), multicall's 9front commands and
  * the directories h9 binds onto. A channel's dev is the table it's on, so
  * the two trees' qids, which overlap, never compare equal as mount points.
  *

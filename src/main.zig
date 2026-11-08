@@ -306,7 +306,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         }
         const why = if (machine.err_msg.len > 0) machine.err_msg else @errorName(err);
         // Over the built-in root alone, the fix for a missing command is
-        // the full tree (design/builtin-root.md).
+        // the full tree (design/0087-builtin-root.md).
         const hint = if (err == error.NotFound and prog == .guest and root == null and builtin_root != .off)
             " (not in the built-in root; pass --root or set H9ROOT for the full 9front tree)"
         else
@@ -384,7 +384,7 @@ fn realPath(io: std.Io, arena: std.mem.Allocator, p: []const u8) ![]u8 {
 }
 
 /// The root as given or found: --root, $H9ROOT, then the development
-/// tree. `--builtin=only` skips the last two (design/builtin-root.md);
+/// tree. `--builtin=only` skips the last two (design/0087-builtin-root.md);
 /// --root with it is a usage error.
 fn rootArg(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, given: ?[]const u8, env: *const std.process.Environ.Map) ?[]const u8 {
     if (cfg.builtin == .only) return null;
