@@ -402,7 +402,7 @@ fn setupAmd64(p: anytype, s: *State, r: *vmm.amd64.Ureg, x: *const vmm.X86Extra,
     r.flags &= ~@as(u64, 0x500);
 }
 
-// i386's frames (arch/x86/include/asm/sigframe.h, design/linux-i386.md).
+// i386's frames (arch/x86/include/asm/sigframe.h, design/0105-linux-i386.md).
 // A handler with SA_SIGINFO gets an rt_sigframe: pretcode, sig, pinfo and
 // puc (the handler's arguments), siginfo at 16, then the ucontext at 144
 // (uc_flags, uc_link, uc_stack, the sigcontext at 20 and the mask at 108)
@@ -424,7 +424,7 @@ const i32_fp_size = 112 + 512;
 const i32_flags_user: u32 = 0xcd5; // CF PF AF ZF SF DF OF (and the kernel's AC, which it allows, is left out)
 
 /// The TLS selector: i386 Linux programs load %gs with it, from the GDT
-/// entry set_thread_area gives them (design/linux-i386.md, "TLS").
+/// entry set_thread_area gives them (design/0105-linux-i386.md, "TLS").
 pub const i386_tls_entry = 6;
 pub const i386_tls_sel: u32 = (i386_tls_entry << 3) | 3;
 

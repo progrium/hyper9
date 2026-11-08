@@ -37,7 +37,7 @@ pub const Args = struct {
 /// registers that say the same; the rest are left for the program to
 /// discover by trying (design/0018, "Loading"). On amd64 and i386,
 /// AT_HWCAP is CPUID.1:EDX, the baseline x86-64 features, which both the
-/// emulator and v86 have (design/linux-i386.md).
+/// emulator and v86 have (design/0105-linux-i386.md).
 pub fn hwcap(arch: vmm.Arch) u64 {
     return switch (arch) {
         .arm64 => (1 << 0) | (1 << 1) | hwcap_cpuid, // HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID

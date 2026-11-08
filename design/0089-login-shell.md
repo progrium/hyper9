@@ -5,7 +5,7 @@ title: h9 as a login shell
 status: draft
 created: 2026-11-08
 authors: [progrium]
-depends: [default-command, host-cmd]
+depends: [81, host-cmd]
 areas: [cli, kern, sandbox, docs, tests]
 ---
 

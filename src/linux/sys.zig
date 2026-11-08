@@ -389,7 +389,7 @@ pub const Process = struct {
     /// Set when the last call returned -EINTR, with what restarts it.
     restart: ?Restart = null,
     /// The current call's timespecs are 32-bit: i386's calls other than
-    /// the *_time64 ones (design/linux-i386.md).
+    /// the *_time64 ones (design/0105-linux-i386.md).
     time32: bool = false,
     name_buf: [4096]u8 = undefined,
     name2_buf: [4096]u8 = undefined,
@@ -1361,7 +1361,7 @@ fn lseek(p: *Process, fd: i32, off: i64, whence: i32) i64 {
     return r;
 }
 
-/// i386's calls (design/linux-i386.md). Most are the generic calls with
+/// i386's calls (design/0105-linux-i386.md). Most are the generic calls with
 /// 32-bit longs and pointers, which the helpers lay out by `Process.is32`;
 /// these are the ones whose numbering or arguments differ.
 const ia32 = struct {
@@ -2953,7 +2953,7 @@ fn defaultTermios() [60]u8 {
 /// CLONE_THREAD, CLONE_SIGHAND and CLONE_VM together, as Linux does; memory
 /// is shared only with threads and vfork (design/0049-linux-threads.md).
 /// clone's thread pointer: the value itself, or on i386 the base of the
-/// struct user_desc it points at (design/linux-i386.md, "TLS").
+/// struct user_desc it points at (design/0105-linux-i386.md, "TLS").
 fn cloneTls(p: *Process, flags: u64, tls: u64) Err!u64 {
     if (!p.is32() or flags & CLONE_SETTLS == 0) return tls;
     return try p.readU32(tls + 4);
