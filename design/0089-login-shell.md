@@ -1,4 +1,5 @@
 ---
+id: 89
 slug: login-shell
 title: h9 as a login shell
 status: draft
