@@ -196,6 +196,8 @@ fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []
     if (go) |g| {
         run.setEnvironmentVariable("H9_TEST_GO", g.dir);
         run.step.dependOn(g.step);
+        // On the native backend when it's in the list, else the emulator.
+        if (std.mem.indexOf(u8, backends, "native") != null) run.setEnvironmentVariable("H9_TEST_GO_BACKEND", "native");
     }
     run.setEnvironmentVariable("H9_TEST_BIN", h9_bin);
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
@@ -780,6 +782,8 @@ const ModuleParts = struct {
     unicorn: ?*std.Build.Module,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
+    /// The native backend's stub, for Linux x86_64 hosts.
+    native_stub: std.Build.LazyPath,
     host_cmd: bool,
     guest_tree: std.Build.LazyPath,
     /// The built-in root (design/0087-builtin-root.md).
@@ -807,6 +811,8 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     if (p.unicorn) |uc| mod.addImport("unicorn", uc);
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
     mod.addAnonymousImport("shim_amd64", .{ .root_source_file = p.shim_amd64 });
+    if (os == .linux and target.result.cpu.arch == .x86_64)
+        mod.addAnonymousImport("native_stub", .{ .root_source_file = p.native_stub });
 
     const web = os == .wasi;
     // The web host's kern turns on wasm exception handling, for setjmp
@@ -916,6 +922,24 @@ pub fn build(b: *std.Build) void {
     shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
     const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
 
+    // The native backend's stub (design/native-backend.md): a freestanding
+    // static program, linked high so the guest's whole layout is free, and
+    // embedded in h9.
+    const native_stub = b.addExecutable(.{
+        .name = "h9-stub",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vmm/native_stub.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .none }),
+            .optimize = .ReleaseSmall,
+            .single_threaded = true,
+            .strip = true,
+            .pic = false,
+            .code_model = .large,
+        }),
+    });
+    native_stub.pie = false;
+    native_stub.image_base = 0x6000_0000_0000; // native_abi.stub_base
+
     const kern_step = b.step("kern", "Compile drawterm's kern");
     const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
 
@@ -945,6 +969,7 @@ pub fn build(b: *std.Build) void {
         .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),
+        .native_stub = native_stub.getEmittedBin(),
         .host_cmd = host_cmd,
         .guest_tree = guest_tree.file,
         .builtin_root = builtin_root,
@@ -1196,11 +1221,20 @@ pub fn build(b: *std.Build) void {
             backends.appendSlice(b.allocator, "whp,") catch @panic("OOM")
         else |_| {}
     }
+    // The native backend (design/native-backend.md) runs amd64 on Linux
+    // x86_64 when the kernel has Syscall User Dispatch and seccomp; h9
+    // skips it where it can't run, as it does a backend that isn't built.
+    if (os == .linux and b.graph.host.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and
+        b.graph.host.result.cpu.arch == .x86_64 and std.mem.eql(u8, cases_arch, "amd64"))
+        backends.appendSlice(b.allocator, "native,") catch @panic("OOM");
     if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
+    // -Dbackends picks the backends instead, such as only `native` for a
+    // quick run where there's no KVM.
+    const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
     // -Dweb runs them on the web host under Node instead: h9-node on the v86
     // backend, with the root's 386 binaries (design/0012-browser-host.md).
     const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (v86, 386)") orelse false;
-    const backend_list = if (test_web) "v86" else if (backends.items.len > 0) backends.items else "auto";
+    const backend_list = if (test_web) "v86" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
         .arch = "386",
@@ -1222,7 +1256,7 @@ pub fn build(b: *std.Build) void {
     const go_fixtures: ?GoFixtures = if (go_bin) |g| addGoFixtures(b, g, go_version) else null;
     const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
     if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
-    const go_cases: ?GoFixtures = if (emu == .unicorn) go_fixtures else null;
+    const go_cases: ?GoFixtures = if (emu == .unicorn or std.mem.indexOf(u8, backend_list, "native") != null) go_fixtures else null;
     // The Linux Go fixtures (design/0049-linux-threads.md), with the same
     // toolchain, into fixtures/linux/<arch>/go.
     if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64" }) |arch| {

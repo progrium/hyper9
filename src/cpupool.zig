@@ -14,7 +14,8 @@
 //! or pooled, on every backend: a process waits for a slot before each run,
 //! in ticket order, and a waiter kicks the longest run after a slice.
 //!
-//! On the emulator there's no vCPU limit (each engine is host memory), so
+//! On the emulator there's no vCPU limit (each engine is host memory), nor
+//! on the native backend (each process has its own stub process), so
 //! every process owns one.
 
 const std = @import("std");
@@ -67,7 +68,7 @@ pub const Pool = struct {
     /// (for tests of the pool).
     pub fn init(gpa: std.mem.Allocator, io: std.Io, backend: vmm.Backend, cpus: ?u32, own_limit_override: ?u32) vmm.Error!Pool {
         const own_limit: ?u32 = switch (backend.kind()) {
-            .emu, .v86 => null,
+            .emu, .v86, .native => null,
             .hvf, .kvm, .whp => blk: {
                 const max = try backend.maxVcpus();
                 break :blk if (max > reserve) max - reserve else 1;

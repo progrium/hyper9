@@ -103,7 +103,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
 
     var failed = false;
     const kinds: []const vmm.BackendKind = switch (o.backend) {
-        .auto => &.{ .hvf, .kvm, .whp, .emu, .v86, .auto },
+        .auto => &.{ .hvf, .kvm, .whp, .native, .emu, .v86, .auto },
         else => &.{o.backend},
     };
     for (kinds) |k| {
@@ -225,8 +225,8 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
     return .{
         .ok = .{
             .kind = kind,
-            // The emulator has no vCPU limit.
-            .max_vcpus = if (kind != .emu) m.backend.maxVcpus() catch null else null,
+            // The emulator and the native backend have no vCPU limit.
+            .max_vcpus = if (kind != .emu and kind != .native) m.backend.maxVcpus() catch null else null,
             .us = us,
         },
     };
