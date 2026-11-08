@@ -1218,6 +1218,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_mkroot.addArgs(args);
     b.step("mkroot", "Build the 9front root tree in .local/9front/root: zig build mkroot -- [--force] [--src] [--arch arm64,386,amd64]").dependOn(&run_mkroot.step);
 
+    // Unpacks a 9front release ISO into a root tree (tools/isoroot.zig),
+    // for the Pages workflow's 386 root: zig build isoroot -- ISO DIR.
+    const isoroot_tool = b.addExecutable(.{
+        .name = "isoroot",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/isoroot.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run_isoroot = b.addRunArtifact(isoroot_tool);
+    run_isoroot.setCwd(b.path("."));
+    run_isoroot.has_side_effects = true;
+    run_isoroot.stdio = .inherit;
+    if (b.args) |args| run_isoroot.addArgs(args);
+    b.step("isoroot", "Unpack a 9front release ISO into a root tree: zig build isoroot -- ISO DIR").dependOn(&run_isoroot.step);
+
     const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     linkUnicorn(mod_tests); // exe_tests shares exe's root module, already linked
@@ -1276,6 +1293,7 @@ pub fn build(b: *std.Build) void {
     design_tests.setCwd(b.path("."));
     test_step.dependOn(&design_tests.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mkroot_tool.root_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = isoroot_tool.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
     // HVF needs the entitlement, so the test binary is signed like h9.
     const run_backend_tests = b.addRunArtifact(backend_tests);

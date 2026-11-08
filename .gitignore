@@ -9,3 +9,7 @@
 
 # Release assets (scripts/release.sh)
 /dist/
+
+# The Pages workflow's site and its Playwright install
+/_site/
+/node_modules/

@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
-# libraries and the patched Unicorn source into .local.
+# libraries, the patched Unicorn source and v86 into .local, and on request
+# the release's 386 ISO.
+#
+#   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src v86
+#                                 iso386; default all but iso386)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
 
 mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
+
+parts=" ${*:-src image unicorn unicorn-src v86} "
+for p in $parts; do
+	case $p in src|image|unicorn|unicorn-src|v86|iso386) ;; *) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
+done
+want() { [[ $parts == *" $1 "* ]]; }
 
 # clone repo dir [rev]: a shallow clone at rev, or tracking the default
 # branch if rev is empty.
@@ -25,17 +35,35 @@ clone() {
 	echo "src/$2: $(git -C "$dir" rev-parse --short HEAD)"
 }
 
+if want src; then
 clone "$HYPERLINUX_REPO" hyper-linux
 clone "$NINEFRONT_REPO" 9front "$NINEFRONT_REV"
+fi
 
+if want image; then
 img="9front-$NINEFRONT_RELEASE.arm64.qcow2"
 if [ ! -f "$H9_LOCAL/9front/$img" ]; then
 	curl -fL --progress-bar -o "$H9_LOCAL/9front/$img.gz" "$NINEFRONT_ISO_URL/$img.gz"
 	gunzip "$H9_LOCAL/9front/$img.gz"
 fi
 echo "9front/$img"
+fi
+
+# The 386 ISO, for zig build isoroot (the Pages workflow's 386 root).
+if want iso386; then
+iso="9front-$NINEFRONT_RELEASE.386.iso"
+if [ ! -f "$H9_LOCAL/9front/$iso" ]; then
+	curl -fL --progress-bar -o "$H9_LOCAL/9front/$iso.gz" "$NINEFRONT_ISO_URL/$iso.gz"
+	gunzip -c "$H9_LOCAL/9front/$iso.gz" >"$H9_LOCAL/9front/$iso.tmp"
+	echo "$NINEFRONT_386_ISO_SHA256  $H9_LOCAL/9front/$iso.tmp" | shasum -a 256 -c --quiet
+	mv "$H9_LOCAL/9front/$iso.tmp" "$H9_LOCAL/9front/$iso"
+	rm -f "$H9_LOCAL/9front/$iso.gz"
+fi
+echo "9front/$iso"
+fi
 
 # Unicorn: headers and libunicorn.a for each target into .local/unicorn/<name>.
+if want unicorn; then
 echo "$UNICORN_WHEELS" | while read -r name tag sha; do
 	[ -n "$name" ] || continue
 	dir="$H9_LOCAL/unicorn/$name"
@@ -50,10 +78,12 @@ echo "$UNICORN_WHEELS" | while read -r name tag sha; do
 	fi
 	echo "unicorn/$name: $UNICORN_VERSION"
 done
+fi
 
 # Unicorn source: unpacked into .local/src/unicorn with our patches applied.
 # A stamp holds the tarball hash and the patches' hashes, so it's redone only
 # when either changes.
+if want unicorn-src; then
 src="$H9_LOCAL/src/unicorn"
 patches=("$H9_ROOT"/third_party/unicorn/patches/*.patch)
 stamp="$UNICORN_SRC_SHA256 $(cat "${patches[@]}" | shasum -a 256 | cut -d' ' -f1)"
@@ -71,8 +101,10 @@ if [ "$(cat "$src/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
 	rm -f "$tgz"
 fi
 echo "src/unicorn: $UNICORN_VERSION + ${#patches[@]} patches"
+fi
 
 # v86: v86.wasm and its license into .local/v86, for zig build web.
+if want v86; then
 dir="$H9_LOCAL/v86"
 if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$V86_SHA256" ]; then
 	tgz="$H9_LOCAL/cache/v86-$V86_VERSION.tgz"
@@ -87,3 +119,4 @@ if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$V86_SHA256" ]; then
 	rm -f "$tgz"
 fi
 echo "v86: $V86_VERSION"
+fi

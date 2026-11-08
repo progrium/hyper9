@@ -18,7 +18,7 @@ Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 
 ```sh
 . scripts/env.sh               # Zig cache and tools live in .local/ (gitignored); puts zig-out/bin (h9) on PATH
-./scripts/fetch.sh             # reference sources (9front at the pinned release), 9front arm64 image, prebuilt and patched-source Unicorn into .local/
+./scripts/fetch.sh             # reference sources (9front at the pinned release), 9front arm64 image, prebuilt and patched-source Unicorn, v86 into .local/ (or name parts: fetch.sh v86 iso386)
 zig build mkroot               # extracts the 9front root tree into .local/9front/root (~1 min, ~250 MB)
 ```
 
@@ -162,6 +162,14 @@ zig-out/web/h9-node --root ws://localhost:8080/9p ls /   # over a WebSocket 9P s
 (cd zig-out/web && python3 -m http.server)   # then open http://localhost:8000 for an interactive rc
 zig build integration -Dweb -Droot=$PWD/.local/9front/root386
 ```
+
+A 386 root for the archive can also come straight from the release's 386 ISO,
+without cross-compiling: `scripts/fetch.sh iso386` fetches it, and
+`zig build isoroot -- .local/9front/9front-<release>.386.iso .local/9front/root386`
+([tools/isoroot.zig](tools/isoroot.zig)) unpacks it in about 20 seconds.
+That's how the [pages workflow](.github/workflows/pages.yml) builds the demo on
+each push to main and publishes it with the project page,
+[site/index.html](site/index.html), to GitHub Pages.
 
 The demo page runs over a WebSocket 9P server with `?root=ws://…/9p`. The
 integration run's WebSocket cases need `-Demu=unicorn` too (with

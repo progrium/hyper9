@@ -7,6 +7,10 @@ NINEFRONT_RELEASE=11952 # "THIS WAS SUPPOSED TO BE FUN", Aug 2026
 # The release's source: HEAD of /dist/9front in the release image.
 NINEFRONT_REV=602faae9a52f342a40b086d10b23c71c82dd52d7
 NINEFRONT_ISO_URL=https://9front.org/iso
+# The release's 386 ISO, unpacked (zig build isoroot) into the 386 root
+# the Pages workflow packs the browser host's demo archive from. The hash
+# is of the ISO after gunzip.
+NINEFRONT_386_ISO_SHA256=068e8ff723a3e5b8c6fdec4862f53e0b7d04e04b3b54baca022b9d2fe869035f
 
 HYPERLINUX_REPO=https://github.com/zw3rk/hyper-linux
 
