@@ -1318,7 +1318,7 @@ pub fn build(b: *std.Build) void {
         const bin = b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
         backend_tests.root_module.addAnonymousImport(b.fmt("{s}_{s}", .{ set.prefix, name }), .{ .root_source_file = bin.getOutput() });
     };
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
@@ -1349,7 +1349,9 @@ pub fn build(b: *std.Build) void {
         run_backend_tests.step.dependOn(&sign.step);
     }
     test_step.dependOn(&run_backend_tests.step);
-    test_step.dependOn(&run_integration.step);
+    // The integration cases are their own step, `zig build integration`, so
+    // running both doesn't run them twice; `zig build test integration`
+    // runs everything.
 
     // docs/embedding/embed.zig, docs/embedding.md's example of embedding h9.
     const embed_example = b.addExecutable(.{

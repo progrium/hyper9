@@ -25,7 +25,7 @@ Running on KVM depends on [kvm](0016-kvm.md), which can be added to CI when it l
 
 ## Done when
 
-- Every push runs `zig build test -Demu=unicorn` with a root tree on Linux arm64 and macOS hosted runners, and `zig build design -- check`.
+- Every push runs `zig build test integration -Demu=unicorn` with a root tree on Linux arm64 and macOS hosted runners, and `zig build design -- check`.
 
 ## Open issues
 
