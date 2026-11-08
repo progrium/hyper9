@@ -280,7 +280,6 @@ const Stub = struct {
         if (failed(linux.ftruncate(ctl_fd, abi.ctl_size))) return error.HypervisorFailed;
         const map = std.posix.mmap(null, abi.ctl_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, ctl_fd, 0) catch
             return error.HypervisorFailed;
-        errdefer std.posix.munmap(map);
         const ctl: *abi.Ctl = @ptrCast(map.ptr);
         @atomicStore(u32, &ctl.state, @intFromEnum(abi.State.guest), .release);
 
@@ -288,7 +287,11 @@ const Stub = struct {
         var stack: [16 * 1024]u8 align(16) = undefined;
         const SIGCHLD = 17;
         const rc = linux.clone(spawnChild, @intFromPtr(&stack) + stack.len, linux.CLONE.VM | linux.CLONE.VFORK | SIGCHLD, @intFromPtr(&args), null, 0, null);
-        if (failed(rc)) return error.HypervisorFailed;
+        if (failed(rc)) {
+            std.posix.munmap(map);
+            return error.HypervisorFailed;
+        }
+        // From here `stop` frees the control page.
         var s: Stub = .{ .pid = @intCast(rc), .ctl = ctl };
         s.wait() catch {
             s.stop();
