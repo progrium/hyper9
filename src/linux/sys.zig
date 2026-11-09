@@ -4835,7 +4835,7 @@ fn scmDiscard(b: ScmBatch) void {
 /// the peer; SCM_CREDENTIALS and others are accepted and dropped.
 fn scmSend(p: *Process, fd: i32, qpath: u64, ctl: u64, ctllen: u64, msg_len: u64) Err!i64 {
     const is32 = p.is32();
-    const hdr: u64 = if (is32) 12 else 16;
+    const hdr: usize = if (is32) 12 else 16;
     const al: u64 = if (is32) 4 else 8;
     var fds: [scm_max]i32 = undefined;
     var n: u32 = 0;
@@ -4896,7 +4896,7 @@ fn scmRecv(p: *Process, m: MsgHdr, flags: u32, got: ?ScmBatch) Err!void {
     };
     defer scmDiscard(b);
     const is32 = p.is32();
-    const hdr: u64 = if (is32) 12 else 16;
+    const hdr: usize = if (is32) 12 else 16;
     const al: u64 = if (is32) 4 else 8;
     const room: u64 = if (m.control == 0 or m.controllen < hdr + 4) 0 else (m.controllen - hdr) / 4;
     var out: [scm_max]i32 = undefined;
