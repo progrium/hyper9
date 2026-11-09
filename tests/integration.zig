@@ -7018,6 +7018,29 @@ test "a .L mount lists, reads, writes and removes [22]" {
     try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8\n", r.out);
 }
 
+test "a .L.Z mount lists, reads, writes and removes, with compound requests [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    d.version = "9P2000.L.Z";
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cd /n/l/usr/glenda
+        \\echo new >made && cat made
+        \\echo more >>made && awk 'END{print NR}' made
+        \\mkdir dir && touch dir/x && ls dir
+        \\mv made renamed && ls
+        \\rm renamed dir/x dir && ls
+        \\ls -l notes /n/l/lib | awk '{print $1, $6, $NF}'
+        \\cat /n/l/lib/notes
+        \\cat /net/dotl/*/status
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8 notes\nd-rwxr-xr-x 0 /n/l/lib/full\n--rw-r--r-- 8 /n/l/lib/notes\none\ntwo\n9P2000.L.Z\n", r.out);
+}
+
 test "a symlink in a .L mount is followed and can't leave the mount [22]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
