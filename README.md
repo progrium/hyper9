@@ -451,8 +451,10 @@ host clipboard, and `--gfx-scale N` sets the scale on macOS (drawterm's `-x`).
 Closing the window posts `hangup` to the machine. Only one machine in a
 process has the window. Without `--gfx`, `#i`, `#m`, and `#b` are masked. A
 build without a GUI backend, or with no display (`$DISPLAY` unset for X11),
-exits 125 on `--gfx`; `--check` reports a `gfx` line. rio needs `/mnt/temp` in
-the root tree, which `zig build mkroot` makes (and adds to an existing tree).
+exits 125 on `--gfx`; `--check` reports a `gfx` line. rio needs `/mnt/temp` and
+`/mnt/wsys`. h9 makes them in the root's overlay when the root lacks them; under
+`--write=scope`, or with the root writable, the tree needs them, and `zig build
+mkroot` makes them (and adds them to an existing tree).
 
 ```sh
 h9 --gfx rio

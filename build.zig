@@ -135,7 +135,7 @@ const segattach_fixtures = [_][]const u8{
 };
 /// Programs in tests/fixtures/overlay, for tests/backends.zig. They use the
 /// segattach fixtures' lib.S.
-const overlay_fixtures = [_][]const u8{ "tmp_own", "tmp_absent", "copyup_reader", "root_own", "root_absent" };
+const overlay_fixtures = [_][]const u8{ "tmp_own", "tmp_absent", "copyup_reader", "root_own", "root_absent", "mnt_points" };
 /// Programs in tests/fixtures/srv, for tests/backends.zig, with the same lib.S.
 const srv_fixtures = [_][]const u8{ "board", "hold", "absent", "orclose" };
 /// Programs in tests/fixtures/htools, for tests/backends.zig, with the same lib.S.

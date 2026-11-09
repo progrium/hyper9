@@ -1813,6 +1813,27 @@ test "two machines in one host process each see only their own root changes [11]
     if (ran == 0) return error.SkipZigTest;
 }
 
+test "rio's mount points are made in the root's overlay when the root lacks them [15]" {
+    var ran: usize = 0;
+    for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
+        var r: OverlayRoot = .{ .tmp = undefined };
+        try r.init();
+        defer r.deinit();
+        var sb: [300]u8 = undefined;
+        var changes: h9.RootChanges = .{};
+        const got = try runOverlayTools(kind, &r, @embedFile("ov_mnt_points"), .{}, true, &sb, &changes) orelse continue;
+        errdefer std.debug.print("backend {t}\n", .{kind});
+        try std.testing.expectEqualStrings("exited ", got);
+        // They're in the overlay, not the host tree, and not a change the
+        // guest made.
+        try std.testing.expect(!r.exists("mnt/temp"));
+        try std.testing.expect(!r.exists("mnt/wsys"));
+        try std.testing.expect(!changes.changed);
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
 test "a copy-up while another process has the lower file open leaves that reader on the old contents [6]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {

@@ -1655,8 +1655,10 @@ the run ends.
 - Linux builds have no window code unless built with `-Dgfx=x11`; `h9
   --version` says which (`gfx:`), and `h9 --check` says whether `$DISPLAY`
   opens. Without it, or without a display, `--gfx` exits 125.
-- rio needs `/mnt/temp` in the root tree; `zig build mkroot` makes it, and
-  adds it to a tree it built before.
+- rio needs `/mnt/temp` and `/mnt/wsys`. h9 makes them in the root's
+  overlay when the root lacks them; under `--write=scope`, or with the root
+  writable, the tree needs them, and `zig build mkroot` makes them, and adds
+  them to a tree it built before.
 - `--print` shows a `gfx:` line, and lists the clipboard and the guest's
   freedom to draw anything in its window (including what looks like a host
   dialog) as caveats.

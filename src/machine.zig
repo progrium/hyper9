@@ -2719,7 +2719,10 @@ pub const Machine = struct {
             if (!b.optional) return m.fail("bind {s} {s}: {s}", .{ b.from, b.to, kern.errstr() });
         }
         if (cwd_at) |at| kern.chdir(at) catch return m.fail("cwd: {s}", .{kern.errstr()});
-        if (m.plan.root_overlay) makeHome();
+        if (m.plan.root_overlay) {
+            makeHome();
+            makeMountPoints();
+        }
         if (m.opts.linux_root != null) linuxEtc();
 
         // fds 0-2 on the console.
@@ -2745,6 +2748,21 @@ pub const Machine = struct {
         const home = std.fmt.bufPrintZ(&buf, "/usr/{s}", .{kern.user()}) catch return;
         if (kern.stat(home, &st)) |_| return else |_| {}
         for ([_][:0]const u8{ "/usr", home }) |dir| {
+            if (kern.stat(dir, &st)) |_| continue else |_| {}
+            const fd = kern.create(dir, kern.OREAD, dmdir | 0o775) catch return;
+            kern.close(fd) catch {};
+        }
+    }
+
+    /// Makes the mount points rio needs, `/mnt/temp` and `/mnt/wsys`, in
+    /// the root's overlay if the root doesn't have them. 9front's kernel
+    /// supplies them through `#/` rather than the disk, so a tree exported
+    /// from a 9front disk lacks them unless `zig build mkroot` added them,
+    /// which a tree it made before gfx (design/0015-gfx.md) didn't, nor
+    /// does a 9P root's server. Best effort, like `makeHome`.
+    fn makeMountPoints() void {
+        var st: [512]u8 = undefined;
+        for ([_][:0]const u8{ "/mnt", "/mnt/temp", "/mnt/wsys" }) |dir| {
             if (kern.stat(dir, &st)) |_| continue else |_| {}
             const fd = kern.create(dir, kern.OREAD, dmdir | 0o775) catch return;
             kern.close(fd) catch {};
