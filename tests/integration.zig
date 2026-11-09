@@ -3182,7 +3182,11 @@ const RootServer = struct {
         return std.fmt.bufPrint(&s.dial_buf, "tcp!127.0.0.1!{d}", .{s.port}) catch unreachable;
     }
 
+    /// Kills the server outright. Child.kill's SIGTERM is a hangup to h9,
+    /// which listen1 doesn't end on, so h9 would wait out its 2.5 s grace
+    /// period on every case that serves a root.
     fn stop(s: *RootServer) void {
+        if (builtin.os.tag != .windows) if (s.child.id) |pid| std.posix.kill(pid, .KILL) catch {};
         s.child.kill(std.testing.io);
     }
 };
