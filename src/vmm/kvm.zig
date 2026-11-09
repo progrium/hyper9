@@ -611,6 +611,8 @@ pub const Vcpu = struct {
             x.* = .{ .amd64 = .{} };
             try s.getFpu(&x.amd64.fx);
             x.amd64.tls = try s.getMsr(x86.MSR_FS_BASE);
+            // At an exit the shim has swapped GS: the user's base is here.
+            x.amd64.gs = try s.getMsr(x86.MSR_KERNEL_GS_BASE);
         } else {
             x.* = .{ .arm64 = .{} };
             const a = &x.arm64;
@@ -626,6 +628,7 @@ pub const Vcpu = struct {
         if (is_x86) {
             try s.setFpu(&x.amd64.fx);
             try s.setMsr(x86.MSR_FS_BASE, x.amd64.tls);
+            try s.setMsr(x86.MSR_KERNEL_GS_BASE, x.amd64.gs);
         } else {
             const a = &x.arm64;
             for (a.v, 0..) |q, i| try s.setReg(abi.armV(@intCast(i)), u128, q);

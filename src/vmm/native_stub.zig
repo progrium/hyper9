@@ -51,6 +51,7 @@ const selector: u8 = 1;
 /// last set or read.
 var starting: [abi.max_threads]bool = @splat(true);
 var fs_bases: [abi.max_threads]u64 = @splat(0);
+var gs_bases: [abi.max_threads]u64 = @splat(0);
 var parent: usize = 0;
 
 /// CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
@@ -84,6 +85,8 @@ const PR_SET_SYSCALL_USER_DISPATCH = 59;
 const PR_SYS_DISPATCH_ON = 1;
 const ARCH_SET_FS = 0x1002;
 const ARCH_GET_FS = 0x1003;
+const ARCH_SET_GS = 0x1001;
+const ARCH_GET_GS = 0x1004;
 
 const SA_SIGINFO = 4;
 const SA_ONSTACK = 0x0800_0000;
@@ -414,6 +417,10 @@ fn saveRegs(ctl: *volatile abi.Ctl, k: usize, mc: *const Mcontext) void {
     _ = sys(.arch_prctl, ARCH_GET_FS, @intFromPtr(&fs), 0, 0, 0, 0);
     fs_bases[k] = fs;
     ctl.fs_base = fs;
+    var gs: u64 = 0;
+    _ = sys(.arch_prctl, ARCH_GET_GS, @intFromPtr(&gs), 0, 0, 0, 0);
+    gs_bases[k] = gs;
+    ctl.gs_base = gs;
 }
 
 fn loadRegs(ctl: *volatile abi.Ctl, k: usize, mc: *Mcontext) void {
@@ -450,6 +457,10 @@ fn loadRegs(ctl: *volatile abi.Ctl, k: usize, mc: *Mcontext) void {
     if (ctl.fs_base != fs_bases[k]) {
         fs_bases[k] = ctl.fs_base;
         _ = sys(.arch_prctl, ARCH_SET_FS, fs_bases[k], 0, 0, 0, 0);
+    }
+    if (ctl.gs_base != gs_bases[k]) {
+        gs_bases[k] = ctl.gs_base;
+        _ = sys(.arch_prctl, ARCH_SET_GS, gs_bases[k], 0, 0, 0, 0);
     }
 }
 

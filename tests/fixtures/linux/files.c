@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -162,6 +163,113 @@ static void shared_map(void) {
 	CHECK("shared_map", mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) == MAP_FAILED && errno == EACCES);
 	close(fd);
 	printf("ok shared_map\n");
+}
+
+/* Shared file mappings placed by MAP_FIXED anywhere, beside private
+ * pages in the same MiB, as Wine maps its shared user data page at
+ * 0x7ffe0000: they see the file's other mappings and its writes. */
+static void fixed_shared(void) {
+	int fd = fresh("fixed");
+	CHECK("fixed_shared", fd >= 0 && ftruncate(fd, (2 << 20) + 16384) == 0);
+	char *w = mmap(0, (2 << 20) + 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	char *area = mmap(0, 4 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("fixed_shared", w != MAP_FAILED && area != MAP_FAILED);
+	char *base = (char *)(((unsigned long)area + (1 << 20) - 1) & ~((1UL << 20) - 1));
+	strcpy(base, "private");
+	/* Two pages at file offset 4096, at base + 12 KiB. */
+	char *fix = mmap(base + 0x3000, 8192, PROT_READ, MAP_SHARED | MAP_FIXED, fd, 4096);
+	CHECK("fixed_shared", fix == base + 0x3000);
+	strcpy(w + 4096, "one");
+	strcpy(w + 8192, "two");
+	CHECK("fixed_shared", strcmp(fix, "one") == 0 && strcmp(fix + 4096, "two") == 0 && strcmp(base, "private") == 0);
+	CHECK("fixed_shared", pwrite(fd, "pw", 2, 8192 + 100) == 2 && memcmp(fix + 4096 + 100, "pw", 2) == 0);
+	/* Three pages that cross a MiB in memory and a MiB of the file. */
+	char *x = mmap(base + 0xff000, 0x3000, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0xfe000);
+	CHECK("fixed_shared", x == base + 0xff000);
+	strcpy(x + 0x2000, "across");
+	CHECK("fixed_shared", strcmp(w + 0x100000, "across") == 0);
+	strcpy(w + 0xfe000, "before");
+	CHECK("fixed_shared", strcmp(x, "before") == 0);
+	/* Across fork: the child's stores reach the parent's mappings, and its private page is its own. */
+	pid_t c = fork();
+	if (c == 0) {
+		if (strcmp(fix, "one") != 0 || strcmp(x + 0x2000, "across") != 0) _exit(1);
+		strcpy(w + 4096, "child");
+		strcpy(x + 0x1000, "kid");
+		strcpy(base, "kid");
+		_exit(0);
+	}
+	CHECK("fixed_shared", child_status(c) == 0);
+	CHECK("fixed_shared", strcmp(fix, "child") == 0 && strcmp(w + 0xff000, "kid") == 0 && strcmp(base, "private") == 0);
+	/* Unmapping one page leaves the other, and its place is private memory again. */
+	CHECK("fixed_shared", munmap(fix, 4096) == 0 && strcmp(fix + 4096, "two") == 0);
+	CHECK("fixed_shared", mmap(fix, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == fix);
+	strcpy(fix, "anon");
+	CHECK("fixed_shared", strcmp(w + 4096, "child") == 0);
+	CHECK("fixed_shared", munmap(fix, 8192) == 0 && munmap(x, 0x3000) == 0 && munmap(area, 4 << 20) == 0);
+	CHECK("fixed_shared", munmap(w, (2 << 20) + 16384) == 0);
+	/* The file kept the stores. */
+	char b[8] = {0};
+	CHECK("fixed_shared", pread(fd, b, 6, 0x100000) == 6 && strcmp(b, "across") == 0);
+	close(fd);
+	printf("ok fixed_shared\n");
+}
+
+/* A private mapping of a file mapped shared sees later writes to it
+ * until a page is written, as on Linux: Wine reads wineserver's session
+ * memory through one. */
+static void private_sees(void) {
+	int fd = fresh("cow");
+	CHECK("private_sees", fd >= 0 && ftruncate(fd, 8192) == 0);
+	char *w = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	char *r = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	CHECK("private_sees", w != MAP_FAILED && r != MAP_FAILED);
+	strcpy(w, "first");
+	CHECK("private_sees", strcmp(r, "first") == 0);
+	strcpy(r + 4096, "mine");
+	strcpy(w + 4096, "theirs");
+	strcpy(w, "second");
+	CHECK("private_sees", strcmp(r, "second") == 0 && strcmp(r + 4096, "mine") == 0);
+	/* A child sees the file through the pages neither wrote, and its write is its own. */
+	pid_t c = fork();
+	if (c == 0) {
+		if (strcmp(r, "second") != 0 || strcmp(r + 4096, "mine") != 0) _exit(1);
+		strcpy(r, "child");
+		if (strcmp(w, "second") != 0) _exit(2);
+		_exit(0);
+	}
+	CHECK("private_sees", child_status(c) == 0 && strcmp(r, "second") == 0);
+	/* A read() into the mapping writes the process's own copy, not the file. */
+	CHECK("private_sees", pwrite(fd, "zz", 2, 100) == 2 && pread(fd, r, 2, 100) == 2);
+	strcpy(w, "third");
+	CHECK("private_sees", memcmp(r, "zz", 2) == 0 && strcmp(w, "third") == 0);
+	CHECK("private_sees", munmap(r, 8192) == 0 && munmap(w, 8192) == 0);
+	char b[8] = {0};
+	CHECK("private_sees", pread(fd, b, 5, 0) == 5 && strcmp(b, "third") == 0);
+	close(fd);
+	printf("ok private_sees\n");
+}
+
+/* arch_prctl's GS base, where 64-bit Wine keeps the Windows TEB. */
+static void gs_base(void) {
+#if defined(__x86_64__)
+	static long slot[2] = {1234, 5678};
+	long got = 0;
+	unsigned long base = 0;
+	CHECK("gs_base", syscall(SYS_arch_prctl, 0x1001, slot) == 0);
+	getpid();
+	__asm__ volatile("movq %%gs:8, %0" : "=r"(got));
+	CHECK("gs_base", got == 5678);
+	CHECK("gs_base", syscall(SYS_arch_prctl, 0x1004, &base) == 0 && base == (unsigned long)slot);
+	pid_t c = fork();
+	if (c == 0) {
+		long v = 0;
+		__asm__ volatile("movq %%gs:0, %0" : "=r"(v));
+		_exit(v == 1234 ? 0 : 1);
+	}
+	CHECK("gs_base", child_status(c) == 0);
+#endif
+	printf("ok gs_base\n");
 }
 
 static void fsync_rusage(void) {
@@ -526,6 +634,9 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "ofd_flock")) ofd_flock();
 		if (all || !strcmp(n, "flock_exec")) flock_exec();
 		if (all || !strcmp(n, "shared_map")) shared_map();
+		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
+		if (all || !strcmp(n, "private_sees")) private_sees();
+		if (all || !strcmp(n, "gs_base")) gs_base();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "read_cache")) read_cache();

@@ -31,6 +31,7 @@ const real = struct {
     extern fn h9_linux_sockrecv(fd: c_int, buf: [*]u8, n: c_int, peek: c_int, dontwait: c_int, raddr: ?*[16]u8, rport: ?*u16) c_int;
     extern fn h9_linux_socksend(fd: c_int, buf: [*]const u8, n: c_int, dontwait: c_int, raddr: ?*const [16]u8, rport: u16) c_int;
     extern fn h9_linux_soerror(fd: c_int) c_int;
+    extern fn h9_linux_pipequeued(fd: c_int) c_long;
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
     extern fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) c_int;
@@ -113,6 +114,9 @@ const stub = struct {
     }
     fn h9_linux_soerror(_: c_int) c_int {
         return 9;
+    }
+    fn h9_linux_pipequeued(_: c_int) c_long {
+        return -1;
     }
     fn h9_linux_sockctl(_: c_int, _: [*:0]const u8) c_int {
         return -1;
@@ -210,6 +214,12 @@ pub fn sockSend(fd: i32, buf: []const u8, dontwait: bool, to: ?*const NetAddr) i
 }
 
 /// SO_ERROR, as a Linux errno.
+/// Bytes queued in the pipe that a write on pipe end `fd` goes into, or
+/// -1 if fd isn't a pipe end.
+pub fn pipeQueued(fd: i32) i64 {
+    return c.h9_linux_pipequeued(fd);
+}
+
 pub fn soError(fd: i32) u32 {
     return @intCast(c.h9_linux_soerror(fd));
 }

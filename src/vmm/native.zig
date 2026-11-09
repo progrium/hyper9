@@ -718,6 +718,7 @@ fn writeRegs(ctl: *abi.Ctl, u: *const amd64.Ureg, x: *const vmm.X86Extra) void {
     }
     @memcpy(&ctl.fx, std.mem.asBytes(&x.fx)[0..abi.fx_len]);
     ctl.fs_base = x.tls;
+    ctl.gs_base = x.gs;
 }
 
 fn readRegs(ctl: *const abi.Ctl, u: *amd64.Ureg, x: *vmm.X86Extra) void {
@@ -740,6 +741,7 @@ fn readRegs(ctl: *const abi.Ctl, u: *amd64.Ureg, x: *vmm.X86Extra) void {
     fx.mxcsr_mask = 0xffff;
     fx._r2 = @splat(0);
     x.tls = ctl.fs_base;
+    x.gs = ctl.gs_base;
 }
 
 fn decode(ctl: *const abi.Ctl, u: *amd64.Ureg) vmm.Exit {

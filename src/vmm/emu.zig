@@ -918,6 +918,7 @@ pub const Vcpu = struct {
                 const t = &@field(x, @tagName(a));
                 try getFxsave(e, a, &t.fx);
                 if (a == .amd64) try check(uc.uc_reg_read(e, uc.UC_X86_REG_FS_BASE, &t.tls));
+                if (a == .amd64) try check(uc.uc_reg_read(e, uc.UC_X86_REG_GS_BASE, &t.gs));
                 if (a == .i386) t.tls = v.s.tls;
             },
         }
@@ -936,6 +937,7 @@ pub const Vcpu = struct {
             inline .amd64, .i386 => |*t, a| {
                 try setFxsave(e, a, &t.fx);
                 if (a == .amd64) try check(uc.uc_reg_write(e, uc.UC_X86_REG_FS_BASE, &t.tls));
+                if (a == .amd64) try check(uc.uc_reg_write(e, uc.UC_X86_REG_GS_BASE, &t.gs));
                 if (a == .i386 and t.tls != v.s.tls) v.s.setTlsDesc(@truncate(t.tls));
             },
         }

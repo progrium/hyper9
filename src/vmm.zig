@@ -273,6 +273,8 @@ pub const X86Extra = struct {
     /// FS base on amd64; on 386, the base of the Linux TLS segment that
     /// set_thread_area sets and selector 0x33 loads.
     tls: u64 = 0,
+    /// GS base on amd64 (ARCH_SET_GS), which 64-bit Wine keeps its TEB in.
+    gs: u64 = 0,
 
     pub const init: X86Extra = .{ .fx = .{ .fcw = 0x037f, .mxcsr = 0x1f80 } };
 };

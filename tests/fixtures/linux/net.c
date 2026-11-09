@@ -19,6 +19,7 @@
 #include <sys/eventfd.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -461,6 +462,9 @@ static void unix_one(const char *name, struct sockaddr_un *a, socklen_t alen) {
 	CHECK(name, bind(l, (struct sockaddr *)a, alen) == 0 && listen(l, 8) == 0);
 	int again = socket(AF_UNIX, SOCK_STREAM, 0);
 	CHECK(name, bind(again, (struct sockaddr *)a, alen) < 0 && errno == EADDRINUSE);
+	/* A listening socket's file is a socket, as Wine's client checks. */
+	struct stat st;
+	if (a->sun_path[0] != 0) CHECK(name, stat(a->sun_path, &st) == 0 && S_ISSOCK(st.st_mode));
 	close(again);
 	struct sockaddr_un got;
 	socklen_t gl = sizeof got;
@@ -515,6 +519,77 @@ static void unix_sock(void) {
 	unix_one("unix_abstract", &b, offsetof(struct sockaddr_un, sun_path) + 12);
 }
 
+/* Sends one byte of `data` with fd attached (fd < 0: none). */
+static int send_fd(int s, char data, int fd) {
+	char cbuf[CMSG_SPACE(sizeof(int))] = {0};
+	struct iovec iov = {.iov_base = &data, .iov_len = 1};
+	struct msghdr m = {.msg_iov = &iov, .msg_iovlen = 1};
+	if (fd >= 0) {
+		m.msg_control = cbuf;
+		m.msg_controllen = sizeof cbuf;
+		struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+		c->cmsg_level = SOL_SOCKET;
+		c->cmsg_type = SCM_RIGHTS;
+		c->cmsg_len = CMSG_LEN(sizeof(int));
+		memcpy(CMSG_DATA(c), &fd, sizeof fd);
+	}
+	return sendmsg(s, &m, 0);
+}
+
+/* recvmsg into buf; *fd gets a passed fd, or -1. */
+static int recv_fd(int s, char *buf, int n, int *fd) {
+	char cbuf[CMSG_SPACE(sizeof(int) * 4)];
+	struct iovec iov = {.iov_base = buf, .iov_len = n};
+	struct msghdr m = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = cbuf, .msg_controllen = sizeof cbuf};
+	int r = recvmsg(s, &m, MSG_CMSG_CLOEXEC);
+	*fd = -1;
+	if (r < 0) return r;
+	struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+	if (c && c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS && c->cmsg_len == CMSG_LEN(sizeof(int)))
+		memcpy(fd, CMSG_DATA(c), sizeof(int));
+	return r;
+}
+
+/* SCM_RIGHTS over a socket pair and across fork, as Wine's wineserver
+ * passes fds: a read stops before a message with fds and takes only
+ * that message, and fds a plain read skips over are closed. */
+static void scm_rights(void) {
+	int sv[2], p[2], fd;
+	char b[16];
+	CHECK("scm_rights", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && pipe(p) == 0);
+	CHECK("scm_rights", write(sv[0], "a", 1) == 1 && send_fd(sv[0], 'b', p[1]) == 1 && write(sv[0], "c", 1) == 1);
+	close(p[1]);
+	CHECK("scm_rights", recv_fd(sv[1], b, sizeof b, &fd) == 1 && b[0] == 'a' && fd == -1);
+	CHECK("scm_rights", recv_fd(sv[1], b, sizeof b, &fd) == 1 && b[0] == 'b' && fd >= 0);
+	int fd2 = fd;
+	CHECK("scm_rights", (fcntl(fd2, F_GETFD) & FD_CLOEXEC) != 0);
+	CHECK("scm_rights", recv_fd(sv[1], b, sizeof b, &fd) == 1 && b[0] == 'c' && fd == -1);
+	/* The passed write end works, and is the pipe's last writer once closed. */
+	CHECK("scm_rights", write(fd2, "x", 1) == 1 && close(fd2) == 0);
+	CHECK("scm_rights", read(p[0], b, sizeof b) == 1 && b[0] == 'x' && read(p[0], b, sizeof b) == 0);
+	int w = -1;
+	/* A child passes an fd back to its parent. */
+	int q[2];
+	CHECK("scm_rights", pipe(q) == 0);
+	pid_t c = fork();
+	if (c == 0) {
+		if (send_fd(sv[1], 'e', q[1]) != 1) _exit(1);
+		_exit(0);
+	}
+	CHECK("scm_rights", waitpid(c, 0, 0) == c);
+	close(q[1]);
+	CHECK("scm_rights", recv_fd(sv[0], b, sizeof b, &w) == 1 && b[0] == 'e' && w >= 0);
+	CHECK("scm_rights", write(w, "x", 1) == 1 && close(w) == 0 && read(q[0], b, sizeof b) == 1 && b[0] == 'x');
+	CHECK("scm_rights", read(q[0], b, sizeof b) == 0);
+	/* An fd that a plain read skips is closed: the pipe sees its writer go. */
+	int r2[2];
+	CHECK("scm_rights", pipe(r2) == 0 && send_fd(sv[0], 'f', r2[1]) == 1);
+	close(r2[1]);
+	CHECK("scm_rights", read(sv[1], b, sizeof b) == 1 && b[0] == 'f');
+	CHECK("scm_rights", read(r2[0], b, sizeof b) == 0);
+	printf("ok scm_rights\n");
+}
+
 /* getifaddrs (netlink's link and address dumps) lists loopback, up,
  * with 127.0.0.1; a listener bound to 127.0.0.1 reports that address,
  * not the wildcard. */
@@ -549,6 +624,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "epoll_et")) epoll_et();
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
 		if (all || !strcmp(n, "unix_sock")) unix_sock();
+		if (all || !strcmp(n, "scm_rights")) scm_rights();
 		if (!strcmp(n, "tcp_echo") || !strcmp(n, "net")) tcp_echo();
 		if (!strcmp(n, "nb_connect") || !strcmp(n, "net")) nb_connect();
 		if (!strcmp(n, "tcp_et") || !strcmp(n, "net")) tcp_et();
