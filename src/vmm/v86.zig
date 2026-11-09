@@ -570,6 +570,11 @@ pub const Vcpu = struct {
         b.setTls(s.tls);
         b.writeUreg(&s.ureg);
         js.main_loop();
+        // A slice can also end in the shim itself, on the restore path
+        // before its iret or in a trap vector before its halt. That's ring
+        // 0 with no user state to take, so finish the shim's few
+        // instructions before deciding how the run ended.
+        while (reg(u8, regs.in_hlt).* == 0 and reg(u8, regs.cpl).* != 3) js.main_loop();
         if (reg(u8, regs.in_hlt).* != 0) return b.exit(s);
         // The slice ended in guest code: preempt it, as a timer interrupt
         // would, and let everything else run before it goes on.
