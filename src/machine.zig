@@ -494,7 +494,8 @@ pub const Machine = struct {
         m.root_changes = .{};
         // The listeners are bound before anything runs, so one that can't
         // listen ends the run here (design/0035-serve.md, "Flags").
-        const srv: ?*serve.Server = if (m.opts.serve.len > 0) blk: {
+        // The browser host can't listen, so its build leaves serving out.
+        const srv: ?*serve.Server = if (comptime web.enabled) null else if (m.opts.serve.len > 0) blk: {
             var len: usize = 0;
             const s = serve.open(m.gpa, m.io, .{
                 .listens = m.opts.serve,
@@ -1293,8 +1294,10 @@ pub const Machine = struct {
         }
         // The server Proc gets a copy of the namespace as it is now, the
         // plan's, before the program can change it (design/0035-serve.md).
-        if (j.srv != null) try m.startServer(p);
-        if (j.argv.len == 0 and j.srv != null) return serveOnly(j);
+        if (!web.enabled and j.srv != null) {
+            try m.startServer(p);
+            if (j.argv.len == 0) return serveOnly(j);
+        }
 
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
