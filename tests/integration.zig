@@ -578,7 +578,7 @@ test "devfs checks the file it opened, not the path it was given [baseline]" {
     defer other.deinit();
     try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "secret\n" });
     var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
     const w = try run(e, &.{ "--cwd", s.path, "--rc", "echo pwned >link" });
     defer w.deinit();
     try std.testing.expectEqual(1, w.code);
@@ -6325,13 +6325,20 @@ fn expectServed(e: Env, addr: []const u8, path: []const u8) !void {
     try std.testing.expectEqual(0, r.code);
 }
 
-/// A TCP connection of the case's own to 127.0.0.1:`port`.
+/// A TCP connection of the case's own to 127.0.0.1:`port`. On Windows,
+/// where a socket isn't a C file descriptor, reads and writes go through
+/// Io.
 const Sock = struct {
     s: std.Io.net.Stream,
 
     fn dial(port: u16) !Sock {
         const a = try std.Io.net.IpAddress.parse("127.0.0.1", port);
-        return .{ .s = try a.connect(std.testing.io, .{ .mode = .stream }) };
+        const s = a.connect(std.testing.io, .{ .mode = .stream }) catch |err| {
+            // Zig 0.16 reports a refused connect on Windows as unexpected.
+            if (builtin.os.tag == .windows and err == error.Unexpected) return error.ConnectionRefused;
+            return err;
+        };
+        return .{ .s = s };
     }
 
     fn close(k: Sock) void {
@@ -6339,6 +6346,11 @@ const Sock = struct {
     }
 
     fn write(k: Sock, bytes: []const u8) !void {
+        if (builtin.os.tag == .windows) {
+            var w = k.s.writer(std.testing.io, &.{});
+            w.interface.writeAll(bytes) catch return error.WriteFailed;
+            return;
+        }
         var off: usize = 0;
         while (off < bytes.len) {
             const n = std.c.write(k.s.socket.handle, bytes[off..].ptr, bytes.len - off);
@@ -6350,6 +6362,11 @@ const Sock = struct {
     /// Reads what's there within `ms`; 0 at EOF or a reset.
     fn read(k: Sock, buf: []u8, ms: u32) !usize {
         try deadline.waitReadable(k.s.socket.handle, @intCast(slow(ms)));
+        if (builtin.os.tag == .windows) {
+            var r = k.s.reader(std.testing.io, &.{});
+            var bufs = [_][]u8{buf};
+            return r.interface.readVec(&bufs) catch 0;
+        }
         const n = std.c.read(k.s.socket.handle, buf.ptr, buf.len);
         return if (n <= 0) 0 else @intCast(n);
     }
@@ -6684,6 +6701,8 @@ test "clients exporting at the --pids cap don't stop the program's rfork [35]" {
 }
 
 test "--serve with no program serves until a hangup and exits 0 [35]" {
+    // It ends the server with SIGHUP, which Windows has no way to send.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6915,6 +6934,8 @@ test "an interrupt to the program leaves clients connected [35]" {
 }
 
 test "two runs on one stale unix socket: one listens, one exits 125 [35]" {
+    // It stops the winner with SIGTERM, which Windows has no way to send.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
