@@ -10,6 +10,17 @@ const deadline = @import("deadline.zig");
 pub const Server = dotl.Server;
 pub const Fill = *const fn (s: *Server) anyerror!void;
 
+/// Reads what the connection has, 0 at its end. Through Io, which reads a
+/// socket on Windows too, where std.posix.read can't.
+fn readSome(io: std.Io, conn: std.Io.net.Stream, buf: []u8) !usize {
+    var r = conn.reader(io, &.{});
+    var bufs = [_][]u8{buf};
+    return r.interface.readVec(&bufs) catch |e| switch (e) {
+        error.EndOfStream => 0,
+        else => e,
+    };
+}
+
 pub const DotlServer = struct {
     srv: std.Io.net.Server,
     fill: Fill,
@@ -119,7 +130,7 @@ pub const DotlServer = struct {
         var w = conn.writer(io, &wbuf);
         while (true) {
             deadline.waitReadable(conn.socket.handle, deadline.limit_ms) catch return;
-            const n = std.posix.read(conn.socket.handle, &rbuf) catch return;
+            const n = readSome(io, conn, &rbuf) catch return;
             if (n == 0) return;
             try s.feed(rbuf[0..n]);
             if (s.attached_as) |a| {
@@ -147,7 +158,7 @@ pub const DotlServer = struct {
         var w = conn.writer(io, &wbuf);
         while (true) {
             deadline.waitReadable(conn.socket.handle, deadline.limit_ms) catch return;
-            const n = std.posix.read(conn.socket.handle, &rbuf) catch return;
+            const n = readSome(io, conn, &rbuf) catch return;
             if (n == 0) return;
             const s = d.lock();
             defer d.unlock();
