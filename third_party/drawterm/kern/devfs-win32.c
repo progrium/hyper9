@@ -700,7 +700,12 @@ fswstat(Chan *c, uchar *buf, int n)
 	if (convM2D(buf, n, &d, strs) != n)
 		error(Ebadstat);
 	uif = c->aux;
-	/* h9: a wstat that changes nothing syncs the file (fsync(2) for Linux programs) */
+	/*
+	 * h9: a wstat that changes nothing syncs the file (fsync(2) for Linux
+	 * programs). A directory isn't opened as a handle here (it's a
+	 * FindFirstFile search), and NTFS logs a rename or create in it
+	 * itself, so a directory has nothing to sync.
+	 */
 	if(~d.mode == 0 && ~d.atime == 0 && ~d.mtime == 0 && (uvlong)d.length == (uvlong)~0 && d.name[0] == 0){
 		if(uif->fh != INVALID_HANDLE_VALUE && uif->fh != NULL)
 			FlushFileBuffers(uif->fh);	/* fails on a read-only handle, which has nothing to sync */
@@ -989,6 +994,28 @@ h9_fs_symlink(Chan *c, char *name, char *target)
 	USED(name);
 	USED(target);
 	error(Eperm);
+}
+
+/*
+ * h9: syncfs(2) on c syncs its own file, as fsync does. Directories, and
+ * sync(2)'s every volume, need a volume handle, which needs an
+ * administrator, so they have nothing to sync here.
+ */
+void
+h9_fs_syncfs(Chan *c)
+{
+	Ufsinfo *uif;
+
+	if(devtab[c->type]->dc != 'U' || (c->flag & COPEN) == 0)
+		return;
+	uif = c->aux;
+	if(uif->fh != INVALID_HANDLE_VALUE && uif->fh != NULL)
+		FlushFileBuffers(uif->fh);
+}
+
+void
+h9_fs_sync(void)
+{
 }
 
 /* h9: renameat across directories stays EXDEV here for now. */

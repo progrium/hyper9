@@ -11,6 +11,7 @@
 #include "fns.h"
 #include "error.h"
 
+#include "fscheck.h"
 #include "hproc.h"
 #include "tsleep.h"
 
@@ -243,6 +244,40 @@ h9_linux_fdchan(int fd, long *refs)
 	cclose(c);
 	poperror();
 	return id;
+}
+
+/*
+ * syncfs(2): syncs the host file system behind fd's channel. Only devfs
+ * has one; other devices, and 9P servers, have nothing to sync.
+ */
+int
+h9_linux_syncfs(int fd)
+{
+	Chan *volatile c;
+
+	c = nil;
+	if(waserror()){
+		if(c != nil)
+			cclose(c);
+		return syserr();
+	}
+	c = fdtochan(fd, -1, 0, 1);
+	if(devtab[c->type]->dc == 'U')
+		h9_fs_syncfs(c);
+	cclose(c);
+	poperror();
+	return 0;
+}
+
+/* sync(2): syncs every host file system. */
+int
+h9_linux_sync(void)
+{
+	if(waserror())
+		return syserr();
+	h9_fs_sync();
+	poperror();
+	return 0;
 }
 
 /* The CPU time the calling process's wait record reports, in ms. */

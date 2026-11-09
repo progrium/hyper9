@@ -77,4 +77,11 @@ int	h9_fs_symlinkpath(char *path, char *target);
  * (the caller's EXDEV), or -1 with the error in errstr.
  */
 int	h9_fs_rename(Chan *c, Chan *dir, char *name);
+/*
+ * h9_fs_syncfs syncs the host file system behind the open devfs chan c,
+ * for syncfs(2); h9_fs_sync syncs every host file system, for sync(2).
+ * Each raises the host's error.
+ */
+void	h9_fs_syncfs(Chan *c);
+void	h9_fs_sync(void);
 int	h9_fs_renamepath(char *old, char *new);

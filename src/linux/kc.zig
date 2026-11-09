@@ -34,6 +34,8 @@ const real = struct {
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
     extern fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) c_int;
+    extern fn h9_linux_syncfs(fd: c_int) c_int;
+    extern fn h9_linux_sync() c_int;
 };
 
 /// devlinux's hook for its text files (src/kern/devlinux.c): the file's
@@ -113,6 +115,12 @@ const stub = struct {
         return 9;
     }
     fn h9_linux_sockctl(_: c_int, _: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_linux_syncfs(_: c_int) c_int {
+        return -1;
+    }
+    fn h9_linux_sync() c_int {
         return -1;
     }
 };
@@ -260,6 +268,17 @@ pub fn fdInfo(fd: i32) Error!FdInfo {
     var ce: c_int = 0;
     _ = try check(c.h9_linux_fdinfo(fd, &dc, &dev, &qp, &qt, &mode, &ce));
     return .{ .dc = @intCast(@as(u32, @bitCast(dc)) & 0x1fffff), .dev = dev, .qpath = qp, .dir = qt & 0x80 != 0, .mode = @intCast(mode & 3), .cexec = ce != 0 };
+}
+
+/// syncfs(2): syncs the host file system behind fd's channel, if it's on
+/// one (src/kern/linux.c).
+pub fn syncfs(fd: i32) Error!void {
+    _ = try check(c.h9_linux_syncfs(fd));
+}
+
+/// sync(2): syncs every host file system.
+pub fn sync() Error!void {
+    _ = try check(c.h9_linux_sync());
 }
 
 /// fd's open file description: an identity dup and fork share, and how

@@ -190,6 +190,27 @@ static void fsync_rusage(void) {
 	printf("ok fsync_rusage\n");
 }
 
+static void dir_sync(void) {
+	/* PostgreSQL's durable_rename: write, fsync, rename, fsync the directory. */
+	const char *d = getenv("DIR");
+	if (!d) d = "/tmp";
+	int fd = fresh("dsync.tmp");
+	char tmp[256];
+	snprintf(tmp, sizeof tmp, "%s", path);
+	snprintf(path, sizeof path, "%s/dsync", d);
+	CHECK("dir_sync", fd >= 0 && write(fd, "x", 1) == 1 && fsync(fd) == 0 && rename(tmp, path) == 0);
+	close(fd);
+	int dfd = open(d, O_RDONLY | O_DIRECTORY);
+	CHECK("dir_sync", dfd >= 0);
+	CHECK("dir_sync", fsync(dfd) == 0 && fdatasync(dfd) == 0 && syncfs(dfd) == 0);
+	close(dfd);
+	sync();
+	CHECK("dir_sync", syncfs(-1) < 0 && errno == EBADF);
+	CHECK("dir_sync", fsync(dfd) < 0 && errno == EBADF);
+	unlink(path);
+	printf("ok dir_sync\n");
+}
+
 static void read_cache(void) {
 	int fd = fresh("cache");
 	char page[4096];
@@ -486,6 +507,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "flock_exec")) flock_exec();
 		if (all || !strcmp(n, "shared_map")) shared_map();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
+		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "read_cache")) read_cache();
 		if (all || !strcmp(n, "falloc")) falloc();
 		if (all || !strcmp(n, "rename_across")) rename_across();
