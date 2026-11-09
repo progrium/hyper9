@@ -11,6 +11,8 @@ areas: [kern, cli, sandbox]
 
 # Proposal: Recursive unions and root layers
 
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Add recursive unions: a union directory whose members are merged at every depth, not only at the bind point, as Wanix's namespaces do. They're `#O` instances with several lower trees instead of one, so they reuse the overlay's walk, directory merging, and memory accounting, and need no change to the vendored `chan.c`. A new `bind -r` flag in h9's namespace syntax makes and extends them, a forked guest `bind` does the same inside the machine, and `/proc/n/ns` prints them as `bind -r` lines, so `--print` and `ns` output replays. A new repeatable `--layer DIR` stacks trees over a root, in the 9front view or the Linux view, and `#Oroot` and `#Olinux` name the merged stacks without the namespace's other binds, so `h9 --root base --layer app --rc 'cd ''#Oroot'' && tar cf /fd/1 .'` flattens trees into one archive.

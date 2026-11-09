@@ -2,7 +2,7 @@
 id: 120
 slug: browser-gfx
 title: Graphics on the browser host
-status: draft
+status: accepted
 created: 2026-11-07
 authors: [progrium]
 depends: [12, 15]
@@ -10,6 +10,8 @@ areas: [kern, build, tests]
 ---
 
 # Proposal: graphics on the browser host
+
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 

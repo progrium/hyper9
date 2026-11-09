@@ -10,6 +10,8 @@ areas: [cli, kern]
 
 # Proposal: Metadata indexes for 9P roots and mounts
 
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 A [9P root](0013-9p-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its qid, mode, length, mtime, and owner, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server. Each directory is checked against the server once per run, in one pipelined batch when the tree is mounted, and each file is checked when it's opened. Anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers.
