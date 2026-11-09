@@ -734,7 +734,7 @@ test "auto uses kvm when /dev/kvm is usable [16]" {
     try std.testing.expectEqualStrings("", w.err);
 }
 
-test "without access to /dev/kvm, auto falls back to native or the emulator with a warning [16]" {
+test "without access to /dev/kvm, auto falls back to the emulator with a warning [16]" {
     const e = try env(@src());
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // Runs where this user can't open /dev/kvm (not in the kvm group).
@@ -746,11 +746,13 @@ test "without access to /dev/kvm, auto falls back to native or the emulator with
     try std.testing.expect(std.mem.indexOf(u8, k.err, "no access to /dev/kvm (is your user in the kvm group?)") != null);
     const r = try runOn(e, "auto", &.{ "/bin/echo", "hi" }, null);
     defer r.deinit();
-    // Without the emulator built in, auto fails with the same reason.
+    // auto falls back only to the emulator; native is never chosen
+    // automatically, since it isn't a security boundary (design/0095,
+    // Security; security audit 2026-11-09). Without the emulator built in,
+    // auto fails with the same reason instead of silently using native.
     if (r.code == 125) return error.SkipZigTest;
     try std.testing.expectEqualStrings("hi\n", r.out);
-    // Native on x86_64 (design/0095-native-backend.md), else the emulator.
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the emulator") != null);
 }
 
 test "more live processes than KVM's owned vCPUs run on the pool [16]" {
@@ -860,17 +862,23 @@ test "--check reports native and runs its trap probe [95]" {
     try expectIn(r.out, "/bin/echo runs (amd64)");
 }
 
-test "auto uses native when KVM is unavailable [95]" {
+test "auto never selects native; it stays an explicit opt-in [95]" {
+    // The native backend shares h9's address space and is not a security
+    // boundary, so `auto` must not pick it silently (design/0095, Security;
+    // security audit 2026-11-09). On a host with a hypervisor or the
+    // emulator, auto uses one of those; native runs only when asked for.
     const e = try env(@src());
     try requireNative(e);
     if (try kvmLimit(e) != null) return error.SkipZigTest;
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
-    try expectIn(r.out, "backend auto: ok (uses native)");
-    const w = try runOn(e, "auto", &.{ "/bin/echo", "hi" }, null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses native)") == null);
+    // Explicit native still works. Its not-a-security-boundary warning is
+    // printed only on a terminal, so stderr is clean here (not a tty).
+    const w = try runOn(e, "native", &.{ "/bin/echo", "hi" }, null);
     defer w.deinit();
     try std.testing.expectEqualStrings("hi\n", w.out);
-    try expectIn(w.err, "; using the native backend");
+    try std.testing.expectEqualStrings("", w.err);
 }
 
 test "rfork with RFMEM shares data and bss but not the stack [95]" {

@@ -344,16 +344,20 @@ pub fn create(gpa: std.mem.Allocator, io: std.Io, want: BackendKind, opts: Optio
             if (web) return createKind(gpa, io, .v86, opts);
             if (hypervisor()) |k| {
                 if (createKind(gpa, io, k, opts)) |b| return b else |err| switch (err) {
-                    error.HypervisorUnavailable, error.WrongArch => if (!have_emu and !have_native) return err,
-                    else => return err,
-                }
-            }
-            if (have_native) {
-                if (createKind(gpa, io, .native, opts)) |b| return b else |err| switch (err) {
                     error.HypervisorUnavailable, error.WrongArch => if (!have_emu) return err,
                     else => return err,
                 }
             }
+            // The native backend runs guest code in the host process's own
+            // address space, sharing it with the stub's control pages and
+            // text, so it is not a security boundary (design/0095-native-
+            // backend.md, Security; security audit 2026-11-09). `auto` must
+            // not select it silently: a host without a hypervisor falls
+            // back to the emulator, and native is reached only by an
+            // explicit `--backend native`, an informed choice for a
+            // trusted guest. When the emulator isn't built either, `auto`
+            // fails with the hypervisor's reason rather than quietly using
+            // native; the CLI points at `--backend native` then.
             return createKind(gpa, io, .emu, opts);
         },
     };
