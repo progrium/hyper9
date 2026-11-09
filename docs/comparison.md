@@ -140,7 +140,8 @@ differences:
   ones and see 9P servers as ordinary mounts.
 - h9 runs on macOS and Windows hosts as well as Linux, and in a browser.
 - gVisor is a mature, production sandbox. h9's security has had no audit
-  (see the warning in the README's [Sandbox](../README.md#sandbox) section).
+  (see the warning in the manual's
+  [Sandboxing](../MANUAL.md#23-sandboxing) chapter).
 
 ## Virtual machines
 

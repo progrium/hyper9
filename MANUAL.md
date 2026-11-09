@@ -2,7 +2,7 @@
 
 > This manual is for people *using* h9, the command-line program from the
 > Hyper9 project, including people who have never used Plan 9.
-> [README.md](README.md) is the place for setup and build instructions, and
+> [DEVELOPING.md](DEVELOPING.md) is the place for build and test instructions, and
 > [SPEC.md](SPEC.md) for internals. It describes h9 as built on `main`;
 > features that aren't built yet are marked with the proposal that adds them
 > (see Conventions).
@@ -184,7 +184,7 @@ host$ zig build              # builds and signs zig-out/bin/h9
 host$ zig build -Demu=unicorn   # or: h9 with the emulator built in (h9-emu)
 ```
 
-The [README](README.md) has the details, including cross-building for Linux
+[DEVELOPING.md](DEVELOPING.md) has the details, including cross-building for Linux
 and Windows.
 
 #### Getting a root tree
@@ -2961,7 +2961,7 @@ originals.
 
 **h9 itself**
 
-- [README.md](README.md): building, testing, and the flags in brief.
+- [DEVELOPING.md](DEVELOPING.md): building, testing, and releases.
 - [SPEC.md](SPEC.md): how h9 works inside.
 - [design/](design/README.md): proposals, including the ones this manual's
   badges point to.
