@@ -5,7 +5,7 @@ title: Serving the namespace over 9P
 status: draft
 created: 2026-11-06
 authors: [progrium]
-depends: [8, 21]
+depends: [8, 21, 87]
 areas: [cli, kern, sandbox, web]
 ---
 
@@ -13,7 +13,7 @@ areas: [cli, kern, sandbox, web]
 
 ## Abstract
 
-`--serve ADDR` makes h9 a 9P server while its program runs. Each connection gets its own `exportfs` of the machine's namespace, so a client sees what the guest sees, under the same access rules. h9 listens on the host, on a unix socket (`unix!PATH`), on TCP (`tcp!HOST!PORT`), or on a WebSocket (`ws://HOST:PORT/PATH`). A 9front machine, another h9, or anything with a 9P2000 client can mount it, and so can an h9 in a browser tab, using a [websocket-9p](0021-websocket-9p.md) root or `/net/ws`. Accepted connections enter the kernel through websocket-9p's devhstream, as host-made streams do. Before a connection reaches `exportfs`, its first `Tversion` passes through a slot where [dotl](0022-dotl.md) adds its 9P2000.L translator. This proposal leaves the slot empty.
+`--serve ADDR` makes h9 a 9P server while its program runs. Each connection gets its own `exportfs` of the machine's namespace, so a client sees what the guest sees, under the same access rules, except `/net`, which is left out unless `--serve-net` is given. h9 listens on the host, on a unix socket (`unix!PATH`), on TCP (`tcp!HOST!PORT`), or on a WebSocket (`ws://HOST:PORT/PATH`). A 9front machine, another h9, or anything with a 9P2000 client can mount it, and so can an h9 in a browser tab, using a [websocket-9p](0021-websocket-9p.md) root or `/net/ws`. Accepted connections enter the kernel through websocket-9p's devhstream, as host-made streams do. Before a connection reaches `exportfs`, its first `Tversion` passes through a slot where [dotl](0022-dotl.md) adds its 9P2000.L translator. This proposal leaves the slot empty.
 
 ## Background
 
@@ -31,19 +31,23 @@ areas: [cli, kern, sandbox, web]
 | `--serve ADDR` | Repeatable. Listen on `unix!PATH`, `tcp!HOST!PORT`, or `ws://HOST:PORT[/PATH]` while the program runs. Port `0` picks a free port |
 | `--serve-root PATH` | The guest path each connection exports. `/` by default |
 | `--serve-token @FILE` | WebSocket listeners require this token, as `Authorization: Bearer TOKEN` or `?token=TOKEN` |
-| `--serve-origin ORIGIN` | Repeatable. An `Origin` a WebSocket listener accepts, such as `https://app.example`. `*` accepts any |
+| `--serve-origin ORIGIN` | Repeatable. An `Origin` a WebSocket listener accepts, such as `https://app.example`. `*` accepts any, and needs `--serve-token` |
+| `--serve-net` | Export `/net` too. Without it, clients don't see `/net` |
 
 These are usage errors (exit 2):
 - an address in none of the three forms;
 - `ws://` without an explicit host, or `wss://`;
-- `--serve-root`, `--serve-token`, or `--serve-origin` without a `--serve` they apply to;
+- `--serve-root`, `--serve-token`, `--serve-origin`, or `--serve-net` without a `--serve` they apply to;
+- `--serve-origin '*'` without `--serve-token`;
 - `--serve` on the browser host.
 
 A listen that fails before the program runs, such as an address in use or a socket path that can't be created, exits 125 with the cause (`serve tcp!127.0.0.1!5640: address in use`).
 
-**Unix socket paths.** If `PATH` exists and is a socket that refuses a connection, it's a stale socket from an earlier run, and h9 removes it and listens. If it accepts a connection, the address is in use. If it isn't a socket, h9 doesn't touch it and exits 125 (`serve unix!/tmp/h9.sock: not a socket`). h9 removes the sockets it created when the run ends.
+**Unix socket paths.** h9 first takes an exclusive `flock` on `PATH.lock`, created mode 0600, and holds it for the run, so two runs starting at once can't both decide a socket is stale. If the lock is held, the address is in use. If `PATH` exists and is a socket that refuses a connection, it's a stale socket from an earlier run, and h9 removes it and listens. If it accepts a connection, the address is in use. If it isn't a socket, h9 doesn't touch it and exits 125 (`serve unix!/tmp/h9.sock: not a socket`). h9 removes the sockets and lock files it created when the run ends.
 
 **Port 0.** `tcp!HOST!0` and `ws://HOST:0/PATH` listen on a port the host picks. Once listening, h9 prints the bound address to stderr, `serve: tcp!127.0.0.1!53122`, one line per such listener, before the program starts. Library callers read every listener's bound address from `Machine.serving()`. Listeners with an explicit port print nothing.
+
+**`$serve` in the guest.** The program's environment has `serve`, an rc list of every listener's bound address in the order given, port 0 resolved (`serve=(unix!/tmp/h9.sock tcp!127.0.0.1!53122)`). So a program can print where it's served, or hand the address to a client it starts. The list is fixed for the run. Without `--serve`, `serve` isn't set.
 
 ### Lifetime
 
@@ -55,10 +59,12 @@ The listeners open after the namespace is built and before the program starts. T
 
 1. **Accept.** A Zig listener thread per address, in `src/serve.zig`, accepts the connection. For `ws://` it first reads the HTTP request (see WebSocket listeners). It then registers the connection with devhstream as a host-made stream: a raw byte stream for unix and TCP, a framed one for WebSocket.
 2. **The dialect slot.** h9 reads the client's first message, which must be a `Tversion`. In this proposal it's passed through, and exportfs negotiates as 9P2000 servers do, answering a version it doesn't know with `unknown`. [dotl](0022-dotl.md) fills the slot: `9P2000.L` routes the connection through its server-side translator.
-3. **Serve.** The machine's server Proc forks a new Proc with the stream's channel as fds 0 and 1 and execs `/bin/exportfs -r PATH`, with `-R` under `--write=none`, as listen(8) does for a network service. The server Proc is created from the first Proc after the plan's namespace is built and before the program runs, with its own copy of that namespace. So every connection sees the plan's namespace, not changes the program later makes in its own.
+3. **Serve.** The machine's server Proc forks a new Proc with the stream's channel as fds 0 and 1 and execs `exportfs -r PATH`, with `-R` under `--write=none`, as listen(8) does for a network service. The server Proc is created from the first Proc after the plan's namespace is built and before the program runs, with its own copy of that namespace, its own note group (`RFNOTEG`), and, without `--serve-net`, `/net` unmounted. So every connection sees the plan's namespace, not changes the program later makes in its own, and notes posted to the program's group, such as an interrupt from the console, don't reach exportfs.
 4. **End.** When the client hangs up, exportfs reads EOF and exits. When exportfs exits, h9 closes the connection.
 
-A root tree without `/bin/exportfs` makes `--serve` fail before the program runs, exit 125 (`serve: /bin/exportfs not in root`).
+**Which exportfs.** The server Proc runs `/bin/exportfs` from the root when there is one, and otherwise the built-in root's, `#Hroot/$cputype/bin/exportfs` ([builtin-root](0087-builtin-root.md)'s box has it). So `--serve` works over any root, including a Linux tree with no 9front binaries, which [dotl](0022-dotl.md)'s Linux clients and a VM served from the machine both need. The plan's `serve` heading says which one runs.
+
+**Where the namespace comes from.** The server Proc takes its namespace from a source, and this proposal has one: the plan's namespace, copied once. Exporting a live namespace, or one task's, would be a second source feeding the same per-connection path (see Open issues).
 
 Every client acts as the machine's user, which exportfs runs as. The `uname` in its `Tattach` isn't checked.
 
@@ -113,7 +119,10 @@ caveats:
 
 A machine serves at most 32 connections at once, across all its listeners. Beyond that, a new connection is closed when it's accepted, or answered with 503 on a WebSocket listener.
 
-**Processes.** Each connection's exportfs is a guest process, and exportfs forks more to answer requests that block. The server Proc and its descendants are counted under `--pids` separately from the program's processes, each against the full `--pids` value. So clients can't use up the program's processes and make its `rfork` fail, and a program that forks to its cap doesn't refuse clients. A run can have up to twice `--pids` live processes, and the plan's `limits` line says so when `--serve` is given (`pids=32 (+32 serving)`). An `rfork` past the serving cap fails in exportfs, which answers that request with an error. Memory isn't split: exportfs's memory counts under `--memory` with the program's, so serving can't take more memory than the run allows.
+**Per connection.** Each connection's exportfs and the processes it forks can have at most 8 live processes, counted within the serving count below. exportfs forks one per request that blocks, so past 8, the next blocking request on that connection fails with an error, and other connections are unaffected. So one client can't take every serving process from the others.
+
+**Processes.** Each connection's exportfs is a guest process, and exportfs forks more to answer requests that block. The server Proc and its descendants are counted under `--pids` separately from the program's processes, each against the full `--pids` value. So clients can't use up the program's processes and make its `rfork` fail, and a program that forks to its cap doesn't refuse clients. A run can have up to twice `--pids` live processes, and the plan's `limits` line says so when `--serve` is given (`pids=32 (+32 serving)`). An `rfork` past the serving cap fails in exportfs, which answers that request with an error. 
+**Memory isn't split.** exportfs's memory counts under `--memory` with the program's, so serving can't take more memory than the run allows, but it can take memory the program would have used. A client that makes exportfs hold large reads, or many connections each at their process cap, can make the program's allocations fail. The serving count and the cap of 32 connections bound how many exportfs processes can hold memory at once. An operator who serves untrusted clients should give the run a `--memory` with room for them. A separate serving cap is an open issue.
 
 ## Rationale
 
@@ -133,6 +142,18 @@ A machine serves at most 32 connections at once, across all its listeners. Beyon
 
 **Separate process counts for serving.** Clients are outside the program's control, and exportfs forks per blocking request, so a shared `--pids` would let a busy client make the program's `rfork` fail, which reads as a bug in the program. A share reserved for the program would need a second number to pick. Counting each side against `--pids` keeps one flag and isolates the two. Memory stays shared, since splitting it would halve what a program that doesn't serve much could use.
 
+**`/net` left out by default.** Through `/net`, a client can dial anything the guest's `--net` policy allows, from the host's address. A TCP listener has no authentication, so under `--net=enable` it would be an open relay for anyone who can reach it, which the plan's caveat about authentication doesn't make clear. Most clients want files, not the network, so `/net` is left out unless `--serve-net` asks for it, and the plan then shows a caveat for it. `/srv` stays: it holds the machine's posted servers, which are files a client may want, and it's named in Security.
+
+**`*` origins need a token.** Without a token, `--serve-origin '*'` lets every page in every browser on the host mount a loopback listener, which is what the origin check exists to stop. With a token, `*` is reasonable, since a page then needs the token too.
+
+**A cap per connection.** The serving count keeps clients from starving the program, but not from starving each other: one client with many blocking reads could take all of it. 8 covers a client with a few blocking reads (a console, an event file, a pipe) outstanding at once, and the serving count still bounds the total across connections.
+
+**exportfs from the built-in root.** Requiring `/bin/exportfs` would make serving depend on the root being 9front. A Linux root is exactly where Linux clients, through dotl, want to mount the machine. The built-in box is always there and is the same exportfs.
+
+**Its own note group.** The server Proc is forked from the first Proc, so without `RFNOTEG` it would share the program's note group, and an interrupt meant for the program would kill every client's exportfs. Clients are hung up only when the run ends.
+
+**`$serve`, not a device.** The program needs the bound addresses, mainly for port 0, and they don't change during the run. An environment variable is how rc and every language read such a thing, and it needs no new device. Live state, such as connected clients, is in `--trace`.
+
 **Serving with no program, not a subcommand.** h9 has no subcommands, so `h9 ls` runs `ls`, and an `h9 serve` would be the first. No program is a usage error today, so giving it a meaning under `--serve` breaks nothing. Exiting 0 when a note ends it matches how a server stopped by its operator exits, and is what service managers expect from a clean stop.
 
 **Raw TCP stays unauthenticated.** 9P authentication on the server side would put a key in the guest, for factotum, against [root-auth](root-auth.md)'s rule that the guest never holds one, or have h9 run `p9any` on the host in front of exportfs, a design of its own. A unix socket has file permissions, and a WebSocket listener has a token, so a listener that needs authentication uses one of those. TCP is for trusted networks and loopback, and the plan's caveat names every TCP listener.
@@ -147,21 +168,23 @@ A machine serves at most 32 connections at once, across all its listeners. Beyon
 
 ## Compatibility
 
-- **CLI:** new `--serve`, `--serve-root`, `--serve-token`, and `--serve-origin`. Exit 2 for misuse, 125 for a listen that fails. No program, an error today, is a serve-only run when `--serve` is given, and still an error without it.
+- **CLI:** new `--serve`, `--serve-root`, `--serve-token`, `--serve-origin`, and `--serve-net`. Exit 2 for misuse, 125 for a listen that fails. No program, an error today, is a serve-only run when `--serve` is given, and still an error without it.
 - **`Machine.Options`:** new `serve`, `serve_root`, `serve_token`, and `serve_origins`, and `Machine.serving()`.
-- **Limits:** `--pids` counts serving processes separately, so a run with `--serve` can have up to twice as many live processes. Without `--serve`, unchanged.
+- **Limits:** `--pids` counts serving processes separately, so a run with `--serve` can have up to twice as many live processes, with at most 8 per connection. Without `--serve`, unchanged.
+- **Environment:** the program gets `$serve` when `--serve` is given.
 - **Sandbox defaults:** unchanged. Nothing listens without `--serve`.
-- **The root tree:** unchanged. `/bin/exportfs` is already in it.
+- **The root tree:** unchanged. A 9front root's `/bin/exportfs` is used, and the built-in root's otherwise.
 - **`third_party/`:** unchanged.
 - **Browser host:** `--serve` is an error.
 
 ## Security
 
-- **What a client reaches.** The plan's namespace from `--serve-root` down, as the machine's user, through exportfs. devfs's access rules apply: `--read-deny` paths are hidden, read-only paths refuse writes, and `--write=none` adds exportfs's `-R`. A client reaches nothing the guest couldn't. But it does reach everything the guest could, including `/mnt/term`, `/srv`, and `/net`. `--serve-root` narrows it.
+- **What a client reaches.** The plan's namespace from `--serve-root` down, as the machine's user, through exportfs. devfs's access rules apply: `--read-deny` paths are hidden, read-only paths refuse writes, and `--write=none` adds exportfs's `-R`. A client reaches nothing the guest couldn't. But it does reach almost everything the guest could, including `/mnt/term` and `/srv`. `/net` is left out unless `--serve-net` is given. `--serve-root` narrows it.
 - **Who can connect.** Unix sockets are created mode 0600. TCP and WebSocket listeners take whatever host the operator names, including non-loopback addresses. Those without a token, which is every TCP listener, are listed in the plan as served without authentication. There's no default address, so h9 never listens anywhere unasked.
 - **Browsers.** WebSocket listeners refuse requests carrying an `Origin` that `--serve-origin` doesn't list, so a page the user visits can't reach a loopback listener. DNS rebinding gets a page's own origin, which is refused the same way.
-- **`/net` through a client.** A client that walks to `/net` in the export reaches devip as the guest does, under the guest's `--net` policy, since `/net` is served through the guest's namespace. Under `--net=disable`, `#I` is masked and there's nothing there.
-- **Hostile clients** send anything. exportfs rejects malformed 9P. Frames and buffers are bounded by websocket-9p's limits, connections by the cap of 32, and processes and memory by `--pids` and `--memory`.
+- **`/net` through a client.** By default the export has no `/net`, so a client can't dial out through the machine. With `--serve-net`, a client that walks to `/net` reaches devip as the guest does, under the guest's `--net` policy, from the host's address, and the plan shows a caveat (`/net served on tcp!0.0.0.0!5640`) for each listener. Under `--net=disable`, `#I` is masked and there's nothing there either way.
+- **Notes.** The serving processes are in their own note group, so a note to the program doesn't reach them. The other way, a client acts as the machine's user, so with `/proc` in the export it can write a process's `note` as the guest can. `--serve-root` below `/` leaves `/proc` out.
+- **Hostile clients** send anything. exportfs rejects malformed 9P. Frames and buffers are bounded by websocket-9p's limits, connections by the cap of 32, processes by 8 per connection and the serving count, and memory by `--memory`, which serving shares with the program (see Limits).
 - **Credentials.** `--serve-token @FILE` keeps the token out of the process listing, and `--print` and `--trace` elide it. A token sent as `?token=` is in the request URL, which a reverse proxy may log. h9 doesn't log request URLs, but an operator using the query form should keep the proxy's logs private or rotate the token.
 - **Who connected.** `--trace` logs each accepted connection with its listener and peer: the address for TCP and WebSocket, and the peer's uid and pid for a unix socket (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS). Nothing is decided by them.
 
@@ -189,6 +212,14 @@ Integration cases tagged `[serve]`. The client is a second h9, which mounts with
 - `test "a unix socket path that isn't a socket exits 125 [serve]"`
 - `test "a ws:// listener pings an idle client and closes one that stops answering [serve]"`
 - `test "an address in use exits 125 [serve]"`
+- `test "a client doesn't see /net without --serve-net [serve]"`
+- `test "--serve-net exports /net and the plan shows a caveat [serve]"`
+- `test "--serve-origin '*' without --serve-token exits 2 [serve]"`
+- `test "a connection past 8 blocking requests fails them without affecting another [serve]"`
+- `test "--serve works over a root without /bin/exportfs [serve]"`
+- `test "\$serve lists the bound addresses [serve]"`
+- `test "an interrupt to the program leaves clients connected [serve]"`
+- `test "two runs on one stale unix socket: one listens, one exits 125 [serve]"`
 - `test "--print lists listeners and elides the token [serve]"`
 
 Demos:
@@ -198,7 +229,7 @@ Demos:
 ## Implementation
 
 1. The server Proc and the per-connection fork and exec of `exportfs`, with a test-only stream source.
-2. `src/serve.zig` with unix and TCP listeners (stale sockets, port 0, `Machine.serving()`), devhstream's raw streams, `--serve` and `--serve-root`, `Machine.Options`, serve-only runs, and the limits, with the separate `--pids` count.
+2. `src/serve.zig` with unix and TCP listeners (the lock file, stale sockets, port 0, `Machine.serving()`, `$serve`), devhstream's raw streams, `--serve`, `--serve-root`, and `--serve-net`, `Machine.Options`, serve-only runs, the server Proc's note group and exportfs fallback, and the limits, with the separate `--pids` count and the per-connection cap.
 3. `ws.zig`'s server side (written for websocket-9p's test relay) wired to WebSocket listeners, with the HTTP checks, `--serve-origin` and `--serve-token`.
 4. The plan's `serve` heading, caveats, elision, and `pids` line in `src/policy.zig`, the `--write=none` `-R`, and `--trace`'s connection lines.
 5. The dialect slot, empty, ready for [dotl](0022-dotl.md).
@@ -206,4 +237,7 @@ Demos:
 
 ## Open issues
 
-None. Follow-ups recorded elsewhere: 9P authentication for served TCP in [root-auth](root-auth.md)'s open issues, and serving to the page over a `MessagePort` in [browser-host](0012-browser-host.md)'s updates.
+- **Live or per-task export.** Clients see a copy of the plan's namespace. A sketch of Wanix rebuilt on hyper9 wants a page to export one task's namespace, and a VM served from the machine loses binds made after its connection started. Both would be another namespace source for the server Proc (see Each connection); which process's namespace, and how to follow it safely, needs its own proposal.
+- **A memory cap for serving.** Serving shares `--memory` with the program. If untrusted clients make that a problem in practice, a `--serve-memory` share is the likely fix.
+
+Follow-ups recorded elsewhere: 9P authentication for served TCP in [root-auth](root-auth.md)'s open issues, and serving to the page over a `MessagePort` in [browser-host](0012-browser-host.md)'s updates.

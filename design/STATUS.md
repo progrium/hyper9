@@ -138,6 +138,7 @@ flowchart LR
   p_guest_tools --> p_dotl
   p_devsrv --> p_serve
   p_websocket_9p --> p_serve
+  p_builtin_root --> p_serve
   p_linux_personality --> p_linux_threads
   p_linux_net --> p_linux_threads
   p_linux_personality --> p_linux_net
