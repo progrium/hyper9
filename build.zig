@@ -152,7 +152,7 @@ const sema_fixtures = [_][]const u8{
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
-const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files" };
+const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "drawpeek" };
 
 /// Programs in tests/fixtures/gfx, for tests/backends.zig's [gfx] cases on
 /// the headless backend, with the same lib.S.
@@ -1098,12 +1098,21 @@ pub fn build(b: *std.Build) void {
         for (linux_fixture_names) |name| {
             const m = b.createModule(.{ .target = lt, .optimize = .ReleaseSmall, .link_libc = true });
             m.addCSourceFile(.{ .file = b.path(b.fmt("tests/fixtures/linux/{s}.c", .{name})), .flags = &.{ "-std=c11", "-D_GNU_SOURCE" } });
+            // drawpeek speaks draw through src/wine/draw9.h (design/wine-draw.md).
+            m.addIncludePath(b.path("src/wine"));
             const fx = b.addExecutable(.{ .name = name, .root_module = m, .linkage = .static });
             const inst = b.addInstallArtifact(fx, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("fixtures/linux/{s}", .{arch}) } } });
             linux_fixtures.dependOn(&inst.step);
         }
     }
     b.getInstallStep().dependOn(linux_fixtures);
+
+    // winedraw (design/wine-draw.md): Wine's display driver for draw, built
+    // with zig cc against the pinned Wine headers (scripts/fetch.sh wine),
+    // into zig-out/wine/x86_64-{windows,unix}, the layout of Wine's own
+    // lib/wine; and wdtest.exe, the Win32 program its cases run.
+    const wine_step = b.step("wine", "Build winedraw.drv and winedraw.so, Wine's display driver for draw, into zig-out/wine (needs scripts/fetch.sh wine)");
+    addWine(b, wine_step);
 
     // Proposal demos that aren't integration cases, by the proposal's slug;
     // `zig build proposal -Dp=...` runs them along with its tagged cases.
@@ -1490,6 +1499,10 @@ pub fn build(b: *std.Build) void {
     const run_backend_tests = b.addRunArtifact(backend_tests);
     // The [gfx] cases that run rio and acme take them from the root tree.
     run_backend_tests.setEnvironmentVariable("H9_TEST_ROOT", root);
+    // The wine-draw case's driver and program, from zig build wine
+    // (design/wine-draw.md); it also needs H9_TEST_WINE_ROOT, from the
+    // environment.
+    run_backend_tests.setEnvironmentVariable("H9_TEST_WINE", b.getInstallPath(.prefix, ""));
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
@@ -1583,4 +1596,61 @@ fn hostHasHvf(b: *std.Build) bool {
         else => false,
     };
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
+}
+
+/// The steps behind `zig build wine` (design/wine-draw.md).
+fn addWine(b: *std.Build, step: *std.Build.Step) void {
+    const inc = ".local/src/wine/include";
+    b.build_root.handle.access(b.graph.io, inc ++ "/wine/gdi_driver.h", .{}) catch {
+        step.dependOn(&b.addFail(inc ++ " is missing; run scripts/fetch.sh wine").step);
+        return;
+    };
+    const zig = b.graph.zig_exe;
+    // winedraw.so needs win32u.so, which Wine provides: an empty library
+    // of that name makes the link list it (src/wine/win32u_stub.c).
+    const stub = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-linux-musl", "-shared", "-fPIC", "-Wl,-soname,win32u.so", "-o" });
+    const stub_so = stub.addOutputFileArg("win32u.so");
+    stub.addFileArg(b.path("src/wine/win32u_stub.c"));
+
+    const so = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-linux-musl", "-shared", "-fPIC", "-O2", "-Wall", "-DWINE_UNIX_LIB", "-D__WINESRC__", "-Wl,-soname,winedraw.so", "-Wl,-rpath,$ORIGIN" });
+    so.addPrefixedDirectoryArg("-I", b.path("src/wine"));
+    so.addPrefixedDirectoryArg("-I", b.path(inc));
+    so.addArg("-o");
+    const so_out = so.addOutputFileArg("winedraw.so");
+    so.addFileArg(b.path("src/wine/winedraw.c"));
+    so.addArg("-Wl,--no-as-needed");
+    so.addFileArg(stub_so);
+    so.addFileInput(b.path("src/wine/draw9.h"));
+    so.addFileInput(b.path("src/wine/unixlib.h"));
+
+    // The PE side links no C runtime, only kernel32 (src/wine/dllmain.c).
+    const obj = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-windows-gnu", "-c", "-O2", "-Wall" });
+    obj.addPrefixedDirectoryArg("-I", b.path("src/wine"));
+    obj.addArg("-o");
+    const obj_out = obj.addOutputFileArg("dllmain.o");
+    obj.addFileArg(b.path("src/wine/dllmain.c"));
+    obj.addFileInput(b.path("src/wine/unixlib.h"));
+    const dll = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-windows-gnu", "-shared", "-nostdlib", "-Wl,--entry=winedraw_entry", "-o" });
+    // Named as installed: Wine finds a builtin's file by the name in its
+    // export directory, which the linker takes from the output's.
+    const dll_out = dll.addOutputFileArg("winedraw.drv");
+    dll.addFileArg(obj_out);
+    dll.addArg("-lkernel32");
+    const builtin_tool = b.addExecutable(.{
+        .name = "winebuiltin",
+        .root_module = b.createModule(.{ .root_source_file = b.path("tools/winebuiltin.zig"), .target = b.graph.host }),
+    });
+    const mark = b.addRunArtifact(builtin_tool);
+    mark.addFileArg(dll_out);
+    const drv_out = mark.addOutputFileArg("winedraw.drv");
+
+    const exe = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-o" });
+    const exe_out = exe.addOutputFileArg("wdtest.exe");
+    exe.addFileArg(b.path("tests/fixtures/wine/wdtest.c"));
+    exe.addArgs(&.{ "-luser32", "-lgdi32" });
+
+    step.dependOn(&b.addInstallFileWithDir(so_out, .{ .custom = "wine/x86_64-unix" }, "winedraw.so").step);
+    step.dependOn(&b.addInstallFileWithDir(drv_out, .{ .custom = "wine/x86_64-windows" }, "winedraw.drv").step);
+    step.dependOn(&b.addInstallFileWithDir(exe_out, .{ .custom = "fixtures/wine" }, "wdtest.exe").step);
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = builtin_tool.root_module })).step);
 }

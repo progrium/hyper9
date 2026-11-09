@@ -459,6 +459,23 @@ h9 --gfx rio
 h9 --gfx rio -i 'window acme'
 ```
 
+Linux programs see the machine's 9front `/dev` at `/dev/9`, so with `--gfx`
+they can open the window's draw files there. `winedraw` is a Wine display
+driver that draws through them, one draw layer per top-level window, and turns
+`/dev/mouse` and `/dev/kbd` into input ([wine-draw](design/wine-draw.md),
+a draft). It builds against Wine 11.0's headers, and runs in an amd64 Linux
+root with Wine in it:
+
+```sh
+scripts/fetch.sh wine          # Wine's include/ at the pinned tag, into .local/src/wine
+zig build wine                 # zig-out/wine/x86_64-{unix,windows}/winedraw.{so,drv}
+scripts/wine-root.sh           # Alpine amd64 with Wine 11, at .local/linux/wine-amd64
+```
+
+Copy the two files into the root's `/usr/lib/wine/x86_64-unix` and
+`x86_64-windows`, and set `Graphics` to `draw` under
+`HKCU\Software\Wine\Drivers` in the prefix.
+
 ### Sandbox
 
 > **Warning!** This is a ~~stable~~ in-development research prototype, but it has not been through any formal security audits or any other verification. Such a review would be essential before trusting h9 to handle malicious code in the wild. USE AT YOUR OWN RISK!
@@ -559,6 +576,7 @@ scripts/lima/vm test linux                  # backend and integration tests on t
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
 | `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, the clipboard), the headless test backend, and the stubs for builds without graphics |
+| `src/wine/` | winedraw, the Wine display driver over Plan 9 draw: its Unix library, its PE side, and `draw9.h`, a small draw client the `drawpeek` fixture shares |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |

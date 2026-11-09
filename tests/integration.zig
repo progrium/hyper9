@@ -5400,6 +5400,12 @@ test "a process that exits with a file mapped shared writes it back on the way o
     try netCase(&le, &.{ "/mnt/term/cwd/files", "map_exit" }, "ok map_exit\n");
 }
 
+test "prctl PR_SET_NAME keeps the first 15 bytes of a longer name [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "prctl_name" }, "ok prctl_name\n");
+}
+
 test "/dev/9 in the Linux view is the machine's 9front /dev, with no draw files without --gfx [wine-draw]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

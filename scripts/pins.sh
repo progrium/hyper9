@@ -89,3 +89,10 @@ memory_size 812
 # Function table: JIT slots after v86's own (src/rust/jit.rs).
 V86_TABLE_SIZE=1924
 V86_TABLE_OFFSET=1024
+
+# Wine's headers, for winedraw (design/wine-draw.md): a display driver is
+# built against one release's driver interface (WINE_GDI_DRIVER_VERSION),
+# so this is the release the driver targets. Only include/ is fetched.
+WINE_REPO=https://github.com/wine-mirror/wine
+WINE_VERSION=11.0
+WINE_REV=db11d0fe6a169c457e23d007e20404643d067aa8

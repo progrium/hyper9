@@ -19,6 +19,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -625,6 +626,14 @@ static void many_fds(void) {
 	printf("ok many_fds\n");
 }
 
+/* PR_SET_NAME with a name longer than Linux's 15 bytes keeps the first
+ * 15, as Wine names its threads. */
+static void prctl_name(void) {
+	CHECK("prctl_name", prctl(PR_SET_NAME, "a-much-longer-thread-name", 0, 0, 0) == 0);
+	CHECK("prctl_name", prctl(PR_SET_NAME, "short", 0, 0, 0) == 0);
+	printf("ok prctl_name\n");
+}
+
 /* /dev/9 is the machine's 9front /dev (design/wine-draw.md): the console
  * files always, and the window's draw files only with --gfx, where
  * draw/new answers with the screen's 144 bytes of image info. */
@@ -660,6 +669,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "private_sees")) private_sees();
 		if (all || !strcmp(n, "gs_base")) gs_base();
 		if (all || !strcmp(n, "dev9")) dev9();
+		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "read_cache")) read_cache();

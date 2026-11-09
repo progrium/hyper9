@@ -12,7 +12,7 @@ areas: [linux, kern, build, tests]
 
 ## Abstract
 
-Windows programs under Wine get a window. `winedraw.drv` is a Wine display driver whose Unix side draws through `/dev/draw` and reads `/dev/mouse` and `/dev/kbd`, so a Wine program runs in the `--gfx` window (or a rio window) with no X or Wayland server in the Linux root. A Linux process reaches those files through `/dev/9`, a new directory in the Linux view that is the process's own 9front `/dev`. The first version runs Wine as a virtual desktop: one draw image holds Wine's desktop, top-level windows are drawn inside it by Wine, and the driver copies what changed onto the screen. The driver uses only the draw files, so it should work unchanged wherever [gfx](0015-gfx.md) does, including [browser-gfx](0120-browser-gfx.md) once the Linux personality runs there.
+Windows programs under Wine get a window. `winedraw.drv` is a Wine display driver whose Unix side draws through `/dev/draw` and reads `/dev/mouse` and `/dev/kbd`, so a Wine program runs in the `--gfx` window (or a rio window) with no X or Wayland server in the Linux root. A Linux process reaches those files through `/dev/9`, a new directory in the Linux view that is the process's own 9front `/dev`. Each Windows top-level window is a draw window (a layer) on one public screen that every Wine process in the machine shares, so devdraw stacks and clips windows across processes, as it does rio's. The driver uses only the draw files, so it should work unchanged wherever [gfx](0015-gfx.md) does, including [browser-gfx](0120-browser-gfx.md) once the Linux personality runs there.
 
 ## Background
 
@@ -26,32 +26,32 @@ On the h9 side, gfx serves `/dev/draw`, `/dev/mouse`, `/dev/cursor`, `/dev/kbd`,
 
 ## Proposal
 
-**`/dev/9` in the Linux view.** devlinux's `/dev` gains `9`, a directory that resolves names in the calling process's 9front namespace under `/dev`. `open("/dev/9/draw/new")` in a Linux process opens what `/dev/draw/new` is for a 9front process in the same Proc: the host window's `#i` under `--gfx`, or rio's per-window files when the process was started from a rio window. Without `--gfx` the gfx devices are masked as now, so `/dev/9/draw` doesn't exist. Reads, writes, and `stat` pass straight through; `/dev/9` adds no device of its own.
+**`/dev/9` in the Linux view.** devlinux's `/dev` gains `9`, a mount point, and the namespace builder binds the machine's 9front `/dev` on it, so `open("/dev/9/draw/new")` in a Linux process opens the host window's `#i` under `--gfx`. The bind copies `/dev`'s union as the machine starts, so binds made on `/dev` later, such as rio's for a window, aren't in it; a Linux process started from a rio window finds those under `/9/dev`, the 9front root's `/dev`, when the machine has a 9front root. Without `--gfx` the gfx devices are masked as now, so `/dev/9/draw` doesn't exist. Reads, writes, and `stat` pass straight through; `/dev/9` adds no device of its own.
 
 **`winedraw.drv`.** A display driver in `src/wine/`, in C, in two parts:
 
-- `winedraw.drv`, the PE side: a `DllMain` that loads the Unix library with `__wine_init_unix_call`, and calls its init. It's built with `zig cc -target x86_64-windows-gnu`, so no MinGW is needed.
-- `winedraw.so`, the Unix side, built with `zig cc` against Wine's headers for the targeted release (`include/` from the pinned Wine source, fetched by `scripts/fetch.sh`, not vendored).
+- `winedraw.drv`, the PE side: a `DllMain` that finds the Unix library as winecrt0's `__wine_init_unix_call` does, calls its init, and starts the input threads. It's built with `zig cc -target x86_64-windows-gnu` and no C runtime, so it imports only `kernel32` and no MinGW is needed. `tools/winebuiltin.zig` writes the "Wine builtin DLL" marker into its DOS stub, as `winebuild` does: Wine gives only a builtin DLL a Unix library.
+- `winedraw.so`, the Unix side, built with `zig cc` against Wine's headers for the targeted release (`include/` from the pinned Wine source, fetched by `scripts/fetch.sh wine`, not vendored). An empty `win32u.so` stub makes the link list Wine's `win32u.so` as needed, so the build needs no Wine binaries.
 
 The Unix side fills in these functions in the first version:
 
 | Function | What it does |
 |---|---|
-| `UpdateDisplayDevices` | Reports one monitor, the size of the window's rectangle from `/dev/draw/new` (and `/dev/winname` for its image) |
-| `CreateWindowSurface` | Gives each window `win32u`'s DIB-backed surface, with a `flush` that queues its dirty rectangle |
-| `DesktopWindowProc` | Serves the virtual desktop |
-| `WindowPosChanged` | Marks the moved region for a flush |
-| `SetCursor` | Converts a Windows cursor to the 16×16 image and mask `/dev/cursor` takes (the nearest fit; color cursors are thresholded) |
-| `SetCursorPos`, `ClipCursor` | Write `/dev/mouse` to move the pointer; clipping is ignored at first |
-| `KbdLayerDescriptor` | A US layout, to start |
+| `UpdateDisplayDevices` | Reports one monitor and mode, the size of the window named by `/dev/9/winname` |
+| `CreateWindowSurface` | Gives each top-level window a surface with an `x8r8g8b8` staging image of its size in draw |
+| `WindowPosChanged` | Allocates the window's layer at its visible rectangle, or frees it when hidden or moved, and raises it when it comes to the top |
+| `ActivateWindow` | Raises the window's layer |
+| `DestroyWindow` | Frees the layer |
 
-A flush loads the dirty rectangle into an image of the window's size with draw's `y` (load) message, draws it onto the screen image with `d`, and writes `v` to flush. Wine's surfaces are 32-bit BGRX, which is draw's `XRGB32` byte for byte, so there's no conversion. One thread per process reads `/dev/mouse` and `/dev/kbd` and turns them into input through `NtUserSendHardwareInput`: mouse messages give the position and buttons (with wheel buttons 4 and 5), kbd's `k` and `K` messages list the keys held after a press and after a release, so the difference from the last message is a key down or up, mapped to virtual keys and scan codes, and a resize (`r` from `/dev/mouse`) reattaches the window and calls `UpdateDisplayDevices`. A process that doesn't create windows (`wineserver`, services) never opens the draw files, so draw isn't opened until the first window surface or display query.
+A flush loads the dirty rectangle into the staging image with draw's `y` (load) message, draws it onto the window's layer with `d`, and writes `v` to flush. Wine's surfaces are 32-bit BGRX, which is draw's `x8r8g8b8` byte for byte; drawing from the staging image converts to the screen's format, whatever it is. A new or moved layer gets the whole surface on the next flush.
 
-**Virtual desktop only, at first.** The driver always runs Wine's desktop as one window the size of the draw window (`explorer /desktop`), so Windows programs' top-level windows are drawn inside it by Wine, with its own title bars, and positioning and focus never reach rio. This is the mode `winex11.drv` uses with a virtual desktop, and it keeps the driver to presenting one surface.
+Input comes from two threads that the PE side starts in each process, which run in the Unix library: one reads `/dev/9/mouse` and one `/dev/9/kbd`. Each file allows one reader, so the first Wine process (usually `explorer`, the desktop) reads them for all, and the others' threads end. They turn input into `NtUserSendHardwareInput`, and wineserver routes it to the right window in whatever process. Mouse messages give the position and buttons, with the wheel's buttons 4 and 5; kbd's `k` and `K` messages list the keys held after a press and after a release, so the difference from the last message is a key down or up, sent as a US layout's scan code, which `win32u`'s default keyboard tables translate. A process that doesn't create windows never opens draw: the connection opens with the first window surface.
 
-**Selecting it.** `h9` doesn't set it automatically. In a Wine prefix, `Graphics=draw` under `HKCU\Software\Wine\Drivers` picks it, and `zig build wine` installs the two files into a Linux root's `/usr/lib/wine/x86_64-windows` and `x86_64-unix`. A Wine whose `WINE_GDI_DRIVER_VERSION` doesn't match the one the driver was built for refuses it at registration, and Wine says why.
+**Windows as draw windows on a shared screen.** Each top-level window is a layer (`b` with a screen id, refreshed from its own backing store) on a public screen with a fixed id. The first process to draw makes the screen over the machine's window (`A`), filled with Windows' default desktop color, and every other process uses it (`S`), so devdraw stacks, clips, and uncovers windows across processes, and Wine draws its own title bars inside each. The screen stays one window as far as rio or the host is concerned.
 
-**Not in the first version:** OpenGL and Vulkan (`OpenGLInit` and `VulkanInit` aren't filled in, so Direct3D and anything that needs GL fails as it would with no GL driver), the clipboard (`/dev/9/snarf` is there for a later step), IME, a window per top-level window, and 32-bit (WoW64) Wine.
+**Selecting it.** `h9` doesn't set it automatically. `zig build wine` builds the two files into `zig-out/wine/x86_64-windows` and `x86_64-unix`, the layout of Wine's own `lib/wine`, and they're copied into a Linux root's `/usr/lib/wine`; in a Wine prefix, `Graphics=draw` under `HKCU\Software\Wine\Drivers` picks the driver. With no window (no `--gfx`) its init fails and Wine falls back as it does without a display. A Wine whose `WINE_GDI_DRIVER_VERSION` doesn't match the one the driver was built for refuses it at registration, and Wine says why.
+
+**Not in the first version:** the cursor's shape and moving the pointer (`SetCursor`, `SetCursorPos`, `ClipCursor`), following a resized window (the display keeps its first size), OpenGL and Vulkan (`OpenGLInit` and `VulkanInit` aren't filled in, so Direct3D and anything that needs GL fails as it would with no GL driver), the clipboard (`/dev/9/snarf` is there for a later step), IME, layouts other than US, and 32-bit (WoW64) Wine.
 
 ## Rationale
 
@@ -63,7 +63,7 @@ A flush loads the dirty rectangle into an image of the window's size with draw's
 
 **`/dev/9` rather than a device for each file.** Exposing the process's own 9front `/dev` covers draw, rio's per-window files, `snarf`, and whatever comes later with one directory, and a Linux process sees exactly what a 9front process in its place would. The name keeps clear of Linux's own `/dev` entries.
 
-**Virtual desktop first.** Mapping each Windows top-level window to a rio window (through `/dev/wsys`) needs window management in both directions: moves, z-order, focus, and minimizing. That's most of `winex11.drv`'s size. One surface is enough to run real programs and to tell whether the rest is worth doing.
+**Draw windows on one screen, not a virtual desktop or rio windows.** A virtual desktop (one draw image that the driver composes every window into) would need the driver to know every window's stacking order and contents, across processes, since each Wine process has its own connection; devdraw's screens already do that, so a layer per window is less code. Mapping each Windows top-level window to a rio window (through `/dev/wsys`) needs window management in both directions: moves, z-order, focus, and minimizing. That's most of `winex11.drv`'s size, and one screen is enough to run real programs and to tell whether the rest is worth doing.
 
 ## Compatibility
 
@@ -75,23 +75,22 @@ No CLI flags, exit codes, `Machine.Options`, or sandbox defaults change. The Lin
 
 ## Done when
 
-Demo: `h9 --gfx --root <alpine root with wine> wine notepad`, in a prefix with `Graphics=draw`, opens Notepad in the window, and typing and clicking work.
+Demo: `h9 --gfx --root <alpine root with wine and the driver> wine notepad`, in a prefix with `Graphics=draw`, opens Notepad in the window, and typing and clicking work.
 
-Integration cases, on the headless gfx backend, tagged `[wine-draw]`:
+Cases tagged `[wine-draw]`:
 
-- `/dev/9` serves the process's 9front /dev, and has no draw files without gfx: a Linux fixture reads `/dev/9/winname` with gfx on, and gets `ENOENT` for `/dev/9/draw/new` with gfx off.
-- a Wine program's window reaches the screen: a small Win32 test program (built with `zig cc -target x86_64-windows-gnu`) fills its client area with one color, and the test reads that color from the headless screen.
-- mouse clicks and keys reach a Wine program: the test injects a click and a key, and the program prints the `WM_LBUTTONDOWN` position and the `WM_CHAR`.
+- Integration: "/dev/9 in the Linux view is the machine's 9front /dev, with no draw files without --gfx", and "with --gfx, a Linux program opens the window's draw files through /dev/9", which needs an h9 built with `-Dgfx=headless`.
+- Backend (`tests/backends.zig`, on the headless screen, whose test hooks inject input): "a Wine program draws on the window through winedraw, and gets clicks and keys". `wdtest.exe`, a Win32 program built with `zig cc -target x86_64-windows-gnu`, fills its client area with red; the test reads red from the screen, clicks until it turns green, and types `a` and `q`, which the program prints. It needs a root with Wine in it (`scripts/wine-root.sh`, named by `H9_TEST_WINE_ROOT`) and `zig build wine`'s files, and skips without them.
 
-The Wine cases need a root with Wine in it and skip without one, as the Alpine cases do.
+`tests/fixtures/linux/drawpeek` reads the window's pixels back through `/dev/9/draw`, to check a run by hand or save it as a PPM image.
 
 ## Implementation
 
 1. `/dev/9` in devlinux, with its fixture case.
-2. `scripts/fetch.sh` fetches Wine 11.0's source at a pinned hash, and `zig build wine` builds `winedraw.drv` and `winedraw.so` and installs them into a root.
-3. The driver: registration, `UpdateDisplayDevices`, window surfaces and flushing, and the virtual desktop. The color case passes.
-4. Input: the mouse and keyboard thread, the US layout, the cursor, and resizes. The input case passes.
-5. The Notepad demo, and notes on what larger programs need next.
+2. `scripts/fetch.sh wine` fetches Wine 11.0's `include/` at a pinned commit, and `zig build wine` builds `winedraw.drv` and `winedraw.so`.
+3. The driver: registration, `UpdateDisplayDevices`, window surfaces, layers on the shared screen, and flushing. The color part of the backend case passes.
+4. Input: the mouse and keyboard threads and the US layout. The click and key parts pass.
+5. The cursor, resizes, and the Notepad demo, with notes on what larger programs need next.
 
 ## Open issues
 
@@ -99,3 +98,4 @@ The Wine cases need a root with Wine in it and skip without one, as the Alpine c
 - Whether a Linux root's Wine is the only target, or h9 should provide a Wine build with the driver in it, so the version always matches.
 - Keyboard layouts beyond US, and keys that `/dev/kbd` reports as runes with no scan code.
 - Whether the X server bridge in Rationale should come first, since it would cover both Wine and Linux X11 programs.
+- Wine fails with paths under `/mnt/term`: it can't open such a working directory ("could not open working directory"), `wine /path/prog.exe` with a Unix path to a program segfaults where `wine 'c:\prog.exe'` runs, and a `WINEDLLPATH` there isn't searched. Until that's found, the driver is copied into the root and test programs into the prefix's `C:`. This is in the Linux personality, not the driver.
