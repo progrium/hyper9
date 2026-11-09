@@ -42,6 +42,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [recursive-unions](0102-recursive-unions.md) | draft |  | Recursive unions and root layers |
 | [linux-i386](0105-linux-i386.md) | implemented |  | 32-bit x86 Linux programs |
 | [tilde-roots](0107-tilde-roots.md) | draft |  | Tilde roots from $H9ROOTPATH |
+| [child-machines](0109-child-machines.md) | draft |  | Child machines |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [ci](ci.md) | draft |  | Continuous integration |
@@ -98,6 +99,7 @@ flowchart LR
   p_recursive_unions["#35;102 recursive-unions<br/>draft"]:::draft
   p_linux_i386["#35;105 linux-i386<br/>implemented"]:::implemented
   p_tilde_roots["#35;107 tilde-roots<br/>draft"]:::draft
+  p_child_machines["#35;109 child-machines<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
   p_browser_gfx["browser-gfx<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
