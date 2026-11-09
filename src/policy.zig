@@ -156,6 +156,30 @@ pub const NinePRoot = struct {
     proxy: ?[]const u8 = null,
 };
 
+/// The listeners that serve the namespace over 9P (design/0035-serve.md),
+/// as the plan shows them.
+pub const Serve = struct {
+    pub const Listener = struct {
+        /// The address as `--serve` takes it.
+        addr: []const u8,
+        kind: enum { unix, tcp, ws },
+    };
+    listeners: []const Listener,
+    /// The guest path each connection exports.
+    root: []const u8 = "/",
+    /// WebSocket listeners require a token.
+    token: bool = false,
+    /// Origins WebSocket listeners accept.
+    origins: []const []const u8 = &.{},
+    /// `/net` is exported.
+    net: bool = false,
+    /// There's no program: the run only serves. The CLI sets it.
+    only: bool = false,
+    /// The exportfs run when the root has no /bin/exportfs: the built-in
+    /// root's.
+    fallback: []const u8 = "",
+};
+
 /// The host-stream device, `#ℏ`, whose tree is the guest's /net/ws.
 pub const hstream_dev = "ℏ";
 
@@ -223,6 +247,8 @@ pub const Plan = struct {
     /// The host's DNS servers: a connect to port 53 on one is allowed
     /// even when it's link-local, as a cloud VM's resolver is.
     nameservers: []const [16]u8 = &.{},
+    /// The `--serve` listeners (design/0035-serve.md), if any.
+    serve: ?Serve = null,
 
     /// Checks `op` on the resolved host path `path`.
     pub fn check(p: *const Plan, path: []const u8, op: Op) Verdict {
@@ -268,6 +294,7 @@ pub const Plan = struct {
     /// Prints the plan in the format of DESIGN.md, "Plan output".
     pub fn print(p: *const Plan, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("profile:  {t}\n", .{p.profile});
+        if (p.serve) |sv| if (sv.only) try w.writeAll("program:  none (serve only)\n");
         try w.writeAll("enforces:");
         var it = p.enforces.iterator();
         while (it.next()) |c| try w.print(" {t}", .{c});
@@ -281,7 +308,12 @@ pub const Plan = struct {
         try w.print("limits:   write={t} net={t}", .{ p.write, p.net });
         if (p.memory) |m| try w.print(" memory={f}", .{fmtSize(m)});
         if (p.timeout_ns) |d| try w.print(" timeout={f}", .{fmtDuration(d)});
-        if (p.pids) |n| try w.print(" pids={d}", .{n});
+        if (p.pids) |n| {
+            try w.print(" pids={d}", .{n});
+            // Serving's processes are counted on their own
+            // (design/0035-serve.md, "Limits").
+            if (p.serve != null) try w.print(" (+{d} serving)", .{n});
+        }
         if (p.cpus) |n| try w.print(" cpus={d}", .{n});
         try w.writeAll("\n");
         try w.writeAll("devmask: ");
@@ -330,6 +362,24 @@ pub const Plan = struct {
                 .allow_eph => "eph ",
                 .deny => "deny",
             }, r.path });
+        }
+        if (p.serve) |sv| {
+            try w.print("serve:    # /bin/exportfs, or {s} without one\n", .{sv.fallback});
+            for (sv.listeners) |l| {
+                var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+                defer line.deinit();
+                line.writer.print("  {s}", .{l.addr}) catch return error.WriteFailed;
+                try w.writeAll(line.written());
+                try w.splatByteAll(' ', (40 -| line.written().len) + 1);
+                try w.print("exportfs{s} -r {s}", .{ if (p.write == .none) " -R" else "", sv.root });
+                if (l.kind == .ws) {
+                    try w.print("   ({s}origins: ", .{if (sv.token) "token, " else ""});
+                    if (sv.origins.len == 0) try w.writeAll("none");
+                    for (sv.origins, 0..) |o, i| try w.print("{s}{s}", .{ if (i > 0) " " else "", o });
+                    try w.writeAll(")");
+                }
+                try w.writeAll("\n");
+            }
         }
         try w.writeAll("caveats:\n");
         for (p.caveats) |c| try w.print("  - {s}\n", .{c});
@@ -414,6 +464,8 @@ pub const Inputs = struct {
     builtin: Builtin = .off,
     /// What the plan says about the built-in root beside its bind.
     builtin_note: ?[]const u8 = null,
+    /// `--serve` listeners (design/0035-serve.md).
+    serve: ?Serve = null,
 };
 
 /// Whether host path `path` is one `--writable` names, and writing is allowed.
@@ -768,6 +820,18 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
+    var serve_plan = in.serve;
+    if (serve_plan) |*sv| {
+        sv.fallback = try std.fmt.allocPrint(arena, "{s}/{s}/bin/exportfs", .{ builtin_dev, in.arch.name() });
+        // Unix sockets rely on file permissions, and TCP has nothing, so
+        // both are listed, as is a WebSocket listener without a token.
+        for (sv.listeners) |l| if (l.kind != .ws or !sv.token) {
+            try caveats.append(arena, try std.fmt.allocPrint(arena, "served without authentication on {s}", .{l.addr}));
+        };
+        if (sv.net) for (sv.listeners) |l| {
+            try caveats.append(arena, try std.fmt.allocPrint(arena, "/net served on {s}: clients can dial out from the host's address, under --net={t}", .{ l.addr, net }));
+        };
+    }
     try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
     try caveats.append(arena, "the h9 process itself is not host-sandboxed");
 
@@ -792,6 +856,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .root_overlay = root_overlay,
         .nameservers = nameservers.items,
         .gfx = in.gfx,
+        .serve = serve_plan,
     };
 }
 

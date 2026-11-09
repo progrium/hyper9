@@ -73,8 +73,8 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
 /// Cases the web host can't run (design/0012-browser-host.md), skipped
 /// when H9_TEST_WEB is set (-Dweb): by name, those that need a host TTY,
 /// POSIX signals, or what a page's WebSocket can't do; by tag, the
-/// network's and 9P roots' proposals, since the web host has only
-/// WebSockets.
+/// network's, 9P roots', and serving's proposals, since the web host has
+/// only WebSockets and can't listen.
 const web_skips = [_][]const u8{
     "the discarded-changes notice is printed on a terminal and not otherwise",
     "--timeout stops a console read on a terminal at once",
@@ -106,7 +106,7 @@ const web_skips = [_][]const u8{
     // Browsers and Node fail a handshake that offered subprotocols and got none.
     "a ws:// root works with a server that selects no subprotocol",
 };
-const web_skip_tags = [_][]const u8{ "5", "13" };
+const web_skip_tags = [_][]const u8{ "5", "13", "35" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -6132,4 +6132,759 @@ test "a missing command names the built-in root in its error [87]" {
     defer r.deinit();
     try std.testing.expectEqual(127, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "not in the built-in root; pass --root or set H9ROOT") != null);
+}
+
+// Serving the namespace (design/0035-serve.md). A server is h9 on a
+// terminal from tests/term.zig, so the cases can signal it and read its
+// "serve: ADDR" lines; a client is a second h9 with the listener as its
+// 9P root, which mounts the connection's /srv/root at /mnt/temp to look
+// at the served tree beside its own. The HTTP and 9P-level cases speak to
+// the listener over a socket of their own.
+
+/// The case's environment, skipped on Windows: the cases signal the server.
+fn serveEnv(comptime src: std.builtin.SourceLocation) !Env {
+    const e = try env(src);
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    return e;
+}
+
+/// A scratch directory with `marker` in it, the server's --cwd.
+fn serveScratch(s: *Scratch) !void {
+    try s.init();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "marker", .data = "served\n" });
+}
+
+/// `name` in `s`, in `buf`.
+fn scratchPath(s: *Scratch, buf: []u8, name: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ s.path, name });
+}
+
+/// Starts `h9 args...` on a terminal on the first backend.
+fn startServer(e: Env, args: []const []const u8) !Term {
+    return spawnTerm(e, firstBackend(e), args);
+}
+
+/// Waits for the server's next "serve: ADDR" line and returns ADDR,
+/// copied into `buf`.
+fn servedAddr(t: *Term, buf: []u8) ![]const u8 {
+    try t.expect("serve: ", slow(10_000));
+    const start = t.mark;
+    try t.expect("\n", slow(10_000));
+    const line = std.mem.trimEnd(u8, t.out.items[start .. t.mark - 1], "\r");
+    @memcpy(buf[0..line.len], line);
+    return buf[0..line.len];
+}
+
+/// The port at the end of `tcp!127.0.0.1!PORT` or in `ws://127.0.0.1:PORT/path`.
+fn addrPort(addr: []const u8) !u16 {
+    if (std.mem.startsWith(u8, addr, "tcp!")) {
+        const bang = std.mem.lastIndexOfScalar(u8, addr, '!').?;
+        return std.fmt.parseInt(u16, addr[bang + 1 ..], 10);
+    }
+    const rest = addr["ws://".len..];
+    const colon = std.mem.indexOfScalar(u8, rest, ':').?;
+    const slash = std.mem.indexOfScalarPos(u8, rest, colon, '/') orelse rest.len;
+    return std.fmt.parseInt(u16, rest[colon + 1 .. slash], 10);
+}
+
+/// Waits up to 10 s for `path` to exist, as a serve-only run's socket.
+fn waitPath(path: []const u8) !void {
+    var i: usize = 0;
+    while (i < slow(200)) : (i += 1) {
+        std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch {
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+            continue;
+        };
+        return;
+    }
+    return error.Timeout;
+}
+
+fn pathExists(path: []const u8) bool {
+    std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch return false;
+    return true;
+}
+
+/// Runs a client, `h9 --root ROOT args...`, on the first backend, without
+/// the proxy variables, so a ws:// root on 127.0.0.1 is dialed directly.
+fn runClient(e: Env, root: []const u8, args: []const []const u8) !Result {
+    var map = try std.testing.environ.createMap(gpa);
+    defer map.deinit();
+    for ([_][]const u8{ "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy" }) |k| _ = map.swapRemove(k);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, args);
+    const r = try runProcessWith(argv.items, null, &map, 60_000);
+    const code = switch (r.term) {
+        .exited => |c| c,
+        else => {
+            gpa.free(r.stdout);
+            gpa.free(r.stderr);
+            return error.Crashed;
+        },
+    };
+    return .{ .code = code, .out = r.stdout, .err = r.stderr };
+}
+
+/// A client on `addr` running `cmd` with the served tree at /mnt/temp.
+fn runServed(e: Env, addr: []const u8, cmd: []const u8) !Result {
+    var buf: [1024]u8 = undefined;
+    return runClient(e, addr, &.{ "--rc", try std.fmt.bufPrint(&buf, "mount /srv/root /mnt/temp && {{ {s} }}", .{cmd}) });
+}
+
+/// Checks that a client on `addr` reads the server's marker at `path`.
+fn expectServed(e: Env, addr: []const u8, path: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const r = try runServed(e, addr, try std.fmt.bufPrint(&buf, "cat {s}", .{path}));
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("served\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+/// A TCP connection of the case's own to 127.0.0.1:`port`.
+const Sock = struct {
+    s: std.Io.net.Stream,
+
+    fn dial(port: u16) !Sock {
+        const a = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+        return .{ .s = try a.connect(std.testing.io, .{ .mode = .stream }) };
+    }
+
+    fn close(k: Sock) void {
+        k.s.close(std.testing.io);
+    }
+
+    fn write(k: Sock, bytes: []const u8) !void {
+        var off: usize = 0;
+        while (off < bytes.len) {
+            const n = std.c.write(k.s.socket.handle, bytes[off..].ptr, bytes.len - off);
+            if (n <= 0) return error.WriteFailed;
+            off += @intCast(n);
+        }
+    }
+
+    /// Reads what's there within `ms`; 0 at EOF or a reset.
+    fn read(k: Sock, buf: []u8, ms: u32) !usize {
+        try deadline.waitReadable(k.s.socket.handle, @intCast(slow(ms)));
+        const n = std.c.read(k.s.socket.handle, buf.ptr, buf.len);
+        return if (n <= 0) 0 else @intCast(n);
+    }
+
+    /// Reads exactly `buf.len` bytes, or fails with error.Closed.
+    fn readFull(k: Sock, buf: []u8, ms: u32) !void {
+        var off: usize = 0;
+        while (off < buf.len) {
+            const n = try k.read(buf[off..], ms);
+            if (n == 0) return error.Closed;
+            off += n;
+        }
+    }
+
+    /// Sends a Tversion and checks for the Rversion: the connection has
+    /// an exportfs behind it.
+    fn version(k: Sock) !void {
+        try k.write("\x13\x00\x00\x00\x64\xff\xff\x00\x20\x00\x00\x06\x009P2000");
+        var hdr: [7]u8 = undefined;
+        try k.readFull(&hdr, 10_000);
+        if (hdr[4] != 101) return error.NotRversion;
+        const size = std.mem.readInt(u32, hdr[0..4], .little);
+        var rest: [64]u8 = undefined;
+        if (size < 7 or size - 7 > rest.len) return error.NotRversion;
+        try k.readFull(rest[0 .. size - 7], 10_000);
+    }
+
+    /// Waits up to `ms` for the server to close the connection.
+    fn expectClosed(k: Sock, ms: u32) !void {
+        var buf: [256]u8 = undefined;
+        while (true) if (try k.read(&buf, ms) == 0) return;
+    }
+
+    /// Sends a WebSocket upgrade for `target` with `extra` header lines and
+    /// returns the status code of the answer.
+    fn upgrade(k: Sock, target: []const u8, extra: []const u8) !u16 {
+        var req: [1024]u8 = undefined;
+        try k.write(try std.fmt.bufPrint(&req, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: 9p\r\n{s}\r\n", .{ target, extra }));
+        // Reads to the end of the head, a byte at a time, so a frame after
+        // it stays unread.
+        var head: [2048]u8 = undefined;
+        var n: usize = 0;
+        while (n < head.len) {
+            try k.readFull(head[n .. n + 1], 10_000);
+            n += 1;
+            if (std.mem.endsWith(u8, head[0..n], "\r\n\r\n")) break;
+        }
+        if (!std.mem.startsWith(u8, head[0..n], "HTTP/1.1 ")) return error.NotHttp;
+        return std.fmt.parseInt(u16, head[9..12], 10);
+    }
+};
+
+test "an h9 root over --serve unix! lists the served tree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", addr, "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "an h9 root over --serve tcp! lists the served tree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "an h9 ws:// root over --serve ws:// lists the served tree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try std.testing.expect(std.mem.startsWith(u8, addr, "ws://127.0.0.1:"));
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "a guest mounts a --serve ws:// listener through /net/ws [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    var cmd: [256]u8 = undefined;
+    const r = try runClient(e, e.root, &.{ "--rc", try std.fmt.bufPrint(&cmd, "mkdir /tmp/fs && wsmount {s} /tmp/fs && cat /tmp/fs/mnt/term/cwd/marker", .{addr}) });
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("served\n", r.out);
+}
+
+test "--serve-root exports only that subtree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--serve-root", "/mnt/term/cwd", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    // The subtree has no rc to boot a client from, so the client mounts
+    // it beside its own root.
+    var cmd: [256]u8 = undefined;
+    const r = try runClient(e, e.root, &.{ "--rc", try std.fmt.bufPrint(&cmd, "mkdir /tmp/fs && wsmount {s} /tmp/fs && cat /tmp/fs/marker && {{ test -e /tmp/fs/rc && echo whole || echo subtree }}", .{addr}) });
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("served\nsubtree\n", r.out);
+}
+
+test "--serve under --write=none refuses writes [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--write=none", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "touch /mnt/temp/tmp/f >[2]/dev/null && echo wrote || echo refused");
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("refused\n", r.out);
+}
+
+test "--read-deny paths aren't visible through --serve [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "hidden\n" });
+    var db: [512]u8 = undefined;
+    var t = try startServer(e, &.{ "--cwd", s.path, "--read-deny", try scratchPath(&s, &db, "secret"), "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "cat /mnt/temp/mnt/term/cwd/marker; if(test -e /mnt/temp/mnt/term/cwd/secret) echo seen; if not echo hidden");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("served\nhidden\n", r.out);
+}
+
+test "clients see the plan's namespace, not the program's later binds [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "tcp!127.0.0.1!0", "--rc", "bind /mnt/term/cwd /tmp && cat /tmp/marker && echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "if(test -e /mnt/temp/tmp/marker) echo bound; if not echo plan");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("plan\n", r.out);
+}
+
+test "listeners close and clients see hangups when the program exits [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ub: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    const unix = try std.fmt.bufPrint(&ub, "unix!{s}", .{sock});
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--serve", unix, "--rc", "echo ready; read >/dev/null; exit gone" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const k = try Sock.dial(try addrPort(addr));
+    defer k.close();
+    try k.version();
+    try t.send("x" ++ enter);
+    try k.expectClosed(10_000);
+    try std.testing.expectEqual(1, try t.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+    try std.testing.expectError(error.ConnectionRefused, Sock.dial(try addrPort(addr)));
+}
+
+test "a ws:// listener refuses an unlisted Origin with 403 [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-origin", "http://ok.example", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect("ready", slow(10_000));
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(403, try k.upgrade("/9p", "Origin: http://evil.example\r\n"));
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(101, try k.upgrade("/9p", "Origin: http://ok.example\r\n"));
+    }
+}
+
+test "a ws:// listener with --serve-token refuses a request without it [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "token", .data = "s3cret\n" });
+    var tb: [512]u8 = undefined;
+    var fb: [600]u8 = undefined;
+    const tok = try std.fmt.bufPrint(&fb, "@{s}", .{try scratchPath(&s, &tb, "token")});
+    var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-token", tok, "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect("ready", slow(10_000));
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(401, try k.upgrade("/9p", ""));
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(401, try k.upgrade("/9p", "Authorization: Bearer wrong\r\n"));
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(101, try k.upgrade("/9p", "Authorization: Bearer s3cret\r\n"));
+    }
+}
+
+test "a ws:// listener accepts the token in the query [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "token", .data = "ab+c/=\n" });
+    var tb: [512]u8 = undefined;
+    var fb: [600]u8 = undefined;
+    const tok = try std.fmt.bufPrint(&fb, "@{s}", .{try scratchPath(&s, &tb, "token")});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--serve-token", tok, "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    {
+        const k = try Sock.dial(try addrPort(addr));
+        defer k.close();
+        try std.testing.expectEqual(101, try k.upgrade("/9p?token=ab%2Bc%2F%3D", ""));
+    }
+    var ub: [256]u8 = undefined;
+    try expectServed(e, try std.fmt.bufPrint(&ub, "{s}?token=ab%2bc/%3d", .{addr}), "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "the 33rd connection is refused [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    var conns: [32]Sock = undefined;
+    var open: usize = 0;
+    defer for (conns[0..open]) |k| k.close();
+    while (open < conns.len) : (open += 1) {
+        conns[open] = try Sock.dial(port);
+        errdefer conns[open].close();
+        try conns[open].version();
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectError(error.Closed, k.version());
+    }
+    // Closing one frees its slot.
+    open -= 1;
+    conns[open].close();
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        const k = try Sock.dial(port);
+        defer k.close();
+        k.version() catch |err| {
+            if (i >= 50) return err;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+            continue;
+        };
+        break;
+    }
+}
+
+test "clients exporting at the --pids cap don't stop the program's rfork [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--pids", "8", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; read >/dev/null; echo a | cat; echo forked" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect("ready", slow(10_000));
+    // More connections than serving's share of --pids: the ones past it
+    // are closed, and the program still forks.
+    var conns: [12]Sock = undefined;
+    var open: usize = 0;
+    defer for (conns[0..open]) |k| k.close();
+    var refused: usize = 0;
+    while (open < conns.len) : (open += 1) {
+        conns[open] = try Sock.dial(port);
+        conns[open].version() catch {
+            refused += 1;
+        };
+    }
+    try std.testing.expect(refused > 0);
+    try t.send("x" ++ enter);
+    try t.expect("a", slow(10_000));
+    try t.expect("forked", slow(10_000));
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+}
+
+test "--serve with no program serves until a hangup and exits 0 [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{sock});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", addr });
+    defer t.deinit();
+    try waitPath(sock);
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+    t.signal(.HUP);
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+}
+
+test "--serve tcp!127.0.0.1!0 prints the bound address [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try std.testing.expect(std.mem.startsWith(u8, addr, "tcp!127.0.0.1!"));
+    const port = try addrPort(addr);
+    try std.testing.expect(port != 0);
+    const k = try Sock.dial(port);
+    defer k.close();
+    try k.version();
+}
+
+/// Leaves a unix socket at `path` that nothing answers, as a crashed
+/// server would.
+fn staleSocket(path: []const u8) !void {
+    const ua = try std.Io.net.UnixAddress.init(path);
+    var srv = try ua.listen(std.testing.io, .{});
+    srv.deinit(std.testing.io);
+    try std.testing.expect(pathExists(path));
+}
+
+test "a stale unix socket is replaced and removed at exit [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    try staleSocket(sock);
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{sock});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", addr, "--rc", "echo ready; read >/dev/null" });
+    defer t.deinit();
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+    try t.send("x" ++ enter);
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+    try std.testing.expect(!s.exists("fs.sock.lock"));
+}
+
+test "a unix socket path that isn't a socket exits 125 [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fs.sock", .data = "keep\n" });
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
+    const r = try runOn(e, firstBackend(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+    try expectIn(r.err, "not a socket");
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("keep\n", try s.tmp.dir.readFile(std.testing.io, "fs.sock", &buf));
+}
+
+test "a ws:// listener pings an idle client and closes one that stops answering [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    const k = try Sock.dial(port);
+    defer k.close();
+    try std.testing.expectEqual(101, try k.upgrade("/9p", ""));
+    // The keepalive pings after 30 s idle and fails the connection 30 s
+    // after that; this client never answers.
+    var hdr: [2]u8 = undefined;
+    try k.readFull(&hdr, 45_000);
+    try std.testing.expectEqual(0x89, hdr[0]);
+    try k.expectClosed(45_000);
+}
+
+test "an address in use exits 125 [35]" {
+    const e = try serveEnv(@src());
+    var srv = try listenLocal();
+    defer srv.deinit(std.testing.io);
+    var ab: [64]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&ab, "tcp!127.0.0.1!{d}", .{srv.socket.address.getPort()});
+    const r = try runOn(e, firstBackend(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+    try expectIn(r.err, "address in use");
+}
+
+test "a client doesn't see /net without --serve-net [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--rc", "test -e /net/tcp/clone && echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "if(test -e /mnt/temp/net/tcp/clone) echo net; if not echo nonet");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("nonet\n", r.out);
+}
+
+test "--serve-net exports /net and the plan shows a caveat [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--serve-net", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "if(test -e /mnt/temp/net/tcp/clone) echo net; if not echo nonet");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("net\n", r.out);
+    const p = try run(e, &.{ "--print", "--serve", "tcp!127.0.0.1!5640", "--serve-net", "--rc", "echo" });
+    defer p.deinit();
+    try expectIn(p.out, "/net served on tcp!127.0.0.1!5640: clients can dial out from the host's address");
+}
+
+test "--serve-origin '*' without --serve-token exits 2 [35]" {
+    const e = try serveEnv(@src());
+    const r = try run(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-origin", "*", "--rc", "echo ran" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+}
+
+test "a connection past 8 blocking requests fails them without affecting another [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    // /srv/blk is a pipe nobody writes, so each read through it blocks
+    // one of the connection's exportfs processes.
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "srv.rc", .data = "{ echo 3 >/srv/blk; echo ready; sleep 60 } <>[3] '#|/data'\n" });
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--rc", ". /mnt/term/cwd/srv.rc" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    var cmd: [512]u8 = undefined;
+    const r = try runClient(e, e.root, &.{ "--rc", try std.fmt.bufPrint(&cmd,
+        \\mkdir /tmp/a /tmp/b && wsmount {s} /tmp/a || exit
+        \\for(i in 1 2 3 4 5 6 7 8 9 10 11 12) {{ cat /tmp/a/srv/blk >[2]/tmp/err.$i & }}
+        \\sleep 3
+        \\wsmount {s} /tmp/b && cat /tmp/b/mnt/term/cwd/marker
+        \\cat /tmp/err.* | grep -c 'Out of processes'
+    , .{ addr, addr }) });
+    defer r.deinit();
+    errdefer std.debug.print("client out: {s}\nclient stderr: {s}\n", .{ r.out, r.err });
+    var lines = std.mem.splitScalar(u8, r.out, '\n');
+    try std.testing.expectEqualStrings("served", lines.next().?);
+    const failed = try std.fmt.parseInt(u32, lines.next().?, 10);
+    try std.testing.expect(failed > 0);
+}
+
+test "--serve works over a root without /bin/exportfs [35]" {
+    const e = try serveEnv(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    // --read-deny hides the root's exportfs, so the server falls back to
+    // the built-in root's.
+    var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&db, "{s}/{s}/bin/exportfs", .{ e.root, testArch(e) });
+    var t = try startServer(e, &.{ "--cwd", s.path, "--read-deny", deny, "--serve", "tcp!127.0.0.1!0", "--rc", "test -e /bin/exportfs || echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "$serve lists the bound addresses [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const unix = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
+    const r = try run(e, &.{ "--serve", unix, "--serve", "tcp!127.0.0.1!0", "--rc", "echo $#serve; echo $serve(1); echo $serve(2)" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    var lines = std.mem.splitScalar(u8, r.out, '\n');
+    try std.testing.expectEqualStrings("2", lines.next().?);
+    try std.testing.expectEqualStrings(unix, lines.next().?);
+    const tcp = lines.next().?;
+    try std.testing.expect(std.mem.startsWith(u8, tcp, "tcp!127.0.0.1!"));
+    try std.testing.expect(try addrPort(tcp) != 0);
+    // The bound address is the one printed on stderr.
+    try expectIn(r.err, tcp);
+}
+
+test "an interrupt to the program leaves clients connected [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "rc", "-i" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect(prompt, slow(10_000));
+    const k = try Sock.dial(port);
+    defer k.close();
+    try k.version();
+    try t.send("sleep 60" ++ enter);
+    try t.drain(500);
+    try t.send("\x03");
+    try t.expect(prompt, slow(10_000));
+    try k.version();
+    try t.send("exit" ++ enter);
+    _ = try t.wait(slow(10_000));
+}
+
+test "two runs on one stale unix socket: one listens, one exits 125 [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    try staleSocket(sock);
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{sock});
+    var a = try startServer(e, &.{ "--cwd", s.path, "--serve", addr });
+    defer a.deinit();
+    var b = try startServer(e, &.{ "--cwd", s.path, "--serve", addr });
+    defer b.deinit();
+    // One of the two fails; the other is still serving.
+    var i: usize = 0;
+    while (a.code == null and b.code == null) : (i += 1) {
+        if (i > slow(200)) return error.Timeout;
+        try a.drain(25);
+        try b.drain(25);
+    }
+    const lost, const won = if (a.code != null) .{ &a, &b } else .{ &b, &a };
+    try std.testing.expectEqual(125, lost.code.?);
+    try std.testing.expect(std.mem.indexOf(u8, lost.out.items, "address in use") != null);
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+    won.signal(.TERM);
+    try std.testing.expectEqual(0, try won.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+}
+
+test "--print lists listeners and elides the token [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "token", .data = "s3cret\n" });
+    var tb: [512]u8 = undefined;
+    var fb: [600]u8 = undefined;
+    const tok = try std.fmt.bufPrint(&fb, "@{s}", .{try scratchPath(&s, &tb, "token")});
+    var pb: [512]u8 = undefined;
+    var ub: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    const unix = try std.fmt.bufPrint(&ub, "unix!{s}", .{sock});
+    const r = try run(e, &.{ "--print", "--serve", "ws://127.0.0.1:8080/9p", "--serve-token", tok, "--serve-origin", "http://a.example", "--serve", unix, "--write=none", "--rc", "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "\nserve:");
+    try expectIn(r.out, "ws://127.0.0.1:8080/9p");
+    try expectIn(r.out, "exportfs -R -r /   (token, origins: http://a.example)");
+    try expectIn(r.out, unix);
+    try expectIn(r.out, "served without authentication on " ++ "unix!");
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "s3cret") == null);
+    // --print binds nothing.
+    try std.testing.expect(!pathExists(sock));
 }

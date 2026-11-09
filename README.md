@@ -509,6 +509,38 @@ h9 --net-allow 'tcp!*.example.com!443' myclient        # egress only to these na
 | `--no-guest-tools` | Leave out `#H/bin`, h9's own commands, and mask `#H` |
 | `--print`, `--strict` | Print the plan and exit; refuse (exit 2) capabilities this build can't enforce |
 
+### Serving
+
+`--serve ADDR` serves the machine's namespace over 9P while the program
+runs, one `exportfs` per connection, so a 9front machine, another h9, or any
+9P2000 client can mount what the guest sees, under the same access rules
+([serve](design/0035-serve.md)). Clients see the namespace as the plan built
+it, without `/net` unless `--serve-net` is given. With no program, h9 only
+serves, until Ctrl-C, SIGTERM, or `--timeout`, and then exits 0.
+
+```sh
+h9 --serve unix!/tmp/h9.sock                 # serve only; then, in another shell:
+h9 --root unix!/tmp/h9.sock --rc 'mount /srv/root /mnt/temp && ls /mnt/temp/mnt/term/cwd'
+h9 --serve tcp!127.0.0.1!0 --rc 'echo $serve; sleep 600'   # port 0: prints serve: tcp!127.0.0.1!PORT
+h9 --serve ws://127.0.0.1:8080/9p --serve-origin http://localhost:8000 --serve-token @token
+h9 --write=none --serve-root /mnt/term/cwd --serve unix!/tmp/ro.sock   # a read-only export of the cwd
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--serve ADDR` | Repeatable. Listen on `unix!PATH`, `tcp!HOST!PORT`, or `ws://HOST:PORT[/PATH]`; port 0 picks a free port. A stale unix socket is replaced, and the socket is removed at exit |
+| `--serve-root PATH` | The guest path each connection exports, `/` by default |
+| `--serve-token @FILE` | WebSocket listeners require this token, as `Authorization: Bearer TOKEN` or `?token=TOKEN` |
+| `--serve-origin ORIGIN` | Repeatable. An `Origin` WebSocket listeners accept; `*` for any, which needs `--serve-token`. Requests without `Origin` are accepted |
+| `--serve-net` | Export `/net` too, so clients can dial out from this host |
+
+Unix and TCP listeners have no authentication, and the plan says so in a
+caveat: serve TCP on loopback, or behind something that authenticates. Every
+client acts as the machine's user. A machine serves at most 32 connections,
+each with at most 8 exportfs processes, and serving's processes count against
+`--pids` separately from the program's. `wss://` is a reverse proxy, such as
+Caddy, in front of a `ws://` listener on loopback.
+
 `zig build` also writes the test binaries `zig-out/fixtures/hello` (arm64) and
 `zig-out/fixtures/hello-amd64`. They're hand-assembled a.outs (see
 [tests/fixtures/hello.zig](tests/fixtures/hello.zig)) because Zig no longer

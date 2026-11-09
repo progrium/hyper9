@@ -38,6 +38,9 @@ pub const Close = struct {
     pub const normal = 1000;
     pub const going_away = 1001;
     pub const protocol_error = 1002;
+    /// A data type the endpoint can't accept: a text message on a
+    /// served 9P stream (design/0035-serve.md).
+    pub const unsupported_data = 1003;
     pub const invalid_data = 1007;
     pub const too_big = 1009;
     /// Received when a close frame has no code; never sent.
@@ -309,6 +312,8 @@ pub fn readResponse(r: *Reader, key: []const u8, offered: []const []const u8, re
 
 /// A client's opening handshake, as the server side reads it.
 pub const Request = struct {
+    /// The method, in `buf`: `GET` for an upgrade.
+    method: []const u8 = "",
     /// The request target, in `buf`.
     target: []const u8 = "",
     key: []const u8 = "",
@@ -346,13 +351,17 @@ pub const Request = struct {
     }
 };
 
-/// Reads a client's opening handshake (the server side).
+/// Reads a client's opening handshake (the server side). Any method is
+/// read, so the caller can answer one that isn't `GET` with 405.
 pub fn readRequest(r: *Reader, q: *Request) HandshakeError!void {
     const first = try readLine(r);
     // GET /path HTTP/1.1
     var parts = std.mem.splitScalar(u8, first, ' ');
-    if (!std.mem.eql(u8, parts.next() orelse "", "GET")) return error.BadResponse;
+    const method = parts.next() orelse "";
+    if (method.len == 0) return error.BadResponse;
+    q.method = q.keep(method);
     q.target = q.keep(parts.next() orelse return error.BadResponse);
+    if (!std.mem.startsWith(u8, parts.next() orelse "", "HTTP/1.")) return error.BadResponse;
     const start = q.used;
     var key_at: ?struct { usize, usize } = null;
     var proto_at: ?struct { usize, usize } = null;
@@ -389,6 +398,120 @@ pub fn writeAccept(w: *Writer, key: []const u8, protocol: ?[]const u8) Writer.Er
 pub fn writeStatus(w: *Writer, status: u16, reason: []const u8) Writer.Error!void {
     try w.print("HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{ status, reason });
     try w.flush();
+}
+
+/// A status's reason phrase, for `writeStatus`.
+pub fn reasonPhrase(status: u16) []const u8 {
+    return switch (status) {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        426 => "Upgrade Required",
+        503 => "Service Unavailable",
+        else => "Error",
+    };
+}
+
+/// What a WebSocket listener accepts (design/0035-serve.md, "WebSocket
+/// listeners").
+pub const ServerPolicy = struct {
+    /// The one path upgrades are answered on.
+    path: []const u8 = "/",
+    /// The token a request must carry, as `Authorization: Bearer TOKEN`
+    /// or `?token=TOKEN`; null for none.
+    token: ?[]const u8 = null,
+    /// `Origin`s accepted; "*" accepts any. A request without `Origin`
+    /// is accepted whatever this says.
+    origins: []const []const u8 = &.{},
+};
+
+/// The answer to a request: an upgrade selecting `protocol` (or none),
+/// or a refusal with an HTTP status.
+pub const Verdict = union(enum) {
+    accept: ?[]const u8,
+    refuse: u16,
+};
+
+/// Checks a client's opening handshake against a listener's policy:
+/// 404 for another path, 405 for another method, 426 for a request
+/// that isn't an upgrade, 403 for an `Origin` not allowed, 401 without
+/// the token, and 400 when subprotocols are offered but not `9p`.
+pub fn checkUpgrade(q: *const Request, p: ServerPolicy) Verdict {
+    const qmark = std.mem.indexOfScalar(u8, q.target, '?');
+    const path = q.target[0 .. qmark orelse q.target.len];
+    if (!std.mem.eql(u8, path, p.path)) return .{ .refuse = 404 };
+    if (!std.mem.eql(u8, q.method, "GET")) return .{ .refuse = 405 };
+    if (!q.upgrade or !q.version13 or q.key.len == 0) return .{ .refuse = 426 };
+    if (q.header("origin")) |o| if (!originAllowed(p.origins, o)) return .{ .refuse = 403 };
+    if (p.token) |want| {
+        const query = if (qmark) |i| q.target[i + 1 ..] else "";
+        if (!tokenGiven(q.header("authorization"), query, want)) return .{ .refuse = 401 };
+    }
+    if (q.protocols.len > 0 and !q.offers(subprotocol)) return .{ .refuse = 400 };
+    return .{ .accept = if (q.offers(subprotocol)) subprotocol else null };
+}
+
+fn originAllowed(allowed: []const []const u8, origin: []const u8) bool {
+    for (allowed) |a| {
+        if (std.mem.eql(u8, a, "*") or std.ascii.eqlIgnoreCase(std.mem.trimEnd(u8, a, "/"), origin)) return true;
+    }
+    return false;
+}
+
+/// Whether the token is in an `Authorization: Bearer` header or the
+/// query's `token` parameter, compared in constant time.
+fn tokenGiven(auth: ?[]const u8, query: []const u8, want: []const u8) bool {
+    var ok = false;
+    if (auth) |a| {
+        if (a.len > 7 and std.ascii.eqlIgnoreCase(a[0..7], "bearer ")) ok = sameToken(std.mem.trim(u8, a[7..], " \t"), want) or ok;
+    }
+    var params = std.mem.splitScalar(u8, query, '&');
+    while (params.next()) |kv| {
+        if (!std.mem.startsWith(u8, kv, "token=")) continue;
+        var buf: [512]u8 = undefined;
+        const v = queryDecode(&buf, kv["token=".len..]) orelse continue;
+        ok = sameToken(v, want) or ok;
+    }
+    return ok;
+}
+
+/// Compares through SHA-256, so the time taken depends on neither
+/// token's contents.
+fn sameToken(got: []const u8, want: []const u8) bool {
+    const Sha = std.crypto.hash.sha2.Sha256;
+    var a: [Sha.digest_length]u8 = undefined;
+    var b: [Sha.digest_length]u8 = undefined;
+    Sha.hash(got, &a, .{});
+    Sha.hash(want, &b, .{});
+    return std.crypto.timing_safe.eql([Sha.digest_length]u8, a, b);
+}
+
+/// `%XX` and `+` decoded into `buf`, or null if it doesn't fit or is
+/// malformed.
+fn queryDecode(buf: []u8, s: []const u8) ?[]const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (n += 1) {
+        if (n >= buf.len) return null;
+        switch (s[i]) {
+            '%' => {
+                if (i + 3 > s.len) return null;
+                buf[n] = std.fmt.parseInt(u8, s[i + 1 .. i + 3], 16) catch return null;
+                i += 3;
+            },
+            '+' => {
+                buf[n] = ' ';
+                i += 1;
+            },
+            else => |c| {
+                buf[n] = c;
+                i += 1;
+            },
+        }
+    }
+    return buf[0..n];
 }
 
 // Frames
@@ -1033,4 +1156,50 @@ test "proxy URLs and CONNECT" {
     try t.expectError(error.Status, readConnect(&r2, &resp));
     try t.expectEqual(@as(u16, 407), resp.status);
     try t.expectEqualStrings("Proxy Authentication Required", resp.reason);
+}
+
+test "a listener's checks: path, method, upgrade, Origin, token, and subprotocol" {
+    const req = struct {
+        fn of(text: []const u8, q: *Request) !void {
+            var r: Reader = .fixed(text);
+            try readRequest(&r, q);
+        }
+    };
+    const up = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+    const pol: ServerPolicy = .{ .path = "/9p", .token = "s3cret t", .origins = &.{"https://app.example"} };
+    var q: Request = .{};
+    try req.of("GET /9p HTTP/1.1\r\n" ++ up ++ "Authorization: Bearer s3cret t\r\nSec-WebSocket-Protocol: 9p\r\n\r\n", &q);
+    try t.expectEqualStrings("9p", checkUpgrade(&q, pol).accept.?);
+    q = .{};
+    try req.of("GET /9p?a=1&token=s3cret%20t HTTP/1.1\r\n" ++ up ++ "Origin: https://app.example\r\n\r\n", &q);
+    try t.expect(checkUpgrade(&q, pol).accept == null);
+    q = .{};
+    try req.of("GET /9p?token=wrong HTTP/1.1\r\n" ++ up ++ "\r\n", &q);
+    try t.expectEqual(@as(u16, 401), checkUpgrade(&q, pol).refuse);
+    q = .{};
+    try req.of("GET /9p HTTP/1.1\r\n" ++ up ++ "Origin: https://evil.example\r\nAuthorization: Bearer s3cret t\r\n\r\n", &q);
+    try t.expectEqual(@as(u16, 403), checkUpgrade(&q, pol).refuse);
+    q = .{};
+    try req.of("GET /other HTTP/1.1\r\n" ++ up ++ "\r\n", &q);
+    try t.expectEqual(@as(u16, 404), checkUpgrade(&q, pol).refuse);
+    q = .{};
+    try req.of("POST /9p HTTP/1.1\r\n" ++ up ++ "\r\n", &q);
+    try t.expectEqual(@as(u16, 405), checkUpgrade(&q, pol).refuse);
+    q = .{};
+    try req.of("GET /9p HTTP/1.1\r\nHost: x\r\n\r\n", &q);
+    try t.expectEqual(@as(u16, 426), checkUpgrade(&q, pol).refuse);
+    q = .{};
+    try req.of("GET /9p HTTP/1.1\r\n" ++ up ++ "Authorization: Bearer s3cret t\r\nSec-WebSocket-Protocol: chat\r\n\r\n", &q);
+    try t.expectEqual(@as(u16, 400), checkUpgrade(&q, pol).refuse);
+    // Any origin, and no token required.
+    q = .{};
+    try req.of("GET / HTTP/1.1\r\n" ++ up ++ "Origin: https://any.example\r\n\r\n", &q);
+    try t.expect(checkUpgrade(&q, .{ .origins = &.{"*"} }) == .accept);
+    // No Origin is a client that isn't a browser.
+    q = .{};
+    try req.of("GET / HTTP/1.1\r\n" ++ up ++ "\r\n", &q);
+    try t.expect(checkUpgrade(&q, .{}) == .accept);
+    q = .{};
+    try req.of("GET / HTTP/1.1\r\n" ++ up ++ "Origin: http://localhost:8000\r\n\r\n", &q);
+    try t.expectEqual(@as(u16, 403), checkUpgrade(&q, .{}).refuse);
 }

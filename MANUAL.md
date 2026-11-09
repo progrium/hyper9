@@ -464,7 +464,7 @@ host$ h9 --rc 'exit 3'; echo $?
 | 1–255 | The program exited with that number as its string (`exit 3` in rc, `os.Exit(3)` in Go); nothing is printed |
 | 1 | The program failed with any other string, which is printed on standard error |
 | 2 | h9's command line was wrong; h9 prints its usage or the conflict |
-| 125 | h9 itself failed: no root tree, no hypervisor, not enough memory, a 9P root that can't be reached |
+| 125 | h9 itself failed: no root tree, no hypervisor, not enough memory, a 9P root that can't be reached, a `--serve` address in use |
 | 126 | The program isn't a 9front executable for this machine (chapter 29) |
 | 127 | The program wasn't found |
 
@@ -1562,6 +1562,27 @@ devices in Plan 9.
   stream, and its `text` file text messages, one per read and write.
   `wsmount [-h 'Name: value'] url mountpoint` dials a 9P server and mounts
   it. Guest connections don't use the host's proxies.
+- **Serving the machine** ([serve](design/0035-serve.md)). `--serve ADDR`
+  makes h9 a 9P server while the program runs: `unix!/path`,
+  `tcp!host!port`, or `ws://host:port/path`, repeatable. Each connection
+  gets its own `exportfs` of the machine's namespace as the plan built it,
+  so a client sees what the guest sees, under the same rules, but not binds
+  the program makes later, and not `/net` unless `--serve-net` is given.
+  `--serve-root PATH` exports a subtree instead of `/`, and `--write=none`
+  makes the export read-only (`exportfs -R`). With no program, h9 only
+  serves, until Ctrl-C, SIGTERM, a hangup, or `--timeout`, and then exits
+  0. Port 0 picks a free port, and h9 prints it (`serve:
+  tcp!127.0.0.1!53122`) before the program starts; the program finds every
+  bound address in `$serve`. A unix socket is created mode 0600 next to a
+  `PATH.lock` file, a stale socket from a run that crashed is replaced, and
+  both are removed at exit. A WebSocket listener accepts a request without
+  an `Origin` header, or with one listed by `--serve-origin`, and with
+  `--serve-token @FILE` it also needs the token, as `Authorization: Bearer
+  TOKEN` or `?token=TOKEN` (a browser can only use the query). Unix and TCP
+  listeners don't authenticate, so every client acts as your user: keep TCP
+  on loopback or a trusted network. A machine serves up to 32 connections,
+  each with up to 8 exportfs processes; serving's processes count against
+  `--pids` separately from the program's.
 - Not yet available: roots that need authentication
   ([root-auth](design/root-auth.md)); serving a machine's namespace to the
   host or the network as a 9P server from h9 itself, rather than with
@@ -1590,7 +1611,15 @@ host$ h9 --rc 'echo hello | { echo 0 >/srv/namedpipe }; cat /srv/namedpipe'
 hello
 ```
 
-One h9 serving its root tree, read-only, and another using it as its root:
+One h9 serving its namespace, read-only, and another mounting it:
+
+```sh
+host$ h9 --write=none --serve 'tcp!127.0.0.1!5640' &
+host$ h9 --root 'tcp!127.0.0.1!5640' --rc 'mount /srv/root /mnt/temp && ls /mnt/temp/mnt/term/cwd'
+```
+
+The guest can do the same itself with `aux/listen1` under `--net=enable`,
+since exportfs is in the root tree:
 
 ```sh
 host$ h9 --net=enable aux/listen1 -t 'tcp!127.0.0.1!5640' /bin/exportfs -R -r / &
@@ -1955,7 +1984,7 @@ h9 --help          (or -h alone)
 - A flag's value can be the next argument or follow `=`: `--root DIR` or
   `--root=DIR`. Flags marked *repeatable* can be given more than once.
 - `-h` is `--help` only when it's the only argument.
-- Running `h9` with no program, an unknown flag, or a bad value prints the
+- Running `h9` with no program (and no `--serve`), an unknown flag, or a bad value prints the
   usage to standard error and exits 2. A combination h9 refuses (such as
   `--write=none --writable DIR`) prints `h9: ...` and exits 2.
 
@@ -2006,6 +2035,11 @@ Files and sandbox (chapters 22 and 23):
 | `--write none\|scope\|ephemeral\|overlay` | `none`: deny every write. `scope`: writes go to the writable paths on the host, and the root is read-only. `overlay` (the default, in both profiles): as `scope`, with a copy-on-write overlay over the root, thrown away at exit. `ephemeral`: the root and the writable paths are copy-on-write overlays in memory, thrown away at exit. |
 | `--net disable\|outbound\|enable` | No network; clients only (the default); clients and servers |
 | `--net-allow PATTERN` | Allow connections only to matching dial strings; repeatable (chapter 15) |
+| `--serve ADDR` | Serve the namespace over 9P on `unix!PATH`, `tcp!HOST!PORT`, or `ws://HOST:PORT/PATH`; repeatable. With no program, only serve (chapter 16) |
+| `--serve-root PATH` | The guest path `--serve` exports, `/` by default |
+| `--serve-token @FILE` | The token WebSocket listeners require |
+| `--serve-origin ORIGIN` | An `Origin` WebSocket listeners accept, or `*` with a token; repeatable |
+| `--serve-net` | Export `/net` too |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
 | `--host-cmd` | Leave `#C`, which runs host commands, unmasked. Only in builds with `-Dhost-cmd`; otherwise exit 2. |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
@@ -2048,7 +2082,7 @@ Tools:
 | 1 | Any other exit string, including `0`; or the program was killed by a note that isn't a signal | The string, or `h9: PROG: NOTE` |
 | 2 | Usage error or refused combination | The usage, or `h9: ...` |
 | 124 | `--timeout` was reached | `h9: PROG: h9: timeout` |
-| 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, or the machine failed mid-run | `h9: ...` |
+| 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, a `--serve` address that can't be listened on, or the machine failed mid-run | `h9: ...` |
 | 126 | The program isn't a runnable a.out or ELF binary for this machine | `h9: PROG: not a 9front executable...` |
 | 127 | The program wasn't found | `h9: PROG: ...` |
 | 128+N | The program was killed by a note that's signal N, as a shell reports it: 130 for Ctrl-C (`interrupt`), 129 for `hangup`, 137 for `kill`, 141 for a closed pipe, 139 for a fault; a Linux program killed by signal N (`linux: signal N`); or a second Ctrl-C (130), SIGHUP (129), or SIGTERM (143) stopped the machine. N is the host's number for the signal, so `usr1` is 138 on Linux and 158 on macOS | Nothing for Ctrl-C and a closed pipe; otherwise `h9: PROG: NOTE` |

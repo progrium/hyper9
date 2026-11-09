@@ -336,6 +336,20 @@ The host's working directory is bound at the guest's `/mnt/term/cwd` and set as 
 
 **Graphics (`--gfx`).** A machine with `Machine.Options.gfx` claims the process's one window (`src/gfx.zig`; a second machine gets `GfxInUse`). The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, X11 on Linux only with `-Dgfx=x11` (glibc), and `headless`, a screen in memory with hooks to inject keys and mouse events and read pixels, for `tests/backends.zig`. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead. The backend files are compiled unchanged; `src/kern/gfx-gui.h`, force-included before them, renames `screeninit`, `clipread`, `clipwrite`, and `kbdkey` to h9's wrappers in `src/kern/gfx.c`, and turns the backend's `exit` (or `ExitProcess`) on a closed window into `h9_gfx_exit`, which posts `hangup` to the machine with the window (as for a closed terminal) and parks the backend's thread. The window opens lazily, on the first walk below `#i` or open of `/dev/snarf`, so a program that never draws gets no window; the backend's kprocs run in an empty namespace of their own. `/dev/kbd` serves kbdfs's format (`k`/`K` for keys held, `c` for a key typed), which rio reads, and drops keys while it isn't open. `/dev/snarf` is the host clipboard, or under `--gfx=noclip` a buffer in the h9 process; machines without `#i` can't open it. The console stays the host terminal, so `/dev/cons` and kernel prints still go there. On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same.
 
+## Serving
+
+`--serve` makes a machine a 9P server while its program runs ([serve](design/0035-serve.md)). `src/serve.zig` opens every listener before the program starts, so a failure is exit 125 with nothing run, and `Machine.serving()` and the guest's `$serve` (an rc list) give the bound addresses, port 0 resolved. The listeners close when the program exits, which hangs up every connection.
+
+**Listeners.** Unix and TCP listeners are host sockets with an accept thread each. A unix listener first takes an exclusive `flock` on `PATH.lock` (mode 0600) for the whole run, so two runs can't both decide a socket is stale; then an existing socket that refuses a connection is removed, one that answers is an address in use, and a path that isn't a socket is left alone (`not a socket`). The socket is made mode 0600, and the socket and lock file are removed at the end of the run. A TCP listener sets `SO_REUSEADDR`, so a port is free again as soon as the run ends. A `ws://` listener reads the HTTP request on its accept thread and answers it with `ws.zig`'s server side: 404 for another path, 405 for another method, 426 for a request that isn't a version 13 upgrade, 403 for an `Origin` `--serve-origin` doesn't allow, 401 without the token (compared as SHA-256 digests in constant time), and 400 for subprotocols offered without `9p`; otherwise 101, selecting `9p` when it was offered. A machine serves at most 32 connections at once; past that a connection is closed on accept, or answered 503 on a WebSocket listener, and `--trace` logs each accept and refusal.
+
+**Streams.** An accepted connection enters the kernel through devhstream as a host-made stream (`hstream.openAccepted`): raw for unix and TCP, whose bytes are queued as they arrive and written back unframed, or a server-side WebSocket, whose frames are sent unmasked and whose text messages close it with 1003. A server stream answers pings, pings after 30 s idle and fails a connection silent for another 30 s, and drops a client whose handshake hasn't finished within 60 s. The first message passes a dialect slot (`hstream.dialect`), where a `Tversion` is plain 9P2000 today and dotl's translator will hook in.
+
+**The server Proc.** After the plan's namespace is built and before the program runs, the first Proc forks the server Proc with `RFNAMEG|RFFDG|RFENVG|RFNOTEG|RFNOWAIT`: its own copy of the plan's namespace, so binds the program makes later aren't served, and its own note group, so an interrupt from the console doesn't reach exportfs. Without `--serve-net` it unmounts `/net`. It takes each ready connection from `serve.Server.next`, opens its stream as an fd, and forks a Proc that dups it to 0 and 1 and execs `exportfs -r ROOT` (`-R` under `--write=none`): the root's `/bin/exportfs` if it has one, else the built-in root's `#Hroot/$cputype/bin/exportfs`. When exportfs exits, the stream closes and the connection's slot is freed. With no program (`argv` empty), the first Proc sleeps until a note or the end of the run instead of exec'ing anything, and the CLI exits 0 when a note ends it.
+
+**Process counts.** The server Proc and its descendants are counted against `--pids` separately from the program's processes, each against the full value, so neither can use up the other's (`pids=32 (+32 serving)` in the plan). Each connection's exportfs and its children are also capped at 8 live processes, so past 8 blocking requests the next fails with exportfs's `Out of processes` while other connections carry on. Memory isn't split: exportfs counts under `--memory` with the program.
+
+**The plan.** `--print` lists the listeners under `serve:`, each with the exportfs command it runs and, for WebSocket listeners, `(token, origins: …)` without the token's value; the heading's comment says which exportfs runs. Caveats name each listener without authentication (unix, TCP, and WebSocket without a token) and, under `--serve-net`, that clients can dial out from the host's address. A serve-only run prints `program:  none (serve only)`.
+
 ## Security, debugging, and testing
 
 **Security stance.** The hypervisor isolates guest memory and the CPU, and every guest syscall is served by drawterm's kernel rather than the host's, so the guest never reaches host syscalls, ioctls, or the host environment directly. The namespace decides what a guest can reach on the host. Identity: hostowner is the host user's name; devfs maps the host's file ownership onto Plan 9 user strings.
@@ -480,6 +494,7 @@ h9 [h9-flags] --rc 'command line'
 h9 [h9-flags] --rc                  # login rc: the root's default command
 h9 [h9-flags] rc                    # interactive shell
 h9 [h9-flags]                       # no program: prints the usage to stderr, exit 2
+h9 [h9-flags] --serve ADDR...       # no program: serves the namespace until a note
 h9 --version | --check | --help      # tool functions; -h alone is --help
 ```
 
@@ -525,6 +540,11 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--write none\|scope\|ephemeral\|overlay` | Deny writes; persist only writable paths (`scope`); `scope` plus a copy-on-write overlay over the root, discarded at exit (`overlay`, the default); or make the root and writable paths overlays in memory, discarded at exit (`ephemeral`) |
 | `--net disable\|outbound\|enable` | Network policy: mask `#I`, refuse `announce` (the default profile's default), or allow it |
 | `--net-allow PATTERN` (repeatable) | Allows `connect` only to matching addresses, and `cs` lookups only of matching names (`proto!host!port`) |
+| `--serve unix!PATH\|tcp!HOST!PORT\|ws://HOST:PORT[/PATH]` (repeatable) | Serves the machine's namespace over 9P while the program runs, one `exportfs` per connection (see Serving). Port 0 picks a free port, printed as `serve: ADDR`. With no program, the run only serves. On the browser host, exit 2; an address that can't be listened on is exit 125 |
+| `--serve-root PATH` | The guest path each connection exports, absolute. `/` by default |
+| `--serve-token @FILE` | A token, the file's one word, that WebSocket listeners require as `Authorization: Bearer TOKEN` or `?token=TOKEN`. A missing file is exit 125 |
+| `--serve-origin ORIGIN` (repeatable) | An `Origin` WebSocket listeners accept; `*` for any, which needs `--serve-token`. A request with no `Origin` is accepted |
+| `--serve-net` | Exports `/net` too. Without it, the server Proc unmounts `/net` |
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |
 | `--pids N`, `--cpus N` | Caps processes and concurrently running vCPUs |
 | `--timeout DURATION` | Posts `hangup` at a deadline, waits up to 2 s, then tears down the machine |
@@ -554,7 +574,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | 1 | Any other `exits` string, including `"0"`, which is also printed to stderr; or the first process was killed by a note that isn't a signal |
 | 2 | Usage error |
 | 124 | `--timeout` stopped the program (`h9: prog: h9: timeout`), as coreutils `timeout` |
-| 125 | h9 itself failed: no hypervisor, VM creation failed, the root wasn't found, a 9P root's connection, handshake, or attach failed, or a namespace file's WebSocket mount failed; or the run ended with `halted`, an unexpected VM exit, or an internal error |
+| 125 | h9 itself failed: no hypervisor, VM creation failed, the root wasn't found, a 9P root's connection, handshake, or attach failed, a namespace file's WebSocket mount failed, or a `--serve` listener couldn't listen (`h9: serve tcp!127.0.0.1!5640: address in use`); or the run ended with `halted`, an unexpected VM exit, or an internal error |
 | 126 | The program was found but isn't a runnable a.out (bad magic or wrong architecture) |
 | 127 | The program wasn't found |
 | 128+N | The first process was killed by a note that's signal N ([exit-status](design/0033-exit-status.md)): see below |
@@ -624,12 +644,18 @@ pub const Options = struct {
     trace: ?*std.Io.Writer = null,
     dump_on_fault: bool = false,
     ns: ?[]const u8 = null,             // newns file to replay
+    serve: []const Listen = &.{},       // .unix (path), .tcp (host!port), .ws (host:port/path); empty argv serves only
+    serve_root: []const u8 = "/",       // the guest path each connection exports
+    serve_token: ?[]const u8 = null,    // required on WebSocket listeners when set
+    serve_origins: []const []const u8 = &.{}, // Origins WebSocket listeners accept; "*" for any
+    serve_net: bool = false,            // export /net too
     owned_vcpus: ?u32 = null,           // for tests of the vCPU pool
     signals: ?*Signals = null,          // Ctrl-C and hangup from the embedder
     gfx: ?Gfx = null,                   // a host window; one machine in the process at a time
     stdio: Stdio,                       // host fds behind the console
 };
 pub fn run(m: *Machine, prog: Program, argv: []const []const u8) !ExitStatus;
+pub fn serving(m: *const Machine) []const []const u8; // each listener's bound address, once run has opened them
 ```
 
 `cli.zig` is the only code that knows flag strings; tests and other embedders build `Options` directly. `stdio` and `trace` are passed in rather than taken from the process. That keeps the machine API free of CLI-global state and lets integration tests capture a machine's output and syscall trace.
