@@ -26,11 +26,11 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [linux-personality](0018-linux-personality.md) | implemented |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
-| [dotl](0022-dotl.md) | accepted | needs serve | 9P2000.L and ZeroFS |
+| [dotl](0022-dotl.md) | accepted | ready | 9P2000.L and ZeroFS |
 | [guest-tools](0032-guest-tools.md) | implemented |  | h9's own commands in the guest |
 | [exit-status](0033-exit-status.md) | implemented |  | Host exit statuses for processes killed by notes |
 | [symlinks-in-root](0034-symlinks-in-root.md) | implemented |  | Symlinks resolved inside a bound tree |
-| [serve](0035-serve.md) | draft |  | Serving the namespace over 9P |
+| [serve](0035-serve.md) | implemented |  | Serving the namespace over 9P |
 | [linux-threads](0049-linux-threads.md) | implemented |  | Linux threads |
 | [linux-net](0050-linux-net.md) | implemented |  | Linux readiness and sockets |
 | [multicall](0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
@@ -89,7 +89,7 @@ flowchart LR
   p_guest_tools["#35;32 guest-tools<br/>implemented"]:::implemented
   p_exit_status["#35;33 exit-status<br/>implemented"]:::implemented
   p_symlinks_in_root["#35;34 symlinks-in-root<br/>implemented"]:::implemented
-  p_serve["#35;35 serve<br/>draft"]:::draft
+  p_serve["#35;35 serve<br/>implemented"]:::implemented
   p_linux_threads["#35;49 linux-threads<br/>implemented"]:::implemented
   p_linux_net["#35;50 linux-net<br/>implemented"]:::implemented
   p_multicall["#35;64 multicall<br/>implemented"]:::implemented
