@@ -291,13 +291,26 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         }
         const a: h9.vmm.Arch = arch orelse h9.vmm.host_arch orelse .arm64;
         std.debug.print("h9: cannot create {t} machine for {s}: {s}\n", .{ cfg.backend, a.name(), tools.explain(cfg.backend, err) });
+        // `auto` no longer falls back to native (it isn't a security
+        // boundary); point at the explicit opt-in when it's the only
+        // backend that could run here.
+        if (cfg.backend == .auto and err == error.HypervisorUnavailable and h9.vmm.Kind.built(.native)) {
+            std.debug.print("h9: the native backend can run here, but it shares h9's process and is not a security boundary; pass --backend native to use it for a trusted guest\n", .{});
+        }
         return exit_failed;
     };
     defer machine.deinit();
-    if (cfg.backend == .auto and (machine.backend.kind() == .emu or machine.backend.kind() == .native)) {
+    if (cfg.backend == .auto and machine.backend.kind() == .emu) {
         const why = h9.vmm.whyUnavailable(.auto) orelse "no usable hypervisor";
-        const what = if (machine.backend.kind() == .emu) "the emulator" else "the native backend";
-        std.debug.print("h9: warning: {s}; using {s}\n", .{ why, what });
+        std.debug.print("h9: warning: {s}; using the emulator\n", .{why});
+    }
+    // The native backend is a trusted-guest performance path, not a
+    // sandbox: guest code shares h9's address space (design/0095, Security;
+    // audit 2026-11-09). Warn when it's chosen explicitly, but only on a
+    // terminal, so scripts that opt into it aren't spammed on every run
+    // (as the root-changes notice does below).
+    if (cfg.backend == .native and (std.Io.File.stderr().isTty(io) catch false)) {
+        std.debug.print("h9: warning: the native backend runs guest code in h9's own process and is not a security boundary; use a hypervisor backend to contain an untrusted guest\n", .{});
     }
 
     const status = machine.run(prog, argv) catch |err| {

@@ -86,8 +86,10 @@ program. That kernel decides which of your host's files, and how much of the
 network, the program can see. Chapter 23 covers that sandbox.
 
 On Linux x86\_64 hosts without KVM, such as containers and many cloud VMs,
-h9 runs amd64 programs directly on the CPU instead, in a small helper
-process whose system calls it traps (the native backend). On other hosts
+h9 can run amd64 programs directly on the CPU, in a small helper process
+whose system calls it traps (the native backend) — but that backend shares
+h9's own process and isn't a sandbox, so you choose it explicitly, with
+`--backend native`, for a program you trust (chapter 23). On other hosts
 without a usable hypervisor, such as most Windows machines and CI runners,
 `h9-emu` runs the same programs in a CPU emulator: slower for heavy
 computation, but otherwise identical (chapter 27).
@@ -139,7 +141,7 @@ server on the network (chapter 16).
 
 | Binary | License | Runs programs with |
 | --- | --- | --- |
-| `h9` | MIT | Your host's hypervisor, or on Linux x86\_64 the native backend when there's no KVM |
+| `h9` | MIT | Your host's hypervisor; on Linux x86\_64 without KVM, the native backend only when you ask for it (`--backend native`, for a trusted guest) |
 | `h9-emu` | GPLv2 | The same, or the Unicorn CPU emulator when neither is usable |
 
 The two take the same flags and behave the same way; `h9-emu` is a separate
@@ -154,7 +156,7 @@ to `h9-emu` too. (When you build `h9-emu` from source it's still called
 | --- | --- | --- |
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | ✓ |
 | Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | ✓ |
-| Linux x86\_64 | ✓ (KVM, or the native backend without it), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
+| Linux x86\_64 | ✓ (KVM; without it, `h9-emu`, or `--backend native` for a trusted guest), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
 | Windows on ARM | *Not yet available ([whp](design/0017-whp.md))* | ✓ |
 | Windows x86\_64 | Incomplete: the WHP backend is built but still a draft ([whp](design/0017-whp.md)) | ✓, with an amd64 root tree |
 
@@ -162,10 +164,11 @@ to `h9-emu` too. (When you build `h9-emu` from source it's still called
 entitlement in `h9.entitlements`; `zig build` does that, and release binaries
 will come signed. `h9-emu` needs nothing special. On Linux, KVM needs read
 and write access to `/dev/kvm` (usually by being in the `kvm` group), and in
-a VM, nested virtualization. Without them, h9 on Linux x86\_64 uses the
-native backend, which needs Linux 5.11 or later (for Syscall User Dispatch)
-and seccomp; `h9 --check` tells you which backends work and why the others
-don't. On Windows x86\_64, the WHP backend needs the optional Windows
+a VM, nested virtualization. Without them, `auto` won't run on Linux x86\_64:
+use `h9-emu`, or `--backend native` for a program you trust (the native
+backend shares h9's process and isn't a sandbox; it needs Linux 5.11 or
+later, for Syscall User Dispatch, and seccomp). `h9 --check` tells you which
+backends work and why the others don't. On Windows x86\_64, the WHP backend needs the optional Windows
 Hypervisor Platform feature; without it, `h9-emu` falls back to the
 emulator.
 
@@ -333,7 +336,7 @@ If this fails, the message says why:
 | `h9: cannot create emu machine for arm64: the emulator isn't built into this h9 (use h9-emu from the releases, or build with -Demu=unicorn)` | 125 | Use `h9-emu` |
 | `h9: warning: no usable hypervisor; using the emulator` | | Not an error: `h9-emu` fell back to the emulator |
 | `h9: cannot create kvm machine for amd64: no access to /dev/kvm (is your user in the kvm group?)` | 125 | Only with `--backend kvm`: add yourself to the `kvm` group, or leave `--backend` off |
-| `h9: warning: no /dev/kvm (...); using the native backend` | | Not an error: on Linux x86\_64 without KVM, h9 runs amd64 programs on the native backend |
+| `h9: warning: the native backend runs guest code in h9's own process and is not a security boundary` | | Not an error: `--backend native` was chosen; use a hypervisor or `h9-emu` to contain an untrusted guest |
 | `h9: cannot create native machine for amd64: the kernel has no Syscall User Dispatch (Linux 5.11 or later)` | 125 | Upgrade the kernel, or use `h9-emu` |
 
 ### 3. First run
@@ -1765,9 +1768,9 @@ hello, world
   `plan9/arm64`. So on an Apple Silicon Mac a Go program runs on the
   emulator, which needs `h9-emu`; `h9-emu` picks the emulator by itself,
   with the warning above, and `--backend emu` picks it silently. On an
-  x86\_64 Linux host, h9 runs it natively, on KVM or the native backend (Go's
-  own test suite has been run on the emulator only), and on Windows `h9-emu`
-  runs it on the emulator. Compute-heavy Go code runs several times slower
+  x86\_64 Linux host, h9 runs it on KVM, or on the native backend when you
+  pass `--backend native` (Go's own test suite has been run on the emulator
+  only), and on Windows `h9-emu` runs it on the emulator. Compute-heavy Go code runs several times slower
   on the emulator than natively (chapter 27).
 - **Or build for Linux.** A `GOOS=linux` binary runs through the Linux
   personality (chapter 20), and Go has `linux/arm64`, so on an Apple Silicon
@@ -1901,8 +1904,8 @@ h9: sh: linux: signal 15
 ```
 
 **Architectures and speed.** A program for the host's architecture runs on
-the hypervisor or the native backend, at native speed apart from system
-calls. One for another architecture, such as an amd64 image on an Apple
+the hypervisor (or, with `--backend native`, the native backend), at native
+speed apart from system calls. One for another architecture, such as an amd64 image on an Apple
 Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
 32-bit x86 programs run with `--arch 386` on the emulator
 ([linux-i386](design/0105-linux-i386.md)).
@@ -1979,7 +1982,7 @@ Machine:
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, then on Linux x86\_64 the native backend, and otherwise the emulator, with a warning. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/0017-whp.md)). |
+| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `native`, which shares h9's process and isn't a security boundary (chapter 23); pass `--backend native` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/0017-whp.md)). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
 | `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. A host directory can be a 9front tree or a Linux one, and `--root` can be given twice, once for each (chapter 20). Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
 | `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
@@ -2159,15 +2162,16 @@ read-only.
 **The threat model in plain words.** A program in h9 runs in a separate
 address space on a virtual CPU, so it can't touch the h9 process's memory or
 make host system calls: every system call is answered by the Plan 9 kernel
-inside h9. On the native backend the separate address space is a stub
-process instead, whose system calls the host kernel turns into signals for
-h9, with a seccomp filter behind that as a backstop. A Linux program's
+inside h9. A Linux program's
 calls are answered the same way, by the same kernel. That kernel's namespace is the only route to your host, and h9
 builds it from the policy: which host directories to bind, read-only or not,
 whether `/net` exists, and which devices are masked so they can't be
 attached again. What's *not* protected: the h9 process itself, which runs as
 you with your full rights and isn't sandboxed by the host, so a bug in h9's
-kernel or device code is a bug in the sandbox; and anything you share.
+kernel or device code is a bug in the sandbox; and anything you share. The
+native backend goes further: it runs guest code in h9's own process, so it
+is not a boundary at all, and `auto` never chooses it — use it, with
+`--backend native`, only for a program you already trust.
 
 **Profiles**
 
@@ -2430,12 +2434,15 @@ A **backend** is what runs guest code:
 | `emu` | Any, in `h9-emu` only (Unicorn) | arm64, amd64, and 386 |
 
 `--backend auto`, the default, uses the host's hypervisor if it's built in,
-usable, and can run the program's architecture; then, on Linux x86\_64, the
-native backend; and otherwise the emulator. When it doesn't use the
-hypervisor it prints why, as `h9: warning: no /dev/kvm (...); using the
-native backend` or `h9: warning: no usable hypervisor; using the emulator`.
-Naming a backend uses that one or fails with exit 125. `h9 --check` lists
-each backend built in and whether it works here.
+usable, and can run the program's architecture, and otherwise the emulator,
+printing `h9: warning: no usable hypervisor; using the emulator`. It never
+chooses the native backend, which shares h9's process and isn't a security
+boundary; where only native could run (Linux x86\_64 without KVM, in an
+`h9` that has no emulator), `auto` fails and points you at `--backend
+native` as an explicit choice for a trusted guest. Naming a backend uses
+that one or fails with exit 125, and `--backend native` warns that it isn't
+a security boundary. `h9 --check` lists each backend built in and whether it
+works here.
 
 **KVM** runs guest code on a virtual CPU, as Hypervisor.framework does on a
 Mac. In a VM it needs nested virtualization, and each system call then goes
@@ -2451,11 +2458,16 @@ h9 answers, and a seccomp filter kills the stub if guest code reaches the
 host kernel any other way. It's much faster than the emulator (an awk loop
 that takes 10.7 s on the emulator takes 0.24 s), and a Linux program's
 threads run in parallel. Unlike under KVM, guests see the host CPU's
-features, such as AVX-512, in `CPUID`. It runs amd64 only.
+features, such as AVX-512, in `CPUID`. It runs amd64 only. Because the stub
+shares h9's own address space, this backend is **not a security boundary**:
+guest code that gets past the dispatch and seccomp gates reaches the h9
+process. So `auto` never picks it, and you choose it with `--backend native`
+only for a program you trust (chapter 23).
 
-**The emulator.** Use it where there's no hypervisor and no native backend
-(Windows on ARM, Windows without the Windows Hypervisor Platform, and
-arm64 Linux VMs without nested virtualization), for Go
+**The emulator.** Use it where there's no hypervisor (Windows on ARM,
+Windows without the Windows Hypervisor Platform, and arm64 Linux VMs
+without nested virtualization), where there's no KVM and you won't opt into
+the native backend, for Go
 programs on Apple Silicon, and for testing amd64 or 386 programs on any
 host. Measured on an M3 Max: system calls cost about the same as on the
 hypervisor (about 0.8 µs round trip, against 1.1 µs), so shell pipelines
