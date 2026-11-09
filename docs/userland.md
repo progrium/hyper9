@@ -4,7 +4,7 @@
 > 9front tree: a trimmed 9front, a userland written from scratch, 9front with
 > your own layer on top, or a tree served by a program. It assumes you've
 > read the [manual](../MANUAL.md)'s chapters on namespaces (6), file servers
-> (16), sharing files (21) and `--ns` (24). It uses the manual's conventions:
+> (16), sharing files (22), and `--ns` (25). It uses the manual's conventions:
 > `host$` is your host shell, `%` is rc inside h9, and the examples use a Mac
 > with the user `me`.
 
@@ -39,7 +39,7 @@ are the targets, in the order h9 binds them:
 | `/bin` | Yes, to run programs by name | `h9 prog` exits 127. |
 | `/env` | For rc and Go programs | The environment isn't there. Go programs crash with `fatal error: getenv before env init`. |
 | `/fd`, `/proc`, `/srv`, `/net`, `/tmp` | Optional | The bind is skipped, and so is the private `/tmp` in memory. Most 9front programs expect them: rc reads `/fd/0`, for one. |
-| `/mnt/term/...` | Optional | Paths you share with `--readable` and `--writable` appear under `/mnt/term` (manual chapter 21). |
+| `/mnt/term/...` | Optional | Paths you share with `--readable` and `--writable` appear under `/mnt/term` (manual chapter 22). |
 
 **Programs.** h9 binds `/$cputype/bin` over `/bin`, then `/rc/bin` after it,
 and both binds are skipped if their source doesn't exist. So you can put
@@ -272,7 +272,7 @@ host$ du -sh ~/slim
 
 Some of 9front's commands are rc scripts in `/rc/bin` (`lc`, `man`, `kill`,
 `9fs`) rather than binaries, so copy those from `$src/rc/bin` instead, along
-with whatever they run. `h9 --trace` (manual chapter 27) shows each file a
+with whatever they run. `h9 --trace` (manual chapter 28) shows each file a
 program opens, which is the quickest way to find what else a command needs:
 
 ```sh
@@ -353,7 +353,7 @@ leaves out.
 Often you want 9front plus a few things of your own: your commands in
 `/bin`, a different profile, a replaced data file. You don't need a tree of
 your own for that. Keep your layer in a host directory, share it, and bind
-it over the stock root with a namespace file (manual chapter 24):
+it over the stock root with a namespace file (manual chapter 25):
 
 ```sh
 host$ mkdir -p ~/layer/bin ~/layer/rc/lib

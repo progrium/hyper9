@@ -66,10 +66,10 @@ inside it ([self-host](../design/0010-self-host.md)), but no 9front kernel
 features beyond what drawterm's kernel and h9 add. h9 does use QEMU once:
 `zig build mkroot` boots the pinned 9front image to extract the full root
 tree. Without one, h9 falls back to a [built-in root](../design/0087-builtin-root.md)
-of 42 9front commands in one multi-call binary. The
-[image-roots](../design/0014-image-roots.md) draft *(planned)* would let h9
-use a 9front disk image directly as its root, by running 9front's own file
-server as a guest process.
+of 42 9front commands in one multi-call binary. Using a 9front disk image
+directly as the root was proposed and declined
+([image-roots](../design/0014-image-roots.md)): directories, 9P servers, and
+overlays have covered every root so far.
 
 **9vx.** h9's closest ancestor: Plan 9 binaries running on a Unix host, with a
 Plan 9 kernel in the host process serving their syscalls. 9vx confined guest
@@ -162,8 +162,9 @@ ELF loader h9's design draws on.
 VM. h9's Linux personality is the same idea, with the translation in user
 space behind a hypervisor and onto a Plan 9 kernel rather than NT. WSL 2 is a
 lightweight VM with a real Linux kernel, closer to Firecracker. On Windows,
-h9 runs on the emulator today, and its WHP backend for the Windows
-Hypervisor Platform is a draft ([whp](../design/0017-whp.md), *planned*).
+h9 mostly runs on the emulator today. Its WHP backend for the Windows
+Hypervisor Platform is built for x86\_64 but incomplete, and its proposal is
+a draft ([whp](../design/0017-whp.md), *planned*).
 
 ## Compatibility layers
 
