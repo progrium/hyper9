@@ -524,6 +524,8 @@ fn decode(s: *const x86.Shared) vmm.Exit {
                 .access = if (s.ureg.@"error" & 0x10 != 0) .exec else if (s.ureg.@"error" & 2 != 0) .write else .read,
                 .syndrome = s.ureg.@"error",
             } }
+        else if (s.ureg.type == x86.vector_bp)
+            .breakpoint
         else
             .{ .fault = .{ .addr = s.ureg.pc, .access = .exec, .syndrome = s.ureg.type } },
         else => .{ .other = s.ureg.type },
