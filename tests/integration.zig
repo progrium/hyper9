@@ -5392,6 +5392,24 @@ test "a process that exits with a file mapped shared writes it back on the way o
     try netCase(&le, &.{ "/mnt/term/cwd/files", "map_exit" }, "ok map_exit\n");
 }
 
+test "a fixed MAP_SHARED file mapping can sit at any page beside private ones, even across a MiB, and fork, munmap, and remap keep it right [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "fixed_shared" }, "ok fixed_shared\n");
+}
+
+test "a MAP_PRIVATE file mapping sees the file's changes until it writes a page, and its writes stay its own [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "private_sees" }, "ok private_sees\n");
+}
+
+test "on amd64, arch_prctl ARCH_SET_GS sets the GS base a %gs load reads, and fork keeps it [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "gs_base" }, "ok gs_base\n");
+}
+
 test "process-shared semaphores in MAP_SHARED memory work across fork, on pages touched only after it [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5467,6 +5485,12 @@ test "named and abstract Unix sockets: bind, listen, epoll, accept, connect, and
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "unix_sock" }, "ok unix_sock\nok unix_abstract\n");
+}
+
+test "SCM_RIGHTS passes fds over a Unix socket, one batch per message, with MSG_CMSG_CLOEXEC [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "scm_rights" }, "ok scm_rights\n");
 }
 
 test "socket under --net=disable is EACCES [50]" {

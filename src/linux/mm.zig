@@ -101,6 +101,10 @@ pub const Vma = struct {
     kind: Kind = .anon,
     /// MAP_SHARED: the same pages after fork.
     shared: bool = false,
+    /// A MAP_PRIVATE file mapping over the file's shared pages (overlays),
+    /// which sees later writes to the file until a page is written, when
+    /// that page becomes a private copy, as on Linux.
+    cow: bool = false,
     /// Fills the rest of a shared mapping's chunks (`insertShared`), so no
     /// other mapping lands in them. Not the guest's: unmapped with the
     /// mapping, and not in /proc/n/maps.
@@ -143,6 +147,20 @@ pub const Pages = struct {
     release: ?*const fn (p: *Pages) void = null,
 };
 
+/// Shared file pages standing in for part of a chunk's own (`insertFile`):
+/// a shared file mapping at any page, or a copy-on-write private one,
+/// beside private pages in the same chunk. A chunk with overlays is
+/// copied by fork, its overlays with it, rather than shared whole.
+const Overlay = struct {
+    /// The part of the chunk it covers, as offsets in it, page aligned.
+    lo: u64,
+    hi: u64,
+    /// A file chunk's pages (shmfile.zig), with a reference held.
+    pages: *Pages,
+    /// Where `lo` is in `pages.mem`.
+    poff: u64,
+};
+
 /// A chunk in one Mm.
 const Chunk = struct {
     pages: *Pages,
@@ -150,6 +168,22 @@ const Chunk = struct {
     /// The regions of it mapped in the address space now.
     runs: [pages_per_chunk]Run = undefined,
     nruns: u16 = 0,
+    /// Shared file mappings that don't sit at their offset's place in a
+    /// chunk of their own, such as Wine's at 0x7ffe0000 beside private
+    /// pages: their pages replace `mem`'s there. Sorted, not overlapping.
+    overlays: std.ArrayList(Overlay) = .empty,
+
+    const Backing = struct { mem: []u8, end: u64, overlay: bool };
+
+    /// The memory behind chunk offset `off`, up to where that memory
+    /// ends (an overlay's edge or the chunk's end), as `end`.
+    fn backing(c: *const Chunk, off: u64) Backing {
+        for (c.overlays.items) |o| {
+            if (off < o.lo) return .{ .mem = c.mem[@intCast(off)..@intCast(o.lo)], .end = o.lo, .overlay = false };
+            if (off < o.hi) return .{ .mem = o.pages.mem[@intCast(o.poff + (off - o.lo))..][0..@intCast(o.hi - off)], .end = o.hi, .overlay = true };
+        }
+        return .{ .mem = c.mem[@intCast(off)..], .end = chunk_size, .overlay = false };
+    }
 };
 
 pub const Error = error{ OutOfMemory, BadAddress, NoSpace };
@@ -227,7 +261,15 @@ pub const Mm = struct {
     fn dropChunk(m: *Mm, c: *Chunk) void {
         _ = m.allocated.fetchSub(c.mem.len, .acq_rel);
         const p = c.pages;
+        for (c.overlays.items) |o| m.dropRef(o.pages);
+        c.overlays.deinit(m.gpa);
         m.gpa.destroy(c);
+        m.dropRef(p);
+    }
+
+    /// Drops this Mm's reference to `p`, freeing the pages once no vCPU
+    /// can reach them, or handing a file table's back to it.
+    fn dropRef(m: *Mm, p: *Pages) void {
         const was = p.refs.fetchSub(1, .acq_rel);
         if (p.release) |f| {
             // The table's reference is the last: it may drop the pages.
@@ -393,7 +435,139 @@ pub const Mm = struct {
             if (!v.shared) m.zero(v.start, v.end);
         }
         m.dropPads(start, end);
+        try m.trimOverlays(start, end);
         try m.refreshRange(start - start % chunk_size, std.mem.alignForward(u64, end, chunk_size));
+    }
+
+    /// Takes the overlays out of [start, end), splitting any that
+    /// straddle its ends, after their VMAs went.
+    fn trimOverlays(m: *Mm, start: u64, end: u64) Error!void {
+        var ci = start / chunk_size;
+        while (ci * chunk_size < end) : (ci += 1) {
+            const c = m.chunks.get(ci) orelse continue;
+            if (c.overlays.items.len == 0) continue;
+            const cs = ci * chunk_size;
+            try m.trimChunk(ci, c, @max(start, cs) - cs, @min(end, cs + chunk_size) - cs);
+        }
+    }
+
+    /// trimOverlays within one chunk, [lo, hi) as offsets in it.
+    fn trimChunk(m: *Mm, ci: u64, c: *Chunk, lo: u64, hi: u64) Error!void {
+        {
+            var changed = false;
+            var i: usize = 0;
+            while (i < c.overlays.items.len) {
+                const o = c.overlays.items[i];
+                if (o.hi <= lo or o.lo >= hi) {
+                    i += 1;
+                    continue;
+                }
+                changed = true;
+                if (o.lo < lo and o.hi > hi) {
+                    // The middle goes: two overlays over the same pages.
+                    try c.overlays.insert(m.gpa, i + 1, .{ .lo = hi, .hi = o.hi, .pages = o.pages, .poff = o.poff + (hi - o.lo) });
+                    _ = o.pages.refs.fetchAdd(1, .acq_rel);
+                    c.overlays.items[i].hi = lo;
+                    i += 2;
+                } else if (o.lo < lo) {
+                    c.overlays.items[i].hi = lo;
+                    i += 1;
+                } else if (o.hi > hi) {
+                    c.overlays.items[i].lo = hi;
+                    c.overlays.items[i].poff = o.poff + (hi - o.lo);
+                    i += 1;
+                } else {
+                    _ = c.overlays.orderedRemove(i);
+                    m.dropRef(o.pages);
+                }
+            }
+            if (changed) m.dropRuns(ci, c, lo, hi);
+        }
+    }
+
+    /// The overlay under chunk offset `off`, if any.
+    fn overlayAt(c: *const Chunk, off: u64) ?*Overlay {
+        for (c.overlays.items) |*o| if (off >= o.lo and off < o.hi) return o;
+        return null;
+    }
+
+    /// A write to a copy-on-write page (`Vma.cow`): the page becomes the
+    /// chunk's own, with the file's contents as they are now.
+    fn breakCow(m: *Mm, ci: u64, c: *Chunk, off_in: u64) Error!void {
+        const off = off_in - off_in % page;
+        const o = overlayAt(c, off) orelse return;
+        @memcpy(c.mem[@intCast(off)..][0..page], o.pages.mem[@intCast(o.poff + (off - o.lo))..][0..page]);
+        try m.trimChunk(ci, c, off, off + page);
+        try m.remap(ci, c);
+    }
+
+    /// Breaks copy-on-write for the pages of [va, end) in `cow` VMAs,
+    /// before the host writes them for the guest.
+    fn unshare(m: *Mm, va: u64, end: u64) Error!void {
+        var at = va - va % page;
+        while (at < end) : (at += page) {
+            const c = m.chunks.get(at / chunk_size) orelse continue;
+            if (c.overlays.items.len == 0) {
+                at = (at / chunk_size + 1) * chunk_size - page;
+                continue;
+            }
+            const v = m.find(at) orelse continue;
+            if (v.cow) try m.breakCow(at / chunk_size, c, at % chunk_size);
+        }
+    }
+
+    /// Unmaps the runs of chunk `ci` that overlap [lo, hi) (chunk offsets),
+    /// whose memory changed, so `remap` maps them anew.
+    fn dropRuns(m: *Mm, ci: u64, c: *Chunk, lo: u64, hi: u64) void {
+        const cs = ci * chunk_size;
+        var kept: u16 = 0;
+        for (c.runs[0..c.nruns]) |r| {
+            if (r.va < cs + hi and r.va + r.len > cs + lo) {
+                m.as.unmap(r.va);
+                continue;
+            }
+            c.runs[kept] = r;
+            kept += 1;
+        }
+        c.nruns = kept;
+    }
+
+    /// Adds a file VMA at any page, MAP_SHARED or copy-on-write
+    /// (`Vma.cow`), `v.offset` its file offset,
+    /// over chunks that may hold other mappings: each piece of it within
+    /// one chunk and one file chunk is an overlay of the file chunk's
+    /// pages, from `pagesFor(ctx, file_chunk_index)`, which hands over a
+    /// reference the caller holds (the table's) and gets one of its own.
+    pub fn insertFile(m: *Mm, v: Vma, ctx: anytype, comptime pagesFor: fn (@TypeOf(ctx), u64) Error!*Pages) Error!void {
+        std.debug.assert((v.shared or v.cow) and v.kind == .file and v.start % page == 0 and v.end % page == 0 and v.start < v.end and v.offset % page == 0);
+        defer m.settle(false);
+        m.lockSpin();
+        defer m.lock.unlock();
+        if (!m.isFree(v.start, v.end)) return error.BadAddress;
+        try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+        errdefer {
+            const i = m.indexAfter(v.start) - 1;
+            _ = m.vmas.orderedRemove(i);
+            m.trimOverlays(v.start, v.end) catch {};
+            m.refreshRange(v.start - v.start % chunk_size, std.mem.alignForward(u64, v.end, chunk_size)) catch {};
+        }
+        var at = v.start;
+        while (at < v.end) {
+            const ci = at / chunk_size;
+            const cs = ci * chunk_size;
+            const fo = v.offset + (at - v.start);
+            const hi = @min(v.end, cs + chunk_size, at + (chunk_size - fo % chunk_size));
+            const c = try m.populate(at);
+            try c.overlays.ensureUnusedCapacity(m.gpa, 1);
+            const pg = try pagesFor(ctx, fo / chunk_size);
+            _ = pg.refs.fetchAdd(1, .acq_rel);
+            var i: usize = 0;
+            while (i < c.overlays.items.len and c.overlays.items[i].lo < at - cs) i += 1;
+            c.overlays.insertAssumeCapacity(i, .{ .lo = at - cs, .hi = hi - cs, .pages = pg, .poff = fo % chunk_size });
+            m.dropRuns(ci, c, at - cs, hi - cs);
+            try m.remap(ci, c);
+            at = hi;
+        }
     }
 
     /// Removes the padding of the chunks overlapping [start, end) where
@@ -521,9 +695,14 @@ pub const Mm = struct {
         while (ci * chunk_size < end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
             const cs = ci * chunk_size;
-            const lo = @max(start, cs) - cs;
+            var lo = @max(start, cs) - cs;
             const hi = @min(end, cs + chunk_size) - cs;
-            @memset(c.mem[@intCast(lo)..@intCast(hi)], 0);
+            while (lo < hi) {
+                const b = c.backing(lo);
+                const e = @min(hi, b.end);
+                if (!b.overlay) @memset(b.mem[0..@intCast(e - lo)], 0);
+                lo = e;
+            }
         }
     }
 
@@ -562,10 +741,14 @@ pub const Mm = struct {
                 if (!std.meta.eql(w.prot.perms(), v.prot.perms())) break;
                 run_end = @min(w.end, cs + chunk_size);
             }
+            const b = c.backing(p * page);
+            run_end = @min(run_end, cs + b.end);
             const n = (run_end - va) / page;
-            if (v.prot.perms()) |perms| {
-                const off = p * page;
-                m.as.map(va, @alignCast(c.mem[@intCast(off)..][0..@intCast(n * page)]), perms) catch return error.OutOfMemory;
+            if (v.prot.perms()) |perms_v| {
+                var perms = perms_v;
+                // Copy-on-write file pages fault on a write (`fault`).
+                if (b.overlay and v.cow) perms.write = false;
+                m.as.map(va, @alignCast(b.mem[0..@intCast(n * page)]), perms) catch return error.OutOfMemory;
                 c.runs[c.nruns] = .{ .va = va, .len = n * page, .perms = perms };
                 c.nruns += 1;
             }
@@ -591,6 +774,7 @@ pub const Mm = struct {
             const v = m.find(cs + p * page);
             w.* = if (v) |x| x.prot.perms() else null;
             if (v != null) any = true;
+            if (w.* != null and v.?.cow and overlayAt(c, p * page) != null) w.*.?.write = false;
         }
         if (!any) {
             for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
@@ -626,10 +810,12 @@ pub const Mm = struct {
                 p += 1;
                 continue;
             }
-            var q = p + 1;
-            while (q < pages_per_chunk and !in_run[q] and want[q] != null and std.meta.eql(want[q].?, perms)) q += 1;
             const off = p * page;
-            m.as.map(cs + off, @alignCast(c.mem[@intCast(off)..][0..@intCast((q - p) * page)]), perms) catch return error.OutOfMemory;
+            const b = c.backing(off);
+            const limit: usize = @intCast(b.end / page);
+            var q = p + 1;
+            while (q < limit and !in_run[q] and want[q] != null and std.meta.eql(want[q].?, perms)) q += 1;
+            m.as.map(cs + off, @alignCast(b.mem[0..@intCast((q - p) * page)]), perms) catch return error.OutOfMemory;
             c.runs[c.nruns] = .{ .va = cs + off, .len = (q - p) * page, .perms = perms };
             c.nruns += 1;
             p = q;
@@ -670,7 +856,8 @@ pub const Mm = struct {
             .exec => v.prot.exec,
         };
         if (!ok) return null;
-        if (!m.chunks.contains(va / chunk_size)) _ = try m.populate(va);
+        const c = m.chunks.get(va / chunk_size) orelse try m.populate(va);
+        if (access == .write and v.cow) try m.breakCow(va / chunk_size, c, va % chunk_size);
         return m.remaps;
     }
 
@@ -696,6 +883,7 @@ pub const Mm = struct {
         }
         var ci = va / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) _ = try m.populate(ci * chunk_size);
+        if (write) try m.unshare(va, end);
     }
 
     /// The host's view of [va, va+len), which must lie in one chunk, as
@@ -710,8 +898,10 @@ pub const Mm = struct {
         defer m.lock.unlock();
         try m.touchLocked(va, len, write);
         const c = m.chunks.get(va / chunk_size).?;
-        const off: usize = @intCast(va % chunk_size);
-        return c.mem[off..][0..@intCast(len)];
+        const off = va % chunk_size;
+        const b = c.backing(off);
+        if (len > b.end - off) return error.BadAddress;
+        return b.mem[0..@intCast(len)];
     }
 
     /// Copies between guest [va, va+buf.len) and `buf` for a syscall, as
@@ -728,8 +918,9 @@ pub const Mm = struct {
         while (at < end) {
             const c = m.chunks.get(at / chunk_size).?;
             const cs = at - at % chunk_size;
-            const hi = @min(end, cs + chunk_size);
-            const g = c.mem[@intCast(at - cs)..@intCast(hi - cs)];
+            const b = c.backing(at - cs);
+            const hi = @min(end, cs + b.end);
+            const g = b.mem[0..@intCast(hi - at)];
             const h = buf[@intCast(at - va)..@intCast(hi - va)];
             if (to_guest) @memcpy(g, h) else @memcpy(h, g);
             at = hi;
@@ -746,10 +937,13 @@ pub const Mm = struct {
         defer m.lock.unlock();
         while (at < end) {
             if (m.find(at) == null) return error.BadAddress;
-            const c = try m.populate(at);
+            _ = try m.populate(at);
+            try m.unshare(at, @min(end, (at / chunk_size + 1) * chunk_size));
+            const c = m.chunks.get(at / chunk_size).?;
             const cs = at - at % chunk_size;
-            const hi = @min(end, cs + chunk_size);
-            f(ctx, c.mem[@intCast(at - cs)..@intCast(hi - cs)], at - va);
+            const b = c.backing(at - cs);
+            const hi = @min(end, cs + b.end);
+            f(ctx, b.mem[0..@intCast(hi - at)], at - va);
             at = hi;
         }
     }
@@ -822,20 +1016,30 @@ pub const Mm = struct {
         while (it.next()) |e| {
             const ci = e.key_ptr.*;
             const c = e.value_ptr.*;
-            const shared = if (m.find(ci * chunk_size)) |v| v.shared else false;
+            // A chunk with overlays has private pages around them.
+            const shared = c.overlays.items.len == 0 and if (m.find(ci * chunk_size)) |v| v.shared else false;
             if (shared) {
                 _ = try n.addChunk(ci, c.pages);
                 continue;
             }
             const p = try n.newPages();
             copySparse(p.mem, c.mem);
-            _ = n.addChunk(ci, p) catch |err| {
+            const nc = n.addChunk(ci, p) catch |err| {
                 if (p.refs.load(.acquire) == 0) {
                     n.backend.freePages(p.mem);
                     n.gpa.destroy(p);
                 }
                 return err;
             };
+            if (c.overlays.items.len == 0) continue;
+            // The overlays' file pages are shared, as MAP_SHARED is.
+            try nc.overlays.ensureTotalCapacity(n.gpa, c.overlays.items.len);
+            for (c.overlays.items) |o| {
+                _ = o.pages.refs.fetchAdd(1, .acq_rel);
+                nc.overlays.appendAssumeCapacity(o);
+            }
+            n.dropRuns(ci, nc, 0, chunk_size);
+            try n.remap(ci, nc);
         }
         return n;
     }
@@ -861,11 +1065,11 @@ pub const Mm = struct {
         while (off < len) : (off += page) {
             const sc = m.chunks.get((src + off) / chunk_size) orelse continue;
             const so = (src + off) % chunk_size;
-            const from = sc.mem[@intCast(so)..][0..page];
+            const from = sc.backing(so).mem[0..page];
             if (std.mem.allEqual(u8, from, 0)) continue;
             const dc = try m.populate(dst + off);
             const do = (dst + off) % chunk_size;
-            @memcpy(dc.mem[@intCast(do)..][0..page], from);
+            @memcpy(dc.backing(do).mem[0..page], from);
         }
     }
 
@@ -877,7 +1081,9 @@ pub const Mm = struct {
         const v = m.find(va) orelse return null;
         if (!v.shared) return null;
         const c = m.chunks.get(va / chunk_size) orelse return null;
-        return .{ .pages = c.pages, .off = va % chunk_size };
+        const off = va % chunk_size;
+        for (c.overlays.items) |o| if (off >= o.lo and off < o.hi) return .{ .pages = o.pages, .off = o.poff + (off - o.lo) };
+        return .{ .pages = c.pages, .off = off };
     }
 
     /// Bytes of guest memory allocated.

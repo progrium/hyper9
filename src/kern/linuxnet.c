@@ -558,6 +558,28 @@ h9_linux_socksend(int fd, void *buf, long n, int dontwait, uchar *raddr, ushort 
 	return h9so_sendto(s, buf, n, dontwait, raddr, rport);
 }
 
+/*
+ * Bytes queued in the pipe that a write on pipe end fd goes into, for
+ * SCM_RIGHTS (src/linux/sys.zig); -1 if fd isn't a pipe's data file.
+ */
+long
+h9_linux_pipequeued(int fd)
+{
+	Chan *c;
+	Queue *q;
+	long n;
+
+	if(waserror())
+		return -1;
+	c = fdtochan(fd, -1, 0, 1);
+	n = -1;
+	if(devtab[c->type]->dc == '|' && (c->qid.type & QTDIR) == 0 && (q = h9_pipeq(c, 1)) != nil)
+		n = qlen(q);
+	cclose(c);
+	poperror();
+	return n;
+}
+
 int
 h9_linux_soerror(int fd)
 {

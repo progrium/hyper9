@@ -14,6 +14,10 @@
 //! other processes see the pages already. Writes from outside the Linux
 //! layer (9front programs, the host) don't reach mapped pages, and the
 //! pages beyond the file's end are kept, not SIGBUS.
+//!
+//! A MAP_PRIVATE mapping of a file that's mapped shared maps these pages
+//! too, copy-on-write, so it sees other processes' stores until it writes
+//! a page, as Linux's page cache gives it (mm.zig, "overlays").
 
 const std = @import("std");
 const kern = @import("../kern.zig");

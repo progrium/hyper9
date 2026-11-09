@@ -1954,10 +1954,12 @@ pub const Machine = struct {
                 return null;
             }
         }
-        // amd64's arch_prctl sets the thread pointer, which is the vCPU's.
+        // amd64's arch_prctl sets the FS and GS bases, which are the vCPU's.
         if (u.* == .amd64 and u.amd64.ax == 158) {
+            const ARCH_SET_GS = 0x1001;
             const ARCH_SET_FS = 0x1002;
             const ARCH_GET_FS = 0x1003;
+            const ARCH_GET_GS = 0x1004;
             const r = &u.amd64;
             try vcpu.getExtra(&p.extra);
             const v: i64 = switch (r.di) {
@@ -1968,6 +1970,14 @@ pub const Machine = struct {
                     break :blk 0;
                 },
                 ARCH_GET_FS => if (l.writeU64(r.si, p.extra.amd64.tls)) 0 else |_| -attr.E.FAULT,
+                // GS base: 64-bit Wine keeps the Windows TEB there.
+                ARCH_SET_GS => blk: {
+                    if (r.si >= lmm.user_top) break :blk -attr.E.PERM;
+                    p.extra.amd64.gs = r.si;
+                    vcpu.setExtra(&p.extra);
+                    break :blk 0;
+                },
+                ARCH_GET_GS => if (l.writeU64(r.si, p.extra.amd64.gs)) 0 else |_| -attr.E.FAULT,
                 else => -attr.E.INVAL,
             };
             r.ax = @bitCast(v);

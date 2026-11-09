@@ -386,6 +386,9 @@ pub const Process = struct {
     exe_len: usize = 0,
     trace: ?*std.Io.Writer = null,
     trace_lock: ?*std.atomic.Mutex = null,
+    /// recvmsg's SCM_RIGHTS: set while it reads, and the fds the read took.
+    scm_want: bool = false,
+    scm_got: ?ScmBatch = null,
     /// Set when the last call returned -EINTR, with what restarts it.
     restart: ?Restart = null,
     /// The current call's timespecs are 32-bit: i386's calls other than
@@ -1772,6 +1775,20 @@ fn isDir(p: *Process, dirfd: i32, path: [:0]const u8) bool {
 const Dir = enum { read, write };
 
 fn rw(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Dir) Err!i64 {
+    // A read of a stream socket stops at a message that passes fds, and
+    // the read that starts at it takes them (SCM_RIGHTS).
+    // A read that was already waiting when the fds were sent still takes
+    // them, so the count is kept whenever a batch is waiting at the end.
+    if (dir == .read and off == -1 and fd >= 0) if (scmReadKey(fd)) |key| {
+        const len = if (scm_live.load(.monotonic) > 0) scmClamp(key, len_in) else len_in;
+        const r = try rwOne(p, fd, buf, len, off, dir);
+        if (r > 0 and scm_live.load(.monotonic) > 0) scmConsumed(p, key, @intCast(r));
+        return r;
+    };
+    return rwOne(p, fd, buf, len_in, off, dir);
+}
+
+fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Dir) Err!i64 {
     if (fd < 0) return -E.BADF;
     const len = @min(len_in, 0x7ffff000);
     p.mm.touch(buf, len, dir == .read) catch return -E.FAULT;
@@ -2385,8 +2402,20 @@ fn kindOfDir(d: *const attr.Dir) attr.Kind {
         'c', 'y' => .chr,
         // A conversation's data file is a socket's (design/0050-linux-net.md).
         'I' => if (d.qid_type & 0x80 == 0 and d.qid_path & 0xf == ip_qdata) .sock else .auto,
-        else => if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else .auto,
+        else => if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else if (isListeningUnix(d)) .sock else .auto,
     };
+}
+
+/// An empty file that a listening AF_UNIX socket was bound to: its post
+/// (`lx.DC.DEV.QPATH`, see unixKey) is in #s. Wine's client checks
+/// S_ISSOCK on wineserver's socket before connecting.
+fn isListeningUnix(d: *const attr.Dir) bool {
+    if (d.qid_type & 0x80 != 0 or d.length != 0) return false;
+    var b: [80]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&b, "#s/lx.{d}.{d}.{d}", .{ d.type, d.dev, d.qid_path }) catch return false;
+    const fd = kern.open(z, kern.OREAD) catch return false;
+    kern.close(fd) catch {};
+    return true;
 }
 
 /// devlinux's device character and the qid bit it sets on its devices
@@ -3262,6 +3291,29 @@ const MAP_ANONYMOUS = 0x20;
 const MAP_GROWSDOWN = 0x100;
 const MAP_FIXED_NOREPLACE = 0x100000;
 
+/// What mmap's file mappings take their pages from: the file's shared
+/// pages (shmfile.zig).
+const FileCtx = struct {
+    backend: vmm.Backend,
+    file: locks.Key,
+    fd: u31,
+    path: []const u8,
+    writable: bool,
+    first: u64 = 0,
+    failed: bool = false,
+
+    fn pagesAt(x: *FileCtx, fi: u64) mm.Error!*mm.Pages {
+        return shmfile.pagesFor(x.backend, x.file, fi, x.fd, x.path, x.writable) catch |e| switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.NoSpace => error.NoSpace,
+            error.Io => {
+                x.failed = true;
+                return error.BadAddress;
+            },
+        };
+    }
+};
+
 fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32, off: u64) Err!i64 {
     if (len_in == 0) return -E.INVAL;
     const len = std.mem.alignForward(u64, len_in, page);
@@ -3283,7 +3335,9 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
     // Shared mappings are kept in chunks of their own, padded, so fork
     // can share them whole and processes mapping one file share its
     // pages (shmfile.zig): a file mapping sits at its offset's place in
-    // its first chunk.
+    // its first chunk. A fixed one that can't, and a private mapping of
+    // a file mapped shared, are overlays of the file's pages on chunks
+    // that may hold other mappings (mm.insertFile).
     const fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
     const delta: u64 = if (shared and !anon) off % mm.chunk_size else 0;
     const span = if (shared) std.mem.alignForward(u64, delta + len, mm.chunk_size) else len;
@@ -3292,8 +3346,6 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
         if (addr % page != 0) return -E.INVAL;
         if (addr < mm.min_addr or addr >= top or len > top - addr) return -E.NOMEM;
         if (flags & MAP_FIXED_NOREPLACE != 0 and !p.mm.isFree(addr, addr + len)) return -E.EXIST;
-        // A shared file mapping can only go where the file's chunks fit.
-        if (shared and !anon and addr % mm.chunk_size != delta) return -E.NODEV;
         p.mm.unmap(addr, addr + len) catch return -E.NOMEM;
         start = addr;
     } else {
@@ -3315,20 +3367,29 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
     }
     if (shared and !anon) {
         if (path.len == 0) return -E.NODEV;
-        const Ctx = struct { backend: vmm.Backend, file: locks.Key, fd: u31, path: []const u8, writable: bool, first: u64, failed: bool = false };
-        var cx: Ctx = .{ .backend = p.mm.backend, .file = lockKey(info.?), .fd = @intCast(fd), .path = path, .writable = prot.write, .first = off / mm.chunk_size -% start / mm.chunk_size };
+        var cx: FileCtx = .{ .backend = p.mm.backend, .file = lockKey(info.?), .fd = @intCast(fd), .path = path, .writable = prot.write };
+        // A fixed mapping that isn't at its offset's place in a chunk, or
+        // whose chunks hold other mappings (Wine's shared user data page
+        // at 0x7ffe0000), overlays the file's pages on those chunks.
+        if (fixed and (start % mm.chunk_size != delta or !p.mm.isFree(start - start % mm.chunk_size, std.mem.alignForward(u64, start + len, mm.chunk_size)))) {
+            p.mm.insertFile(v, &cx, FileCtx.pagesAt) catch return if (cx.failed) kerr() else -E.NOMEM;
+            return @intCast(start);
+        }
+        cx.first = off / mm.chunk_size -% start / mm.chunk_size;
         p.mm.insertShared(v, &cx, struct {
-            fn f(x: *Ctx, ci: u64) mm.Error!*mm.Pages {
-                return shmfile.pagesFor(x.backend, x.file, ci +% x.first, x.fd, x.path, x.writable) catch |e| switch (e) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.NoSpace => error.NoSpace,
-                    error.Io => {
-                        x.failed = true;
-                        return error.BadAddress;
-                    },
-                };
+            fn f(x: *FileCtx, ci: u64) mm.Error!*mm.Pages {
+                return x.pagesAt(ci +% x.first);
             }
-        }.f) catch return if (cx.failed) kerr() else if (fixed) -E.NODEV else -E.NOMEM;
+        }.f) catch return if (cx.failed) kerr() else -E.NOMEM;
+        return @intCast(start);
+    }
+    if (!anon and !shared and path.len > 0 and shmfile.mapped(lockKey(info.?))) {
+        // A private mapping of a file that's mapped shared sees later
+        // writes to it until a page is written, as on Linux, where Wine
+        // reads wineserver's session memory through such a mapping.
+        v.cow = true;
+        var fx: FileCtx = .{ .backend = p.mm.backend, .file = lockKey(info.?), .fd = @intCast(fd), .path = path, .writable = false };
+        p.mm.insertFile(v, &fx, FileCtx.pagesAt) catch return if (fx.failed) kerr() else -E.NOMEM;
         return @intCast(start);
     }
     if (shared and !fixed) {
@@ -4577,6 +4638,10 @@ fn sendmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
                 }
                 return netlinkSend(p, fd, tmp[0..off]);
             };
+            if (m.control != 0) {
+                const r = try scmSend(p, fd, info.qpath, m.control, m.controllen, try m.total(p));
+                if (r < 0) return r;
+            }
             return rwv(p, fd, m.iov, m.iovlen, -1, .write);
         };
         return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
@@ -4600,8 +4665,18 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     const so = sockOf(p, fd) orelse {
         if (kc.fdInfo(fd) catch null) |info| if (info.dc == '|') {
             const m = try MsgHdr.read(p, msg_va);
-            try p.writePtr(m.controllen_va, 0); // no control data
-            const r = try rwv(p, fd, m.iov, m.iovlen, -1, .read);
+            p.scm_want = true;
+            p.scm_got = null;
+            const r = rwv(p, fd, m.iov, m.iovlen, -1, .read) catch |e| {
+                p.scm_want = false;
+                if (p.scm_got) |b| scmDiscard(b);
+                p.scm_got = null;
+                return e;
+            };
+            p.scm_want = false;
+            const got = p.scm_got;
+            p.scm_got = null;
+            try scmRecv(p, m, flags, got);
             if (r >= 0 and m.name != 0) if (unixOf(p, fd)) |u| if (u.netlink) try writeNlAddr(p, m.name, m.namelen_va, 0);
             return r;
         };
@@ -4630,6 +4705,229 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     try p.writePtr(m.controllen_va, 0); // msg_controllen: no control data
     try p.writeU32(m.flags_va, 0);
     return r;
+}
+
+// SCM_RIGHTS on Unix sockets, which are pipe ends. The kernel's pipes
+// can't carry fds, so sendmsg posts each passed fd in #s as `lxf.N`
+// before it writes the data, and queues a batch naming the posts under
+// the pipe end that will read it, with the bytes already queued ahead
+// of the message. Reads on that end count down those bytes and stop at
+// a batch's message, as Linux's stop at a message with control data;
+// the read that starts at it takes the batch: recvmsg opens the posts
+// as new fds and removes them, and any other read closes them, as
+// Linux discards fds that a read without room for them would get.
+// Batches wait in one list for every machine in the process, keyed by
+// the pipe (pipe ids are the kernel's), and are few: a receiver takes
+// them as it reads.
+pub const ScmBatch = struct {
+    key: u64,
+    /// Bytes queued in the pipe ahead of the message, counted down by reads.
+    ahead: u64,
+    /// The message's length: the read that takes the fds ends with it.
+    len: u64,
+    base: u32,
+    n: u32,
+    modes: [scm_max]u8,
+};
+const scm_max = 64;
+var scm_mutex: std.atomic.Mutex = .unlocked;
+var scm_list: std.ArrayList(ScmBatch) = .empty;
+var scm_live: std.atomic.Value(usize) = .init(0);
+var scm_seq: std.atomic.Value(u32) = .init(0);
+const scm_gpa = @import("../web.zig").gpa;
+const SCM_RIGHTS = 1;
+const MSG_CMSG_CLOEXEC = 0x40000000;
+const MSG_CTRUNC = 0x8;
+
+fn scmLock() void {
+    while (!scm_mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+/// The key for the end of the pipe `qpath` that reads: that end itself,
+/// or, with `peer`, the end that a write on `qpath` reaches.
+fn scmKey(qpath: u64, peer: bool) u64 {
+    const t = qpath & 0x1f;
+    const rt = if (peer) (if (t == 1) @as(u64, 2) else 1) else t;
+    return ((qpath >> 5) << 2) | rt;
+}
+
+fn scmReadKey(fd: i32) ?u64 {
+    const info = kc.fdInfo(fd) catch return null;
+    if (info.dc != '|' or info.dir) return null;
+    return scmKey(info.qpath, false);
+}
+
+/// How much of `len` a read on `key` may take: up to the next message
+/// with fds, or that message alone if the read starts at it.
+fn scmClamp(key: u64, len: u64) u64 {
+    scmLock();
+    defer scm_mutex.unlock();
+    for (scm_list.items) |b| {
+        if (b.key != key) continue;
+        // A read that starts at the message ends with it, as Linux's do.
+        if (b.ahead == 0) return @max(1, @min(len, b.len));
+        return @min(len, b.ahead);
+    }
+    return len;
+}
+
+/// After a read of n bytes on `key`: the first batch whose message
+/// starts within them goes to recvmsg (`scm_want`) or is closed, and the
+/// rest count the bytes down.
+fn scmConsumed(p: *Process, key: u64, n: u64) void {
+    var taken: ?ScmBatch = null;
+    {
+        scmLock();
+        defer scm_mutex.unlock();
+        var i: usize = 0;
+        var first = true;
+        while (i < scm_list.items.len) {
+            const b = &scm_list.items[i];
+            if (b.key != key) {
+                i += 1;
+                continue;
+            }
+            if (first and b.ahead < n) {
+                taken = scm_list.orderedRemove(i);
+                _ = scm_live.fetchSub(1, .monotonic);
+                first = false;
+                continue;
+            }
+            first = false;
+            b.ahead -|= n;
+            i += 1;
+        }
+    }
+    const t = taken orelse return;
+    if (p.scm_want and p.scm_got == null) p.scm_got = t else scmDiscard(t);
+}
+
+fn scmPost(base: u32, i: u32, out: *[32]u8) [:0]const u8 {
+    return std.fmt.bufPrintZ(out, "#s/lxf.{d}", .{base +% i}) catch unreachable;
+}
+
+/// Closes the fds of every batch waiting for `key`'s reader.
+fn scmDropKey(key: u64) void {
+    while (true) {
+        const b = blk: {
+            scmLock();
+            defer scm_mutex.unlock();
+            for (scm_list.items, 0..) |x, i| if (x.key == key) {
+                _ = scm_live.fetchSub(1, .monotonic);
+                break :blk scm_list.orderedRemove(i);
+            };
+            return;
+        };
+        scmDiscard(b);
+    }
+}
+
+/// Closes a batch's fds: removes its posts.
+fn scmDiscard(b: ScmBatch) void {
+    var i: u32 = 0;
+    while (i < b.n) : (i += 1) {
+        var nb: [32]u8 = undefined;
+        kern.remove(scmPost(b.base, i, &nb)) catch {};
+    }
+}
+
+/// sendmsg's control messages: SCM_RIGHTS fds are posted and queued for
+/// the peer; SCM_CREDENTIALS and others are accepted and dropped.
+fn scmSend(p: *Process, fd: i32, qpath: u64, ctl: u64, ctllen: u64, msg_len: u64) Err!i64 {
+    const is32 = p.is32();
+    const hdr: u64 = if (is32) 12 else 16;
+    const al: u64 = if (is32) 4 else 8;
+    var fds: [scm_max]i32 = undefined;
+    var n: u32 = 0;
+    var off: u64 = 0;
+    while (off + hdr <= ctllen) {
+        var h: [16]u8 = undefined;
+        try p.readMem(ctl + off, h[0..hdr]);
+        const len: u64 = if (is32) std.mem.readInt(u32, h[0..4], .little) else std.mem.readInt(u64, h[0..8], .little);
+        const lo: usize = if (is32) 4 else 8;
+        const level = std.mem.readInt(i32, h[lo..][0..4], .little);
+        const typ = std.mem.readInt(i32, h[lo + 4 ..][0..4], .little);
+        if (len < hdr or len > ctllen - off) return -E.INVAL;
+        if (level == SOL_SOCKET and typ == SCM_RIGHTS) {
+            var i: u64 = hdr;
+            while (i + 4 <= len) : (i += 4) {
+                if (n == scm_max) return -E.INVAL;
+                var w: [4]u8 = undefined;
+                try p.readMem(ctl + off + i, &w);
+                fds[n] = std.mem.readInt(i32, &w, .little);
+                n += 1;
+            }
+        }
+        off += (len + al - 1) & ~(al - 1);
+    }
+    if (n == 0) return 0;
+    var b: ScmBatch = .{ .key = scmKey(qpath, true), .ahead = 0, .len = msg_len, .base = scm_seq.fetchAdd(n, .monotonic), .n = 0, .modes = undefined };
+    while (b.n < n) : (b.n += 1) {
+        const info = kc.fdInfo(fds[b.n]) catch {
+            scmDiscard(b);
+            return -E.BADF;
+        };
+        b.modes[b.n] = info.mode;
+        var nb: [32]u8 = undefined;
+        const r = srvPost(scmPost(b.base, b.n, &nb)[3..], @intCast(fds[b.n]));
+        if (r < 0) {
+            scmDiscard(b);
+            return r;
+        }
+    }
+    scmLock();
+    defer scm_mutex.unlock();
+    b.ahead = @intCast(@max(0, kc.pipeQueued(fd)));
+    scm_list.append(scm_gpa, b) catch {
+        scmDiscard(b);
+        return -E.NOMEM;
+    };
+    _ = scm_live.fetchAdd(1, .monotonic);
+    return 0;
+}
+
+/// recvmsg's control data: the fds of the batch its read took, opened
+/// from their posts, as many as fit (MSG_CTRUNC and closed otherwise).
+fn scmRecv(p: *Process, m: MsgHdr, flags: u32, got: ?ScmBatch) Err!void {
+    try p.writeU32(m.flags_va, 0);
+    const b = got orelse {
+        try p.writePtr(m.controllen_va, 0);
+        return;
+    };
+    defer scmDiscard(b);
+    const is32 = p.is32();
+    const hdr: u64 = if (is32) 12 else 16;
+    const al: u64 = if (is32) 4 else 8;
+    const room: u64 = if (m.control == 0 or m.controllen < hdr + 4) 0 else (m.controllen - hdr) / 4;
+    var out: [scm_max]i32 = undefined;
+    var k: u32 = 0;
+    var i: u32 = 0;
+    while (i < b.n and k < room) : (i += 1) {
+        var nb: [32]u8 = undefined;
+        const nfd = kern.open(scmPost(b.base, i, &nb), b.modes[i]) catch continue;
+        if (flags & MSG_CMSG_CLOEXEC != 0) kc.setCloexec(nfd, true) catch {};
+        out[k] = nfd;
+        k += 1;
+    }
+    if (k < b.n) try p.writeU32(m.flags_va, MSG_CTRUNC);
+    if (k == 0) {
+        try p.writePtr(m.controllen_va, 0);
+        return;
+    }
+    const len = hdr + 4 * @as(u64, k);
+    var buf: [16 + 4 * scm_max]u8 = @splat(0);
+    if (is32) {
+        std.mem.writeInt(u32, buf[0..4], @intCast(len), .little);
+        std.mem.writeInt(i32, buf[4..8], SOL_SOCKET, .little);
+        std.mem.writeInt(i32, buf[8..12], SCM_RIGHTS, .little);
+    } else {
+        std.mem.writeInt(u64, buf[0..8], len, .little);
+        std.mem.writeInt(i32, buf[8..12], SOL_SOCKET, .little);
+        std.mem.writeInt(i32, buf[12..16], SCM_RIGHTS, .little);
+    }
+    for (out[0..k], 0..) |f, j| std.mem.writeInt(i32, buf[hdr + 4 * j ..][0..4], f, .little);
+    try p.writeMem(m.control, buf[0..@intCast(len)]);
+    try p.writePtr(m.controllen_va, @min((len + al - 1) & ~(al - 1), m.controllen));
 }
 
 /// UDP segmentation offload (UDP_SEGMENT) and receive coalescing
@@ -5090,6 +5388,8 @@ fn unixClosed(p: *Process, fd: i32) void {
         p.gpa.destroy(u);
     }
     if (key_len > 0) srvRemove(key[0..key_len]);
+    // fds passed to this end that it never read are closed with it.
+    if (scm_live.load(.monotonic) > 0) scmDropKey(scmKey(info.qpath, false));
 }
 
 // Readiness.

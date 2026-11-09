@@ -85,6 +85,8 @@ pub const Ctl = extern struct {
     /// FS base: the stub reports it at each exit and sets it on resume
     /// when it differs.
     fs_base: u64 = 0,
+    /// GS base, as FS base (ARCH_SET_GS; Wine keeps the TEB there).
+    gs_base: u64 = 0,
     /// The signal frame's XSTATE_BV, for `fx`: bits 0 and 1 clear mean
     /// the x87 and SSE state was in its initial state and isn't in `fx`.
     xstate_bv: u64 = 0,
