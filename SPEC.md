@@ -4,6 +4,98 @@ Nov 2, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 This describes h9 as built. Changes to it go through proposals in [design/](design/README.md); the record of how h9 got here before proposals is the [baseline](design/0000-baseline.md).
 
+## Contents
+
+- [Overview](#overview)
+- [Decisions](#decisions)
+- [Architecture](#architecture)
+- [Hypervisor layer (`vmm`)](#hypervisor-layer-vmm)
+  - [Shared pieces](#shared-pieces)
+  - [KVM](#kvm)
+  - [WHP](#whp)
+- [Native backend (`native`)](#native-backend-native)
+  - [Stubs](#stubs)
+  - [Syscalls and the filter](#syscalls-and-the-filter)
+  - [Threads and runs](#threads-and-runs)
+  - [Speed](#speed)
+- [Emulator backend (`emu`)](#emulator-backend-emu)
+  - [Scope](#scope)
+  - [How the Unicorn backend works](#how-the-unicorn-backend-works)
+  - [Atomics](#atomics)
+  - [Memory](#memory)
+  - [Implementation](#implementation)
+  - [What it's for](#what-its-for)
+  - [Limits and selection](#limits-and-selection)
+- [Browser host (`web`, `v86`)](#browser-host-web-v86)
+  - [The v86 backend](#the-v86-backend)
+  - [Hosts](#hosts)
+- [Guest shims and ABI](#guest-shims-and-abi)
+  - [What the shim does](#what-the-shim-does)
+  - [The amd64 shim](#the-amd64-shim)
+  - [Binary ABI](#binary-abi)
+  - [a.out loading (host side)](#aout-loading-host-side)
+  - [Syscall table](#syscall-table)
+- [Process model](#process-model)
+  - [Threads](#threads)
+  - [Several machines per host process](#several-machines-per-host-process)
+  - [Notes on blocked and running processes](#notes-on-blocked-and-running-processes)
+  - [vCPU limits](#vcpu-limits)
+- [Go programs](#go-programs)
+- [Linux personality](#linux-personality)
+  - [Loading](#loading)
+  - [Memory](#memory-1)
+  - [Files for databases](#files-for-databases)
+  - [Syscalls](#syscalls)
+  - [Signals](#signals)
+  - [The Linux view](#the-linux-view)
+  - [Roots, environment, and console](#roots-environment-and-console)
+  - [Sockets and readiness](#sockets-and-readiness)
+  - [Threads](#threads-1)
+  - [IPC for PostgreSQL](#ipc-for-postgresql)
+  - [32-bit x86](#32-bit-x86)
+  - [Not yet](#not-yet)
+  - [Tests](#tests)
+- [Kernel: drawterm `kern/` and the Zig seam](#kernel-drawterm-kern-and-the-zig-seam)
+  - [Reused as-is](#reused-as-is)
+  - [Added by us](#added-by-us)
+  - [Zig/C seam rules](#zigc-seam-rules)
+- [Filesystem, boot, and I/O](#filesystem-boot-and-io)
+  - [Root filesystem](#root-filesystem)
+  - [Slim roots](#slim-roots)
+  - [Boot sequence](#boot-sequence)
+  - [Terminal](#terminal)
+  - [Graphics (`--gfx`)](#graphics---gfx)
+- [Serving](#serving)
+  - [Listeners](#listeners)
+  - [Streams](#streams)
+  - [The server Proc](#the-server-proc)
+  - [Process counts](#process-counts)
+  - [The plan](#the-plan)
+- [Security, debugging, and testing](#security-debugging-and-testing)
+  - [Sandbox policy](#sandbox-policy)
+    - [Vendor hooks](#vendor-hooks)
+    - [Network rules](#network-rules)
+    - [Access rules](#access-rules)
+    - [Path resolution](#path-resolution)
+    - [Contained trees](#contained-trees)
+    - [Default profile](#default-profile)
+    - [Discarded root changes](#discarded-root-changes)
+    - [The root overlay's cost](#the-root-overlays-cost)
+    - [Plan output](#plan-output)
+    - [Ephemeral writes](#ephemeral-writes)
+    - [Examples](#examples)
+  - [Debugging](#debugging)
+  - [Testing and CI](#testing-and-ci)
+- [CLI](#cli)
+  - [Parsing rules](#parsing-rules)
+  - [Program resolution](#program-resolution)
+  - [Flags](#flags)
+  - [Default guest environment](#default-guest-environment)
+  - [Exit codes](#exit-codes)
+  - [Signals and TTY](#signals-and-tty)
+  - [Code structure](#code-structure)
+- [Sources](#sources)
+
 ## Overview
 
 h9 is a small Zig library and CLI that runs native 9front executables directly on macOS, Linux, and Windows, using each host's hypervisor API. Each guest process runs in hardware-isolated user mode, and its syscalls are served by drawterm's Plan 9 kernel running in the host process. Prior art: hyper-linux (the same shape for Linux ELF on macOS) and 9vx (Plan 9 binaries on Linux and OS X x86 through a vx32 sandbox).
@@ -90,7 +182,11 @@ const Extra = union(Arch) { arm64: Arm64Extra, amd64: X86Extra, i386: X86Extra }
 const Exit = union(enum) { syscall, fault: Fault, breakpoint, interrupted, halted, other: u64 };
 ```
 
-Each backend is a file under `src/vmm/` with the same method set; the unions dispatch to it. Backends not built into a given h9 are replaced by a stub whose `create` fails with `BackendNotBuilt`, so every host builds the same code. A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only, KVM the host's architecture (arm64 or amd64), WHP and native amd64 only, and only the emulator and v86 run 386. `src/arch/i386.zig` holds the 386 Ureg, notify frame, and `noted` sanitizing without backend details, so a hardware backend could add 386 later with a compatibility-mode code segment and an `INT $64` gate in its shim.
+Each backend is a file under `src/vmm/` with the same method set; the unions dispatch to it. Backends not built into a given h9 are replaced by a stub whose `create` fails with `BackendNotBuilt`, so every host builds the same code.
+
+A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only, KVM the host's architecture (arm64 or amd64), WHP and native amd64 only, and only the emulator and v86 run 386.
+
+`src/arch/i386.zig` holds the 386 Ureg, notify frame, and `noted` sanitizing without backend details, so a hardware backend could add 386 later with a compatibility-mode code segment and an `INT $64` gate in its shim.
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
@@ -112,24 +208,74 @@ The interface was shaped around all three hypervisors, so the table and rules be
 - **Page size:** guest page tables use 4K pages on every host, matching 9front's page size on both architectures. hyper-linux shows HVF guests can use 4K pages. Only the single host memory region has to be aligned to the host page size (16K on Apple Silicon).
 - **No hypervisor:** `create` fails cleanly with a clear message, and `auto` falls back to the emulator when it's built in. The native backend is never chosen automatically, since it shares h9's process and isn't a security boundary; it needs an explicit `--backend native`, and the CLI points at it when nothing else can run.
 
-**Shared pieces.** The hypervisor backends share `src/vmm/gphys.zig`, the guest-physical page allocator over the one RAM region and the address space type (a list of regions over page tables), and a page-table format: `pt_arm64.zig` (TTBR0 for user, a TTBR1 kernel half with the shim, the doorbell page and the per-vCPU shared pages, and the system register values the host sets) or `pt_amd64.zig` (4-level tables, with the kernel half under PML4 entry 511, which every address space's root shares). `x86.zig` holds the amd64 CPU state the host sets, as plain values. `hvf.zig` and `kvm.zig` hold only their hypervisor's calls.
+### Shared pieces
 
-**KVM** (`src/vmm/kvm.zig`, Linux on x86\_64, and on arm64, where it builds but hasn't yet run on a KVM host: [#92](https://github.com/progrium/hyper9/issues/92)). Its ioctls and structs are declared in `kvm_abi.zig`, so it needs no headers or library and static musl builds keep working. `/dev/kvm` missing, or not accessible, is `HypervisorUnavailable`, and the CLI says which. The VM has one memory slot, the RAM region at 2 GiB, and no in-kernel interrupt controller: h9 never injects interrupts. On arm64 the VM asks for HVF's 36-bit IPA size, and the host sets the same system registers HVF does with `KVM_SET_ONE_REG`, so the shim is unchanged; the doorbell store is an MMIO exit, which KVM completes and steps past itself. On x86\_64 the doorbell is an `OUT`. FP state goes through `KVM_{GET,SET}_XSAVE`, whose first 512 bytes are FXSAVE's image (`KVM_GET_FPU` leaves MXCSR out on recent kernels), and the FS base and the user GS base (`KERNEL_GS_BASE`, which `SWAPGS` swaps in) through `KVM_{GET,SET}_MSRS`.
+The hypervisor backends share:
+
+- `src/vmm/gphys.zig`: the guest-physical page allocator over the one RAM region, and the address space type (a list of regions over page tables).
+- A page-table format: `pt_arm64.zig` (TTBR0 for user, a TTBR1 kernel half with the shim, the doorbell page and the per-vCPU shared pages, and the system register values the host sets) or `pt_amd64.zig` (4-level tables, with the kernel half under PML4 entry 511, which every address space's root shares).
+- `x86.zig`: the amd64 CPU state the host sets, as plain values.
+
+`hvf.zig` and `kvm.zig` hold only their hypervisor's calls.
+
+### KVM
+
+The KVM backend (`src/vmm/kvm.zig`) runs on Linux on x86\_64, and on arm64, where it builds but hasn't yet run on a KVM host ([#92](https://github.com/progrium/hyper9/issues/92)). Its ioctls and structs are declared in `kvm_abi.zig`, so it needs no headers or library and static musl builds keep working. `/dev/kvm` missing, or not accessible, is `HypervisorUnavailable`, and the CLI says which.
+
+The VM has one memory slot, the RAM region at 2 GiB, and no in-kernel interrupt controller: h9 never injects interrupts. On arm64 the VM asks for HVF's 36-bit IPA size, and the host sets the same system registers HVF does with `KVM_SET_ONE_REG`, so the shim is unchanged; the doorbell store is an MMIO exit, which KVM completes and steps past itself. On x86\_64 the doorbell is an `OUT`.
+
+FP state goes through `KVM_{GET,SET}_XSAVE`, whose first 512 bytes are FXSAVE's image (`KVM_GET_FPU` leaves MXCSR out on recent kernels), and the FS base and the user GS base (`KERNEL_GS_BASE`, which `SWAPGS` swaps in) through `KVM_{GET,SET}_MSRS`.
 
 - **vCPU lifetime.** KVM can't destroy one vCPU, and every vCPU a VM ever created counts against its limit. So `destroy` parks the vCPU on a free list, and `createVcpu` takes a parked one first and resets it: `KVM_ARM_VCPU_INIT` again on arm64, which is a full reset, and on x86 the registers, segment state, MSRs, and FP state all set again. A vCPU isn't bound to a thread, so any thread may take a parked one. The limit `maxVcpus` reports is KVM's (`KVM_CAP_MAX_VCPUS`, capped by `KVM_CAP_MAX_VCPU_ID` and 1024 shared-page slots), capped again by the file descriptors left less 256, since each vCPU holds one; the backend raises the soft `RLIMIT_NOFILE` to the hard limit when it creates the VM.
 - **Kicks.** `kick` sets `kvm_run.immediate_exit` and sends the vCPU's thread `SIGRTMIN + 1`. The signal is blocked in each vCPU thread (from `createVcpu`) and unblocked only inside `KVM_RUN` through `KVM_SET_SIGNAL_MASK`, so it never interrupts a host call; after a stop, h9 consumes it with `sigtimedwait`, as it stays pending once blocked again. A kick can stop the vCPU anywhere. In user mode, the host reads the registers into the Ureg and re-enters the shim at its restore path before the next run, so a note delivered at that exit takes effect. In the shim's save path, before the doorbell, the Ureg is half written, so the host runs it on to the doorbell and returns that exit instead; in its restore path, the Ureg is already current.
 
-**WHP** (`src/vmm/whp.zig`, Windows x86\_64 only) is built but incomplete. It runs KVM's amd64 shim, page tables, and CPU state (`x86.zig`, `pt_amd64.zig`), setting the state through `WHvSetVirtualProcessorRegisters` rather than ioctls; its functions and structs are declared in `whp_abi.zig`. `WinHvPlatform.dll` is loaded at run time, so `h9.exe` starts on machines without the Windows Hypervisor Platform feature, and `auto` falls back to the emulator there. The doorbell is an `OUT` to an I/O port, whose exit the backend steps past itself, and `kick` is `WHvCancelRunVirtualProcessor` plus a flag that `run` checks first, since a cancel only stops a run already in progress. As on KVM, destroyed vCPUs are parked and reset for their next user. The partition's processor count, and so the vCPU limit, is fixed at 64, HVF's measured limit, until WHP's own is measured. What's missing: the `[whp]` cases have passed on a Windows x86\_64 VM except the emulator fallback case, which hasn't run on a machine without the feature, and arm64 Windows has no WHP backend yet.
+### WHP
+
+The WHP backend (`src/vmm/whp.zig`, Windows x86\_64 only) is built but incomplete. It runs KVM's amd64 shim, page tables, and CPU state (`x86.zig`, `pt_amd64.zig`), setting the state through `WHvSetVirtualProcessorRegisters` rather than ioctls; its functions and structs are declared in `whp_abi.zig`.
+
+`WinHvPlatform.dll` is loaded at run time, so `h9.exe` starts on machines without the Windows Hypervisor Platform feature, and `auto` falls back to the emulator there.
+
+The doorbell is an `OUT` to an I/O port, whose exit the backend steps past itself, and `kick` is `WHvCancelRunVirtualProcessor` plus a flag that `run` checks first, since a cancel only stops a run already in progress.
+
+As on KVM, destroyed vCPUs are parked and reset for their next user. The partition's processor count, and so the vCPU limit, is fixed at 64, HVF's measured limit, until WHP's own is measured.
+
+What's missing: the `[whp]` cases have passed on a Windows x86\_64 VM except the emulator fallback case, which hasn't run on a machine without the feature, and arm64 Windows has no WHP backend yet.
 
 ## Native backend (`native`)
 
 The native backend ([native-backend](design/0095-native-backend.md), `src/vmm/native.zig`) runs amd64 guest code directly on the host CPU on Linux x86\_64, with no hypervisor and no emulator, so it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. It's MIT and built into every Linux x86\_64 `h9`.
 
-**Stubs.** Every 9front process is linked at the same address with its stack at the same top, so guest code can't run in h9's own address space. Each address space is a stub process instead (`src/vmm/native_stub.zig`): a freestanding static program of about 4 KB, embedded in h9, written to a sealed memfd and started with `clone(CLONE_VM|CLONE_VFORK)` and `execveat`, with every signal blocked across the clone. It's linked at `0x6000_0000_0000` and keeps `[stub_base, stub_base + 4 GiB)` for itself, far above 9front's amd64 layout; at startup it unmaps everything else (the kernel's stack, vDSO, and vvar), so the guest's whole range is free. It runs in its own session, so the terminal's signals go to h9 alone, with only two file descriptors: the machine's guest RAM, one memfd that h9 maps once and hands out in pages through `gphys.Ram`, and its control pages (`src/vmm/native_abi.zig`). `map` and `unmap` queue requests, and a stub thread carries them out (an `mmap` of the RAM file at the guest address, or a `munmap`) before it next runs guest code, so `translate` and `copy` read guest memory in place.
+### Stubs
 
-**Syscalls and the filter.** Each stub thread turns on Syscall User Dispatch for everything outside the stub's range, with a read-only selector, so every guest `SYSCALL` (whatever is in AX) raises SIGSYS instead of reaching the host kernel. A seccomp filter is the backstop: it kills the stub for any call not made from the stub's range, and allows only the few calls the stub makes (`futex`, `mmap` of the RAM file, `munmap`, `clone` with exactly the thread flags, and a handful more). Backend creation runs a probe once per h9: a guest that makes syscalls with unusual values in AX (0, 39, 335, 336, x32 numbers, high bits) must trap each time, or `--check` says why and the backend is refused.
+Every 9front process is linked at the same address with its stack at the same top, so guest code can't run in h9's own address space. Each address space is a stub process instead (`src/vmm/native_stub.zig`): a freestanding static program of about 4 KB, embedded in h9, written to a sealed memfd and started with `clone(CLONE_VM|CLONE_VFORK)` and `execveat`, with every signal blocked across the clone.
 
-**Threads and runs.** A stub's first thread is its control thread, which never runs guest code; it starts another thread for each vCPU that runs the space, so a Linux program's threads run in parallel. A vCPU goes back to the stub thread it last ran on while that one is free, which keeps the AVX state `Extra` doesn't carry with it. One signal handler, on a per-thread alternate stack, is the only way in or out of guest code: SIGSYS, a CPU exception (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), or a kick's SIGURG writes the registers, the first 416 bytes of the FXSAVE image, and the FS and GS bases to the thread's control page, tells h9 through a futex (spinning first), and waits. `run` writes the Ureg back, hands the thread `run`, and waits for the next exit; a page fault's access comes from the error code. `kick` sets the page's kick flag and sends SIGURG with `tgkill`; the stub reports `interrupted` only while the flag is set, so a signal that arrives after the run it was meant for has ended just resumes the guest. `AddressSpace.shootdown` has the control thread carry out the queued unmaps, whose host `munmap` shoots down the other threads' TLBs. Unlike KVM's shim, the backend can't hide CPUID, so guests see the host's AVX.
+It's linked at `0x6000_0000_0000` and keeps `[stub_base, stub_base + 4 GiB)` for itself, far above 9front's amd64 layout; at startup it unmaps everything else (the kernel's stack, vDSO, and vvar), so the guest's whole range is free.
+
+It runs in its own session, so the terminal's signals go to h9 alone, with only two file descriptors: the machine's guest RAM, one memfd that h9 maps once and hands out in pages through `gphys.Ram`, and its control pages (`src/vmm/native_abi.zig`).
+
+`map` and `unmap` queue requests, and a stub thread carries them out (an `mmap` of the RAM file at the guest address, or a `munmap`) before it next runs guest code, so `translate` and `copy` read guest memory in place.
+
+### Syscalls and the filter
+
+Each stub thread turns on Syscall User Dispatch for everything outside the stub's range, with a read-only selector, so every guest `SYSCALL` (whatever is in AX) raises SIGSYS instead of reaching the host kernel.
+
+A seccomp filter is the backstop: it kills the stub for any call not made from the stub's range, and allows only the few calls the stub makes (`futex`, `mmap` of the RAM file, `munmap`, `clone` with exactly the thread flags, and a handful more).
+
+Backend creation runs a probe once per h9: a guest that makes syscalls with unusual values in AX (0, 39, 335, 336, x32 numbers, high bits) must trap each time, or `--check` says why and the backend is refused.
+
+### Threads and runs
+
+A stub's first thread is its control thread, which never runs guest code; it starts another thread for each vCPU that runs the space, so a Linux program's threads run in parallel. A vCPU goes back to the stub thread it last ran on while that one is free, which keeps the AVX state `Extra` doesn't carry with it.
+
+One signal handler, on a per-thread alternate stack, is the only way in or out of guest code: SIGSYS, a CPU exception (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), or a kick's SIGURG writes the registers, the first 416 bytes of the FXSAVE image, and the FS and GS bases to the thread's control page, tells h9 through a futex (spinning first), and waits.
+
+`run` writes the Ureg back, hands the thread `run`, and waits for the next exit; a page fault's access comes from the error code.
+
+`kick` sets the page's kick flag and sends SIGURG with `tgkill`; the stub reports `interrupted` only while the flag is set, so a signal that arrives after the run it was meant for has ended just resumes the guest.
+
+`AddressSpace.shootdown` has the control thread carry out the queued unmaps, whose host `munmap` shoots down the other threads' TLBs. Unlike KVM's shim, the backend can't hide CPUID, so guests see the host's AVX.
+
+### Speed
 
 On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24 s on native, and the amd64 integration suite runs in about 5½ minutes against 7 on emu. arm64 isn't built yet.
 
@@ -137,23 +283,71 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-**Scope:** user-mode arm64, amd64, and 386 code only. On an `SVC`, `SYSCALL`, or `INT $64`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers, and no MMU. The shim is tested only on real hypervisors.
+### Scope
 
-**How the Unicorn backend works.** Each vCPU is one Unicorn engine, running arm64 at EL0, amd64 in flat 64-bit mode, or 386 in `UC_MODE_32`, whose segments are all based at 0 as 9front's are for user code; the 386 Ureg's selectors are the values 9front gives user mode, kept in the Ureg rather than the engine. Guest pages come from one reserved range of host memory, twice the memory cap in address space (`src/vmm/arena.zig`: first fit below a bump pointer; a freed range is given back to the host, mapped over with fresh zero pages on POSIX and decommitted on Windows, so neither allocation nor free touches the pages), and each engine maps that range once, with `uc_mem_map_ptr`, as its physical memory at 4 GiB. So the host and the guest share the pages and syscall arguments are read in place. An address space is a list of regions of that memory. Engines run in Unicorn's virtual-TLB mode (`UC_TLB_VIRTUAL`): a `UC_HOOK_TLB_FILL` hook finds a guest page's region by binary search in the engine's sorted copy of the list, taken when the vCPU runs after a change, so a change never touches Unicorn's memory map, whose every change rebuilds it. A region gone or changed flushes the engine's TLB, and only an executable one drops its translated blocks (`UC_CTL_TB_REMOVE_CACHE` over its range, while the old copy still translates it), since blocks are keyed by physical address. The fill hook sees only the page, so an access the guest may not make (unmapped, or without the permission) gets a trap entry instead: one of eight physical pages with nothing behind them, recorded with the guest page, which the access then reaches with its offset intact, through `UC_HOOK_MEM_INVALID`; the fault's address is the guest page plus that offset. A run after trap entries flushes the TLB first, so their slots can be reused. Hooks stop the engine: `UC_HOOK_INTR` for `SVC` and 386 `INT $64` (and other exceptions), `UC_HOOK_INSN` for amd64 `SYSCALL`, and `UC_HOOK_MEM_INVALID` for faults. After a syscall stop the PC is already past the instruction, as with a hypervisor; after a fault it's at the faulting instruction. `Ureg.type` (`trap` on 386) holds what the real kernel puts there for a syscall (the ESR on arm64, vector 64 on x86). Unicorn has no FXSAVE register, so `getExtra` and `setExtra` assemble the image on both x86 architectures from the x87 control, status, tag, and opcode registers, `ST0`–`ST7` (in stack order, as FXSAVE has them, with the status word and its TOP written first), MXCSR, and the XMM registers; XMM8–15 stay zero on 386. `kick` sets two flags: one the next run checks before it starts, and a stop request that a `UC_HOOK_BLOCK` hook sees at the engine's next block, on its own thread, where it calls `uc_emu_stop`. On arm64, `CNTKCTL_EL1` lets EL0 read the counter and its frequency, as Linux does.
+User-mode arm64, amd64, and 386 code only. On an `SVC`, `SYSCALL`, or `INT $64`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers, and no MMU. The shim is tested only on real hypervisors.
 
-**Atomics.** Unicorn generates code for a single-threaded context (its `curr_cflags` never sets `CF_PARALLEL`), so guest atomics (x86 `LOCK` instructions, arm64 exclusives, and LSE atomics) become plain loads and stores, and engines running at once on shared memory would race through them; a Go program's runtime fails with "unlock of unlocked lock". So a backend runs guest code on one engine at a time, through a ticket lock held across each `uc_emu_start`; kernel calls run outside it, so processes still block in the kernel in parallel. The lock passes at exits, and is time-sliced: a waiter that has waited 1 ms for the same holder sets the holder's stop request, and the holder stops at its next block and returns `interrupted` ([linux-threads](design/0049-linux-threads.md)), so a guest spinning without syscalls (a spinlock waiting on another thread) doesn't hold the others off. The stop is made from the block hook, not by `uc_emu_stop` from the waiter's thread, since an engine stopped from another thread can report the PC of an earlier block than the one it stopped in, and resuming it would run instructions twice. A kick that arrives while an engine waits for the lock is seen once it has it. An engine copies the address space's regions (`sync`) only after taking the lock, mapping and unmapping just the regions that changed and flushing translated blocks only when one went away, so `AddressSpace.shootdown`, which takes and passes on the lock, guarantees no engine still runs with mappings from before a change.
+### How the Unicorn backend works
 
-**Memory.** Guest pages come from the reserved range above, whose pages are zero and stay unbacked until touched, and rfork's eager copy skips pages that are still zero (`src/segment.zig`), so the several hundred MB of `brk` a Go program reserves at start cost next to nothing until it uses them. They still count against `--memory`.
+Each vCPU is one Unicorn engine, running arm64 at EL0, amd64 in flat 64-bit mode, or 386 in `UC_MODE_32`, whose segments are all based at 0 as 9front's are for user code; the 386 Ureg's selectors are the values 9front gives user mode, kept in the Ureg rather than the engine.
 
-**Implementation.** The backend uses Unicorn Engine. It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses. It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into the MIT `h9` release build. Releases ship it separately as `h9-emu`, a GPLv2 binary built from source (`-Dunicorn=source`) with its complete corresponding source attached to the same release (`scripts/release.sh`); the two are separate programs side by side, so `h9` stays MIT. We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target. There are no Windows wheels, so emu on Windows (arm64 and x86\_64) is built from source with our own `build.zig` (`-Dunicorn=source`, `build/unicorn.zig`). amd64 binaries are tested on Linux x86\_64 only; there's no amd64 on Darwin.
+Guest pages come from one reserved range of host memory, twice the memory cap in address space (`src/vmm/arena.zig`: first fit below a bump pointer; a freed range is given back to the host, mapped over with fresh zero pages on POSIX and decommitted on Windows, so neither allocation nor free touches the pages), and each engine maps that range once, with `uc_mem_map_ptr`, as its physical memory at 4 GiB. So the host and the guest share the pages and syscall arguments are read in place. An address space is a list of regions of that memory.
 
-**What it's for**
+Engines run in Unicorn's virtual-TLB mode (`UC_TLB_VIRTUAL`): a `UC_HOOK_TLB_FILL` hook finds a guest page's region by binary search in the engine's sorted copy of the list, taken when the vCPU runs after a change, so a change never touches Unicorn's memory map, whose every change rebuilds it.
+
+A region gone or changed flushes the engine's TLB, and only an executable one drops its translated blocks (`UC_CTL_TB_REMOVE_CACHE` over its range, while the old copy still translates it), since blocks are keyed by physical address.
+
+The fill hook sees only the page, so an access the guest may not make (unmapped, or without the permission) gets a trap entry instead: one of eight physical pages with nothing behind them, recorded with the guest page, which the access then reaches with its offset intact, through `UC_HOOK_MEM_INVALID`; the fault's address is the guest page plus that offset. A run after trap entries flushes the TLB first, so their slots can be reused.
+
+Hooks stop the engine: `UC_HOOK_INTR` for `SVC` and 386 `INT $64` (and other exceptions), `UC_HOOK_INSN` for amd64 `SYSCALL`, and `UC_HOOK_MEM_INVALID` for faults. After a syscall stop the PC is already past the instruction, as with a hypervisor; after a fault it's at the faulting instruction. `Ureg.type` (`trap` on 386) holds what the real kernel puts there for a syscall (the ESR on arm64, vector 64 on x86).
+
+Unicorn has no FXSAVE register, so `getExtra` and `setExtra` assemble the image on both x86 architectures from the x87 control, status, tag, and opcode registers, `ST0`–`ST7` (in stack order, as FXSAVE has them, with the status word and its TOP written first), MXCSR, and the XMM registers; XMM8–15 stay zero on 386.
+
+`kick` sets two flags: one the next run checks before it starts, and a stop request that a `UC_HOOK_BLOCK` hook sees at the engine's next block, on its own thread, where it calls `uc_emu_stop`.
+
+On arm64, `CNTKCTL_EL1` lets EL0 read the counter and its frequency, as Linux does.
+
+### Atomics
+
+Unicorn generates code for a single-threaded context (its `curr_cflags` never sets `CF_PARALLEL`), so guest atomics (x86 `LOCK` instructions, arm64 exclusives, and LSE atomics) become plain loads and stores, and engines running at once on shared memory would race through them; a Go program's runtime fails with "unlock of unlocked lock".
+
+So a backend runs guest code on one engine at a time, through a ticket lock held across each `uc_emu_start`; kernel calls run outside it, so processes still block in the kernel in parallel.
+
+The lock passes at exits, and is time-sliced: a waiter that has waited 1 ms for the same holder sets the holder's stop request, and the holder stops at its next block and returns `interrupted` ([linux-threads](design/0049-linux-threads.md)), so a guest spinning without syscalls (a spinlock waiting on another thread) doesn't hold the others off.
+
+The stop is made from the block hook, not by `uc_emu_stop` from the waiter's thread, since an engine stopped from another thread can report the PC of an earlier block than the one it stopped in, and resuming it would run instructions twice. A kick that arrives while an engine waits for the lock is seen once it has it.
+
+An engine copies the address space's regions (`sync`) only after taking the lock, mapping and unmapping just the regions that changed and flushing translated blocks only when one went away, so `AddressSpace.shootdown`, which takes and passes on the lock, guarantees no engine still runs with mappings from before a change.
+
+### Memory
+
+Guest pages come from the reserved range above, whose pages are zero and stay unbacked until touched, and rfork's eager copy skips pages that are still zero (`src/segment.zig`), so the several hundred MB of `brk` a Go program reserves at start cost next to nothing until it uses them. They still count against `--memory`.
+
+### Implementation
+
+The backend uses Unicorn Engine. It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses.
+
+It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into the MIT `h9` release build. Releases ship it separately as `h9-emu`, a GPLv2 binary built from source (`-Dunicorn=source`) with its complete corresponding source attached to the same release (`scripts/release.sh`); the two are separate programs side by side, so `h9` stays MIT.
+
+We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target.
+
+There are no Windows wheels, so emu on Windows (arm64 and x86\_64) is built from source with our own `build.zig` (`-Dunicorn=source`, `build/unicorn.zig`). amd64 binaries are tested on Linux x86\_64 only; there's no amd64 on Darwin.
+
+### What it's for
 
 - Developing and testing on any host or VM: macOS, Linux, Windows, and hosted CI runners.
 - Cross-architecture runs, for testing only: amd64 binaries on an arm64 Mac, and the reverse.
 - Conformance: the backend cases in `tests/backends.zig` run against every backend built in.
 
-**Limits and selection.** Measured with `zig build bench -Demu=unicorn` ([tests/bench.zig](tests/bench.zig)) on an M3 Max (macOS, release build of Unicorn 2.1.4): a 2-instruction loop of 10⁹ iterations takes 0.27 s on HVF, 1.4 s on emu for arm64 (about 1.5 G instructions/s; Unicorn's code generation, not our hooks) and 1.9 s on emu for amd64. A `pwrite` syscall round trip costs about 0.8 µs on emu, a little less than HVF's 1.1 µs: a bare exit and re-entry takes about 0.35 µs on emu, which never leaves the process, and about 0.8 µs on HVF, which goes through the shim, EL2, and the macOS kernel each way. On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loop takes 0.35 s for amd64, and a `pwrite` round trip about 28 µs, of which about 19 µs is the bare `OUT` exit and re-entry, each going through both hypervisors; KVM on bare metal is far cheaper. So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds. By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86` is accepted everywhere but fails with `BackendNotBuilt` outside web builds ([browser-host](design/0012-browser-host.md)).
+### Limits and selection
+
+Measured with `zig build bench -Demu=unicorn` ([tests/bench.zig](tests/bench.zig)) on an M3 Max (macOS, release build of Unicorn 2.1.4): a 2-instruction loop of 10⁹ iterations takes 0.27 s on HVF, 1.4 s on emu for arm64 (about 1.5 G instructions/s; Unicorn's code generation, not our hooks) and 1.9 s on emu for amd64. A `pwrite` syscall round trip costs about 0.8 µs on emu, a little less than HVF's 1.1 µs: a bare exit and re-entry takes about 0.35 µs on emu, which never leaves the process, and about 0.8 µs on HVF, which goes through the shim, EL2, and the macOS kernel each way.
+
+On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loop takes 0.35 s for amd64, and a `pwrite` round trip about 28 µs, of which about 19 µs is the bare `OUT` exit and re-entry, each going through both hypervisors; KVM on bare metal is far cheaper.
+
+So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds.
+
+By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86` is accepted everywhere but fails with `BackendNotBuilt` outside web builds ([browser-host](design/0012-browser-host.md)).
 
 ## Browser host (`web`, `v86`)
 
@@ -170,15 +364,37 @@ The emulator lets the system run anywhere, including VMs without nested virtuali
 | Policy | `#C` and `#I` are always masked. `--host-cmd` is a usage error. The network is WebSockets only: `--net=outbound` (the default) and `enable` bind `#ℏ` alone at `/net`, and `disable` masks it. |
 | WebSockets | `hstream.zig`'s web branch calls `h9-web.js`'s `h9_ws_*` imports, over the runtime's `WebSocket` ([websocket-9p](design/0021-websocket-9p.md)): `ws_open` and `ws_send` return at once, `ws_opened` and `ws_recv` are Suspending, and a stream's reader is a coroutine parked in `ws_recv`, which hands over as many queued binary messages as fit. The browser does the handshake, TLS, proxies, and pongs, so `--root-header`, `--root-ca`, and `header` in `ctl` are errors, there's no keepalive, and a failed connection says only "connection failed". `--net-allow` checks a connect's name or literal address but can't check what a name resolves to, which the plan lists as a caveat. |
 
-**The v86 backend** (`src/vmm/v86.zig`) runs 386 binaries on v86's CPU, the only backend in web builds. `v86.wasm` (0.5.473, pinned in `scripts/pins.sh` with its register-block offsets, fetched by `scripts/fetch.sh`, checked by `tests/web/v86-layout.mjs`) and `h9.wasm` share one linear memory: v86 owns the low part, h9 is linked with `--import-memory` at a 16 MiB base, and guest RAM is one `allocate_memory` from v86, made after h9 is instantiated. `src/arch/i386/shim.S`, loaded at guest-physical 0x1000, sets up 9front's GDT (kernel and user code and data, a TSS), an IDT whose every vector pushes a 386 Ureg on the kernel stack and halts, and paging with the kernel at `KZERO`. A halt ends `main_loop`, and the backend reads the Ureg from the stack; a resume writes it back, clears `in_hlt`, and jumps to the shim's restore path. An address space is a 386 page directory in guest RAM. A slice that ends without a halt is preemption: `run` builds the Ureg from v86's registers, returns the CPU to ring 0, yields to the event loop, and returns `.interrupted`. A context that halts often (a syscall every few instructions) never reaches a slice's end, so `run` also yields first once 2 ms have passed since the last yield; a Linux `sched_yield` is the kernel's `sleep(0)`, a coroutine switch here. Freed pages and executable mappings call `jit_dirty_cache`, so recycled pages never run stale compiled code. `h9-web.js` provides v86's imports: a clock, JIT glue (compile the generated module and set it in the shared table, deferring `codegen_finalize_finished` until `main_loop` returns), and stubs for ports and MMIO, which ring 3 can't reach.
+### The v86 backend
 
-**Hosts.** `h9-node` runs the CLI under Node 24 or later, with the same flags as `h9`; it's how the integration suite tests the web host. In a page, `createMachine({ root, memory, policy, terminal })` from `h9-web.js` starts one machine in its own Worker (`src/web/worker.js`) and `machine.run(argv)` resolves to the exit status. `root` is a root archive's URL, or a `ws://` or `wss://` URL of a 9P server, under which WASI sees an empty tree; the page edits and echoes lines in cooked mode, passes keys in raw mode, and sends the interrupt key as `Machine.Signals.interrupt`. The demo page (`index.html`) runs an interactive rc, over `?root=` when given.
+The v86 backend (`src/vmm/v86.zig`) runs 386 binaries on v86's CPU, the only backend in web builds.
+
+`v86.wasm` (0.5.473, pinned in `scripts/pins.sh` with its register-block offsets, fetched by `scripts/fetch.sh`, checked by `tests/web/v86-layout.mjs`) and `h9.wasm` share one linear memory: v86 owns the low part, h9 is linked with `--import-memory` at a 16 MiB base, and guest RAM is one `allocate_memory` from v86, made after h9 is instantiated.
+
+`src/arch/i386/shim.S`, loaded at guest-physical 0x1000, sets up 9front's GDT (kernel and user code and data, a TSS), an IDT whose every vector pushes a 386 Ureg on the kernel stack and halts, and paging with the kernel at `KZERO`.
+
+A halt ends `main_loop`, and the backend reads the Ureg from the stack; a resume writes it back, clears `in_hlt`, and jumps to the shim's restore path. An address space is a 386 page directory in guest RAM.
+
+A slice that ends without a halt is preemption: `run` builds the Ureg from v86's registers, returns the CPU to ring 0, yields to the event loop, and returns `.interrupted`. A context that halts often (a syscall every few instructions) never reaches a slice's end, so `run` also yields first once 2 ms have passed since the last yield; a Linux `sched_yield` is the kernel's `sleep(0)`, a coroutine switch here.
+
+Freed pages and executable mappings call `jit_dirty_cache`, so recycled pages never run stale compiled code.
+
+`h9-web.js` provides v86's imports: a clock, JIT glue (compile the generated module and set it in the shared table, deferring `codegen_finalize_finished` until `main_loop` returns), and stubs for ports and MMIO, which ring 3 can't reach.
+
+### Hosts
+
+`h9-node` runs the CLI under Node 24 or later, with the same flags as `h9`; it's how the integration suite tests the web host.
+
+In a page, `createMachine({ root, memory, policy, terminal })` from `h9-web.js` starts one machine in its own Worker (`src/web/worker.js`) and `machine.run(argv)` resolves to the exit status.
+
+`root` is a root archive's URL, or a `ws://` or `wss://` URL of a 9P server, under which WASI sees an empty tree; the page edits and echoes lines in cooked mode, passes keys in raw mode, and sends the interrupt key as `Machine.Signals.interrupt`.
+
+The demo page (`index.html`) runs an interactive rc, over `?root=` when given.
 
 ## Guest shims and ABI
 
 Each guest architecture gets a few hundred lines of assembly that run in guest kernel mode. The shim holds no policy: it moves control to the host and back, and the host decides everything.
 
-**What the shim does**
+### What the shim does
 
 - Bring up the CPU: on arm64, EL1 with the MMU on; on amd64, long mode with a GDT, an IDT, and the SYSCALL MSRs. Every hypervisor h9 uses lets the host set these directly (HVF and KVM on arm64 through their register calls, KVM on amd64 through `KVM_SET_SREGS` and `KVM_SET_MSRS`), so the host does it and the shim is only the entry and exit paths.
 - Switch the user page table root when the host asks: the host sets TTBR0 on arm64 and the shim flushes the TLB; on amd64 the host writes the next root into the shared page and the shim loads it into CR3, which flushes too, since setting CR3 from the host would take a full get and set of the segment state.
@@ -186,9 +402,22 @@ Each guest architecture gets a few hundred lines of assembly that run in guest k
 
 **Per-vCPU shared page:** the saved Ureg, the exit reason and fault address, and the flush flag (arm64) or next CR3 (amd64). The host reads and writes it directly, so a typical syscall costs one exit and no register get/set calls.
 
-**The amd64 shim** (`src/arch/amd64/shim.S`, used by KVM). The host puts the vCPU in long mode at ring 0: CR0 with paging and write protection, CR4 with PAE, FXSR, and SMEP and SMAP where the CPU has them, EFER with long mode, SYSCALL, and NX; a GDT per vCPU laid out as 9front's `pc64` is, so `UESEL` and `UDSEL` are the user selectors, with a TSS whose IST1 is the top of the vCPU's shared page; one IDT, shared, sending vectors 0–31 through IST1; and `STAR`, `LSTAR`, and `SFMASK`. GS points at the shared page while the shim runs, and `SWAPGS` keeps it in `KERNEL_GS_BASE` in user mode. CPUID hides XSAVE, AVX, and AVX-512, so user code uses only state the FXSAVE image carries across vCPUs. The shim's `SYSCALL` entry and exception stubs save the registers into the Ureg (the vector and error code in `type` and `error`, CR2 for a page fault) and ring the doorbell; the restore path loads the next CR3 if set, then the Ureg, with the user selectors and only the user flags (plus IF), and returns with `IRETQ`, one path for syscalls, faults, and notes. The doorbell sits at a fixed offset, so the host can tell from a stopped vCPU's PC whether the shim was saving a Ureg or loading one.
+### The amd64 shim
 
-**Binary ABI (checked against 9front source).** The values below come from `sys/src/9/{arm64,pc64}/mem.h` and `trap.c`, plus `sysexec` in `port/sysproc.c`.
+The amd64 shim (`src/arch/amd64/shim.S`) is used by KVM. The host puts the vCPU in long mode at ring 0:
+
+- CR0 with paging and write protection, CR4 with PAE, FXSR, and SMEP and SMAP where the CPU has them, and EFER with long mode, SYSCALL, and NX.
+- A GDT per vCPU laid out as 9front's `pc64` is, so `UESEL` and `UDSEL` are the user selectors, with a TSS whose IST1 is the top of the vCPU's shared page.
+- One IDT, shared, sending vectors 0–31 through IST1.
+- `STAR`, `LSTAR`, and `SFMASK`.
+
+GS points at the shared page while the shim runs, and `SWAPGS` keeps it in `KERNEL_GS_BASE` in user mode. CPUID hides XSAVE, AVX, and AVX-512, so user code uses only state the FXSAVE image carries across vCPUs.
+
+The shim's `SYSCALL` entry and exception stubs save the registers into the Ureg (the vector and error code in `type` and `error`, CR2 for a page fault) and ring the doorbell; the restore path loads the next CR3 if set, then the Ureg, with the user selectors and only the user flags (plus IF), and returns with `IRETQ`, one path for syscalls, faults, and notes. The doorbell sits at a fixed offset, so the host can tell from a stopped vCPU's PC whether the shim was saving a Ureg or loading one.
+
+### Binary ABI
+
+The values below are checked against 9front source. They come from `sys/src/9/{arm64,pc64}/mem.h` and `trap.c`, plus `sysexec` in `port/sysproc.c`.
 
 | Item | arm64 (`R_MAGIC`) | amd64 (`S_MAGIC`) | 386 (`I_MAGIC`) |
 | --- | --- | --- | --- |
@@ -205,7 +434,7 @@ Each guest architecture gets a few hundred lines of assembly that run in guest k
 
 Pointers, argv, the words of the note frame, and the Tos's pointers follow the architecture's word size, so 386's Tos is 56 bytes with `pid` at 48. `noted` on 386 keeps the segment selectors and the flags outside 0xCD5 (IF, IOPL, TF) from the kernel's copy, as 9front's `setregisters` does.
 
-**a.out loading (host side)**
+### a.out loading (host side)
 
 1. Read the Exec header: eight big-endian 32-bit words. Both 64-bit magics set HDR\_MAGIC, so a big-endian 64-bit entry address follows, making the header 40 bytes; 386's has none, so its entry is the header's 32-bit `entry` word and the header is 32 bytes.
 2. Map file bytes \[0, header + text) read-only at UTZERO. The header is part of the text segment, and the entry point must fall inside it.
@@ -213,7 +442,15 @@ Pointers, argv, the words of the note frame, and the Tos's pointers follow the a
 4. The stack may span \[USTKTOP − 16 MiB, USTKTOP), but as in 9front only its top pages are mapped at first; it grows down on faults below it, and at each syscall to cover the arguments. A zeroed Tos sits at the very top. Below it go the argument strings, then the argv array, then argc at SP.
 5. Tos fields: the host fills `pid` and `cyclefreq` and keeps `kcycles`/`pcycles` current; the profiling pointers stay zero.
 
-**Syscall table.** 9front's `libc/9syscall/sys.h` defines numbers 0–53; 48 and 49 are unused. The underscore entries (`_READ`, `_WRITE`, `_STAT`, `_NSEC`, and so on) are old compatibility calls that current libc doesn't use. h9 implements only the current calls, plus `_NSEC` (53), which Go's `syscall.Gettimeofday` uses ([go-compat](design/0007-go-compat.md)): as 9front's `sys_nsec`, it returns the wall time in nanoseconds in the return register on 64-bit machines, and on 386 stores it through its argument and returns 0. The others post "sys: bad sys call", as the real kernel does for unknown calls. `mount`, `unmount`, and `fauth` are served by drawterm's `sysmount` and `sysunmount` and a `fauth` wrapper over devmnt's `mntauth` (`h9_fauth` in `src/kern/glue.c`), so a guest mounts any 9P server it has an fd for: a posted channel, a pipe it serves itself, or a network connection the policy allowed. `mount` blocks until the server answers `Tversion` and `Tattach`, and a note interrupts it as it does any devmnt RPC. Time otherwise comes from `/dev/bintime`, which h9's devcons hooks serve in nanoseconds with all four of 9front's words (see Kernel, "Added by us").
+### Syscall table
+
+9front's `libc/9syscall/sys.h` defines numbers 0–53; 48 and 49 are unused. The underscore entries (`_READ`, `_WRITE`, `_STAT`, `_NSEC`, and so on) are old compatibility calls that current libc doesn't use.
+
+h9 implements only the current calls, plus `_NSEC` (53), which Go's `syscall.Gettimeofday` uses ([go-compat](design/0007-go-compat.md)): as 9front's `sys_nsec`, it returns the wall time in nanoseconds in the return register on 64-bit machines, and on 386 stores it through its argument and returns 0. The others post "sys: bad sys call", as the real kernel does for unknown calls.
+
+`mount`, `unmount`, and `fauth` are served by drawterm's `sysmount` and `sysunmount` and a `fauth` wrapper over devmnt's `mntauth` (`h9_fauth` in `src/kern/glue.c`), so a guest mounts any 9P server it has an fd for: a posted channel, a pipe it serves itself, or a network connection the policy allowed. `mount` blocks until the server answers `Tversion` and `Tattach`, and a note interrupts it as it does any devmnt RPC.
+
+Time otherwise comes from `/dev/bintime`, which h9's devcons hooks serve in nanoseconds with all four of 9front's words (see Kernel, "Added by us").
 
 **Reference:** hyper-linux's `src/shim.S` (648 lines, Apache-2.0) covers EL1 vectors, MMU setup, and W^X page splitting on HVF, and was the reference for ours. Its license notice stays on anything borrowed from it.
 
@@ -235,17 +472,45 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 | `/proc/n/ctl` `stop` / `start` / `hang` | Park the process on its own thread at its next stop point (syscall entry, note delivery, a breakpoint exit, or before the first instruction after `exec` with `hang`), with its Ureg and Extra copied to its record ([self-host](design/0010-self-host.md)) |
 | `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.c`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](design/0003-semaphores.md)) |
 
-**Threads.** The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.c`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set. That thread creates the process's vCPU, which HVF binds to its creating thread, and runs the exit loop. `Machine.run` starts the first process this way and waits for it to exit; `rfork` uses the same path. The boot also starts one kernel thread of its own, the timer kproc (`src/kern/tsleep.c`), which idles on a host condition variable until the earliest `tsleep` deadline.
+### Threads
 
-**Several machines per host process.** An embedder, or the test suite, can run several machines in one host process. They share the one drawterm kernel, but each machine's first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, and environment. The CLI always runs one.
+The kernel boots once per host process, on a private thread, because booting turns the calling thread into a Proc for good. Every guest process then runs on a kernel thread made by `h9_kern_spawn` in `src/kern/proc.c`, which works like drawterm's `kproc` but can be called from a thread that isn't a Proc: it clones from the boot Proc, and the new thread sets up its groups once `up` is set.
 
-**Notes on blocked and running processes.** A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted" (`rendezvous` returns `~0` instead, as on 9front). A note to a process running guest code kicks its vCPU, and the note is delivered at the exit. Pending notes are queued on h9's process record, not in drawterm's Proc: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag. Because calls clear that flag as they return, a note posted while one call is finishing would be lost to the next call if the guest made one straight away; the exit loop re-arms the flag when it starts a call with a note flagged, and `pushnote` kicks before it interrupts, so a call started before the kick's flag is set still sees the interrupt.
+That thread creates the process's vCPU, which HVF binds to its creating thread, and runs the exit loop. `Machine.run` starts the first process this way and waits for it to exit; `rfork` uses the same path.
 
-**vCPU limits.** Each process runs on one vCPU at a time, and hypervisors cap the live vCPUs per VM (`hv_vm_get_max_vcpu_count` on HVF, `KVM_CAP_MAX_VCPUS` on KVM). On HVF a vCPU is bound to its thread, so a process past the cap can't simply borrow one: it needs pool threads that run the guest on its behalf.
+The boot also starts one kernel thread of its own, the timer kproc (`src/kern/tsleep.c`), which idles on a host condition variable until the earliest `tsleep` deadline.
 
-Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. A Unicorn engine has no limit but costs about 1.3 MiB of host memory and 0.3 ms to create. So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it. KVM in a nested x86\_64 VM (Linux 6.12, Intel VT-x) reports 1024, and recycles its vCPUs (see KVM above), so its limit is on live vCPUs too; with fewer file descriptors it reports less.
+### Several machines per host process
 
-The answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8. Processes beyond that run guest code through a pool of 8 pool threads, each with a vCPU: the process thread hands its Ureg, FP/SIMD registers, and thread pointer to a pool thread, which runs the guest to its next exit and hands them back. Kernel calls stay on the process's own thread, so pool threads never block in the kernel and the pool always makes progress. A handoff costs two thread wake-ups per syscall, so only the processes past the first 56 pay it. `--cpus` caps how many vCPUs run guest code at the same moment, owned or pooled, on every backend. Runs take slots in ticket order, so a process that exits for a syscall and runs again queues behind the others, and a run waiting 5 ms with no slot freed kicks the run that has held one longest, which ends with `interrupted` and queues again, so guest code that makes no kernel calls (a spinning goroutine) can't keep the rest out. The emulator and the native backend have no vCPU limit, so every process owns an engine or a stub thread there.
+An embedder, or the test suite, can run several machines in one host process. They share the one drawterm kernel, but each machine's first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, and environment. The CLI always runs one.
+
+### Notes on blocked and running processes
+
+A note to a process blocked in a host syscall wakes it through drawterm's sleep/wakeup, and the syscall fails with "interrupted" (`rendezvous` returns `~0` instead, as on 9front). A note to a process running guest code kicks its vCPU, and the note is delivered at the exit.
+
+Pending notes are queued on h9's process record, not in drawterm's Proc: drawterm's `postnote` keeps only `notepending`, which `enderror` clears after every failed syscall, so it serves only as the "interrupt this call" flag.
+
+Because calls clear that flag as they return, a note posted while one call is finishing would be lost to the next call if the guest made one straight away; the exit loop re-arms the flag when it starts a call with a note flagged, and `pushnote` kicks before it interrupts, so a call started before the kick's flag is set still sees the interrupt.
+
+### vCPU limits
+
+Each process runs on one vCPU at a time, and hypervisors cap the live vCPUs per VM (`hv_vm_get_max_vcpu_count` on HVF, `KVM_CAP_MAX_VCPUS` on KVM). On HVF a vCPU is bound to its thread, so a process past the cap can't simply borrow one: it needs pool threads that run the guest on its behalf.
+
+Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. A Unicorn engine has no limit but costs about 1.3 MiB of host memory and 0.3 ms to create.
+
+So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it.
+
+KVM in a nested x86\_64 VM (Linux 6.12, Intel VT-x) reports 1024, and recycles its vCPUs (see KVM above), so its limit is on live vCPUs too; with fewer file descriptors it reports less.
+
+The answer (`src/cpupool.zig`) is a hybrid. A process creates and owns its vCPU on its own thread, as before, while the machine owns fewer than the limit less a reserve of 8.
+
+Processes beyond that run guest code through a pool of 8 pool threads, each with a vCPU: the process thread hands its Ureg, FP/SIMD registers, and thread pointer to a pool thread, which runs the guest to its next exit and hands them back. Kernel calls stay on the process's own thread, so pool threads never block in the kernel and the pool always makes progress.
+
+A handoff costs two thread wake-ups per syscall, so only the processes past the first 56 pay it.
+
+`--cpus` caps how many vCPUs run guest code at the same moment, owned or pooled, on every backend. Runs take slots in ticket order, so a process that exits for a syscall and runs again queues behind the others, and a run waiting 5 ms with no slot freed kicks the run that has held one longest, which ends with `interrupted` and queues again, so guest code that makes no kernel calls (a spinning goroutine) can't keep the rest out.
+
+The emulator and the native backend have no vCPU limit, so every process owns an engine or a stub thread there.
 
 ## Go programs
 
@@ -265,18 +530,130 @@ The go-compat integration cases (tagged `[7]`) run the programs in `tests/fixtur
 
 Linux ELF binaries run next to 9front ones in the same machine ([linux-personality](design/0018-linux-personality.md)). The personality is picked at exec by the binary's format: `exec` of an ELF builds a Linux image, and a Linux `execve` of an a.out goes back to 9front. A Linux process keeps the same kernel `Proc`, fds, pipes, notes and namespace; only its syscall table and root differ.
 
-- **Loading** (`src/linux/elf.zig`, `src/linux/exec.zig`): static and dynamic ELF for arm64 and amd64. ET_DYN programs load at a fixed PIE base and `PT_INTERP` (musl's `ld-musl`, read in the Linux view) at the first free range. The stack carries argv, envp and auxv, with `AT_HWCAP` limited to what every backend has. arm64 gets a one-page vDSO holding `__kernel_rt_sigreturn`, with the `LINUX_2.6.39` version tables Go's vDSO lookup needs; amd64 has none, and musl's `syscall` fallback covers it.
-- **Memory** (`src/linux/mm.zig`): VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings copied at `mmap`, and shared mappings. A private mapping of a file that's also mapped shared is the exception: it maps the shared pages copy-on-write (`Vma.cow`), so it sees the file's changes until it writes a page, as on Linux; Wine reads wineserver's session memory through one. A shared mapping gets 1 MiB chunks of its own, the rest of them padded with VMAs the guest doesn't see, so no other mapping shares their pages. A shared file mapping sits at its file offset's place in a chunk, and its pages come from a table of the files mapped shared (`src/linux/shmfile.zig`), one set per chunk of the file, for every Mm of every machine on the same backend: read from the file at the first mapping, kept coherent with the Linux layer's `read` and `write` of that file, and written back by path when the last mapping goes if any could write. `fork` copies the touched pages and shares a shared mapping's chunks, making the ones no one has touched yet first; `vfork` shares the address space and parks the parent until the child execs or exits.
-- **Files for databases**: `fcntl` record locks (POSIX, owned by the process and dropped when it closes any fd of the file or ends, and OFD, owned by the Chan) and `flock` locks are kept in one table for the h9 process (`src/linux/locks.zig`), keyed by the file's device, instance and qid path; `F_SETLKW` and blocking `flock` poll every 2 ms and a signal ends them. `fsync` and `fdatasync` are a wstat that changes nothing, which `#U` serves with the host's `fsync` of the open file or directory (`fcntl(F_FULLFSYNC)` first on macOS, which also flushes the drive's cache; `FlushFileBuffers` on Windows, where a directory has nothing to sync). `syncfs` is the host's `syncfs` on the fd's `#U` file system (on macOS, `sync` and then the fd's own `F_FULLFSYNC`), and `sync` is the host's `sync`. `fallocate` mode 0 grows the file with a truncate up, `FALLOC_FL_KEEP_SIZE` does nothing, and the hole modes are `EOPNOTSUPP`. A `pread64` of 16 KiB or less reads 128 KiB ahead into a cache per fd, trusted until any Linux write or truncate, any lock change, or a second. `wait4`, `waitid` and `getrusage` report CPU time from the host thread a guest thread runs on (`src/linux/cputime.zig`); a group's leader puts it, with its reaped children's, in its wait record's user and system times (a hook in `src/kern/proc.c`).
-- **Syscalls** (`src/linux/sys.zig`, `src/linux/nr.zig`): one table, decoded per architecture (amd64's older forms such as `open` and `stat` map onto the `*at` calls), translated onto the drawterm kernel. Errors map from 9front error strings to errno. A Linux process starts as uid and gid 0 and keeps real, effective and saved ids and up to 32 supplementary groups, which the `set*id` calls and `setgroups` change as Linux's do for root and for other users, so `su` and programs that refuse to run as root (PostgreSQL's `initdb`) work; `stat` reports every file as owned by the caller's effective uid and gid, and permission checks stay with the namespace and the sandbox. `link` copies the file with an exclusive create, since 9P has no hard links. `rename` across directories is the host's `rename(2)` when both names are in host trees, a move in memory within one overlay (`h9_overlay_move`), and `EXDEV` for a directory still in an overlay's lower tree, between two overlays, and on Windows hosts. `arch_prctl(ARCH_SET_GS)` and `ARCH_GET_GS` set and read the GS base, as `ARCH_SET_FS` does FS (`X86Extra.gs`). On arm64, an EL0 `mrs` of an ID register (`MIDR_EL1`, the `ID_AA64` registers), which Linux traps and emulates, is emulated on the hypervisors with values that match `AT_HWCAP` (`src/linux/exec.zig`); the emulator's CPU answers for itself. `symlink` makes a link in memory in an overlay (an `Nlink` node in `src/kern/devoverlay.c`, followed on walk as a contained tree's links are, an absolute target from the overlay's own top, so right for the root, and kept beside the target on the chan so `rename`, `unlink`, `readlink` and `lstat` act on the link), or a host symlink in a `#U` tree, the new name checked like a create and the target checked whenever a walk follows it; elsewhere it's `EPERM`, as it is on Windows hosts. A Linux parent gets `SIGCHLD` when a child leaves a wait record (a hook in `src/kern/proc.c`), unless it ignores it. Interrupted calls restart or return `EINTR` per `SA_RESTART`, and the waits (`pause`, `poll`, `nanosleep` and the like) always return `EINTR`.
-- **Signals** (`src/linux/signal.zig`): notes are signals. `interrupt`, `hangup` and `alarm` map to `SIGINT`, `SIGHUP` and `SIGALRM`; faults to `SIGSEGV`, `SIGBUS`, `SIGILL` or `SIGFPE` with `si_addr`; a closed pipe to `SIGPIPE`; and Linux `kill` posts `linux: signal N`, so a 9front process sees a note it can print. Handlers get the kernel's frame layout on both architectures, and `rt_sigreturn` restores only what user code may set: NZCV on arm64, and on amd64 the user flags with `cs` and `ss` kept and a canonical `rip`. A note with no signal kills a Linux process. A process killed by a signal exits as the host would report it, 128 + N.
-- **The Linux view** (`src/kern/devlinux.c`, `#λ`): a Linux process's `/` is `#λ`, a small tree of mount points (`/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, `/sys`) with the Linux root unioned after it. `/9` is the machine's 9front root when there is one, and `/tmp` and `/mnt/term` are the 9front ones, so files pass between the two by the same names. `/dev` serves `null`, `zero`, `full`, `random`, `urandom`, the console as `tty`, and `fd`, and `/dev/shm` is an ephemeral overlay of its own. `/proc` and `/sys` serve the files libc, busybox, Python and htop read (`self`, `cpuinfo`, `meminfo`, `stat`, `uptime`, `mounts`, per-process `maps`, `stat`, `statm`, `status`, `cmdline`, `exe`, `fd` and `task`), with `cpuinfo` following `--cpus`; only a thread group's leader is listed in `/proc`, and its other threads are under its `task`. A process's dot is renamed when it changes views. drawterm's `namec` doesn't cross mounts on a `#` path, so `#λ` is exempted (`third_party/drawterm/kern/chan.c`).
-- **CLI**: `--root` may be given twice, one 9front tree and one Linux tree, told apart by their contents. With a Linux root, a bare program name is looked up on the Linux `PATH`; `--rc` still runs 9front's rc. A 9front process runs a Linux program by its `#λ` path. The environment goes both ways: a Linux program gets `/env` as `NAME=value` (with `USER`, `LOGNAME`, `HOME` and a default `PATH`), and a 9front program exec'd from Linux gets `envp` written to `/env`. `isatty` is true only when h9's own stdin and stdout are terminals. The console's termios is one per machine: `TCSETS` sets raw mode from `ICANON`, and, through the optional `echo` and `crnl` on `Machine.Stdio.raw`, the host's echo from `ECHO` and its CR-to-NL mapping from `ICRNL`; `TIOCGWINSZ` is the host terminal's size, through the hook's optional `size`, or 80x24. In non-canonical mode with `VMIN` 0, a console read waits at most `VTIME` tenths of a second and may return 0 bytes. consctl also takes `echooff` and `echoon`, which keep the line discipline.
-- **Sockets and readiness** ([linux-net](design/0050-linux-net.md)): a socket is a `/net` conversation, its fd the conversation's data file opened from `#I`, so `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`). `connect`, `bind` and `listen` write control messages; devip gains `nbconnect` (a connect the host finishes in the background, writable when done, with `SO_ERROR` from the host socket), `shutdown`, `sockopt`, a socket for an announce on port 0, no `listen` for UDP, and 4096 TCP and 1024 UDP conversations. `recvfrom`, `sendto` and their flags go straight to the host socket, with the policy's connect check on a `sendto` address; an unbound UDP socket's first `sendto` connects it, since a bind is refused under the default policy, and a UDP bind to any address and port 0 that the policy refuses leaves the socket unbound for its `connect` or `sendto` to bind. DNS is the Linux program's own: when the Linux root has no `/etc/resolv.conf`, the machine binds `#λetc` (devlinux's attach for files a root may lack) after the root's `/etc`, which is bound over itself first with `MCREATE` so files made in `/etc` go to the root, and its `resolv.conf` names the host's DNS servers, read by the CLI from the host's `/etc/resolv.conf` (Google's public servers where it names none, as on Windows). Port 53 on those servers is allowed even when they're link-local, as a cloud VM's resolver is, and `--print` says so in a caveat; `--net-allow` patterns must cover them. `socketpair` is a 9front pipe, and a named or abstract `AF_UNIX` socket is a pipe end too, connected through `#s`: a listener posts its pipe's write end under the bound file's identity, and a connect posts its connection's pipe end and writes that post's name to the listener, for `accept` to open. A listening socket's bound file `stat`s as `S_IFSOCK`. `sendmsg` and `recvmsg` carry `SCM_RIGHTS`, posting each fd in `#s` and recording the batch against the receiving pipe end, so fds pass between the processes of one machine. `AF_NETLINK` with `NETLINK_ROUTE` answers the link and address dumps (`RTM_GETLINK`, `RTM_GETADDR`) from the host's interfaces (`src/linux/netlink.zig`), which `getifaddrs` and Go's `net.Interfaces` make. `recvmmsg` and `sendmmsg` loop over the single-message calls, and `IPV6_V6ONLY` is passed to the host socket, so an IPv4 and an IPv6 wildcard listener can share a port. Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's channel whether it would block (qio queues, the console, host sockets with a zero-timeout `poll`; files and 9P are always ready) and sleeps on a wake generation that qio's wakeups (a hook in `qio.c`), the console reader and a host-socket watcher thread bump. `poll`, `ppoll`, `select` and `pselect6` use it, `epoll` keeps interest lists in the Linux layer (edge-triggered by generation), and `#ε` serves eventfd and epoll instances. `O_NONBLOCK` asks first and returns `EAGAIN`, and a blocking socket read waits in `h9_poll` so a signal can interrupt it. A Linux pipe read takes everything queued.
-- **Threads** ([linux-threads](design/0049-linux-threads.md)): a thread is its own kernel process, with its own `Proc`, vCPU lease and note queue, forked with `RFNOWAIT` (and `RFFDG` unless `CLONE_FILES`), sharing the creator's `Mm` and a thread group (`lsys.Group`), which holds the tgid, the members, the signal actions, fd flags, directory buffers, sockets and epoll sets. `getpid` is the tgid, `gettid` the process's own pid. A thread's forks are the leader's children (`RFLXTHREAD` in `src/kern/proc.c`), so any thread can wait for them, several at once, and `waitid` takes `WNOWAIT`. `clone` takes the flag sets glibc, musl and Go use (`CLONE_SETTLS`, `PARENT_SETTID`, `CHILD_CLEARTID`); others are `EINVAL`. Futexes (`WAIT`, `WAIT_BITSET`, `WAKE`, `WAKE_BITSET`, `REQUEUE`, `CMP_REQUEUE`) are kernel wait queues in `src/kern/linux.c`, keyed by the `Mm` and address, or in a `MAP_SHARED` mapping (unless `FUTEX_PRIVATE_FLAG`) by its chunk's pages and the offset in them, so processes sharing the pages meet there, with interruptible waits; `WAKE_OP` and PI futexes are `ENOSYS`. A thread's exit runs its robust list and clears and wakes its `clear_child_tid`. `exit_group`, or a fatal signal, kills the other members and the leader waits for them before the group's status is reported. `execve` from a non-leader kills the others and hands the exec to the leader. `tgkill` and `tkill` reach one thread; a process-directed signal blocked by the leader goes to a member that doesn't block it. Memory calls are serialised per `Mm`, and an unmap or protect that narrows access while other threads share the `Mm` frees its pages only after `AddressSpace.shootdown`; a layout change then leaves the other runs of the chunks it touches mapped as they were, and maps new pages as runs of their own, so no other thread's live page is ever briefly unmapped (on a hypervisor that faulted or failed its syscalls with `EFAULT`). `/proc/<pid>/status` shows `Tgid` and `Threads`. Not yet: sharing `CLONE_FS`, and shared futexes across `fork` (they key on the `Mm`).
-- **IPC for PostgreSQL**: System V shared memory (`src/linux/sysvshm.zig`): `shmget`, `shmat`, `shmdt` and `shmctl`, a segment being chunk pages held by a table per backend and by each address space that attaches it, its attach count those pages' references, and a removed one freed with its last detach; semaphores are none, as musl's process-shared POSIX ones are futexes. `signalfd` is an `#ε` eventfd the process model writes when a signal the fd's mask names is left pending, and a read takes the signals as `signalfd_siginfo`. `setitimer`'s `ITIMER_REAL` and `alarm` are served by one kernel process (`src/linux/itimer.zig`) that posts `alarm` to a due process through a reference to its kernel record (`h9_kern_selfref`), waking at least every 5 ms while any timer is set and ending two seconds after the last is cleared; the CPU-time timers are accepted and never fire. `sync_file_range` is a no-op, since `fsync` does the writing.
-- **32-bit x86** ([linux-i386](design/0105-linux-i386.md)): with `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator and on v86. The address space tops out at `0xC0000000`, with PIEs at `0x400000`. Calls come through `int 0x80` and the i386 table; `ia32.serve` in `sys.zig` joins split 64-bit arguments, maps the `*_time64` calls and the `*32`/`*64` forms onto the generic calls, and serves the multiplexers (`socketcall`, `ipc`) and the old forms (`old_mmap`, `old_select`, the 64-byte `stat`), while the generic calls read `long`s, pointers, `iovec`s, `msghdr`s, `rusage`, and `siginfo` at the process's word size. TLS is `set_thread_area`'s GDT entry 6 (selector `0x33`), whose base is the vCPU's `X86Extra.tls`: the emulator keeps a read-only GDT page at `0xFFFFF000` per engine (with flat ring-0 code and data loaded at start, since any segment load otherwise makes QEMU drop Unicorn's 32-bit stack flag), and v86's shim GDT has the entry, rewritten when the base changes. Signals use i386's `rt_sigframe` and old `sigframe`; `sigreturn` keeps `%gs` only if it's the TLS selector. The 386 fixtures and Go's `linux/386` builds go in `fixtures/linux/386`, and `-Darch=386` runs the Linux cases with them on the emulator.
-- **Not yet:** job-control stops (`SIGSTOP` and `SIGTSTP` are ignored for now), and the vmm's range `unmap` and `protect`.
+### Loading
+
+`src/linux/elf.zig` and `src/linux/exec.zig` load static and dynamic ELF for arm64 and amd64. ET_DYN programs load at a fixed PIE base and `PT_INTERP` (musl's `ld-musl`, read in the Linux view) at the first free range.
+
+The stack carries argv, envp and auxv, with `AT_HWCAP` limited to what every backend has.
+
+arm64 gets a one-page vDSO holding `__kernel_rt_sigreturn`, with the `LINUX_2.6.39` version tables Go's vDSO lookup needs; amd64 has none, and musl's `syscall` fallback covers it.
+### Memory
+
+`src/linux/mm.zig` keeps VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings copied at `mmap`, and shared mappings.
+
+A private mapping of a file that's also mapped shared is the exception: it maps the shared pages copy-on-write (`Vma.cow`), so it sees the file's changes until it writes a page, as on Linux; Wine reads wineserver's session memory through one.
+
+A shared mapping gets 1 MiB chunks of its own, the rest of them padded with VMAs the guest doesn't see, so no other mapping shares their pages.
+
+A shared file mapping sits at its file offset's place in a chunk, and its pages come from a table of the files mapped shared (`src/linux/shmfile.zig`), one set per chunk of the file, for every Mm of every machine on the same backend: read from the file at the first mapping, kept coherent with the Linux layer's `read` and `write` of that file, and written back by path when the last mapping goes if any could write.
+
+`fork` copies the touched pages and shares a shared mapping's chunks, making the ones no one has touched yet first; `vfork` shares the address space and parks the parent until the child execs or exits.
+### Files for databases
+
+`fcntl` record locks (POSIX, owned by the process and dropped when it closes any fd of the file or ends, and OFD, owned by the Chan) and `flock` locks are kept in one table for the h9 process (`src/linux/locks.zig`), keyed by the file's device, instance and qid path; `F_SETLKW` and blocking `flock` poll every 2 ms and a signal ends them.
+
+`fsync` and `fdatasync` are a wstat that changes nothing, which `#U` serves with the host's `fsync` of the open file or directory (`fcntl(F_FULLFSYNC)` first on macOS, which also flushes the drive's cache; `FlushFileBuffers` on Windows, where a directory has nothing to sync). `syncfs` is the host's `syncfs` on the fd's `#U` file system (on macOS, `sync` and then the fd's own `F_FULLFSYNC`), and `sync` is the host's `sync`.
+
+`fallocate` mode 0 grows the file with a truncate up, `FALLOC_FL_KEEP_SIZE` does nothing, and the hole modes are `EOPNOTSUPP`.
+
+A `pread64` of 16 KiB or less reads 128 KiB ahead into a cache per fd, trusted until any Linux write or truncate, any lock change, or a second.
+
+`wait4`, `waitid` and `getrusage` report CPU time from the host thread a guest thread runs on (`src/linux/cputime.zig`); a group's leader puts it, with its reaped children's, in its wait record's user and system times (a hook in `src/kern/proc.c`).
+### Syscalls
+
+`src/linux/sys.zig` and `src/linux/nr.zig` have one table, decoded per architecture (amd64's older forms such as `open` and `stat` map onto the `*at` calls), translated onto the drawterm kernel. Errors map from 9front error strings to errno.
+
+A Linux process starts as uid and gid 0 and keeps real, effective and saved ids and up to 32 supplementary groups, which the `set*id` calls and `setgroups` change as Linux's do for root and for other users, so `su` and programs that refuse to run as root (PostgreSQL's `initdb`) work; `stat` reports every file as owned by the caller's effective uid and gid, and permission checks stay with the namespace and the sandbox.
+
+`link` copies the file with an exclusive create, since 9P has no hard links. `rename` across directories is the host's `rename(2)` when both names are in host trees, a move in memory within one overlay (`h9_overlay_move`), and `EXDEV` for a directory still in an overlay's lower tree, between two overlays, and on Windows hosts.
+
+`arch_prctl(ARCH_SET_GS)` and `ARCH_GET_GS` set and read the GS base, as `ARCH_SET_FS` does FS (`X86Extra.gs`). On arm64, an EL0 `mrs` of an ID register (`MIDR_EL1`, the `ID_AA64` registers), which Linux traps and emulates, is emulated on the hypervisors with values that match `AT_HWCAP` (`src/linux/exec.zig`); the emulator's CPU answers for itself.
+
+`symlink` makes a link in memory in an overlay (an `Nlink` node in `src/kern/devoverlay.c`, followed on walk as a contained tree's links are, an absolute target from the overlay's own top, so right for the root, and kept beside the target on the chan so `rename`, `unlink`, `readlink` and `lstat` act on the link), or a host symlink in a `#U` tree, the new name checked like a create and the target checked whenever a walk follows it; elsewhere it's `EPERM`, as it is on Windows hosts.
+
+A Linux parent gets `SIGCHLD` when a child leaves a wait record (a hook in `src/kern/proc.c`), unless it ignores it. Interrupted calls restart or return `EINTR` per `SA_RESTART`, and the waits (`pause`, `poll`, `nanosleep` and the like) always return `EINTR`.
+### Signals
+
+Notes are signals (`src/linux/signal.zig`). `interrupt`, `hangup` and `alarm` map to `SIGINT`, `SIGHUP` and `SIGALRM`; faults to `SIGSEGV`, `SIGBUS`, `SIGILL` or `SIGFPE` with `si_addr`; a closed pipe to `SIGPIPE`; and Linux `kill` posts `linux: signal N`, so a 9front process sees a note it can print.
+
+Handlers get the kernel's frame layout on both architectures, and `rt_sigreturn` restores only what user code may set: NZCV on arm64, and on amd64 the user flags with `cs` and `ss` kept and a canonical `rip`. A note with no signal kills a Linux process. A process killed by a signal exits as the host would report it, 128 + N.
+### The Linux view
+
+A Linux process's `/` is `#λ` (`src/kern/devlinux.c`), a small tree of mount points (`/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, `/sys`) with the Linux root unioned after it. `/9` is the machine's 9front root when there is one, and `/tmp` and `/mnt/term` are the 9front ones, so files pass between the two by the same names.
+
+`/dev` serves `null`, `zero`, `full`, `random`, `urandom`, the console as `tty`, and `fd`, and `/dev/shm` is an ephemeral overlay of its own.
+
+`/proc` and `/sys` serve the files libc, busybox, Python and htop read (`self`, `cpuinfo`, `meminfo`, `stat`, `uptime`, `mounts`, per-process `maps`, `stat`, `statm`, `status`, `cmdline`, `exe`, `fd` and `task`), with `cpuinfo` following `--cpus`; only a thread group's leader is listed in `/proc`, and its other threads are under its `task`.
+
+A process's dot is renamed when it changes views. drawterm's `namec` doesn't cross mounts on a `#` path, so `#λ` is exempted (`third_party/drawterm/kern/chan.c`).
+### Roots, environment, and console
+
+`--root` may be given twice, one 9front tree and one Linux tree, told apart by their contents. With a Linux root, a bare program name is looked up on the Linux `PATH`; `--rc` still runs 9front's rc. A 9front process runs a Linux program by its `#λ` path.
+
+The environment goes both ways: a Linux program gets `/env` as `NAME=value` (with `USER`, `LOGNAME`, `HOME` and a default `PATH`), and a 9front program exec'd from Linux gets `envp` written to `/env`.
+
+`isatty` is true only when h9's own stdin and stdout are terminals. The console's termios is one per machine: `TCSETS` sets raw mode from `ICANON`, and, through the optional `echo` and `crnl` on `Machine.Stdio.raw`, the host's echo from `ECHO` and its CR-to-NL mapping from `ICRNL`; `TIOCGWINSZ` is the host terminal's size, through the hook's optional `size`, or 80x24. In non-canonical mode with `VMIN` 0, a console read waits at most `VTIME` tenths of a second and may return 0 bytes. consctl also takes `echooff` and `echoon`, which keep the line discipline.
+### Sockets and readiness
+
+A socket ([linux-net](design/0050-linux-net.md)) is a `/net` conversation, its fd the conversation's data file opened from `#I`, so `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
+
+`connect`, `bind` and `listen` write control messages; devip gains `nbconnect` (a connect the host finishes in the background, writable when done, with `SO_ERROR` from the host socket), `shutdown`, `sockopt`, a socket for an announce on port 0, no `listen` for UDP, and 4096 TCP and 1024 UDP conversations.
+
+`recvfrom`, `sendto` and their flags go straight to the host socket, with the policy's connect check on a `sendto` address; an unbound UDP socket's first `sendto` connects it, since a bind is refused under the default policy, and a UDP bind to any address and port 0 that the policy refuses leaves the socket unbound for its `connect` or `sendto` to bind.
+
+DNS is the Linux program's own: when the Linux root has no `/etc/resolv.conf`, the machine binds `#λetc` (devlinux's attach for files a root may lack) after the root's `/etc`, which is bound over itself first with `MCREATE` so files made in `/etc` go to the root, and its `resolv.conf` names the host's DNS servers, read by the CLI from the host's `/etc/resolv.conf` (Google's public servers where it names none, as on Windows).
+
+Port 53 on those servers is allowed even when they're link-local, as a cloud VM's resolver is, and `--print` says so in a caveat; `--net-allow` patterns must cover them.
+
+`socketpair` is a 9front pipe, and a named or abstract `AF_UNIX` socket is a pipe end too, connected through `#s`: a listener posts its pipe's write end under the bound file's identity, and a connect posts its connection's pipe end and writes that post's name to the listener, for `accept` to open.
+
+A listening socket's bound file `stat`s as `S_IFSOCK`. `sendmsg` and `recvmsg` carry `SCM_RIGHTS`, posting each fd in `#s` and recording the batch against the receiving pipe end, so fds pass between the processes of one machine.
+
+`AF_NETLINK` with `NETLINK_ROUTE` answers the link and address dumps (`RTM_GETLINK`, `RTM_GETADDR`) from the host's interfaces (`src/linux/netlink.zig`), which `getifaddrs` and Go's `net.Interfaces` make. `recvmmsg` and `sendmmsg` loop over the single-message calls, and `IPV6_V6ONLY` is passed to the host socket, so an IPv4 and an IPv6 wildcard listener can share a port.
+
+Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's channel whether it would block (qio queues, the console, host sockets with a zero-timeout `poll`; files and 9P are always ready) and sleeps on a wake generation that qio's wakeups (a hook in `qio.c`), the console reader and a host-socket watcher thread bump.
+
+`poll`, `ppoll`, `select` and `pselect6` use it, `epoll` keeps interest lists in the Linux layer (edge-triggered by generation), and `#ε` serves eventfd and epoll instances. `O_NONBLOCK` asks first and returns `EAGAIN`, and a blocking socket read waits in `h9_poll` so a signal can interrupt it. A Linux pipe read takes everything queued.
+### Threads
+
+A thread ([linux-threads](design/0049-linux-threads.md)) is its own kernel process, with its own `Proc`, vCPU lease and note queue, forked with `RFNOWAIT` (and `RFFDG` unless `CLONE_FILES`), sharing the creator's `Mm` and a thread group (`lsys.Group`), which holds the tgid, the members, the signal actions, fd flags, directory buffers, sockets and epoll sets.
+
+`getpid` is the tgid, `gettid` the process's own pid. A thread's forks are the leader's children (`RFLXTHREAD` in `src/kern/proc.c`), so any thread can wait for them, several at once, and `waitid` takes `WNOWAIT`.
+
+`clone` takes the flag sets glibc, musl and Go use (`CLONE_SETTLS`, `PARENT_SETTID`, `CHILD_CLEARTID`); others are `EINVAL`.
+
+Futexes (`WAIT`, `WAIT_BITSET`, `WAKE`, `WAKE_BITSET`, `REQUEUE`, `CMP_REQUEUE`) are kernel wait queues in `src/kern/linux.c`, keyed by the `Mm` and address, or in a `MAP_SHARED` mapping (unless `FUTEX_PRIVATE_FLAG`) by its chunk's pages and the offset in them, so processes sharing the pages meet there, with interruptible waits; `WAKE_OP` and PI futexes are `ENOSYS`.
+
+A thread's exit runs its robust list and clears and wakes its `clear_child_tid`. `exit_group`, or a fatal signal, kills the other members and the leader waits for them before the group's status is reported. `execve` from a non-leader kills the others and hands the exec to the leader.
+
+`tgkill` and `tkill` reach one thread; a process-directed signal blocked by the leader goes to a member that doesn't block it.
+
+Memory calls are serialised per `Mm`, and an unmap or protect that narrows access while other threads share the `Mm` frees its pages only after `AddressSpace.shootdown`; a layout change then leaves the other runs of the chunks it touches mapped as they were, and maps new pages as runs of their own, so no other thread's live page is ever briefly unmapped (on a hypervisor that faulted or failed its syscalls with `EFAULT`).
+
+`/proc/<pid>/status` shows `Tgid` and `Threads`. Not yet: sharing `CLONE_FS`, and shared futexes across `fork` (they key on the `Mm`).
+### IPC for PostgreSQL
+
+System V shared memory (`src/linux/sysvshm.zig`): `shmget`, `shmat`, `shmdt` and `shmctl`, a segment being chunk pages held by a table per backend and by each address space that attaches it, its attach count those pages' references, and a removed one freed with its last detach; semaphores are none, as musl's process-shared POSIX ones are futexes.
+
+`signalfd` is an `#ε` eventfd the process model writes when a signal the fd's mask names is left pending, and a read takes the signals as `signalfd_siginfo`.
+
+`setitimer`'s `ITIMER_REAL` and `alarm` are served by one kernel process (`src/linux/itimer.zig`) that posts `alarm` to a due process through a reference to its kernel record (`h9_kern_selfref`), waking at least every 5 ms while any timer is set and ending two seconds after the last is cleared; the CPU-time timers are accepted and never fire. `sync_file_range` is a no-op, since `fsync` does the writing.
+### 32-bit x86
+
+With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator and on v86 ([linux-i386](design/0105-linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.
+
+Calls come through `int 0x80` and the i386 table; `ia32.serve` in `sys.zig` joins split 64-bit arguments, maps the `*_time64` calls and the `*32`/`*64` forms onto the generic calls, and serves the multiplexers (`socketcall`, `ipc`) and the old forms (`old_mmap`, `old_select`, the 64-byte `stat`), while the generic calls read `long`s, pointers, `iovec`s, `msghdr`s, `rusage`, and `siginfo` at the process's word size.
+
+TLS is `set_thread_area`'s GDT entry 6 (selector `0x33`), whose base is the vCPU's `X86Extra.tls`: the emulator keeps a read-only GDT page at `0xFFFFF000` per engine (with flat ring-0 code and data loaded at start, since any segment load otherwise makes QEMU drop Unicorn's 32-bit stack flag), and v86's shim GDT has the entry, rewritten when the base changes.
+
+Signals use i386's `rt_sigframe` and old `sigframe`; `sigreturn` keeps `%gs` only if it's the TLS selector.
+
+The 386 fixtures and Go's `linux/386` builds go in `fixtures/linux/386`, and `-Darch=386` runs the Linux cases with them on the emulator.
+### Not yet
+
+Job-control stops (`SIGSTOP` and `SIGTSTP` are ignored for now), and the vmm's range `unmap` and `protect`.
+
+### Tests
 
 The `[18]` integration cases run static musl programs from `tests/fixtures/linux` (built by `zig build linux-fixtures`) and busybox from an Alpine root that `scripts/fetch.sh` pins by digest into `.local/linux/alpine-<arch>`.
 
@@ -284,31 +661,155 @@ The `[18]` integration cases run static musl programs from `tests/fixtures/linux
 
 We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, libmemlayer, libsec, libmp, libip, libauthsrv) and its GUI backends. Its `sysfile.c` already implements the file syscalls with Plan 9 semantics, so most syscall handlers are a decode followed by one call. We keep the vendored tree close to upstream so 9front fixes keep merging cleanly.
 
-**Reused as-is:** chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (for unix socket roots), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe, devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, devcmd, qio, and the auth code. We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`. The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
+### Reused as-is
 
-**Added by us**
+These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (for unix socket roots), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe, devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, devcmd, qio, and the auth code.
 
-| Piece | Why |
-| --- | --- |
-| Process model (Proc fields, segments, rfork/exec/await, notes) | drawterm only ever ran its own kprocs |
-| `src/kern/devtab.c` | The device table, listing drawterm's devices plus ours |
-| Per-machine console device `#y` (`src/kern/devhcons.c`) | drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>` serves machine `id`'s `Stdio` through leaf calls into Zig, and is bound before `#c` on `/dev`, so `/dev/cons` is ours and the rest of `#c` stays visible. It also has `/dev/stderr`, which the guest's fd 2 is opened on, so fd 2 reaches the host's stderr. |
-| devenv `#e`, from 9front (`src/kern/devenv.c`) | drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. drawterm's Proc has no `egrp` and stays as it is, so each process's group is kept on its h9 process record (`src/kern/proc.c`). `#ec` isn't supported. |
-| devproc `#p`, from 9front (`src/kern/devproc.c`) | rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](design/0010-self-host.md)). It serves h9's process records (`src/kern/proc.c`, shared through `src/kern/hproc.h`) instead of 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes. `status` has the 12 fields `ps` reads: the user is the machine's user (the guest's `$user`), the state is the syscall being served (as 9front's `psstate`, so `Await`, `Sleep`, `Pread`) or `Running`, memory is the process's mapped segments, and the user and system times read 0 until there's per-thread CPU accounting. `segment` lists the stack (its whole 16 MiB), text, data up to the break, and segattach's segments (`Shared`, or `Bss` for `memory`) in 9front's format, with the number of address spaces each is attached to. `ctl` takes `kill` (the process dies with `Killed` at its next note delivery, handler or not), `hang`/`nohang` (`exec` then stops the process before its first instruction), `close`, `closefiles`, and acid's `stop`, `start`, `waitstop`, and `startstop`; a stopped process reads `Stopped` and a waiting debugger `Stopwait`. `mem` translates through the target's address space; writes, and `regs` and `fpregs` writes, need the process stopped. `regs` reads while the process is stopped or in a syscall, `fpregs` only while it's stopped, laid out as 9front's `FPsave` (520 bytes on arm64, the 512-byte FXSAVE on x86). `text` opens the file the process executed (the interpreter, for a `#!` script). Unmapped addresses fail with "bad address" and missing register state with `Enoreg`. A process may `stop` itself while a debugger waits on it, which 9front refuses with `Einuse`; acid's `new()` doesn't need it, but the integration fixture does. `ns` prints the mount table as 9front does, so binds of host trees show their host paths; `--print` lists this as a caveat. A process takes its record's `debug` lock to swap its fd group, namespace, or dot (rfork, chdir) and to mark itself gone at exit, so `fd` and `ns` readers can hold references to them. |
-| devdup `#d` | `/fd/N` |
-| The Linux view `#λ` (`src/kern/devlinux.c`) and eventfds `#ε` (`src/kern/linuxnet.c`) | A Linux process's `/`, and its eventfd, epoll, and signalfd instances (see Linux personality) |
-| `tsleep` (`src/kern/tsleep.c`) | drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only drawterm's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline. The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed. |
-| Semaphores and `rendezvous` (`src/kern/sema.c`) | drawterm has no semaphores. 9front's code is ported closely, with the wait lists in 64 hashed buckets keyed by the host address of the semaphore word rather than in the segment, since h9's segments are Zig objects; the word is changed with host atomics. `src/syscall.zig` checks the address first (aligned, mapped, in a writable segment), and the pages it names never move while it's shared. `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list. |
-| Host command lifetime (`src/kern/hostcmd.c`) | Host commands are built in only with `zig build -Dhost-cmd` (devtab.c lists devcmd under `H9_HOSTCMD`, `hcmd` comes from `src/guest-hostcmd/`, and the policy refuses `host_cmd` otherwise) while [host-cmd](design/host-cmd.md) rethinks them. drawterm's devcmd `#C` (under `--host-cmd`) kills a host command only when the last fd on its conversation closes, and a guest process reading its output waits in a host `read` no note interrupts, so a stopped machine could leave the command running after h9 exits. posix.c and win32.c are built with `oscmd`, `oscmdkill`, and `oscmdfree` renamed, and wrappers keep each running command with the machine that started it, found through the Fgrp that devcmd's kproc shares with the writer of `exec`. When the machine stops its processes, and when its last process is released, its commands are killed (SIGKILL to the process group on POSIX hosts; `TerminateProcess` on Windows), which ends the stuck reads; one started after that is killed at once |
-| Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.c`) | The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks" |
-| devsrv `#s`, from 9front (`src/kern/devsrv.c`), per machine | Guest file servers post themselves in `/srv` (lib9p's `postsrv`, `srvfs`, factotum, plumber), and clients open the posted channel and mount it. 9front's code is ported closely, but each machine has its own root board, hung off its `Hmach` and made on first attach, with its own lock, so machines in one host process can't see each other's services; `clone` boards hang off the machine's root, so `#s/id` addressing works within a machine. A write of an fd number goes through `fdtochan`, then the post itself (the in-use and auth checks, holding the reference) is shared with `h9_srvpost`, which posts a host-side channel without a guest fd. Posting sets the channel's `srvname` to its `/srv` path, which `/proc/n/ns` prints for a mount of it, as 9front does. The machine's last process to release its groups (`h9_kern_release` in `src/kern/proc.c`) closes every posted channel, as closing a lease does, while the machine is still there; the boards go with the machine. |
-| Host-stream device `#ℏ` (`src/kern/devhstream.c`, `src/hstream.zig`) | WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](design/0021-websocket-9p.md)). It follows devhcons's pattern: Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it. A host-made stream has no path: `h9_hstream_fd` makes its channel, which is posted as `#s/root` or mounted at once, so the guest can't reach it by name. Attached with no spec, the device serves `ws/clone` and `ws/N/{ctl,data,text,remote,status}`, listing only the caller's machine's conversations (at most 32); `bind -a '#ℏ' /net` puts them at `/net/ws`. `data` is the binary stream, `text` one text message per read or write. Received data is queued in the machine's pages, up to 16 MiB unread per stream. A guest `connect` asks the net policy as a TCP dial would, through the same `netLookup`, `netResolved`, and `netCheck` as devip and `cs`. The machine's end closes its streams (`h9_hstream_machend`, from `src/kern/proc.c`) |
-| devcons hooks (`src/kern/consx.c`, `consx.h`) | drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/0007-go-compat.md)). So devcons calls hooks: `#c/pid` and `#c/ppid` (machine-local pids, as `$pid` and `/proc` have them, in 9front's 12-character format); `bintime` (wall nanoseconds, ticks, `fasthz`, and monotonic nanoseconds, big-endian, with a short read getting the leading words that fit); `time` (seconds, nanoseconds, ticks, and `fasthz`, in drawterm's text format); and `sysstat`, a line per CPU the machine may use, in 9front's ten columns with zeros for the counters h9 doesn't keep, so Go's `runtime.NumCPU` counts them. The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](design/0010-self-host.md)). The clock is one per host process (`src/kern.zig`): wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot; ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail. |
-| Overlay device `#O` (`src/kern/devoverlay.c`) | Copy-on-write trees in memory over a lower directory, for the root's overlay, `--write=ephemeral`, and the private `/tmp` (see Sandbox policy). An instance can report each change to the machine, for the root's discarded-changes notice. A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it. |
-| h9's guest commands `#H` (`src/kern/devhtools.c`) | Commands that wrap h9's own devices (websocket-9p's `wsmount`, say, or `hcmd`, which runs host commands through `#C`) can't come from 9front, and h9 never writes into the root ([guest-tools](design/0032-guest-tools.md)). `src/guest/` holds them, laid out as the guest sees them, and the build embeds it in the binary as a generated table (`tools/guesttree.zig`): only rc scripts and data, so an executable that doesn't start with `#!/bin/rc` fails the build, and names starting with `.` are left out. Executables are 0555, other files 0444, directories 0555, all owned by the machine's user; `#H/bin` always exists. The device gets the table once at reset from one leaf, `h9_tools_table` (`src/kern.zig`), and is plain C over constant memory after that. An entry's index is its qid path, so qids are the same on every run of one build. Attach takes no spec, or `root` for the built-in root below; writes, creates, removes, `OTRUNC` and `ORCLOSE` opens, and `wstat` fail with "permission denied". Debug builds also serve `tests/fixtures/guest/` (`-Dguest-test`), for the integration cases. |
-| The built-in root `#Hroot` (`src/kern/devhtools.c`) | A root that's in the binary, so h9 runs with no tree to find ([builtin-root](design/0087-builtin-root.md)). It's a second table in `#H`, served by the same code with the same rules except its modes, a 9front tree's 0775 and 0664 so that an overlay over it can create files (the device itself still refuses every write), and a channel's `dev` says which table it's on, so the two trees' qids never meet in the mount table. Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](design/0064-multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`. The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds its target's architecture, and with `-Demu=unicorn` also `amd64` and `386`, and the web host `386`. Entries with the same bytes share them (`tools/guesttree.zig`), so the command names cost a table entry each rather than a copy of `9box`, and the bytes are embedded with `@embedFile`. A missing architecture gets the skeleton only, with a warning; `-Drelease` fails instead. The device gets the table from `h9_root_table` (`src/kern.zig`) |
+We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`. The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
-**Zig/C seam rules**
+### Added by us
+
+Each piece below is new in h9, with the reason it's needed.
+
+#### Process model (Proc fields, segments, rfork/exec/await, notes)
+
+drawterm only ever ran its own kprocs.
+
+#### `src/kern/devtab.c`
+
+The device table, listing drawterm's devices plus ours.
+
+#### Per-machine console device `#y` (`src/kern/devhcons.c`)
+
+drawterm's `#c/cons` reads and writes the host's fds 0 and 1 directly. `#y<id>` serves machine `id`'s `Stdio` through leaf calls into Zig, and is bound before `#c` on `/dev`, so `/dev/cons` is ours and the rest of `#c` stays visible. It also has `/dev/stderr`, which the guest's fd 2 is opened on, so fd 2 reaches the host's stderr.
+
+#### devenv `#e`, from 9front (`src/kern/devenv.c`)
+
+drawterm's has one machine-wide environment and imports the host process's environment on first attach, which breaks `env.scrub`. 9front's keeps one environment per Egrp, which `RFENVG` needs anyway. drawterm's Proc has no `egrp` and stays as it is, so each process's group is kept on its h9 process record (`src/kern/proc.c`). `#ec` isn't supported.
+
+#### devproc `#p`, from 9front (`src/kern/devproc.c`)
+
+rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](design/0010-self-host.md)).
+
+It serves h9's process records (`src/kern/proc.c`, shared through `src/kern/hproc.h`) instead of 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes.
+
+`status` has the 12 fields `ps` reads: the user is the machine's user (the guest's `$user`), the state is the syscall being served (as 9front's `psstate`, so `Await`, `Sleep`, `Pread`) or `Running`, memory is the process's mapped segments, and the user and system times read 0 until there's per-thread CPU accounting.
+
+`segment` lists the stack (its whole 16 MiB), text, data up to the break, and segattach's segments (`Shared`, or `Bss` for `memory`) in 9front's format, with the number of address spaces each is attached to.
+
+`ctl` takes `kill` (the process dies with `Killed` at its next note delivery, handler or not), `hang`/`nohang` (`exec` then stops the process before its first instruction), `close`, `closefiles`, and acid's `stop`, `start`, `waitstop`, and `startstop`; a stopped process reads `Stopped` and a waiting debugger `Stopwait`.
+
+`mem` translates through the target's address space; writes, and `regs` and `fpregs` writes, need the process stopped. `regs` reads while the process is stopped or in a syscall, `fpregs` only while it's stopped, laid out as 9front's `FPsave` (520 bytes on arm64, the 512-byte FXSAVE on x86).
+
+`text` opens the file the process executed (the interpreter, for a `#!` script). Unmapped addresses fail with "bad address" and missing register state with `Enoreg`.
+
+A process may `stop` itself while a debugger waits on it, which 9front refuses with `Einuse`; acid's `new()` doesn't need it, but the integration fixture does.
+
+`ns` prints the mount table as 9front does, so binds of host trees show their host paths; `--print` lists this as a caveat.
+
+A process takes its record's `debug` lock to swap its fd group, namespace, or dot (rfork, chdir) and to mark itself gone at exit, so `fd` and `ns` readers can hold references to them.
+
+#### devdup `#d`
+
+Serves `/fd/N`.
+
+#### The Linux view `#λ` (`src/kern/devlinux.c`) and eventfds `#ε` (`src/kern/linuxnet.c`)
+
+A Linux process's `/`, and its eventfd, epoll, and signalfd instances (see Linux personality).
+
+#### `tsleep` (`src/kern/tsleep.c`)
+
+drawterm's `sleep` has no timeout. `tsleep` has 9front's contract and uses only drawterm's public `sleep` and `wakeup`: it puts a timer on its own stack into a list sorted by host monotonic time, and the timer kproc wakes it at the deadline.
+
+The list is guarded by a host lock (`glue.c`, `glue-win32.c`) that the kproc holds while it calls `wakeup`, and `tsleep` always takes its timer out under that lock before returning, so no Proc fields are needed.
+
+#### Semaphores and `rendezvous` (`src/kern/sema.c`)
+
+drawterm has no semaphores. 9front's code is ported closely, with the wait lists in 64 hashed buckets keyed by the host address of the semaphore word rather than in the segment, since h9's segments are Zig objects; the word is changed with host atomics.
+
+`src/syscall.zig` checks the address first (aligned, mapped, in a writable segment), and the pages it names never move while it's shared.
+
+`rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list.
+
+#### Host command lifetime (`src/kern/hostcmd.c`)
+
+Host commands are built in only with `zig build -Dhost-cmd` (devtab.c lists devcmd under `H9_HOSTCMD`, `hcmd` comes from `src/guest-hostcmd/`, and the policy refuses `host_cmd` otherwise) while [host-cmd](design/host-cmd.md) rethinks them.
+
+drawterm's devcmd `#C` (under `--host-cmd`) kills a host command only when the last fd on its conversation closes, and a guest process reading its output waits in a host `read` no note interrupts, so a stopped machine could leave the command running after h9 exits.
+
+posix.c and win32.c are built with `oscmd`, `oscmdkill`, and `oscmdfree` renamed, and wrappers keep each running command with the machine that started it, found through the Fgrp that devcmd's kproc shares with the writer of `exec`.
+
+When the machine stops its processes, and when its last process is released, its commands are killed (SIGKILL to the process group on POSIX hosts; `TerminateProcess` on Windows), which ends the stuck reads; one started after that is killed at once.
+
+#### Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.c`)
+
+The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks".
+
+#### devsrv `#s`, from 9front (`src/kern/devsrv.c`), per machine
+
+Guest file servers post themselves in `/srv` (lib9p's `postsrv`, `srvfs`, factotum, plumber), and clients open the posted channel and mount it. 9front's code is ported closely, but each machine has its own root board, hung off its `Hmach` and made on first attach, with its own lock, so machines in one host process can't see each other's services; `clone` boards hang off the machine's root, so `#s/id` addressing works within a machine.
+
+A write of an fd number goes through `fdtochan`, then the post itself (the in-use and auth checks, holding the reference) is shared with `h9_srvpost`, which posts a host-side channel without a guest fd.
+
+Posting sets the channel's `srvname` to its `/srv` path, which `/proc/n/ns` prints for a mount of it, as 9front does.
+
+The machine's last process to release its groups (`h9_kern_release` in `src/kern/proc.c`) closes every posted channel, as closing a lease does, while the machine is still there; the boards go with the machine.
+
+#### Host-stream device `#ℏ` (`src/kern/devhstream.c`, `src/hstream.zig`)
+
+WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](design/0021-websocket-9p.md)).
+
+It follows devhcons's pattern: Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it.
+
+A host-made stream has no path: `h9_hstream_fd` makes its channel, which is posted as `#s/root` or mounted at once, so the guest can't reach it by name.
+
+Attached with no spec, the device serves `ws/clone` and `ws/N/{ctl,data,text,remote,status}`, listing only the caller's machine's conversations (at most 32); `bind -a '#ℏ' /net` puts them at `/net/ws`. `data` is the binary stream, `text` one text message per read or write.
+
+Received data is queued in the machine's pages, up to 16 MiB unread per stream.
+
+A guest `connect` asks the net policy as a TCP dial would, through the same `netLookup`, `netResolved`, and `netCheck` as devip and `cs`. The machine's end closes its streams (`h9_hstream_machend`, from `src/kern/proc.c`).
+
+#### devcons hooks (`src/kern/consx.c`, `consx.h`)
+
+drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/0007-go-compat.md)).
+
+So devcons calls hooks: `#c/pid` and `#c/ppid` (machine-local pids, as `$pid` and `/proc` have them, in 9front's 12-character format); `bintime` (wall nanoseconds, ticks, `fasthz`, and monotonic nanoseconds, big-endian, with a short read getting the leading words that fit); `time` (seconds, nanoseconds, ticks, and `fasthz`, in drawterm's text format); and `sysstat`, a line per CPU the machine may use, in 9front's ten columns with zeros for the counters h9 doesn't keep, so Go's `runtime.NumCPU` counts them.
+
+The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](design/0010-self-host.md)).
+
+The clock is one per host process (`src/kern.zig`): wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot; ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail.
+
+#### Overlay device `#O` (`src/kern/devoverlay.c`)
+
+Copy-on-write trees in memory over a lower directory, for the root's overlay, `--write=ephemeral`, and the private `/tmp` (see Sandbox policy). An instance can report each change to the machine, for the root's discarded-changes notice. A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it.
+
+#### h9's guest commands `#H` (`src/kern/devhtools.c`)
+
+Commands that wrap h9's own devices (websocket-9p's `wsmount`, say, or `hcmd`, which runs host commands through `#C`) can't come from 9front, and h9 never writes into the root ([guest-tools](design/0032-guest-tools.md)).
+
+`src/guest/` holds them, laid out as the guest sees them, and the build embeds it in the binary as a generated table (`tools/guesttree.zig`): only rc scripts and data, so an executable that doesn't start with `#!/bin/rc` fails the build, and names starting with `.` are left out.
+
+Executables are 0555, other files 0444, directories 0555, all owned by the machine's user; `#H/bin` always exists.
+
+The device gets the table once at reset from one leaf, `h9_tools_table` (`src/kern.zig`), and is plain C over constant memory after that. An entry's index is its qid path, so qids are the same on every run of one build.
+
+Attach takes no spec, or `root` for the built-in root below; writes, creates, removes, `OTRUNC` and `ORCLOSE` opens, and `wstat` fail with "permission denied".
+
+Debug builds also serve `tests/fixtures/guest/` (`-Dguest-test`), for the integration cases.
+
+#### The built-in root `#Hroot` (`src/kern/devhtools.c`)
+
+A root that's in the binary, so h9 runs with no tree to find ([builtin-root](design/0087-builtin-root.md)). It's a second table in `#H`, served by the same code with the same rules except its modes, a 9front tree's 0775 and 0664 so that an overlay over it can create files (the device itself still refuses every write), and a channel's `dev` says which table it's on, so the two trees' qids never meet in the mount table.
+
+Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](design/0064-multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`.
+
+The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds its target's architecture, and with `-Demu=unicorn` also `amd64` and `386`, and the web host `386`.
+
+Entries with the same bytes share them (`tools/guesttree.zig`), so the command names cost a table entry each rather than a copy of `9box`, and the bytes are embedded with `@embedFile`.
+
+A missing architecture gets the skeleton only, with a warning; `-Drelease` fails instead. The device gets the table from `h9_root_table` (`src/kern.zig`).
+
+### Zig/C seam rules
 
 1. drawterm raises errors with `waserror()`/`error()`, built on setjmp/longjmp. A longjmp across a Zig frame skips its `defer` and `errdefer`. So Zig code never sits between a `waserror` and an `error`.
 2. drawterm already provides the seam. Each `sysX` wrapper in `kern/sysfile.c` (`sysopen`, `syspread`, `sysbind`, `sysmount`, and so on) runs `waserror`; on error it stores the string for `errstr` and returns -1. Zig calls these directly and turns -1 into an error union. New process and segment calls get wrappers in the same style.
@@ -320,36 +821,139 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ## Filesystem, boot, and I/O
 
-**Root filesystem.** Either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([9p-roots](design/0013-9p-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL. A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](design/0076-schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it. The path is tried first, so a directory named like a host stays a directory, and when such a root can't be reached h9 says it read the value as a URL. h9 connects to a 9P root before the program runs: a TCP root is dialed through devip by device path (`#I/cs` and `#I/tcp/clone`), outside the network policy, since h9 makes the connection and the guest can't dial anything through it; a unix socket root is connected on the host and wrapped as a channel with devlfd's `lfdchan` (`src/kern/rootdial.c`), on POSIX hosts only; a `ws://` or `wss://` root is connected by `src/hstream.zig` (TCP, TLS, the HTTP proxy if one applies, and the handshake), and its stream's channel comes from devhstream. The connection is posted on the machine's `/srv` board as `root`, which holds it for the machine's life, and `#s/root` is mounted at `/` with no auth fd and `--root-spec` as the attach name. devmnt sends the calling process's user as the attach uname, so the first Proc takes on `--root-user` for the mount when one is given. Everything else is bound over the mount as over a host tree. A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks another dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, and h9 doesn't reconnect. Disk images aren't supported ([image-roots](design/0014-image-roots.md) was declined).
+### Root filesystem
 
-**Slim roots ([multicall](design/0064-multicall.md)).** `zig build slim` builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes. `tools/slim.zig` copies `src/9box/` into a fresh build directory and runs its mkfile inside the just-built h9, against the stock root, with the build directory as the only writable path and `/sys/src` from the root or the fetched checkout bound read-only. For each command in `src/9box/slim` (a name and a directory under `/sys/src/cmd` per line), `mkcmd` builds it as 9front does, with `mk`, behind `bind -bc` layers so `/sys/src` isn't written, reads the objects off the link line from `mk -n -a`, lists the globals they define with `nm`, and compiles them again with a `-Dname=bx_CMD_name` flag for each one libc and libbio don't define. A command's override of a libc function (ed's `mktemp`) is renamed too, unless libc's or libbio's own code calls it; that, initialising a library global other than `argv0`, or being a thread program, fails the build. `9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), or from its first argument when run as `9box`, and sets `argv0` to nil before running it. The tree is `9box`, a hard link or stub per command, `rcmain`, the time zone, and the mount points h9 binds onto. Its 42 commands are a 749 KB `9box` against 3.4 MB for the same binaries copied. Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
+The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([9p-roots](design/0013-9p-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
 
-**Boot sequence**
+A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](design/0076-schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it.
+
+The path is tried first, so a directory named like a host stays a directory, and when such a root can't be reached h9 says it read the value as a URL.
+
+h9 connects to a 9P root before the program runs:
+
+- A TCP root is dialed through devip by device path (`#I/cs` and `#I/tcp/clone`), outside the network policy, since h9 makes the connection and the guest can't dial anything through it.
+- A unix socket root is connected on the host and wrapped as a channel with devlfd's `lfdchan` (`src/kern/rootdial.c`), on POSIX hosts only.
+- A `ws://` or `wss://` root is connected by `src/hstream.zig` (TCP, TLS, the HTTP proxy if one applies, and the handshake), and its stream's channel comes from devhstream.
+
+The connection is posted on the machine's `/srv` board as `root`, which holds it for the machine's life, and `#s/root` is mounted at `/` with no auth fd and `--root-spec` as the attach name. devmnt sends the calling process's user as the attach uname, so the first Proc takes on `--root-user` for the mount when one is given. Everything else is bound over the mount as over a host tree.
+
+A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks another dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, and h9 doesn't reconnect. Disk images aren't supported ([image-roots](design/0014-image-roots.md) was declined).
+
+### Slim roots
+
+`zig build slim` ([multicall](design/0064-multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
+
+`tools/slim.zig` copies `src/9box/` into a fresh build directory and runs its mkfile inside the just-built h9, against the stock root, with the build directory as the only writable path and `/sys/src` from the root or the fetched checkout bound read-only.
+
+For each command in `src/9box/slim` (a name and a directory under `/sys/src/cmd` per line), `mkcmd` builds it as 9front does, with `mk`, behind `bind -bc` layers so `/sys/src` isn't written, reads the objects off the link line from `mk -n -a`, lists the globals they define with `nm`, and compiles them again with a `-Dname=bx_CMD_name` flag for each one libc and libbio don't define.
+
+A command's override of a libc function (ed's `mktemp`) is renamed too, unless libc's or libbio's own code calls it; that, initialising a library global other than `argv0`, or being a thread program, fails the build.
+
+`9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
+
+The tree is `9box`, a hard link or stub per command, `rcmain`, the time zone, and the mount points h9 binds onto. Its 42 commands are a 749 KB `9box` against 3.4 MB for the same binaries copied.
+
+Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
+
+### Boot sequence
 
 1. The kernel boots once per host process, on its own thread (see Process model).
-2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. For a 9P root it first connects, posts the connection as `#s/root`, and mounts it at `/`; a host root is bound at `/`, and the built-in root is `#Hroot` bound at `/`. Under `--write=overlay` (the default) and `--write=ephemeral` a `#O` overlay goes over `/` next, before every other bind, so everything else is bound onto directories reached through it; a directory the overlay hasn't copied keeps its lower qid, so the mount table matches it. Then it binds the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp` (the guest's `/tmp` for a 9P or the built-in root), and `#c`, `#p`, `#d`, `#e`, `#s` (the machine's own `/srv`, with `-c`) and (unless the network is off) `#I` to their usual places, with `#ℏ` bound after it at `/net`, giving `/net/ws`, and `#H/bin` after the root's `/bin`, so h9's own commands are on the path and a root command of the same name wins. With `--builtin=before` over another root, `#Hroot/$cputype/bin` is bound at `/bin` first and the root's `/$cputype/bin` after it; with `--builtin=after`, it's bound after the root's `/rc/bin`. A namespace file's `mount` of a `ws://` or `wss://` URL connects a new stream during the replay, which runs before the device mask. It binds the machine's console over `/dev/cons` and opens fds 0–2 on it; with `--gfx` it then binds `#i`, `#m`, and `#b` after it on `/dev`. Under the root's overlay it makes `/usr/$user` in the overlay if the root lacks it, so `$home` exists. Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. For a 9P root it first connects, posts the connection as `#s/root`, and mounts it at `/`; a host root is bound at `/`, and the built-in root is `#Hroot` bound at `/`.
+
+   Under `--write=overlay` (the default) and `--write=ephemeral` a `#O` overlay goes over `/` next, before every other bind, so everything else is bound onto directories reached through it; a directory the overlay hasn't copied keeps its lower qid, so the mount table matches it.
+
+   Then it binds the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp` (the guest's `/tmp` for a 9P or the built-in root), and `#c`, `#p`, `#d`, `#e`, `#s` (the machine's own `/srv`, with `-c`) and (unless the network is off) `#I` to their usual places, with `#ℏ` bound after it at `/net`, giving `/net/ws`, and `#H/bin` after the root's `/bin`, so h9's own commands are on the path and a root command of the same name wins.
+
+   With `--builtin=before` over another root, `#Hroot/$cputype/bin` is bound at `/bin` first and the root's `/$cputype/bin` after it; with `--builtin=after`, it's bound after the root's `/rc/bin`.
+
+   A namespace file's `mount` of a `ws://` or `wss://` URL connects a new stream during the replay, which runs before the device mask.
+
+   It binds the machine's console over `/dev/cons` and opens fds 0–2 on it; with `--gfx` it then binds `#i`, `#m`, and `#b` after it on `/dev`.
+
+   Under the root's overlay it makes `/usr/$user` in the overlay if the root lacks it, so `$home` exists.
+
+   Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
+
 4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
 
 The host's working directory is bound at the guest's `/mnt/term/cwd` and set as the guest's cwd, so that `h9 ls` lists what the user expects.
 
-**Terminal (default):** `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI. A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed. That host read happens on a reader thread for the machine run (`src/consin.zig`), never on the guest's thread: the guest sleeps in the kernel (`src/kern/devhcons.c`) until the thread has input, so a note or a teardown interrupts a console read as it does any other blocking call. Nothing is read ahead of a guest's request. At the end of a run the thread is stopped through `Stdio.in_cancel` (the CLI's stdin polls with a wake pipe on POSIX and uses `CancelSynchronousIo` on Windows). Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group (see the CLI section's Signals and TTY for each host). Exit status: an empty `exits` string gives 0, a decimal number from 1 to 255 gives that number, and any other string gives 1 and is printed to stderr; a process killed by a note exits 128+N for a signal (see the CLI's exit codes).
+### Terminal
 
-**Graphics (`--gfx`).** A machine with `Machine.Options.gfx` claims the process's one window (`src/gfx.zig`; a second machine gets `GfxInUse`). The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, X11 on Linux only with `-Dgfx=x11` (glibc), and `headless`, a screen in memory with hooks to inject keys and mouse events and read pixels, for `tests/backends.zig`. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead. The backend files are compiled unchanged; `src/kern/gfx-gui.h`, force-included before them, renames `screeninit`, `clipread`, `clipwrite`, and `kbdkey` to h9's wrappers in `src/kern/gfx.c`, and turns the backend's `exit` (X11) or `ExitProcess` (Win32) on a closed window into `h9_gfx_exit`, which posts `hangup` to the machine with the window (as for a closed terminal) and parks the backend's thread. AppKit exits by itself, so on macOS `src/kern/gfx-cocoa.m` observes the app's termination instead, and `src/gfx.zig` posts the same `hangup` and exits with the run's status once it ends. The window opens lazily, on the first walk below `#i` or open of `/dev/snarf`, so a program that never draws gets no window; the backend's kprocs run in an empty namespace of their own. `/dev/kbd` serves kbdfs's format (`k`/`K` for keys held, `c` for a key typed), which rio reads, and drops keys while it isn't open. `/dev/snarf` is the host clipboard, or under `--gfx=noclip` a buffer in the h9 process; machines without `#i` can't open it. The console stays the host terminal, so `/dev/cons` and kernel prints still go there. On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same.
+By default, `/dev/cons` is the machine's console device, which maps to the `Stdio` in `Machine.Options`: the host stdin and stdout for the CLI.
+
+A read returns after one host read, as on a terminal, so a typed line reaches the guest when Enter is pressed.
+
+That host read happens on a reader thread for the machine run (`src/consin.zig`), never on the guest's thread: the guest sleeps in the kernel (`src/kern/devhcons.c`) until the thread has input, so a note or a teardown interrupts a console read as it does any other blocking call. Nothing is read ahead of a guest's request.
+
+At the end of a run the thread is stopped through `Stdio.in_cancel` (the CLI's stdin polls with a wake pipe on POSIX and uses `CancelSynchronousIo` on Windows).
+
+Writing `rawon` to `/dev/consctl` switches the host TTY to raw mode (console mode on Windows). Ctrl-C posts an `interrupt` note to the foreground note group (see the CLI section's Signals and TTY for each host).
+
+Exit status: an empty `exits` string gives 0, a decimal number from 1 to 255 gives that number, and any other string gives 1 and is printed to stderr; a process killed by a note exits 128+N for a signal (see the CLI's exit codes).
+
+### Graphics (`--gfx`)
+
+A machine with `Machine.Options.gfx` claims the process's one window (`src/gfx.zig`; a second machine gets `GfxInUse`).
+
+The window is drawn by drawterm's own GUI backend, chosen at build time with `-Dgfx`: Cocoa on macOS and Win32 on Windows by default, X11 on Linux only with `-Dgfx=x11` (glibc), and `headless`, a screen in memory with hooks to inject keys and mouse events and read pixels, for `tests/backends.zig`. `-Dgfx=none` builds `src/kern/nogfx.c`'s stubs instead.
+
+The backend files are compiled unchanged; `src/kern/gfx-gui.h`, force-included before them, renames `screeninit`, `clipread`, `clipwrite`, and `kbdkey` to h9's wrappers in `src/kern/gfx.c`, and turns the backend's `exit` (X11) or `ExitProcess` (Win32) on a closed window into `h9_gfx_exit`, which posts `hangup` to the machine with the window (as for a closed terminal) and parks the backend's thread.
+
+AppKit exits by itself, so on macOS `src/kern/gfx-cocoa.m` observes the app's termination instead, and `src/gfx.zig` posts the same `hangup` and exits with the run's status once it ends.
+
+The window opens lazily, on the first walk below `#i` or open of `/dev/snarf`, so a program that never draws gets no window; the backend's kprocs run in an empty namespace of their own.
+
+`/dev/kbd` serves kbdfs's format (`k`/`K` for keys held, `c` for a key typed), which rio reads, and drops keys while it isn't open. `/dev/snarf` is the host clipboard, or under `--gfx=noclip` a buffer in the h9 process; machines without `#i` can't open it.
+
+The console stays the host terminal, so `/dev/cons` and kernel prints still go there.
+
+On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same.
 
 ## Serving
 
 `--serve` makes a machine a 9P server while its program runs ([serve](design/0035-serve.md)). `src/serve.zig` opens every listener before the program starts, so a failure is exit 125 with nothing run, and `Machine.serving()` and the guest's `$serve` (an rc list) give the bound addresses, port 0 resolved. The listeners close when the program exits, which hangs up every connection.
 
-**Listeners.** Unix and TCP listeners are host sockets with an accept thread each. A unix listener first takes an exclusive `flock` on `PATH.lock` (mode 0600) for the whole run, so two runs can't both decide a socket is stale; then an existing socket that refuses a connection is removed, one that answers is an address in use, and a path that isn't a socket is left alone (`not a socket`). The socket is made mode 0600, and the socket and lock file are removed at the end of the run. A TCP listener sets `SO_REUSEADDR`, so a port is free again as soon as the run ends. A `ws://` listener reads the HTTP request on its accept thread and answers it with `ws.zig`'s server side: 404 for another path, 405 for another method, 426 for a request that isn't a version 13 upgrade, 403 for an `Origin` `--serve-origin` doesn't allow, 401 without the token (compared as SHA-256 digests in constant time), and 400 for subprotocols offered without `9p`; otherwise 101, selecting `9p` when it was offered. A machine serves at most 32 connections at once; past that a connection is closed on accept, or answered 503 on a WebSocket listener, and `--trace` logs each accept and refusal.
+### Listeners
 
-**Streams.** An accepted connection enters the kernel through devhstream as a host-made stream (`hstream.openAccepted`): raw for unix and TCP, whose bytes are queued as they arrive and written back unframed, or a server-side WebSocket, whose frames are sent unmasked and whose text messages close it with 1003. A server stream answers pings, pings after 30 s idle and fails a connection silent for another 30 s, and drops a client whose handshake hasn't finished within 60 s. The first message passes a dialect slot (`hstream.dialect`), where a `Tversion` is plain 9P2000 today and dotl's translator will hook in.
+Unix and TCP listeners are host sockets with an accept thread each.
 
-**The server Proc.** After the plan's namespace is built and before the program runs, the first Proc forks the server Proc with `RFNAMEG|RFFDG|RFENVG|RFNOTEG|RFNOWAIT`: its own copy of the plan's namespace, so binds the program makes later aren't served, and its own note group, so an interrupt from the console doesn't reach exportfs. Without `--serve-net` it unmounts `/net`. It takes each ready connection from `serve.Server.next`, opens its stream as an fd, and forks a Proc that dups it to 0 and 1 and execs `exportfs -r ROOT` (`-R` under `--write=none`): the root's `/bin/exportfs` if it has one, else the built-in root's `#Hroot/$cputype/bin/exportfs`. When exportfs exits, the stream closes and the connection's slot is freed. With no program (`argv` empty), the first Proc sleeps until a note or the end of the run instead of exec'ing anything, and the CLI exits 0 when a note ends it.
+A unix listener first takes an exclusive `flock` on `PATH.lock` (mode 0600) for the whole run, so two runs can't both decide a socket is stale; then an existing socket that refuses a connection is removed, one that answers is an address in use, and a path that isn't a socket is left alone (`not a socket`).
 
-**Process counts.** The server Proc and its descendants are counted against `--pids` separately from the program's processes, each against the full value, so neither can use up the other's (`pids=32 (+32 serving)` in the plan). Each connection's exportfs and its children are also capped at 8 live processes, so past 8 blocking requests the next fails with exportfs's `Out of processes` while other connections carry on. Memory isn't split: exportfs counts under `--memory` with the program.
+The socket is made mode 0600, and the socket and lock file are removed at the end of the run.
 
-**The plan.** `--print` lists the listeners under `serve:`, each with the exportfs command it runs and, for WebSocket listeners, `(token, origins: …)` without the token's value; the heading's comment says which exportfs runs. Caveats name each listener without authentication (unix, TCP, and WebSocket without a token) and, under `--serve-net`, that clients can dial out from the host's address. A serve-only run prints `program:  none (serve only)`.
+A TCP listener sets `SO_REUSEADDR`, so a port is free again as soon as the run ends.
+
+A `ws://` listener reads the HTTP request on its accept thread and answers it with `ws.zig`'s server side: 404 for another path, 405 for another method, 426 for a request that isn't a version 13 upgrade, 403 for an `Origin` `--serve-origin` doesn't allow, 401 without the token (compared as SHA-256 digests in constant time), and 400 for subprotocols offered without `9p`; otherwise 101, selecting `9p` when it was offered.
+
+A machine serves at most 32 connections at once; past that a connection is closed on accept, or answered 503 on a WebSocket listener, and `--trace` logs each accept and refusal.
+
+### Streams
+
+An accepted connection enters the kernel through devhstream as a host-made stream (`hstream.openAccepted`): raw for unix and TCP, whose bytes are queued as they arrive and written back unframed, or a server-side WebSocket, whose frames are sent unmasked and whose text messages close it with 1003.
+
+A server stream answers pings, pings after 30 s idle and fails a connection silent for another 30 s, and drops a client whose handshake hasn't finished within 60 s. The first message passes a dialect slot (`hstream.dialect`), where a `Tversion` is plain 9P2000 today and dotl's translator will hook in.
+
+### The server Proc
+
+After the plan's namespace is built and before the program runs, the first Proc forks the server Proc with `RFNAMEG|RFFDG|RFENVG|RFNOTEG|RFNOWAIT`: its own copy of the plan's namespace, so binds the program makes later aren't served, and its own note group, so an interrupt from the console doesn't reach exportfs. Without `--serve-net` it unmounts `/net`.
+
+It takes each ready connection from `serve.Server.next`, opens its stream as an fd, and forks a Proc that dups it to 0 and 1 and execs `exportfs -r ROOT` (`-R` under `--write=none`): the root's `/bin/exportfs` if it has one, else the built-in root's `#Hroot/$cputype/bin/exportfs`.
+
+When exportfs exits, the stream closes and the connection's slot is freed.
+
+With no program (`argv` empty), the first Proc sleeps until a note or the end of the run instead of exec'ing anything, and the CLI exits 0 when a note ends it.
+
+### Process counts
+
+The server Proc and its descendants are counted against `--pids` separately from the program's processes, each against the full value, so neither can use up the other's (`pids=32 (+32 serving)` in the plan). Each connection's exportfs and its children are also capped at 8 live processes, so past 8 blocking requests the next fails with exportfs's `Out of processes` while other connections carry on. Memory isn't split: exportfs counts under `--memory` with the program.
+
+### The plan
+
+`--print` lists the listeners under `serve:`, each with the exportfs command it runs and, for WebSocket listeners, `(token, origins: …)` without the token's value; the heading's comment says which exportfs runs. Caveats name each listener without authentication (unix, TCP, and WebSocket without a token) and, under `--serve-net`, that clients can dial out from the host's address. A serve-only run prints `program:  none (serve only)`.
 
 ## Security, debugging, and testing
 
@@ -375,17 +979,65 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | `proc.timeout` | A machine deadline: a `hangup` note to every process, then a hard teardown after a 2 s grace period |
 | `res.pids`, `res.cpu` | A cap on live processes in `rfork`; a cap on vCPUs running guest code at once |
 
-**Vendor hooks.** The policy lives in Zig. drawterm calls it through leaf functions, following seam rule 3. devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat, and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied"). devip calls `h9_net_check(op, proto, addr, port)` (declared in `src/kern/netcheck.h`) when a ctl file's `connect` or `announce` is parsed, before a port is bound or the host is dialed, and raises "permission denied" on a refusal. Its `cs` calls `h9_net_lookup(proto, name, port)` before the host's resolver, raising "no translation for host found" for a name no pattern covers, and `h9_net_resolved` after it. The machine's compiled plan is set per host thread, because each guest process runs on its own thread. The leaves return an int and never raise kernel errors themselves.
+#### Vendor hooks
 
-**Network rules.** Under `--net=outbound` (the default profile's setting) `announce` is refused; `--net=enable` allows it. Without `--net-allow`, a `connect` to link-local addresses (169.254.0.0/16, fe80::/10) is refused in both modes, which keeps the common cloud metadata endpoint out of reach, and everything else is allowed. With patterns, the patterns are the whole policy: a `connect` must match one, by protocol (`tcp`, `udp`, or `net`/`*`), address (an address, a CIDR range, or `*`) and port (a number, a range, or `*`). IPv4 is matched as IPv4, however devip spelled it. A name pattern (`api.example.com`, or `*.example.com` for one or more labels) can't be checked at `connect`, whose message is numeric, so `cs` resolves only names a pattern covers and records what each returned in the machine's resolved-name table (the 1024 most recent entries). A later `connect` to a recorded address is allowed if its name matches a name pattern with that protocol and port. A `/net/ws` `connect` is checked as a TCP dial to the URL's host and port: a name goes through the same lookup check and resolved-name table, and each address it resolves to through the connect check. Connections h9 makes itself (a root, a namespace-file mount) are outside the policy, and the guest can't reach them by name. `--net-allow` with `--net=disable`, or a bad pattern, is exit 2.
+The policy lives in Zig. drawterm calls it through leaf functions, following seam rule 3.
 
-**Access rules.** The plan's rules are the root, the cwd, each `--readable` and `--writable` path, and each `--read-deny` path, all as resolved host paths. Overlaid paths (`eph`) are read-only rules, since the overlay never writes its lower tree. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
+devfs-posix and devfs-win32 call `h9_fs_check(path, op)` (in `src/kern/fscheck.c`) before each walk, open, create, remove, wstat, and directory entry. It resolves the host path and asks the Zig leaf `h9_policy_check` for a verdict: allowed, hidden (the walk fails, or the entry is left out of the listing) or read-only ("permission denied").
 
-**Path resolution.** devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. Every devfs path is resolved (`realpath`; on Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths) and the resolved path is checked against the access rules, on every host. Create, remove, and rename act on the name rather than a link's target, so an existing entry is checked by its own canonical name without following it. On macOS that's `F_GETPATH` on an `O_SYMLINK` open, and on Windows the final path of a reparse-point open, so another case, an 8.3 short name, or a trailing dot can't dodge a rule on a case-insensitive file system. A new name is appended to its resolved parent. A create over an existing symlink also checks the link's target for writing. Renaming a directory that has any rule strictly beneath it is refused ("permission denied"), because it would move those paths out from under their rules. The check and the host call aren't atomic, so a host process renaming paths at the same time can race it; the plan reports that, and hardlinks under writable paths, as caveats.
+devip calls `h9_net_check(op, proto, addr, port)` (declared in `src/kern/netcheck.h`) when a ctl file's `connect` or `announce` is parsed, before a port is bound or the host is dialed, and raises "permission denied" on a refusal.
 
-**Contained trees.** A bind from `#U!c/path` ([symlinks-in-root](design/0034-symlinks-in-root.md)) is *contained*: devfs resolves its links itself, inside the tree, as `openat2`'s `RESOLVE_IN_ROOT` does. The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from the vendored `chan.c`), canonicalised. Each later walk looks names up one at a time with `lstat` (`h9_fs_resolvein` in `src/kern/fscheck.c`; on Windows `h9_fs_resolveinw`, which reads symlinks and junctions with `FSCTL_GET_REPARSE_POINT` and refuses other reparse points and UNC targets): a link's target is read, an absolute one starts again at the top (on Windows, with its drive dropped), a relative one from the link's directory, `..` at the top stays there, and more than 40 links in one walk is "too many symbolic links". The resolved path, which holds no links, is checked against the access rules as any other path is, so `--read-deny` and partly allowed trees still apply, and kept on the chan with the link's own path beside it: stat shows the link's name, remove and rename act on the link, and open, read, and wstat on its target. A listing shows each link with its target's `Dir` and leaves out a link whose target is missing or loops, since walking it fails. `h9_fs_readlink` (and `h9_fs_readlinkpath` by guest path, through the root overlay; `kern.readlink`) gives a link's target as written, for the Linux personality; Plan 9 programs never see links. An uncontained `#U` attach is unchanged. `--root-contained` makes the root's bind and the root overlay's lower tree contained; other binds, including writable paths inside the root, stay uncontained. `--print` shows the root as `bind '#U!c/path' /`, which replays with `--ns` where `#U` isn't masked. Any other `#U` attach spec is "bad attach specifier".
+Its `cs` calls `h9_net_lookup(proto, name, port)` before the host's resolver, raising "no translation for host found" for a name no pattern covers, and `h9_net_resolved` after it.
 
-**Default profile.** With no sandbox flags the guest can work in the host cwd and nothing else:
+The machine's compiled plan is set per host thread, because each guest process runs on its own thread. The leaves return an int and never raise kernel errors themselves.
+
+#### Network rules
+
+Under `--net=outbound` (the default profile's setting) `announce` is refused; `--net=enable` allows it.
+
+Without `--net-allow`, a `connect` to link-local addresses (169.254.0.0/16, fe80::/10) is refused in both modes, which keeps the common cloud metadata endpoint out of reach, and everything else is allowed.
+
+With patterns, the patterns are the whole policy: a `connect` must match one, by protocol (`tcp`, `udp`, or `net`/`*`), address (an address, a CIDR range, or `*`) and port (a number, a range, or `*`). IPv4 is matched as IPv4, however devip spelled it.
+
+A name pattern (`api.example.com`, or `*.example.com` for one or more labels) can't be checked at `connect`, whose message is numeric, so `cs` resolves only names a pattern covers and records what each returned in the machine's resolved-name table (the 1024 most recent entries). A later `connect` to a recorded address is allowed if its name matches a name pattern with that protocol and port.
+
+A `/net/ws` `connect` is checked as a TCP dial to the URL's host and port: a name goes through the same lookup check and resolved-name table, and each address it resolves to through the connect check.
+
+Connections h9 makes itself (a root, a namespace-file mount) are outside the policy, and the guest can't reach them by name. `--net-allow` with `--net=disable`, or a bad pattern, is exit 2.
+
+#### Access rules
+
+The plan's rules are the root, the cwd, each `--readable` and `--writable` path, and each `--read-deny` path, all as resolved host paths. Overlaid paths (`eph`) are read-only rules, since the overlay never writes its lower tree. A deny rule covering a path wins. Otherwise the longest allow rule covering the path decides between read-only and read-write. Ancestors of allowed paths can be walked and listed but not changed, so `/mnt/term/<path>` works when the host's `/` is unioned after the tree's `/mnt/term`. Anything else is hidden. Bind-level read-only (no `MCREATE`) is a second, coarser check.
+
+#### Path resolution
+
+devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host.
+
+Every devfs path is resolved (`realpath`; on Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths) and the resolved path is checked against the access rules, on every host.
+
+Create, remove, and rename act on the name rather than a link's target, so an existing entry is checked by its own canonical name without following it. On macOS that's `F_GETPATH` on an `O_SYMLINK` open, and on Windows the final path of a reparse-point open, so another case, an 8.3 short name, or a trailing dot can't dodge a rule on a case-insensitive file system. A new name is appended to its resolved parent. A create over an existing symlink also checks the link's target for writing.
+
+Renaming a directory that has any rule strictly beneath it is refused ("permission denied"), because it would move those paths out from under their rules. The check and the host call aren't atomic, so a host process renaming paths at the same time can race it; the plan reports that, and hardlinks under writable paths, as caveats.
+
+#### Contained trees
+
+A bind from `#U!c/path` ([symlinks-in-root](design/0034-symlinks-in-root.md)) is *contained*: devfs resolves its links itself, inside the tree, as `openat2`'s `RESOLVE_IN_ROOT` does.
+
+The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from the vendored `chan.c`), canonicalised.
+
+Each later walk looks names up one at a time with `lstat` (`h9_fs_resolvein` in `src/kern/fscheck.c`; on Windows `h9_fs_resolveinw`, which reads symlinks and junctions with `FSCTL_GET_REPARSE_POINT` and refuses other reparse points and UNC targets): a link's target is read, an absolute one starts again at the top (on Windows, with its drive dropped), a relative one from the link's directory, `..` at the top stays there, and more than 40 links in one walk is "too many symbolic links".
+
+The resolved path, which holds no links, is checked against the access rules as any other path is, so `--read-deny` and partly allowed trees still apply, and kept on the chan with the link's own path beside it: stat shows the link's name, remove and rename act on the link, and open, read, and wstat on its target.
+
+A listing shows each link with its target's `Dir` and leaves out a link whose target is missing or loops, since walking it fails.
+
+`h9_fs_readlink` (and `h9_fs_readlinkpath` by guest path, through the root overlay; `kern.readlink`) gives a link's target as written, for the Linux personality; Plan 9 programs never see links.
+
+An uncontained `#U` attach is unchanged. `--root-contained` makes the root's bind and the root overlay's lower tree contained; other binds, including writable paths inside the root, stay uncontained. `--print` shows the root as `bind '#U!c/path' /`, which replays with `--ns` where `#U` isn't masked. Any other `#U` attach spec is "bad attach specifier".
+
+#### Default profile
+
+With no sandbox flags the guest can work in the host cwd and nothing else:
 
 | Area | Default |
 | --- | --- |
@@ -402,11 +1054,21 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 
 `--profile=tight` differs in three ways: the cwd is read-only (an overlay under `--write=ephemeral`), `#I` is masked, and a default timeout of 10 minutes applies. Its root is an overlay and its `/tmp` private and writable, as in the default profile, since neither writes the host; `--write=scope` keeps a read-only root in either profile. `--sandbox DIR` is the tight profile with only DIR bound, read-write, as the cwd; the host cwd isn't bound.
 
-**Discarded root changes.** The root overlay reports each create, copy-up, remove, and wstat to the machine once the namespace is built, so the `$home` the builder makes isn't counted. After a run, `Machine.root_changes` (a `RootChanges` value) says whether the guest changed the root outside `$home`, which top-level directories it changed, and whether it changed `$home`. When it changed the root outside `$home` and stderr is a terminal, the CLI prints `h9: changes to the root under /386, /lib were discarded (rerun with --writable "$H9ROOT" to keep them)` (for a 9P root, `--write=scope`). Scripts, whose stderr is rarely a terminal, don't see it.
+#### Discarded root changes
 
-**The root overlay's cost.** Every walk in the root goes through `#O`: a lookup in its memory tree, then the lower device. A lower directory keeps the mounts made on it before the overlay (`findmount` in `third_party/drawterm/kern/chan.c` asks `#O` for the lower device when a mount hash bucket has an entry for the same qid path), which only a namespace file's overlay over `/` needs. Measured on the emulator (Linux x86_64, 4 cores, best of 7 runs, `--write=overlay` against `--write=scope`): `du -a /sys/src`, twenty `ls -l` of `/bin`, `/lib`, and `/sys/include`, and `mk -n cat.install` in `/sys/src/cmd` all differ by less than 4%, within run-to-run noise, and the `[baseline]` suite passes the same cases either way. On HVF (M-series MacBook Pro), `zig build proposal -Dp=baseline` takes 27.29 s with the overlay against 27.05 s without (median of 3), under 1%, and the `du -a /sys/src` (9747 entries) and `ls -l` loop above takes 0.45 s with it against 0.44 s without (median of 3), within noise. No fast path in `#O` was needed.
+The root overlay reports each create, copy-up, remove, and wstat to the machine once the namespace is built, so the `$home` the builder makes isn't counted. After a run, `Machine.root_changes` (a `RootChanges` value) says whether the guest changed the root outside `$home`, which top-level directories it changed, and whether it changed `$home`. When it changed the root outside `$home` and stderr is a terminal, the CLI prints `h9: changes to the root under /386, /lib were discarded (rerun with --writable "$H9ROOT" to keep them)` (for a 9P root, `--write=scope`). Scripts, whose stderr is rarely a terminal, don't see it.
 
-**Plan output.** `--print` compiles the policy and exits without running. The namespace is printed in `newns` format, so it can be saved and replayed with `--ns`:
+#### The root overlay's cost
+
+Every walk in the root goes through `#O`: a lookup in its memory tree, then the lower device. A lower directory keeps the mounts made on it before the overlay (`findmount` in `third_party/drawterm/kern/chan.c` asks `#O` for the lower device when a mount hash bucket has an entry for the same qid path), which only a namespace file's overlay over `/` needs.
+
+Measured on the emulator (Linux x86_64, 4 cores, best of 7 runs, `--write=overlay` against `--write=scope`): `du -a /sys/src`, twenty `ls -l` of `/bin`, `/lib`, and `/sys/include`, and `mk -n cat.install` in `/sys/src/cmd` all differ by less than 4%, within run-to-run noise, and the `[baseline]` suite passes the same cases either way.
+
+On HVF (M-series MacBook Pro), `zig build proposal -Dp=baseline` takes 27.29 s with the overlay against 27.05 s without (median of 3), under 1%, and the `du -a /sys/src` (9747 entries) and `ls -l` loop above takes 0.45 s with it against 0.44 s without (median of 3), within noise. No fast path in `#O` was needed.
+
+#### Plan output
+
+`--print` compiles the policy and exits without running. The namespace is printed in `newns` format, so it can be saved and replayed with `--ns`:
 
 ```text
 $ h9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
@@ -443,7 +1105,15 @@ caveats:
   - the h9 process itself is not host-sandboxed
 ```
 
-A 9P root is printed as `mount '#s/root' / '<spec>'` with `9p` in the access column and the dial string (and `--root-user`, as `as NAME`) in a comment. The spec is always written, `''` when empty, so a replay can tell it from the column; the line replays with `--ns` as an ordinary mount of the posted channel, a new attach on the same connection. A 9P root has no access rule. Under the root's overlay, a bare `bind -c '#O' /` after the mount, nothing reaches its server; under `--write=scope` the server decides what can be written, and the plan says so in a caveat. Another caveat covers a TCP root's unencrypted connection. `--write=none` with a 9P root is exit 2, because h9 can't make devmnt read-only. A WebSocket root's comment is its URL with the query elided (`?…`), its headers with their values as `…`, the proxy it goes through (credentials as `…@`) and `--root-ca`, and the unencrypted caveat applies to `ws://` but not `wss://`. `/net/ws`'s bind is printed as `bind -a '#ℏ' /net`, and `ℏ` joins the `devmask:` line under `--net=disable`. `--trace` prints no write data, so a URL written to a `ctl` doesn't appear in a trace.
+A 9P root is printed as `mount '#s/root' / '<spec>'` with `9p` in the access column and the dial string (and `--root-user`, as `as NAME`) in a comment. The spec is always written, `''` when empty, so a replay can tell it from the column; the line replays with `--ns` as an ordinary mount of the posted channel, a new attach on the same connection.
+
+A 9P root has no access rule. Under the root's overlay, a bare `bind -c '#O' /` after the mount, nothing reaches its server; under `--write=scope` the server decides what can be written, and the plan says so in a caveat. Another caveat covers a TCP root's unencrypted connection.
+
+`--write=none` with a 9P root is exit 2, because h9 can't make devmnt read-only.
+
+A WebSocket root's comment is its URL with the query elided (`?…`), its headers with their values as `…`, the proxy it goes through (credentials as `…@`) and `--root-ca`, and the unencrypted caveat applies to `ws://` but not `wss://`.
+
+`/net/ws`'s bind is printed as `bind -a '#ℏ' /net`, and `ℏ` joins the `devmask:` line under `--net=disable`. `--trace` prints no write data, so a URL written to a `ctl` doesn't appear in a trace.
 
 The built-in root is printed as `bind '#Hroot' /` with `builtin` in the access column and what it holds in a comment (`h9 v0.2.0, 9front 11952 slim`, or `skeleton only`). It's constant data, so it has no access rule, `--writable` can't name it, and it's read-only whatever the flags; the root's overlay and `/tmp` go over it as over a 9P root, as bare `#O`s. `--builtin=before` and `--builtin=after` print their `#Hroot/$cputype/bin` bind with `builtin` too. The lines replay with `--ns` as ordinary binds, so a plan printed over the built-in root replays on any h9 of the same build.
 
@@ -451,9 +1121,21 @@ The built-in root is printed as `bind '#Hroot' /` with `builtin` in the access c
 
 The root's overlay is printed as `bind -c '#O' /` with `eph` and, over a host tree, the root's path in a comment, and the root's access rule as `eph`. Replayed with `--ns`, the line overlays whatever `/` is at that point; binds made before it onto directories of the root (the builder's own, when replaying into a running plan) are hidden under it, and the replay's later lines redo them, except `#U` binds, which the device mask refuses. The guest's cwd stays where the builder put it.
 
-**Ephemeral writes.** `--write=ephemeral` binds each path `scope` would make writable (the cwd, in the tight profile too, and each `--writable` path) as a `#O` overlay over its `#U` tree, printed as `bind -c '#O' <target>` with `eph` and the host path in a comment. Reads come from the host tree; creates, writes, removes, and renames land in memory. The root is an overlay too, `--writable` or not. The overlay device (`src/kern/devoverlay.c`) keeps a tree in memory over a lower chan: a walk looks in memory first and falls through to the lower device, so devfs's checks (`--read-deny`, hidden paths, symlink resolution) apply to every lower lookup. A memory node is a copy (a file or directory with its own data), a whiteout (a removed lower name), a directory marker (a lower directory with changed children) or a symbolic link a Linux program made (see Linux personality). A lower file is copied up whole the first time it's opened for writing, or not read at all with `OTRUNC`; a process that already has the lower file open keeps reading it. Renaming a lower directory, or a marker, is refused ("permission denied"). Copies' data is page-sized blocks and the nodes, names, and `Dir` strings come from a small allocator on the same pages, all from the machine's guest-physical page allocator through Zig leaves (`h9_overlay_alloc` in `src/kern.zig`), so ephemeral files count against `--memory` and running out fails the operation with "file system full", changing nothing. Instances are made by the namespace builder (`h9_overlay_newpath`) and attached as `#O<n>`; attaching checks the instance belongs to the caller's machine, and the last close of its last chan frees it. In a namespace file, a bind from a bare `#O` makes a fresh instance over what its target is at that point in the replay. Ephemeral changes can't be exported yet.
+#### Ephemeral writes
 
-**Examples**
+`--write=ephemeral` binds each path `scope` would make writable (the cwd, in the tight profile too, and each `--writable` path) as a `#O` overlay over its `#U` tree, printed as `bind -c '#O' <target>` with `eph` and the host path in a comment. Reads come from the host tree; creates, writes, removes, and renames land in memory. The root is an overlay too, `--writable` or not.
+
+The overlay device (`src/kern/devoverlay.c`) keeps a tree in memory over a lower chan: a walk looks in memory first and falls through to the lower device, so devfs's checks (`--read-deny`, hidden paths, symlink resolution) apply to every lower lookup.
+
+A memory node is a copy (a file or directory with its own data), a whiteout (a removed lower name), a directory marker (a lower directory with changed children) or a symbolic link a Linux program made (see Linux personality).
+
+A lower file is copied up whole the first time it's opened for writing, or not read at all with `OTRUNC`; a process that already has the lower file open keeps reading it. Renaming a lower directory, or a marker, is refused ("permission denied").
+
+Copies' data is page-sized blocks and the nodes, names, and `Dir` strings come from a small allocator on the same pages, all from the machine's guest-physical page allocator through Zig leaves (`h9_overlay_alloc` in `src/kern.zig`), so ephemeral files count against `--memory` and running out fails the operation with "file system full", changing nothing.
+
+Instances are made by the namespace builder (`h9_overlay_newpath`) and attached as `#O<n>`; attaching checks the instance belongs to the caller's machine, and the last close of its last chan frees it. In a namespace file, a bind from a bare `#O` makes a fresh instance over what its target is at that point in the replay. Ephemeral changes can't be exported yet.
+
+#### Examples
 
 ```sh
 h9 --profile=tight ls -l                                  # read-only, no network
@@ -499,26 +1181,26 @@ h9 [h9-flags] --serve ADDR...       # no program: serves the namespace until a n
 h9 --version | --check | --help      # tool functions; -h alone is --help
 ```
 
-**Parsing rules**
+### Parsing rules
 
 - No subcommands. `h9 ls` must run 9front's `ls`, so tool functions such as `--version` and `--check` are flags instead.
 - Flag parsing stops at the first non-flag, as with `env` and `nice`, so `h9 ls -l` passes `-l` to `ls`. `--` ends h9's flags explicitly.
 - Long flags only, so h9's flags are never confused with Plan 9-style short flags. There are no short aliases. The exception is `-h` as the only argument, which is `--help`: alone it can't be a program's flag, and anywhere else it's a program name or argument.
 
-**Program resolution**
+### Program resolution
 
 | Argument | Resolution |
 | --- | --- |
 | Starts with `./` or `../` (`./hello`, `../out/x`) | A host path relative to the host cwd, read on the host. It doesn't need to be in the guest namespace. |
 | Absolute (`/bin/cat`) | A guest path, resolved in the guest namespace. To run an absolute host path, use the guest view of it (`/mnt/term/...`) or a relative path. |
 | Bare name or other relative path (`ls`, `aux/vga`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
-
-A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
 | `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell ([default-command](design/0081-default-command.md)). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
 | `--ns file` | Runs `newns` with the file before the program |
 
-**Flags**
+A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
+
+### Flags
 
 | Flag | Meaning |
 | --- | --- |
@@ -564,9 +1246,11 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (42 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
-**Default guest environment:** `user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the machine's architecture (`386` for 386), `sysname=h9`, `service=terminal`, `timezone` (copied from the root's `/adm/timezone/local`, as 9front's boot does), `serve` under `--serve` (see Serving), and `NPROC`, the CPUs the machine may use (`--cpus`, or the host's count capped by the vCPU limit), as `/dev/sysstat` lists them ([self-host](design/0010-self-host.md)). Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
+### Default guest environment
 
-**Exit codes**
+`user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the machine's architecture (`386` for 386), `sysname=h9`, `service=terminal`, `timezone` (copied from the root's `/adm/timezone/local`, as 9front's boot does), `serve` under `--serve` (see Serving), and `NPROC`, the CPUs the machine may use (`--cpus`, or the host's count capped by the vCPU limit), as `/dev/sysstat` lists them ([self-host](design/0010-self-host.md)). Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
+
+### Exit codes
 
 | Code | Meaning |
 | --- | --- |
@@ -596,7 +1280,7 @@ A first process killed by a note exits as a host shell reports a death by signal
 
 Signal numbers are the host's (`std.posix.SIG`), since a host shell decodes the status, so `usr1` is 138 on Linux and 158 on macOS; Windows uses Linux's numbers, as Git Bash and MSYS expect. A unit test checks the copy of `sigtab` in `src/cli.zig` against the pinned 9front source when it's been fetched. h9 exits with the status rather than re-raising the signal on itself.
 
-**Signals and TTY**
+### Signals and TTY
 
 - **Ctrl-C:** posts an `interrupt` note to the foreground note group; a program it kills exits 130. A second Ctrl-C within a second tears down the machine, which exits 130 too.
 - **SIGTERM and SIGHUP:** post a `hangup` note to every process, then tear down the machine 2 s later, or sooner if it has exited by then. A program the note kills exits 129; a teardown exits 143 after SIGTERM and 129 after SIGHUP. `src/hostsig.zig` records which host signal started a teardown (the first one wins); on Windows, closing the console counts as SIGHUP, and logoff and shutdown as SIGTERM.
@@ -612,9 +1296,15 @@ How each host delivers these:
 | Raw mode | termios: clear ICANON, ECHO, and ISIG | Console mode: clear `ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT`, and `ENABLE_PROCESSED_INPUT`; set `ENABLE_VIRTUAL_TERMINAL_INPUT` |
 | Line endings | The driver gives `\n` | A console in line mode gives `\r\n`, which the stdin reader turns into `\n` |
 
-The CLI's handlers (`src/hostsig.zig`) only record the event: on POSIX a signal handler writes a byte to a self-pipe that a watcher thread reads, and on Windows the console control handler runs on its own thread already. The watcher calls `Machine.Signals` (`interrupt`, `hangup`, `stop`), which sets a bit and wakes `Machine.run`'s waiting thread, and that thread posts the notes. Posting from a thread that isn't a kernel process is safe because the post (`h9_kern_postmach`) only queues the note and calls drawterm's `procinterrupt`, neither of which uses `up`. Raw mode reaches the CLI through `Machine.Stdio.raw`, a callback the console device calls on `rawon` and `rawoff`; the library itself never touches the host terminal. On Windows the close handler waits out the grace period before returning, since Windows ends the process when it returns.
+The CLI's handlers (`src/hostsig.zig`) only record the event: on POSIX a signal handler writes a byte to a self-pipe that a watcher thread reads, and on Windows the console control handler runs on its own thread already.
 
-**Code structure**
+The watcher calls `Machine.Signals` (`interrupt`, `hangup`, `stop`), which sets a bit and wakes `Machine.run`'s waiting thread, and that thread posts the notes. Posting from a thread that isn't a kernel process is safe because the post (`h9_kern_postmach`) only queues the note and calls drawterm's `procinterrupt`, neither of which uses `up`.
+
+Raw mode reaches the CLI through `Machine.Stdio.raw`, a callback the console device calls on `rawon` and `rawoff`; the library itself never touches the host terminal.
+
+On Windows the close handler waits out the grace period before returning, since Windows ends the process when it returns.
+
+### Code structure
 
 | File | Role |
 | --- | --- |
