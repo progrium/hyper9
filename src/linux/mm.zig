@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const vmm = @import("../vmm.zig");
+const gm = @import("../guestmem.zig");
 
 const page = vmm.page_size;
 pub const chunk_size: u64 = 1 << 20;
@@ -307,6 +308,73 @@ pub const Mm = struct {
         list.deinit(m.gpa);
         for (files.items) |p| p.release.?(p);
         files.deinit(m.gpa);
+    }
+
+    /// A hold on the pages behind a guest buffer, taken by `pin` and
+    /// released by `unpin`. While it's held, a munmap, mremap, or exit on
+    /// another thread sharing the Mm can unmap the range but can't free its
+    /// host memory, so a blocking kernel read or write into the slice can't
+    /// land in freed memory (the cross-thread use-after-free a backing
+    /// syscall buffer would otherwise allow).
+    pub const Pinned = struct {
+        /// The contiguous host slice backing the range, as
+        /// `guestmem.contiguous` returns it.
+        s: []u8,
+        held: std.ArrayList(*Pages) = .empty,
+    };
+
+    /// Resolves guest [va, va+len) to one contiguous host slice and holds a
+    /// reference to the pages of every chunk behind it, so the memory stays
+    /// valid until `unpin` even if the range is unmapped meanwhile. Returns
+    /// null when the range isn't one contiguous mapped run (as
+    /// `guestmem.contiguous` does), so the caller falls back to a bounce
+    /// buffer. The slice and the references are taken under one lock, so a
+    /// concurrent unmap either loses the race (and the pin keeps the pages)
+    /// or wins it (and this returns null), with no window in between.
+    pub fn pin(m: *Mm, va: u64, len: u64) ?Pinned {
+        if (len == 0) return null;
+        m.lockSpin();
+        defer m.lock.unlock();
+        return m.pinLocked(va, len) catch null;
+    }
+
+    fn pinLocked(m: *Mm, va: u64, len: u64) Error!Pinned {
+        const s = gm.contiguous(m.as, va, len) orelse return error.BadAddress;
+        var held: std.ArrayList(*Pages) = .empty;
+        // On failure, give back the references already taken; each page
+        // still has its chunk's reference, so a plain drop can't free it.
+        errdefer {
+            for (held.items) |p| _ = p.refs.fetchSub(1, .acq_rel);
+            held.deinit(m.gpa);
+        }
+        const end = va + len;
+        var ci = va / chunk_size;
+        while (ci * chunk_size < end) : (ci += 1) {
+            const c = m.chunks.get(ci) orelse continue;
+            const cs = ci * chunk_size;
+            const lo = @max(va, cs) - cs;
+            const hi = @min(end, cs + chunk_size) - cs;
+            try held.append(m.gpa, c.pages);
+            _ = c.pages.refs.fetchAdd(1, .acq_rel);
+            for (c.overlays.items) |o| {
+                if (o.hi <= lo or o.lo >= hi) continue;
+                try held.append(m.gpa, o.pages);
+                _ = o.pages.refs.fetchAdd(1, .acq_rel);
+            }
+        }
+        return .{ .s = s, .held = held };
+    }
+
+    /// Releases a pin from `pin`, freeing any pages whose last reference it
+    /// held (the range was unmapped while it was pinned).
+    pub fn unpin(m: *Mm, pn: *Pinned) void {
+        defer pn.held = .empty;
+        if (pn.held.items.len == 0) return;
+        defer m.settle(false);
+        m.lockSpin();
+        defer m.lock.unlock();
+        for (pn.held.items) |p| m.dropRef(p);
+        pn.held.deinit(m.gpa);
     }
 
     /// Adds a chunk over `p` (taking a reference) at index `ci`, mapped.
@@ -1129,4 +1197,125 @@ fn copySparse(dst: []u8, src: []const u8) void {
             }
         }
     }
+}
+
+const testing = std.testing;
+
+/// A translate-only address space over one run of host memory, for the
+/// pin tests; `pin` resolves a buffer through `guestmem.contiguous`, which
+/// only needs `translate`.
+const FakeAs = struct {
+    base: u64,
+    mem: []align(page) u8,
+    fn translate(f: *FakeAs, va: u64, len: u64) ?[]u8 {
+        if (va < f.base) return null;
+        const off = va - f.base;
+        if (off > f.mem.len or len > f.mem.len - off) return null;
+        return f.mem[@intCast(off)..][0..@intCast(len)];
+    }
+};
+
+/// Builds an Mm holding a single chunk that maps `mem` at `va`, with the
+/// one reference a live chunk holds. The backend is never used: these
+/// tests drive `pin`/`unpin`/`dropRef` without allocating or freeing
+/// pages through it.
+fn pinFixture(m: *Mm, fake: *FakeAs, chunk: *Chunk, pages: *Pages, va: u64, mem: []align(page) u8) !void {
+    fake.* = .{ .base = va, .mem = mem };
+    m.* = .{
+        .gpa = testing.allocator,
+        .backend = undefined,
+        .lay = .of(.amd64),
+        .as = vmm.AddressSpace.initFake(fake, FakeAs.translate),
+    };
+    pages.* = .{ .mem = mem };
+    chunk.* = .{ .pages = pages, .mem = mem };
+    try m.chunks.put(testing.allocator, va / chunk_size, chunk);
+}
+
+test "pin holds a guest buffer's pages across a concurrent unmap" {
+    const gpa = testing.allocator;
+    const mem = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
+    defer gpa.free(mem);
+    @memset(mem, 0);
+    const va: u64 = chunk_size; // chunk index 1, chunk-aligned.
+
+    var fake: FakeAs = undefined;
+    var m: Mm = undefined;
+    var chunk: Chunk = undefined;
+    var pages: Pages = undefined;
+    try pinFixture(&m, &fake, &chunk, &pages, va, mem);
+    defer m.chunks.deinit(gpa);
+    defer m.doomed.deinit(gpa);
+
+    // Pin the page, as io() does before a blocking read or write.
+    var pinned = m.pin(va, page) orelse return error.PinFailed;
+    try testing.expectEqual(mem.ptr, pinned.s.ptr);
+    try testing.expectEqual(@as(usize, page), pinned.s.len);
+    try testing.expectEqual(@as(u32, 2), pages.refs.load(.acquire));
+
+    // Another thread unmaps the range, dropping the chunk's reference.
+    // Without the pin this would free `mem`; with it the page survives and
+    // isn't even scheduled to be freed.
+    m.dropRef(&pages);
+    try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), m.doomed.items.len);
+
+    // The host slice is still ours: a kernel read or write into it is safe.
+    @memset(pinned.s, 0xAB);
+
+    // Releasing the pin drops its reference; only now are the pages doomed.
+    // (unpin would free them through the backend; here the last reference
+    // is dropped by hand so the stack-allocated Pages isn't destroyed.)
+    pinned.held.deinit(gpa);
+    m.dropRef(&pages);
+    try testing.expectEqual(@as(u32, 0), pages.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 1), m.doomed.items.len);
+    try testing.expectEqual(&pages, m.doomed.items[0]);
+}
+
+test "unpin releases its reference and frees nothing when the mapping stays" {
+    const gpa = testing.allocator;
+    const mem = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
+    defer gpa.free(mem);
+    @memset(mem, 0);
+    const va: u64 = chunk_size;
+
+    var fake: FakeAs = undefined;
+    var m: Mm = undefined;
+    var chunk: Chunk = undefined;
+    var pages: Pages = undefined;
+    try pinFixture(&m, &fake, &chunk, &pages, va, mem);
+    defer m.chunks.deinit(gpa);
+    defer m.doomed.deinit(gpa);
+
+    var pinned = m.pin(va, page) orelse return error.PinFailed;
+    try testing.expectEqual(@as(u32, 2), pages.refs.load(.acquire));
+
+    // No unmap raced the I/O: unpin drops the pin's reference and the
+    // chunk still maps the page, so nothing is freed.
+    m.unpin(&pinned);
+    try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), m.doomed.items.len);
+    try testing.expectEqual(@as(usize, 0), pinned.held.items.len);
+}
+
+test "pin returns null for a buffer that isn't one contiguous mapped run" {
+    const gpa = testing.allocator;
+    const mem = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
+    defer gpa.free(mem);
+    @memset(mem, 0);
+    const va: u64 = chunk_size;
+
+    var fake: FakeAs = undefined;
+    var m: Mm = undefined;
+    var chunk: Chunk = undefined;
+    var pages: Pages = undefined;
+    try pinFixture(&m, &fake, &chunk, &pages, va, mem);
+    defer m.chunks.deinit(gpa);
+    defer m.doomed.deinit(gpa);
+
+    // Past the one mapped page: not translatable, so no pin and no stray
+    // reference left behind.
+    try testing.expectEqual(@as(?Mm.Pinned, null), m.pin(va, 2 * page));
+    try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
 }
