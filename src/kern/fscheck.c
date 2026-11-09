@@ -261,10 +261,58 @@ h9_fs_resolvein(char *top, char *dir, char *rel, char *buf, int nbuf)
  * however its name resolved. /proc/self/fd on Linux, F_GETPATH on macOS.
  * Returns 0 with the path in buf (at most PATH_MAX), or -1.
  */
+#ifdef __wasi__
+/*
+ * The web host's fd paths, as devfs noted them at the open. Every open that
+ * devfs checks by its fd is noted, so a reused fd number gets its new path
+ * before it's checked again. The web host runs one coroutine at a time and
+ * no host call parks between an open and its check, so the path can't
+ * change under it either.
+ */
+enum { Nwasifd = 4096 };
+static char *wasifds[Nwasifd];
+
+void
+h9_fs_notefd(int fd, char *path)
+{
+	char cwd[PATH_MAX], *p;
+
+	if(fd < 0 || fd >= Nwasifd)
+		return;
+	if(path[0] != '/'){
+		if(getcwd(cwd, sizeof cwd) == nil)
+			return;
+		p = smprint("%s/%s", cwd, path);
+	}else
+		p = strdup(path);
+	free(wasifds[fd]);
+	wasifds[fd] = p;
+}
+
+void
+h9_fs_notefdat(int fd, int dfd, char *name)
+{
+	char *p;
+
+	if(fd < 0 || fd >= Nwasifd || dfd < 0 || dfd >= Nwasifd || wasifds[dfd] == nil)
+		return;
+	p = smprint("%s/%s", wasifds[dfd], name);
+	if(p == nil)
+		return;
+	h9_fs_notefd(fd, p);
+	free(p);
+}
+#endif
+
 static int
 fdpath(int fd, char *buf)
 {
-#ifdef __APPLE__
+#ifdef __wasi__
+	if(fd < 0 || fd >= Nwasifd || wasifds[fd] == nil || strlen(wasifds[fd]) >= PATH_MAX)
+		return -1;
+	strcpy(buf, wasifds[fd]);
+	return 0;
+#elif defined(__APPLE__)
 	return fcntl(fd, F_GETPATH, buf) < 0 ? -1 : 0;
 #else
 	char link[64];
