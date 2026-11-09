@@ -1183,6 +1183,8 @@ comptime {
         @export(&h9_cons_poll, .{ .name = "h9_cons_poll" });
         @export(&h9_policy_active, .{ .name = "h9_policy_active" });
         @export(&h9_policy_check, .{ .name = "h9_policy_check" });
+        @export(&h9_plan_get, .{ .name = "h9_plan_get" });
+        @export(&h9_plan_set, .{ .name = "h9_plan_set" });
         @export(&h9_net_check, .{ .name = "h9_net_check" });
         @export(&h9_net_lookup, .{ .name = "h9_net_lookup" });
         @export(&h9_net_resolved, .{ .name = "h9_net_resolved" });
@@ -1380,6 +1382,16 @@ fn netProto(proto: c_int) ?policy.NetProto {
 
 fn netPort(port: c_int) ?u16 {
     return std.math.cast(u16, port);
+}
+
+/// The calling thread's plan, for a kernel thread that acts for a
+/// process, such as #ℓ's reader when it redials (src/kern/devdotl.c).
+fn h9_plan_get() callconv(.c) ?*const anyopaque {
+    return fs_plan;
+}
+
+fn h9_plan_set(p: ?*const anyopaque) callconv(.c) void {
+    fs_plan = @ptrCast(@alignCast(p));
 }
 
 fn h9_net_check(op: c_int, proto: c_int, addr: [*]const u8, port: c_int) callconv(.c) c_int {

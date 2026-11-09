@@ -7120,3 +7120,94 @@ test "a 9P2000 root goes through the translator unchanged [22]" {
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings("9P2000\n/bin/ls\n", r.out);
 }
+
+test "a 9P2000.L.Z mount resumes a write the server dropped, applied once [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    // The server applies the second write and goes before answering it,
+    // as a crash would. The file was made by create, with OTRUNC.
+    d.lock().drop_after_write = 1;
+    d.unlock();
+    const r = try dotlRun(e, &d,
+        \\{ echo one; echo two; echo three } >/n/l/usr/glenda/log
+        \\cat /n/l/usr/glenda/log
+        \\cat /net/dotl/*/status
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    // Reopened without OTRUNC, and the resent write answered from what
+    // the server remembers rather than applied again.
+    try std.testing.expectEqualStrings("one\ntwo\nthree\n9P2000.L.Z reconnects 1\n", r.out);
+    const s = d.lock();
+    defer d.unlock();
+    try std.testing.expectEqual(1, s.replayed);
+    try std.testing.expectEqual(2, d.connections.load(.acquire));
+}
+
+test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    // The first write to an existing file opened with OTRUNC is dropped.
+    d.lock().drop_after_write = 0;
+    d.unlock();
+    const r = try dotlRun(e, &d,
+        \\{ echo x; echo y } >/n/l/usr/glenda/notes
+        \\cat /n/l/usr/glenda/notes
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("x\ny\n", r.out);
+}
+
+test "a .L.Z root survives the server restarting mid-write [22]" {
+    const e = try env(@src());
+    dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    } };
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlRootTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    d.lock().drop_after_write = 0;
+    d.unlock();
+    const r = try run(e, &.{
+        "--root", d.dial(), "--write=scope", "--builtin=off", "--rc",
+        \\echo new >/usr/glenda/made && cat /usr/glenda/made
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n9P2000.L.Z reconnects 1\n", r.out);
+}
+
+test "a 9P2000.L.Z mount moves to the next address when the server isn't the leader [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    d.lock().not_leader = 1;
+    d.unlock();
+    // The first address refuses, so both dials and the redial go round
+    // the list to the second.
+    var allow_buf: [64]u8 = undefined;
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf,
+        \\mkdir -p /n/l; dotlfs tcp!127.0.0.1!1,{s} /n/l || exit mount
+        \\echo led >/n/l/usr/glenda/log && cat /n/l/usr/glenda/log
+        \\cat /net/dotl/*/status
+    , .{d.dial()});
+    const r = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!1", "--net-allow", try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()}), "--rc", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("led\n9P2000.L.Z reconnects 1\n", r.out);
+    try std.testing.expectEqual(2, d.connections.load(.acquire));
+}

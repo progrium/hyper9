@@ -22,11 +22,39 @@ pub const DotlServer = struct {
     n_uname: u32 = 0,
     attached: std.atomic.Value(bool) = .init(false),
     dial_buf: [64]u8 = undefined,
+    /// One tree for every connection, made by `startShared`: a new
+    /// connection is the server restarting with its files kept, as for
+    /// the 9P2000.L.Z cases. Used under `mu`.
+    shared: ?*Server = null,
+    mu: std.atomic.Mutex = .unlocked,
+    connections: std.atomic.Value(u32) = .init(0),
 
     pub fn start(d: *DotlServer, io: std.Io, fill: Fill) !void {
         const ip = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
         d.* = .{ .srv = try ip.listen(io, .{ .reuse_address = true }), .fill = fill };
         d.thread = try std.Thread.spawn(.{}, serve, .{ d, io });
+    }
+
+    /// Like `start`, with one tree made by `fill` for every connection,
+    /// speaking `version`.
+    pub fn startShared(d: *DotlServer, io: std.Io, fill: Fill, version: []const u8) !void {
+        const ip = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        d.* = .{ .srv = try ip.listen(io, .{ .reuse_address = true }), .fill = fill };
+        const s = try Server.init(std.heap.smp_allocator);
+        s.version = version;
+        try fill(s);
+        d.shared = s;
+        d.thread = try std.Thread.spawn(.{}, serve, .{ d, io });
+    }
+
+    /// The shared tree, locked until `unlock`.
+    pub fn lock(d: *DotlServer) *Server {
+        while (!d.mu.tryLock()) std.atomic.spinLoopHint();
+        return d.shared.?;
+    }
+
+    pub fn unlock(d: *DotlServer) void {
+        d.mu.unlock();
     }
 
     pub fn port(d: *const DotlServer) u16 {
@@ -45,6 +73,12 @@ pub const DotlServer = struct {
         } else |_| {}
         d.thread.join();
         d.srv.deinit(io);
+        if (d.shared) |s| {
+            _ = d.lock();
+            s.deinit();
+            d.shared = null;
+            d.unlock();
+        }
     }
 
     pub fn unameSeen(d: *const DotlServer) []const u8 {
@@ -73,6 +107,8 @@ pub const DotlServer = struct {
     }
 
     fn one(d: *DotlServer, io: std.Io, conn: std.Io.net.Stream) !void {
+        _ = d.connections.fetchAdd(1, .acq_rel);
+        if (d.shared != null) return d.oneShared(io, conn);
         const gpa = std.heap.smp_allocator;
         const s = try Server.init(gpa);
         defer s.deinit();
@@ -97,6 +133,32 @@ pub const DotlServer = struct {
                 try w.interface.flush();
                 s.out.items.len = 0;
             }
+        }
+    }
+
+    fn oneShared(d: *DotlServer, io: std.Io, conn: std.Io.net.Stream) !void {
+        {
+            const s = d.lock();
+            defer d.unlock();
+            s.reset();
+        }
+        var rbuf: [1 << 16]u8 = undefined;
+        var wbuf: [1 << 16]u8 = undefined;
+        var w = conn.writer(io, &wbuf);
+        while (true) {
+            deadline.waitReadable(conn.socket.handle, deadline.limit_ms) catch return;
+            const n = std.posix.read(conn.socket.handle, &rbuf) catch return;
+            if (n == 0) return;
+            const s = d.lock();
+            defer d.unlock();
+            try s.feed(rbuf[0..n]);
+            if (s.out.items.len != 0) {
+                try w.interface.writeAll(s.out.items);
+                try w.interface.flush();
+                s.out.items.len = 0;
+            }
+            // A crash: the connection goes without the last answer.
+            if (s.dropped) return;
         }
     }
 };
