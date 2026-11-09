@@ -675,6 +675,11 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             };
         }
         try binds.append(arena, .{ .from = "#d", .to = lv ++ "/dev/fd", .optional = true });
+        // The 9front /dev (design/wine-draw.md), so a Linux program can
+        // open the window's draw files, which exist only with --gfx. It's
+        // a copy of /dev's union as the machine starts: binds made on
+        // /dev later, such as rio's for a window, show under /9/dev.
+        try binds.append(arena, .{ .from = "/dev", .to = lv ++ "/dev/9", .optional = true });
         // /dev/shm is a tmpfs on Linux: an empty writable tree of its
         // own, kept in memory, for shm_open and for scripts that keep
         // secrets off the disk (passage, pass).

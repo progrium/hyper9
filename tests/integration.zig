@@ -5400,6 +5400,28 @@ test "a process that exits with a file mapped shared writes it back on the way o
     try netCase(&le, &.{ "/mnt/term/cwd/files", "map_exit" }, "ok map_exit\n");
 }
 
+test "/dev/9 in the Linux view is the machine's 9front /dev, with no draw files without --gfx [wine-draw]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "dev9" }, "ok dev9\n");
+}
+
+/// Whether h9 was built with the headless window (-Dgfx=headless), whose
+/// screen the wine-draw cases can open without a display.
+fn headlessGfx(h9: []const u8) !bool {
+    const v = try runProcess(&.{ h9, "--version" }, null);
+    defer gpa.free(v.stdout);
+    defer gpa.free(v.stderr);
+    return std.mem.indexOf(u8, v.stdout, "gfx: headless\n") != null;
+}
+
+test "with --gfx, a Linux program opens the window's draw files through /dev/9 [wine-draw]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (!try headlessGfx(le.h9)) return error.SkipZigTest;
+    try netCase(&le, &.{ "--gfx", "/mnt/term/cwd/files", "dev9" }, "ok dev9 gfx\n");
+}
+
 test "a fixed MAP_SHARED file mapping can sit at any page beside private ones, even across a MiB, and fork, munmap, and remap keep it right [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
