@@ -105,8 +105,12 @@ wfdtodmode(WIN32_FIND_DATA *wfd)
 		m |= DMDIR;
 	if(wfd->dwFileAttributes & FILE_ATTRIBUTE_READONLY)
 		m &= ~DMWRITE;
-	m |= (m & 07)<<3;
-	m |= (m & 07)<<6;
+	/*
+	 * h9: owner bits only (0700, 0600, 0500). Windows has no group or
+	 * other bits, and Postgres refuses a data directory that reads as
+	 * group- or world-writable.
+	 */
+	m = (m & 07)<<6 | (m & ~0777);
 	return m;
 }
 
@@ -161,9 +165,23 @@ wfdtodir(wchar_t *path, Dir *d, WIN32_FIND_DATA *wfd)
 	case TPATH_FILE:
 		if(wfd == nil){
 			HANDLE h;
+			WIN32_FILE_ATTRIBUTE_DATA fa;
 			if((h = FindFirstFile(path, &f))==INVALID_HANDLE_VALUE)
 				oserror();
 			FindClose(h);
+			/*
+			 * h9: FindFirstFile reads the directory entry, whose size and
+			 * times NTFS updates lazily while another handle writes, so a
+			 * stat right after a write could see the old size.
+			 * GetFileAttributesEx reads the file's own record.
+			 */
+			if(GetFileAttributesExW(path, GetFileExInfoStandard, &fa)){
+				f.dwFileAttributes = fa.dwFileAttributes;
+				f.ftLastAccessTime = fa.ftLastAccessTime;
+				f.ftLastWriteTime = fa.ftLastWriteTime;
+				f.nFileSizeHigh = fa.nFileSizeHigh;
+				f.nFileSizeLow = fa.nFileSizeLow;
+			}
 			wfd = &f;
 		}
 		d->mode		= wfdtodmode(wfd);
@@ -485,7 +503,7 @@ fsopen(Chan *c, int mode)
 		if((uif->fh = CreateFile(
 			uif->path,
 			access,
-			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,	/* h9: as POSIX, a file can be removed while open */
 			NULL,
 			OPEN_EXISTING,
 			FILE_ATTRIBUTE_NORMAL,
@@ -561,7 +579,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 		if((h = CreateFile(
 			newpath,
 			fsaccess(omode & 3),
-			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,	/* h9: as in fsopen */
 			NULL,
 			(mode & OEXCL) ? CREATE_NEW : CREATE_ALWAYS,
 			FILE_ATTRIBUTE_NORMAL,
@@ -688,6 +706,31 @@ fswrite(Chan *c, void *va, long n, vlong offset)
 	return n;
 }
 
+/*
+ * h9: delete with POSIX semantics, as unlink(2) does: the name goes at
+ * once, even while the file is open, rather than when the last handle
+ * closes, so a new file can take the name right away. Falls back to
+ * DeleteFile where the file system doesn't support it.
+ */
+static int
+posixdelete(wchar_t *path)
+{
+	/* FILE_DISPOSITION_INFO_EX: DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE */
+	struct { DWORD Flags; } fd = { 0x1 | 0x2 | 0x10 };
+	HANDLE h;
+	BOOL ok;
+
+	h = CreateFileW(path, DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, 0);
+	if(h == INVALID_HANDLE_VALUE)
+		return DeleteFile(path);
+	ok = SetFileInformationByHandle(h, 21 /* FileDispositionInfoEx */, &fd, sizeof fd);
+	CloseHandle(h);
+	if(ok)
+		return 1;
+	return DeleteFile(path);
+}
+
 static void
 fsremove(Chan *c)
 {
@@ -709,13 +752,13 @@ fsremove(Chan *c)
 		if(attr & FILE_ATTRIBUTE_DIRECTORY){
 			if(!RemoveDirectory(uif->lpath))
 				oserror();
-		}else if(!DeleteFile(uif->lpath))
+		}else if(!posixdelete(uif->lpath))
 			oserror();
 	} else if(c->qid.type & QTDIR){
 		if(!RemoveDirectory(uif->path))
 			oserror();
 	} else {
-		if(!DeleteFile(uif->path))
+		if(!posixdelete(uif->path))
 			oserror();
 	}
 	poperror();
@@ -746,6 +789,32 @@ fswstat(Chan *c, uchar *buf, int n)
 	if(pathtype(uif->path) != TPATH_FILE)
 		error(Ebadstat);
 	h9_fs_allow(uif->path, H9_FSWRITE);
+	/*
+	 * h9: change the length: truncate, ftruncate, and fallocate, which
+	 * grows a file this way. Upstream ignored it, so the call succeeded
+	 * with the file unchanged.
+	 */
+	if((uvlong)d.length != (uvlong)~0){
+		HANDLE h;
+		LARGE_INTEGER len;
+		int ok;
+
+		if((h = CreateFile(uif->path, GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)) == INVALID_HANDLE_VALUE)
+			oserror();
+		if(waserror()){
+			CloseHandle(h);
+			nexterror();
+		}
+		h9_fs_allowhandlew(h, H9_FSWRITE);
+		len.QuadPart = d.length;
+		ok = SetFilePointerEx(h, len, NULL, FILE_BEGIN) && SetEndOfFile(h);
+		if(!ok)
+			oserror();
+		poperror();
+		CloseHandle(h);
+	}
 	if(~d.atime != 0 || ~d.mtime != 0){
 		FILETIME ta, *pta = NULL;
 		FILETIME tm, *ptm = NULL;
