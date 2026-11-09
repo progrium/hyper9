@@ -57,6 +57,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [mount-index](mount-index.md) | draft |  | Metadata indexes for 9P roots and mounts |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
+| [wine-draw](wine-draw.md) | draft |  | Wine windows through draw |
 
 ```mermaid
 flowchart LR
@@ -115,6 +116,7 @@ flowchart LR
   p_mount_index["mount-index<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
+  p_wine_draw["wine-draw<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
@@ -172,4 +174,6 @@ flowchart LR
   p_guest_tools --> p_mount_index
   p_ephemeral_writes --> p_overlay_export
   p_9p_roots --> p_root_auth
+  p_gfx --> p_wine_draw
+  p_linux_personality --> p_wine_draw
 ```
