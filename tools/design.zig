@@ -131,6 +131,7 @@ fn check(r: Repo, diags: *Diags) !void {
         if (p.status != .draft and p.id == null) diags.err("design/{s}: status `{t}` needs an id; file it first (zig build design -- file {s})", .{ p.file, p.status, p.slug });
         if (p.status == .superseded and p.superseded_by == null) diags.err("design/{s}: superseded, but `superseded-by` isn't set", .{p.file});
         if (p.status != .superseded and p.superseded_by != null) diags.err("design/{s}:{d}: `superseded-by` is set, but the status is `{t}`", .{ p.file, p.superseded_line, p.status });
+        if (p.status == .declined and !hasSection(p.body, "Declined")) diags.err("design/{s}: declined, but it has no `## Declined` section giving the reason", .{p.file});
         if (p.status.inFcp()) try fcp.append(r.arena, p.file);
 
         for (p.depends) |ref| {
@@ -532,6 +533,16 @@ fn titleFromSlug(arena: std.mem.Allocator, slug: []const u8) ![]const u8 {
 
 // ---- file ----
 
+/// Whether the body has a `## <name>` heading.
+fn hasSection(body: []const u8, name: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| {
+        const l = std.mem.trimEnd(u8, line, " \r");
+        if (std.mem.startsWith(u8, l, "## ") and std.mem.eql(u8, l[3..], name)) return true;
+    }
+    return false;
+}
+
 /// The text of the Abstract section, for the issue body.
 fn abstract(body: []const u8) []const u8 {
     const h = std.mem.indexOf(u8, body, "\n## Abstract\n") orelse return "";
@@ -904,6 +915,8 @@ test "new fills the template" {
 test "file helpers" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
+    try std.testing.expect(hasSection("\n# P\n\n## Declined\n\nNo.\n", "Declined"));
+    try std.testing.expect(!hasSection("\n# P\n\n### Declined\n\n## Declined later\n", "Declined"));
     try std.testing.expectEqualStrings("Short.", abstract("\n# P\n\n## Abstract\n\nShort.\n\n## Background\n\nLong.\n"));
     try std.testing.expectEqualStrings("---\nid: 9\nslug: a\n---\n", try withId(arena_state.allocator(), "---\nslug: a\n---\n", 9));
 }
