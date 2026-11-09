@@ -1607,18 +1607,19 @@ devices in Plan 9.
   connection dropping: h9 dials again for up to 120 seconds, a second apart,
   reopens every open file without truncating it, and resends each request
   that wasn't answered, which the server applies once. Meanwhile the guest
-  sees slow replies, not errors. `dotlfs host1,host2 mountpoint` gives
+  sees slow replies, not errors. .L.Z's compound requests also save round
+  trips: a walk brings the file's attributes, so a stat after it is free,
+  opening a file to read brings up to its first megabyte, and a directory listing
+  comes with every entry's attributes. `dotlfs host1,host2 mountpoint` gives
   addresses to try in turn, as for an HA server, and a server that answers
   that it's no longer the leader is dialed again the same way. `dotlfs -L`
   asks for plain .L. `/net/dotl/N/status` shows `9P2000.L.Z reconnects N`
-  once a reconnect has happened. Unix socket and WebSocket roots don't
-  reconnect yet.
+  once a reconnect has happened. A unix socket root reconnects too, but a
+  WebSocket root doesn't yet.
 - Not yet available: roots that need authentication
   ([root-auth](design/root-auth.md)); serving a machine's namespace to the
   host or the network as a 9P server from h9 itself, rather than with
-  `exportfs` inside the guest as below ([serve](design/0035-serve.md)); and
-  9P2000.L.Z's compound requests, which save round trips
-  ([dotl](design/0022-dotl.md)).
+  `exportfs` inside the guest as below ([serve](design/0035-serve.md)).
 - 9front disk images as roots were proposed and declined
   ([image-roots](design/0014-image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an

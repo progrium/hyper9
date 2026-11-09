@@ -3088,10 +3088,14 @@ pub const Machine = struct {
                 .ca_file = m.opts.root_ca,
                 .proxy = m.opts.proxy orelse .{},
             }, "root")),
-            // `#ℓ` dials a TCP root itself, so it can dial again if the
-            // server goes (9P2000.L.Z).
+            // `#ℓ` dials a TCP or unix socket root itself, so it can
+            // dial again if the server goes (9P2000.L.Z). A comma would
+            // split the dial's list.
             .tcp => |a| return m.postDotl(dotlConv("dial {s}", a)),
-            .unix => |path| kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("root {s}: name too long", .{addr})),
+            .unix => |path| if (std.mem.indexOfScalar(u8, path, ',') == null)
+                return m.postDotl(dotlConv("dial unix!{s}", path))
+            else
+                kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("root {s}: name too long", .{addr})),
         } catch return m.fail("root {s}: {s}", .{ addr, kern.errstr() });
         return m.postRoot(fd);
     }
@@ -3125,7 +3129,7 @@ pub const Machine = struct {
         defer kern.close(clone) catch {};
         var nbuf: [16]u8 = undefined;
         const n = std.mem.trim(u8, nbuf[0..try kern.pread(clone, &nbuf, 0)], " \n");
-        var cmd: [600]u8 = undefined;
+        var cmd: [std.fs.max_path_bytes + 16]u8 = undefined;
         _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, fmt, .{arg}) catch return error.Kern, 0);
         var path: [64]u8 = undefined;
         return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
