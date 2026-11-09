@@ -121,7 +121,7 @@ Tilde expansion is done by the shell, before h9 starts: for an unquoted `~/roots
 
 **Literal concatenation.** h9 doesn't add a `/` between prefix and rest, so a prefix can be the start of a name (`wss://host/root-`). Adding one would be friendlier for a prefix that leaves it off, but would make `wss://host/r` and `wss://host/r/` the same, and couldn't express the name-prefix case at all.
 
-**No query strings in prefixes.** A prefix with `?token=…` would put the rest after the query, which isn't what's meant. Tokens go in `--root-header` or, once it lands, a [credential helper](credential-helpers.md), not in `$H9ROOTPATH`.
+**No query strings in prefixes.** A prefix with `?token=…` would put the rest after the query, which isn't what's meant. Tokens go in `--root-header` or, once it lands, a [credential helper](0119-credential-helpers.md), not in `$H9ROOTPATH`.
 
 ## Compatibility
 

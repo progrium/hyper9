@@ -1,4 +1,5 @@
 ---
+id: 119
 slug: credential-helpers
 title: Credential helpers for WebSocket 9P
 status: draft
