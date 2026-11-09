@@ -43,11 +43,11 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [linux-i386](0105-linux-i386.md) | implemented |  | 32-bit x86 Linux programs |
 | [tilde-roots](0107-tilde-roots.md) | draft |  | Tilde roots from $H9ROOTPATH |
 | [child-machines](0109-child-machines.md) | draft |  | Child machines |
+| [credential-helpers](0119-credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
+| [browser-gfx](0120-browser-gfx.md) | accepted | ready | Graphics on the browser host |
+| [cow-fork](0121-cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [audio](audio.md) | draft |  | Audio (--audio) |
-| [browser-gfx](browser-gfx.md) | draft |  | Graphics on the browser host |
 | [ci](ci.md) | draft |  | Continuous integration |
-| [cow-fork](cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
-| [credential-helpers](credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-cmd](host-cmd.md) | draft |  | Rethinking host commands |
@@ -101,11 +101,11 @@ flowchart LR
   p_linux_i386["#35;105 linux-i386<br/>implemented"]:::implemented
   p_tilde_roots["#35;107 tilde-roots<br/>draft"]:::draft
   p_child_machines["#35;109 child-machines<br/>draft"]:::draft
+  p_credential_helpers["#35;119 credential-helpers<br/>draft"]:::draft
+  p_browser_gfx["#35;120 browser-gfx<br/>accepted"]:::accepted
+  p_cow_fork["#35;121 cow-fork<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
-  p_browser_gfx["browser-gfx<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
-  p_cow_fork["cow-fork<br/>draft"]:::draft
-  p_credential_helpers["credential-helpers<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
@@ -156,13 +156,13 @@ flowchart LR
   p_9p_roots --> p_tilde_roots
   p_websocket_9p --> p_tilde_roots
   p_schemeless_roots --> p_tilde_roots
-  p_browser_host --> p_audio
+  p_websocket_9p --> p_credential_helpers
+  p_dotl --> p_credential_helpers
   p_browser_host --> p_browser_gfx
   p_gfx --> p_browser_gfx
   p_linux_personality --> p_cow_fork
   p_linux_threads --> p_cow_fork
-  p_websocket_9p --> p_credential_helpers
-  p_dotl --> p_credential_helpers
+  p_browser_host --> p_audio
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
