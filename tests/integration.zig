@@ -7275,3 +7275,39 @@ test "the guest can't dial a host unix socket through #ℓ [22]" {
     try std.testing.expect(r.code != 0);
     try expectIn(r.err, "unix sockets are for roots");
 }
+
+test "an h9 root over --serve speaks 9P2000.L through both translators [22]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    // The client offers 9P2000.L.Z and the server answers 9P2000.L.
+    const r = try runServed(e, addr,
+        \\cat /net/dotl/*/status
+        \\cd /mnt/temp/tmp && echo hi >f && cat f && mkdir d && mv f g && ls -F && rm g && rm d && ls
+        \\cat /mnt/temp/mnt/term/cwd/marker
+    );
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("9P2000.L\nhi\nd/\ng\nserved\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a .L client of --serve under --write=none gets EROFS [22]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--write=none", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "cat /net/dotl/*/status; touch /mnt/temp/tmp/f");
+    defer r.deinit();
+    errdefer std.debug.print("client stdout: {s}\nclient stderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("9P2000.L\n", r.out);
+    try expectIn(r.err, "read-only file system");
+}

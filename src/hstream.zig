@@ -317,8 +317,9 @@ pub const Served = struct {
 
 /// The dialect slot (design/0035-serve.md, "Each connection"): what
 /// serves a connection whose first message has type `typ`. Every
-/// dialect is exportfs's for now, which answers a version it doesn't
-/// know with `unknown`; dotl's translator is the slot's second entry.
+/// connection goes to an exportfs through a `#ℓ` conversation's server
+/// side (design/0022-dotl.md), which translates a 9P2000.L client and
+/// passes any other version to exportfs to answer.
 pub const Dialect = enum { exportfs };
 
 pub fn dialect(typ: u8) ?Dialect {

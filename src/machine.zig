@@ -1448,7 +1448,15 @@ pub const Machine = struct {
             return;
         };
         hstream.release(id);
-        defer kern.close(fd) catch {};
+        // Through a `#ℓ` conversation's server side (design/0022-dotl.md),
+        // so a 9P2000.L client is translated and a 9P2000 one passes.
+        const data = dotlConv("serve {d}", fd);
+        kern.close(fd) catch {};
+        const sfd = data catch {
+            srv.connEnded();
+            return;
+        };
+        defer kern.close(sfd) catch {};
         const conn = m.gpa.create(Conn) catch {
             srv.connEnded();
             return;
@@ -1459,7 +1467,7 @@ pub const Machine = struct {
             srv.connEnded();
             return;
         };
-        c.serve_fd = fd;
+        c.serve_fd = sfd;
         const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.NOWAIT;
         // On failure dropProc ends the connection, as its last process.
         kern.fork(flags, c.pid, Proc, exportfsMain, c) catch j.dropProc(c);
