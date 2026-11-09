@@ -330,8 +330,8 @@ pub fn whyUnavailable(want: BackendKind) ?[]const u8 {
 }
 
 /// Creates a backend. `.auto` uses the host hypervisor when it can run
-/// `opts.arch` binaries, then the native backend, and otherwise the
-/// emulator; check `kind()` to see which one was picked.
+/// `opts.arch` binaries, and otherwise the emulator (never the native
+/// backend; see below); check `kind()` to see which one was picked.
 pub fn create(gpa: std.mem.Allocator, io: std.Io, want: BackendKind, opts: Options) CreateError!Backend {
     return switch (want) {
         .hvf => createKind(gpa, io, .hvf, opts),
