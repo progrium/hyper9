@@ -503,10 +503,14 @@ fn addArch(c: Ctx, dest: []const u8, arch: []const u8, keep_src: bool, tmp_paren
     {
         var ad = Dir.cwd().openDir(io, arm, .{ .iterate = true }) catch |e| die("opening {s}: {t}", .{ arm, e });
         defer ad.close(io);
+        // Relative to bin's handle: Windows takes a whole path's aux as
+        // the device, but not a name below an open directory.
+        var bd = Dir.cwd().openDir(io, bin, .{}) catch |e| die("opening {s}: {t}", .{ bin, e });
+        defer bd.close(io);
         var w = ad.walk(c.gpa) catch oom();
         defer w.deinit();
         while (w.next(io) catch |e| die("reading {s}: {t}", .{ arm, e })) |e| {
-            if (e.kind == .directory) c.makePath(c.join(&.{ bin, e.path }));
+            if (e.kind == .directory) bd.createDirPath(io, e.path) catch |err| die("creating {s}: {t}", .{ c.join(&.{ bin, e.path }), err });
         }
     }
     c.makePath(c.join(&.{ dest, arch, "lib" }));
@@ -768,18 +772,24 @@ pub fn main(init: std.process.Init) !u8 {
         error.IsDir => Dir.cwd().deleteDir(io, link) catch |e2| die("removing {s}: {t}", .{ c.rel(link), e2 }),
         else => die("removing {s}: {t}", .{ c.rel(link), e }),
     };
+    // Windows lets only an administrator, or Developer Mode, make a link.
+    // Without one the tree is still built, and -Droot names it.
+    var linked = true;
     Dir.cwd().symLink(io, std.fs.path.basename(dest), link, .{ .is_directory = true }) catch |e| switch (e) {
-        error.AccessDenied, error.PermissionDenied => if (builtin.os.tag == .windows)
-            die("can't link {s} to {s}: {t} (turn on Developer Mode, or pass -Droot={s})", .{ c.rel(link), std.fs.path.basename(dest), e, c.rel(dest) })
-        else
-            die("linking {s}: {t}", .{ c.rel(link), e }),
+        error.AccessDenied, error.PermissionDenied => if (builtin.os.tag == .windows) {
+            log("can't link {s} to {s}: {t} (turn on Developer Mode, or pass -Droot={s})", .{ c.rel(link), std.fs.path.basename(dest), e, c.rel(dest) });
+            linked = false;
+        } else die("linking {s}: {t}", .{ c.rel(link), e }),
         else => die("linking {s}: {t}", .{ c.rel(link), e }),
     };
     for ([_][]const u8{ "lib/namespace", "arm64/bin/cat", "arm64/bin/rc" }) |f| {
         if (!c.isFile(c.join(&.{ dest, f }))) die("tree is missing {s}", .{f});
     }
     addArches(c, o, dest, build);
-    log("done: .local/9front/root -> {s}", .{std.fs.path.basename(dest)});
+    if (linked)
+        log("done: .local/9front/root -> {s}", .{std.fs.path.basename(dest)})
+    else
+        log("done: {s} (pass it as -Droot)", .{c.rel(dest)});
     return 0;
 }
 
