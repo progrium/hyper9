@@ -1,10 +1,13 @@
-//! Plan 9 errors and Dirs in Linux's terms: errno numbers from error
-//! strings, and `stat`, `statx` and `d_type` from a `Dir`. Shared by the
-//! Linux personality (design/0018-linux-personality.md, "Users and stat")
-//! and, once it's built, 9P2000.L (design/0022-dotl.md), which names this
-//! file.
+//! Plan 9 errors and Dirs in Linux's terms, both ways: errno numbers from
+//! error strings and back, `stat`, `statx` and `d_type` from a `Dir`, a
+//! `Dir` from .L's `stat`, open modes, and users by name and number.
+//! Shared by the Linux personality (design/0018-linux-personality.md,
+//! "Users and stat") and 9P2000.L (design/0022-dotl.md), which names this
+//! file. The two share the mappings and `/etc/passwd` parsing here, not
+//! the policy: each decides which user is which number.
 
 const std = @import("std");
+const wire = @import("wire.zig");
 
 pub const E = struct {
     pub const PERM = 1;
@@ -70,7 +73,57 @@ pub const E = struct {
     pub const ISCONN = 106;
     pub const ALREADY = 114;
     pub const INPROGRESS = 115;
+    pub const STALE = 116;
+    pub const DQUOT = 122;
 };
+
+/// The Plan 9 error string for an errno, what a .L server's Rlerror becomes
+/// (design/0022-dotl.md, "Errors"). `errno` maps each back to the same
+/// number; one with no string here is "errno N", which `errno` reads too.
+pub fn errstr(e: u32, buf: *[16]u8) []const u8 {
+    const table = [_]struct { u16, []const u8 }{
+        .{ E.PERM, "operation not permitted" },
+        .{ E.NOENT, "file does not exist" },
+        .{ E.SRCH, "no such process" },
+        .{ E.INTR, "interrupted" },
+        .{ E.IO, "i/o error" },
+        .{ E.NOEXEC, "exec format error" },
+        .{ E.BADF, "bad file descriptor" },
+        .{ E.CHILD, "no living children" },
+        .{ E.AGAIN, "resource temporarily unavailable" },
+        .{ E.NOMEM, "out of memory" },
+        .{ E.ACCES, "permission denied" },
+        .{ E.BUSY, "device or object already in use" },
+        .{ E.EXIST, "file already exists" },
+        .{ E.XDEV, "cross-device link" },
+        .{ E.NODEV, "no such device" },
+        .{ E.NOTDIR, "not a directory" },
+        .{ E.ISDIR, "file is a directory" },
+        .{ E.INVAL, "invalid argument" },
+        .{ E.MFILE, "too many open files" },
+        .{ E.TXTBSY, "text file busy" },
+        .{ E.FBIG, "file too large" },
+        .{ E.NOSPC, "file system full" },
+        .{ E.SPIPE, "illegal seek" },
+        .{ E.ROFS, "read-only file system" },
+        .{ E.MLINK, "too many links" },
+        .{ E.PIPE, "broken pipe" },
+        .{ E.NAMETOOLONG, "name too long" },
+        .{ E.NOSYS, "function not implemented" },
+        .{ E.NOTEMPTY, "directory not empty" },
+        .{ E.LOOP, "too many symbolic links" },
+        .{ E.OVERFLOW, "value too large" },
+        .{ E.OPNOTSUPP, "operation not supported" },
+        .{ E.CONNRESET, "connection reset" },
+        .{ E.NOTCONN, "not connected" },
+        .{ E.TIMEDOUT, "connection timed out" },
+        .{ E.CONNREFUSED, "connection refused" },
+        .{ E.STALE, "stale file handle" },
+        .{ E.DQUOT, "disk quota exceeded" },
+    };
+    for (table) |t| if (t[0] == e) return t[1];
+    return std.fmt.bufPrint(buf, "errno {d}", .{e}) catch unreachable;
+}
 
 /// The errno for a Plan 9 error string (drawterm's error.h, h9's own
 /// devices and the host's strerror through devfs). Unknown strings are EIO.
@@ -142,7 +195,19 @@ pub fn errno(msg: []const u8) u16 {
         .{ "no such process", E.SRCH },
         .{ "would block", E.AGAIN },
         .{ "resource temporarily unavailable", E.AGAIN },
+        .{ "operation not supported", E.OPNOTSUPP },
+        .{ "function not implemented", E.NOSYS },
+        .{ "file too large", E.FBIG },
+        .{ "no such device", E.NODEV },
+        .{ "too many links", E.MLINK },
+        .{ "value too large", E.OVERFLOW },
+        .{ "stale file handle", E.STALE },
+        .{ "disk quota exceeded", E.DQUOT },
     };
+    // What errstr makes of an errno it has no string for.
+    if (std.mem.startsWith(u8, msg, "errno ")) {
+        if (std.fmt.parseInt(u16, msg["errno ".len..], 10)) |e| return e else |_| {}
+    }
     var lower: [128]u8 = undefined;
     const n = @min(msg.len, lower.len);
     const l = std.ascii.lowerString(lower[0..n], msg[0..n]);
@@ -184,6 +249,7 @@ pub const Dir = struct {
     name: []const u8,
     uid: []const u8,
     gid: []const u8,
+    muid: []const u8 = "",
 
     /// Parses one Dir from the start of `b`; returns it and its size.
     pub fn parse(b: []const u8) ?struct { Dir, usize } {
@@ -210,7 +276,283 @@ pub const Dir = struct {
             s.* = b[at..][0..l];
             at += l;
         }
+        d.muid = "";
+        if (at + 2 <= size) {
+            const l = std.mem.readInt(u16, b[at..][0..2], .little);
+            if (at + 2 + l <= size) d.muid = b[at + 2 ..][0..l];
+        }
         return .{ d, size };
+    }
+
+    /// Packs the Dir as stat(5) lays it out, with its size prefix, at the
+    /// start of `out`, returning the bytes.
+    pub fn pack(d: *const Dir, out: []u8) wire.Error![]u8 {
+        var w: wire.Writer = .{ .b = out, .at = 2 };
+        if (out.len < 2) return error.NoSpace;
+        try w.int(u16, d.type);
+        try w.int(u32, d.dev);
+        try w.qid(.{ .type = d.qid_type, .vers = d.qid_vers, .path = d.qid_path });
+        try w.int(u32, d.mode);
+        try w.int(u32, d.atime);
+        try w.int(u32, d.mtime);
+        try w.int(u64, d.length);
+        for ([_][]const u8{ d.name, d.uid, d.gid, d.muid }) |str| try w.str(str);
+        if (w.at - 2 > std.math.maxInt(u16)) return error.NoSpace;
+        std.mem.writeInt(u16, out[0..2], @intCast(w.at - 2), .little);
+        return out[0..w.at];
+    }
+
+    /// A Dir whose every field is wstat(5)'s "don't touch".
+    pub const keep: Dir = .{
+        .type = 0xffff,
+        .dev = 0xffffffff,
+        .qid_type = 0xff,
+        .qid_vers = 0xffffffff,
+        .qid_path = 0xffffffffffffffff,
+        .mode = 0xffffffff,
+        .atime = 0xffffffff,
+        .mtime = 0xffffffff,
+        .length = 0xffffffffffffffff,
+        .name = "",
+        .uid = "",
+        .gid = "",
+        .muid = "",
+    };
+
+    /// Whether a wstat of this Dir changes nothing, which stat(5) makes a
+    /// request to commit the file to stable storage.
+    pub fn isNull(d: *const Dir) bool {
+        return d.mode == keep.mode and d.atime == keep.atime and d.mtime == keep.mtime and
+            d.length == keep.length and d.name.len == 0 and d.uid.len == 0 and d.gid.len == 0;
+    }
+};
+
+/// Whether a .L file of this mode can be opened through 9P2000: a regular
+/// file or a directory. Device nodes, FIFOs, and sockets show as empty
+/// files that fail to open with "not a regular file".
+pub fn openable(mode: u32) bool {
+    return mode & S_IFMT == S_IFREG or mode & S_IFMT == S_IFDIR;
+}
+
+fn sec32(s: u64) u32 {
+    return @intCast(@min(s, std.math.maxInt(u32)));
+}
+
+/// The Dir 9P2000 shows for a .L file (design/0022-dotl.md, "`Dir` from a
+/// Linux `stat`"): its permission bits with DMDIR for a directory, its
+/// size, and its times in seconds. `uid` and `gid` are the names the user
+/// map gives its numbers; `muid` is the uid. The qid's type is derived
+/// from the mode, since a Plan 9 client reads QTDIR to mean DMDIR and has
+/// no use for .L's QTSYMLINK.
+pub fn dirFromStat(st: *const wire.Stat, name: []const u8, uid: []const u8, gid: []const u8) Dir {
+    const dir = st.mode & S_IFMT == S_IFDIR;
+    return .{
+        .type = 0,
+        .dev = 0,
+        .qid_type = if (dir) wire.QTDIR else wire.QTFILE,
+        .qid_vers = st.qid.vers,
+        .qid_path = st.qid.path,
+        .mode = (st.mode & 0o777) | if (dir) DMDIR else 0,
+        .atime = sec32(st.atime_sec),
+        .mtime = sec32(st.mtime_sec),
+        .length = if (st.mode & S_IFMT == S_IFREG) st.size else 0,
+        .name = name,
+        .uid = uid,
+        .gid = gid,
+        .muid = uid,
+    };
+}
+
+/// The .L `stat` a Linux client sees for a Dir from exportfs, the server
+/// side's Rgetattr. Every file is a directory or regular file, since
+/// that's all 9P2000 shows; ctime is the mtime and btime is unknown.
+pub fn statFromDir(d: *const Dir, uid: u32, gid: u32) wire.Stat {
+    const s = Stat.fromDir(d, .auto, uid, gid);
+    return .{
+        .qid = .{ .type = d.qid_type, .vers = d.qid_vers, .path = d.qid_path },
+        .mode = s.mode,
+        .uid = uid,
+        .gid = gid,
+        .nlink = s.nlink,
+        .size = s.size,
+        .blksize = s.blksize,
+        .blocks = s.blocks(),
+        .atime_sec = d.atime,
+        .mtime_sec = d.mtime,
+        .ctime_sec = d.mtime,
+    };
+}
+
+/// A 9P2000 open mode as .L open flags. OEXEC opens for reading, and
+/// ORCLOSE is the translator's to keep, not the server's.
+pub fn openFlags(mode: u8) u32 {
+    const L = wire.L;
+    var f: u32 = switch (mode & 3) {
+        wire.OREAD, wire.OEXEC => L.RDONLY,
+        wire.OWRITE => L.WRONLY,
+        else => L.RDWR,
+    };
+    if (mode & wire.OTRUNC != 0) f |= L.TRUNC;
+    return f;
+}
+
+/// .L open flags as a 9P2000 open mode, for the server side. Flags 9P2000
+/// has no word for (O_APPEND, O_NOFOLLOW, ...) are dropped.
+pub fn openMode(flags: u32) u8 {
+    const L = wire.L;
+    var m: u8 = switch (flags & L.ACCMODE) {
+        L.WRONLY => wire.OWRITE,
+        L.RDWR => wire.ORDWR,
+        else => wire.OREAD,
+    };
+    if (flags & L.TRUNC != 0) m |= wire.OTRUNC;
+    return m;
+}
+
+/// A 9P2000 create's permissions as a .L mode: the permission bits only.
+/// DMDIR is a Tmkdir rather than a mode bit, and DMAPPEND, DMEXCL, and
+/// DMTMP have no .L equivalent.
+pub fn createMode(perm: u32) u32 {
+    return perm & 0o777;
+}
+
+/// What a 9P2000 wstat asks of a .L server: a rename, then a Tsetattr
+/// (design/0022-dotl.md, "Twstat"). `valid` is 0 when nothing but the name
+/// changes; `sync` is set for the null wstat, which becomes a Tfsync.
+pub const Wstat = struct {
+    rename: ?[]const u8 = null,
+    setattr: SetAttr = .{},
+    sync: bool = false,
+
+    pub const SetAttr = struct {
+        valid: u32 = 0,
+        mode: u32 = 0,
+        size: u64 = 0,
+        mtime_sec: u64 = 0,
+    };
+};
+
+pub fn wstat(d: *const Dir) Wstat {
+    if (d.isNull()) return .{ .sync = true };
+    const L = wire.L;
+    var w: Wstat = .{};
+    if (d.name.len != 0) w.rename = d.name;
+    if (d.mode != Dir.keep.mode) {
+        w.setattr.valid |= L.SETATTR_MODE;
+        w.setattr.mode = d.mode & 0o777;
+    }
+    if (d.length != Dir.keep.length) {
+        w.setattr.valid |= L.SETATTR_SIZE;
+        w.setattr.size = d.length;
+    }
+    if (d.mtime != Dir.keep.mtime) {
+        w.setattr.valid |= L.SETATTR_MTIME | L.SETATTR_MTIME_SET;
+        w.setattr.mtime_sec = d.mtime;
+    }
+    return w;
+}
+
+/// The wstat Dir for a .L client's Tsetattr, for the server side: the
+/// fields it sets, and "don't touch" for the rest. Owner and group changes
+/// aren't carried, since every client acts as the machine's user; atime
+/// can't be set through 9P2000 either. `now` is used for a time set to the
+/// server's clock (SETATTR_MTIME without SETATTR_MTIME_SET).
+pub fn wstatFromSetattr(valid: u32, mode: u32, size: u64, mtime_sec: u64, now: u32) Dir {
+    const L = wire.L;
+    var d = Dir.keep;
+    if (valid & L.SETATTR_MODE != 0) d.mode = mode & 0o777;
+    if (valid & L.SETATTR_SIZE != 0) d.length = size;
+    if (valid & L.SETATTR_MTIME != 0)
+        d.mtime = if (valid & L.SETATTR_MTIME_SET != 0) sec32(mtime_sec) else now;
+    return d;
+}
+
+/// One line of an `/etc/passwd`-format file.
+pub const PasswdEntry = struct {
+    name: []const u8,
+    uid: u32,
+    gid: u32,
+};
+
+/// Iterates the entries of an `/etc/passwd`-format file, skipping blank,
+/// comment, and malformed lines.
+pub const Passwd = struct {
+    lines: std.mem.SplitIterator(u8, .scalar),
+
+    pub fn init(text: []const u8) Passwd {
+        return .{ .lines = std.mem.splitScalar(u8, text, '\n') };
+    }
+
+    pub fn next(p: *Passwd) ?PasswdEntry {
+        while (p.lines.next()) |raw| {
+            const line = std.mem.trimEnd(u8, raw, "\r");
+            if (line.len == 0 or line[0] == '#') continue;
+            var f = std.mem.splitScalar(u8, line, ':');
+            const name = f.next() orelse continue;
+            _ = f.next() orelse continue;
+            const uid = std.fmt.parseInt(u32, f.next() orelse continue, 10) catch continue;
+            const gid = std.fmt.parseInt(u32, f.next() orelse continue, 10) catch continue;
+            if (name.len == 0) continue;
+            return .{ .name = name, .uid = uid, .gid = gid };
+        }
+        return null;
+    }
+
+    pub fn byName(text: []const u8, name: []const u8) ?PasswdEntry {
+        var p = init(text);
+        while (p.next()) |e| if (std.mem.eql(u8, e.name, name)) return e;
+        return null;
+    }
+
+    pub fn byUid(text: []const u8, uid: u32) ?PasswdEntry {
+        var p = init(text);
+        while (p.next()) |e| if (e.uid == uid) return e;
+        return null;
+    }
+};
+
+/// dotl's user map (design/0022-dotl.md, "The user map"): .L carries
+/// numbers and 9P2000 names. `--user-map` gives a passwd file; without
+/// one the machine's user is `uid` (the host's uid) and any other number N
+/// is the name "N". 0 is sent only for a name the map gives uid 0.
+pub const UserMap = struct {
+    /// The `--user-map` file's contents, if one was given.
+    passwd: ?[]const u8 = null,
+    /// The machine's user.
+    user: []const u8,
+    /// What the machine's user is on the wire without a map entry.
+    uid: u32,
+
+    /// The default `uid` for a host uid (`getuid()`, or null on Windows,
+    /// which has none). A host root is sent as nobody, so that running h9
+    /// as root doesn't claim root on a server without `--user-map` saying
+    /// so (design/0022-dotl.md, Security).
+    pub fn hostUid(host: ?u32) u32 {
+        const h = host orelse return 1000;
+        return if (h == 0) nobody else h;
+    }
+
+    pub const nobody: u32 = 65534;
+
+    /// The number to send for a user name.
+    pub fn number(m: *const UserMap, user: []const u8) u32 {
+        if (m.passwd) |text| {
+            if (Passwd.byName(text, user)) |e| return e.uid;
+        }
+        if (std.mem.eql(u8, user, m.user)) return m.uid;
+        if (std.fmt.parseInt(u32, user, 10)) |n| {
+            if (n != 0) return n;
+        } else |_| {}
+        return m.uid;
+    }
+
+    /// The name to show for a number from the server.
+    pub fn name(m: *const UserMap, uid: u32, buf: *[10]u8) []const u8 {
+        if (m.passwd) |text| {
+            if (Passwd.byUid(text, uid)) |e| return e.name;
+        }
+        if (uid == m.uid) return m.user;
+        return std.fmt.bufPrint(buf, "{d}", .{uid}) catch unreachable;
     }
 };
 
@@ -421,4 +763,134 @@ test "stat from a Dir" {
     const g = s.generic();
     try std.testing.expectEqual(@as(u64, 1234), std.mem.readInt(u64, g[48..56], .little));
     try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, g[8..16], .little));
+}
+
+test "errstr and errno agree" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("file does not exist", errstr(E.NOENT, &buf));
+    try std.testing.expectEqualStrings("permission denied", errstr(E.ACCES, &buf));
+    try std.testing.expectEqualStrings("errno 6", errstr(E.NXIO, &buf));
+    // Every errno up to 133 maps to a string that maps back to it.
+    for (1..134) |e| {
+        try std.testing.expectEqual(@as(u16, @intCast(e)), errno(errstr(@intCast(e), &buf)));
+    }
+}
+
+test "Dir from a .L stat" {
+    const st: wire.Stat = .{ .qid = .{ .type = wire.QTDIR, .vers = 3, .path = 42 }, .mode = S_IFDIR | 0o755, .size = 4096, .atime_sec = 10, .mtime_sec = 1 << 40 };
+    const d = dirFromStat(&st, "bin", "glenda", "users");
+    try std.testing.expectEqual(wire.DMDIR | 0o755, d.mode);
+    try std.testing.expectEqual(wire.QTDIR, d.qid_type);
+    try std.testing.expectEqual(@as(u64, 0), d.length);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), d.mtime);
+    try std.testing.expectEqualStrings("glenda", d.muid);
+
+    var buf: [128]u8 = undefined;
+    const b = try d.pack(&buf);
+    const p, const n = Dir.parse(b).?;
+    try std.testing.expectEqual(b.len, n);
+    try std.testing.expectEqualStrings("bin", p.name);
+    try std.testing.expectEqualStrings("users", p.gid);
+    try std.testing.expectEqualStrings("glenda", p.muid);
+    try std.testing.expectEqual(@as(u64, 42), p.qid_path);
+
+    const f: wire.Stat = .{ .qid = .{ .type = wire.QTSYMLINK, .path = 7 }, .mode = S_IFREG | 0o4644, .size = 12 };
+    const fd = dirFromStat(&f, "x", "1", "1");
+    try std.testing.expectEqual(@as(u32, 0o644), fd.mode);
+    try std.testing.expectEqual(wire.QTFILE, fd.qid_type);
+    try std.testing.expectEqual(@as(u64, 12), fd.length);
+    const fifo: wire.Stat = .{ .mode = S_IFIFO | 0o600, .size = 5 };
+    try std.testing.expectEqual(@as(u64, 0), dirFromStat(&fifo, "p", "", "").length);
+    try std.testing.expect(!openable(fifo.mode));
+    try std.testing.expect(openable(f.mode));
+
+    const back = statFromDir(&p, 1000, 1000);
+    try std.testing.expectEqual(@as(u32, S_IFDIR | 0o755), back.mode);
+    try std.testing.expectEqual(@as(u64, 2), back.nlink);
+}
+
+test "open modes" {
+    const L = wire.L;
+    try std.testing.expectEqual(L.RDONLY, openFlags(wire.OREAD));
+    try std.testing.expectEqual(L.RDONLY, openFlags(wire.OEXEC));
+    try std.testing.expectEqual(L.RDWR | L.TRUNC, openFlags(wire.ORDWR | wire.OTRUNC | wire.ORCLOSE));
+    try std.testing.expectEqual(wire.OWRITE | wire.OTRUNC, openMode(L.WRONLY | L.TRUNC | L.CREATE | L.NOFOLLOW));
+    try std.testing.expectEqual(wire.OREAD, openMode(L.NOACCESS));
+    try std.testing.expectEqual(@as(u32, 0o640), createMode(wire.DMDIR | wire.DMEXCL | 0o640));
+}
+
+test "wstat as rename and setattr" {
+    const L = wire.L;
+    try std.testing.expect(wstat(&Dir.keep).sync);
+    var d = Dir.keep;
+    d.name = "new";
+    d.mode = wire.DMDIR | 0o700;
+    const w = wstat(&d);
+    try std.testing.expectEqualStrings("new", w.rename.?);
+    try std.testing.expectEqual(L.SETATTR_MODE, w.setattr.valid);
+    try std.testing.expectEqual(@as(u32, 0o700), w.setattr.mode);
+    try std.testing.expect(!w.sync);
+
+    var t = Dir.keep;
+    t.length = 0;
+    t.mtime = 99;
+    const wt = wstat(&t);
+    try std.testing.expectEqual(@as(?[]const u8, null), wt.rename);
+    try std.testing.expectEqual(L.SETATTR_SIZE | L.SETATTR_MTIME | L.SETATTR_MTIME_SET, wt.setattr.valid);
+
+    const s = wstatFromSetattr(L.SETATTR_SIZE | L.SETATTR_MTIME | L.SETATTR_UID, 0, 5, 0, 1234);
+    try std.testing.expectEqual(@as(u64, 5), s.length);
+    try std.testing.expectEqual(@as(u32, 1234), s.mtime);
+    try std.testing.expectEqual(Dir.keep.mode, s.mode);
+    try std.testing.expect(wstatFromSetattr(0, 0, 0, 0, 0).isNull());
+}
+
+test "user map" {
+    const passwd =
+        \\# comment
+        \\root:x:0:0:root:/root:/bin/sh
+        \\glenda:x:1000:1000::/usr/glenda:/bin/rc
+        \\bad line
+        \\svc:x:notanumber:1::/:/bin/false
+        \\
+    ;
+    var buf: [10]u8 = undefined;
+    // Without a map: the machine's user is the host uid, numbers are names.
+    const plain: UserMap = .{ .user = "glenda", .uid = 501 };
+    try std.testing.expectEqual(@as(u32, 501), plain.number("glenda"));
+    try std.testing.expectEqual(@as(u32, 42), plain.number("42"));
+    try std.testing.expectEqual(@as(u32, 501), plain.number("0"));
+    try std.testing.expectEqual(@as(u32, 501), plain.number("root"));
+    try std.testing.expectEqualStrings("glenda", plain.name(501, &buf));
+    try std.testing.expectEqualStrings("0", plain.name(0, &buf));
+    // With one: names in it are theirs, 0 included.
+    const mapped: UserMap = .{ .passwd = passwd, .user = "glenda", .uid = 501 };
+    try std.testing.expectEqual(@as(u32, 1000), mapped.number("glenda"));
+    try std.testing.expectEqual(@as(u32, 0), mapped.number("root"));
+    try std.testing.expectEqualStrings("root", mapped.name(0, &buf));
+    try std.testing.expectEqual(@as(u32, 501), mapped.number("svc"));
+
+    try std.testing.expectEqual(@as(u32, 1000), UserMap.hostUid(null));
+    try std.testing.expectEqual(UserMap.nobody, UserMap.hostUid(0));
+    try std.testing.expectEqual(@as(u32, 501), UserMap.hostUid(501));
+}
+
+fn fuzzDir(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [512]u8 = undefined;
+    const n = smith.slice(&buf);
+    if (Dir.parse(buf[0..n])) |r| {
+        const d, const size = r;
+        try std.testing.expect(size <= n);
+        _ = wstat(&d);
+        _ = statFromDir(&d, 1, 1);
+    }
+    var p = Passwd.init(buf[0..n]);
+    while (p.next()) |_| {}
+    var eb: [16]u8 = undefined;
+    _ = errno(buf[0..n]);
+    _ = errstr(smith.value(u32), &eb);
+}
+
+test "fuzz: Dirs, passwd files, and error strings" {
+    try std.testing.fuzz({}, fuzzDir, .{});
 }
