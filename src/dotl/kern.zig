@@ -22,6 +22,8 @@ pub const Config = struct {
     user: []const u8,
     /// The `--user-map` file's contents, if any.
     user_map: ?[]const u8 = null,
+    /// For the op_ids' random seeds.
+    io: ?std.Io = null,
 };
 
 const Entry = struct { owner: usize, cfg: Config };
@@ -71,13 +73,19 @@ fn putErr(err: [*]u8, msg: []const u8) void {
     err[n] = 0;
 }
 
-fn h9_dotl_new(mach: ?*anyopaque, err: [*]u8) callconv(.c) ?*client.Client {
+fn h9_dotl_new(mach: ?*anyopaque, lz: c_int, err: [*]u8) callconv(.c) ?*client.Client {
     const cfg = configFor(@intFromPtr(mach)) orelse Config{ .user = "none" };
+    var seed: [8]u8 = undefined;
+    if (cfg.io) |io| io.random(&seed) else std.mem.writeInt(u64, &seed, @intFromPtr(mach) ^ @as(u64, @truncate(@intFromPtr(&seed))), .little);
     const t = gpa.create(client.Client) catch {
         putErr(err, "out of memory");
         return null;
     };
-    t.* = client.Client.init(gpa, .{ .users = .{ .passwd = cfg.user_map, .user = cfg.user, .uid = hostUid() } }) catch {
+    t.* = client.Client.init(gpa, .{
+        .users = .{ .passwd = cfg.user_map, .user = cfg.user, .uid = hostUid() },
+        .offer_lz = lz != 0,
+        .op_seed = std.mem.readInt(u64, &seed, .little),
+    }) catch {
         gpa.destroy(t);
         putErr(err, "out of memory");
         return null;
@@ -130,9 +138,31 @@ fn h9_dotl_status(t: *client.Client, buf: [*]u8, n: c_int) callconv(.c) c_int {
     const out = buf[0..@intCast(n)];
     const s = switch (t.version()) {
         .failed => std.fmt.bufPrint(out, "Hungup {s}", .{t.err orelse ""}),
-        else => |v| std.fmt.bufPrint(out, "{t}", .{v}),
+        else => |v| if (t.reconnects != 0 or t.reconnecting)
+            std.fmt.bufPrint(out, "{t} reconnects {d}{s}", .{ v, t.reconnects, if (t.reconnecting) " reconnecting" else "" })
+        else
+            std.fmt.bufPrint(out, "{t}", .{v}),
     } catch out;
     return @intCast(s.len);
+}
+
+/// Whether a dropped connection can be resumed (9P2000.L.Z).
+fn h9_dotl_canreconnect(t: *client.Client) callconv(.c) c_int {
+    return @intFromBool(t.canReconnect());
+}
+
+/// Whether the server asked to be dropped (ENOTLEADER).
+fn h9_dotl_wantreconnect(t: *client.Client) callconv(.c) c_int {
+    return @intFromBool(t.want_reconnect);
+}
+
+/// Resumes on a new connection; what to send is in takeserver.
+fn h9_dotl_reconnect(t: *client.Client, err: [*]u8) callconv(.c) c_int {
+    t.reconnect() catch {
+        putErr(err, "out of memory");
+        return -1;
+    };
+    return 0;
 }
 
 comptime {
@@ -145,5 +175,8 @@ comptime {
         @export(&h9_dotl_takemount, .{ .name = "h9_dotl_takemount" });
         @export(&h9_dotl_mountready, .{ .name = "h9_dotl_mountready" });
         @export(&h9_dotl_status, .{ .name = "h9_dotl_status" });
+        @export(&h9_dotl_canreconnect, .{ .name = "h9_dotl_canreconnect" });
+        @export(&h9_dotl_wantreconnect, .{ .name = "h9_dotl_wantreconnect" });
+        @export(&h9_dotl_reconnect, .{ .name = "h9_dotl_reconnect" });
     }
 }

@@ -8,9 +8,21 @@
 //! So it's tested with a server in memory and no kernel.
 //!
 //! It negotiates the dialect itself. devmnt's Tversion waits for the
-//! server's answer to the translator's own: `9P2000.L` translates, and
-//! `9P2000` passes bytes through both ways unchanged. `9P2000.L.Z` isn't
-//! offered yet (stage 4).
+//! server's answer to the translator's own, which offers `9P2000.L.Z`:
+//! `9P2000.L.Z` and `9P2000.L` translate, and `9P2000` passes bytes
+//! through both ways unchanged. A server that answers `unknown` to
+//! `9P2000.L.Z`, as some .L servers do to any version they don't know
+//! exactly, is offered `9P2000.L` next.
+//!
+//! With `9P2000.L.Z`, every mutation carries an envelope with an op_id,
+//! and a dropped connection can be resumed (`reconnect`): every server fid
+//! is rebound by its inode, opened ones are reopened without O_TRUNC,
+//! O_CREAT, or O_EXCL, and every request not yet answered is resent in
+//! order, mutations with the retry flag, so the server applies each once.
+//!
+//! A read that follows the last one on its fid, or starts a newly opened
+//! file, asks the server for a whole msize, and devmnt's next reads are
+//! answered from what came back. Any mutation drops what was read ahead.
 //!
 //! One devmnt request can become several to the server, so each is an
 //! `Op` with its own server tags and server fids, which the translator
@@ -30,6 +42,12 @@ pub const Options = struct {
     users: attr.UserMap,
     /// The largest msize offered upstream.
     msize: u32 = 1 << 20,
+    /// Whether to offer `9P2000.L.Z`; `#ℓ`'s `version 9P2000.L` turns it
+    /// off, for servers that answer it wrongly.
+    offer_lz: bool = true,
+    /// Makes the op_ids of mutations unique to this translator: random
+    /// bytes from the caller.
+    op_seed: u64 = 0,
 };
 
 /// What `version` reads, for `#ℓ`'s status file.
@@ -37,6 +55,7 @@ pub const Dialect = enum {
     negotiating,
     @"9P2000",
     @"9P2000.L",
+    @"9P2000.L.Z",
     failed,
 };
 
@@ -57,6 +76,11 @@ const Fid = struct {
     cookie: u64 = 0,
     dirbuf: std.ArrayList(u8) = .empty,
     eof: bool = false,
+    /// Read-ahead: where the next sequential read starts, and bytes the
+    /// server sent past what devmnt asked for, from offset `ahead_off`.
+    next_off: ?u64 = null,
+    ahead: std.ArrayList(u8) = .empty,
+    ahead_off: u64 = 0,
 };
 
 /// A hidden server fid at an attach's root, which outlives the fid devmnt
@@ -78,11 +102,33 @@ const Step = union(enum) {
     main: u32,
     /// A getattr for entry i of a directory read.
     entry: u32,
+    /// Resuming after a reconnect: 0 the Tversion, 1 a Trebind or the
+    /// Tlopen that replays an open.
+    reconnect: u32,
 };
 
 const Pending = struct {
     op: ?*Op,
     step: Step,
+    /// The request as encoded, kept to resend after a reconnect, and
+    /// whether it has an envelope.
+    frame: []u8 = &.{},
+    enveloped: bool = false,
+    /// The order requests were made in, and whether it was sent on the
+    /// connection that dropped.
+    seq: u64 = 0,
+    sent: bool = false,
+};
+
+/// What a server fid is bound to, so a reconnect can rebind it with
+/// Trebind: its inode, its attach root's inode and user, and the flags it
+/// was opened with.
+const Bound = struct {
+    inode: u64,
+    root: u64,
+    uname: []u8,
+    n_uname: u32,
+    open: ?u32 = null,
 };
 
 const Kind = enum { version, attach, walk, open, create, read, readdir, write, clunk, remove, stat, wstat };
@@ -117,6 +163,8 @@ const Op = struct {
     resolve: ?*Resolve = null,
     entries: []Entry = &.{},
     entries_left: u32 = 0,
+    /// The client's `ahead_gen` when a read was sent.
+    ahead_gen: u64 = 0,
 
     fn allocator(op: *Op) Allocator {
         return op.arena.allocator();
@@ -192,12 +240,32 @@ pub const Client = struct {
     next_tag: u16 = 0,
     next_sfid: u32 = 1,
     free_sfids: std.ArrayList(u32) = .empty,
+    next_seq: u64 = 0,
+
+    /// The version offered upstream.
+    offered: []const u8 = wire.version_l,
+    /// Server fids and what they're bound to, for a reconnect (.L.Z).
+    bound: std.AutoHashMapUnmanaged(u32, Bound) = .empty,
+    /// Mutations sent so far, the second half of each op_id.
+    op_count: u64 = 0,
+    /// Resuming on a new connection: requests wait, unsent, until every
+    /// fid is rebound (`rebinds` left).
+    reconnecting: bool = false,
+    rebinds: u32 = 0,
+    reconnects: u32 = 0,
+    /// The server answered ENOTLEADER: the caller should drop the
+    /// connection and reconnect, as for a hangup.
+    want_reconnect: bool = false,
+    /// Counts mutations, which drop every fid's read-ahead: a read sent
+    /// before one keeps nothing ahead.
+    ahead_gen: u64 = 0,
 
     pub fn init(gpa: Allocator, opts: Options) Allocator.Error!Client {
         var c: Client = .{ .gpa = gpa, .opts = opts };
         c.msize = opts.msize;
-        // Offer .L straight away; devmnt's Tversion waits for the answer.
-        try c.sendServer(0, wire.common.Tversion{ .msize = opts.msize, .version = wire.version_l }, .{ .op = null, .step = .{ .main = 0 } });
+        c.offered = if (opts.offer_lz) wire.version_lz else wire.version_l;
+        // Offer straight away; devmnt's Tversion waits for the answer.
+        try c.sendServer(0, wire.common.Tversion{ .msize = opts.msize, .version = c.offered }, .{ .op = null, .step = .{ .main = 0 } });
         return c;
     }
 
@@ -208,7 +276,12 @@ pub const Client = struct {
         var fit = c.fids.valueIterator();
         while (fit.next()) |f| c.freeFid(f.*);
         c.fids.deinit(c.gpa);
+        var pit = c.pending.valueIterator();
+        while (pit.next()) |p| c.gpa.free(p.frame);
         c.pending.deinit(c.gpa);
+        var bit = c.bound.valueIterator();
+        while (bit.next()) |b| c.gpa.free(b.uname);
+        c.bound.deinit(c.gpa);
         c.free_sfids.deinit(c.gpa);
         for ([_]*std.ArrayList(u8){ &c.in_mount, &c.in_server, &c.out_mount, &c.out_server }) |b| b.deinit(c.gpa);
     }
@@ -216,6 +289,51 @@ pub const Client = struct {
     /// The negotiated dialect, for `status`.
     pub fn version(c: *const Client) Dialect {
         return c.dialect;
+    }
+
+    /// Whether requests are translated (not passed through).
+    fn translating(c: *const Client) bool {
+        return c.dialect == .@"9P2000.L" or c.dialect == .@"9P2000.L.Z";
+    }
+
+    /// Whether a dropped connection can be resumed on a new one: only
+    /// with `9P2000.L.Z`, which has Trebind and op_ids.
+    pub fn canReconnect(c: *const Client) bool {
+        return c.dialect == .@"9P2000.L.Z";
+    }
+
+    /// Starts over on a new connection to the same server, once the
+    /// caller has one: everything queued for the old one is dropped, and
+    /// the translator negotiates, rebinds every server fid, and resends
+    /// what wasn't answered. devmnt's requests meanwhile wait.
+    pub fn reconnect(c: *Client) Allocator.Error!void {
+        std.debug.assert(c.canReconnect());
+        c.in_server.items.len = 0;
+        c.out_server.items.len = 0;
+        c.want_reconnect = false;
+        c.reconnecting = true;
+        // The server may have changed while the connection was down.
+        c.dropAhead();
+        c.rebinds = 0;
+        // A clunk the server never answered is done: the new connection
+        // has no such fid.
+        var done: std.ArrayList(u16) = .empty;
+        defer done.deinit(c.gpa);
+        var it = c.pending.iterator();
+        while (it.next()) |e| switch (e.value_ptr.step) {
+            .clunked => try done.append(c.gpa, e.key_ptr.*),
+            .reconnect => try done.append(c.gpa, e.key_ptr.*),
+            else => {},
+        };
+        for (done.items) |t| {
+            const p = c.pending.fetchRemove(t).?.value;
+            c.gpa.free(p.frame);
+            switch (p.step) {
+                .clunked => |sfid| try c.free_sfids.append(c.gpa, sfid),
+                else => {},
+            }
+        }
+        try c.sendServer(null, wire.common.Tversion{ .msize = c.msize, .version = wire.version_lz }, .{ .op = null, .step = .{ .reconnect = 0 } });
     }
 
     /// Bytes to send to the server; `consumedServer` drops what was sent.
@@ -279,13 +397,123 @@ pub const Client = struct {
             defer c.gpa.free(frame);
             consume(&c.in_server, hd.size);
             const d = wire.decode(l.R, frame, c.msize, false) catch return c.fail("bad 9P message from the server");
-            const p = c.pending.fetchRemove(d.tag) orelse return c.fail("9P reply for no request");
-            try c.reply(p.value, d.msg);
+            const kv = c.pending.fetchRemove(d.tag) orelse return c.fail("9P reply for no request");
+            const p = kv.value;
+            if (c.dialect == .@"9P2000.L.Z" and !c.reconnecting and notLeader(d.msg)) {
+                // Not the writer any more: the request is resent after a
+                // reconnect, like everything else unanswered.
+                try c.pending.put(c.gpa, d.tag, p);
+                c.want_reconnect = true;
+                c.in_server.items.len = 0;
+                return;
+            }
+            defer c.gpa.free(p.frame);
+            try c.track(p, d.msg);
+            try c.reply(p, d.msg);
             if (c.dialect == .@"9P2000") {
                 try c.out_mount.appendSlice(c.gpa, c.in_server.items);
                 c.in_server.items.len = 0;
                 break;
             }
+        }
+    }
+
+    fn notLeader(msg: l.R) bool {
+        const e = lerror(msg) orelse return false;
+        return e == L.ENOTLEADER or e == L.ENOTLEADER_CLEAN;
+    }
+
+    /// Notes what a server fid is bound to from a request and its reply,
+    /// for a reconnect's Trebind.
+    fn track(c: *Client, p: Pending, msg: l.R) Allocator.Error!void {
+        if (c.dialect != .@"9P2000.L.Z" or p.step == .reconnect or lerror(msg) != null) return;
+        const d = wire.decode(l.T, p.frame, std.math.maxInt(u32), p.enveloped) catch return;
+        switch (d.msg) {
+            .Tattach => |a| if (msg == .Rattach) {
+                const q = msg.Rattach.qid.path;
+                try c.bind(a.fid, .{ .inode = q, .root = q, .uname = try c.gpa.dupe(u8, a.uname), .n_uname = a.n_uname });
+            },
+            .Twalk => |w| if (msg == .Rwalk and msg.Rwalk.wqids.n == w.wnames.n) {
+                const src = c.bound.get(w.fid) orelse return;
+                const q = if (w.wnames.n == 0) src.inode else msg.Rwalk.wqids.slice()[w.wnames.n - 1].path;
+                try c.bind(w.newfid, .{ .inode = q, .root = src.root, .uname = try c.gpa.dupe(u8, src.uname), .n_uname = src.n_uname });
+            },
+            .Tlopen => |o| if (msg == .Rlopen) {
+                if (c.bound.getPtr(o.fid)) |b| b.open = o.flags;
+            },
+            .Tlcreate => |cr| if (msg == .Rlcreate) {
+                if (c.bound.getPtr(cr.fid)) |b| {
+                    b.inode = msg.Rlcreate.qid.path;
+                    b.open = cr.flags;
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn bind(c: *Client, sfid: u32, b: Bound) Allocator.Error!void {
+        errdefer c.gpa.free(b.uname);
+        const gop = try c.bound.getOrPut(c.gpa, sfid);
+        if (gop.found_existing) c.gpa.free(gop.value_ptr.uname);
+        gop.value_ptr.* = b;
+    }
+
+    /// A step of resuming after a reconnect.
+    fn stepReconnect(c: *Client, n: u32, msg: l.R) Allocator.Error!void {
+        var buf: [16]u8 = undefined;
+        var mbuf: [96]u8 = undefined;
+        if (lerror(msg)) |e| return c.fail(std.fmt.bufPrint(&mbuf, "reconnect: {s}", .{attr.errstr(e, &buf)}) catch "reconnect failed");
+        switch (n) {
+            0 => {
+                if (msg != .Rversion or !std.mem.eql(u8, msg.Rversion.version, wire.version_lz)) return c.fail("reconnect: the server no longer speaks 9P2000.L.Z");
+                // Requests already made fit the old msize.
+                if (msg.Rversion.msize < c.msize) return c.fail("reconnect: the server's msize shrank");
+                var it = c.bound.iterator();
+                while (it.next()) |e| {
+                    const b = e.value_ptr;
+                    const flags: u8 = L.REBIND_REPLAY | if (b.open != null) L.REBIND_OPENED else 0;
+                    try c.sendServer(null, l.Trebind{ .fid = e.key_ptr.*, .inode_id = b.inode, .root_inode = b.root, .flags = flags, .uname = b.uname, .n_uname = b.n_uname }, .{ .op = null, .step = .{ .reconnect = 1 } });
+                    c.rebinds += 1;
+                    // The open is replayed in place, never truncating or
+                    // creating what the guest already has open.
+                    if (b.open) |o| {
+                        try c.sendServer(null, l.Tlopen{ .fid = e.key_ptr.*, .flags = o & ~@as(u32, L.TRUNC | L.CREATE | L.EXCL) }, .{ .op = null, .step = .{ .reconnect = 1 } });
+                        c.rebinds += 1;
+                    }
+                }
+            },
+            1 => {
+                if (msg != .Rrebind and msg != .Rlopen) return c.unexpected();
+                c.rebinds -= 1;
+            },
+            else => unreachable,
+        }
+        if (c.rebinds == 0) try c.resume_();
+    }
+
+    /// Every fid is rebound: what wasn't answered on the old connection,
+    /// and what devmnt asked meanwhile, goes out in the order it was made.
+    fn resume_(c: *Client) Allocator.Error!void {
+        c.reconnecting = false;
+        c.reconnects += 1;
+        var tags: std.ArrayList(u16) = .empty;
+        defer tags.deinit(c.gpa);
+        var it = c.pending.iterator();
+        while (it.next()) |e| try tags.append(c.gpa, e.key_ptr.*);
+        const Ctx = struct {
+            c: *Client,
+            fn less(ctx: @This(), a: u16, b: u16) bool {
+                return ctx.c.pending.get(a).?.seq < ctx.c.pending.get(b).?.seq;
+            }
+        };
+        std.mem.sort(u16, tags.items, Ctx{ .c = c }, Ctx.less);
+        for (tags.items) |t| {
+            const p = c.pending.getPtr(t).?;
+            // The retry flag tells the server it may have applied this
+            // mutation already, by its op_id.
+            if (p.enveloped and p.sent) p.frame[wire.header_size + 16] |= L.OP_FLAG_RETRY;
+            p.sent = true;
+            try c.out_server.appendSlice(c.gpa, p.frame);
         }
     }
 
@@ -307,7 +535,10 @@ pub const Client = struct {
             op.*.arena.deinit();
         }
         c.ops.clearRetainingCapacity();
+        var pit = c.pending.valueIterator();
+        while (pit.next()) |p| c.gpa.free(p.frame);
         c.pending.clearRetainingCapacity();
+        c.reconnecting = false;
     }
 
     // Queuing messages.
@@ -333,14 +564,31 @@ pub const Client = struct {
         }
     }
 
-    fn sendServer(c: *Client, tag: ?u16, msg: anytype, p: Pending) Allocator.Error!void {
+    fn sendServer(c: *Client, tag: ?u16, msg: anytype, p0: Pending) Allocator.Error!void {
         const t = tag orelse c.allocTag();
+        var p = p0;
+        // An op_id: the seed, then a count, so it's unique to this
+        // translator for as long as the server remembers it.
+        var env: ?wire.Envelope = null;
+        if (c.dialect == .@"9P2000.L.Z" and @hasDecl(@TypeOf(msg), "mutation")) {
+            var e: wire.Envelope = .{};
+            std.mem.writeInt(u64, e.op_id[0..8], c.opts.op_seed, .little);
+            std.mem.writeInt(u64, e.op_id[8..16], c.op_count, .little);
+            c.op_count += 1;
+            env = e;
+        }
+        const need = frameSize(msg) + @as(usize, if (env != null) wire.Envelope.wire_size else 0);
+        p.frame = try c.gpa.alloc(u8, need);
+        errdefer c.gpa.free(p.frame);
+        _ = wire.encode(p.frame, t, msg, env) catch unreachable;
+        p.enveloped = env != null;
+        p.seq = c.next_seq;
+        c.next_seq += 1;
+        // While reconnecting only the reconnect's own requests go out.
+        p.sent = !c.reconnecting or p.step == .reconnect;
+        if (p.sent) try c.out_server.appendSlice(c.gpa, p.frame);
         try c.pending.put(c.gpa, t, p);
         if (p.op) |op| op.outstanding += 1;
-        const need = frameSize(msg);
-        try c.out_server.ensureUnusedCapacity(c.gpa, need);
-        const f = wire.encode(c.out_server.unusedCapacitySlice(), t, msg, null) catch unreachable;
-        c.out_server.items.len += f.len;
     }
 
     fn send(c: *Client, op: *Op, msg: anytype, step: Step) Allocator.Error!void {
@@ -355,6 +603,7 @@ pub const Client = struct {
 
     /// Clunks a server fid; it's reused once the server answers.
     fn clunk(c: *Client, sfid: u32) Allocator.Error!void {
+        if (c.bound.fetchRemove(sfid)) |b| c.gpa.free(b.value.uname);
         try c.sendServer(null, wire.common.Tclunk{ .fid = sfid }, .{ .op = null, .step = .{ .clunked = sfid } });
     }
 
@@ -380,6 +629,13 @@ pub const Client = struct {
     }
 
     // devmnt's requests.
+
+    /// Drops what was read ahead on every fid: the files may have changed.
+    fn dropAhead(c: *Client) void {
+        c.ahead_gen += 1;
+        var it = c.fids.valueIterator();
+        while (it.next()) |f| f.*.ahead.items.len = 0;
+    }
 
     fn newOp(c: *Client, tag: u16, kind: Kind) Allocator.Error!*Op {
         const op = try c.gpa.create(Op);
@@ -415,17 +671,22 @@ pub const Client = struct {
     fn request(c: *Client, tag: u16, msg: p9.T) Allocator.Error!void {
         if (c.dialect == .failed) return c.rerror(tag, c.err.?);
         switch (msg) {
+            .Twrite, .Tcreate, .Tremove, .Twstat => c.dropAhead(),
+            .Tclunk => |cl| if (c.fids.get(cl.fid)) |f| if (f.rclose) c.dropAhead(),
+            else => {},
+        }
+        switch (msg) {
             .Tversion => |v| {
                 // The server's Rversion can come before devmnt's Tversion.
                 if (c.held_version != null or c.mount_msize != 0) return c.rerror(tag, "version already negotiated");
-                if (c.dialect == .@"9P2000.L") return c.answerVersion(tag, v.msize);
+                if (c.translating()) return c.answerVersion(tag, v.msize);
                 c.held_version = .{ .tag = tag, .msize = v.msize };
                 return;
             },
             .Tflush => |f| return c.flush(tag, f.oldtag),
             else => {},
         }
-        if (c.dialect != .@"9P2000.L") return c.rerror(tag, "version not negotiated");
+        if (!c.translating()) return c.rerror(tag, "version not negotiated");
         if (c.ops.contains(tag)) return c.rerror(tag, "tag in use");
         switch (msg) {
             .Tversion, .Tflush => unreachable,
@@ -479,8 +740,25 @@ pub const Client = struct {
                 const f = c.fids.get(r.fid) orelse return c.rerror(tag, "unknown fid");
                 if (!f.open) return c.rerror(tag, "fid not open");
                 if (f.qid.type & wire.QTDIR != 0) return c.readDir(tag, r.fid, f, r.offset, r.count);
+                // From what was read ahead, or a read of a whole upstream
+                // msize when this one follows the last.
+                if (r.offset >= f.ahead_off and r.offset < f.ahead_off + f.ahead.items.len) {
+                    const from: usize = @intCast(r.offset - f.ahead_off);
+                    const n = @min(r.count, f.ahead.items.len - from);
+                    f.next_off = r.offset + n;
+                    try c.sendMount(tag, wire.common.Rread{ .data = .{ .bytes = f.ahead.items[from..][0..n] } });
+                    if (from + n == f.ahead.items.len) f.ahead.items.len = 0;
+                    return;
+                }
+                f.ahead.items.len = 0;
                 const op = try c.newOp(tag, .read);
-                try c.send(op, wire.common.Tread{ .fid = f.sfid, .offset = r.offset, .count = @min(r.count, c.msize - wire.io_header) }, .{ .main = 0 });
+                op.fid = r.fid;
+                op.offset = r.offset;
+                op.count = @min(r.count, c.msize - wire.io_header);
+                op.ahead_gen = c.ahead_gen;
+                const count = if (f.next_off == r.offset) c.msize - wire.io_header else op.count;
+                f.next_off = null;
+                try c.send(op, wire.common.Tread{ .fid = f.sfid, .offset = r.offset, .count = count }, .{ .main = 0 });
             },
             .Twrite => |w| {
                 const f = c.fids.get(w.fid) orelse return c.rerror(tag, "unknown fid");
@@ -573,11 +851,13 @@ pub const Client = struct {
             .flush => |f| {
                 // The flushed request won't be answered now, if it hasn't been.
                 if (c.pending.fetchRemove(f.oldtag)) |old| {
+                    c.gpa.free(old.value.frame);
                     if (old.value.op) |o| o.outstanding -= 1;
                 }
                 f.op.flushes -= 1;
                 return c.maybeFlushed(f.op);
             },
+            .reconnect => |n| return c.stepReconnect(n, msg),
             else => {},
         }
         const op = p.op orelse {
@@ -590,7 +870,7 @@ pub const Client = struct {
             .resolve => |r| return c.stepResolve(r, msg),
             .main => |n| return c.stepOp(op, n, msg),
             .entry => |i| return c.stepEntry(op, i, msg),
-            .clunked, .flush => unreachable,
+            .clunked, .flush, .reconnect => unreachable,
         }
     }
 
@@ -603,8 +883,14 @@ pub const Client = struct {
             },
             else => return c.fail("bad reply to Tversion"),
         };
-        if (std.mem.eql(u8, v.version, wire.version_l)) {
+        if (std.mem.eql(u8, v.version, wire.version_lz) and c.offered.ptr == wire.version_lz.ptr) {
+            c.dialect = .@"9P2000.L.Z";
+        } else if (std.mem.eql(u8, v.version, wire.version_l)) {
             c.dialect = .@"9P2000.L";
+        } else if (std.mem.eql(u8, v.version, "unknown") and c.offered.ptr == wire.version_lz.ptr) {
+            // Some .L servers know only their own version string exactly.
+            c.offered = wire.version_l;
+            return c.sendServer(null, wire.common.Tversion{ .msize = c.opts.msize, .version = c.offered }, .{ .op = null, .step = .{ .main = 0 } });
         } else if (std.mem.eql(u8, v.version, wire.version_9p)) {
             c.dialect = .@"9P2000";
         } else {
@@ -642,7 +928,18 @@ pub const Client = struct {
             .read => {
                 if (lerror(msg)) |e| return c.finishErrno(op, e);
                 if (msg != .Rread) return c.unexpected();
-                return c.finish(op, wire.common.Rread{ .data = msg.Rread.data });
+                const data = msg.Rread.data.bytes;
+                const got = @min(data.len, op.count);
+                if (c.fids.get(op.fid)) |f| {
+                    f.next_off = op.offset + got;
+                    // Kept unless a mutation came while the read was out.
+                    if (data.len > got and c.ahead_gen == op.ahead_gen) {
+                        f.ahead.items.len = 0;
+                        try f.ahead.appendSlice(c.gpa, data[got..]);
+                        f.ahead_off = op.offset + got;
+                    }
+                }
+                return c.finish(op, wire.common.Rread{ .data = .{ .bytes = data[0..got] } });
             },
             .readdir => return c.stepReaddir(op, msg),
             .write => {
@@ -712,6 +1009,7 @@ pub const Client = struct {
         for (f.path.items) |p| c.gpa.free(p);
         f.path.deinit(c.gpa);
         f.dirbuf.deinit(c.gpa);
+        f.ahead.deinit(c.gpa);
         f.root.refs -= 1;
         if (f.root.refs == 0) {
             c.clunk(f.root.sfid) catch {};
@@ -745,6 +1043,7 @@ pub const Client = struct {
                 f.open = true;
                 f.rclose = op.mode & wire.ORCLOSE != 0;
                 f.qid = msg.Rlopen.qid;
+                f.next_off = 0;
                 if (op.dir) f.qid.type |= wire.QTDIR;
                 return c.finish(op, p9.Ropen{ .qid = pq(f.qid), .iounit = 0 });
             },
@@ -753,8 +1052,14 @@ pub const Client = struct {
     }
 
     fn stepCreate(c: *Client, op: *Op, n: u32, msg: l.R) Allocator.Error!void {
-        if (lerror(msg)) |e| return c.finishErrno(op, e);
         const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
+        // create(5) of a file that exists truncates it, unless DMEXCL: so
+        // `>` in rc works on an existing file.
+        if (n == 10 and lerror(msg) == attr.E.EXIST and op.perm & wire.DMEXCL == 0) {
+            op.sfid = try c.tmpSfid(op);
+            return c.send(op, wire.common.Twalk{ .fid = f.sfid, .newfid = op.sfid, .wnames = .init(&.{op.name}) }, .{ .main = 11 });
+        }
+        if (lerror(msg)) |e| return c.finishErrno(op, e);
         switch (n) {
             // A directory: Tmkdir, then walk to it and open it.
             0 => {
@@ -781,6 +1086,20 @@ pub const Client = struct {
                 if (msg != .Rlcreate) return c.unexpected();
                 return c.created(op, f, msg.Rlcreate.qid);
             },
+            // It exists: open it truncated, if it's a file.
+            11 => {
+                if (msg != .Rwalk) return c.unexpected();
+                if (msg.Rwalk.wqids.n != 1) return c.finishErrno(op, attr.E.NOENT);
+                if (msg.Rwalk.wqids.qids[0].type & wire.QTDIR != 0) return c.finishErrno(op, attr.E.EXIST);
+                try c.send(op, l.Tlopen{ .fid = op.sfid, .flags = attr.openFlags(op.mode) | L.TRUNC }, .{ .main = 12 });
+            },
+            12 => {
+                if (msg != .Rlopen) return c.unexpected();
+                keep(op, op.sfid);
+                try c.clunk(f.sfid);
+                f.sfid = op.sfid;
+                return c.created(op, f, msg.Rlopen.qid);
+            },
             else => unreachable,
         }
     }
@@ -790,6 +1109,7 @@ pub const Client = struct {
         f.qid = qid;
         f.open = true;
         f.rclose = op.mode & wire.ORCLOSE != 0;
+        f.next_off = 0;
         return c.finish(op, p9.Rcreate{ .qid = pq(qid), .iounit = 0 });
     }
 
@@ -1463,9 +1783,9 @@ test "reads, writes, creates, and removes" {
     _ = try h.ok(p9.Tclunk{ .fid = 2 });
     try testing.expectEqualStrings("12345", h.s.lookup("etc/new").?.data.items);
 
-    // An existing name can't be created.
+    // An existing name can't be created with DMEXCL.
     _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 3, .wnames = .init(&.{"etc"}) });
-    try testing.expectEqualStrings("file already exists", try h.err(p9.Tcreate{ .fid = 3, .name = "new", .perm = 0o640, .mode = wire.OWRITE }));
+    try testing.expectEqualStrings("file already exists", try h.err(p9.Tcreate{ .fid = 3, .name = "new", .perm = 0o640 | wire.DMEXCL, .mode = wire.OWRITE }));
 
     // A directory, then a file in it.
     const dc = try h.ok(p9.Tcreate{ .fid = 3, .name = "sub", .perm = wire.DMDIR | 0o755, .mode = wire.OREAD });
@@ -1658,4 +1978,105 @@ test "a reply for no request fails the connection" {
     try h.c.fromServer(try wire.encode(&buf, 999, wire.common.Rclunk{}, null));
     try testing.expectEqual(Dialect.failed, h.c.version());
     try testing.expectEqualStrings("9P reply for no request", try h.err(p9.Tstat{ .fid = 0 }));
+}
+
+test "negotiates .L.Z and puts mutations in envelopes" {
+    var h = try Harness.init(wire.version_lz);
+    defer h.deinit();
+    _ = try h.s.add("usr/glenda/notes", .file, "one\ntwo\n");
+    try h.mount();
+    try testing.expectEqual(Dialect.@"9P2000.L.Z", h.c.version());
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{ "usr", "glenda" }) });
+    _ = try h.ok(p9.Tcreate{ .fid = 1, .name = "new", .perm = 0o644, .mode = wire.ORDWR });
+    _ = try h.ok(p9.Twrite{ .fid = 1, .offset = 0, .data = .{ .bytes = "hi" } });
+    try testing.expectEqual(@as(u32, 2), h.s.applied);
+    try testing.expectEqualStrings("hi", h.s.lookup("usr/glenda/new").?.data.items);
+}
+
+test "a server that answers unknown to .L.Z is offered .L" {
+    var h = try Harness.init(wire.version_l);
+    defer h.deinit();
+    h.s.strict_version = true;
+    _ = try h.s.add("usr/glenda/notes", .file, "one\ntwo\n");
+    try h.mount();
+    try testing.expectEqual(Dialect.@"9P2000.L", h.c.version());
+    const got = try h.cat(5, &.{ "usr", "glenda", "notes" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("one\ntwo\n", got);
+}
+
+test "a reconnect rebinds fids, reopens without O_TRUNC, and resends a write once" {
+    var h = try Harness.init(wire.version_lz);
+    defer h.deinit();
+    _ = try h.s.add("usr/glenda/notes", .file, "one\ntwo\n");
+    try h.mount();
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{ "usr", "glenda", "notes" }) });
+    _ = try h.ok(p9.Topen{ .fid = 1, .mode = wire.OWRITE | wire.OTRUNC });
+    _ = try h.ok(p9.Twrite{ .fid = 1, .offset = 0, .data = .{ .bytes = "ab" } });
+    // The next write is applied, and the connection drops before its
+    // answer.
+    h.s.drop_after_write = h.s.writes;
+    const tag = try h.send(p9.Twrite{ .fid = 1, .offset = 2, .data = .{ .bytes = "cd" } });
+    try testing.expect(h.s.dropped);
+    try testing.expectEqual(@as(?wire.Frame(p9.R), null), try h.next());
+    try testing.expect(h.c.canReconnect());
+    // A request made while the connection is down waits for it.
+    const tag2 = try h.send(p9.Twrite{ .fid = 1, .offset = 4, .data = .{ .bytes = "ef" } });
+    h.s.reset();
+    try h.c.reconnect();
+    try h.pump();
+    const r = (try h.next()).?;
+    try testing.expectEqual(tag, r.tag);
+    try testing.expectEqual(@as(u32, 2), r.msg.Rwrite.count);
+    try testing.expectEqual(tag2, (try h.next()).?.tag);
+    try testing.expectEqual(@as(u32, 1), h.s.replayed);
+    try testing.expectEqualStrings("abcdef", h.s.lookup("usr/glenda/notes").?.data.items);
+    try testing.expectEqual(@as(u32, 1), h.c.reconnects);
+    // Fids work as before.
+    const got = try h.cat(5, &.{ "usr", "glenda", "notes" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("abcdef", got);
+}
+
+test "creating a file that exists truncates it, as create(5) does" {
+    var h = try Harness.init(wire.version_l);
+    defer h.deinit();
+    _ = try h.s.add("etc/motd", .file, "hello from .L\n");
+    try h.mount();
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{"etc"}) });
+    _ = try h.ok(p9.Tcreate{ .fid = 1, .name = "motd", .perm = 0o644, .mode = wire.OWRITE });
+    _ = try h.ok(p9.Twrite{ .fid = 1, .offset = 0, .data = .{ .bytes = "new\n" } });
+    try testing.expectEqualStrings("new\n", h.s.lookup("etc/motd").?.data.items);
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 2, .wnames = .init(&.{"etc"}) });
+    try testing.expectEqualStrings("file already exists", try h.err(p9.Tcreate{ .fid = 2, .name = "motd", .perm = 0o644 | wire.DMEXCL, .mode = wire.OWRITE }));
+}
+
+test "sequential reads read a whole msize ahead, and a write drops it" {
+    var h = try Harness.init(wire.version_l);
+    defer h.deinit();
+    const big = try testing.allocator.alloc(u8, 40000);
+    defer testing.allocator.free(big);
+    for (big, 0..) |*b, i| b.* = @intCast(i % 251);
+    _ = try h.s.add("big", .file, big);
+    try h.mount();
+    const before = std.mem.count(u8, h.s.log.items, &.{wire.common.Tread.id});
+    const got = try h.cat(1, &.{"big"});
+    defer testing.allocator.free(got);
+    try testing.expectEqualSlices(u8, big, got);
+    // Five 8 KiB reads and the one at the end: two upstream, the second
+    // finding the end.
+    try testing.expectEqual(before + 2, std.mem.count(u8, h.s.log.items, &.{wire.common.Tread.id}));
+
+    // What was read ahead isn't served once the file is written.
+    _ = try h.walk(0, 2, &.{"big"});
+    _ = try h.ok(p9.Topen{ .fid = 2, .mode = wire.OREAD });
+    _ = try h.ok(p9.Tread{ .fid = 2, .offset = 0, .count = 8192 });
+    _ = try h.walk(0, 3, &.{"big"});
+    _ = try h.ok(p9.Topen{ .fid = 3, .mode = wire.OWRITE });
+    _ = try h.ok(p9.Twrite{ .fid = 3, .offset = 8192, .data = .{ .bytes = "new" } });
+    const r = try h.ok(p9.Tread{ .fid = 2, .offset = 8192, .count = 3 });
+    try testing.expectEqualStrings("new", r.Rread.data.bytes);
+    // Nor at an offset it doesn't hold.
+    const r2 = try h.ok(p9.Tread{ .fid = 2, .offset = 100, .count = 2 });
+    try testing.expectEqualSlices(u8, big[100..102], r2.Rread.data.bytes);
 }

@@ -3,6 +3,13 @@
 //! walks stop at a symlink, Treaddir includes `.` and `..`, and errors
 //! are errnos. `hold` keeps requests unanswered until `release`, to test
 //! flushes.
+//!
+//! With `version` set to `9P2000.L.Z` it speaks ZeroFS's extension as far
+//! as the translator uses it: envelopes, whose op_ids it remembers so a
+//! resent mutation is applied once, and Trebind. `reset` starts a new
+//! connection on the same tree, as a server restarting keeps its files,
+//! and `drop_after_write` drops the connection after applying a write and
+//! before answering it, as a crash at the worst moment would.
 
 const std = @import("std");
 const wire = @import("wire.zig");
@@ -69,6 +76,26 @@ pub const Server = struct {
     log: std.ArrayList(u8) = .empty,
     /// The uname and n_uname of the last attach.
     attached_as: ?struct { []const u8, u32 } = null,
+    /// `9P2000.L.Z` was negotiated on this connection.
+    lz: bool = false,
+    /// Answer `unknown` to any version but `version` exactly, as some
+    /// .L servers do.
+    strict_version: bool = false,
+    /// Replies to mutations by op_id, kept across connections.
+    done: std.AutoHashMapUnmanaged([16]u8, []u8) = .empty,
+    /// Writes applied, across connections.
+    writes: u32 = 0,
+    /// After this many writes, apply the next one and then drop the
+    /// connection without answering it: `dropped` is set, and the
+    /// transport should close.
+    drop_after_write: ?u32 = null,
+    dropped: bool = false,
+    /// Answers this many mutations with ENOTLEADER, without applying
+    /// them, as an HA server that lost the lead would.
+    not_leader: u32 = 0,
+    /// Mutations applied, and resent ones answered from `done`.
+    applied: u32 = 0,
+    replayed: u32 = 0,
 
     pub fn init(gpa: Allocator) !*Server {
         const s = try gpa.create(Server);
@@ -78,7 +105,23 @@ pub const Server = struct {
         return s;
     }
 
+    /// A new connection on the same tree: fids and buffers start over.
+    pub fn reset(s: *Server) void {
+        s.fids.clearRetainingCapacity();
+        s.in.items.len = 0;
+        s.out.items.len = 0;
+        for (s.held.items) |h| s.gpa.free(h);
+        s.held.items.len = 0;
+        s.hold = false;
+        s.lz = false;
+        s.msize = 1 << 16;
+        s.dropped = false;
+    }
+
     pub fn deinit(s: *Server) void {
+        var it = s.done.valueIterator();
+        while (it.next()) |v| s.gpa.free(v.*);
+        s.done.deinit(s.gpa);
         s.fids.deinit(s.gpa);
         s.in.deinit(s.gpa);
         s.out.deinit(s.gpa);
@@ -124,6 +167,7 @@ pub const Server = struct {
     pub fn feed(s: *Server, bytes: []const u8) !void {
         try s.in.appendSlice(s.gpa, bytes);
         while (try wire.header(s.in.items, s.msize)) |h| {
+            if (s.dropped) return;
             if (s.in.items.len < h.size) break;
             const frame = try s.gpa.dupe(u8, s.in.items[0..h.size]);
             std.mem.copyForwards(u8, s.in.items, s.in.items[h.size..]);
@@ -172,13 +216,62 @@ pub const Server = struct {
     }
 
     fn handle(s: *Server, frame: []const u8) !void {
-        const d = try wire.decode(l.T, frame, s.msize, false);
+        const d = try wire.decode(l.T, frame, s.msize, s.lz);
+        const e = d.env orelse return s.handleMsg(d);
+        // A mutation: answered from `done` if its op_id was applied.
+        if (s.done.get(e.op_id)) |r| {
+            s.replayed += 1;
+            const at = s.out.items.len;
+            try s.out.appendSlice(s.gpa, r);
+            std.mem.writeInt(u16, s.out.items[at + 5 ..][0..2], d.tag, .little);
+            return;
+        }
+        if (s.not_leader > 0) {
+            s.not_leader -= 1;
+            return s.lerr(d.tag, L.ENOTLEADER);
+        }
+        const at = s.out.items.len;
+        try s.handleMsg(d);
+        s.applied += 1;
+        try s.done.put(s.gpa, e.op_id, try s.gpa.dupe(u8, s.out.items[at..]));
+        if (d.msg == .Twrite) {
+            s.writes += 1;
+            if (s.drop_after_write) |n| if (s.writes > n) {
+                s.drop_after_write = null;
+                s.out.items.len = at;
+                s.dropped = true;
+            };
+        }
+    }
+
+    fn nodeByPath(n: *Node, path: u64) ?*Node {
+        if (n.path == path) return n;
+        for (n.children.items) |c| if (nodeByPath(c, path)) |f| return f;
+        return null;
+    }
+
+    fn handleMsg(s: *Server, d: wire.Frame(l.T)) !void {
         const tag = d.tag;
         const a = s.arena.allocator();
         switch (d.msg) {
             .Tversion => |v| {
                 s.msize = @min(s.msize, v.msize);
-                try s.send(tag, wire.common.Rversion{ .msize = s.msize, .version = s.version });
+                var ver = s.version;
+                if (!std.mem.eql(u8, v.version, s.version)) {
+                    if (s.strict_version) {
+                        ver = "unknown";
+                    } else if (std.mem.eql(u8, s.version, wire.version_lz)) {
+                        ver = wire.version_l;
+                    }
+                }
+                s.lz = std.mem.eql(u8, ver, wire.version_lz);
+                try s.send(tag, wire.common.Rversion{ .msize = s.msize, .version = ver });
+            },
+            .Trebind => |rb| {
+                if (!s.lz) return s.lerr(tag, E.OPNOTSUPP);
+                const n = nodeByPath(s.root, rb.inode_id) orelse return s.lerr(tag, E.NOENT);
+                try s.fids.put(s.gpa, rb.fid, .{ .node = n });
+                try s.send(tag, l.Rrebind{ .qid = n.qid() });
             },
             .Tattach => |at| {
                 s.attached_as = .{ try a.dupe(u8, at.uname), at.n_uname };

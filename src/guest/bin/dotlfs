@@ -1,12 +1,17 @@
 #!/bin/rc
-# dotlfs [-abcC] addr mountpoint [spec]: mounts a 9P2000.L server, or a
-# 9P2000 one, through #ℓ (design/0022-dotl.md). addr is a dial string, so
-# the dial goes through /net under the network policy.
+# dotlfs [-abcCL] addr[,addr...] mountpoint [spec]: mounts a 9P2000.L
+# server, or a 9P2000 one, through #ℓ (design/0022-dotl.md). addr is a
+# dial string, tcp!host!port, and the dial goes through #I under the
+# network policy. With 9P2000.L.Z the conversation redials the addresses
+# when the connection drops; -L offers plain 9P2000.L only.
 rfork e
-fn usage { echo 'usage: dotlfs [-abcC] addr mountpoint [spec]' >[1=2]; exit usage }
+fn usage { echo 'usage: dotlfs [-abcCL] addr[,addr...] mountpoint [spec]' >[1=2]; exit usage }
 flags=()
+version=()
 while(~ $1 -*){
 	switch($1){
+	case -L
+		version=9P2000.L
 	case -[abcC]*
 		flags=($flags $1)
 	case *
@@ -15,10 +20,21 @@ while(~ $1 -*){
 	shift
 }
 ~ $#* 2 3 || usage
-srvname=dotlfs.$pid
-# srv always says post..., and its note handler misnames any note.
-srv -q $1 $srvname >[2=1] | sed '/^(post\.\.\.|write on closed pipe)$/d' >[1=2] || exit dial
+addrs=()
+for(a in `{echo $1 | sed 's/,/ /g'}){
+	switch($a){
+	case *!*!*
+		;
+	case *!*
+		a=$a!564
+	case *
+		a=tcp!$a!564
+	}
+	addrs=($addrs $a)
+}
+addr=`{echo $addrs | sed 's/ /,/g'}
 { n=`{read}
-  rm -f /srv/$srvname
-  echo fd 3 >/net/dotl/$n/ctl || exit ctl
-  mount -n $flags /net/dotl/$n/data $2 $3 } <>/net/dotl/clone <>[3]/srv/$srvname
+  if(! ~ $#version 0)
+	echo version $version >/net/dotl/$n/ctl
+  echo dial $addr >/net/dotl/$n/ctl || exit dial
+  mount -n $flags /net/dotl/$n/data $2 $3 } <>/net/dotl/clone

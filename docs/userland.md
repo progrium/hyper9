@@ -587,8 +587,9 @@ welcome to box
   ([root-auth](../design/root-auth.md) is a draft), so a server that wants it
   is refused with exit 125. A TCP root is plain 9P, so keep it on loopback or
   a network you trust.
-- **Plain 9P2000.** Not 9P2000.u or 9P2000.L (the
-  [dotl](../design/0022-dotl.md) draft would add .L).
+- **9P2000 or 9P2000.L.** Not 9P2000.u. A .L server goes through a
+  translator ([dotl](../design/0022-dotl.md)), so devmnt still speaks
+  9P2000.
 - **Partial walks, as 9P specifies.** When a walk of several names fails
   partway, the server must answer with the names it did walk, not an error.
   The kernel walks `dev/cons` in one message to reach the console bound over

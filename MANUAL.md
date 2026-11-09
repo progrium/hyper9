@@ -1599,12 +1599,26 @@ devices in Plan 9.
   `--user-map FILE` gives a file in `/etc/passwd` format to map names to
   numbers both ways, and it's the only way to send 0. `/net/dotl/N/status`
   says which dialect the server chose. A 9P root's address can be a .L
-  server too: `--root tcp!host!port` works with either.
+  server too: `--root tcp!host!port` works with either. A file read from
+  start to end is read a whole `msize` (up to 1 MiB) at a time, not
+  devmnt's 32 KiB, and any write drops what was read ahead.
+- **Reconnecting to ZeroFS** ([dotl](design/0022-dotl.md)). With a server
+  that speaks ZeroFS's 9P2000.L.Z, a TCP mount or root survives the
+  connection dropping: h9 dials again for up to 120 seconds, a second apart,
+  reopens every open file without truncating it, and resends each request
+  that wasn't answered, which the server applies once. Meanwhile the guest
+  sees slow replies, not errors. `dotlfs host1,host2 mountpoint` gives
+  addresses to try in turn, as for an HA server, and a server that answers
+  that it's no longer the leader is dialed again the same way. `dotlfs -L`
+  asks for plain .L. `/net/dotl/N/status` shows `9P2000.L.Z reconnects N`
+  once a reconnect has happened. Unix socket and WebSocket roots don't
+  reconnect yet.
 - Not yet available: roots that need authentication
   ([root-auth](design/root-auth.md)); serving a machine's namespace to the
   host or the network as a 9P server from h9 itself, rather than with
   `exportfs` inside the guest as below ([serve](design/0035-serve.md)); and
-  ZeroFS's reconnecting 9P2000.L.Z ([dotl](design/0022-dotl.md)).
+  9P2000.L.Z's compound requests, which save round trips
+  ([dotl](design/0022-dotl.md)).
 - 9front disk images as roots were proposed and declined
   ([image-roots](design/0014-image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an

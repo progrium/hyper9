@@ -1244,7 +1244,7 @@ pub const Machine = struct {
         const mc = kern.mach();
         j.mach.store(mc, .release);
         // What #ℓ's translators send as the machine's user.
-        if (mc) |x| dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map });
+        if (mc) |x| dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
         const r = m.startFirst(p);
         // The status and err_msg can point into the Proc or its errstr,
         // which go when it exits.
@@ -3088,7 +3088,9 @@ pub const Machine = struct {
                 .ca_file = m.opts.root_ca,
                 .proxy = m.opts.proxy orelse .{},
             }, "root")),
-            .tcp => |a| dialTcp(a),
+            // `#ℓ` dials a TCP root itself, so it can dial again if the
+            // server goes (9P2000.L.Z).
+            .tcp => |a| return m.postDotl(dotlConv("dial {s}", a)),
             .unix => |path| kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("root {s}: name too long", .{addr})),
         } catch return m.fail("root {s}: {s}", .{ addr, kern.errstr() });
         return m.postRoot(fd);
@@ -3098,12 +3100,15 @@ pub const Machine = struct {
     /// conversation (design/0022-dotl.md), so a 9P2000.L server works as a
     /// root and a 9P2000 one passes through. Closes `fd`.
     fn postRoot(m: *Machine, conn: u31) RunError!void {
+        defer kern.close(conn) catch {};
+        return m.postDotl(dotlConv("fd {d}", conn));
+    }
+
+    /// Posts the data file of a `#ℓ` conversation, `data` from dotlConv,
+    /// as `#s/root`.
+    fn postDotl(m: *Machine, data: kern.Error!u31) RunError!void {
         const addr = m.plan.root_9p.?.addr;
-        const fd = dotlData(conn) catch {
-            kern.close(conn) catch {};
-            return m.fail("root {f}: 9P2000.L: {s}", .{ ws.Url.elide(addr), kern.errstr() });
-        };
-        kern.close(conn) catch {};
+        const fd = data catch return m.fail("root {f}: {s}", .{ ws.Url.elide(addr), kern.errstr() });
         defer kern.close(fd) catch {};
         const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
         defer kern.close(srv) catch {};
@@ -3111,16 +3116,17 @@ pub const Machine = struct {
         _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
     }
 
-    /// Starts a `#ℓ` conversation on connection `conn` and returns an fd
-    /// on its data file, which devmnt mounts. `conn` can be closed after.
-    fn dotlData(conn: u31) kern.Error!u31 {
+    /// Starts a `#ℓ` conversation with the ctl message `fmt` ("fd N" for
+    /// a connection, which can be closed after, or "dial ADDR") and
+    /// returns an fd on its data file, which devmnt mounts.
+    fn dotlConv(comptime fmt: []const u8, arg: anytype) kern.Error!u31 {
         const dev = "#" ++ policy.dotl_dev ++ "/dotl/";
         const clone = try kern.open(dev ++ "clone", kern.ORDWR);
         defer kern.close(clone) catch {};
         var nbuf: [16]u8 = undefined;
         const n = std.mem.trim(u8, nbuf[0..try kern.pread(clone, &nbuf, 0)], " \n");
-        var cmd: [32]u8 = undefined;
-        _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "fd {d}", .{conn}) catch unreachable, 0);
+        var cmd: [600]u8 = undefined;
+        _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, fmt, .{arg}) catch return error.Kern, 0);
         var path: [64]u8 = undefined;
         return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
     }
@@ -3144,40 +3150,6 @@ pub const Machine = struct {
         defer hstream.release(id);
         kern.hstreamWait(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
         return kern.hstreamFd(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
-    }
-
-    /// Dials `tcp!host!port` through `#I`, as 9front's dial does through
-    /// /net: cs translates the address, and each translation is tried in
-    /// turn. Returns an fd on the connection's data file.
-    fn dialTcp(addr: []const u8) kern.Error!u31 {
-        var buf: [512]u8 = undefined;
-        const cs = try kern.open("#I/cs", kern.ORDWR);
-        defer kern.close(cs) catch {};
-        _ = try kern.pwrite(cs, addr, 0);
-        // cs returns one "/net/tcp/clone ip!port" line per read, so a name
-        // with several addresses (::1 and 127.0.0.1 for localhost) takes
-        // several reads.
-        var off: i64 = 0;
-        var last: kern.Error = error.Kern;
-        while (true) {
-            const n = try kern.pread(cs, &buf, off);
-            if (n == 0) return last;
-            off += @intCast(n);
-            const line = std.mem.trimEnd(u8, buf[0..n], "\n");
-            const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
-            if (dialOne(line[sp + 1 ..])) |fd| return fd else |e| last = e;
-        }
-    }
-
-    fn dialOne(ipport: []const u8) kern.Error!u31 {
-        var buf: [128]u8 = undefined;
-        const ctl = try kern.open("#I/tcp/clone", kern.ORDWR);
-        defer kern.close(ctl) catch {};
-        const n = try kern.pread(ctl, &buf, 0);
-        const conv = std.mem.trim(u8, buf[0..n], " \n");
-        var cmd: [160]u8 = undefined;
-        _ = try kern.pwrite(ctl, std.fmt.bufPrint(&cmd, "connect {s}", .{ipport}) catch return error.Kern, 0);
-        return kern.open(std.fmt.bufPrintZ(&cmd, "#I/tcp/{s}/data", .{conv}) catch return error.Kern, kern.ORDWR);
     }
 
     /// Mounts the 9P root's posted connection (`b.from`) at `b.to`. devmnt
