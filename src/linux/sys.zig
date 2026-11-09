@@ -984,8 +984,12 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .fsync, .fdatasync => return ret(fsync(c.int(0))),
         // A hint to start writing back: fsync does the writing here.
         .sync_file_range => return ret(if (kc.fdInfo(c.int(0))) |_| 0 else |_| -E.BADF),
-        .syncfs => return ret(if (c.int(0) < 0) -E.BADF else 0),
-        .sync => return ret(0),
+        .syncfs => return ret(syncfs(c.int(0))),
+        // Host errors have no fd to report them on, as Linux's sync.
+        .sync => {
+            kc.sync() catch {};
+            return ret(0);
+        },
         .getcwd => {
             const cwd = kc.getcwd(&p.name_buf) catch return ret(kerr());
             if (cwd.len + 1 > c.a[1]) return ret(-E.RANGE);
@@ -2496,17 +2500,26 @@ fn statExists(dirfd: i32, path: [:0]const u8) bool {
 }
 
 /// fsync and fdatasync: a wstat that changes nothing, which a host file
-/// system serves with the host's fsync (src/kern/devfs-*.c). Devices that
-/// don't keep data, and 9P servers that refuse it, have nothing to sync.
+/// system serves with the host's fsync of the file or directory
+/// (third_party/drawterm/kern/devfs-*.c). Databases fsync a directory
+/// to make a rename or a create in it durable. Devices that don't keep
+/// data, and 9P servers that refuse it, have nothing to sync.
 fn fsync(fd: i32) i64 {
     if (fd < 0) return -E.BADF;
     const info = kc.fdInfo(fd) catch return -E.BADF;
-    if (info.dir) return 0;
     var b: [64]u8 = undefined;
     _ = kern.fwstat(@intCast(fd), (Wstat{}).encode(&b)) catch {
         // devfs raises the host's error; anything else means no sync.
         return if (info.dc == 'U') -E.IO else 0;
     };
+    return 0;
+}
+
+/// syncfs: the host file system behind fd's channel (src/kern/linux.c).
+fn syncfs(fd: i32) i64 {
+    if (fd < 0) return -E.BADF;
+    const info = kc.fdInfo(fd) catch return -E.BADF;
+    kc.syncfs(fd) catch return if (info.dc == 'U') -E.IO else 0;
     return 0;
 }
 

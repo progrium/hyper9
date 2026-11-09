@@ -5286,6 +5286,58 @@ test "fsync works, and wait4 and getrusage report CPU time [18]" {
     try netCase(&le, &.{ "/mnt/term/cwd/files", "fsync_rusage" }, "ok fsync_rusage\n");
 }
 
+test "fsync on a directory, syncfs and sync reach the host [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "dir_sync" }, "ok dir_sync\n");
+    // A durable rename needs the host to sync the directory: on a Linux
+    // host with a working strace, check that the host calls happen, on a
+    // host directory (the guest's /tmp is in memory), and never on fd 0,
+    // which a directory's devfs channel used to have as its file's fd.
+    if (builtin.os.tag != .linux) return;
+    if (runProcessWith(&.{ "strace", "-o", "/dev/null", "true" }, null, null, 10_000)) |p| {
+        defer gpa.free(p.stdout);
+        defer gpa.free(p.stderr);
+        if (p.term != .exited or p.term.exited != 0) return;
+    } else |_| return;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
+    var trace_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const trace = try std.fmt.bufPrint(&trace_buf, "{s}/trace", .{s.path});
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    const p = try runProcessWith(&.{
+        "strace", "-f",     "-y",    "-qq",                 "-e",                    "trace=fsync,fdatasync,syncfs,sync",
+        "-o",     trace,    le.h9,   "--backend",           it.next() orelse "auto", "--arch",
+        le.arch,  "--root", le.root, "--cwd",               le.fixtures,             "--writable",
+        s.path,   "env",    dir,     "/mnt/term/cwd/files", "dir_sync",
+    }, null, null, 120_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ p.stdout, p.stderr });
+    try std.testing.expectEqualStrings("ok dir_sync\n", p.stdout);
+    const st = try s.tmp.dir.readFileAlloc(std.testing.io, "trace", gpa, .limited(1 << 20));
+    defer gpa.free(st);
+    errdefer std.debug.print("strace: {s}\n", .{st});
+    var dir_fsyncs: usize = 0;
+    var syncfs = false;
+    var sync = false;
+    var lines = std.mem.tokenizeScalar(u8, st, '\n');
+    while (lines.next()) |l| {
+        try std.testing.expect(std.mem.indexOf(u8, l, "sync(0") == null);
+        var tail_buf: [std.Io.Dir.max_path_bytes + 2]u8 = undefined;
+        const on_dir = std.mem.indexOf(u8, l, try std.fmt.bufPrint(&tail_buf, "<{s}>)", .{s.path})) != null;
+        if (on_dir and std.mem.indexOf(u8, l, " fsync(") != null) dir_fsyncs += 1;
+        if (on_dir and std.mem.indexOf(u8, l, " syncfs(") != null) syncfs = true;
+        if (std.mem.indexOf(u8, l, " sync()") != null) sync = true;
+    }
+    // fsync and fdatasync on the directory.
+    try std.testing.expect(dir_fsyncs >= 2);
+    try std.testing.expect(syncfs and sync);
+}
+
 test "page-by-page preads read ahead, and see writes and truncates at once [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

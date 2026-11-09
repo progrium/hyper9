@@ -51,6 +51,7 @@ static	Qid	fsqid(struct stat *);
 static	char*	catpath(char*, char*);
 static	ulong	fsdirread(Chan*, uchar*, int, ulong);
 static	int	fsomode(int);
+static	void	fsflush(Chan*);	/* h9 */
 
 static char*
 lastelem(char *s)
@@ -541,10 +542,13 @@ fswstat(Chan *c, uchar *buf, int n)
 		error(Ebadstat);
 	
 	uif = c->aux;
-	/* h9: a wstat that changes nothing syncs the file (fsync(2) for Linux programs) */
+	/*
+	 * h9: a wstat that changes nothing syncs the open file or directory
+	 * (fsync(2) for Linux programs; a directory's makes a rename or a
+	 * create in it durable).
+	 */
 	if(~d.mode == 0 && ~d.atime == 0 && ~d.mtime == 0 && (uvlong)d.length == (uvlong)~0 && d.name[0] == 0){
-		if(uif->fd >= 0 && fsync(uif->fd) < 0 && errno != EINVAL)
-			error(strerror(errno));
+		fsflush(c);
 		return n;
 	}
 	/*
@@ -886,6 +890,82 @@ h9_fs_rename(Chan *c, Chan *dir, char *name)
 	poperror();
 	free(newpath);
 	return 0;
+}
+
+/*
+ * h9: the host fd of an open file or directory, or -1. uif->fd is 0
+ * until a file is opened, and a directory's is never set: its DIR is.
+ */
+static int
+fshostfd(Chan *c)
+{
+	Ufsinfo *uif;
+
+	uif = c->aux;
+	if((c->flag & COPEN) == 0)
+		return -1;
+	if(c->qid.type & QTDIR)
+		return uif->dir != NULL ? dirfd(uif->dir) : -1;
+	return uif->fd;
+}
+
+/*
+ * h9: syncs an open file or directory to the host's disk. On macOS
+ * fsync(2) leaves the data in the drive's cache; F_FULLFSYNC flushes
+ * it, and fsync stands in where the file system can't. Hosts that can't
+ * sync a directory say EINVAL (or EBADF for one opened read-only), as
+ * PostgreSQL's fsync_fname allows for.
+ */
+static void
+fsflush(Chan *c)
+{
+	int fd;
+
+	if((fd = fshostfd(c)) < 0)
+		return;
+#ifdef F_FULLFSYNC
+	if(fcntl(fd, F_FULLFSYNC) == 0)
+		return;
+#endif
+	if(fsync(fd) < 0 && errno != EINVAL && !(errno == EBADF && (c->qid.type & QTDIR)))
+		error(strerror(errno));
+}
+
+#if defined(__linux__)
+extern int syncfs(int);
+#endif
+
+/*
+ * h9: syncfs(2) on the open devfs chan c: Linux's syncfs on the host
+ * file system it's on. Elsewhere, sync(2) and then the file's own sync,
+ * which on macOS (F_FULLFSYNC) also flushes the drive's cache; the web
+ * host has only the file's.
+ */
+void
+h9_fs_syncfs(Chan *c)
+{
+	int fd;
+
+	if(devtab[c->type]->dc != 'U' || (fd = fshostfd(c)) < 0)
+		return;
+#if defined(__linux__)
+	if(syncfs(fd) < 0)
+		error(strerror(errno));
+#else
+#if !defined(__wasi__)
+	sync();
+#endif
+	fsflush(c);
+#endif
+}
+
+/* h9: sync(2): every host file system (none on the web host). */
+void
+h9_fs_sync(void)
+{
+#if !defined(__wasi__)
+	sync();
+#endif
 }
 
 static int
