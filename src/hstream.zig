@@ -35,6 +35,7 @@
 //! raises it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ws = @import("ws.zig");
 const kern = @import("kern.zig");
 const policy = @import("policy.zig");
@@ -910,6 +911,7 @@ fn connect(s: *Stream) ConnectError!void {
         }
         return last;
     } else try dial(io, if (proxy) |p| p.host else url.host, if (proxy) |p| p.port else url.port);
+    noDelay(stream);
     const c = Conn.create(stream) catch |e| {
         stream.close(io);
         return e;
@@ -1085,6 +1087,23 @@ fn protoSlices(s: *Stream) []const []const u8 {
 fn headerSlices(s: *Stream) []const []const u8 {
     return @ptrCast(s.headers.items);
 }
+
+/// Turns off Nagle's algorithm on `st`. A 9P request is a small write,
+/// and so is the pong h9 sends for a server's ping. With Nagle on, a
+/// request written while a pong is unacknowledged waits for the server's
+/// delayed ACK (40 ms on Linux, up to 200 ms on macOS) before it's sent,
+/// on every round trip that follows a ping. Browsers turn it off for
+/// WebSockets too.
+fn noDelay(st: net.Stream) void {
+    const one: c_int = 1;
+    if (builtin.os.tag == .windows) {
+        _ = setsockopt(st.socket.handle, 6, 1, std.mem.asBytes(&one), @sizeOf(c_int));
+    } else std.posix.setsockopt(st.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
+}
+
+/// Winsock's, which std.posix doesn't wrap: IPPROTO_TCP is 6 and
+/// TCP_NODELAY 1 there too.
+extern "ws2_32" fn setsockopt(s: net.Socket.Handle, level: i32, optname: i32, optval: [*]const u8, optlen: i32) callconv(.winapi) i32;
 
 /// Connects to `host`, a name or a literal address.
 fn dial(io: Io, host: []const u8, port: u16) !net.Stream {

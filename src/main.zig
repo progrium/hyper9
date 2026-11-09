@@ -176,6 +176,14 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     }
     const wo = wsOptions(arena, io, cfg, root, init.environ_map) catch |e| return wsExit(e);
     const so = serveOptions(arena, io, cfg) catch |e| return wsExit(e);
+    // H9_TEST_KEEPALIVE (milliseconds) shortens the WebSocket keepalive's
+    // 30 s idle time, so the integration case that waits out a ping and a
+    // missed pong takes seconds rather than two minutes. Tests only.
+    if (init.environ_map.get("H9_TEST_KEEPALIVE")) |v| {
+        if (std.fmt.parseInt(u32, v, 10)) |ms| {
+            if (ms > 0) h9.hstream.keepalive_idle_ns = @as(u64, ms) * std.time.ns_per_ms;
+        } else |_| {}
+    }
     const cwd_arg = cfg.sandbox orelse cfg.cwd orelse ".";
     const cwd = kernPath(arena, realPath(io, arena, cwd_arg) catch {
         std.debug.print("h9: cwd {s}: not found\n", .{cwd_arg});

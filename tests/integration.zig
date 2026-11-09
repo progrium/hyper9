@@ -2187,11 +2187,16 @@ test "/proc/n/ctl kill stops a process [baseline]" {
 
 test "notepg reaches the note group and not a new one [baseline]" {
     const e = try env(@src());
-    // The block in braces makes its own note group (rfork s), so the
-    // hangup posted to rc's group doesn't reach it; sleep 1000 is in rc's.
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup {}; { rfork s; sleep 1; echo survived } & sleep 1000 & echo hangup >/proc/$pid/notepg; wait; echo done" });
+    // rc runs each & job in a note group of its own (rfork RFNOTEG), so the
+    // background block isn't in rc's group and survives the hangup it posts
+    // there, while the foreground sleep 1000 is in rc's group and dies of
+    // it. The block waits for sleep to have exec'd first, since exec drops
+    // notes queued before it. If the hangup didn't reach sleep, --timeout
+    // would end the run, and the exit code says so.
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "p=$pid; { while(! grep -s '^sleep 1000$' /proc/*/args) sleep 0; echo hangup >/proc/$p/notepg; sleep 1; echo survived } & fn sighup {}; sleep 1000; wait; echo done" });
     defer r.deinit();
     try std.testing.expectEqualStrings("survived\ndone\n", r.out);
+    try std.testing.expectEqual(0, r.code);
 }
 
 test "/proc/n has status, fd, ns and args [baseline]" {
@@ -2498,8 +2503,12 @@ test "outbound refuses link-local without patterns [5]" {
 test "a pattern allows link-local [5]" {
     const e = try env(@src());
     var cmd_buf: [256]u8 = undefined;
-    // Nothing listens there, so the connect fails, but not by the policy.
-    const r = try run(e, &.{ "--net-allow", "tcp!169.254.0.0/16!*", "--timeout", "20s", "--rc", try rcDial(&cmd_buf, "169.254.169.254!80", "x") });
+    // The policy refuses the connect at once, so a short --timeout is
+    // enough to tell. Past the policy, nothing usually answers there and
+    // the host's connect waits until --timeout ends the run (on a cloud VM,
+    // the metadata service may answer instead).
+    var to_buf: [16]u8 = undefined;
+    const r = try run(e, &.{ "--net-allow", "tcp!169.254.0.0/16!*", "--timeout", slowTimeout(&to_buf, 2000), "--rc", try rcDial(&cmd_buf, "169.254.169.254!80", "x") });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") == null);
 }
@@ -3994,25 +4003,32 @@ test "a server close makes guest file operations fail [21]" {
 
 test "an idle ws:// root pings, and a server that stops answering fails it [21]" {
     const e = try env(@src());
-    // The keepalive pings after 30 s without a frame and fails the
-    // connection 30 s after that, so this case takes over a minute.
+    // H9_TEST_KEEPALIVE shortens the keepalive's 30 s idle time to 1 s:
+    // h9 pings after 1 s without a frame and fails the connection 1 s
+    // after an unanswered ping. The sleeps are a few idle periods long.
+    var ka_buf: [16]u8 = undefined;
+    const ka = try std.fmt.bufPrint(&ka_buf, "{d}", .{slow(1000)});
+    var cmd_buf: [64]u8 = undefined;
     {
         var w: WsRoot = undefined;
         try w.start(e, .{});
         defer w.stop();
-        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", "sleep 40; /bin/echo still" }, &.{}, 90_000);
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 4 / 1000});
+        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stderr: {s}\n", .{r.err});
         try std.testing.expectEqual(0, r.code);
         try std.testing.expectEqualStrings("still\n", r.out);
-        try std.testing.expect(w.relay.pings.load(.acquire) >= 1);
+        try std.testing.expect(w.relay.pings.load(.acquire) >= 2);
     }
     {
         var w: WsRoot = undefined;
         try w.start(e, .{ .no_pong = true });
         defer w.stop();
-        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", "sleep 70; /bin/echo still" }, &.{}, 120_000);
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 6 / 1000});
+        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
         try std.testing.expect(r.code != 0);
         try std.testing.expect(std.mem.indexOf(u8, r.out, "still") == null);
         try std.testing.expect(w.relay.pings.load(.acquire) >= 1);
