@@ -85,6 +85,12 @@ const Tr = union(enum) {
 
 fn secondsNow() u32 {
     if (web.enabled or !builtin.link_libc) return 0;
+    if (builtin.os.tag == .windows) {
+        // 100ns ticks since 1601; Windows' C library has no clock_gettime.
+        const ticks = std.os.windows.ntdll.RtlGetSystemTimePrecise();
+        const secs = @divFloor(ticks, 10_000_000) - 11_644_473_600;
+        return @intCast(@max(0, @min(secs, std.math.maxInt(u32))));
+    }
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 0;
     return @intCast(@max(0, @min(ts.sec, std.math.maxInt(u32))));
