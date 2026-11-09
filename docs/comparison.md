@@ -14,7 +14,7 @@
 > This is a short map from things you may already know to h9. The
 > [manual](../MANUAL.md)'s first chapter has a smaller version for other ways
 > to run Plan 9; this one goes wider. For how h9 works, see
-> [DESIGN.md](../DESIGN.md).
+> [SPEC.md](../SPEC.md).
 
 ## h9 in one paragraph
 
@@ -58,7 +58,7 @@ process, and its kernel is Plan 9's, which makes the namespace, 9P, and
 
 **9front in QEMU, or on hardware.** That's the real system: the 9front kernel,
 its drivers, a disk, a boot. h9 deliberately isn't (running the 9front kernel
-is a [non-goal](../DESIGN.md#overview)). It runs one program, or one process
+is a [non-goal](../SPEC.md#overview)). It runs one program, or one process
 tree, against a namespace it builds, and exits with it. You get a real 9front
 userland as host commands (`git log | h9 sort | h9 uniq -c`), rio and acme in
 a host window with `--gfx`, and the compilers and `mk` rebuilding 9front

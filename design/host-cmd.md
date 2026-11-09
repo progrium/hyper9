@@ -88,7 +88,7 @@ The guest can run only the host programs the user names, with the scrubbed envir
 2. `src/kern/devhcmd.c`: the device over it, following devhstream. Swap it into devtab for devcmd and drop `hostcmd.c` and the `-Doscmd` renames.
 3. Policy: `host_cmds`, `host_cmd_env`, `proc.host`, resolving names at compile time, `--print`'s `host-cmd:` line, and the caveats. Update the CLI flags.
 4. `hcmd`: drop the `/proc/$pid/ns` parsing and use `wait`'s new format.
-5. Remove `-Dhost-cmd`. Update README, MANUAL, DESIGN.md, and `docs/embedding.md`.
+5. Remove `-Dhost-cmd`. Update README, MANUAL, SPEC.md, and `docs/embedding.md`.
 
 ## Open issues
 

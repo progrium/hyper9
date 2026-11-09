@@ -114,7 +114,7 @@ The build check that rejects a non-rc executable is a `zig build test` case.
 1. The build step that embeds `src/guest/` as a table, with the rc check.
 2. `src/kern/devhtools.c`, its `devtab.c` entry, and `h9_tools_table` in `src/kern.zig`.
 3. The bind and `--no-guest-tools` in `src/policy.zig`, `src/cli.zig`, and `Machine.Options`.
-4. README: the flag, and a line on where `wsmount` and the like come from. DESIGN.md: `#H` in the "Added by us" table, the namespace listing, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
+4. README: the flag, and a line on where `wsmount` and the like come from. SPEC.md: `#H` in the "Added by us" table, the namespace listing, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 

@@ -33,7 +33,7 @@ There's no standard for 9P over WebSocket, but existing servers and bridges agre
 
 - **9P roots** are proposed in [9p-roots](0013-9p-roots.md): `--root tcp!host!port` dials through devip and `--root unix!path` wraps a host socket with devlfd's `lfdchan`. Either way devmnt mounts the connection at `/` before any other bind, and the root's connection isn't subject to `--net`, since h9 makes it, not the guest.
 - **devmnt reads a byte stream.** `mntrpcread` in drawterm's `kern/devmnt.c` reads the size, type, and tag, then reads until it has the whole message, through the channel's `bread`. It doesn't need a message per read, so any channel that delivers the server's bytes in order can carry 9P.
-- **devhcons** (`src/kern/devhcons.c`) is a kernel device whose reads and writes are leaf calls into Zig (DESIGN.md, seam rule 3). A Zig reader thread (`src/consin.zig`) does the host reads, and a guest read sleeps on a Rendez until there's input, so a note or a teardown interrupts it with `Eintr`.
+- **devhcons** (`src/kern/devhcons.c`) is a kernel device whose reads and writes are leaf calls into Zig (SPEC.md, seam rule 3). A Zig reader thread (`src/consin.zig`) does the host reads, and a guest read sleeps on a Rendez until there's input, so a note or a teardown interrupts it with `Eintr`.
 - **Guest mounts** come with [devsrv](0008-devsrv.md), which serves the `mount`, `unmount`, and `fauth` syscalls. `mount` takes any open fd that speaks 9P, and the `mount` command opens any path, not only `/srv` entries.
 - **Guest networking** is devip (`#I`) at `/net`, governed by [net-policy](0005-net-policy.md): `--net=disable` masks `#I`, `outbound` refuses `announce`, and `--net-allow` patterns are checked on every `connect` and at `/net/cs`, through the Zig leaves `h9_net_check`, `h9_net_lookup`, and `h9_net_resolved`. The browser host masks `#I`, so a guest there has no network at all.
 - **No WebSocket client** exists in the 9front userland. webfs speaks HTTP but doesn't do the upgrade, and nothing else in the pinned root tree does.
@@ -445,7 +445,7 @@ Demo: `h9 --root ws://localhost:8080/9p ls /` lists the served tree, with the se
 6. The plan: the `mount '#s/root'` line for URLs, the elision, the caveats, and the `--write=none` conflict in `src/policy.zig`.
 7. `/net/ws`: devhstream's guest tree, `clone`, `ctl`, `data`, `text`, `remote`, and `status`, per-machine conversations, the `bind -a '#ℏ' /net` and the mask under `--net=disable` in `src/policy.zig`, and net-policy's checks in `src/hstream.zig`. Then the guest cases, `wsmount` in `src/guest/bin`, and the rc snippet in README.
 8. Once [browser-host](0012-browser-host.md) is built: the `h9_ws_*` imports in `h9-web.js`, `hstream.zig`'s web branch, `createMachine`'s URL root, `/net/ws` as the web host's network, and the web cases.
-9. README's `--root` notes, `--root-header`, `--root-ca`, proxies, and `/net/ws`. DESIGN.md: the root filesystem paragraph, the kernel's "Added by us" table (devhstream), the boot sequence, the capability table's `net.*` rows, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
+9. README's `--root` notes, `--root-header`, `--root-ca`, proxies, and `/net/ws`. SPEC.md: the root filesystem paragraph, the kernel's "Added by us" table (devhstream), the boot sequence, the capability table's `net.*` rows, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 

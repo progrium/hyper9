@@ -108,7 +108,7 @@ checkout needs Unicorn's prebuilt library in `.local/unicorn`
 (`-Dtarget=x86_64-linux-musl`). On a Mac your build also has to sign the
 binary with the entitlement, as above, and set `SDKROOT` if Zig can't find
 the SDK (`scripts/env.sh` does). Unicorn is GPLv2, so a program that links
-it is a GPLv2 program; see DESIGN.md, "Emulator".
+it is a GPLv2 program; see SPEC.md, "Emulator".
 
 A fetched (URL or hash) dependency doesn't work yet: `build.zig.zon`'s
 `paths` leave out `third_party/` and `scripts/`, so drawterm's sources and
@@ -177,7 +177,7 @@ pub fn run(m: *Machine, prog: Program, argv: []const []const u8) RunError!Status
 The result is a `Status`:
 
 - `.exited`: the `exits` string, unchanged. Empty means success. The CLI
-  turns it into an exit code (DESIGN.md, "Exit codes"); the library leaves
+  turns it into an exit code (SPEC.md, "Exit codes"); the library leaves
   that to you.
 - `.killed`: the process died, with the reason in note form
   (`sys: trap: fault read addr=0x0`, `h9: timeout`).

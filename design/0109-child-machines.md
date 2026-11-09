@@ -35,7 +35,7 @@ The inner h9 starts, parses its flags, boots its kernel, and runs its probes. It
 
 **What exists that a child machine can use:**
 
-- **Several machines per host process.** An embedder, or the test suite, can run several `Machine`s in one process. They share the one drawterm kernel, and each first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, `/srv` board ([devsrv](0008-devsrv.md)), and environment (DESIGN.md, "Process model").
+- **Several machines per host process.** An embedder, or the test suite, can run several `Machine`s in one process. They share the one drawterm kernel, and each first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, `/srv` board ([devsrv](0008-devsrv.md)), and environment (SPEC.md, "Process model").
 - **One VM per process on HVF.** `hv_vm_create` succeeds once per host process (`src/vmm/hvf.zig`), so on macOS a second machine can't have a backend of its own. KVM, native, and emu have no such limit.
 - **One allocator per backend.** HVF, KVM, and native hand out guest pages, page tables included, from one `gphys.Ram`, reserved at `--memory` bytes; emu uses its arena (`src/vmm/arena.zig`). `--memory` is a cap on that allocator, `--pids` a cap on live processes in `rfork`, and `--cpus` the size of the run-slot pool (`src/cpupool.zig`).
 - **devcmd's shape.** `#C` runs host commands through a conversation: `clone`, `ctl` (`dir`, `exec`), `data`, `stderr`, and `wait` ([host-cmd](host-cmd.md)). `hcmd` wraps it.
@@ -189,7 +189,7 @@ The cases run on every backend, including HVF, where a second VM in the process 
 3. The namespace builder taking channels from a caller's namespace in place of `#U` paths, and printing them.
 4. `#μ`, the conversation, `exec`, `wait`, `note`, `plan`, and the narrowing checks, with `--children` and `proc.children`.
 5. `src/guest/bin/h9` and its flag parsing.
-6. The cases, MANUAL.md (a section on children), README, and DESIGN.md; set `status: implemented`.
+6. The cases, MANUAL.md (a section on children), README, and SPEC.md; set `status: implemented`.
 
 ## Open issues
 

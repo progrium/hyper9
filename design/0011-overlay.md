@@ -19,7 +19,7 @@ Enforce `--write=overlay` and make it the default: [ephemeral-writes](0006-ephem
  
 ## Background
  
-This was part of milestone M10 in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's capability table had a row for it:
+This was part of milestone M10 in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's capability table had a row for it:
  
 | Capability | Mechanism |
 | --- | --- |
@@ -166,7 +166,7 @@ Integration cases tagged `[overlay]`:
 - With [9p-roots](0013-9p-roots.md) implemented, `test "a write to a 9P root under the default profile doesn't reach the server [overlay]"`.
 Backend case: two machines in one process each see only their own root changes.
  
-Measurement: the `[baseline]` suite and `zig build bench`, with and without the root overlay, recorded in DESIGN.md. The default changes only if the overlay costs less than 5% of the suite's run time.
+Measurement: the `[baseline]` suite and `zig build bench`, with and without the root overlay, recorded in SPEC.md. The default changes only if the overlay costs less than 5% of the suite's run time.
  
 Demo: `h9 --rc 'echo hi > /lib/x && cat /lib/x'` prints `hi`, and the root tree has no `/lib/x` afterwards.
  
@@ -176,7 +176,7 @@ Demo: `h9 --rc 'echo hi > /lib/x && cat /lib/x'` prints `hi`, and the root tree 
 2. `$home` in the overlay when the root lacks it.
 3. The measurement, and a fast path in `#O` if it's needed.
 4. `overlay` as the default of `Policy.write` in both profiles, the run status's `RootChanges` summary, and the CLI's notice.
-5. README's sandbox table, and DESIGN.md: the capability table, the default profile's root row, the tight profile's paragraph, the CLI table's `--write` row, and the plan example. Set `status: implemented`.
+5. README's sandbox table, and SPEC.md: the capability table, the default profile's root row, the tight profile's paragraph, the CLI table's `--write` row, and the plan example. Set `status: implemented`.
  
 
 ## Updates
@@ -186,6 +186,6 @@ Demo: `h9 --rc 'echo hi > /lib/x && cat /lib/x'` prints `hi`, and the root tree 
   - For a 9P root the notice says to rerun with `--write=scope`, since `--writable "$H9ROOT"` names a host tree.
   - A bare `#O` over `/` used to take the root device under the mount as its lower tree (namec's `Atodir` stops before a mount point); `h9_overlay_newpath` now resolves the target through its mounts, so an overlay over a bind or mount point overlays what's bound there. This also fixes the manual's known issue for `#O` lines on `/mnt/term/cwd`.
   - Replaying `--print` output with the root overlay line into a machine whose namespace is already built put the builder's binds below it out of reach, since mount points are matched by device as well as qid. `findmount` now also matches an overlay's lower directory's mounts (only when a mount hash bucket has an entry with the same qid path), a small change to the vendored `chan.c`, and after a replay without a `cd` the cwd is set again, so it lands on the replayed binds.
-  - The measurement (DESIGN.md, "The root overlay's cost"): on HVF the `[baseline]` suite takes 27.29 s with the root overlay and 27.05 s without (median of 3 runs each), under 1%, well inside the 5% gate; on the emulator, walk-heavy commands differ within noise. No fast path in `#O` was needed, and `overlay` is the default.
+  - The measurement (SPEC.md, "The root overlay's cost"): on HVF the `[baseline]` suite takes 27.29 s with the root overlay and 27.05 s without (median of 3 runs each), under 1%, well inside the 5% gate; on the emulator, walk-heavy commands differ within noise. No fast path in `#O` was needed, and `overlay` is the default.
   - The `--strict` baseline case can no longer show a refusal: this build enforces every capability it knows.
 

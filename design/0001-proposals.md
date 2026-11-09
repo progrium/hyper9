@@ -15,17 +15,17 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-Design changes to h9 go through proposals: one Markdown file each under `design/`, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. Milestones go away; the order of work comes from the dependency graph. DESIGN.md becomes a description of h9 as built, with no milestone list and no changelog. A small Zig tool lists, checks, and files proposals, and the integration tests are tagged with proposals instead of milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)).
+Design changes to h9 go through proposals: one Markdown file each under `design/`, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. Milestones go away; the order of work comes from the dependency graph. SPEC.md becomes a description of h9 as built, with no milestone list and no changelog. A small Zig tool lists, checks, and files proposals, and the integration tests are tagged with proposals instead of milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)).
 
 ## Background
 
-DESIGN.md does three jobs at once. It describes how h9 works, it plans what comes next (the Milestones section, and design text for features that don't exist yet, such as 9P roots and host self-sandboxing), and it records why things changed (the Changelog, filed under the milestone in progress). Each job makes the others worse:
+SPEC.md does three jobs at once. It describes how h9 works, it plans what comes next (the Milestones section, and design text for features that don't exist yet, such as 9P roots and host self-sandboxing), and it records why things changed (the Changelog, filed under the milestone in progress). Each job makes the others worse:
 
 - **The plan is a line.** Milestones are numbered, so anything new lands after M10 or forces a renumbering, even when it depends on nothing pending. A Linux personality, for example, needs only what M3 and M4 already provide, but has nowhere to go except "M11".
 - **Milestones bundle unrelated work.** M5 holds devsrv, semaphores, segattach, network policy, ephemeral writes, and Go compatibility. They can't be decided, started, or finished separately, and Go compatibility's real dependency (semaphores) isn't written down anywhere.
 - **The changelog mixes kinds of entry.** Design decisions (the sandbox becomes a capability policy) sit next to workarounds (`__clear_cache` on Linux arm64, `memccpy` on musl), which belong in code comments and commit messages. The section grows with every change and is read in order, so the doc keeps getting longer and more linear.
-- **There's no place for an idea that isn't accepted yet.** A design that's still being argued either goes into DESIGN.md, as if decided, or lives only in a conversation.
-- **Agents follow the rule they're given.** AGENTS.md tells them to edit DESIGN.md and add a changelog entry, so every agent-driven decision lands in the doc directly, with no point where a person accepts it.
+- **There's no place for an idea that isn't accepted yet.** A design that's still being argued either goes into SPEC.md, as if decided, or lives only in a conversation.
+- **Agents follow the rule they're given.** AGENTS.md tells them to edit SPEC.md and add a changelog entry, so every agent-driven decision lands in the doc directly, with no point where a person accepts it.
 
 Go solves the same problems with proposals: a proposal is identified by an issue, discussed there, written up as `design/NNNN-shortname.md` only when the discussion asks for detail, and decided after a final comment period. Go keeps its design docs as history and its spec as the description of the current system.
 
@@ -34,7 +34,7 @@ Go solves the same problems with proposals: a proposal is identified by an issue
 ### Layout
 
 ```
-DESIGN.md                    h9 as built: architecture, invariants, decisions
+SPEC.md                    h9 as built: architecture, invariants, decisions
 design/
   README.md                  the process
   TEMPLATE.md
@@ -94,7 +94,7 @@ Only facts are stored. Whether a proposal is *ready* (accepted, with every depen
 | `accepted` | Decided. Work can start once every dependency is implemented. |
 | `declined` | Decided against; kept, so the reasoning can be found later. The issue is closed. |
 | `hold` | Paused, with a reason on the issue |
-| `implemented` | Built, its "Done when" cases exist and pass, and DESIGN.md describes it. The tool doesn't enforce the cases, so a proposal with nothing to test, such as a process change, can still be marked implemented; the PR says why. |
+| `implemented` | Built, its "Done when" cases exist and pass, and SPEC.md describes it. The tool doesn't enforce the cases, so a proposal with nothing to test, such as a process change, can still be marked implemented; the PR says why. |
 | `superseded` | Replaced by `superseded-by` |
 
 Each status change is its own commit (`design: 42 likely-accept`), so `git log design/` is the record of decisions. The issue's labels may mirror the status, but the frontmatter is authoritative. At most three proposals sit in `likely-accept` or `likely-decline` at a time, so finishing decisions comes before starting new ones (Go's Incoming column does this for a larger group).
@@ -114,7 +114,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 ### Template
 
-`design/TEMPLATE.md` follows Go's, with three changes. Compatibility covers what h9 has instead of a Go 1 promise. Security is new, because most of h9's design choices are sandbox choices. And "Done when" replaces the milestone demos. Proposals are written with a line per paragraph, as DESIGN.md is.
+`design/TEMPLATE.md` follows Go's, with three changes. Compatibility covers what h9 has instead of a Go 1 promise. Security is new, because most of h9's design choices are sandbox choices. And "Done when" replaces the milestone demos. Proposals are written with a line per paragraph, as SPEC.md is.
 
 1. **Abstract:** a short summary.
 2. **Background:** the problem, and what exists today.
@@ -131,7 +131,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 An accepted proposal's body isn't edited. A discovery during implementation that refines the design gets a dated note under Updates; one that changes the design gets a new proposal, which supersedes the old one or is added to its `depends`. A dependency found during implementation is added to `depends` in the same PR, with a line saying so.
 
-The PR that finishes a proposal updates DESIGN.md to describe what was built, tags the passing cases, and sets `status: implemented`. DESIGN.md never describes unbuilt features; proposals never get updated to describe the current system. DESIGN.md links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision, not as a rule for every section, and the tool doesn't check those links.
+The PR that finishes a proposal updates SPEC.md to describe what was built, tags the passing cases, and sets `status: implemented`. SPEC.md never describes unbuilt features; proposals never get updated to describe the current system. SPEC.md links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision, not as a rule for every section, and the tool doesn't check those links.
 
 ### Tests
 
@@ -177,8 +177,8 @@ It warns on a slug reference to a filed proposal, so a branch drafted before the
 
 ### Migration
 
-1. **Baseline.** M0 to M4 are done and described by DESIGN.md as it stands. They become one proposal, `0000-baseline.md` (`slug: baseline`, `status: implemented`, no issue). Its body is the record of how h9 got here: the M0 to M4 entries from the Milestones section, with their demos, and DESIGN.md's Changelog, moved unchanged with its dated entries and milestone headings. The one M5 entry so far (the rename from hp9 to h9) moves with it, since it predates proposals. Like any implemented proposal, it isn't edited afterwards. Finished work gets no retroactive proposals.
-2. **DESIGN.md.** The Milestones and Changelog sections are removed, and DESIGN.md links to the baseline proposal for the history. Design text for unbuilt work moves into proposals, leaving DESIGN.md about what exists. Milestone references in the remaining text ("from M5", "M10") are dropped, or become links where the proposal adds context.
+1. **Baseline.** M0 to M4 are done and described by SPEC.md as it stands. They become one proposal, `0000-baseline.md` (`slug: baseline`, `status: implemented`, no issue). Its body is the record of how h9 got here: the M0 to M4 entries from the Milestones section, with their demos, and SPEC.md's Changelog, moved unchanged with its dated entries and milestone headings. The one M5 entry so far (the rename from hp9 to h9) moves with it, since it predates proposals. Like any implemented proposal, it isn't edited afterwards. Finished work gets no retroactive proposals.
+2. **SPEC.md.** The Milestones and Changelog sections are removed, and SPEC.md links to the baseline proposal for the history. Design text for unbuilt work moves into proposals, leaving SPEC.md about what exists. Milestone references in the remaining text ("from M5", "M10") are dropped, or become links where the proposal adds context.
 3. **Remaining milestones become proposals**, split by feature rather than kept as bundles. Each starts as a `draft` with its existing design text, and is filed and accepted as work reaches it:
 
     | Slug | Depends on |
@@ -201,9 +201,9 @@ It warns on a slug reference to a filed proposal, so a branch drafted before the
     The research notes each milestone was meant to record (Seatbelt with `--gfx`, Landlock with KVM, AppContainer with WHP) go into the relevant proposal's Open issues.
 4. **Tests and build.** Case tags and build steps change as in Tests.
 5. **README.** The status checklist is replaced by a table generated by `list`, plus the `graph` output.
-6. **AGENTS.md.** The rule to edit DESIGN.md and add a changelog entry is replaced by:
+6. **AGENTS.md.** The rule to edit SPEC.md and add a changelog entry is replaced by:
 
-    > When a task would change anything listed under Scope in `design/README.md`, find the accepted proposal that covers it and check that it's ready (`zig build design -- ready`). If there's none, don't implement the change: draft one with `zig build design -- new <slug>`, leave it as a draft, and stop. Cite the proposal in implementation PRs, and tag new integration cases with it. Never edit an accepted proposal's body: add a dated note under Updates, or draft a new proposal. Add a dependency you discover to `depends` in the same PR, and say so. The PR that finishes a proposal updates DESIGN.md to match and sets `status: implemented`. Run `zig build design -- check` before opening a PR.
+    > When a task would change anything listed under Scope in `design/README.md`, find the accepted proposal that covers it and check that it's ready (`zig build design -- ready`). If there's none, don't implement the change: draft one with `zig build design -- new <slug>`, leave it as a draft, and stop. Cite the proposal in implementation PRs, and tag new integration cases with it. Never edit an accepted proposal's body: add a dated note under Updates, or draft a new proposal. Add a dependency you discover to `depends` in the same PR, and say so. The PR that finishes a proposal updates SPEC.md to match and sets `status: implemented`. Run `zig build design -- check` before opening a PR.
 
 ## Rationale
 
@@ -229,7 +229,7 @@ No user-visible change to h9: no CLI flags, `Machine.Options`, or sandbox defaul
 
 - `zig build m1` … `m4` are removed, with no aliases; `zig build proposal -Dp=baseline` runs the same demos and cases.
 - Integration case names change from `(Mn)` to `[tag]`, which changes `zig build test` filters that match on them.
-- DESIGN.md loses its Milestones and Changelog sections; both are preserved in `design/0000-baseline.md`.
+- SPEC.md loses its Milestones and Changelog sections; both are preserved in `design/0000-baseline.md`.
 - AGENTS.md's rule for design changes changes, as above.
 
 ## Security
@@ -243,14 +243,14 @@ None for the guest or the host. `file` runs `gh` with the user's credentials and
 - `zig build proposal -Dp=baseline` runs every case formerly tagged `(M2)`, `(M3)`, or `(M4)` and every former M0 to M4 demo, and they pass.
 - A case tagged with a draft proposal skips in `zig build integration` and runs with `-Dpending`.
 - `zig build design -- new linux-personality` followed by `file linux-personality` (against a test repository, or with `--dry-run`) produces `design/NNNN-linux-personality.md` and rewrites a slug reference to it elsewhere.
-- DESIGN.md has no Milestones or Changelog section and no milestone references, and `0000-baseline.md` holds both, with every Changelog entry unchanged.
+- SPEC.md has no Milestones or Changelog section and no milestone references, and `0000-baseline.md` holds both, with every Changelog entry unchanged.
 
 ## Implementation
 
 1. `tools/frontmatter.zig` and `tools/design.zig` with `list`, `ready`, `graph`, `new`, and `check`, and the fixtures.
 2. `design/README.md` (the process: States, Scope, After acceptance, the tool) and `design/TEMPLATE.md`.
-3. `0000-baseline.md`, holding the M0 to M4 milestones and the Changelog moved out of DESIGN.md.
-4. The draft proposals from Migration, with their design text moved out of DESIGN.md.
+3. `0000-baseline.md`, holding the M0 to M4 milestones and the Changelog moved out of SPEC.md.
+4. The draft proposals from Migration, with their design text moved out of SPEC.md.
 5. Test tags, `H9_TEST_PENDING_TAGS`, and the `proposal` build step; the `m1`–`m4` steps removed.
 6. `file` and `fix`.
 7. README and AGENTS.md.
@@ -265,7 +265,7 @@ This proposal is decided under the current process, since the new one doesn't ex
   - The tags of proposals that aren't implemented are compiled into the integration tests as a build option (`design.pending_tags`), rather than passed as `H9_TEST_PENDING_TAGS`, so a binary from `zig build install-tests` knows them too. `-Dpending` sets `H9_TEST_PENDING`, as before.
   - The baseline demos that need a root tree are left out of `zig build proposal -Dp=baseline` when there's no tree, as the integration cases skip, rather than failing; the hello demos always run.
   - Slugs may start with a digit (`9p-roots`), but can't be all digits, which would read as an id. The baseline's id 0 isn't an issue, so references to it keep its slug, and `fix` leaves them alone.
-  - Migration added three drafts the table didn't list, for DESIGN.md text with nowhere else to go: `zig-interpreter` (the emulator's second step), `hide-host-paths` (an open question) and `ci` (the CI plan). The `self-host` and `9p-roots` drafts don't depend on `segattach` and `devsrv`: nothing in their design text needs them, and `self-host` notes it may gain a dependency.
+  - Migration added three drafts the table didn't list, for SPEC.md text with nowhere else to go: `zig-interpreter` (the emulator's second step), `hide-host-paths` (an open question) and `ci` (the CI plan). The `self-host` and `9p-roots` drafts don't depend on `segattach` and `devsrv`: nothing in their design text needs them, and `self-host` notes it may gain a dependency.
   - Milestone names were also replaced in source comments and scripts, and `--print`'s network caveat now reads "the network is not restricted beyond --net=disable".
   - `image-roots` depends on `devsrv` as well as `9p-roots`, since it posts to `/srv`.
   - `check` also refuses scalar values that YAML would read differently, since values are never quoted (a `: ` or ` #` inside, or a leading indicator such as `#` or `-` followed by a space), and list items that aren't plain words. That keeps the frontmatter a true subset of YAML; the baseline's title lost its colon for it.

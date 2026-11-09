@@ -158,7 +158,7 @@ Demo: `H9ROOTPATH="localhost:8080/ $HOME/roots/" h9 --print --root=~9front ls` s
 1. `cli.tildeRoot(arena, arg, rootpath) ?[]const []const u8`, which returns the candidates or null and does no I/O, and its unit test.
 2. `resolveRoot`'s tilde step, the tries for each kind of candidate, and the error that lists them. The WebSocket try reuses websocket-9p's dial and handshake with the same headers, CA, and proxy settings, and keeps the status from `ws.Response`.
 3. The integration cases.
-4. README's and MANUAL.md's `--root` notes, a paragraph on `$H9ROOTPATH` and the shell, and DESIGN.md's root filesystem paragraph and CLI flag table. Set `status: implemented`.
+4. README's and MANUAL.md's `--root` notes, a paragraph on `$H9ROOTPATH` and the shell, and SPEC.md's root filesystem paragraph and CLI flag table. Set `status: implemented`.
 
 ## Open issues
 

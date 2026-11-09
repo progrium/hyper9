@@ -19,7 +19,7 @@ The 9front compilers, linkers, and mk already run inside h9 and rebuild all of `
 
 ## Background
 
-This was milestone M6 in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). Self-hosting is one of DESIGN.md's goals, and a source of test binaries for other proposals.
+This was milestone M6 in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). Self-hosting is one of SPEC.md's goals, and a source of test binaries for other proposals.
 
 **What runs today.** These were measured on 2026-11-04 on an M3 Max with HVF, the pinned 9front 11952 root, and its source from `.local/src/9front` (which `scripts/fetch.sh` checks out at the same revision).
 
@@ -110,7 +110,7 @@ The integration tests use the root tree, which normally has no `/sys/src`. The s
 
 **NPROC from the CPU limit, not `/dev/sysstat`.** Filling `/dev/sysstat` would mean making up per-CPU counters (context switches, interrupts, syscalls) that h9 doesn't track. The only consumer that matters, `termrc`'s `NPROC` line, gets the same value directly.
 
-**Leaving devfs alone.** DESIGN.md asked whether the host-tree root needs a faster read path for exec and compilers. With a ReleaseFast h9, the whole userland rebuilds in 60 s serially, or 33 s with 8 jobs. Each `exec` already reads the image in one pass (`Machine.readFile`). A cache or a second read path would add a correctness surface (staleness when the host edits a file) for a gain these numbers don't need. If a profile later shows devfs dominating, that's performance work without a behaviour change, so it doesn't need a proposal.
+**Leaving devfs alone.** SPEC.md asked whether the host-tree root needs a faster read path for exec and compilers. With a ReleaseFast h9, the whole userland rebuilds in 60 s serially, or 33 s with 8 jobs. Each `exec` already reads the image in one pass (`Machine.readFile`). A cache or a second read path would add a correctness surface (staleness when the host edits a file) for a gain these numbers don't need. If a profile later shows devfs dominating, that's performance work without a behaviour change, so it doesn't need a proposal.
 
 **Stopping on the process's own thread.** One alternative is to freeze a process by holding its vCPU or pausing its host thread. But reading registers from another thread would then need backend calls on a vCPU the reader doesn't own, which HVF forbids. Parking at the existing stop points, with the state copied to the record, needs no backend support and works the same on every backend. A process spinning in pure guest code with no syscalls still stops promptly: `stop` kicks the vCPU, as note delivery and `--timeout` do. hvf's kick is `hv_vcpus_exit`, and emu's is `uc_emu_stop`, retried until the run sees it. Neither waits for a timer tick. `tests/backends.zig` already covers both against a `b .` / `jmp .` loop.
 
@@ -122,7 +122,7 @@ The integration tests use the root tree, which normally has no `/sys/src`. The s
 
 **Copy-on-write text for `mem` writes.** Text segments are shared among every process running the same image in a process tree (`Segs.fork`). Writing a breakpoint into shared text would make siblings trap too. 9front avoids this by turning text into a private data segment on the first write (`txt2data`), and h9 does the same.
 
-**No gdb stub.** acid is the native debugger and needs only devproc. A gdb remote stub is a separate interface that isn't needed for this proposal; DESIGN.md already lists it as absent.
+**No gdb stub.** acid is the native debugger and needs only devproc. A gdb remote stub is a separate interface that isn't needed for this proposal; SPEC.md already lists it as absent.
 
 **Not fixing the build-date differences.** `gs`, `cwfs64x`, and `mp3enc` embed `__DATE__`. Reproducible builds would mean changing the compiler's notion of the date, which belongs in 9front, not h9. The test compares binaries that don't embed dates.
 
@@ -183,7 +183,7 @@ Already done and untagged, as bug fixes: `test "concurrent processes contending 
 5. devproc `text` (read-only, no stopping needed), and the `Stack`-first check on `segment`, which [segattach](0004-segattach.md) serves.
 6. Stop points and the record's saved Ureg and Extra, then `ctl` `stop`, `start`, `waitstop`, `startstop`, and `hang`, and the `Stopped` and `Stopwait` states.
 7. `AddressSpace.codeChanged` in hvf and emu, then devproc `regs`, `fpregs`, and `mem`, including copy-on-write text.
-8. The acid case and demo. DESIGN.md: devproc's row, the Debugging section, and the process model table. Then `status: implemented`.
+8. The acid case and demo. SPEC.md: devproc's row, the Debugging section, and the process model table. Then `status: implemented`.
 
 ## Open issues
 

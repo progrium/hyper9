@@ -1,5 +1,5 @@
 /*
- * The devfs side of the sandbox policy (DESIGN.md, "Vendor hooks" and
+ * The devfs side of the sandbox policy (SPEC.md, "Vendor hooks" and
  * "Path resolution"). devfs-posix calls these before touching a host path.
  * Each host path is resolved (symlinks followed, as devfs's own stat and
  * open do) and the resolved path is checked against the calling machine's

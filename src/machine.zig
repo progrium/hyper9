@@ -1,5 +1,5 @@
 //! One machine: a VM running 9front processes whose syscalls are served by
-//! drawterm's kern. See DESIGN.md, "Process model" and "Filesystem, boot
+//! drawterm's kern. See SPEC.md, "Process model" and "Filesystem, boot
 //! and I/O".
 //!
 //! Each guest process runs on its own kernel thread with its own vCPU. The
@@ -217,7 +217,7 @@ pub const Machine = struct {
         cwd: ?[]const u8 = null,
         /// Guest environment variables, beyond the defaults.
         env: []const EnvVar = &.{},
-        /// The sandbox policy (DESIGN.md, "Sandbox policy"). Host paths in
+        /// The sandbox policy (SPEC.md, "Sandbox policy"). Host paths in
         /// it, like `root` and `cwd`, must be absolute and resolved.
         policy: policy.Policy = .{},
         /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
@@ -269,7 +269,7 @@ pub const Machine = struct {
     pub const Gfx = gfx.Options;
 
     /// Host events an embedder delivers to a running machine, from any
-    /// thread, including a signal handler's watcher (DESIGN.md, "Signals
+    /// thread, including a signal handler's watcher (SPEC.md, "Signals
     /// and TTY"). Each call only sets a flag and wakes `run`, which posts
     /// the notes. Calls while no run is in progress are dropped.
     pub const Signals = struct {
@@ -2971,7 +2971,7 @@ pub const Machine = struct {
         cwd: ?[:0]const u8 = null,
     };
 
-    /// Builds the first Proc's namespace from the plan (DESIGN.md, "Boot
+    /// Builds the first Proc's namespace from the plan (SPEC.md, "Boot
     /// sequence"), then sets the device mask.
     fn buildNamespace(m: *Machine, con_id: u32) RunError!Built {
         var root_ov: ?u32 = null;

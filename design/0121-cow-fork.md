@@ -92,7 +92,7 @@ Integration cases:
 1. Copy-on-write in `Mm`: shared private chunks in `fork`, write-less runs in `remap` and `remapShared`, the copy (or reuse) in `fault` and in the host write paths, `MADV_DONTNEED`, and the shootdown before `fork` returns. Cases 1 to 4.
 2. Demand-loaded private file mappings: a Chan reference and offset in the VMA, filling chunks on populate, and fork's handling of unloaded chunks. Case 5.
 3. `exec` through file mappings in `elf.load`, reading headers only up front. Case 6, and the Zig demos.
-4. DESIGN.md's memory section, and an Updates note on [18].
+4. SPEC.md's memory section, and an Updates note on [18].
 
 ## Open issues
 

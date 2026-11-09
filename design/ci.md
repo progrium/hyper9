@@ -16,7 +16,7 @@ CI on hosted runners: the full suite on the emulator on every runner, `zig build
 
 ## Background
 
-DESIGN.md's Testing and CI section described this plan, before milestones became proposals ([#1](0001-proposals.md)). The design text below is as it stood there. Rationale, Compatibility, Security, and Implementation are to be written before filing.
+SPEC.md's Testing and CI section described this plan, before milestones became proposals ([#1](0001-proposals.md)). The design text below is as it stood there. Rationale, Compatibility, Security, and Implementation are to be written before filing.
 
 - The full suite runs on the emulator on every hosted CI runner, and Linux CI also runs it on KVM. macOS (HVF) and Windows (WHP) need self-hosted machines, because hosted runners there generally lack nested virtualization.
 - CI isn't set up yet. When it is, one Linux job runs `scripts/fetch.sh` and `zig build mkroot` and caches `.local/9front/root-<release>` keyed on `NINEFRONT_RELEASE` and a hash of `tools/mkroot.zig`; the other jobs restore that cache, so QEMU (slow without hardware acceleration on hosted runners) only runs when the pin or the script changes. The prebuilt Unicorn in `.local/unicorn` is cached the same way, keyed on `UNICORN_VERSION`. Integration tests skip, rather than fail, when no root tree is present.
@@ -29,4 +29,4 @@ Running on KVM depends on [kvm](0016-kvm.md), which can be added to CI when it l
 
 ## Open issues
 
-- Running 9front's own regression tests, where they exist, alongside the integration cases. (DESIGN.md's test plan listed them.)
+- Running 9front's own regression tests, where they exist, alongside the integration cases. (SPEC.md's test plan listed them.)

@@ -19,7 +19,7 @@ Nov 6, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Background
 
-This was part of milestone M10 in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's root filesystem list had three entries, of which only the first is built:
+This was part of milestone M10 in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's root filesystem list had three entries, of which only the first is built:
 
 1. **Direct host tree:** a directory served through `#U`.
 2. **9P mount:** `--root tcp!host!564` (or a unix socket path) dials and mounts through devmnt. Covers remote file servers and u9fs.
@@ -192,7 +192,7 @@ Measured: the same workloads (`ls -l /bin`, an rc pipeline, and `mk` on a small 
 3. Unix socket roots on POSIX hosts: the host connect and `lfdchan`, and the error on Windows.
 4. The plan: the `mount '#s/root'` line, `9p` access, the caveats, and the `--write=none` conflict in `src/policy.zig`.
 5. The speed measurement, recorded under Updates.
-6. README's `--root` notes. DESIGN.md: the Decisions table's root row, the root filesystem paragraph, the boot sequence, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
+6. README's `--root` notes. SPEC.md: the Decisions table's root row, the root filesystem paragraph, the boot sequence, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 
 ## Updates
 

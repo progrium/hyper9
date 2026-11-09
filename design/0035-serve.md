@@ -235,7 +235,7 @@ Demos:
 3. `ws.zig`'s server side (written for websocket-9p's test relay) wired to WebSocket listeners, with the HTTP checks, `--serve-origin` and `--serve-token`.
 4. The plan's `serve` heading, caveats, elision, and `pids` line in `src/policy.zig`, the `--write=none` `-R`, and `--trace`'s connection lines.
 5. The dialect slot, empty, ready for [dotl](0022-dotl.md).
-6. README: the flags and the demos. DESIGN.md: a Serving section, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
+6. README: the flags and the demos. SPEC.md: a Serving section, the CLI flag table, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 

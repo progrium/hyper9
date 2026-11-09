@@ -1,4 +1,4 @@
-//! Zig side of the drawterm kern seam (DESIGN.md, "Kernel: drawterm kern/
+//! Zig side of the drawterm kern seam (SPEC.md, "Kernel: drawterm kern/
 //! and the Zig seam"). Each call goes through one of kern's `sys*` wrappers,
 //! which catch kernel errors with waserror and return -1; `errstr` then
 //! holds the message. No Zig frame sits between a waserror and an error.

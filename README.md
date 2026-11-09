@@ -1,7 +1,7 @@
 # h9 - Hyper9
 
 Run native Plan 9 (9front) executables directly on host hypervisors. See
-[MANUAL.md](MANUAL.md) for using h9, and [DESIGN.md](DESIGN.md) for how it works.
+[MANUAL.md](MANUAL.md) for using h9, and [SPEC.md](SPEC.md) for how it works.
 
 ## Status
 
@@ -477,7 +477,7 @@ overlay as well, so nothing reaches the host. `#U` and `#C` are masked, so the g
 and symlinks are resolved before access is checked, so a link inside a bound
 tree can't reach outside it. `--root-contained` resolves the root tree's
 links inside it instead, as `chroot` would, for Linux roots and container
-images whose links are absolute. See [DESIGN.md](DESIGN.md), "Sandbox policy".
+images whose links are absolute. See [SPEC.md](SPEC.md), "Sandbox policy".
 
 ```sh
 h9 --profile=tight ls -l            # read-only cwd, no network, 10m timeout

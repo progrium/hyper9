@@ -1,4 +1,4 @@
-//! Hypervisor abstraction. See DESIGN.md, "Hypervisor layer (vmm)".
+//! Hypervisor abstraction. See SPEC.md, "Hypervisor layer (vmm)".
 //!
 //! Each backend module provides Backend, AddressSpace and Vcpu types with the
 //! same methods; the unions below pick one at run time. Backends that aren't

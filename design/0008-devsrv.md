@@ -24,7 +24,7 @@ With [semaphores](0003-semaphores.md), which serves the `rendezvous` that every 
 
 ## Background
 
-This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's table of kernel pieces added by h9 had two rows for it:
+This was part of milestone M5 ("servers") in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's table of kernel pieces added by h9 had two rows for it:
 
 | Piece | Why |
 | --- | --- |
@@ -179,7 +179,7 @@ Demo: `h9 --rc 'ramfs -S tmp && mount -c /srv/tmp /n/tmp && touch /n/tmp/a && ls
 3. `srvname`: the field and its free in the vendored `kern/dat.h` and `kern/chan.c`, set by devsrv's open, and printed by `readns1`.
 4. The `/srv` bind in `src/policy.zig`'s namespace builder, and `--print`'s line for it.
 5. With [semaphores](0003-semaphores.md) implemented, the integration and backend cases.
-6. DESIGN.md:
+6. SPEC.md:
    - the kernel's "Added by us" table: devsrv, per machine
    - the boot sequence's bind list
    - the syscall paragraph: `mount`, `unmount`, and `fauth` are served

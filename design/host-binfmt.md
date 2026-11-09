@@ -18,9 +18,9 @@ On Linux, h9 can be registered with `binfmt_misc` for the 9front a.out magics, s
 
 ## Background
 
-This was an open question in DESIGN.md, then in [kvm](0016-kvm.md), where it didn't belong: it has nothing to do with the backend.
+This was an open question in SPEC.md, then in [kvm](0016-kvm.md), where it didn't belong: it has nothing to do with the backend.
 
-- **Today** a 9front binary on the host runs as `h9 ./prog`. DESIGN.md's CLI rules make an argument starting with `./` or `../` a host path, and an absolute one a guest path.
+- **Today** a 9front binary on the host runs as `h9 ./prog`. SPEC.md's CLI rules make an argument starting with `./` or `../` a host path, and an absolute one a guest path.
 - **The magics** are big-endian at offset 0: arm64 (`R_MAGIC`) is `00 00 8c 47`, amd64 (`S_MAGIC`) is `00 00 8a 97`, and 386 (`I_MAGIC`, [i386](0009-i386.md)) is `00 00 01 eb`.
 - **`binfmt_misc`** matches a file's leading bytes and runs `interpreter path args...`, or with the `P` flag `interpreter path argv0 args...`. It can't add arguments of its own, and `path` is whatever was given to `execve`, relative or absolute. Registering a rule needs root.
 
@@ -107,7 +107,7 @@ With the rule registered, any host process that runs a 9front binary starts a ne
 1. `h9-binfmt` in `main.zig`, `H9FLAGS`, and `H9_NESTED` set for devcmd's host commands. The cases that run it directly.
 2. `--binfmt-conf` and the `--check` report.
 3. The `h9-binfmt` link in the build and the release archives; registration in the Lima `linux` VM's provisioning.
-4. README (registration, `H9FLAGS`, nested runs) and DESIGN.md (the CLI's program rules and exit codes). Set `status: implemented`.
+4. README (registration, `H9FLAGS`, nested runs) and SPEC.md (the CLI's program rules and exit codes). Set `status: implemented`.
 ## Open issues
 
 - A link to the h9 binary, or a separate small binary. A link is simpler, but puts a name check in `main.zig`.

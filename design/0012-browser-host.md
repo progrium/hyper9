@@ -201,7 +201,7 @@ The GDT, IDT, and TSS are shared by every vCPU, since only one runs at a time. T
 
 ## Compatibility
 
-- **DESIGN.md's goals.** "Run native code only" and the non-goal of translating across architectures for users assume a CPU to run natively on. A browser has none. DESIGN.md would say that the web host runs 386 binaries on v86, and that this is its only mode.
+- **SPEC.md's goals.** "Run native code only" and the non-goal of translating across architectures for users assume a CPU to run natively on. A browser has none. SPEC.md would say that the web host runs 386 binaries on v86, and that this is its only mode.
 - **vmm.** `Kind` and `BackendKind` gain `v86`. `--backend v86` is accepted everywhere and fails with `BackendNotBuilt` outside web builds. The [i386](0009-i386.md) proposal changes `Extra`; this one changes nothing else in the interface.
 - **Machine and CLI.** `Machine.Options` is unchanged. In web builds the policy always masks `#C`, which doesn't exist, and `#I`, since there's no socket API. `--net` other than `disable` is listed as unenforced, and `--strict` refuses it. `--host-cmd` is a usage error.
 - **Build and releases.** A new step, `zig build web`, and a new release archive, `h9-web-<version>.tar.gz`. Native builds are unchanged. h9 stays MIT. The archive carries v86's BSD-2 notice and the root archive's 9front licence.
@@ -252,7 +252,7 @@ Nothing in the page is reachable except through those imports.
 4. **WASI root under Node.** `h9-node` runs `echo` from a 386 root on a stub backend that only executes syscalls.
 5. **The v86 backend.** The shim, contexts, faults, preemption, and JIT dirtying. Then the integration suite under Node, with stack depths measured to set the default stack size.
 6. **Browser.** The WASI shim over the root archive, the console over messages, the demo page, and the Playwright test.
-7. **Release and docs.** The `h9-web` archive in `scripts/release.sh`, the README, and DESIGN.md's host and backend sections. Set `status: implemented`.
+7. **Release and docs.** The `h9-web` archive in `scripts/release.sh`, the README, and SPEC.md's host and backend sections. Set `status: implemented`.
 
 ## Open issues
 

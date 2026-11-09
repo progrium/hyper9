@@ -15,11 +15,11 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-The work done before proposals: milestones M0 to M4, which [DESIGN.md](../DESIGN.md) describes. This file is its record. It holds those milestones as they were planned, DESIGN.md's Changelog as it stood when [proposal 1](0001-proposals.md) replaced it, and the open questions settled along the way. It has no issue, so its id is 0, and it isn't edited.
+The work done before proposals: milestones M0 to M4, which [SPEC.md](../SPEC.md) describes. This file is its record. It holds those milestones as they were planned, SPEC.md's Changelog as it stood when [proposal 1](0001-proposals.md) replaced it, and the open questions settled along the way. It has no issue, so its id is 0, and it isn't edited.
 
 ## Milestones
 
-These are DESIGN.md's milestones M0 to M4, unchanged. Each milestone ends with a demo command that must pass. M0 targets macOS arm64. From M1 on, the emulator lets M2 to M7 be developed and tested on any host. The hypervisor backends for the other hosts follow once the process model settles. The milestones after M4 became proposals.
+These are SPEC.md's milestones M0 to M4, unchanged. Each milestone ends with a demo command that must pass. M0 targets macOS arm64. From M1 on, the emulator lets M2 to M7 be developed and tested on any host. The hypervisor backends for the other hosts follow once the process model settles. The milestones after M4 became proposals.
 
 1. **M0, hello:** `zig build` compiles drawterm's kern. The HVF backend, the arm64 shim, and the a.out loader run a static binary that calls `pwrite` on fd 1 and `exits`. Demo: `h9 ./hello`.
 2. **M1, emulator:** the AddressSpace interface, plus the Unicorn backend for arm64 and amd64. Demo: `h9 --backend emu ./hello` on macOS and Linux arm64, including inside VMs, and the amd64 hello on Linux x86\_64.
@@ -29,7 +29,7 @@ These are DESIGN.md's milestones M0 to M4, unchanged. Each milestone ends with a
 
 ## Changelog
 
-DESIGN.md's Changelog, unchanged: every dated entry, under the milestone it was recorded in. The one M5 entry predates proposals, so it's here too. Each entry was recorded as `- YYYY-MM-DD: <design change> (reason).`
+SPEC.md's Changelog, unchanged: every dated entry, under the milestone it was recorded in. The one M5 entry predates proposals, so it's here too. Each entry was recorded as `- YYYY-MM-DD: <design change> (reason).`
 
 ### M0
 
@@ -105,7 +105,7 @@ DESIGN.md's Changelog, unchanged: every dated entry, under the milestone it was 
 
 ## Settled questions
 
-The questions from DESIGN.md's Open questions that were answered before proposals. The open ones moved to the proposals they concern.
+The questions from SPEC.md's Open questions that were answered before proposals. The open ones moved to the proposals they concern.
 
 - [x] Name: keep `h9`.
 - [x] Syscall conventions, Tos, UTZERO, and USTKTOP: verified (Guest shims section).

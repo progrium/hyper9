@@ -1,7 +1,7 @@
 //! A process's memory segments: text, data (data and bss together) and
 //! stack, plus up to five that segattach adds (`shared` and `memory`), each
 //! a set of pages from the backend's allocator that it can free again. See
-//! DESIGN.md, "Process model", and design/0004-segattach.md.
+//! SPEC.md, "Process model", and design/0004-segattach.md.
 //!
 //! A segment can be attached to several address spaces (rfork with RFMEM
 //! shares text, data and bss), and a change to it, such as brk growing the

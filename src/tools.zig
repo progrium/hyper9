@@ -1,4 +1,4 @@
-//! The CLI's tool functions, `--version` and `--check` (DESIGN.md, "CLI").
+//! The CLI's tool functions, `--version` and `--check` (SPEC.md, "CLI").
 //! They use the library like any embedder; only the output format is here.
 
 const std = @import("std");

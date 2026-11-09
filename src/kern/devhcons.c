@@ -1,7 +1,7 @@
 /*
  * #y: a machine's console. drawterm's #c/cons reads and writes the host
  * process's fds 0 and 1; this device serves each machine's Stdio instead,
- * through leaf calls into Zig (DESIGN.md, seam rule 3). The namespace
+ * through leaf calls into Zig (SPEC.md, seam rule 3). The namespace
  * builder binds it over /dev, so /dev/cons is this device and the rest of
  * #c stays visible.
  *

@@ -1,4 +1,4 @@
-//! The CLI's host terminal and signals (DESIGN.md, "Signals and TTY"):
+//! The CLI's host terminal and signals (SPEC.md, "Signals and TTY"):
 //! Ctrl-C, hangup and raw mode for one running machine.
 //!
 //! Handlers only record the event and wake a watcher thread, which calls

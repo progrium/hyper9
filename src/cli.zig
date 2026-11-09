@@ -1,4 +1,4 @@
-//! Command-line parsing: argv to a Config, with no I/O. See DESIGN.md, "CLI".
+//! Command-line parsing: argv to a Config, with no I/O. See SPEC.md, "CLI".
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -133,7 +133,7 @@ pub const Config = struct {
 
 pub const Error = error{ Usage, OutOfMemory };
 
-/// How a program argument is found (DESIGN.md, "Program resolution").
+/// How a program argument is found (SPEC.md, "Program resolution").
 pub const ProgramKind = enum {
     /// `./x` or `../x`: read on the host, relative to the host cwd.
     host,
@@ -159,7 +159,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var serve_addrs: std.ArrayList([]const u8) = .empty;
     var serve_origins: std.ArrayList([]const u8) = .empty;
     var gfx_scale: ?u8 = null;
-    // Long flags only (DESIGN.md, "Parsing rules"); -h is accepted alone,
+    // Long flags only (SPEC.md, "Parsing rules"); -h is accepted alone,
     // where it can't be a program's flag.
     if (args.len == 2 and std.mem.eql(u8, args[1], "-h")) return .{ .mode = .help, .argv = &.{} };
     var i: usize = 1;
