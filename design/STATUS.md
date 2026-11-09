@@ -19,7 +19,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [overlay](0011-overlay.md) | implemented |  | Copy-on-write overlay as the root's default |
 | [browser-host](0012-browser-host.md) | implemented |  | A browser host on wasm, with v86 |
 | [9p-roots](0013-9p-roots.md) | implemented |  | 9P roots |
-| [image-roots](0014-image-roots.md) | draft |  | Disk-image roots |
+| [image-roots](0014-image-roots.md) | declined |  | Disk-image roots |
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
 | [kvm](0016-kvm.md) | accepted | ready | KVM backend |
 | [whp](0017-whp.md) | draft | needs kvm | WHP backend |
@@ -77,7 +77,7 @@ flowchart LR
   p_overlay["#35;11 overlay<br/>implemented"]:::implemented
   p_browser_host["#35;12 browser-host<br/>implemented"]:::implemented
   p_9p_roots["#35;13 9p-roots<br/>implemented"]:::implemented
-  p_image_roots["#35;14 image-roots<br/>draft"]:::draft
+  p_image_roots["#35;14 image-roots<br/>declined"]:::closed
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
   p_kvm["#35;16 kvm<br/>accepted"]:::accepted
   p_whp["#35;17 whp<br/>draft"]:::draft
