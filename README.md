@@ -91,7 +91,8 @@ other machines:
 ```sh
 h9 --root 'tcp!fs.example.com!564' ls /       # a 9P server as the root
 h9 --root fs.example.com/9p ls /              # the same over wss://
-h9 --serve unix!/tmp/h9.sock                  # export this machine's namespace
+h9 --serve unix!/tmp/h9.sock                  # export this machine's namespace, to Linux too
+h9 --root 'tcp!zerofs.local!5564' ls /        # a 9P2000.L server (ZeroFS, diod) too
 ```
 
 Build 9front software inside h9 with its own compilers and `mk`, run Go's
