@@ -543,7 +543,7 @@ test "--read-deny hides a path, and symlinks can't escape [baseline]" {
     defer other.deinit();
     try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "secret\n" });
     var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
     const l = try run(e, &.{ "--cwd", s.path, "cat", "link" });
     defer l.deinit();
     try std.testing.expectEqual(1, l.code);
@@ -1740,7 +1740,8 @@ fn buildDebug(e: Env, s: *Scratch) !void {
 /// rc functions for the debugging cases: `addr sym` is a symbol's address
 /// in target, and `run mode` starts `./target mode` in the background,
 /// sets $p to its pid, and prints its exit status when it ends, without
-/// the pid.
+/// the pid. nm prints addresses in lower-case hex, and dc reads only
+/// upper case, so arithmetic on them goes through tr.
 const debug_rc =
     \\fn addr { nm target | awk '$3 == "'$1'" { print $1 }' }
     \\fn run { rm -f pid child; { ./target $*; echo status $status | sed 's/^status target [0-9]+:/status target:/' } & while(! test -s pid) sleep 0.05; p=`{cat pid} }
@@ -1781,7 +1782,7 @@ test "/proc/n/mem reads a variable and a write to text doesn't reach a sibling [
     // The parent and child share text until the write, which gives the
     // parent its own copy.
     const r = try runDebug(e,
-        \\n=`{echo 16 i `{addr three} `{addr two} - p | dc}
+        \\n=`{echo 16 i `{addr three} `{addr two} - p | tr a-f A-F | dc}
         \\run pair >out
         \\echo waitstop >/proc/$p/ctl
         \\c=`{cat child}
@@ -1803,7 +1804,7 @@ test "/proc/n/mem writes to text are fetched by the next run, including a rewrit
     // target isn't sharing its text, so the writes go to the same pages
     // each time, and only the code-cache invalidation makes them seen.
     const r = try runDebug(e,
-        \\n=`{echo 16 i `{addr three} `{addr two} - p | dc}
+        \\n=`{echo 16 i `{addr three} `{addr two} - p | tr a-f A-F | dc}
         \\run thrice
         \\echo waitstop >/proc/$p/ctl
         \\./dbg copy $p `{addr two} `{addr answer} $n
@@ -1877,9 +1878,10 @@ test "acid attaches and prints registers and a stack trace [10]" {
     const r = try runIn(e, &.{ "--timeout", slowTimeout(&tb, 60_000), "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" }, "regs()\nstk()\n");
     defer r.deinit();
     errdefer std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ r.out, r.err });
-    // acid prints its registers by name: R0 on arm64, AX on x86.
+    // acid prints its registers by name: R0 on arm64, AX on x86, after a
+    // tab, except amd64's, which pads with spaces.
     const a = selfArch(e);
-    const reg = if (std.mem.eql(u8, a.name, "arm64")) "R0\t0x" else "AX\t0x";
+    const reg = if (std.mem.eql(u8, a.name, "arm64")) "R0\t0x" else if (std.mem.eql(u8, a.name, "amd64")) "AX    0x" else "AX\t0x";
     try std.testing.expect(std.mem.indexOf(u8, r.out, reg) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "sleep()+") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null);
@@ -2415,6 +2417,15 @@ test "--timeout stops processes blocked in rendezvous and semacquire [3]" {
 // they need no client program the root tree doesn't have.
 
 /// A TCP listener on an ephemeral port of 127.0.0.1.
+/// Makes a symbolic link, or skips the case on a Windows host that refuses
+/// to: only an administrator, or Developer Mode, may make one there.
+fn symLinkOrSkip(dir: std.Io.Dir, io: std.Io, target: []const u8, name: []const u8, flags: std.Io.Dir.SymLinkFlags) !void {
+    dir.symLink(io, target, name, flags) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return if (builtin.os.tag == .windows) error.SkipZigTest else err,
+        else => return err,
+    };
+}
+
 fn listenLocal() !std.Io.net.Server {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
     return addr.listen(std.testing.io, .{ .reuse_address = true });
@@ -4524,7 +4535,7 @@ test "an existing directory with a dotted name is a host root, not a URL [76]" {
     defer s.deinit();
     var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, e.root, &root_buf);
-    try s.tmp.dir.symLink(std.testing.io, root_buf[0..n], "fs.example.com", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, root_buf[0..n], "fs.example.com", .{ .is_directory = true });
     const r = try runBare(e, s.path, &.{ "--root", "fs.example.com", "--print", "ls" }, &.{});
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
@@ -4925,12 +4936,12 @@ fn linkTree(e: Env, s: *Scratch, out: []u8) ![]const u8 {
     try d.writeFile(io, .{ .sub_path = "tree/deny/secret", .data = "secret\n" });
     // Absolute, climbing past the top, a loop, a link to a denied file,
     // and a link to the cat binary.
-    try d.symLink(io, "/lib/hello", "tree/etc/hello", .{});
-    try d.symLink(io, "../../../../../../lib/hello", "tree/etc/up", .{});
-    try d.symLink(io, "loop", "tree/etc/loop", .{});
-    try d.symLink(io, "/deny/secret", "tree/etc/pub", .{});
+    try symLinkOrSkip(d, io, "/lib/hello", "tree/etc/hello", .{});
+    try symLinkOrSkip(d, io, "../../../../../../lib/hello", "tree/etc/up", .{});
+    try symLinkOrSkip(d, io, "loop", "tree/etc/loop", .{});
+    try symLinkOrSkip(d, io, "/deny/secret", "tree/etc/pub", .{});
     var t: [64]u8 = undefined;
-    try d.symLink(io, try std.fmt.bufPrint(&t, "/{s}/bin/cat", .{arch}), try std.fmt.bufPrint(&b, "tree/{s}/bin/kitty", .{arch}), .{});
+    try symLinkOrSkip(d, io, try std.fmt.bufPrint(&t, "/{s}/bin/cat", .{arch}), try std.fmt.bufPrint(&b, "tree/{s}/bin/kitty", .{arch}), .{});
     return std.fmt.bufPrint(out, "{s}/tree", .{s.path});
 }
 
@@ -5011,7 +5022,7 @@ test "uncontained bind follows host symlinks as before [34]" {
     defer other.deinit();
     try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "host\n" });
     var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/f", .{other.path}), "tree/lib/host", .{});
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, try std.fmt.bufPrint(&lp, "{s}/f", .{other.path}), "tree/lib/host", .{});
     const u = try runRoot(e, tree, &.{ "--cwd", s.path, "--readable", other.path, "cat", "/lib/host" });
     defer u.deinit();
     try std.testing.expectEqualStrings("host\n", u.out);
