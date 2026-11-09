@@ -2,7 +2,7 @@
 id: 35
 slug: serve
 title: Serving the namespace over 9P
-status: accepted
+status: implemented
 created: 2026-11-06
 authors: [progrium]
 depends: [8, 21, 87]
