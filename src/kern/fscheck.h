@@ -65,6 +65,15 @@ int	h9_fs_readlinkw(wchar_t *path, char *buf, int nbuf);
 int	h9_fs_checkw(wchar_t *path, int op);
 int	h9_fs_checknamew(wchar_t *path, int op);
 void	h9_fs_allow(wchar_t *path, int op);
+/*
+ * The same for an already-open handle, by the file the handle actually
+ * opened (GetFinalPathNameByHandle) rather than by resolving a path again:
+ * devfs-win32 opens, then checks the handle, so a swapped component can't
+ * steer the open past the check. The handle is a void* so this header needn't
+ * include windows.h; HANDLE is a void* on Windows.
+ */
+int	h9_fs_checkhandlew(void *handle, int op);
+void	h9_fs_allowhandlew(void *handle, int op);
 
 /*
  * devfs-win32's paths spelled for the Win32 file calls. A drive path,

@@ -529,21 +529,20 @@ h9_fs_getattr(wchar_t *path)
 	return r;
 }
 
+/*
+ * The guest's spelling, "/C:/a/b", of the file an open handle refers to,
+ * from its final path name (symlinks and junctions followed, case and short
+ * names canonicalised). Returns 0, or -1 if it isn't a drive path.
+ */
 static int
-finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
+handlefinal(HANDLE h, char *buf, int nbuf)
 {
 	wchar_t w[MAX_PATH*4];
-	HANDLE h;
 	DWORD n;
 	char *p;
 	int i;
 
-	h = h9_fs_createfile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|flags, nil);
-	if(h == INVALID_HANDLE_VALUE)
-		return -1;
 	n = GetFinalPathNameByHandleW(h, w, nelem(w), FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
-	CloseHandle(h);
 	if(n == 0 || n >= nelem(w))
 		return -1;
 	/* Only drive paths, \\?\C:\..., are allowed; not UNC or devices. */
@@ -559,6 +558,21 @@ finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
 	if(i > 1 && buf[i-1] == '/')
 		buf[i-1] = 0;
 	return 0;
+}
+
+static int
+finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
+{
+	HANDLE h;
+	int r;
+
+	h = h9_fs_createfile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|flags, nil);
+	if(h == INVALID_HANDLE_VALUE)
+		return -1;
+	r = handlefinal(h, buf, nbuf);
+	CloseHandle(h);
+	return r;
 }
 
 static int
@@ -824,6 +838,40 @@ void
 h9_fs_allow(wchar_t *path, int op)
 {
 	switch(h9_fs_checkw(path, op)){
+	case 0:
+		return;
+	case Readonly:
+		error(Eperm);
+	default:
+		error(Enonexist);
+	}
+}
+
+/*
+ * The policy decision for an already-open handle, judged by the file the
+ * handle actually opened (its final path name) rather than by resolving a
+ * path string again: devfs-win32 opens, then checks the handle, so a swapped
+ * component can't steer the open past the check (the check-then-open race).
+ * h9_fs_checkhandlew returns 0/-1/-2 as h9_fs_checkw; h9_fs_allowhandlew
+ * raises the matching error. The handle is passed as void* so the header
+ * needn't include windows.h; HANDLE is a void* on Windows.
+ */
+int
+h9_fs_checkhandlew(void *handle, int op)
+{
+	char buf[MAX_PATH*4*UTFmax];
+
+	if(!h9_policy_active())
+		return 0;
+	if(handlefinal((HANDLE)handle, buf, sizeof buf) < 0)
+		return Hidden;
+	return h9_policy_check(buf, strlen(buf), op);
+}
+
+void
+h9_fs_allowhandlew(void *handle, int op)
+{
+	switch(h9_fs_checkhandlew(handle, op)){
 	case 0:
 		return;
 	case Readonly:

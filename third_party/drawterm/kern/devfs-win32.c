@@ -421,17 +421,19 @@ fsopen(Chan *c, int mode)
 {
 	wchar_t *p;
 	Ufsinfo *uif;
-	int omode;
+	int omode, op;
 
 	omode = openmode(mode);
 
 	uif = c->aux;
-	h9_fs_allow(uif->path, omode == OREAD && !(mode&OTRUNC) ? H9_FSREAD : H9_FSWRITE);
-	if(mode & ORCLOSE)
-		h9_fs_allow(uif->path, H9_FSREMOVE);
+	op = omode == OREAD && !(mode&OTRUNC) ? H9_FSREAD : H9_FSWRITE;
 	if(c->qid.type & QTDIR){
 		DIR *d;
 
+		/* A directory is listed by search, not a handle, so check its path. */
+		h9_fs_allow(uif->path, op);
+		if(mode & ORCLOSE)
+			h9_fs_allow(uif->path, H9_FSREMOVE);
 		if(omode != OREAD)
 			error(Eperm);
 		d = malloc(sizeof(*d));
@@ -463,16 +465,46 @@ fsopen(Chan *c, int mode)
 		uif->dir = d;
 		poperror();
 	} else {
+		DWORD access;
+
 		uif->dir = NULL;
+		/* FILE_READ_ATTRIBUTES so GetFinalPathNameByHandle works on a
+		 * write-only open (the handle check needs it). */
+		access = fsaccess(omode & 3) | FILE_READ_ATTRIBUTES;
+		/* A truncation needs write access and must wait for the check. */
+		if(mode & OTRUNC)
+			access |= GENERIC_WRITE;
+		/*
+		 * h9: open first, then check the file the handle actually refers to
+		 * (h9_fs_allowhandlew, via GetFinalPathNameByHandle), rather than
+		 * checking uif->path and opening it as two separate resolutions. The
+		 * open follows links as before, but the truncation is withheld
+		 * (OPEN_EXISTING, then SetEndOfFile) until the check passes, so a
+		 * denied file keeps its contents.
+		 */
 		if((uif->fh = CreateFile(
 			uif->path,
-			fsaccess(omode & 3),
+			access,
 			FILE_SHARE_READ | FILE_SHARE_WRITE,
 			NULL,
-			(mode & OTRUNC) ? TRUNCATE_EXISTING : OPEN_EXISTING,
+			OPEN_EXISTING,
 			FILE_ATTRIBUTE_NORMAL,
 			0)) == INVALID_HANDLE_VALUE)
 			oserror();
+		if(waserror()){
+			CloseHandle(uif->fh);
+			uif->fh = INVALID_HANDLE_VALUE;
+			nexterror();
+		}
+		h9_fs_allowhandlew(uif->fh, op);
+		if(mode & ORCLOSE)
+			h9_fs_allowhandlew(uif->fh, H9_FSREMOVE);
+		if(mode & OTRUNC){
+			if(SetFilePointer(uif->fh, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER
+			|| !SetEndOfFile(uif->fh))
+				oserror();
+		}
+		poperror();
 	}
 	uif->offset = 0;
 
@@ -727,13 +759,20 @@ fswstat(Chan *c, uchar *buf, int n)
 			ptm = &tm;
 		}
 		if((h = CreateFile(uif->path,
-			FILE_WRITE_ATTRIBUTES,
+			FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES,
 			FILE_SHARE_READ | FILE_SHARE_WRITE,
 			NULL,
 			OPEN_EXISTING,
 			FILE_ATTRIBUTE_NORMAL,
 			0)) != INVALID_HANDLE_VALUE){
+			/* h9: check the file the handle actually opened, not the path. */
+			if(waserror()){
+				CloseHandle(h);
+				nexterror();
+			}
+			h9_fs_allowhandlew(h, H9_FSWRITE);
 			SetFileTime(h, NULL, pta, ptm);
+			poperror();
 			CloseHandle(h);
 		}
 	}
@@ -986,7 +1025,25 @@ h9_fs_anchor(Chan *c)
 	uif->lpath = nil;
 }
 
-/* h9: symbolic links aren't made on Windows hosts. */
+/*
+ * h9: symbolic links aren't made on Windows hosts.
+ *
+ * This is load-bearing for the sandbox. fscreate, fsremove, and the
+ * wstat rename path still check a path string and then let the host
+ * re-resolve it (CreateFile/DeleteFile/MoveFile), which is the same
+ * check-then-act shape the POSIX backend had to close. It is safe here only
+ * because the guest has no way to win that race: it can't plant a reparse
+ * point (no symlink or junction creation anywhere in this driver) and can't
+ * move a file across directories into an in-policy name (h9_fs_rename is
+ * EXDEV), so it can never make the check and the operation resolve to
+ * different files. fsopen and the wstat time-set don't rely on that: they
+ * open first and check the handle (h9_fs_allowhandlew).
+ *
+ * If link or junction creation is ever added here, the create, remove, and
+ * rename paths must move to handle-bound checks first (open-then-check, and
+ * a handle-relative create via the NT RootDirectory, as devfs-posix.c does
+ * with openat/unlinkat/renameat), or this race reopens.
+ */
 void
 h9_fs_symlink(Chan *c, char *name, char *target)
 {
