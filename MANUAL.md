@@ -78,7 +78,7 @@ of running programs never outlive the h9 invocation.
 
 Each Plan 9 program runs as real machine code on a virtual CPU from your
 host's hypervisor (Hypervisor.framework on macOS, KVM on Linux, and the
-Windows Hypervisor Platform on Windows x86\_64, which is still incomplete).
+Windows Hypervisor Platform on Windows x86\_64).
 When a program makes a system call, it
 doesn't reach your host's kernel. It's answered by a Plan 9 kernel that runs
 inside the h9 process: the kernel from drawterm, Plan 9's remote terminal
@@ -158,7 +158,7 @@ to `h9-emu` too. (When you build `h9-emu` from source it's still called
 | Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | ✓ |
 | Linux x86\_64 | ✓ (KVM; without it, `h9-emu`, or `--backend native` for a trusted guest), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
 | Windows on ARM | *Not yet available ([whp](design/0017-whp.md))* | ✓ |
-| Windows x86\_64 | Incomplete: the WHP backend is built but still a draft ([whp](design/0017-whp.md)) | ✓, with an amd64 root tree |
+| Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | ✓, with an amd64 root tree |
 
 **Host requirements.** On macOS, h9 must be signed with the hypervisor
 entitlement in `h9.entitlements`; `zig build` does that, and release binaries
@@ -2500,7 +2500,7 @@ A **backend** is what runs guest code:
 | --- | --- | --- |
 | `hvf` | macOS on Apple Silicon (Hypervisor.framework) | arm64 |
 | `kvm` | Linux x86\_64 and arm64, with access to `/dev/kvm` | The host's architecture. The arm64 path is built but hasn't yet run on an arm64 KVM host ([#92](https://github.com/progrium/hyper9/issues/92)). |
-| `whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64. Incomplete: built, but still a draft ([whp](design/0017-whp.md)) |
+| `whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 |
 | `native` | Linux x86\_64, 5.11 or later, without a hypervisor | amd64 |
 | `emu` | Any, in `h9-emu` only (Unicorn) | arm64, amd64, and 386 |
 
@@ -2704,7 +2704,7 @@ They change faster than this manual, as proposals land.
   server's tree. Attaching a kernel device is what a `#` name does.
 
 - **backend**: h9's name for what runs guest code: a hypervisor (`hvf` on macOS, `kvm`
-  on Linux, and `whp`, still incomplete, on Windows), the host CPU in a stub
+  on Linux, and `whp` on Windows), the host CPU in a stub
   process (`native`, on Linux x86\_64), or the emulator (`emu`). Chosen with
   `--backend`; see chapter 27.
 

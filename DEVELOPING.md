@@ -154,8 +154,8 @@ fetches it. The prebuilt libraries exist for macOS arm64 and Linux musl only,
 so Windows (`-Dtarget=aarch64-windows` or `x86_64-windows`) always builds
 from source. kern builds for Windows with drawterm's win32 files, so h9.exe
 runs programs on the emulator, and host paths are `/C:/...` in `#U`. On
-Windows x86\_64, h9.exe also has the WHP backend ([whp](design/0017-whp.md),
-a draft): it needs the Windows Hypervisor Platform feature (Settings >
+Windows x86\_64, h9.exe also has the WHP backend ([whp](design/0017-whp.md)):
+it needs the Windows Hypervisor Platform feature (Settings >
 Optional features, or `DISM /Online /Enable-Feature
 /FeatureName:HypervisorPlatform`, then restart), and loads
 `WinHvPlatform.dll` only when it's used, so h9.exe still starts, and `auto`
