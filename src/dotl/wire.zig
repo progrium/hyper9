@@ -225,8 +225,8 @@ pub const Qids = struct {
     }
 };
 
-/// Messages common to every dialect.
-const common = struct {
+/// Messages common to every dialect, also in `p9` and `l`.
+pub const common = struct {
     pub const Tversion = struct {
         pub const id = 100;
         msize: u32,

@@ -27,6 +27,7 @@ const Term = @import("term.zig").Term;
 const wsrelay = @import("wsrelay.zig");
 const deadline = @import("deadline.zig");
 const design = @import("design");
+const DotlServer = @import("dotlserver.zig").DotlServer;
 
 const gpa = std.testing.allocator;
 
@@ -106,7 +107,7 @@ const web_skips = [_][]const u8{
     // Browsers and Node fail a handshake that offered subprotocols and got none.
     "a ws:// root works with a server that selects no subprotocol",
 };
-const web_skip_tags = [_][]const u8{ "5", "13", "35" };
+const web_skip_tags = [_][]const u8{ "5", "13", "22", "35" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -6952,4 +6953,170 @@ test "--print lists listeners and elides the token [35]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "s3cret") == null);
     // --print binds nothing.
     try std.testing.expect(!pathExists(sock));
+}
+
+// 9P2000.L (design/0022-dotl.md). The server is tests/dotlserver.zig's,
+// a tree in memory behind a loopback port, made fresh per connection.
+
+fn dotlTree(s: *@import("dotlserver.zig").Server) !void {
+    _ = try s.add("etc/motd", .file, "hello from .L\n");
+    _ = try s.add("etc/passwd", .file, "root:x:0:0\n");
+    _ = try s.add("usr/glenda/notes", .file, "one\ntwo\n");
+    _ = try s.add("usr/glenda/full/f", .file, "");
+    _ = try s.add("lib", .link, "usr/glenda");
+    _ = try s.add("usr/abs", .link, "/etc/passwd");
+    _ = try s.add("usr/escape", .link, "../../../../etc/passwd");
+    _ = try s.add("usr/loop", .link, "loop");
+    _ = try s.add("usr/dangling", .link, "nowhere");
+}
+
+/// Runs `script` in rc with the server mounted at /n/l by dotlfs.
+fn dotlRun(e: Env, d: *DotlServer, script: []const u8) !Result {
+    var allow_buf: [64]u8 = undefined;
+    var cmd_buf: [1024]u8 = undefined;
+    const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; {s}", .{ d.dial(), script });
+    return run(e, &.{ "--net-allow", allow, "--rc", cmd });
+}
+
+test "the guest mounts a .L server with dotlfs, under the network policy [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d, "cat /n/l/etc/motd; ls /n/l/usr/glenda; cat /net/dotl/*/status");
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hello from .L\n/n/l/usr/glenda/full\n/n/l/usr/glenda/notes\n9P2000.L\n", r.out);
+    // When --net-allow doesn't cover the server the dial is refused, and
+    // nothing is mounted.
+    var cmd_buf: [256]u8 = undefined;
+    const no = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!1", "--rc", try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l && echo mounted", .{d.dial()}) });
+    defer no.deinit();
+    try std.testing.expect(no.code != 0);
+    try std.testing.expect(std.mem.indexOf(u8, no.out, "mounted") == null);
+}
+
+test "a .L mount lists, reads, writes and removes [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cd /n/l/usr/glenda
+        \\echo new >made && cat made
+        \\echo more >>made && awk 'END{print NR}' made
+        \\mkdir dir && touch dir/x && ls dir
+        \\mv made renamed && ls
+        \\rm renamed dir/x dir && ls
+        \\ls -l notes | awk '{print $1, $6}'
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8\n", r.out);
+}
+
+test "a symlink in a .L mount is followed and can't leave the mount [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cat /n/l/usr/abs /n/l/usr/escape /n/l/lib/notes
+        \\ls /n/l/usr
+        \\# A walk's error reaches the guest only from its first name.
+        \\cd /n/l/usr && cat loop
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    // A link that resolves to nothing, dangling or a loop, isn't listed.
+    try std.testing.expectEqualStrings("root:x:0:0\nroot:x:0:0\none\ntwo\n/n/l/usr/abs\n/n/l/usr/escape\n/n/l/usr/glenda\n", r.out[0..@min(r.out.len, 200)]);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
+}
+
+test "Rlerror errnos become 9front error strings [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cat /n/l/etc/nope
+        \\rm /n/l/usr/glenda/full
+        \\mkdir /n/l/etc
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "file does not exist: '/n/l/etc/nope'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "directory not empty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "already exists") != null);
+}
+
+test "a .L mount attaches as the host uid, not 0, without --user-map [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d, "ls /n/l >/dev/null");
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(d.attached.load(.acquire));
+    const uid: u32 = if (builtin.os.tag == .windows) 1000 else std.c.getuid();
+    try std.testing.expectEqual(if (uid == 0) @as(u32, 65534) else uid, d.n_uname);
+}
+
+/// The root tree and arch a .L root's fill copies programs from; set by
+/// the case before the server starts.
+var dotl_root_from: struct { root: []const u8 = "", arch: []const u8 = "" } = .{};
+
+/// A small 9front root in memory: dotlTree, the mount points, rc and a
+/// few programs from the test's root tree.
+fn dotlRootTree(s: *@import("dotlserver.zig").Server) !void {
+    try dotlTree(s);
+    for ([_][]const u8{ "dev", "env", "fd", "proc", "srv", "net", "n", "tmp", "mnt/term/cwd", "bin" }) |d| _ = try s.add(d, .dir, "");
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, dotl_root_from.root, .{});
+    defer dir.close(std.testing.io);
+    var prog_buf: [64]u8 = undefined;
+    for ([_][]const u8{ "rc", "echo", "ls", "cat", "rm" }) |prog| {
+        const host = try std.fmt.bufPrint(&prog_buf, "{s}/bin/{s}", .{ dotl_root_from.arch, prog });
+        const bytes = try dir.readFileAlloc(std.testing.io, host, s.arena.allocator(), .limited(16 << 20));
+        (try s.add(host, .file, bytes)).mode = 0o755;
+    }
+    _ = try s.add("rc/lib/rcmain", .file, try dir.readFileAlloc(std.testing.io, "rc/lib/rcmain", s.arena.allocator(), .limited(1 << 20)));
+}
+
+test "a 9P2000.L root lists, reads, writes and removes [22]" {
+    const e = try env(@src());
+    dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    } };
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlRootTree);
+    defer d.finish(std.testing.io);
+    const r = try run(e, &.{
+        "--root", d.dial(), "--write=scope", "--builtin=off", "--rc",
+        \\cat /etc/motd /usr/glenda/notes
+        \\echo new >/usr/glenda/made && cat /usr/glenda/made
+        \\rm /usr/glenda/notes && ls /usr/glenda
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hello from .L\none\ntwo\nnew\n/usr/glenda/full\n/usr/glenda/made\n9P2000.L\n", r.out);
+}
+
+test "a 9P2000 root goes through the translator unchanged [22]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    const r = try run(e, &.{ "--root", srv.dial(), "--rc", "cat /net/dotl/*/status; ls /bin/ls" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("9P2000\n/bin/ls\n", r.out);
 }

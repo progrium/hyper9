@@ -252,6 +252,7 @@ fn integrationTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .imports = &.{
                 .{ .name = "design", .module = designModule(b) },
                 .{ .name = "ws", .module = b.createModule(.{ .root_source_file = b.path("src/ws.zig") }) },
+                .{ .name = "dotltest", .module = b.createModule(.{ .root_source_file = b.path("src/dotl/testserver.zig") }) },
             },
         }),
         .filters = filters,
@@ -599,7 +600,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c" },
         .flags = flags,
     });
     if (!web) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostcmd.c"}, .flags = flags });

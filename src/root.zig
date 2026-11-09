@@ -69,4 +69,6 @@ test {
     _ = @import("linux/netlink.zig");
     _ = @import("dotl/attr.zig");
     _ = @import("dotl/wire.zig");
+    _ = @import("dotl/client.zig");
+    _ = @import("dotl/kern.zig");
 }
