@@ -49,6 +49,14 @@ void	h9_fs_allow(char *path, int op);
  */
 int	h9_fs_checkfd(int fd, int op);
 void	h9_fs_allowfd(int fd, int op);
+/*
+ * The same for the entry `name` within the directory `dfd` already refers to,
+ * judged by that directory's canonical path joined to `name`, without
+ * following `name`. For an unlinkat or renameat done relative to a parent
+ * directory fd the devfs code opened and checked once.
+ */
+int	h9_fs_checkat(int dfd, char *name, int op);
+void	h9_fs_allowat(int dfd, char *name, int op);
 #else
 /* The same, for devfs-win32's paths, "C:\a\b". */
 int	h9_fs_resolveinw(wchar_t *top, wchar_t *dir, char *rel, wchar_t *buf, int nbuf);
