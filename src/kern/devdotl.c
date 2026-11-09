@@ -14,6 +14,8 @@
  *			(tcp!, or unix! for h9's own root dials), and
  *			again on a drop if the server speaks 9P2000.L.Z;
  *			version 9P2000.L: don't offer .L.Z;
+ *			serve N: the server side, for a 9P2000.L client
+ *			on fd N, with an exportfs on data;
  *			reads give N
  *	dotl/N/data	9P2000, for devmnt
  *	dotl/N/status	the dialect: negotiating, 9P2000, 9P2000.L,
@@ -63,7 +65,7 @@ extern Chan	*h9_unixchan(char *path);
 extern void	h9_plan_set(void *plan);
 
 /* Implemented in Zig (src/dotl/kern.zig). */
-extern void	*h9_dotl_new(void *mach, int lz, char *err);
+extern void	*h9_dotl_new(void *mach, int mode, char *err);
 extern int	h9_dotl_canreconnect(void *t);
 extern int	h9_dotl_wantreconnect(void *t);
 extern int	h9_dotl_reconnect(void *t, char *err);
@@ -112,6 +114,7 @@ struct Conv
 	Proc	*kp;		/* the reader, until it exits; under lk */
 	int	kpgone;		/* the reader has exited; under lk */
 	int	nolz;		/* ctl's version 9P2000.L */
+	int	serving;	/* ctl's serve: the server side */
 	char	*addrs;		/* dial's addresses, to redial */
 	int	at;		/* which of them was dialed last */
 	void	*plan;		/* the dialer's plan, for redials */
@@ -175,6 +178,7 @@ newconv(void)
 			cv->kp = nil;
 			cv->kpgone = 0;
 			cv->nolz = 0;
+			cv->serving = 0;
 			cv->addrs = nil;
 			cv->plan = nil;
 			cv->pg = nil;
@@ -644,7 +648,7 @@ start(Conv *cv, Chan *c)
 	Proc *kp;
 	void *tr;
 
-	tr = h9_dotl_new(cv->mach, !cv->nolz, err);
+	tr = h9_dotl_new(cv->mach, cv->serving ? 2 : !cv->nolz, err);
 	if(tr == nil){
 		cclose(c);
 		error(err);
@@ -683,6 +687,11 @@ ctlwrite(Conv *cv, char *a, long n)
 	if(cb->nf == 2 && strcmp(cb->f[0], "fd") == 0){
 		if(cv->started)
 			error("already connected");
+		start(cv, fdtochan(atoi(cb->f[1]), ORDWR, 1, 1));
+	}else if(cb->nf == 2 && strcmp(cb->f[0], "serve") == 0){
+		if(cv->started)
+			error("already connected");
+		cv->serving = 1;
 		start(cv, fdtochan(atoi(cb->f[1]), ORDWR, 1, 1));
 	}else if(cb->nf == 2 && strcmp(cb->f[0], "dial") == 0){
 		if(cv->started)

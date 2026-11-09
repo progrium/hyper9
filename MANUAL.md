@@ -1585,7 +1585,13 @@ devices in Plan 9.
   listeners don't authenticate, so every client acts as your user: keep TCP
   on loopback or a trusted network. A machine serves up to 32 connections,
   each with up to 8 exportfs processes; serving's processes count against
-  `--pids` separately from the program's.
+  `--pids` separately from the program's. Every listener also speaks
+  9P2000.L ([dotl](design/0022-dotl.md)), so Linux mounts it: `mount -t 9p
+  -o trans=unix,version=9p2000.L /path/h9.sock /mnt`. A .L client sees
+  regular files and directories only, with every file owned by your host
+  uid. Renames work only within a directory, and symlinks, device nodes,
+  and hard links can't be made. Byte-range locks are advisory, shared by
+  the machine's connections.
 - **9P2000.L servers** ([dotl](design/0022-dotl.md)). `dotlfs addr
   mountpoint [spec]` dials a server that speaks 9P2000.L, such as diod or
   ZeroFS, and mounts it. It also mounts a plain 9P2000 server, so it can be
@@ -1614,8 +1620,8 @@ devices in Plan 9.
   mountpoint` gives addresses to try in turn, as for an HA server, and a
   server that answers that it's no longer the leader is dialed again the
   same way. `dotlfs -L` asks for plain .L. `/net/dotl/N/status` shows
-  `9P2000.L.Z reconnects N` once a reconnect has happened. A unix socket root reconnects too, but a
-  WebSocket root doesn't yet.
+  `9P2000.L.Z reconnects N` once a reconnect has happened. A unix socket
+  root reconnects too, but a WebSocket root doesn't yet.
 - Not yet available: roots that need authentication
   ([root-auth](design/root-auth.md)); serving a machine's namespace to the
   host or the network as a 9P server from h9 itself, rather than with

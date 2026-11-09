@@ -368,7 +368,7 @@ pub const Plan = struct {
             }, r.path });
         }
         if (p.serve) |sv| {
-            try w.print("serve:    # /bin/exportfs, or {s} without one\n", .{sv.fallback});
+            try w.print("serve:    # 9P2000 and 9P2000.L; /bin/exportfs, or {s} without one\n", .{sv.fallback});
             for (sv.listeners) |l| {
                 var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
                 defer line.deinit();
