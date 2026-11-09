@@ -474,7 +474,9 @@ scripts/wine-root.sh           # Alpine amd64 with Wine 11, at .local/linux/wine
 
 Copy the two files into the root's `/usr/lib/wine/x86_64-unix` and
 `x86_64-windows`, and set `Graphics` to `draw` under
-`HKCU\Software\Wine\Drivers` in the prefix.
+`HKCU\Software\Wine\Drivers` in the prefix. [Running Windows
+programs](docs/windows.md) walks through it, from the root to a prefix that
+lasts between runs.
 
 ### Sandbox
 

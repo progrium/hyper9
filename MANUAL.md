@@ -2611,6 +2611,9 @@ They change faster than this manual, as proposals land.
 - [Recreating Docker](docs/containers.md): Docker-style images, layers,
   volumes, ports, and limits, from slim root trees and Linux images pulled
   from Docker Hub to images served over 9P, ending in a docker-like CLI.
+- [Running Windows programs](docs/windows.md): Wine in a Linux root, a
+  prefix that lasts between runs, console programs, and programs with
+  windows through the `winedraw` display driver.
 
 ## Appendices
 
