@@ -114,6 +114,11 @@ pub const Vma = struct {
     name: Name = .{},
     /// The file offset of `start`, for /proc/n/maps.
     offset: u64 = 0,
+    /// A private file mapping filled on first touch: each chunk's pages in
+    /// it are read from the file when the chunk is allocated (`populate`),
+    /// rather than all of them at mmap, which for a shared library is
+    /// mostly pages no one reads. Held by the Mm (`Mm.srcs`).
+    src: ?*Src = null,
 
     pub const Name = struct {
         buf: [96]u8 = undefined,
@@ -133,6 +138,29 @@ pub const Vma = struct {
 };
 
 const Run = struct { va: u64, len: u64, perms: vmm.Perms = .{} };
+
+/// The file behind lazily filled private mappings (`Vma.src`), reference
+/// counted: an Mm holds one for each Src its VMAs use, and drops it when
+/// the last of them is unmapped.
+pub const Src = struct {
+    refs: std.atomic.Value(u32) = .init(1),
+    /// Reads the file at `off` into `dst`, with zeros past its end or
+    /// after a failed read.
+    fill: *const fn (s: *Src, dst: []u8, off: u64) void,
+    /// Frees it, after its last reference.
+    free: *const fn (s: *Src) void,
+
+    pub fn get(s: *Src) *Src {
+        _ = s.refs.fetchAdd(1, .acq_rel);
+        return s;
+    }
+
+    /// Drops a reference, outside any Mm's lock: the last frees it, which
+    /// may close a file.
+    pub fn put(s: *Src) void {
+        if (s.refs.fetchSub(1, .acq_rel) == 1) s.free(s);
+    }
+};
 
 /// A chunk's pages. Shared by the Mms of a fork for MAP_SHARED mappings,
 /// and freed by the last. A shared file mapping's (shmfile.zig) are held
@@ -218,6 +246,11 @@ pub const Mm = struct {
     /// that's allowed. `fault` returns it, so a repeated fault counts as
     /// real only if no remap came between. Guarded by `lock`.
     remaps: u64 = 0,
+    /// The Srcs of lazily filled mappings (`Vma.src`), with a reference
+    /// each. Guarded by `lock`.
+    srcs: std.ArrayList(*Src) = .empty,
+    /// Srcs no VMA uses any more, put by `settle`. Guarded by `lock`.
+    dead_srcs: std.ArrayList(*Src) = .empty,
 
     /// Holds off other threads' layout changes (`op`).
     pub fn opLock(m: *Mm, io: std.Io) void {
@@ -255,6 +288,10 @@ pub const Mm = struct {
         m.doomed.deinit(m.gpa);
         for (m.unmapped_files.items) |p| p.release.?(p);
         m.unmapped_files.deinit(m.gpa);
+        for (m.srcs.items) |s| s.put();
+        m.srcs.deinit(m.gpa);
+        for (m.dead_srcs.items) |s| s.put();
+        m.dead_srcs.deinit(m.gpa);
         m.as.destroy();
         m.gpa.destroy(m);
     }
@@ -302,12 +339,16 @@ pub const Mm = struct {
         m.doomed = .empty;
         var files = m.unmapped_files;
         m.unmapped_files = .empty;
+        var srcs = m.dead_srcs;
+        m.dead_srcs = .empty;
         m.lock.unlock();
         if ((narrowed or list.items.len > 0 or files.items.len > 0) and m.refs.load(.acquire) > 1) m.as.shootdown();
         for (list.items) |p| m.freeP(p);
         list.deinit(m.gpa);
         for (files.items) |p| p.release.?(p);
         files.deinit(m.gpa);
+        for (srcs.items) |s| s.put();
+        srcs.deinit(m.gpa);
     }
 
     /// A hold on the pages behind a guest buffer, taken by `pin` and
@@ -476,8 +517,71 @@ pub const Mm = struct {
         m.lockSpin();
         defer m.lock.unlock();
         if (!m.isFree(v.start, v.end)) return error.BadAddress;
-        try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+        if (v.src) |s| {
+            try m.srcs.ensureUnusedCapacity(m.gpa, 1);
+            try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+            if (std.mem.indexOfScalar(*Src, m.srcs.items, s) == null) m.srcs.appendAssumeCapacity(s.get());
+            // Chunks allocated already won't be filled by `populate`.
+            m.fillAllocated(v, v.start, v.end);
+        } else try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
         try m.refreshRange(v.start, v.end);
+    }
+
+    /// Reads the file pages of lazy VMA `v` over [start, end) into the
+    /// chunks there that are allocated, past any overlays.
+    fn fillAllocated(m: *Mm, v: Vma, start: u64, end: u64) void {
+        const s = v.src.?;
+        var ci = start / chunk_size;
+        while (ci * chunk_size < end) : (ci += 1) {
+            const c = m.chunks.get(ci) orelse continue;
+            const cs = ci * chunk_size;
+            var lo = @max(start, cs) - cs;
+            const hi = @min(end, cs + chunk_size) - cs;
+            while (lo < hi) {
+                const b = c.backing(lo);
+                const e = @min(hi, b.end);
+                if (!b.overlay) s.fill(s, b.mem[0..@intCast(e - lo)], v.offset + (cs + lo - v.start));
+                lo = e;
+            }
+        }
+    }
+
+    /// Reads the file pages of the lazy VMAs over chunk `ci` into `mem`,
+    /// its new pages.
+    fn fillNew(m: *Mm, ci: u64, mem: []u8) void {
+        if (m.srcs.items.len == 0) return;
+        const cs = ci * chunk_size;
+        const ce = cs + chunk_size;
+        var i = m.indexAfter(cs);
+        if (i > 0 and m.vmas.items[i - 1].end > cs) i -= 1;
+        while (i < m.vmas.items.len and m.vmas.items[i].start < ce) : (i += 1) {
+            const v = m.vmas.items[i];
+            const s = v.src orelse continue;
+            const lo = @max(v.start, cs);
+            const hi = @min(v.end, ce);
+            if (lo >= hi) continue;
+            s.fill(s, mem[@intCast(lo - cs)..@intCast(hi - cs)], v.offset + (lo - v.start));
+        }
+    }
+
+    /// Moves the Srcs no VMA uses any more to `dead_srcs`, for `settle`:
+    /// of `which`, or of all if it's null.
+    fn dropSrcs(m: *Mm, which: ?[]const *Src) void {
+        var i: usize = 0;
+        while (i < m.srcs.items.len) {
+            const s = m.srcs.items[i];
+            const check = if (which) |w| std.mem.indexOfScalar(*Src, w, s) != null else true;
+            const used = !check or for (m.vmas.items) |v| {
+                if (v.src == s) break true;
+            } else false;
+            if (used) {
+                i += 1;
+                continue;
+            }
+            if (m.dead_srcs.append(m.gpa, s)) |_| {
+                _ = m.srcs.swapRemove(i);
+            } else |_| i += 1;
+        }
     }
 
     /// Removes every VMA in [start, end), splitting at the ends, and
@@ -491,6 +595,9 @@ pub const Mm = struct {
         try m.splitAt(end);
         var i = m.indexAfter(start);
         if (i > 0 and m.vmas.items[i - 1].start >= start) i -= 1;
+        // The Srcs of the lazy VMAs removed, to see if others use them.
+        var gone: [8]*Src = undefined;
+        var nlazy: usize = 0;
         while (i < m.vmas.items.len and m.vmas.items[i].start < end) {
             const v = m.vmas.items[i];
             if (v.end <= start) {
@@ -498,10 +605,17 @@ pub const Mm = struct {
                 continue;
             }
             _ = m.vmas.orderedRemove(i);
+            if (v.src) |s| {
+                if (std.mem.indexOfScalar(*Src, gone[0..@min(nlazy, gone.len)], s) == null) {
+                    if (nlazy < gone.len) gone[nlazy] = s;
+                    nlazy += 1;
+                }
+            }
             // Shared pages are others' too; a chunk of them goes when
             // nothing maps it, and is never reused for another mapping.
             if (!v.shared) m.zero(v.start, v.end);
         }
+        if (nlazy > 0) m.dropSrcs(if (nlazy <= gone.len) gone[0..nlazy] else null);
         m.dropPads(start, end);
         try m.trimOverlays(start, end);
         try m.refreshRange(start - start % chunk_size, std.mem.alignForward(u64, end, chunk_size));
@@ -895,6 +1009,7 @@ pub const Mm = struct {
         const ci = va / chunk_size;
         if (m.chunks.get(ci)) |c| return c;
         const p = try m.newPages();
+        m.fillNew(ci, p.mem);
         return m.addChunk(ci, p) catch |e| {
             // A failed addChunk leaves the pages unreferenced.
             if (p.refs.load(.acquire) == 0) {
@@ -1063,6 +1178,8 @@ pub const Mm = struct {
         m.lockSpin();
         defer m.lock.unlock();
         try n.vmas.appendSlice(n.gpa, m.vmas.items);
+        try n.srcs.ensureTotalCapacity(n.gpa, m.srcs.items.len);
+        for (m.srcs.items) |s| n.srcs.appendAssumeCapacity(s.get());
         n.brk_start = m.brk_start;
         n.brk = m.brk;
         // A shared mapping's chunks that no one has touched yet are made
@@ -1112,29 +1229,37 @@ pub const Mm = struct {
         return n;
     }
 
-    /// MADV_DONTNEED: private pages in [start, end) read as zero again.
-    /// Shared ones keep their contents, as Linux's do.
+    /// MADV_DONTNEED: private pages in [start, end) read as zero again,
+    /// or a private file mapping's as the file's. Shared ones keep their
+    /// contents, as Linux's do.
     pub fn discard(m: *Mm, start: u64, end: u64) void {
         m.lockSpin();
         defer m.lock.unlock();
         for (m.vmas.items) |v| {
             if (v.end <= start or v.start >= end or v.shared) continue;
-            m.zero(@max(v.start, start), @min(v.end, end));
+            if (v.src != null)
+                m.fillAllocated(v, @max(v.start, start), @min(v.end, end))
+            else
+                m.zero(@max(v.start, start), @min(v.end, end));
         }
     }
 
     /// Copies the allocated pages of [src, src+len) to dst, for mremap's
     /// move. dst must be in a VMA already; pages never allocated at src
-    /// are left unallocated (zero) at dst.
+    /// are left unallocated at dst, zero or, in a lazily filled mapping
+    /// moved with its file offset, the file's as at src.
     pub fn copyRange(m: *Mm, src: u64, dst: u64, len: u64) Error!void {
         m.lockSpin();
         defer m.lock.unlock();
+        const lazy = if (m.find(dst)) |v| v.src != null else false;
         var off: u64 = 0;
         while (off < len) : (off += page) {
             const sc = m.chunks.get((src + off) / chunk_size) orelse continue;
             const so = (src + off) % chunk_size;
             const from = sc.backing(so).mem[0..page];
-            if (std.mem.allEqual(u8, from, 0)) continue;
+            // A lazy mapping's new chunk is filled from the file, so a
+            // page the guest zeroed is copied too.
+            if (!lazy and std.mem.allEqual(u8, from, 0)) continue;
             const dc = try m.populate(dst + off);
             const do = (dst + off) % chunk_size;
             @memcpy(dc.backing(do).mem[0..page], from);

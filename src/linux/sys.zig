@@ -3426,6 +3426,41 @@ const FileCtx = struct {
     }
 };
 
+/// The file of a lazily filled private mapping (`mm.Src`): a reference
+/// to the fd's channel, which outlives the fd.
+const LazyFile = struct {
+    src: mm.Src = .{ .fill = fill, .free = free },
+    gpa: std.mem.Allocator,
+    ch: *anyopaque,
+
+    fn open(gpa: std.mem.Allocator, fd: i32) ?*LazyFile {
+        const ch = kc.chanGet(fd) orelse return null;
+        const lf = gpa.create(LazyFile) catch {
+            kc.chanPut(ch);
+            return null;
+        };
+        lf.* = .{ .gpa = gpa, .ch = ch };
+        return lf;
+    }
+
+    fn fill(s: *mm.Src, dst: []u8, off: u64) void {
+        const lf: *LazyFile = @fieldParentPtr("src", s);
+        var done: usize = 0;
+        while (done < dst.len) {
+            const n = kc.chanPread(lf.ch, dst[done..], off + done) catch break;
+            if (n == 0) break;
+            done += n;
+        }
+        @memset(dst[done..], 0);
+    }
+
+    fn free(s: *mm.Src) void {
+        const lf: *LazyFile = @fieldParentPtr("src", s);
+        kc.chanPut(lf.ch);
+        lf.gpa.destroy(lf);
+    }
+};
+
 fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32, off: u64) Err!i64 {
     if (len_in == 0) return -E.INVAL;
     const len = std.mem.alignForward(u64, len_in, page);
@@ -3502,6 +3537,14 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
         v.cow = true;
         var fx: FileCtx = .{ .backend = p.mm.backend, .file = lockKey(info.?), .fd = @intCast(fd), .path = path, .writable = false };
         p.mm.insertFile(v, &fx, FileCtx.pagesAt) catch return if (fx.failed) kerr() else -E.NOMEM;
+        return @intCast(start);
+    }
+    if (!anon and !shared) lazy: {
+        // Filled from the file as the guest touches it (`mm.Vma.src`).
+        const lf = LazyFile.open(p.mm.gpa, fd) orelse break :lazy;
+        defer lf.src.put();
+        v.src = &lf.src;
+        p.mm.insert(v) catch return -E.NOMEM;
         return @intCast(start);
     }
     if (shared and !fixed) {
@@ -3686,6 +3729,7 @@ fn mremap(p: *Process, old: u64, old_len_in: u64, new_len_in: u64, flags: u32, n
         var ext = vma;
         ext.start = old + old_len;
         ext.end = old + new_len;
+        if (vma.kind == .file) ext.offset = vma.offset + (ext.start - vma.start);
         p.mm.insert(ext) catch return -E.NOMEM;
         return @intCast(old);
     }
@@ -3695,8 +3739,10 @@ fn mremap(p: *Process, old: u64, old_len_in: u64, new_len_in: u64, flags: u32, n
     var nv = vma;
     nv.start = dst;
     nv.end = dst + new_len;
+    if (vma.kind == .file) nv.offset = vma.offset + (old - vma.start);
     p.mm.insert(nv) catch return -E.NOMEM;
-    // Copy only the pages that were allocated; the rest are zero anyway.
+    // Copy only the pages that were allocated; the rest are zero, or the
+    // file's in a lazily filled mapping.
     p.mm.copyRange(old, dst, old_len) catch {
         p.mm.unmap(dst, dst + new_len) catch {};
         return -E.NOMEM;
