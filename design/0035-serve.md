@@ -11,6 +11,8 @@ areas: [cli, kern, sandbox, web]
 
 # Proposal: Serving the namespace over 9P
 
+Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 `--serve ADDR` makes h9 a 9P server while its program runs. Each connection gets its own `exportfs` of the machine's namespace, so a client sees what the guest sees, under the same access rules, except `/net`, which is left out unless `--serve-net` is given. h9 listens on the host, on a unix socket (`unix!PATH`), on TCP (`tcp!HOST!PORT`), or on a WebSocket (`ws://HOST:PORT/PATH`). A 9front machine, another h9, or anything with a 9P2000 client can mount it, and so can an h9 in a browser tab, using a [websocket-9p](0021-websocket-9p.md) root or `/net/ws`. Accepted connections enter the kernel through websocket-9p's devhstream, as host-made streams do. Before a connection reaches `exportfs`, its first `Tversion` passes through a slot where [dotl](0022-dotl.md) adds its 9P2000.L translator. This proposal leaves the slot empty.
