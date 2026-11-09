@@ -1268,8 +1268,9 @@ test "creating empty files until memory runs out fails with file system full [6]
     // rc makes the files itself, without forking: no memory is left for
     // another process. A redirection with no command doesn't set $status
     // when it works, so there's nothing to test in the loop; when one
-    // fails, rc prints the error and leaves the script.
-    const r = try run(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" });
+    // fails, rc prints the error and leaves the script. About 30,000 files
+    // fit; on WHP, whose exits are slower, making them takes about 45s.
+    const r = try runInFor(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" }, null, 120_000);
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
@@ -1883,7 +1884,8 @@ test "acid attaches and prints registers and a stack trace [10]" {
     const a = selfArch(e);
     const reg = if (std.mem.eql(u8, a.name, "arm64")) "R0\t0x" else if (std.mem.eql(u8, a.name, "amd64")) "AX    0x" else "AX\t0x";
     try std.testing.expect(std.mem.indexOf(u8, r.out, reg) != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "sleep()+") != null);
+    // amd64's frame shows sleep's argument, sleep(a0=0x1388)+0xe.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\nsleep(") != null or std.mem.indexOf(u8, r.out, " sleep(") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/sys/src/cmd/sleep.c:") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "warning") == null);
@@ -2739,13 +2741,15 @@ test "exportfs -S serves a posted channel [8]" {
     // other end is posted as /srv/e, and exportfs passes it to /srv/r.
     // Each attach mounts /srv/r on /mnt/exportfs/<n>, mntexport's on
     // 9front, so /mnt/exportfs/0 is made in /tmp if the root lacks it.
+    // /srv/e exists once echo creates it, before its write posts the fd,
+    // and an open in between fails, so the mount is retried.
     const script =
         \\mkdir -p /tmp/m/exportfs/0 && bind -a /tmp/m /mnt && bind -a /tmp/m/exportfs /mnt/exportfs || exit mtpt
         \\ramfs -S r && mkdir /tmp/a /tmp/b && mount -c /srv/r /tmp/a && echo through >/tmp/a/x || exit setup
         \\exportfs -S /srv/r <[0=1] | { echo 0 >/srv/e } &
         \\n=0
-        \\while(! test -e /srv/e && test $n -lt 100){ sleep 0.1; n=`{echo $n+1 | hoc} }
-        \\mount -c /srv/e /tmp/b && cat /tmp/b/x
+        \\while(! mount -c /srv/e /tmp/b >[2]/dev/null && test $n -lt 100){ sleep 0.1; n=`{echo $n+1 | hoc} }
+        \\cat /tmp/b/x
     ;
     const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
     defer r.deinit();
