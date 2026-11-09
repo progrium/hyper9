@@ -15,7 +15,7 @@ Nov 5, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A 9P server can be reached over a WebSocket: `--root ws://host/path` or `wss://host/path`, and `mount 'wss://…' /n/x` in namespace files. h9 makes the connection on the host, before the program starts, and devmnt mounts it as it mounts a [9P root](9p-roots.md)'s connection. The WebSocket is carried into the kernel by a new host-stream device, `src/kern/devhstream.c`, built on the pattern devhcons uses for the console: leaf calls into Zig, a host reader thread, and the guest sleeping in the kernel. Natively, Zig does the TCP, TLS, and WebSocket framing. On the [browser host](0012-browser-host.md), the page's own `WebSocket` does, which makes this the browser host's only way to reach a file server over the network.
+A 9P server can be reached over a WebSocket: `--root ws://host/path` or `wss://host/path`, and `mount 'wss://…' /n/x` in namespace files. h9 makes the connection on the host, before the program starts, and devmnt mounts it as it mounts a [9P root](0013-9p-roots.md)'s connection. The WebSocket is carried into the kernel by a new host-stream device, `src/kern/devhstream.c`, built on the pattern devhcons uses for the console: leaf calls into Zig, a host reader thread, and the guest sleeping in the kernel. Natively, Zig does the TCP, TLS, and WebSocket framing. On the [browser host](0012-browser-host.md), the page's own `WebSocket` does, which makes this the browser host's only way to reach a file server over the network.
 
 The guest can open WebSockets too. The same device is bound at `/net/ws`, laid out like devip's `/net/tcp`, so a guest writes `connect wss://…` to a conversation's `ctl` and mounts its `data` with the ordinary `mount` command. A conversation's `text` file, beside `data`, sends and receives text messages, so guest programs can use it for any WebSocket service, not only 9P. [net-policy](0005-net-policy.md)'s `--net` and `--net-allow` decide which URLs it may connect to. On the browser host, `/net/ws` is the guest's only network.
 
@@ -24,14 +24,14 @@ The guest can open WebSockets too. The same device is bound at `/net/ws`, laid o
 ### Why WebSocket
 
 - **The browser host has no sockets.** [browser-host](0012-browser-host.md) masks `#I`, since a Worker can't open TCP connections. A WebSocket is the only bidirectional network transport a page has, so without it a browser h9 can only run what's in its root archive or what the embedder lends it through WASI.
-- **Natively, it's 9P that crosses the web's infrastructure.** A WebSocket goes through HTTP proxies, load balancers, and TLS terminators that plain TCP on port 564 doesn't, and `wss` gives the connection TLS and the HTTP layer's authentication (a bearer token, a cookie, a signed URL) without a factotum. [9p-roots](9p-roots.md) lists "the 9P root's connection isn't encrypted" as a caveat and leaves authentication open. For a root reached over `wss`, both have an answer.
+- **Natively, it's 9P that crosses the web's infrastructure.** A WebSocket goes through HTTP proxies, load balancers, and TLS terminators that plain TCP on port 564 doesn't, and `wss` gives the connection TLS and the HTTP layer's authentication (a bearer token, a cookie, a signed URL) without a factotum. [9p-roots](0013-9p-roots.md) lists "the 9P root's connection isn't encrypted" as a caveat and leaves authentication open. For a root reached over `wss`, both have an answer.
 - **One URL for both hosts.** A server that speaks 9P over WebSocket can be the root of an h9 in a terminal and of an h9 in a browser tab, from the same `wss://` URL.
 
 There's no standard for 9P over WebSocket, but existing servers and bridges agree on the essentials: binary messages, with 9P's own size-prefixed messages as the payload.
 
 ### h9 today
 
-- **9P roots** are proposed in [9p-roots](9p-roots.md): `--root tcp!host!port` dials through devip and `--root unix!path` wraps a host socket with devlfd's `lfdchan`. Either way devmnt mounts the connection at `/` before any other bind, and the root's connection isn't subject to `--net`, since h9 makes it, not the guest.
+- **9P roots** are proposed in [9p-roots](0013-9p-roots.md): `--root tcp!host!port` dials through devip and `--root unix!path` wraps a host socket with devlfd's `lfdchan`. Either way devmnt mounts the connection at `/` before any other bind, and the root's connection isn't subject to `--net`, since h9 makes it, not the guest.
 - **devmnt reads a byte stream.** `mntrpcread` in drawterm's `kern/devmnt.c` reads the size, type, and tag, then reads until it has the whole message, through the channel's `bread`. It doesn't need a message per read, so any channel that delivers the server's bytes in order can carry 9P.
 - **devhcons** (`src/kern/devhcons.c`) is a kernel device whose reads and writes are leaf calls into Zig (DESIGN.md, seam rule 3). A Zig reader thread (`src/consin.zig`) does the host reads, and a guest read sleeps on a Rendez until there's input, so a note or a teardown interrupts it with `Eintr`.
 - **Guest mounts** come with [devsrv](0008-devsrv.md), which serves the `mount`, `unmount`, and `fauth` syscalls. `mount` takes any open fd that speaks 9P, and the `mount` command opens any path, not only `/srv` entries.
@@ -48,7 +48,7 @@ There's no standard for 9P over WebSocket, but existing servers and bridges agre
 | `ws://host[:port][/path][?query]` | A WebSocket over TCP. Port 80 by default |
 | `wss://host[:port][/path][?query]` | A WebSocket over TLS, verified against the host's certificate bundle, or `--root-ca`'s (below). Port 443 by default |
 
-They're accepted wherever [9p-roots](9p-roots.md) accepts a dial string: `--root`, `$H9ROOT`, and the source of a `mount` line in a namespace file. A string with either prefix is a URL, so it can't be confused with a host path or a `tcp!` dial string.
+They're accepted wherever [9p-roots](0013-9p-roots.md) accepts a dial string: `--root`, `$H9ROOT`, and the source of a `mount` line in a namespace file. A string with either prefix is a URL, so it can't be confused with a host path or a `tcp!` dial string.
 
 ### The wire
 
@@ -104,7 +104,7 @@ The Zig side is in two parts:
 
 ### `Machine.Options`
 
-[9p-roots](9p-roots.md)'s `Root` gains a case, and the options gain the headers:
+[9p-roots](0013-9p-roots.md)'s `Root` gains a case, and the options gain the headers:
 
 ```zig
 pub const Root = union(enum) {
@@ -240,9 +240,9 @@ So a text client needs no `data` at all:
 
 ### The policy and the plan
 
-Everything [9p-roots](9p-roots.md) says about a 9P root applies to a WebSocket root, and to a WebSocket mount:
+Everything [9p-roots](0013-9p-roots.md) says about a 9P root applies to a WebSocket root, and to a WebSocket mount:
 
-- Writes go to the server, which decides what's writable. `--write=none` with a WebSocket root, or with a namespace file that mounts one, is a usage error, exit 2. [overlay](overlay.md) covers a WebSocket root as any other.
+- Writes go to the server, which decides what's writable. `--write=none` with a WebSocket root, or with a namespace file that mounts one, is a usage error, exit 2. [overlay](0011-overlay.md) covers a WebSocket root as any other.
 - `--net` doesn't apply to the connections h9 makes. The guest gets nothing through them: their channels aren't in `/net/ws`.
 
 Guest conversations follow [net-policy](0005-net-policy.md), with the URL's host and port treated as a TCP dial:

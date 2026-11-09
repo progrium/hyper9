@@ -43,9 +43,9 @@ On HVF, `--check` reports a hello in 1.1 ms, so startup is a non-issue on a hype
 
 Related work:
 
-- [default-command](default-command.md) makes `h9 --rc` with no command line an interactive login rc (`rc -l -i`) on a terminal, reading `/rc/lib/rcmain.local` and `$home/lib/profile`.
+- [default-command](0081-default-command.md) makes `h9 --rc` with no command line an interactive login rc (`rc -l -i`) on a terminal, reading `/rc/lib/rcmain.local` and `$home/lib/profile`.
 - [host-cmd](host-cmd.md) replaces devcmd with a per-machine device whose reads a note can interrupt, allowlists commands with `--host-cmd NAME`, and scrubs their environment. It leaves terminals as an open issue.
-- [builtin-root](builtin-root.md) gives h9 a root with no install, so `h9sh` works on a fresh machine.
+- [builtin-root](0087-builtin-root.md) gives h9 a root with no install, so `h9sh` works on a fresh machine.
 - [host-binfmt](host-binfmt.md) set the pattern for a second entry point chosen by `argv[0]` and settings read from the environment.
 
 ## Proposal
