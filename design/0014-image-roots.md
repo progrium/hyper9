@@ -2,7 +2,7 @@
 id: 14
 slug: image-roots
 title: Disk-image roots
-status: draft
+status: declined
 created: 2026-11-03
 authors: [progrium]
 depends: [8, 13]
@@ -206,3 +206,6 @@ Demo: `h9 --root .local/9front/9front.img --rc 'ls /usr/glenda && cat /dev/sysna
 - **`--pids`.** Whether the server's processes, which outlive runs, count against each run's `--pids` cap, or the cap is for the run's own processes only.
 - **cwfs without its original config.** The device map covers configs that name `sdXX` partitions. A config that names other devices, or the `-c` reconfiguration path, may not be worth supporting before someone has such an image.
  
+## Declined
+
+- 2026-11-09: It hasn't been needed: host directories, 9P servers, and overlays have covered every root so far, and nobody has had a 9front disk image to run from ([discussion](https://github.com/progrium/hyper9/issues/14#issuecomment-6731497293)). A need to run from an image that serving it over 9P from a booted 9front can't meet would reopen it.
