@@ -24,6 +24,7 @@
 #include "dat.h"
 #include "fns.h"
 #include "error.h"
+#define H9_FSCHECK_IMPL	/* the Win32 calls themselves, not fscheck.h's wrappers */
 #include "fscheck.h"
 
 /* Implemented in Zig (src/kern.zig): 0 allows, -1 hides, -2 is read-only. */
@@ -361,6 +362,173 @@ h9_fs_allowat(int dfd, char *name, int op)
  * asks for its final name, which follows symlinks and junctions and
  * canonicalises case and short names.
  */
+
+enum {
+	Longmax = 32767,	/* the longest \\?\ path, in characters */
+	Longroot = 7,	/* \\?\C:\ */
+};
+
+wchar_t*
+h9_fs_longw(wchar_t *path)
+{
+	wchar_t *l, *p, *e;
+	int n, k, len;
+
+	n = wcslen(path);
+	if(path[0] == 0 || path[1] != L':' || (path[2] != L'\\' && path[2] != L'/')){
+		if((l = malloc((n+1)*sizeof(wchar_t))) == nil){
+			SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+			return nil;
+		}
+		memmove(l, path, (n+1)*sizeof(wchar_t));
+		return l;
+	}
+	/* At most the prefix, the rest of path and a separator, then NUL. */
+	if(n + 5 > Longmax){
+		SetLastError(ERROR_FILENAME_EXCED_RANGE);
+		return nil;
+	}
+	if((l = malloc((n+6)*sizeof(wchar_t))) == nil){
+		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+		return nil;
+	}
+	memmove(l, L"\\\\?\\", 4*sizeof(wchar_t));
+	l[4] = path[0];
+	l[5] = L':';
+	l[6] = L'\\';
+	k = Longroot;
+	/* Each name is followed by a separator; ".." goes back one, never above the drive. */
+	for(p = path+3; *p != 0; p = e){
+		while(*p == L'\\' || *p == L'/')
+			p++;
+		for(e = p; *e != 0 && *e != L'\\' && *e != L'/'; e++)
+			;
+		len = e - p;
+		if(len == 0 || (len == 1 && p[0] == L'.'))
+			continue;
+		if(len == 2 && p[0] == L'.' && p[1] == L'.'){
+			if(k > Longroot)
+				for(k--; k > Longroot && l[k-1] != L'\\'; k--)
+					;
+			continue;
+		}
+		memmove(l+k, p, len*sizeof(wchar_t));
+		k += len;
+		l[k++] = L'\\';
+	}
+	if(k > Longroot)
+		k--;
+	l[k] = 0;
+	return l;
+}
+
+/* Frees l without losing the error of the call that used it. */
+static void
+longfree(wchar_t *l)
+{
+	DWORD err;
+
+	err = GetLastError();
+	free(l);
+	SetLastError(err);
+}
+
+HANDLE
+h9_fs_findfirst(wchar_t *path, WIN32_FIND_DATAW *wfd)
+{
+	wchar_t *l;
+	HANDLE h;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return INVALID_HANDLE_VALUE;
+	h = FindFirstFileW(l, wfd);
+	longfree(l);
+	return h;
+}
+
+HANDLE
+h9_fs_createfile(wchar_t *path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *sa, DWORD disp, DWORD flags, HANDLE tmpl)
+{
+	wchar_t *l;
+	HANDLE h;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return INVALID_HANDLE_VALUE;
+	h = CreateFileW(l, access, share, sa, disp, flags, tmpl);
+	longfree(l);
+	return h;
+}
+
+BOOL
+h9_fs_createdir(wchar_t *path, SECURITY_ATTRIBUTES *sa)
+{
+	wchar_t *l;
+	BOOL r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return FALSE;
+	r = CreateDirectoryW(l, sa);
+	longfree(l);
+	return r;
+}
+
+BOOL
+h9_fs_removedir(wchar_t *path)
+{
+	wchar_t *l;
+	BOOL r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return FALSE;
+	r = RemoveDirectoryW(l);
+	longfree(l);
+	return r;
+}
+
+BOOL
+h9_fs_deletefile(wchar_t *path)
+{
+	wchar_t *l;
+	BOOL r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return FALSE;
+	r = DeleteFileW(l);
+	longfree(l);
+	return r;
+}
+
+BOOL
+h9_fs_movefile(wchar_t *old, wchar_t *new)
+{
+	wchar_t *lo, *ln;
+	BOOL r;
+
+	if((lo = h9_fs_longw(old)) == nil)
+		return FALSE;
+	if((ln = h9_fs_longw(new)) == nil){
+		longfree(lo);
+		return FALSE;
+	}
+	r = MoveFileW(lo, ln);
+	longfree(ln);
+	longfree(lo);
+	return r;
+}
+
+DWORD
+h9_fs_getattr(wchar_t *path)
+{
+	wchar_t *l;
+	DWORD r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return INVALID_FILE_ATTRIBUTES;
+	r = GetFileAttributesW(l);
+	longfree(l);
+	return r;
+}
+
 static int
 finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
 {
@@ -370,7 +538,7 @@ finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
 	char *p;
 	int i;
 
-	h = CreateFileW(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+	h = h9_fs_createfile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
 		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|flags, nil);
 	if(h == INVALID_HANDLE_VALUE)
 		return -1;
@@ -503,7 +671,7 @@ reparsetarget(wchar_t *path, wchar_t *target, int ntarget, int *relative, int pr
 	DWORD n;
 	USHORT off, len;
 
-	h = CreateFileW(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+	h = h9_fs_createfile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
 		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT, nil);
 	if(h == INVALID_HANDLE_VALUE)
 		return -1;
@@ -602,7 +770,7 @@ h9_fs_resolveinw(wchar_t *top, wchar_t *dir, char *rel, wchar_t *buf, int nbuf)
 			next[n++] = L'\\';
 		memmove(next+n, p, len*sizeof(wchar_t));
 		next[n+len] = 0;
-		attr = GetFileAttributesW(next);
+		attr = h9_fs_getattr(next);
 		if(attr == INVALID_FILE_ATTRIBUTES)
 			return H9_RESNONEXIST;
 		if(attr & FILE_ATTRIBUTE_REPARSE_POINT){
