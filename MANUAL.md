@@ -13,10 +13,11 @@
   inside h9.
 - Every Plan 9 concept chapter has the same three parts: **In Plan 9** (how the
   real system works), **In h9** (what h9 does the same, differently, or not
-  yet) and **Try it** (commands to paste).
+  yet), and **Try it** (commands to paste).
 - Badges: *Not yet available ([gfx](design/0015-gfx.md))* marks something
   that isn't built yet, linked to the [proposal](design/README.md) that adds
-  it. A badge comes off when its proposal is marked implemented.
+  it. A badge comes off when its proposal is marked implemented. A feature
+  whose proposal was declined is said to be declined, with a link to why.
 - Man page references use Plan 9's form, `bind(1)`, `intro(5)`. Read them
   inside h9 with `h9 man 1 bind`, or online at
   [man.9front.org](https://man.9front.org/).
@@ -76,16 +77,24 @@ of running programs never outlive the h9 invocation.
 ```
 
 Each Plan 9 program runs as real machine code on a virtual CPU from your
-host's hypervisor (Hypervisor.framework on macOS, KVM on Linux; the Windows
-Hypervisor Platform is proposed). When a program makes a system call, it
+host's hypervisor (Hypervisor.framework on macOS, KVM on Linux, and the
+Windows Hypervisor Platform on Windows x86\_64, which is still incomplete).
+When a program makes a system call, it
 doesn't reach your host's kernel. It's answered by a Plan 9 kernel that runs
 inside the h9 process: the kernel from drawterm, Plan 9's remote terminal
 program. That kernel decides which of your host's files, and how much of the
-network, the program can see. Chapter 22 covers that sandbox.
+network, the program can see. Chapter 23 covers that sandbox.
 
-On hosts without a usable hypervisor, such as Windows today, many cloud VMs,
-and CI runners, `h9-emu` runs the same programs in a CPU emulator
-instead: slower for heavy computation, but otherwise identical (chapter 26).
+On Linux x86\_64 hosts without KVM, such as containers and many cloud VMs,
+h9 runs amd64 programs directly on the CPU instead, in a small helper
+process whose system calls it traps (the native backend). On other hosts
+without a usable hypervisor, such as most Windows machines and CI runners,
+`h9-emu` runs the same programs in a CPU emulator: slower for heavy
+computation, but otherwise identical (chapter 27).
+
+h9 runs Linux programs too. A Linux binary's system calls are answered by
+the same Plan 9 kernel, so it gets the same sandbox, and Linux and 9front
+programs can share one machine (chapter 20).
 
 #### How h9 differs from other ways to run Plan 9
 
@@ -109,8 +118,9 @@ and compatibility layers.
   on arm64 hosts, and amd64 programs on x86\_64 hosts. The emulator can also
   run amd64 programs on arm64 hosts and 386 programs anywhere, but that's
   for testing (and for Go programs, chapter 19).
-- It runs 9front programs only, not those of the original Plan 9 or other
-  forks, whose system calls differ.
+- It runs 9front programs and Linux ELF programs, not those of the original
+  Plan 9 or other forks, whose system calls differ, nor macOS or Windows
+  programs.
 - It isn't a long-running service. Every invocation is its own machine.
 
 ### 2. Installing
@@ -129,31 +139,35 @@ server on the network (chapter 16).
 
 | Binary | License | Runs programs with |
 | --- | --- | --- |
-| `h9` | MIT | Your host's hypervisor only |
-| `h9-emu` | GPLv2 | Your host's hypervisor, or the Unicorn CPU emulator when there's no usable hypervisor |
+| `h9` | MIT | Your host's hypervisor, or on Linux x86\_64 the native backend when there's no KVM |
+| `h9-emu` | GPLv2 | The same, or the Unicorn CPU emulator when neither is usable |
 
 The two take the same flags and behave the same way; `h9-emu` is a separate
 program because Unicorn is GPL-licensed. Use `h9` where it works, and
-`h9-emu` on Windows, and in VMs, containers, and CI runners without nested
-virtualization. This manual says `h9` throughout; everything applies
+`h9-emu` on Windows on ARM, on Windows x86\_64 without the Windows
+Hypervisor Platform, on Macs for amd64 programs, and on arm64 Linux VMs
+without nested virtualization. This manual says `h9` throughout; everything applies
 to `h9-emu` too. (When you build `h9-emu` from source it's still called
 `zig-out/bin/h9`; the release scripts rename it.)
 
 | Host | `h9` | `h9-emu` |
 | --- | --- | --- |
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | ✓ |
-| Linux arm64 | ✓ (KVM) | ✓ |
-| Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
+| Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | ✓ |
+| Linux x86\_64 | ✓ (KVM, or the native backend without it), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
 | Windows on ARM | *Not yet available ([whp](design/0017-whp.md))* | ✓ |
-| Windows x86\_64 | *Not yet available ([whp](design/0017-whp.md))* | ✓, with an amd64 root tree |
+| Windows x86\_64 | Incomplete: the WHP backend is built but still a draft ([whp](design/0017-whp.md)) | ✓, with an amd64 root tree |
 
 **Host requirements.** On macOS, h9 must be signed with the hypervisor
 entitlement in `h9.entitlements`; `zig build` does that, and release binaries
-will come signed. `h9-emu` needs nothing special. On Linux, h9 needs read
+will come signed. `h9-emu` needs nothing special. On Linux, KVM needs read
 and write access to `/dev/kvm` (usually by being in the `kvm` group), and in
-a VM, nested virtualization; `h9 --check` tells you which is missing. Once
-the WHP backend exists, Windows will need the optional Windows Hypervisor
-Platform feature.
+a VM, nested virtualization. Without them, h9 on Linux x86\_64 uses the
+native backend, which needs Linux 5.11 or later (for Syscall User Dispatch)
+and seccomp; `h9 --check` tells you which backends work and why the others
+don't. On Windows x86\_64, the WHP backend needs the optional Windows
+Hypervisor Platform feature; without it, `h9-emu` falls back to the
+emulator.
 
 #### Building from source
 
@@ -199,8 +213,10 @@ h9 looks for its root in this order:
 4. The built-in root, a small read-only tree inside the h9 binary.
 
 `--root` and `H9ROOT` take a directory, or a 9P server: a dial string such
-as `tcp!fs.example.com!564`, `unix!/path/to/socket`, or the path of a unix
-socket (chapter 16).
+as `tcp!fs.example.com!564`, `unix!/path/to/socket`, the path of a unix
+socket, or a WebSocket URL (chapter 16). A `--root` directory can also be a
+Linux root, such as Alpine's, which comes on top of the 9front root rather
+than replacing it (chapter 20).
 
 So the development build finds its tree on its own. If you copy `h9`
 somewhere else, such as onto your `PATH`, set `H9ROOT` in your shell profile:
@@ -254,6 +270,7 @@ host$ h9 --check
 h9 v0.1.0-123-gfe6c65f on macos aarch64
 backend hvf: ok, 64 vCPUs, hello in 2.8 ms
 backend auto: ok (uses hvf), 64 vCPUs, hello in 1.1 ms
+gfx cocoa: built in
 root /Users/me/src/hyper9/.local/9front/root-11952: ok, /bin/echo runs (arm64)
 ```
 
@@ -261,31 +278,37 @@ Each backend line runs a tiny test program in a new machine, so a failure
 there names the problem (see the table below). `h9-emu` adds a `backend emu`
 line. `auto` is the backend h9 uses unless you pass `--backend`; with
 `--backend`, only that one is checked. The vCPU count is the hypervisor's
-limit (see chapter 8). The version is `git describe` for a development build
+limit (see chapter 8). The `gfx` line says whether `--gfx` can open a window
+(chapter 17). The version is `git describe` for a development build
 and the release's version for a release. The root line shows the root with
 symlinks resolved, so `root` appears as `root-11952`, the release it came
 from.
 
-On a host with no hypervisor and no root tree, `h9-emu --check` looks like
+On a Linux x86\_64 VM without KVM and with no root tree, it looks like
 this:
 
 ```sh
 host$ h9 --check
 h9 fe6c65f on linux x86_64
-backend emu: ok, hello in 11.9 ms
-backend auto: ok (uses emu), hello in 3.0 ms
+backend kvm: no /dev/kvm (no KVM in this kernel, or a VM without nested virtualization)
+backend native: ok, hello in 2.8 ms
+backend auto: ok (uses native), hello in 1.9 ms
+gfx: not built in
 root: built-in (9front 11952 slim, amd64; no tree found): ok, /bin/echo runs (amd64)
 ```
 
 `h9 --version` prints the h9 version, the 9front release, and drawterm
-revision it was built against, and the backends built in:
+revision it was built against, the backends built in, the window code
+(`gfx:`), and what the built-in root holds:
 
 ```sh
 host$ h9 --version
 h9 fe6c65f
 9front 11952 (602faae9a52f)
 drawterm be39bbaa88fd
-backends: emu (Unicorn 2.1)
+backends: kvm native
+gfx: none
+built-in root: 9front 11952 slim, amd64 (42 commands)
 ```
 
 `h9 --help` (or `h9 -h` alone) prints the usage. Then run something:
@@ -309,7 +332,9 @@ If this fails, the message says why:
 | `h9: cannot create auto machine for arm64: no usable hypervisor (is h9 signed with h9.entitlements?)` | 125 | Build with `zig build`, which signs it, or use `h9-emu` |
 | `h9: cannot create emu machine for arm64: the emulator isn't built into this h9 (use h9-emu from the releases, or build with -Demu=unicorn)` | 125 | Use `h9-emu` |
 | `h9: warning: no usable hypervisor; using the emulator` | | Not an error: `h9-emu` fell back to the emulator |
+| `h9: cannot create kvm machine for amd64: no access to /dev/kvm (is your user in the kvm group?)` | 125 | Only with `--backend kvm`: add yourself to the `kvm` group, or leave `--backend` off |
 | `h9: warning: no /dev/kvm (...); using the native backend` | | Not an error: on Linux x86\_64 without KVM, h9 runs amd64 programs on the native backend |
+| `h9: cannot create native machine for amd64: the kernel has no Syscall User Dispatch (Linux 5.11 or later)` | 125 | Upgrade the kernel, or use `h9-emu` |
 
 ### 3. First run
 
@@ -334,7 +359,7 @@ bind #c /dev
 from with the machine: it appears inside as `/mnt/term/cwd`, and it's the
 program's working directory. The rest of your host's files aren't visible.
 `/lib/namespace`, on the other hand, is a file from the root tree. Chapter 6
-explains how these two worlds are joined into one file tree, and chapter 21
+explains how these two worlds are joined into one file tree, and chapter 22
 how to share more host directories.
 
 Everything after the program name goes to the program, so `h9 ls -l` passes
@@ -409,13 +434,13 @@ Run it through rc instead, as `h9 rc script.rc`, or by its guest path,
 
 | You write | h9 runs |
 | --- | --- |
-| `h9 ./hello`, `h9 ../bin/hello` | A file on the **host**, relative to your current directory. It doesn't need to be anywhere the machine can see. It must be an a.out, not a script. |
-| `h9 ls`, `h9 aux/vga` | A program found through the machine's `$path`, which is `(. /bin)`: the current directory, then `/bin`. |
+| `h9 ./hello`, `h9 ../bin/hello` | A file on the **host**, relative to your current directory. It doesn't need to be anywhere the machine can see. It must be a 9front a.out or a Linux ELF binary (chapter 20), not a script. |
+| `h9 ls`, `h9 aux/vga` | A program found through the machine's `$path`, which is `(. /bin)`: the current directory, then `/bin`. With a Linux root, the Linux `PATH` instead (chapter 20). |
 | `h9 /bin/ls` | A path **inside the machine**. `/Users/me/prog` isn't a host path here; inside, your cwd is `/mnt/term/cwd`. |
 | `h9 --rc 'cmd'` | `/bin/rc -c 'cmd'` |
 | `h9 --rc` | A login rc, which runs the root's default command from `/rc/lib/rcmain.local` |
 
-On Windows, `.\hello` is a host path too. Chapter 20 has the complete rules.
+On Windows, `.\hello` is a host path too. Chapter 21 has the complete rules.
 
 #### Exit status
 
@@ -440,7 +465,7 @@ host$ h9 --rc 'exit 3'; echo $?
 | 1 | The program failed with any other string, which is printed on standard error |
 | 2 | h9's command line was wrong; h9 prints its usage or the conflict |
 | 125 | h9 itself failed: no root tree, no hypervisor, not enough memory, a 9P root that can't be reached |
-| 126 | The program isn't a 9front executable for this machine (chapter 28) |
+| 126 | The program isn't a 9front executable for this machine (chapter 29) |
 | 127 | The program wasn't found |
 
 When h9 itself fails (2, 125–127), it always prints a message starting with
@@ -624,7 +649,7 @@ service in Plan 9, from the window system to FTP sites to mail, is a program
 like this. (On 9front `mntgen` makes `/n/scratch` for you; h9 has no
 `mntgen`, so the tour uses the machine's private `/tmp`.)
 
-**10. The view from outside.** ([Namespaces](#6-namespaces), [Sandboxing](#22-sandboxing))
+**10. The view from outside.** ([Namespaces](#6-namespaces), [Sandboxing](#23-sandboxing))
 
 Leave the shell, and ask h9 to describe the machine it would build, without
 running anything:
@@ -635,7 +660,7 @@ host$ h9 --print rc
 profile:  default
 enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.outbound
 limits:   write=overlay net=outbound
-devmask:  #C #U
+devmask:  #C #U #b #i #m
 namespace:
   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
@@ -646,6 +671,7 @@ namespace:
   bind '#p' /proc
   bind -c '#s' /srv
   bind '#I' /net
+  bind -a '#ℏ' /net  # WebSockets, under --net
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
   bind -a '#H/bin' /bin  # h9's commands
@@ -661,10 +687,11 @@ caveats:
 The namespace section is the list of `bind` commands that built the file
 tree you just explored. `#U` is the host's file system, `#c` the console, `#e`
 the environment, `#p` the processes, `#s` the service registry, `#I` the
-network, `#H` h9's own commands, and `#O` an overlay in memory, over the root and over `/tmp`, that keeps your changes off the host. Each `#`
+network, `#ℏ` WebSockets, `#H` h9's own commands, and `#O` an overlay in
+memory, over the root and over `/tmp`, that keeps your changes off the host. Each `#`
 name is a kernel device, and the `devmask` line says which ones a program
 can't attach again, so it can't reach more of your host than this list
-allows. That's how h9's sandbox works, and chapter 22 explains the rest.
+allows. That's how h9's sandbox works, and chapter 23 explains the rest.
 
 ---
 
@@ -793,6 +820,7 @@ plain `h9 rc` in `~/tour`, line by line:
   bind '#p' /proc
   bind -c '#s' /srv
   bind '#I' /net
+  bind -a '#ℏ' /net  # WebSockets, under --net
   bind '/arm64/bin' /bin
   bind -a '/rc/bin' /bin
   bind -a '#H/bin' /bin  # h9's commands
@@ -811,6 +839,7 @@ plain `h9 rc` in `~/tour`, line by line:
 | `bind '#p' /proc` | The machine's processes |
 | `bind -c '#s' /srv` | The machine's own service registry |
 | `bind '#I' /net` | The network; missing under `--net=disable` |
+| `bind -a '#ℏ' /net` | WebSockets, as `/net/ws` (chapter 16); missing under `--net=disable` |
 | `bind '/arm64/bin' /bin`, `bind -a '/rc/bin' /bin` | The `/bin` union |
 | `bind -a '#H/bin' /bin` | h9's own commands, last in the union, so the root's win; left out under `--no-guest-tools` |
 | `bind -c '#O' /tmp` | A private, writable `/tmp` in memory over the tree's empty `/tmp` |
@@ -818,7 +847,7 @@ plain `h9 rc` in `~/tour`, line by line:
 
 Host paths you share with `--readable` and `--writable` appear under
 `/mnt/term` at their host path (`/mnt/term/Users/me/notes`), unless they're
-inside the root or the cwd (chapter 21). That's the convention drawterm uses
+inside the root or the cwd (chapter 22). That's the convention drawterm uses
 for the terminal's files on a cpu server, and the host is h9's terminal.
 
 You can change the namespace two ways:
@@ -827,7 +856,7 @@ You can change the namespace two ways:
   affects that process and the processes it starts afterwards, and ends with
   the machine.
 - **At startup**, with `--ns FILE`: h9 replays a namespace file after
-  building its own namespace and before looking up the program (chapter 24).
+  building its own namespace and before looking up the program (chapter 25).
 
 Because `--print`'s namespace section is in namespace-file syntax, you can
 save it, edit it, and replay it with `--ns`.
@@ -877,15 +906,18 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#s` | srv | `/srv` | 9front's service registry, one per machine |
 | `#\|` | pipe | | Pipes |
 | `#I` | ip | `/net` | The network, through the host's own stack: `cs`, `tcp`, `udp`. Masked under `--net=disable`. |
+| `#ℏ` | hstream | `/net`, after `#I` | WebSockets, as `/net/ws` (chapter 16), and the connection behind a WebSocket root. Masked under `--net=disable`. |
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
-| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 21) |
+| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22) |
 | `#C` | cmd | | Runs host commands. Only in builds with `-Dhost-cmd`, and masked unless `--host-cmd`. |
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
 | `#i`, `#m`, `#b` | draw, mouse, kbd | `/dev`, with `--gfx` | The window, its mouse and cursor, and its keyboard (chapter 17). Masked without `--gfx`. |
 | `#A` | audio | | Present, but there's no sound to drive |
+| `#λ` | linux | A Linux process's `/` | The Linux view: `/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, and `/sys`, with the Linux root unioned after them (chapter 20) |
+| `#ε` | eventfd | | Linux `eventfd`, `epoll`, and `signalfd` instances |
 
 9front's hardware devices aren't there: no `#S` disks, `#l` Ethernet, `#t`
 serial lines, `#v` VGA, or `#P` architecture, and no `#σ` shared-memory
@@ -893,7 +925,8 @@ directory or named `#g` segments.
 
 **The device mask.** After building the namespace, h9 tells the kernel that
 this machine may no longer attach some devices by name: `#U` and `#C`
-always, `#I` when the network is off, and `#H` under `--no-guest-tools`. That's the `devmask:` line of
+always, `#I` and `#ℏ` when the network is off, `#i`, `#m`, and `#b` without
+`--gfx`, and `#H` under `--no-guest-tools`. That's the `devmask:` line of
 `--print`. Existing binds keep working, so `/mnt/term/cwd` still reaches
 your host directory, but a program can't attach `#U` again to reach the rest
 of your disk:
@@ -905,7 +938,7 @@ ls: #U/: mount/attach disallowed
 ...
 ```
 
-This is the core of the sandbox (chapter 22): the namespace h9 built is the
+This is the core of the sandbox (chapter 23): the namespace h9 built is the
 whole of the host a program can reach. `--host-fs` leaves `#U` unmasked, and
 `--host-cmd` leaves `#C` unmasked.
 
@@ -984,7 +1017,7 @@ paths of bound host trees (a caveat `--print` lists).
 
 Limits: `--pids N` caps how many processes can be alive at once (`rfork`
 fails with `no procs` past it), and `--cpus N` caps how many run guest code
-at the same moment (chapter 23). On macOS the hypervisor allows 64 vCPUs per
+at the same moment (chapter 24). On macOS the hypervisor allows 64 vCPUs per
 machine. A machine with more than 56 live processes still works: the extra
 ones share a pool of 8 vCPUs, which costs a thread handoff on each of their
 system calls. You'd notice only with very wide pipelines or `mk` with many
@@ -1050,7 +1083,7 @@ notes:
 If the first process dies of one of these notes, h9 exits as a shell would
 for the matching signal: 130 for `interrupt`, 129 for `hangup`. A stopped
 machine exits 130 after a second Ctrl-C, 129 after SIGHUP, and 143 after
-SIGTERM (chapter 20 lists every exit code).
+SIGTERM (chapter 21 lists every exit code).
 
 When a program has put the console in raw mode (chapter 13), Ctrl-C isn't
 an interrupt: it reaches the program as a key, as Del does on 9front.
@@ -1286,7 +1319,7 @@ protocols, with `secstore` keeping them encrypted.
 | The host's own permissions | `permission denied` | The same operation fails outside h9 |
 
 A path hidden by `--read-deny`, or outside every bound tree, isn't denied: it
-doesn't exist (`file does not exist`). Chapters 27 and 28 have more on
+doesn't exist (`file does not exist`). Chapters 28 and 29 have more on
 telling these apart.
 
 ### 13. The console and the terminal
@@ -1530,8 +1563,16 @@ devices in Plan 9.
   `wsmount [-h 'Name: value'] url mountpoint` dials a 9P server and mounts
   it. Guest connections don't use the host's proxies.
 - Not yet available: roots that need authentication
-  ([root-auth](design/root-auth.md)), and disk images as roots
-  ([image-roots](design/0014-image-roots.md)).
+  ([root-auth](design/root-auth.md)); serving a machine's namespace to the
+  host or the network as a 9P server from h9 itself, rather than with
+  `exportfs` inside the guest as below ([serve](design/0035-serve.md)); and
+  9P2000.L servers, such as QEMU's or ZeroFS's, as roots and mounts
+  ([dotl](design/0022-dotl.md)).
+- 9front disk images as roots were proposed and declined
+  ([image-roots](design/0014-image-roots.md)), since host directories, 9P
+  servers, and overlays have covered every root so far. To run from an
+  image, boot it in a VM and serve its file system over 9P, or copy its files
+  out, as `zig build mkroot` does.
 
 **Try it**
 
@@ -1724,31 +1765,173 @@ hello, world
   `plan9/arm64`. So on an Apple Silicon Mac a Go program runs on the
   emulator, which needs `h9-emu`; `h9-emu` picks the emulator by itself,
   with the warning above, and `--backend emu` picks it silently. On an
-  x86\_64 Linux host, h9 runs it on KVM (Go's own test suite has been run
-  on the emulator only), and on Windows `h9-emu` runs it on the emulator
-  until the WHP backend exists. Compute-heavy Go code runs several times
-  slower on the emulator than natively (chapter 26).
+  x86\_64 Linux host, h9 runs it natively, on KVM or the native backend (Go's
+  own test suite has been run on the emulator only), and on Windows `h9-emu`
+  runs it on the emulator. Compute-heavy Go code runs several times slower
+  on the emulator than natively (chapter 27).
+- **Or build for Linux.** A `GOOS=linux` binary runs through the Linux
+  personality (chapter 20), and Go has `linux/arm64`, so on an Apple Silicon
+  Mac `GOOS=linux GOARCH=arm64 go build` gives a program that runs on the
+  hypervisor at full speed: `h9 ./hello`. It sees Linux's system calls
+  rather than Plan 9's, so it can't use Plan 9 features such as `bind` or
+  notes directly, but it still runs in the machine's namespace and sandbox.
 - **What works:** goroutines on several processes, timers and `time.Now`,
-  files, `os/exec` and `os.Getpid`/`Getppid`, `net` and `net/http`,
-  `os/signal` (Ctrl-C arrives as `os.Interrupt`), panics from faults such as
-  a nil dereference, and `os.Exit(n)`, which becomes h9's exit status `n`.
-  `runtime.NumCPU` follows `--cpus`.
+  files, `os/exec` and `os.Getpid`/`Getppid`, `os.Executable`, `net` and
+  `net/http`, `os/signal` (Ctrl-C arrives as `os.Interrupt`), panics from
+  faults such as a nil dereference, and `os.Exit(n)`, which becomes h9's exit
+  status `n`. `runtime.NumCPU` follows `--cpus`.
 - **Memory.** A Go program reserves several hundred MB at start. That's free
   until it's touched, but it counts against `--memory`, whose default is
   1 GB. A program that uses `os/exec` needs `--memory 4G`, because `rfork`
   copies the parent's memory eagerly.
-- **Not yet:** `os.Executable`, and running 9front commands from Go with
-  `os/exec` unless your root tree has `/amd64/bin` (`zig build mkroot`
-  on x86\_64, or `--arch amd64`).
-- A Go program doesn't need a root tree to run, but without one it has no
-  `/bin`, no `/tmp`, and no access to your files; give it a root or at least
-  `--root` pointing at a directory with the usual mount points.
+- **Not yet:** running 9front commands from Go with `os/exec` unless your
+  root tree has `/amd64/bin` (`zig build mkroot` on x86\_64, or
+  `--arch amd64`).
+- A Go program doesn't need a root tree to run. Without one it gets the
+  built-in root (chapter 2), with `/tmp`, your cwd, and its 42 commands;
+  give it `--root` for the full tree.
+
+### 20. Linux programs
+
+h9 runs Linux ELF programs as well as 9front ones
+([linux-personality](design/0018-linux-personality.md)). There's no Linux
+kernel: a Linux program's system calls are translated onto the same Plan 9
+kernel that serves 9front programs, so it runs in the same machine, with
+the same namespace, sandbox, network policy, and limits. Static and dynamic
+programs for arm64 and amd64 run, built against musl or glibc; Alpine's
+busybox, `apk`, Python, SQLite, PostgreSQL, Redis, Git, the Go and Zig
+toolchains, fzf, htop, and ripgrep have all been run this way.
+
+**A single binary.** A static Linux program on the host runs like a 9front
+one, by its host path, with no Linux tree at all:
+
+```sh
+host$ zig cc -target x86_64-linux-musl -static -o hello hello.c
+host$ h9 ./hello
+hello from linux
+```
+
+Go programs built with `GOOS=linux` work the same way, which is the fast
+way to run Go on an Apple Silicon Mac (chapter 19). A dynamic program needs
+its loader and libraries, so it needs a Linux root.
+
+**A Linux root.** `--root` takes a Linux file system as readily as a 9front
+one. h9 tells them apart by looking: a tree with `/etc/os-release` or a
+`/lib/ld-*` loader, and no `/rc/bin` or `/$cputype/bin`, is a Linux root.
+Alpine's minirootfs, or any container image unpacked to a directory, works:
+
+```sh
+host$ mkdir alpine && curl -fsSL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.2-aarch64.tar.gz | tar -xzf - -C alpine
+host$ h9 --root ./alpine sh -c 'cat /etc/alpine-release; id -u'
+3.22.2
+0
+host$ h9 --root ./alpine sh
+/mnt/term/cwd #
+```
+
+[Recreating Docker](docs/containers.md) shows how to pull any image from
+Docker Hub this way. `--root` can be given twice, once for a 9front tree and
+once for a Linux one, in either order. With only a Linux root, the 9front
+side comes from the usual lookup (`$H9ROOT`, the development tree, then the
+built-in root), and `--builtin=off` leaves the machine with none. A Linux
+root has to be a host directory: 9P and WebSocket roots are always 9front
+trees.
+
+**Which program runs.** With a Linux root, a bare name (`h9 --root ./alpine
+ls`) is looked up on the Linux `PATH`, and an absolute path is a path in the
+Linux view, so `h9 --root ./alpine /9/bin/ls` runs 9front's `ls`. `--rc`
+always runs 9front's rc. Each program then runs as what it is: an ELF exec'd
+from 9front runs as Linux, and an a.out exec'd from Linux runs as 9front, so
+the two kinds pipe into each other freely. A 9front program reaches the
+Linux tree as `'#λ'` (quoted in rc), so `'#λ'/bin/busybox ls` runs
+busybox from rc.
+
+**The Linux view.** A Linux process's `/` is the Linux root, with a few
+directories h9 provides on top:
+
+| Path | What it is |
+| --- | --- |
+| `/9` | The machine's 9front root: `/9/bin/ls` is 9front's `ls` |
+| `/tmp` | The machine's private `/tmp`, the same files a 9front program sees there |
+| `/mnt/term` | The shared host paths; your cwd is `/mnt/term/cwd`, and programs start in it |
+| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, and `shm`, a private in-memory directory as a tmpfs would be |
+| `/proc`, `/sys` | What libc, busybox, Python, and htop read: `cpuinfo` (following `--cpus`), `meminfo`, `mounts`, and per-process `stat`, `status`, `maps`, `cmdline`, `exe`, `fd`, and `task` |
+| `/etc/resolv.conf` | Your host's DNS servers, when the root has none |
+
+The root's symlinks always resolve inside it, as `chroot` would, so
+Alpine's `/bin/ls -> /bin/busybox` reads the root's busybox
+(`--root-contained` is implied). Writes to the root go to a copy-on-write
+overlay in memory and are thrown away at exit, as for a 9front root, so
+`apk add` works for the run; pass `--writable ./alpine` to keep what it
+installs. `h9 --print` shows the view as binds on `'#λ'`.
+
+**Users and the environment.** A Linux program starts as uid 0, and `stat`
+shows every file as owned by it. That grants nothing: access is still the
+namespace's and the sandbox's, as in a rootless container. The `set*id`
+calls work, so `su` and programs that won't run as root (such as
+PostgreSQL's `initdb`) behave as on Linux, and `chown` succeeds without
+changing anything. A Linux program's environment is the machine's `/env`,
+as `NAME=value`, plus `USER`, `LOGNAME`, `HOME`, and a default `PATH`;
+`--env` sets more, and the host's environment still isn't imported.
+
+**Network.** A socket is a `/net` connection underneath, so `--net`,
+`--net-allow`, and listening only under `--net=enable` apply to Linux
+programs exactly as to 9front ones. DNS is the program's own, through the
+`/etc/resolv.conf` above, so under `--net-allow` a pattern has to cover
+those servers (`udp!8.8.8.8!53`). Unix-domain sockets, `socketpair`,
+`epoll`, `eventfd`, and passing file descriptors work between the processes
+of one machine.
+
+**The terminal.** `isatty` is true only when h9's standard input and output
+are both terminals, so `ls` doesn't colour a pipe. A program that turns off
+canonical mode or echo with `tcsetattr` changes the host terminal, so `vi`,
+`less`, `read -s`, `fzf`, and `htop` work, and `TIOCGWINSZ` gives the host
+terminal's size.
+
+**Signals and exit status.** Notes and signals map onto each other: Ctrl-C
+is `SIGINT`, a hangup `SIGHUP`, a fault `SIGSEGV`, and a Linux `kill` posts
+`linux: signal N`, which a 9front program sees as a note. A Linux program
+killed by a signal exits as a host shell would report it, 128 plus the
+host's number for the signal:
+
+```sh
+host$ h9 --root ./alpine sh -c 'kill -TERM $$'; echo $?
+h9: sh: linux: signal 15
+143
+```
+
+**Architectures and speed.** A program for the host's architecture runs on
+the hypervisor or the native backend, at native speed apart from system
+calls. One for another architecture, such as an amd64 image on an Apple
+Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
+32-bit x86 programs run with `--arch 386` on the emulator
+([linux-i386](design/0105-linux-i386.md)).
+
+**Not yet.**
+
+- Job-control stops: `SIGSTOP` and `SIGTSTP` are ignored, and a terminal
+  resize doesn't send `SIGWINCH`.
+- Hard links: `link` copies the file, since 9P has none, so the two names
+  don't share later writes. `git clone` of a local repository needs
+  `--no-hardlinks`.
+- Moving a directory across directories inside the root's overlay, or
+  between two overlays, fails with `EXDEV`; `mv` falls back to copying.
+- Memory: `exec` copies the whole program image into the new process, so a
+  large program that starts others, such as `zig cc` or a compiler driver,
+  can need `--memory 3g` to `8g`
+  (*Not yet available ([cow-fork](design/0121-cow-fork.md))*).
+- CPU times in `/proc/stat` and `/proc/n/stat` read 0, so `top` and `htop`
+  show 0%.
+- `symlink` works in overlays (the root and `/tmp`) and host trees on macOS
+  and Linux, but not on Windows hosts.
+- A call h9 doesn't know returns `ENOSYS`, and `--trace` shows it as
+  `= -ENOSYS (absent)`; please report the ones a program needs.
 
 ---
 
 ## Part III: Using h9
 
-### 20. Command-line reference
+### 21. Command-line reference
 
 **Synopsis**
 
@@ -1780,9 +1963,9 @@ h9 --help          (or -h alone)
 
 | Argument | Resolution |
 | --- | --- |
-| Starts with `./` or `../` (on Windows also `.\` or `..\`) | A host file, relative to the host's current directory, read before the machine starts. It must be an a.out. Its header decides the architecture unless `--arch` says otherwise. |
-| Starts with `/` | A path in the machine's namespace. The host's `/Users/me/x` is `/mnt/term/Users/me/x` inside, and only if it's shared. |
-| Anything else (`ls`, `aux/vga`) | Looked up through `$path`, `(. /bin)` |
+| Starts with `./` or `../` (on Windows also `.\` or `..\`) | A host file, relative to the host's current directory, read before the machine starts. It must be a 9front a.out or a Linux ELF binary. Its header decides the architecture unless `--arch` says otherwise. |
+| Starts with `/` | A path in the machine's namespace, or in the Linux view with a Linux root (`/9/bin/ls` is then 9front's `ls`). The host's `/Users/me/x` is `/mnt/term/Users/me/x` inside, and only if it's shared. |
+| Anything else (`ls`, `aux/vga`) | Looked up through `$path`, `(. /bin)`, or with a Linux root through the Linux `PATH` |
 | `--rc 'cmd'` | `/bin/rc -c 'cmd'`, with the remaining arguments as `$*` |
 
 A program found in the namespace may be an rc script starting with `#!`; a
@@ -1796,22 +1979,22 @@ Machine:
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code. `auto` (the default) uses the host's hypervisor when it can run the program's architecture, then on Linux x86\_64 the native backend, and otherwise the emulator, with a warning. `kvm` and `whp` aren't built yet (*Not yet available ([kvm](design/0016-kvm.md), [whp](design/0017-whp.md))*). |
+| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, then on Linux x86\_64 the native backend, and otherwise the emulator, with a warning. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/0017-whp.md)). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
-| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
+| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. A host directory can be a 9front tree or a Linux one, and `--root` can be given twice, once for each (chapter 20). Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
 | `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
 | `--root-spec NAME` | The attach name sent to a 9P root. Default: empty. |
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
-| `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For Linux roots, container images, and 9front trees with links. |
+| `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
-| `--rc 'command'` | Run an rc command line instead of a program |
+| `--rc 'command'` | Run an rc command line instead of a program. It's always 9front's rc, even with a Linux root. |
 | `--rc` (last) | Run a login rc: the root's default command from `/rc/lib/rcmain.local`, then an interactive rc on a terminal, or commands from stdin otherwise |
-| `--ns FILE` | Replay a namespace file before running the program (chapter 24). `FILE` is a guest path; a relative one is in `/mnt/term/cwd`. |
+| `--ns FILE` | Replay a namespace file before running the program (chapter 25). `FILE` is a guest path; a relative one is in `/mnt/term/cwd`. |
 
-Files and sandbox (chapters 21 and 22):
+Files and sandbox (chapters 22 and 23):
 
 | Flag | Meaning |
 | --- | --- |
@@ -1829,7 +2012,7 @@ Files and sandbox (chapters 21 and 22):
 | `--strict` | Refuse, with exit 2, anything this build can't enforce |
 | `--print` | Print the compiled sandbox plan and exit without running |
 
-Limits (chapter 23):
+Limits (chapter 24):
 
 | Flag | Meaning |
 | --- | --- |
@@ -1838,7 +2021,7 @@ Limits (chapter 23):
 | `--pids N` | Cap live processes |
 | `--cpus N` | Cap processes running guest code at the same moment |
 
-Debugging (chapter 27):
+Debugging (chapter 28):
 
 | Flag | Meaning |
 | --- | --- |
@@ -1866,9 +2049,9 @@ Tools:
 | 2 | Usage error or refused combination | The usage, or `h9: ...` |
 | 124 | `--timeout` was reached | `h9: PROG: h9: timeout` |
 | 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, or the machine failed mid-run | `h9: ...` |
-| 126 | The program isn't a runnable a.out for this machine | `h9: PROG: not a 9front executable...` |
+| 126 | The program isn't a runnable a.out or ELF binary for this machine | `h9: PROG: not a 9front executable...` |
 | 127 | The program wasn't found | `h9: PROG: ...` |
-| 128+N | The program was killed by a note that's signal N, as a shell reports it: 130 for Ctrl-C (`interrupt`), 129 for `hangup`, 137 for `kill`, 141 for a closed pipe, 139 for a fault; or a second Ctrl-C (130), SIGHUP (129) or SIGTERM (143) stopped the machine. N is the host's number for the signal | Nothing for Ctrl-C and a closed pipe; otherwise `h9: PROG: NOTE` |
+| 128+N | The program was killed by a note that's signal N, as a shell reports it: 130 for Ctrl-C (`interrupt`), 129 for `hangup`, 137 for `kill`, 141 for a closed pipe, 139 for a fault; a Linux program killed by signal N (`linux: signal N`); or a second Ctrl-C (130), SIGHUP (129), or SIGTERM (143) stopped the machine. N is the host's number for the signal, so `usr1` is 138 on Linux and 158 on macOS | Nothing for Ctrl-C and a closed pipe; otherwise `h9: PROG: NOTE` |
 
 **Signals and the terminal**
 
@@ -1879,7 +2062,7 @@ Tools:
 | Hangup | SIGHUP or SIGTERM: `hangup` to every process, stop 2 s later | Closing the console, logoff, or shutdown: the same, with a shorter grace period because Windows ends the process soon after |
 | Raw mode | termios: no line editing, echo, or signals | Console mode: the same |
 
-### 21. Sharing files with the host
+### 22. Sharing files with the host
 
 **The current directory.** The host directory you run h9 from, or `--cwd
 DIR`, is bound at `/mnt/term/cwd`, read-write, and is the program's working
@@ -1967,7 +2150,7 @@ read-only.
   host's permission bits. Changing them with `chmod` works where the host
   lets you; there's no `chown` across users.
 
-### 22. Sandboxing
+### 23. Sandboxing
 
 > **Warning.** h9 is an in-development research prototype. Its sandbox
 > hasn't been through a security audit. Don't rely on it to contain
@@ -1976,7 +2159,10 @@ read-only.
 **The threat model in plain words.** A program in h9 runs in a separate
 address space on a virtual CPU, so it can't touch the h9 process's memory or
 make host system calls: every system call is answered by the Plan 9 kernel
-inside h9. That kernel's namespace is the only route to your host, and h9
+inside h9. On the native backend the separate address space is a stub
+process instead, whose system calls the host kernel turns into signals for
+h9, with a seccomp filter behind that as a backstop. A Linux program's
+calls are answered the same way, by the same kernel. That kernel's namespace is the only route to your host, and h9
 builds it from the policy: which host directories to bind, read-only or not,
 whether `/net` exists, and which devices are masked so they can't be
 attached again. What's *not* protected: the h9 process itself, which runs as
@@ -2029,7 +2215,7 @@ host$ h9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
 profile:  tight
 enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
 limits:   write=overlay net=disable memory=512M timeout=1m
-devmask:  #C #I #U
+devmask:  #C #I #ℏ #U #b #i #m
 namespace:
   bind '#U/Users/me/src/hyper9/.local/9front/root-11952' / ro
   bind -c '#O' /                                         eph  # /Users/me/src/hyper9/.local/9front/root-11952
@@ -2098,7 +2284,7 @@ host$ h9 --net=disable --memory 512m --timeout 30s --pids 64 --rc 'mk test'
 host$ h9 --net-allow 'tcp!api.example.com!443' ./client
 ```
 
-### 23. Resource limits
+### 24. Resource limits
 
 | Flag | Units | Default | When a program hits it |
 | --- | --- | --- | --- |
@@ -2112,7 +2298,7 @@ memory, the stacks, shared segments, and the files in `/tmp` and ephemeral
 overlays. `--memory 8m` is enough for `echo`; a Go program needs several
 hundred MB, or about 4 GB if it starts other processes.
 
-### 24. Namespace files with `--ns`
+### 25. Namespace files with `--ns`
 
 `--ns FILE` replays a namespace file after h9 has built the machine's
 namespace and before it looks up the program, so the file can add, replace,
@@ -2175,10 +2361,10 @@ host$ h9 --ns ns ls -d /lib/acid
 /lib/acid
 ```
 
-### 25. Using h9 from host scripts and tools
+### 26. Using h9 from host scripts and tools
 
 h9 behaves like a host program: standard input, output, and error are its
-own, and its exit status follows the table in chapter 20.
+own, and its exit status follows the table in chapter 21.
 
 ```sh
 # In a pipeline:
@@ -2231,48 +2417,72 @@ unchanged; the mapping to exit codes is the CLI's. Several machines can run
 in one host process. [Embedding h9 in a Zig program](docs/embedding.md)
 walks through all of it with an example that builds.
 
-### 26. Backends and performance
+### 27. Backends and performance
 
 A **backend** is what runs guest code:
 
 | Backend | Host | Runs |
 | --- | --- | --- |
 | `hvf` | macOS on Apple Silicon (Hypervisor.framework) | arm64 |
-| `kvm` | Linux | *Not yet available ([kvm](design/0016-kvm.md))* |
-| `whp` | Windows | *Not yet available ([whp](design/0017-whp.md))* |
+| `kvm` | Linux x86\_64 and arm64, with access to `/dev/kvm` | The host's architecture. The arm64 path is built but hasn't yet run on an arm64 KVM host ([#92](https://github.com/progrium/hyper9/issues/92)). |
+| `whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64. Incomplete: built, but still a draft ([whp](design/0017-whp.md)) |
 | `native` | Linux x86\_64, 5.11 or later, without a hypervisor | amd64 |
 | `emu` | Any, in `h9-emu` only (Unicorn) | arm64, amd64, and 386 |
 
 `--backend auto`, the default, uses the host's hypervisor if it's built in,
 usable, and can run the program's architecture; then, on Linux x86\_64, the
-native backend, which runs amd64 guest code directly on the CPU in a stub
-process and traps its system calls with the kernel's Syscall User Dispatch
-and seccomp ([native-backend](design/0095-native-backend.md)); and otherwise the
-emulator, printing `h9: warning: no usable hypervisor; using the emulator`.
-Naming a backend uses that one or fails with exit 125.
+native backend; and otherwise the emulator. When it doesn't use the
+hypervisor it prints why, as `h9: warning: no /dev/kvm (...); using the
+native backend` or `h9: warning: no usable hypervisor; using the emulator`.
+Naming a backend uses that one or fails with exit 125. `h9 --check` lists
+each backend built in and whether it works here.
 
-**The emulator.** Use it where there's no hypervisor (Linux and Windows
-today, VMs without nested virtualization, CI), for Go programs on Apple
-Silicon, and for testing amd64 or 386 programs on any host. Measured on an
-M3 Max: system calls cost about the same as on the hypervisor (about 0.8 µs
-round trip, against 1.1 µs), so shell pipelines and file-heavy work run at
-nearly the same speed, while arm64 computation runs about 5 times slower and
-amd64 about 7 times slower. The emulator runs guest code on one virtual CPU
-at a time, so CPU-bound programs don't get faster with more processes;
-blocking in the kernel still overlaps.
+**KVM** runs guest code on a virtual CPU, as Hypervisor.framework does on a
+Mac. In a VM it needs nested virtualization, and each system call then goes
+through both hypervisors, so it costs tens of microseconds rather than
+about one.
 
-**vCPU limits.** On macOS each process normally has its own vCPU, and the
-hypervisor allows 64. Past 56 live processes, the rest share a pool of 8,
-costing a thread handoff per system call. `--cpus N` caps how many processes
-run guest code at the same moment, on every backend. The emulator has no
-vCPU limit.
+**The native backend** runs amd64 guest code directly on the CPU, with no
+hypervisor, so it works in containers without `/dev/kvm` and cloud VMs
+without nested virtualization ([native-backend](design/0095-native-backend.md)).
+Each address space is a tiny stub process that h9 starts; the kernel's
+Syscall User Dispatch turns every system call the guest makes into a signal
+h9 answers, and a seccomp filter kills the stub if guest code reaches the
+host kernel any other way. It's much faster than the emulator (an awk loop
+that takes 10.7 s on the emulator takes 0.24 s), and a Linux program's
+threads run in parallel. Unlike under KVM, guests see the host CPU's
+features, such as AVX-512, in `CPUID`. It runs amd64 only.
 
-### 27. Debugging
+**The emulator.** Use it where there's no hypervisor and no native backend
+(Windows on ARM, Windows without the Windows Hypervisor Platform, and
+arm64 Linux VMs without nested virtualization), for Go
+programs on Apple Silicon, and for testing amd64 or 386 programs on any
+host. Measured on an M3 Max: system calls cost about the same as on the
+hypervisor (about 0.8 µs round trip, against 1.1 µs), so shell pipelines
+and file-heavy work run at nearly the same speed, while arm64 computation
+runs about 5 times slower and amd64 about 7 times slower. The emulator runs
+guest code on one virtual CPU at a time, so CPU-bound programs don't get
+faster with more processes; blocking in the kernel still overlaps.
+
+**In a browser.** h9 also builds for WebAssembly, where the `v86` backend
+runs 386 programs; `--backend v86` is refused everywhere else
+([browser-host](design/0012-browser-host.md)).
+
+**vCPU limits.** Each process normally has its own vCPU. On macOS the
+hypervisor allows 64; KVM usually allows 1024, fewer if h9 can open few
+file descriptors, since each vCPU holds one; WHP is set to 64. Past the
+limit less 8, the rest share a pool of 8, costing a thread handoff per
+system call. `--cpus N` caps how many processes run guest code at the same
+moment, on every backend. The emulator and the native backend have no vCPU
+limit; `h9 --check` prints the limit for each hypervisor.
+
+### 28. Debugging
 
 **Tracing system calls.** `--trace` prints a line for each system call to
 standard error, or `--trace=FILE` writes them to a file, much like 9front's
 `ratrace`: the pid, the call and its arguments, and the result, with the
-error string when it failed:
+error string when it failed. Linux programs' calls are traced too, by their
+Linux names, and a call h9 doesn't serve shows as `= -ENOSYS (absent)`:
 
 ```text
 host$ h9 --trace cat /lib/nosuch
@@ -2296,7 +2506,7 @@ work too
 
 | You see | It came from |
 | --- | --- |
-| A message starting `h9:` and exit 2 or 125–127 | h9 itself (chapter 28) |
+| A message starting `h9:` and exit 2 or 125–127 | h9 itself (chapter 29) |
 | `h9: PROG: h9: timeout` | `--timeout` |
 | A program's own message, such as `ls: x: file does not exist: 'x'`, and exit 1 | The program; the error string came from the Plan 9 kernel |
 | `mount/attach disallowed` | The device mask (chapter 7) |
@@ -2305,19 +2515,20 @@ work too
 | `permission denied` on a network write | The network policy (chapter 15) |
 | `sys: bad sys call` | A system call h9 doesn't implement |
 
-### 28. Troubleshooting and FAQ
+### 29. Troubleshooting and FAQ
 
 **Exit 125: h9 couldn't run anything.** The message says why: no root tree
 (`h9: no root tree found; pass --root or set H9ROOT`, chapter 2), a root
-that isn't there, no usable hypervisor (`zig build` signs h9 on macOS; or use
-`h9-emu`), a 9P root that refused the connection or wants authentication, or
+that isn't there, no usable backend (`zig build` signs h9 on macOS; join the
+`kvm` group on Linux; or use `h9-emu`; `h9 --check` says which backends
+work), a 9P root that refused the connection or wants authentication, or
 too little memory (`OutOfGuestMemory`: raise `--memory`).
 
-**Exit 126: not a 9front executable.** The file isn't a Plan 9 a.out (a
-script given by host path, an ELF or Mach-O binary), or it's for an
-architecture this backend can't run: an amd64 binary on an Apple Silicon Mac
-needs `h9-emu`, and a 386 binary always does. A guest `#!` script whose
-interpreter line is empty also gives 126.
+**Exit 126: not a 9front executable.** The file isn't a Plan 9 a.out or a
+Linux ELF binary (a script given by host path, a Mach-O or PE binary), or
+it's for an architecture this backend can't run: an amd64 binary on an Apple
+Silicon Mac needs `h9-emu`, and a 386 binary always does. A guest `#!`
+script whose interpreter line is empty also gives 126.
 
 **Exit 127: not found.** Bare names are looked up in `.` and `/bin` inside
 the machine. To run a program from your host directory, write `./prog`; to
@@ -2332,6 +2543,15 @@ Chapter 12 has the table.
 **"sys: bad sys call".** The program used a system call h9 doesn't
 implement. The old compatibility calls (`_READ`, `_STAT`, and so on) aren't
 served, as they're not used by current 9front. Please report others.
+
+**A Linux program fails with "Function not implemented".** It made a Linux
+system call h9 doesn't serve (`ENOSYS`). `--trace` shows which, as
+`= -ENOSYS (absent)`. Please report it, with the program. Chapter 20 lists
+what's known to be missing.
+
+**A large Linux program can't start others** (Zig reports
+`SystemResources`). `exec` copies the whole program image, so raise
+`--memory` (`3g` to `8g` for compilers such as `zig cc`).
 
 **"no procs".** `--pids` is too low for what the program starts. A pipeline
 of `n` commands under `rc` needs `n + 1`.
@@ -2393,15 +2613,17 @@ They change faster than this manual, as proposals land.
   directory, given with `--root tcp!host!port`. See chapter 16.
 
 - **a.out**: Plan 9's executable format: a short header, then text, then data, then a
-  symbol table. h9 loads a.outs itself; it doesn't run ELF, Mach-O, or PE
-  programs. A program in the wrong architecture's a.out exits 126.
+  symbol table. h9 loads a.outs itself, and Linux ELF binaries through the
+  Linux personality (chapter 20); it doesn't run Mach-O or PE programs. A
+  program for an architecture the backend can't run exits 126.
 
 - **attach**: The first 9P message on a connection, which gives a client the root of a
   server's tree. Attaching a kernel device is what a `#` name does.
 
-- **backend**: h9's name for what runs guest code: a hypervisor (`hvf` on macOS; `kvm`
-  and `whp` are proposed), the host CPU in a stub process (`native`, on Linux
-  x86\_64), or the emulator (`emu`). Chosen with `--backend`.
+- **backend**: h9's name for what runs guest code: a hypervisor (`hvf` on macOS, `kvm`
+  on Linux, and `whp`, still incomplete, on Windows), the host CPU in a stub
+  process (`native`, on Linux x86\_64), or the emulator (`emu`). Chosen with
+  `--backend`; see chapter 27.
 
 - **bind**: Make one name in the namespace refer to another file or directory, like a
   symlink that lives in the process's namespace rather than on disk. See
@@ -2420,8 +2642,8 @@ They change faster than this manual, as proposals land.
 
 - **devmask**: The set of kernel devices a process may no longer attach with a `#` name.
   Existing binds keep working, so the mask fixes the namespace in place. h9
-  masks `#U` and `#C`, and `#I` without a network, after building the
-  namespace.
+  masks `#U` and `#C`, `#I` and `#ℏ` without a network, and the window's
+  devices without `--gfx`, after building the namespace.
 
 - **device, kernel device**: A file server built into the kernel, named by `#` and a letter (`#c` for
   the console, `#e` for the environment). See chapter 7 for h9's list and
@@ -2457,6 +2679,11 @@ They change faster than this manual, as proposals land.
   Plan 9 has to root, with far fewer powers. In h9 it's the host user's name.
 
 - **Hyper9**: The project; `h9` is its command and library.
+
+- **Linux personality, Linux view**: The part of h9 that runs Linux ELF programs by
+  translating their system calls onto the Plan 9 kernel, and the file tree
+  a Linux process sees as `/` (the device `#λ`): the Linux root with `/9`,
+  `/tmp`, `/mnt/term`, `/dev`, and `/proc` added. See chapter 20.
 
 - **machine**: One h9 invocation: one namespace, console, environment, `/srv`, and process
   tree, which disappears when its first process exits. A library user can run
@@ -2637,7 +2864,8 @@ old one stays until you delete it.
 
 **Other roots.** Any 9front file tree works as `--root`, as long as it has
 the mount points above and binaries for the architecture you run. A 9P
-server works too (chapter 16).
+server works too (chapter 16), and so does a Linux root, such as Alpine's
+(chapter 20).
 
 ### D. Further reading
 

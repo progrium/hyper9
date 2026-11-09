@@ -20,7 +20,7 @@ compares](comparison.md#containers-and-sandboxes) sets h9 beside containers
 in general; this guide is the hands-on version.
 
 > **Warning.** h9 is an in-development research prototype and its sandbox
-> hasn't been audited ([manual, chapter 22](../MANUAL.md#22-sandboxing)).
+> hasn't been audited ([manual, chapter 23](../MANUAL.md#23-sandboxing)).
 > Don't run hostile code in it and call it contained.
 
 ## Contents
@@ -80,7 +80,7 @@ something the runtime does for you.
 | The container's writable layer | The default, `--write=overlay`: the root takes writes in memory ([section 8](#8-the-containers-writable-layer)) | main |
 | `docker run --read-only` | `--write=scope`: the root is read-only, writable volumes still write | main |
 | `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux personality) |
-| Running Linux images | `h9 --root ./alpine sh`: a Linux root, run by the Linux personality | main; [proposal](../design/0018-linux-personality.md) still a draft |
+| Running Linux images | `h9 --root ./alpine sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/0018-linux-personality.md)) |
 | `FROM scratch` + static binaries | A slim root tree: Plan 9 binaries are statically linked ([section 4](#4-from-scratch-slim-images)) | main |
 | A busybox base image | `zig build slim`, or the built-in root h9 carries: 42 of 9front's commands in one binary | main |
 | `ENTRYPOINT`, `CMD` | An rc script in the image, run by path; or `/rc/lib/rcmain.local`, run by `h9 --rc` | main |
@@ -108,7 +108,7 @@ something the runtime does for you.
 | Multi-platform images | One tree with `/arm64/bin` and `/amd64/bin`; `--arch` picks | main |
 | `docker compose` | A shell script that starts several `h9`s ([section 15](#15-compose-several-machines)) | main |
 | `docker exec`, `docker ps`, detached containers | Nothing built in ([section 16](#16-running-containers-stop-logs-restart-exec)); serving a running machine's namespace is proposed | *Not yet available ([serve](../design/0035-serve.md), draft)* |
-| Disk-image roots (like a squashfs image) | Proposed | *Not yet available ([image-roots](../design/0014-image-roots.md), draft)* |
+| Disk-image roots (like a squashfs image) | Declined: unpack the image, or serve it over 9P | ([image-roots](../design/0014-image-roots.md), declined) |
 
 ## 3. Images are root trees
 
@@ -211,7 +211,7 @@ A program that isn't in the image fails as it would anywhere: `h9 --root
 ./images/tools sed` exits 127. A program that opens files the image doesn't
 have, such as `/lib/ndb/local`, `/sys/lib/tls/ca.pem`, or a font, fails when
 it opens them; `--trace` shows which file it was looking for ([manual,
-chapter 27](../MANUAL.md#27-debugging)).
+chapter 28](../MANUAL.md#28-debugging)).
 
 **A multi-stage build.** The 9front compilers are in the full tree, so build
 there and copy the result into a slim image, the way a Dockerfile builds in
@@ -246,9 +246,9 @@ answers their system calls with the same Plan 9 kernel, so a Linux program
 gets the machine's sandbox, network policy, and limits like a 9front one.
 `--root` takes a Linux root as readily as a 9front one: h9 tells them apart by
 their contents (`/etc/os-release`, a `/lib/ld-*` loader, and no `/rc/bin`).
-The [proposal](../design/0018-linux-personality.md) is still a draft, but the
-code is in main and runs Alpine's busybox, `apk`, Python, SQLite, PostgreSQL,
-Redis, and Git.
+It's built ([linux-personality](../design/0018-linux-personality.md),
+and [manual, chapter 20](../MANUAL.md#20-linux-programs)), and runs Alpine's
+busybox, `apk`, Python, SQLite, PostgreSQL, Redis, and Git.
 
 A Docker image is a list of gzipped tar layers and a JSON config, so getting
 one onto disk is a few HTTP requests to the registry. For Alpine on Apple
@@ -320,7 +320,7 @@ There's no image config file. Its parts go in two places:
 - **The namespace is a file in the image.** `--ns /app/ns` replays a
   namespace file from the root tree after h9 has built the machine's
   namespace and before it looks up the program ([manual, chapter
-  24](../MANUAL.md#24-namespace-files-with---ns)). Its `bind` lines are the
+  25](../MANUAL.md#25-namespace-files-with---ns)). Its `bind` lines are the
   layers, and its `cd` line is `WORKDIR`.
 
 **A default command.** An image can also say what to run when it's given
@@ -442,7 +442,7 @@ image.
 **Layers from the host.** A layer can live outside the image: share it with
 `--readable` and bind it in. A host path outside the root tree and the cwd
 appears at `/mnt/term` followed by its host path ([manual, chapter
-21](../MANUAL.md#21-sharing-files-with-the-host)):
+22](../MANUAL.md#22-sharing-files-with-the-host)):
 
 ```sh
 host$ echo 'bind -b /mnt/term/Users/me/src/plugins/bin /bin' > plugins.ns
@@ -655,7 +655,7 @@ host$ h9 --net-allow 'tcp!api.github.com!443' --rc 'mkdir -p /tmp/m/web && bind 
 | `--stop-timeout`, a job's deadline | `--timeout 30s` | `hangup` to every process, a stop 2 s later, exit 124 |
 | `--ulimit`, `--device-read-bps`, disk quotas | None | Writes to writable host paths aren't capped (`--print` says so) |
 
-[Manual, chapter 23](../MANUAL.md#23-resource-limits) has the details.
+[Manual, chapter 24](../MANUAL.md#24-resource-limits) has the details.
 
 ## 13. docker inspect: reading the plan
 
@@ -788,7 +788,7 @@ host$ h9 --net-allow 'tcp!127.0.0.1!5641' --rc 'srv tcp!127.0.0.1!5641 db && mkd
 | `docker kill` | `kill -9 PID` |
 | `docker logs` | `h9`'s standard output and error: redirect them to a file |
 | `--restart on-failure` | A loop in the unit or script, reading the exit code |
-| `docker wait` | `wait PID`; the exit code follows the [manual's table](../MANUAL.md#20-command-line-reference) |
+| `docker wait` | `wait PID`; the exit code follows the [manual's table](../MANUAL.md#21-command-line-reference) |
 | `HEALTHCHECK` | A host-side probe, such as `curl -fs localhost:8080` |
 | `docker exec` | None yet |
 
@@ -837,9 +837,9 @@ where there is one:
   [serve](../design/0035-serve.md) is a draft.
 - **Saving a run's changes.** The root's overlay is thrown away; exporting it
   as a layer is [overlay-export](../design/overlay-export.md), a draft.
-- **Image files.** Images are directories or 9P servers; a single-file image
-  you can attach read-only is [image-roots](../design/0014-image-roots.md), a
-  draft.
+- **Image files.** Images are directories or 9P servers. Attaching a
+  single-file image read-only was proposed and declined
+  ([image-roots](../design/0014-image-roots.md)).
 - **Authenticated registries.** 9P roots can't ask for authentication yet
   ([root-auth](../design/root-auth.md), a draft). WebSocket roots can send a
   bearer token in a header.
@@ -853,8 +853,8 @@ where there is one:
   system calls are missing. Its [proposal](../design/0018-linux-personality.md)
   lists them.
 - **A daemon, an API, and Windows hypervisors.** h9 is a command, not a
-  service. Windows runs on the emulator until the
-  [whp](../design/0017-whp.md) backend lands.
+  service. Windows mostly runs on the emulator: the
+  [whp](../design/0017-whp.md) backend is built for x86\_64 but incomplete.
 
 ## 18. Putting it together: h9box
 
