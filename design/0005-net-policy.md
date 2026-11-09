@@ -19,7 +19,7 @@ Enforce `--net=outbound` and make it the default profile's setting: guests can d
 
 ## Background
 
-This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's capability table had two rows for it:
+This was part of milestone M5 ("servers") in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's capability table had two rows for it:
 
 | Capability | Mechanism |
 | --- | --- |
@@ -106,7 +106,7 @@ A refused `connect` or `announce` raises "permission denied", as devfs does for 
 
 ### The hook
 
-The policy lives in Zig, as the filesystem's does. devip calls it through leaf functions, following DESIGN.md's seam rule 3: a leaf returns a verdict and raises no kernel error itself. The C side raises the error.
+The policy lives in Zig, as the filesystem's does. devip calls it through leaf functions, following SPEC.md's seam rule 3: a leaf returns a verdict and raises no kernel error itself. The C side raises the error.
 
 ```c
 /* src/kern/netcheck.h */
@@ -268,7 +268,7 @@ Unit tests in `src/policy.zig` for pattern parsing and matching: IPv4 and IPv6 C
 3. The three hook calls in `third_party/drawterm/kern/devip.c`.
 4. `--net-allow` in `src/cli.zig` and the README's sandbox table.
 5. The integration cases.
-6. DESIGN.md: `net.outbound` and `net.allow` join the capability table, the default profile's network row becomes outbound, the vendor-hooks paragraph gains `h9_net_check`, and the CLI table gains `--net-allow`. Set `status: implemented`.
+6. SPEC.md: `net.outbound` and `net.allow` join the capability table, the default profile's network row becomes outbound, the vendor-hooks paragraph gains `h9_net_check`, and the CLI table gains `--net-allow`. Set `status: implemented`.
 
 ## Updates
 

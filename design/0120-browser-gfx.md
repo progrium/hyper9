@@ -182,7 +182,7 @@ The paste event gives the user an explicit action, the shortcut they already use
 3. **Input.** The `gfxinput` kernel process, the page's pointer and keyboard handlers, focus and key release, and composition. The rio case passes.
 4. **The clipboard and cursor.** Paste in, `writeText` out with the `snarf` event fallback, and `setcursor` as a CSS cursor. The paste case passes.
 5. **Resize, close, and the plan.** The `ResizeObserver` path, `machine.hangup`, and the `gfx:` line and caveats. The remaining cases pass.
-6. **Docs.** The demo page's rio button, the README's browser section, and DESIGN.md's graphics and web host sections. Set `status: implemented`.
+6. **Docs.** The demo page's rio button, the README's browser section, and SPEC.md's graphics and web host sections. Set `status: implemented`.
 
 ## Open issues
 

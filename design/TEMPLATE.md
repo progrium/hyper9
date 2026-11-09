@@ -10,7 +10,7 @@ areas: []
 
 # Proposal: [Title]
 
-[Copy with `zig build design -- new <slug>`, which fills in the frontmatter. The process is in [README.md](README.md). Write a line per paragraph, as DESIGN.md does. Delete these bracketed notes as you go.]
+[Copy with `zig build design -- new <slug>`, which fills in the frontmatter. The process is in [README.md](README.md). Write a line per paragraph, as SPEC.md does. Delete these bracketed notes as you go.]
 
 [Sign here by hand once you've reviewed the whole doc and take responsibility for it, as described under Signature in README.md. Tools and agents never add the signature.]
 

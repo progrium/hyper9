@@ -145,7 +145,7 @@ Integration cases, using `spawnTerm` where a terminal is needed:
 4. `#C/bin`.
 5. The shell profile, its caveat, and `--strict`.
 6. `h9sh`: the `argv[0]` check, the config file, the host-shell fallback, and `H9_NESTED`.
-7. README (installing as a login shell), MANUAL (a chapter on h9 as your shell), and DESIGN.md.
+7. README (installing as a login shell), MANUAL (a chapter on h9 as your shell), and SPEC.md.
 
 Steps 1 and 2 don't need host-cmd and can land first; with default-command, they already make `h9 --profile=... --rc` in a terminal tab useful.
 

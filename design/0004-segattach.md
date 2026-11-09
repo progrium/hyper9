@@ -19,7 +19,7 @@ Serve 9front's segment calls: `segattach`, `segdetach`, `segfree`, `segbrk`, and
 
 ## Background
 
-This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's process model table had a row for it:
+This was part of milestone M5 ("servers") in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's process model table had a row for it:
 
 | Plan 9 call | Implementation |
 | --- | --- |
@@ -206,4 +206,4 @@ APE `select` end to end isn't a case here: nothing in the pinned userland calls 
 3. `Segs.fork` and exec carrying extras, `brk_`'s new limit, and `Segs.writable`. The fork, exec, and brk backend cases pass.
 4. `segbrk`, `segfree`, and `segflush`.
 5. `/proc/n/segment` in devproc, and its case. Remove `segment` from [self-host](0010-self-host.md)'s list.
-6. DESIGN.md's process model table gets rows for the segment calls, `/proc/n/segment` joins devproc's row, and `status: implemented`.
+6. SPEC.md's process model table gets rows for the segment calls, `/proc/n/segment` joins devproc's row, and `status: implemented`.

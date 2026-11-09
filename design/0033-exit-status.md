@@ -19,7 +19,7 @@ When the first process is killed by a note, the h9 CLI exits with a status a hos
 
 ## Background
 
-A 9front process ends with an `exits` string, or is killed by a note it didn't handle. The h9 CLI maps that onto a host exit status (DESIGN.md, Exit codes). [go-compat](0007-go-compat.md) already made a decimal `exits` string from 1 to 255 that status, in `cli.exitStatus` in `src/cli.zig`, so `h9 --rc 'exit 3'` exits 3. That's APE's convention: `_exit(n)` writes `n` in decimal, and APE's `wait` reads it back.
+A 9front process ends with an `exits` string, or is killed by a note it didn't handle. The h9 CLI maps that onto a host exit status (SPEC.md, Exit codes). [go-compat](0007-go-compat.md) already made a decimal `exits` string from 1 to 255 that status, in `cli.exitStatus` in `src/cli.zig`, so `h9 --rc 'exit 3'` exits 3. That's APE's convention: `_exit(n)` writes `n` in decimal, and APE's `wait` reads it back.
 
 A killed process is still a flat 1. `src/main.zig` prints `h9: prog: note` and exits 1 for every `.killed` status, whether the note was `interrupt` from Ctrl-C, `hangup` from SIGTERM, a fault, h9's own `h9: timeout`, or `h9: machine stopped`, or an internal failure such as `halted`.
 
@@ -52,7 +52,7 @@ Signal numbers are the host's, from `std.posix.SIG`, not APE's or Linux's: most 
 
 The mapping sits beside `exitStatus` in `src/cli.zig`. To tell a teardown by SIGHUP or SIGTERM from one by Ctrl-C, the CLI records which host signal started it in `src/hostsig.zig`; `Machine.Status` doesn't change.
 
-The DESIGN.md and README exit-code tables gain 124 and the killed rows, and DESIGN.md's Signals and TTY section says what each host signal exits with.
+The SPEC.md and README exit-code tables gain 124 and the killed rows, and SPEC.md's Signals and TTY section says what each host signal exits with.
 
 ## Rationale
 
@@ -66,7 +66,7 @@ The DESIGN.md and README exit-code tables gain 124 and the killed rows, and DESI
 
 **Unknown notes stay 1.** A note that isn't a signal is a message, as an `exits` string is, so it gets the same status as an `exits` string that isn't a number.
 
-**124 for `--timeout`.** That's coreutils `timeout`, and it says something more specific than SIGHUP's 129, which is what the `hangup` note `--timeout` posts would otherwise give. It's h9's first own code below 125; DESIGN.md's table lists it.
+**124 for `--timeout`.** That's coreutils `timeout`, and it says something more specific than SIGHUP's 129, which is what the `hangup` note `--timeout` posts would otherwise give. It's h9's first own code below 125; SPEC.md's table lists it.
 
 **125 for h9's own failures mid-run.** `halted`, an unexpected VM exit, and an internal error are h9 or hypervisor failures, not the guest's, and 125 already means "h9 itself failed".
 
@@ -74,7 +74,7 @@ The DESIGN.md and README exit-code tables gain 124 and the killed rows, and DESI
 
 **Exiting, not re-raising.** h9 could kill itself with the signal so its parent sees `WIFSIGNALED`, which is more exact: bash stops a loop when a child dies of SIGINT, but not when it exits 130. But it doesn't exist on Windows, would have to reset the handler and raw mode first, and `docker run` exits 130 too. A later proposal can add it.
 
-**Collisions with h9's own codes.** A guest can exit 2, 124, 125, 126, or 127 itself, as with `env` or `docker run`. That's already the documented rule (DESIGN.md, Exit codes; [go-compat](0007-go-compat.md)): h9 prints a message whenever it fails itself, and a numeric `exits` prints nothing, so scripts can still tell them apart. Remapping those statuses to 1 would hide real ones, such as `grep` or `diff` exiting 2. 124 keeps the same rule, because `--timeout` prints `h9: prog: h9: timeout`.
+**Collisions with h9's own codes.** A guest can exit 2, 124, 125, 126, or 127 itself, as with `env` or `docker run`. That's already the documented rule (SPEC.md, Exit codes; [go-compat](0007-go-compat.md)): h9 prints a message whenever it fails itself, and a numeric `exits` prints nothing, so scripts can still tell them apart. Remapping those statuses to 1 would hide real ones, such as `grep` or `diff` exiting 2. 124 keeps the same rule, because `--timeout` prints `h9: prog: h9: timeout`.
 
 **In the CLI, not `Machine`.** Exit codes are a host-process idea. Library callers already get the note and can apply their own rules.
 
@@ -103,7 +103,7 @@ Demo: `h9 --rc 'sleep 100'`, press Ctrl-C, then `echo $?` prints `130`.
 1. The note mapping in `src/cli.zig`, beside `exitStatus`, with unit tests for each row, checked against the pinned `sigtab`.
 2. Record the host signal that started a teardown in `src/hostsig.zig`, and use the mapping in `src/main.zig`'s `.killed` branch.
 3. The cases above.
-4. The exit-code tables in README.md and DESIGN.md, and DESIGN.md's Signals and TTY section.
+4. The exit-code tables in README.md and SPEC.md, and SPEC.md's Signals and TTY section.
 
 ## Open issues
 

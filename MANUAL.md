@@ -3,7 +3,7 @@
 > This manual is for people *using* h9, the command-line program from the
 > Hyper9 project, including people who have never used Plan 9.
 > [README.md](README.md) is the place for setup and build instructions, and
-> [DESIGN.md](DESIGN.md) for internals. It describes h9 as built on `main`;
+> [SPEC.md](SPEC.md) for internals. It describes h9 as built on `main`;
 > features that aren't built yet are marked with the proposal that adds them
 > (see Conventions).
 
@@ -2962,7 +2962,7 @@ originals.
 **h9 itself**
 
 - [README.md](README.md): building, testing, and the flags in brief.
-- [DESIGN.md](DESIGN.md): how h9 works inside.
+- [SPEC.md](SPEC.md): how h9 works inside.
 - [design/](design/README.md): proposals, including the ones this manual's
   badges point to.
 

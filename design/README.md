@@ -1,6 +1,6 @@
 # Proposals
 
-Design changes to h9 go through proposals: one Markdown file each in this directory, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. [DESIGN.md](../DESIGN.md) describes h9 as built; proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), and was itself adopted as [proposal 1](0001-proposals.md).
+Design changes to h9 go through proposals: one Markdown file each in this directory, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. [SPEC.md](../SPEC.md) describes h9 as built; proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), and was itself adopted as [proposal 1](0001-proposals.md).
 
 ## When a proposal is needed
 
@@ -25,7 +25,7 @@ The sections are Abstract, Background, Proposal, Rationale, Compatibility, Secur
 
 A proposal is signed with a line under its title: `Mon D, YYYY · Full Name, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>`. It's the named person's sign-off: they directed the work, reviewed it closely enough to understand and defend it, and take responsibility for it, however much of it AI wrote. Readers can trust that a person stands behind a signed doc.
 
-The signature is added by hand by the person it names, never by a tool or an agent. It's dated, and re-signed with a new date after significant changes. An unsigned draft usually hasn't been fully reviewed or understood by its `authors`, and an unsigned proposal is unlikely to be accepted. `check` doesn't enforce any of this. [DESIGN.md](../DESIGN.md) is signed the same way, by the person who last reviewed it as a whole.
+The signature is added by hand by the person it names, never by a tool or an agent. It's dated, and re-signed with a new date after significant changes. An unsigned draft usually hasn't been fully reviewed or understood by its `authors`, and an unsigned proposal is unlikely to be accepted. `check` doesn't enforce any of this. [SPEC.md](../SPEC.md) is signed the same way, by the person who last reviewed it as a whole.
 
 ## Filing and numbering
 
@@ -72,7 +72,7 @@ The syntax is a strict subset of YAML: one `key: value` per line, values are sca
 | `accepted` | Decided. Work can start once every dependency is implemented. |
 | `declined` | Decided against; kept, with a Declined section giving the reason, so the reasoning can be found later. The issue is closed. |
 | `hold` | Paused, with a reason on the issue |
-| `implemented` | Built, its Done when cases exist and pass, and DESIGN.md describes it. The tool doesn't enforce the cases, so a proposal with nothing to test can still be marked implemented; the PR says why. |
+| `implemented` | Built, its Done when cases exist and pass, and SPEC.md describes it. The tool doesn't enforce the cases, so a proposal with nothing to test can still be marked implemented; the PR says why. |
 | `superseded` | Replaced by `superseded-by` |
 
 Each status change is its own commit (`design: 42 likely-accept`), so `git log design/` is the record of decisions. The frontmatter is authoritative; issue labels may mirror it. At most three proposals sit in a final comment period at a time, so finishing decisions comes before starting new ones.
@@ -81,7 +81,7 @@ Each status change is its own commit (`design: 42 likely-accept`), so `git log d
 
 An accepted proposal's body isn't edited. A discovery during implementation that refines the design gets a dated note under an Updates section at the end; one that changes the design gets a new proposal, which supersedes the old one or is added to its `depends`. A dependency found during implementation is added to `depends` in the same PR, with a line saying so.
 
-The PR that finishes a proposal updates DESIGN.md to describe what was built, tags the passing cases, and sets `status: implemented`. DESIGN.md never describes unbuilt features, and proposals aren't updated to describe the current system. DESIGN.md links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision.
+The PR that finishes a proposal updates SPEC.md to describe what was built, tags the passing cases, and sets `status: implemented`. SPEC.md never describes unbuilt features, and proposals aren't updated to describe the current system. SPEC.md links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision.
 
 ## Declining
 

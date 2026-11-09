@@ -23,7 +23,7 @@ What exists today:
 
 - **`--rc 'cmd'`** runs `/bin/rc -c cmd`, and any remaining arguments become `$*` (`src/main.zig`). `--rc` needs a value: `h9 --rc` alone is a usage error, exit 2.
 - **`h9 rc`** runs rc with whatever flags follow. The interactive cases in `tests/integration.zig` pass `rc -i`, since the guest's stdin isn't named `/dev/cons` and rc doesn't turn on `-i` by itself.
-- **Bare `h9`** prints the usage and exits 2 (DESIGN.md, CLI).
+- **Bare `h9`** prints the usage and exits 2 (SPEC.md, CLI).
 - **[The userland guide](../docs/userland.md)** section 4 already shows a root carrying its own login setup in `/rc/lib/rcmain.local` and running it with `h9 --root ~/slim rc -l`. It also notes that `h9 --rc` doesn't read it.
 - **h9 sets the environment** a profile reads: `$user` is the host user, `$home` is `/usr/$user` (created in the overlay when the root lacks it), `$service` is `terminal`, and the cwd is `/mnt/term/cwd`.
 
@@ -83,7 +83,7 @@ exec myserver -p 8080
 
 The built-in root, the stock 9front tree, and slim roots need no changes. None of them has an `rcmain.local`. The stock tree's only profile is glenda's, which runs only when the host user is named `glenda`.
 
-**Docs.** The README's usage line becomes `--rc ['command']`, and DESIGN.md's CLI section gains `h9 [h9-flags] --rc   # login rc: the root's default command`. Section 4 of the userland guide replaces `rc -l` with `--rc` and adds the `exec` form.
+**Docs.** The README's usage line becomes `--rc ['command']`, and SPEC.md's CLI section gains `h9 [h9-flags] --rc   # login rc: the root's default command`. Section 4 of the userland guide replaces `rc -l` with `--rc` and adds the `exec` form.
 
 ## Rationale
 
@@ -129,7 +129,7 @@ Unit cases in `src/cli.zig`: `--rc` as the last argument parses as a login rc, a
 1. `src/cli.zig`: when `value` returns no value for `--rc`, set `c.rc_login = true` instead of returning `error.Usage`, and count it as a program in the run-mode check. Add the unit cases.
 2. `src/main.zig`: when `rc_login` is set, build `rc -l -i` or `rc -l -c '. /fd/0'`, depending on `isatty` of the host's stdin. Then run `/bin/rc` as `--rc` does.
 3. The integration cases.
-4. The README usage, DESIGN.md's CLI section, the usage text in `src/cli.zig`, and section 4 of `docs/userland.md`.
+4. The README usage, SPEC.md's CLI section, the usage text in `src/cli.zig`, and section 4 of `docs/userland.md`.
 
 ## Open issues
 

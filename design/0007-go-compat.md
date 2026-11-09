@@ -28,7 +28,7 @@ The CLI also maps an `exits` string that's a plain decimal number from 1 to 255 
 
 ## Background
 
-This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's Go compatibility section, which moved here, was written from Go 1.25. This proposal is checked against Go 1.27.3, the current release, and its `runtime/os_plan9.go`, `runtime/sys_plan9_amd64.s`, `syscall/syscall_plan9.go`, `syscall/exec_plan9.go`, `os/sys_plan9.go`, and `os/exec_plan9.go`.
+This was part of milestone M5 ("servers") in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's Go compatibility section, which moved here, was written from Go 1.25. This proposal is checked against Go 1.27.3, the current release, and its `runtime/os_plan9.go`, `runtime/sys_plan9_amd64.s`, `syscall/syscall_plan9.go`, `syscall/exec_plan9.go`, `os/sys_plan9.go`, and `os/exec_plan9.go`.
 
 Go has ports for `plan9/386`, `plan9/amd64`, and `plan9/arm`, but not `plan9/arm64`. HVF runs arm64 only, so a Go binary on an arm64 Mac runs as amd64 on the emulator (`--backend emu`, Unicorn). On Linux x86\_64 it runs on the emulator too, until [kvm](0016-kvm.md) gives it hardware.
 
@@ -151,7 +151,7 @@ The step is run by hand or on a schedule. It isn't part of `zig build test`, and
 ## Rationale
 
 **Hooks in devcons, not a shadow file in `#y`.**
-- **The old plan:** DESIGN.md planned to serve `bintime` from h9's console device, bound over `/dev` before `#c`, keeping the vendored tree unmodified. That works for `/dev/bintime`.
+- **The old plan:** SPEC.md planned to serve `bintime` from h9's console device, bound over `/dev` before `#c`, keeping the vendored tree unmodified. That works for `/dev/bintime`.
 - **Why it isn't enough:** Go reads `#c/pid`, `#c/ppid`, and `#c/sysname` by device path, which no bind can change. So devcons has to change for `pid` and `ppid` anyway.
 - **Why the clocks go there too:** putting them in devcons through the same hooks means `#c/bintime` and `/dev/bintime` can't disagree.
 - **The cost:** the change is four call sites and two table entries, which `scripts/vendor-drawterm.sh` carries across upstream merges like the devfs and devip hooks.
@@ -175,7 +175,7 @@ The step is run by hand or on a schedule. It isn't part of `zig build test`, and
 
 **Why not `/proc/n/text` here.** `os.Executable` needs it, but it's part of devproc's debugging files, which [self-host](0010-self-host.md) adds for acid. Go programs rarely call it, and it fails cleanly with an error when it's missing.
 
-**Go on arm64 hosts.** DESIGN.md treats cross-architecture emulation as testing-only. So on an arm64 Mac, Go `plan9/amd64` binaries run, but slowly and through Unicorn, which isn't in the MIT build. Two other proposals change that:
+**Go on arm64 hosts.** SPEC.md treats cross-architecture emulation as testing-only. So on an arm64 Mac, Go `plan9/amd64` binaries run, but slowly and through Unicorn, which isn't in the MIT build. Two other proposals change that:
 - [linux-personality](0018-linux-personality.md) runs `linux/arm64` Go binaries natively on HVF.
 - Someone porting Go to `plan9/arm64` would make this proposal's work apply natively.
 
@@ -204,7 +204,7 @@ Neither is a dependency. And [i386](0009-i386.md) would let `plan9/386` binaries
 The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on the emulator. They need [semaphores](0003-semaphores.md) implemented first.
 
 - `test "a Go hello world prints and exits 0 [go-compat]"`
-- `test "goroutines sleep 100 ms and the elapsed time is right [go-compat]"`: the program starts goroutines, sleeps 100 ms, and prints the elapsed time, which is at least 100 ms and under 200 ms. This is the demo DESIGN.md's Go section promised.
+- `test "goroutines sleep 100 ms and the elapsed time is right [go-compat]"`: the program starts goroutines, sleeps 100 ms, and prints the elapsed time, which is at least 100 ms and under 200 ms. This is the demo SPEC.md's Go section promised.
 - `test "time.Now has sub-second resolution and matches the host [go-compat]"`: two readings 10 ms apart differ by 10 ms or more, and the time is within a second of the host's.
 - `test "runtime.NumCPU follows --cpus [go-compat]"`: it prints 2 under `--cpus 2`.
 - `test "os.Getpid and os.Getppid match /proc [go-compat]"`: they print the same pids as `/proc/n/status` and `/proc/n/ppid`.
@@ -226,7 +226,7 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 4. `tests/fixtures/go/`, `GO_VERSION` in `scripts/pins.sh`, and `zig build go-fixtures`.
 5. With [semaphores](0003-semaphores.md) implemented, the Go cases, then `zig build go-stdtest` and its skip list.
 6. The README: the exit codes paragraph, and the Go fixtures and `go-stdtest` steps.
-7. DESIGN.md:
+7. SPEC.md:
    - the syscall table paragraph: `_NSEC` is served and `/dev/bintime` is nanosecond and monotonic
    - the kernel's "Added by us" table: the devcons hooks
    - the terminal paragraph's exit status sentence, and the CLI's exit code table
@@ -241,7 +241,7 @@ The cases are tagged `[go-compat]`, built from `tests/fixtures/go/`, and run on 
 
 **Nov 6, 2026.** Notes from the implementation:
 
-- **The emulator serializes guest code.** Unicorn translates code for a single-threaded context, so guest atomics aren't atomic across engines, and Go's runtime crashed ("unlock of unlocked lock") as soon as two Ms ran at once. Each emu backend now runs guest code on one engine at a time, passing the turn at exits; kernel calls still run in parallel. Preempting on a timer was tried and dropped, because an engine stopped from another thread can resume at an earlier block and run instructions twice. See DESIGN.md, "Emulator backend".
+- **The emulator serializes guest code.** Unicorn translates code for a single-threaded context, so guest atomics aren't atomic across engines, and Go's runtime crashed ("unlock of unlocked lock") as soon as two Ms ran at once. Each emu backend now runs guest code on one engine at a time, passing the turn at exits; kernel calls still run in parallel. Preempting on a timer was tried and dropped, because an engine stopped from another thread can resume at an earlier block and run instructions twice. See SPEC.md, "Emulator backend".
 - **Memory.** Go reserves several hundred MB of `brk` at start. The emulator no longer zeroes new pages by hand, and rfork's copy skips zero pages, which took a Go hello world from about 3.5 s to 0.3 s. rfork still copies eagerly and the pages count against `--memory`, so the `os/exec` case runs with `--memory 4G`; copy-on-write rfork would remove the need.
 - **`_NSEC` on 386** stores the time through its argument and returns 0, as 9front's `sys_nsec` does on 32-bit machines, instead of using only the return register.
 - **`/dev/time`** keeps drawterm's four fields, as Compatibility says; 9front's current devcons prints a fifth, the monotonic time.

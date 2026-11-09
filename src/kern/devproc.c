@@ -1,7 +1,7 @@
 /*
  * #p: /proc. Ported from 9front's port/devproc.c at the pinned release
  * (NINEFRONT_REV), serving h9's process records (proc.c, hproc.h)
- * instead of 9front's Proc table. See DESIGN.md, "Process model".
+ * instead of 9front's Proc table. See SPEC.md, "Process model".
  *
  * A machine sees only its own processes: the directory lists and walks
  * the caller's machine, by machine-local pid, and the pid in a qid is

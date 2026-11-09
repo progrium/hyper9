@@ -22,7 +22,7 @@ This lets you keep what a run did without writing the host. You can read the arc
 
 - **[ephemeral-writes](0006-ephemeral-writes.md)** added `#O` (`src/kern/devoverlay.c`). An instance is a tree in memory over a lower chan, made up of copies, whiteouts, and directory markers. `--write=ephemeral` puts one over the cwd and each `--writable` path, and every machine has one over `/tmp`.
 - **[overlay](0011-overlay.md)** puts one over the root by default and adds a count of discarded root changes to the run's status, so the CLI can print a notice on a terminal.
-- **Changes are lost at exit.** DESIGN.md says "Ephemeral changes can't be exported yet". An instance is freed when the last chan on it closes, which happens when the run's last process tears down its namespace. The only way to keep a change is to make its path `--writable`, which writes the host as the guest goes, with no review step and no undo.
+- **Changes are lost at exit.** SPEC.md says "Ephemeral changes can't be exported yet". An instance is freed when the last chan on it closes, which happens when the run's last process tears down its namespace. The only way to keep a change is to make its path `--writable`, which writes the host as the guest goes, with no review step and no undo.
 
 ### What people want from a run's changes
 
@@ -184,5 +184,5 @@ Demo: `h9 --export-changes out.tar --rc 'cd /sys/src/cmd && mk cat.install && rm
 2. `src/changes.zig`: the pax/OCI writer and the reserved-name check. Unit tests on a hand-built tree.
 3. `Machine.Options.export_changes` and `export_tmp`, and the export in `run` after the last process exits, then the status fields.
 4. The CLI: `--export-changes`, `--export-tmp`, opening FILE early, exit 125, `--print`'s `export=` and `exp`, and the notice wording shared with [overlay](0011-overlay.md).
-5. README's sandbox section, and DESIGN.md: the CLI table, "Ephemeral changes can't be exported yet" replaced, and the plan example. Set `status: implemented`.
+5. README's sandbox section, and SPEC.md: the CLI table, "Ephemeral changes can't be exported yet" replaced, and the plan example. Set `status: implemented`.
 

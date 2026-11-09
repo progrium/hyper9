@@ -2,7 +2,7 @@
  * h9's per-process records: what 9front keeps in its Proc and drawterm's
  * lacks (parent, children, wait queue, Egrp, the machine-local pid and a
  * pointer to the Zig process). drawterm's Proc stays as it is, so a record is
- * found from its Proc through a table here. See DESIGN.md, "Process model".
+ * found from its Proc through a table here. See SPEC.md, "Process model".
  *
  * Also here, ported from 9front at the pinned release: the group handling
  * of sysrfork (port/sysproc.c), pgrpcpy (port/pgrp.c), pexit's and

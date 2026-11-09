@@ -19,7 +19,7 @@ pub const panic = std.debug.FullPanic(struct {
     }
 }.f);
 
-/// Exit codes for h9's own failures (DESIGN.md, "Exit codes").
+/// Exit codes for h9's own failures (SPEC.md, "Exit codes").
 const exit_failed = 125;
 const exit_not_executable = 126;
 const exit_not_found = 127;

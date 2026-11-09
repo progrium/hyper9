@@ -1542,7 +1542,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_embed.step);
     }
 
-    // The speed numbers in DESIGN.md's "Limits and selection". Always
+    // The speed numbers in SPEC.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
     const bench = b.addExecutable(.{
         .name = "bench",

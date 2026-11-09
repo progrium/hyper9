@@ -1,4 +1,4 @@
-//! The emulator speed benchmark behind DESIGN.md's "Limits and selection":
+//! The emulator speed benchmark behind SPEC.md's "Limits and selection":
 //! a 2-instruction loop of 10⁹ iterations, and 10⁶ one-byte pwrite round
 //! trips, for arm64 and amd64 on every backend built in that can run them.
 //! zig build bench builds it with ReleaseFast and runs it.

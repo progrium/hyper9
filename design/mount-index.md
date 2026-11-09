@@ -223,7 +223,7 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
 7. The cache, `--root-index`, `--index`, `--index-cache`, `--print`, `-v`, and `--check`.
 8. Namespace-file mounts, through the same layer.
 9. URL indexes, through `src/ws.zig`'s HTTP client.
-10. MANUAL and DESIGN.md.
+10. MANUAL and SPEC.md.
 
 ## Open issues
 

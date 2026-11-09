@@ -1,4 +1,4 @@
-//! The sandbox policy (DESIGN.md, "Sandbox policy"): profiles and explicit
+//! The sandbox policy (SPEC.md, "Sandbox policy"): profiles and explicit
 //! settings, compiled into a Plan that the machine's namespace builder
 //! follows and `--print` shows. The Plan's access rules are what devfs
 //! checks through `h9_fs_check` (src/kern.zig), and its network patterns
@@ -291,7 +291,7 @@ pub const Plan = struct {
         for (addrs) |*a| names.record(pr, a, port, name);
     }
 
-    /// Prints the plan in the format of DESIGN.md, "Plan output".
+    /// Prints the plan in the format of SPEC.md, "Plan output".
     pub fn print(p: *const Plan, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("profile:  {t}\n", .{p.profile});
         if (p.serve) |sv| if (sv.only) try w.writeAll("program:  none (serve only)\n");

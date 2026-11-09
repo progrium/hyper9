@@ -1,4 +1,4 @@
-//! vCPUs for a machine's processes. See DESIGN.md, "vCPU limits".
+//! vCPUs for a machine's processes. See SPEC.md, "vCPU limits".
 //!
 //! A process normally owns a vCPU, created on its own thread, as HVF
 //! requires. HVF allows only 64 live vCPUs per VM (KVM a few hundred, or

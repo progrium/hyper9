@@ -17,11 +17,11 @@ A second emulator backend, written in Zig: MIT, dependency-free, and determinist
 
 ## Background
 
-DESIGN.md's emulator section listed this as the second step, after Unicorn, before milestones became proposals ([#1](0001-proposals.md)). As it stood there:
+SPEC.md's emulator section listed this as the second step, after Unicorn, before milestones became proposals ([#1](0001-proposals.md)). As it stood there:
 
 2. **A native Zig interpreter later.** It would be MIT, dependency-free, and deterministic. It covers the instruction subset that 9front's compilers and libc's assembly routines emit, arm64 first. Unicorn is the reference: single-step both and compare registers after every instruction.
 
-The emulator's speed was measured against HVF: about 5× slower for arm64 compute and on par for syscalls, so the interpreter wasn't urgent (DESIGN.md, Limits and selection).
+The emulator's speed was measured against HVF: about 5× slower for arm64 compute and on par for syscalls, so the interpreter wasn't urgent (SPEC.md, Limits and selection).
 
 What Unicorn costs today:
 
@@ -135,7 +135,7 @@ That report is the spec. The inventory also runs as a test that fails when a roo
 
 ### Deterministic mode
 
-Given the same binary, arguments, and syscall results, the interpreter executes the same instruction stream: there's no translation cache whose timing leaks in, and no host FP state. Two places read time: `CNTVCT_EL0` and the kick check. `Machine.Options` gains nothing here. A test-only `interp.Options.deterministic` derives the counter from `retired` and kicks only at exits, which gives the "record and replay at the syscall boundary" DESIGN.md's emulator section promises. A replay CLI would be its own proposal.
+Given the same binary, arguments, and syscall results, the interpreter executes the same instruction stream: there's no translation cache whose timing leaks in, and no host FP state. Two places read time: `CNTVCT_EL0` and the kick check. `Machine.Options` gains nothing here. A test-only `interp.Options.deterministic` derives the counter from `retired` and kicks only at exits, which gives the "record and replay at the syscall boundary" SPEC.md's emulator section promises. A replay CLI would be its own proposal.
 
 ### Build and selection
 
@@ -163,7 +163,7 @@ Given the same binary, arguments, and syscall results, the interpreter executes 
 
 **Why the 9front subset and not all of A64.** A64 with its SIMD and FP extensions is thousands of encodings. 9front's compilers use a small, stable part of it, because they generate simple code and 9front's assembly is hand-written for clarity. The inventory makes the subset concrete and checkable. An encoding outside it faults visibly instead of misbehaving. When the root tree's pin moves, the inventory test says what's new.
 
-**Why arm64 first.** It's what HVF runs and what the root tree is built for. Its fixed 32-bit encoding decodes from a few bit fields, while amd64's variable-length prefixes and ModRM forms would need much more decoder. Unicorn already covers amd64 for the testing-only cross-architecture runs DESIGN.md allows.
+**Why arm64 first.** It's what HVF runs and what the root tree is built for. Its fixed 32-bit encoding decodes from a few bit fields, while amd64's variable-length prefixes and ModRM forms would need much more decoder. Unicorn already covers amd64 for the testing-only cross-architecture runs SPEC.md allows.
 
 **Why keep one `emu` kind.** A new backend kind would add a `--backend` value and a CLI change for something users choose only by build. Behind `emu`, the CLI, `Machine.Options`, and the test harness don't change. The integration harness already runs each case on every backend listed and checks that they agree.
 
@@ -175,7 +175,7 @@ Given the same binary, arguments, and syscall results, the interpreter executes 
 - **Unicorn's interpreter mode.** QEMU's TCI exists, but it's still GPLv2 and still QEMU's build.
 - **Checking only against HVF.** HVF runs at full speed but can't be single-stepped from the host cheaply, and only exists on macOS. Unicorn can be stepped anywhere. Comparing syscall traces against HVF stays, through the integration harness's backend comparison.
 
-**Performance.** The interpreter will be slower than Unicorn on compute; the target is the bench loop within 4× of Unicorn's time, which is about 20× HVF's. Syscall round trips should be faster than Unicorn's 0.8 µs, since `run` enters no engine and sets no registers through an API. Both go in DESIGN.md's Limits and selection from `zig build bench`. The target isn't a gate: correctness is.
+**Performance.** The interpreter will be slower than Unicorn on compute; the target is the bench loop within 4× of Unicorn's time, which is about 20× HVF's. Syscall round trips should be faster than Unicorn's 0.8 µs, since `run` enters no engine and sets no registers through an API. Both go in SPEC.md's Limits and selection from `zig build bench`. The target isn't a gate: correctness is.
 
 ## Compatibility
 
@@ -217,7 +217,7 @@ The sandbox policy is unaffected: it's enforced in the kernel, above the vmm lay
   - `test "unmapping a cached page makes the next access fault [zig-interpreter]"`
   - `test "deterministic mode gives the same instruction count twice [zig-interpreter]"`
 - `test "every root-tree binary decodes to implemented ops [zig-interpreter]"` passes, against the reviewed allowlist.
-- `zig build bench -Demu=zig` reports the loop and the syscall round trip, and DESIGN.md's Limits and selection gives them next to Unicorn's and HVF's.
+- `zig build bench -Demu=zig` reports the loop and the syscall round trip, and SPEC.md's Limits and selection gives them next to Unicorn's and HVF's.
 - Demo: `h9 --backend emu ls /bin | wc -l` from a default MIT build on a Linux host without KVM support.
 
 ## Implementation
@@ -228,14 +228,14 @@ The sandbox policy is unaffected: it's enforced in the kernel, above the vmm lay
 4. **Lockstep.** `src/vmm/lockstep.zig` and `-Demu=lockstep`. From here on, every new class is written against lockstep.
 5. **FP and SIMD.** `fp.zig` for the classes the inventory found, with the host-independence cases.
 6. **Fuzzer.** `zig build fuzz-a64`, standalone and under lockstep.
-7. **Default and release.** Switch the `-Demu` default to `zig`, update `scripts/release.sh` and the README, run `zig build bench`, and update DESIGN.md's emulator section: the interpreter as the default emulator, Unicorn as the reference, and the amd64 emulator. Set `status: implemented`.
+7. **Default and release.** Switch the `-Demu` default to `zig`, update `scripts/release.sh` and the README, run `zig build bench`, and update SPEC.md's emulator section: the interpreter as the default emulator, Unicorn as the reference, and the amd64 emulator. Set `status: implemented`.
 
 ## Open issues
 
 - **Data in text.** Does 7l place literal pools or jump tables in text? If it does, the inventory sees data as instructions, and the allowlist has to be maintained by hand at each pin. Using the symbol table to skip non-code ranges may avoid it.
 - **Which rounding modes 9front code really sets.** `setfcr` can change FPCR.RMode, and software directed rounding is slow. If nothing in the root tree uses it, the first version could fault on a non-default mode instead.
 - **Lockstep time in CI.** Single-stepping Unicorn costs microseconds per instruction, so the full suite under lockstep may take too long for every push. It may need to run nightly, or only on the `tests/backends.zig` cases and a chosen few integration cases ([ci](ci.md)).
-- **Whether `h9-emu` survives.** Once the interpreter passes everything, `h9-emu` is only needed for amd64 emulation, which DESIGN.md treats as testing-only. Retiring it would drop the GPLv2 release and its source archive. Building Unicorn would stay possible for development and lockstep.
+- **Whether `h9-emu` survives.** Once the interpreter passes everything, `h9-emu` is only needed for amd64 emulation, which SPEC.md treats as testing-only. Retiring it would drop the GPLv2 release and its source archive. Building Unicorn would stay possible for development and lockstep.
 - **An amd64 interpreter.** It would give the MIT build amd64 emulation, and is the last thing needed to retire Unicorn completely. It would be a separate proposal.
 - **Hosts beyond the hypervisors.** A core with no OS dependencies would also run on targets h9 doesn't support today, wasm in particular. Each of those is a host platform with its own threading and I/O questions, so it would be its own proposal. The constraint on `src/interp/` here, no OS services, is what keeps that option open.
 ## Updates

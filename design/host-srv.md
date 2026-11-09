@@ -232,7 +232,7 @@ Demos:
 3. `--srv` in `src/cli.zig` and `src/main.zig`: the forms, the names, and the usage errors.
 4. The plan in `src/policy.zig`: the `srv` heading, the caveats, the `--write=none` conflict, and serve's caveat once serve exists. `--trace`'s connection lines.
 5. The browser host: `createMachine`'s `srv`, with URL sources only.
-6. The cases above. README: `--srv` and the demo. DESIGN.md: the CLI flag table, `Machine.Options`, the boot sequence, and `/srv`'s paragraph. Set `status: implemented`.
+6. The cases above. README: `--srv` and the demo. SPEC.md: the CLI flag table, `Machine.Options`, the boot sequence, and `/srv`'s paragraph. Set `status: implemented`.
 
 ## Open issues
 

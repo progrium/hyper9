@@ -122,7 +122,7 @@ Demo: `h9 --print --root fs.example.com/9p ls` shows the `wss://` URL in the pla
 1. `cli.schemelessRoot` and its unit test.
 2. `resolveRoot`'s fallback, and the two-reading error in `rootError`.
 3. The integration cases.
-4. README's and MANUAL.md's `--root` notes, and DESIGN.md's root filesystem paragraph and CLI flag table. Set `status: implemented`.
+4. README's and MANUAL.md's `--root` notes, and SPEC.md's root filesystem paragraph and CLI flag table. Set `status: implemented`.
 
 ## Updates
 

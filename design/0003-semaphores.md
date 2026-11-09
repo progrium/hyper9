@@ -19,9 +19,9 @@ Serve `rendezvous`, `semacquire`, `tsemacquire`, and `semrelease` with host kern
 
 ## Background
 
-This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)).
+This was part of milestone M5 ("servers") in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)).
 
-From DESIGN.md's process model table:
+From SPEC.md's process model table:
 
 | Plan 9 call | Implementation |
 | --- | --- |
@@ -48,7 +48,7 @@ drawterm already has a `sysrendezvous` wrapper in `kern/sysfile.c`, and its Proc
 - The waiter lists live in a kernel-wide hash table of 64 buckets, each with its own lock, rather than in the segment. They're keyed by the host address of the semaphore word. Every address space that shares a segment maps the same host pages, and a segment's pages never move once allocated (`src/segment.zig` grows in chunks without copying), so the host address names the same semaphore in every sharer, as 9front's (segment, address) pair does. Machines never share guest pages, so one table serves every machine in the host process.
 - The value is changed with host atomics (`__atomic` compare-and-swap with sequentially consistent ordering) on the host memory that backs the guest word. That memory is what the guest's own loads, stores, and exclusives see.
 
-Each call gets a `sys*`-style wrapper (`h9_semacquire`, `h9_tsemacquire`, `h9_semrelease`): it runs `waserror`, and on an error stores the string for `errstr` and returns -1, as DESIGN.md's seam rules require. The wrappers take a host pointer that the Zig side has already checked.
+Each call gets a `sys*`-style wrapper (`h9_semacquire`, `h9_tsemacquire`, `h9_semrelease`): it runs `waserror`, and on an error stores the string for `errstr` and returns -1, as SPEC.md's seam rules require. The wrappers take a host pointer that the Zig side has already checked.
 
 **Checking the address.** `src/syscall.zig` checks `addr` before calling into the kernel, so seam rule 7 holds:
 
@@ -126,7 +126,7 @@ Each case runs on every backend in `H9_TEST_BACKENDS` with the same output. The 
 3. `src/kern.zig`: bindings for the three wrappers and for `sysrendezvous`, with the stubs for builds without kern.
 4. `src/syscall.zig`: add `rendezvous`, `semacquire`, `semrelease`, and `tsemacquire` to `Nr`, decode them, check addresses as above, and format them for `--trace`. Note in `src/segment.zig` that semaphore wait lists rely on pages not moving.
 5. The test fixtures and the integration cases.
-6. Update README.md's syscall list, and DESIGN.md: the process model table, `tsleep.c`, and `sema.c` in the kernel's "Added by us" table, and the timer kproc under Threads. Mark the proposal implemented.
+6. Update README.md's syscall list, and SPEC.md: the process model table, `tsleep.c`, and `sema.c` in the kernel's "Added by us" table, and the timer kproc under Threads. Mark the proposal implemented.
 
 ## Open issues
 

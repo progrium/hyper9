@@ -17,7 +17,7 @@ areas: [cli, kern, sandbox]
  
 ## Background
  
-This was part of milestone M10 in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's root filesystem list had it third:
+This was part of milestone M10 in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's root filesystem list had it third:
  
 3. **Disk image:** cwfs or gefs runs as a guest process over an image file exposed as a host file, and posts to `#s`. This is also a good stress test of the process model.
 ### What a 9front disk looks like
@@ -198,7 +198,7 @@ Demo: `h9 --root .local/9front/9front.img --rc 'ls /usr/glenda && cat /dev/sysna
 4. The server's processes on the machine rather than the run, and `halt` at `deinit`.
 5. gefs's `-A` and `-m`, and cwfs's device map.
 6. The plan's `boot:` section, access kinds, conflict, and caveats; `--check` with an image root.
-7. `scripts/fetch.sh`'s raw image, the cases, README's `--root` notes, and DESIGN.md: the root filesystem paragraph, the Decisions table's root row, the kernel's "Added by us" table, the boot sequence, and the CLI flag table. Set `status: implemented`.
+7. `scripts/fetch.sh`'s raw image, the cases, README's `--root` notes, and SPEC.md: the root filesystem paragraph, the Decisions table's root row, the kernel's "Added by us" table, the boot sequence, and the CLI flag table. Set `status: implemented`.
 ## Open issues
  
 - **The program's own attaches.** A program that mounts `/srv/root` again (`mount /srv/root /n/x`) attaches as the machine's user, as on a 9P root, which the image's server refuses unless that user is in its table. Running the program as `glenda` would fix it, but changes `$user` and `/dev/user` from what other roots give.
