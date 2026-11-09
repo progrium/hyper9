@@ -2,7 +2,7 @@
 // page's argv over the root archive or a ws:// root, and passes the console through
 // messages. The page's side is createMachine in h9-web.js.
 //
-// Page to Worker: { type: 'start', argv, env, root } once, then
+// Page to Worker: { type: 'start', argv, env, root, tty } once, then
 // { type: 'input', data }, { type: 'interrupt' } and { type: 'hangup' }.
 // Worker to page: { type: 'output', fd, data }, { type: 'raw', on } and
 // { type: 'exit', code } or { type: 'error', message }.
@@ -43,7 +43,7 @@ const host = {
   setRaw: (on) => post({ type: 'raw', on }),
 };
 
-async function start({ argv, env = {}, root }) {
+async function start({ argv, env = {}, root, tty = false }) {
   const fetchBytes = async (url) => {
     // Revalidated, not taken from the HTTP cache unchecked: GitHub Pages
     // lets browsers cache for 10 minutes, and a stale h9.wasm with a new
@@ -71,6 +71,7 @@ async function start({ argv, env = {}, root }) {
       args: ['h9', '--root', remote ? root : '/', ...argv],
       env: { PWD: '/', ...env },
       write: (fd, data) => post({ type: 'output', fd, data }, [data.buffer]),
+      tty,
     }),
     host,
     log: (m) => console.log(m),
