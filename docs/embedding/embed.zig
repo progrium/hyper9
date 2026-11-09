@@ -13,6 +13,7 @@
 //! runs it on the hello fixture.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const h9 = @import("h9");
 
 const usage = "usage: embed [-j N] [--root DIR] PROGRAM [ARG...]\n";
@@ -85,10 +86,13 @@ pub fn main(init: std.process.Init) !u8 {
 
     // A program with a `/`, `./` or `../` prefix is read on the host, as the
     // CLI does; anything else is looked up in the guest. The a.out's
-    // header picks the architecture; a guest program runs the host's.
+    // header picks the architecture; a guest program runs the host's. On
+    // Windows a host path may use `\` instead.
     var arch: ?h9.vmm.Arch = null;
+    const seps = if (builtin.os.tag == .windows) "/\\" else "/";
     const prog: h9.Program = if (std.mem.startsWith(u8, argv[0], "./") or std.mem.startsWith(u8, argv[0], "../") or
-        (root_arg == null and std.mem.indexOfScalar(u8, argv[0], '/') != null))
+        (builtin.os.tag == .windows and (std.mem.startsWith(u8, argv[0], ".\\") or std.mem.startsWith(u8, argv[0], "..\\"))) or
+        (root_arg == null and std.mem.indexOfAny(u8, argv[0], seps) != null))
     blk: {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, argv[0], arena, .limited(1 << 30));
         arch = (try h9.aout.parse(bytes)).arch;
