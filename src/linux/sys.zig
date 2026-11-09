@@ -12,7 +12,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
 const kern = @import("../kern.zig");
-const gm = @import("../guestmem.zig");
 const mm = @import("mm.zig");
 const nr = @import("nr.zig");
 const kc = @import("kc.zig");
@@ -1856,7 +1855,14 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     if (dir == .read and off >= 0 and len <= read_cache_max) if (file) |k| {
         if (cachedRead(p, fd, k, buf, len, @intCast(off))) |r| return r;
     };
-    if (gm.contiguous(p.mm.as, buf, len)) |s| {
+    // A pin resolves the buffer to one contiguous host slice and holds the
+    // pages behind it across the kernel call, so another thread's munmap,
+    // mremap, or exit can't free the memory under a blocking read or write
+    // into it (a use-after-free).
+    if (p.mm.pin(buf, len)) |pinned| {
+        var pn = pinned;
+        defer p.mm.unpin(&pn);
+        const s = pn.s;
         if (dir == .write and is_pipe) return pipeWrite(p, fd, s);
         const n = switch (dir) {
             .read => kern.pread(@intCast(fd), s, off),
