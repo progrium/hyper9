@@ -2051,6 +2051,7 @@ Machine:
 | `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
 | `--root-spec NAME` | The attach name sent to a 9P root. Default: empty. |
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
+| `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
 | `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |

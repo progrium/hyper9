@@ -28,7 +28,7 @@
  * one request can take several round trips. A guest reading data sleeps
  * until the translator has bytes for it, so a note interrupts it.
  *
- * The translator is called through leaves (src/dotl/kern.zig, DESIGN.md
+ * The translator is called through leaves (src/dotl/kern.zig, SPEC.md
  * seam rule 3) that take and return bytes and never raise. A QLock per
  * conversation serializes them; another keeps writes to the server in
  * the order the translator queued them.
