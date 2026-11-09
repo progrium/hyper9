@@ -2677,7 +2677,17 @@ pub const Machine = struct {
             {
                 j.lockSpin();
                 defer j.lock.unlock();
-                for (j.procs.items) |q| used_kb += q.mem_kb.load(.acquire);
+                // Threads of a Linux process share its Mm, and each one's
+                // mem_kb is the whole of it: count each Mm once.
+                for (j.procs.items, 0..) |q, i| {
+                    if (q.lx) |l| {
+                        const shared = for (j.procs.items[0..i]) |o| {
+                            if (o.lx) |ol| if (ol.mm == l.mm) break true;
+                        } else false;
+                        if (shared) continue;
+                    }
+                    used_kb += q.mem_kb.load(.acquire);
+                }
             }
             const free_kb = total_kb -| used_kb;
             w.print("MemTotal:       {d: >8} kB\nMemFree:        {d: >8} kB\nMemAvailable:   {d: >8} kB\nBuffers:               0 kB\nCached:                0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n", .{ total_kb, free_kb, free_kb }) catch {};
