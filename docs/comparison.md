@@ -47,6 +47,7 @@ process, and its kernel is Plan 9's, which makes the namespace, 9P, and
 | plan9port | Plan 9 tools recompiled for Unix | None (ordinary Unix processes) | The host kernel | Native | None |
 | Docker / OCI | Linux binaries | Linux namespaces, cgroups, seccomp | The shared host Linux kernel (a Linux VM on macOS and Windows) | ~100 ms+ | Layered image |
 | gVisor | Linux binaries | ptrace, systrap, or KVM platform | The Sentry (Linux in Go), in user space | ~100 ms+ | OCI image |
+| Docker Sandboxes | A coding agent in a Linux VM, with its own Docker daemon | Full VM per sandbox (HVF, WHP, or KVM), plus a host proxy for network and credentials | A guest Linux kernel | Fast boot, then persistent | Agent template image |
 | Firecracker | A Linux VM | Full VM (KVM) | A guest Linux kernel | ~125 ms boot | Kernel plus rootfs image |
 | WSL 1 / WSL 2 | Linux binaries on Windows | Process / full VM | NT translating Linux calls / a real Linux kernel | Fast / seconds | Distro rootfs |
 | Wine | Windows binaries on Unix | None | The host kernel, behind a Win32 reimplementation | Native | A prefix directory |
@@ -142,6 +143,48 @@ differences:
 - gVisor is a mature, production sandbox. h9's security has had no audit
   (see the warning in the manual's
   [Sandboxing](../MANUAL.md#23-sandboxing) chapter).
+
+**Docker Sandboxes.** Docker's `sbx` runs AI coding agents (Claude Code,
+Codex, Copilot, and others) each in its own microVM, on Docker's own VMM over
+Hypervisor.framework, the Windows Hypervisor Platform, or KVM: the same three
+hypervisors h9 uses. The guest is a whole Linux system with its own kernel and
+a private Docker daemon, so an agent can `docker build` and `docker compose`
+without reaching the host's daemon. A sandbox is persistent: `sbx run`,
+`sbx stop`, and `sbx rm` manage it, and its packages, images, and files
+survive restarts. The project directory is shared into the VM at the same
+path with virtiofs, or mounted read-only beside a private clone, or not at
+all. All outbound TCP goes through a proxy on the host that enforces a
+domain policy (Open, Balanced, or Locked Down, and per-host rules) and swaps
+a placeholder for the real API key, so the key never enters the VM. The
+differences:
+
+- **One machine per agent, or one per command.** A sandbox is a long-lived
+  workstation for an agent. An h9 machine starts in milliseconds, runs one
+  process tree, and ends with it, so it can fence a single step of a
+  pipeline (`git log | h9 sort`) as easily as a shell.
+- **A Linux kernel, or a syscall table.** sbx runs anything Linux runs,
+  Docker included. h9's [Linux personality](../design/0018-linux-personality.md)
+  runs a growing set of programs and fails the rest with `ENOSYS`, and there's
+  no Docker inside h9.
+- **Host files.** sbx shares the workspace whole, and can't hide a file in
+  it, so `.env` is readable in every mode. h9 binds only what the flags name,
+  hides paths with `--read-deny`, keeps writes in memory with
+  `--write=ephemeral`, and prints the result with `--print`.
+- **Network.** sbx filters by domain at an HTTP proxy and injects
+  credentials. h9 filters `/net` dials by dial string with `--net-allow`, and
+  resolves only names a pattern covers ([net-policy](../design/0005-net-policy.md)).
+  h9 injects credentials only into WebSocket 9P handshakes, and that's a draft
+  ([credential-helpers](../design/0119-credential-helpers.md), *planned*).
+- **Images.** sbx starts from agent templates, with an image cache per
+  sandbox. h9 starts from a root tree or a 9P server, and
+  [h9reg](https://github.com/progrium/h9reg) serves OCI images as 9P roots.
+- **Maturity.** sbx is a product, closed source, and needs a Docker sign-in.
+  h9 is MIT licensed and unaudited, and the h9 process isn't sandboxed by the
+  host yet ([host-sandbox](../design/host-sandbox.md), *planned*).
+
+If you want to hand a repository to a coding agent today, sbx is built for
+it. h9 fits when you want a policy per command, file-level denies, writes
+that vanish, or the same sandbox in a browser.
 
 ## Virtual machines
 
