@@ -164,6 +164,7 @@ pub const Relay = struct {
         const r = &sr.interface;
         var q: ws.Request = .{};
         ws.readRequest(r, &q) catch return;
+        if (!std.mem.eql(u8, q.method, "GET")) return;
         {
             rl.locked();
             defer rl.lock.unlock();

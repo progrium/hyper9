@@ -22,6 +22,14 @@
 //! `h9_ws_*` imports below; each stream's reader is a coroutine parked
 //! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
 //!
+//! Accepted streams (design/0035-serve.md) are the other direction: a
+//! connection a `--serve` listener accepted, handed to the kernel the same
+//! way. A WebSocket one (`server`) does the server's side of the
+//! handshake and reads masked frames; a unix or TCP one (`raw`) carries
+//! the bytes as they come. Either way the stream's thread waits for the
+//! client's first 9P message, checks it in the dialect slot, and only then
+//! tells the listener's `Served` that the stream is ready for exportfs.
+//!
 //! The leaves called from devhstream.c never raise kernel errors: they
 //! return -1 with the error in the caller's ERRMAX buffer, and the C side
 //! raises it.
@@ -195,6 +203,18 @@ const Queue = struct {
         return got;
     }
 
+    /// The byte `off` bytes in; the caller checks `len`.
+    fn peekByte(q: *const Queue, off: usize) u8 {
+        var skip = off;
+        var c = q.head;
+        while (c) |ch| : (c = ch.next) {
+            const n = ch.end - ch.start;
+            if (skip < n) return ch.mem[ch.start + skip];
+            skip -= n;
+        }
+        unreachable;
+    }
+
     /// The first four bytes, as a text message's length.
     fn peekLen(q: *const Queue) u32 {
         var b: [4]u8 = undefined;
@@ -269,9 +289,51 @@ pub const HostOptions = struct {
     proxy: ws.ProxyConfig = .{},
 };
 
+/// What's under a stream.
+pub const Mode = enum {
+    /// A WebSocket h9 connected as the client.
+    client,
+    /// A WebSocket a `--serve ws://` listener accepted: h9 is the server.
+    server,
+    /// A unix or TCP connection a listener accepted: bytes, unframed.
+    raw,
+};
+
+/// An accepted stream's listener (design/0035-serve.md): its WebSocket
+/// checks, and what to tell it. Must outlive the stream's thread.
+pub const Served = struct {
+    /// A WebSocket listener's checks; null for unix and TCP.
+    ws: ?ws.ServerPolicy = null,
+    ctx: *anyopaque,
+    /// The stream's first 9P message has arrived and passed the dialect
+    /// slot. The callee takes the maker's reference, which it drops with
+    /// `release` once it has a channel on the stream.
+    ready: *const fn (ctx: *anyopaque, id: u32) void,
+    /// The stream's thread is ending. `handed` says whether `ready` was
+    /// called; if not, the maker's reference is dropped here.
+    done: *const fn (ctx: *anyopaque, handed: bool) void,
+};
+
+/// The dialect slot (design/0035-serve.md, "Each connection"): what
+/// serves a connection whose first message has type `typ`. Every
+/// dialect is exportfs's for now, which answers a version it doesn't
+/// know with `unknown`; dotl's translator is the slot's second entry.
+pub const Dialect = enum { exportfs };
+
+pub fn dialect(typ: u8) ?Dialect {
+    const tversion = 100;
+    return if (typ == tversion) .exportfs else null;
+}
+
 pub const Stream = struct {
     id: u32,
     owner: usize,
+    mode: Mode = .client,
+    /// An accepted stream's listener.
+    served: ?*const Served = null,
+    /// An accepted stream's first message passed the dialect slot, and
+    /// `served.ready` has it.
+    announced: bool = false,
     /// The guest's conversation number, or null for a host-made stream.
     conv: ?u8,
     /// Under the table lock: references (leaf calls in progress, the
@@ -391,10 +453,28 @@ pub const Stream = struct {
         defer s.wlock.unlock(io);
         if (web.enabled) return s.webSend(op, payload);
         const c = s.conn orelse return false;
+        if (s.mode == .raw) {
+            // No frames: only data goes out, as it is.
+            if (op != .binary) return true;
+            c.writer().writeAll(payload) catch {
+                s.fail("i/o on hungup channel", .{});
+                return false;
+            };
+            c.flush() catch {
+                s.fail("i/o on hungup channel", .{});
+                return false;
+            };
+            return true;
+        }
         if (s.close_sent) return false;
         if (op == .close) s.close_sent = true;
-        var mask: [4]u8 = undefined;
-        io.random(&mask);
+        // A client masks its frames; a server doesn't.
+        var mask: ?[4]u8 = null;
+        if (s.mode == .client) {
+            var m: [4]u8 = undefined;
+            io.random(&m);
+            mask = m;
+        }
         ws.writeFrame(c.writer(), op, payload, mask) catch {
             s.fail("i/o on hungup channel", .{});
             return false;
@@ -451,6 +531,26 @@ pub const Stream = struct {
         wake(s.id);
     }
 
+    /// For an accepted stream, checks the first 9P message in the dialect
+    /// slot once its type has arrived. Returns whether the listener is to
+    /// be told it's ready, or fails the stream if the slot refuses it.
+    /// Called with `lock` held.
+    fn firstLocked(s: *Stream) bool {
+        if (s.served == null or s.announced or s.ended or s.data.len < 5) return false;
+        if (dialect(s.data.peekByte(4)) == null) {
+            s.failLocked("the first message isn't a Tversion", .{});
+            return false;
+        }
+        s.announced = true;
+        return true;
+    }
+
+    /// Tells the listener the stream is ready, after `firstLocked`.
+    fn announce(s: *Stream) void {
+        const sv = s.served.?;
+        sv.ready(sv.ctx, s.id);
+    }
+
     /// Queues received bytes, failing the stream past the limit or when
     /// the machine's memory is used up. Called with `lock` held.
     fn queueLocked(s: *Stream, q: *Queue, bytes: []const u8) bool {
@@ -469,8 +569,14 @@ pub const Stream = struct {
 
 /// Makes a stream in the table with one reference, for the caller.
 fn newStream(owner: usize, conv: ?u8) ?*Stream {
+    return newStreamPages(owner, conv, kern.currentPages());
+}
+
+/// `newStream`, with the machine's pages given, for a thread that isn't
+/// one of its processes.
+fn newStreamPages(owner: usize, conv: ?u8, pages: ?*const kern.Pages) ?*Stream {
     const s = gpa.create(Stream) catch return null;
-    s.* = .{ .id = 0, .owner = owner, .conv = conv, .pages = kern.currentPages() };
+    s.* = .{ .id = 0, .owner = owner, .conv = conv, .pages = pages };
     lockTable();
     defer table_lock.unlock();
     for (&table, 0..) |*slot, i| {
@@ -542,6 +648,141 @@ pub fn release(id: u32) void {
     if (opens == 0) s.hangup(ws.Close.going_away, "");
     unref(s); // get's
     unref(s); // the maker's
+}
+
+/// Takes a connection a listener accepted, for the machine `owner`
+/// (design/0035-serve.md), and starts its thread, which does a WebSocket
+/// listener's handshake, waits for the first 9P message, and calls
+/// `served.ready` with the stream's id if the dialect slot takes it.
+/// `peer` is what `remote` says. The stream holds the connection from
+/// here, even on error.
+pub fn openAccepted(owner: usize, pages: ?*const kern.Pages, stream: net.Stream, peer: []const u8, served: *const Served) OpenError!void {
+    const s = newStreamPages(owner, null, pages) orelse {
+        stream.close(theIo());
+        return error.TooManyStreams;
+    };
+    s.mode = if (served.ws != null) .server else .raw;
+    s.served = served;
+    s.url = gpa.dupe(u8, peer) catch {
+        stream.close(theIo());
+        unref(s);
+        return error.OutOfMemory;
+    };
+    s.conn = Conn.create(stream) catch {
+        stream.close(theIo());
+        unref(s);
+        return error.OutOfMemory;
+    };
+    // A handshake that never comes ends at the keepalive's second period.
+    s.keepalive = .{ .idle_ns = keepalive_idle_ns, .last_rx = now() };
+    s.state.store(.connecting, .release);
+    lockTable();
+    s.refs += 1;
+    table_lock.unlock();
+    s.thread = web.Thread.spawn(.{}, runAccepted, .{s}) catch {
+        finish(s);
+        unref(s); // the thread's
+        unref(s); // the maker's
+        return error.SystemResources;
+    };
+    s.thread.?.detach();
+    if (s.mode == .server) startKeepalive();
+}
+
+/// An accepted stream's thread. The maker's reference is the thread's
+/// until the stream is announced, and `served.ready`'s after.
+fn runAccepted(s: *Stream) void {
+    const sv = s.served.?;
+    defer {
+        s.lockS();
+        const handed = s.announced;
+        s.lock.unlock();
+        sv.done(sv.ctx, handed);
+        if (!handed) unref(s); // the maker's
+        unref(s); // the thread's
+    }
+    if (s.mode == .server) acceptUpgrade(s, sv.ws.?) catch {
+        finish(s);
+        return;
+    };
+    s.lockS();
+    if (s.cancel or s.ended) {
+        s.lock.unlock();
+        finish(s);
+        return;
+    }
+    s.opened = true;
+    s.keepalive = .{ .idle_ns = keepalive_idle_ns, .last_rx = now() };
+    s.state.store(.established, .release);
+    s.lock.unlock();
+    wake(s.id);
+    if (s.mode == .raw) rawLoop(s) else readLoop(s);
+    finish(s);
+}
+
+/// A WebSocket listener's side of the handshake: reads the request,
+/// checks it (ws.checkUpgrade), and answers 101 or the refusal.
+fn acceptUpgrade(s: *Stream, pol: ws.ServerPolicy) error{Refused}!void {
+    const c = s.conn.?;
+    var q: ws.Request = .{};
+    ws.readRequest(c.reader(), &q) catch {
+        ws.writeStatus(c.writer(), 400, ws.reasonPhrase(400)) catch {};
+        c.flush() catch {};
+        s.fail("bad upgrade request", .{});
+        return error.Refused;
+    };
+    switch (ws.checkUpgrade(&q, pol)) {
+        .refuse => |st| {
+            ws.writeStatus(c.writer(), st, ws.reasonPhrase(st)) catch {};
+            c.flush() catch {};
+            s.fail("refused with {d}", .{st});
+            return error.Refused;
+        },
+        .accept => |p| {
+            ws.writeAccept(c.writer(), q.key, p) catch {
+                s.fail("i/o on hungup channel", .{});
+                return error.Refused;
+            };
+            c.flush() catch {
+                s.fail("i/o on hungup channel", .{});
+                return error.Refused;
+            };
+            s.lockS();
+            defer s.lock.unlock();
+            if (p) |name| {
+                @memcpy(s.selected[0..name.len], name);
+                s.selected_len = name.len;
+            }
+        },
+    }
+}
+
+/// Reads an accepted unix or TCP connection's bytes until it ends.
+fn rawLoop(s: *Stream) void {
+    const c = s.conn orelse return;
+    const r = c.reader();
+    while (true) {
+        if (r.bufferedLen() == 0) r.fillMore() catch |e| {
+            if (e == error.EndOfStream) {
+                s.lockS();
+                if (!s.ended) s.ended = true;
+                s.state.store(.closed, .release);
+                s.lock.unlock();
+                wake(s.id);
+                return;
+            }
+            return readFailed(s, e);
+        };
+        const b = r.buffered();
+        s.lockS();
+        const ok = s.queueLocked(&s.data, b);
+        const first = ok and s.firstLocked();
+        s.lock.unlock();
+        r.toss(b.len);
+        wake(s.id);
+        if (!ok) return;
+        if (first) s.announce();
+    }
 }
 
 /// Starts the stream's thread, which connects and then reads.
@@ -904,7 +1145,7 @@ fn now() i64 {
 fn readLoop(s: *Stream) void {
     const c = s.conn orelse return;
     const r = c.reader();
-    var rc: ws.Receiver = .{ .side = .client };
+    var rc: ws.Receiver = .{ .side = if (s.mode == .server) .server else .client };
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
     var buf: [4096]u8 = undefined;
@@ -948,12 +1189,15 @@ fn readLoop(s: *Stream) void {
                     off += n;
                     s.lockS();
                     const ok = s.queueLocked(&s.data, buf[0..n]);
+                    const first = ok and s.firstLocked();
                     s.lock.unlock();
                     if (!ok) return wake(s.id);
                     wake(s.id);
+                    if (first) s.announce();
                 }
             },
             .text => {
+                if (s.mode == .server) return protocolError(s, ws.Close.unsupported_data, "text message on a 9P stream");
                 if (s.conv == null) return protocolError(s, ws.Close.invalid_data, "text message on a 9P stream");
                 if (f.first) text.clearRetainingCapacity();
                 const at = text.items.len;
@@ -1027,8 +1271,14 @@ fn keepaliveLoop() void {
             };
             defer unref(s);
             s.lockS();
-            const act: ws.Keepalive.Action = if (s.state.load(.acquire) == .established and !s.ended) s.keepalive.tick(now()) else .none;
-            if (act == .fail) s.failLocked("i/o on hungup channel: the server stopped answering pings", .{});
+            const st = s.state.load(.acquire);
+            var act: ws.Keepalive.Action = if (st == .established and !s.ended and s.mode != .raw) s.keepalive.tick(now()) else .none;
+            // A listener's client that hasn't finished its handshake
+            // within two periods is dropped.
+            if (s.mode == .server and st == .connecting and !s.ended and now() - s.keepalive.last_rx >= 2 * @as(i64, @intCast(s.keepalive.idle_ns))) {
+                s.failLocked("the handshake timed out", .{});
+                act = .fail;
+            } else if (act == .fail) s.failLocked("i/o on hungup channel: {s} stopped answering pings", .{if (s.mode == .server) "the client" else "the server"});
             s.lock.unlock();
             switch (act) {
                 .none => {},

@@ -23,6 +23,7 @@ const consin = @import("consin.zig");
 const web = @import("web.zig");
 const hstream = @import("hstream.zig");
 const ws = @import("ws.zig");
+const serve = @import("serve.zig");
 const lsys = @import("linux/sys.zig");
 const lsig = @import("linux/signal.zig");
 const lexec = @import("linux/exec.zig");
@@ -116,6 +117,9 @@ pub const RunError = error{
     /// The machine's last run timed out and its process is still stuck in
     /// a host call, so the machine can't run another.
     Stuck,
+    /// A `--serve` listener couldn't listen (exit code 125); see `err_msg`
+    /// (design/0035-serve.md).
+    ServeFailed,
 } || kern.Error || vmm.CreateError || loader.Error;
 
 /// The built-in root `#Hroot` serves (design/0087-builtin-root.md): what it
@@ -164,6 +168,11 @@ pub const Machine = struct {
     /// Proxies for the connections the machine makes itself: a WebSocket
     /// root and namespace-file mounts. Guest connections always go direct.
     pub const Proxy = ws.ProxyConfig;
+
+    /// A `--serve` listener's address (design/0035-serve.md): a unix
+    /// socket's host path, `host!port` for TCP, or `host:port/path` from
+    /// a ws:// URL. Port 0 picks a free port.
+    pub const Listen = serve.Listen;
 
     pub const Options = struct {
         backend: vmm.BackendKind = .auto,
@@ -241,6 +250,19 @@ pub const Machine = struct {
         /// process can have it at a time; closing the window is a hangup.
         /// On macOS the program must run `h9.gfx.main` on its main thread.
         gfx: ?Gfx = null,
+        /// Listeners that serve the machine's namespace over 9P while a run
+        /// is in progress, each connection with its own exportfs
+        /// (design/0035-serve.md). With an empty `argv`, `run` only serves,
+        /// until a note ends it.
+        serve: []const Listen = &.{},
+        /// The guest path each connection exports.
+        serve_root: []const u8 = "/",
+        /// Required on WebSocket listeners when set.
+        serve_token: ?[]const u8 = null,
+        /// Origins WebSocket listeners accept; "*" for any.
+        serve_origins: []const []const u8 = &.{},
+        /// Export `/net` too; without it, clients don't see it.
+        serve_net: bool = false,
         stdio: Stdio,
     };
 
@@ -325,12 +347,33 @@ pub const Machine = struct {
     root_changes: RootChanges = .{},
     /// The machine's claim on the screen, with `Options.gfx`; in `arena`.
     gfx_claim: ?*gfx.Claim = null,
+    /// The listeners' bound addresses, once a run has opened them; in
+    /// `arena`.
+    serve_addrs: []const []const u8 = &.{},
+
+    /// Each `serve` listener's bound address, in the order given, with
+    /// port 0 resolved, once a run has opened them; empty before.
+    pub fn serving(m: *const Machine) []const []const u8 {
+        return m.serve_addrs;
+    }
 
     /// Compiles a policy for a machine with these options, as `init` does,
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
         var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .root_contained = opts.root_contained, .linux_root = opts.linux_root, .nameservers = opts.nameservers, .builtin = opts.builtin };
+        if (opts.serve.len > 0) {
+            const ls = try arena.alloc(policy.Serve.Listener, opts.serve.len);
+            for (ls, opts.serve) |*l, a| l.* = .{
+                .addr = try std.fmt.allocPrint(arena, "{f}", .{a}),
+                .kind = switch (a) {
+                    .unix => .unix,
+                    .tcp => .tcp,
+                    .ws => .ws,
+                },
+            };
+            in.serve = .{ .listeners = ls, .root = opts.serve_root, .token = opts.serve_token != null, .origins = opts.serve_origins, .net = opts.serve_net, .only = false };
+        }
         if (opts.builtin != .off) in.builtin_note = try builtin_root.describe(arena);
         if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
         if (opts.root) |r| switch (r) {
@@ -449,6 +492,40 @@ pub const Machine = struct {
     pub fn run(m: *Machine, prog: Program, argv: []const []const u8) RunError!Status {
         if (m.stuck) return error.Stuck;
         m.root_changes = .{};
+        // The listeners are bound before anything runs, so one that can't
+        // listen ends the run here (design/0035-serve.md, "Flags").
+        const srv: ?*serve.Server = if (m.opts.serve.len > 0) blk: {
+            var len: usize = 0;
+            const s = serve.open(m.gpa, m.io, .{
+                .listens = m.opts.serve,
+                .token = m.opts.serve_token,
+                .origins = m.opts.serve_origins,
+                .trace = m.opts.trace,
+            }, &m.msg_buf, &len) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.ServeFailed => {
+                    m.err_msg = m.msg_buf[0..len];
+                    return error.ServeFailed;
+                },
+            };
+            const a = m.arena.allocator();
+            const addrs = a.alloc([]const u8, s.serving().len) catch {
+                s.close();
+                return error.OutOfMemory;
+            };
+            for (addrs, s.serving()) |*d, src| d.* = a.dupe(u8, src) catch {
+                s.close();
+                return error.OutOfMemory;
+            };
+            m.serve_addrs = addrs;
+            // A port the host picked is printed, so a caller can find it.
+            for (m.opts.serve, addrs) |l, b| if (l.port() == 0) {
+                m.opts.stdio.err.print("serve: {s}\n", .{b}) catch {};
+                m.opts.stdio.err.flush() catch {};
+            };
+            break :blk s;
+        } else null;
+        defer if (srv) |s| s.close();
         // Heap-allocated, with its own copy of the machine, so a stuck
         // process never refers to the caller's Machine.
         const job = try m.gpa.create(Job);
@@ -456,7 +533,8 @@ pub const Machine = struct {
             m.gpa.destroy(job);
             return e;
         };
-        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool };
+        job.* = .{ .m = undefined, .mc = m.*, .prog = prog, .argv = argv, .con = .{ .in = null, .out = m.opts.stdio.out, .err = m.opts.stdio.err, .raw = m.opts.stdio.raw }, .pool = pool, .srv = srv };
+        if (srv) |s| s.cfg.trace_lock = &job.trace_lock;
         job.pool.gpa = m.gpa;
         job.ncpu = m.cpuCount();
         kern.setNoteKick(Proc.noteKick);
@@ -479,7 +557,7 @@ pub const Machine = struct {
             job.con_in = .{ .io = m.io, .src = src, .cancel = m.opts.stdio.in_cancel, .id = job.con_id, .wake = kern.wakeConsole };
             job.con.in = &job.con_in.?;
         }
-        const first = job.newProc() catch |e| {
+        const first = job.newProc(.program) catch |e| {
             kern.removeConsole(job.con_id);
             job.pool.deinit();
             m.gpa.destroy(job);
@@ -581,6 +659,16 @@ pub const Machine = struct {
         /// this is empty it stays empty.
         procs: std.ArrayList(*Proc) = .empty,
         next_pid: u32 = 1,
+        /// Of `procs`: the program's, and the server Proc and its
+        /// descendants, each counted against `--pids` on its own
+        /// (design/0035-serve.md, "Limits").
+        n_program: u32 = 0,
+        n_serving: u32 = 0,
+        /// The listeners, with `--serve` (design/0035-serve.md).
+        srv: ?*serve.Server = null,
+        /// The exportfs the server Proc runs, as a guest path.
+        exportfs_buf: [64]u8 = undefined,
+        exportfs: []const u8 = "",
         trace_lock: std.atomic.Mutex = .unlocked,
         /// vCPUs for the processes.
         pool: cpupool.Pool,
@@ -641,17 +729,37 @@ pub const Machine = struct {
             if (j.mach.load(.acquire)) |mc| _ = mc.post(to, msg);
         }
 
+        /// Whose a new process is: the program's, or serving's, and then
+        /// which connection's, if any (design/0035-serve.md).
+        const Owner = union(enum) {
+            program,
+            serving: ?*Conn,
+        };
+
         /// Allocates and registers a process with the next pid. Fails with
-        /// TooManyProcs at the policy's `--pids` cap.
-        fn newProc(j: *Job) error{ OutOfMemory, TooManyProcs }!*Proc {
+        /// TooManyProcs at the policy's `--pids` cap, which the program's
+        /// processes and serving's are each counted against, or at a
+        /// connection's cap.
+        fn newProc(j: *Job, owner: Owner) error{ OutOfMemory, TooManyProcs }!*Proc {
             const gpa = j.m.gpa;
             const p = try gpa.create(Proc);
             errdefer gpa.destroy(p);
             j.lockSpin();
             defer j.lock.unlock();
-            if (j.m.plan.pids) |cap| if (j.procs.items.len >= cap) return error.TooManyProcs;
+            const n = switch (owner) {
+                .program => &j.n_program,
+                .serving => &j.n_serving,
+            };
+            if (j.m.plan.pids) |cap| if (n.* >= cap) return error.TooManyProcs;
+            const conn: ?*Conn = switch (owner) {
+                .program => null,
+                .serving => |c| c,
+            };
+            if (conn) |c| if (c.live >= serve.conn_procs) return error.TooManyProcs;
             try j.procs.append(gpa, p);
-            p.* = .{ .job = j, .pid = j.next_pid };
+            n.* += 1;
+            if (conn) |c| c.live += 1;
+            p.* = .{ .job = j, .pid = j.next_pid, .serving = owner == .serving, .conn = conn };
             j.next_pid += 1;
             return p;
         }
@@ -663,8 +771,31 @@ pub const Machine = struct {
                 _ = j.procs.swapRemove(i);
                 break;
             };
+            const ended = j.uncount(p);
             j.lock.unlock();
+            if (ended) |c| j.connEnded(c);
             j.m.gpa.destroy(p);
+        }
+
+        /// Takes a leaving process out of the counts. Returns its
+        /// connection if it was the connection's last. Called with `lock`
+        /// held.
+        fn uncount(j: *Job, p: *Proc) ?*Conn {
+            if (!p.serving) {
+                j.n_program -= 1;
+                return null;
+            }
+            j.n_serving -= 1;
+            const c = p.conn orelse return null;
+            c.live -= 1;
+            return if (c.live == 0) c else null;
+        }
+
+        /// A connection's last process is gone: it's no longer counted
+        /// against the cap of 32.
+        fn connEnded(j: *Job, c: *Conn) void {
+            if (j.srv) |s| s.connEnded();
+            j.m.gpa.destroy(c);
         }
 
         /// Waits for the first process to exit, delivering host signals
@@ -715,6 +846,7 @@ pub const Machine = struct {
         /// kernel calls. Safe from any thread.
         fn stopAll(j: *Job) void {
             j.stopping.store(true, .release);
+            if (j.srv) |s| s.stop();
             // Host commands die with the machine. A process reading one's
             // output waits in a host read no interrupt reaches; this ends it.
             if (j.mach.load(.acquire)) |mc| mc.endHostCmds();
@@ -752,12 +884,27 @@ pub const Machine = struct {
         }
     };
 
+    /// One served connection (design/0035-serve.md): how many processes
+    /// its exportfs and their children have, up to `serve.conn_procs`.
+    /// Guarded by `Job.lock`; freed with its last process.
+    const Conn = struct {
+        live: u32 = 0,
+    };
+
     /// One guest process: a kernel process with its own host thread, an
     /// address space and segments, and a vCPU while it runs.
     const Proc = struct {
         job: *Job,
         /// Machine-local pid.
         pid: u32,
+        /// The server Proc or one of its descendants (design/0035-serve.md),
+        /// counted apart from the program's processes.
+        serving: bool = false,
+        /// The connection a serving process belongs to, if any.
+        conn: ?*Conn = null,
+        /// For a connection's first process: its stream's fd, which
+        /// becomes fds 0 and 1 before exportfs runs.
+        serve_fd: ?u31 = null,
         /// Set on the process's own thread; guarded by `job.lock`.
         kproc: ?*kern.Proc = null,
         /// How it runs guest code, while it does.
@@ -1065,7 +1212,9 @@ pub const Machine = struct {
                 break;
             };
             const empty = j.procs.items.len == 0;
+            const ended = j.uncount(p);
             j.lock.unlock();
+            if (ended) |c| j.connEnded(c);
             gpa.destroy(p);
             if (empty) j.all_done.set(io);
         }
@@ -1142,6 +1291,10 @@ pub const Machine = struct {
             j.track = .{ .ctx = j, .changed = Job.rootChanged };
             kern.overlayTrack(id, &j.track);
         }
+        // The server Proc gets a copy of the namespace as it is now, the
+        // plan's, before the program can change it (design/0035-serve.md).
+        if (j.srv != null) try m.startServer(p);
+        if (j.argv.len == 0 and j.srv != null) return serveOnly(j);
 
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
@@ -1221,6 +1374,142 @@ pub const Machine = struct {
         kern.setArgs(argv);
         if (text_path) |t| kern.setTextPath(arena.allocator().dupeZ(u8, t) catch null);
         return m.loop(p);
+    }
+
+    /// Forks the server Proc (design/0035-serve.md, "Each connection"):
+    /// a copy of the first Proc's namespace, without `/net` unless
+    /// `serve_net`, in a note group of its own, with no wait record for
+    /// the program to see. It runs no guest code; it takes each ready
+    /// stream and forks an exportfs for it.
+    fn startServer(m: *Machine, first: *Proc) RunError!void {
+        const j = first.job;
+        const p = j.newProc(.{ .serving = null }) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TooManyProcs => unreachable, // the cap is at least 1
+        };
+        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.ENVG | kern.RF.NOTEG | kern.RF.NOWAIT;
+        kern.fork(flags, p.pid, Proc, serverMain, p) catch {
+            j.dropProc(p);
+            return m.fail("serve: can't start the server process: {s}", .{kern.errstr()});
+        };
+    }
+
+    /// The server Proc's thread.
+    fn serverMain(p: *Proc) void {
+        const j = p.job;
+        const m = j.m;
+        kern.setPlan(&m.plan);
+        kern.setPages(&j.pages);
+        kern.setCpus(j.ncpu);
+        p.setKproc();
+        kern.setText("serve");
+        defer p.exit();
+        const srv = j.srv.?;
+        if (!m.opts.serve_net) kern.unmount(null, "/net") catch {};
+        // A root without 9front's binaries has the built-in root's.
+        var st: [512]u8 = undefined;
+        j.exportfs = if (kern.stat("/bin/exportfs", &st)) |_|
+            "/bin/exportfs"
+        else |_|
+            std.fmt.bufPrint(&j.exportfs_buf, "{s}/{s}/bin/exportfs", .{ policy.builtin_dev, m.arch.name() }) catch "/bin/exportfs";
+        const mc = kern.mach() orelse return;
+        const owner = @intFromPtr(mc);
+        mc.put();
+        srv.start(owner, kern.currentPages());
+        while (srv.next()) |id| {
+            m.serveConn(p, id);
+            if (j.stopping.load(.acquire)) break;
+        }
+    }
+
+    /// Forks an exportfs for a ready stream. Its fd is the child's until
+    /// it execs, when it becomes fds 0 and 1.
+    fn serveConn(m: *Machine, server: *Proc, id: u32) void {
+        const j = server.job;
+        const srv = j.srv.?;
+        const fd = kern.hstreamFd(id) catch {
+            hstream.release(id);
+            srv.connEnded();
+            return;
+        };
+        hstream.release(id);
+        defer kern.close(fd) catch {};
+        const conn = m.gpa.create(Conn) catch {
+            srv.connEnded();
+            return;
+        };
+        conn.* = .{};
+        const c = j.newProc(.{ .serving = conn }) catch {
+            m.gpa.destroy(conn);
+            srv.connEnded();
+            return;
+        };
+        c.serve_fd = fd;
+        const flags = kern.RF.PROC | kern.RF.NAMEG | kern.RF.FDG | kern.RF.NOWAIT;
+        // On failure dropProc ends the connection, as its last process.
+        kern.fork(flags, c.pid, Proc, exportfsMain, c) catch j.dropProc(c);
+    }
+
+    /// A connection's first process: puts the stream on fds 0 and 1 and
+    /// runs `exportfs -r ROOT`, with `-R` under `--write=none`, as
+    /// listen(8) does for a network service.
+    fn exportfsMain(p: *Proc) void {
+        const j = p.job;
+        const m = j.m;
+        kern.setPlan(&m.plan);
+        kern.setPages(&j.pages);
+        kern.setCpus(j.ncpu);
+        p.setKproc();
+        const st = m.startExportfs(p) catch |e| Status{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: exportfs: {t}", .{e}) catch "h9: error" };
+        setExits(switch (st) {
+            .exited => |t| t,
+            .killed => |t| t,
+        });
+        p.exit();
+    }
+
+    fn startExportfs(m: *Machine, p: *Proc) RunError!Status {
+        const j = p.job;
+        const fd = p.serve_fd.?;
+        _ = try kern.dup(fd, 0);
+        _ = try kern.dup(fd, 1);
+        try kern.close(fd);
+        var arena: std.heap.ArenaAllocator = .init(m.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.append(a, "exportfs");
+        if (m.plan.write == .none) try argv.append(a, "-R");
+        try argv.appendSlice(a, &.{ "-r", m.opts.serve_root });
+        const path = try a.dupeZ(u8, j.exportfs);
+        const bytes = readFile(a, path) catch |e| {
+            return .{ .killed = std.fmt.bufPrint(&p.msg_buf, "h9: {s}: {t}", .{ j.exportfs, e }) catch "h9: no exportfs" };
+        };
+        if (elf.isElf(bytes)) return .{ .killed = "h9: exportfs isn't a 9front binary" };
+        const hdr = aout.parse(bytes) catch return .{ .killed = "h9: exportfs: " ++ ebadexec };
+        if (hdr.arch != m.arch) return .{ .killed = "h9: exportfs: wrong architecture" };
+        kern.setText("exportfs");
+        p.as = try m.backend.newAddressSpace();
+        const img = try loader.load(m.gpa, m.backend, p.as.?, bytes, argv.items, p.pid);
+        p.segs.replace(p.as.?, img.segs);
+        p.tos = img.tos;
+        p.ureg = .initExec(img.arch, img.entry, img.sp, img.tos);
+        p.extra = .initExec(img.arch);
+        p.keepImage(bytes);
+        p.initSys();
+        p.noteMem();
+        kern.setArgs(argv.items);
+        kern.setTextPath(path);
+        return m.loop(p);
+    }
+
+    /// A run with `serve` and no program: the first Proc sleeps in the
+    /// kernel until a note (an interrupt, a hangup, the timeout) ends it,
+    /// and the run exits 0, as a server its operator stops does.
+    fn serveOnly(j: *Job) RunError!Status {
+        kern.setText("serve");
+        while (!j.stopping.load(.acquire)) kern.sleep(60_000) catch break;
+        return .{ .exited = "" };
     }
 
     /// A forked process's thread.
@@ -2171,7 +2460,7 @@ pub const Machine = struct {
         const thread = cl.flags & lsys.CLONE_THREAD != 0;
         const share = cl.flags & lsys.CLONE_VM != 0;
         const j = p.job;
-        const c = j.newProc() catch return -attr.E.AGAIN;
+        const c = j.newProc(if (p.serving) .{ .serving = p.conn } else .program) catch return -attr.E.AGAIN;
         const cx = m.gpa.create(lsys.Process) catch {
             j.dropProc(c);
             return -attr.E.NOMEM;
@@ -2474,7 +2763,7 @@ pub const Machine = struct {
         }
         const j = p.job;
         // 9front's error when it runs out of procs.
-        const c = j.newProc() catch return failWith("no procs");
+        const c = j.newProc(if (p.serving) .{ .serving = p.conn } else .program) catch return failWith("no procs");
         const cas = m.backend.newAddressSpace() catch {
             j.dropProc(c);
             return failWith("no procs");
@@ -2988,6 +3277,16 @@ pub const Machine = struct {
         // the CPUs the machine may use (design/0010-self-host.md).
         var nproc_buf: [16]u8 = undefined;
         try putEnv("NPROC", std.fmt.bufPrint(&nproc_buf, "{d}", .{m.cpuCount()}) catch unreachable);
+        // The listeners' bound addresses, an rc list (design/0035-serve.md).
+        if (m.serve_addrs.len > 0) {
+            var list: std.ArrayList(u8) = .empty;
+            defer list.deinit(m.gpa);
+            for (m.serve_addrs) |a| {
+                try list.appendSlice(m.gpa, a);
+                try list.append(m.gpa, 0);
+            }
+            try putEnv("serve", list.items);
+        }
         for (m.opts.env) |e| try putEnv(e.name, e.value);
     }
 

@@ -7,6 +7,7 @@ const policy = @import("h9").policy;
 const ws = @import("h9").ws;
 const RootChanges = @import("h9").RootChanges;
 const gfx = @import("h9").gfx;
+const serve = @import("h9").serve;
 
 pub const usage =
     \\usage: h9 [--backend auto|hvf|kvm|whp|native|emu] [--arch arm64|amd64|386]
@@ -20,10 +21,14 @@ pub const usage =
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
     \\           [--ns FILE] [--host-fs] [--host-cmd] [--no-guest-tools]
     \\           [--gfx[=noclip]] [--gfx-scale N]
+    \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
+    \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
+    \\           [--serve-net]
     \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
     \\       h9 [flags] --rc
+    \\       h9 [flags] --serve ADDR...
     \\       h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] [--builtin MODE] [--memory SIZE] --check
     \\       h9 --version
     \\       h9 --help
@@ -105,6 +110,16 @@ pub const Config = struct {
     gfx: ?gfx.Options = null,
     strict: bool = false,
     print: bool = false,
+    /// --serve addresses, checked (design/0035-serve.md).
+    serve: []const []const u8 = &.{},
+    /// --serve-root: the guest path each connection exports.
+    serve_root: ?[]const u8 = null,
+    /// --serve-token: `@FILE`, the token's host file.
+    serve_token: ?[]const u8 = null,
+    /// --serve-origin values.
+    serve_origins: []const []const u8 = &.{},
+    /// --serve-net: export /net too.
+    serve_net: bool = false,
     /// --rc: the command line for /bin/rc -c.
     rc: ?[]const u8 = null,
     /// --rc as the last argument: a login rc, which runs the root's
@@ -141,6 +156,8 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var read_deny: std.ArrayList([]const u8) = .empty;
     var net_allow: std.ArrayList([]const u8) = .empty;
     var root_headers: std.ArrayList([]const u8) = .empty;
+    var serve_addrs: std.ArrayList([]const u8) = .empty;
+    var serve_origins: std.ArrayList([]const u8) = .empty;
     var gfx_scale: ?u8 = null;
     // Long flags only (DESIGN.md, "Parsing rules"); -h is accepted alone,
     // where it can't be a program's flag.
@@ -174,6 +191,25 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             return error.Usage;
         } else if (value(args, &i, "--gfx-scale")) |v| {
             gfx_scale = std.fmt.parseInt(u8, v orelse return error.Usage, 10) catch return error.Usage;
+        } else if (flag(a, "--serve-net")) {
+            c.serve_net = true;
+        } else if (value(args, &i, "--serve-root")) |v| {
+            const r = v orelse return error.Usage;
+            if (r.len == 0 or r[0] != '/') return error.Usage;
+            c.serve_root = r;
+        } else if (value(args, &i, "--serve-token")) |v| {
+            // Only from a file, so the token isn't in the process listing.
+            const tok = v orelse return error.Usage;
+            if (tok.len < 2 or tok[0] != '@') return error.Usage;
+            c.serve_token = tok;
+        } else if (value(args, &i, "--serve-origin")) |v| {
+            const o = v orelse return error.Usage;
+            if (o.len == 0) return error.Usage;
+            try serve_origins.append(gpa, o);
+        } else if (value(args, &i, "--serve")) |v| {
+            const addr = v orelse return error.Usage;
+            _ = serve.Listen.parse(addr) catch return error.Usage;
+            try serve_addrs.append(gpa, addr);
         } else if (flag(a, "--root-contained")) {
             c.root_contained = true;
         } else if (flag(a, "--strict")) {
@@ -268,11 +304,19 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         if (c.host_fs or c.host_cmd or c.cwd != null) return error.Usage;
         c.profile = .tight;
     }
+    // The --serve flags apply to a --serve (design/0035-serve.md), and
+    // any origin needs the token, or every page could mount the machine.
+    const serving = serve_addrs.items.len > 0;
+    if (!serving and (c.serve_root != null or c.serve_token != null or serve_origins.items.len > 0 or c.serve_net)) return error.Usage;
+    for (serve_origins.items) |o| if (std.mem.eql(u8, o, "*") and c.serve_token == null) return error.Usage;
     // The tool functions take no program, so `h9 --check ls` is a mistake.
+    // No program is a run that only serves, with --serve.
     const rc = c.rc != null or c.rc_login;
     if (c.mode != .run) {
-        if (rc or i < args.len) return error.Usage;
-    } else if (!rc and i >= args.len) return error.Usage;
+        if (rc or i < args.len or serving) return error.Usage;
+    } else if (!rc and i >= args.len and !serving) return error.Usage;
+    c.serve = try serve_addrs.toOwnedSlice(gpa);
+    c.serve_origins = try serve_origins.toOwnedSlice(gpa);
     c.env = try env.toOwnedSlice(gpa);
     c.readable = try readable.toOwnedSlice(gpa);
     c.writable = try writable.toOwnedSlice(gpa);
@@ -850,6 +894,37 @@ test "--pids, --cpus and --ns" {
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--pids", "0", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--cpus", "x", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--ns" }));
+}
+
+test "--serve and its flags [serve]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try parse(a, &.{ "h9", "--serve", "unix!/tmp/h9.sock", "--serve=tcp!127.0.0.1!0", "--serve-root", "/usr", "--serve-net", "ls" });
+    try t.expectEqual(@as(usize, 2), c.serve.len);
+    try t.expectEqualStrings("tcp!127.0.0.1!0", c.serve[1]);
+    try t.expectEqualStrings("/usr", c.serve_root.?);
+    try t.expect(c.serve_net);
+    try t.expectEqualStrings("ls", c.argv[0]);
+    // No program serves only; without --serve it's still an error.
+    const only = try parse(a, &.{ "h9", "--serve", "ws://127.0.0.1:8080/9p", "--serve-token", "@tok", "--serve-origin", "*", "--serve-origin", "https://app.example" });
+    try t.expectEqual(@as(usize, 0), only.argv.len);
+    try t.expectEqualStrings("@tok", only.serve_token.?);
+    try t.expectEqual(@as(usize, 2), only.serve_origins.len);
+    try t.expectError(error.Usage, parse(a, &.{"h9"}));
+    for ([_][]const []const u8{
+        &.{ "h9", "--serve", "/tmp/sock", "ls" },
+        &.{ "h9", "--serve", "wss://h:1/", "ls" },
+        &.{ "h9", "--serve", "ws://:8080/", "ls" },
+        &.{ "h9", "--serve-root", "/", "ls" },
+        &.{ "h9", "--serve-net", "ls" },
+        &.{ "h9", "--serve-token", "@f", "ls" },
+        &.{ "h9", "--serve-origin", "https://x", "ls" },
+        &.{ "h9", "--serve", "tcp!h!1", "--serve-token", "plain", "ls" },
+        &.{ "h9", "--serve", "tcp!h!1", "--serve-origin", "*", "ls" },
+        &.{ "h9", "--serve", "tcp!h!1", "--serve-root", "rel", "ls" },
+        &.{ "h9", "--serve", "tcp!h!1", "--check" },
+    }) |bad| try t.expectError(error.Usage, parse(a, bad));
 }
 
 test "--check and --version" {

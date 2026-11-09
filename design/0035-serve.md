@@ -243,3 +243,15 @@ Demos:
 - **A memory cap for serving.** Serving shares `--memory` with the program. If untrusted clients make that a problem in practice, a `--serve-memory` share is the likely fix.
 
 Follow-ups recorded elsewhere: 9P authentication for served TCP in [root-auth](root-auth.md)'s open issues, and serving to the page over a `MessagePort` in [browser-host](0012-browser-host.md)'s updates.
+
+## Updates
+
+**2026-11-09, implementation.** Refinements found while building it:
+
+- `Machine.Options` also has `serve_net: bool`, for `--serve-net`, which the sketch above leaves out.
+- There's no test-only stream source (Implementation, step 1). The listeners were built in the same change, so the integration cases drive the per-connection path through real sockets instead.
+- The server Proc chooses the exportfs when it starts, by whether `/bin/exportfs` exists in its namespace, so the plan can't know which one runs. The `serve:` heading's comment names both (`# /bin/exportfs, or #Hroot/amd64/bin/exportfs without one`), and each listener's line shows `-R` under `--write=none`.
+- A WebSocket client that connects but hasn't finished its handshake after two keepalive periods (60 s) is dropped, so an idle socket can't hold one of the 32 slots.
+- The 503 for a WebSocket connection past the cap is written after reading the request, on a short-lived thread, at most 4 at once; past that, the connection is just closed.
+- `--serve-token`'s file holds one token, with surrounding whitespace trimmed; a token with spaces in it is a usage error, and a missing file is exit 125.
+- A unix socket is created mode 0600 (under a umask of 0177, then `chmod`), like its lock file.
