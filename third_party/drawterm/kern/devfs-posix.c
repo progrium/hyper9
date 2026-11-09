@@ -47,6 +47,65 @@ ownpath(Ufsinfo *uif)
 	return uif->lpath != nil ? uif->lpath : uif->path;
 }
 
+
+#if defined(__wasi__)
+/*
+ * h9: WASI has no permission bits: every file stats as 0775 and chmod
+ * fails. Programs that check what they set (PostgreSQL wants its data
+ * directory 0700 or 0750) need the mode back, so the web host remembers
+ * the permission bits a create or wstat gave each file, by inode, for
+ * the life of the machine.
+ */
+typedef struct Wmode Wmode;
+struct Wmode {
+	dev_t	dev;
+	ino_t	ino;
+	int	mode;
+	Wmode	*next;
+};
+static Wmode *wmodes[256];
+
+static Wmode**
+wmodeslot(struct stat *st)
+{
+	return &wmodes[((unsigned long)st->st_ino ^ (unsigned long)st->st_dev) & 255];
+}
+
+static void
+wmodeset(struct stat *st, int mode)
+{
+	Wmode *w;
+
+	for(w = *wmodeslot(st); w != nil; w = w->next)
+		if(w->ino == st->st_ino && w->dev == st->st_dev){
+			w->mode = mode & 0777;
+			return;
+		}
+	w = malloc(sizeof *w);
+	if(w == nil)
+		return;
+	w->dev = st->st_dev;
+	w->ino = st->st_ino;
+	w->mode = mode & 0777;
+	w->next = *wmodeslot(st);
+	*wmodeslot(st) = w;
+}
+
+static int
+wmodeof(struct stat *st)
+{
+	Wmode *w;
+
+	for(w = *wmodeslot(st); w != nil; w = w->next)
+		if(w->ino == st->st_ino && w->dev == st->st_dev)
+			return w->mode;
+	return st->st_mode & 0777;
+}
+#define	STMODE(st)	wmodeof(st)
+#else
+#define	STMODE(st)	((st)->st_mode&0777)
+#endif
+
 static	Qid	fsqid(struct stat *);
 static	char*	catpath(char*, char*);
 static	ulong	fsdirread(Chan*, uchar*, int, ulong);
@@ -338,7 +397,7 @@ fsstat(Chan *c, uchar *buf, int n)
 	d.gid = eve;
 	d.muid = eve;
 	d.qid = c->qid;
-	d.mode = (c->qid.type<<24)|(stbuf.st_mode&0777);
+	d.mode = (c->qid.type<<24)|STMODE(&stbuf);
 	d.atime = stbuf.st_atime;
 	d.mtime = stbuf.st_mtime;
 	d.length = stbuf.st_size;
@@ -501,6 +560,10 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 		if(fstat(fd, &stbuf) < 0)
 			error(strerror(errno));
 	}
+#if defined(__wasi__)
+	/* The parent's mode has no permission bits to inherit here. */
+	wmodeset(&stbuf, perm & 0777);
+#endif
 	c->qid = fsqid(&stbuf);
 	uif->fd = fd;
 	uif->dir = dir;
@@ -734,11 +797,15 @@ fswstat(Chan *c, uchar *buf, int n)
 	 * leave truncate until last.
 	 * (see above comment about atomicity).
 	 */
-	if(~d.mode != 0 && (int)(d.mode&0777) != (int)(stbuf.st_mode&0777)) {
+	if(~d.mode != 0 && (int)(d.mode&0777) != STMODE(&stbuf)) {
 		if(wfd < 0)
 			error(strerror(ENOENT));
+#if defined(__wasi__)
+		wmodeset(&stbuf, d.mode);
+#else
 		if(fchmod(wfd, d.mode&0777) < 0)
 			error(strerror(errno));
+#endif
 		uif->mode &= ~0777;
 		uif->mode |= d.mode&0777;
 	}
@@ -945,7 +1012,7 @@ fsdirread(Chan *c, uchar *va, int count, ulong offset)
 		d.gid = eve;
 		d.muid = eve;
 		d.qid = fsqid(&stbuf);
-		d.mode = (d.qid.type<<24)|(stbuf.st_mode&0777);
+		d.mode = (d.qid.type<<24)|STMODE(&stbuf);
 		d.atime = stbuf.st_atime;
 		d.mtime = stbuf.st_mtime;
 		d.length = stbuf.st_size;

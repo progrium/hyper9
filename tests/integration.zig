@@ -5317,6 +5317,23 @@ test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fo
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
 }
 
+test "a mode set by mkdir, creat, or chmod reads back, as databases check of their data directories [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // PostgreSQL won't start unless its data directory is 0700 or 0750.
+    // The web host's WASI has no permission bits, so devfs keeps them.
+    const script =
+        \\umask 077; mkdir /tmp/d; touch /tmp/d/f
+        \\stat -c %a /tmp/d /tmp/d/f
+        \\chmod 750 /tmp/d; chmod 640 /tmp/d/f
+        \\stat -c %a /tmp/d /tmp/d/f
+    ;
+    const r = try runLinux(&le, false, &.{ "sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("700\n600\n750\n640\n", r.out);
+}
+
 test "9front and Linux programs share pipelines both ways (demo) [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
