@@ -69,7 +69,7 @@ Complete corresponding source for h9-emu $version
   third_party/unicorn/patches already applied. Its own licence files
   (COPYING, COPYING.LGPL2, COPYING_GLIB, qemu/LICENSE) are in that directory.
 
-Build with Zig $(zig version) (see README.md); for example:
+Build with Zig $(zig version) (see DEVELOPING.md); for example:
 
   zig build -Doptimize=ReleaseSafe -Demu=unicorn -Dunicorn=source -Dversion=$version -Dtarget=aarch64-linux-musl
 
