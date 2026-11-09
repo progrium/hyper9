@@ -1108,6 +1108,17 @@ extern "ws2_32" fn setsockopt(s: net.Socket.Handle, level: i32, optname: i32, op
 
 /// Connects to `host`, a name or a literal address.
 fn dial(io: Io, host: []const u8, port: u16) !net.Stream {
+    if (builtin.os.tag != .windows) return dialHost(io, host, port);
+    return dialHost(io, host, port) catch |e| switch (e) {
+        // Zig 0.16's Windows connect reports a refused connection, the
+        // usual reason one fails, as an unexpected NTSTATUS; name it so
+        // the machine's error says what happened.
+        error.Unexpected => error.ConnectionRefused,
+        else => e,
+    };
+}
+
+fn dialHost(io: Io, host: []const u8, port: u16) !net.Stream {
     if (net.IpAddress.parse(host, port)) |a| return a.connect(io, .{ .mode = .stream }) else |_| {}
     const hn = try net.HostName.init(host);
     return hn.connect(io, port, .{ .mode = .stream });
