@@ -15,6 +15,7 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
@@ -654,6 +655,69 @@ static void unlinked(void) {
 	printf("ok unlinked\n");
 }
 
+/* WebKit's out-of-line IPC messages: the sender fills a memfd (or an
+ * unlinked shm_open file), passes it with SCM_RIGHTS, and unmaps and
+ * closes its copy before the receiver maps it. The data stays with the
+ * file, which only the passed fd still names. */
+static int pass_fd(int s, int fd) {
+	char d = 'm', cb[CMSG_SPACE(sizeof(int))] = {0};
+	struct iovec v = {&d, 1};
+	struct msghdr h = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+	struct cmsghdr *c = CMSG_FIRSTHDR(&h);
+	c->cmsg_level = SOL_SOCKET, c->cmsg_type = SCM_RIGHTS, c->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(c), &fd, sizeof fd);
+	return sendmsg(s, &h, 0);
+}
+
+static int take_fd(int s) {
+	char d, cb[CMSG_SPACE(sizeof(int))];
+	struct iovec v = {&d, 1};
+	struct msghdr h = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+	int fd = -1;
+	if (recvmsg(s, &h, 0) != 1 || CMSG_FIRSTHDR(&h) == NULL) return -1;
+	memcpy(&fd, CMSG_DATA(CMSG_FIRSTHDR(&h)), sizeof fd);
+	return fd;
+}
+
+static void shm_pass(void) {
+	int sv[2];
+	CHECK("shm_pass", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+	pid_t c = fork();
+	if (c == 0) {
+		close(sv[0]);
+		for (int k = 0; k < 2; k++) {
+			int fd = take_fd(sv[1]);
+			struct stat st;
+			if (fd < 0 || fstat(fd, &st) != 0 || st.st_size != 11656) _exit(1);
+			char *m = mmap(0, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+			if (m == MAP_FAILED) _exit(2);
+			if (strcmp(m + 8000, k ? "via shm_open" : "via memfd") != 0) _exit(3 + k);
+			munmap(m, st.st_size), close(fd);
+		}
+		_exit(0);
+	}
+	close(sv[1]);
+	for (int k = 0; k < 2; k++) {
+		int fd;
+		if (k == 0) fd = memfd_create("h9test", MFD_CLOEXEC);
+		else {
+			char name[32];
+			snprintf(name, sizeof name, "/h9test.%d", getpid());
+			fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+			shm_unlink(name);
+		}
+		CHECK("shm_pass", fd >= 0 && ftruncate(fd, 11656) == 0);
+		char *m = mmap(0, 11656, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		CHECK("shm_pass", m != MAP_FAILED);
+		strcpy(m + 8000, k ? "via shm_open" : "via memfd");
+		CHECK("shm_pass", pass_fd(sv[0], fd) == 1);
+		CHECK("shm_pass", munmap(m, 11656) == 0 && close(fd) == 0);
+	}
+	CHECK("shm_pass", child_status(c) == 0);
+	close(sv[0]);
+	printf("ok shm_pass\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -681,6 +745,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "creds")) creds();
 		if (all || !strcmp(n, "many_fds")) many_fds();
 		if (all || !strcmp(n, "unlinked")) unlinked();
+		if (all || !strcmp(n, "shm_pass")) shm_pass();
 	}
 	return failed;
 }

@@ -5527,6 +5527,12 @@ test "an open file survives unlink for ftruncate, fstat, and mmap, and memfd_cre
     try netCase(&le, &.{ "/mnt/term/cwd/files", "unlinked" }, "ok unlinked\n");
 }
 
+test "a memfd passed with SCM_RIGHTS keeps its data after the sender unmaps and closes it [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "shm_pass" }, "ok shm_pass\n");
+}
+
 // Readiness and sockets (design/0050-linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 
@@ -5778,6 +5784,12 @@ test "/proc lists a thread group once, with its threads under task, and statm re
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "proc_threads");
+}
+
+test "/proc/meminfo counts a process's memory once however many threads it has [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "meminfo_threads");
 }
 
 test "Go os/exec waits for a child from another thread, and RemoveAll empties a /tmp directory [49]" {
