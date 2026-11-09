@@ -32,6 +32,12 @@ h9so_connect_nb(int fd, unsigned char *raddr, unsigned short rport)
 }
 
 void
+h9so_close(int fd)
+{
+	USED(fd);
+}
+
+void
 h9so_shutdown(int fd, char *how)
 {
 	USED(fd, how);

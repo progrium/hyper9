@@ -373,7 +373,7 @@ ipopen(Chan *c, int omode)
 		sfd = so_accept(lcv->sfd, raddr, &rport);
 		cv = protoclone(p, up->user, sfd);
 		if(cv == 0) {
-			close(sfd);
+			h9so_close(sfd);	/* h9: closesocket on Windows */
 			error(Enodev);
 		}
 		ipmove(cv->raddr, raddr);
@@ -412,7 +412,7 @@ ipclose(Chan *c)
 		ipzero(cc->raddr);
 		cc->lport = 0;
 		cc->rport = 0;
-		close(cc->sfd);
+		h9so_close(cc->sfd);	/* h9: closesocket on Windows */
 		cc->sfd = -1;	/* h9: not closed twice, nor watched once closed */
 		memset(cc->h9opts, 0, sizeof cc->h9opts);
 		break;
