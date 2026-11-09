@@ -1,1 +1,7 @@
 design/STATUS.md linguist-generated=true
+
+# LF everywhere, Windows checkouts too (core.autocrlf would otherwise give
+# CRLF): rc scripts, mkfiles and test fixtures go into 9front guests byte
+# for byte. Vendored trees keep the bytes upstream has.
+* text=auto eol=lf
+third_party/** -text
