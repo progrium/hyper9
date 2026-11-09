@@ -28,6 +28,38 @@
 
 /*
  * Connects to the unix-domain socket at the host path `path` and returns
+ * a devlfd channel for it. Raises errors.
+ */
+Chan*
+h9_unixchan(char *path)
+{
+#if defined(WINDOWS) || defined(H9_WEB)
+	USED(path);
+	error("unix socket roots need a POSIX host");
+	return nil;
+#else
+	struct sockaddr_un sa;
+	int s;
+
+	memset(&sa, 0, sizeof sa);
+	sa.sun_family = AF_UNIX;
+	if(strlen(path) >= sizeof sa.sun_path)
+		error("socket path too long");
+	strcpy(sa.sun_path, path);
+	s = socket(AF_UNIX, SOCK_STREAM, 0);
+	if(s < 0)
+		oserror();
+	if(connect(s, (struct sockaddr*)&sa, sizeof sa) < 0){
+		close(s);
+		oserror();
+	}
+	/* closing the channel closes s (devlfd's lfdclose) */
+	return lfdchan((void*)(uintptr)s);
+#endif
+}
+
+/*
+ * Connects to the unix-domain socket at the host path `path` and returns
  * a new fd on a devlfd channel for it; or -1 with the error string set.
  */
 int
@@ -42,37 +74,12 @@ h9_unixdial(char *path)
 		up->errstr = p;
 		return -1;
 	}
-#if defined(WINDOWS) || defined(H9_WEB)
-	USED(path);
-	USED(c);
-	fd = -1;
-	error("unix socket roots need a POSIX host");
-#else
-	{
-		struct sockaddr_un sa;
-		int s;
-
-		memset(&sa, 0, sizeof sa);
-		sa.sun_family = AF_UNIX;
-		if(strlen(path) >= sizeof sa.sun_path)
-			error("socket path too long");
-		strcpy(sa.sun_path, path);
-		s = socket(AF_UNIX, SOCK_STREAM, 0);
-		if(s < 0)
-			oserror();
-		if(connect(s, (struct sockaddr*)&sa, sizeof sa) < 0){
-			close(s);
-			oserror();
-		}
-		/* closing the channel closes s (devlfd's lfdclose) */
-		c = lfdchan((void*)(uintptr)s);
-		fd = newfd(c, 0);
-		if(fd < 0){
-			cclose(c);
-			error(Enofd);
-		}
+	c = h9_unixchan(path);
+	fd = newfd(c, 0);
+	if(fd < 0){
+		cclose(c);
+		error(Enofd);
 	}
-#endif
 	poperror();
 	return fd;
 }

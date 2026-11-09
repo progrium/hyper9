@@ -10,9 +10,10 @@
  *
  *	dotl/clone	opening it makes a conversation and opens its ctl
  *	dotl/N/ctl	fd N: the caller's fd N is the server connection;
- *			dial ADDR[,ADDR...]: dial the first that answers,
- *			and again on a drop if the server speaks
- *			9P2000.L.Z; version 9P2000.L: don't offer .L.Z;
+ *			dial ADDR[,ADDR...]: dial the first that answers
+ *			(tcp!, or unix! for h9's own root dials), and
+ *			again on a drop if the server speaks 9P2000.L.Z;
+ *			version 9P2000.L: don't offer .L.Z;
  *			reads give N
  *	dotl/N/data	9P2000, for devmnt
  *	dotl/N/status	the dialect: negotiating, 9P2000, 9P2000.L,
@@ -58,6 +59,7 @@ extern void	h9_kprocdetach(void);
 
 /* src/kern.zig: the calling thread's sandbox plan. */
 extern void	*h9_plan_get(void);
+extern Chan	*h9_unixchan(char *path);
 extern void	h9_plan_set(void *plan);
 
 /* Implemented in Zig (src/dotl/kern.zig). */
@@ -329,6 +331,15 @@ dialaddr(char *addr)
 	char *sp;
 	long n;
 
+	/*
+	 * A host unix socket, only for a dial h9 makes itself (a root's),
+	 * which runs with no plan: a guest has no way to the host's sockets.
+	 */
+	if(strncmp(addr, "unix!", 5) == 0){
+		if(h9_plan_get() != nil)
+			error("dial: unix sockets are for roots");
+		return h9_unixchan(addr+5);
+	}
 	if(strncmp(addr, "tcp!", 4) != 0 && strncmp(addr, "net!", 4) != 0)
 		error("dial: only tcp addresses");
 	cs = namec("#I/cs", Aopen, ORDWR, 0);

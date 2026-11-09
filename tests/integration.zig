@@ -7234,3 +7234,44 @@ test "a 9P2000.L.Z mount moves to the next address when the server isn't the lea
     try std.testing.expectEqualStrings("led\n9P2000.L.Z reconnects 1\n", r.out);
     try std.testing.expectEqual(2, d.connections.load(.acquire));
 }
+
+test "a .L.Z unix socket root survives the server restarting mid-write [22]" {
+    if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    } };
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlRootTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    d.lock().drop_after_write = 0;
+    d.unlock();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    var relay: UnixRelay = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    try relay.start(sock, d.port());
+    const r = try run(e, &.{
+        "--root", try std.fmt.bufPrint(&ab, "unix!{s}", .{sock}), "--write=scope", "--builtin=off", "--rc",
+        \\echo new >/usr/glenda/made && cat /usr/glenda/made
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n9P2000.L.Z reconnects 1\n", r.out);
+}
+
+test "the guest can't dial a host unix socket through #ℓ [22]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--rc", "{ n=`{cat}; echo dial unix!/tmp/x.sock >/net/dotl/$n/ctl } <>/net/dotl/clone" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(r.code != 0);
+    try expectIn(r.err, "unix sockets are for roots");
+}
