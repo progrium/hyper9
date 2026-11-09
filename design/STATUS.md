@@ -54,6 +54,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [host-sandbox](host-sandbox.md) | draft | needs kvm, whp | Host self-sandboxing |
 | [host-scripts](host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](host-srv.md) | draft |  | Posting host connections to /srv |
+| [mount-index](mount-index.md) | draft |  | Metadata indexes for 9P roots and mounts |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
 
@@ -111,6 +112,7 @@ flowchart LR
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_host_scripts["host-scripts<br/>draft"]:::draft
   p_host_srv["host-srv<br/>draft"]:::draft
+  p_mount_index["mount-index<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
   p_semaphores --> p_go_compat
@@ -164,6 +166,9 @@ flowchart LR
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
   p_9p_roots --> p_host_srv
+  p_9p_roots --> p_mount_index
+  p_websocket_9p --> p_mount_index
+  p_guest_tools --> p_mount_index
   p_ephemeral_writes --> p_overlay_export
   p_9p_roots --> p_root_auth
 ```
