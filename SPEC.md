@@ -190,7 +190,7 @@ A backend that can't run the binary's architecture fails with `WrongArch`; HVF r
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
-The interface was shaped around all three hypervisors, so the table and rules below cover WHP as well. HVF and KVM ([kvm](design/0016-kvm.md)) are built. WHP is built for Windows x86\_64 but incomplete, and [whp](design/0017-whp.md) is still a draft (see WHP below).
+The interface was shaped around all three hypervisors, so the table and rules below cover WHP as well. HVF, KVM ([kvm](design/0016-kvm.md)), and WHP ([whp](design/0017-whp.md)) on Windows x86\_64 are built; WHP on Windows on ARM isn't yet (see WHP below).
 
 | Operation | macOS: Hypervisor.framework | Linux: KVM | Windows: WHP |
 | --- | --- | --- | --- |
@@ -231,7 +231,7 @@ FP state goes through `KVM_{GET,SET}_XSAVE`, whose first 512 bytes are FXSAVE's 
 
 ### WHP
 
-The WHP backend (`src/vmm/whp.zig`, Windows x86\_64 only) is built but incomplete. It runs KVM's amd64 shim, page tables, and CPU state (`x86.zig`, `pt_amd64.zig`), setting the state through `WHvSetVirtualProcessorRegisters` rather than ioctls; its functions and structs are declared in `whp_abi.zig`.
+The WHP backend (`src/vmm/whp.zig`) runs on Windows x86\_64. It runs KVM's amd64 shim, page tables, and CPU state (`x86.zig`, `pt_amd64.zig`), setting the state through `WHvSetVirtualProcessorRegisters` rather than ioctls; its functions and structs are declared in `whp_abi.zig`.
 
 `WinHvPlatform.dll` is loaded at run time, so `h9.exe` starts on machines without the Windows Hypervisor Platform feature, and `auto` falls back to the emulator there.
 
@@ -239,7 +239,7 @@ The doorbell is an `OUT` to an I/O port, whose exit the backend steps past itsel
 
 As on KVM, destroyed vCPUs are parked and reset for their next user. The partition's processor count, and so the vCPU limit, is fixed at 64, HVF's measured limit, until WHP's own is measured.
 
-What's missing: the `[whp]` cases have passed on a Windows x86\_64 VM except the emulator fallback case, which hasn't run on a machine without the feature, and arm64 Windows has no WHP backend yet.
+The baseline and `[whp]` integration cases pass on a Windows x86\_64 VM, except the emulator fallback case, which hasn't run on a machine without the feature. Windows on ARM has no WHP backend yet: `aarch64-windows` builds keep the stub's `BackendNotBuilt`.
 
 ## Native backend (`native`)
 
