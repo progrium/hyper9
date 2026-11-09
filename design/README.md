@@ -19,7 +19,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 `zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `host-sandbox`), unique, and never changed. Start it with a letter: a draft's file is named by its slug alone, so one starting with a digit sorts among the filed `NNNN-` files instead of after them (`websocket-9p`, not `9p-websocket`). `new` refuses such a slug and `check` warns on an unfiled one; filed proposals that already have one, like `9p-roots`, keep it. Write a line per paragraph.
 
-The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done when, Implementation, and Open issues, and, after acceptance, Updates. Rationale should cover the alternatives that were rejected, so the question isn't asked again. Done when names the demo commands and the integration cases that prove the proposal, the way the old milestone demos did.
+The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done when, Implementation, and Open issues, and, once decided, Updates (after acceptance) or Declined. Rationale should cover the alternatives that were rejected, so the question isn't asked again. Done when names the demo commands and the integration cases that prove the proposal, the way the old milestone demos did.
 
 ## Signature
 
@@ -70,7 +70,7 @@ The syntax is a strict subset of YAML: one `key: value` per line, values are sca
 | `draft` | Being written or discussed; the only state allowed without an `id` |
 | `likely-accept`, `likely-decline` | The final comment period: at least three days, announced on the issue, for second thoughts. Significant new discussion moves it back to `draft`. |
 | `accepted` | Decided. Work can start once every dependency is implemented. |
-| `declined` | Decided against; kept, so the reasoning can be found later. The issue is closed. |
+| `declined` | Decided against; kept, with a Declined section giving the reason, so the reasoning can be found later. The issue is closed. |
 | `hold` | Paused, with a reason on the issue |
 | `implemented` | Built, its Done when cases exist and pass, and DESIGN.md describes it. The tool doesn't enforce the cases, so a proposal with nothing to test can still be marked implemented; the PR says why. |
 | `superseded` | Replaced by `superseded-by` |
@@ -82,6 +82,24 @@ Each status change is its own commit (`design: 42 likely-accept`), so `git log d
 An accepted proposal's body isn't edited. A discovery during implementation that refines the design gets a dated note under an Updates section at the end; one that changes the design gets a new proposal, which supersedes the old one or is added to its `depends`. A dependency found during implementation is added to `depends` in the same PR, with a line saying so.
 
 The PR that finishes a proposal updates DESIGN.md to describe what was built, tags the passing cases, and sets `status: implemented`. DESIGN.md never describes unbuilt features, and proposals aren't updated to describe the current system. DESIGN.md links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision.
+
+## Declining
+
+A declined proposal stays in `design/`, as Go's do, so the next person with the idea finds the answer and the reasoning behind it. Declining one is like any other decision:
+
+1. Set `status: likely-decline` in its own commit (`design: 42 likely-decline`), and announce the final comment period on the issue with the reason.
+2. After at least three days without significant new discussion, set `status: declined`, and add a Declined section at the end of the doc in the same commit (`design: 42 declined`). The section is dated, says in a few lines why it was declined, and links the issue comment that decided it. It also names what would change the answer, if anything, so a later proposal knows what it has to address.
+3. Close the issue as not planned, linking the commit.
+
+The rest of the body isn't edited, as with an accepted proposal. A Declined section looks like this:
+
+```markdown
+## Declined
+
+- 2026-11-09: The guest can already do this with `bind`, and a new flag would be one more thing to keep compatible ([discussion](https://github.com/progrium/hyper9/issues/42#issuecomment-1)). A use `bind` can't cover would reopen it.
+```
+
+To reconsider a declined proposal, write a new one that links the old one and answers its Declined section, rather than reopening the old one. A draft that was never filed has nothing to decline: delete it, or, if its reasoning is worth keeping, file it and decline it. `check` fails on a declined proposal without a `## Declined` section, and on an accepted proposal that depends on a declined one.
 
 ## Tests
 
@@ -106,4 +124,4 @@ Integration cases are tagged with the proposal they prove, by slug or id, in bra
 
 [STATUS.md](STATUS.md) is generated, and only main commits it: after each push to main that touches `design/` or the tool, [.github/workflows/design-status.yml](../.github/workflows/design-status.yml) runs `status` and commits the result if it changed. PRs leave it alone, even when they change a proposal's status or dependencies, so two open PRs never conflict over it, and it catches up within a minute or so of a merge. `list` and `ready` give the current state on any branch.
 
-`check` fails on bad frontmatter (including values YAML would read differently), tags not written as `[a, b]`, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by`, or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites.
+`check` fails on bad frontmatter (including values YAML would read differently), tags not written as `[a, b]`, a duplicate slug or id, a filename that doesn't match them, a status past `draft` without an `id`, a reference that doesn't resolve (in `depends`, `superseded-by`, or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, a declined proposal without a `## Declined` section, `superseded` without `superseded-by`, and more than three proposals in a final comment period. It warns on a slug reference to a filed proposal, which `fix` rewrites.
