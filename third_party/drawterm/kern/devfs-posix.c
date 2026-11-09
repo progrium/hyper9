@@ -64,6 +64,54 @@ lastelem(char *s)
 		return t;
 	return t+1;
 }
+
+/*
+ * h9: opens the parent directory of path for an *at operation, and checks it
+ * by the directory the fd actually is (h9_fs_allowfd), so an openat, mkdirat,
+ * unlinkat or renameat relative to the fd can't be steered outside the policy
+ * by a swapped parent component. Copies path's last element into base, which
+ * must hold NAME_MAX+1 bytes. Returns the fd (the caller closes it) or raises
+ * the policy or host error.
+ */
+static int
+h9_parentfd(char *path, char *base)
+{
+	char dir[PATH_MAX];
+	char *slash;
+	int fd, n;
+
+	slash = strrchr(path, '/');
+	if(slash == nil){
+		if(strlen(path) > NAME_MAX)
+			error(strerror(ENAMETOOLONG));
+		strcpy(base, path);
+		fd = open(".", O_RDONLY|O_DIRECTORY);
+	}else{
+		if(strlen(slash+1) > NAME_MAX)
+			error(strerror(ENAMETOOLONG));
+		strcpy(base, slash+1);
+		n = slash - path;
+		if(n == 0){
+			dir[0] = '/';
+			dir[1] = 0;
+		}else{
+			if(n >= sizeof dir)
+				error(strerror(ENAMETOOLONG));
+			memmove(dir, path, n);
+			dir[n] = 0;
+		}
+		fd = open(dir, O_RDONLY|O_DIRECTORY);
+	}
+	if(fd < 0)
+		error(strerror(errno));
+	if(waserror()){
+		close(fd);
+		nexterror();
+	}
+	h9_fs_allowfd(fd, H9_FSWALK);
+	poperror();
+	return fd;
+}
 	
 static Chan*
 fsattach(char *spec)
@@ -370,7 +418,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 	Ufsinfo *uif;
 	char *path;
 	DIR *dir;
-	int fd, omode;
+	int fd, dfd, omode;
 
 	omode = openmode(mode & ~OEXCL);
 
@@ -382,20 +430,49 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 	}
 	fd = -1;
 	dir = NULL;
-	h9_fs_allow(path, H9_FSCREATE);
+	/*
+	 * h9: create relative to an fd for the parent directory, checked by the
+	 * directory the fd actually is (h9_fs_allowfd). Check the new name's own
+	 * slot before creating (h9_fs_allowat) and the created file by the file
+	 * it actually is (h9_fs_allowfd) after, so a swapped parent component
+	 * can't steer the create outside the policy, and a symlink left in place
+	 * of the name can't hand back a write to a file outside it. A truncation
+	 * waits for that check.
+	 */
+	dfd = open(uif->path, O_RDONLY|O_DIRECTORY);
+	if(dfd < 0)
+		error(strerror(errno));
+	if(waserror()){
+		close(dfd);
+		nexterror();
+	}
+	h9_fs_allowfd(dfd, H9_FSWALK);
+	h9_fs_allowat(dfd, name, H9_FSCREATE);
 	if(perm & DMDIR) {
 		if(omode != OREAD)
 			error(Eperm);
-		if(mkdir(path, uif->mode & perm & 0777) < 0){
+		if(mkdirat(dfd, name, uif->mode & perm & 0777) < 0){
 			if(errno != EEXIST || mode & OEXCL)
 				error(strerror(errno));
 		}
-		if((dir = opendir(path)) == NULL)
+		if((fd = openat(dfd, name, O_RDONLY|O_DIRECTORY)) < 0)
 			error(strerror(errno));
+		if(waserror()){
+			close(fd);
+			nexterror();
+		}
+		h9_fs_allowfd(fd, H9_FSCREATE);
+		if((dir = fdopendir(fd)) == NULL)
+			error(strerror(errno));
+		poperror();
+		/* dir now owns the fd; this isn't a file fd. */
+		fd = -1;
 		if(waserror()){
 			closedir(dir);
 			nexterror();
 		}
+		if(fstatat(dfd, name, &stbuf, 0) < 0)
+			error(strerror(errno));
 	}
 	else {
 		int m = omode & 3;
@@ -403,21 +480,26 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 		 * POSIX specifies that O_TRUNC with O_RDONLY is undefined.
 		 * OpenBSD chooses to return an error.
 		 */
-		m = fsomode(m == OREAD ? ORDWR : m) | O_CREAT | O_TRUNC;
+		m = fsomode(m == OREAD ? ORDWR : m) | O_CREAT;
 		if(mode & OEXCL)
 			m |= O_EXCL;
-		if((fd = open(path, m, uif->mode & perm & 0777)) < 0)
+		if((fd = openat(dfd, name, m, uif->mode & perm & 0777)) < 0)
 			error(strerror(errno));
 		if(waserror()){
 			close(fd);
 			nexterror();
 		}
+		h9_fs_allowfd(fd, H9_FSCREATE);
+		if(ftruncate(fd, 0) < 0)
+			error(strerror(errno));
+		if(fstat(fd, &stbuf) < 0)
+			error(strerror(errno));
 	}
-	if(stat(path, &stbuf) < 0)
-		error(strerror(errno));
 	c->qid = fsqid(&stbuf);
 	uif->fd = fd;
 	uif->dir = dir;
+	poperror();
+	close(dfd);
 	poperror();
 
 	free(uif->path);
@@ -535,16 +617,28 @@ fsremove(Chan *c)
 		nexterror();
 	}
 	uif = c->aux;
-	/* h9: a link is removed, not its target. */
-	h9_fs_allow(ownpath(uif), H9_FSREMOVE);
-	if(uif->lpath != nil)
-		n = unlink(uif->lpath);
-	else if(c->qid.type & QTDIR)
-		n = rmdir(uif->path);
-	else
-		n = remove(uif->path);
-	if(n < 0)
-		error(strerror(errno));
+	/*
+	 * h9: remove the entry relative to an fd for its parent directory,
+	 * checked (h9_fs_allowat) by that directory's own canonical path joined
+	 * to the name, so a swapped parent component can't steer the unlink
+	 * outside the policy. A link is removed, not its target.
+	 */
+	{
+		char base[NAME_MAX+1];
+		int dfd;
+
+		dfd = h9_parentfd(ownpath(uif), base);
+		if(waserror()){
+			close(dfd);
+			nexterror();
+		}
+		h9_fs_allowat(dfd, base, H9_FSREMOVE);
+		n = unlinkat(dfd, base, (c->qid.type & QTDIR) ? AT_REMOVEDIR : 0);
+		if(n < 0)
+			error(strerror(errno));
+		poperror();
+		close(dfd);
+	}
 	poperror();
 	fsclose(c);
 }
@@ -565,11 +659,11 @@ fswstat(Chan *c, uchar *buf, int n)
 	 * half broken and return an error.  it's hardly perfect.
 	 */
 	struct stat fdst;
-	int byfd, fl;
+	int byfd, fl, opfd, wfd, trunc;
 
 	if(convM2D(buf, n, &d, strs) != n)
 		error(Ebadstat);
-	
+
 	uif = c->aux;
 	/*
 	 * h9: a wstat that changes nothing syncs the open file or directory
@@ -580,28 +674,51 @@ fswstat(Chan *c, uchar *buf, int n)
 		fsflush(c);
 		return n;
 	}
+	trunc = (uvlong)d.length != (uvlong)~0;
 	/*
-	 * h9: an open file may have been renamed since (Zig renames its
-	 * cache entries into place, then truncates the output it still has
-	 * open), so its path is stale: one open for writing is changed
-	 * through its fd, as Linux's ftruncate and fchmod change the file.
+	 * h9: find the file to change and bind the metadata operations to it
+	 * through a file descriptor, never by re-resolving its path. An open
+	 * file may have been renamed since (Zig renames its cache entries into
+	 * place, then truncates the output it still has open), so its path is
+	 * stale: it is changed through its own fd. Otherwise the file is opened
+	 * once and checked by the file the fd actually refers to (h9_fs_allowfd),
+	 * then changed through that fd (fchmod/futimens/ftruncate), so a symlink
+	 * swapped after the check can't redirect the change to a file outside the
+	 * policy (the check-then-act race). A dangling link (danglingwalk) is
+	 * checked and renamed as itself, and has no fd.
 	 */
 	byfd = 0;
+	opfd = -1;
+	wfd = -1;
 	if(openfile(c) && fstat(uif->fd, &fdst) == 0
 	&& (stat(uif->path, &stbuf) < 0 || stbuf.st_dev != fdst.st_dev || stbuf.st_ino != fdst.st_ino)){
 		fl = fcntl(uif->fd, F_GETFL);
 		if(fl < 0 || (fl & O_ACCMODE) == O_RDONLY || d.name[0] != 0)
 			error(strerror(ENOENT));
 		byfd = 1;
+		wfd = uif->fd;
 		stbuf = fdst;
 	}else if(stat(uif->path, &stbuf) < 0){
-		/* h9: a dangling link (danglingwalk) is checked and renamed as itself */
 		if(lstat(ownpath(uif), &stbuf) < 0 || !S_ISLNK(stbuf.st_mode))
 			error(strerror(errno));
 		if(h9_fs_checkname(ownpath(uif), H9_FSWRITE) < 0)
 			error(Eperm);
-	}else
-		h9_fs_allow(uif->path, H9_FSWRITE);
+	}else{
+		/* Truncation needs write access; it waits for the check below. */
+		if((opfd = open(uif->path, trunc ? O_RDWR : O_RDONLY)) < 0)
+			error(strerror(errno));
+		wfd = opfd;
+	}
+	if(waserror()){
+		if(opfd >= 0)
+			close(opfd);
+		nexterror();
+	}
+	if(opfd >= 0){
+		h9_fs_allowfd(opfd, H9_FSWRITE);
+		if(fstat(opfd, &stbuf) < 0)
+			error(strerror(errno));
+	}
 
 	/*
 	 * try things in increasing order of harm to the file.
@@ -611,46 +728,53 @@ fswstat(Chan *c, uchar *buf, int n)
 	 * (see above comment about atomicity).
 	 */
 	if(~d.mode != 0 && (int)(d.mode&0777) != (int)(stbuf.st_mode&0777)) {
-		if((byfd ? fchmod(uif->fd, d.mode&0777) : chmod(uif->path, d.mode&0777)) < 0)
+		if(wfd < 0)
+			error(strerror(ENOENT));
+		if(fchmod(wfd, d.mode&0777) < 0)
 			error(strerror(errno));
 		uif->mode &= ~0777;
 		uif->mode |= d.mode&0777;
 	}
 	if(~d.atime != 0 || ~d.mtime != 0){
-		struct timeval t[2];
-		t[0].tv_sec = ~d.atime != 0 ? d.atime : stbuf.st_atime;
-		t[0].tv_usec = 0;
-		t[1].tv_sec = ~d.mtime != 0 ? d.mtime : stbuf.st_mtime;
-		t[1].tv_usec = 0;
-		if(byfd){
-			/* h9: futimens, which every libc h9 builds with has. */
-			struct timespec ts[2];
-			ts[0].tv_sec = t[0].tv_sec;
-			ts[0].tv_nsec = 0;
-			ts[1].tv_sec = t[1].tv_sec;
-			ts[1].tv_nsec = 0;
-			futimens(uif->fd, ts);
-		}else
-			utimes(uif->path, t);
+		/* h9: futimens, which every libc h9 builds with has. */
+		struct timespec ts[2];
+		if(wfd < 0)
+			error(strerror(ENOENT));
+		ts[0].tv_sec = ~d.atime != 0 ? d.atime : stbuf.st_atime;
+		ts[0].tv_nsec = 0;
+		ts[1].tv_sec = ~d.mtime != 0 ? d.mtime : stbuf.st_mtime;
+		ts[1].tv_nsec = 0;
+		futimens(wfd, ts);
 	}
 	if(d.name[0] && strcmp(d.name, lastelem(ownpath(uif))) != 0) {
-		char *base, *newpath;
+		char base[NAME_MAX+1];
+		char *dirpath, *newpath;
+		int dfd;
 
-		/* h9: a link is renamed, not its target. */
-		base = strdup(ownpath(uif));
-		*lastelem(base) = 0;
-		newpath = catpath(base, d.name);
-		free(base);
+		/*
+		 * h9: a link is renamed, not its target. Rename relative to an fd
+		 * for the (shared) parent directory, checked by that directory's
+		 * own canonical path (h9_fs_allowat), so a swapped parent component
+		 * can't steer the rename outside the policy.
+		 */
+		dfd = h9_parentfd(ownpath(uif), base);
 		if(waserror()){
-			free(newpath);
+			close(dfd);
 			nexterror();
 		}
-		h9_fs_allow(newpath, H9_FSCREATE);
-		h9_fs_allow(ownpath(uif), H9_FSRENAME);
-		if(lstat(newpath, &stbuf) >= 0)
+		h9_fs_allowat(dfd, d.name, H9_FSCREATE);
+		h9_fs_allowat(dfd, base, H9_FSRENAME);
+		if(fstatat(dfd, d.name, &stbuf, AT_SYMLINK_NOFOLLOW) >= 0)
 			error(Eexist);
-		if(rename(ownpath(uif), newpath) < 0)
+		if(renameat(dfd, base, dfd, d.name) < 0)
 			error(strerror(errno));
+		poperror();
+		close(dfd);
+
+		dirpath = strdup(ownpath(uif));
+		*lastelem(dirpath) = 0;
+		newpath = catpath(dirpath, d.name);
+		free(dirpath);
 		if(uif->lpath != nil){
 			free(uif->lpath);
 			uif->lpath = newpath;
@@ -658,7 +782,6 @@ fswstat(Chan *c, uchar *buf, int n)
 			free(uif->path);
 			uif->path = newpath;
 		}
-		poperror();
 	}
 
 /*
@@ -674,9 +797,16 @@ fswstat(Chan *c, uchar *buf, int n)
 	}
 */
 
-	if((uvlong)d.length != (uvlong)~0 && (byfd ? ftruncate(uif->fd, d.length) : truncate(uif->path, d.length)) < 0)
-		error(strerror(errno));
+	if(trunc){
+		if(wfd < 0)
+			error(strerror(ENOENT));
+		if(ftruncate(wfd, d.length) < 0)
+			error(strerror(errno));
+	}
 
+	poperror();
+	if(opfd >= 0)
+		close(opfd);
 	return n;
 }
 
@@ -879,21 +1009,30 @@ void
 h9_fs_symlink(Chan *c, char *name, char *target)
 {
 	Ufsinfo *uif;
-	char *path;
+	int dfd;
 
 	if(devtab[c->type]->dc != 'U')
 		error(Eperm);
 	uif = c->aux;
-	path = catpath(uif->path, name);
+	/*
+	 * h9: create the link relative to an fd for the directory, checked by
+	 * the directory the fd actually refers to (h9_fs_allowfd) and the new
+	 * name's own slot (h9_fs_allowat), so a swapped parent component can't
+	 * steer the create outside the policy.
+	 */
+	dfd = open(uif->path, O_RDONLY|O_DIRECTORY);
+	if(dfd < 0)
+		error(strerror(errno));
 	if(waserror()){
-		free(path);
+		close(dfd);
 		nexterror();
 	}
-	h9_fs_allow(path, H9_FSCREATE);
-	if(symlink(target, path) < 0)
+	h9_fs_allowfd(dfd, H9_FSWALK);
+	h9_fs_allowat(dfd, name, H9_FSCREATE);
+	if(symlinkat(target, dfd, name) < 0)
 		error(strerror(errno));
 	poperror();
-	free(path);
+	close(dfd);
 }
 
 /* h9: c moved to name in directory dir, for renameat across directories */
@@ -901,23 +1040,41 @@ int
 h9_fs_rename(Chan *c, Chan *dir, char *name)
 {
 	Ufsinfo *uif, *duif;
-	char *newpath;
+	char base[NAME_MAX+1];
+	int sdfd, ddfd;
 
 	if(devtab[c->type]->dc != 'U' || devtab[dir->type]->dc != 'U')
 		error(Eperm);
 	uif = c->aux;
 	duif = dir->aux;
-	newpath = catpath(duif->path, name);
+	if(strlen(name) > NAME_MAX)
+		error(strerror(ENAMETOOLONG));
+	/*
+	 * h9: rename relative to fds for the source and destination parent
+	 * directories, each checked by the directory the fd actually refers to
+	 * (h9_fs_allowfd/allowat), so a swapped parent component can't steer the
+	 * rename outside the policy. The source link is moved, not its target.
+	 */
+	sdfd = h9_parentfd(ownpath(uif), base);
 	if(waserror()){
-		free(newpath);
+		close(sdfd);
 		nexterror();
 	}
-	h9_fs_allow(newpath, H9_FSCREATE);
-	h9_fs_allow(ownpath(uif), H9_FSRENAME);
-	if(rename(ownpath(uif), newpath) < 0)
+	if((ddfd = open(duif->path, O_RDONLY|O_DIRECTORY)) < 0)
+		error(strerror(errno));
+	if(waserror()){
+		close(ddfd);
+		nexterror();
+	}
+	h9_fs_allowfd(ddfd, H9_FSWALK);
+	h9_fs_allowat(ddfd, name, H9_FSCREATE);
+	h9_fs_allowat(sdfd, base, H9_FSRENAME);
+	if(renameat(sdfd, base, ddfd, name) < 0)
 		error(strerror(errno));
 	poperror();
-	free(newpath);
+	close(ddfd);
+	poperror();
+	close(sdfd);
 	return 0;
 }
 

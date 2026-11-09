@@ -312,6 +312,47 @@ h9_fs_allowfd(int fd, int op)
 	}
 }
 
+/*
+ * The policy decision for the entry `name` within the directory `dfd` already
+ * refers to, judged by that directory's own canonical path joined to `name`,
+ * without following `name` itself. devfs opens the parent directory once and
+ * then does the operation relative to that fd (unlinkat, renameat), so a
+ * swapped parent component can't steer it outside the policy: the check and
+ * the operation share one directory inode. `name` must be a single element.
+ * Returns 0/-1/-2 as h9_fs_check does.
+ */
+int
+h9_fs_checkat(int dfd, char *name, int op)
+{
+	char buf[PATH_MAX];
+	int n;
+
+	if(!h9_policy_active())
+		return 0;
+	if(fdpath(dfd, buf) < 0)
+		return Hidden;
+	n = strlen(buf);
+	if(n + 1 + strlen(name) + 1 > PATH_MAX)
+		return Hidden;
+	if(n > 0 && buf[n-1] != '/')
+		buf[n++] = '/';
+	strcpy(buf+n, name);
+	return h9_policy_check(buf, strlen(buf), op);
+}
+
+void
+h9_fs_allowat(int dfd, char *name, int op)
+{
+	switch(h9_fs_checkat(dfd, name, op)){
+	case 0:
+		return;
+	case Readonly:
+		error(Eperm);
+	default:
+		error(Enonexist);
+	}
+}
+
 #else
 
 /*
