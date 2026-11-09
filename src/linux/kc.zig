@@ -14,6 +14,9 @@ const real = struct {
     extern fn h9_linux_fdinfo(fd: c_int, dc: *c_int, dev: *c_uint, qpath: *u64, qtype: *c_int, mode: *c_int, cexec: *c_int) c_int;
     extern fn h9_linux_setcputime(user: c_ulong, sys: c_ulong) void;
     extern fn h9_linux_fdchan(fd: c_int, refs: *c_int) usize;
+    extern fn h9_linux_changet(fd: c_int) ?*anyopaque;
+    extern fn h9_linux_chanpread(ch: *anyopaque, buf: [*]u8, n: c_long, off: i64) c_long;
+    extern fn h9_linux_chanput(ch: *anyopaque) void;
     extern fn h9_linux_setcexec(fd: c_int, on: c_int) c_int;
     extern fn h9_linux_maxfd() c_int;
     extern fn h9_linux_fds(fds: [*]c_int, n: c_int) c_int;
@@ -65,6 +68,13 @@ const stub = struct {
     fn h9_linux_fdchan(_: c_int, _: *c_int) usize {
         return 0;
     }
+    fn h9_linux_changet(_: c_int) ?*anyopaque {
+        return null;
+    }
+    fn h9_linux_chanpread(_: *anyopaque, _: [*]u8, _: c_long, _: i64) c_long {
+        return -1;
+    }
+    fn h9_linux_chanput(_: *anyopaque) void {}
     fn h9_linux_fdinfo(_: c_int, _: *c_int, _: *c_uint, _: *u64, _: *c_int, _: *c_int, _: *c_int) c_int {
         return -1;
     }
@@ -298,6 +308,25 @@ pub fn fdChan(fd: i32) ?struct { id: usize, refs: u32 } {
     const id = c.h9_linux_fdchan(fd, &refs);
     if (id == 0) return null;
     return .{ .id = id, .refs = @intCast(@max(refs, 0)) };
+}
+
+/// A reference to fd's channel that outlives the fd, for reading a file
+/// after the guest closes it (`chanPread`); `chanPut` releases it. Null
+/// if fd isn't open for reading.
+pub fn chanGet(fd: i32) ?*anyopaque {
+    return c.h9_linux_changet(fd);
+}
+
+/// Reads up to buf.len bytes at off from a `chanGet` channel: the count,
+/// 0 at the end.
+pub fn chanPread(ch: *anyopaque, buf: []u8, off: u64) Error!usize {
+    const r = c.h9_linux_chanpread(ch, buf.ptr, @intCast(@min(buf.len, 1 << 30)), @intCast(off));
+    if (r < 0) return error.Kern;
+    return @intCast(r);
+}
+
+pub fn chanPut(ch: *anyopaque) void {
+    c.h9_linux_chanput(ch);
 }
 
 /// One of the host's interface addresses (src/kern/hostsock.h's

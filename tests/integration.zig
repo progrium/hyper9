@@ -5533,6 +5533,12 @@ test "a memfd passed with SCM_RIGHTS keeps its data after the sender unmaps and 
     try netCase(&le, &.{ "/mnt/term/cwd/files", "shm_pass" }, "ok shm_pass\n");
 }
 
+test "a private file mapping reads each page from its file offset on first touch, after close, fork, mremap, and MADV_DONTNEED [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "lazy_map" }, "ok lazy_map\n");
+}
+
 // Readiness and sockets (design/0050-linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 

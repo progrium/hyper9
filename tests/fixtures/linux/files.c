@@ -718,6 +718,65 @@ static void shm_pass(void) {
 	printf("ok shm_pass\n");
 }
 
+/* Private file mappings are read from the file as pages are first
+ * touched, so the file must still be readable after the fd is closed,
+ * and each page must come from its own offset after splits, moves,
+ * forks, and MADV_DONTNEED. Pages straddle h9's 1 MiB chunks. */
+static int stamp_ok(const char *p, int i) {
+	char want[16];
+	snprintf(want, sizeof want, "page %d", i);
+	return strcmp(p, want) == 0;
+}
+
+static void lazy_map(void) {
+	enum { NP = 3 * 256 + 3 };
+	const size_t size = (size_t)NP * 4096 - 4000;
+	int fd = fresh("lazy");
+	CHECK("lazy_map", fd >= 0);
+	char *buf = calloc(1, (size_t)NP * 4096);
+	for (int i = 0; i < NP; i++) snprintf(buf + (size_t)i * 4096, 16, "page %d", i);
+	CHECK("lazy_map", pwrite(fd, buf, size, 0) == (ssize_t)size);
+	free(buf);
+	/* From page 1 on, so file offsets and chunk offsets differ. */
+	char *m = mmap(0, size - 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 4096);
+	CHECK("lazy_map", m != MAP_FAILED && close(fd) == 0);
+	CHECK("lazy_map", stamp_ok(m + 300 * 4096, 301) && stamp_ok(m, 1));
+	/* The tail of the last page, past the end of the file, reads zero. */
+	char *last = m + (size_t)(NP - 2) * 4096;
+	CHECK("lazy_map", stamp_ok(last, NP - 1) && last[95] == 0 && last[4095] == 0);
+	/* A written page goes back to the file's after MADV_DONTNEED. */
+	strcpy(m + 600 * 4096, "mine");
+	CHECK("lazy_map", madvise(m + 600 * 4096, 4096, MADV_DONTNEED) == 0 && stamp_ok(m + 600 * 4096, 601));
+	strcpy(m + 2 * 4096, "kept");
+	pid_t c = fork();
+	if (c == 0) {
+		if (!stamp_ok(m + 700 * 4096, 701) || strcmp(m + 2 * 4096, "kept") != 0) _exit(1);
+		_exit(0);
+	}
+	CHECK("lazy_map", child_status(c) == 0);
+	/* Unmapping the start leaves the rest reading from the file. */
+	CHECK("lazy_map", munmap(m, 400 * 4096) == 0 && stamp_ok(m + 500 * 4096, 501));
+	CHECK("lazy_map", mprotect(m + 450 * 4096, 4096, PROT_READ) == 0 && stamp_ok(m + 450 * 4096, 451) && stamp_ok(m + 451 * 4096, 452));
+	CHECK("lazy_map", munmap(m + 400 * 4096, size - 4096 - 400 * 4096) == 0);
+
+	/* mremap moves a mapping with its file offset: a grown mapping reads
+	 * on into the file, and a page zeroed before the move stays zero. */
+	fd = open(path, O_RDONLY);
+	CHECK("lazy_map", fd >= 0);
+	char *r = mmap(0, 3 * 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("lazy_map", r != MAP_FAILED);
+	char *f = mmap(r, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 5 * 4096);
+	CHECK("lazy_map", f == r && close(fd) == 0);
+	memset(f, 0, 4096);
+	char *g = mremap(f, 2 * 4096, 300 * 4096, MREMAP_MAYMOVE);
+	CHECK("lazy_map", g != MAP_FAILED && g != f);
+	char zero[4096] = {0};
+	CHECK("lazy_map", memcmp(g, zero, 4096) == 0 && stamp_ok(g + 4096, 6) && stamp_ok(g + 299 * 4096, 304));
+	munmap(g, 300 * 4096), munmap(r + 2 * 4096, 4096);
+	unlink(path);
+	printf("ok lazy_map\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -746,6 +805,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "many_fds")) many_fds();
 		if (all || !strcmp(n, "unlinked")) unlinked();
 		if (all || !strcmp(n, "shm_pass")) shm_pass();
+		if (all || !strcmp(n, "lazy_map")) lazy_map();
 	}
 	return failed;
 }
