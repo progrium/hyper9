@@ -65,6 +65,49 @@ int	h9_fs_readlinkw(wchar_t *path, char *buf, int nbuf);
 int	h9_fs_checkw(wchar_t *path, int op);
 int	h9_fs_checknamew(wchar_t *path, int op);
 void	h9_fs_allow(wchar_t *path, int op);
+
+/*
+ * devfs-win32's paths spelled for the Win32 file calls. A drive path,
+ * "C:\a\b", goes as "\\?\C:\a\b", so a name Windows reserves for a device
+ * (aux, con, nul, prn, com1 and the rest, with or without an extension)
+ * is a file like any other, as are trailing dots and spaces, and paths
+ * can be longer than MAX_PATH. "\\?\" turns off Win32's own handling of
+ * "." and "..", so h9_fs_longw resolves them, lexically as Win32 does.
+ * It returns the path in memory the caller frees, or nil (with
+ * ERROR_FILENAME_EXCED_RANGE) if it's too long. Other paths, "" and
+ * "C:", are copied as they are. These need windows.h, which linux.c
+ * doesn't include.
+ */
+#ifdef WINAPI
+wchar_t*	h9_fs_longw(wchar_t *path);
+HANDLE	h9_fs_findfirst(wchar_t *path, WIN32_FIND_DATAW *wfd);
+HANDLE	h9_fs_createfile(wchar_t *path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *sa, DWORD disp, DWORD flags, HANDLE tmpl);
+BOOL	h9_fs_createdir(wchar_t *path, SECURITY_ATTRIBUTES *sa);
+BOOL	h9_fs_removedir(wchar_t *path);
+BOOL	h9_fs_deletefile(wchar_t *path);
+BOOL	h9_fs_movefile(wchar_t *old, wchar_t *new);
+DWORD	h9_fs_getattr(wchar_t *path);
+
+#ifndef H9_FSCHECK_IMPL
+/* devfs-win32 makes these calls through the functions above. */
+#undef FindFirstFile
+#undef CreateFile
+#undef CreateFileW
+#undef CreateDirectory
+#undef RemoveDirectory
+#undef DeleteFile
+#undef MoveFile
+#undef GetFileAttributesW
+#define FindFirstFile	h9_fs_findfirst
+#define CreateFile	h9_fs_createfile
+#define CreateFileW	h9_fs_createfile
+#define CreateDirectory	h9_fs_createdir
+#define RemoveDirectory	h9_fs_removedir
+#define DeleteFile	h9_fs_deletefile
+#define MoveFile	h9_fs_movefile
+#define GetFileAttributesW	h9_fs_getattr
+#endif
+#endif
 #endif
 
 /*
