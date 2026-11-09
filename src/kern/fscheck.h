@@ -50,6 +50,18 @@ void	h9_fs_allow(char *path, int op);
 int	h9_fs_checkfd(int fd, int op);
 void	h9_fs_allowfd(int fd, int op);
 /*
+ * WASI has no way to ask an fd for its path (no /proc, no F_GETPATH), so on
+ * the web host devfs notes the path it opened each fd by, and
+ * h9_fs_checkfd and h9_fs_checkat read it back. Elsewhere these do nothing.
+ */
+#ifdef __wasi__
+void	h9_fs_notefd(int fd, char *path);
+void	h9_fs_notefdat(int fd, int dfd, char *name);
+#else
+#define	h9_fs_notefd(fd, path)	do{}while(0)
+#define	h9_fs_notefdat(fd, dfd, name)	do{}while(0)
+#endif
+/*
  * The same for the entry `name` within the directory `dfd` already refers to,
  * judged by that directory's canonical path joined to `name`, without
  * following `name`. For an unlinkat or renameat done relative to a parent

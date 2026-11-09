@@ -108,6 +108,7 @@ h9_parentfd(char *path, char *base)
 		close(fd);
 		nexterror();
 	}
+	h9_fs_notefd(fd, slash == nil ? "." : dir);
 	h9_fs_allowfd(fd, H9_FSWALK);
 	poperror();
 	return fd;
@@ -377,6 +378,7 @@ fsopen(Chan *c, int mode)
 			close(fd);
 			nexterror();
 		}
+		h9_fs_notefd(fd, uif->path);
 		h9_fs_allowfd(fd, op);
 		if(mode & ORCLOSE)
 			h9_fs_allowfd(fd, H9_FSREMOVE);
@@ -395,6 +397,7 @@ fsopen(Chan *c, int mode)
 			close(fd);
 			nexterror();
 		}
+		h9_fs_notefd(fd, uif->path);
 		h9_fs_allowfd(fd, op);
 		if(mode & ORCLOSE)
 			h9_fs_allowfd(fd, H9_FSREMOVE);
@@ -446,6 +449,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 		close(dfd);
 		nexterror();
 	}
+	h9_fs_notefd(dfd, uif->path);
 	h9_fs_allowfd(dfd, H9_FSWALK);
 	h9_fs_allowat(dfd, name, H9_FSCREATE);
 	if(perm & DMDIR) {
@@ -461,6 +465,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 			close(fd);
 			nexterror();
 		}
+		h9_fs_notefdat(fd, dfd, name);
 		h9_fs_allowfd(fd, H9_FSCREATE);
 		if((dir = fdopendir(fd)) == NULL)
 			error(strerror(errno));
@@ -489,6 +494,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 			close(fd);
 			nexterror();
 		}
+		h9_fs_notefdat(fd, dfd, name);
 		h9_fs_allowfd(fd, H9_FSCREATE);
 		if(ftruncate(fd, 0) < 0)
 			error(strerror(errno));
@@ -715,6 +721,7 @@ fswstat(Chan *c, uchar *buf, int n)
 		nexterror();
 	}
 	if(opfd >= 0){
+		h9_fs_notefd(opfd, uif->path);
 		h9_fs_allowfd(opfd, H9_FSWRITE);
 		if(fstat(opfd, &stbuf) < 0)
 			error(strerror(errno));
@@ -1027,6 +1034,7 @@ h9_fs_symlink(Chan *c, char *name, char *target)
 		close(dfd);
 		nexterror();
 	}
+	h9_fs_notefd(dfd, uif->path);
 	h9_fs_allowfd(dfd, H9_FSWALK);
 	h9_fs_allowat(dfd, name, H9_FSCREATE);
 	if(symlinkat(target, dfd, name) < 0)
@@ -1066,6 +1074,7 @@ h9_fs_rename(Chan *c, Chan *dir, char *name)
 		close(ddfd);
 		nexterror();
 	}
+	h9_fs_notefd(ddfd, duif->path);
 	h9_fs_allowfd(ddfd, H9_FSWALK);
 	h9_fs_allowat(ddfd, name, H9_FSCREATE);
 	h9_fs_allowat(sdfd, base, H9_FSRENAME);
