@@ -184,6 +184,10 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             if (ms > 0) h9.hstream.keepalive_idle_ns = @as(u64, ms) * std.time.ns_per_ms;
         } else |_| {}
     }
+    const user_map = if (cfg.user_map) |path| std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch {
+        std.debug.print("h9: --user-map {s}: can't read it\n", .{path});
+        return exit_failed;
+    } else null;
     const cwd_arg = cfg.sandbox orelse cfg.cwd orelse ".";
     const cwd = kernPath(arena, realPath(io, arena, cwd_arg) catch {
         std.debug.print("h9: cwd {s}: not found\n", .{cwd_arg});
@@ -234,6 +238,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .serve_token = so.token,
         .serve_origins = cfg.serve_origins,
         .serve_net = cfg.serve_net,
+        .user_map = user_map,
         .stdio = undefined,
     };
 

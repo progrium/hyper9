@@ -1,0 +1,24 @@
+#!/bin/rc
+# dotlfs [-abcC] addr mountpoint [spec]: mounts a 9P2000.L server, or a
+# 9P2000 one, through #ℓ (design/0022-dotl.md). addr is a dial string, so
+# the dial goes through /net under the network policy.
+rfork e
+fn usage { echo 'usage: dotlfs [-abcC] addr mountpoint [spec]' >[1=2]; exit usage }
+flags=()
+while(~ $1 -*){
+	switch($1){
+	case -[abcC]*
+		flags=($flags $1)
+	case *
+		usage
+	}
+	shift
+}
+~ $#* 2 3 || usage
+srvname=dotlfs.$pid
+# srv always says post..., and its note handler misnames any note.
+srv -q $1 $srvname >[2=1] | sed '/^(post\.\.\.|write on closed pipe)$/d' >[1=2] || exit dial
+{ n=`{read}
+  rm -f /srv/$srvname
+  echo fd 3 >/net/dotl/$n/ctl || exit ctl
+  mount -n $flags /net/dotl/$n/data $2 $3 } <>/net/dotl/clone <>[3]/srv/$srvname

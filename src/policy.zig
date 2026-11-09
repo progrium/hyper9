@@ -183,6 +183,10 @@ pub const Serve = struct {
 /// The host-stream device, `#ℏ`, whose tree is the guest's /net/ws.
 pub const hstream_dev = "ℏ";
 
+/// The 9P2000.L device, `#ℓ`, whose tree is the guest's /net/dotl
+/// (design/0022-dotl.md).
+pub const dotl_dev = "ℓ";
+
 /// Where a 9P root's connection is posted, and the board name it's under.
 pub const root_srv = "#s/root";
 
@@ -627,6 +631,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
         try binds.append(arena, .{ .from = "#" ++ hstream_dev, .to = "/net", .flag = .after, .optional = true, .note = "WebSockets, under --net" });
     }
+    // 9P2000.L mounts (design/0022-dotl.md) reach nothing by themselves:
+    // a conversation translates a connection the guest already has.
+    try binds.append(arena, .{ .from = "#" ++ dotl_dev, .to = "/net", .flag = .after, .optional = true, .note = "9P2000.L mounts" });
     if (has_root) {
         const boxed = try std.fmt.allocPrint(arena, "{s}/{s}/bin", .{ builtin_dev, in.arch.name() });
         // --builtin=before: the box's commands first, then the root's.

@@ -16,7 +16,7 @@ pub const usage =
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
-    \\           [--net-allow PATTERN]... [--root-contained]
+    \\           [--net-allow PATTERN]... [--root-contained] [--user-map FILE]
     \\           [--builtin auto|only|before|after|off]
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
     \\           [--ns FILE] [--host-fs] [--host-cmd] [--no-guest-tools]
@@ -74,6 +74,9 @@ pub const Config = struct {
     root_headers: []const []const u8 = &.{},
     /// --root-ca: PEM certificates a wss:// root must chain to.
     root_ca: ?[]const u8 = null,
+    /// --user-map: a passwd file mapping names to the numbers a 9P2000.L
+    /// server sees (design/0022-dotl.md).
+    user_map: ?[]const u8 = null,
     /// --root-contained: the root tree's symlinks resolve inside it
     /// (design/0034-symlinks-in-root.md).
     root_contained: bool = false,
@@ -238,6 +241,9 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             const h = v orelse return error.Usage;
             if (h.len == 0) return error.Usage;
             try root_headers.append(gpa, h);
+        } else if (value(args, &i, "--user-map")) |v| {
+            c.user_map = v orelse return error.Usage;
+            if (c.user_map.?.len == 0) return error.Usage;
         } else if (value(args, &i, "--root-ca")) |v| {
             c.root_ca = v orelse return error.Usage;
             if (c.root_ca.?.len == 0) return error.Usage;
@@ -740,7 +746,7 @@ test "schemelessRoot reads host/path as wss:// and leaves paths alone" {
     }
     for ([_][]const u8{
         "",               "root",          "root/9p",       "dist/root",     "./9front.img", "../r",
-        "/abs/root",      "~/root",        "-x.y",          ".local/9front", "C:\\root",    "C:/root",
+        "/abs/root",      "~/root",        "-x.y",          ".local/9front", "C:\\root",     "C:/root",
         "tcp!h.x!564",    "u@fs.example",  "fs .example/x", "fs..example/x", "-fs.example",  "fs-.example/x",
         "fs.example:0/x", "fs.example:x/", "[::1/x",        "[]:80/",        "[::1]x/",      "fs_x.example/",
     }) |bad| {

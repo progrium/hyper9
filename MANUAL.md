@@ -1586,12 +1586,25 @@ devices in Plan 9.
   on loopback or a trusted network. A machine serves up to 32 connections,
   each with up to 8 exportfs processes; serving's processes count against
   `--pids` separately from the program's.
+- **9P2000.L servers** ([dotl](design/0022-dotl.md)). `dotlfs addr
+  mountpoint [spec]` dials a server that speaks 9P2000.L, such as diod or
+  ZeroFS, and mounts it. It also mounts a plain 9P2000 server, so it can be
+  used without knowing which one is at the address. The dial goes through
+  `/net`, under `--net` and `--net-allow`. The server's symlinks are
+  followed, but none can leave the mount: an absolute target starts at the
+  mount's root, and `..` stops there. Dangling links aren't listed, and
+  devices and FIFOs can't be opened. A .L server knows users by number, so
+  the guest's user goes out as your host uid, and any other number shows as
+  itself, such as `1000`. Running as root sends 65534 (nobody), never 0.
+  `--user-map FILE` gives a file in `/etc/passwd` format to map names to
+  numbers both ways, and it's the only way to send 0. `/net/dotl/N/status`
+  says which dialect the server chose. A 9P root's address can be a .L
+  server too: `--root tcp!host!port` works with either.
 - Not yet available: roots that need authentication
   ([root-auth](design/root-auth.md)); serving a machine's namespace to the
   host or the network as a 9P server from h9 itself, rather than with
   `exportfs` inside the guest as below ([serve](design/0035-serve.md)); and
-  9P2000.L servers, such as QEMU's or ZeroFS's, as roots and mounts
-  ([dotl](design/0022-dotl.md)).
+  ZeroFS's reconnecting 9P2000.L.Z ([dotl](design/0022-dotl.md)).
 - 9front disk images as roots were proposed and declined
   ([image-roots](design/0014-image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an

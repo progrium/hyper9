@@ -22,6 +22,7 @@ const gm = @import("guestmem.zig");
 const consin = @import("consin.zig");
 const web = @import("web.zig");
 const hstream = @import("hstream.zig");
+const dotl = @import("dotl/kern.zig");
 const ws = @import("ws.zig");
 const serve = @import("serve.zig");
 const lsys = @import("linux/sys.zig");
@@ -210,6 +211,11 @@ pub const Machine = struct {
         /// Whether the console is a terminal, for a Linux program's
         /// isatty: the CLI sets it when its stdin and stdout both are.
         console_tty: bool = true,
+        /// An `/etc/passwd`-format file's contents, mapping user names to
+        /// the numbers a 9P2000.L server is sent (design/0022-dotl.md,
+        /// "The user map"). Without it, the machine's user is the host's
+        /// uid, never 0.
+        user_map: ?[]const u8 = null,
         /// Proxies for host-made connections; null goes direct. The CLI
         /// fills it from HTTPS_PROXY, HTTP_PROXY and NO_PROXY.
         proxy: ?Proxy = null,
@@ -590,7 +596,10 @@ pub const Machine = struct {
         kern.removeConsole(job.con_id);
         job.con.reset();
         m.root_changes = job.rootChanges();
-        if (job.mach.load(.acquire)) |mc| mc.put();
+        if (job.mach.load(.acquire)) |mc| {
+            dotl.unregister(@intFromPtr(mc));
+            mc.put();
+        }
         // No process reads the console now. A reader thread still in a
         // host read that can't be cancelled keeps the Job, leaked.
         const freed = if (job.con_in) |*in| in.stop(grace_ms) else true;
@@ -1232,7 +1241,10 @@ pub const Machine = struct {
         kern.setCpus(j.ncpu);
         kern.setGuestPid(p.pid);
         p.setKproc();
-        j.mach.store(kern.mach(), .release);
+        const mc = kern.mach();
+        j.mach.store(mc, .release);
+        // What #ℓ's translators send as the machine's user.
+        if (mc) |x| dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map });
         const r = m.startFirst(p);
         // The status and err_msg can point into the Proc or its errstr,
         // which go when it exits.
@@ -3071,7 +3083,7 @@ pub const Machine = struct {
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         const fd = switch (r) {
             .dir => unreachable,
-            .ws => |u| return m.postStream(try m.connectStream(u, .{
+            .ws => |u| return m.postRoot(try m.connectStream(u, .{
                 .headers = m.opts.root_headers,
                 .ca_file = m.opts.root_ca,
                 .proxy = m.opts.proxy orelse .{},
@@ -3079,11 +3091,38 @@ pub const Machine = struct {
             .tcp => |a| dialTcp(a),
             .unix => |path| kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("root {s}: name too long", .{addr})),
         } catch return m.fail("root {s}: {s}", .{ addr, kern.errstr() });
+        return m.postRoot(fd);
+    }
+
+    /// Posts a root's connection `fd` as `#s/root`, through a `#ℓ`
+    /// conversation (design/0022-dotl.md), so a 9P2000.L server works as a
+    /// root and a 9P2000 one passes through. Closes `fd`.
+    fn postRoot(m: *Machine, conn: u31) RunError!void {
+        const addr = m.plan.root_9p.?.addr;
+        const fd = dotlData(conn) catch {
+            kern.close(conn) catch {};
+            return m.fail("root {f}: 9P2000.L: {s}", .{ ws.Url.elide(addr), kern.errstr() });
+        };
+        kern.close(conn) catch {};
         defer kern.close(fd) catch {};
-        const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {s}: post {s}: {s}", .{ addr, policy.root_srv, kern.errstr() });
+        const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
         defer kern.close(srv) catch {};
         var num: [16]u8 = undefined;
-        _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {s}: post {s}: {s}", .{ addr, policy.root_srv, kern.errstr() });
+        _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
+    }
+
+    /// Starts a `#ℓ` conversation on connection `conn` and returns an fd
+    /// on its data file, which devmnt mounts. `conn` can be closed after.
+    fn dotlData(conn: u31) kern.Error!u31 {
+        const dev = "#" ++ policy.dotl_dev ++ "/dotl/";
+        const clone = try kern.open(dev ++ "clone", kern.ORDWR);
+        defer kern.close(clone) catch {};
+        var nbuf: [16]u8 = undefined;
+        const n = std.mem.trim(u8, nbuf[0..try kern.pread(clone, &nbuf, 0)], " \n");
+        var cmd: [32]u8 = undefined;
+        _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "fd {d}", .{conn}) catch unreachable, 0);
+        var path: [64]u8 = undefined;
+        return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
     }
 
     /// Connects a host-made WebSocket stream to `url` (`what` names it in
@@ -3105,17 +3144,6 @@ pub const Machine = struct {
         defer hstream.release(id);
         kern.hstreamWait(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
         return kern.hstreamFd(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
-    }
-
-    /// Posts a WebSocket root's channel as `#s/root`, as `connectRoot`
-    /// posts a dialed one.
-    fn postStream(m: *Machine, fd: u31) RunError!void {
-        const addr = m.plan.root_9p.?.addr;
-        defer kern.close(fd) catch {};
-        const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
-        defer kern.close(srv) catch {};
-        var num: [16]u8 = undefined;
-        _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
     }
 
     /// Dials `tcp!host!port` through `#I`, as 9front's dial does through
