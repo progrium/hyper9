@@ -169,6 +169,7 @@ flowchart LR
   p_whp --> p_host_sandbox
   p_devsrv --> p_host_srv
   p_9p_roots --> p_host_srv
+  p_websocket_9p --> p_host_srv
   p_9p_roots --> p_mount_index
   p_websocket_9p --> p_mount_index
   p_guest_tools --> p_mount_index
