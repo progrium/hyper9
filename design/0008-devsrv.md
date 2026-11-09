@@ -20,7 +20,7 @@ Guest file servers can post themselves and be mounted:
 - **`#s`:** devsrv, ported from 9front, bound at `/srv`. Each machine gets its own registry, so machines in one host process can't see each other's services.
 - **Syscalls:** `mount`, `unmount`, and `fauth` are served, through drawterm's existing `sysmount`, `sysunmount`, and devmnt's `mntauth`.
 
-With [semaphores](semaphores.md), which serves the `rendezvous` that every lib9p server uses at startup, `ramfs`, `factotum`, `plumber`, `srv`, and `srvfs` run. rio's `/srv` and `/mnt/wsys`, which [gfx](0015-gfx.md) needs, work the same way.
+With [semaphores](0003-semaphores.md), which serves the `rendezvous` that every lib9p server uses at startup, `ramfs`, `factotum`, `plumber`, `srv`, and `srvfs` run. rio's `/srv` and `/mnt/wsys`, which [gfx](0015-gfx.md) needs, work the same way.
 
 ## Background
 
@@ -126,7 +126,7 @@ A pipe mounted directly, as acme does, has no `srvname` and still prints as `#|/
 
 **No devshr or devcap.** devshr's shared `/srv` across namespaces, and devcap's capabilities for changing user, have no user in what h9 runs today. They'd each be a proposal once something needs them.
 
-**Depending on semaphores.** lib9p's `postsrv` always does a `rendezvous`, and lib9p and libthread lock with `qlock`, which needs `rendezvous` under contention. Without [semaphores](semaphores.md), devsrv could be tested only with hand-written servers, and the demos below wouldn't run.
+**Depending on semaphores.** lib9p's `postsrv` always does a `rendezvous`, and lib9p and libthread lock with `qlock`, which needs `rendezvous` under contention. Without [semaphores](0003-semaphores.md), devsrv could be tested only with hand-written servers, and the demos below wouldn't run.
 
 ## Compatibility
 
@@ -178,7 +178,7 @@ Demo: `h9 --rc 'ramfs -S tmp && mount -c /srv/tmp /n/tmp && touch /n/tmp/a && ls
 2. `src/kern/devsrv.c`, the port with per-machine root boards, `h9_srvpost`, `Hmach`'s board pointer, and teardown, and the `s` entry in `devtab.c`.
 3. `srvname`: the field and its free in the vendored `kern/dat.h` and `kern/chan.c`, set by devsrv's open, and printed by `readns1`.
 4. The `/srv` bind in `src/policy.zig`'s namespace builder, and `--print`'s line for it.
-5. With [semaphores](semaphores.md) implemented, the integration and backend cases.
+5. With [semaphores](0003-semaphores.md) implemented, the integration and backend cases.
 6. DESIGN.md:
    - the kernel's "Added by us" table: devsrv, per machine
    - the boot sequence's bind list

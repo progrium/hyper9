@@ -138,4 +138,4 @@ Unit cases in `src/cli.zig`: `--rc` as the last argument parses as a login rc, a
 
 ## Updates
 
-**Nov 8, 2026.** The integration cases don't use `--builtin=before`, since [builtin-root](builtin-root.md) isn't built yet. They run over the stock tree, which has no `rcmain.local`, and union a scratch directory's `rcmain.local` onto `/rc/lib` with `--ns`, so `rcmain` and `/bin/test` come from the root. The plain-rc case runs on the stock tree rather than the built-in root.
+**Nov 8, 2026.** The integration cases don't use `--builtin=before`, since [builtin-root](0087-builtin-root.md) isn't built yet. They run over the stock tree, which has no `rcmain.local`, and union a scratch directory's `rcmain.local` onto `/rc/lib` with `--ns`, so `rcmain` and `/bin/test` come from the root. The plain-rc case runs on the stock tree rather than the built-in root.

@@ -12,7 +12,7 @@ areas: [linux, kern, build, tests]
 
 ## Abstract
 
-Windows programs under Wine get a window. `winedraw.drv` is a Wine display driver whose Unix side draws through `/dev/draw` and reads `/dev/mouse` and `/dev/kbd`, so a Wine program runs in the `--gfx` window (or a rio window) with no X or Wayland server in the Linux root. A Linux process reaches those files through `/dev/9`, a new directory in the Linux view that is the process's own 9front `/dev`. The first version runs Wine as a virtual desktop: one draw image holds Wine's desktop, top-level windows are drawn inside it by Wine, and the driver copies what changed onto the screen. The driver uses only the draw files, so it should work unchanged wherever [gfx](0015-gfx.md) does, including [browser-gfx](browser-gfx.md) once the Linux personality runs there.
+Windows programs under Wine get a window. `winedraw.drv` is a Wine display driver whose Unix side draws through `/dev/draw` and reads `/dev/mouse` and `/dev/kbd`, so a Wine program runs in the `--gfx` window (or a rio window) with no X or Wayland server in the Linux root. A Linux process reaches those files through `/dev/9`, a new directory in the Linux view that is the process's own 9front `/dev`. The first version runs Wine as a virtual desktop: one draw image holds Wine's desktop, top-level windows are drawn inside it by Wine, and the driver copies what changed onto the screen. The driver uses only the draw files, so it should work unchanged wherever [gfx](0015-gfx.md) does, including [browser-gfx](0120-browser-gfx.md) once the Linux personality runs there.
 
 ## Background
 
