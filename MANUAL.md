@@ -1945,8 +1945,10 @@ as `NAME=value`, plus `USER`, `LOGNAME`, `HOME`, and a default `PATH`;
 programs exactly as to 9front ones. DNS is the program's own, through the
 `/etc/resolv.conf` above, so under `--net-allow` a pattern has to cover
 those servers (`udp!8.8.8.8!53`). Unix-domain sockets, `socketpair`,
-`epoll`, `eventfd`, and passing file descriptors work between the processes
-of one machine.
+`epoll`, `eventfd`, passing file descriptors, and passing credentials
+(`SO_PASSCRED`) work between the processes of one machine, and
+`SOCK_SEQPACKET` keeps each message whole. `memfd_create`, and a file
+unlinked while still open, work for shared memory.
 
 **The terminal.** `isatty` is true only when h9's standard input and output
 are both terminals, so `ls` doesn't colour a pipe. A program that turns off
