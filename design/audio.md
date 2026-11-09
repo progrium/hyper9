@@ -140,7 +140,7 @@ So a guest can never get more than about 200 ms ahead of the speakers, the Worke
 
 ### Relation to gfx
 
-Audio doesn't depend on [gfx](0015-gfx.md) or [browser-gfx](browser-gfx.md) (proposed in #58). It follows their shape: a device that's built in but masked until a flag grants it, a wrapper in `src/kern/` around drawterm's device, a `-D` build option per host with a headless backend for tests, and an error naming the backend when a machine asks for something this build doesn't have. A machine can have both, and `h9 --gfx --audio rio` gives rio's programs a window and sound.
+Audio doesn't depend on [gfx](0015-gfx.md) or [browser-gfx](0120-browser-gfx.md) (proposed in #58). It follows their shape: a device that's built in but masked until a flag grants it, a wrapper in `src/kern/` around drawterm's device, a `-D` build option per host with a headless backend for tests, and an error naming the backend when a machine asks for something this build doesn't have. A machine can have both, and `h9 --gfx --audio rio` gives rio's programs a window and sound.
 
 ### The plan
 

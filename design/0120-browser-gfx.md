@@ -1,4 +1,5 @@
 ---
+id: 120
 slug: browser-gfx
 title: Graphics on the browser host
 status: draft
