@@ -549,6 +549,43 @@ test "--read-deny hides a path, and symlinks can't escape [baseline]" {
     try std.testing.expectEqualStrings("", l.out);
 }
 
+test "devfs checks the file it opened, not the path it was given [baseline]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "one\n" });
+
+    // Reading (OREAD), overwriting with truncation (OWRITE|OTRUNC, through
+    // the deferred ftruncate), and listing the directory (the fdopendir
+    // path) all go through the refactored fsopen and still work on an
+    // in-policy file.
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", "cat f && echo two >f && cat f && ls ." });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "one\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "two\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "f") != null);
+
+    // Writing through a symlink whose target is outside every bound tree is
+    // denied by the opened fd's own path, and leaves the target untouched:
+    // the open resolves the link but the check sees where it landed, and the
+    // truncation waits until after the check, so a denied file keeps its
+    // contents.
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "secret\n" });
+    var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
+    const w = try run(e, &.{ "--cwd", s.path, "--rc", "echo pwned >link" });
+    defer w.deinit();
+    try std.testing.expectEqual(1, w.code);
+    const data = try other.tmp.dir.readFileAlloc(std.testing.io, "secret", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualStrings("secret\n", data);
+}
+
 test "masked devices can't be attached [baseline]" {
     const e = try env(@src());
     const r = try run(e, &.{ "ls", "#U/" });

@@ -40,6 +40,15 @@ int	h9_fs_check(char *path, int op);
 int	h9_fs_checkname(char *path, int op);
 /* Like h9_fs_check, but raises "file does not exist" or "permission denied". */
 void	h9_fs_allow(char *path, int op);
+/*
+ * The policy decision for an already-open fd, by the file the fd actually
+ * opened rather than by resolving a path string again: devfs opens, then
+ * checks the fd, so a swapped symlink can't steer the open past the check
+ * (the check-then-open race). h9_fs_checkfd returns 0/-1/-2 as h9_fs_check;
+ * h9_fs_allowfd raises the matching error.
+ */
+int	h9_fs_checkfd(int fd, int op);
+void	h9_fs_allowfd(int fd, int op);
 #else
 /* The same, for devfs-win32's paths, "C:\a\b". */
 int	h9_fs_resolveinw(wchar_t *top, wchar_t *dir, char *rel, wchar_t *buf, int nbuf);

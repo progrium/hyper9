@@ -302,7 +302,7 @@ static Chan*
 fsopen(Chan *c, int mode)
 {
 	Ufsinfo *uif;
-	int omode;
+	int omode, op, fd, m;
 
 	omode = openmode(mode);
 
@@ -310,21 +310,50 @@ fsopen(Chan *c, int mode)
 	/* h9: a link walked to as itself has no target to open (danglingwalk). */
 	if(S_ISLNK(uif->mode))
 		error(Enonexist);
-	h9_fs_allow(uif->path, omode == OREAD && !(mode&OTRUNC) ? H9_FSREAD : H9_FSWRITE);
-	if(mode & ORCLOSE)
-		h9_fs_allow(uif->path, H9_FSREMOVE);
+	op = omode == OREAD && !(mode&OTRUNC) ? H9_FSREAD : H9_FSWRITE;
+	/*
+	 * h9: open first, then check the file the fd actually refers to
+	 * (h9_fs_allowfd), rather than checking uif->path and opening it as two
+	 * separate resolutions. A guest thread that swaps a path component for a
+	 * symlink between a check and the open can't redirect this open past the
+	 * policy: the fd and the check see one inode. The open follows symlinks
+	 * as before but reads nothing until it has passed the check, and a
+	 * truncation waits until then so a denied file is left intact.
+	 */
 	if(c->qid.type & QTDIR) {
 		if(omode != OREAD)
 			error(Eperm);
-		if((uif->dir = opendir(uif->path)) == NULL)
+		if((fd = open(uif->path, O_RDONLY|O_DIRECTORY)) < 0)
 			error(strerror(errno));
-	}	
+		if(waserror()){
+			close(fd);
+			nexterror();
+		}
+		h9_fs_allowfd(fd, op);
+		if(mode & ORCLOSE)
+			h9_fs_allowfd(fd, H9_FSREMOVE);
+		if((uif->dir = fdopendir(fd)) == NULL)
+			error(strerror(errno));
+		poperror();
+	}
 	else {
-		int m = fsomode(omode & 3);
-		if(mode & OTRUNC)
-			m |= O_TRUNC;
-		if((uif->fd = open(uif->path, m, 0666)) < 0)
+		m = fsomode(omode & 3);
+		/* A truncation needs write access and must wait for the check. */
+		if((mode & OTRUNC) && (m & O_ACCMODE) == O_RDONLY)
+			m = (m & ~O_ACCMODE) | O_RDWR;
+		if((fd = open(uif->path, m, 0666)) < 0)
 			error(strerror(errno));
+		if(waserror()){
+			close(fd);
+			nexterror();
+		}
+		h9_fs_allowfd(fd, op);
+		if(mode & ORCLOSE)
+			h9_fs_allowfd(fd, H9_FSREMOVE);
+		if((mode & OTRUNC) && ftruncate(fd, 0) < 0)
+			error(strerror(errno));
+		poperror();
+		uif->fd = fd;
 	}
 	uif->offset = 0;
 

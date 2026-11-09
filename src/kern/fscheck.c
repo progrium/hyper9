@@ -255,6 +255,63 @@ h9_fs_resolvein(char *top, char *dir, char *rel, char *buf, int nbuf)
 	return 0;
 }
 
+/*
+ * The canonical path of an already-open fd: the file it actually refers to,
+ * however its name resolved. /proc/self/fd on Linux, F_GETPATH on macOS.
+ * Returns 0 with the path in buf (at most PATH_MAX), or -1.
+ */
+static int
+fdpath(int fd, char *buf)
+{
+#ifdef __APPLE__
+	return fcntl(fd, F_GETPATH, buf) < 0 ? -1 : 0;
+#else
+	char link[64];
+	int n;
+
+	snprint(link, sizeof link, "/proc/self/fd/%d", fd);
+	n = readlink(link, buf, PATH_MAX-1);
+	if(n < 0)
+		return -1;
+	buf[n] = 0;
+	return 0;
+#endif
+}
+
+/*
+ * The policy decision for an already-open fd, judged by the file the fd
+ * actually opened rather than by resolving a path string a second time.
+ * devfs opens a file and then checks its fd, so a guest that swaps a
+ * directory for a symlink between a path check and the open (the devfs
+ * check-then-open race, design/0034) can't steer the open to a file outside
+ * the policy: the fd and the check see one inode. Returns 0 if op is allowed,
+ * Hidden or Readonly as h9_fs_check does.
+ */
+int
+h9_fs_checkfd(int fd, int op)
+{
+	char buf[PATH_MAX];
+
+	if(!h9_policy_active())
+		return 0;
+	if(fdpath(fd, buf) < 0)
+		return Hidden;
+	return h9_policy_check(buf, strlen(buf), op);
+}
+
+void
+h9_fs_allowfd(int fd, int op)
+{
+	switch(h9_fs_checkfd(fd, op)){
+	case 0:
+		return;
+	case Readonly:
+		error(Eperm);
+	default:
+		error(Enonexist);
+	}
+}
+
 #else
 
 /*
