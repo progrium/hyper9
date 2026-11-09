@@ -2127,7 +2127,7 @@ fn msgSockRwv(p: *Process, fd: i32, iov: u64, cnt: u64, comptime dir: Dir) Err!?
     const max = 4 << 20;
     if (total > max) return -E.MSGSIZE;
     if (total == 0) return null;
-    const tmp = p.gpa.alloc(u8, total) catch return -E.NOMEM;
+    const tmp = p.gpa.alloc(u8, @intCast(total)) catch return -E.NOMEM;
     defer p.gpa.free(tmp);
     const want: u32 = if (dir == .read) kc.POLLIN else kc.POLLOUT;
     if (flagsOf(p, fd).nonblock) {
