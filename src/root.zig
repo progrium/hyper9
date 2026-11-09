@@ -65,4 +65,5 @@ test {
     _ = @import("linux/cputime.zig");
     _ = @import("linux/netlink.zig");
     _ = @import("dotl/attr.zig");
+    _ = @import("dotl/wire.zig");
 }
