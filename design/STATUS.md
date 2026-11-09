@@ -22,7 +22,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [image-roots](0014-image-roots.md) | declined |  | Disk-image roots |
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
 | [kvm](0016-kvm.md) | implemented |  | KVM backend |
-| [whp](0017-whp.md) | draft |  | WHP backend |
+| [whp](0017-whp.md) | accepted | ready | WHP backend |
 | [linux-personality](0018-linux-personality.md) | implemented |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
@@ -81,7 +81,7 @@ flowchart LR
   p_image_roots["#35;14 image-roots<br/>declined"]:::closed
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
   p_kvm["#35;16 kvm<br/>implemented"]:::implemented
-  p_whp["#35;17 whp<br/>draft"]:::draft
+  p_whp["#35;17 whp<br/>accepted"]:::accepted
   p_linux_personality["#35;18 linux-personality<br/>implemented"]:::implemented
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
   p_websocket_9p["#35;21 websocket-9p<br/>implemented"]:::implemented
