@@ -244,6 +244,53 @@ pub const Server = struct {
         }
     }
 
+    fn readDir(s: *Server, tag: u16, fid: u32, offset: u64, count: u32, attrs: bool) !void {
+        if (attrs and !s.lz) return s.lerr(tag, E.OPNOTSUPP);
+        const f = s.fids.get(fid) orelse return s.lerr(tag, E.BADF);
+        if (f.node.kind != .dir) return s.lerr(tag, E.NOTDIR);
+        var buf: [1 << 16]u8 = undefined;
+        var w: wire.Writer = .{ .b = buf[0..@min(buf.len, count)] };
+        const kids = f.node.children.items;
+        var i: u64 = offset;
+        while (i < kids.len + 2) : (i += 1) {
+            const node = switch (i) {
+                0 => f.node,
+                1 => f.node.parent orelse f.node,
+                else => kids[i - 2],
+            };
+            const e: wire.DirEntry = .{
+                .qid = node.qid(),
+                .offset = i + 1,
+                .type = if (i < 2) attr.DT_DIR else attr.DT_REG,
+                .name = switch (i) {
+                    0 => ".",
+                    1 => "..",
+                    else => node.name,
+                },
+                .stat = if (attrs) node.stat() else null,
+            };
+            wire.putDirEntry(&w, e) catch break;
+        }
+        if (attrs)
+            try s.send(tag, l.Rreaddirattr{ .data = .{ .bytes = buf[0..w.at] } })
+        else
+            try s.send(tag, l.Rreaddir{ .data = .{ .bytes = buf[0..w.at] } });
+    }
+
+    /// Walks `names` from `n` as far as they go: the node reached, and
+    /// how many names were walked, their qids in `qids`.
+    fn walkNames(from: *Node, names: []const []const u8, qids: []wire.Qid) struct { *Node, usize } {
+        var n = from;
+        var k: usize = 0;
+        for (names) |name| {
+            if (n.kind != .dir) break;
+            n = if (std.mem.eql(u8, name, "..")) (n.parent orelse n) else (n.child(name) orelse break);
+            qids[k] = n.qid();
+            k += 1;
+        }
+        return .{ n, k };
+    }
+
     fn nodeByPath(n: *Node, path: u64) ?*Node {
         if (n.path == path) return n;
         for (n.children.items) |c| if (nodeByPath(c, path)) |f| return f;
@@ -281,19 +328,22 @@ pub const Server = struct {
             .Twalk => |w| {
                 const f = s.fids.get(w.fid) orelse return s.lerr(tag, E.BADF);
                 if (w.newfid != w.fid and s.fids.contains(w.newfid)) return s.lerr(tag, E.BADF);
-                var n = f.node;
                 var qids: [wire.max_welem]wire.Qid = undefined;
-                var k: usize = 0;
-                for (w.wnames.slice()) |name| {
-                    if (n.kind != .dir) break;
-                    const next = if (std.mem.eql(u8, name, "..")) (n.parent orelse n) else (n.child(name) orelse break);
-                    n = next;
-                    qids[k] = n.qid();
-                    k += 1;
-                }
+                const n, const k = walkNames(f.node, w.wnames.slice(), &qids);
                 if (k == 0 and w.wnames.n != 0) return s.lerr(tag, if (n.kind != .dir) E.NOTDIR else E.NOENT);
                 if (k == w.wnames.n) try s.fids.put(s.gpa, w.newfid, .{ .node = n });
                 try s.send(tag, wire.common.Rwalk{ .wqids = .init(qids[0..k]) });
+            },
+            // A full walk with the destination's attributes, or an error.
+            .Twalkgetattr => |w| {
+                if (!s.lz) return s.lerr(tag, E.OPNOTSUPP);
+                const f = s.fids.get(w.fid) orelse return s.lerr(tag, E.BADF);
+                if (w.newfid != w.fid and s.fids.contains(w.newfid)) return s.lerr(tag, E.BADF);
+                var qids: [wire.max_welem]wire.Qid = undefined;
+                const n, const k = walkNames(f.node, w.wnames.slice(), &qids);
+                if (k != w.wnames.n) return s.lerr(tag, if (n.kind != .dir) E.NOTDIR else E.NOENT);
+                try s.fids.put(s.gpa, w.newfid, .{ .node = n });
+                try s.send(tag, l.Rwalkgetattr{ .wqids = .init(qids[0..k]), .stat = n.stat() });
             },
             .Treadlink => |r| {
                 const f = s.fids.get(r.fid) orelse return s.lerr(tag, E.BADF);
@@ -311,6 +361,18 @@ pub const Server = struct {
                 f.open = true;
                 try s.send(tag, l.Rlopen{ .qid = f.node.qid(), .iounit = 0 });
             },
+            // Opens a copy of the fid, and reads from 0.
+            .Tlopenatread => |o| {
+                if (!s.lz) return s.lerr(tag, E.OPNOTSUPP);
+                const f = s.fids.get(o.fid) orelse return s.lerr(tag, E.BADF);
+                if (f.open or s.fids.contains(o.newfid)) return s.lerr(tag, E.BADF);
+                if (f.node.kind == .dir) return s.lerr(tag, E.ISDIR);
+                if (o.flags & L.TRUNC != 0) f.node.data.items.len = 0;
+                try s.fids.put(s.gpa, o.newfid, .{ .node = f.node, .open = true });
+                const data = f.node.data.items;
+                const n = @min(data.len, o.count, s.msize - (wire.header_size + wire.Qid.wire_size + 4 + 1 + 4));
+                try s.send(tag, l.Rlopenatread{ .qid = f.node.qid(), .iounit = 0, .eof = @intFromBool(n == data.len), .data = .{ .bytes = data[0..n] } });
+            },
             .Tread => |r| {
                 const f = s.fids.get(r.fid) orelse return s.lerr(tag, E.BADF);
                 if (!f.open) return s.lerr(tag, E.BADF);
@@ -327,23 +389,8 @@ pub const Server = struct {
                 @memcpy(f.node.data.items[w.offset..end], w.data.bytes);
                 try s.send(tag, wire.common.Rwrite{ .count = @intCast(w.data.bytes.len) });
             },
-            .Treaddir => |r| {
-                const f = s.fids.get(r.fid) orelse return s.lerr(tag, E.BADF);
-                if (f.node.kind != .dir) return s.lerr(tag, E.NOTDIR);
-                var buf: [1 << 16]u8 = undefined;
-                var w: wire.Writer = .{ .b = buf[0..@min(buf.len, r.count)] };
-                const kids = f.node.children.items;
-                var i: u64 = r.offset;
-                while (i < kids.len + 2) : (i += 1) {
-                    const e: wire.DirEntry = switch (i) {
-                        0 => .{ .qid = f.node.qid(), .offset = 1, .type = attr.DT_DIR, .name = "." },
-                        1 => .{ .qid = (f.node.parent orelse f.node).qid(), .offset = 2, .type = attr.DT_DIR, .name = ".." },
-                        else => .{ .qid = kids[i - 2].qid(), .offset = i + 1, .type = attr.DT_REG, .name = kids[i - 2].name },
-                    };
-                    wire.putDirEntry(&w, e) catch break;
-                }
-                try s.send(tag, l.Rreaddir{ .data = .{ .bytes = buf[0..w.at] } });
-            },
+            .Treaddir => |r| try s.readDir(tag, r.fid, r.offset, r.count, false),
+            .Treaddirattr => |r| try s.readDir(tag, r.fid, r.offset, r.count, true),
             .Tlcreate => |cr| {
                 const f = s.fids.getPtr(cr.fid) orelse return s.lerr(tag, E.BADF);
                 if (f.node.child(cr.name) != null) return s.lerr(tag, E.EXIST);
@@ -353,6 +400,18 @@ pub const Server = struct {
                 f.node = n;
                 f.open = true;
                 try s.send(tag, l.Rlcreate{ .qid = n.qid(), .iounit = 0 });
+            },
+            // Creates and opens newfid, and keeps dfid.
+            .Tlcreateattr => |cr| {
+                if (!s.lz) return s.lerr(tag, E.OPNOTSUPP);
+                const f = s.fids.get(cr.dfid) orelse return s.lerr(tag, E.BADF);
+                if (s.fids.contains(cr.newfid)) return s.lerr(tag, E.BADF);
+                if (f.node.child(cr.name) != null) return s.lerr(tag, E.EXIST);
+                const n = try s.newNode(f.node, cr.name, .file);
+                n.mode = cr.mode;
+                n.uid = 1000;
+                try s.fids.put(s.gpa, cr.newfid, .{ .node = n, .open = true });
+                try s.send(tag, l.Rlcreateattr{ .iounit = 0, .stat = n.stat() });
             },
             .Tmkdir => |m| {
                 const f = s.fids.get(m.dfid) orelse return s.lerr(tag, E.BADF);

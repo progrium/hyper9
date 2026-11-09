@@ -63,6 +63,9 @@ pub const Dialect = enum {
 /// design/0034-symlinks-in-root.md has it.
 pub const max_links = 40;
 
+/// Rlopenatread's bytes before its data: header, qid, iounit, eof, count.
+const lopenatread_header = wire.header_size + wire.Qid.wire_size + 4 + 1 + 4;
+
 const Fid = struct {
     sfid: u32,
     root: *Root,
@@ -81,6 +84,13 @@ const Fid = struct {
     next_off: ?u64 = null,
     ahead: std.ArrayList(u8) = .empty,
     ahead_off: u64 = 0,
+    /// Where the file ended when it was read ahead, if the server said.
+    eof_at: ?u64 = null,
+    /// Attributes from a compound reply (.L.Z), which answer the next
+    /// Tstat if no mutation came since (`stat_gen`, the client's
+    /// `ahead_gen` then).
+    stat: ?wire.Stat = null,
+    stat_gen: u64 = 0,
 };
 
 /// A hidden server fid at an attach's root, which outlives the fid devmnt
@@ -175,6 +185,8 @@ const Entry = struct {
     name: []const u8,
     resolve: ?*Resolve = null,
     stat: ?wire.Stat = null,
+    /// Came with its attributes (.L.Z), so it isn't walked.
+    ready: bool = false,
 };
 
 /// A walk that follows symbolic links inside the attach root, by
@@ -198,6 +210,10 @@ const Resolve = struct {
     /// The server fid at the end, once every name is walked.
     sfid: u32 = 0,
     err: ?[]const u8 = null,
+    /// The fast walk was a Twalkgetattr (.L.Z), and the attributes at its
+    /// end, when it went the whole way without a link.
+    compound: bool = false,
+    stat: ?wire.Stat = null,
 
     // One name at a time: the fid walked so far, and what's left to walk,
     // with a marker after each of the original names.
@@ -441,6 +457,19 @@ pub const Client = struct {
             .Tlopen => |o| if (msg == .Rlopen) {
                 if (c.bound.getPtr(o.fid)) |b| b.open = o.flags;
             },
+            .Twalkgetattr => |w| if (msg == .Rwalkgetattr) {
+                const src = c.bound.get(w.fid) orelse return;
+                const q = msg.Rwalkgetattr.stat.qid.path;
+                try c.bind(w.newfid, .{ .inode = q, .root = src.root, .uname = try c.gpa.dupe(u8, src.uname), .n_uname = src.n_uname });
+            },
+            .Tlopenatread => |o| if (msg == .Rlopenatread) {
+                const src = c.bound.get(o.fid) orelse return;
+                try c.bind(o.newfid, .{ .inode = src.inode, .root = src.root, .uname = try c.gpa.dupe(u8, src.uname), .n_uname = src.n_uname, .open = o.flags });
+            },
+            .Tlcreateattr => |cr| if (msg == .Rlcreateattr) {
+                const src = c.bound.get(cr.dfid) orelse return;
+                try c.bind(cr.newfid, .{ .inode = msg.Rlcreateattr.stat.qid.path, .root = src.root, .uname = try c.gpa.dupe(u8, src.uname), .n_uname = src.n_uname, .open = cr.flags });
+            },
             .Tlcreate => |cr| if (msg == .Rlcreate) {
                 if (c.bound.getPtr(cr.fid)) |b| {
                     b.inode = msg.Rlcreate.qid.path;
@@ -630,11 +659,29 @@ pub const Client = struct {
 
     // devmnt's requests.
 
-    /// Drops what was read ahead on every fid: the files may have changed.
+    /// Drops what was read ahead on every fid, and the attributes held:
+    /// the files may have changed.
     fn dropAhead(c: *Client) void {
         c.ahead_gen += 1;
         var it = c.fids.valueIterator();
-        while (it.next()) |f| f.*.ahead.items.len = 0;
+        while (it.next()) |f| {
+            f.*.ahead.items.len = 0;
+            f.*.eof_at = null;
+            f.*.stat = null;
+        }
+    }
+
+    fn cacheStat(c: *Client, f: *Fid, st: wire.Stat) void {
+        f.stat = st;
+        f.stat_gen = c.ahead_gen;
+    }
+
+    /// The attributes held for `f`, once: only the next request gets them.
+    fn cachedStat(c: *Client, f: *Fid) ?wire.Stat {
+        const st = f.stat orelse return null;
+        f.stat = null;
+        if (f.stat_gen != c.ahead_gen) return null;
+        return st;
     }
 
     fn newOp(c: *Client, tag: u16, kind: Kind) Allocator.Error!*Op {
@@ -717,6 +764,8 @@ pub const Client = struct {
                 const op = try c.newOp(tag, .open);
                 op.fid = o.fid;
                 op.mode = o.mode;
+                // A walk's attributes answer the type check.
+                if (c.cachedStat(f)) |st| return c.stepOpen(op, 0, .{ .Rgetattr = .{ .valid = L.GETATTR_BASIC, .stat = st } });
                 try c.send(op, l.Tgetattr{ .fid = f.sfid, .request_mask = L.GETATTR_BASIC }, .{ .main = 0 });
             },
             .Tcreate => |cr| {
@@ -732,6 +781,10 @@ pub const Client = struct {
                 const gid = c.opts.users.number(c.opts.users.user);
                 if (cr.perm & wire.DMDIR != 0) {
                     try c.send(op, l.Tmkdir{ .dfid = f.sfid, .name = op.name, .mode = attr.createMode(cr.perm), .gid = gid }, .{ .main = 0 });
+                } else if (c.dialect == .@"9P2000.L.Z") {
+                    // Created on a new server fid, with its attributes.
+                    op.sfid = try c.tmpSfid(op);
+                    try c.send(op, l.Tlcreateattr{ .dfid = f.sfid, .newfid = op.sfid, .name = op.name, .flags = attr.openFlags(cr.mode) | L.CREATE | L.EXCL, .mode = attr.createMode(cr.perm), .gid = gid }, .{ .main = 13 });
                 } else {
                     try c.send(op, l.Tlcreate{ .fid = f.sfid, .name = op.name, .flags = attr.openFlags(cr.mode) | L.CREATE | L.EXCL, .mode = attr.createMode(cr.perm), .gid = gid }, .{ .main = 10 });
                 }
@@ -742,15 +795,23 @@ pub const Client = struct {
                 if (f.qid.type & wire.QTDIR != 0) return c.readDir(tag, r.fid, f, r.offset, r.count);
                 // From what was read ahead, or a read of a whole upstream
                 // msize when this one follows the last.
+                if (f.eof_at == r.offset and r.offset == f.ahead_off + f.ahead.items.len) {
+                    f.eof_at = null;
+                    return c.sendMount(tag, wire.common.Rread{ .data = .{ .bytes = "" } });
+                }
                 if (r.offset >= f.ahead_off and r.offset < f.ahead_off + f.ahead.items.len) {
                     const from: usize = @intCast(r.offset - f.ahead_off);
                     const n = @min(r.count, f.ahead.items.len - from);
                     f.next_off = r.offset + n;
                     try c.sendMount(tag, wire.common.Rread{ .data = .{ .bytes = f.ahead.items[from..][0..n] } });
-                    if (from + n == f.ahead.items.len) f.ahead.items.len = 0;
+                    if (from + n == f.ahead.items.len) {
+                        f.ahead_off += f.ahead.items.len;
+                        f.ahead.items.len = 0;
+                    }
                     return;
                 }
                 f.ahead.items.len = 0;
+                f.eof_at = null;
                 const op = try c.newOp(tag, .read);
                 op.fid = r.fid;
                 op.offset = r.offset;
@@ -787,6 +848,10 @@ pub const Client = struct {
                 const f = c.fids.get(s.fid) orelse return c.rerror(tag, "unknown fid");
                 const op = try c.newOp(tag, .stat);
                 op.fid = s.fid;
+                if (c.cachedStat(f)) |st| {
+                    const name = if (f.path.items.len == 0) "/" else f.path.items[f.path.items.len - 1];
+                    return c.finishStat(op, &st, name);
+                }
                 try c.send(op, l.Tgetattr{ .fid = f.sfid, .request_mask = L.GETATTR_BASIC }, .{ .main = 0 });
             },
             .Twstat => |ws| {
@@ -1036,7 +1101,29 @@ pub const Client = struct {
                 if (op.dir and op.mode & 3 != wire.OREAD) return c.finishErrno(op, attr.E.ISDIR);
                 var flags = attr.openFlags(op.mode);
                 if (op.dir) flags = L.RDONLY | L.DIRECTORY;
+                // With .L.Z, a file opened to read comes with its first
+                // msize, on a new server fid.
+                if (c.dialect == .@"9P2000.L.Z" and !op.dir and op.mode & 3 != wire.OWRITE) {
+                    op.sfid = try c.tmpSfid(op);
+                    return c.send(op, l.Tlopenatread{ .fid = f.sfid, .newfid = op.sfid, .flags = flags, .count = c.msize - lopenatread_header }, .{ .main = 2 });
+                }
                 try c.send(op, l.Tlopen{ .fid = f.sfid, .flags = flags }, .{ .main = 1 });
+            },
+            2 => {
+                if (msg != .Rlopenatread) return c.unexpected();
+                const r = msg.Rlopenatread;
+                keep(op, op.sfid);
+                try c.clunk(f.sfid);
+                f.sfid = op.sfid;
+                f.open = true;
+                f.rclose = op.mode & wire.ORCLOSE != 0;
+                f.qid = r.qid;
+                f.next_off = 0;
+                f.ahead.items.len = 0;
+                try f.ahead.appendSlice(c.gpa, r.data.bytes);
+                f.ahead_off = 0;
+                f.eof_at = if (r.eof != 0) r.data.bytes.len else null;
+                return c.finish(op, p9.Ropen{ .qid = pq(f.qid), .iounit = 0 });
             },
             1 => {
                 if (msg != .Rlopen) return c.unexpected();
@@ -1055,7 +1142,8 @@ pub const Client = struct {
         const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
         // create(5) of a file that exists truncates it, unless DMEXCL: so
         // `>` in rc works on an existing file.
-        if (n == 10 and lerror(msg) == attr.E.EXIST and op.perm & wire.DMEXCL == 0) {
+        if ((n == 10 or n == 13) and lerror(msg) == attr.E.EXIST and op.perm & wire.DMEXCL == 0) {
+            if (n == 13) keep(op, op.sfid);
             op.sfid = try c.tmpSfid(op);
             return c.send(op, wire.common.Twalk{ .fid = f.sfid, .newfid = op.sfid, .wnames = .init(&.{op.name}) }, .{ .main = 11 });
         }
@@ -1099,6 +1187,15 @@ pub const Client = struct {
                 try c.clunk(f.sfid);
                 f.sfid = op.sfid;
                 return c.created(op, f, msg.Rlopen.qid);
+            },
+            // Tlcreateattr: the directory's fid stays as it was.
+            13 => {
+                if (msg != .Rlcreateattr) return c.unexpected();
+                keep(op, op.sfid);
+                try c.clunk(f.sfid);
+                f.sfid = op.sfid;
+                c.cacheStat(f, msg.Rlcreateattr.stat);
+                return c.created(op, f, msg.Rlcreateattr.stat.qid);
             },
             else => unreachable,
         }
@@ -1268,7 +1365,15 @@ pub const Client = struct {
         const op = try c.newOp(tag, .readdir);
         op.fid = fid;
         op.count = count;
-        try c.send(op, l.Treaddir{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - 11 }, .{ .main = 0 });
+        try c.readDirMore(op, f);
+    }
+
+    /// Reads more entries from the server: with .L.Z, with their
+    /// attributes.
+    fn readDirMore(c: *Client, op: *Op, f: *Fid) Allocator.Error!void {
+        if (c.dialect == .@"9P2000.L.Z")
+            return c.send(op, l.Treaddirattr{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - 11 }, .{ .main = 0 });
+        return c.send(op, l.Treaddir{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - 11 }, .{ .main = 0 });
     }
 
     /// Returns whole Dirs from the fid's buffer, as many as fit.
@@ -1287,27 +1392,41 @@ pub const Client = struct {
 
     fn stepReaddir(c: *Client, op: *Op, msg: l.R) Allocator.Error!void {
         if (lerror(msg)) |e| return c.finishErrno(op, e);
-        if (msg != .Rreaddir) return c.unexpected();
+        const data = switch (msg) {
+            .Rreaddir => |r| r.data.bytes,
+            .Rreaddirattr => |r| r.data.bytes,
+            else => return c.unexpected(),
+        };
         const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
         const a = op.allocator();
         var list: std.ArrayList(Entry) = .empty;
-        var it = wire.DirEntries.init(msg.Rreaddir.data.bytes, false);
+        var it = wire.DirEntries.init(data, msg == .Rreaddirattr);
         var last: ?u64 = null;
         while (it.next() catch return c.fail("bad directory entries from the server")) |e| {
             last = e.offset;
             if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
             if (!validName(e.name)) continue;
-            try list.append(a, .{ .name = try a.dupe(u8, e.name) });
+            // A link's attributes are its own: it's walked to its target.
+            var st = e.stat;
+            if (st) |x| if (x.mode & attr.S_IFMT == attr.S_IFLNK) {
+                st = null;
+            };
+            try list.append(a, .{ .name = try a.dupe(u8, e.name), .stat = st, .ready = st != null });
         }
         if (last) |o| f.cookie = o else f.eof = true;
         if (list.items.len == 0) {
             if (f.eof) return c.endWith(op, f);
             // Only . and ..: read on.
-            return c.send(op, l.Treaddir{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - 11 }, .{ .main = 0 });
+            return c.readDirMore(op, f);
         }
         op.entries = list.items;
-        op.entries_left = @intCast(list.items.len);
+        op.entries_left = 0;
+        for (op.entries) |e| {
+            if (!e.ready) op.entries_left += 1;
+        }
+        if (op.entries_left == 0) return c.entriesReady(op);
         for (op.entries, 0..) |*e, i| {
+            if (e.ready) continue;
             const names = try a.alloc([]const u8, 1);
             names[0] = e.name;
             e.resolve = try c.startResolve(op, @intCast(i), f, names);
@@ -1324,6 +1443,11 @@ pub const Client = struct {
     fn entryResolved(c: *Client, op: *Op, r: *Resolve) Allocator.Error!void {
         if (r.err != null or r.qids.items.len != 1) {
             // A dangling link, or an entry gone since: left out.
+            return c.entryDone(op);
+        }
+        if (r.stat) |st| {
+            try c.dropTmp(op, r.sfid);
+            op.entries[r.slot].stat = st;
             return c.entryDone(op);
         }
         keep(op, r.sfid);
@@ -1345,6 +1469,11 @@ pub const Client = struct {
     fn entryDone(c: *Client, op: *Op) Allocator.Error!void {
         op.entries_left -= 1;
         if (op.entries_left != 0) return;
+        return c.entriesReady(op);
+    }
+
+    /// Packs the entries with attributes into Dirs.
+    fn entriesReady(c: *Client, op: *Op) Allocator.Error!void {
         const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
         for (op.entries) |e| {
             const st = e.stat orelse continue;
@@ -1358,7 +1487,7 @@ pub const Client = struct {
         if (f.dirbuf.items.len == 0 and !f.eof) {
             // Every entry was left out: read on.
             op.entries = &.{};
-            return c.send(op, l.Treaddir{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - 11 }, .{ .main = 0 });
+            return c.readDirMore(op, f);
         }
         return c.endWith(op, f);
     }
@@ -1372,7 +1501,15 @@ pub const Client = struct {
         for (f.path.items) |p| try r.path.append(a, p);
         r.sfid = try c.tmpSfid(op);
         r.state = .fast;
-        try c.send(op, wire.common.Twalk{ .fid = f.sfid, .newfid = r.sfid, .wnames = .init(names) }, .{ .resolve = r });
+        // With .L.Z, the walk brings the attributes too, so a stat after
+        // it costs nothing. It fails on any miss, so a walk of several
+        // names that fails is tried again as a Twalk, for how far it got.
+        if (c.dialect == .@"9P2000.L.Z" and names.len > 0) {
+            r.compound = true;
+            try c.send(op, l.Twalkgetattr{ .fid = f.sfid, .newfid = r.sfid, .wnames = .init(names) }, .{ .resolve = r });
+        } else {
+            try c.send(op, wire.common.Twalk{ .fid = f.sfid, .newfid = r.sfid, .wnames = .init(names) }, .{ .resolve = r });
+        }
         return r;
     }
 
@@ -1406,6 +1543,10 @@ pub const Client = struct {
         const a = op.allocator();
         switch (r.state) {
             .fast => {
+                if (r.compound and lerror(msg) != null and r.names.len > 1) {
+                    r.compound = false;
+                    return c.send(op, wire.common.Twalk{ .fid = r.start, .newfid = r.sfid, .wnames = .init(r.names) }, .{ .resolve = r });
+                }
                 if (lerror(msg)) |e| {
                     // The first name failed (devmnt's walks never fail
                     // later than that with an error).
@@ -1413,13 +1554,18 @@ pub const Client = struct {
                     c.free_sfids.append(c.gpa, r.sfid) catch {};
                     return c.resolveFail(r, e);
                 }
-                if (msg != .Rwalk) return c.unexpected();
-                const qids = msg.Rwalk.wqids.slice();
+                const qids = switch (msg) {
+                    .Rwalk => |w| w.wqids.slice(),
+                    .Rwalkgetattr => |w| w.wqids.slice(),
+                    else => return c.unexpected(),
+                };
                 if (qids.len > r.names.len) return c.fail("bad walk reply from the server");
+                if (msg == .Rwalkgetattr and qids.len != r.names.len) return c.fail("bad walk reply from the server");
                 const link = for (qids, 0..) |q, i| {
                     if (q.type & wire.QTSYMLINK != 0) break i;
                 } else null;
                 if (link == null) {
+                    if (msg == .Rwalkgetattr) r.stat = msg.Rwalkgetattr.stat;
                     for (qids, r.names[0..qids.len]) |q, n| {
                         try r.qids.append(a, q);
                         try pathStep(a, &r.path, n);
@@ -1554,6 +1700,7 @@ pub const Client = struct {
             const root = f.root;
             const qid = if (qids.len == 0) f.qid else qids[qids.len - 1];
             try c.addFid(op.newfid, r.sfid, root, r.path.items, pq(qid));
+            if (r.stat) |st| c.cacheStat(c.fids.get(op.newfid).?, st);
         }
         return c.finish(op, wire.common.Rwalk{ .wqids = .init(out[0..qids.len]) });
     }
@@ -2079,4 +2226,75 @@ test "sequential reads read a whole msize ahead, and a write drops it" {
     // Nor at an offset it doesn't hold.
     const r2 = try h.ok(p9.Tread{ .fid = 2, .offset = 100, .count = 2 });
     try testing.expectEqualSlices(u8, big[100..102], r2.Rread.data.bytes);
+}
+
+test ".L.Z's compound requests save round trips" {
+    var h = try Harness.init(wire.version_lz);
+    defer h.deinit();
+    _ = try h.s.add("etc/motd", .file, "hello from .L.Z\n");
+    _ = try h.s.add("etc/passwd", .file, "root:x:0:0\n");
+    _ = try h.s.add("etc/link", .link, "motd");
+    try h.mount();
+    const Count = struct {
+        h: *Harness,
+        at: usize = 0,
+        /// The server requests since the last call.
+        fn since(k: *@This()) []const u8 {
+            const log = k.h.s.log.items[k.at..];
+            k.at = k.h.s.log.items.len;
+            return log;
+        }
+    };
+    var k: Count = .{ .h = &h };
+    _ = k.since();
+
+    // Walk and stat: one Twalkgetattr.
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{ "etc", "motd" }) });
+    _ = try h.ok(p9.Tstat{ .fid = 1 });
+    const d, _ = attr.Dir.parse(h.last[9..]).?;
+    try testing.expectEqual(@as(u64, 16), d.length);
+    try testing.expectEqualSlices(u8, &.{l.Twalkgetattr.id}, k.since());
+
+    // Walk, open, and read a small file: a Twalkgetattr and a
+    // Tlopenatread (and a clunk), and no Tread, even for the end. The
+    // attributes held answer only the next request, so the walk's go to
+    // the open's type check.
+    _ = try h.ok(p9.Tclunk{ .fid = 1 });
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{ "etc", "motd" }) });
+    _ = try h.ok(p9.Topen{ .fid = 1, .mode = wire.OREAD });
+    try testing.expectEqualStrings("hello from .L.Z\n", (try h.ok(p9.Tread{ .fid = 1, .offset = 0, .count = 8192 })).Rread.data.bytes);
+    try testing.expectEqual(@as(usize, 0), (try h.ok(p9.Tread{ .fid = 1, .offset = 16, .count = 8192 })).Rread.data.bytes.len);
+    try testing.expectEqualSlices(u8, &.{ wire.common.Tclunk.id, l.Twalkgetattr.id, l.Tlopenatread.id, wire.common.Tclunk.id }, k.since());
+
+    // Create and stat: one Tlcreateattr (and a clunk of the directory's
+    // fid).
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 2, .wnames = .init(&.{"etc"}) });
+    _ = k.since();
+    _ = try h.ok(p9.Tcreate{ .fid = 2, .name = "new", .perm = 0o640, .mode = wire.OWRITE });
+    _ = try h.ok(p9.Tstat{ .fid = 2 });
+    try testing.expectEqualSlices(u8, &.{ l.Tlcreateattr.id, wire.common.Tclunk.id }, k.since());
+    // A write drops the attributes held.
+    _ = try h.ok(p9.Twrite{ .fid = 2, .offset = 0, .data = .{ .bytes = "x" } });
+    _ = try h.ok(p9.Tstat{ .fid = 2 });
+    try testing.expectEqualSlices(u8, &.{ wire.common.Twrite.id, l.Tgetattr.id }, k.since());
+
+    // A directory: Treaddirattr until the end, and a walk and a Tgetattr
+    // only for the link's target.
+    var dirs = try h.ls(&.{"etc"}, 8192);
+    _ = &dirs;
+    try testing.expectEqual(@as(usize, 4), dirs.items.len);
+    try testing.expectEqual(@as(u64, 16), hasName(dirs.items, "link").?.length);
+    const log = k.since();
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, log, &.{l.Treaddirattr.id}));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, &.{l.Tgetattr.id}));
+}
+
+test "a .L.Z walk that fails partway still answers how far it got" {
+    var h = try Harness.init(wire.version_lz);
+    defer h.deinit();
+    _ = try h.s.add("etc/motd", .file, "x");
+    try h.mount();
+    const r = try h.rpc(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{ "etc", "nope" }) });
+    try testing.expectEqual(@as(usize, 1), r.Rwalk.wqids.n);
+    try testing.expectEqualStrings("file does not exist", try h.err(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{"nope"}) }));
 }
