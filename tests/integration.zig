@@ -5521,6 +5521,12 @@ test "a process past 100 fds gets no Plan 9 warning on its stderr [18]" {
     try netCase(&le, &.{ "/mnt/term/cwd/files", "many_fds" }, "ok many_fds\n");
 }
 
+test "an open file survives unlink for ftruncate, fstat, and mmap, and memfd_create makes one [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "unlinked" }, "ok unlinked\n");
+}
+
 // Readiness and sockets (design/0050-linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 
@@ -5574,6 +5580,12 @@ test "SCM_RIGHTS passes fds over a Unix socket, one batch per message, with MSG_
     try netCase(&le, &.{ "/mnt/term/cwd/net", "scm_rights" }, "ok scm_rights\n");
 }
 
+test "SEQPACKET socket pairs keep message bounds, pass SCM_CREDENTIALS, and stay sockets through SCM_RIGHTS [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "seqpacket" }, "ok seqpacket\n");
+}
+
 test "socket under --net=disable is EACCES [50]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5614,6 +5626,12 @@ test "netlink lists loopback for getifaddrs, and a listener on 127.0.0.1 reports
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "ifaddrs" }, "ok ifaddrs\n");
+}
+
+test "a netlink MSG_PEEK|MSG_TRUNC read sizes the next message and leaves it queued [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "netlink_peek" }, "ok netlink_peek\n");
 }
 
 test "UDP sendto and recvfrom on an unconnected socket [50]" {

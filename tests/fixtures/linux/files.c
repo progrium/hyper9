@@ -625,6 +625,35 @@ static void many_fds(void) {
 	printf("ok many_fds\n");
 }
 
+/* WebKit's shared memory: shm_open, unlink, then ftruncate and mmap
+ * the open file; and memfd_create, which does the same in one call.
+ * The file is gone from the directory but still sized, stat-able, and
+ * mappable through its fd, and a fork sees writes through the map. */
+static void unlinked(void) {
+	int fd = fresh("unl");
+	struct stat st;
+	CHECK("unlinked", fd >= 0 && unlink(path) == 0 && access(path, F_OK) != 0);
+	CHECK("unlinked", ftruncate(fd, 8192) == 0 && fstat(fd, &st) == 0 && st.st_size == 8192);
+	char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("unlinked", m != MAP_FAILED);
+	strcpy(m + 4096, "gone");
+	char b[8] = {0};
+	CHECK("unlinked", pread(fd, b, 4, 4096) == 4 && !strcmp(b, "gone"));
+	CHECK("unlinked", munmap(m, 8192) == 0 && close(fd) == 0);
+
+	fd = memfd_create("h9test", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	CHECK("unlinked", fd >= 0 && (fcntl(fd, F_GETFD) & FD_CLOEXEC));
+	CHECK("unlinked", ftruncate(fd, 4096) == 0 && fstat(fd, &st) == 0 && st.st_size == 4096);
+	CHECK("unlinked", fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) == 0);
+	m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("unlinked", m != MAP_FAILED);
+	pid_t c = fork();
+	if (c == 0) { strcpy(m, "child"); _exit(0); }
+	CHECK("unlinked", child_status(c) == 0 && !strcmp(m, "child"));
+	munmap(m, 4096), close(fd);
+	printf("ok unlinked\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -651,6 +680,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "itimer")) itimer();
 		if (all || !strcmp(n, "creds")) creds();
 		if (all || !strcmp(n, "many_fds")) many_fds();
+		if (all || !strcmp(n, "unlinked")) unlinked();
 	}
 	return failed;
 }

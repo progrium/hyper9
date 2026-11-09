@@ -909,11 +909,22 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             return okOr(if (fd < 0) error.Kern else kern.close(@intCast(fd)));
         },
         .read => return ret(try rw(p, c.int(0), c.a[1], c.a[2], -1, .read)),
-        .write => return ret(try rw(p, c.int(0), c.a[1], c.a[2], -1, .write)),
+        .write => {
+            if (try passcredWrite(p, c.int(0), c.a[2])) |e| return ret(e);
+            return ret(try rw(p, c.int(0), c.a[1], c.a[2], -1, .write));
+        },
         .pread64 => return ret(try rw(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .read)),
         .pwrite64 => return ret(try rw(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write)),
         .readv => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], -1, .read)),
-        .writev => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], -1, .write)),
+        .writev => {
+            if (passcred_live.load(.monotonic) > 0) {
+                var total: u64 = 0;
+                var i: u64 = 0;
+                while (i < @min(c.a[2], 1024)) : (i += 1) total += (try p.iovec(c.a[1], i))[1];
+                if (try passcredWrite(p, c.int(0), total)) |e| return ret(e);
+            }
+            return ret(try rwv(p, c.int(0), c.a[1], c.a[2], -1, .write));
+        },
         .preadv => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .read)),
         .pwritev => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write)),
         .sendfile => return ret(try sendfile(p, c.int(0), c.int(1), c.a[2], c.a[3], p.is32())),
@@ -1343,6 +1354,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .signalfd4 => return ret(try signalfd(p, c.int(0), c.a[1], c.a[2], c.uint(3))),
         .eventfd => return ret(try eventfd(p, c.uint(0), 0)),
         .eventfd2 => return ret(try eventfd(p, c.uint(0), c.uint(1))),
+        .memfd_create => return ret(try memfdCreate(p, c.uint(1))),
         .epoll_create => return ret(if (c.int(0) <= 0) -E.INVAL else try epollCreate(p, 0)),
         .epoll_create1 => return ret(try epollCreate(p, c.uint(0))),
         .epoll_ctl => return ret(try epollCtl(p, c.int(0), c.uint(1), c.int(2), c.a[3])),
@@ -1763,6 +1775,33 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     return fd;
 }
 
+var memfd_seq: std.atomic.Value(u32) = .init(0);
+
+/// memfd_create: a file in the machine's private /dev/shm (or /tmp
+/// without one), opened and then removed, so it lives in memory until
+/// its last close, as Linux's does. WebKit makes its shared memory with
+/// it, and GTK and Mesa their buffers. Seals are accepted and not kept.
+fn memfdCreate(p: *Process, flags: u32) Err!i64 {
+    const MFD_CLOEXEC = 1;
+    const MFD_ALLOW_SEALING = 2;
+    const MFD_NOEXEC_SEAL = 8;
+    const MFD_EXEC = 0x10;
+    const OEXCL = 0x1000;
+    if (flags & ~@as(u32, MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL | MFD_EXEC) != 0) return -E.INVAL;
+    var omode: c_int = kern.ORDWR;
+    if (flags & MFD_CLOEXEC != 0) omode |= OCEXEC;
+    const dirs = [_][]const u8{ "/dev/shm", "/tmp" };
+    for (dirs) |d| {
+        var b: [96]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&b, "{s}/.memfd.{d}.{d}", .{ d, p.tgid(), memfd_seq.fetchAdd(1, .monotonic) }) catch unreachable;
+        const fd = kern.create(path, omode | OEXCL, 0o600) catch continue;
+        kern.remove(path) catch {};
+        p.fdClosed(fd);
+        return fd;
+    }
+    return kerr();
+}
+
 fn isDir(p: *Process, dirfd: i32, path: [:0]const u8) bool {
     var b: [512]u8 = undefined;
     const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
@@ -1782,6 +1821,7 @@ fn rw(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Dir) 
         const len = if (scm_live.load(.monotonic) > 0) scmClamp(key, len_in) else len_in;
         const r = try rwOne(p, fd, buf, len, off, dir);
         if (r > 0 and scm_live.load(.monotonic) > 0) scmConsumed(p, key, @intCast(r));
+        if (r > 0 and nlq_live.load(.monotonic) > 0) nlqConsumed(key, @intCast(r));
         return r;
     };
     return rwOne(p, fd, buf, len_in, off, dir);
@@ -1868,7 +1908,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
             .read => kern.pread(@intCast(fd), s, off),
             .write => kern.pwrite(@intCast(fd), s, off),
         } catch return kerr();
-        if (dir == .read and is_pipe) return @intCast(pipeMore(fd, s, n));
+        if (dir == .read and is_pipe) return @intCast(pipeMore(p, fd, s, n));
         if (file) |k| fileIo(fd, k, off, s[0..n], dir);
         return @intCast(n);
     }
@@ -1879,7 +1919,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     switch (dir) {
         .read => {
             var n = kern.pread(@intCast(fd), tmp, off) catch return kerr();
-            if (is_pipe) n = pipeMore(fd, tmp, n);
+            if (is_pipe) n = pipeMore(p, fd, tmp, n);
             if (file) |k| fileIo(fd, k, off, tmp[0..n], .read);
             p.mm.copy(buf, tmp[0..n], true) catch return -E.FAULT;
             return @intCast(n);
@@ -2023,8 +2063,12 @@ fn cachedRead(p: *Process, fd: i32, key: locks.Key, buf: u64, len: u64, off: u64
 
 /// A Linux pipe read takes everything queued, where a 9front one stops
 /// at a write's boundary: read on while more is queued and there's room.
-fn pipeMore(fd: i32, buf: []u8, n_in: usize) usize {
+/// A datagram or seqpacket socket's read takes one message, as on Linux:
+/// WebKit's IPC reads two messages run together as one and drops the
+/// second.
+fn pipeMore(p: *Process, fd: i32, buf: []u8, n_in: usize) usize {
     var n = n_in;
+    if (n > 0 and n < buf.len) if (unixOf(p, fd)) |u| if (u.stype != SOCK_STREAM) return n;
     while (n > 0 and n < buf.len) {
         const r = kc.fdReady(fd, kc.POLLIN) orelse break;
         if (r & kc.POLLIN == 0 or r & kc.POLLHUP != 0) break;
@@ -2037,6 +2081,7 @@ fn pipeMore(fd: i32, buf: []u8, n_in: usize) usize {
 
 fn rwv(p: *Process, fd: i32, iov: u64, cnt: u64, off_in: i64, comptime dir: Dir) Err!i64 {
     if (cnt > 1024) return -E.INVAL;
+    if (off_in == -1 and cnt > 1) if (try msgSockRwv(p, fd, iov, cnt, dir)) |r| return r;
     var total: i64 = 0;
     var off = off_in;
     // A read goes on to the next buffer only from a file: from a pipe,
@@ -2062,6 +2107,63 @@ fn rwv(p: *Process, fd: i32, iov: u64, cnt: u64, off_in: i64, comptime dir: Dir)
         if (@as(u64, @intCast(n)) < len) break;
     }
     return total;
+}
+
+/// readv, writev, sendmsg, and recvmsg with several buffers on a
+/// datagram or seqpacket Unix socket: one message, gathered into one
+/// pipe write or scattered from one pipe read, since a pipe write per
+/// buffer would send each as its own message (WebKit's IPC sends a
+/// header and a body as two buffers of one message). Null for any other
+/// fd, to go buffer by buffer.
+fn msgSockRwv(p: *Process, fd: i32, iov: u64, cnt: u64, comptime dir: Dir) Err!?i64 {
+    const info = kc.fdInfo(fd) catch return null;
+    if (info.dc != '|' or info.dir) return null;
+    const u = unixOf(p, fd) orelse return null;
+    if (u.stype == SOCK_STREAM or u.netlink) return null;
+    if (u.state != .connected) return -E.NOTCONN;
+    var total: u64 = 0;
+    var i: u64 = 0;
+    while (i < cnt) : (i += 1) total += (try p.iovec(iov, i))[1];
+    const max = 4 << 20;
+    if (total > max) return -E.MSGSIZE;
+    if (total == 0) return null;
+    const tmp = p.gpa.alloc(u8, total) catch return -E.NOMEM;
+    defer p.gpa.free(tmp);
+    const want: u32 = if (dir == .read) kc.POLLIN else kc.POLLOUT;
+    if (flagsOf(p, fd).nonblock) {
+        const r = kc.fdReady(fd, want) orelse return -E.BADF;
+        if (r & (want | kc.POLLHUP | kc.POLLERR) == 0) return -E.AGAIN;
+    }
+    switch (dir) {
+        .write => {
+            var o: usize = 0;
+            i = 0;
+            while (i < cnt) : (i += 1) {
+                const base, const len = try p.iovec(iov, i);
+                const l: usize = @intCast(len);
+                if (l == 0) continue;
+                p.mm.copy(base, tmp[o..][0..l], false) catch return -E.FAULT;
+                o += l;
+            }
+            return pipeWrite(p, fd, tmp);
+        },
+        .read => {
+            const key = scmKey(info.qpath, false);
+            const len = if (scm_live.load(.monotonic) > 0) scmClamp(key, total) else total;
+            const n = kern.pread(@intCast(fd), tmp[0..@intCast(len)], -1) catch return kerr();
+            if (n > 0 and scm_live.load(.monotonic) > 0) scmConsumed(p, key, n);
+            var o: usize = 0;
+            i = 0;
+            while (i < cnt and o < n) : (i += 1) {
+                const base, const l0 = try p.iovec(iov, i);
+                const l = @min(@as(usize, @intCast(l0)), n - o);
+                if (l == 0) continue;
+                p.mm.copy(base, tmp[o..][0..l], true) catch return -E.FAULT;
+                o += l;
+            }
+            return @intCast(n);
+        },
+    }
 }
 
 /// sendfile; on i386 its offset is a 32-bit off_t unless it's sendfile64.
@@ -2151,6 +2253,10 @@ fn fcntl(p: *Process, fd: i32, cmd: i32, arg: u64) Err!i64 {
             if (!p.is32()) return -E.INVAL;
             return recordLock(p, fd, arg, false, cmd == 12, cmd == 14, .i386_64);
         },
+        // F_ADD_SEALS and F_GET_SEALS, for memfd_create's files: seals
+        // are accepted and not enforced.
+        1033 => return if (kc.fdInfo(fd)) |_| 0 else |_| -E.BADF,
+        1034 => return if (kc.fdInfo(fd)) |_| 0 else |_| -E.BADF,
         else => return -E.INVAL,
     }
 }
@@ -2458,7 +2564,7 @@ fn statFd(p: *Process, fd: i32, buf: u64, fmt: StatFmt) Err!i64 {
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
     // A pipe end's Dir is its directory's in some kernels; trust the fd.
     if (kc.fdInfo(fd)) |info| {
-        if (info.dc == '|' and !info.dir) st = attr.Stat.fromDir(&d, .fifo, 0, 0);
+        if (info.dc == '|' and !info.dir) st = attr.Stat.fromDir(&d, if (unixOf(p, fd) != null) .sock else .fifo, 0, 0);
     } else |_| {}
     try putStat(p, buf, &st, fmt);
     return 0;
@@ -4036,6 +4142,7 @@ const SO_ERROR = 4;
 const SO_SNDBUF = 7;
 const SO_RCVBUF = 8;
 const SO_KEEPALIVE = 9;
+const SO_PASSCRED = 16;
 const SO_ACCEPTCONN = 30;
 const SO_PROTOCOL = 38;
 const SO_DOMAIN = 39;
@@ -4184,6 +4291,17 @@ fn socketpair(p: *Process, domain: u32, type_in: u32, sv: u64) Err!i64 {
     for (fds) |fd| {
         if (type_in & SOCK_CLOEXEC != 0) kc.setCloexec(fd, true) catch {};
         if (type_in & SOCK_NONBLOCK != 0) setFlags(p, fd, .{ .nonblock = true });
+        // Both ends are connected Unix sockets, so setsockopt, getsockopt,
+        // and fstat treat them as sockets, not pipes: WebKit sets
+        // SO_PASSCRED on its IPC socketpair and aborts on ENOTSOCK.
+        const r = unixPut(p, fd, .{ .stype = @intCast(st), .state = .connected });
+        if (r < 0) {
+            for (fds) |f| {
+                unixClosed(p, f);
+                kern.close(f) catch {};
+            }
+            return r;
+        }
     }
     std.mem.writeInt(i32, b[0..4], fds[0], .little);
     std.mem.writeInt(i32, b[4..8], fds[1], .little);
@@ -4428,7 +4546,22 @@ fn shutdownCall(p: *Process, fd: i32, how: u32) Err!i64 {
 }
 
 fn setsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, len: u64) Err!i64 {
-    if (unixOf(p, fd) != null) return 0;
+    if (unixOf(p, fd) != null) {
+        if (level == SOL_SOCKET and name == SO_PASSCRED) {
+            var v: i32 = 0;
+            if (len >= 4) {
+                var b: [4]u8 = undefined;
+                try p.readMem(va, &b);
+                v = std.mem.readInt(i32, &b, .little);
+            } else if (len > 0) {
+                var b: [1]u8 = undefined;
+                try p.readMem(va, &b);
+                v = b[0];
+            }
+            if (scmReadKey(fd)) |key| passcredSet(key, v != 0);
+        }
+        return 0;
+    }
     const so = sockOf(p, fd) orelse return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
     if (udpOffload(level, name)) return -E.NOPROTOOPT;
     var v: i32 = 0;
@@ -4466,7 +4599,7 @@ fn setsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, len: u64) Er
 }
 
 fn getsockopt(p: *Process, fd: i32, level: u32, name: u32, va: u64, lenp: u64) Err!i64 {
-    if (unixOf(p, fd)) |u| return unixGetsockopt(p, u, level, name, va, lenp);
+    if (unixOf(p, fd)) |u| return unixGetsockopt(p, u, fd, level, name, va, lenp);
     const so = sockOf(p, fd) orelse return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
     if (udpOffload(level, name)) return -E.NOPROTOOPT;
     const v: i32 = switch (level) {
@@ -4540,7 +4673,10 @@ fn sendCall(p: *Process, fd: i32, buf_va: u64, len_in: u64, flags: u32, to_va: u
     const so = sockOf(p, fd) orelse {
         // send on a pipe from socketpair, or a Unix socket, is a write.
         // A netlink socket's too: rw takes its request.
-        if (kc.fdInfo(fd) catch null) |info| if (info.dc == '|') return rw(p, fd, buf_va, len_in, -1, .write);
+        if (kc.fdInfo(fd) catch null) |info| if (info.dc == '|') {
+            if (try passcredWrite(p, fd, len_in)) |e| return e;
+            return rw(p, fd, buf_va, len_in, -1, .write);
+        };
         return if (kc.fdInfo(fd)) |_| -E.NOTSOCK else |_| -E.BADF;
     };
     const len = @min(len_in, 1 << 20);
@@ -4590,6 +4726,10 @@ fn sendBuf(p: *Process, fd: i32, s: *Sock, data: []const u8, flags: u32, to_va: 
 fn recvCall(p: *Process, fd: i32, buf_va: u64, len_in: u64, flags: u32, from_va: u64, from_len: u64) Err!i64 {
     const so = sockOf(p, fd) orelse {
         if (kc.fdInfo(fd) catch null) |info| if (info.dc == '|') {
+            if (try nlPeekCall(p, fd, &.{.{ buf_va, len_in }}, flags)) |r| {
+                if (r >= 0 and from_va != 0) try writeNlAddr(p, from_va, from_len, 0);
+                return r;
+            }
             const r = try rw(p, fd, buf_va, len_in, -1, .read);
             if (r >= 0 and from_va != 0) if (unixOf(p, fd)) |u| if (u.netlink) try writeNlAddr(p, from_va, from_len, 0);
             return r;
@@ -4644,8 +4784,8 @@ fn sendmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
                 }
                 return netlinkSend(p, fd, tmp[0..off]);
             };
-            if (m.control != 0) {
-                const r = try scmSend(p, fd, info.qpath, m.control, m.controllen, try m.total(p));
+            if (m.control != 0 or passcred_live.load(.monotonic) > 0) {
+                const r = try scmSend(p, fd, info.qpath, m.control, if (m.control == 0) 0 else m.controllen, try m.total(p));
                 if (r < 0) return r;
             }
             return rwv(p, fd, m.iov, m.iovlen, -1, .write);
@@ -4671,6 +4811,17 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     const so = sockOf(p, fd) orelse {
         if (kc.fdInfo(fd) catch null) |info| if (info.dc == '|') {
             const m = try MsgHdr.read(p, msg_va);
+            if (flags & MSG_PEEK != 0 and nlq_live.load(.monotonic) > 0 and m.iovlen <= 1024) {
+                var iv: [16][2]u64 = undefined;
+                const k: usize = @intCast(@min(m.iovlen, iv.len));
+                for (iv[0..k], 0..) |*v, i| v.* = try p.iovec(m.iov, i);
+                if (try nlPeekCall(p, fd, iv[0..k], flags)) |r| {
+                    try p.writePtr(m.controllen_va, 0);
+                    try p.writeU32(m.flags_va, 0);
+                    if (r >= 0 and m.name != 0) try writeNlAddr(p, m.name, m.namelen_va, 0);
+                    return r;
+                }
+            }
             p.scm_want = true;
             p.scm_got = null;
             const r = rwv(p, fd, m.iov, m.iovlen, -1, .read) catch |e| {
@@ -4680,8 +4831,13 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
                 return e;
             };
             p.scm_want = false;
-            const got = p.scm_got;
+            var got = p.scm_got;
             p.scm_got = null;
+            // The kernel sends netlink answers: its pid and ids are 0.
+            // GLib's network monitor ignores a message without them.
+            if (got == null and r > 0 and passcred_live.load(.monotonic) > 0) if (unixOf(p, fd)) |u| if (u.netlink) if (scmReadKey(fd)) |key| if (passcredHas(key)) {
+                got = .{ .key = key, .ahead = 0, .len = 0, .base = 0, .n = 0, .modes = undefined, .cred = .{ 0, 0, 0 } };
+            };
             try scmRecv(p, m, flags, got);
             if (r >= 0 and m.name != 0) if (unixOf(p, fd)) |u| if (u.netlink) try writeNlAddr(p, m.name, m.namelen_va, 0);
             return r;
@@ -4734,12 +4890,44 @@ pub const ScmBatch = struct {
     base: u32,
     n: u32,
     modes: [scm_max]u8,
+    /// Each fd's socket type if it's a connected Unix socket (as from
+    /// socketpair), or 0, so the receiver's fd is a socket too: WebKit
+    /// passes its processes the ends of socketpairs.
+    stypes: [scm_max]u8 = @splat(0),
+    /// The sender's pid, uid, and gid, for a reader with SO_PASSCRED.
+    cred: ?[3]u32 = null,
 };
 const scm_max = 64;
 var scm_mutex: std.atomic.Mutex = .unlocked;
 var scm_list: std.ArrayList(ScmBatch) = .empty;
 var scm_live: std.atomic.Value(usize) = .init(0);
 var scm_seq: std.atomic.Value(u32) = .init(0);
+/// The read keys (`scmKey`) of Unix socket ends with SO_PASSCRED set.
+/// A message sent toward one carries the sender's credentials, which
+/// recvmsg gives as SCM_CREDENTIALS, as Linux attaches them whether or
+/// not the sender asked. WebKit reads its child's pid this way. Under
+/// scm_mutex.
+var passcred_keys: std.AutoHashMapUnmanaged(u64, void) = .empty;
+var passcred_live: std.atomic.Value(usize) = .init(0);
+const SCM_CREDENTIALS = 2;
+
+fn passcredSet(key: u64, on: bool) void {
+    scmLock();
+    defer scm_mutex.unlock();
+    if (on) {
+        passcred_keys.put(scm_gpa, key, {}) catch return;
+    } else {
+        _ = passcred_keys.remove(key);
+    }
+    passcred_live.store(passcred_keys.count(), .monotonic);
+}
+
+fn passcredHas(key: u64) bool {
+    if (passcred_live.load(.monotonic) == 0) return false;
+    scmLock();
+    defer scm_mutex.unlock();
+    return passcred_keys.contains(key);
+}
 const scm_gpa = @import("../web.zig").gpa;
 const SCM_RIGHTS = 1;
 const MSG_CMSG_CLOEXEC = 0x40000000;
@@ -4839,6 +5027,20 @@ fn scmDiscard(b: ScmBatch) void {
 
 /// sendmsg's control messages: SCM_RIGHTS fds are posted and queued for
 /// the peer; SCM_CREDENTIALS and others are accepted and dropped.
+/// A plain write, writev, or send on a Unix socket whose reader set
+/// SO_PASSCRED carries the writer's credentials too, as on Linux;
+/// sendmsg attaches them through scmSend itself. Returns an error to
+/// fail the write with, or null.
+fn passcredWrite(p: *Process, fd: i32, len: u64) Err!?i64 {
+    if (passcred_live.load(.monotonic) == 0) return null;
+    const u = unixOf(p, fd) orelse return null;
+    if (u.netlink) return null;
+    const info = kc.fdInfo(fd) catch return null;
+    if (info.dc != '|') return null;
+    const r = try scmSend(p, fd, info.qpath, 0, 0, len);
+    return if (r < 0) r else null;
+}
+
 fn scmSend(p: *Process, fd: i32, qpath: u64, ctl: u64, ctllen: u64, msg_len: u64) Err!i64 {
     const is32 = p.is32();
     const hdr: usize = if (is32) 12 else 16;
@@ -4866,14 +5068,17 @@ fn scmSend(p: *Process, fd: i32, qpath: u64, ctl: u64, ctllen: u64, msg_len: u64
         }
         off += (len + al - 1) & ~(al - 1);
     }
-    if (n == 0) return 0;
-    var b: ScmBatch = .{ .key = scmKey(qpath, true), .ahead = 0, .len = msg_len, .base = scm_seq.fetchAdd(n, .monotonic), .n = 0, .modes = undefined };
+    const key = scmKey(qpath, true);
+    const cred: ?[3]u32 = if (passcredHas(key)) .{ p.tgid(), p.cred.uid[1], p.cred.gid[1] } else null;
+    if (n == 0 and cred == null) return 0;
+    var b: ScmBatch = .{ .key = key, .ahead = 0, .len = msg_len, .base = scm_seq.fetchAdd(n, .monotonic), .n = 0, .modes = undefined, .cred = cred };
     while (b.n < n) : (b.n += 1) {
         const info = kc.fdInfo(fds[b.n]) catch {
             scmDiscard(b);
             return -E.BADF;
         };
         b.modes[b.n] = info.mode;
+        b.stypes[b.n] = if (unixOf(p, fds[b.n])) |u| (if (u.state == .connected and !u.netlink) u.stype else 0) else 0;
         var nb: [32]u8 = undefined;
         const r = srvPost(scmPost(b.base, b.n, &nb)[3..], @intCast(fds[b.n]));
         if (r < 0) {
@@ -4892,8 +5097,10 @@ fn scmSend(p: *Process, fd: i32, qpath: u64, ctl: u64, ctllen: u64, msg_len: u64
     return 0;
 }
 
-/// recvmsg's control data: the fds of the batch its read took, opened
-/// from their posts, as many as fit (MSG_CTRUNC and closed otherwise).
+/// recvmsg's control data: the sender's credentials if the reader asked
+/// for them (SO_PASSCRED), then the fds of the batch its read took,
+/// opened from their posts, as many as fit (MSG_CTRUNC and closed
+/// otherwise).
 fn scmRecv(p: *Process, m: MsgHdr, flags: u32, got: ?ScmBatch) Err!void {
     try p.writeU32(m.flags_va, 0);
     const b = got orelse {
@@ -4904,36 +5111,55 @@ fn scmRecv(p: *Process, m: MsgHdr, flags: u32, got: ?ScmBatch) Err!void {
     const is32 = p.is32();
     const hdr: usize = if (is32) 12 else 16;
     const al: u64 = if (is32) 4 else 8;
-    const room: u64 = if (m.control == 0 or m.controllen < hdr + 4) 0 else (m.controllen - hdr) / 4;
-    var out: [scm_max]i32 = undefined;
+    const cap: u64 = if (m.control == 0) 0 else m.controllen;
+    var buf: [32 + 16 + 4 * scm_max]u8 = @splat(0);
+    var used: u64 = 0;
+    var truncated = false;
+    if (b.cred) |c| {
+        const len = hdr + 12;
+        if (cap >= len) {
+            putCmsgHdr(buf[0..hdr], is32, len, SCM_CREDENTIALS);
+            for (c, 0..) |v, j| std.mem.writeInt(u32, buf[hdr + 4 * j ..][0..4], v, .little);
+            used = (len + al - 1) & ~(al - 1);
+        } else truncated = true;
+    }
+    const room: u64 = if (cap < used + hdr + 4) 0 else (cap - used - hdr) / 4;
     var k: u32 = 0;
     var i: u32 = 0;
     while (i < b.n and k < room) : (i += 1) {
         var nb: [32]u8 = undefined;
         const nfd = kern.open(scmPost(b.base, i, &nb), b.modes[i]) catch continue;
         if (flags & MSG_CMSG_CLOEXEC != 0) kc.setCloexec(nfd, true) catch {};
-        out[k] = nfd;
+        if (b.stypes[i] != 0 and unixOf(p, nfd) == null) _ = unixPut(p, nfd, .{ .stype = b.stypes[i], .state = .connected });
+        std.mem.writeInt(i32, buf[@intCast(used + hdr + 4 * k)..][0..4], nfd, .little);
         k += 1;
     }
-    if (k < b.n) try p.writeU32(m.flags_va, MSG_CTRUNC);
-    if (k == 0) {
+    if (k < b.n) truncated = true;
+    if (k > 0) {
+        const len = hdr + 4 * @as(u64, k);
+        putCmsgHdr(buf[@intCast(used)..][0..hdr], is32, len, SCM_RIGHTS);
+        used += len;
+    }
+    if (truncated) try p.writeU32(m.flags_va, MSG_CTRUNC);
+    if (used == 0) {
         try p.writePtr(m.controllen_va, 0);
         return;
     }
-    const len = hdr + 4 * @as(u64, k);
-    var buf: [16 + 4 * scm_max]u8 = @splat(0);
+    try p.writeMem(m.control, buf[0..@intCast(used)]);
+    try p.writePtr(m.controllen_va, @min((used + al - 1) & ~(al - 1), cap));
+}
+
+/// A struct cmsghdr: its length, SOL_SOCKET, and `typ`.
+fn putCmsgHdr(h: []u8, is32: bool, len: u64, typ: i32) void {
     if (is32) {
-        std.mem.writeInt(u32, buf[0..4], @intCast(len), .little);
-        std.mem.writeInt(i32, buf[4..8], SOL_SOCKET, .little);
-        std.mem.writeInt(i32, buf[8..12], SCM_RIGHTS, .little);
+        std.mem.writeInt(u32, h[0..4], @intCast(len), .little);
+        std.mem.writeInt(i32, h[4..8], SOL_SOCKET, .little);
+        std.mem.writeInt(i32, h[8..12], typ, .little);
     } else {
-        std.mem.writeInt(u64, buf[0..8], len, .little);
-        std.mem.writeInt(i32, buf[8..12], SOL_SOCKET, .little);
-        std.mem.writeInt(i32, buf[12..16], SCM_RIGHTS, .little);
+        std.mem.writeInt(u64, h[0..8], len, .little);
+        std.mem.writeInt(i32, h[8..12], SOL_SOCKET, .little);
+        std.mem.writeInt(i32, h[12..16], typ, .little);
     }
-    for (out[0..k], 0..) |f, j| std.mem.writeInt(i32, buf[hdr + 4 * j ..][0..4], f, .little);
-    try p.writeMem(m.control, buf[0..@intCast(len)]);
-    try p.writePtr(m.controllen_va, @min((len + al - 1) & ~(al - 1), m.controllen));
 }
 
 /// UDP segmentation offload (UDP_SEGMENT) and receive coalescing
@@ -5120,9 +5346,126 @@ fn netlinkSend(p: *Process, fd: i32, req: []const u8) Err!i64 {
         return kerr();
     };
     kern.close(fds[1]) catch {};
+    const old_key = scmReadKey(fd);
     const r = unixSwap(p, fd, fds[0]);
     if (r < 0) return r;
+    if (old_key) |k| nlqDrop(k);
+    if (scmReadKey(fd)) |k| nlqPut(k, out.items);
     return @intCast(req.len);
+}
+
+// Netlink answers, kept beside the pipe that holds them by its read key
+// (`scmKey`), so that MSG_PEEK sees the next one without taking it from
+// the pipe. GLib's network monitor peeks with MSG_TRUNC and no buffer to
+// learn a message's size before reading it, and spun on a peek that
+// read 0 bytes.
+const NlQueue = struct {
+    data: []u8,
+    /// Each message's length, in order; `head` is the next one to read.
+    lens: []u32,
+    head: usize = 0,
+    off: usize = 0,
+};
+var nlq_mutex: std.atomic.Mutex = .unlocked;
+var nlq: std.AutoHashMapUnmanaged(u64, NlQueue) = .empty;
+var nlq_live: std.atomic.Value(usize) = .init(0);
+
+fn nlqLock() void {
+    while (!nlq_mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn nlqFree(q: NlQueue) void {
+    scm_gpa.free(q.data);
+    scm_gpa.free(q.lens);
+}
+
+fn nlqPut(key: u64, msgs: []const []u8) void {
+    var total: usize = 0;
+    for (msgs) |m| total += m.len;
+    const data = scm_gpa.alloc(u8, total) catch return;
+    const lens = scm_gpa.alloc(u32, msgs.len) catch {
+        scm_gpa.free(data);
+        return;
+    };
+    var o: usize = 0;
+    for (msgs, 0..) |m, i| {
+        @memcpy(data[o..][0..m.len], m);
+        lens[i] = @intCast(m.len);
+        o += m.len;
+    }
+    nlqLock();
+    defer nlq_mutex.unlock();
+    const g = nlq.getOrPut(scm_gpa, key) catch {
+        nlqFree(.{ .data = data, .lens = lens });
+        return;
+    };
+    if (g.found_existing) nlqFree(g.value_ptr.*);
+    g.value_ptr.* = .{ .data = data, .lens = lens };
+    nlq_live.store(nlq.count(), .monotonic);
+}
+
+fn nlqDrop(key: u64) void {
+    if (nlq_live.load(.monotonic) == 0) return;
+    nlqLock();
+    defer nlq_mutex.unlock();
+    if (nlq.fetchRemove(key)) |e| nlqFree(e.value);
+    nlq_live.store(nlq.count(), .monotonic);
+}
+
+/// A read took n bytes from the pipe: the messages they cover are gone.
+/// A read takes at least one whole message, as a datagram read does.
+fn nlqConsumed(key: u64, n: usize) void {
+    nlqLock();
+    defer nlq_mutex.unlock();
+    const q = nlq.getPtr(key) orelse return;
+    var left = n;
+    var first = true;
+    while (q.head < q.lens.len) {
+        const l = q.lens[q.head];
+        if (!first and l > left) break;
+        q.off += l;
+        q.head += 1;
+        left -|= l;
+        first = false;
+        if (left == 0) break;
+    }
+}
+
+/// MSG_PEEK on a netlink socket: copies the next message into `out` (up
+/// to its length) and gives the message's full length, or null when
+/// there's none queued.
+fn nlqPeek(key: u64, out: []u8) ?struct { copied: usize, len: usize } {
+    nlqLock();
+    defer nlq_mutex.unlock();
+    const q = nlq.getPtr(key) orelse return null;
+    if (q.head >= q.lens.len) return null;
+    const l = q.lens[q.head];
+    const c = @min(out.len, l);
+    @memcpy(out[0..c], q.data[q.off..][0..c]);
+    return .{ .copied = c, .len = l };
+}
+
+/// A peek on a netlink socket, into the guest's buffers: the count, as
+/// MSG_TRUNC asks, or null to read as usual.
+fn nlPeekCall(p: *Process, fd: i32, iov: []const [2]u64, flags: u32) Err!?i64 {
+    if (nlq_live.load(.monotonic) == 0 or flags & MSG_PEEK == 0) return null;
+    const u = unixOf(p, fd) orelse return null;
+    if (!u.netlink) return null;
+    const key = scmReadKey(fd) orelse return null;
+    var room: usize = 0;
+    for (iov) |v| room += @intCast(@min(v[1], 1 << 16));
+    const tmp = p.gpa.alloc(u8, room) catch return -E.NOMEM;
+    defer p.gpa.free(tmp);
+    const r = nlqPeek(key, tmp) orelse
+        return if (flags & MSG_DONTWAIT != 0 or flagsOf(p, fd).nonblock) -E.AGAIN else null;
+    var o: usize = 0;
+    for (iov) |v| {
+        if (o >= r.copied) break;
+        const l = @min(@as(usize, @intCast(@min(v[1], 1 << 16))), r.copied - o);
+        try p.writeMem(v[0], tmp[o..][0..l]);
+        o += l;
+    }
+    return @intCast(if (flags & MSG_TRUNC != 0) r.len else r.copied);
 }
 
 /// A sockaddr_nl: family, pad, port id, groups.
@@ -5344,7 +5687,7 @@ fn writeUnixAddr(p: *Process, va: u64, lenp: u64, path: []const u8) Err!void {
     try p.writeMem(lenp, &lb);
 }
 
-fn unixGetsockopt(p: *Process, u: *USock, level: u32, name: u32, va: u64, lenp: u64) Err!i64 {
+fn unixGetsockopt(p: *Process, u: *USock, fd: i32, level: u32, name: u32, va: u64, lenp: u64) Err!i64 {
     const SO_PEERCRED = 17;
     var b: [12]u8 = @splat(0);
     var n: u32 = 4;
@@ -5360,6 +5703,7 @@ fn unixGetsockopt(p: *Process, u: *USock, level: u32, name: u32, va: u64, lenp: 
             SO_DOMAIN => AF_UNIX,
             SO_ACCEPTCONN => @intFromBool(u.state == .listening),
             SO_SNDBUF, SO_RCVBUF => 212992,
+            SO_PASSCRED => @intFromBool(if (scmReadKey(fd)) |key| passcredHas(key) else false),
             else => 0,
         };
         std.mem.writeInt(i32, b[0..4], v, .little);
@@ -5396,6 +5740,8 @@ fn unixClosed(p: *Process, fd: i32) void {
     if (key_len > 0) srvRemove(key[0..key_len]);
     // fds passed to this end that it never read are closed with it.
     if (scm_live.load(.monotonic) > 0) scmDropKey(scmKey(info.qpath, false));
+    if (passcred_live.load(.monotonic) > 0) passcredSet(scmKey(info.qpath, false), false);
+    if (nlq_live.load(.monotonic) > 0) nlqDrop(scmKey(info.qpath, false));
 }
 
 // Readiness.

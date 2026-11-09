@@ -807,6 +807,22 @@ adopt(Ovc *o)
 	return 0;
 }
 
+/*
+ * An open file whose name was removed: its node lives on until the last
+ * close, so stat and wstat (a truncate) still reach it, as they do on
+ * Linux. WebKit makes its shared memory by opening a file in /dev/shm,
+ * removing it, and then truncating it to size.
+ */
+static int
+removedopen(Chan *c)
+{
+	Ovc *o;
+
+	o = c->aux;
+	return (c->flag & COPEN) != 0 && o->node != nil && o->node != o->inst->root &&
+		o->node->parent == nil && o->node->kind == Ncopy;
+}
+
 /* Brings a chan up to date with the tree, for operations other than I/O on an open chan. */
 static void
 refresh(Chan *c)
@@ -814,6 +830,8 @@ refresh(Chan *c)
 	Ovc *o;
 
 	o = c->aux;
+	if(removedopen(c))
+		return;
 	if(adopt(o) < 0)
 		error(Enonexist);
 	if(o->node != nil && (c->flag & COPEN) == 0)
@@ -2323,7 +2341,7 @@ ovwstat(Chan *c, uchar *db, int n)
 	Node *nd;
 	Dir d;
 	char *strs;
-	int isdir, chname, chmode, chmtime, chlen;
+	int isdir, chname, chmode, chmtime, chlen, gone;
 
 	o = c->aux;
 	in = o->inst;
@@ -2345,6 +2363,7 @@ ovwstat(Chan *c, uchar *db, int n)
 		c->qid = o->node->qid;
 	}
 	refresh(c);
+	gone = removedopen(c);
 	isdir = (c->qid.type & QTDIR) != 0;
 	nd = o->node;
 	chname = d.name[0] != '\0' &&
@@ -2360,6 +2379,8 @@ ovwstat(Chan *c, uchar *db, int n)
 		error(Eperm);	/* a lower directory can't be renamed */
 	if(o->node == in->root && chname)
 		error(Eperm);
+	if(gone && chname)
+		error(Enonexist);
 	if(chname || chmode || chmtime || chlen){
 		if(nd == nil){
 			if(isdir){
@@ -2378,7 +2399,8 @@ ovwstat(Chan *c, uchar *db, int n)
 			nd->length = d.length;
 			nd->qid.vers++;
 		}
-		changed(in, o->path);
+		if(!gone)
+			changed(in, o->path);
 		if(chname){
 			ovrename(c, nd, d.name);
 			changed(in, o->path);
