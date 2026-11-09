@@ -360,13 +360,15 @@ function policyFlags(policy = {}) {
  * - memory: --memory, such as '256M'
  * - policy: see policyFlags
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
+ * - tty: the terminal is one to Linux programs (isatty, termios and raw
+ *   mode), as a host terminal is; for a terminal that handles raw mode
  *
  * machine.run(argv) runs h9 with the flags and argv (['rc', '-i'], say)
  * and resolves to its exit status. machine.input(bytes or string) types,
  * machine.interrupt() is the interrupt key, and machine.terminate() ends
  * the Worker.
  */
-export async function createMachine({ root, memory, policy, terminal } = {}) {
+export async function createMachine({ root, memory, policy, terminal, tty = false } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const worker = new Worker(new URL('worker.js', import.meta.url), { type: 'module' });
   const enc = new TextEncoder();
@@ -386,7 +388,7 @@ export async function createMachine({ root, memory, policy, terminal } = {}) {
           }
         };
         worker.onerror = (e) => reject(new Error(e.message));
-        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)) });
+        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)), tty });
       });
     },
     input(data) {
