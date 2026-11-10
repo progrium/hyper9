@@ -36,6 +36,12 @@ other work asks the owner for changes rather than editing it.
   counts its own instruction when it completes and then leaves. A faulting,
   undefined, or breakpoint instruction isn't retired, and an SVC is.
   Deterministic mode depends on this.
+- Faults from IR ops (ir_eval, emitters, and mem.zig's slow paths) set
+  only exit_info bits 0..15 (access, fault kind), exit_addr, and exit_pc.
+  Guest syndromes such as arm64's ESR are front-end detail, and the vmm
+  backend derives them. T1-versus-T0 checks compare only the low 16 bits.
+- `cas` goes through `Ctx.slow_cas` on every emitter for now. `MemFlags.rmw`
+  makes a load's fault report a write.
 - `exit_pc` is the PC to resume at, except for a fault, where it's the
   faulting instruction.
 - Flags are values, per guest: `nzcv.*` and `eflags.*`. `ir_eval` computes them
