@@ -21,6 +21,8 @@ const dispatch = @import("vcpu").dispatch;
 const emitter = @import("vcpu").emitter;
 const lift = @import("vcpu").x86jit.lift;
 const wasm_t1 = @import("vcpu").wasm_t1;
+const build_options = @import("build_options");
+const vmm_check = @import("vcpu").x86jit.vmm_check;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter.
@@ -41,7 +43,14 @@ pub const Cpu = struct {
     c: x86cpu.Cpu = .{},
     /// T0's decoded instructions, which `run` points `c` at.
     icache: exec.ICache = .{},
+    /// -Djit-check's state (src/jit/x86/vmm_check.zig).
+    check: vmm_check.State = .{},
 };
+
+/// Frees -Djit-check's state.
+pub fn deinit(c: *Cpu) void {
+    c.check.deinit();
+}
 
 pub fn getUreg(c: *const Cpu, u: *vmm.Ureg) void {
     u.* = .{ .i386 = .{} };
@@ -71,6 +80,8 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     var m: TlbMem = .{ .ctx = ctx, .tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb))) };
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;
+    // -Djit-check: every region lifted and checked against T0.
+    if (build_options.jit_check) return exitOf(c, ctx, vmm_check.run(&cpu.check, c, ctx, &m));
     if (tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);
     if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, &m, em);
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
