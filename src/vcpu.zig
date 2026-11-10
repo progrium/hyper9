@@ -9,6 +9,7 @@ pub const mem = @import("interp/mem.zig");
 /// IEEE binary16, 32, and 64 in software: h86's SSE and ha64's FP share it.
 pub const softfloat = @import("interp/softfloat.zig");
 pub const alloc = @import("jit/alloc.zig");
+pub const regalloc = @import("jit/regalloc.zig");
 pub const frontend = @import("jit/frontend.zig");
 pub const emitter = @import("jit/emitter.zig");
 /// W^X executable memory for the code cache.
@@ -61,6 +62,7 @@ pub const emit = struct {
     pub const cases = @import("jit/emit/cases.zig");
     pub const native = @import("jit/emit/native.zig");
     pub const eval = @import("jit/emit/eval.zig");
+    pub const fuzz = @import("jit/emit/fuzz.zig");
 };
 
 test {

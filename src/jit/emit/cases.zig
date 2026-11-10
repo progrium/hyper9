@@ -12,7 +12,12 @@ const ir_eval = @import("../ir_eval.zig");
 const ctx = @import("../ctx.zig");
 const mem = @import("../../interp/mem.zig");
 
-pub const Case = struct { text: []const u8, regs: [8]u64 };
+pub const Case = struct {
+    text: []const u8,
+    regs: [8]u64,
+    /// Instructions until a poll leaves.
+    budget: i64 = std.math.maxInt(i64),
+};
 
 pub fn free(gpa: std.mem.Allocator, all: []Case) void {
     for (all) |c| gpa.free(c.text);
@@ -35,6 +40,9 @@ pub const Result = struct {
     regs: [8]u64,
     page: u64, // a hash of the data page
     retired: u64,
+    /// For a fault: the address and the kind.
+    addr: u64,
+    info: u64,
 };
 
 pub const data_va = 0x10000;
@@ -61,12 +69,24 @@ pub const Env = struct {
             .slow_load = @intFromPtr(&mem.mapSlowLoad),
             .slow_store = @intFromPtr(&mem.mapSlowStore),
             .slow_cas = @intFromPtr(&mem.mapSlowCas),
+            .interp = @intFromPtr(&testInterp),
+            .helpers = @intFromPtr(&test_helpers),
+            .budget = c.budget,
         };
         return &e.ctx;
     }
 
     pub fn result(e: *Env, exit: ctx.Exit) Result {
-        return .{ .exit = exit, .pc = e.ctx.exit_pc, .regs = e.regs, .page = std.hash.Wyhash.hash(0, &e.page), .retired = e.ctx.retired };
+        const fault = exit == .fault;
+        return .{
+            .exit = exit,
+            .pc = e.ctx.exit_pc,
+            .regs = e.regs,
+            .page = std.hash.Wyhash.hash(0, &e.page),
+            .retired = e.ctx.retired,
+            .addr = if (fault) e.ctx.exit_addr else 0,
+            .info = if (fault) e.ctx.exit_info & 0xffff else 0,
+        };
     }
 
     pub fn evalCase(e: *Env, gpa: std.mem.Allocator, r: *const ir.Region, c: Case) !Result {
@@ -76,8 +96,37 @@ pub const Env = struct {
 };
 
 pub fn same(want: Result, got: Result) bool {
-    return want.exit == got.exit and want.pc == got.pc and std.mem.eql(u64, &want.regs, &got.regs) and want.page == got.page and want.retired == got.retired;
+    return want.exit == got.exit and want.pc == got.pc and std.mem.eql(u64, &want.regs, &got.regs) and want.page == got.page and
+        want.retired == got.retired and want.addr == got.addr and want.info == got.info;
 }
+
+/// The Env's call.interp handler: a pure function of the handle, the PC,
+/// and the registers. A handle ending in 0xf is an undefined instruction;
+/// any other adds to a register.
+pub fn testInterp(c: *ctx.Ctx, handle: u64, pc: u64) callconv(.c) u32 {
+    const regs: *[8]u64 = @ptrFromInt(@as(usize, @intCast(c.cpu)));
+    if (handle & 0xf == 0xf) {
+        c.exit_pc = pc;
+        return @intFromEnum(ctx.Exit.undef);
+    }
+    const k: usize = @intCast((handle >> 8) % 7);
+    regs[k] = regs[k] *% 3 +% handle +% pc;
+    return 0;
+}
+
+/// The Env's helpers: 0 returns a value and changes a register; 1 just
+/// changes a register.
+fn helper0(c: *ctx.Ctx, a: u64, b: u64, x: u64) callconv(.c) u64 {
+    const regs: *[8]u64 = @ptrFromInt(@as(usize, @intCast(c.cpu)));
+    regs[5] ^= a;
+    return a +% (b *% 7) ^ x;
+}
+fn helper1(c: *ctx.Ctx, a: u64, b: u64, x: u64) callconv(.c) u64 {
+    const regs: *[8]u64 = @ptrFromInt(@as(usize, @intCast(c.cpu)));
+    regs[@intCast(a % 7)] = b +% x;
+    return 0xdead;
+}
+pub const test_helpers = [_]ctx.HelperFn{ &helper0, &helper1 };
 
 pub fn expectSame(n: usize, c: Case, want: Result, got: Result) !void {
     if (same(want, got)) return;
