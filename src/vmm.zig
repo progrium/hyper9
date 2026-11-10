@@ -525,6 +525,7 @@ pub const AddressSpace = union(enum) {
 
 test {
     _ = ia32;
+    _ = emu;
 }
 
 pub const Vcpu = union(Kind) {

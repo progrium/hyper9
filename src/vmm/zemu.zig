@@ -2,13 +2,32 @@
 //! binaries and h86 for 386 binaries, picked by architecture at create.
 //! amd64 binaries need Unicorn (-Demu=unicorn).
 //!
-//! Step 0 of the build-out: the dispatch is here and the two backends are
-//! stubs, so later work only fills in src/vmm/ha64.zig and h86.zig and the
-//! shared runtime under src/jit/.
+//! This file is the part both share: guest memory, address spaces, vCPUs,
+//! kicks, and shootdowns. What's particular to an architecture is a Guest
+//! (ha64.zig, h86.zig): its register file and the loop that runs it.
+//!
+//! There is no guest lock. Every vCPU runs guest code at once, and other
+//! threads reach a running vCPU only through its Ctx's exit-request word,
+//! which guest code checks at every `poll` (T1) and every block (T0):
+//!
+//! - A kick sets `req_kick`, and `run` returns `.interrupted`.
+//! - A shootdown or a code-cache flush sets `req_sync`, and the vCPU leaves
+//!   guest code, catches up with its address space, and carries on without
+//!   returning. The thread that asked waits until the vCPU has left (its
+//!   `seq` moves), which is the "wait" of kick-and-wait.
+//!
+//! A vCPU's `seq` is odd while it's in guest code. It makes `seq` odd before
+//! it looks at its address space's generation, and a shootdown bumps the
+//! generation before it looks at `seq`, so either the vCPU sees the change
+//! or the shootdown sees the vCPU and waits for it.
 
 const std = @import("std");
 const build_options = @import("build_options");
 const vmm = @import("../vmm.zig");
+const Arena = @import("arena.zig");
+const mem = @import("../interp/mem.zig");
+const ctx_mod = @import("../jit/ctx.zig");
+const Ctx = ctx_mod.Ctx;
 const ha64 = @import("ha64.zig");
 const h86 = @import("h86.zig");
 
@@ -16,79 +35,690 @@ pub fn version(buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "zig ({s})", .{if (build_options.jit) "jit" else "interpreter"}) catch "zig";
 }
 
-pub const Backend = struct {
-    pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*Backend {
-        return switch (opts.arch) {
-            .arm64 => ha64.create(gpa, io, opts),
-            .i386 => h86.create(gpa, io, opts),
-            .amd64 => error.WrongArch,
+/// Ctx.exit_request bits.
+pub const req_kick: u32 = 1;
+pub const req_sync: u32 = 2;
+
+const Impl = Emu(ha64, h86);
+pub const Backend = Impl.EmuBackend;
+pub const AddressSpace = Impl.EmuSpace;
+pub const Vcpu = Impl.EmuVcpu;
+
+/// The backend over two Guests, one per architecture. A Guest is a type
+/// (in practice a file, ha64.zig or h86.zig) with:
+///
+///     pub const arch: vmm.Arch;
+///     /// False until its T0 runs programs: create fails with NotImplemented.
+///     pub const ready: bool;
+///     /// The register file, default-initialized at createVcpu.
+///     pub const Cpu: type;
+///     pub fn getUreg(cpu: *const Cpu, u: *vmm.Ureg) void;
+///     pub fn setUreg(cpu: *Cpu, u: *const vmm.Ureg) void;
+///     pub fn getExtra(cpu: *const Cpu, x: *vmm.Extra) vmm.Error!void;
+///     pub fn setExtra(cpu: *Cpu, x: *const vmm.Extra) vmm.Error!void;
+///     /// Runs guest code until an exit, filling the Ureg's trap fields as
+///     /// the real kernel would. Returns `.interrupted`, leaving it set,
+///     /// as soon as it sees ctx.exit_request nonzero: at least at every
+///     /// block, so a spinning guest sees it within one iteration.
+///     pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit;
+///
+/// `run`'s ctx comes with `cpu` pointing at the Cpu, `tlb` at the vCPU's
+/// TLB, `space` at its `mem.View`, and the slow paths `mem.slowLoad` and
+/// `mem.slowStore`. `frontend`, `interp`, and `helpers` are the Guest's to
+/// set. T0 reads code through `mem.fastExec` and `mem.probe(.exec)`, and a
+/// lifter through `View.source`, which mark the pages read as holding
+/// code; `mem.probe(.write)` gives a host pointer for an atomic.
+pub fn Emu(comptime A64: type, comptime X86: type) type {
+    return struct {
+        pub const Cpu = union(enum) {
+            arm64: A64.Cpu,
+            i386: X86.Cpu,
         };
+
+        fn Guest(comptime a: std.meta.Tag(Cpu)) type {
+            return switch (a) {
+                .arm64 => A64,
+                .i386 => X86,
+            };
+        }
+
+        pub const EmuBackend = struct {
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            arch: vmm.Arch,
+            /// Guards `arena` and `used`.
+            lock: std.Io.Mutex = .init,
+            arena: Arena,
+            used: u64 = 0,
+            limit: u64,
+            /// Which arena pages hold code.
+            code: mem.CodePages,
+            /// Every vCPU, for sweeps and shootdowns.
+            vcpus: std.ArrayList(*State) = .empty,
+            vcpus_lock: std.atomic.Mutex = .unlocked,
+
+            pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*EmuBackend {
+                switch (opts.arch) {
+                    .arm64 => if (!A64.ready) return error.NotImplemented,
+                    .i386 => if (!X86.ready) return error.NotImplemented,
+                    .amd64 => return error.WrongArch,
+                }
+                const limit = opts.memory orelse vmm.default_memory;
+                if (limit > vmm.max_memory) return error.OutOfGuestMemory;
+                // Twice the cap in address space, as emu.zig does, so freed
+                // ranges scattered through it don't run allocations out.
+                var arena = Arena.init(std.mem.alignForward(usize, @intCast(2 * limit), vmm.page_size)) catch return error.OutOfGuestMemory;
+                errdefer arena.deinit(gpa);
+                const b = try gpa.create(EmuBackend);
+                errdefer gpa.destroy(b);
+                b.* = .{ .gpa = gpa, .io = io, .arch = opts.arch, .limit = limit, .arena = arena, .code = undefined };
+                b.code = try .init(gpa, @intFromPtr(arena.mem.ptr), arena.mem.len, .{
+                    .owner = b,
+                    .drop = dropEntries,
+                    .invalidate = invalidate,
+                });
+                return b;
+            }
+
+            pub fn destroy(b: *EmuBackend) void {
+                std.debug.assert(b.vcpus.items.len == 0);
+                b.vcpus.deinit(b.gpa);
+                b.code.deinit(b.gpa);
+                b.arena.deinit(b.gpa);
+                b.gpa.destroy(b);
+            }
+
+            /// No hardware limit; this keeps the number in line with HVF's.
+            pub fn maxVcpus(_: *EmuBackend) vmm.Error!u32 {
+                return 64;
+            }
+
+            /// Zeroed pages from the arena. Pages nothing touches stay
+            /// unbacked on the host.
+            pub fn allocPages(b: *EmuBackend, n: usize) vmm.Error![]align(vmm.page_size) u8 {
+                const len = n * vmm.page_size;
+                if (len == 0) return error.BadAddress;
+                b.lock.lockUncancelable(b.io);
+                defer b.lock.unlock(b.io);
+                if (b.used + len > b.limit) return error.OutOfGuestMemory;
+                const m = b.arena.alloc(b.gpa, len) catch return error.OutOfGuestMemory;
+                b.used += len;
+                return m;
+            }
+
+            /// Pages from `allocPages`, no longer mapped. Whatever was
+            /// compiled from them goes, so new contents never run stale code.
+            pub fn freePages(b: *EmuBackend, m: []align(vmm.page_size) u8) void {
+                if (m.len == 0) return;
+                b.code.invalidateRange(@intFromPtr(m.ptr), m.len);
+                b.lock.lockUncancelable(b.io);
+                defer b.lock.unlock(b.io);
+                b.used -= m.len;
+                b.arena.freePages(b.gpa, m);
+            }
+
+            pub fn newAddressSpace(b: *EmuBackend) vmm.CreateError!*EmuSpace {
+                const as = try b.gpa.create(EmuSpace);
+                as.* = .{ .backend = b };
+                return as;
+            }
+
+            pub fn createVcpu(b: *EmuBackend) vmm.CreateError!EmuVcpu {
+                const s = try b.gpa.create(State);
+                errdefer b.gpa.destroy(s);
+                s.* = .{ .backend = b, .cpu = switch (b.arch) {
+                    .arm64 => .{ .arm64 = .{} },
+                    .i386 => .{ .i386 = .{} },
+                    .amd64 => unreachable,
+                } };
+                s.view = .{ .code = &b.code, .tlb = &s.tlb };
+                b.lockVcpus();
+                defer b.vcpus_lock.unlock();
+                try b.vcpus.append(b.gpa, s);
+                return .{ .s = s };
+            }
+
+            fn lockVcpus(b: *EmuBackend) void {
+                while (!b.vcpus_lock.tryLock()) std.atomic.spinLoopHint();
+            }
+
+            fn dropEntries(p: *anyopaque, host: usize, table: mem.Table) void {
+                const b: *EmuBackend = @ptrCast(@alignCast(p));
+                b.lockVcpus();
+                defer b.vcpus_lock.unlock();
+                for (b.vcpus.items) |s| mem.dropEntries(&s.tlb, host, table);
+            }
+
+            fn invalidate(_: *anyopaque, _: u64) void {}
+
+            /// Asks each vCPU that `pick` picks and that is in guest code
+            /// (other than `self`) to leave it, and waits until each has.
+            /// Each sees whatever changed before this was called before it
+            /// runs another guest instruction.
+            fn kickAndWait(b: *EmuBackend, self: ?*State, pick: anytype) void {
+                var waits: [64]struct { s: *State, seq: u32 } = undefined;
+                var n: usize = 0;
+                {
+                    b.lockVcpus();
+                    defer b.vcpus_lock.unlock();
+                    for (b.vcpus.items) |s| {
+                        if (s == self or !pick.wants(s)) continue;
+                        const seq = s.seq.load(.seq_cst);
+                        if (seq & 1 == 0) continue;
+                        _ = @atomicRmw(u32, &s.ctx.exit_request, .Or, req_sync, .seq_cst);
+                        if (n < waits.len) {
+                            waits[n] = .{ .s = s, .seq = seq };
+                            n += 1;
+                        }
+                    }
+                }
+                // A vCPU can't be destroyed while it runs, and it runs until
+                // it sees the request, so the pointers stay good.
+                for (waits[0..n]) |w| {
+                    while (w.s.seq.load(.seq_cst) == w.seq) {
+                        b.io.futexWaitTimeout(u32, &w.s.seq.raw, w.seq, .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }) catch {};
+                    }
+                }
+            }
+        };
+
+        /// The mappings, which each vCPU running the space copies into its
+        /// View before it runs guest code whenever `generation` has moved.
+        pub const EmuSpace = struct {
+            backend: *EmuBackend,
+            regions: std.ArrayList(Region) = .empty,
+            /// Bumped on every change.
+            generation: std.atomic.Value(u64) = .init(1),
+            /// Guards `regions`: a process's threads change and read them
+            /// at once.
+            lock: std.atomic.Mutex = .unlocked,
+
+            const Region = struct { va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms };
+
+            fn lockSpin(as: *EmuSpace) void {
+                while (!as.lock.tryLock()) std.atomic.spinLoopHint();
+            }
+
+            pub fn destroy(as: *EmuSpace) void {
+                as.regions.deinit(as.backend.gpa);
+                as.backend.gpa.destroy(as);
+            }
+
+            pub fn map(as: *EmuSpace, va: u64, m: []align(vmm.page_size) u8, perms: vmm.Perms) vmm.CreateError!void {
+                if (va % vmm.page_size != 0 or m.len % vmm.page_size != 0 or m.len == 0) return error.BadAddress;
+                if (va +% m.len < va) return error.BadAddress;
+                as.lockSpin();
+                defer as.lock.unlock();
+                for (as.regions.items) |r| {
+                    if (va < r.va + r.mem.len and r.va < va + m.len) return error.BadAddress;
+                }
+                try as.regions.append(as.backend.gpa, .{ .va = va, .mem = m, .perms = perms });
+                _ = as.generation.fetchAdd(1, .seq_cst);
+            }
+
+            pub fn unmap(as: *EmuSpace, va: u64) void {
+                as.lockSpin();
+                defer as.lock.unlock();
+                for (as.regions.items, 0..) |r, i| if (r.va == va) {
+                    _ = as.regions.swapRemove(i);
+                    _ = as.generation.fetchAdd(1, .seq_cst);
+                    return;
+                };
+            }
+
+            fn find(as: *EmuSpace, va: u64, len: u64) ?[]u8 {
+                for (as.regions.items) |r| {
+                    if (va >= r.va and va - r.va <= r.mem.len and len <= r.mem.len - (va - r.va)) {
+                        return r.mem[@intCast(va - r.va)..][0..@intCast(len)];
+                    }
+                }
+                return null;
+            }
+
+            pub fn translate(as: *EmuSpace, va: u64, len: u64) ?[]u8 {
+                as.lockSpin();
+                defer as.lock.unlock();
+                return as.find(va, len);
+            }
+
+            pub fn copy(as: *EmuSpace, va: u64, buf: []u8, write: bool) bool {
+                as.lockSpin();
+                defer as.lock.unlock();
+                const m = as.find(va, buf.len) orelse return false;
+                if (write) {
+                    // The host may be writing code (a breakpoint).
+                    as.backend.code.invalidateRange(@intFromPtr(m.ptr), m.len);
+                    @memcpy(m, buf);
+                } else @memcpy(buf, m);
+                return true;
+            }
+
+            /// The host wrote code: what was decoded or compiled from those
+            /// pages goes now, for every space mapping them.
+            pub fn codeChanged(as: *EmuSpace, va: u64, len: u64) void {
+                as.lockSpin();
+                defer as.lock.unlock();
+                for (as.regions.items) |r| {
+                    const lo = @max(va, r.va);
+                    const hi = @min(va +| len, r.va + r.mem.len);
+                    if (lo < hi) as.backend.code.invalidateRange(@intFromPtr(r.mem.ptr) + @as(usize, @intCast(lo - r.va)), @intCast(hi - lo));
+                }
+            }
+
+            /// Kicks every vCPU running this space and waits until each has
+            /// left guest code. Each looks at the space again before its
+            /// next guest instruction, so none can reach what `unmap`
+            /// removed. The caller's own vCPU isn't in guest code.
+            pub fn shootdown(as: *EmuSpace) void {
+                as.backend.kickAndWait(null, struct {
+                    as: *EmuSpace,
+                    fn wants(p: @This(), s: *State) bool {
+                        return s.as.load(.seq_cst) == p.as;
+                    }
+                }{ .as = as });
+            }
+        };
+
+        const State = struct {
+            backend: *EmuBackend,
+            cpu: Cpu,
+            ctx: Ctx = .{},
+            tlb: mem.Tlb = .{},
+            view: mem.View = undefined,
+            as: std.atomic.Value(?*EmuSpace) = .init(null),
+            /// The view's mappings, and the space's generation they're from.
+            maps: std.ArrayList(mem.Mapping) = .empty,
+            generation: u64 = 0,
+            /// Odd while in guest code.
+            seq: std.atomic.Value(u32) = .init(0),
+
+            fn enter(s: *State) void {
+                _ = s.seq.fetchAdd(1, .seq_cst);
+            }
+
+            fn leave(s: *State) void {
+                _ = s.seq.fetchAdd(1, .seq_cst);
+                s.backend.io.futexWake(u32, &s.seq.raw, std.math.maxInt(u32));
+            }
+
+            /// Brings the view up to date with the space. Called in guest
+            /// code (seq odd), before running any.
+            fn sync(s: *State) vmm.Error!void {
+                const as = s.as.load(.monotonic).?;
+                if (as.generation.load(.seq_cst) == s.generation) return;
+                as.lockSpin();
+                defer as.lock.unlock();
+                const gpa = s.backend.gpa;
+                // A mapping gone or changed may be in the TLB; a new one
+                // can't be.
+                var dropped = s.generation == 0;
+                if (!dropped) {
+                    outer: for (s.maps.items) |old| {
+                        for (as.regions.items) |r| {
+                            if (r.va == old.va and @intFromPtr(r.mem.ptr) == old.host and r.mem.len == old.len and perms(r.perms) == old.perms) continue :outer;
+                        }
+                        dropped = true;
+                        break;
+                    }
+                }
+                s.maps.clearRetainingCapacity();
+                s.maps.ensureTotalCapacity(gpa, as.regions.items.len) catch return error.OutOfGuestMemory;
+                for (as.regions.items) |r| s.maps.appendAssumeCapacity(.{ .va = r.va, .len = r.mem.len, .host = @intFromPtr(r.mem.ptr), .perms = perms(r.perms) });
+                std.mem.sortUnstable(mem.Mapping, s.maps.items, {}, struct {
+                    fn lt(_: void, a: mem.Mapping, b: mem.Mapping) bool {
+                        return a.va < b.va;
+                    }
+                }.lt);
+                s.view.maps = s.maps.items;
+                if (dropped) s.tlb.flush();
+                s.generation = as.generation.load(.seq_cst);
+            }
+
+            fn perms(p: vmm.Perms) mem.Perms {
+                return .{ .read = p.read, .write = p.write, .exec = p.exec };
+            }
+
+            fn run(s: *State) vmm.Error!vmm.Exit {
+                if (s.as.load(.monotonic) == null) return error.BadAddress;
+                s.ctx.tlb = @intFromPtr(&s.tlb);
+                s.ctx.space = @intFromPtr(&s.view);
+                s.ctx.slow_load = @intFromPtr(&mem.slowLoad);
+                s.ctx.slow_store = @intFromPtr(&mem.slowStore);
+                while (true) {
+                    s.enter();
+                    if (@atomicLoad(u32, &s.ctx.exit_request, .seq_cst) & req_kick != 0) {
+                        _ = @atomicRmw(u32, &s.ctx.exit_request, .And, ~req_kick, .seq_cst);
+                        s.leave();
+                        return .interrupted;
+                    }
+                    s.sync() catch |e| {
+                        s.leave();
+                        return e;
+                    };
+                    const exit = switch (s.cpu) {
+                        inline else => |*c, a| blk: {
+                            s.ctx.cpu = @intFromPtr(c);
+                            break :blk Guest(a).run(c, &s.ctx);
+                        },
+                    } catch |e| {
+                        s.leave();
+                        return e;
+                    };
+                    s.leave();
+                    if (exit != .interrupted) return exit;
+                    const req = @atomicRmw(u32, &s.ctx.exit_request, .And, ~(req_kick | req_sync), .seq_cst);
+                    if (req & req_kick != 0) return .interrupted;
+                    // A sync, or nothing: catch up and go on.
+                }
+            }
+        };
+
+        pub const EmuVcpu = struct {
+            s: *State,
+
+            pub fn destroy(v: *EmuVcpu) void {
+                const s = v.s;
+                const b = s.backend;
+                {
+                    b.lockVcpus();
+                    defer b.vcpus_lock.unlock();
+                    for (b.vcpus.items, 0..) |x, i| if (x == s) {
+                        _ = b.vcpus.swapRemove(i);
+                        break;
+                    };
+                }
+                s.maps.deinit(b.gpa);
+                b.gpa.destroy(s);
+            }
+
+            pub fn setAddressSpace(v: *EmuVcpu, as: *EmuSpace) vmm.Error!void {
+                if (v.s.as.load(.monotonic) == as) return;
+                v.s.as.store(as, .seq_cst);
+                v.s.generation = 0;
+            }
+
+            pub fn run(v: *EmuVcpu) vmm.Error!vmm.Exit {
+                return v.s.run();
+            }
+
+            pub fn getUreg(v: *EmuVcpu, u: *vmm.Ureg) void {
+                switch (v.s.cpu) {
+                    inline else => |*c, a| Guest(a).getUreg(c, u),
+                }
+            }
+
+            pub fn setUreg(v: *EmuVcpu, u: *const vmm.Ureg) void {
+                switch (v.s.cpu) {
+                    inline else => |*c, a| Guest(a).setUreg(c, u),
+                }
+            }
+
+            pub fn getExtra(v: *EmuVcpu, x: *vmm.Extra) vmm.Error!void {
+                return switch (v.s.cpu) {
+                    inline else => |*c, a| Guest(a).getExtra(c, x),
+                };
+            }
+
+            pub fn setExtra(v: *EmuVcpu, x: *const vmm.Extra) vmm.Error!void {
+                return switch (v.s.cpu) {
+                    inline else => |*c, a| Guest(a).setExtra(c, x),
+                };
+            }
+
+            /// Safe from any thread. Before `run`, the next run returns
+            /// `.interrupted` at once; during one, guest code leaves at its
+            /// next check.
+            pub fn kick(v: *EmuVcpu) void {
+                _ = @atomicRmw(u32, &v.s.ctx.exit_request, .Or, req_kick, .seq_cst);
+            }
+        };
+    };
+}
+
+// ---------------------------------------------------------------- tests
+
+const testing = std.testing;
+
+/// A guest for testing the shared layer: a few ops over two registers,
+/// through the TLB and slow paths as a real T0's loads and stores go, with
+/// the exit-request check before every op.
+const Toy = struct {
+    pub const arch: vmm.Arch = .arm64;
+    pub const ready = true;
+
+    pub const Op = union(enum) {
+        /// r[0] = mem64[addr]
+        load: u64,
+        /// mem64[addr] = r[0]
+        store: u64,
+        add: u64,
+        /// Back to op 0 (a loop).
+        again,
+        svc,
+    };
+
+    pub const Cpu = struct {
+        prog: []const Op = &.{},
+        pc: usize = 0,
+        r: [2]u64 = .{ 0, 0 },
+        ureg: vmm.Ureg = .{ .arm64 = .{} },
+        /// Ops run, across runs.
+        steps: u64 = 0,
+    };
+
+    pub fn getUreg(c: *const Cpu, u: *vmm.Ureg) void {
+        u.* = c.ureg;
     }
-    pub fn destroy(_: *Backend) void {
-        unreachable;
+    pub fn setUreg(c: *Cpu, u: *const vmm.Ureg) void {
+        c.ureg = u.*;
     }
-    pub fn maxVcpus(_: *Backend) vmm.Error!u32 {
-        unreachable;
+    pub fn getExtra(_: *const Cpu, x: *vmm.Extra) vmm.Error!void {
+        x.* = .{ .arm64 = .{} };
     }
-    pub fn allocPages(_: *Backend, _: usize) vmm.Error![]align(vmm.page_size) u8 {
-        unreachable;
+    pub fn setExtra(_: *Cpu, _: *const vmm.Extra) vmm.Error!void {}
+
+    pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
+        const tlb: *const mem.Tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb)));
+        while (true) {
+            if (@atomicLoad(u32, &ctx.exit_request, .monotonic) != 0) return .interrupted;
+            const op = c.prog[c.pc];
+            switch (op) {
+                .load => |a| {
+                    if (mem.fast(tlb, a, 8, false)) |h| {
+                        c.r[0] = @atomicLoad(u64, @as(*const u64, @ptrFromInt(h)), .unordered);
+                    } else {
+                        if (mem.slowLoad(ctx, a, 3) != 0) return fault(ctx);
+                        c.r[0] = ctx.scratch;
+                    }
+                },
+                .store => |a| {
+                    if (mem.fast(tlb, a, 8, true)) |h| {
+                        @atomicStore(u64, @as(*u64, @ptrFromInt(h)), c.r[0], .unordered);
+                    } else if (mem.slowStore(ctx, a, 3, c.r[0]) != 0) return fault(ctx);
+                },
+                .add => |n| c.r[0] +%= n,
+                .again => {
+                    c.pc = 0;
+                    c.steps += 1;
+                    continue;
+                },
+                .svc => {
+                    c.pc += 1;
+                    c.steps += 1;
+                    return .syscall;
+                },
+            }
+            c.pc += 1;
+            c.steps += 1;
+        }
     }
-    pub fn freePages(_: *Backend, _: []align(vmm.page_size) u8) void {
-        unreachable;
-    }
-    pub fn newAddressSpace(_: *Backend) vmm.CreateError!*AddressSpace {
-        unreachable;
-    }
-    pub fn createVcpu(_: *Backend) vmm.CreateError!Vcpu {
-        unreachable;
+
+    fn fault(ctx: *Ctx) vmm.Exit {
+        const acc: mem.Access = @enumFromInt(@as(u8, @truncate(ctx.exit_info)));
+        return .{ .fault = .{ .addr = ctx.exit_addr, .access = switch (acc) {
+            .read => .read,
+            .write => .write,
+            .exec => .exec,
+        }, .syndrome = ctx.exit_info } };
     }
 };
 
-pub const AddressSpace = struct {
-    pub fn destroy(_: *AddressSpace) void {
-        unreachable;
-    }
-    pub fn map(_: *AddressSpace, _: u64, _: []align(vmm.page_size) u8, _: vmm.Perms) vmm.CreateError!void {
-        unreachable;
-    }
-    pub fn shootdown(_: *AddressSpace) void {}
-    pub fn unmap(_: *AddressSpace, _: u64) void {
-        unreachable;
-    }
-    pub fn translate(_: *AddressSpace, _: u64, _: u64) ?[]u8 {
-        unreachable;
-    }
-    pub fn copy(_: *AddressSpace, _: u64, _: []u8, _: bool) bool {
-        unreachable;
-    }
-    pub fn codeChanged(_: *AddressSpace, _: u64, _: u64) void {
-        unreachable;
+const T = Emu(Toy, Toy);
+
+fn testBackend() !*T.EmuBackend {
+    return T.EmuBackend.create(testing.allocator, testing.io, .{ .arch = .arm64, .memory = 64 << 20 });
+}
+
+test "address spaces: map, translate, copy, and unmap" {
+    const b = try testBackend();
+    defer b.destroy();
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    const m = try b.allocPages(2);
+    defer b.freePages(m);
+    try as.map(0x10000, m, .{ .write = true });
+    try testing.expectError(error.BadAddress, as.map(0x11000, m, .{}));
+    try testing.expectError(error.BadAddress, as.map(0x10001, m, .{}));
+    try testing.expect(as.translate(0x10ff8, 16) != null);
+    try testing.expect(as.translate(0x11ff8, 16) == null);
+    var buf: [4]u8 = .{ 1, 2, 3, 4 };
+    try testing.expect(as.copy(0x11000, &buf, true));
+    try testing.expectEqual(@as(u8, 3), m[0x1002]);
+    as.unmap(0x10000);
+    try testing.expect(as.translate(0x10000, 1) == null);
+    try testing.expectError(error.WrongArch, T.EmuBackend.create(testing.allocator, testing.io, .{ .arch = .amd64 }));
+}
+
+test "vcpus: run through the view, fault exactly, and stop on a kick" {
+    const b = try testBackend();
+    defer b.destroy();
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    const m = try b.allocPages(1);
+    defer b.freePages(m);
+    try as.map(0x10000, m, .{ .write = true });
+    var v = try b.createVcpu();
+    defer v.destroy();
+    try testing.expectError(error.BadAddress, v.run());
+    try v.setAddressSpace(as);
+    const prog = [_]Toy.Op{ .{ .load = 0x10008 }, .{ .add = 5 }, .{ .store = 0x10008 }, .svc, .{ .store = 0x20000 } };
+    v.s.cpu.arm64.prog = &prog;
+    try testing.expectEqual(vmm.Exit.syscall, try v.run());
+    try testing.expectEqual(@as(u8, 5), m[8]);
+    // The store went through the TLB's write entry once filled.
+    try testing.expect(mem.fast(&v.s.tlb, 0x10008, 8, true) != null);
+    const e = try v.run();
+    try testing.expectEqual(@as(u64, 0x20000), e.fault.addr);
+    try testing.expect(e.fault.access == .write);
+    // A kick before run.
+    v.kick();
+    try testing.expectEqual(vmm.Exit.interrupted, try v.run());
+    try testing.expectEqual(@as(u32, 0), v.s.ctx.exit_request);
+    // Unmapping is seen at the next run, with the TLB flushed.
+    v.s.cpu.arm64.pc = 0;
+    as.unmap(0x10000);
+    const e2 = try v.run();
+    try testing.expectEqual(@as(u64, 0x10008), e2.fault.addr);
+    try testing.expectEqual(@as(u64, 0), e2.fault.syndrome >> 8); // unmapped
+}
+
+/// A vCPU on its own thread, running `prog` until it exits with anything
+/// but `.interrupted` or is told to stop.
+const Runner = struct {
+    v: T.EmuVcpu,
+    exit: vmm.Exit = .halted,
+    interrupts: u32 = 0,
+    stop: std.atomic.Value(bool) = .init(false),
+    started: std.atomic.Value(bool) = .init(false),
+
+    fn main(r: *Runner) void {
+        r.started.store(true, .release);
+        while (true) {
+            const e = r.v.run() catch |err| std.debug.panic("run: {t}", .{err});
+            if (e == .interrupted) {
+                r.interrupts += 1;
+                if (r.stop.load(.acquire)) return;
+                continue;
+            }
+            r.exit = e;
+            return;
+        }
     }
 };
 
-pub const Vcpu = struct {
-    pub fn destroy(_: *Vcpu) void {
-        unreachable;
+test "kick and shootdown with every vCPU running at once" {
+    const b = try testBackend();
+    defer b.destroy();
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    const n = 4;
+    const data = try b.allocPages(1);
+    defer b.freePages(data);
+    try as.map(0x10000, data, .{ .write = true });
+    // Each vCPU counts in its own word, forever.
+    var progs: [n][4]Toy.Op = undefined;
+    var runners: [n]Runner = undefined;
+    var threads: [n]std.Thread = undefined;
+    for (0..n) |i| {
+        const a = 0x10000 + 8 * i;
+        progs[i] = .{ .{ .load = a }, .{ .add = 1 }, .{ .store = a }, .again };
+        runners[i] = .{ .v = try b.createVcpu() };
+        try runners[i].v.setAddressSpace(as);
+        runners[i].v.s.cpu.arm64.prog = &progs[i];
     }
-    pub fn setAddressSpace(_: *Vcpu, _: *AddressSpace) vmm.Error!void {
-        unreachable;
+    defer for (&runners) |*r| r.v.destroy();
+    for (0..n) |i| threads[i] = try std.Thread.spawn(.{}, Runner.main, .{&runners[i]});
+    const words: *[n]u64 = @ptrCast(data[0 .. 8 * n]);
+    // Every one is counting.
+    for (0..n) |i| while (@atomicLoad(u64, &words[i], .monotonic) < 1000) std.atomic.spinLoopHint();
+    // A kick makes run return; the runner goes straight back in.
+    runners[0].v.kick();
+    while (@atomicLoad(u32, &runners[0].interrupts, .monotonic) == 0) std.atomic.spinLoopHint();
+    // Unmap the page under them. Once shootdown returns, no vCPU can still
+    // store to it: each faults at its next access instead.
+    as.unmap(0x10000);
+    as.shootdown();
+    var after: [n]u64 = undefined;
+    for (0..n) |i| after[i] = @atomicLoad(u64, &words[i], .monotonic);
+    for (&threads) |t| t.join();
+    for (0..n) |i| {
+        try testing.expectEqual(after[i], words[i]);
+        try testing.expect(runners[i].exit == .fault);
+        try testing.expectEqual(@as(u64, 0x10000 + 8 * i), runners[i].exit.fault.addr);
     }
-    pub fn run(_: *Vcpu) vmm.Error!vmm.Exit {
-        unreachable;
-    }
-    pub fn getUreg(_: *Vcpu, _: *vmm.Ureg) void {
-        unreachable;
-    }
-    pub fn setUreg(_: *Vcpu, _: *const vmm.Ureg) void {
-        unreachable;
-    }
-    pub fn kick(_: *Vcpu) void {
-        unreachable;
-    }
-    pub fn getExtra(_: *Vcpu, _: *vmm.Extra) vmm.Error!void {
-        unreachable;
-    }
-    pub fn setExtra(_: *Vcpu, _: *const vmm.Extra) vmm.Error!void {
-        unreachable;
-    }
-};
+}
+
+test "a page that turns out to hold code loses every vCPU's write entries" {
+    const b = try testBackend();
+    defer b.destroy();
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    const m = try b.allocPages(1);
+    defer b.freePages(m);
+    try as.map(0x10000, m, .{ .write = true, .exec = true });
+    var v1 = try b.createVcpu();
+    defer v1.destroy();
+    var v2 = try b.createVcpu();
+    defer v2.destroy();
+    try v1.setAddressSpace(as);
+    try v2.setAddressSpace(as);
+    const prog = [_]Toy.Op{ .{ .store = 0x10010 }, .svc };
+    v1.s.cpu.arm64.prog = &prog;
+    try testing.expectEqual(vmm.Exit.syscall, try v1.run());
+    try testing.expect(mem.fast(&v1.s.tlb, 0x10010, 8, true) != null);
+    // v2 reads the page as code.
+    v2.s.cpu.arm64.prog = &.{.svc};
+    _ = try v2.run();
+    var buf: [4]u8 = undefined;
+    try testing.expectEqual(@as(usize, 4), v2.s.view.fetch(0x10000, &buf));
+    try testing.expect(mem.fast(&v1.s.tlb, 0x10010, 8, true) == null);
+    // v1's next store takes the slow path, which drops the code.
+    v1.s.cpu.arm64.pc = 0;
+    try testing.expectEqual(vmm.Exit.syscall, try v1.run());
+    try testing.expect(!b.code.isCode(b.code.pageOf(@intFromPtr(m.ptr)).?));
+    // The host writing code drops it too.
+    _ = v2.s.view.fetch(0x10000, &buf);
+    const epoch = b.code.epoch.load(.monotonic);
+    as.codeChanged(0x10000, 4);
+    try testing.expect(b.code.epoch.load(.monotonic) != epoch);
+}

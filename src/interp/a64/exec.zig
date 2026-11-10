@@ -288,7 +288,8 @@ fn fault(addr: u64, acc: mem.Access, kind: mem.FaultKind) Fault {
     const wnr: u64 = if (acc == .write) 1 << 6 else 0;
     const fsc: u64 = switch (kind) {
         .unmapped => FSC_TRANSLATION_L3,
-        .permission => FSC_PERMISSION_L3,
+        // `code` reaches only the T1 dispatcher, which runs the store in T0.
+        .permission, .code => FSC_PERMISSION_L3,
         .alignment => FSC_ALIGNMENT,
     };
     return .{ .addr = addr, .access = acc, .kind = kind, .esr = (ec << 26) | ESR_IL | wnr | fsc };
