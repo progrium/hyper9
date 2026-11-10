@@ -25,9 +25,12 @@ const build_options = @import("build_options");
 const vmm_check = @import("vcpu").x86jit.vmm_check;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
-/// when the backend has a code cache and this host an emitter.
+/// when the backend has a code cache and this host an emitter. T1 is the
+/// default on x86-64 hosts, where the 386 suite passes on it; arm64 and
+/// the web stay on T0 until their emitters pass it for h86. H9_EMU_TIER
+/// picks either (zemu.applyTier).
 pub const Tier = enum { t0, t1 };
-pub var tier: Tier = .t0;
+pub var tier: Tier = if (builtin.cpu.arch == .x86_64) .t1 else .t0;
 /// T1's emitter; null where this host has none yet.
 pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
     .aarch64 => @import("vcpu").emit.arm64.emitter_def,
