@@ -230,6 +230,30 @@ test "[x86-jit] a REP stopped between iterations on T0 resumes exactly" {
     try testing.expectEqualSlices(u8, &ref.m.pages, &r.m.pages);
 }
 
+test "[x86-jit] flags a region leaves lazily are read by the next one" {
+    // A shell's counted loop: CMP in one region, an indirect jump, and
+    // the JL that reads its flags first thing in another region (busybox
+    // sh's `while [ $i -lt 1000 ]` hung on the web host this way).
+    var prog: [0x108]u8 = @splat(0x90);
+    const head = [_]u8{
+        0x31, 0xc9, // xorl %ecx, %ecx
+        0xba, 0x00, 0x11, 0x00, 0x00, // movl $0x1100, %edx
+        0x41, // incl %ecx (at 0x1007)
+        0x81, 0xf9, 0xe8, 0x03, 0x00, 0x00, // cmpl $1000, %ecx
+        0xff, 0xe2, // jmp *%edx
+    };
+    @memcpy(prog[0..head.len], &head);
+    // At 0x1100: jl 0x1007, then int $0x80.
+    const tail = [_]u8{ 0x0f, 0x8c, 0x01, 0xff, 0xff, 0xff, 0xcd, 0x80 };
+    @memcpy(prog[0x100..][0..tail.len], &tail);
+    try onEachTier(&prog, @splat(0), struct {
+        fn f(_: Tier, r: Run, e: Exit) !void {
+            try expectSyscall(e);
+            try testing.expectEqual(@as(u32, 1000), r.m.cpu.r[1]);
+        }
+    }.f);
+}
+
 test "[x86-jit] a store into the executing page takes effect at the next instruction" {
     const prog = [_]u8{
         0xc6, 0x05, 0x08, 0x10, 0x00, 0x00, 0x2a, // movb $0x2a, 0x1008
