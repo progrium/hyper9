@@ -1070,11 +1070,11 @@ pub fn build(b: *std.Build) void {
         const archive = mk.addOutputFileArg("root.h9a");
         web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "root.h9a").step);
     } else |_| {}
-    // The demo page's Linux root archive for ?linux, from the 386 Alpine
-    // root `scripts/fetch.sh alpine386web` makes and src/web/linux.list;
+    // The demo page's Linux root archive for ?linux, from the arm64 Alpine
+    // root `scripts/fetch.sh alpinearm64web` makes and src/web/linux.list;
     // left out without one.
-    const web_linux_root = b.option([]const u8, "web-linux-root", "386 Linux root tree for the browser host's Linux archive (default .local/linux/alpine-386-web)") orelse
-        b.pathFromRoot(".local/linux/alpine-386-web");
+    const web_linux_root = b.option([]const u8, "web-linux-root", "arm64 Linux root tree for the browser host's Linux archive (default .local/linux/alpine-arm64-web)") orelse
+        b.pathFromRoot(".local/linux/alpine-arm64-web");
     if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_linux_root, "bin/busybox" }), .{})) {
         const webroot = b.addExecutable(.{
             .name = "webroot",

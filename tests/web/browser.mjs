@@ -100,16 +100,16 @@ try {
   }
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
 
-  // With linux.h9a, ?linux runs Alpine's 386 busybox sh, jq and sqlite3
-  // (design/0105-linux-i386.md).
+  // With linux.h9a, ?linux runs Alpine's arm64 busybox sh, jq and sqlite3
+  // on ha64 (design/h86-ha64.md).
   if (await readFile(path.join(dir, 'linux.h9a')).then(() => true, () => false)) {
     await page.goto(`${url}?linux`);
     await step('busybox sh prompts over linux.h9a', () => expect(/# $/, 0, 60_000));
     await term.focus();
-    await step('uname -m says i686', async () => {
+    await step('uname -m says aarch64', async () => {
       const at = (await text()).length;
       await page.keyboard.type('uname -m\n');
-      await expect(/i686\n.*# $/, at);
+      await expect(/aarch64\n.*# $/, at);
     });
     await step('jq and sqlite3 run', async () => {
       const at = (await text()).length;
