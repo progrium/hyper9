@@ -112,6 +112,9 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
     ctx.interp = @intFromPtr(&lift.interp);
     const cfg: dispatch.Config = .{ .frontend = lift.frontend, .emitter = em, .pc_off = @offsetOf(t0.Cpu, "pc") };
     while (true) {
+        // ctx.retired runs on from Cpu.retired, so lift.interp can read the
+        // count mid-region (CNTVCT_EL0 in deterministic mode).
+        ctx.retired = c.t0.retired;
         const before = ctx.retired;
         const r = if (build_options.jit_check)
             check_vmm.run(&c.check, check_vmm.a64_guest, &c.t0, ctx, tier == .t1)

@@ -253,7 +253,10 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
                     l.pending += 1;
                 },
                 .interp => {
-                    try l.flush();
+                    // An instruction that reads the instruction count
+                    // (CNTVCT_EL0 in deterministic mode) needs ctx.retired
+                    // current, so the block retires what it has first.
+                    if (readsCount(in.op)) try l.retireAll() else try l.flush();
                     try b.interp(in.word, in.pc);
                     l.pending += 1;
                     l.clobber();
@@ -1051,9 +1054,19 @@ fn single(k: Kind) ?Single {
 
 /// ha64's `call.interp`: the handle is the instruction word; ctx.frontend
 /// is the vCPU's T0 (*t0.Machine).
+/// Whether `o` reads the Cpu's instruction count: MRS CNTVCT_EL0, which
+/// T0 derives from it when it has no clock (deterministic mode).
+fn readsCount(o: dec.Op) bool {
+    return o.k == .mrs and o.imm == dec.sr.cntvct_el0;
+}
+
 pub fn interp(c: *ctx_mod.Ctx, handle: u64, pc: u64) callconv(.c) u32 {
     const m: *t0.Machine = @ptrFromInt(@as(usize, @intCast(c.frontend)));
     const o = dec.decode(@truncate(handle), pc);
+    // In a region, Cpu.retired is as of the region's entry; ctx.retired
+    // runs on from it (the tier's loop keeps them so) and the lifter
+    // retired the block up to here.
+    if (m.clock == null and readsCount(o)) m.cpu.retired = c.retired;
     switch (t0.step(m, &o, pc)) {
         .next => return 0,
         .jump => |t| {
