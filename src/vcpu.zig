@@ -37,7 +37,6 @@ pub const x86 = struct {
     pub const cpu = @import("interp/x86/cpu.zig");
     pub const exec = @import("interp/x86/exec.zig");
     pub const softfloat = @import("interp/x86/f80.zig");
-    pub const fp = @import("interp/x86/fp.zig");
     pub const x87 = @import("interp/x86/x87.zig");
     pub const x87math = @import("interp/x86/x87math.zig");
     pub const sse = @import("interp/x86/sse.zig");

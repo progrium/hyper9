@@ -523,7 +523,9 @@ pub const table: []const Row = blk: {
     } ++ cc16(0x0f40, .{ .op = .cmovcc, .modrm = true, .dst = .G, .src = .E }) ++
         span(0x0f50, 0x0f6f, .sse, .none) ++
         span(0x0f70, 0x0f73, .sse, .b) ++
-        span(0x0f74, 0x0f77, .sse, .none) ++
+        span(0x0f74, 0x0f76, .sse, .none) ++
+        // EMMS, which has no ModRM byte.
+        [_]Row{r(0x0f77, .{ .op = .sse })} ++
         span(0x0f7e, 0x0f7f, .sse, .none) ++
         cc16(0x0f80, .{ .op = .jcc, .imm = .v, .end = true }) ++
         cc16(0x0f90, .{ .op = .setcc, .modrm = true, .size = .b, .dst = .E }) ++ [_]Row{

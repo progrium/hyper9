@@ -231,6 +231,7 @@ fn gen(n: u32, seed: u64, out: *c.FILE, mode: Mode) !void {
         // Displacement and immediates: random bytes.
         while (p < 16) : (p += 1) cs.code[p] = r.int(u8);
         var inst = dec.decode(&cs.code) catch continue;
+        if (mode == .sse and beyondSse2(cs.code[0], row.opcode)) continue;
         // Pad after the instruction.
         @memset(cs.code[inst.len..], 0x90);
         const disp_small = true;
@@ -244,6 +245,9 @@ fn gen(n: u32, seed: u64, out: *c.FILE, mode: Mode) !void {
             cs.r[1] = r.uintLessThan(u32, 9);
         }
         if (e.op == .xlat) cs.r[3] = win_va + r.uintLessThan(u32, 0x200);
+        // MASKMOVQ and MASKMOVDQU store to EDI, which may fault on a zero
+        // mask or not, as the CPU likes; keep it in the window.
+        if (mode == .sse and row.opcode == 0x0ff7) cs.r[7] = win_va + r.uintLessThan(u32, 0x200);
         if (inst.mem and e.op != .lea) {
             // Steer the address into the window: base = target - disp - index.
             var target = win_va + 0x80 + r.uintLessThan(u32, win_len - 0x100);
@@ -593,7 +597,8 @@ fn close80(a: []const u8, b: []const u8) bool {
 fn close32(a: u32, b: u32) bool {
     if ((a >> 31) != (b >> 31)) return false;
     const d = if (a > b) a - b else b - a;
-    return d <= 1 << 12;
+    // Intel's bound: a relative error of 1.5 * 2^-12.
+    return d <= 3 << 11;
 }
 
 /// What differs between T0's FXSAVE image and the CPU's, if anything:
@@ -641,6 +646,20 @@ fn dumpFx(what: []const u8, fx: *const [512]u8) void {
 }
 
 /// FYL2XP1 outside |x| < 1 - sqrt(2)/2, where the x87 defines no result.
+/// SSE3 and later forms the host runs but h86's CPUID leaves out, which
+/// it raises #UD for: MOVDDUP, MOVSLDUP, MOVSHDUP, HADD, HSUB, ADDSUB,
+/// LDDQU, and 66 0F AE's CLWB and CLFLUSHOPT.
+fn beyondSse2(pfx: u8, opcode: u16) bool {
+    return switch (opcode) {
+        0x0f12 => pfx == 0xf2 or pfx == 0xf3,
+        0x0f16 => pfx == 0xf3,
+        0x0f7c, 0x0f7d, 0x0fd0 => pfx == 0x66 or pfx == 0xf2,
+        0x0ff0 => pfx == 0xf2,
+        0x0fae => pfx == 0x66,
+        else => false,
+    };
+}
+
 fn undefinedResult(cs: *const Case, inst: *const dec.Inst) bool {
     if (inst.op != .x87 or inst.mem or inst.opcode != 0xd9 or inst.modrm != 0xf9) return false;
     const top: u16 = (std.mem.readInt(u16, cs.fx[2..4], .little) >> 11) & 7;
