@@ -97,7 +97,11 @@ pub fn lifts(o: dec.Op) bool {
         .shl, .ushr, .sshr => true,
         .umov, .smov, .ins_g, .ins_e, .dup_g, .dup_e => true,
         .ext, .zip1, .zip2, .uzp1, .uzp2, .trn1, .trn2 => true,
-        .tbl => o.a == 0,
+        .tbl, .tbx => true,
+        .rbit => true,
+        .sli, .sri => true,
+        .umlal, .smlal, .umlsl, .smlsl, .umull, .smull => o.x < 2,
+        .umlal_e, .smlal_e, .umlsl_e, .smlsl_e, .umull_e, .smull_e => o.x < 2,
         .rev64, .rev32, .rev16 => true,
         .xtn => true,
         .sshll, .ushll => true,
@@ -182,6 +186,11 @@ fn make(l: *L, lo: Ref, hi: Ref) !Ref {
 
 fn lane(l: *L, v: Ref, esize: u2, i: u16) !Ref {
     return ext(l, .@"v.lane", ir.laneType(esize), v, ir.none, ir.none, vx(esize, i), 0);
+}
+
+/// A lane of esize, sign- or zero-extended to twice its width.
+fn extendLane(l: *L, e: Ref, esize: u2, signed: bool) !Ref {
+    return l.b.un(if (signed) .sext else .zext, ir.laneType(esize + 1), e);
 }
 
 fn low64(l: *L, v: Ref) !Ref {
@@ -471,9 +480,72 @@ fn one(l: *L, in: Insn) !void {
                 else => try vset(l, o.d, try shape(l, o, try vbin(l, op, n, m, vx(esize, second)))),
             }
         },
-        .tbl => {
-            // One table register: indices past 15 give 0.
-            try vset(l, o.d, try shape(l, o, try vbin(l, .@"v.tbl", try vget(l, o.n), try vget(l, o.m), 0)));
+        .tbl, .tbx => {
+            // Each table register's bytes for indices 16k..16k+15: v.tbl
+            // gives 0 past 15, and idx - 16k wraps below 16k to 240 up.
+            const nregs: usize = @as(usize, o.a) + 1;
+            const idx = try vget(l, o.m);
+            var r = try vbin(l, .@"v.tbl", try vget(l, o.n), idx, 0);
+            for (1..nregs) |t| {
+                const off: u64 = 0x0101_0101_0101_0101 * @as(u64, 16 * t);
+                const sh = try vbin(l, .@"v.sub", idx, try vk(l, off, off), vx(0, 0));
+                r = try vbin(l, .@"v.or", r, try vbin(l, .@"v.tbl", try vget(l, @intCast((o.n + t) & 31)), sh, 0), 0);
+            }
+            if (kd == .tbx) {
+                // Out of range: d's byte.
+                const lim: u64 = 0x0101_0101_0101_0101 * @as(u64, 16 * nregs);
+                const out = try vbin(l, .@"v.cmp", idx, try vk(l, lim, lim), vx(0, @intFromEnum(ir.Pred.uge)));
+                r = try vbin(l, .@"v.or", r, try vbin(l, .@"v.and", try vget(l, o.d), out, 0), 0);
+            }
+            try vset(l, o.d, try shape(l, o, r));
+        },
+        .rbit => {
+            // Bits reversed in each byte: swap halves, pairs, then bits.
+            var v = try vget(l, o.n);
+            const steps = [_]struct { sh: u16, m: u64 }{ .{ .sh = 4, .m = 0x0f0f_0f0f_0f0f_0f0f }, .{ .sh = 2, .m = 0x3333_3333_3333_3333 }, .{ .sh = 1, .m = 0x5555_5555_5555_5555 } };
+            for (steps) |st| {
+                const m = try vk(l, st.m, st.m);
+                const lo = try vun(l, .@"v.shl", try vbin(l, .@"v.and", v, m, 0), vx(0, st.sh));
+                const hi = try vbin(l, .@"v.and", try vun(l, .@"v.lshr", v, vx(0, st.sh)), m, 0);
+                v = try vbin(l, .@"v.or", lo, hi, 0);
+            }
+            try vset(l, o.d, try shape(l, o, v));
+        },
+        .sli, .sri => {
+            const bitsz: u7 = @as(u7, 8) << esize;
+            const sh: u7 = @intCast(o.imm);
+            const lane_ones: u64 = if (bitsz == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(bitsz)) - 1;
+            const lm: u64 = if (kd == .sli) (lane_ones << @intCast(sh)) & lane_ones else if (sh >= bitsz) 0 else lane_ones >> @intCast(sh);
+            var rep: u64 = 0;
+            var i: u7 = 0;
+            while (i < 64) : (i += bitsz) rep |= lm << @intCast(i);
+            const n = try vun(l, if (kd == .sli) .@"v.shl" else .@"v.lshr", try vget(l, o.n), vx(esize, sh));
+            const keep = try vbin(l, .@"v.andn", try vget(l, o.d), try vk(l, rep, rep), 0);
+            try vset(l, o.d, try shape(l, o, try vbin(l, .@"v.or", keep, n, 0)));
+        },
+        .umlal, .smlal, .umlsl, .smlsl, .umull, .smull, .umlal_e, .smlal_e, .umlsl_e, .smlsl_e, .umull_e, .smull_e => {
+            // Widened n and m (or m's element), multiplied in the wide lanes.
+            const signed = switch (kd) {
+                .smlal, .smlsl, .smull, .smlal_e, .smlsl_e, .smull_e => true,
+                else => false,
+            };
+            const indexed = switch (kd) {
+                .umlal_e, .smlal_e, .umlsl_e, .smlsl_e, .umull_e, .smull_e => true,
+                else => false,
+            };
+            const wimm: u16 = @as(u16, @intFromBool(signed)) | @as(u16, @intFromBool(o.sh & sd.Q != 0)) << 1;
+            const wn = try vun(l, .@"v.widen", try vget(l, o.n), vx(esize, wimm));
+            const wm = if (indexed)
+                try ext(l, .@"v.dup", .v128, try extendLane(l, try lane(l, try vget(l, o.m), esize, @intCast(o.imm)), esize, signed), ir.none, ir.none, vx(esize + 1, 0), 0)
+            else
+                try vun(l, .@"v.widen", try vget(l, o.m), vx(esize, wimm));
+            const p = try vbin(l, .@"v.mul", wn, wm, vx(esize + 1, 0));
+            const r = switch (kd) {
+                .umlal, .smlal, .umlal_e, .smlal_e => try vbin(l, .@"v.add", try vget(l, o.d), p, vx(esize + 1, 0)),
+                .umlsl, .smlsl, .umlsl_e, .smlsl_e => try vbin(l, .@"v.sub", try vget(l, o.d), p, vx(esize + 1, 0)),
+                else => p,
+            };
+            try vset(l, o.d, r);
         },
         .rev64, .rev32, .rev16 => {
             const container: u8 = switch (kd) {
