@@ -109,3 +109,13 @@ test "word gives implemented FP and AdvSIMD words" {
     }
     try std.testing.expect(n > 1000);
 }
+
+test "FMOV to and from V.D[1] decode" {
+    // FMOV v0.d[1], x3 (musl's memset) and FMOV x3, v0.d[1]
+    const to_v = dec.decode(0x9eaf0060, 0);
+    try std.testing.expect(to_v.k.isSimd());
+    try std.testing.expectEqual(@as(u8, 4), to_v.x);
+    const from_v = dec.decode(0x9eae0003, 0);
+    try std.testing.expect(from_v.k.isSimd());
+    try std.testing.expectEqual(@as(u8, 4), from_v.x);
+}

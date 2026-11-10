@@ -501,6 +501,8 @@ fn fop(k: Kind, w: u32, x: u32) d.Op {
 
 /// Bits 28:24 = 11110 with bits 30:29 = 00: the scalar FP groups.
 fn fpScalar(w: u32) d.Op {
+    // FMOV to and from V.D[1] has type 10, which is no format.
+    if (bit(w, 21) == 1 and bits(w, 15, 10) == 0 and bits(w, 23, 22) == 2) return fpInt(w, 0);
     const x = ftype(bits(w, 23, 22)) orelse return none;
     const sf = bit(w, 31);
     if (bit(w, 21) == 0) return fpFixed(w, x);
@@ -637,7 +639,7 @@ fn fpInt(w: u32, x: u32) d.Op {
     const t = bits(w, 23, 22);
     switch (opc) {
         0, 1, 4, 5 => {
-            if (x == 1) return none;
+            if (x <= 1) return none;
             if (opc >= 4 and rmode != 0) return none;
             const r: u64 = if (opc >= 4) 4 else switch (rmode) {
                 0 => 0,
@@ -654,7 +656,7 @@ fn fpInt(w: u32, x: u32) d.Op {
             return o;
         },
         2, 3 => {
-            if (x == 1 or rmode != 0) return none;
+            if (x <= 1 or rmode != 0) return none;
             var o = fop(.f_fromint, w, x);
             o.sh = @intCast(opc & 1);
             o.a = @intCast(sf);
