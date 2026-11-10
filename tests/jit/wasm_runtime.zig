@@ -67,7 +67,8 @@ export fn case_count() u32 {
     if (all.len == 0) {
         const ints = cases.generate(gpa) catch return 0;
         const exts = cases.generateExt(gpa) catch return 0;
-        all = std.mem.concat(gpa, cases.Case, &.{ ints, exts }) catch return 0;
+        const lazy = cases.generateLazyFlags(gpa) catch return 0;
+        all = std.mem.concat(gpa, cases.Case, &.{ ints, exts, lazy }) catch return 0;
         env = gpa.create(cases.Env) catch return 0;
     }
     return @intCast(all.len);

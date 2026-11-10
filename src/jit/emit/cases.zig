@@ -752,6 +752,50 @@ test "the FP and vector cases verify and run in ir_eval" {
     }
 }
 
+/// Lazy records (pending.flags @0x2), for emitters that lower them.
+pub fn generateLazyFlags(gpa: std.mem.Allocator) ![]Case {
+    var list: std.ArrayList(Case) = .empty;
+    errdefer {
+        for (list.items) |c| gpa.free(c.text);
+        list.deinit(gpa);
+    }
+    // Lazy records (pending.flags @0x2): from each kind of flags op, used
+    // only there or also by a branch, written on a fault, at an exit,
+    // replaced, and dropped by a setreg.
+    for ([_]u64{ data_va, data_va + 0x10000 }) |start| for ([_][]const u8{
+        "eflags.add:flags %1, %2",       "eflags.sub:flags %1, %2",
+        "eflags.adc:flags %1, %2, %4",   "eflags.sbb:flags %1, %2, %4",
+        "eflags.logic:flags %1",         "eflags.inc:flags %1, %4",
+        "eflags.dec:flags %1, %4",       "eflags.shl:flags %1, %2",
+        "eflags.shr:flags %1, %2",       "eflags.mul:flags %1, %2",
+    }) |op| for ([_][]const u8{ "i32", "i8" }) |ty| {
+        try list.append(gpa, .{ .regs = .{ start, 0x8000_00f7, 0x7fff_ff19, 1, 0, 0, 0x202, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %9 = getreg:i32 #0x8
+            \\  %1 = trunc:{1s} %9
+            \\  %10 = getreg:i32 #0x10
+            \\  %2 = trunc:{1s} %10
+            \\  %11 = getreg:i32 #0x18
+            \\  %4 = eflags.unpack:flags %11
+            \\  %5 = {0s}
+            \\  pending.flags %5 #0x30 @0x2
+            \\  %6 = load:i32 %0 #0x2 @0x100 !1
+            \\  %7 = eflags.cond:i1 %5 #0x4
+            \\  brcond %7 -> b1 b2
+            \\b1:
+            \\  %12 = getreg:i32 #0x8
+            \\  %13 = eflags.logic:flags %12
+            \\  pending.flags %13 #0x30 @0x2
+            \\  exit.chain #0x200 !2
+            \\b2:
+            \\  %14 = getreg:i64 #0x0
+            \\  exit.indirect %14 !2
+        , .{ op, ty }) });
+    };
+    return list.toOwnedSlice(gpa);
+}
+
 /// pending.flags over a word a setreg just wrote (a chunk where the
 /// emitter pins one), for both groups: for emitters that lower it.
 pub fn generatePending(gpa: std.mem.Allocator) ![]Case {
