@@ -46,6 +46,17 @@ const exc_mask: u16 = 0x3f;
 
 const indefinite = F80.default_nan;
 
+/// T0's long-mode Exec sends `.x87` and `.fwait` entries here: this file
+/// takes hx64's.
+pub const long_mode = true;
+
+/// Whether the Exec type `X` (a pointer) runs in long mode (hx64): its Cpu
+/// is a Cpu64. sse.zig asks too.
+pub fn isLong(comptime X: type) bool {
+    const P = @typeInfo(X).pointer.child;
+    return @typeInfo(@FieldType(P, "c")).pointer.child == cpu.Cpu64;
+}
+
 // ------------------------------------------------------------ registers
 
 /// The physical register ST(i) is.
@@ -322,6 +333,12 @@ fn note(x: anytype) void {
     const p = &x.c.fpu;
     const i = x.i;
     p.fop = (@as(u16, @as(u3, @truncate(i.opcode))) << 8) | i.modrm;
+    if (comptime isLong(@TypeOf(x))) {
+        // Long mode has no selectors: the pointers are whole addresses.
+        p.fip = x.c.rip;
+        if (i.mem) p.fdp = x.addr;
+        return;
+    }
     p.fip = (@as(u64, x.c.seg[1]) << 32) | x.c.eip;
     if (i.mem) p.fdp = (@as(u64, x.c.seg[@intFromEnum(i.seg)]) << 32) | x.addr;
 }
@@ -330,8 +347,11 @@ fn note(x: anytype) void {
 pub fn exec(x: anytype) !void {
     const i = x.i;
     const op: u3 = @truncate(i.opcode);
-    if (i.mem) return execMem(x, op, i.reg());
-    return execReg(x, op, i.reg(), i.rm());
+    // REX doesn't reach ModRM's fields here: reg is an opcode extension
+    // and rm an ST(i).
+    const reg: u3 = @truncate(i.modrm >> 3);
+    if (i.mem) return execMem(x, op, reg);
+    return execReg(x, op, reg, @truncate(i.modrm));
 }
 
 // ------------------------------------------------------------ memory forms
@@ -403,11 +423,11 @@ fn execMem(x: anytype, op: u3, r: u3) !void {
         var b_den = false;
         switch (op) {
             0 => {
-                const v = try x.load(a, 4);
+                const v: u32 = @truncate(try x.load(a, 4));
                 b_den = isDen32(v);
                 b = widen32(&o.env, v);
             },
-            2 => b = sf.fromI32(@bitCast(try x.load(a, 4))),
+            2 => b = sf.fromI32(@bitCast(@as(u32, @truncate(try x.load(a, 4))))),
             4 => {
                 const v = try x.load64(a);
                 b_den = isDen64(v);
@@ -423,7 +443,7 @@ fn execMem(x: anytype, op: u3, r: u3) !void {
     switch (op) {
         1 => switch (r) {
             0 => {
-                const v = try x.load(a, 4);
+                const v: u32 = @truncate(try x.load(a, 4));
                 var o = Op.begin(p);
                 const f = o.env.fromF32(v);
                 if (isDen32(v)) o.exc |= DE;
@@ -434,7 +454,7 @@ fn execMem(x: anytype, op: u3, r: u3) !void {
         },
         3 => switch (r) {
             0 => {
-                const v = try x.load(a, 4);
+                const v: u32 = @truncate(try x.load(a, 4));
                 var o = Op.begin(p);
                 return fld(&o, sf.fromI32(@bitCast(v)));
             },
@@ -470,7 +490,7 @@ fn execMem(x: anytype, op: u3, r: u3) !void {
         },
         7 => switch (r) {
             0 => {
-                const v = try x.load(a, 2);
+                const v: u16 = @truncate(try x.load(a, 2));
                 var o = Op.begin(p);
                 return fld(&o, sf.fromI32(@as(i16, @bitCast(@as(u16, @truncate(v))))));
             },
@@ -501,7 +521,7 @@ fn fld(o: *Op, v: F80) void {
 }
 
 /// FST and FSTP to an m32fp or m64fp.
-fn fstFloat(x: anytype, a: u32, size: u8, do_pop: bool) !void {
+fn fstFloat(x: anytype, a: anytype, size: u8, do_pop: bool) !void {
     const p = &x.c.fpu;
     var o = Op.begin(p);
     const v = o.get(0);
@@ -529,7 +549,7 @@ fn fstFloat(x: anytype, a: u32, size: u8, do_pop: bool) !void {
 }
 
 /// FIST (r 2), FISTP (3), and FISTTP (1) to `size` bytes.
-fn fist(x: anytype, a: u32, size: u8, r: u3) !void {
+fn fist(x: anytype, a: anytype, size: u8, r: u3) !void {
     const p = &x.c.fpu;
     var o = Op.begin(p);
     const v = o.get(0);
@@ -635,7 +655,7 @@ fn convert(env: *sf.Env, v: F80, size: u8, mode: sf.Rounding, trunc: bool) i64 {
     return n;
 }
 
-fn fbld(x: anytype, a: u32) !void {
+fn fbld(x: anytype, a: anytype) !void {
     var buf: [10]u8 = undefined;
     try x.loadBytes(a, &buf);
     var n: i64 = 0;
@@ -650,7 +670,7 @@ fn fbld(x: anytype, a: u32) !void {
     fld(&o, v);
 }
 
-fn fbstp(x: anytype, a: u32) !void {
+fn fbstp(x: anytype, a: anytype) !void {
     const p = &x.c.fpu;
     var o = Op.begin(p);
     const v = o.get(0);
@@ -694,10 +714,13 @@ fn envSize(x: anytype) u32 {
 
 fn putEnv(x: anytype, buf: []u8) void {
     const p = &x.c.fpu;
+    // In long mode the pointers are addresses, with no selector to keep:
+    // FCS and FDS are 0, and only the low 32 bits of each fit.
+    const long = comptime isLong(@TypeOf(x));
     const fip: u32 = @truncate(p.fip);
-    const fcs: u16 = @truncate(p.fip >> 32);
+    const fcs: u16 = if (long) 0 else @truncate(p.fip >> 32);
     const fdp: u32 = @truncate(p.fdp);
-    const fds: u16 = @truncate(p.fdp >> 32);
+    const fds: u16 = if (long) 0 else @truncate(p.fdp >> 32);
     if (x.i.opsize) {
         const w = [7]u16{ p.cw, statusWord(p), tagWord(p), @truncate(fip), fcs, @truncate(fdp), fds };
         for (w, 0..) |v, k| std.mem.writeInt(u16, buf[2 * k ..][0..2], v, .little);
@@ -728,13 +751,14 @@ fn getEnv(x: anytype, buf: []const u8) void {
     p.top = @truncate(sw >> 11);
     p.sw = sw & ~@as(u16, 0x3800);
     p.tag = abridge(@truncate(w[2]));
-    p.fip = (@as(u64, w[4] & 0xffff) << 32) | w[3];
+    const long = comptime isLong(@TypeOf(x));
+    p.fip = if (long) w[3] else (@as(u64, w[4] & 0xffff) << 32) | w[3];
     p.fop = if (x.i.opsize) 0 else @truncate((w[4] >> 16) & 0x7ff);
-    p.fdp = (@as(u64, w[6] & 0xffff) << 32) | w[5];
+    p.fdp = if (long) w[5] else (@as(u64, w[6] & 0xffff) << 32) | w[5];
     summarize(p);
 }
 
-fn fstenv(x: anytype, a: u32) !void {
+fn fstenv(x: anytype, a: anytype) !void {
     var buf: [28]u8 = undefined;
     const n = envSize(x);
     putEnv(x, buf[0..n]);
@@ -743,14 +767,14 @@ fn fstenv(x: anytype, a: u32) !void {
     summarize(&x.c.fpu);
 }
 
-fn fldenv(x: anytype, a: u32) !void {
+fn fldenv(x: anytype, a: anytype) !void {
     var buf: [28]u8 = undefined;
     const n = envSize(x);
     try x.loadBytes(a, buf[0..n]);
     getEnv(x, buf[0..n]);
 }
 
-fn fsave(x: anytype, a: u32) !void {
+fn fsave(x: anytype, a: anytype) !void {
     const p = &x.c.fpu;
     var buf: [108]u8 = undefined;
     const n = envSize(x);
@@ -760,7 +784,7 @@ fn fsave(x: anytype, a: u32) !void {
     init(p);
 }
 
-fn frstor(x: anytype, a: u32) !void {
+fn frstor(x: anytype, a: anytype) !void {
     const p = &x.c.fpu;
     var buf: [108]u8 = undefined;
     const n = envSize(x);
@@ -1470,4 +1494,52 @@ test "FXAM, FPREM's condition codes, and FXTRACT" {
     pushing(&o, .fxtract);
     try testing.expectEqual(@as(f64, -1), f64of(st(&p, 0)));
     try testing.expectEqual(@as(f64, 0), f64of(st(&p, 1)));
+}
+
+const TestX64 = @import("sse.zig").TestX64;
+const decode = @import("decode.zig");
+
+/// A long-mode D8-DF instruction for the tests, with REX's bits.
+fn inst64(opcode: u8, rex: u4, modrm: u8) decode.Inst64 {
+    return .{ .op = .x87, .entry = 0, .opcode = opcode, .len = 3, .size = 4, .rex = decode.Rex.of(0x40 | @as(u8, rex)), .modrm = modrm };
+}
+
+test "long mode: loads, stores, and 64-bit pointers" {
+    const base = 0x7fff_0000_0000;
+    var c: cpu.Cpu64 = .{ .rip = base + 0x40 };
+    var mem: [128]u8 align(16) = @splat(0);
+    std.mem.writeInt(u64, mem[0x80 - 0x30 ..][0..8], @bitCast(@as(f64, 2.5)), .little);
+    // fldl 0x...(%rip), 3 bytes + disp at 0x40: the operand at 0x50.
+    var i = inst64(0xdd, 0, 0x05);
+    i.mem = true;
+    i.rip_rel = true;
+    i.len = 7;
+    i.disp = 0x50 - 0x47;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, i));
+    try testing.expectEqual(@as(f64, 2.5), f64of(st(&c.fpu, 0)));
+    // FIP is the whole RIP, FDP the whole address.
+    try testing.expectEqual(@as(u64, base + 0x40), c.fpu.fip);
+    try testing.expectEqual(@as(u64, base + 0x50), c.fpu.fdp);
+    // fld %st(0) with REX.B: ST(i) ignores REX.
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, inst64(0xd9, 0b0001, 0xc0)));
+    // faddp; fistpll (%r9) at 64 bits.
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, inst64(0xde, 0, 0xc1)));
+    c.r[9] = base + 8;
+    i = inst64(0xdf, 0b0001, 0x01 | 7 << 3);
+    i.mem = true;
+    i.base = 9;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, i));
+    try testing.expectEqual(@as(i64, 5), std.mem.readInt(i64, mem[8..16], .little));
+    // fnstsw %ax writes AX, and leaves the rest of RAX.
+    c.r[0] = 0xffff_ffff_ffff_ffff;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, inst64(0xdf, 0, 0xe0)));
+    try testing.expectEqual(@as(u64, 0xffff_ffff_ffff_0000) | statusWord(&c.fpu), c.r[0]);
+    // fnstenv (%r9): 32-bit offsets, with FCS and FDS 0.
+    i = inst64(0xd9, 0b0001, 0x01 | 6 << 3);
+    i.mem = true;
+    i.base = 9;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, i));
+    try testing.expectEqual(@as(u32, @truncate(c.fpu.fip)), std.mem.readInt(u32, mem[8 + 12 ..][0..4], .little));
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, mem[8 + 16 ..][0..4], .little) & 0xffff);
+    try testing.expectEqual(@as(u32, 0xffff_0000), std.mem.readInt(u32, mem[8 + 24 ..][0..4], .little));
 }
