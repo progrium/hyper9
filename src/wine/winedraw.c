@@ -68,6 +68,9 @@ static int debug;
 static pthread_mutex_t draw_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct d9_conn conn;
 static int conn_state; /* 0 unopened, 1 open, -1 failed */
+/* The screen's pixel format, the window's: layers on it must have it too
+ * (x8r8g8b8 in a native window, x8b8g8r8 on a browser's canvas). */
+static unsigned int screen_chan = D9_XRGB32;
 static struct d9_rect screen_r;
 static int next_id = id_first;
 
@@ -77,6 +80,7 @@ struct win
     struct win *next;
     HWND hwnd;
     int layer;      /* 0 when not shown */
+    int desktop;    /* a virtual desktop's window: kept at the bottom */
     RECT visible;   /* screen coordinates */
 };
 
@@ -127,6 +131,7 @@ static int conn_open(void)
     if (d9_open(&conn, DEV) < 0) return -1;
     if (d9_named(&conn, id_window, name, chan, &screen_r) < 0) goto fail;
     DTRACE("window %s %d,%d-%d,%d %s\n", name, screen_r.minx, screen_r.miny, screen_r.maxx, screen_r.maxy, chan);
+    screen_chan = d9_strtochan(chan);
     d9_alloc(&conn, id_opaque, 0, d9_refnone, D9_GREY1, 1, (struct d9_rect){ 0, 0, 1, 1 }, 0xFFFFFFFF);
     if (d9_flushbuf(&conn) < 0) goto fail;
     /* Another process's screen, or a new one. Two processes racing to make
@@ -135,7 +140,7 @@ static int conn_open(void)
     for (int tries = 0; tries < 20; tries++) {
         if (tries) usleep(50000);
         /* draw checks that the screen's channel is the one we expect. */
-        d9_usescreen(&conn, screen_id, d9_strtochan(chan));
+        d9_usescreen(&conn, screen_id, screen_chan);
         if (d9_flushbuf(&conn) == 0) {
             conn_state = 1;
             return 0;
@@ -191,7 +196,8 @@ static int win_show(struct win *w)
     if (w->layer) return 0;
     if (IsRectEmpty(&w->visible)) return -1;
     w->layer = next_id++;
-    d9_alloc(&conn, w->layer, screen_id, d9_refbackup, D9_XRGB32, 0, to_draw(w->visible), 0xFFFFFFFF);
+    d9_alloc(&conn, w->layer, screen_id, d9_refbackup, screen_chan, 0, to_draw(w->visible), 0xFFFFFFFF);
+    if (w->desktop) d9_top(&conn, w->layer, 0);
     if (d9_flushbuf(&conn) < 0) {
         DTRACE("layer for %p: %s\n", w->hwnd, strerror(errno));
         w->layer = 0;
@@ -267,6 +273,21 @@ static const struct window_surface_funcs draw_surface_funcs = {
     draw_surface_destroy,
 };
 
+/*
+ * Whether this thread's desktop is a virtual one (explorer /desktop=NAME,WxH),
+ * whose window Wine draws (wallpaper, desktop icons) and we show as the
+ * bottom layer. On the root desktop the screen's fill is the desktop.
+ */
+static BOOL virtual_desktop(void)
+{
+    HDESK desk = NtUserGetThreadDesktop(HandleToULong(NtCurrentTeb()->ClientId.UniqueThread));
+    USEROBJECTFLAGS flags = { 0 };
+    DWORD len;
+
+    if (!desk || !NtUserGetObjectInformation(desk, UOI_FLAGS, &flags, sizeof(flags), &len)) return FALSE;
+    return (flags.dwFlags & DF_WINE_VIRTUAL_DESKTOP) != 0;
+}
+
 static BOOL DRAW_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rect, struct window_surface **surface)
 {
     char buffer[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
@@ -275,13 +296,14 @@ static BOOL DRAW_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surfac
     int height = surface_rect->bottom - surface_rect->top;
     struct window_surface *previous, *ws;
     struct draw_surface *s;
-    int staging;
+    int staging, desktop;
 
     DTRACE("create surface %p layered %d %d,%d-%d,%d previous %p\n", hwnd, layered, (int)surface_rect->left,
            (int)surface_rect->top, (int)surface_rect->right, (int)surface_rect->bottom, *surface);
     if ((previous = *surface) && previous->funcs == &draw_surface_funcs && EqualRect(&previous->rect, surface_rect))
         return TRUE;
-    if (NtUserGetAncestor(hwnd, GA_PARENT) != NtUserGetDesktopWindow()) return FALSE;
+    desktop = hwnd == NtUserGetDesktopWindow();
+    if (desktop ? !virtual_desktop() : NtUserGetAncestor(hwnd, GA_PARENT) != NtUserGetDesktopWindow()) return FALSE;
 
     pthread_mutex_lock(&draw_lock);
     if (conn_open() < 0) {
@@ -294,7 +316,7 @@ static BOOL DRAW_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surfac
         pthread_mutex_unlock(&draw_lock);
         return FALSE;
     }
-    win_get(hwnd, 1);
+    win_get(hwnd, 1)->desktop = desktop;
     pthread_mutex_unlock(&draw_lock);
 
     memset(info, 0, sizeof(*info));
@@ -354,7 +376,8 @@ static void DRAW_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint,
     } else {
         if (moved) win_hide(w);
         shown = !w->layer && win_show(w) == 0;
-        if (w->layer && !(swp_flags & SWP_NOZORDER) && (insert_after == HWND_TOP || insert_after == HWND_TOPMOST)) {
+        if (w->layer && !w->desktop && !(swp_flags & SWP_NOZORDER) &&
+            (insert_after == HWND_TOP || insert_after == HWND_TOPMOST)) {
             d9_top(&conn, w->layer, 1);
             d9_flush(&conn);
         }
@@ -383,7 +406,7 @@ static void DRAW_ActivateWindow(HWND hwnd, HWND previous)
     struct win *w;
 
     pthread_mutex_lock(&draw_lock);
-    if ((w = win_get(NtUserGetAncestor(hwnd, GA_ROOT), 0)) && w->layer) {
+    if ((w = win_get(NtUserGetAncestor(hwnd, GA_ROOT), 0)) && w->layer && !w->desktop) {
         d9_top(&conn, w->layer, 1);
         d9_flush(&conn);
     }
@@ -558,6 +581,12 @@ static unsigned int scan_code(unsigned int r)
     return 0;
 }
 
+/* Whether a rune is the shifted form of its key on a US keyboard. */
+static int shifted(unsigned int r)
+{
+    return r > ' ' && r < 0x7f && strchr("!@#$%^&*()_+QWERTYUIOP{}ASDFGHJKL:\"~|ZXCVBNM<>?", r);
+}
+
 /* The runes in a UTF-8 string, at most max of them. */
 static int runes(const char *s, unsigned int *out, int max)
 {
@@ -618,8 +647,16 @@ static NTSTATUS read_kbd(void *arg)
         for (i = 0; i < nheld; i++)
             if (!has(now, nnow, held[i]) && !has(now, nnow, scan_code(held[i]) ? held[i] : 0))
                 send_key(scan_code(held[i]), 1);
-        for (i = 0; i < nnow; i++)
-            if (!has(held, nheld, now[i])) send_key(scan_code(now[i]), 0);
+        for (i = 0; i < nnow; i++) {
+            if (has(held, nheld, now[i])) continue;
+            /* A shifted rune with no Shift held, as a page's synthetic
+             * keys can give: shift it here. */
+            if (shifted(now[i]) && !has(now, nnow, Kshift)) {
+                send_key(scan_code(Kshift), 0);
+                send_key(scan_code(now[i]), 0);
+                send_key(scan_code(Kshift), 1);
+            } else send_key(scan_code(now[i]), 0);
+        }
         memcpy(held, now, nnow * sizeof now[0]);
         nheld = nnow;
     }
