@@ -3,9 +3,12 @@
 // and memory it leaves. Built as an i386 Linux program; x86check.zig
 // feeds it cases on stdin and compares T0's results with its answers.
 //
-// A case: 16 code bytes, 8 registers, EFLAGS, and the 1 KiB data window
-// at 0x50000e00 (the window crosses a page boundary at 0x50001000). The
-// answer: a signal number (0 if none), 8 registers, EFLAGS, and the window.
+// A case: 16 code bytes, 8 registers, EFLAGS, the 1 KiB data window at
+// 0x50000e00 (the window crosses a page boundary at 0x50001000), and the
+// x87, MMX, and SSE state as an FXSAVE image. The answer: a signal number
+// (0 if none), 8 registers, EFLAGS, the window, the exception vector
+// (the signal's trap number), and the FXSAVE image after (or, after a
+// signal, the one the kernel saved when it was raised).
 #define _GNU_SOURCE
 #include <setjmp.h>
 #include <signal.h>
@@ -13,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #define CODE 0x40000000u
@@ -25,23 +29,32 @@ struct cas {
     uint32_t r[8];
     uint32_t fl;
     uint8_t win[WINLEN];
+    uint8_t fx[512];
 };
 struct ans {
     uint32_t sig;
     uint32_t r[8];
     uint32_t fl;
     uint8_t win[WINLEN];
+    uint32_t trap;
+    uint8_t fx[512];
 };
 
 // The guest's registers on the way in and out, and the host's stack.
 uint32_t g_in[9], g_out[9], host_esp;
+// The guest's FXSAVE image in and out, and the host's MXCSR.
+uint8_t g_fx[512] __attribute__((aligned(16))), g_fxo[512] __attribute__((aligned(16)));
+uint32_t host_mxcsr = 0x1f80;
 static sigjmp_buf jb;
-static volatile int sig;
+static volatile int sig, trapno;
 
-static void onsig(int s, siginfo_t *si, void *uc) {
+static void onsig(int s, siginfo_t *si, void *ctx) {
     (void)si;
-    (void)uc;
+    ucontext_t *uc = ctx;
     sig = s;
+    trapno = uc->uc_mcontext.gregs[REG_TRAPNO];
+    // The kernel's i386 fpstate: the legacy 112 bytes, then FXSAVE's.
+    if (uc->uc_mcontext.fpregs) memcpy(g_fxo, (char *)uc->uc_mcontext.fpregs + 112, 512);
     siglongjmp(jb, 1);
 }
 
@@ -51,6 +64,7 @@ __asm__(
     "run_guest:\n"
     "  pushal\n"
     "  movl %esp, host_esp\n"
+    "  fxrstor g_fx\n"
     "  movl g_in+32, %eax\n"
     "  pushl %eax\n"
     "  popfl\n"
@@ -65,6 +79,9 @@ __asm__(
     "  jmp *0x40000ff0\n" // CODE: the instruction, then a jump to back
     ".globl back\n"
     "back:\n"
+    "  fxsave g_fxo\n"
+    "  fninit\n"
+    "  ldmxcsr host_mxcsr\n"
     "  movl %esp, g_out+16\n"
     "  movl host_esp, %esp\n"
     "  movl %eax, g_out+0\n"
@@ -111,8 +128,14 @@ int main(void) {
         memcpy(g_in, c.r, 32);
         g_in[8] = c.fl;
         sig = 0;
+        trapno = 0;
+        memcpy(g_fx, c.fx, 512);
+        memset(g_fxo, 0, 512);
         if (sigsetjmp(jb, 1) == 0) run_guest();
+        __asm__ volatile("fninit; ldmxcsr host_mxcsr");
         a.sig = sig;
+        a.trap = sig ? trapno : 0;
+        memcpy(a.fx, g_fxo, 512);
         if (sig) {
             memcpy(a.r, c.r, 32);
             a.fl = c.fl;

@@ -1,10 +1,19 @@
-//! Checks h86's T0 against the host CPU: random integer instructions,
-//! each run once by oracle.c on the real CPU in 32-bit mode and once by
-//! T0, from the same registers, flags, and memory. Registers, the flags
-//! the architecture defines, memory, and exceptions must match.
+//! Checks h86's T0 against the host CPU: random instructions, each run
+//! once by oracle.c on the real CPU in 32-bit mode and once by T0, from
+//! the same registers, flags, memory, and x87/SSE state. Registers, the
+//! flags the architecture defines, memory, the x87/MMX/SSE state, and
+//! exceptions must match.
 //!
-//!     x86check gen <n> <seed> <cases>     write n cases
-//!     x86check cmp <cases> <answers>      compare T0 with the oracle
+//!     x86check gen <n> <seed> <cases> [int|x87|sse]   write n cases
+//!     x86check cmp <cases> <answers>                  compare T0 with the oracle
+//!
+//! `int` (the default) draws integer instructions; `x87` draws D8-DF and
+//! FWAIT, and `sse` MMX, SSE, and SSE2, each from random x87 stacks,
+//! control and status words, XMM registers, and MXCSRs full of the values
+//! floating point breaks on (zeros, denormals, infinities, NaNs, and
+//! unsupported x87 encodings). The transcendentals (FSIN, FYL2X...) are
+//! the x87's own approximations, so their results may differ in the last
+//! few bits; RCPPS and RSQRTPS likewise, within their 12 bits.
 //!
 //! scripts/x86check.sh builds both and runs them (x86-64 Linux only).
 
@@ -27,6 +36,7 @@ const Case = extern struct {
     r: [8]u32,
     fl: u32,
     win: [win_len]u8,
+    fx: [512]u8,
 };
 
 const Answer = extern struct {
@@ -34,9 +44,40 @@ const Answer = extern struct {
     r: [8]u32,
     fl: u32,
     win: [win_len]u8,
+    /// The exception's vector, when sig isn't 0.
+    trap: u32,
+    fx: [512]u8,
 };
 
-fn allowed(op: table.Op) bool {
+/// vmm.X86Extra's shape, which Cpu.getExtra and setExtra take: an FXSAVE
+/// image (32-bit mode keeps FCS and FDS above FIP and FDP).
+const Extra = struct {
+    fx: extern struct {
+        fcw: u16 = 0,
+        fsw: u16 = 0,
+        ftw: u8 = 0,
+        _r1: u8 = 0,
+        fop: u16 = 0,
+        fip: u64 = 0,
+        fdp: u64 = 0,
+        mxcsr: u32 = 0,
+        mxcsr_mask: u32 = 0,
+        st: [8][16]u8 = @splat(@splat(0)),
+        xmm: [16]u128 = @splat(0),
+        _r2: [96]u8 = @splat(0),
+    } = .{},
+    tls: u64 = 0,
+    gs: u64 = 0,
+};
+
+const Mode = enum { int, x87, sse };
+
+fn allowed(op: table.Op, mode: Mode) bool {
+    switch (mode) {
+        .int => {},
+        .x87 => return op == .x87 or op == .fwait,
+        .sse => return op == .sse,
+    }
     return switch (op) {
         .add, .@"or", .adc, .sbb, .@"and", .sub, .xor, .cmp, .@"test" => true,
         .inc, .dec, .not, .neg, .mul, .imul1, .imul, .div, .idiv => true,
@@ -79,7 +120,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const n = std.fmt.parseInt(u32, args.next() orelse die("n"), 10) catch die("n");
         const seed = std.fmt.parseInt(u64, args.next() orelse die("seed"), 10) catch die("seed");
         const out = open(args.next() orelse die("cases"), "wb");
-        try gen(n, seed, out);
+        const mode = std.meta.stringToEnum(Mode, args.next() orelse "int") orelse die("mode");
+        try gen(n, seed, out, mode);
         _ = c.fclose(out);
     } else if (std.mem.eql(u8, cmd, "cmp")) {
         const cf = open(args.next() orelse die("cases"), "rb");
@@ -90,14 +132,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 /// The table rows to draw from.
-fn rows() []const table.Row {
+fn rows(mode: Mode) []const table.Row {
     const S = struct {
         var buf: [table.table.len]table.Row = undefined;
         var n: usize = 0;
     };
     if (S.n == 0) {
         for (table.table) |row| {
-            if (allowed(row.e.op)) {
+            if (allowed(row.e.op, mode)) {
                 S.buf[S.n] = row;
                 S.n += 1;
             }
@@ -119,10 +161,10 @@ fn edge(r: std.Random) u32 {
     };
 }
 
-fn gen(n: u32, seed: u64, out: *c.FILE) !void {
+fn gen(n: u32, seed: u64, out: *c.FILE, mode: Mode) !void {
     var prng: std.Random.DefaultPrng = .init(seed);
     const r = prng.random();
-    const rs = rows();
+    const rs = rows(mode);
     var made: u32 = 0;
     while (made < n) {
         const row = rs[r.uintLessThan(usize, rs.len)];
@@ -134,7 +176,24 @@ fn gen(n: u32, seed: u64, out: *c.FILE) !void {
             .movs, .cmps, .stos, .lods, .scas => true,
             else => false,
         };
-        if (r.uintLessThan(u8, 4) == 0 and e.op != .bswap) {
+        if (mode == .sse) {
+            // The mandatory prefix: none, 66, F3, or F2.
+            switch (r.uintLessThan(u8, 4)) {
+                0 => {},
+                1 => {
+                    cs.code[p] = 0x66;
+                    p += 1;
+                },
+                2 => {
+                    cs.code[p] = 0xf3;
+                    p += 1;
+                },
+                else => {
+                    cs.code[p] = 0xf2;
+                    p += 1;
+                },
+            }
+        } else if (r.uintLessThan(u8, if (mode == .x87) 8 else 4) == 0 and e.op != .bswap) {
             cs.code[p] = 0x66;
             p += 1;
         }
@@ -187,7 +246,11 @@ fn gen(n: u32, seed: u64, out: *c.FILE) !void {
         if (e.op == .xlat) cs.r[3] = win_va + r.uintLessThan(u32, 0x200);
         if (inst.mem and e.op != .lea) {
             // Steer the address into the window: base = target - disp - index.
-            const target = win_va + 0x80 + r.uintLessThan(u32, win_len - 0x100);
+            var target = win_va + 0x80 + r.uintLessThan(u32, win_len - 0x100);
+            // SSE's aligned forms (and FXSAVE) need 16, mostly.
+            if (mode == .sse and r.uintLessThan(u8, 4) != 0) target &= ~@as(u32, 15);
+            // FXSAVE and FSAVE images reach past the operand.
+            if (mode != .int and target > win_va + win_len - 0x200 and r.boolean()) target -= 0x180;
             if (inst.index != dec.no_reg) cs.r[inst.index] = r.uintLessThan(u32, 16);
             if (inst.base == dec.no_reg) continue;
             if (inst.index == inst.base) continue;
@@ -210,12 +273,15 @@ fn gen(n: u32, seed: u64, out: *c.FILE) !void {
             if (count > 16) continue;
         }
         r.bytes(&cs.win);
+        fillFp(r, &cs, mode, &inst);
         if (c.fwrite(@ptrCast(&cs), @sizeOf(Case), 1, out) != 1) die("write");
         made += 1;
     }
 }
 
 fn cmp(cf: *c.FILE, af: *c.FILE) u32 {
+    // X86CHECK_BRIEF=1: one line per difference, for sorting.
+    const brief = c.getenv("X86CHECK_BRIEF") != null;
     var bad: u32 = 0;
     var total: u32 = 0;
     var code: [4096]u8 align(4096) = undefined;
@@ -235,8 +301,13 @@ fn cmp(cf: *c.FILE, af: *c.FILE) u32 {
         cpu.r = cs.r;
         cpu.eip = code_va;
         cpu.fl.set(cs.fl | flags.IF);
+        var ex: Extra = .{};
+        @memcpy(std.mem.asBytes(&ex.fx), &cs.fx);
+        cpu.setExtra(&ex);
         const inst = dec.decode(&cs.code) catch unreachable;
         const exit = x86.exec.step(&cpu, &m);
+        cpu.getExtra(&ex);
+        const t0fx: *const [512]u8 = std.mem.asBytes(&ex.fx);
         const fx = dec.effects(&inst);
         var mask: u32 = flags.arith | flags.DF;
         mask &= ~fx.flags_undefined;
@@ -244,15 +315,19 @@ fn cmp(cf: *c.FILE, af: *c.FILE) u32 {
         if (inst.op == .bt or inst.op == .bts or inst.op == .btr or inst.op == .btc) mask &= ~(flags.arith & ~flags.CF);
         var ok = true;
         var why: []const u8 = "";
+        if (undefinedResult(&cs, &inst)) continue;
         if (an.sig != 0) {
-            const want: u8 = switch (an.sig) {
-                8 => 0, // SIGFPE: #DE
-                4 => 6, // SIGILL: #UD
-                else => 13,
-            };
-            if (exit == null or exit.? != .exception or exit.?.exception != want) {
+            const got: ?u32 = if (exit) |x| switch (x) {
+                .exception => |v| v,
+                .fault => 14,
+                else => null,
+            } else null;
+            if (got == null or got.? != an.trap) {
                 ok = false;
                 why = "exception";
+            } else if (fxDiffers(t0fx, &an.fx, &inst)) |w| {
+                ok = false;
+                why = w;
             }
         } else if (exit != null) {
             ok = false;
@@ -267,16 +342,31 @@ fn cmp(cf: *c.FILE, af: *c.FILE) u32 {
             } else if (!std.mem.eql(u8, data[win_va - data_va ..][0..win_len], &an.win)) {
                 ok = false;
                 why = "memory";
+            } else if (fxDiffers(t0fx, &an.fx, &inst)) |w| {
+                ok = false;
+                why = w;
             }
         }
         if (!ok) {
             bad += 1;
-            if (bad <= 40) {
+            if (brief) {
+                const sw = struct {
+                    fn f(img: *const [512]u8) u16 {
+                        return std.mem.readInt(u16, img[2..4], .little);
+                    }
+                };
+                std.debug.print("{s}: {x} sw {x:0>4} {x:0>4} {x:0>4} cw {x:0>4} ftw {x:0>2}\n", .{ why, cs.code[0..inst.len], sw.f(&cs.fx), sw.f(t0fx), sw.f(&an.fx), std.mem.readInt(u16, cs.fx[0..2], .little), cs.fx[4] });
+            } else if (bad <= 40) {
                 std.debug.print("{s}: {t} {x}", .{ why, inst.op, cs.code[0..inst.len] });
-                std.debug.print(" exit={any} sig={d}\n", .{ exit, an.sig });
+                std.debug.print(" exit={any} sig={d} trap={d}\n", .{ exit, an.sig, an.trap });
                 dump("in ", cs.r, cs.fl);
                 dump("t0 ", cpu.r, cpu.fl.get() & mask);
                 dump("cpu", an.r, an.fl & mask);
+                if (inst.op == .x87 or inst.op == .sse or inst.op == .fwait) {
+                    dumpFx("in ", &cs.fx);
+                    dumpFx("t0 ", t0fx);
+                    dumpFx("cpu", &an.fx);
+                }
             }
         }
     }
@@ -288,4 +378,270 @@ fn dump(what: []const u8, r: [8]u32, fl: u32) void {
     std.debug.print("  {s}", .{what});
     for (r) |v| std.debug.print(" {x:0>8}", .{v});
     std.debug.print(" fl={x}\n", .{fl});
+}
+
+// ---------------------------------------------------------------- x87 and SSE
+
+fn put16(b: []u8, v: u16) void {
+    std.mem.writeInt(u16, b[0..2], v, .little);
+}
+
+fn put32(b: []u8, v: u32) void {
+    std.mem.writeInt(u32, b[0..4], v, .little);
+}
+
+/// An 80-bit value floating point trips on.
+fn f80Val(r: std.Random) u80 {
+    const sign: u80 = @as(u80, @intFromBool(r.boolean())) << 79;
+    const top: u64 = 1 << 63;
+    const v: u80 = switch (r.uintLessThan(u8, 20)) {
+        0 => 0,
+        1 => @as(u80, 0x3fff) << 64 | top,
+        2 => @as(u80, 0x7fff) << 64 | top, // inf
+        3 => @as(u80, 0x7fff) << 64 | top | (1 << 62) | (r.int(u64) >> 2), // QNaN
+        4 => @as(u80, 0x7fff) << 64 | top | ((r.int(u64) >> 2) | 1), // SNaN
+        5 => @as(u80, 0xffff) << 64 | top | (1 << 62), // indefinite
+        6 => r.int(u64) >> 1, // denormal
+        7 => @as(u80, 0x3fff - 70 + r.uintLessThan(u64, 140)) << 64 | top | (r.int(u64) >> 1),
+        8, 9, 10 => @as(u80, 0x3fff - 8 + r.uintLessThan(u64, 24)) << 64 | top | (r.int(u64) >> 1),
+        11 => @as(u80, 1 + r.uintLessThan(u64, 0x7ffe)) << 64 | top | (r.int(u64) >> 1),
+        12 => blk: { // a small integer
+            const k = r.uintLessThan(u64, 1000) + 1;
+            const z: u6 = @intCast(@clz(k));
+            break :blk @as(u80, 0x3fff + 63 - @as(u64, z)) << 64 | (k << z);
+        },
+        13 => @as(u80, 0x3fff + 50 + r.uintLessThan(u64, 20)) << 64 | top | (r.int(u64) >> 1),
+        14 => @as(u80, 0x7ffe) << 64 | ~@as(u64, 0), // max
+        15 => @as(u80, 1) << 64 | top | (r.int(u64) >> 40), // near the smallest normal
+        16 => if (r.uintLessThan(u8, 4) == 0) @as(u80, 0x3fff) << 64 | (r.int(u64) >> 1) else @as(u80, 0x4000) << 64 | top, // unnormal, rarely
+        17 => @as(u80, 0x4000) << 64 | 0xc90f_daa2_2168_c235, // pi
+        18 => @as(u80, 0x3fff - 30 + r.uintLessThan(u64, 60)) << 64 | top | (r.int(u64) >> 1),
+        else => @as(u80, 0x3ffe + r.uintLessThan(u64, 4)) << 64 | top | (r.int(u64) >> 1),
+    };
+    return v | sign;
+}
+
+fn f32Val(r: std.Random) u32 {
+    const sign: u32 = @as(u32, @intFromBool(r.boolean())) << 31;
+    const v: u32 = switch (r.uintLessThan(u8, 14)) {
+        0 => 0,
+        1 => 0x3f80_0000,
+        2 => 0x7f80_0000,
+        3 => 0x7fc0_0000 | (r.int(u32) & 0x3f_ffff),
+        4 => 0x7f80_0000 | ((r.int(u32) & 0x3f_ffff) | 1),
+        5 => r.int(u32) & 0x7f_ffff,
+        6 => 0x7f7f_ffff,
+        7 => 0x0080_0000 | (r.int(u32) & 0xff),
+        8 => @bitCast(@as(f32, @floatFromInt(r.intRangeAtMost(i32, -100000, 100000)))),
+        9 => @as(u32, 0x3f00_0000 + r.uintLessThan(u32, 0x0300_0000)) | (r.int(u32) & 0x7f_ffff),
+        10 => @as(u32, 0x4e80_0000 + r.uintLessThan(u32, 0x0200_0000)), // near 2^31
+        11 => (@as(u32, 1 + r.uintLessThan(u32, 0x30)) << 23) | (r.int(u32) & 0x7f_ffff), // small
+        else => r.int(u32) & 0x7fff_ffff,
+    };
+    return v | sign;
+}
+
+fn f64Val(r: std.Random) u64 {
+    const sign: u64 = @as(u64, @intFromBool(r.boolean())) << 63;
+    const frac = r.int(u64) & 0xf_ffff_ffff_ffff;
+    const v: u64 = switch (r.uintLessThan(u8, 14)) {
+        0 => 0,
+        1 => 0x3ff0_0000_0000_0000,
+        2 => 0x7ff0_0000_0000_0000,
+        3 => 0x7ff8_0000_0000_0000 | (frac >> 1),
+        4 => 0x7ff0_0000_0000_0000 | ((frac >> 1) | 1),
+        5 => frac,
+        6 => 0x7fef_ffff_ffff_ffff,
+        7 => 0x0010_0000_0000_0000 | (frac & 0xff),
+        8 => @bitCast(@as(f64, @floatFromInt(r.intRangeAtMost(i32, -100000, 100000)))),
+        9 => (@as(u64, 0x3f0 + r.uintLessThan(u64, 0x30)) << 52) | frac,
+        10 => (@as(u64, 0x41d + r.uintLessThan(u64, 3)) << 52) | frac, // near 2^31
+        11 => (@as(u64, 1 + r.uintLessThan(u64, 0x40)) << 52) | frac,
+        12 => (@as(u64, 0x380 + r.uintLessThan(u64, 0x10)) << 52) | frac, // f32's edges
+        else => r.int(u64) & 0x7fff_ffff_ffff_ffff,
+    };
+    return v | sign;
+}
+
+/// A random XMM (or MMX) value: lanes of binary32, binary64, or bits.
+fn vecVal(r: std.Random) u128 {
+    var v: u128 = 0;
+    switch (r.uintLessThan(u8, 4)) {
+        0 => for (0..4) |k| {
+            v |= @as(u128, f32Val(r)) << @intCast(32 * k);
+        },
+        1 => for (0..2) |k| {
+            v |= @as(u128, f64Val(r)) << @intCast(64 * k);
+        },
+        2 => for (0..8) |k| {
+            const lane: u16 = switch (r.uintLessThan(u8, 6)) {
+                0 => 0,
+                1 => 0xffff,
+                2 => 0x8000,
+                3 => 0x7fff,
+                4 => 0x80 + r.uintLessThan(u16, 3) -% 1,
+                else => r.int(u16),
+            };
+            v |= @as(u128, lane) << @intCast(16 * k);
+        },
+        else => v = r.int(u128),
+    }
+    return v;
+}
+
+/// The x87 and SSE state of a case, and an interesting value at its
+/// memory operand.
+fn fillFp(r: std.Random, cs: *Case, mode: Mode, inst: *const dec.Inst) void {
+    @memset(&cs.fx, 0);
+    const fx = &cs.fx;
+    put16(fx[0..], 0x037f);
+    put32(fx[24..], 0x1f80);
+    if (mode == .int) return;
+    // The control word: rounding, precision, and now and then IM, DM,
+    // ZM, or PM unmasked. (Unmasked OE and UE get no exponent wrap here.)
+    var cw: u16 = 0x0040 | 0x3f;
+    cw |= @as(u16, r.uintLessThan(u16, 4)) << 10;
+    cw |= @as(u16, switch (r.uintLessThan(u8, 4)) {
+        0 => 0,
+        1 => 2,
+        else => 3,
+    }) << 8;
+    if (r.uintLessThan(u8, 6) == 0) cw &= ~(r.int(u16) & 0x27);
+    var sw: u16 = 0;
+    if (r.uintLessThan(u8, 4) == 0) sw |= r.int(u16) & 0x3f;
+    sw |= r.int(u16) & 0x4700; // C0-C3
+    if (sw & ~cw & 0x3f != 0) sw |= 0x8080 else if (r.uintLessThan(u8, 3) != 0) sw &= ~@as(u16, 0x3f & ~cw);
+    if (sw & ~cw & 0x3f != 0) sw |= 0x8080;
+    const top: u16 = r.uintLessThan(u16, 8);
+    sw |= top << 11;
+    put16(fx[0..], cw);
+    put16(fx[2..], sw);
+    // Tags: mostly full, or a few registers in use.
+    fx[4] = switch (r.uintLessThan(u8, 4)) {
+        0 => 0xff,
+        1 => r.int(u8),
+        2 => blk: {
+            // ST(0)..ST(k-1) in use.
+            const k = r.uintLessThan(u4, 9);
+            var t: u8 = 0;
+            for (0..k) |j| t |= @as(u8, 1) << @intCast((top + j) & 7);
+            break :blk t;
+        },
+        else => ~(@as(u8, 1) << @intCast((top + 7) & 7)),
+    };
+    for (0..8) |k| std.mem.writeInt(u80, fx[32 + 16 * k ..][0..10], f80Val(r), .little);
+    // MXCSR: rounding, DAZ, FTZ, sticky flags, and now and then unmasked
+    // exceptions.
+    var mx: u32 = 0x1f80;
+    mx |= @as(u32, r.uintLessThan(u32, 4)) << 13;
+    if (r.uintLessThan(u8, 4) == 0) mx |= 1 << 6;
+    if (r.uintLessThan(u8, 4) == 0) mx |= 1 << 15;
+    if (r.uintLessThan(u8, 4) == 0) mx |= r.int(u32) & 0x3f;
+    if (r.uintLessThan(u8, 6) == 0) mx &= ~((r.int(u32) & 0x3f) << 7);
+    put32(fx[24..], mx);
+    for (0..8) |k| std.mem.writeInt(u128, fx[160 + 16 * k ..][0..16], vecVal(r), .little);
+    // An interesting value at the operand.
+    if (inst.mem) {
+        const off = targetOf(cs, inst) -% win_va;
+        if (off < win_len - 16) {
+            const w = cs.win[off..];
+            switch (r.uintLessThan(u8, 5)) {
+                0 => put32(w, f32Val(r)),
+                1 => std.mem.writeInt(u64, w[0..8], f64Val(r), .little),
+                2 => std.mem.writeInt(u80, w[0..10], f80Val(r), .little),
+                3 => std.mem.writeInt(u128, w[0..16], vecVal(r), .little),
+                else => {},
+            }
+        }
+    }
+}
+
+fn targetOf(cs: *const Case, inst: *const dec.Inst) u32 {
+    var a = inst.disp;
+    if (inst.base != dec.no_reg) a +%= cs.r[inst.base];
+    if (inst.index != dec.no_reg) a +%= cs.r[inst.index] << inst.scale;
+    return a;
+}
+
+/// D9 F0-FF's approximations, and FYL2X's kin: compared to a few ulps.
+fn approximate(inst: *const dec.Inst) bool {
+    if (inst.op != .x87 or inst.mem or inst.opcode != 0xd9) return false;
+    return switch (inst.modrm) {
+        0xf0, 0xf1, 0xf2, 0xf3, 0xf9, 0xfb, 0xfe, 0xff => true,
+        else => false,
+    };
+}
+
+/// RCPPS, RCPSS, RSQRTPS, and RSQRTSS.
+fn approximateSse(inst: *const dec.Inst) bool {
+    return inst.op == .sse and (inst.opcode == 0x0f52 or inst.opcode == 0x0f53);
+}
+
+fn close80(a: []const u8, b: []const u8) bool {
+    const x = std.mem.readInt(u80, a[0..10], .little);
+    const y = std.mem.readInt(u80, b[0..10], .little);
+    if (x == y) return true;
+    if ((x >> 79) != (y >> 79)) return false;
+    const d = if (x > y) x - y else y - x;
+    return d <= 64;
+}
+
+fn close32(a: u32, b: u32) bool {
+    if ((a >> 31) != (b >> 31)) return false;
+    const d = if (a > b) a - b else b - a;
+    return d <= 1 << 12;
+}
+
+/// What differs between T0's FXSAVE image and the CPU's, if anything:
+/// not FOP, FIP, or FDP, which this CPU may not keep, nor MXCSR_MASK.
+fn fxDiffers(t: *const [512]u8, h: *const [512]u8, inst: *const dec.Inst) ?[]const u8 {
+    const approx = approximate(inst);
+    var sw_mask: u16 = 0xffff;
+    if (approx) sw_mask &= ~@as(u16, 0x0230); // C1, UE, PE
+    const ts = std.mem.readInt(u16, t[2..4], .little);
+    const hs = std.mem.readInt(u16, h[2..4], .little);
+    if (!std.mem.eql(u8, t[0..2], h[0..2])) return "fcw";
+    if ((ts ^ hs) & sw_mask != 0) return "fsw";
+    if (t[4] != h[4]) return "ftw";
+    if (!std.mem.eql(u8, t[24..28], h[24..28])) return "mxcsr";
+    for (0..8) |k| {
+        const a = t[32 + 16 * k ..][0..10];
+        const b = h[32 + 16 * k ..][0..10];
+        if (approx) {
+            if (!close80(a, b)) return "st";
+        } else if (!std.mem.eql(u8, a, b)) return "st";
+    }
+    if (approximateSse(inst)) {
+        for (0..32) |k| {
+            const a = std.mem.readInt(u32, t[160 + 4 * k ..][0..4], .little);
+            const b = std.mem.readInt(u32, h[160 + 4 * k ..][0..4], .little);
+            if (!close32(a, b)) return "xmm";
+        }
+    } else if (!std.mem.eql(u8, t[160..288], h[160..288])) return "xmm";
+    return null;
+}
+
+fn dumpFx(what: []const u8, fx: *const [512]u8) void {
+    std.debug.print("  {s} fcw={x:0>4} fsw={x:0>4} ftw={x:0>2} mxcsr={x:0>8}\n", .{
+        what,
+        std.mem.readInt(u16, fx[0..2], .little),
+        std.mem.readInt(u16, fx[2..4], .little),
+        fx[4],
+        std.mem.readInt(u32, fx[24..28], .little),
+    });
+    std.debug.print("     ", .{});
+    for (0..8) |k| std.debug.print(" {x:0>20}", .{std.mem.readInt(u80, fx[32 + 16 * k ..][0..10], .little)});
+    std.debug.print("\n     ", .{});
+    for (0..8) |k| std.debug.print(" {x:0>32}", .{std.mem.readInt(u128, fx[160 + 16 * k ..][0..16], .little)});
+    std.debug.print("\n", .{});
+}
+
+/// FYL2XP1 outside |x| < 1 - sqrt(2)/2, where the x87 defines no result.
+fn undefinedResult(cs: *const Case, inst: *const dec.Inst) bool {
+    if (inst.op != .x87 or inst.mem or inst.opcode != 0xd9 or inst.modrm != 0xf9) return false;
+    const top: u16 = (std.mem.readInt(u16, cs.fx[2..4], .little) >> 11) & 7;
+    _ = top;
+    const v = std.mem.readInt(u80, cs.fx[32..42], .little);
+    const e: u16 = @truncate((v >> 64) & 0x7fff);
+    return e >= 0x3ffd and e != 0x7fff;
 }
