@@ -16,6 +16,7 @@ const exec = @import("exec.zig");
 const dec = @import("decode.zig");
 const sd = @import("simd_decode.zig");
 const sf = @import("../softfloat.zig");
+const mem = @import("../mem.zig");
 
 const K = sd.Kind;
 const Op = dec.Op;
@@ -210,6 +211,7 @@ fn run(comptime k: K, m: *Machine, o: *const Op, pc: u64) Next {
             }
             cpu.v[o.d] = r;
         },
+        .ld_multi, .st_multi, .ld_single, .st_single, .ld_rep => return structure(k, m, o, pc),
         _ => return exec.undef(m, pc),
     }
     if (qc) cpu.fpsr |= QC;
@@ -1140,6 +1142,82 @@ fn fpCvtVec(comptime k: K, cpu: *Cpu, o: *const Op) void {
     }
 }
 
+// ---------------------------------------------------------------- structure loads and stores
+
+fn structure(comptime k: K, m: *Machine, o: *const Op, pc: u64) Next {
+    return switch (o.x) {
+        inline 0...3 => |s| structureT(k, UInt(s), m, o, pc),
+        else => unreachable,
+    };
+}
+
+fn structureT(comptime k: K, comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
+    const cpu = m.cpu;
+    const eb = @sizeOf(T);
+    const base = cpu.r[o.n];
+    var addr = base;
+    var f: exec.MemFault = undefined;
+    const t: usize = o.d;
+    switch (k) {
+        .ld_multi, .st_multi => {
+            const selem: usize = o.a & 0xf;
+            const rpt: usize = (o.a >> 4) / selem;
+            const elements = count(o, T);
+            // Loads land in a copy, so a fault leaves the registers alone.
+            var regs: [4]u128 = undefined;
+            for (0..4) |i| regs[i] = if (k == .st_multi) cpu.v[(t + i) & 31] else 0;
+            for (0..rpt) |r| {
+                for (0..elements) |e| {
+                    for (0..selem) |s| {
+                        const ri = r + s;
+                        if (k == .ld_multi) {
+                            const v = exec.loadAny(m, T, addr, &f) orelse return exec.dataFault(m, pc, f.addr, .read, f.kind);
+                            setLane(&regs[ri], T, e, v);
+                        } else {
+                            if (!exec.storeAny(m, T, addr, lane(regs[ri], T, e), &f)) return exec.dataFault(m, pc, f.addr, .write, f.kind);
+                        }
+                        addr +%= eb;
+                    }
+                }
+            }
+            if (k == .ld_multi) for (0..rpt * selem) |i| {
+                cpu.v[(t + i) & 31] = regs[i];
+            };
+        },
+        .ld_single, .st_single => {
+            const selem: usize = o.a & 0xf;
+            const idx: usize = @intCast(o.imm & 0xff);
+            var vals: [4]T = undefined;
+            for (0..selem) |s| {
+                if (k == .ld_single) {
+                    vals[s] = exec.loadAny(m, T, addr, &f) orelse return exec.dataFault(m, pc, f.addr, .read, f.kind);
+                } else {
+                    if (!exec.storeAny(m, T, addr, lane(cpu.v[(t + s) & 31], T, idx), &f)) return exec.dataFault(m, pc, f.addr, .write, f.kind);
+                }
+                addr +%= eb;
+            }
+            if (k == .ld_single) for (0..selem) |s| setLane(&cpu.v[(t + s) & 31], T, idx, vals[s]);
+        },
+        .ld_rep => {
+            const selem: usize = o.a & 0xf;
+            var vals: [4]T = undefined;
+            for (0..selem) |s| {
+                vals[s] = exec.loadAny(m, T, addr, &f) orelse return exec.dataFault(m, pc, f.addr, .read, f.kind);
+                addr +%= eb;
+            }
+            for (0..selem) |s| {
+                var r: u128 = 0;
+                for (0..count(o, T)) |i| put(&r, T, i, vals[s]);
+                cpu.v[(t + s) & 31] = r;
+            }
+        },
+        else => unreachable,
+    }
+    if (o.imm & (1 << 8) != 0) cpu.r[o.n] = base +% cpu.r[o.m] +% (o.imm >> 16);
+    return .next;
+}
+
 test {
     _ = @import("simd_oracle_test.zig");
+    _ = @import("simd_gen.zig");
 }

@@ -11,6 +11,10 @@ const builtin = @import("builtin");
 const dec = @import("decode.zig");
 const exec = @import("exec.zig");
 const sd = @import("simd_decode.zig");
+const gen = @import("simd_gen.zig");
+const Class = gen.Class;
+const classes = gen.classes;
+const vValue = gen.vValue;
 const mem = @import("../mem.zig");
 const Ctx = @import("../../jit/ctx.zig").Ctx;
 
@@ -152,24 +156,6 @@ const gp_interesting = [_]u64{
     63,                 64,                 31,                 32,
 };
 
-const f16s = [_]u16{ 0, 0x8000, 0x3c00, 0xbc00, 0x7c00, 0xfc00, 0x7e00, 0x7e55, 0x7c01, 0xfd23, 0x0400, 0x0001, 0x03ff, 0x7bff, 0x3800, 0x3e00, 0x4100, 0x3c01 };
-const f32s = [_]u32{
-    0,          0x80000000, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc00000, 0x7fc12345,
-    0x7f800001, 0xff812345, 0x00800000, 0x00000001, 0x007fffff, 0x807fffff, 0x7f7fffff, 0xff7fffff,
-    0x3f000000, 0x3fc00000, 0x40200000, 0xc0200000, 0x4f000000, 0xcf000000, 0x4f800000, 0x5f000000,
-    0xdf000000, 0x5f800000, 0x3f800001, 0x3effffff, 0x4effffff, 0x33800000, 0x00ffffff, 0x0f800000,
-};
-const f64s = [_]u64{
-    0,                  0x8000000000000000, 0x3ff0000000000000, 0xbff0000000000000,
-    0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000000, 0x7ff8000012345678,
-    0x7ff0000000000001, 0xfff0000000012345, 0x0010000000000000, 0x0000000000000001,
-    0x000fffffffffffff, 0x800fffffffffffff, 0x7fefffffffffffff, 0x3fe0000000000000,
-    0x3ff8000000000000, 0x4004000000000000, 0xc004000000000000, 0x41e0000000000000,
-    0xc1e0000000000000, 0x41f0000000000000, 0x43e0000000000000, 0xc3e0000000000000,
-    0x43f0000000000000, 0x3ff0000000000001, 0x380fffffe0000000, 0x47efffffe0000000,
-    0x36a0000000000000, 0x3810000000000000, 0x41dfffffffc00000, 0x7e37e43c8800759c,
-};
-
 fn gpValue(rand: std.Random) u64 {
     return switch (rand.uintLessThan(u8, 4)) {
         0 => gp_interesting[rand.uintLessThan(usize, gp_interesting.len)],
@@ -177,56 +163,6 @@ fn gpValue(rand: std.Random) u64 {
         else => rand.int(u64),
     };
 }
-
-fn vValue(rand: std.Random) u128 {
-    var v: u128 = @as(u128, rand.int(u64)) << 64 | rand.int(u64);
-    switch (rand.uintLessThan(u8, 6)) {
-        0 => for (0..8) |i| {
-            if (rand.boolean()) v = (v & ~(@as(u128, 0xffff) << @intCast(16 * i))) | @as(u128, f16s[rand.uintLessThan(usize, f16s.len)]) << @intCast(16 * i);
-        },
-        1, 2 => for (0..4) |i| {
-            if (rand.uintLessThan(u8, 4) != 0) v = (v & ~(@as(u128, 0xffffffff) << @intCast(32 * i))) | @as(u128, f32s[rand.uintLessThan(usize, f32s.len)]) << @intCast(32 * i);
-        },
-        3, 4 => for (0..2) |i| {
-            if (rand.uintLessThan(u8, 4) != 0) v = (v & ~(@as(u128, std.math.maxInt(u64)) << @intCast(64 * i))) | @as(u128, f64s[rand.uintLessThan(usize, f64s.len)]) << @intCast(64 * i);
-        },
-        else => {},
-    }
-    return v;
-}
-
-const Class = struct { name: []const u8, mask: u32, val: u32 };
-
-/// The FP and AdvSIMD encoding classes, as bits that must match.
-pub const classes = [_]Class{
-    .{ .name = "three same", .mask = 0x9f200400, .val = 0x0e200400 },
-    .{ .name = "scalar three same", .mask = 0xdf200400, .val = 0x5e200400 },
-    .{ .name = "three different", .mask = 0x9f200c00, .val = 0x0e200000 },
-    .{ .name = "scalar three different", .mask = 0xdf200c00, .val = 0x5e200000 },
-    .{ .name = "two-reg misc", .mask = 0x9f3e0c00, .val = 0x0e200800 },
-    .{ .name = "scalar two-reg misc", .mask = 0xdf3e0c00, .val = 0x5e200800 },
-    .{ .name = "across lanes", .mask = 0x9f3e0c00, .val = 0x0e300800 },
-    .{ .name = "scalar pairwise", .mask = 0xdf3e0c00, .val = 0x5e300800 },
-    .{ .name = "copy", .mask = 0x9fe08400, .val = 0x0e000400 },
-    .{ .name = "scalar copy", .mask = 0xdfe08400, .val = 0x5e000400 },
-    .{ .name = "modified immediate", .mask = 0x9ff80400, .val = 0x0f000400 },
-    .{ .name = "shift by immediate", .mask = 0x9f800400, .val = 0x0f000400 },
-    .{ .name = "scalar shift by immediate", .mask = 0xdf800400, .val = 0x5f000400 },
-    .{ .name = "by element", .mask = 0x9f000400, .val = 0x0f000000 },
-    .{ .name = "scalar by element", .mask = 0xdf000400, .val = 0x5f000000 },
-    .{ .name = "table lookup", .mask = 0xbfe08c00, .val = 0x0e000000 },
-    .{ .name = "permute", .mask = 0xbf208c00, .val = 0x0e000800 },
-    .{ .name = "extract", .mask = 0xbfe08400, .val = 0x2e000000 },
-    .{ .name = "FP and fixed point", .mask = 0x7f200000, .val = 0x1e000000 },
-    .{ .name = "FP and integer", .mask = 0x7f20fc00, .val = 0x1e200000 },
-    .{ .name = "FP one source", .mask = 0xff207c00, .val = 0x1e204000 },
-    .{ .name = "FP compare", .mask = 0xff203c00, .val = 0x1e202000 },
-    .{ .name = "FP immediate", .mask = 0xff201c00, .val = 0x1e201000 },
-    .{ .name = "FP conditional compare", .mask = 0xff200c00, .val = 0x1e200400 },
-    .{ .name = "FP two source", .mask = 0xff200c00, .val = 0x1e200800 },
-    .{ .name = "FP conditional select", .mask = 0xff200c00, .val = 0x1e200c00 },
-    .{ .name = "FP three source", .mask = 0xff000000, .val = 0x1f000000 },
-};
 
 /// A word of class `c` that simd_decode.zig implements and that touches
 /// neither SP nor X18 (macOS reserves it).
@@ -323,11 +259,103 @@ test "T0 matches the host CPU on random FP and AdvSIMD instructions" {
     for (classes, per_class) |c, n| if (n == 0) std.debug.print("no coverage: class {s}\n", .{c.name});
     var missing: usize = 0;
     inline for (@typeInfo(sd.Kind).@"enum".fields) |f| {
-        if (kinds[f.value] == 0) {
+        if (kinds[f.value] == 0 and !isMem(@enumFromInt(f.value))) {
             std.debug.print("no coverage: {s}\n", .{f.name});
             missing += 1;
         }
     }
     try std.testing.expectEqual(@as(usize, 0), failures);
+    try std.testing.expectEqual(@as(usize, 0), missing);
+}
+
+fn isMem(k: sd.Kind) bool {
+    return switch (k) {
+        .ld_multi, .st_multi, .ld_single, .st_single, .ld_rep => true,
+        else => false,
+    };
+}
+
+const mem_classes = [_]Class{
+    .{ .name = "multiple structures", .mask = 0xbfbf0000, .val = 0x0c000000 },
+    .{ .name = "multiple structures, post-index", .mask = 0xbfa00000, .val = 0x0c800000 },
+    .{ .name = "single structure", .mask = 0xbf9f0000, .val = 0x0d000000 },
+    .{ .name = "single structure, post-index", .mask = 0xbf800000, .val = 0x0d800000 },
+};
+
+test "T0 matches the host CPU on random structure loads and stores" {
+    if (!supported) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var words: std.ArrayList(u32) = .empty;
+    defer words.deinit(gpa);
+    const at = try harness(&words, gpa);
+    var native = try Native.init(words.items, at);
+
+    const size = 64 * 1024;
+    const host_buf = try gpa.alignedAlloc(u8, .fromByteUnits(mem.page_size), size);
+    defer gpa.free(host_buf);
+    const t0_buf = try gpa.alignedAlloc(u8, .fromByteUnits(mem.page_size), size);
+    defer gpa.free(t0_buf);
+    const va: u64 = @intFromPtr(host_buf.ptr);
+    const maps = [_]mem.Mapping{.{ .va = va, .len = size, .host = @intFromPtr(t0_buf.ptr), .perms = .{ .write = true } }};
+
+    const cfg = config();
+    var prng: std.Random.DefaultPrng = .init(cfg.seed ^ 0x1234);
+    const rand = prng.random();
+    rand.bytes(host_buf);
+    @memcpy(t0_buf, host_buf);
+    var cpu: exec.Cpu = .{};
+    var tlb: mem.Tlb = .{};
+    var cache: exec.Cache = .init(gpa);
+    defer cache.deinit();
+    var view: mem.View = .{ .maps = &maps, .tlb = &tlb };
+    var ctx: Ctx = .{ .tlb = @intFromPtr(&tlb), .space = @intFromPtr(&view) };
+    var m: exec.Machine = .init(&cpu, &ctx, &cache, null);
+
+    const nk = @typeInfo(sd.Kind).@"enum".fields.len;
+    var kinds: [nk]u32 = @splat(0);
+    var tried: usize = 0;
+    const n = @max(cfg.n / 6, 1000);
+    while (tried < n) {
+        const c = mem_classes[rand.uintLessThan(usize, mem_classes.len)];
+        const w = (rand.int(u32) & ~c.mask) | c.val;
+        const o = dec.decode(w, 0x10000);
+        if (!o.k.isSimd()) continue;
+        const r = dec.regs(o);
+        const bad: u64 = 1 << 18 | 1 << dec.SP;
+        if ((r.read | r.write) & bad != 0) continue;
+        tried += 1;
+        var s: State = undefined;
+        for (&s.x) |*x| x.* = gpValue(rand);
+        s.x[18] = 0;
+        for (&s.v) |*v| v.* = vValue(rand);
+        s.nzcv = 0;
+        s.fpcr = 0;
+        s.fpsr = 0;
+        s.x[o.n] = va + 4096 + rand.uintLessThan(u64, 64);
+        if (o.m < 31 and o.m != o.n) s.x[o.m] = rand.uintLessThan(u64, 256);
+        cpu = .{};
+        @memcpy(cpu.r[0..31], &s.x);
+        cpu.v = s.v;
+        const before = s;
+        native.run(w, &s);
+        kinds[@intFromEnum(sd.ofKind(o.k))] += 1;
+        try std.testing.expectEqual(exec.Next.next, exec.step(&m, &o, 0x10000));
+        const same = std.mem.eql(u64, cpu.r[0..31], &s.x) and std.mem.eql(u128, &cpu.v, &s.v) and
+            std.mem.eql(u8, host_buf, t0_buf);
+        if (!same) {
+            std.debug.print("{x:0>8} ({t}, x {d} sh {d} a {x} imm {x}): differs\n", .{ w, sd.ofKind(o.k), o.x, o.sh, o.a, o.imm });
+            for (0..31) |i| if (cpu.r[i] != s.x[i]) std.debug.print("  x{d}: in {x} host {x} t0 {x}\n", .{ i, before.x[i], s.x[i], cpu.r[i] });
+            for (0..32) |i| if (cpu.v[i] != s.v[i]) std.debug.print("  v{d}: host {x:0>32} t0 {x:0>32}\n", .{ i, s.v[i], cpu.v[i] });
+            if (std.mem.indexOfDiff(u8, host_buf, t0_buf)) |d| std.debug.print("  memory differs at +{x}\n", .{d});
+            return error.TestUnexpectedResult;
+        }
+    }
+    var missing: usize = 0;
+    inline for (@typeInfo(sd.Kind).@"enum".fields) |f| {
+        if (kinds[f.value] == 0 and isMem(@enumFromInt(f.value))) {
+            std.debug.print("no coverage: {s}\n", .{f.name});
+            missing += 1;
+        }
+    }
     try std.testing.expectEqual(@as(usize, 0), missing);
 }

@@ -341,6 +341,18 @@ pub const Kind = enum(u16) {
     vf_mul_e,
     vf_mulx_e,
 
+    // ---- structure loads and stores: d is Rt, n the base (a general
+    // register slot), m the post-index register (ZR for an immediate,
+    // which is imm >> 16); x the element size; sh Q; a the structure's
+    // element count (1-4) and, for the multiple forms, bits 7:4 the
+    // register count; imm bits 7:0 the element index, bit 8 writeback
+    ld_multi,
+    st_multi,
+    ld_single,
+    st_single,
+    /// LD1R-LD4R.
+    ld_rep,
+
     // ---- permute, extract, and table lookup
     uzp1,
     uzp2,
@@ -389,11 +401,86 @@ pub fn decode(w: u32, pc: u64) d.Op {
         if (hi == 0b11110 and bits(w, 30, 30) == 1) return vec01110(w, true);
         if (hi == 0b11111 and bits(w, 30, 30) == 1) return vec01111(w, true);
     }
+    if (bit(w, 31) == 0 and bits(w, 29, 24) == 0b001100) return ldStMulti(w);
+    if (bit(w, 31) == 0 and bits(w, 29, 24) == 0b001101) return ldStSingle(w);
     if (bit(w, 30) == 0 and bit(w, 29) == 0) {
         if (hi == 0b11110) return fpScalar(w);
         if (hi == 0b11111 and bit(w, 31) == 0) return fp3(w);
     }
     return none;
+}
+
+/// The base and post-index fields of a structure load or store; null
+/// for an encoding the post-index bit says has none but whose Rm isn't 0.
+fn ldStCommon(w: u32, k: Kind, x: u32, q: u32, bytes: u64) ?d.Op {
+    var o: d.Op = .{ .k = kk(k), .d = @intCast(bits(w, 4, 0)), .x = @intCast(x), .sh = @intCast(q) };
+    o.n = if (bits(w, 9, 5) == 31) d.SP else @intCast(bits(w, 9, 5));
+    o.m = d.ZR;
+    if (bit(w, 23) == 1) {
+        o.imm = 1 << 8;
+        if (bits(w, 20, 16) == 31) o.imm |= bytes << 16 else o.m = @intCast(bits(w, 20, 16));
+    } else if (bits(w, 20, 16) != 0) return null;
+    return o;
+}
+
+fn ldStMulti(w: u32) d.Op {
+    const q = bit(w, 30);
+    const l = bit(w, 22);
+    const size = bits(w, 11, 10);
+    const rs: struct { regs: u32, selem: u32 } = switch (bits(w, 15, 12)) {
+        0b0000 => .{ .regs = 4, .selem = 4 },
+        0b0010 => .{ .regs = 4, .selem = 1 },
+        0b0100 => .{ .regs = 3, .selem = 3 },
+        0b0110 => .{ .regs = 3, .selem = 1 },
+        0b0111 => .{ .regs = 1, .selem = 1 },
+        0b1000 => .{ .regs = 2, .selem = 2 },
+        0b1010 => .{ .regs = 2, .selem = 1 },
+        else => return none,
+    };
+    if (bit(w, 21) != 0) return none;
+    if (size == 3 and q == 0 and rs.selem != 1) return none;
+    var o = ldStCommon(w, if (l == 1) .ld_multi else .st_multi, size, q, @as(u64, rs.regs) * (if (q == 1) @as(u64, 16) else 8)) orelse return none;
+    o.a = @intCast(rs.selem | rs.regs << 4);
+    return o;
+}
+
+fn ldStSingle(w: u32) d.Op {
+    const q = bit(w, 30);
+    const l = bit(w, 22);
+    const r = bit(w, 21);
+    const opc = bits(w, 15, 13);
+    const s = bit(w, 12);
+    const size = bits(w, 11, 10);
+    const selem = ((opc & 1) << 1 | r) + 1;
+    var x: u32 = opc >> 1;
+    var index: u32 = undefined;
+    switch (x) {
+        0 => index = q << 3 | s << 2 | size,
+        1 => {
+            if (size & 1 != 0) return none;
+            index = q << 2 | s << 1 | size >> 1;
+        },
+        2 => {
+            if (size & 2 != 0) return none;
+            if (size & 1 == 0) {
+                index = q << 1 | s;
+            } else {
+                if (s != 0) return none;
+                index = q;
+                x = 3;
+            }
+        },
+        else => {
+            if (l == 0 or s != 0) return none;
+            var o = ldStCommon(w, .ld_rep, size, q, @as(u64, selem) << @intCast(size)) orelse return none;
+            o.a = @intCast(selem);
+            return o;
+        },
+    }
+    var o = ldStCommon(w, if (l == 1) .ld_single else .st_single, x, 0, @as(u64, selem) << @intCast(x)) orelse return none;
+    o.a = @intCast(selem);
+    o.imm |= index;
+    return o;
 }
 
 /// The scalar FP format of a type field: 00 S, 01 D, 11 H.
@@ -1312,6 +1399,9 @@ fn uses(k: Kind) Uses {
         .f_toint, .f_mov_tog => .{ .d = .gw },
         .f_fromint => .{ .n = .gr },
         .f_mov_fromg => .{ .n = .gr },
+        .ld_multi, .ld_rep => .{ .n = .gr, .mem = .load },
+        .ld_single => .{ .d = .vrw, .n = .gr, .mem = .load },
+        .st_multi, .st_single => .{ .d = .vr, .n = .gr, .mem = .store },
         else => .{ .m = .vr },
     };
 }
@@ -1363,6 +1453,18 @@ pub fn regs(o: d.Op) d.Regs {
         // FMOV V.D[1], Xn keeps the lower half.
         .f_mov_fromg => if (o.x == 4) {
             du = .vrw;
+        },
+        else => {},
+    }
+    switch (k) {
+        .ld_multi, .st_multi, .ld_single, .st_single, .ld_rep => {
+            const nregs: usize = if (k == .ld_multi or k == .st_multi) o.a >> 4 else o.a & 0xf;
+            for (0..nregs) |i| put(&r, du, @intCast((o.d + i) & 31));
+            const wb = o.imm & (1 << 8) != 0;
+            put(&r, .gr, o.n);
+            if (wb) put(&r, .gw, o.n);
+            if (wb) put(&r, .gr, o.m);
+            return r;
         },
         else => {},
     }
