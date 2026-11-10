@@ -8,6 +8,21 @@ const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
 const Ctx = @import("../jit/ctx.zig").Ctx;
 const t0 = @import("../interp/a64/exec.zig");
+const cache = @import("../jit/cache.zig");
+const dispatch = @import("../jit/dispatch.zig");
+const emitter = @import("../jit/emitter.zig");
+const lift = @import("../jit/a64/lift.zig");
+
+/// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
+/// when the backend has a code cache and this host an emitter.
+pub const Tier = enum { t0, t1 };
+pub var tier: Tier = .t0;
+/// T1's emitter; null where this host has none yet.
+pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
+    .aarch64 => @import("../jit/emit/arm64.zig").emitter_def,
+    else => null,
+};
+pub var t1_stats: dispatch.Stats = .{};
 
 pub const arch: vmm.Arch = .arm64;
 pub const ready = true;
@@ -63,11 +78,40 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
 pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     c.machine = .init(&c.t0, ctx, &c.cache, clock);
     ctx.frontend = @intFromPtr(&c.machine);
+    if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, em);
     // A spent budget (ctx.budget) gives `.interrupted`, as an exit request does.
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
     const before = c.t0.retired;
     const e = t0.run(&c.machine, budget);
     if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(c.t0.retired -% before, std.math.maxInt(i63)));
+    return exitOf(c, e);
+}
+
+/// T1: compiled code, with T0 for each instruction that raises an
+/// exception or stores to code. Compiled code spends ctx.budget itself.
+fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
+    ctx.interp = @intFromPtr(&lift.interp);
+    const cfg: dispatch.Config = .{ .frontend = lift.frontend, .emitter = em, .pc_off = @offsetOf(t0.Cpu, "pc") };
+    while (true) {
+        const before = ctx.retired;
+        const r = dispatch.run(std.heap.smp_allocator, ctx, cfg, &t1_stats);
+        c.t0.retired +%= ctx.retired -% before;
+        switch (r) {
+            .svc => return exitOf(c, .syscall),
+            .interrupted => return .interrupted,
+            .t0 => {
+                if (ctx.budget <= 0) return .interrupted;
+                const t0_before = c.t0.retired;
+                const e = t0.run(&c.machine, 1);
+                if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(c.t0.retired -% t0_before);
+                if (e != .interrupted) return exitOf(c, e);
+                if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
+            },
+        }
+    }
+}
+
+fn exitOf(c: *Cpu, e: t0.Exit) vmm.Exit {
     switch (e) {
         .syscall => {
             c.esr = t0.EC_SVC64 << 26;

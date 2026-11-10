@@ -17,6 +17,9 @@ pub const codemem = @import("jit/codemem.zig");
 pub const check = @import("jit/check.zig");
 /// The code cache: translations, chaining, the jump cache, invalidation.
 pub const cache = @import("jit/cache.zig");
+/// T1's run loop, and the passes it runs on each region.
+pub const dispatch = @import("jit/dispatch.zig");
+pub const opt = @import("jit/opt.zig");
 pub const a64 = struct {
     pub const decode = @import("interp/a64/decode.zig");
     pub const exec = @import("interp/a64/exec.zig");
@@ -49,6 +52,7 @@ pub const emit = struct {
     pub const x64 = @import("jit/emit/x64.zig");
     pub const cases = @import("jit/emit/cases.zig");
     pub const native = @import("jit/emit/native.zig");
+    pub const eval = @import("jit/emit/eval.zig");
 };
 
 test {
