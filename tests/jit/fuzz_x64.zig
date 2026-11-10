@@ -280,6 +280,12 @@ fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *Cpu64, c: *ctx_mod.Ctx, 
         if (!same and lockstep.knownX64(exceptionOf(c, e0) == 13, st) != null) return false;
         var bad = !same;
         if (lockstep.knownX64Insn(bytes) != null) return false;
+        // Known: a 32-bit CMPXCHG, where Unicorn zero-extends both EAX
+        // and the destination. The program ends there if they differ.
+        if (same and e0 == .ok and lockstep.knownX64Result(bytes) != null) {
+            var probe: std.Io.Writer.Discarding = .init(&.{});
+            if (lockstep.diff(.amd64, canon(cpu), e.getState(), 0, &probe.writer)) return false;
+        }
         if (!same) try w.print("exit: at {x} ({x}) T0 {t} (info {x}), unicorn {any}\n", .{ pc, bytes, e0, c.exit_info, st });
         const mask: u32 = if (e0 == .ok) lockstep.x86_status_flags & ~undef else 0;
         var ust = e.getState();

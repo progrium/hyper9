@@ -435,7 +435,30 @@ pub const Known = enum {
     /// amd64: SHLD or SHRD with an imm8 and a RIP-relative operand: QEMU
     /// takes RIP before the imm8, so its address is one byte short.
     rip_rel_shxd_imm,
+    /// amd64: a 32-bit CMPXCHG writes both EAX and the destination in
+    /// QEMU, zero-extending each; the hardware writes only the one the
+    /// outcome names (the destination on success, EAX on failure), and
+    /// leaves the other's upper half.
+    cmpxchg32_zext,
 };
+
+/// Whether amd64 instruction `bytes`, after which T0 and Unicorn differ,
+/// is a 32-bit CMPXCHG (`cmpxchg32_zext`).
+pub fn knownX64Result(bytes: []const u8) ?Known {
+    var k: usize = 0;
+    var o16 = false;
+    while (k < bytes.len) : (k += 1) switch (bytes[k]) {
+        0x66 => o16 = true,
+        0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65 => {},
+        else => break,
+    };
+    if (k < bytes.len and bytes[k] & 0xF0 == 0x40) {
+        if (bytes[k] & 8 != 0) return null;
+        k += 1;
+    }
+    if (o16 or k + 1 >= bytes.len or bytes[k] != 0x0F or bytes[k + 1] != 0xB1) return null;
+    return .cmpxchg32_zext;
+}
 
 /// Whether amd64 instruction `bytes` is SHLD or SHRD with an imm8 and a
 /// RIP-relative operand, which Unicorn gets wrong (`rip_rel_shxd_imm`).
