@@ -319,6 +319,16 @@ pub fn Engine(comptime arch: Arch) type {
 
         /// Writes each byte where T0's memory and the mirror differ (up to
         /// a few); returns whether any do.
+        /// Whether every byte where T0's memory and the mirror differ is in
+        /// [lo, hi).
+        pub fn memDiffsWithin(s: *Self, lo: u64, hi: u64) bool {
+            for (s.mirrors) |m| {
+                if (std.mem.eql(u8, m.t0, m.copy)) continue;
+                for (m.t0, m.copy, 0..) |a, b, i| if (a != b and (m.va + i < lo or m.va + i >= hi)) return false;
+            }
+            return true;
+        }
+
         pub fn diffMemory(s: *Self, w: *std.Io.Writer) bool {
             var n: usize = 0;
             for (s.mirrors) |m| {
@@ -354,6 +364,10 @@ pub const Known = enum {
     /// store's size but checks the status against the whole loaded value,
     /// so it can store and still return status 1.
     exclusive_size_mismatch,
+    /// A store that crosses into a page it faults on: Unicorn has written
+    /// the bytes on the page before, where T0 (and T1) check both pages
+    /// first and write none.
+    partial_page_cross_store,
 };
 
 /// The size in bytes of arm64 load or store exclusive `word` (both

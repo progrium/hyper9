@@ -146,8 +146,14 @@ fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *s
         };
         var bad = !same_exit;
         if (!same_exit) try w.print("exit: at {x} ({x:0>8}) T0 {t} (addr {x}, info {x}), unicorn {any}\n", .{ pc, word, e0, c.exit_addr, c.exit_info, e1 });
-        if (lockstep.diff(.arm64, canon(&cpu), e.getState(), 0, w)) bad = true;
-        if (e.diffMemory(w)) bad = true;
+        const regs_bad = lockstep.diff(.arm64, canon(&cpu), e.getState(), 0, w);
+        if (regs_bad) bad = true;
+        const mem_bad = e.diffMemory(w);
+        if (mem_bad) bad = true;
+        // A store faulting on its second page, which Unicorn has partly
+        // written: only the 16 bytes below the page boundary differ.
+        if (same_exit and e0 == .fault and !regs_bad and mem_bad and c.exit_addr % 4096 == 0 and
+            e.memDiffsWithin(c.exit_addr - 16, c.exit_addr)) return .{ .known = .partial_page_cross_store };
         if (bad) {
             if (same_exit) if (lockstep.knownA64Result(word)) |k| return .{ .known = k };
             if (same_exit) if (lockstep.knownA64Exclusive(word, load_bytes)) |k| return .{ .known = k };
