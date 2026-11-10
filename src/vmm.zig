@@ -418,11 +418,11 @@ pub const Backend = union(Kind) {
     /// The optional CPU features beyond `arch`'s baseline that this
     /// backend runs, as Linux's AT_HWCAP bits for that arch: on arm64, the
     /// emulator's Armv8.1 atomics, CRC32, AES with PMULL, SHA1, and
-    /// SHA256. Hardware backends say none, and a program finds what the
-    /// host has by trying.
+    /// SHA256. Hardware backends, and Unicorn's, say none, and a program
+    /// finds what the CPU has by trying.
     pub fn hwcaps(b: Backend, arch: Arch) u64 {
         return switch (b) {
-            .emu => switch (arch) {
+            .emu => if (build_options.emu != .zig) 0 else switch (arch) {
                 .arm64 => hwcap_arm64_aes | hwcap_arm64_pmull | hwcap_arm64_sha1 | hwcap_arm64_sha2 | hwcap_arm64_crc32 | hwcap_arm64_atomics,
                 else => 0,
             },
