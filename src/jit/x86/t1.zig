@@ -51,8 +51,8 @@ pub fn config(em: emitter_mod.Emitter) dispatch.Config {
 
 /// A one-vCPU 386 machine over a View, at gen_x86's addresses: code (two
 /// pages, writable, so programs can store to their own text), data, and
-/// stack.
-const Machine = struct {
+/// stack. tests/x86.zig runs its cases on it too.
+pub const Machine = struct {
     pages: [4 * mem.page_size]u8 align(mem.page_size) = @splat(0),
     maps: [2]mem.Mapping = undefined,
     code: mem.CodePages = undefined,
@@ -69,7 +69,7 @@ const Machine = struct {
 
     const code_pages = 2;
 
-    fn init(m: *Machine, jit: ?*cache_mod.Cache) !void {
+    pub fn init(m: *Machine, jit: ?*cache_mod.Cache) !void {
         comptime std.debug.assert(gen.data_va + mem.page_size == gen.stack_va);
         const base = @intFromPtr(&m.pages);
         m.maps = .{
@@ -95,7 +95,7 @@ const Machine = struct {
         cx.frontend = @intFromPtr(&m.lm);
     }
 
-    fn deinit(m: *Machine) void {
+    pub fn deinit(m: *Machine) void {
         if (m.jit) |c| c.removeJumpCache(&m.rt.jump);
         m.code.deinit(testing.allocator);
     }
@@ -110,7 +110,7 @@ const Machine = struct {
         m.icache = .{};
     }
 
-    fn load(m: *Machine, prog: []const u8, regs: [8]u32, eflags: u32, seed: u64) void {
+    pub fn load(m: *Machine, prog: []const u8, regs: [8]u32, eflags: u32, seed: u64) void {
         const text = m.pages[0 .. code_pages * mem.page_size];
         if (!std.mem.eql(u8, text[0..prog.len], prog) or text[prog.len] != 0xCC) {
             m.code.invalidateRange(@intFromPtr(&m.pages), text.len);
@@ -130,7 +130,7 @@ const Machine = struct {
         m.rt.ctx.retired = 0;
     }
 
-    fn runT0(m: *Machine, budget: u64) cpu_mod.Exit {
+    pub fn runT0(m: *Machine, budget: u64) cpu_mod.Exit {
         const before = m.cpu.retired;
         const e = exec.run(&m.cpu, &m.pm, .{ .budget = budget });
         m.rt.ctx.retired += m.cpu.retired - before;
@@ -138,7 +138,7 @@ const Machine = struct {
     }
 
     /// Runs to the first exit but a stop, as h86.zig's runT1 does.
-    fn run(m: *Machine) !cpu_mod.Exit {
+    pub fn run(m: *Machine) !cpu_mod.Exit {
         if (m.jit == null) return m.runT0(100_000);
         const cfg = config(m.em);
         var rounds: u32 = 0;
@@ -189,7 +189,7 @@ fn expectSame(t1: *Machine, t0m: *Machine, prog: []const u8, regs: [8]u32, eflag
     }
 }
 
-fn testCache(size: usize) !*cache_mod.Cache {
+pub fn testCache(size: usize) !*cache_mod.Cache {
     if (!eval_emit.supported or !codemem.available()) return error.SkipZigTest;
     const c = try testing.allocator.create(cache_mod.Cache);
     errdefer testing.allocator.destroy(c);
@@ -197,7 +197,7 @@ fn testCache(size: usize) !*cache_mod.Cache {
     return c;
 }
 
-fn freeCache(c: *cache_mod.Cache) void {
+pub fn freeCache(c: *cache_mod.Cache) void {
     c.deinit();
     testing.allocator.destroy(c);
     eval_emit.reset();

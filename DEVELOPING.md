@@ -103,6 +103,8 @@ zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, v86.
 zig build integration -Dweb   # the integration cases through h9-node on v86 (Node 24 or later)
 zig build web-test # the demo page in Chromium, with Playwright, and vcpu-web
 zig build vcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
+zig build x86-jit  # the 386 JIT's [x86-jit] cases (tests/x86.zig) on T0 and T1; zig build vcpu runs them too
+zig build -Demu=zig -Dvcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
