@@ -1,7 +1,6 @@
 //! The emulator backend on h9's own CPUs (-Demu=zig): ha64 for arm64
 //! binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by
-//! architecture at create. Until hx64 is ready, amd64 binaries need
-//! Unicorn (-Demu=unicorn).
+//! architecture at create.
 //!
 //! This file is the part they share: guest memory, address spaces, vCPUs,
 //! kicks, and shootdowns. What's particular to an architecture is a Guest
@@ -838,7 +837,7 @@ const Toy = struct {
     }
 };
 
-/// A Guest that isn't ready, as hx64 is until its T0 runs programs.
+/// A Guest that isn't ready: one whose T0 doesn't run programs yet.
 const Unready = struct {
     pub const arch: vmm.Arch = .amd64;
     pub const ready = false;

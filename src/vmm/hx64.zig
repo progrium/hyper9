@@ -3,17 +3,17 @@
 //! (design/hcpu.md, hx64): the same decoder, T0, and lifter in
 //! src/interp/x86/ and src/jit/x86/, instantiated with `.long`.
 //!
-//! A skeleton: `ready` is false, so zemu still fails amd64 with WrongArch,
-//! and T0 in long mode raises #UD at the first instruction. The register
-//! file, its Ureg and FXSAVE conversions, and the run loop are here for
-//! T0 and the lifter to fill in.
+//! Guest code runs on T0 (tlb.runIn(.long)), with h86's decode caches.
+//! The lifter doesn't do long mode yet, so there's no T1 here.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
 const amd64 = @import("../arch/amd64.zig");
 const Ctx = @import("vcpu").ctx.Ctx;
 const x86cpu = @import("vcpu").x86.cpu;
 const tlb = @import("vcpu").x86.tlb;
+const exec = @import("vcpu").x86.exec;
 const dispatch = @import("vcpu").dispatch;
 
 /// Which tier runs guest code. T1 isn't wired in yet, so both run T0.
@@ -23,12 +23,32 @@ pub var tier: Tier = .t0;
 pub var t1_stats: dispatch.Stats = .{};
 
 pub const arch: vmm.Arch = .amd64;
-/// False until T0 runs `[baseline]` with the amd64 root.
-pub const ready = false;
+pub const ready = true;
 
 pub const Cpu = struct {
     c: x86cpu.CpuOf(.long) = .{},
+    /// T0's decoded instructions, by address and by page, which `run`
+    /// allocates on first use and points `c` at.
+    icache: ?*exec.ICacheOf(.long) = null,
+    pages: ?*exec.PageCacheOf(.long) = null,
 };
+
+/// What the decode caches come from: the web host has no threads, so no
+/// SmpAllocator.
+const icache_gpa = if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator;
+
+/// Frees the decode caches.
+pub fn deinit(cpu: *Cpu) void {
+    if (cpu.icache) |ic| icache_gpa.destroy(ic);
+    cpu.icache = null;
+    if (cpu.pages) |pc| {
+        pc.deinit();
+        icache_gpa.destroy(pc);
+    }
+    cpu.pages = null;
+    cpu.c.icache = null;
+    cpu.c.pages = null;
+}
 
 pub fn getUreg(cpu: *const Cpu, u: *vmm.Ureg) void {
     const c = &cpu.c;
@@ -128,6 +148,21 @@ pub fn retired(cpu: *const Cpu) u64 {
 /// clears) or a spent ctx.budget gives `.interrupted`.
 pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     const c = &cpu.c;
+    if (cpu.icache == null) {
+        // Without one T0 runs, decoding every instruction.
+        if (icache_gpa.create(exec.ICacheOf(.long))) |ic| {
+            ic.init();
+            cpu.icache = ic;
+        } else |_| {}
+    }
+    if (cpu.pages == null) {
+        if (icache_gpa.create(exec.PageCacheOf(.long))) |pc| {
+            pc.init(icache_gpa);
+            cpu.pages = pc;
+        } else |_| {}
+    }
+    c.icache = cpu.icache;
+    c.pages = cpu.pages;
     var m: tlb.TlbMem = .init(ctx);
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;
