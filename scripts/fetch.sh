@@ -4,8 +4,8 @@
 # the release's 386 ISO and the browser host's Linux demo root.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
-#                                 iso386 alpine386web; default all but
-#                                 iso386 and alpine386web)
+#                                 iso386 alpinearm64web; default all but
+#                                 iso386 and alpinearm64web)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -14,9 +14,10 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn unicorn-src} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|iso386|alpine386web) ;;
-	# v86 was the browser host's 386 CPU before h86; nothing to fetch now.
-	v86) ;;
+	case $p in src|image|unicorn|unicorn-src|iso386|alpinearm64web) ;;
+	# v86 was the browser host's 386 CPU before h86, and alpine386web the
+	# Linux demo's root before it moved to arm64; nothing to fetch now.
+	v86|alpine386web) ;;
 	*) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
 done
 want() { [[ $parts == *" $1 "* ]]; }
@@ -128,15 +129,15 @@ echo "$ALPINE_LAYERS" | while read -r arch sha; do
 	echo "linux/alpine-$arch: $ALPINE_VERSION"
 done
 
-# The browser host's Linux demo root: the 386 Alpine root with the pinned
+# The browser host's Linux demo root: the arm64 Alpine root with the pinned
 # packages unpacked over a copy of it, for src/web/linux.list.
-if want alpine386web; then
-dir="$H9_LOCAL/linux/alpine-386-web"
-stamp=$(echo "$ALPINE_386_WEB_PKGS" | shasum -a 256 | cut -d' ' -f1)
+if want alpinearm64web; then
+dir="$H9_LOCAL/linux/alpine-arm64-web"
+stamp=$(echo "$ALPINE_ARM64_WEB_PKGS" | shasum -a 256 | cut -d' ' -f1)
 if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
 	rm -rf "$dir" "$dir.tmp"
-	cp -a "$H9_LOCAL/linux/alpine-386" "$dir.tmp"
-	echo "$ALPINE_386_WEB_PKGS" | while read -r f sha; do
+	cp -a "$H9_LOCAL/linux/alpine-arm64" "$dir.tmp"
+	echo "$ALPINE_ARM64_WEB_PKGS" | while read -r f sha; do
 		[ -n "$f" ] || continue
 		apk="$H9_LOCAL/cache/$f"
 		curl -fsSL -o "$apk" "$ALPINE_PKG_URL/$f"
@@ -149,6 +150,6 @@ if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
 	echo "$stamp" >"$dir.tmp/.h9-stamp"
 	mv "$dir.tmp" "$dir"
 fi
-echo "linux/alpine-386-web: $(echo "$ALPINE_386_WEB_PKGS" | awk 'NF{printf "%s ", $1}')"
+echo "linux/alpine-arm64-web: $(echo "$ALPINE_ARM64_WEB_PKGS" | awk 'NF{printf "%s ", $1}')"
 fi
 

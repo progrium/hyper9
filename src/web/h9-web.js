@@ -704,7 +704,9 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * - root: the root archive's URL (default root.h9a beside this file), or
  *   a ws:// or wss:// URL of a 9P server (design/0021-websocket-9p.md)
  * - memory: --memory, such as '256M'
- * - backend: --backend: 'emu' (h9's own 386 CPU, h86, the default) or 'v86', its old name
+ * - backend: --backend: 'emu' (h9's own CPUs, h86 and ha64, the default) or 'v86', its old name
+ * - arch: --arch: the guest's CPU, '386' (h86, the default) or 'arm64'
+ *   (ha64); 'arm64' runs arm64 Linux programs, such as Alpine's
  * - policy: see policyFlags
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
  * - tty: the terminal is one to Linux programs (isatty, termios and raw
@@ -725,7 +727,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ root, memory, backend, policy, terminal, tty = false, gfx } = {}) {
+export async function createMachine({ root, memory, backend, arch, policy, terminal, tty = false, gfx } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -738,7 +740,7 @@ export async function createMachine({ root, memory, backend, policy, terminal, t
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
-      const flags = [...(backend ? ['--backend', backend] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
+      const flags = [...(backend ? ['--backend', backend] : []), ...(arch ? ['--arch', arch] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       let onGfx = () => false;
       let start = {}, transfer = [];
       if (gfx) {

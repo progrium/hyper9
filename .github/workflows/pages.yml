@@ -6,8 +6,8 @@
 # `zig build mkroot -- --arch 386` cross-compiles the userland on the
 # emulator, about an hour on x86_64, so this unpacks the release's 386 ISO
 # instead (tools/isoroot.zig). The Linux page's demo runs the same build
-# over linux.h9a, Alpine's 386 busybox, jq, and sqlite3
-# (src/web/linux.list). The demo page's browser test gates the deploy.
+# over linux.h9a, Alpine's arm64 busybox, jq, and sqlite3 on ha64, h9's
+# own arm64 CPU (src/web/linux.list). The demo page's browser test gates the deploy.
 name: pages
 
 on:
@@ -42,7 +42,7 @@ jobs:
           path: |
             .local/9front/*.386.iso
           key: pages-fetch-${{ hashFiles('scripts/pins.sh') }}
-      - run: scripts/fetch.sh iso386 alpine386web
+      - run: scripts/fetch.sh iso386 alpinearm64web
       - name: 386 root from the ISO
         run: |
           . scripts/pins.sh

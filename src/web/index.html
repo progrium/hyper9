@@ -57,19 +57,21 @@ if (!haveJSPI) {
   print('This browser lacks JavaScript Promise Integration, which h9 needs (Chrome 137 or later).\n');
 } else {
   // ?root=ws://host/9p runs over a 9P server instead of root.h9a,
-  // ?linux runs Alpine's 386 busybox sh over linux.h9a, a Linux root
-  // (design/0018-linux-personality.md). ?backend= picks the backend (emu,
-  // h9's own 386 CPU, is the only one; v86 is its old name).
+  // ?linux runs Alpine's arm64 busybox sh over linux.h9a, a Linux root
+  // (design/0018-linux-personality.md), on ha64, h9's own arm64 CPU.
+  // ?backend= picks the backend (emu, h9's own CPUs, is the only one; v86
+  // is its old name).
   const params = new URLSearchParams(location.search);
   const linux = params.has('linux');
   // ?rio runs rio with acme in a canvas (design/0120-browser-gfx.md).
   document.getElementById('rio').onclick = () => { location.search = params.has('rio') ? '' : '?rio'; };
   if (params.has('rio')) await runRio(params);
   else {
-    if (linux) document.getElementById('about').textContent = "h9: Alpine Linux's 386 programs in a Web Worker. Type to busybox sh;";
+    if (linux) document.getElementById('about').textContent = "h9: Alpine Linux's arm64 programs in a Web Worker. Type to busybox sh;";
     const m = await createMachine({
       root: linux ? 'linux.h9a' : params.get('root') ?? undefined,
-    backend: params.get('backend') ?? undefined,
+      arch: linux ? 'arm64' : undefined,
+      backend: params.get('backend') ?? undefined,
       terminal: { write: (b) => print(dec.decode(b, { stream: true })), setRaw: (on) => { raw = on; render(); } },
     });
     const kbd = document.getElementById('kbd');
