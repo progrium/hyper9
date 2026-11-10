@@ -2,6 +2,12 @@
 //! a 2-instruction loop of 10⁹ iterations, and 10⁶ one-byte pwrite round
 //! trips, for arm64 and amd64 on every backend built in that can run them.
 //! zig build bench builds it with ReleaseFast and runs it.
+//!
+//! Then the compute benchmarks (tests/bench/*.c: fib, sieve, md5, qsort,
+//! and a double-precision loop), built as arm64 and 386 text by build.zig,
+//! on every backend that runs them, and on the emulator once per tier (T0
+//! and T1, through H9_EMU_TIER, with -Demu=zig). Each run's exit message is
+//! its checksum, which must match the same C run natively.
 
 const std = @import("std");
 const h9 = @import("h9");
@@ -88,6 +94,29 @@ fn words(comptime code: []const u32) [code.len * 4]u8 {
     return out;
 }
 
+extern "c" fn bench_fib() u32;
+extern "c" fn bench_sieve() u32;
+extern "c" fn bench_md5() u32;
+extern "c" fn bench_qsort() u32;
+extern "c" fn bench_fp() u32;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+const Compute = struct {
+    name: []const u8,
+    native: *const fn () callconv(.c) u32,
+    arm64: []const u8,
+    i386: []const u8,
+};
+
+const computes = [_]Compute{
+    .{ .name = "fib", .native = bench_fib, .arm64 = @embedFile("bench_fib_arm64"), .i386 = @embedFile("bench_fib_386") },
+    .{ .name = "sieve", .native = bench_sieve, .arm64 = @embedFile("bench_sieve_arm64"), .i386 = @embedFile("bench_sieve_386") },
+    .{ .name = "md5", .native = bench_md5, .arm64 = @embedFile("bench_md5_arm64"), .i386 = @embedFile("bench_md5_386") },
+    .{ .name = "qsort", .native = bench_qsort, .arm64 = @embedFile("bench_qsort_arm64"), .i386 = @embedFile("bench_qsort_386") },
+    .{ .name = "fp", .native = bench_fp, .arm64 = @embedFile("bench_fp_arm64"), .i386 = @embedFile("bench_fp_386") },
+};
+
 const Case = struct {
     name: []const u8,
     arch: aout.Arch,
@@ -108,8 +137,12 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
 
-    try w.print("{s: <7} {s: <6} {s: <4} {s: >8}  {s}\n", .{ "case", "arch", "vmm", "time", "rate" });
-    for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| {
+    var bad = false;
+    // zig build bench -- compute: the compute benchmarks only.
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const compute_only = argv.len > 1 and std.mem.eql(u8, argv[1], "compute");
+    if (!compute_only) try w.print("{s: <7} {s: <6} {s: <4} {s: >8}  {s}\n", .{ "case", "arch", "vmm", "time", "rate" });
+    if (!compute_only) for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| {
         const ns = try runOne(gpa, io, kind, c) orelse continue;
         const s = @as(f64, @floatFromInt(ns)) / 1e9;
         try w.print("{s: <7} {t: <6} {t: <4} {d: >7.2}s  ", .{ c.name, c.arch, kind, s });
@@ -121,6 +154,69 @@ pub fn main(init: std.process.Init) !void {
         try w.flush();
     };
     try w.flush();
+
+    try w.print("\n{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "compute", "arch", "vmm", "time", "vs native" });
+    for (computes) |c| {
+        const t0 = std.Io.Timestamp.now(io, .awake);
+        const want = c.native();
+        const native_ns = t0.untilNow(io, .awake).toNanoseconds();
+        try w.print("{s: <7} {s: <6} {s: <7} {d: >7.3}s\n", .{ c.name, "host", "native", @as(f64, @floatFromInt(native_ns)) / 1e9 });
+        var hex: [8]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex, "{x:0>8}", .{want}) catch unreachable;
+        for ([_]aout.Arch{ .arm64, .i386 }) |arch| {
+            const text = if (arch == .arm64) c.arm64 else c.i386;
+            for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| {
+                const tiers: []const ?[:0]const u8 = if (kind == .emu) &.{ "t0", "t1" } else &.{null};
+                for (tiers) |tier| {
+                    if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
+                    defer _ = unsetenv("H9_EMU_TIER");
+                    const r = try runText(gpa, io, kind, arch, text) orelse continue;
+                    const s = @as(f64, @floatFromInt(r.ns)) / 1e9;
+                    const label = if (tier) |t| try std.fmt.allocPrint(gpa, "emu/{s}", .{t}) else try std.fmt.allocPrint(gpa, "{t}", .{kind});
+                    defer gpa.free(label);
+                    try w.print("{s: <7} {t: <6} {s: <7} {d: >7.3}s  {d:.1}x", .{ c.name, arch, label, s, s / (@as(f64, @floatFromInt(native_ns)) / 1e9) });
+                    if (!std.mem.eql(u8, r.msg[0..@min(r.msg.len, 8)], &hex) or r.msg.len != 8) {
+                        try w.print("  WRONG: exited \"{s}\", want {s}\n", .{ r.msg, &hex });
+                        bad = true;
+                    } else try w.writeAll("\n");
+                    try w.flush();
+                }
+            }
+        }
+    }
+    try w.flush();
+    if (bad) std.process.exit(1);
+}
+
+var msg_buf: [64]u8 = undefined;
+
+/// One run of a compute text segment: its wall time and exit message.
+fn runText(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout.Arch, text: []const u8) !?struct { ns: i96, msg: []const u8 } {
+    const bytes = try gpa.alloc(u8, aout.header_size + text.len);
+    defer gpa.free(bytes);
+    const hs = arch.headerSize();
+    aout.writeTextHeader(bytes[0..hs], arch, text.len);
+    @memcpy(bytes[hs..][0..text.len], text);
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+    const start: std.Io.Timestamp = .now(io, .awake);
+    var m = h9.Machine.init(gpa, io, .{
+        .backend = kind,
+        .arch = arch,
+        .stdio = .{ .out = &discard.writer, .err = &discard.writer },
+    }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
+        else => return e,
+    };
+    defer m.deinit();
+    const status = try m.run(.{ .bytes = bytes[0 .. hs + text.len] }, &.{"bench"});
+    const ns = start.untilNow(io, .awake).toNanoseconds();
+    const msg = switch (status) {
+        .exited => |x| x,
+        .killed => "killed",
+    };
+    const n = @min(msg.len, msg_buf.len);
+    @memcpy(msg_buf[0..n], msg[0..n]);
+    return .{ .ns = ns, .msg = msg_buf[0..n] };
 }
 
 /// The wall time of one run of `c` on `kind`, including machine setup, or

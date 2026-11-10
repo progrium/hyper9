@@ -85,8 +85,9 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
 pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     c.machine = .init(&c.t0, ctx, &c.cache, clock);
     ctx.frontend = @intFromPtr(&c.machine);
-    // -Djit-check: every region lifted and checked against T0 (src/jit/check/vmm.zig).
-    if (build_options.jit_check) return exitOf(c, check_vmm.runA64(&c.check, &c.t0, ctx));
+    // -Djit-check: every region lifted and checked against T0, in T1's
+    // loop (src/jit/check/vmm.zig); the emitter only runs them with tier t1.
+    if (build_options.jit_check) return runT1(c, ctx, t1_emitter orelse undefined);
     if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, em);
     // A spent budget (ctx.budget) gives `.interrupted`, as an exit request does.
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
@@ -103,7 +104,10 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
     const cfg: dispatch.Config = .{ .frontend = lift.frontend, .emitter = em, .pc_off = @offsetOf(t0.Cpu, "pc") };
     while (true) {
         const before = ctx.retired;
-        const r = dispatch.run(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator, ctx, cfg, &t1_stats);
+        const r = if (build_options.jit_check)
+            check_vmm.run(&c.check, check_vmm.a64_guest, &c.t0, ctx, tier == .t1)
+        else
+            dispatch.run(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator, ctx, cfg, &t1_stats);
         c.t0.retired +%= ctx.retired -% before;
         switch (r) {
             .svc => return exitOf(c, .syscall),

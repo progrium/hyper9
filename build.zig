@@ -726,6 +726,43 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
     return .{ .exe = exe, .install = all };
 }
 
+/// The compute benchmarks (tests/bench/*.c): each built as an arm64 and a
+/// 386 guest text segment, embedded in the bench as "bench_<name>_<arch>",
+/// and compiled for the host too (as bench_<name>), for the checksum each
+/// guest run must match.
+const compute_benches = [_][]const u8{ "fib", "sieve", "md5", "qsort", "fp" };
+
+fn addComputeBenches(b: *std.Build, bench: *std.Build.Step.Compile) void {
+    const flags = &.{ "-O2", "-ffreestanding", "-fno-builtin", "-ffp-contract=off", "-fno-stack-protector", "-fno-pic", "-fno-asynchronous-unwind-tables" };
+    const arches = [_]struct { name: []const u8, query: std.Target.Query, ld: []const u8 }{
+        .{ .name = "arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .freestanding }, .ld = "tests/bench/link_arm64.ld" },
+        // SSE2 for doubles, so they round as the host's do (x87 keeps 80 bits).
+        .{ .name = "386", .query = .{ .cpu_arch = .x86, .os_tag = .freestanding, .cpu_model = .{ .explicit = &std.Target.x86.cpu.pentium4 } }, .ld = "tests/bench/link_386.ld" },
+    };
+    for (compute_benches) |name| {
+        for (arches) |a| {
+            const exe = b.addExecutable(.{
+                .name = b.fmt("bench-{s}-{s}", .{ name, a.name }),
+                .root_module = b.createModule(.{
+                    .target = b.resolveTargetQuery(a.query),
+                    .optimize = .ReleaseFast,
+                    .pic = false,
+                    .strip = true,
+                }),
+            });
+            exe.root_module.addCSourceFiles(.{ .files = &.{ "tests/bench/start.c", b.fmt("tests/bench/{s}.c", .{name}) }, .flags = flags });
+            exe.setLinkerScript(b.path(a.ld));
+            exe.entry = .{ .symbol_name = "_start" };
+            exe.pie = false;
+            exe.bundle_compiler_rt = true;
+            const bin = b.addObjCopy(exe.getEmittedBin(), .{ .format = .bin, .only_section = ".text" }).getOutput();
+            bench.root_module.addAnonymousImport(b.fmt("bench_{s}_{s}", .{ name, a.name }), .{ .root_source_file = bin });
+        }
+        bench.root_module.addCSourceFile(.{ .file = b.path(b.fmt("tests/bench/{s}.c", .{name})), .flags = &.{ "-O2", "-ffp-contract=off", b.fmt("-Dcompute=bench_{s}", .{name}) } });
+    }
+    bench.root_module.link_libc = true;
+}
+
 /// The 386 guest shim for the v86 backend, assembled freestanding and
 /// embedded as raw bytes, loaded at a fixed guest-physical address.
 fn shimI386(b: *std.Build) std.Build.LazyPath {
@@ -1637,15 +1674,17 @@ pub fn build(b: *std.Build) void {
         bench.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(bench);
+    addComputeBenches(b, bench);
     const run_bench = b.addRunArtifact(bench);
     run_bench.has_side_effects = true;
+    if (b.args) |a| run_bench.addArgs(a);
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
         sign.addFileArg(bench.getEmittedBin());
         run_bench.step.dependOn(&sign.step);
     }
-    b.step("bench", "Time a compute loop and pwrite round trips on every backend built in").dependOn(&run_bench.step);
+    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; -Demu=zig for T0 and T1)").dependOn(&run_bench.step);
 
     // For running the tests in a VM (scripts/lima/vm test): the backend
     // tests and the integration tests, built for the target.
