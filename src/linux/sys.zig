@@ -3609,7 +3609,14 @@ fn shmat(p: *Process, id: i32, addr: u64, flags: u32) i64 {
     const len = std.mem.alignForward(u64, sg.size, page);
     sg.lpid = @intCast(p.tgid());
     sg.atime = @divTrunc(kern.wallNs(), std.time.ns_per_s);
+    const key = sg.key;
+    // A reference to each of its chunks, taken under the table's lock, so
+    // an IPC_RMID and the last shmdt meanwhile can't free the segment
+    // before it's mapped. insertShared takes over the ones it maps.
+    for (pages) |pg| _ = pg.refs.fetchAdd(1, .acq_rel);
     sysvshm.unlock();
+    var used: usize = 0;
+    defer for (pages[used..]) |pg| sysvshm.drop(pg);
     // Its chunks are its own, so it sits at a chunk's start.
     var start: u64 = undefined;
     if (addr != 0) {
@@ -3621,12 +3628,14 @@ fn shmat(p: *Process, id: i32, addr: u64, flags: u32) i64 {
     }
     var v: mm.Vma = .{ .start = start, .end = start + len, .prot = if (flags & SHM_RDONLY != 0) .{ .read = true } else .rw, .shared = true, .kind = .shm, .offset = @intCast(id) };
     var nb: [32]u8 = undefined;
-    v.name = .init(std.fmt.bufPrint(&nb, "/SYSV{x:0>8}", .{@as(u32, @bitCast(sg.key))}) catch "");
-    const Ctx = struct { pages: []*mm.Pages, first: u64 };
-    var cx: Ctx = .{ .pages = pages, .first = start / mm.chunk_size };
+    v.name = .init(std.fmt.bufPrint(&nb, "/SYSV{x:0>8}", .{@as(u32, @bitCast(key))}) catch "");
+    const Ctx = struct { pages: []*mm.Pages, first: u64, used: *usize };
+    var cx: Ctx = .{ .pages = pages, .first = start / mm.chunk_size, .used = &used };
     p.mm.insertShared(v, &cx, struct {
         fn f(x: *Ctx, ci: u64) mm.Error!*mm.Pages {
-            return x.pages[@intCast(ci - x.first)];
+            const i: usize = @intCast(ci - x.first);
+            x.used.* = i + 1;
+            return x.pages[i];
         }
     }.f) catch return if (addr != 0) -E.INVAL else -E.NOMEM;
     return @intCast(start);
