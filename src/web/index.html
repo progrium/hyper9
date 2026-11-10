@@ -212,18 +212,19 @@ async function runWine(params) {
     memory: params.get('memory') ?? '768M',
     gfx: { canvas, scale: 1 },
     terminal: { write: (b) => print(dec.decode(b, { stream: true })) },
-    // Without the wasm JIT tier: with it, 32-bit Wine computes a DPI of
-    // 0 and gets garbled bytes from some reads, and draws nothing. ?jit
-    // turns it back on.
-    env: params.has('jit') ? undefined : { H9_JIT_HOT: '4000000000' },
   });
   canvas.focus();
   // The archive keeps no links: busybox makes its applets', and the
   // prefix's C: and Z: drives are made here, in the root's overlay.
   // ?start= names the program to open first, one of Wine's: a bare name.
+  // USER is the prefix's user, root (scripts/wine-web.sh): Wine takes its
+  // profile, C:\users\$USER, from it, and h9 sets it from 9front's user,
+  // glenda here. Without the profile, opening the Start menu brings
+  // Wine's desktop down.
   const start = /^[a-z0-9]+$/.test(params.get('start') ?? '') ? params.get('start') : 'winemine';
   const script = [
     '/bin/busybox --install -s 2>/dev/null',
+    'export USER=root LOGNAME=root',
     'ln -sfn ../drive_c /root/.wine/dosdevices/c:',
     'ln -sfn / /root/.wine/dosdevices/z:',
     'cd /root',

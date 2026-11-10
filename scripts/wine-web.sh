@@ -38,6 +38,9 @@ zig cc -target x86-windows-gnu -municode -O2 -o "$dir.tmp/root/mklnk.exe" \
 # lands in the tree rather than in the run's overlay.
 cat >"$dir.tmp/root/setup.sh" <<'EOF'
 set -e
+# Wine names the prefix's profile, C:\users\$USER, from USER, which h9
+# sets from the host's user. The page runs Wine as root (src/web/index.html).
+export USER=root LOGNAME=root
 export WINEPREFIX=/mnt/term/cwd/.wine
 wineboot -i
 reg() { wine reg add "$@" /f >/dev/null; }
