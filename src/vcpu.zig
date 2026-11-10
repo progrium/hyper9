@@ -6,6 +6,8 @@ pub const ir = @import("jit/ir.zig");
 pub const ir_eval = @import("jit/ir_eval.zig");
 pub const ctx = @import("jit/ctx.zig");
 pub const mem = @import("interp/mem.zig");
+/// IEEE binary16, 32, and 64 in software: h86's SSE and ha64's FP share it.
+pub const softfloat = @import("interp/softfloat.zig");
 pub const alloc = @import("jit/alloc.zig");
 pub const frontend = @import("jit/frontend.zig");
 pub const emitter = @import("jit/emitter.zig");
