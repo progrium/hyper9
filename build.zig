@@ -1328,11 +1328,11 @@ pub fn build(b: *std.Build) void {
     // -Dbackends picks the backends instead, such as only `native` for a
     // quick run where there's no KVM.
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
-    // -Dweb runs them on the web host under Node instead: h9-node on the v86
-    // backend, with the root's 386 binaries (design/0012-browser-host.md).
-    // -Dbackends=emu runs them there on h9's own 386 CPU (h86) instead.
-    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (v86, or -Dbackends=emu, 386)") orelse false;
-    const backend_list = if (test_web) want_backends orelse "v86" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
+    // -Dweb runs them on the web host under Node instead: h9-node on h9's
+    // own 386 CPU (h86), with the root's 386 binaries
+    // (design/0012-browser-host.md). -Dbackends=v86 runs them on v86's.
+    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (emu, or -Dbackends=v86, 386)") orelse false;
+    const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
         .arch = "386",

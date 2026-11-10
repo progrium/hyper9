@@ -1164,7 +1164,7 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 - Unit tests in Zig for the a.out loader, the page allocator, and the syscall decoders.
 - Integration tests run real 9front binaries from a pinned root tree. Each case is tagged with the proposal it proves, and skips while that proposal isn't implemented ([design/README.md](design/README.md#tests)).
 - `zig build integration` runs real binaries from the root tree through the `h9` CLI as subprocesses, so each case gets a fresh kernel and checks exit codes end to end; it skips when there's no tree. `zig build proposal -Dp=baseline` runs the baseline's demos and cases. The Lima test VMs get the tree with `scripts/lima/vm push-root`.
-- `zig build integration -Dweb` runs the same cases through `h9-node` on v86 with the 386 root; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
+- `zig build integration -Dweb` runs the same cases through `h9-node` on h9's own 386 CPU (h86; `-Dbackends=v86` for v86's) with the 386 root; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
 - CI isn't set up yet ([ci](design/ci.md)).
 
 ## CLI
@@ -1204,7 +1204,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|native\|whp\|emu\|v86` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning; it never selects native (not a security boundary), which needs an explicit `--backend native`. `v86` runs only in web builds |
+| `--backend auto\|hvf\|kvm\|native\|whp\|emu\|v86` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning; it never selects native (not a security boundary), which needs an explicit `--backend native`. `v86` runs only in web builds, where `auto` is `emu` |
 | `--arch arm64\|amd64\|386` | The architecture of the binaries to run, which also picks `/$cputype/bin`. Without it a host program runs as its header says, and a guest one as the host's architecture |
 | `--root DIR\|DIAL\|SOCKET\|URL` | The root tree: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host` for port 564, or `unix!path`), the path of a unix socket, or a `ws://` or `wss://` URL of a 9P server behind a WebSocket, whose scheme can be left off when the value isn't an existing path (`wss://`, or `ws://` for a loopback host). If omitted, use `$H9ROOT` (same forms), then the default install location (`.local/9front/root` in development builds until there's an installer), then the built-in root (`--builtin`). A path that's neither a directory nor a socket, a failed connection or attach, and a unix socket root on Windows are exit 125 |
 | `--root-spec NAME` | The attach name sent to a 9P root. Empty by default |

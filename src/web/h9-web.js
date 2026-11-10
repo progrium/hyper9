@@ -446,7 +446,7 @@ function policyFlags(policy = {}) {
  * - root: the root archive's URL (default root.h9a beside this file), or
  *   a ws:// or wss:// URL of a 9P server (design/0021-websocket-9p.md)
  * - memory: --memory, such as '256M'
- * - backend: --backend: 'v86' (v86's CPU) or 'emu' (h9's own, h86)
+ * - backend: --backend: 'emu' (h9's own CPU, h86, the default) or 'v86' (v86's)
  * - policy: see policyFlags
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
  * - tty: the terminal is one to Linux programs (isatty, termios and raw

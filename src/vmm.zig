@@ -374,7 +374,7 @@ pub fn create(gpa: std.mem.Allocator, io: std.Io, want: BackendKind, opts: Optio
         .whp => createKind(gpa, io, .whp, opts),
         .native => createKind(gpa, io, .native, opts),
         .auto => {
-            if (web) return createKind(gpa, io, .v86, opts);
+            if (web) return createKind(gpa, io, .emu, opts);
             if (hypervisor()) |k| {
                 if (createKind(gpa, io, k, opts)) |b| return b else |err| switch (err) {
                     error.HypervisorUnavailable, error.WrongArch => if (!have_emu) return err,
