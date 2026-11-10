@@ -58,7 +58,9 @@ const CTX = ctx.x64_ctx_reg;
 const arg_regs: []const u8 = if (win64) &.{ RCX, RDX, R8, R9 } else &.{ RDI, RSI, RDX, RCX, R8 };
 const outgoing = 48;
 const staging = outgoing;
-const slots_base = staging + 40;
+/// evalExtC's operands and result: a, b, and c, 16 bytes each.
+const io_base = staging + 40;
+const slots_base = io_base + 48;
 
 // Condition codes.
 const CC = struct {
@@ -390,6 +392,7 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
     const ty = i.ty;
     const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
     const dst: u32 = if (ty != .none) slotOf(a, @intCast(idx)) else 0;
+    if (i.op.isExt() or ty == .v128 or (i.op == .setreg and ta == .v128)) return lowerExt(e, r, a, i, dst);
     if (i.a != ir.none) try e.ldSlot(RAX, slotOf(a, i.a));
     if (i.b != ir.none) try e.ldSlot(RCX, slotOf(a, i.b));
     if (i.c != ir.none) try e.ldSlot(RDX, slotOf(a, i.c));
@@ -679,6 +682,140 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
     if (ty != .none) try e.stSlot(dst, RAX);
 }
 
+/// movdqu xmm`x`, [base+disp]
+fn vload(e: *E, x: u8, base: u8, disp: i32) !void {
+    try e.b(0xf3);
+    try e.rm(false, &.{ 0x0f, 0x6f }, x, base, disp);
+}
+
+/// movdqu [base+disp], xmm`x`
+fn vstore(e: *E, base: u8, disp: i32, x: u8) !void {
+    try e.b(0xf3);
+    try e.rm(false, &.{ 0x0f, 0x7f }, x, base, disp);
+}
+
+fn slotDisp(slot: u32) i32 {
+    return @intCast(slots_base + slot * 8);
+}
+
+/// The FP and vector ops, and v128 getreg and setreg: each through
+/// ir_eval.evalExtC for now, and v.load and v.store inline.
+fn lowerExt(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) EmitError!void {
+    switch (i.op) {
+        .getreg, .setreg => {
+            const disp: i32 = std.math.cast(i32, i.aux) orelse return error.Unsupported;
+            try e.ldCtx(R10, ctx.off.cpu);
+            if (i.op == .getreg) {
+                try vload(e, 0, R10, disp);
+                try vstore(e, RSP, slotDisp(dst), 0);
+            } else {
+                try vload(e, 0, RSP, slotDisp(slotOf(a, i.a)));
+                try vstore(e, R10, disp, 0);
+            }
+            return;
+        },
+        .@"v.load", .@"v.store" => return vmemOp(e, a, i, dst),
+        else => {},
+    }
+    if (!i.op.isExt()) return error.Unsupported;
+    // Stage the operands, each zero-extended to 16 bytes.
+    for (i.operands(), 0..) |o, k| {
+        if (o == ir.none) continue;
+        const at: i32 = @intCast(io_base + 16 * k);
+        if (r.insts.items[o].ty == .v128) {
+            try vload(e, 0, RSP, slotDisp(slotOf(a, o)));
+            try vstore(e, RSP, at, 0);
+        } else {
+            try e.ldSlot(RAX, slotOf(a, o));
+            try e.store(RSP, at, RAX);
+            try e.rr(false, &.{0x31}, RAX, RAX);
+            try e.store(RSP, at + 8, RAX);
+        }
+    }
+    const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
+    try e.rm(true, &.{0x8d}, RAX, RSP, io_base); // lea rax, [rsp+io]
+    try e.movImm(R11, @intFromPtr(&ir_eval.evalExtC));
+    try e.call(&.{ .{ .imm = ir_eval.fallbackCode(i.op, i.ty, ta) }, .{ .reg = RAX }, .{ .imm = i.aux }, .{ .imm = i.aux2 } });
+    if (i.ty == .v128) {
+        try vload(e, 0, RSP, io_base);
+        try vstore(e, RSP, slotDisp(dst), 0);
+    } else if (i.ty != .none) {
+        try e.load(RAX, RSP, io_base);
+        try e.stSlot(dst, RAX);
+    }
+}
+
+/// v.load and v.store: 16 bytes through the TLB, or two 8-byte halves
+/// through the slow path.
+fn vmemOp(e: *E, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !void {
+    const f: ir.MemFlags = @bitCast(i.aux);
+    const store = i.op == .@"v.store";
+    try e.ldSlot(RAX, slotOf(a, i.a));
+    if (f.aligned) {
+        try e.bs(&.{ 0xa8, 15 }); // test al, 15
+        const ok = try e.fwd(CC.e);
+        try e.stCtx(ctx.off.exit_addr, RAX);
+        const acc: u64 = @intFromEnum(if (store) mem.Access.write else mem.Access.read);
+        try e.movImm(RAX, acc | (@as(u64, @intFromEnum(mem.FaultKind.alignment)) << 8));
+        try e.stCtx(ctx.off.exit_info, RAX);
+        try e.leave(.fault, i.aux2, i.retired);
+        e.land(ok);
+    }
+    const table: i32 = if (store) mem.tlb_write_off else mem.tlb_read_off;
+    try e.mov(R10, RAX);
+    try e.shiftImm(true, 5, R10, mem.page_shift);
+    try e.ldCtx(R11, ctx.off.tlb);
+    try e.rr(false, &.{ 0x0f, 0xb6 }, RDX, R10);
+    try e.shiftImm(false, 4, RDX, 4);
+    try e.rr(true, &.{0x01}, RDX, R11);
+    try e.rm(true, &.{0x39}, R10, R11, table);
+    const miss1 = try e.fwd(CC.ne);
+    try e.mov(RDX, RAX);
+    try e.aluImm(false, 4, RDX, mem.page_size - 1);
+    try e.aluImm(false, 7, RDX, mem.page_size - 16);
+    const miss2 = try e.fwd(CC.a);
+    try e.rm(true, &.{0x03}, RAX, R11, table + 8);
+    if (store) {
+        try vload(e, 0, RSP, slotDisp(slotOf(a, i.b)));
+        try vstore(e, RAX, 0, 0);
+    } else {
+        try vload(e, 0, RAX, 0);
+        try vstore(e, RSP, slotDisp(dst), 0);
+    }
+    const join = try e.fwd(null);
+    e.land(miss1);
+    e.land(miss2);
+    // Two halves, the low first; the address is kept in the io area.
+    try e.store(RSP, io_base, RAX);
+    for (0..2) |h| {
+        try e.load(RAX, RSP, io_base);
+        if (h == 1) try e.aluImm(true, 0, RAX, 8);
+        if (store) {
+            try e.ldSlot(RCX, slotOf(a, i.b) + @as(u32, @intCast(h)));
+            try e.ldCtx(R11, ctx.off.slow_store);
+            try e.call(&.{ .{ .reg = RAX }, .{ .imm = 3 }, .{ .reg = RCX } });
+        } else {
+            try e.ldCtx(R11, ctx.off.slow_load);
+            try e.call(&.{ .{ .reg = RAX }, .{ .imm = 3 } });
+        }
+        try e.rr(false, &.{0x85}, RAX, RAX);
+        const ok = try e.fwd(CC.e);
+        try e.mov(RCX, RAX);
+        try e.retireOn(i.retired);
+        try e.movImm(RDX, i.aux2);
+        try e.stCtx(ctx.off.exit_pc, RDX);
+        try e.mov(RAX, RCX);
+        try e.jmpTo(null, epilogue);
+        e.land(ok);
+        if (!store) {
+            try e.ldCtx(RAX, ctx.off.scratch);
+            try e.store(RSP, slotDisp(dst + @as(u32, @intCast(h))), RAX);
+        }
+    }
+    e.land(join);
+    if (store and f.order == .seq_cst) try e.bs(&.{ 0x0f, 0xae, 0xf0 });
+}
+
 fn aluWidthTest(e: *E, bits: u32) !void {
     switch (bits) {
         8 => try e.bs(&.{ 0x84, 0xc0 }),
@@ -877,8 +1014,12 @@ pub const supported = builtin.cpu.arch == .x86_64;
 test "emitted code matches ir_eval on the shared cases" {
     if (!supported or !codemem.available()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
-    const all = try cases.generate(gpa);
-    defer cases.free(gpa, all);
+    const int_cases = try cases.generate(gpa);
+    defer cases.free(gpa, int_cases);
+    const ext_cases = try cases.generateExt(gpa);
+    defer cases.free(gpa, ext_cases);
+    const all = try std.mem.concat(gpa, cases.Case, &.{ int_cases, ext_cases });
+    defer gpa.free(all);
     const env = try gpa.create(cases.Env);
     defer gpa.destroy(env);
     var region = try codemem.Region.init(16 << 20);

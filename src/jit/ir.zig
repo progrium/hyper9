@@ -113,6 +113,67 @@ pub const MemFlags = packed struct(u64) {
     }
 };
 
+/// The aux of the floating-point and vector ops (`fp.*` and `v.*`, the
+/// ops `Op.isExt` covers): the FP environment an `fp.*` op runs in, as the
+/// guest's FPCR or MXCSR sets it when the region is lifted, an immediate,
+/// and a vector's lane size.
+///
+/// An `fp.*` op's aux2, when not 0, is 1 + the byte offset in the Cpu of
+/// a u32 the op ORs the exceptions it raises into, in the guest's layout:
+/// MXCSR's IE DE ZE OE UE PE (bits 0..5) for x86, FPSR's IOC DZC OFC UFC
+/// IXC (bits 0..4) and IDC (bit 7) for Arm.
+pub const ExtAux = packed struct(u64) {
+    /// softfloat.Rounding: near_even, down, up, zero, near_away, odd.
+    rounding: u3 = 0,
+    /// Denormal inputs are zeros (MXCSR.DAZ; FPCR.FZ).
+    daz: bool = false,
+    /// Tiny results are zeros (MXCSR.FZ; FPCR.FZ).
+    ftz: bool = false,
+    /// softfloat.Nans: first (x86), signaling_first (Arm), default (FPCR.DN).
+    nans: u2 = 0,
+    /// Arm's rules: a positive default NaN, tininess before rounding, FZ
+    /// without inexact, FMIN and FMAX's NaN handling, saturating
+    /// conversions, and FPSR's flag layout. Otherwise x86's.
+    arm: bool = false,
+    /// `fp.cmp`: a quiet NaN raises invalid too (COMISS, FCMPE).
+    /// `fp.round`: raise inexact (FRINTX; SSE4.1's ROUNDSS without bit 3).
+    exact: bool = false,
+    _r: u7 = 0,
+    /// Per op: fixed-point fraction bits (conversions), a lane index, a
+    /// shift count, a byte offset, a predicate, or a variant.
+    imm: u16 = 0,
+    /// A vector's lane size: 8 << esize bits. For `fp.*` on v128, 1 to 3
+    /// (binary16, 32, 64).
+    esize: u2 = 0,
+    _: u30 = 0,
+
+    pub fn of(aux: u64) ExtAux {
+        return @bitCast(aux);
+    }
+    pub fn bits(x: ExtAux) u32 {
+        return @as(u32, 8) << x.esize;
+    }
+    pub fn lanes(x: ExtAux) u32 {
+        return @as(u32, 16) >> x.esize;
+    }
+};
+
+/// The integer type of a lane of 8 << esize bits.
+pub fn laneType(esize: u2) Type {
+    return switch (esize) {
+        0 => .i8,
+        1 => .i16,
+        2 => .i32,
+        3 => .i64,
+    };
+}
+
+/// Whether a scalar type holds an FP value's bits: i16 (binary16), i32
+/// (binary32), or i64 (binary64).
+pub fn isFloat(t: Type) bool {
+    return t == .i16 or t == .i32 or t == .i64;
+}
+
 /// Which flag group a front end uses. The emitter lowers both; a front end
 /// produces only its own.
 pub const FlagGroup = enum(u8) { nzcv, eflags };
@@ -272,6 +333,95 @@ pub const Op = enum(u16) {
     /// An undefined instruction at aux.
     @"exit.undef" = 198,
 
+    // ---- floating point (224..255): IEEE binary16, 32, and 64 values as
+    // i16, i32, and i64 bit patterns, or lane-wise on v128 by aux's esize.
+    // aux is an ExtAux (the FP environment); aux2 names where exceptions
+    // accumulate (see ExtAux). Results follow softfloat.zig with the
+    // guest's rules, never the host's.
+    @"fp.add" = 224,
+    @"fp.sub" = 225,
+    @"fp.mul" = 226,
+    @"fp.div" = 227,
+    @"fp.sqrt" = 228,
+    /// a * b + c, rounded once. With Arm's rules, NaNs are picked in the
+    /// order c, a, b, and inf * 0 + a quiet NaN is the default NaN.
+    @"fp.fma" = 229,
+    /// x86's MINSS (a < b ? a : b), or Arm's FMIN.
+    @"fp.min" = 230,
+    @"fp.max" = 231,
+    /// Arm's FMINNM: a quiet NaN against a number gives the number.
+    @"fp.minnm" = 232,
+    @"fp.maxnm" = 233,
+    /// Scalar: an i8 softfloat.Order (0 lt, 1 eq, 2 gt, 3 unordered).
+    /// Vector: each lane all ones if its order is in the set imm (bit k
+    /// for order k), else zero.
+    @"fp.cmp" = 234,
+    /// Between formats, a's to the result's. Vector: lanes of esize to
+    /// lanes of imm & 3, widening the low half's (the high half's if imm
+    /// bit 8 is set), or narrowing into the low half, the high half zero.
+    @"fp.cvt" = 235,
+    /// Integer a / 2^imm to FP. Vector: lane for lane, of one size.
+    @"fp.fromsint" = 236,
+    @"fp.fromuint" = 237,
+    /// FP a * 2^imm to an integer, rounded by aux's rounding. A NaN or a
+    /// value out of range is the integer indefinite (x86: the sign bit
+    /// alone, or all ones unsigned), or saturates with NaN giving 0 (Arm).
+    @"fp.tosint" = 238,
+    @"fp.touint" = 239,
+    /// To an integral value in a's format, by aux's rounding.
+    @"fp.round" = 240,
+
+    // ---- vectors (256..): v128 values; aux is an ExtAux for its esize and
+    // imm. Lanes are numbered from the low end.
+    /// v128 with a (i64) low and b (i64) high.
+    @"v.make" = 256,
+    /// Lane imm of a, of the result's type (laneType(esize)).
+    @"v.lane" = 257,
+    /// a with lane imm replaced by b.
+    @"v.ins" = 258,
+    /// Every lane a (of laneType(esize)).
+    @"v.dup" = 259,
+    @"v.add" = 260,
+    @"v.sub" = 261,
+    /// Low halves of the products; esize 0 to 2.
+    @"v.mul" = 262,
+    @"v.and" = 263,
+    @"v.or" = 264,
+    @"v.xor" = 265,
+    /// a & ~b.
+    @"v.andn" = 266,
+    /// Each lane by imm; a count of the lane's width or more gives 0
+    /// (shl, lshr) or the sign (ashr).
+    @"v.shl" = 267,
+    @"v.lshr" = 268,
+    @"v.ashr" = 269,
+    /// Each lane all ones if a's lane <imm, an ir.Pred> b's, else zero.
+    @"v.cmp" = 270,
+    /// imm bit 0: signed.
+    @"v.min" = 271,
+    @"v.max" = 272,
+    /// Bytes imm..imm+15 of a (low) and b (high) together.
+    @"v.ext" = 273,
+    /// Arm's ZIP1, UZP1, and TRN1 of a and b, or with imm 1, ZIP2, UZP2,
+    /// and TRN2.
+    @"v.zip" = 274,
+    @"v.uzp" = 275,
+    @"v.trn" = 276,
+    /// Byte i is a's byte b[i], or 0 where b[i] >= 16 (Arm's TBL; x86's
+    /// PSHUFB with b masked by 0x8f).
+    @"v.tbl" = 277,
+    /// Lanes of esize (1 to 3) to half their width, in the low half, the
+    /// high half zero. imm: 0 truncates; saturating, 1 signed to signed,
+    /// 2 signed to unsigned, 3 unsigned to unsigned.
+    @"v.narrow" = 278,
+    /// The low half's lanes of esize (0 to 2), or the high half's with imm
+    /// bit 1, to twice their width, sign-extended with imm bit 0.
+    @"v.widen" = 279,
+    /// 16 bytes at a; aux is MemFlags (size 4), aux2 the PC. As `load`.
+    @"v.load" = 280,
+    /// 16 bytes, b, to a; as `store`.
+    @"v.store" = 281,
+
     pub fn name(op: Op) []const u8 {
         return @tagName(op);
     }
@@ -279,14 +429,28 @@ pub const Op = enum(u16) {
     /// Whether the op can leave the region: it takes `Inst.retired`.
     pub fn canLeave(op: Op) bool {
         return switch (op) {
-            .load, .store, .cas, .@"call.interp", .poll => true,
+            .load, .store, .cas, .@"call.interp", .poll, .@"v.load", .@"v.store" => true,
             .br, .brcond => false,
             else => op.isTerminator(),
         };
     }
 
     pub fn isTerminator(op: Op) bool {
-        return @intFromEnum(op) >= 192;
+        const v = @intFromEnum(op);
+        return v >= 192 and v < 224;
+    }
+
+    /// The FP and vector ops (`fp.*`, `v.*`), whose aux is an ExtAux. They
+    /// have their own fallback, ir_eval.evalExtC, since v128 values don't
+    /// fit evalOpC and `fp.*` accumulate exceptions in the guest's Cpu.
+    pub fn isExt(op: Op) bool {
+        return @intFromEnum(op) >= 224;
+    }
+
+    /// Whether the op is an `fp.*` op.
+    pub fn isFp(op: Op) bool {
+        const v = @intFromEnum(op);
+        return v >= 224 and v < 256;
     }
 
     /// No side effects, no memory, no guest state: an emitter may call
@@ -299,7 +463,7 @@ pub const Op = enum(u16) {
     /// Whether the operation defines a value (else its type is `.none`).
     pub fn hasResult(op: Op) bool {
         return switch (op) {
-            .setreg, .store, .fence, .@"call.interp", .poll, .retire => false,
+            .setreg, .store, .fence, .@"call.interp", .poll, .retire, .@"v.store" => false,
             .@"call.helper" => true, // may be .none: see the instruction's type
             else => !op.isTerminator(),
         };
@@ -583,11 +747,100 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
         },
         .@"exit.indirect" => if (ta != .i64 and ta != .i32) return "exit.indirect needs an address",
         .@"exit.chain", .@"exit.svc", .@"exit.brk", .@"exit.undef" => {},
+        else => if (checkExt(i, ta, tb, tc)) |msg| return msg,
     }
     if (i.retired != 0 and !i.op.canLeave()) return "only an op that can leave carries a retired count";
     if (i.op.hasResult()) {
         if (i.ty == .none and i.op != .@"call.helper") return "operation must have a result type";
     } else if (i.ty != .none) return "operation has no result";
+    return null;
+}
+
+/// The verifier's rules for the `fp.*` and `v.*` ops.
+fn checkExt(i: *const Inst, ta: Type, tb: Type, tc: Type) ?[]const u8 {
+    const x = ExtAux.of(i.aux);
+    const vec = i.ty == .v128 or ta == .v128;
+    if (i.op.isFp()) {
+        if (i.aux2 != 0 and i.aux2 - 1 > std.math.maxInt(i32)) return "bad exception word offset";
+        if (vec) {
+            if (x.esize == 0) return "FP lanes are 16, 32, or 64 bits";
+            switch (i.op) {
+                .@"fp.cvt" => {
+                    const to: u3 = @as(u2, @truncate(x.imm));
+                    const from: u3 = x.esize;
+                    if (to == 0 or (to != from + 1 and to + 1 != from)) return "fp.cvt on v128 widens or narrows one step";
+                    if (x.imm & ~@as(u16, 0x103) != 0) return "bad fp.cvt immediate";
+                },
+                .@"fp.cmp" => if (x.imm > 15) return "fp.cmp's order set is 4 bits",
+                .@"fp.fromsint", .@"fp.fromuint", .@"fp.tosint", .@"fp.touint" => if (x.imm > x.bits()) return "too many fraction bits",
+                else => {},
+            }
+            if (i.ty != .v128 or ta != .v128) return "a vector FP op takes and gives v128";
+            if (tb != .none and tb != .v128 or tc != .none and tc != .v128) return "a vector FP op takes v128";
+        } else switch (i.op) {
+            .@"fp.cmp" => if (i.ty != .i8 or !isFloat(ta) or tb != ta) return "fp.cmp compares two FP values of one type, giving i8",
+            .@"fp.cvt" => if (!isFloat(i.ty) or !isFloat(ta) or ta == i.ty) return "fp.cvt converts between FP types",
+            .@"fp.fromsint", .@"fp.fromuint" => {
+                if (!isFloat(i.ty) or (ta != .i32 and ta != .i64)) return "fp.from*int takes an i32 or i64";
+                if (x.imm > ta.bits()) return "too many fraction bits";
+            },
+            .@"fp.tosint", .@"fp.touint" => {
+                if ((i.ty != .i32 and i.ty != .i64) or !isFloat(ta)) return "fp.to*int gives an i32 or i64";
+                if (x.imm > i.ty.bits()) return "too many fraction bits";
+            },
+            else => {
+                if (!isFloat(i.ty) or ta != i.ty) return "an FP op takes and gives i16, i32, or i64";
+                if (tb != .none and tb != i.ty or tc != .none and tc != i.ty) return "FP operands of different types";
+            },
+        }
+        const want: u8 = switch (i.op) {
+            .@"fp.sqrt", .@"fp.cvt", .@"fp.fromsint", .@"fp.fromuint", .@"fp.tosint", .@"fp.touint", .@"fp.round" => 1,
+            .@"fp.fma" => 3,
+            else => 2,
+        };
+        const have: u8 = @as(u8, @intFromBool(ta != .none)) + @intFromBool(tb != .none) + @intFromBool(tc != .none);
+        if (have != want) return "wrong number of operands";
+        return null;
+    }
+    const lane = laneType(x.esize);
+    switch (i.op) {
+        .@"v.make" => if (i.ty != .v128 or ta != .i64 or tb != .i64) return "v.make takes two i64s",
+        .@"v.lane" => {
+            if (i.ty != lane or ta != .v128) return "v.lane gives a lane of a v128";
+            if (x.imm >= x.lanes()) return "lane out of range";
+        },
+        .@"v.ins" => {
+            if (i.ty != .v128 or ta != .v128 or tb != lane) return "v.ins puts a lane into a v128";
+            if (x.imm >= x.lanes()) return "lane out of range";
+        },
+        .@"v.dup" => if (i.ty != .v128 or ta != lane) return "v.dup takes a lane",
+        .@"v.shl", .@"v.lshr", .@"v.ashr" => if (i.ty != .v128 or ta != .v128 or tb != .none) return "a vector shift takes a v128 and a count in imm",
+        .@"v.narrow", .@"v.widen" => {
+            if (i.ty != .v128 or ta != .v128 or tb != .none) return "v.narrow and v.widen take a v128";
+            if (x.imm > 3) return "bad variant";
+            if (if (i.op == .@"v.narrow") x.esize == 0 else x.esize == 3) return "bad lane size";
+        },
+        .@"v.load" => {
+            if (i.ty != .v128 or (ta != .i64 and ta != .i32)) return "v.load gives a v128 from an address";
+            const f: MemFlags = @bitCast(i.aux);
+            if (f.size != 4 or f.signed or f.rmw) return "v.load is 16 bytes";
+        },
+        .@"v.store" => {
+            if ((ta != .i64 and ta != .i32) or tb != .v128) return "v.store takes an address and a v128";
+            const f: MemFlags = @bitCast(i.aux);
+            if (f.size != 4 or f.signed or f.rmw) return "v.store is 16 bytes";
+        },
+        else => {
+            if (i.ty != .v128 or ta != .v128 or tb != .v128) return "a vector op takes two v128s";
+            switch (i.op) {
+                .@"v.mul" => if (x.esize == 3) return "v.mul's lanes are 8 to 32 bits",
+                .@"v.cmp" => if (x.imm > @intFromEnum(Pred.sge)) return "bad predicate",
+                .@"v.ext" => if (x.imm > 15) return "v.ext's offset is 0 to 15",
+                .@"v.zip", .@"v.uzp", .@"v.trn", .@"v.min", .@"v.max" => if (x.imm > 1) return "bad variant",
+                else => {},
+            }
+        },
+    }
     return null;
 }
 
@@ -812,6 +1065,10 @@ test "op numbers are stable" {
     try std.testing.expectEqual(@as(u16, 131), @intFromEnum(Op.cas));
     try std.testing.expectEqual(@as(u16, 160), @intFromEnum(Op.@"call.interp"));
     try std.testing.expectEqual(@as(u16, 192), @intFromEnum(Op.br));
+    try std.testing.expectEqual(@as(u16, 224), @intFromEnum(Op.@"fp.add"));
+    try std.testing.expectEqual(@as(u16, 240), @intFromEnum(Op.@"fp.round"));
+    try std.testing.expectEqual(@as(u16, 256), @intFromEnum(Op.@"v.make"));
+    try std.testing.expectEqual(@as(u16, 281), @intFromEnum(Op.@"v.store"));
 }
 
 test "tso round-trips" {

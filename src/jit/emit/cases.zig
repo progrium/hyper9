@@ -228,3 +228,254 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
     };
     return list.toOwnedSlice(gpa);
 }
+
+/// Cases for the FP and vector ops (`Op.isExt`), for emitters that lower
+/// them or call ir_eval.evalExtC. Registers 0..3 are inputs (v128s are
+/// built from pairs with v.make), results go to 0x10 and 0x30 (a v128 at
+/// 0x30..0x40), and `fp.*` ops accumulate exceptions at 0x28.
+pub fn generateExt(gpa: std.mem.Allocator) ![]Case {
+    var list: std.ArrayList(Case) = .empty;
+    errdefer {
+        for (list.items) |c| gpa.free(c.text);
+        list.deinit(gpa);
+    }
+    const Aux = ir.ExtAux;
+    const envs = [_]Aux{
+        .{}, // x86, nearest
+        .{ .arm = true, .nans = 1 }, // Arm
+        .{ .arm = true, .nans = 2, .daz = true, .ftz = true }, // Arm, DN and FZ
+        .{ .rounding = 2, .daz = true, .ftz = true }, // x86, up, DAZ and FZ
+        .{ .rounding = 3, .arm = true, .nans = 1 }, // Arm, toward zero
+    };
+    // Interesting binary32 and binary64 values, by kind.
+    const f32s = [_]u64{ 0x3fc0_0000, 0xc010_0000, 0x7fc0_0001, 0x7f80_0001, 0x7f80_0000, 0x8000_0000, 0x0000_0001, 0x3eaa_aaab, 0x7f7f_ffff, 0x0080_0000, 0xff80_0000, 0x4f80_0000 };
+    const f64s = [_]u64{ 0x3ff8_0000_0000_0000, 0xc002_0000_0000_0000, 0x7ff8_0000_0000_0001, 0x7ff0_0000_0000_0001, 0x7ff0_0000_0000_0000, 0x8000_0000_0000_0000, 0x0000_0000_0000_0001, 0x3fd5_5555_5555_5555, 0x7fef_ffff_ffff_ffff, 0x0010_0000_0000_0000, 0xfff0_0000_0000_0000, 0x43f0_0000_0000_0000 };
+    const pairs = [_][2]u8{ .{ 0, 1 }, .{ 2, 0 }, .{ 0, 3 }, .{ 4, 4 }, .{ 4, 10 }, .{ 5, 9 }, .{ 6, 9 }, .{ 7, 1 }, .{ 8, 8 }, .{ 9, 6 } };
+    const bin = [_][]const u8{ "fp.add", "fp.sub", "fp.mul", "fp.div", "fp.min", "fp.max", "fp.minnm", "fp.maxnm", "fp.cmp" };
+    for ([_][]const u8{ "i32", "i64" }, [_][]const u64{ &f32s, &f64s }) |ty, vals| for (bin) |op| for (envs) |env| for (pairs) |pr| {
+        var x = env;
+        x.exact = std.mem.eql(u8, op, "fp.cmp") and env.rounding == 3;
+        const rty = if (std.mem.eql(u8, op, "fp.cmp")) "i8" else ty;
+        try list.append(gpa, .{ .regs = .{ vals[pr[0]], vals[pr[1]], 0, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = getreg:{0s} #0x8
+            \\  %2 = {1s}:{2s} %0, %1 #0x{3x} @0x29
+            \\  %3 = zext:i64 %2
+            \\  setreg %3 #0x10
+            \\  exit.chain #0x0
+        , .{ ty, op, rty, @as(u64, @bitCast(x)) }) });
+    };
+    // One operand: sqrt, round, and conversions.
+    for ([_][]const u8{ "i32", "i64" }, [_][]const u64{ &f32s, &f64s }) |ty, vals| for (envs) |env| for (vals) |v| {
+        const other = if (ty[1] == '3') "i64" else "i32";
+        var exact = env;
+        exact.exact = true;
+        var fixed = env;
+        fixed.imm = 3;
+        const ops = [_]struct { []const u8, []const u8, Aux }{
+            .{ "fp.sqrt", ty, env },
+            .{ "fp.round", ty, env },
+            .{ "fp.round", ty, exact },
+            .{ "fp.cvt", other, env },
+            .{ "fp.cvt", "i16", env },
+            .{ "fp.tosint", "i32", env },
+            .{ "fp.tosint", "i64", fixed },
+            .{ "fp.touint", "i32", fixed },
+            .{ "fp.touint", "i64", env },
+        };
+        for (ops) |o| try list.append(gpa, .{ .regs = .{ v, 0, 0, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = {1s}:{2s} %0 #0x{3x} @0x29
+            \\  %2 = zext:i64 %1
+            \\  setreg %2 #0x10
+            \\  exit.chain #0x0
+        , .{ ty, o[0], o[1], @as(u64, @bitCast(o[2])) }) });
+    };
+    // Integers to FP.
+    const ints = [_]u64{ 0, 1, 3, 0xffff_ffff_ffff_ffff, 0x7fff_ffff, 0x8000_0000, 0x1234_5678_9abc_def1, 0x8000_0000_0000_0001 };
+    for ([_][]const u8{ "fp.fromsint", "fp.fromuint" }) |op| for ([_][]const u8{ "i32", "i64" }) |from| for ([_][]const u8{ "i16", "i32", "i64" }) |to| for (envs[0..4]) |env| for (ints) |v| for ([_]u16{ 0, 5 }) |fb| {
+        var x = env;
+        x.imm = fb;
+        try list.append(gpa, .{ .regs = .{ v, 0, 0, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = {1s}:{2s} %0 #0x{3x} @0x29
+            \\  %2 = zext:i64 %1
+            \\  setreg %2 #0x10
+            \\  exit.chain #0x0
+        , .{ from, op, to, @as(u64, @bitCast(x)) }) });
+    };
+    // Fused multiply-add.
+    const triples = [_][3]u8{ .{ 0, 1, 7 }, .{ 4, 5, 2 }, .{ 4, 5, 0 }, .{ 3, 0, 2 }, .{ 8, 8, 10 }, .{ 9, 7, 6 } };
+    for ([_][]const u8{ "i32", "i64" }, [_][]const u64{ &f32s, &f64s }) |ty, vals| for (envs) |env| for (triples) |t| {
+        try list.append(gpa, .{ .regs = .{ vals[t[0]], vals[t[1]], vals[t[2]], 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = getreg:{0s} #0x8
+            \\  %2 = getreg:{0s} #0x10
+            \\  %3 = fp.fma:{0s} %0, %1, %2 #0x{1x} @0x29
+            \\  setreg %3 #0x10
+            \\  exit.chain #0x0
+        , .{ ty, @as(u64, @bitCast(env)) }) });
+    };
+
+    // Vectors.
+    const vregs = [_][4]u64{
+        .{ 0x8000_7fff_ff01_0080, 0x0123_4567_89ab_cdef, 0x7f80_0001_00ff_8000, 0xfedc_ba98_7654_3210 },
+        .{ 0x1f0f_0e03_0200_8010, 0x0001_0203_0405_0607, 0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908 },
+        .{ 0xffff_ffff_ffff_ffff, 0x8000_0000_0000_0000, 0x0000_0000_0000_0001, 0x7fff_ffff_ffff_ffff },
+    };
+    const V = struct { op: []const u8, imm: []const u16, es: []const u2 };
+    const all: []const u2 = &.{ 0, 1, 2, 3 };
+    const vops = [_]V{
+        .{ .op = "v.add", .imm = &.{0}, .es = all },
+        .{ .op = "v.sub", .imm = &.{0}, .es = all },
+        .{ .op = "v.mul", .imm = &.{0}, .es = &.{ 0, 1, 2 } },
+        .{ .op = "v.and", .imm = &.{0}, .es = &.{0} },
+        .{ .op = "v.or", .imm = &.{0}, .es = &.{0} },
+        .{ .op = "v.xor", .imm = &.{0}, .es = &.{0} },
+        .{ .op = "v.andn", .imm = &.{0}, .es = &.{0} },
+        .{ .op = "v.cmp", .imm = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, .es = all },
+        .{ .op = "v.min", .imm = &.{ 0, 1 }, .es = all },
+        .{ .op = "v.max", .imm = &.{ 0, 1 }, .es = all },
+        .{ .op = "v.zip", .imm = &.{ 0, 1 }, .es = all },
+        .{ .op = "v.uzp", .imm = &.{ 0, 1 }, .es = all },
+        .{ .op = "v.trn", .imm = &.{ 0, 1 }, .es = all },
+        .{ .op = "v.ext", .imm = &.{ 0, 1, 5, 8, 15 }, .es = &.{0} },
+        .{ .op = "v.tbl", .imm = &.{0}, .es = &.{0} },
+    };
+    for (vregs) |r| for (vops) |o| for (o.es) |es| for (o.imm) |imm| {
+        const x: Aux = .{ .esize = es, .imm = imm };
+        try list.append(gpa, .{ .regs = .{ r[0], r[1], r[2], r[3], 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i64 #0x8
+            \\  %2 = getreg:i64 #0x10
+            \\  %3 = getreg:i64 #0x18
+            \\  %4 = v.make:v128 %0, %1
+            \\  %5 = v.make:v128 %2, %3
+            \\  %6 = {0s}:v128 %4, %5 #0x{1x}
+            \\  setreg %6 #0x30
+            \\  exit.chain #0x0
+        , .{ o.op, @as(u64, @bitCast(x)) }) });
+    };
+    // One-operand vector ops, lanes, and dup.
+    for (vregs) |r| for (all) |es| {
+        const bits = @as(u16, 8) << es;
+        var ops: std.ArrayList(struct { []const u8, Aux }) = .empty;
+        defer ops.deinit(gpa);
+        for ([_][]const u8{ "v.shl", "v.lshr", "v.ashr" }) |op| for ([_]u16{ 0, 3, bits - 1, bits, bits + 1 }) |imm|
+            try ops.append(gpa, .{ op, .{ .esize = es, .imm = imm } });
+        if (es != 0) for (0..4) |imm| try ops.append(gpa, .{ "v.narrow", .{ .esize = es, .imm = @intCast(imm) } });
+        if (es != 3) for (0..4) |imm| try ops.append(gpa, .{ "v.widen", .{ .esize = es, .imm = @intCast(imm) } });
+        for (ops.items) |o| try list.append(gpa, .{ .regs = .{ r[0], r[1], r[2], r[3], 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i64 #0x8
+            \\  %4 = v.make:v128 %0, %1
+            \\  %6 = {0s}:v128 %4 #0x{1x}
+            \\  setreg %6 #0x30
+            \\  exit.chain #0x0
+        , .{ o[0], @as(u64, @bitCast(o[1])) }) });
+        const lt = @tagName(ir.laneType(es));
+        const lane: u16 = @intCast(@min(@as(u32, 16) >> es, 16) - 1);
+        try list.append(gpa, .{ .regs = .{ r[0], r[1], r[2], r[3], 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i64 #0x8
+            \\  %2 = getreg:{0s} #0x10
+            \\  %4 = v.make:v128 %0, %1
+            \\  %5 = v.lane:{0s} %4 #0x{1x}
+            \\  %6 = zext:i64 %5
+            \\  setreg %6 #0x10
+            \\  %7 = v.lane:{0s} %4 #0x{2x}
+            \\  %8 = zext:i64 %7
+            \\  setreg %8 #0x18
+            \\  %9 = v.ins:v128 %4, %2 #0x{1x}
+            \\  %10 = v.ins:v128 %9, %2 #0x{2x}
+            \\  setreg %10 #0x30
+            \\  %11 = v.dup:v128 %2 #0x{3x}
+            \\  %12 = v.xor:v128 %11, %10
+            \\  setreg %12 #0x20
+            \\  exit.chain #0x0
+        , .{ lt, @as(u64, @bitCast(Aux{ .esize = es })), @as(u64, @bitCast(Aux{ .esize = es, .imm = lane })), @as(u64, @bitCast(Aux{ .esize = es, .imm = lane / 2 })) }) });
+    };
+    // FP lanes.
+    const fvregs = [_][4]u64{
+        .{ 0x3fc0_0000_c010_0000, 0x7fc0_0001_7f80_0001, 0x3fc0_0000_3eaa_aaab, 0x7f80_0000_8000_0000 },
+        .{ f64s[0], f64s[2], f64s[1], f64s[3] },
+        .{ f64s[4], f64s[5], f64s[10], f64s[9] },
+        .{ 0x4f80_0000_cf00_0000, 0x0000_0001_7f7f_ffff, 0x4b80_0001_3f80_0000, 0xff80_0000_0080_0000 },
+    };
+    const fvops = [_][]const u8{ "fp.add", "fp.sub", "fp.mul", "fp.div", "fp.min", "fp.max", "fp.minnm", "fp.maxnm", "fp.cmp", "fp.sqrt", "fp.round", "fp.tosint", "fp.touint", "fp.fromsint", "fp.fromuint", "fp.fma" };
+    for (fvregs) |r| for (fvops) |op| for ([_]u2{ 2, 3 }) |es| for (envs[0..3]) |env| {
+        var x = env;
+        x.esize = es;
+        if (std.mem.eql(u8, op, "fp.cmp")) x.imm = 0b1011;
+        const nops: usize = if (std.mem.eql(u8, op, "fp.fma")) 3 else if (std.mem.indexOf(u8, "fp.sqrt fp.round fp.tosint fp.touint fp.fromsint fp.fromuint", op) != null) 1 else 2;
+        const args = switch (nops) {
+            1 => "%4",
+            2 => "%4, %5",
+            else => "%4, %5, %4",
+        };
+        try list.append(gpa, .{ .regs = .{ r[0], r[1], r[2], r[3], 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i64 #0x8
+            \\  %2 = getreg:i64 #0x10
+            \\  %3 = getreg:i64 #0x18
+            \\  %4 = v.make:v128 %0, %1
+            \\  %5 = v.make:v128 %2, %3
+            \\  %6 = {0s}:v128 {1s} #0x{2x} @0x29
+            \\  setreg %6 #0x30
+            \\  exit.chain #0x0
+        , .{ op, args, @as(u64, @bitCast(x)) }) });
+    };
+    for (fvregs) |r| for ([_]Aux{ .{ .esize = 2, .imm = 3 }, .{ .esize = 2, .imm = 0x103 }, .{ .esize = 3, .imm = 2 }, .{ .esize = 2, .imm = 1 }, .{ .esize = 1, .imm = 2 } }) |cv| for (envs[0..3]) |env| {
+        var x = env;
+        x.esize = cv.esize;
+        x.imm = cv.imm;
+        try list.append(gpa, .{ .regs = .{ r[0], r[1], r[2], r[3], 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i64 #0x8
+            \\  %4 = v.make:v128 %0, %1
+            \\  %6 = fp.cvt:v128 %4 #0x{0x} @0x29
+            \\  setreg %6 #0x30
+            \\  exit.chain #0x0
+        , .{@as(u64, @bitCast(x))}) });
+    };
+    // 16-byte loads and stores: in a page, across its end, unmapped, and
+    // misaligned where alignment is required.
+    for ([_]u64{ data_va, data_va + 0x10, data_va + 0xff8, data_va + 0xfe0, data_va + 0x10000, data_va + 3 }) |addr| for ([_]u64{ 4, 0x14 }) |f| {
+        try list.append(gpa, .{ .regs = .{ addr, 0, 0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\region 0x0
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = v.load:v128 %0 #0x{0x} @0x300 !1
+            \\  setreg %1 #0x30
+            \\  %2 = const:i64 #0x10
+            \\  %3 = add:i64 %0, %2
+            \\  v.store %3, %1 #0x{0x} @0x304 !2
+            \\  %5 = getreg:v128 #0x10
+            \\  v.store %0, %5 #0x{0x} @0x308 !3
+            \\  exit.chain #0x30c !4
+        , .{f}) });
+    };
+    return list.toOwnedSlice(gpa);
+}
+
+test "the FP and vector cases verify and run in ir_eval" {
+    const gpa = std.testing.allocator;
+    const all = try generateExt(gpa);
+    defer free(gpa, all);
+    const env = try gpa.create(Env);
+    defer gpa.destroy(env);
+    for (all) |c| {
+        var r = try parse(gpa, c);
+        defer r.deinit(gpa);
+        _ = try env.evalCase(gpa, &r, c);
+    }
+}

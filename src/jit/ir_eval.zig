@@ -8,14 +8,16 @@
 //! pure operation yet calls `evalOpC` for it, so adding an op never breaks
 //! an emitter.
 //!
-//! Values are u64s holding the type's bits, zero-extended: i1 is 0 or 1,
-//! and a flags value is the guest's packed flags (see ir.zig). v128 has no
-//! pure operations yet; when it does, they get their own fallback ABI.
+//! Values hold the type's bits, zero-extended: i1 is 0 or 1, a flags
+//! value is the guest's packed flags (see ir.zig), and a v128 is a u128.
+//! The FP and vector ops (`Op.isExt`) have their own fallback, `evalExtC`.
 
 const std = @import("std");
 const ir = @import("ir.zig");
 const ctx_mod = @import("ctx.zig");
 const mem = @import("../interp/mem.zig");
+const softfloat = @import("../interp/softfloat.zig");
+const sf = softfloat;
 const Ctx = ctx_mod.Ctx;
 const Exit = ctx_mod.Exit;
 const Op = ir.Op;
@@ -104,16 +106,16 @@ fn eflagsSub(a: u64, b: u64, cin: u1, bits: u32) u64 {
 
 pub fn eflagsCond(f: u64, cc: u64) bool {
     const of = f & OF != 0;
-    const sf = f & SF != 0;
+    const sign = f & SF != 0;
     const r = switch (cc >> 1) {
         0 => of,
         1 => f & CF != 0,
         2 => f & ZF != 0,
         3 => f & (CF | ZF) != 0,
-        4 => sf,
+        4 => sign,
         5 => f & PF != 0,
-        6 => sf != of,
-        else => f & ZF != 0 or sf != of,
+        6 => sign != of,
+        else => f & ZF != 0 or sign != of,
     };
     return if (cc & 1 == 1) !r else r;
 }
@@ -220,6 +222,346 @@ pub fn fallbackCode(op: Op, ty: Type, ta: Type) u64 {
     return @as(u64, @intFromEnum(op)) | (@as(u64, @intFromEnum(ty)) << 16) | (@as(u64, @intFromEnum(ta)) << 24);
 }
 
+// ---------------------------------------------------------------- FP and vectors
+
+/// softfloat's environment for an `fp.*` op's aux.
+pub fn envOf(x: ir.ExtAux) sf.Env {
+    return .{
+        .rounding = @enumFromInt(x.rounding),
+        .daz = x.daz,
+        .ftz = x.ftz,
+        .ftz_inexact = !x.arm,
+        .tininess = if (x.arm) .before_rounding else .after_rounding,
+        .nans = @enumFromInt(x.nans),
+        .default_nan_negative = !x.arm,
+    };
+}
+
+/// softfloat's exceptions in the guest's layout: MXCSR's, or FPSR's.
+pub fn guestFlags(f: u8, arm: bool) u32 {
+    if (!arm) return f & 0x3f;
+    return @as(u32, @intFromBool(f & sf.IE != 0)) |
+        @as(u32, @intFromBool(f & sf.ZE != 0)) << 1 |
+        @as(u32, @intFromBool(f & sf.OE != 0)) << 2 |
+        @as(u32, @intFromBool(f & sf.UE != 0)) << 3 |
+        @as(u32, @intFromBool(f & sf.PE != 0)) << 4 |
+        @as(u32, @intFromBool(f & sf.ID != 0)) << 7;
+}
+
+fn FpT(comptime esize: u2) type {
+    return switch (esize) {
+        1 => u16,
+        2 => u32,
+        3 => u64,
+        else => unreachable,
+    };
+}
+
+fn esizeOf(t: Type) u2 {
+    return switch (t) {
+        .i8 => 0,
+        .i16 => 1,
+        .i32 => 2,
+        else => 3,
+    };
+}
+
+fn laneGet(v: u128, esize: u2, i: usize) u64 {
+    const bits = @as(u32, 8) << esize;
+    return @as(u64, @truncate(v >> @intCast(i * bits))) & maskOf(bits);
+}
+
+fn lanePut(v: *u128, esize: u2, i: usize, x: u64) void {
+    const bits = @as(u32, 8) << esize;
+    const m: u128 = @as(u128, maskOf(bits)) << @intCast(i * bits);
+    v.* = (v.* & ~m) | ((@as(u128, x & maskOf(bits)) << @intCast(i * bits)) & m);
+}
+
+/// Arm's FMAX, FMIN, FMAXNM, and FMINNM.
+fn armMaxMin(comptime T: type, e: *sf.Env, a: T, b: T, is_max: bool, num: bool) T {
+    const F = sf.Fmt(T);
+    var x = a;
+    var y = b;
+    if (num) {
+        const qa = sf.isNan(T, a) and !sf.isSnan(T, a);
+        const qb = sf.isNan(T, b) and !sf.isSnan(T, b);
+        const inf: T = if (is_max) F.sign_bit | F.inf else F.inf;
+        if (qa and !qb) x = inf else if (qb and !qa) y = inf;
+    }
+    if (sf.pickNan(T, e, &.{ x, y })) |r| return r;
+    x = sf.daz(T, e, x);
+    y = sf.daz(T, e, y);
+    if (sf.isZero(T, x) and sf.isZero(T, y)) {
+        const sa = x & F.sign_bit != 0;
+        const sb = y & F.sign_bit != 0;
+        const neg = if (is_max) sa and sb else sa or sb;
+        return if (neg) F.sign_bit else 0;
+    }
+    const o = sf.order(T, x, y);
+    return if ((o == .gt) == is_max) x else y;
+}
+
+/// a * b + c, by x's rules.
+fn fma(comptime T: type, e: *sf.Env, arm: bool, a: T, b: T, c: T) T {
+    if (!arm) return sf.mulAdd(T, e, a, b, c);
+    // Arm's FPMulAdd: NaNs in the order c, a, b; inf * 0 + qNaN is the
+    // default NaN.
+    if (sf.pickNan(T, e, &.{ c, a, b })) |r| {
+        const inf_zero = (sf.isInf(T, a) and sf.isZero(T, sf.daz(T, e, b))) or (sf.isZero(T, sf.daz(T, e, a)) and sf.isInf(T, b));
+        if (sf.isNan(T, c) and !sf.isSnan(T, c) and inf_zero) {
+            e.flags |= sf.IE;
+            return sf.defaultNan(T, e);
+        }
+        return r;
+    }
+    return sf.mulAdd(T, e, a, b, c);
+}
+
+/// FP to an integer of I, by x's rules for NaNs and values out of range.
+fn toInt(comptime T: type, comptime I: type, e: *sf.Env, x: ir.ExtAux, a: T) I {
+    if (sf.toFixed(T, I, e, a, @enumFromInt(x.rounding), x.imm)) |v| return v;
+    const signed = @typeInfo(I).int.signedness == .signed;
+    if (!x.arm) return if (signed) std.math.minInt(I) else std.math.maxInt(I);
+    if (sf.isNan(T, a)) return 0;
+    return if (a & sf.Fmt(T).sign_bit != 0) std.math.minInt(I) else std.math.maxInt(I);
+}
+
+fn fromInt(comptime T: type, comptime I: type, e: *sf.Env, v: u64, imm: u32) T {
+    const U = std.meta.Int(.unsigned, @bitSizeOf(I));
+    return sf.fromFixed(T, I, e, @bitCast(@as(U, @truncate(v))), imm);
+}
+
+/// One `fp.*` op on scalars of format T (or, for conversions, from or to
+/// it): the result's bits, zero-extended.
+fn fpScalar(comptime T: type, op: Op, ty: Type, ta: Type, e: *sf.Env, x: ir.ExtAux, a: u64, b: u64, c: u64) u64 {
+    const p: T = @truncate(a);
+    const q: T = @truncate(b);
+    const r: T = @truncate(c);
+    return switch (op) {
+        .@"fp.add" => sf.add(T, e, p, q),
+        .@"fp.sub" => sf.sub(T, e, p, q),
+        .@"fp.mul" => sf.mul(T, e, p, q),
+        .@"fp.div" => sf.div(T, e, p, q),
+        .@"fp.sqrt" => sf.sqrt(T, e, p),
+        .@"fp.fma" => fma(T, e, x.arm, p, q, r),
+        .@"fp.min" => if (x.arm) armMaxMin(T, e, p, q, false, false) else sf.min(T, e, p, q),
+        .@"fp.max" => if (x.arm) armMaxMin(T, e, p, q, true, false) else sf.max(T, e, p, q),
+        .@"fp.minnm" => armMaxMin(T, e, p, q, false, true),
+        .@"fp.maxnm" => armMaxMin(T, e, p, q, true, true),
+        .@"fp.cmp" => @intFromEnum(sf.compare(T, e, p, q, x.exact)),
+        .@"fp.round" => sf.roundToInt(T, e, p, @enumFromInt(x.rounding), x.exact),
+        // T is the result's format; a is ta's.
+        .@"fp.cvt" => switch (ta) {
+            inline .i16, .i32, .i64 => |t| sf.convert(T, FpT(esizeOf(t)), e, @truncate(a)),
+            else => unreachable,
+        },
+        .@"fp.fromsint" => if (ta == .i32) fromInt(T, i32, e, a, x.imm) else fromInt(T, i64, e, a, x.imm),
+        .@"fp.fromuint" => if (ta == .i32) fromInt(T, u32, e, a, x.imm) else fromInt(T, u64, e, a, x.imm),
+        // T is a's format; the result is ty.
+        .@"fp.tosint" => if (ty == .i32) @as(u32, @bitCast(toInt(T, i32, e, x, p))) else @bitCast(toInt(T, i64, e, x, p)),
+        .@"fp.touint" => if (ty == .i32) toInt(T, u32, e, x, p) else toInt(T, u64, e, x, p),
+        else => unreachable,
+    };
+}
+
+/// The format an `fp.*` op computes in: its result's, but its operand's
+/// for comparisons and conversions to integers.
+fn fpFormat(op: Op, ty: Type, ta: Type) u2 {
+    return switch (op) {
+        .@"fp.cmp", .@"fp.tosint", .@"fp.touint" => esizeOf(ta),
+        else => esizeOf(ty),
+    };
+}
+
+/// An `fp.*` op lane-wise on v128.
+fn fpVector(op: Op, e: *sf.Env, x: ir.ExtAux, a: u128, b: u128, c: u128) u128 {
+    var out: u128 = 0;
+    switch (op) {
+        .@"fp.cvt" => {
+            const to: u2 = @truncate(x.imm);
+            const n = @as(u32, 16) >> @max(to, x.esize);
+            const half: usize = if (x.imm & 0x100 != 0) n else 0;
+            for (0..n) |k| {
+                const from_lane = if (to > x.esize) half + k else k;
+                const v = laneGet(a, x.esize, from_lane);
+                const r: u64 = switch (to) {
+                    inline 1...3 => |t| switch (x.esize) {
+                        inline 1...3 => |f| if (t == f) unreachable else sf.convert(FpT(t), FpT(f), e, @truncate(v)),
+                        else => unreachable,
+                    },
+                    else => unreachable,
+                };
+                lanePut(&out, to, k, r);
+            }
+            return out;
+        },
+        else => {},
+    }
+    const lt = ir.laneType(x.esize);
+    for (0..x.lanes()) |k| {
+        const p = laneGet(a, x.esize, k);
+        const q = laneGet(b, x.esize, k);
+        const r = laneGet(c, x.esize, k);
+        const v: u64 = switch (x.esize) {
+            inline 1...3 => |es| blk: {
+                const T = FpT(es);
+                if (op == .@"fp.cmp") {
+                    const o = sf.compare(T, e, @truncate(p), @truncate(q), x.exact);
+                    break :blk if (x.imm >> @intFromEnum(o) & 1 != 0) maskOf(x.bits()) else 0;
+                }
+                break :blk fpScalar(T, op, lt, lt, e, x, p, q, r);
+            },
+            else => unreachable,
+        };
+        lanePut(&out, x.esize, k, v);
+    }
+    return out;
+}
+
+fn sat(v: i128, lo: i128, hi: i128) u64 {
+    return @truncate(@as(u128, @bitCast(@min(@max(v, lo), hi))));
+}
+
+/// A `v.*` op (but v.load and v.store).
+fn vecOp(op: Op, x: ir.ExtAux, a: u128, b: u128) u128 {
+    const es = x.esize;
+    const n = x.lanes();
+    const bits = x.bits();
+    var out: u128 = 0;
+    switch (op) {
+        .@"v.make" => return @as(u128, @as(u64, @truncate(b))) << 64 | @as(u64, @truncate(a)),
+        .@"v.lane" => return laneGet(a, es, x.imm),
+        .@"v.ins" => {
+            out = a;
+            lanePut(&out, es, x.imm, @truncate(b));
+            return out;
+        },
+        .@"v.dup" => {
+            for (0..n) |k| lanePut(&out, es, k, @truncate(a));
+            return out;
+        },
+        .@"v.and" => return a & b,
+        .@"v.or" => return a | b,
+        .@"v.xor" => return a ^ b,
+        .@"v.andn" => return a & ~b,
+        .@"v.ext" => {
+            if (x.imm == 0) return a;
+            const sh: u7 = @intCast(8 * @as(u32, x.imm));
+            return (a >> sh) | (b << @intCast(128 - @as(u32, sh)));
+        },
+        .@"v.tbl" => {
+            for (0..16) |k| {
+                const idx = laneGet(b, 0, k);
+                if (idx < 16) lanePut(&out, 0, k, laneGet(a, 0, @intCast(idx)));
+            }
+            return out;
+        },
+        .@"v.zip", .@"v.uzp", .@"v.trn" => {
+            const two = x.imm == 1;
+            for (0..n) |k| {
+                const v = switch (op) {
+                    .@"v.uzp" => blk: {
+                        const j = 2 * k + @intFromBool(two);
+                        break :blk if (j < n) laneGet(a, es, j) else laneGet(b, es, j - n);
+                    },
+                    .@"v.trn" => blk: {
+                        const j = (k & ~@as(usize, 1)) + @intFromBool(two);
+                        break :blk if (k & 1 == 0) laneGet(a, es, j) else laneGet(b, es, j);
+                    },
+                    else => blk: {
+                        const j = k / 2 + (if (two) n / 2 else 0);
+                        break :blk if (k & 1 == 0) laneGet(a, es, j) else laneGet(b, es, j);
+                    },
+                };
+                lanePut(&out, es, k, v);
+            }
+            return out;
+        },
+        .@"v.narrow" => {
+            const hb = bits / 2;
+            const smax: i128 = (@as(i128, 1) << @intCast(hb - 1)) - 1;
+            const smin: i128 = -(@as(i128, 1) << @intCast(hb - 1));
+            const umax: i128 = (@as(i128, 1) << @intCast(hb)) - 1;
+            for (0..n) |k| {
+                const v = laneGet(a, es, k);
+                const r: u64 = switch (x.imm) {
+                    0 => v,
+                    1 => sat(sx(v, bits), smin, smax),
+                    2 => sat(sx(v, bits), 0, umax),
+                    else => sat(v, 0, umax),
+                };
+                lanePut(&out, es - 1, k, r);
+            }
+            return out;
+        },
+        .@"v.widen" => {
+            const half: usize = if (x.imm & 2 != 0) n / 2 else 0;
+            for (0..n / 2) |k| {
+                const v = laneGet(a, es, half + k);
+                lanePut(&out, es + 1, k, if (x.imm & 1 != 0) @bitCast(sx(v, bits)) else v);
+            }
+            return out;
+        },
+        else => {},
+    }
+    for (0..n) |k| {
+        const p = laneGet(a, es, k);
+        const q = laneGet(b, es, k);
+        const sp = sx(p, bits);
+        const sq = sx(q, bits);
+        const v: u64 = switch (op) {
+            .@"v.add" => p +% q,
+            .@"v.sub" => p -% q,
+            .@"v.mul" => p *% q,
+            .@"v.shl" => if (x.imm >= bits) 0 else p << @intCast(x.imm),
+            .@"v.lshr" => if (x.imm >= bits) 0 else p >> @intCast(x.imm),
+            .@"v.ashr" => @bitCast(sp >> @intCast(@min(x.imm, bits - 1))),
+            .@"v.cmp" => if (evalPure(.icmp, .i1, ir.laneType(es), p, q, 0, x.imm) == 1) maxInt64 else 0,
+            .@"v.min" => if (if (x.imm & 1 != 0) sp < sq else p < q) p else q,
+            .@"v.max" => if (if (x.imm & 1 != 0) sp > sq else p > q) p else q,
+            else => unreachable,
+        };
+        lanePut(&out, es, k, v);
+    }
+    return out;
+}
+
+const maxInt64: u64 = std.math.maxInt(u64);
+
+/// An `fp.*` or `v.*` op (but v.load and v.store), on the Cpu at `cpu`
+/// for `fp.*`'s exceptions.
+pub fn evalExt(cpu: [*]u8, op: Op, ty: Type, ta: Type, a: u128, b: u128, c: u128, aux: u64, aux2: u64) u128 {
+    const x = ir.ExtAux.of(aux);
+    if (!op.isFp()) return vecOp(op, x, a, b);
+    var e = envOf(x);
+    const r: u128 = if (ty == .v128)
+        fpVector(op, &e, x, a, b, c)
+    else switch (fpFormat(op, ty, ta)) {
+        inline 1...3 => |es| fpScalar(FpT(es), op, ty, ta, &e, x, @truncate(a), @truncate(b), @truncate(c)) & ty.mask(),
+        else => unreachable,
+    };
+    if (aux2 != 0 and e.flags != 0) {
+        const w: *align(1) u32 = @ptrCast(cpu + @as(usize, @intCast(aux2 - 1)));
+        w.* |= guestFlags(e.flags, x.arm);
+    }
+    return r;
+}
+
+/// The fallback emitters call for an `fp.*` or `v.*` op (but v.load and
+/// v.store) they don't lower: `code` is `fallbackCode(op, ty, ta)`, and
+/// `io` holds a, b, and c, 16 bytes each, little-endian (a scalar in its
+/// low bytes, zero-extended). The result goes to io[0..16].
+pub fn evalExtC(ctx: *Ctx, code: u64, io: [*]u8, aux: u64, aux2: u64) callconv(.c) void {
+    const op: Op = @enumFromInt(@as(u16, @truncate(code)));
+    const ty: Type = @enumFromInt(@as(u8, @truncate(code >> 16)));
+    const ta: Type = @enumFromInt(@as(u8, @truncate(code >> 24)));
+    const a = std.mem.readInt(u128, io[0..16], .little);
+    const b = std.mem.readInt(u128, io[16..32], .little);
+    const c = std.mem.readInt(u128, io[32..48], .little);
+    const cpu: [*]u8 = @ptrFromInt(@as(usize, @intCast(ctx.cpu)));
+    std.mem.writeInt(u128, io[0..16], evalExt(cpu, op, ty, ta, a, b, c, aux, aux2), .little);
+}
+
 // ---------------------------------------------------------------- regions
 
 pub const Error = error{ OutOfMemory, Unsupported };
@@ -230,6 +572,7 @@ fn byteSize(t: Type) Error!usize {
         .i16 => 2,
         .i32 => 4,
         .i64, .flags => 8,
+        .v128 => 16,
         else => error.Unsupported,
     };
 }
@@ -237,7 +580,7 @@ fn byteSize(t: Type) Error!usize {
 /// Runs a verified region with ctx's Cpu, TLB, and slow paths, and
 /// returns how it left, as generated code would.
 pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
-    const vals = try gpa.alloc(u64, r.insts.items.len);
+    const vals = try gpa.alloc(u128, r.insts.items.len);
     defer gpa.free(vals);
     const cpu: [*]u8 = @ptrFromInt(@as(usize, @intCast(ctx.cpu)));
     const tlb: *mem.Tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb)));
@@ -246,21 +589,62 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
         const b = r.blocks.items[blk];
         for (b.start..b.start + b.len) |idx| {
             const i = r.insts.items[idx];
-            const a = if (i.a != ir.none) vals[i.a] else 0;
-            const bv = if (i.b != ir.none) vals[i.b] else 0;
-            const cv = if (i.c != ir.none) vals[i.c] else 0;
+            const wa: u128 = if (i.a != ir.none) vals[i.a] else 0;
+            const wb: u128 = if (i.b != ir.none) vals[i.b] else 0;
+            const wc: u128 = if (i.c != ir.none) vals[i.c] else 0;
+            const a: u64 = @truncate(wa);
+            const bv: u64 = @truncate(wb);
+            const cv: u64 = @truncate(wc);
             const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
             if (i.op.isPure()) {
                 vals[idx] = evalPure(i.op, i.ty, ta, a, bv, cv, i.aux);
                 continue;
             }
+            if (i.op.isExt() and i.op != .@"v.load" and i.op != .@"v.store") {
+                vals[idx] = evalExt(cpu, i.op, i.ty, ta, wa, wb, wc, i.aux, i.aux2);
+                continue;
+            }
             switch (i.op) {
                 .getreg => {
-                    var v: u64 = 0;
+                    var v: u128 = 0;
                     @memcpy(std.mem.asBytes(&v)[0..try byteSize(i.ty)], cpu[@intCast(i.aux)..][0..try byteSize(i.ty)]);
                     vals[idx] = v;
                 },
-                .setreg => @memcpy(cpu[@intCast(i.aux)..][0..try byteSize(ta)], std.mem.asBytes(&a)[0..try byteSize(ta)]),
+                .setreg => @memcpy(cpu[@intCast(i.aux)..][0..try byteSize(ta)], std.mem.asBytes(&wa)[0..try byteSize(ta)]),
+                .@"v.load" => {
+                    const f: ir.MemFlags = @bitCast(i.aux);
+                    if (f.aligned and a % 16 != 0) return left(ctx, i, alignFault(ctx, a, .read, i.aux2));
+                    var v: u128 = 0;
+                    if (mem.fast(tlb, a, 16, false)) |host| {
+                        @memcpy(std.mem.asBytes(&v), @as([*]const u8, @ptrFromInt(host))[0..16]);
+                    } else {
+                        // Two halves through the slow path, the low first.
+                        const slow: mem.SlowLoadFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_load)));
+                        for (0..2) |h| {
+                            if (slow(ctx, a +% 8 * h, 3) != 0) {
+                                ctx.exit_pc = i.aux2;
+                                return left(ctx, i, .fault);
+                            }
+                            v |= @as(u128, ctx.scratch) << @intCast(64 * h);
+                        }
+                    }
+                    vals[idx] = v;
+                },
+                .@"v.store" => {
+                    const f: ir.MemFlags = @bitCast(i.aux);
+                    if (f.aligned and a % 16 != 0) return left(ctx, i, alignFault(ctx, a, .write, i.aux2));
+                    if (mem.fast(tlb, a, 16, true)) |host| {
+                        @memcpy(@as([*]u8, @ptrFromInt(host))[0..16], std.mem.asBytes(&wb));
+                    } else {
+                        const slow: mem.SlowStoreFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_store)));
+                        for (0..2) |h| {
+                            if (slow(ctx, a +% 8 * h, 3, @truncate(wb >> @intCast(64 * h))) != 0) {
+                                ctx.exit_pc = i.aux2;
+                                return left(ctx, i, .fault);
+                            }
+                        }
+                    }
+                },
                 .load => {
                     const f: ir.MemFlags = @bitCast(i.aux);
                     const n = f.bytes();
@@ -498,4 +882,101 @@ test "loads and stores take the slow path and fault exactly" {
     regs = .{ 0x4ff0, 0 };
     try testing.expectEqual(Exit.chain, try run(gpa, &region, &c));
     try testing.expectEqual(@as(u64, 0x10c), c.exit_pc);
+}
+
+fn ext(op: Op, ty: Type, ta: Type, a: u128, b: u128, c: u128, x: ir.ExtAux, flags: ?*u32) u128 {
+    var cpu: [4]u32 = .{ 0, 0, 0, 0 };
+    const r = evalExt(@ptrCast(&cpu), op, ty, ta, a, b, c, @bitCast(x), if (flags != null) 5 else 0);
+    if (flags) |f| f.* = cpu[1];
+    return r;
+}
+
+const x86_env: ir.ExtAux = .{};
+const arm_env: ir.ExtAux = .{ .arm = true, .nans = @intFromEnum(sf.Nans.signaling_first) };
+
+test "fp ops follow the guest's rules" {
+    var f: u32 = 0;
+    // 1 + 2 = 3, exactly.
+    try testing.expectEqual(@as(u128, 0x4040_0000), ext(.@"fp.add", .i32, .i32, 0x3f80_0000, 0x4000_0000, 0, x86_env, &f));
+    try testing.expectEqual(@as(u32, 0), f);
+    // 1 / 0: infinity and divide-by-zero, in MXCSR's bit 2 or FPSR's bit 1.
+    try testing.expectEqual(@as(u128, 0x7ff0_0000_0000_0000), ext(.@"fp.div", .i64, .i64, 0x3ff0_0000_0000_0000, 0, 0, x86_env, &f));
+    try testing.expectEqual(@as(u32, 4), f);
+    _ = ext(.@"fp.div", .i64, .i64, 0x3ff0_0000_0000_0000, 0, 0, arm_env, &f);
+    try testing.expectEqual(@as(u32, 2), f);
+    // 0 / 0: the default NaN, negative on x86 and positive on Arm.
+    try testing.expectEqual(@as(u128, 0xffc0_0000), ext(.@"fp.div", .i32, .i32, 0, 0, 0, x86_env, null));
+    try testing.expectEqual(@as(u128, 0x7fc0_0000), ext(.@"fp.div", .i32, .i32, 0, 0, 0, arm_env, null));
+    // 1/3 is inexact.
+    _ = ext(.@"fp.div", .i32, .i32, 0x3f80_0000, 0x4040_0000, 0, x86_env, &f);
+    try testing.expectEqual(@as(u32, 0x20), f);
+    // MINSS gives b for a NaN; FMIN gives the NaN, FMINNM the number.
+    try testing.expectEqual(@as(u128, 0x3f80_0000), ext(.@"fp.min", .i32, .i32, 0x7fc0_0001, 0x3f80_0000, 0, x86_env, null));
+    try testing.expectEqual(@as(u128, 0x7fc0_0001), ext(.@"fp.min", .i32, .i32, 0x7fc0_0001, 0x3f80_0000, 0, arm_env, null));
+    try testing.expectEqual(@as(u128, 0x3f80_0000), ext(.@"fp.minnm", .i32, .i32, 0x7fc0_0001, 0x3f80_0000, 0, arm_env, null));
+    // FMAX of zeros is +0, FMIN -0.
+    try testing.expectEqual(@as(u128, 0x8000_0000), ext(.@"fp.min", .i32, .i32, 0, 0x8000_0000, 0, arm_env, null));
+    try testing.expectEqual(@as(u128, 0), ext(.@"fp.max", .i32, .i32, 0x8000_0000, 0, 0, arm_env, null));
+    // Out of range: x86's integer indefinite, Arm's saturation; NaN is 0 on Arm.
+    var trunc = x86_env;
+    trunc.rounding = @intFromEnum(sf.Rounding.zero);
+    try testing.expectEqual(@as(u128, 0x8000_0000), ext(.@"fp.tosint", .i32, .i32, 0x4f80_0000, 0, 0, trunc, null)); // 2^32
+    var arm_trunc = arm_env;
+    arm_trunc.rounding = @intFromEnum(sf.Rounding.zero);
+    try testing.expectEqual(@as(u128, 0x7fff_ffff), ext(.@"fp.tosint", .i32, .i32, 0x4f80_0000, 0, 0, arm_trunc, null));
+    try testing.expectEqual(@as(u128, 0), ext(.@"fp.tosint", .i64, .i32, 0x7fc0_0000, 0, 0, arm_trunc, null));
+    try testing.expectEqual(@as(u128, 0xffff_ffff_ffff_fffe), ext(.@"fp.tosint", .i64, .i64, 0xc000_0000_0000_0000, 0, 0, trunc, null)); // -2.0
+    // Fixed point: 3 / 2^1 = 1.5.
+    var fixed = x86_env;
+    fixed.imm = 1;
+    try testing.expectEqual(@as(u128, 0x3fc0_0000), ext(.@"fp.fromsint", .i32, .i32, 3, 0, 0, fixed, null));
+    try testing.expectEqual(@as(u128, 0xbf80_0000), ext(.@"fp.fromsint", .i32, .i64, 0xffff_ffff_ffff_ffff, 0, 0, x86_env, null));
+    try testing.expectEqual(@as(u128, 0x4f80_0000), ext(.@"fp.fromuint", .i32, .i32, 0xffff_ffff, 0, 0, x86_env, null));
+    // Compare: 1 < 2; NaN unordered.
+    try testing.expectEqual(@as(u128, 0), ext(.@"fp.cmp", .i8, .i32, 0x3f80_0000, 0x4000_0000, 0, x86_env, null));
+    try testing.expectEqual(@as(u128, 3), ext(.@"fp.cmp", .i8, .i32, 0x7fc0_0000, 0x4000_0000, 0, x86_env, null));
+    // Conversions, and rounding to integral: 2.5 to even is 2.
+    try testing.expectEqual(@as(u128, 0x3ff8_0000_0000_0000), ext(.@"fp.cvt", .i64, .i32, 0x3fc0_0000, 0, 0, x86_env, null));
+    try testing.expectEqual(@as(u128, 0x4000_0000), ext(.@"fp.round", .i32, .i32, 0x4020_0000, 0, 0, x86_env, null));
+    // FMA: 2 * 3 + 1, and Arm's inf * 0 + qNaN.
+    try testing.expectEqual(@as(u128, 0x40e0_0000), ext(.@"fp.fma", .i32, .i32, 0x4000_0000, 0x4040_0000, 0x3f80_0000, x86_env, null));
+    try testing.expectEqual(@as(u128, 0x7fc0_0000), ext(.@"fp.fma", .i32, .i32, 0x7f80_0000, 0, 0x7fc0_0001, arm_env, &f));
+    try testing.expectEqual(@as(u32, 1), f);
+}
+
+test "vector ops lane by lane" {
+    var x: ir.ExtAux = .{ .esize = 0 };
+    const ones: u128 = std.math.maxInt(u128);
+    const seq: u128 = 0x0f0e0d0c_0b0a0908_07060504_03020100;
+    try testing.expectEqual(@as(u128, 0), vecOp(.@"v.add", x, ones, @as(u128, 0x01010101_01010101_01010101_01010101)));
+    try testing.expectEqual(@as(u128, 0x0807_0605_0403_0201), vecOp(.@"v.make", x, 0x0807_0605_0403_0201, 0));
+    // TBL: out-of-range indexes give 0.
+    try testing.expectEqual(seq & ~@as(u128, 0xff), vecOp(.@"v.tbl", x, seq, seq | 0xff));
+    // EXT by 1 byte.
+    x.imm = 1;
+    try testing.expectEqual(@as(u128, 0xaa0f0e0d_0c0b0a09_08070605_04030201), vecOp(.@"v.ext", x, seq, 0xaa));
+    // ZIP1 and UZP1 of 32-bit lanes.
+    x = .{ .esize = 2 };
+    const p: u128 = 0x00000003_00000002_00000001_00000000;
+    const q: u128 = 0x00000013_00000012_00000011_00000010;
+    try testing.expectEqual(@as(u128, 0x00000011_00000001_00000010_00000000), vecOp(.@"v.zip", x, p, q));
+    try testing.expectEqual(@as(u128, 0x00000012_00000010_00000002_00000000), vecOp(.@"v.uzp", x, p, q));
+    try testing.expectEqual(@as(u128, 0x00000012_00000002_00000010_00000000), vecOp(.@"v.trn", x, p, q));
+    // Shifts past the width; signed compare.
+    x.imm = 40;
+    try testing.expectEqual(@as(u128, 0), vecOp(.@"v.shl", x, p, 0));
+    try testing.expectEqual(ones, vecOp(.@"v.ashr", x, ones, 0));
+    x.imm = @intFromEnum(ir.Pred.slt);
+    try testing.expectEqual(@as(u128, 0xffff_ffff), vecOp(.@"v.cmp", x, 0xffff_ffff, 0));
+    // Saturating narrow of 16-bit lanes to signed bytes, and widening back.
+    x = .{ .esize = 1, .imm = 1 };
+    try testing.expectEqual(@as(u128, 0x807f), vecOp(.@"v.narrow", x, 0x8000_7fff, 0));
+    x = .{ .esize = 0, .imm = 1 };
+    try testing.expectEqual(@as(u128, 0xff80_007f), vecOp(.@"v.widen", x, 0x807f, 0));
+    // FP lanes: 1+1 in each of four binary32 lanes; binary32 to 64 of the high half.
+    const one4: u128 = 0x3f800000_3f800000_3f800000_3f800000;
+    try testing.expectEqual(@as(u128, 0x40000000_40000000_40000000_40000000), ext(.@"fp.add", .v128, .v128, one4, one4, 0, .{ .esize = 2 }, null));
+    try testing.expectEqual(@as(u128, 0x3ff00000_00000000_3ff00000_00000000), ext(.@"fp.cvt", .v128, .v128, one4, 0, 0, .{ .esize = 2, .imm = 0x103 }, null));
+    // fp.cmp's order set: less-or-equal.
+    try testing.expectEqual(@as(u128, 0xffffffff_ffffffff_ffffffff_ffffffff), ext(.@"fp.cmp", .v128, .v128, one4, one4, 0, .{ .esize = 2, .imm = 0b0011 }, null));
 }

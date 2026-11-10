@@ -3,7 +3,7 @@
 //!
 //! `spillAll` is the trivial allocator, so emitters can be written and
 //! tested before linear scan (regalloc.zig) exists: every value gets its
-//! own 8-byte frame slot, and the emitter loads operands into scratch
+//! own 8-byte frame slot (two for a v128), and the emitter loads operands into scratch
 //! registers around each operation.
 
 const std = @import("std");
@@ -37,7 +37,8 @@ pub fn spillAll(gpa: std.mem.Allocator, r: *const ir.Region) !Allocation {
             l.* = .none;
         } else {
             l.* = .{ .slot = n };
-            n += 1;
+            // A v128 takes two slots: 16 bytes at slot*8.
+            n += if (i.ty == .v128) 2 else 1;
         }
     }
     return .{ .locs = locs, .slots = n };

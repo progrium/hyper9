@@ -53,6 +53,20 @@ other work asks the owner for changes rather than editing it.
   the slow path. ir_eval, x86-64, and wasm ignore it.
 - `exit_pc` is the PC to resume at, except for a fault, where it's the
   faulting instruction.
+- FP and vectors (`fp.*` at 224, `v.*` at 256; `Op.isExt`) take an
+  `ir.ExtAux` in aux: the guest's FP environment as the lifter saw FPCR or
+  MXCSR (rounding, DAZ, FZ, the NaN rule, and Arm's or x86's rules), an
+  immediate, and a lane size. FP values are i16, i32, and i64 bit patterns,
+  or lanes of a v128; ir_eval computes them with softfloat.zig, never the
+  host's FPU. An `fp.*` op whose aux2 is nonzero ORs its exceptions, in the
+  guest's layout, into the u32 at Cpu offset aux2 - 1, so it writes guest
+  state, and passes that move or drop guest writes must treat it as a
+  barrier for that word. None of them is `isPure`: an emitter that doesn't
+  lower one calls `ir_eval.evalExtC(ctx, fallbackCode(op, ty, ta), io,
+  aux, aux2)`, with a, b, and c staged 16 bytes each at `io` and the
+  result written back to io[0..16]. `spillAll` gives a v128 two slots.
+  `emit/cases.zig`'s `generateExt` has their cases, apart from `generate`'s
+  until every emitter takes them.
 - Flags are values, per guest: `nzcv.*` and `eflags.*`. `ir_eval` computes them
   eagerly in the guest's packing; emitters may keep them lazy.
 
