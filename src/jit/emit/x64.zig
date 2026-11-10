@@ -974,3 +974,134 @@ test "chain sites link, and the jump cache finds a target inline" {
     try std.testing.expectEqual(@as(u64, 15), regs[0]);
     try std.testing.expectEqual(@as(u64, 3), cx.retired);
 }
+
+// ---------------------------------------------------------------- random regions
+
+const check = @import("../check.zig");
+
+/// Emits `reg` into `code` (reset when full) and returns its entry.
+fn load(gpa: std.mem.Allocator, code: *codemem.Region, reg: *const ir.Region) !ctx.EntryFn {
+    var a = try alloc_mod.spillAll(gpa, reg);
+    defer a.deinit(gpa);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    const out = try emit(gpa, reg, &a, &buf);
+    const off = code.alloc(buf.items.len, 16) orelse blk: {
+        code.reset();
+        break :blk code.alloc(buf.items.len, 16) orelse return error.TooLarge;
+    };
+    code.write(off, buf.items);
+    return code.entry(off + out.entry);
+}
+
+/// Checks one lifted region from Cpu `start`: with ir_eval, and then, if
+/// that agrees with T0, natively. Returns false on a native divergence
+/// (printed), null if ir_eval itself diverges (the lifter's, not ours),
+/// and true otherwise, leaving the native run's results in `run`.
+fn checkNative(gpa: std.mem.Allocator, run: *check.Run, code: *codemem.Region, reg: *const ir.Region, start: []const u8) !?bool {
+    if (!try run.check(.{ .ir_eval = reg }, start, .{})) return null;
+    const f = try load(gpa, code, reg);
+    if (try run.check(.{ .entry = f }, start, .{})) return true;
+    std.debug.print("x86-64 code diverges:\n{s}", .{run.report.items});
+    ir.print(reg, &std.debug.lockStderr(&.{}).file_writer.interface) catch {};
+    std.debug.unlockStderr();
+    return false;
+}
+
+test "random arm64 programs agree with T0 natively, region by region" {
+    if (!supported or !codemem.available()) return error.SkipZigTest;
+    const fuzz = check.fuzz_a64;
+    const gen = check.gen_a64;
+    const gpa = std.testing.allocator;
+    const s = try gpa.create(fuzz.Space);
+    defer gpa.destroy(s);
+    s.load(&.{}, 0);
+    const run = try check.Run.init(gpa, &check.a64.guest, check.mapBacking(&s.map));
+    defer run.deinit();
+    var code = try codemem.Region.init(4 << 20);
+    defer code.deinit();
+    var prng = std.Random.DefaultPrng.init(0x64);
+    var buf: [65]u32 = undefined;
+    var regions: u32 = 0;
+    for (0..300) |i| {
+        const words = gen.program(prng.random(), .{ .len = 48 }, &buf);
+        s.load(words, i);
+        var cpu = s.cpu(prng.random());
+        const backing = check.mapBacking(&s.map);
+        for (0..64) |_| {
+            var reg = try check.liftAt(gpa, &check.a64.guest, &backing, cpu.pc, .{});
+            defer reg.deinit(gpa);
+            const ok = try checkNative(gpa, run, &code, &reg, std.mem.asBytes(&cpu)) orelse break;
+            if (!ok) return error.Diverged;
+            regions += 1;
+            const o = run.out[check.Run.t1];
+            run.shadow[check.Run.t1].commit();
+            cpu = std.mem.bytesToValue(@TypeOf(cpu), run.cpu[check.Run.t1]);
+            if (o.retired == 0 or (o.exit != .chain and o.exit != .indirect)) break;
+        }
+    }
+    try std.testing.expect(regions > 300);
+}
+
+test "random 386 programs agree with T0 natively, region by region" {
+    if (!supported or !codemem.available()) return error.SkipZigTest;
+    const gen = check.gen_x86;
+    const X86 = check.x86;
+    const gpa = std.testing.allocator;
+    const Space = struct {
+        code: [mem.page_size]u8 align(mem.page_size) = @splat(0),
+        data: [mem.page_size]u8 align(mem.page_size) = @splat(0),
+        stack: [mem.page_size]u8 align(mem.page_size) = @splat(0),
+        regions: [3]mem.Region = undefined,
+        map: mem.Map = undefined,
+
+        fn load(sp: *@This(), bytes: []const u8, seed: u64) void {
+            sp.code = @splat(0xCC);
+            @memcpy(sp.code[0..bytes.len], bytes);
+            var p = std.Random.DefaultPrng.init(seed);
+            p.random().bytes(&sp.data);
+            p.random().bytes(&sp.stack);
+            sp.regions = .{
+                .{ .va = gen.code_va, .mem = &sp.code, .exec = true },
+                .{ .va = gen.data_va, .mem = &sp.data, .write = true },
+                .{ .va = gen.stack_va, .mem = &sp.stack, .write = true },
+            };
+            sp.map = .{ .regions = &sp.regions };
+        }
+    };
+    const s = try gpa.create(Space);
+    defer gpa.destroy(s);
+    s.load(&.{}, 0);
+    const run = try check.Run.init(gpa, &X86.guest, check.mapBacking(&s.map));
+    defer run.deinit();
+    var code = try codemem.Region.init(4 << 20);
+    defer code.deinit();
+    var buf: [mem.page_size - 16]u8 = undefined;
+    var regions: u32 = 0;
+    for (0..300) |i| {
+        var prng = std.Random.DefaultPrng.init(0x86 + i);
+        const bytes = gen.program(prng.random(), .{ .len = 48 }, &buf);
+        const regs = gen.registers(prng.random());
+        s.load(bytes, i);
+        var cpu: X86.Cpu = .{};
+        cpu.r = regs.r;
+        cpu.eip = gen.code_va;
+        cpu.fl.set(regs.eflags);
+        const backing = check.mapBacking(&s.map);
+        for (0..64) |_| {
+            var reg = check.liftAt(gpa, &X86.guest, &backing, cpu.eip, .{}) catch |e| switch (e) {
+                error.Unsupported => break,
+                else => return e,
+            };
+            defer reg.deinit(gpa);
+            const ok = try checkNative(gpa, run, &code, &reg, std.mem.asBytes(&cpu)) orelse break;
+            if (!ok) return error.Diverged;
+            regions += 1;
+            const o = run.out[check.Run.t1];
+            run.shadow[check.Run.t1].commit();
+            @memcpy(std.mem.asBytes(&cpu), run.cpu[check.Run.t1]);
+            if (o.retired == 0 or (o.exit != .chain and o.exit != .indirect)) break;
+        }
+    }
+    try std.testing.expect(regions > 300);
+}
