@@ -135,6 +135,15 @@ try {
       await page.keyboard.type(`seq 3 | jq -s add; echo 'select 6*7;' | sqlite3\n`);
       await expect(/6\n42\n.*# $/, at);
     });
+    // With nine-arm64.h9a, the page puts the arm64 slim root at /9, and
+    // a #!/bin/rc script runs with its rc (src/web/nine-arm64.list).
+    if (await readFile(path.join(dir, 'nine-arm64.h9a')).then(() => true, () => false)) {
+      await step("9front's rc runs from /9", async () => {
+        const at = (await text()).length;
+        await page.keyboard.type(`printf '#!/bin/rc\\necho rc on $cputype\\n' >/tmp/r; chmod +x /tmp/r; /tmp/r\n`);
+        await expect(/rc on arm64\n.*# $/, at);
+      });
+    }
     await step('a dropped script lands in /root, and Enter runs it', async () => {
       await term.focus();
       const at = (await text()).length;

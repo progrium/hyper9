@@ -2,7 +2,7 @@
 // page's argv over the root archive or a ws:// root, and passes the console through
 // messages. The page's side is createMachine in h9-web.js.
 //
-// Page to Worker: { type: 'start', argv, env, root, tty, gfx } once, then
+// Page to Worker: { type: 'start', argv, env, root, layers, tty, gfx } once, then
 // { type: 'input', data }, { type: 'interrupt' } and { type: 'hangup' },
 // and { type: 'put', path, data, mode } at any time, which adds a file to
 // the root's tree (before start, once it's loaded).
@@ -64,7 +64,7 @@ const put = ({ path, data, mode }) => {
   }
 };
 
-async function start({ argv, env = {}, root, tty = false, gfx: canvas }) {
+async function start({ argv, env = {}, root, layers = [], tty = false, gfx: canvas }) {
   if (canvas) {
     if (!canDrawInWorker()) throw new Error("this browser can't draw from a Worker");
     gfx = new GfxHost({ ...canvas, post });
@@ -78,20 +78,26 @@ async function start({ argv, env = {}, root, tty = false, gfx: canvas }) {
     return new Uint8Array(await r.arrayBuffer());
   };
   // A ws:// or wss:// root is served over a WebSocket
-  // (design/0021-websocket-9p.md), and WASI sees an empty tree.
+  // (design/0021-websocket-9p.md), and WASI sees only the layers. An
+  // archive root is the bottom layer, and root.h9a is the default when
+  // there are no layers.
   const remote = typeof root === 'string' && /^wss?:/i.test(root);
-  const [h9, archive] = await Promise.all([
+  const base = remote ? [] : root ? [{ url: root }] : layers.length ? [] : [{ url: new URL('root.h9a', import.meta.url) }];
+  const all = [...base, ...layers];
+  const [h9, ...archives] = await Promise.all([
     fetchBytes(new URL('h9.wasm', import.meta.url)),
-    remote ? new TextEncoder().encode('h9root1\n') : fetchBytes(root ?? new URL('root.h9a', import.meta.url)),
+    ...all.map((l) => fetchBytes(l.url)),
   ]);
-  tree = parseRoot(archive);
+  // Each layer adds its files over the ones before it, under its `at`.
+  tree = parseRoot(new TextEncoder().encode('h9root1\n'));
+  archives.forEach((a, i) => parseRoot(a, tree, all[i].at ?? '/'));
   puts.splice(0).forEach(put);
   return run({
     h9,
     wasi: (memory) => wasiImports({
       memory,
       root: tree,
-      // The archive is the whole tree WASI sees, so the root is /.
+      // The layers are the whole tree WASI sees, so the root is /.
       args: ['h9', '--root', remote ? root : '/', ...argv],
       env: { PWD: '/', ...env },
       write: (fd, data) => post({ type: 'output', fd, data }, [data.buffer]),

@@ -61,7 +61,9 @@ if (!haveJSPI) {
 } else {
   // ?root=ws://host/9p runs over a 9P server instead of root.h9a,
   // ?linux runs Alpine's arm64 busybox sh over linux.h9a, a Linux root
-  // (design/0018-linux-personality.md), on ha64, h9's own arm64 CPU.
+  // (design/0018-linux-personality.md), on ha64, h9's own arm64 CPU, with
+  // nine-arm64.h9a's 9front commands at /9 when the build has them, so
+  // /9/bin/wsmount can mount a host's /net.
   // ?backend= picks the backend (emu, h9's own CPUs, is the only one; v86
   // is its old name).
   const params = new URLSearchParams(location.search);
@@ -72,8 +74,12 @@ if (!haveJSPI) {
   else if (params.has('wine')) await runWine(params);
   else {
     if (linux) document.getElementById('about').textContent = "h9: Alpine Linux's arm64 programs in a Web Worker. Type to busybox sh;";
+    // The 9front layer is in a build that had arm64 9front commands
+    // (build.zig, web-nine-arm64-root).
+    const nine = linux && (await fetch('nine-arm64.h9a', { method: 'HEAD', cache: 'no-cache' }).then((r) => r.ok, () => false));
     const m = await createMachine({
       root: linux ? 'linux.h9a' : params.get('root') ?? undefined,
+      layers: nine ? [{ url: 'nine-arm64.h9a', at: '/9' }] : [],
       arch: linux ? 'arm64' : undefined,
       backend: params.get('backend') ?? undefined,
       terminal: { write: (b) => print(dec.decode(b, { stream: true })), setRaw: (on) => { raw = on; render(); } },
@@ -186,7 +192,8 @@ if (!haveJSPI) {
     render();
     // The archive keeps no links, so busybox makes its applets' links at
     // the start, in the root's overlay.
-    const argv = linux ? ['/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
+    // The 9front layer is the machine's 9front root, a second --root.
+    const argv = linux ? [...(nine ? ['--root', '/9'] : []), '/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
     const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
     if (code !== null) print(`\n[h9 exited ${code}]\n`);
   }

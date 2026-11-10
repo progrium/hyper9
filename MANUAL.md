@@ -1687,7 +1687,11 @@ In the browser demo, add `--serve-origin` with the page's origin (and a
 `--serve-token` beyond loopback), then type the same `wsmount -b` line.
 Linux programs use the mount too, since their sockets open `/net`
 through the namespace: from busybox, `/9/bin/wsmount -b
-ws://127.0.0.1:5640/ /net` and then `wget` fetches through the host. Each
+ws://127.0.0.1:5640/ /net` and then `wget` fetches through the host. The
+demo's `?linux` mode has `/9/bin/wsmount` as well: its page stacks a slim
+arm64 9front tree at `/9` over the Alpine archive with `createMachine`'s
+`layers`, a list of archives, each a URL or `{ url, at }`, unpacked in
+order, and names it with a second `--root /9`. Each
 connection carries about 7 sockets waiting at once, since each holds one
 of the server's 8 exportfs processes; mount `/net` over more connections
 for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`

@@ -701,8 +701,14 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * A machine in its own Worker (design/0012-browser-host.md), from the
  * page:
  *
- * - root: the root archive's URL (default root.h9a beside this file), or
- *   a ws:// or wss:// URL of a 9P server (design/0021-websocket-9p.md)
+ * - root: the root archive's URL (default root.h9a beside this file,
+ *   unless there are layers), or a ws:// or wss:// URL of a 9P server
+ *   (design/0021-websocket-9p.md)
+ * - layers: more root archives, each a URL or { url, at }, unpacked in
+ *   order over the root archive, a later file replacing an earlier one,
+ *   each under its directory `at` (default /). Together they're the tree
+ *   at /, h9's --root. A 9front tree layered at a Linux root's /9 is
+ *   named by a second `--root /9` in argv (design/0018-linux-personality.md)
  * - memory: --memory, such as '256M'
  * - backend: --backend: 'emu' (h9's own CPUs, h86 and ha64, the default) or 'v86', its old name
  * - arch: --arch: the guest's CPU, '386' (h86, the default) or 'arm64'
@@ -734,7 +740,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ root, memory, backend, arch, policy, terminal, tty = false, gfx, env } = {}) {
+export async function createMachine({ root, layers = [], memory, backend, arch, policy, terminal, tty = false, gfx, env } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -771,7 +777,9 @@ export async function createMachine({ root, memory, backend, arch, policy, termi
           }
         };
         worker.onerror = (e) => reject(new Error(e.message));
-        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)), tty, env, ...start }, transfer);
+        const url = (u) => String(new URL(u, location.href));
+        const layerList = layers.map((l) => (typeof l === 'object' && !(l instanceof URL) ? { url: url(l.url), at: l.at ?? '/' } : { url: url(l), at: '/' }));
+        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && url(root), layers: layerList, tty, env, ...start }, transfer);
       });
     },
     input(data) {

@@ -7,7 +7,9 @@
 # emulator, about an hour on x86_64, so this unpacks the release's 386 ISO
 # instead (tools/isoroot.zig). The Linux page's demo runs the same build
 # over linux.h9a, Alpine's arm64 busybox, jq, and sqlite3 on ha64, h9's
-# own arm64 CPU (src/web/linux.list). The Wine page's demo runs it over
+# own arm64 CPU (src/web/linux.list), with nine-arm64.h9a's slim arm64
+# 9front commands at /9, cross-compiled from the 386 root
+# (scripts/nine-arm64-web.sh, cached like Wine's). The Wine page's demo runs it over
 # wine.h9a, Alpine's 32-bit Wine with winedraw on h86 and a prefix made
 # ahead of time by h9 on the emulator (scripts/wine-web.sh, a few
 # minutes), cached until the scripts, the pins, or the driver change. The
@@ -64,6 +66,16 @@ jobs:
           zig build wine
           zig build -Demu=zig -Dgfx=headless -Doptimize=ReleaseSafe
           scripts/wine-web.sh
+      - uses: actions/cache@v4
+        id: nine-arm64-web
+        with:
+          path: .local/9front/slim-*-arm64
+          key: pages-nine-arm64-web-${{ hashFiles('scripts/pins.sh', 'scripts/nine-arm64-web.sh', 'src/9box/**', 'tools/slim.zig') }}
+      - name: arm64 9front layer for the Linux page
+        if: steps.nine-arm64-web.outputs.cache-hit != 'true'
+        run: |
+          zig build -Demu=zig -Doptimize=ReleaseSafe
+          scripts/nine-arm64-web.sh
       - run: zig build web -Doptimize=ReleaseSafe -Dweb-root=.local/9front/root386
       - name: Demo page in Chromium
         run: |
@@ -75,7 +87,7 @@ jobs:
         run: |
           mkdir -p _site/demo
           cp site/*.html _site/
-          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,root.h9a,linux.h9a,wine.h9a,package.json} _site/demo/
+          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,root.h9a,linux.h9a,nine-arm64.h9a,wine.h9a,package.json} _site/demo/
           cp LICENSE _site/demo/LICENSE
           cp third_party/drawterm/LICENSE _site/demo/LICENSE.drawterm
       - uses: actions/upload-pages-artifact@v3

@@ -15,13 +15,19 @@ const RIGHTS = 0x1fffffffn;
 const TTY_RIGHTS = RIGHTS & ~((1n << 2n) | (1n << 5n));
 const PREOPEN = 3;
 
-/** Parses a root archive into a tree of { dir, mode, data, kids, ino }. */
-export function parseRoot(buf) {
+/**
+ * Parses a root archive into a tree of { dir, mode, data, kids, ino }, or,
+ * given `into`, a tree from an earlier parseRoot, adds the archive's
+ * entries to it under the directory `at`, as putNode does: one of the
+ * createMachine's layers.
+ */
+export function parseRoot(buf, into = null, at = '/') {
   const b = new Uint8Array(buf);
   const magic = new TextDecoder().decode(b.subarray(0, 8));
   if (magic !== 'h9root1\n') throw new Error('not an h9 root archive');
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  const root = { dir: true, mode: S_IFDIR | 0o775, kids: new Map(), ino: 1, nextIno: 2 };
+  const root = into ?? { dir: true, mode: S_IFDIR | 0o775, kids: new Map(), ino: 1, nextIno: 2 };
+  const prefix = at.replace(/\/+$/, '');
   const dec = new TextDecoder();
   let i = 8;
   // Each entry's data, for a later entry that shares it: size 0xffffffff
@@ -36,7 +42,7 @@ export function parseRoot(buf) {
     if (size === 0xffffffff) { data = datas[dv.getUint32(i, true)]; i += 4; }
     else { data = b.subarray(i, i + size); i += size; }
     datas.push(data);
-    putNode(root, path, mode, data);
+    putNode(root, `${prefix}/${path}`, mode, data);
   }
   return root;
 }

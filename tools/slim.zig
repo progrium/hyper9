@@ -194,7 +194,12 @@ fn build9box(arena: std.mem.Allocator, io: std.Io, h9: []const u8, root: []const
     // root has none.
     const build_abs = try std.Io.Dir.cwd().realPathFileAlloc(io, build, arena);
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(arena, &.{ h9, "--arch", "arm64", "--root", root, "--cwd", build_abs });
+    // The compilers run on an architecture the root has binaries for,
+    // arm64 when it can: the 386 tree an ISO unpacks to cross-compiles.
+    const host_arch = for ([_][]const u8{ "arm64", "amd64", "386" }) |h| {
+        if (root_dir.access(io, try std.fmt.allocPrint(arena, "{s}/bin/rc", .{h}), .{})) break h else |_| {}
+    } else fail("the root has no rc for arm64, amd64 or 386", .{});
+    try args.appendSlice(arena, &.{ h9, "--arch", host_arch, "--root", root, "--cwd", build_abs });
     var script: std.ArrayList(u8) = .empty;
     if (!own_src) {
         const src_abs = try cwd.realPathFileAlloc(io, syssrc, arena);
