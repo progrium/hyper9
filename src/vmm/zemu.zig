@@ -53,7 +53,7 @@ pub const Vcpu = Impl.EmuVcpu;
 /// (in practice a file, ha64.zig or h86.zig) with:
 ///
 ///     pub const arch: vmm.Arch;
-///     /// False until its T0 runs programs: create fails with NotImplemented.
+///     /// False until its T0 runs programs: create fails with WrongArch.
 ///     pub const ready: bool;
 ///     /// The register file, default-initialized at createVcpu.
 ///     pub const Cpu: type;
@@ -117,8 +117,10 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
 
             pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*EmuBackend {
                 switch (opts.arch) {
-                    .arm64 => if (!A64.ready) return error.NotImplemented,
-                    .i386 => if (!X86.ready) return error.NotImplemented,
+                    // Until a Guest runs programs, its architecture is
+                    // one this backend can't run, as for amd64.
+                    .arm64 => if (!A64.ready) return error.WrongArch,
+                    .i386 => if (!X86.ready) return error.WrongArch,
                     .amd64 => return error.WrongArch,
                 }
                 const limit = opts.memory orelse vmm.default_memory;
