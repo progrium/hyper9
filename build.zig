@@ -1360,6 +1360,25 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_a64inv.addArgs(args) else run_a64inv.addArg(b.pathJoin(&.{ root, "arm64" }));
     b.step("a64-inventory", "Report the arm64 instructions in binaries (default: the root tree's arm64): zig build a64-inventory -- PATH...").dependOn(&run_a64inv.step);
 
+    // The 386 instruction inventory over h86's decoder and T0
+    // (tools/x86inv.zig): zig build x86-inventory -- PATH...
+    const x86inv = b.addExecutable(.{
+        .name = "x86inv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/x86inv.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+            },
+        }),
+    });
+    const run_x86inv = b.addRunArtifact(x86inv);
+    run_x86inv.has_side_effects = true;
+    if (b.args) |args| run_x86inv.addArgs(args) else run_x86inv.addArg(b.pathJoin(&.{ root, "386" }));
+    b.step("x86-inventory", "Report the 386 instructions in binaries (default: the root tree's 386): zig build x86-inventory -- PATH...").dependOn(&run_x86inv.step);
+
     const slim_tool = b.addExecutable(.{
         .name = "slim",
         .root_module = b.createModule(.{ .root_source_file = b.path("tools/slim.zig"), .target = b.graph.host }),
