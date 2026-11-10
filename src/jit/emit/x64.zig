@@ -94,10 +94,14 @@ const saved_regs: []const u8 = if (win64) &.{ RBX, R12, R13, R14, R15, RSI, RDI 
 /// less this.
 const saved_bytes: u8 = 8 * saved_regs.len;
 /// Registers a call may clobber, of those regalloc hands out.
-const caller_saved_mask: u64 = if (win64) (1 << R8) | (1 << R9) else (1 << RSI) | (1 << RDI) | (1 << R8) | (1 << R9);
+const caller_saved_mask: u64 = if (win64) (1 << R8) else (1 << RSI) | (1 << RDI) | (1 << R8);
+/// Instructions retired since ctx.retired and ctx.budget were last
+/// brought up to date (ir.zig's rule): `retire` adds here, and `flush`
+/// moves it to the Ctx at exits and calls.
+const PENDING = R9;
 
 pub const host: regalloc.Host = .{
-    .regs = &.{ RSI, RDI, R8, R9, R12, R13, R14, R15 },
+    .regs = &.{ RSI, RDI, R8, R12, R13, R14, R15 },
     .pin_regs = &.{ R15, R14, R13, R12 },
     .max_pinned = 4,
     .callee_saved = ((1 << R12) | (1 << R13) | (1 << R14) | (1 << R15)) | (if (win64) (1 << RSI) | (1 << RDI) else 0),
@@ -352,16 +356,24 @@ const E = struct {
     }
 
     /// ctx.retired += n, ctx.budget -= n. No registers.
+    /// On a path out: counts `n` more, then flushes what's pending.
     fn retireOn(e: *E, n: u64) !void {
+        try e.retireLater(n);
+        try e.flush();
+    }
+    /// pending += n.
+    fn retireLater(e: *E, n: u64) !void {
         if (n == 0) return;
         if (n > std.math.maxInt(i32)) {
             try e.movImm(R10, n);
-            try e.rm(true, &.{0x01}, R10, CTX, ctx.off.retired); // add [retired], r10
-            try e.rm(true, &.{0x29}, R10, CTX, ctx.off.budget); // sub [budget], r10
-            return;
-        }
-        try e.aluMemImm(0, CTX, ctx.off.retired, @intCast(n));
-        try e.aluMemImm(5, CTX, ctx.off.budget, @intCast(n));
+            try e.rr(true, &.{0x01}, R10, PENDING); // add r9, r10
+        } else try e.aluImm(true, 0, PENDING, @intCast(n));
+    }
+    /// ctx.retired += pending, ctx.budget -= pending, pending = 0.
+    fn flush(e: *E) !void {
+        try e.rm(true, &.{0x01}, PENDING, CTX, ctx.off.retired); // add [retired], r9
+        try e.rm(true, &.{0x29}, PENDING, CTX, ctx.off.budget); // sub [budget], r9
+        try e.rr(false, &.{0x31}, PENDING, PENDING); // xor r9d, r9d
     }
 
     /// Sets exit_pc and leaves with `code`, counting `n` retired.
@@ -380,6 +392,7 @@ const E = struct {
     /// the context first and then `args`. The result is in rax.
     fn call(e: *E, args: []const Arg) !void {
         std.debug.assert(args.len + 1 <= 5);
+        try e.flush();
         const live = e.saveMask();
         try e.saveRegs(live);
         // Stage every argument, then load the ABI's registers from there,
@@ -401,6 +414,7 @@ const E = struct {
             }
         }
         try e.bs(&.{ 0x41, 0xff, 0xd3 }); // call r11
+        try e.rr(false, &.{0x31}, PENDING, PENDING); // r9 is the callee's
         try e.restoreRegs(live);
         if (e.watch) try clearHostFlags(e);
     }
@@ -486,6 +500,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     const frame: u32 = ((slots_base + p.slots * 8 + 15) & ~@as(u32, 15)) + 8;
     try e.rr(true, &.{0x81}, 5, RSP); // sub rsp, frame
     try e.d32(frame);
+    try e.rr(false, &.{0x31}, PENDING, PENDING); // xor r9d, r9d: nothing pending
     try e.loadChunks();
     for (r.insts.items) |i| {
         if (i.op.isFp() and i.aux2 != 0) e.watch = true;
@@ -894,13 +909,13 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         .poll => {
             try e.bs(&.{ 0x83, 0x7b, ctx.off.exit_request, 0x00 }); // cmp dword [rbx+exit_request], 0
             const req = try e.fwd(CC.ne);
-            try e.bs(&.{ 0x48, 0x83, 0x7b, ctx.off.budget, 0x00 }); // cmp qword [rbx+budget], 0
+            try e.rm(true, &.{0x39}, PENDING, CTX, ctx.off.budget); // cmp [budget], r9: budget - pending
             const ok = try e.fwd(CC.g);
             e.land(req);
             try e.leave(.interrupted, i.aux, i.retired);
             e.land(ok);
         },
-        .retire => try e.retireOn(i.aux),
+        .retire => try e.retireLater(i.aux),
         .br => try e.jmpTo(null, @intCast(i.aux)),
         .brcond => {
             try e.rr(false, &.{0x85}, RAX, RAX);
@@ -1726,6 +1741,7 @@ fn divide(e: *E, op: Op, w: bool) !void {
 fn fallback(e: *E, i: ir.Inst, ta: Type) !void {
     // evalOpC doesn't take the context first, so stage its five
     // arguments by hand.
+    try e.flush();
     const live = e.saveMask();
     try e.saveRegs(live);
     const args = [_]E.Arg{ .{ .imm = ir_eval.fallbackCode(i.op, i.ty, ta) }, .{ .reg = RAX }, .{ .reg = RCX }, .{ .reg = RDX }, .{ .imm = i.aux } };
@@ -1746,6 +1762,7 @@ fn fallback(e: *E, i: ir.Inst, ta: Type) !void {
     }
     try e.movImm(R11, @intFromPtr(&ir_eval.evalOpC));
     try e.bs(&.{ 0x41, 0xff, 0xd3 }); // call r11
+    try e.rr(false, &.{0x31}, PENDING, PENDING); // r9 is the callee's
     try e.restoreRegs(live);
     if (e.watch) try clearHostFlags(e);
 }

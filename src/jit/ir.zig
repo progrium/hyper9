@@ -29,6 +29,15 @@
 //!   it adds that to ctx.retired (and takes it from the budget); otherwise
 //!   it costs nothing. A front end's `call.interp` handler counts the
 //!   instruction it ran itself, when it completes and then leaves.
+//! - **ctx.retired and ctx.budget need be exact only where something
+//!   outside the region sees them:** at every exit (chained ones too: a
+//!   linked chain site and a jump-cache hit leave like any other), and
+//!   across `call.interp`, `call.helper`, and `copy`, which may read and
+//!   write both. In between, an emitter may keep `retire`'s counts in a
+//!   register and add them to both fields there. A `poll` must still test
+//!   the exact budget less what's pending (`<= 0`), so an interrupt lands
+//!   on the instruction T0's count would; other threads interrupt through
+//!   ctx.exit_request, never the budget.
 //! - **Flags are values.** `nzcv.*` (arm64) and `eflags.*` (x86) produce a
 //!   `flags` value, and `*.cond` reads a condition from one. The reference
 //!   semantics compute the flags eagerly, packed as the guest packs them;
