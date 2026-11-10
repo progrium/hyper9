@@ -160,6 +160,11 @@ const State = struct {
     /// entries hold slots, is cleared when it last saw an older one.
     jump_gen: u32 = 0,
     jump_seen: std.AutoHashMapUnmanaged(usize, u32) = .empty,
+    /// The jump cache the last run used, and the generation it had then.
+    last_jump: usize = 0,
+    last_gen: u32 = 0,
+    /// H9_JIT_HOT and H9_JIT_PATIENCE read.
+    tuned: bool = false,
 
     const Range = struct { base: u32, n: u32 };
 };
@@ -384,16 +389,23 @@ fn relink() void {
 /// Runs compiled code from the Cpu's PC, as dispatch.run does.
 pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
     st.gpa = gpa;
+    if (on_wasm and !st.tuned) {
+        st.tuned = true;
+        if (std.c.getenv("H9_JIT_HOT")) |v| hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch hot;
+        if (std.c.getenv("H9_JIT_PATIENCE")) |v| patience = std.fmt.parseInt(u32, std.mem.span(v), 10) catch patience;
+    }
     if (st.flush_wanted or st.used_slots > max_slots - batch_max or st.map.count() > max_entries) flush();
     settle(&stats);
     const jump: ?*[ctx_mod.jump_entries]ctx_mod.JumpEntry = if (cx.jump != 0) @ptrFromInt(@as(usize, @intCast(cx.jump))) else null;
-    if (jump) |j| {
+    if (jump) |j| if (@intFromPtr(j) != st.last_jump or st.last_gen != st.jump_gen) {
+        st.last_jump = @intFromPtr(j);
+        st.last_gen = st.jump_gen;
         const gop = st.jump_seen.getOrPut(gpa, @intFromPtr(j)) catch return cold();
         if (!gop.found_existing or gop.value_ptr.* != st.jump_gen) {
             for (j) |*x| x.pc = std.math.maxInt(u64);
             gop.value_ptr.* = st.jump_gen;
         }
-    }
+    };
     const view: *mem.View = @ptrFromInt(@as(usize, @intCast(cx.space)));
     const pc_addr = @as(usize, @intCast(cx.cpu)) + cfg.pc_off;
     view.code_stores = .exit;
