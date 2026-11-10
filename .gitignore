@@ -1,7 +1,7 @@
 .DS_Store
 
 # Local tools, caches, downloaded sources and 9front images (see scripts/fetch.sh)
-/.local/
+/.local
 
 # Zig build output
 /zig-out/
