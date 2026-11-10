@@ -687,6 +687,11 @@ var pair_lock: std.atomic.Value(u32) = .init(0);
 const have_cas128 = builtin.cpu.arch == .aarch64 or
     (builtin.cpu.arch == .x86_64 and builtin.cpu.has(.x86, .cx16));
 
+/// CASP's 16-byte `@cmpxchgStrong`: Zig 0.16's own x86-64 backend (Debug
+/// builds) crashes compiling it, so there it takes the pair lock.
+const have_cas128_op = have_cas128 and
+    !(builtin.cpu.arch == .x86_64 and builtin.zig_backend == .stage2_x86_64);
+
 fn fence() void {
     // seq_cst: stronger than DMB needs, and simple.
     var x: u32 = 0;
@@ -908,7 +913,7 @@ fn caspX(m: *Machine, o: *const Op, pc: u64) Next {
     const expect = @as(u128, r[o.d + 1]) << 64 | r[o.d];
     const new = @as(u128, r[o.m + 1]) << 64 | r[o.m];
     var old: u128 = undefined;
-    if (have_cas128) {
+    if (have_cas128_op) {
         old = @cmpxchgStrong(u128, @as(*u128, @ptrFromInt(h)), expect, new, .seq_cst, .seq_cst) orelse expect;
     } else {
         while (pair_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
