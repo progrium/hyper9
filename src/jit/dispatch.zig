@@ -483,6 +483,30 @@ test "dispatch: a trace follows calls and jumps, across pages and backward" {
     } else false);
 }
 
+test "dispatch: an instruction T0 ends a region at (ISB) is retired once" {
+    const c = try testCache(1 << 20);
+    defer freeCache(c);
+    const t1 = try testing.allocator.create(Machine);
+    defer testing.allocator.destroy(t1);
+    const t0m = try testing.allocator.create(Machine);
+    defer testing.allocator.destroy(t0m);
+    t1.* = .{};
+    t0m.* = .{};
+    try t1.init(c);
+    defer t1.deinit();
+    try t0m.init(null);
+    defer t0m.deinit();
+    const prog = [_]u32{
+        0xD2800020, // movz x0, #1
+        0xD5033FDF, // isb
+        0x91000400, // add x0, x0, #1
+        0xD5033FDF, // isb
+        0xD4000001, // svc #0
+    };
+    try expectSame(t1, t0m, &prog, &.{}, 0);
+    try testing.expectEqual(@as(u64, 5), t1.rt.ctx.retired);
+}
+
 test "dispatch: a store to the code being run finishes in T0 and retranslates" {
     const c = try testCache(1 << 20);
     defer freeCache(c);

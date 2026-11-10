@@ -1069,7 +1069,11 @@ pub fn interp(c: *ctx_mod.Ctx, handle: u64, pc: u64) callconv(.c) u32 {
     if (m.clock == null and readsCount(o)) m.cpu.retired = c.retired;
     switch (t0.step(m, &o, pc)) {
         .next => return 0,
+        // It completed (ISB, which T0 ends at as a jump to the next PC):
+        // the call's count is the block's up to it, so count it here.
         .jump => |t| {
+            c.retired +%= 1;
+            c.budget -%= 1;
             c.exit_pc = t;
             return @intFromEnum(ctx_mod.Exit.indirect);
         },
