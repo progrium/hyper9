@@ -249,10 +249,8 @@ pub fn exitForIn(comptime mode: Mode, c: *Ctx, cpu: *cpu_mod.CpuOf(mode), e: cpu
 
 const seg_base_off = @offsetOf(Cpu, "seg_base");
 const seg_null_off = @offsetOf(Cpu, "seg_null");
-const xmm_off = @offsetOf(Cpu, "xmm");
 /// REP string counts up to this run as a loop in IR (see `repString`).
 const rep_inline = 16;
-const mxcsr_off = @offsetOf(Cpu, "mxcsr");
 /// MXCSR's controls (DAZ, the masks, RC, FZ) that lifted SSE assumes: the
 /// power-on 0x1F80, everything masked, round to nearest. Anything else
 /// runs on T0.
@@ -263,12 +261,16 @@ const mxcsr_default: u32 = 0x1f80;
 fn extAux(rounding: u3, exact: bool) u64 {
     return @bitCast(ir.ExtAux{ .rounding = rounding, .exact = exact });
 }
-const fp_aux2: u64 = 1 + mxcsr_off;
+/// fp ops' aux2: the x86 FP environment, MXCSR at its offset in `mode`'s
+/// Cpu.
+fn fpAux2Of(comptime mode: Mode) u64 {
+    return 1 + @offsetOf(cpu_mod.CpuOf(mode), "mxcsr");
+}
 const round_zero: u3 = 3;
 
 const Pfx = enum { none, p66, f3, f2 };
 
-fn pfxOf(i: *const Inst) Pfx {
+fn pfxOf(i: anytype) Pfx {
     return switch (i.rep) {
         .rep => .f3,
         .repne => .f2,
@@ -279,8 +281,9 @@ fn pfxOf(i: *const Inst) Pfx {
 /// The SSE and SSE2 forms `Lifter.sse` lifts: scalar single and double
 /// arithmetic, moves, conversions, and compares, and the 128-bit moves and
 /// logic. MMX forms (no 66 prefix on the integer ones) stay on T0.
-fn sseLifted(i: *const Inst) bool {
-    if (i.addr16 or i.lock) return false;
+fn sseLifted(i: anytype) bool {
+    if (@hasField(@TypeOf(i.*), "addr16") and i.addr16) return false;
+    if (i.lock) return false;
     const p = pfxOf(i);
     const op: u8 = @truncate(i.opcode);
     if (i.opcode >> 8 != 0x0f) return false;
@@ -483,7 +486,7 @@ fn classify64(i: *const dec.Inst64) Class {
 /// The long-mode instructions lifted inline (beyond control flow).
 fn lifted64(i: *const dec.Inst64) bool {
     const e = i.tableEntry();
-    // Not yet: CMPXCHG8B and CMPXCHG16B, x87, and SSE.
+    // Not yet: CMPXCHG8B and CMPXCHG16B, and x87.
     if (isAtomic(i)) return i.op != .cmpxchg8b;
     // A count of 0 still checks that memory is writable.
     const count_ok = struct {
@@ -513,6 +516,9 @@ fn lifted64(i: *const dec.Inst64) bool {
         // POP to memory through FS or GS is T0's, as in h86.
         .pop => !i.mem or @intFromEnum(i.seg) < 4,
         .clc, .stc, .cmc, .cld, .std, .sahf, .lahf => true,
+        // XMM8-15 through REX, and MOVQ and the conversions at 64 bits
+        // under REX.W.
+        .sse => sseLifted(i),
         else => false,
     };
 }
@@ -647,6 +653,13 @@ fn LifterOf(comptime mode: Mode) type {
         const bits_off = xf.bitsOff(mode);
         const kind_off = xf.kindOff(mode);
         const jit_tmp_off = @offsetOf(C, "jit_tmp");
+        const fpAux2 = fpAux2Of(mode);
+
+        /// A general register operand of SSE's conversions and moves: 4 bytes,
+        /// or 8 under REX.W.
+        fn gprSize(i: *const I) u8 {
+            return if (long and i.rex.w == 1) 8 else 4;
+        }
 
         b: *Builder,
         insns: []const Insn,
@@ -1252,7 +1265,7 @@ fn LifterOf(comptime mode: Mode) type {
                 .shld, .shrd => try l.shiftDouble(k, addr),
                 .bt, .bts, .btr, .btc => try l.bitTest(k, addr),
                 .x87 => if (long) unreachable else try l.x87(k),
-                .sse => if (long) unreachable else try l.sse(k),
+                .sse => try l.sse(k),
                 .fwait => {
                     // #MF for a pending unmasked exception, through T0.
                     if (long) unreachable else try l.esGuard(k);
@@ -1844,8 +1857,8 @@ fn LifterOf(comptime mode: Mode) type {
             l.es_ok = true;
         }
 
-        fn xmmOff(n: u3) u64 {
-            return xmm_off + @as(u64, n) * 16;
+        fn xmmOff(n: Rn) u64 {
+            return @offsetOf(C, "xmm") + @as(u64, n) * 16;
         }
 
         /// MXCSR's controls are the default, or T0 runs the instruction:
@@ -1853,7 +1866,7 @@ fn LifterOf(comptime mode: Mode) type {
         fn mxGuard(l: *Self, k: usize) !void {
             if (l.mx_ok) return;
             const b = l.b;
-            const mx = try b.getreg(.i32, mxcsr_off);
+            const mx = try b.getreg(.i32, @offsetOf(C, "mxcsr"));
             const c = try b.bin(.@"and", .i32, mx, try l.k32(mxcsr_controls));
             try l.guard(k, try b.icmp(.ne, c, try l.k32(mxcsr_default)), true);
             l.mx_ok = true;
@@ -1862,8 +1875,8 @@ fn LifterOf(comptime mode: Mode) type {
         /// A 16-byte aligned operand, or #GP on T0.
         fn alignGuard(l: *Self, k: usize, addr: Ref) !void {
             const b = l.b;
-            const low = try b.bin(.@"and", .i32, addr, try l.k32(15));
-            try l.guard(k, try b.icmp(.ne, low, try l.k32(0)), true);
+            const low = try b.bin(.@"and", A, addr, try l.kA(15));
+            try l.guard(k, try b.icmp(.ne, low, try l.kA(0)), true);
         }
 
         /// The xmm or memory source of `size` bytes (4, 8, or 16), as i32,
@@ -1910,7 +1923,7 @@ fn LifterOf(comptime mode: Mode) type {
         }
 
         fn fpOp(l: *Self, op: ir.Op, ty: Type, a: Ref, bv: Ref, aux: u64) !Ref {
-            return l.b.emit(.{ .op = op, .ty = ty, .a = a, .b = bv, .aux = aux, .aux2 = fp_aux2 });
+            return l.b.emit(.{ .op = op, .ty = ty, .a = a, .b = bv, .aux = aux, .aux2 = fpAux2 });
         }
 
         /// SSE and SSE2, as `sseLifted` lists them. An `fp.*` op raises into
@@ -1972,7 +1985,7 @@ fn LifterOf(comptime mode: Mode) type {
                         break :blk @as(u64, @bitCast(e));
                     } else extAux(0, false);
                     const r = switch (op) {
-                        0x51 => try b.emit(.{ .op = .@"fp.sqrt", .ty = T, .a = y, .aux = aux, .aux2 = fp_aux2 }),
+                        0x51 => try b.emit(.{ .op = .@"fp.sqrt", .ty = T, .a = y, .aux = aux, .aux2 = fpAux2 }),
                         else => try l.fpOp(switch (op) {
                             0x58 => .@"fp.add",
                             0x59 => .@"fp.mul",
@@ -1988,19 +2001,22 @@ fn LifterOf(comptime mode: Mode) type {
                     // CVTSD2SS, CVTSS2SD.
                     const from: u8 = if (p == .f2) 8 else 4;
                     const y = try l.xsrc(k, addr, from);
-                    try b.setreg(d, try b.emit(.{ .op = .@"fp.cvt", .ty = tyOf(12 - from), .a = y, .aux = extAux(0, false), .aux2 = fp_aux2 }));
+                    try b.setreg(d, try b.emit(.{ .op = .@"fp.cvt", .ty = tyOf(12 - from), .a = y, .aux = extAux(0, false), .aux2 = fpAux2 }));
                 },
                 0x2a => {
-                    // CVTSI2SS, CVTSI2SD: from a general register or m32.
-                    const v = if (addr) |a| try l.load(k, 4, a) else try l.getR(i.rm(), 4);
+                    // CVTSI2SS, CVTSI2SD: from a general register or m32
+                    // (r/m64 under REX.W).
+                    const gs = gprSize(i);
+                    const v = if (addr) |a| try l.load(k, gs, a) else try l.getR(i.rm(), gs);
                     const T: Type = if (p == .f2) .i64 else .i32;
-                    try b.setreg(d, try b.emit(.{ .op = .@"fp.fromsint", .ty = T, .a = v, .aux = extAux(0, false), .aux2 = fp_aux2 }));
+                    try b.setreg(d, try b.emit(.{ .op = .@"fp.fromsint", .ty = T, .a = v, .aux = extAux(0, false), .aux2 = fpAux2 }));
                 },
                 0x2c, 0x2d => {
                     // CVTT and CVT, SS and SD, to a general register.
                     const y = try l.xsrc(k, addr, if (p == .f2) 8 else 4);
-                    const r = try b.emit(.{ .op = .@"fp.tosint", .ty = .i32, .a = y, .aux = extAux(if (op == 0x2c) round_zero else 0, false), .aux2 = fp_aux2 });
-                    try l.setR(i.reg(), 4, r);
+                    const gs = gprSize(i);
+                    const r = try b.emit(.{ .op = .@"fp.tosint", .ty = tyOf(gs), .a = y, .aux = extAux(if (op == 0x2c) round_zero else 0, false), .aux2 = fpAux2 });
+                    try l.setR(i.reg(), gs, r);
                 },
                 0x2e, 0x2f => {
                     // UCOMISS/SD and COMISS/SD: ZF PF CF from the order, the
@@ -2032,14 +2048,17 @@ fn LifterOf(comptime mode: Mode) type {
                     try b.setreg(d, r);
                 },
                 0x6e => {
-                    // MOVD xmm, r/m32: the rest zeroed.
-                    const v = if (addr) |a| try l.load(k, 4, a) else try l.getR(i.rm(), 4);
-                    try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = try b.un(.zext, .i64, v), .b = try b.konst(.i64, 0) }));
+                    // MOVD xmm, r/m32 (MOVQ xmm, r/m64): the rest zeroed.
+                    const gs = gprSize(i);
+                    const v = if (addr) |a| try l.load(k, gs, a) else try l.getR(i.rm(), gs);
+                    const v64 = if (gs == 8) v else try b.un(.zext, .i64, v);
+                    try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = v64, .b = try b.konst(.i64, 0) }));
                 },
                 0x7e => if (p == .p66) {
-                    // MOVD r/m32, xmm.
-                    const v = try b.getreg(.i32, d);
-                    if (addr) |a| try l.store(k, a, v) else try l.setR(i.rm(), 4, v);
+                    // MOVD r/m32, xmm (MOVQ r/m64, xmm).
+                    const gs = gprSize(i);
+                    const v = try b.getreg(tyOf(gs), d);
+                    if (addr) |a| try l.store(k, a, v) else try l.setR(i.rm(), gs, v);
                 } else {
                     // MOVQ xmm, xmm/m64: the high half zeroed.
                     const v = try l.xsrc(k, addr, 8);
@@ -2056,7 +2075,7 @@ fn LifterOf(comptime mode: Mode) type {
                     // the high from the source, by the immediate.
                     const y = try l.xsrc(k, addr, 16);
                     const x = try b.getreg(.v128, d);
-                    const imm = i.imm;
+                    const imm: u32 = @truncate(i.imm);
                     if (p == .p66) {
                         const lo = try l.vlane(x, 3, imm & 1);
                         const hi = try l.vlane(y, 3, (imm >> 1) & 1);

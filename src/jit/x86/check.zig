@@ -1234,3 +1234,81 @@ test "check/x64: rotates and SHLD at 64 bits, BT into memory by a register, POP 
     };
     _ = try expectRun64(&code, S.setup);
 }
+
+/// fuzzSse in long mode: XMM8-15 and R8-R9 through REX, and REX.W now and
+/// then (MOVQ and the conversions at 64 bits; ignored elsewhere).
+pub fn fuzzSse64(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    const m = try gpa.create(Machine64);
+    defer gpa.destroy(m);
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(gpa);
+    const ops = [_]u8{ 0x10, 0x11, 0x28, 0x29, 0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f, 0x5a, 0x2a, 0x2c, 0x2d, 0x2e, 0x2f, 0x54, 0x55, 0x56, 0x57, 0x6e, 0x7e, 0xd6, 0x6f, 0x7f, 0xef, 0xdb, 0xeb, 0xdf, 0x14, 0x15, 0xc6, 0xfc, 0xfd, 0xfe, 0xd4, 0xf8, 0xf9, 0xfa, 0xfb, 0x74, 0x75, 0x76, 0x64, 0x65, 0x66, 0xda, 0xde, 0xea, 0xee, 0xd5, 0x60, 0x61, 0x62, 0x68, 0x69, 0x6a, 0x6c, 0x6d, 0x63, 0x67, 0x6b, 0x70, 0x71, 0x72, 0x73 };
+    const pfx = [_]?u8{ null, 0x66, 0xf3, 0xf2 };
+    for (0..count) |iter| {
+        m.* = .{};
+        m.init();
+        for (&m.data) |*b| b.* = rng.int(u8);
+        code.clearRetainingCapacity();
+        // Fill the 16 registers from memory first: movups xmmN, [rbx+d8].
+        for (0..16) |r| {
+            if (r >= 8) try code.append(gpa, 0x44);
+            try code.appendSlice(gpa, &.{ 0x0f, 0x10, 0x43 | @as(u8, @intCast(r & 7)) << 3, @bitCast(@as(i8, @intCast(@as(i32, @intCast(r)) * 16 - 128))) });
+        }
+        for (0..4 + rng.uintLessThan(usize, 24)) |_| {
+            if (rng.uintLessThan(u8, 30) == 0) {
+                try code.appendSlice(gpa, &.{ 0x0f, 0xae, 0x53, rng.uintLessThan(u8, 0x70) & ~@as(u8, 3) });
+                continue;
+            }
+            if (rng.uintLessThan(u8, 6) == 0) {
+                try code.appendSlice(gpa, &.{ 0x41, 0x0f, 0x92, 0xc1 }); // setb r9b
+                continue;
+            }
+            const op = ops[rng.uintLessThan(usize, ops.len)];
+            if (pfx[rng.uintLessThan(usize, 4)]) |p| try code.append(gpa, p);
+            var reg = rng.uintLessThan(u8, 8);
+            var rm = rng.uintLessThan(u8, 8);
+            // General registers these write or read: RAX, RCX, R8, R9.
+            if (op == 0x2c or op == 0x2d) reg &= 1;
+            if (op == 0x7e or op == 0x2a or op == 0x6e) rm &= 1;
+            const shift = op >= 0x71 and op <= 0x73;
+            const memop = !shift and rng.boolean();
+            const w: u8 = if (rng.uintLessThan(u8, 4) == 0) 8 else 0;
+            const r_: u8 = if (rng.boolean()) 4 else 0;
+            const b_: u8 = if (!memop and rng.boolean()) 1 else 0;
+            const rex = 0x40 | w | r_ | b_;
+            if (rex != 0x40 or rng.uintLessThan(u8, 8) == 0) try code.append(gpa, rex);
+            try code.appendSlice(gpa, &.{ 0x0f, op });
+            if (memop) {
+                const disp = if (rng.uintLessThan(u8, 4) == 0) rng.uintLessThan(u8, 0x70) else rng.uintLessThan(u8, 0x70) & ~@as(u8, 15);
+                try code.appendSlice(gpa, &.{ 0x43 | reg << 3, disp });
+            } else try code.append(gpa, 0xc0 | reg << 3 | rm);
+            if (op == 0x70 or op == 0xc6 or shift) {
+                try code.append(gpa, if (shift and rng.uintLessThan(u8, 4) != 0) rng.uintLessThan(u8, 20) else rng.int(u8));
+            }
+        }
+        try code.appendSlice(gpa, &.{ 0x0f, 0x05 });
+        m.load(code.items);
+        var c = m.cpu();
+        for (&c.r, 0..) |*x, n| if (n != 3 and n != 4) {
+            x.* = if (rng.boolean()) rng.int(u64) else rng.int(u32);
+        };
+        c.r[3] = Machine64.data_va + 0x100;
+        c.fl.set(rng.int(u32) & 0x8d5);
+        _ = runChecked64(gpa, m, c, std.math.maxInt(i64)) catch |e| {
+            std.debug.print("fuzz-sse64: seed {d}, program {d}: {s}\ncode:", .{ seed, iter, @errorName(e) });
+            for (code.items) |b| std.debug.print(" {x:0>2}", .{b});
+            std.debug.print("\n", .{});
+            return e;
+        };
+    }
+}
+
+test "fuzz-sse64: random SSE and SSE2 programs in long mode agree region by region" {
+    try fuzzSse64(testing.allocator, 0x55e64, 1000);
+}
+
+test "fuzz-sse64 natively" {
+    try natively(fuzzSse64, .{ testing.allocator, 0x55f64, 300 });
+}
