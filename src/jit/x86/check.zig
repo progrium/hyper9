@@ -274,6 +274,39 @@ test "check/x86: DIV from memory, its #DE, and SAHF and LAHF" {
     try testing.expectEqual(@as(u32, 0xd7), r.cpu.r[1] & 0xff);
 }
 
+fn shortRepSetup(c: *Cpu) void {
+    c.r[6] = Machine.data_va + 0x2000 - 8;
+    c.r[7] = Machine.data_va + 0x100;
+    c.r[1] = 10;
+}
+
+test "check/x86: short REP counts as IR loops: MOVS faulting mid-copy, CMPS, SCAS, STOS, and zero" {
+    // rep movsl: two dwords, then the source runs off the data page.
+    const r = try expectRun(&.{ 0xf3, 0xa5, 0xcd, 0x80 }, shortRepSetup);
+    try testing.expectEqual(Exit.fault, r.exit);
+    try testing.expectEqual(@as(u64, Machine.code_va), r.pc);
+    try testing.expectEqual(@as(u32, 8), r.cpu.r[1]);
+    // movl $0x20000, %edi; movl $12, %ecx; movb $0x61, %al; rep stosb;
+    // movb $0x62, 0x20005; movl $0x20000, %esi; movl $0x20100, %edi;
+    // movl $12, %ecx; rep movsb; movl $0x20000, %esi; movl $0x20100, %edi;
+    // movl $12, %ecx; movb $0x63, 0x20107; repe cmpsb (stops at 7);
+    // movl $0x20000, %edi; movl $9, %ecx; movb $0x62, %al; repne scasb (finds 5);
+    // xorl %ecx, %ecx; rep stosb (nothing); std; movl $0x20008, %edi;
+    // movl $3, %ecx; rep stosb (down); cld; int $0x80
+    const code = [_]u8{
+        0xbf, 0, 0, 2, 0, 0xb9, 12, 0, 0, 0, 0xb0, 0x61, 0xf3, 0xaa,
+        0xc6, 0x05, 0x05, 0, 2, 0, 0x62,
+        0xbe, 0, 0, 2, 0, 0xbf, 0, 1, 2, 0, 0xb9, 12, 0, 0, 0, 0xf3, 0xa4,
+        0xbe, 0, 0, 2, 0, 0xbf, 0, 1, 2, 0, 0xb9, 12, 0, 0, 0, 0xc6, 0x05, 0x07, 1, 2, 0, 0x63, 0xf3, 0xa6,
+        0xbf, 0, 0, 2, 0, 0xb9, 9, 0, 0, 0, 0xb0, 0x62, 0xf2, 0xae,
+        0x31, 0xc9, 0xf3, 0xaa,
+        0xfd, 0xbf, 8, 0, 2, 0, 0xb9, 3, 0, 0, 0, 0xf3, 0xaa, 0xfc,
+        0xcd, 0x80,
+    };
+    const r2 = try expectRun(&code, null);
+    try testing.expectEqual(Exit.svc, r2.exit);
+}
+
 fn repSetup(c: *Cpu) void {
     c.r[6] = Machine.data_va + 0xff0;
     c.r[7] = Machine.data_va + 0x1000 - 0x40;

@@ -193,6 +193,8 @@ const seg_base_off = @offsetOf(Cpu, "seg_base");
 const seg_null_off = @offsetOf(Cpu, "seg_null");
 const xmm_off = @offsetOf(Cpu, "xmm");
 const jit_tmp_off = @offsetOf(Cpu, "jit_tmp");
+/// REP string counts up to this run as a loop in IR (see `repString`).
+const rep_inline = 16;
 const mxcsr_off = @offsetOf(Cpu, "mxcsr");
 /// MXCSR's controls (DAZ, the masks, RC, FZ) that lifted SSE assumes: the
 /// power-on 0x1F80, everything masked, round to nearest. Anything else
@@ -2049,6 +2051,11 @@ const Lifter = struct {
     /// MOVS, STOS, LODS, CMPS, and SCAS without REP: one iteration, ESI
     /// and EDI stepping by DF.
     fn string(l: *Lifter, k: usize) !void {
+        return l.stringFlags(k, l.needFlags(k));
+    }
+
+    /// One string operation; CMPS and SCAS set the flags if `flags`.
+    fn stringFlags(l: *Lifter, k: usize, flags: bool) !void {
         const i = &l.insns[k].i;
         const b = l.b;
         const size = i.size;
@@ -2084,13 +2091,13 @@ const Lifter = struct {
                 const y = try l.load(k, size, di);
                 try l.setR(6, 4, try b.bin(.add, .i32, si, d));
                 try l.setR(7, 4, try b.bin(.add, .i32, di, d));
-                if (l.needFlags(k)) try l.setFlags(.@"eflags.sub", x, y);
+                if (flags) try l.setFlags(.@"eflags.sub", x, y);
             },
             .scas => {
                 const x = try l.getR(0, size);
                 const y = try l.load(k, size, di);
                 try l.setR(7, 4, try b.bin(.add, .i32, di, d));
-                if (l.needFlags(k)) try l.setFlags(.@"eflags.sub", x, y);
+                if (flags) try l.setFlags(.@"eflags.sub", x, y);
             },
             else => unreachable,
         }
@@ -2236,16 +2243,46 @@ const Lifter = struct {
         return l.linear(k);
     }
 
-    /// REP MOVS, STOS, LODS, CMPS, and SCAS: a loop of T0 chunks of up
-    /// to a page each, polling between them, so a long copy can be
-    /// interrupted with ECX, ESI, and EDI exact.
+    /// REP MOVS, STOS, LODS, CMPS, and SCAS. A count up to `rep_inline`
+    /// (most of them: awk's are 1 to 16) is a loop of the operation in IR,
+    /// with ECX, ESI, and EDI written each time round, so a fault leaves
+    /// them exact; a longer one a loop of T0 chunks of up to a page each,
+    /// polling between them, so a long copy can be interrupted with them
+    /// exact too. A source through FS or GS takes the chunks.
     fn repString(l: *Lifter, k: usize) !void {
         const i = &l.insns[k].i;
         const b = l.b;
         const pc = l.insns[k].pc;
         const loop = try b.block();
         const done = try b.block();
-        try l.endBlock(.{ .br = loop });
+        if (@intFromEnum(i.seg) >= 4 and i.op != .stos and i.op != .scas) {
+            try l.endBlock(.{ .br = loop });
+        } else {
+            const top = try b.block();
+            const body = try b.block();
+            // The operation reads DF from the Cpu: the flags written.
+            try l.fl.settle(b);
+            const n = try l.getR(1, 4);
+            try l.endBlock(.{ .brcond = .{ .c = try b.icmp(.ule, n, try l.k32(rep_inline)), .t = top, .f = loop } });
+            l.startBlock(top);
+            const n0 = try l.getR(1, 4);
+            try l.endBlock(.{ .brcond = .{ .c = try b.icmp(.eq, n0, try l.k32(0)), .t = done, .f = body } });
+            l.startBlock(body);
+            const cmp = i.op == .cmps or i.op == .scas;
+            try l.stringFlags(k, cmp);
+            // Not done until the count runs out.
+            l.count = 0;
+            const n1 = try b.bin(.sub, .i32, try l.getR(1, 4), try l.k32(1));
+            try l.setR(1, 4, n1);
+            var more = try b.icmp(.ne, n1, try l.k32(0));
+            if (cmp) {
+                // REPE goes on while ZF is set, REPNE while it's clear.
+                const z = try l.fl.cond(b, if (i.rep == .rep) xf.cc_e else xf.cc_ne);
+                more = try b.bin(.@"and", .i1, more, z);
+            }
+            try l.fl.settle(b);
+            try l.endBlock(.{ .brcond = .{ .c = more, .t = body, .f = done } });
+        }
         l.startBlock(loop);
         // Pending flags, if any, stay so until the call.interp writes them.
         l.fl.entry_pending = true;
