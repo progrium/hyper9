@@ -678,6 +678,9 @@ const E = struct {
     /// The batch index of regions[0].
     first: u32,
     regs: []Reg,
+    /// Per promoted register: written to its local since the block began
+    /// or since a call last flushed and reloaded it (flushDirty).
+    dirty: []bool = &.{},
     promoted: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     /// The batch's chain targets: guest PC to cell index.
     cells: *const std.AutoHashMapUnmanaged(u64, u32),
@@ -764,6 +767,21 @@ const E = struct {
             try e.w.memop(loadOp(g.ty), g.off);
             try e.w.set(g.local);
         }
+    }
+
+    /// Before a call out: the registers written since the last one (or
+    /// the block's start) go back to the Cpu; after it, loadRegs and
+    /// cleanRegs.
+    fn flushDirty(e: *E) !void {
+        for (e.regs, e.dirty) |g, d| {
+            if (g.bad or !g.written or !d) continue;
+            try e.w.get(e.l32(.cpu));
+            try e.w.get(g.local);
+            try e.w.memop(storeOp(g.ty), g.off);
+        }
+    }
+    fn cleanRegs(e: *E) void {
+        @memset(e.dirty, false);
     }
 
     fn flushRegs(e: *E) !void {
@@ -932,6 +950,7 @@ const E = struct {
             .setreg => if (e.regOf(i.aux)) |g| {
                 try e.val(i.a);
                 try w.set(g.local);
+                e.dirty[e.promoted.get(@intCast(i.aux)).?] = true;
             } else if (ta == .v128) {
                 try w.get(e.l32(.cpu));
                 try e.val(i.a);
@@ -1210,13 +1229,14 @@ const E = struct {
             },
             .fence => {}, // one thread per memory in the browser
             .@"call.interp" => {
-                try e.flushRegs();
+                try e.flushDirty();
                 try w.get(0);
                 try w.i64c(e.r.handles.items[@intCast(i.aux)]);
                 try w.i64c(i.aux2);
                 try w.call(F_INTERP);
                 try w.set(e.l32(.code));
                 try e.loadRegs();
+                e.cleanRegs();
                 try w.get(e.l32(.code));
                 if (i.retired == 0) {
                     try e.brIf(.exit);
@@ -1230,13 +1250,14 @@ const E = struct {
             .copy => {
                 // As call.interp on the guest word, at PC 0; it can't leave
                 // (ir.zig, Op.copy).
-                try e.flushRegs();
+                try e.flushDirty();
                 try w.get(0);
                 try w.i64c(i.aux & 0xffff_ffff);
                 try w.i64c(0);
                 try w.call(F_INTERP);
                 try w.byte(0x1A); // drop
                 try e.loadRegs();
+                e.cleanRegs();
             },
             .@"call.helper" => {
                 try w.get(0);
@@ -1244,7 +1265,7 @@ const E = struct {
                 try e.val64(i.a);
                 try e.val64(i.b);
                 try e.val64(i.c);
-                try e.flushRegs();
+                try e.flushDirty();
                 if (e.opts.cells != 0) {
                     // Straight through h9's table, which the module has
                     // when chaining: ctx.helpers[aux] is a slot in it.
@@ -1255,6 +1276,7 @@ const E = struct {
                 } else try w.call(F_HELPER);
                 if (t == .none) try w.byte(0x1A);
                 try e.loadRegs();
+                e.cleanRegs();
             },
             .poll => {
                 try w.get(0);
@@ -1898,6 +1920,8 @@ const E = struct {
     fn body(e: *E, b: BlockId) !void {
         const blk = e.r.blocks.items[b];
         e.pend = null;
+        // What came before is unknown here.
+        @memset(e.dirty, true);
         for (blk.start..blk.start + blk.len - 1) |idx| {
             if (e.plan.kind[idx] != .root) continue;
             const i = e.r.insts.items[idx];
@@ -2155,6 +2179,7 @@ fn function(
         e.labels.deinit(gpa);
         e.promoted.deinit(gpa);
         gpa.free(e.regs);
+        gpa.free(e.dirty);
     }
 
     // The guest registers the function uses.
@@ -2207,6 +2232,7 @@ fn function(
         try keep.append(gpa, g);
     };
     e.regs = try keep.toOwnedSlice(gpa);
+    e.dirty = try gpa.alloc(bool, e.regs.len);
 
     // Plans and control flow.
     var pools: Pools = .{};
