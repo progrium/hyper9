@@ -1983,12 +1983,14 @@ test "--timeout stops a console read on a terminal at once [baseline]" {
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
         var tb: [16]u8 = undefined;
-        var t = try spawnTerm(e, backend, &.{ "--timeout", slowTimeout(&tb, 500), "--rc", "echo ready; read" });
+        // Long enough for rc to start and print ready first, under
+        // -Djit-check too (about 3 s there).
+        var t = try spawnTerm(e, backend, &.{ "--timeout", slowTimeout(&tb, 1_500), "--rc", "echo ready; read" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         // Before the reader thread, the read held the machine until a
         // 500 ms grace period ran out, and h9 exited without freeing it.
-        try std.testing.expectEqual(124, try t.wait(slow(1_500)));
+        try std.testing.expectEqual(124, try t.wait(slow(2_500)));
         try t.expect("h9: timeout", slow(1_000));
     }
 }
