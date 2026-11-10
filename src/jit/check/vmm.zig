@@ -17,9 +17,9 @@
 //! reads code from it too), so a store landing between the T1 run and the
 //! T0 run can't make them differ. Before the agreed result is committed,
 //! the snapshot is compared with live memory: if anything wrote a page the
-//! region touched, the region runs again from a fresh snapshot (a race
-//! doesn't repeat; a lifter bug does), and after a few tries T0 takes the
-//! instruction instead. A divergence on a snapshot nothing else changed is
+//! region touched, the region runs again from a fresh snapshot, on half
+//! the budget each time (a race doesn't repeat; a lifter bug does), and
+//! once that's down to one instruction T0 takes it instead. A divergence on a snapshot nothing else changed is
 //! the lifter's, and panics. The commit writes only the 8-byte words the
 //! region changed, each atomically, so a neighbour's stores to the same
 //! page aren't lost.
@@ -183,7 +183,9 @@ pub const Snapshot = struct {
 
 var lock: std.atomic.Mutex = .unlocked;
 /// Instructions a region may run before it comes back to look for kicks.
-const slice = 1 << 16;
+/// The check runs each one twice, slowly, and another vCPU's munmap or
+/// mprotect waits on the kick: a small slice keeps that wait short.
+const slice = 1 << 12;
 /// Takes the lock: a short spin, then yielding the host CPU, since the
 /// holder may be one of more vCPUs than there are host CPUs.
 fn acquire() void {
@@ -194,8 +196,9 @@ fn acquire() void {
     }
 }
 
-/// Runs of a region whose pages something else wrote, before T0 takes it.
-const tries = 8;
+/// Runs of a region whose pages something else wrote, each on half the
+/// budget of the one before, before T0 takes it.
+const tries = std.math.log2_int(u32, slice) + 1;
 
 /// Per-vCPU check state, kept by the Guest's Cpu.
 pub const State = struct {
@@ -393,7 +396,9 @@ pub fn run(s: *State, g: *const check.Guest, cpu: *anyopaque, ctx: *Ctx, native:
 
         // The check's own Ctx doesn't see kicks: a slice of budget brings
         // a guest loop back here to look for them.
-        const budget = @min(ctx.budget, slice);
+        // Each race halves it: a loop running into another vCPU's stores
+        // comes back to commit sooner.
+        const budget = @min(ctx.budget, @as(i64, slice) >> @intCast(raced));
         acquire();
         const agreed = r.check(tier, bytes[0..g.cpu_size], .{ .budget = budget, .helpers = ctx.helpers, .retired = ctx.retired }) catch |err| {
             lock.unlock();
