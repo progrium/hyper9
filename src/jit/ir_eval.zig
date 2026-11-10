@@ -586,6 +586,8 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
     const cpu: [*]u8 = @ptrFromInt(@as(usize, @intCast(ctx.cpu)));
     const tlb: *mem.Tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb)));
     var blk: ir.BlockId = 0;
+    // A pending.flags not yet written: its packed value and offset.
+    var pend: ?Pend = null;
     while (true) {
         const b = r.blocks.items[blk];
         for (b.start..b.start + b.len) |idx| {
@@ -605,16 +607,32 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 vals[idx] = evalExt(cpu, i.op, i.ty, ta, wa, wb, wc, i.aux, i.aux2);
                 continue;
             }
+            // Written before any way out of the block and before calls
+            // (ir.zig, Op."pending.flags"); a fault writes it in leave().
+            if (pend != null and (i.op.isTerminator() or i.op == .@"call.interp" or i.op == .@"call.helper" or i.op == .copy)) {
+                pend.?.write(cpu);
+                pend = null;
+            }
             switch (i.op) {
+                .@"pending.flags" => {
+                    if (pend) |p| if (p.off != i.aux) p.write(cpu);
+                    const packed_: u64 = if (i.aux2 == 0) a & 0xf000_0000 else a & eflags_mask;
+                    pend = .{ .val = @truncate(packed_), .off = i.aux };
+                },
                 .getreg => {
                     var v: u128 = 0;
                     @memcpy(std.mem.asBytes(&v)[0..try byteSize(i.ty)], cpu[@intCast(i.aux)..][0..try byteSize(i.ty)]);
                     vals[idx] = v;
                 },
-                .setreg => @memcpy(cpu[@intCast(i.aux)..][0..try byteSize(ta)], std.mem.asBytes(&wa)[0..try byteSize(ta)]),
+                .setreg => {
+                    if (pend) |p| if (i.aux < p.off + 4 and p.off < i.aux + try byteSize(ta)) {
+                        pend = null;
+                    };
+                    @memcpy(cpu[@intCast(i.aux)..][0..try byteSize(ta)], std.mem.asBytes(&wa)[0..try byteSize(ta)]);
+                },
                 .@"v.load" => {
                     const f: ir.MemFlags = @bitCast(i.aux);
-                    if (f.aligned and a % 16 != 0) return left(ctx, i, alignFault(ctx, a, .read, i.aux2));
+                    if (f.aligned and a % 16 != 0) return leave(ctx, i, cpu, pend, alignFault(ctx, a, .read, i.aux2));
                     var v: u128 = 0;
                     if (mem.fast(tlb, a, 16, false)) |host| {
                         @memcpy(std.mem.asBytes(&v), @as([*]const u8, @ptrFromInt(host))[0..16]);
@@ -624,7 +642,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                         for (0..2) |h| {
                             if (slow(ctx, a +% 8 * h, 3) != 0) {
                                 ctx.exit_pc = i.aux2;
-                                return left(ctx, i, .fault);
+                                return leave(ctx, i, cpu, pend, .fault);
                             }
                             v |= @as(u128, ctx.scratch) << @intCast(64 * h);
                         }
@@ -633,7 +651,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 },
                 .@"v.store" => {
                     const f: ir.MemFlags = @bitCast(i.aux);
-                    if (f.aligned and a % 16 != 0) return left(ctx, i, alignFault(ctx, a, .write, i.aux2));
+                    if (f.aligned and a % 16 != 0) return leave(ctx, i, cpu, pend, alignFault(ctx, a, .write, i.aux2));
                     if (mem.fast(tlb, a, 16, true)) |host| {
                         @memcpy(@as([*]u8, @ptrFromInt(host))[0..16], std.mem.asBytes(&wb));
                     } else {
@@ -641,7 +659,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                         for (0..2) |h| {
                             if (slow(ctx, a +% 8 * h, 3, @truncate(wb >> @intCast(64 * h))) != 0) {
                                 ctx.exit_pc = i.aux2;
-                                return left(ctx, i, .fault);
+                                return leave(ctx, i, cpu, pend, .fault);
                             }
                         }
                     }
@@ -650,7 +668,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                     const f: ir.MemFlags = @bitCast(i.aux);
                     const n = f.bytes();
                     var v: u64 = 0;
-                    if (f.aligned and a % n != 0) return left(ctx, i, alignFault(ctx, a, if (f.rmw) .write else .read, i.aux2));
+                    if (f.aligned and a % n != 0) return leave(ctx, i, cpu, pend, alignFault(ctx, a, if (f.rmw) .write else .read, i.aux2));
                     if (mem.fast(tlb, a, n, false)) |host| {
                         @memcpy(std.mem.asBytes(&v)[0..n], @as([*]const u8, @ptrFromInt(host))[0..n]);
                     } else {
@@ -658,7 +676,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                         if (slow(ctx, a, f.size) != 0) {
                             if (f.rmw) ctx.exit_info = (ctx.exit_info & ~@as(u64, 0xff)) | @intFromEnum(mem.Access.write);
                             ctx.exit_pc = i.aux2;
-                            return left(ctx, i, .fault);
+                            return leave(ctx, i, cpu, pend, .fault);
                         }
                         v = ctx.scratch;
                     }
@@ -668,14 +686,14 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 .store => {
                     const f: ir.MemFlags = @bitCast(i.aux);
                     const n = f.bytes();
-                    if (f.aligned and a % n != 0) return left(ctx, i, alignFault(ctx, a, .write, i.aux2));
+                    if (f.aligned and a % n != 0) return leave(ctx, i, cpu, pend, alignFault(ctx, a, .write, i.aux2));
                     if (mem.fast(tlb, a, n, true)) |host| {
                         @memcpy(@as([*]u8, @ptrFromInt(host))[0..n], std.mem.asBytes(&bv)[0..n]);
                     } else {
                         const slow: mem.SlowStoreFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_store)));
                         if (slow(ctx, a, f.size, bv) != 0) {
                             ctx.exit_pc = i.aux2;
-                            return left(ctx, i, .fault);
+                            return leave(ctx, i, cpu, pend, .fault);
                         }
                     }
                 },
@@ -685,7 +703,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                     const slow: mem.SlowCasFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_cas)));
                     if (slow(ctx, a, f.size, bv & m, cv & m) != 0) {
                         ctx.exit_pc = i.aux2;
-                        return left(ctx, i, .fault);
+                        return leave(ctx, i, cpu, pend, .fault);
                     }
                     vals[idx] = ctx.scratch & m;
                 },
@@ -693,7 +711,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 .@"call.interp" => {
                     const f: ctx_mod.InterpFn = @ptrFromInt(@as(usize, @intCast(ctx.interp)));
                     const res = f(ctx, r.handles.items[@intCast(i.aux)], i.aux2);
-                    if (res != 0) return left(ctx, i, @enumFromInt(res));
+                    if (res != 0) return leave(ctx, i, cpu, pend, @enumFromInt(res));
                 },
                 .copy => {
                     // As call.interp on the word (ir.zig, Op.copy).
@@ -706,7 +724,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 },
                 .poll => if (@atomicLoad(u32, &ctx.exit_request, .monotonic) != 0 or ctx.budget <= 0) {
                     ctx.exit_pc = i.aux;
-                    return left(ctx, i, .interrupted);
+                    return leave(ctx, i, cpu, pend, .interrupted);
                 },
                 .retire => {
                     ctx.retired +%= i.aux;
@@ -714,11 +732,11 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 },
                 .br => blk = @intCast(i.aux),
                 .brcond => blk = @intCast(if (a & 1 == 1) i.aux else i.aux2),
-                .@"exit.chain" => return left(ctx, i, exitAt(ctx, .chain, i.aux)),
-                .@"exit.indirect" => return left(ctx, i, exitAt(ctx, .indirect, a)),
-                .@"exit.svc" => return left(ctx, i, exitAt(ctx, .svc, i.aux)),
-                .@"exit.brk" => return left(ctx, i, exitAt(ctx, .brk, i.aux)),
-                .@"exit.undef" => return left(ctx, i, exitAt(ctx, .undef, i.aux)),
+                .@"exit.chain" => return leave(ctx, i, cpu, pend, exitAt(ctx, .chain, i.aux)),
+                .@"exit.indirect" => return leave(ctx, i, cpu, pend, exitAt(ctx, .indirect, a)),
+                .@"exit.svc" => return leave(ctx, i, cpu, pend, exitAt(ctx, .svc, i.aux)),
+                .@"exit.brk" => return leave(ctx, i, cpu, pend, exitAt(ctx, .brk, i.aux)),
+                .@"exit.undef" => return leave(ctx, i, cpu, pend, exitAt(ctx, .undef, i.aux)),
                 else => unreachable,
             }
         }
@@ -727,6 +745,20 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
 
 /// A seq_cst read-modify-write is a full barrier on every host.
 var fence_word: u32 = 0;
+
+const Pend = struct {
+    val: u32,
+    off: u64,
+    fn write(p: Pend, cpu: [*]u8) void {
+        @memcpy(cpu[@intCast(p.off)..][0..4], std.mem.asBytes(&p.val));
+    }
+};
+
+/// Leaving: write any pending flags, then count.
+fn leave(ctx: *Ctx, i: ir.Inst, cpu: [*]u8, pend: ?Pend, e: Exit) Exit {
+    if (pend) |p| p.write(cpu);
+    return left(ctx, i, e);
+}
 
 /// Leaving through `i`: count the instructions it says completed.
 fn left(ctx: *Ctx, i: ir.Inst, e: Exit) Exit {
@@ -987,4 +1019,65 @@ test "vector ops lane by lane" {
     try testing.expectEqual(@as(u128, 0x3ff00000_00000000_3ff00000_00000000), ext(.@"fp.cvt", .v128, .v128, one4, 0, 0, .{ .esize = 2, .imm = 0x103 }, null));
     // fp.cmp's order set: less-or-equal.
     try testing.expectEqual(@as(u128, 0xffffffff_ffffffff_ffffffff_ffffffff), ext(.@"fp.cmp", .v128, .v128, one4, one4, 0, .{ .esize = 2, .imm = 0b0011 }, null));
+}
+
+test "pending flags are written at a fault and before an exit, and dropped by a setreg" {
+    const gpa = testing.allocator;
+    // Slot 0x10 holds the flags. The load at 0x200 faults (unmapped).
+    const text =
+        \\b0:
+        \\  %0 = getreg:i64 #0x0
+        \\  %1 = getreg:i64 #0x8
+        \\  %2 = nzcv.sub:flags %0, %1
+        \\  pending.flags %2 #0x10
+        \\  %4 = load:i64 %0 #0x3 @0x200
+        \\  setreg %4 #0x18
+        \\  exit.chain #0x204
+    ;
+    var r = try ir.parse(gpa, text);
+    defer r.deinit(gpa);
+    try testing.expect(ir.verify(&r) == null);
+    var page: [mem.page_size]u8 align(mem.page_size) = @splat(0);
+    const regions = [_]mem.Region{.{ .va = 0x4000, .mem = &page }};
+    var map: mem.Map = .{ .regions = &regions };
+    var tlb: mem.Tlb = .{};
+    var regs: [4]u64 = .{ 0x9000, 0x9000, 0, 0 };
+    var c: Ctx = .{
+        .cpu = @intFromPtr(&regs),
+        .tlb = @intFromPtr(&tlb),
+        .space = @intFromPtr(&map),
+        .slow_load = @intFromPtr(&mem.mapSlowLoad),
+        .slow_store = @intFromPtr(&mem.mapSlowStore),
+    };
+    try testing.expectEqual(Exit.fault, try run(gpa, &r, &c));
+    try testing.expectEqual(@as(u64, 0x6000_0000), regs[2]); // Z and C
+    // Mapped: written at the exit.
+    regs = .{ 0x4000, 0x4001, 0, 0 };
+    try testing.expectEqual(Exit.chain, try run(gpa, &r, &c));
+    try testing.expectEqual(@as(u64, 0x8000_0000), regs[2]); // N
+    // A setreg of the slot drops it.
+    var r2 = try ir.parse(gpa,
+        \\b0:
+        \\  %0 = getreg:i64 #0x0
+        \\  %1 = nzcv.logic:flags %0
+        \\  pending.flags %1 #0x10
+        \\  %3 = const:i32 #0x7
+        \\  setreg %3 #0x10
+        \\  exit.chain #0x0
+    );
+    defer r2.deinit(gpa);
+    regs = .{ 0, 0, 0, 0 };
+    try testing.expectEqual(Exit.chain, try run(gpa, &r2, &c));
+    try testing.expectEqual(@as(u64, 7), regs[2]);
+    // The verifier rejects a read of the pending slot.
+    var r3 = try ir.parse(gpa,
+        \\b0:
+        \\  %0 = getreg:i64 #0x0
+        \\  %1 = nzcv.logic:flags %0
+        \\  pending.flags %1 #0x10
+        \\  %3 = getreg:i32 #0x10
+        \\  exit.chain #0x0
+    );
+    defer r3.deinit(gpa);
+    try testing.expect(ir.verify(&r3) != null);
 }

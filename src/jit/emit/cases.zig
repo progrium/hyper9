@@ -315,6 +315,24 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x208 !4
         , .{ ty, 3 - k }) });
     };
+    // same_page hints, right and wrong (the second load's page differs
+    // when x0 is near the end of the page); a wrong hint must still work.
+    for ([_]u64{ data_va, data_va + 0xff8, data_va + 0xffc }) |start| {
+        try list.append(gpa, .{ .regs = .{ start, 0, 0, 0, 0, 0, 0, 0 }, .text = try gpa.dupe(u8,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = load:i64 %0 #0x3 @0x300
+            \\  %2 = const:i64 #0x8
+            \\  %3 = add:i64 %0, %2
+            \\  %4 = load:i32 %3 #0x602 @0x304 !1
+            \\  %5 = zext:i64 %4
+            \\  %6 = add:i64 %1, %5
+            \\  setreg %6 #0x8
+            \\  store %0, %6 #0x3 @0x308 !2
+            \\  store %3, %4 #0x202 @0x30c !3
+            \\  exit.chain #0x310 !4
+        ) });
+    }
     return list.toOwnedSlice(gpa);
 }
 
@@ -572,6 +590,24 @@ pub fn generateExt(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x30c !4
         , .{f}) });
     };
+    // same_page hints, right and wrong (the second load's page differs
+    // when x0 is near the end of the page); a wrong hint must still work.
+    for ([_]u64{ data_va, data_va + 0xff8, data_va + 0xffc }) |start| {
+        try list.append(gpa, .{ .regs = .{ start, 0, 0, 0, 0, 0, 0, 0 }, .text = try gpa.dupe(u8,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = load:i64 %0 #0x3 @0x300
+            \\  %2 = const:i64 #0x8
+            \\  %3 = add:i64 %0, %2
+            \\  %4 = load:i32 %3 #0x602 @0x304 !1
+            \\  %5 = zext:i64 %4
+            \\  %6 = add:i64 %1, %5
+            \\  setreg %6 #0x8
+            \\  store %0, %6 #0x3 @0x308 !2
+            \\  store %3, %4 #0x202 @0x30c !3
+            \\  exit.chain #0x310 !4
+        ) });
+    }
     return list.toOwnedSlice(gpa);
 }
 

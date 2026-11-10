@@ -51,6 +51,13 @@ other work asks the owner for changes rather than editing it.
 - `Region.tso` says the guest is TSO (h86 sets it). The arm64 emitter then
   uses LDAR and STLR, sends misaligned accesses to the slow path, and fences
   the slow path. ir_eval, x86-64, and wasm ignore it.
+- Guest state is exact at every exit, fault stubs included. The one
+  deferral is `pending.flags`: packed flags written only on a way out, or
+  before a call. Emitters may write it at once instead, which is always
+  correct.
+- `MemFlags.same_page` is only a hint (reuse an earlier access's TLB
+  lookup). Emitters still compare the page numbers, so a wrong hint is
+  slow, never unsafe. Ignoring it is correct.
 - `exit_pc` is the PC to resume at, except for a fault, where it's the
   faulting instruction.
 - FP and vectors (`fp.*` at 224, `v.*` at 256; `Op.isExt`) take an

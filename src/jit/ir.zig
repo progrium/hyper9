@@ -104,7 +104,15 @@ pub const MemFlags = packed struct(u64) {
     /// (x86's `add [m], r`), so a fault reports a write access, as the
     /// guest's own fault would.
     rmw: bool = false,
-    _: u55 = 0,
+    /// A hint: this access is on the same guest page as the `load` or
+    /// `store` (the same op as this one) `same_page` instructions earlier
+    /// in this block, so an emitter may reuse that access's TLB lookup.
+    /// 0 is no hint. It never changes what happens: an emitter that uses it
+    /// still checks the page number matches (one compare, no TLB load) and
+    /// does the full check if it doesn't, so a wrong hint is only slow.
+    /// ir_eval ignores it.
+    same_page: u16 = 0,
+    _: u39 = 0,
 
     pub const Order = enum(u3) { plain = 0, acquire, release, seq_cst };
 
@@ -335,6 +343,16 @@ pub const Op = enum(u16) {
     poll = 176,
     /// Count aux guest instructions as retired (and against the budget).
     retire = 177,
+    /// Flags not yet written back: the guest's flags at `aux` (a Cpu
+    /// offset) are the packed form of a (`nzcv.pack` if aux2 is 0,
+    /// `eflags.pack` if 1, an i32), but are written there only if needed.
+    /// They're written before any way out of the block (every terminator,
+    /// a fault, a poll that leaves) and before `call.interp`,
+    /// `call.helper`, and `copy`. A `setreg` overlapping aux drops it; a
+    /// new `pending.flags` writes the old one first if its offset differs.
+    /// Nothing may `getreg` the slot while it's pending. No result.
+    /// An emitter may simply write it at once: that's always correct.
+    @"pending.flags" = 178,
 
     // ---- terminators: exactly one, last in each block.
     /// To block aux.
@@ -482,7 +500,7 @@ pub const Op = enum(u16) {
     /// Whether the operation defines a value (else its type is `.none`).
     pub fn hasResult(op: Op) bool {
         return switch (op) {
-            .setreg, .store, .fence, .@"call.interp", .copy, .poll, .retire, .@"v.store" => false,
+            .setreg, .store, .fence, .@"call.interp", .copy, .poll, .retire, .@"pending.flags", .@"v.store" => false,
             .@"call.helper" => true, // may be .none: see the instruction's type
             else => !op.isTerminator(),
         };
@@ -625,6 +643,9 @@ pub const Builder = struct {
         _ = try b.emit(.{ .op = .poll, .aux = pc });
     }
     /// Retires n instructions; the count for later exits starts again at 0.
+    pub fn pendingFlags(b: *Builder, f: Ref, off: u64, group: FlagGroup) !void {
+        _ = try b.emit(.{ .op = .@"pending.flags", .a = f, .aux = off, .aux2 = @intFromEnum(group) });
+    }
     pub fn retire(b: *Builder, n: u64) !void {
         if (n != 0) _ = try b.emit(.{ .op = .retire, .aux = n });
         b.retired = 0;
@@ -659,6 +680,7 @@ pub fn verify(r: *const Region) ?VerifyError {
         if (!blk.begun) return .{ .block = b, .inst = 0, .msg = "block never begun" };
         if (blk.len == 0) return .{ .block = b, .inst = 0, .msg = "empty block" };
         const end = blk.start + blk.len;
+        var pending: ?u64 = null; // the offset of a pending.flags
         for (blk.start..end) |ii| {
             const idx: u32 = @intCast(ii);
             const i = &r.insts.items[ii];
@@ -671,9 +693,34 @@ pub fn verify(r: *const Region) ?VerifyError {
                 if (r.insts.items[o].ty == .none) return .{ .block = b, .inst = idx, .msg = "operand has no value" };
             }
             if (checkInst(r, i)) |msg| return .{ .block = b, .inst = idx, .msg = msg };
+            switch (i.op) {
+                .@"pending.flags" => pending = i.aux,
+                .setreg => if (pending) |p| if (overlaps(i.aux, byteLen(r.insts.items[i.a].ty), p, 4)) {
+                    pending = null;
+                },
+                .getreg => if (pending) |p| if (overlaps(i.aux, byteLen(i.ty), p, 4))
+                    return .{ .block = b, .inst = idx, .msg = "getreg of a slot with flags pending" },
+                .@"call.interp", .@"call.helper", .copy => pending = null,
+                else => {},
+            }
+            if (i.op == .load or i.op == .store) {
+                const f: MemFlags = @bitCast(i.aux);
+                if (f.same_page != 0) {
+                    if (f.same_page > idx - blk.start) return .{ .block = b, .inst = idx, .msg = "same_page reaches before the block" };
+                    if (r.insts.items[idx - f.same_page].op != i.op) return .{ .block = b, .inst = idx, .msg = "same_page must name an earlier access of the same op" };
+                }
+            }
         }
     }
     return null;
+}
+
+fn overlaps(a: u64, an: u64, b: u64, bn: u64) bool {
+    return a < b + bn and b < a + an;
+}
+
+fn byteLen(t: Type) u64 {
+    return @max(1, t.bits() / 8);
 }
 
 fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
@@ -759,6 +806,10 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
         .@"call.interp" => if (i.aux >= r.handles.items.len) return "call.interp handle out of range",
         .@"call.helper" => if (i.ty != .none and i.ty != .i64) return "call.helper gives i64 or nothing",
         .poll, .retire => {},
+        .@"pending.flags" => {
+            if (ta != .flags) return "pending.flags takes flags";
+            if (i.aux2 > 1) return "pending.flags's group is 0 (nzcv) or 1 (eflags)";
+        },
         .copy => {
             if (i.aux >> 35 != 0) return "copy's aux has bits above 34";
             var d = i.aux2;
@@ -1092,6 +1143,7 @@ test "op numbers are stable" {
     try std.testing.expectEqual(@as(u16, 128), @intFromEnum(Op.load));
     try std.testing.expectEqual(@as(u16, 131), @intFromEnum(Op.cas));
     try std.testing.expectEqual(@as(u16, 162), @intFromEnum(Op.copy));
+    try std.testing.expectEqual(@as(u16, 178), @intFromEnum(Op.@"pending.flags"));
     try std.testing.expectEqual(@as(u16, 160), @intFromEnum(Op.@"call.interp"));
     try std.testing.expectEqual(@as(u16, 192), @intFromEnum(Op.br));
     try std.testing.expectEqual(@as(u16, 224), @intFromEnum(Op.@"fp.add"));
