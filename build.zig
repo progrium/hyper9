@@ -1332,6 +1332,25 @@ pub fn build(b: *std.Build) void {
         .x86 => "386",
         else => "arm64",
     };
+    // The arm64 instruction inventory over ha64's decoder
+    // (tools/a64inv.zig): zig build a64-inventory -- PATH...
+    const a64inv = b.addExecutable(.{
+        .name = "a64inv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/a64inv.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "a64decode", .module = b.createModule(.{ .root_source_file = b.path("src/interp/a64/decode.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+            },
+        }),
+    });
+    const run_a64inv = b.addRunArtifact(a64inv);
+    run_a64inv.has_side_effects = true;
+    if (b.args) |args| run_a64inv.addArgs(args) else run_a64inv.addArg(b.pathJoin(&.{ root, "arm64" }));
+    b.step("a64-inventory", "Report the arm64 instructions in binaries (default: the root tree's arm64): zig build a64-inventory -- PATH...").dependOn(&run_a64inv.step);
+
     const slim_tool = b.addExecutable(.{
         .name = "slim",
         .root_module = b.createModule(.{ .root_source_file = b.path("tools/slim.zig"), .target = b.graph.host }),
