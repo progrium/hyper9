@@ -100,7 +100,11 @@ pub const MemFlags = packed struct(u64) {
     /// The access must be naturally aligned, or it faults.
     aligned: bool = false,
     order: Order = .plain,
-    _: u56 = 0,
+    /// `load` only: the load is the first half of a read-modify-write
+    /// (x86's `add [m], r`), so a fault reports a write access, as the
+    /// guest's own fault would.
+    rmw: bool = false,
+    _: u55 = 0,
 
     pub const Order = enum(u3) { plain = 0, acquire, release, seq_cst };
 
@@ -226,6 +230,14 @@ pub const Op = enum(u16) {
     store = 129,
     /// A full barrier. aux: 0 full, 1 loads, 2 stores.
     fence = 130,
+    /// Compare and swap: if the value at a equals b (at the access width),
+    /// store c there; the result is the old value either way, of the
+    /// result type, which is b's and c's. Atomic, sequentially consistent
+    /// whatever `order` says. The access must be naturally aligned (else an
+    /// alignment fault, whatever `aligned` says), and a fault of any kind
+    /// reports a write. For STXR and STXP (as one wider access), LOCK
+    /// CMPXCHG, and anything else that needs the host's atomics.
+    cas = 131,
 
     // ---- calls. They see guest state in the Cpu, as written by setreg.
     /// Run the front end's interpreter on one decoded instruction:
@@ -267,7 +279,7 @@ pub const Op = enum(u16) {
     /// Whether the op can leave the region: it takes `Inst.retired`.
     pub fn canLeave(op: Op) bool {
         return switch (op) {
-            .load, .store, .@"call.interp", .poll => true,
+            .load, .store, .cas, .@"call.interp", .poll => true,
             .br, .brcond => false,
             else => op.isTerminator(),
         };
@@ -411,6 +423,9 @@ pub const Builder = struct {
     pub fn load(b: *Builder, ty: Type, addr: Ref, f: MemFlags, pc: u64) !Ref {
         return b.emit(.{ .op = .load, .ty = ty, .a = addr, .aux = @bitCast(f), .aux2 = pc });
     }
+    pub fn cas(b: *Builder, ty: Type, addr: Ref, expected: Ref, new: Ref, f: MemFlags, pc: u64) !Ref {
+        return b.emit(.{ .op = .cas, .ty = ty, .a = addr, .b = expected, .c = new, .aux = @bitCast(f), .aux2 = pc });
+    }
     pub fn store(b: *Builder, addr: Ref, v: Ref, f: MemFlags, pc: u64) !void {
         _ = try b.emit(.{ .op = .store, .a = addr, .b = v, .aux = @bitCast(f), .aux2 = pc });
     }
@@ -541,9 +556,18 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
             if (ta != .i64 and ta != .i32) return "address must be i64 or i32";
             const f: MemFlags = @bitCast(i.aux);
             if (!tb.isInt() or tb == .i1) return "store takes an integer";
+            if (f.rmw) return "rmw is for loads";
             if (f.size > 3 or f.bytes() * 8 > tb.bits()) return "store size doesn't fit its value";
         },
         .fence => if (i.aux > 2) return "bad fence kind",
+        .cas => {
+            if (ta != .i64 and ta != .i32) return "address must be i64 or i32";
+            const f: MemFlags = @bitCast(i.aux);
+            if (!i.ty.isInt() or i.ty == .i1) return "cas gives an integer";
+            if (tb != i.ty or tc != i.ty) return "cas's expected and new values must be of its type";
+            if (f.size > 3 or f.bytes() * 8 > i.ty.bits()) return "cas size doesn't fit its type";
+            if (f.signed or f.rmw) return "cas takes neither signed nor rmw";
+        },
         .@"call.interp" => if (i.aux >= r.handles.items.len) return "call.interp handle out of range",
         .@"call.helper" => if (i.ty != .none and i.ty != .i64) return "call.helper gives i64 or nothing",
         .poll, .retire => {},
@@ -775,6 +799,7 @@ test "op numbers are stable" {
     try std.testing.expectEqual(@as(u16, 96), @intFromEnum(Op.@"eflags.add"));
     try std.testing.expectEqual(@as(u16, 108), @intFromEnum(Op.@"eflags.mul"));
     try std.testing.expectEqual(@as(u16, 128), @intFromEnum(Op.load));
+    try std.testing.expectEqual(@as(u16, 131), @intFromEnum(Op.cas));
     try std.testing.expectEqual(@as(u16, 160), @intFromEnum(Op.@"call.interp"));
     try std.testing.expectEqual(@as(u16, 192), @intFromEnum(Op.br));
 }

@@ -60,6 +60,7 @@ pub const Env = struct {
             .space = @intFromPtr(&e.map),
             .slow_load = @intFromPtr(&mem.mapSlowLoad),
             .slow_store = @intFromPtr(&mem.mapSlowStore),
+            .slow_cas = @intFromPtr(&mem.mapSlowCas),
         };
         return &e.ctx;
     }
@@ -207,5 +208,21 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  exit.svc #0x118 !1
         ) });
     }
+    // cas: success, failure, each width, misaligned, and unmapped; and an
+    // rmw load's fault, reported as a write.
+    for ([_][]const u8{ "i64", "i32", "i16", "i8" }, 0..) |ty, k| for ([_]u64{ data_va + 8, data_va + 9, data_va + 0x10000 }) |addr| for ([_]u64{ 0x5a5a_5a5a_5a5a_5a5a, 7 }) |expected| {
+        try list.append(gpa, .{ .regs = .{ addr, expected, 0x1122_3344_5566_7788, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:{0s} #0x8
+            \\  %2 = getreg:{0s} #0x10
+            \\  %3 = cas:{0s} %0, %1, %2 #0x{1x} @0x200 !2
+            \\  %4 = zext:i64 %3
+            \\  setreg %4 #0x18
+            \\  %5 = load:i64 %0 #0x103 @0x204 !3
+            \\  setreg %5 #0x20
+            \\  exit.chain #0x208 !4
+        , .{ ty, 3 - k }) });
+    };
     return list.toOwnedSlice(gpa);
 }

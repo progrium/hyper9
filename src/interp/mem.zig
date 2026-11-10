@@ -82,6 +82,11 @@ pub const FaultKind = enum(u8) {
 pub const SlowLoadFn = *const fn (ctx: *Ctx, va: u64, size_log2: u32) callconv(.c) u32;
 /// The slow path for stores, likewise. Nothing is written if it faults.
 pub const SlowStoreFn = *const fn (ctx: *Ctx, va: u64, size_log2: u32, value: u64) callconv(.c) u32;
+/// The path for the IR's `cas`: compares the 2^size_log2 bytes at `va` with
+/// `expected` and stores `new` there if they're equal, atomically, then
+/// returns `.ok` with the old value, zero-extended, in ctx.scratch. The
+/// access must be naturally aligned. Any fault reports a write.
+pub const SlowCasFn = *const fn (ctx: *Ctx, va: u64, size_log2: u32, expected: u64, new: u64) callconv(.c) u32;
 
 
 // ---------------------------------------------------------------- views
@@ -297,6 +302,12 @@ pub fn slowLoad(ctx: *Ctx, va: u64, size_log2: u32) callconv(.c) u32 {
     return load(ctx, v, va, size_log2);
 }
 
+/// `cas` over the View in ctx.space.
+pub fn slowCas(ctx: *Ctx, va: u64, size_log2: u32, expected: u64, new: u64) callconv(.c) u32 {
+    const v: *View = @ptrFromInt(@as(usize, @intCast(ctx.space)));
+    return cas(ctx, v, va, size_log2, expected, new);
+}
+
 /// The slow path for stores over the View in ctx.space.
 pub fn slowStore(ctx: *Ctx, va: u64, size_log2: u32, value: u64) callconv(.c) u32 {
     const v: *View = @ptrFromInt(@as(usize, @intCast(ctx.space)));
@@ -440,6 +451,39 @@ fn store(ctx: *Ctx, src: anytype, va: u64, size_log2: u32, value: u64) u32 {
     return 0;
 }
 
+fn cas(ctx: *Ctx, src: anytype, va: u64, size_log2: u32, expected: u64, new: u64) u32 {
+    const n = @as(u64, 1) << @intCast(size_log2);
+    if (va % n != 0) return fault(ctx, va, .write, .alignment);
+    const tlb: *Tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb)));
+    const h = switch (resolve(src, tlb, va, .write)) {
+        .ok => |h| h,
+        .fault => |k| return fault(ctx, va, .write, k),
+    };
+    ctx.scratch = casAt(h, size_log2, expected, new);
+    return 0;
+}
+
+/// An atomic compare-and-swap at host address h; returns the old value.
+pub fn casAt(h: usize, size_log2: u32, expected: u64, new: u64) u64 {
+    return switch (size_log2) {
+        0 => casT(u8, h, expected, new),
+        1 => casT(u16, h, expected, new),
+        2 => casT(u32, h, expected, new),
+        else => if (atomic64) casT(u64, h, expected, new) else blk: {
+            // wasm32 runs one vCPU at a time.
+            const p: *u64 = @ptrFromInt(h);
+            const old = p.*;
+            if (old == expected) p.* = new;
+            break :blk old;
+        },
+    };
+}
+
+fn casT(comptime T: type, h: usize, expected: u64, new: u64) u64 {
+    const p: *T = @ptrFromInt(h);
+    return @cmpxchgStrong(T, p, @truncate(expected), @truncate(new), .seq_cst, .seq_cst) orelse @as(T, @truncate(expected));
+}
+
 /// The inline fast path, in Zig, for T0 and `ir_eval`: the same check the
 /// emitters generate.
 pub inline fn fast(tlb: *const Tlb, va: u64, size: u32, comptime write: bool) ?usize {
@@ -512,6 +556,11 @@ pub fn mapSlowLoad(ctx: *Ctx, va: u64, size_log2: u32) callconv(.c) u32 {
 pub fn mapSlowStore(ctx: *Ctx, va: u64, size_log2: u32, value: u64) callconv(.c) u32 {
     const m: *const Map = @ptrFromInt(@as(usize, @intCast(ctx.space)));
     return store(ctx, m, va, size_log2, value);
+}
+
+pub fn mapSlowCas(ctx: *Ctx, va: u64, size_log2: u32, expected: u64, new: u64) callconv(.c) u32 {
+    const m: *const Map = @ptrFromInt(@as(usize, @intCast(ctx.space)));
+    return cas(ctx, m, va, size_log2, expected, new);
 }
 
 // ---------------------------------------------------------------- tests

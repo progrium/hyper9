@@ -50,6 +50,8 @@ pub const Ctx = extern struct {
     interp: u64 = 0,
     /// *const [n]HelperFn: the backend's helpers, for `call.helper`.
     helpers: u64 = 0,
+    /// mem.SlowCasFn: `cas` (every emitter's path today, and ir_eval's).
+    slow_cas: u64 = 0,
 
     pub fn cpuPtr(c: *Ctx, comptime T: type) *T {
         return @ptrFromInt(@as(usize, @intCast(c.cpu)));
@@ -73,12 +75,13 @@ pub const off = struct {
     pub const slow_store = @offsetOf(Ctx, "slow_store");
     pub const interp = @offsetOf(Ctx, "interp");
     pub const helpers = @offsetOf(Ctx, "helpers");
+    pub const slow_cas = @offsetOf(Ctx, "slow_cas");
 };
 
 comptime {
     // The layout is part of the ABI: wasm modules hard-code these.
     std.debug.assert(off.cpu == 0 and off.tlb == 8 and off.exit_request == 16 and off.budget == 24);
-    std.debug.assert(off.exit_pc == 40 and off.scratch == 64 and off.interp == 104 and @sizeOf(Ctx) == 120);
+    std.debug.assert(off.exit_pc == 40 and off.scratch == 64 and off.interp == 104 and off.slow_cas == 120 and @sizeOf(Ctx) == 128);
 }
 
 /// Why generated code returned. 0 is never returned: it means "carry on"

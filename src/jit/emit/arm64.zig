@@ -290,6 +290,25 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.put(0xD3641C00 | 0); // lsl x0, x0, #28 (ubfm #36, #3)
         },
         .load, .store => try memOp(e, i),
+        .cas => {
+            // Always the runtime's: a host CAS behind the TLB check is an
+            // inline fast path to add later.
+            const f: ir.MemFlags = @bitCast(i.aux);
+            try e.mov(4, 2);
+            try e.mov(3, 1);
+            try e.mov(1, 0);
+            try e.mov(0, CTX);
+            try e.movImm(2, f.size);
+            try e.ldrCtx(16, ctx.off.slow_cas);
+            try e.put(0xD63F0200); // blr x16
+            const ok = try e.fwd(0x34000000); // cbz w0, ok
+            try e.retireOn(i.retired);
+            try e.movImm(1, i.aux2);
+            try e.strCtx(1, ctx.off.exit_pc);
+            try e.branch(.b26, 0x14000000, epilogue);
+            e.land19(ok);
+            try e.ldrCtx(0, ctx.off.scratch);
+        },
         .fence => try e.put(switch (i.aux) {
             1 => @as(u32, 0xD50339BF),
             2 => 0xD5033ABF,
@@ -406,6 +425,14 @@ fn memOp(e: *E, i: ir.Inst) !void {
     try e.ldrCtx(16, if (store) ctx.off.slow_store else ctx.off.slow_load);
     try e.put(0xD63F0200); // blr x16
     const ok = try e.fwd(0x34000000); // cbz w0, ok
+    if (!store and f.rmw) {
+        // Report the read-modify-write's fault as a write.
+        try e.ldrCtx(9, ctx.off.exit_info);
+        try e.put(0xD348FD29); // lsr x9, x9, #8
+        try e.put(0xD378DD29); // lsl x9, x9, #8
+        try e.put(0xB2400129); // orr x9, x9, #1 (write)
+        try e.strCtx(9, ctx.off.exit_info);
+    }
     try e.retireOn(i.retired);
     try e.movImm(1, i.aux2);
     try e.strCtx(1, ctx.off.exit_pc);

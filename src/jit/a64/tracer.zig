@@ -82,6 +82,7 @@ pub const State = struct {
             .frontend = @intFromPtr(&s.machine),
             .slow_load = @intFromPtr(&mem.slowLoad),
             .slow_store = @intFromPtr(&mem.slowStore),
+            .slow_cas = @intFromPtr(&mem.slowCas),
             .interp = @intFromPtr(&lift.interp),
         };
         s.machine = .init(&s.cpu, &s.ctx, &s.cache, null);

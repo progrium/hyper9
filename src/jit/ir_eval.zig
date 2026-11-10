@@ -265,12 +265,13 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                     const f: ir.MemFlags = @bitCast(i.aux);
                     const n = f.bytes();
                     var v: u64 = 0;
-                    if (f.aligned and a % n != 0) return left(ctx, i, alignFault(ctx, a, .read, i.aux2));
+                    if (f.aligned and a % n != 0) return left(ctx, i, alignFault(ctx, a, if (f.rmw) .write else .read, i.aux2));
                     if (mem.fast(tlb, a, n, false)) |host| {
                         @memcpy(std.mem.asBytes(&v)[0..n], @as([*]const u8, @ptrFromInt(host))[0..n]);
                     } else {
                         const slow: mem.SlowLoadFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_load)));
                         if (slow(ctx, a, f.size) != 0) {
+                            if (f.rmw) ctx.exit_info = (ctx.exit_info & ~@as(u64, 0xff)) | @intFromEnum(mem.Access.write);
                             ctx.exit_pc = i.aux2;
                             return left(ctx, i, .fault);
                         }
@@ -292,6 +293,16 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                             return left(ctx, i, .fault);
                         }
                     }
+                },
+                .cas => {
+                    const f: ir.MemFlags = @bitCast(i.aux);
+                    const m = i.ty.mask();
+                    const slow: mem.SlowCasFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_cas)));
+                    if (slow(ctx, a, f.size, bv & m, cv & m) != 0) {
+                        ctx.exit_pc = i.aux2;
+                        return left(ctx, i, .fault);
+                    }
+                    vals[idx] = ctx.scratch & m;
                 },
                 .fence => _ = @atomicRmw(u32, &fence_word, .Add, 0, .seq_cst),
                 .@"call.interp" => {
@@ -476,6 +487,7 @@ test "loads and stores take the slow path and fault exactly" {
         .space = @intFromPtr(&map),
         .slow_load = @intFromPtr(&mem.mapSlowLoad),
         .slow_store = @intFromPtr(&mem.mapSlowStore),
+        .slow_cas = @intFromPtr(&mem.mapSlowCas),
     };
     // The store and the signed byte load fit; the 8-byte load 8 bytes on
     // is in the unmapped page. State before it is already written.

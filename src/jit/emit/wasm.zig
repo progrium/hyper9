@@ -54,6 +54,7 @@
 //! | slow_store | (i32 ctx, i64 va, i32 size_log2, i64 v) -> i32 | mem.SlowStoreFn |
 //! | interp | (i32 ctx, i64 handle, i64 pc) -> i32 | ctx.InterpFn |
 //! | helper | (i32 ctx, i64 index, i64 a, i64 b, i64 c) -> i64 | the helper table |
+//! | slow_cas | (i32 ctx, i64 va, i32 size_log2, i64 expected, i64 new) -> i32 | mem.SlowCasFn |
 //! | table | table funcref | the function table regions are installed in (with cells only) |
 //! | base | global i32 | the table slot of "r0"; "rK" is at base + K (with cells only) |
 //!
@@ -134,7 +135,8 @@ const F_SLOW_LOAD = 1;
 const F_SLOW_STORE = 2;
 const F_INTERP = 3;
 const F_HELPER = 4;
-const F_BODY = 5;
+const F_SLOW_CAS = 5;
+const F_BODY = 6;
 
 // Type indexes.
 const T_ENTRY = 0;
@@ -1079,6 +1081,27 @@ const E = struct {
                 try w.byte(0xAD);
             },
             .load, .store => try e.memOp(i),
+            .cas => {
+                // Always the runtime's, as on arm64.
+                const f: ir.MemFlags = @bitCast(i.aux);
+                try w.get(0);
+                try e.val64(i.a);
+                try w.i32c(f.size);
+                try e.val64(i.b);
+                try e.val64(i.c);
+                try w.call(F_SLOW_CAS);
+                try w.tee(e.l32(.code));
+                try e.open(0x04, .other);
+                try e.retireOn(i.retired);
+                try w.get(0);
+                try w.i64c(i.aux2);
+                try w.memop(0x37, ctx.off.exit_pc);
+                try e.br(.exit);
+                try e.end();
+                try w.get(0);
+                try w.memop(0x29, ctx.off.scratch);
+                if (wt(t).? == I32) try w.byte(0xA7);
+            },
             .fence => {}, // one thread per memory in the browser
             .@"call.interp" => {
                 try e.flushRegs();
@@ -1300,6 +1323,17 @@ const E = struct {
         } else try w.call(F_SLOW_LOAD);
         try w.tee(e.l32(.code));
         try e.open(0x04, .other);
+        if (!store and f.rmw) {
+            // Report the read-modify-write's fault as a write.
+            try w.get(0);
+            try w.get(0);
+            try w.memop(0x29, ctx.off.exit_info);
+            try w.i64c(~@as(u64, 0xff));
+            try w.byte(0x83);
+            try w.i64c(@intFromEnum(mem.Access.write));
+            try w.byte(0x84);
+            try w.memop(0x37, ctx.off.exit_info);
+        }
         try e.retireOn(i.retired);
         try w.get(0);
         try w.i64c(i.aux2);
@@ -1692,6 +1726,7 @@ fn module(gpa: Allocator, bodies: []const []const u8, n: usize, opts: Options, o
         &.{ 3, I32, I64, I64, 1, I32 }, // interp
         &.{ 5, I32, I64, I64, I64, I64, 1, I64 }, // helper
         &.{ 2, I32, I32, 1, I32 }, // body
+        &.{ 5, I32, I64, I32, I64, I64, 1, I32 }, // slow_cas
     };
     try sec.uleb(types.len);
     for (types) |t| {
@@ -1701,7 +1736,7 @@ fn module(gpa: Allocator, bodies: []const []const u8, n: usize, opts: Options, o
     try m.section(1, sec.b.items);
 
     sec.b.clearRetainingCapacity();
-    const imports = [_]struct { []const u8, u32 }{ .{ "eval", 1 }, .{ "slow_load", 2 }, .{ "slow_store", 3 }, .{ "interp", 4 }, .{ "helper", 5 } };
+    const imports = [_]struct { []const u8, u32 }{ .{ "eval", 1 }, .{ "slow_load", 2 }, .{ "slow_store", 3 }, .{ "interp", 4 }, .{ "helper", 5 }, .{ "slow_cas", 7 } };
     try sec.uleb(imports.len + 1 + @as(u32, if (chaining) 2 else 0));
     for (imports) |imp| {
         try sec.name("env");

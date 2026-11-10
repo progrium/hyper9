@@ -28,6 +28,10 @@ export fn jit_slow_store(ctx: *Ctx, va: u64, size_log2: u32, v: u64) u32 {
     const f: vcpu.mem.SlowStoreFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_store)));
     return f(ctx, va, size_log2, v);
 }
+export fn jit_slow_cas(ctx: *Ctx, va: u64, size_log2: u32, expected: u64, new: u64) u32 {
+    const f: vcpu.mem.SlowCasFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_cas)));
+    return f(ctx, va, size_log2, expected, new);
+}
 export fn jit_interp(ctx: *Ctx, handle: u64, pc: u64) u32 {
     return vcpu.a64.lift.interp(ctx, handle, pc);
 }

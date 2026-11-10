@@ -246,6 +246,24 @@ pub const Shadow = struct {
         return 0;
     }
 
+    /// mem.SlowCasFn over the Shadow in ctx.space. A check runs one tier
+    /// at a time, so it needn't be atomic.
+    pub fn slowCas(c: *Ctx, va: u64, size_log2: u32, expected: u64, new: u64) callconv(.c) u32 {
+        const s: *Shadow = @ptrFromInt(@as(usize, @intCast(c.space)));
+        const tlb: *mem.Tlb = @ptrFromInt(@as(usize, @intCast(c.tlb)));
+        const n = @as(u32, 1) << @intCast(size_log2);
+        if (va % n != 0) return fault(c, va, .write, .alignment);
+        const p: [*]u8 = switch (s.byte(tlb, va, .write)) {
+            .ok => |p| @ptrCast(p),
+            .fault => |k| return fault(c, va, .write, k),
+        };
+        var old: u64 = 0;
+        @memcpy(std.mem.asBytes(&old)[0..n], p[0..n]);
+        if (old == expected) @memcpy(p[0..n], std.mem.asBytes(&new)[0..n]);
+        c.scratch = old;
+        return 0;
+    }
+
     /// mem.SlowStoreFn over the Shadow in ctx.space. Checks every byte
     /// before writing any.
     pub fn slowStore(c: *Ctx, va: u64, size_log2: u32, value: u64) callconv(.c) u32 {
@@ -357,6 +375,7 @@ pub const Run = struct {
             .space = @intFromPtr(&r.shadow[i]),
             .slow_load = @intFromPtr(&Shadow.slowLoad),
             .slow_store = @intFromPtr(&Shadow.slowStore),
+            .slow_cas = @intFromPtr(&Shadow.slowCas),
             .interp = @intFromPtr(r.g.frontend.interp),
             .helpers = o.helpers,
             .budget = if (i == t1) o.budget else std.math.maxInt(i64),

@@ -88,7 +88,8 @@ function importedMin(bytes, want) {
  *
  * - memory and table: h9's memory and the function table it imports.
  * - exports(): h9's exports, once it's instantiated. Modules import its
- *   jit_eval, jit_slow_load, jit_slow_store, jit_interp, and jit_helper as
+ *   jit_eval, jit_slow_load, jit_slow_store, jit_interp, jit_helper, and
+ *   jit_slow_cas as
  *   they are, so no JS frame sits between a region and h9 and JSPI can
  *   suspend through both.
  *
@@ -120,7 +121,7 @@ export function wasmJit({ memory, table, exports, log = console.error }) {
       started.push(WebAssembly.compile(bytes).then((mod) => {
         if (!env) {
           const x = exports();
-          env = { memory, table, eval: x.jit_eval, slow_load: x.jit_slow_load, slow_store: x.jit_slow_store, interp: x.jit_interp, helper: x.jit_helper };
+          env = { memory, table, eval: x.jit_eval, slow_load: x.jit_slow_load, slow_store: x.jit_slow_store, interp: x.jit_interp, helper: x.jit_helper, slow_cas: x.jit_slow_cas };
         }
         return WebAssembly.instantiate(mod, { env: { ...env, base: new WebAssembly.Global({ value: 'i32' }, base) } });
       }).then((inst) => {

@@ -455,6 +455,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 cx.space = @intFromPtr(&s.view);
                 cx.slow_load = @intFromPtr(&mem.slowLoad);
                 cx.slow_store = @intFromPtr(&mem.slowStore);
+                cx.slow_cas = @intFromPtr(&mem.slowCas);
                 while (true) {
                     s.enter();
                     if (b.stopping.load(.seq_cst) != 0) {
