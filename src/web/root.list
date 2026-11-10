@@ -9,6 +9,8 @@ boot/
 dev/
 env/
 fd/
+mnt/acme/
+mnt/temp/
 mnt/term/cwd/
 mnt/wsys/
 n/
@@ -73,3 +75,10 @@ adm/timezone/GMT
 386/bin/unmount
 386/bin/wc
 386/bin/xd
+
+# rio and acme, for a page with a canvas (design/0120-browser-gfx.md):
+# window, which rio's -i runs, and the font both open by default.
+386/bin/rio
+386/bin/acme
+rc/bin/window
+lib/font/bit/vga

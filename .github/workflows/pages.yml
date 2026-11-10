@@ -54,6 +54,7 @@ jobs:
           npm install --no-save --no-package-lock playwright@1.63.0
           npx playwright install --with-deps chromium
           node tests/web/browser.mjs zig-out/web
+          node tests/web/gfx.mjs zig-out/web
       - name: Assemble the site
         run: |
           mkdir -p _site/demo

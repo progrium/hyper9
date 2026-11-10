@@ -4,14 +4,15 @@
 //! has them masked. The backend is chosen at build time (`-Dgfx`).
 //!
 //! The kernel side is src/kern/gfx.c, with the backend's own source, or
-//! src/kern/nogfx.c without one.
+//! src/kern/nogfx.c without one. On the browser host the backend is a
+//! page's canvas (src/kern/gfx-web.c, design/0120-browser-gfx.md).
 
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const kern = @import("kern.zig");
 
-pub const Backend = enum { none, headless, x11, win32, cocoa };
+pub const Backend = enum { none, headless, x11, win32, cocoa, web };
 
 /// The GUI backend built into this h9.
 pub const backend: Backend = std.meta.stringToEnum(Backend, build_options.gfx).?;
@@ -26,7 +27,9 @@ pub const Options = struct {
     clipboard: bool = true,
     /// The screen scale, drawterm's `-x`: 0 draws in the display's
     /// backing pixels, 1 in points, N in backing pixels divided by N.
-    /// Cocoa only; the other backends draw in device pixels.
+    /// Cocoa and the browser host's canvas (where 1 is CSS pixels, and
+    /// the page computes the size); the other backends draw in device
+    /// pixels.
     scale: u8 = 1,
 };
 
@@ -47,11 +50,15 @@ pub const Claim = struct {
 };
 
 const c = if (built) struct {
+    extern fn h9_gfx_web_present() c_int;
     extern var h9_gfx_noclip: c_int;
     extern var scalef: c_int;
     extern var h9_gfx_onclose: ?*const fn () callconv(.c) void;
     extern fn h9_gfx_ready() c_int;
 } else struct {
+    fn h9_gfx_web_present() c_int {
+        return 0;
+    }
     var h9_gfx_noclip: c_int = 0;
     var scalef: c_int = 0;
     var h9_gfx_onclose: ?*const fn () callconv(.c) void = null;
@@ -112,6 +119,10 @@ pub fn acquire(io: std.Io, claim: *const Claim, opts: Options) Error!void {
 }
 
 fn claimScreen(io: std.Io, claim: *const Claim, opts: Options) Error!void {
+    // The browser host's h9.wasm has the canvas backend, but only a page
+    // that passed a canvas has a screen; h9-node never does, and says so
+    // as a build without graphics would (design/0120-browser-gfx.md).
+    if (backend == .web and c.h9_gfx_web_present() == 0) return error.GfxNotBuilt;
     if (unavailable() != null) return error.GfxUnavailable;
     if (owner.cmpxchgStrong(null, claim, .acq_rel, .acquire) != null) return error.GfxInUse;
     c.h9_gfx_noclip = @intFromBool(!opts.clipboard);

@@ -4938,6 +4938,16 @@ test "--gfx on a build without graphics exits 125 [15]" {
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
     if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return error.SkipZigTest;
+    try expectGfxNotBuilt(e);
+}
+
+test "h9-node has no canvas, so --gfx exits 125 as a build without graphics does [120]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    try expectGfxNotBuilt(e);
+}
+
+fn expectGfxNotBuilt(e: Env) !void {
     const r = try run(e, &.{ "--gfx", "echo", "hi" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
