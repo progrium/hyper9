@@ -1,25 +1,38 @@
 //! IR to x86-64 machine code.
 //!
-//! The spill-everything form, as emit/arm64.zig starts: every value lives
-//! in its frame slot (alloc.spillAll), and each operation loads its
-//! operands into rax (a), rcx (b), and rdx (c), computes into rax, and
-//! stores it. Linear scan replaces the loads and stores later.
+//! Registers come from regalloc.zig, as in emit/arm64.zig: values in
+//! host registers (or frame slots when they run out; a v128 always has a
+//! slot pair), and the region's most used guest register-file fields
+//! ("chunks") pinned to host registers, written back to the Cpu only
+//! when dirty, and only where guest state must be exact: at exits, before
+//! call.interp and call.helper (which reload every chunk after), and on a
+//! slow path's fault exit. Each operation still loads its operands into
+//! rax (a), rcx (b), and rdx (c), computes into rax, and moves that to its
+//! value's register or slot.
+//!
+//! Fixed registers: rbx the Ctx (ctx.x64_ctx_reg), rbp the frame. rax,
+//! rcx, rdx, r10, r11, and xmm0 to xmm2 are scratch. Values take rsi, rdi,
+//! r8, r9, and whatever of r12 to r15 no chunk has; chunks take r12 to r15,
+//! which survive the slow paths' calls. A call saves the live values in
+//! caller-saved registers in a save area of the frame.
 //!
 //! The frame, from rbp down: the caller's return address above, then the
-//! saved rbp, rbx (the Ctx, ctx.x64_ctx_reg), and r12 (for alignment), then
-//! `sub rsp, frame`. From rsp up: 48 bytes of outgoing argument space (the
-//! Win64 shadow space and a fifth argument), 40 bytes where a call's
-//! arguments are staged before they go to the ABI's registers, then the
+//! saved rbp, rbx, r12 to r15 (and rsi and rdi on Win64, where they're
+//! callee-saved), then `sub rsp, frame`. From rsp up: 48 bytes of outgoing
+//! argument space (the Win64 shadow space and a fifth argument), 40 bytes
+//! where a call's arguments are staged before they go to the ABI's
+//! registers, 48 for evalExtC's operands, the call save area, then the
 //! value slots. Calls follow SysV, or Win64 on Windows.
 //!
-//! Chaining (cache.zig's contract, as emit/arm64.zig): `exit.chain` drops
-//! the frame back to the three saved registers, then has its site, a
+//! Chaining (cache.zig's contract, as emit/arm64.zig): `exit.chain` writes
+//! back, drops the frame back to the saved registers, then has its site, a
 //! `jmp rel32` with the rel32 4-byte aligned, which falls through to the
 //! exit. A linked site jumps to the target's chain entry, which is past
-//! the target's pushes, so the frame shape carries over. The exit sets
-//! ctx.exit_info to the site's address. `exit.indirect` looks the target
-//! up in the jump cache (ctx.jump) inline and, on a hit, leaves the same
-//! way for the target's chain entry.
+//! the target's pushes (every region saves the same registers), so the
+//! frame shape carries over, and which loads the target's chunks. The exit
+//! sets ctx.exit_info to the site's address. `exit.indirect` looks the
+//! target up in the jump cache (ctx.jump) inline and, on a hit, leaves the
+//! same way for the target's chain entry.
 //!
 //! Pure ops this file doesn't lower call ir_eval.evalOpC.
 
@@ -30,6 +43,7 @@ const ir_eval = @import("../ir_eval.zig");
 const ctx = @import("../ctx.zig");
 const mem = @import("../../interp/mem.zig");
 const alloc_mod = @import("../alloc.zig");
+const regalloc = @import("../regalloc.zig");
 const emitter = @import("../emitter.zig");
 const Op = ir.Op;
 const Type = ir.Type;
@@ -57,6 +71,9 @@ const R9 = 9;
 const R10 = 10;
 const R11 = 11;
 const R12 = 12;
+const R13 = 13;
+const R14 = 14;
+const R15 = 15;
 const CTX = ctx.x64_ctx_reg;
 
 const arg_regs: []const u8 = if (win64) &.{ RCX, RDX, R8, R9 } else &.{ RDI, RSI, RDX, RCX, R8 };
@@ -64,7 +81,24 @@ const outgoing = 48;
 const staging = outgoing;
 /// evalExtC's operands and result: a, b, and c, 16 bytes each.
 const io_base = staging + 40;
-const slots_base = io_base + 48;
+/// Where a call keeps the live values of caller-saved registers.
+const save_base = io_base + 48;
+const slots_base = save_base + 8 * 16;
+
+/// The callee-saved registers every region pushes after rbp, in order.
+const saved_regs: []const u8 = if (win64) &.{ RBX, R12, R13, R14, R15, RSI, RDI } else &.{ RBX, R12, R13, R14, R15 };
+/// Bytes from rbp down to the last push: rsp at the chain entry is rbp
+/// less this.
+const saved_bytes: u8 = 8 * saved_regs.len;
+/// Registers a call may clobber, of those regalloc hands out.
+const caller_saved_mask: u64 = if (win64) (1 << R8) | (1 << R9) else (1 << RSI) | (1 << RDI) | (1 << R8) | (1 << R9);
+
+pub const host: regalloc.Host = .{
+    .regs = &.{ RSI, RDI, R8, R9, R12, R13, R14, R15 },
+    .pin_regs = &.{ R15, R14, R13, R12 },
+    .max_pinned = 4,
+    .callee_saved = ((1 << R12) | (1 << R13) | (1 << R14) | (1 << R15)) | (if (win64) (1 << RSI) | (1 << RDI) else 0),
+};
 
 // Condition codes.
 const CC = struct {
@@ -100,6 +134,13 @@ const E = struct {
     base: usize,
     fixups: std.ArrayList(Fixup) = .empty,
     code: emitter.Code = .{},
+    r: *const ir.Region,
+    p: *const regalloc.Plan,
+    /// The block and instruction being lowered.
+    block: ir.BlockId = 0,
+    idx: usize = 0,
+    /// The chunks that may be dirty here.
+    dirty: regalloc.ChunkSet = 0,
 
     fn pos(e: *E) usize {
         return e.out.items.len - e.base;
@@ -172,6 +213,70 @@ const E = struct {
     }
     fn stSlot(e: *E, slot: u32, src: u8) !void {
         try e.store(RSP, @intCast(slots_base + slot * 8), src);
+    }
+    /// `dst` = value `v`, from its register or slot.
+    fn ldVal(e: *E, dst: u8, v: ir.Ref) !void {
+        switch (e.p.locs[v]) {
+            .reg => |x| try e.mov(dst, @intCast(x)),
+            .slot => |s| try e.ldSlot(dst, s),
+            .none => unreachable,
+        }
+    }
+    /// Value `v` = `src`.
+    fn stVal(e: *E, v: ir.Ref, src: u8) !void {
+        switch (e.p.locs[v]) {
+            .reg => |x| try e.mov(@intCast(x), src),
+            .slot => |s| try e.stSlot(s, src),
+            .none => {},
+        }
+    }
+    /// A v128 value's slot pair.
+    fn vslot(e: *E, v: ir.Ref) u32 {
+        return e.p.locs[v].slot;
+    }
+
+    // ---- chunks and calls
+
+    fn chunkAccess(e: *E, k: usize, to_cpu: bool) !void {
+        const c = e.p.chunks[k];
+        const reg: u8 = @intCast(c.reg);
+        const disp: i32 = @intCast(c.off);
+        if (to_cpu) switch (c.bytes) {
+            1 => try e.rm(false, &.{0x88}, reg, R10, disp),
+            2 => try e.rm16(&.{0x89}, reg, R10, disp),
+            4 => try e.rm(false, &.{0x89}, reg, R10, disp),
+            else => try e.rm(true, &.{0x89}, reg, R10, disp),
+        } else switch (c.bytes) {
+            1 => try e.rm(false, &.{ 0x0f, 0xb6 }, reg, R10, disp),
+            2 => try e.rm(false, &.{ 0x0f, 0xb7 }, reg, R10, disp),
+            4 => try e.rm(false, &.{0x8b}, reg, R10, disp),
+            else => try e.rm(true, &.{0x8b}, reg, R10, disp),
+        }
+    }
+    /// Loads every chunk from the Cpu. Uses r10.
+    fn loadChunks(e: *E) !void {
+        if (e.p.chunks.len == 0) return;
+        try e.ldCtx(R10, ctx.off.cpu);
+        for (0..e.p.chunks.len) |k| try e.chunkAccess(k, false);
+    }
+    /// Stores the chunks in `set` to the Cpu. Uses r10.
+    fn writeback(e: *E, set: regalloc.ChunkSet) !void {
+        if (set == 0) return;
+        try e.ldCtx(R10, ctx.off.cpu);
+        for (0..e.p.chunks.len) |k| {
+            if (set & (@as(regalloc.ChunkSet, 1) << @intCast(k)) != 0) try e.chunkAccess(k, true);
+        }
+    }
+    /// The caller-saved registers holding values a call at the current
+    /// instruction must keep.
+    fn saveMask(e: *E) u64 {
+        return e.p.liveAcross(e.r, e.block, e.idx) & caller_saved_mask;
+    }
+    fn saveRegs(e: *E, m: u64) !void {
+        for (0..16) |x| if (m & (@as(u64, 1) << @intCast(x)) != 0) try e.store(RSP, @intCast(save_base + 8 * x), @intCast(x));
+    }
+    fn restoreRegs(e: *E, m: u64) !void {
+        for (0..16) |x| if (m & (@as(u64, 1) << @intCast(x)) != 0) try e.load(@intCast(x), RSP, @intCast(save_base + 8 * x));
     }
     fn ldCtx(e: *E, dst: u8, off: u32) !void {
         try e.load(dst, CTX, @intCast(off));
@@ -251,6 +356,7 @@ const E = struct {
 
     /// Sets exit_pc and leaves with `code`, counting `n` retired.
     fn leave(e: *E, code: ctx.Exit, pc: u64, n: u64) !void {
+        try e.writeback(e.dirty);
         try e.retireOn(n);
         try e.movImm(RAX, pc);
         try e.stCtx(ctx.off.exit_pc, RAX);
@@ -264,6 +370,8 @@ const E = struct {
     /// the context first and then `args`. The result is in rax.
     fn call(e: *E, args: []const Arg) !void {
         std.debug.assert(args.len + 1 <= 5);
+        const live = e.saveMask();
+        try e.saveRegs(live);
         // Stage every argument, then load the ABI's registers from there,
         // so no argument overwrites another on its way.
         try e.store(RSP, staging, CTX);
@@ -283,6 +391,12 @@ const E = struct {
             }
         }
         try e.bs(&.{ 0x41, 0xff, 0xd3 }); // call r11
+        try e.restoreRegs(live);
+    }
+
+    /// lea rsp, [rbp - saved_bytes]: the frame torn down to the pushes.
+    fn dropFrame(e: *E) !void {
+        try e.bs(&.{ 0x48, 0x8d, 0x65, @bitCast(-@as(i8, saved_bytes)) });
     }
 };
 
@@ -300,34 +414,57 @@ fn native(t: Type) bool {
     return t == .i32 or t == .i64;
 }
 
+/// The Emitter interface. This emitter plans its own registers
+/// (regalloc.zig), so `a` is unused.
 pub fn emit(gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc_mod.Allocation, out: *std.ArrayList(u8)) EmitError!emitter.Code {
-    if (a.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
-    var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len };
+    _ = a;
+    return emitRegion(gpa, r, out);
+}
+
+pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayList(u8)) EmitError!emitter.Code {
+    var p = regalloc.plan(gpa, r, host, null) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.TooLarge => error.TooLarge,
+    };
+    defer p.deinit(gpa);
+    if (p.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
+    var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len, .r = r, .p = &p };
     defer e.fixups.deinit(gpa);
     const block_pos = try gpa.alloc(usize, r.blocks.items.len);
     defer gpa.free(block_pos);
 
-    // Prologue. The pushes leave rsp 16-byte aligned, and so does the frame.
+    // Prologue.
     try e.b(0x55); // push rbp
     try e.bs(&.{ 0x48, 0x89, 0xe5 }); // mov rbp, rsp
-    try e.b(0x53); // push rbx
-    try e.bs(&.{ 0x41, 0x54 }); // push r12
+    for (saved_regs) |x| {
+        try e.rex(false, 0, 0, x);
+        try e.b(0x50 + (x & 7)); // push
+    }
     try e.mov(CTX, if (win64) RCX else RDI);
     // The chain entry: linked sites and jump-cache hits land here, with rbx
-    // the context and rsp at rbp-16 (the frame torn down).
+    // the context and rsp at rbp - saved_bytes (the frame torn down).
     e.code.chain_entry = @intCast(e.pos());
-    const frame: u32 = (slots_base + a.slots * 8 + 15) & ~@as(u32, 15);
+    // The pushes leave rsp 8 off 16-byte alignment (an odd number of
+    // them); the frame puts it back.
+    comptime std.debug.assert(saved_regs.len % 2 == 1);
+    const frame: u32 = ((slots_base + p.slots * 8 + 15) & ~@as(u32, 15)) + 8;
     try e.rr(true, &.{0x81}, 5, RSP); // sub rsp, frame
     try e.d32(frame);
+    try e.loadChunks();
 
     for (r.blocks.items, 0..) |blk, bi| {
         block_pos[bi] = e.pos();
-        for (blk.start..blk.start + blk.len) |idx| try lower(&e, r, a, idx);
+        e.block = @intCast(bi);
+        e.dirty = p.dirty_in[bi];
+        for (blk.start..blk.start + blk.len) |idx| {
+            e.idx = idx;
+            try lower(&e, r, idx);
+        }
     }
 
     // Epilogue: eax holds the exit code.
     const epi = e.pos();
-    try e.bs(&.{ 0x48, 0x8d, 0x65, 0xf0 }); // lea rsp, [rbp-16]
+    try e.dropFrame();
     try popAndReturn(&e);
 
     for (e.fixups.items) |f| {
@@ -339,14 +476,15 @@ pub fn emit(gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc_mod.All
 }
 
 fn popAndReturn(e: *E) !void {
-    try e.bs(&.{ 0x41, 0x5c }); // pop r12
-    try e.b(0x5b); // pop rbx
+    var k = saved_regs.len;
+    while (k > 0) {
+        k -= 1;
+        const x = saved_regs[k];
+        try e.rex(false, 0, 0, x);
+        try e.b(0x58 + (x & 7)); // pop
+    }
     try e.b(0x5d); // pop rbp
     try e.b(0xc3); // ret
-}
-
-fn slotOf(a: *const alloc_mod.Allocation, ref: ir.Ref) u32 {
-    return a.locs[ref].slot;
 }
 
 /// Masks rax to `t`'s width (values are kept zero-extended).
@@ -391,15 +529,15 @@ fn hostFlags(e: *E) !void {
     try e.b(0x58);
 }
 
-fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize) EmitError!void {
+fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
     const i = r.insts.items[idx];
     const ty = i.ty;
     const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
-    const dst: u32 = if (ty != .none) slotOf(a, @intCast(idx)) else 0;
-    if (i.op.isExt() or ty == .v128 or (i.op == .setreg and ta == .v128)) return lowerExt(e, r, a, i, dst);
-    if (i.a != ir.none) try e.ldSlot(RAX, slotOf(a, i.a));
-    if (i.b != ir.none) try e.ldSlot(RCX, slotOf(a, i.b));
-    if (i.c != ir.none) try e.ldSlot(RDX, slotOf(a, i.c));
+    const dst: ir.Ref = @intCast(idx);
+    if (i.op.isExt() or ty == .v128 or (i.op == .setreg and ta == .v128)) return lowerExt(e, r, i, dst);
+    if (i.a != ir.none) try e.ldVal(RAX, i.a);
+    if (i.b != ir.none) try e.ldVal(RCX, i.b);
+    if (i.c != ir.none) try e.ldVal(RDX, i.c);
     const w = ty == .i64;
 
     switch (i.op) {
@@ -407,6 +545,34 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
         .getreg, .setreg => {
             const t = if (i.op == .getreg) ty else ta;
             const sz = sizeLog2(t) orelse return error.Unsupported;
+            const ck = e.p.chunk_of[idx];
+            if (ck != regalloc.no_chunk) {
+                const c = e.p.chunks[ck];
+                const creg: u8 = @intCast(c.reg);
+                const sh: u8 = @intCast((i.aux - c.off) * 8);
+                const whole = (@as(u32, 1) << @intCast(sz)) == c.bytes;
+                if (i.op == .getreg) {
+                    try e.mov(RAX, creg);
+                    if (sh != 0) try e.shiftImm(true, 5, RAX, sh); // shr rax, sh
+                    try maskTo(e, t);
+                    try e.stVal(dst, RAX);
+                } else {
+                    // Values are zero-extended, so the chunk stays so.
+                    if (whole) {
+                        try e.mov(creg, RAX);
+                    } else {
+                        const bits: u6 = @intCast(8 * (@as(u32, 1) << @intCast(sz)));
+                        const mask: u64 = ((@as(u64, 1) << bits) - 1) << @intCast(sh);
+                        try e.movImm(R10, ~mask);
+                        try e.rr(true, &.{0x21}, R10, creg); // and creg, r10
+                        try e.mov(R10, RAX);
+                        if (sh != 0) try e.shiftImm(true, 4, R10, sh); // shl r10, sh
+                        try e.rr(true, &.{0x09}, R10, creg); // or creg, r10
+                    }
+                    e.dirty |= @as(regalloc.ChunkSet, 1) << @intCast(ck);
+                }
+                return;
+            }
             try e.ldCtx(R10, ctx.off.cpu);
             const disp: i32 = std.math.cast(i32, i.aux) orelse return error.Unsupported;
             if (i.op == .getreg) switch (sz) {
@@ -591,6 +757,7 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.call(&.{ .{ .reg = RAX }, .{ .imm = f.size }, .{ .reg = RCX }, .{ .reg = RDX } });
             try e.rr(false, &.{0x85}, RAX, RAX); // test eax, eax
             const ok = try e.fwd(CC.e);
+            try e.writeback(e.dirty);
             try e.retireOn(i.retired);
             try e.movImm(RCX, i.aux2);
             try e.stCtx(ctx.off.exit_pc, RCX);
@@ -600,8 +767,11 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
         },
         .fence => if (i.aux == 0) try e.bs(&.{ 0x0f, 0xae, 0xf0 }), // mfence; TSO orders the rest
         .@"call.interp" => {
+            try e.writeback(e.dirty);
+            e.dirty = 0;
             try e.ldCtx(R11, ctx.off.interp);
             try e.call(&.{ .{ .imm = r.handles.items[@intCast(i.aux)] }, .{ .imm = i.aux2 } });
+            try e.loadChunks();
             try e.rr(false, &.{0x85}, RAX, RAX);
             if (i.retired == 0) {
                 try e.jmpTo(CC.ne, epilogue);
@@ -613,9 +783,18 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             }
         },
         .@"call.helper" => {
+            try e.writeback(e.dirty);
+            e.dirty = 0;
             try e.ldCtx(R11, ctx.off.helpers);
             try e.load(R11, R11, std.math.cast(i32, i.aux * 8) orelse return error.Unsupported);
-            try e.call(&.{ .{ .reg = RAX }, .{ .reg = RCX }, .{ .reg = RDX } });
+            // Missing arguments are 0, as in ir_eval.
+            const args = [3]E.Arg{
+                if (i.a != ir.none) .{ .reg = RAX } else .{ .imm = 0 },
+                if (i.b != ir.none) .{ .reg = RCX } else .{ .imm = 0 },
+                if (i.c != ir.none) .{ .reg = RDX } else .{ .imm = 0 },
+            };
+            try e.call(&args);
+            try e.loadChunks();
         },
         .poll => {
             try e.bs(&.{ 0x83, 0x7b, ctx.off.exit_request, 0x00 }); // cmp dword [rbx+exit_request], 0
@@ -634,8 +813,9 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.jmpTo(null, @intCast(i.aux2));
         },
         .@"exit.chain" => {
+            try e.writeback(e.dirty);
             try e.retireOn(i.retired);
-            try e.bs(&.{ 0x48, 0x8d, 0x65, 0xf0 }); // lea rsp, [rbp-16]: the chain entry's stack
+            try e.dropFrame(); // the chain entry's stack
             while ((e.pos() + 1) % 4 != 0) try e.b(0x90);
             const site = e.pos();
             try e.bs(&.{ 0xe9, 0, 0, 0, 0 }); // jmp .+5, until linked
@@ -657,6 +837,7 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
         .@"exit.brk" => try e.leave(.brk, i.aux, i.retired),
         .@"exit.undef" => try e.leave(.undef, i.aux, i.retired),
         .@"exit.indirect" => {
+            try e.writeback(e.dirty);
             try e.retireOn(i.retired);
             try e.stCtx(ctx.off.exit_pc, RAX);
             // The jump cache, inline: a hit goes straight to the target's
@@ -674,7 +855,7 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.rm(true, &.{0x39}, RAX, R10, 0); // cmp [r10], rax
             const miss = try e.fwd(CC.ne);
             try e.load(R10, R10, @offsetOf(ctx.JumpEntry, "code"));
-            try e.bs(&.{ 0x48, 0x8d, 0x65, 0xf0 }); // lea rsp, [rbp-16]
+            try e.dropFrame();
             try e.bs(&.{ 0x41, 0xff, 0xe2 }); // jmp r10
             e.land(none);
             e.land(miss);
@@ -683,7 +864,7 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
         },
         else => if (i.op.isPure()) try fallback(e, i, ta) else return error.Unsupported,
     }
-    if (ty != .none) try e.stSlot(dst, RAX);
+    if (ty != .none) try e.stVal(dst, RAX);
 }
 
 /// movdqu xmm`x`, [base+disp]
@@ -704,40 +885,40 @@ fn slotDisp(slot: u32) i32 {
 
 /// The FP and vector ops, and v128 getreg and setreg: each through
 /// ir_eval.evalExtC for now, and v.load and v.store inline.
-fn lowerExt(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) EmitError!void {
+fn lowerExt(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) EmitError!void {
     switch (i.op) {
         .getreg, .setreg => {
             const disp: i32 = std.math.cast(i32, i.aux) orelse return error.Unsupported;
             try e.ldCtx(R10, ctx.off.cpu);
             if (i.op == .getreg) {
                 try vload(e, 0, R10, disp);
-                try vstore(e, RSP, slotDisp(dst), 0);
+                try vstore(e, RSP, slotDisp(e.vslot(dst)), 0);
             } else {
-                try vload(e, 0, RSP, slotDisp(slotOf(a, i.a)));
+                try vload(e, 0, RSP, slotDisp(e.vslot(i.a)));
                 try vstore(e, R10, disp, 0);
             }
             return;
         },
-        .@"v.load", .@"v.store" => return vmemOp(e, a, i, dst),
+        .@"v.load", .@"v.store" => return vmemOp(e, i, dst),
         else => {},
     }
     if (!i.op.isExt()) return error.Unsupported;
-    if (try vecNative(e, r, a, i, dst)) return;
-    if (try fpNative(e, r, a, i, dst)) return;
-    return extFallback(e, r, a, i, dst);
+    if (try vecNative(e, r, i, dst)) return;
+    if (try fpNative(e, r, i, dst)) return;
+    return extFallback(e, r, i, dst);
 }
 
 /// ir_eval.evalExtC for an `fp.*` or `v.*` op.
-fn extFallback(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) EmitError!void {
+fn extFallback(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) EmitError!void {
     // Stage the operands, each zero-extended to 16 bytes.
     for (i.operands(), 0..) |o, k| {
         if (o == ir.none) continue;
         const at: i32 = @intCast(io_base + 16 * k);
         if (r.insts.items[o].ty == .v128) {
-            try vload(e, 0, RSP, slotDisp(slotOf(a, o)));
+            try vload(e, 0, RSP, slotDisp(e.vslot(o)));
             try vstore(e, RSP, at, 0);
         } else {
-            try e.ldSlot(RAX, slotOf(a, o));
+            try e.ldVal(RAX, o);
             try e.store(RSP, at, RAX);
             try e.rr(false, &.{0x31}, RAX, RAX);
             try e.store(RSP, at + 8, RAX);
@@ -749,19 +930,19 @@ fn extFallback(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir
     try e.call(&.{ .{ .imm = ir_eval.fallbackCode(i.op, i.ty, ta) }, .{ .reg = RAX }, .{ .imm = i.aux }, .{ .imm = i.aux2 } });
     if (i.ty == .v128) {
         try vload(e, 0, RSP, io_base);
-        try vstore(e, RSP, slotDisp(dst), 0);
+        try vstore(e, RSP, slotDisp(e.vslot(dst)), 0);
     } else if (i.ty != .none) {
         try e.load(RAX, RSP, io_base);
-        try e.stSlot(dst, RAX);
+        try e.stVal(dst, RAX);
     }
 }
 
 /// v.load and v.store: 16 bytes through the TLB, or two 8-byte halves
 /// through the slow path.
-fn vmemOp(e: *E, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !void {
+fn vmemOp(e: *E, i: ir.Inst, dst: ir.Ref) !void {
     const f: ir.MemFlags = @bitCast(i.aux);
     const store = i.op == .@"v.store";
-    try e.ldSlot(RAX, slotOf(a, i.a));
+    try e.ldVal(RAX, i.a);
     if (f.aligned) {
         try e.bs(&.{ 0xa8, 15 }); // test al, 15
         const ok = try e.fwd(CC.e);
@@ -787,11 +968,11 @@ fn vmemOp(e: *E, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !void {
     const miss2 = try e.fwd(CC.a);
     try e.rm(true, &.{0x03}, RAX, R11, table + 8);
     if (store) {
-        try vload(e, 0, RSP, slotDisp(slotOf(a, i.b)));
+        try vload(e, 0, RSP, slotDisp(e.vslot(i.b)));
         try vstore(e, RAX, 0, 0);
     } else {
         try vload(e, 0, RAX, 0);
-        try vstore(e, RSP, slotDisp(dst), 0);
+        try vstore(e, RSP, slotDisp(e.vslot(dst)), 0);
     }
     const join = try e.fwd(null);
     e.land(miss1);
@@ -802,7 +983,7 @@ fn vmemOp(e: *E, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !void {
         try e.load(RAX, RSP, io_base);
         if (h == 1) try e.aluImm(true, 0, RAX, 8);
         if (store) {
-            try e.ldSlot(RCX, slotOf(a, i.b) + @as(u32, @intCast(h)));
+            try e.ldSlot(RCX, e.vslot(i.b) + @as(u32, @intCast(h)));
             try e.ldCtx(R11, ctx.off.slow_store);
             try e.call(&.{ .{ .reg = RAX }, .{ .imm = 3 }, .{ .reg = RCX } });
         } else {
@@ -811,6 +992,7 @@ fn vmemOp(e: *E, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !void {
         }
         try e.rr(false, &.{0x85}, RAX, RAX);
         const ok = try e.fwd(CC.e);
+        try e.writeback(e.dirty);
         try e.mov(RCX, RAX);
         try e.retireOn(i.retired);
         try e.movImm(RDX, i.aux2);
@@ -820,7 +1002,7 @@ fn vmemOp(e: *E, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !void {
         e.land(ok);
         if (!store) {
             try e.ldCtx(RAX, ctx.off.scratch);
-            try e.store(RSP, slotDisp(dst + @as(u32, @intCast(h))), RAX);
+            try e.store(RSP, slotDisp(e.vslot(dst) + @as(u32, @intCast(h))), RAX);
         }
     }
     e.land(join);
@@ -845,20 +1027,26 @@ fn sseI(e: *E, prefix: ?u8, opc: []const u8, reg: u8, rm: u8, imm: u8) !void {
     try e.b(imm);
 }
 
-/// xmm`x` = the value in `slot`: 16 bytes, or a scalar's 8.
-fn ldX(e: *E, x: u8, slot: u32, t: Type) !void {
-    if (t == .v128) return vload(e, x, RSP, slotDisp(slot));
-    try e.b(0xf3); // movq xmm, m64
-    try e.rm(false, &.{ 0x0f, 0x7e }, x, RSP, slotDisp(slot));
+/// xmm`x` = value `v`: 16 bytes, or a scalar's 8.
+fn ldX(e: *E, x: u8, v: ir.Ref, t: Type) !void {
+    if (t == .v128) return vload(e, x, RSP, slotDisp(e.vslot(v)));
+    switch (e.p.locs[v]) {
+        .reg => |g| try sse(e, 0x66, true, &.{0x6e}, x, @intCast(g)), // movq xmm, r64
+        .slot => |s| {
+            try e.b(0xf3); // movq xmm, m64
+            try e.rm(false, &.{ 0x0f, 0x7e }, x, RSP, slotDisp(s));
+        },
+        .none => unreachable,
+    }
 }
 
-/// The value in xmm`x` to `slot`: 16 bytes, or a scalar of type t,
+/// The value in xmm`x` to value `v`: 16 bytes, or a scalar of type t,
 /// zero-extended to 8.
-fn stX(e: *E, slot: u32, x: u8, t: Type) !void {
-    if (t == .v128) return vstore(e, RSP, slotDisp(slot), x);
+fn stX(e: *E, v: ir.Ref, x: u8, t: Type) !void {
+    if (t == .v128) return vstore(e, RSP, slotDisp(e.vslot(v)), x);
     try sse(e, 0x66, t == .i64, &.{0x7e}, x, RAX); // movd/movq rax, xmm
     try maskTo(e, t);
-    try e.stSlot(slot, RAX);
+    try e.stVal(v, RAX);
 }
 
 /// xmm`x` = imm32 in every 32-bit lane.
@@ -871,7 +1059,7 @@ fn splat32(e: *E, x: u8, v: u32) !void {
 /// Integer `v.*` ops that SSE2 (or SSSE3 and SSE4.1 where the build
 /// allows) does exactly: a in xmm0, b in xmm1, the result in xmm0.
 /// Returns false, emitting nothing, for the rest.
-fn vecNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !bool {
+fn vecNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     _ = r;
     if (i.op.isFp()) return false;
     const x = ir.ExtAux.of(i.aux);
@@ -899,28 +1087,28 @@ fn vecNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.I
     if (!can) return false;
     switch (i.op) {
         .@"v.make" => {
-            try e.ldSlot(RAX, slotOf(a, i.a));
-            try e.ldSlot(RCX, slotOf(a, i.b));
-            try e.stSlot(dst, RAX);
-            try e.stSlot(dst + 1, RCX);
+            try e.ldVal(RAX, i.a);
+            try e.ldVal(RCX, i.b);
+            try e.stSlot(e.vslot(dst), RAX);
+            try e.stSlot(e.vslot(dst) + 1, RCX);
             return true;
         },
         .@"v.lane" => {
-            const off: i32 = slotDisp(slotOf(a, i.a)) + @as(i32, x.imm) * @as(i32, @intCast(x.bits() / 8));
+            const off: i32 = slotDisp(e.vslot(i.a)) + @as(i32, x.imm) * @as(i32, @intCast(x.bits() / 8));
             switch (es) {
                 0 => try e.rm(false, &.{ 0x0f, 0xb6 }, RAX, RSP, off),
                 1 => try e.rm(false, &.{ 0x0f, 0xb7 }, RAX, RSP, off),
                 2 => try e.rm(false, &.{0x8b}, RAX, RSP, off),
                 3 => try e.load(RAX, RSP, off),
             }
-            try e.stSlot(dst, RAX);
+            try e.stVal(dst, RAX);
             return true;
         },
         .@"v.ins" => {
-            try vload(e, 0, RSP, slotDisp(slotOf(a, i.a)));
-            try vstore(e, RSP, slotDisp(dst), 0);
-            try e.ldSlot(RAX, slotOf(a, i.b));
-            const off: i32 = slotDisp(dst) + @as(i32, x.imm) * @as(i32, @intCast(x.bits() / 8));
+            try vload(e, 0, RSP, slotDisp(e.vslot(i.a)));
+            try vstore(e, RSP, slotDisp(e.vslot(dst)), 0);
+            try e.ldVal(RAX, i.b);
+            const off: i32 = slotDisp(e.vslot(dst)) + @as(i32, x.imm) * @as(i32, @intCast(x.bits() / 8));
             switch (es) {
                 0 => try e.rm(false, &.{0x88}, RAX, RSP, off),
                 1 => try e.rm16(&.{0x89}, RAX, RSP, off),
@@ -930,7 +1118,7 @@ fn vecNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.I
             return true;
         },
         .@"v.dup" => {
-            try e.ldSlot(RAX, slotOf(a, i.a));
+            try e.ldVal(RAX, i.a);
             try sse(e, 0x66, true, &.{0x6e}, 0, RAX); // movq xmm0, rax
             switch (es) {
                 0 => {
@@ -945,13 +1133,13 @@ fn vecNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.I
                 2 => try sseI(e, 0x66, &.{0x70}, 0, 0, 0),
                 3 => try sse(e, 0x66, false, &.{0x6c}, 0, 0), // punpcklqdq
             }
-            try vstore(e, RSP, slotDisp(dst), 0);
+            try vstore(e, RSP, slotDisp(e.vslot(dst)), 0);
             return true;
         },
         else => {},
     }
-    try vload(e, 0, RSP, slotDisp(slotOf(a, i.a)));
-    if (i.b != ir.none) try vload(e, 1, RSP, slotDisp(slotOf(a, i.b)));
+    try vload(e, 0, RSP, slotDisp(e.vslot(i.a)));
+    if (i.b != ir.none) try vload(e, 1, RSP, slotDisp(e.vslot(i.b)));
     switch (i.op) {
         .@"v.and" => try sse(e, 0x66, false, &.{0xdb}, 0, 1),
         .@"v.or" => try sse(e, 0x66, false, &.{0xeb}, 0, 1),
@@ -1030,7 +1218,7 @@ fn vecNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.I
         },
         else => unreachable,
     }
-    try vstore(e, RSP, slotDisp(dst), 0);
+    try vstore(e, RSP, slotDisp(e.vslot(dst)), 0);
     return true;
 }
 
@@ -1095,7 +1283,7 @@ fn vecCmp(e: *E, es: u2, p: ir.Pred) !void {
 /// inexact, which map one to one. Otherwise ir_eval runs it (the slow
 /// path), from the same operands. Returns false, emitting nothing, for an
 /// op or form it doesn't do.
-fn fpNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !bool {
+fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     const x = ir.ExtAux.of(i.aux);
     if (x.rounding != 0 or x.daz or x.ftz) return false;
     const ta: Type = r.insts.items[i.a].ty;
@@ -1128,8 +1316,8 @@ fn fpNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.In
         else => if (arith == null) return false,
     }
     if (watch) try clearHostFlags(e);
-    try ldX(e, 0, slotOf(a, i.a), ta);
-    if (i.b != ir.none) try ldX(e, 1, slotOf(a, i.b), r.insts.items[i.b].ty);
+    try ldX(e, 0, i.a, ta);
+    if (i.b != ir.none) try ldX(e, 1, i.b, r.insts.items[i.b].ty);
     var nan_check = true;
     switch (i.op) {
         .@"fp.cmp" => {
@@ -1149,18 +1337,18 @@ fn fpNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.In
             try e.bs(&.{ 0x85, 0xc9 }); // test ecx, ecx
             try e.bs(&.{ 0xb9, 3, 0, 0, 0 }); // mov ecx, 3
             try e.bs(&.{ 0x0f, 0x45, 0xc1 }); // cmovne eax, ecx
-            try e.stSlot(dst, RAX);
+            try e.stVal(dst, RAX);
             nan_check = false;
         },
         .@"fp.cvt" => try sse(e, if (dbl) 0xf3 else 0xf2, false, &.{0x5a}, 0, 0), // cvtss2sd / cvtsd2ss (by the source)
         .@"fp.tosint" => {
             try sse(e, if (dbl) 0xf2 else 0xf3, i.ty == .i64, &.{0x2d}, RAX, 0); // cvtss2si / cvtsd2si, nearest
             try maskTo(e, i.ty);
-            try e.stSlot(dst, RAX);
+            try e.stVal(dst, RAX);
             nan_check = false;
         },
         .@"fp.fromsint" => {
-            try e.ldSlot(RAX, slotOf(a, i.a));
+            try e.ldVal(RAX, i.a);
             try sse(e, 0x66, false, &.{0xef}, 0, 0); // pxor xmm0, xmm0
             try sse(e, if (i.ty == .i64) 0xf2 else 0xf3, ta == .i64, &.{0x2a}, 0, RAX); // cvtsi2ss / sd
             nan_check = false;
@@ -1201,7 +1389,7 @@ fn fpNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.In
     if (slow[0] != null or slow[1] != null) {
         const done = try e.fwd(null);
         for (slow) |s0| if (s0) |at| e.land(at);
-        try extFallback(e, r, a, i, dst);
+        try extFallback(e, r, i, dst);
         e.land(done);
     }
     return true;
@@ -1292,6 +1480,8 @@ fn divide(e: *E, op: Op, w: bool) !void {
 fn fallback(e: *E, i: ir.Inst, ta: Type) !void {
     // evalOpC doesn't take the context first, so stage its five
     // arguments by hand.
+    const live = e.saveMask();
+    try e.saveRegs(live);
     const args = [_]E.Arg{ .{ .imm = ir_eval.fallbackCode(i.op, i.ty, ta) }, .{ .reg = RAX }, .{ .reg = RCX }, .{ .reg = RDX }, .{ .imm = i.aux } };
     for (args, 0..) |arg, k| switch (arg) {
         .reg => |rg| try e.store(RSP, @intCast(staging + 8 * k), rg),
@@ -1310,6 +1500,7 @@ fn fallback(e: *E, i: ir.Inst, ta: Type) !void {
     }
     try e.movImm(R11, @intFromPtr(&ir_eval.evalOpC));
     try e.bs(&.{ 0x41, 0xff, 0xd3 }); // call r11
+    try e.restoreRegs(live);
 }
 
 /// A load or store through the TLB, with the slow path inline after the
@@ -1372,6 +1563,7 @@ fn memOp(e: *E, i: ir.Inst) !void {
     }
     try e.rr(false, &.{0x85}, RAX, RAX);
     const ok = try e.fwd(CC.e);
+    try e.writeback(e.dirty);
     try e.mov(RCX, RAX); // the exit code
     if (!store and f.rmw) {
         // Report the read-modify-write's fault as a write.
@@ -1630,4 +1822,113 @@ test "random 386 programs agree with T0 natively, region by region" {
         }
     }
     try std.testing.expect(regions > 300);
+}
+
+// ---------------------------------------------------------------- random IR
+
+const irfuzz = @import("fuzz.zig");
+
+/// Runs `r` natively in `region` (reset first).
+fn runNative(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env, r: *const ir.Region, c: cases.Case) !cases.Result {
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(gpa);
+    const out = try emitRegion(gpa, r, &code);
+    region.reset();
+    const off = region.alloc(code.items.len, 16) orelse return error.TooLarge;
+    region.write(off, code.items);
+    const cx = env.reset(c);
+    return env.result(@enumFromInt(region.entry(off + out.entry)(cx)));
+}
+
+/// Whether the region (as text) still runs differently natively, in a
+/// child process with an alarm, so a crash or a hang counts as differing.
+fn stillDiffers(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env, text: []const u8, c: cases.Case) bool {
+    var r = ir.parse(gpa, text) catch return false;
+    defer r.deinit(gpa);
+    if (ir.verify(&r) != null) return false;
+    for (r.blocks.items, 0..) |blk, bi| {
+        const t = r.insts.items[blk.start + blk.len - 1];
+        // ir_eval must finish: leave loops alone.
+        if ((t.op == .br or t.op == .brcond) and t.aux <= bi) return false;
+        if (t.op == .brcond and t.aux2 <= bi) return false;
+    }
+    const want = env.evalCase(gpa, &r, c) catch return false;
+    const linux = std.os.linux;
+    const pid = linux.fork();
+    if (pid == 0) {
+        _ = linux.syscall1(.alarm, 1);
+        const got = runNative(gpa, region, env, &r, c) catch linux.exit(2);
+        linux.exit(if (cases.same(want, got)) 0 else 1);
+    }
+    var status: u32 = 0;
+    _ = linux.waitpid(@intCast(pid), &status, 0);
+    return status != 0 and status != 2 << 8;
+}
+
+/// Deletes runs of instruction lines while the region keeps differing.
+fn reduce(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env, text: []const u8, c: cases.Case) ![]u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(gpa);
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |l| if (l.len != 0) try lines.append(gpa, l);
+    var run: usize = lines.items.len / 2;
+    while (run > 0) {
+        var changed = false;
+        var k: usize = lines.items.len;
+        while (k > 0) {
+            const start = k -| run;
+            k = start;
+            var keep: std.ArrayList([]const u8) = .empty;
+            defer keep.deinit(gpa);
+            for (lines.items, 0..) |l, j| {
+                const t = std.mem.trimStart(u8, l, " ");
+                const term = std.mem.startsWith(u8, t, "br") or std.mem.startsWith(u8, t, "exit.");
+                if (j >= start and j < start + run and l[0] == ' ' and !term) continue;
+                try keep.append(gpa, l);
+            }
+            if (keep.items.len == lines.items.len) continue;
+            const joined = try std.mem.join(gpa, "\n", keep.items);
+            defer gpa.free(joined);
+            if (stillDiffers(gpa, region, env, joined, c)) {
+                std.mem.swap(std.ArrayList([]const u8), &lines, &keep);
+                changed = true;
+            }
+        }
+        if (!changed) run /= 2;
+    }
+    return std.mem.join(gpa, "\n", lines.items);
+}
+
+/// Random regions per `zig build vcpu`, from fuzz_seed.
+const fuzz_count = 3000;
+const fuzz_seed = 0x5eed;
+
+test "random regions match ir_eval" {
+    if (!supported or builtin.os.tag != .linux or !codemem.available()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const env = try gpa.create(cases.Env);
+    defer gpa.destroy(env);
+    var region = try codemem.Region.init(1 << 20);
+    defer region.deinit();
+    for (0..fuzz_count) |n| {
+        const seed = fuzz_seed +% n;
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const rnd = prng.random();
+        var r = try irfuzz.generate(gpa, rnd, .{});
+        defer r.deinit(gpa);
+        const c: cases.Case = .{ .text = "", .regs = irfuzz.regs(rnd), .budget = irfuzz.budget(rnd) };
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        try ir.print(&r, &aw.writer);
+        if (!stillDiffers(gpa, &region, env, aw.written(), c)) continue;
+        const small = try reduce(gpa, &region, env, aw.written(), c);
+        defer gpa.free(small);
+        std.debug.print("fuzz seed 0x{x} differs: regs {any} budget {d}\nreduced:\n{s}\n", .{ seed, c.regs, c.budget, small });
+        var r2 = try ir.parse(gpa, small);
+        defer r2.deinit(gpa);
+        const want = try env.evalCase(gpa, &r2, c);
+        const got = try runNative(gpa, &region, env, &r2, c);
+        std.debug.print(" want {any}\n  got {any}\n", .{ want, got });
+        return error.TestExpectedEqual;
+    }
 }
