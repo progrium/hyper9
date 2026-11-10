@@ -1940,7 +1940,7 @@ const E = struct {
     /// (flushPending, or the exit tail).
     fn pendingFlags(e: *E, i: ir.Inst) !void {
         const w = &e.w;
-        if (e.pend) |p| if (p.off != i.aux) try e.flushPending();
+        if (e.pend) |p| if (p.off != i.aux or p.mask != @as(u32, if (i.aux2 == 0) 0xf000_0000 else @intCast(ir_eval.eflags_mask))) try e.flushPending();
         const a = e.r.insts.items[i.a];
         const ta = e.ty(a.a);
         const lazy = i.aux2 == 1 and e.plan.kind[i.a] == .inl and switch (a.op) {

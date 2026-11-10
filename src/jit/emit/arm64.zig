@@ -1219,7 +1219,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
         .@"pending.flags" => {
             // Deferred: written only on the way out of the block, before a
             // call, or when other flags take a different slot.
-            if (e.pend) |p| if (p.off != i.aux) try writePend(e, p);
+            if (e.pend) |p| if (p.off != i.aux or p.group != i.aux2) try writePend(e, p);
             e.pend = .{ .v = i.a, .off = i.aux, .group = i.aux2 };
         },
         .@"nzcv.pack", .@"nzcv.unpack" => {

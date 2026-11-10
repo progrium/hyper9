@@ -36,8 +36,11 @@
 //!   write both. In between, an emitter may keep `retire`'s counts in a
 //!   register and add them to both fields there. A `poll` must still test
 //!   the exact budget less what's pending (`<= 0`), so an interrupt lands
-//!   on the instruction T0's count would; other threads interrupt through
-//!   ctx.exit_request, never the budget.
+//!   on the instruction T0's count would. Another thread interrupts by
+//!   setting ctx.exit_request and then dropping the budget far below zero
+//!   (cache.request), so a poll may test the budget alone; an emitter that
+//!   does must take from the budget with an atomic op, so as not to lose
+//!   that store.
 //! - **Flags are values.** `nzcv.*` (arm64) and `eflags.*` (x86) produce a
 //!   `flags` value, and `*.cond` reads a condition from one. The reference
 //!   semantics compute the flags eagerly, packed as the guest packs them;
@@ -361,7 +364,8 @@ pub const Op = enum(u16) {
     /// They're written before any way out of the region (every exit, a
     /// fault, a poll that leaves) and before `call.interp`, `call.helper`,
     /// and `copy`. A `setreg` overlapping aux drops it; a new
-    /// `pending.flags` writes the old one first if its offset differs.
+    /// `pending.flags` writes the old one first if its offset or kind
+    /// (aux2) differs, so that writing each at once stays correct.
     /// Pending flags stay pending across `br` and `brcond` to the blocks
     /// they name, so a loop needn't store them on each back edge: a block
     /// starts with them pending where its predecessors left them so (the

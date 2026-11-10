@@ -84,8 +84,10 @@ const io_base = staging + 40;
 /// Where MXCSR goes through on its way to and from a register: the last
 /// staging slot, free outside a call.
 const mxcsr_tmp = staging + 32;
+/// The guest's flags word while pending.flags defers it (E.pend_off).
+const pend_slot = io_base + 48;
 /// Where a call keeps the live values of caller-saved registers.
-const save_base = io_base + 48;
+const save_base = pend_slot + 8;
 const slots_base = save_base + 8 * 16;
 
 /// The callee-saved registers every region pushes after rbp, in order.
@@ -155,6 +157,27 @@ const E = struct {
     /// A condition computed early into r11 (condEarly), to go to its
     /// value when the emit loop reaches it.
     pending: ?usize = null,
+    /// pending.flags deferred (pendMode): the Cpu offset of the flags
+    /// word, which pend_slot holds for the whole region. It's the word in
+    /// memory except while flags are pending, and goes out at every exit
+    /// and call (syncPend); null when each pending.flags writes at once.
+    pend_off: ?i32 = null,
+
+    /// pend_slot to the guest's word. r10 and r11 only.
+    fn syncPend(e: *E) !void {
+        const off = e.pend_off orelse return;
+        try e.rm(false, &.{0x8b}, R11, RSP, pend_slot); // mov r11d, [rsp+pend]
+        try e.ldCtx(R10, ctx.off.cpu);
+        try e.rm(false, &.{0x89}, R11, R10, off); // mov [cpu+off], r11d
+    }
+    /// The guest's word to pend_slot, once it has changed in memory. rax
+    /// and r10 only (r11 may hold condEarly's condition).
+    fn reloadPend(e: *E) !void {
+        const off = e.pend_off orelse return;
+        try e.ldCtx(R10, ctx.off.cpu);
+        try e.rm(false, &.{0x8b}, RAX, R10, off);
+        try e.rm(false, &.{0x89}, RAX, RSP, pend_slot);
+    }
 
     fn pos(e: *E) usize {
         return e.out.items.len - e.base;
@@ -372,13 +395,17 @@ const E = struct {
     /// ctx.retired += pending, ctx.budget -= pending, pending = 0.
     fn flush(e: *E) !void {
         try e.rm(true, &.{0x01}, PENDING, CTX, ctx.off.retired); // add [retired], r9
-        try e.rm(true, &.{0x29}, PENDING, CTX, ctx.off.budget); // sub [budget], r9
+        // Locked: a kick from another thread lowers the budget too
+        // (cache.request), and an unlocked sub could lose its store.
+        try e.b(0xf0);
+        try e.rm(true, &.{0x29}, PENDING, CTX, ctx.off.budget); // lock sub [budget], r9
         try e.rr(false, &.{0x31}, PENDING, PENDING); // xor r9d, r9d
     }
 
     /// Sets exit_pc and leaves with `code`, counting `n` retired.
     fn leave(e: *E, code: ctx.Exit, pc: u64, n: u64) !void {
         try e.writeback(e.dirty);
+        try e.syncPend();
         try e.retireOn(n);
         try e.movImm(RAX, pc);
         try e.stCtx(ctx.off.exit_pc, RAX);
@@ -502,6 +529,8 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     try e.d32(frame);
     try e.rr(false, &.{0x31}, PENDING, PENDING); // xor r9d, r9d: nothing pending
     try e.loadChunks();
+    e.pend_off = pendMode(r, &p);
+    try e.reloadPend();
     for (r.insts.items) |i| {
         if (i.op.isFp() and i.aux2 != 0) e.watch = true;
     }
@@ -524,6 +553,13 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
                 continue;
             }
             try lower(&e, r, idx);
+            if (e.pend_off) |po| switch (r.insts.items[idx].op) {
+                // The callee may have changed the word; a setreg over it
+                // drops what's pending.
+                .@"call.interp", .@"call.helper" => try e.reloadPend(),
+                .setreg => if (overlaps(r, r.insts.items[idx], @intCast(po))) try e.reloadPend(),
+                else => {},
+            };
             // The guest set an exception word: start the host's flags over.
             if (e.watch and r.insts.items[idx].op == .setreg and setsWatched(r, r.insts.items[idx])) try clearHostFlags(&e);
         }
@@ -540,6 +576,41 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     }
     e.code.entry = 0;
     return e.code;
+}
+
+/// Whether getreg or setreg `i` touches a byte of the u32 at `off`.
+fn overlaps(r: *const ir.Region, i: ir.Inst, off: u64) bool {
+    const t = if (i.op == .setreg) r.insts.items[i.a].ty else i.ty;
+    const n: u64 = switch (t) {
+        .i1, .i8 => 1,
+        .i16 => 2,
+        .i32 => 4,
+        .v128 => 16,
+        else => 8,
+    };
+    return i.aux < off + 4 and off < i.aux + n;
+}
+
+/// The flags word's Cpu offset when pending.flags can stay pending for
+/// the whole region, across its edges (E.pend_off): every pending.flags
+/// names the same word and kind, nothing in the region reads the word
+/// (so it's stale in memory only where nothing looks), and no chunk
+/// holds it. Null otherwise: each pending.flags is written at once.
+fn pendMode(r: *const ir.Region, p: *const regalloc.Plan) ?i32 {
+    var off: ?u64 = null;
+    var kind: u64 = 0;
+    for (r.insts.items) |i| if (i.op == .@"pending.flags") {
+        if (off) |o| {
+            if (o != i.aux or kind != i.aux2) return null;
+        } else {
+            off = i.aux;
+            kind = i.aux2;
+        }
+    };
+    const o = off orelse return null;
+    for (r.insts.items) |i| if (i.op == .getreg and overlaps(r, i, o)) return null;
+    for (p.chunks) |c| if (o < c.off + c.bytes and c.off < o + 4) return null;
+    return std.math.cast(i32, o);
 }
 
 /// Whether setreg `i` writes a byte of a word some fp op reports to.
@@ -868,6 +939,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             try e.rr(false, &.{0x85}, RAX, RAX); // test eax, eax
             const ok = try e.fwd(CC.e);
             try e.writeback(e.dirty);
+            try e.syncPend();
             try e.retireOn(i.retired);
             try e.movImm(RCX, i.aux2);
             try e.stCtx(ctx.off.exit_pc, RCX);
@@ -878,6 +950,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         .fence => if (i.aux == 0) try e.bs(&.{ 0x0f, 0xae, 0xf0 }), // mfence; TSO orders the rest
         .@"call.interp" => {
             try e.writeback(e.dirty);
+            try e.syncPend();
             e.dirty = 0;
             try e.ldCtx(R11, ctx.off.interp);
             try e.call(&.{ .{ .imm = r.handles.items[@intCast(i.aux)] }, .{ .imm = i.aux2 } });
@@ -894,6 +967,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         },
         .@"call.helper" => {
             try e.writeback(e.dirty);
+            try e.syncPend();
             e.dirty = 0;
             try e.ldCtx(R11, ctx.off.helpers);
             try e.load(R11, R11, std.math.cast(i32, i.aux * 8) orelse return error.Unsupported);
@@ -907,11 +981,9 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             try e.loadChunks();
         },
         .poll => {
-            try e.bs(&.{ 0x83, 0x7b, ctx.off.exit_request, 0x00 }); // cmp dword [rbx+exit_request], 0
-            const req = try e.fwd(CC.ne);
+            // The budget alone: a request lowers it too (cache.request).
             try e.rm(true, &.{0x39}, PENDING, CTX, ctx.off.budget); // cmp [budget], r9: budget - pending
             const ok = try e.fwd(CC.g);
-            e.land(req);
             try e.leave(.interrupted, i.aux, i.retired);
             e.land(ok);
         },
@@ -925,10 +997,23 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             for (e.p.chunks, 0..) |c, k| {
                 if (i.aux < c.off + c.bytes and c.off < i.aux + 4) over |= @as(regalloc.ChunkSet, 1) << @intCast(k);
             }
+            try e.aluImm(false, 4, RAX, @bitCast(mask)); // and eax, mask
+            if (e.pend_off != null) {
+                // Merged into pend_slot (pendMode saw to it that no chunk
+                // holds the word).
+                try e.rm(false, &.{0x8b}, RCX, RSP, pend_slot);
+                try e.aluImm(false, 4, RCX, @bitCast(~mask));
+                try e.rr(false, &.{0x09}, RCX, RAX); // or eax, ecx
+                try e.rm(false, &.{0x89}, RAX, RSP, pend_slot);
+                return;
+            }
             try e.writeback(over & e.dirty);
             e.dirty &= ~over;
-            try e.aluImm(false, 4, RAX, @bitCast(mask)); // and eax, mask
+            // Merged into the word: old & ~mask | pack.
             try e.ldCtx(R10, ctx.off.cpu);
+            try e.rm(false, &.{0x8b}, RCX, R10, off); // mov ecx, [cpu+off]
+            try e.aluImm(false, 4, RCX, @bitCast(~mask)); // and ecx, ~mask
+            try e.rr(false, &.{0x09}, RCX, RAX); // or eax, ecx
             try e.rm(false, &.{0x89}, RAX, R10, off); // mov [cpu+off], eax
             for (e.p.chunks, 0..) |_, k| {
                 if (over & (@as(regalloc.ChunkSet, 1) << @intCast(k)) != 0) try e.chunkAccess(k, false);
@@ -942,6 +1027,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         },
         .@"exit.chain" => {
             try e.writeback(e.dirty);
+            try e.syncPend();
             try e.retireOn(i.retired);
             try e.dropFrame(); // the chain entry's stack
             while ((e.pos() + 1) % 4 != 0) try e.b(0x90);
@@ -981,6 +1067,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         .@"exit.undef" => try e.leave(.undef, i.aux, i.retired),
         .@"exit.indirect" => {
             try e.writeback(e.dirty);
+            try e.syncPend();
             try e.retireOn(i.retired);
             try e.stCtx(ctx.off.exit_pc, RAX);
             // The jump cache, inline: a hit goes straight to the target's
@@ -1101,8 +1188,16 @@ fn lowerExt(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) EmitError!void 
     if (!i.op.isExt()) return error.Unsupported;
     if (try vecNative(e, r, i, dst)) return;
     if (try fpNative(e, r, i, dst)) return;
+    const key = @as(usize, @intFromEnum(i.op)) * 4 + ir.ExtAux.of(i.aux).esize;
+    if (key < ext_fallbacks.len) ext_fallbacks[key] +|= 1;
     return extFallback(e, r, i, dst);
 }
+
+/// The `fp.*` and `v.*` ops compiled to ir_eval's fallback outright (not
+/// a native op's slow path), by op and lane size (op * 4 + esize), for
+/// the fuzzers' reports. Not atomic: a
+/// tally, not an invariant.
+pub var ext_fallbacks: [300 * 4]u32 = @splat(0);
 
 /// ir_eval.evalExtC for an `fp.*` or `v.*` op.
 fn extFallback(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) EmitError!void {
@@ -1189,6 +1284,7 @@ fn vmemOp(e: *E, i: ir.Inst, dst: ir.Ref) !void {
         try e.rr(false, &.{0x85}, RAX, RAX);
         const ok = try e.fwd(CC.e);
         try e.writeback(e.dirty);
+        try e.syncPend();
         try e.mov(RCX, RAX);
         try e.retireOn(i.retired);
         try e.movImm(RDX, i.aux2);
@@ -1264,7 +1360,7 @@ fn vecNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     const T4 = [4]u8;
     const can = switch (i.op) {
         .@"v.make", .@"v.and", .@"v.or", .@"v.xor", .@"v.andn", .@"v.add", .@"v.sub", .@"v.lane", .@"v.ins", .@"v.dup", .@"v.ext" => true,
-        .@"v.zip" => true,
+        .@"v.zip", .@"v.uzp", .@"v.trn" => true,
         .@"v.mul" => es == 1 or (es == 2 and sse41),
         .@"v.shl", .@"v.lshr" => es != 0 and x.imm < 256,
         .@"v.ashr" => (es == 1 or es == 2) and x.imm < 256,
@@ -1371,6 +1467,45 @@ fn vecNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
             const lo = T4{ 0x60, 0x61, 0x62, 0x6c };
             const hi = T4{ 0x68, 0x69, 0x6a, 0x6d };
             try sse(e, 0x66, false, &.{if (x.imm == 0) lo[es] else hi[es]}, 0, 1);
+        },
+        .@"v.uzp" => switch (es) {
+            // Even lanes (imm 0) or odd lanes of a, then of b.
+            0, 1 => {
+                // Each lane's half, sign-extended to the whole lane, then
+                // a signed pack, which can't saturate.
+                const sh: u8 = if (es == 0) 0x71 else 0x72;
+                const n: u8 = if (es == 0) 8 else 16;
+                for ([_]u8{ 0, 1 }) |v| {
+                    if (x.imm == 0) try sseI(e, 0x66, &.{sh}, 6, v, n); // psllw/pslld
+                    try sseI(e, 0x66, &.{sh}, 4, v, n); // psraw/psrad
+                }
+                try sse(e, 0x66, false, &.{if (es == 0) 0x63 else 0x6b}, 0, 1); // packsswb / packssdw
+            },
+            2 => try sseI(e, null, &.{0xc6}, 0, 1, if (x.imm == 0) 0x88 else 0xdd), // shufps
+            3 => try sse(e, 0x66, false, &.{if (x.imm == 0) 0x6c else 0x6d}, 0, 1), // punpckl/hqdq
+        },
+        .@"v.trn" => switch (es) {
+            // Pairs: (a's lane, b's lane) from the even lanes (imm 0) or
+            // the odd ones.
+            0, 1 => {
+                const sh: u8 = if (es == 0) 0x71 else 0x72;
+                const n: u8 = if (es == 0) 8 else 16;
+                if (x.imm == 0) {
+                    try sseI(e, 0x66, &.{sh}, 6, 0, n); // a's even lanes, alone
+                    try sseI(e, 0x66, &.{sh}, 2, 0, n);
+                    try sseI(e, 0x66, &.{sh}, 6, 1, n); // b's, moved up
+                } else {
+                    try sseI(e, 0x66, &.{sh}, 2, 0, n); // a's odd lanes, moved down
+                    try sseI(e, 0x66, &.{sh}, 2, 1, n); // b's, alone
+                    try sseI(e, 0x66, &.{sh}, 6, 1, n);
+                }
+                try sse(e, 0x66, false, &.{0xeb}, 0, 1); // por
+            },
+            2 => {
+                try sseI(e, null, &.{0xc6}, 0, 1, if (x.imm == 0) 0x88 else 0xdd); // shufps: a's two, b's two
+                try sseI(e, 0x66, &.{0x70}, 0, 0, 0xd8); // pshufd: interleave them
+            },
+            3 => try sse(e, 0x66, false, &.{if (x.imm == 0) 0x6c else 0x6d}, 0, 1),
         },
         .@"v.ext" => if (x.imm != 0) {
             try sseI(e, 0x66, &.{0x73}, 3, 0, @intCast(x.imm)); // psrldq xmm0, imm
@@ -1846,6 +1981,7 @@ fn memOp(e: *E, i: ir.Inst) !void {
     try e.rr(false, &.{0x85}, RAX, RAX);
     const ok = try e.fwd(CC.e);
     try e.writeback(e.dirty);
+    try e.syncPend();
     try e.mov(RCX, RAX); // the exit code
     if (!store and f.rmw) {
         // Report the read-modify-write's fault as a write.

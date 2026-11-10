@@ -615,7 +615,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
             }
             switch (i.op) {
                 .@"pending.flags" => {
-                    if (pend) |p| if (p.off != i.aux) p.write(cpu);
+                    if (pend) |p| if (p.off != i.aux or p.mask != @as(u32, @truncate(if (i.aux2 == 0) 0xf000_0000 else eflags_mask))) p.write(cpu);
                     const m: u64 = if (i.aux2 == 0) 0xf000_0000 else eflags_mask;
                     pend = .{ .val = @truncate(a & m), .mask = @truncate(m), .off = i.aux };
                 },

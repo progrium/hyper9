@@ -694,5 +694,26 @@ pub fn generatePending(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x0
         , .{ op, grp }) });
     };
+    // Nothing reads the word (0x18, its other bits set), so an emitter
+    // may keep it pending across the edge: written at the exit, at a poll
+    // that leaves, or dropped by a setreg over it.
+    const tails = [_][]const u8{
+        "  br -> b1\nb1:\n  exit.chain #0x0\n",
+        "  br -> b1\nb1:\n  poll #0x40\n  exit.chain #0x0\n",
+        "  setreg %1 #0x18\n  br -> b1\nb1:\n  exit.chain #0x0\n",
+    };
+    for ([_][]const u8{ "nzcv.sub", "eflags.sub" }, [_][]const u8{ "", " @0x1" }) |op, grp| for (tails, 0..) |tail, t| {
+        try list.append(gpa, .{ .regs = .{ 5, 7, 0, 0xdead_beef_ffff_ffff, 0, 0, 0, 0 }, .budget = if (t == 1) 0 else std.math.maxInt(i64), .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i32 #0x0
+            \\  %1 = getreg:i32 #0x8
+            \\  %2 = {0s}:flags %0, %1
+            \\  pending.flags %2 #0x18{1s}
+            \\  %4 = sub:i32 %0, %1
+            \\  %5 = zext:i64 %4
+            \\  setreg %5 #0x0
+            \\{2s}
+        , .{ op, grp, tail }) });
+    };
     return list.toOwnedSlice(gpa);
 }

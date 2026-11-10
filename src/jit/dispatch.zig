@@ -305,7 +305,7 @@ const Machine = struct {
                 .svc => return .syscall,
                 .interrupted => {
                     // A full cache: flush, as the vmm layer would.
-                    _ = @atomicRmw(u32, &m.rt.ctx.exit_request, .And, 0, .seq_cst);
+                    _ = cache_mod.clearRequest(&m.rt.ctx, ~@as(u32, 0));
                     m.jit.?.reset();
                 },
                 .t0 => {

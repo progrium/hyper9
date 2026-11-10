@@ -380,7 +380,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                         if (s == self or !pick.wants(s)) continue;
                         const seq = s.seq.load(.seq_cst);
                         if (seq & 1 == 0) continue;
-                        _ = @atomicRmw(u32, &s.rt.ctx.exit_request, .Or, req_sync, .seq_cst);
+                        cache.request(&s.rt.ctx, req_sync);
                         waits[n] = .{ .s = s, .seq = seq };
                         n += 1;
                     }
@@ -592,7 +592,8 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 // passed, as a timer interrupt would.
                 if (web and monoNs() -% b.yielded > web_slice_ns) b.yieldThread();
                 while (true) {
-                    if (web) cx.budget = web_budget;
+                    // Before exit_request is read: see cache.request.
+                    if (web) cx.budget = web_budget else @atomicStore(i64, &cx.budget, std.math.maxInt(i64), .seq_cst);
                     s.enter();
                     if (b.stopping.load(.seq_cst) != 0) {
                         // A flush is emptying the cache: wait it out.
@@ -704,7 +705,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             /// `.interrupted` at once; during one, guest code leaves at its
             /// next check.
             pub fn kick(v: *EmuVcpu) void {
-                _ = @atomicRmw(u32, &v.s.rt.ctx.exit_request, .Or, req_kick, .seq_cst);
+                cache.request(&v.s.rt.ctx, req_kick);
             }
         };
     };

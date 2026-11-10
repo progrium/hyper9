@@ -438,6 +438,32 @@ pub const Cache = struct {
 pub const req_kick: u32 = 1;
 pub const req_sync: u32 = 2;
 
+/// The budget a request leaves: far below zero, so the counts taken
+/// from it afterwards can't wrap it.
+pub const budget_stopped: i64 = std.math.minInt(i64) / 2;
+
+/// Sets `bits` in ctx.exit_request, then drops ctx.budget to
+/// `budget_stopped`, so a poll that tests the budget alone (as x64's
+/// does) leaves too. The vCPU's loop restores the budget before it reads
+/// exit_request, so whichever way the two race, the request is seen.
+/// Generated code takes from the budget with an atomic sub; front ends
+/// that don't (T0, ir_eval) check exit_request before they run a region.
+pub fn request(cx: *Ctx, bits: u32) void {
+    _ = @atomicRmw(u32, &cx.exit_request, .Or, bits, .seq_cst);
+    // wasm32 has no 64-bit atomics here, and the wasm tier polls
+    // exit_request itself.
+    if (builtin.cpu.arch != .wasm32) @atomicStore(i64, &cx.budget, budget_stopped, .seq_cst);
+}
+
+/// Clears `bits` in ctx.exit_request, first putting back a budget that a
+/// request dropped (as maxInt: a loop that meters the budget sets its
+/// own). Returns the bits that were set.
+pub fn clearRequest(cx: *Ctx, bits: u32) u32 {
+    if (builtin.cpu.arch != .wasm32 and @atomicLoad(i64, &cx.budget, .seq_cst) <= budget_stopped / 2)
+        @atomicStore(i64, &cx.budget, std.math.maxInt(i64), .seq_cst);
+    return @atomicRmw(u32, &cx.exit_request, .And, ~bits, .seq_cst);
+}
+
 /// A vCPU's JIT state around its Ctx, which the vmm layer (vmm/zemu.zig)
 /// embeds and a Guest's run loop finds from the Ctx it's given.
 pub const Runtime = struct {
@@ -466,7 +492,7 @@ pub const Runtime = struct {
     /// guest code so it can happen. The caller returns `.interrupted`.
     pub fn requestFlush(rt: *Runtime) void {
         if (rt.flush_wanted) |f| f.store(true, .seq_cst);
-        _ = @atomicRmw(u32, &rt.ctx.exit_request, .Or, req_sync, .seq_cst);
+        request(&rt.ctx, req_sync);
     }
 };
 

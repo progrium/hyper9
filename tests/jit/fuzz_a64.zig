@@ -93,7 +93,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
     std.debug.print("fuzz-a64: {d} programs, {d} diverged; {d} instructions region-checked\n", .{ i, failed, retired });
-    if (native) |n| std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
+    if (native) |n| {
+        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
+        vcpu.emit.native.printFallbacks();
+    }
     tally.print();
     if (options.unicorn) for (std.enums.values(lockstep.Known)) |k| if (known.get(k) != 0)
         std.debug.print("  known divergence {t}: {d} (T0 is architectural)\n", .{ k, known.get(k) });

@@ -15,6 +15,25 @@ const host = switch (builtin.cpu.arch) {
     else => null,
 };
 
+/// Prints the `fp.*` and `v.*` ops most often compiled to ir_eval's
+/// fallback (x64 only), with their lane sizes.
+pub fn printFallbacks() void {
+    if (@TypeOf(host) == @TypeOf(null) or !@hasDecl(host, "ext_fallbacks")) return;
+    const t = &host.ext_fallbacks;
+    var shown: usize = 0;
+    var done: [t.len]bool = @splat(false);
+    while (shown < 12) : (shown += 1) {
+        var best: ?usize = null;
+        for (t, 0..) |n, k| if (n != 0 and !done[k] and (best == null or n > t[best.?])) {
+            best = k;
+        };
+        const k = best orelse break;
+        done[k] = true;
+        const op: ir.Op = std.enums.fromInt(ir.Op, k / 4) orelse continue;
+        std.debug.print("    {d:>7} {s} esize {d}\n", .{ t[k], @tagName(op), k % 4 });
+    }
+}
+
 /// Whether this host has an emitter and code memory works.
 pub fn available() bool {
     return @TypeOf(host) != @TypeOf(null) and codemem.available();

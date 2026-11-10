@@ -106,7 +106,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
     std.debug.print("fuzz-x86: {d} programs, {d} diverged; {d} instructions stepped, {d} region-checked\n", .{ i, failed, steps, checked });
-    if (native) |n| std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
+    if (native) |n| {
+        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
+        vcpu.emit.native.printFallbacks();
+    }
     tally.print();
     if (failed != 0) std.process.exit(1);
 }
