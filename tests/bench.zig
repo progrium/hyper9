@@ -184,14 +184,29 @@ pub fn main(init: std.process.Init) !void {
     const w = &stdout.interface;
 
     var bad = false;
-    // zig build bench -- compute: the compute benchmarks only.
+    // zig build bench -- [compute] [--repeat N]: the compute benchmarks
+    // only; each timing the fastest of N runs (default 3).
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
-    const compute_only = argv.len > 1 and std.mem.eql(u8, argv[1], "compute");
+    var compute_only = false;
+    var repeat: usize = 3;
+    var ai: usize = 1;
+    while (ai < argv.len) : (ai += 1) {
+        if (std.mem.eql(u8, argv[ai], "compute")) {
+            compute_only = true;
+        } else if (std.mem.eql(u8, argv[ai], "--repeat") and ai + 1 < argv.len) {
+            ai += 1;
+            repeat = @max(1, try std.fmt.parseUnsigned(usize, argv[ai], 10));
+        } else {
+            std.debug.print("usage: bench [compute] [--repeat N]\n", .{});
+            std.process.exit(2);
+        }
+    }
     if (!compute_only) try w.print("{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "case", "arch", "vmm", "time", "rate" });
     if (!compute_only) for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| for (tiersOf(kind)) |tier| {
         if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
         defer _ = unsetenv("H9_EMU_TIER");
-        const ns = try runOne(gpa, io, kind, c) orelse continue;
+        var ns: i96 = try runOne(gpa, io, kind, c) orelse continue;
+        for (1..repeat) |_| ns = @min(ns, (try runOne(gpa, io, kind, c)).?);
         const s = @as(f64, @floatFromInt(ns)) / 1e9;
         var lb: [16]u8 = undefined;
         try w.print("{s: <7} {t: <6} {s: <7} {d: >7.2}s  ", .{ c.name, c.arch, tierLabel(&lb, kind, tier), s });
@@ -211,7 +226,8 @@ pub fn main(init: std.process.Init) !void {
     if (!compute_only) for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for (tiersOf(kind)) |tier| {
         if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
         defer _ = unsetenv("H9_EMU_TIER");
-        const ns = try bareRoundTrip(gpa, io, kind) orelse continue;
+        var ns: i96 = try bareRoundTrip(gpa, io, kind) orelse continue;
+        for (1..repeat) |_| ns = @min(ns, (try bareRoundTrip(gpa, io, kind)).?);
         var lb: [16]u8 = undefined;
         try w.print("{s: <7} {s: <6} {s: <7} {d: >7.2}s  {d:.0} ns per exit and re-entry\n", .{ "bare", "arm64", tierLabel(&lb, kind, tier), @as(f64, @floatFromInt(ns)) / 1e9, @as(f64, @floatFromInt(ns)) / bare_iters });
         try w.flush();
@@ -219,9 +235,13 @@ pub fn main(init: std.process.Init) !void {
 
     try w.print("\n{s: <7} {s: <6} {s: <7} {s: >8}  {s: <10} {s}\n", .{ "compute", "arch", "vmm", "time", "vs native", "rate (where the emulator counts)" });
     for (computes) |c| {
-        const t0 = std.Io.Timestamp.now(io, .awake);
-        const want = c.native();
-        const native_ns = t0.untilNow(io, .awake).toNanoseconds();
+        var want: u32 = undefined;
+        var native_ns: i96 = std.math.maxInt(i96);
+        for (0..repeat) |_| {
+            const t0 = std.Io.Timestamp.now(io, .awake);
+            want = c.native();
+            native_ns = @min(native_ns, t0.untilNow(io, .awake).toNanoseconds());
+        }
         try w.print("{s: <7} {s: <6} {s: <7} {d: >7.3}s\n", .{ c.name, "host", "native", @as(f64, @floatFromInt(native_ns)) / 1e9 });
         var hex: [8]u8 = undefined;
         _ = std.fmt.bufPrint(&hex, "{x:0>8}", .{want}) catch unreachable;
@@ -232,8 +252,12 @@ pub fn main(init: std.process.Init) !void {
                     if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
                     defer _ = unsetenv("H9_EMU_TIER");
                     const before = vmm.emuRetired();
-                    const r = try runText(gpa, io, kind, arch, text) orelse continue;
+                    var r = try runText(gpa, io, kind, arch, text) orelse continue;
                     const insns: ?u64 = if (kind == .emu) if (vmm.emuRetired()) |n| n - before.? else null else null;
+                    for (1..repeat) |_| {
+                        const again = (try runText(gpa, io, kind, arch, text)).?;
+                        if (again.ns < r.ns) r = again;
+                    }
                     const s = @as(f64, @floatFromInt(r.ns)) / 1e9;
                     const label = if (tier) |t| try std.fmt.allocPrint(gpa, "emu/{s}", .{t}) else try std.fmt.allocPrint(gpa, "{t}", .{kind});
                     defer gpa.free(label);
