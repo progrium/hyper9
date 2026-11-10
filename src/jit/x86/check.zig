@@ -256,6 +256,24 @@ test "check/x86: DIV and IDIV, and #DE through the guard" {
     try testing.expectEqual(Exit.fault, r2.exit);
 }
 
+test "check/x86: DIV from memory, its #DE, and SAHF and LAHF" {
+    // movl $0x20000, %ebx; movl $7, (%ebx); movl $100, %eax; xorl %edx, %edx;
+    // divl (%ebx); movb $9, 4(%ebx); movw $300, %ax; divb 4(%ebx);
+    // movb $0xd5, %ah; sahf; lahf; movb %ah, %cl; movb $0x00, %ah; sahf;
+    // lahf; movl $0, 8(%ebx); idivl 8(%ebx) (#DE)
+    const code = [_]u8{
+        0xbb, 0x00, 0x00, 0x02, 0x00, 0xc7, 0x03, 7, 0, 0, 0, 0xb8, 100, 0, 0, 0, 0x31, 0xd2,
+        0xf7, 0x33, // divl (%ebx)
+        0xc6, 0x43, 0x04, 9, 0x66, 0xb8, 0x2c, 0x01, 0xf6, 0x73, 0x04, // movb; movw; divb 4(%ebx)
+        0xb4, 0xd5, 0x9e, 0x9f, 0x88, 0xe1, 0xb4, 0x00, 0x9e, 0x9f,
+        0xc7, 0x43, 0x08, 0, 0, 0, 0, 0xf7, 0x7b, 0x08,
+    };
+    const r = try expectRun(&code, null);
+    try testing.expectEqual(Exit.fault, r.exit);
+    try testing.expectEqual(@as(u64, Machine.code_va + code.len - 3), r.pc);
+    try testing.expectEqual(@as(u32, 0xd7), r.cpu.r[1] & 0xff);
+}
+
 fn repSetup(c: *Cpu) void {
     c.r[6] = Machine.data_va + 0xff0;
     c.r[7] = Machine.data_va + 0x1000 - 0x40;

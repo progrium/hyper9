@@ -192,6 +192,7 @@ fn byteOff(n: u3) u64 {
 const seg_base_off = @offsetOf(Cpu, "seg_base");
 const seg_null_off = @offsetOf(Cpu, "seg_null");
 const xmm_off = @offsetOf(Cpu, "xmm");
+const jit_tmp_off = @offsetOf(Cpu, "jit_tmp");
 const mxcsr_off = @offsetOf(Cpu, "mxcsr");
 /// MXCSR's controls (DAZ, the masks, RC, FZ) that lifted SSE assumes: the
 /// power-on 0x1F80, everything masked, round to nearest. Anything else
@@ -342,9 +343,7 @@ fn classify(i: *const Inst) Class {
     return switch (i.op) {
         .nop, .fence, .add, .@"or", .adc, .sbb, .@"and", .sub, .xor, .cmp, .@"test" => .lifted,
         .inc, .dec, .not, .neg, .mul, .imul1, .imul => .lifted,
-        // A memory divisor would have to be loaded twice (the check and
-        // the division are in different blocks): T0 runs it.
-        .div, .idiv => if (i.mem) .interp else .lifted,
+        .div, .idiv => .lifted,
         .shl, .shr, .sar, .rol, .ror, .shld, .shrd => blk: {
             const cl = e.src == .CL or ((i.op == .shld or i.op == .shrd) and e.imm != .b);
             if (cl) break :blk if (i.mem) .interp else .lifted;
@@ -360,7 +359,7 @@ fn classify(i: *const Inst) Class {
         // POP to memory addresses with ESP after the pop (FS and GS go
         // to T0).
         .pop => if (i.mem and @intFromEnum(i.seg) >= 4) .interp else .lifted,
-        .clc, .stc, .cmc, .cld, .std => .lifted,
+        .clc, .stc, .cmc, .cld, .std, .sahf, .lahf => .lifted,
         // Without REP, a source through FS or GS goes to T0.
         .movs, .cmps, .stos, .lods, .scas => if (i.addr16) .interp else if (i.rep != .none) .lifted else if (@intFromEnum(i.seg) >= 4 and i.op != .stos and i.op != .scas) .interp else .lifted,
         // x87 through helpers.zig; 16-bit addressing (which no 9front
@@ -1151,6 +1150,19 @@ const Lifter = struct {
                 try l.setR(i.reg(), size, try b.emit(.{ .op = .select, .ty = T, .a = c, .b = v, .c = old }));
             },
             .clc => try l.fl.modify(b, .@"and", ~xf.CF),
+            .sahf => {
+                // SF, ZF, AF, PF, and CF from AH; OF as it was.
+                const ah = try b.un(.zext, .i32, try l.getR(4, 1));
+                const p = try b.un(.@"eflags.pack", .i32, try l.fl.get(b));
+                const keep = try b.bin(.@"and", .i32, p, try l.k32(~@as(u32, 0xd5)));
+                const v = try b.bin(.@"or", .i32, keep, try b.bin(.@"and", .i32, ah, try l.k32(0xd5)));
+                l.fl.set(try b.un(.@"eflags.unpack", .flags, v));
+            },
+            .lahf => {
+                const p = try b.un(.@"eflags.pack", .i32, try l.fl.get(b));
+                const v = try b.bin(.@"or", .i32, try b.bin(.@"and", .i32, p, try l.k32(0xd5)), try l.k32(2));
+                try l.setR(4, 1, try b.un(.trunc, .i8, v));
+            },
             .stc => try l.fl.modify(b, .@"or", xf.CF),
             .cmc => try l.fl.modify(b, .xor, xf.CF),
             .cld, .std => {
@@ -1317,21 +1329,30 @@ const Lifter = struct {
     /// too big) goes to T0 through a guard; the division runs at twice
     /// the width.
     fn divide(l: *Lifter, k: usize) !void {
-        const ok = try l.divide1(k, false);
+        const i = &l.insns[k].i;
+        // A memory divisor is loaded once, and crosses the guard in the
+        // Cpu's scratch word.
+        const md: ?Ref = if (i.mem) try l.load(k, i.size, try l.linear(k)) else null;
+        if (md) |d| try l.b.setreg(jit_tmp_off, if (i.size == 4) d else try l.b.un(.zext, .i32, d));
+        const ok = try l.divide1(k, false, md);
         try l.guard(k, ok, false);
-        _ = try l.divide1(k, true);
+        const again: ?Ref = if (i.mem) blk: {
+            const t = try l.b.getreg(.i32, jit_tmp_off);
+            break :blk if (i.size == 4) t else try l.b.un(.trunc, tyOf(i.size), t);
+        } else null;
+        _ = try l.divide1(k, true, again);
     }
 
     /// Computes the division; returns whether it's free of #DE, and
     /// writes the results if `write`.
-    fn divide1(l: *Lifter, k: usize, write: bool) !Ref {
+    fn divide1(l: *Lifter, k: usize, write: bool, md: ?Ref) !Ref {
         const i = &l.insns[k].i;
         const b = l.b;
         const size = i.size;
         const T = tyOf(size);
         const W = wideOf(size);
         const bits: u64 = @as(u64, size) * 8;
-        const d = try l.getR(i.rm(), size);
+        const d = md orelse try l.getR(i.rm(), size);
         // The dividend: AX, DX:AX, or EDX:EAX.
         const n = if (size == 1) try l.getR(0, 2) else blk: {
             const lo = try b.un(.zext, W, try l.getR(0, size));

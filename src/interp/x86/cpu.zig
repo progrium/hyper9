@@ -91,6 +91,9 @@ pub const Cpu = struct {
     /// Ureg.trap and Ureg.ecode, as the last exit left them.
     trap: u32 = 0,
     ecode: u32 = 0,
+    /// Lifted code's scratch word, for a value that must cross one of its
+    /// guards (blocks share no values): nothing else reads it.
+    jit_tmp: u32 = 0,
     /// Guest instructions retired.
     retired: u64 = 0,
     /// T0's decoded-instruction cache, which the owner allocates.
