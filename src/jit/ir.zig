@@ -309,6 +309,25 @@ pub const Op = enum(u16) {
     /// Call the runtime helper numbered aux with a, b, c (i64s); the
     /// result, if any, is an i64. The helper table is the backend's.
     @"call.helper" = 161,
+    /// A guest instruction run on the host as itself (ha64 on arm64 hosts,
+    /// src/jit/a64/copy.zig), with its register fields rewritten to
+    /// wherever the allocator put the guest registers. No result, and it
+    /// can't leave: only register-only, non-PC-relative instructions that
+    /// can't fault are copied.
+    ///
+    /// aux: the guest word in bits 31..0; bit 32, it reads NZCV; bit 33, it
+    /// writes NZCV; bit 34, it's FP (runs under the guest FPCR, accumulates
+    /// into FPSR, may set QC).
+    /// aux2: four 16-bit field descriptors, for Rd (word bits 4..0), Rn
+    /// (9..5), Rm (20..16), and Ra (14..10), in that order from bit 0. In
+    /// each: bits 12..0 the guest Cpu offset, bit 13 read, bit 14 written,
+    /// bit 15 a V register (16 bytes, else an 8-byte X register); 0 is a
+    /// field that isn't a register.
+    ///
+    /// Elsewhere (ir_eval, other hosts) it runs as `call.interp` with the
+    /// word as the handle and PC 0, which ha64's handler takes; it must
+    /// return `.ok`.
+    copy = 162,
 
     // ---- runtime
     /// Leave with `.interrupted` and resume PC aux if an exit is
@@ -463,7 +482,7 @@ pub const Op = enum(u16) {
     /// Whether the operation defines a value (else its type is `.none`).
     pub fn hasResult(op: Op) bool {
         return switch (op) {
-            .setreg, .store, .fence, .@"call.interp", .poll, .retire, .@"v.store" => false,
+            .setreg, .store, .fence, .@"call.interp", .copy, .poll, .retire, .@"v.store" => false,
             .@"call.helper" => true, // may be .none: see the instruction's type
             else => !op.isTerminator(),
         };
@@ -740,6 +759,15 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
         .@"call.interp" => if (i.aux >= r.handles.items.len) return "call.interp handle out of range",
         .@"call.helper" => if (i.ty != .none and i.ty != .i64) return "call.helper gives i64 or nothing",
         .poll, .retire => {},
+        .copy => {
+            if (i.aux >> 35 != 0) return "copy's aux has bits above 34";
+            var d = i.aux2;
+            for (0..4) |_| {
+                const f: u16 = @truncate(d);
+                if (f != 0 and f & 0x6000 == 0) return "copy maps a field it neither reads nor writes";
+                d >>= 16;
+            }
+        },
         .br => if (i.aux >= nblocks) return "branch to a block that doesn't exist",
         .brcond => {
             if (ta != .i1) return "brcond needs an i1";
@@ -1063,6 +1091,7 @@ test "op numbers are stable" {
     try std.testing.expectEqual(@as(u16, 108), @intFromEnum(Op.@"eflags.mul"));
     try std.testing.expectEqual(@as(u16, 128), @intFromEnum(Op.load));
     try std.testing.expectEqual(@as(u16, 131), @intFromEnum(Op.cas));
+    try std.testing.expectEqual(@as(u16, 162), @intFromEnum(Op.copy));
     try std.testing.expectEqual(@as(u16, 160), @intFromEnum(Op.@"call.interp"));
     try std.testing.expectEqual(@as(u16, 192), @intFromEnum(Op.br));
     try std.testing.expectEqual(@as(u16, 224), @intFromEnum(Op.@"fp.add"));

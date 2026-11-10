@@ -695,6 +695,11 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                     const res = f(ctx, r.handles.items[@intCast(i.aux)], i.aux2);
                     if (res != 0) return left(ctx, i, @enumFromInt(res));
                 },
+                .copy => {
+                    // As call.interp on the word (ir.zig, Op.copy).
+                    const f: ctx_mod.InterpFn = @ptrFromInt(@as(usize, @intCast(ctx.interp)));
+                    if (f(ctx, i.aux & 0xffff_ffff, 0) != 0) return error.Unsupported;
+                },
                 .@"call.helper" => {
                     const table: [*]const ctx_mod.HelperFn = @ptrFromInt(@as(usize, @intCast(ctx.helpers)));
                     vals[idx] = table[@intCast(i.aux)](ctx, a, bv, cv);
