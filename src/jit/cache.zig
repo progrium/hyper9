@@ -43,7 +43,9 @@ const ctx_mod = @import("ctx.zig");
 const mem = @import("../interp/mem.zig");
 const Ctx = ctx_mod.Ctx;
 
-pub const max_chains = 2;
+/// As many as an emitter reports (emitter.max_chains), so every direct
+/// exit of a hot region can be linked.
+pub const max_chains = 16;
 pub const no_page = std.math.maxInt(u64);
 
 /// A direct exit, as an emitter reports it: the site's offset from the
