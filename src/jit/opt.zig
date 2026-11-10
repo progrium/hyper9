@@ -26,8 +26,11 @@
 //! An `fp.*` op with an aux2 ORs its exceptions into a Cpu word (FPSR or
 //! MXCSR): both passes treat it as a read and a write of that word.
 //!
-//! Redundant TLB checks (two accesses to one page in a block) need the IR
-//! to say a load or store may skip its check; that waits for an op flag.
+//! - **Same-page hints.** A load or store whose address is an earlier
+//!   load's or store's (the same op) plus or minus less than a page gets
+//!   MemFlags.same_page pointing at it, so an emitter can reuse that
+//!   access's TLB lookup after one compare. It's only a hint: the emitter
+//!   checks the page and does the full lookup if it differs.
 
 const std = @import("std");
 const ir = @import("ir.zig");
@@ -54,6 +57,7 @@ pub fn run(gpa: std.mem.Allocator, r: *ir.Region) !void {
     defer gpa.free(live);
     deadCode(r, dead, live);
     try compact(gpa, r, dead);
+    samePage(r);
 }
 
 fn resolve(repl: []const Ref, x: Ref) Ref {
@@ -292,8 +296,11 @@ fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
         }
         switch (i.op) {
             .getreg => forget(&later, &nl, i.aux, sizeOf(i.ty)),
-            .setreg => {
-                const sz = sizeOf(insts[i.a].ty);
+            // Flags pending at a slot are written there before anything
+            // can see it, unless a later write to the slot drops them: as
+            // a store for this pass.
+            .setreg, .@"pending.flags" => {
+                const sz: u32 = if (i.op == .setreg) sizeOf(insts[i.a].ty) else 4;
                 const covered = for (later[0..nl]) |k| {
                     if (k.off <= i.aux and i.aux + sz <= k.off + k.size) break true;
                 } else false;
@@ -328,6 +335,55 @@ fn deadCode(r: *ir.Region, dead: []bool, live: []bool) void {
             for (i.operands()) |o| if (o != none) {
                 live[o] = true;
             };
+        }
+    }
+}
+
+/// An address as a root value plus a constant: through `add` and `sub`
+/// of constants, a few deep.
+const Addr = struct { root: Ref, off: i64 };
+
+fn addrOf(insts: []const Inst, a: Ref) Addr {
+    var v = a;
+    var off: i64 = 0;
+    for (0..4) |_| {
+        const d = insts[v];
+        if (d.op != .add and d.op != .sub) break;
+        const c = constOf(insts, d.b) orelse break;
+        const k: i64 = @bitCast(c);
+        off = if (d.op == .add) off +% k else off -% k;
+        v = d.a;
+    }
+    return .{ .root = v, .off = off };
+}
+
+/// Sets MemFlags.same_page on each load and store whose address is within
+/// a page of an earlier one's in the block, from the same root. Runs
+/// after `compact`, since the hint is a distance in instructions.
+fn samePage(r: *ir.Region) void {
+    const insts = r.insts.items;
+    for (r.blocks.items) |blk| {
+        const end = blk.start + blk.len;
+        for (blk.start..end) |idx| {
+            const i = &insts[idx];
+            if (i.op != .load and i.op != .store) continue;
+            var f: ir.MemFlags = @bitCast(i.aux);
+            if (f.same_page != 0) continue;
+            const me = addrOf(insts, i.a);
+            var j = idx;
+            while (j > blk.start and idx - j < std.math.maxInt(u16)) {
+                j -= 1;
+                const p = insts[j];
+                if (p.op != i.op) continue;
+                const them = addrOf(insts, p.a);
+                if (them.root != me.root) continue;
+                const d = me.off -% them.off;
+                if (d > -4096 and d < 4096) {
+                    f.same_page = @intCast(idx - j);
+                    i.aux = @bitCast(f);
+                }
+                break;
+            }
         }
     }
 }
@@ -558,4 +614,66 @@ test "opt: decrement and logic conditions agree with the flags" {
             };
         }
     };
+}
+
+test "opt: same-page hints for nearby accesses from one base" {
+    const got = try optimized(
+        \\region 0x1000
+        \\handle 0x0
+        \\b0:
+        \\  %0 = getreg:i64 #0x8
+        \\  %1 = load:i64 %0 #0x3 @0x1000
+        \\  %2 = const:i64 #0x8
+        \\  %3 = add:i64 %0, %2
+        \\  %4 = load:i64 %3 #0x3 @0x1004
+        \\  %5 = const:i64 #0x2000
+        \\  %6 = add:i64 %0, %5
+        \\  %7 = load:i64 %6 #0x3 @0x1008
+        \\  store %3, %4 #0x3 @0x100c
+        \\  store %0, %7 #0x3 @0x1010
+        \\  setreg %1 #0x10
+        \\  exit.chain #0x1014
+        \\
+    );
+    defer testing.allocator.free(got);
+    var r = try ir.parse(testing.allocator, got);
+    defer r.deinit(testing.allocator);
+    var hints: [5]u16 = undefined;
+    var n: usize = 0;
+    for (r.insts.items) |i| if (i.op == .load or i.op == .store) {
+        hints[n] = @as(ir.MemFlags, @bitCast(i.aux)).same_page;
+        n += 1;
+    };
+    // The second load is 3 back from the first; the third is a page off;
+    // the second store names the first, one back.
+    try testing.expectEqualSlices(u16, &.{ 0, 3, 0, 0, 1 }, hints[0..n]);
+}
+
+test "opt: a pending.flags a later write covers goes, and covers an earlier setreg" {
+    const got = try optimized(
+        \\region 0x1000
+        \\b0:
+        \\  %0 = getreg:i64 #0x8
+        \\  %1 = const:i64 #0x1
+        \\  %2 = nzcv.sub:flags %0, %1
+        \\  %3 = const:i32
+        \\  setreg %3 #0x350
+        \\  pending.flags %2 #0x350
+        \\  %4 = nzcv.pack:i32 %2
+        \\  setreg %4 #0x350
+        \\  exit.chain #0x1004
+        \\
+    );
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(
+        \\region 0x1000
+        \\b0:
+        \\  %0 = getreg:i64 #0x8
+        \\  %1 = const:i64 #0x1
+        \\  %2 = nzcv.sub:flags %0, %1
+        \\  %3 = nzcv.pack:i32 %2
+        \\  setreg %3 #0x350
+        \\  exit.chain #0x1004
+        \\
+    , got);
 }
