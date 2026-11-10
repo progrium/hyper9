@@ -615,9 +615,22 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
             }
             switch (i.op) {
                 .@"pending.flags" => {
-                    if (pend) |p| if (p.off != i.aux or p.mask != @as(u32, @truncate(if (i.aux2 == 0) 0xf000_0000 else eflags_mask))) p.write(cpu);
-                    const m: u64 = if (i.aux2 == 0) 0xf000_0000 else eflags_mask;
-                    pend = .{ .val = @truncate(a & m), .mask = @truncate(m), .off = i.aux };
+                    if (pend) |p| if (p.off != i.aux or p.kind != i.aux2) p.write(cpu);
+                    if (i.aux2 == 2) {
+                        // The record of the op that made the flags.
+                        const f = r.insts.items[i.a];
+                        const ft: Type = r.insts.items[f.a].ty;
+                        const fv = struct {
+                            fn of(rr: *const ir.Region, vs: []const u128, ref: ir.Ref) u64 {
+                                _ = rr;
+                                return if (ref == ir.none) 0 else @truncate(vs[ref]);
+                            }
+                        };
+                        pend = .{ .val = 0, .mask = 0, .off = i.aux, .kind = 2, .rec = ir.lazyRecord(f.op, ft, fv.of(r, vals, f.a), fv.of(r, vals, f.b), fv.of(r, vals, f.c)) };
+                    } else {
+                        const m: u64 = if (i.aux2 == 0) 0xf000_0000 else eflags_mask;
+                        pend = .{ .val = @truncate(a & m), .mask = @truncate(m), .off = i.aux, .kind = i.aux2 };
+                    }
                 },
                 .getreg => {
                     var v: u128 = 0;
@@ -750,8 +763,17 @@ const Pend = struct {
     val: u32,
     mask: u32,
     off: u64,
-    /// Merges the flags into the slot, keeping its other bits.
+    /// pending.flags' aux2.
+    kind: u64,
+    /// For kind 2: the lazy record, written at off + 4.
+    rec: ir.LazyRecord = undefined,
+    /// Merges the flags into the slot, keeping its other bits, or for a
+    /// lazy one, writes its record.
     fn write(p: Pend, cpu: [*]u8) void {
+        if (p.kind == 2) {
+            @memcpy(cpu[@intCast(p.off + 4)..][0..16], std.mem.asBytes(&p.rec));
+            return;
+        }
         const slot = cpu[@intCast(p.off)..][0..4];
         const old = std.mem.readInt(u32, slot, .little);
         std.mem.writeInt(u32, slot, (old & ~p.mask) | p.val, .little);
@@ -1096,4 +1118,40 @@ test "pending flags are written at a fault and before an exit, and dropped by a 
     );
     defer r3.deinit(gpa);
     try testing.expect(ir.verify(&r3) != null);
+}
+
+test "a lazy pending.flags writes its record and leaves the bits alone" {
+    const gpa = testing.allocator;
+    var r = try ir.parse(gpa,
+        \\b0:
+        \\  %0 = getreg:i32 #0x0
+        \\  %1 = const:i32 #0x1
+        \\  %2 = eflags.sub:flags %0, %1
+        \\  pending.flags %2 #0x10 @0x2
+        \\  exit.chain #0x0
+    );
+    defer r.deinit(gpa);
+    try testing.expect(ir.verify(&r) == null);
+    var cpu: [8]u32 = .{ 0, 0, 0, 0, 0x202, 0, 0, 0 }; // bits at 0x10, record at 0x14
+    var tlb: mem.Tlb = .{};
+    var c: Ctx = .{ .cpu = @intFromPtr(&cpu), .tlb = @intFromPtr(&tlb) };
+    try testing.expectEqual(Exit.chain, try run(gpa, &r, &c));
+    try testing.expectEqual(@as(u32, 0x202), cpu[4]);
+    const rec: *const ir.LazyRecord = @ptrCast(@alignCast(&cpu[5]));
+    try testing.expectEqual(@intFromEnum(ir.LazyKind.sub), rec.kind);
+    try testing.expectEqual(@as(u8, 4), rec.size);
+    try testing.expectEqual(@as(u32, 0), rec.a);
+    try testing.expectEqual(@as(u32, 1), rec.b);
+    try testing.expectEqual(@as(u32, 0xffff_ffff), rec.res);
+    // Lazy and eager at one offset don't verify.
+    var r2 = try ir.parse(gpa,
+        \\b0:
+        \\  %0 = getreg:i32 #0x0
+        \\  %1 = eflags.logic:flags %0
+        \\  pending.flags %1 #0x10 @0x2
+        \\  pending.flags %1 #0x10 @0x1
+        \\  exit.chain #0x0
+    );
+    defer r2.deinit(gpa);
+    try testing.expect(ir.verify(&r2) != null);
 }

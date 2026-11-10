@@ -376,6 +376,15 @@ pub const Op = enum(u16) {
     /// verifier tracks where the slot may be pending, through the blocks,
     /// and nothing may `getreg` it there. No result.
     /// An emitter may simply write it at once: that's always correct.
+    ///
+    /// aux2 = 2, eflags written lazily: a must be made by one of the
+    /// `eflags.*` ops `lazyKind` maps, and writing stores a `LazyRecord` of
+    /// its operands at aux + 4, leaving the u32 at aux (the materialized
+    /// bits) alone. The guest's EFLAGS are then the front end's
+    /// materialization of the two (h86's flags.Flags). A region may use
+    /// aux2 = 2 and aux2 = 1 at one offset, but not both. A front end that
+    /// reads the bits word, or writes it, must first materialize the
+    /// record or clear its kind, which a region can't see the state of.
     @"pending.flags" = 178,
 
     // ---- terminators: exactly one, last in each block.
@@ -538,6 +547,69 @@ pub const Op = enum(u16) {
 /// pending. Nothing checks it: setting it on a helper that does touch
 /// those bytes is a front-end bug, and the region check catches it.
 pub const helper_no_regs: u64 = 1;
+
+/// pending.flags' lazy eflags record (aux2 = 2), at aux + 4. The kinds
+/// and operand conventions are h86's flags.Kind and flags.Lazy, which must
+/// stay in step with these.
+pub const LazyKind = enum(u8) { none = 0, add, sub, logic, inc, dec, shl, shr, mul };
+
+pub const LazyRecord = extern struct {
+    kind: u8,
+    /// Operand size in bytes: 1, 2, or 4.
+    size: u8,
+    /// The carry in (ADC, SBB), or the CF INC and DEC keep.
+    cin: u8,
+    _pad: u8 = 0,
+    a: u32,
+    b: u32,
+    res: u32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(LazyRecord) == 16 and @offsetOf(LazyRecord, "a") == 4);
+}
+
+/// The record kind for an eflags op, or null if it has none.
+pub fn lazyKind(op: Op) ?LazyKind {
+    return switch (op) {
+        .@"eflags.add", .@"eflags.adc" => .add,
+        .@"eflags.sub", .@"eflags.sbb" => .sub,
+        .@"eflags.logic" => .logic,
+        .@"eflags.inc" => .inc,
+        .@"eflags.dec" => .dec,
+        .@"eflags.shl" => .shl,
+        .@"eflags.shr" => .shr,
+        .@"eflags.mul" => .mul,
+        else => null,
+    };
+}
+
+/// The record a lazy pending.flags writes for flags op `op` at operand
+/// type `ta`, from its operand values a, b, c (as ir_eval holds them).
+/// add and sub get res = a ± b ± cin; logic's res is its value; inc and
+/// dec keep b's CF in cin; shl and shr take (pre, res); mul (ovf, lo).
+pub fn lazyRecord(op: Op, ta: Type, a: u64, b: u64, c: u64) LazyRecord {
+    const m: u32 = @truncate(ta.mask());
+    const x: u32 = @truncate(a);
+    const y: u32 = @truncate(b);
+    const size: u8 = @intCast(ta.bits() / 8);
+    const cin: u8 = switch (op) {
+        .@"eflags.adc", .@"eflags.sbb" => @intCast(c & 1),
+        .@"eflags.inc", .@"eflags.dec" => @intCast(b & 1),
+        else => 0,
+    };
+    const kind = lazyKind(op).?;
+    return switch (kind) {
+        .add => .{ .kind = @intFromEnum(kind), .size = size, .cin = cin, .a = x & m, .b = y & m, .res = (x +% y +% cin) & m },
+        .sub => .{ .kind = @intFromEnum(kind), .size = size, .cin = cin, .a = x & m, .b = y & m, .res = (x -% y -% cin) & m },
+        .logic => .{ .kind = @intFromEnum(kind), .size = size, .cin = 0, .a = 0, .b = 0, .res = x & m },
+        .inc => .{ .kind = @intFromEnum(kind), .size = size, .cin = cin, .a = x & m, .b = 1, .res = (x +% 1) & m },
+        .dec => .{ .kind = @intFromEnum(kind), .size = size, .cin = cin, .a = x & m, .b = 1, .res = (x -% 1) & m },
+        .shl, .shr => .{ .kind = @intFromEnum(kind), .size = size, .cin = 0, .a = x & m, .b = 0, .res = y & m },
+        .mul => .{ .kind = @intFromEnum(kind), .size = size, .cin = 0, .a = x & 1, .b = 0, .res = y & m },
+        .none => unreachable,
+    };
+}
 
 pub const Ref = u32;
 pub const none: Ref = std.math.maxInt(Ref);
@@ -777,6 +849,12 @@ pub fn verify(r: *const Region) ?VerifyError {
     if (r.blocks.items.len > in_buf.len) return .{ .block = 0, .inst = 0, .msg = "too many blocks to verify" };
     const pend_in = in_buf[0..r.blocks.items.len];
     pendingIn(r, pend_in);
+    // Eagerly (aux2 = 1) and lazily (aux2 = 2) written eflags don't mix at
+    // one offset in a region.
+    for (r.insts.items, 0..) |x, xi| if (x.op == .@"pending.flags" and x.aux2 == 2) {
+        for (r.insts.items) |y| if (y.op == .@"pending.flags" and y.aux2 == 1 and y.aux == x.aux)
+            return .{ .block = 0, .inst = @intCast(xi), .msg = "lazy and eager eflags at one offset in a region" };
+    };
     for (r.blocks.items, 0..) |blk, bi| {
         const b: BlockId = @intCast(bi);
         if (!blk.begun) return .{ .block = b, .inst = 0, .msg = "block never begun" };
@@ -914,7 +992,11 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
         .poll, .retire => {},
         .@"pending.flags" => {
             if (ta != .flags) return "pending.flags takes flags";
-            if (i.aux2 > 1) return "pending.flags's group is 0 (nzcv) or 1 (eflags)";
+            if (i.aux2 > 2) return "pending.flags's kind is 0 (nzcv), 1 (eflags), or 2 (eflags, lazily)";
+            if (i.aux2 == 2) {
+                const p = r.insts.items[i.a];
+                if (lazyKind(p.op) == null) return "a lazy pending.flags takes an eflags op with a record kind";
+            }
         },
         .copy => {
             if (i.aux >> 35 != 0) return "copy's aux has bits above 34";

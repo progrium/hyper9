@@ -56,6 +56,10 @@ other work asks the owner for changes rather than editing it.
   the slot's other bits, such as EFLAGS' DF) only on a way out, or before a
   call. Emitters may write it at once instead, which is always
   correct.
+- `pending.flags` with aux2 = 2 writes eflags lazily: an `ir.LazyRecord` of
+  the producing op's operands at aux + 4 (h86's flags.Lazy layout and
+  kinds), with the bits word left alone. It doesn't mix with aux2 = 1 at one
+  offset in a region. Readers of the bits word materialize first.
 - `call.helper` with `aux2 = ir.helper_no_regs` promises that the helper
   touches none of the Cpu bytes the region names, so emitters may skip the
   write-back and reload around it, and pending flags stay pending.
