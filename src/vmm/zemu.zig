@@ -852,6 +852,11 @@ const Unready = struct {
 
 const T = Emu(Toy, Toy, Unready);
 
+test {
+    // hx64's own tests: its Ureg, FXSAVE, and exits.
+    _ = hx64;
+}
+
 test "applyTier sets a Guest's tier by name" {
     const G = struct {
         pub var tier: enum { t0, t1 } = .t0;

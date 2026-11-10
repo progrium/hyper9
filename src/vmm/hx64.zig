@@ -140,7 +140,28 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     return exitOf(c, ctx, e);
 }
 
-fn exitOf(c: *const x86cpu.Cpu64, ctx: *Ctx, exit: x86cpu.Exit64) vmm.Exit {
+/// 9front's VectorSYSCALL (pc/io.h), which its amd64 kernel puts in
+/// Ureg.type for a system call, as emu.zig does.
+const vector_syscall = 64;
+
+/// The vmm exit for T0's, leaving Ureg.type and the registers as the real
+/// kernel would see them.
+fn exitOf(c: *x86cpu.Cpu64, ctx: *Ctx, exit: x86cpu.Exit64) vmm.Exit {
+    switch (exit) {
+        // SYSCALL leaves the return RIP in RCX and RFLAGS in R11, which
+        // 9front's and Linux's entry code save and SYSRET restores, so a
+        // program sees them clobbered as on hardware.
+        .syscall => {
+            c.r[1] = c.rip;
+            c.r[11] = c.fl.get();
+            c.trap = vector_syscall;
+            c.ecode = 0;
+        },
+        .breakpoint => c.trap = x86cpu.vec_bp,
+        .exception => |v| c.trap = v,
+        .fault => c.trap = x86cpu.vec_pf,
+        .stopped => {},
+    }
     return switch (exit) {
         .syscall => .syscall,
         .breakpoint => .breakpoint,
@@ -180,4 +201,31 @@ test "Ureg and FXSAVE round trips" {
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&x.amd64.fx), std.mem.asBytes(&y.amd64.fx));
     try std.testing.expectEqual(@as(u64, 0x5000), y.amd64.tls);
     try std.testing.expectEqual(@as(u64, 0x6000), y.amd64.gs);
+}
+
+
+test "a SYSCALL exit leaves RCX, R11, and Ureg.type as the kernel sees them" {
+    var cpu: Cpu = .{};
+    var ctx: Ctx = undefined;
+    cpu.c.rip = 0x20_0010;
+    cpu.c.fl.set(0x246);
+    cpu.c.r[1] = 0xdead;
+    cpu.c.r[11] = 0xbeef;
+    try std.testing.expectEqual(vmm.Exit.syscall, exitOf(&cpu.c, &ctx, .syscall));
+    var u: vmm.Ureg = undefined;
+    getUreg(&cpu, &u);
+    try std.testing.expectEqual(@as(u64, 0x20_0010), u.amd64.cx);
+    try std.testing.expectEqual(@as(u64, 0x246), u.amd64.r11);
+    try std.testing.expectEqual(@as(u64, vector_syscall), u.amd64.type);
+    try std.testing.expectEqual(@as(u64, 0x20_0010), u.amd64.pc);
+}
+
+test "an exception exits as a fault at RIP with the vector in Ureg.type" {
+    var cpu: Cpu = .{};
+    var ctx: Ctx = undefined;
+    cpu.c.rip = 0x20_0004;
+    const e = exitOf(&cpu.c, &ctx, .{ .exception = x86cpu.vec_de });
+    try std.testing.expectEqual(@as(u64, 0x20_0004), e.fault.addr);
+    try std.testing.expectEqual(@as(u64, x86cpu.vec_de), e.fault.syndrome);
+    try std.testing.expectEqual(@as(u64, x86cpu.vec_de), cpu.c.trap);
 }
