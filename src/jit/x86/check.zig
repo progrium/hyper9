@@ -198,9 +198,9 @@ test "check/x86: a counted loop with memory, flags, and a backward branch" {
     // l: addl %ecx, %eax; addl %ecx, (%ebx); adcl $0, 4(%ebx); decl %ecx; jnz l
     // int $0x80
     const code = [_]u8{
-        0xb9, 100, 0, 0, 0, 0x31, 0xc0, 0xbb, 0x00, 0x00, 0x02, 0x00,
-        0x01, 0xc8, 0x01, 0x0b, 0x83, 0x53, 0x04, 0x00, 0x49, 0x75, 0xf5,
-        0xcd, 0x80,
+        0xb9, 100,  0,    0,    0,    0x31, 0xc0, 0xbb, 0x00, 0x00, 0x02, 0x00,
+        0x01, 0xc8, 0x01, 0x0b, 0x83, 0x53, 0x04, 0x00, 0x49, 0x75, 0xf5, 0xcd,
+        0x80,
     };
     const r = try expectRun(&code, null);
     try testing.expectEqual(Exit.svc, r.exit);
@@ -216,7 +216,10 @@ test "check/x86: push, pop, call, ret, leave, and call-next-pop" {
         0x5e, // n: pop esi
         0x6a, 0x07, 0x5a, // push 7; pop edx
         0xcd, 0x80, 0x90, // int $0x80; nop
-        0x55, 0x89, 0xe5, 0x6a, 0x05, 0x8b, 0x45, 0xfc, 0xc9, 0xc3,
+        0x55, 0x89, 0xe5,
+        0x6a, 0x05, 0x8b,
+        0x45, 0xfc, 0xc9,
+        0xc3,
     };
     const r = try expectRun(&code, null);
     try testing.expectEqual(Exit.svc, r.exit);
@@ -244,10 +247,9 @@ test "check/x86: DIV and IDIV, and #DE through the guard" {
     // movl $-100, %eax; cltd; idivl %ecx; movb $3, %cl; divb %cl;
     // xorl %ecx, %ecx; divl %ecx (#DE)
     const code = [_]u8{
-        0xb8, 100, 0, 0, 0, 0x31, 0xd2, 0xb9, 7, 0, 0, 0, 0xf7, 0xf1,
-        0xb8, 0x9c, 0xff, 0xff, 0xff, 0x99, 0xf7, 0xf9,
-        0x66, 0xb8, 0x10, 0x00, 0xb1, 0x03, 0xf6, 0xf1,
-        0x31, 0xc9, 0xf7, 0xf1,
+        0xb8, 100,  0,    0,    0,    0x31, 0xd2, 0xb9, 7,    0,    0,    0,    0xf7, 0xf1,
+        0xb8, 0x9c, 0xff, 0xff, 0xff, 0x99, 0xf7, 0xf9, 0x66, 0xb8, 0x10, 0x00, 0xb1, 0x03,
+        0xf6, 0xf1, 0x31, 0xc9, 0xf7, 0xf1,
     };
     const r = try expectRun(&code, null);
     try testing.expectEqual(Exit.fault, r.exit);
@@ -266,9 +268,9 @@ test "check/x86: DIV from memory, its #DE, and SAHF and LAHF" {
     const code = [_]u8{
         0xbb, 0x00, 0x00, 0x02, 0x00, 0xc7, 0x03, 7, 0, 0, 0, 0xb8, 100, 0, 0, 0, 0x31, 0xd2,
         0xf7, 0x33, // divl (%ebx)
-        0xc6, 0x43, 0x04, 9, 0x66, 0xb8, 0x2c, 0x01, 0xf6, 0x73, 0x04, // movb; movw; divb 4(%ebx)
-        0xb4, 0xd5, 0x9e, 0x9f, 0x88, 0xe1, 0xb4, 0x00, 0x9e, 0x9f,
-        0xc7, 0x43, 0x08, 0, 0, 0, 0, 0xf7, 0x7b, 0x08,
+        0xc6, 0x43, 0x04, 9,    0x66, 0xb8, 0x2c, 0x01, 0xf6, 0x73, 0x04, // movb; movw; divb 4(%ebx)
+        0xb4, 0xd5, 0x9e, 0x9f, 0x88, 0xe1, 0xb4, 0x00, 0x9e, 0x9f, 0xc7,
+        0x43, 0x08, 0,    0,    0,    0,    0xf7, 0x7b, 0x08,
     };
     const r = try expectRun(&code, null);
     try testing.expectEqual(Exit.fault, r.exit);
@@ -296,14 +298,13 @@ test "check/x86: short REP counts as IR loops: MOVS faulting mid-copy, CMPS, SCA
     // xorl %ecx, %ecx; rep stosb (nothing); std; movl $0x20008, %edi;
     // movl $3, %ecx; rep stosb (down); cld; int $0x80
     const code = [_]u8{
-        0xbf, 0, 0, 2, 0, 0xb9, 12, 0, 0, 0, 0xb0, 0x61, 0xf3, 0xaa,
-        0xc6, 0x05, 0x05, 0, 2, 0, 0x62,
-        0xbe, 0, 0, 2, 0, 0xbf, 0, 1, 2, 0, 0xb9, 12, 0, 0, 0, 0xf3, 0xa4,
-        0xbe, 0, 0, 2, 0, 0xbf, 0, 1, 2, 0, 0xb9, 12, 0, 0, 0, 0xc6, 0x05, 0x07, 1, 2, 0, 0x63, 0xf3, 0xa6,
-        0xbf, 0, 0, 2, 0, 0xb9, 9, 0, 0, 0, 0xb0, 0x62, 0xf2, 0xae,
-        0x31, 0xc9, 0xf3, 0xaa,
-        0xfd, 0xbf, 8, 0, 2, 0, 0xb9, 3, 0, 0, 0, 0xf3, 0xaa, 0xfc,
-        0xcd, 0x80,
+        0xbf, 0,    0,    2,    0,    0xb9, 12,   0,    0,    0,    0xb0, 0x61, 0xf3, 0xaa,
+        0xc6, 0x05, 0x05, 0,    2,    0,    0x62, 0xbe, 0,    0,    2,    0,    0xbf, 0,
+        1,    2,    0,    0xb9, 12,   0,    0,    0,    0xf3, 0xa4, 0xbe, 0,    0,    2,
+        0,    0xbf, 0,    1,    2,    0,    0xb9, 12,   0,    0,    0,    0xc6, 0x05, 0x07,
+        1,    2,    0,    0x63, 0xf3, 0xa6, 0xbf, 0,    0,    2,    0,    0xb9, 9,    0,
+        0,    0,    0xb0, 0x62, 0xf2, 0xae, 0x31, 0xc9, 0xf3, 0xaa, 0xfd, 0xbf, 8,    0,
+        2,    0,    0xb9, 3,    0,    0,    0,    0xf3, 0xaa, 0xfc, 0xcd, 0x80,
     };
     const r2 = try expectRun(&code, null);
     try testing.expectEqual(Exit.svc, r2.exit);
@@ -329,7 +330,7 @@ test "check/x86: REP MOVS, STOS, and SCAS a page at a time, and a fault mid-copy
     const code3 = [_]u8{
         0xbf, 0, 0, 2, 0, 0xb9, 0, 0x09, 0, 0, 0xb0, 0x61, 0xf3, 0xaa, // fills 0x900 bytes of 'a'
         0xbf, 0, 0, 2, 0, 0xb9, 0, 0x20, 0, 0, 0xf2, 0xae, // repne scasb for 'a': stops at once
-        0xbf, 0, 0, 2, 0, 0xb9, 0, 0x20, 0, 0, 0xf3, 0xae, // repe scasb: stops at 0x900
+        0xbf, 0,    0, 2, 0, 0xb9, 0, 0x20, 0, 0, 0xf3, 0xae, // repe scasb: stops at 0x900
         0xcd, 0x80,
     };
     const r3 = try expectRun(&code3, null);
@@ -433,7 +434,8 @@ test "check/x86: x87 through the helper: loads, arithmetic, stores, FCOMI, FNSTS
         0xdb, 0x6b, 0x38, // fldt 56(%ebx)
         0xdd, 0xd8, // fstp %st(0)
         0x9b, // fwait
-        0xcd, 0x80,
+        0xcd,
+        0x80,
     };
     const r = try expectRun(&code, &x87Setup);
     try testing.expectEqual(Exit.svc, r.exit);
@@ -824,4 +826,411 @@ test "fuzz-sse: random SSE and SSE2 programs agree region by region" {
 
 test "fuzz-sse natively" {
     try natively(fuzzSse, .{ testing.allocator, 0x55f, 300 });
+}
+
+// ---------------------------------------------------------------- hx64
+
+pub const Cpu64 = cpu_mod.Cpu64;
+const guest64 = &check.x86.guest64;
+const gen = check.gen_x86;
+
+/// hx64's test address space: gen_x86's (code, then data at RBX and the
+/// stack after it), with the code two pages.
+pub const Machine64 = struct {
+    pub const code_va = gen.code_va;
+    pub const data_va = gen.data_va;
+    pub const stack_va = gen.stack_va;
+
+    code: [2 * page_size]u8 align(page_size) = @splat(0xcc),
+    data: [page_size]u8 align(page_size) = @splat(0),
+    stack: [page_size]u8 align(page_size) = @splat(0),
+    regions: [3]mem.Region = undefined,
+    map: mem.Map = undefined,
+
+    pub fn init(m: *Machine64) void {
+        m.regions = .{
+            .{ .va = code_va, .mem = &m.code, .exec = true },
+            .{ .va = data_va, .mem = &m.data, .write = true },
+            .{ .va = stack_va, .mem = &m.stack, .write = true },
+        };
+        m.map = .{ .regions = &m.regions };
+    }
+
+    pub fn load(m: *Machine64, code: []const u8) void {
+        @memset(&m.code, 0xcc);
+        @memcpy(m.code[0..code.len], code);
+    }
+
+    pub fn cpu(_: *Machine64) Cpu64 {
+        var c: Cpu64 = .{};
+        c.rip = code_va;
+        c.r[3] = data_va;
+        c.r[4] = stack_va + page_size / 2;
+        return c;
+    }
+};
+
+pub const Result64 = struct {
+    exit: Exit,
+    pc: u64,
+    regions: u32,
+    retired: u64,
+    cpu: Cpu64 = .{},
+    ok: bool = true,
+};
+
+/// `checkRegions` for hx64, over check.x86.guest64.
+pub fn checkRegions64(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, start: Cpu64, budget: i64, max_regions: u32, native: ?*Native) !Result64 {
+    const backing = check.mapBacking(map);
+    var cpu = start;
+    var res: Result64 = .{ .exit = .chain, .pc = start.rip, .regions = 0, .retired = 0 };
+    while (res.regions < max_regions) {
+        var reg = check.liftOpt(gpa, guest64, &backing, cpu.rip, .{ .lazy_eflags = native == null or native_mod.lazy_eflags }) catch |e| switch (e) {
+            error.Unsupported => {
+                var sh = check.Shadow.init(gpa, backing);
+                defer sh.deinit();
+                var c: Ctx = .{ .cpu = @intFromPtr(&cpu), .space = @intFromPtr(&sh) };
+                const x: Exit = @enumFromInt(check.x86.step64(&c));
+                sh.commit();
+                res.exit = x;
+                res.pc = cpu.rip;
+                res.cpu = cpu;
+                return res;
+            },
+            else => return e,
+        };
+        defer reg.deinit(gpa);
+        if (!try r.check(.{ .ir_eval = &reg }, std.mem.asBytes(&cpu), .{ .budget = budget })) {
+            res.ok = false;
+            return res;
+        }
+        if (native) |n| if (try n.compile(gpa, &reg)) |f| {
+            if (!try r.check(.{ .entry = f }, std.mem.asBytes(&cpu), .{ .budget = budget })) {
+                res.ok = false;
+                return res;
+            }
+        };
+        res.regions += 1;
+        const o = r.out[check.Run.t1];
+        res.retired += o.retired;
+        r.shadow[check.Run.t1].commit();
+        @memcpy(std.mem.asBytes(&cpu), r.cpu[check.Run.t1]);
+        res.exit = o.exit;
+        res.pc = o.pc;
+        res.cpu = cpu;
+        switch (o.exit) {
+            .chain, .indirect => {},
+            else => return res,
+        }
+    }
+    return res;
+}
+
+pub fn runChecked64(gpa: std.mem.Allocator, m: *Machine64, start: Cpu64, budget: i64) !Result64 {
+    const r = try check.Run.init(gpa, guest64, check.mapBacking(&m.map));
+    defer r.deinit();
+    const res = try checkRegions64(gpa, r, &m.map, start, budget, 1000, run_native);
+    if (!res.ok) {
+        std.debug.print("hx64 region check failed:\n{s}\n", .{r.report.items});
+        return error.Diverged;
+    }
+    if (res.regions == 1000) return error.TooManyRegions;
+    return res;
+}
+
+/// Runs long-mode T0 alone from `start` to its first exit.
+pub fn runT0_64(m: *Machine64, start: Cpu64) struct { exit: cpu_mod.Exit64, cpu: Cpu64 } {
+    var c = start;
+    const M = struct {
+        m: *Machine64,
+        pub fn translate(s: *@This(), va: u64, access: cpu_mod.Access) ?[*]u8 {
+            for (s.m.regions) |rg| {
+                if (va >= rg.va and va - rg.va < rg.mem.len) {
+                    const ok = switch (access) {
+                        .read => rg.read,
+                        .write => rg.write,
+                        .exec => rg.exec,
+                    };
+                    if (!ok) return null;
+                    return rg.mem.ptr + (va - rg.va);
+                }
+            }
+            return null;
+        }
+    };
+    var mm: M = .{ .m = m };
+    const e = exec.runIn(.long, &c, &mm, .{ .budget = 1_000_000 });
+    return .{ .exit = e, .cpu = c };
+}
+
+fn expectRun64(code: []const u8, setup: ?*const fn (*Cpu64) void) !Result64 {
+    const gpa = testing.allocator;
+    const m = try gpa.create(Machine64);
+    defer gpa.destroy(m);
+    m.* = .{};
+    m.init();
+    m.load(code);
+    var c = m.cpu();
+    if (setup) |f| f(&c);
+    const m0 = try gpa.create(Machine64);
+    defer gpa.destroy(m0);
+    m0.* = m.*;
+    m0.init();
+    const want = runT0_64(m0, c);
+    const got = try runChecked64(gpa, m, c, std.math.maxInt(i64));
+    try testing.expectEqualSlices(u64, &want.cpu.r, &got.cpu.r);
+    try testing.expectEqual(want.cpu.fl.get(), got.cpu.fl.get());
+    try testing.expectEqual(want.cpu.rip, got.pc);
+    try testing.expectEqualSlices(u8, &m0.data, &m.data);
+    try testing.expectEqualSlices(u8, &m0.stack, &m.stack);
+    return got;
+}
+
+fn regs64Setup(c: *Cpu64) void {
+    for (&c.r, 0..) |*x, n| {
+        if (n == 3 or n == 4) continue;
+        x.* = 0x8000_0000_ffff_0000 +% n *% 0x1111_1111_1111;
+    }
+}
+
+test "check/x64: a counted loop over 64-bit memory, RIP-relative data, and R8-R15" {
+    // mov ecx, 100; xor eax, eax; mov r9, 0x1_0000_0003
+    // l: add rax, rcx; add [rbx], rcx; adc qword [rbx+8], 0
+    //    add r10, [rip+d] (the qword after the code); add r10, r9;
+    //    dec ecx; jnz l
+    // syscall
+    const code = [_]u8{
+        0xb9, 100, 0, 0, 0, // mov ecx, 100
+        0x31, 0xc0, // xor eax, eax
+        0x49, 0xb9, 3, 0, 0, 0, 1, 0, 0, 0, // mov r9, 0x1_0000_0003
+        0x48, 0x01, 0xc8, // l (+0x11): add rax, rcx
+        0x48, 0x01, 0x0b, // add [rbx], rcx
+        0x48, 0x83, 0x53, 0x08, 0x00, // adc qword [rbx+8], 0
+        0x4c, 0x03, 0x15, 0x09, 0, 0, 0, // add r10, [rip+9]: the qword at +0x2c
+        0x4d, 0x01, 0xca, // add r10, r9
+        0xff, 0xc9, // dec ecx
+        0x75, 0xe7, // jnz l
+        0x0f, 0x05, // syscall (+0x2a)
+        0xef, 0xbe, 0xad, 0xde, 0x01, 0, 0, 0, // the qword
+    };
+    const r = try expectRun64(&code, regs64Setup);
+    try testing.expectEqual(@as(u64, 5050), r.cpu.r[0]);
+    try testing.expectEqual(Exit.svc, r.exit);
+}
+
+test "check/x64: 32-bit writes zero the upper half, and 8-bit ones with REX name SPL-DIL" {
+    // mov eax, ecx; add edx, 1; xchg esi, edi; lea r8d, [rax+rdx]
+    // cmovz r9d, r10d (not taken either way, still zero-extends)
+    // shl r11d, 0 (also); bsf r12d, r13d with r13 = 0 (also)
+    // mov sil, 7 (REX); mov ah, 9 (no REX); add dil, ah? (not encodable): add dil, al
+    // cmpxchg r14d, r15d; setnz bpl; movsxd rcx, edx; movzx r15, byte [rbx+1]
+    // cdqe; cqo; bswap rbp; neg r8; not r9w; imul r10, r11, -3; mul r12
+    // syscall
+    const code = [_]u8{
+        0x89, 0xc8, // mov eax, ecx
+        0x83, 0xc2, 0x01, // add edx, 1
+        0x87, 0xfe, // xchg esi, edi
+        0x44, 0x8d, 0x04, 0x10, // lea r8d, [rax+rdx]
+        0x45, 0x0f, 0x44, 0xca, // cmovz r9d, r10d
+        0x41, 0xc1, 0xe3, 0x00, // shl r11d, 0
+        0x45, 0x0f, 0xbc, 0xe5, // bsf r12d, r13d
+        0x40, 0xb6, 0x07, // mov sil, 7
+        0xb4, 0x09, // mov ah, 9
+        0x40, 0x00, 0xc7, // add dil, al
+        0x45, 0x0f, 0xb1, 0xfe, // cmpxchg r14d, r15d
+        0x40, 0x0f, 0x95, 0xc5, // setnz bpl
+        0x48, 0x63, 0xca, // movsxd rcx, edx
+        0x4c, 0x0f, 0xb6, 0x7b, 0x01, // movzx r15, byte [rbx+1]
+        0x48, 0x98, // cdqe
+        0x48, 0x99, // cqo
+        0x48, 0x0f, 0xcd, // bswap rbp
+        0x49, 0xf7, 0xd8, // neg r8
+        0x66, 0x41, 0xf7, 0xd1, // not r9w
+        0x4d, 0x6b, 0xd3, 0xfd, // imul r10, r11, -3
+        0x49, 0xf7, 0xe4, // mul r12
+        0x0f, 0x05,
+    };
+    const S = struct {
+        fn setup(c: *Cpu64) void {
+            regs64Setup(c);
+            c.r[13] = 0;
+            c.fl.set(0x2); // ZF clear
+        }
+    };
+    _ = try expectRun64(&code, S.setup);
+}
+
+test "check/x64: push, pop, call, ret, leave, and 16-bit pushes" {
+    // push rbp; mov rbp, rsp; push 0x12345678 (sign-extended); push word 7
+    // call f; pop ax; pop rcx; leave; syscall
+    // f: mov rax, [rsp]; ret 0
+    const code = [_]u8{
+        0x55, // push rbp
+        0x48, 0x89, 0xe5, // mov rbp, rsp
+        0x68, 0x78, 0x56, 0x34, 0x92, // push 0xffffffff92345678
+        0x66, 0x6a, 0x07, // push word 7
+        0xe8, 0x08, 0, 0, 0, // call f (+0x19)
+        0x66, 0x58, // pop ax
+        0x59, // pop rcx
+        0xc9, // leave
+        0x0f, 0x05, // syscall
+        0xcc, 0xcc,
+        0x48, 0x8b, 0x04, 0x24, // f: mov rax, [rsp]
+        0xc2, 0x00, 0x00, // ret 0
+    };
+    _ = try expectRun64(&code, regs64Setup);
+}
+
+test "check/x64: DIV and IDIV under 64 bits, #DE through the guard, and DIV at 64 on T0" {
+    // div ecx; xor edx, edx; idiv cx; div r8 (T0's); then a #DE: xor
+    // ecx, ecx; div ecx
+    const code = [_]u8{
+        0xf7, 0xf1, // div ecx
+        0x31, 0xd2, // xor edx, edx
+        0x66, 0xf7, 0xf9, // idiv cx
+        0x49, 0xf7, 0xf0, // div r8
+        0x31, 0xc9, // xor ecx, ecx
+        0xf7, 0xf1, // div ecx
+        0x0f, 0x05,
+    };
+    const S = struct {
+        fn setup(c: *Cpu64) void {
+            c.r[0] = 0x1234_5678_9abc_def0;
+            c.r[1] = 0x30003;
+            c.r[2] = 0x7;
+            c.r[8] = 0x1_0000_0000;
+        }
+    };
+    const r = try expectRun64(&code, S.setup);
+    try testing.expectEqual(Exit.fault, r.exit);
+    try testing.expectEqual(@as(u64, Machine64.code_va + 12), r.pc);
+}
+
+test "check/x64: a fault is exact: a store past the stack page" {
+    // mov rsp, rbx; sub rsp, 8 (below data, unmapped: data is the first
+    // mapped page after the code gap); push rax
+    const code = [_]u8{
+        0x48, 0x89, 0xdc, // mov rsp, rbx
+        0x48, 0x83, 0xec, 0x08, // sub rsp, 8
+        0x50, // push rax
+        0x0f,
+        0x05,
+    };
+    const r = try expectRun64(&code, regs64Setup);
+    try testing.expectEqual(Exit.fault, r.exit);
+    try testing.expectEqual(@as(u64, Machine64.code_va + 7), r.pc);
+}
+
+/// Random long-mode programs (gen_x86.program64) region by region.
+pub fn fuzz64(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    const m = try gpa.create(Machine64);
+    defer gpa.destroy(m);
+    var buf: [page_size - 16]u8 = undefined;
+    for (0..count) |iter| {
+        m.* = .{};
+        m.init();
+        for (&m.data) |*b| b.* = rng.int(u8);
+        for (&m.stack) |*b| b.* = rng.int(u8);
+        const code = gen.program64(rng, .{ .len = 8 + rng.uintLessThan(u32, 40) }, &buf);
+        m.load(code);
+        var c = m.cpu();
+        const regs = gen.registers64(rng);
+        c.r = regs.r;
+        c.fl.set(@truncate(regs.rflags));
+        _ = runChecked64(gpa, m, c, std.math.maxInt(i64)) catch |e| {
+            std.debug.print("fuzz-x64: seed {d}, program {d}: {s}\ncode:", .{ seed, iter, @errorName(e) });
+            for (code) |b| std.debug.print(" {x:0>2}", .{b});
+            std.debug.print("\n", .{});
+            return e;
+        };
+    }
+}
+
+test "fuzz-x64: random long-mode programs agree region by region" {
+    try fuzz64(testing.allocator, 0x64, 400);
+}
+
+test "fuzz-x64 natively" {
+    try natively(fuzz64, .{ testing.allocator, 0x6464, 200 });
+}
+
+fn strings64Setup(c: *Cpu64) void {
+    regs64Setup(c);
+    c.r[6] = Machine64.data_va + 0x100; // rsi
+    c.r[7] = Machine64.data_va + 0x200; // rdi
+    c.r[1] = 9; // rcx
+    c.r[0] = 0x1122_3344_5566_7788;
+}
+
+test "check/x64: strings: REP MOVSB, REP STOSQ, REPE CMPSB, REPNE SCASB, and LODSQ, both directions" {
+    const code = [_]u8{
+        0xf3, 0xa4, // rep movsb
+        0xb9, 0x05, 0, 0, 0, // mov ecx, 5
+        0xf3, 0x48, 0xab, // rep stosq
+        0xb9, 0x30, 0, 0, 0, // mov ecx, 48 (past rep_inline: T0 chunks)
+        0x48, 0x83, 0xee, 0x40, // sub rsi, 64
+        0xf3, 0xa6, // repe cmpsb
+        0xb9, 0x11, 0, 0, 0, // mov ecx, 17
+        0xf2, 0xae, // repne scasb
+        0x48, 0xad, // lodsq
+        0xfd, // std
+        0x48, 0xa5, // movsq
+        0xf3, 0x66, 0xa5, // rep movsw (rcx = what scas left)
+        0xfc, // cld
+        0x0f,
+        0x05,
+    };
+    _ = try expectRun64(&code, strings64Setup);
+}
+
+test "check/x64: atomics through cas: LOCK ADD, XADD, XCHG, and CMPXCHG at 32 and 64 bits" {
+    const code = [_]u8{
+        0xf0, 0x48, 0x01, 0x0b, // lock add [rbx], rcx
+        0xf0, 0x0f, 0xc1, 0x53, 0x08, // lock xadd [rbx+8], edx
+        0x48, 0x87, 0x73, 0x10, // xchg [rbx+16], rsi
+        0x8b, 0x43, 0x18, // mov eax, [rbx+24]
+        0xf0, 0x0f, 0xb1, 0x7b, 0x18, // lock cmpxchg [rbx+24], edi (equal)
+        0xf0, 0x0f, 0xb1, 0x7b, 0x18, // lock cmpxchg [rbx+24], edi (not now)
+        0xf0, 0x4c, 0x0f, 0xb1, 0x43, 0x20, // lock cmpxchg [rbx+32], r8
+        0xf0, 0x48, 0xff, 0x43, 0x28, // lock inc qword [rbx+40]
+        0xf0, 0x48, 0xf7, 0x5b, 0x30, // lock neg qword [rbx+48]
+        0x48, 0x0f, 0xc7, 0x4b, 0x40, // cmpxchg16b [rbx+64] (T0's)
+        0x0f, 0x05,
+    };
+    const S = struct {
+        fn setup(c: *Cpu64) void {
+            regs64Setup(c);
+            c.r[0] = 0xdead_beef_0000_0000; // upper half kept by an equal CMPXCHG
+        }
+    };
+    _ = try expectRun64(&code, S.setup);
+}
+
+test "check/x64: rotates and SHLD at 64 bits, BT into memory by a register, POP to memory, and FS" {
+    const code = [_]u8{
+        0x48, 0xc1, 0xc0, 0x25, // rol rax, 37
+        0x49, 0xd3, 0xc9, // ror r9, cl
+        0x41, 0xc1, 0xc2, 0x00, // rol r10d, 0 (zeroes the upper half)
+        0x0f, 0xa4, 0xd6, 0x05, // shld esi, edx, 5
+        0x48, 0x0f, 0xa5, 0xd7, // shld rdi, rdx, cl (T0's)
+        0x48, 0x0f, 0xab, 0x0b, // bts [rbx], rcx
+        0x48, 0x0f, 0xa3, 0x13, // bt [rbx], rdx
+        0x0f, 0xba, 0xf8, 0x23, // btc eax, 35
+        0xff, 0x33, // push qword [rbx]
+        0x8f, 0x43, 0x08, // pop qword [rbx+8]
+        0x64, 0x48, 0x8b, 0x04, 0x25, 0x10, 0, 0, 0, // mov rax, fs:[0x10]
+        0x64, 0x48, 0x89, 0x0c, 0x25, 0x18, 0, 0, 0, // mov fs:[0x18], rcx
+        0x0f, 0x05,
+    };
+    const S = struct {
+        fn setup(c: *Cpu64) void {
+            regs64Setup(c);
+            c.r[1] = 0x1_0000_0047; // rcx: cl 0x47, a bit offset past the qword
+            c.r[2] = 0xffff_ffff_ffff_ffc3; // rdx: a negative bit offset
+            c.fs_base = Machine64.data_va + 0x300;
+        }
+    };
+    _ = try expectRun64(&code, S.setup);
 }
