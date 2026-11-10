@@ -8,6 +8,7 @@
 //! class here when T0 gains one.
 
 const std = @import("std");
+const simd_gen = @import("../../interp/a64/simd_gen.zig");
 
 pub const code_va: u64 = 0x1000;
 pub const data_va: u64 = 0x20000;
@@ -49,6 +50,8 @@ pub const Class = enum {
     ldst_v,
     ldp_v,
     ldar_stlr,
+    /// FP and AdvSIMD data processing (simd_gen.zig).
+    simd,
 };
 
 pub const Options = struct {
@@ -231,6 +234,9 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
         },
         // LDAR STLR on x20
         .ldar_stlr => (r.uintLessThan(u32, 4) << 30) | (if (r.boolean()) @as(u32, 0x08DFFC00) else 0x089FFC00) | (base_reg << 5) | d,
+        .simd => while (true) {
+            if (simd_gen.word(r)) |w| break w;
+        },
         // B.cond, CBZ, CBNZ, TBZ, TBNZ, B: forward, within the program
         .branch => blk: {
             const k = 1 + r.uintLessThan(u32, @max(1, @min(8, n - i)));

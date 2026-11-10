@@ -7,6 +7,7 @@ const std = @import("std");
 const check = @import("../check.zig");
 const a64 = @import("a64.zig");
 const gen = @import("gen_a64.zig");
+const simd_gen = @import("../../interp/a64/simd_gen.zig");
 const mem = @import("../../interp/mem.zig");
 const ctx_mod = @import("../ctx.zig");
 const Native = @import("../emit/native.zig").Native;
@@ -37,6 +38,8 @@ pub const Space = struct {
         var c: a64.Cpu = .{ .pc = gen.code_va, .nzcv = regs.nzcv };
         @memcpy(c.r[0..31], &regs.x);
         c.r[a64.t0.dec.SP] = gen.data_va + page_size; // SP: unused, but valid
+        for (&c.v) |*v| v.* = simd_gen.vValue(r);
+        c.fpcr = simd_gen.fpcr(r);
         return c;
     }
 };
