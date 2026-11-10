@@ -229,7 +229,6 @@ fn sseLifted(i: *const Inst) bool {
     if (i.opcode >> 8 != 0x0f) return false;
     return switch (op) {
         0x10, 0x11 => true,
-        0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f => p == .f2 or p == .f3,
         0x5a => p == .f2 or p == .f3,
         0x2a, 0x2c, 0x2d => p == .f2 or p == .f3,
         0x2e, 0x2f => p == .none or p == .p66,
@@ -240,6 +239,21 @@ fn sseLifted(i: *const Inst) bool {
         0xd6 => p == .p66,
         0x6f, 0x7f => p == .p66 or p == .f3,
         0xef, 0xdb, 0xeb, 0xdf => p == .p66,
+        // Scalar (F3, F2) and packed (PS, PD) FP.
+        0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f => true,
+        0x14, 0x15 => p == .none or p == .p66,
+        0xc6 => p == .none or p == .p66,
+        // SSE2 integer on XMM (66; without it they're MMX).
+        0xfc, 0xfd, 0xfe, 0xd4, 0xf8, 0xf9, 0xfa, 0xfb => p == .p66,
+        0x74, 0x75, 0x76, 0x64, 0x65, 0x66 => p == .p66,
+        0xda, 0xde, 0xea, 0xee, 0xd5 => p == .p66,
+        0x60, 0x61, 0x62, 0x6c, 0x68, 0x69, 0x6a, 0x6d => p == .p66,
+        0x63, 0x67, 0x6b => p == .p66,
+        0x70 => p != .none,
+        // Shifts by an immediate: register forms, and only the defined
+        // /n (the rest are #UD on T0).
+        0x71, 0x72 => p == .p66 and !i.mem and (i.reg() == 2 or i.reg() == 4 or i.reg() == 6),
+        0x73 => p == .p66 and !i.mem and (i.reg() == 2 or i.reg() == 3 or i.reg() == 6 or i.reg() == 7),
         else => false,
     };
 }
@@ -1323,8 +1337,28 @@ const Lifter = struct {
         try l.store(k, addr, v);
     }
 
-    fn fpOp(l: *Lifter, op: ir.Op, ty: Type, a: Ref, bv: Ref, rounding: u3, exact: bool) !Ref {
-        return l.b.emit(.{ .op = op, .ty = ty, .a = a, .b = bv, .aux = extAux(rounding, exact), .aux2 = fp_aux2 });
+    fn vec(l: *Lifter, op: ir.Op, x: Ref, y: Ref, es: u2, imm: u16) !Ref {
+        return l.b.emit(.{ .op = op, .ty = .v128, .a = x, .b = y, .aux = @bitCast(ir.ExtAux{ .esize = es, .imm = imm }) });
+    }
+
+    fn vec1(l: *Lifter, op: ir.Op, x: Ref, es: u2, imm: u16) !Ref {
+        return l.b.emit(.{ .op = op, .ty = .v128, .a = x, .aux = @bitCast(ir.ExtAux{ .esize = es, .imm = imm }) });
+    }
+
+    /// Lane `n` of x: i32 lanes (es 2) or i64 (es 3).
+    fn vlane(l: *Lifter, x: Ref, es: u2, n: u32) !Ref {
+        return l.b.emit(.{ .op = .@"v.lane", .ty = if (es == 3) .i64 else .i32, .a = x, .aux = @bitCast(ir.ExtAux{ .esize = es, .imm = @intCast(n) }) });
+    }
+
+    /// Two i32s as an i64, lo first.
+    fn pair(l: *Lifter, lo: Ref, hi: Ref) !Ref {
+        const b = l.b;
+        const h = try b.bin(.shl, .i64, try b.un(.zext, .i64, hi), try b.konst(.i64, 32));
+        return b.bin(.@"or", .i64, h, try b.un(.zext, .i64, lo));
+    }
+
+    fn fpOp(l: *Lifter, op: ir.Op, ty: Type, a: Ref, bv: Ref, aux: u64) !Ref {
+        return l.b.emit(.{ .op = op, .ty = ty, .a = a, .b = bv, .aux = aux, .aux2 = fp_aux2 });
     }
 
     /// SSE and SSE2, as `sseLifted` lists them. An `fp.*` op raises into
@@ -1347,6 +1381,10 @@ const Lifter = struct {
         const aligned = switch (op) {
             0x28, 0x29, 0x54, 0x55, 0x56, 0x57, 0xef, 0xdb, 0xeb, 0xdf => true,
             0x6f, 0x7f => p == .p66,
+            0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f => p == .none or p == .p66,
+            0x14, 0x15, 0xc6 => true,
+            0xfc, 0xfd, 0xfe, 0xd4, 0xf8, 0xf9, 0xfa, 0xfb, 0x74, 0x75, 0x76, 0x64, 0x65, 0x66 => true,
+            0xda, 0xde, 0xea, 0xee, 0xd5, 0x60, 0x61, 0x62, 0x6c, 0x68, 0x69, 0x6a, 0x6d, 0x63, 0x67, 0x6b, 0x70 => true,
             else => false,
         };
         if (addr) |a| if (aligned) {
@@ -1370,12 +1408,19 @@ const Lifter = struct {
                 }
             },
             0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f => {
-                const size: u8 = if (p == .f2) 8 else 4;
+                const packed_ = p == .none or p == .p66;
+                const size: u8 = if (packed_) 16 else if (p == .f2) 8 else 4;
                 const T = tyOf(size);
                 const y = try l.xsrc(k, addr, size);
                 const x = try b.getreg(T, d);
+                // Packed: lanes of binary32 (PS, esize 2) or binary64 (PD, 3).
+                const aux = if (packed_) blk: {
+                    var e: ir.ExtAux = @bitCast(extAux(0, false));
+                    e.esize = if (p == .p66) 3 else 2;
+                    break :blk @as(u64, @bitCast(e));
+                } else extAux(0, false);
                 const r = switch (op) {
-                    0x51 => try b.emit(.{ .op = .@"fp.sqrt", .ty = T, .a = y, .aux = extAux(0, false), .aux2 = fp_aux2 }),
+                    0x51 => try b.emit(.{ .op = .@"fp.sqrt", .ty = T, .a = y, .aux = aux, .aux2 = fp_aux2 }),
                     else => try l.fpOp(switch (op) {
                         0x58 => .@"fp.add",
                         0x59 => .@"fp.mul",
@@ -1383,7 +1428,7 @@ const Lifter = struct {
                         0x5d => .@"fp.min",
                         0x5e => .@"fp.div",
                         else => .@"fp.max",
-                    }, T, x, y, 0, false),
+                    }, T, x, y, aux),
                 };
                 try b.setreg(d, r);
             },
@@ -1412,7 +1457,7 @@ const Lifter = struct {
                 const T = tyOf(size);
                 const y = try l.xsrc(k, addr, size);
                 const x = try b.getreg(T, d);
-                const ord = try l.fpOp(.@"fp.cmp", .i8, x, y, 0, op == 0x2f);
+                const ord = try l.fpOp(.@"fp.cmp", .i8, x, y, extAux(0, op == 0x2f));
                 // Order 0 lt, 1 eq, 2 gt, 3 unordered, through a table in
                 // a constant: CF, ZF, 0, ZF|PF|CF, a byte each.
                 const tbl: u64 = (@as(u64, xf.ZF | xf.PF | xf.CF) << 24) | (@as(u64, xf.ZF) << 8) | xf.CF;
@@ -1447,6 +1492,134 @@ const Lifter = struct {
                 // MOVQ xmm, xmm/m64: the high half zeroed.
                 const v = try l.xsrc(k, addr, 8);
                 try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = v, .b = try b.konst(.i64, 0) }));
+            },
+            0x14, 0x15 => {
+                // UNPCKL/HPS and PD: ZIP1 and ZIP2.
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                try b.setreg(d, try l.vec(.@"v.zip", x, y, if (p == .p66) 3 else 2, if (op == 0x15) 1 else 0));
+            },
+            0xc6 => {
+                // SHUFPS and SHUFPD: the low lanes from the destination,
+                // the high from the source, by the immediate.
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                const imm = i.imm;
+                if (p == .p66) {
+                    const lo = try l.vlane(x, 3, imm & 1);
+                    const hi = try l.vlane(y, 3, (imm >> 1) & 1);
+                    try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = lo, .b = hi }));
+                } else {
+                    const ls = [4]Ref{ try l.vlane(x, 2, imm & 3), try l.vlane(x, 2, (imm >> 2) & 3), try l.vlane(y, 2, (imm >> 4) & 3), try l.vlane(y, 2, (imm >> 6) & 3) };
+                    try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = try l.pair(ls[0], ls[1]), .b = try l.pair(ls[2], ls[3]) }));
+                }
+            },
+            0xfc, 0xfd, 0xfe, 0xd4, 0xf8, 0xf9, 0xfa, 0xfb => {
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                const es: u2 = switch (op) {
+                    0xfc, 0xf8 => 0,
+                    0xfd, 0xf9 => 1,
+                    0xfe, 0xfa => 2,
+                    else => 3,
+                };
+                try b.setreg(d, try l.vec(if (op >= 0xf8 or op == 0xd4) (if (op == 0xd4 or op >= 0xfc) .@"v.add" else .@"v.sub") else .@"v.sub", x, y, es, 0));
+            },
+            0x74, 0x75, 0x76, 0x64, 0x65, 0x66 => {
+                // PCMPEQ and PCMPGT (signed).
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                const es: u2 = @intCast(op & 3);
+                const pred: ir.Pred = if (op >= 0x74) .eq else .sgt;
+                try b.setreg(d, try l.vec(.@"v.cmp", x, y, es, @intFromEnum(pred)));
+            },
+            0xda, 0xde, 0xea, 0xee => {
+                // PMINUB, PMAXUB, PMINSW, PMAXSW.
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                const signed = op == 0xea or op == 0xee;
+                const max = op == 0xde or op == 0xee;
+                try b.setreg(d, try l.vec(if (max) .@"v.max" else .@"v.min", x, y, if (signed) 1 else 0, @intFromBool(signed)));
+            },
+            0xd5 => {
+                // PMULLW.
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                try b.setreg(d, try l.vec(.@"v.mul", x, y, 1, 0));
+            },
+            0x60, 0x61, 0x62, 0x6c, 0x68, 0x69, 0x6a, 0x6d => {
+                // PUNPCKL and PUNPCKH: ZIP1 and ZIP2.
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                const es: u2 = switch (op) {
+                    0x60, 0x68 => 0,
+                    0x61, 0x69 => 1,
+                    0x62, 0x6a => 2,
+                    else => 3,
+                };
+                try b.setreg(d, try l.vec(.@"v.zip", x, y, es, if (op >= 0x68 and op != 0x6c) 1 else 0));
+            },
+            0x63, 0x67, 0x6b => {
+                // PACKSSWB, PACKUSWB, PACKSSDW: the destination's lanes
+                // narrowed into the low half, the source's into the high.
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                const es: u2 = if (op == 0x6b) 2 else 1;
+                const sat: u16 = if (op == 0x67) 2 else 1;
+                const lo = try l.vlane(try l.vec1(.@"v.narrow", x, es, sat), 3, 0);
+                const hi = try l.vlane(try l.vec1(.@"v.narrow", y, es, sat), 3, 0);
+                try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = lo, .b = hi }));
+            },
+            0x70 => {
+                // PSHUFD (66), PSHUFHW (F3), PSHUFLW (F2): a byte table.
+                const y = try l.xsrc(k, addr, 16);
+                const imm: u8 = @truncate(i.imm);
+                var idx: [16]u8 = undefined;
+                for (0..16) |j| idx[j] = @intCast(j);
+                switch (p) {
+                    .p66 => for (0..4) |w| {
+                        const s_: u8 = (imm >> @intCast(2 * w)) & 3;
+                        for (0..4) |q| idx[4 * w + q] = 4 * s_ + @as(u8, @intCast(q));
+                    },
+                    else => {
+                        const base: u8 = if (p == .f3) 8 else 0;
+                        for (0..4) |w| {
+                            const s_: u8 = (imm >> @intCast(2 * w)) & 3;
+                            for (0..2) |q| idx[base + 2 * w + q] = base + 2 * s_ + @as(u8, @intCast(q));
+                        }
+                    },
+                }
+                const t = std.mem.readInt(u128, &idx, .little);
+                const tv = try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = try b.konst(.i64, @truncate(t)), .b = try b.konst(.i64, @truncate(t >> 64)) });
+                try b.setreg(d, try l.vec(.@"v.tbl", y, tv, 0, 0));
+            },
+            0x71, 0x72, 0x73 => {
+                // Shifts of the r/m register by an immediate.
+                const r = xmmOff(i.rm());
+                const x = try b.getreg(.v128, r);
+                const n: u16 = @truncate(i.imm);
+                const res = switch (op) {
+                    0x73 => switch (i.reg()) {
+                        2 => try l.vec1(.@"v.lshr", x, 3, n),
+                        6 => try l.vec1(.@"v.shl", x, 3, n),
+                        else => blk: {
+                            // PSRLDQ and PSLLDQ: bytes, through EXT with zero.
+                            const zero = try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = try b.konst(.i64, 0), .b = try b.konst(.i64, 0) });
+                            if (n == 0) break :blk x;
+                            if (n >= 16) break :blk zero;
+                            break :blk if (i.reg() == 3) try l.vec(.@"v.ext", x, zero, 0, n) else try l.vec(.@"v.ext", zero, x, 0, 16 - n);
+                        },
+                    },
+                    else => blk: {
+                        const es: u2 = if (op == 0x71) 1 else 2;
+                        break :blk try l.vec1(switch (i.reg()) {
+                            2 => .@"v.lshr",
+                            4 => .@"v.ashr",
+                            else => .@"v.shl",
+                        }, x, es, n);
+                    },
+                };
+                try b.setreg(r, res);
             },
             0xd6 => {
                 // MOVQ xmm/m64, xmm: to a register, the high half zeroed.
