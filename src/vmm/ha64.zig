@@ -20,6 +20,7 @@ pub var tier: Tier = .t0;
 /// T1's emitter; null where this host has none yet.
 pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
     .aarch64 => @import("../jit/emit/arm64.zig").emitter_def,
+    .x86_64 => @import("../jit/emit/x64.zig").emitter_def,
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};

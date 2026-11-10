@@ -206,6 +206,7 @@ const Machine = struct {
     dcache: a64.t0.Cache = undefined,
     machine: a64.t0.Machine = undefined,
     stats: Stats = .{},
+    em: emitter_mod.Emitter = eval_emit.emitter_def,
 
     const code_va = 0x1000;
     const data_va = 0x20000;
@@ -276,7 +277,7 @@ const Machine = struct {
             m.rt.ctx.retired = m.cpu.retired;
             return e;
         }
-        const cfg: Config = .{ .frontend = a64.lift.frontend, .emitter = eval_emit.emitter_def, .pc_off = @offsetOf(a64.t0.Cpu, "pc") };
+        const cfg: Config = .{ .frontend = a64.lift.frontend, .emitter = m.em, .pc_off = @offsetOf(a64.t0.Cpu, "pc") };
         var rounds: u32 = 0;
         while (rounds < 100_000) : (rounds += 1) {
             switch (run_(m, cfg)) {
@@ -369,6 +370,15 @@ test "dispatch: T1 runs the tracer loop as T0 does, chained and from the cache" 
 }
 
 test "dispatch: random programs agree with T0, with chaining, faults, and flushes" {
+    try randomPrograms(eval_emit.emitter_def);
+}
+
+test "dispatch: the same through this host's emitter" {
+    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    try randomPrograms(@import("emit/x64.zig").emitter_def);
+}
+
+fn randomPrograms(em: emitter_mod.Emitter) !void {
     // A small cache, so it fills and flushes now and then.
     const c = try testCache(codemem.granule);
     defer freeCache(c);
@@ -380,6 +390,7 @@ test "dispatch: random programs agree with T0, with chaining, faults, and flushe
     t0m.* = .{};
     try t1.init(c);
     defer t1.deinit();
+    t1.em = em;
     try t0m.init(null);
     defer t0m.deinit();
     var prng = std.Random.DefaultPrng.init(0x7d15);
