@@ -125,6 +125,7 @@ pub fn lifts(o: dec.Op) bool {
 // ---------------------------------------------------------------- regions
 
 const max_insns = 512;
+const max_pages = 2;
 
 pub const Insn = struct { pc: u64, word: u32, op: dec.Op, how: How };
 
@@ -132,9 +133,20 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
     var buf: [max_insns]Insn = undefined;
     var n: usize = 0;
     const max = @min(limits.max_insns, max_insns);
-    const last_page = (pc >> 12) + limits.max_pages - 1;
+    // A trace: straight-line code from the entry, continuing at the target
+    // of a direct jump or call (B, BL) not yet in the region, over at most
+    // `max_pages` distinct pages. Conditional branches fall through.
+    var pages: [max_pages]u64 = undefined;
+    var npages: usize = 0;
+    const page_limit = @min(limits.max_pages, max_pages);
     var p = pc;
-    while (n < max and p >> 12 <= last_page) : (p += 4) {
+    scan: while (n < max) {
+        const pg = p >> 12;
+        if (std.mem.indexOfScalar(u64, pages[0..npages], pg) == null) {
+            if (npages == page_limit) break;
+            pages[npages] = pg;
+            npages += 1;
+        }
         var word: [4]u8 = undefined;
         if (src.readAll(p, &word) != 4) break;
         const w = std.mem.readInt(u32, &word, .little);
@@ -142,7 +154,19 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
         const how = classify(o);
         buf[n] = .{ .pc = p, .word = w, .op = o, .how = how };
         n += 1;
-        if (how.ends()) break;
+        switch (how) {
+            .jump, .call => {
+                const t = o.imm;
+                // Follow it, unless it's already in the region (a loop) or
+                // can't be.
+                if (t & 3 != 0 or indexOf(buf[0..n], t) != null) break :scan;
+                p = t;
+            },
+            else => {
+                if (how.ends()) break;
+                p += 4;
+            },
+        }
     }
     if (n == 0) {
         // Nothing readable: T0 takes the instruction abort.
@@ -151,20 +175,20 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
         return;
     }
     const insns = buf[0..n];
-    const end = pc + 4 * n; // the first PC past the scanned range
+    // Where the last instruction falls out to, if it doesn't end the trace.
+    const end = insns[n - 1].pc + 4;
 
     // Block leaders: the entry, in-range branch targets, and the
     // instructions after conditional branches.
     var leader: [max_insns + 1]bool = @splat(false);
     var loop_head: [max_insns + 1]bool = @splat(false);
     leader[0] = true;
-    leader[n] = true; // the fall-out point, if anything reaches it
+    // The fall-out point, if the trace doesn't end in a jump or an exit.
+    leader[n] = !insns[n - 1].how.ends();
     for (insns, 0..) |in, i| {
         switch (in.how) {
             .branch, .jump, .call => {
-                const t = in.op.imm;
-                if (inRange(t, pc, end)) {
-                    const ti: usize = @intCast((t - pc) / 4);
+                if (indexOf(insns, in.op.imm)) |ti| {
                     leader[ti] = true;
                     if (ti <= i) loop_head[ti] = true;
                 }
@@ -189,7 +213,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
         block_of[i] = try b.block();
     };
 
-    const R = Region{ .pc = pc, .end = end, .block_of = block_of[0 .. n + 1] };
+    const R = Region{ .insns = insns, .block_of = block_of[0 .. n + 1] };
     var i: usize = 0;
     while (i <= n) {
         const start = i;
@@ -203,7 +227,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
         if (loop_head[start]) try b.poll(insns[start].pc);
         // The block's last instruction: the next leader's, less one.
         var last = start;
-        while (!leader[last + 1]) last += 1;
+        while (last + 1 < n and !leader[last + 1]) last += 1;
         while (true) {
             const in = insns[i];
             // On arm64 hosts, a register-only instruction runs as itself.
@@ -240,17 +264,17 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
                     try b.brcond(c, taken, block_of[i + 1]);
                     // Only a target outside the region gets a new block to
                     // fill; one inside is lifted in its turn.
-                    if (!inRange(in.op.imm, pc, end)) try fillExit(b, taken, in.op.imm);
+                    if (!R.has(in.op.imm)) try fillExit(b, taken, in.op.imm);
                 },
                 .jump => {
                     l.pending += 1;
-                    try l.flushFor(inRange(in.op.imm, pc, end));
+                    try l.flushFor(R.has(in.op.imm));
                     try R.jumpTo(b, in.op.imm);
                 },
                 .call => {
                     try l.put(30, try b.konst(.i64, in.pc + 4));
                     l.pending += 1;
-                    try l.flushFor(inRange(in.op.imm, pc, end));
+                    try l.flushFor(R.has(in.op.imm));
                     try R.jumpTo(b, in.op.imm);
                 },
                 .indirect => {
@@ -289,24 +313,29 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
     }
 }
 
-fn inRange(t: u64, pc: u64, end: u64) bool {
-    return t >= pc and t < end and t & 3 == 0;
+/// The index of the instruction at `t` in the trace, if it's there.
+fn indexOf(insns: []const Insn, t: u64) ?usize {
+    for (insns, 0..) |in, i| if (in.pc == t) return i;
+    return null;
 }
 
 const Region = struct {
-    pc: u64,
-    end: u64,
+    insns: []const Insn,
     block_of: []const ir.BlockId,
+
+    fn has(r: Region, t: u64) bool {
+        return indexOf(r.insns, t) != null;
+    }
 
     /// A block id for branching to guest PC `t`: its block if it's in the
     /// region, else a new block that will hold an exit.
     fn target(r: Region, b: *Builder, t: u64) !ir.BlockId {
-        if (inRange(t, r.pc, r.end)) return r.block_of[@intCast((t - r.pc) / 4)];
+        if (indexOf(r.insns, t)) |i| return r.block_of[i];
         return b.block();
     }
 
     fn jumpTo(r: Region, b: *Builder, t: u64) !void {
-        if (inRange(t, r.pc, r.end)) return b.br(r.block_of[@intCast((t - r.pc) / 4)]);
+        if (indexOf(r.insns, t)) |i| return b.br(r.block_of[i]);
         try b.exit(.@"exit.chain", t);
     }
 };

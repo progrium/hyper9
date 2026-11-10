@@ -25,7 +25,7 @@ pub const Source = struct {
 pub const Limits = struct {
     /// Stop after this many guest instructions.
     max_insns: u32 = 512,
-    /// Stop at the end of the second guest page.
+    /// Read from at most this many distinct guest pages.
     max_pages: u32 = 2,
 };
 

@@ -169,7 +169,8 @@ fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64
     defer r.deinit(gpa);
     var b = ir.Builder.init(gpa, &r);
     var rd: Reader = .{ .view = view, .first = pc >> mem.page_shift };
-    // Two pages at most, so a second page is the one after.
+    // Two pages at most: the entry's and one other (the next, or a
+    // traced jump's).
     var limits = cfg.limits;
     limits.max_pages = @min(limits.max_pages, 2);
     try cfg.frontend.lift(&b, .{ .ctx = &rd, .read = Reader.read }, pc, limits);
@@ -427,6 +428,59 @@ fn randomPrograms(em: emitter_mod.Emitter) !void {
     }
     try testing.expect(t1.stats.linked > 0);
     try testing.expect(c.flushes > 0);
+}
+
+test "dispatch: a trace follows calls and jumps, across pages and backward" {
+    const c = try testCache(1 << 20);
+    defer freeCache(c);
+    const t1 = try testing.allocator.create(Machine);
+    defer testing.allocator.destroy(t1);
+    const t0m = try testing.allocator.create(Machine);
+    defer testing.allocator.destroy(t0m);
+    t1.* = .{};
+    t0m.* = .{};
+    try t1.init(c);
+    defer t1.deinit();
+    try t0m.init(null);
+    defer t0m.deinit();
+    var prog: [1029]u32 = @splat(0xD503201F); // nop
+    const main = [_]u32{
+        0xD2800000, // movz x0, #0
+        0xD28000A1, // movz x1, #5
+        0x940003FE, // loop: bl f (0x2000)          (0x1008)
+        0xF1000421, //   subs x1, x1, #1
+        0x54FFFFC1, //   b.ne loop
+        0x14000002, // b done (0x101c)
+        0x91019000, // add x0, x0, #100 (skipped)
+        0xD4000001, // done: svc #0
+    };
+    const f = [_]u32{
+        0x14000003, // f: b f1 (0x200c)              (0x2000)
+        0xD503201F, // nop
+        0xD65F03C0, // f2: ret                       (0x2008)
+        0x91000C00, // f1: add x0, x0, #3
+        0x17FFFFFE, //   b f2 (back to 0x2008)
+    };
+    @memcpy(prog[0..main.len], &main);
+    @memcpy(prog[1024..][0..f.len], &f);
+    try expectSame(t1, t0m, &prog, &.{}, 0);
+    try testing.expectEqual(@as(u64, 15), t1.cpu.r[0]);
+
+    // The entry's region runs main into f and on to f's RET: one region
+    // over both pages, with no exit to 0x2000.
+    var r: ir.Region = .{ .entry_pc = Machine.code_va };
+    defer r.deinit(testing.allocator);
+    var b = ir.Builder.init(testing.allocator, &r);
+    var rd: Reader = .{ .view = &t1.view, .first = Machine.code_va >> mem.page_shift };
+    try a64.lift.frontend.lift(&b, .{ .ctx = &rd, .read = Reader.read }, Machine.code_va, .{});
+    try testing.expectEqual(@as(u64, 2), rd.second);
+    for (r.insts.items) |i| {
+        try testing.expect(i.op != .@"exit.chain" or i.aux != 0x2000);
+        try testing.expect(i.op != .@"exit.chain" or i.aux != 0x200c);
+    }
+    try testing.expect(for (r.insts.items) |i| {
+        if (i.op == .@"exit.indirect") break true;
+    } else false);
 }
 
 test "dispatch: a store to the code being run finishes in T0 and retranslates" {

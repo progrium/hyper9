@@ -173,8 +173,9 @@ test "tracer bullet: T0, ir_eval, and native arm64 agree on a counted loop" {
 
     var r = try s.liftRegion(gpa);
     defer r.deinit(gpa);
-    // Three blocks (setup, loop, svc) and the unused fall-out.
-    try std.testing.expectEqual(@as(usize, 4), r.blocks.items.len);
+    // Three blocks: setup, loop, and svc (which ends the trace, so
+    // there's no fall-out block).
+    try std.testing.expectEqual(@as(usize, 3), r.blocks.items.len);
 
     const cx = s.reset();
     try std.testing.expect(s.check(try ir_eval.run(gpa, &r, cx), want));
