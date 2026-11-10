@@ -141,10 +141,25 @@ fn mapEach(p: *anyopaque, f: *const fn (*anyopaque, u64) void, data: *anyopaque)
 /// touch. ctx.space points at it, and its slow paths are `slowLoad` and
 /// `slowStore`; the TLB is filled with the copies' addresses, so inline
 /// accesses hit the copies too.
+/// Whether two pages hold the same bytes. Through memcmp (compiler_rt's,
+/// or libc's): this module's own code isn't optimized in a Debug h9 on
+/// hosts whose Debug builds use Zig's own backend, and a page compare is
+/// on every check's path.
+pub fn samePage(a: *const [page_size]u8, b: *const [page_size]u8) bool {
+    return memcmp(a, b, page_size) == 0;
+}
+
+pub extern fn memcmp(a: [*]const u8, b: [*]const u8, n: usize) c_int;
+
 pub const Shadow = struct {
     gpa: std.mem.Allocator,
     backing: Backing,
     pages: std.AutoArrayHashMapUnmanaged(u64, *Copy) = .empty,
+    /// Copies `clear` let go, for `get` to use again.
+    free: std.ArrayList(*Copy) = .empty,
+    /// The page `get` found last: most lookups are of it.
+    last_vp: u64 = std.math.maxInt(u64),
+    last: ?*Copy = null,
     /// Set when a page couldn't be copied (out of memory): the check is void.
     oom: bool = false,
 
@@ -163,23 +178,44 @@ pub const Shadow = struct {
     pub fn deinit(s: *Shadow) void {
         for (s.pages.values()) |c| s.gpa.destroy(c);
         s.pages.deinit(s.gpa);
+        for (s.free.items) |c| s.gpa.destroy(c);
+        s.free.deinit(s.gpa);
+    }
+
+    /// Drops every copy, keeping them to use again.
+    pub fn clear(s: *Shadow) void {
+        for (s.pages.values()) |c| s.free.append(s.gpa, c) catch s.gpa.destroy(c);
+        s.pages.clearRetainingCapacity();
+        s.oom = false;
+        s.last = null;
+        s.last_vp = std.math.maxInt(u64);
     }
 
     /// The copy of page vp, made now if it wasn't yet; null if unmapped.
     pub fn get(s: *Shadow, vp: u64) ?*Copy {
-        if (s.pages.get(vp)) |c| return c;
+        if (vp == s.last_vp) if (s.last) |c| return c;
+        if (s.pages.get(vp)) |c| {
+            s.last_vp = vp;
+            s.last = c;
+            return c;
+        }
         const pg = s.backing.page(s.backing.ctx, vp) orelse return null;
-        const c = s.gpa.create(Copy) catch {
+        const c = s.free.pop() orelse s.gpa.create(Copy) catch {
             s.oom = true;
             return null;
         };
-        c.* = .{ .data = undefined, .orig = pg.host, .read = pg.read, .write = pg.write, .exec = pg.exec };
+        c.orig = pg.host;
+        c.read = pg.read;
+        c.write = pg.write;
+        c.exec = pg.exec;
         @memcpy(&c.data, pg.host[0..page_size]);
         s.pages.put(s.gpa, vp, c) catch {
-            s.gpa.destroy(c);
+            s.free.append(s.gpa, c) catch s.gpa.destroy(c);
             s.oom = true;
             return null;
         };
+        s.last_vp = vp;
+        s.last = c;
         return c;
     }
 
@@ -206,7 +242,7 @@ pub const Shadow = struct {
         var it = s.pages.iterator();
         while (it.next()) |e| {
             const c = e.value_ptr.*;
-            if (c.write and !std.mem.eql(u8, &c.data, c.orig[0..page_size])) @memcpy(c.orig[0..page_size], &c.data);
+            if (c.write and !samePage(&c.data, c.orig[0..page_size])) @memcpy(c.orig[0..page_size], &c.data);
         }
     }
 
@@ -367,9 +403,7 @@ pub const Run = struct {
         for (&r.shadow, 0..) |*s, i| {
             if (r.ctx[i].frontend != 0) if (r.g.unbind) |u| u(r.gpa, &r.ctx[i]);
             r.ctx[i].frontend = 0;
-            for (s.pages.values()) |c| s.gpa.destroy(c);
-            s.pages.clearRetainingCapacity();
-            s.oom = false;
+            s.clear();
         }
     }
 
@@ -486,7 +520,7 @@ pub const Run = struct {
                 if (i == t0 and r.shadow[t1].pages.contains(vp)) continue;
                 const pa = r.shadow[t1].view(vp) orelse continue;
                 const pb = r.shadow[t0].view(vp) orelse continue;
-                if (std.mem.eql(u8, pa, pb)) continue;
+                if (samePage(pa, pb)) continue;
                 bad = true;
                 for (pa, pb, 0..) |x, y, off| {
                     if (x == y) continue;

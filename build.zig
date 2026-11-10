@@ -1377,6 +1377,10 @@ pub fn build(b: *std.Build) void {
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const run_integration = addIntegration(b, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
     if (!test_web) run_integration.step.dependOn(linux_fixtures);
+    // -Djit-check checks every region against T0, one region at a time
+    // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
+    // set already).
+    if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "4");
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
     // 9box and a slim root around it (design/0064-multicall.md), built inside
