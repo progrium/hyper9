@@ -4129,8 +4129,13 @@ fn prctl(p: *Process, op: i32, arg: u64) Err!i64 {
         PR_GET_DUMPABLE => return 1,
         PR_SET_NAME => {
             var b: [16]u8 = undefined;
+            // Linux keeps the first 15 bytes of a longer name. string
+            // fills b before it finds no NUL, so end the name there.
             const name = p.string(arg, &b) catch |e| switch (e) {
-                error.NameTooLong => b[0..15 :0],
+                error.NameTooLong => blk: {
+                    b[15] = 0;
+                    break :blk b[0..15 :0];
+                },
                 else => return e,
             };
             kern.setText(name);

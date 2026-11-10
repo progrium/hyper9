@@ -24,12 +24,18 @@ export function parseRoot(buf) {
   const root = { dir: true, mode: S_IFDIR | 0o775, kids: new Map(), ino: 1, nextIno: 2 };
   const dec = new TextDecoder();
   let i = 8;
+  // Each entry's data, for a later entry that shares it: size 0xffffffff
+  // and an earlier entry's index in place of data (tools/webroot.zig).
+  const datas = [];
   while (i < b.length) {
     const n = dv.getUint32(i, true); i += 4;
     const path = dec.decode(b.subarray(i, i + n)); i += n;
     const mode = dv.getUint32(i, true); i += 4;
     const size = dv.getUint32(i, true); i += 4;
-    const data = b.subarray(i, i + size); i += size;
+    let data;
+    if (size === 0xffffffff) { data = datas[dv.getUint32(i, true)]; i += 4; }
+    else { data = b.subarray(i, i + size); i += size; }
+    datas.push(data);
     putNode(root, path, mode, data);
   }
   return root;

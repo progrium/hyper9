@@ -423,10 +423,17 @@ const i32_size = 732;
 const i32_fp_size = 112 + 512;
 const i32_flags_user: u32 = 0xcd5; // CF PF AF ZF SF DF OF (and the kernel's AC, which it allows, is left out)
 
-/// The TLS selector: i386 Linux programs load %gs with it, from the GDT
-/// entry set_thread_area gives them (design/0105-linux-i386.md, "TLS").
+/// The first TLS selector: i386 Linux programs load %gs with it, from the
+/// GDT entry set_thread_area gives them (design/0105-linux-i386.md, "TLS").
+/// Linux has three such entries, 6 to 8; 32-bit Wine loads %fs with one.
 pub const i386_tls_entry = 6;
+pub const i386_tls_entries = 3;
 pub const i386_tls_sel: u32 = (i386_tls_entry << 3) | 3;
+
+/// Whether a selector is one of the TLS entries', which sigreturn keeps.
+pub fn isTlsSel(sel: u32) bool {
+    return sel & 7 == 3 and sel >> 3 >= i386_tls_entry and sel >> 3 < i386_tls_entry + i386_tls_entries;
+}
 
 fn setupI386(p: anytype, s: *State, r: *vmm.ia32.Ureg, x: *const vmm.X86Extra, f: Frame) FrameError!void {
     const rt = f.act.flags & SA_SIGINFO != 0;
@@ -498,7 +505,9 @@ fn restoreI386(p: anytype, r: *vmm.ia32.Ureg, x: *vmm.Extra) FrameError!u64 {
     const mask: u64 = if (rt) get64(&b, i32_rt_mask) else get32(&b, mc + 80) | @as(u64, get32(&b, i32_extramask)) << 32;
     var n = r.*;
     const gs = get32(&b, mc) & 0xffff;
-    n.gs = if (gs == i386_tls_sel) gs else 0;
+    n.gs = if (isTlsSel(gs)) gs else 0;
+    const fs = get32(&b, mc + 4) & 0xffff;
+    n.fs = if (isTlsSel(fs)) fs else 0;
     const dst = [_]*u32{ &n.di, &n.si, &n.bp, &n.sp, &n.bx, &n.dx, &n.cx, &n.ax };
     for (dst, 0..) |d, i| d.* = get32(&b, mc + 16 + 4 * i);
     n.pc = get32(&b, mc + 56);

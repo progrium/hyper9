@@ -5335,6 +5335,24 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
 // 32-bit x86 Linux programs (design/0105-linux-i386.md): Alpine's x86 root
 // and the 386 fixtures on the emulator, whatever the host. With
 // -Darch=386 the cases above run them too.
+// 32-bit Wine takes a second TLS entry for %fs, beside libc's %gs, and
+// returns from its syscalls with IRET (tests/fixtures/linux/tls386.c).
+test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET returns at ring 3 [105]" {
+    try skipPending(@src().fn_name);
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
+    var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "tls386"), .{}) catch return error.SkipZigTest;
+    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--cwd", fixtures, "/mnt/term/cwd/tls386" }, null, null, 60_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
+    errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
+    try std.testing.expectEqualStrings("ok tls386\n", p.stdout);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
+}
+
 test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [105]" {
     try skipPending(@src().fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
@@ -5548,6 +5566,34 @@ test "a process that exits with a file mapped shared writes it back on the way o
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "map_exit" }, "ok map_exit\n");
+}
+
+test "prctl PR_SET_NAME keeps the first 15 bytes of a longer name [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "prctl_name" }, "ok prctl_name\n");
+}
+
+test "/dev/9 in the Linux view is the machine's 9front /dev, with no draw files without --gfx [wine-draw]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "dev9" }, "ok dev9\n");
+}
+
+/// Whether h9 was built with the headless window (-Dgfx=headless), whose
+/// screen the wine-draw cases can open without a display.
+fn headlessGfx(h9: []const u8) !bool {
+    const v = try runProcess(&.{ h9, "--version" }, null);
+    defer gpa.free(v.stdout);
+    defer gpa.free(v.stderr);
+    return std.mem.indexOf(u8, v.stdout, "gfx: headless\n") != null;
+}
+
+test "with --gfx, a Linux program opens the window's draw files through /dev/9 [wine-draw]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (!try headlessGfx(le.h9)) return error.SkipZigTest;
+    try netCase(&le, &.{ "--gfx", "/mnt/term/cwd/files", "dev9" }, "ok dev9 gfx\n");
 }
 
 test "a fixed MAP_SHARED file mapping can sit at any page beside private ones, even across a MiB, and fork, munmap, and remap keep it right [18]" {

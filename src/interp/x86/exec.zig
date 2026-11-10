@@ -895,6 +895,24 @@ pub fn Exec(comptime M: type) type {
                     x.c.r[4] +%= i.imm;
                     x.next = if (i.size == 2) t & 0xffff else t;
                 },
+                .retf, .iret => {
+                    // To the same privilege only: the popped CS must be
+                    // the one running, since the segments are flat and
+                    // there's one user code selector. Nothing changes
+                    // until every pop has succeeded.
+                    const sp = x.c.r[4];
+                    const size = i.size;
+                    const t = try x.load(sp, size);
+                    const cs: u16 = @truncate(try x.load(sp +% size, size));
+                    if (cs != x.c.seg[@intFromEnum(cpu_mod.Seg.cs)]) return x.exc(cpu_mod.vec_gp);
+                    if (i.op == .iret) {
+                        const fl = try x.load(sp +% 2 * size, size);
+                        const mask = if (size == 2) flags.popf_mask & 0xffff else flags.popf_mask;
+                        x.c.fl.setMasked(mask, fl);
+                        x.c.r[4] = sp +% 3 * size;
+                    } else x.c.r[4] = sp +% 2 * size +% i.imm;
+                    x.next = if (size == 2) t & 0xffff else t;
+                },
                 .loop, .loope, .loopne => {
                     const size: u8 = if (i.addr16) 2 else 4;
                     const cx = getReg(x.c, 1, size) -% 1;
