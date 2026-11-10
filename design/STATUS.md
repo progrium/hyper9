@@ -49,7 +49,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [wine-draw](0158-wine-draw.md) | draft |  | Wine windows through draw |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [ci](ci.md) | draft |  | Continuous integration |
-| [h86-ha64](h86-ha64.md) | draft |  | h86 and ha64, h9's own CPUs for the emulator |
+| [hcpu](hcpu.md) | draft |  | hcpu, h9's own CPUs for the emulator |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-cmd](host-cmd.md) | draft |  | Rethinking host commands |
@@ -109,7 +109,7 @@ flowchart LR
   p_wine_draw["#35;158 wine-draw<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
-  p_h86_ha64["h86-ha64<br/>draft"]:::draft
+  p_hcpu["hcpu<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
