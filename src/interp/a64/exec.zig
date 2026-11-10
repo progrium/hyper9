@@ -348,7 +348,7 @@ fn fault(addr: u64, acc: mem.Access, kind: mem.FaultKind) Fault {
     return .{ .addr = addr, .access = acc, .kind = kind, .esr = (ec << 26) | ESR_IL | wnr | fsc };
 }
 
-fn dataFault(m: *Machine, pc: u64, addr: u64, acc: mem.Access, kind: mem.FaultKind) Next {
+pub fn dataFault(m: *Machine, pc: u64, addr: u64, acc: mem.Access, kind: mem.FaultKind) Next {
     m.cpu.pc = pc;
     m.exit = .{ .fault = fault(addr, acc, kind) };
     return .exit;
@@ -367,7 +367,7 @@ pub fn undef(m: *Machine, pc: u64) Next {
 const max_atomic = @sizeOf(usize);
 
 /// A pending fault from an access helper.
-const MemFault = struct { addr: u64, kind: mem.FaultKind };
+pub const MemFault = struct { addr: u64, kind: mem.FaultKind };
 
 /// The host address of an access of `n` bytes at `va` within one page.
 inline fn host(m: *Machine, va: u64, n: u32, comptime acc: mem.Access, f: *MemFault) ?usize {
@@ -407,7 +407,7 @@ inline fn rawStore(comptime T: type, h: usize, va: u64, v: T) void {
 
 /// Loads a T of up to 8 bytes; a page-crossing access goes a byte at a
 /// time, faulting at the first byte it can't read.
-fn load(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
+pub fn load(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
     const n = @sizeOf(T);
     if ((va & (page_size - 1)) + n <= page_size) {
         const h = host(m, va, n, .read, f) orelse return null;
@@ -424,7 +424,7 @@ fn load(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
 
 /// Stores a T of up to 8 bytes. A page-crossing store checks both pages
 /// before it writes anything.
-fn store(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
+pub fn store(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
     const n = @sizeOf(T);
     if ((va & (page_size - 1)) + n <= page_size) {
         const h = host(m, va, n, .write, f) orelse return false;
@@ -439,14 +439,14 @@ fn store(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
 
 /// A load of any size: 16 bytes as two 8-byte loads, as the hardware's
 /// single-copy atomicity has it.
-fn loadAny(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
+pub fn loadAny(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
     if (T != u128) return load(m, T, va, f);
     const lo = load(m, u64, va, f) orelse return null;
     const hi = load(m, u64, va +% 8, f) orelse return null;
     return @as(u128, hi) << 64 | lo;
 }
 
-fn storeAny(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
+pub fn storeAny(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
     if (T != u128) return store(m, T, va, v, f);
     return store(m, u64, va, @truncate(v), f) and store(m, u64, va +% 8, @truncate(v >> 64), f);
 }
