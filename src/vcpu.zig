@@ -13,6 +13,8 @@ pub const emitter = @import("jit/emitter.zig");
 pub const codemem = @import("jit/codemem.zig");
 /// Test infrastructure: T1-against-T0 region checks and the fuzzers' parts.
 pub const check = @import("jit/check.zig");
+/// The code cache: translations, chaining, the jump cache, invalidation.
+pub const cache = @import("jit/cache.zig");
 pub const a64 = struct {
     pub const decode = @import("interp/a64/decode.zig");
     pub const exec = @import("interp/a64/exec.zig");

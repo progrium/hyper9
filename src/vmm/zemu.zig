@@ -28,6 +28,8 @@ const Arena = @import("arena.zig");
 const mem = @import("../interp/mem.zig");
 const ctx_mod = @import("../jit/ctx.zig");
 const Ctx = ctx_mod.Ctx;
+const cache = @import("../jit/cache.zig");
+const codemem = @import("../jit/codemem.zig");
 const ha64 = @import("ha64.zig");
 const h86 = @import("h86.zig");
 
@@ -36,8 +38,11 @@ pub fn version(buf: []u8) []const u8 {
 }
 
 /// Ctx.exit_request bits.
-pub const req_kick: u32 = 1;
-pub const req_sync: u32 = 2;
+pub const req_kick = cache.req_kick;
+pub const req_sync = cache.req_sync;
+
+/// The code cache's size, per backend.
+const cache_size = 64 << 20;
 
 const Impl = Emu(ha64, h86);
 pub const Backend = Impl.EmuBackend;
@@ -61,6 +66,12 @@ pub const Vcpu = Impl.EmuVcpu;
 ///     /// as soon as it sees ctx.exit_request nonzero: at least at every
 ///     /// block, so a spinning guest sees it within one iteration.
 ///     pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit;
+///
+/// The ctx is a `cache.Runtime`'s (`cache.Runtime.of(ctx)`), which holds
+/// the vCPU's jump cache and the backend's code cache, null when the host
+/// or build can't generate code. When `insert` says the cache is full, the
+/// Guest calls `requestFlush` and returns `.interrupted`; the flush happens
+/// here, with every vCPU out of guest code.
 ///
 /// `run`'s ctx comes with `cpu` pointing at the Cpu, `tlb` at the vCPU's
 /// TLB, `space` at its `mem.View`, and the slow paths `mem.slowLoad` and
@@ -96,6 +107,13 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             /// Every vCPU, for sweeps and shootdowns.
             vcpus: std.ArrayList(*State) = .empty,
             vcpus_lock: std.atomic.Mutex = .unlocked,
+            /// The code cache, if this host and build generate code.
+            jit: ?*cache.Cache = null,
+            flush_wanted: std.atomic.Value(bool) = .init(false),
+            /// Nonzero while a flush has every vCPU held out of guest code.
+            stopping: std.atomic.Value(u32) = .init(0),
+            /// Serializes flushes.
+            world: std.Io.Mutex = .init,
 
             pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*EmuBackend {
                 switch (opts.arch) {
@@ -117,12 +135,24 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .drop = dropEntries,
                     .invalidate = invalidate,
                 });
+                errdefer b.code.deinit(gpa);
+                if (build_options.jit and codemem.available()) {
+                    const c = try gpa.create(cache.Cache);
+                    if (cache.Cache.init(gpa, cache_size)) |v| {
+                        c.* = v;
+                        b.jit = c;
+                    } else |_| gpa.destroy(c);
+                }
                 return b;
             }
 
             pub fn destroy(b: *EmuBackend) void {
                 std.debug.assert(b.vcpus.items.len == 0);
                 b.vcpus.deinit(b.gpa);
+                if (b.jit) |c| {
+                    c.deinit();
+                    b.gpa.destroy(c);
+                }
                 b.code.deinit(b.gpa);
                 b.arena.deinit(b.gpa);
                 b.gpa.destroy(b);
@@ -172,6 +202,10 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .amd64 => unreachable,
                 } };
                 s.view = .{ .code = &b.code, .tlb = &s.tlb };
+                s.rt.cache = b.jit;
+                s.rt.flush_wanted = &b.flush_wanted;
+                if (b.jit) |c| try c.addJumpCache(&s.rt.jump);
+                errdefer if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
                 b.lockVcpus();
                 defer b.vcpus_lock.unlock();
                 try b.vcpus.append(b.gpa, s);
@@ -189,7 +223,32 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 for (b.vcpus.items) |s| mem.dropEntries(&s.tlb, host, table);
             }
 
-            fn invalidate(_: *anyopaque, _: u64) void {}
+            fn invalidate(p: *anyopaque, page: u64) void {
+                const b: *EmuBackend = @ptrCast(@alignCast(p));
+                if (b.jit) |c| c.invalidatePage(page);
+            }
+
+            /// Empties the code cache if someone asked, with every vCPU
+            /// but `self` (which isn't in guest code) held out of it.
+            fn flushCache(b: *EmuBackend, self: ?*State) void {
+                b.world.lockUncancelable(b.io);
+                defer b.world.unlock(b.io);
+                if (!b.flush_wanted.swap(false, .seq_cst)) return;
+                b.stopping.store(1, .seq_cst);
+                b.kickAndWait(self, struct {
+                    fn wants(_: @This(), _: *State) bool {
+                        return true;
+                    }
+                }{});
+                if (std.debug.runtime_safety) {
+                    b.lockVcpus();
+                    defer b.vcpus_lock.unlock();
+                    for (b.vcpus.items) |x| std.debug.assert(!x.running.load(.seq_cst));
+                }
+                if (b.jit) |c| c.reset();
+                b.stopping.store(0, .seq_cst);
+                b.io.futexWake(u32, &b.stopping.raw, std.math.maxInt(u32));
+            }
 
             /// Asks each vCPU that `pick` picks and that is in guest code
             /// (other than `self`) to leave it, and waits until each has.
@@ -205,7 +264,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                         if (s == self or !pick.wants(s)) continue;
                         const seq = s.seq.load(.seq_cst);
                         if (seq & 1 == 0) continue;
-                        _ = @atomicRmw(u32, &s.ctx.exit_request, .Or, req_sync, .seq_cst);
+                        _ = @atomicRmw(u32, &s.rt.ctx.exit_request, .Or, req_sync, .seq_cst);
                         if (n < waits.len) {
                             waits[n] = .{ .s = s, .seq = seq };
                             n += 1;
@@ -322,7 +381,8 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
         const State = struct {
             backend: *EmuBackend,
             cpu: Cpu,
-            ctx: Ctx = .{},
+            /// The Ctx, and the jump cache with it.
+            rt: cache.Runtime = .{},
             tlb: mem.Tlb = .{},
             view: mem.View = undefined,
             as: std.atomic.Value(?*EmuSpace) = .init(null),
@@ -331,6 +391,8 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             generation: u64 = 0,
             /// Odd while in guest code.
             seq: std.atomic.Value(u32) = .init(0),
+            /// While inside the Guest's run, for checking flushes.
+            running: std.atomic.Value(bool) = .init(false),
 
             fn enter(s: *State) void {
                 _ = s.seq.fetchAdd(1, .seq_cst);
@@ -370,7 +432,10 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     }
                 }.lt);
                 s.view.maps = s.maps.items;
-                if (dropped) s.tlb.flush();
+                if (dropped) {
+                    s.tlb.flush();
+                    s.rt.jump.clear();
+                }
                 s.generation = as.generation.load(.seq_cst);
             }
 
@@ -380,14 +445,22 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
 
             fn run(s: *State) vmm.Error!vmm.Exit {
                 if (s.as.load(.monotonic) == null) return error.BadAddress;
-                s.ctx.tlb = @intFromPtr(&s.tlb);
-                s.ctx.space = @intFromPtr(&s.view);
-                s.ctx.slow_load = @intFromPtr(&mem.slowLoad);
-                s.ctx.slow_store = @intFromPtr(&mem.slowStore);
+                const b = s.backend;
+                const cx = &s.rt.ctx;
+                cx.tlb = @intFromPtr(&s.tlb);
+                cx.space = @intFromPtr(&s.view);
+                cx.slow_load = @intFromPtr(&mem.slowLoad);
+                cx.slow_store = @intFromPtr(&mem.slowStore);
                 while (true) {
                     s.enter();
-                    if (@atomicLoad(u32, &s.ctx.exit_request, .seq_cst) & req_kick != 0) {
-                        _ = @atomicRmw(u32, &s.ctx.exit_request, .And, ~req_kick, .seq_cst);
+                    if (b.stopping.load(.seq_cst) != 0) {
+                        // A flush is emptying the cache: wait it out.
+                        s.leave();
+                        while (b.stopping.load(.seq_cst) != 0) b.io.futexWaitUncancelable(u32, &b.stopping.raw, 1);
+                        continue;
+                    }
+                    if (@atomicLoad(u32, &cx.exit_request, .seq_cst) & req_kick != 0) {
+                        _ = @atomicRmw(u32, &cx.exit_request, .And, ~req_kick, .seq_cst);
                         s.leave();
                         return .interrupted;
                     }
@@ -397,8 +470,10 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     };
                     const exit = switch (s.cpu) {
                         inline else => |*c, a| blk: {
-                            s.ctx.cpu = @intFromPtr(c);
-                            break :blk Guest(a).run(c, &s.ctx);
+                            cx.cpu = @intFromPtr(c);
+                            if (std.debug.runtime_safety) s.running.store(true, .seq_cst);
+                            defer if (std.debug.runtime_safety) s.running.store(false, .seq_cst);
+                            break :blk Guest(a).run(c, cx);
                         },
                     } catch |e| {
                         s.leave();
@@ -406,9 +481,10 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     };
                     s.leave();
                     if (exit != .interrupted) return exit;
-                    const req = @atomicRmw(u32, &s.ctx.exit_request, .And, ~(req_kick | req_sync), .seq_cst);
+                    const req = @atomicRmw(u32, &cx.exit_request, .And, ~(req_kick | req_sync), .seq_cst);
+                    if (b.flush_wanted.load(.seq_cst)) b.flushCache(s);
                     if (req & req_kick != 0) return .interrupted;
-                    // A sync, or nothing: catch up and go on.
+                    // A sync, a flush, or nothing: catch up and go on.
                 }
             }
         };
@@ -427,6 +503,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                         break;
                     };
                 }
+                if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
                 s.maps.deinit(b.gpa);
                 b.gpa.destroy(s);
             }
@@ -469,7 +546,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             /// `.interrupted` at once; during one, guest code leaves at its
             /// next check.
             pub fn kick(v: *EmuVcpu) void {
-                _ = @atomicRmw(u32, &v.s.ctx.exit_request, .Or, req_kick, .seq_cst);
+                _ = @atomicRmw(u32, &v.s.rt.ctx.exit_request, .Or, req_kick, .seq_cst);
             }
         };
     };
@@ -495,6 +572,8 @@ const Toy = struct {
         /// Back to op 0 (a loop).
         again,
         svc,
+        /// Asks for a code-cache flush, as a full cache would.
+        flush,
     };
 
     pub const Cpu = struct {
@@ -546,6 +625,12 @@ const Toy = struct {
                     c.pc += 1;
                     c.steps += 1;
                     return .syscall;
+                },
+                .flush => {
+                    c.pc += 1;
+                    c.steps += 1;
+                    cache.Runtime.of(ctx).requestFlush();
+                    return .interrupted;
                 },
             }
             c.pc += 1;
@@ -613,7 +698,7 @@ test "vcpus: run through the view, fault exactly, and stop on a kick" {
     // A kick before run.
     v.kick();
     try testing.expectEqual(vmm.Exit.interrupted, try v.run());
-    try testing.expectEqual(@as(u32, 0), v.s.ctx.exit_request);
+    try testing.expectEqual(@as(u32, 0), v.s.rt.ctx.exit_request);
     // Unmapping is seen at the next run, with the TLB flushed.
     v.s.cpu.arm64.pc = 0;
     as.unmap(0x10000);
@@ -721,4 +806,52 @@ test "a page that turns out to hold code loses every vCPU's write entries" {
     const epoch = b.code.epoch.load(.monotonic);
     as.codeChanged(0x10000, 4);
     try testing.expect(b.code.epoch.load(.monotonic) != epoch);
+}
+
+test "a full cache is flushed with every other vCPU held out of guest code" {
+    const b = try testBackend();
+    defer b.destroy();
+    const c = b.jit orelse return error.SkipZigTest;
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    const data = try b.allocPages(1);
+    defer b.freePages(data);
+    try as.map(0x10000, data, .{ .write = true });
+    const n = 4;
+    var progs: [n][4]Toy.Op = undefined;
+    var runners: [n]Runner = undefined;
+    var threads: [n]std.Thread = undefined;
+    for (0..n) |i| {
+        const a = 0x10000 + 8 * i;
+        progs[i] = .{ .{ .load = a }, .{ .add = 1 }, .{ .store = a }, .again };
+        runners[i] = .{ .v = try b.createVcpu() };
+        try runners[i].v.setAddressSpace(as);
+        runners[i].v.s.cpu.arm64.prog = &progs[i];
+    }
+    defer for (&runners) |*r| r.v.destroy();
+    for (0..n) |i| threads[i] = try std.Thread.spawn(.{}, Runner.main, .{&runners[i]});
+    const words: *[n]u64 = @ptrCast(data[0 .. 8 * n]);
+    for (0..n) |i| while (@atomicLoad(u64, &words[i], .monotonic) < 100) std.atomic.spinLoopHint();
+    // A fifth vCPU asks for flushes, round after round, while the others
+    // keep counting. flushCache asserts that none of them is in guest code
+    // when the cache is reset.
+    var v = try b.createVcpu();
+    defer v.destroy();
+    try v.setAddressSpace(as);
+    const prog = [_]Toy.Op{ .flush, .svc };
+    v.s.cpu.arm64.prog = &prog;
+    for (0..50) |_| {
+        v.s.cpu.arm64.pc = 0;
+        try testing.expectEqual(vmm.Exit.syscall, try v.run());
+    }
+    try testing.expectEqual(@as(u64, 50), c.flushes);
+    // Everyone is still counting.
+    var before: [n]u64 = undefined;
+    for (0..n) |i| before[i] = @atomicLoad(u64, &words[i], .monotonic);
+    for (0..n) |i| while (@atomicLoad(u64, &words[i], .monotonic) == before[i]) std.atomic.spinLoopHint();
+    for (&runners) |*r| {
+        r.stop.store(true, .release);
+        r.v.kick();
+    }
+    for (&threads) |t| t.join();
 }
