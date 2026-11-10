@@ -71,6 +71,7 @@ fn open(gpa: std.mem.Allocator, c: *ctx_mod.Ctx, map: *const mem.Map) anyerror!*
     const b = try gpa.create(Bound);
     b.* = .{ .cpu = c.cpuPtr(Cpu), .map = map, .m = .{ .ctx = @constCast(map), .translateFn = mapTranslate } };
     c.frontend = @intFromPtr(&b.m);
+    c.helpers = @import("../x86/helpers.zig").tableAddr();
     return b;
 }
 

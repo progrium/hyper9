@@ -20,7 +20,8 @@ const Ctx = ctx_mod.Ctx;
 const Exit = ctx_mod.Exit;
 pub const Cpu = t0.Cpu;
 
-pub const lift = @import("../x86/lift.zig");
+pub const helpers = @import("../x86/helpers.zig");
+const lift = @import("../x86/lift.zig");
 pub const frontend = lift.frontend;
 
 pub const guest: check.Guest = .{
@@ -41,6 +42,7 @@ fn bind(gpa: std.mem.Allocator, c: *Ctx, s: *check.Shadow) anyerror!void {
     const b = try gpa.create(Bound);
     b.* = .{ .m = .{ .ctx = s, .translateFn = shadowTranslate } };
     c.frontend = @intFromPtr(&b.m);
+    c.helpers = helpers.tableAddr();
 }
 
 fn unbind(gpa: std.mem.Allocator, c: *Ctx) void {

@@ -181,6 +181,7 @@ fn expectRun(code: []const u8, setup: ?*const fn (*Cpu) void) !Result {
     try testing.expectEqualSlices(u32, &want.cpu.r, &got.cpu.r);
     try testing.expectEqual(want.cpu.fl.get(), got.cpu.fl.get());
     try testing.expectEqual(@as(u64, want.cpu.eip), got.pc);
+    try testing.expect(std.meta.eql(want.cpu.fpu, got.cpu.fpu));
     try testing.expectEqualSlices(u8, &m0.data, &m.data);
     try testing.expectEqualSlices(u8, &m0.stack, &m.stack);
     return got;
@@ -323,6 +324,67 @@ test "check/x86: rotates, SHLD, BT*, BSF/BSR, POP to memory, and single string o
     };
     const r = try expectRun(&code, &bitSetup);
     try testing.expectEqual(Exit.svc, r.exit);
+}
+
+fn x87Setup(c: *Cpu) void {
+    c.r[3] = Machine.data_va + 0x100;
+}
+
+test "check/x86: x87 through the helper: loads, arithmetic, stores, FCOMI, FNSTSW, and FCMOV" {
+    const code = [_]u8{
+        0xc7, 0x03, 0x00, 0x00, 0x00, 0x00, // movl $0, (%ebx)
+        0xc7, 0x43, 0x04, 0x00, 0x00, 0x24, 0x40, // movl $0x40240000, 4(%ebx) (10.0)
+        0xc7, 0x43, 0x0c, 0x00, 0x00, 0xc0, 0x3f, // movl $0x3fc00000, 12(%ebx) (1.5f)
+        0x66, 0xc7, 0x43, 0x14, 0x07, 0x00, // movw $7, 20(%ebx)
+        0xd9, 0xe8, // fld1
+        0xd9, 0xee, // fldz
+        0xde, 0xc1, // faddp
+        0xdd, 0x03, // fldl (%ebx)
+        0xd8, 0x4b, 0x0c, // fmuls 12(%ebx)
+        0xdf, 0x43, 0x14, // filds 20(%ebx)
+        0xdb, 0xf1, // fcomi %st(1), %st
+        0x0f, 0x92, 0xc1, // setb %cl
+        0xda, 0xc1, // fcmovb %st(1), %st
+        0xd9, 0xc9, // fxch %st(1)
+        0xd9, 0xfa, // fsqrt
+        0xd9, 0xe0, // fchs
+        0xdd, 0x5b, 0x20, // fstpl 32(%ebx)
+        0xdb, 0x5b, 0x28, // fistpl 40(%ebx)
+        0xdf, 0xe9, // fucomip %st(1), %st
+        0xdf, 0xe0, // fnstsw %ax
+        0x9e, // sahf
+        0xd9, 0x7b, 0x30, // fnstcw 48(%ebx)
+        0xd9, 0x6b, 0x30, // fldcw 48(%ebx)
+        0xdb, 0x7b, 0x38, // fstpt 56(%ebx)
+        0xdb, 0x6b, 0x38, // fldt 56(%ebx)
+        0xdd, 0xd8, // fstp %st(0)
+        0x9b, // fwait
+        0xcd, 0x80,
+    };
+    const r = try expectRun(&code, &x87Setup);
+    try testing.expectEqual(Exit.svc, r.exit);
+    // FCOMI compares 7 with 10 * 1.5: below, so SETB gives 1.
+    try testing.expectEqual(@as(u32, 1), r.cpu.r[1] & 0xff);
+}
+
+test "check/x86: x87 traps go to T0: a store fault, a crossing store, and #MF" {
+    // fld1; movl $0x40000, %ecx; fstpl (%ecx) (read-only): faults with
+    // the stack unpopped.
+    const r = try expectRun(&.{ 0xd9, 0xe8, 0xb9, 0, 0, 4, 0, 0xdd, 0x19, 0xcd, 0x80 }, null);
+    try testing.expectEqual(Exit.fault, r.exit);
+    try testing.expectEqual(@as(u64, Machine.code_va + 7), r.pc);
+    try testing.expectEqual(@as(u3, 7), r.cpu.fpu.top);
+    // fld1; movl $0x20ffc, %ecx; fstpt (%ecx) (crosses into the second
+    // data page); fldt (%ecx)
+    const r2 = try expectRun(&.{ 0xd9, 0xe8, 0xb9, 0xfc, 0x0f, 2, 0, 0xdb, 0x39, 0xdb, 0x29, 0xcd, 0x80 }, null);
+    try testing.expectEqual(Exit.svc, r2.exit);
+    // Unmask ZE, divide 1 by 0, and the next waiting instruction raises
+    // #MF: movw $0x037b, 0x100(%ebx); fldcw; fld1; fldz; fdivp; fld1
+    const r3 = try expectRun(&.{
+        0x66, 0xc7, 0x43, 0x30, 0x7b, 0x03, 0xd9, 0x6b, 0x30, 0xd9, 0xe8, 0xd9, 0xee, 0xde, 0xf9, 0xd9, 0xe8, 0xcd, 0x80,
+    }, &x87Setup);
+    try testing.expectEqual(Exit.fault, r3.exit);
+    try testing.expectEqual(@as(u64, Machine.code_va + 15), r3.pc);
 }
 
 fn atomSetup(c: *Cpu) void {
@@ -547,4 +609,49 @@ pub fn fuzz(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
 
 test "fuzz-x86: random programs agree region by region" {
     try fuzz(testing.allocator, 0x86, 400);
+}
+
+/// Random x87 programs: memory forms on [ebx+d8] over random data (so
+/// NaNs, denormals, and random control words from FLDCW, with unmasked
+/// exceptions and #MF), register forms, and SAHF, SETB, and FWAIT between.
+pub fn fuzzX87(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    const m = try gpa.create(Machine);
+    defer gpa.destroy(m);
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(gpa);
+    for (0..count) |iter| {
+        m.* = .{};
+        m.init();
+        for (&m.data) |*b| b.* = rng.int(u8);
+        code.clearRetainingCapacity();
+        for (0..4 + rng.uintLessThan(usize, 20)) |_| {
+            switch (rng.uintLessThan(u8, 10)) {
+                0...3 => try code.appendSlice(gpa, &.{ 0xd8 | rng.uintLessThan(u8, 8), 0x43 | @as(u8, rng.uintLessThan(u8, 8)) << 3, rng.uintLessThan(u8, 0x78) }),
+                4...7 => try code.appendSlice(gpa, &.{ 0xd8 | rng.uintLessThan(u8, 8), 0xc0 | rng.uintLessThan(u8, 64) }),
+                8 => try code.appendSlice(gpa, &.{ 0xd9, 0xe8 + rng.uintLessThan(u8, 7) }), // constants
+                else => try code.appendSlice(gpa, switch (rng.uintLessThan(u8, 4)) {
+                    0 => &.{0x9e}, // sahf
+                    1 => &.{ 0x0f, 0x92, 0xc1 }, // setb %cl
+                    2 => &.{0x9b}, // fwait
+                    else => &.{ 0xdf, 0xe0 }, // fnstsw %ax
+                }),
+            }
+        }
+        try code.appendSlice(gpa, &.{ 0xcd, 0x80 });
+        m.load(code.items);
+        var c = randomCpu(m, rng);
+        c.r[3] = Machine.data_va + 0x100;
+        _ = runChecked(gpa, m, c, std.math.maxInt(i64)) catch |e| {
+            std.debug.print("fuzz-x87: seed {d}, program {d}: {s}\ncode:", .{ seed, iter, @errorName(e) });
+            for (code.items) |b| std.debug.print(" {x:0>2}", .{b});
+            std.debug.print("\n", .{});
+            return e;
+        };
+    }
+}
+
+test "fuzz-x87: random x87 programs agree region by region" {
+    try fuzzX87(testing.allocator, 0x87, 1000);
 }

@@ -90,6 +90,7 @@ pub const Machine = struct {
         cx.slow_store = @intFromPtr(&mem.slowStore);
         cx.slow_cas = @intFromPtr(&mem.slowCas);
         cx.interp = @intFromPtr(&lift.interp);
+        cx.helpers = @import("helpers.zig").tableAddr();
         m.pm = .{ .ctx = cx };
         m.lm = .{ .ctx = &m.pm, .translateFn = ProbeMem.translateFn };
         cx.frontend = @intFromPtr(&m.lm);

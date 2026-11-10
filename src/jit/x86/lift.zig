@@ -38,6 +38,7 @@ const dec = @import("../../interp/x86/decode.zig");
 const table = @import("../../interp/x86/table.zig");
 const exec = @import("../../interp/x86/exec.zig");
 const cpu_mod = @import("../../interp/x86/cpu.zig");
+const helpers = @import("helpers.zig");
 
 const Cpu = cpu_mod.Cpu;
 const Inst = dec.Inst;
@@ -190,6 +191,8 @@ fn byteOff(n: u3) u64 {
 
 const seg_base_off = @offsetOf(Cpu, "seg_base");
 const seg_null_off = @offsetOf(Cpu, "seg_null");
+const fpu_sw_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "sw");
+const x87_ES: u16 = 1 << 7;
 
 const ESP = 4;
 
@@ -295,6 +298,10 @@ fn classify(i: *const Inst) Class {
         .clc, .stc, .cmc, .cld, .std => .lifted,
         // Without REP, a source through FS or GS goes to T0.
         .movs, .cmps, .stos, .lods, .scas => if (i.addr16) .interp else if (i.rep != .none) .lifted else if (@intFromEnum(i.seg) >= 4 and i.op != .stos and i.op != .scas) .interp else .lifted,
+        // x87 through helpers.zig; 16-bit addressing (which no 9front
+        // binary has) to T0.
+        .x87 => if (i.addr16) .interp else .lifted,
+        .fwait => .lifted,
         .jcc => if (near32) .cond else .stop,
         .loop, .loope, .loopne, .jcxz => if (near32 and !i.addr16) .cond else .stop,
         .jmp => if (near32) .jump else .stop,
@@ -441,7 +448,8 @@ const Lifter = struct {
                 .read = x.flags_read & xf.arith,
                 .written = x.flags_written & xf.arith,
                 .barrier = !inline_(in.class) or x.mem_read or x.mem_write or in.i.mem and in.i.op != .lea and in.i.op != .nop or
-                    in.i.op == .div or in.i.op == .idiv or isString(in.i.op) or isAtomic(&in.i),
+                    in.i.op == .div or in.i.op == .idiv or isString(in.i.op) or isAtomic(&in.i) or
+                    in.i.op == .x87 or in.i.op == .fwait,
             };
             ends[k] = l.leader[k + 1] or switch (in.class) {
                 .lifted, .interp => isString(in.i.op) or isAtomic(&in.i),
@@ -832,6 +840,13 @@ const Lifter = struct {
             .rol, .ror => try l.rotate(k, addr),
             .shld, .shrd => try l.shiftDouble(k, addr),
             .bt, .bts, .btr, .btc => try l.bitTest(k, addr),
+            .x87 => try l.x87(k),
+            .fwait => {
+                // #MF for a pending unmasked exception, through T0.
+                const sw = try b.getreg(.i16, fpu_sw_off);
+                const es = try b.bin(.@"and", .i16, sw, try b.konst(.i16, x87_ES));
+                try l.guard(k, try b.icmp(.ne, es, try b.konst(.i16, 0)), true);
+            },
             .bsf, .bsr => {
                 const v = try l.get(k, addr, e.src, size);
                 const v32 = if (T == .i32) v else try b.un(.zext, .i32, v);
@@ -1168,6 +1183,30 @@ const Lifter = struct {
 
     /// ROL and ROR by a constant, or by CL into a register. CF and OF
     /// only, as T0 computes them (for any count but 0, OF as for 1).
+    /// An x87 instruction: helpers.zig's x87 helper runs it (x87.zig)
+    /// on the Cpu, and if it trapped, having put everything back, the
+    /// guard runs it on T0 to raise the trap.
+    fn x87(l: *Lifter, k: usize) !void {
+        const b = l.b;
+        const i = &l.insns[k].i;
+        const fx = dec.effects(i);
+        const addr = if (i.mem) try b.un(.zext, .i64, try l.linear(k)) else try b.konst(.i64, 0);
+        // FCMOVcc reads EFLAGS, and FCOMI writes it, in the Cpu.
+        if (fx.flags_read != 0 or fx.flags_written != 0) try l.fl.flush(b);
+        const arg: helpers.X87Arg = .{
+            .pc = l.insns[k].pc,
+            .op = @truncate(i.opcode),
+            .modrm = i.modrm,
+            .mem = i.mem,
+            .seg = @intCast(@intFromEnum(i.seg)),
+            .opsize = i.opsize,
+        };
+        const zero = try b.konst(.i64, 0);
+        const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = addr, .c = zero, .aux = @intFromEnum(helpers.Index.x87) });
+        if (fx.flags_written != 0) l.fl.forget();
+        try l.guard(k, try b.icmp(.ne, st, zero), true);
+    }
+
     fn rotate(l: *Lifter, k: usize, addr: ?Ref) !void {
         const i = &l.insns[k].i;
         const e = i.tableEntry();

@@ -20,6 +20,7 @@ const cache = @import("vcpu").cache;
 const dispatch = @import("vcpu").dispatch;
 const emitter = @import("vcpu").emitter;
 const lift = @import("vcpu").x86jit.lift;
+const helpers = @import("vcpu").x86jit.helpers;
 const wasm_t1 = @import("vcpu").wasm_t1;
 const build_options = @import("build_options");
 const vmm_check = @import("vcpu").x86jit.vmm_check;
@@ -83,6 +84,8 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     var m: TlbMem = .{ .ctx = ctx, .tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb))) };
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;
+    // The lifter's call.helper table (x87).
+    ctx.helpers = helpers.tableAddr();
     // -Djit-check: every region lifted and checked against T0.
     if (build_options.jit_check) return exitOf(c, ctx, vmm_check.run(&cpu.check, c, ctx, &m));
     if (tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);

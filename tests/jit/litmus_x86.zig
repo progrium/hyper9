@@ -223,6 +223,7 @@ const Vcpu = struct {
             .slow_cas = @intFromPtr(&mem.mapSlowCas),
             .interp = @intFromPtr(&lift.interp),
             .frontend = @intFromPtr(&v.lm),
+            .helpers = vcpu.x86jit.helpers.tableAddr(),
         };
     }
 
