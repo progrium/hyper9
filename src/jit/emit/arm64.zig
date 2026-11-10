@@ -1229,6 +1229,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.finish(idx, rd);
         },
         .@"eflags.add", .@"eflags.sub", .@"eflags.logic", .@"eflags.inc", .@"eflags.dec" => try eflagsOp(e, idx),
+        .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => try shiftMulFlags(e, idx),
         .@"eflags.cond" => {
             if (dd.host_cc) |c| {
                 if (!dd.virtual) {
@@ -1540,6 +1541,8 @@ fn lowerExt(e: *E, idx: usize) !void {
         .@"v.load", .@"v.store" => try vmemOp(e, idx),
         else => {
             if (!i.op.isExt()) return error.Unsupported;
+            if (try vecNative(e, idx)) return;
+            if (try fpNative(e, idx)) return;
             try extFallback(e, idx);
         },
     }
@@ -1587,6 +1590,237 @@ fn extFallback(e: *E, idx: usize) !void {
         try e.ldrSlot(SD, io);
         try e.finish(idx, SD);
     }
+}
+
+// ---------------------------------------------------------------- x86's FP and vectors
+
+const LO: Cond = 3;
+const MI: Cond = 4;
+const HI: Cond = 8;
+const GT: Cond = 12;
+
+/// The 128-bit ops that are two 64-bit halves (v.and, v.or, v.xor, v.andn),
+/// v.make, and v.lane of a word or doubleword, on the values' slot pairs.
+/// Returns false, emitting nothing, for the rest.
+fn vecNative(e: *E, idx: usize) !bool {
+    const i = e.r.insts.items[idx];
+    const x = ir.ExtAux.of(i.aux);
+    switch (i.op) {
+        .@"v.make" => {
+            const k = e.p.locs[idx].slot;
+            try e.strSlot(try e.src(i.a, S0), k);
+            try e.strSlot(try e.src(i.b, S1), k + 1);
+        },
+        .@"v.and", .@"v.or", .@"v.xor", .@"v.andn" => {
+            const base: u32 = switch (i.op) {
+                .@"v.and" => 0x8A000000,
+                .@"v.or" => 0xAA000000,
+                .@"v.xor" => 0xCA000000,
+                .@"v.andn" => 0x8A200000, // bic
+                else => unreachable,
+            };
+            const ka = e.p.locs[i.a].slot;
+            const kb = e.p.locs[i.b].slot;
+            const kd = e.p.locs[idx].slot;
+            for (0..2) |h| {
+                try e.ldrSlot(S0, ka + @as(u32, @intCast(h)));
+                try e.ldrSlot(S1, kb + @as(u32, @intCast(h)));
+                try e.put(base | @as(u32, S1) << 16 | @as(u32, S0) << 5 | S0);
+                try e.strSlot(S0, kd + @as(u32, @intCast(h)));
+            }
+        },
+        .@"v.lane" => {
+            if (x.esize < 2) return false;
+            const k = e.p.locs[i.a].slot;
+            const off = @as(u64, k) * 8 + @as(u64, x.imm) * (x.bits() / 8);
+            try e.ldst(false, @intCast(x.esize), T0, SP, off);
+            try e.finish(idx, T0);
+        },
+        else => return false,
+    }
+    return true;
+}
+
+/// Branches to `slow` if the `w`-bit FP value in `r` is (with `tiny`) a
+/// zero-exponent or smallest-exponent nonzero, (with `nan`) a NaN, or
+/// (with `den`) a denormal.
+fn fpClass(e: *E, r: u5, w: u32, den: bool, tiny: bool, nan: bool, slow: u32) !void {
+    const sf = w == 64;
+    const mant: u6 = if (sf) 52 else 23;
+    try e.lslImm(sf, IP1, r, 1); // the sign gone
+    if (nan) {
+        // Above the infinities' exponent with a zero fraction.
+        const inf: u64 = (if (sf) @as(u64, 0x7ff) else 0xff) << (mant + 1);
+        try e.movImm(IP0, inf);
+        try e.dp(0x6B000000, sf, ZR, IP1, IP0); // cmp
+        try e.bcond(HI, slow);
+    }
+    if (den or tiny) {
+        try e.put((if (sf) @as(u32, 0xD1000400) else 0x51000400) | @as(u32, IP1) << 5 | IP1); // sub #1: a zero wraps
+        const lim: u64 = (@as(u64, if (tiny) 2 else 1) << (mant + 1)) - 1;
+        try e.movImm(IP0, lim);
+        try e.dp(0x6B000000, sf, ZR, IP1, IP0);
+        try e.bcond(LO, slow);
+    }
+}
+
+/// x86's scalar FP natively, under the host's FPCR (round to nearest, no
+/// FZ, no DN), where arm64's result and flags are x86's: no denormal
+/// operand (x86's DE), no NaN result (the NaNs it picks differ), no tiny
+/// result (tininess is before rounding here, after on x86), and no
+/// invalid or underflow. Then FPSR's DZC, OFC, and IXC are x86's ZE, OE,
+/// and PE one bit up. Otherwise ir_eval runs it, after. Returns false,
+/// emitting nothing, for an op or form it doesn't do.
+fn fpNative(e: *E, idx: usize) !bool {
+    const i = e.r.insts.items[idx];
+    if (!i.op.isFp() or i.ty == .v128) return false;
+    const x = ir.ExtAux.of(i.aux);
+    if (x.arm or x.daz or x.ftz) return false;
+    const ta = e.r.insts.items[i.a].ty;
+    // The FP operand's width, and its FP register type bit (22: double).
+    const fw: u32 = switch (i.op) {
+        .@"fp.fromsint" => if (x.imm != 0 or (ta != .i32 and ta != .i64)) return false else i.ty.bits(),
+        .@"fp.tosint" => if (x.imm != 0 or (x.rounding != 0 and x.rounding != 3)) return false else ta.bits(),
+        else => if (x.rounding != 0) return false else ta.bits(),
+    };
+    if (fw != 32 and fw != 64) return false;
+    if (i.ty != .i8 and i.ty != .i32 and i.ty != .i64) return false;
+    const dbl: u32 = if (fw == 64) 1 << 22 else 0;
+    switch (i.op) {
+        .@"fp.add", .@"fp.sub", .@"fp.mul", .@"fp.div", .@"fp.sqrt", .@"fp.min", .@"fp.max", .@"fp.cmp", .@"fp.fromsint", .@"fp.tosint" => {},
+        .@"fp.cvt" => if (ta.bits() == i.ty.bits() or (ta != .i32 and ta != .i64)) return false,
+        else => return false,
+    }
+    const slow = try e.label();
+    const done = try e.label();
+    const a = try e.src(i.a, S0);
+    const b: u5 = if (i.b != ir.none) try e.src(i.b, S1) else ZR;
+    const sfa = ta == .i64;
+    // fmov to d0/s0 and d1/s1 (fp.fromsint takes a general register).
+    if (i.op != .@"fp.fromsint") {
+        try e.put((if (sfa) @as(u32, 0x9E670000) else 0x1E270000) | @as(u32, a) << 5 | 0);
+        if (i.b != ir.none) try e.put((if (sfa) @as(u32, 0x9E670000) else 0x1E270000) | @as(u32, b) << 5 | 1);
+        try fpClass(e, a, fw, true, false, i.op == .@"fp.cmp" or i.op == .@"fp.min" or i.op == .@"fp.max" or i.op == .@"fp.cvt", slow);
+        if (i.b != ir.none) try fpClass(e, b, fw, true, false, i.op == .@"fp.cmp" or i.op == .@"fp.min" or i.op == .@"fp.max", slow);
+    }
+    try e.put(0xD51B4420 | @as(u32, ZR)); // msr fpsr, xzr
+    const rw: u32 = i.ty.bits();
+    switch (i.op) {
+        .@"fp.add", .@"fp.sub", .@"fp.mul", .@"fp.div" => {
+            const base: u32 = switch (i.op) {
+                .@"fp.add" => 0x1E202800,
+                .@"fp.sub" => 0x1E203800,
+                .@"fp.mul" => 0x1E200800,
+                .@"fp.div" => 0x1E201800,
+                else => unreachable,
+            };
+            try e.put(base | dbl | 1 << 16 | 0 << 5 | 2);
+        },
+        .@"fp.sqrt" => try e.put(0x1E21C000 | dbl | 0 << 5 | 2),
+        .@"fp.min", .@"fp.max" => {
+            // a < b ? a : b, and a > b ? a : b: b for unordered or equal.
+            try e.put(0x1E202000 | dbl | 1 << 16 | 0 << 5); // fcmp s0/d0, s1/d1
+            try e.put(0x1E200C00 | dbl | 1 << 16 | @as(u32, if (i.op == .@"fp.min") MI else GT) << 12 | 0 << 5 | 2);
+        },
+        .@"fp.cmp" => {
+            // An Order: lt 0, eq 1, gt 2 (no NaN gets here).
+            try e.put(0x1E202000 | dbl | 1 << 16 | 0 << 5);
+            try e.movImm(T0, 2);
+            try e.movImm(IP0, 1);
+            try e.put(0x9A800000 | @as(u32, T0) << 16 | @as(u32, EQ) << 12 | @as(u32, IP0) << 5 | T0); // csel x13, x16, x13, eq
+            try e.put(0x9A800000 | @as(u32, T0) << 16 | @as(u32, MI) << 12 | @as(u32, ZR) << 5 | T0); // csel x13, xzr, x13, mi
+        },
+        .@"fp.cvt" => try e.put(if (fw == 64) @as(u32, 0x1E624000) | 0 << 5 | 2 else 0x1E22C000 | 0 << 5 | 2),
+        .@"fp.fromsint" => {
+            // scvtf s2/d2 from w/x.
+            const base: u32 = if (sfa) 0x9E220000 else 0x1E220000;
+            try e.put(base | dbl | @as(u32, a) << 5 | 2);
+        },
+        .@"fp.tosint" => {
+            // fcvtzs or fcvtns to w/x.
+            const base: u32 = if (x.rounding == 3) 0x1E380000 else 0x1E200000;
+            try e.put(base | (if (rw == 64) @as(u32, 1) << 31 else 0) | dbl | 0 << 5 | T0);
+        },
+        else => unreachable,
+    }
+    // The result to T0, and its check.
+    switch (i.op) {
+        .@"fp.cmp", .@"fp.tosint" => {},
+        else => {
+            const sfr = rw == 64;
+            try e.put((if (sfr) @as(u32, 0x9E660000) else 0x1E260000) | 2 << 5 | T0);
+            if (i.op != .@"fp.min" and i.op != .@"fp.max" and i.op != .@"fp.fromsint")
+                try fpClass(e, T0, rw, false, true, true, slow);
+        },
+    }
+    try e.put(0xD53B4420 | @as(u32, IP0)); // mrs x16, fpsr
+    // Invalid (fp.tosint's NaN or out of range: x86's indefinite), and
+    // underflow (a tiny result that rounded to zero, which the result's
+    // check doesn't see).
+    try e.logImm(3, false, ZR, IP0, 0, 1); // tst w16, #1 (IOC)
+    try e.bcond(NE, slow);
+    try e.logImm(3, false, ZR, IP0, 3, 1); // tst w16, #8 (UFC)
+    try e.bcond(NE, slow);
+    if (i.aux2 != 0) {
+        // DZC (1), OFC (2), IXC (4) to ZE (2), OE (3), PE (5).
+        try e.movImm(IP1, 0x16);
+        try e.dp(0x0A000000, false, IP0, IP0, IP1);
+        try e.lslImm(false, IP0, IP0, 1);
+        const skip = try e.label();
+        try e.cbz(false, IP0, skip);
+        try e.ldst(false, 2, S2, CPU, i.aux2 - 1);
+        try e.dp(0x2A000000, false, S2, S2, IP0);
+        try e.ldst(true, 2, S2, CPU, i.aux2 - 1);
+        e.bind(skip);
+    }
+    try e.finish(idx, T0);
+    try e.b(done);
+    e.bind(slow);
+    try extFallback(e, idx);
+    e.bind(done);
+    return true;
+}
+
+/// eflags.shl, shr, and mul, materialized: SF ZF PF from b, and CF and OF
+/// (AF is 0).
+fn shiftMulFlags(e: *E, idx: usize) !void {
+    const i = e.r.insts.items[idx];
+    const W: u32 = e.r.insts.items[i.a].ty.bits();
+    const a = try e.src(i.a, S0);
+    const b = try e.src(i.b, S1);
+    const rd = T0;
+    try e.movImm(rd, 0);
+    // SF
+    try e.ubfx(IP0, b, W - 1, 1);
+    try e.bfi(rd, IP0, 7, 1);
+    // ZF
+    try e.dp(0xEB000000, true, ZR, b, ZR); // cmp b, #0 (b is zero-extended)
+    try e.cset(IP0, EQ);
+    try e.bfi(rd, IP0, 6, 1);
+    // PF: even parity of the low byte.
+    try e.mov(IP1, b);
+    try e.dpShift(0x4A000000, false, IP1, IP1, IP1, 1, 4);
+    try e.dpShift(0x4A000000, false, IP1, IP1, IP1, 1, 2);
+    try e.dpShift(0x4A000000, false, IP1, IP1, IP1, 1, 1);
+    try e.logImm(2, false, IP1, IP1, 0, 1);
+    try e.bfi(rd, IP1, 2, 1);
+    switch (i.op) {
+        .@"eflags.mul" => {
+            try e.bfi(rd, a, 0, 1);
+            try e.bfi(rd, a, 11, 1);
+        },
+        else => {
+            // CF: shl's msb(a), shr's a & 1. OF: msb(a ^ b).
+            if (i.op == .@"eflags.shl") {
+                try e.ubfx(IP0, a, W - 1, 1);
+                try e.bfi(rd, IP0, 0, 1);
+            } else try e.bfi(rd, a, 0, 1);
+            try e.dp(0xCA000000, true, IP0, a, b);
+            try e.ubfx(IP0, IP0, W - 1, 1);
+            try e.bfi(rd, IP0, 11, 1);
+        },
+    }
+    try e.finish(idx, rd);
 }
 
 /// A 16-byte load or store through the TLB.
