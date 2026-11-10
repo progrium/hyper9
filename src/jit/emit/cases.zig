@@ -315,6 +315,54 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x208 !4
         , .{ ty, 3 - k }) });
     };
+    // pending.flags: written on every way out (a fault, a terminator), a
+    // second one at another slot writing the first, a setreg dropping one,
+    // a call writing one first, and nzcv's.
+    for ([_]u64{ data_va, data_va + 0x10000 }) |start| for ([_][]const u8{ "logic", "add", "dec" }) |op| {
+        try list.append(gpa, .{ .regs = .{ start, 0x7f, 0x80, 0, 0, 0, 0xdead_beef, 0x1234 }, .text = try std.fmt.allocPrint(gpa,
+            \\handle 0x123
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i32 #0x8
+            \\  %2 = getreg:i32 #0x10
+            \\  %3 = eflags.sub:flags %1, %2
+            \\  pending.flags %3 #0x30 @0x1
+            \\  %4 = load:i32 %0 #0x2 @0x100 !1
+            \\  %5 = getreg:i32 #0x18
+            \\  %6 = eflags.unpack:flags %5
+            \\  %7 = eflags.{0s}:flags %4{1s}
+            \\  pending.flags %7 #0x30 @0x1
+            \\  %8 = trunc:i8 %4
+            \\  %9 = trunc:i8 %2
+            \\  %10 = eflags.add:flags %8, %9
+            \\  pending.flags %10 #0x38 @0x1
+            \\  store %0, %1 #0x2 @0x104 !2
+            \\  %11 = eflags.cond:i1 %10 #0x4
+            \\  brcond %11 -> b1 b2
+            \\b1:
+            \\  %12 = getreg:i64 #0x8
+            \\  %13 = getreg:i64 #0x10
+            \\  %14 = nzcv.sub:flags %12, %13
+            \\  pending.flags %14 #0x20 @0x0
+            \\  %15 = trunc:i32 %13
+            \\  %16 = eflags.logic:flags %15
+            \\  pending.flags %16 #0x28 @0x1
+            \\  %17 = const:i32 #0x5
+            \\  setreg %17 #0x28
+            \\  %19 = getreg:i64 #0x0
+            \\  %18 = load:i64 %19 #0x3 @0x108 !3
+            \\  call.interp #0x0 @0x10c !4
+            \\  exit.chain #0x200 !5
+            \\b2:
+            \\  %20 = getreg:i32 #0x8
+            \\  %22 = getreg:i32 #0x18
+            \\  %23 = eflags.unpack:flags %22
+            \\  %21 = eflags.inc:flags %20, %23
+            \\  pending.flags %21 #0x30 @0x1
+            \\  %24 = getreg:i64 #0x0
+            \\  exit.indirect %24 !4
+        , .{ op, if (std.mem.eql(u8, op, "logic")) "" else if (std.mem.eql(u8, op, "add")) ", %1" else ", %6" }) });
+    };
     // same_page hints, right and wrong (the second load's page differs
     // when x0 is near the end of the page); a wrong hint must still work.
     for ([_]u64{ data_va, data_va + 0xff8, data_va + 0xffc }) |start| {

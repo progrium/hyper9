@@ -642,9 +642,17 @@ const Label = union(enum) {
 };
 
 /// Fixed locals after the parameters, by wasm type.
-const fixed32 = enum(u32) { code, cell, cpu, tlb, ent, blk, sv, s0, s1, s2 };
-const fixed64 = enum(u32) { va, sv, s0, s1, s2 };
+const fixed32 = enum(u32) { code, cell, cpu, tlb, ent, blk, sv, s0, s1, s2, poff };
+const fixed64 = enum(u32) { va, sv, s0, s1, s2, pa, pb, pc, pcode };
 const fixed128 = enum(u32) { v };
+
+/// A `pending.flags` the block hasn't written yet. Lazy: an eflags op
+/// whose operands are in the pa, pb, and pc locals, computed only when
+/// written; otherwise pa holds the packed i32. The pcode local says the
+/// same for the exit tail, which writes it on a way out from inside the
+/// block (a fault, or a poll that leaves): 0 none, 1 packed in pa, or
+/// ir_eval.fallbackCode of the lazy op.
+const Pend = struct { op: ir.Op, ta: Type, off: u32, lazy: bool };
 
 const E = struct {
     gpa: Allocator,
@@ -673,6 +681,8 @@ const E = struct {
     r: *const ir.Region = undefined,
     plan: *const Plan = undefined,
     cfg: *const Cfg = undefined,
+    /// The block's `pending.flags`, not yet written (pendingFlags).
+    pend: ?Pend = null,
 
     fn l32(e: *const E, f: fixed32) u32 {
         return e.base32 + @intFromEnum(f);
@@ -870,6 +880,17 @@ const E = struct {
         const ta = e.ty(i.a);
         const w = &e.w;
         switch (i.op) {
+            .@"call.interp", .@"call.helper", .copy => try e.flushPending(),
+            .setreg => if (e.pend) |p| if (i.aux < p.off + 4 and p.off < i.aux + byteSize(ta).?) {
+                // Overwritten: the pending flags are never written.
+                e.pend = null;
+                try w.i64c(0);
+                try w.set(e.l64(.pcode));
+            },
+            else => {},
+        }
+        switch (i.op) {
+            .@"pending.flags" => try e.pendingFlags(i),
             .@"const" => unreachable,
             .getreg => if (e.regOf(i.aux)) |g| {
                 try w.get(g.local);
@@ -1525,25 +1546,49 @@ const E = struct {
     /// difference. Every operand is pushed before a scratch local is set,
     /// since pushing one can use them.
     fn eflags(e: *E, i: ir.Inst) !void {
+        return e.eflagsOf(i.op, e.ty(i.a), i);
+    }
+
+    /// Operand k (0 a, 1 b, 2 c) of an eflags op, as an i64: from `src`'s
+    /// operands, or, with no `src`, from the locals pendingFlags stashed
+    /// them in. `m` masks it to ta (a source operand, not a flags value).
+    fn eflagsArg(e: *E, src: ?ir.Inst, k: u2, ta: Type, m: bool) !void {
+        if (src) |i| {
+            const ref = switch (k) {
+                0 => i.a,
+                1 => i.b,
+                else => i.c,
+            };
+            return if (m) e.val64m(ref, ta) else e.val64(ref);
+        }
+        try e.w.get(e.l64(switch (k) {
+            0 => .pa,
+            1 => .pb,
+            else => .pc,
+        }));
+    }
+
+    /// eflagsOf for `op` at width ta, with operands from `src` or the
+    /// pending-flags locals (eflagsArg).
+    fn eflagsOf(e: *E, op: ir.Op, ta: Type, src: ?ir.Inst) !void {
         const w = &e.w;
-        const ta = e.ty(i.a);
         const bits = ta.bits();
         const a = e.scratch(I64, 0);
         const b = e.scratch(I64, 1);
         const r = e.scratch(I64, 2);
-        switch (i.op) {
+        switch (op) {
             .@"eflags.logic" => {
-                try e.val64m(i.a, ta);
+                try e.eflagsArg(src, 0, ta, true);
                 try w.set(r);
                 try w.i64c(0);
                 try e.szp(r, bits);
             },
             .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => {
-                try e.val64m(i.a, ta);
-                try e.val64m(i.b, ta);
+                try e.eflagsArg(src, 0, ta, true);
+                try e.eflagsArg(src, 1, ta, true);
                 try w.set(r);
                 try w.set(a);
-                if (i.op == .@"eflags.mul") {
+                if (op == .@"eflags.mul") {
                     try w.get(a);
                     try w.i64c(0);
                     try w.byte(0x52); // ne
@@ -1553,7 +1598,7 @@ const E = struct {
                 } else {
                     // CF: msb(a) or a & 1; OF: msb(a ^ r)
                     try w.get(a);
-                    if (i.op == .@"eflags.shl") {
+                    if (op == .@"eflags.shl") {
                         try w.i64c(bits - 1);
                         try w.byte(0x88);
                     }
@@ -1568,30 +1613,30 @@ const E = struct {
                 try e.szp(r, bits);
             },
             else => {
-                const sub = switch (i.op) {
+                const sub = switch (op) {
                     .@"eflags.sub", .@"eflags.sbb", .@"eflags.dec" => true,
                     else => false,
                 };
-                const op: u8 = if (sub) 0x7D else 0x7C;
-                switch (i.op) {
+                const aop: u8 = if (sub) 0x7D else 0x7C;
+                switch (op) {
                     .@"eflags.inc", .@"eflags.dec" => {
                         // CF is kept from flags b: it starts the result.
-                        try e.val64(i.b);
+                        try e.eflagsArg(src, 1, ta, false);
                         try w.i64c(ir_eval.CF);
                         try w.byte(0x83);
-                        try e.val64m(i.a, ta);
+                        try e.eflagsArg(src, 0, ta, true);
                         try w.set(a);
                         try w.i64c(1);
                         try w.set(b);
                         try w.get(a);
                         try w.get(b);
-                        try w.byte(op);
+                        try w.byte(aop);
                         try w.set(r);
                     },
                     .@"eflags.adc", .@"eflags.sbb" => {
-                        try e.val64m(i.a, ta);
-                        try e.val64m(i.b, ta);
-                        try e.val64(i.c);
+                        try e.eflagsArg(src, 0, ta, true);
+                        try e.eflagsArg(src, 1, ta, true);
+                        try e.eflagsArg(src, 2, ta, false);
                         try w.i64c(1);
                         try w.byte(0x83);
                         try w.set(r);
@@ -1599,22 +1644,22 @@ const E = struct {
                         try w.set(a);
                         try w.get(a);
                         try w.get(b);
-                        try w.byte(op);
+                        try w.byte(aop);
                         try w.get(r);
-                        try w.byte(op);
+                        try w.byte(aop);
                         try w.set(r);
                     },
                     else => {
-                        try e.val64m(i.a, ta);
-                        try e.val64m(i.b, ta);
+                        try e.eflagsArg(src, 0, ta, true);
+                        try e.eflagsArg(src, 1, ta, true);
                         try w.set(b);
                         try w.tee(a);
                         try w.get(b);
-                        try w.byte(op);
+                        try w.byte(aop);
                         try w.set(r);
                     },
                 }
-                if (i.op != .@"eflags.inc" and i.op != .@"eflags.dec") {
+                if (op != .@"eflags.inc" and op != .@"eflags.dec") {
                     // CF: bit `bits` of r.
                     try w.get(r);
                     try w.i64c(bits);
@@ -1826,6 +1871,7 @@ const E = struct {
     /// A block's instructions but its terminator.
     fn body(e: *E, b: BlockId) !void {
         const blk = e.r.blocks.items[b];
+        e.pend = null;
         for (blk.start..blk.start + blk.len - 1) |idx| {
             if (e.plan.kind[idx] != .root) continue;
             const i = e.r.insts.items[idx];
@@ -1834,6 +1880,64 @@ const E = struct {
                 if (e.plan.used[idx]) try e.w.set(e.poolLocal(wt(i.ty).?, e.plan.loc[idx])) else try e.w.byte(0x1A);
             }
         }
+        // Every terminator is a way out of the block.
+        try e.flushPending();
+    }
+
+    /// `pending.flags`: an eflags op used only here is kept as its
+    /// operands, and computed only if the flags are written; anything else
+    /// is packed now. Either way the Cpu slot is written only on a way out
+    /// (flushPending, or the exit tail).
+    fn pendingFlags(e: *E, i: ir.Inst) !void {
+        const w = &e.w;
+        if (e.pend) |p| if (p.off != i.aux) try e.flushPending();
+        const a = e.r.insts.items[i.a];
+        const ta = e.ty(a.a);
+        const lazy = i.aux2 == 1 and e.plan.kind[i.a] == .inl and switch (a.op) {
+            .@"eflags.add", .@"eflags.sub", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.logic", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => true,
+            else => false,
+        };
+        if (lazy) {
+            // As eflagsOf takes them: a and b masked to ta (but inc's and
+            // dec's b, which is flags), c as it is.
+            const incdec = a.op == .@"eflags.inc" or a.op == .@"eflags.dec";
+            try e.val64m(a.a, ta);
+            if (a.op != .@"eflags.logic") {
+                if (incdec) try e.val64(a.b) else try e.val64m(a.b, ta);
+            }
+            if (a.op == .@"eflags.adc" or a.op == .@"eflags.sbb") try e.val64(a.c);
+            if (a.op == .@"eflags.adc" or a.op == .@"eflags.sbb") try w.set(e.l64(.pc));
+            if (a.op != .@"eflags.logic") try w.set(e.l64(.pb));
+            try w.set(e.l64(.pa));
+            try w.i64c(ir_eval.fallbackCode(a.op, .flags, ta));
+        } else {
+            try e.val64(i.a);
+            try w.i64c(if (i.aux2 == 1) ir_eval.eflags_mask else 0xf000_0000);
+            try w.byte(0x83);
+            try w.set(e.l64(.pa));
+            try w.i64c(1);
+        }
+        try w.set(e.l64(.pcode));
+        try w.i32c(@intCast(i.aux));
+        try w.set(e.l32(.poff));
+        e.pend = .{ .op = a.op, .ta = ta, .off = @intCast(i.aux), .lazy = lazy };
+    }
+
+    /// Writes the block's pending flags, if any, and forgets them.
+    fn flushPending(e: *E) !void {
+        const p = e.pend orelse return;
+        e.pend = null;
+        const w = &e.w;
+        try w.get(e.l32(.cpu));
+        if (p.lazy) {
+            try e.eflagsOf(p.op, p.ta, null);
+            try w.i64c(ir_eval.eflags_mask);
+            try w.byte(0x83);
+        } else try w.get(e.l64(.pa));
+        try w.byte(0xA7); // i32.wrap_i64
+        try w.memop(0x36, p.off); // i32.store
+        try w.i64c(0);
+        try w.set(e.l64(.pcode));
     }
 
     fn terminator(e: *E, b: BlockId) Ref {
@@ -2043,6 +2147,13 @@ fn function(
             g.bad = true;
         };
     };
+    // A slot flags are pending for is written in the exit tail, through
+    // the Cpu, so it stays there.
+    for (regions) |rg| for (rg.insts.items) |i| if (i.op == .@"pending.flags") {
+        for (regs.items) |*g| if (g.off < i.aux + 4 and i.aux < g.off + g.size) {
+            g.bad = true;
+        };
+    };
     // Overlapping accesses at different offsets: neither is promoted.
     std.mem.sort(Reg, regs.items, {}, struct {
         fn lt(_: void, a: Reg, b: Reg) bool {
@@ -2160,6 +2271,32 @@ fn function(
     }
     try e.end(); // top
     try e.end(); // exit
+    // Flags pending where the region left from inside a block.
+    try w.get(e.l64(.pcode));
+    try w.byte(0x50); // i64.eqz
+    try w.byte(0x45); // i32.eqz
+    try w.bytes(&.{ 0x04, VOID });
+    try w.get(e.l32(.cpu));
+    try w.get(e.l32(.poff));
+    try w.byte(0x6A);
+    try w.get(e.l64(.pcode));
+    try w.i64c(1);
+    try w.byte(0x51); // i64.eq
+    try w.bytes(&.{ 0x04, I64 });
+    try w.get(e.l64(.pa));
+    try w.byte(0x05);
+    try w.get(e.l64(.pcode));
+    try w.get(e.l64(.pa));
+    try w.get(e.l64(.pb));
+    try w.get(e.l64(.pc));
+    try w.i64c(0);
+    try w.call(F_EVAL);
+    try w.i64c(ir_eval.eflags_mask);
+    try w.byte(0x83);
+    try w.byte(0x0B);
+    try w.byte(0xA7);
+    try w.memop(0x36, 0);
+    try w.byte(0x0B);
     try e.flushRegs();
     if (opts.cells != 0) {
         // A chain to a linked region elsewhere: tail-call it.
