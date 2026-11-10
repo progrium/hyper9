@@ -126,7 +126,11 @@ fn helper1(c: *ctx.Ctx, a: u64, b: u64, x: u64) callconv(.c) u64 {
     regs[@intCast(a % 7)] = b +% x;
     return 0xdead;
 }
-pub const test_helpers = [_]ctx.HelperFn{ &helper0, &helper1 };
+/// 2 touches no register, as an ir.helper_no_regs helper may not.
+fn helper2(_: *ctx.Ctx, a: u64, b: u64, x: u64) callconv(.c) u64 {
+    return (a ^ (b << 3)) +% x;
+}
+pub const test_helpers = [_]ctx.HelperFn{ &helper0, &helper1, &helper2 };
 
 pub fn expectSame(n: usize, c: Case, want: Result, got: Result) !void {
     if (same(want, got)) return;
@@ -363,6 +367,30 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  exit.indirect %24 !4
         , .{ op, if (std.mem.eql(u8, op, "logic")) "" else if (std.mem.eql(u8, op, "add")) ", %1" else ", %6" }) });
     };
+    // A helper_no_regs call between a register's writes and its reads,
+    // and with flags pending: neither need be written first.
+    for ([_]u64{ data_va, data_va + 0x10000 }) |start| {
+        try list.append(gpa, .{ .regs = .{ start, 0x7f, 0x80, 3, 0, 0, 0, 0 }, .text = try gpa.dupe(u8,
+            \\b0:
+            \\  %0 = getreg:i64 #0x8
+            \\  %1 = getreg:i64 #0x10
+            \\  %2 = add:i64 %0, %1
+            \\  setreg %2 #0x8
+            \\  %3 = trunc:i32 %0
+            \\  %4 = trunc:i32 %1
+            \\  %5 = eflags.sub:flags %3, %4
+            \\  pending.flags %5 #0x30 @0x1
+            \\  %6 = call.helper:i64 %2, %1, %0 #0x2 @0x1
+            \\  %7 = getreg:i64 #0x8
+            \\  %8 = add:i64 %7, %6
+            \\  setreg %8 #0x18
+            \\  %9 = getreg:i64 #0x0
+            \\  %10 = load:i64 %9 #0x3 @0x100 !1
+            \\  %11 = call.helper:i64 %10, %8, %2 #0x2 @0x1
+            \\  setreg %11 #0x20
+            \\  exit.chain #0x200 !2
+        ) });
+    }
     // same_page hints, right and wrong (the second load's page differs
     // when x0 is near the end of the page); a wrong hint must still work.
     for ([_]u64{ data_va, data_va + 0xff8, data_va + 0xffc }) |start| {

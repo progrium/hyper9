@@ -43,8 +43,9 @@ var ext_io: [48]u8 align(16) = undefined;
 fn extIo() u32 {
     return @intFromPtr(&ext_io);
 }
-export fn jit_helper(_: *Ctx, _: u64, _: u64, _: u64, _: u64) u64 {
-    return 0;
+export fn jit_helper(ctx: *Ctx, index: u64, a: u64, b: u64, c: u64) u64 {
+    const hs: [*]const vcpu.ctx.HelperFn = @ptrFromInt(@as(usize, @intCast(ctx.helpers)));
+    return hs[@intCast(index)](ctx, a, b, c);
 }
 
 var all: []cases.Case = &.{};

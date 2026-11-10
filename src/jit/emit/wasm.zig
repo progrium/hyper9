@@ -321,7 +321,8 @@ const Reg = struct {
 fn clobbers(r: *const ir.Region, k: usize, off: u64, n: u64) bool {
     const i = r.insts.items[k];
     return switch (i.op) {
-        .@"call.interp", .@"call.helper", .copy => true,
+        .@"call.interp", .copy => true,
+        .@"call.helper" => i.aux2 & ir.helper_no_regs == 0,
         .setreg => blk: {
             const m = byteSize(r.insts.items[i.a].ty) orelse 8;
             break :blk i.aux < off + n and off < i.aux + m;
@@ -921,8 +922,14 @@ const E = struct {
         const ta = e.ty(i.a);
         const w = &e.w;
         switch (i.op) {
-            .@"call.interp", .@"call.helper", .copy => {
+            .@"call.interp", .copy => {
                 try e.flushPending();
+                try e.flushRetired();
+            },
+            // A helper that touches none of the region's Cpu bytes
+            // (ir.helper_no_regs, an x87 one) leaves the flags pending.
+            .@"call.helper" => {
+                if (i.aux2 & ir.helper_no_regs == 0) try e.flushPending();
                 try e.flushRetired();
             },
             .setreg => if (e.pend) |p| if (i.aux < p.off + 4 and p.off < i.aux + byteSize(ta).?) {
@@ -1265,7 +1272,8 @@ const E = struct {
                 try e.val64(i.a);
                 try e.val64(i.b);
                 try e.val64(i.c);
-                try e.flushDirty();
+                const regs = i.aux2 & ir.helper_no_regs == 0;
+                if (regs) try e.flushDirty();
                 if (e.opts.cells != 0) {
                     // Straight through h9's table, which the module has
                     // when chaining: ctx.helpers[aux] is a slot in it.
@@ -1275,8 +1283,10 @@ const E = struct {
                     try w.bytes(&.{ 0x11, T_HELPER, 0 }); // call_indirect
                 } else try w.call(F_HELPER);
                 if (t == .none) try w.byte(0x1A);
-                try e.loadRegs();
-                e.cleanRegs();
+                if (regs) {
+                    try e.loadRegs();
+                    e.cleanRegs();
+                }
             },
             .poll => {
                 try w.get(0);
