@@ -1,7 +1,8 @@
 //! The emulator speed benchmark behind SPEC.md's "Limits and selection":
 //! a 2-instruction loop of 10⁹ iterations, 10⁶ one-byte pwrite round
 //! trips, and 10⁶ _nsec calls (the cost of a system call itself), for
-//! arm64 and amd64 on every backend built in that can run them.
+//! arm64 and amd64, and 10⁷ bare arm64 vCPU exits and re-entries (an SVC
+//! that run returns, with no system call served) on every backend built in that can run them.
 //! zig build bench builds it with ReleaseFast and runs it.
 //!
 //! Then the compute benchmarks (tests/bench/*.c: fib, sieve, md5, qsort,
@@ -205,6 +206,17 @@ pub fn main(init: std.process.Init) !void {
     };
     try w.flush();
 
+    // The bare vCPU round trip: run returning .syscall and run again,
+    // with no system call served (SVC; B back to it).
+    if (!compute_only) for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for (tiersOf(kind)) |tier| {
+        if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
+        defer _ = unsetenv("H9_EMU_TIER");
+        const ns = try bareRoundTrip(gpa, io, kind) orelse continue;
+        var lb: [16]u8 = undefined;
+        try w.print("{s: <7} {s: <6} {s: <7} {d: >7.2}s  {d:.0} ns per exit and re-entry\n", .{ "bare", "arm64", tierLabel(&lb, kind, tier), @as(f64, @floatFromInt(ns)) / 1e9, @as(f64, @floatFromInt(ns)) / bare_iters });
+        try w.flush();
+    };
+
     try w.print("\n{s: <7} {s: <6} {s: <7} {s: >8}  {s: <10} {s}\n", .{ "compute", "arch", "vmm", "time", "vs native", "rate (where the emulator counts)" });
     for (computes) |c| {
         const t0 = std.Io.Timestamp.now(io, .awake);
@@ -254,6 +266,36 @@ fn tierLabel(buf: []u8, kind: vmm.BackendKind, tier: ?[]const u8) []const u8 {
 var msg_buf: [64]u8 = undefined;
 
 /// One run of a compute text segment: its wall time and exit message.
+const bare_iters = 10_000_000;
+
+/// The time of `bare_iters` exits and re-entries of an arm64 vCPU on
+/// `kind`: SVC, then B back to it, at 0x10000.
+fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind) !?i96 {
+    var b = vmm.create(gpa, io, kind, .{ .arch = .arm64 }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
+        else => return e,
+    };
+    defer b.destroy();
+    const page = try b.allocPages(1);
+    defer b.freePages(page);
+    std.mem.writeInt(u32, page[0..4], 0xd4000001, .little); // svc #0
+    std.mem.writeInt(u32, page[4..8], 0x17ffffff, .little); // b .-4
+    const as = try b.newAddressSpace();
+    defer as.destroy();
+    try as.map(0x10000, page, .{ .exec = true });
+    defer as.unmap(0x10000);
+    var v = try b.createVcpu();
+    defer v.destroy();
+    try v.setAddressSpace(as);
+    var u: vmm.Ureg = .initExec(.arm64, 0x10000, 0, 0);
+    v.setUreg(&u);
+    const start: std.Io.Timestamp = .now(io, .awake);
+    for (0..bare_iters) |_| {
+        if (try v.run() != .syscall) return error.BenchFailed;
+    }
+    return start.untilNow(io, .awake).toNanoseconds();
+}
+
 fn runText(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout.Arch, text: []const u8) !?struct { ns: i96, msg: []const u8 } {
     const bytes = try gpa.alloc(u8, aout.header_size + text.len);
     defer gpa.free(bytes);

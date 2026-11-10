@@ -515,7 +515,12 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
 
             fn leave(s: *State) void {
                 _ = s.seq.fetchAdd(1, .seq_cst);
-                s.backend.io.futexWake(u32, &s.seq.raw, std.math.maxInt(u32));
+                // Only a shootdown waits on seq, and it raises `kickers`
+                // before it reads seq: with both seq_cst, either it sees
+                // the new seq or this sees it waiting. A futex wake is a
+                // system call, most of a bare exit's cost otherwise.
+                if (s.backend.kickers.load(.seq_cst) != 0)
+                    s.backend.io.futexWake(u32, &s.seq.raw, std.math.maxInt(u32));
             }
 
             /// Brings the view up to date with the space. Called in guest
