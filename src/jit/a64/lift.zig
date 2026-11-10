@@ -5,10 +5,11 @@
 //! arithmetic with and without flags, logical, shifts, bitfields,
 //! conditional select and compare, multiply and divide), every branch,
 //! loads and stores of one register or a pair (general and FP/SIMD
-//! registers, every addressing mode), the load-exclusive and
+//! registers, every addressing mode), the exclusive and
 //! load-acquire/store-release forms, barriers, and the system registers
-//! EL0 reads. Everything else (FP and SIMD data processing, the
-//! store-exclusives, CLREX, DC ZVA, CNTVCT) runs through `call.interp`,
+//! EL0 reads. STXR and STXP of W pairs are a branch on the monitor and a
+//! `cas`. Everything else (FP and SIMD data processing, STXP of X pairs,
+//! LDXP, CLREX, DC ZVA, CNTVCT) runs through `call.interp`,
 //! which runs T0's handler on the Cpu.
 //!
 //! Regions: a linear scan from the entry PC that continues through
@@ -100,7 +101,9 @@ pub fn classify(o: dec.Op) How {
 /// Whether a non-branch instruction is lifted (else it's interpreted).
 pub fn lifts(o: dec.Op) bool {
     return switch (o.k) {
-        .ldxp, .stxr, .stxp, .clrex, .dc_zva => false,
+        .ldxp, .clrex, .dc_zva => false,
+        // A pair of X registers is 16 bytes, wider than `cas`.
+        .stxp => o.x == 2,
         .mrs => switch (o.imm) {
             dec.sr.nzcv, dec.sr.fpcr, dec.sr.fpsr, dec.sr.tpidr_el0, dec.sr.tpidrro_el0, dec.sr.cntfrq_el0, dec.sr.ctr_el0, dec.sr.dczid_el0 => true,
             else => false, // CNTVCT_EL0 reads T0's clock
@@ -243,13 +246,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
                 },
                 .svc => {
                     // T0 clears the exclusive monitor at a system call.
-                    const z64 = try b.konst(.i64, 0);
-                    const z8 = try b.konst(.i8, 0);
-                    try b.setreg(monOff("valid"), z8);
-                    try b.setreg(monOff("addr"), z64);
-                    try b.setreg(monOff("size"), z8);
-                    try b.setreg(monOff("lo"), z64);
-                    try b.setreg(monOff("hi"), z64);
+                    try clearMonitor(b);
                     l.pending += 1;
                     try l.flush();
                     try b.exit(.@"exit.svc", in.pc + 4);
@@ -297,6 +294,16 @@ const Region = struct {
         try b.exit(.@"exit.chain", t);
     }
 };
+
+fn clearMonitor(b: *Builder) !void {
+    const z64 = try b.konst(.i64, 0);
+    const z8 = try b.konst(.i8, 0);
+    try b.setreg(monOff("valid"), z8);
+    try b.setreg(monOff("addr"), z64);
+    try b.setreg(monOff("size"), z8);
+    try b.setreg(monOff("lo"), z64);
+    try b.setreg(monOff("hi"), z64);
+}
 
 fn fillExit(b: *Builder, id: ir.BlockId, t: u64) !void {
     if (b.r.blocks.items[id].begun) return;
@@ -703,6 +710,7 @@ const L = struct {
                 }
                 try l.put(o.d, v);
             },
+            .stxr, .stxp => try l.storeExclusive(in),
             .stlr => {
                 try l.flush();
                 const addr = try l.x(o.n);
@@ -713,6 +721,91 @@ const L = struct {
                 unreachable;
             },
         }
+    }
+
+    /// STXR, and STXP of two W registers, as T0 runs them: if the monitor
+    /// holds this address and size, a compare-and-swap against the value
+    /// LDXR saw (status 0 if it swapped); otherwise status 1, with no
+    /// access, after the alignment check. Either way the monitor clears.
+    /// It ends the current block: the rest of the instruction's block
+    /// continues in a new one.
+    fn storeExclusive(l: *L, in: Insn) !void {
+        const o = in.op;
+        const b = l.b;
+        const is_pair = o.k == .stxp;
+        const size: u3 = if (is_pair) 3 else @intCast(o.x);
+        const bytes = @as(u64, 1) << size;
+        const ty: Type = switch (size) {
+            0 => .i8,
+            1 => .i16,
+            2 => .i32,
+            else => .i64,
+        };
+        const addr = try l.x(o.n);
+        const valid = try b.icmp(.ne, try b.getreg(.i8, monOff("valid")), try l.k(.i8, 0));
+        const same_addr = try b.icmp(.eq, try b.getreg(.i64, monOff("addr")), addr);
+        const same_size = try b.icmp(.eq, try b.getreg(.i8, monOff("size")), try l.k(.i8, bytes));
+        const match = try l.bin(.@"and", .i1, valid, try l.bin(.@"and", .i1, same_addr, same_size));
+
+        const ok = try b.block();
+        const miss = try b.block();
+        const fault = try b.block();
+        const fail = try b.block();
+        const join = try b.block();
+        try l.retireAll();
+        try b.brcond(match, ok, miss);
+
+        // The monitor's address passed LDXR's alignment check at this
+        // size, so the swap can't fault on alignment.
+        b.begin(ok);
+        const a2 = try b.getreg(.i64, regOff(o.n));
+        const lo = try b.getreg(.i64, monOff("lo"));
+        const exp = if (ty == .i64) lo else try b.un(.trunc, ty, lo);
+        try clearMonitor(b);
+        const v = try l.newValue(in, size, is_pair);
+        const old = try b.cas(ty, a2, exp, v, .{ .size = size, .aligned = true, .order = .seq_cst }, in.pc);
+        const status = try b.un(.zext, .i64, try b.icmp(.ne, old, exp));
+        if (o.d != SINK and o.d != ZR) try b.setreg(regOff(o.d), status);
+        try b.br(join);
+
+        b.begin(miss);
+        const ma = try b.bin(.@"and", .i64, try b.getreg(.i64, regOff(o.n)), try b.konst(.i64, bytes - 1));
+        try b.brcond(try b.icmp(.ne, ma, try b.konst(.i64, 0)), fault, fail);
+
+        // Misaligned: the alignment fault, before the monitor clears.
+        b.begin(fault);
+        const fa = try b.getreg(.i64, regOff(o.n));
+        _ = try b.cas(ty, fa, try b.konst(ty, 0), try b.konst(ty, 0), .{ .size = size, .aligned = true, .order = .seq_cst }, in.pc);
+        try b.exit(.@"exit.chain", in.pc); // not reached: the cas faults
+
+        b.begin(fail);
+        try clearMonitor(b);
+        if (o.sh == 1) _ = try b.emit(.{ .op = .fence });
+        if (o.d != SINK and o.d != ZR) try b.setreg(regOff(o.d), try b.konst(.i64, 1));
+        try b.br(join);
+
+        b.begin(join);
+        l.regs = @splat(null);
+        l.flags.clobber();
+    }
+
+    /// The value a store-exclusive writes, read in the current block.
+    fn newValue(l: *L, in: Insn, size: u3, is_pair: bool) !Ref {
+        const o = in.op;
+        const b = l.b;
+        if (is_pair) {
+            const w0 = try b.un(.zext, .i64, try b.un(.trunc, .i32, try l.rawX(o.m)));
+            const w1 = try b.bin(.shl, .i64, try l.rawX(o.a), try b.konst(.i64, 32));
+            return b.bin(.@"or", .i64, w0, w1);
+        }
+        return l.narrow(try l.rawX(o.m), size);
+    }
+
+    /// A register read without the block's cache (in a block made inside
+    /// an instruction).
+    fn rawX(l: *L, s: u8) !Ref {
+        if (s == ZR or s == SINK) return l.b.konst(.i64, 0);
+        return l.b.getreg(.i64, regOff(s));
     }
 
     /// The low 2^size bytes of an i64, at the matching type.

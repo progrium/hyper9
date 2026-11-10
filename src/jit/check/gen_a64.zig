@@ -137,6 +137,21 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
         // LDXR, or STXR with status s ≠ t, both on x20
         .exclusive => blk: {
             const size: u32 = 2 + sf;
+            var t2 = reg(r);
+            if (t2 == d) t2 = (d + 1) & 15;
+            var st = reg(r);
+            if (st == d or st == t2) st = (d + 2) & 15;
+            switch (r.uintLessThan(u32, 8)) {
+                // LDXP and STXP of W pairs (an 8-byte monitor)
+                0 => break :blk 0x887F0000 | (t2 << 10) | (base_reg << 5) | d,
+                1 => break :blk 0x88200000 | (st << 16) | (r.uintLessThan(u32, 2) << 15) | (t2 << 10) | (base_reg << 5) | d,
+                // STXR on x22, which isn't mapped: fails without access
+                // unless the monitor holds it
+                2 => break :blk (size << 30) | 0x08007C00 | (st << 16) | (index_reg << 5) | d,
+                // the acquire and release forms
+                3 => break :blk (size << 30) | 0x085FFC00 | (base_reg << 5) | d,
+                else => {},
+            }
             if (r.boolean()) break :blk (size << 30) | 0x085F7C00 | (base_reg << 5) | d;
             var s = reg(r);
             if (s == d) s = (d + 1) & 15;
