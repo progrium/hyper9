@@ -46,19 +46,19 @@ amd64 2d35ebdb57d9971fea0cac1582aa78935adf8058b2cc32db163c98822e5dfa1b
 386 13c6e95c06ae06f126f5e940d6d88c2fec0da715c80878ad225c76ad48d0a31e
 "
 
-# Alpine 3.22's x86 packages for the browser host's Linux demo
-# (src/web/linux.list), added to a copy of the 386 root as
-# .local/linux/alpine-386-web by `scripts/fetch.sh alpine386web`. Alpine's
-# mirrors keep only each package's newest build, so a bump there means a
-# bump here.
-ALPINE_PKG_URL=https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86
+# Alpine 3.22's aarch64 packages for the browser host's Linux demo
+# (src/web/linux.list), which runs on ha64, h9's own arm64 CPU. They're
+# added to a copy of the arm64 root as .local/linux/alpine-arm64-web by
+# `scripts/fetch.sh alpinearm64web`. Alpine's mirrors keep only each
+# package's newest build, so a bump there means a bump here.
+ALPINE_PKG_URL=https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64
 # package-file  sha256
-ALPINE_386_WEB_PKGS="
-jq-1.8.2-r0.apk 8c1723d8cd568238307d7769fd777c7e82b48b875e205ac20f985a24e98f77ed
-oniguruma-6.9.10-r0.apk 81f950d14be98a5a3bf2d7eead3125cf8be00ed32e9d1110643240c4fb671b58
-sqlite-3.49.2-r1.apk 0011331af45374074dc23bfa5c068af78bcdbc9ad283f49e5e8cb8a5890cf54b
-readline-8.2.13-r1.apk 29e35b5876481d0d1d4f60fdfdbd59a0c974d86e6355f7c38ea85518645ada6b
-libncursesw-6.5_p20250503-r0.apk b1262e30c3eb0c9a9b74dba4f33c36ca37e33c4a060429af22f371236bfd4d61
+ALPINE_ARM64_WEB_PKGS="
+jq-1.8.2-r0.apk 20e3b54393eecb2ee3c41a2f54e2401fadadf493b4de58a69fa09fa654c37ab5
+oniguruma-6.9.10-r0.apk 486a30ba898571f8f391958494ef3982494dffbc56d368d477293c5159c5c192
+sqlite-3.49.2-r1.apk 23cc7ebfee1170d2e6be5740ef5eae1c522691e164e399629f9147705370e8c9
+readline-8.2.13-r1.apk 334af29dbf6b5a71a87af4d6a58e2967a8f711a51d00093de0e1498daf83ceb2
+libncursesw-6.5_p20250503-r0.apk 419b375e8a4345e7172b1f0f3a3c57db61374f5408cdb875d9e860bd4c243aca
 "
 
 # Wine's headers, for winedraw (design/wine-draw.md): a display driver is

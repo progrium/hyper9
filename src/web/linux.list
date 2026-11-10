@@ -1,6 +1,6 @@
 # The browser host's Linux root archive (design/0018-linux-personality.md,
-# design/0105-linux-i386.md): the paths, relative to the 386 Alpine root that
-# `scripts/fetch.sh alpine386web` makes, that `zig build web` packs into
+# design/h86-ha64.md): the paths, relative to the arm64 Alpine root
+# that `scripts/fetch.sh alpinearm64web` makes, that `zig build web` packs into
 # zig-out/web/linux.h9a for the demo page's ?linux mode. A path ending in
 # / is an empty directory. tools/webroot.zig copies files rather than
 # links, so busybox's applets are made by the page at start.
@@ -22,8 +22,8 @@ etc/passwd
 etc/group
 
 # musl and busybox.
-lib/ld-musl-i386.so.1
-lib/libc.musl-x86.so.1
+lib/ld-musl-aarch64.so.1
+lib/libc.musl-aarch64.so.1
 bin/busybox
 
 # jq.

@@ -6,12 +6,12 @@
 # `zig build mkroot -- --arch 386` cross-compiles the userland on the
 # emulator, about an hour on x86_64, so this unpacks the release's 386 ISO
 # instead (tools/isoroot.zig). The Linux page's demo runs the same build
-# over linux.h9a, Alpine's 386 busybox, jq, and sqlite3
-# (src/web/linux.list). The Wine page's demo runs it over wine.h9a,
-# Alpine's 32-bit Wine with winedraw and a prefix made ahead of time by
-# h9 on the emulator (scripts/wine-web.sh, a few minutes), cached until
-# the scripts, the pins, or the driver change. The demo page's browser
-# test gates the deploy.
+# over linux.h9a, Alpine's arm64 busybox, jq, and sqlite3 on ha64, h9's
+# own arm64 CPU (src/web/linux.list). The Wine page's demo runs it over
+# wine.h9a, Alpine's 32-bit Wine with winedraw on h86 and a prefix made
+# ahead of time by h9 on the emulator (scripts/wine-web.sh, a few
+# minutes), cached until the scripts, the pins, or the driver change. The
+# demo page's browser test gates the deploy.
 name: pages
 
 on:
@@ -46,7 +46,7 @@ jobs:
           path: |
             .local/9front/*.386.iso
           key: pages-fetch-${{ hashFiles('scripts/pins.sh') }}
-      - run: scripts/fetch.sh iso386 alpine386web
+      - run: scripts/fetch.sh iso386 alpinearm64web
       - name: 386 root from the ISO
         run: |
           . scripts/pins.sh

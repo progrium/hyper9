@@ -66,13 +66,15 @@ or on h9's emulator where there is none.
 <h2 id="demo">Demo</h2>
 
 <p>
-Below is h9's browser host running Alpine Linux's own 386 binaries:
-busybox's shell, jq, and sqlite3, unchanged, on h9's own 386 CPU
+Below is h9's browser host running Alpine Linux's own arm64 binaries:
+busybox's shell, jq, and sqlite3, unchanged, on ha64, h9's own arm64 CPU,
 in a Web Worker,
 with a small Linux root loaded into memory.
 Try <tt>uname -a</tt>, <tt>ps</tt>, <tt>ls /proc</tt>,
 <tt>seq 5 | jq -s add</tt>, or
 <tt>echo 'select sqlite_version();' | sqlite3</tt>.
+A file dropped on the terminal lands in <tt>/root</tt>, and its path is typed,
+so a dropped script runs with Enter.
 It needs JavaScript Promise Integration, which Chrome and Edge have from version 137.
 The demo can also be <a href="demo/?linux">opened on its own page</a>.
 </p>
@@ -80,10 +82,11 @@ The demo can also be <a href="demo/?linux">opened on its own page</a>.
 <iframe src="demo/?linux" title="h9 running Alpine Linux's busybox sh in the browser"></iframe>
 
 <p>
-The browser has no amd64 or arm64 CPU to run on,
-so this uses the Linux personality's 32-bit x86 support
-(<a href="https://github.com/progrium/hyper9/blob/main/design/0105-linux-i386.md">linux-i386</a>),
-the same syscall table decoded for <tt>int 0x80</tt>.
+The browser has no hypervisor,
+so ha64 decodes the arm64 instructions itself, compiled to WebAssembly
+(<a href="https://github.com/progrium/hyper9/blob/main/design/h86-ha64.md">h86 and ha64</a>).
+The Linux system calls reach h9 as they do on an arm64 host,
+as an <tt>SVC</tt> exit with the Linux ABI's registers.
 </p>
 
 <h2 id="trying">Trying it</h2>
@@ -112,7 +115,7 @@ into <tt>.local/linux</tt>.
 <h2 id="runs">What runs</h2>
 
 <p>
-Static and dynamic programs, for arm64 and amd64, and 386 on the emulator and in the browser,
+Static and dynamic programs, for arm64 and amd64, and 386 on the emulator, with arm64 and 386 in the browser,
 with threads, sockets, and signals.
 Each of these has been run in h9, most of them from Alpine's packages:
 </p>

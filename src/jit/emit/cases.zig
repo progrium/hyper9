@@ -823,6 +823,30 @@ pub fn generateLazyFlags(gpa: std.mem.Allocator) ![]Case {
             \\  exit.indirect %14 !2
         , .{ op, ty }) });
     };
+    // The record's kind byte read and cleared (as h86's lifter settles the
+    // bits and clears it, then writes a record), with the record written
+    // after: an emitter that keeps the kind byte in a register must not
+    // write it back over the record, or read it stale.
+    // (Not a read of it while the record may be pending: emitters may
+    // write a pending record early, so what that reads isn't defined.)
+    for ([_][]const u8{"exit.chain #0x200"}) |end| {
+        try list.append(gpa, .{ .regs = .{ data_va, 0x8000_00f7, 0x7fff_ff19, 1, 0, 0, 0x0000_0303_0000_0202, 0x55 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i8 #0x34
+            \\  %1 = getreg:i32 #0x8
+            \\  %2 = getreg:i32 #0x10
+            \\  setreg %0 #0x38
+            \\  %3 = const:i8 #0x0
+            \\  setreg %3 #0x34
+            \\  %4 = eflags.sub:flags %1, %2
+            \\  pending.flags %4 #0x30 @0x2
+            \\  {0s}
+            \\b1:
+            \\  %5 = getreg:i8 #0x34
+            \\  setreg %5 #0x3c
+            \\  exit.chain #0x300
+        , .{end}) });
+    }
     return list.toOwnedSlice(gpa);
 }
 
