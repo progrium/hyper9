@@ -1085,7 +1085,7 @@ pub fn Exec(comptime M: type) type {
             const new: u64 = (@as(u64, c.r[1]) << 32) | c.r[3];
             const r = try x.ref(x.addr, 8, .write);
             var old: u64 = undefined;
-            if (r.q == null and @intFromPtr(r.p) & 7 == 0) {
+            if (@bitSizeOf(usize) >= 64 and r.q == null and @intFromPtr(r.p) & 7 == 0) {
                 const p: *u64 = @ptrCast(@alignCast(r.p));
                 old = @cmpxchgStrong(u64, p, want, new, .seq_cst, .seq_cst) orelse want;
             } else {

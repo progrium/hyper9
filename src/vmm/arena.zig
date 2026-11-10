@@ -13,6 +13,12 @@ const builtin = @import("builtin");
 const page_size = @import("../vmm.zig").page_size;
 
 const windows = builtin.os.tag == .windows;
+/// The web host: wasm memory has no reserve, commit, or decommit, so the
+/// range is grown up front (memory.grow, whose new pages are zero and
+/// which the browser backs on first touch), and freed pages are zeroed by
+/// hand. Memory never shrinks, so a released range is kept for the next.
+const wasm = builtin.cpu.arch == .wasm32;
+var wasm_spare: []align(host_min) u8 = &.{};
 const host_min = std.heap.page_size_min;
 
 mem: []align(host_min) u8,
@@ -98,6 +104,19 @@ fn giveBack(a: *Arena, gpa: std.mem.Allocator, off: usize, len: usize) void {
 // over a range; Windows reserves, then commits and decommits.
 
 fn reserve(size: usize) error{OutOfMemory}![]align(host_min) u8 {
+    if (wasm) {
+        if (wasm_spare.len >= size) {
+            const m = wasm_spare[0..size];
+            wasm_spare = &.{};
+            @memset(m, 0);
+            return m;
+        }
+        const wasm_page = 64 * 1024;
+        const old = @wasmMemoryGrow(0, std.math.divCeil(usize, size, wasm_page) catch unreachable);
+        if (old < 0) return error.OutOfMemory;
+        const p: [*]align(host_min) u8 = @ptrFromInt(@as(usize, @intCast(old)) * wasm_page);
+        return p[0..size];
+    }
     if (windows) {
         const w = std.os.windows;
         var base: ?*anyopaque = null;
@@ -110,6 +129,10 @@ fn reserve(size: usize) error{OutOfMemory}![]align(host_min) u8 {
 }
 
 fn release(m: []align(host_min) u8) void {
+    if (wasm) {
+        if (m.len > wasm_spare.len) wasm_spare = m;
+        return;
+    }
     if (windows) {
         const w = std.os.windows;
         var base: ?*anyopaque = m.ptr;
@@ -131,6 +154,7 @@ fn commit(m: []align(page_size) u8) error{OutOfMemory}!void {
 
 /// Gives the pages back to the host; their next use sees zeroes.
 fn decommit(m: []align(page_size) u8) void {
+    if (wasm) return @memset(m, 0);
     if (windows) {
         const w = std.os.windows;
         var base: ?*anyopaque = m.ptr;

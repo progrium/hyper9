@@ -28,10 +28,11 @@ const nat = if (have_native) @import("vmm/native.zig") else @import("vmm/none.zi
 const have_hvf = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
 const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
-const have_emu = build_options.emu != .none and !web;
+/// The web host has h9's own CPUs (-Demu=zig) beside v86, but not Unicorn.
+const have_emu = build_options.emu != .none and !(web and build_options.emu == .unicorn);
 /// The native backend (design/0095-native-backend.md): Linux x86_64 for now.
 const have_native = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
-/// The web host (design/0012-browser-host.md) has only v86.
+/// The web host (design/0012-browser-host.md) has v86, and zemu when built in.
 const web = builtin.os.tag == .wasi;
 const have_v86 = web;
 

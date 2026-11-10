@@ -22,6 +22,7 @@
 //! or the shootdown sees the vCPU and waits for it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const vmm = @import("../vmm.zig");
 const Arena = @import("arena.zig");
@@ -40,6 +41,27 @@ pub fn version(buf: []u8) []const u8 {
 /// Ctx.exit_request bits.
 pub const req_kick = cache.req_kick;
 pub const req_sync = cache.req_sync;
+
+/// The web host (design/0012-browser-host.md): one thread, whose
+/// coroutines take turns, so a vCPU leaves guest code on a budget of
+/// instructions as well as on requests (see State.run).
+const web = builtin.os.tag == .wasi;
+/// Guest memory there, as v86's: a tab's memory is scarcer than a host's,
+/// and wasm32 addresses 4 GiB in all, h9's heap and v86's included.
+const web_default_memory: u64 = 256 << 20;
+const web_max_memory: u64 = 2 << 30;
+/// Guest instructions between looks at the clock, and how long a vCPU
+/// keeps the thread before the other coroutines get a turn (v86.zig's
+/// slice).
+const web_budget: i64 = 64 * 1024;
+const web_slice_ns = 2 * std.time.ns_per_ms;
+const coro = if (web) @import("../web/coro.zig") else struct {};
+
+fn monoNs() u64 {
+    var t: std.os.wasi.timestamp_t = 0;
+    _ = std.os.wasi.clock_time_get(.MONOTONIC, 1, &t);
+    return t;
+}
 
 /// The code cache's size, per backend.
 const cache_size = 64 << 20;
@@ -116,6 +138,9 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             stopping: std.atomic.Value(u32) = .init(0),
             /// Serializes flushes.
             world: std.Io.Mutex = .init,
+            /// On the web, when a vCPU last let the other coroutines run,
+            /// in monotonic ns.
+            yielded: u64 = 0,
 
             pub fn create(gpa: std.mem.Allocator, io: std.Io, opts: vmm.Options) vmm.CreateError!*EmuBackend {
                 switch (opts.arch) {
@@ -125,11 +150,12 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .i386 => if (!X86.ready) return error.WrongArch,
                     .amd64 => return error.WrongArch,
                 }
-                const limit = opts.memory orelse vmm.default_memory;
-                if (limit > vmm.max_memory) return error.OutOfGuestMemory;
+                const limit = opts.memory orelse if (web) web_default_memory else vmm.default_memory;
+                if (limit > (if (web) web_max_memory else vmm.max_memory)) return error.OutOfGuestMemory;
                 // Twice the cap in address space, as emu.zig does, so freed
-                // ranges scattered through it don't run allocations out.
-                var arena = Arena.init(std.mem.alignForward(usize, @intCast(2 * limit), vmm.page_size)) catch return error.OutOfGuestMemory;
+                // ranges scattered through it don't run allocations out. Not
+                // on the web, where the arena is real memory in a 4 GiB space.
+                var arena = Arena.init(std.mem.alignForward(usize, @intCast(if (web) limit else 2 * limit), vmm.page_size)) catch return error.OutOfGuestMemory;
                 errdefer arena.deinit(gpa);
                 const b = try gpa.create(EmuBackend);
                 errdefer gpa.destroy(b);
@@ -216,6 +242,14 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 return .{ .s = s };
             }
 
+            /// On the web: lets every other coroutine run. Only between
+            /// runs of guest code, so no vCPU is ever in it while another
+            /// coroutine runs, and kickAndWait never waits.
+            fn yieldThread(b: *EmuBackend) void {
+                coro.yield();
+                b.yielded = monoNs();
+            }
+
             fn lockVcpus(b: *EmuBackend) void {
                 while (!b.vcpus_lock.tryLock()) std.atomic.spinLoopHint();
             }
@@ -290,8 +324,8 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
         pub const EmuSpace = struct {
             backend: *EmuBackend,
             regions: std.ArrayList(Region) = .empty,
-            /// Bumped on every change.
-            generation: std.atomic.Value(u64) = .init(1),
+            /// Bumped on every change. A usize: wasm32 has no 64-bit atomics.
+            generation: std.atomic.Value(usize) = .init(1),
             /// Guards `regions`: a process's threads change and read them
             /// at once.
             lock: std.atomic.Mutex = .unlocked,
@@ -392,7 +426,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             as: std.atomic.Value(?*EmuSpace) = .init(null),
             /// The view's mappings, and the space's generation they're from.
             maps: std.ArrayList(mem.Mapping) = .empty,
-            generation: u64 = 0,
+            generation: usize = 0,
             /// Odd while in guest code.
             seq: std.atomic.Value(u32) = .init(0),
             /// While inside the Guest's run, for checking flushes.
@@ -457,7 +491,12 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 cx.slow_load = @intFromPtr(&mem.slowLoad);
                 cx.slow_store = @intFromPtr(&mem.slowStore);
                 cx.slow_cas = @intFromPtr(&mem.slowCas);
+                // A guest that makes a syscall every few instructions never
+                // spends a budget: let the others run once a slice has
+                // passed, as a timer interrupt would.
+                if (web and monoNs() -% b.yielded > web_slice_ns) b.yieldThread();
                 while (true) {
+                    if (web) cx.budget = web_budget;
                     s.enter();
                     if (b.stopping.load(.seq_cst) != 0) {
                         // A flush is emptying the cache: wait it out.
@@ -487,6 +526,14 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     };
                     s.leave();
                     if (exit != .interrupted) return exit;
+                    if (web and cx.budget <= 0 and @atomicLoad(u32, &cx.exit_request, .seq_cst) == 0) {
+                        // The budget ran out. Past a slice, preempt: the
+                        // others run, then the caller sees `.interrupted`.
+                        if (monoNs() -% b.yielded <= web_slice_ns) continue;
+                        b.yieldThread();
+                        _ = @atomicRmw(u32, &cx.exit_request, .And, ~req_kick, .seq_cst);
+                        return .interrupted;
+                    }
                     const req = @atomicRmw(u32, &cx.exit_request, .And, ~(req_kick | req_sync), .seq_cst);
                     if (b.flush_wanted.load(.seq_cst)) b.flushCache(s);
                     if (req & req_kick != 0) return .interrupted;

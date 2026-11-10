@@ -14,7 +14,7 @@ pub const ready = true;
 
 pub const Cpu = struct {
     t0: t0.Cpu = .{},
-    cache: t0.Cache = .init(std.heap.smp_allocator),
+    cache: t0.Cache = .init(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator),
     machine: t0.Machine = undefined,
     /// The ESR of the last exit, for the Ureg's `type`.
     esr: u64 = 0,
@@ -63,7 +63,11 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
 pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     c.machine = .init(&c.t0, ctx, &c.cache, clock);
     ctx.frontend = @intFromPtr(&c.machine);
-    const e = t0.run(&c.machine, std.math.maxInt(u64));
+    // A spent budget (ctx.budget) gives `.interrupted`, as an exit request does.
+    const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
+    const before = c.t0.retired;
+    const e = t0.run(&c.machine, budget);
+    if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(c.t0.retired -% before, std.math.maxInt(i63)));
     switch (e) {
         .syscall => {
             c.esr = t0.EC_SVC64 << 26;
