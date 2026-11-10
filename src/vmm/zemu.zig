@@ -141,6 +141,13 @@ pub const Vcpu = Impl.EmuVcpu;
 /// which has no 64-bit atomics.)
 pub var retired_total: std.atomic.Value(if (web) usize else u64) = .init(0);
 
+/// T1's dispatch counts so far, both guests' together (native hosts).
+pub fn t1Stats() [4]u64 {
+    const a = ha64.t1_stats;
+    const x = h86.t1_stats;
+    return .{ a.compiled + x.compiled, a.entries + x.entries, a.linked + x.linked, a.t0 + x.t0 };
+}
+
 /// H9_EMU_TIER, if set: "t0" or "t1".
 pub fn tierFromEnv() ?[]const u8 {
     if (!builtin.link_libc) return null;

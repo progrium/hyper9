@@ -325,6 +325,12 @@ pub fn emuRetired() ?u64 {
     return if (comptime zemu) |z| z.retired_total.load(.monotonic) else null;
 }
 
+/// T1's dispatch counts so far (compiled, entries, linked, t0), where
+/// the emulator has a T1 (-Demu=zig); null otherwise.
+pub fn emuT1Stats() ?[4]u64 {
+    return if (comptime zemu) |z| z.t1Stats() else null;
+}
+
 /// The emulator's version (Unicorn's, e.g. "2.1"), or null if it isn't built in.
 pub fn emuVersion(buf: []u8) ?[]const u8 {
     return if (have_emu) emu.version(buf) else null;

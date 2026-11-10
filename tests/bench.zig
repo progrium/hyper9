@@ -252,7 +252,15 @@ pub fn main(init: std.process.Init) !void {
                     if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
                     defer _ = unsetenv("H9_EMU_TIER");
                     const before = vmm.emuRetired();
+                    const st0 = vmm.emuT1Stats();
                     var r = try runText(gpa, io, kind, arch, text) orelse continue;
+                    // T1's dispatch counts for the first run: a run whose
+                    // regions differ shows here (compiled, region entries,
+                    // links, and instructions handed to T0).
+                    var st: ?[4]u64 = null;
+                    if (st0) |a| if (vmm.emuT1Stats()) |b| if (tier != null and std.mem.eql(u8, tier.?, "t1")) {
+                        st = .{ b[0] - a[0], b[1] - a[1], b[2] - a[2], b[3] - a[3] };
+                    };
                     const insns: ?u64 = if (kind == .emu) if (vmm.emuRetired()) |n| n - before.? else null else null;
                     for (1..repeat) |_| {
                         const again = (try runText(gpa, io, kind, arch, text)).?;
@@ -263,6 +271,7 @@ pub fn main(init: std.process.Init) !void {
                     defer gpa.free(label);
                     try w.print("{s: <7} {t: <6} {s: <7} {d: >7.3}s  {d: <10.1}", .{ c.name, arch, label, s, s / (@as(f64, @floatFromInt(native_ns)) / 1e9) });
                     if (insns) |n| try w.print(" {d:.2} G instructions/s ({d} M)", .{ @as(f64, @floatFromInt(n)) / s / 1e9, n / 1_000_000 });
+                    if (st) |v| try w.print("  [compiled {d}, entries {d}, linked {d}, t0 {d}]", .{ v[0], v[1], v[2], v[3] });
                     if (!std.mem.eql(u8, r.msg[0..@min(r.msg.len, 8)], &hex) or r.msg.len != 8) {
                         try w.print("  WRONG: exited \"{s}\", want {s}\n", .{ r.msg, &hex });
                         bad = true;
