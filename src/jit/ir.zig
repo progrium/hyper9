@@ -334,6 +334,11 @@ pub const Block = struct { start: u32 = 0, len: u32 = 0, begun: bool = false };
 pub const Region = struct {
     /// The guest PC the region starts at; block 0 is its entry.
     entry_pc: u64,
+    /// The guest's memory model is TSO (x86): every plain load is an
+    /// acquire and every plain store a release, which hosts with a weaker
+    /// model (arm64) must honour. ir_eval and hosts that are TSO already
+    /// (x86-64, single-threaded wasm) ignore it. Text form: `region PC tso`.
+    tso: bool = false,
     insts: std.ArrayList(Inst) = .empty,
     blocks: std.ArrayList(Block) = .empty,
     /// The front end's decoded-instruction handles, for `call.interp`.
@@ -597,7 +602,7 @@ fn hasBlocks(op: Op) u8 {
 }
 
 pub fn print(r: *const Region, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    try w.print("region 0x{x}\n", .{r.entry_pc});
+    try w.print("region 0x{x}{s}\n", .{ r.entry_pc, if (r.tso) " tso" else "" });
     for (r.handles.items) |h| try w.print("handle 0x{x}\n", .{h});
     for (r.blocks.items, 0..) |blk, bi| {
         try w.print("b{d}:\n", .{bi});
@@ -643,7 +648,12 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Region {
         const line = std.mem.trim(u8, stripComment(raw), " \t\r");
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "region ")) {
-            r.entry_pc = try num(line["region ".len..]);
+            var rest = std.mem.trim(u8, line["region ".len..], " ");
+            if (std.mem.endsWith(u8, rest, " tso")) {
+                r.tso = true;
+                rest = std.mem.trimEnd(u8, rest[0 .. rest.len - 4], " ");
+            }
+            r.entry_pc = try num(rest);
             continue;
         }
         if (std.mem.startsWith(u8, line, "handle ")) {
@@ -802,4 +812,16 @@ test "op numbers are stable" {
     try std.testing.expectEqual(@as(u16, 131), @intFromEnum(Op.cas));
     try std.testing.expectEqual(@as(u16, 160), @intFromEnum(Op.@"call.interp"));
     try std.testing.expectEqual(@as(u16, 192), @intFromEnum(Op.br));
+}
+
+test "tso round-trips" {
+    const gpa = std.testing.allocator;
+    const text = "region 0x10 tso\nb0:\n  exit.chain #0x10\n";
+    var r = try parse(gpa, text);
+    defer r.deinit(gpa);
+    try std.testing.expect(r.tso);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try print(&r, &out.writer);
+    try std.testing.expectEqualStrings(text, out.written());
 }

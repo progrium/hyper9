@@ -48,6 +48,9 @@ other work asks the owner for changes rather than editing it.
   (cache.zig's contract). `Ctx.jump` points at the vCPU's jump cache
   (`ctx.JumpEntry`, `ctx.jumpIndex`), so `exit.indirect` can look up its
   target inline and jump to the hit's chain entry.
+- `Region.tso` says the guest is TSO (h86 sets it). The arm64 emitter then
+  uses LDAR and STLR, sends misaligned accesses to the slow path, and fences
+  the slow path. ir_eval, x86-64, and wasm ignore it.
 - `exit_pc` is the PC to resume at, except for a fault, where it's the
   faulting instruction.
 - Flags are values, per guest: `nzcv.*` and `eflags.*`. `ir_eval` computes them

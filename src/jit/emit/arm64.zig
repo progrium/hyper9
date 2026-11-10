@@ -42,6 +42,8 @@ const E = struct {
     base: usize,
     fixups: std.ArrayList(Fixup) = .empty,
     code: emitter.Code = .{},
+    /// Region.tso: plain loads are LDAR and stores STLR.
+    tso: bool = false,
 
     fn put(e: *E, w: u32) !void {
         try e.out.appendSlice(e.gpa, std.mem.asBytes(&std.mem.nativeToLittle(u32, w)));
@@ -149,7 +151,7 @@ const pred_cond = [_]u32{ 0, 1, 3, 9, 8, 2, 11, 13, 12, 10 };
 
 pub fn emit(gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc_mod.Allocation, out: *std.ArrayList(u8)) EmitError!emitter.Code {
     if (a.slots > 4095) return error.TooLarge;
-    var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len };
+    var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len, .tso = r.tso };
     defer e.fixups.deinit(gpa);
     const block_pos = try gpa.alloc(usize, r.blocks.items.len);
     defer gpa.free(block_pos);
@@ -447,7 +449,23 @@ fn memOp(e: *E, i: ir.Inst) !void {
     try e.put(0xD3402C0E); // ubfx x14, x0, #0, #12
     try e.put(0xF10001DF | (mem.page_size - n) << 10); // cmp x14, #(page - n)
     const miss2 = try e.fwd(0x54000008); // b.hi slow
-    if (store) {
+    var miss3: ?usize = null;
+    if (e.tso) {
+        // TSO: LDAR and STLR, which fault on a misaligned address, so
+        // misaligned accesses take the slow path. (LDAPR, where the host
+        // has FEAT_LRCPC, is the faster load to switch to.)
+        if (n > 1) {
+            try e.put(0xF240001F | (@as(u32, f.size) - 1) << 10); // tst x0, #(n-1)
+            miss3 = try e.fwd(0x54000001); // b.ne slow
+        }
+        try e.put(0x8B0D000E); // add x14, x0, x13
+        const sz = @as(u32, f.size) << 30;
+        if (store) {
+            try e.put(0x089FFC00 | sz | 14 << 5 | 1); // stlr x1, [x14]
+        } else {
+            try e.put(0x08DFFC00 | sz | 14 << 5 | 0); // ldar x0, [x14]
+        }
+    } else if (store) {
         try e.put(str_reg[f.size] | 13 << 16 | 0 << 5 | 1); // str x1, [x0, x13]
     } else {
         try e.put(ldr_reg[f.size] | 13 << 16 | 0 << 5 | 0); // ldr x0, [x0, x13]
@@ -456,6 +474,9 @@ fn memOp(e: *E, i: ir.Inst) !void {
     // Slow path.
     e.land19(miss1);
     e.land19(miss2);
+    if (miss3) |m| e.land19(m);
+    // TSO: the slow path's plain accesses are fenced instead.
+    if (e.tso and store) try e.put(0xD5033BBF); // dmb ish
     if (store) try e.mov(3, 1);
     try e.mov(1, 0);
     try e.mov(0, CTX);
@@ -476,6 +497,7 @@ fn memOp(e: *E, i: ir.Inst) !void {
     try e.strCtx(1, ctx.off.exit_pc);
     try e.branch(.b26, 0x14000000, epilogue);
     e.land19(ok);
+    if (e.tso and !store) try e.put(0xD5033BBF); // dmb ish
     if (!store) try e.ldrCtx(0, ctx.off.scratch);
     e.land26(join);
     if (!store and f.signed) {

@@ -176,8 +176,10 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
         , .{ ty, cc }) });
     };
     // Memory, a loop, polls, retire, and faults.
-    for ([_]u64{ data_va, data_va + 0xfec, data_va + 0x10000 }) |start| {
-        try list.append(gpa, .{ .regs = .{ start, 0, 10, 0, 0, 0, 0, 0 }, .text = try gpa.dupe(u8,
+    // Each in both memory models (Region.tso), and misaligned too.
+    for ([_]u64{ data_va, data_va + 0xfec, data_va + 0x10000, data_va + 1 }) |start| for ([_][]const u8{ "", " tso" }) |model| {
+        try list.append(gpa, .{ .regs = .{ start, 0, 10, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\region 0x0{s}
             \\b0:
             \\  poll #0x100
             \\  br -> b1
@@ -206,8 +208,8 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  brcond %13 -> b1 b2
             \\b2:
             \\  exit.svc #0x118 !1
-        ) });
-    }
+        , .{model}) });
+    };
     // cas: success, failure, each width, misaligned, and unmapped; and an
     // rmw load's fault, reported as a write.
     for ([_][]const u8{ "i64", "i32", "i16", "i8" }, 0..) |ty, k| for ([_]u64{ data_va + 8, data_va + 9, data_va + 0x10000 }) |addr| for ([_]u64{ 0x5a5a_5a5a_5a5a_5a5a, 7 }) |expected| {
