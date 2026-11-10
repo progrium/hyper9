@@ -265,14 +265,14 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                     const f: ir.MemFlags = @bitCast(i.aux);
                     const n = f.bytes();
                     var v: u64 = 0;
-                    if (f.aligned and a % n != 0) return alignFault(ctx, a, .read, i.aux2);
+                    if (f.aligned and a % n != 0) return left(ctx, i, alignFault(ctx, a, .read, i.aux2));
                     if (mem.fast(tlb, a, n, false)) |host| {
                         @memcpy(std.mem.asBytes(&v)[0..n], @as([*]const u8, @ptrFromInt(host))[0..n]);
                     } else {
                         const slow: mem.SlowLoadFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_load)));
                         if (slow(ctx, a, f.size) != 0) {
                             ctx.exit_pc = i.aux2;
-                            return .fault;
+                            return left(ctx, i, .fault);
                         }
                         v = ctx.scratch;
                     }
@@ -282,14 +282,14 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 .store => {
                     const f: ir.MemFlags = @bitCast(i.aux);
                     const n = f.bytes();
-                    if (f.aligned and a % n != 0) return alignFault(ctx, a, .write, i.aux2);
+                    if (f.aligned and a % n != 0) return left(ctx, i, alignFault(ctx, a, .write, i.aux2));
                     if (mem.fast(tlb, a, n, true)) |host| {
                         @memcpy(@as([*]u8, @ptrFromInt(host))[0..n], std.mem.asBytes(&bv)[0..n]);
                     } else {
                         const slow: mem.SlowStoreFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_store)));
                         if (slow(ctx, a, f.size, bv) != 0) {
                             ctx.exit_pc = i.aux2;
-                            return .fault;
+                            return left(ctx, i, .fault);
                         }
                     }
                 },
@@ -297,7 +297,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 .@"call.interp" => {
                     const f: ctx_mod.InterpFn = @ptrFromInt(@as(usize, @intCast(ctx.interp)));
                     const res = f(ctx, r.handles.items[@intCast(i.aux)], i.aux2);
-                    if (res != 0) return @enumFromInt(res);
+                    if (res != 0) return left(ctx, i, @enumFromInt(res));
                 },
                 .@"call.helper" => {
                     const table: [*]const ctx_mod.HelperFn = @ptrFromInt(@as(usize, @intCast(ctx.helpers)));
@@ -305,7 +305,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 },
                 .poll => if (@atomicLoad(u32, &ctx.exit_request, .monotonic) != 0 or ctx.budget <= 0) {
                     ctx.exit_pc = i.aux;
-                    return .interrupted;
+                    return left(ctx, i, .interrupted);
                 },
                 .retire => {
                     ctx.retired +%= i.aux;
@@ -313,11 +313,11 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
                 },
                 .br => blk = @intCast(i.aux),
                 .brcond => blk = @intCast(if (a & 1 == 1) i.aux else i.aux2),
-                .@"exit.chain" => return exitAt(ctx, .chain, i.aux),
-                .@"exit.indirect" => return exitAt(ctx, .indirect, a),
-                .@"exit.svc" => return exitAt(ctx, .svc, i.aux),
-                .@"exit.brk" => return exitAt(ctx, .brk, i.aux),
-                .@"exit.undef" => return exitAt(ctx, .undef, i.aux),
+                .@"exit.chain" => return left(ctx, i, exitAt(ctx, .chain, i.aux)),
+                .@"exit.indirect" => return left(ctx, i, exitAt(ctx, .indirect, a)),
+                .@"exit.svc" => return left(ctx, i, exitAt(ctx, .svc, i.aux)),
+                .@"exit.brk" => return left(ctx, i, exitAt(ctx, .brk, i.aux)),
+                .@"exit.undef" => return left(ctx, i, exitAt(ctx, .undef, i.aux)),
                 else => unreachable,
             }
         }
@@ -326,6 +326,13 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
 
 /// A seq_cst read-modify-write is a full barrier on every host.
 var fence_word: u32 = 0;
+
+/// Leaving through `i`: count the instructions it says completed.
+fn left(ctx: *Ctx, i: ir.Inst, e: Exit) Exit {
+    ctx.retired +%= i.retired;
+    ctx.budget -%= i.retired;
+    return e;
+}
 
 fn exitAt(ctx: *Ctx, e: Exit, pc: u64) Exit {
     ctx.exit_pc = pc;

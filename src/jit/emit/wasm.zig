@@ -712,6 +712,20 @@ const E = struct {
         try e.br(.exit);
     }
 
+    /// On a path out: ctx.retired += n and ctx.budget -= n (the
+    /// instructions the leaving op says completed).
+    fn retireOn(e: *E, n: u32) !void {
+        if (n == 0) return;
+        for ([_]struct { u32, u8 }{ .{ ctx.off.retired, 0x7C }, .{ ctx.off.budget, 0x7D } }) |f| {
+            try e.w.get(0);
+            try e.w.get(0);
+            try e.w.memop(0x29, f[0]);
+            try e.w.i64c(n);
+            try e.w.byte(f[1]);
+            try e.w.memop(0x37, f[0]);
+        }
+    }
+
     /// Sets exit_pc to `pc` and leaves with `code`.
     fn leave(e: *E, code: ctx.Exit, pc: u64) !void {
         try e.w.get(0);
@@ -720,7 +734,8 @@ const E = struct {
         try e.leaveCode(code);
     }
 
-    fn chain(e: *E, pc: u64) !void {
+    fn chain(e: *E, pc: u64, retired: u32) !void {
+        try e.retireOn(retired);
         if (e.opts.cells != 0) {
             const k = e.cells.get(pc).?;
             try e.w.i32c(e.opts.cells + 4 * k);
@@ -1074,7 +1089,14 @@ const E = struct {
                 try w.set(e.l32(.code));
                 try e.loadRegs();
                 try w.get(e.l32(.code));
-                try e.brIf(.exit);
+                if (i.retired == 0) {
+                    try e.brIf(.exit);
+                } else {
+                    try e.open(0x04, .other);
+                    try e.retireOn(i.retired);
+                    try e.br(.exit);
+                    try e.end();
+                }
             },
             .@"call.helper" => {
                 try w.get(0);
@@ -1096,6 +1118,7 @@ const E = struct {
                 try w.byte(0x57); // i64.le_s
                 try w.byte(0x72); // i32.or
                 try e.open(0x04, .other);
+                try e.retireOn(i.retired);
                 try e.leave(.interrupted, i.aux);
                 try e.end();
             },
@@ -1107,14 +1130,20 @@ const E = struct {
                 try w.byte(f[1]);
                 try w.memop(0x37, f[0]);
             },
-            .@"exit.chain" => try e.chain(i.aux),
-            .@"exit.svc" => try e.leave(.svc, i.aux),
-            .@"exit.brk" => try e.leave(.brk, i.aux),
-            .@"exit.undef" => try e.leave(.undef, i.aux),
+            .@"exit.chain" => try e.chain(i.aux, i.retired),
+            .@"exit.svc", .@"exit.brk", .@"exit.undef" => {
+                try e.retireOn(i.retired);
+                try e.leave(switch (i.op) {
+                    .@"exit.svc" => .svc,
+                    .@"exit.brk" => .brk,
+                    else => .undef,
+                }, i.aux);
+            },
             .@"exit.indirect" => {
                 try w.get(0);
                 try e.val64(i.a);
                 try w.memop(0x37, ctx.off.exit_pc);
+                try e.retireOn(i.retired);
                 try e.leaveCode(.indirect);
             },
             .br, .brcond => unreachable, // the control flow's
@@ -1213,6 +1242,7 @@ const E = struct {
             try w.get(0);
             try w.i64c(@as(u64, @intFromEnum(if (store) mem.Access.write else mem.Access.read)) | (@as(u64, @intFromEnum(mem.FaultKind.alignment)) << 8));
             try w.memop(0x37, ctx.off.exit_info);
+            try e.retireOn(i.retired);
             try e.leave(.fault, i.aux2);
             try e.end();
         }
@@ -1270,6 +1300,7 @@ const E = struct {
         } else try w.call(F_SLOW_LOAD);
         try w.tee(e.l32(.code));
         try e.open(0x04, .other);
+        try e.retireOn(i.retired);
         try w.get(0);
         try w.i64c(i.aux2);
         try w.memop(0x37, ctx.off.exit_pc);

@@ -34,6 +34,7 @@ pub const Result = struct {
     pc: u64,
     regs: [8]u64,
     page: u64, // a hash of the data page
+    retired: u64,
 };
 
 pub const data_va = 0x10000;
@@ -64,7 +65,7 @@ pub const Env = struct {
     }
 
     pub fn result(e: *Env, exit: ctx.Exit) Result {
-        return .{ .exit = exit, .pc = e.ctx.exit_pc, .regs = e.regs, .page = std.hash.Wyhash.hash(0, &e.page) };
+        return .{ .exit = exit, .pc = e.ctx.exit_pc, .regs = e.regs, .page = std.hash.Wyhash.hash(0, &e.page), .retired = e.ctx.retired };
     }
 
     pub fn evalCase(e: *Env, gpa: std.mem.Allocator, r: *const ir.Region, c: Case) !Result {
@@ -74,7 +75,7 @@ pub const Env = struct {
 };
 
 pub fn same(want: Result, got: Result) bool {
-    return want.exit == got.exit and want.pc == got.pc and std.mem.eql(u64, &want.regs, &got.regs) and want.page == got.page;
+    return want.exit == got.exit and want.pc == got.pc and std.mem.eql(u64, &want.regs, &got.regs) and want.page == got.page and want.retired == got.retired;
 }
 
 pub fn expectSame(n: usize, c: Case, want: Result, got: Result) !void {
@@ -183,8 +184,8 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  poll #0x104
             \\  %0 = getreg:i64 #0x0
             \\  %1 = getreg:i64 #0x8
-            \\  %2 = load:i64 %0 #0x3 @0x108
-            \\  %3 = load:i32 %0 #0xa @0x10c
+            \\  %2 = load:i64 %0 #0x3 @0x108 !1
+            \\  %3 = load:i32 %0 #0xa @0x10c !2
             \\  %4 = add:i64 %1, %2
             \\  %5 = sext:i64 %3
             \\  %6 = add:i64 %4, %5
@@ -192,7 +193,7 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  %7 = const:i64 #0x8
             \\  %8 = add:i64 %0, %7
             \\  %20 = trunc:i16 %6
-            \\  store %8, %20 #0x1 @0x110
+            \\  store %8, %20 #0x1 @0x110 !3
             \\  setreg %8 #0x0
             \\  retire #0x5
             \\  %9 = getreg:i64 #0x10
@@ -203,7 +204,7 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  %13 = nzcv.cond:i1 %12 #0x1
             \\  brcond %13 -> b1 b2
             \\b2:
-            \\  exit.svc #0x118
+            \\  exit.svc #0x118 !1
         ) });
     }
     return list.toOwnedSlice(gpa);

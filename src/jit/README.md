@@ -27,6 +27,15 @@ other work asks the owner for changes rather than editing it.
   `getreg`/`setreg` on the front end's `Cpu`.
 - Guest state is exact at every op that can leave: a lifter writes an
   instruction's results before the next load, store, call, or exit.
+- `ctx.retired` is exact at every exit, faults included. Every op that can
+  leave (`Op.canLeave`: loads, stores, `call.interp`, `poll`, and the exits)
+  carries `Inst.retired`, the guest instructions completed since its block's
+  last `retire`. Lifters set `Builder.retired` before each guest instruction
+  and `emit` stamps it. Emitters add it only on the path out, such as a slow
+  path's fault stub, so the fast path costs nothing. A `call.interp` handler
+  counts its own instruction when it completes and then leaves. A faulting,
+  undefined, or breakpoint instruction isn't retired, and an SVC is.
+  Deterministic mode depends on this.
 - `exit_pc` is the PC to resume at, except for a fault, where it's the
   faulting instruction.
 - Flags are values, per guest: `nzcv.*` and `eflags.*`. `ir_eval` computes them

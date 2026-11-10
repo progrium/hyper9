@@ -99,8 +99,21 @@ const E = struct {
         const d: u32 = @intCast((e.pos() - at) / 4);
         e.patch(at, e.word(at) | (d & 0x3ffffff));
     }
-    /// Sets exit_pc and leaves with `code` (in w0).
-    fn leave(e: *E, code: ctx.Exit, pc: u64) !void {
+    /// On a path out: ctx.retired += n and ctx.budget -= n (the
+    /// instructions the leaving op says completed). Uses x9 and x10 only.
+    fn retireOn(e: *E, n: u32) !void {
+        if (n == 0) return;
+        try e.movImm(10, n);
+        try e.ldrCtx(9, ctx.off.retired);
+        try e.put(0x8B0A0129); // add x9, x9, x10
+        try e.strCtx(9, ctx.off.retired);
+        try e.ldrCtx(9, ctx.off.budget);
+        try e.put(0xCB0A0129); // sub x9, x9, x10
+        try e.strCtx(9, ctx.off.budget);
+    }
+    /// Sets exit_pc and leaves with `code` (in w0), counting `n` retired.
+    fn leave(e: *E, code: ctx.Exit, pc: u64, n: u32) !void {
+        try e.retireOn(n);
         try e.movImm(1, pc);
         try e.strCtx(1, ctx.off.exit_pc);
         try e.put(0x52800000 | @as(u32, @intFromEnum(code)) << 5); // movz w0, #code
@@ -288,7 +301,14 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.movImm(2, i.aux2);
             try e.ldrCtx(16, ctx.off.interp);
             try e.put(0xD63F0200); // blr x16
-            try e.branch(.b19, 0x35000000, epilogue); // cbnz w0, epilogue
+            if (i.retired == 0) {
+                try e.branch(.b19, 0x35000000, epilogue); // cbnz w0, epilogue
+            } else {
+                const on = try e.fwd(0x34000000); // cbz w0, on
+                try e.retireOn(i.retired);
+                try e.branch(.b26, 0x14000000, epilogue);
+                e.land19(on);
+            }
         },
         .@"call.helper" => {
             try e.mov(3, 2);
@@ -307,7 +327,7 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.put(0xF100001F); // cmp x0, #0
             const ok = try e.fwd(0x5400000C); // b.gt cont
             e.land19(req);
-            try e.leave(.interrupted, i.aux);
+            try e.leave(.interrupted, i.aux, i.retired);
             e.land19(ok);
         },
         .retire => {
@@ -324,11 +344,12 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.branch(.b19, 0xB5000000, @intCast(i.aux)); // cbnz x0, then
             try e.branch(.b26, 0x14000000, @intCast(i.aux2));
         },
-        .@"exit.chain" => try e.leave(.chain, i.aux),
-        .@"exit.svc" => try e.leave(.svc, i.aux),
-        .@"exit.brk" => try e.leave(.brk, i.aux),
-        .@"exit.undef" => try e.leave(.undef, i.aux),
+        .@"exit.chain" => try e.leave(.chain, i.aux, i.retired),
+        .@"exit.svc" => try e.leave(.svc, i.aux, i.retired),
+        .@"exit.brk" => try e.leave(.brk, i.aux, i.retired),
+        .@"exit.undef" => try e.leave(.undef, i.aux, i.retired),
         .@"exit.indirect" => {
+            try e.retireOn(i.retired);
             try e.strCtx(0, ctx.off.exit_pc);
             try e.put(0x52800000 | @as(u32, @intFromEnum(ctx.Exit.indirect)) << 5);
             try e.branch(.b26, 0x14000000, epilogue);
@@ -385,6 +406,7 @@ fn memOp(e: *E, i: ir.Inst) !void {
     try e.ldrCtx(16, if (store) ctx.off.slow_store else ctx.off.slow_load);
     try e.put(0xD63F0200); // blr x16
     const ok = try e.fwd(0x34000000); // cbz w0, ok
+    try e.retireOn(i.retired);
     try e.movImm(1, i.aux2);
     try e.strCtx(1, ctx.off.exit_pc);
     try e.branch(.b26, 0x14000000, epilogue);

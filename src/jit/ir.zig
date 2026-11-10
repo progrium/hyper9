@@ -23,6 +23,12 @@
 //!   before the next instruction's first load, store, helper call, or
 //!   exit. An emitter that sinks those writes must write them back on every
 //!   path out (side exits, slow paths, and helpers).
+//! - **ctx.retired is exact at every exit, faults included.** An op that
+//!   can leave the region (`Op.canLeave`) carries `retired`: the guest
+//!   instructions completed since its block's last `retire`. Leaving through
+//!   it adds that to ctx.retired (and takes it from the budget); otherwise
+//!   it costs nothing. A front end's `call.interp` handler counts the
+//!   instruction it ran itself, when it completes and then leaves.
 //! - **Flags are values.** `nzcv.*` (arm64) and `eflags.*` (x86) produce a
 //!   `flags` value, and `*.cond` reads a condition from one. The reference
 //!   semantics compute the flags eagerly, packed as the guest packs them;
@@ -42,7 +48,8 @@
 //!     b1:
 //!       exit.chain #0x1010
 //!
-//! `#` is `aux` and `@` is `aux2`, in hex; `-> bN` names blocks.
+//! `#` is `aux` and `@` is `aux2`, in hex; `!` is `retired`, in decimal;
+//! `-> bN` names blocks.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -257,6 +264,15 @@ pub const Op = enum(u16) {
         return @tagName(op);
     }
 
+    /// Whether the op can leave the region: it takes `Inst.retired`.
+    pub fn canLeave(op: Op) bool {
+        return switch (op) {
+            .load, .store, .@"call.interp", .poll => true,
+            .br, .brcond => false,
+            else => op.isTerminator(),
+        };
+    }
+
     pub fn isTerminator(op: Op) bool {
         return @intFromEnum(op) >= 192;
     }
@@ -290,6 +306,9 @@ pub const Inst = struct {
     c: Ref = none,
     aux: u64 = 0,
     aux2: u64 = 0,
+    /// For ops that can leave: guest instructions completed since the
+    /// block's last `retire`, added to ctx.retired if this op leaves.
+    retired: u32 = 0,
 
     pub fn operands(i: *const Inst) [3]Ref {
         return .{ i.a, i.b, i.c };
@@ -326,6 +345,10 @@ pub const Builder = struct {
     gpa: Allocator,
     r: *Region,
     cur: ?BlockId = null,
+    /// Guest instructions completed since the current block's last
+    /// `retire`. The lifter sets it before each guest instruction; `emit`
+    /// stamps it on every op that can leave. `begin` and `retire` reset it.
+    retired: u32 = 0,
 
     pub fn init(gpa: Allocator, r: *Region) Builder {
         return .{ .gpa = gpa, .r = r };
@@ -342,10 +365,13 @@ pub const Builder = struct {
         std.debug.assert(!blk.begun);
         blk.* = .{ .start = @intCast(b.r.insts.items.len), .len = 0, .begun = true };
         b.cur = id;
+        b.retired = 0;
     }
 
-    pub fn emit(b: *Builder, i: Inst) Allocator.Error!Ref {
+    pub fn emit(b: *Builder, inst: Inst) Allocator.Error!Ref {
         const id = b.cur.?;
+        var i = inst;
+        if (i.op.canLeave() and i.retired == 0) i.retired = b.retired;
         try b.r.insts.append(b.gpa, i);
         b.r.blocks.items[id].len += 1;
         if (i.op.isTerminator()) b.cur = null;
@@ -395,8 +421,10 @@ pub const Builder = struct {
     pub fn poll(b: *Builder, pc: u64) !void {
         _ = try b.emit(.{ .op = .poll, .aux = pc });
     }
+    /// Retires n instructions; the count for later exits starts again at 0.
     pub fn retire(b: *Builder, n: u64) !void {
         if (n != 0) _ = try b.emit(.{ .op = .retire, .aux = n });
+        b.retired = 0;
     }
     pub fn br(b: *Builder, to: BlockId) !void {
         _ = try b.emit(.{ .op = .br, .aux = to });
@@ -527,6 +555,7 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
         .@"exit.indirect" => if (ta != .i64 and ta != .i32) return "exit.indirect needs an address",
         .@"exit.chain", .@"exit.svc", .@"exit.brk", .@"exit.undef" => {},
     }
+    if (i.retired != 0 and !i.op.canLeave()) return "only an op that can leave carries a retired count";
     if (i.op.hasResult()) {
         if (i.ty == .none and i.op != .@"call.helper") return "operation must have a result type";
     } else if (i.ty != .none) return "operation has no result";
@@ -568,6 +597,7 @@ pub fn print(r: *const Region, w: *std.Io.Writer) std.Io.Writer.Error!void {
                     if (i.aux2 != 0) try w.print(" @0x{x}", .{i.aux2});
                 },
             }
+            if (i.retired != 0) try w.print(" !{d}", .{i.retired});
             try w.writeByte('\n');
         }
     }
@@ -640,6 +670,8 @@ pub fn parse(gpa: Allocator, text: []const u8) ParseError!Region {
                 inst.aux = try num(t[1..]);
             } else if (t[0] == '@') {
                 inst.aux2 = try num(t[1..]);
+            } else if (t[0] == '!') {
+                inst.retired = std.fmt.parseInt(u32, t[1..], 10) catch return error.Syntax;
             } else if (std.mem.eql(u8, t, "->")) {
                 arrow = true;
             } else return error.Syntax;
@@ -679,7 +711,9 @@ const example =
     \\  %5 = nzcv.cond:i1 %4 #0x1
     \\  brcond %5 -> b0 b1
     \\b1:
-    \\  exit.chain #0x1010
+    \\  %7 = getreg:i64 #0x10
+    \\  %8 = load:i64 %7 #0x3 @0x1010 !2
+    \\  exit.chain #0x1010 !3
     \\
 ;
 

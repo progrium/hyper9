@@ -108,7 +108,10 @@ pub const EntryFn = *const fn (ctx: *Ctx) callconv(.c) u32;
 
 /// Runs one decoded instruction (`handle`, from the region's handles) at
 /// guest PC `pc`, on the Cpu. Returns `.ok` to go on to the next
-/// instruction, or an exit with exit_pc (and the fault fields) set.
+/// instruction, or an exit with exit_pc (and the fault fields) set. If the
+/// instruction completed and then leaves (an SVC, a branch), the handler
+/// adds 1 to ctx.retired and takes 1 from the budget itself; the region
+/// adds the instructions before it (ir.Inst.retired).
 pub const InterpFn = *const fn (ctx: *Ctx, handle: u64, pc: u64) callconv(.c) u32;
 
 /// A runtime helper for `call.helper`.
