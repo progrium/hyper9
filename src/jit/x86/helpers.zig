@@ -92,8 +92,15 @@ fn x87Helper(c: *Ctx, a: u64, addr: u64, _: u64) callconv(.c) u64 {
 /// runs (awk's: 88% of its x87 instructions), each done straight on the
 /// Fpu when it's exact and raises nothing. Otherwise the helper changes
 /// nothing and returns `refuse`, and the region's guard runs the
-/// instruction on T0. The memory forms' wait and last-instruction note
-/// are the lifter's, before the access, as T0 orders them.
+/// instruction on T0. The memory forms' wait is the lifter's (`wait`),
+/// and their last-instruction note `note` before a load and the first
+/// half's before a store, c the operand's linear address: before the
+/// access, as T0 orders them, so a fault finds it made. A refusal after
+/// the note is fine, since T0 makes the same note.
+///
+/// The lifter's x87 code names no Fpu byte with getreg or setreg, so
+/// every call is `helper_no_regs`: these touch only the Fpu (and EIP,
+/// put back), and read the segment selectors.
 pub const Fast = enum(u8) {
     /// FLD m64fp: b is the double.
     fld64,
@@ -122,6 +129,15 @@ pub const Fast = enum(u8) {
     fist_done,
     /// FLDCW: b is the word.
     fldcw,
+    /// The wait: `refuse` with an unmasked exception pending (ES), for
+    /// #MF on T0. Changes nothing.
+    wait,
+    /// FNSTCW's word.
+    fnstcw,
+    /// FNSTSW's word: the status word with TOP in it.
+    fnstsw,
+    /// The note alone, before a load that may fault (c the address).
+    note,
 };
 
 /// x87fast's first argument.
@@ -154,13 +170,20 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, c_: u64) callconv(.c) u64 {
     const p = &cpu.fpu;
     const arg: FastArg = @bitCast(a);
     switch (arg.kind) {
+        .wait => if (p.sw & ES != 0) return refuse,
+        .fnstcw => return p.cw,
+        .fnstsw => return (p.sw & ~@as(u16, 0x3800)) | (@as(u16, p.top) << 11),
+        .note => note(cpu, arg, c_),
         .fld64 => {
             const v = f80Of(b) orelse return refuse;
             if (!empty(p, 7)) return refuse;
             push(p, v);
             p.sw &= ~C1;
         },
-        .fst64 => return f64Of(p) orelse refuse,
+        .fst64 => {
+            note(cpu, arg, c_);
+            return f64Of(p) orelse refuse;
+        },
         .arith_mem => {
             const eip = cpu.eip;
             cpu.eip = arg.pc;
@@ -177,6 +200,7 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, c_: u64) callconv(.c) u64 {
         },
         .fist, .fist_done => {
             const size: u8 = if (arg.pop) 2 else 4;
+            if (arg.kind == .fist) note(cpu, arg, c_);
             const r = x87.fistPeek(p, size, arg.i) orelse return refuse;
             if (arg.kind == .fist) return @as(u64, @as(u32, @bitCast(@as(i32, @truncate(r.n))))) & (if (size == 2) @as(u64, 0xffff) else 0xffff_ffff);
             p.sw = r.sw;
@@ -226,6 +250,15 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, c_: u64) callconv(.c) u64 {
         },
     }
     return 0;
+}
+
+/// The last-instruction note, as T0 makes it for a memory form: FOP,
+/// FIP, and FDP (a32 in the operand's segment).
+fn note(cpu: *Cpu, arg: FastArg, a32: u64) void {
+    const p = &cpu.fpu;
+    p.fop = (@as(u16, arg.op) << 8) | arg.modrm;
+    p.fip = (@as(u64, cpu.seg[1]) << 32) | arg.pc;
+    p.fdp = (@as(u64, cpu.seg[arg.seg]) << 32) | (a32 & 0xffff_ffff);
 }
 
 fn phys(p: *const cpu_mod.Fpu, i: u3) u3 {

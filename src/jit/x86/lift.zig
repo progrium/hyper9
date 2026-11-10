@@ -191,14 +191,6 @@ fn byteOff(n: u3) u64 {
 
 const seg_base_off = @offsetOf(Cpu, "seg_base");
 const seg_null_off = @offsetOf(Cpu, "seg_null");
-const fpu_sw_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "sw");
-const fpu_top_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "top");
-const x87_ES: u16 = 1 << 7;
-const fpu_fop_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "fop");
-const fpu_cw_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "cw");
-const fpu_fip_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "fip");
-const fpu_fdp_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "fdp");
-const seg_off = @offsetOf(Cpu, "seg");
 const xmm_off = @offsetOf(Cpu, "xmm");
 const mxcsr_off = @offsetOf(Cpu, "mxcsr");
 /// MXCSR's controls (DAZ, the masks, RC, FZ) that lifted SSE assumes: the
@@ -1344,12 +1336,11 @@ const Lifter = struct {
         const b = l.b;
         const i = &l.insns[k].i;
         if (!i.mem and i.opcode == 0xdf and i.modrm == 0xe0) {
-            // FNSTSW AX, inline: it doesn't wait, so nothing traps, and
-            // FCOM, FNSTSW AX, SAHF and a branch need no second helper.
-            const sw = try b.getreg(.i16, fpu_sw_off);
-            const top = try b.bin(.@"and", .i16, try b.un(.zext, .i16, try b.getreg(.i8, fpu_top_off)), try b.konst(.i16, 7));
-            const keep = try b.bin(.@"and", .i16, sw, try b.konst(.i16, ~@as(u16, 0x3800)));
-            try l.setR(0, 2, try b.bin(.@"or", .i16, keep, try b.bin(.shl, .i16, top, try b.konst(.i16, 11))));
+            // FNSTSW AX: it doesn't wait, so nothing traps, and FCOM,
+            // FNSTSW AX, SAHF and a branch need no guard.
+            const z = try b.konst(.i64, 0);
+            const sw = try l.fastCall(.{ .kind = .fnstsw }, z, z);
+            try l.setR(0, 2, try b.un(.trunc, .i16, sw));
             return;
         }
         if (try l.x87Fast(k)) return;
@@ -1366,7 +1357,10 @@ const Lifter = struct {
             .opsize = i.opsize,
         };
         const zero = try b.konst(.i64, 0);
-        const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = addr, .c = zero, .aux = @intFromEnum(helpers.Index.x87) });
+        // It touches EAX and EFLAGS only for FCOMI and FCMOVcc (FNSTSW AX
+        // is above); otherwise only the Fpu, which the region doesn't name.
+        const no_regs = fx.flags_read == 0 and fx.flags_written == 0;
+        const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = addr, .c = zero, .aux = @intFromEnum(helpers.Index.x87), .aux2 = if (no_regs) ir.helper_no_regs else 0 });
         if (fx.flags_written != 0) l.fl.forget();
         // It may have raised an unmasked exception: ES again.
         l.es_ok = false;
@@ -1374,18 +1368,8 @@ const Lifter = struct {
     }
 
     fn fastCall(l: *Lifter, arg: helpers.FastArg, v: Ref, c: Ref) !Ref {
-        return l.b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try l.b.konst(.i64, @bitCast(arg)), .b = v, .c = c, .aux = @intFromEnum(helpers.Index.x87fast) });
-    }
-
-    /// FPU's last-instruction note, as T0 makes it: FOP, FIP, and FDP.
-    fn x87Note(l: *Lifter, k: usize, a32: Ref) !void {
-        const b = l.b;
-        const i = &l.insns[k].i;
-        try b.setreg(fpu_fop_off, try b.konst(.i16, (@as(u16, @as(u3, @truncate(i.opcode))) << 8) | i.modrm));
-        const cs = try b.un(.zext, .i64, try b.getreg(.i16, seg_off + 2));
-        try b.setreg(fpu_fip_off, try b.bin(.@"or", .i64, try b.bin(.shl, .i64, cs, try b.konst(.i64, 32)), try b.konst(.i64, l.insns[k].pc)));
-        const ds = try b.un(.zext, .i64, try b.getreg(.i16, seg_off + 2 * @as(u64, @intFromEnum(i.seg))));
-        try b.setreg(fpu_fdp_off, try b.bin(.@"or", .i64, try b.bin(.shl, .i64, ds, try b.konst(.i64, 32)), try b.un(.zext, .i64, a32)));
+        // The Fpu is the helper's alone: no getreg or setreg names it.
+        return l.b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try l.b.konst(.i64, @bitCast(arg)), .b = v, .c = c, .aux = @intFromEnum(helpers.Index.x87fast), .aux2 = ir.helper_no_regs });
     }
 
     /// x87Fast's memory forms: the access is the IR's, in T0's order
@@ -1423,7 +1407,9 @@ const Lifter = struct {
         if (form == .fnstcw) {
             // Doesn't wait, and isn't noted.
             const a32 = try l.linear(k);
-            try l.store(k, a32, try b.getreg(.i16, fpu_cw_off));
+            const z = try b.konst(.i64, 0);
+            const cw = try l.fastCall(.{ .kind = .fnstcw }, z, z);
+            try l.store(k, a32, try b.un(.trunc, .i16, cw));
             return true;
         }
         try l.esGuard(k);
@@ -1453,9 +1439,13 @@ const Lifter = struct {
             },
             else => {},
         }
-        try l.x87Note(k, a32);
+        // The note (c is the address), before the access, which may fault:
+        // a call of its own before a load, the first half's before a store.
+        const a64 = try b.un(.zext, .i64, a32);
         switch (form) {
             .fld64, .fild32 => {
+                arg.kind = .note;
+                _ = try l.fastCall(arg, zero, a64);
                 const v = if (form == .fld64) try l.load(k, 8, a32) else try b.un(.zext, .i64, try l.load(k, 4, a32));
                 arg.kind = if (form == .fld64) .fld64 else .fild32;
                 const st = try l.fastCall(arg, v, zero);
@@ -1470,14 +1460,15 @@ const Lifter = struct {
                     arg.i = r;
                     arg.pop = size == 2;
                 }
-                const ok = try l.fastCall(arg, zero, zero);
+                const ok = try l.fastCall(arg, zero, a64);
                 try l.guard(k, try b.icmp(.eq, ok, try b.konst(.i64, @bitCast(helpers.refuse))), true);
                 // The guard started a block, and values don't cross: the
                 // value again (this half changes nothing), and the address.
                 const z0 = try b.konst(.i64, 0);
-                const bits = try l.fastCall(arg, z0, z0);
+                const a = try l.linear(k);
+                const bits = try l.fastCall(arg, z0, try b.un(.zext, .i64, a));
                 const v = if (size == 8) bits else try b.un(.trunc, tyOf(size), bits);
-                try l.store(k, try l.linear(k), v);
+                try l.store(k, a, v);
                 if (form == .fst64) {
                     arg.kind = .fst64_done;
                     arg.pop = r == 3;
@@ -1496,9 +1487,9 @@ const Lifter = struct {
     fn esGuard(l: *Lifter, k: usize) !void {
         if (l.es_ok) return;
         const b = l.b;
-        const sw = try b.getreg(.i16, fpu_sw_off);
-        const es = try b.bin(.@"and", .i16, sw, try b.konst(.i16, x87_ES));
-        try l.guard(k, try b.icmp(.ne, es, try b.konst(.i16, 0)), true);
+        const z = try b.konst(.i64, 0);
+        const st = try l.fastCall(.{ .kind = .wait }, z, z);
+        try l.guard(k, try b.icmp(.ne, st, z), true);
         l.es_ok = true;
     }
 
