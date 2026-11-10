@@ -281,6 +281,38 @@ test "check/x86: shifts by CL (including 0), 8- and 16-bit operands, SETcc, and 
     try testing.expectEqual(Exit.svc, r.exit);
 }
 
+fn atomSetup(c: *Cpu) void {
+    c.r[3] = Machine.data_va + 0x100;
+    c.r[0] = 5;
+    c.r[1] = 0x77;
+    c.r[2] = 0;
+}
+
+test "check/x86: atomics through cas, and split locks through T0" {
+    const code = [_]u8{
+        0xf0, 0x01, 0x03, // lock addl %eax, (%ebx)
+        0xf0, 0x0f, 0xc1, 0x43, 0x04, // lock xaddl %eax, 4(%ebx)
+        0x87, 0x4b, 0x08, // xchgl %ecx, 8(%ebx)
+        0xf0, 0x0f, 0xb1, 0x0b, // lock cmpxchgl %ecx, (%ebx) (fails: (%ebx) is 5)
+        0xf0, 0x0f, 0xb1, 0x0b, // again (succeeds: EAX now holds 5)
+        0xf0, 0xfe, 0x43, 0x0c, // lock incb 12(%ebx)
+        0xf0, 0xf7, 0x5b, 0x10, // lock negl 16(%ebx)
+        0xf0, 0x83, 0x53, 0x14, 0x01, // lock adcl $1, 20(%ebx)
+        0xf0, 0x0f, 0xc7, 0x4b, 0x18, // lock cmpxchg8b 24(%ebx)
+        0xf0, 0x0f, 0xc7, 0x4b, 0x18, // again
+        0xf0, 0x01, 0x43, 0x21, // lock addl %eax, 33(%ebx): a split lock
+        0xf0, 0x87, 0x43, 0x29, // lock xchgl %eax, 41(%ebx): another
+        0x0f, 0xc1, 0xc1, // xaddl %eax, %ecx
+        0x0f, 0xb1, 0xd1, // cmpxchgl %edx, %ecx
+        0xf0, 0x01, 0xc0, // lock addl %eax, %eax: #UD
+    };
+    const r = try expectRun(&code, atomSetup);
+    try testing.expectEqual(Exit.undef, r.exit);
+    // A cas on an unmapped page faults as a write.
+    const r2 = try expectRun(&.{ 0xbb, 0, 0, 5, 0, 0xf0, 0x01, 0x03 }, null);
+    try testing.expectEqual(Exit.fault, r2.exit);
+}
+
 fn fsSetup(c: *Cpu) void {
     c.setTls(Machine.data_va + 0x100);
     c.loadSeg(.fs, cpu_mod.tls_sel) catch unreachable;

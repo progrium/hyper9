@@ -233,6 +233,24 @@ const Class = enum {
     stop,
 };
 
+/// A memory read-modify-write that must be atomic: LOCK-prefixed, or
+/// XCHG, CMPXCHG, and CMPXCHG8B with memory. Lifted with `cas`.
+fn isAtomic(i: *const Inst) bool {
+    if (!i.mem) return false;
+    return switch (i.op) {
+        .add, .@"or", .adc, .sbb, .@"and", .sub, .xor, .inc, .dec, .not, .neg => i.lock,
+        // XADD and CMPXCHG without LOCK needn't be atomic, but may be.
+        .xchg, .xadd, .cmpxchg, .cmpxchg8b => true,
+        else => false,
+    };
+}
+
+/// Atomics that retry: a load, the new value, and a `cas` that must find
+/// the loaded value. CMPXCHG and CMPXCHG8B are a single `cas`.
+fn retries(i: *const Inst) bool {
+    return i.op != .cmpxchg and i.op != .cmpxchg8b;
+}
+
 fn isString(op: table.Op) bool {
     return switch (op) {
         .movs, .cmps, .stos, .lods, .scas => true,
@@ -242,7 +260,9 @@ fn isString(op: table.Op) bool {
 
 fn classify(i: *const Inst) Class {
     const e = i.tableEntry();
-    if (i.lock) return if (e.end) .stop else .interp;
+    // LOCK where it isn't allowed raises #UD, in T0.
+    if (i.lock and (!e.lock or !i.mem)) return if (e.end) .stop else .interp;
+    if (isAtomic(i)) return .lifted;
     const near32 = i.size == 4;
     return switch (i.op) {
         .nop, .fence, .add, .@"or", .adc, .sbb, .@"and", .sub, .xor, .cmp, .@"test" => .lifted,
@@ -257,7 +277,7 @@ fn classify(i: *const Inst) Class {
             break :blk if (n == 0 and i.mem) .interp else .lifted;
         },
         .mov, .movzx, .movsx, .lea, .bswap, .cbw, .cwd, .setcc, .cmovcc => .lifted,
-        .xchg => if (i.mem) .interp else .lifted,
+        .xchg, .xadd, .cmpxchg => .lifted,
         .push, .leave => .lifted,
         // POP to memory addresses with ESP after the pop.
         .pop => if (i.mem) .interp else .lifted,
@@ -407,10 +427,10 @@ const Lifter = struct {
                 .read = x.flags_read & xf.arith,
                 .written = x.flags_written & xf.arith,
                 .barrier = !inline_(in.class) or x.mem_read or x.mem_write or in.i.mem and in.i.op != .lea and in.i.op != .nop or
-                    in.i.op == .div or in.i.op == .idiv or isString(in.i.op),
+                    in.i.op == .div or in.i.op == .idiv or isString(in.i.op) or isAtomic(&in.i),
             };
             ends[k] = l.leader[k + 1] or switch (in.class) {
-                .lifted, .interp => isString(in.i.op),
+                .lifted, .interp => isString(in.i.op) or isAtomic(&in.i),
                 else => true,
             };
         }
@@ -675,6 +695,10 @@ const Lifter = struct {
         l.fl.set(try l.b.emit(.{ .op = op, .ty = .flags, .a = x, .b = y, .c = f }));
     }
 
+    fn sel(l: *Lifter, ty: Type, c: Ref, x: Ref, y: Ref) !Ref {
+        return l.b.emit(.{ .op = .select, .ty = ty, .a = c, .b = x, .c = y });
+    }
+
     /// i1 to an integer of `ty`.
     fn widen(l: *Lifter, ty: Type, c: Ref) !Ref {
         return l.b.un(.zext, ty, c);
@@ -701,6 +725,10 @@ const Lifter = struct {
                 return 1;
             },
             else => {},
+        }
+        if (isAtomic(i)) {
+            try l.atomic(k);
+            return 1;
         }
         if (isString(i.op)) {
             try l.repString(k);
@@ -813,6 +841,25 @@ const Lifter = struct {
                 const y = try l.get(k, addr, e.src, size);
                 try l.put(k, addr, e.dst, size, y);
                 try l.put(k, addr, e.src, size, x);
+            },
+            .xadd => {
+                // The destination is written last, so XADD of a register
+                // with itself leaves the sum.
+                const y = try l.getR(i.reg(), size);
+                const x = try l.getR(i.rm(), size);
+                try l.setR(i.reg(), size, x);
+                try l.setR(i.rm(), size, try b.bin(.add, T, x, y));
+                if (l.needFlags(k)) try l.setFlags(.@"eflags.add", x, y);
+            },
+            .cmpxchg => {
+                const acc = try l.getR(0, size);
+                const src_ = try l.getR(i.reg(), size);
+                const old = try l.getR(i.rm(), size);
+                const eq = try b.icmp(.eq, old, acc);
+                try l.setR(i.rm(), size, try l.sel(T, eq, src_, old));
+                const now = try l.getR(0, size);
+                try l.setR(0, size, try l.sel(T, eq, now, old));
+                if (l.needFlags(k)) try l.setFlags(.@"eflags.sub", acc, old);
             },
             .bswap => {
                 const r = i.zreg();
@@ -1056,6 +1103,139 @@ const Lifter = struct {
         const back = try b.un(if (signed) .sext else .zext, W, qn);
         const fits = try b.icmp(.eq, back, q);
         return b.bin(.@"and", .i1, nz, fits);
+    }
+
+    /// An atomic read-modify-write (see `isAtomic`). An access that isn't
+    /// naturally aligned (a split lock) goes to T0, which serializes it
+    /// under its own lock. The retrying ones are a block of their own: a
+    /// load, the new value, and a `cas`; if the `cas` finds another value,
+    /// nothing has been written (registers and flags are written through
+    /// selects that keep the old values) and the block runs again.
+    fn atomic(l: *Lifter, k: usize) !void {
+        const i = &l.insns[k].i;
+        const b = l.b;
+        const pc = l.insns[k].pc;
+        const e = i.tableEntry();
+        const size: u8 = if (i.op == .cmpxchg8b) 8 else i.size;
+        const T: Type = if (size == 8) .i64 else tyOf(size);
+        const retry = retries(i);
+        const loop = if (retry) try b.block() else undefined;
+        if (retry) {
+            try l.endBlock(.{ .br = loop });
+            l.startBlock(loop);
+        }
+        const addr = try l.linear(k);
+        if (size > 1) {
+            const mis = try b.bin(.@"and", .i32, addr, try l.k32(size - 1));
+            try l.guard(k, try b.icmp(.ne, mis, try l.k32(0)), true);
+        }
+        // Values from before the guard are gone: recompute the address.
+        const a = try l.linearAgain(k);
+        try l.leave();
+        const f: ir.MemFlags = .{ .size = switch (size) {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            else => 3,
+        } };
+        if (!retry) {
+            if (i.op == .cmpxchg8b) {
+                const lo = try b.un(.zext, .i64, try l.getR(0, 4));
+                const hi = try b.un(.zext, .i64, try l.getR(2, 4));
+                const want = try b.bin(.@"or", .i64, try b.bin(.shl, .i64, hi, try b.konst(.i64, 32)), lo);
+                const nlo = try b.un(.zext, .i64, try l.getR(3, 4));
+                const nhi = try b.un(.zext, .i64, try l.getR(1, 4));
+                const new = try b.bin(.@"or", .i64, try b.bin(.shl, .i64, nhi, try b.konst(.i64, 32)), nlo);
+                const got = try b.cas(.i64, a, want, new, f, pc);
+                const eq = try b.icmp(.eq, got, want);
+                const glo = try b.un(.trunc, .i32, got);
+                const ghi = try b.un(.trunc, .i32, try b.bin(.lshr, .i64, got, try b.konst(.i64, 32)));
+                try l.setR(0, 4, try l.sel(.i32, eq, try l.getR(0, 4), glo));
+                try l.setR(2, 4, try l.sel(.i32, eq, try l.getR(2, 4), ghi));
+                const p = try b.un(.@"eflags.pack", .i32, try l.fl.get(b));
+                const cleared = try b.bin(.@"and", .i32, p, try l.k32(~xf.ZF));
+                const z = try b.bin(.shl, .i32, try b.un(.zext, .i32, eq), try l.k32(6));
+                l.fl.set(try b.un(.@"eflags.unpack", .flags, try b.bin(.@"or", .i32, cleared, z)));
+            } else {
+                // CMPXCHG: the old value either way, in one cas.
+                const acc = try l.getR(0, size);
+                const src_ = try l.getR(i.reg(), size);
+                const got = try b.cas(T, a, acc, src_, f, pc);
+                const eq = try b.icmp(.eq, got, acc);
+                try l.setR(0, size, try l.sel(T, eq, acc, got));
+                if (l.needFlags(k)) try l.setFlags(.@"eflags.sub", acc, got);
+            }
+            l.count += 1;
+            return;
+        }
+        const old = try b.load(T, a, .{ .size = f.size, .rmw = true }, pc);
+        var new: Ref = undefined;
+        var flags: ?Ref = null;
+        const need = l.needFlags(k);
+        switch (i.op) {
+            .xchg => new = try l.getR(i.reg(), size),
+            .xadd => {
+                const y = try l.getR(i.reg(), size);
+                new = try b.bin(.add, T, old, y);
+                if (need) flags = try b.flags(.@"eflags.add", old, y);
+            },
+            .not => new = try b.un(.not, T, old),
+            .neg => {
+                const zero = try b.konst(T, 0);
+                new = try b.bin(.sub, T, zero, old);
+                if (need) flags = try b.flags(.@"eflags.sub", zero, old);
+            },
+            .inc, .dec => {
+                const inc = i.op == .inc;
+                new = try b.bin(if (inc) .add else .sub, T, old, try b.konst(T, 1));
+                if (need) flags = try b.emit(.{ .op = if (inc) .@"eflags.inc" else .@"eflags.dec", .ty = .flags, .a = old, .b = try l.fl.get(b) });
+            },
+            else => {
+                const y = try l.get(k, null, e.src, size);
+                switch (i.op) {
+                    .add, .sub => {
+                        new = try b.bin(if (i.op == .add) .add else .sub, T, old, y);
+                        if (need) flags = try b.flags(if (i.op == .add) .@"eflags.add" else .@"eflags.sub", old, y);
+                    },
+                    .adc, .sbb => {
+                        const fo = try l.fl.get(b);
+                        const cin = try l.widen(T, try l.fl.cond(b, xf.cc_b));
+                        const op: ir.Op = if (i.op == .adc) .add else .sub;
+                        new = try b.bin(op, T, try b.bin(op, T, old, y), cin);
+                        if (need) flags = try b.emit(.{ .op = if (i.op == .adc) .@"eflags.adc" else .@"eflags.sbb", .ty = .flags, .a = old, .b = y, .c = fo });
+                    },
+                    else => {
+                        const op: ir.Op = switch (i.op) {
+                            .@"or" => .@"or",
+                            .xor => .xor,
+                            else => .@"and",
+                        };
+                        new = try b.bin(op, T, old, y);
+                        if (need) flags = try b.un(.@"eflags.logic", .flags, new);
+                    },
+                }
+            },
+        }
+        const got = try b.cas(T, a, old, new, f, pc);
+        const ok = try b.icmp(.eq, got, old);
+        // The register results, kept on a retry.
+        if (i.op == .xchg or i.op == .xadd) {
+            const r = i.reg();
+            try l.setR(r, size, try l.sel(T, ok, old, try l.getR(r, size)));
+        }
+        if (flags) |nf| {
+            const cur = try l.fl.get(b);
+            l.fl.set(try l.sel(.flags, ok, nf, cur));
+        }
+        const cont = try b.block();
+        try l.endBlock(.{ .brcond = .{ .c = ok, .t = cont, .f = loop } });
+        l.startBlock(cont);
+        l.count = 1;
+    }
+
+    /// The memory operand's linear address, after `linear` has guarded it.
+    fn linearAgain(l: *Lifter, k: usize) !Ref {
+        return l.linear(k);
     }
 
     /// REP MOVS, STOS, LODS, CMPS, and SCAS: a loop of T0 chunks of up
