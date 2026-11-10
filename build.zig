@@ -1678,6 +1678,20 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
         b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)", .{arch})).dependOn(&run.step);
     }
     _ = vcpu;
+
+    const litmus = b.addExecutable(.{
+        .name = "litmus",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/jit/litmus.zig"),
+            .target = target,
+            .optimize = fuzz_optimize,
+            .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
+        }),
+    });
+    const litmus_run = b.addRunArtifact(litmus);
+    litmus_run.has_side_effects = true;
+    if (b.args) |a| litmus_run.addArgs(a);
+    b.step("litmus", "Run the threading litmus tests on every tier, with their outcome tallies (-- --iters N --tier T --only NAME)").dependOn(&litmus_run.step);
 }
 
 /// The emulator's own CPUs (src/vcpu.zig): the JIT layer's unit tests,

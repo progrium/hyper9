@@ -48,6 +48,9 @@ pub const fuzz_a64 = @import("check/fuzz_a64.zig");
 /// h86's Guest, and fuzz-x86's generator.
 pub const x86 = @import("check/x86.zig");
 pub const gen_x86 = @import("check/gen_x86.zig");
+/// The litmus harness, and ha64's litmus tests.
+pub const litmus = @import("check/litmus.zig");
+pub const litmus_a64 = @import("check/litmus_a64.zig");
 
 /// What check mode needs from a guest architecture, beyond its `Frontend`.
 pub const Guest = struct {
