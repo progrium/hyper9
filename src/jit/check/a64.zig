@@ -31,18 +31,12 @@ pub const guest: check.Guest = .{
 pub const Bound = struct {
     machine: t0.Machine,
     cache: t0.Cache,
-    kick: u32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, c: *Ctx, space: t0.Space) !*Bound {
         const b = try gpa.create(Bound);
         b.* = .{ .machine = undefined, .cache = t0.Cache.init(gpa) };
-        b.machine = .{
-            .cpu = c.cpuPtr(Cpu),
-            .tlb = @ptrFromInt(@as(usize, @intCast(c.tlb))),
-            .space = space,
-            .cache = &b.cache,
-            .kick = &b.kick,
-        };
+        b.machine = .init(c.cpuPtr(Cpu), c, &b.cache, null);
+        b.machine.space = space;
         c.frontend = @intFromPtr(&b.machine);
         return b;
     }
@@ -87,7 +81,7 @@ pub fn step(c: *Ctx) u32 {
     const m: *t0.Machine = @ptrFromInt(@as(usize, @intCast(c.frontend)));
     const cpu = m.cpu;
     const pc = cpu.pc;
-    const f = m.space.fill(m.space.ctx, m.tlb, pc, .exec);
+    const f = m.space.?.fill(m.space.?.ctx, m.tlb(), pc, .exec);
     if (f.host == 0 or pc & 3 != 0) {
         c.exit_pc = pc;
         c.exit_addr = pc;

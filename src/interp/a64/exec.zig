@@ -85,6 +85,21 @@ pub const Exit = union(enum) {
     fault: Fault,
 };
 
+/// What a `Space`'s fill reports.
+pub const Fill = struct {
+    /// The host address of `va`, or 0 with `fault` set.
+    host: usize = 0,
+    fault: mem.FaultKind = .unmapped,
+};
+
+/// An address space other than a mem.View, for test harnesses that keep
+/// their own memory (src/jit/check/). `fill` translates `va` for `access`
+/// and, for reads and writes, fills `tlb`'s entry for the page.
+pub const Space = struct {
+    ctx: *anyopaque,
+    fill: *const fn (ctx: *anyopaque, tlb: *mem.Tlb, va: u64, access: mem.Access) Fill,
+};
+
 /// CNTVCT_EL0's source: ticks at 24 MHz.
 pub const Clock = struct {
     ctx: ?*anyopaque = null,
@@ -103,12 +118,14 @@ pub const Machine = struct {
     clock: ?Clock = null,
     /// Set by a handler that returns `.exit`.
     exit: Exit = .interrupted,
+    /// If set, memory goes through it instead of mem.probe over ctx.space.
+    space: ?Space = null,
 
     pub fn init(cpu: *Cpu, ctx: *Ctx, cache: *Cache, clock: ?Clock) Machine {
         return .{ .cpu = cpu, .ctx = ctx, .cache = cache, .clock = clock };
     }
 
-    inline fn tlb(m: *Machine) *mem.Tlb {
+    pub inline fn tlb(m: *Machine) *mem.Tlb {
         return @ptrFromInt(@as(usize, @intCast(m.ctx.tlb)));
     }
 
@@ -171,6 +188,7 @@ pub const Cache = struct {
 
     /// Flushes the cache if code was invalidated since it last looked.
     inline fn check(c: *Cache, m: *Machine) void {
+        if (m.space != null) return;
         const code = m.view().code orelse return;
         const e = code.epoch.load(.monotonic);
         if (e != c.epoch) {
@@ -184,6 +202,14 @@ pub const Cache = struct {
     fn get(c: *Cache, m: *Machine, va: u64) ?*Page {
         const base = va & ~@as(u64, page_size - 1);
         const h = mem.fastExec(m.tlb(), base, 4) orelse blk: {
+            if (m.space) |sp| {
+                const f = sp.fill(sp.ctx, m.tlb(), base, .exec);
+                if (f.host == 0) {
+                    m.exit = .{ .fault = fault(va, .exec, f.fault) };
+                    return null;
+                }
+                break :blk f.host;
+            }
             const p = mem.probe(m.ctx, base, .exec) orelse {
                 m.exit = .{ .fault = ctxFault(m, va, .exec) };
                 return null;
@@ -346,6 +372,14 @@ const MemFault = struct { addr: u64, kind: mem.FaultKind };
 /// The host address of an access of `n` bytes at `va` within one page.
 inline fn host(m: *Machine, va: u64, n: u32, comptime acc: mem.Access, f: *MemFault) ?usize {
     if (mem.fast(m.tlb(), va, n, acc == .write)) |h| return h;
+    if (m.space) |sp| {
+        const r = sp.fill(sp.ctx, m.tlb(), va, acc);
+        if (r.host == 0) {
+            f.* = .{ .addr = va, .kind = r.fault };
+            return null;
+        }
+        return r.host;
+    }
     const p = mem.probe(m.ctx, va, acc) orelse {
         f.* = .{ .addr = m.ctx.exit_addr, .kind = @enumFromInt(@as(u8, @truncate(m.ctx.exit_info >> 8))) };
         return null;
@@ -1074,6 +1108,34 @@ fn sdiv(comptime I: type, a: I, b: I) I {
     if (b == 0) return 0;
     if (b == -1) return 0 -% a;
     return @divTrunc(a, b);
+}
+
+// ---------------------------------------------------------------- a Space over mem.Map
+
+/// T0's view of a mem.Map, the stand-in address space for tests.
+pub fn mapSpace(map: *const mem.Map) Space {
+    return .{ .ctx = @constCast(map), .fill = mapFill };
+}
+
+fn mapFill(p: *anyopaque, tlb_: *mem.Tlb, va: u64, acc: mem.Access) Fill {
+    const map: *const mem.Map = @ptrCast(@alignCast(p));
+    for (map.regions) |*r| {
+        if (va < r.va or va - r.va >= r.mem.len) continue;
+        const ok = switch (acc) {
+            .read => r.read,
+            .write => r.write,
+            .exec => r.exec,
+        };
+        if (!ok) return .{ .fault = .permission };
+        const h: usize = @intFromPtr(r.mem.ptr) + @as(usize, @intCast(va - r.va));
+        const page = va & ~@as(u64, page_size - 1);
+        if (acc != .exec and page >= r.va and page + page_size <= r.va + r.mem.len) {
+            const table = if (acc == .write) &tlb_.write else &tlb_.read;
+            table[@intCast((va >> mem.page_shift) & (mem.entries - 1))] = .{ .tag = va >> mem.page_shift, .delta = @as(u64, h) -% va };
+        }
+        return .{ .host = h };
+    }
+    return .{ .fault = .unmapped };
 }
 
 test {

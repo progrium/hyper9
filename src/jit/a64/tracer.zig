@@ -48,6 +48,9 @@ pub const State = struct {
     cpu: t0.Cpu = .{},
     tlb: mem.Tlb = .{},
     maps: [2]mem.Mapping = undefined,
+    /// The same mappings as a mem.Map, for src/jit/check/.
+    regions: [2]mem.Region = undefined,
+    map: mem.Map = undefined,
     view: mem.View = undefined,
     cache: t0.Cache = undefined,
     machine: t0.Machine = undefined,
@@ -65,6 +68,11 @@ pub const State = struct {
             .{ .va = data_va, .len = mem.page_size, .host = @intFromPtr(&s.data), .perms = .{ .write = true } },
         };
         s.view = .{ .maps = &s.maps, .tlb = &s.tlb };
+        s.regions = .{
+            .{ .va = code_va, .mem = &s.code, .exec = true },
+            .{ .va = data_va, .mem = &s.data, .write = true },
+        };
+        s.map = .{ .regions = &s.regions };
         // Stepping decodes as it goes, so the page cache stays empty.
         s.cache = .init(std.heap.page_allocator);
         s.ctx = .{
