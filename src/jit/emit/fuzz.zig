@@ -373,6 +373,27 @@ pub fn generate(gpa: std.mem.Allocator, rnd: std.Random, opts: Options) !ir.Regi
     return r;
 }
 
+/// The region as emitters get it: a copy run through jit/opt, verified.
+/// A verify error after opt is opt's bug, and fails loudly.
+pub fn optimized(gpa: std.mem.Allocator, r: *const ir.Region) !ir.Region {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try ir.print(r, &aw.writer);
+    var o = try ir.parse(gpa, aw.written());
+    errdefer o.deinit(gpa);
+    try @import("../opt.zig").run(gpa, &o);
+    if (ir.verify(&o)) |e| {
+        if (cases.can_print) {
+            var bw: std.Io.Writer.Allocating = .init(gpa);
+            defer bw.deinit();
+            ir.print(&o, &bw.writer) catch {};
+            std.debug.print("opt made an invalid region: {s} at %{d}\nfrom:\n{s}\nto:\n{s}\n", .{ e.msg, e.inst, aw.written(), bw.written() });
+        }
+        return error.Invalid;
+    }
+    return o;
+}
+
 /// Random starting registers: interesting values, a data-page address or
 /// two, and the loop counter.
 pub fn regs(rnd: std.Random) [8]u64 {

@@ -2957,10 +2957,14 @@ pub fn fuzzOne(gpa: std.mem.Allocator, env: *cases.Env, seed: u64) !void {
         ir.print(&r, &aw.writer) catch {};
         std.debug.print("regs {any} budget {d}\n{s}\n", .{ c.regs, c.budget, aw.written() });
     }
+    // Emitted as the pipeline gives it (through jit/opt); ir_eval runs the
+    // region as generated.
+    var ro = try fuzz.optimized(gpa, &r);
+    defer ro.deinit(gpa);
     var code: std.ArrayList(u8) = .empty;
     defer code.deinit(gpa);
-    const out = try emitRegion(gpa, &r, &code);
-        const x = try testexec.load(code.items);
+    const out = try emitRegion(gpa, &ro, &code);
+    const x = try testexec.load(code.items);
     defer x.deinit();
     const want = try env.evalCase(gpa, &r, c);
     if (envInt("H9_FUZZ_REDUCE", 0) != 0) {
@@ -3002,9 +3006,11 @@ pub fn fuzzOne(gpa: std.mem.Allocator, env: *cases.Env, seed: u64) !void {
 }
 
 fn runNative(gpa: std.mem.Allocator, env: *cases.Env, r: *const ir.Region, c: cases.Case) !cases.Result {
+    var ro = try fuzz.optimized(gpa, r);
+    defer ro.deinit(gpa);
     var code: std.ArrayList(u8) = .empty;
     defer code.deinit(gpa);
-    const out = try emitRegion(gpa, r, &code);
+    const out = try emitRegion(gpa, &ro, &code);
         const x = try testexec.load(code.items);
     defer x.deinit();
     const cx = env.reset(c);
@@ -3145,7 +3151,13 @@ test "an IR file runs the same natively (H9_IR_FILE, H9_IR_REGS)" {
     }
     const want = try env.evalCase(gpa, &r, c);
     const got = try runNative(gpa, env, &r, c);
-    std.debug.print("want {any}\n got {any}\n", .{ want, got });
+    var ro = try fuzz.optimized(gpa, &r);
+    defer ro.deinit(gpa);
+    const want_opt = try env.evalCase(gpa, &ro, c);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    ir.print(&ro, &aw.writer) catch {};
+    std.debug.print("want {any}\n opt {any}\n got {any}\noptimized:\n{s}\n", .{ want, want_opt, got, aw.written() });
     var code: std.ArrayList(u8) = .empty;
     defer code.deinit(gpa);
     _ = try emitRegion(gpa, &r, &code);
