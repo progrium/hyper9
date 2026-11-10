@@ -44,6 +44,7 @@
 //! The function is a ctx.EntryFn.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ir = @import("../ir.zig");
 const ir_eval = @import("../ir_eval.zig");
 const ctx = @import("../ctx.zig");
@@ -1647,6 +1648,8 @@ fn tsoOn() bool {
         2 => return true,
         else => {},
     }
+    // Only where libc is linked (h9 itself; not the vcpu unit tests).
+    if (!builtin.link_libc) return true;
     const getenv = @extern(*const fn ([*:0]const u8) callconv(.c) ?[*:0]const u8, .{ .name = "getenv" });
     const off = if (getenv("H9_TSO")) |v| std.mem.eql(u8, std.mem.span(v), "off") else false;
     S.known.store(if (off) 1 else 2, .monotonic);
@@ -1665,7 +1668,6 @@ fn hasLrcpc() bool {
         2 => return true,
         else => {},
     }
-    const builtin = @import("builtin");
     const yes = builtin.cpu.arch == .aarch64 and switch (builtin.os.tag) {
         .macos, .ios => blk: {
             const sysctlbyname = @extern(*const fn ([*:0]const u8, ?*anyopaque, ?*usize, ?*anyopaque, usize) callconv(.c) c_int, .{ .name = "sysctlbyname" });

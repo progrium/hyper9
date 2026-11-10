@@ -126,8 +126,9 @@ pub const Vcpu = Impl.EmuVcpu;
 /// lifter through `View.source`, which mark the pages read as holding
 /// code; `mem.probe(.write)` gives a host pointer for an atomic.
 /// Guest instructions retired by every vCPU so far, for benchmarks: a
-/// Guest with `retired(cpu) u64` counts here.
-pub var retired_total: std.atomic.Value(u64) = .init(0);
+/// Guest with `retired(cpu) u64` counts here. (A usize on the web host,
+/// which has no 64-bit atomics.)
+pub var retired_total: std.atomic.Value(if (web) usize else u64) = .init(0);
 
 /// H9_EMU_TIER, if set: "t0" or "t1".
 pub fn tierFromEnv() ?[]const u8 {
@@ -597,7 +598,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                             const G = Guest(a);
                             if (!@hasDecl(G, "retired")) break :blk G.run(c, cx);
                             const before = G.retired(c);
-                            defer _ = retired_total.fetchAdd(G.retired(c) -% before, .monotonic);
+                            defer _ = retired_total.fetchAdd(@truncate(G.retired(c) -% before), .monotonic);
                             break :blk G.run(c, cx);
                         },
                     } catch |e| {
