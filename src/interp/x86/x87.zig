@@ -574,6 +574,57 @@ fn fist(x: anytype, a: u32, size: u8, r: u3) !void {
     o.done();
 }
 
+// ------------------------------------------------------------ for h86's T1
+
+/// What execMem does for D8, DA, DC, and DE's arithmetic and compares once
+/// the operand `v` is loaded (with the note after, as there), for h86's
+/// lifted code (jit/x86/helpers.zig), which has done the wait and the load.
+/// Nothing in it traps.
+pub fn arithMem(x: anytype, op: u3, r: u3, v: u64) void {
+    const p = &x.c.fpu;
+    var o = Op.begin(p);
+    var b: F80 = undefined;
+    var b_den = false;
+    switch (op) {
+        0 => {
+            b_den = isDen32(@truncate(v));
+            b = widen32(&o.env, @truncate(v));
+        },
+        2 => b = sf.fromI32(@bitCast(@as(u32, @truncate(v)))),
+        4 => {
+            b_den = isDen64(v);
+            b = widen64(&o.env, v);
+        },
+        6 => b = sf.fromI32(@as(i16, @bitCast(@as(u16, @truncate(v))))),
+        else => unreachable,
+    }
+    note(x);
+    arithOrCompare(&o, r, 0, b, b_den, false);
+}
+
+/// FIST, FISTP, or FISTTP (`r` 2, 3, 1) to `size` bytes, without the store:
+/// the integer, and the status word it leaves. Null where nothing would be
+/// stored (a stack fault or an unmasked exception), for T0 to run.
+pub fn fistPeek(p: *const Fpu, size: u8, r: u3) ?struct { n: i64, sw: u16 } {
+    var q = p.*;
+    var o = Op.begin(&q);
+    const v = o.get(0);
+    const trunc = r == 1;
+    if (unsupported(v) or v.isNan()) return null;
+    const mode = if (trunc) sf.Rounding.min_mag else o.env.rounding;
+    var e = o.env;
+    const n = convert(&e, v, size, mode, trunc);
+    if (e.flags.invalid) return null;
+    o.env.flags = e.flags;
+    if (e.flags.inexact and !trunc) {
+        var t = o.chop();
+        o.c1 = n != convert(&t, v, size, .min_mag, true);
+    }
+    if (!o.okStore() or o.raised() & SF != 0) return null;
+    o.done();
+    return .{ .n = n, .sw = q.sw };
+}
+
 /// v to an integer of `size` bytes; env.flags.invalid if it doesn't fit.
 fn convert(env: *sf.Env, v: F80, size: u8, mode: sf.Rounding, trunc: bool) i64 {
     if (size == 8) return if (trunc) env.toI64MinMag(v, true) else env.toI64(v, mode, true);

@@ -21,7 +21,8 @@ const cpu_mod = @import("../../interp/x86/cpu.zig");
 const exec = @import("../../interp/x86/exec.zig");
 const x87 = @import("../../interp/x86/x87.zig");
 const dec = @import("../../interp/x86/decode.zig");
-const F80 = @import("../../interp/x86/f80.zig").F80;
+const f80_mod = @import("../../interp/x86/f80.zig");
+const F80 = f80_mod.F80;
 
 const Ctx = ctx_mod.Ctx;
 const Cpu = cpu_mod.Cpu;
@@ -108,6 +109,18 @@ pub const Fast = enum(u8) {
     fld_const,
     /// FXCH ST(i).
     fxch,
+    /// D8, DA, DC, and DE's arithmetic and compares with a memory operand:
+    /// b is the operand, c its linear address (for the note).
+    arith_mem,
+    /// FILD m32int: b is the integer.
+    fild32,
+    /// FIST, FISTP, and FISTTP to m16int or m32int (i is r, `pop` m16),
+    /// first half: the integer, or `refuse`. Changes nothing.
+    fist,
+    /// The second half, after the store: the status word, and the pop.
+    fist_done,
+    /// FLDCW: b is the word.
+    fldcw,
 };
 
 /// x87fast's first argument.
@@ -120,7 +133,8 @@ pub const FastArg = packed struct(u64) {
     _0: u4 = 0,
     /// The opcode's low 3 bits and the ModRM byte, for the note.
     op: u3 = 0,
-    _1: u5 = 0,
+    seg: u3 = 0,
+    _1: u2 = 0,
     modrm: u8 = 0,
     pc: u32 = 0,
 };
@@ -134,7 +148,7 @@ const PE: u16 = 1 << 5;
 const PM: u16 = 1 << 5;
 const ES: u16 = 1 << 7;
 
-fn x87Fast(c: *Ctx, a: u64, b: u64, _: u64) callconv(.c) u64 {
+fn x87Fast(c: *Ctx, a: u64, b: u64, c_: u64) callconv(.c) u64 {
     const cpu = c.cpuPtr(Cpu);
     const p = &cpu.fpu;
     const arg: FastArg = @bitCast(a);
@@ -146,6 +160,30 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, _: u64) callconv(.c) u64 {
             p.sw &= ~C1;
         },
         .fst64 => return f64Of(p) orelse refuse,
+        .arith_mem => {
+            const eip = cpu.eip;
+            cpu.eip = arg.pc;
+            defer cpu.eip = eip;
+            var x: exec.Exec(*lift.Mem) = .{ .c = cpu, .m = undefined, .opts = .{}, .addr = @truncate(c_) };
+            x.i = .{ .op = .x87, .entry = 0, .opcode = 0xd8 | @as(u16, arg.op), .len = 0, .size = 4, .seg = @enumFromInt(arg.seg), .modrm = arg.modrm, .mem = true };
+            x87.arithMem(&x, arg.op, @truncate(arg.modrm >> 3), b);
+        },
+        .fild32 => {
+            if (!empty(p, 7)) return refuse;
+            push(p, f80_mod.fromI32(@bitCast(@as(u32, @truncate(b)))));
+            p.sw &= ~C1;
+        },
+        .fist, .fist_done => {
+            const size: u8 = if (arg.pop) 2 else 4;
+            const r = x87.fistPeek(p, size, arg.i) orelse return refuse;
+            if (arg.kind == .fist) return @as(u64, @as(u32, @bitCast(@as(i32, @truncate(r.n))))) & (if (size == 2) @as(u64, 0xffff) else 0xffff_ffff);
+            p.sw = r.sw;
+            if (arg.i != 2) pop(p);
+        },
+        .fldcw => {
+            p.cw = (@as(u16, @truncate(b)) & 0x1f3f) | 0x40;
+            x87.summarize(p);
+        },
         .fst64_done => {
             const v = st(p, 0);
             const lost = v.signif & 0x7ff;

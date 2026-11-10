@@ -631,7 +631,15 @@ pub fn fuzzX87(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
         for (&m.data) |*b| b.* = rng.int(u8);
         code.clearRetainingCapacity();
         for (0..4 + rng.uintLessThan(usize, 20)) |_| {
-            switch (rng.uintLessThan(u8, 13)) {
+            switch (rng.uintLessThan(u8, 15)) {
+                // FLDCW, FNSTCW, FILD m32, and FIST(P)/FISTTP m16 and m32.
+                13 => {
+                    const forms = [_][2]u8{ .{ 0xd9, 5 }, .{ 0xd9, 7 }, .{ 0xdb, 0 }, .{ 0xdb, 1 }, .{ 0xdb, 2 }, .{ 0xdb, 3 }, .{ 0xdf, 1 }, .{ 0xdf, 2 }, .{ 0xdf, 3 } };
+                    const f = forms[rng.uintLessThan(usize, forms.len)];
+                    try code.appendSlice(gpa, &.{ f[0], 0x43 | f[1] << 3, rng.uintLessThan(u8, 0x78) & ~@as(u8, 1) });
+                },
+                // Arithmetic with a memory operand.
+                14 => try code.appendSlice(gpa, &.{ 0xd8 | 2 * rng.uintLessThan(u8, 4), 0x43 | @as(u8, rng.uintLessThan(u8, 8)) << 3, rng.uintLessThan(u8, 0x78) & ~@as(u8, 7) }),
                 0...3 => try code.appendSlice(gpa, &.{ 0xd8 | rng.uintLessThan(u8, 8), 0x43 | @as(u8, rng.uintLessThan(u8, 8)) << 3, rng.uintLessThan(u8, 0x78) }),
                 // The data movement x87fast takes: FLD, FST, and FSTP
                 // m64fp, and FLD, FXCH, FST, and FSTP ST(i).
