@@ -13,8 +13,9 @@
 //!   executable at the same address. arm64 cleans and invalidates the caches
 //!   by hand (`dc cvau` / `ic ivau`, as emu.zig's clearCache does).
 //!   Under a binary translator that misses writes through the other view
-//!   (Rosetta or QEMU running x86_64 Linux), it falls back to one RWX
-//!   mapping, which those translators watch.
+//!   (Rosetta or QEMU running x86_64 Linux on arm64), and only there, it
+//!   falls back to one RWX mapping, which those translators watch. Native
+//!   x86_64 is always dual; if the dual probe ever fails there, it's T0.
 //! - Windows: a pagefile-backed section mapped twice, then
 //!   FlushInstructionCache.
 //!
@@ -281,12 +282,36 @@ const linux = struct {
     /// x86_64 Linux in Docker on a Mac, QEMU user mode) don't see writes
     /// through the other view and keep running stale code, which the probe
     /// catches; there we fall back to one RWX mapping, which they handle.
+    /// The fallback needs both the failed probe and a translated process,
+    /// so native x86_64 never ends up RWX: a dual probe failing there is
+    /// something else (a noexec memfd, SELinux), and T0 is the answer.
     fn detect() bool {
         mode = .dual;
         if (probe()) return true;
-        if (arch != .x86_64) return false;
+        if (arch != .x86_64 or !translated()) return false;
         mode = .rwx;
         return probe();
+    }
+
+    /// Whether this x86_64 process is running under a binary translator on
+    /// an arm64 kernel. Rosetta and QEMU user mode both pass the host's
+    /// /proc/cpuinfo through, and an arm64 kernel's has "CPU implementer"
+    /// where an x86 one has "vendor_id" (hypervisors and gVisor keep
+    /// "vendor_id"). The first processor's block is enough, so this reads
+    /// 4 KiB. An unreadable /proc counts as native: W^X or T0, never RWX.
+    fn translated() bool {
+        const rc = L.open("/proc/cpuinfo", .{ .CLOEXEC = true }, 0);
+        if (L.errno(rc) != .SUCCESS) return false;
+        const fd: i32 = @intCast(rc);
+        defer _ = L.close(fd);
+        var buf: [4096]u8 = undefined;
+        var n: usize = 0;
+        while (n < buf.len) {
+            const got = L.read(fd, buf[n..].ptr, buf.len - n);
+            if (L.errno(got) != .SUCCESS or got == 0) break;
+            n += got;
+        }
+        return isArmCpuinfo(buf[0..n]);
     }
 
     fn map(n: usize) Error!Region {
@@ -523,6 +548,24 @@ test "code written on one thread runs on another" {
         (try std.Thread.spawn(.{}, T.runner, .{ &r, off, &got })).join();
         try std.testing.expectEqual(@as(u32, v), got);
     }
+}
+
+/// Whether a /proc/cpuinfo prefix comes from an arm64 kernel.
+fn isArmCpuinfo(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "CPU implementer") != null and
+        std.mem.indexOf(u8, text, "vendor_id") == null;
+}
+
+test "cpuinfo: arm64 kernels are translated hosts, x86 ones aren't" {
+    try std.testing.expect(isArmCpuinfo("processor\t: 0\nBogoMIPS\t: 48.00\nFeatures\t: fp asimd\nCPU implementer\t: 0x61\n"));
+    try std.testing.expect(!isArmCpuinfo("processor\t: 0\nvendor_id\t: GenuineIntel\nflags\t: fpu sse2\n"));
+    try std.testing.expect(!isArmCpuinfo(""));
+}
+
+test "native x86_64 Linux uses the dual mapping" {
+    if (os != .linux or arch != .x86_64 or !available()) return error.SkipZigTest;
+    if (linux.translated()) return error.SkipZigTest;
+    try std.testing.expectEqual(linux.Mode.dual, linux.mode);
 }
 
 test "the probe agrees with init" {
