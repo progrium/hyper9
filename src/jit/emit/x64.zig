@@ -2601,7 +2601,9 @@ test "emitted code matches ir_eval on the shared cases" {
     defer cases.free(gpa, ext_cases);
     const pending_cases = try cases.generatePending(gpa);
     defer cases.free(gpa, pending_cases);
-    const all = try std.mem.concat(gpa, cases.Case, &.{ int_cases, ext_cases, pending_cases });
+    const lazy_cases = try cases.generateLazyFlags(gpa);
+    defer cases.free(gpa, lazy_cases);
+    const all = try std.mem.concat(gpa, cases.Case, &.{ int_cases, ext_cases, pending_cases, lazy_cases });
     defer gpa.free(all);
     const env = try gpa.create(cases.Env);
     defer gpa.destroy(env);
@@ -2928,7 +2930,7 @@ test "random regions match ir_eval" {
         const seed = fuzz_seed +% n;
         var prng: std.Random.DefaultPrng = .init(seed);
         const rnd = prng.random();
-        var r = try irfuzz.generate(gpa, rnd, .{});
+        var r = try irfuzz.generate(gpa, rnd, .{ .lazy_records = true });
         defer r.deinit(gpa);
         const c: cases.Case = .{ .text = "", .regs = irfuzz.regs(rnd), .budget = irfuzz.budget(rnd) };
         var aw: std.Io.Writer.Allocating = .init(gpa);
