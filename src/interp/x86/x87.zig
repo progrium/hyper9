@@ -1032,7 +1032,8 @@ fn unary(o: *Op, k: Unary) void {
         o.p.sw |= C2;
         return o.done();
     } else {
-        if (a.isDenormal()) o.exc |= DE;
+        // An invalid square root sees no denormal.
+        if (a.isDenormal() and !(k == .fsqrt and a.sign())) o.exc |= DE;
         res = switch (k) {
             .fsqrt => o.arithSqrt(a),
             .frndint => blk: {
@@ -1044,21 +1045,21 @@ fn unary(o: *Op, k: Unary) void {
                 }
                 break :blk v;
             },
-            .f2xm1 => if (a.exp() >= 0x3fff and !(a.exp() == 0x3fff and a.signif == 1 << 63)) blk: {
+            .f2xm1 => if (!a.isInf() and a.exp() >= 0x3fff and !(a.exp() == 0x3fff and a.signif == 1 << 63)) blk: {
                 // Beyond [-1, 1]: the x87 leaves ST(0) and sets PE.
                 o.env.flags.inexact = true;
                 break :blk a;
             } else if (a.isInf())
                 (if (a.sign()) F80.one.neg() else a)
             else if (a.signif == 0) a else o.roundScaled(xm.exp2m1(xm.toF128(a))),
-            .fsin => if (a.isInf()) o.invalid() else if (a.signif == 0) a else o.round(xm.sin(a)),
-            .fcos => if (a.isInf()) o.invalid() else if (a.signif == 0) F80.one else o.round(xm.cos(a)),
+            .fsin => if (a.isInf()) o.invalid() else if (a.signif == 0) a else o.roundScaled(xm.sin(a)),
+            .fcos => if (a.isInf()) o.invalid() else if (a.signif == 0) F80.one else o.roundScaled(xm.cos(a)),
         };
     }
-    if (!o.ok()) return o.done();
-    setSt(p, 0, res);
     // FSIN and FCOS clear C2 and leave C3 and C0.
     if (k == .fsin or k == .fcos) o.p.sw &= ~C2;
+    if (!o.ok()) return o.done();
+    setSt(p, 0, res);
     o.done();
 }
 
@@ -1077,7 +1078,9 @@ fn binaryPop(o: *Op, k: Binary) void {
     } else if (a.isNan() or b.isNan()) {
         res = o.env.add(b, a);
     } else {
-        if (a.isDenormal() or b.isDenormal()) o.exc |= DE;
+        // FYL2X of a negative x is invalid before it looks further.
+        const neg_log = k == .fyl2x and a.sign() and a.signif != 0;
+        if ((a.isDenormal() or b.isDenormal()) and !neg_log) o.exc |= DE;
         res = switch (k) {
             .fpatan => fpatan(o, b, a),
             .fyl2x => fyl2x(o, b, a, false),
@@ -1208,7 +1211,7 @@ fn pushing(o: *Op, k: Pushing) void {
                     lo = o.invalid();
                     hi = lo;
                 } else {
-                    lo = if (a.signif == 0) a else o.round(xm.tan(a));
+                    lo = if (a.signif == 0) a else o.roundScaled(xm.tan(a));
                     hi = F80.one;
                 }
             },
@@ -1221,8 +1224,8 @@ fn pushing(o: *Op, k: Pushing) void {
                     hi = F80.one;
                 } else {
                     // C1 reflects the last rounding, the cosine's.
-                    lo = o.round(xm.sin(a));
-                    hi = o.round(xm.cos(a));
+                    lo = o.roundScaled(xm.sin(a));
+                    hi = o.roundScaled(xm.cos(a));
                 }
             },
             .fxtract => {
@@ -1243,11 +1246,11 @@ fn pushing(o: *Op, k: Pushing) void {
             },
         }
     }
+    // FPTAN and FSINCOS clear C2 and leave C3 and C0.
+    if (k != .fxtract) p.sw &= ~C2;
     if (!o.ok()) return o.done();
     setSt(p, 0, lo);
     push(p, hi);
-    // FPTAN and FSINCOS clear C2 and leave C3 and C0.
-    if (k != .fxtract) p.sw &= ~C2;
     o.done();
 }
 
@@ -1284,13 +1287,11 @@ fn fprem(o: *Op, nearest: bool) void {
             }
         }
     }
+    // Special operands leave C3 and C0 as they were.
+    if (!computed or !o.ok()) p.sw &= ~C2;
     if (!o.ok()) return o.done();
     setSt(p, 0, res);
-    // Special operands leave C3 and C0 as they were.
-    if (!computed) {
-        p.sw &= ~C2;
-        return o.done();
-    }
+    if (!computed) return o.done();
     o.doneCC(cc);
 }
 

@@ -578,10 +578,14 @@ fn approximateSse(inst: *const dec.Inst) bool {
 }
 
 fn close80(a: []const u8, b: []const u8) bool {
-    const x = std.mem.readInt(u80, a[0..10], .little);
-    const y = std.mem.readInt(u80, b[0..10], .little);
+    var x = std.mem.readInt(u80, a[0..10], .little);
+    var y = std.mem.readInt(u80, b[0..10], .little);
     if (x == y) return true;
     if ((x >> 79) != (y >> 79)) return false;
+    // Without the explicit integer bit, the bits count in ulps across
+    // a change of exponent.
+    x = (x >> 64 & 0x7fff) << 63 | (x & 0x7fff_ffff_ffff_ffff);
+    y = (y >> 64 & 0x7fff) << 63 | (y & 0x7fff_ffff_ffff_ffff);
     const d = if (x > y) x - y else y - x;
     return d <= 64;
 }

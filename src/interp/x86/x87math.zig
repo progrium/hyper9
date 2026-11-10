@@ -350,30 +350,59 @@ pub fn reduce(x: F80) Reduced {
     return .{ .r = rf, .k = kk };
 }
 
-pub fn sin(x: F80) f128 {
+/// Below this, sin(r) is r less a sliver, cos(r) 1 less one, and tan(r)
+/// r plus one: the slivers (r^3/6 and the like) are far below the 64th
+/// bit, but they make the result inexact and steer directed rounding.
+const tiny: f128 = 0x1p-60;
+
+fn negate(v: Scaled) Scaled {
+    return .{ .v = -v.v, .k = v.k };
+}
+
+fn sinR(r: f128) Scaled {
+    if (@abs(r) < tiny) {
+        if (r == 0) return .{ .v = r };
+        const t = split(r);
+        return .{ .v = t.v * (1 - 0x1p-100), .k = t.k };
+    }
+    return .{ .v = @sin(r) };
+}
+
+fn cosR(r: f128) Scaled {
+    if (@abs(r) < tiny) return .{ .v = 1 - 0x1p-100 };
+    return .{ .v = @cos(r) };
+}
+
+pub fn sin(x: F80) Scaled {
     const red = reduce(x);
     return switch (red.k) {
-        0 => @sin(red.r),
-        1 => @cos(red.r),
-        2 => -@sin(red.r),
-        3 => -@cos(red.r),
+        0 => sinR(red.r),
+        1 => cosR(red.r),
+        2 => negate(sinR(red.r)),
+        3 => negate(cosR(red.r)),
     };
 }
 
-pub fn cos(x: F80) f128 {
+pub fn cos(x: F80) Scaled {
     const red = reduce(x);
     return switch (red.k) {
-        0 => @cos(red.r),
-        1 => -@sin(red.r),
-        2 => -@cos(red.r),
-        3 => @sin(red.r),
+        0 => cosR(red.r),
+        1 => negate(sinR(red.r)),
+        2 => negate(cosR(red.r)),
+        3 => sinR(red.r),
     };
 }
 
-pub fn tan(x: F80) f128 {
+pub fn tan(x: F80) Scaled {
     const red = reduce(x);
+    if (@abs(red.r) < tiny and red.r != 0) {
+        const t = split(red.r);
+        const v = t.v * (1 + 0x1p-100);
+        if (red.k & 1 == 0) return .{ .v = v, .k = t.k };
+        return .{ .v = -1 / v, .k = -t.k };
+    }
     const t = @tan(red.r);
-    return if (red.k & 1 == 0) t else -1 / t;
+    return .{ .v = if (red.k & 1 == 0) t else -1 / t };
 }
 
 // --------------------------------------------------------------- tests
@@ -418,9 +447,9 @@ test "binary128 round trip and transcendentals" {
     var env: Env = .{};
     const vals = [_]f64{ 1, -2.5, 0x1p-1070, 3.14159, 1e300 };
     for (vals) |v| try testing.expectEqual(v, back(round80(&env, toF128(ext(v)))));
-    try testing.expectApproxEqRel(@as(f64, 0.8414709848078965), back(round80(&env, sin(ext(1)))), 1e-15);
-    try testing.expectApproxEqRel(@as(f64, -0.4161468365471424), back(round80(&env, cos(ext(2)))), 1e-15);
-    try testing.expectApproxEqRel(@as(f64, -2.185039863261519), back(round80(&env, tan(ext(2)))), 1e-15);
+    try testing.expectApproxEqRel(@as(f64, 0.8414709848078965), back(roundScaled(&env, sin(ext(1)))), 1e-15);
+    try testing.expectApproxEqRel(@as(f64, -0.4161468365471424), back(roundScaled(&env, cos(ext(2)))), 1e-15);
+    try testing.expectApproxEqRel(@as(f64, -2.185039863261519), back(roundScaled(&env, tan(ext(2)))), 1e-15);
     try testing.expectApproxEqRel(@as(f64, 3.321928094887362), back(round80(&env, log2(10))), 1e-15);
     try testing.expectApproxEqRel(@as(f64, 0.41421356237309503), back(roundScaled(&env, exp2m1(0.5))), 1e-15);
     try testing.expectApproxEqRel(@as(f64, 0.5849625007211562), back(roundScaled(&env, log2p1(0.5))), 1e-15);
