@@ -193,6 +193,19 @@ scripts/wine-root.sh           # Alpine amd64 with Wine 11, at .local/linux/wine
 [Running Windows programs](docs/windows.md) walks through installing it,
 from the root to a prefix that lasts between runs.
 
+`zig build wine` builds the driver for i386 too, in `zig-out/wine/i386-*`,
+with `roundf386.so`: Alpine's 32-bit musl gets `roundf` wrong at the x87
+precision Windows programs set, which makes every window 96 times too big,
+so 32-bit Wine runs with it in `LD_PRELOAD`. The [Wine page](site/wine.html)'s
+demo is 32-bit Wine in the browser host (`?wine`), over `wine.h9a`:
+
+```sh
+scripts/wine-root.sh 386       # Alpine x86 with Wine 11, at .local/linux/wine-386
+zig build -Demu=zig -Dgfx=headless -Doptimize=ReleaseSafe
+scripts/wine-web.sh            # .local/linux/wine-web: the driver and a prefix, made by h9 on h86
+zig build web                  # packs it into zig-out/web/wine.h9a, from src/web/wine.list
+```
+
 ### Browser host
 
 `zig build web` builds h9 for wasm32-wasi

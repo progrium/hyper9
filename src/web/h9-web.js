@@ -716,6 +716,8 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   "private" (--gfx=noclip). scale is --gfx-scale: 0 (the default)
  *   draws in device pixels, 1 in CSS pixels, and N in device pixels
  *   divided by N. The canvas moves into the Worker at run.
+ * - env: h9's own environment (an object), not its programs': the
+ *   emulator's knobs, such as H9_JIT_HOT (src/jit/wasm_t1.zig)
  *
  * machine.run(argv) runs h9 with the flags and argv (['rc', '-i'], say)
  * and resolves to its exit status. machine.input(bytes or string) types,
@@ -725,7 +727,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ root, memory, backend, policy, terminal, tty = false, gfx } = {}) {
+export async function createMachine({ root, memory, backend, policy, terminal, tty = false, gfx, env } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -762,7 +764,7 @@ export async function createMachine({ root, memory, backend, policy, terminal, t
           }
         };
         worker.onerror = (e) => reject(new Error(e.message));
-        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)), tty, ...start }, transfer);
+        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)), tty, env, ...start }, transfer);
       });
     },
     input(data) {

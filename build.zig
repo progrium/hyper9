@@ -1086,6 +1086,22 @@ pub fn build(b: *std.Build) void {
         const archive = mk.addOutputFileArg("linux.h9a");
         web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "linux.h9a").step);
     } else |_| {}
+    // The demo page's Wine root archive for ?wine (site/wine.html), from
+    // the root scripts/wine-web.sh makes and src/web/wine.list; left out
+    // without one.
+    const web_wine_root = b.option([]const u8, "web-wine-root", "386 Wine root tree for the browser host's Wine archive (default .local/linux/wine-web)") orelse
+        b.pathFromRoot(".local/linux/wine-web");
+    if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_wine_root, "root/.wine/system.reg" }), .{})) {
+        const webroot = b.addExecutable(.{
+            .name = "webroot",
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        });
+        const mk = b.addRunArtifact(webroot);
+        mk.addArg(web_wine_root);
+        mk.addFileArg(b.path("src/web/wine.list"));
+        const archive = mk.addOutputFileArg("wine.h9a");
+        web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "wine.h9a").step);
+    } else |_| {}
     // The demo page in Chromium through Playwright (tests/web/browser.mjs).
     const web_test = b.addSystemCommand(&.{ "node", "tests/web/browser.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
     web_test.setCwd(b.path("."));

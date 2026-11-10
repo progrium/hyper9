@@ -12,7 +12,10 @@
 //!     entries, each: u32 path length, path, u32 mode, u32 size, data
 //!
 //! little-endian, with POSIX modes (S_IFDIR for directories, which have no
-//! data), in path order.
+//! data), in path order. A file whose bytes an earlier entry already has
+//! is written with size 0xffffffff and, in place of data, a u32: that
+//! entry's index, counting from 0. Wine's prefix copies its DLLs, so its
+//! archive would hold most of them twice.
 
 const std = @import("std");
 
@@ -87,11 +90,24 @@ pub fn main(init: std.process.Init) !u8 {
     var fw = out_file.writer(io, &buf);
     const w = &fw.interface;
     try w.writeAll("h9root1\n");
-    for (entries.values()) |e| {
+    // Each file's index by its contents' hash, for the shared entries.
+    var by_hash: std.AutoHashMapUnmanaged([32]u8, u32) = .empty;
+    for (entries.values(), 0..) |e, i| {
         const data: []const u8 = if (e.src) |s| try root.readFileAlloc(io, s, arena, .limited(1 << 30)) else "";
         try w.writeInt(u32, @intCast(e.path.len), .little);
         try w.writeAll(e.path);
         try w.writeInt(u32, e.mode, .little);
+        if (e.src != null and data.len > 0) {
+            var h: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(data, &h, .{});
+            const got = try by_hash.getOrPut(arena, h);
+            if (got.found_existing) {
+                try w.writeInt(u32, 0xffffffff, .little);
+                try w.writeInt(u32, got.value_ptr.*, .little);
+                continue;
+            }
+            got.value_ptr.* = @intCast(i);
+        }
         try w.writeInt(u32, @intCast(data.len), .little);
         try w.writeAll(data);
     }
