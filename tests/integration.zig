@@ -2203,7 +2203,8 @@ test "an unhandled note kills the process with the note as its status [baseline]
         \\echo die >/proc/$p/note
         \\wait $w
     ;
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
+    var tb: [16]u8 = undefined;
+    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 20_000), "--rc", script });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "die") != null);
     try std.testing.expectEqual(0, r.code);

@@ -23,7 +23,7 @@ const lift = @import("vcpu").x86jit.lift;
 const helpers = @import("vcpu").x86jit.helpers;
 const wasm_t1 = @import("vcpu").wasm_t1;
 const build_options = @import("build_options");
-const vmm_check = @import("vcpu").x86jit.vmm_check;
+const check_vmm = @import("vcpu").check_vmm;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter. T1 is the
@@ -47,8 +47,8 @@ pub const Cpu = struct {
     c: x86cpu.Cpu = .{},
     /// T0's decoded instructions, which `run` points `c` at.
     icache: exec.ICache = .{},
-    /// -Djit-check's state (src/jit/x86/vmm_check.zig).
-    check: vmm_check.State = .{},
+    /// -Djit-check's state (src/jit/check/vmm.zig).
+    check: check_vmm.State = .{},
 };
 
 /// Frees -Djit-check's state.
@@ -91,10 +91,10 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     if (stop.load(.acquire) != 0) return .interrupted;
     // The lifter's call.helper table (x87).
     ctx.helpers = helpers.tableAddr();
-    // -Djit-check: every region lifted and checked against T0.
-    if (build_options.jit_check) return exitOf(c, ctx, vmm_check.run(&cpu.check, c, ctx, &m));
+    // -Djit-check: every region lifted and checked against T0, in T1's loop.
+    if (build_options.jit_check) return runT1(cpu, ctx, &m, t1_emitter orelse undefined);
     if (tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);
-    if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, &m, em);
+    if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(cpu, ctx, &m, em);
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
     return exitOf(c, ctx, runT0(c, ctx, &m, budget));
 }
@@ -119,7 +119,8 @@ fn runT0Opts(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64, branches: u32) 
 /// exception or stores to code. Compiled code spends ctx.budget and counts
 /// ctx.retired itself; the lifter's `call.interp` reaches T0's memory
 /// through a lift.Mem in ctx.frontend.
-fn runT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!vmm.Exit {
+fn runT1(cpu: *Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!vmm.Exit {
+    const c = &cpu.c;
     var lm: lift.Mem = .{ .ctx = m, .translateFn = TlbMem.translateFn };
     ctx.frontend = @intFromPtr(&lm);
     // The lifter's getreg and setreg offsets are into x86cpu.Cpu.
@@ -139,7 +140,10 @@ fn runT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!v
         // the one that holds.
         const before = ctx.retired;
         const c_before = c.retired;
-        const r = dispatch.run(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator, ctx, cfg, &t1_stats);
+        const r = if (build_options.jit_check)
+            check_vmm.run(&cpu.check, check_vmm.x86_guest, c, ctx, tier == .t1)
+        else
+            dispatch.run(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator, ctx, cfg, &t1_stats);
         c.retired = c_before +% (ctx.retired -% before);
         switch (r) {
             // Compiled code leaves Cpu.fl's bits current (lift.zig).
