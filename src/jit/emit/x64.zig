@@ -1771,6 +1771,11 @@ test "chain sites link, and the jump cache finds a target inline" {
 const check = @import("../check.zig");
 const native_mod = @import("native.zig");
 
+/// The region-by-region tests below run random programs until this many
+/// regions have been checked natively, or give up after max_programs.
+const min_regions = 400;
+const max_programs = 5000;
+
 /// Checks one lifted region from Cpu `start`: with ir_eval, and then, if
 /// that agrees with T0, natively. Returns false on a native divergence
 /// (printed), null if ir_eval itself diverges (the lifter's, not ours),
@@ -1800,7 +1805,10 @@ test "random arm64 programs agree with T0 natively, region by region" {
     var prng = std.Random.DefaultPrng.init(0x64);
     var buf: [65]u32 = undefined;
     var regions: u32 = 0;
-    for (0..300) |i| {
+    // Programs until min_regions regions have run, whatever the random
+    // stream's mix of classes, within max_programs.
+    var i: u64 = 0;
+    while (regions < min_regions and i < max_programs) : (i += 1) {
         const words = gen.program(prng.random(), .{ .len = 48 }, &buf);
         s.load(words, i);
         var cpu = s.cpu(prng.random());
@@ -1819,7 +1827,7 @@ test "random arm64 programs agree with T0 natively, region by region" {
     }
     // At least every program's first region: most end there, at a fault
     // or the SVC, and a new gen_a64 class can tip the few that chain.
-    try std.testing.expect(regions >= 300);
+    try std.testing.expect(regions >= min_regions);
 }
 
 test "random 386 programs agree with T0 natively, region by region" {
@@ -1857,7 +1865,10 @@ test "random 386 programs agree with T0 natively, region by region" {
     defer code.deinit();
     var buf: [mem.page_size - 16]u8 = undefined;
     var regions: u32 = 0;
-    for (0..300) |i| {
+    // Programs until min_regions regions have run, whatever the random
+    // stream's mix of classes, within max_programs.
+    var i: u64 = 0;
+    while (regions < min_regions and i < max_programs) : (i += 1) {
         var prng = std.Random.DefaultPrng.init(0x86 + i);
         const bytes = gen.program(prng.random(), .{ .len = 48 }, &buf);
         const regs = gen.registers(prng.random());
@@ -1882,7 +1893,7 @@ test "random 386 programs agree with T0 natively, region by region" {
             if (o.retired == 0 or (o.exit != .chain and o.exit != .indirect)) break;
         }
     }
-    try std.testing.expect(regions > 300);
+    try std.testing.expect(regions >= min_regions);
 }
 
 // ---------------------------------------------------------------- random IR
