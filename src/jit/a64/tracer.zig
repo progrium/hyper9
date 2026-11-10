@@ -47,10 +47,9 @@ pub const State = struct {
     data: [mem.page_size]u8 align(mem.page_size) = undefined,
     cpu: t0.Cpu = .{},
     tlb: mem.Tlb = .{},
-    regions: [2]mem.Region = undefined,
-    map: mem.Map = undefined,
+    maps: [2]mem.Mapping = undefined,
+    view: mem.View = undefined,
     cache: t0.Cache = undefined,
-    kick: u32 = 0,
     machine: t0.Machine = undefined,
     ctx: ctx_mod.Ctx = .{},
 
@@ -61,24 +60,23 @@ pub const State = struct {
         std.mem.writeInt(u64, s.data[0..8], 1000, .little);
         s.cpu = .{ .pc = code_va };
         s.tlb = .{};
-        s.regions = .{
-            .{ .va = code_va, .mem = &s.code, .exec = true },
-            .{ .va = data_va, .mem = &s.data, .write = true },
+        s.maps = .{
+            .{ .va = code_va, .len = mem.page_size, .host = @intFromPtr(&s.code), .perms = .{ .exec = true } },
+            .{ .va = data_va, .len = mem.page_size, .host = @intFromPtr(&s.data), .perms = .{ .write = true } },
         };
-        s.map = .{ .regions = &s.regions };
+        s.view = .{ .maps = &s.maps, .tlb = &s.tlb };
         // Stepping decodes as it goes, so the page cache stays empty.
         s.cache = .init(std.heap.page_allocator);
-        s.kick = 0;
-        s.machine = .{ .cpu = &s.cpu, .tlb = &s.tlb, .space = t0.mapSpace(&s.map), .cache = &s.cache, .kick = &s.kick };
         s.ctx = .{
             .cpu = @intFromPtr(&s.cpu),
             .tlb = @intFromPtr(&s.tlb),
-            .space = @intFromPtr(&s.map),
+            .space = @intFromPtr(&s.view),
             .frontend = @intFromPtr(&s.machine),
-            .slow_load = @intFromPtr(&mem.mapSlowLoad),
-            .slow_store = @intFromPtr(&mem.mapSlowStore),
+            .slow_load = @intFromPtr(&mem.slowLoad),
+            .slow_store = @intFromPtr(&mem.slowStore),
             .interp = @intFromPtr(&lift.interp),
         };
+        s.machine = .init(&s.cpu, &s.ctx, &s.cache, null);
         return &s.ctx;
     }
 

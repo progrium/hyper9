@@ -132,7 +132,7 @@ pub const CodePages = struct {
     bits: []std.atomic.Value(usize),
     /// Bumped by every `invalidate`, so a front end's decode cache can
     /// tell that some page lost its code since it last looked.
-    epoch: std.atomic.Value(u64) = .init(0),
+    epoch: std.atomic.Value(usize) = .init(0), // usize: wasm32 has no 64-bit atomics
     hooks: Hooks,
 
     pub const Hooks = struct {

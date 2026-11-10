@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const dec = @import("decode.zig");
 const exec = @import("exec.zig");
 const mem = @import("../mem.zig");
+const Ctx = @import("../../jit/ctx.zig").Ctx;
 
 const supported = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 
@@ -115,9 +116,6 @@ const Native = struct {
     }
 };
 
-fn noFill(_: *anyopaque, _: *mem.Tlb, _: u64, _: mem.Access) exec.Fill {
-    return .{ .fault = .unmapped };
-}
 
 const interesting = [_]u64{
     0,                  1,                  2,                  0xffffffffffffffff,
@@ -174,8 +172,9 @@ test "T0 matches the host CPU on random data-processing instructions" {
     var tlb: mem.Tlb = .{};
     var cache: exec.Cache = .init(gpa);
     defer cache.deinit();
-    var kick: u32 = 0;
-    var m: exec.Machine = .{ .cpu = &cpu, .tlb = &tlb, .space = .{ .ctx = undefined, .fill = noFill }, .cache = &cache, .kick = &kick };
+    var view: mem.View = .{ .tlb = &tlb };
+    var ctx: Ctx = .{ .tlb = @intFromPtr(&tlb), .space = @intFromPtr(&view) };
+    var m: exec.Machine = .init(&cpu, &ctx, &cache, null);
 
     var tried: usize = 0;
     var kinds: [dec.nkinds]u32 = @splat(0);
@@ -262,8 +261,7 @@ test "T0 matches the host CPU on random loads and stores" {
     const t0_buf = try gpa.alignedAlloc(u8, .fromByteUnits(mem.page_size), size);
     defer gpa.free(t0_buf);
     const va: u64 = @intFromPtr(host_buf.ptr);
-    const regions = [_]mem.Region{.{ .va = va, .mem = t0_buf, .write = true }};
-    const map: mem.Map = .{ .regions = &regions };
+    const maps = [_]mem.Mapping{.{ .va = va, .len = size, .host = @intFromPtr(t0_buf.ptr), .perms = .{ .write = true } }};
 
     var prng: std.Random.DefaultPrng = .init(0x243f6a8885a308d3);
     const rand = prng.random();
@@ -273,8 +271,9 @@ test "T0 matches the host CPU on random loads and stores" {
     var tlb: mem.Tlb = .{};
     var cache: exec.Cache = .init(gpa);
     defer cache.deinit();
-    var kick: u32 = 0;
-    var m: exec.Machine = .{ .cpu = &cpu, .tlb = &tlb, .space = exec.mapSpace(&map), .cache = &cache, .kick = &kick };
+    var view: mem.View = .{ .maps = &maps, .tlb = &tlb };
+    var ctx: Ctx = .{ .tlb = @intFromPtr(&tlb), .space = @intFromPtr(&view) };
+    var m: exec.Machine = .init(&cpu, &ctx, &cache, null);
 
     var tried: usize = 0;
     var kinds: [dec.nkinds]u32 = @splat(0);

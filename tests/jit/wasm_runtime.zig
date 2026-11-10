@@ -18,11 +18,15 @@ const gpa = std.heap.wasm_allocator;
 export fn jit_eval(code: u64, a: u64, b: u64, c: u64, aux: u64) u64 {
     return vcpu.ir_eval.evalOpC(code, a, b, c, aux);
 }
+// Whichever slow path the Ctx names: the emitter cases run over a mem.Map,
+// the tracer over a mem.View.
 export fn jit_slow_load(ctx: *Ctx, va: u64, size_log2: u32) u32 {
-    return vcpu.mem.mapSlowLoad(ctx, va, size_log2);
+    const f: vcpu.mem.SlowLoadFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_load)));
+    return f(ctx, va, size_log2);
 }
 export fn jit_slow_store(ctx: *Ctx, va: u64, size_log2: u32, v: u64) u32 {
-    return vcpu.mem.mapSlowStore(ctx, va, size_log2, v);
+    const f: vcpu.mem.SlowStoreFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_store)));
+    return f(ctx, va, size_log2, v);
 }
 export fn jit_interp(ctx: *Ctx, handle: u64, pc: u64) u32 {
     return vcpu.a64.lift.interp(ctx, handle, pc);

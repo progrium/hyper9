@@ -7,15 +7,17 @@
 //! takes minutes.
 //!
 //! Guest memory goes through the per-vCPU software TLB in src/interp/mem.zig,
-//! the same one generated code checks inline, and on a miss through the
-//! address space's `fill`. The core uses no OS services: the caller hands
-//! it the address space, the clock, and the kick word.
+//! the same one generated code checks inline, and on a miss through
+//! `mem.probe` over the View in ctx.space. The core uses no OS services:
+//! the caller hands it the Ctx (TLB, address space, and exit-request word)
+//! and the clock.
 
 const std = @import("std");
 const builtin = @import("builtin");
 pub const dec = @import("decode.zig");
 const mem = @import("../mem.zig");
 const simd_exec = @import("simd_exec.zig");
+const Ctx = @import("../../jit/ctx.zig").Ctx;
 
 const Kind = dec.Kind;
 const Op = dec.Op;
@@ -83,40 +85,41 @@ pub const Exit = union(enum) {
     fault: Fault,
 };
 
-/// What `fill` reports.
-pub const Fill = struct {
-    /// The host address of `va`, or 0 with `fault` set.
-    host: usize = 0,
-    fault: mem.FaultKind = .unmapped,
+/// CNTVCT_EL0's source: ticks at 24 MHz.
+pub const Clock = struct {
+    ctx: ?*anyopaque = null,
+    now: *const fn (ctx: ?*anyopaque) u64,
 };
 
-/// The address space, as T0 needs it.
-pub const Space = struct {
-    ctx: *anyopaque,
-    /// Translates `va` for `access`. For reads and writes it also fills
-    /// `tlb`'s entry for the page, if the whole page is mapped that way.
-    /// For `.exec` it returns the host address of `va` only.
-    fill: *const fn (ctx: *anyopaque, tlb: *mem.Tlb, va: u64, access: mem.Access) Fill,
-};
-
-/// One vCPU's T0: its registers, TLB, decode cache, and the world.
+/// One vCPU's T0: its registers, the Ctx it runs with, and its decode
+/// cache.
 pub const Machine = struct {
     cpu: *Cpu,
-    tlb: *mem.Tlb,
-    space: Space,
+    /// tlb and space (a *mem.View) set; exit_request read, never cleared.
+    ctx: *Ctx,
     cache: *Cache,
-    /// Nonzero asks `run` to return `.interrupted` (Ctx.exit_request).
-    kick: *u32,
-    /// CNTVCT_EL0: ticks at 24 MHz. Null derives it from `retired`, which
-    /// makes runs deterministic.
-    clock: ?*const fn () u64 = null,
+    /// Null derives CNTVCT_EL0 from `retired`, which makes runs
+    /// deterministic.
+    clock: ?Clock = null,
     /// Set by a handler that returns `.exit`.
     exit: Exit = .interrupted,
 
-    fn kicked(m: *Machine) bool {
-        if (@atomicLoad(u32, m.kick, .monotonic) == 0) return false;
-        _ = @atomicRmw(u32, m.kick, .Xchg, 0, .acquire);
-        return true;
+    pub fn init(cpu: *Cpu, ctx: *Ctx, cache: *Cache, clock: ?Clock) Machine {
+        return .{ .cpu = cpu, .ctx = ctx, .cache = cache, .clock = clock };
+    }
+
+    inline fn tlb(m: *Machine) *mem.Tlb {
+        return @ptrFromInt(@as(usize, @intCast(m.ctx.tlb)));
+    }
+
+    inline fn view(m: *Machine) *mem.View {
+        return @ptrFromInt(@as(usize, @intCast(m.ctx.space)));
+    }
+
+    /// Whether someone asked T0 to leave (a kick, a shootdown, a flush).
+    /// The vmm backend clears the request, not T0.
+    inline fn requested(m: *Machine) bool {
+        return @atomicLoad(u32, &m.ctx.exit_request, .monotonic) != 0;
     }
 };
 
@@ -134,15 +137,20 @@ pub const Handler = *const fn (m: *Machine, o: *const Op, pc: u64) Next;
 
 pub const Page = struct {
     ops: [ops_per_page + 1]Op,
+    /// The host address of the text it was decoded from.
+    host: usize = 0,
 };
 
-/// Decoded pages by virtual page number. The owner flushes it when an
-/// executable mapping changes or code is written.
+/// Decoded pages by virtual page number, each with the host page it was
+/// decoded from. A lookup checks the page still maps there (a TLB hit, as
+/// a mapping change flushes the TLB), and the whole cache goes when any
+/// page's code is invalidated (CodePages.epoch moves: a store to code).
 pub const Cache = struct {
     gpa: std.mem.Allocator,
     pages: std.AutoHashMapUnmanaged(u64, *Page) = .empty,
     last_vp: u64 = std.math.maxInt(u64),
     last: ?*Page = null,
+    epoch: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator) Cache {
         return .{ .gpa = gpa };
@@ -161,34 +169,48 @@ pub const Cache = struct {
         c.last = null;
     }
 
+    /// Flushes the cache if code was invalidated since it last looked.
+    inline fn check(c: *Cache, m: *Machine) void {
+        const code = m.view().code orelse return;
+        const e = code.epoch.load(.monotonic);
+        if (e != c.epoch) {
+            c.flush();
+            c.epoch = e;
+        }
+    }
+
     /// The decoded page holding `va`, or null with m.exit set to the
     /// instruction abort.
     fn get(c: *Cache, m: *Machine, va: u64) ?*Page {
-        const vp = va >> mem.page_shift;
-        if (vp == c.last_vp) return c.last;
-        const p = c.pages.get(vp) orelse blk: {
-            const base = vp << mem.page_shift;
-            const f = m.space.fill(m.space.ctx, m.tlb, base, .exec);
-            if (f.host == 0) {
-                m.exit = .{ .fault = fault(va, .exec, f.fault) };
-                return null;
-            }
-            const text: *const [page_size]u8 = @ptrFromInt(f.host);
-            const p = c.gpa.create(Page) catch {
-                m.exit = .{ .fault = fault(va, .exec, .unmapped) };
+        const base = va & ~@as(u64, page_size - 1);
+        const h = mem.fastExec(m.tlb(), base, 4) orelse blk: {
+            const p = mem.probe(m.ctx, base, .exec) orelse {
+                m.exit = .{ .fault = ctxFault(m, va, .exec) };
                 return null;
             };
-            decodePage(p, base, text);
-            c.pages.put(c.gpa, vp, p) catch {
-                c.gpa.destroy(p);
-                m.exit = .{ .fault = fault(va, .exec, .unmapped) };
-                return null;
-            };
-            break :blk p;
+            break :blk @intFromPtr(p);
         };
+        const vp = va >> mem.page_shift;
+        if (vp == c.last_vp and c.last.?.host == h) return c.last;
+        const gop = c.pages.getOrPut(c.gpa, vp) catch {
+            m.exit = .{ .fault = fault(va, .exec, .unmapped) };
+            return null;
+        };
+        if (!gop.found_existing or gop.value_ptr.*.host != h) {
+            if (!gop.found_existing) {
+                gop.value_ptr.* = c.gpa.create(Page) catch {
+                    _ = c.pages.remove(vp);
+                    m.exit = .{ .fault = fault(va, .exec, .unmapped) };
+                    return null;
+                };
+            }
+            const p = gop.value_ptr.*;
+            p.host = h;
+            decodePage(p, base, @ptrFromInt(h));
+        }
         c.last_vp = vp;
-        c.last = p;
-        return p;
+        c.last = gop.value_ptr.*;
+        return c.last;
     }
 };
 
@@ -208,7 +230,8 @@ pub fn decodePage(p: *Page, va: u64, text: *const [page_size]u8) void {
 /// instructions (maxInt for no limit).
 pub fn run(m: *Machine, max_steps: u64) Exit {
     const cpu = m.cpu;
-    if (m.kicked()) return .interrupted;
+    if (m.requested()) return .interrupted;
+    m.cache.check(m);
     var page = m.cache.get(m, cpu.pc) orelse return m.exit;
     var base = cpu.pc & ~@as(u64, page_size - 1);
     var i: usize = @intCast((cpu.pc & (page_size - 1)) >> 2);
@@ -229,7 +252,7 @@ pub fn run(m: *Machine, max_steps: u64) Exit {
                 if (o.k != .next_page) n += 1;
                 // Every guest loop has a taken branch or crosses a page, so
                 // checking here bounds how long a kick waits.
-                if (m.kicked()) {
+                if (m.requested()) {
                     cpu.pc = t;
                     return .interrupted;
                 }
@@ -237,7 +260,11 @@ pub fn run(m: *Machine, max_steps: u64) Exit {
                     cpu.pc = t;
                     return .{ .fault = .{ .addr = t, .access = .exec, .kind = .alignment, .esr = (EC_PC_ALIGN << 26) | ESR_IL } };
                 }
-                if (t >> mem.page_shift != base >> mem.page_shift) {
+                // A store to code, here or on another vCPU, drops what was
+                // decoded from it: look the page up again.
+                const epoch = m.cache.epoch;
+                m.cache.check(m);
+                if (t >> mem.page_shift != base >> mem.page_shift or epoch != m.cache.epoch) {
                     cpu.pc = t;
                     page = m.cache.get(m, t) orelse return m.exit;
                     base = t & ~@as(u64, page_size - 1);
@@ -318,13 +345,18 @@ const MemFault = struct { addr: u64, kind: mem.FaultKind };
 
 /// The host address of an access of `n` bytes at `va` within one page.
 inline fn host(m: *Machine, va: u64, n: u32, comptime acc: mem.Access, f: *MemFault) ?usize {
-    if (mem.fast(m.tlb, va, n, acc == .write)) |h| return h;
-    const r = m.space.fill(m.space.ctx, m.tlb, va, acc);
-    if (r.host == 0) {
-        f.* = .{ .addr = va, .kind = r.fault };
+    if (mem.fast(m.tlb(), va, n, acc == .write)) |h| return h;
+    const p = mem.probe(m.ctx, va, acc) orelse {
+        f.* = .{ .addr = m.ctx.exit_addr, .kind = @enumFromInt(@as(u8, @truncate(m.ctx.exit_info >> 8))) };
         return null;
-    }
-    return r.host;
+    };
+    return @intFromPtr(p);
+}
+
+/// The fault mem.probe reported in the Ctx.
+fn ctxFault(m: *Machine, va: u64, acc: mem.Access) Fault {
+    _ = va;
+    return fault(m.ctx.exit_addr, acc, @enumFromInt(@as(u8, @truncate(m.ctx.exit_info >> 8))));
 }
 
 inline fn rawLoad(comptime T: type, h: usize, va: u64) T {
@@ -763,7 +795,7 @@ fn mrs(m: *Machine, o: *const Op) Next {
         sr.tpidr_el0 => cpu.tpidr,
         sr.tpidrro_el0 => cpu.tpidrro,
         sr.cntfrq_el0 => cntfrq,
-        sr.cntvct_el0 => if (m.clock) |c| c() else cpu.retired,
+        sr.cntvct_el0 => if (m.clock) |c| c.now(c.ctx) else cpu.retired,
         sr.ctr_el0 => ctr_el0,
         sr.dczid_el0 => dczid_el0,
         else => unreachable,
@@ -1042,35 +1074,6 @@ fn sdiv(comptime I: type, a: I, b: I) I {
     if (b == 0) return 0;
     if (b == -1) return 0 -% a;
     return @divTrunc(a, b);
-}
-
-// ---------------------------------------------------------------- a Space over mem.Map
-
-/// T0's view of the stand-in address space in mem.zig, for tests and the
-/// tracer.
-pub fn mapSpace(map: *const mem.Map) Space {
-    return .{ .ctx = @constCast(map), .fill = mapFill };
-}
-
-fn mapFill(p: *anyopaque, tlb: *mem.Tlb, va: u64, acc: mem.Access) Fill {
-    const map: *const mem.Map = @ptrCast(@alignCast(p));
-    for (map.regions) |*r| {
-        if (va < r.va or va - r.va >= r.mem.len) continue;
-        const ok = switch (acc) {
-            .read => r.read,
-            .write => r.write,
-            .exec => r.exec,
-        };
-        if (!ok) return .{ .fault = .permission };
-        const h: usize = @intFromPtr(r.mem.ptr) + @as(usize, @intCast(va - r.va));
-        const page = va & ~@as(u64, page_size - 1);
-        if (acc != .exec and page >= r.va and page + page_size <= r.va + r.mem.len) {
-            const table = if (acc == .write) &tlb.write else &tlb.read;
-            table[@intCast((va >> mem.page_shift) & (mem.entries - 1))] = .{ .tag = va >> mem.page_shift, .delta = @as(u64, h) -% va };
-        }
-        return .{ .host = h };
-    }
-    return .{ .fault = .unmapped };
 }
 
 test {
