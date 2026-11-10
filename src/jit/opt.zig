@@ -198,6 +198,13 @@ fn compareOf(insts: []const Inst, start: usize, idx: usize) ?Compare {
     const i = insts[idx];
     const f = insts[i.a];
     const x86 = i.op == .@"eflags.cond";
+    // A condition only means a comparison on its own group's flags: an
+    // eflags.cond of an nzcv value reads bits nzcv never sets.
+    const f_x86 = switch (f.op) {
+        .@"eflags.sub", .@"eflags.dec", .@"eflags.logic" => true,
+        else => false,
+    };
+    if (f_x86 != x86) return null;
     switch (f.op) {
         .@"nzcv.sub", .@"eflags.sub" => {
             const p = (if (x86) subPredX86(i.aux) else subPredA64(i.aux)) orelse return null;
@@ -775,4 +782,22 @@ test "opt: a pending.flags merge doesn't cover an earlier setreg" {
     );
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "setreg") != null);
+}
+
+test "opt: a condition on the other group's flags isn't folded" {
+    const got = try optimized(
+        \\region 0x1000
+        \\b0:
+        \\  %0 = getreg:i64 #0x8
+        \\  %1 = nzcv.sub:flags %0, %0
+        \\  %2 = eflags.cond:i1 %1 #0x4
+        \\  brcond %2 -> b1 b2
+        \\b1:
+        \\  exit.chain #0x1
+        \\b2:
+        \\  exit.chain #0x2
+        \\
+    );
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "icmp") == null);
 }
