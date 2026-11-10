@@ -1953,7 +1953,7 @@ ls`) is looked up on the Linux `PATH`, and an absolute path is a path in the
 Linux view, so `h9 --root ./alpine /9/bin/ls` runs 9front's `ls`. `--rc`
 always runs 9front's rc. Each program then runs as what it is: an ELF exec'd
 from 9front runs as Linux, and an a.out exec'd from Linux runs as 9front, so
-the two kinds pipe into each other freely. A 9front program reaches the
+the two kinds pipe into each other freely. A script that starts `#!/bin/rc` runs with 9front's rc when the Linux root has no `/bin/rc`, so `/9/bin/wsmount` works from busybox, and its mount is the shell's. A 9front program reaches the
 Linux tree as `'#λ'` (quoted in rc), so `'#λ'/bin/busybox ls` runs
 busybox from rc.
 
