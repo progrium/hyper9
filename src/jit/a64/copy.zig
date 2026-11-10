@@ -85,6 +85,12 @@ fn touchesFp(k: sd.Kind) bool {
 pub fn plan(w: u32, o: dec.Op) ?Plan {
     if (o.k == .undef or o.k == .next_page) return null;
     if (w & 0x1f00_0000 == 0x1000_0000) return null; // ADR, ADRP
+    // TBL and TBX of more than one register: the list must be consecutive
+    // registers, which a field rewrite can't keep.
+    if (o.k.isSimd()) switch (sd.ofKind(o.k)) {
+        .tbl, .tbx => if (o.a != 0) return null,
+        else => {},
+    };
     const r = dec.regs(o);
     if (r.mem != .none or r.ctrl != .none or r.system) return null;
     const sp_bit: u64 = 1 << dec.SP;
@@ -191,4 +197,11 @@ test "plans: fields, ZR, SP, and what doesn't qualify" {
     try testing.expectEqual(gpOff(3) | D_READ, @as(u16, @truncate(ma.aux2 >> 48)));
     // tbl v0.16b, {v1.16b, v2.16b}, v3.16b: a register list, no
     try testing.expectEqual(@as(?Plan, null), plan(0x4e032020, dec.decode(0x4e032020, 0)));
+    // tbx v0.16b, {v31.16b, v0.16b}, v2.16b: no, though the list wraps
+    // onto the fields' registers
+    try testing.expectEqual(@as(?Plan, null), plan(0x4e0233e0, dec.decode(0x4e0233e0, 0)));
+    // mul v0.8h, v1.8h, v2.h[0] and h[1]: Rm is 4 bits with M an index bit; copied
+    // only with M clear, so the 5-bit field is the register
+    try testing.expect(plan(0x4f428020, dec.decode(0x4f428020, 0)) != null);
+    try testing.expectEqual(@as(?Plan, null), plan(0x4f528020, dec.decode(0x4f528020, 0)));
 }
