@@ -150,6 +150,9 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             /// Every vCPU, for sweeps and shootdowns.
             vcpus: std.ArrayList(*State) = .empty,
             vcpus_lock: std.atomic.Mutex = .unlocked,
+            /// kickAndWait calls holding vCPU pointers outside vcpus_lock;
+            /// a vCPU isn't freed until there are none.
+            kickers: std.atomic.Value(u32) = .init(0),
             /// The code cache, if this host and build generate code.
             jit: ?*cache.Cache = null,
             flush_wanted: std.atomic.Value(bool) = .init(false),
@@ -320,24 +323,38 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             /// Each sees whatever changed before this was called before it
             /// runs another guest instruction.
             fn kickAndWait(b: *EmuBackend, self: ?*State, pick: anytype) void {
-                var waits: [64]struct { s: *State, seq: u32 } = undefined;
+                const Wait = struct { s: *State, seq: u32 };
+                var stack: [64]Wait = undefined;
+                var heap: []Wait = &.{};
+                defer if (heap.len != 0) b.gpa.free(heap);
                 var n: usize = 0;
                 {
                     b.lockVcpus();
                     defer b.vcpus_lock.unlock();
+                    // Room to wait for every one of them: a vCPU not waited
+                    // for could still be reading what the caller changes.
+                    const waits: []Wait = if (b.vcpus.items.len <= stack.len) &stack else blk: {
+                        heap = b.gpa.alloc(Wait, b.vcpus.items.len) catch @panic("zemu: out of memory in a shootdown");
+                        break :blk heap;
+                    };
                     for (b.vcpus.items) |s| {
                         if (s == self or !pick.wants(s)) continue;
                         const seq = s.seq.load(.seq_cst);
                         if (seq & 1 == 0) continue;
                         _ = @atomicRmw(u32, &s.rt.ctx.exit_request, .Or, req_sync, .seq_cst);
-                        if (n < waits.len) {
-                            waits[n] = .{ .s = s, .seq = seq };
-                            n += 1;
-                        }
+                        waits[n] = .{ .s = s, .seq = seq };
+                        n += 1;
                     }
+                    // Raised under the lock, so a destroy that removes one
+                    // of these afterwards waits for the waits below.
+                    _ = b.kickers.fetchAdd(1, .seq_cst);
                 }
-                // A vCPU can't be destroyed while it runs, and it runs until
-                // it sees the request, so the pointers stay good.
+                defer _ = b.kickers.fetchSub(1, .seq_cst);
+                const waits: []Wait = if (heap.len != 0) heap else &stack;
+                // A vCPU may leave guest code for its own reasons and be
+                // destroyed (its thread exiting) before the wait reads its
+                // seq; EmuVcpu.destroy waits out `kickers`, so the pointers
+                // stay good.
                 for (waits[0..n]) |w| {
                     while (w.s.seq.load(.seq_cst) == w.seq) {
                         b.io.futexWaitTimeout(u32, &w.s.seq.raw, w.seq, .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }) catch {};
@@ -371,6 +388,13 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             pub fn map(as: *EmuSpace, va: u64, m: []align(vmm.page_size) u8, perms: vmm.Perms) vmm.CreateError!void {
                 if (va % vmm.page_size != 0 or m.len % vmm.page_size != 0 or m.len == 0) return error.BadAddress;
                 if (va +% m.len < va) return error.BadAddress;
+                // Only the backend's own memory: a host pointer from
+                // anywhere else would let guest code reach outside the
+                // sandbox (A1 saw a kernel bug pass a null slice).
+                const arena = as.backend.arena.mem;
+                const lo = @intFromPtr(arena.ptr);
+                const p = @intFromPtr(m.ptr);
+                if (p < lo or p - lo > arena.len or m.len > arena.len - (p - lo)) return error.BadAddress;
                 as.lockSpin();
                 defer as.lock.unlock();
                 for (as.regions.items) |r| {
@@ -583,6 +607,8 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                         break;
                     };
                 }
+                // A shootdown that saw this vCPU may still read its seq.
+                while (b.kickers.load(.seq_cst) != 0) std.atomic.spinLoopHint();
                 if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
                 switch (s.cpu) {
                     inline else => |*c, a| if (@hasDecl(Guest(a), "deinit")) Guest(a).deinit(c),
@@ -758,6 +784,10 @@ test "address spaces: map, translate, copy, and unmap" {
     try as.map(0x10000, m, .{ .write = true });
     try testing.expectError(error.BadAddress, as.map(0x11000, m, .{}));
     try testing.expectError(error.BadAddress, as.map(0x10001, m, .{}));
+    // Memory that isn't the backend's.
+    var outside: [vmm.page_size]u8 align(vmm.page_size) = undefined;
+    try testing.expectError(error.BadAddress, as.map(0x40000, &outside, .{}));
+    try testing.expectError(error.BadAddress, as.map(0x40000, @as([*]align(vmm.page_size) u8, @ptrFromInt(vmm.page_size))[0..vmm.page_size], .{}));
     try testing.expect(as.translate(0x10ff8, 16) != null);
     try testing.expect(as.translate(0x11ff8, 16) == null);
     var buf: [4]u8 = .{ 1, 2, 3, 4 };
