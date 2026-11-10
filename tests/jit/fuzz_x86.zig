@@ -155,6 +155,10 @@ fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *vcpu.ctx.Ct
         const r0 = x86.step(c);
         shadow.commit();
         const e0: vcpu.ctx.Exit = @enumFromInt(r0);
+        // Unicorn's IDIV helper divides EDX:EAX = 2^63 by -1 in 64 bits,
+        // which kills the host with SIGFPE. T0 raises #DE there (and left
+        // EDX:EAX as they were); the program ends without asking Unicorn.
+        if (exceptionOf(c, e0) == 0 and cpu.r[2] == 0x80000000 and cpu.r[0] == 0) return false;
         const st = try e.step();
         const same = switch (st) {
             .next => e0 == .ok,
@@ -162,7 +166,7 @@ fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *vcpu.ctx.Ct
             .breakpoint => e0 == .brk,
             .undef => e0 == .undef,
             .fault => |f| e0 == .fault and f.addr == c.exit_addr,
-            .exception => |v| e0 == .fault and c.exit_info >> 8 == v,
+            .exception => |v| exceptionOf(c, e0) == v,
         };
         var bad = !same;
         if (!same) try w.print("exit: at {x} ({x}) T0 {t} (info {x}), unicorn {any}\n", .{ pc, bytes[0..@min(bytes.len, if (inst) |in| in.len else 8)], e0, c.exit_info, st });
@@ -183,6 +187,13 @@ fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *vcpu.ctx.Ct
         if (e0 != .ok) return false;
     }
     return false;
+}
+
+/// The vector of the exception T0 raised, if it raised one (lift.exitFor's
+/// exit_info: exception_kind in bits 8-15, the vector above).
+fn exceptionOf(c: *const vcpu.ctx.Ctx, e: vcpu.ctx.Exit) ?u64 {
+    if (e != .fault or (c.exit_info >> 8) & 0xff != vcpu.x86jit.lift.exception_kind) return null;
+    return c.exit_info >> 16;
 }
 
 fn canon(c: *const x86.Cpu) lockstep.X86 {
