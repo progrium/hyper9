@@ -56,6 +56,8 @@ const win64 = builtin.os.tag == .windows;
 /// them (the host's own CPU for native builds).
 const ssse3 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .ssse3);
 const sse41 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .sse4_1);
+const sse42 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .sse4_2);
+const fma3 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .fma);
 
 // Registers.
 const RAX = 0;
@@ -1369,7 +1371,7 @@ fn vecNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
         .@"v.mul" => es == 1 or (es == 2 and sse41),
         .@"v.shl", .@"v.lshr" => es != 0 and x.imm < 256,
         .@"v.ashr" => (es == 1 or es == 2) and x.imm < 256,
-        .@"v.cmp" => es <= 2 or (es == 3 and sse41 and (x.imm == 0 or x.imm == 1)),
+        .@"v.cmp" => es <= 2 or (es == 3 and (sse42 or (sse41 and (x.imm == 0 or x.imm == 1)))),
         .@"v.min", .@"v.max" => switch (es) {
             0 => x.imm == 0 or sse41,
             1 => x.imm == 1 or sse41,
@@ -1570,7 +1572,7 @@ fn vecCmp(e: *E, es: u2, p: ir.Pred) !void {
         0 => &.{0x64},
         1 => &.{0x65},
         2 => &.{0x66},
-        3 => &.{ 0x38, 0x37 }, // pcmpgtq (SSE4.2): never chosen
+        3 => &.{ 0x38, 0x37 }, // pcmpgtq (SSE4.2)
     };
     switch (p) {
         .eq, .ne => try sse(e, 0x66, false, eq_op, 0, 1),
@@ -1657,10 +1659,12 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
         .@"fp.tosint" => if (vec or x.imm != 0) return false,
         .@"fp.fromsint", .@"fp.fromuint" => if (vec or x.imm != 0 or (i.ty != .i32 and i.ty != .i64)) return false,
         .@"fp.round" => {},
+        .@"fp.fma" => if (!fma3) return false,
         else => if (arith == null) return false,
     }
     try ldX(e, 0, i.a, ta);
     if (i.b != ir.none) try ldX(e, 1, i.b, r.insts.items[i.b].ty);
+    if (i.c != ir.none) try ldX(e, 2, i.c, r.insts.items[i.c].ty);
     var nan_check = true;
     var slow: [3]?usize = .{ null, null, null };
     switch (i.op) {
@@ -1726,6 +1730,12 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
             try sse(e, 0x66, false, &.{0xef}, 0, 0); // pxor xmm0, xmm0
             try sse(e, if (i.ty == .i64) 0xf2 else 0xf3, ta == .i64, &.{0x2a}, 0, RAX); // cvtsi2ss / sd
             nan_check = false;
+        },
+        .@"fp.fma" => {
+            // vfmadd213ss/sd/ps/pd xmm0, xmm1, xmm2: xmm0 = xmm1 * xmm0 +
+            // xmm2, rounded once. VEX: C4, RXB and map 0F38, W vvvv
+            // (xmm1, inverted) L pp (66).
+            try e.bs(&.{ 0xc4, 0xe2, @as(u8, if (dbl) 0x80 else 0) | 0x71, if (vec) 0xa8 else 0xa9, 0xc2 });
         },
         else => try sse(e, pfx, false, &.{arith.?}, 0, if (i.op == .@"fp.sqrt") 0 else 1),
     }
