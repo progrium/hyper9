@@ -2654,3 +2654,22 @@ test "a long-mode program: MOVABS, a RIP-relative store, R8-R15, and MOVSXD" {
     try std.testing.expectEqual(@as(u64, 0x5566_7788), t.c.r[10]);
     try std.testing.expectEqual(base64 + 28, t.c.rip);
 }
+
+test "a long-mode store into the code takes effect at the next instruction, with the decode cache on" {
+    var t: T64 = .{};
+    t.init();
+    const ic = try std.testing.allocator.create(ICacheOf(.long));
+    defer std.testing.allocator.destroy(ic);
+    ic.init();
+    t.c.icache = ic;
+    //  0: b8 01 00 00 00           movl $1, %eax
+    //  5: 85 db                    testl %ebx, %ebx
+    //  7: 75 0b                    jne done
+    //  9: ff c3                    incl %ebx
+    // 11: c6 05 ef ff ff ff 07     movb $7, -0x11(%rip)  (byte 1)
+    // 18: eb ec                    jmp 0
+    // 20: cc                       done: int3
+    const code = [_]u8{ 0xb8, 1, 0, 0, 0, 0x85, 0xdb, 0x75, 0x0b, 0xff, 0xc3, 0xc6, 0x05, 0xef, 0xff, 0xff, 0xff, 0x07, 0xeb, 0xec, 0xcc };
+    try std.testing.expectEqual(Exit64.breakpoint, runCode64(&t, &code));
+    try std.testing.expectEqual(@as(u64, 7), t.c.r[0]);
+}
