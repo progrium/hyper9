@@ -1,6 +1,6 @@
 # The emulator's CPUs: the shared layer
 
-This describes, as built on the `vcpu` branch, what h9's own CPUs share: the emulator backend they run under (`zemu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [h86-ha64](../design/h86-ha64.md) proposal says why the CPUs exist and how they replace Unicorn and v86. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
+This describes, as built on the `vcpu` branch, what h9's own CPUs share: the emulator backend they run under (`zemu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [hcpu](../design/hcpu.md) proposal says why the CPUs exist and how they replace Unicorn and v86. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
 
 ## Contents
 
