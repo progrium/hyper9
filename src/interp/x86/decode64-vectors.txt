@@ -1,0 +1,1967 @@
+# Long-mode decoder vectors, for decode.zig's test "decode64 against objdump".
+# Random encodings, decoded by decodeIn(.long) and kept only where GNU
+# objdump -M intel64 agreed on the length, memory operand, and immediate:
+#   bytes len op size mem rip_rel base index scale disp imm  # objdump's text
+# base and index are 0-15, or 16 for none; disp and imm are 64-bit hex.
+# "bytes - ud" is 15 bytes that objdump calls (bad) and the decoder #UD.
+4392 2 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%r10d
+364e83fec4 5 cmp 8 0 0 16 16 0 0 ffffffffffffffc4  # cmpq $0xffffffffffffffc4,%rsi
+66d1d7 3 rcl 2 0 0 16 16 0 0 0  # rclw $1,%di
+f23e66430f23dc 7 gp 2 0 0 16 16 0 0 0  # movq %r12,%db3
+662e64fff4 5 push 2 0 0 16 16 0 0 0  # pushw %sp
+430f9fdd 4 setcc 1 0 0 16 16 0 0 0  # setg %r13b
+f026440f9590440248bc 10 setcc 1 1 0 0 16 0 ffffffffbc480244 0  # setne -0x43b7fdbc(%rax)
+471bcb 3 sbb 4 0 0 16 16 0 0 0  # sbbl.s %r11d,%r9d
+8309d8 3 or 4 1 0 1 16 0 0 ffffffffffffffd8  # orl $0xffffffd8,(%rcx)
+660f6936 4 sse 2 1 0 6 16 0 0 0  # punpckhwd (%rsi),%xmm6
+65410f5e4690 6 sse 4 1 0 14 16 0 ffffffffffffff90 0  # divps %gs:-0x70(%r14),%xmm0
+f00f30 3 gp 4 0 0 16 16 0 0 0  # wrmsr
+490fca 3 bswap 8 0 0 16 16 0 0 0  # bswap %r10
+66440fe52585fc2267 9 sse 2 1 1 16 16 0 6722fc85 0  # pmulhw 0x6722fc85(%rip),%xmm12
+480fae10 4 sse 8 1 0 0 16 0 0 0  # ldmxcsr (%rax)
+0f29f8 3 sse 4 0 0 16 16 0 0 0  # movaps.s %xmm7,%xmm0
+66f00f5797c4922ec9 9 sse 2 1 0 7 16 0 ffffffffc92e92c4 0  # xorpd -0x36d16d3c(%rdi),%xmm2
+664519e8 4 sbb 2 0 0 16 16 0 0 0  # sbbw %r13w,%r8w
+2e660f120f 5 sse 2 1 0 7 16 0 0 0  # movlpd (%rdi),%xmm1
+26440f65b30a12ea64 9 sse 4 1 0 3 16 0 64ea120a 0  # pcmpgtw 0x64ea120a(%rbx),%mm6
+4f0fc68ebe8a6d1379 9 sse 8 1 0 14 16 0 136d8abe 79  # shufps $0x79,0x136d8abe(%r14),%xmm9
+f240c10ff4 5 ror 4 1 0 7 16 0 0 f4  # rorl $0xf4,(%rdi)
+4b3310 3 xor 8 1 0 8 16 0 0 0  # xorq (%r8),%rdx
+4f90 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%r8
+0f2e2cfb 4 sse 4 1 0 3 7 3 0 0  # ucomiss (%rbx,%rdi,8),%xmm5
+66460f43dc 5 cmovcc 2 0 0 16 16 0 0 0  # cmovaew %sp,%r11w
+4a0ffb6d03 5 sse 8 1 0 5 16 0 3 0  # psubq 0x3(%rbp),%mm5
+19af18446d79 6 sbb 4 1 0 7 16 0 796d4418 0  # sbbl %ebp,0x796d4418(%rdi)
+6626dbe3 4 x87 2 0 0 16 16 0 0 0  # fninit
+0f984565 4 setcc 1 1 0 5 16 0 65 0  # sets 0x65(%rbp)
+364a0fc43998 6 sse 8 1 0 1 16 0 0 98  # pinsrw $0x98,(%rcx),%mm7
+64660fe4ed 5 sse 2 0 0 16 16 0 0 0  # pmulhuw %xmm5,%xmm5
+4e0ff48d8aa50c38 8 sse 8 1 0 5 16 0 380ca58a 0  # pmuludq 0x380ca58a(%rbp),%mm1
+3e4fd9f7 4 x87 8 0 0 16 16 0 0 0  # fincstp
+83e4d5 3 and 4 0 0 16 16 0 0 ffffffffffffffd5  # andl $0xffffffd5,%esp
+22e2 2 and 1 0 0 16 16 0 0 0  # andb.s %dl,%ah
+480fa5d5 4 shld 8 0 0 16 16 0 0 0  # shldq %cl,%rdx,%rbp
+490ffcee 4 sse 8 0 0 16 16 0 0 0  # paddb %mm6,%mm5
+65460fdb4ce2de 7 sse 4 1 0 2 12 3 ffffffffffffffde 0  # pand %gs:-0x22(%rdx,%r12,8),%mm1
+660f42c2 4 cmovcc 2 0 0 16 16 0 0 0  # cmovbw %dx,%ax
+654acc 3 int3 8 0 0 16 16 0 0 0  # int3
+64460fe8d4 5 sse 4 0 0 16 16 0 0 0  # psubsb %mm4,%mm2
+4621972f98b5cd 7 and 4 1 0 7 16 0 ffffffffcdb5982f 0  # andl %r10d,-0x324a67d1(%rdi)
+f3664890 4 nop 8 0 0 16 16 0 0 0  # pause
+66260fabfc 5 bts 2 0 0 16 16 0 0 0  # btsw %di,%sp
+660f285b80 5 sse 2 1 0 3 16 0 ffffffffffffff80 0  # movapd -0x80(%rbx),%xmm3
+460f12f1 4 sse 4 0 0 16 16 0 0 0  # movhlps %xmm1,%xmm14
+660f4213 4 cmovcc 2 1 0 3 16 0 0 0  # cmovbw (%rbx),%dx
+2e6636410fb608 7 movzx 2 1 0 8 16 0 0 0  # movzbw (%r8),%cx
+3665f0470f017d37 8 gp 4 1 0 13 16 0 37 0  # invlpg %gs:0x37(%r13)
+4b0fd87d31 5 sse 8 1 0 13 16 0 31 0  # psubusb 0x31(%r13),%mm7
+3666664d0fd02dcbcb6f39 11 sse 8 1 1 16 16 0 396fcbcb 0  # addsubpd 0x396fcbcb(%rip),%xmm13
+6467480f103a 6 sse 8 1 0 2 16 0 0 0  # movups %fs:(%edx),%xmm7
+3e0f756313 5 sse 4 1 0 3 16 0 13 0  # pcmpeqw 0x13(%rbx),%mm4
+26677fb5 4 jcc 8 0 0 16 16 0 0 ffffffffffffffb5  # jg 0x1d6122
+480f5ec5 4 sse 8 0 0 16 16 0 0 0  # divps %xmm5,%xmm0
+2e4aab 3 stos 8 0 0 16 16 0 0 0  # stosq %rax,%es:(%rdi)
+66f0f00f35 5 gp 2 0 0 16 16 0 0 0  # sysexitl
+f04f0ff23e 5 sse 8 1 0 14 16 0 0 0  # pslld (%r14),%mm7
+4b0fdfda 4 sse 8 0 0 16 16 0 0 0  # pandn %mm2,%mm3
+64367ea6 4 jcc 8 0 0 16 16 0 0 ffffffffffffffa6  # jle 0xff408
+660fab7c1b3e 6 bts 2 1 0 3 3 0 3e 0  # btsw %di,0x3e(%rbx,%rbx,1)
+6609e0 3 or 2 0 0 16 16 0 0 0  # orw %sp,%ax
+66660fd7d9 5 sse 2 0 0 16 16 0 0 0  # pmovmskb %xmm1,%ebx
+f2421545d0c216 7 adc 4 0 0 16 16 0 0 16c2d045  # adcl $0x16c2d045,%eax
+0fdcd9 3 sse 4 0 0 16 16 0 0 0  # paddusb %mm1,%mm3
+4783acb3f1e690bfb2 9 sub 4 1 0 11 14 2 ffffffffbf90e6f1 ffffffffffffffb2  # subl $0xffffffb2,-0x406f190f(%r11,%r14,4)
+4881b16ea7a497bea1b6d8 11 xor 8 1 0 1 16 0 ffffffff97a4a76e ffffffffd8b6a1be  # xorq $0xffffffffd8b6a1be,-0x685b5892(%rcx)
+0f59d9 3 sse 4 0 0 16 16 0 0 0  # mulps %xmm1,%xmm3
+662e679d 4 popf 2 0 0 16 16 0 0 0  # popfw
+2dae9c71fd 5 sub 4 0 0 16 16 0 0 fd719cae  # subl $0xfd719cae,%eax
+f04e0f7e09 5 sse 8 1 0 1 16 0 0 0  # movq %mm1,(%rcx)
+2626660fc3497d 7 sse 2 1 0 1 16 0 7d 0  # movntiw %ecx,0x7d(%rcx)
+64410fc33d08d80f08 9 sse 4 1 1 16 16 0 80fd808 0  # movntil %edi,%fs:0x80fd808(%rip)
+3ef24b0fb6ed 6 movzx 8 0 0 16 16 0 0 0  # movzbq %r13b,%rbp
+4fc1d619 4 rcl 8 0 0 16 16 0 0 19  # rclq $0x19,%r14
+2e2e46f7cb5df55797 9 test 4 0 0 16 16 0 0 9757f55d  # testl $0x9757f55d,%ebx
+646466400f4609 7 cmovcc 2 1 0 1 16 0 0 0  # cmovbew %fs:(%rcx),%cx
+4e0f6fda 4 sse 8 0 0 16 16 0 0 0  # movq %mm2,%mm3
+262e4d0fd2d5 6 sse 8 0 0 16 16 0 0 0  # psrld %mm5,%mm2
+6665d7 3 xlat 2 0 0 16 16 0 0 0  # xlat %gs:(%rbx)
+640fac3aca 5 shrd 4 1 0 2 16 0 0 ca  # shrdl $0xca,%edi,%fs:(%rdx)
+f2dd3c05d3289b4d 8 x87 4 1 0 16 0 0 4d9b28d3 0  # fnstsw 0x4d9b28d3(,%rax,1)
+450f5ade 4 sse 4 0 0 16 16 0 0 0  # cvtps2pd %xmm14,%xmm11
+40a7 2 cmps 4 0 0 16 16 0 0 0  # cmpsl %es:(%rdi),%ds:(%rsi)
+660f15f8 4 sse 2 0 0 16 16 0 0 0  # unpckhpd %xmm0,%xmm7
+4ae1c0 3 loope 8 0 0 16 16 0 0 ffffffffffffffc0  # loopeq 0x2ff35
+f23e674bf7da 6 neg 8 0 0 16 16 0 0 0  # negq %r10
+f0662e0f6123 6 sse 2 1 0 3 16 0 0 0  # punpcklwd (%rbx),%xmm4
+6467f34a0fff6d26 8 sse 8 1 0 5 16 0 26 0  # ud0q %fs:0x26(%ebp),%rbp
+f2f0644a0f12b442412c9195 12 sse 8 1 0 2 8 1 ffffffff95912c41 0  # movddup %fs:-0x6a6ed3bf(%rdx,%r8,2),%xmm6
+64f0f7fe 4 idiv 4 0 0 16 16 0 0 0  # idivl %esi
+656c 2 gp 4 0 0 16 16 0 0 0  # insb (%dx),%es:(%rdi)
+3e40d0d9 4 rcr 1 0 0 16 16 0 0 0  # rcrb $1,%cl
+666766d1eb 5 shr 2 0 0 16 16 0 0 0  # shrw $1,%bx
+265d 2 pop 8 0 0 16 16 0 0 0  # popq %rbp
+ba65985baa 5 mov 4 0 0 16 16 0 0 aa5b9865  # movl $0xaa5b9865,%edx
+4b0fbfd0 4 movsx 8 0 0 16 16 0 0 0  # movswq %r8w,%rdx
+66470f1de0 5 nop 2 0 0 16 16 0 0 0  # nopw %r8w
+f3f0640f8c121f0b37 9 jcc 8 0 0 16 16 0 0 370b1f12  # jl 0x3723579f
+f066670fecb4405bce0ef2 11 sse 2 1 0 0 0 1 fffffffff20ece5b 0  # paddsb -0xdf131a5(%eax,%eax,2),%xmm6
+f367644f0f7eee 7 sse 8 0 0 16 16 0 0 0  # movq %xmm14,%xmm13
+48bf174e8cd3bce81a14 10 mov 8 0 0 16 16 0 0 141ae8bcd38c4e17  # movabsq $0x141ae8bcd38c4e17,%rdi
+66440fdadb 5 sse 2 0 0 16 16 0 0 0  # pminub %xmm3,%xmm11
+66430ffb48ee 6 sse 2 1 0 8 16 0 ffffffffffffffee 0  # psubq -0x12(%r8),%xmm1
+440f688ce97b7b8e6c 9 sse 4 1 0 1 5 3 6c8e7b7b 0  # punpckhbw 0x6c8e7b7b(%rcx,%rbp,8),%mm1
+f24d0f44e9 5 cmovcc 8 0 0 16 16 0 0 0  # cmoveq %r9,%r13
+670f14e4 4 sse 4 0 0 16 16 0 0 0  # unpcklps %xmm4,%xmm4
+480ff9f4 4 sse 8 0 0 16 16 0 0 0  # psubw %mm4,%mm6
+66460ff136 5 sse 2 1 0 6 16 0 0 0  # psllw (%rsi),%xmm14
+4f0f580dfe85b905 8 sse 8 1 1 16 16 0 5b985fe 0  # addps 0x5b985fe(%rip),%xmm9
+66470f51977a3ccf66 9 sse 2 1 0 15 16 0 66cf3c7a 0  # sqrtpd 0x66cf3c7a(%r15),%xmm10
+0faf0e 3 imul 4 1 0 6 16 0 0 0  # imull (%rsi),%ecx
+36416b3988 5 imul 4 1 0 9 16 0 0 ffffffffffffff88  # imull $0xffffff88,(%r9),%edi
+0f87a28a83b8 6 jcc 8 0 0 16 16 0 0 ffffffffb8838aa2  # ja 0xffffffffb88a69d2
+3e450fd8da 5 sse 4 0 0 16 16 0 0 0  # psubusb %mm2,%mm3
+80e1ed 3 and 1 0 0 16 16 0 0 ed  # andb $0xed,%cl
+3e4c757e 4 jcc 8 0 0 16 16 0 0 7e  # jne,pt 0x92c99
+66656493 4 xchg 2 0 0 16 16 0 0 0  # xchgw %ax,%bx
+c0c55b 3 rol 1 0 0 16 16 0 0 5b  # rolb $0x5b,%ch
+4b0fadc1 4 shrd 8 0 0 16 16 0 0 0  # shrdq %cl,%rax,%r9
+4e205aa6 4 and 1 1 0 2 16 0 ffffffffffffffa6 0  # andb %r11b,-0x5a(%rdx)
+4f25b27c0e1b 6 and 8 0 0 16 16 0 0 1b0e7cb2  # andq $0x1b0e7cb2,%rax
+f366f0450f20f9 7 gp 2 0 0 16 16 0 0 0  # movq %cr15,%r9
+67f0364dd11f 6 rcr 8 1 0 15 16 0 0 0  # rcrq $1,(%r15d)
+f5 1 cmc 4 0 0 16 16 0 0 0  # cmc
+f00fd11d220b17e7 8 sse 4 1 1 16 16 0 ffffffffe7170b22 0  # psrlw -0x18e8f4de(%rip),%mm3
+3e4c6beef9 5 imul 8 0 0 16 16 0 0 fffffffffffffff9  # imulq $0xfffffffffffffff9,%rsi,%r13
+3e654cffcc 5 dec 8 0 0 16 16 0 0 0  # decq %rsp
+4d0f52244e 5 sse 8 1 0 14 1 1 0 0  # rsqrtps (%r14,%rcx,2),%xmm12
+264c0f299f2287b9e7 9 sse 8 1 0 7 16 0 ffffffffe7b98722 0  # movaps %xmm11,-0x184678de(%rdi)
+66660ff1d9 5 sse 2 0 0 16 16 0 0 0  # psllw %xmm1,%xmm3
+0f73f71f 4 sse 4 0 0 16 16 0 0 1f  # psllq $0x1f,%mm7
+400fbeb2e6c34763 8 movsx 4 1 0 2 16 0 6347c3e6 0  # movsbl 0x6347c3e6(%rdx),%esi
+f20fe6e4 4 sse 4 0 0 16 16 0 0 0  # cvtpd2dq %xmm4,%xmm4
+81362b55b7e6 6 xor 4 1 0 6 16 0 0 e6b7552b  # xorl $0xe6b7552b,(%rsi)
+f0430f1f9ee1745e4a 9 nop 4 1 0 14 16 0 4a5e74e1 0  # nopl 0x4a5e74e1(%r14)
+660fde9f7e26c9e1 8 sse 2 1 0 7 16 0 ffffffffe1c9267e 0  # pmaxub -0x1e36d982(%rdi),%xmm3
+666444c0cd30 6 ror 1 0 0 16 16 0 0 30  # rorb $0x30,%bpl
+660f19ee 4 nop 2 0 0 16 16 0 0 0  # nopw %si
+66440f5ae9 5 sse 2 0 0 16 16 0 0 0  # cvtpd2ps %xmm1,%xmm13
+66660ffae2 5 sse 2 0 0 16 16 0 0 0  # psubd %xmm2,%xmm4
+56 1 push 8 0 0 16 16 0 0 0  # pushq %rsi
+4fd1532b 4 rcl 8 1 0 11 16 0 2b 0  # rclq $1,0x2b(%r11)
+66646481b86defe09b27f6 11 cmp 2 1 0 0 16 0 ffffffff9be0ef6d f627  # cmpw $0xf627,%fs:-0x641f1093(%rax)
+662e0f0120 5 gp 2 1 0 0 16 0 0 0  # smsww (%rax)
+66f22e4935a913cda0 9 xor 8 0 0 16 16 0 0 ffffffffa0cd13a9  # xorq $0xffffffffa0cd13a9,%rax
+66450fe5e3 5 sse 2 0 0 16 16 0 0 0  # pmulhw %xmm11,%xmm12
+3edbd7 3 x87 4 0 0 16 16 0 0 0  # fcmovnbe %st(7),%st
+48ec 2 gp 8 0 0 16 16 0 0 0  # inb (%dx),%al
+400f7652bc 5 sse 4 1 0 2 16 0 ffffffffffffffbc 0  # pcmpeqd -0x44(%rdx),%mm2
+f266480fd6f0 6 sse 8 0 0 16 16 0 0 0  # movdq2q %xmm0,%xmm6
+36660f5e6a98 6 sse 2 1 0 2 16 0 ffffffffffffff98 0  # divpd -0x68(%rdx),%xmm5
+f04f157c9334aa 7 adc 8 0 0 16 16 0 0 ffffffffaa34937c  # adcq $0xffffffffaa34937c,%rax
+652ade 3 sub 1 0 0 16 16 0 0 0  # subb.s %dh,%bl
+67f2660fa4e601 7 shld 2 0 0 16 16 0 0 1  # shldw $0x1,%sp,%si
+f6e9 2 imul1 1 0 0 16 16 0 0 0  # imulb %cl
+480f1ac0 4 nop 8 0 0 16 16 0 0 0  # nopq %rax
+4a0f32 3 gp 8 0 0 16 16 0 0 0  # rdmsr
+664159 3 pop 2 0 0 16 16 0 0 0  # popw %r9w
+65662e440fd03434 8 sse 2 1 0 4 6 0 0 0  # addsubpd %gs:(%rsp,%rsi,1),%xmm14
+4bfa 2 gp 8 0 0 16 16 0 0 0  # cli
+660ff91f 4 sse 2 1 0 7 16 0 0 0  # psubw (%rdi),%xmm3
+2636f4 3 gp 4 0 0 16 16 0 0 0  # hlt
+f20f4eb1825e1590 8 cmovcc 4 1 0 1 16 0 ffffffff90155e82 0  # cmovlel -0x6feaa17e(%rcx),%esi
+67d07a29 4 sar 1 1 0 2 16 0 29 0  # sarb $1,0x29(%edx)
+3e36f241c15c63f920 9 rcr 4 1 0 11 16 1 fffffffffffffff9 20  # rcrl $0x20,-0x7(%r11,%riz,2)
+0fb7c3 3 movzx 4 0 0 16 16 0 0 0  # movzwl %bx,%eax
+66f30f19b47753806c28 10 nop 2 1 0 7 6 1 286c8053 0  # nopw 0x286c8053(%rdi,%rsi,2)
+65674e1902 5 sbb 8 1 0 2 16 0 0 0  # sbbq %r8,%gs:(%edx)
+6566f00fea89f4c8b603 10 sse 2 1 0 1 16 0 3b6c8f4 0  # pminsw %gs:0x3b6c8f4(%rcx),%xmm1
+6665644d3939 6 cmp 8 1 0 9 16 0 0 0  # cmpq %r15,%fs:(%r9)
+4d0fa4da9f 5 shld 8 0 0 16 16 0 0 9f  # shldq $0x9f,%r11,%r10
+f26566a36e91081dcc488de6 12 mov 2 1 0 16 16 0 e68d48cc1d08916e 0  # movabsw %ax,%gs:0xe68d48cc1d08916e
+66639ce1d14c1d01 8 movsx 2 1 0 1 16 3 11d4cd1 0  # movsxd 0x11d4cd1(%rcx,%riz,8),%bx
+66f32e0fbc7cb78c 8 bsf 2 1 0 7 6 2 ffffffffffffff8c 0  # tzcntw -0x74(%rdi,%rsi,4),%di
+4bc1a04886fcdbbc 8 shl 8 1 0 8 16 0 ffffffffdbfc8648 bc  # shlq $0xbc,-0x240379b8(%r8)
+4cf8 2 clc 8 0 0 16 16 0 0 0  # clc
+64c053cb8a 5 rcl 1 1 0 3 16 0 ffffffffffffffcb 8a  # rclb $0x8a,%fs:-0x35(%rbx)
+4b0f63cb 4 sse 8 0 0 16 16 0 0 0  # packsswb %mm3,%mm1
+67490ff8e0 5 sse 8 0 0 16 16 0 0 0  # psubb %mm0,%mm4
+4993 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%r11
+0fefd6 3 sse 4 0 0 16 16 0 0 0  # pxor %mm6,%mm2
+a4 1 movs 1 0 0 16 16 0 0 0  # movsb %ds:(%rsi),%es:(%rdi)
+0fafc4 3 imul 4 0 0 16 16 0 0 0  # imull %esp,%eax
+2626640fdd12 6 sse 4 1 0 2 16 0 0 0  # paddusw %fs:(%rdx),%mm2
+66460f05 4 syscall 2 0 0 16 16 0 0 0  # syscall
+480f904cfe44 6 setcc 1 1 0 6 7 3 44 0  # seto 0x44(%rsi,%rdi,8)
+490f45f6 4 cmovcc 8 0 0 16 16 0 0 0  # cmovneq %r14,%rsi
+47c1e21b 4 shl 4 0 0 16 16 0 0 1b  # shll $0x1b,%r10d
+0f45658e 4 cmovcc 4 1 0 5 16 0 ffffffffffffff8e 0  # cmovnel -0x72(%rbp),%esp
+f090 2 nop 4 0 0 16 16 0 0 0  # nop
+460ffab2c81638c9 8 sse 4 1 0 2 16 0 ffffffffc93816c8 0  # psubd -0x36c7e938(%rdx),%mm6
+664a0dd4f85fb5 7 or 8 0 0 16 16 0 0 ffffffffb55ff8d4  # orq $0xffffffffb55ff8d4,%rax
+4f0fa8 3 push_sreg 8 0 0 16 16 0 0 0  # pushq %gs
+674281c9fa3a84b8 8 or 4 0 0 16 16 0 0 b8843afa  # orl $0xb8843afa,%ecx
+3626f3d009 5 ror 1 1 0 1 16 0 0 0  # rorb $1,(%rcx)
+674b0f6bd5 5 sse 8 0 0 16 16 0 0 0  # packssdw %mm5,%mm2
+652e0fd1c4 5 sse 4 0 0 16 16 0 0 0  # psrlw %mm4,%mm0
+642e6721c8 5 and 4 0 0 16 16 0 0 0  # andl %ecx,%eax
+41f8 2 clc 4 0 0 16 16 0 0 0  # clc
+4a6b1c170a 5 imul 8 1 0 7 10 0 0 a  # imulq $0xa,(%rdi,%r10,1),%rbx
+f0f24989cd 5 mov 8 0 0 16 16 0 0 0  # movq %rcx,%r13
+66400f32 4 gp 2 0 0 16 16 0 0 0  # rdmsr
+6666c12c0795 6 shr 2 1 0 7 0 0 0 95  # shrw $0x95,(%rdi,%rax,1)
+f02e2649a5 5 movs 8 0 0 16 16 0 0 0  # movsq %ds:(%rsi),%es:(%rdi)
+490f709af9241bf9dd 9 sse 8 1 0 10 16 0 fffffffff91b24f9 dd  # pshufw $0xdd,-0x6e4db07(%r10),%mm3
+4f0538e13bba 6 add 8 0 0 16 16 0 0 ffffffffba3be138  # addq $0xffffffffba3be138,%rax
+66479c 3 pushf 2 0 0 16 16 0 0 0  # pushfw
+66f2cc 3 int3 2 0 0 16 16 0 0 0  # int3
+66833f9b 4 cmp 2 1 0 7 16 0 0 ffffffffffffff9b  # cmpw $0xff9b,(%rdi)
+3e480faffe 5 imul 8 0 0 16 16 0 0 0  # imulq %rsi,%rdi
+0fc468a6d8 5 sse 4 1 0 0 16 0 ffffffffffffffa6 d8  # pinsrw $0xd8,-0x5a(%rax),%mm5
+65660f1611 5 sse 2 1 0 1 16 0 0 0  # movhpd %gs:(%rcx),%xmm2
+364d0ff6db 5 sse 8 0 0 16 16 0 0 0  # psadbw %mm3,%mm3
+2e26674e02d1 6 add 1 0 0 16 16 0 0 0  # addb.s %cl,%r10b
+0fe7beeb273f16 7 sse 4 1 0 6 16 0 163f27eb 0  # movntq %mm7,0x163f27eb(%rsi)
+b391 2 mov 1 0 0 16 16 0 0 91  # movb $0x91,%bl
+3e4e0faeec 5 fence 8 0 0 16 16 0 0 0  # lfence
+64364b0f173b 6 sse 8 1 0 11 16 0 0 0  # movhps %xmm7,%fs:(%r11)
+26662dc9b1 5 sub 2 0 0 16 16 0 0 b1c9  # subw $0xb1c9,%ax
+640f5f12 4 sse 4 1 0 2 16 0 0 0  # maxps %fs:(%rdx),%xmm2
+d1e1 2 shl 4 0 0 16 16 0 0 0  # shll $1,%ecx
+640f1bff 4 nop 4 0 0 16 16 0 0 0  # nopl %edi
+4c0f8a247bd9e0 7 jcc 8 0 0 16 16 0 0 ffffffffe0d97b24  # jp 0xffffffffe0ec2e25
+486c 2 gp 8 0 0 16 16 0 0 0  # insb (%dx),%es:(%rdi)
+66420f1736 5 sse 2 1 0 6 16 0 0 0  # movhpd %xmm6,(%rsi)
+4a0f165266 5 sse 8 1 0 2 16 0 66 0  # movhps 0x66(%rdx),%xmm2
+f2674bffa8030623cc 9 gp 8 1 0 8 16 0 ffffffffcc230603 0  # ljmpq *-0x33dcf9fd(%r8d)
+f2ee 2 gp 4 0 0 16 16 0 0 0  # outb %al,(%dx)
+264a0f57f6 5 sse 8 0 0 16 16 0 0 0  # xorps %xmm6,%xmm6
+3e428ed8 4 mov_sreg 2 0 0 16 16 0 0 0  # movl %eax,%ds
+3e490f6e8e6b378cab 9 sse 8 1 0 14 16 0 ffffffffab8c376b 0  # movq -0x5473c895(%r14),%mm1
+6536674e0f5e15e2ea67d7 11 sse 8 1 1 16 16 0 ffffffffd767eae2 0  # divps %gs:-0x2898151e(%eip),%xmm10
+653e4b0fe2e7 6 sse 8 0 0 16 16 0 0 0  # psrad %mm7,%mm4
+663ef0460f4a44d38f 9 cmovcc 2 1 0 3 10 3 ffffffffffffff8f 0  # cmovpw -0x71(%rbx,%r10,8),%r8w
+36443b4e55 5 cmp 4 1 0 6 16 0 55 0  # cmpl 0x55(%rsi),%r9d
+3666360f2d20 6 sse 2 1 0 0 16 0 0 0  # cvtpd2pi (%rax),%mm4
+6ad1 2 push 8 0 0 16 16 0 0 ffffffffffffffd1  # pushq $0xffffffffffffffd1
+650f55e8 4 sse 4 0 0 16 16 0 0 0  # andnps %xmm0,%xmm5
+6566670fe292b223db61 10 sse 2 1 0 2 16 0 61db23b2 0  # psrad %gs:0x61db23b2(%edx),%xmm2
+490fbdcd 4 bsr 8 0 0 16 16 0 0 0  # bsrq %r13,%rcx
+f24fdf3a 4 x87 8 1 0 10 16 0 0 0  # fistpll (%r10)
+66410f67940cfd55542b 10 sse 2 1 0 12 1 0 2b5455fd 0  # packuswb 0x2b5455fd(%r12,%rcx,1),%xmm2
+0f5eca 3 sse 4 0 0 16 16 0 0 0  # divps %xmm2,%xmm1
+660f08 3 gp 2 0 0 16 16 0 0 0  # invd
+3e263e430f57e6 7 sse 4 0 0 16 16 0 0 0  # xorps %xmm14,%xmm4
+3e65430fda724b 7 sse 4 1 0 10 16 0 4b 0  # pminub %gs:0x4b(%r10),%mm6
+66450faf881d9636e3 9 imul 2 1 0 8 16 0 ffffffffe336961d 0  # imulw -0x1cc969e3(%r8),%r9w
+650f5933 4 sse 4 1 0 3 16 0 0 0  # mulps %gs:(%rbx),%xmm6
+66f23ef78f87eb3b769c7c 11 test 2 1 0 7 16 0 763beb87 7c9c  # testw $0x7c9c,0x763beb87(%rdi)
+440fbaecd1 5 bts 4 0 0 16 16 0 0 d1  # btsl $0xd1,%esp
+66644783a620ccf919ae 10 and 2 1 0 14 16 0 19f9cc20 ffffffffffffffae  # andw $0xffae,%fs:0x19f9cc20(%r14)
+66d1c0 3 rol 2 0 0 16 16 0 0 0  # rolw $1,%ax
+674a0f70e1fd 6 sse 8 0 0 16 16 0 0 fd  # pshufw $0xfd,%mm1,%mm4
+662641832b30 6 sub 2 1 0 11 16 0 0 30  # subw $0x30,(%r11)
+660fdd3cae 5 sse 2 1 0 6 5 2 0 0  # paddusw (%rsi,%rbp,4),%xmm7
+4a342f 3 xor 1 0 0 16 16 0 0 2f  # xorb $0x2f,%al
+4dc7c7eefc1083 7 mov 8 0 0 16 16 0 0 ffffffff8310fcee  # movq $0xffffffff8310fcee,%r15
+64f348f9 4 stc 8 0 0 16 16 0 0 0  # stc
+661bd9 3 sbb 2 0 0 16 16 0 0 0  # sbbw.s %cx,%bx
+6626c18320e38f5ca7 9 rol 2 1 0 3 16 0 5c8fe320 a7  # rolw $0xa7,0x5c8fe320(%rbx)
+66643e450f5dc1 7 sse 2 0 0 16 16 0 0 0  # minpd %xmm9,%xmm8
+653e81aa9a6cd6cbee0af2ab 12 sub 4 1 0 2 16 0 ffffffffcbd66c9a abf20aee  # subl $0xabf20aee,%gs:-0x34299366(%rdx)
+66f236470fac29cb 8 shrd 2 1 0 9 16 0 0 cb  # shrdw $0xcb,%r13w,(%r9)
+2e460fead1 5 sse 4 0 0 16 16 0 0 0  # pminsw %mm1,%mm2
+6465f04b0f545e08 8 sse 8 1 0 14 16 0 8 0  # andps %gs:0x8(%r14),%xmm3
+643e2e0f435972 7 cmovcc 4 1 0 1 16 0 72 0  # cmovael %fs:0x72(%rcx),%ebx
+364f0fead4 5 sse 8 0 0 16 16 0 0 0  # pminsw %mm4,%mm2
+4af6e4 3 mul 1 0 0 16 16 0 0 0  # mulb %spl
+0fc2eef1 4 sse 4 0 0 16 16 0 0 f1  # cmpps $0xf1,%xmm6,%xmm5
+264af7c07807b80e 8 test 8 0 0 16 16 0 0 eb80778  # testq $0xeb80778,%rax
+656641e7e4 5 gp 2 0 0 16 16 0 0 e4  # outw %ax,$0xe4
+0f16a5c08fddda 7 sse 4 1 0 5 16 0 ffffffffdadd8fc0 0  # movhps -0x25227040(%rbp),%xmm4
+0f75d3 3 sse 4 0 0 16 16 0 0 0  # pcmpeqw %mm3,%mm2
+6667f347f5 5 cmc 2 0 0 16 16 0 0 0  # cmc
+4ff6f6 3 div 1 0 0 16 16 0 0 0  # divb %r14b
+66f24f0ff086031653e0 10 sse 8 1 0 14 16 0 ffffffffe0531603 0  # lddqu -0x1face9fd(%r14),%xmm8
+0f22fe 3 gp 4 0 0 16 16 0 0 0  # movq %rsi,%cr7
+66f04e0f76d1 6 sse 8 0 0 16 16 0 0 0  # pcmpeqd %xmm1,%xmm10
+3e266745308c0472d265ab 11 xor 1 1 0 12 0 0 ffffffffab65d272 0  # xorb %r9b,-0x549a2d8e(%r12d,%eax,1)
+640f48d9 4 cmovcc 4 0 0 16 16 0 0 0  # cmovsl %ecx,%ebx
+2e64d36bd0 5 shr 4 1 0 3 16 0 ffffffffffffffd0 0  # shrl %cl,%fs:-0x30(%rbx)
+f0646645a1470e7fa9c215eef1 13 mov 2 1 0 16 16 0 f1ee15c2a97f0e47 0  # movabsw %fs:0xf1ee15c2a97f0e47,%ax
+0fe1d0 3 sse 4 0 0 16 16 0 0 0  # psraw %mm0,%mm2
+666464f77ecd 6 idiv 2 1 0 6 16 0 ffffffffffffffcd 0  # idivw %fs:-0x33(%rsi)
+6666260f4477c7 7 cmovcc 2 1 0 7 16 0 ffffffffffffffc7 0  # cmovew -0x39(%rdi),%si
+20ff 2 and 1 0 0 16 16 0 0 0  # andb %bh,%bh
+48dd93cf2b0488 7 x87 8 1 0 3 16 0 ffffffff88042bcf 0  # fstl -0x77fbd431(%rbx)
+ac 1 lods 1 0 0 16 16 0 0 0  # lodsb %ds:(%rsi),%al
+366667d13f 5 sar 2 1 0 7 16 0 0 0  # sarw $1,(%edi)
+676645d95d30 6 x87 2 1 0 13 16 0 30 0  # fstps 0x30(%r13d)
+2e26674c13f7 6 adc 8 0 0 16 16 0 0 0  # adcq.s %rdi,%r14
+660fe6b7584d4017 8 sse 2 1 0 7 16 0 17404d58 0  # cvttpd2dq 0x17404d58(%rdi),%xmm6
+65666b81ce1410d501 9 imul 2 1 0 1 16 0 ffffffffd51014ce 1  # imulw $0x1,%gs:-0x2aefeb32(%rcx),%ax
+65430fd2e7 5 sse 4 0 0 16 16 0 0 0  # psrld %mm7,%mm4
+49fff5 3 push 8 0 0 16 16 0 0 0  # pushq %r13
+4fdb3f 3 x87 8 1 0 15 16 0 0 0  # fstpt (%r15)
+4b0f2ac1 4 sse 8 0 0 16 16 0 0 0  # cvtpi2ps %mm1,%xmm0
+66d9cf 3 x87 2 0 0 16 16 0 0 0  # fxch %st(7)
+4b0fc9 3 bswap 8 0 0 16 16 0 0 0  # bswap %r9
+0f61cf 3 sse 4 0 0 16 16 0 0 0  # punpcklwd %mm7,%mm1
+66850f 3 test 2 1 0 7 16 0 0 0  # testw %cx,(%rdi)
+4898 2 cbw 8 0 0 16 16 0 0 0  # cltq
+36f23640c1283b 7 shr 4 1 0 0 16 0 0 3b  # shrl $0x3b,(%rax)
+640f33 3 gp 4 0 0 16 16 0 0 0  # rdpmc
+f32e6643b9ea0e 7 mov 2 0 0 16 16 0 0 eea  # movw $0xeea,%r9w
+3636269c 4 pushf 8 0 0 16 16 0 0 0  # pushfq
+654c0f2e9df26caa8a 9 sse 8 1 0 5 16 0 ffffffff8aaa6cf2 0  # ucomiss %gs:-0x7555930e(%rbp),%xmm11
+2666f3450f41f3 7 cmovcc 2 0 0 16 16 0 0 0  # cmovnow %r11w,%r14w
+2e3e2e0f400b 6 cmovcc 4 1 0 3 16 0 0 0  # cmovol (%rbx),%ecx
+3e66260ff5ff 6 sse 2 0 0 16 16 0 0 0  # pmaddwd %xmm7,%xmm7
+4e0f2f6280 5 sse 8 1 0 2 16 0 ffffffffffffff80 0  # comiss -0x80(%rdx),%xmm12
+2666400fbbc9 6 btc 2 0 0 16 16 0 0 0  # btcw %cx,%cx
+2e674d69e603a25ad5 9 imul 8 0 0 16 16 0 0 ffffffffd55aa203  # imulq $0xffffffffd55aa203,%r14,%r12
+3e66c155c95e 6 rcl 2 1 0 5 16 0 ffffffffffffffc9 5e  # rclw $0x5e,-0x37(%rbp)
+6465f04f0f4649ea 8 cmovcc 8 1 0 9 16 0 ffffffffffffffea 0  # cmovbeq %gs:-0x16(%r9),%r9
+66816514b193 6 and 2 1 0 5 16 0 14 93b1  # andw $0x93b1,0x14(%rbp)
+4e0fc0c3 4 xadd 1 0 0 16 16 0 0 0  # xaddb %r8b,%bl
+4fdef8 3 x87 8 0 0 16 16 0 0 0  # fdivrp %st,%st(0)
+65400fe39e62c46cc3 9 sse 4 1 0 6 16 0 ffffffffc36cc462 0  # pavgw %gs:-0x3c933b9e(%rsi),%mm3
+f0660f4ee1 5 cmovcc 2 0 0 16 16 0 0 0  # cmovlew %cx,%sp
+36f03e450f50f9 7 sse 4 0 0 16 16 0 0 0  # movmskps %xmm9,%r15d
+f36744831bc8 6 sbb 4 1 0 3 16 0 0 ffffffffffffffc8  # sbbl $0xffffffc8,(%ebx)
+6566650fc4015a 7 sse 2 1 0 1 16 0 0 5a  # pinsrw $0x5a,%gs:(%rcx),%xmm0
+4e0f49a38b6ef1d1 8 cmovcc 8 1 0 3 16 0 ffffffffd1f16e8b 0  # cmovnsq -0x2e0e9175(%rbx),%r12
+264ad25ff1 5 rcr 1 1 0 7 16 0 fffffffffffffff1 0  # rcrb %cl,-0xf(%rdi)
+dc153f8abeb8 6 x87 4 1 1 16 16 0 ffffffffb8be8a3f 0  # fcoml -0x474175c1(%rip)
+6467660f5cc0 6 sse 2 0 0 16 16 0 0 0  # subpd %xmm0,%xmm0
+666667470f68c8 7 sse 2 0 0 16 16 0 0 0  # punpckhbw %xmm8,%xmm9
+7411 2 jcc 8 0 0 16 16 0 0 11  # je 0x12175f
+0fcf 2 bswap 4 0 0 16 16 0 0 0  # bswap %edi
+2e83f7f5 4 xor 4 0 0 16 16 0 0 fffffffffffffff5  # xorl $0xfffffff5,%edi
+42d148cd 4 ror 4 1 0 0 16 0 ffffffffffffffcd 0  # rorl $1,-0x33(%rax)
+670fe2d9 4 sse 4 0 0 16 16 0 0 0  # psrad %mm1,%mm3
+66440f6a65c4 6 sse 2 1 0 5 16 0 ffffffffffffffc4 0  # punpckhdq -0x3c(%rbp),%xmm12
+f0363e4b3ba3e1b3da71 10 cmp 8 1 0 11 16 0 71dab3e1 0  # cmpq 0x71dab3e1(%r11),%rsp
+f0490fe5cf 5 sse 8 0 0 16 16 0 0 0  # pmulhw %mm7,%mm1
+65360f2cd5 5 sse 4 0 0 16 16 0 0 0  # cvttps2pi %xmm5,%mm2
+264a0f4cf2 5 cmovcc 8 0 0 16 16 0 0 0  # cmovlq %rdx,%rsi
+498daa5c2b9218 7 lea 8 1 0 10 16 0 18922b5c 0  # leaq 0x18922b5c(%r10),%rbp
+66d8c2 3 x87 2 0 0 16 16 0 0 0  # fadd %st(2),%st
+8f8295961c69 6 pop 8 1 0 2 16 0 691c9695 0  # popq 0x691c9695(%rdx)
+4e0f52d7 4 sse 8 0 0 16 16 0 0 0  # rsqrtps %xmm7,%xmm10
+663e400fbe6af0 7 movsx 2 1 0 2 16 0 fffffffffffffff0 0  # movsbw -0x10(%rdx),%bp
+3ef3660f1025841d360c 10 sse 2 1 1 16 16 0 c361d84 0  # movss 0xc361d84(%rip),%xmm4
+4f0f21ca 4 gp 8 0 0 16 16 0 0 0  # movq %db9,%r10
+660fe6cc 4 sse 2 0 0 16 16 0 0 0  # cvttpd2dq %xmm4,%xmm1
+672e6643f9 5 stc 2 0 0 16 16 0 0 0  # stc
+430f4adf 4 cmovcc 4 0 0 16 16 0 0 0  # cmovpl %r15d,%ebx
+64674f0f2ffd 6 sse 8 0 0 16 16 0 0 0  # comiss %xmm13,%xmm15
+64c1c2d0 4 rol 4 0 0 16 16 0 0 d0  # roll $0xd0,%edx
+f34dd38bfc0387de 8 ror 8 1 0 11 16 0 ffffffffde8703fc 0  # rorq %cl,-0x2178fc04(%r11)
+f341d2ca 4 ror 1 0 0 16 16 0 0 0  # rorb %cl,%r10b
+66440f6550af 6 sse 2 1 0 0 16 0 ffffffffffffffaf 0  # pcmpgtw -0x51(%rax),%xmm10
+36643ec1dc7d 6 rcr 4 0 0 16 16 0 0 7d  # rcrl $0x7d,%esp
+4b0f56e0 4 sse 8 0 0 16 16 0 0 0  # orps %xmm8,%xmm4
+3e3ef34f11e9 6 adc 8 0 0 16 16 0 0 0  # adcq %r13,%r9
+2e4f0fe3d8 5 sse 8 0 0 16 16 0 0 0  # pavgw %mm0,%mm3
+66410f2ee1 5 sse 2 0 0 16 16 0 0 0  # ucomisd %xmm9,%xmm4
+6666470fa1 5 pop_sreg 2 0 0 16 16 0 0 0  # popw %fs
+4a0ff54ba7 5 sse 8 1 0 3 16 0 ffffffffffffffa7 0  # pmaddwd -0x59(%rbx),%mm1
+266690 3 nop 2 0 0 16 16 0 0 0  # xchgw %ax,%ax
+3e3e669f 4 lahf 2 0 0 16 16 0 0 0  # lahf
+0ff5e3 3 sse 4 0 0 16 16 0 0 0  # pmaddwd %mm3,%mm4
+4883f4c4 4 xor 8 0 0 16 16 0 0 ffffffffffffffc4  # xorq $0xffffffffffffffc4,%rsp
+260f64f8 4 sse 4 0 0 16 16 0 0 0  # pcmpgtb %mm0,%mm7
+f04d0f33 4 gp 8 0 0 16 16 0 0 0  # rdpmc
+664123a8718ecfbc 8 and 2 1 0 8 16 0 ffffffffbccf8e71 0  # andw -0x4330718f(%r8),%bp
+4a0f8006d3b5a2 7 jcc 8 0 0 16 16 0 0 ffffffffa2b5d306  # jo 0xffffffffa2d11ac9
+4f7838 3 jcc 8 0 0 16 16 0 0 38  # js 0x65b6
+676643c135d3bebc9c25 10 shl 2 1 1 16 16 0 ffffffff9cbcbed3 25  # shlw $0x25,-0x6343412d(%eip)
+663e64480f61922817feec 11 sse 8 1 0 2 16 0 ffffffffecfe1728 0  # punpcklwd %fs:-0x1301e8d8(%rdx),%xmm2
+66654799 4 cwd 2 0 0 16 16 0 0 0  # cwtd
+4ad3f9 3 sar 8 0 0 16 16 0 0 0  # sarq %cl,%rcx
+f20fd0bb82f9e5ba 8 sse 4 1 0 3 16 0 ffffffffbae5f982 0  # addsubps -0x451a067e(%rbx),%xmm7
+3e673e490f72d48d 8 sse 8 0 0 16 16 0 0 8d  # psrld $0x8d,%mm4
+6611d5 3 adc 2 0 0 16 16 0 0 0  # adcw %dx,%bp
+66f00f63f9 5 sse 2 0 0 16 16 0 0 0  # packsswb %xmm1,%xmm7
+66f0f0440f6e901174dc39 11 sse 2 1 0 0 16 0 39dc7411 0  # movd 0x39dc7411(%rax),%xmm10
+4b0fa472d3fe 6 shld 8 1 0 10 16 0 ffffffffffffffd3 fe  # shldq $0xfe,%rsi,-0x2d(%r10)
+644f817c47d7116f7576 10 cmp 8 1 0 15 8 1 ffffffffffffffd7 76756f11  # cmpq $0x76756f11,%fs:-0x29(%r15,%r8,2)
+643e26391d33219e93 9 cmp 4 1 1 16 16 0 ffffffff939e2133 0  # cmpl %ebx,%fs:-0x6c61decd(%rip)
+65364b0ff906 6 sse 8 1 0 14 16 0 0 0  # psubw %gs:(%r14),%mm0
+6467f241d1db 6 rcr 4 0 0 16 16 0 0 0  # rcrl $1,%r11d
+3e0fbbdd 4 btc 4 0 0 16 16 0 0 0  # btcl %ebx,%ebp
+410f5ce9 4 sse 4 0 0 16 16 0 0 0  # subps %xmm9,%xmm5
+f2f2644a33ed 6 xor 8 0 0 16 16 0 0 0  # xorq.s %rbp,%rbp
+0f53da 3 sse 4 0 0 16 16 0 0 0  # rcpps %xmm2,%xmm3
+4a0f74ea 4 sse 8 0 0 16 16 0 0 0  # pcmpeqb %mm2,%mm5
+2e2e410f66da 6 sse 4 0 0 16 16 0 0 0  # pcmpgtd %mm2,%mm3
+0f18493e 4 nop 4 1 0 1 16 0 3e 0  # prefetcht0 0x3e(%rcx)
+6764490f1c87d5ffbbbd 10 nop 8 1 0 15 16 0 ffffffffbdbbffd5 0  # cldemote %fs:-0x4244002b(%r15d)
+223424 3 and 1 1 0 4 16 0 0 0  # andb (%rsp),%dh
+491dbd866cbc 6 sbb 8 0 0 16 16 0 0 ffffffffbc6c86bd  # sbbq $0xffffffffbc6c86bd,%rax
+66f3ca38db 5 gp 2 0 0 16 16 0 0 db38  # lretw $0xdb38
+6466f05e 4 pop 2 0 0 16 16 0 0 0  # popw %si
+64262e0f4ff9 6 cmovcc 4 0 0 16 16 0 0 0  # cmovgl %ecx,%edi
+66f344b85faf 6 mov 2 0 0 16 16 0 0 af5f  # movw $0xaf5f,%ax
+2e663647cb 5 gp 2 0 0 16 16 0 0 0  # lretw
+6646835099e1 6 adc 2 1 0 0 16 0 ffffffffffffff99 ffffffffffffffe1  # adcw $0xffe1,-0x67(%rax)
+440f580c86 5 sse 4 1 0 6 0 2 0 0  # addps (%rsi,%rax,4),%xmm9
+6466430f13485f 7 sse 2 1 0 8 16 0 5f 0  # movlpd %xmm1,%fs:0x5f(%r8)
+66663e0fd6f4 6 sse 2 0 0 16 16 0 0 0  # movq.s %xmm6,%xmm4
+f30fd6d7 4 sse 4 0 0 16 16 0 0 0  # movq2dq %mm7,%xmm2
+0f5512 3 sse 4 1 0 2 16 0 0 0  # andnps (%rdx),%xmm2
+6640a2a878dadd70b3cfb5 11 mov 1 1 0 16 16 0 b5cfb370ddda78a8 0  # movabsb %al,0xb5cfb370ddda78a8
+652e46d24784 6 rol 1 1 0 7 16 0 ffffffffffffff84 0  # rolb %cl,%gs:-0x7c(%rdi)
+660f566fd6 5 sse 2 1 0 7 16 0 ffffffffffffffd6 0  # orpd -0x2a(%rdi),%xmm5
+f26745ec 4 gp 4 0 0 16 16 0 0 0  # inb (%dx),%al
+263e4a0f5cde 6 sse 8 0 0 16 16 0 0 0  # subps %xmm6,%xmm3
+66f00fdf17 5 sse 2 1 0 7 16 0 0 0  # pandn (%rdi),%xmm2
+f23e674451 5 push 8 0 0 16 16 0 0 0  # pushq %rcx
+366646c7c1f4e7 7 mov 2 0 0 16 16 0 0 e7f4  # movw $0xe7f4,%cx
+f3f3490fb730 6 movzx 8 1 0 8 16 0 0 0  # movzwq (%r8),%rsi
+0f60b8271cd71e 7 sse 4 1 0 0 16 0 1ed71c27 0  # punpcklbw 0x1ed71c27(%rax),%mm7
+4e83d9fa 4 sbb 8 0 0 16 16 0 0 fffffffffffffffa  # sbbq $0xfffffffffffffffa,%rcx
+f04a0fe4fe 5 sse 8 0 0 16 16 0 0 0  # pmulhuw %mm6,%mm7
+6664f00fd606 6 sse 2 1 0 6 16 0 0 0  # movq %xmm0,%fs:(%rsi)
+f064f3490ae1 6 or 1 0 0 16 16 0 0 0  # orb.s %r9b,%spl
+03f1 2 add 4 0 0 16 16 0 0 0  # addl.s %ecx,%esi
+4f2910 3 sub 8 1 0 8 16 0 0 0  # subq %r10,(%r8)
+4c0fcd 3 bswap 8 0 0 16 16 0 0 0  # bswap %rbp
+67f2f2f644641bbf 8 test 1 1 0 4 16 1 1b bf  # testb $0xbf,0x1b(%esp,%eiz,2)
+66430fef0c57 6 sse 2 1 0 15 10 1 0 0  # pxor (%r15,%r10,2),%xmm1
+430f1b9a785811f7 8 nop 4 1 0 10 16 0 fffffffff7115878 0  # bndstx %bnd3,-0x8eea788(%r10)
+4ad8f5 3 x87 8 0 0 16 16 0 0 0  # fdiv %st(5),%st
+4d0fe119 4 sse 8 1 0 9 16 0 0 0  # psraw (%r9),%mm3
+6585e2 3 test 4 0 0 16 16 0 0 0  # testl %esp,%edx
+f225ea9d7cd0 6 and 4 0 0 16 16 0 0 d07c9dea  # andl $0xd07c9dea,%eax
+660f11fb 4 sse 2 0 0 16 16 0 0 0  # movupd.s %xmm7,%xmm3
+6464f00f7ec7 6 sse 4 0 0 16 16 0 0 0  # movd %mm0,%edi
+2ef2264d0fbaf488 8 btr 8 0 0 16 16 0 0 88  # btrq $0x88,%r12
+663e65410f28f7 7 sse 2 0 0 16 16 0 0 0  # movapd %xmm15,%xmm6
+450f21dd 4 gp 4 0 0 16 16 0 0 0  # movq %db11,%r13
+664b0f6cf5 5 sse 8 0 0 16 16 0 0 0  # punpcklqdq %xmm13,%xmm6
+6664f0480ffae4 7 sse 8 0 0 16 16 0 0 0  # psubd %xmm4,%xmm4
+0fe810 3 sse 4 1 0 0 16 0 0 0  # psubsb (%rax),%mm2
+66410f55535c 6 sse 2 1 0 11 16 0 5c 0  # andnpd 0x5c(%r11),%xmm2
+f26748e9575cb0ac 8 jmp 8 0 0 16 16 0 0 ffffffffacb05c57  # jmpq 0xffffffffacc6c561
+66478f8764dcd8f2 8 pop 2 1 0 15 16 0 fffffffff2d8dc64 0  # popw -0xd27239c(%r15)
+6472b3 3 jcc 8 0 0 16 16 0 0 ffffffffffffffb3  # jb 0x1a9ced
+6564660f48e9 6 cmovcc 2 0 0 16 16 0 0 0  # cmovsw %cx,%bp
+d3f8 2 sar 4 0 0 16 16 0 0 0  # sarl %cl,%eax
+4d0fabc2 4 bts 8 0 0 16 16 0 0 0  # btsq %r8,%r10
+660fd0e8 4 sse 2 0 0 16 16 0 0 0  # addsubpd %xmm0,%xmm5
+f2f22648832444e7 8 and 8 1 0 4 0 1 0 ffffffffffffffe7  # andq $0xffffffffffffffe7,(%rsp,%rax,2)
+4dd16dc1 4 shr 8 1 0 13 16 0 ffffffffffffffc1 0  # shrq $1,-0x3f(%r13)
+6467f366f797200f4c9c 10 not 2 1 0 7 16 0 ffffffff9c4c0f20 0  # notw %fs:-0x63b3f0e0(%edi)
+45c1c9d8 4 ror 4 0 0 16 16 0 0 d8  # rorl $0xd8,%r9d
+2e64460fb4706c 7 lseg 4 1 0 0 16 0 6c 0  # lfsl %fs:0x6c(%rax),%r14d
+f2410c29 4 or 1 0 0 16 16 0 0 29  # orb $0x29,%al
+443a74fe92 5 cmp 1 1 0 6 7 3 ffffffffffffff92 0  # cmpb -0x6e(%rsi,%rdi,8),%r14b
+65490f00c4 5 gp 8 0 0 16 16 0 0 0  # sldtq %r12
+67264c0f7f19 6 sse 8 1 0 1 16 0 0 0  # movq %mm3,(%ecx)
+26f3650fb1544379 8 cmpxchg 4 1 0 3 0 1 79 0  # cmpxchgl %edx,%gs:0x79(%rbx,%rax,2)
+0fc4f948 4 sse 4 0 0 16 16 0 0 48  # pinsrw $0x48,%ecx,%mm7
+f06445fa 4 gp 4 0 0 16 16 0 0 0  # cli
+674b8ce8 4 mov_from_sreg 8 0 0 16 16 0 0 0  # movq %gs,%r8
+660f5a83204230a0 8 sse 2 1 0 3 16 0 ffffffffa0304220 0  # cvtpd2ps -0x5fcfbde0(%rbx),%xmm0
+0fdff8 3 sse 4 0 0 16 16 0 0 0  # pandn %mm0,%mm7
+660ffdec 4 sse 2 0 0 16 16 0 0 0  # paddw %xmm4,%xmm5
+664def 3 gp 8 0 0 16 16 0 0 0  # outl %eax,(%dx)
+2e644a0fedbd0f944e6f 10 sse 8 1 0 5 16 0 6f4e940f 0  # paddsw %fs:0x6f4e940f(%rbp),%mm7
+f2f323f3 4 and 4 0 0 16 16 0 0 0  # andl.s %ebx,%esi
+460f6408 4 sse 4 1 0 0 16 0 0 0  # pcmpgtb (%rax),%mm1
+2e2ef0460f44dd 7 cmovcc 4 0 0 16 16 0 0 0  # cmovel %ebp,%r11d
+4cd17a79 4 sar 8 1 0 2 16 0 79 0  # sarq $1,0x79(%rdx)
+44806c165cb1 6 sub 1 1 0 6 2 0 5c b1  # subb $0xb1,0x5c(%rsi,%rdx,1)
+64410f175395 6 sse 4 1 0 11 16 0 ffffffffffffff95 0  # movhps %xmm2,%fs:-0x6b(%r11)
+66670f6ed2 5 sse 2 0 0 16 16 0 0 0  # movd %edx,%xmm2
+490fffdb 4 sse 8 0 0 16 16 0 0 0  # ud0q %r11,%rbx
+0ffd6d44 4 sse 4 1 0 5 16 0 44 0  # paddw 0x44(%rbp),%mm5
+4a0f697ba3 5 sse 8 1 0 3 16 0 ffffffffffffffa3 0  # punpckhwd -0x5d(%rbx),%mm7
+67f24e0fb4b34652fb89 10 lseg 8 1 0 3 16 0 ffffffff89fb5246 0  # lfsq -0x7604adba(%ebx),%r14
+66364039e6 5 cmp 2 0 0 16 16 0 0 0  # cmpw %sp,%si
+0f18f2 3 nop 4 0 0 16 16 0 0 0  # nopl %edx
+2664470f5710 6 sse 4 1 0 8 16 0 0 0  # xorps %fs:(%r8),%xmm10
+3632fe 3 xor 1 0 0 16 16 0 0 0  # xorb.s %dh,%bh
+f3f266d154ccea 7 rcl 2 1 0 4 1 3 ffffffffffffffea 0  # rclw $1,-0x16(%rsp,%rcx,8)
+480fe1f0 4 sse 8 0 0 16 16 0 0 0  # psraw %mm0,%mm6
+674c0b9bcf742c48 8 or 8 1 0 3 16 0 482c74cf 0  # orq 0x482c74cf(%ebx),%r11
+f342c0ab3f2b8bb10a 9 shr 1 1 0 3 16 0 ffffffffb18b2b3f a  # shrb $0xa,-0x4e74d4c1(%rbx)
+30e2 2 xor 1 0 0 16 16 0 0 0  # xorb %ah,%dl
+31a8e10c1d5f 6 xor 4 1 0 0 16 0 5f1d0ce1 0  # xorl %ebp,0x5f1d0ce1(%rax)
+f26667391f 5 cmp 2 1 0 7 16 0 0 0  # cmpw %bx,(%edi)
+662e47096128 6 or 2 1 0 9 16 0 28 0  # orw %r12w,0x28(%r9)
+661d637a 4 sbb 2 0 0 16 16 0 0 7a63  # sbbw $0x7a63,%ax
+67664c0f1cf7 6 nop 8 0 0 16 16 0 0 0  # nopq %rdi
+660f5fd2 4 sse 2 0 0 16 16 0 0 0  # maxpd %xmm2,%xmm2
+f6a6dc78bbea 6 mul 1 1 0 6 16 0 ffffffffeabb78dc 0  # mulb -0x15448724(%rsi)
+3e0f9eb057554e2b 8 setcc 1 1 0 0 16 0 2b4e5557 0  # setle 0x2b4e5557(%rax)
+660fdc01 4 sse 2 1 0 1 16 0 0 0  # paddusb (%rcx),%xmm0
+64f0d3d4 4 rcl 4 0 0 16 16 0 0 0  # rcll %cl,%esp
+0ff8f9 3 sse 4 0 0 16 16 0 0 0  # psubb %mm1,%mm7
+f2670f42d0 5 cmovcc 4 0 0 16 16 0 0 0  # cmovbl %eax,%edx
+4a0ffee8 4 sse 8 0 0 16 16 0 0 0  # paddd %mm0,%mm5
+0f7020ae 4 sse 4 1 0 0 16 0 0 ae  # pshufw $0xae,(%rax),%mm4
+4e0f1eef 4 nop 8 0 0 16 16 0 0 0  # nopq %rdi
+662e2e0f7f8d09c88586 10 sse 2 1 0 5 16 0 ffffffff8685c809 0  # movdqa %xmm1,-0x797a37f7(%rbp)
+4e846343 4 test 1 1 0 3 16 0 43 0  # testb %r12b,0x43(%rbx)
+43f1 2 gp 4 0 0 16 16 0 0 0  # int1
+65480ffbf4 5 sse 8 0 0 16 16 0 0 0  # psubq %mm4,%mm6
+2e3e659d 4 popf 8 0 0 16 16 0 0 0  # popfq
+66640fe7b03f95ddfd 9 sse 2 1 0 0 16 0 fffffffffddd953f 0  # movntdq %xmm6,%fs:-0x2226ac1(%rax)
+360f5ff1 4 sse 4 0 0 16 16 0 0 0  # maxps %xmm1,%xmm6
+4f0facfca3 5 shrd 8 0 0 16 16 0 0 a3  # shrdq $0xa3,%r15,%r12
+6643d302 4 rol 2 1 0 10 16 0 0 0  # rolw %cl,(%r10)
+f343ff2f 4 gp 4 1 0 15 16 0 0 0  # ljmpl *(%r15)
+f267498564452a 7 test 8 1 0 13 0 1 2a 0  # testq %rsp,0x2a(%r13d,%eax,2)
+4ff75368 4 not 8 1 0 11 16 0 68 0  # notq 0x68(%r11)
+f04019e9 4 sbb 4 0 0 16 16 0 0 0  # sbbl %ebp,%ecx
+406bd5fb 4 imul 4 0 0 16 16 0 0 fffffffffffffffb  # imull $0xfffffffb,%ebp,%edx
+3e4aa7 3 cmps 8 0 0 16 16 0 0 0  # cmpsq %es:(%rdi),%ds:(%rsi)
+66f00f6d89863918de 9 sse 2 1 0 1 16 0 ffffffffde183986 0  # punpckhqdq -0x21e7c67a(%rcx),%xmm1
+0f63c3 3 sse 4 0 0 16 16 0 0 0  # packsswb %mm3,%mm0
+4bc1dbaa 4 rcr 8 0 0 16 16 0 0 aa  # rcrq $0xaa,%r11
+0fffdd 3 sse 4 0 0 16 16 0 0 0  # ud0l %ebp,%ebx
+664e0f6da0bc4db803 9 sse 8 1 0 0 16 0 3b84dbc 0  # punpckhqdq 0x3b84dbc(%rax),%xmm12
+410f1efd 4 nop 4 0 0 16 16 0 0 0  # nopl %r13d
+2666650feee1 6 sse 2 0 0 16 16 0 0 0  # pmaxsw %xmm1,%xmm4
+66470fba6aba38 7 bts 2 1 0 10 16 0 ffffffffffffffba 38  # btsw $0x38,-0x46(%r10)
+66f2f00f21e9 6 gp 2 0 0 16 16 0 0 0  # movq %db5,%rcx
+470f01de 4 gp 4 0 0 16 16 0 0 0  # skinit
+3e4fd2677e 5 shl 1 1 0 15 16 0 7e 0  # shlb %cl,0x7e(%r15)
+26440f8e3cd4c771 8 jcc 8 0 0 16 16 0 0 71c7d43c  # jle 0x71d93f37
+6667d1e1 4 shl 2 0 0 16 16 0 0 0  # shlw $1,%cx
+3e4dae 3 scas 1 0 0 16 16 0 0 0  # scasb %es:(%rdi),%al
+64490f0101 5 gp 8 1 0 9 16 0 0 0  # sgdt %fs:(%r9)
+440f6e21 4 sse 4 1 0 1 16 0 0 0  # movd (%rcx),%mm4
+460f94a02b5ae63c 8 setcc 1 1 0 0 16 0 3ce65a2b 0  # sete 0x3ce65a2b(%rax)
+66430ff9c6 5 sse 2 0 0 16 16 0 0 0  # psubw %xmm14,%xmm0
+0ff9ff 3 sse 4 0 0 16 16 0 0 0  # psubw %mm7,%mm7
+4a0f14b68fdc8e3b 8 sse 8 1 0 6 16 0 3b8edc8f 0  # unpcklps 0x3b8edc8f(%rsi),%xmm6
+4d691407dadebfec 8 imul 8 1 0 15 0 0 0 ffffffffecbfdeda  # imulq $0xffffffffecbfdeda,(%r15,%rax,1),%r10
+3e670b8da0e820ad 8 or 4 1 0 5 16 0 ffffffffad20e8a0 0  # orl -0x52df1760(%ebp),%ecx
+64653e430fe408 7 sse 4 1 0 8 16 0 0 0  # pmulhuw %gs:(%r8),%mm1
+f04d0f1ea0b6649563 9 nop 8 1 0 8 16 0 639564b6 0  # nopq 0x639564b6(%r8)
+6696 2 xchg 2 0 0 16 16 0 0 0  # xchgw %ax,%si
+3ef0264d839a961c0db865 11 sbb 8 1 0 10 16 0 ffffffffb80d1c96 65  # sbbq $0x65,-0x47f2e36a(%r10)
+4050 2 push 8 0 0 16 16 0 0 0  # pushq %rax
+676645fa 4 gp 2 0 0 16 16 0 0 0  # cli
+660f2b90788f6c46 8 sse 2 1 0 0 16 0 466c8f78 0  # movntpd %xmm2,0x466c8f78(%rax)
+6466f24a0f93834e5b456a 11 setcc 1 1 0 3 16 0 6a455b4e 0  # setae %fs:0x6a455b4e(%rbx)
+663e3e0fbcde 6 bsf 2 0 0 16 16 0 0 0  # bsfw %si,%bx
+4a0fe7690b 5 sse 8 1 0 1 16 0 b 0  # movntq %mm5,0xb(%rcx)
+6667410f45ba4c940e54 10 cmovcc 2 1 0 10 16 0 540e944c 0  # cmovnew 0x540e944c(%r10d),%di
+65440f94da 5 setcc 1 0 0 16 16 0 0 0  # sete %dl
+36672642d11427 7 rcl 4 1 0 7 12 0 0 0  # rcll $1,(%edi,%r12d,1)
+64660ff6d8 5 sse 2 0 0 16 16 0 0 0  # psadbw %xmm0,%xmm3
+66670fa9 4 pop_sreg 2 0 0 16 16 0 0 0  # popw %gs
+3e0f192b 4 nop 4 1 0 3 16 0 0 0  # nopl (%rbx)
+66652e473113 6 xor 2 1 0 11 16 0 0 0  # xorw %r10w,%gs:(%r11)
+f32e36480f2de3 7 sse 8 0 0 16 16 0 0 0  # cvtss2si %xmm3,%rsp
+f0672e1b39 5 sbb 4 1 0 1 16 0 0 0  # sbbl (%ecx),%edi
+4e9f 2 lahf 8 0 0 16 16 0 0 0  # lahf
+9b 1 fwait 4 0 0 16 16 0 0 0  # fwait
+f04c0fe95f4f 6 sse 8 1 0 7 16 0 4f 0  # psubsw 0x4f(%rdi),%mm3
+49c1ca77 4 ror 8 0 0 16 16 0 0 77  # rorq $0x77,%r10
+65f0368340e2cc 7 add 4 1 0 0 16 0 ffffffffffffffe2 ffffffffffffffcc  # addl $0xffffffcc,%gs:-0x1e(%rax)
+674f0f5d5d03 6 sse 8 1 0 13 16 0 3 0  # minps 0x3(%r13d),%xmm11
+f0642640b543 6 mov 1 0 0 16 16 0 0 43  # movb $0x43,%bpl
+0ff639 3 sse 4 1 0 1 16 0 0 0  # psadbw (%rcx),%mm7
+67f20f1c22 5 nop 4 1 0 2 16 0 0 0  # nopl (%edx)
+0fba21b6 4 bt 4 1 0 1 16 0 0 b6  # btl $0xb6,(%rcx)
+4a0fb330 4 btr 8 1 0 0 16 0 0 0  # btrq %rsi,(%rax)
+66450f625a2a 6 sse 2 1 0 10 16 0 2a 0  # punpckldq 0x2a(%r10),%xmm11
+6633c9 3 xor 2 0 0 16 16 0 0 0  # xorw.s %cx,%cx
+4f63c4 3 movsx 8 0 0 16 16 0 0 0  # movslq %r12d,%r8
+362e260f51ed 6 sse 4 0 0 16 16 0 0 0  # sqrtps %xmm5,%xmm5
+d87602 3 x87 4 1 0 6 16 0 2 0  # fdivs 0x2(%rsi)
+362e4edaa098e5edc6 9 x87 8 1 0 0 16 0 ffffffffc6ede598 0  # fisubl -0x39121a68(%rax)
+663ef24383b2ad66953477 11 xor 2 1 0 10 16 0 349566ad 77  # xorw $0x77,0x349566ad(%r10)
+4883814edd7d20f1 8 add 8 1 0 1 16 0 207ddd4e fffffffffffffff1  # addq $0xfffffffffffffff1,0x207ddd4e(%rcx)
+4f0f7fdf 4 sse 8 0 0 16 16 0 0 0  # movq.s %mm3,%mm7
+673e664b1a6622 7 sbb 1 1 0 14 16 0 22 0  # sbbb 0x22(%r14d),%spl
+66480f68cc 5 sse 8 0 0 16 16 0 0 0  # punpckhbw %xmm4,%xmm1
+f30fbdd8 4 bsr 4 0 0 16 16 0 0 0  # lzcntl %eax,%ebx
+4d0f8364d7cb70 7 jcc 8 0 0 16 16 0 0 70cbd764  # jae 0x70ec2a51
+664dd0e4 4 shl 1 0 0 16 16 0 0 0  # shlb $1,%r12b
+f0f242f75348 6 not 4 1 0 3 16 0 48 0  # xacquire notl 0x48(%rbx)
+6640f77628 5 div 2 1 0 6 16 0 28 0  # divw 0x28(%rsi)
+64410f4c3ca6 6 cmovcc 4 1 0 14 16 2 0 0  # cmovll %fs:(%r14,%riz,4),%edi
+2e64660fe9c3 6 sse 2 0 0 16 16 0 0 0  # psubsw %xmm3,%xmm0
+66a7 2 cmps 2 0 0 16 16 0 0 0  # cmpsw %es:(%rdi),%ds:(%rsi)
+673e264a0f629a6ed4fb4b 11 sse 8 1 0 2 16 0 4bfbd46e 0  # punpckldq 0x4bfbd46e(%edx),%mm3
+490fddef 4 sse 8 0 0 16 16 0 0 0  # paddusw %mm7,%mm5
+83d67d 3 adc 4 0 0 16 16 0 0 7d  # adcl $0x7d,%esi
+65f0644ed811 6 x87 8 1 0 1 16 0 0 0  # fcoms %fs:(%rcx)
+f06445df4f11 6 x87 4 1 0 15 16 0 11 0  # fisttps %fs:0x11(%r15)
+400f2add 4 sse 4 0 0 16 16 0 0 0  # cvtpi2ps %mm5,%xmm3
+0f76ca 3 sse 4 0 0 16 16 0 0 0  # pcmpeqd %mm2,%mm1
+f04f0f10da 5 sse 8 0 0 16 16 0 0 0  # movups %xmm10,%xmm11
+4e0f1d32 4 nop 8 1 0 2 16 0 0 0  # nopq (%rdx)
+f24e39d0 4 cmp 8 0 0 16 16 0 0 0  # cmpq %r10,%rax
+64f04a0fd1c5 6 sse 8 0 0 16 16 0 0 0  # psrlw %mm5,%mm0
+66460f65db 5 sse 2 0 0 16 16 0 0 0  # pcmpgtw %xmm3,%xmm11
+0f92483d 4 setcc 1 1 0 0 16 0 3d 0  # setb 0x3d(%rax)
+4d3d55125314 6 cmp 8 0 0 16 16 0 0 14531255  # cmpq $0x14531255,%rax
+67650f05 4 syscall 4 0 0 16 16 0 0 0  # syscall
+83ebe6 3 sub 4 0 0 16 16 0 0 ffffffffffffffe6  # subl $0xffffffe6,%ebx
+4ad0c9 3 ror 1 0 0 16 16 0 0 0  # rorb $1,%cl
+0f15d3 3 sse 4 0 0 16 16 0 0 0  # unpckhps %xmm3,%xmm2
+490ffd8cb467191c52 9 sse 8 1 0 12 6 2 521c1967 0  # paddw 0x521c1967(%r12,%rsi,4),%mm1
+663e450f2e4621 7 sse 2 1 0 14 16 0 21 0  # ucomisd 0x21(%r14),%xmm8
+264b8ad2 4 mov 1 0 0 16 16 0 0 0  # movb.s %r10b,%dl
+6466360f59db 6 sse 2 0 0 16 16 0 0 0  # mulpd %xmm3,%xmm3
+a32cd1f1711733bcb3 9 mov 4 1 0 16 16 0 b3bc331771f1d12c 0  # movabsl %eax,0xb3bc331771f1d12c
+4e89a5202be80d 7 mov 8 1 0 5 16 0 de82b20 0  # movq %r12,0xde82b20(%rbp)
+2e6651 3 push 2 0 0 16 16 0 0 0  # pushw %cx
+66ffcd 3 dec 2 0 0 16 16 0 0 0  # decw %bp
+654a833246 5 xor 8 1 0 2 16 0 0 46  # xorq $0x46,%gs:(%rdx)
+88c4 2 mov 1 0 0 16 16 0 0 0  # movb %al,%ah
+364511f9 4 adc 4 0 0 16 16 0 0 0  # adcl %r15d,%r9d
+64638133b2d53d 7 movsx 4 1 0 1 16 0 3dd5b233 0  # movsxd %fs:0x3dd5b233(%rcx),%eax
+364a0ff883c0368c42 9 sse 8 1 0 3 16 0 428c36c0 0  # psubb 0x428c36c0(%rbx),%mm0
+264c0f64fb 5 sse 8 0 0 16 16 0 0 0  # pcmpgtb %mm3,%mm7
+f7ee 2 imul1 4 0 0 16 16 0 0 0  # imull %esi
+3e400fcb 4 bswap 4 0 0 16 16 0 0 0  # bswap %ebx
+4d92 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%r10
+4b0f4c938e25798f 8 cmovcc 8 1 0 11 16 0 ffffffff8f79258e 0  # cmovlq -0x7086da72(%r11),%rdx
+3e64410fc6f6ef 7 sse 4 0 0 16 16 0 0 ef  # shufps $0xef,%xmm14,%xmm6
+6667670f69ce 6 sse 2 0 0 16 16 0 0 0  # punpckhwd %xmm6,%xmm1
+67f043d005b5a9b41d 9 rol 1 1 1 16 16 0 1db4a9b5 0  # rolb $1,0x1db4a9b5(%eip)
+360f7f1e 4 sse 4 1 0 6 16 0 0 0  # movq %mm3,(%rsi)
+4c0feb4f33 5 sse 8 1 0 7 16 0 33 0  # por 0x33(%rdi),%mm1
+660fb7c0 4 movzx 2 0 0 16 16 0 0 0  # movzww %ax,%ax
+4c81ebc255e345 7 sub 8 0 0 16 16 0 0 45e355c2  # subq $0x45e355c2,%rbx
+4b0f5b32 4 sse 8 1 0 10 16 0 0 0  # cvtdq2ps (%r10),%xmm6
+6636ff85d4734aa2 8 inc 2 1 0 5 16 0 ffffffffa24a73d4 0  # incw -0x5db58c2c(%rbp)
+674983e4cf 5 and 8 0 0 16 16 0 0 ffffffffffffffcf  # andq $0xffffffffffffffcf,%r12
+4e0f566e03 5 sse 8 1 0 6 16 0 3 0  # orps 0x3(%rsi),%xmm13
+3665660f408377039d83 10 cmovcc 2 1 0 3 16 0 ffffffff839d0377 0  # cmovow %gs:-0x7c62fc89(%rbx),%ax
+f24fc9 3 leave 8 0 0 16 16 0 0 0  # leaveq
+f2648734450be306e1 9 xchg 4 1 0 16 0 1 ffffffffe106e30b 0  # xacquire xchgl %esi,%fs:-0x1ef91cf5(,%rax,2)
+36f0f049d9248dfe6b9af0 11 x87 8 1 0 16 1 2 fffffffff09a6bfe 0  # fldenvl -0xf659402(,%rcx,4)
+4ec12f7d 4 shr 8 1 0 7 16 0 0 7d  # shrq $0x7d,(%rdi)
+4b0f4e6948 5 cmovcc 8 1 0 9 16 0 48 0  # cmovleq 0x48(%r9),%rbp
+f03e440f63b5475152f3 10 sse 4 1 0 5 16 0 fffffffff3525147 0  # packsswb -0xcadaeb9(%rbp),%mm6
+4bf7f1 3 div 8 0 0 16 16 0 0 0  # divq %r9
+0f14af1ec089fe 7 sse 4 1 0 7 16 0 fffffffffe89c01e 0  # unpcklps -0x1763fe2(%rdi),%xmm5
+6526440ffdee 6 sse 4 0 0 16 16 0 0 0  # paddw %mm6,%mm5
+0febee 3 sse 4 0 0 16 16 0 0 0  # por %mm6,%mm5
+e6ef 2 gp 4 0 0 16 16 0 0 ef  # outb %al,$0xef
+3667407d77 5 jcc 8 0 0 16 16 0 0 77  # jge 0x1ab3f2
+f0364e0f649e6e058df9 10 sse 8 1 0 6 16 0 fffffffff98d056e 0  # pcmpgtb -0x672fa92(%rsi),%mm3
+2e3e654b0fde7977 8 sse 8 1 0 9 16 0 77 0  # pmaxub %gs:0x77(%r9),%mm7
+362ef20f35 5 gp 4 0 0 16 16 0 0 0  # sysexitl
+81fb61f491ef 6 cmp 4 0 0 16 16 0 0 ef91f461  # cmpl $0xef91f461,%ebx
+26f03649c0ecfe 7 shr 1 0 0 16 16 0 0 fe  # shrb $0xfe,%r12b
+f3f065fe00 5 inc 1 1 0 0 16 0 0 0  # xrelease incb %gs:(%rax)
+f266450fa8 5 push_sreg 2 0 0 16 16 0 0 0  # pushw %gs
+362e3e0f08 5 gp 4 0 0 16 16 0 0 0  # invd
+cb 1 gp 4 0 0 16 16 0 0 0  # lretl
+6766460fbd742f3c 8 bsr 2 1 0 7 13 0 3c 0  # bsrw 0x3c(%edi,%r13d,1),%r14w
+2666fb 3 gp 2 0 0 16 16 0 0 0  # sti
+460fbab0e104ede45e 9 btr 4 1 0 0 16 0 ffffffffe4ed04e1 5e  # btrl $0x5e,-0x1b12fb1f(%rax)
+660fb337 4 btr 2 1 0 7 16 0 0 0  # btrw %si,(%rdi)
+66f365460fc291afeee2513a 12 sse 2 1 0 1 16 0 51e2eeaf 3a  # cmpss $0x3a,%gs:0x51e2eeaf(%rcx),%xmm10
+3e67f34c0fbaeab1 8 bts 8 0 0 16 16 0 0 b1  # btsq $0xb1,%rdx
+66ff6f58 4 gp 2 1 0 7 16 0 58 0  # ljmpw *0x58(%rdi)
+3e0ff407 4 sse 4 1 0 7 16 0 0 0  # pmuludq (%rdi),%mm0
+6544d103 4 rol 4 1 0 3 16 0 0 0  # roll $1,%gs:(%rbx)
+4f0f11d6 4 sse 8 0 0 16 16 0 0 0  # movups.s %xmm10,%xmm14
+2666368ced 5 mov_from_sreg 2 0 0 16 16 0 0 0  # movw %gs,%bp
+420f65e1 4 sse 4 0 0 16 16 0 0 0  # pcmpgtw %mm1,%mm4
+660fd82f 4 sse 2 1 0 7 16 0 0 0  # psubusb (%rdi),%xmm5
+640ffad1 4 sse 4 0 0 16 16 0 0 0  # psubd %mm1,%mm2
+2610ee 3 adc 1 0 0 16 16 0 0 0  # adcb %ch,%dh
+2ef0490f754f54 7 sse 8 1 0 15 16 0 54 0  # pcmpeqw 0x54(%r15),%mm1
+3665470f60c2 6 sse 4 0 0 16 16 0 0 0  # punpcklbw %mm2,%mm0
+f066360f74f3 6 sse 2 0 0 16 16 0 0 0  # pcmpeqb %xmm3,%xmm6
+65f3674f832912 7 sub 8 1 0 9 16 0 0 12  # subq $0x12,%gs:(%r9d)
+263e3e410f77 6 sse 4 0 0 16 16 0 0 0  # emms
+663e64def8 5 x87 2 0 0 16 16 0 0 0  # fdivrp %st,%st(0)
+2e0f74b5d6bc26c0 8 sse 4 1 0 5 16 0 ffffffffc026bcd6 0  # pcmpeqb -0x3fd9432a(%rbp),%mm6
+2e6645e46b 5 gp 2 0 0 16 16 0 0 6b  # inb $0x6b,%al
+65666543aa 5 stos 1 0 0 16 16 0 0 0  # stosb %al,%es:(%rdi)
+663e0f47b0816dad42 9 cmovcc 2 1 0 0 16 0 42ad6d81 0  # cmovaw 0x42ad6d81(%rax),%si
+66650f14c6 5 sse 2 0 0 16 16 0 0 0  # unpcklpd %xmm6,%xmm0
+4f80baa66aba1148 8 cmp 1 1 0 10 16 0 11ba6aa6 48  # cmpb $0x48,0x11ba6aa6(%r10)
+f3f366480f4fc1 7 cmovcc 8 0 0 16 16 0 0 0  # cmovgq %rcx,%rax
+643ef04e0fe9c0 7 sse 8 0 0 16 16 0 0 0  # psubsw %mm0,%mm0
+470fde572b 5 sse 4 1 0 15 16 0 2b 0  # pmaxub 0x2b(%r15),%mm2
+26422ba73466a4ce 8 sub 4 1 0 7 16 0 ffffffffcea46634 0  # subl -0x315b99cc(%rdi),%esp
+66674233900141c093 9 xor 2 1 0 0 16 0 ffffffff93c04101 0  # xorw -0x6c3fbeff(%eax),%dx
+64640ff5b3d3e7bc8f 9 sse 4 1 0 3 16 0 ffffffff8fbce7d3 0  # pmaddwd %fs:-0x7043182d(%rbx),%mm6
+55 1 push 8 0 0 16 16 0 0 0  # pushq %rbp
+4b23da 3 and 8 0 0 16 16 0 0 0  # andq.s %r10,%rbx
+f02647831778 6 adc 4 1 0 15 16 0 0 78  # adcl $0x78,(%r15)
+662647e610 5 gp 2 0 0 16 16 0 0 10  # outb %al,$0x10
+2e66f0440f1e7f39 8 nop 2 1 0 7 16 0 39 0  # nopw 0x39(%rdi)
+66360f31 4 rdtsc 2 0 0 16 16 0 0 0  # rdtsc
+4c0f20d3 4 gp 8 0 0 16 16 0 0 0  # movq %cr10,%rbx
+44fd 2 std 4 0 0 16 16 0 0 0  # std
+8fc4 2 pop 8 0 0 16 16 0 0 0  # popq %rsp
+4e0f0db2cdfbc114 8 nop 8 1 0 2 16 0 14c1fbcd 0  # prefetch 0x14c1fbcd(%rdx)
+4ff798efc41e6a 7 neg 8 1 0 8 16 0 6a1ec4ef 0  # negq 0x6a1ec4ef(%r8)
+660f4f743749 6 cmovcc 2 1 0 7 6 0 49 0  # cmovgw 0x49(%rdi,%rsi,1),%si
+2ef0480f62c3 6 sse 8 0 0 16 16 0 0 0  # punpckldq %mm3,%mm0
+660f747afe 5 sse 2 1 0 2 16 0 fffffffffffffffe 0  # pcmpeqb -0x2(%rdx),%xmm7
+4923b9d68236ed 7 and 8 1 0 9 16 0 ffffffffed3682d6 0  # andq -0x12c97d2a(%r9),%rdi
+26f2420fd0e1 6 sse 4 0 0 16 16 0 0 0  # addsubps %xmm1,%xmm4
+66450ffbf3 5 sse 2 0 0 16 16 0 0 0  # psubq %xmm11,%xmm14
+4489cf 3 mov 4 0 0 16 16 0 0 0  # movl %r9d,%edi
+2e662e4b0fd63574c69b41 11 sse 8 1 1 16 16 0 419bc674 0  # movq %xmm6,0x419bc674(%rip)
+0fedd7 3 sse 4 0 0 16 16 0 0 0  # paddsw %mm7,%mm2
+f06658 3 pop 2 0 0 16 16 0 0 0  # popw %ax
+0f1de6 3 nop 4 0 0 16 16 0 0 0  # nopl %esi
+674c0fc5f978 6 sse 8 0 0 16 16 0 0 78  # pextrw $0x78,%mm1,%r15d
+6647d3c5 4 rol 2 0 0 16 16 0 0 0  # rolw %cl,%r13w
+3e413dc2c043c4 7 cmp 4 0 0 16 16 0 0 c443c0c2  # cmpl $0xc443c0c2,%eax
+660fe0dc 4 sse 2 0 0 16 16 0 0 0  # pavgb %xmm4,%xmm3
+3667660f2cef 6 sse 2 0 0 16 16 0 0 0  # cvttpd2pi %xmm7,%mm5
+6565264a0f99e2 7 setcc 1 0 0 16 16 0 0 0  # setns %dl
+f22e66400fa4821a7c36e7df 12 shld 2 1 0 2 16 0 ffffffffe7367c1a df  # shldw $0xdf,%ax,-0x18c983e6(%rdx)
+3e264cfd 4 std 8 0 0 16 16 0 0 0  # std
+4899 2 cwd 8 0 0 16 16 0 0 0  # cqto
+f276eb 3 jcc 8 0 0 16 16 0 0 ffffffffffffffeb  # jbe 0x14aec4
+f2f9 2 stc 4 0 0 16 16 0 0 0  # stc
+4e0054304d 5 add 1 1 0 0 14 0 4d 0  # addb %r10b,0x4d(%rax,%r14,1)
+f3486d 3 gp 8 0 0 16 16 0 0 0  # insl (%dx),%es:(%rdi)
+0fe11dc56d43a8 7 sse 4 1 1 16 16 0 ffffffffa8436dc5 0  # psraw -0x57bc923b(%rip),%mm3
+0f19c2 3 nop 4 0 0 16 16 0 0 0  # nopl %edx
+66264f0f6c6814 7 sse 8 1 0 8 16 0 14 0  # punpcklqdq 0x14(%r8),%xmm13
+0fef55ee 4 sse 4 1 0 5 16 0 ffffffffffffffee 0  # pxor -0x12(%rbp),%mm2
+646665401bb90426c472 10 sbb 2 1 0 1 16 0 72c42604 0  # sbbw %gs:0x72c42604(%rcx),%di
+65c1e983 4 shr 4 0 0 16 16 0 0 83  # shrl $0x83,%ecx
+4aa113a74453a5989a39 10 mov 8 1 0 16 16 0 399a98a55344a713 0  # movabsq 0x399a98a55344a713,%rax
+3e4f0f06 4 gp 8 0 0 16 16 0 0 0  # clts
+4c0fc2e6e4 5 sse 8 0 0 16 16 0 0 e4  # cmpps $0xe4,%xmm6,%xmm12
+b423 2 mov 1 0 0 16 16 0 0 23  # movb $0x23,%ah
+67f064d306 5 rol 4 1 0 6 16 0 0 0  # roll %cl,%fs:(%esi)
+3ec022ab 4 shl 1 1 0 2 16 0 0 ab  # shlb $0xab,(%rdx)
+67480f35 4 gp 8 0 0 16 16 0 0 0  # sysexitq
+4c0fc8 3 bswap 8 0 0 16 16 0 0 0  # bswap %rax
+3e42fe89e2653aa4 8 dec 1 1 0 1 16 0 ffffffffa43a65e2 0  # decb -0x5bc59a1e(%rcx)
+48dac1 3 x87 8 0 0 16 16 0 0 0  # fcmovb %st(1),%st
+0f4cf2 3 cmovcc 4 0 0 16 16 0 0 0  # cmovll %edx,%esi
+666426410f60b14b69b27c 11 sse 2 1 0 9 16 0 7cb2694b 0  # punpcklbw %fs:0x7cb2694b(%r9),%xmm6
+666a19 3 push 2 0 0 16 16 0 0 19  # pushw $0x19
+4881a3a11f6302ac46fb3f 11 and 8 1 0 3 16 0 2631fa1 3ffb46ac  # andq $0x3ffb46ac,0x2631fa1(%rbx)
+66672e0fa2 5 cpuid 2 0 0 16 16 0 0 0  # cpuid
+2e4a0feffe 5 sse 8 0 0 16 16 0 0 0  # pxor %mm6,%mm7
+4f0f7493a095a089 8 sse 8 1 0 11 16 0 ffffffff89a095a0 0  # pcmpeqb -0x765f6a60(%r11),%mm2
+3e4b0fdd4cd575 7 sse 8 1 0 13 10 3 75 0  # paddusw 0x75(%r13,%r10,8),%mm1
+3e0fcd 3 bswap 4 0 0 16 16 0 0 0  # bswap %ebp
+6626670ffff1 6 sse 2 0 0 16 16 0 0 0  # ud0w %cx,%si
+400fab640a99 6 bts 4 1 0 2 1 0 ffffffffffffff99 0  # btsl %esp,-0x67(%rdx,%rcx,1)
+4b91 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%r9
+6566660fe813 6 sse 2 1 0 3 16 0 0 0  # psubsb %gs:(%rbx),%xmm2
+458c143dbd65182c 8 mov_from_sreg 4 1 0 16 7 0 2c1865bd 0  # movw %ss,0x2c1865bd(,%rdi,1)
+2e0fbb5b77 5 btc 4 1 0 3 16 0 77 0  # btcl %ebx,0x77(%rbx)
+66460f66f4 5 sse 2 0 0 16 16 0 0 0  # pcmpgtd %xmm4,%xmm14
+4e31c8 3 xor 8 0 0 16 16 0 0 0  # xorq %r9,%rax
+42bd21af5508 6 mov 4 0 0 16 16 0 0 855af21  # movl $0x855af21,%ebp
+4f0fda6743 5 sse 8 1 0 15 16 0 43 0  # pminub 0x43(%r15),%mm4
+4a0f6605fa3c1676 8 sse 8 1 1 16 16 0 76163cfa 0  # pcmpgtd 0x76163cfa(%rip),%mm0
+f0663648108bace00b3a 10 adc 1 1 0 3 16 0 3a0be0ac 0  # adcb %cl,0x3a0be0ac(%rbx)
+6641cdea 4 int 2 0 0 16 16 0 0 ea  # int $0xea
+364d0fbcbcb8817c4c07 10 bsf 8 1 0 8 7 2 74c7c81 0  # bsfq 0x74c7c81(%r8,%rdi,4),%r15
+3666450f15b5b017de6f 10 sse 2 1 0 13 16 0 6fde17b0 0  # unpckhpd 0x6fde17b0(%r13),%xmm14
+490fef50a0 5 sse 8 1 0 8 16 0 ffffffffffffffa0 0  # pxor -0x60(%r8),%mm2
+643666445a 5 pop 2 0 0 16 16 0 0 0  # popw %dx
+4e8702 3 xchg 8 1 0 2 16 0 0 0  # xchgq %r8,(%rdx)
+4a0f6af4 4 sse 8 0 0 16 16 0 0 0  # punpckhdq %mm4,%mm6
+f33e6645d30e 6 ror 2 1 0 14 16 0 0 0  # rorw %cl,(%r14)
+3e4bf1 3 gp 8 0 0 16 16 0 0 0  # int1
+662e3e43c1daba 7 rcr 2 0 0 16 16 0 0 ba  # rcrw $0xba,%r10w
+4f0f15f6 4 sse 8 0 0 16 16 0 0 0  # unpckhps %xmm14,%xmm14
+64f2f0411285af952ef1 10 adc 1 1 0 13 16 0 fffffffff12e95af 0  # adcb %fs:-0xed16a51(%r13),%al
+0f997b33 4 setcc 1 1 0 3 16 0 33 0  # setns 0x33(%rbx)
+36654e0fecce 6 sse 8 0 0 16 16 0 0 0  # paddsb %mm6,%mm1
+4ac11172 4 rcl 8 1 0 1 16 0 0 72  # rclq $0x72,(%rcx)
+f047d33413 5 shl 4 1 0 11 10 0 0 0  # shll %cl,(%r11,%r10,1)
+3665364d0f2c2e 7 sse 8 1 0 14 16 0 0 0  # cvttps2pi %gs:(%r14),%mm5
+480fba6a327d 6 bts 8 1 0 2 16 0 32 7d  # btsq $0x7d,0x32(%rdx)
+266669d04d22 6 imul 2 0 0 16 16 0 0 224d  # imulw $0x224d,%ax,%dx
+640f6bc0 4 sse 4 0 0 16 16 0 0 0  # packssdw %mm0,%mm0
+3e0fb20b 4 lseg 4 1 0 3 16 0 0 0  # lssl (%rbx),%ecx
+3e0daefafa9a 6 or 4 0 0 16 16 0 0 9afafaae  # orl $0x9afafaae,%eax
+38c8 2 cmp 1 0 0 16 16 0 0 0  # cmpb %cl,%al
+65470fa3e2 5 bt 4 0 0 16 16 0 0 0  # btl %r12d,%r10d
+66d1ad8562cc5a 7 shr 2 1 0 5 16 0 5acc6285 0  # shrw $1,0x5acc6285(%rbp)
+4b0fc1c6 4 xadd 8 0 0 16 16 0 0 0  # xaddq %rax,%r14
+4dd24e7a 4 ror 1 1 0 14 16 0 7a 0  # rorb %cl,0x7a(%r14)
+2ed31a 3 rcr 4 1 0 2 16 0 0 0  # rcrl %cl,(%rdx)
+66470ff397576ba994 9 sse 2 1 0 15 16 0 ffffffff94a96b57 0  # psllq -0x6b5694a9(%r15),%xmm10
+6749dbd4 4 x87 8 0 0 16 16 0 0 0  # fcmovnbe %st(4),%st
+f0ffd3 3 call_ind 8 0 0 16 16 0 0 0  # callq *%rbx
+64644e0f157bed 7 sse 8 1 0 3 16 0 ffffffffffffffed 0  # unpckhps %fs:-0x13(%rbx),%xmm15
+666441d82da1888280 9 x87 2 1 1 16 16 0 ffffffff808288a1 0  # fsubrs %fs:-0x7f7d775f(%rip)
+64f366445c 5 pop 2 0 0 16 16 0 0 0  # popw %sp
+6640899ef424c9ac 8 mov 2 1 0 6 16 0 ffffffffacc924f4 0  # movw %bx,-0x5336db0c(%rsi)
+4ac1c351 4 rol 8 0 0 16 16 0 0 51  # rolq $0x51,%rbx
+480f19c9 4 nop 8 0 0 16 16 0 0 0  # nopq %rcx
+f3664f8b87a79f01ee 9 mov 8 1 0 15 16 0 ffffffffee019fa7 0  # movq -0x11fe6059(%r15),%r8
+f0264cdc19 5 x87 8 1 0 1 16 0 0 0  # fcompl (%rcx)
+66640f58f4 5 sse 2 0 0 16 16 0 0 0  # addpd %xmm4,%xmm6
+410587527148 6 add 4 0 0 16 16 0 0 48715287  # addl $0x48715287,%eax
+6742d1ec 4 shr 4 0 0 16 16 0 0 0  # shrl $1,%esp
+fb 1 gp 4 0 0 16 16 0 0 0  # sti
+26a5 2 movs 4 0 0 16 16 0 0 0  # movsl %ds:(%rsi),%es:(%rdi)
+2e470ffce4 5 sse 4 0 0 16 16 0 0 0  # paddb %mm4,%mm4
+2e2640b998f9fc9f 8 mov 4 0 0 16 16 0 0 9ffcf998  # movl $0x9ffcf998,%ecx
+f3f266415d 5 pop 2 0 0 16 16 0 0 0  # popw %r13w
+4793 2 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%r11d
+4d8128c79c1725 7 sub 8 1 0 8 16 0 0 25179cc7  # subq $0x25179cc7,(%r8)
+6647f4 3 gp 2 0 0 16 16 0 0 0  # hlt
+666549c15b8077 7 rcr 8 1 0 11 16 0 ffffffffffffff80 77  # rcrq $0x77,%gs:-0x80(%r11)
+f26480f0c6 5 xor 1 0 0 16 16 0 0 c6  # xorb $0xc6,%al
+f20fca 3 bswap 4 0 0 16 16 0 0 0  # bswap %edx
+f2f065420fb1d0 7 cmpxchg 4 0 0 16 16 0 0 0  # cmpxchgl %edx,%eax
+4e0f23f4 4 gp 8 0 0 16 16 0 0 0  # movq %rsp,%db14
+66664d0f6eed 6 sse 8 0 0 16 16 0 0 0  # movq %r13,%xmm13
+6465f04f0fbafb14 8 btc 8 0 0 16 16 0 0 14  # btcq $0x14,%r11
+482bea 3 sub 8 0 0 16 16 0 0 0  # subq.s %rdx,%rbp
+6665d35a80 5 rcr 2 1 0 2 16 0 ffffffffffffff80 0  # rcrw %cl,%gs:-0x80(%rdx)
+264581657f48061372 9 and 4 1 0 13 16 0 7f 72130648  # andl $0x72130648,0x7f(%r13)
+46ad 2 lods 4 0 0 16 16 0 0 0  # lodsl %ds:(%rsi),%eax
+36460fa527 5 shld 4 1 0 7 16 0 0 0  # shldl %cl,%r12d,(%rdi)
+41f76d5e 4 imul1 4 1 0 13 16 0 5e 0  # imull 0x5e(%r13)
+6783a6776fae928e 8 and 4 1 0 6 16 0 ffffffff92ae6f77 ffffffffffffff8e  # andl $0xffffff8e,-0x6d519089(%esi)
+6694 2 xchg 2 0 0 16 16 0 0 0  # xchgw %ax,%sp
+f065644339fe 6 cmp 4 0 0 16 16 0 0 0  # cmpl %edi,%r14d
+644fa6 3 cmps 1 0 0 16 16 0 0 0  # cmpsb %es:(%rdi),%fs:(%rsi)
+4cd3dd 3 rcr 8 0 0 16 16 0 0 0  # rcrq %cl,%rbp
+f00f9b6882 5 setcc 1 1 0 0 16 0 ffffffffffffff82 0  # setnp -0x7e(%rax)
+4f0ffca97837e295 8 sse 8 1 0 9 16 0 ffffffff95e23778 0  # paddb -0x6a1dc888(%r9),%mm5
+f048d1d5 4 rcl 8 0 0 16 16 0 0 0  # rclq $1,%rbp
+662e450fbecf 6 movsx 2 0 0 16 16 0 0 0  # movsbw %r15b,%r9w
+0ff992b758b676 7 sse 4 1 0 2 16 0 76b658b7 0  # psubw 0x76b658b7(%rdx),%mm2
+460f6b31 4 sse 4 1 0 1 16 0 0 0  # packssdw (%rcx),%mm6
+4bd3beffc463d8 7 sar 8 1 0 14 16 0 ffffffffd863c4ff 0  # sarq %cl,-0x279c3b01(%r14)
+3ecf 2 gp 4 0 0 16 16 0 0 0  # iretl
+490febd4 4 sse 8 0 0 16 16 0 0 0  # por %mm4,%mm2
+64f3664029a5cf435829 10 sub 2 1 0 5 16 0 295843cf 0  # subw %sp,%fs:0x295843cf(%rbp)
+d2f9 2 sar 1 0 0 16 16 0 0 0  # sarb %cl,%cl
+2667660f4af4 6 cmovcc 2 0 0 16 16 0 0 0  # cmovpw %sp,%si
+0f629f5950b959 7 sse 4 1 0 7 16 0 59b95059 0  # punpckldq 0x59b95059(%rdi),%mm3
+66650f595512 6 sse 2 1 0 5 16 0 12 0  # mulpd %gs:0x12(%rbp),%xmm2
+f064660f49eb 6 cmovcc 2 0 0 16 16 0 0 0  # cmovnsw %bx,%bp
+66f32e2bee 5 sub 2 0 0 16 16 0 0 0  # subw.s %si,%bp
+3e0f00c0 4 gp 4 0 0 16 16 0 0 0  # sldtl %eax
+4c0f71e0c3 5 sse 8 0 0 16 16 0 0 c3  # psraw $0xc3,%mm0
+4b81de34a34676 7 sbb 8 0 0 16 16 0 0 7646a334  # sbbq $0x7646a334,%r14
+4f0f75ff 4 sse 8 0 0 16 16 0 0 0  # pcmpeqw %mm7,%mm7
+0f10a1a1d93356 7 sse 4 1 0 1 16 0 5633d9a1 0  # movups 0x5633d9a1(%rcx),%xmm4
+f365364c81fa98c97dd3 10 cmp 8 0 0 16 16 0 0 ffffffffd37dc998  # cmpq $0xffffffffd37dc998,%rdx
+64674d0f77 5 sse 8 0 0 16 16 0 0 0  # emms
+f26466420f4b67b6 8 cmovcc 2 1 0 7 16 0 ffffffffffffffb6 0  # cmovnpw %fs:-0x4a(%rdi),%sp
+66f2f0815e0a4b21 8 sbb 2 1 0 6 16 0 a 214b  # xacquire sbbw $0x214b,0xa(%rsi)
+66f30f6fed 5 sse 2 0 0 16 16 0 0 0  # movdqu %xmm5,%xmm5
+264f0ff6b51bcb7a50 9 sse 8 1 0 13 16 0 507acb1b 0  # psadbw 0x507acb1b(%r13),%mm6
+f264f20f8b9e7c60f0 9 jcc 8 0 0 16 16 0 0 fffffffff0607c9e  # jnp 0xfffffffff069a0ff
+a9843253df 5 test 4 0 0 16 16 0 0 df533284  # testl $0xdf533284,%eax
+3ef066438be8 6 mov 2 0 0 16 16 0 0 0  # movw.s %r8w,%bp
+66430f754b08 6 sse 2 1 0 11 16 0 8 0  # pcmpeqw 0x8(%r11),%xmm1
+f2f2490fe6db 6 sse 8 0 0 16 16 0 0 0  # cvtpd2dq %xmm11,%xmm3
+66400f4e861343cf49 9 cmovcc 2 1 0 6 16 0 49cf4313 0  # cmovlew 0x49cf4313(%rsi),%ax
+66430f5bf2 5 sse 2 0 0 16 16 0 0 0  # cvtps2dq %xmm10,%xmm6
+6566670f33 5 gp 2 0 0 16 16 0 0 0  # rdpmc
+6464a8fc 4 test 1 0 0 16 16 0 0 fc  # testb $0xfc,%al
+2666664b7b4c 6 jcc 8 0 0 16 16 0 0 4c  # jnp 0x147c25
+3ef33ef75d0e 6 neg 4 1 0 5 16 0 e 0  # negl 0xe(%rbp)
+0f9722 3 setcc 1 1 0 2 16 0 0 0  # seta (%rdx)
+663ed180a5686a7e 8 rol 2 1 0 0 16 0 7e6a68a5 0  # rolw $1,0x7e6a68a5(%rax)
+663ef30f6f09 6 sse 2 1 0 1 16 0 0 0  # movdqu (%rcx),%xmm1
+36490f1b872317c2c2 9 nop 8 1 0 15 16 0 ffffffffc2c21723 0  # bndstx %bnd0,-0x3d3de8dd(%r15)
+6466f24a83ed2a 7 sub 8 0 0 16 16 0 0 2a  # subq $0x2a,%rbp
+f2f3654be51c 6 gp 8 0 0 16 16 0 0 1c  # inl $0x1c,%eax
+6766f048d1fb 6 sar 8 0 0 16 16 0 0 0  # sarq $1,%rbx
+f26667452b3400 7 sub 2 1 0 8 0 0 0 0  # subw (%r8d,%eax,1),%r14w
+64cc 2 int3 4 0 0 16 16 0 0 0  # int3
+f0266645f1 5 gp 2 0 0 16 16 0 0 0  # int1
+642e0fd448cc 6 sse 4 1 0 0 16 0 ffffffffffffffcc 0  # paddq %fs:-0x34(%rax),%mm1
+0fee11 3 sse 4 1 0 1 16 0 0 0  # pmaxsw (%rcx),%mm2
+266748de466d 6 x87 8 1 0 6 16 0 6d 0  # fiadds 0x6d(%esi)
+660f5d8de990e7af 8 sse 2 1 0 5 16 0 ffffffffafe790e9 0  # minpd -0x50186f17(%rbp),%xmm1
+f04d0fe24079 6 sse 8 1 0 8 16 0 79 0  # psrad 0x79(%r8),%mm0
+654e0f6535a7b0c17f 9 sse 8 1 1 16 16 0 7fc1b0a7 0  # pcmpgtw %gs:0x7fc1b0a7(%rip),%mm6
+2e470fd5b8b721eff6 9 sse 4 1 0 8 16 0 fffffffff6ef21b7 0  # pmullw -0x910de49(%r8),%mm7
+4b0fc6c8e7 5 sse 8 0 0 16 16 0 0 e7  # shufps $0xe7,%xmm8,%xmm1
+f23e46d1b63f115f3d 9 shl 4 1 0 6 16 0 3d5f113f 0  # shll $1,0x3d5f113f(%rsi)
+3664f2db6b44 6 x87 4 1 0 3 16 0 44 0  # fldt %fs:0x44(%rbx)
+660fdb7cb3e8 6 sse 2 1 0 3 6 2 ffffffffffffffe8 0  # pand -0x18(%rbx,%rsi,4),%xmm7
+6666f047dcfd 6 x87 2 0 0 16 16 0 0 0  # fdivr %st,%st(5)
+f3f0460fff50eb 7 sse 4 1 0 0 16 0 ffffffffffffffeb 0  # ud0l -0x15(%rax),%r10d
+646741d1d3 5 rcl 4 0 0 16 16 0 0 0  # rcll $1,%r11d
+36653e4e0fb59e0f83462b 11 lseg 8 1 0 6 16 0 2b46830f 0  # lgsq %gs:0x2b46830f(%rsi),%r11
+f22e450fa4658621 8 shld 4 1 0 13 16 0 ffffffffffffff86 21  # shldl $0x21,%r12d,-0x7a(%r13)
+e023 2 loopne 8 0 0 16 16 0 0 23  # loopneq 0x42467
+4501ab92393837 7 add 4 1 0 11 16 0 37383992 0  # addl %r13d,0x37383992(%r11)
+66440f7fe3 5 sse 2 0 0 16 16 0 0 0  # movdqa.s %xmm12,%xmm3
+2e0fe9f5 4 sse 4 0 0 16 16 0 0 0  # psubsw %mm5,%mm6
+3e666691 4 xchg 2 0 0 16 16 0 0 0  # xchgw %ax,%cx
+400f2edb 4 sse 4 0 0 16 16 0 0 0  # ucomiss %xmm3,%xmm3
+660f761e 4 sse 2 1 0 6 16 0 0 0  # pcmpeqd (%rsi),%xmm3
+4e0f5a56eb 5 sse 8 1 0 6 16 0 ffffffffffffffeb 0  # cvtps2pd -0x15(%rsi),%xmm10
+4381f7c559304a 7 xor 4 0 0 16 16 0 0 4a3059c5  # xorl $0x4a3059c5,%r15d
+26f066430fdfe2 7 sse 2 0 0 16 16 0 0 0  # pandn %xmm10,%xmm4
+2ef3661902 5 sbb 2 1 0 2 16 0 0 0  # sbbw %ax,(%rdx)
+26f04aa91ba3020b 8 test 8 0 0 16 16 0 0 b02a31b  # testq $0xb02a31b,%rax
+662e400f6838 6 sse 2 1 0 0 16 0 0 0  # punpckhbw (%rax),%xmm7
+3e66dfbee9218a90 8 x87 2 1 0 6 16 0 ffffffff908a21e9 0  # fistpll -0x6f75de17(%rsi)
+7033 2 jcc 8 0 0 16 16 0 0 33  # jo 0x1b4b81
+440f2d76ec 5 sse 4 1 0 6 16 0 ffffffffffffffec 0  # cvtps2pi -0x14(%rsi),%mm6
+4fd38614141923 7 rol 8 1 0 14 16 0 23191414 0  # rolq %cl,0x23191414(%r14)
+4d0ff2ef 4 sse 8 0 0 16 16 0 0 0  # pslld %mm7,%mm5
+2e6736d7 4 xlat 4 0 0 16 16 0 0 0  # xlat %ds:(%ebx)
+363e4f0fcc 5 bswap 8 0 0 16 16 0 0 0  # bswap %r12
+66f0670f1d0b 6 nop 2 1 0 3 16 0 0 0  # nopw (%ebx)
+42811fd8779dc7 7 sbb 4 1 0 7 16 0 0 c79d77d8  # sbbl $0xc79d77d8,(%rdi)
+260fe5f6 4 sse 4 0 0 16 16 0 0 0  # pmulhw %mm6,%mm6
+663e660f414b3b 7 cmovcc 2 1 0 3 16 0 3b 0  # cmovnow 0x3b(%rbx),%cx
+66440fa324c3 6 bt 2 1 0 3 0 3 0 0  # btw %r12w,(%rbx,%rax,8)
+640fea0a 4 sse 4 1 0 2 16 0 0 0  # pminsw %fs:(%rdx),%mm1
+f34480705aaa 6 xor 1 1 0 0 16 0 5a aa  # xorb $0xaa,0x5a(%rax)
+360fcc 3 bswap 4 0 0 16 16 0 0 0  # bswap %esp
+0f11ed 3 sse 4 0 0 16 16 0 0 0  # movups.s %xmm5,%xmm5
+3648bd1372dabb4f21ffad 11 mov 8 0 0 16 16 0 0 adff214fbbda7213  # movabsq $0xadff214fbbda7213,%rbp
+f22e67470f23dd 7 gp 4 0 0 16 16 0 0 0  # movq %r13,%db11
+f03e44d3ea 5 shr 4 0 0 16 16 0 0 0  # shrl %cl,%edx
+3666f00f4c4029 7 cmovcc 2 1 0 0 16 0 29 0  # cmovlw 0x29(%rax),%ax
+f2f20fa4c153 6 shld 4 0 0 16 16 0 0 53  # shldl $0x53,%eax,%ecx
+640f52da 4 sse 4 0 0 16 16 0 0 0  # rsqrtps %xmm2,%xmm3
+f0653ef7bfe1bde1f3 9 idiv 4 1 0 7 16 0 fffffffff3e1bde1 0  # idivl %gs:-0xc1e421f(%rdi)
+4f21ae021b1d74 7 and 8 1 0 14 16 0 741d1b02 0  # andq %r13,0x741d1b02(%r14)
+654c0fd4d5 5 sse 8 0 0 16 16 0 0 0  # paddq %mm5,%mm2
+66420f61fd 5 sse 2 0 0 16 16 0 0 0  # punpcklwd %xmm5,%xmm7
+f266f30f10f9 6 sse 2 0 0 16 16 0 0 0  # movss %xmm1,%xmm7
+4cee 2 gp 8 0 0 16 16 0 0 0  # outb %al,(%dx)
+3e4f814bc88bdfd86c 9 or 8 1 0 11 16 0 ffffffffffffffc8 6cd8df8b  # orq $0x6cd8df8b,-0x38(%r11)
+363ef0440f4ecd 7 cmovcc 4 0 0 16 16 0 0 0  # cmovlel %ebp,%r9d
+660f4dc6 4 cmovcc 2 0 0 16 16 0 0 0  # cmovgew %si,%ax
+2efc 2 cld 4 0 0 16 16 0 0 0  # cld
+3ef366450f5bbf7dc0dfb2 11 sse 2 1 0 15 16 0 ffffffffb2dfc07d 0  # cvttps2dq -0x4d203f83(%r15),%xmm15
+490f66d8 4 sse 8 0 0 16 16 0 0 0  # pcmpgtd %mm0,%mm3
+3e0f2ffb 4 sse 4 0 0 16 16 0 0 0  # comiss %xmm3,%xmm7
+4d386d3c 4 cmp 1 1 0 13 16 0 3c 0  # cmpb %r13b,0x3c(%r13)
+4e52 2 push 8 0 0 16 16 0 0 0  # pushq %rdx
+6664654f0fd0dc 7 sse 8 0 0 16 16 0 0 0  # addsubpd %xmm12,%xmm11
+263e4981cf65f268f3 9 or 8 0 0 16 16 0 0 fffffffff368f265  # orq $0xfffffffff368f265,%r15
+3e3666410fe1c2 7 sse 2 0 0 16 16 0 0 0  # psraw %xmm10,%xmm0
+264ecb 3 gp 8 0 0 16 16 0 0 0  # lretq
+c1b4ed813f7c07d0 8 shl 4 1 0 5 5 3 77c3f81 d0  # shll $0xd0,0x77c3f81(%rbp,%rbp,8)
+480ffa912bcb7fe3 8 sse 8 1 0 1 16 0 ffffffffe37fcb2b 0  # psubd -0x1c8034d5(%rcx),%mm2
+66f24c0f9ee3 6 setcc 1 0 0 16 16 0 0 0  # setle %bl
+4b21cf 3 and 8 0 0 16 16 0 0 0  # andq %rcx,%r15
+f3894013 4 mov 4 1 0 0 16 0 13 0  # xrelease movl %eax,0x13(%rax)
+f33e3e490f16c3 7 sse 8 0 0 16 16 0 0 0  # movshdup %xmm11,%xmm0
+673e26460f56e4 7 sse 4 0 0 16 16 0 0 0  # orps %xmm4,%xmm12
+42c0e1f0 4 shl 1 0 0 16 16 0 0 f0  # shlb $0xf0,%cl
+f26665495f 5 pop 8 0 0 16 16 0 0 0  # popq %r15
+f048e6e7 4 gp 8 0 0 16 16 0 0 e7  # outb %al,$0xe7
+36674b0f5fff 6 sse 8 0 0 16 16 0 0 0  # maxps %xmm15,%xmm7
+f366400f09 5 gp 2 0 0 16 16 0 0 0  # wbnoinvd
+66f26bd7a9 5 imul 2 0 0 16 16 0 0 ffffffffffffffa9  # imulw $0xffa9,%di,%dx
+91 1 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%ecx
+66ddb0bcccad2a 7 x87 2 1 0 0 16 0 2aadccbc 0  # fnsaves 0x2aadccbc(%rax)
+2e360f68c6 5 sse 4 0 0 16 16 0 0 0  # punpckhbw %mm6,%mm0
+f3f266c89fdf51 7 enter 2 0 0 16 16 0 0 df9f  # enterw $0xdf9f,$0x51
+f3650f1cd3 5 nop 4 0 0 16 16 0 0 0  # nopl %ebx
+66d3f7 3 shl 2 0 0 16 16 0 0 0  # shlw %cl,%di
+0fd29fc6b1e9a7 7 sse 4 1 0 7 16 0 ffffffffa7e9b1c6 0  # psrld -0x58164e3a(%rdi),%mm3
+674e6f 3 gp 8 0 0 16 16 0 0 0  # outsl %ds:(%esi),(%dx)
+46f6b22817caef 7 div 1 1 0 2 16 0 ffffffffefca1728 0  # divb -0x1035e8d8(%rdx)
+6685dd 3 test 2 0 0 16 16 0 0 0  # testw %bx,%bp
+4f0f54f1 4 sse 8 0 0 16 16 0 0 0  # andps %xmm9,%xmm14
+4733cb 3 xor 4 0 0 16 16 0 0 0  # xorl.s %r11d,%r9d
+42c7c7abf1d26a 7 mov 4 0 0 16 16 0 0 6ad2f1ab  # movl $0x6ad2f1ab,%edi
+2e4c8bff 4 mov 8 0 0 16 16 0 0 0  # movq.s %rdi,%r15
+4d63b75b8c7c34 7 movsx 8 1 0 15 16 0 347c8c5b 0  # movslq 0x347c8c5b(%r15),%r14
+66812a6926 5 sub 2 1 0 2 16 0 0 2669  # subw $0x2669,(%rdx)
+410f9d53a2 5 setcc 1 1 0 11 16 0 ffffffffffffffa2 0  # setge -0x5e(%r11)
+0f5a5f6a 4 sse 4 1 0 7 16 0 6a 0  # cvtps2pd 0x6a(%rdi),%xmm3
+3e4f0f538f6ce6d29a 9 sse 8 1 0 15 16 0 ffffffff9ad2e66c 0  # rcpps -0x652d1994(%r15),%xmm9
+6653 2 push 2 0 0 16 16 0 0 0  # pushw %bx
+663e0f4feb 5 cmovcc 2 0 0 16 16 0 0 0  # cmovgw %bx,%bp
+663e0f5874d898 7 sse 2 1 0 0 3 3 ffffffffffffff98 0  # addpd -0x68(%rax,%rbx,8),%xmm6
+0fbeeb 3 movsx 4 0 0 16 16 0 0 0  # movsbl %bl,%ebp
+6645a94a6e 5 test 2 0 0 16 16 0 0 6e4a  # testw $0x6e4a,%ax
+6665f24b0f00b190eb81d5 11 gp 8 1 0 9 16 0 ffffffffd581eb90 0  # lkgsw %gs:-0x2a7e1470(%r9)
+45ca0a84 4 gp 4 0 0 16 16 0 0 840a  # lretl $0x840a
+f03e66410ff7e1 7 sse 2 0 0 16 16 0 0 0  # maskmovdqu %xmm9,%xmm4
+4c0f4f6317 5 cmovcc 8 1 0 3 16 0 17 0  # cmovgq 0x17(%rbx),%r12
+4b0fb1e8 4 cmpxchg 8 0 0 16 16 0 0 0  # cmpxchgq %rbp,%r8
+3e66410fd331 6 sse 2 1 0 9 16 0 0 0  # psrlq (%r9),%xmm6
+44c0d57a 4 rcl 1 0 0 16 16 0 0 7a  # rclb $0x7a,%bpl
+460ffeda 4 sse 4 0 0 16 16 0 0 0  # paddd %mm2,%mm3
+266666450fe95bec 8 sse 2 1 0 11 16 0 ffffffffffffffec 0  # psubsw -0x14(%r11),%xmm11
+66364683d0ad 6 adc 2 0 0 16 16 0 0 ffffffffffffffad  # adcw $0xffad,%ax
+660f6ad0 4 sse 2 0 0 16 16 0 0 0  # punpckhdq %xmm0,%xmm2
+3e490fc04e0f 6 xadd 1 1 0 14 16 0 f 0  # xaddb %cl,0xf(%r14)
+0ff2db 3 sse 4 0 0 16 16 0 0 0  # pslld %mm3,%mm3
+2e4d0fdf146f 6 sse 8 1 0 15 5 1 0 0  # pandn (%r15,%rbp,2),%mm2
+f266d314d8 5 rcl 2 1 0 0 3 3 0 0  # rclw %cl,(%rax,%rbx,8)
+0f69eb 3 sse 4 0 0 16 16 0 0 0  # punpckhwd %mm3,%mm5
+f2f064d1cc 5 ror 4 0 0 16 16 0 0 0  # rorl $1,%esp
+f347ebab 4 jmp 8 0 0 16 16 0 0 ffffffffffffffab  # jmp 0x529bd
+6666403b11 5 cmp 2 1 0 1 16 0 0 0  # cmpw (%rcx),%dx
+643e6e 3 gp 4 0 0 16 16 0 0 0  # outsb %fs:(%rsi),(%dx)
+66f30f51c0 5 sse 2 0 0 16 16 0 0 0  # sqrtss %xmm0,%xmm0
+3e66660ffcf8 6 sse 2 0 0 16 16 0 0 0  # paddb %xmm0,%xmm7
+656736430f40ec 7 cmovcc 4 0 0 16 16 0 0 0  # cmovol %r12d,%ebp
+66670f489b336cd358 9 cmovcc 2 1 0 3 16 0 58d36c33 0  # cmovsw 0x58d36c33(%ebx),%bx
+4d0fc4d29d 5 sse 8 0 0 16 16 0 0 9d  # pinsrw $0x9d,%r10d,%mm2
+4281d7a0fed087 7 adc 4 0 0 16 16 0 0 87d0fea0  # adcl $0x87d0fea0,%edi
+f264400fe6a4e0597d3966 11 sse 4 1 0 0 16 3 66397d59 0  # cvtpd2dq %fs:0x66397d59(%rax,%riz,8),%xmm4
+672e4ed1c5 5 rol 8 0 0 16 16 0 0 0  # rolq $1,%rbp
+2e4abaa055ea63c0f53f39 11 mov 8 0 0 16 16 0 0 393ff5c063ea55a0  # movabsq $0x393ff5c063ea55a0,%rdx
+26663643fc 5 cld 2 0 0 16 16 0 0 0  # cld
+67400f7e31 5 sse 4 1 0 1 16 0 0 0  # movd %mm6,(%ecx)
+66360fd252da 6 sse 2 1 0 2 16 0 ffffffffffffffda 0  # psrld -0x26(%rdx),%xmm2
+480900 3 or 8 1 0 0 16 0 0 0  # orq %rax,(%rax)
+80c178 3 add 1 0 0 16 16 0 0 78  # addb $0x78,%cl
+4c81f18bd0bfa0 7 xor 8 0 0 16 16 0 0 ffffffffa0bfd08b  # xorq $0xffffffffa0bfd08b,%rcx
+4d85d9 3 test 8 0 0 16 16 0 0 0  # testq %r11,%r9
+4e0fadaf1f69be25 8 shrd 8 1 0 7 16 0 25be691f 0  # shrdq %cl,%r13,0x25be691f(%rdi)
+66f32e6e 4 gp 2 0 0 16 16 0 0 0  # outsb %ds:(%rsi),(%dx)
+6549dff4 4 x87 8 0 0 16 16 0 0 0  # fcomip %st(4),%st
+3626357ea65258 7 xor 4 0 0 16 16 0 0 5852a67e  # xorl $0x5852a67e,%eax
+490f09 3 gp 8 0 0 16 16 0 0 0  # wbinvd
+64f3412bfa 5 sub 4 0 0 16 16 0 0 0  # subl.s %r10d,%edi
+653e4a0f4de0 6 cmovcc 8 0 0 16 16 0 0 0  # cmovgeq %rax,%rsp
+3e6636470fb774db7f 9 movzx 2 1 0 11 11 3 7f 0  # movzww 0x7f(%r11,%r11,8),%r14w
+f34a0f01f1 5 gp 8 0 0 16 16 0 0 0  # lmsw %cx
+66420f6bd9 5 sse 2 0 0 16 16 0 0 0  # packssdw %xmm1,%xmm3
+664121cc 4 and 2 0 0 16 16 0 0 0  # andw %cx,%r12w
+660f34 3 gp 2 0 0 16 16 0 0 0  # sysenter
+66410f639bc165faa7 9 sse 2 1 0 11 16 0 ffffffffa7fa65c1 0  # packsswb -0x58059a3f(%r11),%xmm3
+12e5 2 adc 1 0 0 16 16 0 0 0  # adcb.s %ch,%ah
+6665f04b0ff3ec 7 sse 8 0 0 16 16 0 0 0  # psllq %xmm12,%xmm5
+4d808fce19ad567f 8 or 1 1 0 15 16 0 56ad19ce 7f  # orb $0x7f,0x56ad19ce(%r15)
+36f3490fa2 5 cpuid 8 0 0 16 16 0 0 0  # cpuid
+3666440fa56e60 7 shld 2 1 0 6 16 0 60 0  # shldw %cl,%r13w,0x60(%rsi)
+264f0f58eb 5 sse 8 0 0 16 16 0 0 0  # addps %xmm11,%xmm13
+3bc7 2 cmp 4 0 0 16 16 0 0 0  # cmpl.s %edi,%eax
+4d2b5a38 4 sub 8 1 0 10 16 0 38 0  # subq 0x38(%r10),%r11
+4f0ff7fe 4 sse 8 0 0 16 16 0 0 0  # maskmovq %mm6,%mm7
+4c0fc33a 4 sse 8 1 0 2 16 0 0 0  # movntiq %r15,(%rdx)
+0f9fb006b6fc88 7 setcc 1 1 0 0 16 0 ffffffff88fcb606 0  # setg -0x770349fa(%rax)
+674a0f2ef4 5 sse 8 0 0 16 16 0 0 0  # ucomiss %xmm4,%xmm6
+65450f70d5fd 6 sse 4 0 0 16 16 0 0 fd  # pshufw $0xfd,%mm5,%mm2
+4b0fd923 4 sse 8 1 0 11 16 0 0 0  # psubusw (%r11),%mm4
+66470fb6ef 5 movzx 2 0 0 16 16 0 0 0  # movzbw %r15b,%r13w
+36410f4a7701 6 cmovcc 4 1 0 15 16 0 1 0  # cmovpl 0x1(%r15),%esi
+490fcb 3 bswap 8 0 0 16 16 0 0 0  # bswap %r11
+66450f01f4 5 gp 2 0 0 16 16 0 0 0  # lmsw %r12w
+2e65664501da 6 add 2 0 0 16 16 0 0 0  # addw %r11w,%r10w
+3e6631c9 4 xor 2 0 0 16 16 0 0 0  # xorw %cx,%cx
+26666598 4 cbw 2 0 0 16 16 0 0 0  # cbtw
+640fbaf8c8 5 btc 4 0 0 16 16 0 0 c8  # btcl $0xc8,%eax
+66f267489e 5 sahf 8 0 0 16 16 0 0 0  # sahf
+4514ec 3 adc 1 0 0 16 16 0 0 ec  # adcb $0xec,%al
+3e4e834a44b2 6 or 8 1 0 2 16 0 44 ffffffffffffffb2  # orq $0xffffffffffffffb2,0x44(%rdx)
+2636408108d098b853 9 or 4 1 0 0 16 0 0 53b898d0  # orl $0x53b898d0,(%rax)
+64f2d3cd 4 ror 4 0 0 16 16 0 0 0  # rorl %cl,%ebp
+672e664af724ba 7 mul 8 1 0 2 15 2 0 0  # mulq (%edx,%r15d,4)
+0f5bd0 3 sse 4 0 0 16 16 0 0 0  # cvtdq2ps %xmm0,%xmm2
+662e0f1bd0 5 nop 2 0 0 16 16 0 0 0  # bndmov.s %bnd2,%bnd0
+364d2890fa8a8a0b 8 sub 1 1 0 8 16 0 b8a8afa 0  # subb %r10b,0xb8a8afa(%r8)
+45c3 2 ret 8 0 0 16 16 0 0 0  # retq
+f20fb79196c74abc 8 movzx 4 1 0 1 16 0 ffffffffbc4ac796 0  # movzwl -0x43b5386a(%rcx),%edx
+400fbc36 4 bsf 4 1 0 6 16 0 0 0  # bsfl (%rsi),%esi
+0f92f7 3 setcc 1 0 0 16 16 0 0 0  # setb %bh
+656695 3 xchg 2 0 0 16 16 0 0 0  # xchgw %ax,%bp
+66f3ee 3 gp 2 0 0 16 16 0 0 0  # outb %al,(%dx)
+3e49c003af 5 rol 1 1 0 11 16 0 0 af  # rolb $0xaf,(%r11)
+6426650f09 5 gp 4 0 0 16 16 0 0 0  # wbinvd
+2e64f345dcc0 6 x87 4 0 0 16 16 0 0 0  # fadd %st,%st(0)
+6636674b0ff5c3 7 sse 8 0 0 16 16 0 0 0  # pmaddwd %xmm11,%xmm0
+420f4bf8 4 cmovcc 4 0 0 16 16 0 0 0  # cmovnpl %eax,%edi
+4f94 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%r12
+54 1 push 8 0 0 16 16 0 0 0  # pushq %rsp
+f34b833e7c 5 cmp 8 1 0 14 16 0 0 7c  # cmpq $0x7c,(%r14)
+6667460f708a66c6931c5a 11 sse 2 1 0 2 16 0 1c93c666 5a  # pshufd $0x5a,0x1c93c666(%edx),%xmm9
+664052 3 push 2 0 0 16 16 0 0 0  # pushw %dx
+f266f254 4 push 2 0 0 16 16 0 0 0  # pushw %sp
+58 1 pop 8 0 0 16 16 0 0 0  # popq %rax
+817c2ccbc37c31b3 8 cmp 4 1 0 4 5 0 ffffffffffffffcb b3317cc3  # cmpl $0xb3317cc3,-0x35(%rsp,%rbp,1)
+2e6626410fe8df 7 sse 2 0 0 16 16 0 0 0  # psubsb %xmm15,%xmm3
+364f0fe395d78c5180 9 sse 8 1 0 13 16 0 ffffffff80518cd7 0  # pavgw -0x7fae7329(%r13),%mm2
+2e3e66430f5f3b 7 sse 2 1 0 11 16 0 0 0  # maxpd (%r11),%xmm7
+6647da25ae6fdcb1 8 x87 2 1 1 16 16 0 ffffffffb1dc6fae 0  # fisubl -0x4e239052(%rip)
+363e425b 4 pop 8 0 0 16 16 0 0 0  # popq %rbx
+660f1a8fc43f48c4 8 nop 2 1 0 7 16 0 ffffffffc4483fc4 0  # bndmov -0x3bb7c03c(%rdi),%bnd1
+654a0f59f7 5 sse 8 0 0 16 16 0 0 0  # mulps %xmm7,%xmm6
+66f0650f6bbfe294f417 10 sse 2 1 0 7 16 0 17f494e2 0  # packssdw %gs:0x17f494e2(%rdi),%xmm7
+2e6566470f5c5029 8 sse 2 1 0 8 16 0 29 0  # subpd %gs:0x29(%r8),%xmm10
+6626460f2dcd 6 sse 2 0 0 16 16 0 0 0  # cvtpd2pi %xmm5,%mm1
+420f58ca 4 sse 4 0 0 16 16 0 0 0  # addps %xmm2,%xmm1
+96 1 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%esi
+36f2431caf 5 sbb 1 0 0 16 16 0 0 af  # sbbb $0xaf,%al
+0fe0b3a2eb053e 7 sse 4 1 0 3 16 0 3e05eba2 0  # pavgb 0x3e05eba2(%rbx),%mm6
+4181c01b46700d 7 add 4 0 0 16 16 0 0 d70461b  # addl $0xd70461b,%r8d
+f2660f1f93e50d3556 9 nop 2 1 0 3 16 0 56350de5 0  # nopw 0x56350de5(%rbx)
+67f34df7bd1ffb57d3 9 idiv 8 1 0 13 16 0 ffffffffd357fb1f 0  # idivq -0x2ca804e1(%r13d)
+3666650fed4d26 7 sse 2 1 0 5 16 0 26 0  # paddsw %gs:0x26(%rbp),%xmm1
+67f2d3e7 4 shl 4 0 0 16 16 0 0 0  # shll %cl,%edi
+0f8142cf7b45 6 jcc 8 0 0 16 16 0 0 457bcf42  # jno 0x458f7cba
+6640f71a 4 neg 2 1 0 2 16 0 0 0  # negw (%rdx)
+65360f48ba847a9244 9 cmovcc 4 1 0 2 16 0 44927a84 0  # cmovsl %gs:0x44927a84(%rdx),%edi
+4e0f9bdc 4 setcc 1 0 0 16 16 0 0 0  # setnp %spl
+f24f0f31 4 rdtsc 8 0 0 16 16 0 0 0  # rdtsc
+65366448e477 6 gp 8 0 0 16 16 0 0 77  # inb $0x77,%al
+3e668bbe2b0a33ed 8 mov 2 1 0 6 16 0 ffffffffed330a2b 0  # movw -0x12ccf5d5(%rsi),%di
+f3f34c0f1bd5 6 nop 8 0 0 16 16 0 0 0  # nopq %rbp
+4f29fd 3 sub 8 0 0 16 16 0 0 0  # subq %r15,%r13
+f6b80cf74a1e 6 idiv 1 1 0 0 16 0 1e4af70c 0  # idivb 0x1e4af70c(%rax)
+4fffc3 3 inc 8 0 0 16 16 0 0 0  # incq %r11
+4a0fbd4004 5 bsr 8 1 0 0 16 0 4 0  # bsrq 0x4(%rax),%rax
+0f8d19742f2e 6 jcc 8 0 0 16 16 0 0 2e2f7419  # jge 0x2e3878b8
+4a0f1802 4 nop 8 1 0 2 16 0 0 0  # prefetchnta (%rdx)
+66f30fa0 4 push_sreg 2 0 0 16 16 0 0 0  # pushw %fs
+1add 2 sbb 1 0 0 16 16 0 0 0  # sbbb.s %ch,%bl
+663e4b0fb3c6 6 btr 8 0 0 16 16 0 0 0  # btrq %rax,%r14
+ed 1 gp 4 0 0 16 16 0 0 0  # inl (%dx),%eax
+f2490fe66514 6 sse 8 1 0 13 16 0 14 0  # cvtpd2dq 0x14(%r13),%xmm4
+36f2f34783c100 7 add 4 0 0 16 16 0 0 0  # addl $0x0,%r9d
+264c0fb1468d 6 cmpxchg 8 1 0 6 16 0 ffffffffffffff8d 0  # cmpxchgq %r8,-0x73(%rsi)
+f0f226f6fc 5 idiv 1 0 0 16 16 0 0 0  # idivb %ah
+6666420fd8c8 6 sse 2 0 0 16 16 0 0 0  # psubusb %xmm0,%xmm1
+f2263e480f4a16 7 cmovcc 8 1 0 6 16 0 0 0  # cmovpq (%rsi),%rdx
+0f4db2d6031b1e 7 cmovcc 4 1 0 2 16 0 1e1b03d6 0  # cmovgel 0x1e1b03d6(%rdx),%esi
+0f28e1 3 sse 4 0 0 16 16 0 0 0  # movaps %xmm1,%xmm4
+41fecf 3 dec 1 0 0 16 16 0 0 0  # decb %r15b
+400f821b6df00a 7 jcc 8 0 0 16 16 0 0 af06d1b  # jb 0xb05b612
+f7043ddc896a5a2ee5e406 11 test 4 1 0 16 7 0 5a6a89dc 6e4e52e  # testl $0x6e4e52e,0x5a6a89dc(,%rdi,1)
+6f 1 gp 4 0 0 16 16 0 0 0  # outsl %ds:(%rsi),(%dx)
+65f06701d7 5 add 4 0 0 16 16 0 0 0  # addl %edx,%edi
+46ff824b522c20 7 inc 4 1 0 2 16 0 202c524b 0  # incl 0x202c524b(%rdx)
+6657 2 push 2 0 0 16 16 0 0 0  # pushw %di
+2e660f2a4c83c5 7 sse 2 1 0 3 0 2 ffffffffffffffc5 0  # cvtpi2pd -0x3b(%rbx,%rax,4),%xmm1
+660ff43c24 5 sse 2 1 0 4 16 0 0 0  # pmuludq (%rsp),%xmm7
+f359 2 pop 8 0 0 16 16 0 0 0  # popq %rcx
+650f2ddd 4 sse 4 0 0 16 16 0 0 0  # cvtps2pi %xmm5,%mm3
+644581e9ef4840b9 8 sub 4 0 0 16 16 0 0 b94048ef  # subl $0xb94048ef,%r9d
+640f9627 4 setcc 1 1 0 7 16 0 0 0  # setbe %fs:(%rdi)
+0f10ea 3 sse 4 0 0 16 16 0 0 0  # movups %xmm2,%xmm5
+4d32a7f4d76c6e 7 xor 1 1 0 15 16 0 6e6cd7f4 0  # xorb 0x6e6cd7f4(%r15),%r12b
+bcffff1e81 5 mov 4 0 0 16 16 0 0 811effff  # movl $0x811effff,%esp
+f281df5886b2ba 7 sbb 4 0 0 16 16 0 0 bab28658  # sbbl $0xbab28658,%edi
+480fdecb 4 sse 8 0 0 16 16 0 0 0  # pmaxub %mm3,%mm1
+654fdde2 4 x87 8 0 0 16 16 0 0 0  # fucom %st(2)
+263e364f0fdc21 7 sse 8 1 0 9 16 0 0 0  # paddusb (%r9),%mm4
+64664281ef3a65 7 sub 2 0 0 16 16 0 0 653a  # subw $0x653a,%di
+64663e410fc1ff 7 xadd 2 0 0 16 16 0 0 0  # xaddw %di,%r15w
+663e3e0f67e7 6 sse 2 0 0 16 16 0 0 0  # packuswb %xmm7,%xmm4
+4a97 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%rdi
+430f5dec 4 sse 4 0 0 16 16 0 0 0  # minps %xmm12,%xmm5
+66420f56c6 5 sse 2 0 0 16 16 0 0 0  # orpd %xmm6,%xmm0
+65674a0fdccf 6 sse 8 0 0 16 16 0 0 0  # paddusb %mm7,%mm1
+f036644ec10981 7 ror 8 1 0 1 16 0 0 81  # rorq $0x81,%fs:(%rcx)
+d34bbf 3 ror 4 1 0 3 16 0 ffffffffffffffbf 0  # rorl %cl,-0x41(%rbx)
+660f0099edc23f92 8 gp 2 1 0 1 16 0 ffffffff923fc2ed 0  # ltrw -0x6dc03d13(%rcx)
+36662e490f41e8 7 cmovcc 8 0 0 16 16 0 0 0  # cmovnoq %r8,%rbp
+47f7f0 3 div 4 0 0 16 16 0 0 0  # divl %r8d
+4b0f1dd7 4 nop 8 0 0 16 16 0 0 0  # nopq %r15
+3649fb 3 gp 8 0 0 16 16 0 0 0  # sti
+64430f74e7 5 sse 4 0 0 16 16 0 0 0  # pcmpeqb %mm7,%mm4
+65266646e5e9 6 gp 2 0 0 16 16 0 0 e9  # inw $0xe9,%ax
+36f3467c59 5 jcc 8 0 0 16 16 0 0 59  # jl 0x11fe64
+f0480f18ee 5 nop 8 0 0 16 16 0 0 0  # nopq %rsi
+0f96c7 3 setcc 1 0 0 16 16 0 0 0  # setbe %bh
+66f0465f 4 pop 2 0 0 16 16 0 0 0  # popw %di
+64f24d087c6adc 7 or 1 1 0 10 5 1 ffffffffffffffdc 0  # orb %r15b,%fs:-0x24(%r10,%rbp,2)
+4157 2 push 8 0 0 16 16 0 0 0  # pushq %r15
+4cc1f5ed 4 shl 8 0 0 16 16 0 0 ed  # shlq $0xed,%rbp
+0fbd350ca47478 7 bsr 4 1 1 16 16 0 7874a40c 0  # bsrl 0x7874a40c(%rip),%esi
+672665490fb6a8a1a066fc 11 movzx 8 1 0 8 16 0 fffffffffc66a0a1 0  # movzbq %gs:-0x3995f5f(%r8d),%rbp
+66644c0f416ff4 7 cmovcc 8 1 0 7 16 0 fffffffffffffff4 0  # cmovnoq %fs:-0xc(%rdi),%r13
+660f14902e48499e 8 sse 2 1 0 0 16 0 ffffffff9e49482e 0  # unpcklpd -0x61b6b7d2(%rax),%xmm2
+d0fa 2 sar 1 0 0 16 16 0 0 0  # sarb $1,%dl
+2e663e4b28dc 6 sub 1 0 0 16 16 0 0 0  # subb %bl,%r12b
+f067f34eff8d6b4a7528 10 dec 8 1 0 5 16 0 28754a6b 0  # xrelease decq 0x28754a6b(%ebp)
+460fd5da 4 sse 4 0 0 16 16 0 0 0  # pmullw %mm2,%mm3
+66c263da 4 ret 8 0 0 16 16 0 0 da63  # retq $0xda63
+640fe3c1 4 sse 4 0 0 16 16 0 0 0  # pavgw %mm1,%mm0
+f066430ff55db8 7 sse 2 1 0 13 16 0 ffffffffffffffb8 0  # pmaddwd -0x48(%r13),%xmm3
+0fc60b93 4 sse 4 1 0 3 16 0 0 93  # shufps $0x93,(%rbx),%xmm1
+66260f6637 5 sse 2 1 0 7 16 0 0 0  # pcmpgtd (%rdi),%xmm6
+f03e0f46f5 5 cmovcc 4 0 0 16 16 0 0 0  # cmovbel %ebp,%esi
+676426440fdecf 7 sse 4 0 0 16 16 0 0 0  # pmaxub %mm7,%mm1
+4486dd 3 xchg 1 0 0 16 16 0 0 0  # xchgb %r11b,%bpl
+4bf7b0dafba827 7 div 8 1 0 8 16 0 27a8fbda 0  # divq 0x27a8fbda(%r8)
+3ef3640fb3e9 6 btr 4 0 0 16 16 0 0 0  # btrl %ebp,%ecx
+d0ac9825fdbbb2 7 shr 1 1 0 0 3 2 ffffffffb2bbfd25 0  # shrb $1,-0x4d4402db(%rax,%rbx,4)
+662e670fb4a9789c53f9 10 lseg 2 1 0 1 16 0 fffffffff9539c78 0  # lfsw -0x6ac6388(%ecx),%bp
+66f2f3460fbfce 7 movsx 2 0 0 16 16 0 0 0  # movsww %si,%r9w
+662e65f7fa 5 idiv 2 0 0 16 16 0 0 0  # idivw %dx
+65f23e0ff0a793deabd7 10 sse 4 1 0 7 16 0 ffffffffd7abde93 0  # lddqu %gs:-0x2854216d(%rdi),%xmm4
+4f0fa3250ef0ac73 8 bt 8 1 1 16 16 0 73acf00e 0  # btq %r12,0x73acf00e(%rip)
+2e6636450faff3 7 imul 2 0 0 16 16 0 0 0  # imulw %r11w,%r14w
+41e36c 3 jcxz 8 0 0 16 16 0 0 6c  # jrcxz 0x1ecf8
+36f61e 3 neg 1 1 0 6 16 0 0 0  # negb (%rsi)
+1df15a8e02 5 sbb 4 0 0 16 16 0 0 28e5af1  # sbbl $0x28e5af1,%eax
+263e480f69e9 6 sse 8 0 0 16 16 0 0 0  # punpckhwd %mm1,%mm5
+672e66c1c8f7 6 ror 2 0 0 16 16 0 0 f7  # rorw $0xf7,%ax
+f24a0faf966ee14ba2 9 imul 8 1 0 6 16 0 ffffffffa24be16e 0  # imulq -0x5db41e92(%rsi),%rdx
+3e66360f645956 7 sse 2 1 0 1 16 0 56 0  # pcmpgtb 0x56(%rcx),%xmm3
+491b7d63 4 sbb 8 1 0 13 16 0 63 0  # sbbq 0x63(%r13),%rdi
+4c0f50f1 4 sse 8 0 0 16 16 0 0 0  # movmskps %xmm1,%r14
+2ef00f6fba7719a303 9 sse 4 1 0 2 16 0 3a31977 0  # movq 0x3a31977(%rdx),%mm7
+6466450f1ce9 6 nop 2 0 0 16 16 0 0 0  # nopw %r9w
+f0417a86 4 jcc 8 0 0 16 16 0 0 ffffffffffffff86  # jp 0xfbae2
+263e490ff39299c0c516 10 sse 8 1 0 10 16 0 16c5c099 0  # psllq 0x16c5c099(%r10),%mm2
+66420ff25859 6 sse 2 1 0 0 16 0 59 0  # pslld 0x59(%rax),%xmm3
+64470fdaf1 5 sse 4 0 0 16 16 0 0 0  # pminub %mm1,%mm6
+6647c9 3 leave 2 0 0 16 16 0 0 0  # leavew
+65260f2936 5 sse 4 1 0 6 16 0 0 0  # movaps %xmm6,%gs:(%rsi)
+490f12d0 4 sse 8 0 0 16 16 0 0 0  # movhlps %xmm8,%xmm2
+99 1 cwd 4 0 0 16 16 0 0 0  # cltd
+f236f30f422c1a 7 cmovcc 4 1 0 2 3 0 0 0  # cmovbl (%rdx,%rbx,1),%ebp
+66656689e8 5 mov 2 0 0 16 16 0 0 0  # movw %bp,%ax
+644f0f47f5 5 cmovcc 8 0 0 16 16 0 0 0  # cmovaq %r13,%r14
+66430fc4dd6a 6 sse 2 0 0 16 16 0 0 6a  # pinsrw $0x6a,%r13d,%xmm3
+6643d3ea 4 shr 2 0 0 16 16 0 0 0  # shrw %cl,%r10w
+83cc4f 3 or 4 0 0 16 16 0 0 4f  # orl $0x4f,%esp
+f0f048d1251fda434f 9 shl 8 1 1 16 16 0 4f43da1f 0  # shlq $1,0x4f43da1f(%rip)
+263e4469a867ad2324e18aa105 13 imul 4 1 0 0 16 0 2423ad67 5a18ae1  # imull $0x5a18ae1,0x2423ad67(%rax),%r13d
+f2d1fb 3 sar 4 0 0 16 16 0 0 0  # sarl $1,%ebx
+2ee451 3 gp 4 0 0 16 16 0 0 51  # inb $0x51,%al
+660f4bfd 4 cmovcc 2 0 0 16 16 0 0 0  # cmovnpw %bp,%di
+3e664468e5db 6 push 2 0 0 16 16 0 0 dbe5  # pushw $0xdbe5
+643644ffcc 5 dec 4 0 0 16 16 0 0 0  # decl %esp
+49d323 3 shl 8 1 0 11 16 0 0 0  # shlq %cl,(%r11)
+3e640f32 4 gp 4 0 0 16 16 0 0 0  # rdmsr
+64f2f04f0fba7ea517 9 btc 8 1 0 14 16 0 ffffffffffffffa5 17  # xacquire btcq $0x17,%fs:-0x5b(%r14)
+6636420fc129 6 xadd 2 1 0 1 16 0 0 0  # xaddw %bp,(%rcx)
+f2428bfa 4 mov 4 0 0 16 16 0 0 0  # movl.s %edx,%edi
+48d3e2 3 shl 8 0 0 16 16 0 0 0  # shlq %cl,%rdx
+65410f49e0 5 cmovcc 4 0 0 16 16 0 0 0  # cmovnsl %r8d,%esp
+2ed2e1 3 shl 1 0 0 16 16 0 0 0  # shlb %cl,%cl
+643e4f0fd57b1a 7 sse 8 1 0 11 16 0 1a 0  # pmullw %fs:0x1a(%r11),%mm7
+652e66430fff879bd188a4 11 sse 2 1 0 15 16 0 ffffffffa488d19b 0  # ud0w %gs:-0x5b772e65(%r15),%ax
+3e410f1a1e 5 nop 4 1 0 14 16 0 0 0  # bndldx (%r14),%bnd3
+f384f9 3 test 1 0 0 16 16 0 0 0  # testb %bh,%cl
+3e65dde4 4 x87 4 0 0 16 16 0 0 0  # fucom %st(4)
+64643643b77b 6 mov 1 0 0 16 16 0 0 7b  # movb $0x7b,%r15b
+f2f3670faef2 6 fence 4 0 0 16 16 0 0 0  # umonitor %edx
+663e4e0ff4d9 6 sse 8 0 0 16 16 0 0 0  # pmuludq %xmm1,%xmm11
+26362931 4 sub 4 1 0 1 16 0 0 0  # subl %esi,(%rcx)
+410ffe4127 5 sse 4 1 0 9 16 0 27 0  # paddd 0x27(%r9),%mm0
+6643fd 3 std 2 0 0 16 16 0 0 0  # std
+3e6566410ffe0e 7 sse 2 1 0 14 16 0 0 0  # paddd %gs:(%r14),%xmm1
+676566af 4 scas 2 0 0 16 16 0 0 0  # scasw %es:(%edi),%ax
+6643ef 3 gp 2 0 0 16 16 0 0 0  # outw %ax,(%dx)
+490ff1f1 4 sse 8 0 0 16 16 0 0 0  # psllw %mm1,%mm6
+644e0f1fb7dcd06123 9 nop 8 1 0 7 16 0 2361d0dc 0  # nopq %fs:0x2361d0dc(%rdi)
+4a0ff131 4 sse 8 1 0 1 16 0 0 0  # psllw (%rcx),%mm6
+420f43f9 4 cmovcc 4 0 0 16 16 0 0 0  # cmovael %ecx,%edi
+0fa31dc914e4ee 7 bt 4 1 1 16 16 0 ffffffffeee414c9 0  # btl %ebx,-0x111beb37(%rip)
+2e490f1fd0 5 nop 8 0 0 16 16 0 0 0  # nopq %r8
+2e4affe2 4 jmp_ind 8 0 0 16 16 0 0 0  # jmpq *%rdx
+6565264c0fd9f7 7 sse 8 0 0 16 16 0 0 0  # psubusw %mm7,%mm6
+f366430364e3cc 7 add 2 1 0 11 12 3 ffffffffffffffcc 0  # addw -0x34(%r11,%r12,8),%sp
+66db07 3 x87 2 1 0 7 16 0 0 0  # fildl (%rdi)
+4f0fd18a1a2cbfb0 8 sse 8 1 0 10 16 0 ffffffffb0bf2c1a 0  # psrlw -0x4f40d3e6(%r10),%mm1
+4309c4 3 or 4 0 0 16 16 0 0 0  # orl %eax,%r12d
+490fdad0 4 sse 8 0 0 16 16 0 0 0  # pminub %mm0,%mm2
+f33e3e45af 5 scas 4 0 0 16 16 0 0 0  # scasl %es:(%rdi),%eax
+450ff7e8 4 sse 4 0 0 16 16 0 0 0  # maskmovq %mm0,%mm5
+430f1da89f8b5d98 8 nop 4 1 0 8 16 0 ffffffff985d8b9f 0  # nopl -0x67a27461(%r8)
+c6848e31b32d8613 8 mov 1 1 0 6 1 2 ffffffff862db331 13  # movb $0x13,-0x79d24ccf(%rsi,%rcx,4)
+0fce 2 bswap 4 0 0 16 16 0 0 0  # bswap %esi
+410f008401be7289d3 9 gp 4 1 0 9 0 0 ffffffffd38972be 0  # sldtw -0x2c768d42(%r9,%rax,1)
+0fec5894 4 sse 4 1 0 0 16 0 ffffffffffffff94 0  # paddsb -0x6c(%rax),%mm3
+490f5118 4 sse 8 1 0 8 16 0 0 0  # sqrtps (%r8),%xmm3
+364e0f08 4 gp 8 0 0 16 16 0 0 0  # invd
+363646b26c 5 mov 1 0 0 16 16 0 0 6c  # movb $0x6c,%dl
+8b5ade 3 mov 4 1 0 2 16 0 ffffffffffffffde 0  # movl -0x22(%rdx),%ebx
+2e663643dc21 6 x87 2 1 0 9 16 0 0 0  # fsubl (%r9)
+4ef780e4da2dbabbf9414b 11 test 8 1 0 0 16 0 ffffffffba2ddae4 4b41f9bb  # testq $0x4b41f9bb,-0x45d2251c(%rax)
+48ffb4e396e93d7f 8 push 8 1 0 3 16 3 7f3de996 0  # pushq 0x7f3de996(%rbx,%riz,8)
+2e64660ffd151b715417 10 sse 2 1 1 16 16 0 1754711b 0  # paddw %fs:0x1754711b(%rip),%xmm2
+420f534333 5 sse 4 1 0 3 16 0 33 0  # rcpps 0x33(%rbx),%xmm0
+6764260fd933 6 sse 4 1 0 3 16 0 0 0  # psubusw %fs:(%ebx),%mm6
+66f2400f00cf 6 gp 2 0 0 16 16 0 0 0  # strw %di
+26662e0df8b0 6 or 2 0 0 16 16 0 0 b0f8  # orw $0xb0f8,%ax
+470f515bf4 5 sse 4 1 0 11 16 0 fffffffffffffff4 0  # sqrtps -0xc(%r11),%xmm11
+66654655 4 push 2 0 0 16 16 0 0 0  # pushw %bp
+650ff3f1 4 sse 4 0 0 16 16 0 0 0  # psllq %mm1,%mm6
+3e2ef774e1d4 6 div 4 1 0 1 16 3 ffffffffffffffd4 0  # divl -0x2c(%rcx,%riz,8)
+42e523 3 gp 4 0 0 16 16 0 0 23  # inl $0x23,%eax
+662e650fb5425e 7 lseg 2 1 0 2 16 0 5e 0  # lgsw %gs:0x5e(%rdx),%ax
+0f34 2 gp 4 0 0 16 16 0 0 0  # sysenter
+3e67364653 5 push 8 0 0 16 16 0 0 0  # pushq %rbx
+f2f04ed14bff 6 ror 8 1 0 3 16 0 ffffffffffffffff 0  # rorq $1,-0x1(%rbx)
+64f34d0f893b24a110 9 jcc 8 0 0 16 16 0 0 10a1243b  # jns 0x10bacfe7
+801be9 3 sbb 1 1 0 3 16 0 0 e9  # sbbb $0xe9,(%rbx)
+4f0f45a3a2de64af 8 cmovcc 8 1 0 11 16 0 ffffffffaf64dea2 0  # cmovneq -0x509b215e(%r11),%r12
+f2f26745e7e1 6 gp 4 0 0 16 16 0 0 e1  # outl %eax,$0xe1
+66420fc2fd73 6 sse 2 0 0 16 16 0 0 73  # cmppd $0x73,%xmm5,%xmm7
+66670f2c7fde 6 sse 2 1 0 7 16 0 ffffffffffffffde 0  # cvttpd2pi -0x22(%edi),%mm7
+666464448170c14be8 9 xor 2 1 0 0 16 0 ffffffffffffffc1 e84b  # xorw $0xe84b,%fs:-0x3f(%rax)
+66470f64e2 5 sse 2 0 0 16 16 0 0 0  # pcmpgtb %xmm10,%xmm12
+0fbf02 3 movsx 4 1 0 2 16 0 0 0  # movswl (%rdx),%eax
+f0640f2c54f373 7 sse 4 1 0 3 6 3 73 0  # cvttps2pi %fs:0x73(%rbx,%rsi,8),%mm2
+4a0bf2 3 or 8 0 0 16 16 0 0 0  # orq.s %rdx,%rsi
+f34e09fc 4 or 8 0 0 16 16 0 0 0  # orq %r15,%rsp
+65400f20ff 5 gp 4 0 0 16 16 0 0 0  # movq %cr7,%rdi
+66430fe301 5 sse 2 1 0 9 16 0 0 0  # pavgw (%r9),%xmm0
+264a3be6 4 cmp 8 0 0 16 16 0 0 0  # cmpq.s %rsi,%rsp
+f02e674dbc3ab87738aa87dd10 13 mov 8 0 0 16 16 0 0 10dd87aa3877b83a  # movabsq $0x10dd87aa3877b83a,%r12
+dec2 2 x87 4 0 0 16 16 0 0 0  # faddp %st,%st(2)
+3e4ca3ef075ee399a9515f 11 mov 8 1 0 16 16 0 5f51a999e35e07ef 0  # movabsq %rax,0x5f51a999e35e07ef
+83dcb1 3 sbb 4 0 0 16 16 0 0 ffffffffffffffb1  # sbbl $0xffffffb1,%esp
+4e0f6a27 4 sse 8 1 0 7 16 0 0 0  # punpckhdq (%rdi),%mm4
+400f529b39fc520b 8 sse 4 1 0 3 16 0 b52fc39 0  # rsqrtps 0xb52fc39(%rbx),%xmm3
+f22e660f1fe1 6 nop 2 0 0 16 16 0 0 0  # nopw %cx
+45bb5f774386 6 mov 4 0 0 16 16 0 0 8643775f  # movl $0x8643775f,%r11d
+4831a9b7047df1 7 xor 8 1 0 1 16 0 fffffffff17d04b7 0  # xorq %rbp,-0xe82fb49(%rcx)
+66368c8d97710618 8 mov_from_sreg 2 1 0 5 16 0 18067197 0  # movw %cs,0x18067197(%rbp)
+40332d2ce47ba0 7 xor 4 1 1 16 16 0 ffffffffa07be42c 0  # xorl -0x5f841bd4(%rip),%ebp
+f0490fe813 5 sse 8 1 0 11 16 0 0 0  # psubsb (%r11),%mm2
+362e4b03d2 5 add 8 0 0 16 16 0 0 0  # addq.s %r10,%rdx
+f04d0f22f9 5 gp 8 0 0 16 16 0 0 0  # movq %r9,%cr15
+6746d11c04 5 rcr 4 1 0 4 8 0 0 0  # rcrl $1,(%esp,%r8d,1)
+6667420fd4a11ef108c4 10 sse 2 1 0 1 16 0 ffffffffc408f11e 0  # paddq -0x3bf70ee2(%ecx),%xmm4
+644f0f65ee 5 sse 8 0 0 16 16 0 0 0  # pcmpgtw %mm6,%mm5
+660fddd2 4 sse 2 0 0 16 16 0 0 0  # paddusw %xmm2,%xmm2
+f33e364563fa 6 movsx 4 0 0 16 16 0 0 0  # movsxd %r10d,%r15d
+3e65f2c6c5dc 6 mov 1 0 0 16 16 0 0 dc  # movb $0xdc,%ch
+664050 3 push 2 0 0 16 16 0 0 0  # pushw %ax
+0face627 4 shrd 4 0 0 16 16 0 0 27  # shrdl $0x27,%esp,%esi
+f0660f46ce 5 cmovcc 2 0 0 16 16 0 0 0  # cmovbew %si,%cx
+3e4e0f4733 5 cmovcc 8 1 0 3 16 0 0 0  # cmovaq (%rbx),%r14
+364c0fbfa415636d2a89 10 movsx 8 1 0 5 2 0 ffffffff892a6d63 0  # movswq -0x76d5929d(%rbp,%rdx,1),%r12
+66f345a5 4 movs 2 0 0 16 16 0 0 0  # movsw %ds:(%rsi),%es:(%rdi)
+26c1bab51a265b7c 8 sar 4 1 0 2 16 0 5b261ab5 7c  # sarl $0x7c,0x5b261ab5(%rdx)
+672e420f4965a3 7 cmovcc 4 1 0 5 16 0 ffffffffffffffa3 0  # cmovnsl -0x5d(%ebp),%esp
+6447d316 4 rcl 4 1 0 14 16 0 0 0  # rcll %cl,%fs:(%r14)
+66bc4994 4 mov 2 0 0 16 16 0 0 9449  # movw $0x9449,%sp
+f32e47f6ca51 6 test 1 0 0 16 16 0 0 51  # testb $0x51,%r10b
+4e0fd41f 4 sse 8 1 0 7 16 0 0 0  # paddq (%rdi),%mm3
+654c0f4039 5 cmovcc 8 1 0 1 16 0 0 0  # cmovoq %gs:(%rcx),%r15
+13d0 2 adc 4 0 0 16 16 0 0 0  # adcl.s %eax,%edx
+4a0f1a18 4 nop 8 1 0 0 16 0 0 0  # bndldx (%rax),%bnd3
+f0660f18e2 5 nop 2 0 0 16 16 0 0 0  # nopw %dx
+3640f7db 4 neg 4 0 0 16 16 0 0 0  # negl %ebx
+64f24c810306dbbd23 9 add 8 1 0 3 16 0 0 23bddb06  # addq $0x23bddb06,%fs:(%rbx)
+646549023b 5 add 1 1 0 11 16 0 0 0  # addb %gs:(%r11),%dil
+f366654623df 6 and 2 0 0 16 16 0 0 0  # andw.s %di,%r11w
+26653e4f0fe58e71677d3d 11 sse 8 1 0 14 16 0 3d7d6771 0  # pmulhw %gs:0x3d7d6771(%r14),%mm1
+9e 1 sahf 4 0 0 16 16 0 0 0  # sahf
+676641ed 4 gp 2 0 0 16 16 0 0 0  # inw (%dx),%ax
+0f91ff 3 setcc 1 0 0 16 16 0 0 0  # setno %bh
+36660f546c42ce 7 sse 2 1 0 2 0 1 ffffffffffffffce 0  # andpd -0x32(%rdx,%rax,2),%xmm5
+4b0f42e9 4 cmovcc 8 0 0 16 16 0 0 0  # cmovbq %r9,%rbp
+4f95 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%r13
+f0410fdbcf 5 sse 4 0 0 16 16 0 0 0  # pand %mm7,%mm1
+65663e430f1154e898 9 sse 2 1 0 8 13 3 ffffffffffffff98 0  # movupd %xmm2,%gs:-0x68(%r8,%r13,8)
+3e6748f7d4 5 not 8 0 0 16 16 0 0 0  # notq %rsp
+f04e0f4ed9 5 cmovcc 8 0 0 16 16 0 0 0  # cmovleq %rcx,%r11
+66450f7e79d8 6 sse 2 1 0 9 16 0 ffffffffffffffd8 0  # movd %xmm15,-0x28(%r9)
+666545bf5ab9 6 mov 2 0 0 16 16 0 0 b95a  # movw $0xb95a,%r15w
+2e0f67fa 4 sse 4 0 0 16 16 0 0 0  # packuswb %mm2,%mm7
+660fad11 4 shrd 2 1 0 1 16 0 0 0  # shrdw %cl,%dx,(%rcx)
+664480d783 5 adc 1 0 0 16 16 0 0 83  # adcb $0x83,%dil
+642e660f1ec1 6 nop 2 0 0 16 16 0 0 0  # nopw %cx
+3e45c07811a8 6 sar 1 1 0 8 16 0 11 a8  # sarb $0xa8,0x11(%r8)
+6656 2 push 2 0 0 16 16 0 0 0  # pushw %si
+36364c0f9ca635ecc4ed 10 setcc 1 1 0 6 16 0 ffffffffedc4ec35 0  # setl -0x123b13cb(%rsi)
+36d2c5 3 rol 1 0 0 16 16 0 0 0  # rolb %cl,%ch
+3e4a6e 3 gp 8 0 0 16 16 0 0 0  # outsb %ds:(%rsi),(%dx)
+3e420fd8727f 6 sse 4 1 0 2 16 0 7f 0  # psubusb 0x7f(%rdx),%mm6
+2647d2b847f2a57e 8 sar 1 1 0 8 16 0 7ea5f247 0  # sarb %cl,0x7ea5f247(%r8)
+460fd3c7 4 sse 4 0 0 16 16 0 0 0  # psrlq %mm7,%mm0
+660f2f84b4731580c8 9 sse 2 1 0 4 6 2 ffffffffc8801573 0  # comisd -0x377fea8d(%rsp,%rsi,4),%xmm0
+4f1189c138fa8d 7 adc 8 1 0 9 16 0 ffffffff8dfa38c1 0  # adcq %r9,-0x7205c73f(%r9)
+66420f54d7 5 sse 2 0 0 16 16 0 0 0  # andpd %xmm7,%xmm2
+0fbabf806decbcc5 8 btc 4 1 0 7 16 0 ffffffffbcec6d80 c5  # btcl $0xc5,-0x43139280(%rdi)
+4c0f284394 5 sse 8 1 0 3 16 0 ffffffffffffff94 0  # movaps -0x6c(%rbx),%xmm8
+4d5e 2 pop 8 0 0 16 16 0 0 0  # popq %r14
+66640ff897388bbabb 9 sse 2 1 0 7 16 0 ffffffffbbba8b38 0  # psubb %fs:-0x444574c8(%rdi),%xmm2
+d16a2e 3 shr 4 1 0 2 16 0 2e 0  # shrl $1,0x2e(%rdx)
+0ff1a5f05df640 7 sse 4 1 0 5 16 0 40f65df0 0  # psllw 0x40f65df0(%rbp),%mm4
+f2654de79c 5 gp 8 0 0 16 16 0 0 9c  # outl %eax,$0x9c
+0fc9 2 bswap 4 0 0 16 16 0 0 0  # bswap %ecx
+0f71e540 4 sse 4 0 0 16 16 0 0 40  # psraw $0x40,%mm5
+66468303a3 5 add 2 1 0 3 16 0 0 ffffffffffffffa3  # addw $0xffa3,(%rbx)
+66260fda0b 5 sse 2 1 0 3 16 0 0 0  # pminub (%rbx),%xmm1
+64644d0fd30f 6 sse 8 1 0 15 16 0 0 0  # psrlq %fs:(%r15),%mm1
+45d2de 3 rcr 1 0 0 16 16 0 0 0  # rcrb %cl,%r14b
+ff88fb25b374 6 dec 4 1 0 0 16 0 74b325fb 0  # decl 0x74b325fb(%rax)
+66420fe4a1cd62b26b 9 sse 2 1 0 1 16 0 6bb262cd 0  # pmulhuw 0x6bb262cd(%rcx),%xmm4
+2666f0436d 5 gp 2 0 0 16 16 0 0 0  # insw (%dx),%es:(%rdi)
+f3644268713197a2 8 push 8 0 0 16 16 0 0 ffffffffa2973171  # pushq $0xffffffffa2973171
+3e2e0febab5759f2eb 9 sse 4 1 0 3 16 0 ffffffffebf25957 0  # por -0x140da6a9(%rbx),%mm5
+36f02e480f55d2 7 sse 8 0 0 16 16 0 0 0  # andnps %xmm2,%xmm2
+f32648c13e79 6 sar 8 1 0 6 16 0 0 79  # sarq $0x79,(%rsi)
+6464f34580d817 7 sbb 1 0 0 16 16 0 0 17  # sbbb $0x17,%r8b
+642e2e4b01f8 6 add 8 0 0 16 16 0 0 0  # addq %rdi,%r8
+3ef04c0fc18b502d027c 10 xadd 8 1 0 3 16 0 7c022d50 0  # xaddq %r9,0x7c022d50(%rbx)
+450f1e34cdca48e926 9 nop 4 1 0 16 1 3 26e948ca 0  # nopl 0x26e948ca(,%rcx,8)
+0f86d47f655f 6 jcc 8 0 0 16 16 0 0 5f657fd4  # jbe 0x5f74424f
+64490fc25f79a8 7 sse 8 1 0 15 16 0 79 a8  # cmpps $0xa8,%fs:0x79(%r15),%xmm3
+430fabe6 4 bts 4 0 0 16 16 0 0 0  # btsl %esp,%r14d
+4590 2 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%r8d
+6645d3a199095a07 8 shl 2 1 0 9 16 0 75a0999 0  # shlw %cl,0x75a0999(%r9)
+2e36460fe229 6 sse 4 1 0 1 16 0 0 0  # psrad (%rcx),%mm5
+2e65660b2a 5 or 2 1 0 2 16 0 0 0  # orw %gs:(%rdx),%bp
+f34a0f5bda 5 sse 8 0 0 16 16 0 0 0  # cvttps2dq %xmm2,%xmm3
+41833f63 4 cmp 4 1 0 15 16 0 0 63  # cmpl $0x63,(%r15)
+f3f366d172e3 6 shl 2 1 0 2 16 0 ffffffffffffffe3 0  # shlw $1,-0x1d(%rdx)
+4c0fdb3a 4 sse 8 1 0 2 16 0 0 0  # pand (%rdx),%mm7
+66f04571b8 5 jcc 8 0 0 16 16 0 0 ffffffffffffffb8  # jno 0x114026
+79dd 2 jcc 8 0 0 16 16 0 0 ffffffffffffffdd  # jns 0x10b325
+66360fb1841a249ea71b 10 cmpxchg 2 1 0 2 3 0 1ba79e24 0  # cmpxchgw %ax,0x1ba79e24(%rdx,%rbx,1)
+6465664383fb06 7 cmp 2 0 0 16 16 0 0 6  # cmpw $0x6,%r11w
+6767492dfb7346cd 8 sub 8 0 0 16 16 0 0 ffffffffcd4673fb  # subq $0xffffffffcd4673fb,%rax
+c70485e6401b5545318d5d 11 mov 4 1 0 16 0 2 551b40e6 5d8d3145  # movl $0x5d8d3145,0x551b40e6(,%rax,4)
+6665640f73fb23 7 sse 2 0 0 16 16 0 0 23  # pslldq $0x23,%xmm3
+660fbf5ac8 5 movsx 2 1 0 2 16 0 ffffffffffffffc8 0  # movsww -0x38(%rdx),%bx
+646766440ffee4 7 sse 2 0 0 16 16 0 0 0  # paddd %xmm4,%xmm12
+663ef26481111481 8 adc 2 1 0 1 16 0 0 8114  # adcw $0x8114,%fs:(%rcx)
+4a0fb207 4 lseg 8 1 0 7 16 0 0 0  # lssq (%rdi),%rax
+420f44a48d5c4341e4 9 cmovcc 4 1 0 5 9 2 ffffffffe441435c 0  # cmovel -0x1bbebca4(%rbp,%r9,4),%esp
+64f6dc 3 neg 1 0 0 16 16 0 0 0  # negb %ah
+f02e644c0fdbe6 7 sse 8 0 0 16 16 0 0 0  # pand %mm6,%mm4
+4277e6 3 jcc 8 0 0 16 16 0 0 ffffffffffffffe6  # ja 0x1b241f
+f026d1c1 4 rol 4 0 0 16 16 0 0 0  # roll $1,%ecx
+65f066c11ba4 6 rcr 2 1 0 3 16 0 0 a4  # rcrw $0xa4,%gs:(%rbx)
+47dfc6 3 x87 4 0 0 16 16 0 0 0  # ffreep %st(6)
+64663ebdfe8e 6 mov 2 0 0 16 16 0 0 8efe  # movw $0x8efe,%bp
+d0ea 2 shr 1 0 0 16 16 0 0 0  # shrb $1,%dl
+2e4f0fbab480c1147eeda4 11 btr 8 1 0 8 8 2 ffffffffed7e14c1 a4  # btrq $0xa4,-0x1281eb3f(%r8,%r8,4)
+4dbe20dd45935a7823fe 10 mov 8 0 0 16 16 0 0 fe23785a9345dd20  # movabsq $0xfe23785a9345dd20,%r14
+2626664983ce3b 7 or 8 0 0 16 16 0 0 3b  # orq $0x3b,%r14
+480fba67a078 6 bt 8 1 0 7 16 0 ffffffffffffffa0 78  # btq $0x78,-0x60(%rdi)
+4fd3550c 4 rcl 8 1 0 13 16 0 c 0  # rclq %cl,0xc(%r13)
+4600d8 3 add 1 0 0 16 16 0 0 0  # addb %r11b,%al
+264c0f28cd 5 sse 8 0 0 16 16 0 0 0  # movaps %xmm5,%xmm9
+e8ff9570d5 5 call 8 0 0 16 16 0 0 ffffffffd57095ff  # callq 0xffffffffd58260d1
+ab 1 stos 4 0 0 16 16 0 0 0  # stosl %eax,%es:(%rdi)
+48c1f9fd 4 sar 8 0 0 16 16 0 0 fd  # sarq $0xfd,%rcx
+66260f1b12 5 nop 2 1 0 2 16 0 0 0  # bndmov %bnd2,(%rdx)
+2666f041d36bd7 7 shr 2 1 0 11 16 0 ffffffffffffffd7 0  # shrw %cl,-0x29(%r11)
+2e4ebb2556ef78871fea9c 11 mov 8 0 0 16 16 0 0 9cea1f8778ef5625  # movabsq $0x9cea1f8778ef5625,%rbx
+4d0f43f7 4 cmovcc 8 0 0 16 16 0 0 0  # cmovaeq %r15,%r14
+2ef3f2480f4af8 7 cmovcc 8 0 0 16 16 0 0 0  # cmovpq %rax,%rdi
+0f62ff 3 sse 4 0 0 16 16 0 0 0  # punpckldq %mm7,%mm7
+264d043d 4 add 1 0 0 16 16 0 0 3d  # addb $0x3d,%al
+0fc8 2 bswap 4 0 0 16 16 0 0 0  # bswap %eax
+f34b0f2b4646 6 sse 8 1 0 14 16 0 46 0  # movntss %xmm0,0x46(%r14)
+2e3e3643c09d982e3d2b4d 11 rcr 1 1 0 13 16 0 2b3d2e98 4d  # rcrb $0x4d,0x2b3d2e98(%r13)
+0f9cf5 3 setcc 1 0 0 16 16 0 0 0  # setl %ch
+4db964d5c18d07a1325f 10 mov 8 0 0 16 16 0 0 5f32a1078dc1d564  # movabsq $0x5f32a1078dc1d564,%r9
+676446d17806 6 sar 4 1 0 0 16 0 6 0  # sarl $1,%fs:0x6(%eax)
+49cd69 3 int 8 0 0 16 16 0 0 69  # int $0x69
+c14276c2 4 rol 4 1 0 2 16 0 76 c2  # roll $0xc2,0x76(%rdx)
+644d0f5df6 5 sse 8 0 0 16 16 0 0 0  # minps %xmm14,%xmm14
+2e26f294 4 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%esp
+479f 2 lahf 4 0 0 16 16 0 0 0  # lahf
+f04e2c8d 4 sub 1 0 0 16 16 0 0 8d  # subb $0x8d,%al
+f048ff844deab0c14b 9 inc 8 1 0 5 1 1 4bc1b0ea 0  # incq 0x4bc1b0ea(%rbp,%rcx,2)
+662e4a0fe05765 7 sse 8 1 0 7 16 0 65 0  # pavgb 0x65(%rdi),%xmm2
+d3c0 2 rol 4 0 0 16 16 0 0 0  # roll %cl,%eax
+264f0f683e 5 sse 8 1 0 14 16 0 0 0  # punpckhbw (%r14),%mm7
+4631c8 3 xor 4 0 0 16 16 0 0 0  # xorl %r9d,%eax
+6647d3bdd08b359f 8 sar 2 1 0 13 16 0 ffffffff9f358bd0 0  # sarw %cl,-0x60ca7430(%r13)
+3ef066460f60d0 7 sse 2 0 0 16 16 0 0 0  # punpcklbw %xmm0,%xmm10
+65652e0f90d5 6 setcc 1 0 0 16 16 0 0 0  # seto %ch
+36470fb6cd 5 movzx 4 0 0 16 16 0 0 0  # movzbl %r13b,%r9d
+664cf5 3 cmc 8 0 0 16 16 0 0 0  # cmc
+f24f0f49f9 5 cmovcc 8 0 0 16 16 0 0 0  # cmovnsq %r9,%r15
+4887c3 3 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%rbx
+4bb013 3 mov 1 0 0 16 16 0 0 13  # movb $0x13,%r8b
+66260fbdea 5 bsr 2 0 0 16 16 0 0 0  # bsrw %dx,%bp
+f06564dadb 5 x87 4 0 0 16 16 0 0 0  # fcmovu %st(3),%st
+660f76d2 4 sse 2 0 0 16 16 0 0 0  # pcmpeqd %xmm2,%xmm2
+4a0f53c9 4 sse 8 0 0 16 16 0 0 0  # rcpps %xmm1,%xmm1
+f00ff286238eae7d 8 sse 4 1 0 6 16 0 7dae8e23 0  # pslld 0x7dae8e23(%rsi),%mm0
+4c0f57803f0493a4 8 sse 8 1 0 0 16 0 ffffffffa493043f 0  # xorps -0x5b6cfbc1(%rax),%xmm8
+2e65640f28a991c70428 10 sse 4 1 0 1 16 0 2804c791 0  # movaps %fs:0x2804c791(%rcx),%xmm5
+47d8d5 3 x87 4 0 0 16 16 0 0 0  # fcom %st(5)
+65674d0fce 5 bswap 8 0 0 16 16 0 0 0  # bswap %r14
+65480feec2 5 sse 8 0 0 16 16 0 0 0  # pmaxsw %mm2,%mm0
+6636f34790 5 xchg 2 0 0 16 16 0 0 0  # pause
+2e0f2a98f66b2f4b 8 sse 4 1 0 0 16 0 4b2f6bf6 0  # cvtpi2ps 0x4b2f6bf6(%rax),%xmm3
+0f1ffb 3 nop 4 0 0 16 16 0 0 0  # nopl %ebx
+3e3c77 3 cmp 1 0 0 16 16 0 0 77  # cmpb $0x77,%al
+674903a60773d6d6 8 add 8 1 0 14 16 0 ffffffffd6d67307 0  # addq -0x29298cf9(%r14d),%rsp
+802161 3 and 1 1 0 1 16 0 0 61  # andb $0x61,(%rcx)
+364f83c78f 5 add 8 0 0 16 16 0 0 ffffffffffffff8f  # addq $0xffffffffffffff8f,%r15
+65430fae11 5 sse 4 1 0 9 16 0 0 0  # ldmxcsr %gs:(%r9)
+4f0fa3ea 4 bt 8 0 0 16 16 0 0 0  # btq %r13,%r10
+f34af7e1 4 mul 8 0 0 16 16 0 0 0  # mulq %rcx
+450fae3a 4 nop 4 1 0 10 16 0 0 0  # clflush (%r10)
+656536430f47e3 7 cmovcc 4 0 0 16 16 0 0 0  # cmoval %r11d,%esp
+4a0fd7c5 4 sse 8 0 0 16 16 0 0 0  # pmovmskb %mm5,%rax
+264f0fbcd3 5 bsf 8 0 0 16 16 0 0 0  # bsfq %r11,%r10
+f0650fa0 4 push_sreg 8 0 0 16 16 0 0 0  # pushq %fs
+644d1300 4 adc 8 1 0 8 16 0 0 0  # adcq %fs:(%r8),%r8
+660f85d110e0c8 7 jcc 8 0 0 16 16 0 0 ffffffffc8e010d1  # jne 0xffffffffc8e39069
+480f5ae9 4 sse 8 0 0 16 16 0 0 0  # cvtps2pd %xmm1,%xmm5
+f34c0fbeeb 5 movsx 8 0 0 16 16 0 0 0  # movsbq %bl,%r13
+3e470f885db32a66 8 jcc 8 0 0 16 16 0 0 662ab35d  # js,pt 0x66412dad
+0fd4ea 3 sse 4 0 0 16 16 0 0 0  # paddq %mm2,%mm5
+f24b81e1123a5964 8 and 8 0 0 16 16 0 0 64593a12  # andq $0x64593a12,%r9
+66f34563cc 5 movsx 2 0 0 16 16 0 0 0  # movsxd %r12w,%r9w
+6626f383c8df 6 or 2 0 0 16 16 0 0 ffffffffffffffdf  # orw $0xffdf,%ax
+4faf 2 scas 8 0 0 16 16 0 0 0  # scasq %es:(%rdi),%rax
+0fb555c4 4 lseg 4 1 0 5 16 0 ffffffffffffffc4 0  # lgsl -0x3c(%rbp),%edx
+0fb319 3 btr 4 1 0 1 16 0 0 0  # btrl %ebx,(%rcx)
+2ef0f0d3bd93c14007 9 sar 4 1 0 5 16 0 740c193 0  # sarl %cl,0x740c193(%rbp)
+f066be66d4 5 mov 2 0 0 16 16 0 0 d466  # movw $0xd466,%si
+f2f2f3bfc889f0e7 8 mov 4 0 0 16 16 0 0 e7f089c8  # movl $0xe7f089c8,%edi
+4a0f61ed 4 sse 8 0 0 16 16 0 0 0  # punpcklwd %mm5,%mm5
+4f0fd3f2 4 sse 8 0 0 16 16 0 0 0  # psrlq %mm2,%mm6
+440f2b8f399cc766 8 sse 4 1 0 7 16 0 66c79c39 0  # movntps %xmm9,0x66c79c39(%rdi)
+2e4e0f48ce 5 cmovcc 8 0 0 16 16 0 0 0  # cmovsq %rsi,%r9
+460f45c7 4 cmovcc 4 0 0 16 16 0 0 0  # cmovnel %edi,%r8d
+654f0f40f5 5 cmovcc 8 0 0 16 16 0 0 0  # cmovoq %r13,%r14
+678d0e 3 lea 4 1 0 6 16 0 0 0  # leal (%esi),%ecx
+663e0fba7cb723ed 8 btc 2 1 0 7 6 2 23 ed  # btcw $0xed,0x23(%rdi,%rsi,4)
+266466400f55f9 7 sse 2 0 0 16 16 0 0 0  # andnpd %xmm1,%xmm7
+4a0f44476b 5 cmovcc 8 1 0 7 16 0 6b 0  # cmoveq 0x6b(%rdi),%rax
+3e66440f496150 7 cmovcc 2 1 0 1 16 0 50 0  # cmovnsw 0x50(%rcx),%r12w
+64663e0f1c6520 7 nop 2 1 0 5 16 0 20 0  # nopw %fs:0x20(%rbp)
+4fb672 3 mov 1 0 0 16 16 0 0 72  # movb $0x72,%r14b
+2ed0c0 3 rol 1 0 0 16 16 0 0 0  # rolb $1,%al
+f24e3af9 4 cmp 1 0 0 16 16 0 0 0  # cmpb.s %cl,%r15b
+4a0f93ff 4 setcc 1 0 0 16 16 0 0 0  # setae %dil
+64f044f7d3 5 not 4 0 0 16 16 0 0 0  # notl %ebx
+410fc28cf8e2b228c283 10 sse 4 1 0 8 7 3 ffffffffc228b2e2 83  # cmpps $0x83,-0x3dd74d1e(%r8,%rdi,8),%xmm1
+440f6159dc 5 sse 4 1 0 1 16 0 ffffffffffffffdc 0  # punpcklwd -0x24(%rcx),%mm3
+66ba05b6 4 mov 2 0 0 16 16 0 0 b605  # movw $0xb605,%dx
+64f20fb0de 5 cmpxchg 1 0 0 16 16 0 0 0  # cmpxchgb %bl,%dh
+66f00fb3da 5 btr 2 0 0 16 16 0 0 0  # btrw %bx,%dx
+660fb21b 4 lseg 2 1 0 3 16 0 0 0  # lssw (%rbx),%bx
+400fdf33 4 sse 4 1 0 3 16 0 0 0  # pandn (%rbx),%mm6
+87d7 2 xchg 4 0 0 16 16 0 0 0  # xchgl %edx,%edi
+360f9dd8 4 setcc 1 0 0 16 16 0 0 0  # setge %al
+430fa2 3 cpuid 4 0 0 16 16 0 0 0  # cpuid
+3e3666f725d040c970 9 mul 2 1 1 16 16 0 70c940d0 0  # mulw 0x70c940d0(%rip)
+666665f7dc 5 neg 2 0 0 16 16 0 0 0  # negw %sp
+366566410f22d2 7 gp 2 0 0 16 16 0 0 0  # movq %r10,%cr2
+3e4a0fe40c0b 6 sse 8 1 0 3 9 0 0 0  # pmulhuw (%rbx,%r9,1),%mm1
+4d8c5c4eec 5 mov_from_sreg 8 1 0 14 1 1 ffffffffffffffec 0  # movw %ds,-0x14(%r14,%rcx,2)
+0fa5c3 3 shld 4 0 0 16 16 0 0 0  # shldl %cl,%eax,%ebx
+66f30f4d09 5 cmovcc 2 1 0 1 16 0 0 0  # cmovgew (%rcx),%cx
+f267644ed3a87ee193f8 10 shr 8 1 0 0 16 0 fffffffff893e17e 0  # shrq %cl,%fs:-0x76c1e82(%eax)
+c1fe47 3 sar 4 0 0 16 16 0 0 47  # sarl $0x47,%esi
+f3650f95f4 5 setcc 1 0 0 16 16 0 0 0  # setne %ah
+4a0f4d1f 4 cmovcc 8 1 0 7 16 0 0 0  # cmovgeq (%rdi),%rbx
+6665649e 4 sahf 2 0 0 16 16 0 0 0  # sahf
+2e6603c0 4 add 2 0 0 16 16 0 0 0  # addw.s %ax,%ax
+6766360f6dd7 6 sse 2 0 0 16 16 0 0 0  # punpckhqdq %xmm7,%xmm2
+6448f7e9 4 imul1 8 0 0 16 16 0 0 0  # imulq %rcx
+4c0f14ea 4 sse 8 0 0 16 16 0 0 0  # unpcklps %xmm2,%xmm13
+66473bc4 4 cmp 2 0 0 16 16 0 0 0  # cmpw.s %r12w,%r8w
+480f5913 4 sse 8 1 0 3 16 0 0 0  # mulps (%rbx),%xmm2
+f226490f437a0f 7 cmovcc 8 1 0 10 16 0 f 0  # cmovaeq 0xf(%r10),%rdi
+f20fbae607 5 bt 4 0 0 16 16 0 0 7  # btl $0x7,%esi
+64662e0f9ae1 6 setcc 1 0 0 16 16 0 0 0  # setp %cl
+2667430ff3ad77164a8f 10 sse 4 1 0 13 16 0 ffffffff8f4a1677 0  # psllq -0x70b5e989(%r13d),%mm5
+6566640fe10f 6 sse 2 1 0 7 16 0 0 0  # psraw %fs:(%rdi),%xmm1
+4a0f46eb 4 cmovcc 8 0 0 16 16 0 0 0  # cmovbeq %rbx,%rbp
+410f135168 5 sse 4 1 0 9 16 0 68 0  # movlps %xmm2,0x68(%r9)
+3e66660f45cb 6 cmovcc 2 0 0 16 16 0 0 0  # cmovnew %bx,%cx
+f06605966a 5 add 2 0 0 16 16 0 0 6a96  # addw $0x6a96,%ax
+663e46c1bc4d8ec02c2ded 11 sar 2 1 0 5 9 1 2d2cc08e ed  # sarw $0xed,0x2d2cc08e(%rbp,%r9,2)
+654f0f2a979a357eb6 9 sse 8 1 0 15 16 0 ffffffffb67e359a 0  # cvtpi2ps %gs:-0x4981ca66(%r15),%xmm10
+6636660f06 5 gp 2 0 0 16 16 0 0 0  # clts
+f04ed0d0 4 rcl 1 0 0 16 16 0 0 0  # rclb $1,%al
+4db8a36b3a52f380cc79 10 mov 8 0 0 16 16 0 0 79cc80f3523a6ba3  # movabsq $0x79cc80f3523a6ba3,%r8
+260f6fe3 4 sse 4 0 0 16 16 0 0 0  # movq %mm3,%mm4
+644c0fd289ef8931ca 9 sse 8 1 0 1 16 0 ffffffffca3189ef 0  # psrld %fs:-0x35ce7611(%rcx),%mm1
+664fc00f87 5 ror 1 1 0 15 16 0 0 87  # rorb $0x87,(%r15)
+660ffc99b4f91b06 8 sse 2 1 0 1 16 0 61bf9b4 0  # paddb 0x61bf9b4(%rcx),%xmm3
+4b80fe02 4 cmp 1 0 0 16 16 0 0 2  # cmpb $0x2,%r14b
+430fad7b18 5 shrd 4 1 0 11 16 0 18 0  # shrdl %cl,%edi,0x18(%r11)
+4d0fee55a7 5 sse 8 1 0 13 16 0 ffffffffffffffa7 0  # pmaxsw -0x59(%r13),%mm2
+3ef2de6898 5 x87 4 1 0 0 16 0 ffffffffffffff98 0  # fisubrs -0x68(%rax)
+6466450fd9b9151076f0 10 sse 2 1 0 9 16 0 fffffffff0761015 0  # psubusw %fs:-0xf89efeb(%r9),%xmm15
+64663e5b 4 pop 2 0 0 16 16 0 0 0  # popw %bx
+3e67f24dc8ef7ab7 8 enter 8 0 0 16 16 0 0 7aef  # enterq $0x7aef,$0xb7
+440f1565fa 5 sse 4 1 0 5 16 0 fffffffffffffffa 0  # unpckhps -0x6(%rbp),%xmm12
+cd8d 2 int 4 0 0 16 16 0 0 8d  # int $0x8d
+4b8622 3 xchg 1 1 0 10 16 0 0 0  # xchgb %spl,(%r10)
+460fb6ab76cb2311 8 movzx 4 1 0 3 16 0 1123cb76 0  # movzbl 0x1123cb76(%rbx),%r13d
+6465660fece4 6 sse 2 0 0 16 16 0 0 0  # paddsb %xmm4,%xmm4
+0fe0da 3 sse 4 0 0 16 16 0 0 0  # pavgb %mm2,%mm3
+236a3c 3 and 4 1 0 2 16 0 3c 0  # andl 0x3c(%rdx),%ebp
+66264c0f5cb8831fb335 10 sse 8 1 0 0 16 0 35b31f83 0  # subpd 0x35b31f83(%rax),%xmm15
+4cd183a94ab641 7 rol 8 1 0 3 16 0 41b64aa9 0  # rolq $1,0x41b64aa9(%rbx)
+0ffb86d638bdaf 7 sse 4 1 0 6 16 0 ffffffffafbd38d6 0  # psubq -0x5042c72a(%rsi),%mm0
+65f0f20f4b6f4b 7 cmovcc 4 1 0 7 16 0 4b 0  # cmovnpl %gs:0x4b(%rdi),%ebp
+4c1bc8 3 sbb 8 0 0 16 16 0 0 0  # sbbq.s %rax,%r9
+4ef7fc 3 idiv 8 0 0 16 16 0 0 0  # idivq %rsp
+67732d 3 jcc 8 0 0 16 16 0 0 2d  # jae 0x121197
+0fd9e4 3 sse 4 0 0 16 16 0 0 0  # psubusw %mm4,%mm4
+66460ff6a8dfa35dde 9 sse 2 1 0 0 16 0 ffffffffde5da3df 0  # psadbw -0x21a25c21(%rax),%xmm13
+664a0f73da74 6 sse 8 0 0 16 16 0 0 74  # psrldq $0x74,%xmm2
+646447f6516b 6 not 1 1 0 9 16 0 6b 0  # notb %fs:0x6b(%r9)
+670f5d32 4 sse 4 1 0 2 16 0 0 0  # minps (%edx),%xmm6
+480f2cdf 4 sse 8 0 0 16 16 0 0 0  # cvttps2pi %xmm7,%mm3
+360ff4c8 4 sse 4 0 0 16 16 0 0 0  # pmuludq %mm0,%mm1
+65663e4081f24f98 8 xor 2 0 0 16 16 0 0 984f  # xorw $0x984f,%dx
+65f36643ffb310083c16 10 push 2 1 0 11 16 0 163c0810 0  # pushw %gs:0x163c0810(%r11)
+0f7ff5 3 sse 4 0 0 16 16 0 0 0  # movq.s %mm6,%mm5
+3e640fddef 5 sse 4 0 0 16 16 0 0 0  # paddusw %mm7,%mm5
+260f6ec1 4 sse 4 0 0 16 16 0 0 0  # movd %ecx,%mm0
+f20f4196fac8a740 8 cmovcc 4 1 0 6 16 0 40a7c8fa 0  # cmovnol 0x40a7c8fa(%rsi),%edx
+f24bcf 3 gp 8 0 0 16 16 0 0 0  # iretq
+0f06 2 gp 4 0 0 16 16 0 0 0  # clts
+4ed26c8869 5 shr 1 1 0 0 9 2 69 0  # shrb %cl,0x69(%rax,%r9,4)
+460f8fe8faad2b 7 jcc 8 0 0 16 16 0 0 2badfae8  # jg 0x2badfd14
+f03e8507 4 test 4 1 0 7 16 0 0 0  # testl %eax,(%rdi)
+643e4c0f6f4e04 7 sse 8 1 0 6 16 0 4 0  # movq %fs:0x4(%rsi),%mm1
+64887065 4 mov 1 1 0 0 16 0 65 0  # movb %dh,%fs:0x65(%rax)
+26f6d6 3 not 1 0 0 16 16 0 0 0  # notb %dh
+664618ec 4 sbb 1 0 0 16 16 0 0 0  # sbbb %r13b,%spl
+4efec5 3 inc 1 0 0 16 16 0 0 0  # incb %bpl
+4c186b69 4 sbb 1 1 0 3 16 0 69 0  # sbbb %r13b,0x69(%rbx)
+400f54aeb484e0cd 8 sse 4 1 0 6 16 0 ffffffffcde084b4 0  # andps -0x321f7b4c(%rsi),%xmm5
+45ffc0 3 inc 4 0 0 16 16 0 0 0  # incl %r8d
+656766410f62cf 7 sse 2 0 0 16 16 0 0 0  # punpckldq %xmm15,%xmm1
+f3f048dceb 5 x87 8 0 0 16 16 0 0 0  # fsubr %st,%st(3)
+4c0f762c1f 5 sse 8 1 0 7 3 0 0 0  # pcmpeqd (%rdi,%rbx,1),%mm5
+3e2e430fe5725d 7 sse 4 1 0 10 16 0 5d 0  # pmulhw 0x5d(%r10),%mm6
+663e64490fa1 6 pop_sreg 8 0 0 16 16 0 0 0  # popq %fs
+666c 2 gp 2 0 0 16 16 0 0 0  # insb (%dx),%es:(%rdi)
+490f848c114c2a 7 jcc 8 0 0 16 16 0 0 2a4c118c  # je 0x2a6b09f3
+2e2626420f5c6759 8 sse 4 1 0 7 16 0 59 0  # subps 0x59(%rdi),%xmm4
+64f23e4af4 5 gp 8 0 0 16 16 0 0 0  # hlt
+0f694d06 4 sse 4 1 0 5 16 0 6 0  # punpckhwd 0x6(%rbp),%mm1
+f26692 3 xchg 2 0 0 16 16 0 0 0  # xchgw %ax,%dx
+663ef00f6c55ed 7 sse 2 1 0 5 16 0 ffffffffffffffed 0  # punpcklqdq -0x13(%rbp),%xmm2
+455a 2 pop 8 0 0 16 16 0 0 0  # popq %r10
+4fc142bb2e 5 rol 8 1 0 10 16 0 ffffffffffffffbb 2e  # rolq $0x2e,-0x45(%r10)
+674d0fab76da 6 bts 8 1 0 14 16 0 ffffffffffffffda 0  # btsq %r14,-0x26(%r14d)
+d2d1 2 rcl 1 0 0 16 16 0 0 0  # rclb %cl,%cl
+450f72e4a1 5 sse 4 0 0 16 16 0 0 a1  # psrad $0xa1,%mm4
+4c0f29c3 4 sse 8 0 0 16 16 0 0 0  # movaps.s %xmm8,%xmm3
+3e450bc1 4 or 4 0 0 16 16 0 0 0  # orl.s %r9d,%r8d
+470fe4f3 4 sse 4 0 0 16 16 0 0 0  # pmulhuw %mm3,%mm6
+66654d0f6b01 6 sse 8 1 0 9 16 0 0 0  # packssdw %gs:(%r9),%xmm8
+460fbcce 4 bsf 4 0 0 16 16 0 0 0  # bsfl %esi,%r9d
+450fb06e5e 5 cmpxchg 1 1 0 14 16 0 5e 0  # cmpxchgb %r13b,0x5e(%r14)
+f763f2 3 mul 4 1 0 3 16 0 fffffffffffffff2 0  # mull -0xe(%rbx)
+644b0fe0c4 5 sse 8 0 0 16 16 0 0 0  # pavgb %mm4,%mm0
+66f7f4 3 div 2 0 0 16 16 0 0 0  # divw %sp
+644881123fb0d584 8 adc 8 1 0 2 16 0 0 ffffffff84d5b03f  # adcq $0xffffffff84d5b03f,%fs:(%rdx)
+3e460fecd4 5 sse 4 0 0 16 16 0 0 0  # paddsb %mm4,%mm2
+f2f3490fc78d09241c79 10 cmpxchg8b 8 1 0 13 16 0 791c2409 0  # cmpxchg16b 0x791c2409(%r13)
+366747a13af2f27b 8 mov 4 1 0 16 16 0 7bf2f23a 0  # movl 0x7bf2f23a,%eax
+4e831349 4 adc 8 1 0 3 16 0 0 49  # adcq $0x49,(%rbx)
+264b0fbbd1 5 btc 8 0 0 16 16 0 0 0  # btcq %rdx,%r9
+f045d011 4 rcl 1 1 0 9 16 0 0 0  # rclb $1,(%r9)
+6636ad 3 lods 2 0 0 16 16 0 0 0  # lodsw %ds:(%rsi),%ax
+4b0f67ff 4 sse 8 0 0 16 16 0 0 0  # packuswb %mm7,%mm7
+f36626f8 4 clc 2 0 0 16 16 0 0 0  # clc
+f06766400f97d3 7 setcc 1 0 0 16 16 0 0 0  # seta %bl
+666764460f0d8f486c9f8f 11 nop 2 1 0 7 16 0 ffffffff8f9f6c48 0  # prefetchw %fs:-0x706093b8(%edi)
+6449a085e9fad2cb0201fa 11 mov 1 1 0 16 16 0 fa0102cbd2fae985 0  # movabsb %fs:0xfa0102cbd2fae985,%al
+be2e53c8f2 5 mov 4 0 0 16 16 0 0 f2c8532e  # movl $0xf2c8532e,%esi
+66460fe07cad7c 7 sse 2 1 0 5 13 2 7c 0  # pavgb 0x7c(%rbp,%r13,4),%xmm15
+2e4669e79b65a6d6 8 imul 4 0 0 16 16 0 0 d6a6659b  # imull $0xd6a6659b,%edi,%r12d
+2e4ad1e0 4 shl 8 0 0 16 16 0 0 0  # shlq $1,%rax
+2e4e0f609f1660a01d 9 sse 8 1 0 7 16 0 1da06016 0  # punpcklbw 0x1da06016(%rdi),%mm3
+64661180fc683b12 8 adc 2 1 0 0 16 0 123b68fc 0  # adcw %ax,%fs:0x123b68fc(%rax)
+f344b87e24fa7f 7 mov 4 0 0 16 16 0 0 7ffa247e  # movl $0x7ffa247e,%eax
+669b 2 fwait 2 0 0 16 16 0 0 0  # fwait
+2e0fed1a 4 sse 4 1 0 2 16 0 0 0  # paddsw (%rdx),%mm3
+400f6ae9 4 sse 4 0 0 16 16 0 0 0  # punpckhdq %mm1,%mm5
+6613fa 3 adc 2 0 0 16 16 0 0 0  # adcw.s %dx,%di
+490fa5953bd0dc84 8 shld 8 1 0 13 16 0 ffffffff84dcd03b 0  # shldq %cl,%rdx,-0x7b232fc5(%r13)
+656666448398c677ca411a 11 sbb 2 1 0 0 16 0 41ca77c6 1a  # sbbw $0x1a,%gs:0x41ca77c6(%rax)
+660f2ff2 4 sse 2 0 0 16 16 0 0 0  # comisd %xmm2,%xmm6
+66d1c9 3 ror 2 0 0 16 16 0 0 0  # rorw $1,%cx
+440f670d96de8e9f 8 sse 4 1 1 16 16 0 ffffffff9f8ede96 0  # packuswb -0x6071216a(%rip),%mm1
+4a0fd8e5 4 sse 8 0 0 16 16 0 0 0  # psubusb %mm5,%mm4
+663e2eab 4 stos 2 0 0 16 16 0 0 0  # stosw %ax,%es:(%rdi)
+3e66450fee87fdb46d87 10 sse 2 1 0 15 16 0 ffffffff876db4fd 0  # pmaxsw -0x78924b03(%r15),%xmm8
+66c7416ee400 6 mov 2 1 0 1 16 0 6e e4  # movw $0xe4,0x6e(%rcx)
+4ad3998e6b1493 7 rcr 8 1 0 1 16 0 ffffffff93146b8e 0  # rcrq %cl,-0x6ceb9472(%rcx)
+66dff7 3 x87 2 0 0 16 16 0 0 0  # fcomip %st(7),%st
+430f123f 4 sse 4 1 0 15 16 0 0 0  # movlps (%r15),%xmm7
+420f54ea 4 sse 4 0 0 16 16 0 0 0  # andps %xmm2,%xmm5
+6548d3cc 4 ror 8 0 0 16 16 0 0 0  # rorq %cl,%rsp
+36470f6a905f593c15 9 sse 4 1 0 8 16 0 153c595f 0  # punpckhdq 0x153c595f(%r8),%mm2
+66015ae5 4 add 2 1 0 2 16 0 ffffffffffffffe5 0  # addw %bx,-0x1b(%rdx)
+4afc 2 cld 8 0 0 16 16 0 0 0  # cld
+2ef066470faef0 7 fence 2 0 0 16 16 0 0 0  # tpause %r8d
+644511816bc7d19a 8 adc 4 1 0 9 16 0 ffffffff9ad1c76b 0  # adcl %r8d,%fs:-0x652e3895(%r9)
+f3650f4787d2834d4d 9 cmovcc 4 1 0 7 16 0 4d4d83d2 0  # cmoval %gs:0x4d4d83d2(%rdi),%eax
+3e64f7e2 4 mul 4 0 0 16 16 0 0 0  # mull %edx
+66f0640febb6c79db308 10 sse 2 1 0 6 16 0 8b39dc7 0  # por %fs:0x8b39dc7(%rsi),%xmm6
+66f3f042ff4a63 7 dec 2 1 0 2 16 0 63 0  # xrelease decw 0x63(%rdx)
+64430ffc61d3 6 sse 4 1 0 9 16 0 ffffffffffffffd3 0  # paddb %fs:-0x2d(%r9),%mm4
+3ec1d227 4 rcl 4 0 0 16 16 0 0 27  # rcll $0x27,%edx
+5c 1 pop 8 0 0 16 16 0 0 0  # popq %rsp
+0fbff0 3 movsx 4 0 0 16 16 0 0 0  # movswl %ax,%esi
+428100afc20b00 7 add 4 1 0 0 16 0 0 bc2af  # addl $0xbc2af,(%rax)
+6643838ce6f12b65ea16 10 or 2 1 0 14 12 3 ffffffffea652bf1 16  # orw $0x16,-0x159ad40f(%r14,%r12,8)
+640ff86e76 5 sse 4 1 0 6 16 0 76 0  # psubb %fs:0x76(%rsi),%mm5
+f02e674d019dd9e5663a 10 add 8 1 0 13 16 0 3a66e5d9 0  # addq %r11,0x3a66e5d9(%r13d)
+3e666441c1e40f 7 shl 2 0 0 16 16 0 0 f  # shlw $0xf,%r12w
+430fa9 3 pop_sreg 8 0 0 16 16 0 0 0  # popq %gs
+4229f5 3 sub 4 0 0 16 16 0 0 0  # subl %esi,%ebp
+363ef20f4617 6 cmovcc 4 1 0 7 16 0 0 0  # cmovbel (%rdi),%edx
+4ad05995 4 rcr 1 1 0 1 16 0 ffffffffffffff95 0  # rcrb $1,-0x6b(%rcx)
+f0446d 3 gp 4 0 0 16 16 0 0 0  # insl (%dx),%es:(%rdi)
+674f0f6322 5 sse 8 1 0 10 16 0 0 0  # packsswb (%r10d),%mm4
+f23e2e490f98ce 7 setcc 1 0 0 16 16 0 0 0  # sets %r14b
+3e67450f0d828055b44e 10 nop 4 1 0 10 16 0 4eb45580 0  # prefetch 0x4eb45580(%r10d)
+48ad 2 lods 8 0 0 16 16 0 0 0  # lodsq %ds:(%rsi),%rax
+45f62e 3 imul1 1 1 0 14 16 0 0 0  # imulb (%r14)
+0fc5cb7f 4 sse 4 0 0 16 16 0 0 7f  # pextrw $0x7f,%mm3,%ecx
+4e0fbb20 4 btc 8 1 0 0 16 0 0 0  # btcq %r12,(%rax)
+0fc1e0 3 xadd 4 0 0 16 16 0 0 0  # xaddl %esp,%eax
+6466420fbb857048d1e4 10 btc 2 1 0 5 16 0 ffffffffe4d14870 0  # btcw %ax,%fs:-0x1b2eb790(%rbp)
+66664735e541 6 xor 2 0 0 16 16 0 0 41e5  # xorw $0x41e5,%ax
+66bb59a8 4 mov 2 0 0 16 16 0 0 a859  # movw $0xa859,%bx
+f2262e440f41e7 7 cmovcc 4 0 0 16 16 0 0 0  # cmovnol %edi,%r12d
+4bd1ef 3 shr 8 0 0 16 16 0 0 0  # shrq $1,%r15
+3664f34f0fcf 6 bswap 8 0 0 16 16 0 0 0  # bswap %r15
+64f03e132e 5 adc 4 1 0 6 16 0 0 0  # adcl %fs:(%rsi),%ebp
+0fe910 3 sse 4 1 0 0 16 0 0 0  # psubsw (%rax),%mm2
+490f48ae0cd99d71 8 cmovcc 8 1 0 14 16 0 719dd90c 0  # cmovsq 0x719dd90c(%r14),%rbp
+4e0fb7eb 4 movzx 8 0 0 16 16 0 0 0  # movzwq %bx,%r13
+40c0daa8 4 rcr 1 0 0 16 16 0 0 a8  # rcrb $0xa8,%dl
+66478d93bb3745c4 8 lea 2 1 0 11 16 0 ffffffffc44537bb 0  # leaw -0x3bbac845(%r11),%r10w
+f04b0f11ae3e55a49d 9 sse 8 1 0 14 16 0 ffffffff9da4553e 0  # movups %xmm5,-0x625baac2(%r14)
+26430feefa 5 sse 4 0 0 16 16 0 0 0  # pmaxsw %mm2,%mm7
+470ff1db 4 sse 4 0 0 16 16 0 0 0  # psllw %mm3,%mm3
+6448c7470c192ff351 9 mov 8 1 0 7 16 0 c 51f32f19  # movq $0x51f32f19,%fs:0xc(%rdi)
+66450fd3e0 5 sse 2 0 0 16 16 0 0 0  # psrlq %xmm8,%xmm12
+8a971ef6b636 6 mov 1 1 0 7 16 0 36b6f61e 0  # movb 0x36b6f61e(%rdi),%dl
+6566664a0f19955e898205 11 nop 8 1 0 5 16 0 582895e 0  # nopq %gs:0x582895e(%rbp)
+470ff6d2 4 sse 4 0 0 16 16 0 0 0  # psadbw %mm2,%mm2
+f226f367d95085 7 x87 4 1 0 0 16 0 ffffffffffffff85 0  # fsts -0x7b(%eax)
+660fd5612f 5 sse 2 1 0 1 16 0 2f 0  # pmullw 0x2f(%rcx),%xmm4
+66de2b 3 x87 2 1 0 3 16 0 0 0  # fisubrs (%rbx)
+4c0fe8e4 4 sse 8 0 0 16 16 0 0 0  # psubsb %mm4,%mm4
+364b0f67b0a348c17a 9 sse 8 1 0 8 16 0 7ac148a3 0  # packuswb 0x7ac148a3(%r8),%mm6
+4a0fbeba7b3ccc2c 8 movsx 8 1 0 2 16 0 2ccc3c7b 0  # movsbq 0x2ccc3c7b(%rdx),%rdi
+64660fd1a5ad1592be 9 sse 2 1 0 5 16 0 ffffffffbe9215ad 0  # psrlw %fs:-0x416dea53(%rbp),%xmm4
+6466f2418094198680bfefd3 12 adc 1 1 0 9 3 0 ffffffffefbf8086 d3  # adcb $0xd3,%fs:-0x10407f7a(%r9,%rbx,1)
+6466440f75fe 6 sse 2 0 0 16 16 0 0 0  # pcmpeqw %xmm6,%xmm15
+663e403de3a9 6 cmp 2 0 0 16 16 0 0 a9e3  # cmpw $0xa9e3,%ax
+2e36c11002 5 rcl 4 1 0 0 16 0 0 2  # rcll $0x2,(%rax)
+6466658102bb12 7 add 2 1 0 2 16 0 0 12bb  # addw $0x12bb,%gs:(%rdx)
+d2ef 2 shr 1 0 0 16 16 0 0 0  # shrb %cl,%bh
+4e0ffea341bff010 8 sse 8 1 0 3 16 0 10f0bf41 0  # paddd 0x10f0bf41(%rbx),%mm4
+2e08ec 3 or 1 0 0 16 16 0 0 0  # orb %ch,%ah
+6495 2 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%ebp
+360fc70d46ae7af9 8 cmpxchg8b 4 1 1 16 16 0 fffffffff97aae46 0  # cmpxchg8b -0x68551ba(%rip)
+81e26dfc6c30 6 and 4 0 0 16 16 0 0 306cfc6d  # andl $0x306cfc6d,%edx
+490fae39 4 nop 8 1 0 9 16 0 0 0  # clflush (%r9)
+f224a6 3 and 1 0 0 16 16 0 0 a6  # andb $0xa6,%al
+4d19c9 3 sbb 8 0 0 16 16 0 0 0  # sbbq %r9,%r9
+66400f30 4 gp 2 0 0 16 16 0 0 0  # wrmsr
+6648ed 3 gp 8 0 0 16 16 0 0 0  # inl (%dx),%eax
+f3663e0bcc 5 or 2 0 0 16 16 0 0 0  # orw.s %sp,%cx
+f248d3d0 4 rcl 8 0 0 16 16 0 0 0  # rclq %cl,%rax
+2667460fd7e1 6 sse 4 0 0 16 16 0 0 0  # pmovmskb %mm1,%r12d
+643e4ed3ee 5 shr 8 0 0 16 16 0 0 0  # shrq %cl,%rsi
+662e65b131 5 mov 1 0 0 16 16 0 0 31  # movb $0x31,%cl
+42ff26 3 jmp_ind 8 1 0 6 16 0 0 0  # jmpq *(%rsi)
+36264a0a7f16 6 or 1 1 0 7 16 0 16 0  # orb 0x16(%rdi),%dil
+36642e4e0f5551b9 8 sse 8 1 0 1 16 0 ffffffffffffffb9 0  # andnps %fs:-0x47(%rcx),%xmm10
+6466410f4356b2 7 cmovcc 2 1 0 14 16 0 ffffffffffffffb2 0  # cmovaew %fs:-0x4e(%r14),%dx
+3ef00ffbdc 5 sse 4 0 0 16 16 0 0 0  # psubq %mm4,%mm3
+f06466257711 6 and 2 0 0 16 16 0 0 1177  # andw $0x1177,%ax
+f24c0f4b19 5 cmovcc 8 1 0 1 16 0 0 0  # cmovnpq (%rcx),%r11
+3e674098 4 cbw 4 0 0 16 16 0 0 0  # cwtl
+362e40038a91945f0c 9 add 4 1 0 2 16 0 c5f9491 0  # addl 0xc5f9491(%rdx),%ecx
+6626f347156dc9 7 adc 2 0 0 16 16 0 0 c96d  # adcw $0xc96d,%ax
+4c0fec4f5a 5 sse 8 1 0 7 16 0 5a 0  # paddsb 0x5a(%rdi),%mm1
+2ef0668784930eb907c9 10 xchg 2 1 0 3 2 2 ffffffffc907b90e 0  # xchgw %ax,-0x36f846f2(%rbx,%rdx,4)
+66ddd5 3 x87 2 0 0 16 16 0 0 0  # fst %st(5)
+f366f7ef 4 imul1 2 0 0 16 16 0 0 0  # imulw %di
+653ef3d9eb 5 x87 4 0 0 16 16 0 0 0  # fldpi
+66dad4 3 x87 2 0 0 16 16 0 0 0  # fcmovbe %st(4),%st
+f066666f 4 gp 2 0 0 16 16 0 0 0  # outsw %ds:(%rsi),(%dx)
+67d212 3 rcl 1 1 0 2 16 0 0 0  # rclb %cl,(%edx)
+364c0f5f8266cc62db 9 sse 8 1 0 2 16 0 ffffffffdb62cc66 0  # maxps -0x249d339a(%rdx),%xmm8
+0fd3b4f4a4aa28d6 8 sse 4 1 0 4 6 3 ffffffffd628aaa4 0  # psrlq -0x29d7555c(%rsp,%rsi,8),%mm6
+f03680ceae 5 or 1 0 0 16 16 0 0 ae  # orb $0xae,%dh
+676566402114d9 7 and 2 1 0 1 3 3 0 0  # andw %dx,%gs:(%ecx,%ebx,8)
+0f4deb 3 cmovcc 4 0 0 16 16 0 0 0  # cmovgel %ebx,%ebp
+670f9a31 4 setcc 1 1 0 1 16 0 0 0  # setp (%ecx)
+360f66a2363a8ca6 8 sse 4 1 0 2 16 0 ffffffffa68c3a36 0  # pcmpgtd -0x5973c5ca(%rdx),%mm4
+6767480f4be0 6 cmovcc 8 0 0 16 16 0 0 0  # cmovnpq %rax,%rsp
+6666460facff11 7 shrd 2 0 0 16 16 0 0 11  # shrdw $0x11,%r15w,%di
+4bc0fabe 4 sar 1 0 0 16 16 0 0 be  # sarb $0xbe,%r10b
+66420f18691a 6 nop 2 1 0 1 16 0 1a 0  # nopw 0x1a(%rcx)
+653e674a0f915ad6 8 setcc 1 1 0 2 16 0 ffffffffffffffd6 0  # setno %gs:-0x2a(%edx)
+4d96 2 xchg 8 0 0 16 16 0 0 0  # xchgq %rax,%r14
+662e0fe2cf 5 sse 2 0 0 16 16 0 0 0  # psrad %xmm7,%xmm1
+66f36797 4 xchg 2 0 0 16 16 0 0 0  # xchgw %ax,%di
+67663629c8 5 sub 2 0 0 16 16 0 0 0  # subw %cx,%ax
+f33664490f05 6 syscall 8 0 0 16 16 0 0 0  # syscall
+2645d07253 5 shl 1 1 0 10 16 0 53 0  # shlb $1,0x53(%r10)
+658194768ce604242d91f92e 12 adc 4 1 0 6 6 1 2404e68c 2ef9912d  # adcl $0x2ef9912d,%gs:0x2404e68c(%rsi,%rsi,2)
+0f2f5ce420 5 sse 4 1 0 4 16 3 20 0  # comiss 0x20(%rsp,%riz,8),%xmm3
+f0674c0f51f1 6 sse 8 0 0 16 16 0 0 0  # sqrtps %xmm1,%xmm14
+2648f76fa7 5 imul1 8 1 0 7 16 0 ffffffffffffffa7 0  # imulq -0x59(%rdi)
+660f29c1 4 sse 2 0 0 16 16 0 0 0  # movapd.s %xmm0,%xmm1
+3e8334de30 5 xor 4 1 0 6 3 3 0 30  # xorl $0x30,(%rsi,%rbx,8)
+4d0ffde9 4 sse 8 0 0 16 16 0 0 0  # paddw %mm1,%mm5
+4497 2 xchg 4 0 0 16 16 0 0 0  # xchgl %eax,%edi
+6666c188def5bd18ec 9 ror 2 1 0 0 16 0 18bdf5de ec  # rorw $0xec,0x18bdf5de(%rax)
+6543d3dd 4 rcr 4 0 0 16 16 0 0 0  # rcrl %cl,%r13d
+6667400ffa18 6 sse 2 1 0 0 16 0 0 0  # psubd (%eax),%xmm3
+660fa5fc 4 shld 2 0 0 16 16 0 0 0  # shldw %cl,%di,%sp
+266664139ded205691 9 adc 2 1 0 5 16 0 ffffffff915620ed 0  # adcw %fs:-0x6ea9df13(%rbp),%bx
+652ef00f1ac1 6 nop 4 0 0 16 16 0 0 0  # nopl %ecx
+64f3458ce9 5 mov_from_sreg 4 0 0 16 16 0 0 0  # movl %gs,%r9d
+f0f2097bfc 5 or 4 1 0 3 16 0 fffffffffffffffc 0  # xacquire orl %edi,-0x4(%rbx)
+f06645cf 4 gp 2 0 0 16 16 0 0 0  # iretw
+266749e293 5 loop 8 0 0 16 16 0 0 ffffffffffffff93  # loopl 0x11d82e
+0f31 2 rdtsc 4 0 0 16 16 0 0 0  # rdtsc
+450f5b13 4 sse 4 1 0 11 16 0 0 0  # cvtdq2ps (%r11),%xmm10
+f2f0f0450fbaaaeb7ce52f67 12 bts 4 1 0 10 16 0 2fe57ceb 67  # xacquire btsl $0x67,0x2fe57ceb(%r10)
+0fdca115098092 7 sse 4 1 0 1 16 0 ffffffff92800915 0  # paddusb -0x6d7ff6eb(%rcx),%mm4
+0fc103 3 xadd 4 1 0 3 16 0 0 0  # xaddl %eax,(%rbx)
+4283fe6d 4 cmp 4 0 0 16 16 0 0 6d  # cmpl $0x6d,%esi
+f0498198ee0ffee8b255c3d8 12 sbb 8 1 0 8 16 0 ffffffffe8fe0fee ffffffffd8c355b2  # sbbq $0xffffffffd8c355b2,-0x1701f012(%r8)
+36f24fc1e8da 6 shr 8 0 0 16 16 0 0 da  # shrq $0xda,%r8
+f226644f0f2dbd9c6c9d8b 11 sse 8 1 0 13 16 0 ffffffff8b9d6c9c 0  # cvtsd2si %fs:-0x74629364(%r13),%r15
+65f02e4dff13 6 call_ind 8 1 0 11 16 0 0 0  # callq *%gs:(%r11)
+65460f16da 5 sse 4 0 0 16 16 0 0 0  # movlhps %xmm2,%xmm11
+0f117f3a 4 sse 4 1 0 7 16 0 3a 0  # movups %xmm7,0x3a(%rdi)
+4380e921 4 sub 1 0 0 16 16 0 0 21  # subb $0x21,%r9b
+66663e0f71e37f 7 sse 2 0 0 16 16 0 0 7f  # psraw $0x7f,%xmm3
+40daadb4877096 7 x87 4 1 0 5 16 0 ffffffff967087b4 0  # fisubrl -0x698f784c(%rbp)
+264f0fd5db 5 sse 8 0 0 16 16 0 0 0  # pmullw %mm3,%mm3
+2647ef 3 gp 4 0 0 16 16 0 0 0  # outl %eax,(%dx)
+4aca2f34 4 gp 8 0 0 16 16 0 0 342f  # lretq $0x342f
+f066440ff8d5 6 sse 2 0 0 16 16 0 0 0  # psubb %xmm5,%xmm10
+6667400f291e 6 sse 2 1 0 6 16 0 0 0  # movapd %xmm3,(%esi)
+36654d80403b69 7 add 1 1 0 8 16 0 3b 69  # addb $0x69,%gs:0x3b(%r8)
+6636690eb245 6 imul 2 1 0 6 16 0 0 45b2  # imulw $0x45b2,(%rsi),%cx
+f066f00f70d262 7 sse 2 0 0 16 16 0 0 62  # pshufd $0x62,%xmm2,%xmm2
+f0480fedc5 5 sse 8 0 0 16 16 0 0 0  # paddsw %mm5,%mm0
+f0f24dd3c2 5 rol 8 0 0 16 16 0 0 0  # rolq %cl,%r10
+362e4d0f4227 6 cmovcc 8 1 0 15 16 0 0 0  # cmovbq (%r15),%r12
+f0f266ec 4 gp 2 0 0 16 16 0 0 0  # inb (%dx),%al
+f28e2f 3 mov_sreg 2 1 0 7 16 0 0 0  # movw (%rdi),%gs
+2a63a2 3 sub 1 1 0 3 16 0 ffffffffffffffa2 0  # subb -0x5e(%rbx),%ah
+f066440fedc4 6 sse 2 0 0 16 16 0 0 0  # paddsw %xmm4,%xmm8
+36f2490f34 5 gp 8 0 0 16 16 0 0 0  # sysenter
+6642f7d5 4 not 2 0 0 16 16 0 0 0  # notw %bp
+663e3e0f40c6 6 cmovcc 2 0 0 16 16 0 0 0  # cmovow %si,%ax
+3e490fea8e8cb14e3a 9 sse 8 1 0 14 16 0 3a4eb18c 0  # pminsw 0x3a4eb18c(%r14),%mm1
+480f1339 4 sse 8 1 0 1 16 0 0 0  # movlps %xmm7,(%rcx)
+6626470fefce 6 sse 2 0 0 16 16 0 0 0  # pxor %xmm14,%xmm9
+4e0f60ef 4 sse 8 0 0 16 16 0 0 0  # punpcklbw %mm7,%mm5
+410f4f09 4 cmovcc 4 1 0 9 16 0 0 0  # cmovgl (%r9),%ecx
+264d0fac870ac6745417 10 shrd 8 1 0 15 16 0 5474c60a 17  # shrdq $0x17,%r8,0x5474c60a(%r15)
+263ef00f567949 7 sse 4 1 0 1 16 0 49 0  # orps 0x49(%rcx),%xmm7
+664ad7 3 xlat 8 0 0 16 16 0 0 0  # xlat %ds:(%rbx)
+36f02e0fadee 6 shrd 4 0 0 16 16 0 0 0  # shrdl %cl,%ebp,%esi
+26666687e5 5 xchg 2 0 0 16 16 0 0 0  # xchgw %sp,%bp
+654bd1ce 4 ror 8 0 0 16 16 0 0 0  # rorq $1,%r14
+3e67f3480f30 6 gp 8 0 0 16 16 0 0 0  # wrmsr
+46c7fc485163f64049dd3264163e13 - ud
+3e49c79fd68f6cbae500e98b301a88 - ud
+feea03449197c13d91e6c623651613 - ud
+66d628bcfd1d7f269cd4a0c69216a0 - ud
+4d0f25aa6b6d6f94a8559a184101ba - ud
+46d4aa8e79cb29b22b4469a5fafb48 - ud
+266767fe98b968b6154667177a5ba9 - ud
+4c0fa6f9bfd5c19154eefde37a5e69 - ud
+3e4dc42c113138b91ad69cadf238cf - ud
+4461e84c3a036b0bdada8bf5b4f929 - ud
+82a0a377684ed7c68fd913bb15b0fb - ud
+479af90699b0ed0604723e07f48c12 - ud
+0f26b98d8adfa0fbdaf30da27cccc3 - ud
+4a2f93d8e1cdaf099d397fe440d3c4 - ud
+eade19016a468801013090271c2e25 - ud
+439ad743dd083de20063743e41ceda - ud
+3e430ee650a3948226303e2d2ba320 - ud
+fe9a382ac6d382ffc9c94f86daf604 - ud
+674fcef9babec1ea1595c4121475cb - ud
+490e8acc1dcfa8b662590c9c730e4b - ud
+f2450f363563a28c9a5b711554f9aa - ud
+4d0f3c202cd82a551d9d8362f7cecb - ud
+4c0e085dc166afaf50e30e21f89d92 - ud
+1650ad50751f86feaed3d26caddc27 - ud
+674c82088ffbae416c01c4f5c60c6d - ud
+6564654d3f81e5224111642dc60701 - ud
+489a292441a190c2536a7570638ea2 - ud
+f3f365f216809c3cadfdd8b7b9db69 - ud
+4e9a6c9f04b0428fa7c42c86675c29 - ud
+2e41600d5ff87b89ad26f7a723c64d - ud
+364d60d6e010dadbb13633e563ae43 - ud
+640741c10ce3dea22fe93d5d5bbdce - ud
+47621d557008473b63379f3c7e673b - ud
+f00f38b97a6e4bd4abe47802f5925e - ud
+65440f7c163ba7ddd8ea7d74f8163a - ud
+f3450f04534f929a8f85f50a2e3875 - ud
+622a1ef159534ba819dd7999760efd - ud
+66670fb2ce7474ab7ba7f90ea385d0 - ud
+4762770b0356e514fbbad5497d078d - ud
+420618b2fb855a991aee8f602622c0 - ud
+670f0ca1209459d0556dee8317792c - ud
+2ef3410f3d1bf890e68bcfbf1003aa - ud
+449a9b747e2d0b40126ad131d0fc8a - ud
+2ef3480fa68bd35591be7e13135a07 - ud
+3e66450e8e4d6c42d1fdbac753d966 - ud
+ce6e3ad5379dbe015d4f6dbe03d08e - ud
+67640f3aebd17f5eda20d2ac6aca1b - ud
+3e4a612e4566a9cada589e3cb4536a - ud
+67f065432f76db3ee713266271c7f7 - ud
+65264f0f24739a827f08fee5633cff - ud
+4dce28183d3682ac20a68613bd4319 - ud
+400fa78b937c6c03188da6bc6b8332 - ud
+661f75215b5853679b7d73930a9d45 - ud
+f2654c0f3cd2b2cdce46f754033387 - ud
+36264d8f95ca4975aad0bb2c86de50 - ud
+66450f7ae72ebd9c3025527b93a467 - ud
+f3172150c169f02a0a4c880f80cbea - ud
+490f38e9efcca2a389eed9a828a5ce - ud
+49fe2bd794864141b1a7062b31a6eb - ud
+826a6a26109ab5e68587d3de08ab51 - ud
+0f25d79f2aad184793cba4410a54d6 - ud
+3e43d6fb44d8eebcab69b6753352e0 - ud
+67664d1605f9ccd1f4d8961a245854 - ud
+640f3f7897e323bb64498f71188abc - ud
+66664d0fc7055eb4b847a789ada854 - ud
+65674407e697403e9b0ee581eb85eb - ud
+0fa626b39e980db9c2de08015254b6 - ud
+37bc44260b495f5019f1848aadbe3b - ud
+f067f060cace1c67956fea0b4dfbd6 - ud
+f26637139a9cd8bac28ff20b5e055b - ud
+64f067478dd540c64137be7bb8f73a - ud
+262643c7ad28066d827ce672b71cbd - ud
+4a064171c88d3920980f61950b3f05 - ud
+650f24efd1f49e89fec643db74ce19 - ud
+f2400f3b3ff253f73b2f158278ed8e - ud
+3e654aeab4ed61c1fa26de3661e25b - ud
+0f3fe6479f0892c5870ffb0c7108e6 - ud
+6536825bbf988602b8cfad4bbbf9bb - ud
+26f04a0f3ea86cc8dd93138c0d3ac9 - ud
+c59f06f738a68abf1fad29b2ae7feb - ud
+3e2e4a27cee3f0166afff0907d5294 - ud
+490f26c856e2ad4ba7b850a5bd57d8 - ud
+c7faeeeee3328d74381975d7bc0967 - ud
+cea55a51fb1d1f4de34bfadd68a4e0 - ud
+d468dfbda729418b14edd2aace89a1 - ud
+2e4beaf1b767cedf5beea15d969761 - ud
+0f7dd868725a9ce0a1a37ecc9254c6 - ud
+4f0f0a6343867d102043d48b4c607d - ud
+f3f0f30f27062939c73c7fc93e1db2 - ud
+43624f5d62b7f2262b2fd1b4c14c3f - ud
+48079ebb62946541ee936ceff2cad3 - ud
+604863a6a81ae78400ca87197ed0e1 - ud
+26402f43a0dabb3c642fbf941a263c - ud
+400f3fef06810842d598d6bbd349e6 - ud
+65664137efcd0592e3d95ef1410895 - ud
+26f0260f7b27131f5bd3513300633f - ud
+f04b0fa7605a9cb92271917ca8e8af - ud
+6636f23f523e389a3c339c289a2bf5 - ud
+ce72a8cc8eca5b05c72d43fe786393 - ud
+3ed634530bf23b3ae090613859ca7a - ud
