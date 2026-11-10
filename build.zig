@@ -1086,6 +1086,23 @@ pub fn build(b: *std.Build) void {
         const archive = mk.addOutputFileArg("linux.h9a");
         web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "linux.h9a").step);
     } else |_| {}
+    // The 9front layer ?linux puts at /9 (nine-arm64.h9a), from the arm64
+    // slim root `zig build slim -Darch=arm64` makes and
+    // src/web/nine-arm64.list, so a Linux program there has rc and
+    // wsmount; left out without one.
+    const web_nine_root = b.option([]const u8, "web-nine-arm64-root", "arm64 9front root tree for ?linux's 9front layer (default .local/9front/slim-<release>-arm64)") orelse
+        b.pathFromRoot(b.fmt(".local/9front/slim-{s}-arm64", .{pin(pins, "NINEFRONT_RELEASE")}));
+    if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_nine_root, "arm64/bin/rc" }), .{})) {
+        const webroot = b.addExecutable(.{
+            .name = "webroot",
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        });
+        const mk = b.addRunArtifact(webroot);
+        mk.addArg(web_nine_root);
+        mk.addFileArg(b.path("src/web/nine-arm64.list"));
+        const archive = mk.addOutputFileArg("nine-arm64.h9a");
+        web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "nine-arm64.h9a").step);
+    } else |_| {}
     // The demo page's Wine root archive for ?wine (site/wine.html), from
     // the root scripts/wine-web.sh makes and src/web/wine.list; left out
     // without one.
