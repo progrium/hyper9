@@ -212,18 +212,25 @@ fn access(gpa: std.mem.Allocator, words: *std.AutoArrayHashMapUnmanaged(u64, Wor
     gop.value_ptr.uses += 1;
 }
 
-/// Marks the words a `bytes`-byte access at `off` touches as unpinnable.
+/// Marks the bytes a `bytes`-byte access at `off` touches as unpinnable: no
+/// chunk may cover them (the word's other bytes still may be).
 fn markBad(gpa: std.mem.Allocator, words: *std.AutoArrayHashMapUnmanaged(u64, WordInfo), off: u64, bytes: u64) !void {
     var q = off / 8;
     while (q * 8 < off + bytes) : (q += 1) {
         const g = try words.getOrPut(gpa, q);
         if (!g.found_existing) g.value_ptr.* = .{};
-        g.value_ptr.bad = true;
+        var m: u8 = 0;
+        for (0..8) |b| {
+            const at = q * 8 + b;
+            if (at >= off and at < off + bytes) m |= @as(u8, 1) << @intCast(b);
+        }
+        g.value_ptr.bad |= m;
     }
 }
 
 const WordInfo = struct {
-    bad: bool = false,
+    /// Bytes no chunk may cover.
+    bad: u8 = 0,
     span: u8 = 0, // byte mask within the word
     uses: u32 = 0,
 };
@@ -325,7 +332,7 @@ pub fn planExtended(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, vir
     var cands: std.ArrayList(Chunk) = .empty;
     defer cands.deinit(gpa);
     for (words.keys(), words.values()) |q, w| {
-        if (w.bad or w.uses < 2 or w.span == 0) continue;
+        if (w.span & w.bad != 0 or w.uses < 2 or w.span == 0) continue;
         const lo: u32 = @ctz(w.span);
         const hi: u32 = 8 - @clz(w.span); // one past
         const size = hi - lo;

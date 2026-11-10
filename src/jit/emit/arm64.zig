@@ -98,7 +98,10 @@ const fpcr_save = io_save + 6;
 /// Carried lazy flags: an evalOpC code (0 when nothing's carried) and its
 /// operands.
 const lz_save = fpcr_save + 1;
-const save_slots: u32 = lz_save + 4;
+/// The pinned V registers across C calls, 16-byte aligned (an even slot).
+const vsave = (lz_save + 4 + 1) & ~@as(usize, 1);
+const max_vchunks = 16;
+const save_slots: u32 = vsave + 2 * max_vchunks;
 
 pub const host: regalloc.Host = .{
     .regs = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 23, 24, 25, 26, 27 },
@@ -446,6 +449,11 @@ const E = struct {
     block: ir.BlockId = 0,
     pend: ?Pend = null,
     lazy: Lazy = .{},
+    /// Guest V registers pinned to host v16 and up for the region: those
+    /// only copies touch. Written back at exits and calls (`vwritten`).
+    vchunks: [max_vchunks]u32 = undefined,
+    nv: u8 = 0,
+    vwritten: u16 = 0,
     /// The region's retires count in RC, flushed at exits and calls.
     lazy_retire: bool = false,
 
@@ -618,6 +626,34 @@ const E = struct {
     fn call(e: *E, rn: u5) !void {
         try e.put(0xD63F0000 | @as(u32, rn) << 5);
     }
+    /// A call to C code that leaves the Cpu alone: the pinned V registers
+    /// (caller-saved) kept in the frame across it.
+    fn callOut(e: *E, rn: u5) !void {
+        for (0..e.nv) |k| try e.vslot(true, @intCast(16 + k), k);
+        try e.call(rn);
+        for (0..e.nv) |k| try e.vslot(false, @intCast(16 + k), k);
+    }
+    /// A call that reads and writes the Cpu: the written V registers written
+    /// back before, and every pinned one reloaded after.
+    fn callInterp(e: *E, rn: u5) !void {
+        try e.vWriteback();
+        try e.call(rn);
+        try e.vLoad();
+    }
+    fn vslot(e: *E, store: bool, qt: u5, k: usize) !void {
+        const off: u32 = @intCast((e.saveArea(vsave) + 2 * k) * 8);
+        try e.put((if (store) @as(u32, 0x3D800000) else 0x3DC00000) | (off / 16) << 10 | @as(u32, SP) << 5 | qt);
+    }
+    fn vLoad(e: *E) !void {
+        for (e.vchunks[0..e.nv], 0..) |off, k| try vldst(e, false, @intCast(16 + k), off);
+    }
+    fn vWriteback(e: *E) !void {
+        for (e.vchunks[0..e.nv], 0..) |off, k| if (e.vwritten & (@as(u16, 1) << @intCast(k)) != 0) try vldst(e, true, @intCast(16 + k), off);
+    }
+    fn vchunkOf(e: *E, off: u64) ?u5 {
+        for (e.vchunks[0..e.nv], 0..) |o, k| if (o == off) return @intCast(16 + k);
+        return null;
+    }
 
     // ---- values
 
@@ -713,6 +749,7 @@ const E = struct {
         return e.leaveTo(code, pc, dirty, retired, e.epilogue);
     }
     fn leaveTo(e: *E, code: ctx.Exit, pc: u64, dirty: regalloc.ChunkSet, retired: u32, to: u32) !void {
+        if (to != e.epilogue_plain) try e.vWriteback();
         try e.writeback(dirty);
         try e.retireOn(retired);
         try e.movImm(IP0, pc);
@@ -949,6 +986,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     for (r.blocks.items) |_| _ = try e.label();
     e.epilogue = try e.label();
     e.epilogue_plain = try e.label();
+    pickVchunks(&e);
     for (lazy.after_poll) |*lbl| lbl.* = try e.label();
     for (r.insts.items) |i| {
         if (i.op == .copy and i.aux & regalloc.copy_fp != 0 and !regalloc.isCall(i)) e.fp = true;
@@ -974,6 +1012,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     if (e.fp) try fpEnter(&e, true);
     if (e.lazy_retire) try e.mov(RC, ZR);
     if (lazy.on) try e.strSlot(ZR, e.saveArea(lz_save));
+    try e.vLoad();
     try e.loadChunks();
 
     for (r.blocks.items, 0..) |blk, bi| {
@@ -1048,7 +1087,7 @@ fn emitStub(e: *E, s: Stub) !void {
             // TSO: the slow path's plain accesses are fenced instead.
             if (x.tso and x.store) try e.put(0xD5033BBF); // dmb ish
             try e.ldrCtx(IP0, if (x.store) ctx.off.slow_store else ctx.off.slow_load);
-            try e.call(IP0);
+            try e.callOut(IP0);
             const fault = try e.label();
             try e.cbnz(false, 0, fault);
             if (x.tso and !x.store) try e.put(0xD5033BBF);
@@ -1080,7 +1119,7 @@ fn emitStub(e: *E, s: Stub) !void {
                 try e.movImm(2, 3);
                 if (x.store) try e.ldrSlot(3, x.slot + @as(u32, @intCast(h)));
                 try e.ldrCtx(IP0, if (x.store) ctx.off.slow_store else ctx.off.slow_load);
-                try e.call(IP0);
+                try e.callOut(IP0);
                 try e.cbnz(false, 0, fault);
                 if (!x.store) {
                     try e.ldrCtx(IP0, ctx.off.scratch);
@@ -1119,7 +1158,7 @@ fn writePend(e: *E, p: Pend) !void {
         for (1..4) |k| try e.ldrSlot(@intCast(k), e.saveArea(lz_save + k));
         try e.movImm(4, 0);
         try e.movImm(IP0, @intFromPtr(&ir_eval.evalOpC));
-        try e.call(IP0);
+        try e.callOut(IP0);
         try e.mov(SD, 0);
         try e.restoreRegs(caller_saved_mask);
         try e.strSlot(ZR, e.saveArea(lz_save));
@@ -1279,6 +1318,11 @@ fn lower(e: *E, idx: usize) EmitError!void {
         },
         .getreg => {
             if (e.fp and i.aux == host.guest_fpsr.?) try fpFlush(e);
+            if (vchunkFor(e, i.aux, W / 8)) |vc| {
+                const rd = e.dst(idx);
+                try vGetSet(e, false, vc.q, vc.base, i.aux, W / 8, @intCast(idx), rd);
+                return e.finish(idx, rd);
+            }
             const rd = e.dst(idx);
             const ck = e.p.chunk_of[idx];
             if (ck != regalloc.no_chunk) {
@@ -1292,6 +1336,10 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.finish(idx, rd);
         },
         .setreg => {
+            if (vchunkFor(e, i.aux, ta.bits() / 8)) |vc| {
+                const v = try e.src(i.a, S0);
+                return vGetSet(e, true, vc.q, vc.base, i.aux, ta.bits() / 8, i.a, v);
+            }
             const v = try e.src(i.a, S0);
             const ck = e.p.chunk_of[idx];
             if (ck != regalloc.no_chunk) {
@@ -1620,7 +1668,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.movImm(1, r.handles.items[@intCast(i.aux)]);
             try e.movImm(2, i.aux2);
             try e.ldrCtx(IP0, ctx.off.interp);
-            try e.call(IP0);
+            try e.callInterp(IP0);
             if (i.retired == 0) {
                 try e.cbnz(false, 0, e.epilogue);
             } else {
@@ -1655,7 +1703,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.mov(0, CTX);
             try e.ldrCtx(IP0, ctx.off.helpers);
             try e.ldst(false, 3, IP0, IP0, i.aux * 8);
-            try e.call(IP0);
+            if (regs) try e.callInterp(IP0) else try e.callOut(IP0);
             try e.mov(SD, 0);
             try e.restoreRegs(save);
             if (e.fp) try fpEnter(e, false);
@@ -1723,6 +1771,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
         .@"exit.chain" => {
             // The chain site: the frame torn down, then one B that falls
             // through to the exit, which names the site in exit_info.
+            try e.vWriteback();
             try e.writeback(e.dirty);
             try e.retireOn(i.retired);
             if (e.fp) try fpLeave(e);
@@ -1757,6 +1806,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
         .@"exit.undef" => try e.leave(.undef, i.aux, e.dirty, i.retired),
         .@"exit.indirect" => {
             const v = try e.src(i.a, S0);
+            try e.vWriteback();
             try e.writeback(e.dirty);
             try e.retireOn(i.retired);
             try e.strCtx(v, ctx.off.exit_pc);
@@ -1939,6 +1989,7 @@ fn lowerExt(e: *E, idx: usize) !void {
     switch (i.op) {
         .getreg => {
             if (i.ty != .v128) return error.Unsupported;
+            if (vchunkFor(e, i.aux, 16)) |vc| return vGetSet(e, false, vc.q, vc.base, i.aux, 16, @intCast(idx), 0);
             const k = e.p.locs[idx].slot;
             try e.ldst(false, 3, S0, CPU, i.aux);
             try e.ldst(false, 3, S1, CPU, i.aux + 8);
@@ -1947,6 +1998,7 @@ fn lowerExt(e: *E, idx: usize) !void {
         },
         .setreg => {
             if (ta != .v128) return error.Unsupported;
+            if (vchunkFor(e, i.aux, 16)) |vc| return vGetSet(e, true, vc.q, vc.base, i.aux, 16, i.a, 0);
             const k = e.p.locs[i.a].slot;
             try e.ldrSlot(S0, k);
             try e.ldrSlot(S1, k + 1);
@@ -1993,7 +2045,7 @@ fn extFallback(e: *E, idx: usize) !void {
     try e.movImm(3, i.aux);
     try e.movImm(4, i.aux2);
     try e.movImm(IP0, @intFromPtr(&ir_eval.evalExtC));
-    try e.call(IP0);
+    try e.callOut(IP0);
     try e.restoreRegs(save);
     if (i.ty == .v128) {
         const sl = e.p.locs[idx].slot;
@@ -2312,7 +2364,7 @@ fn copyOp(e: *E, idx: usize) !void {
         try e.movImm(1, i.aux & 0xffff_ffff);
         try e.movImm(2, 0);
         try e.ldrCtx(IP0, ctx.off.interp);
-        try e.call(IP0);
+        try e.callInterp(IP0);
         try e.cbnz(false, 0, e.epilogue);
         try e.restoreRegs(save);
         if (e.fp) try fpEnter(e, false);
@@ -2338,7 +2390,9 @@ fn copyOp(e: *E, idx: usize) !void {
             for (fields[k..]) |go| if (go) |g| if (g.off == f.off and g.vec == f.vec and g.read) {
                 read = true;
             };
-            if (f.vec) {
+            if (f.vec and !(k == 2 and regalloc.byElementH(@truncate(i.aux))) and e.vchunkOf(f.off) != null) {
+                reg = e.vchunkOf(f.off).?;
+            } else if (f.vec) {
                 // v0-v3: under 16, for the by-element forms' 4-bit Rm.
                 reg = nv;
                 nv += 1;
@@ -2379,7 +2433,9 @@ fn copyOp(e: *E, idx: usize) !void {
             dup = true;
         };
         if (dup) continue;
-        if (f.vec) try vldst(e, true, regs[k], f.off) else try writeGuest(e, f.off, 8, regs[k]);
+        if (f.vec) {
+            if (regs[k] < 16) try vldst(e, true, regs[k], f.off);
+        } else try writeGuest(e, f.off, 8, regs[k]);
     }
 }
 
@@ -2429,6 +2485,98 @@ fn fpEnter(e: *E, entry: bool) !void {
     try e.bcond(EQ, same);
     try e.put(0xD51B4400 | @as(u32, IP1)); // msr fpcr, x17
     e.bind(same);
+}
+
+/// Picks the guest V registers only (non-interp) copies touch, up to 16,
+/// to keep in host v16 and up.
+fn pickVchunks(e: *E) void {
+    const r = e.r;
+    var offs: [64]u32 = undefined;
+    var n: usize = 0;
+    var bad: [64]bool = @splat(false);
+    for (r.insts.items) |i| {
+        if (i.op != .copy or regalloc.isCall(i)) continue;
+        for (regalloc.copyFields(i.aux2), 0..) |fo, k| if (fo) |f| if (f.vec) {
+            const idx = for (offs[0..n], 0..) |o, j| {
+                if (o == f.off) break j;
+            } else blk: {
+                if (n == offs.len) break :blk null;
+                offs[n] = f.off;
+                n += 1;
+                break :blk n - 1;
+            };
+            // A by-element H op's Rm needs a register under 16.
+            if (idx) |j| if (k == 2 and regalloc.byElementH(@truncate(i.aux))) {
+                bad[j] = true;
+            };
+        };
+    }
+    // Anything else touching a V register's bytes keeps it in the Cpu, but
+    // a getreg or setreg of its whole, or of a 64- or 32-bit lane.
+    for (r.insts.items) |i| {
+        const range: ?[2]u64 = switch (i.op) {
+            .getreg => .{ i.aux, i.aux + @max(i.ty.bits() / 8, 1) },
+            .setreg => .{ i.aux, i.aux + @max(r.insts.items[i.a].ty.bits() / 8, 1) },
+            .@"pending.flags" => .{ i.aux, i.aux + 4 },
+            else => null,
+        };
+        const rg = range orelse continue;
+        for (offs[0..n], 0..) |o, j| if (rg[0] < o + 16 and o < rg[1]) {
+            if (!(i.op != .@"pending.flags" and vLane(o, rg[0], rg[1] - rg[0]))) bad[j] = true;
+        };
+    }
+    for (offs[0..n], 0..) |o, j| {
+        if (bad[j] or e.nv == max_vchunks) continue;
+        e.vchunks[e.nv] = o;
+        e.nv += 1;
+    }
+    // Which of them copies and setregs write.
+    for (r.insts.items) |i| {
+        if (i.op == .setreg) for (e.vchunks[0..e.nv], 0..) |o, k| if (i.aux >= o and i.aux < o + 16) {
+            e.vwritten |= @as(u16, 1) << @intCast(k);
+        };
+        if (i.op != .copy or regalloc.isCall(i)) continue;
+        for (regalloc.copyFields(i.aux2)) |fo| if (fo) |f| if (f.vec and f.write) {
+            for (e.vchunks[0..e.nv], 0..) |o, k| if (o == f.off) {
+                e.vwritten |= @as(u16, 1) << @intCast(k);
+            };
+        };
+    }
+}
+
+/// Whether `bytes` at `at` is all of the V register at `o`, or one of its
+/// 64- or 32-bit lanes.
+fn vLane(o: u64, at: u64, bytes: u64) bool {
+    return switch (bytes) {
+        16 => at == o,
+        8, 4 => (at - o) % bytes == 0,
+        else => false,
+    };
+}
+
+/// getreg or setreg of a pinned V register (or a lane): `reg` is the GPR
+/// side for a lane; a whole one goes through value `v`'s slot pair.
+fn vGetSet(e: *E, set: bool, q: u5, base: u64, at: u64, bytes: u32, v: Ref, reg: u5) !void {
+    if (bytes == 16) {
+        const slot = e.p.locs[v].slot;
+        try e.movImm(IP1, slot * 8);
+        try e.dp(0x8B206000, true, IP1, SP, IP1); // add x17, sp, x17
+        try e.put((if (set) @as(u32, 0x3DC00000) else 0x3D800000) | @as(u32, IP1) << 5 | q); // ldr/str q
+        return;
+    }
+    const lane: u32 = @intCast((at - base) / bytes);
+    const imm5: u32 = if (bytes == 8) (lane << 4) | 0b01000 else (lane << 3) | 0b00100;
+    if (set) {
+        try e.put(0x4E001C00 | imm5 << 16 | @as(u32, reg) << 5 | q); // ins vq.ts[lane], reg
+    } else {
+        try e.put((if (bytes == 8) @as(u32, 0x4E003C00) else 0x0E003C00) | imm5 << 16 | @as(u32, q) << 5 | reg); // umov reg, vq.ts[lane]
+    }
+}
+
+/// The pinned V register holding Cpu bytes [at, at + bytes), and its base.
+fn vchunkFor(e: *E, at: u64, bytes: u64) ?struct { q: u5, base: u64 } {
+    for (e.vchunks[0..e.nv], 0..) |o, k| if (at >= o and at + bytes <= o + 16) return .{ .q = @intCast(16 + k), .base = o };
+    return null;
 }
 
 /// The register of the chunk that is exactly `bytes` bytes at `off`.
@@ -2528,7 +2676,7 @@ fn casOp(e: *E, idx: usize) !void {
     try e.mov(0, CTX);
     try e.movImm(2, f.size);
     try e.ldrCtx(IP0, ctx.off.slow_cas);
-    try e.call(IP0);
+    try e.callOut(IP0);
     const fault = try e.label();
     try e.stubs.append(e.gpa, .{ .slow = .{
         .label = fault,
@@ -2567,7 +2715,7 @@ fn fallback(e: *E, idx: usize) !void {
     try e.movImm(0, ir_eval.fallbackCode(i.op, i.ty, ta));
     try e.movImm(4, i.aux);
     try e.movImm(IP0, @intFromPtr(&ir_eval.evalOpC));
-    try e.call(IP0);
+    try e.callOut(IP0);
     try e.mov(SD, 0);
     try e.restoreRegs(save);
     try e.finish(idx, SD);
