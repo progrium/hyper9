@@ -370,6 +370,7 @@ pub fn generateExt(gpa: std.mem.Allocator) ![]Case {
             .{ "fp.cvt", "i16", env },
             .{ "fp.tosint", "i32", env },
             .{ "fp.tosint", "i64", fixed },
+            .{ "fp.tosint", "i64", env },
             .{ "fp.touint", "i32", fixed },
             .{ "fp.touint", "i64", env },
         };
@@ -381,6 +382,24 @@ pub fn generateExt(gpa: std.mem.Allocator) ![]Case {
             \\  setreg %2 #0x10
             \\  exit.chain #0x0
         , .{ ty, o[0], o[1], @as(u64, @bitCast(o[2])) }) });
+    };
+    // Exception words over several ops: an inexact divide, then (a) the
+    // guest clearing the word and an exact add, or (b) the divide not
+    // reporting and the add reporting. The word must hold only the add's.
+    for (envs[0..2]) |env| for ([_]bool{ false, true }) |unreported| {
+        const x: u64 = @bitCast(env);
+        try list.append(gpa, .{ .regs = .{ 0x3ff0_0000_0000_0000, 0x4008_0000_0000_0000, 0, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i64 #0x8
+            \\  %2 = fp.div:i64 %0, %1 #0x{0x}{1s}
+            \\  %3 = const:i32 #0x0
+            \\  {2s}
+            \\  %5 = fp.add:i64 %0, %0 #0x{0x} @0x29
+            \\  setreg %2 #0x10
+            \\  setreg %5 #0x18
+            \\  exit.chain #0x0
+        , .{ x, if (unreported) "" else " @0x29", if (unreported) "%4 = add:i32 %3, %3" else "setreg %3 #0x28" }) });
     };
     // Integers to FP.
     const ints = [_]u64{ 0, 1, 3, 0xffff_ffff_ffff_ffff, 0x7fff_ffff, 0x8000_0000, 0x1234_5678_9abc_def1, 0x8000_0000_0000_0001 };

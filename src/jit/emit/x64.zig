@@ -81,6 +81,9 @@ const outgoing = 48;
 const staging = outgoing;
 /// evalExtC's operands and result: a, b, and c, 16 bytes each.
 const io_base = staging + 40;
+/// Where MXCSR goes through on its way to and from a register: the last
+/// staging slot, free outside a call.
+const mxcsr_tmp = staging + 32;
 /// Where a call keeps the live values of caller-saved registers.
 const save_base = io_base + 48;
 const slots_base = save_base + 8 * 16;
@@ -141,6 +144,10 @@ const E = struct {
     idx: usize = 0,
     /// The chunks that may be dirty here.
     dirty: regalloc.ChunkSet = 0,
+    /// Some fp op reports exceptions to the guest (aux2): MXCSR's flags
+    /// then hold only what native ops raised since they were last cleared,
+    /// all of it already in the guest's words (see fpNative).
+    watch: bool = false,
 
     fn pos(e: *E) usize {
         return e.out.items.len - e.base;
@@ -392,6 +399,7 @@ const E = struct {
         }
         try e.bs(&.{ 0x41, 0xff, 0xd3 }); // call r11
         try e.restoreRegs(live);
+        if (e.watch) try clearHostFlags(e);
     }
 
     /// lea rsp, [rbp - saved_bytes]: the frame torn down to the pushes.
@@ -451,6 +459,10 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     try e.rr(true, &.{0x81}, 5, RSP); // sub rsp, frame
     try e.d32(frame);
     try e.loadChunks();
+    for (r.insts.items) |i| {
+        if (i.op.isFp() and i.aux2 != 0) e.watch = true;
+    }
+    if (e.watch) try clearHostFlags(&e);
 
     for (r.blocks.items, 0..) |blk, bi| {
         block_pos[bi] = e.pos();
@@ -464,6 +476,8 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
                 continue;
             }
             try lower(&e, r, idx);
+            // The guest set an exception word: start the host's flags over.
+            if (e.watch and r.insts.items[idx].op == .setreg and setsWatched(r, r.insts.items[idx])) try clearHostFlags(&e);
         }
     }
 
@@ -478,6 +492,23 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     }
     e.code.entry = 0;
     return e.code;
+}
+
+/// Whether setreg `i` writes a byte of a word some fp op reports to.
+fn setsWatched(r: *const ir.Region, i: ir.Inst) bool {
+    const n: u64 = switch (r.insts.items[i.a].ty) {
+        .i8 => 1,
+        .i16 => 2,
+        .i32 => 4,
+        .v128 => 16,
+        else => 8,
+    };
+    for (r.insts.items) |f| {
+        if (!f.op.isFp() or f.aux2 == 0) continue;
+        const w = f.aux2 - 1;
+        if (i.aux < w + 4 and w < i.aux + n) return true;
+    }
+    return false;
 }
 
 fn popAndReturn(e: *E) !void {
@@ -1344,7 +1375,14 @@ fn vecCmp(e: *E, es: u2, p: ir.Pred) !void {
 /// op or form it doesn't do.
 fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     const x = ir.ExtAux.of(i.aux);
-    if (x.rounding != 0 or x.daz or x.ftz) return false;
+    if (x.daz or x.ftz) return false;
+    // Nearest, as the host's MXCSR has it, except for the ops that name
+    // their own: conversions to integers toward zero, and rounds.
+    switch (i.op) {
+        .@"fp.tosint" => if (x.rounding != 0 and x.rounding != 3) return false,
+        .@"fp.round" => if (x.rounding > 3 or !sse41) return false,
+        else => if (x.rounding != 0) return false,
+    }
     const ta: Type = r.insts.items[i.a].ty;
     const vec = i.ty == .v128;
     const es: u2 = if (vec) x.esize else switch (if (i.op == .@"fp.cmp" or i.op == .@"fp.tosint") ta else i.ty) {
@@ -1370,14 +1408,15 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     switch (i.op) {
         .@"fp.cmp" => if (vec) return false,
         .@"fp.cvt" => if (vec or (ta != .i32 and ta != .i64) or (i.ty != .i32 and i.ty != .i64)) return false,
-        .@"fp.tosint" => if (vec or x.imm != 0 or x.arm) return false,
-        .@"fp.fromsint" => if (vec or x.imm != 0 or (i.ty != .i32 and i.ty != .i64)) return false,
+        .@"fp.tosint" => if (vec or x.imm != 0) return false,
+        .@"fp.fromsint", .@"fp.fromuint" => if (vec or x.imm != 0 or (i.ty != .i32 and i.ty != .i64)) return false,
+        .@"fp.round" => {},
         else => if (arith == null) return false,
     }
-    if (watch) try clearHostFlags(e);
     try ldX(e, 0, i.a, ta);
     if (i.b != ir.none) try ldX(e, 1, i.b, r.insts.items[i.b].ty);
     var nan_check = true;
+    var slow: [3]?usize = .{ null, null, null };
     switch (i.op) {
         .@"fp.cmp" => {
             // comis (signaling) or ucomis: ZF PF CF give the order.
@@ -1401,10 +1440,40 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
         },
         .@"fp.cvt" => try sse(e, if (dbl) 0xf3 else 0xf2, false, &.{0x5a}, 0, 0), // cvtss2sd / cvtsd2ss (by the source)
         .@"fp.tosint" => {
-            try sse(e, if (dbl) 0xf2 else 0xf3, i.ty == .i64, &.{0x2d}, RAX, 0); // cvtss2si / cvtsd2si, nearest
+            // cvtss2si / cvtsd2si (nearest), or cvtt (toward zero).
+            try sse(e, if (dbl) 0xf2 else 0xf3, i.ty == .i64, &.{if (x.rounding == 3) 0x2c else 0x2d}, RAX, 0);
+            if (x.arm) {
+                // x86's "integer indefinite" (the minimum) for a NaN or
+                // out of range: Arm saturates, so the slow path decides.
+                if (i.ty == .i64) {
+                    try e.movImm(R10, @as(u64, 1) << 63);
+                    try e.rr(true, &.{0x39}, R10, RAX); // cmp rax, r10
+                } else {
+                    try e.aluImm(false, 7, RAX, std.math.minInt(i32)); // cmp eax, min
+                }
+                slow[2] = try e.fwd(CC.e);
+            }
             try maskTo(e, i.ty);
             try e.stVal(dst, RAX);
             nan_check = false;
+        },
+        .@"fp.fromuint" => {
+            // A u32 is exact as a signed 64-bit integer; a u64 is when its
+            // top bit is clear.
+            try e.ldVal(RAX, i.a);
+            if (ta == .i64) {
+                try e.rr(true, &.{0x85}, RAX, RAX); // test rax, rax
+                slow[2] = try e.fwd(CC.s);
+            }
+            try sse(e, 0x66, false, &.{0xef}, 0, 0); // pxor xmm0, xmm0
+            try sse(e, if (i.ty == .i64) 0xf2 else 0xf3, true, &.{0x2a}, 0, RAX); // cvtsi2ss / sd from r64
+            nan_check = false;
+        },
+        .@"fp.round" => {
+            // roundss/sd/ps/pd with the rounding in imm8, and bit 3 to keep
+            // inexact quiet unless the op raises it.
+            const opc: u8 = if (vec) (if (dbl) 0x09 else 0x08) else (if (dbl) 0x0b else 0x0a);
+            try sseI(e, 0x66, &.{ 0x3a, opc }, 0, 0, @as(u8, x.rounding) | (if (x.exact) @as(u8, 0) else 8));
         },
         .@"fp.fromsint" => {
             try e.ldVal(RAX, i.a);
@@ -1416,7 +1485,6 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     }
     // To the slow path on a NaN result, or an exception SSE and the
     // guest may see differently.
-    var slow: [2]?usize = .{ null, null };
     if (nan_check) {
         try sse(e, null, false, &.{0x28}, 2, 0); // movaps xmm2, xmm0
         if (vec) {
@@ -1431,8 +1499,10 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
         }
     }
     if (watch) {
-        try e.bs(&.{ 0x0f, 0xae, 0x5c, 0x24, @intCast(io_base) }); // stmxcsr [rsp+io]
-        try e.rm(false, &.{0x8b}, RAX, RSP, io_base);
+        // MXCSR's flags are sticky, and every one up to this op is already
+        // in the guest's words, so ORing them in again changes nothing.
+        try e.bs(&.{ 0x0f, 0xae, 0x5c, 0x24, mxcsr_tmp }); // stmxcsr [rsp+tmp]
+        try e.rm(false, &.{0x8b}, RAX, RSP, mxcsr_tmp);
         try e.aluImm(false, 4, RAX, 0x3f);
         try e.bs(&.{ 0xa8, 0x13 }); // test al, IE|DE|UE
         slow[1] = try e.fwd(CC.ne);
@@ -1444,22 +1514,27 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
         try e.ldCtx(R10, ctx.off.cpu);
         try e.rm(false, &.{0x09}, RAX, R10, @intCast(i.aux2 - 1)); // or [cpu+off], eax
     }
+    // An op that reports nothing mustn't leave its flags for one that does.
+    if (!watch and e.watch) try clearHostFlags(e);
     if (i.op != .@"fp.cmp" and i.op != .@"fp.tosint") try stX(e, dst, 0, i.ty);
-    if (slow[0] != null or slow[1] != null) {
+    if (slow[0] != null or slow[1] != null or slow[2] != null) {
         const done = try e.fwd(null);
         for (slow) |s0| if (s0) |at| e.land(at);
         try extFallback(e, r, i, dst);
+        // What the native try raised isn't the guest's (the slow path
+        // reported the op's own); extFallback's call cleared it, when
+        // anything watches.
         e.land(done);
     }
     return true;
 }
 
-/// Clears MXCSR's exception flags, through the io area.
+/// Clears MXCSR's exception flags.
 fn clearHostFlags(e: *E) !void {
-    try e.bs(&.{ 0x0f, 0xae, 0x5c, 0x24, @intCast(io_base) }); // stmxcsr [rsp+io]
-    try e.rm(false, &.{0x81}, 4, RSP, io_base); // and dword [rsp+io], ~0x3f
+    try e.bs(&.{ 0x0f, 0xae, 0x5c, 0x24, mxcsr_tmp }); // stmxcsr [rsp+tmp]
+    try e.rm(false, &.{0x81}, 4, RSP, mxcsr_tmp); // and dword [rsp+tmp], ~0x3f
     try e.d32(@bitCast(@as(i32, ~@as(i32, 0x3f))));
-    try e.bs(&.{ 0x0f, 0xae, 0x54, 0x24, @intCast(io_base) }); // ldmxcsr [rsp+io]
+    try e.bs(&.{ 0x0f, 0xae, 0x54, 0x24, mxcsr_tmp }); // ldmxcsr [rsp+tmp]
 }
 
 fn aluWidthTest(e: *E, bits: u32) !void {
@@ -1560,6 +1635,7 @@ fn fallback(e: *E, i: ir.Inst, ta: Type) !void {
     try e.movImm(R11, @intFromPtr(&ir_eval.evalOpC));
     try e.bs(&.{ 0x41, 0xff, 0xd3 }); // call r11
     try e.restoreRegs(live);
+    if (e.watch) try clearHostFlags(e);
 }
 
 /// A load or store through the TLB, with the slow path inline after the
