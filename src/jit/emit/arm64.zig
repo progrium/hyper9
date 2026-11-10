@@ -152,13 +152,6 @@ fn eflagsKind(op: Op) ?Kind {
     };
 }
 
-/// eflagsKind for instruction `i` of `r`: null at 64 bits (hx64), which
-/// falls back to evalOpC until NZCV lowering takes i64 operands.
-fn eflagsKindOf(r: *const ir.Region, i: ir.Inst) ?Kind {
-    if (i.a != ir.none and r.insts.items[i.a].ty == .i64) return null;
-    return eflagsKind(i.op);
-}
-
 /// EFLAGS' CF ZF SF OF from NZCV (index N<<3 | Z<<2 | C<<1 | V), with CF
 /// as arm64's C, or (after a subtraction) its inverse.
 fn eflagsTable(comptime borrow: bool) [16]u16 {
@@ -768,17 +761,17 @@ const E = struct {
 
 // ---------------------------------------------------------------- the flags pre-pass
 
-fn fallsBack(r: *const ir.Region, i: ir.Inst) bool {
-    return switch (i.op) {
+fn fallsBack(op: Op) bool {
+    return switch (op) {
         .@"eflags.adc", .@"eflags.sbb", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => true,
-        else => eflagsKind(i.op) != null and eflagsKindOf(r, i) == null,
+        else => false,
     };
 }
 
-fn producesFlags(r: *const ir.Region, i: ir.Inst) bool {
-    return switch (i.op) {
+fn producesFlags(op: Op) bool {
+    return switch (op) {
         .icmp, .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic", .@"nzcv.adc", .@"nzcv.sbc" => true,
-        else => eflagsKindOf(r, i) != null,
+        else => eflagsKind(op) != null,
     };
 }
 
@@ -808,7 +801,7 @@ fn hostCond(r: *const ir.Region, v: Ref, live: Live) ?Cond {
         .icmp => if (live.is(v, .icmp)) return pred_cond[@intCast(i.aux)],
         .@"nzcv.cond" => if (i.aux < 14 and live.is(i.a, .nzcv)) return @intCast(i.aux),
         .@"eflags.cond" => if (live.is(i.a, .eflags)) {
-            const k = eflagsKindOf(r, r.insts.items[i.a]) orelse return null;
+            const k = eflagsKind(r.insts.items[i.a].op) orelse return null;
             const c = x86_cc.get(k)[@intCast(i.aux)];
             if (c >= 0) return @intCast(c);
         },
@@ -894,7 +887,7 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
                     } else need[i.a] = true;
                 },
                 // Lazy, edge by edge: a producer is recomputed where needed.
-                .@"pending.flags" => if (i.aux2 != 2 and !(edge_pend[idx] and rematerializable(r, r.insts.items[i.a]))) {
+                .@"pending.flags" => if (i.aux2 != 2 and !(edge_pend[idx] and rematerializable(r.insts.items[i.a].op))) {
                     need[i.a] = true;
                 },
                 else => {
@@ -903,12 +896,12 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
                     };
                     clobber = switch (i.op) {
                         .poll, .@"call.interp", .@"call.helper", .cas, .copy => true,
-                        else => fallsBack(r, i) or i.op.isExt(),
+                        else => fallsBack(i.op) or i.op.isExt(),
                     };
                 },
             }
-            if (producesFlags(r, i)) {
-                live = .{ .ref = @intCast(idx), .mode = if (i.op == .icmp) .icmp else if (eflagsKindOf(r, i) != null) .eflags else .nzcv };
+            if (producesFlags(i.op)) {
+                live = .{ .ref = @intCast(idx), .mode = if (i.op == .icmp) .icmp else if (eflagsKind(i.op) != null) .eflags else .nzcv };
             } else if (clobber) live = .{};
         }
     }
@@ -954,7 +947,7 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
             .icmp, .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic", .@"nzcv.adc", .@"nzcv.sbc" => d[idx].virtual = true,
             .@"nzcv.cond" => d[idx].virtual = i.aux < 14,
             .@"eflags.cond" => d[idx].virtual = d[idx].host_cc != null,
-            else => if (eflagsKindOf(r, i) != null) {
+            else => if (eflagsKind(i.op) != null) {
                 d[idx].virtual = true;
             },
         }
@@ -1296,17 +1289,17 @@ fn carryPend(e: *E, p: Pend) !void {
 
 /// Whether a flags value can be recomputed from its operands where lazy
 /// pending flags are written (so it needn't be materialized where made).
-fn rematerializable(r: *const ir.Region, i: ir.Inst) bool {
-    return switch (i.op) {
+fn rematerializable(op: Op) bool {
+    return switch (op) {
         .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic" => true,
-        else => eflagsKindOf(r, i) != null,
+        else => eflagsKind(op) != null,
     };
 }
 
 /// Recomputes the virtual flags value `v` from its operands, into x12.
 fn rematFlags(e: *E, v: Ref) !u5 {
     const i = e.r.insts.items[v];
-    if (eflagsKindOf(e.r, i) != null) {
+    if (eflagsKind(i.op) != null) {
         try eflagsCore(e, v, SD);
         return SD;
     }
@@ -1995,7 +1988,7 @@ fn shiftOp(e: *E, idx: usize) EmitError!void {
 /// it's virtual, the packed EFLAGS value.
 fn eflagsOp(e: *E, idx: usize) !void {
     const i = e.r.insts.items[idx];
-    if (fallsBack(e.r, i)) return fallback(e, idx);
+    if (fallsBack(i.op)) return fallback(e, idx);
     if (e.d[idx].virtual) return eflagsCore(e, idx, null);
     const rd = e.dst(idx);
     try eflagsCore(e, idx, rd);
@@ -2003,11 +1996,14 @@ fn eflagsOp(e: *E, idx: usize) !void {
 }
 
 /// An EFLAGS producer's flags into NZCV and, given `rd`, packed into rd.
+/// At 64 bits the operation is an X register's; PF and AF need only the
+/// low byte, so the packing works in W registers either way.
 fn eflagsCore(e: *E, idx: usize, rd_: ?u5) !void {
     const i = e.r.insts.items[idx];
     const ta = e.r.insts.items[i.a].ty;
     const W = ta.bits();
-    const s: u32 = 32 - W;
+    const x = W == 64;
+    const s: u32 = if (x) 0 else 32 - W;
     const a = try e.src(i.a, S0);
     var bb: u5 = ZR;
     const kind = eflagsKind(i.op).?;
@@ -2025,11 +2021,11 @@ fn eflagsCore(e: *E, idx: usize, rd_: ?u5) !void {
         sa = IP0;
     }
     switch (i.op) {
-        .@"eflags.logic" => try e.dp(0x6A000000, false, ZR, sa, sa),
-        .@"eflags.add" => try e.dpShift(0x2B000000, false, ZR, sa, bb, 0, s),
-        .@"eflags.sub" => try e.dpShift(0x6B000000, false, ZR, sa, bb, 0, s),
-        .@"eflags.inc" => try e.dp(0x2B000000, false, ZR, sa, bb),
-        .@"eflags.dec" => try e.dp(0x6B000000, false, ZR, sa, bb),
+        .@"eflags.logic" => try e.dp(0x6A000000, x, ZR, sa, sa),
+        .@"eflags.add" => try e.dpShift(0x2B000000, x, ZR, sa, bb, 0, s),
+        .@"eflags.sub" => try e.dpShift(0x6B000000, x, ZR, sa, bb, 0, s),
+        .@"eflags.inc" => try e.dp(0x2B000000, x, ZR, sa, bb),
+        .@"eflags.dec" => try e.dp(0x6B000000, x, ZR, sa, bb),
         else => unreachable,
     }
     const rd = rd_ orelse return;
