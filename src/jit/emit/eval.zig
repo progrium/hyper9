@@ -26,7 +26,7 @@ const Ctx = ctx_mod.Ctx;
 pub const supported = builtin.cpu.arch == .x86_64;
 const win64 = builtin.os.tag == .windows;
 
-pub const emitter_def: emitter.Emitter = .{ .name = "ir_eval", .emit = emit };
+pub const emitter_def: emitter.Emitter = .{ .name = "ir_eval", .lazy_eflags = true, .emit = emit };
 
 const gpa = std.heap.smp_allocator;
 var regions: std.ArrayList(*ir.Region) = .empty;

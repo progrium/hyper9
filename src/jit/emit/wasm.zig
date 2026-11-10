@@ -76,7 +76,7 @@ const BlockId = ir.BlockId;
 const EmitError = emitter.EmitError;
 const Allocator = std.mem.Allocator;
 
-pub const emitter_def: emitter.Emitter = .{ .name = "wasm", .emit = emit };
+pub const emitter_def: emitter.Emitter = .{ .name = "wasm", .lazy_eflags = true, .emit = emit };
 
 pub const Options = struct {
     /// The address in linear memory of the batch's chain cells, a u32 per

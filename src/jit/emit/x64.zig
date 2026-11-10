@@ -49,7 +49,7 @@ const Op = ir.Op;
 const Type = ir.Type;
 const EmitError = emitter.EmitError;
 
-pub const emitter_def: emitter.Emitter = .{ .name = "x86-64", .emit = emit };
+pub const emitter_def: emitter.Emitter = .{ .name = "x86-64", .lazy_eflags = true, .emit = emit };
 
 const win64 = builtin.os.tag == .windows;
 /// SSE2 is every x86-64's; SSSE3 and SSE4.1 only where the build targets

@@ -156,7 +156,7 @@ fn fold(insts: []Inst, start: usize, idx: usize, repl: []Ref) void {
     const cb = constOf(insts, i.b);
     const cc = constOf(insts, i.c);
     const all = (i.a == none or ca != null) and (i.b == none or cb != null) and (i.c == none or cc != null);
-    if (all) {
+    if (all and !lazyRecorded(insts, idx)) {
         const ta: ir.Type = if (i.a != none) insts[i.a].ty else .none;
         const v = ir_eval.evalPure(i.op, i.ty, ta, ca orelse 0, cb orelse 0, cc orelse 0, i.aux);
         i.* = .{ .op = .@"const", .ty = i.ty, .aux = if (i.ty == .flags) v else v & i.ty.mask() };
@@ -174,6 +174,17 @@ fn fold(insts: []Inst, start: usize, idx: usize, repl: []Ref) void {
         },
         else => {},
     }
+}
+
+/// Whether a lazy pending.flags (aux2 = 2) in the block takes flags op
+/// idx: its record needs the op's operands, so it stays an op.
+fn lazyRecorded(insts: []const Inst, idx: usize) bool {
+    if (insts[idx].ty != .flags or ir.lazyKind(insts[idx].op) == null) return false;
+    for (insts[idx + 1 ..]) |x| {
+        if (x.op == .@"pending.flags" and x.aux2 == 2 and x.a == idx) return true;
+        if (x.op.isTerminator()) break;
+    }
+    return false;
 }
 
 const Compare = struct { pred: ir.Pred, a: Ref, b: Ref };
@@ -676,4 +687,23 @@ test "opt: a pending.flags a later write covers goes, and covers an earlier setr
         \\  exit.chain #0x1004
         \\
     , got);
+}
+
+test "opt: a lazy pending.flags keeps its flags op, constant operands and all" {
+    const gpa = std.testing.allocator;
+    var r = try ir.parse(gpa,
+        \\b0:
+        \\  %0 = const:i32 #0x5
+        \\  %1 = const:i32 #0x7
+        \\  %2 = eflags.sub:flags %0, %1
+        \\  pending.flags %2 #0x10 @0x2
+        \\  exit.chain #0x0
+    );
+    defer r.deinit(gpa);
+    try run(gpa, &r);
+    try std.testing.expect(ir.verify(&r) == null);
+    const p = for (r.insts.items) |x| {
+        if (x.op == .@"pending.flags") break x;
+    } else unreachable;
+    try std.testing.expectEqual(ir.Op.@"eflags.sub", r.insts.items[p.a].op);
 }

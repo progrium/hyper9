@@ -41,6 +41,10 @@ pub fn available() bool {
 
 pub const name = if (@TypeOf(host) != @TypeOf(null)) @tagName(builtin.cpu.arch) else "none";
 
+/// The host's emitter lowers lazy eflags records (`Emitter.lazy_eflags`);
+/// ir_eval does too, so with no host emitter it's true.
+pub const lazy_eflags = if (@TypeOf(host) != @TypeOf(null)) host.emitter_def.lazy_eflags else true;
+
 /// A code region that `compile` fills, resetting it when full (which
 /// invalidates every entry it returned before).
 pub const Native = struct {

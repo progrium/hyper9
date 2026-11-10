@@ -173,6 +173,7 @@ fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64
     // traced jump's).
     var limits = cfg.limits;
     limits.max_pages = @min(limits.max_pages, 2);
+    limits.lazy_eflags = cfg.emitter.lazy_eflags;
     try cfg.frontend.lift(&b, .{ .ctx = &rd, .read = Reader.read }, pc, limits);
     if (std.debug.runtime_safety) if (ir.verify(&r) != null) return error.Invalid;
     if (cfg.optimize) {

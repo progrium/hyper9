@@ -27,6 +27,9 @@ pub const Limits = struct {
     max_insns: u32 = 512,
     /// Read from at most this many distinct guest pages.
     max_pages: u32 = 2,
+    /// The emitter lowers lazily written eflags (pending.flags aux2 = 2),
+    /// so the lifter may use them (`Emitter.lazy_eflags`).
+    lazy_eflags: bool = false,
 };
 
 pub const LiftError = error{ OutOfMemory, Unsupported };

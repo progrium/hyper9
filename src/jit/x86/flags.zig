@@ -9,6 +9,16 @@
 //! after each instruction it runs, so the invariant holds to the region's
 //! exit, and T0 reads the right flags after it.
 //!
+//! With `State.lazy` (the host's emitter lowers pending.flags aux2 = 2),
+//! a region keeps the flags lazily too: a flush whose flags come from an
+//! op with a record kind (ir.lazyKind) writes T0's `lazy` record and
+//! leaves `bits` alone, as T0 itself would. `bits` is then read only
+//! where it's settled: `settle` writes it from the flags it holds and
+//! clears `lazy.kind`, flags no record can hold are written so at once,
+//! and the prologue materializes only for a first block that must read
+//! them (its leader is settled). So "not pending and not entry_pending"
+//! still means `bits` is current and `lazy.kind` is `.none`.
+//!
 //! Within a block the lifter holds the current flags as an IR value
 //! (`State.cur`) and writes it back only before something that can leave
 //! the region (a load, a store, a call, or an exit) or the end of the
@@ -40,6 +50,9 @@ comptime {
     std.debug.assert(@sizeOf(t0.Kind) == 1);
 }
 
+/// pending.flags' aux2 for a lazily written record (ir.zig).
+pub const lazy_aux2: u64 = 2;
+
 /// x86 condition codes, as `eflags.cond` takes them.
 pub const cc_b: u4 = 2; // CF
 pub const cc_e: u4 = 4; // ZF
@@ -60,6 +73,9 @@ pub const State = struct {
     /// would read it fails with `error.FlagsPending`, and the lifter
     /// lifts again with the block's predecessors settling first.
     entry_pending: bool = false,
+    /// The region writes lazy records (see the top of this file). It
+    /// holds for the whole region: `forget` keeps it.
+    lazy: bool = false,
 
     /// The current flags as a value.
     pub fn get(s: *State, b: *ir.Builder) !Ref {
@@ -95,6 +111,18 @@ pub const State = struct {
             const old = try b.getreg(.i32, bits_off);
             s.rest = try b.bin(.@"and", .i32, old, try b.konst(.i32, ~@as(u64, arith)));
         }
+        if (s.lazy) {
+            const f = s.cur.?;
+            s.pending = true;
+            s.dirty = false;
+            if (ir.lazyKind(b.r.insts.items[f].op) != null) {
+                _ = try b.emit(.{ .op = .@"pending.flags", .a = f, .aux = bits_off, .aux2 = lazy_aux2 });
+                return;
+            }
+            // No record holds these (POPF, SAHF, a rotate, CLC, ...): the
+            // bits, now.
+            return s.writeBits(b);
+        }
         try b.pendingFlags(s.cur.?, bits_off, .eflags);
         s.pending = true;
         s.dirty = false;
@@ -103,6 +131,11 @@ pub const State = struct {
     /// Writes pending flags to `Cpu.fl.bits` now, so it can be read.
     pub fn settle(s: *State, b: *ir.Builder) !void {
         try s.flush(b);
+        return s.writeBits(b);
+    }
+
+    /// `settle`, once flushed.
+    fn writeBits(s: *State, b: *ir.Builder) error{ OutOfMemory, FlagsPending }!void {
         if (!s.pending) {
             if (s.entry_pending) return error.FlagsPending;
             return;
@@ -110,6 +143,8 @@ pub const State = struct {
         const rest = s.rest orelse return error.FlagsPending;
         const p = try b.un(.@"eflags.pack", .i32, s.cur.?);
         try b.setreg(bits_off, try b.bin(.@"or", .i32, rest, p));
+        // A record written before (at a way out) says nothing now.
+        if (s.lazy) try b.setreg(kind_off, try b.konst(.i8, 0));
         s.pending = false;
     }
 

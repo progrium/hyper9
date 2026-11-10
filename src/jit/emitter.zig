@@ -36,6 +36,8 @@ pub const Chain = struct { site: u32, pc: u64 };
 
 pub const Emitter = struct {
     name: []const u8,
+    /// It lowers pending.flags aux2 = 2 (lazily written eflags records).
+    lazy_eflags: bool = false,
     /// Appends the region's code to `out`. The region must verify.
     emit: *const fn (gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc.Allocation, out: *std.ArrayList(u8)) EmitError!Code,
 };

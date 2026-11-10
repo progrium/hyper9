@@ -496,7 +496,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
     defer gpa.free(settled);
     @memset(settled, false);
     while (true) {
-        var l: Lifter = .{ .b = b, .insns = insns.items, .settled = settled };
+        var l: Lifter = .{ .b = b, .insns = insns.items, .settled = settled, .fl = .{ .lazy = limits.lazy_eflags } };
         if (l.run()) |_| return else |e| switch (e) {
             error.FlagsPending => {
                 if (settled[l.cur_leader]) return error.Unsupported;
@@ -643,7 +643,10 @@ const Lifter = struct {
         b.begin(prologue);
         const entry: u32 = l.insns[0].pc;
         try b.poll(entry);
-        if (touches_flags) {
+        // T0, or a region before, may have left a lazy record. Eagerly
+        // written flags need `bits` current from the start; lazily
+        // written ones only if the first block reads it (see flags.zig).
+        if (touches_flags and (!l.fl.lazy or l.settled[0])) {
             const kind = try b.getreg(.i8, xf.kind_off);
             const lazy = try b.icmp(.ne, kind, try b.konst(.i8, 0));
             const mat = try b.block();

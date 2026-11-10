@@ -16,7 +16,8 @@ const Exit = ctx_mod.Exit;
 pub const Cpu = cpu_mod.Cpu;
 const page_size = mem.page_size;
 const guest = &check.x86.guest;
-const Native = @import("../emit/native.zig").Native;
+const native_mod = @import("../emit/native.zig");
+const Native = native_mod.Native;
 
 // ---------------------------------------------------------------- machine
 
@@ -80,7 +81,8 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, 
     var cpu = start;
     var res: Result = .{ .exit = .chain, .pc = start.eip, .regions = 0, .retired = 0 };
     while (res.regions < max_regions) {
-        var reg = check.liftAt(gpa, guest, &backing, cpu.eip, .{}) catch |e| switch (e) {
+        // Lazy records when every emitter that runs the region lowers them.
+        var reg = check.liftAt(gpa, guest, &backing, cpu.eip, .{ .lazy_eflags = native == null or native_mod.lazy_eflags }) catch |e| switch (e) {
             error.Unsupported => {
                 var sh = check.Shadow.init(gpa, backing);
                 defer sh.deinit();

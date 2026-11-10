@@ -57,7 +57,7 @@ const Type = ir.Type;
 const Ref = ir.Ref;
 const EmitError = emitter.EmitError;
 
-pub const emitter_def: emitter.Emitter = .{ .name = "arm64", .emit = emit };
+pub const emitter_def: emitter.Emitter = .{ .name = "arm64", .lazy_eflags = true, .emit = emit };
 
 // ---------------------------------------------------------------- registers
 
