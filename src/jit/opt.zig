@@ -18,6 +18,9 @@
 //!   still dies here goes.
 //! - **Dead code.** Pure ops and `getreg`s nothing uses go.
 //!
+//! An `fp.*` op with an aux2 ORs its exceptions into a Cpu word (FPSR or
+//! MXCSR): both passes treat it as a read and a write of that word.
+//!
 //! Redundant TLB checks (two accesses to one page in a block) need the IR
 //! to say a load or store may skip its check; that waits for an op flag.
 
@@ -68,6 +71,22 @@ fn sizeOf(t: ir.Type) u32 {
     };
 }
 
+/// The Cpu word an `fp.*` op ORs its exceptions into, if any, as an offset.
+fn excWord(i: Inst) ?u64 {
+    return if (i.op.isFp() and i.aux2 != 0) i.aux2 - 1 else null;
+}
+
+/// Drops the entries that overlap [off, off+size).
+fn forget(list: []Known, n: *usize, off: u64, size: u32) void {
+    var j: usize = 0;
+    while (j < n.*) {
+        if (overlaps(list[j].off, list[j].size, off, size)) {
+            list[j] = list[n.* - 1];
+            n.* -= 1;
+        } else j += 1;
+    }
+}
+
 fn overlaps(a_off: u64, a_size: u32, b_off: u64, b_size: u32) bool {
     return a_off < b_off + b_size and b_off < a_off + a_size;
 }
@@ -97,13 +116,7 @@ fn forward(r: *ir.Region, blk: ir.Block, repl: []Ref) !void {
             },
             .setreg => {
                 const sz = sizeOf(insts[i.a].ty);
-                var j: usize = 0;
-                while (j < nk) {
-                    if (overlaps(known[j].off, known[j].size, i.aux, sz)) {
-                        known[j] = known[nk - 1];
-                        nk -= 1;
-                    } else j += 1;
-                }
+                forget(&known, &nk, i.aux, sz);
                 if (nk < known.len) {
                     known[nk] = .{ .off = i.aux, .size = sz, .ref = i.a };
                     nk += 1;
@@ -113,7 +126,9 @@ fn forward(r: *ir.Region, blk: ir.Block, repl: []Ref) !void {
             .brcond => if (constOf(insts, i.a)) |c| {
                 i.* = .{ .op = .br, .aux = if (c & 1 == 1) i.aux else i.aux2 };
             },
-            else => if (i.op.isPure()) fold(insts, idx, repl),
+            else => if (i.op.isPure()) {
+                fold(insts, idx, repl);
+            } else if (excWord(i.*)) |w| forget(&known, &nk, w, 4),
         }
     }
 }
@@ -164,16 +179,7 @@ fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
             continue;
         }
         switch (i.op) {
-            .getreg => {
-                const sz = sizeOf(i.ty);
-                var j: usize = 0;
-                while (j < nl) {
-                    if (overlaps(later[j].off, later[j].size, i.aux, sz)) {
-                        later[j] = later[nl - 1];
-                        nl -= 1;
-                    } else j += 1;
-                }
-            },
+            .getreg => forget(&later, &nl, i.aux, sizeOf(i.ty)),
             .setreg => {
                 const sz = sizeOf(insts[i.a].ty);
                 const covered = for (later[0..nl]) |k| {
@@ -186,7 +192,7 @@ fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
                     nl += 1;
                 }
             },
-            else => {},
+            else => if (excWord(i)) |w| forget(&later, &nl, w, 4),
         }
     }
 }
@@ -327,6 +333,39 @@ test "opt: a write before anything that can leave stays, and calls forget" {
         \\  call.interp @0x1004
         \\  setreg %2 #0x18
         \\  exit.chain #0x1008
+        \\
+    , got);
+}
+
+test "opt: an fp op that ORs into FPSR reads and writes it" {
+    // FPSR at 0x40: the fp.add's aux2 is 0x41.
+    const got = try optimized(
+        \\region 0x1000
+        \\b0:
+        \\  %0 = getreg:i64 #0x8
+        \\  %1 = const:i32
+        \\  setreg %1 #0x40
+        \\  %2 = fp.add:i64 %0, %0 @0x41
+        \\  %3 = getreg:i32 #0x40
+        \\  setreg %3 #0x48
+        \\  setreg %2 #0x8
+        \\  setreg %1 #0x40
+        \\  exit.chain #0x1004
+        \\
+    );
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(
+        \\region 0x1000
+        \\b0:
+        \\  %0 = getreg:i64 #0x8
+        \\  %1 = const:i32
+        \\  setreg %1 #0x40
+        \\  %3 = fp.add:i64 %0, %0 @0x41
+        \\  %4 = getreg:i32 #0x40
+        \\  setreg %4 #0x48
+        \\  setreg %3 #0x8
+        \\  setreg %1 #0x40
+        \\  exit.chain #0x1004
         \\
     , got);
 }
