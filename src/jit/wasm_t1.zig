@@ -74,6 +74,8 @@ pub const Result = enum { svc, interrupted, t0, cold };
 pub const Stats = struct {
     /// Blocks lifted, modules built, and modules installed or failed.
     lifted: u64 = 0,
+    /// By the last vCPU in `run`.
+    retired: u64 = 0,
     batches: u64 = 0,
     installed: u64 = 0,
     failed: u64 = 0,
@@ -89,9 +91,11 @@ pub const Stats = struct {
 
 /// Entries before a block is compiled.
 pub var hot: u32 = 50;
-/// Dispatcher visits, across all vCPUs, before anything is compiled: a
-/// short-lived program (rc starting up, echo) never pays for a compile.
-pub var warmup: u64 = 0;
+/// Instructions a vCPU retires before it compiles anything: a short-lived
+/// program (rc starting up, echo) never pays for a compile. The first
+/// compile costs about 80 ms of V8 compiling h9.wasm's own lift and emit
+/// code lazily, on the thread. rc's startup and echo retire about 1M.
+pub var warmup: u64 = 2_000_000;
 /// Regions per module, at most.
 pub var batch_max: u32 = 64;
 /// Dispatcher visits a queued region waits for others before its batch
@@ -204,7 +208,7 @@ pub fn available() bool {
 pub fn reset() void {
     st.flush_wanted = true;
     if (on_wasm and std.c.getenv("H9_JIT_STATS") != null)
-        std.debug.print("wasm T1: {d} lifted, {d} batches ({d} installed, {d} failed), {d} entries ({d} unlinked chains, {d} indirect), {d} cold, {d} to T0, {d} flushes\n", .{ stats.lifted, stats.batches, stats.installed, stats.failed, stats.entries, stats.chains, stats.indirect, stats.cold, stats.t0, stats.flushes });
+        std.debug.print("wasm T1: {d} retired, {d} lifted, {d} batches ({d} installed, {d} failed), {d} entries ({d} unlinked chains, {d} indirect), {d} cold, {d} to T0, {d} flushes\n", .{ stats.retired, stats.lifted, stats.batches, stats.installed, stats.failed, stats.entries, stats.chains, stats.indirect, stats.cold, stats.t0, stats.flushes });
 }
 
 /// Drops every region compiled from arena page `page`.
@@ -423,6 +427,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
     }
     if (st.flush_wanted or st.used_slots > max_slots - batch_max or st.map.count() > max_entries) flush();
     settle(&stats);
+    stats.retired = cx.retired;
     const jump: ?*[ctx_mod.jump_entries]ctx_mod.JumpEntry = if (cx.jump != 0) @ptrFromInt(@as(usize, @intCast(cx.jump))) else null;
     if (jump) |j| if (@intFromPtr(j) != st.last_jump or st.last_gen != st.jump_gen) {
         st.last_jump = @intFromPtr(j);
@@ -460,7 +465,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
         if (e.state != .live) {
             if (e.state == .cold) {
                 e.hits += 1;
-                if (e.hits >= hot and st.visits >= warmup) queue(e, view, cfg);
+                if (e.hits >= hot and cx.retired >= warmup) queue(e, view, cfg);
             }
             return cold();
         }
