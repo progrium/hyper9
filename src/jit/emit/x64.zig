@@ -590,8 +590,14 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
         error.TooLarge => error.TooLarge,
     };
     defer p.deinit(gpa);
-    if (p.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
     var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len, .r = r, .p = &p };
+    e.pend_off = pendMode(r, &p);
+    if (e.pend_off != null) e.raw_inv = rawMode(r);
+    for (r.insts.items) |i| {
+        if (i.op.isFp() and i.aux2 != 0) e.watch = true;
+    }
+    try replan(&e, &p);
+    if (p.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
     defer e.fixups.deinit(gpa);
     defer e.cold.deinit(gpa);
     e.hint_save = try gpa.alloc(i8, r.insts.items.len);
@@ -622,12 +628,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     try e.d32(frame);
     try e.rr(false, &.{0x31}, PENDING, PENDING); // xor r9d, r9d: nothing pending
     try e.loadChunks();
-    e.pend_off = pendMode(r, &p);
-    if (e.pend_off != null) e.raw_inv = rawMode(r);
     try e.reloadPend();
-    for (r.insts.items) |i| {
-        if (i.op.isFp() and i.aux2 != 0) e.watch = true;
-    }
     if (e.watch) try clearHostFlags(&e);
 
     for (r.blocks.items, 0..) |blk, bi| {
@@ -679,6 +680,60 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     }
     e.code.entry = 0;
     return e.code;
+}
+
+/// Plans the region again with the values kept nowhere left out (regalloc's
+/// `virtual`): those kept in EFLAGS (deferIcmp, deferNzcv), and getregs
+/// of a whole chunk that read its register in place (chunkAlias), whose
+/// location becomes that register. The chunks don't change.
+fn replan(e: *E, p: *regalloc.Plan) !void {
+    const r = e.r;
+    const n = r.insts.items.len;
+    const virt = try e.gpa.alloc(bool, n);
+    defer e.gpa.free(virt);
+    const alias = try e.gpa.alloc(u8, n);
+    defer e.gpa.free(alias);
+    var any = false;
+    for (r.blocks.items, 0..) |blk, bi| {
+        e.block = @intCast(bi);
+        for (blk.start..blk.start + blk.len) |idx| {
+            alias[idx] = chunkAlias(e, r, idx) orelse 0xff;
+            virt[idx] = alias[idx] != 0xff or deferIcmp(e, r, idx) or deferNzcv(e, r, idx);
+            any = any or virt[idx];
+        }
+    }
+    e.block = 0;
+    if (!any) return;
+    var q = regalloc.plan(e.gpa, r, host, virt) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.TooLarge => error.TooLarge,
+    };
+    std.debug.assert(q.chunks.len == p.chunks.len);
+    for (alias, 0..) |a, v| if (a != 0xff) {
+        q.locs[v] = .{ .reg = a };
+    };
+    p.deinit(e.gpa);
+    p.* = q;
+}
+
+/// The chunk register getreg `idx` may read in place, its value never
+/// copied out: a whole chunk (movesOnly) that nothing changes while the
+/// value lives.
+fn chunkAlias(e: *const E, r: *const ir.Region, idx: usize) ?u8 {
+    const i = r.insts.items[idx];
+    if (i.op != .getreg) return null;
+    const ck = e.p.chunk_of[idx];
+    if (ck == regalloc.no_chunk or !movesOnly(e, r, idx)) return null;
+    for (idx + 1..e.p.end[idx] + 1) |j| {
+        const n = r.insts.items[j];
+        switch (n.op) {
+            .setreg => if (e.p.chunk_of[j] == ck) return null,
+            .@"call.interp", .copy, .@"pending.flags" => return null,
+            .@"call.helper" => if (n.aux2 & ir.helper_no_regs == 0) return null,
+            else => {},
+        }
+    }
+    return @intCast(e.p.chunks[ck].reg);
 }
 
 /// Whether getreg or setreg `i` touches a byte of the u32 at `off`.
@@ -2762,4 +2817,5 @@ test "random regions match ir_eval" {
         return error.TestExpectedEqual;
     }
 }
+
 
