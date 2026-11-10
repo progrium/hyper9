@@ -220,6 +220,23 @@ test "check/x86: push, pop, call, ret, leave, and call-next-pop" {
     try testing.expectEqual(Exit.svc, r.exit);
 }
 
+test "check/x86: calls to PIC thunks lift as moves" {
+    //   call tbx; call tcx; addl %ebx, %ecx; int $0x80
+    // tbx: movl (%esp), %ebx; ret    tcx: movl (%esp), %ecx; ret
+    const code = [_]u8{
+        0xe8, 0x0b, 0, 0, 0, // call tbx (0x10)
+        0xe8, 0x0a, 0, 0, 0, // call tcx (0x14)
+        0x01, 0xd9, // addl %ebx, %ecx
+        0xcd, 0x80, 0x90, 0x90, // int $0x80
+        0x8b, 0x1c, 0x24, 0xc3, // tbx
+        0x8b, 0x0c, 0x24, 0xc3, // tcx
+    };
+    const r = try expectRun(&code, null);
+    try testing.expectEqual(Exit.svc, r.exit);
+    try testing.expectEqual(@as(u32, Machine.code_va + 5), r.cpu.r[3]);
+    try testing.expectEqual(@as(u64, 3 + 3 + 2), r.retired);
+}
+
 test "check/x86: DIV and IDIV, and #DE through the guard" {
     // movl $100, %eax; xorl %edx, %edx; movl $7, %ecx; divl %ecx;
     // movl $-100, %eax; cltd; idivl %ecx; movb $3, %cl; divb %cl;

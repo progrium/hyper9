@@ -294,6 +294,36 @@ test "h86 T1: a counted loop chains, and a store to its own code retranslates" {
     try testing.expect(p.t1.stats.compiled > 1);
 }
 
+test "h86 T1: a PIC thunk on the next page is one of the region's pages" {
+    const c = try testCache(1 << 20);
+    defer freeCache(c);
+    const p = try Pair.init(c, eval_emit.emitter_def);
+    defer p.deinit();
+    // Loop 3 times calling the thunk at 0x2000 (movl (%esp), %ebx; ret);
+    // the first pass rewrites it to load EDX, so the later passes leave
+    // EBX at 0 and only the first adds the return address to EAX.
+    var prog: [0x1004]u8 = @splat(0x90);
+    const head = [_]u8{
+        0x31, 0xc0, // xorl %eax, %eax
+        0xb9, 0x03, 0x00, 0x00, 0x00, // movl $3, %ecx
+        0x31, 0xdb, // loop (0x1007): xorl %ebx, %ebx
+        0xe8, 0xf2, 0x0f, 0x00, 0x00, // call 0x2000
+        0x01, 0xd8, // addl %ebx, %eax
+        0xc6, 0x05, 0x01, 0x20, 0x00, 0x00, 0x14, // movb $0x14, 0x2001
+        0x49, // decl %ecx
+        0x75, 0xed, // jnz loop
+        0xcd, 0x80, // int $0x80
+    };
+    @memcpy(prog[0..head.len], &head);
+    @memcpy(prog[0x1000..], &[_]u8{ 0x8b, 0x1c, 0x24, 0xc3 });
+    var regs: [8]u32 = @splat(0);
+    regs[4] = gen.stack_va + 0x800;
+    try expectSame(p.t1, p.t0, &prog, regs, 0x2, 0);
+    try testing.expectEqual(@as(u32, 0x100e), p.t1.cpu.r[0]);
+    try testing.expectEqual(@as(u32, 0x100e), p.t1.cpu.r[2]);
+    try testing.expect(p.t1.stats.compiled > 1);
+}
+
 test "h86 T1: INT3 and INTO's #OF come back with EIP past them, as on T0" {
     const c = try testCache(1 << 20);
     defer freeCache(c);

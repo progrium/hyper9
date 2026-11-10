@@ -397,6 +397,53 @@ const Insn = struct {
     pc: u32,
     i: Inst,
     class: Class,
+    /// For a `call` to a PIC thunk (`mov r, [esp]; ret`): r.
+    thunk: ?u3 = null,
+};
+
+/// Reads guest code from the region's pages: the entry's and at most one
+/// other. The source notes the pages read from for invalidation, and
+/// only two, so no read touches a third.
+const Code = struct {
+    src: fe.Source,
+    first: u64,
+    other: ?u64 = null,
+    max_pages: u32,
+
+    fn may(c: *const Code, pg: u64) bool {
+        if (pg == c.first) return true;
+        if (c.other) |o| return o == pg;
+        return c.max_pages >= 2;
+    }
+
+    /// Fills buf from va, stopping at the first page the region can't
+    /// read from; reading from a new page makes it the other page.
+    fn read(c: *Code, va: u32, buf: []u8) usize {
+        var n: usize = 0;
+        while (n < buf.len) {
+            const a: u32 = va +% @as(u32, @intCast(n));
+            const pg = a >> 12;
+            if (!c.may(pg)) break;
+            if (pg != c.first) c.other = pg;
+            n += @min(buf.len - n, 4096 - (a & 0xfff));
+        }
+        return c.src.readAll(va, buf[0..n]);
+    }
+
+    /// The register a PIC thunk at t loads with the return address:
+    /// `mov r, [esp]; ret` (8b /r with SIB 24, then c3), r not ESP.
+    /// Its page becomes the other page only if it is one.
+    fn thunk(c: *Code, t: u32) ?u3 {
+        if (t & 0xfff > 0x1000 - 4 or !c.may(t >> 12)) return null;
+        var buf: [4]u8 = undefined;
+        // Reads through the source directly, so a miss claims no page.
+        if (c.src.readAll(t, &buf) != 4) return null;
+        if (buf[0] != 0x8b or buf[1] & 0xc7 != 0x04 or buf[2] != 0x24 or buf[3] != 0xc3) return null;
+        const r: u3 = @intCast(buf[1] >> 3 & 7);
+        if (r == ESP) return null;
+        if (t >> 12 != c.first) c.other = t >> 12;
+        return r;
+    }
 };
 
 pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftError!void {
@@ -406,18 +453,25 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
     const max: usize = @max(1, limits.max_insns);
     var insns: std.ArrayList(Insn) = .empty;
     defer insns.deinit(gpa);
-    const last_page = (pc >> 12) + @max(1, limits.max_pages) - 1;
+    var code: Code = .{ .src = src, .first = pc >> 12, .max_pages = @max(1, limits.max_pages) };
     var p: u32 = @truncate(pc);
-    scan: while (insns.items.len < max and p >> 12 <= last_page) {
+    scan: while (insns.items.len < max and code.may(p >> 12)) {
         var buf: [dec.max_len]u8 = undefined;
-        const got = src.readAll(p, &buf);
+        const got = code.read(p, &buf);
         const i = dec.decode(buf[0..got]) catch break;
         const c = classify(&i);
-        try insns.append(gpa, .{ .pc = p, .i = i, .class = c });
+        var in: Insn = .{ .pc = p, .i = i, .class = c };
         switch (c) {
-            .jump, .indirect, .stop => break :scan,
-            .call => if (i.imm != 0) break :scan,
-            else => {},
+            .jump, .indirect, .stop => {
+                try insns.append(gpa, in);
+                break :scan;
+            },
+            .call => if (i.imm != 0) {
+                in.thunk = code.thunk(p +% i.len +% i.imm);
+                try insns.append(gpa, in);
+                if (in.thunk == null) break :scan;
+            } else try insns.append(gpa, in),
+            else => try insns.append(gpa, in),
         }
         p +%= i.len;
     }
@@ -502,7 +556,7 @@ const Lifter = struct {
         l.leader[n] = true;
         var touches_flags = false;
         for (l.insns, 0..) |*in, k| {
-            if (hasTarget(in.class, &in.i)) {
+            if (hasTarget(in.class, &in.i) and in.thunk == null) {
                 if (l.indexOf(l.target(k))) |t| {
                     l.leader[t] = true;
                     if (t <= k) l.loop_head[t] = true;
@@ -1086,6 +1140,14 @@ const Lifter = struct {
                 const sp = try l.getR(ESP, 4);
                 const nsp = try b.bin(.sub, .i32, sp, try l.k32(4));
                 try l.store(k, nsp, try l.k32(nx));
+                if (in.thunk) |r| {
+                    // call thunk; thunk: mov r, [esp]; ret: r = next,
+                    // and ESP is as it was. The thunk's page is one of
+                    // the region's, so a write to it drops the region.
+                    try l.setR(r, 4, try l.k32(nx));
+                    l.count += 3;
+                    return 1;
+                }
                 if (i.imm == 0 and l.fusesPop(k)) {
                     // call next; pop r: r = next, and ESP is as it was.
                     try l.setR(l.insns[k + 1].i.zreg(), 4, try l.k32(nx));
