@@ -1478,6 +1478,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
     addVcpuTests(b, test_step, target, optimize);
+    addJitTestTools(b, test_step, target, optimize, unicorn_mod);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
@@ -1593,6 +1594,59 @@ fn hostHasHvf(b: *std.Build) bool {
         else => false,
     };
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
+}
+
+/// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against
+/// Unicorn (with -Demu=unicorn), the fuzzers, and the litmus tests.
+fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, unicorn: ?*std.Build.Module) void {
+    const vcpu = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig"), .target = target, .optimize = optimize });
+    const lockstep_step = b.step("lockstep", "Run the lockstep tests against Unicorn (needs -Demu=unicorn)");
+    const lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
+        .root_source_file = b.path("src/vmm/lockstep.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "unicorn", .module = uc }},
+    }) else null;
+    if (lockstep) |ls| {
+        const t = b.addTest(.{ .root_module = ls });
+        linkUnicorn(t);
+        lockstep_step.dependOn(&b.addRunArtifact(t).step);
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    } else lockstep_step.dependOn(&b.addFail("lockstep: needs -Demu=unicorn").step);
+
+    // The fuzzers: the region check always, lockstep with -Demu=unicorn.
+    // ReleaseSafe unless -Doptimize says otherwise: fast, and still checked.
+    const fuzz_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
+    const fuzz_vcpu = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig"), .target = target, .optimize = fuzz_optimize });
+    const fuzz_lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
+        .root_source_file = b.path("src/vmm/lockstep.zig"),
+        .target = target,
+        .optimize = fuzz_optimize,
+        .imports = &.{.{ .name = "unicorn", .module = uc }},
+    }) else null;
+    const fuzz_options = b.addOptions();
+    fuzz_options.addOption(bool, "unicorn", unicorn != null);
+    for ([_][]const u8{"a64"}) |arch| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("fuzz-{s}", .{arch}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("tests/jit/fuzz_{s}.zig", .{arch})),
+                .target = target,
+                .optimize = fuzz_optimize,
+                .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
+            }),
+        });
+        exe.root_module.addOptions("fuzz_options", fuzz_options);
+        if (fuzz_lockstep) |ls| {
+            exe.root_module.addImport("lockstep", ls);
+            linkUnicorn(exe);
+        }
+        const run = b.addRunArtifact(exe);
+        run.has_side_effects = true;
+        if (b.args) |a| run.addArgs(a);
+        b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)", .{arch})).dependOn(&run.step);
+    }
+    _ = vcpu;
 }
 
 /// The emulator's own CPUs (src/vcpu.zig): the JIT layer's unit tests,

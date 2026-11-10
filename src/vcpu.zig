@@ -11,6 +11,8 @@ pub const frontend = @import("jit/frontend.zig");
 pub const emitter = @import("jit/emitter.zig");
 /// W^X executable memory for the code cache.
 pub const codemem = @import("jit/codemem.zig");
+/// Test infrastructure: T1-against-T0 region checks and the fuzzers' parts.
+pub const check = @import("jit/check.zig");
 pub const a64 = struct {
     pub const decode = @import("interp/a64/decode.zig");
     pub const exec = @import("interp/a64/exec.zig");
@@ -37,4 +39,5 @@ test {
     @import("std").testing.refAllDecls(emit);
     @import("std").testing.refAllDecls(a64);
     @import("std").testing.refAllDecls(x86);
+    @import("std").testing.refAllDecls(check);
 }
