@@ -47,10 +47,10 @@ pub const Options = struct {
     /// Nonzero asks the interpreter to stop; read every few hundred
     /// instructions and between REP iterations.
     stop: ?*const std.atomic.Value(u32) = null,
-    /// Stop (`.stopped`) after an instruction that doesn't go on to the
-    /// next one: a taken jump, a call, or a return. A tier above uses it
-    /// to see where blocks start.
-    until_branch: bool = false,
+    /// Stop (`.stopped`) after this many instructions that don't go on
+    /// to the next one: taken jumps, calls, and returns. A tier above uses
+    /// it to see where blocks start. 0 is no limit.
+    branches: u32 = 0,
 };
 
 /// Runs instructions until one exits.
@@ -200,6 +200,7 @@ pub fn Exec(comptime M: type) type {
         n: u64 = 0,
 
         fn loop(x: *X) Exit {
+            var taken: u32 = 0;
             while (true) {
                 if (x.n >= x.opts.budget) return .stopped;
                 if (x.n & 255 == 0 and x.stopRequested()) return .stopped;
@@ -207,7 +208,10 @@ pub fn Exec(comptime M: type) type {
                 x.step() catch return x.exit;
                 x.n += 1;
                 x.c.retired += 1;
-                if (x.opts.until_branch and x.c.eip != at +% x.i.len) return .stopped;
+                if (x.opts.branches != 0 and x.c.eip != at +% x.i.len) {
+                    taken += 1;
+                    if (taken >= x.opts.branches) return .stopped;
+                }
             }
         }
 

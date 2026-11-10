@@ -96,14 +96,14 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
 
 /// T0 for up to `budget` instructions, counting them in ctx.
 fn runT0(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64) x86cpu.Exit {
-    return runT0Opts(c, ctx, m, budget, false);
+    return runT0Opts(c, ctx, m, budget, 0);
 }
 
-/// T0, stopping after the first taken branch if `until_branch`.
-fn runT0Opts(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64, until_branch: bool) x86cpu.Exit {
+/// T0, stopping after `branches` taken branches if that's nonzero.
+fn runT0Opts(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64, branches: u32) x86cpu.Exit {
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     const before = c.retired;
-    const exit = tlb.run(c, m, .{ .budget = budget, .stop = stop, .until_branch = until_branch });
+    const exit = tlb.run(c, m, .{ .budget = budget, .stop = stop, .branches = branches });
     const ran = c.retired - before;
     ctx.retired +%= ran;
     if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(ran, std.math.maxInt(i63)));
@@ -177,7 +177,7 @@ fn runWasmT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem) vmm.Error!vmm.Exit {
             .t0, .cold => {
                 if (ctx.budget <= 0) return .interrupted;
                 const budget: u64 = if (r == .t0) 1 else @intCast(ctx.budget);
-                const e = runT0Opts(c, ctx, m, budget, r == .cold);
+                const e = runT0Opts(c, ctx, m, budget, if (r == .cold) wasm_t1.cold_branches else 0);
                 if (e != .stopped) return exitOf(c, ctx, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
             },

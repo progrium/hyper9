@@ -3,9 +3,10 @@
 //! once they're hot, many at a time.
 //!
 //! - **Hot entries.** The dispatcher counts entries to each block it sees
-//!   (keyed by PC and arena page, as cache.zig's translations). T0 runs a
-//!   cold block, stopping at its first taken branch, so the next block's
-//!   head comes back here to be counted (`.cold`). At `hot` entries the
+//!   (keyed by PC and arena page, as cache.zig's translations). T0 runs
+//!   cold code, stopping after `cold_branches` taken branches, so a
+//!   block's head comes back here to be counted (`.cold`): a sample of
+//!   them, since a stint's later blocks aren't. At `hot` entries the
 //!   block is lifted, and its IR waits in a queue.
 //! - **Batches.** A full queue, or one that has waited `patience`
 //!   dispatcher visits, becomes one module (emit/wasm.zig, a function per
@@ -66,8 +67,8 @@ pub const Config = struct {
 /// - `.interrupted`: an exit request or a spent budget.
 /// - `.t0`: run the instruction at the PC in T0 (an exception, a store to
 ///   code, something that can't be compiled), then call `run` again.
-/// - `.cold`: run T0 from the PC to its first taken branch, then call
-///   `run` again.
+/// - `.cold`: run T0 from the PC through `cold_branches` taken branches,
+///   then call `run` again.
 pub const Result = enum { svc, interrupted, t0, cold };
 
 pub const Stats = struct {
@@ -96,8 +97,25 @@ pub var batch_max: u32 = 64;
 /// Dispatcher visits a queued region waits for others before its batch
 /// is built anyway.
 pub var patience: u32 = 2000;
+/// Taken branches T0 runs on a `.cold` return before it comes back: each
+/// round trip costs a lookup, so cold code runs a few blocks per visit
+/// and only a stint's first block is counted.
+pub var cold_branches: u32 = 8;
 const max_slots = 1 << 16;
 const max_entries = 1 << 17;
+const recent_n = 4096;
+
+fn recentSlot(pc: u64) *?*Entry {
+    return &st.recent[@intCast((pc ^ (pc >> 12)) & (recent_n - 1))];
+}
+
+fn lookup(key: Key) ?*Entry {
+    const r = recentSlot(key.pc);
+    if (r.*) |e| if (e.key.pc == key.pc and e.key.page == key.page) return e;
+    const e = st.map.get(key) orelse return null;
+    r.* = e;
+    return e;
+}
 
 pub var stats: Stats = .{};
 
@@ -151,6 +169,8 @@ const State = struct {
     next_slot: u32 = 0,
     used_slots: u32 = 0,
     map: std.AutoHashMapUnmanaged(Key, *Entry) = .empty,
+    /// The map's recent hits, direct-mapped by PC, in front of it.
+    recent: [recent_n]?*Entry = @splat(null),
     /// Entries by arena page (both of an entry's pages).
     pages: std.AutoHashMapUnmanaged(u64, std.ArrayList(*Entry)) = .empty,
     queue: std.ArrayList(*Entry) = .empty,
@@ -207,6 +227,7 @@ pub fn invalidatePage(page: u64) void {
 fn kill(e: *Entry) void {
     e.dead = true;
     _ = st.map.remove(e.key);
+    if (recentSlot(e.key.pc).* == e) recentSlot(e.key.pc).* = null;
     for ([_]u64{ e.key.page, e.page2 }) |p| {
         if (p == no_page) continue;
         if (st.pages.getPtr(p)) |l| {
@@ -302,6 +323,7 @@ fn flush() void {
         }
     }
     st.map.clearRetainingCapacity();
+    st.recent = @splat(null);
     var pit = st.pages.valueIterator();
     while (pit.next()) |l| l.deinit(st.gpa);
     st.pages.clearRetainingCapacity();
@@ -396,6 +418,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
         st.tuned = true;
         if (std.c.getenv("H9_JIT_HOT")) |v| hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch hot;
         if (std.c.getenv("H9_JIT_PATIENCE")) |v| patience = std.fmt.parseInt(u32, std.mem.span(v), 10) catch patience;
+        if (std.c.getenv("H9_JIT_COLD")) |v| cold_branches = std.fmt.parseInt(u32, std.mem.span(v), 10) catch cold_branches;
         if (std.c.getenv("H9_JIT_WARMUP")) |v| warmup = std.fmt.parseInt(u64, std.mem.span(v), 10) catch warmup;
     }
     if (st.flush_wanted or st.used_slots > max_slots - batch_max or st.map.count() > max_entries) flush();
@@ -424,7 +447,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
         st.visits += 1;
         if (st.queue.items.len > 0 and st.visits - st.queued_at > patience) build(cfg);
         const key: Key = .{ .pc = pc, .page = page };
-        const e = st.map.get(key) orelse blk: {
+        const e = lookup(key) orelse blk: {
             const n = gpa.create(Entry) catch return cold();
             n.* = .{ .key = key };
             st.map.put(gpa, key, n) catch {
