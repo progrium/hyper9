@@ -282,6 +282,9 @@ pub const Cpu64 = struct {
     jit_tmp: u64 = 0,
     /// Guest instructions retired.
     retired: u64 = 0,
+    /// T0's decode caches, as Cpu's, which the owner allocates.
+    icache: ?*@import("exec.zig").ICacheOf(.long) = null,
+    pages: ?*@import("exec.zig").PageCacheOf(.long) = null,
 
     pub inline fn rsp(c: *const Cpu64) u64 {
         return c.r[4];
