@@ -46,6 +46,7 @@ pub const x86jit = struct {
     pub const lift = @import("jit/x86/lift.zig");
     pub const flags = @import("jit/x86/flags.zig");
     pub const check = @import("jit/x86/check.zig");
+    pub const t1 = @import("jit/x86/t1.zig");
 };
 pub const emit = struct {
     pub const arm64 = @import("jit/emit/arm64.zig");
