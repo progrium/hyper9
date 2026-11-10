@@ -73,6 +73,9 @@ const SD: u5 = 12;
 const T0: u5 = 13;
 const IP0: u5 = 16;
 const IP1: u5 = 17;
+/// Retired instructions not yet added to ctx.retired and taken from the
+/// budget (in a region with `retire`s).
+const RC: u5 = 28;
 const FP: u5 = 29;
 const ZR: u5 = 31;
 const SP: u5 = 31;
@@ -95,8 +98,8 @@ const fpcr_save = io_save + 6;
 const save_slots: u32 = fpcr_save + 1;
 
 pub const host: regalloc.Host = .{
-    .regs = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 23, 24, 25, 26, 27, 28 },
-    .pin_regs = &.{ 28, 27, 26, 25, 24, 23, 15, 14, 8, 7 },
+    .regs = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 23, 24, 25, 26, 27 },
+    .pin_regs = &.{ 27, 26, 25, 24, 23, 15, 14, 8, 7, 6 },
     .max_pinned = 10,
     .callee_saved = 0x3F << 23,
     .guest_nzcv = @offsetOf(@import("../../interp/a64/exec.zig").Cpu, "nzcv"),
@@ -267,6 +270,8 @@ const E = struct {
     dirty: regalloc.ChunkSet = 0,
     block: ir.BlockId = 0,
     pend: ?Pend = null,
+    /// The region's retires count in RC, flushed at exits and calls.
+    lazy_retire: bool = false,
 
     fn deinit(e: *E) void {
         e.fixups.deinit(e.gpa);
@@ -499,6 +504,21 @@ const E = struct {
     }
     /// On a path out: ctx.retired += n and ctx.budget -= n. Uses x16, x17.
     fn retireOn(e: *E, n: u32) !void {
+        if (e.lazy_retire) {
+            // RC and n, together, and RC is 0 again.
+            for ([2]u32{ ctx.off.retired, ctx.off.budget }, [2]u32{ 0x0B000000, 0x4B000000 }, [2]u32{ 0x91000000, 0xD1000000 }) |off, reg_op, imm_op| {
+                try e.ldrCtx(IP0, off);
+                try e.dp(reg_op, true, IP0, IP0, RC);
+                if (n != 0) {
+                    if (n < 4096) try e.put(imm_op | n << 10 | @as(u32, IP0) << 5 | IP0) else {
+                        try e.movImm(IP1, n);
+                        try e.dp(reg_op, true, IP0, IP0, IP1);
+                    }
+                }
+                try e.strCtx(IP0, off);
+            }
+            return e.mov(RC, ZR);
+        }
         if (n == 0) return;
         for ([2]u32{ ctx.off.retired, ctx.off.budget }, [2]u32{ 0x91000000, 0xD1000000 }) |off, op| {
             try e.ldrCtx(IP0, off);
@@ -699,6 +719,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     e.epilogue_plain = try e.label();
     for (r.insts.items) |i| {
         if (i.op == .copy and i.aux & regalloc.copy_fp != 0 and !regalloc.isCall(i)) e.fp = true;
+        if (i.op == .retire) e.lazy_retire = true;
     }
 
     // Prologue.
@@ -718,6 +739,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     if (frame >> 12 != 0) try e.put(0xD1400000 | (frame >> 12) << 10 | @as(u32, SP) << 5 | @as(u32, SP));
     if (frame & 0xfff != 0) try e.put(0xD1000000 | (frame & 0xfff) << 10 | @as(u32, SP) << 5 | @as(u32, SP));
     if (e.fp) try fpEnter(&e, true);
+    if (e.lazy_retire) try e.mov(RC, ZR);
     try e.loadChunks();
 
     for (r.blocks.items, 0..) |blk, bi| {
@@ -1256,6 +1278,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             const save = e.saveMask(idx, false);
             try e.saveRegs(save);
             if (e.fp) try fpLeave(e);
+            if (e.lazy_retire) try e.retireOn(0);
             try e.mov(0, CTX);
             try e.movImm(1, r.handles.items[@intCast(i.aux)]);
             try e.movImm(2, i.aux2);
@@ -1285,6 +1308,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.saveRegs(save);
             // Missing arguments are 0, as in ir_eval.
             if (e.fp) try fpLeave(e);
+            if (e.lazy_retire) try e.retireOn(0);
             for (args, scr, 1..) |v, s, k| try e.mov(@intCast(k), if (v != ir.none) s else ZR);
             try e.mov(0, CTX);
             try e.ldrCtx(IP0, ctx.off.helpers);
@@ -1301,11 +1325,17 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.stubs.append(e.gpa, .{ .poll = .{ .label = l, .dirty = e.dirty, .pc = i.aux, .retired = i.retired, .pend = e.pend } });
             try e.put(0xB9400000 | (ctx.off.exit_request / 4) << 10 | @as(u32, CTX) << 5 | @as(u32, IP0)); // ldr w16, [x19, #exit_request]
             try e.ldrCtx(IP1, ctx.off.budget);
-            try e.put(0xF100001F | @as(u32, IP1) << 5); // cmp x17, #0
+            // budget - pending > 0, and no exit request.
+            if (e.lazy_retire) try e.dp(0x6B000000, true, ZR, IP1, RC) else try e.put(0xF100001F | @as(u32, IP1) << 5); // cmp x17, x28 or #0
             try e.put(0x7A400800 | 12 << 12 | @as(u32, IP0) << 5); // ccmp w16, #0, #0, gt
             try e.bcond(NE, l);
         },
-        .retire => {
+        .retire => if (e.lazy_retire) {
+            if (i.aux < 4096) try e.put(0x91000000 | @as(u32, @intCast(i.aux)) << 10 | @as(u32, RC) << 5 | RC) else {
+                try e.movImm(IP0, i.aux);
+                try e.dp(0x0B000000, true, RC, RC, IP0);
+            }
+        } else {
             // retired += n; budget -= n
             for ([2]u32{ ctx.off.retired, ctx.off.budget }, [2]u32{ 0x91000000, 0xD1000000 }, [2]u32{ 0x0B000000, 0x4B000000 }) |off, imm_op, reg_op| {
                 try e.ldrCtx(IP0, off);
@@ -1619,6 +1649,7 @@ fn copyOp(e: *E, idx: usize) !void {
         const save = e.saveMask(idx, false);
         try e.saveRegs(save);
         if (e.fp) try fpLeave(e);
+        if (e.lazy_retire) try e.retireOn(0);
         try e.mov(0, CTX);
         try e.movImm(1, i.aux & 0xffff_ffff);
         try e.movImm(2, 0);
