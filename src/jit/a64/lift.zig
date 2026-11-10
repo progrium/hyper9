@@ -106,6 +106,8 @@ pub fn lifts(o: dec.Op) bool {
         .ldxp, .clrex, .dc_zva => false,
         // LSE atomics run on T0 until they're lifted to rmw and cas.
         .ldop, .cas, .casp => false,
+        // ISB refetches what follows: T0 leaves the region after it.
+        .isb => false,
         // A pair of X registers is 16 bytes, wider than `cas`.
         .stxp => o.x == 2,
         .mrs => switch (o.imm) {

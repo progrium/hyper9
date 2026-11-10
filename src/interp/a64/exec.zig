@@ -262,21 +262,22 @@ pub fn run(m: *Machine, max_steps: u64) Exit {
     var page = m.cache.get(m, cpu.pc) orelse return m.exit;
     var base = cpu.pc & ~@as(u64, page_size - 1);
     var i: usize = @intCast((cpu.pc & (page_size - 1)) >> 2);
-    var n: u64 = 0;
-    defer cpu.retired +%= n;
+    // cpu.retired counts as it goes, so CNTVCT_EL0 in deterministic mode
+    // sees every instruction before it.
+    const start = cpu.retired;
     while (true) {
         const o = &page.ops[i];
-        if (n == max_steps) {
+        if (cpu.retired -% start == max_steps) {
             cpu.pc = base + i * 4;
             return .interrupted;
         }
         switch (dispatch(m, o, base + i * 4)) {
             .next => {
                 i += 1;
-                n += 1;
+                cpu.retired +%= 1;
             },
             .jump => |t| {
-                if (o.k != .next_page) n += 1;
+                if (o.k != .next_page) cpu.retired +%= 1;
                 // Every guest loop has a taken branch or crosses a page, so
                 // checking here bounds how long a kick waits.
                 if (m.requested()) {
@@ -299,7 +300,7 @@ pub fn run(m: *Machine, max_steps: u64) Exit {
                 i = @intCast((t & (page_size - 1)) >> 2);
             },
             .exit => {
-                if (m.exit == .syscall) n += 1;
+                if (m.exit == .syscall) cpu.retired +%= 1;
                 return m.exit;
             },
         }
@@ -1185,6 +1186,10 @@ inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
         },
 
         .nop => {},
+        // A context synchronization: what follows is fetched again, so a
+        // store to this page before it is seen. `run` re-checks the decode
+        // cache at every jump.
+        .isb => return .{ .jump = pc + 4 },
         .clrex => cpu.monitor = .{},
         .fence => fence(),
         .mrs => return mrs(m, o),

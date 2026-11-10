@@ -1668,6 +1668,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{.{ .name = "h9", .module = mod.mod }},
     }) });
+    if (os == .macos) {
+        addSdkPaths(b, a64_jit.root_module);
+        a64_jit.root_module.linkFramework("Hypervisor", .{});
+    }
     linkUnicorn(a64_jit);
     const a64_jit_run = b.addRunArtifact(a64_jit);
     b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=zig)").dependOn(&a64_jit_run.step);

@@ -210,7 +210,7 @@ pub const Kind = enum(u16) {
 
     // ---- system
     /// Hints (NOP, YIELD, WFE, WFI, SEV, SEVL, and the hint space later
-    /// architectures use, such as BTI and PACIASP), ISB, and the EL0 cache
+    /// architectures use, such as BTI and PACIASP), and the EL0 cache
     /// maintenance that has no effect here (DC CVAU, CVAC, CIVAC, IC IVAU).
     nop,
     clrex,
@@ -310,6 +310,10 @@ pub const Kind = enum(u16) {
     cas,
     /// CASP: as CAS on the register pairs d, d+1 and m, m+1 (x is 2 or 3).
     casp,
+
+    /// ISB: later instructions are fetched again (a store to code before
+    /// it is seen).
+    isb,
 
     /// simd_decode.zig's kinds, from `simd_base` up.
     _,
@@ -483,6 +487,7 @@ pub fn info(k: Kind) Info {
         .svc => .{ .ctrl = .svc },
         .brk => .{ .ctrl = .brk },
         .nop => .{},
+        .isb => .{ .system = true },
         .clrex, .fence => .{ .system = true },
         // NZCV through MRS and MSR shows in `regs`, which sees imm.
         .mrs => .{ .d = .w, .system = true },
@@ -774,7 +779,7 @@ fn system(w: u32) Op {
         if (op1 == 3 and crn == 3) return switch (op2) {
             2 => .{ .k = .clrex },
             4, 5 => .{ .k = .fence }, // DSB, DMB
-            6 => .{ .k = .nop }, // ISB
+            6 => .{ .k = .isb },
             else => .{},
         };
         return .{}; // MSR (immediate): no PSTATE field EL0 can write here
