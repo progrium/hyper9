@@ -352,9 +352,12 @@ pub const Op = enum(u16) {
     poll = 176,
     /// Count aux guest instructions as retired (and against the budget).
     retire = 177,
-    /// Flags not yet written back: the guest's flags at `aux` (a Cpu
-    /// offset) are the packed form of a (`nzcv.pack` if aux2 is 0,
-    /// `eflags.pack` if 1, an i32), but are written there only if needed.
+    /// Flags not yet written back: the guest's flags in the u32 at `aux` (a
+    /// Cpu offset) are a's, but are written there only if needed. Writing
+    /// merges into the slot: old & ~mask | pack, where pack and mask are
+    /// `nzcv.pack` and 0xf000_0000 if aux2 is 0, or `eflags.pack` and
+    /// ir_eval.eflags_mask (0x8d5) if aux2 is 1, so the slot's other bits
+    /// (EFLAGS' DF, IF, and bit 1) are kept.
     /// They're written before any way out of the block (every terminator,
     /// a fault, a poll that leaves) and before `call.interp`,
     /// `call.helper`, and `copy`. A `setreg` overlapping aux drops it; a

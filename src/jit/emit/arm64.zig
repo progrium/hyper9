@@ -879,6 +879,12 @@ fn writePend(e: *E, p: Pend) !void {
         try e.movImm(IP0, ir_eval.eflags_mask);
         try e.dp(0x0A000000, false, IP0, f, IP0);
     }
+    // Merged into the slot, keeping its other bits (ir.zig: EFLAGS' DF,
+    // IF, and bit 1).
+    try readGuest(e, p.off, 4, IP1);
+    try e.movImm(S0, if (p.group == 0) 0xf000_0000 else ir_eval.eflags_mask);
+    try e.dp(0x0A200000, false, IP1, IP1, S0); // bic w17, w17, w9
+    try e.dp(0x2A000000, false, IP0, IP0, IP1); // orr w16, w16, w17
     try writeGuest(e, p.off, 4, IP0);
 }
 

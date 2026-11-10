@@ -651,8 +651,9 @@ const fixed128 = enum(u32) { v };
 /// written; otherwise pa holds the packed i32. The pcode local says the
 /// same for the exit tail, which writes it on a way out from inside the
 /// block (a fault, or a poll that leaves): 0 none, 1 packed in pa, or
-/// ir_eval.fallbackCode of the lazy op.
-const Pend = struct { op: ir.Op, ta: Type, off: u32, lazy: bool };
+/// ir_eval.fallbackCode of the lazy op. Writing merges into the slot:
+/// old & ~mask | packed (pb holds the mask when pcode is 1).
+const Pend = struct { op: ir.Op, ta: Type, off: u32, lazy: bool, mask: u32 };
 
 const E = struct {
     gpa: Allocator,
@@ -1915,12 +1916,14 @@ const E = struct {
             try w.i64c(if (i.aux2 == 1) ir_eval.eflags_mask else 0xf000_0000);
             try w.byte(0x83);
             try w.set(e.l64(.pa));
+            try w.i64c(if (i.aux2 == 1) ir_eval.eflags_mask else 0xf000_0000);
+            try w.set(e.l64(.pb));
             try w.i64c(1);
         }
         try w.set(e.l64(.pcode));
         try w.i32c(@intCast(i.aux));
         try w.set(e.l32(.poff));
-        e.pend = .{ .op = a.op, .ta = ta, .off = @intCast(i.aux), .lazy = lazy };
+        e.pend = .{ .op = a.op, .ta = ta, .off = @intCast(i.aux), .lazy = lazy, .mask = if (i.aux2 == 1) @intCast(ir_eval.eflags_mask) else 0xf000_0000 };
     }
 
     /// Writes the block's pending flags, if any, and forgets them.
@@ -1935,6 +1938,12 @@ const E = struct {
             try w.byte(0x83);
         } else try w.get(e.l64(.pa));
         try w.byte(0xA7); // i32.wrap_i64
+        // Merged: | (old & ~mask).
+        try w.get(e.l32(.cpu));
+        try w.memop(0x28, p.off); // i32.load
+        try w.i32c(~p.mask);
+        try w.byte(0x71); // i32.and
+        try w.byte(0x72); // i32.or
         try w.memop(0x36, p.off); // i32.store
         try w.i64c(0);
         try w.set(e.l64(.pcode));
@@ -2295,6 +2304,22 @@ fn function(
     try w.byte(0x83);
     try w.byte(0x0B);
     try w.byte(0xA7);
+    // Merged into the slot: | (old & ~mask), mask in pb if pcode is 1.
+    try w.get(e.l32(.cpu));
+    try w.get(e.l32(.poff));
+    try w.byte(0x6A);
+    try w.memop(0x28, 0); // i32.load
+    try w.get(e.l64(.pb));
+    try w.i64c(ir_eval.eflags_mask);
+    try w.get(e.l64(.pcode));
+    try w.i64c(1);
+    try w.byte(0x51); // i64.eq
+    try w.byte(0x1B); // select
+    try w.byte(0xA7);
+    try w.i32c(std.math.maxInt(u32));
+    try w.byte(0x73); // i32.xor
+    try w.byte(0x71); // i32.and
+    try w.byte(0x72); // i32.or
     try w.memop(0x36, 0);
     try w.byte(0x0B);
     try e.flushRegs();

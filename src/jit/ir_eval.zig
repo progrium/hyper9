@@ -616,8 +616,8 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
             switch (i.op) {
                 .@"pending.flags" => {
                     if (pend) |p| if (p.off != i.aux) p.write(cpu);
-                    const packed_: u64 = if (i.aux2 == 0) a & 0xf000_0000 else a & eflags_mask;
-                    pend = .{ .val = @truncate(packed_), .off = i.aux };
+                    const m: u64 = if (i.aux2 == 0) 0xf000_0000 else eflags_mask;
+                    pend = .{ .val = @truncate(a & m), .mask = @truncate(m), .off = i.aux };
                 },
                 .getreg => {
                     var v: u128 = 0;
@@ -748,9 +748,13 @@ var fence_word: u32 = 0;
 
 const Pend = struct {
     val: u32,
+    mask: u32,
     off: u64,
+    /// Merges the flags into the slot, keeping its other bits.
     fn write(p: Pend, cpu: [*]u8) void {
-        @memcpy(cpu[@intCast(p.off)..][0..4], std.mem.asBytes(&p.val));
+        const slot = cpu[@intCast(p.off)..][0..4];
+        const old = std.mem.readInt(u32, slot, .little);
+        std.mem.writeInt(u32, slot, (old & ~p.mask) | p.val, .little);
     }
 };
 
@@ -1055,6 +1059,18 @@ test "pending flags are written at a fault and before an exit, and dropped by a 
     regs = .{ 0x4000, 0x4001, 0, 0 };
     try testing.expectEqual(Exit.chain, try run(gpa, &r, &c));
     try testing.expectEqual(@as(u64, 0x8000_0000), regs[2]); // N
+    // EFLAGS' other bits (bit 1, DF) are kept.
+    var r4 = try ir.parse(gpa,
+        \\b0:
+        \\  %0 = getreg:i32 #0x0
+        \\  %1 = eflags.logic:flags %0
+        \\  pending.flags %1 #0x10 @0x1
+        \\  exit.chain #0x0
+    );
+    defer r4.deinit(gpa);
+    regs = .{ 0, 0, 0x402 | CF, 0 };
+    try testing.expectEqual(Exit.chain, try run(gpa, &r4, &c));
+    try testing.expectEqual(@as(u64, 0x402 | ZF | PF), regs[2]);
     // A setreg of the slot drops it.
     var r2 = try ir.parse(gpa,
         \\b0:
