@@ -2537,9 +2537,12 @@ fn function(
         };
     };
     // A slot flags are pending for is written in the exit tail, through
-    // the Cpu, so it stays there.
+    // the Cpu, so it stays there: for a lazy record (aux2 = 2), the 16
+    // bytes after it too, or a chained region reads its kind byte stale
+    // from a local and an exit writes the local back over the record.
     for (regions) |rg| for (rg.insts.items) |i| if (i.op == .@"pending.flags") {
-        for (regs.items) |*g| if (g.off < i.aux + 4 and i.aux < g.off + g.size) {
+        const end = i.aux + @as(u64, if (i.aux2 == 2) 4 + @sizeOf(ir.LazyRecord) else 4);
+        for (regs.items) |*g| if (g.off < end and i.aux < g.off + g.size) {
             g.bad = true;
         };
     };
