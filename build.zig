@@ -664,27 +664,22 @@ fn webTarget(b: *std.Build, eh: bool) std.Build.ResolvedTarget {
     });
 }
 
-/// Where h9.wasm's data, stack and heap start: above v86.wasm's own
-/// region in the memory they share (design/0012-browser-host.md, "One
-/// memory"). v86's data ends near 36 KiB and its stack near 9.1 MiB.
-const web_global_base = 16 << 20;
-
 const Web = struct {
     exe: *std.Build.Step.Compile,
     /// Installs everything into zig-out/web.
     install: *std.Build.Step,
 };
 
-/// h9.wasm, the JS host, v86.wasm and the demo page, installed in
+/// h9.wasm, the JS host and the demo page, installed in
 /// zig-out/web.
 fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts) Web {
     const target = webTarget(b, false);
     var p = parts;
     p.target = target;
     p.optimize = optimize;
-    // h9's own CPUs, beside v86 (`--backend emu`). The JIT tier here is
-    // the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig), not the
-    // native code cache, which zemu leaves out on the web.
+    // h9's own CPUs (`--backend emu`, or `v86`, its old name). The JIT
+    // tier here is the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig),
+    // not the native code cache, which zemu leaves out on the web.
     p.emu = .zig;
     p.jit = true;
     p.unicorn = null;
@@ -709,7 +704,6 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
     // The function table too, so h9-web.js can grow it: the JIT installs
     // its regions there (src/jit/emit/wasm.zig).
     exe.import_table = true;
-    exe.global_base = web_global_base;
     // The main coroutine's stack; kernel processes get their own.
     exe.stack_size = 1 << 20;
     exe.rdynamic = true;
@@ -719,11 +713,6 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
     all.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dir } }).step);
     for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
-    // v86.wasm and its license, as scripts/fetch.sh left them.
-    if (b.build_root.handle.access(b.graph.io, ".local/v86/v86.wasm", .{})) {
-        all.dependOn(&b.addInstallFileWithDir(b.path(".local/v86/v86.wasm"), dir, "v86.wasm").step);
-        all.dependOn(&b.addInstallFileWithDir(b.path(".local/v86/LICENSE"), dir, "LICENSE.v86").step);
-    } else |_| all.dependOn(&b.addFail("web: no .local/v86/v86.wasm; run scripts/fetch.sh").step);
     return .{ .exe = exe, .install = all };
 }
 
@@ -763,20 +752,6 @@ fn addComputeBenches(b: *std.Build, bench: *std.Build.Step.Compile) void {
         bench.root_module.addCSourceFile(.{ .file = b.path(b.fmt("tests/bench/{s}.c", .{name})), .flags = &.{ "-O2", "-ffp-contract=off", b.fmt("-Dcompute=bench_{s}", .{name}) } });
     }
     bench.root_module.link_libc = true;
-}
-
-/// The 386 guest shim for the v86 backend, assembled freestanding and
-/// embedded as raw bytes, loaded at a fixed guest-physical address.
-fn shimI386(b: *std.Build) std.Build.LazyPath {
-    const obj = b.addObject(.{
-        .name = "shim_i386",
-        .root_module = b.createModule(.{
-            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86, .os_tag = .freestanding }),
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    obj.root_module.addAssemblyFile(b.path("src/arch/i386/shim.S"));
-    return b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" }).getOutput();
 }
 
 /// The value of `NAME=value` in scripts/pins.sh, without a trailing
@@ -884,7 +859,6 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     // The web host's kern turns on wasm exception handling, for setjmp
     // and longjmp, and has no GUI or host commands.
     const kern = addKern(b, if (web) webTarget(b, true) else target, optimize, web, p.host_cmd and !web, if (web) .none else gfx, exported);
-    if (web) mod.addAnonymousImport("shim_i386", .{ .root_source_file = shimI386(b) });
     if (!p.have_drawterm) {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
         kern.step.dependOn(&fail.step);
@@ -1066,7 +1040,7 @@ pub fn build(b: *std.Build) void {
     const test_mod = if (gfx == .headless) mod else addH9Module(b, parts, .headless, false);
 
     // The browser host (design/0012-browser-host.md): h9 for wasm32-wasi
-    // with its JS host, v86.wasm and a demo page, in zig-out/web.
+    // with its JS host and a demo page, in zig-out/web.
     const web_step = b.step("web", "Build the browser host into zig-out/web (design/0012-browser-host.md)");
     const web = addWeb(b, optimize, parts);
     web_step.dependOn(web.install);
@@ -1330,8 +1304,8 @@ pub fn build(b: *std.Build) void {
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
     // -Dweb runs them on the web host under Node instead: h9-node on h9's
     // own 386 CPU (h86), with the root's 386 binaries
-    // (design/0012-browser-host.md). -Dbackends=v86 runs them on v86's.
-    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (emu, or -Dbackends=v86, 386)") orelse false;
+    // (design/0012-browser-host.md).
+    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386)") orelse false;
     const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
@@ -1384,13 +1358,6 @@ pub fn build(b: *std.Build) void {
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const run_integration = addIntegration(b, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
     if (!test_web) run_integration.step.dependOn(linux_fixtures);
-    if (test_web) {
-        // The pinned v86 layout, checked against v86.wasm.
-        const layout = b.addSystemCommand(&.{ "node", "tests/web/v86-layout.mjs", ".local/v86/v86.wasm" });
-        layout.setCwd(b.path("."));
-        layout.expectExitCode(0);
-        run_integration.step.dependOn(&layout.step);
-    }
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
     // 9box and a slim root around it (design/0064-multicall.md), built inside

@@ -36,14 +36,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # The ISO and v86.wasm change only with scripts/pins.sh.
+      # The ISO changes only with scripts/pins.sh.
       - uses: actions/cache@v4
         with:
           path: |
             .local/9front/*.386.iso
-            .local/v86
           key: pages-fetch-${{ hashFiles('scripts/pins.sh') }}
-      - run: scripts/fetch.sh v86 iso386 alpine386web
+      - run: scripts/fetch.sh iso386 alpine386web
       - name: 386 root from the ISO
         run: |
           . scripts/pins.sh
@@ -58,7 +57,7 @@ jobs:
         run: |
           mkdir -p _site/demo
           cp site/*.html _site/
-          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,v86.wasm,root.h9a,linux.h9a,package.json,LICENSE.v86} _site/demo/
+          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,root.h9a,linux.h9a,package.json} _site/demo/
           cp LICENSE _site/demo/LICENSE
           cp third_party/drawterm/LICENSE _site/demo/LICENSE.drawterm
       - uses: actions/upload-pages-artifact@v3

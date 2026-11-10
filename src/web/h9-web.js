@@ -1,8 +1,8 @@
-// h9's JS host (design/0012-browser-host.md): instantiates v86.wasm and
-// h9.wasm on one memory, runs h9's coroutines on JavaScript Promise
-// Integration, and passes v86's exports to h9's v86 backend
-// (src/vmm/v86.zig). The same code runs under Node (h9-node) and in a
-// Web Worker (worker.js), with the page's side of it in createMachine.
+// h9's JS host (design/0012-browser-host.md): instantiates h9.wasm, runs
+// its coroutines on JavaScript Promise Integration, and compiles the
+// modules its JIT builds (wasmJit). The same code runs under Node
+// (h9-node) and in a Web Worker (worker.js), with the page's side of it in
+// createMachine.
 
 /** Whether this JS engine has JSPI, which h9 needs. */
 export const haveJSPI = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
@@ -19,15 +19,6 @@ export class Exit extends Error {
 
 /** A fatal error in h9 itself: a kernel panic, a trap or a stack overflow. */
 export class Panic extends Error {}
-
-// v86 0.5.473's function table: 900 JIT slots after its own 1024
-// (WASM_TABLE_SIZE and WASM_TABLE_OFFSET in src/rust/jit.rs). Pinned with
-// the release in scripts/pins.sh.
-const V86_TABLE_SIZE = 1924;
-const V86_TABLE_OFFSET = 1024;
-
-// v86's memory_size register, in its register block (scripts/pins.sh).
-const V86_MEMORY_SIZE = 812;
 
 const PAGE = 65536;
 
@@ -159,10 +150,10 @@ const nextTask = (() => {
 })();
 
 /**
- * Instantiates v86 and h9 and runs h9's main with `args`. Resolves to the
+ * Instantiates h9 and runs h9's main with `args`. Resolves to the
  * exit code.
  *
- * - h9, v86: the modules' bytes (or WebAssembly.Module).
+ * - h9: the module's bytes (or WebAssembly.Module).
  * - wasi(memory): the wasi_snapshot_preview1 imports, over `memory`.
  * - host: the console and signals, as functions:
  *   readStdin(n) -> Promise<Uint8Array|null|'cancelled'>, cancelStdin(),
@@ -170,78 +161,17 @@ const nextTask = (() => {
  * - stats({ maxStack }): called once h9 ends, with the deepest any
  *   coroutine's stack got at a park, in bytes.
  */
-export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
+export async function run({ h9, wasi, host, log = console.error, stats }) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const h9mod = h9 instanceof WebAssembly.Module ? h9 : new WebAssembly.Module(h9);
-  const v86mod = v86 instanceof WebAssembly.Module ? v86 : new WebAssembly.Module(v86);
   const h9pages = importedMemoryPages(h9 instanceof WebAssembly.Module ? new Uint8Array(0) : h9);
   // h9's own function table, which the JIT installs regions in.
   const h9tableSize = h9 instanceof WebAssembly.Module ? null : importedTableSize(h9);
 
-  // v86, first: it owns the memory's low part (its register block, data
-  // and stack), and h9 is linked to start at 16 MiB.
-  const table = new WebAssembly.Table({ element: 'anyfunc', initial: V86_TABLE_SIZE });
-  let vx, mem;
-  const pending = [];
-  const jitImports = Object.create(null);
+  // h9's memory: wasm32's 4 GiB at most, grown by h9's allocator and the
+  // emulator's arena.
+  const mem = new WebAssembly.Memory({ initial: Math.max(h9pages, 1), maximum: 65536 });
   const str = (p, n) => new TextDecoder().decode(new Uint8Array(mem.buffer, p >>> 0, n >>> 0));
-  const none = () => 0;
-  const venv = {
-    __indirect_function_table: table,
-    microtick: () => performance.now(),
-    // No devices, so no timers to run.
-    run_hardware_timers: () => 100,
-    // The backend learns of a halt from main_loop returning.
-    cpu_event_halt: () => {},
-    stop_idling: () => {},
-    get_rand_int: () => crypto.getRandomValues(new Uint32Array(1))[0],
-    console_log_from_wasm: (p, n) => log('v86: ' + str(p, n)),
-    // A guest at ring 3 can't reach ports or MMIO.
-    io_port_read8: none, io_port_read16: none, io_port_read32: none,
-    io_port_write8: none, io_port_write16: none, io_port_write32: none,
-    mmap_read8: none, mmap_read32: none,
-    mmap_write8: none, mmap_write16: none, mmap_write32: none, mmap_write64: none, mmap_write128: none,
-    jit_clear_func: (i) => table.set(i + V86_TABLE_OFFSET, null),
-    codegen_finalize: (idx, start, flags, ptr, len) => {
-      // A Worker, and Node, may compile synchronously.
-      const code = new Uint8Array(mem.buffer, ptr >>> 0, len >>> 0).slice();
-      const inst = new WebAssembly.Instance(new WebAssembly.Module(code), { e: jitImports });
-      table.set(idx + V86_TABLE_OFFSET, inst.exports.f);
-      // v86 panics if this is called from inside codegen_finalize.
-      pending.push([idx, start, flags]);
-    },
-  };
-  const vinst = new WebAssembly.Instance(v86mod, { env: venv });
-  vx = vinst.exports;
-  mem = vx.memory;
-  jitImports.m = mem;
-  for (const k of Object.keys(vx)) if (!(k.startsWith('_') || k.startsWith('zstd') || k.endsWith('_js'))) jitImports[k] = vx[k];
-  vx.rust_init();
-  if (h9pages > mem.buffer.byteLength / PAGE) mem.grow(h9pages - mem.buffer.byteLength / PAGE);
-
-  let guest = 0, guestSize = 0;
-  const v86imports = {
-    // Guest RAM: one allocation, made once h9's heap has its start
-    // (design/0012-browser-host.md, "One memory").
-    init: (size) => {
-      size >>>= 0;
-      if (guest === 0) {
-        new Uint32Array(mem.buffer, V86_MEMORY_SIZE, 1)[0] = size;
-        guest = vx.allocate_memory(size) >>> 0;
-        guestSize = size;
-      }
-      return size <= guestSize ? guest : 0;
-    },
-    main_loop: () => {
-      vx.main_loop();
-      while (pending.length) vx.codegen_finalize_finished(...pending.shift());
-    },
-    reset_cpu: vx.reset_cpu,
-    full_clear_tlb: vx.full_clear_tlb,
-    update_state_flags: vx.update_state_flags,
-    get_eflags: vx.get_eflags,
-    jit_dirty_cache: vx.jit_dirty_cache,
-  };
 
   // Coroutines. A park is a Promise that unpark resolves; an unpark
   // before the park leaves a permit, so the park returns at once.
@@ -299,7 +229,6 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
     env: { memory: mem, ...(h9table ? { __indirect_function_table: h9table } : {}) },
     wasi_snapshot_preview1: wimports,
     h9: h9imports,
-    v86: v86imports,
   });
   hx = inst.exports;
   // Table slots from here on are the JIT's (src/jit/wasm_t1.zig).
@@ -446,7 +375,7 @@ function policyFlags(policy = {}) {
  * - root: the root archive's URL (default root.h9a beside this file), or
  *   a ws:// or wss:// URL of a 9P server (design/0021-websocket-9p.md)
  * - memory: --memory, such as '256M'
- * - backend: --backend: 'emu' (h9's own CPU, h86, the default) or 'v86' (v86's)
+ * - backend: --backend: 'emu' (h9's own 386 CPU, h86, the default) or 'v86', its old name
  * - policy: see policyFlags
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
  * - tty: the terminal is one to Linux programs (isatty, termios and raw

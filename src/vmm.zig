@@ -22,19 +22,17 @@ const emu = if (!have_emu) @import("vmm/none.zig") else switch (build_options.em
     .zig => @import("vmm/zemu.zig"),
     .none => unreachable,
 };
-const v86 = if (have_v86) @import("vmm/v86.zig") else @import("vmm/none.zig");
 const nat = if (have_native) @import("vmm/native.zig") else @import("vmm/none.zig");
 
 const have_hvf = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
 const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
-/// The web host has h9's own CPUs (-Demu=zig) beside v86, but not Unicorn.
+/// The web host has h9's own CPUs (-Demu=zig), but not Unicorn.
 const have_emu = build_options.emu != .none and !(web and build_options.emu == .unicorn);
 /// The native backend (design/0095-native-backend.md): Linux x86_64 for now.
 const have_native = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
-/// The web host (design/0012-browser-host.md) has v86, and zemu when built in.
+/// The web host (design/0012-browser-host.md), whose backend is zemu.
 const web = builtin.os.tag == .wasi;
-const have_v86 = web;
 
 pub const Arch = aout.Arch;
 
@@ -42,12 +40,14 @@ pub const Arch = aout.Arch;
 pub const host_arch: ?Arch = switch (builtin.cpu.arch) {
     .aarch64 => .arm64,
     .x86_64 => .amd64,
-    // The web host runs 386 binaries on v86 (design/0012-browser-host.md).
+    // The web host runs 386 binaries on h86 (design/0012-browser-host.md).
     .wasm32 => .i386,
     else => null,
 };
 
-/// What `--backend` asks for.
+/// What `--backend` asks for. `v86` is the emulator: the web host's
+/// backend before h86 replaced v86's CPU, kept so its pages and scripts
+/// still work.
 pub const BackendKind = enum { auto, hvf, kvm, whp, emu, v86, native };
 
 /// A concrete backend.
@@ -56,8 +56,6 @@ pub const Kind = enum {
     kvm,
     whp,
     emu,
-    /// v86's 386 CPU, on the web host only (design/0012-browser-host.md).
-    v86,
     /// Guest code on the host CPU in a stub process, with no hypervisor
     /// (design/0095-native-backend.md).
     native,
@@ -68,7 +66,6 @@ pub const Kind = enum {
             .kvm => have_kvm,
             .whp => have_whp,
             .emu => have_emu,
-            .v86 => have_v86,
             .native => have_native,
         };
     }
@@ -369,8 +366,7 @@ pub fn create(gpa: std.mem.Allocator, io: std.Io, want: BackendKind, opts: Optio
     return switch (want) {
         .hvf => createKind(gpa, io, .hvf, opts),
         .kvm => createKind(gpa, io, .kvm, opts),
-        .emu => createKind(gpa, io, .emu, opts),
-        .v86 => createKind(gpa, io, .v86, opts),
+        .emu, .v86 => createKind(gpa, io, .emu, opts),
         .whp => createKind(gpa, io, .whp, opts),
         .native => createKind(gpa, io, .native, opts),
         .auto => {
@@ -402,7 +398,6 @@ fn createKind(gpa: std.mem.Allocator, io: std.Io, k: Kind, opts: Options) Create
         .kvm => .{ .kvm = try kvm.Backend.create(gpa, io, opts) },
         .whp => .{ .whp = try whp.Backend.create(gpa, io, opts) },
         .emu => .{ .emu = try emu.Backend.create(gpa, io, opts) },
-        .v86 => .{ .v86 = try v86.Backend.create(gpa, io, opts) },
         .native => .{ .native = try nat.Backend.create(gpa, io, opts) },
     };
 }
@@ -420,7 +415,6 @@ pub const Backend = union(Kind) {
     kvm: *kvm.Backend,
     whp: *whp.Backend,
     emu: *emu.Backend,
-    v86: *v86.Backend,
     native: *nat.Backend,
 
     pub fn kind(b: Backend) Kind {
@@ -481,7 +475,6 @@ pub const AddressSpace = union(enum) {
     kvm: *kvm.AddressSpace,
     whp: *whp.AddressSpace,
     emu: *emu.AddressSpace,
-    v86: *v86.AddressSpace,
     native: *nat.AddressSpace,
     /// A translate-only stand-in for unit tests of guest-memory code.
     fake: Fake,
@@ -582,7 +575,6 @@ pub const Vcpu = union(Kind) {
     kvm: kvm.Vcpu,
     whp: whp.Vcpu,
     emu: emu.Vcpu,
-    v86: v86.Vcpu,
     native: nat.Vcpu,
 
     pub fn destroy(v: *Vcpu) void {

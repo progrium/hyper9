@@ -56,8 +56,9 @@ try {
     console.log(`ok: ${name} (${Date.now() - t0} ms)`);
   };
 
-  // rc on each 386 CPU: v86's, and h9's own (h86, ?backend=emu).
-  for (const backend of ['v86', 'emu']) {
+  // rc on h9's own 386 CPU (h86): the default, and ?backend=v86, the old
+  // backend's name, which runs the same.
+  for (const backend of ['emu', 'v86']) {
     await page.goto(`${url}?backend=${backend}`);
     const on = (name, f) => step(`${backend}: ${name}`, f);
     await on('rc prompts', () => expect(/% $/, 0, 60_000));

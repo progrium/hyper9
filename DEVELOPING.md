@@ -11,7 +11,7 @@ Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 
 ```sh
 . scripts/env.sh               # Zig cache and tools live in .local/ (gitignored); puts zig-out/bin (h9) on PATH
-./scripts/fetch.sh             # reference sources (9front at the pinned release), 9front arm64 image, prebuilt and patched-source Unicorn, v86 into .local/ (or name parts: fetch.sh v86 iso386)
+./scripts/fetch.sh             # reference sources (9front at the pinned release), 9front arm64 image, prebuilt and patched-source Unicorn into .local/ (or name parts: fetch.sh iso386)
 zig build mkroot               # extracts the 9front root tree into .local/9front/root (~1 min, ~250 MB)
 ```
 
@@ -99,8 +99,8 @@ zig build design -- check        # validate design/ and the test tags (also list
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
-zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, v86.wasm, h9-node, the demo page)
-zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later; -Dbackends=v86 for v86)
+zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, h9-node, the demo page)
+zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later)
 zig build web-test # the demo page in Chromium, with Playwright, and vcpu-web
 zig build vcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build x86-jit  # the 386 JIT's [x86-jit] cases (tests/x86.zig) on T0 and T1; zig build vcpu runs them too
@@ -177,8 +177,8 @@ in memory, which the backend tests use whatever `-Dgfx` is.
 
 `zig build web` builds h9 for wasm32-wasi
 ([browser-host](design/0012-browser-host.md)). It runs 9front's 386 binaries
-on v86, needs JavaScript Promise Integration (Chrome 137 or later, Node 24 or
-later), and takes `v86.wasm` from `scripts/fetch.sh`. With a 386 root tree
+on h9's own CPU (h86, with its wasm JIT tier), and needs JavaScript Promise
+Integration (Chrome 137 or later, Node 24 or later). With a 386 root tree
 (`zig build mkroot -- --arch 386`, linked or copied as
 `.local/9front/root386`, or `-Dweb-root=DIR`) it also packs the demo page's
 root archive, `root.h9a`, from the paths in `src/web/root.list`.
@@ -278,7 +278,7 @@ Each GitHub release has two sets of binaries, built by
 | `h9-<version>-<target>` | MIT | `h9` with the hypervisor backends only (macOS arm64 for now) |
 | `h9-emu-<version>-<target>` | GPLv2 | `h9-emu`: h9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static), and Windows arm64 and x86_64 |
 | `h9-emu-<version>-source.tar.gz` | GPLv2 and MIT | complete corresponding source for `h9-emu`: the h9 tree plus Unicorn's patched source in `.local/src/unicorn` |
-| `h9-web-<version>.tar.gz` | MIT and BSD-2 | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, `v86.wasm` (BSD-2, `LICENSE.v86`), the demo page, and its root archive |
+| `h9-web-<version>.tar.gz` | MIT | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, the demo page, and its root archive |
 | `SHA256SUMS` | | checksums |
 
 `h9-emu` takes the same flags as `h9` and runs on hosts without a usable
@@ -308,7 +308,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, emu on Unicorn, and v86 for the browser host), with the guest-physical allocator and page tables the hypervisor backends share |
+| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, and emu, on Unicorn or h9's own CPUs, which the browser host uses), with the guest-physical allocator and page tables the hypervisor backends share |
 | `src/vcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (`-Demu=zig`): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
@@ -318,7 +318,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
 | `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
-| `tests/web/` | the browser host's Playwright check and the v86 layout check |
+| `tests/web/` | the browser host's Playwright check |
 | `tests/jit/` | the wasm emitter's checks: a runtime module standing in for h9.wasm, a random region generator, the suite (`suite.mjs`) and its Node and Chromium drivers, and `bench.mjs`, which times installs and tier-up in V8 |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source, `h9-web`) into `dist/` |

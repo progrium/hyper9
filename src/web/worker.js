@@ -55,15 +55,13 @@ async function start({ argv, env = {}, root, tty = false }) {
   // A ws:// or wss:// root is served over a WebSocket
   // (design/0021-websocket-9p.md), and WASI sees an empty tree.
   const remote = typeof root === 'string' && /^wss?:/i.test(root);
-  const [h9, v86, archive] = await Promise.all([
+  const [h9, archive] = await Promise.all([
     fetchBytes(new URL('h9.wasm', import.meta.url)),
-    fetchBytes(new URL('v86.wasm', import.meta.url)),
     remote ? new TextEncoder().encode('h9root1\n') : fetchBytes(root ?? new URL('root.h9a', import.meta.url)),
   ]);
   const tree = parseRoot(archive);
   return run({
     h9,
-    v86,
     wasi: (memory) => wasiImports({
       memory,
       root: tree,

@@ -120,7 +120,7 @@ Every field but `stdio` has a default:
 
 | Field | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.whp`, `.native`, `.emu`, `.v86`; one not built for this host fails with `BackendNotBuilt`. See [Backends](#backends). |
+| `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.whp`, `.native`, `.emu`, `.v86` (an alias of `.emu`); one not built for this host fails with `BackendNotBuilt`. See [Backends](#backends). |
 | `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64`, or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
 | `root` | `?Root` | none | `.{ .dir = path }`, `.{ .tcp = "tcp!host!564" }`, `.{ .unix = path }`, or `.{ .ws = "wss://host/9p" }`. Without one, only `.bytes` programs run. |
 | `root_spec` | `[]const u8` | `""` | The attach name for a 9P root. |

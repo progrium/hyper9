@@ -99,7 +99,7 @@ const web_skips = [_][]const u8{
     "a proxy answering 407 exits 125 with the status",
     "an idle ws:// root pings, and a server that stops answering fails it",
     // self-host's debugger cases that write to text or read acid's frames:
-    // v86 hasn't the private text pages and breakpoint trap they need yet.
+    // the web host hasn't the private text pages and breakpoint trap they need yet.
     "/proc/n/mem reads a variable and a write to text doesn't reach a sibling",
     "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address",
     "a BRK posts sys: breakpoint",

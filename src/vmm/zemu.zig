@@ -46,13 +46,12 @@ pub const req_sync = cache.req_sync;
 /// coroutines take turns, so a vCPU leaves guest code on a budget of
 /// instructions as well as on requests (see State.run).
 const web = builtin.os.tag == .wasi;
-/// Guest memory there, as v86's: a tab's memory is scarcer than a host's,
-/// and wasm32 addresses 4 GiB in all, h9's heap and v86's included.
+/// Guest memory there: a tab's memory is scarcer than a host's, and wasm32
+/// addresses 4 GiB in all, h9's heap included.
 const web_default_memory: u64 = 256 << 20;
 const web_max_memory: u64 = 2 << 30;
 /// Guest instructions between looks at the clock, and how long a vCPU
-/// keeps the thread before the other coroutines get a turn (v86.zig's
-/// slice).
+/// keeps the thread before the other coroutines get a turn.
 const web_budget: i64 = 64 * 1024;
 const web_slice_ns = 2 * std.time.ns_per_ms;
 const coro = if (web) @import("../web/coro.zig") else struct {};
