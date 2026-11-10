@@ -15,6 +15,7 @@
   header button { font: inherit; margin-left: 8px; }
   #term { flex: 1; overflow: auto; margin: 0; padding: 8px 16px; white-space: pre-wrap; word-break: break-all; outline: none; }
   #term .cursor { background: var(--accent); color: var(--bg); }
+  #term.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }
   /* Takes the keyboard input, so a tap on the terminal brings up a phone's
      on-screen keyboard, which a <pre> can't. Invisible, and 16px so iOS
      doesn't zoom when it's focused. */
@@ -144,6 +145,38 @@ if (!haveJSPI) {
     kbd.addEventListener('paste', (e) => {
       e.preventDefault();
       send(e.clipboardData.getData('text').replace(/\r\n?/g, '\n'));
+    });
+    // Files dropped on the page go into the root's tree in the shell's home
+    // (machine._put), and their paths are typed, as a host terminal types
+    // a dropped file's path. A program or script is made executable.
+    const home = linux ? '/root' : '/usr/glenda';
+    const quote = (p) => /^[\w./+,:@%=-]+$/.test(p) ? p : linux ? `'${p.replaceAll("'", "'\\''")}'` : `'${p.replaceAll("'", "''")}'`;
+    const runnable = (b) => (b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46) || (b[0] === 0x23 && b[1] === 0x21);
+    // A ws:// root's tree isn't the Worker's, so there's nowhere to put them.
+    const remote = /^wss?:/i.test(params.get('root') ?? '');
+    const hasFiles = (e) => !remote && e.dataTransfer?.types.includes('Files');
+    document.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      term.classList.add('drop');
+    });
+    document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) term.classList.remove('drop'); });
+    document.addEventListener('drop', async (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      term.classList.remove('drop');
+      const paths = [];
+      for (const f of e.dataTransfer.files) {
+        // A dropped folder has no bytes to read, and is left out.
+        const b = await f.arrayBuffer().then((a) => new Uint8Array(a), () => null);
+        if (!b) continue;
+        const name = f.name.replaceAll('/', '_');
+        m._put(`${home.slice(1)}/${name}`, b, runnable(b) ? 0o755 : 0o644);
+        paths.push(quote(`${home}/${name}`));
+      }
+      if (paths.length) send(paths.join(' ') + ' ');
+      kbd.focus();
     });
     reset();
     kbd.focus();
