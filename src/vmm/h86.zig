@@ -5,7 +5,8 @@
 //! T0, the interpreter (interp/x86/exec.zig), reaches guest memory through
 //! the vCPU's TLB: mem.fast and mem.fastExec on a hit, and mem.probe, which
 //! fills the entry, on a miss. With `tier` at .t1 and a code cache, compiled
-//! code runs (src/jit/dispatch.zig), and T0 runs what it hands back.
+//! code runs (src/jit/dispatch.zig), and T0 runs what it hands back. On the
+//! web host T1 is src/jit/wasm_t1.zig's, compiling hot blocks to wasm.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,6 +19,7 @@ const cache = @import("../jit/cache.zig");
 const dispatch = @import("../jit/dispatch.zig");
 const emitter = @import("../jit/emitter.zig");
 const lift = @import("../jit/x86/lift.zig");
+const wasm_t1 = @import("../jit/wasm_t1.zig");
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter.
@@ -91,6 +93,7 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     var m: TlbMem = .{ .ctx = ctx, .tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb))) };
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;
+    if (tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);
     if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, &m, em);
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
     return exitOf(c, ctx, runT0(c, ctx, &m, budget));
@@ -98,9 +101,14 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
 
 /// T0 for up to `budget` instructions, counting them in ctx.
 fn runT0(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64) x86cpu.Exit {
+    return runT0Opts(c, ctx, m, budget, false);
+}
+
+/// T0, stopping after the first taken branch if `until_branch`.
+fn runT0Opts(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64, until_branch: bool) x86cpu.Exit {
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     const before = c.retired;
-    const exit = exec.run(c, m, .{ .budget = budget, .stop = stop });
+    const exit = exec.run(c, m, .{ .budget = budget, .stop = stop, .until_branch = until_branch });
     const ran = c.retired - before;
     ctx.retired +%= ran;
     if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(ran, std.math.maxInt(i63)));
@@ -140,6 +148,41 @@ fn runT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!v
             .t0 => {
                 if (ctx.budget <= 0) return .interrupted;
                 const e = runT0(c, ctx, m, 1);
+                if (e != .stopped) return exitOf(c, ctx, e);
+                if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
+            },
+        }
+    }
+}
+
+/// T1 on the web host (src/jit/wasm_t1.zig): compiled code for hot
+/// blocks, T0 to the next taken branch for cold ones, so their heads come
+/// back to be counted.
+fn runWasmT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem) vmm.Error!vmm.Exit {
+    var lm: lift.Mem = .{ .ctx = m, .translateFn = TlbMem.translateFn };
+    ctx.frontend = @intFromPtr(&lm);
+    const outer = ctx.cpu;
+    ctx.cpu = @intFromPtr(c);
+    defer ctx.cpu = outer;
+    ctx.interp = @intFromPtr(&lift.interp);
+    const cfg: wasm_t1.Config = .{
+        .frontend = lift.frontend,
+        .pc_off = @offsetOf(x86cpu.Cpu, "eip"),
+        .pc_bytes = 4,
+        .pc_align = 1,
+    };
+    while (true) {
+        const before = ctx.retired;
+        const c_before = c.retired;
+        const r = wasm_t1.run(std.heap.c_allocator, ctx, cfg);
+        c.retired = c_before +% (ctx.retired -% before);
+        switch (r) {
+            .svc => return .syscall,
+            .interrupted => return .interrupted,
+            .t0, .cold => {
+                if (ctx.budget <= 0) return .interrupted;
+                const budget: u64 = if (r == .t0) 1 else @intCast(ctx.budget);
+                const e = runT0Opts(c, ctx, m, budget, r == .cold);
                 if (e != .stopped) return exitOf(c, ctx, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
             },

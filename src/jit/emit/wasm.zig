@@ -88,6 +88,10 @@ pub const Options = struct {
     /// dispatch loop (for tests).
     structured: bool = true,
     layout: Layout = .functions,
+    /// With cells: a chain whose cell is 0, and an indirect branch, look
+    /// their target up in the vCPU's jump cache (ctx.jump, whose entries'
+    /// `code` the runtime sets to a table slot) and tail-call it on a hit.
+    jump: bool = false,
 };
 
 pub const Layout = enum {
@@ -1695,7 +1699,50 @@ fn function(
         try w.i32c(@intFromEnum(ctx.Exit.chain));
         try w.byte(0x46);
         try w.byte(0x1B); // select
-        try w.tee(e.l32(.cell));
+        try w.set(e.l32(.cell));
+        if (opts.jump) {
+            // Unlinked, or indirect: the jump cache may know the target.
+            const pc = e.scratch(I64, 0);
+            const ent = e.scratch(I32, 0);
+            try w.get(e.l32(.cell));
+            try w.byte(0x45); // i32.eqz
+            try w.get(e.l32(.code));
+            try w.i32c(@intFromEnum(ctx.Exit.chain));
+            try w.byte(0x46);
+            try w.get(e.l32(.code));
+            try w.i32c(@intFromEnum(ctx.Exit.indirect));
+            try w.byte(0x46);
+            try w.byte(0x72); // i32.or
+            try w.byte(0x71); // i32.and
+            try w.bytes(&.{ 0x04, VOID });
+            // ent = ctx.jump + jumpIndex(pc) * 24
+            try w.get(0);
+            try w.memop(0x29, ctx.off.exit_pc);
+            try w.tee(pc);
+            try w.get(pc);
+            try w.i64c(10);
+            try w.byte(0x88); // i64.shr_u
+            try w.byte(0x85); // i64.xor
+            try w.byte(0xA7); // i32.wrap_i64
+            try w.i32c(ctx.jump_entries - 1);
+            try w.byte(0x71);
+            try w.i32c(@sizeOf(ctx.JumpEntry));
+            try w.byte(0x6C); // i32.mul
+            try w.get(0);
+            try w.memop(0x28, ctx.off.jump);
+            try w.byte(0x6A);
+            try w.tee(ent);
+            try w.memop(0x29, 0);
+            try w.get(pc);
+            try w.byte(0x51); // i64.eq
+            try w.bytes(&.{ 0x04, VOID });
+            try w.get(ent);
+            try w.memop(0x28, @offsetOf(ctx.JumpEntry, "code"));
+            try w.set(e.l32(.cell));
+            try w.byte(0x0B);
+            try w.byte(0x0B);
+        }
+        try w.get(e.l32(.cell));
         try w.bytes(&.{ 0x04, VOID });
         try w.get(0);
         try w.get(e.l32(.cell));

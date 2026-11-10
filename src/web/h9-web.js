@@ -302,6 +302,8 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
     v86: v86imports,
   });
   hx = inst.exports;
+  // Table slots from here on are the JIT's (src/jit/wasm_t1.zig).
+  if (h9table && hx.jit_table_base) hx.jit_table_base(h9table.length);
   entry = WebAssembly.promising(hx.h9_coro_entry);
   // _start is the first coroutine, on the linker's stack.
   WebAssembly.promising(hx._start)().then(() => finish(0), die);

@@ -56,6 +56,8 @@ const web_max_memory: u64 = 2 << 30;
 const web_budget: i64 = 64 * 1024;
 const web_slice_ns = 2 * std.time.ns_per_ms;
 const coro = if (web) @import("../web/coro.zig") else struct {};
+/// The web host's T1, whose regions are keyed by this backend's arena pages.
+const wasm_t1 = @import("../jit/wasm_t1.zig");
 
 fn monoNs() u64 {
     var t: std.os.wasi.timestamp_t = 0;
@@ -208,6 +210,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
 
             pub fn destroy(b: *EmuBackend) void {
                 std.debug.assert(b.vcpus.items.len == 0);
+                if (web) wasm_t1.reset();
                 b.vcpus.deinit(b.gpa);
                 if (b.jit) |c| {
                     c.deinit();
@@ -294,6 +297,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
             fn invalidate(p: *anyopaque, page: u64) void {
                 const b: *EmuBackend = @ptrCast(@alignCast(p));
                 if (b.jit) |c| c.invalidatePage(page);
+                if (web) wasm_t1.invalidatePage(page);
             }
 
             /// Empties the code cache if someone asked, with every vCPU
