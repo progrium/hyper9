@@ -1886,7 +1886,9 @@ test "acid attaches and prints registers and a stack trace [10]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, reg) != null);
     // amd64's frame shows sleep's argument, sleep(a0=0x1388)+0xe.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "\nsleep(") != null or std.mem.indexOf(u8, r.out, " sleep(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null);
+    // arm64's frame passes argc in a register, so acid shows main(argv=);
+    // 386's has both on the stack, main(argc=0x2,argv=...).
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null or std.mem.indexOf(u8, r.out, "main(argc=") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/sys/src/cmd/sleep.c:") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "warning") == null);
 }
@@ -2490,8 +2492,13 @@ test "--net=enable allows a server [5]" {
     const addr = try std.fmt.bufPrint(&addr_buf, "tcp!127.0.0.1!{d}", .{port});
     var it = std.mem.tokenizeScalar(u8, e.backends, ',');
     while (it.next()) |backend| {
+        // The root's binaries are for -Darch's architecture, if any.
+        const argv: []const []const u8 = if (e.arch) |a|
+            &.{ e.h9, "--backend", backend, "--arch", a, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" }
+        else
+            &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" };
         var child = try std.process.spawn(io, .{
-            .argv = &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" },
+            .argv = argv,
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
