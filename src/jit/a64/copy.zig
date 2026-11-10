@@ -108,9 +108,15 @@ pub fn plan(w: u32, o: dec.Op) ?Plan {
     var used: u64 = r.read | r.write | r.vread | r.vwrite;
     for (0..4) |f| used |= @as(u64, 1) << @intCast(fieldOf(w, f));
     var t: u32 = 0;
-    while (t < 31 and (used >> @intCast(t)) & 1 == 1) t += 1;
-    if (t >= 31) return null;
+    while (t < 16 and (used >> @intCast(t)) & 1 == 1) t += 1;
+    if (t >= 16) return null;
     const tb: u64 = @as(u64, 1) << @intCast(t);
+    // And one with bit 4 set, to tell a 4-bit register field (by-element
+    // H lanes, where Rm's bit 4 is the index's M) from a 5-bit one.
+    var t2: u32 = 16;
+    while (t2 < 31 and (used >> @intCast(t2)) & 1 == 1) t2 += 1;
+    if (t2 >= 31) return null;
+    const t2b: u64 = @as(u64, 1) << @intCast(t2);
 
     var desc: [4]u16 = @splat(0);
     var got_read: u64 = 0;
@@ -129,6 +135,11 @@ pub fn plan(w: u32, o: dec.Op) ?Plan {
         if (!(gr or gw or vr or vw)) continue;
         if ((gr or gw) and (vr or vw)) return null;
         const rv = fieldOf(w, f);
+        const p2 = dec.decode(withField(w, f, t2), 0);
+        const pr2 = dec.regs(p2);
+        const five = p2.k != .undef and ((pr2.read | pr2.write) & t2b != 0 or (pr2.vread | pr2.vwrite) & @as(u32, @truncate(t2b)) != 0);
+        // A 4-bit field holding 16 or more: bit 4 isn't the register's.
+        if (!five and rv >= 16) return null;
         if (vr or vw) {
             desc[f] = vOff(rv) | D_V | (if (vr) D_READ else 0) | (if (vw) D_WRITE else 0);
             if (vr) got_vread |= @as(u32, 1) << @intCast(rv);
@@ -218,4 +229,7 @@ test "plans: fields, ZR, SP, and what doesn't qualify" {
     // only with M clear, so the 5-bit field is the register
     try testing.expect(plan(0x4f428020, dec.decode(0x4f428020, 0)) != null);
     try testing.expectEqual(@as(?Plan, null), plan(0x4f528020, dec.decode(0x4f528020, 0)));
+    // mla v21.4h, v5.4h, v5.h[5]: M set, and Rd's v21 matches the 5-bit
+    // field, so the coverage check alone passes it (D1's find)
+    try testing.expectEqual(@as(?Plan, null), plan(0x2f5508b5, dec.decode(0x2f5508b5, 0)));
 }
