@@ -782,7 +782,7 @@ fn stxr(m: *Machine, o: *const Op, pc: u64, comptime is_pair: bool) Next {
         const h2 = host(m, addr + 8, 8, .write, &f) orelse return dataFault(m, pc, f.addr, .write, f.kind);
         const old = @as(u128, mon.hi) << 64 | mon.lo;
         const new = @as(u128, cpu.r[o.a]) << 64 | v;
-        if (have_cas128 and h2 == h + 8) break :blk cas(u128, h, old, new);
+        if (have_cas128_op and h2 == h + 8) break :blk cas(u128, h, old, new);
         while (pair_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
         defer pair_lock.store(0, .release);
         const p1: *u64 = @ptrFromInt(h);
