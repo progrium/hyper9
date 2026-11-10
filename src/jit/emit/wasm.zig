@@ -6,15 +6,21 @@
 //! through a plain function pointer and regions reach each other with
 //! tail calls through the same table. A batch of one also exports "run".
 //!
-//! **One function per batch.** Every region's code is in one function,
-//! entered through a `br_table` on the region's index; the exports are
-//! one-line wrappers that tail-call it. A chain to a region in the same
-//! batch is a branch back to that `br_table`, with no call at all; a chain
-//! to a region in another module is a `return_call_indirect` through a
-//! chain cell (below); anything else returns to the runtime.
+//! **Two layouts.** By default (`Layout.functions`) each region is a wasm
+//! function of its own, exported directly; a chain to another region,
+//! in this module or not, is a `return_call_indirect` through a chain cell
+//! (below). With `Layout.br_table` every region's code is in one function,
+//! entered through a `br_table` on the region's index, and the exports are
+//! one-line wrappers that tail-call it; a chain to a region in the same
+//! batch is then a branch back to that `br_table`, with no call at all.
+//! The first is the default because V8 compiles and tiers up functions one
+//! at a time: a hot loop in a 1,000-region br_table function runs at
+//! baseline speed for most of a second while TurboFan compiles the lot
+//! (tests/jit/bench.mjs). Anything without a linked chain returns to the
+//! runtime.
 //!
 //! **Guest registers live in locals.** Every `getreg`/`setreg` offset the
-//! batch uses at one width, and that no other access overlaps, gets a local,
+//! function uses at one width, and that no other access overlaps, gets a local,
 //! loaded from the Cpu on entry and written back on every way out: one
 //! shared exit path, before `call.interp` and `call.helper` (which reload
 //! all of them after). IR values don't each get a local: values used once
@@ -33,8 +39,9 @@
 //! has a u32 cell in linear memory (`Batch.chains` says which PC each
 //! is for): 0 means unlinked (the region leaves with `.chain`), otherwise
 //! it's the table slot of the region to tail-call. The runtime writes and
-//! clears cells as regions come and go. A cell holding this module's own
-//! slot for a region in the batch takes the in-function branch instead.
+//! clears cells as regions come and go. In the br_table layout, a cell
+//! holding this module's own slot for a region in the batch takes the
+//! in-function branch instead.
 //!
 //! Imports, all from "env", provided by the module that owns memory (h9.wasm
 //! in the browser, tests/jit/wasm_runtime.zig under Node):
@@ -79,6 +86,18 @@ pub const Options = struct {
     /// Lower control flow to blocks and loops; false always uses the
     /// dispatch loop (for tests).
     structured: bool = true,
+    layout: Layout = .functions,
+};
+
+pub const Layout = enum {
+    /// A function per region. V8 compiles and tiers up each on its own,
+    /// so a hot region doesn't drag its batch through the optimizing
+    /// compiler. A chain within the batch is a tail call.
+    functions,
+    /// One function behind a br_table on the region's index, so a chain
+    /// within the batch is a branch. Optimizing it costs superlinear time
+    /// in its size (see tests/jit/bench.mjs).
+    br_table,
 };
 
 pub const Batch = struct {
@@ -595,12 +614,14 @@ const E = struct {
     opts: Options,
     regions: []const *const ir.Region,
     labels: std.ArrayList(Label) = .empty,
+    /// The batch index of regions[0].
+    first: u32,
     regs: []Reg,
     promoted: std.AutoHashMapUnmanaged(u32, u32) = .empty,
-    /// Chain targets: guest PC to cell index.
-    cells: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    /// Region entry PCs: to region index.
-    entries: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// The batch's chain targets: guest PC to cell index.
+    cells: *const std.AutoHashMapUnmanaged(u64, u32),
+    /// The batch's region entry PCs: to batch index.
+    entries: *const std.AutoHashMapUnmanaged(u64, u32),
     nparams: u32,
     base32: u32 = 0,
     base64: u32 = 0,
@@ -705,8 +726,8 @@ const E = struct {
             try e.w.i32c(e.opts.cells + 4 * k);
             try e.w.memop(0x28, 0);
             try e.w.set(e.l32(.cell));
-            if (e.entries.get(pc)) |j| {
-                // Linked to this batch's own region j: branch to it.
+            if (e.entries.get(pc)) |j| if (j >= e.first and j - e.first < e.regions.len) {
+                // Linked to region j, in this function: branch to it.
                 try e.w.get(e.l32(.cell));
                 try e.w.byte(0x23); // global.get base
                 try e.w.uleb(0);
@@ -717,12 +738,12 @@ const E = struct {
                 try e.w.byte(0x46); // i32.eq
                 try e.open(0x04, .other);
                 if (e.regions.len > 1) {
-                    try e.w.i32c(j);
+                    try e.w.i32c(j - e.first);
                     try e.w.set(1);
                 }
                 try e.br(.top);
                 try e.end();
-            }
+            };
         }
         try e.leave(.chain, pc);
     }
@@ -1417,11 +1438,50 @@ fn memLoadOp(vw: u8, size: u3, signed: bool) u8 {
 /// `batch` gets the chain cells it needs (empty without Options.cells).
 pub fn emitBatch(gpa: Allocator, regions: []const *const ir.Region, opts: Options, out: *std.ArrayList(u8), batch: *Batch) EmitError!void {
     if (regions.len == 0) return error.Unsupported;
+    var cells: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    defer cells.deinit(gpa);
+    var entries: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    defer entries.deinit(gpa);
+    for (regions, 0..) |r, ri| {
+        if (!entries.contains(r.entry_pc)) try entries.put(gpa, r.entry_pc, @intCast(ri));
+        if (opts.cells != 0) for (r.insts.items) |i| if (i.op == .@"exit.chain" and !cells.contains(i.aux)) {
+            try cells.put(gpa, i.aux, @intCast(batch.chains.items.len));
+            try batch.chains.append(gpa, i.aux);
+        };
+    }
+    var bodies: std.ArrayList([]u8) = .empty;
+    defer {
+        for (bodies.items) |b| gpa.free(b);
+        bodies.deinit(gpa);
+    }
+    if (opts.layout == .br_table or regions.len == 1) {
+        try bodies.append(gpa, try function(gpa, regions, 0, opts, &cells, &entries, batch));
+    } else for (0..regions.len) |k| {
+        try bodies.append(gpa, try function(gpa, regions[k..][0..1], @intCast(k), opts, &cells, &entries, batch));
+    }
+    try module(gpa, bodies.items, regions.len, opts, out);
+}
+
+/// One function's body (its locals, then its code) for `regions`, which
+/// are the batch's from index `first`. One region is a ctx.EntryFn; more
+/// take their index as a second parameter.
+fn function(
+    gpa: Allocator,
+    regions: []const *const ir.Region,
+    first: u32,
+    opts: Options,
+    cells: *const std.AutoHashMapUnmanaged(u64, u32),
+    entries: *const std.AutoHashMapUnmanaged(u64, u32),
+    batch: *Batch,
+) EmitError![]u8 {
     var e: E = .{
         .gpa = gpa,
         .w = .{ .gpa = gpa },
         .opts = opts,
         .regions = regions,
+        .first = first,
+        .cells = cells,
+        .entries = entries,
         .regs = &.{},
         .nparams = if (regions.len == 1) 1 else 2,
     };
@@ -1429,39 +1489,26 @@ pub fn emitBatch(gpa: Allocator, regions: []const *const ir.Region, opts: Option
         e.w.b.deinit(gpa);
         e.labels.deinit(gpa);
         e.promoted.deinit(gpa);
-        e.cells.deinit(gpa);
-        e.entries.deinit(gpa);
         gpa.free(e.regs);
     }
 
-    // Registers, chain targets, and entries.
+    // The guest registers the function uses.
     var regs: std.ArrayList(Reg) = .empty;
     defer regs.deinit(gpa);
-    for (regions, 0..) |r, ri| {
-        if (!e.entries.contains(r.entry_pc)) try e.entries.put(gpa, r.entry_pc, @intCast(ri));
-        for (r.insts.items) |i| {
-            switch (i.op) {
-                .getreg, .setreg => {
-                    const t = if (i.op == .getreg) i.ty else r.insts.items[i.a].ty;
-                    if (wt(t) == null) return error.Unsupported;
-                    const gop = try e.promoted.getOrPut(gpa, @intCast(i.aux));
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = @intCast(regs.items.len);
-                        try regs.append(gpa, .{ .off = @intCast(i.aux), .ty = t, .size = byteSize(t).? });
-                    }
-                    const g = &regs.items[gop.value_ptr.*];
-                    if (g.size != byteSize(t).?) g.bad = true;
-                    g.size = @max(g.size, byteSize(t).?);
-                    if (i.op == .setreg) g.written = true;
-                },
-                .@"exit.chain" => if (opts.cells != 0 and !e.cells.contains(i.aux)) {
-                    try e.cells.put(gpa, i.aux, @intCast(batch.chains.items.len));
-                    try batch.chains.append(gpa, i.aux);
-                },
-                else => {},
-            }
+    for (regions) |r| for (r.insts.items) |i| {
+        if (i.op != .getreg and i.op != .setreg) continue;
+        const t = if (i.op == .getreg) i.ty else r.insts.items[i.a].ty;
+        if (wt(t) == null) return error.Unsupported;
+        const gop = try e.promoted.getOrPut(gpa, @intCast(i.aux));
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(regs.items.len);
+            try regs.append(gpa, .{ .off = @intCast(i.aux), .ty = t, .size = byteSize(t).? });
         }
-    }
+        const g = &regs.items[gop.value_ptr.*];
+        if (g.size != byteSize(t).?) g.bad = true;
+        g.size = @max(g.size, byteSize(t).?);
+        if (i.op == .setreg) g.written = true;
+    };
     // Overlapping accesses at different offsets: neither is promoted.
     std.mem.sort(Reg, regs.items, {}, struct {
         fn lt(_: void, a: Reg, b: Reg) bool {
@@ -1592,13 +1639,14 @@ pub fn emitBatch(gpa: Allocator, regions: []const *const ir.Region, opts: Option
     }
     try w.get(e.l32(.code));
     try w.byte(0x0B); // end function
-
-    try module(gpa, &e, out);
+    return e.w.b.toOwnedSlice(gpa);
 }
 
-fn module(gpa: Allocator, e: *const E, out: *std.ArrayList(u8)) !void {
-    const n = e.regions.len;
-    const chaining = e.opts.cells != 0;
+/// The module around the function bodies: one per region, or one for all
+/// `n` behind wrappers.
+fn module(gpa: Allocator, bodies: []const []const u8, n: usize, opts: Options, out: *std.ArrayList(u8)) !void {
+    const chaining = opts.cells != 0;
+    const wrapped = bodies.len == 1 and n > 1;
     var m: W = .{ .gpa = gpa };
     defer m.b.deinit(gpa);
     try m.bytes(&.{ 0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00 });
@@ -1643,11 +1691,11 @@ fn module(gpa: Allocator, e: *const E, out: *std.ArrayList(u8)) !void {
     }
     try m.section(2, sec.b.items);
 
-    // Functions: the body, then a wrapper per region if there are several.
+    // Functions: the bodies, then the wrappers if there are any.
     sec.b.clearRetainingCapacity();
-    const nwrap: usize = if (n > 1) n else 0;
-    try sec.uleb(1 + nwrap);
-    try sec.uleb(if (n > 1) T_BODY else T_ENTRY);
+    const nwrap: usize = if (wrapped) n else 0;
+    try sec.uleb(bodies.len + nwrap);
+    for (bodies) |_| try sec.uleb(if (wrapped) T_BODY else T_ENTRY);
     for (0..nwrap) |_| try sec.uleb(T_ENTRY);
     try m.section(3, sec.b.items);
 
@@ -1657,7 +1705,7 @@ fn module(gpa: Allocator, e: *const E, out: *std.ArrayList(u8)) !void {
     for (0..n) |k| {
         try sec.name(std.fmt.bufPrint(&nm, "r{d}", .{k}) catch unreachable);
         try sec.byte(0x00);
-        try sec.uleb(if (n > 1) F_BODY + 1 + k else F_BODY);
+        try sec.uleb(if (wrapped) F_BODY + 1 + k else F_BODY + k);
     }
     if (n == 1) {
         try sec.name("run");
@@ -1667,9 +1715,11 @@ fn module(gpa: Allocator, e: *const E, out: *std.ArrayList(u8)) !void {
     try m.section(7, sec.b.items);
 
     sec.b.clearRetainingCapacity();
-    try sec.uleb(1 + nwrap);
-    try sec.uleb(e.w.b.items.len);
-    try sec.bytes(e.w.b.items);
+    try sec.uleb(bodies.len + nwrap);
+    for (bodies) |b| {
+        try sec.uleb(b.len);
+        try sec.bytes(b);
+    }
     for (0..nwrap) |k| {
         var f: W = .{ .gpa = gpa };
         defer f.b.deinit(gpa);

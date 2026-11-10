@@ -51,13 +51,13 @@ export async function runSuite(bytes, { log = console.log, error = console.error
   }
   for (let i = 0; i < n; i++) jit.jit_drop(first + i, 1);
 
-  // In batches.
+  // In batches, in both layouts.
   const B = 50;
-  for (let at = 0; at < n; at += B) {
+  for (const brTable of [0, 1]) for (let at = 0; at < n; at += B) {
     const count = Math.min(B, n - at);
-    if (!(await install(rt.batch_prepare(at, count), first, count))) { fail(`batch at ${at}: no install`); continue; }
+    if (!(await install(rt.batch_prepare(at, count, brTable), first, count))) { fail(`batch at ${at}: no install`); continue; }
     for (let i = at; i < at + count; i++) {
-      if (!rt.case_run(i, first + i - at)) fail(`case ${i} in a batch at ${at} differs from ir_eval:\n${text(rt.case_text(i), rt.case_text_len(i))}`);
+      if (!rt.case_run(i, first + i - at)) fail(`case ${i} in a batch at ${at} (br_table ${brTable}) differs from ir_eval:\n${text(rt.case_text(i), rt.case_text_len(i))}`);
     }
   }
 
@@ -66,21 +66,24 @@ export async function runSuite(bytes, { log = console.log, error = console.error
 
   // Random regions, in various layouts.
   const R = 6;
+  // [name, modules as [first, count], chaining, fuzz_emit flags]
   const layouts = [
-    ['one module, chained', [[0, R]], true, false],
-    ['a module each, chained', [...Array(R).keys()].map((k) => [k, 1]), true, false],
-    ['two modules, chained', [[0, 2], [2, R - 2]], true, false],
-    ['one module, dispatch loops', [[0, R]], true, true],
-    ['one module, unchained', [[0, R]], false, false],
+    ['one module, chained', [[0, R]], true, 0],
+    ['a module each, chained', [...Array(R).keys()].map((k) => [k, 1]), true, 0],
+    ['two modules, chained', [[0, 2], [2, R - 2]], true, 0],
+    ['one module, dispatch loops', [[0, R]], true, 1],
+    ['one module, unchained', [[0, R]], false, 0],
+    ['one br_table module, chained', [[0, R]], true, 2],
+    ['two br_table modules, chained', [[0, 3], [3, R - 3]], true, 2],
   ];
   let runs = 0;
   for (let seed = 1; seed <= seeds; seed++) {
-    const [name, mods, chaining, dispatch] = layouts[seed % layouts.length];
+    const [name, mods, chaining, flags] = layouts[seed % layouts.length];
     if (!rt.fuzz_reset(seed, R)) { fail(`seed ${seed}: generating failed`); continue; }
     let base = first;
     let ok = true;
     for (const [at, count] of mods) {
-      const len = rt.fuzz_emit(at, count, chaining ? 1 : 0, dispatch ? 1 : 0);
+      const len = rt.fuzz_emit(at, count, chaining ? 1 : 0, flags);
       if (!(await install(len, base, count))) { ok = false; break; }
       rt.fuzz_installed(base);
       base += count;
@@ -119,6 +122,6 @@ export async function runSuite(bytes, { log = console.log, error = console.error
     error(`${failed} failed`);
     return false;
   }
-  log(`wasm emitter: ${n} cases alone and in batches, the tracer bullet, and ${runs} runs of random regions in ${seeds} layouts match`);
+  log(`wasm emitter: ${n} cases alone and in batches, the tracer bullet, and ${runs} runs of random regions from ${seeds} seeds match`);
   return true;
 }

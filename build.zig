@@ -702,6 +702,9 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
         }),
     });
     exe.import_memory = true;
+    // The function table too, so h9-web.js can grow it: the JIT installs
+    // its regions there (src/jit/emit/wasm.zig).
+    exe.import_table = true;
     exe.global_base = web_global_base;
     // The main coroutine's stack; kernel processes get their own.
     exe.stack_size = 1 << 20;
@@ -1651,7 +1654,8 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
 
 /// The emulator's own CPUs (src/vcpu.zig): the JIT layer's unit tests,
 /// natively, and the wasm emitter's under Node when Node is installed
-/// (tests/jit/run.mjs). `zig build vcpu` runs just these.
+/// (tests/jit/run.mjs). `zig build vcpu` runs just these. `zig build
+/// vcpu-web`, and `web-test` with it, runs the wasm emitter's in Chromium.
 fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const step = b.step("vcpu", "Run the emulator CPU and JIT tests (src/vcpu.zig), natively and under Node");
     const tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -1683,4 +1687,12 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     node_run.expectExitCode(0);
     step.dependOn(&node_run.step);
     test_step.dependOn(&node_run.step);
+
+    const browser_run = b.addSystemCommand(&.{ node, "tests/jit/browser.mjs" });
+    browser_run.addFileArg(runtime.getEmittedBin());
+    browser_run.setCwd(b.path("."));
+    browser_run.has_side_effects = true;
+    browser_run.expectExitCode(0);
+    b.step("vcpu-web", "Run the wasm emitter's tests in Chromium with Playwright").dependOn(&browser_run.step);
+    if (b.top_level_steps.get("web-test")) |web_test| web_test.step.dependOn(&browser_run.step);
 }

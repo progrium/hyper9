@@ -101,7 +101,8 @@ zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd,
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, v86.wasm, h9-node, the demo page)
 zig build integration -Dweb   # the integration cases through h9-node on v86 (Node 24 or later)
-zig build web-test # the demo page in Chromium, with Playwright
+zig build web-test # the demo page in Chromium, with Playwright, and vcpu-web
+zig build vcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
@@ -316,7 +317,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
 | `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
 | `tests/web/` | the browser host's Playwright check and the v86 layout check |
-| `tests/jit/` | the wasm emitter's check under Node: a runtime module standing in for h9.wasm, and the driver |
+| `tests/jit/` | the wasm emitter's checks: a runtime module standing in for h9.wasm, a random region generator, the suite (`suite.mjs`) and its Node and Chromium drivers, and `bench.mjs`, which times installs and tier-up in V8 |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source, `h9-web`) into `dist/` |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |

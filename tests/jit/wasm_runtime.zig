@@ -106,12 +106,12 @@ export fn tracer_x(i: u32) u64 {
 
 // ---------------------------------------------------------------- batches
 
-/// Builds cases[first..first+count] as one module (no chaining). Returns
-/// its length.
-export fn batch_prepare(first: u32, count: u32) u32 {
-    return batchPrepare(first, count) catch 0;
+/// Builds cases[first..first+count] as one module (no chaining), in the
+/// br_table layout if `br_table`. Returns its length.
+export fn batch_prepare(first: u32, count: u32, br_table: u32) u32 {
+    return batchPrepare(first, count, br_table != 0) catch 0;
 }
-fn batchPrepare(first: u32, count: u32) !u32 {
+fn batchPrepare(first: u32, count: u32, br_table: bool) !u32 {
     const rs = try gpa.alloc(ir.Region, count);
     var n: usize = 0;
     defer {
@@ -128,7 +128,7 @@ fn batchPrepare(first: u32, count: u32) !u32 {
     module.clearRetainingCapacity();
     var b: vcpu.emit.wasm.Batch = .{};
     defer b.deinit(gpa);
-    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{}, &module, &b);
+    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions }, &module, &b);
     return @intCast(module.items.len);
 }
 
@@ -215,12 +215,12 @@ fn fuzzReset(seed: u32, count: u32) !void {
 }
 
 /// Builds regions[first..first+count] as one module, with chain cells if
-/// `chaining`, and structured control flow unless `dispatch`. Returns its
-/// length.
-export fn fuzz_emit(first: u32, count: u32, chaining: u32, dispatch: u32) u32 {
-    return fuzzEmit(first, count, chaining != 0, dispatch != 0) catch 0;
+/// `chaining`. Flags: 1 forces dispatch loops, 2 the br_table layout.
+/// Returns its length.
+export fn fuzz_emit(first: u32, count: u32, chaining: u32, flags: u32) u32 {
+    return fuzzEmit(first, count, chaining != 0, flags) catch 0;
 }
-fn fuzzEmit(first: u32, count: u32, chaining: bool, dispatch: bool) !u32 {
+fn fuzzEmit(first: u32, count: u32, chaining: bool, flags: u32) !u32 {
     const ptrs = try gpa.alloc(*const ir.Region, count);
     defer gpa.free(ptrs);
     for (ptrs, 0..) |*p, k| p.* = &fz.regions.items[first + k];
@@ -231,7 +231,7 @@ fn fuzzEmit(first: u32, count: u32, chaining: bool, dispatch: bool) !u32 {
     const cells = try gpa.alloc(u32, fz.regions.items.len + 1);
     @memset(cells, 0);
     module.clearRetainingCapacity();
-    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .cells = if (chaining) @intFromPtr(cells.ptr) else 0, .structured = !dispatch, .promote = fz_opts & 1 == 0 }, &module, &b);
+    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .cells = if (chaining) @intFromPtr(cells.ptr) else 0, .structured = flags & 1 == 0, .layout = if (flags & 2 != 0) .br_table else .functions, .promote = fz_opts & 1 == 0 }, &module, &b);
     stats[9] += b.structured;
     stats[10] += b.dispatched;
     try fz.batches.append(gpa, .{ .first = first, .count = count, .cells = cells, .chains = try gpa.dupe(u64, b.chains.items), .chaining = chaining });
@@ -328,4 +328,74 @@ export fn status_alloc(n: u32) ?[*]i32 {
     const s = gpa.alloc(i32, n) catch return null;
     @memset(s, 0);
     return s.ptr;
+}
+
+// ---------------------------------------------------------------- benches
+
+/// A counted loop for tests/jit/bench.mjs: x0 += x1 and SUBS x1, x1, #1
+/// with NZCV written back, until x1 is 0, then svc. Returns the module's
+/// length.
+const bench_text =
+        \\region 0x1000
+        \\b0:
+        \\  poll #0x1000
+        \\  br -> b1
+        \\b1:
+        \\  %0 = getreg:i64 #0x0
+        \\  %1 = getreg:i64 #0x8
+        \\  %2 = add:i64 %0, %1
+        \\  setreg %2 #0x0
+        \\  %3 = const:i64 #0x1
+        \\  %4 = sub:i64 %1, %3
+        \\  setreg %4 #0x8
+        \\  %5 = nzcv.sub:flags %1, %3
+        \\  %6 = nzcv.pack:i32 %5
+        \\  setreg %6 #0x10
+        \\  retire #0x3
+        \\  %7 = nzcv.cond:i1 %5 #0x1
+        \\  brcond %7 -> b1 b2
+        \\b2:
+    \\  exit.svc #0x100c
+;
+
+export fn bench_prepare() u32 {
+    var r = ir.parse(gpa, bench_text) catch return 0;
+    defer r.deinit(gpa);
+    if (ir.verify(&r) != null) return 0;
+    return emitModule(&r) catch 0;
+}
+
+/// The loop as region 0 of a batch of `n`, the rest random, in the
+/// br_table layout if `br_table`. Returns the module's length.
+export fn bench_batch(n: u32, br_table: u32) u32 {
+    return benchBatch(n, br_table != 0) catch 0;
+}
+fn benchBatch(n: u32, br_table: bool) !u32 {
+    try fuzzReset(n, n);
+    var loop = try ir.parse(gpa, bench_text);
+    defer loop.deinit(gpa);
+    const ptrs = try gpa.alloc(*const ir.Region, n);
+    defer gpa.free(ptrs);
+    ptrs[0] = &loop;
+    for (ptrs[1..], fz.regions.items[1..]) |*p, *r| p.* = r;
+    module.clearRetainingCapacity();
+    var b: vcpu.emit.wasm.Batch = .{};
+    defer b.deinit(gpa);
+    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions }, &module, &b);
+    return @intCast(module.items.len);
+}
+
+/// Runs the loop `iters` times through `slot`; 1 if x0 is right.
+export fn bench_run(slot: u32, iters: u32) u32 {
+    var c: cases.Case = .{ .text = "", .regs = @splat(0) };
+    c.regs[1] = iters;
+    const f: vcpu.ctx.EntryFn = @ptrFromInt(slot);
+    const code = f(env.reset(c));
+    const n: u64 = iters;
+    return @intFromBool(code == @intFromEnum(vcpu.ctx.Exit.svc) and env.regs[0] == n * (n + 1) / 2);
+}
+
+/// A context to enter random regions with, for timing their first calls.
+export fn bench_ctx() *Ctx {
+    return env.reset(.{ .text = "", .regs = @splat(0) });
 }
