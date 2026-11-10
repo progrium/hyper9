@@ -417,14 +417,94 @@ pub fn effects(i: *const Inst) Effects {
                 if ((i.opcode == 0xda or i.opcode == 0xdb) and rg <= 3) x.flags_read = CF | flags.ZF | flags.PF;
                 if ((i.opcode == 0xdb or i.opcode == 0xdf) and (rg == 5 or rg == 6)) x.flags_written = A;
             }
+            x87Effects(i, &x);
         },
         .sse => {
             // COMISS, UCOMISS, and their SD forms.
             if (i.opcode == 0x0f2e or i.opcode == 0x0f2f) x.flags_written = A;
+            sseEffects(i, &x);
         },
         else => {},
     }
     return x;
+}
+
+/// x87 memory operands, and FNSTSW AX.
+fn x87Effects(i: *const Inst, x: *Effects) void {
+    const rg = i.reg();
+    if (!i.mem) {
+        // FNSTSW AX: a 16-bit write, so it reads EAX too.
+        if (i.opcode == 0xdf and i.modrm == 0xe0) {
+            x.regs_read |= table.eax;
+            x.regs_written |= table.eax;
+        }
+        return;
+    }
+    // Stores: FST, FSTP, FNSTENV, and FNSTCW (D9 /2 /3 /6 /7); FISTTP,
+    // FIST, FISTP, and FSTP m80 (DB /1 /2 /3 /7); FISTTP, FST, FSTP,
+    // FNSAVE, and FNSTSW (DD /1 /2 /3 /6 /7); FISTTP, FIST, FISTP,
+    // FBSTP, and FISTP m64 (DF /1 /2 /3 /6 /7). The rest load.
+    const store = switch (i.opcode) {
+        0xd9 => rg == 2 or rg == 3 or rg >= 6,
+        0xdb => rg >= 1 and rg <= 3 or rg == 7,
+        0xdd, 0xdf => rg >= 1 and rg <= 3 or rg >= 6,
+        else => false,
+    };
+    if (store) x.mem_write = true else x.mem_read = true;
+}
+
+/// MMX, SSE, and SSE2: the general registers some forms move to or from,
+/// and their memory operands. F3 and F2 take precedence over 66, as in
+/// sse.zig.
+fn sseEffects(i: *const Inst, x: *Effects) void {
+    const Pfx = enum { none, p66, f3, f2 };
+    const p: Pfx = switch (i.rep) {
+        .rep => .f3,
+        .repne => .f2,
+        .none => if (i.opsize) .p66 else .none,
+    };
+    const rm_gpr: u8 = if (i.mem) 0 else regBit(i.rm());
+    const reg_gpr = regBit(i.reg());
+    const op: u8 = @truncate(i.opcode);
+    switch (op) {
+        // CVTSI2SS and CVTSI2SD.
+        0x2a => if (p == .f3 or p == .f2) {
+            x.regs_read |= rm_gpr;
+        },
+        // CVT(T)SS2SI and CVT(T)SD2SI.
+        0x2c, 0x2d => if (p == .f3 or p == .f2) {
+            x.regs_written |= reg_gpr;
+        },
+        // MOVMSKPS and MOVMSKPD, PEXTRW, and PMOVMSKB.
+        0x50, 0xc5, 0xd7 => x.regs_written |= reg_gpr,
+        // MOVD to MMX or XMM, and PINSRW.
+        0x6e, 0xc4 => x.regs_read |= rm_gpr,
+        // MOVD from MMX or XMM (F3 7E is MOVQ, XMM to XMM).
+        0x7e => if (p != .f3) {
+            x.regs_written |= rm_gpr;
+        },
+        // MOVNTI.
+        0xc3 => x.regs_read |= reg_gpr,
+        // MASKMOVQ and MASKMOVDQU: a store to EDI.
+        0xf7 => {
+            x.regs_read |= table.edi;
+            x.mem_write = true;
+            x.seg_base = i.seg == .fs or i.seg == .gs;
+        },
+        else => {},
+    }
+    if (!i.mem) return;
+    const store = switch (op) {
+        // MOVUPS/MOVSS and the rest at 11, MOVLPS, MOVHPS, MOVAPS,
+        // MOVNTPS, MOVQ/MOVDQA/MOVDQU, MOVD, MOVNTI, MOVQ (66 D6),
+        // MOVNTQ and MOVNTDQ.
+        0x11, 0x13, 0x17, 0x29, 0x2b, 0x7f, 0xc3, 0xd6, 0xe7 => true,
+        0x7e => p != .f3,
+        // FXSAVE and STMXCSR.
+        0xae => i.reg() == 0 or i.reg() == 3,
+        else => false,
+    };
+    if (store) x.mem_write = true else x.mem_read = true;
 }
 
 fn d(bytes: []const u8) !Inst {
@@ -528,4 +608,30 @@ test "effects" {
     x = effects(&try d(&.{ 0x8d, 0x40, 0x04 }));
     try std.testing.expect(!x.mem_read and !x.mem_write);
     try std.testing.expectEqual(table.eax, x.regs_written);
+}
+
+test "effects of SSE and x87 forms" {
+    // movd %xmm1, %eax
+    var x = effects(&try d(&.{ 0x66, 0x0f, 0x7e, 0xc8 }));
+    try std.testing.expectEqual(table.eax, x.regs_written);
+    // cvtsi2sd %ecx, %xmm0
+    x = effects(&try d(&.{ 0xf2, 0x0f, 0x2a, 0xc1 }));
+    try std.testing.expectEqual(table.ecx, x.regs_read);
+    // cvttsd2si (%esi), %edx
+    x = effects(&try d(&.{ 0xf2, 0x0f, 0x2c, 0x16 }));
+    try std.testing.expectEqual(table.esi, x.regs_read);
+    try std.testing.expectEqual(table.edx, x.regs_written);
+    try std.testing.expect(x.mem_read and !x.mem_write);
+    // pmovmskb %mm1, %ebx
+    x = effects(&try d(&.{ 0x0f, 0xd7, 0xd9 }));
+    try std.testing.expectEqual(table.ebx, x.regs_written);
+    // movdqa %xmm0, (%eax)
+    x = effects(&try d(&.{ 0x66, 0x0f, 0x7f, 0x00 }));
+    try std.testing.expect(x.mem_write and !x.mem_read);
+    // fnstsw %ax
+    x = effects(&try d(&.{ 0xdf, 0xe0 }));
+    try std.testing.expectEqual(table.eax, x.regs_written);
+    // fstpl (%ecx)
+    x = effects(&try d(&.{ 0xdd, 0x19 }));
+    try std.testing.expect(x.mem_write and !x.mem_read);
 }
