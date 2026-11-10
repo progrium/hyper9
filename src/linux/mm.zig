@@ -1237,6 +1237,15 @@ pub const Mm = struct {
     /// MADV_DONTNEED: private pages in [start, end) read as zero again,
     /// or a private file mapping's as the file's. Shared ones keep their
     /// contents, as Linux's do.
+    ///
+    /// A file mapping with no Src to read again (a program's ELF
+    /// segments, which elf.load copies in, or a private mapping copied
+    /// at mmap) keeps its contents: on Linux those pages would read as
+    /// the file's again, and zeros would be the file's only by chance.
+    /// Bun's standalone executables (Claude Code's) hand back the pages
+    /// of their embedded sources in the .bun section, a writable
+    /// segment, and read them again later; zeroed, they parse as NULs.
+    /// Pages the program wrote keep its writes rather than reverting.
     pub fn discard(m: *Mm, start: u64, end: u64) void {
         m.lockSpin();
         defer m.lock.unlock();
@@ -1244,6 +1253,8 @@ pub const Mm = struct {
             if (v.end <= start or v.start >= end or v.shared) continue;
             if (v.src != null)
                 m.fillAllocated(v, @max(v.start, start), @min(v.end, end))
+            else if (v.kind == .file and !v.cow)
+                continue
             else
                 m.zero(@max(v.start, start), @min(v.end, end));
         }

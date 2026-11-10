@@ -1895,7 +1895,7 @@ kernel that serves 9front programs, so it runs in the same machine, with
 the same namespace, sandbox, network policy, and limits. Static and dynamic
 programs for arm64 and amd64 run, built against musl or glibc; Alpine's
 busybox, `apk`, Python, SQLite, PostgreSQL, Redis, Git, the Go and Zig
-toolchains, fzf, htop, and ripgrep have all been run this way.
+toolchains, fzf, htop, ripgrep, and Claude Code have all been run this way.
 
 **A single binary.** A static Linux program on the host runs like a 9front
 one, by its host path, with no Linux tree at all:

@@ -5526,6 +5526,18 @@ test "madvise MADV_FREE is EINVAL, and MADV_DONTNEED zeroes [18]" {
     try netCase(&le, &.{ "/mnt/term/cwd/files", "madv_free" }, "ok madv_free\n");
 }
 
+test "MADV_DONTNEED on the program's own data segment leaves the file's bytes [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "image_dontneed" }, "ok image_dontneed\n");
+}
+
+test "a path through /proc/self/fd/N walks on from the directory the fd names [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_fd_dir" }, "ok proc_fd_dir\n");
+}
+
 test "System V shared memory: a keyed segment, shared across fork, its attach count, and removal [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

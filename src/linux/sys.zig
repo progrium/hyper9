@@ -1699,7 +1699,42 @@ const ia32 = struct {
 // Files.
 
 fn pathArg(p: *Process, va: u64, buf: []u8) Err![:0]u8 {
-    return p.string(va, buf);
+    const path = try p.string(va, buf);
+    return throughProcLink(p, path, buf) orelse path;
+}
+
+/// `path` with a leading /proc link that has more after it
+/// (/proc/self/fd/N/name, /proc/self/cwd/name) replaced by the link's
+/// target, so the rest is walked from the directory it names, as Linux
+/// follows such a link. Claude Code makes its temp directories with
+/// mkdir("/proc/self/fd/N/name") on a directory it opened O_PATH. Null
+/// if `path` doesn't go through one. The target is the file's path now,
+/// not the open file itself, so a directory renamed since it was opened
+/// isn't followed.
+fn throughProcLink(p: *Process, path: [:0]u8, buf: []u8) ?[:0]u8 {
+    if (!std.mem.startsWith(u8, path, "/proc/")) return null;
+    var i: usize = "/proc/".len;
+    // The link is at most four elements deep: /proc/self/fd/N.
+    var depth: usize = 0;
+    while (depth < 4) : (depth += 1) {
+        i = std.mem.indexOfScalarPos(u8, path, i, '/') orelse return null;
+        if (procLink(p, path[0..i])) |target| {
+            if (target.len == 0 or target[0] != '/') return null;
+            // procLink's target is in name2_buf, which may be `buf`.
+            var rest_buf: [4096]u8 = undefined;
+            const rest = path[i..];
+            if (rest.len > rest_buf.len) return null;
+            @memcpy(rest_buf[0..rest.len], rest);
+            const t = if (std.mem.eql(u8, target, "/")) "" else target;
+            if (t.len + rest.len + 1 > buf.len) return null;
+            std.mem.copyForwards(u8, buf[0..t.len], t);
+            @memcpy(buf[t.len..][0..rest.len], rest_buf[0..rest.len]);
+            buf[t.len + rest.len] = 0;
+            return buf[0 .. t.len + rest.len :0];
+        }
+        i += 1;
+    }
+    return null;
 }
 
 /// Runs `f(path)` with relative paths walked from dirfd's directory.
