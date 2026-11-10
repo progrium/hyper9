@@ -1426,6 +1426,25 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_x86inv.addArgs(args) else run_x86inv.addArg(b.pathJoin(&.{ root, "386" }));
     b.step("x86-inventory", "Report the 386 instructions in binaries (default: the root tree's 386): zig build x86-inventory -- PATH...").dependOn(&run_x86inv.step);
 
+    // The amd64 instruction inventory over hx64's decoder and T0
+    // (tools/x64inv.zig): zig build x64-inventory -- PATH...
+    const x64inv = b.addExecutable(.{
+        .name = "x64inv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/x64inv.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+            },
+        }),
+    });
+    const run_x64inv = b.addRunArtifact(x64inv);
+    run_x64inv.has_side_effects = true;
+    if (b.args) |args| run_x64inv.addArgs(args) else run_x64inv.addArg(b.pathJoin(&.{ root, "amd64" }));
+    b.step("x64-inventory", "Report the amd64 instructions in binaries (default: the root tree's amd64): zig build x64-inventory -- PATH...").dependOn(&run_x64inv.step);
+
     const slim_tool = b.addExecutable(.{
         .name = "slim",
         .root_module = b.createModule(.{ .root_source_file = b.path("tools/slim.zig"), .target = b.graph.host }),
@@ -1730,11 +1749,13 @@ fn addX64check(b: *std.Build, vcpu: *std.Build.Module) void {
         .name = "oracle64",
         .root_module = b.createModule(.{
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }),
-            .optimize = .ReleaseSafe,
+            .optimize = .ReleaseFast,
             .link_libc = true,
         }),
     });
-    oracle.root_module.addCSourceFile(.{ .file = b.path("tools/x86check/oracle64.c") });
+    // No sanitizer: its traps are SIGILL, which the oracle takes as the
+    // guest's.
+    oracle.root_module.addCSourceFile(.{ .file = b.path("tools/x86check/oracle64.c"), .flags = &.{"-fno-sanitize=all"} });
     const check = b.addExecutable(.{
         .name = "x86check",
         .root_module = b.createModule(.{
@@ -1754,8 +1775,8 @@ fn addX64check(b: *std.Build, vcpu: *std.Build.Module) void {
     const cases = gen.addOutputFileArg("cases.bin");
     gen.addArg(mode);
     const run = b.addRunArtifact(oracle);
-    run.setStdIn(.{ .lazy_path = cases });
-    const answers = run.captureStdOut(.{});
+    run.addFileArg(cases);
+    const answers = run.addOutputFileArg("answers.bin");
     const cmp = b.addRunArtifact(check);
     cmp.has_side_effects = true;
     cmp.setEnvironmentVariable("X86CHECK_MODE", mode);

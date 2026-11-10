@@ -314,22 +314,13 @@ fn unicornIdivCrash(bytes: []const u8, rax: u64, rdx: u64) bool {
     return (edx == 0x8000_0000 and eax == 0) or (edx & 0xffff == 0x8000 and eax & 0xffff == 0);
 }
 
-/// The RFLAGS bits the instruction at `bytes` leaves undefined: the
-/// decoder's effects, once long mode has them (workstream A); until then,
-/// every arithmetic flag of the instructions that leave any undefined.
+/// The RFLAGS bits the instruction at `bytes` leaves undefined, as the
+/// decoder's effects have them; DIV and IDIV leave all six.
 fn undefinedFlags(bytes: []const u8) u32 {
     const dec = vcpu.x86.decode;
     const i = dec.decodeIn(.long, bytes) catch return 0;
-    if (@hasDecl(dec, "effects64")) return dec.effects64(&i).flags_undefined;
-    const fl = vcpu.x86.flags;
-    return switch (i.op) {
-        .mul, .imul1, .imul => fl.SF | fl.ZF | fl.AF | fl.PF,
-        .shl, .shr, .sar, .shld, .shrd => fl.AF | fl.OF,
-        .rol, .ror, .rcl, .rcr => fl.OF,
-        .bsf, .bsr => fl.arith & ~fl.ZF,
-        .div, .idiv => fl.arith,
-        else => 0,
-    };
+    if (i.op == .div or i.op == .idiv) return vcpu.x86.flags.arith;
+    return dec.effectsIn(.long, &i).flags_undefined;
 }
 
 /// The vector of the exception T0 raised, if it raised one.

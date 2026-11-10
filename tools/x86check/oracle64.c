@@ -1,8 +1,8 @@
 // The host as oracle for hx64 (tools/x86check, long mode): runs one
 // instruction at a time natively on the real CPU in 64-bit mode and
 // reports the registers, flags, and memory it leaves. Built as an x86-64
-// Linux program; x86check.zig's `gen64` and `cmp64` feed it cases on stdin
-// and compare T0's results with its answers.
+// Linux program; x86check.zig's `gen64` and `cmp64` feed it cases (on
+// stdin, or from a file) and compare T0's results with its answers.
 //
 // A case: 16 code bytes, 16 registers, RFLAGS, the GS base, the 1 KiB
 // data window at 0x50000e00 (crossing a page boundary at 0x50001000), the
@@ -135,7 +135,9 @@ __asm__(
     "  ret\n");
 extern char back[];
 
-int main(void) {
+int main(int argc, char **argv) {
+    // oracle64 [cases answers]: files, or stdin and stdout.
+    if (argc == 3 && (!freopen(argv[1], "rb", stdin) || !freopen(argv[2], "wb", stdout))) return 1;
     if (mmap((void *)CODE, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) return 1;
     if (mmap((void *)DATA, 0x2000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) return 1;
     static char altstack[65536];
@@ -159,7 +161,8 @@ int main(void) {
         code[16] = 0xff;
         code[17] = 0x25;
         memset(code + 18, 0, 4);
-        *(uint64_t *)(code + 22) = (uint64_t)back;
+        uint64_t to = (uint64_t)back;
+        memcpy(code + 22, &to, 8);
         memset((void *)DATA, 0, 0x2000);
         memcpy((void *)WIN, c.win, WINLEN);
         memcpy(g_in, c.r, 128);

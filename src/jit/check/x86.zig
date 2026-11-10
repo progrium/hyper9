@@ -189,6 +189,8 @@ pub const ShadowMem64 = struct {
 /// a fault and any other exception leave RIP at the instruction, the
 /// exception as `exception_kind` in exit_info with its vector above.
 pub fn exitOf64(c: *Ctx, cpu: *Cpu64, e: cpu_mod.Exit64, pc: u64) u32 {
+    // The lifter's, once it has one, so call.interp and the check agree.
+    if (@hasDecl(lift, "exitForIn")) return lift.exitForIn(.long, c, cpu, e, pc);
     c.exit_pc = cpu.rip;
     switch (e) {
         .syscall => {
