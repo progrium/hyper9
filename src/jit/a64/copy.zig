@@ -20,6 +20,7 @@
 //! as call.interp on the word, so the region check covers it everywhere.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ir = @import("../ir.zig");
 const lift = @import("lift.zig");
 const dec = @import("../../interp/a64/decode.zig");
@@ -29,12 +30,11 @@ const t0 = @import("../../interp/a64/exec.zig");
 const Cpu = t0.Cpu;
 const L = lift.L;
 
-/// Whether the lifter emits copies. They're for arm64 hosts, whose
-/// emitter runs them natively (elsewhere a copy is a call into T0, slower
-/// than the lifted ops). Off until real programs run with them: fuzz-a64
-/// agrees, but h9's T1 on an M3 doesn't (a MOVZ copied is enough to break
-/// rc). fuzz-a64 turns it on with H9_FUZZ_COPY=1.
-pub var enabled: bool = false;
+/// Whether the lifter emits copies: on arm64 hosts, whose emitter runs
+/// them natively. Elsewhere a copy is a call into T0, slower than the
+/// lifted ops, so it stays off; fuzz-a64 turns it on (H9_FUZZ_COPY=1) to
+/// check the plans on ir_eval.
+pub var enabled: bool = builtin.cpu.arch == .aarch64;
 
 /// Whether FP and saturating instructions (aux bit 34) are copied. The
 /// arm64 emitter runs those through T0 until it carries the guest's FPCR
