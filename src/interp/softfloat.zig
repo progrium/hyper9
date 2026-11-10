@@ -709,8 +709,9 @@ pub fn rsqrt(a: u32) u32 {
     const x = daz(u32, &env, a);
     if (x & ~Fmt(u32).sign_bit == 0) return x | Fmt(u32).inf;
     if (x & Fmt(u32).sign_bit != 0) return defaultNan(u32, &env);
-    // 1/sqrt(a) = sqrt(1/a), rounded twice: well within 12 bits.
-    const s = sqrt(u32, &env, div(u32, &env, 0x3f80_0000, x));
+    // 1/sqrt(a), rounded twice: well within 12 bits. (sqrt(1/a) would
+    // lose large a, whose reciprocal is denormal and DAZ reads as zero.)
+    const s = div(u32, &env, 0x3f80_0000, sqrt(u32, &env, x));
     if (isDenormal(u32, s)) return 0;
     return s;
 }
@@ -828,6 +829,12 @@ test "Arm's NaN, tininess, and flush rules" {
     try testing.expectEqual(bits64(-3.0), roundToInt(u64, &env, bits64(-2.5), .near_away, false));
     env = .{ .rounding = .odd };
     try testing.expectEqual(@as(u32, 0x3f80_0001), f64to32(&env, 0x3ff0_0000_0000_0001));
+}
+
+test "rsqrt of large and small values" {
+    // 2^126: 2^-63, though 1/a is denormal.
+    try testing.expectEqual(@as(u32, 0x2000_0000), rsqrt(0x7e80_0000));
+    try testing.expectEqual(@as(u32, 0x3f00_0000), rsqrt(0x4080_0000));
 }
 
 test "integer conversions" {
