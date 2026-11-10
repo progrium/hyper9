@@ -151,6 +151,7 @@ fn candidate(rand: std.Random) ?u32 {
     if ((w >> 24) & 0x1f == 0x10) return null; // ADR and ADRP: the PCs differ
     const o = dec.decode(w, 0x10000);
     if (o.k == .undef) return null;
+    if (o.k.isSimd()) return null; // simd_exec's own oracle covers these
     const r = dec.regs(o);
     if (r.mem != .none or r.ctrl != .none or r.system) return null;
     const bad: u64 = 1 << 18 | 1 << dec.SP;
@@ -230,6 +231,7 @@ fn memCandidate(rand: std.Random) ?u32 {
     };
     w = (w & ~@as(u32, 0xf << 25)) | op0 << 25;
     const o = dec.decode(w, 0x10000);
+    if (o.k.isSimd()) return null; // simd_exec's own oracle covers these
     const r = dec.regs(o);
     if (r.mem != .load and r.mem != .store) return null;
     if (r.system or r.ctrl != .none) return null;
