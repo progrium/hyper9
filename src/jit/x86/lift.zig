@@ -40,6 +40,24 @@ const exec = @import("../../interp/x86/exec.zig");
 const cpu_mod = @import("../../interp/x86/cpu.zig");
 const helpers = @import("helpers.zig");
 
+// A lazy pending.flags writes an ir.LazyRecord at the bits offset + 4,
+// which the interpreter reads back as its flags.Lazy.
+comptime {
+    const iflags = @import("../../interp/x86/flags.zig");
+    const L = iflags.Lazy;
+    const R = ir.LazyRecord;
+    if (@sizeOf(L) != @sizeOf(R)) @compileError("flags.Lazy and ir.LazyRecord differ in size");
+    for (.{ "kind", "size", "cin", "a", "b", "res" }) |f|
+        if (@offsetOf(L, f) != @offsetOf(R, f)) @compileError("flags.Lazy." ++ f ++ " is not where ir.LazyRecord puts it");
+    if (@offsetOf(iflags.Flags, "lazy") != @offsetOf(iflags.Flags, "bits") + 4) @compileError("flags.Flags.lazy is not at bits + 4");
+    if (@typeInfo(iflags.Kind).@"enum".tag_type != @typeInfo(ir.LazyKind).@"enum".tag_type) @compileError("flags.Kind and ir.LazyKind differ in tag type");
+    const ik = @typeInfo(iflags.Kind).@"enum".fields;
+    const jk = @typeInfo(ir.LazyKind).@"enum".fields;
+    if (ik.len != jk.len) @compileError("flags.Kind and ir.LazyKind differ");
+    for (ik, jk) |x, y|
+        if (x.value != y.value or !std.mem.eql(u8, x.name, y.name)) @compileError("flags.Kind." ++ x.name ++ " is not ir.LazyKind." ++ y.name);
+}
+
 const Cpu = cpu_mod.Cpu;
 const Inst = dec.Inst;
 const Ref = ir.Ref;

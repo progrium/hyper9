@@ -58,12 +58,15 @@ pub const Kind = enum(u8) {
     mul,
 };
 
-pub const Lazy = struct {
+/// The JIT writes this record directly (ir.LazyRecord, which lift.zig
+/// asserts matches), so its layout is fixed.
+pub const Lazy = extern struct {
     kind: Kind = .none,
     /// Operand size in bytes: 1, 2, or 4.
     size: u8 = 4,
-    /// Carry in (ADC, SBB), or the CF that INC and DEC keep.
-    cin: u1 = 0,
+    /// Carry in (ADC, SBB), or the CF that INC and DEC keep: 0 or 1.
+    cin: u8 = 0,
+    _pad: u8 = 0,
     a: u32 = 0,
     b: u32 = 0,
     res: u32 = 0,
@@ -99,7 +102,8 @@ pub fn condReads(cc: u4) u32 {
     };
 }
 
-pub const Flags = struct {
+/// `lazy` sits right after `bits`, where a lazy pending.flags puts it.
+pub const Flags = extern struct {
     bits: u32 = res1,
     lazy: Lazy = .{},
 

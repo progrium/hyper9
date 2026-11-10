@@ -1132,7 +1132,7 @@ test "a lazy pending.flags writes its record and leaves the bits alone" {
     );
     defer r.deinit(gpa);
     try testing.expect(ir.verify(&r) == null);
-    var cpu: [8]u32 = .{ 0, 0, 0, 0, 0x202, 0, 0, 0 }; // bits at 0x10, record at 0x14
+    var cpu: [12]u32 = .{ 0, 0, 0, 0, 0x202, 0, 0, 0, 0, 0, 0, 0 }; // bits at 0x10, record at 0x14
     var tlb: mem.Tlb = .{};
     var c: Ctx = .{ .cpu = @intFromPtr(&cpu), .tlb = @intFromPtr(&tlb) };
     try testing.expectEqual(Exit.chain, try run(gpa, &r, &c));
