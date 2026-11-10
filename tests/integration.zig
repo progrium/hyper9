@@ -2245,9 +2245,12 @@ test "--timeout posts hangup before tearing down [baseline]" {
     const e = try env(@src());
     // rc must define sighup before the timeout, which takes a few guest
     // process starts on a slow host (or under -Djit-check), and the
-    // timeout must come before sleep's 10 s.
+    // timeout must come before sleep's 10 s. Both scale with H9_TEST_SLOW,
+    // so the sleep still outlasts the timeout.
     var tb: [16]u8 = undefined;
-    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 2_000), "--rc", "fn sighup { echo got hangup }; sleep 10; echo after" });
+    var sb: [80]u8 = undefined;
+    const script = std.fmt.bufPrint(&sb, "fn sighup {{ echo got hangup }}; sleep {d}; echo after", .{slow(10_000) / 1000}) catch unreachable;
+    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 2_000), "--rc", script });
     defer r.deinit();
     // rc execs a last simple command in place, dropping its handler, so
     // sleep isn't last here.
