@@ -38,6 +38,10 @@ const EmitError = emitter.EmitError;
 pub const emitter_def: emitter.Emitter = .{ .name = "x86-64", .emit = emit };
 
 const win64 = builtin.os.tag == .windows;
+/// SSE2 is every x86-64's; SSSE3 and SSE4.1 only where the build targets
+/// them (the host's own CPU for native builds).
+const ssse3 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .ssse3);
+const sse41 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .sse4_1);
 
 // Registers.
 const RAX = 0;
@@ -718,6 +722,13 @@ fn lowerExt(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.In
         else => {},
     }
     if (!i.op.isExt()) return error.Unsupported;
+    if (try vecNative(e, r, a, i, dst)) return;
+    if (try fpNative(e, r, a, i, dst)) return;
+    return extFallback(e, r, a, i, dst);
+}
+
+/// ir_eval.evalExtC for an `fp.*` or `v.*` op.
+fn extFallback(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) EmitError!void {
     // Stage the operands, each zero-extended to 16 bytes.
     for (i.operands(), 0..) |o, k| {
         if (o == ir.none) continue;
@@ -814,6 +825,394 @@ fn vmemOp(e: *E, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !void {
     }
     e.land(join);
     if (store and f.order == .seq_cst) try e.bs(&.{ 0x0f, 0xae, 0xf0 });
+}
+
+// ---------------------------------------------------------------- SSE
+
+/// An SSE op on registers: [prefix] 0F opc... modrm(reg, rm). xmm and
+/// general registers are numbered alike; `w` sets REX.W.
+fn sse(e: *E, prefix: ?u8, w: bool, opc: []const u8, reg: u8, rm: u8) !void {
+    if (prefix) |p| try e.b(p);
+    try e.rex(w, reg, 0, rm);
+    try e.b(0x0f);
+    try e.bs(opc);
+    try e.b(0xc0 | ((reg & 7) << 3) | (rm & 7));
+}
+
+/// The same with an imm8 after.
+fn sseI(e: *E, prefix: ?u8, opc: []const u8, reg: u8, rm: u8, imm: u8) !void {
+    try sse(e, prefix, false, opc, reg, rm);
+    try e.b(imm);
+}
+
+/// xmm`x` = the value in `slot`: 16 bytes, or a scalar's 8.
+fn ldX(e: *E, x: u8, slot: u32, t: Type) !void {
+    if (t == .v128) return vload(e, x, RSP, slotDisp(slot));
+    try e.b(0xf3); // movq xmm, m64
+    try e.rm(false, &.{ 0x0f, 0x7e }, x, RSP, slotDisp(slot));
+}
+
+/// The value in xmm`x` to `slot`: 16 bytes, or a scalar of type t,
+/// zero-extended to 8.
+fn stX(e: *E, slot: u32, x: u8, t: Type) !void {
+    if (t == .v128) return vstore(e, RSP, slotDisp(slot), x);
+    try sse(e, 0x66, t == .i64, &.{0x7e}, x, RAX); // movd/movq rax, xmm
+    try maskTo(e, t);
+    try e.stSlot(slot, RAX);
+}
+
+/// xmm`x` = imm32 in every 32-bit lane.
+fn splat32(e: *E, x: u8, v: u32) !void {
+    try e.movImm(RAX, v);
+    try sse(e, 0x66, false, &.{0x6e}, x, RAX); // movd
+    try sseI(e, 0x66, &.{0x70}, x, x, 0); // pshufd x, x, 0
+}
+
+/// Integer `v.*` ops that SSE2 (or SSSE3 and SSE4.1 where the build
+/// allows) does exactly: a in xmm0, b in xmm1, the result in xmm0.
+/// Returns false, emitting nothing, for the rest.
+fn vecNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !bool {
+    _ = r;
+    if (i.op.isFp()) return false;
+    const x = ir.ExtAux.of(i.aux);
+    const es = x.esize;
+    // Per lane size: byte, word, dword, qword forms (0 if none).
+    const T4 = [4]u8;
+    const can = switch (i.op) {
+        .@"v.make", .@"v.and", .@"v.or", .@"v.xor", .@"v.andn", .@"v.add", .@"v.sub", .@"v.lane", .@"v.ins", .@"v.dup", .@"v.ext" => true,
+        .@"v.zip" => true,
+        .@"v.mul" => es == 1 or (es == 2 and sse41),
+        .@"v.shl", .@"v.lshr" => es != 0 and x.imm < 256,
+        .@"v.ashr" => (es == 1 or es == 2) and x.imm < 256,
+        .@"v.cmp" => es <= 2 or (es == 3 and sse41 and (x.imm == 0 or x.imm == 1)),
+        .@"v.min", .@"v.max" => switch (es) {
+            0 => x.imm == 0 or sse41,
+            1 => x.imm == 1 or sse41,
+            2 => sse41,
+            3 => false,
+        },
+        .@"v.tbl" => ssse3,
+        .@"v.narrow" => (es == 1 and x.imm != 3) or (es == 2 and (x.imm == 1 or (x.imm == 2 and sse41))),
+        .@"v.widen" => es <= 1 or (x.imm & 1 == 0) or sse41,
+        else => false,
+    };
+    if (!can) return false;
+    switch (i.op) {
+        .@"v.make" => {
+            try e.ldSlot(RAX, slotOf(a, i.a));
+            try e.ldSlot(RCX, slotOf(a, i.b));
+            try e.stSlot(dst, RAX);
+            try e.stSlot(dst + 1, RCX);
+            return true;
+        },
+        .@"v.lane" => {
+            const off: i32 = slotDisp(slotOf(a, i.a)) + @as(i32, x.imm) * @as(i32, @intCast(x.bits() / 8));
+            switch (es) {
+                0 => try e.rm(false, &.{ 0x0f, 0xb6 }, RAX, RSP, off),
+                1 => try e.rm(false, &.{ 0x0f, 0xb7 }, RAX, RSP, off),
+                2 => try e.rm(false, &.{0x8b}, RAX, RSP, off),
+                3 => try e.load(RAX, RSP, off),
+            }
+            try e.stSlot(dst, RAX);
+            return true;
+        },
+        .@"v.ins" => {
+            try vload(e, 0, RSP, slotDisp(slotOf(a, i.a)));
+            try vstore(e, RSP, slotDisp(dst), 0);
+            try e.ldSlot(RAX, slotOf(a, i.b));
+            const off: i32 = slotDisp(dst) + @as(i32, x.imm) * @as(i32, @intCast(x.bits() / 8));
+            switch (es) {
+                0 => try e.rm(false, &.{0x88}, RAX, RSP, off),
+                1 => try e.rm16(&.{0x89}, RAX, RSP, off),
+                2 => try e.rm(false, &.{0x89}, RAX, RSP, off),
+                3 => try e.store(RSP, off, RAX),
+            }
+            return true;
+        },
+        .@"v.dup" => {
+            try e.ldSlot(RAX, slotOf(a, i.a));
+            try sse(e, 0x66, true, &.{0x6e}, 0, RAX); // movq xmm0, rax
+            switch (es) {
+                0 => {
+                    try sse(e, 0x66, false, &.{0x60}, 0, 0); // punpcklbw
+                    try sseI(e, 0xf2, &.{0x70}, 0, 0, 0); // pshuflw 0
+                    try sseI(e, 0x66, &.{0x70}, 0, 0, 0); // pshufd 0
+                },
+                1 => {
+                    try sseI(e, 0xf2, &.{0x70}, 0, 0, 0);
+                    try sseI(e, 0x66, &.{0x70}, 0, 0, 0);
+                },
+                2 => try sseI(e, 0x66, &.{0x70}, 0, 0, 0),
+                3 => try sse(e, 0x66, false, &.{0x6c}, 0, 0), // punpcklqdq
+            }
+            try vstore(e, RSP, slotDisp(dst), 0);
+            return true;
+        },
+        else => {},
+    }
+    try vload(e, 0, RSP, slotDisp(slotOf(a, i.a)));
+    if (i.b != ir.none) try vload(e, 1, RSP, slotDisp(slotOf(a, i.b)));
+    switch (i.op) {
+        .@"v.and" => try sse(e, 0x66, false, &.{0xdb}, 0, 1),
+        .@"v.or" => try sse(e, 0x66, false, &.{0xeb}, 0, 1),
+        .@"v.xor" => try sse(e, 0x66, false, &.{0xef}, 0, 1),
+        .@"v.andn" => {
+            try sse(e, 0x66, false, &.{0xdf}, 1, 0); // pandn xmm1, xmm0: ~b & a
+            try sse(e, 0x66, false, &.{0x6f}, 0, 1); // movdqa xmm0, xmm1
+        },
+        .@"v.add" => try sse(e, 0x66, false, &.{(T4{ 0xfc, 0xfd, 0xfe, 0xd4 })[es]}, 0, 1),
+        .@"v.sub" => try sse(e, 0x66, false, &.{(T4{ 0xf8, 0xf9, 0xfa, 0xfb })[es]}, 0, 1),
+        .@"v.mul" => if (es == 1) try sse(e, 0x66, false, &.{0xd5}, 0, 1) else try sse(e, 0x66, false, &.{ 0x38, 0x40 }, 0, 1),
+        .@"v.shl", .@"v.lshr", .@"v.ashr" => {
+            // psllw/d/q, psrlw/d/q, psraw/d by imm8: /6, /2, /4 of 0F 71-73.
+            const n: u8 = switch (i.op) {
+                .@"v.shl" => 6,
+                .@"v.lshr" => 2,
+                else => 4,
+            };
+            try sseI(e, 0x66, &.{0x70 + @as(u8, es)}, n, 0, @intCast(x.imm));
+        },
+        .@"v.cmp" => try vecCmp(e, es, @enumFromInt(x.imm)),
+        .@"v.min", .@"v.max" => {
+            const max = i.op == .@"v.max";
+            const signed = x.imm & 1 != 0;
+            switch (es) {
+                0 => if (signed) try sse(e, 0x66, false, &.{ 0x38, if (max) 0x3c else 0x38 }, 0, 1) else try sse(e, 0x66, false, &.{if (max) 0xde else 0xda}, 0, 1),
+                1 => if (signed) try sse(e, 0x66, false, &.{if (max) 0xee else 0xea}, 0, 1) else try sse(e, 0x66, false, &.{ 0x38, if (max) 0x3e else 0x3a }, 0, 1),
+                2 => try sse(e, 0x66, false, &.{ 0x38, if (signed) (if (max) 0x3d else 0x39) else (if (max) 0x3f else 0x3b) }, 0, 1),
+                3 => unreachable,
+            }
+        },
+        .@"v.zip" => {
+            const lo = T4{ 0x60, 0x61, 0x62, 0x6c };
+            const hi = T4{ 0x68, 0x69, 0x6a, 0x6d };
+            try sse(e, 0x66, false, &.{if (x.imm == 0) lo[es] else hi[es]}, 0, 1);
+        },
+        .@"v.ext" => if (x.imm != 0) {
+            try sseI(e, 0x66, &.{0x73}, 3, 0, @intCast(x.imm)); // psrldq xmm0, imm
+            try sseI(e, 0x66, &.{0x73}, 7, 1, @intCast(16 - x.imm)); // pslldq xmm1, 16-imm
+            try sse(e, 0x66, false, &.{0xeb}, 0, 1); // por
+        },
+        .@"v.tbl" => {
+            // pshufb zeroes a byte whose index has bit 7 set; set it for
+            // indexes 16 to 127 too.
+            try splat32(e, 2, 0x0f0f_0f0f);
+            try sse(e, 0x66, false, &.{0x6f}, 3, 1); // movdqa xmm3, xmm1
+            try sse(e, 0x66, false, &.{0x64}, 3, 2); // pcmpgtb xmm3, xmm2
+            try sse(e, 0x66, false, &.{0xeb}, 1, 3); // por xmm1, xmm3
+            try sse(e, 0x66, false, &.{ 0x38, 0x00 }, 0, 1); // pshufb xmm0, xmm1
+        },
+        .@"v.narrow" => {
+            try sse(e, 0x66, false, &.{0xef}, 1, 1); // pxor xmm1, xmm1
+            if (es == 1) {
+                if (x.imm == 0) {
+                    try splat32(e, 2, 0x00ff_00ff);
+                    try sse(e, 0x66, false, &.{0xdb}, 0, 2); // pand: packuswb then can't saturate
+                }
+                try sse(e, 0x66, false, &.{if (x.imm == 1) 0x63 else 0x67}, 0, 1); // packsswb / packuswb
+            } else if (x.imm == 1) {
+                try sse(e, 0x66, false, &.{0x6b}, 0, 1); // packssdw
+            } else {
+                try sse(e, 0x66, false, &.{ 0x38, 0x2b }, 0, 1); // packusdw
+            }
+        },
+        .@"v.widen" => {
+            if (x.imm & 2 != 0) try sseI(e, 0x66, &.{0x73}, 3, 0, 8); // psrldq xmm0, 8
+            if (x.imm & 1 == 0) {
+                try sse(e, 0x66, false, &.{0xef}, 1, 1); // pxor xmm1, xmm1
+                try sse(e, 0x66, false, &.{(T4{ 0x60, 0x61, 0x62, 0 })[es]}, 0, 1); // punpckl with zero
+            } else if (es <= 1) {
+                try sse(e, 0x66, false, &.{(T4{ 0x60, 0x61, 0, 0 })[es]}, 0, 0); // each lane twice
+                try sseI(e, 0x66, &.{if (es == 0) 0x71 else 0x72}, 4, 0, if (es == 0) 8 else 16); // psraw / psrad
+            } else {
+                try sse(e, 0x66, false, &.{ 0x38, 0x25 }, 0, 0); // pmovsxdq
+            }
+        },
+        else => unreachable,
+    }
+    try vstore(e, RSP, slotDisp(dst), 0);
+    return true;
+}
+
+/// xmm0 = lanes of xmm0 <pred> xmm1, all ones or zero. Clobbers xmm1-3.
+fn vecCmp(e: *E, es: u2, p: ir.Pred) !void {
+    const eq_op: []const u8 = switch (es) {
+        0 => &.{0x74},
+        1 => &.{0x75},
+        2 => &.{0x76},
+        3 => &.{ 0x38, 0x29 }, // pcmpeqq
+    };
+    const gt_op: []const u8 = switch (es) {
+        0 => &.{0x64},
+        1 => &.{0x65},
+        2 => &.{0x66},
+        3 => &.{ 0x38, 0x37 }, // pcmpgtq (SSE4.2): never chosen
+    };
+    switch (p) {
+        .eq, .ne => try sse(e, 0x66, false, eq_op, 0, 1),
+        else => {
+            // Unsigned: flip each lane's sign bit, then compare signed.
+            const unsigned = switch (p) {
+                .ult, .ule, .ugt, .uge => true,
+                else => false,
+            };
+            if (unsigned) {
+                try sse(e, 0x66, false, &.{0x76}, 2, 2); // pcmpeqd xmm2, xmm2: all ones
+                try sseI(e, 0x66, &.{if (es == 3) 0x73 else if (es == 2) 0x72 else 0x71}, 6, 2, @intCast((@as(u32, 8) << es) - 1)); // the top bit of each lane
+                if (es == 0) {
+                    // No psllb: make 0x80 bytes from 0x8080 words.
+                    try sse(e, 0x66, false, &.{0x76}, 2, 2);
+                    try sseI(e, 0x66, &.{0x71}, 6, 2, 15);
+                    try sse(e, 0x66, false, &.{0x6f}, 3, 2);
+                    try sseI(e, 0x66, &.{0x71}, 2, 3, 8);
+                    try sse(e, 0x66, false, &.{0xeb}, 2, 3);
+                }
+                try sse(e, 0x66, false, &.{0xef}, 0, 2);
+                try sse(e, 0x66, false, &.{0xef}, 1, 2);
+            }
+            // gt: a > b; lt: b > a; le: !(a > b); ge: !(b > a).
+            switch (p) {
+                .sgt, .ugt, .sle, .ule => try sse(e, 0x66, false, gt_op, 0, 1),
+                else => {
+                    try sse(e, 0x66, false, gt_op, 1, 0);
+                    try sse(e, 0x66, false, &.{0x6f}, 0, 1);
+                },
+            }
+        },
+    }
+    switch (p) {
+        .ne, .sle, .ule, .sge, .uge => {
+            try sse(e, 0x66, false, &.{0x76}, 2, 2); // all ones
+            try sse(e, 0x66, false, &.{0xef}, 0, 2); // pxor: not
+        },
+        else => {},
+    }
+}
+
+/// `fp.*` ops natively where the host's SSE gives the guest's result:
+/// round to nearest, no DAZ or FZ, no NaN result, and, when the guest
+/// watches exceptions (aux2), none but overflow, divide-by-zero, and
+/// inexact, which map one to one. Otherwise ir_eval runs it (the slow
+/// path), from the same operands. Returns false, emitting nothing, for an
+/// op or form it doesn't do.
+fn fpNative(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, i: ir.Inst, dst: u32) !bool {
+    const x = ir.ExtAux.of(i.aux);
+    if (x.rounding != 0 or x.daz or x.ftz) return false;
+    const ta: Type = r.insts.items[i.a].ty;
+    const vec = i.ty == .v128;
+    const es: u2 = if (vec) x.esize else switch (if (i.op == .@"fp.cmp" or i.op == .@"fp.tosint") ta else i.ty) {
+        .i32 => 2,
+        .i64 => 3,
+        else => return false,
+    };
+    if (es < 2) return false;
+    const dbl = es == 3;
+    // ps/pd and ss/sd prefixes.
+    const pfx: ?u8 = if (vec) (if (dbl) 0x66 else null) else (if (dbl) 0xf2 else 0xf3);
+    const arith: ?u8 = switch (i.op) {
+        .@"fp.add" => 0x58,
+        .@"fp.mul" => 0x59,
+        .@"fp.sub" => 0x5c,
+        .@"fp.div" => 0x5e,
+        .@"fp.sqrt" => 0x51,
+        .@"fp.min" => if (x.arm) null else 0x5d,
+        .@"fp.max" => if (x.arm) null else 0x5f,
+        else => null,
+    };
+    const watch = i.aux2 != 0;
+    switch (i.op) {
+        .@"fp.cmp" => if (vec) return false,
+        .@"fp.cvt" => if (vec or (ta != .i32 and ta != .i64) or (i.ty != .i32 and i.ty != .i64)) return false,
+        .@"fp.tosint" => if (vec or x.imm != 0 or x.arm) return false,
+        .@"fp.fromsint" => if (vec or x.imm != 0 or (i.ty != .i32 and i.ty != .i64)) return false,
+        else => if (arith == null) return false,
+    }
+    if (watch) try clearHostFlags(e);
+    try ldX(e, 0, slotOf(a, i.a), ta);
+    if (i.b != ir.none) try ldX(e, 1, slotOf(a, i.b), r.insts.items[i.b].ty);
+    var nan_check = true;
+    switch (i.op) {
+        .@"fp.cmp" => {
+            // comis (signaling) or ucomis: ZF PF CF give the order.
+            try sse(e, if (dbl) 0x66 else null, false, &.{if (x.exact) 0x2f else 0x2e}, 0, 1);
+            try e.bs(&.{ 0x0f, 0x9a, 0xc1 }); // setp cl
+            try e.bs(&.{ 0x0f, 0x92, 0xc2 }); // setb dl
+            try e.bs(&.{ 0x0f, 0x94, 0xc0 }); // sete al
+            // un: 3; else 2 - 2*CF - ZF.
+            try e.bs(&.{ 0x0f, 0xb6, 0xc0 }); // movzx eax, al
+            try e.bs(&.{ 0x0f, 0xb6, 0xd2 }); // movzx edx, dl
+            try e.bs(&.{ 0x0f, 0xb6, 0xc9 }); // movzx ecx, cl
+            try e.bs(&.{ 0x01, 0xd2 }); // add edx, edx
+            try e.bs(&.{ 0x01, 0xd0 }); // add eax, edx
+            try e.bs(&.{ 0xf7, 0xd8 }); // neg eax
+            try e.bs(&.{ 0x83, 0xc0, 0x02 }); // add eax, 2
+            try e.bs(&.{ 0x85, 0xc9 }); // test ecx, ecx
+            try e.bs(&.{ 0xb9, 3, 0, 0, 0 }); // mov ecx, 3
+            try e.bs(&.{ 0x0f, 0x45, 0xc1 }); // cmovne eax, ecx
+            try e.stSlot(dst, RAX);
+            nan_check = false;
+        },
+        .@"fp.cvt" => try sse(e, if (dbl) 0xf3 else 0xf2, false, &.{0x5a}, 0, 0), // cvtss2sd / cvtsd2ss (by the source)
+        .@"fp.tosint" => {
+            try sse(e, if (dbl) 0xf2 else 0xf3, i.ty == .i64, &.{0x2d}, RAX, 0); // cvtss2si / cvtsd2si, nearest
+            try maskTo(e, i.ty);
+            try e.stSlot(dst, RAX);
+            nan_check = false;
+        },
+        .@"fp.fromsint" => {
+            try e.ldSlot(RAX, slotOf(a, i.a));
+            try sse(e, 0x66, false, &.{0xef}, 0, 0); // pxor xmm0, xmm0
+            try sse(e, if (i.ty == .i64) 0xf2 else 0xf3, ta == .i64, &.{0x2a}, 0, RAX); // cvtsi2ss / sd
+            nan_check = false;
+        },
+        else => try sse(e, pfx, false, &.{arith.?}, 0, if (i.op == .@"fp.sqrt") 0 else 1),
+    }
+    // To the slow path on a NaN result, or an exception SSE and the
+    // guest may see differently.
+    var slow: [2]?usize = .{ null, null };
+    if (nan_check) {
+        try sse(e, null, false, &.{0x28}, 2, 0); // movaps xmm2, xmm0
+        if (vec) {
+            try sseI(e, if (dbl) 0x66 else null, &.{0xc2}, 2, 2, 3); // cmpunordps/pd xmm2, xmm2
+            try sse(e, if (dbl) 0x66 else null, false, &.{0x50}, RAX, 2); // movmskps/pd eax, xmm2
+            try e.bs(&.{ 0x85, 0xc0 }); // test eax, eax
+            slow[0] = try e.fwd(CC.ne);
+        } else {
+            const rdbl = i.ty == .i64;
+            try sse(e, if (rdbl) 0x66 else null, false, &.{0x2e}, 2, 2); // ucomis xmm2, xmm2
+            slow[0] = try e.fwd(0xa); // jp
+        }
+    }
+    if (watch) {
+        try e.bs(&.{ 0x0f, 0xae, 0x5c, 0x24, @intCast(io_base) }); // stmxcsr [rsp+io]
+        try e.rm(false, &.{0x8b}, RAX, RSP, io_base);
+        try e.aluImm(false, 4, RAX, 0x3f);
+        try e.bs(&.{ 0xa8, 0x13 }); // test al, IE|DE|UE
+        slow[1] = try e.fwd(CC.ne);
+        // ZE, OE, and PE, in the guest's layout.
+        if (x.arm) {
+            // MXCSR ZE (2) OE (3) PE (5) to FPSR DZC (1) OFC (2) IXC (4).
+            try e.bs(&.{ 0xd1, 0xe8 }); // shr eax, 1
+        }
+        try e.ldCtx(R10, ctx.off.cpu);
+        try e.rm(false, &.{0x09}, RAX, R10, @intCast(i.aux2 - 1)); // or [cpu+off], eax
+    }
+    if (i.op != .@"fp.cmp" and i.op != .@"fp.tosint") try stX(e, dst, 0, i.ty);
+    if (slow[0] != null or slow[1] != null) {
+        const done = try e.fwd(null);
+        for (slow) |s0| if (s0) |at| e.land(at);
+        try extFallback(e, r, a, i, dst);
+        e.land(done);
+    }
+    return true;
+}
+
+/// Clears MXCSR's exception flags, through the io area.
+fn clearHostFlags(e: *E) !void {
+    try e.bs(&.{ 0x0f, 0xae, 0x5c, 0x24, @intCast(io_base) }); // stmxcsr [rsp+io]
+    try e.rm(false, &.{0x81}, 4, RSP, io_base); // and dword [rsp+io], ~0x3f
+    try e.d32(@bitCast(@as(i32, ~@as(i32, 0x3f))));
+    try e.bs(&.{ 0x0f, 0xae, 0x54, 0x24, @intCast(io_base) }); // ldmxcsr [rsp+io]
 }
 
 fn aluWidthTest(e: *E, bits: u32) !void {
