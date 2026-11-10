@@ -231,7 +231,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .invalidate = invalidate,
                 });
                 errdefer b.code.deinit(gpa);
-                if (build_options.jit and codegenAvailable()) {
+                if (build_options.jit and !web and codegenAvailable()) {
                     const c = try gpa.create(cache.Cache);
                     if (cache.Cache.init(gpa, cacheSize())) |v| {
                         c.* = v;

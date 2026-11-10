@@ -644,8 +644,21 @@ const Label = union(enum) {
 
 /// Fixed locals after the parameters, by wasm type.
 const fixed32 = enum(u32) { code, cell, cpu, tlb, ent, blk, sv, s0, s1, s2, poff };
-const fixed64 = enum(u32) { va, sv, s0, s1, s2, pa, pb, pc, pcode };
+const fixed64 = enum(u32) { va, sv, s0, s1, s2, pa, pb, pc, pcode, rp };
 const fixed128 = enum(u32) { v };
+
+fn flushRetiredW(w: *W, rp: u32) !void {
+    for ([_]struct { u32, u8 }{ .{ ctx.off.retired, 0x7C }, .{ ctx.off.budget, 0x7D } }) |f| {
+        try w.get(0);
+        try w.get(0);
+        try w.memop(0x29, f[0]);
+        try w.get(rp);
+        try w.byte(f[1]);
+        try w.memop(0x37, f[0]);
+    }
+    try w.i64c(0);
+    try w.set(rp);
+}
 
 /// A `pending.flags` the block hasn't written yet. Lazy: an eflags op
 /// whose operands are in the pa, pb, and pc locals, computed only when
@@ -775,14 +788,22 @@ const E = struct {
     /// instructions the leaving op says completed).
     fn retireOn(e: *E, n: u32) !void {
         if (n == 0) return;
-        for ([_]struct { u32, u8 }{ .{ ctx.off.retired, 0x7C }, .{ ctx.off.budget, 0x7D } }) |f| {
-            try e.w.get(0);
-            try e.w.get(0);
-            try e.w.memop(0x29, f[0]);
-            try e.w.i64c(n);
-            try e.w.byte(f[1]);
-            try e.w.memop(0x37, f[0]);
-        }
+        try e.addRetired(n);
+    }
+
+    /// Adds n to the retire count pending in the rp local, which reaches
+    /// ctx.retired and ctx.budget only at exits (the exit tail) and before
+    /// calls out (flushRetired): ir.zig's contract.
+    fn addRetired(e: *E, n: u64) !void {
+        try e.w.get(e.l64(.rp));
+        try e.w.i64c(n);
+        try e.w.byte(0x7C);
+        try e.w.set(e.l64(.rp));
+    }
+
+    /// ctx.retired += rp and ctx.budget -= rp, and rp = 0.
+    fn flushRetired(e: *E) !void {
+        try flushRetiredW(&e.w, e.l64(.rp));
     }
 
     /// Sets exit_pc to `pc` and leaves with `code`.
@@ -882,7 +903,10 @@ const E = struct {
         const ta = e.ty(i.a);
         const w = &e.w;
         switch (i.op) {
-            .@"call.interp", .@"call.helper", .copy => try e.flushPending(),
+            .@"call.interp", .@"call.helper", .copy => {
+                try e.flushPending();
+                try e.flushRetired();
+            },
             .setreg => if (e.pend) |p| if (i.aux < p.off + 4 and p.off < i.aux + byteSize(ta).?) {
                 // Overwritten: the pending flags are never written.
                 e.pend = null;
@@ -1237,22 +1261,15 @@ const E = struct {
                 try w.memop(0x28, ctx.off.exit_request);
                 try w.get(0);
                 try w.memop(0x29, ctx.off.budget);
-                try w.i64c(0);
-                try w.byte(0x57); // i64.le_s
+                try w.get(e.l64(.rp));
+                try w.byte(0x57); // i64.le_s: budget <= pending
                 try w.byte(0x72); // i32.or
                 try e.open(0x04, .other);
                 try e.retireOn(i.retired);
                 try e.leave(.interrupted, i.aux);
                 try e.end();
             },
-            .retire => for ([_]struct { u32, u8 }{ .{ ctx.off.retired, 0x7C }, .{ ctx.off.budget, 0x7D } }) |f| {
-                try w.get(0);
-                try w.get(0);
-                try w.memop(0x29, f[0]);
-                try w.i64c(i.aux);
-                try w.byte(f[1]);
-                try w.memop(0x37, f[0]);
-            },
+            .retire => try e.addRetired(i.aux),
             .@"exit.chain" => try e.chain(i.aux, i.retired),
             .@"exit.svc", .@"exit.brk", .@"exit.undef" => {
                 try e.retireOn(i.retired);
@@ -2288,6 +2305,7 @@ fn function(
     }
     try e.end(); // top
     try e.end(); // exit
+    try flushRetiredW(w, e.l64(.rp));
     // Flags pending where the region left from inside a block.
     try w.get(e.l64(.pcode));
     try w.byte(0x50); // i64.eqz

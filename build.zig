@@ -683,9 +683,10 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
     p.target = target;
     p.optimize = optimize;
     // h9's own CPUs, beside v86 (`--backend emu`). The JIT tier here is
-    // the wasm one (src/jit/emit/wasm.zig), not the native code cache.
+    // the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig), not the
+    // native code cache, which zemu leaves out on the web.
     p.emu = .zig;
-    p.jit = false;
+    p.jit = true;
     p.unicorn = null;
     p.host_cmd = false;
     // The browser runs 386 only (design/0087-builtin-root.md, Open issues: every
