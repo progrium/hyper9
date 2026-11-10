@@ -6,7 +6,8 @@
 //!
 //! - **Register forwarding.** A `getreg` of a Cpu slot the block already
 //!   read or wrote at the same width takes that value instead. A call out
-//!   (`call.interp`, `call.helper`) may change the Cpu, and forgets them.
+//!   (`call.interp`, `call.helper`) or a `copy` may change the Cpu, and
+//!   forgets them.
 //! - **Constant folding.** A pure op whose operands are all constants
 //!   becomes a constant; `select` on a constant condition becomes its arm;
 //!   `brcond` on one becomes `br`; adding, subtracting, or-ing, or xor-ing
@@ -126,7 +127,8 @@ fn forward(r: *ir.Region, blk: ir.Block, repl: []Ref) !void {
                     nk += 1;
                 }
             },
-            .@"call.interp", .@"call.helper" => nk = 0,
+            // A copy reads and writes Cpu slots (its fields, NZCV, FPSR).
+            .@"call.interp", .@"call.helper", .copy => nk = 0,
             .brcond => if (constOf(insts, i.a)) |c| {
                 i.* = .{ .op = .br, .aux = if (c & 1 == 1) i.aux else i.aux2 };
             },
@@ -223,7 +225,7 @@ fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
     while (idx > blk.start) {
         idx -= 1;
         const i = insts[idx];
-        if (i.op.canLeave() or i.op == .@"call.interp" or i.op == .@"call.helper" or i.op.isTerminator()) {
+        if (i.op.canLeave() or i.op == .@"call.interp" or i.op == .@"call.helper" or i.op == .copy or i.op.isTerminator()) {
             nl = 0;
             continue;
         }
@@ -384,6 +386,26 @@ test "opt: a write before anything that can leave stays, and calls forget" {
         \\  exit.chain #0x1008
         \\
     , got);
+}
+
+test "opt: a copy reads and writes the Cpu, so it forgets and keeps writes" {
+    // add x2, x1, ... as a copy: it reads 0x8 and writes 0x10.
+    const text =
+        \\region 0x1000
+        \\b0:
+        \\  %0 = const:i64 #0x5
+        \\  setreg %0 #0x8
+        \\  setreg %0 #0x10
+        \\  copy #0x8b000020 @0x20084010
+        \\  %4 = getreg:i64 #0x10
+        \\  setreg %4 #0x18
+        \\  setreg %0 #0x8
+        \\  exit.chain #0x1008
+        \\
+    ;
+    const got = try optimized(text);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(text, got);
 }
 
 test "opt: an fp op that ORs into FPSR reads and writes it" {
