@@ -37,6 +37,8 @@ const G = struct {
     rnd: std.Random,
     b: ir.Builder,
     opts: Options,
+    uniform_pend: bool = false,
+    pend_kind: u64 = 0,
     /// This block's values, by type.
     pool: std.EnumArray(Type, std.ArrayList(Ref)),
 
@@ -236,7 +238,12 @@ const G = struct {
             try g.setreg();
         } else if (k < 93) {
             if (g.chance(40)) {
-                _ = try g.b.emit(.{ .op = .@"pending.flags", .a = try g.val(.flags), .aux = pending_off + 4 * g.rnd.uintLessThan(u64, 2), .aux2 = g.rnd.uintLessThan(u64, 2) });
+                // Mostly one slot and kind per region, as lifters make them
+                // (and as arm64's lazy flags want).
+                const one = g.uniform_pend;
+                const off = if (one) pending_off else pending_off + 4 * g.rnd.uintLessThan(u64, 2);
+                const kind = if (one) g.pend_kind else g.rnd.uintLessThan(u64, 2);
+                _ = try g.b.emit(.{ .op = .@"pending.flags", .a = try g.flags(), .aux = off, .aux2 = kind });
                 return;
             }
             _ = try g.getreg(g.pick(Type, &.{ .i8, .i16, .i32, .i64, .flags }));
@@ -304,6 +311,8 @@ pub fn generate(gpa: std.mem.Allocator, rnd: std.Random, opts: Options) !ir.Regi
     var g: G = .{ .gpa = gpa, .rnd = rnd, .b = ir.Builder.init(gpa, &r), .opts = opts, .pool = .initFill(.empty) };
     defer g.deinit();
     const nb = 1 + rnd.uintLessThan(u32, opts.max_blocks);
+    g.uniform_pend = g.chance(70);
+    g.pend_kind = rnd.uintLessThan(u64, 2);
     for (0..nb) |_| _ = try g.b.block();
     for (0..nb) |bi| {
         const blk: ir.BlockId = @intCast(bi);

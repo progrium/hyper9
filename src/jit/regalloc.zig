@@ -232,6 +232,12 @@ const WordInfo = struct {
 /// doesn't keep anywhere (flags it keeps in host flags, conditions it fuses
 /// into branches): they get `.none`.
 pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[]const bool) Error!Plan {
+    return planExtended(gpa, r, host, virtual, null);
+}
+
+/// plan, with `extend[v]`, if nonzero, a later index value v must live to
+/// (an emitter that reads it at the block's end).
+pub fn planExtended(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[]const bool, extend: ?[]const u32) Error!Plan {
     const n = r.insts.items.len;
     var p: Plan = .{
         .locs = try gpa.alloc(Loc, n),
@@ -263,6 +269,9 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
         if (o == ir.none) continue;
         p.end[o] = @intCast(idx);
         p.uses[o] += 1;
+    };
+    if (extend) |x| for (x, 0..) |to, v| {
+        if (to > p.end[v]) p.end[v] = to;
     };
     // A pending.flags' value lives until the flags are written or dropped:
     // a terminator, a call, a copy, the next pending.flags, or a setreg

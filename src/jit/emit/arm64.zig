@@ -95,7 +95,10 @@ const va_save = nzcv_save + 1;
 const io_save = va_save + 1;
 /// The host's FPCR, in a region that runs FP copies under the guest's.
 const fpcr_save = io_save + 6;
-const save_slots: u32 = fpcr_save + 1;
+/// Carried lazy flags: an evalOpC code (0 when nothing's carried) and its
+/// operands.
+const lz_save = fpcr_save + 1;
+const save_slots: u32 = lz_save + 4;
 
 pub const host: regalloc.Host = .{
     .regs = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 23, 24, 25, 26, 27 },
@@ -231,7 +234,177 @@ const Stub = union(enum) {
 
 /// A pending.flags not yet written: value v, packed by group, for Cpu
 /// offset off.
-const Pend = struct { v: Ref, off: u64, group: u64 };
+const Pend = struct {
+    v: Ref,
+    off: u64,
+    group: u64,
+    /// Lazy: written on the block's way out only where a successor needs
+    /// them (Lazy.edge_pend), and the value may be virtual, recomputed then.
+    edge: bool = false,
+    /// Carried into this block in the frame's lz slots (v is none): written,
+    /// from them, only by a fault or poll stub before they're replaced.
+    carried: bool = false,
+};
+
+/// Lazy pending flags, across a region whose pending.flags all name one
+/// slot and kind: where a block's last pending.flags (with nothing after it
+/// that could see the slot) is written, edge by edge.
+const Lazy = struct {
+    on: bool = false,
+    /// pending.flags written on their block's outgoing edges only.
+    edge_pend: []bool = &.{},
+    /// Per block: entered with flags pending, would anything see them
+    /// before they're replaced (a poll counting)?
+    need_full: []bool = &.{},
+    /// Per block: the block starts with a poll.
+    entry_poll: []bool = &.{},
+    /// Per block: need_full, but past an entry poll (which an edge carrying
+    /// flags does itself).
+    need_after_poll: []bool = &.{},
+    /// Per block: a label just past its entry poll.
+    after_poll: []u32 = &.{},
+    /// Per block: flags pending at entry are replaced before anything but
+    /// a fault or a poll could see them, so an edge may carry them in the
+    /// lz slots rather than write them.
+    carry_ok: []bool = &.{},
+    /// Per block: some edge carries flags in.
+    carried_in: []bool = &.{},
+    off: u64 = 0,
+    group: u64 = 0,
+
+    fn deinit(l: *Lazy, gpa: std.mem.Allocator) void {
+        gpa.free(l.edge_pend);
+        gpa.free(l.need_full);
+        gpa.free(l.entry_poll);
+        gpa.free(l.need_after_poll);
+        gpa.free(l.after_poll);
+        gpa.free(l.carry_ok);
+        gpa.free(l.carried_in);
+    }
+};
+
+const Event = enum { none, need, replace };
+
+/// What `i` does to flags pending in the 4 bytes at `off`.
+fn pendEvent(r: *const ir.Region, i: ir.Inst, off: u64) Event {
+    return switch (i.op) {
+        .@"pending.flags" => .replace,
+        .setreg => blk: {
+            const sz = sizeLog2(r.insts.items[i.a].ty) orelse break :blk .need;
+            break :blk if (i.aux < off + 4 and off < i.aux + (@as(u64, 1) << sz)) .replace else .none;
+        },
+        .getreg => blk: {
+            const n: u64 = @max(i.ty.bits() / 8, 1);
+            break :blk if (i.aux < off + 4 and off < i.aux + n) .need else .none;
+        },
+        .load, .store, .cas, .@"v.load", .@"v.store", .poll, .@"call.interp", .copy => .need,
+        .@"call.helper" => if (regalloc.touchesRegs(i)) .need else .none,
+        .br, .brcond => .none,
+        else => if (i.op.isTerminator()) .need else .none,
+    };
+}
+
+/// Whether flags pending at instruction `from` of block `b` could be seen
+/// before they're replaced.
+fn needFrom(r: *const ir.Region, b: usize, from: usize, off: u64, need_full: []const bool) bool {
+    const blk = r.blocks.items[b];
+    for (blk.start + from..blk.start + blk.len) |idx| {
+        const i = r.insts.items[idx];
+        switch (pendEvent(r, i, off)) {
+            .need => return true,
+            .replace => return false,
+            .none => {},
+        }
+        switch (i.op) {
+            .br => return need_full[i.aux],
+            .brcond => return need_full[i.aux] or need_full[i.aux2],
+            else => {},
+        }
+    }
+    return true;
+}
+
+fn lazyFlags(gpa: std.mem.Allocator, r: *const ir.Region) !Lazy {
+    const nb = r.blocks.items.len;
+    var l: Lazy = .{};
+    errdefer l.deinit(gpa);
+    l.edge_pend = try gpa.alloc(bool, r.insts.items.len);
+    @memset(l.edge_pend, false);
+    l.need_full = try gpa.alloc(bool, nb);
+    @memset(l.need_full, false);
+    l.entry_poll = try gpa.alloc(bool, nb);
+    l.need_after_poll = try gpa.alloc(bool, nb);
+    l.after_poll = try gpa.alloc(u32, nb);
+    @memset(l.after_poll, 0);
+    l.carry_ok = try gpa.alloc(bool, nb);
+    @memset(l.carry_ok, false);
+    l.carried_in = try gpa.alloc(bool, nb);
+    @memset(l.carried_in, false);
+    var off: ?u64 = null;
+    var group: u64 = 0;
+    for (r.insts.items) |i| {
+        if (i.op != .@"pending.flags") continue;
+        if (off) |o| {
+            if (o != i.aux or group != i.aux2) return l;
+        } else {
+            off = i.aux;
+            group = i.aux2;
+        }
+    }
+    const o = off orelse return l;
+    l.on = true;
+    l.off = o;
+    l.group = group;
+    for (r.blocks.items, 0..) |blk, b| l.entry_poll[b] = r.insts.items[blk.start].op == .poll;
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (0..nb) |b| {
+            if (l.need_full[b]) continue;
+            if (needFrom(r, b, 0, o, l.need_full)) {
+                l.need_full[b] = true;
+                changed = true;
+            }
+        }
+    }
+    for (0..nb) |b| l.need_after_poll[b] = if (l.entry_poll[b]) needFrom(r, b, 1, o, l.need_full) else l.need_full[b];
+    for (r.blocks.items, 0..) |blk, b| {
+        for (blk.start..blk.start + blk.len) |idx| {
+            const i = r.insts.items[idx];
+            switch (i.op) {
+                .load, .store, .cas, .@"v.load", .@"v.store", .poll => continue,
+                else => {},
+            }
+            switch (pendEvent(r, i, o)) {
+                .replace => l.carry_ok[b] = true,
+                .need => {},
+                .none => if (!i.op.isTerminator()) continue,
+            }
+            break;
+        }
+    }
+    for (r.blocks.items) |blk| {
+        const last = blk.start + blk.len - 1;
+        const t = r.insts.items[last].op;
+        if (t != .br and t != .brcond) continue;
+        var k = last;
+        while (k > blk.start) {
+            k -= 1;
+            const i = r.insts.items[k];
+            if (i.op == .@"pending.flags") {
+                l.edge_pend[k] = true;
+                const term = r.insts.items[last];
+                const succ = [2]u64{ term.aux, if (t == .brcond) term.aux2 else term.aux };
+                for (succ) |sb| if (l.need_full[sb] and l.carry_ok[sb]) {
+                    l.carried_in[sb] = true;
+                };
+                break;
+            }
+            if (pendEvent(r, i, o) != .none) break;
+        }
+    }
+    return l;
+}
 
 /// Per instruction, what the flags pre-pass decided.
 const Decide = struct {
@@ -272,6 +445,7 @@ const E = struct {
     dirty: regalloc.ChunkSet = 0,
     block: ir.BlockId = 0,
     pend: ?Pend = null,
+    lazy: Lazy = .{},
     /// The region's retires count in RC, flushed at exits and calls.
     lazy_retire: bool = false,
 
@@ -615,7 +789,7 @@ fn immB(r: *const ir.Region, i: ir.Inst, v: u64) bool {
 /// Decides, for each instruction, where flags and conditions live. The
 /// lowering follows these decisions exactly, so it leaves NZCV as this
 /// pass models it.
-fn decide(gpa: std.mem.Allocator, r: *const ir.Region) ![]Decide {
+fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) ![]Decide {
     const n = r.insts.items.len;
     const d = try gpa.alloc(Decide, n);
     errdefer gpa.free(d);
@@ -674,6 +848,10 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region) ![]Decide {
                     if (hostCond(r, @intCast(idx), live)) |c| {
                         d[idx].host_cc = c;
                     } else need[i.a] = true;
+                },
+                // Lazy, edge by edge: a producer is recomputed where needed.
+                .@"pending.flags" => if (!(edge_pend[idx] and rematerializable(r.insts.items[i.a].op))) {
+                    need[i.a] = true;
                 },
                 else => {
                     for (i.operands()) |o| if (o != ir.none) {
@@ -736,22 +914,42 @@ pub fn emit(gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc_mod.All
 }
 
 pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayList(u8)) EmitError!emitter.Code {
-    const d = try decide(gpa, r);
+    var lazy = try lazyFlags(gpa, r);
+    defer lazy.deinit(gpa);
+    const d = try decide(gpa, r, lazy.edge_pend);
     defer gpa.free(d);
     const virtual = try gpa.alloc(bool, d.len);
     defer gpa.free(virtual);
     for (d, virtual) |x, *v| v.* = x.virtual;
-    var p = regalloc.plan(gpa, r, host, virtual) catch |err| return switch (err) {
+    // Lazy flags' values, or a virtual producer's operands, live to the
+    // block's terminator, where the edges may write them.
+    const extend = try gpa.alloc(u32, d.len);
+    defer gpa.free(extend);
+    @memset(extend, 0);
+    for (r.blocks.items) |blk| {
+        const last: u32 = @intCast(blk.start + blk.len - 1);
+        for (blk.start..last) |idx| {
+            if (!lazy.edge_pend[idx]) continue;
+            const f = r.insts.items[idx].a;
+            if (d[f].virtual) {
+                for (r.insts.items[f].operands()) |o| if (o != ir.none) {
+                    extend[o] = last;
+                };
+            } else extend[f] = last;
+        }
+    }
+    var p = regalloc.planExtended(gpa, r, host, virtual, extend) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.TooLarge => error.TooLarge,
     };
     defer p.deinit(gpa);
 
-    var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len, .r = r, .p = p, .d = d };
+    var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len, .r = r, .p = p, .d = d, .lazy = lazy };
     defer e.deinit();
     for (r.blocks.items) |_| _ = try e.label();
     e.epilogue = try e.label();
     e.epilogue_plain = try e.label();
+    for (lazy.after_poll) |*lbl| lbl.* = try e.label();
     for (r.insts.items) |i| {
         if (i.op == .copy and i.aux & regalloc.copy_fp != 0 and !regalloc.isCall(i)) e.fp = true;
         if (i.op == .retire) e.lazy_retire = true;
@@ -775,6 +973,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     if (frame & 0xfff != 0) try e.put(0xD1000000 | (frame & 0xfff) << 10 | @as(u32, SP) << 5 | @as(u32, SP));
     if (e.fp) try fpEnter(&e, true);
     if (e.lazy_retire) try e.mov(RC, ZR);
+    if (lazy.on) try e.strSlot(ZR, e.saveArea(lz_save));
     try e.loadChunks();
 
     for (r.blocks.items, 0..) |blk, bi| {
@@ -782,9 +981,11 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
         e.bind(@intCast(bi));
         e.dirty = p.dirty_in[bi];
         e.pend = null;
+        if (lazy.on and lazy.carried_in[bi]) e.pend = .{ .v = ir.none, .off = lazy.off, .group = lazy.group, .carried = true };
         for (blk.start..blk.start + blk.len) |idx| {
             if (d[idx].skip) continue;
             try lower(&e, idx);
+            if (idx == blk.start and lazy.on and lazy.entry_poll[bi]) e.bind(lazy.after_poll[bi]);
         }
     }
 
@@ -907,7 +1108,23 @@ fn emitStub(e: *E, s: Stub) !void {
 
 /// Writes pending flags (packed for their group) to the guest.
 fn writePend(e: *E, p: Pend) !void {
-    const f = try e.src(p.v, S0);
+    var skip: ?u32 = null;
+    const f = if (p.carried) blk: {
+        // From the lz slots, if anything's carried: evalOpC(code, a, b, c).
+        skip = try e.label();
+        try e.ldrSlot(IP0, e.saveArea(lz_save));
+        try e.cbz(true, IP0, skip.?);
+        try e.saveRegs(caller_saved_mask);
+        try e.mov(0, IP0);
+        for (1..4) |k| try e.ldrSlot(@intCast(k), e.saveArea(lz_save + k));
+        try e.movImm(4, 0);
+        try e.movImm(IP0, @intFromPtr(&ir_eval.evalOpC));
+        try e.call(IP0);
+        try e.mov(SD, 0);
+        try e.restoreRegs(caller_saved_mask);
+        try e.strSlot(ZR, e.saveArea(lz_save));
+        break :blk SD;
+    } else if (e.p.locs[p.v] == .none) try rematFlags(e, p.v) else try e.src(p.v, S0);
     if (p.group == 0) {
         try e.logImm(0, true, IP0, f, 28, 4);
     } else {
@@ -921,6 +1138,95 @@ fn writePend(e: *E, p: Pend) !void {
     try e.dp(0x0A200000, false, IP1, IP1, S0); // bic w17, w17, w9
     try e.dp(0x2A000000, false, IP0, IP0, IP1); // orr w16, w16, w17
     try writeGuest(e, p.off, 4, IP0);
+    if (skip) |l| e.bind(l);
+}
+
+/// Carries lazy pending flags over an edge in the lz slots: the producer's
+/// evalOpC code and operands (or the materialized value, as an unpack).
+fn carryPend(e: *E, p: Pend) !void {
+    const fi = e.r.insts.items[p.v];
+    if (e.p.locs[p.v] == .none) {
+        const ta = e.r.insts.items[fi.a].ty;
+        try e.movImm(IP0, ir_eval.fallbackCode(fi.op, fi.ty, ta));
+        try e.strSlot(IP0, e.saveArea(lz_save));
+        for ([3]Ref{ fi.a, fi.b, fi.c }, 1..) |o, k| {
+            if (o == ir.none) continue;
+            if (k == 2 and e.d[p.v].imm_b) {
+                try e.movImm(IP0, e.r.insts.items[o].aux);
+                try e.strSlot(IP0, e.saveArea(lz_save + k));
+            } else try e.strSlot(try e.src(o, S0), e.saveArea(lz_save + k));
+        }
+    } else {
+        const unpack: Op = if (p.group == 0) .@"nzcv.unpack" else .@"eflags.unpack";
+        try e.movImm(IP0, ir_eval.fallbackCode(unpack, .flags, .i32));
+        try e.strSlot(IP0, e.saveArea(lz_save));
+        try e.strSlot(try e.src(p.v, S0), e.saveArea(lz_save + 1));
+    }
+}
+
+/// Whether a flags value can be recomputed from its operands where lazy
+/// pending flags are written (so it needn't be materialized where made).
+fn rematerializable(op: Op) bool {
+    return switch (op) {
+        .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic" => true,
+        else => eflagsKind(op) != null,
+    };
+}
+
+/// Recomputes the virtual flags value `v` from its operands, into x12.
+fn rematFlags(e: *E, v: Ref) !u5 {
+    const i = e.r.insts.items[v];
+    if (eflagsKind(i.op) != null) {
+        try eflagsCore(e, v, SD);
+        return SD;
+    }
+    const ta = e.r.insts.items[i.a].ty;
+    const a = try e.src(i.a, S0);
+    const s64 = ta == .i64;
+    switch (i.op) {
+        .@"nzcv.logic" => try e.dp(0x6A000000, s64, ZR, a, a),
+        .@"nzcv.add", .@"nzcv.sub" => if (e.d[v].imm_b) {
+            const imm: u32 = @intCast(e.r.insts.items[i.b].aux);
+            try e.put((if (i.op == .@"nzcv.add") @as(u32, 0x31000000) else 0x71000000) | (if (s64) @as(u32, 0x8000_0000) else 0) | imm << 10 | @as(u32, a) << 5 | ZR);
+        } else {
+            const bb = try e.src(i.b, S1);
+            try e.dp(if (i.op == .@"nzcv.add") 0x2B000000 else 0x6B000000, s64, ZR, a, bb);
+        },
+        else => unreachable,
+    }
+    try e.put(0xD53B4200 | @as(u32, SD)); // mrs x12, nzcv
+    return SD;
+}
+
+/// A branch to block `t` carrying lazy pending flags: written if `t` needs
+/// them; else, if `t` starts with a poll, that poll is done here (writing
+/// them only if it leaves) and the branch skips it; else they're dropped.
+fn edgeTo(e: *E, t: u32, fallthrough_ok: bool) !void {
+    const lz = &e.lazy;
+    if (e.pend) |p| if (p.edge) {
+        if (lz.need_full[t] and lz.carry_ok[t]) {
+            try carryPend(e, p);
+        } else if (lz.need_full[t] and !(lz.entry_poll[t] and !lz.need_after_poll[t])) {
+            try writePend(e, p);
+        } else if (lz.entry_poll[t] and !lz.need_after_poll[t]) {
+            const poll = e.r.insts.items[e.r.blocks.items[t].start];
+            const l = try e.label();
+            try e.stubs.append(e.gpa, .{ .poll = .{ .label = l, .dirty = e.dirty, .pc = poll.aux, .retired = poll.retired, .pend = p } });
+            try pollCheck(e, l);
+            return e.b(lz.after_poll[t]);
+        }
+    };
+    if (!(fallthrough_ok and t == e.block + 1)) try e.b(t);
+}
+
+/// exit_request, and the budget less what's retired but not yet counted:
+/// to `l` if the region must leave.
+fn pollCheck(e: *E, l: u32) !void {
+    try e.put(0xB9400000 | (ctx.off.exit_request / 4) << 10 | @as(u32, CTX) << 5 | @as(u32, IP0)); // ldr w16, [x19, #exit_request]
+    try e.ldrCtx(IP1, ctx.off.budget);
+    if (e.lazy_retire) try e.dp(0x6B000000, true, ZR, IP1, RC) else try e.put(0xF100001F | @as(u32, IP1) << 5); // cmp x17, x28 or #0
+    try e.put(0x7A400800 | 12 << 12 | @as(u32, IP0) << 5); // ccmp w16, #0, #0, gt
+    try e.bcond(NE, l);
 }
 
 /// Writes the main line's pending flags, if any, now.
@@ -958,9 +1264,10 @@ fn lower(e: *E, idx: usize) EmitError!void {
         .@"call.interp", .copy => try flushPend(e),
         .@"call.helper" => if (regalloc.touchesRegs(i)) try flushPend(e),
         .setreg => if (sizeLog2(ta)) |sz| if (i.aux < p.off + 4 and p.off < i.aux + (@as(u64, 1) << sz)) {
+            if (p.carried) try e.strSlot(ZR, e.saveArea(lz_save));
             e.pend = null;
         },
-        else => if (i.op.isTerminator()) try flushPend(e),
+        else => if (i.op.isTerminator() and !(p.edge and (i.op == .br or i.op == .brcond))) try flushPend(e),
     };
     if (i.op.isExt() or ty == .v128 or ta == .v128) return lowerExt(e, idx);
 
@@ -1238,8 +1545,12 @@ fn lower(e: *E, idx: usize) EmitError!void {
         .@"pending.flags" => {
             // Deferred: written only on the way out of the block, before a
             // call, or when other flags take a different slot.
-            if (e.pend) |p| if (p.off != i.aux or p.group != i.aux2) try writePend(e, p);
-            e.pend = .{ .v = i.a, .off = i.aux, .group = i.aux2 };
+            if (e.pend) |p| {
+                if (p.carried) {
+                    try e.strSlot(ZR, e.saveArea(lz_save)); // replaced
+                } else if (p.off != i.aux or p.group != i.aux2) try writePend(e, p);
+            }
+            e.pend = .{ .v = i.a, .off = i.aux, .group = i.aux2, .edge = e.lazy.edge_pend[idx] };
         },
         .@"nzcv.pack", .@"nzcv.unpack" => {
             const a = try e.src(i.a, S0);
@@ -1379,8 +1690,17 @@ fn lower(e: *E, idx: usize) EmitError!void {
                 try e.strCtx(IP0, off);
             }
         },
-        .br => if (i.aux != e.block + 1) try e.b(@intCast(i.aux)),
-        .brcond => {
+        .br => try edgeTo(e, @intCast(i.aux), true),
+        .brcond => if (e.pend != null and e.pend.?.edge) {
+            // Each edge does its own flags work.
+            const then: u32 = @intCast(i.aux);
+            const els: u32 = @intCast(i.aux2);
+            const lthen = try e.label();
+            if (dd.host_cc) |c| try e.bcond(c, lthen) else try e.cbnz(false, try e.src(i.a, S0), lthen);
+            try edgeTo(e, els, false);
+            e.bind(lthen);
+            try edgeTo(e, then, true);
+        } else {
             const then: u32 = @intCast(i.aux);
             const els: u32 = @intCast(i.aux2);
             if (dd.host_cc) |c| {
@@ -1535,6 +1855,15 @@ fn shiftOp(e: *E, idx: usize) EmitError!void {
 fn eflagsOp(e: *E, idx: usize) !void {
     const i = e.r.insts.items[idx];
     if (fallsBack(i.op)) return fallback(e, idx);
+    if (e.d[idx].virtual) return eflagsCore(e, idx, null);
+    const rd = e.dst(idx);
+    try eflagsCore(e, idx, rd);
+    try e.finish(idx, rd);
+}
+
+/// An EFLAGS producer's flags into NZCV and, given `rd`, packed into rd.
+fn eflagsCore(e: *E, idx: usize, rd_: ?u5) !void {
+    const i = e.r.insts.items[idx];
     const ta = e.r.insts.items[i.a].ty;
     const W = ta.bits();
     const s: u32 = 32 - W;
@@ -1562,9 +1891,7 @@ fn eflagsOp(e: *E, idx: usize) !void {
         .@"eflags.dec" => try e.dp(0x6B000000, false, ZR, sa, bb),
         else => unreachable,
     }
-    if (e.d[idx].virtual) return;
-
-    const rd = e.dst(idx);
+    const rd = rd_ orelse return;
     const borrow = kind == .sub or i.op == .@"eflags.dec";
     const t = @intFromBool(borrow);
     if (e.table_label[t] == null) e.table_label[t] = try e.label();
@@ -1601,7 +1928,6 @@ fn eflagsOp(e: *E, idx: usize) !void {
         const cf = try e.src(i.b, S1);
         try e.bfi(rd, cf, 0, 1);
     }
-    try e.finish(idx, rd);
 }
 
 /// The FP and vector ops, and v128 getreg and setreg. v128 values live in
