@@ -707,9 +707,16 @@ fn fbstp(x: anytype, a: anytype) !void {
 
 // ------------------------------------------------------------ environment
 
+/// Whether the environment has the 16-bit layout: a 66 prefix, which REX.W
+/// overrides in long mode.
+fn env16(x: anytype) bool {
+    if (comptime isLong(@TypeOf(x))) return x.i.opsize and x.i.rex.w == 0;
+    return x.i.opsize;
+}
+
 /// The environment's size: 28 bytes, or 14 with a 16-bit operand size.
 fn envSize(x: anytype) u32 {
-    return if (x.i.opsize) 14 else 28;
+    return if (env16(x)) 14 else 28;
 }
 
 fn putEnv(x: anytype, buf: []u8) void {
@@ -721,7 +728,7 @@ fn putEnv(x: anytype, buf: []u8) void {
     const fcs: u16 = if (long) 0 else @truncate(p.fip >> 32);
     const fdp: u32 = @truncate(p.fdp);
     const fds: u16 = if (long) 0 else @truncate(p.fdp >> 32);
-    if (x.i.opsize) {
+    if (env16(x)) {
         const w = [7]u16{ p.cw, statusWord(p), tagWord(p), @truncate(fip), fcs, @truncate(fdp), fds };
         for (w, 0..) |v, k| std.mem.writeInt(u16, buf[2 * k ..][0..2], v, .little);
         return;
@@ -741,7 +748,7 @@ fn putEnv(x: anytype, buf: []u8) void {
 fn getEnv(x: anytype, buf: []const u8) void {
     const p = &x.c.fpu;
     var w: [7]u32 = undefined;
-    if (x.i.opsize) {
+    if (env16(x)) {
         for (&w, 0..) |*v, k| v.* = std.mem.readInt(u16, buf[2 * k ..][0..2], .little);
     } else {
         for (&w, 0..) |*v, k| v.* = std.mem.readInt(u32, buf[4 * k ..][0..4], .little);
@@ -753,7 +760,7 @@ fn getEnv(x: anytype, buf: []const u8) void {
     p.tag = abridge(@truncate(w[2]));
     const long = comptime isLong(@TypeOf(x));
     p.fip = if (long) w[3] else (@as(u64, w[4] & 0xffff) << 32) | w[3];
-    p.fop = if (x.i.opsize) 0 else @truncate((w[4] >> 16) & 0x7ff);
+    p.fop = if (env16(x)) 0 else @truncate((w[4] >> 16) & 0x7ff);
     p.fdp = if (long) w[5] else (@as(u64, w[6] & 0xffff) << 32) | w[5];
     summarize(p);
 }
@@ -1362,6 +1369,10 @@ fn fprem(o: *Op, nearest: bool) void {
             }
         }
     }
+    // A pseudo-denormal (exponent 0, integer bit set) that comes back
+    // unchanged comes back as the hardware gives it: the same value, with
+    // the smallest normal exponent.
+    if (computed and res.sign_exp & 0x7fff == 0 and res.signif >> 63 != 0) res.sign_exp |= 1;
     // Special operands leave C3 and C0 as they were.
     if (!computed or !o.ok()) p.sw &= ~C2;
     if (!o.ok()) return o.done();
@@ -1542,4 +1553,35 @@ test "long mode: loads, stores, and 64-bit pointers" {
     try testing.expectEqual(@as(u32, @truncate(c.fpu.fip)), std.mem.readInt(u32, mem[8 + 12 ..][0..4], .little));
     try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, mem[8 + 16 ..][0..4], .little) & 0xffff);
     try testing.expectEqual(@as(u32, 0xffff_0000), std.mem.readInt(u32, mem[8 + 24 ..][0..4], .little));
+}
+
+test "long mode: REX.W overrides 66 on FNSTENV" {
+    const base = 0x10000;
+    var c: cpu.Cpu64 = .{ .rip = base };
+    var mem: [64]u8 align(16) = @splat(0);
+    // 66 48 d9 33: fnstenv (%rbx), the 28-byte layout.
+    var i = inst64(0xd9, 0b1000, 0x03 | 6 << 3);
+    i.opsize = true;
+    i.mem = true;
+    i.base = 3;
+    c.r[3] = base;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, i));
+    try testing.expectEqual(@as(u32, 0xffff_037f), std.mem.readInt(u32, mem[0..4], .little));
+    // Without REX.W it is the 14-byte one.
+    @memset(&mem, 0);
+    c.fpu.cw = 0x37f;
+    i.rex.w = 0;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, base, i));
+    try testing.expectEqual(@as(u32, 0x0000_037f), std.mem.readInt(u32, mem[0..4], .little));
+}
+
+test "FPREM1 gives back a pseudo-denormal with the smallest normal exponent" {
+    var p: Fpu = .{};
+    var o = Op.begin(&p);
+    fld(&o, ext(3));
+    o = Op.begin(&p);
+    fld(&o, .{ .sign_exp = 0, .signif = 0xc394_da7c_f98b_ecd2 });
+    o = Op.begin(&p);
+    fprem(&o, true);
+    try testing.expectEqual(F80{ .sign_exp = 1, .signif = 0xc394_da7c_f98b_ecd2 }, st(&p, 0));
 }
