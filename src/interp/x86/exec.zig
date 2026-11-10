@@ -67,20 +67,48 @@ pub fn step(c: *Cpu, mem: anytype) ?Exit {
     return null;
 }
 
-/// Decoded instructions by address, direct-mapped, each with the bytes
-/// it was decoded from: a hit is used only if memory still holds them.
+/// Decoded instructions by address, direct-mapped: 16384 of them (1 MiB),
+/// enough for CPython's hot code, where 2048 missed one fetch in five. Where the memory
+/// tracks code (a `codeEpoch` method), an entry holds while the host page
+/// is the same and no code has been invalidated since (CodePages.epoch),
+/// as ha64's decode cache does. Otherwise it keeps the bytes it was
+/// decoded from, and a hit is used only if memory still holds them.
 pub const ICache = struct {
-    pub const n = 2048;
+    pub const n = 16384;
     e: [n]Entry = @splat(.{}),
+    /// The code epoch the entries of generation `gen` were filled in.
+    epoch: usize = 0,
+    gen: u32 = 1,
 
     pub const Entry = struct {
         eip: u32 = 0,
-        valid: bool = false,
+        /// The generation it was filled in; 0 is never valid.
+        gen: u32 = 0,
+        /// The host address of its first byte.
+        host: usize = 0,
         /// The instruction's 15 bytes from memory: bytes 0-7 and 7-14.
         lo: u64 = 0,
         hi: u64 = 0,
         inst: Inst = undefined,
     };
+
+    /// An empty cache in place, without a 1 MiB temporary.
+    pub fn init(ic: *ICache) void {
+        @memset(std.mem.asBytes(&ic.e), 0);
+        ic.epoch = 0;
+        ic.gen = 1;
+    }
+
+    /// Drops every entry: a new generation.
+    pub fn clear(ic: *ICache) void {
+        ic.drop();
+    }
+
+    /// Starts a new generation, dropping every entry.
+    fn drop(ic: *ICache) void {
+        ic.gen +%= 1;
+        if (ic.gen == 0) ic.init();
+    }
 };
 
 /// An instruction left: `Exec.exit` says how.
@@ -190,7 +218,10 @@ pub fn Exec(comptime M: type) type {
         c: *Cpu,
         m: M,
         opts: Options,
-        i: Inst = undefined,
+        /// The instruction: a decode-cache entry's, or `ibuf`.
+        i: *const Inst = undefined,
+        /// An instruction decoded outside the cache.
+        ibuf: Inst = undefined,
         /// EIP after this instruction, or a branch's target.
         next: u32 = 0,
         /// The memory operand's linear address.
@@ -200,6 +231,10 @@ pub fn Exec(comptime M: type) type {
         n: u64 = 0,
 
         fn loop(x: *X) Exit {
+            return if (x.opts.branches != 0) x.loopFor(true) else x.loopFor(false);
+        }
+
+        inline fn loopFor(x: *X, comptime count_branches: bool) Exit {
             var taken: u32 = 0;
             while (true) {
                 if (x.n >= x.opts.budget) return .stopped;
@@ -208,7 +243,7 @@ pub fn Exec(comptime M: type) type {
                 x.step() catch return x.exit;
                 x.n += 1;
                 x.c.retired += 1;
-                if (x.opts.branches != 0 and x.c.eip != at +% x.i.len) {
+                if (count_branches and x.c.eip != at +% x.i.len) {
                     taken += 1;
                     if (taken >= x.opts.branches) return .stopped;
                 }
@@ -308,7 +343,7 @@ pub fn Exec(comptime M: type) type {
 
         /// The memory operand's offset (no segment base).
         fn ea(x: *const X) u32 {
-            const i = &x.i;
+            const i = x.i;
             var a = i.disp;
             if (i.base != dec.no_reg) a +%= x.c.r[i.base];
             if (i.index != dec.no_reg) a +%= x.c.r[i.index] << i.scale;
@@ -335,7 +370,7 @@ pub fn Exec(comptime M: type) type {
             setReg(x.c, n, size, v);
         }
 
-        fn regOf(x: *const X, o: Opd) u3 {
+        fn regOf(x: *const X, comptime o: Opd) u3 {
             return switch (o) {
                 .E => x.i.rm(),
                 .G => x.i.reg(),
@@ -344,12 +379,12 @@ pub fn Exec(comptime M: type) type {
             };
         }
 
-        fn isMem(x: *const X, o: Opd) bool {
+        fn isMem(x: *const X, comptime o: Opd) bool {
             return (o == .E and x.i.mem) or o == .O;
         }
 
         /// Reads operand `o` at `size` bytes.
-        fn get(x: *X, o: Opd, size: u8) Trap!u32 {
+        fn get(x: *X, comptime o: Opd, size: u8) Trap!u32 {
             return switch (o) {
                 .E => if (x.i.mem) x.load(x.addr, size) else getReg(x.c, x.i.rm(), size),
                 .O => x.load(x.addr, size),
@@ -365,7 +400,7 @@ pub fn Exec(comptime M: type) type {
         }
 
         /// Writes operand `o`.
-        fn put(x: *X, o: Opd, size: u8, v: u32) Trap!void {
+        fn put(x: *X, comptime o: Opd, size: u8, v: u32) Trap!void {
             if (x.isMem(o)) return x.store(x.addr, size, v);
             setReg(x.c, x.regOf(o), size, v);
         }
@@ -373,7 +408,7 @@ pub fn Exec(comptime M: type) type {
         /// Reads, changes, and writes operand `o` with `f.apply`, which
         /// may run more than once for a locked operand. Returns the old
         /// value.
-        fn modify(x: *X, o: Opd, size: u8, f: anytype) Trap!u32 {
+        fn modify(x: *X, comptime o: Opd, size: u8, f: anytype) Trap!u32 {
             if (x.isMem(o)) {
                 const r = try x.ref(x.addr, size, .write);
                 if (x.i.lock) return locked(r, size, f);
@@ -417,25 +452,43 @@ pub fn Exec(comptime M: type) type {
 
         // ------------------------------------------------------ fetch
 
-        fn fetch(x: *X) Trap!Inst {
+        const MemT = switch (@typeInfo(M)) {
+            .pointer => |p| p.child,
+            else => M,
+        };
+        const tracks_code = @typeInfo(MemT) == .@"struct" and @hasDecl(MemT, "codeEpoch");
+
+        fn fetch(x: *X) Trap!*const Inst {
             const eip = x.c.eip;
             const p = try x.ptr(eip, .exec);
             const avail = page_size - (eip & (page_size - 1));
             if (avail >= dec.max_len) {
-                const ic = x.c.icache orelse return x.decodeWhole(p);
+                const ic = x.c.icache orelse {
+                    x.ibuf = try x.decodeWhole(p);
+                    return &x.ibuf;
+                };
+                const k = (eip ^ (eip >> 9)) & (ICache.n - 1);
+                const e = &ic.e[k];
+                const host = @intFromPtr(p);
+                if (tracks_code) if (x.m.codeEpoch()) |epoch| {
+                    if (epoch != ic.epoch) {
+                        ic.epoch = epoch;
+                        ic.drop();
+                    }
+                    if (e.eip == eip and e.host == host and e.gen == ic.gen) return &e.inst;
+                    e.* = .{ .eip = eip, .gen = ic.gen, .host = host, .inst = try x.decodeWhole(p) };
+                    return &e.inst;
+                };
                 // A hit must still match the bytes in memory, so code
                 // written since (by any vCPU or the host) is decoded again.
                 // All 15 bytes are compared, as two overlapping words, with
                 // builtins only: std is built as the root module is, which
                 // is Debug in a Debug h9 even when this module isn't.
-                const k = (eip ^ (eip >> 9)) & (ICache.n - 1);
-                const e = &ic.e[k];
                 const lo: u64 = @bitCast(p[0..8].*);
                 const hi: u64 = @bitCast(p[7..15].*);
-                if (e.eip == eip and e.valid and e.lo == lo and e.hi == hi) return e.inst;
-                const inst = try x.decodeWhole(p);
-                e.* = .{ .eip = eip, .valid = true, .inst = inst, .lo = lo, .hi = hi };
-                return inst;
+                if (e.eip == eip and e.gen != 0 and e.lo == lo and e.hi == hi) return &e.inst;
+                e.* = .{ .eip = eip, .gen = ic.gen, .host = host, .inst = try x.decodeWhole(p), .lo = lo, .hi = hi };
+                return &e.inst;
             }
             var buf: [dec.max_len]u8 = undefined;
             @memcpy(buf[0..avail], p[0..avail]);
@@ -444,10 +497,11 @@ pub fn Exec(comptime M: type) type {
                 @memcpy(buf[avail..], q[0 .. dec.max_len - avail]);
                 len = dec.max_len;
             }
-            return dec.decode(buf[0..len]) catch |e| switch (e) {
-                error.TooLong => x.exc(cpu_mod.vec_gp),
-                error.Truncated => x.pageFault(eip +% avail, .exec),
+            x.ibuf = dec.decode(buf[0..len]) catch |e| switch (e) {
+                error.TooLong => return x.exc(cpu_mod.vec_gp),
+                error.Truncated => return x.pageFault(eip +% avail, .exec),
             };
+            return &x.ibuf;
         }
 
         fn decodeWhole(x: *X, p: [*]u8) Trap!Inst {
@@ -459,7 +513,7 @@ pub fn Exec(comptime M: type) type {
 
         fn step(x: *X) Trap!void {
             x.i = try x.fetch();
-            const i = &x.i;
+            const i = x.i;
             x.next = x.c.eip +% i.len;
             if (i.mem and i.op != .lea and i.op != .nop) x.addr = try x.linear(x.ea());
             try x.exec();
@@ -468,13 +522,31 @@ pub fn Exec(comptime M: type) type {
 
         // ------------------------------------------------------ execute
 
+        /// A handler per table entry: `execEntry` with the entry known at
+        /// compile time, so its operation and operand forms fold away.
+        const Handler = *const fn (x: *X) Trap!void;
+        const handlers: [table.entry_count]Handler = blk: {
+            @setEvalBranchQuota(100_000);
+            var hs: [table.entry_count]Handler = undefined;
+            for (0..table.entry_count) |k| hs[k] = struct {
+                fn h(x: *X) Trap!void {
+                    return x.execEntry(comptime table.entryAt(k));
+                }
+            }.h;
+            break :blk hs;
+        };
+
         fn exec(x: *X) Trap!void {
-            const i = &x.i;
-            const e = i.tableEntry();
+            return handlers[x.i.entry](x);
+        }
+
+        fn execEntry(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             // LOCK is allowed only on the instructions that take it, with
             // a memory destination.
-            if (i.lock and (!e.lock or !i.mem)) return x.exc(cpu_mod.vec_ud);
-            switch (i.op) {
+            const lockable = comptime e.lock;
+            if (i.lock and (!lockable or !i.mem)) return x.exc(cpu_mod.vec_ud);
+            switch (comptime e.op) {
                 .ud => return x.exc(cpu_mod.vec_ud),
                 .gp => return x.exc(cpu_mod.vec_gp),
                 .nop => {},
@@ -539,8 +611,7 @@ pub fn Exec(comptime M: type) type {
                         }
                     };
                     // XCHG with memory is locked whether it says so or not.
-                    if (i.mem) i.lock = true;
-                    const a = try x.modify(e.dst, size, F{ .b = b });
+                    const a = if (i.mem) locked(try x.ref(x.addr, size, .write), size, F{ .b = b }) else try x.modify(e.dst, size, F{ .b = b });
                     try x.put(e.src, size, a);
                 },
                 .xadd => {
@@ -768,8 +839,8 @@ pub fn Exec(comptime M: type) type {
             x.next = if (x.i.size == 2) target & 0xffff else target;
         }
 
-        fn alu(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn alu(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const b = try x.get(e.src, size);
             const fl = &x.c.fl;
@@ -811,8 +882,8 @@ pub fn Exec(comptime M: type) type {
             }
         }
 
-        fn mul1(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn mul1(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const b = try x.get(e.src, size);
             const a = getReg(x.c, 0, size);
@@ -847,8 +918,8 @@ pub fn Exec(comptime M: type) type {
             x.c.fl.record(.mul, size, @intFromBool(ovf), 0, lo, 0);
         }
 
-        fn div(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn div(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const d = try x.get(e.src, size);
             if (d == 0) return x.exc(cpu_mod.vec_de);
@@ -891,8 +962,8 @@ pub fn Exec(comptime M: type) type {
             }
         }
 
-        fn shift(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn shift(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const count = (try x.get(e.src, 1)) & 31;
             if (count == 0) {
@@ -919,8 +990,8 @@ pub fn Exec(comptime M: type) type {
             x.c.fl.record(if (i.op == .shl) .shl else .shr, size, pre, 0, res, 0);
         }
 
-        fn shiftDouble(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn shiftDouble(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const count: u32 = (if (e.imm == .b) i.imm else x.c.r[1]) & 31;
             if (count == 0) {
@@ -952,8 +1023,8 @@ pub fn Exec(comptime M: type) type {
             x.c.fl.record(if (left) .shl else .shr, size, pre, 0, res, 0);
         }
 
-        fn rotate(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn rotate(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const bits: u32 = @as(u32, size) * 8;
             const raw = (try x.get(e.src, 1)) & 31;
@@ -1019,8 +1090,8 @@ pub fn Exec(comptime M: type) type {
             x.c.fl.setMasked(flags.CF | flags.OF, (if (cf) flags.CF else 0) | (if (of) flags.OF else 0));
         }
 
-        fn popOp(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn popOp(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const old_sp = x.c.r[4];
             const v = try x.load(old_sp, size);
@@ -1042,7 +1113,7 @@ pub fn Exec(comptime M: type) type {
         }
 
         fn enter(x: *X) Trap!void {
-            const i = &x.i;
+            const i = x.i;
             const size = i.size;
             const level = i.imm2 & 31;
             var sp = x.c.r[4];
@@ -1066,7 +1137,7 @@ pub fn Exec(comptime M: type) type {
         }
 
         fn cmpxchg(x: *X) Trap!void {
-            const i = &x.i;
+            const i = x.i;
             const size = i.size;
             const acc = getReg(x.c, 0, size);
             const src = getReg(x.c, i.reg(), size);
@@ -1124,8 +1195,8 @@ pub fn Exec(comptime M: type) type {
             }
         }
 
-        fn bitTest(x: *X, e: *const table.Entry) Trap!void {
-            const i = &x.i;
+        fn bitTest(x: *X, comptime e: *const table.Entry) Trap!void {
+            const i = x.i;
             const size = i.size;
             const bits: u32 = @as(u32, size) * 8;
             var bit: u32 = undefined;
@@ -1164,7 +1235,7 @@ pub fn Exec(comptime M: type) type {
         // ------------------------------------------------------ strings
 
         fn string(x: *X) Trap!void {
-            const i = &x.i;
+            const i = x.i;
             const size = i.size;
             const asize: u8 = if (i.addr16) 2 else 4;
             const am = flags.sizeMask(asize);
@@ -1246,7 +1317,7 @@ pub fn Exec(comptime M: type) type {
         /// REP MOVS and REP STOS forward, a page's worth at a time where
         /// the pages allow. Returns false to do one iteration instead.
         fn stringBulk(x: *X, size: u8, am: u32, src_base: u32) Trap!bool {
-            const i = &x.i;
+            const i = x.i;
             const c = x.c;
             if ((i.op != .movs and i.op != .stos) or c.fl.df() or am != 0xffff_ffff) return false;
             const di = c.r[7];

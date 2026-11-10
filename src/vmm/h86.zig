@@ -48,15 +48,22 @@ pub const ready = true;
 
 pub const Cpu = struct {
     c: x86cpu.Cpu = .{},
-    /// T0's decoded instructions, which `run` points `c` at.
-    icache: exec.ICache = .{},
+    /// T0's decoded instructions, which `run` allocates on first use and
+    /// points `c` at.
+    icache: ?*exec.ICache = null,
     /// -Djit-check's state (src/jit/check/vmm.zig).
     check: check_vmm.State = .{},
 };
 
-/// Frees -Djit-check's state.
+/// What the decode cache comes from: the web host has no threads, so no
+/// SmpAllocator.
+const icache_gpa = if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator;
+
+/// Frees -Djit-check's state and the decode cache.
 pub fn deinit(c: *Cpu) void {
     if (build_options.jit_check) c.check.deinit();
+    if (c.icache) |ic| icache_gpa.destroy(ic);
+    c.icache = null;
 }
 
 pub fn getUreg(c: *const Cpu, u: *vmm.Ureg) void {
@@ -88,8 +95,15 @@ pub fn retired(cpu: *const Cpu) u64 {
 
 pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     const c = &cpu.c;
-    c.icache = &cpu.icache;
-    var m: TlbMem = .{ .ctx = ctx, .tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb))) };
+    if (cpu.icache == null) {
+        // Without one T0 runs, decoding every instruction.
+        if (icache_gpa.create(exec.ICache)) |ic| {
+            ic.init();
+            cpu.icache = ic;
+        } else |_| {}
+    }
+    c.icache = cpu.icache;
+    var m: TlbMem = .init(ctx);
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;
     // The lifter's call.helper table (x87).

@@ -63,7 +63,7 @@ fn x87Helper(c: *Ctx, a: u64, addr: u64, _: u64) callconv(.c) u64 {
     const ecode = cpu.ecode;
     cpu.eip = arg.pc;
     var x: exec.Exec(*lift.Mem) = .{ .c = cpu, .m = m, .opts = .{}, .addr = @truncate(addr) };
-    x.i = .{
+    x.ibuf = .{
         .op = .x87,
         .entry = 0,
         .opcode = 0xd8 | @as(u16, arg.op),
@@ -74,6 +74,7 @@ fn x87Helper(c: *Ctx, a: u64, addr: u64, _: u64) callconv(.c) u64 {
         .modrm = arg.modrm,
         .mem = arg.mem,
     };
+    x.i = &x.ibuf;
     x87.exec(&x) catch {
         cpu.fpu = fpu;
         cpu.r[0] = eax;
@@ -165,7 +166,8 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, c_: u64) callconv(.c) u64 {
             cpu.eip = arg.pc;
             defer cpu.eip = eip;
             var x: exec.Exec(*lift.Mem) = .{ .c = cpu, .m = undefined, .opts = .{}, .addr = @truncate(c_) };
-            x.i = .{ .op = .x87, .entry = 0, .opcode = 0xd8 | @as(u16, arg.op), .len = 0, .size = 4, .seg = @enumFromInt(arg.seg), .modrm = arg.modrm, .mem = true };
+            x.ibuf = .{ .op = .x87, .entry = 0, .opcode = 0xd8 | @as(u16, arg.op), .len = 0, .size = 4, .seg = @enumFromInt(arg.seg), .modrm = arg.modrm, .mem = true };
+            x.i = &x.ibuf;
             x87.arithMem(&x, arg.op, @truncate(arg.modrm >> 3), b);
         },
         .fild32 => {

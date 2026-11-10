@@ -123,7 +123,7 @@ fn raise(x: anytype, e: *const fp.Env) !void {
 // ------------------------------------------------------------ entry
 
 pub fn exec(x: anytype) !void {
-    const i = &x.i;
+    const i = x.i;
     const p = prefix(x);
     const op: u8 = @truncate(i.opcode);
     switch (op) {
@@ -225,7 +225,7 @@ pub fn exec(x: anytype) !void {
 // ------------------------------------------------------------ moves
 
 fn moves1x(x: anytype, op: u8, p: Pfx) !void {
-    const i = &x.i;
+    const i = x.i;
     const d = xreg(x);
     switch (op) {
         0x10 => switch (p) {
@@ -458,7 +458,7 @@ fn cmpLanes(x: anytype, comptime T: type, comptime n: usize) !void {
 // ------------------------------------------------------------ conversions
 
 fn cvt2a(x: anytype, p: Pfx) !void {
-    const i = &x.i;
+    const i = x.i;
     var e = env(x);
     const d = xreg(x);
     switch (p) {
@@ -492,7 +492,7 @@ fn cvt2a(x: anytype, p: Pfx) !void {
 
 /// CVTTPS2PI, CVTPS2PI, CVTTPD2PI, CVTPD2PI, CVT(T)SS2SI, and CVT(T)SD2SI.
 fn cvt2c(x: anytype, p: Pfx, trunc: bool) !void {
-    const i = &x.i;
+    const i = x.i;
     var e = env(x);
     switch (p) {
         .none, .p66 => {
@@ -593,7 +593,7 @@ fn cvtE6(x: anytype, p: Pfx) !void {
 // ------------------------------------------------------------ FXSAVE
 
 fn fxGroup(x: anytype) !void {
-    const i = &x.i;
+    const i = x.i;
     switch (i.reg()) {
         0 => return fxsave(x),
         1 => return fxrstor(x),
@@ -648,7 +648,7 @@ fn fxrstor(x: anytype) !void {
 
 /// MMX (no prefix) or SSE2 (66) integer instructions and their moves.
 fn integer(x: anytype, p: Pfx, op: u8) !void {
-    const i = &x.i;
+    const i = x.i;
     // The ones with F3 or F2 forms.
     switch (op) {
         0x6f, 0x7f => if (p == .f3) {
@@ -755,7 +755,7 @@ fn mmxValid(i: anytype, op: u8) bool {
 
 /// W is u64 for MMX and u128 for XMM.
 fn integerOp(x: anytype, comptime W: type, op: u8) !void {
-    const i = &x.i;
+    const i = x.i;
     const is_mmx = W == u64;
     // #UD comes before the MMX transition, which waits and resets TOP.
     if (is_mmx and !mmxValid(i, op)) return ud(x);

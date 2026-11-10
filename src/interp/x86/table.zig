@@ -649,6 +649,9 @@ const lookup: Lookup = blk: {
     break :blk .{ .slots = slots, .entries = &out };
 };
 
+/// How many entries there are: entryAt takes 0 to entry_count - 1.
+pub const entry_count = lookup.entries.len;
+
 /// The slot for `opcode`.
 pub inline fn slot(opcode: u16) Slot {
     return lookup.slots[index(opcode)];

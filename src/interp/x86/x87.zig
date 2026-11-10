@@ -324,7 +324,7 @@ pub fn fwait(x: anytype) !void {
 /// each with its selector above the offset.
 fn note(x: anytype) void {
     const p = &x.c.fpu;
-    const i = &x.i;
+    const i = x.i;
     p.fop = (@as(u16, @as(u3, @truncate(i.opcode))) << 8) | i.modrm;
     p.fip = (@as(u64, x.c.seg[1]) << 32) | x.c.eip;
     if (i.mem) p.fdp = (@as(u64, x.c.seg[@intFromEnum(i.seg)]) << 32) | x.addr;
@@ -332,7 +332,7 @@ fn note(x: anytype) void {
 
 /// Runs a D8-DF instruction.
 pub fn exec(x: anytype) !void {
-    const i = &x.i;
+    const i = x.i;
     const op: u3 = @truncate(i.opcode);
     if (i.mem) return execMem(x, op, i.reg());
     return execReg(x, op, i.reg(), i.rm());

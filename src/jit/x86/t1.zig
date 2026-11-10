@@ -108,7 +108,7 @@ pub const Machine = struct {
     fn invHook(p: *anyopaque, page: u64) void {
         const m: *Machine = @ptrCast(@alignCast(p));
         if (m.jit) |c| c.invalidatePage(page);
-        m.icache = .{};
+        m.icache.clear();
     }
 
     pub fn load(m: *Machine, prog: []const u8, regs: [8]u32, eflags: u32, seed: u64) void {
@@ -124,7 +124,7 @@ pub const Machine = struct {
         m.cpu.r = regs;
         m.cpu.eip = gen.code_va;
         m.cpu.fl.set(eflags);
-        m.icache = .{};
+        m.icache.clear();
         m.cpu.icache = &m.icache;
         m.tlb.flush();
         m.rt.jump.clear();

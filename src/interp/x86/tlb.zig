@@ -12,6 +12,18 @@ const exec = @import("exec.zig");
 pub const TlbMem = struct {
     ctx: *Ctx,
     tlb: *const mem.Tlb,
+    /// The View's code pages, if anything tracks code.
+    code: ?*const mem.CodePages = null,
+
+    /// Over ctx's TLB and View (ctx.tlb and ctx.space).
+    pub fn init(ctx: *Ctx) TlbMem {
+        const view: ?*const mem.View = if (ctx.space == 0) null else @ptrFromInt(@as(usize, @intCast(ctx.space)));
+        return .{
+            .ctx = ctx,
+            .tlb = @ptrFromInt(@as(usize, @intCast(ctx.tlb))),
+            .code = if (view) |v| v.code else null,
+        };
+    }
 
     pub fn translate(m: *TlbMem, va: u32, access: cpu_mod.Access) ?[*]u8 {
         const hit = switch (access) {
@@ -25,6 +37,13 @@ pub const TlbMem = struct {
             .write => .write,
             .exec => .exec,
         });
+    }
+
+    /// The code epoch of the View in ctx.space, for T0's decode cache, or
+    /// null if nothing tracks code there.
+    pub inline fn codeEpoch(m: *TlbMem) ?usize {
+        const code = m.code orelse return null;
+        return code.epoch.load(.monotonic);
     }
 
     /// `translate` for a lift.Mem.
