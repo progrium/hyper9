@@ -142,10 +142,14 @@ pub fn emulateIdRead(insn: u32, hwcap_bits: u64) ?struct { rt: u5, value: u64 } 
     return .{ .rt = rt, .value = value };
 }
 
-/// ID_AA64ISAR0_EL1 for the AT_HWCAP bits `h`: CRC32 (bits 19:16) 1, and
-/// Atomic (23:20) 2.
+/// ID_AA64ISAR0_EL1 for the AT_HWCAP bits `h`: AES (bits 7:4) 1, or 2
+/// with PMULL; SHA1 (11:8) 1; SHA2 (15:12) 1; CRC32 (19:16) 1; and Atomic
+/// (23:20) 2.
 fn isar0(h: u64) u64 {
     var v: u64 = 0;
+    if (h & vmm.hwcap_arm64_aes != 0) v |= @as(u64, if (h & vmm.hwcap_arm64_pmull != 0) 2 else 1) << 4;
+    if (h & vmm.hwcap_arm64_sha1 != 0) v |= 1 << 8;
+    if (h & vmm.hwcap_arm64_sha2 != 0) v |= 1 << 12;
     if (h & vmm.hwcap_arm64_crc32 != 0) v |= 1 << 16;
     if (h & vmm.hwcap_arm64_atomics != 0) v |= 2 << 20;
     return v;
@@ -160,6 +164,7 @@ test "emulateIdRead decodes mrs of the ID registers" {
     try std.testing.expectEqual(@as(u64, 0), emulateIdRead(0xd5380600, 0).?.value);
     // ID_AA64ISAR0 says what AT_HWCAP does.
     try std.testing.expectEqual(@as(u64, 0x21_0000), emulateIdRead(0xd5380600, vmm.hwcap_arm64_crc32 | vmm.hwcap_arm64_atomics).?.value);
+    try std.testing.expectEqual(@as(u64, 0x21_1120), emulateIdRead(0xd5380600, 0x1f8).?.value);
     // mrs x1, mpidr_el1
     try std.testing.expectEqual(@as(u64, 0x8000_0000), emulateIdRead(0xd53800a1, 0).?.value);
     // mrs x0, tpidr_el0 isn't one; nor is a nop.

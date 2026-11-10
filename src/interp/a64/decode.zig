@@ -514,6 +514,7 @@ pub fn info(k: Kind) Info {
 /// The registers, flags, memory, and control flow of one decoded op.
 pub fn regs(o: Op) Regs {
     if (o.k.isSimd()) return simd.regs(o);
+    if (o.k.isExt()) return ext.regs(o);
     const i = info(o.k);
     var r: Regs = .{ .flags = i.flags, .mem = i.mem, .ctrl = i.ctrl, .system = i.system };
     const pair = switch (o.k) {

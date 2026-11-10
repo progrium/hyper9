@@ -58,6 +58,8 @@ pub const Class = enum {
     crc,
     /// LSE atomics on x20 (FEAT_LSE): LDADD and the rest, SWP, CAS, CASP.
     lse,
+    /// AES, SHA1, SHA256, and PMULL's 1Q form (ha64's ext.zig).
+    crypto,
 };
 
 pub const Options = struct {
@@ -249,6 +251,17 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
             const sz = r.uintLessThan(u32, 4);
             const xf: u32 = if (sz == 3) 1 else 0;
             break :blk (xf << 31) | 0x1AC04000 | (rm << 16) | (r.uintLessThan(u32, 2) << 12) | (sz << 10) | (src(r) << 5) | d;
+        },
+        .crypto => blk: {
+            const vd = r.uintLessThan(u32, 32);
+            const vn = r.uintLessThan(u32, 32);
+            const vm = r.uintLessThan(u32, 32);
+            break :blk switch (r.uintLessThan(u32, 4)) {
+                0 => 0x4E284800 | r.uintLessThan(u32, 4) << 12 | vn << 5 | vd,
+                1 => 0x5E000000 | vm << 16 | r.uintLessThan(u32, 7) << 12 | vn << 5 | vd,
+                2 => 0x5E280800 | r.uintLessThan(u32, 3) << 12 | vn << 5 | vd,
+                else => 0x0EE0E000 | r.uintLessThan(u32, 2) << 30 | vm << 16 | vn << 5 | vd,
+            };
         },
         .lse => blk: {
             const size = r.uintLessThan(u32, 4);

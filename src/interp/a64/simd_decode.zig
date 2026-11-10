@@ -7,7 +7,8 @@
 //! simd_exec.zig's handlers. Loads and stores of single FP/SIMD registers
 //! (LDR, STR, LDP, STP, and LDUR of B, H, S, D, and Q) are decode.zig's.
 //! Later architecture versions' encodings (FP16 arithmetic, RDM, dot
-//! product, the crypto extensions) decode to .undef.
+//! product) decode to .undef. The crypto extensions (AES, SHA1, SHA256,
+//! and PMULL's 1Q form) are ext.zig's.
 //!
 //! The contract with decode.zig:
 //!   decode(w, pc) Op     an Op with k = .undef or a kind >= simd_base
@@ -30,6 +31,7 @@
 
 const std = @import("std");
 const d = @import("decode.zig");
+const ext = @import("ext.zig");
 
 pub const Q: u8 = 1;
 pub const SCALAR: u8 = 2;
@@ -394,6 +396,7 @@ const none: d.Op = .{};
 /// Decodes the instruction word `w` at `pc`.
 pub fn decode(w: u32, pc: u64) d.Op {
     _ = pc;
+    if (ext.decodeCrypto(w)) |o| return o;
     const hi = bits(w, 28, 24);
     if (bit(w, 31) == 0) {
         if (hi == 0b01110) return vec01110(w, false);
