@@ -60,6 +60,7 @@ pub fn main(init: std.process.Init) !u8 {
             var w = std.Io.File.stdout().writerStreaming(io, &buf);
             const code = tools.check(init.gpa, io, &w.interface, .{
                 .backend = cfg.backend,
+                .arch = cfg.arch,
                 .memory = cfg.memory,
                 .builtin = builtinFor(cfg.builtin, root_arg != null),
                 .root_arg = root_arg,
