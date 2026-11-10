@@ -381,6 +381,10 @@ fn createKind(gpa: std.mem.Allocator, io: std.Io, k: Kind, opts: Options) Create
     };
 }
 
+/// arm64 AT_HWCAP bits (Linux's arch/arm64/include/uapi/asm/hwcap.h).
+pub const hwcap_arm64_crc32: u64 = 1 << 7;
+pub const hwcap_arm64_atomics: u64 = 1 << 8;
+
 pub const Backend = union(Kind) {
     hvf: *hvf.Backend,
     kvm: *kvm.Backend,
@@ -396,6 +400,20 @@ pub const Backend = union(Kind) {
         switch (b) {
             inline else => |p| p.destroy(),
         }
+    }
+    /// The optional CPU features beyond `arch`'s baseline that this
+    /// backend runs, as Linux's AT_HWCAP bits for that arch: on arm64, the
+    /// emulator's Armv8.1 atomics and CRC32 (HWCAP_ATOMICS and
+    /// HWCAP_CRC32). Hardware backends say none, and a program finds what
+    /// the host has by trying.
+    pub fn hwcaps(b: Backend, arch: Arch) u64 {
+        return switch (b) {
+            .emu => switch (arch) {
+                .arm64 => hwcap_arm64_crc32 | hwcap_arm64_atomics,
+                else => 0,
+            },
+            else => 0,
+        };
     }
     pub fn maxVcpus(b: Backend) Error!u32 {
         return switch (b) {

@@ -1,7 +1,7 @@
 //! ha64's Armv8.0 optional extensions on T0: CRC32 (FEAT_CRC32), with the
 //! cryptographic ones (AES, SHA1, SHA2, PMULL) to follow. Linux programs
 //! use them only when AT_HWCAP says so, and h9 says so on the emulator
-//! (vmm.Backend.hwcaps) once both tiers run them.
+//! (vmm.Backend.hwcaps) for each one both tiers run: CRC32 so far.
 //!
 //! decode.zig hands the encodings here (`decodeDp2`), and its kinds from
 //! `dec.ext_base` up are this file's: exec.zig dispatches them to
