@@ -33,6 +33,7 @@ const fe = @import("../frontend.zig");
 const flags_mod = @import("flags.zig");
 const dec = @import("../../interp/a64/decode.zig");
 const t0 = @import("../../interp/a64/exec.zig");
+const lift_simd = @import("lift_simd.zig");
 
 const Kind = dec.Kind;
 const Cpu = t0.Cpu;
@@ -85,7 +86,7 @@ pub const How = enum {
 };
 
 pub fn classify(o: dec.Op) How {
-    if (o.k.isSimd()) return .interp;
+    if (o.k.isSimd()) return if (lift_simd.lifts(o)) .lift else .interp;
     return switch (dec.regs(o).ctrl) {
         .none => if (lifts(o)) .lift else .interp,
         .jump => .jump,
@@ -124,7 +125,7 @@ pub fn lifts(o: dec.Op) bool {
 
 const max_insns = 512;
 
-const Insn = struct { pc: u64, word: u32, op: dec.Op, how: How };
+pub const Insn = struct { pc: u64, word: u32, op: dec.Op, how: How };
 
 pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftError!void {
     var buf: [max_insns]Insn = undefined;
@@ -205,7 +206,13 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
         while (true) {
             const in = insns[i];
             switch (in.how) {
-                .lift => {
+                .lift => if (in.op.k.isSimd()) {
+                    // A run of FP/SIMD instructions: lift_simd.zig's.
+                    var j = i;
+                    while (j < last and insns[j + 1].how == .lift and insns[j + 1].op.k.isSimd()) j += 1;
+                    try lift_simd.run(&l, insns[i .. j + 1]);
+                    i = j;
+                } else {
                     // The flags this writes are dead if a later
                     // instruction in the block overwrites them first.
                     l.flags_dead = flags_mod.dead(ops[i + 1 .. last + 1], by_interp[i + 1 .. last + 1]) and i < last;
@@ -317,7 +324,7 @@ fn fillExit(b: *Builder, id: ir.BlockId, t: u64) !void {
 
 /// A block being lifted: the builder, the cached register and flag values,
 /// and the instructions not yet retired.
-const L = struct {
+pub const L = struct {
     b: *Builder,
     /// Each general register slot's current value (i64), once read or
     /// written in this block.
@@ -330,7 +337,7 @@ const L = struct {
 
     /// Before an operation that can leave: the flags in the Cpu, and the
     /// instructions so far retired.
-    fn flush(l: *L) !void {
+    pub fn flush(l: *L) !void {
         try l.flags.sync(l.b);
         l.b.retired = @intCast(l.pending);
     }
@@ -341,7 +348,7 @@ const L = struct {
     }
 
     /// Before a branch to another block: the block's count, as a `retire`.
-    fn retireAll(l: *L) !void {
+    pub fn retireAll(l: *L) !void {
         try l.flags.sync(l.b);
         try l.b.retire(l.pending);
         l.pending = 0;
@@ -358,7 +365,7 @@ const L = struct {
     }
 
     /// A general register slot as an i64 (ZR reads 0).
-    fn x(l: *L, s: u8) !Ref {
+    pub fn x(l: *L, s: u8) !Ref {
         if (s == ZR or s == SINK) return l.k(.i64, 0);
         if (l.regs[s]) |v| return v;
         const v = try l.b.getreg(.i64, regOff(s));
@@ -367,20 +374,20 @@ const L = struct {
     }
 
     /// A register at type `ty` (i64, or the low 32 bits as i32).
-    fn src(l: *L, s: u8, ty: Type) !Ref {
+    pub fn src(l: *L, s: u8, ty: Type) !Ref {
         const v = try l.x(s);
         return if (ty == .i64) v else l.b.un(.trunc, ty, v);
     }
 
     /// Writes an i64 to a register slot.
-    fn put(l: *L, s: u8, v: Ref) !void {
+    pub fn put(l: *L, s: u8, v: Ref) !void {
         if (s == SINK or s == ZR) return;
         try l.b.setreg(regOff(s), v);
         l.regs[s] = v;
     }
 
     /// Writes a value of type `ty`, zero-extended.
-    fn putT(l: *L, s: u8, v: Ref, ty: Type) !void {
+    pub fn putT(l: *L, s: u8, v: Ref, ty: Type) !void {
         try l.put(s, if (ty == .i64) v else try l.b.un(.zext, .i64, v));
     }
 

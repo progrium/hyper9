@@ -52,6 +52,8 @@ pub const Class = enum {
     ldar_stlr,
     /// FP and AdvSIMD data processing (simd_gen.zig).
     simd,
+    /// AdvSIMD structure loads and stores through x20.
+    simd_mem,
 };
 
 pub const Options = struct {
@@ -237,6 +239,7 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
         .simd => while (true) {
             if (simd_gen.word(r)) |w| break w;
         },
+        .simd_mem => simd_gen.memWord(r, base_reg),
         // B.cond, CBZ, CBNZ, TBZ, TBNZ, B: forward, within the program
         .branch => blk: {
             const k = 1 + r.uintLessThan(u32, @max(1, @min(8, n - i)));

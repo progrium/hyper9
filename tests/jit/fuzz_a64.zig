@@ -22,6 +22,8 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var args = try common.Args(gen.Class).parse("fuzz-a64", init);
     if (!options.unicorn and args.lockstep) args.lockstep = false;
+    // Check FP and SIMD lifting whatever this host's emitter takes.
+    vcpu.a64.lift_simd.enabled = true;
     std.debug.print("fuzz-a64: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
 
     const s = try gpa.create(fuzz.Space);
@@ -95,8 +97,9 @@ pub fn main(init: std.process.Init) !void {
     if (failed != 0) std.process.exit(1);
 }
 
-const KnownCounts = if (options.unicorn) std.EnumArray(lockstep.Known, u64) else std.EnumArray(enum { none }, u64);
-const Lockstep = union(enum) { agree, diverged, known: if (options.unicorn) lockstep.Known else enum { none } };
+const NoKnown = enum { none };
+const KnownCounts = if (options.unicorn) std.EnumArray(lockstep.Known, u64) else std.EnumArray(NoKnown, u64);
+const Lockstep = union(enum) { agree, diverged, known: if (options.unicorn) lockstep.Known else NoKnown };
 
 /// T0 against Unicorn, an instruction at a time, to the SVC. Writes how
 /// they diverged to `w`.

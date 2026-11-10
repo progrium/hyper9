@@ -90,6 +90,20 @@ pub fn word(r: std.Random) ?u32 {
     return w;
 }
 
+/// A random structure load or store (LD1-LD4, ST1-ST4, their lane forms,
+/// and LD1R-LD4R) through general register `base`, without writeback.
+pub fn memWord(r: std.Random, base: u5) u32 {
+    while (true) {
+        const single = r.boolean();
+        const w: u32 = if (single)
+            (r.int(u32) & 0x4060fc1f) | 0x0d000000
+        else
+            (r.int(u32) & 0x4040fc1f) | 0x0c000000;
+        const x = (w & ~@as(u32, 0x3e0)) | @as(u32, base) << 5;
+        if (dec.decode(x, 0x1000).k.isSimd()) return x;
+    }
+}
+
 /// A random FPCR: RMode, FZ, and DN, nearest and neither most often.
 pub fn fpcr(r: std.Random) u32 {
     const rmode: u32 = if (r.boolean()) 0 else r.int(u2);

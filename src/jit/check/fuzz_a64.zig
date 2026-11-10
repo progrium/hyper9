@@ -123,3 +123,27 @@ test "fuzz-a64: random programs agree region by region" {
         }
     }
 }
+
+test "fuzz-a64: FP and SIMD programs agree region by region, lifted" {
+    const lift_simd = @import("../a64/lift_simd.zig");
+    const was = lift_simd.enabled;
+    lift_simd.enabled = true;
+    defer lift_simd.enabled = was;
+    const gpa = std.testing.allocator;
+    const s = try gpa.create(Space);
+    defer gpa.destroy(s);
+    s.load(&.{}, 0);
+    const r = try check.Run.init(gpa, &a64.guest, check.mapBacking(&s.map));
+    defer r.deinit();
+    var prng = std.Random.DefaultPrng.init(0xf10a7);
+    var buf: [65]u32 = undefined;
+    for (0..300) |i| {
+        const words = gen.program(prng.random(), .{ .len = 48, .classes = &.{ .simd, .simd_mem, .add_imm, .csel } }, &buf);
+        s.load(words, i);
+        const out = try checkRegions(gpa, r, s, s.cpu(prng.random()), 64, null);
+        if (!out.ok) {
+            std.debug.print("program {d} diverges:\n{s}\n", .{ i, r.report.items });
+            return error.Diverged;
+        }
+    }
+}
