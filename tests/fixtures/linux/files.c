@@ -777,6 +777,41 @@ static void lazy_map(void) {
 	printf("ok lazy_map\n");
 }
 
+/* MADV_DONTNEED on a page of the program's own writable data segment,
+ * which the file backs, leaves the file's bytes: Bun's standalone
+ * executables (Claude Code) hand back the pages of their embedded
+ * sources in such a segment and read them again later. */
+static char image_page[2 * 4096] __attribute__((aligned(4096))) = {[0] = 'i', [4095] = 'm', [4096] = 'g'};
+
+static void image_dontneed(void) {
+	volatile char *p = image_page;
+	CHECK("image_dontneed", madvise(image_page, sizeof image_page, MADV_DONTNEED) == 0);
+	CHECK("image_dontneed", p[0] == 'i' && p[4095] == 'm' && p[4096] == 'g');
+	printf("ok image_dontneed\n");
+}
+
+/* A path through /proc/self/fd/N, for a directory opened O_PATH, walks
+ * on from that directory, as Claude Code makes its temp directories. */
+static void proc_fd_dir(void) {
+	char dir[64], via[96], file[96];
+	snprintf(dir, sizeof dir, "/tmp/procfd.%d", (int)getpid());
+	CHECK("proc_fd_dir", mkdir(dir, 0700) == 0);
+	int d = open(dir, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	CHECK("proc_fd_dir", d >= 0);
+	snprintf(via, sizeof via, "/proc/self/fd/%d/sub", d);
+	CHECK("proc_fd_dir", mkdir(via, 0700) == 0);
+	snprintf(via, sizeof via, "/proc/self/fd/%d/sub/f", d);
+	int f = open(via, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK("proc_fd_dir", f >= 0 && write(f, "hi", 2) == 2 && close(f) == 0);
+	snprintf(file, sizeof file, "%s/sub/f", dir);
+	struct stat st;
+	CHECK("proc_fd_dir", stat(file, &st) == 0 && st.st_size == 2);
+	CHECK("proc_fd_dir", unlink(via) == 0 && stat(file, &st) < 0 && errno == ENOENT);
+	snprintf(via, sizeof via, "/proc/self/fd/%d/sub", d);
+	CHECK("proc_fd_dir", rmdir(via) == 0 && close(d) == 0 && rmdir(dir) == 0);
+	printf("ok proc_fd_dir\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -806,6 +841,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "unlinked")) unlinked();
 		if (all || !strcmp(n, "shm_pass")) shm_pass();
 		if (all || !strcmp(n, "lazy_map")) lazy_map();
+		if (all || !strcmp(n, "image_dontneed")) image_dontneed();
+		if (all || !strcmp(n, "proc_fd_dir")) proc_fd_dir();
 	}
 	return failed;
 }
