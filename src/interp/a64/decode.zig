@@ -291,6 +291,18 @@ pub const Kind = enum(u16) {
     ldar,
     stlr,
 
+    // ---- LSE atomics (Armv8.1): x is log2 of the size, sh bit 0 acquire
+    // and bit 1 release; n is the base.
+    /// LDADD, LDCLR, LDEOR, LDSET, LDSMAX, LDSMIN, LDUMAX, LDUMIN, and SWP by
+    /// a (0-8), and their ST aliases (d is ZR): d gets the old value, m is
+    /// the operand.
+    ldop,
+    /// CAS: d is Rs, compared and then given the old value; m is Rt, the
+    /// new value.
+    cas,
+    /// CASP: as CAS on the register pairs d, d+1 and m, m+1 (x is 2 or 3).
+    casp,
+
     /// simd_decode.zig's kinds, from `simd_base` up.
     _,
 
@@ -350,6 +362,8 @@ pub const MemUse = enum(u3) {
     load_exclusive,
     /// Store-exclusive: checks the monitor and writes a status.
     store_exclusive,
+    /// An atomic read-modify-write (LSE).
+    rmw,
 };
 
 pub const Ctrl = enum(u4) {
@@ -478,6 +492,8 @@ pub fn info(k: Kind) Info {
         .stxr, .stxp => .{ .d = .w, .n = .r, .m = .r, .mem = .store_exclusive, .system = true },
         .ldar => .{ .d = .w, .n = .r, .mem = .load, .system = true },
         .stlr => .{ .m = .r, .n = .r, .mem = .store, .system = true },
+        .ldop => .{ .d = .w, .m = .r, .n = .r, .mem = .rmw, .system = true },
+        .cas, .casp => .{ .d = .rw, .m = .r, .n = .r, .mem = .rmw, .system = true },
         _ => unreachable,
     };
 }
@@ -516,6 +532,10 @@ pub fn regs(o: Op) Regs {
         .bl, .blr => Regs.slot(&r.write, 30),
         .ldxp => r.use(.w, o.a, false),
         .stxp => r.use(.r, o.a, false),
+        .casp => {
+            r.use(.rw, o.d + 1, false);
+            r.use(.r, o.m + 1, false);
+        },
         .mrs => if (o.imm == sr.nzcv) {
             r.flags = .r;
         },
@@ -964,6 +984,14 @@ fn ldSt(w: u32, pc: u64) Op {
         if (v) return .{ .k = k, .d = @intCast(rt), .m = @intCast(rt2), .n = rsp(rn), .x = x, .imm = imm };
         return .{ .k = k, .d = if (l) rdz(rt) else rz(rt), .m = if (l) rdz(rt2) else rz(rt2), .n = rsp(rn), .x = x, .imm = imm };
     }
+    // LSE atomic memory operations
+    if (!v and bits(w, 24, 24) == 0 and bits(w, 21, 21) == 1 and bits(w, 11, 10) == 0) {
+        const o3 = bits(w, 15, 15);
+        const opc = bits(w, 14, 12);
+        if (o3 == 1 and opc != 0) return .{}; // LDAPR (Armv8.3) and unallocated
+        const order: u8 = @intCast(bits(w, 23, 22) >> 1 | (bits(w, 22, 22) & 1) << 1);
+        return .{ .k = .ldop, .d = rdz(rt), .m = rz(bits(w, 20, 16)), .n = rsp(rn), .x = @intCast(size), .a = if (o3 == 1) 8 else @intCast(opc), .sh = order };
+    }
     // single register
     const opc = bits(w, 23, 22);
     const prfm = !v and size == 3 and opc == 2;
@@ -1014,7 +1042,10 @@ fn exclusive(w: u32) Op {
         return .{ .k = .stxr, .d = rdz(rs), .m = rz(rt), .n = rsp(rn), .x = x, .sh = o0 };
     }
     if (o2 == 0 and o1 == 1) {
-        if (size < 2) return .{}; // CASP (LSE)
+        if (size < 2) { // CASP (LSE)
+            if (rt2 != 31 or rs & 1 != 0 or rt & 1 != 0) return .{};
+            return .{ .k = .casp, .d = @intCast(rs), .m = @intCast(rt), .n = rsp(rn), .x = @intCast(size + 2), .sh = @as(u8, @intFromBool(l)) | o0 << 1 };
+        }
         if (l) return .{ .k = .ldxp, .d = rdz(rt), .a = rdz(rt2), .n = rsp(rn), .x = x, .sh = o0 };
         return .{ .k = .stxp, .d = rdz(rs), .m = rz(rt), .a = rz(rt2), .n = rsp(rn), .x = x, .sh = o0 };
     }
@@ -1023,7 +1054,9 @@ fn exclusive(w: u32) Op {
         if (l) return .{ .k = .ldar, .d = rdz(rt), .n = rsp(rn), .x = x, .sh = 1 };
         return .{ .k = .stlr, .m = rz(rt), .n = rsp(rn), .x = x, .sh = 1 };
     }
-    return .{}; // CAS (LSE)
+    // CAS (LSE)
+    if (rt2 != 31) return .{};
+    return .{ .k = .cas, .d = rz(rs), .m = rz(rt), .n = rsp(rn), .x = x, .sh = @as(u8, @intFromBool(l)) | o0 << 1 };
 }
 
 // ---------------------------------------------------------------- tests

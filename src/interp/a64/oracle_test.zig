@@ -318,3 +318,107 @@ test "T0 matches the host CPU on random loads and stores" {
     }
     try std.testing.expectEqual(@as(usize, 0), missing);
 }
+
+/// A random LSE atomic (LDADD and the rest, SWP, CAS, CASP), with its base
+/// register aligned for the access.
+fn lseCandidate(rand: std.Random) ?u32 {
+    const rt = rand.uintLessThan(u32, 32);
+    const rs = rand.uintLessThan(u32, 32);
+    const rn = rand.uintLessThan(u32, 31);
+    const size = rand.uintLessThan(u32, 4);
+    const ar = rand.uintLessThan(u32, 4);
+    const w: u32 = switch (rand.uintLessThan(u8, 3)) {
+        // LDADD..LDUMIN, SWP: size 111000 A R 1 Rs o3 opc 00 Rn Rt
+        0 => blk: {
+            const o3 = rand.uintLessThan(u32, 4) == 0;
+            const opc: u32 = if (o3) 0 else rand.uintLessThan(u32, 8);
+            break :blk size << 30 | 0x38200000 | ar << 22 | rs << 16 | @as(u32, @intFromBool(o3)) << 15 | opc << 12 | rn << 5 | rt;
+        },
+        // CAS: size 0010001 L 1 Rs o0 11111 Rn Rt
+        1 => size << 30 | 0x08a07c00 | (ar & 1) << 22 | rs << 16 | (ar >> 1) << 15 | rn << 5 | rt,
+        // CASP: 0 sz 0010000 L 1 Rs o0 11111 Rn Rt, even registers
+        else => (size & 1) << 30 | 0x08207c00 | (ar & 1) << 22 | (rs & 0x1e) << 16 | (ar >> 1) << 15 | rn << 5 | (rt & 0x1e),
+    };
+    const o = dec.decode(w, 0x10000);
+    if (o.k != .ldop and o.k != .cas and o.k != .casp) return null;
+    const r = dec.regs(o);
+    const bad: u64 = 1 << 18 | 1 << dec.SP;
+    if ((r.read | r.write) & bad != 0) return null;
+    // The base must stay the base: no destination may be it.
+    if (r.write & (@as(u64, 1) << @intCast(o.n)) != 0) return null;
+    return w;
+}
+
+test "T0 matches the host CPU on random LSE atomics" {
+    if (!supported) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var words: std.ArrayList(u32) = .empty;
+    defer words.deinit(gpa);
+    const at = try harness(&words, gpa);
+    var native = try Native.init(words.items, at);
+
+    const size = 64 * 1024;
+    const host_buf = try gpa.alignedAlloc(u8, .fromByteUnits(mem.page_size), size);
+    defer gpa.free(host_buf);
+    const t0_buf = try gpa.alignedAlloc(u8, .fromByteUnits(mem.page_size), size);
+    defer gpa.free(t0_buf);
+    const va: u64 = @intFromPtr(host_buf.ptr);
+    const maps = [_]mem.Mapping{.{ .va = va, .len = size, .host = @intFromPtr(t0_buf.ptr), .perms = .{ .write = true } }};
+
+    var prng: std.Random.DefaultPrng = .init(0x13198a2e03707344);
+    const rand = prng.random();
+    var cpu: exec.Cpu = .{};
+    var tlb: mem.Tlb = .{};
+    var cache: exec.Cache = .init(gpa);
+    defer cache.deinit();
+    var view: mem.View = .{ .maps = &maps, .tlb = &tlb };
+    var ctx: Ctx = .{ .tlb = @intFromPtr(&tlb), .space = @intFromPtr(&view) };
+    var m: exec.Machine = .init(&cpu, &ctx, &cache, null);
+
+    var tried: usize = 0;
+    var seen: [3]u32 = @splat(0);
+    while (tried < 50_000) {
+        const w = lseCandidate(rand) orelse continue;
+        tried += 1;
+        const o = dec.decode(w, 0x10000);
+        rand.bytes(host_buf[0..4096]);
+        @memcpy(t0_buf[0..4096], host_buf[0..4096]);
+        var s: State = undefined;
+        for (&s.x) |*x| x.* = randomValue(rand);
+        for (&s.v) |*v| v.* = 0;
+        s.x[18] = 0;
+        s.nzcv = 0;
+        const addr = va + 16 * rand.uintLessThan(u64, 256);
+        s.x[o.n] = addr;
+        // Half the time, the comparison value matches memory.
+        if ((o.k == .cas or o.k == .casp) and rand.boolean()) {
+            const cur = std.mem.readInt(u64, host_buf[addr - va ..][0..8], .little);
+            if (o.k == .cas) {
+                if (o.d != 31) s.x[o.d] = cur;
+            } else {
+                const hi = std.mem.readInt(u64, host_buf[addr - va + 8 ..][0..8], .little);
+                if (o.x == 2) {
+                    if (o.d != 31) s.x[o.d] = cur & 0xffffffff;
+                    if (o.d + 1 != 31) s.x[o.d + 1] = cur >> 32;
+                } else {
+                    if (o.d != 31) s.x[o.d] = cur;
+                    if (o.d + 1 != 31) s.x[o.d + 1] = hi;
+                }
+            }
+        }
+        cpu = .{};
+        @memcpy(cpu.r[0..31], &s.x);
+        const before = s;
+        native.run(w, &s);
+        seen[@intFromEnum(o.k) - @intFromEnum(dec.Kind.ldop)] += 1;
+        try std.testing.expectEqual(exec.Next.next, exec.step(&m, &o, 0x10000));
+        const same = std.mem.eql(u64, cpu.r[0..31], &s.x) and std.mem.eql(u8, host_buf[0..4096], t0_buf[0..4096]);
+        if (!same) {
+            std.debug.print("{x:0>8} ({t}): differs\n", .{ w, o.k });
+            for (0..31) |i| if (cpu.r[i] != s.x[i]) std.debug.print("  x{d}: in {x} host {x} t0 {x}\n", .{ i, before.x[i], s.x[i], cpu.r[i] });
+            if (std.mem.indexOfDiff(u8, host_buf[0..4096], t0_buf[0..4096])) |d| std.debug.print("  memory differs at +{x}\n", .{d});
+            return error.TestUnexpectedResult;
+        }
+    }
+    for (seen) |n| try std.testing.expect(n > 0);
+}

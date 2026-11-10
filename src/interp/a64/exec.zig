@@ -817,6 +817,111 @@ fn stlr(m: *Machine, o: *const Op, pc: u64) Next {
     return .next;
 }
 
+// ---------------------------------------------------------------- LSE atomics
+
+/// A register write where 31 is ZR (the LSE forms' Rs).
+inline fn setZ(r: *[dec.nslots]u64, slot: u8, v: u64) void {
+    if (slot != ZR) r[slot] = v;
+}
+
+/// The host address of an aligned atomic, or a fault. LSE atomics need
+/// natural alignment on Armv8.0 and 8.1 (without LSE2).
+fn atomicHost(m: *Machine, comptime T: type, addr: u64, pc: u64, f: *MemFault) ?usize {
+    if (addr % @sizeOf(T) != 0) {
+        f.* = .{ .addr = addr, .kind = .alignment };
+        _ = dataFault(m, pc, addr, .write, .alignment);
+        return null;
+    }
+    return host(m, addr, @sizeOf(T), .write, f) orelse {
+        _ = dataFault(m, pc, f.addr, .write, f.kind);
+        return null;
+    };
+}
+
+fn ldop(comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
+    const r = &m.cpu.r;
+    var f: MemFault = undefined;
+    const h = atomicHost(m, T, r[o.n], pc, &f) orelse return .exit;
+    const v: T = @truncate(r[o.m]);
+    const S = std.meta.Int(.signed, @bitSizeOf(T));
+    const old: T = if (@sizeOf(T) > max_atomic) blk: {
+        // wasm32: one vCPU per instance, so a plain read-modify-write.
+        const p: *T = @ptrFromInt(h);
+        const x = p.*;
+        p.* = switch (o.a) {
+            0 => x +% v,
+            1 => x & ~v,
+            2 => x ^ v,
+            3 => x | v,
+            4 => @bitCast(@max(@as(S, @bitCast(x)), @as(S, @bitCast(v)))),
+            5 => @bitCast(@min(@as(S, @bitCast(x)), @as(S, @bitCast(v)))),
+            6 => @max(x, v),
+            7 => @min(x, v),
+            else => v,
+        };
+        break :blk x;
+    } else blk: {
+        const p: *T = @ptrFromInt(h);
+        const ps: *S = @ptrFromInt(h);
+        break :blk switch (o.a) {
+            0 => @atomicRmw(T, p, .Add, v, .seq_cst),
+            1 => @atomicRmw(T, p, .And, ~v, .seq_cst),
+            2 => @atomicRmw(T, p, .Xor, v, .seq_cst),
+            3 => @atomicRmw(T, p, .Or, v, .seq_cst),
+            4 => @bitCast(@atomicRmw(S, ps, .Max, @bitCast(v), .seq_cst)),
+            5 => @bitCast(@atomicRmw(S, ps, .Min, @bitCast(v), .seq_cst)),
+            6 => @atomicRmw(T, p, .Max, v, .seq_cst),
+            7 => @atomicRmw(T, p, .Min, v, .seq_cst),
+            else => @atomicRmw(T, p, .Xchg, v, .seq_cst),
+        };
+    };
+    r[o.d] = old;
+    return .next;
+}
+
+/// CAS, and CASP of two words as one 8-byte compare-and-swap.
+fn casOp(comptime T: type, m: *Machine, o: *const Op, pc: u64) Next {
+    const r = &m.cpu.r;
+    var f: MemFault = undefined;
+    const h = atomicHost(m, T, r[o.n], pc, &f) orelse return .exit;
+    const is_pair = o.k == .casp;
+    const expect: T = if (is_pair) @truncate(w32(r[o.d]) | r[o.d + 1] << 32) else @truncate(r[o.d]);
+    const new: T = if (is_pair) @truncate(w32(r[o.m]) | r[o.m + 1] << 32) else @truncate(r[o.m]);
+    const old: T = if (@sizeOf(T) > max_atomic) blk: {
+        const p: *T = @ptrFromInt(h);
+        const x = p.*;
+        if (x == expect) p.* = new;
+        break :blk x;
+    } else @cmpxchgStrong(T, @as(*T, @ptrFromInt(h)), expect, new, .seq_cst, .seq_cst) orelse expect;
+    if (is_pair) {
+        setZ(r, o.d, w32(old));
+        setZ(r, o.d + 1, @as(u64, old) >> 32);
+    } else setZ(r, o.d, old);
+    return .next;
+}
+
+/// CASP of two doublewords: a 16-byte compare-and-swap, or the pair lock.
+fn caspX(m: *Machine, o: *const Op, pc: u64) Next {
+    const r = &m.cpu.r;
+    var f: MemFault = undefined;
+    const h = atomicHost(m, u128, r[o.n], pc, &f) orelse return .exit;
+    const expect = @as(u128, r[o.d + 1]) << 64 | r[o.d];
+    const new = @as(u128, r[o.m + 1]) << 64 | r[o.m];
+    var old: u128 = undefined;
+    if (have_cas128) {
+        old = @cmpxchgStrong(u128, @as(*u128, @ptrFromInt(h)), expect, new, .seq_cst, .seq_cst) orelse expect;
+    } else {
+        while (pair_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        defer pair_lock.store(0, .release);
+        const p: *[2]u64 = @ptrFromInt(h);
+        old = @as(u128, p[1]) << 64 | p[0];
+        if (old == expect) p.* = .{ @truncate(new), @truncate(new >> 64) };
+    }
+    setZ(r, o.d, @truncate(old));
+    setZ(r, o.d + 1, @truncate(old >> 64));
+    return .next;
+}
+
 // ---------------------------------------------------------------- system
 
 fn mrs(m: *Machine, o: *const Op) Next {
@@ -1083,6 +1188,19 @@ inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
         .stxp => return stxr(m, o, pc, true),
         .ldar => return ldar(m, o, pc),
         .stlr => return stlr(m, o, pc),
+        .ldop => return switch (o.x) {
+            0 => ldop(u8, m, o, pc),
+            1 => ldop(u16, m, o, pc),
+            2 => ldop(u32, m, o, pc),
+            else => ldop(u64, m, o, pc),
+        },
+        .cas => return switch (o.x) {
+            0 => casOp(u8, m, o, pc),
+            1 => casOp(u16, m, o, pc),
+            2 => casOp(u32, m, o, pc),
+            else => casOp(u64, m, o, pc),
+        },
+        .casp => return if (o.x == 2) casOp(u64, m, o, pc) else caspX(m, o, pc),
         else => comptime unreachable,
     }
     return .next;
