@@ -100,7 +100,7 @@ zig build mkroot -- --src        # build the root tree from the pinned image (al
 zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, h9-node, the demo page)
-zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later)
+zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later); -Darch=arm64 for ha64
 zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in Chromium with Playwright, and vcpu-web
 zig build vcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build x86-jit  # the 386 JIT's [x86-jit] cases (tests/x86.zig) on T0 and T1; zig build vcpu runs them too

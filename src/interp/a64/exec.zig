@@ -256,7 +256,20 @@ pub fn decodePage(p: *Page, va: u64, text: *const [page_size]u8) void {
 /// Runs until a syscall, a breakpoint, a fault, a kick, or `max_steps`
 /// instructions (maxInt for no limit).
 pub fn run(m: *Machine, max_steps: u64) Exit {
+    return runLoop(m, max_steps, false, 0);
+}
+
+/// As `run`, but also stops (`.interrupted`, with the PC at the target)
+/// after `branches` taken branches: the web host's T1 runs cold code this
+/// way, so the next block's head comes back to its dispatcher to be
+/// counted (src/jit/wasm_t1.zig).
+pub fn runBranches(m: *Machine, max_steps: u64, branches: u32) Exit {
+    return runLoop(m, max_steps, true, branches);
+}
+
+fn runLoop(m: *Machine, max_steps: u64, comptime counted: bool, branches: u32) Exit {
     const cpu = m.cpu;
+    var taken: u32 = 0;
     if (m.requested()) return .interrupted;
     m.cache.check(m);
     var page = m.cache.get(m, cpu.pc) orelse return m.exit;
@@ -287,6 +300,13 @@ pub fn run(m: *Machine, max_steps: u64) Exit {
                 if (t & 3 != 0) {
                     cpu.pc = t;
                     return .{ .fault = .{ .addr = t, .access = .exec, .kind = .alignment, .esr = (EC_PC_ALIGN << 26) | ESR_IL } };
+                }
+                if (counted and o.k != .next_page) {
+                    taken += 1;
+                    if (taken == branches) {
+                        cpu.pc = t;
+                        return .interrupted;
+                    }
                 }
                 // A store to code, here or on another vCPU, drops what was
                 // decoded from it: look the page up again.
