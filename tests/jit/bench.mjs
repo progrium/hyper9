@@ -10,7 +10,7 @@
 
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { importedTableSize, jitImports } from '../../src/web/h9-web.js';
+import { importedTableSize, wasmJit } from '../../src/web/h9-web.js';
 
 const configs = {
   default: [],
@@ -30,7 +30,7 @@ if (!process.env.BENCH_CHILD) {
 const bytes = readFileSync(process.argv[2]);
 const table = new WebAssembly.Table({ element: 'anyfunc', initial: importedTableSize(bytes) ?? 0 });
 const rt = (await WebAssembly.instantiate(bytes, { env: { __indirect_function_table: table } })).instance.exports;
-const jit = jitImports({ memory: rt.memory, table, exports: () => rt });
+const jit = wasmJit({ memory: rt.memory, table, exports: () => rt });
 rt.case_count();
 const status = rt.status_alloc(1);
 const base = table.length;

@@ -1,7 +1,7 @@
 // The wasm emitter's tests, for Node (run.mjs) and Chromium (browser.mjs).
 // wasm_runtime.zig plays h9.wasm's part: it owns memory and the function
 // table, builds modules with the emitter, and checks runs against ir_eval.
-// Modules are compiled and installed by h9-web.js's jitImports, as h9's
+// Modules are compiled and installed by h9-web.js's wasmJit, as h9's
 // would be, and the runtime calls each region through a function pointer.
 //
 // - Every IR case (emit/cases.zig) as a module of its own, and in batches
@@ -11,12 +11,12 @@
 //   across modules through cells and tail calls, interrupted by the budget,
 //   and unlinked when a module is dropped.
 
-import { importedTableSize, jitImports } from '../../src/web/h9-web.js';
+import { importedTableSize, wasmJit } from '../../src/web/h9-web.js';
 
 export async function runSuite(bytes, { log = console.log, error = console.error, seeds = 300 } = {}) {
   const table = new WebAssembly.Table({ element: 'anyfunc', initial: importedTableSize(bytes) ?? 0 });
   const rt = (await WebAssembly.instantiate(bytes, { env: { __indirect_function_table: table } })).instance.exports;
-  const jit = jitImports({ memory: rt.memory, table, exports: () => rt, log: error });
+  const jit = wasmJit({ memory: rt.memory, table, exports: () => rt, log: error });
   const text = (p, n) => new TextDecoder().decode(new Uint8Array(rt.memory.buffer, p, n));
   let failed = 0;
   const fail = (msg) => {

@@ -104,7 +104,7 @@ function importedMin(bytes, want) {
  * - jit_drop(base, n): nulls those slots and cancels a compile still on
  *   its way to them. h9 unlinks the chain cells that point at them first.
  */
-export function jitImports({ memory, table, exports, log = console.error }) {
+export function wasmJit({ memory, table, exports, log = console.error }) {
   let env = null;
   const pending = new Map(); // base -> the compile that owns it
   let started = [];
@@ -256,7 +256,7 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
   };
   let entry, hx;
   const h9table = h9tableSize === null ? null : new WebAssembly.Table({ element: 'anyfunc', initial: h9tableSize });
-  const jit = h9table && jitImports({ memory: mem, table: h9table, exports: () => hx, log });
+  const jit = h9table && wasmJit({ memory: mem, table: h9table, exports: () => hx, log });
   const h9imports = {
     park: new WebAssembly.Suspending((id, ms) => {
       if (permits.delete(id)) return 1;
