@@ -947,6 +947,17 @@ const Lifter = struct {
             },
             else => {},
         }
+        if ((i.op == .x87 or i.op == .fwait) and k + 1 < l.insns.len and !l.leader[k + 1]) {
+            const nx = &l.insns[k + 1];
+            if (i.op == .fwait and nx.class == .lifted and nx.i.op == .x87 and !nx.i.mem and nx.i.opcode == 0xdf and nx.i.modrm == 0xe0) {
+                try l.waitFnstsw(k);
+                return 2;
+            }
+            if (l.fastPlan(k)) |a1| if (l.fastPlan(k + 1)) |a2| {
+                try l.x87Pair(k, a1, a2);
+                return 2;
+            };
+        }
         if (isAtomic(i)) {
             try l.atomic(k);
             return 1;
@@ -1443,76 +1454,6 @@ const Lifter = struct {
         return l.b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try l.b.konst(.i64, @bitCast(arg)), .b = v, .c = c, .aux = @intFromEnum(helpers.Index.x87fast), .aux2 = ir.helper_no_regs });
     }
 
-    /// x87Fast's memory forms: the access is the IR's, in T0's order
-    /// with the wait and the note.
-    fn x87FastMem(l: *Lifter, k: usize, arg0: helpers.FastArg) !bool {
-        const b = l.b;
-        const i = &l.insns[k].i;
-        const op: u3 = @truncate(i.opcode);
-        const r = i.reg();
-        var arg = arg0;
-        arg.seg = @intCast(@intFromEnum(i.seg));
-        const Form = enum { fld64, fst64, arith, fild32, fist, fldcw, fnstcw };
-        const form: Form = switch (op) {
-            0, 2, 4, 6 => .arith,
-            1 => switch (r) {
-                5 => .fldcw,
-                7 => .fnstcw,
-                else => return false,
-            },
-            3 => switch (r) {
-                0 => .fild32,
-                1, 2, 3 => .fist,
-                else => return false,
-            },
-            5 => switch (r) {
-                0 => .fld64,
-                2, 3 => .fst64,
-                else => return false,
-            },
-            7 => switch (r) {
-                1, 2, 3 => .fist,
-                else => return false,
-            },
-        };
-        if (form == .fnstcw) {
-            // Doesn't wait, and isn't noted.
-            const a32 = try l.linear(k);
-            const z = try b.konst(.i64, 0);
-            const cw = try l.fastCall(.{ .kind = .fnstcw }, z, z);
-            try l.store(k, a32, try b.un(.trunc, .i16, cw));
-            return true;
-        }
-        // One call: the wait, the access, the note, and the operation,
-        // refusing (with nothing changed) for T0 to run it.
-        const a32 = try l.linear(k);
-        arg.kind = switch (form) {
-            .arith => .arith_mem,
-            .fldcw => .fldcw,
-            .fild32 => .fild32,
-            .fld64 => .fld64,
-            .fst64 => .fst64,
-            .fist => .fist,
-            .fnstcw => unreachable,
-        };
-        switch (form) {
-            .fst64 => arg.pop = r == 3,
-            .fist => {
-                arg.i = r;
-                arg.pop = op == 7;
-            },
-            else => {},
-        }
-        const st = try l.fastCall(arg, try b.un(.zext, .i64, a32), try b.konst(.i64, 0));
-        try l.guard(k, try b.icmp(.ne, st, try b.konst(.i64, 0)), true);
-        // Arithmetic, FLDCW, and FIST may raise an unmasked exception.
-        switch (form) {
-            .arith, .fldcw, .fist => l.es_ok = false,
-            else => {},
-        }
-        return true;
-    }
-
     /// #MF for a pending unmasked x87 exception, through T0: once a block,
     /// until something that can raise one.
     fn esGuard(l: *Lifter, k: usize) !void {
@@ -1524,18 +1465,85 @@ const Lifter = struct {
         l.es_ok = true;
     }
 
-    /// The x87's data movement through helpers.x87fast, which does it on
-    /// the Fpu when it's exact and nothing is raised, and otherwise leaves
-    /// it to T0 (the guard). FLD and FST(P) m64fp, FLD and FST(P) ST(i),
-    /// FXCH, FLDZ, and FLD1. Returns false, emitting nothing, for the rest.
+    /// The x87's data movement, and its arithmetic with a memory operand,
+    /// through helpers.x87fast, which does it on the Fpu when it's exact
+    /// and nothing is raised, and otherwise leaves it to T0 (the guard):
+    /// FLD, FST(P), FILD, FIST(P), FLDCW, FXCH, FLDZ, FLD1, FNSTCW, and
+    /// D8, DA, DC, and DE with a memory operand. Returns false, emitting
+    /// nothing, for the rest.
     fn x87Fast(l: *Lifter, k: usize) !bool {
         const b = l.b;
         const i = &l.insns[k].i;
+        if (i.mem and @as(u3, @truncate(i.opcode)) == 1 and i.reg() == 7) {
+            // FNSTCW: doesn't wait, and isn't noted.
+            const a32 = try l.linear(k);
+            const z = try b.konst(.i64, 0);
+            const cw = try l.fastCall(.{ .kind = .fnstcw }, z, z);
+            try l.store(k, a32, try b.un(.trunc, .i16, cw));
+            return true;
+        }
+        const arg = l.fastPlan(k) orelse return false;
+        const addr = if (i.mem) try b.un(.zext, .i64, try l.linear(k)) else try b.konst(.i64, 0);
+        const zero = try b.konst(.i64, 0);
+        const st = try l.fastCall(arg, addr, zero);
+        try l.guard(k, try b.icmp(.ne, st, zero), true);
+        if (mayRaise(arg.kind)) l.es_ok = false;
+        return true;
+    }
+
+    /// Arithmetic, FLDCW, and FIST may raise an unmasked exception (ES).
+    fn mayRaise(k: helpers.Fast) bool {
+        return k == .arith_mem or k == .fldcw or k == .fist;
+    }
+
+    /// Instruction k as one x87fast call that returns 0 or refuses: its
+    /// argument, or null if it isn't one (or its operand is through FS or
+    /// GS, whose guard would have to come first).
+    fn fastPlan(l: *const Lifter, k: usize) ?helpers.FastArg {
+        const in = &l.insns[k];
+        const i = &in.i;
+        if (in.class != .lifted) return null;
+        if (i.op == .fwait) return .{ .kind = .wait, .pc = in.pc };
+        if (i.op != .x87) return null;
         const op: u3 = @truncate(i.opcode);
         const r = i.reg();
-        const H = helpers.FastArg;
-        var arg: H = .{ .kind = .fld64, .op = op, .modrm = i.modrm, .pc = l.insns[k].pc };
-        if (i.mem) return l.x87FastMem(k, arg);
+        var arg: helpers.FastArg = .{ .kind = .fld64, .op = op, .modrm = i.modrm, .pc = in.pc };
+        if (i.mem) {
+            if (@intFromEnum(i.seg) >= 4) return null;
+            arg.seg = @intCast(@intFromEnum(i.seg));
+            switch (op) {
+                0, 2, 4, 6 => arg.kind = .arith_mem,
+                1 => switch (r) {
+                    5 => arg.kind = .fldcw,
+                    else => return null,
+                },
+                3 => switch (r) {
+                    0 => arg.kind = .fild32,
+                    1, 2, 3 => {
+                        arg.kind = .fist;
+                        arg.i = r;
+                    },
+                    else => return null,
+                },
+                5 => switch (r) {
+                    0 => arg.kind = .fld64,
+                    2, 3 => {
+                        arg.kind = .fst64;
+                        arg.pop = r == 3;
+                    },
+                    else => return null,
+                },
+                7 => switch (r) {
+                    1, 2, 3 => {
+                        arg.kind = .fist;
+                        arg.i = r;
+                        arg.pop = true;
+                    },
+                    else => return null,
+                },
+            }
+            return arg;
+        }
         const rm = i.rm();
         switch (op) {
             1 => switch (r) {
@@ -1543,24 +1551,57 @@ const Lifter = struct {
                 1 => arg.kind = .fxch,
                 5 => switch (rm) {
                     0, 6 => arg.kind = .fld_const,
-                    else => return false,
+                    else => return null,
                 },
-                else => return false,
+                else => return null,
             },
             5 => switch (r) {
                 2, 3 => {
                     arg.kind = .fst_st;
                     arg.pop = r == 3;
                 },
-                else => return false,
+                else => return null,
             },
-            else => return false,
+            else => return null,
         }
         arg.i = if (arg.kind == .fld_const) @intFromBool(rm == 0) else rm;
-        const zero = try b.konst(.i64, 0);
-        const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = zero, .c = zero, .aux = @intFromEnum(helpers.Index.x87fast) });
-        try l.guard(k, try b.icmp(.ne, st, zero), true);
-        return true;
+        return arg;
+    }
+
+    /// Instructions k and k+1, two x87fast ones, as one call: returns 1
+    /// if the first refused (nothing done), 2 if the second did (the first
+    /// done), each going to T0 at its instruction through a guard.
+    fn x87Pair(l: *Lifter, k: usize, a1: helpers.FastArg, a2: helpers.FastArg) !void {
+        const b = l.b;
+        const z = try b.konst(.i64, 0);
+        const ad1 = if (l.insns[k].i.mem) try b.un(.zext, .i64, try l.linear(k)) else z;
+        const ad2 = if (l.insns[k + 1].i.mem) try b.un(.zext, .i64, try l.linear(k + 1)) else z;
+        const both = try b.bin(.@"or", .i64, ad1, try b.bin(.shl, .i64, ad2, try b.konst(.i64, 32)));
+        const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(a1)), .b = both, .c = try b.konst(.i64, @bitCast(a2)), .aux = @intFromEnum(helpers.Index.x87pair), .aux2 = ir.helper_no_regs });
+        const st32 = try b.un(.trunc, .i32, st);
+        // The status crosses the first guard in the scratch word.
+        try b.setreg(jit_tmp_off, st32);
+        try l.guard(k, try b.icmp(.eq, st32, try l.k32(1)), true);
+        l.count += 1;
+        const t = try b.getreg(.i32, jit_tmp_off);
+        try l.guard(k + 1, try b.icmp(.eq, t, try l.k32(2)), true);
+        l.count += 1;
+        if (mayRaise(a1.kind) or mayRaise(a2.kind)) l.es_ok = false;
+    }
+
+    /// FWAIT then FNSTSW AX, as one call (awk's FCOM, FWAIT, FNSTSW AX,
+    /// SAHF): the status word, or `refuse` for #MF through T0 at FWAIT.
+    fn waitFnstsw(l: *Lifter, k: usize) !void {
+        const b = l.b;
+        const z = try b.konst(.i64, 0);
+        const sw = try l.fastCall(.{ .kind = .fnstsw, .pop = true }, z, z);
+        const sw32 = try b.un(.trunc, .i32, sw);
+        try b.setreg(jit_tmp_off, sw32);
+        try l.guard(k, try b.icmp(.eq, sw, try b.konst(.i64, @bitCast(helpers.refuse))), true);
+        l.count += 1;
+        try l.setR(0, 2, try b.un(.trunc, .i16, try b.getreg(.i32, jit_tmp_off)));
+        l.count += 1;
+        l.es_ok = true;
     }
 
     fn xmmOff(n: u3) u64 {

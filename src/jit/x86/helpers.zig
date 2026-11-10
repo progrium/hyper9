@@ -28,9 +28,9 @@ const mem_mod = @import("../../interp/mem.zig");
 const Ctx = ctx_mod.Ctx;
 const Cpu = cpu_mod.Cpu;
 
-pub const Index = enum(u8) { x87 = 0, x87fast = 1 };
+pub const Index = enum(u8) { x87 = 0, x87fast = 1, x87pair = 2 };
 
-pub const table = [_]ctx_mod.HelperFn{ x87Helper, x87Fast };
+pub const table = [_]ctx_mod.HelperFn{ x87Helper, x87Fast, x87Pair };
 
 /// The pointer for ctx.helpers.
 pub fn tableAddr() u64 {
@@ -167,7 +167,11 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, _: u64) callconv(.c) u64 {
     switch (arg.kind) {
         .wait => if (p.sw & ES != 0) return refuse,
         .fnstcw => return p.cw,
-        .fnstsw => return (p.sw & ~@as(u16, 0x3800)) | (@as(u16, p.top) << 11),
+        .fnstsw => {
+            // `pop`: FWAIT first.
+            if (arg.pop and p.sw & ES != 0) return refuse;
+            return (p.sw & ~@as(u16, 0x3800)) | (@as(u16, p.top) << 11);
+        },
         .fld64, .fild32 => {
             if (p.sw & ES != 0 or !empty(p, 7)) return refuse;
             const v = if (arg.kind == .fld64)
@@ -249,6 +253,15 @@ note(cpu, arg, addr);
             p.sw &= ~C1;
         },
     }
+    return 0;
+}
+
+/// Two x87fast kinds that return 0 or refuse, one after the other (a's
+/// operand address in b's low half, c's in its high): 0, or 1 if the
+/// first refused (nothing done), or 2 if the second did (the first done).
+fn x87Pair(c: *Ctx, a: u64, b: u64, c2: u64) callconv(.c) u64 {
+    if (@call(.always_inline, x87Fast, .{ c, a, b & 0xffff_ffff, 0 }) != 0) return 1;
+    if (@call(.always_inline, x87Fast, .{ c, c2, b >> 32, 0 }) != 0) return 2;
     return 0;
 }
 
