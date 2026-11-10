@@ -20,8 +20,20 @@ const page = vmm.page_size;
 
 const Tier = enum { t0, t1 };
 
+// zemu reads these with getenv, so they go through the C library's
+// environment: setenv and unsetenv, or the CRT's _putenv_s on Windows,
+// where an empty value removes the variable.
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
+
+fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
+    _ = if (@import("builtin").os.tag == .windows) _putenv_s(name, value) else setenv(name, value, 1);
+}
+
+fn unsetEnv(name: [*:0]const u8) void {
+    _ = if (@import("builtin").os.tag == .windows) _putenv_s(name, "") else unsetenv(name);
+}
 
 /// Settings read when a backend is created.
 const Env = struct {
@@ -41,13 +53,13 @@ const M = struct {
         var buf: [32]u8 = undefined;
         const v = vmm.emuVersion(&buf) orelse return null;
         if (!std.mem.eql(u8, v, "zig (jit)")) return null;
-        _ = setenv("H9_EMU_TIER", @tagName(t), 1);
-        if (env.cache) |c| _ = setenv("H9_EMU_CACHE", c, 1);
-        if (env.deterministic) _ = setenv("H9_EMU_DETERMINISTIC", "1", 1);
+        setEnv("H9_EMU_TIER", @tagName(t));
+        if (env.cache) |c| setEnv("H9_EMU_CACHE", c);
+        if (env.deterministic) setEnv("H9_EMU_DETERMINISTIC", "1");
         defer {
-            _ = unsetenv("H9_EMU_TIER");
-            _ = unsetenv("H9_EMU_CACHE");
-            _ = unsetenv("H9_EMU_DETERMINISTIC");
+            unsetEnv("H9_EMU_TIER");
+            unsetEnv("H9_EMU_CACHE");
+            unsetEnv("H9_EMU_DETERMINISTIC");
         }
         const b = try vmm.create(testing.allocator, testing.io, .emu, .{ .arch = .arm64, .memory = 64 << 20 });
         errdefer b.destroy();

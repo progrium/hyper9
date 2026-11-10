@@ -757,7 +757,10 @@ test "binary32 and binary64 arithmetic matches the host in nearest" {
         try testing.expectEqual(@as(u16, @bitCast(h)), convert(u16, u32, &env, bits32(c)));
         const e: f64 = @bitCast(r.int(u64) & 0xbfff_ffff_ffff_ffff);
         const fma = @mulAdd(f64, a, b, e);
-        if (!std.math.isNan(fma)) try testing.expectEqual(bits64(fma), mulAdd(u64, &env, bits64(a), bits64(b), bits64(e)));
+        // On a baseline x86_64-windows build, @mulAdd is the C library's
+        // fma, which wine's misrounds (2 of these 20000).
+        if (!std.math.isNan(fma) and @import("builtin").os.tag != .windows)
+            try testing.expectEqual(bits64(fma), mulAdd(u64, &env, bits64(a), bits64(b), bits64(e)));
         const fma32 = @mulAdd(f32, c, d, @floatCast(e));
         if (!std.math.isNan(fma32)) try testing.expectEqual(bits32(fma32), mulAdd(u32, &env, bits32(c), bits32(d), bits32(@floatCast(e))));
     }
