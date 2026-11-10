@@ -148,8 +148,9 @@ const E = struct {
     /// then hold only what native ops raised since they were last cleared,
     /// all of it already in the guest's words (see fpNative).
     watch: bool = false,
-    /// The next instruction was lowered with this one (condNow).
-    skip_next: bool = false,
+    /// A condition computed early into r11 (condEarly), to go to its
+    /// value when the emit loop reaches it.
+    pending: ?usize = null,
 
     fn pos(e: *E) usize {
         return e.out.items.len - e.base;
@@ -404,33 +405,29 @@ const E = struct {
         if (e.watch) try clearHostFlags(e);
     }
 
-    /// With the host's flags just set as an eflags.* op at `idx` defines
-    /// them: if the next instruction is an eflags.cond of it, computes the
-    /// condition now with a setcc (instead of a popfq later), and has the
-    /// emit loop skip it. inc and dec leave the host's CF alone, so for
-    /// them only conditions without CF.
-    fn condNow(e: *E, r: *const ir.Region, idx: usize, no_cf: bool) !void {
-        if (idx + 1 >= r.insts.items.len) return;
-        const n = r.insts.items[idx + 1];
-        if (n.op != .@"eflags.cond" or n.a != idx) return;
-        const cc: u8 = @intCast(n.aux);
-        if (no_cf and (cc == CC.b or cc == CC.ae or cc == CC.be or cc == CC.a)) return;
+    /// With the host's flags just set as the flags op at `idx` defines
+    /// them: the first `cond` of it later in the block, if only ops that
+    /// leave r11 alone come between, is computed now with a setcc (instead
+    /// of a popfq when it's reached). Right after, it goes to its value;
+    /// further on, r11 holds it until then (`pending`). `ccOf` maps the
+    /// condition's aux to a host condition, or null.
+    fn condEarly(e: *E, r: *const ir.Region, idx: usize, cond: Op, ccOf: *const fn (u64) ?u8) !void {
+        const blk = r.blocks.items[e.block];
+        var k = idx + 1;
+        while (k < blk.start + blk.len) : (k += 1) {
+            const n = r.insts.items[k];
+            if (n.op == cond and n.a == idx) break;
+            const keeps_r11 = switch (n.op) {
+                .@"const", .getreg, .add, .sub, .@"and", .@"or", .xor, .zext, .trunc, .@"nzcv.pack", .@"eflags.pack", .retire => n.ty != .v128,
+                .setreg => r.insts.items[n.a].ty != .v128,
+                else => false,
+            };
+            if (!keeps_r11) return;
+        } else return;
+        const cc = ccOf(r.insts.items[k].aux) orelse return;
         try e.bs(&.{ 0x41, 0x0f, 0x90 + cc, 0xc3 }); // setcc r11b
         try e.bs(&.{ 0x45, 0x0f, 0xb6, 0xdb }); // movzx r11d, r11b
-        try e.stVal(@intCast(idx + 1), R11);
-        e.skip_next = true;
-    }
-
-    /// condNow for nzcv.sub and nzcv.sbc, and the nzcv.cond after.
-    fn condNowNzcv(e: *E, r: *const ir.Region, idx: usize) !void {
-        if (idx + 1 >= r.insts.items.len) return;
-        const n = r.insts.items[idx + 1];
-        if (n.op != .@"nzcv.cond" or n.a != idx or n.aux >= 14) return;
-        const cc = nzcv_cc[@intCast(n.aux)];
-        try e.bs(&.{ 0x41, 0x0f, 0x90 + cc, 0xc3 }); // setcc r11b
-        try e.bs(&.{ 0x45, 0x0f, 0xb6, 0xdb }); // movzx r11d, r11b
-        try e.stVal(@intCast(idx + 1), R11);
-        e.skip_next = true;
+        e.pending = k;
     }
 
     /// lea rsp, [rbp - saved_bytes]: the frame torn down to the pushes.
@@ -506,11 +503,12 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
                 idx += 1;
                 continue;
             }
-            try lower(&e, r, idx);
-            if (e.skip_next) {
-                e.skip_next = false;
-                idx += 1;
+            if (e.pending == idx) {
+                e.pending = null;
+                try e.stVal(@intCast(idx), R11);
+                continue;
             }
+            try lower(&e, r, idx);
             // The guest set an exception word: start the host's flags over.
             if (e.watch and r.insts.items[idx].op == .setreg and setsWatched(r, r.insts.items[idx])) try clearHostFlags(&e);
         }
@@ -753,10 +751,14 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             }
             // After a subtract the host's CF is Arm's !C, the form
             // nzcv_cc is for.
-            if (i.op == .@"nzcv.sub" or i.op == .@"nzcv.sbc") try e.condNowNzcv(r, idx);
-            try hostFlags(e);
+            if (i.op == .@"nzcv.sub" or i.op == .@"nzcv.sbc") try e.condEarly(r, idx, .@"nzcv.cond", nzcvCc);
             const invert_c = i.op == .@"nzcv.sub" or i.op == .@"nzcv.sbc";
-            try packNzcv(e, invert_c, i.op == .@"nzcv.logic");
+            if (lahf_ok) {
+                try lahfNzcv(e, invert_c, i.op == .@"nzcv.logic");
+            } else {
+                try hostFlags(e);
+                try packNzcv(e, invert_c, i.op == .@"nzcv.logic");
+            }
         } else try fallback(e, i, ta),
         .@"nzcv.cond" => if (i.aux >= 14) {
             try e.movImm(RAX, 1);
@@ -810,8 +812,17 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
                 },
                 else => unreachable,
             }
-            try e.condNow(r, idx, i.op == .@"eflags.inc" or i.op == .@"eflags.dec");
-            try hostFlags(e);
+            try e.condEarly(r, idx, .@"eflags.cond", if (i.op == .@"eflags.inc" or i.op == .@"eflags.dec") eflagsCcNoCf else eflagsCc);
+            if (lahf_ok) {
+                // lahf's SF ZF AF PF CF sit where EFLAGS has them; OF is
+                // bit 11.
+                try e.bs(&.{ 0x0f, 0x90, 0xc2 }); // seto dl
+                try e.b(0x9f); // lahf
+                try e.bs(&.{ 0x0f, 0xb6, 0xc4 }); // movzx eax, ah
+                try e.bs(&.{ 0x0f, 0xb6, 0xd2 }); // movzx edx, dl
+                try e.shiftImm(false, 4, RDX, 11);
+                try e.rr(false, &.{0x09}, RDX, RAX);
+            } else try hostFlags(e);
             try e.aluImm(false, 4, RAX, @intCast(mask));
             if (i.op == .@"eflags.inc" or i.op == .@"eflags.dec") {
                 try e.aluImm(false, 4, RCX, 1); // CF from b
@@ -898,6 +909,21 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             if (e.code.nchains < emitter.max_chains) {
                 e.code.chains[e.code.nchains] = .{ .site = @intCast(site), .pc = i.aux };
                 e.code.nchains += 1;
+            }
+            // Unlinked (or never linkable: another page, or past the
+            // sites the cache keeps): the jump cache, inline, at the
+            // target's fixed entry.
+            {
+                const slot: i32 = @intCast(ctx.jumpIndex(i.aux) * @sizeOf(ctx.JumpEntry));
+                try e.ldCtx(R10, ctx.off.jump);
+                try e.rr(true, &.{0x85}, R10, R10); // test r10, r10
+                const none = try e.fwd(CC.e);
+                try e.movImm(RCX, i.aux);
+                try e.rm(true, &.{0x39}, RCX, R10, slot); // cmp [r10+slot], rcx
+                const miss = try e.fwd(CC.ne);
+                try e.rm(false, &.{0xff}, 4, R10, slot + @offsetOf(ctx.JumpEntry, "code")); // jmp [r10+slot+code]
+                e.land(none);
+                e.land(miss);
             }
             // lea rax, [rip - (distance back to the site)]
             const disp: i32 = -@as(i32, @intCast(e.pos() + 7 - site));
@@ -1592,6 +1618,45 @@ fn btImm(e: *E, reg: u8, n: u8) !void {
 }
 
 /// rax = NZCV (bits 31..28) from host flags in rax.
+fn nzcvCc(aux: u64) ?u8 {
+    return if (aux < 14) nzcv_cc[@intCast(aux)] else null;
+}
+fn eflagsCc(aux: u64) ?u8 {
+    return @intCast(aux & 15);
+}
+/// inc and dec leave the host's CF alone.
+fn eflagsCcNoCf(aux: u64) ?u8 {
+    const cc: u8 = @intCast(aux & 15);
+    return if (cc == CC.b or cc == CC.ae or cc == CC.be or cc == CC.a) null else cc;
+}
+
+/// LAHF works in 64-bit mode (every x86-64 since 2005 but the first).
+const lahf_ok = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .sahf);
+
+/// rax = NZCV (bits 31..28) from the host's flags, through lahf and seto
+/// rather than pushfq.
+fn lahfNzcv(e: *E, invert_c: bool, logic: bool) !void {
+    try e.bs(&.{ 0x0f, 0x90, 0xc1 }); // seto cl
+    try e.b(0x9f); // lahf: ah = SF ZF 0 AF 0 PF 1 CF
+    try e.bs(&.{ 0x0f, 0xb6, 0xc4 }); // movzx eax, ah
+    if (logic) {
+        // C = V = 0.
+        try e.aluImm(false, 4, RAX, 0xc0);
+        try e.shiftImm(false, 4, RAX, 24);
+        return;
+    }
+    if (invert_c) try e.aluImm(false, 6, RAX, 1); // xor eax, 1
+    try e.bs(&.{ 0x0f, 0xb6, 0xc9 }); // movzx ecx, cl
+    try e.shiftImm(false, 4, RCX, 28); // V
+    try e.mov(RDX, RAX);
+    try e.aluImm(false, 4, RDX, 1);
+    try e.shiftImm(false, 4, RDX, 29); // C
+    try e.aluImm(false, 4, RAX, 0xc0);
+    try e.shiftImm(false, 4, RAX, 24); // N, Z
+    try e.rr(false, &.{0x09}, RDX, RAX);
+    try e.rr(false, &.{0x09}, RCX, RAX);
+}
+
 fn packNzcv(e: *E, invert_c: bool, logic: bool) !void {
     try e.mov(RDX, RAX);
     try e.movImm(RAX, 0);
@@ -1879,6 +1944,15 @@ test "chain sites link, and the jump cache finds a target inline" {
     try std.testing.expectEqual(ctx.Exit.svc, @as(ctx.Exit, @enumFromInt(region.entry(off + starts[2])(&cx))));
     try std.testing.expectEqual(@as(u64, 15), regs[0]);
     try std.testing.expectEqual(@as(u64, 3), cx.retired);
+
+    // Unlinked again, A's chain exit finds B in the jump cache.
+    const zero: i32 = 0;
+    region.write(site + 1, std.mem.asBytes(&zero));
+    regs = .{ 5, 0x2000 };
+    cx.retired = 0;
+    try std.testing.expectEqual(ctx.Exit.svc, @as(ctx.Exit, @enumFromInt(region.entry(off + starts[0])(&cx))));
+    try std.testing.expectEqual(@as(u64, 16), regs[0]);
+    try std.testing.expectEqual(@as(u64, 2), cx.retired);
 }
 
 // ---------------------------------------------------------------- random regions
@@ -2119,4 +2193,5 @@ test "random regions match ir_eval" {
         return error.TestExpectedEqual;
     }
 }
+
 
