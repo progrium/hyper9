@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
-# libraries, the patched Unicorn source and v86 into .local, and on request
+# libraries and the patched Unicorn source into .local, and on request
 # the release's 386 ISO, the browser host's Linux demo root, and Wine's
 # headers.
 #
-#   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src v86
+#   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
 #                                 iso386 alpine386web wine; default all but
 #                                 iso386, alpine386web and wine)
 set -euo pipefail
@@ -13,9 +13,12 @@ set -euo pipefail
 
 mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
-parts=" ${*:-src image unicorn unicorn-src v86} "
+parts=" ${*:-src image unicorn unicorn-src} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|v86|iso386|alpine386web|wine) ;; *) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
+	case $p in src|image|unicorn|unicorn-src|iso386|alpine386web|wine) ;;
+	# v86 was the browser host's 386 CPU before h86; nothing to fetch now.
+	v86) ;;
+	*) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
 done
 want() { [[ $parts == *" $1 "* ]]; }
 
@@ -163,20 +166,3 @@ fi
 echo "linux/alpine-386-web: $(echo "$ALPINE_386_WEB_PKGS" | awk 'NF{printf "%s ", $1}')"
 fi
 
-# v86: v86.wasm and its license into .local/v86, for zig build web.
-if want v86; then
-dir="$H9_LOCAL/v86"
-if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$V86_SHA256" ]; then
-	tgz="$H9_LOCAL/cache/v86-$V86_VERSION.tgz"
-	curl -fsSL -o "$tgz" "$V86_URL"
-	echo "$V86_SHA256  $tgz" | shasum -a 256 -c --quiet
-	rm -rf "$dir" "$dir.tmp" && mkdir -p "$dir.tmp"
-	tar -xzf "$tgz" -C "$dir.tmp" --strip-components 1 package/build/v86.wasm package/LICENSE
-	mv "$dir.tmp/build/v86.wasm" "$dir.tmp/v86.wasm" && rmdir "$dir.tmp/build"
-	echo "$V86_WASM_SHA256  $dir.tmp/v86.wasm" | shasum -a 256 -c --quiet
-	echo "$V86_SHA256" >"$dir.tmp/.h9-stamp"
-	mv "$dir.tmp" "$dir"
-	rm -f "$tgz"
-fi
-echo "v86: $V86_VERSION"
-fi

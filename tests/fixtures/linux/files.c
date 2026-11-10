@@ -15,6 +15,7 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
@@ -656,6 +657,157 @@ static void dev9(void) {
 	printf("ok dev9 gfx\n");
 }
 
+/* WebKit's shared memory: shm_open, unlink, then ftruncate and mmap
+ * the open file; and memfd_create, which does the same in one call.
+ * The file is gone from the directory but still sized, stat-able, and
+ * mappable through its fd, and a fork sees writes through the map. */
+static void unlinked(void) {
+	int fd = fresh("unl");
+	struct stat st;
+	CHECK("unlinked", fd >= 0 && unlink(path) == 0 && access(path, F_OK) != 0);
+	CHECK("unlinked", ftruncate(fd, 8192) == 0 && fstat(fd, &st) == 0 && st.st_size == 8192);
+	char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("unlinked", m != MAP_FAILED);
+	strcpy(m + 4096, "gone");
+	char b[8] = {0};
+	CHECK("unlinked", pread(fd, b, 4, 4096) == 4 && !strcmp(b, "gone"));
+	CHECK("unlinked", munmap(m, 8192) == 0 && close(fd) == 0);
+
+	fd = memfd_create("h9test", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	CHECK("unlinked", fd >= 0 && (fcntl(fd, F_GETFD) & FD_CLOEXEC));
+	CHECK("unlinked", ftruncate(fd, 4096) == 0 && fstat(fd, &st) == 0 && st.st_size == 4096);
+	CHECK("unlinked", fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) == 0);
+	m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK("unlinked", m != MAP_FAILED);
+	pid_t c = fork();
+	if (c == 0) { strcpy(m, "child"); _exit(0); }
+	CHECK("unlinked", child_status(c) == 0 && !strcmp(m, "child"));
+	munmap(m, 4096), close(fd);
+	printf("ok unlinked\n");
+}
+
+/* WebKit's out-of-line IPC messages: the sender fills a memfd (or an
+ * unlinked shm_open file), passes it with SCM_RIGHTS, and unmaps and
+ * closes its copy before the receiver maps it. The data stays with the
+ * file, which only the passed fd still names. */
+static int pass_fd(int s, int fd) {
+	char d = 'm', cb[CMSG_SPACE(sizeof(int))] = {0};
+	struct iovec v = {&d, 1};
+	struct msghdr h = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+	struct cmsghdr *c = CMSG_FIRSTHDR(&h);
+	c->cmsg_level = SOL_SOCKET, c->cmsg_type = SCM_RIGHTS, c->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(c), &fd, sizeof fd);
+	return sendmsg(s, &h, 0);
+}
+
+static int take_fd(int s) {
+	char d, cb[CMSG_SPACE(sizeof(int))];
+	struct iovec v = {&d, 1};
+	struct msghdr h = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+	int fd = -1;
+	if (recvmsg(s, &h, 0) != 1 || CMSG_FIRSTHDR(&h) == NULL) return -1;
+	memcpy(&fd, CMSG_DATA(CMSG_FIRSTHDR(&h)), sizeof fd);
+	return fd;
+}
+
+static void shm_pass(void) {
+	int sv[2];
+	CHECK("shm_pass", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+	pid_t c = fork();
+	if (c == 0) {
+		close(sv[0]);
+		for (int k = 0; k < 2; k++) {
+			int fd = take_fd(sv[1]);
+			struct stat st;
+			if (fd < 0 || fstat(fd, &st) != 0 || st.st_size != 11656) _exit(1);
+			char *m = mmap(0, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+			if (m == MAP_FAILED) _exit(2);
+			if (strcmp(m + 8000, k ? "via shm_open" : "via memfd") != 0) _exit(3 + k);
+			munmap(m, st.st_size), close(fd);
+		}
+		_exit(0);
+	}
+	close(sv[1]);
+	for (int k = 0; k < 2; k++) {
+		int fd;
+		if (k == 0) fd = memfd_create("h9test", MFD_CLOEXEC);
+		else {
+			char name[32];
+			snprintf(name, sizeof name, "/h9test.%d", getpid());
+			fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+			shm_unlink(name);
+		}
+		CHECK("shm_pass", fd >= 0 && ftruncate(fd, 11656) == 0);
+		char *m = mmap(0, 11656, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		CHECK("shm_pass", m != MAP_FAILED);
+		strcpy(m + 8000, k ? "via shm_open" : "via memfd");
+		CHECK("shm_pass", pass_fd(sv[0], fd) == 1);
+		CHECK("shm_pass", munmap(m, 11656) == 0 && close(fd) == 0);
+	}
+	CHECK("shm_pass", child_status(c) == 0);
+	close(sv[0]);
+	printf("ok shm_pass\n");
+}
+
+/* Private file mappings are read from the file as pages are first
+ * touched, so the file must still be readable after the fd is closed,
+ * and each page must come from its own offset after splits, moves,
+ * forks, and MADV_DONTNEED. Pages straddle h9's 1 MiB chunks. */
+static int stamp_ok(const char *p, int i) {
+	char want[16];
+	snprintf(want, sizeof want, "page %d", i);
+	return strcmp(p, want) == 0;
+}
+
+static void lazy_map(void) {
+	enum { NP = 3 * 256 + 3 };
+	const size_t size = (size_t)NP * 4096 - 4000;
+	int fd = fresh("lazy");
+	CHECK("lazy_map", fd >= 0);
+	char *buf = calloc(1, (size_t)NP * 4096);
+	for (int i = 0; i < NP; i++) snprintf(buf + (size_t)i * 4096, 16, "page %d", i);
+	CHECK("lazy_map", pwrite(fd, buf, size, 0) == (ssize_t)size);
+	free(buf);
+	/* From page 1 on, so file offsets and chunk offsets differ. */
+	char *m = mmap(0, size - 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 4096);
+	CHECK("lazy_map", m != MAP_FAILED && close(fd) == 0);
+	CHECK("lazy_map", stamp_ok(m + 300 * 4096, 301) && stamp_ok(m, 1));
+	/* The tail of the last page, past the end of the file, reads zero. */
+	char *last = m + (size_t)(NP - 2) * 4096;
+	CHECK("lazy_map", stamp_ok(last, NP - 1) && last[95] == 0 && last[4095] == 0);
+	/* A written page goes back to the file's after MADV_DONTNEED. */
+	strcpy(m + 600 * 4096, "mine");
+	CHECK("lazy_map", madvise(m + 600 * 4096, 4096, MADV_DONTNEED) == 0 && stamp_ok(m + 600 * 4096, 601));
+	strcpy(m + 2 * 4096, "kept");
+	pid_t c = fork();
+	if (c == 0) {
+		if (!stamp_ok(m + 700 * 4096, 701) || strcmp(m + 2 * 4096, "kept") != 0) _exit(1);
+		_exit(0);
+	}
+	CHECK("lazy_map", child_status(c) == 0);
+	/* Unmapping the start leaves the rest reading from the file. */
+	CHECK("lazy_map", munmap(m, 400 * 4096) == 0 && stamp_ok(m + 500 * 4096, 501));
+	CHECK("lazy_map", mprotect(m + 450 * 4096, 4096, PROT_READ) == 0 && stamp_ok(m + 450 * 4096, 451) && stamp_ok(m + 451 * 4096, 452));
+	CHECK("lazy_map", munmap(m + 400 * 4096, size - 4096 - 400 * 4096) == 0);
+
+	/* mremap moves a mapping with its file offset: a grown mapping reads
+	 * on into the file, and a page zeroed before the move stays zero. */
+	fd = open(path, O_RDONLY);
+	CHECK("lazy_map", fd >= 0);
+	char *r = mmap(0, 3 * 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("lazy_map", r != MAP_FAILED);
+	char *f = mmap(r, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 5 * 4096);
+	CHECK("lazy_map", f == r && close(fd) == 0);
+	memset(f, 0, 4096);
+	char *g = mremap(f, 2 * 4096, 300 * 4096, MREMAP_MAYMOVE);
+	CHECK("lazy_map", g != MAP_FAILED && g != f);
+	char zero[4096] = {0};
+	CHECK("lazy_map", memcmp(g, zero, 4096) == 0 && stamp_ok(g + 4096, 6) && stamp_ok(g + 299 * 4096, 304));
+	munmap(g, 300 * 4096), munmap(r + 2 * 4096, 4096);
+	unlink(path);
+	printf("ok lazy_map\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -684,6 +836,9 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "itimer")) itimer();
 		if (all || !strcmp(n, "creds")) creds();
 		if (all || !strcmp(n, "many_fds")) many_fds();
+		if (all || !strcmp(n, "unlinked")) unlinked();
+		if (all || !strcmp(n, "shm_pass")) shm_pass();
+		if (all || !strcmp(n, "lazy_map")) lazy_map();
 	}
 	return failed;
 }

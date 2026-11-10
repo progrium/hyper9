@@ -19,7 +19,7 @@ A vmm backend, `src/vmm/native.zig`, that runs guest code directly on the host C
 
 ## Background
 
-Without a hypervisor, h9 today runs only on the emulator, which is in `h9-emu` and not the MIT `h9`, and runs compute about 5–7× slower than hardware (DESIGN.md, Emulator backend). Many Linux hosts h9 should run on have no usable KVM: CI containers, most PaaS and sandbox VMs (Firecracker guests among them), and Docker without `--device /dev/kvm`. Go's `plan9/amd64` binaries run only on the emulator there ([go-compat](0007-go-compat.md)).
+Without a hypervisor, h9 today runs only on the emulator, which is in `h9-emu` and not the MIT `h9`, and runs compute about 5–7× slower than hardware (SPEC.md, Emulator backend). Many Linux hosts h9 should run on have no usable KVM: CI containers, most PaaS and sandbox VMs (Firecracker guests among them), and Docker without `--device /dev/kvm`. Go's `plan9/amd64` binaries run only on the emulator there ([go-compat](0007-go-compat.md)).
 
 The vmm contract is already in Plan 9 terms: address spaces over host memory, a Ureg, and syscall, fault, breakpoint and interrupted exits. The emulator shows the contract can be met without kernel mode or an MMU. A user-mode process on the same architecture meets it too, provided the host kernel hands every guest syscall to h9 instead of executing it.
 
@@ -38,7 +38,7 @@ A spike (in the project's `native-backend-spike/` folder, not in the repo) ran h
 | The same, spinning up to ~2000 pauses before the futex | 1.4–1.9 µs |
 | `PTRACE_SYSEMU`, different CPUs / one CPU | 26 µs / 3.7 µs |
 
-The 27 µs is the cost of waking an idle vCPU inside a VM, the same cost that puts nested KVM's `OUT` exit at 19 µs in DESIGN.md; bare metal wakes a CPU far faster, but it wasn't measured. Spinning briefly before sleeping brings the round trip near HVF's 1.1 µs and the emulator's 0.8 µs. Seccomp beat ptrace, and handles faults without injecting syscalls into the tracee.
+The 27 µs is the cost of waking an idle vCPU inside a VM, the same cost that puts nested KVM's `OUT` exit at 19 µs in SPEC.md; bare metal wakes a CPU far faster, but it wasn't measured. Spinning briefly before sleeping brings the round trip near HVF's 1.1 µs and the emulator's 0.8 µs. Seccomp beat ptrace, and handles faults without injecting syscalls into the tracee.
 
 Two findings shaped the design:
 
@@ -140,4 +140,4 @@ So a guest gets no host filesystem, network or process access that the sandbox `
 - 2026-11-09: A security audit found that the Security section above overstates the backend's containment, and `auto`'s fallback to native was changed in response.
   - The stub's control page is mapped read-write in the stub's address space, which is the guest's own, so guest code can write it directly; h9 then reads `why`, the `ops`/`nops` request queue, fault fields, and `fs_base`/`gs_base` back from it and acts on them. A guest can queue an `mmap` of the RAM memfd, or jump to a `SYSCALL` in the stub's text (both of which the seccomp allow-set must permit, since mapping guest RAM at arbitrary offsets is how guest memory works), and reach the whole machine's memory, which holds the overlay's host pointers. So on the native backend a guest can obtain host code execution in the (un-host-sandboxed) h9 process. This is inherent to running guest code in h9's own address space with address-keyed gates (Syscall User Dispatch and seccomp), which the guest defeats by controlling the instruction pointer; it can't be closed by hardening the gates, only by not treating native as a boundary.
   - Therefore `auto` no longer selects the native backend. A host without a usable hypervisor falls back to the emulator; where the emulator isn't built either, `auto` fails with the hypervisor's reason and the CLI points at `--backend native` as an explicit opt-in for a trusted guest. `--backend native` now prints a warning that it isn't a security boundary. This changes the Compatibility and Selection sections' statement that `auto` picks native on Linux without KVM; the backend itself is unchanged.
-  - This note corrects an accepted, signed proposal's security claims; DESIGN.md and the manual were updated to match, and the doc may need re-signing.
+  - This note corrects an accepted, signed proposal's security claims; SPEC.md and the manual were updated to match, and the doc may need re-signing.

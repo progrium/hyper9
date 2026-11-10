@@ -1,4 +1,4 @@
-//! Emulator backend (Unicorn). Built with -Demu=unicorn. See DESIGN.md,
+//! Emulator backend (Unicorn). Built with -Demu=unicorn. See SPEC.md,
 //! "Emulator backend (emu)".
 //!
 //! User mode only: each vCPU is a Unicorn engine running at EL0 (arm64), in

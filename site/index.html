@@ -57,16 +57,15 @@ rc pipelines, servers posting to <tt>/srv</tt>, rio, and its clients.
 <p>
 h9 is a small Zig library and a thin CLI.
 It runs arm64 9front binaries on arm64 hosts and amd64 binaries on x86-64 hosts.
-386 binaries run on an emulator backend,
-and in the browser, where there is no CPU to run natively on,
-on <a href="https://github.com/copy/v86">v86</a>.
+386 binaries run on h9's own emulator,
+which is also how they run in the browser, where there is no CPU to run natively on.
 </p>
 
 <h2 id="demo">Demo</h2>
 
 <p>
 Below is h9's browser host: h9 built for wasm32-wasi, running in a Web Worker,
-with 9front's own 386 binaries on v86 and a small root file system loaded into memory.
+with 9front's own 386 binaries on h9's own 386 CPU and a small root file system loaded into memory.
 Type to rc; try <tt>ls /bin</tt>, <tt>cal</tt>, <tt>primes 1 50</tt>,
 <tt>echo hello | tr h H</tt> or <tt>ps</tt>.
 Ctrl-C interrupts a command.
@@ -82,7 +81,7 @@ The demo can also be <a href="demo/">opened on its own page</a>.
 The <a href="https://github.com/progrium/hyper9/blob/main/design/0012-browser-host.md">browser-host proposal</a>
 explains how it works:
 drawterm's kernel processes are coroutines on JSPI,
-and v86 shares one linear memory with h9, so system call arguments are read in place.
+and guest memory is part of h9's own linear memory, so system call arguments are read in place.
 </p>
 
 <h2 id="docs">Documentation</h2>
@@ -90,7 +89,7 @@ and v86 shares one linear memory with h9, so system call arguments are read in p
 <p>
 The <a href="https://github.com/progrium/hyper9/blob/main/MANUAL.md">manual</a>
 covers using h9, and the
-<a href="https://github.com/progrium/hyper9/blob/main/DESIGN.md">design document</a>
+<a href="https://github.com/progrium/hyper9/blob/main/SPEC.md">design document</a>
 describes h9 as built.
 Changes go through
 <a href="https://github.com/progrium/hyper9/tree/main/design">proposals</a>;
@@ -117,7 +116,7 @@ zig build
 
 <p>
 The browser host builds with <tt>zig build web</tt>.
-The <a href="https://github.com/progrium/hyper9#readme">README</a>
+<a href="https://github.com/progrium/hyper9/blob/main/DEVELOPING.md">DEVELOPING.md</a>
 has the details for each host.
 </p>
 
@@ -145,7 +144,6 @@ Please report bugs and send questions through
   the same shape for Linux ELF binaries on macOS</li>
 <li><a href="https://9front.org/">9front</a></li>
 <li><a href="https://drawterm.9front.org/">drawterm</a></li>
-<li><a href="https://github.com/copy/v86">v86</a></li>
 </ul>
 
 <div class="corner"><a class="lambda" href="linux.html" aria-label="Linux programs in h9">λ</a></div>

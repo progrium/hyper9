@@ -11,6 +11,8 @@ const E = {
 const FT = { CHAR: 2, DIR: 3, FILE: 4 };
 const S_IFDIR = 0o040000;
 const RIGHTS = 0x1fffffffn;
+// A terminal can't seek or tell: wasi-libc's isatty checks for neither.
+const TTY_RIGHTS = RIGHTS & ~((1n << 2n) | (1n << 5n));
 const PREOPEN = 3;
 
 /** Parses a root archive into a tree of { dir, mode, data, kids, ino }. */
@@ -49,7 +51,9 @@ export function parseRoot(buf) {
  * The wasi_snapshot_preview1 imports over `memory`: `root` from
  * parseRoot, `args` and `env` (an object) for the program.
  */
-export function wasiImports({ memory, root, args, env, write }) {
+// tty: the console is a terminal (isatty is true on 0..2), so Linux
+// programs get termios and raw mode, as h9 gives a host terminal.
+export function wasiImports({ memory, root, args, env, write, tty = false }) {
   const enc = new TextEncoder();
   const dec = new TextDecoder();
   const u8 = () => new Uint8Array(memory.buffer);
@@ -163,8 +167,9 @@ export function wasiImports({ memory, root, args, env, write }) {
       else { const d = fds.get(fd); if (!d) return E.BADF; ft = d.node.dir ? FT.DIR : FT.FILE; }
       v.setUint8(p, ft);
       v.setUint16(p + 2, 0, true);
-      v.setBigUint64(p + 8, RIGHTS, true);
-      v.setBigUint64(p + 16, RIGHTS, true);
+      const rights = fd <= 2 && tty ? TTY_RIGHTS : RIGHTS;
+      v.setBigUint64(p + 8, rights, true);
+      v.setBigUint64(p + 16, rights, true);
       return E.SUCCESS;
     },
     fd_filestat_get: (fd, p) => {

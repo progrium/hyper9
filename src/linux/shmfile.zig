@@ -10,8 +10,11 @@
 //! read and write calls on the file go through them as well as to the
 //! file (`read`, `wrote`), so a program that mixes the two sees one file.
 //! When the last mapping goes, pages that any mapping could write are
-//! written back to the file, by path; msync doesn't wait for that, since
-//! other processes see the pages already. Writes from outside the Linux
+//! written back to the file, through the file itself, posted in #s when
+//! a mapping that could write them came, so a file removed while mapped
+//! (shm_open then unlink, memfd_create) keeps them for the processes
+//! that still have it open; msync doesn't wait for that, since other
+//! processes see the pages already. Writes from outside the Linux
 //! layer (9front programs, the host) don't reach mapped pages, and the
 //! pages beyond the file's end are kept, not SIGBUS.
 //!
@@ -43,7 +46,28 @@ const Entry = struct {
     /// Some mapping could write them, so they're written back.
     writable: bool,
     path: [:0]u8,
+    /// The #s post holding the file open for the write-back, once a
+    /// mapping could write the pages, or empty (then the path is used).
+    post: [24]u8 = undefined,
+    post_len: u8 = 0,
 };
+
+var post_seq: std.atomic.Value(u32) = .init(0);
+
+/// Posts the file open as `fd` for e's write-back, if it isn't yet.
+fn postFile(e: *Entry, fd: u31) void {
+    if (e.post_len != 0) return;
+    const name = std.fmt.bufPrintZ(&e.post, "#s/lxm.{d}", .{post_seq.fetchAdd(1, .monotonic)}) catch return;
+    const sfd = kern.create(name, kern.OWRITE, 0o600) catch return;
+    defer kern.close(sfd) catch {};
+    var nb: [16]u8 = undefined;
+    const t = std.fmt.bufPrint(&nb, "{d}", .{fd}) catch return;
+    _ = kern.pwrite(sfd, t, -1) catch {
+        kern.remove(name) catch {};
+        return;
+    };
+    e.post_len = @intCast(name.len);
+}
 
 const gpa = @import("../web.zig").gpa;
 var mutex: std.atomic.Mutex = .unlocked;
@@ -64,13 +88,18 @@ fn backendId(b: vmm.Backend) usize {
 pub const Error = error{ OutOfMemory, NoSpace, Io };
 
 /// The pages of chunk `index` of the file open as `fd`, read from it if
-/// no process maps them yet. The Mm's addChunk takes its own reference.
+/// no process maps them yet, with a reference for the caller. It's taken
+/// under the table's lock, so the last mapping going meanwhile (another
+/// process's munmap, as when the sender of a memfd unmaps it as the
+/// receiver maps it) can't free them (`released`).
 pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path: []const u8, writable: bool) Error!*mm.Pages {
     const key: Key = .{ .backend = backendId(backend), .file = file, .index = index };
     lock();
     defer mutex.unlock();
     if (table.get(key)) |e| {
         e.writable = e.writable or writable;
+        if (writable) postFile(e, fd);
+        _ = e.pages.refs.fetchAdd(1, .acq_rel);
         return e.pages;
     }
     const mem = backend.allocPages(mm.pages_per_chunk) catch return error.NoSpace;
@@ -87,9 +116,11 @@ pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path
     errdefer gpa.destroy(p);
     const pz = try gpa.dupeZ(u8, path);
     errdefer gpa.free(pz);
-    p.* = .{ .mem = mem, .refs = .init(1), .file = e, .release = released };
+    // The table's reference and the caller's.
+    p.* = .{ .mem = mem, .refs = .init(2), .file = e, .release = released };
     e.* = .{ .key = key, .backend = backend, .pages = p, .writable = writable, .path = pz };
     try table.put(gpa, key, e);
+    if (writable) postFile(e, fd);
     _ = live.fetchAdd(1, .monotonic);
     return p;
 }
@@ -107,6 +138,7 @@ fn released(p: *mm.Pages) void {
     _ = live.fetchSub(1, .monotonic);
     mutex.unlock();
     if (e.writable) writeBack(e);
+    if (e.post_len != 0) kern.remove(e.post[0..e.post_len :0]) catch {};
     e.backend.freePages(p.mem);
     gpa.destroy(p);
     gpa.free(e.path);
@@ -115,7 +147,8 @@ fn released(p: *mm.Pages) void {
 
 /// Writes the pages within the file's current length back to it.
 fn writeBack(e: *Entry) void {
-    const fd = kern.open(e.path, kern.ORDWR) catch return;
+    const name: [:0]const u8 = if (e.post_len != 0) e.post[0..e.post_len :0] else e.path;
+    const fd = kern.open(name, kern.OWRITE) catch kern.open(e.path, kern.ORDWR) catch return;
     defer kern.close(fd) catch {};
     var st: [512]u8 = undefined;
     _ = kern.fstat(fd, &st) catch return;

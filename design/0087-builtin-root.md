@@ -199,7 +199,7 @@ The content sharing, the release check, and the build failure on a stale tree ar
 2. Embedding multicall's trees: `-Dbuiltin-root`, content sharing, the release and staleness checks, and the binary's measured growth recorded under Updates. This step waits for multicall.
 3. Reporting: `--check`, `--version`, and the missing-command hint.
 4. Release: run `zig build slim` for each architecture before building `h9` and `h9-emu`, and add 9front's notice to the archives.
-5. Docs: MANUAL chapter 2 (getting started no longer needs a tree first), the userland guide's sections 1 and 4, README. DESIGN.md: the root lookup, `#H`'s second table, the namespace listing, the flag, and `Machine.Options`. Set `status: implemented`.
+5. Docs: MANUAL chapter 2 (getting started no longer needs a tree first), the userland guide's sections 1 and 4, README. SPEC.md: the root lookup, `#H`'s second table, the namespace listing, the flag, and `Machine.Options`. Set `status: implemented`.
 
 ## Open issues
 

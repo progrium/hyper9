@@ -21,6 +21,8 @@ pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
 pub const hstream = @import("hstream.zig");
+/// `--serve` listeners (design/0035-serve.md).
+pub const serve = @import("serve.zig");
 pub const gfx = @import("gfx.zig");
 pub const web = @import("web.zig");
 
@@ -54,6 +56,7 @@ test {
     _ = consin;
     _ = ws;
     _ = hstream;
+    _ = serve;
     _ = gfx;
     _ = @import("cpupool.zig");
     _ = @import("linux/nr.zig");
@@ -66,4 +69,7 @@ test {
     _ = @import("linux/netlink.zig");
     _ = @import("dotl/attr.zig");
     _ = @import("dotl/wire.zig");
+    _ = @import("dotl/client.zig");
+    _ = @import("dotl/server.zig");
+    _ = @import("dotl/kern.zig");
 }

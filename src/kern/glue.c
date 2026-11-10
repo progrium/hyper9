@@ -1,7 +1,7 @@
 /*
  * h9's replacement for drawterm's main.c and cpu.c: boots drawterm's kern
  * without a cpu connection. The screen is src/kern/gfx.c with a GUI
- * backend, or src/kern/nogfx.c without one (design/0015-gfx.md). See DESIGN.md,
+ * backend, or src/kern/nogfx.c without one (design/0015-gfx.md). See SPEC.md,
  * "Kernel: drawterm kern/ and the Zig seam".
  */
 

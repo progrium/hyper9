@@ -228,7 +228,7 @@ Demos, by hand, one per backend: `h9 --audio play song.mp3` plays on macOS, Wind
 5. macOS: `audio-coreaudio.c`, the frameworks, and the entitlement. The macOS demos work.
 6. Linux: `-Daudio=pipewire` and `-Daudio=alsa` with `audio-alsa.h`. The Linux demos work. Send drawterm the `on_process` fix.
 7. Web: `audio-web.c`, `audiopump`, `h9-audio-worklet.js`, `createMachine`'s `audio`, autoplay handling, and recording. The Playwright cases pass.
-8. README and MANUAL: `--audio` and the build option. DESIGN.md: the boot sequence's binds and device mask, the CLI flag table, and the web host's section. Set `status: implemented`.
+8. README and MANUAL: `--audio` and the build option. SPEC.md: the boot sequence's binds and device mask, the CLI flag table, and the web host's section. Set `status: implemented`.
 
 ## Open issues
 

@@ -13,8 +13,11 @@
 //! the primary tree's are conformed to upper case; modes come from the
 //! primary tree's Plan 9 extension, matched by extent, since both trees
 //! point at the same file data. Plan 9 names longer than Joliet's 64
-//! characters come from the extension too, where it has them. Files
-//! keep their Plan 9 permission bits, directories get 0775.
+//! characters come from the extension too, where it has them, but only
+//! for a Joliet name cut short: mk9660 stores files with the same
+//! contents once, so files can share an extent, and with it one of
+//! their extensions, whose name is another file's. Files keep their
+//! Plan 9 permission bits, directories get 0775.
 
 const std = @import("std");
 const Io = std.Io;
@@ -24,6 +27,14 @@ const flag_dir = 0x02;
 const flag_multi = 0x80;
 
 const Meta = struct { mode: u32, name: []const u8 };
+
+/// Top-level directories the 9front kernel supplies through #/ rather than
+/// the disk, which h9 binds devices onto: tools/mkroot.zig's list, made
+/// here too since the ISO doesn't carry them.
+const mount_points = [_][]const u8{
+    "bin", "boot",    "dev",  "env",  "fd",  "mnt", "mnt/temp", "mnt/term", "mnt/term/cwd", "mnt/wsys", "n",
+    "net", "net.alt", "proc", "root", "shr", "srv", "tmp",
+};
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -67,6 +78,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer out.close(io);
     var n: usize = 0;
     try r.unpack(j, &meta, out, "", &n);
+    for (mount_points) |d| try out.createDirPath(io, d);
     std.debug.print("isoroot: {d} files into {s}\n", .{ n, argv[2] });
     return 0;
 }
@@ -164,7 +176,7 @@ const Reader = struct {
             if (rec.flags() & flag_multi != 0) return error.MultiExtentFile;
             var name = try jolietName(r.arena, rec.name());
             const m = if (rec.flags() & flag_dir == 0) meta.get(rec.extent()) else null;
-            if (m) |mm| if (mm.name.len > 0) {
+            if (m) |mm| if (cutShort(name, mm.name)) {
                 name = mm.name;
             };
             if (name.len == 0 or std.mem.indexOfScalar(u8, name, '/') != null or std.mem.eql(u8, name, "..")) return error.BadName;
@@ -186,6 +198,18 @@ const Reader = struct {
     }
 };
 
+/// The longest Joliet name, less the room for ";1".
+const joliet_max = 62;
+
+/// Whether `plan9` is the whole of `joliet`, a Joliet name cut at its
+/// limit. A Plan 9 name that isn't, such as "cropmarks.rc" for the
+/// Joliet name "cropmarks", belongs to another file with the same
+/// contents.
+fn cutShort(joliet: []const u8, plan9: []const u8) bool {
+    const n = std.unicode.utf8CountCodepoints(joliet) catch return false;
+    return n >= joliet_max and plan9.len > joliet.len and std.mem.startsWith(u8, plan9, joliet);
+}
+
 /// A Joliet name, UCS-2 big-endian, as UTF-8 without its ";1" version.
 fn jolietName(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -206,6 +230,14 @@ test "jolietName" {
     defer a.deinit();
     try std.testing.expectEqualStrings("rc", try jolietName(a.allocator(), "\x00r\x00c\x00;\x001"));
     try std.testing.expectEqualStrings("namespace", try jolietName(a.allocator(), "\x00n\x00a\x00m\x00e\x00s\x00p\x00a\x00c\x00e"));
+}
+
+test "cutShort" {
+    const long = "a" ** 62;
+    try std.testing.expect(cutShort(long, long ++ "bcd"));
+    try std.testing.expect(!cutShort("cropmarks", "cropmarks.rc"));
+    try std.testing.expect(!cutShort("CW", "R.nomath"));
+    try std.testing.expect(!cutShort(long, "b" ** 70));
 }
 
 test "plan9 mode" {

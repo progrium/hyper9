@@ -2,8 +2,8 @@
 
 > This manual is for people *using* h9, the command-line program from the
 > Hyper9 project, including people who have never used Plan 9.
-> [README.md](README.md) is the place for setup and build instructions, and
-> [DESIGN.md](DESIGN.md) for internals. It describes h9 as built on `main`;
+> [DEVELOPING.md](DEVELOPING.md) is the place for build and test instructions, and
+> [SPEC.md](SPEC.md) for internals. It describes h9 as built on `main`;
 > features that aren't built yet are marked with the proposal that adds them
 > (see Conventions).
 
@@ -78,7 +78,7 @@ of running programs never outlive the h9 invocation.
 
 Each Plan 9 program runs as real machine code on a virtual CPU from your
 host's hypervisor (Hypervisor.framework on macOS, KVM on Linux, and the
-Windows Hypervisor Platform on Windows x86\_64, which is still incomplete).
+Windows Hypervisor Platform on Windows x86\_64).
 When a program makes a system call, it
 doesn't reach your host's kernel. It's answered by a Plan 9 kernel that runs
 inside the h9 process: the kernel from drawterm, Plan 9's remote terminal
@@ -158,7 +158,7 @@ to `h9-emu` too. (When you build `h9-emu` from source it's still called
 | Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | ✓ |
 | Linux x86\_64 | ✓ (KVM; without it, `h9-emu`, or `--backend native` for a trusted guest), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
 | Windows on ARM | *Not yet available ([whp](design/0017-whp.md))* | ✓ |
-| Windows x86\_64 | Incomplete: the WHP backend is built but still a draft ([whp](design/0017-whp.md)) | ✓, with an amd64 root tree |
+| Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | ✓, with an amd64 root tree |
 
 **Host requirements.** On macOS, h9 must be signed with the hypervisor
 entitlement in `h9.entitlements`; `zig build` does that, and release binaries
@@ -184,7 +184,7 @@ host$ zig build              # builds and signs zig-out/bin/h9
 host$ zig build -Demu=unicorn   # or: h9 with the emulator built in (h9-emu)
 ```
 
-The [README](README.md) has the details, including cross-building for Linux
+[DEVELOPING.md](DEVELOPING.md) has the details, including cross-building for Linux
 and Windows.
 
 #### Getting a root tree
@@ -467,7 +467,7 @@ host$ h9 --rc 'exit 3'; echo $?
 | 1–255 | The program exited with that number as its string (`exit 3` in rc, `os.Exit(3)` in Go); nothing is printed |
 | 1 | The program failed with any other string, which is printed on standard error |
 | 2 | h9's command line was wrong; h9 prints its usage or the conflict |
-| 125 | h9 itself failed: no root tree, no hypervisor, not enough memory, a 9P root that can't be reached |
+| 125 | h9 itself failed: no root tree, no hypervisor, not enough memory, a 9P root that can't be reached, a `--serve` address in use |
 | 126 | The program isn't a 9front executable for this machine (chapter 29) |
 | 127 | The program wasn't found |
 
@@ -1565,12 +1565,67 @@ devices in Plan 9.
   stream, and its `text` file text messages, one per read and write.
   `wsmount [-h 'Name: value'] url mountpoint` dials a 9P server and mounts
   it. Guest connections don't use the host's proxies.
+- **Serving the machine** ([serve](design/0035-serve.md)). `--serve ADDR`
+  makes h9 a 9P server while the program runs: `unix!/path`,
+  `tcp!host!port`, or `ws://host:port/path`, repeatable. Each connection
+  gets its own `exportfs` of the machine's namespace as the plan built it,
+  so a client sees what the guest sees, under the same rules, but not binds
+  the program makes later, and not `/net` unless `--serve-net` is given.
+  `--serve-root PATH` exports a subtree instead of `/`, and `--write=none`
+  makes the export read-only (`exportfs -R`). With no program, h9 only
+  serves, until Ctrl-C, SIGTERM, a hangup, or `--timeout`, and then exits
+  0. Port 0 picks a free port, and h9 prints it (`serve:
+  tcp!127.0.0.1!53122`) before the program starts; the program finds every
+  bound address in `$serve`. A unix socket is created mode 0600 next to a
+  `PATH.lock` file, a stale socket from a run that crashed is replaced, and
+  both are removed at exit. A WebSocket listener accepts a request without
+  an `Origin` header, or with one listed by `--serve-origin`, and with
+  `--serve-token @FILE` it also needs the token, as `Authorization: Bearer
+  TOKEN` or `?token=TOKEN` (a browser can only use the query). Unix and TCP
+  listeners don't authenticate, so every client acts as your user: keep TCP
+  on loopback or a trusted network. A machine serves up to 32 connections,
+  each with up to 8 exportfs processes; serving's processes count against
+  `--pids` separately from the program's. Every listener also speaks
+  9P2000.L ([dotl](design/0022-dotl.md)), so Linux mounts it: `mount -t 9p
+  -o trans=unix,version=9p2000.L /path/h9.sock /mnt`. A .L client sees
+  regular files and directories only, with every file owned by your host
+  uid. Renames work only within a directory, and symlinks, device nodes,
+  and hard links can't be made. Byte-range locks are advisory, shared by
+  the machine's connections.
+- **9P2000.L servers** ([dotl](design/0022-dotl.md)). `dotlfs addr
+  mountpoint [spec]` dials a server that speaks 9P2000.L, such as diod or
+  ZeroFS, and mounts it. It also mounts a plain 9P2000 server, so it can be
+  used without knowing which one is at the address. The dial goes through
+  `/net`, under `--net` and `--net-allow`. The server's symlinks are
+  followed, but none can leave the mount: an absolute target starts at the
+  mount's root, and `..` stops there. Dangling links aren't listed, and
+  devices and FIFOs can't be opened. A .L server knows users by number, so
+  the guest's user goes out as your host uid, and any other number shows as
+  itself, such as `1000`. Running as root sends 65534 (nobody), never 0.
+  `--user-map FILE` gives a file in `/etc/passwd` format to map names to
+  numbers both ways, and it's the only way to send 0. `/net/dotl/N/status`
+  says which dialect the server chose. A 9P root's address can be a .L
+  server too: `--root tcp!host!port` works with either. A file read from
+  start to end is read a whole `msize` (up to 1 MiB) at a time, not
+  devmnt's 32 KiB, and any write drops what was read ahead.
+- **Reconnecting to ZeroFS** ([dotl](design/0022-dotl.md)). With a server
+  that speaks ZeroFS's 9P2000.L.Z, a TCP mount or root survives the
+  connection dropping: h9 dials again for up to 120 seconds, a second apart,
+  reopens every open file without truncating it, and resends each request
+  that wasn't answered, which the server applies once. Meanwhile the guest
+  sees slow replies, not errors. .L.Z's compound requests also save round
+  trips: a walk brings the file's attributes, so a stat after it is free,
+  opening a file to read brings up to its first megabyte, and a directory
+  listing comes with every entry's attributes. `dotlfs host1,host2
+  mountpoint` gives addresses to try in turn, as for an HA server, and a
+  server that answers that it's no longer the leader is dialed again the
+  same way. `dotlfs -L` asks for plain .L. `/net/dotl/N/status` shows
+  `9P2000.L.Z reconnects N` once a reconnect has happened. A unix socket
+  root reconnects too, but a WebSocket root doesn't yet.
 - Not yet available: roots that need authentication
   ([root-auth](design/root-auth.md)); serving a machine's namespace to the
   host or the network as a 9P server from h9 itself, rather than with
-  `exportfs` inside the guest as below ([serve](design/0035-serve.md)); and
-  9P2000.L servers, such as QEMU's or ZeroFS's, as roots and mounts
-  ([dotl](design/0022-dotl.md)).
+  `exportfs` inside the guest as below ([serve](design/0035-serve.md)).
 - 9front disk images as roots were proposed and declined
   ([image-roots](design/0014-image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an
@@ -1593,7 +1648,15 @@ host$ h9 --rc 'echo hello | { echo 0 >/srv/namedpipe }; cat /srv/namedpipe'
 hello
 ```
 
-One h9 serving its root tree, read-only, and another using it as its root:
+One h9 serving its namespace, read-only, and another mounting it:
+
+```sh
+host$ h9 --write=none --serve 'tcp!127.0.0.1!5640' &
+host$ h9 --root 'tcp!127.0.0.1!5640' --rc 'mount /srv/root /mnt/temp && ls /mnt/temp/mnt/term/cwd'
+```
+
+The guest can do the same itself with `aux/listen1` under `--net=enable`,
+since exportfs is in the root tree:
 
 ```sh
 host$ h9 --net=enable aux/listen1 -t 'tcp!127.0.0.1!5640' /bin/exportfs -R -r / &
@@ -1660,6 +1723,35 @@ the run ends.
 - `--print` shows a `gfx:` line, and lists the clipboard and the guest's
   freedom to draw anything in its window (including what looks like a host
   dialog) as caveats.
+
+**In a browser.** On the browser host, a page's `<canvas>` is the window
+([browser-gfx](design/0120-browser-gfx.md)). `h9-web.js`'s
+`createMachine({ gfx: { canvas } })` moves the canvas into the machine's
+Worker, and rio and acme draw on it. The demo page's **rio** button runs
+`rio -i 'window acme'` that way.
+
+- Click the canvas to type to it. Keys reach the guest only while the canvas
+  has focus, and keys the browser keeps for itself, such as Ctrl-W and
+  Ctrl-T, never reach it. Leaving the canvas releases every key still held.
+- With a one-button mouse or a trackpad, Alt (Option) and click is button 2,
+  and Cmd and click on macOS, or Ctrl and click elsewhere, is button 3. The
+  wheel is buttons 4 and 5, as rio and acme expect.
+- `/dev/snarf` is a buffer in the machine, not the page's clipboard. Ctrl-V
+  (Cmd-V) in the canvas puts the clipboard's text in it, and then rio's or
+  acme's own paste (button 2's menu, or a 1-3 chord) pastes it. A snarf in
+  the guest copies to the page's clipboard; if the browser refuses, the
+  machine fires a `snarf` event with the text, so the page can offer its own
+  copy button. So the guest reads the clipboard only when you paste.
+  `clipboard: "private"` keeps the buffer to the guest, as `--gfx=noclip`
+  does.
+- `scale` is `--gfx-scale`: 0 (the default) draws in device pixels, so text
+  is small on a high-DPI display, 1 in CSS pixels, and N in device pixels
+  divided by N. The screen follows the canvas's size.
+- A page can't move the pointer, so rio's and acme's warps don't happen.
+- `machine.hangup()` posts `hangup`, as closing a native window does.
+- The root archive holds rio, acme, `window`, and the `vga` font they open
+  by default; other fonts need a fuller root. `h9-node` has no canvas, so
+  `--gfx` there exits 125 as a build without graphics does.
 
 The plumber starts and serves `/mnt/plumb`, and `sam -d` and `ed` edit text
 without graphics.
@@ -1882,8 +1974,10 @@ as `NAME=value`, plus `USER`, `LOGNAME`, `HOME`, and a default `PATH`;
 programs exactly as to 9front ones. DNS is the program's own, through the
 `/etc/resolv.conf` above, so under `--net-allow` a pattern has to cover
 those servers (`udp!8.8.8.8!53`). Unix-domain sockets, `socketpair`,
-`epoll`, `eventfd`, and passing file descriptors work between the processes
-of one machine.
+`epoll`, `eventfd`, passing file descriptors, and passing credentials
+(`SO_PASSCRED`) work between the processes of one machine, and
+`SOCK_SEQPACKET` keeps each message whole. `memfd_create`, and a file
+unlinked while still open, work for shared memory.
 
 **The terminal.** `isatty` is true only when h9's standard input and output
 are both terminals, so `ls` doesn't colour a pipe. A program that turns off
@@ -1958,7 +2052,7 @@ h9 --help          (or -h alone)
 - A flag's value can be the next argument or follow `=`: `--root DIR` or
   `--root=DIR`. Flags marked *repeatable* can be given more than once.
 - `-h` is `--help` only when it's the only argument.
-- Running `h9` with no program, an unknown flag, or a bad value prints the
+- Running `h9` with no program (and no `--serve`), an unknown flag, or a bad value prints the
   usage to standard error and exits 2. A combination h9 refuses (such as
   `--write=none --writable DIR`) prints `h9: ...` and exits 2.
 
@@ -1988,6 +2082,7 @@ Machine:
 | `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
 | `--root-spec NAME` | The attach name sent to a 9P root. Default: empty. |
 | `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
+| `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
 | `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |
@@ -2009,6 +2104,11 @@ Files and sandbox (chapters 22 and 23):
 | `--write none\|scope\|ephemeral\|overlay` | `none`: deny every write. `scope`: writes go to the writable paths on the host, and the root is read-only. `overlay` (the default, in both profiles): as `scope`, with a copy-on-write overlay over the root, thrown away at exit. `ephemeral`: the root and the writable paths are copy-on-write overlays in memory, thrown away at exit. |
 | `--net disable\|outbound\|enable` | No network; clients only (the default); clients and servers |
 | `--net-allow PATTERN` | Allow connections only to matching dial strings; repeatable (chapter 15) |
+| `--serve ADDR` | Serve the namespace over 9P on `unix!PATH`, `tcp!HOST!PORT`, or `ws://HOST:PORT/PATH`; repeatable. With no program, only serve (chapter 16) |
+| `--serve-root PATH` | The guest path `--serve` exports, `/` by default |
+| `--serve-token @FILE` | The token WebSocket listeners require |
+| `--serve-origin ORIGIN` | An `Origin` WebSocket listeners accept, or `*` with a token; repeatable |
+| `--serve-net` | Export `/net` too |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
 | `--host-cmd` | Leave `#C`, which runs host commands, unmasked. Only in builds with `-Dhost-cmd`; otherwise exit 2. |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
@@ -2051,7 +2151,7 @@ Tools:
 | 1 | Any other exit string, including `0`; or the program was killed by a note that isn't a signal | The string, or `h9: PROG: NOTE` |
 | 2 | Usage error or refused combination | The usage, or `h9: ...` |
 | 124 | `--timeout` was reached | `h9: PROG: h9: timeout` |
-| 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, or the machine failed mid-run | `h9: ...` |
+| 125 | h9 failed: no root, no usable backend, too little memory, a 9P root that can't be reached, a `--serve` address that can't be listened on, or the machine failed mid-run | `h9: ...` |
 | 126 | The program isn't a runnable a.out or ELF binary for this machine | `h9: PROG: not a 9front executable...` |
 | 127 | The program wasn't found | `h9: PROG: ...` |
 | 128+N | The program was killed by a note that's signal N, as a shell reports it: 130 for Ctrl-C (`interrupt`), 129 for `hangup`, 137 for `kill`, 141 for a closed pipe, 139 for a fault; a Linux program killed by signal N (`linux: signal N`); or a second Ctrl-C (130), SIGHUP (129), or SIGTERM (143) stopped the machine. N is the host's number for the signal, so `usr1` is 138 on Linux and 158 on macOS | Nothing for Ctrl-C and a closed pipe; otherwise `h9: PROG: NOTE` |
@@ -2124,6 +2224,13 @@ The overlay copies a file into memory, whole, the first time it's opened for
 writing, and it counts against `--memory`; when memory runs out, writes fail
 with `file system full`. Renaming a host directory inside an overlay is
 refused with `permission denied`.
+
+**Exclusive-use files.** In an overlay (the root, `/tmp`, ephemeral paths),
+a file with the `l` mode bit (`DMEXCL`, set by `create` or `chmod +l`) can
+be open only once at a time in the machine, as on 9front's file servers: a
+second open fails with `file is locked` until the first is closed. Host
+directories have no such bit, so it isn't kept there: a file created with it
+on a shared host path opens as often as any other.
 
 **`/tmp`.** Every machine has its own `/tmp`, an overlay in memory over the
 root tree's empty `/tmp`, in both profiles. It's not your host's temporary
@@ -2429,7 +2536,7 @@ A **backend** is what runs guest code:
 | --- | --- | --- |
 | `hvf` | macOS on Apple Silicon (Hypervisor.framework) | arm64 |
 | `kvm` | Linux x86\_64 and arm64, with access to `/dev/kvm` | The host's architecture. The arm64 path is built but hasn't yet run on an arm64 KVM host ([#92](https://github.com/progrium/hyper9/issues/92)). |
-| `whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64. Incomplete: built, but still a draft ([whp](design/0017-whp.md)) |
+| `whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 |
 | `native` | Linux x86\_64, 5.11 or later, without a hypervisor | amd64 |
 | `emu` | Any, in `h9-emu` only (Unicorn) | arm64, amd64, and 386 |
 
@@ -2476,9 +2583,10 @@ runs about 5 times slower and amd64 about 7 times slower. The emulator runs
 guest code on one virtual CPU at a time, so CPU-bound programs don't get
 faster with more processes; blocking in the kernel still overlaps.
 
-**In a browser.** h9 also builds for WebAssembly, where the `v86` backend
-runs 386 programs; `--backend v86` is refused everywhere else
-([browser-host](design/0012-browser-host.md)).
+**In a browser.** h9 also builds for WebAssembly, where the emulator runs
+386 programs ([browser-host](design/0012-browser-host.md)). `--backend v86`,
+the browser's backend before the emulator replaced it, is another name for
+`emu`.
 
 **vCPU limits.** Each process normally has its own vCPU. On macOS the
 hypervisor allows 64; KVM usually allows 1024, fewer if h9 can open few
@@ -2636,7 +2744,7 @@ They change faster than this manual, as proposals land.
   server's tree. Attaching a kernel device is what a `#` name does.
 
 - **backend**: h9's name for what runs guest code: a hypervisor (`hvf` on macOS, `kvm`
-  on Linux, and `whp`, still incomplete, on Windows), the host CPU in a stub
+  on Linux, and `whp` on Windows), the host CPU in a stub
   process (`native`, on Linux x86\_64), or the emulator (`emu`). Chosen with
   `--backend`; see chapter 27.
 
@@ -2930,8 +3038,8 @@ originals.
 
 **h9 itself**
 
-- [README.md](README.md): building, testing, and the flags in brief.
-- [DESIGN.md](DESIGN.md): how h9 works inside.
+- [DEVELOPING.md](DEVELOPING.md): building, testing, and releases.
+- [SPEC.md](SPEC.md): how h9 works inside.
 - [design/](design/README.md): proposals, including the ones this manual's
   badges point to.
 

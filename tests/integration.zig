@@ -27,6 +27,7 @@ const Term = @import("term.zig").Term;
 const wsrelay = @import("wsrelay.zig");
 const deadline = @import("deadline.zig");
 const design = @import("design");
+const DotlServer = @import("dotlserver.zig").DotlServer;
 
 const gpa = std.testing.allocator;
 
@@ -73,8 +74,8 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
 /// Cases the web host can't run (design/0012-browser-host.md), skipped
 /// when H9_TEST_WEB is set (-Dweb): by name, those that need a host TTY,
 /// POSIX signals, or what a page's WebSocket can't do; by tag, the
-/// network's and 9P roots' proposals, since the web host has only
-/// WebSockets.
+/// network's, 9P roots', and serving's proposals, since the web host has
+/// only WebSockets and can't listen.
 const web_skips = [_][]const u8{
     "the discarded-changes notice is printed on a terminal and not otherwise",
     "--timeout stops a console read on a terminal at once",
@@ -98,7 +99,7 @@ const web_skips = [_][]const u8{
     "a proxy answering 407 exits 125 with the status",
     "an idle ws:// root pings, and a server that stops answering fails it",
     // self-host's debugger cases that write to text or read acid's frames:
-    // v86 hasn't the private text pages and breakpoint trap they need yet.
+    // the web host hasn't the private text pages and breakpoint trap they need yet.
     "/proc/n/mem reads a variable and a write to text doesn't reach a sibling",
     "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address",
     "a BRK posts sys: breakpoint",
@@ -106,7 +107,7 @@ const web_skips = [_][]const u8{
     // Browsers and Node fail a handshake that offered subprotocols and got none.
     "a ws:// root works with a server that selects no subprotocol",
 };
-const web_skip_tags = [_][]const u8{ "5", "13" };
+const web_skip_tags = [_][]const u8{ "5", "13", "22", "35" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -542,11 +543,49 @@ test "--read-deny hides a path, and symlinks can't escape [baseline]" {
     defer other.deinit();
     try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "secret\n" });
     var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
     const l = try run(e, &.{ "--cwd", s.path, "cat", "link" });
     defer l.deinit();
     try std.testing.expectEqual(1, l.code);
     try std.testing.expectEqualStrings("", l.out);
+}
+
+test "devfs checks the file it opened, not the path it was given [baseline]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f.orig", .data = "one\n" });
+
+    // Reading (OREAD), overwriting with truncation (OWRITE|OTRUNC, through
+    // the deferred ftruncate), and listing the directory (the fdopendir
+    // path) all go through the refactored fsopen and still work on an
+    // in-policy file. Each backend starts from its own copy of f, as the
+    // one before it overwrote it.
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", "cp f.orig f && cat f && echo two >f && cat f && ls ." });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "one\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "two\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "f") != null);
+
+    // Writing through a symlink whose target is outside every bound tree is
+    // denied by the opened fd's own path, and leaves the target untouched:
+    // the open resolves the link but the check sees where it landed, and the
+    // truncation waits until after the check, so a denied file keeps its
+    // contents.
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "secret\n" });
+    var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, try std.fmt.bufPrint(&lp, "{s}/secret", .{other.path}), "link", .{});
+    const w = try run(e, &.{ "--cwd", s.path, "--rc", "echo pwned >link" });
+    defer w.deinit();
+    try std.testing.expectEqual(1, w.code);
+    const data = try other.tmp.dir.readFileAlloc(std.testing.io, "secret", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualStrings("secret\n", data);
 }
 
 test "masked devices can't be attached [baseline]" {
@@ -895,6 +934,23 @@ test "rfork with RFMEM shares data and bss but not the stack [95]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+test "an RFMEM process can use pages another just grew, without a syscall [95]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "rfgrow", @embedFile("fixtures/rfmem/rfgrow.c"));
+    // Two CPUs at least, so the child spins while the parent grows the
+    // break. Before native carried out queued mappings on a fault, the
+    // child's first write to the new pages was "sys: trap: fault write"
+    // (rio's procs malloc'ing from one heap, in 9/UX's GUI tests).
+    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--cpus", "4", "--rc", "./rfgrow 32" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("32 rounds\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "concurrent processes contending for one environment don't hang" {
     const e = try env(@src());
     // 8 processes sharing /env, each creating 150 variables, then running
@@ -1064,6 +1120,17 @@ test "a new file in an ephemeral cwd is readable and absent on the host afterwar
     try std.testing.expect(!s.exists("f"));
 }
 
+test "an exclusive-use file in the overlay opens once at a time [6]" {
+    const e = try env(@src());
+    // DMEXCL (chmod +l), as 9front's file servers keep it: a second open
+    // while one is open fails, and succeeds once that one is closed.
+    const r = try run(e, &.{ "--rc", "touch /tmp/f && chmod +l /tmp/f && { cat /tmp/f >[2=1] } </tmp/f; cat /tmp/f && echo again" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try expectIn(r.out, "file is locked");
+    try expectIn(r.out, "again\n");
+}
+
 test "writing an existing host file changes it in the guest only [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
@@ -1230,8 +1297,9 @@ test "creating empty files until memory runs out fails with file system full [6]
     // rc makes the files itself, without forking: no memory is left for
     // another process. A redirection with no command doesn't set $status
     // when it works, so there's nothing to test in the loop; when one
-    // fails, rc prints the error and leaves the script.
-    const r = try run(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" });
+    // fails, rc prints the error and leaves the script. About 30,000 files
+    // fit; on WHP, whose exits are slower, making them takes about 45s.
+    const r = try runInFor(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" }, null, 120_000);
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
@@ -1702,7 +1770,8 @@ fn buildDebug(e: Env, s: *Scratch) !void {
 /// rc functions for the debugging cases: `addr sym` is a symbol's address
 /// in target, and `run mode` starts `./target mode` in the background,
 /// sets $p to its pid, and prints its exit status when it ends, without
-/// the pid.
+/// the pid. nm prints addresses in lower-case hex, and dc reads only
+/// upper case, so arithmetic on them goes through tr.
 const debug_rc =
     \\fn addr { nm target | awk '$3 == "'$1'" { print $1 }' }
     \\fn run { rm -f pid child; { ./target $*; echo status $status | sed 's/^status target [0-9]+:/status target:/' } & while(! test -s pid) sleep 0.05; p=`{cat pid} }
@@ -1743,7 +1812,7 @@ test "/proc/n/mem reads a variable and a write to text doesn't reach a sibling [
     // The parent and child share text until the write, which gives the
     // parent its own copy.
     const r = try runDebug(e,
-        \\n=`{echo 16 i `{addr three} `{addr two} - p | dc}
+        \\n=`{echo 16 i `{addr three} `{addr two} - p | tr a-f A-F | dc}
         \\run pair >out
         \\echo waitstop >/proc/$p/ctl
         \\c=`{cat child}
@@ -1765,7 +1834,7 @@ test "/proc/n/mem writes to text are fetched by the next run, including a rewrit
     // target isn't sharing its text, so the writes go to the same pages
     // each time, and only the code-cache invalidation makes them seen.
     const r = try runDebug(e,
-        \\n=`{echo 16 i `{addr three} `{addr two} - p | dc}
+        \\n=`{echo 16 i `{addr three} `{addr two} - p | tr a-f A-F | dc}
         \\run thrice
         \\echo waitstop >/proc/$p/ctl
         \\./dbg copy $p `{addr two} `{addr answer} $n
@@ -1839,12 +1908,16 @@ test "acid attaches and prints registers and a stack trace [10]" {
     const r = try runIn(e, &.{ "--timeout", slowTimeout(&tb, 60_000), "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" }, "regs()\nstk()\n");
     defer r.deinit();
     errdefer std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ r.out, r.err });
-    // acid prints its registers by name: R0 on arm64, AX on x86.
+    // acid prints its registers by name: R0 on arm64, AX on x86, after a
+    // tab, except amd64's, which pads with spaces.
     const a = selfArch(e);
-    const reg = if (std.mem.eql(u8, a.name, "arm64")) "R0\t0x" else "AX\t0x";
+    const reg = if (std.mem.eql(u8, a.name, "arm64")) "R0\t0x" else if (std.mem.eql(u8, a.name, "amd64")) "AX    0x" else "AX\t0x";
     try std.testing.expect(std.mem.indexOf(u8, r.out, reg) != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "sleep()+") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null);
+    // amd64's frame shows sleep's argument, sleep(a0=0x1388)+0xe.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\nsleep(") != null or std.mem.indexOf(u8, r.out, " sleep(") != null);
+    // arm64's frame passes argc in a register, so acid shows main(argv=);
+    // 386's has both on the stack, main(argc=0x2,argv=...).
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null or std.mem.indexOf(u8, r.out, "main(argc=") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/sys/src/cmd/sleep.c:") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "warning") == null);
 }
@@ -2150,16 +2223,18 @@ test "an unhandled note kills the process with the note as its status [baseline]
     // An inner rc waits for sleep and nothing else: rc drops the wait record
     // of a background child that exits while it waits for a foreground one
     // (echo, here). The note goes out once sleep has exec'd, as before that
-    // the child is still rc, which would catch it.
+    // the child is still rc, which would catch it. The status names sleep's
+    // pid, which differs between backends, so sed drops it.
     const script =
-        \\rc -c 'sleep 1000 & wait $apid; echo $status' &
+        \\rc -c 'sleep 1000 & wait $apid; echo $status | sed ''s/^sleep [0-9]+: /sleep: /''' &
         \\w=$apid
         \\p=()
         \\while(~ $#p 0) p=`{awk 'FNR==1 && $1=="sleep" {split(FILENAME, a, "/"); print a[3]}' /proc/*/status >[2]/dev/null}
         \\echo die >/proc/$p/note
         \\wait $w
     ;
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
+    var tb: [16]u8 = undefined;
+    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 20_000), "--rc", script });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "die") != null);
     try std.testing.expectEqual(0, r.code);
@@ -2187,11 +2262,16 @@ test "/proc/n/ctl kill stops a process [baseline]" {
 
 test "notepg reaches the note group and not a new one [baseline]" {
     const e = try env(@src());
-    // The block in braces makes its own note group (rfork s), so the
-    // hangup posted to rc's group doesn't reach it; sleep 1000 is in rc's.
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", "fn sighup {}; { rfork s; sleep 1; echo survived } & sleep 1000 & echo hangup >/proc/$pid/notepg; wait; echo done" });
+    // rc runs each & job in a note group of its own (rfork RFNOTEG), so the
+    // background block isn't in rc's group and survives the hangup it posts
+    // there, while the foreground sleep 1000 is in rc's group and dies of
+    // it. The block waits for sleep to have exec'd first, since exec drops
+    // notes queued before it. If the hangup didn't reach sleep, --timeout
+    // would end the run, and the exit code says so.
+    const r = try run(e, &.{ "--timeout", "20s", "--rc", "p=$pid; { while(! grep -s '^sleep 1000$' /proc/*/args) sleep 0; echo hangup >/proc/$p/notepg; sleep 1; echo survived } & fn sighup {}; sleep 1000; wait; echo done" });
     defer r.deinit();
     try std.testing.expectEqualStrings("survived\ndone\n", r.out);
+    try std.testing.expectEqual(0, r.code);
 }
 
 test "/proc/n has status, fd, ns and args [baseline]" {
@@ -2372,6 +2452,15 @@ test "--timeout stops processes blocked in rendezvous and semacquire [3]" {
 // they need no client program the root tree doesn't have.
 
 /// A TCP listener on an ephemeral port of 127.0.0.1.
+/// Makes a symbolic link, or skips the case on a Windows host that refuses
+/// to: only an administrator, or Developer Mode, may make one there.
+fn symLinkOrSkip(dir: std.Io.Dir, io: std.Io, target: []const u8, name: []const u8, flags: std.Io.Dir.SymLinkFlags) !void {
+    dir.symLink(io, target, name, flags) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return if (builtin.os.tag == .windows) error.SkipZigTest else err,
+        else => return err,
+    };
+}
+
 fn listenLocal() !std.Io.net.Server {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
     return addr.listen(std.testing.io, .{ .reuse_address = true });
@@ -2434,8 +2523,13 @@ test "--net=enable allows a server [5]" {
     const addr = try std.fmt.bufPrint(&addr_buf, "tcp!127.0.0.1!{d}", .{port});
     var it = std.mem.tokenizeScalar(u8, e.backends, ',');
     while (it.next()) |backend| {
+        // The root's binaries are for -Darch's architecture, if any.
+        const argv: []const []const u8 = if (e.arch) |a|
+            &.{ e.h9, "--backend", backend, "--arch", a, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" }
+        else
+            &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" };
         var child = try std.process.spawn(io, .{
-            .argv = &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" },
+            .argv = argv,
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
@@ -2498,8 +2592,12 @@ test "outbound refuses link-local without patterns [5]" {
 test "a pattern allows link-local [5]" {
     const e = try env(@src());
     var cmd_buf: [256]u8 = undefined;
-    // Nothing listens there, so the connect fails, but not by the policy.
-    const r = try run(e, &.{ "--net-allow", "tcp!169.254.0.0/16!*", "--timeout", "20s", "--rc", try rcDial(&cmd_buf, "169.254.169.254!80", "x") });
+    // The policy refuses the connect at once, so a short --timeout is
+    // enough to tell. Past the policy, nothing usually answers there and
+    // the host's connect waits until --timeout ends the run (on a cloud VM,
+    // the metadata service may answer instead).
+    var to_buf: [16]u8 = undefined;
+    const r = try run(e, &.{ "--net-allow", "tcp!169.254.0.0/16!*", "--timeout", slowTimeout(&to_buf, 2000), "--rc", try rcDial(&cmd_buf, "169.254.169.254!80", "x") });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") == null);
 }
@@ -2681,13 +2779,15 @@ test "exportfs -S serves a posted channel [8]" {
     // other end is posted as /srv/e, and exportfs passes it to /srv/r.
     // Each attach mounts /srv/r on /mnt/exportfs/<n>, mntexport's on
     // 9front, so /mnt/exportfs/0 is made in /tmp if the root lacks it.
+    // /srv/e exists once echo creates it, before its write posts the fd,
+    // and an open in between fails, so the mount is retried.
     const script =
         \\mkdir -p /tmp/m/exportfs/0 && bind -a /tmp/m /mnt && bind -a /tmp/m/exportfs /mnt/exportfs || exit mtpt
         \\ramfs -S r && mkdir /tmp/a /tmp/b && mount -c /srv/r /tmp/a && echo through >/tmp/a/x || exit setup
         \\exportfs -S /srv/r <[0=1] | { echo 0 >/srv/e } &
         \\n=0
-        \\while(! test -e /srv/e && test $n -lt 100){ sleep 0.1; n=`{echo $n+1 | hoc} }
-        \\mount -c /srv/e /tmp/b && cat /tmp/b/x
+        \\while(! mount -c /srv/e /tmp/b >[2]/dev/null && test $n -lt 100){ sleep 0.1; n=`{echo $n+1 | hoc} }
+        \\cat /tmp/b/x
     ;
     const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
     defer r.deinit();
@@ -3173,7 +3273,11 @@ const RootServer = struct {
         return std.fmt.bufPrint(&s.dial_buf, "tcp!127.0.0.1!{d}", .{s.port}) catch unreachable;
     }
 
+    /// Kills the server outright. Child.kill's SIGTERM is a hangup to h9,
+    /// which listen1 doesn't end on, so h9 would wait out its 2.5 s grace
+    /// period on every case that serves a root.
     fn stop(s: *RootServer) void {
+        if (builtin.os.tag != .windows) if (s.child.id) |pid| std.posix.kill(pid, .KILL) catch {};
         s.child.kill(std.testing.io);
     }
 };
@@ -3994,25 +4098,32 @@ test "a server close makes guest file operations fail [21]" {
 
 test "an idle ws:// root pings, and a server that stops answering fails it [21]" {
     const e = try env(@src());
-    // The keepalive pings after 30 s without a frame and fails the
-    // connection 30 s after that, so this case takes over a minute.
+    // H9_TEST_KEEPALIVE shortens the keepalive's 30 s idle time to 1 s:
+    // h9 pings after 1 s without a frame and fails the connection 1 s
+    // after an unanswered ping. The sleeps are a few idle periods long.
+    var ka_buf: [16]u8 = undefined;
+    const ka = try std.fmt.bufPrint(&ka_buf, "{d}", .{slow(1000)});
+    var cmd_buf: [64]u8 = undefined;
     {
         var w: WsRoot = undefined;
         try w.start(e, .{});
         defer w.stop();
-        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", "sleep 40; /bin/echo still" }, &.{}, 90_000);
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 4 / 1000});
+        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stderr: {s}\n", .{r.err});
         try std.testing.expectEqual(0, r.code);
         try std.testing.expectEqualStrings("still\n", r.out);
-        try std.testing.expect(w.relay.pings.load(.acquire) >= 1);
+        try std.testing.expect(w.relay.pings.load(.acquire) >= 2);
     }
     {
         var w: WsRoot = undefined;
         try w.start(e, .{ .no_pong = true });
         defer w.stop();
-        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", "sleep 70; /bin/echo still" }, &.{}, 120_000);
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 6 / 1000});
+        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
         try std.testing.expect(r.code != 0);
         try std.testing.expect(std.mem.indexOf(u8, r.out, "still") == null);
         try std.testing.expect(w.relay.pings.load(.acquire) >= 1);
@@ -4466,7 +4577,7 @@ test "an existing directory with a dotted name is a host root, not a URL [76]" {
     defer s.deinit();
     var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, e.root, &root_buf);
-    try s.tmp.dir.symLink(std.testing.io, root_buf[0..n], "fs.example.com", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, root_buf[0..n], "fs.example.com", .{ .is_directory = true });
     const r = try runBare(e, s.path, &.{ "--root", "fs.example.com", "--print", "ls" }, &.{});
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
@@ -4837,6 +4948,16 @@ test "--gfx on a build without graphics exits 125 [15]" {
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
     if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return error.SkipZigTest;
+    try expectGfxNotBuilt(e);
+}
+
+test "h9-node has no canvas, so --gfx exits 125 as a build without graphics does [120]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    try expectGfxNotBuilt(e);
+}
+
+fn expectGfxNotBuilt(e: Env) !void {
     const r = try run(e, &.{ "--gfx", "echo", "hi" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
@@ -4867,12 +4988,12 @@ fn linkTree(e: Env, s: *Scratch, out: []u8) ![]const u8 {
     try d.writeFile(io, .{ .sub_path = "tree/deny/secret", .data = "secret\n" });
     // Absolute, climbing past the top, a loop, a link to a denied file,
     // and a link to the cat binary.
-    try d.symLink(io, "/lib/hello", "tree/etc/hello", .{});
-    try d.symLink(io, "../../../../../../lib/hello", "tree/etc/up", .{});
-    try d.symLink(io, "loop", "tree/etc/loop", .{});
-    try d.symLink(io, "/deny/secret", "tree/etc/pub", .{});
+    try symLinkOrSkip(d, io, "/lib/hello", "tree/etc/hello", .{});
+    try symLinkOrSkip(d, io, "../../../../../../lib/hello", "tree/etc/up", .{});
+    try symLinkOrSkip(d, io, "loop", "tree/etc/loop", .{});
+    try symLinkOrSkip(d, io, "/deny/secret", "tree/etc/pub", .{});
     var t: [64]u8 = undefined;
-    try d.symLink(io, try std.fmt.bufPrint(&t, "/{s}/bin/cat", .{arch}), try std.fmt.bufPrint(&b, "tree/{s}/bin/kitty", .{arch}), .{});
+    try symLinkOrSkip(d, io, try std.fmt.bufPrint(&t, "/{s}/bin/cat", .{arch}), try std.fmt.bufPrint(&b, "tree/{s}/bin/kitty", .{arch}), .{});
     return std.fmt.bufPrint(out, "{s}/tree", .{s.path});
 }
 
@@ -4953,7 +5074,7 @@ test "uncontained bind follows host symlinks as before [34]" {
     defer other.deinit();
     try other.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "host\n" });
     var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try s.tmp.dir.symLink(std.testing.io, try std.fmt.bufPrint(&lp, "{s}/f", .{other.path}), "tree/lib/host", .{});
+    try symLinkOrSkip(s.tmp.dir, std.testing.io, try std.fmt.bufPrint(&lp, "{s}/f", .{other.path}), "tree/lib/host", .{});
     const u = try runRoot(e, tree, &.{ "--cwd", s.path, "--readable", other.path, "cat", "/lib/host" });
     defer u.deinit();
     try std.testing.expectEqualStrings("host\n", u.out);
@@ -5244,6 +5365,23 @@ test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fo
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
 }
 
+test "a mode set by mkdir, creat, or chmod reads back, as databases check of their data directories [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // PostgreSQL won't start unless its data directory is 0700 or 0750.
+    // The web host's WASI has no permission bits, so devfs keeps them.
+    const script =
+        \\umask 077; mkdir /tmp/d; touch /tmp/d/f
+        \\stat -c %a /tmp/d /tmp/d/f
+        \\chmod 750 /tmp/d; chmod 640 /tmp/d/f
+        \\stat -c %a /tmp/d /tmp/d/f
+    ;
+    const r = try runLinux(&le, false, &.{ "sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("700\n600\n750\n640\n", r.out);
+}
+
 test "9front and Linux programs share pipelines both ways (demo) [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5476,6 +5614,24 @@ test "a process past 100 fds gets no Plan 9 warning on its stderr [18]" {
     try netCase(&le, &.{ "/mnt/term/cwd/files", "many_fds" }, "ok many_fds\n");
 }
 
+test "an open file survives unlink for ftruncate, fstat, and mmap, and memfd_create makes one [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "unlinked" }, "ok unlinked\n");
+}
+
+test "a memfd passed with SCM_RIGHTS keeps its data after the sender unmaps and closes it [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "shm_pass" }, "ok shm_pass\n");
+}
+
+test "a private file mapping reads each page from its file offset on first touch, after close, fork, mremap, and MADV_DONTNEED [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "lazy_map" }, "ok lazy_map\n");
+}
+
 // Readiness and sockets (design/0050-linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 
@@ -5529,6 +5685,12 @@ test "SCM_RIGHTS passes fds over a Unix socket, one batch per message, with MSG_
     try netCase(&le, &.{ "/mnt/term/cwd/net", "scm_rights" }, "ok scm_rights\n");
 }
 
+test "SEQPACKET socket pairs keep message bounds, pass SCM_CREDENTIALS, and stay sockets through SCM_RIGHTS [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "seqpacket" }, "ok seqpacket\n");
+}
+
 test "socket under --net=disable is EACCES [50]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5569,6 +5731,12 @@ test "netlink lists loopback for getifaddrs, and a listener on 127.0.0.1 reports
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "ifaddrs" }, "ok ifaddrs\n");
+}
+
+test "a netlink MSG_PEEK|MSG_TRUNC read sizes the next message and leaves it queued [50]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "netlink_peek" }, "ok netlink_peek\n");
 }
 
 test "UDP sendto and recvfrom on an unconnected socket [50]" {
@@ -5715,6 +5883,12 @@ test "/proc lists a thread group once, with its threads under task, and statm re
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "proc_threads");
+}
+
+test "/proc/meminfo counts a process's memory once however many threads it has [49]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "meminfo_threads");
 }
 
 test "Go os/exec waits for a child from another thread, and RemoveAll empties a /tmp directory [49]" {
@@ -6168,4 +6342,1137 @@ test "a missing command names the built-in root in its error [87]" {
     defer r.deinit();
     try std.testing.expectEqual(127, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "not in the built-in root; pass --root or set H9ROOT") != null);
+}
+
+// Serving the namespace (design/0035-serve.md). A server is h9 on a
+// terminal from tests/term.zig, so the cases can signal it and read its
+// "serve: ADDR" lines; a client is a second h9 with the listener as its
+// 9P root, which mounts the connection's /srv/root at /mnt/temp to look
+// at the served tree beside its own. The HTTP and 9P-level cases speak to
+// the listener over a socket of their own.
+
+/// The case's environment, skipped on Windows: the cases signal the server.
+fn serveEnv(comptime src: std.builtin.SourceLocation) !Env {
+    const e = try env(src);
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    return e;
+}
+
+/// A scratch directory with `marker` in it, the server's --cwd.
+fn serveScratch(s: *Scratch) !void {
+    try s.init();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "marker", .data = "served\n" });
+}
+
+/// `name` in `s`, in `buf`.
+fn scratchPath(s: *Scratch, buf: []u8, name: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ s.path, name });
+}
+
+/// Starts `h9 args...` on a terminal on the first backend.
+fn startServer(e: Env, args: []const []const u8) !Term {
+    return spawnTerm(e, firstBackend(e), args);
+}
+
+/// Waits for the server's next "serve: ADDR" line and returns ADDR,
+/// copied into `buf`.
+fn servedAddr(t: *Term, buf: []u8) ![]const u8 {
+    try t.expect("serve: ", slow(10_000));
+    const start = t.mark;
+    try t.expect("\n", slow(10_000));
+    const line = std.mem.trimEnd(u8, t.out.items[start .. t.mark - 1], "\r");
+    @memcpy(buf[0..line.len], line);
+    return buf[0..line.len];
+}
+
+/// The port at the end of `tcp!127.0.0.1!PORT` or in `ws://127.0.0.1:PORT/path`.
+fn addrPort(addr: []const u8) !u16 {
+    if (std.mem.startsWith(u8, addr, "tcp!")) {
+        const bang = std.mem.lastIndexOfScalar(u8, addr, '!').?;
+        return std.fmt.parseInt(u16, addr[bang + 1 ..], 10);
+    }
+    const rest = addr["ws://".len..];
+    const colon = std.mem.indexOfScalar(u8, rest, ':').?;
+    const slash = std.mem.indexOfScalarPos(u8, rest, colon, '/') orelse rest.len;
+    return std.fmt.parseInt(u16, rest[colon + 1 .. slash], 10);
+}
+
+/// Waits up to 10 s for `path` to exist, as a serve-only run's socket.
+fn waitPath(path: []const u8) !void {
+    var i: usize = 0;
+    while (i < slow(200)) : (i += 1) {
+        std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch {
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+            continue;
+        };
+        return;
+    }
+    return error.Timeout;
+}
+
+fn pathExists(path: []const u8) bool {
+    std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch return false;
+    return true;
+}
+
+/// Runs a client, `h9 --root ROOT args...`, on the first backend, without
+/// the proxy variables, so a ws:// root on 127.0.0.1 is dialed directly.
+fn runClient(e: Env, root: []const u8, args: []const []const u8) !Result {
+    var map = try std.testing.environ.createMap(gpa);
+    defer map.deinit();
+    for ([_][]const u8{ "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy" }) |k| _ = map.swapRemove(k);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", root });
+    if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
+    try argv.appendSlice(gpa, args);
+    const r = try runProcessWith(argv.items, null, &map, 60_000);
+    const code = switch (r.term) {
+        .exited => |c| c,
+        else => {
+            gpa.free(r.stdout);
+            gpa.free(r.stderr);
+            return error.Crashed;
+        },
+    };
+    return .{ .code = code, .out = r.stdout, .err = r.stderr };
+}
+
+/// A client on `addr` running `cmd` with the served tree at /mnt/temp.
+fn runServed(e: Env, addr: []const u8, cmd: []const u8) !Result {
+    var buf: [1024]u8 = undefined;
+    return runClient(e, addr, &.{ "--rc", try std.fmt.bufPrint(&buf, "mount /srv/root /mnt/temp && {{ {s} }}", .{cmd}) });
+}
+
+/// Checks that a client on `addr` reads the server's marker at `path`.
+fn expectServed(e: Env, addr: []const u8, path: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const r = try runServed(e, addr, try std.fmt.bufPrint(&buf, "cat {s}", .{path}));
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("served\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+/// A TCP connection of the case's own to 127.0.0.1:`port`. On Windows,
+/// where a socket isn't a C file descriptor, reads and writes go through
+/// Io.
+const Sock = struct {
+    s: std.Io.net.Stream,
+
+    fn dial(port: u16) !Sock {
+        const a = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+        const s = a.connect(std.testing.io, .{ .mode = .stream }) catch |err| {
+            // Zig 0.16 reports a refused connect on Windows as unexpected.
+            if (builtin.os.tag == .windows and err == error.Unexpected) return error.ConnectionRefused;
+            return err;
+        };
+        return .{ .s = s };
+    }
+
+    fn close(k: Sock) void {
+        k.s.close(std.testing.io);
+    }
+
+    fn write(k: Sock, bytes: []const u8) !void {
+        if (builtin.os.tag == .windows) {
+            var w = k.s.writer(std.testing.io, &.{});
+            w.interface.writeAll(bytes) catch return error.WriteFailed;
+            return;
+        }
+        var off: usize = 0;
+        while (off < bytes.len) {
+            const n = std.c.write(k.s.socket.handle, bytes[off..].ptr, bytes.len - off);
+            if (n <= 0) return error.WriteFailed;
+            off += @intCast(n);
+        }
+    }
+
+    /// Reads what's there within `ms`; 0 at EOF or a reset.
+    fn read(k: Sock, buf: []u8, ms: u32) !usize {
+        try deadline.waitReadable(k.s.socket.handle, @intCast(slow(ms)));
+        if (builtin.os.tag == .windows) {
+            var r = k.s.reader(std.testing.io, &.{});
+            var bufs = [_][]u8{buf};
+            return r.interface.readVec(&bufs) catch 0;
+        }
+        const n = std.c.read(k.s.socket.handle, buf.ptr, buf.len);
+        return if (n <= 0) 0 else @intCast(n);
+    }
+
+    /// Reads exactly `buf.len` bytes, or fails with error.Closed.
+    fn readFull(k: Sock, buf: []u8, ms: u32) !void {
+        var off: usize = 0;
+        while (off < buf.len) {
+            const n = try k.read(buf[off..], ms);
+            if (n == 0) return error.Closed;
+            off += n;
+        }
+    }
+
+    /// Sends a Tversion and checks for the Rversion: the connection has
+    /// an exportfs behind it.
+    fn version(k: Sock) !void {
+        try k.write("\x13\x00\x00\x00\x64\xff\xff\x00\x20\x00\x00\x06\x009P2000");
+        var hdr: [7]u8 = undefined;
+        try k.readFull(&hdr, 10_000);
+        if (hdr[4] != 101) return error.NotRversion;
+        const size = std.mem.readInt(u32, hdr[0..4], .little);
+        var rest: [64]u8 = undefined;
+        if (size < 7 or size - 7 > rest.len) return error.NotRversion;
+        try k.readFull(rest[0 .. size - 7], 10_000);
+    }
+
+    /// Waits up to `ms` for the server to close the connection.
+    fn expectClosed(k: Sock, ms: u32) !void {
+        var buf: [256]u8 = undefined;
+        while (true) if (try k.read(&buf, ms) == 0) return;
+    }
+
+    /// Sends a WebSocket upgrade for `target` with `extra` header lines and
+    /// returns the status code of the answer.
+    fn upgrade(k: Sock, target: []const u8, extra: []const u8) !u16 {
+        var req: [1024]u8 = undefined;
+        try k.write(try std.fmt.bufPrint(&req, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: 9p\r\n{s}\r\n", .{ target, extra }));
+        // Reads to the end of the head, a byte at a time, so a frame after
+        // it stays unread.
+        var head: [2048]u8 = undefined;
+        var n: usize = 0;
+        while (n < head.len) {
+            try k.readFull(head[n .. n + 1], 10_000);
+            n += 1;
+            if (std.mem.endsWith(u8, head[0..n], "\r\n\r\n")) break;
+        }
+        if (!std.mem.startsWith(u8, head[0..n], "HTTP/1.1 ")) return error.NotHttp;
+        return std.fmt.parseInt(u16, head[9..12], 10);
+    }
+};
+
+test "an h9 root over --serve unix! lists the served tree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", addr, "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "an h9 root over --serve tcp! lists the served tree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "an h9 ws:// root over --serve ws:// lists the served tree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try std.testing.expect(std.mem.startsWith(u8, addr, "ws://127.0.0.1:"));
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "a guest mounts a --serve ws:// listener through /net/ws [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    var cmd: [256]u8 = undefined;
+    const r = try runClient(e, e.root, &.{ "--rc", try std.fmt.bufPrint(&cmd, "mkdir /tmp/fs && wsmount {s} /tmp/fs && cat /tmp/fs/mnt/term/cwd/marker", .{addr}) });
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("served\n", r.out);
+}
+
+test "--serve-root exports only that subtree [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--serve-root", "/mnt/term/cwd", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    // The subtree has no rc to boot a client from, so the client mounts
+    // it beside its own root.
+    var cmd: [256]u8 = undefined;
+    const r = try runClient(e, e.root, &.{ "--rc", try std.fmt.bufPrint(&cmd, "mkdir /tmp/fs && wsmount {s} /tmp/fs && cat /tmp/fs/marker && {{ test -e /tmp/fs/rc && echo whole || echo subtree }}", .{addr}) });
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("served\nsubtree\n", r.out);
+}
+
+test "--serve under --write=none refuses writes [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--write=none", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "touch /mnt/temp/tmp/f >[2]/dev/null && echo wrote || echo refused");
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("refused\n", r.out);
+}
+
+test "--read-deny paths aren't visible through --serve [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "secret", .data = "hidden\n" });
+    var db: [512]u8 = undefined;
+    var t = try startServer(e, &.{ "--cwd", s.path, "--read-deny", try scratchPath(&s, &db, "secret"), "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "cat /mnt/temp/mnt/term/cwd/marker; if(test -e /mnt/temp/mnt/term/cwd/secret) echo seen; if not echo hidden");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("served\nhidden\n", r.out);
+}
+
+test "clients see the plan's namespace, not the program's later binds [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "tcp!127.0.0.1!0", "--rc", "bind /mnt/term/cwd /tmp && cat /tmp/marker && echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "if(test -e /mnt/temp/tmp/marker) echo bound; if not echo plan");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("plan\n", r.out);
+}
+
+test "listeners close and clients see hangups when the program exits [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ub: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    const unix = try std.fmt.bufPrint(&ub, "unix!{s}", .{sock});
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--serve", unix, "--rc", "echo ready; read >/dev/null; exit gone" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const k = try Sock.dial(try addrPort(addr));
+    defer k.close();
+    try k.version();
+    try t.send("x" ++ enter);
+    try k.expectClosed(10_000);
+    try std.testing.expectEqual(1, try t.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+    try std.testing.expectError(error.ConnectionRefused, Sock.dial(try addrPort(addr)));
+}
+
+test "a ws:// listener refuses an unlisted Origin with 403 [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-origin", "http://ok.example", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect("ready", slow(10_000));
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(403, try k.upgrade("/9p", "Origin: http://evil.example\r\n"));
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(101, try k.upgrade("/9p", "Origin: http://ok.example\r\n"));
+    }
+}
+
+test "a ws:// listener with --serve-token refuses a request without it [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "token", .data = "s3cret\n" });
+    var tb: [512]u8 = undefined;
+    var fb: [600]u8 = undefined;
+    const tok = try std.fmt.bufPrint(&fb, "@{s}", .{try scratchPath(&s, &tb, "token")});
+    var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-token", tok, "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect("ready", slow(10_000));
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(401, try k.upgrade("/9p", ""));
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(401, try k.upgrade("/9p", "Authorization: Bearer wrong\r\n"));
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectEqual(101, try k.upgrade("/9p", "Authorization: Bearer s3cret\r\n"));
+    }
+}
+
+test "a ws:// listener accepts the token in the query [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "token", .data = "ab+c/=\n" });
+    var tb: [512]u8 = undefined;
+    var fb: [600]u8 = undefined;
+    const tok = try std.fmt.bufPrint(&fb, "@{s}", .{try scratchPath(&s, &tb, "token")});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--serve-token", tok, "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    {
+        const k = try Sock.dial(try addrPort(addr));
+        defer k.close();
+        try std.testing.expectEqual(101, try k.upgrade("/9p?token=ab%2Bc%2F%3D", ""));
+    }
+    var ub: [256]u8 = undefined;
+    try expectServed(e, try std.fmt.bufPrint(&ub, "{s}?token=ab%2bc/%3d", .{addr}), "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "the 33rd connection is refused [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    var conns: [32]Sock = undefined;
+    var open: usize = 0;
+    defer for (conns[0..open]) |k| k.close();
+    while (open < conns.len) : (open += 1) {
+        conns[open] = try Sock.dial(port);
+        errdefer conns[open].close();
+        try conns[open].version();
+    }
+    {
+        const k = try Sock.dial(port);
+        defer k.close();
+        try std.testing.expectError(error.Closed, k.version());
+    }
+    // Closing one frees its slot.
+    open -= 1;
+    conns[open].close();
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        const k = try Sock.dial(port);
+        defer k.close();
+        k.version() catch |err| {
+            if (i >= 50) return err;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+            continue;
+        };
+        break;
+    }
+}
+
+test "clients exporting at the --pids cap don't stop the program's rfork [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--pids", "8", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; read >/dev/null; echo a | cat; echo forked" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect("ready", slow(10_000));
+    // More connections than serving's share of --pids: the ones past it
+    // are closed, and the program still forks.
+    var conns: [12]Sock = undefined;
+    var open: usize = 0;
+    defer for (conns[0..open]) |k| k.close();
+    var refused: usize = 0;
+    while (open < conns.len) : (open += 1) {
+        conns[open] = try Sock.dial(port);
+        conns[open].version() catch {
+            refused += 1;
+        };
+    }
+    try std.testing.expect(refused > 0);
+    try t.send("x" ++ enter);
+    try t.expect("a", slow(10_000));
+    try t.expect("forked", slow(10_000));
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+}
+
+test "--serve with no program serves until a hangup and exits 0 [35]" {
+    // It ends the server with SIGHUP, which Windows has no way to send.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{sock});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", addr });
+    defer t.deinit();
+    try waitPath(sock);
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+    t.signal(.HUP);
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+}
+
+test "--serve tcp!127.0.0.1!0 prints the bound address [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try std.testing.expect(std.mem.startsWith(u8, addr, "tcp!127.0.0.1!"));
+    const port = try addrPort(addr);
+    try std.testing.expect(port != 0);
+    const k = try Sock.dial(port);
+    defer k.close();
+    try k.version();
+}
+
+/// Leaves a unix socket at `path` that nothing answers, as a crashed
+/// server would.
+fn staleSocket(path: []const u8) !void {
+    const ua = try std.Io.net.UnixAddress.init(path);
+    var srv = try ua.listen(std.testing.io, .{});
+    srv.deinit(std.testing.io);
+    try std.testing.expect(pathExists(path));
+}
+
+test "a stale unix socket is replaced and removed at exit [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    try staleSocket(sock);
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{sock});
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", addr, "--rc", "echo ready; read >/dev/null" });
+    defer t.deinit();
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+    try t.send("x" ++ enter);
+    try std.testing.expectEqual(0, try t.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+    try std.testing.expect(!s.exists("fs.sock.lock"));
+}
+
+test "a unix socket path that isn't a socket exits 125 [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fs.sock", .data = "keep\n" });
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
+    const r = try runOn(e, firstBackend(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+    try expectIn(r.err, "not a socket");
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("keep\n", try s.tmp.dir.readFile(std.testing.io, "fs.sock", &buf));
+}
+
+test "a ws:// listener pings an idle client and closes one that stops answering [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    const k = try Sock.dial(port);
+    defer k.close();
+    try std.testing.expectEqual(101, try k.upgrade("/9p", ""));
+    // The keepalive pings after 30 s idle and fails the connection 30 s
+    // after that; this client never answers.
+    var hdr: [2]u8 = undefined;
+    try k.readFull(&hdr, 45_000);
+    try std.testing.expectEqual(0x89, hdr[0]);
+    try k.expectClosed(45_000);
+}
+
+test "an address in use exits 125 [35]" {
+    const e = try serveEnv(@src());
+    var srv = try listenLocal();
+    defer srv.deinit(std.testing.io);
+    var ab: [64]u8 = undefined;
+    const addr = try std.fmt.bufPrint(&ab, "tcp!127.0.0.1!{d}", .{srv.socket.address.getPort()});
+    const r = try runOn(e, firstBackend(e), &.{ "--serve", addr, "--rc", "echo ran" }, null);
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+    try expectIn(r.err, "address in use");
+}
+
+test "a client doesn't see /net without --serve-net [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--rc", "test -e /net/tcp/clone && echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "if(test -e /mnt/temp/net/tcp/clone) echo net; if not echo nonet");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("nonet\n", r.out);
+}
+
+test "--serve-net exports /net and the plan shows a caveat [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--serve-net", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "if(test -e /mnt/temp/net/tcp/clone) echo net; if not echo nonet");
+    defer r.deinit();
+    try std.testing.expectEqualStrings("net\n", r.out);
+    const p = try run(e, &.{ "--print", "--serve", "tcp!127.0.0.1!5640", "--serve-net", "--rc", "echo" });
+    defer p.deinit();
+    try expectIn(p.out, "/net served on tcp!127.0.0.1!5640: clients can dial out from the host's address");
+}
+
+test "--serve-origin '*' without --serve-token exits 2 [35]" {
+    const e = try serveEnv(@src());
+    const r = try run(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-origin", "*", "--rc", "echo ran" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try std.testing.expectEqualStrings("", r.out);
+}
+
+test "a connection past 8 blocking requests fails them without affecting another [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    // /srv/blk is a pipe nobody writes, so each read through it blocks
+    // one of the connection's exportfs processes.
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "srv.rc", .data = "{ echo 3 >/srv/blk; echo ready; sleep 60 } <>[3] '#|/data'\n" });
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "ws://127.0.0.1:0/9p", "--rc", ". /mnt/term/cwd/srv.rc" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    var cmd: [512]u8 = undefined;
+    const r = try runClient(e, e.root, &.{ "--rc", try std.fmt.bufPrint(&cmd,
+        \\mkdir /tmp/a /tmp/b && wsmount {s} /tmp/a || exit
+        \\for(i in 1 2 3 4 5 6 7 8 9 10 11 12) {{ cat /tmp/a/srv/blk >[2]/tmp/err.$i & }}
+        \\sleep 3
+        \\wsmount {s} /tmp/b && cat /tmp/b/mnt/term/cwd/marker
+        \\cat /tmp/err.* | grep -c 'Out of processes'
+    , .{ addr, addr }) });
+    defer r.deinit();
+    errdefer std.debug.print("client out: {s}\nclient stderr: {s}\n", .{ r.out, r.err });
+    var lines = std.mem.splitScalar(u8, r.out, '\n');
+    try std.testing.expectEqualStrings("served", lines.next().?);
+    const failed = try std.fmt.parseInt(u32, lines.next().?, 10);
+    try std.testing.expect(failed > 0);
+}
+
+test "--serve works over a root without /bin/exportfs [35]" {
+    const e = try serveEnv(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    // --read-deny hides the root's exportfs, so the server falls back to
+    // the built-in root's.
+    var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&db, "{s}/{s}/bin/exportfs", .{ e.root, testArch(e) });
+    var t = try startServer(e, &.{ "--cwd", s.path, "--read-deny", deny, "--serve", "tcp!127.0.0.1!0", "--rc", "test -e /bin/exportfs || echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+}
+
+test "$serve lists the bound addresses [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const unix = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
+    const r = try run(e, &.{ "--serve", unix, "--serve", "tcp!127.0.0.1!0", "--rc", "echo $#serve; echo $serve(1); echo $serve(2)" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    var lines = std.mem.splitScalar(u8, r.out, '\n');
+    try std.testing.expectEqualStrings("2", lines.next().?);
+    try std.testing.expectEqualStrings(unix, lines.next().?);
+    const tcp = lines.next().?;
+    try std.testing.expect(std.mem.startsWith(u8, tcp, "tcp!127.0.0.1!"));
+    try std.testing.expect(try addrPort(tcp) != 0);
+    // The bound address is the one printed on stderr.
+    try expectIn(r.err, tcp);
+}
+
+test "an interrupt to the program leaves clients connected [35]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "rc", "-i" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const port = try addrPort(try servedAddr(&t, &ab));
+    try t.expect(prompt, slow(10_000));
+    const k = try Sock.dial(port);
+    defer k.close();
+    try k.version();
+    try t.send("sleep 60" ++ enter);
+    try t.drain(500);
+    try t.send("\x03");
+    try t.expect(prompt, slow(10_000));
+    try k.version();
+    try t.send("exit" ++ enter);
+    _ = try t.wait(slow(10_000));
+}
+
+test "two runs on one stale unix socket: one listens, one exits 125 [35]" {
+    // It stops the winner with SIGTERM, which Windows has no way to send.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    try staleSocket(sock);
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{sock});
+    var a = try startServer(e, &.{ "--cwd", s.path, "--serve", addr });
+    defer a.deinit();
+    var b = try startServer(e, &.{ "--cwd", s.path, "--serve", addr });
+    defer b.deinit();
+    // One of the two fails; the other is still serving.
+    var i: usize = 0;
+    while (a.code == null and b.code == null) : (i += 1) {
+        if (i > slow(200)) return error.Timeout;
+        try a.drain(25);
+        try b.drain(25);
+    }
+    const lost, const won = if (a.code != null) .{ &a, &b } else .{ &b, &a };
+    try std.testing.expectEqual(125, lost.code.?);
+    try std.testing.expect(std.mem.indexOf(u8, lost.out.items, "address in use") != null);
+    try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
+    won.signal(.TERM);
+    try std.testing.expectEqual(0, try won.wait(slow(10_000)));
+    try std.testing.expect(!pathExists(sock));
+}
+
+test "--print lists listeners and elides the token [35]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "token", .data = "s3cret\n" });
+    var tb: [512]u8 = undefined;
+    var fb: [600]u8 = undefined;
+    const tok = try std.fmt.bufPrint(&fb, "@{s}", .{try scratchPath(&s, &tb, "token")});
+    var pb: [512]u8 = undefined;
+    var ub: [600]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    const unix = try std.fmt.bufPrint(&ub, "unix!{s}", .{sock});
+    const r = try run(e, &.{ "--print", "--serve", "ws://127.0.0.1:8080/9p", "--serve-token", tok, "--serve-origin", "http://a.example", "--serve", unix, "--write=none", "--rc", "echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, "\nserve:");
+    try expectIn(r.out, "ws://127.0.0.1:8080/9p");
+    try expectIn(r.out, "exportfs -R -r /   (token, origins: http://a.example)");
+    try expectIn(r.out, unix);
+    try expectIn(r.out, "served without authentication on " ++ "unix!");
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "s3cret") == null);
+    // --print binds nothing.
+    try std.testing.expect(!pathExists(sock));
+}
+
+// 9P2000.L (design/0022-dotl.md). The server is tests/dotlserver.zig's,
+// a tree in memory behind a loopback port, made fresh per connection.
+
+fn dotlTree(s: *@import("dotlserver.zig").Server) !void {
+    _ = try s.add("etc/motd", .file, "hello from .L\n");
+    _ = try s.add("etc/passwd", .file, "root:x:0:0\n");
+    _ = try s.add("usr/glenda/notes", .file, "one\ntwo\n");
+    _ = try s.add("usr/glenda/full/f", .file, "");
+    _ = try s.add("lib", .link, "usr/glenda");
+    _ = try s.add("usr/abs", .link, "/etc/passwd");
+    _ = try s.add("usr/escape", .link, "../../../../etc/passwd");
+    _ = try s.add("usr/loop", .link, "loop");
+    _ = try s.add("usr/dangling", .link, "nowhere");
+}
+
+/// Runs `script` in rc with the server mounted at /n/l by dotlfs.
+fn dotlRun(e: Env, d: *DotlServer, script: []const u8) !Result {
+    var allow_buf: [64]u8 = undefined;
+    var cmd_buf: [1024]u8 = undefined;
+    const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; {s}", .{ d.dial(), script });
+    return run(e, &.{ "--net-allow", allow, "--rc", cmd });
+}
+
+test "the guest mounts a .L server with dotlfs, under the network policy [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d, "cat /n/l/etc/motd; ls /n/l/usr/glenda; cat /net/dotl/*/status");
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hello from .L\n/n/l/usr/glenda/full\n/n/l/usr/glenda/notes\n9P2000.L\n", r.out);
+    // When --net-allow doesn't cover the server the dial is refused, and
+    // nothing is mounted.
+    var cmd_buf: [256]u8 = undefined;
+    const no = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!1", "--rc", try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l && echo mounted", .{d.dial()}) });
+    defer no.deinit();
+    try std.testing.expect(no.code != 0);
+    try std.testing.expect(std.mem.indexOf(u8, no.out, "mounted") == null);
+}
+
+test "a .L mount lists, reads, writes and removes [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cd /n/l/usr/glenda
+        \\echo new >made && cat made
+        \\echo more >>made && awk 'END{print NR}' made
+        \\mkdir dir && touch dir/x && ls dir
+        \\mv made renamed && ls
+        \\rm renamed dir/x dir && ls
+        \\ls -l notes | awk '{print $1, $6}'
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8\n", r.out);
+}
+
+test "a .L.Z mount lists, reads, writes and removes, with compound requests [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    d.version = "9P2000.L.Z";
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cd /n/l/usr/glenda
+        \\echo new >made && cat made
+        \\echo more >>made && awk 'END{print NR}' made
+        \\mkdir dir && touch dir/x && ls dir
+        \\mv made renamed && ls
+        \\rm renamed dir/x dir && ls
+        \\ls -l notes /n/l/lib | awk '{print $1, $6, $NF}'
+        \\cat /n/l/lib/notes
+        \\cat /net/dotl/*/status
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8 notes\nd-rwxr-xr-x 0 /n/l/lib/full\n--rw-r--r-- 8 /n/l/lib/notes\none\ntwo\n9P2000.L.Z\n", r.out);
+}
+
+test "a symlink in a .L mount is followed and can't leave the mount [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cat /n/l/usr/abs /n/l/usr/escape /n/l/lib/notes
+        \\ls /n/l/usr
+        \\# A walk's error reaches the guest only from its first name.
+        \\cd /n/l/usr && cat loop
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    // A link that resolves to nothing, dangling or a loop, isn't listed.
+    try std.testing.expectEqualStrings("root:x:0:0\nroot:x:0:0\none\ntwo\n/n/l/usr/abs\n/n/l/usr/escape\n/n/l/usr/glenda\n", r.out[0..@min(r.out.len, 200)]);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
+}
+
+test "Rlerror errnos become 9front error strings [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d,
+        \\cat /n/l/etc/nope
+        \\rm /n/l/usr/glenda/full
+        \\mkdir /n/l/etc
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "file does not exist: '/n/l/etc/nope'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "directory not empty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "already exists") != null);
+}
+
+test "a .L mount attaches as the host uid, not 0, without --user-map [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    const r = try dotlRun(e, &d, "ls /n/l >/dev/null");
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expect(d.attached.load(.acquire));
+    const uid: u32 = if (builtin.os.tag == .windows) 1000 else std.c.getuid();
+    try std.testing.expectEqual(if (uid == 0) @as(u32, 65534) else uid, d.n_uname);
+}
+
+/// The root tree and arch a .L root's fill copies programs from; set by
+/// the case before the server starts.
+var dotl_root_from: struct { root: []const u8 = "", arch: []const u8 = "" } = .{};
+
+/// A small 9front root in memory: dotlTree, the mount points, rc and a
+/// few programs from the test's root tree.
+fn dotlRootTree(s: *@import("dotlserver.zig").Server) !void {
+    try dotlTree(s);
+    for ([_][]const u8{ "dev", "env", "fd", "proc", "srv", "net", "n", "tmp", "mnt/term/cwd", "bin" }) |d| _ = try s.add(d, .dir, "");
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, dotl_root_from.root, .{});
+    defer dir.close(std.testing.io);
+    var prog_buf: [64]u8 = undefined;
+    for ([_][]const u8{ "rc", "echo", "ls", "cat", "rm" }) |prog| {
+        const host = try std.fmt.bufPrint(&prog_buf, "{s}/bin/{s}", .{ dotl_root_from.arch, prog });
+        const bytes = try dir.readFileAlloc(std.testing.io, host, s.arena.allocator(), .limited(16 << 20));
+        (try s.add(host, .file, bytes)).mode = 0o755;
+    }
+    _ = try s.add("rc/lib/rcmain", .file, try dir.readFileAlloc(std.testing.io, "rc/lib/rcmain", s.arena.allocator(), .limited(1 << 20)));
+}
+
+test "a 9P2000.L root lists, reads, writes and removes [22]" {
+    const e = try env(@src());
+    dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    } };
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlRootTree);
+    defer d.finish(std.testing.io);
+    const r = try run(e, &.{
+        "--root", d.dial(), "--write=scope", "--builtin=off", "--rc",
+        \\cat /etc/motd /usr/glenda/notes
+        \\echo new >/usr/glenda/made && cat /usr/glenda/made
+        \\rm /usr/glenda/notes && ls /usr/glenda
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hello from .L\none\ntwo\nnew\n/usr/glenda/full\n/usr/glenda/made\n9P2000.L\n", r.out);
+}
+
+test "a 9P2000 root goes through the translator unchanged [22]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    const r = try run(e, &.{ "--root", srv.dial(), "--rc", "cat /net/dotl/*/status; ls /bin/ls" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("9P2000\n/bin/ls\n", r.out);
+}
+
+test "a 9P2000.L.Z mount resumes a write the server dropped, applied once [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    // The server applies the second write and goes before answering it,
+    // as a crash would. The file was made by create, with OTRUNC.
+    d.lock().drop_after_write = 1;
+    d.unlock();
+    const r = try dotlRun(e, &d,
+        \\{ echo one; echo two; echo three } >/n/l/usr/glenda/log
+        \\cat /n/l/usr/glenda/log
+        \\cat /net/dotl/*/status
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    // Reopened without OTRUNC, and the resent write answered from what
+    // the server remembers rather than applied again.
+    try std.testing.expectEqualStrings("one\ntwo\nthree\n9P2000.L.Z reconnects 1\n", r.out);
+    const s = d.lock();
+    defer d.unlock();
+    try std.testing.expectEqual(1, s.replayed);
+    try std.testing.expectEqual(2, d.connections.load(.acquire));
+}
+
+test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    // The first write to an existing file opened with OTRUNC is dropped.
+    d.lock().drop_after_write = 0;
+    d.unlock();
+    const r = try dotlRun(e, &d,
+        \\{ echo x; echo y } >/n/l/usr/glenda/notes
+        \\cat /n/l/usr/glenda/notes
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("x\ny\n", r.out);
+}
+
+test "a .L.Z root survives the server restarting mid-write [22]" {
+    const e = try env(@src());
+    dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    } };
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlRootTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    d.lock().drop_after_write = 0;
+    d.unlock();
+    const r = try run(e, &.{
+        "--root", d.dial(), "--write=scope", "--builtin=off", "--rc",
+        \\echo new >/usr/glenda/made && cat /usr/glenda/made
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n9P2000.L.Z reconnects 1\n", r.out);
+}
+
+test "a 9P2000.L.Z mount moves to the next address when the server isn't the leader [22]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    d.lock().not_leader = 1;
+    d.unlock();
+    // The first address refuses, so both dials and the redial go round
+    // the list to the second.
+    var allow_buf: [64]u8 = undefined;
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf,
+        \\mkdir -p /n/l; dotlfs tcp!127.0.0.1!1,{s} /n/l || exit mount
+        \\echo led >/n/l/usr/glenda/log && cat /n/l/usr/glenda/log
+        \\cat /net/dotl/*/status
+    , .{d.dial()});
+    const r = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!1", "--net-allow", try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()}), "--rc", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("led\n9P2000.L.Z reconnects 1\n", r.out);
+    try std.testing.expectEqual(2, d.connections.load(.acquire));
+}
+
+test "a .L.Z unix socket root survives the server restarting mid-write [22]" {
+    if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    } };
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlRootTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    d.lock().drop_after_write = 0;
+    d.unlock();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    var relay: UnixRelay = undefined;
+    const sock = try scratchPath(&s, &pb, "fs.sock");
+    try relay.start(sock, d.port());
+    const r = try run(e, &.{
+        "--root", try std.fmt.bufPrint(&ab, "unix!{s}", .{sock}), "--write=scope", "--builtin=off", "--rc",
+        \\echo new >/usr/glenda/made && cat /usr/glenda/made
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n9P2000.L.Z reconnects 1\n", r.out);
+}
+
+test "the guest can't dial a host unix socket through #ℓ [22]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--rc", "{ n=`{cat}; echo dial unix!/tmp/x.sock >/net/dotl/$n/ctl } <>/net/dotl/clone" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(r.code != 0);
+    try expectIn(r.err, "unix sockets are for roots");
+}
+
+test "an h9 root over --serve speaks 9P2000.L through both translators [22]" {
+    const e = try serveEnv(@src());
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    // The client offers 9P2000.L.Z and the server answers 9P2000.L.
+    const r = try runServed(e, addr,
+        \\cat /net/dotl/*/status
+        \\cd /mnt/temp/tmp && echo hi >f && cat f && mkdir d && mv f g && ls -F && rm g && rm d && ls
+        \\cat /mnt/temp/mnt/term/cwd/marker
+    );
+    defer r.deinit();
+    errdefer std.debug.print("client stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("9P2000.L\nhi\nd/\ng\nserved\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a .L client of --serve under --write=none gets EROFS [22]" {
+    const e = try serveEnv(@src());
+    var t = try startServer(e, &.{ "--write=none", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    try t.expect("ready", slow(10_000));
+    const r = try runServed(e, addr, "cat /net/dotl/*/status; touch /mnt/temp/tmp/f");
+    defer r.deinit();
+    errdefer std.debug.print("client stdout: {s}\nclient stderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings("9P2000.L\n", r.out);
+    try expectIn(r.err, "read-only file system");
 }

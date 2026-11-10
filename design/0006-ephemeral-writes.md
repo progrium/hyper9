@@ -21,7 +21,7 @@ The same device over the root tree's empty `/tmp` gives every machine a private 
 
 ## Background
 
-This was part of milestone M5 ("servers") in DESIGN.md, before milestones became proposals ([#1](0001-proposals.md)). DESIGN.md's capability table had a row for it:
+This was part of milestone M5 ("servers") in SPEC.md, before milestones became proposals ([#1](0001-proposals.md)). SPEC.md's capability table had a row for it:
 
 | Capability | Mechanism |
 | --- | --- |
@@ -229,7 +229,7 @@ Demo: in a copy of a 9front source directory, `h9 --write=ephemeral --rc 'rm -f 
 2. Lower trees: walk, open, and directory-read fall-through, copy-up, whiteouts, `OTRUNC`, renames. `/tmp` as an instance over the root's `/tmp` in both profiles; remove `hostTmp` and `Policy.tmp`. The `/tmp` cases pass.
 3. `--write=ephemeral` in `src/policy.zig`: overlay binds, the `eph` access kind, `enforces:`, caveats, `--print`, and `--strict`.
 4. `--ns`: the `eph` column in `src/newns.zig`, and a bare `#O` source in the replay in `src/machine.zig`. The `ephemeral-writes` cases pass.
-5. README's sandbox table and `--ns` notes, and DESIGN.md: the capability table, the default profile's `/tmp` row, and the tight profile's paragraph, `devoverlay.c` in the kernel's "Added by us" table, and the CLI table's `--write` row. Set `status: implemented`.
+5. README's sandbox table and `--ns` notes, and SPEC.md: the capability table, the default profile's `/tmp` row, and the tight profile's paragraph, `devoverlay.c` in the kernel's "Added by us" table, and the CLI table's `--write` row. Set `status: implemented`.
 
 ## Updates
 

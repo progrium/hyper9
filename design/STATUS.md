@@ -22,15 +22,15 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [image-roots](0014-image-roots.md) | declined |  | Disk-image roots |
 | [gfx](0015-gfx.md) | implemented |  | Graphics (--gfx) |
 | [kvm](0016-kvm.md) | implemented |  | KVM backend |
-| [whp](0017-whp.md) | draft |  | WHP backend |
+| [whp](0017-whp.md) | implemented |  | WHP backend |
 | [linux-personality](0018-linux-personality.md) | implemented |  | Linux personality |
 | [zig-interpreter](0019-zig-interpreter.md) | draft |  | A native Zig interpreter for the emulator |
 | [websocket-9p](0021-websocket-9p.md) | implemented |  | 9P over WebSocket |
-| [dotl](0022-dotl.md) | accepted | needs serve | 9P2000.L and ZeroFS |
+| [dotl](0022-dotl.md) | accepted | ready | 9P2000.L and ZeroFS |
 | [guest-tools](0032-guest-tools.md) | implemented |  | h9's own commands in the guest |
 | [exit-status](0033-exit-status.md) | implemented |  | Host exit statuses for processes killed by notes |
 | [symlinks-in-root](0034-symlinks-in-root.md) | implemented |  | Symlinks resolved inside a bound tree |
-| [serve](0035-serve.md) | draft |  | Serving the namespace over 9P |
+| [serve](0035-serve.md) | implemented |  | Serving the namespace over 9P |
 | [linux-threads](0049-linux-threads.md) | implemented |  | Linux threads |
 | [linux-net](0050-linux-net.md) | implemented |  | Linux readiness and sockets |
 | [multicall](0064-multicall.md) | implemented |  | A multi-call 9front userland binary |
@@ -48,10 +48,11 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [cow-fork](0121-cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [ci](ci.md) | draft |  | Continuous integration |
+| [h86-ha64](h86-ha64.md) | draft |  | h86 and ha64, h9's own CPUs for the emulator |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-cmd](host-cmd.md) | draft |  | Rethinking host commands |
-| [host-sandbox](host-sandbox.md) | draft | needs whp | Host self-sandboxing |
+| [host-sandbox](host-sandbox.md) | draft |  | Host self-sandboxing |
 | [host-scripts](host-scripts.md) | draft |  | Running host scripts as the program |
 | [host-srv](host-srv.md) | draft |  | Posting host connections to /srv |
 | [mount-index](mount-index.md) | draft |  | Metadata indexes for 9P roots and mounts |
@@ -81,7 +82,7 @@ flowchart LR
   p_image_roots["#35;14 image-roots<br/>declined"]:::closed
   p_gfx["#35;15 gfx<br/>implemented"]:::implemented
   p_kvm["#35;16 kvm<br/>implemented"]:::implemented
-  p_whp["#35;17 whp<br/>draft"]:::draft
+  p_whp["#35;17 whp<br/>implemented"]:::implemented
   p_linux_personality["#35;18 linux-personality<br/>implemented"]:::implemented
   p_zig_interpreter["#35;19 zig-interpreter<br/>draft"]:::draft
   p_websocket_9p["#35;21 websocket-9p<br/>implemented"]:::implemented
@@ -89,7 +90,7 @@ flowchart LR
   p_guest_tools["#35;32 guest-tools<br/>implemented"]:::implemented
   p_exit_status["#35;33 exit-status<br/>implemented"]:::implemented
   p_symlinks_in_root["#35;34 symlinks-in-root<br/>implemented"]:::implemented
-  p_serve["#35;35 serve<br/>draft"]:::draft
+  p_serve["#35;35 serve<br/>implemented"]:::implemented
   p_linux_threads["#35;49 linux-threads<br/>implemented"]:::implemented
   p_linux_net["#35;50 linux-net<br/>implemented"]:::implemented
   p_multicall["#35;64 multicall<br/>implemented"]:::implemented
@@ -107,6 +108,7 @@ flowchart LR
   p_cow_fork["#35;121 cow-fork<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
+  p_h86_ha64["h86-ha64<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft

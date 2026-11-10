@@ -2,7 +2,7 @@
  * #e: environment variables, one environment per Egrp. Ported from
  * 9front's port/devenv.c at the pinned release (NINEFRONT_REV), replacing
  * drawterm's, which has one machine-wide environment and imports the host
- * process's environment on first attach (DESIGN.md, env.scrub).
+ * process's environment on first attach (SPEC.md, env.scrub).
  *
  * drawterm's Proc has no egrp, and stays as it is, so a Proc's
  * group is kept on its h9 process record (src/kern/proc.c). drawterm's own Egrp

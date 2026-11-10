@@ -1,4 +1,4 @@
-//! The sandbox policy (DESIGN.md, "Sandbox policy"): profiles and explicit
+//! The sandbox policy (SPEC.md, "Sandbox policy"): profiles and explicit
 //! settings, compiled into a Plan that the machine's namespace builder
 //! follows and `--print` shows. The Plan's access rules are what devfs
 //! checks through `h9_fs_check` (src/kern.zig), and its network patterns
@@ -156,8 +156,36 @@ pub const NinePRoot = struct {
     proxy: ?[]const u8 = null,
 };
 
+/// The listeners that serve the namespace over 9P (design/0035-serve.md),
+/// as the plan shows them.
+pub const Serve = struct {
+    pub const Listener = struct {
+        /// The address as `--serve` takes it.
+        addr: []const u8,
+        kind: enum { unix, tcp, ws },
+    };
+    listeners: []const Listener,
+    /// The guest path each connection exports.
+    root: []const u8 = "/",
+    /// WebSocket listeners require a token.
+    token: bool = false,
+    /// Origins WebSocket listeners accept.
+    origins: []const []const u8 = &.{},
+    /// `/net` is exported.
+    net: bool = false,
+    /// There's no program: the run only serves. The CLI sets it.
+    only: bool = false,
+    /// The exportfs run when the root has no /bin/exportfs: the built-in
+    /// root's.
+    fallback: []const u8 = "",
+};
+
 /// The host-stream device, `#ℏ`, whose tree is the guest's /net/ws.
 pub const hstream_dev = "ℏ";
+
+/// The 9P2000.L device, `#ℓ`, whose tree is the guest's /net/dotl
+/// (design/0022-dotl.md).
+pub const dotl_dev = "ℓ";
 
 /// Where a 9P root's connection is posted, and the board name it's under.
 pub const root_srv = "#s/root";
@@ -223,6 +251,8 @@ pub const Plan = struct {
     /// The host's DNS servers: a connect to port 53 on one is allowed
     /// even when it's link-local, as a cloud VM's resolver is.
     nameservers: []const [16]u8 = &.{},
+    /// The `--serve` listeners (design/0035-serve.md), if any.
+    serve: ?Serve = null,
 
     /// Checks `op` on the resolved host path `path`.
     pub fn check(p: *const Plan, path: []const u8, op: Op) Verdict {
@@ -265,9 +295,10 @@ pub const Plan = struct {
         for (addrs) |*a| names.record(pr, a, port, name);
     }
 
-    /// Prints the plan in the format of DESIGN.md, "Plan output".
+    /// Prints the plan in the format of SPEC.md, "Plan output".
     pub fn print(p: *const Plan, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("profile:  {t}\n", .{p.profile});
+        if (p.serve) |sv| if (sv.only) try w.writeAll("program:  none (serve only)\n");
         try w.writeAll("enforces:");
         var it = p.enforces.iterator();
         while (it.next()) |c| try w.print(" {t}", .{c});
@@ -281,7 +312,12 @@ pub const Plan = struct {
         try w.print("limits:   write={t} net={t}", .{ p.write, p.net });
         if (p.memory) |m| try w.print(" memory={f}", .{fmtSize(m)});
         if (p.timeout_ns) |d| try w.print(" timeout={f}", .{fmtDuration(d)});
-        if (p.pids) |n| try w.print(" pids={d}", .{n});
+        if (p.pids) |n| {
+            try w.print(" pids={d}", .{n});
+            // Serving's processes are counted on their own
+            // (design/0035-serve.md, "Limits").
+            if (p.serve != null) try w.print(" (+{d} serving)", .{n});
+        }
         if (p.cpus) |n| try w.print(" cpus={d}", .{n});
         try w.writeAll("\n");
         try w.writeAll("devmask: ");
@@ -289,7 +325,7 @@ pub const Plan = struct {
         var dv = (std.unicode.Utf8View.init(p.devmask) catch unreachable).iterator();
         while (dv.nextCodepointSlice()) |d| try w.print(" #{s}", .{d});
         try w.writeAll("\n");
-        if (p.gfx) |g| try w.print("gfx:      {s} scale={d} clipboard={s}\n", .{ g.backend, g.scale, if (g.clipboard) "host" else "private" });
+        if (p.gfx) |g| try w.print("gfx:      {s} scale={d} clipboard={s}\n", .{ g.backend, g.scale, if (!g.clipboard) "private" else if (g.isWeb()) "page" else "host" });
         if (p.net_allow.len > 0) {
             try w.writeAll("net-allow:\n");
             for (p.net_allow) |pat| try w.print("  {s}\n", .{pat.text});
@@ -330,6 +366,24 @@ pub const Plan = struct {
                 .allow_eph => "eph ",
                 .deny => "deny",
             }, r.path });
+        }
+        if (p.serve) |sv| {
+            try w.print("serve:    # 9P2000 and 9P2000.L; /bin/exportfs, or {s} without one\n", .{sv.fallback});
+            for (sv.listeners) |l| {
+                var line: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+                defer line.deinit();
+                line.writer.print("  {s}", .{l.addr}) catch return error.WriteFailed;
+                try w.writeAll(line.written());
+                try w.splatByteAll(' ', (40 -| line.written().len) + 1);
+                try w.print("exportfs{s} -r {s}", .{ if (p.write == .none) " -R" else "", sv.root });
+                if (l.kind == .ws) {
+                    try w.print("   ({s}origins: ", .{if (sv.token) "token, " else ""});
+                    if (sv.origins.len == 0) try w.writeAll("none");
+                    for (sv.origins, 0..) |o, i| try w.print("{s}{s}", .{ if (i > 0) " " else "", o });
+                    try w.writeAll(")");
+                }
+                try w.writeAll("\n");
+            }
         }
         try w.writeAll("caveats:\n");
         for (p.caveats) |c| try w.print("  - {s}\n", .{c});
@@ -380,11 +434,17 @@ const ElidedUserinfo = struct {
 
 /// A machine's window (design/0015-gfx.md), as the plan shows it.
 pub const Gfx = struct {
-    /// The GUI backend's name: cocoa, win32, x11 or headless.
+    /// The GUI backend's name: cocoa, win32, x11, web or headless.
     backend: []const u8,
-    /// Whether /dev/snarf is the host clipboard (not `--gfx=noclip`).
+    /// Whether /dev/snarf is the host clipboard (not `--gfx=noclip`). On
+    /// the browser host, the page's, as the user pastes into the canvas.
     clipboard: bool = true,
     scale: u8 = 1,
+
+    /// The browser host's canvas (design/0120-browser-gfx.md).
+    pub fn isWeb(g: Gfx) bool {
+        return std.mem.eql(u8, g.backend, "web");
+    }
 };
 
 pub const Inputs = struct {
@@ -414,6 +474,8 @@ pub const Inputs = struct {
     builtin: Builtin = .off,
     /// What the plan says about the built-in root beside its bind.
     builtin_note: ?[]const u8 = null,
+    /// `--serve` listeners (design/0035-serve.md).
+    serve: ?Serve = null,
 };
 
 /// Whether host path `path` is one `--writable` names, and writing is allowed.
@@ -575,6 +637,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
         try binds.append(arena, .{ .from = "#" ++ hstream_dev, .to = "/net", .flag = .after, .optional = true, .note = "WebSockets, under --net" });
     }
+    // 9P2000.L mounts (design/0022-dotl.md) reach nothing by themselves:
+    // a conversation translates a connection the guest already has.
+    try binds.append(arena, .{ .from = "#" ++ dotl_dev, .to = "/net", .flag = .after, .optional = true, .note = "9P2000.L mounts" });
     if (has_root) {
         const boxed = try std.fmt.allocPrint(arena, "{s}/{s}/bin", .{ builtin_dev, in.arch.name() });
         // --builtin=before: the box's commands first, then the root's.
@@ -768,11 +833,28 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
     }
     if (in.gfx) |g| {
-        if (g.clipboard) try caveats.append(arena, "the guest can read and write the host clipboard through /dev/snarf");
-        try caveats.append(arena, "the guest can draw anything in its window, including what looks like a host dialog");
+        if (g.isWeb()) {
+            if (g.clipboard) try caveats.append(arena, "the guest can write the page's clipboard, and read what the user pastes into its canvas");
+            try caveats.append(arena, "the guest can draw anything in its canvas, including what looks like the page's own UI or a browser dialog");
+        } else {
+            if (g.clipboard) try caveats.append(arena, "the guest can read and write the host clipboard through /dev/snarf");
+            try caveats.append(arena, "the guest can draw anything in its window, including what looks like a host dialog");
+        }
     }
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
+    var serve_plan = in.serve;
+    if (serve_plan) |*sv| {
+        sv.fallback = try std.fmt.allocPrint(arena, "{s}/{s}/bin/exportfs", .{ builtin_dev, in.arch.name() });
+        // Unix sockets rely on file permissions, and TCP has nothing, so
+        // both are listed, as is a WebSocket listener without a token.
+        for (sv.listeners) |l| if (l.kind != .ws or !sv.token) {
+            try caveats.append(arena, try std.fmt.allocPrint(arena, "served without authentication on {s}", .{l.addr}));
+        };
+        if (sv.net) for (sv.listeners) |l| {
+            try caveats.append(arena, try std.fmt.allocPrint(arena, "/net served on {s}: clients can dial out from the host's address, under --net={t}", .{ l.addr, net }));
+        };
+    }
     try caveats.append(arena, "/proc/n/ns shows the host paths of bound host trees");
     try caveats.append(arena, "the h9 process itself is not host-sandboxed");
 
@@ -797,6 +879,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .root_overlay = root_overlay,
         .nameservers = nameservers.items,
         .gfx = in.gfx,
+        .serve = serve_plan,
     };
 }
 
@@ -1864,4 +1947,24 @@ test "compile: --gfx binds #i, #m and #b after the console, and masks them witho
         try t.expect(std.mem.indexOf(u8, out.written(), "/dev/snarf") == null);
         try t.expect(std.mem.indexOf(u8, out.written(), "looks like a host dialog") != null);
     }
+}
+
+test "compile: the browser host's canvas shows clipboard=page and its own caveats" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    const page = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .scale = 0 } }, .{}, &msg);
+    try page.print(&out.writer);
+    try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      web scale=0 clipboard=page\n") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "the guest can write the page's clipboard, and read what the user pastes into its canvas") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "looks like the page's own UI or a browser dialog") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "host clipboard") == null);
+
+    const private = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .clipboard = false, .scale = 2 } }, .{}, &msg);
+    out.clearRetainingCapacity();
+    try private.print(&out.writer);
+    try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      web scale=2 clipboard=private\n") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "page's clipboard") == null);
 }

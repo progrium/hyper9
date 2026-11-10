@@ -1674,7 +1674,7 @@ test "a name pattern allows a connect through cs, and only through cs [5]" {
 /// A host root tree with the mount points the namespace builder needs.
 const OverlayRoot = struct {
     tmp: std.testing.TmpDir,
-    buf: [std.fs.max_path_bytes]u8 = undefined,
+    buf: [std.fs.max_path_bytes + 1]u8 = undefined,
     path: []const u8 = "",
     cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
     cwd: []const u8 = "",
@@ -1683,7 +1683,9 @@ const OverlayRoot = struct {
         const io = std.testing.io;
         r.tmp = std.testing.tmpDir(.{});
         for ([_][]const u8{ "dev", "tmp", "srv", "bin", "mnt/term/cwd", "cwd" }) |d| try r.tmp.dir.createDirPath(io, d);
-        r.path = r.buf[0..try r.tmp.dir.realPath(io, &r.buf)];
+        // Options.root and .cwd take host paths in #U form (kernPath).
+        var host: [std.fs.max_path_bytes]u8 = undefined;
+        r.path = kernPath(&r.buf, host[0..try r.tmp.dir.realPath(io, &host)]);
         r.cwd = try std.fmt.bufPrint(&r.cwd_buf, "{s}/cwd", .{r.path});
     }
     fn deinit(r: *OverlayRoot) void {

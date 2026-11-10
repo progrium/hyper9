@@ -116,7 +116,7 @@ Demos: `h9 --root alpine curl -sI https://example.com` under the default network
 2. `h9_poll` for qio channels, `poll`, `ppoll`, `pselect6`, `O_NONBLOCK`.
 3. The host poller for devip, sockets in `h9_poll`, and devip's asynchronous connect. UDP `headers`, and DNS through musl's resolver.
 4. `epoll` and `eventfd`. curl and `http.server`.
-5. DESIGN.md's Linux personality section gains sockets and readiness.
+5. SPEC.md's Linux personality section gains sockets and readiness.
 
 ## Open issues
 

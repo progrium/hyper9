@@ -19,7 +19,7 @@ pub const panic = std.debug.FullPanic(struct {
     }
 }.f);
 
-/// Exit codes for h9's own failures (DESIGN.md, "Exit codes").
+/// Exit codes for h9's own failures (SPEC.md, "Exit codes").
 const exit_failed = 125;
 const exit_not_executable = 126;
 const exit_not_found = 127;
@@ -34,6 +34,11 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print(cli.usage, .{});
         return 2;
     };
+    // The browser host can't listen (design/0035-serve.md).
+    if (web and cfg.serve.len > 0) {
+        std.debug.print("h9: --serve isn't available on the web host\n", .{});
+        return 2;
+    }
     switch (cfg.mode) {
         .run => {},
         .help, .version => {
@@ -55,6 +60,7 @@ pub fn main(init: std.process.Init) !u8 {
             var w = std.Io.File.stdout().writerStreaming(io, &buf);
             const code = tools.check(init.gpa, io, &w.interface, .{
                 .backend = cfg.backend,
+                .arch = cfg.arch,
                 .memory = cfg.memory,
                 .builtin = builtinFor(cfg.builtin, root_arg != null),
                 .root_arg = root_arg,
@@ -116,13 +122,15 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             &.{ "rc", "-l", "-c", ". /fd/0" }
     else
         cfg.argv;
-    const prog_arg = if (cfg.rc != null or cfg.rc_login) "/bin/rc" else argv[0];
+    // --serve with no program only serves (design/0035-serve.md).
+    const serve_only = cfg.serve.len > 0 and argv.len == 0;
+    const prog_arg = if (cfg.rc != null or cfg.rc_login) "/bin/rc" else if (serve_only) "serve" else argv[0];
 
     // A host program is read here; a guest one is resolved in the machine.
     // --arch picks the architecture; without it, a host program's header
     // does, and a guest one runs the host's.
     var arch: ?h9.vmm.Arch = cfg.arch;
-    const prog: h9.Program = switch (cli.programKind(prog_arg)) {
+    const prog: h9.Program = if (serve_only) .{ .guest = "" } else switch (cli.programKind(prog_arg)) {
         .host => blk: {
             const path = if (web) std.fs.path.resolvePosix(arena, &.{ web_pwd, prog_arg }) catch prog_arg else prog_arg;
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |err| {
@@ -168,6 +176,19 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         return exit_failed;
     }
     const wo = wsOptions(arena, io, cfg, root, init.environ_map) catch |e| return wsExit(e);
+    const so = serveOptions(arena, io, cfg) catch |e| return wsExit(e);
+    // H9_TEST_KEEPALIVE (milliseconds) shortens the WebSocket keepalive's
+    // 30 s idle time, so the integration case that waits out a ping and a
+    // missed pong takes seconds rather than two minutes. Tests only.
+    if (init.environ_map.get("H9_TEST_KEEPALIVE")) |v| {
+        if (std.fmt.parseInt(u32, v, 10)) |ms| {
+            if (ms > 0) h9.hstream.keepalive_idle_ns = @as(u64, ms) * std.time.ns_per_ms;
+        } else |_| {}
+    }
+    const user_map = if (cfg.user_map) |path| std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch {
+        std.debug.print("h9: --user-map {s}: can't read it\n", .{path});
+        return exit_failed;
+    } else null;
     const cwd_arg = cfg.sandbox orelse cfg.cwd orelse ".";
     const cwd = kernPath(arena, realPath(io, arena, cwd_arg) catch {
         std.debug.print("h9: cwd {s}: not found\n", .{cwd_arg});
@@ -213,17 +234,24 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .guest_tools = cfg.guest_tools,
         .builtin = builtin_root,
         .gfx = cfg.gfx,
+        .serve = so.listens,
+        .serve_root = cfg.serve_root orelse "/",
+        .serve_token = so.token,
+        .serve_origins = cfg.serve_origins,
+        .serve_net = cfg.serve_net,
+        .user_map = user_map,
         .stdio = undefined,
     };
 
     var conflict: []const u8 = "";
-    const plan = h9.Machine.compilePlan(arena, base, &conflict) catch |err| switch (err) {
+    var plan = h9.Machine.compilePlan(arena, base, &conflict) catch |err| switch (err) {
         error.Conflict => {
             std.debug.print("h9: {s}\n", .{conflict});
             return 2;
         },
         else => return err,
     };
+    if (plan.serve) |*sv| sv.only = serve_only;
     if (cfg.print) {
         var buf: [4096]u8 = undefined;
         var w = std.Io.File.stdout().writerStreaming(io, &buf);
@@ -266,9 +294,11 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     opts.dump_on_fault = cfg.dump_on_fault;
     opts.ns = cfg.ns;
     opts.console_tty = (std.Io.File.stdin().isTty(io) catch false) and (std.Io.File.stdout().isTty(io) catch false);
+    // A run that only serves doesn't read the console, so it can run in
+    // the background without stopping on terminal input.
     opts.stdio = .{
-        .in = in.reader(),
-        .in_cancel = .{ .ctx = &in, .func = Stdin.cancel, .reset = Stdin.reset },
+        .in = if (serve_only) null else in.reader(),
+        .in_cancel = if (serve_only) null else .{ .ctx = &in, .func = Stdin.cancel, .reset = Stdin.reset },
         .out = &out.interface,
         .err = &err_w.interface,
         .raw = host.raw(),
@@ -319,6 +349,11 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             std.process.exit(exit_failed);
         }
         const why = if (machine.err_msg.len > 0) machine.err_msg else @errorName(err);
+        // A listener's failure names its address itself.
+        if (err == error.ServeFailed) {
+            std.debug.print("h9: {s}\n", .{why});
+            return exit_failed;
+        }
         // Over the built-in root alone, the fix for a missing command is
         // the full tree (design/0087-builtin-root.md).
         const hint = if (err == error.NotFound and prog == .guest and root == null and builtin_root != .off)
@@ -336,6 +371,9 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             else => exit_failed,
         };
     };
+    // A serve-only run that a note ended exits 0, as a server its
+    // operator stops does; the timeout still exits 124.
+    if (serve_only and status == .killed and !std.mem.eql(u8, status.killed, "h9: timeout")) return 0;
     // Only on a terminal: scripts rarely have one (design/0011-overlay.md).
     if (machine.root_changes.changed and (std.Io.File.stderr().isTty(io) catch false)) {
         var nb: [512]u8 = undefined;
@@ -567,6 +605,33 @@ fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Ro
         .https = env.get("HTTPS_PROXY") orelse env.get("https_proxy"),
         .no_proxy = env.get("NO_PROXY") orelse env.get("no_proxy") orelse "",
     };
+    return o;
+}
+
+const ServeOptions = struct {
+    listens: []const h9.Machine.Listen = &.{},
+    token: ?[]const u8 = null,
+};
+
+/// Reads the --serve flags (design/0035-serve.md): the addresses, which
+/// cli.parse checked, and the token from its @FILE, trimmed.
+fn serveOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config) WsError!ServeOptions {
+    var o: ServeOptions = .{};
+    const ls = try arena.alloc(h9.Machine.Listen, cfg.serve.len);
+    for (ls, cfg.serve) |*l, a| l.* = h9.Machine.Listen.parse(a) catch return error.Usage;
+    o.listens = ls;
+    if (cfg.serve_token) |f| {
+        const text = std.Io.Dir.cwd().readFileAlloc(io, f[1..], arena, .limited(4096)) catch {
+            std.debug.print("h9: --serve-token {s}: not found\n", .{f});
+            return error.NotFound;
+        };
+        const tok = std.mem.trim(u8, text, " \t\r\n");
+        if (tok.len == 0 or std.mem.indexOfAny(u8, tok, " \t\r\n") != null) {
+            std.debug.print("h9: --serve-token {s}: the file must hold one token\n", .{f});
+            return error.Usage;
+        }
+        o.token = tok;
+    }
     return o;
 }
 

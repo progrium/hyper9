@@ -2,12 +2,18 @@
 // page's argv over the root archive or a ws:// root, and passes the console through
 // messages. The page's side is createMachine in h9-web.js.
 //
-// Page to Worker: { type: 'start', argv, env, root } once, then
+// Page to Worker: { type: 'start', argv, env, root, tty, gfx } once, then
 // { type: 'input', data }, { type: 'interrupt' } and { type: 'hangup' }.
 // Worker to page: { type: 'output', fd, data }, { type: 'raw', on } and
 // { type: 'exit', code } or { type: 'error', message }.
+//
+// With a canvas (design/0120-browser-gfx.md), start's gfx is { canvas,
+// width, height }, the OffscreenCanvas and the screen's size, and the page
+// sends { type: 'gfx', ev }, { type: 'gfx-paste', text } and
+// { type: 'gfx-size', width, height }; the Worker sends { type: 'cursor',
+// data } and { type: 'snarf', text }.
 
-import { run, Panic } from './h9-web.js';
+import { run, Panic, GfxHost, canDrawInWorker } from './h9-web.js';
 import { parseRoot, wasiImports } from './wasi-mem.js';
 
 const post = (m, t) => self.postMessage(m, t);
@@ -43,7 +49,13 @@ const host = {
   setRaw: (on) => post({ type: 'raw', on }),
 };
 
-async function start({ argv, env = {}, root }) {
+let gfx = null;
+
+async function start({ argv, env = {}, root, tty = false, gfx: canvas }) {
+  if (canvas) {
+    if (!canDrawInWorker()) throw new Error("this browser can't draw from a Worker");
+    gfx = new GfxHost({ ...canvas, post });
+  }
   const fetchBytes = async (url) => {
     // Revalidated, not taken from the HTTP cache unchecked: GitHub Pages
     // lets browsers cache for 10 minutes, and a stale h9.wasm with a new
@@ -55,15 +67,13 @@ async function start({ argv, env = {}, root }) {
   // A ws:// or wss:// root is served over a WebSocket
   // (design/0021-websocket-9p.md), and WASI sees an empty tree.
   const remote = typeof root === 'string' && /^wss?:/i.test(root);
-  const [h9, v86, archive] = await Promise.all([
+  const [h9, archive] = await Promise.all([
     fetchBytes(new URL('h9.wasm', import.meta.url)),
-    fetchBytes(new URL('v86.wasm', import.meta.url)),
     remote ? new TextEncoder().encode('h9root1\n') : fetchBytes(root ?? new URL('root.h9a', import.meta.url)),
   ]);
   const tree = parseRoot(archive);
   return run({
     h9,
-    v86,
     wasi: (memory) => wasiImports({
       memory,
       root: tree,
@@ -71,8 +81,10 @@ async function start({ argv, env = {}, root }) {
       args: ['h9', '--root', remote ? root : '/', ...argv],
       env: { PWD: '/', ...env },
       write: (fd, data) => post({ type: 'output', fd, data }, [data.buffer]),
+      tty,
     }),
     host,
+    gfx,
     log: (m) => console.log(m),
   });
 }
@@ -91,5 +103,8 @@ self.onmessage = ({ data: m }) => {
       break;
     case 'interrupt': raise(1); break;
     case 'hangup': raise(2); break;
+    case 'gfx': gfx?.input(m.ev); break;
+    case 'gfx-paste': gfx?.paste(m.text); break;
+    case 'gfx-size': gfx?.resize(m.width, m.height); break;
   }
 };

@@ -201,7 +201,7 @@ Integration cases:
 2. Named instances, `bind -r` in `newns.zig` and the machine's replay, and the Linux root as `#Olinux`, which fixes its replay.
 3. `--layer` and `Machine.Options.layers`, and the plan lines for both views.
 4. The control tree, `unionbind`, the forked `bind` in `#H/over`, and devproc's `bind -r` lines.
-5. MANUAL and README: unions in the namespaces chapter, `--layer`, and the `/lib/namespace` caveat. DESIGN.md once built.
+5. MANUAL and README: unions in the namespaces chapter, `--layer`, and the `/lib/namespace` caveat. SPEC.md once built.
 
 ## Open issues
 

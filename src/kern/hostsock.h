@@ -26,6 +26,12 @@ int	h9so_socket(int type, unsigned char *addr, int *opts);
 int	h9so_connect_nb(int fd, unsigned char *raddr, unsigned short rport);
 /* how is "rd", "wr" or "rdwr". */
 void	h9so_shutdown(int fd, char *how);
+/*
+ * Closes a socket devip made. On Windows that's closesocket: the C
+ * library's close doesn't take a socket, so the connection stayed open
+ * until h9 exited, and Windows then reset it.
+ */
+void	h9so_close(int fd);
 /* Records option name (nodelay, keepalive, ...) and applies it if fd >= 0. */
 void	h9so_setopt(int fd, int *opts, char *name, int val);
 /* Whether the host can make IPv6 sockets. */

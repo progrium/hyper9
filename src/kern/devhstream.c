@@ -4,7 +4,7 @@
  * can open WebSockets of its own through /net/ws.
  *
  * It's devhcons's design applied to a connection: reads and writes are
- * leaf calls into Zig (src/hstream.zig, DESIGN.md seam rule 3), a host
+ * leaf calls into Zig (src/hstream.zig, SPEC.md seam rule 3), a host
  * thread per stream reads frames and queues their payloads, and a guest
  * read sleeps here until the queue has bytes, so a note or a teardown
  * interrupts it with Eintr. Leaves never raise kernel errors: they return

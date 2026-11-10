@@ -1,4 +1,4 @@
-//! The CLI's tool functions, `--version` and `--check` (DESIGN.md, "CLI").
+//! The CLI's tool functions, `--version` and `--check` (SPEC.md, "CLI").
 //! They use the library like any embedder; only the output format is here.
 
 const std = @import("std");
@@ -57,6 +57,7 @@ fn checkGfx(w: *std.Io.Writer) std.Io.Writer.Error!void {
         else
             try w.writeAll("gfx x11: can't open $DISPLAY\n"),
         .win32, .cocoa => try w.print("gfx {t}: built in\n", .{h9.gfx.backend}),
+        .web => try w.writeAll("gfx web: built in (a page's canvas, given to createMachine)\n"),
     }
 }
 
@@ -68,6 +69,8 @@ pub const CheckOptions = struct {
     /// Which backend to check; `.auto` checks every one built in and then
     /// the one `auto` picks.
     backend: vmm.BackendKind = .auto,
+    /// The guest architecture (--arch), or null for the host's.
+    arch: ?vmm.Arch = null,
     memory: ?u64 = null,
     /// The built-in root, as the CLI resolved --builtin
     /// (design/0087-builtin-root.md): without a root, anything but `.off`
@@ -96,14 +99,14 @@ pub const CheckOptions = struct {
 /// run 9front programs from the root here.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOptions) std.Io.Writer.Error!u8 {
     try w.print("h9 {s} on {t} {t}\n", .{ build_options.version, builtin.os.tag, builtin.cpu.arch });
-    const arch = vmm.host_arch orelse {
+    const arch = o.arch orelse vmm.host_arch orelse {
         try w.writeAll("host: no 9front architecture for this CPU\n");
         return exit_failed;
     };
 
     var failed = false;
     const kinds: []const vmm.BackendKind = switch (o.backend) {
-        .auto => &.{ .hvf, .kvm, .whp, .native, .emu, .v86, .auto },
+        .auto => &.{ .hvf, .kvm, .whp, .native, .emu, .auto },
         else => &.{o.backend},
     };
     for (kinds) |k| {

@@ -476,6 +476,54 @@ static void proc_threads(void) {
 	printf("ok proc_threads\n");
 }
 
+/* /proc/meminfo counts a process's memory once, not once per thread:
+ * WebKit's memory monitor reads MemAvailable, and a count per thread
+ * makes a few threads look like memory pressure. */
+static long mem_free_kb(void) {
+	FILE *f = fopen("/proc/meminfo", "r");
+	char k[64];
+	long v, r = -1;
+	if (f == NULL) return -1;
+	while (fscanf(f, "%63s %ld kB", k, &v) == 2)
+		if (!strcmp(k, "MemFree:")) r = v;
+	fclose(f);
+	return r;
+}
+
+static int mi_up, mi_done;
+
+static void *mi_thread(void *a) {
+	pthread_mutex_lock(&pt_mu);
+	mi_up++;
+	pthread_cond_broadcast(&pt_cv);
+	while (!mi_done) pthread_cond_wait(&pt_cv, &pt_mu);
+	pthread_mutex_unlock(&pt_mu);
+	return a;
+}
+
+static void meminfo_threads(void) {
+	enum { MB = 1 << 20, TOUCH = 64 * MB, N = 6 };
+	char *m = mmap(0, TOUCH, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("meminfo_threads", m != MAP_FAILED);
+	for (long i = 0; i < TOUCH; i += 4096) m[i] = 1;
+	long before = mem_free_kb();
+	pthread_t t[N];
+	for (int i = 0; i < N; i++) pthread_create(&t[i], 0, mi_thread, 0);
+	pthread_mutex_lock(&pt_mu);
+	while (mi_up < N) pthread_cond_wait(&pt_cv, &pt_mu);
+	long during = mem_free_kb();
+	mi_done = 1;
+	pthread_cond_broadcast(&pt_cv);
+	pthread_mutex_unlock(&pt_mu);
+	for (int i = 0; i < N; i++) pthread_join(t[i], 0);
+	munmap(m, TOUCH);
+	CHECK("meminfo_threads", before > 0 && during > 0);
+	/* Thread stacks cost a little; another copy of the 64 MiB per thread
+	 * would cost 384 MiB. */
+	CHECK("meminfo_threads", before - during < 32 * 1024);
+	printf("ok meminfo_threads\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -492,6 +540,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "remap_race")) remap_race();
 		if (all || !strcmp(n, "fault_race")) fault_race();
 		if (all || !strcmp(n, "proc_threads")) proc_threads();
+		if (all || !strcmp(n, "meminfo_threads")) meminfo_threads();
 		if (!strcmp(n, "exit_main")) exit_main();
 		if (!strcmp(n, "exit_thread")) exit_thread();
 		if (!strcmp(n, "exec_thread")) exec_thread(argv);

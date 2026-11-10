@@ -247,6 +247,50 @@ h9_linux_fdchan(int fd, long *refs)
 }
 
 /*
+ * fd's channel, with a reference h9_linux_chanput releases: what a lazily
+ * filled private file mapping reads its pages from (src/linux/mm.zig),
+ * after the fd is closed or renumbered. nil if fd isn't open for reading.
+ */
+void*
+h9_linux_changet(int fd)
+{
+	Chan *c;
+
+	if(waserror())
+		return nil;
+	c = fdtochan(fd, OREAD, 0, 1);
+	poperror();
+	return c;
+}
+
+/*
+ * Reads up to n bytes at off from a h9_linux_changet channel: the count,
+ * 0 at the end, or -1 with the error string set.
+ */
+long
+h9_linux_chanpread(void *v, void *buf, long n, vlong off)
+{
+	Chan *c;
+	long r;
+
+	c = v;
+	if(waserror())
+		return syserr();
+	r = devtab[c->type]->read(c, buf, n, off);
+	poperror();
+	return r;
+}
+
+void
+h9_linux_chanput(void *v)
+{
+	if(waserror())
+		return;
+	cclose(v);
+	poperror();
+}
+
+/*
  * syncfs(2): syncs the host file system behind fd's channel. Only devfs
  * has one; other devices, and 9P servers, have nothing to sync.
  */

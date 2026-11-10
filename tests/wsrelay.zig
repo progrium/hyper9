@@ -164,6 +164,7 @@ pub const Relay = struct {
         const r = &sr.interface;
         var q: ws.Request = .{};
         ws.readRequest(r, &q) catch return;
+        if (!std.mem.eql(u8, q.method, "GET")) return;
         {
             rl.locked();
             defer rl.lock.unlock();
@@ -283,7 +284,10 @@ const Conn = struct {
             while (c.rl.paused.load(.acquire)) io.sleep(.fromMilliseconds(10), .awake) catch {};
             if (flusher != null) {
                 // Held for the flusher, which sends what's come in every
-                // 20 ms as one message.
+                // 2 ms as one message. Answers to requests in flight
+                // together arrive within that, and every round trip waits
+                // for the tick, so a longer one only slows the case down
+                // (20 ms made it take 10 s).
                 while (!pend.lock.tryLock()) std.atomic.spinLoopHint();
                 pend.buf.appendSlice(gpa, data) catch {};
                 pend.lock.unlock();
@@ -332,7 +336,7 @@ const Pending = struct {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(gpa);
         while (true) {
-            c.rl.io.sleep(.fromMilliseconds(20), .awake) catch {};
+            c.rl.io.sleep(.fromMilliseconds(2), .awake) catch {};
             const done = p.done.load(.acquire);
             while (!p.lock.tryLock()) std.atomic.spinLoopHint();
             out.clearRetainingCapacity();

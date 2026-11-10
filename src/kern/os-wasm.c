@@ -26,7 +26,7 @@ IMPORT(random) void js_random(void *p, int n);
 /*
  * The kernel process stack: the integration suite's deepest use at a park
  * (149 KiB, in a guest process's syscall path, Debug build), doubled and
- * rounded up (DESIGN.md).
+ * rounded up (SPEC.md).
  */
 enum { KSTACK = 320*1024 };
 

@@ -1,5 +1,5 @@
 /*
- * The devfs side of the sandbox policy (DESIGN.md, "Vendor hooks" and
+ * The devfs side of the sandbox policy (SPEC.md, "Vendor hooks" and
  * "Path resolution"). devfs-posix calls these before touching a host path.
  * Each host path is resolved (symlinks followed, as devfs's own stat and
  * open do) and the resolved path is checked against the calling machine's
@@ -24,6 +24,7 @@
 #include "dat.h"
 #include "fns.h"
 #include "error.h"
+#define H9_FSCHECK_IMPL	/* the Win32 calls themselves, not fscheck.h's wrappers */
 #include "fscheck.h"
 
 /* Implemented in Zig (src/kern.zig): 0 allows, -1 hides, -2 is read-only. */
@@ -255,6 +256,152 @@ h9_fs_resolvein(char *top, char *dir, char *rel, char *buf, int nbuf)
 	return 0;
 }
 
+/*
+ * The canonical path of an already-open fd: the file it actually refers to,
+ * however its name resolved. /proc/self/fd on Linux, F_GETPATH on macOS.
+ * Returns 0 with the path in buf (at most PATH_MAX), or -1.
+ */
+#ifdef __wasi__
+/*
+ * The web host's fd paths, as devfs noted them at the open. Every open that
+ * devfs checks by its fd is noted, so a reused fd number gets its new path
+ * before it's checked again. The web host runs one coroutine at a time and
+ * no host call parks between an open and its check, so the path can't
+ * change under it either.
+ */
+enum { Nwasifd = 4096 };
+static char *wasifds[Nwasifd];
+
+void
+h9_fs_notefd(int fd, char *path)
+{
+	char cwd[PATH_MAX], *p;
+
+	if(fd < 0 || fd >= Nwasifd)
+		return;
+	if(path[0] != '/'){
+		if(getcwd(cwd, sizeof cwd) == nil)
+			return;
+		p = smprint("%s/%s", cwd, path);
+	}else
+		p = strdup(path);
+	free(wasifds[fd]);
+	wasifds[fd] = p;
+}
+
+void
+h9_fs_notefdat(int fd, int dfd, char *name)
+{
+	char *p;
+
+	if(fd < 0 || fd >= Nwasifd || dfd < 0 || dfd >= Nwasifd || wasifds[dfd] == nil)
+		return;
+	p = smprint("%s/%s", wasifds[dfd], name);
+	if(p == nil)
+		return;
+	h9_fs_notefd(fd, p);
+	free(p);
+}
+#endif
+
+static int
+fdpath(int fd, char *buf)
+{
+#ifdef __wasi__
+	if(fd < 0 || fd >= Nwasifd || wasifds[fd] == nil || strlen(wasifds[fd]) >= PATH_MAX)
+		return -1;
+	strcpy(buf, wasifds[fd]);
+	return 0;
+#elif defined(__APPLE__)
+	return fcntl(fd, F_GETPATH, buf) < 0 ? -1 : 0;
+#else
+	char link[64];
+	int n;
+
+	snprint(link, sizeof link, "/proc/self/fd/%d", fd);
+	n = readlink(link, buf, PATH_MAX-1);
+	if(n < 0)
+		return -1;
+	buf[n] = 0;
+	return 0;
+#endif
+}
+
+/*
+ * The policy decision for an already-open fd, judged by the file the fd
+ * actually opened rather than by resolving a path string a second time.
+ * devfs opens a file and then checks its fd, so a guest that swaps a
+ * directory for a symlink between a path check and the open (the devfs
+ * check-then-open race, design/0034) can't steer the open to a file outside
+ * the policy: the fd and the check see one inode. Returns 0 if op is allowed,
+ * Hidden or Readonly as h9_fs_check does.
+ */
+int
+h9_fs_checkfd(int fd, int op)
+{
+	char buf[PATH_MAX];
+
+	if(!h9_policy_active())
+		return 0;
+	if(fdpath(fd, buf) < 0)
+		return Hidden;
+	return h9_policy_check(buf, strlen(buf), op);
+}
+
+void
+h9_fs_allowfd(int fd, int op)
+{
+	switch(h9_fs_checkfd(fd, op)){
+	case 0:
+		return;
+	case Readonly:
+		error(Eperm);
+	default:
+		error(Enonexist);
+	}
+}
+
+/*
+ * The policy decision for the entry `name` within the directory `dfd` already
+ * refers to, judged by that directory's own canonical path joined to `name`,
+ * without following `name` itself. devfs opens the parent directory once and
+ * then does the operation relative to that fd (unlinkat, renameat), so a
+ * swapped parent component can't steer it outside the policy: the check and
+ * the operation share one directory inode. `name` must be a single element.
+ * Returns 0/-1/-2 as h9_fs_check does.
+ */
+int
+h9_fs_checkat(int dfd, char *name, int op)
+{
+	char buf[PATH_MAX];
+	int n;
+
+	if(!h9_policy_active())
+		return 0;
+	if(fdpath(dfd, buf) < 0)
+		return Hidden;
+	n = strlen(buf);
+	if(n + 1 + strlen(name) + 1 > PATH_MAX)
+		return Hidden;
+	if(n > 0 && buf[n-1] != '/')
+		buf[n++] = '/';
+	strcpy(buf+n, name);
+	return h9_policy_check(buf, strlen(buf), op);
+}
+
+void
+h9_fs_allowat(int dfd, char *name, int op)
+{
+	switch(h9_fs_checkat(dfd, name, op)){
+	case 0:
+		return;
+	case Readonly:
+		error(Eperm);
+	default:
+		error(Enonexist);
+	}
+}
+
 #else
 
 /*
@@ -263,21 +410,187 @@ h9_fs_resolvein(char *top, char *dir, char *rel, char *buf, int nbuf)
  * asks for its final name, which follows symlinks and junctions and
  * canonicalises case and short names.
  */
+
+enum {
+	Longmax = 32767,	/* the longest \\?\ path, in characters */
+	Longroot = 7,	/* \\?\C:\ */
+};
+
+wchar_t*
+h9_fs_longw(wchar_t *path)
+{
+	wchar_t *l, *p, *e;
+	int n, k, len;
+
+	n = wcslen(path);
+	if(path[0] == 0 || path[1] != L':' || (path[2] != L'\\' && path[2] != L'/')){
+		if((l = malloc((n+1)*sizeof(wchar_t))) == nil){
+			SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+			return nil;
+		}
+		memmove(l, path, (n+1)*sizeof(wchar_t));
+		return l;
+	}
+	/* At most the prefix, the rest of path and a separator, then NUL. */
+	if(n + 5 > Longmax){
+		SetLastError(ERROR_FILENAME_EXCED_RANGE);
+		return nil;
+	}
+	if((l = malloc((n+6)*sizeof(wchar_t))) == nil){
+		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+		return nil;
+	}
+	memmove(l, L"\\\\?\\", 4*sizeof(wchar_t));
+	l[4] = path[0];
+	l[5] = L':';
+	l[6] = L'\\';
+	k = Longroot;
+	/* Each name is followed by a separator; ".." goes back one, never above the drive. */
+	for(p = path+3; *p != 0; p = e){
+		while(*p == L'\\' || *p == L'/')
+			p++;
+		for(e = p; *e != 0 && *e != L'\\' && *e != L'/'; e++)
+			;
+		len = e - p;
+		if(len == 0 || (len == 1 && p[0] == L'.'))
+			continue;
+		if(len == 2 && p[0] == L'.' && p[1] == L'.'){
+			if(k > Longroot)
+				for(k--; k > Longroot && l[k-1] != L'\\'; k--)
+					;
+			continue;
+		}
+		memmove(l+k, p, len*sizeof(wchar_t));
+		k += len;
+		l[k++] = L'\\';
+	}
+	if(k > Longroot)
+		k--;
+	l[k] = 0;
+	return l;
+}
+
+/* Frees l without losing the error of the call that used it. */
+static void
+longfree(wchar_t *l)
+{
+	DWORD err;
+
+	err = GetLastError();
+	free(l);
+	SetLastError(err);
+}
+
+HANDLE
+h9_fs_findfirst(wchar_t *path, WIN32_FIND_DATAW *wfd)
+{
+	wchar_t *l;
+	HANDLE h;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return INVALID_HANDLE_VALUE;
+	h = FindFirstFileW(l, wfd);
+	longfree(l);
+	return h;
+}
+
+HANDLE
+h9_fs_createfile(wchar_t *path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *sa, DWORD disp, DWORD flags, HANDLE tmpl)
+{
+	wchar_t *l;
+	HANDLE h;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return INVALID_HANDLE_VALUE;
+	h = CreateFileW(l, access, share, sa, disp, flags, tmpl);
+	longfree(l);
+	return h;
+}
+
+BOOL
+h9_fs_createdir(wchar_t *path, SECURITY_ATTRIBUTES *sa)
+{
+	wchar_t *l;
+	BOOL r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return FALSE;
+	r = CreateDirectoryW(l, sa);
+	longfree(l);
+	return r;
+}
+
+BOOL
+h9_fs_removedir(wchar_t *path)
+{
+	wchar_t *l;
+	BOOL r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return FALSE;
+	r = RemoveDirectoryW(l);
+	longfree(l);
+	return r;
+}
+
+BOOL
+h9_fs_deletefile(wchar_t *path)
+{
+	wchar_t *l;
+	BOOL r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return FALSE;
+	r = DeleteFileW(l);
+	longfree(l);
+	return r;
+}
+
+BOOL
+h9_fs_movefile(wchar_t *old, wchar_t *new)
+{
+	wchar_t *lo, *ln;
+	BOOL r;
+
+	if((lo = h9_fs_longw(old)) == nil)
+		return FALSE;
+	if((ln = h9_fs_longw(new)) == nil){
+		longfree(lo);
+		return FALSE;
+	}
+	r = MoveFileW(lo, ln);
+	longfree(ln);
+	longfree(lo);
+	return r;
+}
+
+DWORD
+h9_fs_getattr(wchar_t *path)
+{
+	wchar_t *l;
+	DWORD r;
+
+	if((l = h9_fs_longw(path)) == nil)
+		return INVALID_FILE_ATTRIBUTES;
+	r = GetFileAttributesW(l);
+	longfree(l);
+	return r;
+}
+
+/*
+ * The guest's spelling, "/C:/a/b", of the file an open handle refers to,
+ * from its final path name (symlinks and junctions followed, case and short
+ * names canonicalised). Returns 0, or -1 if it isn't a drive path.
+ */
 static int
-finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
+handlefinal(HANDLE h, char *buf, int nbuf)
 {
 	wchar_t w[MAX_PATH*4];
-	HANDLE h;
 	DWORD n;
 	char *p;
 	int i;
 
-	h = CreateFileW(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|flags, nil);
-	if(h == INVALID_HANDLE_VALUE)
-		return -1;
 	n = GetFinalPathNameByHandleW(h, w, nelem(w), FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
-	CloseHandle(h);
 	if(n == 0 || n >= nelem(w))
 		return -1;
 	/* Only drive paths, \\?\C:\..., are allowed; not UNC or devices. */
@@ -293,6 +606,21 @@ finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
 	if(i > 1 && buf[i-1] == '/')
 		buf[i-1] = 0;
 	return 0;
+}
+
+static int
+finalflags(wchar_t *path, char *buf, int nbuf, DWORD flags)
+{
+	HANDLE h;
+	int r;
+
+	h = h9_fs_createfile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|flags, nil);
+	if(h == INVALID_HANDLE_VALUE)
+		return -1;
+	r = handlefinal(h, buf, nbuf);
+	CloseHandle(h);
+	return r;
 }
 
 static int
@@ -405,7 +733,7 @@ reparsetarget(wchar_t *path, wchar_t *target, int ntarget, int *relative, int pr
 	DWORD n;
 	USHORT off, len;
 
-	h = CreateFileW(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+	h = h9_fs_createfile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
 		nil, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT, nil);
 	if(h == INVALID_HANDLE_VALUE)
 		return -1;
@@ -504,7 +832,7 @@ h9_fs_resolveinw(wchar_t *top, wchar_t *dir, char *rel, wchar_t *buf, int nbuf)
 			next[n++] = L'\\';
 		memmove(next+n, p, len*sizeof(wchar_t));
 		next[n+len] = 0;
-		attr = GetFileAttributesW(next);
+		attr = h9_fs_getattr(next);
 		if(attr == INVALID_FILE_ATTRIBUTES)
 			return H9_RESNONEXIST;
 		if(attr & FILE_ATTRIBUTE_REPARSE_POINT){
@@ -558,6 +886,40 @@ void
 h9_fs_allow(wchar_t *path, int op)
 {
 	switch(h9_fs_checkw(path, op)){
+	case 0:
+		return;
+	case Readonly:
+		error(Eperm);
+	default:
+		error(Enonexist);
+	}
+}
+
+/*
+ * The policy decision for an already-open handle, judged by the file the
+ * handle actually opened (its final path name) rather than by resolving a
+ * path string again: devfs-win32 opens, then checks the handle, so a swapped
+ * component can't steer the open past the check (the check-then-open race).
+ * h9_fs_checkhandlew returns 0/-1/-2 as h9_fs_checkw; h9_fs_allowhandlew
+ * raises the matching error. The handle is passed as void* so the header
+ * needn't include windows.h; HANDLE is a void* on Windows.
+ */
+int
+h9_fs_checkhandlew(void *handle, int op)
+{
+	char buf[MAX_PATH*4*UTFmax];
+
+	if(!h9_policy_active())
+		return 0;
+	if(handlefinal((HANDLE)handle, buf, sizeof buf) < 0)
+		return Hidden;
+	return h9_policy_check(buf, strlen(buf), op);
+}
+
+void
+h9_fs_allowhandlew(void *handle, int op)
+{
+	switch(h9_fs_checkhandlew(handle, op)){
 	case 0:
 		return;
 	case Readonly:

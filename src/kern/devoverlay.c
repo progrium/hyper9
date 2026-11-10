@@ -87,6 +87,7 @@ enum
 
 static char Efull[] = "file system full";
 static char Enotempty[] = "directory not empty";
+static char Elocked[] = "file is locked";	/* ramfs's */
 
 typedef struct Inst Inst;
 typedef struct Node Node;
@@ -129,6 +130,7 @@ struct Node
 	uchar	*direct[Ndirect];
 	uchar	***ind;		/* Perpage pointers to pages of Perpage block pointers */
 	char	*link;		/* an Nlink's target */
+	int	excl;		/* a DMEXCL file that a chan has open */
 };
 
 struct Inst
@@ -158,6 +160,7 @@ struct Ovc
 	long	ndir;
 	Node	*lnk;		/* with a ref: the link the walk's last name followed, or nil */
 	char	*lpath;		/* lnk's path */
+	int	excl;		/* this chan holds node's DMEXCL open */
 	int	nlinks;		/* links followed in this walk */
 };
 
@@ -719,6 +722,8 @@ ovcfree(Ovc *o)
 	if(o->lower != nil)
 		cclose(o->lower);
 	qlock(&in->ql);
+	if(o->excl)
+		o->node->excl = 0;
 	nodeunref(in, o->node);
 	nodeunref(in, o->lnk);
 	qunlock(&in->ql);
@@ -807,6 +812,22 @@ adopt(Ovc *o)
 	return 0;
 }
 
+/*
+ * An open file whose name was removed: its node lives on until the last
+ * close, so stat and wstat (a truncate) still reach it, as they do on
+ * Linux. WebKit makes its shared memory by opening a file in /dev/shm,
+ * removing it, and then truncating it to size.
+ */
+static int
+removedopen(Chan *c)
+{
+	Ovc *o;
+
+	o = c->aux;
+	return (c->flag & COPEN) != 0 && o->node != nil && o->node != o->inst->root &&
+		o->node->parent == nil && o->node->kind == Ncopy;
+}
+
 /* Brings a chan up to date with the tree, for operations other than I/O on an open chan. */
 static void
 refresh(Chan *c)
@@ -814,6 +835,8 @@ refresh(Chan *c)
 	Ovc *o;
 
 	o = c->aux;
+	if(removedopen(c))
+		return;
 	if(adopt(o) < 0)
 		error(Enonexist);
 	if(o->node != nil && (c->flag & COPEN) == 0)
@@ -1804,6 +1827,9 @@ ovopen(Chan *c, int omode)
 	refresh(c);
 	if(o->node != nil && o->node->kind == Nlink)
 		error(Enonexist);	/* a link whose target is missing */
+	/* Exclusive use, as 9front's file servers do: one open at a time. */
+	if(o->node != nil && (o->node->mode & DMEXCL) && o->node->excl)
+		error(Elocked);
 	if(c->qid.type & QTDIR){
 		if(mode != OREAD || (omode & OTRUNC))
 			error(Eisdir);
@@ -1835,6 +1861,10 @@ ovopen(Chan *c, int omode)
 			n->mtime = seconds();
 		}
 		c->qid = n->qid;
+	}
+	if(o->node != nil && (o->node->mode & DMEXCL) && (c->qid.type & QTDIR) == 0){
+		o->node->excl = 1;
+		o->excl = 1;
 	}
 	if(omode & ORCLOSE)
 		c->flag |= CRCLOSE;
@@ -1936,6 +1966,10 @@ ovcreate(Chan *c, char *name, int omode, ulong perm)
 	o->node = ch;
 	c->qid = ch->qid;
 	changed(in, o->path);
+	if((ch->mode & DMEXCL) && (perm & DMDIR) == 0){
+		ch->excl = 1;
+		o->excl = 1;
+	}
 	if(omode & ORCLOSE)
 		c->flag |= CRCLOSE;
 	c->mode = openmode(omode);
@@ -2323,7 +2357,7 @@ ovwstat(Chan *c, uchar *db, int n)
 	Node *nd;
 	Dir d;
 	char *strs;
-	int isdir, chname, chmode, chmtime, chlen;
+	int isdir, chname, chmode, chmtime, chlen, gone;
 
 	o = c->aux;
 	in = o->inst;
@@ -2345,6 +2379,7 @@ ovwstat(Chan *c, uchar *db, int n)
 		c->qid = o->node->qid;
 	}
 	refresh(c);
+	gone = removedopen(c);
 	isdir = (c->qid.type & QTDIR) != 0;
 	nd = o->node;
 	chname = d.name[0] != '\0' &&
@@ -2360,6 +2395,8 @@ ovwstat(Chan *c, uchar *db, int n)
 		error(Eperm);	/* a lower directory can't be renamed */
 	if(o->node == in->root && chname)
 		error(Eperm);
+	if(gone && chname)
+		error(Enonexist);
 	if(chname || chmode || chmtime || chlen){
 		if(nd == nil){
 			if(isdir){
@@ -2378,7 +2415,8 @@ ovwstat(Chan *c, uchar *db, int n)
 			nd->length = d.length;
 			nd->qid.vers++;
 		}
-		changed(in, o->path);
+		if(!gone)
+			changed(in, o->path);
 		if(chname){
 			ovrename(c, nd, d.name);
 			changed(in, o->path);

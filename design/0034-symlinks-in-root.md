@@ -19,7 +19,7 @@ A host tree bound into the namespace can be marked *contained*. In a contained t
 
 ## Background
 
-devfs-posix follows a symlink with `stat`, so the host kernel resolves it against the host's `/` (DESIGN.md, Path resolution). h9 then checks the *resolved* host path against the plan's rules. A link that points outside the allowed paths is hidden, which is correct for a sandbox, but wrong for a tree whose links are meant to be read relative to itself:
+devfs-posix follows a symlink with `stat`, so the host kernel resolves it against the host's `/` (SPEC.md, Path resolution). h9 then checks the *resolved* host path against the plan's rules. A link that points outside the allowed paths is hidden, which is correct for a sandbox, but wrong for a tree whose links are meant to be read relative to itself:
 
 - On Alpine, `/bin/ls` is a link to `/bin/busybox`. Bound as a Linux root, it resolves to the host's `/bin/busybox`, which is hidden, or on a Linux host with busybox installed, outside the tree and denied.
 - Container image layers, extracted to a directory, are full of absolute links.
@@ -59,7 +59,7 @@ devfs keeps the unresolved link target of the last component, so the Linux perso
 
 ## Rationale
 
-**Resolving with `openat2(RESOLVE_IN_ROOT)`.** Linux 5.6 and later does exactly this in the kernel, atomically. macOS and Windows have nothing like it, and h9's sandbox has to work the same on every host. DESIGN.md also records why h9 moved from `RESOLVE_BENEATH` to a resolved-path check on every host. Using `openat2` where it exists is an optimisation for later, if the results match.
+**Resolving with `openat2(RESOLVE_IN_ROOT)`.** Linux 5.6 and later does exactly this in the kernel, atomically. macOS and Windows have nothing like it, and h9's sandbox has to work the same on every host. SPEC.md also records why h9 moved from `RESOLVE_BENEATH` to a resolved-path check on every host. Using `openat2` where it exists is an optimisation for later, if the results match.
 
 **`chroot` or a mount namespace on the host.** They need privileges h9 doesn't have, and don't exist on macOS or Windows.
 
@@ -98,7 +98,7 @@ Demo: `h9 --root-contained --root ./tree-with-links ls -l /bin`.
 1. The resolver in `src/kern/fscheck.c`, for POSIX, with unit tests on a temporary tree.
 2. The `#U!c` attach spec in devfs-posix, `--print` and `newns` parsing, `--root-contained`.
 3. The Windows resolver and devfs-win32.
-4. `h9_fs_readlink`. DESIGN.md's Path resolution paragraph describes contained trees.
+4. `h9_fs_readlink`. SPEC.md's Path resolution paragraph describes contained trees.
 
 ## Open issues
 

@@ -1,4 +1,4 @@
-//! vCPUs for a machine's processes. See DESIGN.md, "vCPU limits".
+//! vCPUs for a machine's processes. See SPEC.md, "vCPU limits".
 //!
 //! A process normally owns a vCPU, created on its own thread, as HVF
 //! requires. HVF allows only 64 live vCPUs per VM (KVM a few hundred, or
@@ -68,7 +68,7 @@ pub const Pool = struct {
     /// (for tests of the pool).
     pub fn init(gpa: std.mem.Allocator, io: std.Io, backend: vmm.Backend, cpus: ?u32, own_limit_override: ?u32) vmm.Error!Pool {
         const own_limit: ?u32 = switch (backend.kind()) {
-            .emu, .v86, .native => null,
+            .emu, .native => null,
             .hvf, .kvm, .whp => blk: {
                 const max = try backend.maxVcpus();
                 break :blk if (max > reserve) max - reserve else 1;

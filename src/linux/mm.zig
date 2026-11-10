@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const vmm = @import("../vmm.zig");
+const gm = @import("../guestmem.zig");
 
 const page = vmm.page_size;
 pub const chunk_size: u64 = 1 << 20;
@@ -49,9 +50,8 @@ pub const Layout = struct {
     pie_base: u64,
 
     /// 47 bits on arm64 and amd64, as on amd64 Linux, which arm64's 48-bit
-    /// space also holds. i386 gets Linux's 3 GiB, below the v86 shim's
-    /// kernel at 0xF0000000 and the emulator's descriptor table at the
-    /// top (design/0105-linux-i386.md), with PIEs at 4 MiB as Linux puts them.
+    /// space also holds. i386 gets Linux's 3 GiB, below the emulator's
+    /// descriptor table at the top (design/0105-linux-i386.md), with PIEs at 4 MiB as Linux puts them.
     pub fn of(arch: vmm.Arch) Layout {
         const top: u64 = if (arch == .i386) 0xC000_0000 else 1 << 47;
         return .{
@@ -113,6 +113,11 @@ pub const Vma = struct {
     name: Name = .{},
     /// The file offset of `start`, for /proc/n/maps.
     offset: u64 = 0,
+    /// A private file mapping filled on first touch: each chunk's pages in
+    /// it are read from the file when the chunk is allocated (`populate`),
+    /// rather than all of them at mmap, which for a shared library is
+    /// mostly pages no one reads. Held by the Mm (`Mm.srcs`).
+    src: ?*Src = null,
 
     pub const Name = struct {
         buf: [96]u8 = undefined,
@@ -132,6 +137,29 @@ pub const Vma = struct {
 };
 
 const Run = struct { va: u64, len: u64, perms: vmm.Perms = .{} };
+
+/// The file behind lazily filled private mappings (`Vma.src`), reference
+/// counted: an Mm holds one for each Src its VMAs use, and drops it when
+/// the last of them is unmapped.
+pub const Src = struct {
+    refs: std.atomic.Value(u32) = .init(1),
+    /// Reads the file at `off` into `dst`, with zeros past its end or
+    /// after a failed read.
+    fill: *const fn (s: *Src, dst: []u8, off: u64) void,
+    /// Frees it, after its last reference.
+    free: *const fn (s: *Src) void,
+
+    pub fn get(s: *Src) *Src {
+        _ = s.refs.fetchAdd(1, .acq_rel);
+        return s;
+    }
+
+    /// Drops a reference, outside any Mm's lock: the last frees it, which
+    /// may close a file.
+    pub fn put(s: *Src) void {
+        if (s.refs.fetchSub(1, .acq_rel) == 1) s.free(s);
+    }
+};
 
 /// A chunk's pages. Shared by the Mms of a fork for MAP_SHARED mappings,
 /// and freed by the last. A shared file mapping's (shmfile.zig) are held
@@ -217,6 +245,11 @@ pub const Mm = struct {
     /// that's allowed. `fault` returns it, so a repeated fault counts as
     /// real only if no remap came between. Guarded by `lock`.
     remaps: u64 = 0,
+    /// The Srcs of lazily filled mappings (`Vma.src`), with a reference
+    /// each. Guarded by `lock`.
+    srcs: std.ArrayList(*Src) = .empty,
+    /// Srcs no VMA uses any more, put by `settle`. Guarded by `lock`.
+    dead_srcs: std.ArrayList(*Src) = .empty,
 
     /// Holds off other threads' layout changes (`op`).
     pub fn opLock(m: *Mm, io: std.Io) void {
@@ -254,6 +287,10 @@ pub const Mm = struct {
         m.doomed.deinit(m.gpa);
         for (m.unmapped_files.items) |p| p.release.?(p);
         m.unmapped_files.deinit(m.gpa);
+        for (m.srcs.items) |s| s.put();
+        m.srcs.deinit(m.gpa);
+        for (m.dead_srcs.items) |s| s.put();
+        m.dead_srcs.deinit(m.gpa);
         m.as.destroy();
         m.gpa.destroy(m);
     }
@@ -301,12 +338,83 @@ pub const Mm = struct {
         m.doomed = .empty;
         var files = m.unmapped_files;
         m.unmapped_files = .empty;
+        var srcs = m.dead_srcs;
+        m.dead_srcs = .empty;
         m.lock.unlock();
         if ((narrowed or list.items.len > 0 or files.items.len > 0) and m.refs.load(.acquire) > 1) m.as.shootdown();
         for (list.items) |p| m.freeP(p);
         list.deinit(m.gpa);
         for (files.items) |p| p.release.?(p);
         files.deinit(m.gpa);
+        for (srcs.items) |s| s.put();
+        srcs.deinit(m.gpa);
+    }
+
+    /// A hold on the pages behind a guest buffer, taken by `pin` and
+    /// released by `unpin`. While it's held, a munmap, mremap, or exit on
+    /// another thread sharing the Mm can unmap the range but can't free its
+    /// host memory, so a blocking kernel read or write into the slice can't
+    /// land in freed memory (the cross-thread use-after-free a backing
+    /// syscall buffer would otherwise allow).
+    pub const Pinned = struct {
+        /// The contiguous host slice backing the range, as
+        /// `guestmem.contiguous` returns it.
+        s: []u8,
+        held: std.ArrayList(*Pages) = .empty,
+    };
+
+    /// Resolves guest [va, va+len) to one contiguous host slice and holds a
+    /// reference to the pages of every chunk behind it, so the memory stays
+    /// valid until `unpin` even if the range is unmapped meanwhile. Returns
+    /// null when the range isn't one contiguous mapped run (as
+    /// `guestmem.contiguous` does), so the caller falls back to a bounce
+    /// buffer. The slice and the references are taken under one lock, so a
+    /// concurrent unmap either loses the race (and the pin keeps the pages)
+    /// or wins it (and this returns null), with no window in between.
+    pub fn pin(m: *Mm, va: u64, len: u64) ?Pinned {
+        if (len == 0) return null;
+        m.lockSpin();
+        defer m.lock.unlock();
+        return m.pinLocked(va, len) catch null;
+    }
+
+    fn pinLocked(m: *Mm, va: u64, len: u64) Error!Pinned {
+        const s = gm.contiguous(m.as, va, len) orelse return error.BadAddress;
+        var held: std.ArrayList(*Pages) = .empty;
+        // On failure, give back the references already taken; each page
+        // still has its chunk's reference, so a plain drop can't free it.
+        errdefer {
+            for (held.items) |p| _ = p.refs.fetchSub(1, .acq_rel);
+            held.deinit(m.gpa);
+        }
+        const end = va + len;
+        var ci = va / chunk_size;
+        while (ci * chunk_size < end) : (ci += 1) {
+            const c = m.chunks.get(ci) orelse continue;
+            const cs = ci * chunk_size;
+            const lo = @max(va, cs) - cs;
+            const hi = @min(end, cs + chunk_size) - cs;
+            try held.append(m.gpa, c.pages);
+            _ = c.pages.refs.fetchAdd(1, .acq_rel);
+            for (c.overlays.items) |o| {
+                if (o.hi <= lo or o.lo >= hi) continue;
+                try held.append(m.gpa, o.pages);
+                _ = o.pages.refs.fetchAdd(1, .acq_rel);
+            }
+        }
+        return .{ .s = s, .held = held };
+    }
+
+    /// Releases a pin from `pin`, freeing any pages whose last reference it
+    /// held (the range was unmapped while it was pinned).
+    pub fn unpin(m: *Mm, pn: *Pinned) void {
+        defer pn.held = .empty;
+        if (pn.held.items.len == 0) return;
+        defer m.settle(false);
+        m.lockSpin();
+        defer m.lock.unlock();
+        for (pn.held.items) |p| m.dropRef(p);
+        pn.held.deinit(m.gpa);
     }
 
     /// Adds a chunk over `p` (taking a reference) at index `ci`, mapped.
@@ -408,8 +516,71 @@ pub const Mm = struct {
         m.lockSpin();
         defer m.lock.unlock();
         if (!m.isFree(v.start, v.end)) return error.BadAddress;
-        try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+        if (v.src) |s| {
+            try m.srcs.ensureUnusedCapacity(m.gpa, 1);
+            try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+            if (std.mem.indexOfScalar(*Src, m.srcs.items, s) == null) m.srcs.appendAssumeCapacity(s.get());
+            // Chunks allocated already won't be filled by `populate`.
+            m.fillAllocated(v, v.start, v.end);
+        } else try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
         try m.refreshRange(v.start, v.end);
+    }
+
+    /// Reads the file pages of lazy VMA `v` over [start, end) into the
+    /// chunks there that are allocated, past any overlays.
+    fn fillAllocated(m: *Mm, v: Vma, start: u64, end: u64) void {
+        const s = v.src.?;
+        var ci = start / chunk_size;
+        while (ci * chunk_size < end) : (ci += 1) {
+            const c = m.chunks.get(ci) orelse continue;
+            const cs = ci * chunk_size;
+            var lo = @max(start, cs) - cs;
+            const hi = @min(end, cs + chunk_size) - cs;
+            while (lo < hi) {
+                const b = c.backing(lo);
+                const e = @min(hi, b.end);
+                if (!b.overlay) s.fill(s, b.mem[0..@intCast(e - lo)], v.offset + (cs + lo - v.start));
+                lo = e;
+            }
+        }
+    }
+
+    /// Reads the file pages of the lazy VMAs over chunk `ci` into `mem`,
+    /// its new pages.
+    fn fillNew(m: *Mm, ci: u64, mem: []u8) void {
+        if (m.srcs.items.len == 0) return;
+        const cs = ci * chunk_size;
+        const ce = cs + chunk_size;
+        var i = m.indexAfter(cs);
+        if (i > 0 and m.vmas.items[i - 1].end > cs) i -= 1;
+        while (i < m.vmas.items.len and m.vmas.items[i].start < ce) : (i += 1) {
+            const v = m.vmas.items[i];
+            const s = v.src orelse continue;
+            const lo = @max(v.start, cs);
+            const hi = @min(v.end, ce);
+            if (lo >= hi) continue;
+            s.fill(s, mem[@intCast(lo - cs)..@intCast(hi - cs)], v.offset + (lo - v.start));
+        }
+    }
+
+    /// Moves the Srcs no VMA uses any more to `dead_srcs`, for `settle`:
+    /// of `which`, or of all if it's null.
+    fn dropSrcs(m: *Mm, which: ?[]const *Src) void {
+        var i: usize = 0;
+        while (i < m.srcs.items.len) {
+            const s = m.srcs.items[i];
+            const check = if (which) |w| std.mem.indexOfScalar(*Src, w, s) != null else true;
+            const used = !check or for (m.vmas.items) |v| {
+                if (v.src == s) break true;
+            } else false;
+            if (used) {
+                i += 1;
+                continue;
+            }
+            if (m.dead_srcs.append(m.gpa, s)) |_| {
+                _ = m.srcs.swapRemove(i);
+            } else |_| i += 1;
+        }
     }
 
     /// Removes every VMA in [start, end), splitting at the ends, and
@@ -423,6 +594,9 @@ pub const Mm = struct {
         try m.splitAt(end);
         var i = m.indexAfter(start);
         if (i > 0 and m.vmas.items[i - 1].start >= start) i -= 1;
+        // The Srcs of the lazy VMAs removed, to see if others use them.
+        var gone: [8]*Src = undefined;
+        var nlazy: usize = 0;
         while (i < m.vmas.items.len and m.vmas.items[i].start < end) {
             const v = m.vmas.items[i];
             if (v.end <= start) {
@@ -430,10 +604,17 @@ pub const Mm = struct {
                 continue;
             }
             _ = m.vmas.orderedRemove(i);
+            if (v.src) |s| {
+                if (std.mem.indexOfScalar(*Src, gone[0..@min(nlazy, gone.len)], s) == null) {
+                    if (nlazy < gone.len) gone[nlazy] = s;
+                    nlazy += 1;
+                }
+            }
             // Shared pages are others' too; a chunk of them goes when
             // nothing maps it, and is never reused for another mapping.
             if (!v.shared) m.zero(v.start, v.end);
         }
+        if (nlazy > 0) m.dropSrcs(if (nlazy <= gone.len) gone[0..nlazy] else null);
         m.dropPads(start, end);
         try m.trimOverlays(start, end);
         try m.refreshRange(start - start % chunk_size, std.mem.alignForward(u64, end, chunk_size));
@@ -536,8 +717,9 @@ pub const Mm = struct {
     /// (`Vma.cow`), `v.offset` its file offset,
     /// over chunks that may hold other mappings: each piece of it within
     /// one chunk and one file chunk is an overlay of the file chunk's
-    /// pages, from `pagesFor(ctx, file_chunk_index)`, which hands over a
-    /// reference the caller holds (the table's) and gets one of its own.
+    /// pages, from `pagesFor(ctx, file_chunk_index)`, which takes a
+    /// reference to them for the overlay, under the table's lock, so a
+    /// process unmapping them meanwhile can't free them.
     pub fn insertFile(m: *Mm, v: Vma, ctx: anytype, comptime pagesFor: fn (@TypeOf(ctx), u64) Error!*Pages) Error!void {
         std.debug.assert((v.shared or v.cow) and v.kind == .file and v.start % page == 0 and v.end % page == 0 and v.start < v.end and v.offset % page == 0);
         defer m.settle(false);
@@ -560,7 +742,6 @@ pub const Mm = struct {
             const c = try m.populate(at);
             try c.overlays.ensureUnusedCapacity(m.gpa, 1);
             const pg = try pagesFor(ctx, fo / chunk_size);
-            _ = pg.refs.fetchAdd(1, .acq_rel);
             var i: usize = 0;
             while (i < c.overlays.items.len and c.overlays.items[i].lo < at - cs) i += 1;
             c.overlays.insertAssumeCapacity(i, .{ .lo = at - cs, .hi = hi - cs, .pages = pg, .poff = fo % chunk_size });
@@ -595,8 +776,10 @@ pub const Mm = struct {
     /// chunks so their pages serve only it. For a file mapping, `pagesFor`
     /// gives each chunk's pages, shared with every process mapping the
     /// same part of the file; `v.start` must then sit at the file
-    /// offset's place in a chunk. An anonymous one's pages come on first
-    /// touch, as any.
+    /// offset's place in a chunk; it takes a reference to them, under the
+    /// table's lock, so a process unmapping them meanwhile can't free
+    /// them, and the chunk takes its own. An anonymous one's pages come on
+    /// first touch, as any.
     pub fn insertShared(m: *Mm, v: Vma, ctx: anytype, comptime pagesFor: ?fn (@TypeOf(ctx), u64) Error!*Pages) Error!void {
         std.debug.assert(v.shared and v.start % page == 0 and v.end % page == 0 and v.start < v.end);
         defer m.settle(false);
@@ -637,7 +820,11 @@ pub const Mm = struct {
         }
         if (pagesFor) |f| {
             ci = lo / chunk_size;
-            while (ci * chunk_size < hi) : (ci += 1) _ = try m.addChunk(ci, try f(ctx, ci));
+            while (ci * chunk_size < hi) : (ci += 1) {
+                const p = try f(ctx, ci);
+                defer m.dropRef(p);
+                _ = try m.addChunk(ci, p);
+            }
         }
     }
 
@@ -827,6 +1014,7 @@ pub const Mm = struct {
         const ci = va / chunk_size;
         if (m.chunks.get(ci)) |c| return c;
         const p = try m.newPages();
+        m.fillNew(ci, p.mem);
         return m.addChunk(ci, p) catch |e| {
             // A failed addChunk leaves the pages unreferenced.
             if (p.refs.load(.acquire) == 0) {
@@ -995,6 +1183,8 @@ pub const Mm = struct {
         m.lockSpin();
         defer m.lock.unlock();
         try n.vmas.appendSlice(n.gpa, m.vmas.items);
+        try n.srcs.ensureTotalCapacity(n.gpa, m.srcs.items.len);
+        for (m.srcs.items) |s| n.srcs.appendAssumeCapacity(s.get());
         n.brk_start = m.brk_start;
         n.brk = m.brk;
         // A shared mapping's chunks that no one has touched yet are made
@@ -1044,29 +1234,37 @@ pub const Mm = struct {
         return n;
     }
 
-    /// MADV_DONTNEED: private pages in [start, end) read as zero again.
-    /// Shared ones keep their contents, as Linux's do.
+    /// MADV_DONTNEED: private pages in [start, end) read as zero again,
+    /// or a private file mapping's as the file's. Shared ones keep their
+    /// contents, as Linux's do.
     pub fn discard(m: *Mm, start: u64, end: u64) void {
         m.lockSpin();
         defer m.lock.unlock();
         for (m.vmas.items) |v| {
             if (v.end <= start or v.start >= end or v.shared) continue;
-            m.zero(@max(v.start, start), @min(v.end, end));
+            if (v.src != null)
+                m.fillAllocated(v, @max(v.start, start), @min(v.end, end))
+            else
+                m.zero(@max(v.start, start), @min(v.end, end));
         }
     }
 
     /// Copies the allocated pages of [src, src+len) to dst, for mremap's
     /// move. dst must be in a VMA already; pages never allocated at src
-    /// are left unallocated (zero) at dst.
+    /// are left unallocated at dst, zero or, in a lazily filled mapping
+    /// moved with its file offset, the file's as at src.
     pub fn copyRange(m: *Mm, src: u64, dst: u64, len: u64) Error!void {
         m.lockSpin();
         defer m.lock.unlock();
+        const lazy = if (m.find(dst)) |v| v.src != null else false;
         var off: u64 = 0;
         while (off < len) : (off += page) {
             const sc = m.chunks.get((src + off) / chunk_size) orelse continue;
             const so = (src + off) % chunk_size;
             const from = sc.backing(so).mem[0..page];
-            if (std.mem.allEqual(u8, from, 0)) continue;
+            // A lazy mapping's new chunk is filled from the file, so a
+            // page the guest zeroed is copied too.
+            if (!lazy and std.mem.allEqual(u8, from, 0)) continue;
             const dc = try m.populate(dst + off);
             const do = (dst + off) % chunk_size;
             @memcpy(dc.backing(do).mem[0..page], from);
@@ -1129,4 +1327,125 @@ fn copySparse(dst: []u8, src: []const u8) void {
             }
         }
     }
+}
+
+const testing = std.testing;
+
+/// A translate-only address space over one run of host memory, for the
+/// pin tests; `pin` resolves a buffer through `guestmem.contiguous`, which
+/// only needs `translate`.
+const FakeAs = struct {
+    base: u64,
+    mem: []align(page) u8,
+    fn translate(f: *FakeAs, va: u64, len: u64) ?[]u8 {
+        if (va < f.base) return null;
+        const off = va - f.base;
+        if (off > f.mem.len or len > f.mem.len - off) return null;
+        return f.mem[@intCast(off)..][0..@intCast(len)];
+    }
+};
+
+/// Builds an Mm holding a single chunk that maps `mem` at `va`, with the
+/// one reference a live chunk holds. The backend is never used: these
+/// tests drive `pin`/`unpin`/`dropRef` without allocating or freeing
+/// pages through it.
+fn pinFixture(m: *Mm, fake: *FakeAs, chunk: *Chunk, pages: *Pages, va: u64, mem: []align(page) u8) !void {
+    fake.* = .{ .base = va, .mem = mem };
+    m.* = .{
+        .gpa = testing.allocator,
+        .backend = undefined,
+        .lay = .of(.amd64),
+        .as = vmm.AddressSpace.initFake(fake, FakeAs.translate),
+    };
+    pages.* = .{ .mem = mem };
+    chunk.* = .{ .pages = pages, .mem = mem };
+    try m.chunks.put(testing.allocator, va / chunk_size, chunk);
+}
+
+test "pin holds a guest buffer's pages across a concurrent unmap" {
+    const gpa = testing.allocator;
+    const mem = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
+    defer gpa.free(mem);
+    @memset(mem, 0);
+    const va: u64 = chunk_size; // chunk index 1, chunk-aligned.
+
+    var fake: FakeAs = undefined;
+    var m: Mm = undefined;
+    var chunk: Chunk = undefined;
+    var pages: Pages = undefined;
+    try pinFixture(&m, &fake, &chunk, &pages, va, mem);
+    defer m.chunks.deinit(gpa);
+    defer m.doomed.deinit(gpa);
+
+    // Pin the page, as io() does before a blocking read or write.
+    var pinned = m.pin(va, page) orelse return error.PinFailed;
+    try testing.expectEqual(mem.ptr, pinned.s.ptr);
+    try testing.expectEqual(@as(usize, page), pinned.s.len);
+    try testing.expectEqual(@as(u32, 2), pages.refs.load(.acquire));
+
+    // Another thread unmaps the range, dropping the chunk's reference.
+    // Without the pin this would free `mem`; with it the page survives and
+    // isn't even scheduled to be freed.
+    m.dropRef(&pages);
+    try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), m.doomed.items.len);
+
+    // The host slice is still ours: a kernel read or write into it is safe.
+    @memset(pinned.s, 0xAB);
+
+    // Releasing the pin drops its reference; only now are the pages doomed.
+    // (unpin would free them through the backend; here the last reference
+    // is dropped by hand so the stack-allocated Pages isn't destroyed.)
+    pinned.held.deinit(gpa);
+    m.dropRef(&pages);
+    try testing.expectEqual(@as(u32, 0), pages.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 1), m.doomed.items.len);
+    try testing.expectEqual(&pages, m.doomed.items[0]);
+}
+
+test "unpin releases its reference and frees nothing when the mapping stays" {
+    const gpa = testing.allocator;
+    const mem = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
+    defer gpa.free(mem);
+    @memset(mem, 0);
+    const va: u64 = chunk_size;
+
+    var fake: FakeAs = undefined;
+    var m: Mm = undefined;
+    var chunk: Chunk = undefined;
+    var pages: Pages = undefined;
+    try pinFixture(&m, &fake, &chunk, &pages, va, mem);
+    defer m.chunks.deinit(gpa);
+    defer m.doomed.deinit(gpa);
+
+    var pinned = m.pin(va, page) orelse return error.PinFailed;
+    try testing.expectEqual(@as(u32, 2), pages.refs.load(.acquire));
+
+    // No unmap raced the I/O: unpin drops the pin's reference and the
+    // chunk still maps the page, so nothing is freed.
+    m.unpin(&pinned);
+    try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), m.doomed.items.len);
+    try testing.expectEqual(@as(usize, 0), pinned.held.items.len);
+}
+
+test "pin returns null for a buffer that isn't one contiguous mapped run" {
+    const gpa = testing.allocator;
+    const mem = try gpa.alignedAlloc(u8, .fromByteUnits(page), page);
+    defer gpa.free(mem);
+    @memset(mem, 0);
+    const va: u64 = chunk_size;
+
+    var fake: FakeAs = undefined;
+    var m: Mm = undefined;
+    var chunk: Chunk = undefined;
+    var pages: Pages = undefined;
+    try pinFixture(&m, &fake, &chunk, &pages, va, mem);
+    defer m.chunks.deinit(gpa);
+    defer m.doomed.deinit(gpa);
+
+    // Past the one mapped page: not translatable, so no pin and no stray
+    // reference left behind.
+    try testing.expectEqual(@as(?Mm.Pinned, null), m.pin(va, 2 * page));
+    try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
 }

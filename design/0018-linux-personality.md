@@ -19,7 +19,7 @@ h9 runs Linux ELF binaries next to 9front ones, in the same machine. A process's
 
 ## Background
 
-h9 already has the shape of a syscall-translating kernel. Each guest process runs in user mode on a vCPU, a syscall exits to the host, and a kernel in the host serves it (DESIGN.md, Architecture). gVisor has the same shape: its KVM platform is h9's vmm layer, and its Sentry is drawterm's kernel. What's missing is a second ABI.
+h9 already has the shape of a syscall-translating kernel. Each guest process runs in user mode on a vCPU, a syscall exits to the host, and a kernel in the host serves it (SPEC.md, Architecture). gVisor has the same shape: its KVM platform is h9's vmm layer, and its Sentry is drawterm's kernel. What's missing is a second ABI.
 
 Linux binaries trap with the same instructions as 9front's: `SVC` on arm64 and `SYSCALL` on amd64. So a Linux syscall already arrives as the vmm's `.syscall` exit, with every register the Linux ABI uses already in the Ureg:
 
@@ -301,7 +301,7 @@ Cases:
 1. A personality on the process record, the dispatch switch in `Machine.loop`, the ELF loader, the stack and auxv, the minimal vDSO, `Backend.hwcaps`. Static musl hello, on arm64 and then amd64.
 2. File, process, and terminal calls, with amd64's older forms; the errno and `stat` mapping; exit statuses; `wait4`; `vfork`; signals for the common notes, and stops with the console's `ISIG` handling; devlinux and the Linux view, with Chan-relative dirfd walks; root detection in `--root`. busybox and the mixed pipelines. Needs [symlinks-in-root](0034-symlinks-in-root.md).
 3. The vmm range `unmap` and `protect`, sorted regions on HVF, and the emulator's virtual-TLB mode; the VMA layer with lazy pages, faulted in by `guestmem` too; `PT_INTERP`. Dynamic binaries, and `pip --version` on the emulator.
-4. DESIGN.md gets a "Linux personality" section.
+4. SPEC.md gets a "Linux personality" section.
 
 ## Open issues
 
@@ -347,7 +347,7 @@ Cases:
   - `initdb` refuses to run as root, and `su` needs `setgroups`, so the set-id calls move out of Stubbed. Each process keeps real, effective and saved uids and gids and its supplementary groups, inherited across `fork` and `exec`; root may set any, others only among their own. `stat` reports files as owned by the caller's effective ids, since PostgreSQL checks that it owns its data directory.
   - The postmaster's interlock is a System V shared memory segment, which the table left absent. `shmget`, `shmat`, `shmdt` and `shmctl` are built on chunk pages.
   - Its locks are musl's process-shared semaphores, futexes in its anonymous `MAP_SHARED` memory. A futex there is keyed by the pages, not the `Mm`. And `fork` shared only the chunks the parent had touched, so the shared buffers a backend read into were its own: another backend saw a page as zeros ("index contains unexpected zero page"). `fork` now makes the untouched chunks of a shared mapping first.
-  - The latch is `signalfd` with `epoll`, and timeouts are `setitimer`. Both are built (see DESIGN.md).
+  - The latch is `signalfd` with `epoll`, and timeouts are `setitimer`. Both are built (see SPEC.md).
   - `pgbench -i` on an HVF Mac found `fallocate` absent, which PostgreSQL 17 doesn't fall back from. Mode 0 now grows the file with a truncate up, `FALLOC_FL_KEEP_SIZE` does nothing, and the hole modes are `EOPNOTSUPP`. The size it compares against was read from the wrong offset of the stat buffer, and so were `fcntl`'s `SEEK_END` lock base and the shared-mapping write-back's file length, which could write a chunk's pages past the file's end.
   - Named `AF_UNIX` sockets, PostgreSQL's default for local connections, came next (see [linux-net](0050-linux-net.md)'s Updates), so psql connects without `-h`. IPv6 `::1` doesn't listen ("I/O error"). The postmaster's fd probe trips 9front's "process exceeds 100 file descriptors" warning, ten times. `initdb` takes about a minute on the arm64 emulator.
 - 2026-11-08: age 1.2.1 and passage 1.7.4 (Alpine's `age`, `passage`, `git`, `tree`) on the amd64 emulator: keygen, encryption to keys, files and passphrases, and every passage command but the clipboard and QR ones, with its git store. What they needed:
@@ -390,3 +390,4 @@ Cases:
   - Unix sockets, which Wine's client uses to talk to wineserver, are in [linux-net](0050-linux-net.md).
   - Still open: Wine has no display driver here, so it runs console programs only (a `winedraw.drv` user driver over devdraw is the likely way to windows), and `pwritev2` and `userfaultfd` are `ENOSYS`, which Wine falls back from.
 - 2026-11-09: No `--debug` flag was built. An absent call shows up in `--trace` instead, as `= -ENOSYS (absent)`, or `(unknown)` for a number outside the table. The Proposal's two `--debug` mentions, for absent calls and for a fault past `--memory`, have nothing behind them.
+- 2026-11-09: Private file mappings were read whole at `mmap`, so each process paid for every page of every shared library it loaded, about 400 MB for a WebKitGTK process, though it touches far less. They're now filled chunk by chunk as the Proposal planned: a private file mapping not overlaid on shared pages keeps a reference to the file's channel (`kc.chanGet`, so the fd can be closed), and a chunk's pages in it are read from the file when the chunk is allocated, on a fault or a syscall's touch (`Vma.src`, `Mm.populate`). The parts that fall in chunks allocated already are read at `mmap`. `MADV_DONTNEED` reads such pages from the file again, as Linux does, rather than zeroing them, and `mremap` keeps the file offset, so a grown mapping reads on into the file. [webframe](https://github.com/tractordev/webframe)'s hello example went from about 4.3 s to 3.7 s on the native backend in a release build, with about 1 GB read across its processes instead of about 1.6 GB.

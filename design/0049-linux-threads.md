@@ -23,7 +23,7 @@ The Linux personality runs one vCPU per address space at a time: a `vfork` paren
 
 That's not enough once two vCPUs run in one address space. A thread that calls `munmap` while another thread is in guest code leaves the other vCPU with stale TLB entries. If the host frees those pages and reuses them for another process, the running thread reads and writes that process's memory.
 
-On the emulator, threads can't run at once at all. Unicorn generates code for a single-threaded context, so guest atomics are plain loads and stores, and `emu.zig` already runs guest code on one engine at a time under its GuestLock (DESIGN.md, Atomics). A prototype confirmed it for Linux threads: four engines incrementing one counter with arm64 `ldaxr`/`stlxr` lost 69% of 8,000,000 increments, and with amd64 `lock incl` lost 72%.
+On the emulator, threads can't run at once at all. Unicorn generates code for a single-threaded context, so guest atomics are plain loads and stores, and `emu.zig` already runs guest code on one engine at a time under its GuestLock (SPEC.md, Atomics). A prototype confirmed it for Linux threads: four engines incrementing one counter with arm64 `ldaxr`/`stlxr` lost 69% of 8,000,000 increments, and with amd64 `lock incl` lost 72%.
 
 That lock passes only at exits, so a thread that loops without making a syscall holds every other thread off forever. 9front programs get away with it, since their runtimes make calls between short spins. Linux programs don't: a pthread spinning on a flag, or a Go goroutine in a call-free loop while the GC waits to stop the world, hangs the process.
 
@@ -58,7 +58,7 @@ The vmm gains a shootdown for address spaces with several vCPUs:
 
 ### Time-slicing on the emulator
 
-The emulator's GuestLock passes on a timer as well as at exits, so a thread spinning in guest code is preempted and others run. A preemption is a request the engine acts on itself: the kicker sets a flag on the vCPU, and a `UC_HOOK_BLOCK` hook on the engine's own thread sees it at the next block and calls `uc_emu_stop`, which leaves the PC exact. A kick never calls `uc_emu_stop` from another thread. DESIGN.md already warns that a cross-thread stop can report an earlier block's PC, and the prototype confirmed it: Go crashed with wild reads in 6 of 6 runs at 1 ms slices that way, with signals off, and ran cleanly in 11 of 11 with the in-engine stop.
+The emulator's GuestLock passes on a timer as well as at exits, so a thread spinning in guest code is preempted and others run. A preemption is a request the engine acts on itself: the kicker sets a flag on the vCPU, and a `UC_HOOK_BLOCK` hook on the engine's own thread sees it at the next block and calls `uc_emu_stop`, which leaves the PC exact. A kick never calls `uc_emu_stop` from another thread. SPEC.md already warns that a cross-thread stop can report an earlier block's PC, and the prototype confirmed it: Go crashed with wild reads in 6 of 6 runs at 1 ms slices that way, with signals off, and ran cleanly in 11 of 11 with the in-engine stop.
 
 The slice is a few milliseconds, and the timer only fires while another vCPU is waiting for the lock or the running one has a signal pending. `tgkill`'s kick of a running thread is the same flag. [zig-interpreter](0019-zig-interpreter.md) can test the flag between blocks at no cost.
 
@@ -123,7 +123,7 @@ Demo: a Go program built with `GOOS=linux GOARCH=arm64` runs natively on HVF.
 2. futex, robust lists. pthreads with mutexes and condition variables.
 3. The shootdown in both backends, and its stress test. Time-slicing on the emulator, with the in-engine stop.
 4. Per-thread signals and `tgkill`. Go, once linux-net's epoll and eventfd are built.
-5. DESIGN.md's Linux personality section gains threads.
+5. SPEC.md's Linux personality section gains threads.
 
 ## Open issues
 

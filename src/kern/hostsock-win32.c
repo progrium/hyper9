@@ -155,6 +155,12 @@ h9so_connect_nb(int fd, unsigned char *raddr, unsigned short rport)
 }
 
 void
+h9so_close(int fd)
+{
+	closesocket(fd);
+}
+
+void
 h9so_shutdown(int fd, char *how)
 {
 	int h;
@@ -239,6 +245,44 @@ h9so_linuxerrno(int e)
 	case WSAESHUTDOWN: return 32;
 	}
 	return 5;
+}
+
+/*
+ * The text a Linux host gives for a Winsock error, or nil for any other
+ * error. drawterm's oserrstr asks first, so a guest reads "Connection
+ * refused" on every host, not Windows's sentence for it, which is longer
+ * than an exits string and gets cut off.
+ */
+char*
+h9so_errstr(int e)
+{
+	switch(e){
+	case WSAEINTR: return "Interrupted system call";
+	case WSAEBADF: return "Bad file descriptor";
+	case WSAEACCES: return "Permission denied";
+	case WSAEINVAL: return "Invalid argument";
+	case WSAEWOULDBLOCK: return "Resource temporarily unavailable";
+	case WSAEINPROGRESS: return "Operation now in progress";
+	case WSAEALREADY: return "Operation already in progress";
+	case WSAENOTSOCK: return "Socket operation on non-socket";
+	case WSAEMSGSIZE: return "Message too long";
+	case WSAEAFNOSUPPORT: return "Address family not supported by protocol";
+	case WSAEADDRINUSE: return "Address already in use";
+	case WSAEADDRNOTAVAIL: return "Cannot assign requested address";
+	case WSAENETDOWN: return "Network is down";
+	case WSAENETUNREACH: return "Network is unreachable";
+	case WSAECONNABORTED: return "Software caused connection abort";
+	case WSAECONNRESET: return "Connection reset by peer";
+	case WSAENOBUFS: return "No buffer space available";
+	case WSAEISCONN: return "Transport endpoint is already connected";
+	case WSAENOTCONN: return "Transport endpoint is not connected";
+	case WSAESHUTDOWN: return "Cannot send after transport endpoint shutdown";
+	case WSAETIMEDOUT: return "Connection timed out";
+	case WSAECONNREFUSED: return "Connection refused";
+	case WSAEHOSTDOWN: return "Host is down";
+	case WSAEHOSTUNREACH: return "No route to host";
+	}
+	return nil;
 }
 
 int

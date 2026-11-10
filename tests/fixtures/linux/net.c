@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/select.h>
@@ -590,6 +592,56 @@ static void scm_rights(void) {
 	printf("ok scm_rights\n");
 }
 
+/* WebKit's IPC: a SOCK_SEQPACKET socket pair sends each message as a
+ * gathered iovec and reads it back whole, one message per read; the
+ * ends are sockets (fstat, SO_TYPE); SO_PASSCRED on the reader gets
+ * SCM_CREDENTIALS naming the sender; and an end passed with
+ * SCM_RIGHTS is still a socket in the receiver. */
+static void seqpacket(void) {
+	int sv[2], sv2[2], fd, on = 1, t;
+	socklen_t tl = sizeof t;
+	struct stat st;
+	char h[4] = "head", body[6] = "body!", b[64];
+	CHECK("seqpacket", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+	CHECK("seqpacket", fstat(sv[0], &st) == 0 && S_ISSOCK(st.st_mode));
+	CHECK("seqpacket", getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &t, &tl) == 0 && t == SOCK_SEQPACKET);
+	struct iovec out[2] = {{h, 4}, {body, 5}};
+	CHECK("seqpacket", writev(sv[0], out, 2) == 9 && write(sv[0], "x", 1) == 1);
+	struct iovec in[2] = {{b, 2}, {b + 2, 30}};
+	CHECK("seqpacket", readv(sv[1], in, 2) == 9 && !memcmp(b, "headbody!", 9));
+	CHECK("seqpacket", read(sv[1], b, sizeof b) == 1 && b[0] == 'x');
+
+	CHECK("seqpacket", setsockopt(sv[1], SOL_SOCKET, SO_PASSCRED, &on, sizeof on) == 0);
+	on = 0;
+	CHECK("seqpacket", getsockopt(sv[1], SOL_SOCKET, SO_PASSCRED, &on, &tl) == 0 && on == 1);
+	CHECK("seqpacket", write(sv[0], "c", 1) == 1);
+	char cbuf[CMSG_SPACE(sizeof(struct ucred))];
+	struct iovec iov = {b, sizeof b};
+	struct msghdr m = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = cbuf, .msg_controllen = sizeof cbuf};
+	CHECK("seqpacket", recvmsg(sv[1], &m, 0) == 1 && b[0] == 'c');
+	struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+	CHECK("seqpacket", c && c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_CREDENTIALS);
+	struct ucred u;
+	memcpy(&u, CMSG_DATA(c), sizeof u);
+	CHECK("seqpacket", u.pid == getpid() && u.uid == getuid());
+
+	CHECK("seqpacket", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv2) == 0);
+	CHECK("seqpacket", send_fd(sv[0], 'r', sv2[1]) == 1 && close(sv2[1]) == 0);
+	m.msg_controllen = sizeof cbuf;
+	char rb[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int))];
+	m.msg_control = rb;
+	m.msg_controllen = sizeof rb;
+	CHECK("seqpacket", recvmsg(sv[1], &m, 0) == 1 && b[0] == 'r');
+	fd = -1;
+	for (c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c))
+		if (c->cmsg_type == SCM_RIGHTS) memcpy(&fd, CMSG_DATA(c), sizeof fd);
+	CHECK("seqpacket", fd >= 0 && fstat(fd, &st) == 0 && S_ISSOCK(st.st_mode));
+	CHECK("seqpacket", setsockopt(fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof on) == 0);
+	CHECK("seqpacket", write(sv2[0], "p", 1) == 1 && read(fd, b, sizeof b) == 1 && b[0] == 'p');
+	close(fd), close(sv2[0]), close(sv[0]), close(sv[1]);
+	printf("ok seqpacket\n");
+}
+
 /* getifaddrs (netlink's link and address dumps) lists loopback, up,
  * with 127.0.0.1; a listener bound to 127.0.0.1 reports that address,
  * not the wildcard. */
@@ -612,6 +664,23 @@ static void ifaddrs(void) {
 	printf("ok ifaddrs\n");
 }
 
+/* GLib sizes a netlink read with MSG_PEEK|MSG_TRUNC first: the peek
+ * returns the full length and leaves the message for the real read. */
+static void netlink_peek(void) {
+	int s = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	CHECK("netlink_peek", s >= 0);
+	struct { struct nlmsghdr h; struct rtgenmsg g; } req = {
+		.h = {.nlmsg_len = sizeof req, .nlmsg_type = RTM_GETLINK, .nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP, .nlmsg_seq = 1},
+		.g = {.rtgen_family = AF_UNSPEC}};
+	CHECK("netlink_peek", send(s, &req, sizeof req, 0) == sizeof req);
+	char one[1], buf[65536];
+	int n = recv(s, one, 1, MSG_PEEK | MSG_TRUNC);
+	CHECK("netlink_peek", n > (int)sizeof(struct nlmsghdr));
+	CHECK("netlink_peek", recv(s, buf, sizeof buf, 0) == n);
+	close(s);
+	printf("ok netlink_peek\n");
+}
+
 int main(int argc, char **argv) {
 	signal(SIGPIPE, SIG_IGN);
 	setvbuf(stdout, 0, _IONBF, 0);
@@ -625,6 +694,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
 		if (all || !strcmp(n, "unix_sock")) unix_sock();
 		if (all || !strcmp(n, "scm_rights")) scm_rights();
+		if (all || !strcmp(n, "seqpacket")) seqpacket();
 		if (!strcmp(n, "tcp_echo") || !strcmp(n, "net")) tcp_echo();
 		if (!strcmp(n, "nb_connect") || !strcmp(n, "net")) nb_connect();
 		if (!strcmp(n, "tcp_et") || !strcmp(n, "net")) tcp_et();
@@ -636,6 +706,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "many") || !strcmp(n, "net")) many();
 		if (!strcmp(n, "disabled")) disabled();
 		if (!strcmp(n, "ifaddrs")) ifaddrs();
+		if (!strcmp(n, "netlink_peek")) netlink_peek();
 		if (!strcmp(n, "udp_twice") && i + 1 < argc) udp_twice(atoi(argv[++i]));
 	}
 	return failed;

@@ -61,35 +61,6 @@ readline-8.2.13-r1.apk 29e35b5876481d0d1d4f60fdfdbd59a0c974d86e6355f7c38ea855186
 libncursesw-6.5_p20250503-r0.apk b1262e30c3eb0c9a9b74dba4f33c36ca37e33c4a060429af22f371236bfd4d61
 "
 
-# v86 for the browser host's x86 backend (design/0012-browser-host.md):
-# v86.wasm from the npm release, loaded beside h9.wasm. BSD-2-Clause.
-V86_VERSION=0.5.473
-V86_URL=https://registry.npmjs.org/v86/-/v86-$V86_VERSION.tgz
-V86_SHA256=364ab67a68c1d83646e2ddf7caf73c24574694a132b2b43689ad0f72e7242636
-V86_WASM_SHA256=2f0c4150f266415b754a84a32e6f8e4c975a1d3abb94c78b047fa30027db1ef1
-# This release's layout, which src/web/h9-web.js and src/vmm/v86.zig
-# hardcode; tests/web/v86-layout.mjs checks them against v86.wasm.
-# Register block offsets (src/rust/cpu/global_pointers.rs), the names as
-# in src/vmm/v86.zig's regs.
-V86_REGS="
-reg32 64
-segment_access_bytes 512
-instruction_pointer 556
-cr 580
-cpl 612
-in_hlt 616
-sreg 668
-segment_is_null 724
-segment_offsets 736
-segment_limits 768
-is_32 804
-stack_size_32 808
-memory_size 812
-"
-# Function table: JIT slots after v86's own (src/rust/jit.rs).
-V86_TABLE_SIZE=1924
-V86_TABLE_OFFSET=1024
-
 # Wine's headers, for winedraw (design/wine-draw.md): a display driver is
 # built against one release's driver interface (WINE_GDI_DRIVER_VERSION),
 # so this is the release the driver targets. Only include/ is fetched.

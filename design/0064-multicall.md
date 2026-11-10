@@ -181,7 +181,7 @@ Integration cases tagged `[multicall]`, run against the slim tree:
 2. The set, including the directory commands `rc`, `grep`, `awk`, `diff`, `gzip`, and `exportfs`, and the build-time checks: library overrides, initialised library globals, thread programs, and `-!` as a first argument.
 3. `zig build slim`, with hard links and stubs.
 4. The integration cases and the differential corpus.
-5. docs/userland.md section 4 and the README's build commands. DESIGN.md: the slim tree under "Filesystem, boot, and I/O". Set `status: implemented`.
+5. docs/userland.md section 4 and the README's build commands. SPEC.md: the slim tree under "Filesystem, boot, and I/O". Set `status: implemented`.
 
 ## Open issues
 

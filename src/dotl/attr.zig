@@ -160,6 +160,8 @@ pub fn errno(msg: []const u8) u16 {
         .{ "file system full", E.NOSPC },
         .{ "no space left", E.NOSPC },
         .{ "read-only file system", E.ROFS },
+        // exportfs -R's "file system read only".
+        .{ "read only", E.ROFS },
         .{ "virtual memory allocation failed", E.NOMEM },
         .{ "kernel allocate failed", E.NOMEM },
         .{ "no memory", E.NOMEM },

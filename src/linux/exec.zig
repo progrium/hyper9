@@ -37,8 +37,13 @@ pub const Args = struct {
 /// registers that say the same; the rest are left for the program to
 /// discover by trying (design/0018, "Loading"). On amd64 and i386,
 /// AT_HWCAP is CPUID.1:EDX, the baseline x86-64 features, which both the
-/// emulator and v86 have (design/0105-linux-i386.md).
-pub fn hwcap(arch: vmm.Arch) u64 {
+/// emulator has (design/0105-linux-i386.md). `backend` adds the
+/// optional features it runs (vmm.Backend.hwcaps).
+pub fn hwcap(arch: vmm.Arch, backend: vmm.Backend) u64 {
+    return baseHwcap(arch) | backend.hwcaps(arch);
+}
+
+fn baseHwcap(arch: vmm.Arch) u64 {
     return switch (arch) {
         .arm64 => (1 << 0) | (1 << 1) | hwcap_cpuid, // HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID
         else => 0x078bfbff,
@@ -77,7 +82,7 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
         .phent = a.exe.ehdr.phentsize,
         .interp_base = interp_base,
         .vdso = vdso,
-        .hwcap = if (a.hwcap != 0) a.hwcap else hwcap(a.arch),
+        .hwcap = if (a.hwcap != 0) a.hwcap else hwcap(a.arch, backend),
         .hwcap2 = a.hwcap2,
         .random = a.random,
         .execfn = a.path,
@@ -110,11 +115,12 @@ pub const hwcap_cpuid: u64 = 1 << 11;
 /// ID_AA64 registers to pick the host CPU's features, and an unhandled
 /// read was a fault.
 ///
-/// The values say what `hwcap` says, the same on every backend: MIDR is
-/// an implementer-0 Armv8 part (as /proc/cpuinfo's), MPIDR has only its
-/// RES1 bit, and every feature register reads 0, which is Armv8.0 with
-/// FP and Advanced SIMD (their fields are 0 when implemented).
-pub fn emulateIdRead(insn: u32) ?struct { rt: u5, value: u64 } {
+/// The values say what `hwcap`, the program's AT_HWCAP, says: MIDR is an
+/// implementer-0 Armv8 part (as /proc/cpuinfo's), MPIDR has only its RES1
+/// bit, ID_AA64ISAR0 has the fields of the optional features `hwcap`
+/// names, and every other feature register reads 0, which is Armv8.0
+/// with FP and Advanced SIMD (their fields are 0 when implemented).
+pub fn emulateIdRead(insn: u32, hwcap_bits: u64) ?struct { rt: u5, value: u64 } {
     // MRS Xt, (op0 3, op1 0, CRn 0, CRm, op2): the ID space Linux emulates.
     if (insn & 0xffff_f000 != 0xd538_0000) return null;
     const crm: u4 = @truncate(insn >> 8);
@@ -127,24 +133,41 @@ pub fn emulateIdRead(insn: u32) ?struct { rt: u5, value: u64 } {
             6 => 0, // REVIDR_EL1
             else => return null,
         },
+        6 => if (op2 == 0) isar0(hwcap_bits) else 0,
         // ID_AA64PFR0 and up, and the AArch32 ones, which read as 0 on an
         // AArch64-only CPU's EL0 as Linux sanitizes them.
-        1...7 => 0,
+        1...5, 7 => 0,
         else => return null,
     };
     return .{ .rt = rt, .value = value };
 }
 
+/// ID_AA64ISAR0_EL1 for the AT_HWCAP bits `h`: AES (bits 7:4) 1, or 2
+/// with PMULL; SHA1 (11:8) 1; SHA2 (15:12) 1; CRC32 (19:16) 1; and Atomic
+/// (23:20) 2.
+fn isar0(h: u64) u64 {
+    var v: u64 = 0;
+    if (h & vmm.hwcap_arm64_aes != 0) v |= @as(u64, if (h & vmm.hwcap_arm64_pmull != 0) 2 else 1) << 4;
+    if (h & vmm.hwcap_arm64_sha1 != 0) v |= 1 << 8;
+    if (h & vmm.hwcap_arm64_sha2 != 0) v |= 1 << 12;
+    if (h & vmm.hwcap_arm64_crc32 != 0) v |= 1 << 16;
+    if (h & vmm.hwcap_arm64_atomics != 0) v |= 2 << 20;
+    return v;
+}
+
 test "emulateIdRead decodes mrs of the ID registers" {
     // mrs x3, midr_el1
-    const midr = emulateIdRead(0xd5380003).?;
+    const midr = emulateIdRead(0xd5380003, 0).?;
     try std.testing.expectEqual(@as(u5, 3), midr.rt);
     try std.testing.expectEqual(@as(u64, 0x000f_0000), midr.value);
     // mrs x0, id_aa64isar0_el1 (CRm 6, op2 0)
-    try std.testing.expectEqual(@as(u64, 0), emulateIdRead(0xd5380600).?.value);
+    try std.testing.expectEqual(@as(u64, 0), emulateIdRead(0xd5380600, 0).?.value);
+    // ID_AA64ISAR0 says what AT_HWCAP does.
+    try std.testing.expectEqual(@as(u64, 0x21_0000), emulateIdRead(0xd5380600, vmm.hwcap_arm64_crc32 | vmm.hwcap_arm64_atomics).?.value);
+    try std.testing.expectEqual(@as(u64, 0x21_1120), emulateIdRead(0xd5380600, 0x1f8).?.value);
     // mrs x1, mpidr_el1
-    try std.testing.expectEqual(@as(u64, 0x8000_0000), emulateIdRead(0xd53800a1).?.value);
+    try std.testing.expectEqual(@as(u64, 0x8000_0000), emulateIdRead(0xd53800a1, 0).?.value);
     // mrs x0, tpidr_el0 isn't one; nor is a nop.
-    try std.testing.expect(emulateIdRead(0xd53bd040) == null);
-    try std.testing.expect(emulateIdRead(0xd503201f) == null);
+    try std.testing.expect(emulateIdRead(0xd53bd040, 0) == null);
+    try std.testing.expect(emulateIdRead(0xd503201f, 0) == null);
 }

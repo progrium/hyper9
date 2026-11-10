@@ -40,6 +40,10 @@ extern void h9_gui_screeninit(void);	/* the backend's */
 extern char *h9_gui_clipread(void);
 extern int h9_gui_clipwrite(char*);
 extern void h9_kern_isolated(void (*)(void*), void*);	/* proc.c */
+#ifdef H9_GFX_X11
+extern void h9_gui_setcursor(void);
+extern void h9_gui_mouseset(Point);
+#endif
 
 static void
 guiinit(void *arg)
@@ -62,7 +66,33 @@ screeninit(void)
 	h9_kern_isolated(guiinit, nil);
 	screenputs = 0;
 	screenready = 1;
+#ifdef H9_GFX_X11
+	/* The cursor a guest set before the screen opened. */
+	h9_gui_setcursor();
+#endif
 }
+
+#ifdef H9_GFX_X11
+/*
+ * X11's cursor calls use the display, which screeninit opens: a guest that
+ * binds /dev/mouse before /dev/draw (rio's namespace does) set the cursor
+ * with no display, which crashed in Xlib. Until the screen is open they do
+ * nothing; screeninit sets the cursor then.
+ */
+void
+setcursor(void)
+{
+	if(screenready)
+		h9_gui_setcursor();
+}
+
+void
+mouseset(Point xy)
+{
+	if(screenready)
+		h9_gui_mouseset(xy);
+}
+#endif
 
 /*
  * drawterm's backends call cpubody once the GUI is up, to run the rest of
