@@ -1,7 +1,8 @@
 # src/jit: the emulator's JIT layer
 
-Shared by ha64 (arm64 guests) and h86 (386 guests). Built with
-`-Demu=zig`; tested with `zig build vcpu`.
+Shared by ha64 (arm64 guests), h86 (386 guests), and hx64 (amd64 guests,
+in progress on the `hx64` branch). Built with `-Demu=zig`; tested with
+`zig build vcpu`.
 
 The specs describe what's built: [spec/jit.md](../../spec/jit.md) for this
 layer, and [spec/h86.md](../../spec/h86.md) and [spec/ha64.md](../../spec/ha64.md)
@@ -20,6 +21,37 @@ other work asks the owner for changes rather than editing it.
 | `../interp/mem.zig` | The TLB entry and table layout, the inline check, and the slow-path signatures (final); `Map` is a stand-in address space | the JIT runtime thread |
 | `frontend.zig` | What a front end gives: `lift`, `interp`, its flag group | the IR thread |
 | `emitter.zig`, `alloc.zig` | What an emitter takes and gives, and `Allocation` (`spillAll` until linear scan) | the IR thread; `regalloc.zig` belongs to the arm64 emitter thread |
+
+## hx64's contracts
+
+hx64 is h86 in long mode ([hcpu](../../design/hcpu.md), hx64), built in
+parallel workstreams on the `hx64` branch
+(`/mnt/project-files/hx64/plan.md` in the project). These files fix what
+they code against. The contracts thread (S0) owns them: ask it for a
+change, in a small commit, rather than editing them.
+
+| File | What it fixes |
+| --- | --- |
+| `../interp/x86/mode.zig` | `Mode` (`.legacy`, `.long`), the comptime parameter of the table, decoder, T0, Cpu, and lifter |
+| `../interp/x86/flags.zig` (`Lazy`), `ir.zig` (`LazyRecord`, `eflags.*` at `i64`) | The lazy flags record: 64-bit operands at record offsets 4, 12, and 20, sizes 1 to 8, with `Flags` 8-aligned |
+| `../interp/x86/decode.zig` (`Inst64`, `Rex`, `InstOf`, `decodeIn`) | A long-mode instruction's shape: REX, 64-bit `disp` and `imm`, `rip_rel`, `addr32`, and 4-bit registers |
+| `../interp/x86/table.zig` (`Entry.d64`, `inv64`, `rexw`, `slotIn`) | The table's long-mode fields |
+| `../interp/x86/cpu.zig` (`Cpu64`, `Exit64`, `CpuOf`, `ExitOf`) | hx64's register file and exits |
+| `../interp/x86/exec.zig` (`runIn`, `stepIn`), `../interp/x86/tlb.zig` (`runIn`) | T0's entry points by mode |
+| `x86/lift.zig` (`frontendFor`, `liftIn`) | The lifter's entry points by mode |
+| `../vmm/zemu.zig` (`Emu` over three Guests) | The Guest interface, with hx64 for amd64 |
+
+Each workstream owns the code behind its entry points:
+
+| Workstream | Owns |
+| --- | --- |
+| S0, contracts | The files above, `emit/fuzz.zig`'s and `emit/cases.zig`'s lazy-flags cases, and this table |
+| A, decoder and table | `../interp/x86/table.zig`'s long-mode rows and lookup, `../interp/x86/decode.zig`'s `decodeIn(.long)` and `effects` |
+| B, T0 integer | `../interp/x86/exec.zig`, `../interp/x86/cpu.zig` (but `Cpu64`'s fields), `../interp/x86/flags.zig` (but `Lazy`) |
+| C, x87 and SSE | `../interp/x86/sse.zig`, `../interp/x86/x87.zig` |
+| D, oracles and tests | `../../tools/x86check/`, `../../tools/x64inv.zig`, `check/gen_x86.zig`, `check/x86.zig`, `check/litmus_x86.zig`, `../vmm/lockstep.zig`, `../../tests/x64.zig` |
+| E, the Guest | `../vmm/hx64.zig`, and hx64's part of `../vmm/zemu.zig` |
+| F, the lifter | `x86/lift.zig`, `x86/flags.zig`, `x86/helpers.zig`, `x86/t1.zig`, `x86/check.zig` |
 
 ## Rules of the IR
 
@@ -62,8 +94,11 @@ other work asks the owner for changes rather than editing it.
   correct.
 - `pending.flags` with aux2 = 2 writes eflags lazily: an `ir.LazyRecord` of
   the producing op's operands at aux + 4 (h86's flags.Lazy layout and
-  kinds), with the bits word left alone. It doesn't mix with aux2 = 1 at one
-  offset in a region. Readers of the bits word materialize first.
+  kinds: a 4-byte header, then a, b, and res as u64s, narrower operands
+  zero-extended), with the bits word left alone. It doesn't mix with
+  aux2 = 1 at one offset in a region. Readers of the bits word
+  materialize first. `eflags.*` take i8 to i64 operands; an emitter that
+  doesn't lower a width falls back to `evalOpC`.
 - `call.helper` with `aux2 = ir.helper_no_regs` promises that the helper
   touches none of the Cpu bytes the region names, so emitters may skip the
   write-back and reload around it, and pending flags stay pending.

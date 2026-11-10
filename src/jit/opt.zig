@@ -333,7 +333,7 @@ fn subPredX86(cc: u64) ?ir.Pred {
 /// merges its mask into the word at aux, keeping the other bits, so it
 /// covers nothing but an earlier pending.flags of the same kind at the same
 /// offset (one of another kind is written first). Kind 2 overwrites the
-/// 16-byte record at aux + 4, so it covers writes inside that, and an
+/// record (ir.LazyRecord) at aux + 4, so it covers writes inside that, and an
 /// earlier kind 2 at the same offset.
 fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
     const W = struct {
@@ -359,7 +359,7 @@ fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
         const w: ?W = switch (i.op) {
             .setreg => .{ .off = i.aux, .size = sizeOf(insts[i.a].ty), .merge = null },
             .@"pending.flags" => if (i.aux2 == 2)
-                .{ .off = i.aux + 4, .size = 16, .merge = null }
+                .{ .off = i.aux + 4, .size = @sizeOf(ir.LazyRecord), .merge = null }
             else
                 .{ .off = i.aux, .size = 4, .merge = i.aux2 },
             else => null,

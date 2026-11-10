@@ -26,7 +26,7 @@ pub const TlbMem = struct {
     }
 
     /// `translate` on a TLB hit, or null.
-    pub inline fn hit(m: *TlbMem, va: u32, access: cpu_mod.Access) ?[*]u8 {
+    pub inline fn hit(m: *TlbMem, va: u64, access: cpu_mod.Access) ?[*]u8 {
         const h = switch (access) {
             .read => mem.fast(m.tlb, va, 1, false),
             .write => mem.fast(m.tlb, va, 1, true),
@@ -35,7 +35,9 @@ pub const TlbMem = struct {
         return @ptrFromInt(h);
     }
 
-    pub fn translate(m: *TlbMem, va: u32, access: cpu_mod.Access) ?[*]u8 {
+    /// The host address of `va`, filling the TLB on a miss: 32-bit
+    /// addresses for h86, 64-bit ones for hx64.
+    pub fn translate(m: *TlbMem, va: u64, access: cpu_mod.Access) ?[*]u8 {
         const h = switch (access) {
             .read => mem.fast(m.tlb, va, 1, false),
             .write => mem.fast(m.tlb, va, 1, true),
@@ -66,4 +68,9 @@ pub const TlbMem = struct {
 /// exec.run over a TlbMem.
 pub fn run(c: *cpu_mod.Cpu, m: *TlbMem, opts: exec.Options) cpu_mod.Exit {
     return exec.run(c, m, opts);
+}
+
+/// exec.runIn over a TlbMem.
+pub fn runIn(comptime mode: cpu_mod.Mode, c: *cpu_mod.CpuOf(mode), m: *TlbMem, opts: exec.Options) cpu_mod.ExitOf(mode) {
+    return exec.runIn(mode, c, m, opts);
 }

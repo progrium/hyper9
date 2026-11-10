@@ -328,7 +328,7 @@ pub fn planExtended(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, vir
         }
         if (i.op == .@"pending.flags") {
             // Lazy (aux2 2): a record after the word, which stays as it is.
-            if (i.aux2 == 2) try markBad(gpa, &words, i.aux + 4, 16) else try access(gpa, &words, i.aux, 4);
+            if (i.aux2 == 2) try markBad(gpa, &words, i.aux + 4, @sizeOf(ir.LazyRecord)) else try access(gpa, &words, i.aux, 4);
             continue;
         }
         if (i.op != .getreg and i.op != .setreg) continue;

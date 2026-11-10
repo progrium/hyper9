@@ -33,6 +33,7 @@ const flags = @import("flags.zig");
 const x87 = @import("x87.zig");
 const sse = @import("sse.zig");
 
+pub const Mode = cpu_mod.Mode;
 pub const Cpu = cpu_mod.Cpu;
 pub const Exit = cpu_mod.Exit;
 pub const Access = cpu_mod.Access;
@@ -65,6 +66,24 @@ pub fn step(c: *Cpu, mem: anytype) ?Exit {
     x.step() catch return x.exit;
     c.retired += 1;
     return null;
+}
+
+/// `run` in `mode`. Long mode (hx64) doesn't execute yet: its first
+/// instruction raises #UD, with RIP at it. `mem` translates 64-bit
+/// addresses there.
+pub fn runIn(comptime mode: Mode, c: *cpu_mod.CpuOf(mode), mem: anytype, opts: Options) cpu_mod.ExitOf(mode) {
+    return switch (mode) {
+        .legacy => run(c, mem, opts),
+        .long => .{ .exception = cpu_mod.vec_ud },
+    };
+}
+
+/// `step` in `mode`; long mode as `runIn`.
+pub fn stepIn(comptime mode: Mode, c: *cpu_mod.CpuOf(mode), mem: anytype) ?cpu_mod.ExitOf(mode) {
+    return switch (mode) {
+        .legacy => step(c, mem),
+        .long => .{ .exception = cpu_mod.vec_ud },
+    };
 }
 
 /// Decoded instructions by address, direct-mapped: 16384 of them (1 MiB),
@@ -1619,6 +1638,13 @@ fn runCode(code: []const u8, c: *Cpu) !Exit {
     c.eip = 0x10000;
     c.r[4] = 0x10000 + 3 * page_size;
     return run(c, &m, .{ .budget = 1000 });
+}
+
+test "long mode raises #UD until T0 runs it" {
+    var c: cpu_mod.Cpu64 = .{ .rip = 0x1000 };
+    var m: TestMem = .{ .base = 0, .mem = &.{} };
+    try std.testing.expectEqual(cpu_mod.Exit64{ .exception = cpu_mod.vec_ud }, runIn(.long, &c, &m, .{}));
+    try std.testing.expectEqual(@as(u64, 0x1000), c.rip);
 }
 
 test "a loop, a call, and a syscall" {

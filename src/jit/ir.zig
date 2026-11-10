@@ -272,7 +272,7 @@ pub const Op = enum(u16) {
 
     // ---- x86 flags (pure). A flags value is EFLAGS' CF PF AF ZF SF OF
     // bits in their EFLAGS positions; other bits are 0.
-    /// Flags of a + b, at a's width (8, 16, or 32 bits).
+    /// Flags of a + b, at a's width (8, 16, 32, or 64 bits; 64 for hx64).
     @"eflags.add" = 96,
     @"eflags.sub" = 97,
     /// a + b + CF, a - b - CF, with CF from flags c.
@@ -553,20 +553,30 @@ pub const helper_no_regs: u64 = 1;
 /// stay in step with these.
 pub const LazyKind = enum(u8) { none = 0, add, sub, logic, inc, dec, shl, shr, mul };
 
+/// The operands are 64 bits, zero-extended from narrower ones, at record
+/// offsets 4, 12, and 20: with `aux` 8-aligned, as h86's and hx64's Flags
+/// are, each is 8-aligned.
 pub const LazyRecord = extern struct {
     kind: u8,
-    /// Operand size in bytes: 1, 2, or 4.
+    /// Operand size in bytes: 1, 2, 4, or 8.
     size: u8,
     /// The carry in (ADC, SBB), or the CF INC and DEC keep.
     cin: u8,
     _pad: u8 = 0,
-    a: u32,
-    b: u32,
-    res: u32,
+    a: u64 align(4),
+    b: u64 align(4),
+    res: u64 align(4),
 };
 
 comptime {
-    std.debug.assert(@sizeOf(LazyRecord) == 16 and @offsetOf(LazyRecord, "a") == 4);
+    std.debug.assert(@sizeOf(LazyRecord) == 28 and @offsetOf(LazyRecord, "a") == 4 and
+        @offsetOf(LazyRecord, "b") == 12 and @offsetOf(LazyRecord, "res") == 20);
+}
+
+/// Whether `t` is an operand type of the `eflags.*` ops: i8, i16, i32,
+/// or i64 (long mode).
+pub fn isEflagsInt(t: Type) bool {
+    return t == .i8 or t == .i16 or t == .i32 or t == .i64;
 }
 
 /// The record kind for an eflags op, or null if it has none.
@@ -589,9 +599,9 @@ pub fn lazyKind(op: Op) ?LazyKind {
 /// add and sub get res = a ± b ± cin; logic's res is its value; inc and
 /// dec keep b's CF in cin; shl and shr take (pre, res); mul (ovf, lo).
 pub fn lazyRecord(op: Op, ta: Type, a: u64, b: u64, c: u64) LazyRecord {
-    const m: u32 = @truncate(ta.mask());
-    const x: u32 = @truncate(a);
-    const y: u32 = @truncate(b);
+    const m: u64 = ta.mask();
+    const x: u64 = a;
+    const y: u64 = b;
     const size: u8 = @intCast(ta.bits() / 8);
     const cin: u8 = switch (op) {
         .@"eflags.adc", .@"eflags.sbb" => @intCast(c & 1),
@@ -944,18 +954,18 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
         .@"nzcv.logic" => if (i.ty != .flags or (ta != .i32 and ta != .i64)) return "nzcv.logic takes an i32 or i64",
         .@"eflags.add", .@"eflags.sub" => {
             if (i.ty != .flags) return "flags op gives flags";
-            if ((ta != .i8 and ta != .i16 and ta != .i32) or ta != tb) return "eflags operands must be i8, i16, or i32, of one type";
+            if (!isEflagsInt(ta) or ta != tb) return "eflags operands must be i8, i16, i32, or i64, of one type";
         },
         .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => {
             if (i.ty != .flags) return "flags op gives flags";
-            if ((ta != .i8 and ta != .i16 and ta != .i32) or ta != tb) return "eflags operands must be i8, i16, or i32, of one type";
+            if (!isEflagsInt(ta) or ta != tb) return "eflags operands must be i8, i16, i32, or i64, of one type";
         },
         .@"eflags.adc", .@"eflags.sbb" => {
             if (i.ty != .flags) return "flags op gives flags";
-            if ((ta != .i8 and ta != .i16 and ta != .i32) or ta != tb or tc != .flags) return "eflags carry ops take two ints and flags";
+            if (!isEflagsInt(ta) or ta != tb or tc != .flags) return "eflags carry ops take two ints and flags";
         },
-        .@"eflags.logic" => if (i.ty != .flags or (ta != .i8 and ta != .i16 and ta != .i32)) return "eflags.logic takes an i8, i16, or i32",
-        .@"eflags.inc", .@"eflags.dec" => if (i.ty != .flags or (ta != .i8 and ta != .i16 and ta != .i32) or tb != .flags) return "eflags.inc and dec take an int and flags",
+        .@"eflags.logic" => if (i.ty != .flags or !isEflagsInt(ta)) return "eflags.logic takes an i8, i16, i32, or i64",
+        .@"eflags.inc", .@"eflags.dec" => if (i.ty != .flags or !isEflagsInt(ta) or tb != .flags) return "eflags.inc and dec take an int and flags",
         .@"nzcv.cond", .@"eflags.cond" => {
             if (i.ty != .i1 or ta != .flags) return "cond takes flags and gives i1";
             if (i.aux > 15) return "bad condition";

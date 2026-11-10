@@ -68,6 +68,37 @@ const Exit = ctx_mod.Exit;
 
 pub const frontend: fe.Frontend = .{ .name = "h86", .flags = .eflags, .lift = lift, .interp = interp };
 
+pub const Mode = cpu_mod.Mode;
+
+/// The front end of `mode`: h86's, or hx64's. Long mode isn't lifted
+/// yet: its `lift` says Unsupported, so dispatch hands every region to
+/// T0, and its `interp` raises #UD.
+pub fn frontendFor(comptime mode: Mode) fe.Frontend {
+    return switch (mode) {
+        .legacy => frontend,
+        .long => .{ .name = "hx64", .flags = .eflags, .lift = liftLong, .interp = interpLong },
+    };
+}
+
+/// `lift` in `mode`.
+pub fn liftIn(comptime mode: Mode, b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftError!void {
+    return switch (mode) {
+        .legacy => lift(b, src, pc, limits),
+        .long => liftLong(b, src, pc, limits),
+    };
+}
+
+fn liftLong(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftError!void {
+    _ = .{ b, src, pc, limits };
+    return error.Unsupported;
+}
+
+fn interpLong(c: *Ctx, h: u64, pc: u64) callconv(.c) u32 {
+    _ = h;
+    c.exit_pc = pc;
+    return @intFromEnum(Exit.undef);
+}
+
 const page_size = 4096;
 
 /// Guest memory as T0 reaches it: `ctx.frontend` points at one. See

@@ -14,6 +14,8 @@
 
 const std = @import("std");
 
+pub const Mode = @import("mode.zig").Mode;
+
 /// What an instruction does. ALU operations share one `op` per kind; the
 /// operand fields say where the operands come from.
 pub const Op = enum(u8) {
@@ -222,6 +224,23 @@ pub const Entry = struct {
     sreg: u3 = 0,
     /// MOVZX and MOVSX: the source's size.
     src_size: Size = .b,
+
+    // Long mode (hx64). The legacy table ignores these.
+
+    /// The operand size defaults to 64 bits in long mode, and 0x66 makes
+    /// it 16 (32 can't be encoded): PUSH, POP, near JMP, CALL, RET, Jcc,
+    /// LOOP, JRCXZ, LEAVE, ENTER, PUSHF, and POPF.
+    d64: bool = false,
+    /// Invalid in long mode, so #UD there: PUSHA, POPA, the BCD
+    /// instructions, BOUND, LDS, LES, INTO, the one-byte segment pushes
+    /// and pops, SALC, and far CALL and JMP with an immediate pointer.
+    /// (40-4F are REX prefixes there, which the decoder takes before the
+    /// table.)
+    inv64: bool = false,
+    /// REX.W does more than make the operand size 8: MOV r64, imm64 (B8+r)
+    /// takes an 8-byte immediate, MOVSXD (63) replaces ARPL, and
+    /// CMPXCHG8B (0F C7 /1) becomes CMPXCHG16B.
+    rexw: bool = false,
 };
 
 /// One table row: an opcode (0x00-0xFF, or 0x0F00-0x0FFF for two-byte
@@ -657,6 +676,15 @@ pub inline fn slot(opcode: u16) Slot {
     return lookup.slots[index(opcode)];
 }
 
+/// The slot for `opcode` in `mode`. Long mode's lookup isn't built yet:
+/// every opcode there is #UD (entry 0), so a `.long` decode raises #UD.
+pub inline fn slotIn(comptime mode: Mode, opcode: u16) Slot {
+    return switch (mode) {
+        .legacy => slot(opcode),
+        .long => .{ .first = 0, .grouped = false, .modrm = false },
+    };
+}
+
 /// The entry for `opcode` with ModRM byte `modrm` (ignored unless the
 /// slot is grouped).
 pub inline fn entry(s: Slot, modrm: u8) *const Entry {
@@ -674,6 +702,11 @@ pub inline fn entryIndex(e: *const Entry) u16 {
 
 pub inline fn entryAt(i: u16) *const Entry {
     return &lookup.entries[i];
+}
+
+test "long mode is #UD until its lookup is built" {
+    try std.testing.expectEqual(Op.ud, entry(slotIn(.long, 0x01), 0xc0).op);
+    try std.testing.expectEqual(Op.add, entry(slotIn(.legacy, 0x01), 0xc0).op);
 }
 
 test "lookup" {

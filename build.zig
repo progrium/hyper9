@@ -1795,6 +1795,11 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     fuzz_long.dependOn(&long.step);
     _ = vcpu;
 
+    // hx64's (design/hcpu.md): stubs until its T0 and lifter run long
+    // mode. fuzz-x64 joins fuzz-long when it fuzzes something.
+    b.step("fuzz-x64", "Fuzz the x64 T0 and lifter with random programs (not built yet)").dependOn(&b.addFail("fuzz-x64: hx64's generator and fuzzer aren't built yet (src/jit/check/gen_x86.zig in long mode)").step);
+    b.step("x64check", "Check hx64's T0 against the host CPU in long mode (not built yet)").dependOn(&b.addFail("x64check: tools/x86check in long mode isn't built yet").step);
+
     const litmus = b.addExecutable(.{
         .name = "litmus",
         .root_module = b.createModule(.{
@@ -1840,6 +1845,22 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     step.dependOn(&x86_run.step);
     test_step.dependOn(&x86_run.step);
     b.step("x86-jit", "Run the 386 JIT plan's [x86-jit] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
+
+    // hx64's [hcpu] cases, on T0 and T1 (design/hcpu.md).
+    const x64 = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/x64.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/vcpu.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) }},
+    }) });
+    const x64_run = b.addRunArtifact(x64);
+    step.dependOn(&x64_run.step);
+    test_step.dependOn(&x64_run.step);
+    b.step("x64-jit", "Run hx64's [hcpu] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
 
     // h86's memory-model litmus tests: compiled code on host threads.
     // ReleaseSafe unless -Doptimize says otherwise, so the threads race.

@@ -12,6 +12,7 @@ const flags = @import("flags.zig");
 const sf = @import("f80.zig");
 
 pub const Seg = @import("decode.zig").Seg;
+pub const Mode = @import("mode.zig").Mode;
 
 /// 9front's user code and data selectors (pc/mem.h UESEL and UDSEL), as
 /// src/arch/i386.zig has them. This module doesn't import that file, so
@@ -231,6 +232,69 @@ pub const Cpu = struct {
         if (base == null) c.seg_null |= bit else c.seg_null &= ~bit;
     }
 };
+
+/// Why a long-mode `run` returned: Exit, with 64-bit addresses, and
+/// SYSCALL as the system call.
+pub const Exit64 = union(enum) {
+    /// SYSCALL; RIP is past it. RCX and R11 are left as they were: the
+    /// Guest, not the CPU, gives them SYSCALL's return RIP and RFLAGS
+    /// where the kernel would see them.
+    syscall,
+    /// INT3; RIP is past it.
+    breakpoint,
+    /// A page fault: RIP is at the instruction, which can be restarted.
+    fault: struct { addr: u64, access: Access },
+    /// Any other exception, by vector, with RIP at the instruction. INT
+    /// 0x80 and INT $64 are #GP in long mode.
+    exception: u8,
+    /// A stop request or the end of the budget, between instructions.
+    stopped,
+};
+
+/// The Exit of `mode`.
+pub fn ExitOf(comptime mode: Mode) type {
+    return switch (mode) {
+        .legacy => Exit,
+        .long => Exit64,
+    };
+}
+
+/// hx64's register file: a ring-3, flat 64-bit long-mode process. The
+/// general registers are 64 bits and a 32-bit write zero-extends into one,
+/// as the hardware does. There are no selectors: FS and GS have plain
+/// bases, which arch_prctl (Linux) and 9front's TLS set. Flags, x87, and
+/// MXCSR are h86's.
+pub const Cpu64 = struct {
+    /// RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8-R15, in encoding order.
+    r: [16]u64 = @splat(0),
+    rip: u64 = 0,
+    fl: flags.Flags = .{},
+    fs_base: u64 = 0,
+    gs_base: u64 = 0,
+    fpu: Fpu = .{},
+    xmm: [16]u128 = @splat(0),
+    mxcsr: u32 = 0x1f80,
+    /// Ureg.type and Ureg.error (amd64's trap and ecode), as the last
+    /// exit left them.
+    trap: u64 = 0,
+    ecode: u64 = 0,
+    /// Lifted code's scratch word, as Cpu.jit_tmp.
+    jit_tmp: u64 = 0,
+    /// Guest instructions retired.
+    retired: u64 = 0,
+
+    pub inline fn rsp(c: *const Cpu64) u64 {
+        return c.r[4];
+    }
+};
+
+/// The Cpu of `mode`.
+pub fn CpuOf(comptime mode: Mode) type {
+    return switch (mode) {
+        .legacy => Cpu,
+        .long => Cpu64,
+    };
+}
 
 /// arch/i386.zig's Ureg's fields, for the tests.
 const TestUreg = struct {

@@ -229,9 +229,14 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
         , .{ ty, cc }) });
     };
     // x86 flags at each width, every condition of each.
-    const evals = [_][3]u64{ .{ 0, 0, 0 }, .{ 0xff, 1, 1 }, .{ 0x7f, 1, 0 }, .{ 0x80, 0xff, 1 }, .{ 0x7fff_ffff, 0xffff_ffff, 1 }, .{ 0x8000, 0x7fff, 0 }, .{ 0x1234_5678, 0x9abc_def0, 1 }, .{ 3, 0x8000_0001, 0 } };
+    const evals = [_][3]u64{
+        .{ 0, 0, 0 },                                       .{ 0xff, 1, 1 },                                    .{ 0x7f, 1, 0 },
+        .{ 0x80, 0xff, 1 },                                 .{ 0x7fff_ffff, 0xffff_ffff, 1 },                   .{ 0x8000, 0x7fff, 0 },
+        .{ 0x1234_5678, 0x9abc_def0, 1 },                   .{ 3, 0x8000_0001, 0 },                             .{ 0xffff_ffff_ffff_ffff, 1, 1 },
+        .{ 0x7fff_ffff_ffff_ffff, 1, 0 },                   .{ 0x8000_0000_0000_0000, 0x7fff_ffff_ffff_ffff, 1 }, .{ 0x1_0000_0000, 0xffff_ffff, 0 },
+    };
     const eops = [_][]const u8{ "add", "sub", "shl", "shr", "mul" };
-    for ([_][]const u8{ "i8", "i16", "i32" }) |ty| for (evals) |v| for (eops) |op| for (0..16) |cc| {
+    for ([_][]const u8{ "i8", "i16", "i32", "i64" }) |ty| for (evals) |v| for (eops) |op| for (0..16) |cc| {
         try list.append(gpa, .{ .regs = .{ v[0], v[1], v[2], 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
             \\b0:
             \\  %0 = getreg:{0s} #0x0
@@ -798,30 +803,34 @@ pub fn generateLazyFlags(gpa: std.mem.Allocator) ![]Case {
         "eflags.logic:flags %1",         "eflags.inc:flags %1, %4",
         "eflags.dec:flags %1, %4",       "eflags.shl:flags %1, %2",
         "eflags.shr:flags %1, %2",       "eflags.mul:flags %1, %2",
-    }) |op| for ([_][]const u8{ "i32", "i8" }) |ty| {
-        try list.append(gpa, .{ .regs = .{ start, 0x8000_00f7, 0x7fff_ff19, 1, 0, 0, 0x202, 0 }, .text = try std.fmt.allocPrint(gpa,
+    }) |op| for ([_][]const u8{ "i32", "i8", "i64" }) |ty| {
+        // The bits word at 0x20 and the record after it, to the end of
+        // the registers; i64 operands are the registers whole.
+        const narrow = !std.mem.eql(u8, ty, "i64");
+        const ops: []const u8 = if (narrow)
+            try std.fmt.allocPrint(gpa, "  %9 = getreg:i32 #0x8\n  %1 = trunc:{0s} %9\n  %10 = getreg:i32 #0x10\n  %2 = trunc:{0s} %10\n", .{ty})
+        else
+            try gpa.dupe(u8, "  %1 = getreg:i64 #0x8\n  %2 = getreg:i64 #0x10\n");
+        defer gpa.free(ops);
+        try list.append(gpa, .{ .regs = .{ start, 0xffff_ff00_8000_00f7, 0x7fff_ff19, 1, 0x202, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
             \\b0:
             \\  %0 = getreg:i64 #0x0
-            \\  %9 = getreg:i32 #0x8
-            \\  %1 = trunc:{1s} %9
-            \\  %10 = getreg:i32 #0x10
-            \\  %2 = trunc:{1s} %10
-            \\  %11 = getreg:i32 #0x18
+            \\{2s}  %11 = getreg:i32 #0x18
             \\  %4 = eflags.unpack:flags %11
             \\  %5 = {0s}
-            \\  pending.flags %5 #0x30 @0x2
+            \\  pending.flags %5 #0x20 @0x2
             \\  %6 = load:i32 %0 #0x2 @0x100 !1
             \\  %7 = eflags.cond:i1 %5 #0x4
             \\  brcond %7 -> b1 b2
             \\b1:
-            \\  %12 = getreg:i32 #0x8
+            \\  %12 = getreg:{1s} #0x8
             \\  %13 = eflags.logic:flags %12
-            \\  pending.flags %13 #0x30 @0x2
+            \\  pending.flags %13 #0x20 @0x2
             \\  exit.chain #0x200 !2
             \\b2:
             \\  %14 = getreg:i64 #0x0
             \\  exit.indirect %14 !2
-        , .{ op, ty }) });
+        , .{ op, if (narrow) "i32" else "i64", ops }) });
     };
     return list.toOwnedSlice(gpa);
 }

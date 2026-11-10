@@ -15,6 +15,7 @@ const flags = @import("flags.zig");
 
 pub const Op = table.Op;
 pub const Opd = table.Opd;
+pub const Mode = table.Mode;
 
 /// Segment registers, in encoding order (`Cpu.seg`).
 pub const Seg = enum(u3) { es, cs, ss, ds, fs, gs };
@@ -77,6 +78,97 @@ pub const Inst = struct {
         return @truncate(i.opcode);
     }
 };
+
+/// A REX prefix's bits (0100WRXB), and whether there was one.
+pub const Rex = packed struct(u8) {
+    /// Extends ModRM.rm, SIB.base, or the opcode's register.
+    b: u1 = 0,
+    /// Extends SIB.index.
+    x: u1 = 0,
+    /// Extends ModRM.reg.
+    r: u1 = 0,
+    /// A 64-bit operand size.
+    w: u1 = 0,
+    /// A REX prefix came right before the opcode: byte registers 4-7 are
+    /// then SPL, BPL, SIL, and DIL, not AH, CH, DH, and BH.
+    present: bool = false,
+    _: u3 = 0,
+
+    pub fn of(byte: u8) Rex {
+        return .{ .b = @truncate(byte), .x = @truncate(byte >> 1), .r = @truncate(byte >> 2), .w = @truncate(byte >> 3), .present = true };
+    }
+};
+
+/// No register in long mode: a missing base or index (RIP-relative
+/// addressing has neither, and sets `Inst64.rip_rel`).
+pub const no_reg64: u5 = 16;
+
+/// A decoded long-mode instruction (hx64): `Inst` with REX, 64-bit
+/// operands, and RIP-relative addressing. The field meanings are Inst's
+/// but where they say otherwise.
+pub const Inst64 = struct {
+    op: Op,
+    entry: u16,
+    opcode: u16,
+    len: u8,
+    /// Operand size in bytes: 1, 2, 4, or 8 (REX.W, or a d64 entry's
+    /// default).
+    size: u8,
+    /// A 0x66 prefix: 16-bit operands, or SSE's 66 form.
+    opsize: bool = false,
+    /// A 0x67 prefix: 32-bit addressing (the effective address is
+    /// computed in 32 bits and zero-extended).
+    addr32: bool = false,
+    lock: bool = false,
+    rep: Rep = .none,
+    /// FS or GS for their bases; ES, CS, SS, and DS overrides are
+    /// accepted and ignored, as long mode ignores them.
+    seg: Seg = .ds,
+    rex: Rex = .{},
+    modrm: u8 = 0,
+    mem: bool = false,
+    /// The address is the next instruction's RIP plus `disp` (ModRM mod 0,
+    /// r/m 5, with no SIB).
+    rip_rel: bool = false,
+    /// Registers 0-15, or no_reg64.
+    base: u5 = no_reg64,
+    index: u5 = no_reg64,
+    scale: u2 = 0,
+    /// Sign-extended to 64 bits; a moffs (A0-A3) is 8 bytes, whole.
+    disp: u64 = 0,
+    /// As Inst.imm, extended to 64 bits; MOV r64, imm64's whole.
+    imm: u64 = 0,
+    /// ENTER's nesting level.
+    imm2: u16 = 0,
+
+    pub inline fn tableEntry(i: *const Inst64) *const table.Entry {
+        return table.entryAt(i.entry);
+    }
+    /// ModRM.reg, with REX.R.
+    pub inline fn reg(i: *const Inst64) u4 {
+        return @as(u4, i.rex.r) << 3 | @as(u3, @truncate(i.modrm >> 3));
+    }
+    /// ModRM.rm as a register, with REX.B.
+    pub inline fn rm(i: *const Inst64) u4 {
+        return @as(u4, i.rex.b) << 3 | @as(u3, @truncate(i.modrm));
+    }
+    /// The condition of a Jcc, SETcc, or CMOVcc.
+    pub inline fn cc(i: *const Inst64) u4 {
+        return @truncate(i.opcode);
+    }
+    /// The register an `.Z` operand names, with REX.B.
+    pub inline fn zreg(i: *const Inst64) u4 {
+        return @as(u4, i.rex.b) << 3 | @as(u3, @truncate(i.opcode));
+    }
+};
+
+/// The decoded instruction of `mode`.
+pub fn InstOf(comptime mode: Mode) type {
+    return switch (mode) {
+        .legacy => Inst,
+        .long => Inst64,
+    };
+}
 
 pub const Error = error{
     /// The bytes ran out before the instruction did.
@@ -226,6 +318,18 @@ pub fn decode(code: []const u8) Error!Inst {
     }
     i.len = @intCast(p);
     return i;
+}
+
+/// Decodes the instruction at the start of `code` in `mode`. Long mode
+/// isn't decoded yet: any instruction there is one byte of #UD.
+pub fn decodeIn(comptime mode: Mode, code: []const u8) Error!InstOf(mode) {
+    switch (mode) {
+        .legacy => return decode(code),
+        .long => {
+            if (code.len == 0) return error.Truncated;
+            return .{ .op = .ud, .entry = 0, .opcode = code[0], .len = 1, .size = 4 };
+        },
+    }
 }
 
 /// What an instruction reads and writes.
@@ -505,6 +609,20 @@ fn sseEffects(i: *const Inst, x: *Effects) void {
         else => false,
     };
     if (store) x.mem_write = true else x.mem_read = true;
+}
+
+test "long mode decodes to #UD until its decoder lands" {
+    const i = try decodeIn(.long, &.{ 0x48, 0x01, 0xc0 });
+    try std.testing.expectEqual(Op.ud, i.op);
+    try std.testing.expectError(error.Truncated, decodeIn(.long, &.{}));
+    try std.testing.expectEqual(Op.add, (try decodeIn(.legacy, &.{ 0x01, 0xc0 })).op);
+    const r = Rex.of(0x4d);
+    try std.testing.expect(r.present and r.w == 1 and r.r == 1 and r.x == 0 and r.b == 1);
+    var j: Inst64 = .{ .op = .add, .entry = 0, .opcode = 0x01, .len = 3, .size = 8, .rex = r, .modrm = 0xc8 };
+    try std.testing.expectEqual(@as(u4, 9), j.reg());
+    try std.testing.expectEqual(@as(u4, 8), j.rm());
+    j.opcode = 0xb9;
+    try std.testing.expectEqual(@as(u4, 9), j.zreg());
 }
 
 fn d(bytes: []const u8) !Inst {

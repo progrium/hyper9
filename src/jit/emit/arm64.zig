@@ -152,6 +152,13 @@ fn eflagsKind(op: Op) ?Kind {
     };
 }
 
+/// eflagsKind for instruction `i` of `r`: null at 64 bits (hx64), which
+/// falls back to evalOpC until NZCV lowering takes i64 operands.
+fn eflagsKindOf(r: *const ir.Region, i: ir.Inst) ?Kind {
+    if (i.a != ir.none and r.insts.items[i.a].ty == .i64) return null;
+    return eflagsKind(i.op);
+}
+
 /// EFLAGS' CF ZF SF OF from NZCV (index N<<3 | Z<<2 | C<<1 | V), with CF
 /// as arm64's C, or (after a subtraction) its inverse.
 fn eflagsTable(comptime borrow: bool) [16]u16 {
@@ -761,17 +768,17 @@ const E = struct {
 
 // ---------------------------------------------------------------- the flags pre-pass
 
-fn fallsBack(op: Op) bool {
-    return switch (op) {
+fn fallsBack(r: *const ir.Region, i: ir.Inst) bool {
+    return switch (i.op) {
         .@"eflags.adc", .@"eflags.sbb", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => true,
-        else => false,
+        else => eflagsKind(i.op) != null and eflagsKindOf(r, i) == null,
     };
 }
 
-fn producesFlags(op: Op) bool {
-    return switch (op) {
+fn producesFlags(r: *const ir.Region, i: ir.Inst) bool {
+    return switch (i.op) {
         .icmp, .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic", .@"nzcv.adc", .@"nzcv.sbc" => true,
-        else => eflagsKind(op) != null,
+        else => eflagsKindOf(r, i) != null,
     };
 }
 
@@ -801,7 +808,7 @@ fn hostCond(r: *const ir.Region, v: Ref, live: Live) ?Cond {
         .icmp => if (live.is(v, .icmp)) return pred_cond[@intCast(i.aux)],
         .@"nzcv.cond" => if (i.aux < 14 and live.is(i.a, .nzcv)) return @intCast(i.aux),
         .@"eflags.cond" => if (live.is(i.a, .eflags)) {
-            const k = eflagsKind(r.insts.items[i.a].op) orelse return null;
+            const k = eflagsKindOf(r, r.insts.items[i.a]) orelse return null;
             const c = x86_cc.get(k)[@intCast(i.aux)];
             if (c >= 0) return @intCast(c);
         },
@@ -887,7 +894,7 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
                     } else need[i.a] = true;
                 },
                 // Lazy, edge by edge: a producer is recomputed where needed.
-                .@"pending.flags" => if (i.aux2 != 2 and !(edge_pend[idx] and rematerializable(r.insts.items[i.a].op))) {
+                .@"pending.flags" => if (i.aux2 != 2 and !(edge_pend[idx] and rematerializable(r, r.insts.items[i.a]))) {
                     need[i.a] = true;
                 },
                 else => {
@@ -896,12 +903,12 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
                     };
                     clobber = switch (i.op) {
                         .poll, .@"call.interp", .@"call.helper", .cas, .copy => true,
-                        else => fallsBack(i.op) or i.op.isExt(),
+                        else => fallsBack(r, i) or i.op.isExt(),
                     };
                 },
             }
-            if (producesFlags(i.op)) {
-                live = .{ .ref = @intCast(idx), .mode = if (i.op == .icmp) .icmp else if (eflagsKind(i.op) != null) .eflags else .nzcv };
+            if (producesFlags(r, i)) {
+                live = .{ .ref = @intCast(idx), .mode = if (i.op == .icmp) .icmp else if (eflagsKindOf(r, i) != null) .eflags else .nzcv };
             } else if (clobber) live = .{};
         }
     }
@@ -947,7 +954,7 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
             .icmp, .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic", .@"nzcv.adc", .@"nzcv.sbc" => d[idx].virtual = true,
             .@"nzcv.cond" => d[idx].virtual = i.aux < 14,
             .@"eflags.cond" => d[idx].virtual = d[idx].host_cc != null,
-            else => if (eflagsKind(i.op) != null) {
+            else => if (eflagsKindOf(r, i) != null) {
                 d[idx].virtual = true;
             },
         }
@@ -1196,11 +1203,13 @@ fn writePend(e: *E, p: Pend) !void {
 }
 
 /// A lazy pending.flags (aux2 2): ir.LazyRecord at off + 4, from the
-/// producer's operands, as ir.lazyRecord makes it.
+/// producer's operands, as ir.lazyRecord makes it. Its a, b, and res are
+/// 64-bit slots: narrower values are written as a word and a zero word.
 fn writeRecord(e: *E, p: Pend) !void {
     const f = e.r.insts.items[p.v];
     const ta = e.r.insts.items[f.a].ty;
     const W = ta.bits();
+    const x64 = W == 64;
     const kind = ir.lazyKind(f.op).?;
     const a = try e.src(f.a, S0);
     const base = p.off + 4;
@@ -1218,38 +1227,48 @@ fn writeRecord(e: *E, p: Pend) !void {
     try e.ldst(true, 2, IP0, CPU, base);
     switch (kind) {
         .add, .sub => {
+            // res first: a store whose offset needs a register takes IP1.
             const b = try e.src(f.b, S1);
-            try e.ldst(true, 2, a, CPU, base + 4);
-            try e.ldst(true, 2, b, CPU, base + 8);
-            try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, false, IP0, a, b);
-            if (cin != null) try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, false, IP0, IP0, IP1);
+            try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, x64, IP0, a, b);
+            if (cin != null) try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, x64, IP0, IP0, IP1);
             if (W < 32) try e.zx(IP0, IP0, W);
-            try e.ldst(true, 2, IP0, CPU, base + 12);
+            try recSlot(e, IP0, base + 20, x64);
+            try recSlot(e, a, base + 4, x64);
+            try recSlot(e, b, base + 12, x64);
         },
         .logic => {
-            try e.ldst(true, 2, ZR, CPU, base + 4);
-            try e.ldst(true, 2, ZR, CPU, base + 8);
-            try e.ldst(true, 2, a, CPU, base + 12);
+            try e.ldst(true, 3, ZR, CPU, base + 4);
+            try e.ldst(true, 3, ZR, CPU, base + 12);
+            try recSlot(e, a, base + 20, x64);
         },
         .inc, .dec => {
-            try e.ldst(true, 2, a, CPU, base + 4);
+            try recSlot(e, a, base + 4, x64);
             try e.movImm(IP0, 1);
-            try e.ldst(true, 2, IP0, CPU, base + 8);
-            try e.put((if (kind == .inc) @as(u32, 0x11000400) else 0x51000400) | @as(u32, a) << 5 | IP0); // a ± 1
+            try e.ldst(true, 3, IP0, CPU, base + 12);
+            const sf: u32 = if (x64) 0x8000_0000 else 0;
+            try e.put(sf | (if (kind == .inc) @as(u32, 0x11000400) else 0x51000400) | @as(u32, a) << 5 | IP0); // a ± 1
             if (W < 32) try e.zx(IP0, IP0, W);
-            try e.ldst(true, 2, IP0, CPU, base + 12);
+            try recSlot(e, IP0, base + 20, x64);
         },
         .shl, .shr, .mul => {
             const b = try e.src(f.b, S1);
             if (kind == .mul) {
                 try e.logImm(0, false, IP0, a, 0, 1);
-                try e.ldst(true, 2, IP0, CPU, base + 4);
-            } else try e.ldst(true, 2, a, CPU, base + 4);
-            try e.ldst(true, 2, ZR, CPU, base + 8);
-            try e.ldst(true, 2, b, CPU, base + 12);
+                try e.ldst(true, 3, IP0, CPU, base + 4);
+            } else try recSlot(e, a, base + 4, x64);
+            try e.ldst(true, 3, ZR, CPU, base + 12);
+            try recSlot(e, b, base + 20, x64);
         },
         .none => unreachable,
     }
+}
+
+/// One of a lazy record's 64-bit operand slots from register `r`: all of
+/// it at 64 bits, else its low word and a zero word.
+fn recSlot(e: *E, r: u5, off: u64, x64: bool) !void {
+    if (x64) return e.ldst(true, 3, r, CPU, off);
+    try e.ldst(true, 2, r, CPU, off);
+    try e.ldst(true, 2, ZR, CPU, off + 4);
 }
 
 /// Carries lazy pending flags over an edge in the lz slots: the producer's
@@ -1277,17 +1296,17 @@ fn carryPend(e: *E, p: Pend) !void {
 
 /// Whether a flags value can be recomputed from its operands where lazy
 /// pending flags are written (so it needn't be materialized where made).
-fn rematerializable(op: Op) bool {
-    return switch (op) {
+fn rematerializable(r: *const ir.Region, i: ir.Inst) bool {
+    return switch (i.op) {
         .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic" => true,
-        else => eflagsKind(op) != null,
+        else => eflagsKindOf(r, i) != null,
     };
 }
 
 /// Recomputes the virtual flags value `v` from its operands, into x12.
 fn rematFlags(e: *E, v: Ref) !u5 {
     const i = e.r.insts.items[v];
-    if (eflagsKind(i.op) != null) {
+    if (eflagsKindOf(e.r, i) != null) {
         try eflagsCore(e, v, SD);
         return SD;
     }
@@ -1976,7 +1995,7 @@ fn shiftOp(e: *E, idx: usize) EmitError!void {
 /// it's virtual, the packed EFLAGS value.
 fn eflagsOp(e: *E, idx: usize) !void {
     const i = e.r.insts.items[idx];
-    if (fallsBack(i.op)) return fallback(e, idx);
+    if (fallsBack(e.r, i)) return fallback(e, idx);
     if (e.d[idx].virtual) return eflagsCore(e, idx, null);
     const rd = e.dst(idx);
     try eflagsCore(e, idx, rd);
@@ -2589,7 +2608,7 @@ fn pickVchunks(e: *E) void {
         const range: ?[2]u64 = switch (i.op) {
             .getreg => .{ i.aux, i.aux + @max(i.ty.bits() / 8, 1) },
             .setreg => .{ i.aux, i.aux + @max(r.insts.items[i.a].ty.bits() / 8, 1) },
-            .@"pending.flags" => .{ i.aux, i.aux + 4 },
+            .@"pending.flags" => .{ i.aux, i.aux + 4 + @as(u64, if (i.aux2 == 2) @sizeOf(ir.LazyRecord) else 0) },
             else => null,
         };
         const rg = range orelse continue;
@@ -2920,7 +2939,7 @@ test "emitted code matches ir_eval on the shared cases" {
     const gpa = std.testing.allocator;
     const env = try gpa.create(cases.Env);
     defer gpa.destroy(env);
-    for ([_]*const fn (std.mem.Allocator) anyerror![]cases.Case{ cases.generate, cases.generateExt }) |gen| {
+    for ([_]*const fn (std.mem.Allocator) anyerror![]cases.Case{ cases.generate, cases.generateExt, cases.generateLazyFlags }) |gen| {
         const all = try gen(gpa);
         defer cases.free(gpa, all);
         for (all, 0..) |c, n| try runCase(gpa, env, c, n);
