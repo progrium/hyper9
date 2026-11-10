@@ -723,7 +723,12 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * and resolves to its exit status. machine.input(bytes or string) types,
  * machine.interrupt() is the interrupt key, machine.hangup() posts
  * hangup, as closing a native window does, and machine.terminate() ends
- * the Worker. The machine is an EventTarget: with gfx, a write to
+ * the Worker. machine._put(path, data, mode) adds a file (bytes, an
+ * ArrayBuffer, or a string) to the root archive's tree at path, relative
+ * to the root, making its directories, while the machine runs or before;
+ * mode defaults to 0644. It's provisional, so the underscore: a file the
+ * guest has written or removed at path hides it, and there's nothing for
+ * a ws:// root. The machine is an EventTarget: with gfx, a write to
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
@@ -771,6 +776,10 @@ export async function createMachine({ root, memory, backend, arch, policy, termi
       if (data === null) { worker.postMessage({ type: 'input', data: null }); return; }
       const b = typeof data === 'string' ? enc.encode(data) : new Uint8Array(data);
       worker.postMessage({ type: 'input', data: b }, [b.buffer]);
+    },
+    _put(path, data, mode = 0o644) {
+      const b = typeof data === 'string' ? enc.encode(data) : new Uint8Array(data).slice();
+      worker.postMessage({ type: 'put', path, data: b.buffer, mode: 0o100000 | (mode & 0o7777) }, [b.buffer]);
     },
     interrupt() { worker.postMessage({ type: 'interrupt' }); },
     hangup() { worker.postMessage({ type: 'hangup' }); },

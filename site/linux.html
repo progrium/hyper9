@@ -69,6 +69,8 @@ with a small Linux root loaded into memory.
 Try <tt>uname -a</tt>, <tt>ps</tt>, <tt>ls /proc</tt>,
 <tt>seq 5 | jq -s add</tt>, or
 <tt>echo 'select sqlite_version();' | sqlite3</tt>.
+A file dropped on the terminal lands in <tt>/root</tt>, and its path is typed,
+so a dropped script runs with Enter.
 It needs JavaScript Promise Integration, which Chrome and Edge have from version 137.
 The demo can also be <a href="demo/?linux">opened on its own page</a>.
 </p>
