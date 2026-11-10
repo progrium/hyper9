@@ -833,6 +833,9 @@ const ModuleParts = struct {
     /// With -Demu=zig: run every region through the T1-against-T0 check
     /// (src/jit/check/vmm.zig).
     jit_check: bool,
+    /// With -Demu=zig: ir.verify each region after lifting and after opt
+    /// (opt.verify), even where the vcpu module has no runtime safety.
+    jit_verify: bool,
     /// How src/interp/ and src/jit/ (the vcpu module) are optimized.
     vcpu_optimize: std.builtin.OptimizeMode,
     unicorn: ?*std.Build.Module,
@@ -896,6 +899,7 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     options.addOption(Emu, "emu", p.emu);
     options.addOption(bool, "jit", p.jit);
     options.addOption(bool, "jit_check", p.jit_check);
+    options.addOption(bool, "jit_verify", p.jit_verify);
     options.addOption(bool, "kern", p.have_drawterm);
     options.addOption(bool, "host_cmd", p.host_cmd);
     options.addOption([]const u8, "gfx", @tagName(gfx));
@@ -958,6 +962,8 @@ pub fn build(b: *std.Build) void {
     const vcpu_debug = b.option(bool, "vcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
     const vcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !vcpu_debug) .ReleaseFast else optimize;
     const jit_check = b.option(bool, "jit-check", "With -Demu=zig: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
+    const jit_verify = b.option(bool, "jit-verify", "With -Demu=zig: verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
+        (optimize == .Debug or optimize == .ReleaseSafe);
     const no_jit = b.option(bool, "no-jit", "With -Demu=zig: the interpreter tier only, as on hosts that forbid generated code") orelse false;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
@@ -1039,6 +1045,7 @@ pub fn build(b: *std.Build) void {
         .emu = emu,
         .jit = !no_jit,
         .jit_check = jit_check,
+        .jit_verify = jit_verify,
         .vcpu_optimize = vcpu_optimize,
         .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),

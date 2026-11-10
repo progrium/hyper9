@@ -63,7 +63,7 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, s: *Space, start: a64
     var cpu = start;
     var backing = check.mapBacking(&s.map);
     while (out.regions < max_regions) {
-        var reg = try check.liftAt(gpa, &a64.guest, &backing, cpu.pc, .{});
+        var reg = try check.liftOpt(gpa, &a64.guest, &backing, cpu.pc, .{});
         defer reg.deinit(gpa);
         if (!try r.check(.{ .ir_eval = &reg }, std.mem.asBytes(&cpu), .{})) {
             out.ok = false;

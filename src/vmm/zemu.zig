@@ -228,6 +228,10 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     };
                     if (!ok) std.log.warn("H9_EMU_TIER={s}: not t0 or t1; using the default", .{t});
                 }
+                // -Djit-verify (on in Debug and ReleaseSafe builds): every
+                // region verified after lifting and after opt, though the
+                // vcpu module itself is built ReleaseFast.
+                if (build_options.jit_verify) @import("vcpu").opt.verify = true;
                 const limit = opts.memory orelse if (web) web_default_memory else vmm.default_memory;
                 if (limit > (if (web) web_max_memory else vmm.max_memory)) return error.OutOfGuestMemory;
                 // Twice the cap in address space, as emu.zig does, so freed

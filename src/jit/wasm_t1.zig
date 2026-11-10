@@ -569,11 +569,7 @@ fn lift(e: *Entry, view: *mem.View, cfg: Config) !void {
     limits.max_pages = @min(limits.max_pages, 2);
     limits.lazy_eflags = wasm.emitter_def.lazy_eflags;
     try cfg.frontend.lift(&b, .{ .ctx = &rd, .read = Reader.read }, e.key.pc, limits);
-    if (ir.verify(r) != null) return error.Invalid;
-    if (cfg.optimize) {
-        try opt.run(gpa, r);
-        if (ir.verify(r) != null) return error.Invalid;
-    }
+    try opt.prepare(gpa, r, cfg.optimize, true);
     if (rd.second != no_page) {
         const va2 = rd.second << mem.page_shift;
         e.va2 = va2;

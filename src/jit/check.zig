@@ -500,6 +500,16 @@ pub const Run = struct {
     }
 };
 
+/// As `liftAt`, then optimized as dispatch.zig does (opt.prepare: verified
+/// before and after opt, panicking with the region if it doesn't), so a
+/// check runs what T1 would.
+pub fn liftOpt(gpa: std.mem.Allocator, g: *const Guest, backing: *const Backing, pc: u64, limits: fe.Limits) !ir.Region {
+    var reg = try liftAt(gpa, g, backing, pc, limits);
+    errdefer reg.deinit(gpa);
+    try @import("opt.zig").prepare(gpa, &reg, true, true);
+    return reg;
+}
+
 /// Lifts the region at the PC in `start` with the guest's front end, from
 /// the backing's code.
 pub fn liftAt(gpa: std.mem.Allocator, g: *const Guest, backing: *const Backing, pc: u64, limits: fe.Limits) !ir.Region {

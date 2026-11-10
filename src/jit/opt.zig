@@ -33,12 +33,41 @@
 //!   checks the page and does the full lookup if it differs.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ir = @import("ir.zig");
 const ir_eval = @import("ir_eval.zig");
 
 const Inst = ir.Inst;
 const Ref = ir.Ref;
 const none = ir.none;
+
+/// Whether `prepare` verifies: on in builds with runtime safety (Debug,
+/// ReleaseSafe), and set by the vmm layer under -Djit-verify.
+pub var verify: bool = std.debug.runtime_safety;
+
+/// A lifted region, made ready to emit: verified, optimized (with
+/// `optimize`), and verified again, where `verify` is on (or `always`,
+/// as the web host's T1 has it, which verified before). A region that
+/// doesn't verify is a lifter's or opt's bug: it panics with the region,
+/// rather than leave a broken region to T0 unnoticed.
+pub fn prepare(gpa: std.mem.Allocator, r: *ir.Region, optimize: bool, always: bool) !void {
+    const v = verify or always;
+    if (v) check(r, "lifted");
+    if (!optimize) return;
+    try run(gpa, r);
+    if (v) check(r, "after opt");
+}
+
+fn check(r: *const ir.Region, when: []const u8) void {
+    const e = ir.verify(r) orelse return;
+    if (builtin.os.tag != .freestanding) {
+        var buf: [1 << 16]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        ir.print(r, &w) catch {};
+        std.debug.print("{s}\n", .{w.buffered()});
+    }
+    std.debug.panic("jit: region at {x} doesn't verify {s}: {s} at %{d}", .{ r.entry_pc, when, e.msg, e.inst });
+}
 
 pub fn run(gpa: std.mem.Allocator, r: *ir.Region) !void {
     const n = r.insts.items.len;
@@ -703,7 +732,7 @@ test "opt: same-page hints for nearby accesses from one base" {
     try testing.expectEqualSlices(u16, &.{ 0, 3, 0, 0, 1 }, hints[0..n]);
 }
 
-test "opt: a pending.flags a later write covers goes, and covers an earlier setreg" {
+test "opt: a pending.flags a later setreg drops goes" {
     const got = try optimized(
         \\region 0x1000
         \\b0:
@@ -800,4 +829,58 @@ test "opt: a condition on the other group's flags isn't folded" {
     );
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "icmp") == null);
+}
+
+test "opt: random regions run the same in ir_eval before and after" {
+    // The emitters' random IR (emit/fuzz.zig), each region run in ir_eval
+    // as generated and again after `run`, which must verify and agree.
+    const fuzz = @import("emit/fuzz.zig");
+    const cases = @import("emit/cases.zig");
+    const gpa = std.testing.allocator;
+    const env = try gpa.create(cases.Env);
+    defer gpa.destroy(env);
+    var prng: std.Random.DefaultPrng = .init(0x0b7);
+    const rnd = prng.random();
+    for (0..3000) |n| {
+        var r = try fuzz.generate(gpa, rnd, .{ .lazy_records = n % 2 == 0 });
+        defer r.deinit(gpa);
+        const c: cases.Case = .{ .text = "", .regs = fuzz.regs(rnd), .budget = fuzz.budget(rnd) };
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        try ir.print(&r, &aw.writer);
+        const want = try env.evalCase(gpa, &r, c);
+        try run(gpa, &r);
+        if (ir.verify(&r)) |e| {
+            std.debug.print("region {d} doesn't verify after opt: {s} at %{d}\n{s}\n", .{ n, e.msg, e.inst, aw.written() });
+            return error.TestUnexpectedResult;
+        }
+        const got = try env.evalCase(gpa, &r, c);
+        if (!cases.same(want, got)) {
+            var after: std.Io.Writer.Allocating = .init(gpa);
+            defer after.deinit();
+            try ir.print(&r, &after.writer);
+            std.debug.print("region {d} differs after opt: regs {any} budget {d}\n want {any}\n  got {any}\nbefore:\n{s}\nafter:\n{s}\n", .{ n, c.regs, c.budget, want, got, aw.written(), after.written() });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "opt: pending flags of another kind, or a setreg under them, stay" {
+    const text =
+        \\region 0x1000
+        \\b0:
+        \\  %0 = getreg:i32 #0x8
+        \\  %1 = const:i32 #0x1
+        \\  %2 = nzcv.sub:flags %0, %1
+        \\  %3 = const:i32 #0x5
+        \\  setreg %3 #0x30
+        \\  pending.flags %2 #0x30
+        \\  %6 = eflags.sub:flags %0, %1
+        \\  pending.flags %6 #0x30 @0x1
+        \\  exit.chain #0x1004
+        \\
+    ;
+    const got = try optimized(text);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(text, got);
 }

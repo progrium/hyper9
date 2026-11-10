@@ -82,7 +82,7 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, 
     var res: Result = .{ .exit = .chain, .pc = start.eip, .regions = 0, .retired = 0 };
     while (res.regions < max_regions) {
         // Lazy records when every emitter that runs the region lowers them.
-        var reg = check.liftAt(gpa, guest, &backing, cpu.eip, .{ .lazy_eflags = native == null or native_mod.lazy_eflags }) catch |e| switch (e) {
+        var reg = check.liftOpt(gpa, guest, &backing, cpu.eip, .{ .lazy_eflags = native == null or native_mod.lazy_eflags }) catch |e| switch (e) {
             error.Unsupported => {
                 var sh = check.Shadow.init(gpa, backing);
                 defer sh.deinit();
