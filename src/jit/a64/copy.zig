@@ -36,10 +36,10 @@ const L = lift.L;
 /// check the plans on ir_eval.
 pub var enabled: bool = builtin.cpu.arch == .aarch64;
 
-/// Whether FP and saturating instructions (aux bit 34) are copied. The
-/// arm64 emitter runs those through T0 until it carries the guest's FPCR
-/// and FPSR natively, so until then lift_simd.zig's ops serve them better.
-pub var fp: bool = false;
+/// Whether FP and saturating instructions (aux bit 34) are copied: the
+/// arm64 emitter runs them under the guest's FPCR and ORs their exceptions
+/// into its FPSR.
+pub var fp: bool = true;
 
 pub const Plan = struct {
     aux: u64,

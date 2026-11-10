@@ -45,6 +45,9 @@ pub const Host = struct {
     /// The front end's NZCV word in the Cpu, which `copy` ops read and
     /// write (ha64's Cpu.nzcv), if the host runs copy ops natively.
     guest_nzcv: ?u32 = null,
+    /// And the FPCR and FPSR words an FP copy runs under and accumulates into.
+    guest_fpcr: ?u32 = null,
+    guest_fpsr: ?u32 = null,
 };
 
 /// A `copy` op's register field (ir.zig, Op.copy).
@@ -69,7 +72,8 @@ pub fn copyFields(aux2: u64) [4]?CopyField {
 
 pub const copy_reads_nzcv: u64 = 1 << 32;
 pub const copy_writes_nzcv: u64 = 1 << 33;
-/// FP or saturating: the host runs it through the interpreter for now.
+/// FP or saturating: it runs under the guest's FPCR and accumulates into
+/// its FPSR.
 pub const copy_fp: u64 = 1 << 34;
 
 /// Whether the op calls out of generated code (and so reads and writes the
@@ -78,13 +82,23 @@ pub fn isCall(i: ir.Inst) bool {
     return i.op == .@"call.interp" or i.op == .@"call.helper" or (i.op == .copy and copyByInterp(i.aux));
 }
 
-/// Whether a copy op runs through the interpreter: FP and saturating ones,
-/// and TBL and TBX with a list of more than one register (its registers
-/// must be consecutive, which field rewriting can't keep).
+/// Whether a copy op runs through the interpreter: TBL and TBX with a
+/// list of more than one register (its registers must be consecutive,
+/// which field rewriting can't keep; copy.zig doesn't make them).
+/// Likewise a by-element op with H lanes and its index's M bit (bit 20)
+/// set, whose 4-bit Rm a 5-bit descriptor misnames.
 pub fn copyByInterp(aux: u64) bool {
     const w: u32 = @truncate(aux);
     const tbl_list = w & 0xbf208c00 == 0x0e000000 and (w >> 13) & 3 != 0;
-    return aux & copy_fp != 0 or tbl_list;
+    return tbl_list or (byElementH(w) and (w >> 20) & 1 != 0);
+}
+
+/// AdvSIMD by-element (vector or scalar) with H lanes (size 01), whose Rm
+/// is 4 bits with M in bit 20.
+pub fn byElementH(w: u32) bool {
+    const vec = w & 0x9f000400 == 0x0f000000;
+    const scalar = w & 0xdf000400 == 0x5f000000;
+    return (vec or scalar) and (w >> 22) & 3 == 1;
 }
 
 pub const Chunk = struct {
@@ -260,6 +274,7 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                 if (x.vec) try markBad(gpa, &words, x.off, 16) else try access(gpa, &words, x.off, 8);
             };
             if (host.guest_nzcv) |nz| if (i.aux & (copy_reads_nzcv | copy_writes_nzcv) != 0) try access(gpa, &words, nz, 4);
+            if (i.aux & copy_fp != 0) for ([2]?u32{ host.guest_fpcr, host.guest_fpsr }) |w| if (w) |o| try access(gpa, &words, o, 4);
             continue;
         }
         if (i.op != .getreg and i.op != .setreg) continue;
@@ -398,6 +413,9 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                                 if (p.chunkAt(x.off, 8)) |k| d |= @as(ChunkSet, 1) << @intCast(k);
                             };
                             if (i.aux & copy_writes_nzcv != 0) if (host.guest_nzcv) |nz| if (p.chunkAt(nz, 4)) |k| {
+                                d |= @as(ChunkSet, 1) << @intCast(k);
+                            };
+                            if (i.aux & copy_fp != 0) if (host.guest_fpsr) |o| if (p.chunkAt(o, 4)) |k| {
                                 d |= @as(ChunkSet, 1) << @intCast(k);
                             };
                         },

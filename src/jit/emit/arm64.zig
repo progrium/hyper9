@@ -98,6 +98,8 @@ pub const host: regalloc.Host = .{
     .max_pinned = 10,
     .callee_saved = 0x3F << 23,
     .guest_nzcv = @offsetOf(@import("../../interp/a64/exec.zig").Cpu, "nzcv"),
+    .guest_fpcr = @offsetOf(@import("../../interp/a64/exec.zig").Cpu, "fpcr"),
+    .guest_fpsr = @offsetOf(@import("../../interp/a64/exec.zig").Cpu, "fpsr"),
 };
 
 /// The callee-saved pairs the prologue stores above x29/x30, at
@@ -1515,9 +1517,9 @@ fn vmemOp(e: *E, idx: usize) !void {
 /// A guest arm64 instruction run as itself (ir.zig, Op.copy), its register
 /// fields rewritten to the host registers holding the guest's: a pinned
 /// chunk's register, or a scratch register (x9-x11, x13; v0-v3) loaded
-/// from the Cpu and stored back. Guest NZCV goes through host NZCV. FP and
-/// saturating ones (which need the guest FPCR and FPSR) run through the
-/// interpreter for now, as ir_eval runs every copy.
+/// from the Cpu and stored back. Guest NZCV goes through host NZCV. An FP or
+/// saturating one runs under the guest's FPCR, its exceptions (and QC) ORed
+/// into the guest's FPSR, and the host's FPCR put back.
 fn copyOp(e: *E, idx: usize) !void {
     const i = e.r.insts.items[idx];
     if (regalloc.isCall(i)) {
@@ -1569,23 +1571,40 @@ fn copyOp(e: *E, idx: usize) !void {
         }
         regs[k] = reg.?;
         var field: u32 = reg.?;
-        if (f.vec and k == 2) {
+        if (f.vec and k == 2 and regalloc.byElementH(@truncate(i.aux))) {
             // A by-element op with H lanes has a 4-bit Rm and its index's M
-            // bit in bit 20: the field isn't the register number there.
-            const n = (f.off - a64_v_off) / 16;
-            if ((word >> 16) & 31 != n) field |= 16;
+            // bit in bit 20; scratch V registers are under 16.
+            field |= (word >> 16) & 16;
         }
         word = (word & ~(@as(u32, 31) << pos[k])) | field << pos[k];
     }
     const nz = host.guest_nzcv.?;
+    const fp = i.aux & regalloc.copy_fp != 0;
     if (i.aux & regalloc.copy_reads_nzcv != 0) {
         try readGuest(e, nz, 4, IP0);
         try e.put(0xD51B4200 | @as(u32, IP0)); // msr nzcv, x16
+    }
+    if (fp) {
+        // The guest's FPCR for this instruction, the host's kept in the
+        // save area, and a clear FPSR to collect its exceptions.
+        try e.put(0xD53B4400 | @as(u32, IP0)); // mrs x16, fpcr
+        try e.strSlot(IP0, e.saveArea(va_save));
+        try readGuest(e, host.guest_fpcr.?, 4, IP0);
+        try e.put(0xD51B4400 | @as(u32, IP0)); // msr fpcr, x16
+        try e.put(0xD51B4420 | @as(u32, ZR)); // msr fpsr, xzr
     }
     try e.put(word);
     if (i.aux & regalloc.copy_writes_nzcv != 0) {
         try e.put(0xD53B4200 | @as(u32, IP0)); // mrs x16, nzcv
         try writeGuest(e, nz, 4, IP0);
+    }
+    if (fp) {
+        try e.put(0xD53B4420 | @as(u32, IP0)); // mrs x16, fpsr
+        try readGuest(e, host.guest_fpsr.?, 4, IP1);
+        try e.dp(0x2A000000, false, IP1, IP1, IP0);
+        try writeGuest(e, host.guest_fpsr.?, 4, IP1);
+        try e.ldrSlot(IP0, e.saveArea(va_save));
+        try e.put(0xD51B4400 | @as(u32, IP0)); // msr fpcr, x16
     }
     for (fields, 0..) |fo, k| {
         const f = fo orelse continue;
@@ -1599,7 +1618,6 @@ fn copyOp(e: *E, idx: usize) !void {
     }
 }
 
-const a64_v_off: u32 = @offsetOf(@import("../../interp/a64/exec.zig").Cpu, "v");
 
 /// The register of the chunk that is exactly `bytes` bytes at `off`.
 fn exactChunk(e: *E, off: u64, bytes: u64) ?u5 {
