@@ -19,6 +19,7 @@ pub const a64 = struct {
     pub const decode = @import("interp/a64/decode.zig");
     pub const exec = @import("interp/a64/exec.zig");
     pub const lift = @import("jit/a64/lift.zig");
+    pub const flags = @import("jit/a64/flags.zig");
     pub const tracer = @import("jit/a64/tracer.zig");
 };
 /// h86's interpreter (T0).

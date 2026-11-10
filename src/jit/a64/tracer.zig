@@ -14,8 +14,8 @@ const t0 = @import("../../interp/a64/exec.zig");
 pub const code_va = 0x1000;
 pub const data_va = 0x20000;
 
-/// x0 = sum of 1..100, x4 = sum of squares (MADD isn't lifted: it runs
-/// through call.interp), and the data word accumulates too.
+/// x0 = sum of 1..100, x4 = sum of squares, and the data word
+/// accumulates too.
 pub const program = [_]u32{
     0xD2800000, // movz x0, #0
     0xD2800C81, // movz x1, #100

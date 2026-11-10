@@ -11,9 +11,10 @@ const std = @import("std");
 
 pub const code_va: u64 = 0x1000;
 pub const data_va: u64 = 0x20000;
-/// x20 holds data_va; x21 an unmapped address.
+/// x20 holds data_va; x21 an unmapped address; x22 a small index.
 pub const base_reg = 20;
 pub const bad_reg = 21;
+pub const index_reg = 22;
 pub const bad_va: u64 = 0x7000_0000;
 
 pub const Class = enum {
@@ -37,6 +38,14 @@ pub const Class = enum {
     exclusive,
     dmb,
     branch,
+    adc,
+    ccmp,
+    dp1,
+    sysreg,
+    ldst_modes,
+    ldst_v,
+    ldp_v,
+    ldar_stlr,
 };
 
 pub const Options = struct {
@@ -134,6 +143,68 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
             break :blk (size << 30) | 0x08007C00 | (s << 16) | (base_reg << 5) | d;
         },
         .dmb => 0xD5033BBF, // DMB ISH
+        // ADC ADCS SBC SBCS
+        .adc => (sf << 31) | (r.uintLessThan(u32, 4) << 29) | 0x1A000000 | (rm << 16) | (rn << 5) | d,
+        // CCMN CCMP, register or immediate
+        .ccmp => (sf << 31) | (r.uintLessThan(u32, 2) << 30) | 0x3A400000 | (r.uintLessThan(u32, 32) << 16) | (r.uintLessThan(u32, 16) << 12) | (r.uintLessThan(u32, 2) << 11) | (src(r) << 5) | r.uintLessThan(u32, 16),
+        // RBIT REV16 REV32/REV CLZ CLS (and REV for X)
+        .dp1 => blk: {
+            const ops = [_]u32{ 0, 1, 2, 4, 5, 3 };
+            const op = ops[r.uintLessThan(usize, if (sf == 1) 6 else 5)];
+            break :blk (sf << 31) | 0x5AC00000 | (op << 10) | (src(r) << 5) | d;
+        },
+        // MRS and MSR of NZCV and TPIDR_EL0
+        .sysreg => switch (r.uintLessThan(u32, 4)) {
+            0 => 0xD53B4200 | d,
+            1 => 0xD51B4200 | src(r),
+            2 => 0xD53BD040 | d,
+            else => 0xD51BD040 | src(r),
+        },
+        // LDR/STR: unscaled, post- and pre-index (on x20, forward only),
+        // register offset (x20 + x22, LSL or UXTW), and literal
+        .ldst_modes => blk: {
+            const size = r.uintLessThan(u32, 4);
+            const opc: u32 = switch (size) {
+                3 => r.uintLessThan(u32, 2),
+                2 => r.uintLessThan(u32, 3),
+                else => r.uintLessThan(u32, 4),
+            };
+            switch (r.uintLessThan(u32, 4)) {
+                0 => {
+                    const modes = [_]u32{ 0, 1, 3 };
+                    break :blk (size << 30) | 0x38000000 | (opc << 22) | (r.uintLessThan(u32, 64) << 12) | (modes[r.uintLessThan(usize, 3)] << 10) | (base_reg << 5) | d;
+                },
+                1 => {
+                    const opts = [_]u32{ 2, 3 };
+                    break :blk (size << 30) | 0x38200800 | (opc << 22) | (index_reg << 16) | (opts[r.uintLessThan(usize, 2)] << 13) | (r.uintLessThan(u32, 2) << 12) | (base_reg << 5) | d;
+                },
+                2 => break :blk (size << 30) | 0x38000400 | (opc << 22) | (r.uintLessThan(u32, 64) << 12) | (base_reg << 5) | d,
+                // LDR (literal) of W, X, or LDRSW, a few words back
+                else => {
+                    const lsz = r.uintLessThan(u32, 3);
+                    const back: u32 = r.uintLessThan(u32, @max(1, i + 1));
+                    break :blk (lsz << 30) | 0x18000000 | (((0 -% back) & 0x7ffff) << 5) | d;
+                },
+            }
+        },
+        // LDR/STR of B H S D Q registers (unsigned offset on x20)
+        .ldst_v => blk: {
+            const size = r.uintLessThan(u32, 5);
+            const l = r.uintLessThan(u32, 2);
+            const sz: u32 = if (size == 4) 0 else size;
+            const opc: u32 = (if (size == 4) @as(u32, 2) else 0) | l;
+            const off = r.uintLessThan(u32, (@as(u32, 4096) >> @intCast(size)) - 1);
+            break :blk (sz << 30) | 0x3D000000 | (opc << 22) | (off << 10) | (base_reg << 5) | d;
+        },
+        // LDP/STP of S D Q registers (signed offset on x20)
+        .ldp_v => blk: {
+            var t2 = reg(r);
+            const l = r.uintLessThan(u32, 2);
+            if (l == 1 and t2 == d) t2 = (d + 1) & 15;
+            break :blk (r.uintLessThan(u32, 3) << 30) | 0x2D000000 | (l << 22) | (r.uintLessThan(u32, 60) << 15) | (t2 << 10) | (base_reg << 5) | d;
+        },
+        // LDAR STLR on x20
+        .ldar_stlr => (r.uintLessThan(u32, 4) << 30) | (if (r.boolean()) @as(u32, 0x08DFFC00) else 0x089FFC00) | (base_reg << 5) | d,
         // B.cond, CBZ, CBNZ, TBZ, TBNZ, B: forward, within the program
         .branch => blk: {
             const k = 1 + r.uintLessThan(u32, @max(1, @min(8, n - i)));
@@ -195,6 +266,7 @@ pub fn registers(r: std.Random) struct { x: [31]u64, nzcv: u32 } {
     for (0..16) |i| x[i] = value(r);
     x[base_reg] = data_va;
     x[bad_reg] = bad_va;
+    x[index_reg] = r.uintLessThan(u64, 256) * 8;
     return .{ .x = x, .nzcv = r.uintLessThan(u32, 16) << 28 };
 }
 
