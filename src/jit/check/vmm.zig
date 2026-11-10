@@ -103,7 +103,6 @@ pub fn run(s: *State, g: *const check.Guest, cpu: *anyopaque, ctx: *Ctx, native:
 
         var real = ctx.*;
         real.cpu = @intFromPtr(cpu);
-        real.retired = 0;
         // The check's own Ctx doesn't see kicks: a slice of budget brings
         // a guest loop back here to look for them.
         real.budget = @min(ctx.budget, slice);
@@ -114,11 +113,12 @@ pub fn run(s: *State, g: *const check.Guest, cpu: *anyopaque, ctx: *Ctx, native:
         };
         lock.unlock();
         if (v.code) |code| invalidateWritten(code, &ck.r.shadow[check.Run.t1]);
-        ctx.retired +%= real.retired;
-        if (ctx.budget != std.math.maxInt(i64)) ctx.budget -%= @bitCast(real.retired);
+        const n = real.retired -% ctx.retired;
+        ctx.retired = real.retired;
+        if (ctx.budget != std.math.maxInt(i64)) ctx.budget -%= @bitCast(n);
         setPc(g, bytes, real.exit_pc);
         switch (e) {
-            .chain, .indirect, .interrupted => if (real.exit_pc == pc and real.retired == 0) return .t0,
+            .chain, .indirect, .interrupted => if (real.exit_pc == pc and n == 0) return .t0,
             .svc => return .svc,
             // The Cpu is at the instruction: T0 raises it again.
             .fault, .undef, .brk => return .t0,

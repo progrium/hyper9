@@ -92,9 +92,15 @@ pub fn step(c: *Ctx) u32 {
     }
     const word = std.mem.readInt(u32, @as(*const [4]u8, @ptrFromInt(f.host)), .little);
     const o = dec.decode(word, pc);
+    // cpu.retired counts as run() counts it, for CNTVCT_EL0 in
+    // deterministic mode (Bound's Machine has no clock).
     switch (t0.step(m, &o, pc)) {
-        .next => cpu.pc = pc + 4,
+        .next => {
+            cpu.pc = pc + 4;
+            cpu.retired +%= 1;
+        },
         .jump => |t| {
+            cpu.retired +%= 1;
             if (t & 3 != 0) {
                 // run() faults at the target, with the PC there.
                 cpu.pc = t;
@@ -107,6 +113,7 @@ pub fn step(c: *Ctx) u32 {
         },
         .exit => switch (m.exit) {
             .syscall => {
+                cpu.retired +%= 1;
                 c.exit_pc = cpu.pc;
                 return @intFromEnum(Exit.svc);
             },

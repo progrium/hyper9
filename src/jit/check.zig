@@ -304,6 +304,9 @@ pub const Options = struct {
     helpers: u64 = 0,
     /// T0 gives up after this many instructions past T1's count.
     max_t0: u64 = 1 << 24,
+    /// Both tiers' ctx.retired at entry: the Guest's own count, which a
+    /// lifter may read mid-region (CNTVCT_EL0 in deterministic mode).
+    retired: u64 = 0,
 };
 
 /// How a tier left.
@@ -383,6 +386,7 @@ pub const Run = struct {
             .interp = @intFromPtr(r.g.frontend.interp),
             .helpers = o.helpers,
             .budget = if (i == t1) o.budget else std.math.maxInt(i64),
+            .retired = o.retired,
         };
         if (r.g.bind) |b| try b(r.gpa, &r.ctx[i], &r.shadow[i]);
     }
@@ -415,7 +419,7 @@ pub const Run = struct {
             .ir_eval => |reg| try ir_eval.run(r.gpa, reg, c1),
             .entry => |f| @enumFromInt(f(c1)),
         };
-        r.out[t1] = .{ .exit = e1, .pc = c1.exit_pc, .addr = c1.exit_addr, .info = c1.exit_info, .retired = c1.retired };
+        r.out[t1] = .{ .exit = e1, .pc = c1.exit_pc, .addr = c1.exit_addr, .info = c1.exit_info, .retired = c1.retired -% o.retired };
         // Generated code leaves the PC in exit_pc, not the Cpu.
         r.setPc(t1, c1.exit_pc);
 
@@ -534,6 +538,7 @@ pub const Checker = struct {
         var opts = o;
         opts.budget = real.budget;
         opts.helpers = real.helpers;
+        opts.retired = real.retired;
         if (!try r.check(tier, cpu[0..r.g.cpu_size], opts)) {
             if (builtin.os.tag != .freestanding) std.debug.print("jit check: T1 and T0 diverge\n{s}\n", .{r.report.items});
             @panic("jit check: T1 and T0 diverge");
@@ -544,8 +549,9 @@ pub const Checker = struct {
         real.exit_pc = c1.exit_pc;
         real.exit_addr = c1.exit_addr;
         real.exit_info = c1.exit_info;
-        real.retired +%= c1.retired;
-        real.budget -%= @bitCast(c1.retired);
+        const n = r.out[Run.t1].retired;
+        real.retired +%= n;
+        real.budget -%= @bitCast(n);
         return r.out[Run.t1].exit;
     }
 };

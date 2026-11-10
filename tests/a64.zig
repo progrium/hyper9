@@ -1,10 +1,6 @@
 //! zig build a64-jit (and test, with -Demu=zig): the arm64 JIT plan's
 //! [a64-jit] cases, each run through the vmm interface on h9's own
 //! emulator (zemu and ha64), on T0 and on T1 (H9_EMU_TIER at create).
-//! Not in zig build test yet: two cases fail on T0 (a store into the
-//! running page isn't seen until the next branch, even after an ISB, and
-//! CNTVCT_EL0 in deterministic mode reads `retired` as of the run's start).
-//!
 //! T1 is this host's emitter: the x86-64 one here, the arm64 one on an
 //! arm64 Mac. Without -Demu=zig they skip.
 //!

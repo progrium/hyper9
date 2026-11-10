@@ -1660,8 +1660,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // The arm64 JIT plan's [a64-jit] cases, through the vmm interface on
-    // T0 and T1; they skip without -Demu=zig. Not in zig build test until
-    // the two T0 cases tests/a64.zig names pass.
+    // T0 and T1; they skip without -Demu=zig.
     const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/a64.zig"),
         .target = target,
@@ -1675,6 +1674,7 @@ pub fn build(b: *std.Build) void {
     }
     linkUnicorn(a64_jit);
     const a64_jit_run = b.addRunArtifact(a64_jit);
+    test_step.dependOn(&a64_jit_run.step);
     b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=zig)").dependOn(&a64_jit_run.step);
 
     // The speed numbers in SPEC.md's "Limits and selection". Always
