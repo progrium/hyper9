@@ -594,7 +594,8 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
             if (e.pend_off) |po| switch (r.insts.items[idx].op) {
                 // The callee may have changed the word; a setreg over it
                 // drops what's pending.
-                .@"call.interp", .@"call.helper" => try e.reloadPend(),
+                .@"call.interp" => try e.reloadPend(),
+                .@"call.helper" => if (r.insts.items[idx].aux2 & ir.helper_no_regs == 0) try e.reloadPend(),
                 .setreg => if (overlaps(r, r.insts.items[idx], @intCast(po))) try e.reloadPend(),
                 else => {},
             };
@@ -1004,9 +1005,15 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             }
         },
         .@"call.helper" => {
-            try e.writeback(e.dirty);
-            try e.syncPend();
-            e.dirty = 0;
+            // A helper that touches no guest register (helper_no_regs)
+            // leaves the chunks, dirty or not, and pending flags as they
+            // are: they're in callee-saved registers and the frame.
+            const regs = i.aux2 & ir.helper_no_regs == 0;
+            if (regs) {
+                try e.writeback(e.dirty);
+                try e.syncPend();
+                e.dirty = 0;
+            }
             try e.ldCtx(R11, ctx.off.helpers);
             try e.load(R11, R11, std.math.cast(i32, i.aux * 8) orelse return error.Unsupported);
             // Missing arguments are 0, as in ir_eval.
@@ -1016,7 +1023,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
                 if (i.c != ir.none) .{ .reg = RDX } else .{ .imm = 0 },
             };
             try e.call(&args);
-            try e.loadChunks();
+            if (regs) try e.loadChunks();
         },
         .poll => {
             // The budget alone: a request lowers it too (cache.request).
