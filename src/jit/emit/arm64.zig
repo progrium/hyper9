@@ -1806,8 +1806,11 @@ fn shiftMulFlags(e: *E, idx: usize) !void {
     try e.bfi(rd, IP1, 2, 1);
     switch (i.op) {
         .@"eflags.mul" => {
-            try e.bfi(rd, a, 0, 1);
-            try e.bfi(rd, a, 11, 1);
+            // CF = OF = (a != 0): a is the overflow, not just its bit 0.
+            try e.dp(0xEB000000, true, ZR, a, ZR); // cmp a, #0
+            try e.cset(IP0, NE);
+            try e.bfi(rd, IP0, 0, 1);
+            try e.bfi(rd, IP0, 11, 1);
         },
         else => {
             // CF: shl's msb(a), shr's a & 1. OF: msb(a ^ b).
