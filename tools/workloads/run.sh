@@ -39,7 +39,9 @@ filter="${1:-}"
 
 # name|kind|cwd|command (a shell command line, run by the guest's sh, or
 # rc for 9front). Each prints only what the run must reproduce.
-WORKLOADS=$(cat <<'X'
+# read, not $(cat <<...): macOS's bash 3.2 mis-parses quotes in a
+# here-document inside $(...).
+IFS= read -r -d '' WORKLOADS <<'X' || true
 a64-py-sum|arm64||python3 -c 'print(sum(range(10**7)))'
 a64-py-bench|arm64||python3 /w/bench.py
 a64-speedtest1|arm64||/w/speedtest1 --testset main --size 25 --verify --memdb | grep Verification
@@ -55,7 +57,6 @@ a64-go|arm64||/w/gowork 2>/dev/null
 9-awk|9front||seq 1 200000 | awk '{ s += $1; q += sqrt($1); if ($1 % 7 == 0) n++ } END { printf "%.0f %.6f %d\n", s, q, n }'; awk 'BEGIN { for (i = 0; i < 100000; i++) a[i % 977] = a[i % 977] i % 10; for (k in a) t += length(a[k]); print t }'
 9-hoc|9front||{echo 'x = 0'; echo 'i = 1'; echo 'while (i <= 200000) {'; echo 'x = x + sin(i) * exp(-i/100000) + sqrt(i)'; echo 'i = i + 1'; echo '}'; echo x; echo 'atan(1)*4'; echo '2^0.5'; echo 'log(10)'; echo '10^-3'} | hoc
 X
-)
 
 if command -v timeout >/dev/null; then to="timeout $TIMEOUT"
 elif command -v gtimeout >/dev/null; then to="gtimeout $TIMEOUT"
