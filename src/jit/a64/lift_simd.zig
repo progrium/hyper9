@@ -17,7 +17,6 @@
 //! from lanes the guest doesn't have.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const ir = @import("../ir.zig");
 const lift = @import("lift.zig");
 const dec = @import("../../interp/a64/decode.zig");
@@ -78,12 +77,9 @@ pub fn needsEnv(kind: K) bool {
     };
 }
 
-/// Whether lifting is on. The emitters that run `fp.*` and `v.*` ops (so
-/// far x86-64's, wasm's batch emitter, and ir_eval) take regions with
-/// them; arm64's declines such a region whole, which would leave its
-/// integer code in T0 too. So it's on by default only where the host's
-/// emitter has them; tests turn it on to check the lifting on ir_eval.
-pub var enabled: bool = builtin.cpu.arch == .x86_64 or builtin.cpu.arch.isWasm();
+/// Whether lifting is on: every emitter runs `fp.*` and `v.*` ops now.
+/// A switch for comparing against call.interp.
+pub var enabled: bool = true;
 
 /// Whether an FP/SIMD op is lifted (else it runs through call.interp).
 pub fn lifts(o: dec.Op) bool {
