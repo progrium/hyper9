@@ -206,11 +206,7 @@ test "litmus/a64: nothing forbidden on any tier" {
     for ([_]litmus.Tier{ .t0, .ir_eval, .native }) |tier| {
         if (tier == .native and !@import("../emit/native.zig").available()) continue;
         for (all) |t| {
-            var tally = litmus.run(gpa, &arch, t, .{ .iterations = 200, .tier = tier }) catch |e| switch (e) {
-                // LSE atomics aren't in T0's decoder yet.
-                error.Undefined => if (t == &counter_ldadd) continue else return e,
-                else => return e,
-            };
+            var tally = try litmus.run(gpa, &arch, t, .{ .iterations = 200, .tier = tier });
             defer tally.deinit(gpa);
             if (tally.forbidden != 0) {
                 var buf: [4096]u8 = undefined;

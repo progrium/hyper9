@@ -1779,6 +1779,22 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     test_step.dependOn(&litmus_run.step);
     b.step("litmus-x86", "Run h86's memory-model litmus tests on compiled code").dependOn(&litmus_run.step);
 
+    // ha64's memory-model litmus tests: every tier on host threads. About
+    // two minutes at 5000 runs a test, so in zig build vcpu, not test.
+    const litmus_a64 = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/jit/litmus_a64.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/vcpu.zig"),
+            .target = target,
+            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        }) }},
+    }) });
+    const litmus_a64_run = b.addRunArtifact(litmus_a64);
+    step.dependOn(&litmus_a64_run.step);
+    b.step("litmus-a64", "Run ha64's memory-model litmus tests on every tier").dependOn(&litmus_a64_run.step);
+
     const node = b.findProgram(&.{"node"}, &.{}) catch return;
     const runtime = b.addExecutable(.{
         .name = "jit-runtime",
