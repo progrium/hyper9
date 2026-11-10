@@ -358,11 +358,16 @@ pub const Op = enum(u16) {
     /// `nzcv.pack` and 0xf000_0000 if aux2 is 0, or `eflags.pack` and
     /// ir_eval.eflags_mask (0x8d5) if aux2 is 1, so the slot's other bits
     /// (EFLAGS' DF, IF, and bit 1) are kept.
-    /// They're written before any way out of the block (every terminator,
-    /// a fault, a poll that leaves) and before `call.interp`,
-    /// `call.helper`, and `copy`. A `setreg` overlapping aux drops it; a
-    /// new `pending.flags` writes the old one first if its offset differs.
-    /// Nothing may `getreg` the slot while it's pending. No result.
+    /// They're written before any way out of the region (every exit, a
+    /// fault, a poll that leaves) and before `call.interp`, `call.helper`,
+    /// and `copy`. A `setreg` overlapping aux drops it; a new
+    /// `pending.flags` writes the old one first if its offset differs.
+    /// Pending flags stay pending across `br` and `brcond` to the blocks
+    /// they name, so a loop needn't store them on each back edge: a block
+    /// starts with them pending where its predecessors left them so (the
+    /// emitter reconciles predecessors that disagree, on the edges). The
+    /// verifier tracks where the slot may be pending, through the blocks,
+    /// and nothing may `getreg` it there. No result.
     /// An emitter may simply write it at once: that's always correct.
     @"pending.flags" = 178,
 
@@ -684,15 +689,82 @@ pub const VerifyError = struct {
     msg: []const u8,
 };
 
+/// Where flags may be pending: up to two slots (a region's lifter uses
+/// one), or any slot once more have been seen.
+const MayPend = struct {
+    slots: [2]?u64 = .{ null, null },
+    any: bool = false,
+
+    fn add(m: *MayPend, off: u64) void {
+        for (&m.slots) |*s| {
+            if (s.* == off) return;
+            if (s.* == null) {
+                s.* = off;
+                return;
+            }
+        }
+        m.any = true;
+    }
+    fn merge(m: *MayPend, o: MayPend) bool {
+        const before = m.*;
+        if (o.any) m.any = true;
+        for (o.slots) |s| if (s) |x| m.add(x);
+        return !std.meta.eql(before, m.*);
+    }
+    fn hits(m: MayPend, off: u64, len: u64) bool {
+        if (m.any) return true;
+        for (m.slots) |s| if (s) |x| if (overlaps(off, len, x, 4)) return true;
+        return false;
+    }
+    fn drop(m: *MayPend, off: u64, len: u64) void {
+        if (m.any) return;
+        for (&m.slots) |*s| if (s.*) |x| if (overlaps(off, len, x, 4)) {
+            s.* = null;
+        };
+    }
+};
+
+/// The slots each block may start with flags pending at: pending.flags
+/// stays pending across br and brcond (Op.@"pending.flags").
+fn pendingIn(r: *const Region, out: []MayPend) void {
+    @memset(out, .{});
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (r.blocks.items, 0..) |blk, bi| {
+            if (!blk.begun or blk.len == 0) continue;
+            var m = out[bi];
+            const end = blk.start + blk.len;
+            for (r.insts.items[blk.start..end]) |i| switch (i.op) {
+                .@"pending.flags" => m = .{ .slots = .{ i.aux, null } },
+                .setreg => if (i.a < r.insts.items.len) m.drop(i.aux, byteLen(r.insts.items[i.a].ty)),
+                .@"call.interp", .@"call.helper", .copy => m = .{},
+                .br => if (i.aux < out.len) {
+                    changed = out[@intCast(i.aux)].merge(m) or changed;
+                },
+                .brcond => {
+                    if (i.aux < out.len) changed = out[@intCast(i.aux)].merge(m) or changed;
+                    if (i.aux2 < out.len) changed = out[@intCast(i.aux2)].merge(m) or changed;
+                },
+                else => {},
+            };
+        }
+    }
+}
+
 /// Checks the region's structure and types. Returns null if it's valid.
 pub fn verify(r: *const Region) ?VerifyError {
     if (r.blocks.items.len == 0) return .{ .block = 0, .inst = 0, .msg = "no blocks" };
+    var in_buf: [2048]MayPend = undefined;
+    if (r.blocks.items.len > in_buf.len) return .{ .block = 0, .inst = 0, .msg = "too many blocks to verify" };
+    const pend_in = in_buf[0..r.blocks.items.len];
+    pendingIn(r, pend_in);
     for (r.blocks.items, 0..) |blk, bi| {
         const b: BlockId = @intCast(bi);
         if (!blk.begun) return .{ .block = b, .inst = 0, .msg = "block never begun" };
         if (blk.len == 0) return .{ .block = b, .inst = 0, .msg = "empty block" };
         const end = blk.start + blk.len;
-        var pending: ?u64 = null; // the offset of a pending.flags
+        var pending = pend_in[bi]; // where flags may be pending
         for (blk.start..end) |ii| {
             const idx: u32 = @intCast(ii);
             const i = &r.insts.items[ii];
@@ -706,13 +778,11 @@ pub fn verify(r: *const Region) ?VerifyError {
             }
             if (checkInst(r, i)) |msg| return .{ .block = b, .inst = idx, .msg = msg };
             switch (i.op) {
-                .@"pending.flags" => pending = i.aux,
-                .setreg => if (pending) |p| if (overlaps(i.aux, byteLen(r.insts.items[i.a].ty), p, 4)) {
-                    pending = null;
-                },
-                .getreg => if (pending) |p| if (overlaps(i.aux, byteLen(i.ty), p, 4))
+                .@"pending.flags" => pending = .{ .slots = .{ i.aux, null } },
+                .setreg => pending.drop(i.aux, byteLen(r.insts.items[i.a].ty)),
+                .getreg => if (pending.hits(i.aux, byteLen(i.ty)))
                     return .{ .block = b, .inst = idx, .msg = "getreg of a slot with flags pending" },
-                .@"call.interp", .@"call.helper", .copy => pending = null,
+                .@"call.interp", .@"call.helper", .copy => pending = .{},
                 else => {},
             }
             if (i.op == .load or i.op == .store) {
@@ -1142,6 +1212,28 @@ test "the verifier rejects bad regions" {
         var r = parse(gpa, text) catch continue; // some fail to parse, which is fine
         defer r.deinit(gpa);
         try std.testing.expect(verify(&r) != null);
+    }
+}
+
+test "pending flags cross br and brcond" {
+    const gpa = std.testing.allocator;
+    const head = "b0:\n %0 = const:i32 #0x1\n %1 = nzcv.logic:flags %0\n pending.flags %1 #0x30\n";
+    const cases = [_]struct { text: []const u8, ok: bool }{
+        // read in a successor while pending: rejected
+        .{ .text = head ++ " br -> b1\nb1:\n %2 = getreg:i32 #0x30\n exit.indirect %2\n", .ok = false },
+        // ...through a block that doesn't touch it, and around a loop
+        .{ .text = head ++ " br -> b1\nb1:\n %2 = const:i1 #0x1\n brcond %2 -> b1 b2\nb2:\n %3 = getreg:i32 #0x30\n exit.indirect %3\n", .ok = false },
+        // written exactly on one way in only: still may be pending
+        .{ .text = head ++ " %2 = const:i1 #0x1\n brcond %2 -> b1 b2\nb1:\n %3 = const:i32 #0x0\n setreg %3 #0x30\n br -> b2\nb2:\n %4 = getreg:i32 #0x30\n exit.indirect %4\n", .ok = false },
+        // a setreg in the successor, or a call, ends it
+        .{ .text = head ++ " br -> b1\nb1:\n %2 = const:i32 #0x0\n setreg %2 #0x30\n %3 = getreg:i32 #0x30\n exit.indirect %3\n", .ok = true },
+        // another slot is fine
+        .{ .text = head ++ " br -> b1\nb1:\n %2 = getreg:i32 #0x40\n exit.indirect %2\n", .ok = true },
+    };
+    for (cases) |c| {
+        var r = try parse(gpa, c.text);
+        defer r.deinit(gpa);
+        try std.testing.expectEqual(c.ok, verify(&r) == null);
     }
 }
 

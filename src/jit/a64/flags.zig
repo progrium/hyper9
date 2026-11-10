@@ -23,6 +23,8 @@ pub const Flags = struct {
     cur: ?ir.Ref = null,
     /// `cur` differs from Cpu.nzcv.
     dirty: bool = false,
+    /// A `pending.flags` of `cur` hasn't reached Cpu.nzcv yet.
+    pend: bool = false,
 
     /// At the start of a block: values don't cross blocks.
     pub fn reset(f: *Flags) void {
@@ -51,6 +53,17 @@ pub const Flags = struct {
         if (!f.dirty) return;
         try b.pendingFlags(f.cur.?, off, .nzcv);
         f.dirty = false;
+        f.pend = true;
+    }
+
+    /// Makes Cpu.nzcv hold the flags now, not pending: before a block
+    /// that reads the slot (ir.zig: nothing may `getreg` it while pending,
+    /// and pending flags cross `br` and `brcond`).
+    pub fn exact(f: *Flags, b: *ir.Builder) !void {
+        if (!f.dirty and !f.pend) return;
+        try b.setreg(off, try b.un(.@"nzcv.pack", .i32, f.cur.?));
+        f.dirty = false;
+        f.pend = false;
     }
 
     /// After something outside the IR (`call.interp`) may have changed the
@@ -58,6 +71,7 @@ pub const Flags = struct {
     pub fn clobber(f: *Flags) void {
         std.debug.assert(!f.dirty);
         f.cur = null;
+        f.pend = false; // the call wrote it
     }
 
     /// The flags' i32 packing (bits 31..28), as MRS NZCV reads them.

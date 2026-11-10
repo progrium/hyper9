@@ -209,6 +209,48 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
         ops[i] = in.op;
     }
 
+    // Which blocks may read Cpu.nzcv before writing it: a block that ends
+    // with its flags pending leaves them so only if none of its in-region
+    // successors does (ir.zig: nothing may `getreg` a pending slot, and
+    // pending flags cross `br` and `brcond`). A call.interp needs no
+    // exact slot (the emitter writes pending flags before a call), nor
+    // does an exit.
+    var reads_in: [max_insns + 1]bool = @splat(false);
+    var scan_end: [max_insns + 1]enum { reads, writes, passes } = undefined;
+    for (0..n) |s| if (leader[s]) {
+        scan_end[s] = .passes;
+        var j = s;
+        while (true) : (j += 1) {
+            if (by_interp[j]) {
+                scan_end[s] = .writes;
+                break;
+            }
+            switch (dec.regs(ops[j]).flags) {
+                .r, .rw => {
+                    scan_end[s] = .reads;
+                    break;
+                },
+                .w => {
+                    scan_end[s] = .writes;
+                    break;
+                },
+                .none => {},
+            }
+            if (j + 1 >= n or leader[j + 1] or insns[j].how.ends()) break;
+        }
+        reads_in[s] = scan_end[s] == .reads;
+    };
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (0..n) |s| if (leader[s] and scan_end[s] == .passes and !reads_in[s]) {
+            if (succReads(insns, leader[0 .. n + 1], reads_in[0 .. n + 1], s)) {
+                reads_in[s] = true;
+                changed = true;
+            }
+        };
+    }
+
     // One block per leader in [0, n], in order; block ids follow.
     var block_of: [max_insns + 1]ir.BlockId = undefined;
     for (0..n + 1) |i| if (leader[i]) {
@@ -225,7 +267,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
             try b.exit(.@"exit.chain", end);
             break;
         }
-        var l: L = .{ .b = b };
+        var l: L = .{ .b = b, .succ_reads = succReads(insns, leader[0 .. n + 1], reads_in[0 .. n + 1], start) };
         if (loop_head[start]) try b.poll(insns[start].pc);
         // The block's last instruction: the next leader's, less one.
         var last = start;
@@ -264,7 +306,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
                 .branch => {
                     const c = try l.condition(in.op);
                     l.pending += 1;
-                    try l.retireAll();
+                    try l.retireEnd();
                     const taken = try R.target(b, in.op.imm);
                     try b.brcond(c, taken, block_of[i + 1]);
                     // Only a target outside the region gets a new block to
@@ -309,7 +351,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
             i += 1;
             if (in.how.ends() or in.how == .branch) break;
             if (leader[i]) {
-                try l.retireAll();
+                try l.retireEnd();
                 try b.br(block_of[i]);
                 break;
             }
@@ -319,6 +361,27 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
 }
 
 /// The index of the instruction at `t` in the trace, if it's there.
+/// Whether a block of `lift`'s trace, the one starting at `s`, branches to
+/// one in the region that may read Cpu.nzcv first (`reads_in`).
+fn succReads(insns: []const Insn, leader: []const bool, reads_in: []const bool, s: usize) bool {
+    const n = insns.len;
+    var last = s;
+    while (last + 1 < n and !leader[last + 1]) last += 1;
+    const in = insns[last];
+    switch (in.how) {
+        .branch => {
+            if (reads_in[last + 1]) return true;
+            if (indexOf(insns, in.op.imm)) |t| return reads_in[t];
+            return false;
+        },
+        .jump, .call => {
+            if (indexOf(insns, in.op.imm)) |t| return reads_in[t];
+            return false;
+        },
+        else => return !in.how.ends() and reads_in[last + 1],
+    }
+}
+
 fn indexOf(insns: []const Insn, t: u64) ?usize {
     for (insns, 0..) |in, i| if (in.pc == t) return i;
     return null;
@@ -375,6 +438,8 @@ pub const L = struct {
     pending: u64 = 0,
     /// The instruction being lifted needn't compute its flags.
     flags_dead: bool = false,
+    /// A block this one branches to may read Cpu.nzcv before writing it.
+    succ_reads: bool = true,
 
     /// Before an operation that can leave: the flags in the Cpu, and the
     /// instructions so far retired.
@@ -384,12 +449,23 @@ pub const L = struct {
     }
 
     fn flushFor(l: *L, in_region: bool) !void {
-        if (in_region) return l.retireAll();
+        if (in_region) return l.retireEnd();
         try l.flush();
     }
 
-    /// Before a branch to another block: the block's count, as a `retire`.
+    /// Before a branch to another block: the block's count, as a `retire`,
+    /// and the flags in Cpu.nzcv, not pending, for whatever block reads
+    /// them next.
     pub fn retireAll(l: *L) !void {
+        try l.flags.exact(l.b);
+        try l.b.retire(l.pending);
+        l.pending = 0;
+    }
+
+    /// At the end of one of `lift`'s blocks: as retireAll, but the flags
+    /// may stay pending if no block it branches to reads them first.
+    fn retireEnd(l: *L) !void {
+        if (l.succ_reads) return l.retireAll();
         try l.flags.sync(l.b);
         try l.b.retire(l.pending);
         l.pending = 0;
