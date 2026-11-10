@@ -1,8 +1,8 @@
 //! zig build fuzz-x86 [-- options]: random 386 programs (src/jit/check/
 //! gen_x86.zig) run on h86's T0 and, with -Demu=unicorn, checked against
 //! Unicorn an instruction at a time: registers, EIP, the EFLAGS bits the
-//! instruction defines, memory, and the exit. The region check (T1
-//! against T0) joins when h86's lifter exists; until then it's skipped.
+//! instruction defines, memory, and the exit; and, region by region, the
+//! lifter in ir_eval against T0 (check.zig's region check).
 //!
 //! Options: see fuzz_common.zig (`--without` takes gen_x86.Class names).
 //! A divergence prints the seed, the program, and the report; rerun one
@@ -46,10 +46,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var args = try common.Args(gen.Class).parse("fuzz-x86", init);
     if (!options.unicorn) args.lockstep = false;
-    // No h86 lifter yet (E2): nothing to check T0 against but Unicorn.
-    const have_lifter = false;
-    if (!have_lifter) args.check = false;
-    std.debug.print("fuzz-x86: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off (no h86 lifter yet)", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
+    std.debug.print("fuzz-x86: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
     if (!args.lockstep and !args.check) {
         std.debug.print("fuzz-x86: nothing to compare T0 with; running T0 alone for crashes\n", .{});
     }
@@ -63,6 +60,10 @@ pub fn main(init: std.process.Init) !void {
     var buf: [page_size - 16]u8 = undefined;
     var failed: u64 = 0;
     var steps: u64 = 0;
+    var checked: u64 = 0;
+    s.load(&.{}, 0);
+    const run = try check.Run.init(gpa, &x86.guest, check.mapBacking(&s.map));
+    defer run.deinit();
     var i: u64 = 0;
     while (i < args.iters) : (i += 1) {
         const seed = args.seed +% i;
@@ -72,7 +73,24 @@ pub fn main(init: std.process.Init) !void {
         if (args.trace) std.debug.print("seed {d}: {x}\n", .{ seed, code });
         s.load(code, seed);
         report.clearRetainingCapacity();
-        const bad = try runProgram(gpa, s, regs.r, regs.eflags, args.lockstep, &report.writer, &steps);
+        var bad = false;
+        if (args.check) {
+            var cpu: x86.Cpu = .{};
+            cpu.r = regs.r;
+            cpu.eip = gen.code_va;
+            cpu.fl.set(regs.eflags);
+            const out = vcpu.x86jit.check.checkRegions(gpa, run, &s.map, cpu, std.math.maxInt(i64), 4096) catch |e| blk: {
+                try report.writer.print("region check: {t}\n", .{e});
+                break :blk vcpu.x86jit.check.Result{ .exit = .chain, .pc = 0, .regions = 0, .retired = 0, .ok = false };
+            };
+            checked += out.retired;
+            if (!out.ok) {
+                bad = true;
+                try report.writer.print("region check:\n{s}", .{run.report.items});
+            }
+            s.load(code, seed);
+        }
+        if (!bad) bad = try runProgram(gpa, s, regs.r, regs.eflags, args.lockstep, &report.writer, &steps);
         if (!bad) continue;
         failed += 1;
         if (args.keep_going) {
@@ -82,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("seed {d}: program {x}\n{s}\n", .{ seed, code, report.written() });
         std.process.exit(1);
     }
-    std.debug.print("fuzz-x86: {d} programs, {d} diverged; {d} instructions stepped\n", .{ args.iters, failed, steps });
+    std.debug.print("fuzz-x86: {d} programs, {d} diverged; {d} instructions stepped, {d} region-checked\n", .{ args.iters, failed, steps, checked });
     tally.print();
     if (failed != 0) std.process.exit(1);
 }

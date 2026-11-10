@@ -2,10 +2,9 @@
 //! (src/interp/x86/exec.zig).
 //!
 //! T0 reads memory through its `translate`, which `ShadowMem` serves from
-//! the check's shadow, so only the pages a region touches are copied.
-//! h86's lifter (E2) doesn't exist yet: `frontend` stands in for it until
-//! src/jit/x86/lift.zig does, and its `lift` says so, so the region check
-//! for h86 waits on E2 while lockstep (fuzz-x86) runs now.
+//! the check's shadow, so only the pages a region touches are copied. The
+//! lifter's `call.interp` runs T0 through a `lift.Mem` over the same
+//! shadow, which `bind` puts in ctx.frontend.
 
 const std = @import("std");
 const check = @import("../check.zig");
@@ -21,12 +20,8 @@ const Ctx = ctx_mod.Ctx;
 const Exit = ctx_mod.Exit;
 pub const Cpu = t0.Cpu;
 
-/// Stands in for h86's front end until E2's lifter lands.
-pub const frontend: fe.Frontend = .{ .name = "h86", .flags = .eflags, .lift = noLifter, .interp = interp };
-
-fn noLifter(_: *ir.Builder, _: fe.Source, _: u64, _: fe.Limits) fe.LiftError!void {
-    return error.Unsupported;
-}
+pub const lift = @import("../x86/lift.zig");
+pub const frontend = lift.frontend;
 
 pub const guest: check.Guest = .{
     .frontend = frontend,
@@ -35,7 +30,27 @@ pub const guest: check.Guest = .{
     .pc_bytes = 4,
     .step = step,
     .diff = diff,
+    .bind = bind,
+    .unbind = unbind,
 };
+
+/// `call.interp`'s memory over the shadow (ctx.frontend).
+const Bound = struct { m: lift.Mem };
+
+fn bind(gpa: std.mem.Allocator, c: *Ctx, s: *check.Shadow) anyerror!void {
+    const b = try gpa.create(Bound);
+    b.* = .{ .m = .{ .ctx = s, .translateFn = shadowTranslate } };
+    c.frontend = @intFromPtr(&b.m);
+}
+
+fn unbind(gpa: std.mem.Allocator, c: *Ctx) void {
+    const m: *lift.Mem = @ptrFromInt(@as(usize, @intCast(c.frontend)));
+    gpa.destroy(@as(*Bound, @fieldParentPtr("m", m)));
+}
+
+fn shadowTranslate(p: *anyopaque, va: u32, access: cpu_mod.Access) ?[*]u8 {
+    return (ShadowMem{ .s = @ptrCast(@alignCast(p)) }).translate(va, access);
+}
 
 /// T0's memory over a check.Shadow (ctx.space), or any `translate`.
 pub const ShadowMem = struct {
@@ -53,35 +68,10 @@ pub const ShadowMem = struct {
     }
 };
 
-/// Converts T0's exit to ctx's, with the conventions of check.Guest.step.
-pub fn exitOf(c: *Ctx, cpu: *const Cpu, e: cpu_mod.Exit, pc: u32) u32 {
-    switch (e) {
-        .syscall => {
-            c.exit_pc = cpu.eip;
-            return @intFromEnum(Exit.svc);
-        },
-        .breakpoint => {
-            c.exit_pc = cpu.eip;
-            return @intFromEnum(Exit.brk);
-        },
-        .stopped => {
-            c.exit_pc = pc;
-            return @intFromEnum(Exit.interrupted);
-        },
-        .fault => |f| {
-            c.exit_pc = pc;
-            c.exit_addr = f.addr;
-            c.exit_info = @intFromEnum(f.access);
-            return @intFromEnum(Exit.fault);
-        },
-        .exception => |v| {
-            c.exit_pc = cpu.eip;
-            c.exit_addr = 0;
-            // The vector, where a fault's access goes.
-            c.exit_info = @as(u64, v) << 8;
-            return @intFromEnum(if (v == cpu_mod.vec_ud) Exit.undef else Exit.fault);
-        },
-    }
+/// Converts T0's exit to ctx's, as `call.interp` does (check.Guest.step's
+/// conventions).
+pub fn exitOf(c: *Ctx, cpu: *Cpu, e: cpu_mod.Exit, pc: u32) u32 {
+    return lift.exitFor(c, cpu, e, pc);
 }
 
 /// One T0 instruction. ctx.space is the check's Shadow.
@@ -91,13 +81,6 @@ pub fn step(c: *Ctx) u32 {
     const pc = cpu.eip;
     const e = t0.step(cpu, ShadowMem{ .s = s }) orelse return 0;
     return exitOf(c, cpu, e, pc);
-}
-
-/// A stand-in `call.interp` until E2's: runs the instruction at `pc` (the
-/// handle is unused), with ctx.space a check Shadow.
-pub fn interp(c: *Ctx, _: u64, pc: u64) callconv(.c) u32 {
-    c.cpuPtr(Cpu).eip = @truncate(pc);
-    return step(c);
 }
 
 fn diff(pa: *const anyopaque, pb: *const anyopaque, w: *std.Io.Writer) bool {

@@ -35,6 +35,12 @@ pub const x86 = struct {
     pub const x87math = @import("interp/x86/x87math.zig");
     pub const sse = @import("interp/x86/sse.zig");
 };
+/// h86's front end: the lifter to the JIT IR.
+pub const x86jit = struct {
+    pub const lift = @import("jit/x86/lift.zig");
+    pub const flags = @import("jit/x86/flags.zig");
+    pub const check = @import("jit/x86/check.zig");
+};
 pub const emit = struct {
     pub const arm64 = @import("jit/emit/arm64.zig");
     pub const wasm = @import("jit/emit/wasm.zig");
@@ -47,4 +53,5 @@ test {
     @import("std").testing.refAllDecls(a64);
     @import("std").testing.refAllDecls(x86);
     @import("std").testing.refAllDecls(check);
+    @import("std").testing.refAllDecls(x86jit);
 }
