@@ -1626,7 +1626,7 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     }) else null;
     const fuzz_options = b.addOptions();
     fuzz_options.addOption(bool, "unicorn", unicorn != null);
-    for ([_][]const u8{"a64"}) |arch| {
+    for ([_][]const u8{ "a64", "x86" }) |arch| {
         const exe = b.addExecutable(.{
             .name = b.fmt("fuzz-{s}", .{arch}),
             .root_module = b.createModule(.{

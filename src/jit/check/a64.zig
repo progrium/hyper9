@@ -25,8 +25,6 @@ pub const guest: check.Guest = .{
     .diff = diff,
     .bind = bind,
     .unbind = unbind,
-    // The lifter retires before every load, store, and call.interp.
-    .fault_retired_exact = true,
 };
 
 /// T0's machine over a shadow (or any Space), as ctx.frontend.

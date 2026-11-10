@@ -23,6 +23,7 @@
 //!
 //! - An instruction that completes is retired, and so is SVC (resume at
 //!   the next PC). A faulting, undefined, or breakpoint instruction isn't.
+//!   The count is exact at every exit, faults included.
 //! - At `chain`, `indirect`, and `interrupted`, T0 must have retired the
 //!   same number of instructions with no exit, and be at the exit PC.
 //! - At `svc`, `brk`, `undef`, and `fault`, T0 must take the same exit at
@@ -44,6 +45,9 @@ const page_size = mem.page_size;
 pub const a64 = @import("check/a64.zig");
 pub const gen_a64 = @import("check/gen_a64.zig");
 pub const fuzz_a64 = @import("check/fuzz_a64.zig");
+/// h86's Guest, and fuzz-x86's generator.
+pub const x86 = @import("check/x86.zig");
+pub const gen_x86 = @import("check/gen_x86.zig");
 
 /// What check mode needs from a guest architecture, beyond its `Frontend`.
 pub const Guest = struct {
@@ -52,6 +56,8 @@ pub const Guest = struct {
     cpu_size: usize,
     /// Byte offset of the guest PC (a u64) in the Cpu.
     pc_off: usize,
+    /// The PC's size in bytes: 8, or 4 for a 32-bit guest's EIP.
+    pc_bytes: u8 = 8,
     /// Runs one T0 instruction at the Cpu's PC, with ctx's memory (TLB and
     /// slow paths, and ctx.frontend as `bind` left it). Returns `.ok` when
     /// the instruction retired and the Cpu's PC is the next one, or an
@@ -67,11 +73,6 @@ pub const Guest = struct {
     unbind: ?*const fn (gpa: std.mem.Allocator, c: *Ctx) void = null,
     /// The bits of exit_info both tiers must agree on for a fault.
     info_mask: u64 = 0xff,
-    /// Whether T1's retired count is exact at a fault. A lifter that
-    /// retires a block's count at its end leaves it short when a load or
-    /// store in the block faults; with this false, T0 runs to its own exit
-    /// at a fault and the counts aren't compared.
-    fault_retired_exact: bool = true,
     /// A disassembler for reports, if the front end has one.
     disasm: ?*const fn (src: fe.Source, pc: u64, w: *std.Io.Writer) void = null,
 };
@@ -363,8 +364,16 @@ pub const Run = struct {
         if (r.g.bind) |b| try b(r.gpa, &r.ctx[i], &r.shadow[i]);
     }
 
-    fn pcOf(r: *Run, i: usize) *align(1) u64 {
-        return @ptrCast(r.cpu[i][r.g.pc_off..][0..8]);
+    fn getPc(r: *Run, b: []const u8) u64 {
+        return if (r.g.pc_bytes == 4) std.mem.readInt(u32, b[r.g.pc_off..][0..4], .little) else std.mem.readInt(u64, b[r.g.pc_off..][0..8], .little);
+    }
+
+    fn pc(r: *Run, i: usize) u64 {
+        return r.getPc(r.cpu[i]);
+    }
+
+    fn setPc(r: *Run, i: usize, v: u64) void {
+        if (r.g.pc_bytes == 4) std.mem.writeInt(u32, r.cpu[i][r.g.pc_off..][0..4], @truncate(v), .little) else std.mem.writeInt(u64, r.cpu[i][r.g.pc_off..][0..8], v, .little);
     }
 
     /// Checks one region from Cpu `start` (the front end's Cpu, as bytes).
@@ -385,32 +394,29 @@ pub const Run = struct {
         };
         r.out[t1] = .{ .exit = e1, .pc = c1.exit_pc, .addr = c1.exit_addr, .info = c1.exit_info, .retired = c1.retired };
         // Generated code leaves the PC in exit_pc, not the Cpu.
-        r.pcOf(t1).* = c1.exit_pc;
+        r.setPc(t1, c1.exit_pc);
 
         // T0, an instruction at a time, to T1's count.
         try r.setup(t0, o);
         const c0 = &r.ctx[t0];
         const want = r.out[t1].retired;
-        const loose = e1 == .fault and !r.g.fault_retired_exact;
-        if (loose) r.out[t1].retired = 0;
         var n: u64 = 0;
         const out0: Outcome = while (true) {
-            if (n == want and continues(e1)) break .{ .exit = e1, .pc = r.pcOf(t0).*, .retired = n };
-            if (n > want + o.max_t0) break .{ .exit = .interrupted, .pc = r.pcOf(t0).*, .retired = n };
+            if (n == want and continues(e1)) break .{ .exit = e1, .pc = r.pc(t0), .retired = n };
+            if (n > want + o.max_t0) break .{ .exit = .interrupted, .pc = r.pc(t0), .retired = n };
             const e: Exit = @enumFromInt(r.g.step(c0));
             if (e == .ok) {
                 n += 1;
                 // Past T1's count with no exit: T1 left early, or T0 is
                 // running away; either way they differ.
-                if (n > want and !loose) break .{ .exit = .ok, .pc = r.pcOf(t0).*, .retired = n };
+                if (n > want) break .{ .exit = .ok, .pc = r.pc(t0), .retired = n };
                 continue;
             }
             if (e == .svc) n += 1;
             break .{ .exit = e, .pc = c0.exit_pc, .addr = c0.exit_addr, .info = c0.exit_info, .retired = n };
         };
         r.out[t0] = out0;
-        if (loose) r.out[t0].retired = 0;
-        if (!continues(out0.exit) and out0.exit != .ok) r.pcOf(t0).* = out0.pc;
+        if (!continues(out0.exit) and out0.exit != .ok) r.setPc(t0, out0.pc);
 
         if (r.shadow[t1].oom or r.shadow[t0].oom) return error.OutOfMemory;
         return r.compare(tier);
@@ -432,7 +438,7 @@ pub const Run = struct {
         if (r.g.diff(r.cpu[t1].ptr, r.cpu[t0].ptr, w)) bad = true;
         if (try r.compareMemory(w)) bad = true;
         if (bad) {
-            try w.print("{s} region at {x}", .{ r.g.frontend.name, std.mem.readInt(u64, r.start[r.g.pc_off..][0..8], .little) });
+            try w.print("{s} region at {x}", .{ r.g.frontend.name, r.getPc(r.start) });
             switch (tier) {
                 .ir_eval => |reg| {
                     try w.writeAll(":\n");
