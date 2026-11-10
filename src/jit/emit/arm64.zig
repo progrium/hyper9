@@ -1277,6 +1277,20 @@ fn lower(e: *E, idx: usize) EmitError!void {
                 e.code.chains[e.code.nchains] = .{ .site = @intCast(site), .pc = i.aux };
                 e.code.nchains += 1;
             }
+            // Unlinked (or not linkable, across pages): the jump cache,
+            // with the target's index known now, before the dispatcher.
+            const miss = try e.label();
+            try e.ldrCtx(IP0, ctx.off.jump);
+            try e.cbz(true, IP0, miss);
+            try e.movImm(IP1, ctx.jumpIndex(i.aux) * @sizeOf(ctx.JumpEntry));
+            try e.dp(0x0B000000, true, IP0, IP0, IP1);
+            try e.ldrCtx2(IP1, IP0, 0);
+            try e.movImm(T0, i.aux);
+            try e.dp(0x6B000000, true, ZR, IP1, T0); // cmp
+            try e.bcond(NE, miss);
+            try e.ldrCtx2(IP0, IP0, 16);
+            try e.put(0xD61F0000 | @as(u32, IP0) << 5); // br x16
+            e.bind(miss);
             const back: u32 = @bitCast(@as(i32, @intCast(@as(isize, @intCast(site)) - @as(isize, @intCast(e.pos())))));
             try e.put(0x10000000 | (back & 3) << 29 | ((back >> 2) & 0x7ffff) << 5 | @as(u32, IP0)); // adr x16, site
             try e.strCtx(IP0, ctx.off.exit_info);
@@ -2199,4 +2213,40 @@ test "TSO loads are LDAPR where the host has LRCPC, else LDAR" {
     }
     try std.testing.expect(ldapr == hasLrcpc() and ldar != ldapr);
     if (@import("builtin").os.tag == .macos and @import("builtin").cpu.arch == .aarch64) try std.testing.expect(hasLrcpc());
+}
+
+test "an unlinked chain site finds its target in the jump cache" {
+    if (!testexec.supported) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const texts = [_][]const u8{
+        "region 0x1000\nb0:\n %0 = getreg:i64 #0x0\n %1 = const:i64 #0x1\n %2 = add:i64 %0, %1\n setreg %2 #0x0\n retire #0x1\n exit.chain #0x2000\n",
+        "region 0x2000\nb0:\n %0 = getreg:i64 #0x0\n %1 = const:i64 #0xa\n %2 = add:i64 %0, %1\n setreg %2 #0x0\n exit.svc #0x2004 !1\n",
+    };
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(gpa);
+    var outs: [2]emitter.Code = undefined;
+    var starts: [2]u32 = undefined;
+    for (texts, 0..) |t, k| {
+        var r = try ir.parse(gpa, t);
+        defer r.deinit(gpa);
+        while (code.items.len % 16 != 0) try code.append(gpa, 0);
+        starts[k] = @intCast(code.items.len);
+        outs[k] = try emitRegion(gpa, &r, &code);
+    }
+    const x = try testexec.load(code.items);
+    defer x.deinit();
+    var regs: [2]u64 = .{ 5, 0 };
+    var tlb: mem.Tlb = .{};
+    var jc: [ctx.jump_entries]ctx.JumpEntry = @splat(.{});
+    var cx: ctx.Ctx = .{ .cpu = @intFromPtr(&regs), .tlb = @intFromPtr(&tlb), .jump = @intFromPtr(&jc) };
+    // A miss leaves as before.
+    try std.testing.expectEqual(ctx.Exit.chain, @as(ctx.Exit, @enumFromInt(x.entry(starts[0])(&cx))));
+    try std.testing.expectEqual(@as(u64, 6), regs[0]);
+    // A hit runs B without leaving.
+    jc[ctx.jumpIndex(0x2000)] = .{ .pc = 0x2000, .code = @intFromPtr(x.mem.ptr) + starts[1] + outs[1].chain_entry };
+    regs = .{ 5, 0 };
+    cx.retired = 0;
+    try std.testing.expectEqual(ctx.Exit.svc, @as(ctx.Exit, @enumFromInt(x.entry(starts[0])(&cx))));
+    try std.testing.expectEqual(@as(u64, 16), regs[0]);
+    try std.testing.expectEqual(@as(u64, 2), cx.retired);
 }
