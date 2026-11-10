@@ -289,6 +289,42 @@ test "check/x86: shifts by CL (including 0), 8- and 16-bit operands, SETcc, and 
     try testing.expectEqual(Exit.svc, r.exit);
 }
 
+fn bitSetup(c: *Cpu) void {
+    c.r[0] = 0x12345678;
+    c.r[1] = 0x10;
+    c.r[3] = Machine.data_va + 0x300;
+    c.r[6] = Machine.data_va + 0x100;
+    c.r[7] = Machine.data_va + 0x200;
+}
+
+test "check/x86: rotates, SHLD, BT*, BSF/BSR, POP to memory, and single string ops" {
+    const code = [_]u8{
+        0x0f, 0xbc, 0xd0, // bsfl %eax, %edx
+        0x0f, 0xbd, 0xd0, // bsrl %eax, %edx
+        0xbd, 0x00, 0x00, 0x00, 0x00, // movl $0, %ebp
+        0x0f, 0xbc, 0xd5, // bsfl %ebp, %edx (zero: ZF, %edx kept)
+        0x0f, 0xab, 0x0b, // btsl %ecx, (%ebx)
+        0x0f, 0xba, 0x73, 0x04, 0x03, // btrl $3, 4(%ebx)
+        0x0f, 0xbb, 0xc8, // btcl %ecx, %eax
+        0x0f, 0xa3, 0x4b, 0xfc, // btl %ecx, -4(%ebx)
+        0xd3, 0xc0, // roll %cl, %eax
+        0xc0, 0xc8, 0x03, // rorb $3, %al
+        0x66, 0xd1, 0xc0, // rolw $1, %ax
+        0xd1, 0xd0, // rcll $1, %eax
+        0x0f, 0xa4, 0xc2, 0x04, // shldl $4, %eax, %edx
+        0x0f, 0xad, 0xc2, // shrdl %cl, %eax, %edx
+        0x50, 0x8f, 0x43, 0x08, // pushl %eax; popl 8(%ebx)
+        0x50, 0x8f, 0x04, 0x24, // pushl %eax; popl (%esp) (after the pop)
+        0x58, // popl %eax
+        0xa5, 0xa4, 0x66, 0xa5, // movsl; movsb; movsw
+        0xfd, 0xab, 0xac, 0xa7, 0xae, // std; stosl; lodsb; cmpsl; scasb
+        0xfc, 0x66, 0xab, 0xa6, // cld; stosw; cmpsb
+        0xcd, 0x80,
+    };
+    const r = try expectRun(&code, &bitSetup);
+    try testing.expectEqual(Exit.svc, r.exit);
+}
+
 fn atomSetup(c: *Cpu) void {
     c.r[3] = Machine.data_va + 0x100;
     c.r[0] = 5;

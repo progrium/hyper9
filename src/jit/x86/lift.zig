@@ -270,19 +270,24 @@ fn classify(i: *const Inst) Class {
         // A memory divisor would have to be loaded twice (the check and
         // the division are in different blocks): T0 runs it.
         .div, .idiv => if (i.mem) .interp else .lifted,
-        .shl, .shr, .sar => blk: {
-            if (e.src == .CL) break :blk if (i.mem) .interp else .lifted;
+        .shl, .shr, .sar, .rol, .ror, .shld, .shrd => blk: {
+            const cl = e.src == .CL or ((i.op == .shld or i.op == .shrd) and e.imm != .b);
+            if (cl) break :blk if (i.mem) .interp else .lifted;
             const n = if (e.src == .one) 1 else i.imm & 31;
             // A count of 0 still checks that memory is writable.
             break :blk if (n == 0 and i.mem) .interp else .lifted;
         },
+        .bt, .bts, .btr, .btc => if (i.lock) .interp else .lifted,
+        .bsf, .bsr => .lifted,
         .mov, .movzx, .movsx, .lea, .bswap, .cbw, .cwd, .setcc, .cmovcc => .lifted,
         .xchg, .xadd, .cmpxchg => .lifted,
         .push, .leave => .lifted,
-        // POP to memory addresses with ESP after the pop.
-        .pop => if (i.mem) .interp else .lifted,
+        // POP to memory addresses with ESP after the pop (FS and GS go
+        // to T0).
+        .pop => if (i.mem and @intFromEnum(i.seg) >= 4) .interp else .lifted,
         .clc, .stc, .cmc, .cld, .std => .lifted,
-        .movs, .cmps, .stos, .lods, .scas => if (i.rep != .none and !i.addr16) .lifted else .interp,
+        // Without REP, a source through FS or GS goes to T0.
+        .movs, .cmps, .stos, .lods, .scas => if (i.addr16) .interp else if (i.rep != .none) .lifted else if (@intFromEnum(i.seg) >= 4 and i.op != .stos and i.op != .scas) .interp else .lifted,
         .jcc => if (near32) .cond else .stop,
         .loop, .loope, .loopne, .jcxz => if (near32 and !i.addr16) .cond else .stop,
         .jmp => if (near32) .jump else .stop,
@@ -308,6 +313,8 @@ const Insn = struct {
 
 pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftError!void {
     const gpa = b.gpa;
+    // x86 is TSO: a weaker host orders this region's loads and stores.
+    b.r.tso = true;
     const max: usize = @max(1, limits.max_insns);
     var insns: std.ArrayList(Insn) = .empty;
     defer insns.deinit(gpa);
@@ -587,11 +594,23 @@ const Lifter = struct {
 
     /// The memory operand's offset, before the segment base.
     fn effAddr(l: *Lifter, i: *const Inst) !Ref {
+        return l.effAddrEsp(i, null);
+    }
+
+    /// `effAddr`, with ESP's value given (POP to memory addresses with
+    /// ESP after the pop).
+    fn effAddrEsp(l: *Lifter, i: *const Inst, esp: ?Ref) !Ref {
         const b = l.b;
+        const R = struct {
+            fn get(ll: *Lifter, n: u4, e: ?Ref) !Ref {
+                if (n == ESP) if (e) |v| return v;
+                return ll.b.getreg(.i32, regOff(@intCast(n)));
+            }
+        };
         var a: ?Ref = null;
-        if (i.base != dec.no_reg) a = try b.getreg(.i32, regOff(@intCast(i.base)));
+        if (i.base != dec.no_reg) a = try R.get(l, i.base, esp);
         if (i.index != dec.no_reg) {
-            var x = try b.getreg(.i32, regOff(@intCast(i.index)));
+            var x = try R.get(l, i.index, esp);
             if (i.scale != 0) x = try b.bin(.shl, .i32, x, try l.k32(i.scale));
             a = if (a) |y| try b.bin(.add, .i32, y, x) else x;
         }
@@ -610,13 +629,13 @@ const Lifter = struct {
         const i = &l.insns[k].i;
         const s = @intFromEnum(i.seg);
         if (s >= 4) {
-            const bit = @as(u8, 1) << @intCast(s);
-            if (l.seg_ok & bit == 0) {
+            const sbit = @as(u8, 1) << @intCast(s);
+            if (l.seg_ok & sbit == 0) {
                 const b = l.b;
                 const nulls = try b.getreg(.i8, seg_null_off);
-                const t = try b.bin(.@"and", .i8, nulls, try b.konst(.i8, bit));
+                const t = try b.bin(.@"and", .i8, nulls, try b.konst(.i8, sbit));
                 try l.guard(k, try b.icmp(.ne, t, try b.konst(.i8, 0)), true);
-                l.seg_ok |= bit;
+                l.seg_ok |= sbit;
             }
             const off = try l.effAddr(i);
             const base = try l.b.getreg(.i32, seg_base_off + @as(u64, s) * 4);
@@ -731,7 +750,11 @@ const Lifter = struct {
             return 1;
         }
         if (isString(i.op)) {
-            try l.repString(k);
+            if (i.rep != .none) try l.repString(k) else try l.string(k);
+            return 1;
+        }
+        if (i.op == .pop and i.mem) {
+            try l.popMem(k);
             return 1;
         }
         // The memory operand's address comes first: its guard has to
@@ -799,6 +822,22 @@ const Lifter = struct {
                 if (l.needFlags(k)) try l.setFlags(.@"eflags.sub", zero, x);
             },
             .shl, .shr, .sar => try l.shift(k, addr),
+            .rol, .ror => try l.rotate(k, addr),
+            .shld, .shrd => try l.shiftDouble(k, addr),
+            .bt, .bts, .btr, .btc => try l.bitTest(k, addr),
+            .bsf, .bsr => {
+                const v = try l.get(k, addr, e.src, size);
+                const v32 = if (T == .i32) v else try b.un(.zext, .i32, v);
+                const idx = if (i.op == .bsf)
+                    try b.un(.ctz, .i32, v32)
+                else
+                    try b.bin(.sub, .i32, try l.k32(31), try b.un(.clz, .i32, v32));
+                const res = if (T == .i32) idx else try b.un(.trunc, T, idx);
+                const zero = try b.icmp(.eq, v, try b.konst(T, 0));
+                // The destination is written only for a nonzero source.
+                try l.setR(i.reg(), size, try l.sel(T, zero, try l.getR(i.reg(), size), res));
+                if (l.needFlags(k)) l.fl.set(try b.un(.@"eflags.logic", .flags, v));
+            },
             .mul, .imul1 => {
                 const y = try l.get(k, addr, e.src, size);
                 const x = try l.getR(0, size);
@@ -1103,6 +1142,221 @@ const Lifter = struct {
         const back = try b.un(if (signed) .sext else .zext, W, qn);
         const fits = try b.icmp(.eq, back, q);
         return b.bin(.@"and", .i1, nz, fits);
+    }
+
+    /// Sets CF and OF in the flags, from i32 0-or-1 values.
+    fn setCfOf(l: *Lifter, cf: Ref, of: Ref) !void {
+        const b = l.b;
+        const p = try b.un(.@"eflags.pack", .i32, try l.fl.get(b));
+        const keep = try b.bin(.@"and", .i32, p, try l.k32(~(xf.CF | xf.OF)));
+        const o = try b.bin(.shl, .i32, of, try l.k32(11));
+        l.fl.set(try b.un(.@"eflags.unpack", .flags, try b.bin(.@"or", .i32, keep, try b.bin(.@"or", .i32, cf, o))));
+    }
+
+    /// Bit n of the i32 v, as an i32 0 or 1.
+    fn bit(l: *Lifter, v: Ref, n: u32) !Ref {
+        const b = l.b;
+        return b.bin(.@"and", .i32, try b.bin(.lshr, .i32, v, try l.k32(n)), try l.k32(1));
+    }
+
+    /// ROL and ROR by a constant, or by CL into a register. CF and OF
+    /// only, as T0 computes them (for any count but 0, OF as for 1).
+    fn rotate(l: *Lifter, k: usize, addr: ?Ref) !void {
+        const i = &l.insns[k].i;
+        const e = i.tableEntry();
+        const b = l.b;
+        const size = i.size;
+        const T = tyOf(size);
+        const bits: u32 = @as(u32, size) * 8;
+        const op: ir.Op = if (i.op == .rol) .rol else .ror;
+        const x = try l.getDst(k, addr, e.dst, size);
+        var cnt: Ref = undefined;
+        var zero: ?Ref = null;
+        if (e.src == .CL) {
+            const raw = try b.bin(.@"and", .i8, try l.getR(1, 1), try b.konst(.i8, 31));
+            zero = try b.icmp(.eq, raw, try b.konst(.i8, 0));
+            cnt = if (T == .i8) raw else try b.un(.zext, T, raw);
+        } else {
+            const n: u32 = if (e.src == .one) 1 else i.imm & 31;
+            if (n == 0) return;
+            cnt = try b.konst(T, n);
+        }
+        const r = try b.bin(op, T, x, cnt);
+        const res = if (zero) |z| try l.sel(T, z, x, r) else r;
+        try l.put(k, addr, e.dst, size, res);
+        if (!l.needFlags(k)) return;
+        const r32 = if (T == .i32) r else try b.un(.zext, .i32, r);
+        const top = try l.bit(r32, bits - 1);
+        var cf: Ref = undefined;
+        var of: Ref = undefined;
+        if (i.op == .rol) {
+            cf = try b.bin(.@"and", .i32, r32, try l.k32(1));
+            of = try b.bin(.xor, .i32, top, cf);
+        } else {
+            cf = top;
+            of = try b.bin(.xor, .i32, top, try l.bit(r32, bits - 2));
+        }
+        const old = try l.fl.get(b);
+        try l.setCfOf(cf, of);
+        if (zero) |z| l.fl.set(try l.sel(.flags, z, old, l.fl.cur.?));
+    }
+
+    /// SHLD and SHRD, by a constant, or by CL into a register: at 64
+    /// bits, the destination and the source side by side.
+    fn shiftDouble(l: *Lifter, k: usize, addr: ?Ref) !void {
+        const i = &l.insns[k].i;
+        const e = i.tableEntry();
+        const b = l.b;
+        const size = i.size;
+        const T = tyOf(size);
+        const bits: u64 = @as(u64, size) * 8;
+        const left = i.op == .shld;
+        const x = try l.getDst(k, addr, e.dst, size);
+        const y = try l.getR(i.reg(), size);
+        const x64 = try b.un(.zext, .i64, x);
+        const y64 = try b.un(.zext, .i64, y);
+        const sh = try b.konst(.i64, bits);
+        const v = if (left)
+            try b.bin(.@"or", .i64, try b.bin(.shl, .i64, x64, sh), y64)
+        else
+            try b.bin(.@"or", .i64, try b.bin(.shl, .i64, y64, sh), x64);
+        var cnt: Ref = undefined;
+        var zero: ?Ref = null;
+        if (e.imm != .b) {
+            cnt = try b.bin(.@"and", .i64, try b.un(.zext, .i64, try l.getR(1, 1)), try b.konst(.i64, 31));
+            zero = try b.icmp(.eq, cnt, try b.konst(.i64, 0));
+        } else {
+            const n: u64 = i.imm & 31;
+            if (n == 0) return;
+            cnt = try b.konst(.i64, n);
+        }
+        const S = struct {
+            fn at(bb: *Builder, t: Type, lft: bool, vv: Ref, c: Ref, s: Ref) !Ref {
+                const w = if (lft)
+                    try bb.bin(.lshr, .i64, try bb.bin(.shl, .i64, vv, c), s)
+                else
+                    try bb.bin(.lshr, .i64, vv, c);
+                return bb.un(.trunc, t, w);
+            }
+        };
+        const r = try S.at(b, T, left, v, cnt, sh);
+        const res = if (zero) |z| try l.sel(T, z, x, r) else r;
+        try l.put(k, addr, e.dst, size, res);
+        if (!l.needFlags(k)) return;
+        const pre = try S.at(b, T, left, v, try b.bin(.sub, .i64, cnt, try b.konst(.i64, 1)), sh);
+        const f = try b.flags(if (left) .@"eflags.shl" else .@"eflags.shr", pre, r);
+        if (zero) |z| {
+            const old = try l.fl.get(b);
+            l.fl.set(try l.sel(.flags, z, old, f));
+        } else l.fl.set(f);
+    }
+
+    /// BT, BTS, BTR, and BTC (without LOCK). A register bit offset reaches
+    /// outside a memory operand, by whole operands.
+    fn bitTest(l: *Lifter, k: usize, addr0: ?Ref) !void {
+        const i = &l.insns[k].i;
+        const e = i.tableEntry();
+        const b = l.b;
+        const size = i.size;
+        const T = tyOf(size);
+        const bits: u32 = @as(u32, size) * 8;
+        var addr = addr0;
+        var n: Ref = undefined;
+        if (e.src == .I) {
+            n = try b.konst(T, i.imm & (bits - 1));
+        } else {
+            const off = try l.getR(i.reg(), size);
+            n = try b.bin(.@"and", T, off, try b.konst(T, bits - 1));
+            if (i.mem) {
+                const so = if (T == .i32) off else try b.un(.sext, .i32, off);
+                const words = try b.bin(.ashr, .i32, so, try l.k32(@ctz(bits)));
+                const delta = try b.bin(.mul, .i32, words, try l.k32(size));
+                addr = try b.bin(.add, .i32, addr.?, delta);
+            }
+        }
+        const one_ = try b.konst(T, 1);
+        const m = try b.bin(.shl, T, one_, n);
+        const old = if (i.op == .bt) try l.get(k, addr, e.dst, size) else try l.getDst(k, addr, e.dst, size);
+        if (i.op != .bt) {
+            const new = switch (i.op) {
+                .bts => try b.bin(.@"or", T, old, m),
+                .btr => try b.bin(.andn, T, old, m),
+                else => try b.bin(.xor, T, old, m),
+            };
+            try l.put(k, addr, e.dst, size, new);
+        }
+        if (!l.needFlags(k)) return;
+        const bv = try b.bin(.@"and", T, try b.bin(.lshr, T, old, n), one_);
+        const cf = if (T == .i32) bv else try b.un(.zext, .i32, bv);
+        const p = try b.un(.@"eflags.pack", .i32, try l.fl.get(b));
+        const keep = try b.bin(.@"and", .i32, p, try l.k32(~xf.CF));
+        l.fl.set(try b.un(.@"eflags.unpack", .flags, try b.bin(.@"or", .i32, keep, cf)));
+    }
+
+    /// POP to memory: the address uses ESP after the pop, and a fault
+    /// storing leaves ESP as it was.
+    fn popMem(l: *Lifter, k: usize) !void {
+        const i = &l.insns[k].i;
+        const b = l.b;
+        const size = i.size;
+        const sp = try l.getR(ESP, 4);
+        const v = try l.load(k, size, sp);
+        const nsp = try b.bin(.add, .i32, sp, try l.k32(size));
+        const a = try l.effAddrEsp(i, nsp);
+        try l.store(k, a, v);
+        try l.setR(ESP, 4, nsp);
+        l.count += 1;
+    }
+
+    /// MOVS, STOS, LODS, CMPS, and SCAS without REP: one iteration, ESI
+    /// and EDI stepping by DF.
+    fn string(l: *Lifter, k: usize) !void {
+        const i = &l.insns[k].i;
+        const b = l.b;
+        const size = i.size;
+        const T = tyOf(size);
+        const df = try b.bin(.@"and", .i32, try b.getreg(.i32, xf.bits_off), try l.k32(xf.DF));
+        const back = try b.icmp(.ne, df, try l.k32(0));
+        const d = try l.sel(.i32, back, try l.k32(@as(u32, 0) -% size), try l.k32(size));
+        const si = try l.getR(6, 4);
+        const di = try l.getR(7, 4);
+        const src_addr = if (@intFromEnum(i.seg) >= 4)
+            try b.bin(.add, .i32, si, try b.getreg(.i32, seg_base_off + @as(u64, @intFromEnum(i.seg)) * 4))
+        else
+            si;
+        switch (i.op) {
+            .movs => {
+                const v = try l.load(k, size, src_addr);
+                try l.store(k, di, v);
+                try l.setR(6, 4, try b.bin(.add, .i32, si, d));
+                try l.setR(7, 4, try b.bin(.add, .i32, di, d));
+            },
+            .stos => {
+                try l.store(k, di, try l.getR(0, size));
+                try l.setR(7, 4, try b.bin(.add, .i32, di, d));
+            },
+            .lods => {
+                const v = try l.load(k, size, src_addr);
+                try l.setR(0, size, v);
+                try l.setR(6, 4, try b.bin(.add, .i32, si, d));
+            },
+            .cmps => {
+                const x = try l.load(k, size, src_addr);
+                const y = try l.load(k, size, di);
+                try l.setR(6, 4, try b.bin(.add, .i32, si, d));
+                try l.setR(7, 4, try b.bin(.add, .i32, di, d));
+                if (l.needFlags(k)) try l.setFlags(.@"eflags.sub", x, y);
+            },
+            .scas => {
+                const x = try l.getR(0, size);
+                const y = try l.load(k, size, di);
+                try l.setR(7, 4, try b.bin(.add, .i32, di, d));
+                if (l.needFlags(k)) try l.setFlags(.@"eflags.sub", x, y);
+            },
+            else => unreachable,
+        }
+        _ = T;
+        l.count += 1;
     }
 
     /// An atomic read-modify-write (see `isAtomic`). An access that isn't

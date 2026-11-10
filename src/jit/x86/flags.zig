@@ -27,6 +27,7 @@ pub const arith = t0.arith;
 pub const CF = t0.CF;
 pub const ZF = t0.ZF;
 pub const DF = t0.DF;
+pub const OF = t0.OF;
 
 /// Byte offsets in Cpu: the materialized EFLAGS, and the lazy kind
 /// (an enum(u8), `.none` = 0).
