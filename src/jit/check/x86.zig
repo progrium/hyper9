@@ -115,7 +115,12 @@ fn diff(pa: *const anyopaque, pb: *const anyopaque, w: *std.Io.Writer) bool {
         bad = true;
     }
     if (!std.meta.eql(a.fpu, b.fpu)) {
-        w.print("x87 state differs\n", .{}) catch {};
+        const f = a.fpu;
+        const g = b.fpu;
+        w.print("x87 state differs: T1 top {d} tag {x} sw {x} cw {x} fop {x} fip {x} fdp {x}; T0 top {d} tag {x} sw {x} cw {x} fop {x} fip {x} fdp {x}\n", .{ f.top, f.tag, f.sw, f.cw, f.fop, f.fip, f.fdp, g.top, g.tag, g.sw, g.cw, g.fop, g.fip, g.fdp }) catch {};
+        for (f.st, g.st, 0..) |x, y, i| if (x.signif != y.signif or x.sign_exp != y.sign_exp) {
+            w.print("  st[{d}]: T1 {x:0>4} {x:0>16}, T0 {x:0>4} {x:0>16}\n", .{ i, x.sign_exp, x.signif, y.sign_exp, y.signif }) catch {};
+        };
         bad = true;
     }
     return bad;

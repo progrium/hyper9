@@ -627,8 +627,12 @@ pub fn fuzzX87(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
         for (&m.data) |*b| b.* = rng.int(u8);
         code.clearRetainingCapacity();
         for (0..4 + rng.uintLessThan(usize, 20)) |_| {
-            switch (rng.uintLessThan(u8, 10)) {
+            switch (rng.uintLessThan(u8, 13)) {
                 0...3 => try code.appendSlice(gpa, &.{ 0xd8 | rng.uintLessThan(u8, 8), 0x43 | @as(u8, rng.uintLessThan(u8, 8)) << 3, rng.uintLessThan(u8, 0x78) }),
+                // The data movement x87fast takes: FLD, FST, and FSTP
+                // m64fp, and FLD, FXCH, FST, and FSTP ST(i).
+                10, 11 => try code.appendSlice(gpa, &.{ 0xdd, 0x43 | @as(u8, ([_]u8{ 0, 2, 3 })[rng.uintLessThan(usize, 3)]) << 3, rng.uintLessThan(u8, 0x78) & ~@as(u8, 7) }),
+                12 => try code.appendSlice(gpa, if (rng.boolean()) &.{ 0xd9, 0xc0 | rng.uintLessThan(u8, 16) } else &.{ 0xdd, 0xd0 | rng.uintLessThan(u8, 16) }),
                 4...7 => try code.appendSlice(gpa, &.{ 0xd8 | rng.uintLessThan(u8, 8), 0xc0 | rng.uintLessThan(u8, 64) }),
                 8 => try code.appendSlice(gpa, &.{ 0xd9, 0xe8 + rng.uintLessThan(u8, 7) }), // constants
                 else => try code.appendSlice(gpa, switch (rng.uintLessThan(u8, 4)) {

@@ -194,6 +194,10 @@ const seg_null_off = @offsetOf(Cpu, "seg_null");
 const fpu_sw_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "sw");
 const fpu_top_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "top");
 const x87_ES: u16 = 1 << 7;
+const fpu_fop_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "fop");
+const fpu_fip_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "fip");
+const fpu_fdp_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "fdp");
+const seg_off = @offsetOf(Cpu, "seg");
 const xmm_off = @offsetOf(Cpu, "xmm");
 const mxcsr_off = @offsetOf(Cpu, "mxcsr");
 /// MXCSR's controls (DAZ, the masks, RC, FZ) that lifted SSE assumes: the
@@ -434,6 +438,8 @@ const Lifter = struct {
     seg_ok: u8 = 0,
     /// MXCSR's controls checked in this block (see `sse`).
     mx_ok: bool = false,
+    /// The x87's ES checked clear in this block (see `x87`).
+    es_ok: bool = false,
     leader: []bool = &.{},
     loop_head: []bool = &.{},
     block_of: []ir.BlockId = &.{},
@@ -574,6 +580,7 @@ const Lifter = struct {
         l.fl.forget();
         l.seg_ok = 0;
         l.mx_ok = false;
+        l.es_ok = false;
     }
 
     /// Writes the flags back, and stamps what's done on the ops that can
@@ -651,9 +658,11 @@ const Lifter = struct {
         try b.exit(.@"exit.chain", l.next(k));
         const ok = l.seg_ok;
         const mx = l.mx_ok;
+        const es = l.es_ok;
         l.startBlock(cont);
         l.seg_ok = ok;
         l.mx_ok = mx;
+        l.es_ok = es;
     }
 
     fn callInterp(l: *Lifter, k: usize) !void {
@@ -662,6 +671,7 @@ const Lifter = struct {
         l.fl.forget();
         l.seg_ok = 0;
         l.mx_ok = false;
+        l.es_ok = false;
     }
 
     // ------------------------------------------------------ operands
@@ -919,9 +929,7 @@ const Lifter = struct {
             .sse => try l.sse(k),
             .fwait => {
                 // #MF for a pending unmasked exception, through T0.
-                const sw = try b.getreg(.i16, fpu_sw_off);
-                const es = try b.bin(.@"and", .i16, sw, try b.konst(.i16, x87_ES));
-                try l.guard(k, try b.icmp(.ne, es, try b.konst(.i16, 0)), true);
+                try l.esGuard(k);
             },
             .bsf, .bsr => {
                 const v = try l.get(k, addr, e.src, size);
@@ -1274,6 +1282,7 @@ const Lifter = struct {
             try l.setR(0, 2, try b.bin(.@"or", .i16, keep, try b.bin(.shl, .i16, top, try b.konst(.i16, 11))));
             return;
         }
+        if (try l.x87Fast(k)) return;
         const fx = dec.effects(i);
         const addr = if (i.mem) try b.un(.zext, .i64, try l.linear(k)) else try b.konst(.i64, 0);
         // FCMOVcc reads EFLAGS, and FCOMI writes it, in the Cpu.
@@ -1289,7 +1298,89 @@ const Lifter = struct {
         const zero = try b.konst(.i64, 0);
         const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = addr, .c = zero, .aux = @intFromEnum(helpers.Index.x87) });
         if (fx.flags_written != 0) l.fl.forget();
+        // It may have raised an unmasked exception: ES again.
+        l.es_ok = false;
         try l.guard(k, try b.icmp(.ne, st, zero), true);
+    }
+
+    /// #MF for a pending unmasked x87 exception, through T0: once a block,
+    /// until something that can raise one.
+    fn esGuard(l: *Lifter, k: usize) !void {
+        if (l.es_ok) return;
+        const b = l.b;
+        const sw = try b.getreg(.i16, fpu_sw_off);
+        const es = try b.bin(.@"and", .i16, sw, try b.konst(.i16, x87_ES));
+        try l.guard(k, try b.icmp(.ne, es, try b.konst(.i16, 0)), true);
+        l.es_ok = true;
+    }
+
+    /// The x87's data movement through helpers.x87fast, which does it on
+    /// the Fpu when it's exact and nothing is raised, and otherwise leaves
+    /// it to T0 (the guard). FLD and FST(P) m64fp, FLD and FST(P) ST(i),
+    /// FXCH, FLDZ, and FLD1. Returns false, emitting nothing, for the rest.
+    fn x87Fast(l: *Lifter, k: usize) !bool {
+        const b = l.b;
+        const i = &l.insns[k].i;
+        const op: u3 = @truncate(i.opcode);
+        const r = i.reg();
+        const H = helpers.FastArg;
+        var arg: H = .{ .kind = .fld64, .op = op, .modrm = i.modrm, .pc = l.insns[k].pc };
+        if (i.mem) {
+            if (op != 5 or !(r == 0 or r == 2 or r == 3)) return false;
+            // T0's order: the wait, the note, then the access.
+            try l.esGuard(k);
+            const a32 = try l.linear(k);
+            try b.setreg(fpu_fop_off, try b.konst(.i16, (@as(u16, op) << 8) | i.modrm));
+            const cs = try b.un(.zext, .i64, try b.getreg(.i16, seg_off + 2));
+            try b.setreg(fpu_fip_off, try b.bin(.@"or", .i64, try b.bin(.shl, .i64, cs, try b.konst(.i64, 32)), try b.konst(.i64, l.insns[k].pc)));
+            const ds = try b.un(.zext, .i64, try b.getreg(.i16, seg_off + 2 * @as(u64, @intFromEnum(i.seg))));
+            try b.setreg(fpu_fdp_off, try b.bin(.@"or", .i64, try b.bin(.shl, .i64, ds, try b.konst(.i64, 32)), try b.un(.zext, .i64, a32)));
+            const zero = try b.konst(.i64, 0);
+            if (r == 0) {
+                const v = try l.load(k, 8, a32);
+                const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = v, .c = zero, .aux = @intFromEnum(helpers.Index.x87fast) });
+                try l.guard(k, try b.icmp(.ne, st, zero), true);
+                return true;
+            }
+            arg.kind = .fst64;
+            const ok = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = zero, .c = zero, .aux = @intFromEnum(helpers.Index.x87fast) });
+            try l.guard(k, try b.icmp(.eq, ok, try b.konst(.i64, @bitCast(helpers.refuse))), true);
+            // The guard started a block, and values don't cross: the
+            // double again (fst64 changes nothing), and the address.
+            const z0 = try b.konst(.i64, 0);
+            const bits = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = z0, .c = z0, .aux = @intFromEnum(helpers.Index.x87fast) });
+            try l.store(k, try l.linear(k), bits);
+            arg.kind = .fst64_done;
+            arg.pop = r == 3;
+            const z = try b.konst(.i64, 0);
+            _ = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = z, .c = z, .aux = @intFromEnum(helpers.Index.x87fast) });
+            return true;
+        }
+        const rm = i.rm();
+        switch (op) {
+            1 => switch (r) {
+                0 => arg.kind = .fld_st,
+                1 => arg.kind = .fxch,
+                5 => switch (rm) {
+                    0, 6 => arg.kind = .fld_const,
+                    else => return false,
+                },
+                else => return false,
+            },
+            5 => switch (r) {
+                2, 3 => {
+                    arg.kind = .fst_st;
+                    arg.pop = r == 3;
+                },
+                else => return false,
+            },
+            else => return false,
+        }
+        arg.i = if (arg.kind == .fld_const) @intFromBool(rm == 0) else rm;
+        const zero = try b.konst(.i64, 0);
+        const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = zero, .c = zero, .aux = @intFromEnum(helpers.Index.x87fast) });
+        try l.guard(k, try b.icmp(.ne, st, zero), true);
+        return true;
     }
 
     fn xmmOff(n: u3) u64 {
