@@ -27,6 +27,8 @@ pub const Options = struct {
 
 /// The loop counter's Cpu offset.
 const fuel_off = 56;
+/// pending.flags writes 48 or 52, which nothing else reads or writes.
+const pending_off = 48;
 
 const int_tys = [_]Type{ .i8, .i16, .i32, .i64 };
 
@@ -98,7 +100,8 @@ const G = struct {
     fn getreg(g: *G, ty: Type) !Ref {
         const n: u32 = @intCast(ty.bits() / 8);
         // Mostly aligned, sometimes not; anywhere in the 64 bytes.
-        var off = g.rnd.uintLessThan(u32, 64 - n + 1);
+        if (g.chance(5)) return g.emit(.{ .op = .getreg, .ty = ty, .aux = fuel_off + 8 - n });
+        var off = g.rnd.uintLessThan(u32, pending_off - n + 1);
         if (g.chance(75)) off -= off % n;
         return g.emit(.{ .op = .getreg, .ty = ty, .aux = off });
     }
@@ -106,7 +109,7 @@ const G = struct {
     fn setreg(g: *G) !void {
         const ty = g.pick(Type, &.{ .i8, .i16, .i32, .i64, .i64, .i64, .flags });
         const n: u32 = @intCast(ty.bits() / 8);
-        var off = g.rnd.uintLessThan(u32, fuel_off - n + 1);
+        var off = g.rnd.uintLessThan(u32, pending_off - n + 1);
         if (g.chance(75)) off -= off % n;
         _ = try g.b.emit(.{ .op = .setreg, .a = try g.val(ty), .aux = off });
     }
@@ -232,6 +235,10 @@ const G = struct {
         } else if (k < 90) {
             try g.setreg();
         } else if (k < 93) {
+            if (g.chance(40)) {
+                _ = try g.b.emit(.{ .op = .@"pending.flags", .a = try g.val(.flags), .aux = pending_off + 4 * g.rnd.uintLessThan(u64, 2), .aux2 = g.rnd.uintLessThan(u64, 2) });
+                return;
+            }
             _ = try g.getreg(g.pick(Type, &.{ .i8, .i16, .i32, .i64, .flags }));
         } else if (k < 95) {
             try g.b.retire(1 + g.rnd.uintLessThan(u64, 5));

@@ -206,9 +206,10 @@ const Stub = union(enum) {
         tso: bool,
         /// Just the fault exit (cas, which made its call inline).
         fault_only: bool = false,
+        pend: ?Pend = null,
     },
-    poll: struct { label: u32, dirty: regalloc.ChunkSet, pc: u64, retired: u32 },
-    misaligned: struct { label: u32, va: u5, acc: mem.Access, dirty: regalloc.ChunkSet, pc: u64, retired: u32 },
+    poll: struct { label: u32, dirty: regalloc.ChunkSet, pc: u64, retired: u32, pend: ?Pend = null },
+    misaligned: struct { label: u32, va: u5, acc: mem.Access, dirty: regalloc.ChunkSet, pc: u64, retired: u32, pend: ?Pend = null },
     /// v.load and v.store's slow path: two 8-byte halves, the low first.
     vslow: struct {
         label: u32,
@@ -221,8 +222,13 @@ const Stub = union(enum) {
         pc: u64,
         retired: u32,
         tso: bool,
+        pend: ?Pend = null,
     },
 };
+
+/// A pending.flags not yet written: value v, packed by group, for Cpu
+/// offset off.
+const Pend = struct { v: Ref, off: u64, group: u64 };
 
 /// Per instruction, what the flags pre-pass decided.
 const Decide = struct {
@@ -260,6 +266,7 @@ const E = struct {
     fp: bool = false,
     dirty: regalloc.ChunkSet = 0,
     block: ir.BlockId = 0,
+    pend: ?Pend = null,
 
     fn deinit(e: *E) void {
         e.fixups.deinit(e.gpa);
@@ -717,6 +724,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
         e.block = @intCast(bi);
         e.bind(@intCast(bi));
         e.dirty = p.dirty_in[bi];
+        e.pend = null;
         for (blk.start..blk.start + blk.len) |idx| {
             if (d[idx].skip) continue;
             try lower(&e, idx);
@@ -769,7 +777,7 @@ fn emitStub(e: *E, s: Stub) !void {
             e.bind(x.label);
             if (x.fault_only) {
                 try e.restoreRegs(x.save);
-                return e.leave(.fault, x.pc, x.dirty, x.retired);
+                return e.leave(.fault, x.pc, try stubPend(e, x.pend, x.dirty), x.retired);
             }
             try e.saveRegs(x.save);
             try e.put(0xD53B4200 | @as(u32, IP0)); // mrs x16, nzcv
@@ -794,11 +802,11 @@ fn emitStub(e: *E, s: Stub) !void {
             e.bind(fault);
             try e.restoreRegs(x.save);
             if (x.rmw) try reportWrite(e);
-            try e.leave(.fault, x.pc, x.dirty, x.retired);
+            try e.leave(.fault, x.pc, try stubPend(e, x.pend, x.dirty), x.retired);
         },
         .poll => |x| {
             e.bind(x.label);
-            try e.leave(.interrupted, x.pc, x.dirty, x.retired);
+            try e.leave(.interrupted, x.pc, try stubPend(e, x.pend, x.dirty), x.retired);
         },
         .vslow => |x| {
             e.bind(x.label);
@@ -828,16 +836,43 @@ fn emitStub(e: *E, s: Stub) !void {
             try e.b(x.back);
             e.bind(fault);
             try e.restoreRegs(x.save);
-            try e.leave(.fault, x.pc, x.dirty, x.retired);
+            try e.leave(.fault, x.pc, try stubPend(e, x.pend, x.dirty), x.retired);
         },
         .misaligned => |x| {
             e.bind(x.label);
             try e.strCtx(x.va, ctx.off.exit_addr);
             try e.movImm(IP0, @as(u64, @intFromEnum(x.acc)) | (@as(u64, @intFromEnum(mem.FaultKind.alignment)) << 8));
             try e.strCtx(IP0, ctx.off.exit_info);
-            try e.leave(.fault, x.pc, x.dirty, x.retired);
+            try e.leave(.fault, x.pc, try stubPend(e, x.pend, x.dirty), x.retired);
         },
     }
+}
+
+/// Writes pending flags (packed for their group) to the guest.
+fn writePend(e: *E, p: Pend) !void {
+    const f = try e.src(p.v, S0);
+    if (p.group == 0) {
+        try e.logImm(0, true, IP0, f, 28, 4);
+    } else {
+        try e.movImm(IP0, ir_eval.eflags_mask);
+        try e.dp(0x0A000000, false, IP0, f, IP0);
+    }
+    try writeGuest(e, p.off, 4, IP0);
+}
+
+/// Writes the main line's pending flags, if any, now.
+fn flushPend(e: *E) !void {
+    if (e.pend) |p| try writePend(e, p);
+    e.pend = null;
+}
+
+/// A stub's way out: its pending flags written, and its dirty set with
+/// their chunk.
+fn stubPend(e: *E, p: ?Pend, dirty: regalloc.ChunkSet) !regalloc.ChunkSet {
+    const pp = p orelse return dirty;
+    try writePend(e, pp);
+    if (e.p.chunkAt(pp.off, 4)) |k| return dirty | @as(regalloc.ChunkSet, 1) << @intCast(k);
+    return dirty;
 }
 
 /// A read-modify-write's load faulted: report the access as a write.
@@ -856,6 +891,13 @@ fn lower(e: *E, idx: usize) EmitError!void {
     const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
     const W = ty.bits();
     const sf = W > 32;
+    if (e.pend) |p| switch (i.op) {
+        .@"call.interp", .@"call.helper", .copy => try flushPend(e),
+        .setreg => if (sizeLog2(ta)) |sz| if (i.aux < p.off + 4 and p.off < i.aux + (@as(u64, 1) << sz)) {
+            e.pend = null;
+        },
+        else => if (i.op.isTerminator()) try flushPend(e),
+    };
     if (i.op.isExt() or ty == .v128 or ta == .v128) return lowerExt(e, idx);
 
     switch (i.op) {
@@ -1146,6 +1188,12 @@ fn lower(e: *E, idx: usize) EmitError!void {
                 }
             }
         },
+        .@"pending.flags" => {
+            // Deferred: written only on the way out of the block, before a
+            // call, or when other flags take a different slot.
+            if (e.pend) |p| if (p.off != i.aux) try writePend(e, p);
+            e.pend = .{ .v = i.a, .off = i.aux, .group = i.aux2 };
+        },
         .@"nzcv.pack", .@"nzcv.unpack" => {
             const a = try e.src(i.a, S0);
             const rd = e.dst(idx);
@@ -1250,7 +1298,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
         },
         .poll => {
             const l = try e.label();
-            try e.stubs.append(e.gpa, .{ .poll = .{ .label = l, .dirty = e.dirty, .pc = i.aux, .retired = i.retired } });
+            try e.stubs.append(e.gpa, .{ .poll = .{ .label = l, .dirty = e.dirty, .pc = i.aux, .retired = i.retired, .pend = e.pend } });
             try e.put(0xB9400000 | (ctx.off.exit_request / 4) << 10 | @as(u32, CTX) << 5 | @as(u32, IP0)); // ldr w16, [x19, #exit_request]
             try e.ldrCtx(IP1, ctx.off.budget);
             try e.put(0xF100001F | @as(u32, IP1) << 5); // cmp x17, #0
@@ -1515,7 +1563,7 @@ fn vmemOp(e: *E, idx: usize) !void {
     const slot = e.p.locs[if (store) i.b else idx].slot;
     if (f.aligned) {
         const l = try e.label();
-        try e.stubs.append(e.gpa, .{ .misaligned = .{ .label = l, .va = va, .acc = if (store) .write else .read, .dirty = e.dirty, .pc = i.aux2, .retired = i.retired } });
+        try e.stubs.append(e.gpa, .{ .misaligned = .{ .label = l, .va = va, .acc = if (store) .write else .read, .dirty = e.dirty, .pc = i.aux2, .retired = i.retired, .pend = e.pend } });
         try e.logImm(0, true, IP0, va, 0, 4);
         try e.cbnz(true, IP0, l);
     }
@@ -1553,6 +1601,7 @@ fn vmemOp(e: *E, idx: usize) !void {
         .pc = i.aux2,
         .retired = i.retired,
         .tso = tso,
+        .pend = e.pend,
     } });
 }
 
@@ -1807,6 +1856,7 @@ fn casOp(e: *E, idx: usize) !void {
         .rmw = false,
         .tso = false,
         .fault_only = true,
+        .pend = e.pend,
     } });
     try e.cbnz(false, 0, fault);
     try e.ldrCtx(SD, ctx.off.scratch);
@@ -1856,7 +1906,7 @@ fn memOp(e: *E, idx: usize) !void {
     const tso = e.r.tso and tsoOn();
     if (f.aligned and n > 1) {
         const l = try e.label();
-        try e.stubs.append(e.gpa, .{ .misaligned = .{ .label = l, .va = va, .acc = if (store or f.rmw) .write else .read, .dirty = e.dirty, .pc = i.aux2, .retired = i.retired } });
+        try e.stubs.append(e.gpa, .{ .misaligned = .{ .label = l, .va = va, .acc = if (store or f.rmw) .write else .read, .dirty = e.dirty, .pc = i.aux2, .retired = i.retired, .pend = e.pend } });
         try e.logImm(0, true, IP0, va, 0, std.math.log2_int(u32, n));
         try e.cbnz(true, IP0, l);
     }
@@ -1909,6 +1959,7 @@ fn memOp(e: *E, idx: usize) !void {
         .retired = i.retired,
         .rmw = f.rmw,
         .tso = tso,
+        .pend = e.pend,
     } });
     if (!tso and f.order != .plain) {
         if (!store) try e.put(0xD50339BF) // dmb ishld

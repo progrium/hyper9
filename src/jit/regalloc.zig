@@ -258,6 +258,26 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
         p.end[o] = @intCast(idx);
         p.uses[o] += 1;
     };
+    // A pending.flags' value lives until the flags are written or dropped:
+    // a terminator, a call, a copy, the next pending.flags, or a setreg
+    // over its slot. (A fault before then writes it from its stub.)
+    for (r.blocks.items) |blk| {
+        const last = blk.start + blk.len - 1;
+        for (blk.start..last) |idx| {
+            const i = r.insts.items[idx];
+            if (i.op != .@"pending.flags") continue;
+            var j = idx + 1;
+            while (j < last) : (j += 1) {
+                const nx = r.insts.items[j];
+                switch (nx.op) {
+                    .@"call.interp", .@"call.helper", .copy, .@"pending.flags" => break,
+                    .setreg => if (accessBytes(r, nx)) |sz| if (nx.aux < i.aux + 4 and i.aux < nx.aux + sz) break,
+                    else => {},
+                }
+            }
+            p.end[i.a] = @max(p.end[i.a], @as(u32, @intCast(j)));
+        }
+    }
 
     // Chunks.
     var words: std.AutoArrayHashMapUnmanaged(u64, WordInfo) = .empty;
@@ -277,6 +297,10 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
             // FPCR and FPSR stay in the Cpu: the emitter keeps the guest's
             // in the host's registers across the region.
             if (i.aux & copy_fp != 0) for ([2]?u32{ host.guest_fpcr, host.guest_fpsr }) |w| if (w) |o| try markBad(gpa, &words, o, 4);
+            continue;
+        }
+        if (i.op == .@"pending.flags") {
+            try access(gpa, &words, i.aux, 4);
             continue;
         }
         if (i.op != .getreg and i.op != .setreg) continue;
@@ -406,6 +430,9 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                     switch (i.op) {
                         .setreg => if (p.chunk_of[idx] != no_chunk) {
                             d |= @as(ChunkSet, 1) << @intCast(p.chunk_of[idx]);
+                        },
+                        .@"pending.flags" => if (p.chunkAt(i.aux, 4)) |k| {
+                            d |= @as(ChunkSet, 1) << @intCast(k);
                         },
                         .@"call.interp", .@"call.helper" => d = 0,
                         .copy => if (isCall(i)) {
