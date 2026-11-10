@@ -224,6 +224,46 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x2
         , .{ ty, cc }) });
     };
+    // x86 flags at each width, every condition of each.
+    const evals = [_][3]u64{ .{ 0, 0, 0 }, .{ 0xff, 1, 1 }, .{ 0x7f, 1, 0 }, .{ 0x80, 0xff, 1 }, .{ 0x7fff_ffff, 0xffff_ffff, 1 }, .{ 0x8000, 0x7fff, 0 }, .{ 0x1234_5678, 0x9abc_def0, 1 }, .{ 3, 0x8000_0001, 0 } };
+    const eops = [_][]const u8{ "add", "sub", "shl", "shr", "mul" };
+    for ([_][]const u8{ "i8", "i16", "i32" }) |ty| for (evals) |v| for (eops) |op| for (0..16) |cc| {
+        try list.append(gpa, .{ .regs = .{ v[0], v[1], v[2], 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = getreg:{0s} #0x8
+            \\  %2 = getreg:i32 #0x10
+            \\  %3 = eflags.unpack:flags %2
+            \\  %4 = eflags.{1s}:flags %0, %1
+            \\  %5 = eflags.adc:flags %0, %1, %3
+            \\  %6 = eflags.sbb:flags %0, %1, %3
+            \\  %7 = eflags.inc:flags %0, %3
+            \\  %8 = eflags.dec:flags %0, %3
+            \\  %9 = eflags.logic:flags %0
+            \\  %10 = eflags.pack:i32 %4
+            \\  %11 = zext:i64 %10
+            \\  setreg %11 #0x18
+            \\  setreg %5 #0x20
+            \\  setreg %6 #0x28
+            \\  setreg %7 #0x30
+            \\  %12 = eflags.pack:i32 %8
+            \\  %13 = eflags.pack:i32 %9
+            \\  %14 = shl:i32 %13, %12
+            \\  %15 = xor:i32 %14, %12
+            \\  %16 = zext:i64 %15
+            \\  setreg %16 #0x38
+            \\  %17 = eflags.cond:i1 %4 #0x{2x}
+            \\  %18 = eflags.cond:i1 %6 #0x{2x}
+            \\  %19 = xor:i1 %17, %18
+            \\  %20 = zext:i64 %19
+            \\  setreg %20 #0x0
+            \\  brcond %17 -> b1 b2
+            \\b1:
+            \\  exit.chain #0x1
+            \\b2:
+            \\  exit.chain #0x2
+        , .{ ty, op, cc }) });
+    };
     // Memory, a loop, polls, retire, and faults.
     // Each in both memory models (Region.tso), and misaligned too.
     for ([_]u64{ data_va, data_va + 0xfec, data_va + 0x10000, data_va + 1 }) |start| for ([_][]const u8{ "", " tso" }) |model| {

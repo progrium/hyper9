@@ -1056,6 +1056,8 @@ const E = struct {
                 try w.byte(if (is64(ta)) op else op - 0x0B);
             },
             .@"nzcv.add", .@"nzcv.sub" => try e.nzcv(i),
+            .@"eflags.add", .@"eflags.sub", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.logic", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => try e.eflags(i),
+            .@"eflags.cond" => try e.eflagsCond(i),
             .@"nzcv.logic" => {
                 const wide = is64(ta);
                 try e.val(i.a);
@@ -1466,6 +1468,234 @@ const E = struct {
         try w.byte(0x71);
         try w.byte(0x72);
         try w.byte(0xAD);
+    }
+
+    /// Pushes ref as an i64, zero-extended from type t.
+    fn val64m(e: *E, ref: Ref, t: Type) !void {
+        try e.val64(ref);
+        if (t != .i64) {
+            try e.w.i64c(t.mask());
+            try e.w.byte(0x83);
+        }
+    }
+
+    /// ORs (into the i64 on the stack) bit `to` set to bit `from` of l.
+    fn orBit(e: *E, l: u32, from: u32, to: u32) !void {
+        const w = &e.w;
+        try w.get(l);
+        if (from != 0) {
+            try w.i64c(from);
+            try w.byte(0x88); // shr_u
+        }
+        try w.i64c(1);
+        try w.byte(0x83);
+        if (to != 0) {
+            try w.i64c(to);
+            try w.byte(0x86); // shl
+        }
+        try w.byte(0x84);
+    }
+
+    /// ORs SF, ZF, and PF of the result in l (masked to `bits`) into the
+    /// i64 on the stack.
+    fn szp(e: *E, l: u32, bits: u32) !void {
+        const w = &e.w;
+        try w.get(l);
+        try w.byte(0x50); // eqz
+        try w.byte(0xAD);
+        try w.i64c(6);
+        try w.byte(0x86);
+        try w.byte(0x84);
+        try e.orBit(l, bits - 1, 7);
+        try w.get(l);
+        try w.i64c(0xff);
+        try w.byte(0x83);
+        try w.byte(0x7B); // popcnt
+        try w.i64c(1);
+        try w.byte(0x83);
+        try w.i64c(1);
+        try w.byte(0x85);
+        try w.i64c(2);
+        try w.byte(0x86);
+        try w.byte(0x84);
+    }
+
+    /// x86 flags (ir_eval.evalPure's), computed in i64 on operands
+    /// zero-extended from their width, so CF is bit `bits` of the sum or
+    /// difference. Every operand is pushed before a scratch local is set,
+    /// since pushing one can use them.
+    fn eflags(e: *E, i: ir.Inst) !void {
+        const w = &e.w;
+        const ta = e.ty(i.a);
+        const bits = ta.bits();
+        const a = e.scratch(I64, 0);
+        const b = e.scratch(I64, 1);
+        const r = e.scratch(I64, 2);
+        switch (i.op) {
+            .@"eflags.logic" => {
+                try e.val64m(i.a, ta);
+                try w.set(r);
+                try w.i64c(0);
+                try e.szp(r, bits);
+            },
+            .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => {
+                try e.val64m(i.a, ta);
+                try e.val64m(i.b, ta);
+                try w.set(r);
+                try w.set(a);
+                if (i.op == .@"eflags.mul") {
+                    try w.get(a);
+                    try w.i64c(0);
+                    try w.byte(0x52); // ne
+                    try w.byte(0xAD);
+                    try w.i64c(ir_eval.CF | ir_eval.OF);
+                    try w.byte(0x7E); // mul
+                } else {
+                    // CF: msb(a) or a & 1; OF: msb(a ^ r)
+                    try w.get(a);
+                    if (i.op == .@"eflags.shl") {
+                        try w.i64c(bits - 1);
+                        try w.byte(0x88);
+                    }
+                    try w.i64c(1);
+                    try w.byte(0x83);
+                    try w.get(a);
+                    try w.get(r);
+                    try w.byte(0x85);
+                    try w.set(a);
+                    try e.orBit(a, bits - 1, 11);
+                }
+                try e.szp(r, bits);
+            },
+            else => {
+                const sub = switch (i.op) {
+                    .@"eflags.sub", .@"eflags.sbb", .@"eflags.dec" => true,
+                    else => false,
+                };
+                const op: u8 = if (sub) 0x7D else 0x7C;
+                switch (i.op) {
+                    .@"eflags.inc", .@"eflags.dec" => {
+                        // CF is kept from flags b: it starts the result.
+                        try e.val64(i.b);
+                        try w.i64c(ir_eval.CF);
+                        try w.byte(0x83);
+                        try e.val64m(i.a, ta);
+                        try w.set(a);
+                        try w.i64c(1);
+                        try w.set(b);
+                        try w.get(a);
+                        try w.get(b);
+                        try w.byte(op);
+                        try w.set(r);
+                    },
+                    .@"eflags.adc", .@"eflags.sbb" => {
+                        try e.val64m(i.a, ta);
+                        try e.val64m(i.b, ta);
+                        try e.val64(i.c);
+                        try w.i64c(1);
+                        try w.byte(0x83);
+                        try w.set(r);
+                        try w.set(b);
+                        try w.set(a);
+                        try w.get(a);
+                        try w.get(b);
+                        try w.byte(op);
+                        try w.get(r);
+                        try w.byte(op);
+                        try w.set(r);
+                    },
+                    else => {
+                        try e.val64m(i.a, ta);
+                        try e.val64m(i.b, ta);
+                        try w.set(b);
+                        try w.tee(a);
+                        try w.get(b);
+                        try w.byte(op);
+                        try w.set(r);
+                    },
+                }
+                if (i.op != .@"eflags.inc" and i.op != .@"eflags.dec") {
+                    // CF: bit `bits` of r.
+                    try w.get(r);
+                    try w.i64c(bits);
+                    try w.byte(0x88);
+                    try w.i64c(1);
+                    try w.byte(0x83);
+                }
+                try w.get(r);
+                try w.i64c(ta.mask());
+                try w.byte(0x83);
+                try w.set(r);
+                try e.szp(r, bits);
+                // AF
+                try w.get(a);
+                try w.get(b);
+                try w.byte(0x85);
+                try w.get(r);
+                try w.byte(0x85);
+                try w.i64c(ir_eval.AF);
+                try w.byte(0x83);
+                try w.byte(0x84);
+                // OF: add (a^r)&(b^r), sub (a^b)&(a^r), at the top bit.
+                try w.get(a);
+                try w.get(if (sub) b else r);
+                try w.byte(0x85);
+                try w.get(if (sub) a else b);
+                try w.get(r);
+                try w.byte(0x85);
+                try w.byte(0x83);
+                try w.set(a);
+                try e.orBit(a, bits - 1, 11);
+            },
+        }
+    }
+
+    /// x86 condition aux of flags a, as an i32 0 or 1.
+    fn eflagsCond(e: *E, i: ir.Inst) !void {
+        const w = &e.w;
+        const cc: u4 = @intCast(i.aux);
+        const f = e.scratch(I32, 0);
+        try e.val64(i.a);
+        try w.byte(0xA7);
+        try w.set(f);
+        const B = struct {
+            fn bit(ww: *W, l: u32, n: u32) !void {
+                try ww.get(l);
+                if (n != 0) {
+                    try ww.i32c(n);
+                    try ww.byte(0x76); // shr_u
+                }
+            }
+        };
+        switch (@as(u3, @intCast(cc >> 1))) {
+            0 => try B.bit(w, f, 11),
+            1 => try B.bit(w, f, 0),
+            2 => try B.bit(w, f, 6),
+            3 => {
+                try w.get(f);
+                try w.i32c(@intCast(ir_eval.CF | ir_eval.ZF));
+                try w.byte(0x71);
+                try w.i32c(0);
+                try w.byte(0x47); // ne
+            },
+            4 => try B.bit(w, f, 7),
+            5 => try B.bit(w, f, 2),
+            6, 7 => {
+                try B.bit(w, f, 7);
+                try B.bit(w, f, 11);
+                try w.byte(0x73);
+                if (cc >> 1 == 7) {
+                    try B.bit(w, f, 6);
+                    try w.byte(0x72);
+                }
+            },
+        }
+        try w.i32c(1);
+        try w.byte(0x71);
+        if (cc & 1 == 1) {
+            try w.i32c(1);
+            try w.byte(0x73);
+        }
     }
 
     fn memOp(e: *E, i: ir.Inst) !void {
