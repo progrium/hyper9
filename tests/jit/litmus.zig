@@ -14,6 +14,7 @@ const litmus = vcpu.check.litmus;
 const Suite = struct { arch: *const litmus.Arch, tests: []const *const litmus.Test };
 const suites = [_]Suite{
     .{ .arch = &vcpu.check.litmus_a64.arch, .tests = &vcpu.check.litmus_a64.all },
+    .{ .arch = &vcpu.check.litmus_x86.arch, .tests = &vcpu.check.litmus_x86.all },
 };
 
 pub fn main(init: std.process.Init) !void {

@@ -51,6 +51,7 @@ pub const gen_x86 = @import("check/gen_x86.zig");
 /// The litmus harness, and ha64's litmus tests.
 pub const litmus = @import("check/litmus.zig");
 pub const litmus_a64 = @import("check/litmus_a64.zig");
+pub const litmus_x86 = @import("check/litmus_x86.zig");
 
 /// What check mode needs from a guest architecture, beyond its `Frontend`.
 pub const Guest = struct {
