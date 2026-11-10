@@ -5417,6 +5417,18 @@ test "9front and Linux programs share pipelines both ways (demo) [18]" {
     try std.testing.expect(std.mem.indexOf(u8, nine.out, "linux: signal 15") != null);
 }
 
+test "a Linux program runs a #!/bin/rc script with 9front's rc [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // The Linux root has no /bin/rc, so it's 9front's; a script under /9,
+    // such as h9's wsmount, is opened by rc at its 9front path.
+    const r = try runLinux(&le, true, &.{ "sh", "-c", "printf '#!/bin/rc\\necho rc $*\\n' >/tmp/s && chmod +x /tmp/s && /tmp/s a b; /9/bin/wsmount; echo $?" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("rc a b\n1\n", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "usage: wsmount") != null);
+}
+
 // What databases need of files (design/0018-linux-personality.md),
 // through tests/fixtures/linux/files.c, which prints "ok NAME" per case.
 

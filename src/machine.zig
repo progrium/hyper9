@@ -2176,6 +2176,8 @@ pub const Machine = struct {
         var bytes = readLinux(arena, path) catch |err| return execError(err);
         var argv: []const []const u8 = argv0;
         var depth: usize = 0;
+        // Set when `#!/bin/rc` became 9front's rc (below).
+        var nine_rc = false;
         while (std.mem.startsWith(u8, bytes, "#!")) : (depth += 1) {
             if (depth >= 4) return failWith("too many levels of interpreters");
             const head = bytes[0..@min(bytes.len, 256)];
@@ -2183,8 +2185,19 @@ pub const Machine = struct {
             const line = std.mem.trim(u8, head[2..nl], " \t\r");
             if (line.len == 0) return failWith(ebadexec);
             const sp = std.mem.indexOfAny(u8, line, " \t") orelse line.len;
-            const interp = line[0..sp];
+            var interp = line[0..sp];
             const arg = std.mem.trim(u8, line[sp..], " \t");
+            // `#!/bin/rc` is a 9front script, such as h9's own wsmount: a
+            // Linux root has no /bin/rc, so it's 9front's, in the Linux
+            // view at /9/bin/rc. A root that has its own /bin/rc keeps it.
+            const rc_bytes: ?[]u8 = if (std.mem.eql(u8, interp, "/bin/rc")) readLinux(arena, interp) catch |err| switch (err) {
+                error.NotFound => blk: {
+                    interp = "/9/bin/rc";
+                    nine_rc = true;
+                    break :blk null;
+                },
+                else => return execError(err),
+            } else null;
             var next: std.ArrayList([]const u8) = .empty;
             next.append(arena, interp) catch return failWith("no memory");
             if (arg.len > 0) next.append(arena, arg) catch return failWith("no memory");
@@ -2192,7 +2205,7 @@ pub const Machine = struct {
             if (argv.len > 1) next.appendSlice(arena, argv[1..]) catch return failWith("no memory");
             argv = next.items;
             path = interp;
-            bytes = readLinux(arena, path) catch |err| return execError(err);
+            bytes = rc_bytes orelse readLinux(arena, path) catch |err| return execError(err);
         }
         if (!elf.isElf(bytes)) {
             // A 9front program: exec it as a 9front process does, back in
@@ -2200,6 +2213,16 @@ pub const Machine = struct {
             // Egrp (design/0018, "Environment").
             _ = aout.parse(bytes) catch return failWith(ebadexec);
             const v = vcpu orelse return failWith(ebadexec);
+            if (nine_rc) {
+                // exec would read the script's `#!/bin/rc` again in the
+                // Linux view, so it runs rc itself, and rc opens the script
+                // in the 9front view, where /9/x is /x.
+                const zargv = arena.alloc([:0]u8, argv.len) catch return failWith("no memory");
+                for (argv, zargv) |a, *z| z.* = arena.dupeZ(u8, if (std.mem.startsWith(u8, a, "/9/")) a[2..] else a) catch return failWith("no memory");
+                try m.exec(p, v, .{ .path = arena.dupeZ(u8, path) catch return failWith("no memory"), .argv = zargv });
+                nineEnv(envp);
+                return;
+            }
             const zargv = arena.alloc([:0]u8, argv0.len) catch return failWith("no memory");
             for (argv0, zargv) |a, *z| z.* = arena.dupeZ(u8, a) catch return failWith("no memory");
             try m.exec(p, v, .{ .path = arena.dupeZ(u8, path0) catch return failWith("no memory"), .argv = zargv });
