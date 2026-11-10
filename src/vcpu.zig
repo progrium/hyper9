@@ -9,6 +9,8 @@ pub const mem = @import("interp/mem.zig");
 pub const alloc = @import("jit/alloc.zig");
 pub const frontend = @import("jit/frontend.zig");
 pub const emitter = @import("jit/emitter.zig");
+/// W^X executable memory for the code cache.
+pub const codemem = @import("jit/codemem.zig");
 pub const a64 = struct {
     pub const lift = @import("jit/a64/lift.zig");
     pub const tracer = @import("jit/a64/tracer.zig");
