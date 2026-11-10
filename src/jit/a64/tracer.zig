@@ -1,5 +1,4 @@
-//! The tracer bullet: a counted arm64 loop, run on T0 (the spike
-//! interpreter), lifted to IR and run in ir_eval, and emitted to arm64 and
+//! The tracer bullet: a counted arm64 loop, run on T0, lifted to IR and run in ir_eval, and emitted to arm64 and
 //! wasm. Every path has to end in the same machine state. The native run
 //! is a test here; the wasm run is tests/jit/run.mjs under Node.
 
@@ -10,7 +9,7 @@ const ctx_mod = @import("../ctx.zig");
 const mem = @import("../../interp/mem.zig");
 const fe = @import("../frontend.zig");
 const lift = @import("lift.zig");
-const t0 = @import("../../interp/a64/spike.zig");
+const t0 = @import("../../interp/a64/exec.zig");
 
 pub const code_va = 0x1000;
 pub const data_va = 0x20000;
@@ -50,8 +49,9 @@ pub const State = struct {
     tlb: mem.Tlb = .{},
     regions: [2]mem.Region = undefined,
     map: mem.Map = undefined,
-    t0_regions: [2]t0.Region = undefined,
-    t0_mem: t0.Mem = undefined,
+    cache: t0.Cache = undefined,
+    kick: u32 = 0,
+    machine: t0.Machine = undefined,
     ctx: ctx_mod.Ctx = .{},
 
     pub fn reset(s: *State) *ctx_mod.Ctx {
@@ -66,16 +66,15 @@ pub const State = struct {
             .{ .va = data_va, .mem = &s.data, .write = true },
         };
         s.map = .{ .regions = &s.regions };
-        s.t0_regions = .{
-            .{ .va = code_va, .mem = &s.code, .perms = 1 | 4 },
-            .{ .va = data_va, .mem = &s.data, .perms = 1 | 2 },
-        };
-        s.t0_mem = .{ .regions = &s.t0_regions };
+        // Stepping decodes as it goes, so the page cache stays empty.
+        s.cache = .init(std.heap.page_allocator);
+        s.kick = 0;
+        s.machine = .{ .cpu = &s.cpu, .tlb = &s.tlb, .space = t0.mapSpace(&s.map), .cache = &s.cache, .kick = &s.kick };
         s.ctx = .{
             .cpu = @intFromPtr(&s.cpu),
             .tlb = @intFromPtr(&s.tlb),
             .space = @intFromPtr(&s.map),
-            .frontend = @intFromPtr(&s.t0_mem),
+            .frontend = @intFromPtr(&s.machine),
             .slow_load = @intFromPtr(&mem.mapSlowLoad),
             .slow_store = @intFromPtr(&mem.mapSlowStore),
             .interp = @intFromPtr(&lift.interp),
@@ -108,12 +107,12 @@ pub const State = struct {
             var word: [4]u8 = undefined;
             if (pc < code_va or pc + 4 > code_va + mem.page_size) return error.T0DidNotFinish;
             @memcpy(&word, s.code[@intCast(pc - code_va)..][0..4]);
-            const o = t0.decode(std.mem.readInt(u32, &word, .little), pc);
-            switch (t0.step(&s.cpu, &s.t0_mem, &o, pc)) {
+            const o = t0.dec.decode(std.mem.readInt(u32, &word, .little), pc);
+            switch (t0.step(&s.machine, &o, pc)) {
                 .next => s.cpu.pc = pc + 4,
                 .jump => |t| s.cpu.pc = t,
-                .exit => |e| {
-                    if (e != .syscall or s.cpu.pc != svc_return) return error.T0DidNotFinish;
+                .exit => {
+                    if (s.machine.exit != .syscall or s.cpu.pc != svc_return) return error.T0DidNotFinish;
                     return s.snapshot();
                 },
             }

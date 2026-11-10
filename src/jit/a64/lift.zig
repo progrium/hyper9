@@ -1,7 +1,7 @@
 //! ha64's front end: arm64 instructions to IR.
 //!
-//! This is the tracer-bullet lifter, over the spike decoder in
-//! src/interp/a64/spike.zig. It lifts the handful of classes a counted
+//! This is the tracer-bullet lifter, over T0's decoder in
+//! src/interp/a64/decode.zig. It lifts the handful of classes a counted
 //! loop needs (MOVZ and friends, ADD and SUB, SUBS and ADDS, LDR and STR
 //! with an immediate offset, B, B.cond, CBZ and CBNZ, SVC), and runs every
 //! other non-branch instruction through `call.interp`. A branch it doesn't
@@ -16,9 +16,10 @@ const std = @import("std");
 const ir = @import("../ir.zig");
 const ctx_mod = @import("../ctx.zig");
 const fe = @import("../frontend.zig");
-const t0 = @import("../../interp/a64/spike.zig");
+const dec = @import("../../interp/a64/decode.zig");
+const t0 = @import("../../interp/a64/exec.zig");
 
-const Kind = t0.Kind;
+const Kind = dec.Kind;
 const Cpu = t0.Cpu;
 
 pub const frontend: fe.Frontend = .{ .name = "ha64", .flags = .nzcv, .lift = lift, .interp = interp };
@@ -31,18 +32,19 @@ const ZR = 31;
 
 const Class = enum { lifted, interp, branch_cond, branch, stop, unlifted_branch };
 
-fn classify(k: Kind) Class {
-    return switch (k) {
+fn classify(o: dec.Op) Class {
+    if (o.k == .bcond) return if (o.x >= 14) .branch else .branch_cond;
+    return switch (o.k) {
         .movi, .add_imm_x, .add_imm_w, .subs_imm_x, .subs_imm_w, .adds_imm_x, .adds_imm_w, .add_reg_x, .add_reg_w, .sub_reg_x, .sub_reg_w, .ldr_x_o, .ldr_w_o, .str_x_o, .str_w_o, .nop => .lifted,
-        .bcond_0, .bcond_1, .bcond_2, .bcond_3, .bcond_4, .bcond_5, .bcond_6, .bcond_7, .bcond_8, .bcond_9, .bcond_10, .bcond_11, .bcond_12, .bcond_13, .cbz_x, .cbz_w, .cbnz_x, .cbnz_w => .branch_cond,
-        .bcond_14, .bcond_15, .b => .branch,
+        .cbz_x, .cbz_w, .cbnz_x, .cbnz_w => .branch_cond,
+        .b => .branch,
         .svc => .stop,
         .bl, .br, .blr, .ret, .tbz, .tbnz, .brk, .undef, .next_page => .unlifted_branch,
         else => .interp,
     };
 }
 
-const Insn = struct { pc: u64, word: u32, op: t0.Op };
+const Insn = struct { pc: u64, word: u32, op: dec.Op };
 
 pub fn lift(b: *ir.Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftError!void {
     var buf: [512]Insn = undefined;
@@ -54,8 +56,8 @@ pub fn lift(b: *ir.Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftE
         var word: [4]u8 = undefined;
         if (src.readAll(p, &word) != 4) break;
         const w = std.mem.readInt(u32, &word, .little);
-        const o = t0.decode(w, p);
-        switch (classify(o.k)) {
+        const o = dec.decode(w, p);
+        switch (classify(o)) {
             .unlifted_branch => break :scan,
             .branch, .stop => {
                 buf[n] = .{ .pc = p, .word = w, .op = o };
@@ -78,7 +80,7 @@ pub fn lift(b: *ir.Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftE
     leader[0] = true;
     leader[n] = true; // the fall-out point, if anything reaches it
     for (insns, 0..) |in, i| {
-        const c = classify(in.op.k);
+        const c = classify(in.op);
         if (c == .branch_cond or c == .branch) {
             const t = in.op.imm;
             if (t >= pc and t < end and t & 3 == 0) {
@@ -114,7 +116,7 @@ pub fn lift(b: *ir.Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftE
             const in = insns[i];
             count += 1;
             i += 1;
-            switch (classify(in.op.k)) {
+            switch (classify(in.op)) {
                 .lifted => try liftOne(b, in),
                 .interp => try b.interp(in.word, in.pc),
                 .stop => {
@@ -232,7 +234,7 @@ fn condition(b: *ir.Builder, in: Insn) !ir.Ref {
             return b.icmp(if (o.k == .cbz_x or o.k == .cbz_w) .eq else .ne, v, zero);
         },
         else => {
-            const cc: u4 = @intCast(@intFromEnum(o.k) - @intFromEnum(Kind.bcond_0));
+            const cc: u4 = @intCast(o.x);
             const f = try b.un(.@"nzcv.unpack", .flags, try b.getreg(.i32, nzcv_off));
             return b.cond(.@"nzcv.cond", f, cc);
         },
@@ -240,21 +242,24 @@ fn condition(b: *ir.Builder, in: Insn) !ir.Ref {
 }
 
 /// ha64's `call.interp`: the handle is the instruction word; ctx.frontend
-/// is the T0 memory (*t0.Mem) the stand-in T0 reads and writes through.
+/// is the vCPU's T0 (*t0.Machine).
 pub fn interp(c: *ctx_mod.Ctx, handle: u64, pc: u64) callconv(.c) u32 {
-    const cpu = c.cpuPtr(Cpu);
-    const m: *t0.Mem = @ptrFromInt(@as(usize, @intCast(c.frontend)));
-    const o = t0.decode(@truncate(handle), pc);
-    switch (t0.step(cpu, m, &o, pc)) {
+    const m: *t0.Machine = @ptrFromInt(@as(usize, @intCast(c.frontend)));
+    const o = dec.decode(@truncate(handle), pc);
+    switch (t0.step(m, &o, pc)) {
         .next => return 0,
         .jump => |t| {
             c.exit_pc = t;
             return @intFromEnum(ctx_mod.Exit.indirect);
         },
-        .exit => |e| switch (e) {
+        .exit => switch (m.exit) {
             .syscall => {
-                c.exit_pc = cpu.pc;
+                c.exit_pc = m.cpu.pc;
                 return @intFromEnum(ctx_mod.Exit.svc);
+            },
+            .breakpoint => {
+                c.exit_pc = pc;
+                return @intFromEnum(ctx_mod.Exit.brk);
             },
             .interrupted => {
                 c.exit_pc = pc;
@@ -263,11 +268,7 @@ pub fn interp(c: *ctx_mod.Ctx, handle: u64, pc: u64) callconv(.c) u32 {
             .fault => |f| {
                 c.exit_pc = pc;
                 c.exit_addr = f.addr;
-                c.exit_info = @as(u64, switch (f.access) {
-                    .read => 0,
-                    .write => 1,
-                    .exec => 2,
-                }) | (f.esr << 16);
+                c.exit_info = @as(u64, @intFromEnum(f.access)) | (@as(u64, @intFromEnum(f.kind)) << 8) | (f.esr << 16);
                 return @intFromEnum(if (f.esr >> 26 == t0.EC_UNKNOWN) ctx_mod.Exit.undef else ctx_mod.Exit.fault);
             },
         },
