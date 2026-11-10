@@ -23,6 +23,7 @@ const x87 = @import("../../interp/x86/x87.zig");
 const dec = @import("../../interp/x86/decode.zig");
 const f80_mod = @import("../../interp/x86/f80.zig");
 const F80 = f80_mod.F80;
+const mem_mod = @import("../../interp/mem.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Cpu = cpu_mod.Cpu;
@@ -255,19 +256,28 @@ fn mem(c: *Ctx) *lift.Mem {
     return @ptrFromInt(@as(usize, @intCast(c.frontend)));
 }
 
-/// A T-sized read at addr, or null if it would fault or crosses a page
-/// (T0 does those).
+/// n bytes at addr, through the vCPU's TLB (ctx.tlb, the entries the
+/// region's own loads and stores hit) and on a miss the lift.Mem: null if
+/// the access would fault or crosses a page (T0 does those).
+inline fn host(c: *Ctx, addr: u32, n: u32, comptime write: bool) ?[*]u8 {
+    if (addr & 0xfff > 0x1000 - n) return null;
+    if (c.tlb != 0) {
+        const t: *const mem_mod.Tlb = @ptrFromInt(@as(usize, @intCast(c.tlb)));
+        if (mem_mod.fast(t, addr, n, write)) |h| return @ptrFromInt(h);
+    }
+    return mem(c).translate(addr, if (write) .write else .read);
+}
+
+/// A T-sized read at addr, or null as for `host`.
 fn read(c: *Ctx, addr: u32, comptime T: type) ?T {
     const n = @sizeOf(T);
-    if (addr & 0xfff > 0x1000 - n) return null;
-    const h = mem(c).translate(addr, .read) orelse return null;
+    const h = host(c, addr, n, false) orelse return null;
     return std.mem.readInt(T, h[0..n], .little);
 }
 
-/// Where n bytes at addr can be written, or null as for `read`.
+/// Where n bytes at addr can be written, or null as for `host`.
 fn writable(c: *Ctx, addr: u32, n: u32) ?[*]u8 {
-    if (addr & 0xfff > 0x1000 - n) return null;
-    return mem(c).translate(addr, .write);
+    return host(c, addr, n, true);
 }
 
 /// The last-instruction note, as T0 makes it for a memory form: FOP,
