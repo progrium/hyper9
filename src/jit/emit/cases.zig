@@ -701,6 +701,36 @@ pub fn generateExt(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x0
         , .{@as(u64, @bitCast(x))}) });
     };
+    // Tininess: a product just under the smallest normal that rounds up
+    // to it. Arm sees underflow (tiny before rounding), x86 doesn't.
+    for ([_][]const u8{ "i32", "i64" }, [_][2]u64{ .{ 0x3f7f_fffe, 0x0080_0001 }, .{ 0x3fef_ffff_ffff_fffe, 0x0010_0000_0000_0001 } }, [_]u2{ 2, 3 }) |ty, v, es| for (envs[0..2]) |env| {
+        var x = env;
+        try list.append(gpa, .{ .regs = .{ v[0], v[1], 0, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = getreg:{0s} #0x8
+            \\  %2 = fp.mul:{0s} %0, %1 #0x{1x} @0x29
+            \\  %3 = zext:i64 %2
+            \\  setreg %3 #0x10
+            \\  exit.chain #0x0
+        , .{ ty, @as(u64, @bitCast(x)) }) });
+        // The same in every lane.
+        x.esize = es;
+        const lo = if (es == 2) v[0] | v[0] << 32 else v[0];
+        const hi = if (es == 2) v[1] | v[1] << 32 else v[1];
+        try list.append(gpa, .{ .regs = .{ lo, lo, hi, hi, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i64 #0x0
+            \\  %1 = getreg:i64 #0x8
+            \\  %2 = getreg:i64 #0x10
+            \\  %3 = getreg:i64 #0x18
+            \\  %4 = v.make:v128 %0, %1
+            \\  %5 = v.make:v128 %2, %3
+            \\  %6 = fp.mul:v128 %4, %5 #0x{0x} @0x29
+            \\  setreg %6 #0x30
+            \\  exit.chain #0x0
+        , .{@as(u64, @bitCast(x))}) });
+    };
     // 16-byte loads and stores: in a page, across its end, unmapped, and
     // misaligned where alignment is required.
     for ([_]u64{ data_va, data_va + 0x10, data_va + 0xff8, data_va + 0xfe0, data_va + 0x10000, data_va + 3 }) |addr| for ([_]u64{ 4, 0x14 }) |f| {

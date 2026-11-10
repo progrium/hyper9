@@ -2132,7 +2132,7 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     if (i.b != ir.none) try ldX(e, 1, i.b, r.insts.items[i.b].ty);
     if (i.c != ir.none) try ldX(e, 2, i.c, r.insts.items[i.c].ty);
     var nan_check = true;
-    var slow: [3]?usize = .{ null, null, null };
+    var slow: [4]?usize = .{ null, null, null, null };
     switch (i.op) {
         .@"fp.cmp" => {
             // comis (signaling) or ucomis: ZF PF CF give the order.
@@ -2220,6 +2220,36 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
             slow[0] = try e.fwd(0xa); // jp
         }
     }
+    if (watch and x.arm and i.op != .@"fp.cmp" and i.op != .@"fp.tosint") {
+        // Arm detects tininess before rounding, SSE after: a result that
+        // rounded up to the smallest normal may be Arm's underflow but not
+        // the host's. The slow path decides.
+        if (vec) {
+            try sse(e, null, false, &.{0x28}, 2, 0); // movaps xmm2, xmm0
+            if (dbl) {
+                try sseI(e, 0x66, &.{0x73}, 6, 2, 1); // psllq xmm2, 1: no sign
+                try e.movImm(RAX, 0x0020_0000_0000_0000);
+                try sse(e, 0x66, true, &.{0x6e}, 1, RAX); // movq xmm1, rax
+                try sse(e, 0x66, false, &.{0x6c}, 1, 1); // punpcklqdq xmm1, xmm1
+                try sse(e, 0x66, false, &.{0x76}, 2, 1); // pcmpeqd xmm2, xmm1
+                try sseI(e, 0x66, &.{0x70}, 1, 2, 0xb1); // pshufd xmm1, xmm2, swap dwords
+                try sse(e, 0x66, false, &.{0xdb}, 2, 1); // pand xmm2, xmm1
+            } else {
+                try sseI(e, 0x66, &.{0x72}, 6, 2, 1); // pslld xmm2, 1
+                try splat32(e, 1, 0x0100_0000);
+                try sse(e, 0x66, false, &.{0x76}, 2, 1); // pcmpeqd xmm2, xmm1
+            }
+            try sse(e, 0x66, false, &.{0xd7}, RAX, 2); // pmovmskb eax, xmm2
+            try e.bs(&.{ 0x85, 0xc0 }); // test eax, eax
+            slow[3] = try e.fwd(CC.ne);
+        } else {
+            try sse(e, 0x66, dbl, &.{0x7e}, 0, RAX); // movd/movq rax, xmm0
+            try e.rr(dbl, &.{0xd1}, 4, RAX); // shl rax, 1: no sign
+            try e.movImm(R11, if (dbl) 0x0020_0000_0000_0000 else 0x0100_0000);
+            try e.rr(dbl, &.{0x39}, R11, RAX); // cmp rax, r11
+            slow[3] = try e.fwd(CC.e);
+        }
+    }
     if (watch) {
         // MXCSR's flags are sticky, and every one up to this op is already
         // in the guest's words, so ORing them in again changes nothing.
@@ -2239,7 +2269,7 @@ fn fpNative(e: *E, r: *const ir.Region, i: ir.Inst, dst: ir.Ref) !bool {
     // An op that reports nothing mustn't leave its flags for one that does.
     if (!watch and e.watch) try clearHostFlags(e);
     if (i.op != .@"fp.cmp" and i.op != .@"fp.tosint") try stX(e, dst, 0, i.ty);
-    if (slow[0] != null or slow[1] != null or slow[2] != null) {
+    if (slow[0] != null or slow[1] != null or slow[2] != null or slow[3] != null) {
         const done = try e.fwd(null);
         for (slow) |s0| if (s0) |at| e.land(at);
         try extFallback(e, r, i, dst);
