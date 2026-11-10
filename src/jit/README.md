@@ -3,6 +3,10 @@
 Shared by ha64 (arm64 guests) and h86 (386 guests). Built with
 `-Demu=zig`; tested with `zig build vcpu`.
 
+The specs describe what's built: [spec/jit.md](../../spec/jit.md) for this
+layer, and [spec/h86.md](../../spec/h86.md) and [spec/ha64.md](../../spec/ha64.md)
+for the two CPUs.
+
 ## Contracts
 
 These are what the parallel work codes against. Each has one owner, and
