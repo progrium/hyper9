@@ -842,6 +842,52 @@ const E = struct {
         try e.leaveCode(code);
     }
 
+    /// An indirect branch in a function of several regions: if the jump
+    /// cache names one of them (its table slot is base + its index), a
+    /// branch to it, keeping the registers in locals. exit_pc is set.
+    fn indirectHere(e: *E) !void {
+        const w = &e.w;
+        const pc = e.scratch(I64, 0);
+        const ent = e.scratch(I32, 0);
+        try w.get(0);
+        try w.memop(0x29, ctx.off.exit_pc);
+        try w.tee(pc);
+        // ctx.jumpIndex: ((pc ^ pc >> 12) >> 2) & (jump_entries - 1)
+        try w.get(pc);
+        try w.i64c(12);
+        try w.byte(0x88);
+        try w.byte(0x85);
+        try w.i64c(2);
+        try w.byte(0x88);
+        try w.byte(0xA7);
+        try w.i32c(ctx.jump_entries - 1);
+        try w.byte(0x71);
+        try w.i32c(@sizeOf(ctx.JumpEntry));
+        try w.byte(0x6C);
+        try w.get(0);
+        try w.memop(0x28, ctx.off.jump);
+        try w.byte(0x6A);
+        try w.tee(ent);
+        try w.memop(0x29, 0);
+        try w.get(pc);
+        try w.byte(0x51); // i64.eq
+        try e.open(0x04, .other);
+        try w.get(ent);
+        try w.memop(0x28, @offsetOf(ctx.JumpEntry, "code"));
+        try w.byte(0x23); // global.get base
+        try w.uleb(0);
+        try w.byte(0x6B); // i32.sub
+        try w.tee(ent);
+        try w.i32c(@intCast(e.regions.len));
+        try w.byte(0x49); // i32.lt_u
+        try e.open(0x04, .other);
+        try w.get(ent);
+        try w.set(1);
+        try e.br(.top);
+        try e.end();
+        try e.end();
+    }
+
     fn chain(e: *E, pc: u64, retired: u32) !void {
         try e.retireOn(retired);
         if (e.opts.cells != 0) {
@@ -1332,6 +1378,7 @@ const E = struct {
                 try e.val64(i.a);
                 try w.memop(0x37, ctx.off.exit_pc);
                 try e.retireOn(i.retired);
+                if (e.opts.jump and e.nparams == 2) try e.indirectHere();
                 try e.leaveCode(.indirect);
             },
             .br, .brcond => unreachable, // the control flow's
