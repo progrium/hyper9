@@ -6,14 +6,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
-const Ctx = @import("../jit/ctx.zig").Ctx;
-const t0 = @import("../interp/a64/exec.zig");
-const cache = @import("../jit/cache.zig");
-const dispatch = @import("../jit/dispatch.zig");
-const emitter = @import("../jit/emitter.zig");
-const lift = @import("../jit/a64/lift.zig");
+const Ctx = @import("vcpu").ctx.Ctx;
+const t0 = @import("vcpu").a64.exec;
+const cache = @import("vcpu").cache;
+const dispatch = @import("vcpu").dispatch;
+const emitter = @import("vcpu").emitter;
+const lift = @import("vcpu").a64.lift;
 const build_options = @import("build_options");
-const check_vmm = @import("../jit/check/vmm.zig");
+const check_vmm = @import("vcpu").check_vmm;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter.
@@ -21,8 +21,8 @@ pub const Tier = enum { t0, t1 };
 pub var tier: Tier = .t0;
 /// T1's emitter; null where this host has none yet.
 pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
-    .aarch64 => @import("../jit/emit/arm64.zig").emitter_def,
-    .x86_64 => @import("../jit/emit/x64.zig").emitter_def,
+    .aarch64 => @import("vcpu").emit.arm64.emitter_def,
+    .x86_64 => @import("vcpu").emit.x64.emitter_def,
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};

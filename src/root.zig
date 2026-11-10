@@ -72,5 +72,4 @@ test {
     _ = @import("dotl/client.zig");
     _ = @import("dotl/server.zig");
     _ = @import("dotl/kern.zig");
-    _ = @import("interp/x86/f80.zig");
 }

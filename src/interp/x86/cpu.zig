@@ -8,11 +8,16 @@
 //! whose base set_thread_area sets (`tls`).
 
 const std = @import("std");
-const ia32 = @import("../../arch/i386.zig");
 const flags = @import("flags.zig");
 const sf = @import("f80.zig");
 
 pub const Seg = @import("decode.zig").Seg;
+
+/// 9front's user code and data selectors (pc/mem.h UESEL and UDSEL), as
+/// src/arch/i386.zig has them. This module doesn't import that file, so
+/// it builds as a module of its own (src/vcpu.zig).
+pub const uesel: u16 = (4 << 3) | 3;
+pub const udsel: u16 = (3 << 3) | 3;
 
 /// Linux's TLS selector: GDT entry 6, RPL 3.
 pub const tls_entry = 6;
@@ -72,7 +77,7 @@ pub const Cpu = struct {
     eip: u32 = 0,
     fl: flags.Flags = .{},
     /// ES, CS, SS, DS, FS, GS.
-    seg: [6]u16 = .{ ia32.UDSEL, ia32.UESEL, ia32.UDSEL, ia32.UDSEL, 0, 0 },
+    seg: [6]u16 = .{ udsel, uesel, udsel, udsel, 0, 0 },
     /// Each segment's base, from the selector table: zero but for FS and
     /// GS holding the TLS selector.
     seg_base: [6]u32 = @splat(0),
@@ -95,8 +100,9 @@ pub const Cpu = struct {
         return c.r[4];
     }
 
-    /// The registers as a 9front Ureg.
-    pub fn getUreg(c: *const Cpu, u: *ia32.Ureg) void {
+    /// The registers as a 9front Ureg: `u` is a *arch/i386.zig Ureg (taken
+    /// as anytype, as getExtra's is).
+    pub fn getUreg(c: *const Cpu, u: anytype) void {
         u.ax = c.r[0];
         u.cx = c.r[1];
         u.dx = c.r[2];
@@ -119,7 +125,7 @@ pub const Cpu = struct {
 
     /// Loads the registers from a Ureg. A selector the table doesn't hold
     /// becomes null, as the emulator backend does with GS.
-    pub fn setUreg(c: *Cpu, u: *const ia32.Ureg) void {
+    pub fn setUreg(c: *Cpu, u: anytype) void {
         c.r = .{ u.ax, u.cx, u.dx, u.bx, u.sp, u.bp, u.si, u.di };
         c.eip = u.pc;
         c.fl.set(u.flags);
@@ -201,7 +207,7 @@ pub const Cpu = struct {
         // allows, aren't there.
         if (sel & 4 != 0) return error.GP;
         if (idx == 0) return if (seg == .ss) error.GP else null;
-        if (idx == ia32.UDSEL >> 3) return 0;
+        if (idx == udsel >> 3) return 0;
         if (idx == tls_entry and seg != .ss) return c.tls;
         return error.GP;
     }
@@ -220,14 +226,37 @@ pub const Cpu = struct {
     }
 };
 
+/// arch/i386.zig's Ureg's fields, for the tests.
+const TestUreg = struct {
+    di: u32 = 0,
+    si: u32 = 0,
+    bp: u32 = 0,
+    nsp: u32 = 0,
+    bx: u32 = 0,
+    dx: u32 = 0,
+    cx: u32 = 0,
+    ax: u32 = 0,
+    gs: u32 = 0,
+    fs: u32 = 0,
+    es: u32 = 0,
+    ds: u32 = 0,
+    trap: u32 = 0,
+    ecode: u32 = 0,
+    pc: u32 = 0,
+    cs: u32 = 0,
+    flags: u32 = 0,
+    sp: u32 = 0,
+    ss: u32 = 0,
+};
+
 test "Ureg round trip" {
     var c: Cpu = .{};
-    var u: ia32.Ureg = .initExec(0x1020, 0xdfffef00, 0xdffffe00);
+    var u: TestUreg = .{ .pc = 0x1020, .sp = 0xdfffef00, .ax = 0xdffffe00, .cs = uesel, .ss = udsel, .ds = udsel, .es = udsel };
     u.bx = 7;
     u.flags = 0x246;
     c.setUreg(&u);
     try std.testing.expectEqual(@as(u32, 0xdffffe00), c.r[0]);
-    var v: ia32.Ureg = .{};
+    var v: TestUreg = .{};
     c.getUreg(&v);
     try std.testing.expectEqual(u, v);
 }

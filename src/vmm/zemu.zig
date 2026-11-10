@@ -26,11 +26,11 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const vmm = @import("../vmm.zig");
 const Arena = @import("arena.zig");
-const mem = @import("../interp/mem.zig");
-const ctx_mod = @import("../jit/ctx.zig");
+const mem = @import("vcpu").mem;
+const ctx_mod = @import("vcpu").ctx;
 const Ctx = ctx_mod.Ctx;
-const cache = @import("../jit/cache.zig");
-const codemem = @import("../jit/codemem.zig");
+const cache = @import("vcpu").cache;
+const codemem = @import("vcpu").codemem;
 const ha64 = @import("ha64.zig");
 const h86 = @import("h86.zig");
 
@@ -57,7 +57,7 @@ const web_budget: i64 = 64 * 1024;
 const web_slice_ns = 2 * std.time.ns_per_ms;
 const coro = if (web) @import("../web/coro.zig") else struct {};
 /// The web host's T1, whose regions are keyed by this backend's arena pages.
-const wasm_t1 = @import("../jit/wasm_t1.zig");
+const wasm_t1 = @import("vcpu").wasm_t1;
 
 fn monoNs() u64 {
     var t: std.os.wasi.timestamp_t = 0;

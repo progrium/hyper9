@@ -76,7 +76,9 @@ pub const ICache = struct {
     pub const Entry = struct {
         eip: u32 = 0,
         valid: bool = false,
-        bytes: [dec.max_len]u8 = undefined,
+        /// The instruction's 15 bytes from memory: bytes 0-7 and 7-14.
+        lo: u64 = 0,
+        hi: u64 = 0,
         inst: Inst = undefined,
     };
 };
@@ -419,12 +421,16 @@ pub fn Exec(comptime M: type) type {
                 const ic = x.c.icache orelse return x.decodeWhole(p);
                 // A hit must still match the bytes in memory, so code
                 // written since (by any vCPU or the host) is decoded again.
+                // All 15 bytes are compared, as two overlapping words, with
+                // builtins only: std is built as the root module is, which
+                // is Debug in a Debug h9 even when this module isn't.
                 const k = (eip ^ (eip >> 9)) & (ICache.n - 1);
                 const e = &ic.e[k];
-                if (e.eip == eip and e.valid and std.mem.eql(u8, e.bytes[0..e.inst.len], p[0..e.inst.len])) return e.inst;
+                const lo: u64 = @bitCast(p[0..8].*);
+                const hi: u64 = @bitCast(p[7..15].*);
+                if (e.eip == eip and e.valid and e.lo == lo and e.hi == hi) return e.inst;
                 const inst = try x.decodeWhole(p);
-                e.* = .{ .eip = eip, .valid = true, .inst = inst, .bytes = undefined };
-                @memcpy(e.bytes[0..inst.len], p[0..inst.len]);
+                e.* = .{ .eip = eip, .valid = true, .inst = inst, .lo = lo, .hi = hi };
                 return inst;
             }
             var buf: [dec.max_len]u8 = undefined;

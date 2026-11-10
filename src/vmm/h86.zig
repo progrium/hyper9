@@ -11,15 +11,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
-const Ctx = @import("../jit/ctx.zig").Ctx;
-const mem = @import("../interp/mem.zig");
-const x86cpu = @import("../interp/x86/cpu.zig");
-const exec = @import("../interp/x86/exec.zig");
-const cache = @import("../jit/cache.zig");
-const dispatch = @import("../jit/dispatch.zig");
-const emitter = @import("../jit/emitter.zig");
-const lift = @import("../jit/x86/lift.zig");
-const wasm_t1 = @import("../jit/wasm_t1.zig");
+const Ctx = @import("vcpu").ctx.Ctx;
+const mem = @import("vcpu").mem;
+const x86cpu = @import("vcpu").x86.cpu;
+const exec = @import("vcpu").x86.exec;
+const tlb = @import("vcpu").x86.tlb;
+const cache = @import("vcpu").cache;
+const dispatch = @import("vcpu").dispatch;
+const emitter = @import("vcpu").emitter;
+const lift = @import("vcpu").x86jit.lift;
+const wasm_t1 = @import("vcpu").wasm_t1;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter.
@@ -27,8 +28,8 @@ pub const Tier = enum { t0, t1 };
 pub var tier: Tier = .t0;
 /// T1's emitter; null where this host has none yet.
 pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
-    .aarch64 => @import("../jit/emit/arm64.zig").emitter_def,
-    .x86_64 => @import("../jit/emit/x64.zig").emitter_def,
+    .aarch64 => @import("vcpu").emit.arm64.emitter_def,
+    .x86_64 => @import("vcpu").emit.x64.emitter_def,
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};
@@ -60,30 +61,7 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
     c.c.setExtra(&x.i386);
 }
 
-/// T0's view of guest memory: the TLB, and mem.probe on a miss.
-const TlbMem = struct {
-    ctx: *Ctx,
-    tlb: *const mem.Tlb,
-
-    pub fn translate(m: *TlbMem, va: u32, access: x86cpu.Access) ?[*]u8 {
-        const hit = switch (access) {
-            .read => mem.fast(m.tlb, va, 1, false),
-            .write => mem.fast(m.tlb, va, 1, true),
-            .exec => mem.fastExec(m.tlb, va, 1),
-        };
-        if (hit) |h| return @ptrFromInt(h);
-        return mem.probe(m.ctx, va, switch (access) {
-            .read => .read,
-            .write => .write,
-            .exec => .exec,
-        });
-    }
-
-    fn translateFn(p: *anyopaque, va: u32, access: x86cpu.Access) ?[*]u8 {
-        const m: *TlbMem = @ptrCast(@alignCast(p));
-        return m.translate(va, access);
-    }
-};
+const TlbMem = tlb.TlbMem;
 
 /// Runs T0 until an exit. An exit request (ctx.exit_request, which zemu
 /// clears) or a spent ctx.budget gives `.interrupted`.
@@ -108,7 +86,7 @@ fn runT0(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64) x86cpu.Exit {
 fn runT0Opts(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, budget: u64, until_branch: bool) x86cpu.Exit {
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     const before = c.retired;
-    const exit = exec.run(c, m, .{ .budget = budget, .stop = stop, .until_branch = until_branch });
+    const exit = tlb.run(c, m, .{ .budget = budget, .stop = stop, .until_branch = until_branch });
     const ran = c.retired - before;
     ctx.retired +%= ran;
     if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(ran, std.math.maxInt(i63)));

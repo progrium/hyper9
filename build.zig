@@ -794,6 +794,8 @@ const ModuleParts = struct {
     /// With -Demu=zig: run every region through the T1-against-T0 check
     /// (src/jit/check/vmm.zig).
     jit_check: bool,
+    /// How src/interp/ and src/jit/ (the vcpu module) are optimized.
+    vcpu_optimize: std.builtin.OptimizeMode,
     unicorn: ?*std.Build.Module,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
@@ -823,6 +825,13 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
         .target = target,
     };
     const mod = if (exported) b.addModule("h9", opts) else b.createModule(opts);
+    // The emulator's CPUs (src/vcpu.zig), as a module of their own, so
+    // they can be optimized when the rest of h9 isn't.
+    mod.addImport("vcpu", b.createModule(.{
+        .root_source_file = b.path("src/vcpu.zig"),
+        .target = target,
+        .optimize = p.vcpu_optimize,
+    }));
     if (p.unicorn) |uc| mod.addImport("unicorn", uc);
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
     mod.addAnonymousImport("shim_amd64", .{ .root_source_file = p.shim_amd64 });
@@ -905,6 +914,10 @@ pub fn build(b: *std.Build) void {
     // while design/host-cmd rethinks them.
     const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
     var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or zig (h9's own, in progress)") orelse .none;
+    // T0 in a Debug build runs several times slower than in a release one,
+    // enough for long integration cases to time out against Unicorn's JIT.
+    const vcpu_debug = b.option(bool, "vcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
+    const vcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !vcpu_debug) .ReleaseFast else optimize;
     const jit_check = b.option(bool, "jit-check", "With -Demu=zig: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
     const no_jit = b.option(bool, "no-jit", "With -Demu=zig: the interpreter tier only, as on hosts that forbid generated code") orelse false;
     // No wheel exists for Windows, so it always builds from source.
@@ -987,6 +1000,7 @@ pub fn build(b: *std.Build) void {
         .emu = emu,
         .jit = !no_jit,
         .jit_check = jit_check,
+        .vcpu_optimize = vcpu_optimize,
         .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),

@@ -15,11 +15,15 @@ pub const emitter = @import("jit/emitter.zig");
 pub const codemem = @import("jit/codemem.zig");
 /// Test infrastructure: T1-against-T0 region checks and the fuzzers' parts.
 pub const check = @import("jit/check.zig");
+/// -Djit-check's hook in the vmm backend's run loop.
+pub const check_vmm = @import("jit/check/vmm.zig");
 /// The code cache: translations, chaining, the jump cache, invalidation.
 pub const cache = @import("jit/cache.zig");
 /// T1's run loop, and the passes it runs on each region.
 pub const dispatch = @import("jit/dispatch.zig");
 pub const opt = @import("jit/opt.zig");
+/// T1 on the web host: regions compiled to wasm modules.
+pub const wasm_t1 = @import("jit/wasm_t1.zig");
 pub const a64 = struct {
     pub const decode = @import("interp/a64/decode.zig");
     pub const exec = @import("interp/a64/exec.zig");
@@ -41,6 +45,7 @@ pub const x86 = struct {
     pub const x87 = @import("interp/x86/x87.zig");
     pub const x87math = @import("interp/x86/x87math.zig");
     pub const sse = @import("interp/x86/sse.zig");
+    pub const tlb = @import("interp/x86/tlb.zig");
 };
 /// h86's front end: the lifter to the JIT IR.
 pub const x86jit = struct {
