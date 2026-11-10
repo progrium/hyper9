@@ -1290,8 +1290,14 @@ fn LifterOf(comptime mode: Mode) type {
                         try b.bin(.sub, W, try b.konst(W, W.bits() - 1), try b.un(.clz, W, v32));
                     const res = if (T == W) idx else try b.un(.trunc, T, idx);
                     const zero = try b.icmp(.eq, v, try b.konst(T, 0));
-                    // The destination is written only for a nonzero source.
-                    try l.setR(i.reg(), size, try l.sel(T, zero, try l.getR(i.reg(), size), res));
+                    // The destination is written only for a nonzero source. In
+                    // long mode a zero source leaves all 64 bits alone, so the
+                    // 32-bit form selects on the whole register rather than
+                    // zero-extending.
+                    if (long and size == 4) {
+                        const old64 = try l.getR(i.reg(), 8);
+                        try l.setR(i.reg(), 8, try l.sel(.i64, zero, old64, try b.un(.zext, .i64, res)));
+                    } else try l.setR(i.reg(), size, try l.sel(T, zero, try l.getR(i.reg(), size), res));
                     if (l.needFlags(k)) l.fl.set(try b.un(.@"eflags.logic", .flags, v));
                 },
                 .mul, .imul1 => {

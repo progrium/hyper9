@@ -1189,7 +1189,9 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                     if (v != 0) {
                         const r: W = if (i.op == .bsf) @ctz(v) else @bitSizeOf(W) - 1 - @clz(v);
                         x.wr(i.reg(), size, r);
-                    } else x.touch32(.G, size);
+                    }
+                    // A zero source leaves the destination whole, upper half
+                    // included, as on hardware.
                     // As QEMU: ZF from the source, and the rest as a logic
                     // operation on it.
                     x.c.fl.record(.logic, size, 0, 0, v, 0);

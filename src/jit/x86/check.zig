@@ -1021,7 +1021,7 @@ test "check/x64: a counted loop over 64-bit memory, RIP-relative data, and R8-R1
 test "check/x64: 32-bit writes zero the upper half, and 8-bit ones with REX name SPL-DIL" {
     // mov eax, ecx; add edx, 1; xchg esi, edi; lea r8d, [rax+rdx]
     // cmovz r9d, r10d (not taken either way, still zero-extends)
-    // shl r11d, 0 (also); bsf r12d, r13d with r13 = 0 (also)
+    // shl r11d, 0 (also); bsf r12d, r13d with r13 = 0 (leaves r12 whole)
     // mov sil, 7 (REX); mov ah, 9 (no REX); add dil, ah? (not encodable): add dil, al
     // cmpxchg r14d, r15d; setnz bpl; movsxd rcx, edx; movzx r15, byte [rbx+1]
     // cdqe; cqo; bswap rbp; neg r8; not r9w; imul r10, r11, -3; mul r12
