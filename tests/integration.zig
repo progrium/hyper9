@@ -934,6 +934,23 @@ test "rfork with RFMEM shares data and bss but not the stack [95]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+test "an RFMEM process can use pages another just grew, without a syscall [95]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "rfgrow", @embedFile("fixtures/rfmem/rfgrow.c"));
+    // Two CPUs at least, so the child spins while the parent grows the
+    // break. Before native carried out queued mappings on a fault, the
+    // child's first write to the new pages was "sys: trap: fault write"
+    // (rio's procs malloc'ing from one heap, in 9/UX's GUI tests).
+    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--cpus", "4", "--rc", "./rfgrow 32" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("32 rounds\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "concurrent processes contending for one environment don't hang" {
     const e = try env(@src());
     // 8 processes sharing /env, each creating 150 variables, then running
@@ -1101,6 +1118,17 @@ test "a new file in an ephemeral cwd is readable and absent on the host afterwar
     try std.testing.expectEqualStrings("hi\n", r.out);
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(!s.exists("f"));
+}
+
+test "an exclusive-use file in the overlay opens once at a time [6]" {
+    const e = try env(@src());
+    // DMEXCL (chmod +l), as 9front's file servers keep it: a second open
+    // while one is open fails, and succeeds once that one is closed.
+    const r = try run(e, &.{ "--rc", "touch /tmp/f && chmod +l /tmp/f && { cat /tmp/f >[2=1] } </tmp/f; cat /tmp/f && echo again" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try expectIn(r.out, "file is locked");
+    try expectIn(r.out, "again\n");
 }
 
 test "writing an existing host file changes it in the guest only [6]" {
@@ -4920,6 +4948,16 @@ test "--gfx on a build without graphics exits 125 [15]" {
     defer gpa.free(v.stdout);
     defer gpa.free(v.stderr);
     if (std.mem.indexOf(u8, v.stdout, "gfx: none\n") == null) return error.SkipZigTest;
+    try expectGfxNotBuilt(e);
+}
+
+test "h9-node has no canvas, so --gfx exits 125 as a build without graphics does [120]" {
+    const e = try env(@src());
+    if (!onWeb()) return error.SkipZigTest;
+    try expectGfxNotBuilt(e);
+}
+
+fn expectGfxNotBuilt(e: Env) !void {
     const r = try run(e, &.{ "--gfx", "echo", "hi" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);

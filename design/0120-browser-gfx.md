@@ -189,3 +189,12 @@ The paste event gives the user an explicit action, the shortcut they already use
 - **Touch.** Pointer events cover touch too, but with no buttons beyond the first and no hover. A touch page could use the long-press as button 3 and a two-finger tap as button 2. That needs trying on a tablet before it's specified.
 - **Several canvases from one machine.** Plan 9 has one screen per terminal, and rio gives windows within it. A page that wants each rio window as its own element would need a different design (a rio-like file server in the page). That would be its own proposal.
 - **Frame cost at full screen.** A 4K canvas in device pixels is 33 MB of pixels. A full-screen redraw at that size copies all of it each frame, which may be too slow. The fixes would be a larger default scale on such displays, or a texture upload. The Playwright demo on a high-DPI display will tell.
+
+## Updates
+
+- 2026-11-10: Refinements made while implementing it:
+  - 9front 11952 has no `lucsans` font, and its acme, like rio, opens `/lib/font/bit/vga/unicode.font` by default, so the root archive gains only `vga` (0.85 MB with rio, acme, and `window`), not `lucsans/euro.8.font` or `lucm/unicode.9.font`.
+  - The page computes the screen's size from the scale, and sends it in the screen's pixels, so the pointer's coordinates and the size use one formula; `gfx-web.c` takes the size as given. `devicePixelContentBoxSize` is used only where it agrees with the CSS size times `devicePixelRatio` to within a pixel, since it ignores an emulated ratio.
+  - The canvas isn't editable, so browsers send it no composition events; text from an input method reaches the guest only as the keys it sends. `compositionend` is handled for browsers that do send it.
+  - The Playwright cases are `tests/web/gfx.mjs`, run by `zig build web-test` and the pages workflow, tagged `[120]`. They run on a test page beside the demo, over the archive with a `draw` client added, since the demo page runs rio and rc only.
+  - The `[gfx]` backend cases under Node on v86 aren't done: `tests/backends.zig` runs arm64 fixtures on native backends only. The Chromium cases cover the same paths on the canvas backend.

@@ -908,7 +908,7 @@ fn connect(s: *Stream) ConnectError!void {
     const stream: net.Stream = if (s.addrs.len > 0) blk: {
         var last: anyerror = error.UnknownHostName;
         for (s.addrs) |*a| {
-            if (a.connect(io, .{ .mode = .stream })) |st| break :blk st else |e| last = e;
+            if (refusedOnWindows(a.connect(io, .{ .mode = .stream }))) |st| break :blk st else |e| last = e;
         }
         return last;
     } else try dial(io, if (proxy) |p| p.host else url.host, if (proxy) |p| p.port else url.port);
@@ -1108,11 +1108,15 @@ extern "ws2_32" fn setsockopt(s: net.Socket.Handle, level: i32, optname: i32, op
 
 /// Connects to `host`, a name or a literal address.
 fn dial(io: Io, host: []const u8, port: u16) !net.Stream {
-    if (builtin.os.tag != .windows) return dialHost(io, host, port);
-    return dialHost(io, host, port) catch |e| switch (e) {
-        // Zig 0.16's Windows connect reports a refused connection, the
-        // usual reason one fails, as an unexpected NTSTATUS; name it so
-        // the machine's error says what happened.
+    return refusedOnWindows(dialHost(io, host, port));
+}
+
+/// Zig 0.16's Windows connect reports a refused connection, the usual
+/// reason one fails, as an unexpected NTSTATUS; name it so the machine's
+/// error says what happened.
+fn refusedOnWindows(r: anytype) @TypeOf(r) {
+    if (builtin.os.tag != .windows) return r;
+    return r catch |e| switch (e) {
         error.Unexpected => error.ConnectionRefused,
         else => e,
     };

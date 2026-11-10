@@ -325,7 +325,7 @@ pub const Plan = struct {
         var dv = (std.unicode.Utf8View.init(p.devmask) catch unreachable).iterator();
         while (dv.nextCodepointSlice()) |d| try w.print(" #{s}", .{d});
         try w.writeAll("\n");
-        if (p.gfx) |g| try w.print("gfx:      {s} scale={d} clipboard={s}\n", .{ g.backend, g.scale, if (g.clipboard) "host" else "private" });
+        if (p.gfx) |g| try w.print("gfx:      {s} scale={d} clipboard={s}\n", .{ g.backend, g.scale, if (!g.clipboard) "private" else if (g.isWeb()) "page" else "host" });
         if (p.net_allow.len > 0) {
             try w.writeAll("net-allow:\n");
             for (p.net_allow) |pat| try w.print("  {s}\n", .{pat.text});
@@ -434,11 +434,17 @@ const ElidedUserinfo = struct {
 
 /// A machine's window (design/0015-gfx.md), as the plan shows it.
 pub const Gfx = struct {
-    /// The GUI backend's name: cocoa, win32, x11 or headless.
+    /// The GUI backend's name: cocoa, win32, x11, web or headless.
     backend: []const u8,
-    /// Whether /dev/snarf is the host clipboard (not `--gfx=noclip`).
+    /// Whether /dev/snarf is the host clipboard (not `--gfx=noclip`). On
+    /// the browser host, the page's, as the user pastes into the canvas.
     clipboard: bool = true,
     scale: u8 = 1,
+
+    /// The browser host's canvas (design/0120-browser-gfx.md).
+    pub fn isWeb(g: Gfx) bool {
+        return std.mem.eql(u8, g.backend, "web");
+    }
 };
 
 pub const Inputs = struct {
@@ -822,8 +828,13 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (net == .enable) try caveats.append(arena, "servers in the guest are reachable by anything that can reach the host's ports");
     }
     if (in.gfx) |g| {
-        if (g.clipboard) try caveats.append(arena, "the guest can read and write the host clipboard through /dev/snarf");
-        try caveats.append(arena, "the guest can draw anything in its window, including what looks like a host dialog");
+        if (g.isWeb()) {
+            if (g.clipboard) try caveats.append(arena, "the guest can write the page's clipboard, and read what the user pastes into its canvas");
+            try caveats.append(arena, "the guest can draw anything in its canvas, including what looks like the page's own UI or a browser dialog");
+        } else {
+            if (g.clipboard) try caveats.append(arena, "the guest can read and write the host clipboard through /dev/snarf");
+            try caveats.append(arena, "the guest can draw anything in its window, including what looks like a host dialog");
+        }
     }
     if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
@@ -1931,4 +1942,24 @@ test "compile: --gfx binds #i, #m and #b after the console, and masks them witho
         try t.expect(std.mem.indexOf(u8, out.written(), "/dev/snarf") == null);
         try t.expect(std.mem.indexOf(u8, out.written(), "looks like a host dialog") != null);
     }
+}
+
+test "compile: the browser host's canvas shows clipboard=page and its own caveats" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var msg: []const u8 = "";
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    const page = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .scale = 0 } }, .{}, &msg);
+    try page.print(&out.writer);
+    try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      web scale=0 clipboard=page\n") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "the guest can write the page's clipboard, and read what the user pastes into its canvas") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "looks like the page's own UI or a browser dialog") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "host clipboard") == null);
+
+    const private = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .clipboard = false, .scale = 2 } }, .{}, &msg);
+    out.clearRetainingCapacity();
+    try private.print(&out.writer);
+    try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      web scale=2 clipboard=private\n") != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "page's clipboard") == null);
 }

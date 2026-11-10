@@ -1724,6 +1724,35 @@ the run ends.
   freedom to draw anything in its window (including what looks like a host
   dialog) as caveats.
 
+**In a browser.** On the browser host, a page's `<canvas>` is the window
+([browser-gfx](design/0120-browser-gfx.md)). `h9-web.js`'s
+`createMachine({ gfx: { canvas } })` moves the canvas into the machine's
+Worker, and rio and acme draw on it. The demo page's **rio** button runs
+`rio -i 'window acme'` that way.
+
+- Click the canvas to type to it. Keys reach the guest only while the canvas
+  has focus, and keys the browser keeps for itself, such as Ctrl-W and
+  Ctrl-T, never reach it. Leaving the canvas releases every key still held.
+- With a one-button mouse or a trackpad, Alt (Option) and click is button 2,
+  and Cmd and click on macOS, or Ctrl and click elsewhere, is button 3. The
+  wheel is buttons 4 and 5, as rio and acme expect.
+- `/dev/snarf` is a buffer in the machine, not the page's clipboard. Ctrl-V
+  (Cmd-V) in the canvas puts the clipboard's text in it, and then rio's or
+  acme's own paste (button 2's menu, or a 1-3 chord) pastes it. A snarf in
+  the guest copies to the page's clipboard; if the browser refuses, the
+  machine fires a `snarf` event with the text, so the page can offer its own
+  copy button. So the guest reads the clipboard only when you paste.
+  `clipboard: "private"` keeps the buffer to the guest, as `--gfx=noclip`
+  does.
+- `scale` is `--gfx-scale`: 0 (the default) draws in device pixels, so text
+  is small on a high-DPI display, 1 in CSS pixels, and N in device pixels
+  divided by N. The screen follows the canvas's size.
+- A page can't move the pointer, so rio's and acme's warps don't happen.
+- `machine.hangup()` posts `hangup`, as closing a native window does.
+- The root archive holds rio, acme, `window`, and the `vga` font they open
+  by default; other fonts need a fuller root. `h9-node` has no canvas, so
+  `--gfx` there exits 125 as a build without graphics does.
+
 The plumber starts and serves `/mnt/plumb`, and `sam -d` and `ed` edit text
 without graphics.
 
@@ -2195,6 +2224,13 @@ The overlay copies a file into memory, whole, the first time it's opened for
 writing, and it counts against `--memory`; when memory runs out, writes fail
 with `file system full`. Renaming a host directory inside an overlay is
 refused with `permission denied`.
+
+**Exclusive-use files.** In an overlay (the root, `/tmp`, ephemeral paths),
+a file with the `l` mode bit (`DMEXCL`, set by `create` or `chmod +l`) can
+be open only once at a time in the machine, as on 9front's file servers: a
+second open fails with `file is locked` until the first is closed. Host
+directories have no such bit, so it isn't kept there: a file created with it
+on a shared host path opens as often as any other.
 
 **`/tmp`.** Every machine has its own `/tmp`, an overlay in memory over the
 root tree's empty `/tmp`, in both profiles. It's not your host's temporary

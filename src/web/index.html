@@ -18,11 +18,13 @@
   /* Takes the keyboard input, so a tap on the terminal brings up a phone's
      on-screen keyboard, which a <pre> can't. Invisible, and 16px so iOS
      doesn't zoom when it's focused. */
+  /* ?rio: the screen, in CSS pixels' worth of device pixels. */
+  #screen { flex: 1; min-height: 0; width: 100%; display: block; outline: none; background: #777; }
   #kbd { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; resize: none; caret-color: transparent; }
 </style>
 </head>
 <body>
-<header><span id="about">h9: 9front's 386 programs in a Web Worker. Type to rc;</span> <button id="intr">interrupt</button> or Ctrl-C stops a command.</header>
+<header><span id="about">h9: 9front's 386 programs in a Web Worker. Type to rc;</span> <span id="rcnote"><button id="intr">interrupt</button> or Ctrl-C stops a command.</span> <button id="rio">rio</button></header>
 <pre id="term" tabindex="-1" aria-hidden="true"></pre>
 <textarea id="kbd" aria-label="terminal input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
 <script type="module">
@@ -60,90 +62,124 @@ if (!haveJSPI) {
   // h9's own 386 CPU, is the only one; v86 is its old name).
   const params = new URLSearchParams(location.search);
   const linux = params.has('linux');
-  if (linux) document.getElementById('about').textContent = "h9: Alpine Linux's 386 programs in a Web Worker. Type to busybox sh;";
-  const m = await createMachine({
-    root: linux ? 'linux.h9a' : params.get('root') ?? undefined,
+  // ?rio runs rio with acme in a canvas (design/0120-browser-gfx.md).
+  document.getElementById('rio').onclick = () => { location.search = params.has('rio') ? '' : '?rio'; };
+  if (params.has('rio')) await runRio(params);
+  else {
+    if (linux) document.getElementById('about').textContent = "h9: Alpine Linux's 386 programs in a Web Worker. Type to busybox sh;";
+    const m = await createMachine({
+      root: linux ? 'linux.h9a' : params.get('root') ?? undefined,
     backend: params.get('backend') ?? undefined,
-    terminal: { write: (b) => print(dec.decode(b, { stream: true })), setRaw: (on) => { raw = on; render(); } },
-  });
-  const kbd = document.getElementById('kbd');
-  // Sends what was typed: in raw mode as it is, in cooked mode through the
-  // page's line editing, which echoes it, as a host terminal would, and
-  // sends each line whole.
-  const send = (s) => {
-    if (raw) { m.input(s); return; }
-    for (const ch of s) {
-      if (ch === '\b') line = line.slice(0, -1);
-      else if (ch === '\n') { out += line + '\n'; m.input(line + '\n'); line = ''; }
-      else line += ch;
-    }
-    render();
-  };
-  const interrupt = () => { m.interrupt(); if (!raw) { line = ''; print('\n'); } };
-  document.getElementById('intr').onclick = () => { interrupt(); kbd.focus(); };
-  // A click gives the keyboard to the input, unless it made a selection,
-  // which stays so it can be copied. (Moving focus on mousedown would clear
-  // it.) Typing with the terminal focused goes to the input, except a copy.
-  const selected = () => !!getSelection()?.toString();
-  term.addEventListener('click', () => { if (!selected()) kbd.focus(); });
-  term.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && selected()) return;
-    kbd.focus();
-    onKey(e);
-  });
-  const onKey = (e) => {
-    if (e.metaKey || e.isComposing || (e.ctrlKey && e.key === 'v')) return;
-    let s = null;
-    if (e.ctrlKey && e.key.length === 1) {
-      const k = e.key.toLowerCase();
-      if (k === 'c' && !raw) { interrupt(); e.preventDefault(); return; }
-      if (k === 'd' && !raw) { m.input(line + '\x04'); line = ''; render(); e.preventDefault(); return; }
-      s = String.fromCharCode(k.charCodeAt(0) - 96);
-    } else if (e.key === 'Enter') s = '\n';
-    else if (e.key === 'Backspace') s = '\b';
-    else if (e.key === 'Tab') s = '\t';
-    else if (e.key === 'Escape') s = '\x1b';
-    else if (e.key.length === 1) s = e.key;
-    // Anything else, such as the "Unidentified" keys on-screen keyboards
-    // report, arrives as an input event instead.
-    if (s === null) return;
-    e.preventDefault();
-    send(s);
-  };
-  kbd.addEventListener('keydown', onKey);
-  // On-screen keyboards insert text rather than sending keys. The textarea
-  // keeps one space, so a backspace has something to delete and shows up
-  // as a shorter value; what's typed is whatever follows the space. Text
-  // still being composed (word prediction) waits for compositionend.
-  const pad = ' ';
-  const reset = () => { kbd.value = pad; kbd.setSelectionRange(1, 1); };
-  const typed = () => {
-    const v = kbd.value;
+      terminal: { write: (b) => print(dec.decode(b, { stream: true })), setRaw: (on) => { raw = on; render(); } },
+    });
+    const kbd = document.getElementById('kbd');
+    // Sends what was typed: in raw mode as it is, in cooked mode through the
+    // page's line editing, which echoes it, as a host terminal would, and
+    // sends each line whole.
+    const send = (s) => {
+      if (raw) { m.input(s); return; }
+      for (const ch of s) {
+        if (ch === '\b') line = line.slice(0, -1);
+        else if (ch === '\n') { out += line + '\n'; m.input(line + '\n'); line = ''; }
+        else line += ch;
+      }
+      render();
+    };
+    const interrupt = () => { m.interrupt(); if (!raw) { line = ''; print('\n'); } };
+    document.getElementById('intr').onclick = () => { interrupt(); kbd.focus(); };
+    // A click gives the keyboard to the input, unless it made a selection,
+    // which stays so it can be copied. (Moving focus on mousedown would clear
+    // it.) Typing with the terminal focused goes to the input, except a copy.
+    const selected = () => !!getSelection()?.toString();
+    term.addEventListener('click', () => { if (!selected()) kbd.focus(); });
+    term.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && selected()) return;
+      kbd.focus();
+      onKey(e);
+    });
+    const onKey = (e) => {
+      if (e.metaKey || e.isComposing || (e.ctrlKey && e.key === 'v')) return;
+      let s = null;
+      if (e.ctrlKey && e.key.length === 1) {
+        const k = e.key.toLowerCase();
+        if (k === 'c' && !raw) { interrupt(); e.preventDefault(); return; }
+        if (k === 'd' && !raw) { m.input(line + '\x04'); line = ''; render(); e.preventDefault(); return; }
+        s = String.fromCharCode(k.charCodeAt(0) - 96);
+      } else if (e.key === 'Enter') s = '\n';
+      else if (e.key === 'Backspace') s = '\b';
+      else if (e.key === 'Tab') s = '\t';
+      else if (e.key === 'Escape') s = '\x1b';
+      else if (e.key.length === 1) s = e.key;
+      // Anything else, such as the "Unidentified" keys on-screen keyboards
+      // report, arrives as an input event instead.
+      if (s === null) return;
+      e.preventDefault();
+      send(s);
+    };
+    kbd.addEventListener('keydown', onKey);
+    // On-screen keyboards insert text rather than sending keys. The textarea
+    // keeps one space, so a backspace has something to delete and shows up
+    // as a shorter value; what's typed is whatever follows the space. Text
+    // still being composed (word prediction) waits for compositionend.
+    const pad = ' ';
+    const reset = () => { kbd.value = pad; kbd.setSelectionRange(1, 1); };
+    const typed = () => {
+      const v = kbd.value;
+      reset();
+      if (v.length < pad.length) return '\b';
+      return (v.startsWith(pad) ? v.slice(pad.length) : v).replace(/\r\n?/g, '\n');
+    };
+    kbd.addEventListener('input', (e) => {
+      if (e.isComposing) { composing = kbd.value.slice(pad.length); render(); return; }
+      const s = typed();
+      if (s) send(s);
+    });
+    kbd.addEventListener('compositionend', () => {
+      composing = '';
+      const s = typed();
+      if (s) send(s); else render();
+    });
+    kbd.addEventListener('paste', (e) => {
+      e.preventDefault();
+      send(e.clipboardData.getData('text').replace(/\r\n?/g, '\n'));
+    });
     reset();
-    if (v.length < pad.length) return '\b';
-    return (v.startsWith(pad) ? v.slice(pad.length) : v).replace(/\r\n?/g, '\n');
-  };
-  kbd.addEventListener('input', (e) => {
-    if (e.isComposing) { composing = kbd.value.slice(pad.length); render(); return; }
-    const s = typed();
-    if (s) send(s);
+    kbd.focus();
+    render();
+    // The archive keeps no links, so busybox makes its applets' links at
+    // the start, in the root's overlay.
+    const argv = linux ? ['/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
+    const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
+    if (code !== null) print(`\n[h9 exited ${code}]\n`);
+  }
+}
+
+// rio, with acme in a window, on a canvas in place of the terminal. The
+// console's output, if any, goes below it. Click the canvas to type to it;
+// Ctrl-V (Cmd-V) puts the page's clipboard in the snarf buffer, for rio's
+// or acme's own paste, and a snarf in the guest copies to the clipboard.
+async function runRio(params) {
+  document.getElementById('about').textContent = "h9: 9front's rio and acme in a Web Worker. Click to type; Ctrl-V fills the snarf buffer, then paste with button 2.";
+  document.getElementById('rcnote').hidden = true;
+  document.getElementById('rio').textContent = 'rc';
+  const hang = document.createElement('button');
+  hang.textContent = 'hang up';
+  document.querySelector('header').append(' ', hang);
+  const canvas = document.createElement('canvas');
+  canvas.id = 'screen';
+  term.before(canvas);
+  term.style.flex = '0 0 auto';
+  term.style.maxHeight = '20vh';
+  const scale = Number(params.get('scale') ?? 1);
+  const m = await createMachine({
+    gfx: { canvas, scale },
+    terminal: { write: (b) => print(dec.decode(b, { stream: true })) },
   });
-  kbd.addEventListener('compositionend', () => {
-    composing = '';
-    const s = typed();
-    if (s) send(s); else render();
-  });
-  kbd.addEventListener('paste', (e) => {
-    e.preventDefault();
-    send(e.clipboardData.getData('text').replace(/\r\n?/g, '\n'));
-  });
-  reset();
-  kbd.focus();
-  render();
-  // The archive keeps no links, so busybox makes its applets' links at
-  // the start, in the root's overlay.
-  const argv = linux ? ['/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
-  const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
+  hang.onclick = () => m.hangup();
+  m.addEventListener('snarf', (e) => print(`[the clipboard refused the snarf buffer: ${JSON.stringify(e.text)}]\n`));
+  canvas.focus();
+  const cmd = params.get('cmd') ?? 'window acme';
+  const code = await m.run(['rio', '-i', cmd]).catch((e) => { print(`\n${e.message}\n`); return null; });
   if (code !== null) print(`\n[h9 exited ${code}]\n`);
 }
 </script>

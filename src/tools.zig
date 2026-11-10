@@ -57,6 +57,7 @@ fn checkGfx(w: *std.Io.Writer) std.Io.Writer.Error!void {
         else
             try w.writeAll("gfx x11: can't open $DISPLAY\n"),
         .win32, .cocoa => try w.print("gfx {t}: built in\n", .{h9.gfx.backend}),
+        .web => try w.writeAll("gfx web: built in (a page's canvas, given to createMachine)\n"),
     }
 }
 

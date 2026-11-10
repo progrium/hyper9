@@ -3,7 +3,8 @@
  * it with -include), so the vendored files compile unmodified
  * (design/0015-gfx.md):
  *
- * - The backend's screeninit, clipread and clipwrite are renamed, so
+ * - The backend's screeninit, clipread and clipwrite (and on X11,
+ *   setcursor and mouseset) are renamed, so
  *   src/kern/gfx.c can wrap them: screeninit to start the backend's
  *   kprocs outside the guest's namespace and keep kernel prints on the
  *   host terminal, and the clipboard for --gfx=noclip. Its keys go
@@ -22,6 +23,16 @@
 #define clipread h9_gui_clipread
 #define clipwrite h9_gui_clipwrite
 #define kbdkey h9_kbdkey
+
+/*
+ * X11 opens its display in screeninit, but a guest can bind #m before its
+ * first attach of #i, and devmouse's attach sets the cursor: gfx.c skips
+ * the cursor calls until the screen is open, then sets it.
+ */
+#ifdef H9_GFX_X11
+#define setcursor h9_gui_setcursor
+#define mouseset h9_gui_mouseset
+#endif
 
 #ifdef H9_GUI_EXIT
 #ifdef WINDOWS
