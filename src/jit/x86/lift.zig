@@ -295,6 +295,15 @@ fn sseLifted(i: anytype) bool {
         0x28, 0x29 => p == .none or p == .p66,
         0x54, 0x55, 0x56, 0x57 => p == .none or p == .p66,
         0x6e => p == .p66,
+        // MOVLPS/PD and MOVHPS/PD (66: memory only), MOVHLPS, MOVLHPS;
+        // their stores; MOVNTPS/PD, MOVNTDQ.
+        0x12, 0x16 => p == .none or (p == .p66 and i.mem),
+        0x13, 0x17, 0x2b => (p == .none or p == .p66) and i.mem,
+        0xe7 => p == .p66 and i.mem,
+        // PMOVMSKB, MOVMSKPS/PD, PEXTRW: register forms; PINSRW.
+        0xd7, 0xc5 => p == .p66 and !i.mem,
+        0x50 => (p == .none or p == .p66) and !i.mem,
+        0xc4 => p == .p66,
         0x7e => p == .p66 or p == .f3,
         0xd6 => p == .p66,
         0x6f, 0x7f => p == .p66 or p == .f3,
@@ -1950,6 +1959,8 @@ fn LifterOf(comptime mode: Mode) type {
                 0x14, 0x15, 0xc6 => true,
                 0xfc, 0xfd, 0xfe, 0xd4, 0xf8, 0xf9, 0xfa, 0xfb, 0x74, 0x75, 0x76, 0x64, 0x65, 0x66 => true,
                 0xda, 0xde, 0xea, 0xee, 0xd5, 0x60, 0x61, 0x62, 0x6c, 0x68, 0x69, 0x6a, 0x6d, 0x63, 0x67, 0x6b, 0x70 => true,
+                // MOVNTPS/PD and MOVNTDQ.
+                0x2b, 0xe7 => true,
                 else => false,
             };
             if (addr) |a| if (aligned) {
@@ -2046,6 +2057,86 @@ fn LifterOf(comptime mode: Mode) type {
                         else => try b.emit(.{ .op = .@"v.xor", .ty = .v128, .a = x, .b = y, .aux = aux }),
                     };
                     try b.setreg(d, r);
+                },
+                0x12, 0x13, 0x16, 0x17 => {
+                    // MOVLPS/PD and MOVHPS/PD (a qword to or from memory),
+                    // MOVHLPS and MOVLHPS (registers): one half of the
+                    // destination, the other kept.
+                    const hi = op >= 0x16;
+                    const x = try b.getreg(.v128, d);
+                    if (op & 1 == 1) {
+                        try l.store(k, addr.?, try l.vlane(x, 3, @intFromBool(hi)));
+                    } else {
+                        const v = if (addr) |a| try l.load(k, 8, a) else try l.vlane(try b.getreg(.v128, xmmOff(i.rm())), 3, @intFromBool(!hi));
+                        const keep = try l.vlane(x, 3, @intFromBool(!hi));
+                        try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = if (hi) keep else v, .b = if (hi) v else keep }));
+                    }
+                },
+                0x2b, 0xe7 => {
+                    // MOVNTPS/PD and MOVNTDQ: an aligned store (the hint
+                    // means nothing here).
+                    try l.xstore(k, addr.?, try b.getreg(.v128, d));
+                },
+                0xd7, 0x50 => {
+                    // PMOVMSKB, MOVMSKPS, MOVMSKPD: the lanes' sign bits.
+                    const x = try b.getreg(.v128, xmmOff(i.rm()));
+                    const lo = try l.vlane(x, 3, 0);
+                    const hi = try l.vlane(x, 3, 1);
+                    const k64 = struct {
+                        fn f(bb: *Builder, v: u64) !Ref {
+                            return bb.konst(.i64, v);
+                        }
+                    }.f;
+                    const m = switch (op) {
+                        0xd7 => blk: {
+                            // Each byte's top bit to the top byte, by a
+                            // multiply: bit 8j+7 moves to bit 56+j.
+                            const S = struct {
+                                fn gather(bb: *Builder, v: Ref) !Ref {
+                                    const tops = try bb.bin(.lshr, .i64, try bb.bin(.@"and", .i64, v, try k64(bb, 0x8080_8080_8080_8080)), try k64(bb, 7));
+                                    return bb.bin(.lshr, .i64, try bb.bin(.mul, .i64, tops, try k64(bb, 0x0102_0408_1020_4080)), try k64(bb, 56));
+                                }
+                            };
+                            break :blk try b.bin(.@"or", .i64, try S.gather(b, lo), try b.bin(.shl, .i64, try S.gather(b, hi), try k64(b, 8)));
+                        },
+                        else => if (p == .p66) blk: {
+                            const s0 = try b.bin(.lshr, .i64, lo, try k64(b, 63));
+                            const s1 = try b.bin(.lshr, .i64, hi, try k64(b, 63));
+                            break :blk try b.bin(.@"or", .i64, s0, try b.bin(.shl, .i64, s1, try k64(b, 1)));
+                        } else blk: {
+                            // Bits 31 and 63 of each half.
+                            var acc = try k64(b, 0);
+                            for ([2]Ref{ lo, hi }, 0..) |h, n| {
+                                const b0 = try b.bin(.@"and", .i64, try b.bin(.lshr, .i64, h, try k64(b, 31)), try k64(b, 1));
+                                const b1 = try b.bin(.lshr, .i64, h, try k64(b, 63));
+                                const two = try b.bin(.@"or", .i64, b0, try b.bin(.shl, .i64, b1, try k64(b, 1)));
+                                acc = try b.bin(.@"or", .i64, acc, try b.bin(.shl, .i64, two, try k64(b, 2 * n)));
+                            }
+                            break :blk acc;
+                        },
+                    };
+                    try l.setR(i.reg(), 4, try b.un(.trunc, .i32, m));
+                },
+                0xc5 => {
+                    // PEXTRW r32, xmm, imm8.
+                    const x = try b.getreg(.v128, xmmOff(i.rm()));
+                    const n: u32 = @as(u32, @truncate(i.imm)) & 7;
+                    const q = try l.vlane(x, 3, n >> 2);
+                    const w = try b.bin(.@"and", .i64, try b.bin(.lshr, .i64, q, try b.konst(.i64, 16 * (n & 3))), try b.konst(.i64, 0xffff));
+                    try l.setR(i.reg(), 4, try b.un(.trunc, .i32, w));
+                },
+                0xc4 => {
+                    // PINSRW xmm, r32/m16, imm8.
+                    const v16 = if (addr) |a| try l.load(k, 2, a) else try l.getR(i.rm(), 2);
+                    const x = try b.getreg(.v128, d);
+                    const n: u32 = @as(u32, @truncate(i.imm)) & 7;
+                    const sh: u64 = 16 * (n & 3);
+                    const q = try l.vlane(x, 3, n >> 2);
+                    const cleared = try b.bin(.@"and", .i64, q, try b.konst(.i64, ~(@as(u64, 0xffff) << @intCast(sh))));
+                    const nq = try b.bin(.@"or", .i64, cleared, try b.bin(.shl, .i64, try b.un(.zext, .i64, v16), try b.konst(.i64, sh)));
+                    const other = try l.vlane(x, 3, (n >> 2) ^ 1);
+                    const lo_hi = n >> 2 == 0;
+                    try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = if (lo_hi) nq else other, .b = if (lo_hi) other else nq }));
                 },
                 0x6e => {
                     // MOVD xmm, r/m32 (MOVQ xmm, r/m64): the rest zeroed.
