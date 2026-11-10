@@ -1695,6 +1695,23 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     step.dependOn(&run.step);
     test_step.dependOn(&run.step);
 
+    // h86's memory-model litmus tests: compiled code on host threads.
+    // ReleaseSafe unless -Doptimize says otherwise, so the threads race.
+    const litmus = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/jit/litmus_x86.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/vcpu.zig"),
+            .target = target,
+            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        }) }},
+    }) });
+    const litmus_run = b.addRunArtifact(litmus);
+    step.dependOn(&litmus_run.step);
+    test_step.dependOn(&litmus_run.step);
+    b.step("litmus-x86", "Run h86's memory-model litmus tests on compiled code").dependOn(&litmus_run.step);
+
     const node = b.findProgram(&.{"node"}, &.{}) catch return;
     const runtime = b.addExecutable(.{
         .name = "jit-runtime",
