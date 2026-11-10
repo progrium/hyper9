@@ -916,6 +916,24 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             e.land(ok);
         },
         .retire => try e.retireLater(i.aux),
+        .@"pending.flags" => {
+            // Written at once, which ir.zig allows. A chunk over the word
+            // goes out first and comes back after.
+            const mask: u32 = if (i.aux2 == 0) 0xf000_0000 else @intCast(ir_eval.eflags_mask);
+            const off: i32 = std.math.cast(i32, i.aux) orelse return error.Unsupported;
+            var over: regalloc.ChunkSet = 0;
+            for (e.p.chunks, 0..) |c, k| {
+                if (i.aux < c.off + c.bytes and c.off < i.aux + 4) over |= @as(regalloc.ChunkSet, 1) << @intCast(k);
+            }
+            try e.writeback(over & e.dirty);
+            e.dirty &= ~over;
+            try e.aluImm(false, 4, RAX, @bitCast(mask)); // and eax, mask
+            try e.ldCtx(R10, ctx.off.cpu);
+            try e.rm(false, &.{0x89}, RAX, R10, off); // mov [cpu+off], eax
+            for (e.p.chunks, 0..) |_, k| {
+                if (over & (@as(regalloc.ChunkSet, 1) << @intCast(k)) != 0) try e.chunkAccess(k, false);
+            }
+        },
         .br => try e.jmpTo(null, @intCast(i.aux)),
         .brcond => {
             try e.rr(false, &.{0x85}, RAX, RAX);
@@ -1873,7 +1891,9 @@ test "emitted code matches ir_eval on the shared cases" {
     defer cases.free(gpa, int_cases);
     const ext_cases = try cases.generateExt(gpa);
     defer cases.free(gpa, ext_cases);
-    const all = try std.mem.concat(gpa, cases.Case, &.{ int_cases, ext_cases });
+    const pending_cases = try cases.generatePending(gpa);
+    defer cases.free(gpa, pending_cases);
+    const all = try std.mem.concat(gpa, cases.Case, &.{ int_cases, ext_cases, pending_cases });
     defer gpa.free(all);
     const env = try gpa.create(cases.Env);
     defer gpa.destroy(env);

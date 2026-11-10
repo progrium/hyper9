@@ -623,3 +623,28 @@ test "the FP and vector cases verify and run in ir_eval" {
         _ = try env.evalCase(gpa, &r, c);
     }
 }
+
+/// pending.flags over a word a setreg just wrote (a chunk where the
+/// emitter pins one), for both groups: for emitters that lower it.
+pub fn generatePending(gpa: std.mem.Allocator) ![]Case {
+    var list: std.ArrayList(Case) = .empty;
+    errdefer {
+        for (list.items) |c| gpa.free(c.text);
+        list.deinit(gpa);
+    }
+    for ([_][]const u8{ "nzcv.sub", "eflags.sub" }, [_][]const u8{ "", " @0x1" }) |op, grp| for ([_][2]u64{ .{ 5, 7 }, .{ 7, 5 }, .{ 0x8000_0000, 1 } }) |v| {
+        try list.append(gpa, .{ .regs = .{ v[0], v[1], 0xffff_fffe, 0, 0, 0, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:i32 #0x0
+            \\  %1 = getreg:i32 #0x8
+            \\  %2 = {0s}:flags %0, %1
+            \\  %3 = getreg:i64 #0x10
+            \\  %4 = zext:i64 %1
+            \\  %5 = add:i64 %3, %4
+            \\  setreg %5 #0x10
+            \\  pending.flags %2 #0x10{1s}
+            \\  exit.chain #0x0
+        , .{ op, grp }) });
+    };
+    return list.toOwnedSlice(gpa);
+}
