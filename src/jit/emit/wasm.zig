@@ -152,6 +152,7 @@ const F_BODY = 7;
 // Type indexes.
 const T_ENTRY = 0;
 const T_BODY = 6;
+const T_HELPER = 9;
 
 const W = struct {
     gpa: Allocator,
@@ -1215,12 +1216,19 @@ const E = struct {
             },
             .@"call.helper" => {
                 try w.get(0);
-                try w.i64c(i.aux);
+                if (e.opts.cells == 0) try w.i64c(i.aux);
                 try e.val64(i.a);
                 try e.val64(i.b);
                 try e.val64(i.c);
                 try e.flushRegs();
-                try w.call(F_HELPER);
+                if (e.opts.cells != 0) {
+                    // Straight through h9's table, which the module has
+                    // when chaining: ctx.helpers[aux] is a slot in it.
+                    try w.get(0);
+                    try w.memop(0x28, ctx.off.helpers);
+                    try w.memop(0x28, i.aux * 4); // a wasm32 function pointer
+                    try w.bytes(&.{ 0x11, T_HELPER, 0 }); // call_indirect
+                } else try w.call(F_HELPER);
                 if (t == .none) try w.byte(0x1A);
                 try e.loadRegs();
             },
@@ -2407,6 +2415,7 @@ fn module(gpa: Allocator, bodies: []const []const u8, n: usize, opts: Options, o
         &.{ 2, I32, I32, 1, I32 }, // body
         &.{ 5, I32, I64, I32, I64, I64, 1, I32 }, // slow_cas
         &.{ 5, I32, I64, I32, I64, I64, 0 }, // ext
+        &.{ 4, I32, I64, I64, I64, 1, I64 }, // a HelperFn, through the table
     };
     try sec.uleb(types.len);
     for (types) |t| {
