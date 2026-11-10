@@ -585,7 +585,9 @@ pub fn emit(gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc_mod.All
 }
 
 pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayList(u8)) EmitError!emitter.Code {
-    var p = regalloc.plan(gpa, r, host, null) catch |err| return switch (err) {
+    const extend = try lazyExtend(gpa, r);
+    defer gpa.free(extend);
+    var p = regalloc.planExtended(gpa, r, host, null, extend) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.TooLarge => error.TooLarge,
     };
@@ -596,7 +598,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     for (r.insts.items) |i| {
         if (i.op.isFp() and i.aux2 != 0) e.watch = true;
     }
-    try replan(&e, &p);
+    try replan(&e, &p, extend);
     if (p.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
     defer e.fixups.deinit(gpa);
     defer e.cold.deinit(gpa);
@@ -686,7 +688,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
 /// `virtual`): those kept in EFLAGS (deferIcmp, deferNzcv), and getregs
 /// of a whole chunk that read its register in place (chunkAlias), whose
 /// location becomes that register. The chunks don't change.
-fn replan(e: *E, p: *regalloc.Plan) !void {
+fn replan(e: *E, p: *regalloc.Plan, extend: []const u32) !void {
     const r = e.r;
     const n = r.insts.items.len;
     const virt = try e.gpa.alloc(bool, n);
@@ -698,13 +700,13 @@ fn replan(e: *E, p: *regalloc.Plan) !void {
         e.block = @intCast(bi);
         for (blk.start..blk.start + blk.len) |idx| {
             alias[idx] = chunkAlias(e, r, idx) orelse 0xff;
-            virt[idx] = alias[idx] != 0xff or deferIcmp(e, r, idx) or deferNzcv(e, r, idx);
+            virt[idx] = alias[idx] != 0xff or deferIcmp(e, r, idx) or deferNzcv(e, r, idx) or lazyOnly(e, r, idx);
             any = any or virt[idx];
         }
     }
     e.block = 0;
     if (!any) return;
-    var q = regalloc.plan(e.gpa, r, host, virt) catch |err| return switch (err) {
+    var q = regalloc.planExtended(e.gpa, r, host, virt, extend) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.TooLarge => error.TooLarge,
     };
@@ -758,6 +760,7 @@ fn pendMode(r: *const ir.Region, p: *const regalloc.Plan) ?i32 {
     var off: ?u64 = null;
     var kind: u64 = 0;
     for (r.insts.items) |i| if (i.op == .@"pending.flags") {
+        if (i.aux2 == 2) return null; // lazy: written at once (lazyStore)
         if (off) |o| {
             if (o != i.aux or kind != i.aux2) return null;
         } else {
@@ -1411,10 +1414,136 @@ fn branch(e: *E, cc: u8, i: ir.Inst) !void {
     }
 }
 
+// ---- lazy eflags (pending.flags aux2 = 2)
+
+/// The lazy pending.flags in `idx`'s block that uses flags op `idx`, if
+/// one does.
+fn lazyUse(r: *const ir.Region, idx: usize) ?usize {
+    const i = r.insts.items[idx];
+    if (ir.lazyKind(i.op) == null) return null;
+    for (idx + 1..r.insts.items.len) |k| {
+        const n = r.insts.items[k];
+        if (n.op == .@"pending.flags" and n.a == idx and n.aux2 == 2) return k;
+        if (n.op.isTerminator()) return null;
+    }
+    return null;
+}
+
+/// A flags op whose one use is a lazy pending.flags: it's never computed,
+/// as the record takes its operands.
+fn lazyOnly(e: *const E, r: *const ir.Region, idx: usize) bool {
+    return e.p.uses[idx] == 1 and lazyUse(r, idx) != null;
+}
+
+/// Per value, the lazy pending.flags that reads it as an operand of the
+/// flags op it names (regalloc.planExtended), or 0.
+fn lazyExtend(gpa: std.mem.Allocator, r: *const ir.Region) ![]u32 {
+    const ext = try gpa.alloc(u32, r.insts.items.len);
+    @memset(ext, 0);
+    for (r.insts.items, 0..) |i, k| {
+        if (i.op != .@"pending.flags" or i.aux2 != 2) continue;
+        const f = r.insts.items[i.a];
+        for ([_]ir.Ref{ f.a, f.b, f.c }) |o| {
+            if (o != ir.none) ext[o] = @max(ext[o], @as(u32, @intCast(k)));
+        }
+    }
+    return ext;
+}
+
+/// pending.flags `i`, lazily (aux2 = 2): ir.lazyRecord of its flags op's
+/// operands, stored at once at aux + 4.
+fn lazyStore(e: *E, r: *const ir.Region, i: ir.Inst) !void {
+    const f = r.insts.items[i.a];
+    const ft = r.insts.items[f.a].ty;
+    const kind = ir.lazyKind(f.op).?;
+    const size: u32 = ft.bits() / 8;
+    const d: i32 = std.math.cast(i32, i.aux + 4) orelse return error.Unsupported;
+    // A chunk over the record goes out first and comes back after.
+    var over: regalloc.ChunkSet = 0;
+    for (e.p.chunks, 0..) |c, k| {
+        if (i.aux + 4 < c.off + c.bytes and c.off < i.aux + 20) over |= @as(regalloc.ChunkSet, 1) << @intCast(k);
+    }
+    try e.writeback(over & e.dirty);
+    e.dirty &= ~over;
+    if (f.a != ir.none) try e.ldVal(RAX, f.a);
+    if (f.b != ir.none) try e.ldVal(RCX, f.b);
+    if (f.c != ir.none) try e.ldVal(RDX, f.c);
+    try e.ldCtx(R10, ctx.off.cpu);
+    const hdr: u32 = @intFromEnum(kind) | size << 8;
+    // r11 = the carry in: c's CF (adc, sbb), or b's (inc and dec keep it).
+    const cin: ?u8 = switch (f.op) {
+        .@"eflags.adc", .@"eflags.sbb" => RDX,
+        .@"eflags.inc", .@"eflags.dec" => RCX,
+        else => null,
+    };
+    if (cin) |c| {
+        try e.rr(false, &.{0x8b}, R11, c); // mov r11d, c
+        try e.aluImm(false, 4, R11, 1);
+        try e.rr(false, &.{0x8b}, RDX, R11); // mov edx, r11d
+        try e.shiftImm(false, 4, RDX, 16);
+        try e.aluImm(false, 1, RDX, @bitCast(hdr));
+        try e.rm(false, &.{0x89}, RDX, R10, d);
+    } else try storeImm32(e, d, hdr);
+    switch (kind) {
+        .add, .sub => {
+            try e.rm(false, &.{0x89}, RAX, R10, d + 4);
+            try e.rm(false, &.{0x89}, RCX, R10, d + 8);
+            const opc: u8 = if (kind == .add) 0x03 else 0x2b; // add/sub r32, r/m32
+            try e.rr(false, &.{0x8b}, RDX, RAX);
+            try e.rr(false, &.{opc}, RDX, RCX);
+            if (cin != null) try e.rr(false, &.{opc}, RDX, R11);
+        },
+        .logic => {
+            try storeImm32(e, d + 4, 0);
+            try storeImm32(e, d + 8, 0);
+            try e.rr(false, &.{0x8b}, RDX, RAX);
+        },
+        .inc, .dec => {
+            try e.rm(false, &.{0x89}, RAX, R10, d + 4);
+            try storeImm32(e, d + 8, 1);
+            try e.rr(false, &.{0x8b}, RDX, RAX);
+            try e.aluImm(false, if (kind == .inc) 0 else 5, RDX, 1);
+        },
+        .shl, .shr => {
+            try e.rm(false, &.{0x89}, RAX, R10, d + 4);
+            try storeImm32(e, d + 8, 0);
+            try e.rr(false, &.{0x8b}, RDX, RCX);
+        },
+        .mul => {
+            try e.rr(false, &.{0x8b}, RDX, RAX);
+            try e.aluImm(false, 4, RDX, 1);
+            try e.rm(false, &.{0x89}, RDX, R10, d + 4);
+            try storeImm32(e, d + 8, 0);
+            try e.rr(false, &.{0x8b}, RDX, RCX);
+        },
+        .none => unreachable,
+    }
+    switch (size) {
+        1 => try e.bs(&.{ 0x0f, 0xb6, 0xd2 }), // movzx edx, dl
+        2 => try e.bs(&.{ 0x0f, 0xb7, 0xd2 }), // movzx edx, dx
+        else => {},
+    }
+    try e.rm(false, &.{0x89}, RDX, R10, d + 12);
+    for (e.p.chunks, 0..) |_, k| {
+        if (over & (@as(regalloc.ChunkSet, 1) << @intCast(k)) != 0) try e.chunkAccess(k, false);
+    }
+}
+
+/// mov dword [r10+d], imm.
+fn storeImm32(e: *E, d: i32, imm: u32) !void {
+    try e.rm(false, &.{0xc7}, 0, R10, d);
+    try e.d32(imm);
+}
+
 /// The ops kept in EFLAGS (deferIcmp, deferNzcv), the pending.flags and
 /// brcond that use them, and nothing else (false).
 fn inFlags(e: *E, r: *const ir.Region, idx: usize) !bool {
     const i = r.insts.items[idx];
+    if (lazyOnly(e, r, idx)) return true; // lazyStore reads its operands
+    if (i.op == .@"pending.flags" and i.aux2 == 2) {
+        try lazyStore(e, r, i);
+        return true;
+    }
     switch (i.op) {
         .icmp, .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic" => {
             if (!(if (i.op == .icmp) deferIcmp(e, r, idx) else deferNzcv(e, r, idx))) return false;

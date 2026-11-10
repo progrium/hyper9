@@ -882,5 +882,26 @@ pub fn generatePending(gpa: std.mem.Allocator) ![]Case {
         \\b3:
         \\  exit.chain #0x4
     ) });
+    // Lazy eflags (aux2 = 2): the record of each kind's operands, at
+    // each width, written at 0x1c over a word of other bits. The carry ops
+    // take theirs from flags with CF set; the flags op has a second use
+    // in half of them, so it's computed too.
+    for ([_][]const u8{ "i8", "i16", "i32" }) |t| for ([_][]const u8{ "add", "sub", "adc", "sbb", "logic", "inc", "dec", "shl", "shr", "mul" }) |op| for (0..2) |twice| {
+        const carry = std.mem.eql(u8, op, "adc") or std.mem.eql(u8, op, "sbb");
+        const one = std.mem.eql(u8, op, "logic");
+        const keeps = std.mem.eql(u8, op, "inc") or std.mem.eql(u8, op, "dec");
+        const args = if (carry) "%0, %1, %3" else if (one) "%0" else if (keeps) "%0, %3" else "%1, %0";
+        try list.append(gpa, .{ .regs = .{ 0xffff_ff85, 0x7f_ff93, 0, 0xdead_beef_ffff_ffff, 0x1111_2222_3333_4444, 0x5555_6666_7777_8888, 0, 0 }, .text = try std.fmt.allocPrint(gpa,
+            \\b0:
+            \\  %0 = getreg:{0s} #0x0
+            \\  %1 = getreg:{0s} #0x8
+            \\  %2 = const:i32 #0x8d5
+            \\  %3 = eflags.unpack:flags %2
+            \\  %4 = eflags.{1s}:flags {2s}
+            \\  pending.flags %4 #0x18 @0x2
+            \\  {3s}
+            \\  exit.chain #0x0
+        , .{ t, op, args, if (twice == 1) "%6 = eflags.pack:i32 %4\n  setreg %6 #0x10" else "%6 = const:i32 #0x0" }) });
+    };
     return list.toOwnedSlice(gpa);
 }
