@@ -1,6 +1,7 @@
 //! The emulator speed benchmark behind SPEC.md's "Limits and selection":
-//! a 2-instruction loop of 10⁹ iterations, and 10⁶ one-byte pwrite round
-//! trips, for arm64 and amd64 on every backend built in that can run them.
+//! a 2-instruction loop of 10⁹ iterations, 10⁶ one-byte pwrite round
+//! trips, and 10⁶ _nsec calls (the cost of a system call itself), for
+//! arm64 and amd64 on every backend built in that can run them.
 //! zig build bench builds it with ReleaseFast and runs it.
 //!
 //! Then the compute benchmarks (tests/bench/*.c: fib, sieve, md5, qsort,
@@ -81,6 +82,36 @@ const syscall_amd64 = [_]u8{
     'x',
 };
 
+/// _nsec() 10⁶ times, then exits(nil): a system call that doesn't touch
+/// the host beyond reading its clock, so the time is the emulator's exit
+/// and re-entry.
+const nsec_arm64 = words(&.{
+    0xd100c3ff, // sub  sp, sp, #48
+    0xd2884813, // mov  x19, #0x4240
+    0xf2a001f3, // movk x19, #0xf, lsl #16
+    // loop:
+    0xd28006a0, // mov  x0, #53            _NSEC
+    0xd4000001, // svc  #0
+    0xf1000673, // subs x19, x19, #1
+    0x54ffffa1, // b.ne loop
+    0xf90007ff, // str  xzr, [sp, #8]      nil
+    0xd2800100, // mov  x0, #8             EXITS
+    0xd4000001, // svc  #0
+});
+
+const nsec_amd64 = [_]u8{
+    0x48, 0x83, 0xec, 0x30, // subq  $0x30, %rsp
+    0x41, 0xbc, 0x40, 0x42, 0x0f, 0x00, // movl  $1000000, %r12d
+    // loop:
+    0xbd, 0x35, 0x00, 0x00, 0x00, // movl  $53, %ebp          _NSEC
+    0x0f, 0x05, // syscall
+    0x49, 0xff, 0xcc, // decq  %r12
+    0x75, 0xf4, // jne   loop
+    0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)       nil
+    0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
+    0x0f, 0x05, // syscall
+};
+
 comptime {
     // adr's and leaq's displacements point at the trailing "x".
     // adr is at 0x14 with a +0x34 offset; leaq ends at 0x1a with +0x33.
@@ -140,6 +171,8 @@ const cases = [_]Case{
     .{ .name = "loop", .arch = .i386, .text = &loop_386 },
     .{ .name = "pwrite", .arch = .arm64, .text = &syscall_arm64 },
     .{ .name = "pwrite", .arch = .amd64, .text = &syscall_amd64 },
+    .{ .name = "nsec", .arch = .arm64, .text = &nsec_arm64 },
+    .{ .name = "nsec", .arch = .amd64, .text = &nsec_amd64 },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -163,6 +196,8 @@ pub fn main(init: std.process.Init) !void {
         try w.print("{s: <7} {t: <6} {s: <7} {d: >7.2}s  ", .{ c.name, c.arch, tierLabel(&lb, kind, tier), s });
         if (std.mem.eql(u8, c.name, "loop")) {
             try w.print("{d:.2} G instructions/s\n", .{2 * loop_iters / s / 1e9});
+        } else if (std.mem.eql(u8, c.name, "nsec")) {
+            try w.print("{d:.0} ns per system call\n", .{s * 1e9 / syscall_iters});
         } else {
             try w.print("{d:.2} µs per round trip\n", .{s * 1e6 / syscall_iters});
         }
