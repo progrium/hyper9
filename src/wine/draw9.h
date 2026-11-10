@@ -36,6 +36,20 @@ struct d9_conn {
     int n;
 };
 
+/* A channel descriptor from its name, as strtochan(2): "x8r8g8b8". */
+static inline unsigned int d9_strtochan(const char *s)
+{
+    static const char names[] = "rgbkamx";
+    unsigned int c = 0;
+    const char *t;
+
+    for (; s[0] && s[1]; s += 2) {
+        if (!(t = strchr(names, s[0])) || s[1] < '1' || s[1] > '8') return 0;
+        c = c << 8 | D9_CHAN(t - names, s[1] - '0');
+    }
+    return c;
+}
+
 static inline int d9_dx(struct d9_rect r) { return r.maxx - r.minx; }
 static inline int d9_dy(struct d9_rect r) { return r.maxy - r.miny; }
 

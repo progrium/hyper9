@@ -1729,61 +1729,79 @@ fn hostHasHvf(b: *std.Build) bool {
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
 }
 
-/// The steps behind `zig build wine` (design/wine-draw.md).
+/// The steps behind `zig build wine` (design/wine-draw.md): winedraw for
+/// amd64 Wine and for 386 Wine, which the browser's Wine demo runs.
 fn addWine(b: *std.Build, step: *std.Build.Step) void {
     const inc = ".local/src/wine/include";
     b.build_root.handle.access(b.graph.io, inc ++ "/wine/gdi_driver.h", .{}) catch {
         step.dependOn(&b.addFail(inc ++ " is missing; run scripts/fetch.sh wine").step);
         return;
     };
-    const zig = b.graph.zig_exe;
-    // winedraw.so needs win32u.so, which Wine provides: an empty library
-    // of that name makes the link list it (src/wine/win32u_stub.c).
-    const stub = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-linux-musl", "-shared", "-fPIC", "-Wl,-soname,win32u.so", "-o" });
-    const stub_so = stub.addOutputFileArg("win32u.so");
-    stub.addFileArg(b.path("src/wine/win32u_stub.c"));
-
-    const so = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-linux-musl", "-shared", "-fPIC", "-O2", "-Wall", "-DWINE_UNIX_LIB", "-D__WINESRC__", "-Wl,-soname,winedraw.so", "-Wl,-rpath,$ORIGIN" });
-    so.addPrefixedDirectoryArg("-I", b.path("src/wine"));
-    so.addPrefixedDirectoryArg("-I", b.path(inc));
-    so.addArg("-o");
-    const so_out = so.addOutputFileArg("winedraw.so");
-    so.addFileArg(b.path("src/wine/winedraw.c"));
-    so.addArg("-Wl,--no-as-needed");
-    so.addFileArg(stub_so);
-    so.addFileInput(b.path("src/wine/draw9.h"));
-    so.addFileInput(b.path("src/wine/unixlib.h"));
-
-    // The PE side links no C runtime, only kernel32 (src/wine/dllmain.c).
-    const obj = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-windows-gnu", "-c", "-O2", "-Wall" });
-    obj.addPrefixedDirectoryArg("-I", b.path("src/wine"));
-    obj.addArg("-o");
-    const obj_out = obj.addOutputFileArg("dllmain.o");
-    obj.addFileArg(b.path("src/wine/dllmain.c"));
-    obj.addFileInput(b.path("src/wine/unixlib.h"));
-    const dll = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-windows-gnu", "-shared", "-nostdlib", "-Wl,--entry=winedraw_entry", "-o" });
-    // Named as installed: Wine finds a builtin's file by the name in its
-    // export directory, which the linker takes from the output's.
-    const dll_out = dll.addOutputFileArg("winedraw.drv");
-    dll.addFileArg(obj_out);
-    dll.addArg("-lkernel32");
     const builtin_tool = b.addExecutable(.{
         .name = "winebuiltin",
         .root_module = b.createModule(.{ .root_source_file = b.path("tools/winebuiltin.zig"), .target = b.graph.host }),
     });
-    const mark = b.addRunArtifact(builtin_tool);
-    mark.addFileArg(dll_out);
-    const drv_out = mark.addOutputFileArg("winedraw.drv");
-
-    const exe = b.addSystemCommand(&.{ zig, "cc", "-target", "x86_64-windows-gnu", "-O2", "-Wall", "-o" });
-    const exe_out = exe.addOutputFileArg("wdtest.exe");
-    exe.addFileArg(b.path("tests/fixtures/wine/wdtest.c"));
-    exe.addArgs(&.{ "-luser32", "-lgdi32" });
-
-    step.dependOn(&b.addInstallFileWithDir(so_out, .{ .custom = "wine/x86_64-unix" }, "winedraw.so").step);
-    step.dependOn(&b.addInstallFileWithDir(drv_out, .{ .custom = "wine/x86_64-windows" }, "winedraw.drv").step);
-    step.dependOn(&b.addInstallFileWithDir(exe_out, .{ .custom = "fixtures/wine" }, "wdtest.exe").step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = builtin_tool.root_module })).step);
+    const Arch = struct { unix: []const u8, pe: []const u8, dir: []const u8, entry: []const u8 };
+    const arches = [_]Arch{
+        .{ .unix = "x86_64-linux-musl", .pe = "x86_64-windows-gnu", .dir = "x86_64", .entry = "winedraw_entry" },
+        // stdcall decorates the entry point's name on 386.
+        .{ .unix = "x86-linux-musl", .pe = "x86-windows-gnu", .dir = "i386", .entry = "winedraw_entry@12" },
+    };
+    for (arches) |a| {
+        const zig = b.graph.zig_exe;
+        // winedraw.so needs win32u.so, which Wine provides: an empty library
+        // of that name makes the link list it (src/wine/win32u_stub.c).
+        const stub = b.addSystemCommand(&.{ zig, "cc", "-target", a.unix, "-shared", "-fPIC", "-Wl,-soname,win32u.so", "-o" });
+        const stub_so = stub.addOutputFileArg("win32u.so");
+        stub.addFileArg(b.path("src/wine/win32u_stub.c"));
+
+        const so = b.addSystemCommand(&.{ zig, "cc", "-target", a.unix, "-shared", "-fPIC", "-O2", "-Wall", "-DWINE_UNIX_LIB", "-D__WINESRC__", "-Wl,-soname,winedraw.so", "-Wl,-rpath,$ORIGIN" });
+        so.addPrefixedDirectoryArg("-I", b.path("src/wine"));
+        so.addPrefixedDirectoryArg("-I", b.path(inc));
+        so.addArg("-o");
+        const so_out = so.addOutputFileArg("winedraw.so");
+        so.addFileArg(b.path("src/wine/winedraw.c"));
+        so.addArg("-Wl,--no-as-needed");
+        so.addFileArg(stub_so);
+        so.addFileInput(b.path("src/wine/draw9.h"));
+        so.addFileInput(b.path("src/wine/unixlib.h"));
+
+        // The PE side links no C runtime, only kernel32 (src/wine/dllmain.c).
+        const obj = b.addSystemCommand(&.{ zig, "cc", "-target", a.pe, "-c", "-O2", "-Wall" });
+        obj.addPrefixedDirectoryArg("-I", b.path("src/wine"));
+        obj.addArg("-o");
+        const obj_out = obj.addOutputFileArg("dllmain.o");
+        obj.addFileArg(b.path("src/wine/dllmain.c"));
+        obj.addFileInput(b.path("src/wine/unixlib.h"));
+        const dll = b.addSystemCommand(&.{ zig, "cc", "-target", a.pe, "-shared", "-nostdlib", b.fmt("-Wl,--entry={s}", .{a.entry}), "-o" });
+        // Named as installed: Wine finds a builtin's file by the name in its
+        // export directory, which the linker takes from the output's.
+        const dll_out = dll.addOutputFileArg("winedraw.drv");
+        dll.addFileArg(obj_out);
+        dll.addArg("-lkernel32");
+        const mark = b.addRunArtifact(builtin_tool);
+        mark.addFileArg(dll_out);
+        const drv_out = mark.addOutputFileArg("winedraw.drv");
+
+        const exe = b.addSystemCommand(&.{ zig, "cc", "-target", a.pe, "-O2", "-Wall", "-o" });
+        const exe_out = exe.addOutputFileArg("wdtest.exe");
+        exe.addFileArg(b.path("tests/fixtures/wine/wdtest.c"));
+        exe.addArgs(&.{ "-luser32", "-lgdi32" });
+
+        step.dependOn(&b.addInstallFileWithDir(so_out, .{ .custom = b.fmt("wine/{s}-unix", .{a.dir}) }, "winedraw.so").step);
+        step.dependOn(&b.addInstallFileWithDir(drv_out, .{ .custom = b.fmt("wine/{s}-windows", .{a.dir}) }, "winedraw.drv").step);
+        step.dependOn(&b.addInstallFileWithDir(exe_out, .{ .custom = b.fmt("fixtures/wine/{s}", .{a.dir}) }, "wdtest.exe").step);
+
+        // 32-bit Wine needs a roundf that works at Windows' x87 precision,
+        // preloaded (src/wine/roundf386.c).
+        if (std.mem.eql(u8, a.dir, "i386")) {
+            const fix = b.addSystemCommand(&.{ zig, "cc", "-target", a.unix, "-shared", "-fPIC", "-O2", "-Wall", "-o" });
+            const fix_out = fix.addOutputFileArg("roundf386.so");
+            fix.addFileArg(b.path("src/wine/roundf386.c"));
+            step.dependOn(&b.addInstallFileWithDir(fix_out, .{ .custom = "wine/i386-unix" }, "roundf386.so").step);
+        }
+    }
 }
 
 /// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against

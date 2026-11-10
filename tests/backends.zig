@@ -2329,7 +2329,7 @@ fn wineEnv(root_buf: []u8, out_buf: []u8) ?struct { root: []const u8, out: []con
     const rn = std.Io.Dir.cwd().realPathFile(io, r, root_buf) catch return null;
     const on = std.Io.Dir.cwd().realPathFile(io, o, out_buf) catch return null;
     var pb: [std.fs.max_path_bytes + 64]u8 = undefined;
-    for ([_][]const u8{ "wine/x86_64-unix/winedraw.so", "wine/x86_64-windows/winedraw.drv", "fixtures/wine/wdtest.exe" }) |f| {
+    for ([_][]const u8{ "wine/x86_64-unix/winedraw.so", "wine/x86_64-windows/winedraw.drv", "fixtures/wine/x86_64/wdtest.exe" }) |f| {
         const p = std.fmt.bufPrint(&pb, "{s}/{s}", .{ out_buf[0..on], f }) catch return null;
         std.Io.Dir.cwd().access(io, p, .{}) catch return null;
     }
@@ -2384,7 +2384,7 @@ test "a Wine program draws on the window through winedraw, and gets clicks and k
         \\wineboot -i >/dev/null 2>&1
         \\wine reg add 'HKCU\Software\Wine\Drivers' /v Graphics /d draw /f >/dev/null 2>&1
         \\wineserver -k
-        \\cp /mnt/term/cwd/fixtures/wine/wdtest.exe /tmp/wp/drive_c/
+        \\cp /mnt/term/cwd/fixtures/wine/x86_64/wdtest.exe /tmp/wp/drive_c/
         \\wine 'c:\wdtest.exe' 2>/dev/null
         \\wineserver -k
     ;

@@ -130,9 +130,12 @@ static int conn_open(void)
     d9_alloc(&conn, id_opaque, 0, d9_refnone, D9_GREY1, 1, (struct d9_rect){ 0, 0, 1, 1 }, 0xFFFFFFFF);
     if (d9_flushbuf(&conn) < 0) goto fail;
     /* Another process's screen, or a new one. Two processes racing to make
-     * it: the loser's 'A' fails, and it uses the winner's. */
-    for (int tries = 0; tries < 2; tries++) {
-        d9_usescreen(&conn, screen_id, 0);
+     * it: the loser's 'A' fails, and it uses the winner's, which may take a
+     * moment to appear. */
+    for (int tries = 0; tries < 20; tries++) {
+        if (tries) usleep(50000);
+        /* draw checks that the screen's channel is the one we expect. */
+        d9_usescreen(&conn, screen_id, d9_strtochan(chan));
         if (d9_flushbuf(&conn) == 0) {
             conn_state = 1;
             return 0;
@@ -151,6 +154,7 @@ static int conn_open(void)
 fail:
     DTRACE("can't open draw: %s\n", strerror(errno));
     d9_close(&conn);
+    conn_state = 0; /* try again next time */
     return -1;
 }
 
@@ -273,7 +277,10 @@ static BOOL DRAW_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surfac
     struct draw_surface *s;
     int staging;
 
-    if ((previous = *surface) && previous->funcs == &draw_surface_funcs) return TRUE;
+    DTRACE("create surface %p layered %d %d,%d-%d,%d previous %p\n", hwnd, layered, (int)surface_rect->left,
+           (int)surface_rect->top, (int)surface_rect->right, (int)surface_rect->bottom, *surface);
+    if ((previous = *surface) && previous->funcs == &draw_surface_funcs && EqualRect(&previous->rect, surface_rect))
+        return TRUE;
     if (NtUserGetAncestor(hwnd, GA_PARENT) != NtUserGetDesktopWindow()) return FALSE;
 
     pthread_mutex_lock(&draw_lock);
@@ -335,7 +342,9 @@ static void DRAW_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint,
         pthread_mutex_unlock(&draw_lock);
         return;
     }
-    DTRACE("pos %p %s,%s,%s,%s after %p flags %#x visible %d\n", hwnd, "", "", "", "", insert_after, swp_flags, visible);
+    DTRACE("pos %p %d,%d-%d,%d after %p flags %#x visible %d\n", hwnd, (int)rects->visible.left,
+           (int)rects->visible.top, (int)rects->visible.right, (int)rects->visible.bottom, insert_after, swp_flags,
+           visible);
     if (!EqualRect(&w->visible, &rects->visible)) {
         w->visible = rects->visible;
         moved = 1;
@@ -408,7 +417,7 @@ static UINT DRAW_UpdateDisplayDevices(const struct gdi_device_manager *manager, 
     mode.dmPelsHeight = d9_dy(r);
     mode.dmDisplayFrequency = 60;
     manager->add_modes(&mode, 1, &mode, param);
-    DTRACE("display %dx%d\n", d9_dx(r), d9_dy(r));
+    DTRACE("display %dx%d dpi %u\n", d9_dx(r), d9_dy(r), NtUserGetSystemDpiForProcess(NULL));
     return STATUS_SUCCESS;
 }
 
