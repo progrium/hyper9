@@ -50,9 +50,8 @@ pub const Layout = struct {
     pie_base: u64,
 
     /// 47 bits on arm64 and amd64, as on amd64 Linux, which arm64's 48-bit
-    /// space also holds. i386 gets Linux's 3 GiB, below the v86 shim's
-    /// kernel at 0xF0000000 and the emulator's descriptor table at the
-    /// top (design/0105-linux-i386.md), with PIEs at 4 MiB as Linux puts them.
+    /// space also holds. i386 gets Linux's 3 GiB, below the emulator's
+    /// descriptor table at the top (design/0105-linux-i386.md), with PIEs at 4 MiB as Linux puts them.
     pub fn of(arch: vmm.Arch) Layout {
         const top: u64 = if (arch == .i386) 0xC000_0000 else 1 << 47;
         return .{

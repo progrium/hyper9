@@ -28,6 +28,14 @@ const flag_multi = 0x80;
 
 const Meta = struct { mode: u32, name: []const u8 };
 
+/// Top-level directories the 9front kernel supplies through #/ rather than
+/// the disk, which h9 binds devices onto: tools/mkroot.zig's list, made
+/// here too since the ISO doesn't carry them.
+const mount_points = [_][]const u8{
+    "bin", "boot",    "dev",  "env",  "fd",  "mnt", "mnt/temp", "mnt/term", "mnt/term/cwd", "mnt/wsys", "n",
+    "net", "net.alt", "proc", "root", "shr", "srv", "tmp",
+};
+
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const io = init.io;
@@ -70,6 +78,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer out.close(io);
     var n: usize = 0;
     try r.unpack(j, &meta, out, "", &n);
+    for (mount_points) |d| try out.createDirPath(io, d);
     std.debug.print("isoroot: {d} files into {s}\n", .{ n, argv[2] });
     return 0;
 }

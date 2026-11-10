@@ -99,7 +99,7 @@ const web_skips = [_][]const u8{
     "a proxy answering 407 exits 125 with the status",
     "an idle ws:// root pings, and a server that stops answering fails it",
     // self-host's debugger cases that write to text or read acid's frames:
-    // v86 hasn't the private text pages and breakpoint trap they need yet.
+    // the web host hasn't the private text pages and breakpoint trap they need yet.
     "/proc/n/mem reads a variable and a write to text doesn't reach a sibling",
     "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address",
     "a BRK posts sys: breakpoint",
@@ -555,13 +555,14 @@ test "devfs checks the file it opened, not the path it was given [baseline]" {
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "one\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f.orig", .data = "one\n" });
 
     // Reading (OREAD), overwriting with truncation (OWRITE|OTRUNC, through
     // the deferred ftruncate), and listing the directory (the fdopendir
     // path) all go through the refactored fsopen and still work on an
-    // in-policy file.
-    const r = try run(e, &.{ "--cwd", s.path, "--rc", "cat f && echo two >f && cat f && ls ." });
+    // in-policy file. Each backend starts from its own copy of f, as the
+    // one before it overwrote it.
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", "cp f.orig f && cat f && echo two >f && cat f && ls ." });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "one\n") != null);
@@ -1914,7 +1915,9 @@ test "acid attaches and prints registers and a stack trace [10]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, reg) != null);
     // amd64's frame shows sleep's argument, sleep(a0=0x1388)+0xe.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "\nsleep(") != null or std.mem.indexOf(u8, r.out, " sleep(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null);
+    // arm64's frame passes argc in a register, so acid shows main(argv=);
+    // 386's has both on the stack, main(argc=0x2,argv=...).
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "main(argv=") != null or std.mem.indexOf(u8, r.out, "main(argc=") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/sys/src/cmd/sleep.c:") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "warning") == null);
 }
@@ -2220,16 +2223,18 @@ test "an unhandled note kills the process with the note as its status [baseline]
     // An inner rc waits for sleep and nothing else: rc drops the wait record
     // of a background child that exits while it waits for a foreground one
     // (echo, here). The note goes out once sleep has exec'd, as before that
-    // the child is still rc, which would catch it.
+    // the child is still rc, which would catch it. The status names sleep's
+    // pid, which differs between backends, so sed drops it.
     const script =
-        \\rc -c 'sleep 1000 & wait $apid; echo $status' &
+        \\rc -c 'sleep 1000 & wait $apid; echo $status | sed ''s/^sleep [0-9]+: /sleep: /''' &
         \\w=$apid
         \\p=()
         \\while(~ $#p 0) p=`{awk 'FNR==1 && $1=="sleep" {split(FILENAME, a, "/"); print a[3]}' /proc/*/status >[2]/dev/null}
         \\echo die >/proc/$p/note
         \\wait $w
     ;
-    const r = try run(e, &.{ "--timeout", "20s", "--rc", script });
+    var tb: [16]u8 = undefined;
+    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 20_000), "--rc", script });
     defer r.deinit();
     try std.testing.expect(std.mem.indexOf(u8, r.out, "die") != null);
     try std.testing.expectEqual(0, r.code);
@@ -2518,8 +2523,13 @@ test "--net=enable allows a server [5]" {
     const addr = try std.fmt.bufPrint(&addr_buf, "tcp!127.0.0.1!{d}", .{port});
     var it = std.mem.tokenizeScalar(u8, e.backends, ',');
     while (it.next()) |backend| {
+        // The root's binaries are for -Darch's architecture, if any.
+        const argv: []const []const u8 = if (e.arch) |a|
+            &.{ e.h9, "--backend", backend, "--arch", a, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" }
+        else
+            &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" };
         var child = try std.process.spawn(io, .{
-            .argv = &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" },
+            .argv = argv,
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,

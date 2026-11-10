@@ -233,9 +233,9 @@ magics: host Linux binaries still run natively.
 ## The browser and wasm
 
 **v86.** v86 emulates a whole x86 PC in the browser, and you boot an OS on
-it. h9's [browser host](../design/0012-browser-host.md) uses v86
-differently: only its CPU core, as an h9 vmm backend, with h9 itself
-compiled to wasm and running in a Web Worker. So in a browser tab, as on
+it. h9's [browser host](../design/0012-browser-host.md) works
+differently: h9 itself is compiled to wasm and runs in a Web Worker, with its
+own 386 CPU (interpreted, and compiled to wasm when hot) and no PC around it. So in a browser tab, as on
 every other host, 9front's 386 binaries and Alpine's 386 Linux binaries
 (busybox, jq, sqlite3) run with no disk image, boot, or guest kernel. It
 needs JavaScript Promise Integration, which Chrome and Edge have.

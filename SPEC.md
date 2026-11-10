@@ -26,8 +26,8 @@ This describes h9 as built. Changes to it go through proposals in [design/](desi
   - [Implementation](#implementation)
   - [What it's for](#what-its-for)
   - [Limits and selection](#limits-and-selection)
-- [Browser host (`web`, `v86`)](#browser-host-web-v86)
-  - [The v86 backend](#the-v86-backend)
+- [Browser host (`web`)](#browser-host-web)
+  - [The 386 CPU on the web](#the-386-cpu-on-the-web)
   - [Hosts](#hosts)
 - [Guest shims and ABI](#guest-shims-and-abi)
   - [What the shim does](#what-the-shim-does)
@@ -104,7 +104,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 
 - Start and run a 9front binary as fast as a native process: no VM image, no boot, no guest kernel.
 - One invocation can hold a whole process tree (rc pipelines, servers posting to /srv, rio, and its clients).
-- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, and on the browser host, which has no CPU to run natively on, on v86 ([i386](design/0009-i386.md), [browser-host](design/0012-browser-host.md)).
+- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, including on the browser host, which has no CPU to run natively on ([i386](design/0009-i386.md), [browser-host](design/0012-browser-host.md)).
 - One host backend each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows), and a native backend for Linux x86\_64 hosts without KVM.
 - Self-hosting: the 9front compilers and mk run inside and can rebuild the 9front userland.
 
@@ -128,7 +128,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
 | Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/0019-zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
 | No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/0095-native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
-| Browser host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on v86 | One machine per Web Worker; the same build runs under Node for the tests |
+| Browser host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on h9's own CPU (h86) | One machine per Web Worker; the same build runs under Node for the tests |
 
 ## Architecture
 
@@ -146,7 +146,7 @@ pub fn create(gpa, io, want: BackendKind, opts: Options) !Backend;   // Options:
 
 // One address space per Plan 9 process. Each backend decides how to realize it:
 // the hypervisors build 4K page tables, the emulator keeps a virtual-address -> host-memory map.
-const AddressSpace = union(Kind) {             // Kind: hvf, kvm, whp, native, emu, v86
+const AddressSpace = union(Kind) {             // Kind: hvf, kvm, whp, native, emu
     pub fn destroy(self) void;                 // mapped pages belong to the caller
     pub fn map(self, va: u64, mem: []align(4096) u8, perms: Perms) !void;
     pub fn unmap(self, va: u64) void;          // the mapping map made at va; its pages stay allocated
@@ -184,7 +184,7 @@ const Exit = union(enum) { syscall, fault: Fault, breakpoint, interrupted, halte
 
 Each backend is a file under `src/vmm/` with the same method set; the unions dispatch to it. Backends not built into a given h9 are replaced by a stub whose `create` fails with `BackendNotBuilt`, so every host builds the same code.
 
-A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only, KVM the host's architecture (arm64 or amd64), WHP and native amd64 only, and only the emulator and v86 run 386.
+A backend that can't run the binary's architecture fails with `WrongArch`; HVF runs arm64 only, KVM the host's architecture (arm64 or amd64), WHP and native amd64 only, and only the emulator runs 386.
 
 `src/arch/i386.zig` holds the 386 Ureg, notify frame, and `noted` sanitizing without backend details, so a hardware backend could add 386 later with a compatibility-mode code segment and an `INT $64` gate in its shim.
 
@@ -283,6 +283,8 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
+`-Demu=zig` builds it on h9's own CPUs instead of Unicorn, ha64 for arm64 binaries and h86 for 386 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
+
 ### Scope
 
 User-mode arm64, amd64, and 386 code only. On an `SVC`, `SYSCALL`, or `INT $64`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers, and no MMU. The shim is tested only on real hypervisors.
@@ -347,9 +349,9 @@ On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loo
 
 So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds.
 
-By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86` is accepted everywhere but fails with `BackendNotBuilt` outside web builds ([browser-host](design/0012-browser-host.md)).
+By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](design/0012-browser-host.md)).
 
-## Browser host (`web`, `v86`)
+## Browser host (`web`)
 
 `zig build web` builds h9 for wasm32-wasi into `zig-out/web/` ([browser-host](design/0012-browser-host.md)). The kernel, the machine, and the CLI are the same code; what differs is underneath them. Native hosts are unchanged.
 
@@ -364,21 +366,13 @@ By default `h9` uses the host's hypervisor when it's available, and otherwise fa
 | Policy | `#C` and `#I` are always masked. `--host-cmd` is a usage error. The network is WebSockets only: `--net=outbound` (the default) and `enable` bind `#ℏ` alone at `/net`, and `disable` masks it. |
 | WebSockets | `hstream.zig`'s web branch calls `h9-web.js`'s `h9_ws_*` imports, over the runtime's `WebSocket` ([websocket-9p](design/0021-websocket-9p.md)): `ws_open` and `ws_send` return at once, `ws_opened` and `ws_recv` are Suspending, and a stream's reader is a coroutine parked in `ws_recv`, which hands over as many queued binary messages as fit. The browser does the handshake, TLS, proxies, and pongs, so `--root-header`, `--root-ca`, and `header` in `ctl` are errors, there's no keepalive, and a failed connection says only "connection failed". `--net-allow` checks a connect's name or literal address but can't check what a name resolves to, which the plan lists as a caveat. |
 
-### The v86 backend
+### The 386 CPU on the web
 
-The v86 backend (`src/vmm/v86.zig`) runs 386 binaries on v86's CPU, the only backend in web builds.
+Web builds run 386 binaries on h9's own CPU, h86 (`src/vmm/h86.zig`, through `src/vmm/zemu.zig`), the only backend there; `--backend v86`, the name of the v86 backend it replaced, is an alias of `emu`. Guest memory is an arena grown with `memory.grow` in h9's own linear memory (`src/vmm/arena.zig`), 256 MiB by default.
 
-`v86.wasm` (0.5.473, pinned in `scripts/pins.sh` with its register-block offsets, fetched by `scripts/fetch.sh`, checked by `tests/web/v86-layout.mjs`) and `h9.wasm` share one linear memory: v86 owns the low part, h9 is linked with `--import-memory` at a 16 MiB base, and guest RAM is one `allocate_memory` from v86, made after h9 is instantiated.
+T0 interprets; T1 (`src/jit/wasm_t1.zig`) counts entries to blocks and, once a vCPU has retired 2M instructions, lifts hot ones, batches them into a module (`src/jit/emit/wasm.zig`, a function per region, with chain cells and a jump-cache lookup for indirect branches), and has `h9-web.js` compile it asynchronously into table slots of h9's own function table; T0 runs until the batch is installed. `CodePages`' invalidation drops a page's regions and their slots.
 
-`src/arch/i386/shim.S`, loaded at guest-physical 0x1000, sets up 9front's GDT (kernel and user code and data, a TSS), an IDT whose every vector pushes a 386 Ureg on the kernel stack and halts, and paging with the kernel at `KZERO`.
-
-A halt ends `main_loop`, and the backend reads the Ureg from the stack; a resume writes it back, clears `in_hlt`, and jumps to the shim's restore path. An address space is a 386 page directory in guest RAM.
-
-A slice that ends without a halt is preemption: `run` builds the Ureg from v86's registers, returns the CPU to ring 0, yields to the event loop, and returns `.interrupted`. A context that halts often (a syscall every few instructions) never reaches a slice's end, so `run` also yields first once 2 ms have passed since the last yield; a Linux `sched_yield` is the kernel's `sleep(0)`, a coroutine switch here.
-
-Freed pages and executable mappings call `jit_dirty_cache`, so recycled pages never run stale compiled code.
-
-`h9-web.js` provides v86's imports: a clock, JIT glue (compile the generated module and set it in the shared table, deferring `codegen_finalize_finished` until `main_loop` returns), and stubs for ports and MMIO, which ring 3 can't reach.
+Preemption is a budget: each slice runs 64K instructions at a time, and `run` yields to the event loop once 2 ms have passed since the last yield, returning `.interrupted`; a Linux `sched_yield` is the kernel's `sleep(0)`, a coroutine switch here.
 
 ### Hosts
 
@@ -640,7 +634,7 @@ System V shared memory (`src/linux/sysvshm.zig`): `shmget`, `shmat`, `shmdt` and
 `setitimer`'s `ITIMER_REAL` and `alarm` are served by one kernel process (`src/linux/itimer.zig`) that posts `alarm` to a due process through a reference to its kernel record (`h9_kern_selfref`), waking at least every 5 ms while any timer is set and ending two seconds after the last is cleared; the CPU-time timers are accepted and never fire. `sync_file_range` is a no-op, since `fsync` does the writing.
 ### 32-bit x86
 
-With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator and on v86 ([linux-i386](design/0105-linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.
+With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator ([linux-i386](design/0105-linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.
 
 Calls come through `int 0x80` and the i386 table; `ia32.serve` in `sys.zig` joins split 64-bit arguments, maps the `*_time64` calls and the `*32`/`*64` forms onto the generic calls, and serves the multiplexers (`socketcall`, `ipc`) and the old forms (`old_mmap`, `old_select`, the 64-byte `stat`), while the generic calls read `long`s, pointers, `iovec`s, `msghdr`s, `rusage`, and `siginfo` at the process's word size.
 
@@ -1175,7 +1169,7 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 - Unit tests in Zig for the a.out loader, the page allocator, and the syscall decoders.
 - Integration tests run real 9front binaries from a pinned root tree. Each case is tagged with the proposal it proves, and skips while that proposal isn't implemented ([design/README.md](design/README.md#tests)).
 - `zig build integration` runs real binaries from the root tree through the `h9` CLI as subprocesses, so each case gets a fresh kernel and checks exit codes end to end; it skips when there's no tree. `zig build proposal -Dp=baseline` runs the baseline's demos and cases. The Lima test VMs get the tree with `scripts/lima/vm push-root`.
-- `zig build integration -Dweb` runs the same cases through `h9-node` on v86 with the 386 root; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
+- `zig build integration -Dweb` runs the same cases through `h9-node` on h86 with the 386 root; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
 - CI isn't set up yet ([ci](design/ci.md)).
 
 ## CLI
@@ -1215,7 +1209,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|native\|whp\|emu\|v86` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning; it never selects native (not a security boundary), which needs an explicit `--backend native`. `v86` runs only in web builds |
+| `--backend auto\|hvf\|kvm\|native\|whp\|emu\|v86` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning; it never selects native (not a security boundary), which needs an explicit `--backend native`. `v86` is an alias of `emu` |
 | `--arch arm64\|amd64\|386` | The architecture of the binaries to run, which also picks `/$cputype/bin`. Without it a host program runs as its header says, and a guest one as the host's architecture |
 | `--root DIR\|DIAL\|SOCKET\|URL` | The root tree: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host` for port 564, or `unix!path`), the path of a unix socket, or a `ws://` or `wss://` URL of a 9P server behind a WebSocket, whose scheme can be left off when the value isn't an existing path (`wss://`, or `ws://` for a loopback host). If omitted, use `$H9ROOT` (same forms), then the default install location (`.local/9front/root` in development builds until there's an installer), then the built-in root (`--builtin`). A path that's neither a directory nor a socket, a failed connection or attach, and a unix socket root on Windows are exit 125 |
 | `--root-spec NAME` | The attach name sent to a 9P root. Empty by default |

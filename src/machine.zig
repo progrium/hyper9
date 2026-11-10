@@ -1650,7 +1650,7 @@ pub const Machine = struct {
                     if (m.arch == .arm64 and f.access == .exec and f.addr == u.pc()) {
                         var w: [4]u8 = undefined;
                         if (l.readMem(f.addr, &w)) |_| {
-                            if (lexec.emulateIdRead(std.mem.readInt(u32, &w, .little))) |r| {
+                            if (lexec.emulateIdRead(std.mem.readInt(u32, &w, .little), l.hwcap)) |r| {
                                 if (r.rt != 31) u.arm64.r[r.rt] = r.value;
                                 u.arm64.pc += 4;
                                 vcpu.setUreg(&u);
@@ -2046,7 +2046,7 @@ pub const Machine = struct {
                 .host = .{ .ctx = j, .kill = linuxKill, .pgidOf = linuxPgid },
                 .pgid = p.pid,
                 .sid = p.pid,
-                .hwcap = lexec.hwcap(m.arch),
+                .hwcap = lexec.hwcap(m.arch, m.backend),
                 .vdso = prog.vdso,
                 .ncpu = j.ncpu,
                 .mem_limit = m.plan.memory orelse vmm.default_memory,

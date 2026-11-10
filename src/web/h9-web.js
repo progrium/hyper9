@@ -1,8 +1,8 @@
-// h9's JS host (design/0012-browser-host.md): instantiates v86.wasm and
-// h9.wasm on one memory, runs h9's coroutines on JavaScript Promise
-// Integration, and passes v86's exports to h9's v86 backend
-// (src/vmm/v86.zig). The same code runs under Node (h9-node) and in a
-// Web Worker (worker.js), with the page's side of it in createMachine.
+// h9's JS host (design/0012-browser-host.md): instantiates h9.wasm, runs
+// its coroutines on JavaScript Promise Integration, and compiles the
+// modules its JIT builds (wasmJit). The same code runs under Node
+// (h9-node) and in a Web Worker (worker.js), with the page's side of it in
+// createMachine.
 
 /** Whether this JS engine has JSPI, which h9 needs. */
 export const haveJSPI = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
@@ -20,15 +20,6 @@ export class Exit extends Error {
 /** A fatal error in h9 itself: a kernel panic, a trap or a stack overflow. */
 export class Panic extends Error {}
 
-// v86 0.5.473's function table: 900 JIT slots after its own 1024
-// (WASM_TABLE_SIZE and WASM_TABLE_OFFSET in src/rust/jit.rs). Pinned with
-// the release in scripts/pins.sh.
-const V86_TABLE_SIZE = 1924;
-const V86_TABLE_OFFSET = 1024;
-
-// v86's memory_size register, in its register block (scripts/pins.sh).
-const V86_MEMORY_SIZE = 812;
-
 const PAGE = 65536;
 
 /**
@@ -36,6 +27,19 @@ const PAGE = 65536;
  * from its import section, or 0 if it imports none.
  */
 export function importedMemoryPages(bytes) {
+  return importedMin(bytes, 2) ?? 0;
+}
+
+/**
+ * The minimum size of the function table a module imports (h9.wasm
+ * imports its own, so the JIT can grow it), or null if it imports none.
+ */
+export function importedTableSize(bytes) {
+  return importedMin(bytes, 1);
+}
+
+// The minimum of the first import of `want` kind (1 table, 2 memory).
+function importedMin(bytes, want) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let i = 8;
   const leb = () => {
@@ -55,16 +59,84 @@ export function importedMemoryPages(bytes) {
         skipName();
         const kind = b[i++];
         if (kind === 0) leb();
-        else if (kind === 1) { i++; limits(); }
-        else if (kind === 2) return limits();
+        else if (kind === 1) { i++; const m = limits(); if (want === 1) return m; }
+        else if (kind === 2) { const m = limits(); if (want === 2) return m; }
         else if (kind === 3) i += 2;
         else if (kind === 4) { i++; leb(); }
       }
-      return 0;
+      return null;
     }
     i = end;
   }
-  return 0;
+  return null;
+}
+
+/**
+ * The JIT's side of the host (src/jit/emit/wasm.zig): compiles the modules
+ * h9's JIT builds in its memory, asynchronously, and installs their
+ * regions in h9's function table. h9 calls a region there through a
+ * function pointer, and regions tail-call each other through it.
+ *
+ * - memory and table: h9's memory and the function table it imports.
+ * - exports(): h9's exports, once it's instantiated. Modules import its
+ *   jit_eval, jit_slow_load, jit_slow_store, jit_interp, jit_helper,
+ *   jit_slow_cas, and jit_ext as
+ *   they are, so no JS frame sits between a region and h9 and JSPI can
+ *   suspend through both.
+ *
+ * Returns h9's imports, and settled() for tests, a Promise for every
+ * compile started since the last call:
+ *
+ * - jit_compile(ptr, len, base, n, status): copies the module at
+ *   ptr..ptr+len, compiles it off the thread, installs its exports r0 to
+ *   r{n-1} at table slots base to base+n-1 (growing the table to fit; the
+ *   slots are null until then), and sets the i32 at `status` to 1, or to
+ *   -1 if it failed or the slots were dropped first. h9 keeps interpreting
+ *   until it sees 1.
+ * - jit_drop(base, n): nulls those slots and cancels a compile still on
+ *   its way to them. h9 unlinks the chain cells that point at them first.
+ */
+export function wasmJit({ memory, table, exports, log = console.error }) {
+  let env = null;
+  const pending = new Map(); // base -> the compile that owns it
+  let started = [];
+  const setStatus = (at, v) => { new Int32Array(memory.buffer, at >>> 0, 1)[0] = v; };
+  return {
+    jit_compile(ptr, len, base, n, status) {
+      base >>>= 0;
+      n >>>= 0;
+      if (table.length < base + n) table.grow(base + n - table.length);
+      const bytes = new Uint8Array(memory.buffer, ptr >>> 0, len >>> 0).slice();
+      const token = {};
+      pending.set(base, token);
+      started.push(WebAssembly.compile(bytes).then((mod) => {
+        if (!env) {
+          const x = exports();
+          env = { memory, table, eval: x.jit_eval, slow_load: x.jit_slow_load, slow_store: x.jit_slow_store, interp: x.jit_interp, helper: x.jit_helper, slow_cas: x.jit_slow_cas, ext: x.jit_ext };
+        }
+        return WebAssembly.instantiate(mod, { env: { ...env, base: new WebAssembly.Global({ value: 'i32' }, base) } });
+      }).then((inst) => {
+        if (pending.get(base) !== token) return setStatus(status, -1);
+        pending.delete(base);
+        for (let k = 0; k < n; k++) table.set(base + k, inst.exports[`r${k}`]);
+        setStatus(status, 1);
+      }, (e) => {
+        if (pending.get(base) === token) pending.delete(base);
+        log(`jit: ${e.message}`);
+        setStatus(status, -1);
+      }));
+    },
+    jit_drop(base, n) {
+      base >>>= 0;
+      pending.delete(base);
+      for (let k = 0; k < n >>> 0; k++) table.set(base + k, null);
+    },
+    settled() {
+      const all = started;
+      started = [];
+      return Promise.all(all);
+    },
+  };
 }
 
 // Runs fn on a later turn of the event loop. setTimeout(0) is clamped to
@@ -78,10 +150,10 @@ const nextTask = (() => {
 })();
 
 /**
- * Instantiates v86 and h9 and runs h9's main with `args`. Resolves to the
+ * Instantiates h9 and runs h9's main with `args`. Resolves to the
  * exit code.
  *
- * - h9, v86: the modules' bytes (or WebAssembly.Module).
+ * - h9: the module's bytes (or WebAssembly.Module).
  * - wasi(memory): the wasi_snapshot_preview1 imports, over `memory`.
  * - host: the console and signals, as functions:
  *   readStdin(n) -> Promise<Uint8Array|null|'cancelled'>, cancelStdin(),
@@ -92,76 +164,17 @@ const nextTask = (() => {
  *   (design/0120-browser-gfx.md); without one, --gfx fails as on a build
  *   without graphics.
  */
-export async function run({ h9, v86, wasi, host, log = console.error, stats, gfx }) {
+export async function run({ h9, wasi, host, log = console.error, stats, gfx }) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const h9mod = h9 instanceof WebAssembly.Module ? h9 : new WebAssembly.Module(h9);
-  const v86mod = v86 instanceof WebAssembly.Module ? v86 : new WebAssembly.Module(v86);
   const h9pages = importedMemoryPages(h9 instanceof WebAssembly.Module ? new Uint8Array(0) : h9);
+  // h9's own function table, which the JIT installs regions in.
+  const h9tableSize = h9 instanceof WebAssembly.Module ? null : importedTableSize(h9);
 
-  // v86, first: it owns the memory's low part (its register block, data
-  // and stack), and h9 is linked to start at 16 MiB.
-  const table = new WebAssembly.Table({ element: 'anyfunc', initial: V86_TABLE_SIZE });
-  let vx, mem;
-  const pending = [];
-  const jitImports = Object.create(null);
+  // h9's memory: wasm32's 4 GiB at most, grown by h9's allocator and the
+  // emulator's arena.
+  const mem = new WebAssembly.Memory({ initial: Math.max(h9pages, 1), maximum: 65536 });
   const str = (p, n) => new TextDecoder().decode(new Uint8Array(mem.buffer, p >>> 0, n >>> 0));
-  const none = () => 0;
-  const venv = {
-    __indirect_function_table: table,
-    microtick: () => performance.now(),
-    // No devices, so no timers to run.
-    run_hardware_timers: () => 100,
-    // The backend learns of a halt from main_loop returning.
-    cpu_event_halt: () => {},
-    stop_idling: () => {},
-    get_rand_int: () => crypto.getRandomValues(new Uint32Array(1))[0],
-    console_log_from_wasm: (p, n) => log('v86: ' + str(p, n)),
-    // A guest at ring 3 can't reach ports or MMIO.
-    io_port_read8: none, io_port_read16: none, io_port_read32: none,
-    io_port_write8: none, io_port_write16: none, io_port_write32: none,
-    mmap_read8: none, mmap_read32: none,
-    mmap_write8: none, mmap_write16: none, mmap_write32: none, mmap_write64: none, mmap_write128: none,
-    jit_clear_func: (i) => table.set(i + V86_TABLE_OFFSET, null),
-    codegen_finalize: (idx, start, flags, ptr, len) => {
-      // A Worker, and Node, may compile synchronously.
-      const code = new Uint8Array(mem.buffer, ptr >>> 0, len >>> 0).slice();
-      const inst = new WebAssembly.Instance(new WebAssembly.Module(code), { e: jitImports });
-      table.set(idx + V86_TABLE_OFFSET, inst.exports.f);
-      // v86 panics if this is called from inside codegen_finalize.
-      pending.push([idx, start, flags]);
-    },
-  };
-  const vinst = new WebAssembly.Instance(v86mod, { env: venv });
-  vx = vinst.exports;
-  mem = vx.memory;
-  jitImports.m = mem;
-  for (const k of Object.keys(vx)) if (!(k.startsWith('_') || k.startsWith('zstd') || k.endsWith('_js'))) jitImports[k] = vx[k];
-  vx.rust_init();
-  if (h9pages > mem.buffer.byteLength / PAGE) mem.grow(h9pages - mem.buffer.byteLength / PAGE);
-
-  let guest = 0, guestSize = 0;
-  const v86imports = {
-    // Guest RAM: one allocation, made once h9's heap has its start
-    // (design/0012-browser-host.md, "One memory").
-    init: (size) => {
-      size >>>= 0;
-      if (guest === 0) {
-        new Uint32Array(mem.buffer, V86_MEMORY_SIZE, 1)[0] = size;
-        guest = vx.allocate_memory(size) >>> 0;
-        guestSize = size;
-      }
-      return size <= guestSize ? guest : 0;
-    },
-    main_loop: () => {
-      vx.main_loop();
-      while (pending.length) vx.codegen_finalize_finished(...pending.shift());
-    },
-    reset_cpu: vx.reset_cpu,
-    full_clear_tlb: vx.full_clear_tlb,
-    update_state_flags: vx.update_state_flags,
-    get_eflags: vx.get_eflags,
-    jit_dirty_cache: vx.jit_dirty_cache,
-  };
 
   // Coroutines. A park is a Promise that unpark resolves; an unpark
   // before the park leaves a permit, so the park returns at once.
@@ -175,7 +188,9 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats, gfx
     fatal = e;
     finish(e instanceof Exit ? e.code : Promise.reject(e));
   };
-  let entry;
+  let entry, hx;
+  const h9table = h9tableSize === null ? null : new WebAssembly.Table({ element: 'anyfunc', initial: h9tableSize });
+  const jit = h9table && wasmJit({ memory: mem, table: h9table, exports: () => hx, log });
   const h9imports = {
     park: new WebAssembly.Suspending((id, ms) => {
       if (permits.delete(id)) return 1;
@@ -209,17 +224,19 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats, gfx
     stop_signals: () => host.stopSignals(),
     set_raw: (on) => host.setRaw(!!on),
     ...wsImports(() => mem, str),
+    ...(jit ? { jit_compile: jit.jit_compile, jit_drop: jit.jit_drop } : {}),
     ...(gfx ?? noGfx).imports(() => mem),
   };
   const wimports = wasi(mem);
   wimports.proc_exit = (code) => { throw new Exit(code); };
   const inst = new WebAssembly.Instance(h9mod, {
-    env: { memory: mem },
+    env: { memory: mem, ...(h9table ? { __indirect_function_table: h9table } : {}) },
     wasi_snapshot_preview1: wimports,
     h9: h9imports,
-    v86: v86imports,
   });
-  const hx = inst.exports;
+  hx = inst.exports;
+  // Table slots from here on are the JIT's (src/jit/wasm_t1.zig).
+  if (h9table && hx.jit_table_base) hx.jit_table_base(h9table.length);
   entry = WebAssembly.promising(hx.h9_coro_entry);
   // _start is the first coroutine, on the linker's stack.
   WebAssembly.promising(hx._start)().then(() => finish(0), die);
@@ -687,6 +704,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * - root: the root archive's URL (default root.h9a beside this file), or
  *   a ws:// or wss:// URL of a 9P server (design/0021-websocket-9p.md)
  * - memory: --memory, such as '256M'
+ * - backend: --backend: 'emu' (h9's own 386 CPU, h86, the default) or 'v86', its old name
  * - policy: see policyFlags
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
  * - tty: the terminal is one to Linux programs (isatty, termios and raw
@@ -707,7 +725,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ root, memory, policy, terminal, tty = false, gfx } = {}) {
+export async function createMachine({ root, memory, backend, policy, terminal, tty = false, gfx } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -720,7 +738,7 @@ export async function createMachine({ root, memory, policy, terminal, tty = fals
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
-      const flags = [...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
+      const flags = [...(backend ? ['--backend', backend] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       let onGfx = () => false;
       let start = {}, transfer = [];
       if (gfx) {

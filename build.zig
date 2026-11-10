@@ -336,7 +336,10 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
 }
 
-pub const Emu = enum { none, unicorn };
+/// none: no emulator. unicorn: Unicorn (GPLv2). zig: h9's own CPUs, ha64
+/// for arm64 guests and h86 for 386 (src/vcpu.zig; in progress on the vcpu
+/// branch, so it isn't usable yet).
+pub const Emu = enum { none, unicorn, zig };
 
 /// Where -Demu=unicorn gets Unicorn: the PyPI wheels' libunicorn.a, or a
 /// build from the patched source (build/unicorn.zig).
@@ -661,25 +664,24 @@ fn webTarget(b: *std.Build, eh: bool) std.Build.ResolvedTarget {
     });
 }
 
-/// Where h9.wasm's data, stack and heap start: above v86.wasm's own
-/// region in the memory they share (design/0012-browser-host.md, "One
-/// memory"). v86's data ends near 36 KiB and its stack near 9.1 MiB.
-const web_global_base = 16 << 20;
-
 const Web = struct {
     exe: *std.Build.Step.Compile,
     /// Installs everything into zig-out/web.
     install: *std.Build.Step,
 };
 
-/// h9.wasm, the JS host, v86.wasm and the demo page, installed in
+/// h9.wasm, the JS host and the demo page, installed in
 /// zig-out/web.
 fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts, gfx: Gfx) Web {
     const target = webTarget(b, false);
     var p = parts;
     p.target = target;
     p.optimize = optimize;
-    p.emu = .none;
+    // h9's own CPUs (`--backend emu`, or `v86`, its old name). The JIT
+    // tier here is the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig),
+    // not the native code cache, which zemu leaves out on the web.
+    p.emu = .zig;
+    p.jit = true;
     p.unicorn = null;
     p.host_cmd = false;
     // The browser runs 386 only (design/0087-builtin-root.md, Open issues: every
@@ -699,7 +701,9 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
         }),
     });
     exe.import_memory = true;
-    exe.global_base = web_global_base;
+    // The function table too, so h9-web.js can grow it: the JIT installs
+    // its regions there (src/jit/emit/wasm.zig).
+    exe.import_table = true;
     // The main coroutine's stack; kernel processes get their own.
     exe.stack_size = 1 << 20;
     exe.rdynamic = true;
@@ -709,26 +713,45 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     all.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dir } }).step);
     for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
-    // v86.wasm and its license, as scripts/fetch.sh left them.
-    if (b.build_root.handle.access(b.graph.io, ".local/v86/v86.wasm", .{})) {
-        all.dependOn(&b.addInstallFileWithDir(b.path(".local/v86/v86.wasm"), dir, "v86.wasm").step);
-        all.dependOn(&b.addInstallFileWithDir(b.path(".local/v86/LICENSE"), dir, "LICENSE.v86").step);
-    } else |_| all.dependOn(&b.addFail("web: no .local/v86/v86.wasm; run scripts/fetch.sh").step);
     return .{ .exe = exe, .install = all };
 }
 
-/// The 386 guest shim for the v86 backend, assembled freestanding and
-/// embedded as raw bytes, loaded at a fixed guest-physical address.
-fn shimI386(b: *std.Build) std.Build.LazyPath {
-    const obj = b.addObject(.{
-        .name = "shim_i386",
-        .root_module = b.createModule(.{
-            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86, .os_tag = .freestanding }),
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    obj.root_module.addAssemblyFile(b.path("src/arch/i386/shim.S"));
-    return b.addObjCopy(obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" }).getOutput();
+/// The compute benchmarks (tests/bench/*.c): each built as an arm64 and a
+/// 386 guest text segment, embedded in the bench as "bench_<name>_<arch>",
+/// and compiled for the host too (as bench_<name>), for the checksum each
+/// guest run must match.
+const compute_benches = [_][]const u8{ "fib", "sieve", "md5", "qsort", "fp" };
+
+fn addComputeBenches(b: *std.Build, bench: *std.Build.Step.Compile) void {
+    const flags = &.{ "-O2", "-ffreestanding", "-fno-builtin", "-ffp-contract=off", "-fno-stack-protector", "-fno-pic", "-fno-asynchronous-unwind-tables" };
+    const arches = [_]struct { name: []const u8, query: std.Target.Query, ld: []const u8 }{
+        .{ .name = "arm64", .query = .{ .cpu_arch = .aarch64, .os_tag = .freestanding }, .ld = "tests/bench/link_arm64.ld" },
+        // SSE2 for doubles, so they round as the host's do (x87 keeps 80 bits).
+        .{ .name = "386", .query = .{ .cpu_arch = .x86, .os_tag = .freestanding, .cpu_model = .{ .explicit = &std.Target.x86.cpu.pentium4 } }, .ld = "tests/bench/link_386.ld" },
+    };
+    for (compute_benches) |name| {
+        for (arches) |a| {
+            const exe = b.addExecutable(.{
+                .name = b.fmt("bench-{s}-{s}", .{ name, a.name }),
+                .root_module = b.createModule(.{
+                    .target = b.resolveTargetQuery(a.query),
+                    .optimize = .ReleaseFast,
+                    .pic = false,
+                    .strip = true,
+                }),
+            });
+            exe.root_module.addCSourceFiles(.{ .files = &.{ "tests/bench/start.c", b.fmt("tests/bench/{s}.c", .{name}) }, .flags = flags });
+            exe.setLinkerScript(b.path(a.ld));
+            exe.entry = .{ .symbol_name = "_start" };
+            exe.pie = false;
+            exe.bundle_compiler_rt = true;
+            // The whole image: the linker scripts keep only text.
+            const bin = b.addObjCopy(exe.getEmittedBin(), .{ .format = .bin }).getOutput();
+            bench.root_module.addAnonymousImport(b.fmt("bench_{s}_{s}", .{ name, a.name }), .{ .root_source_file = bin });
+        }
+        bench.root_module.addCSourceFile(.{ .file = b.path(b.fmt("tests/bench/{s}.c", .{name})), .flags = &.{ "-O2", "-ffp-contract=off", b.fmt("-Dcompute=bench_{s}", .{name}) } });
+    }
+    bench.root_module.link_libc = true;
 }
 
 /// The value of `NAME=value` in scripts/pins.sh, without a trailing
@@ -785,6 +808,16 @@ const ModuleParts = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     emu: Emu,
+    /// With -Demu=zig: build the JIT tier, not just the interpreter.
+    jit: bool,
+    /// With -Demu=zig: run every region through the T1-against-T0 check
+    /// (src/jit/check/vmm.zig).
+    jit_check: bool,
+    /// With -Demu=zig: ir.verify each region after lifting and after opt
+    /// (opt.verify), even where the vcpu module has no runtime safety.
+    jit_verify: bool,
+    /// How src/interp/ and src/jit/ (the vcpu module) are optimized.
+    vcpu_optimize: std.builtin.OptimizeMode,
     unicorn: ?*std.Build.Module,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
@@ -814,6 +847,13 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
         .target = target,
     };
     const mod = if (exported) b.addModule("h9", opts) else b.createModule(opts);
+    // The emulator's CPUs (src/vcpu.zig), as a module of their own, so
+    // they can be optimized when the rest of h9 isn't.
+    mod.addImport("vcpu", b.createModule(.{
+        .root_source_file = b.path("src/vcpu.zig"),
+        .target = target,
+        .optimize = p.vcpu_optimize,
+    }));
     if (p.unicorn) |uc| mod.addImport("unicorn", uc);
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
     mod.addAnonymousImport("shim_amd64", .{ .root_source_file = p.shim_amd64 });
@@ -824,7 +864,6 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     // The web host's kern turns on wasm exception handling, for setjmp
     // and longjmp, and has no host commands.
     const kern = addKern(b, if (web) webTarget(b, true) else target, optimize, web, p.host_cmd and !web, gfx, exported);
-    if (web) mod.addAnonymousImport("shim_i386", .{ .root_source_file = shimI386(b) });
     if (!p.have_drawterm) {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
         kern.step.dependOn(&fail.step);
@@ -837,6 +876,9 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
 
     const options = b.addOptions();
     options.addOption(Emu, "emu", p.emu);
+    options.addOption(bool, "jit", p.jit);
+    options.addOption(bool, "jit_check", p.jit_check);
+    options.addOption(bool, "jit_verify", p.jit_verify);
     options.addOption(bool, "kern", p.have_drawterm);
     options.addOption(bool, "host_cmd", p.host_cmd);
     options.addOption([]const u8, "gfx", @tagName(gfx));
@@ -895,7 +937,15 @@ pub fn build(b: *std.Build) void {
     // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
     // while design/host-cmd rethinks them.
     const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the h9-emu release only)") orelse .none;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or zig (h9's own, in progress)") orelse .none;
+    // T0 in a Debug build runs several times slower than in a release one,
+    // enough for long integration cases to time out against Unicorn's JIT.
+    const vcpu_debug = b.option(bool, "vcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
+    const vcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !vcpu_debug) .ReleaseFast else optimize;
+    const jit_check = b.option(bool, "jit-check", "With -Demu=zig: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
+    const jit_verify = b.option(bool, "jit-verify", "With -Demu=zig: verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
+        (optimize == .Debug or optimize == .ReleaseSafe);
+    const no_jit = b.option(bool, "no-jit", "With -Demu=zig: the interpreter tier only, as on hosts that forbid generated code") orelse false;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
@@ -978,6 +1028,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .emu = emu,
+        .jit = !no_jit,
+        .jit_check = jit_check,
+        .jit_verify = jit_verify,
+        .vcpu_optimize = vcpu_optimize,
         .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),
@@ -997,7 +1051,7 @@ pub fn build(b: *std.Build) void {
     const test_mod = if (gfx == .headless) mod else addH9Module(b, parts, .headless, false);
 
     // The browser host (design/0012-browser-host.md): h9 for wasm32-wasi
-    // with its JS host, v86.wasm and a demo page, in zig-out/web.
+    // with its JS host and a demo page, in zig-out/web.
     const web_step = b.step("web", "Build the browser host into zig-out/web (design/0012-browser-host.md)");
     const web = addWeb(b, optimize, parts, web_gfx);
     web_step.dependOn(web.install);
@@ -1267,10 +1321,11 @@ pub fn build(b: *std.Build) void {
     // -Dbackends picks the backends instead, such as only `native` for a
     // quick run where there's no KVM.
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
-    // -Dweb runs them on the web host under Node instead: h9-node on the v86
-    // backend, with the root's 386 binaries (design/0012-browser-host.md).
-    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (v86, 386)") orelse false;
-    const backend_list = if (test_web) "v86" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
+    // -Dweb runs them on the web host under Node instead: h9-node on h9's
+    // own 386 CPU (h86), with the root's 386 binaries
+    // (design/0012-browser-host.md).
+    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386)") orelse false;
+    const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
         .arch = "386",
@@ -1322,13 +1377,6 @@ pub fn build(b: *std.Build) void {
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const run_integration = addIntegration(b, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
     if (!test_web) run_integration.step.dependOn(linux_fixtures);
-    if (test_web) {
-        // The pinned v86 layout, checked against v86.wasm.
-        const layout = b.addSystemCommand(&.{ "node", "tests/web/v86-layout.mjs", ".local/v86/v86.wasm" });
-        layout.setCwd(b.path("."));
-        layout.expectExitCode(0);
-        run_integration.step.dependOn(&layout.step);
-    }
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
     // 9box and a slim root around it (design/0064-multicall.md), built inside
@@ -1340,6 +1388,44 @@ pub fn build(b: *std.Build) void {
         .x86 => "386",
         else => "arm64",
     };
+    // The arm64 instruction inventory over ha64's decoder
+    // (tools/a64inv.zig): zig build a64-inventory -- PATH...
+    const a64inv = b.addExecutable(.{
+        .name = "a64inv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/a64inv.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "a64decode", .module = b.createModule(.{ .root_source_file = b.path("src/interp/a64/decode.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+            },
+        }),
+    });
+    const run_a64inv = b.addRunArtifact(a64inv);
+    run_a64inv.has_side_effects = true;
+    if (b.args) |args| run_a64inv.addArgs(args) else run_a64inv.addArg(b.pathJoin(&.{ root, "arm64" }));
+    b.step("a64-inventory", "Report the arm64 instructions in binaries (default: the root tree's arm64): zig build a64-inventory -- PATH...").dependOn(&run_a64inv.step);
+
+    // The 386 instruction inventory over h86's decoder and T0
+    // (tools/x86inv.zig): zig build x86-inventory -- PATH...
+    const x86inv = b.addExecutable(.{
+        .name = "x86inv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/x86inv.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+            },
+        }),
+    });
+    const run_x86inv = b.addRunArtifact(x86inv);
+    run_x86inv.has_side_effects = true;
+    if (b.args) |args| run_x86inv.addArgs(args) else run_x86inv.addArg(b.pathJoin(&.{ root, "386" }));
+    b.step("x86-inventory", "Report the 386 instructions in binaries (default: the root tree's 386): zig build x86-inventory -- PATH...").dependOn(&run_x86inv.step);
+
     const slim_tool = b.addExecutable(.{
         .name = "slim",
         .root_module = b.createModule(.{ .root_source_file = b.path("tools/slim.zig"), .target = b.graph.host }),
@@ -1488,6 +1574,11 @@ pub fn build(b: *std.Build) void {
     };
     const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    // h9.wasm too, so a change to the shared vmm or JIT code that breaks
+    // wasm32 (64-bit atomics, threads) is caught where it's made.
+    test_step.dependOn(&web.exe.step);
+    addVcpuTests(b, test_step, target, optimize);
+    addJitTestTools(b, test_step, target, optimize, unicorn_mod);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
@@ -1562,6 +1653,24 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_embed.step);
     }
 
+    // The arm64 JIT plan's [a64-jit] cases, through the vmm interface on
+    // T0 and T1; they skip without -Demu=zig.
+    const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/a64.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "h9", .module = mod.mod }},
+    }) });
+    if (os == .macos) {
+        addSdkPaths(b, a64_jit.root_module);
+        a64_jit.root_module.linkFramework("Hypervisor", .{});
+    }
+    linkUnicorn(a64_jit);
+    const a64_jit_run = b.addRunArtifact(a64_jit);
+    test_step.dependOn(&a64_jit_run.step);
+    b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=zig)").dependOn(&a64_jit_run.step);
+
     // The speed numbers in SPEC.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
     const bench = b.addExecutable(.{
@@ -1578,15 +1687,17 @@ pub fn build(b: *std.Build) void {
         bench.root_module.linkFramework("Hypervisor", .{});
     }
     linkUnicorn(bench);
+    addComputeBenches(b, bench);
     const run_bench = b.addRunArtifact(bench);
     run_bench.has_side_effects = true;
+    if (b.args) |a| run_bench.addArgs(a);
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
         sign.addFileArg(bench.getEmittedBin());
         run_bench.step.dependOn(&sign.step);
     }
-    b.step("bench", "Time a compute loop and pwrite round trips on every backend built in").dependOn(&run_bench.step);
+    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; -Demu=zig for T0 and T1)").dependOn(&run_bench.step);
 
     // For running the tests in a VM (scripts/lima/vm test): the backend
     // tests and the integration tests, built for the target.
@@ -1603,4 +1714,192 @@ fn hostHasHvf(b: *std.Build) bool {
         else => false,
     };
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
+}
+
+/// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against
+/// Unicorn (with -Demu=unicorn), the fuzzers, and the litmus tests.
+fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, unicorn: ?*std.Build.Module) void {
+    const vcpu = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig"), .target = target, .optimize = optimize });
+    const lockstep_step = b.step("lockstep", "Run the lockstep tests against Unicorn (needs -Demu=unicorn)");
+    const lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
+        .root_source_file = b.path("src/vmm/lockstep.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "unicorn", .module = uc }},
+    }) else null;
+    if (lockstep) |ls| {
+        const t = b.addTest(.{ .root_module = ls });
+        linkUnicorn(t);
+        lockstep_step.dependOn(&b.addRunArtifact(t).step);
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    } else lockstep_step.dependOn(&b.addFail("lockstep: needs -Demu=unicorn").step);
+
+    // The fuzzers: the region check always, lockstep with -Demu=unicorn.
+    // ReleaseSafe unless -Doptimize says otherwise: fast, and still checked.
+    const fuzz_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
+    const fuzz_vcpu = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig"), .target = target, .optimize = fuzz_optimize });
+    const fuzz_lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
+        .root_source_file = b.path("src/vmm/lockstep.zig"),
+        .target = target,
+        .optimize = fuzz_optimize,
+        .imports = &.{.{ .name = "unicorn", .module = uc }},
+    }) else null;
+    const fuzz_options = b.addOptions();
+    fuzz_options.addOption(bool, "unicorn", unicorn != null);
+    // zig build fuzz-long: both fuzzers with the region check, generated
+    // code (--native), and lockstep when Unicorn is built in, for
+    // -Dfuzz-minutes (default 60), -Dfuzz-jobs processes each (default 2),
+    // tallying divergences instead of stopping. Each job starts its seeds
+    // 2^40 apart from -Dfuzz-seed (default: from the clock).
+    const fuzz_long = b.step("fuzz-long", "Run fuzz-a64 and fuzz-x86 with the region check and --native for an hour across seeds (-Dfuzz-minutes, -Dfuzz-jobs, -Dfuzz-seed)");
+    const fuzz_minutes = b.option(u32, "fuzz-minutes", "zig build fuzz-long: how long to fuzz (default 60)") orelse 60;
+    const fuzz_jobs = b.option(u32, "fuzz-jobs", "zig build fuzz-long: processes per fuzzer (default 2)") orelse 2;
+    const fuzz_seed = b.option(u64, "fuzz-seed", "zig build fuzz-long: the first seed (default: from the clock)") orelse
+        @as(u64, @truncate(@as(u128, @bitCast(@as(i128, std.Io.Timestamp.now(b.graph.io, .real).nanoseconds)))));
+    var fuzz_exes: [2]*std.Build.Step.Compile = undefined;
+    var fuzz_i: usize = 0;
+    for ([_][]const u8{ "a64", "x86" }) |arch| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("fuzz-{s}", .{arch}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("tests/jit/fuzz_{s}.zig", .{arch})),
+                .target = target,
+                .optimize = fuzz_optimize,
+                .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
+            }),
+        });
+        exe.root_module.addOptions("fuzz_options", fuzz_options);
+        if (fuzz_lockstep) |ls| {
+            exe.root_module.addImport("lockstep", ls);
+            linkUnicorn(exe);
+        }
+        const run = b.addRunArtifact(exe);
+        run.has_side_effects = true;
+        if (b.args) |a| run.addArgs(a);
+        b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)", .{arch})).dependOn(&run.step);
+        fuzz_exes[fuzz_i] = exe;
+        fuzz_i += 1;
+    }
+    const fuzz_long_exe = b.addExecutable(.{
+        .name = "fuzz-long",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/jit/fuzz_long.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const long = b.addRunArtifact(fuzz_long_exe);
+    long.has_side_effects = true;
+    long.addArgs(&.{ "--minutes", b.fmt("{d}", .{fuzz_minutes}), "--jobs", b.fmt("{d}", .{fuzz_jobs}), "--seed", b.fmt("{d}", .{fuzz_seed}) });
+    for (fuzz_exes) |e| long.addArtifactArg(e);
+    fuzz_long.dependOn(&long.step);
+    _ = vcpu;
+
+    const litmus = b.addExecutable(.{
+        .name = "litmus",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/jit/litmus.zig"),
+            .target = target,
+            .optimize = fuzz_optimize,
+            .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
+        }),
+    });
+    const litmus_run = b.addRunArtifact(litmus);
+    litmus_run.has_side_effects = true;
+    if (b.args) |a| litmus_run.addArgs(a);
+    b.step("litmus", "Run the threading litmus tests on every tier, with their outcome tallies (-- --iters N --tier T --only NAME)").dependOn(&litmus_run.step);
+}
+
+/// The emulator's own CPUs (src/vcpu.zig): the JIT layer's unit tests,
+/// natively, and the wasm emitter's under Node when Node is installed
+/// (tests/jit/run.mjs). `zig build vcpu` runs just these. `zig build
+/// vcpu-web`, and `web-test` with it, runs the wasm emitter's in Chromium.
+fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const step = b.step("vcpu", "Run the emulator CPU and JIT tests (src/vcpu.zig), natively and under Node");
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/vcpu.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run = b.addRunArtifact(tests);
+    step.dependOn(&run.step);
+    test_step.dependOn(&run.step);
+
+    // The 386 JIT plan's [x86-jit] cases, on T0 and T1.
+    const x86 = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/x86.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/vcpu.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) }},
+    }) });
+    const x86_run = b.addRunArtifact(x86);
+    step.dependOn(&x86_run.step);
+    test_step.dependOn(&x86_run.step);
+    b.step("x86-jit", "Run the 386 JIT plan's [x86-jit] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
+
+    // h86's memory-model litmus tests: compiled code on host threads.
+    // ReleaseSafe unless -Doptimize says otherwise, so the threads race.
+    const litmus = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/jit/litmus_x86.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/vcpu.zig"),
+            .target = target,
+            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        }) }},
+    }) });
+    const litmus_run = b.addRunArtifact(litmus);
+    step.dependOn(&litmus_run.step);
+    test_step.dependOn(&litmus_run.step);
+    b.step("litmus-x86", "Run h86's memory-model litmus tests on compiled code").dependOn(&litmus_run.step);
+
+    // ha64's memory-model litmus tests: every tier on host threads. About
+    // two minutes at 5000 runs a test, so in zig build vcpu, not test.
+    const litmus_a64 = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/jit/litmus_a64.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/vcpu.zig"),
+            .target = target,
+            .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        }) }},
+    }) });
+    const litmus_a64_run = b.addRunArtifact(litmus_a64);
+    step.dependOn(&litmus_a64_run.step);
+    b.step("litmus-a64", "Run ha64's memory-model litmus tests on every tier").dependOn(&litmus_a64_run.step);
+
+    const node = b.findProgram(&.{"node"}, &.{}) catch return;
+    const runtime = b.addExecutable(.{
+        .name = "jit-runtime",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/jit/wasm_runtime.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
+            // Debug: optimizing the stand-in T0's dispatch for wasm takes minutes.
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) }},
+        }),
+    });
+    runtime.entry = .disabled;
+    runtime.rdynamic = true;
+    // Imported, as h9.wasm's is, so h9-web.js's JIT installer can grow it.
+    runtime.import_table = true;
+    const node_run = b.addSystemCommand(&.{ node, "tests/jit/run.mjs" });
+    node_run.addFileArg(runtime.getEmittedBin());
+    node_run.expectExitCode(0);
+    step.dependOn(&node_run.step);
+    test_step.dependOn(&node_run.step);
+
+    const browser_run = b.addSystemCommand(&.{ node, "tests/jit/browser.mjs" });
+    browser_run.addFileArg(runtime.getEmittedBin());
+    browser_run.setCwd(b.path("."));
+    browser_run.has_side_effects = true;
+    browser_run.expectExitCode(0);
+    b.step("vcpu-web", "Run the wasm emitter's tests in Chromium with Playwright").dependOn(&browser_run.step);
+    if (b.top_level_steps.get("web-test")) |web_test| web_test.step.dependOn(&browser_run.step);
 }

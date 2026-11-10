@@ -1,5 +1,5 @@
 //! The web host (design/0012-browser-host.md): h9 on wasm32-wasi, in a
-//! Web Worker or under Node, with v86 as its only backend.
+//! Web Worker or under Node, with h9's own 386 CPU (h86) as its backend.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -61,6 +61,5 @@ pub fn Atomic(comptime T: type) type {
 }
 
 /// The allocator for h9's own long-lived state: libc's malloc on the web
-/// host, whose heap shares the memory with v86 (design/0012-browser-host.md,
-/// "One memory").
+/// host, which is single-threaded.
 pub const gpa: std.mem.Allocator = if (enabled) std.heap.c_allocator else std.heap.smp_allocator;

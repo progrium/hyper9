@@ -2583,9 +2583,10 @@ runs about 5 times slower and amd64 about 7 times slower. The emulator runs
 guest code on one virtual CPU at a time, so CPU-bound programs don't get
 faster with more processes; blocking in the kernel still overlaps.
 
-**In a browser.** h9 also builds for WebAssembly, where the `v86` backend
-runs 386 programs; `--backend v86` is refused everywhere else
-([browser-host](design/0012-browser-host.md)).
+**In a browser.** h9 also builds for WebAssembly, where the emulator runs
+386 programs ([browser-host](design/0012-browser-host.md)). `--backend v86`,
+the browser's backend before the emulator replaced it, is another name for
+`emu`.
 
 **vCPU limits.** Each process normally has its own vCPU. On macOS the
 hypervisor allows 64; KVM usually allows 1024, fewer if h9 can open few

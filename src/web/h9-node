@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // h9 on the web host's build, under Node 24 or later (JSPI on by default):
-// the same flags as the native h9, with v86 as the backend. The host
+// the same flags as the native h9, on h9's own 386 CPU (h86). The host
 // file system is WASI's, preopened at /. design/0012-browser-host.md.
 
 import fs from 'node:fs';
@@ -68,7 +68,6 @@ let code;
 try {
   code = await run({
     h9: fs.readFileSync(new URL('h9.wasm', dir)),
-    v86: fs.readFileSync(new URL('v86.wasm', dir)),
     wasi: (memory) => {
       const imports = wasi.getImportObject().wasi_snapshot_preview1;
       // WASI needs the memory, which h9 imports rather than exports.
