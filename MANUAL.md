@@ -1672,6 +1672,22 @@ host$ h9 --root ws://localhost:8080/9p ls /
 host$ h9 --rc 'mkdir /tmp/fs && wsmount ws://localhost:8080/9p /tmp/fs && ls /tmp/fs'
 ```
 
+Sharing the host's network with a machine that has none, such as one in a
+browser tab. One h9 serves its `/net`, and the other mounts it before its
+own `/net/ws`, so `dial(2)` and `/net/tcp` go through the host, under the
+serving machine's `--net` and `--net-allow`. Here the second machine may
+only reach the listener, and still fetches from the host's port 8000:
+
+```sh
+host$ h9 --serve ws://127.0.0.1:5640/ --serve-root /net --serve-net &
+host$ h9 --net-allow 'tcp!127.0.0.1!5640' --rc 'wsmount -b ws://127.0.0.1:5640/ /net && cat /net/tcp/clone'
+```
+
+In the browser demo, add `--serve-origin` with the page's origin (and a
+`--serve-token` beyond loopback), then type the same `wsmount -b` line.
+Linux programs don't use the mount, since their sockets are devip's own
+([remote-net](design/remote-net.md) proposes that).
+
 Mounting a remote 9P server the network policy allows:
 
 ```sh
