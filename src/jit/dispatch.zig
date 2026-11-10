@@ -38,8 +38,13 @@ pub const Config = struct {
     frontend: fe.Frontend,
     emitter: emitter_mod.Emitter,
     limits: fe.Limits = .{},
-    /// Byte offset of the guest PC in the front end's Cpu.
+    /// Byte offset of the guest PC in the front end's Cpu, and its size:
+    /// 8 (a u64), or 4 (a u32, as h86's EIP).
     pc_off: usize,
+    pc_bytes: u8 = 8,
+    /// Instruction alignment: a PC off it goes to T0 (arm64's PC alignment
+    /// fault). 1 for x86.
+    pc_align: u8 = 4,
     /// Run opt.zig's passes on each region.
     optimize: bool = true,
 };
@@ -59,7 +64,8 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config, stats: ?*Stats) Result
     const rt = Runtime.of(cx);
     const c = rt.cache.?;
     const view = rt.view();
-    const pcp: *u64 = @ptrFromInt(@as(usize, @intCast(cx.cpu)) + cfg.pc_off);
+    const pc_addr = @as(usize, @intCast(cx.cpu)) + cfg.pc_off;
+    const pcp: Pc = .{ .addr = pc_addr, .wide = cfg.pc_bytes == 8 };
     var st: Stats = .{};
     defer if (stats) |s| {
         s.compiled += st.compiled;
@@ -73,9 +79,9 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config, stats: ?*Stats) Result
     defer view.code_stores = .store;
     var from: ?struct { tb: *Tb, site: u64 } = null;
     while (true) {
-        const pc = pcp.*;
+        const pc = pcp.get();
         if (@atomicLoad(u32, &cx.exit_request, .seq_cst) != 0) return .interrupted;
-        const page = codePage(view, pc) orelse {
+        const page = codePage(view, pc, cfg.pc_align) orelse {
             st.t0 += 1;
             return .t0;
         };
@@ -96,7 +102,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config, stats: ?*Stats) Result
         from = null;
         st.entries += 1;
         const e: Exit = @enumFromInt(tb.entry(cx));
-        pcp.* = cx.exit_pc;
+        pcp.set(cx.exit_pc);
         switch (e) {
             .chain => if (c.tbAt(cx.exit_info)) |t| {
                 from = .{ .tb = t, .site = cx.exit_info };
@@ -116,12 +122,26 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config, stats: ?*Stats) Result
     }
 }
 
+/// The guest PC in the Cpu, a u64 or a u32.
+const Pc = struct {
+    addr: usize,
+    wide: bool,
+
+    fn get(p: Pc) u64 {
+        if (p.wide) return @as(*const u64, @ptrFromInt(p.addr)).*;
+        return @as(*const u32, @ptrFromInt(p.addr)).*;
+    }
+    fn set(p: Pc, v: u64) void {
+        if (p.wide) @as(*u64, @ptrFromInt(p.addr)).* = v else @as(*u32, @ptrFromInt(p.addr)).* = @truncate(v);
+    }
+};
+
 /// The arena page holding the instruction at `pc`, if it's executable
-/// and aligned.
-fn codePage(view: *mem.View, pc: u64) ?u64 {
-    if (pc & 3 != 0) return null;
+/// and aligned to `pc_align`.
+fn codePage(view: *mem.View, pc: u64, pc_align: u8) ?u64 {
+    if (pc & (pc_align - 1) != 0) return null;
     const code = view.code orelse return null;
-    const host = view.translate(pc, 4, .exec) orelse return null;
+    const host = view.translate(pc, 1, .exec) orelse return null;
     return code.pageOf(@intFromPtr(host.ptr));
 }
 
@@ -167,7 +187,7 @@ fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64
     if (rd.second != cache_mod.no_page) {
         const va2 = rd.second << mem.page_shift;
         n.va2 = va2;
-        n.page2 = codePage(view, va2) orelse return error.Unsupported;
+        n.page2 = codePage(view, va2, 1) orelse return error.Unsupported;
     }
     var chains: [cache_mod.max_chains]cache_mod.Chain = undefined;
     const sites = code.chainSites();
