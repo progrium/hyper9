@@ -609,7 +609,7 @@ pub fn run(gpa: std.mem.Allocator, r: *const ir.Region, ctx: *Ctx) Error!Exit {
             }
             // Written before any way out of the block and before calls
             // (ir.zig, Op."pending.flags"); a fault writes it in leave().
-            if (pend != null and (i.op.isTerminator() or i.op == .@"call.interp" or i.op == .@"call.helper" or i.op == .copy)) {
+            if (pend != null and (i.op.isTerminator() or i.op == .@"call.interp" or (i.op == .@"call.helper" and i.aux2 & ir.helper_no_regs == 0) or i.op == .copy)) {
                 pend.?.write(cpu);
                 pend = null;
             }

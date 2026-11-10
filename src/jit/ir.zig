@@ -328,6 +328,9 @@ pub const Op = enum(u16) {
     @"call.interp" = 160,
     /// Call the runtime helper numbered aux with a, b, c (i64s); the
     /// result, if any, is an i64. The helper table is the backend's.
+    /// aux2 holds effect bits (`helper_no_regs`); 0 means the helper may
+    /// read and write any guest state, so everything is written back
+    /// before the call and reloaded after it.
     @"call.helper" = 161,
     /// A guest instruction run on the host as itself (ha64 on arm64 hosts,
     /// src/jit/a64/copy.zig), with its register fields rewritten to
@@ -527,6 +530,14 @@ pub const Op = enum(u16) {
         };
     }
 };
+
+/// call.helper's aux2: the helper reads and writes none of the Cpu bytes
+/// the region names (with getreg, setreg, pending.flags, or copy), such as
+/// an x87 helper that touches only FPU state. Emitters may then keep guest
+/// registers in host registers across the call, and pending flags stay
+/// pending. Nothing checks it: setting it on a helper that does touch
+/// those bytes is a front-end bug, and the region check catches it.
+pub const helper_no_regs: u64 = 1;
 
 pub const Ref = u32;
 pub const none: Ref = std.math.maxInt(Ref);
@@ -742,7 +753,10 @@ fn pendingIn(r: *const Region, out: []MayPend) void {
             for (r.insts.items[blk.start..end]) |i| switch (i.op) {
                 .@"pending.flags" => m = .{ .slots = .{ i.aux, null } },
                 .setreg => if (i.a < r.insts.items.len) m.drop(i.aux, byteLen(r.insts.items[i.a].ty)),
-                .@"call.interp", .@"call.helper", .copy => m = .{},
+                .@"call.interp", .copy => m = .{},
+                .@"call.helper" => if (i.aux2 & helper_no_regs == 0) {
+                    m = .{};
+                },
                 .br => if (i.aux < out.len) {
                     changed = out[@intCast(i.aux)].merge(m) or changed;
                 },
@@ -786,7 +800,10 @@ pub fn verify(r: *const Region) ?VerifyError {
                 .setreg => pending.drop(i.aux, byteLen(r.insts.items[i.a].ty)),
                 .getreg => if (pending.hits(i.aux, byteLen(i.ty)))
                     return .{ .block = b, .inst = idx, .msg = "getreg of a slot with flags pending" },
-                .@"call.interp", .@"call.helper", .copy => pending = .{},
+                .@"call.interp", .copy => pending = .{},
+                .@"call.helper" => if (i.aux2 & helper_no_regs == 0) {
+                    pending = .{};
+                },
                 else => {},
             }
             if (i.op == .load or i.op == .store) {
@@ -890,7 +907,10 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
             if (f.signed or f.rmw) return "cas takes neither signed nor rmw";
         },
         .@"call.interp" => if (i.aux >= r.handles.items.len) return "call.interp handle out of range",
-        .@"call.helper" => if (i.ty != .none and i.ty != .i64) return "call.helper gives i64 or nothing",
+        .@"call.helper" => {
+            if (i.ty != .none and i.ty != .i64) return "call.helper gives i64 or nothing";
+            if (i.aux2 & ~helper_no_regs != 0) return "unknown call.helper effect bits";
+        },
         .poll, .retire => {},
         .@"pending.flags" => {
             if (ta != .flags) return "pending.flags takes flags";
@@ -1270,4 +1290,21 @@ test "tso round-trips" {
     defer out.deinit();
     try print(&r, &out.writer);
     try std.testing.expectEqualStrings(text, out.written());
+}
+
+test "a call.helper that leaves the registers alone keeps flags pending" {
+    const gpa = std.testing.allocator;
+    const head = "b0:\n %0 = const:i32 #0x1\n %1 = nzcv.logic:flags %0\n pending.flags %1 #0x30\n";
+    // helper_no_regs: still pending, so a getreg of the slot is rejected.
+    var r = try parse(gpa, head ++ " call.helper @0x1\n %4 = getreg:i32 #0x30\n exit.chain\n");
+    defer r.deinit(gpa);
+    try std.testing.expect(verify(&r) != null);
+    // A helper that may touch them writes the flags first.
+    var r2 = try parse(gpa, head ++ " call.helper\n %4 = getreg:i32 #0x30\n exit.chain\n");
+    defer r2.deinit(gpa);
+    try std.testing.expect(verify(&r2) == null);
+    // Unknown effect bits are rejected.
+    var r3 = try parse(gpa, "b0:\n call.helper @0x2\n exit.chain\n");
+    defer r3.deinit(gpa);
+    try std.testing.expect(verify(&r3) != null);
 }

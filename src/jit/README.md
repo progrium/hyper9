@@ -56,6 +56,9 @@ other work asks the owner for changes rather than editing it.
   the slot's other bits, such as EFLAGS' DF) only on a way out, or before a
   call. Emitters may write it at once instead, which is always
   correct.
+- `call.helper` with `aux2 = ir.helper_no_regs` promises that the helper
+  touches none of the Cpu bytes the region names, so emitters may skip the
+  write-back and reload around it, and pending flags stay pending.
 - `MemFlags.same_page` is only a hint (reuse an earlier access's TLB
   lookup). Emitters still compare the page numbers, so a wrong hint is
   slow, never unsafe. Ignoring it is correct.
