@@ -642,7 +642,10 @@ test "full: insert fails until reset, which empties everything" {
 }
 
 test "vCPUs run chained code while another thread invalidates and retranslates" {
-    var c = try testCache();
+    if (builtin.cpu.arch != .x86_64 or !codemem.available()) return error.SkipZigTest;
+    // Room for every retranslation below: dropped code stays until a flush,
+    // which needs the runners stopped.
+    var c = try Cache.init(testing.allocator, 1 << 20);
     defer c.deinit();
     const n = 4;
     // A ring of 8 translations on page 9, each chaining to the next; the
@@ -672,7 +675,7 @@ test "vCPUs run chained code while another thread invalidates and retranslates" 
                 // Mid-retranslation a lookup can miss; that's an undef.
                 if (res.exit == .svc) {
                     if (r.cx.retired - before != pcs.len or r.cx.exit_pc != pcs[pcs.len - 1]) r.bad += 1;
-                    r.rounds += 1;
+                    @atomicStore(u64, &r.rounds, r.rounds + 1, .release);
                 }
             }
         }
@@ -684,21 +687,18 @@ test "vCPUs run chained code while another thread invalidates and retranslates" 
         try c.addJumpCache(&r.j);
     }
     for (&threads, &runners) |*t, *r| t.* = try std.Thread.spawn(.{}, Runner.main, .{r});
-    var drops: u32 = 0;
-    while (drops < 300) : (drops += 1) {
+    for (0..300) |_| {
         c.invalidatePage(9);
-        Ring.fill(&c) catch |e| switch (e) {
-            // The old code stays until a flush, which needs the runners
-            // stopped; this test never flushes, so stop dropping.
-            error.Full => break,
-            else => return e,
-        };
+        try Ring.fill(&c);
     }
+    // With the ring whole again, every runner gets through a round, however
+    // the threads were scheduled while it was being dropped.
+    for (&runners) |*r| while (@atomicLoad(u64, &r.rounds, .acquire) == 0) std.atomic.spinLoopHint();
     for (&runners) |*r| r.stop.store(true, .release);
     for (threads) |t| t.join();
     for (runners) |r| {
         try testing.expectEqual(@as(u64, 0), r.bad);
         try testing.expect(r.rounds > 0);
     }
-    try testing.expect(drops > 10);
+    try testing.expectEqual(@as(u64, 300 * pcs.len), c.invalidated);
 }

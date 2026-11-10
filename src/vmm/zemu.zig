@@ -66,6 +66,8 @@ pub const Vcpu = Impl.EmuVcpu;
 ///     /// as soon as it sees ctx.exit_request nonzero: at least at every
 ///     /// block, so a spinning guest sees it within one iteration.
 ///     pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit;
+///     /// Optional: frees what the Cpu owns, when its vCPU is destroyed.
+///     pub fn deinit(cpu: *Cpu) void;
 ///
 /// The ctx is a `cache.Runtime`'s (`cache.Runtime.of(ctx)`), which holds
 /// the vCPU's jump cache and the backend's code cache, null when the host
@@ -506,6 +508,9 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     };
                 }
                 if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
+                switch (s.cpu) {
+                    inline else => |*c, a| if (@hasDecl(Guest(a), "deinit")) Guest(a).deinit(c),
+                }
                 s.maps.deinit(b.gpa);
                 b.gpa.destroy(s);
             }
