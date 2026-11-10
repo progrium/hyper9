@@ -5335,6 +5335,24 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
 // 32-bit x86 Linux programs (design/0105-linux-i386.md): Alpine's x86 root
 // and the 386 fixtures on the emulator, whatever the host. With
 // -Darch=386 the cases above run them too.
+// 32-bit Wine takes a second TLS entry for %fs, beside libc's %gs, and
+// returns from its syscalls with IRET (tests/fixtures/linux/tls386.c).
+test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET returns at ring 3 [105]" {
+    try skipPending(@src().fn_name);
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
+    var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "tls386"), .{}) catch return error.SkipZigTest;
+    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--cwd", fixtures, "/mnt/term/cwd/tls386" }, null, null, 60_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
+    errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
+    try std.testing.expectEqualStrings("ok tls386\n", p.stdout);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
+}
+
 test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [105]" {
     try skipPending(@src().fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;

@@ -40,12 +40,12 @@ const trap_slots = 8;
 
 /// Where a 386 engine's GDT is, in every address space: the top page,
 /// above any user mapping (9front's stack ends at 0xDFFFF000 and a Linux
-/// process's address space at 0xC0000000). It holds the TLS segment Linux
-/// programs load %gs with (design/0105-linux-i386.md, "TLS"). Each engine has
-/// its own page, which the fill hook maps here read-only.
+/// process's address space at 0xC0000000). It holds the TLS segments Linux
+/// programs load %gs and %fs with (design/0105-linux-i386.md, "TLS"). Each
+/// engine has its own page, which the fill hook maps here read-only.
 const gdt_va: u64 = 0xFFFF_F000;
-/// Its entries: the null one, then up to Linux's TLS entry.
-const gdt_entries = 7;
+/// Its entries: the null one, then up to Linux's last TLS entry, 8.
+const gdt_entries = 9;
 
 fn open(arch: vmm.Arch) vmm.Error!*uc.uc_engine {
     const a: uc.uc_arch, const mode: uc.uc_mode = switch (arch) {
@@ -191,7 +191,7 @@ pub const Backend = struct {
             // with (see below).
             std.mem.writeInt(u64, s.gdt.?[8..16], 0x00cf9b00_0000ffff, .little);
             std.mem.writeInt(u64, s.gdt.?[16..24], 0x00cf9300_0000ffff, .little);
-            s.setTlsDesc(0);
+            for (0..sig_tls_entries) |i| s.setTlsDesc(i, 0);
             var gdtr: uc.uc_x86_mmr = .{ .selector = 0, .base = gdt_va, .limit = gdt_entries * 8 - 1, .flags = 0 };
             try check(uc.uc_reg_write(s.engine, uc.UC_X86_REG_GDTR, &gdtr));
         }
@@ -377,10 +377,13 @@ const State = struct {
     /// The vector of the last syscall exit on 386: INT $64 (9front's) or
     /// int 0x80 (Linux's).
     sys_vector: u32 = ia32.vector_syscall,
-    /// 386: this engine's GDT page (see `gdt_va`), the TLS base its entry
-    /// holds, and the %gs selector last loaded, or null to load it again.
+    /// 386: this engine's GDT page (see `gdt_va`), the bases its three TLS
+    /// entries hold, and the %fs and %gs selectors last loaded, or null to
+    /// load them again.
     gdt: ?[]align(vmm.page_size) u8 = null,
-    tls: u32 = 0,
+    tls: [sig_tls_entries]u32 = @splat(0),
+    tls_used: u8 = 0,
+    fs: ?u32 = null,
     gs: ?u32 = null,
     kicked: std.atomic.Value(bool) = .init(false),
     /// Asks the engine to stop at its next block: set by a kick and by a
@@ -538,29 +541,31 @@ const State = struct {
         s.generation = as.generation.load(.acquire);
     }
 
-    /// Sets the TLS entry's base: a flat 4 GiB, 32-bit, writable data
-    /// segment for user mode, already accessed (so the CPU never writes
-    /// the read-only page), as set_thread_area makes it.
-    fn setTlsDesc(s: *State, base: u32) void {
+    /// Sets TLS entry `sig_tls_entry + i`'s base: a flat 4 GiB, 32-bit,
+    /// writable data segment for user mode, already accessed (so the CPU
+    /// never writes the read-only page), as set_thread_area makes it.
+    fn setTlsDesc(s: *State, i: usize, base: u32) void {
         const g = s.gdt orelse return;
         const d: u64 = 0xffff | (@as(u64, base & 0xffffff) << 16) | (@as(u64, 0xf3) << 40) | (@as(u64, 0xcf) << 48) | (@as(u64, base >> 24) << 56);
-        std.mem.writeInt(u64, g[8 * sig_tls_entry ..][0..8], d, .little);
-        s.tls = base;
-        // A loaded %gs keeps the old base until it's loaded again.
+        std.mem.writeInt(u64, g[8 * (sig_tls_entry + i) ..][0..8], d, .little);
+        s.tls[i] = base;
+        // A loaded %fs or %gs keeps the old base until it's loaded again.
+        s.fs = null;
         s.gs = null;
     }
 
-    /// Loads %gs from the Ureg, which reads its descriptor from the GDT:
-    /// the null selector, or the TLS one. Anything else would fault the
+    /// Loads %fs or %gs from the Ureg, which reads its descriptor from the
+    /// GDT: the null selector, or a TLS one. Anything else would fault the
     /// load, so it becomes null.
-    fn loadGs(s: *State, sel: u32) vmm.Error!void {
-        if (s.gs == sel) return;
-        var v: u16 = if (sel == (sig_tls_entry << 3) | 3) @intCast(sel) else 0;
-        if (uc.uc_reg_write(s.engine, uc.UC_X86_REG_GS, &v) != uc.UC_ERR_OK) {
+    fn loadSeg(s: *State, reg: c_int, last: *?u32, sel: u32) vmm.Error!void {
+        if (last.* == sel) return;
+        const tls = sel & 7 == 3 and sel >> 3 >= sig_tls_entry and sel >> 3 < sig_tls_entry + sig_tls_entries;
+        var v: u16 = if (tls) @intCast(sel) else 0;
+        if (uc.uc_reg_write(s.engine, reg, &v) != uc.UC_ERR_OK) {
             v = 0;
-            try check(uc.uc_reg_write(s.engine, uc.UC_X86_REG_GS, &v));
+            try check(uc.uc_reg_write(s.engine, reg, &v));
         }
-        s.gs = v;
+        last.* = v;
     }
 
     fn writeRegs(s: *State) vmm.Error!void {
@@ -586,7 +591,8 @@ const State = struct {
                 inline for (i386_fields, 0..) |f, i| vals[i] = @field(u, f);
                 vals[i386_fields.len] = u.flags | @as(u32, @truncate(amd64_flags_res1));
                 try writeBatch32(s.engine, &i386_regs, &vals);
-                try s.loadGs(u.gs);
+                try s.loadSeg(uc.UC_X86_REG_FS, &s.fs, u.fs);
+                try s.loadSeg(uc.UC_X86_REG_GS, &s.gs, u.gs);
             },
         }
     }
@@ -612,11 +618,15 @@ const State = struct {
                 try readBatch32(s.engine, &i386_regs, &vals);
                 inline for (i386_fields, 0..) |f, i| @field(u, f) = vals[i];
                 u.flags = vals[i386_fields.len];
-                // A Linux program loads %gs itself.
+                // A Linux program loads %fs and %gs itself.
                 var gs: u16 = 0;
                 try check(uc.uc_reg_read(s.engine, uc.UC_X86_REG_GS, &gs));
                 u.gs = gs;
                 s.gs = gs;
+                var fs: u16 = 0;
+                try check(uc.uc_reg_read(s.engine, uc.UC_X86_REG_FS, &fs));
+                u.fs = fs;
+                s.fs = fs;
             },
         }
     }
@@ -757,8 +767,9 @@ const uc_ctl_tlb_type: c_uint = uc.UC_CTL_TLB_TYPE | (1 << 26) | (1 << 30);
 // QEMU's arm64 exception numbers, as passed to UC_HOOK_INTR.
 const arm64_excp_swi = 2;
 const arm64_excp_bkpt = 7;
-// i386 Linux's TLS entry in the GDT (linux/signal.zig).
+// i386 Linux's TLS entries in the GDT (linux/signal.zig).
 const sig_tls_entry = 6;
+const sig_tls_entries = 3;
 // x86 #BP, which INT3 raises.
 const x86_vector_bp = 3;
 const arm64_nzcv: u64 = 0xf000_0000;
@@ -919,7 +930,11 @@ pub const Vcpu = struct {
                 try getFxsave(e, a, &t.fx);
                 if (a == .amd64) try check(uc.uc_reg_read(e, uc.UC_X86_REG_FS_BASE, &t.tls));
                 if (a == .amd64) try check(uc.uc_reg_read(e, uc.UC_X86_REG_GS_BASE, &t.gs));
-                if (a == .i386) t.tls = v.s.tls;
+                if (a == .i386) {
+                    t.tls = v.s.tls[0];
+                    for (&t.tls_more, v.s.tls[1..]) |*d, b| d.* = b;
+                    t.tls_used = v.s.tls_used;
+                }
             },
         }
     }
@@ -938,7 +953,11 @@ pub const Vcpu = struct {
                 try setFxsave(e, a, &t.fx);
                 if (a == .amd64) try check(uc.uc_reg_write(e, uc.UC_X86_REG_FS_BASE, &t.tls));
                 if (a == .amd64) try check(uc.uc_reg_write(e, uc.UC_X86_REG_GS_BASE, &t.gs));
-                if (a == .i386 and t.tls != v.s.tls) v.s.setTlsDesc(@truncate(t.tls));
+                if (a == .i386) {
+                    if (t.tls != v.s.tls[0]) v.s.setTlsDesc(0, @truncate(t.tls));
+                    for (t.tls_more, 1..) |b, i| if (b != v.s.tls[i]) v.s.setTlsDesc(i, @truncate(b));
+                    v.s.tls_used = t.tls_used;
+                }
             },
         }
     }

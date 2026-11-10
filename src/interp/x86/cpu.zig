@@ -4,8 +4,8 @@
 //!
 //! Segments are flat. CS, DS, ES, and SS have base 0 whatever they hold.
 //! FS and GS have a base from the selector table (`segBase`), which holds
-//! the null selector, 9front's user selectors, and Linux's TLS entry 6,
-//! whose base set_thread_area sets (`tls`).
+//! the null selector, 9front's user selectors, and Linux's three TLS
+//! entries, 6 to 8, whose bases set_thread_area sets (`tls`).
 
 const std = @import("std");
 const flags = @import("flags.zig");
@@ -19,8 +19,10 @@ pub const Seg = @import("decode.zig").Seg;
 pub const uesel: u16 = (4 << 3) | 3;
 pub const udsel: u16 = (3 << 3) | 3;
 
-/// Linux's TLS selector: GDT entry 6, RPL 3.
+/// Linux's first TLS selector: GDT entry 6, RPL 3, which libc takes for
+/// %gs. Entries 7 and 8 follow it; 32-bit Wine takes one for %fs.
 pub const tls_entry = 6;
+pub const tls_entries = 3;
 pub const tls_sel: u16 = (tls_entry << 3) | 3;
 
 /// The x87 FPU, by physical register: ST(i) is `st[(top + i) & 7]`.
@@ -79,12 +81,15 @@ pub const Cpu = struct {
     /// ES, CS, SS, DS, FS, GS.
     seg: [6]u16 = .{ udsel, uesel, udsel, udsel, 0, 0 },
     /// Each segment's base, from the selector table: zero but for FS and
-    /// GS holding the TLS selector.
+    /// GS holding a TLS selector.
     seg_base: [6]u32 = @splat(0),
     /// Segments holding the null selector, which fault on use.
     seg_null: u8 = (1 << 4) | (1 << 5),
-    /// The base of Linux's TLS segment (X86Extra.tls).
-    tls: u32 = 0,
+    /// The bases of Linux's TLS entries 6 to 8 (X86Extra.tls and
+    /// X86Extra.tls_more).
+    tls: [tls_entries]u32 = @splat(0),
+    /// Which TLS entries set_thread_area has given out (X86Extra.tls_used).
+    tls_used: u8 = 0,
     fpu: Fpu = .{},
     xmm: [8]u128 = @splat(0),
     mxcsr: u32 = 0x1f80,
@@ -170,7 +175,9 @@ pub const Cpu = struct {
             std.mem.writeInt(u16, st[8..10], v.sign_exp, .little);
         }
         @memcpy(fx.xmm[0..8], &c.xmm);
-        x.tls = c.tls;
+        x.tls = c.tls[0];
+        for (&x.tls_more, c.tls[1..]) |*d, b| d.* = b;
+        x.tls_used = c.tls_used;
     }
 
     pub fn setExtra(c: *Cpu, x: anytype) void {
@@ -193,14 +200,22 @@ pub const Cpu = struct {
         }
         @memcpy(&c.xmm, fx.xmm[0..8]);
         c.setTls(@truncate(x.tls));
+        for (x.tls_more, 1..) |b, i| c.setTlsEntry(i, @truncate(b));
+        c.tls_used = x.tls_used;
     }
 
-    /// Sets the TLS segment's base, and the base of FS or GS if either
-    /// holds its selector.
+    /// Sets the first TLS entry's base (entry 6).
     pub fn setTls(c: *Cpu, base: u32) void {
-        c.tls = base;
+        c.setTlsEntry(0, base);
+    }
+
+    /// Sets TLS entry `tls_entry + i`'s base, and the base of FS or GS if
+    /// either holds its selector.
+    pub fn setTlsEntry(c: *Cpu, i: usize, base: u32) void {
+        c.tls[i] = base;
+        const idx = tls_entry + i;
         for ([_]Seg{ .fs, .gs }) |s| {
-            if (c.seg[@intFromEnum(s)] & ~@as(u16, 3) == tls_sel & ~@as(u16, 3)) c.seg_base[@intFromEnum(s)] = base;
+            if (c.seg[@intFromEnum(s)] >> 3 == idx and c.seg[@intFromEnum(s)] & 4 == 0) c.seg_base[@intFromEnum(s)] = base;
         }
     }
 
@@ -214,7 +229,7 @@ pub const Cpu = struct {
         if (sel & 4 != 0) return error.GP;
         if (idx == 0) return if (seg == .ss) error.GP else null;
         if (idx == udsel >> 3) return 0;
-        if (idx == tls_entry and seg != .ss) return c.tls;
+        if (idx >= tls_entry and idx < tls_entry + tls_entries and seg != .ss) return c.tls[idx - tls_entry];
         return error.GP;
     }
 
@@ -275,6 +290,7 @@ test "the TLS selector gives GS its base" {
     c.setTls(0x2000);
     try std.testing.expectEqual(@as(u32, 0x2000), c.seg_base[5]);
     try std.testing.expectError(error.GP, c.loadSeg(.gs, 0x2b));
+    try std.testing.expectError(error.GP, c.loadSeg(.gs, (9 << 3) | 3));
     try std.testing.expectError(error.GP, c.loadSeg(.ss, 0));
     try c.loadSeg(.gs, 0);
     try std.testing.expect(c.seg_null & (1 << 5) != 0);
@@ -298,6 +314,8 @@ const TestExtra = struct {
     } = .{},
     tls: u64 = 0,
     gs: u64 = 0,
+    tls_more: [2]u64 = @splat(0),
+    tls_used: u8 = 0,
 };
 
 test "FXSAVE image round trip" {
@@ -309,6 +327,8 @@ test "FXSAVE image round trip" {
     x.fx.xmm[3] = 0x1234;
     x.fx.mxcsr = 0x7f80;
     x.tls = 0x5000;
+    x.tls_more = .{ 0x6000, 0x7000 };
+    x.tls_used = 3;
     c.setExtra(&x);
     try std.testing.expectEqual(@as(u3, 5), c.fpu.top);
     try std.testing.expectEqual(@as(u64, 0x0807060504030201), c.fpu.st[5].signif);
@@ -317,4 +337,21 @@ test "FXSAVE image round trip" {
     x.fx.mxcsr_mask = 0xffff;
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&x.fx), std.mem.asBytes(&y.fx));
     try std.testing.expectEqual(x.tls, y.tls);
+    try std.testing.expectEqual(x.tls_more, y.tls_more);
+    try std.testing.expectEqual(x.tls_used, y.tls_used);
+}
+
+test "each TLS entry has its own base, as 32-bit Wine's %fs and libc's %gs" {
+    var c: Cpu = .{};
+    c.setTls(0x1000);
+    c.setTlsEntry(1, 0x2000);
+    try c.loadSeg(.gs, tls_sel);
+    try c.loadSeg(.fs, tls_sel + 8);
+    try std.testing.expectEqual(@as(u32, 0x1000), c.seg_base[5]);
+    try std.testing.expectEqual(@as(u32, 0x2000), c.seg_base[4]);
+    c.setTlsEntry(1, 0x3000);
+    try std.testing.expectEqual(@as(u32, 0x3000), c.seg_base[4]);
+    try std.testing.expectEqual(@as(u32, 0x1000), c.seg_base[5]);
+    try c.loadSeg(.fs, tls_sel + 16);
+    try std.testing.expectEqual(@as(u32, 0), c.seg_base[4]);
 }
