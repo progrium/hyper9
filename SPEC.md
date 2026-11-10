@@ -283,6 +283,8 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
+`-Demu=zig` builds it on h9's own CPUs instead of Unicorn, ha64 for arm64 binaries and h86 for 386 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
+
 ### Scope
 
 User-mode arm64, amd64, and 386 code only. On an `SVC`, `SYSCALL`, or `INT $64`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers, and no MMU. The shim is tested only on real hypervisors.
