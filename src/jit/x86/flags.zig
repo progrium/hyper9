@@ -55,10 +55,16 @@ pub const State = struct {
     pending: bool = false,
     /// `Cpu.fl.bits` but the arithmetic flags, while `pending`.
     rest: ?Ref = null,
+    /// The block may have started with the flags pending (a predecessor
+    /// left them so), so `Cpu.fl.bits` can't be read here: anything that
+    /// would read it fails with `error.FlagsPending`, and the lifter
+    /// lifts again with the block's predecessors settling first.
+    entry_pending: bool = false,
 
     /// The current flags as a value.
     pub fn get(s: *State, b: *ir.Builder) !Ref {
         if (s.cur) |f| return f;
+        if (s.entry_pending) return error.FlagsPending;
         const v = try b.getreg(.i32, bits_off);
         const f = try b.un(.@"eflags.unpack", .flags, v);
         s.cur = f;
@@ -84,7 +90,7 @@ pub const State = struct {
     /// `Cpu.fl.bits` while they're pending: `settle` first.
     pub fn flush(s: *State, b: *ir.Builder) !void {
         if (!s.dirty) return;
-        if (!s.pending) {
+        if (!s.pending and !s.entry_pending) {
             // EFLAGS' other bits, for `settle`, while the slot may be read.
             const old = try b.getreg(.i32, bits_off);
             s.rest = try b.bin(.@"and", .i32, old, try b.konst(.i32, ~@as(u64, arith)));
@@ -97,10 +103,19 @@ pub const State = struct {
     /// Writes pending flags to `Cpu.fl.bits` now, so it can be read.
     pub fn settle(s: *State, b: *ir.Builder) !void {
         try s.flush(b);
-        if (!s.pending) return;
+        if (!s.pending) {
+            if (s.entry_pending) return error.FlagsPending;
+            return;
+        }
+        const rest = s.rest orelse return error.FlagsPending;
         const p = try b.un(.@"eflags.pack", .i32, s.cur.?);
-        try b.setreg(bits_off, try b.bin(.@"or", .i32, s.rest.?, p));
+        try b.setreg(bits_off, try b.bin(.@"or", .i32, rest, p));
         s.pending = false;
+    }
+
+    /// Whether `Cpu.fl.bits` may hold flags still pending here.
+    pub fn mayBePending(s: *const State) bool {
+        return s.pending or s.entry_pending;
     }
 
     /// A new block, or after something (`call.interp`) that may have
@@ -110,6 +125,7 @@ pub const State = struct {
         s.cur = null;
         s.pending = false;
         s.rest = null;
+        s.entry_pending = false;
     }
 
     /// Changes the flags in `mask` with `op` (and, or, xor) and `v`, as

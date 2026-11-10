@@ -469,8 +469,28 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
     }
     if (insns.items.len == 0) return error.Unsupported;
 
-    var l: Lifter = .{ .b = b, .insns = insns.items };
-    try l.run();
+    // Flags stay pending across the region's branches, and a block that
+    // must read EFLAGS from the Cpu needs its predecessors to settle
+    // them first: found by lifting, and lifting again with those blocks
+    // marked (each pass marks one more, so this ends).
+    const settled = try gpa.alloc(bool, insns.items.len + 1);
+    defer gpa.free(settled);
+    @memset(settled, false);
+    while (true) {
+        var l: Lifter = .{ .b = b, .insns = insns.items, .settled = settled };
+        if (l.run()) |_| return else |e| switch (e) {
+            error.FlagsPending => {
+                if (settled[l.cur_leader]) return error.Unsupported;
+                settled[l.cur_leader] = true;
+                b.r.insts.clearRetainingCapacity();
+                b.r.blocks.clearRetainingCapacity();
+                b.r.handles.clearRetainingCapacity();
+                b.cur = null;
+                b.retired = 0;
+            },
+            else => |x| return x,
+        }
+    }
 }
 
 // ---------------------------------------------------------------- lifter
@@ -495,6 +515,13 @@ const Lifter = struct {
     end: u32 = 0,
     /// Exit blocks for branches out of the region, to fill.
     pending_exits: std.ArrayList(ExitBlock) = .empty,
+    /// By instruction: its block (if it leads one) starts with EFLAGS
+    /// written, not pending, since it reads them from the Cpu.
+    settled: []const bool,
+    /// The same, by block id, for the leaders' blocks.
+    settled_blk: []bool = &.{},
+    /// The instruction leading the block being lifted.
+    cur_leader: usize = 0,
 
     const ExitBlock = struct { id: ir.BlockId, pc: u32 };
 
@@ -588,6 +615,12 @@ const Lifter = struct {
         for (0..n + 1) |k| {
             if (l.leader[k]) l.block_of[k] = try b.block();
         }
+        l.settled_blk = try gpa.alloc(bool, b.r.blocks.items.len);
+        defer gpa.free(l.settled_blk);
+        @memset(l.settled_blk, false);
+        for (0..n + 1) |k| {
+            if (l.leader[k] and l.settled[k]) l.settled_blk[l.block_of[k]] = true;
+        }
         b.begin(prologue);
         const entry: u32 = l.insns[0].pc;
         try b.poll(entry);
@@ -608,6 +641,8 @@ const Lifter = struct {
             if (l.leader[k]) {
                 if (b.cur != null) try l.endBlock(.{ .br = l.block_of[k] });
                 l.startBlock(l.block_of[k]);
+                l.cur_leader = k;
+                l.fl.entry_pending = !l.settled[k];
                 if (l.loop_head[k]) try b.poll(l.insns[k].pc);
             } else if (b.cur == null) {
                 // Unreachable code after a terminator: the scan stops
@@ -653,10 +688,15 @@ const Lifter = struct {
     fn endBlock(l: *Lifter, e: End) !void {
         try l.leave();
         switch (e) {
-            // Pending flags would stay pending into the next block, which
-            // may read them from the Cpu: written now.
+            // Pending flags stay pending into the next block, unless it
+            // reads them from the Cpu.
             .br, .brcond => {
-                try l.fl.settle(l.b);
+                const to_settled = switch (e) {
+                    .br => |id| l.settledBlock(id),
+                    .brcond => |c| l.settledBlock(c.t) or l.settledBlock(c.f),
+                    else => unreachable,
+                };
+                if (to_settled) try l.fl.settle(l.b);
                 try l.retireAll();
             },
             // An exit carries the count.
@@ -668,6 +708,10 @@ const Lifter = struct {
             .chain => |t| try l.b.exit(.@"exit.chain", t),
             .indirect => |t| try l.b.exitIndirect(t),
         }
+    }
+
+    fn settledBlock(l: *const Lifter, id: ir.BlockId) bool {
+        return id < l.settled_blk.len and l.settled_blk[id];
     }
 
     /// The block for a jump to guest PC t: its block if the region has
@@ -700,7 +744,10 @@ const Lifter = struct {
     fn guard(l: *Lifter, k: usize, c: Ref, slow_if: bool) !void {
         const b = l.b;
         try l.leave();
-        try l.fl.settle(b);
+        // The flags stay pending into `cont`, unless this guest block
+        // reads them from the Cpu.
+        if (l.settled[l.cur_leader]) try l.fl.settle(b);
+        const pend = l.fl.mayBePending();
         try l.retireAll();
         const slow = try b.block();
         const cont = try b.block();
@@ -713,6 +760,7 @@ const Lifter = struct {
         const mx = l.mx_ok;
         const es = l.es_ok;
         l.startBlock(cont);
+        l.fl.entry_pending = pend;
         l.seg_ok = ok;
         l.mx_ok = mx;
         l.es_ok = es;
@@ -2085,6 +2133,8 @@ const Lifter = struct {
         const retry = retries(i);
         const loop = if (retry) try b.block() else undefined;
         if (retry) {
+            // The loop reads the flags from the Cpu: written, not pending.
+            try l.fl.settle(b);
             try l.endBlock(.{ .br = loop });
             l.startBlock(loop);
         }
@@ -2192,8 +2242,11 @@ const Lifter = struct {
             l.fl.set(try l.sel(.flags, ok, nf, cur));
         }
         const cont = try b.block();
+        if (retry) try l.fl.settle(b);
+        const pend = l.fl.mayBePending();
         try l.endBlock(.{ .brcond = .{ .c = ok, .t = cont, .f = loop } });
         l.startBlock(cont);
+        l.fl.entry_pending = pend;
         l.count = 1;
     }
 
@@ -2213,8 +2266,11 @@ const Lifter = struct {
         const done = try b.block();
         try l.endBlock(.{ .br = loop });
         l.startBlock(loop);
+        // Pending flags, if any, stay so until the call.interp writes them.
+        l.fl.entry_pending = true;
         try b.poll(pc);
         try b.interp(handle(.rep_chunk, i.len, i.size), pc);
+        l.fl.forget();
         const ecx = try l.getR(1, 4);
         var fin = try b.icmp(.eq, ecx, try l.k32(0));
         if (i.op == .cmps or i.op == .scas) {
