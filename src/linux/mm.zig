@@ -718,8 +718,9 @@ pub const Mm = struct {
     /// (`Vma.cow`), `v.offset` its file offset,
     /// over chunks that may hold other mappings: each piece of it within
     /// one chunk and one file chunk is an overlay of the file chunk's
-    /// pages, from `pagesFor(ctx, file_chunk_index)`, which hands over a
-    /// reference the caller holds (the table's) and gets one of its own.
+    /// pages, from `pagesFor(ctx, file_chunk_index)`, which takes a
+    /// reference to them for the overlay, under the table's lock, so a
+    /// process unmapping them meanwhile can't free them.
     pub fn insertFile(m: *Mm, v: Vma, ctx: anytype, comptime pagesFor: fn (@TypeOf(ctx), u64) Error!*Pages) Error!void {
         std.debug.assert((v.shared or v.cow) and v.kind == .file and v.start % page == 0 and v.end % page == 0 and v.start < v.end and v.offset % page == 0);
         defer m.settle(false);
@@ -742,7 +743,6 @@ pub const Mm = struct {
             const c = try m.populate(at);
             try c.overlays.ensureUnusedCapacity(m.gpa, 1);
             const pg = try pagesFor(ctx, fo / chunk_size);
-            _ = pg.refs.fetchAdd(1, .acq_rel);
             var i: usize = 0;
             while (i < c.overlays.items.len and c.overlays.items[i].lo < at - cs) i += 1;
             c.overlays.insertAssumeCapacity(i, .{ .lo = at - cs, .hi = hi - cs, .pages = pg, .poff = fo % chunk_size });
@@ -777,8 +777,10 @@ pub const Mm = struct {
     /// chunks so their pages serve only it. For a file mapping, `pagesFor`
     /// gives each chunk's pages, shared with every process mapping the
     /// same part of the file; `v.start` must then sit at the file
-    /// offset's place in a chunk. An anonymous one's pages come on first
-    /// touch, as any.
+    /// offset's place in a chunk; it takes a reference to them, under the
+    /// table's lock, so a process unmapping them meanwhile can't free
+    /// them, and the chunk takes its own. An anonymous one's pages come on
+    /// first touch, as any.
     pub fn insertShared(m: *Mm, v: Vma, ctx: anytype, comptime pagesFor: ?fn (@TypeOf(ctx), u64) Error!*Pages) Error!void {
         std.debug.assert(v.shared and v.start % page == 0 and v.end % page == 0 and v.start < v.end);
         defer m.settle(false);
@@ -819,7 +821,11 @@ pub const Mm = struct {
         }
         if (pagesFor) |f| {
             ci = lo / chunk_size;
-            while (ci * chunk_size < hi) : (ci += 1) _ = try m.addChunk(ci, try f(ctx, ci));
+            while (ci * chunk_size < hi) : (ci += 1) {
+                const p = try f(ctx, ci);
+                defer m.dropRef(p);
+                _ = try m.addChunk(ci, p);
+            }
         }
     }
 

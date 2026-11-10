@@ -3626,7 +3626,9 @@ fn shmat(p: *Process, id: i32, addr: u64, flags: u32) i64 {
     var cx: Ctx = .{ .pages = pages, .first = start / mm.chunk_size };
     p.mm.insertShared(v, &cx, struct {
         fn f(x: *Ctx, ci: u64) mm.Error!*mm.Pages {
-            return x.pages[@intCast(ci - x.first)];
+            const pg = x.pages[@intCast(ci - x.first)];
+            _ = pg.refs.fetchAdd(1, .acq_rel);
+            return pg;
         }
     }.f) catch return if (addr != 0) -E.INVAL else -E.NOMEM;
     return @intCast(start);
