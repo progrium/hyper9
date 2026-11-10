@@ -1770,6 +1770,8 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     const fuzz_jobs = b.option(u32, "fuzz-jobs", "zig build fuzz-long: processes per fuzzer (default 2)") orelse 2;
     const fuzz_seed = b.option(u64, "fuzz-seed", "zig build fuzz-long: the first seed (default: from the clock)") orelse
         @as(u64, @truncate(@as(u128, @bitCast(@as(i128, std.Io.Timestamp.now(b.graph.io, .real).nanoseconds)))));
+    var fuzz_exes: [2]*std.Build.Step.Compile = undefined;
+    var fuzz_i: usize = 0;
     for ([_][]const u8{ "a64", "x86" }) |arch| {
         const exe = b.addExecutable(.{
             .name = b.fmt("fuzz-{s}", .{arch}),
@@ -1789,14 +1791,22 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
         run.has_side_effects = true;
         if (b.args) |a| run.addArgs(a);
         b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)", .{arch})).dependOn(&run.step);
-        for (0..fuzz_jobs) |j| {
-            const long = b.addRunArtifact(exe);
-            long.has_side_effects = true;
-            long.setName(b.fmt("fuzz-{s} job {d}", .{ arch, j }));
-            long.addArgs(&.{ "--native", "--keep-going", "--len", "64", "--minutes", b.fmt("{d}", .{fuzz_minutes}), "--seed", b.fmt("{d}", .{fuzz_seed +% (@as(u64, j) << 40)}) });
-            fuzz_long.dependOn(&long.step);
-        }
+        fuzz_exes[fuzz_i] = exe;
+        fuzz_i += 1;
     }
+    const fuzz_long_exe = b.addExecutable(.{
+        .name = "fuzz-long",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/jit/fuzz_long.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const long = b.addRunArtifact(fuzz_long_exe);
+    long.has_side_effects = true;
+    long.addArgs(&.{ "--minutes", b.fmt("{d}", .{fuzz_minutes}), "--jobs", b.fmt("{d}", .{fuzz_jobs}), "--seed", b.fmt("{d}", .{fuzz_seed}) });
+    for (fuzz_exes) |e| long.addArtifactArg(e);
+    fuzz_long.dependOn(&long.step);
     _ = vcpu;
 
     const litmus = b.addExecutable(.{
