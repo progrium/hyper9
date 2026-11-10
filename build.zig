@@ -1716,6 +1716,55 @@ fn hostHasHvf(b: *std.Build) bool {
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
 }
 
+/// zig build x64check [-- n [seed [int|x87|sse]]]: hx64's T0 against the
+/// host CPU in long mode (tools/x86check): n random instructions (default
+/// 100000) run natively by oracle64.c and on T0. x86-64 Linux hosts only.
+fn addX64check(b: *std.Build, vcpu: *std.Build.Module) void {
+    const step = b.step("x64check", "Check hx64's T0 against the host CPU in long mode (-- [n [seed [int|x87|sse]]]; x86-64 Linux)");
+    const host = b.graph.host.result;
+    if (host.cpu.arch != .x86_64 or host.os.tag != .linux) {
+        step.dependOn(&b.addFail("x64check: needs an x86-64 Linux host, where the CPU is the oracle").step);
+        return;
+    }
+    const oracle = b.addExecutable(.{
+        .name = "oracle64",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }),
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        }),
+    });
+    oracle.root_module.addCSourceFile(.{ .file = b.path("tools/x86check/oracle64.c") });
+    const check = b.addExecutable(.{
+        .name = "x86check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/x86check/x86check.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+            .imports = &.{.{ .name = "vcpu", .module = vcpu }},
+        }),
+    });
+    const a = b.args orelse &.{};
+    const n = if (a.len > 0) a[0] else "100000";
+    const seed = if (a.len > 1) a[1] else "1";
+    const mode = if (a.len > 2) a[2] else "int";
+    const gen = b.addRunArtifact(check);
+    gen.addArgs(&.{ "gen64", n, seed });
+    const cases = gen.addOutputFileArg("cases.bin");
+    gen.addArg(mode);
+    const run = b.addRunArtifact(oracle);
+    run.setStdIn(.{ .lazy_path = cases });
+    const answers = run.captureStdOut(.{});
+    const cmp = b.addRunArtifact(check);
+    cmp.has_side_effects = true;
+    cmp.setEnvironmentVariable("X86CHECK_MODE", mode);
+    cmp.addArg("cmp64");
+    cmp.addFileArg(cases);
+    cmp.addFileArg(answers);
+    step.dependOn(&cmp.step);
+}
+
 /// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against
 /// Unicorn (with -Demu=unicorn), the fuzzers, and the litmus tests.
 fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, unicorn: ?*std.Build.Module) void {
@@ -1795,10 +1844,28 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     fuzz_long.dependOn(&long.step);
     _ = vcpu;
 
-    // hx64's (design/hcpu.md): stubs until its T0 and lifter run long
-    // mode. fuzz-x64 joins fuzz-long when it fuzzes something.
-    b.step("fuzz-x64", "Fuzz the x64 T0 and lifter with random programs (not built yet)").dependOn(&b.addFail("fuzz-x64: hx64's generator and fuzzer aren't built yet (src/jit/check/gen_x86.zig in long mode)").step);
-    b.step("x64check", "Check hx64's T0 against the host CPU in long mode (not built yet)").dependOn(&b.addFail("x64check: tools/x86check in long mode isn't built yet").step);
+    // hx64's fuzzer (design/hcpu.md). Until long-mode T0 runs, it runs
+    // the programs on Unicorn alone; it joins fuzz-long once T0 and the
+    // lifter run long mode.
+    const fuzz_x64 = b.addExecutable(.{
+        .name = "fuzz-x64",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/jit/fuzz_x64.zig"),
+            .target = target,
+            .optimize = fuzz_optimize,
+            .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
+        }),
+    });
+    fuzz_x64.root_module.addOptions("fuzz_options", fuzz_options);
+    if (fuzz_lockstep) |ls| {
+        fuzz_x64.root_module.addImport("lockstep", ls);
+        linkUnicorn(fuzz_x64);
+    }
+    const fuzz_x64_run = b.addRunArtifact(fuzz_x64);
+    fuzz_x64_run.has_side_effects = true;
+    if (b.args) |a| fuzz_x64_run.addArgs(a);
+    b.step("fuzz-x64", "Fuzz the x64 T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)").dependOn(&fuzz_x64_run.step);
+    addX64check(b, fuzz_vcpu);
 
     const litmus = b.addExecutable(.{
         .name = "litmus",
