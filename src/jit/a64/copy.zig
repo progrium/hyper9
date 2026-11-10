@@ -92,6 +92,7 @@ fn touchesFp(k: sd.Kind) bool {
 /// The copy op for instruction `w`, or null if it doesn't qualify.
 pub fn plan(w: u32, o: dec.Op) ?Plan {
     if (o.k == .undef or o.k == .next_page) return null;
+    if (w & 0x1f00_0000 == 0x1000_0000) return null; // ADR, ADRP
     // TBL and TBX of more than one register: the list must be consecutive
     // registers, which a field rewrite can't keep.
     if (o.k.isSimd()) switch (sd.ofKind(o.k)) {
