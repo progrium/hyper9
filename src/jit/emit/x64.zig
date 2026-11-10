@@ -731,6 +731,14 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         .icmp => if (native(ta)) {
             try e.rr(ta == .i64, &.{0x39}, RCX, RAX); // cmp rax, rcx
             try e.setcc(pred_cc[@intCast(i.aux)]);
+        } else if (ta == .i8 or ta == .i16) {
+            // Widened to 32 bits, signed for the signed predicates.
+            const signed = i.aux >= @intFromEnum(ir.Pred.slt);
+            const op2: u8 = (if (ta == .i8) @as(u8, 0xb6) else 0xb7) | (if (signed) @as(u8, 8) else 0);
+            try e.bs(&.{ 0x0f, op2, 0xc0 }); // movzx/movsx eax, al/ax
+            try e.bs(&.{ 0x0f, op2, 0xc9 }); // movzx/movsx ecx, cl/cx
+            try e.rr(false, &.{0x39}, RCX, RAX); // cmp eax, ecx
+            try e.setcc(pred_cc[@intCast(i.aux)]);
         } else try fallback(e, i, ta),
         .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic", .@"nzcv.adc", .@"nzcv.sbc" => if (native(ta)) {
             const w2 = ta == .i64;
