@@ -20,9 +20,10 @@
 //! Within a block the lifter keeps each general register's latest value
 //! (read once, then reused) and the flags (flags.zig), and writes every
 //! result to the Cpu as it's made, so guest state is exact at every
-//! operation that can leave. `retire` counts are flushed before each load,
-//! store, and `call.interp`, so `Ctx.retired` is exact at a fault too:
-//! instructions before the faulting one, as T0 counts them.
+//! operation that can leave. Each op that can leave carries the count of
+//! instructions completed before it in the block (`Builder.retired`), so
+//! `Ctx.retired` is exact at a fault too, as T0 counts them; a `retire`
+//! op is only needed before a branch to another block.
 
 const std = @import("std");
 const ir = @import("../ir.zig");
@@ -209,13 +210,13 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
                 .interp => {
                     try l.flush();
                     try b.interp(in.word, in.pc);
-                    l.pending = 1;
+                    l.pending += 1;
                     l.clobber();
                 },
                 .branch => {
                     const c = try l.condition(in.op);
                     l.pending += 1;
-                    try l.flush();
+                    try l.retireAll();
                     const taken = try R.target(b, in.op.imm);
                     try b.brcond(c, taken, block_of[i + 1]);
                     // Only a target outside the region gets a new block to
@@ -224,13 +225,13 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
                 },
                 .jump => {
                     l.pending += 1;
-                    try l.flush();
+                    try l.flushFor(inRange(in.op.imm, pc, end));
                     try R.jumpTo(b, in.op.imm);
                 },
                 .call => {
                     try l.put(30, try b.konst(.i64, in.pc + 4));
                     l.pending += 1;
-                    try l.flush();
+                    try l.flushFor(inRange(in.op.imm, pc, end));
                     try R.jumpTo(b, in.op.imm);
                 },
                 .indirect => {
@@ -266,7 +267,7 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
             i += 1;
             if (in.how.ends() or in.how == .branch) break;
             if (leader[i]) {
-                try l.flush();
+                try l.retireAll();
                 try b.br(block_of[i]);
                 break;
             }
@@ -321,6 +322,17 @@ const L = struct {
     /// Before an operation that can leave: the flags in the Cpu, and the
     /// instructions so far retired.
     fn flush(l: *L) !void {
+        try l.flags.sync(l.b);
+        l.b.retired = @intCast(l.pending);
+    }
+
+    fn flushFor(l: *L, in_region: bool) !void {
+        if (in_region) return l.retireAll();
+        try l.flush();
+    }
+
+    /// Before a branch to another block: the block's count, as a `retire`.
+    fn retireAll(l: *L) !void {
         try l.flags.sync(l.b);
         try l.b.retire(l.pending);
         l.pending = 0;
