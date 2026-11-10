@@ -861,6 +861,7 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
         .none => unreachable,
         .headless => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-headless.c"}, .flags = flags }),
         .x11 => {
+            m.addCMacro("H9_GFX_X11", "1");
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-x11"), .files = &.{"x11.c"}, .flags = gui_exit });
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-x11"), .files = &.{"keysym2ucs-x11.c"}, .flags = flags });
             m.linkSystemLibrary("X11", .{});
