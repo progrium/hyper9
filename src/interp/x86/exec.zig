@@ -998,7 +998,6 @@ pub fn Exec(comptime M: type) type {
                     const hi = sext(try x.load(x.addr +% size, size), size);
                     if (idx < lo or idx > hi) return x.exc(cpu_mod.vec_br);
                 },
-                .cpuid => x.cpuid(),
                 .rdtsc => {
                     const t = x.c.retired;
                     x.c.r[0] = @truncate(t);
@@ -1008,6 +1007,15 @@ pub fn Exec(comptime M: type) type {
                 .fwait => try x87.fwait(x),
                 .x87 => try x87.exec(x),
                 .sse => try sse.exec(x),
+                // table.Op only grows, and long mode adds ops (SYSCALL) that
+                // land in table.zig before T0 handles them. This prong keeps
+                // the switch from being exhaustive, so a new tag builds and
+                // is #UD here until T0 has its own prong; CPUID sits in it
+                // so the prong is never all-handled, which Zig rejects.
+                else => switch (comptime e.op) {
+                    .cpuid => x.cpuid(),
+                    else => return x.exc(cpu_mod.vec_ud),
+                },
             }
         }
 
