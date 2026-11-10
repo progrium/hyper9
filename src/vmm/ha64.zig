@@ -19,9 +19,10 @@ const check_vmm = @import("vcpu").check_vmm;
 /// when the backend has a code cache and this host an emitter. T1 is the
 /// default; H9_EMU_TIER=t0 picks T0 alone (zemu.applyTier).
 pub const Tier = enum { t0, t1 };
-pub var tier: Tier = .t1;
-/// T1's emitter; null where this host has none yet.
-pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
+pub var tier: Tier = if (build_options.jit) .t1 else .t0;
+/// T1's emitter; null where this host has none yet, or in a -Dno-jit
+/// build, which leaves src/jit/ out.
+pub var t1_emitter: ?emitter.Emitter = if (!build_options.jit) null else switch (builtin.cpu.arch) {
     .aarch64 => @import("vcpu").emit.arm64.emitter_def,
     .x86_64 => @import("vcpu").emit.x64.emitter_def,
     else => null,
@@ -48,7 +49,7 @@ pub const Cpu = struct {
 /// Frees the decode cache.
 pub fn deinit(c: *Cpu) void {
     c.cache.deinit();
-    c.check.deinit();
+    if (build_options.jit_check) c.check.deinit();
 }
 
 pub fn getUreg(c: *const Cpu, u: *vmm.Ureg) void {
@@ -97,7 +98,7 @@ pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     // -Djit-check: every region lifted and checked against T0, in T1's
     // loop (src/jit/check/vmm.zig); the emitter only runs them with tier t1.
     if (build_options.jit_check) return runT1(c, ctx, t1_emitter orelse undefined);
-    if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, em);
+    if (build_options.jit and tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, em);
     // A spent budget (ctx.budget) gives `.interrupted`, as an exit request does.
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
     const before = c.t0.retired;

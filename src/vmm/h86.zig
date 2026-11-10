@@ -30,12 +30,13 @@ const check_vmm = @import("vcpu").check_vmm;
 /// default on x86-64 and arm64 hosts and on the web (wasm_t1.zig), where
 /// the 386 suite passes on it. H9_EMU_TIER picks either (zemu.applyTier).
 pub const Tier = enum { t0, t1 };
-pub var tier: Tier = switch (builtin.cpu.arch) {
+pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) {
     .x86_64, .aarch64, .wasm32 => .t1,
     else => .t0,
 };
-/// T1's emitter; null where this host has none yet.
-pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
+/// T1's emitter; null where this host has none yet, or in a -Dno-jit
+/// build, which leaves src/jit/ out.
+pub var t1_emitter: ?emitter.Emitter = if (!build_options.jit) null else switch (builtin.cpu.arch) {
     .aarch64 => @import("vcpu").emit.arm64.emitter_def,
     .x86_64 => @import("vcpu").emit.x64.emitter_def,
     else => null,
@@ -55,7 +56,7 @@ pub const Cpu = struct {
 
 /// Frees -Djit-check's state.
 pub fn deinit(c: *Cpu) void {
-    c.check.deinit();
+    if (build_options.jit_check) c.check.deinit();
 }
 
 pub fn getUreg(c: *const Cpu, u: *vmm.Ureg) void {
@@ -92,11 +93,11 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;
     // The lifter's call.helper table (x87).
-    ctx.helpers = helpers.tableAddr();
+    if (build_options.jit) ctx.helpers = helpers.tableAddr();
     // -Djit-check: every region lifted and checked against T0, in T1's loop.
     if (build_options.jit_check) return runT1(cpu, ctx, &m, t1_emitter orelse undefined);
-    if (tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);
-    if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(cpu, ctx, &m, em);
+    if (build_options.jit and tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);
+    if (build_options.jit and tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(cpu, ctx, &m, em);
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
     return exitOf(c, ctx, runT0(c, ctx, &m, budget));
 }

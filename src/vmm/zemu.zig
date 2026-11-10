@@ -234,9 +234,11 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 std.debug.assert(b.vcpus.items.len == 0);
                 if (web) wasm_t1.reset();
                 b.vcpus.deinit(b.gpa);
-                if (b.jit) |c| {
-                    c.deinit();
-                    b.gpa.destroy(c);
+                if (build_options.jit) {
+                    if (b.jit) |c| {
+                        c.deinit();
+                        b.gpa.destroy(c);
+                    }
                 }
                 b.code.deinit(b.gpa);
                 b.arena.deinit(b.gpa);
@@ -289,8 +291,8 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 s.view = .{ .code = &b.code, .tlb = &s.tlb };
                 s.rt.cache = b.jit;
                 s.rt.flush_wanted = &b.flush_wanted;
-                if (b.jit) |c| try c.addJumpCache(&s.rt.jump);
-                errdefer if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
+                if (build_options.jit) if (b.jit) |c| try c.addJumpCache(&s.rt.jump);
+                errdefer if (build_options.jit) if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
                 b.lockVcpus();
                 defer b.vcpus_lock.unlock();
                 try b.vcpus.append(b.gpa, s);
@@ -318,7 +320,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
 
             fn invalidate(p: *anyopaque, page: u64) void {
                 const b: *EmuBackend = @ptrCast(@alignCast(p));
-                if (b.jit) |c| c.invalidatePage(page);
+                if (build_options.jit) if (b.jit) |c| c.invalidatePage(page);
                 if (web) wasm_t1.invalidatePage(page);
             }
 
@@ -339,7 +341,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     defer b.vcpus_lock.unlock();
                     for (b.vcpus.items) |x| std.debug.assert(!x.running.load(.seq_cst));
                 }
-                if (b.jit) |c| c.reset();
+                if (build_options.jit) if (b.jit) |c| c.reset();
                 b.stopping.store(0, .seq_cst);
                 b.io.futexWake(u32, &b.stopping.raw, std.math.maxInt(u32));
             }
@@ -645,7 +647,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 }
                 // A shootdown that saw this vCPU may still read its seq.
                 while (b.kickers.load(.seq_cst) != 0) std.atomic.spinLoopHint();
-                if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
+                if (build_options.jit) if (b.jit) |c| c.removeJumpCache(&s.rt.jump);
                 switch (s.cpu) {
                     inline else => |*c, a| if (@hasDecl(Guest(a), "deinit")) Guest(a).deinit(c),
                 }
