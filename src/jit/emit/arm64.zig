@@ -2948,7 +2948,7 @@ fn nowSeconds() u64 {
 pub fn fuzzOne(gpa: std.mem.Allocator, env: *cases.Env, seed: u64) !void {
     var prng: std.Random.DefaultPrng = .init(seed);
     const rnd = prng.random();
-    var r = try fuzz.generate(gpa, rnd, .{});
+    var r = try fuzz.generate(gpa, rnd, .{ .lazy_records = true });
     defer r.deinit(gpa);
     const c: cases.Case = .{ .text = "", .regs = fuzz.regs(rnd), .budget = fuzz.budget(rnd) };
     if (envInt("H9_FUZZ_VERBOSE", 0) > 1) {

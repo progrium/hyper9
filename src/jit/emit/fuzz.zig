@@ -23,6 +23,9 @@ pub const Options = struct {
     calls: bool = true,
     max_blocks: u32 = 6,
     max_insts: u32 = 40,
+    /// Lazy eflags records (pending.flags aux2 2), for emitters that lower
+    /// them.
+    lazy_records: bool = false,
 };
 
 /// The loop counter's Cpu offset.
@@ -334,7 +337,7 @@ pub fn generate(gpa: std.mem.Allocator, rnd: std.Random, opts: Options) !ir.Regi
     defer g.deinit();
     const nb = 1 + rnd.uintLessThan(u32, opts.max_blocks);
     g.uniform_pend = g.chance(70);
-    g.pend_kind = rnd.uintLessThan(u64, 3);
+    g.pend_kind = rnd.uintLessThan(u64, if (opts.lazy_records) 3 else 2);
     for (0..nb) |_| _ = try g.b.block();
     for (0..nb) |bi| {
         const blk: ir.BlockId = @intCast(bi);
