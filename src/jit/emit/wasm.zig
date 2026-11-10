@@ -97,6 +97,10 @@ pub const Options = struct {
     /// isn't lowered stages its operands for `ext` (ir_eval.evalExtC). 0:
     /// such ops are unsupported.
     ext_io: u32 = 0,
+    /// With cells: the address of the helper table (ctx.helpers), read
+    /// while emitting, so a call.helper names its table slot as a
+    /// constant. 0: the code reads it from ctx.helpers.
+    helpers: u32 = 0,
 };
 
 pub const Layout = enum {
@@ -933,8 +937,10 @@ const E = struct {
             },
             // A helper that touches none of the region's Cpu bytes
             // (ir.helper_no_regs, an x87 one) leaves the flags pending.
-            .@"call.helper" => {
-                if (i.aux2 & ir.helper_no_regs == 0) try e.flushPending();
+            // Nor does it read the retired count or the budget, which are
+            // written on the way out if it traps.
+            .@"call.helper" => if (i.aux2 & ir.helper_no_regs == 0) {
+                try e.flushPending();
                 try e.flushRetired();
             },
             .setreg => if (e.pend) |p| if (i.aux < p.off + 4 and p.off < i.aux + byteSize(ta).?) {
@@ -1282,9 +1288,14 @@ const E = struct {
                 if (e.opts.cells != 0) {
                     // Straight through h9's table, which the module has
                     // when chaining: ctx.helpers[aux] is a slot in it.
-                    try w.get(0);
-                    try w.memop(0x28, ctx.off.helpers);
-                    try w.memop(0x28, i.aux * 4); // a wasm32 function pointer
+                    if (e.opts.helpers != 0) {
+                        const hs: [*]const u32 = @ptrFromInt(e.opts.helpers);
+                        try w.i32c(@bitCast(hs[@intCast(i.aux)]));
+                    } else {
+                        try w.get(0);
+                        try w.memop(0x28, ctx.off.helpers);
+                        try w.memop(0x28, i.aux * 4); // a wasm32 function pointer
+                    }
                     try w.bytes(&.{ 0x11, T_HELPER, 0 }); // call_indirect
                 } else try w.call(F_HELPER);
                 if (t == .none) try w.byte(0x1A);

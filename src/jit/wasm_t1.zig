@@ -166,6 +166,9 @@ const Batch = struct {
 
 const State = struct {
     gpa: std.mem.Allocator = undefined,
+    /// The vCPU's helper table (ctx.helpers), whose slots the code names
+    /// as constants: one frontend's, the same for every vCPU.
+    helpers: u32 = 0,
     /// The first slot the JIT may use; 0 before the host says (no T1).
     table_base: u32 = 0,
     /// Free slot ranges, and the next never-used slot.
@@ -418,6 +421,7 @@ fn relink() void {
 /// Runs compiled code from the Cpu's PC, as dispatch.run does.
 pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
     st.gpa = gpa;
+    st.helpers = @intCast(cx.helpers);
     if (on_wasm and !st.tuned) {
         st.tuned = true;
         if (std.c.getenv("H9_JIT_HOT")) |v| hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch hot;
@@ -615,7 +619,7 @@ fn buildBatch(entries: []*Entry) !void {
     defer out.deinit(gpa);
     var wb: wasm.Batch = .{};
     defer wb.deinit(gpa);
-    try wasm.emitBatch(gpa, regions, .{ .cells = @intCast(@intFromPtr(cells.ptr)), .jump = true, .ext_io = @intCast(@intFromPtr(&ext_io)) }, &out, &wb);
+    try wasm.emitBatch(gpa, regions, .{ .cells = @intCast(@intFromPtr(cells.ptr)), .jump = true, .ext_io = @intCast(@intFromPtr(&ext_io)), .helpers = st.helpers }, &out, &wb);
     // Which key each cell links to: the target on a page its sources came
     // from, if every source in the batch that uses it agrees.
     const targets = try gpa.alloc(?Key, cells.len);
