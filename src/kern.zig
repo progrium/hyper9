@@ -1478,6 +1478,24 @@ fn h9_cons_write(id: c_ulong, fd: c_int, buf: [*]const u8, n: c_long) callconv(.
     return n;
 }
 
+/// `dir`'s resolved path in the form `#U` takes, NUL-terminated in `buf`:
+/// unchanged on Unix, `/C:/a/b` for `C:\a\b` on Windows (devfs-win32's
+/// view of the host, as the CLI's kernPath in main.zig makes it).
+fn testRoot(dir: std.Io.Dir, buf: *[std.fs.max_path_bytes + 2]u8) ![:0]u8 {
+    var host: [std.fs.max_path_bytes]u8 = undefined;
+    const p = host[0..try dir.realPath(std.testing.io, &host)];
+    if (@import("builtin").os.tag != .windows) {
+        @memcpy(buf[0..p.len], p);
+        buf[p.len] = 0;
+        return buf[0..p.len :0];
+    }
+    buf[0] = '/';
+    for (p, buf[1 .. p.len + 1]) |ch, *o| o.* = if (ch == '\\') '/' else ch;
+    if (p.len >= 2 and p[1] == ':') buf[1] = std.ascii.toUpper(buf[1]);
+    buf[p.len + 1] = 0;
+    return buf[0 .. p.len + 1 :0];
+}
+
 test "spawn a process and read a host file through kern" {
     if (!available) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
@@ -1486,8 +1504,8 @@ test "spawn a process and read a host file through kern" {
     try tmp.dir.createDirPath(io, "lib");
     try tmp.dir.writeFile(io, .{ .sub_path = "lib/namespace", .data = "mount -a #s/boot /\n" });
     try tmp.dir.createDirPath(io, "dev");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
+    var buf: [std.fs.max_path_bytes + 2]u8 = undefined;
+    const root = try testRoot(tmp.dir, &buf);
 
     const T = struct {
         root: [:0]u8,
@@ -1522,8 +1540,7 @@ test "spawn a process and read a host file through kern" {
             t.sysname_len = try pread(s, &t.sysname, 0);
         }
     };
-    buf[n] = 0;
-    var t: T = .{ .root = buf[0..n :0] };
+    var t: T = .{ .root = root };
     try spawn("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
@@ -1541,9 +1558,8 @@ test "fork shares or copies groups, and await returns wait records" {
     try tmp.dir.writeFile(io, .{ .sub_path = "lib/namespace", .data = "ns\n" });
     try tmp.dir.createDirPath(io, "dev");
     try tmp.dir.createDirPath(io, "env");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    buf[n] = 0;
+    var buf: [std.fs.max_path_bytes + 2]u8 = undefined;
+    const root = try testRoot(tmp.dir, &buf);
 
     const T = struct {
         root: [:0]u8,
@@ -1641,7 +1657,7 @@ test "fork shares or copies groups, and await returns wait records" {
             _ = try pwrite(fd, data, 0);
         }
     };
-    var t: T = .{ .root = buf[0..n :0] };
+    var t: T = .{ .root = root };
     try spawn("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
@@ -2013,9 +2029,8 @@ test "#O overlays a host tree in memory and never writes it" {
     try tmp.dir.writeFile(io, .{ .sub_path = "lower/sub/b.txt", .data = "host b\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "lower/sub/c.txt", .data = "host c\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "lower/d/x", .data = "x\n" });
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    buf[n] = 0;
+    var buf: [std.fs.max_path_bytes + 2]u8 = undefined;
+    const root = try testRoot(tmp.dir, &buf);
 
     const T = struct {
         root: [:0]u8,
@@ -2149,7 +2164,7 @@ test "#O overlays a host tree in memory and never writes it" {
             if (bind(try std.fmt.bufPrintZ(&spec, "#O{d}", .{id}), "/mem", MREPL)) |_| return error.AttachedOtherMachine else |_| {}
         }
     };
-    var t: T = .{ .root = buf[0..n :0] };
+    var t: T = .{ .root = root };
     try spawn("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| {
@@ -2183,9 +2198,8 @@ test "#O finds, removes and lists the children of a large directory" {
     defer tmp.cleanup();
     const io = std.testing.io;
     try tmp.dir.createDirPath(io, "mem");
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = try tmp.dir.realPath(io, &buf);
-    buf[n] = 0;
+    var buf: [std.fs.max_path_bytes + 2]u8 = undefined;
+    const root = try testRoot(tmp.dir, &buf);
     const count = 20000;
     const T = struct {
         root: [:0]u8,
@@ -2229,7 +2243,7 @@ test "#O finds, removes and lists the children of a large directory" {
             }
         }
     };
-    var t: T = .{ .root = buf[0..n :0] };
+    var t: T = .{ .root = root };
     try spawn("test", T, T.run, &t);
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;

@@ -437,19 +437,27 @@ oscmdfree(void *c)
 	CloseHandle((HANDLE)c);
 }
 
+extern char *h9so_errstr(int);	/* h9: src/kern/hostsock-win32.c */
+
 void
 oserrstr(void)
 {
-	char *p, *q;
+	char *p, *q, *s;
 	int e, r;
 
 	e = GetLastError();
 	p = up->errstr;	/* up kills last error */
+	/* h9: a socket error reads as it does on a POSIX host */
+	if((s = h9so_errstr(e)) != nil){
+		snprint(p, ERRMAX, "%s", s);
+		return;
+	}
 	r = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM,
 		0, e, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
 		p, ERRMAX, 0);
 	if(r == 0)
 		snprint(p, ERRMAX, "windows error %d", e);
+	s = p;
 	for(q=p; *p; p++) {
 		if(*p == '\r')
 			continue;
@@ -458,6 +466,9 @@ oserrstr(void)
 		else
 			*q++ = *p;
 	}
+	/* h9: drop the sentence's period and the line break after it */
+	while(q > s && (q[-1] == ' ' || q[-1] == '.'))
+		q--;
 	*q = '\0';
 }
 
