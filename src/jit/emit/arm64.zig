@@ -1636,6 +1636,33 @@ fn vldst(e: *E, store: bool, qt: u5, off: u64) !void {
     try e.put((if (store) @as(u32, 0x3D800000) else 0x3DC00000) | @as(u32, IP1) << 5 | qt);
 }
 
+/// Whether the host has FEAT_LRCPC (LDAPR): every Apple core does, and
+/// Linux reports it in AT_HWCAP. Tests and benchmarks can turn it off.
+pub var use_lrcpc: bool = true;
+var lrcpc_known: std.atomic.Value(u8) = .init(0); // 0 unknown, 1 no, 2 yes
+
+fn hasLrcpc() bool {
+    if (!use_lrcpc) return false;
+    switch (lrcpc_known.load(.monotonic)) {
+        1 => return false,
+        2 => return true,
+        else => {},
+    }
+    const builtin = @import("builtin");
+    const yes = builtin.cpu.arch == .aarch64 and switch (builtin.os.tag) {
+        .macos, .ios => blk: {
+            const sysctlbyname = @extern(*const fn ([*:0]const u8, ?*anyopaque, ?*usize, ?*anyopaque, usize) callconv(.c) c_int, .{ .name = "sysctlbyname" });
+            var v: u32 = 0;
+            var len: usize = @sizeOf(u32);
+            break :blk sysctlbyname("hw.optional.arm.FEAT_LRCPC", &v, &len, null, 0) == 0 and v != 0;
+        },
+        .linux => std.os.linux.getauxval(std.elf.AT_HWCAP) & (1 << 15) != 0,
+        else => false,
+    };
+    lrcpc_known.store(if (yes) 2 else 1, .monotonic);
+    return yes;
+}
+
 /// cas through the runtime's slow_cas (an inline host CAS behind the TLB
 /// check is for later).
 fn casOp(e: *E, idx: usize) !void {
@@ -1746,6 +1773,8 @@ fn memOp(e: *E, idx: usize) !void {
         const sz = @as(u32, size) << 30;
         if (store) {
             try e.put(0x089FFC00 | sz | @as(u32, IP0) << 5 | val); // stlr
+        } else if (hasLrcpc()) {
+            try e.put(0x38BFC000 | sz | @as(u32, IP0) << 5 | rd); // ldapr: acquire is all TSO needs
         } else {
             try e.put(0x08DFFC00 | sz | @as(u32, IP0) << 5 | rd); // ldar
         }
@@ -2114,4 +2143,23 @@ test "chain sites link, and the jump cache finds a target inline" {
     try std.testing.expectEqual(ctx.Exit.svc, @as(ctx.Exit, @enumFromInt(y.entry(starts[2])(&cx))));
     try std.testing.expectEqual(@as(u64, 15), regs[0]);
     try std.testing.expectEqual(@as(u64, 3), cx.retired);
+}
+
+test "TSO loads are LDAPR where the host has LRCPC, else LDAR" {
+    const gpa = std.testing.allocator;
+    var r = try ir.parse(gpa, "region 0x0 tso\nb0:\n %0 = getreg:i64 #0x0\n %1 = load:i32 %0 #0x2 @0x0\n setreg %1 #0x8\n exit.chain #0x4\n");
+    defer r.deinit(gpa);
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(gpa);
+    _ = try emitRegion(gpa, &r, &code);
+    var ldapr = false;
+    var ldar = false;
+    var k: usize = 0;
+    while (k + 4 <= code.items.len) : (k += 4) {
+        const w = std.mem.readInt(u32, code.items[k..][0..4], .little);
+        if (w & 0x3FFFFC00 == 0x38BFC000) ldapr = true;
+        if (w & 0x3FFFFC00 == 0x08DFFC00) ldar = true;
+    }
+    try std.testing.expect(ldapr == hasLrcpc() and ldar != ldapr);
+    if (@import("builtin").os.tag == .macos and @import("builtin").cpu.arch == .aarch64) try std.testing.expect(hasLrcpc());
 }
