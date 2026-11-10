@@ -192,6 +192,7 @@ fn byteOff(n: u3) u64 {
 const seg_base_off = @offsetOf(Cpu, "seg_base");
 const seg_null_off = @offsetOf(Cpu, "seg_null");
 const fpu_sw_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "sw");
+const fpu_top_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "top");
 const x87_ES: u16 = 1 << 7;
 
 const ESP = 4;
@@ -1189,6 +1190,15 @@ const Lifter = struct {
     fn x87(l: *Lifter, k: usize) !void {
         const b = l.b;
         const i = &l.insns[k].i;
+        if (!i.mem and i.opcode == 0xdf and i.modrm == 0xe0) {
+            // FNSTSW AX, inline: it doesn't wait, so nothing traps, and
+            // FCOM, FNSTSW AX, SAHF and a branch need no second helper.
+            const sw = try b.getreg(.i16, fpu_sw_off);
+            const top = try b.bin(.@"and", .i16, try b.un(.zext, .i16, try b.getreg(.i8, fpu_top_off)), try b.konst(.i16, 7));
+            const keep = try b.bin(.@"and", .i16, sw, try b.konst(.i16, ~@as(u16, 0x3800)));
+            try l.setR(0, 2, try b.bin(.@"or", .i16, keep, try b.bin(.shl, .i16, top, try b.konst(.i16, 11))));
+            return;
+        }
         const fx = dec.effects(i);
         const addr = if (i.mem) try b.un(.zext, .i64, try l.linear(k)) else try b.konst(.i64, 0);
         // FCMOVcc reads EFLAGS, and FCOMI writes it, in the Cpu.
