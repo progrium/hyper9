@@ -40,9 +40,11 @@ const Run = struct {
         var cache: ?*vcpu.cache.Cache = null;
         if (t != .t0) {
             const em = emitterOf(t) orelse return null;
-            cache = t1.testCache(1 << 20) catch |e| switch (e) {
-                error.SkipZigTest => return null,
-                else => return e,
+            // On some hosts SkipZigTest is testCache's only error, so no
+            // switch with an else prong.
+            cache = t1.testCache(1 << 20) catch |e| {
+                if (e == error.SkipZigTest) return null;
+                return e;
             };
             const m = try testing.allocator.create(Machine);
             m.* = .{};
