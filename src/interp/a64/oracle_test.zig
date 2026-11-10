@@ -194,7 +194,8 @@ test "T0 matches the host CPU on random data-processing instructions" {
         const before = s;
         native.run(w, &s);
         const o = dec.decode(w, 0x10000);
-        kinds[@intFromEnum(o.k)] += 1;
+        // ext.zig's kinds (CRC32) run here too, uncounted.
+        if (@intFromEnum(o.k) < dec.nkinds) kinds[@intFromEnum(o.k)] += 1;
         try std.testing.expectEqual(exec.Next.next, exec.step(&m, &o, 0x10000));
         const same = std.mem.eql(u64, cpu.r[0..31], &s.x) and cpu.nzcv == s.nzcv and std.mem.eql(u128, &cpu.v, &s.v);
         if (!same) {
@@ -231,7 +232,7 @@ fn memCandidate(rand: std.Random) ?u32 {
     };
     w = (w & ~@as(u32, 0xf << 25)) | op0 << 25;
     const o = dec.decode(w, 0x10000);
-    if (o.k.isSimd()) return null; // simd_exec's own oracle covers these
+    if (@intFromEnum(o.k) >= dec.nkinds) return null; // simd_exec's and ext's own tests cover these
     const r = dec.regs(o);
     if (r.mem != .load and r.mem != .store) return null;
     if (r.system or r.ctrl != .none) return null;
