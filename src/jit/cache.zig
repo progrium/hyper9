@@ -468,9 +468,35 @@ pub fn clearRequest(cx: *Ctx, bits: u32) u32 {
 
 /// A vCPU's JIT state around its Ctx, which the vmm layer (vmm/zemu.zig)
 /// embeds and a Guest's run loop finds from the Ctx it's given.
+/// Entries counted per block before T1 compiles it (dispatch.zig's
+/// `.cold`), direct-mapped by PC: a collision restarts the count, which
+/// only delays a compile.
+pub const HotCounts = struct {
+    pub const n = 4096;
+    pc: [n]u64 = @splat(std.math.maxInt(u64)),
+    page: [n]u64 = @splat(no_page),
+    count: [n]u32 = @splat(0),
+
+    /// Counts an entry to (pc, page): true once it's been entered `hot`
+    /// times, when the count starts over.
+    pub fn bump(h: *HotCounts, pc: u64, page: u64, hot: u32) bool {
+        const i: usize = @intCast((pc ^ (pc >> 12)) >> 2 & (n - 1));
+        if (h.pc[i] != pc or h.page[i] != page) {
+            h.pc[i] = pc;
+            h.page[i] = page;
+            h.count[i] = 0;
+        }
+        h.count[i] += 1;
+        if (h.count[i] < hot) return false;
+        h.count[i] = 0;
+        return true;
+    }
+};
+
 pub const Runtime = struct {
     ctx: Ctx = .{},
     jump: JumpCache = .{},
+    hot: HotCounts = .{},
     /// The backend's cache, or null when this host or build runs T0 only.
     cache: ?*Cache = null,
     /// Set by `requestFlush`; the vmm layer flushes when it sees it.

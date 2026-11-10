@@ -164,6 +164,7 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!vmm.Ex
         .pc_off = @offsetOf(x86cpu.Cpu, "eip"),
         .pc_bytes = 4,
         .pc_align = 1,
+        .hot = dispatch.hot,
     };
     while (true) {
         // T0 counts Cpu.retired again in each `call.interp`: ctx's count is
@@ -179,9 +180,9 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!vmm.Ex
             // Compiled code leaves Cpu.fl's bits current (lift.zig).
             .svc => return .syscall,
             .interrupted => return .interrupted,
-            .t0 => {
+            .t0, .cold => {
                 if (ctx.budget <= 0) return .interrupted;
-                const e = runT0(c, ctx, m, 1);
+                const e = if (r == .t0) runT0(c, ctx, m, 1) else runT0Opts(c, ctx, m, @intCast(ctx.budget), dispatch.cold_branches);
                 if (e != .stopped) return exitOf(c, ctx, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
             },

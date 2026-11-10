@@ -115,7 +115,7 @@ pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
 /// exception or stores to code. Compiled code spends ctx.budget itself.
 fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
     ctx.interp = @intFromPtr(&lift.interp);
-    const cfg: dispatch.Config = .{ .frontend = lift.frontend, .emitter = em, .pc_off = @offsetOf(t0.Cpu, "pc") };
+    const cfg: dispatch.Config = .{ .frontend = lift.frontend, .emitter = em, .pc_off = @offsetOf(t0.Cpu, "pc"), .hot = dispatch.hot };
     while (true) {
         // ctx.retired runs on from Cpu.retired, so lift.interp can read the
         // count mid-region (CNTVCT_EL0 in deterministic mode).
@@ -129,10 +129,11 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
         switch (r) {
             .svc => return exitOf(c, .syscall),
             .interrupted => return .interrupted,
-            .t0 => {
+            .t0, .cold => {
                 if (ctx.budget <= 0) return .interrupted;
                 const t0_before = c.t0.retired;
-                const e = t0.run(&c.machine, 1);
+                const budget: u64 = if (r == .t0) 1 else @intCast(ctx.budget);
+                const e = if (r == .t0) t0.run(&c.machine, 1) else t0.runBranches(&c.machine, budget, dispatch.cold_branches);
                 if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(c.t0.retired -% t0_before);
                 if (e != .interrupted) return exitOf(c, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;

@@ -53,7 +53,9 @@ Each CPU has two tiers. T0 is an interpreter. T1 is a JIT that lifts regions of 
 
 T1 is the default wherever it can run. `H9_EMU_TIER=t0` or `t1` picks a tier when the backend is created, for tests and comparisons.
 
-**Natively,** T1's run loop is `src/jit/dispatch.zig`: find the translation for the PC in the jump cache or the code cache, or lift, optimize, and emit one the first time a PC is dispatched, run it, and follow its exits. A chained exit links the site to its target, so the next run jumps straight there. The loop returns to the Guest only for a system call, an exit request, or `.t0`.
+**Natively,** T1's run loop is `src/jit/dispatch.zig`: find the translation for the PC in the jump cache or the code cache, or, once the PC has been dispatched 32 times, lift, optimize, and emit one, run it, and follow its exits. A chained exit links the site to its target, so the next run jumps straight there. The loop returns to the Guest only for a system call, an exit request, `.t0`, or `.cold`.
+
+**Hot blocks.** Each vCPU counts dispatches of PCs with no translation in a direct-mapped table of 4096 (`cache.HotCounts`, keyed by PC and arena page; a collision starts the count over). Below the threshold, `run` returns `.cold`, and the Guest runs T0 from the PC through 8 taken branches, so a later block's head comes back to be counted. Large programs run most of their code only a few times: compiling every block on first entry made Claude Code's `--help` on ha64 compile 283K regions and flush the cache 27 times, three times slower than T0 alone. `H9_JIT_HOT` sets the threshold (0 or 1 compiles on first entry) and `H9_JIT_COLD` the branches.
 
 **`.t0` is how every exception reaches the Guest.** A fault, a breakpoint, an undefined instruction, or a failed fetch leaves guest state exact at the instruction, and the Guest runs that one instruction in T0, which raises the exception again with all its architectural detail (the ESR, the 386 vector and error code). A store to a page holding code ends a region the same way: T0 does the store after the page's translations are dropped.
 
@@ -177,6 +179,8 @@ h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_
 | `H9_EMU_TIER` | `t0` or `t1`, at backend create |
 | `H9_EMU_NO_CODEGEN=1` | Act as a host that refuses generated code |
 | `H9_EMU_CACHE` | The code cache's size in bytes |
+| `H9_JIT_HOT` | Dispatches of a block before it's compiled, natively (default 32; 0 or 1 compiles on first entry) |
+| `H9_JIT_COLD` | Taken branches T0 runs for a block that isn't hot yet, natively (default 8) |
 | `H9_EMU_DETERMINISTIC=1` | ha64's counter from instructions retired ([ha64](ha64.md)) |
 | `H9_TSO=off` | Plain accesses for x86 guests on arm64 hosts; for measuring only |
 
