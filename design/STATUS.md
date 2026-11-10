@@ -46,6 +46,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [credential-helpers](0119-credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
 | [browser-gfx](0120-browser-gfx.md) | accepted | ready | Graphics on the browser host |
 | [cow-fork](0121-cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
+| [wine-draw](0158-wine-draw.md) | draft |  | Wine windows through draw |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [ci](ci.md) | draft |  | Continuous integration |
 | [h86-ha64](h86-ha64.md) | draft |  | h86 and ha64, h9's own CPUs for the emulator |
@@ -58,7 +59,6 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [mount-index](mount-index.md) | draft |  | Metadata indexes for 9P roots and mounts |
 | [overlay-export](overlay-export.md) | draft |  | Exporting a run's overlay changes |
 | [root-auth](root-auth.md) | draft |  | Authenticated 9P roots |
-| [wine-draw](wine-draw.md) | draft |  | Wine windows through draw |
 
 ```mermaid
 flowchart LR
@@ -106,6 +106,7 @@ flowchart LR
   p_credential_helpers["#35;119 credential-helpers<br/>draft"]:::draft
   p_browser_gfx["#35;120 browser-gfx<br/>accepted"]:::accepted
   p_cow_fork["#35;121 cow-fork<br/>draft"]:::draft
+  p_wine_draw["#35;158 wine-draw<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
   p_h86_ha64["h86-ha64<br/>draft"]:::draft
@@ -118,7 +119,6 @@ flowchart LR
   p_mount_index["mount-index<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>draft"]:::draft
   p_root_auth["root-auth<br/>draft"]:::draft
-  p_wine_draw["wine-draw<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
@@ -166,6 +166,8 @@ flowchart LR
   p_gfx --> p_browser_gfx
   p_linux_personality --> p_cow_fork
   p_linux_threads --> p_cow_fork
+  p_gfx --> p_wine_draw
+  p_linux_personality --> p_wine_draw
   p_browser_host --> p_audio
   p_kvm --> p_host_sandbox
   p_whp --> p_host_sandbox
@@ -177,6 +179,4 @@ flowchart LR
   p_guest_tools --> p_mount_index
   p_ephemeral_writes --> p_overlay_export
   p_9p_roots --> p_root_auth
-  p_gfx --> p_wine_draw
-  p_linux_personality --> p_wine_draw
 ```
