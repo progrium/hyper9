@@ -550,11 +550,14 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
         /// A host pointer to `va`'s byte for an access, good to the end of
         /// its page. Inline as far as a memory's `hit` (a TLB hit) goes.
         pub inline fn ptr(x: *X, va: W, access: Access) Trap![*]u8 {
-            if (has_hit) if (x.m.hit(va, access)) |p| return p;
+            // Long mode's hit is out of line: inlined there, Zig 0.16.0's
+            // code generation segfaults (tests/a64.zig under -Demu=zig).
+            if (has_hit and !long) if (x.m.hit(va, access)) |p| return p;
             return x.ptrMiss(va, access);
         }
 
         noinline fn ptrMiss(x: *X, va: W, access: Access) Trap![*]u8 {
+            if (has_hit and long) if (x.m.hit(va, access)) |p| return p;
             return x.m.translate(va, access) orelse x.pageFault(va, access);
         }
 
@@ -1763,6 +1766,16 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                 try x.stringOnce(size, delta, am, src_base);
                 return;
             }
+            // A REP with a 32-bit address size writes ECX even when it
+            // does nothing, as the hardware does, so RCX's upper half goes;
+            // so do those of the ESI and EDI that MOVS and STOS use (the
+            // host CPU, through x64check, shows LODS, CMPS, and SCAS leave
+            // theirs).
+            if (long and asize == 4) {
+                c.r[1] &= 0xffff_ffff;
+                if (i.op == .movs) c.r[6] &= 0xffff_ffff;
+                if (i.op == .movs or i.op == .stos) c.r[7] &= 0xffff_ffff;
+            }
             var iter: u32 = 0;
             while (x.rd(1, asize) != 0) {
                 if (iter & 4095 == 4095 and x.stopRequested()) {
@@ -2492,6 +2505,13 @@ test "string instructions on RSI, RDI, and RCX" {
     _ = t.run(i);
     try std.testing.expectEqual(@as(u64, 1), t.c.r[7]);
     try std.testing.expectEqual(@as(u8, 5), t.buf[0]);
+    // A 67 REP with ECX 0 still writes ECX, and EDI for STOS.
+    t.c.r[1] = 0x5_0000_0000;
+    t.c.r[7] = 0x7_0000_0040;
+    i.rep = .rep;
+    _ = t.run(i);
+    try std.testing.expectEqual(@as(u64, 0), t.c.r[1]);
+    try std.testing.expectEqual(@as(u64, 0x40), t.c.r[7]);
 }
 
 test "CMPXCHG16B, CMPXCHG8B, and locked 8-byte operations" {
