@@ -456,8 +456,13 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
         block_pos[bi] = e.pos();
         e.block = @intCast(bi);
         e.dirty = p.dirty_in[bi];
-        for (blk.start..blk.start + blk.len) |idx| {
+        var idx = blk.start;
+        while (idx < blk.start + blk.len) : (idx += 1) {
             e.idx = idx;
+            if (try fusedBranch(&e, r, idx)) {
+                idx += 1;
+                continue;
+            }
             try lower(&e, r, idx);
         }
     }
@@ -535,6 +540,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
     const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
     const dst: ir.Ref = @intCast(idx);
     if (i.op.isExt() or ty == .v128 or (i.op == .setreg and ta == .v128)) return lowerExt(e, r, i, dst);
+    if (try direct(e, i, dst)) return;
     if (i.a != ir.none) try e.ldVal(RAX, i.a);
     if (i.b != ir.none) try e.ldVal(RCX, i.b);
     if (i.c != ir.none) try e.ldVal(RDX, i.c);
@@ -865,6 +871,59 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         else => if (i.op.isPure()) try fallback(e, i, ta) else return error.Unsupported,
     }
     if (ty != .none) try e.stVal(dst, RAX);
+}
+
+/// An icmp whose one use is the brcond right after it: cmp and jcc,
+/// without the i1. Returns false, emitting nothing, otherwise.
+fn fusedBranch(e: *E, r: *const ir.Region, idx: usize) !bool {
+    const i = r.insts.items[idx];
+    if (i.op != .icmp or idx + 1 >= r.insts.items.len or e.p.uses[idx] != 1) return false;
+    const n = r.insts.items[idx + 1];
+    if (n.op != .brcond or n.a != idx) return false;
+    const ta = r.insts.items[i.a].ty;
+    if (!native(ta)) return false;
+    try e.ldVal(RAX, i.a);
+    switch (e.p.locs[i.b]) {
+        .reg => |x| try e.rr(ta == .i64, &.{0x3b}, RAX, @intCast(x)), // cmp rax, b
+        .slot => |s| try e.rm(ta == .i64, &.{0x3b}, RAX, RSP, slotDisp(s)),
+        .none => unreachable,
+    }
+    try e.jmpTo(pred_cc[@intCast(i.aux)], @intCast(n.aux));
+    try e.jmpTo(null, @intCast(n.aux2));
+    return true;
+}
+
+/// Ops computed straight into their value's register, when it has one:
+/// constants, and 32- and 64-bit add, sub, and, or, and xor, whose b is
+/// read from its register or slot. A value never shares a register with
+/// its operands, so the result register can be written first. Returns
+/// false, emitting nothing, for the rest.
+fn direct(e: *E, i: ir.Inst, dst: ir.Ref) !bool {
+    const d: u8 = @intCast(e.p.reg(dst) orelse return false);
+    switch (i.op) {
+        .@"const" => try e.movImm(d, i.aux),
+        .add, .sub, .@"and", .@"or", .xor => {
+            if (i.ty != .i32 and i.ty != .i64) return false;
+            // The "op reg, r/m" forms; 32-bit forms zero-extend.
+            const opc: u8 = switch (i.op) {
+                .add => 0x03,
+                .sub => 0x2b,
+                .@"and" => 0x23,
+                .@"or" => 0x0b,
+                .xor => 0x33,
+                else => unreachable,
+            };
+            const w = i.ty == .i64;
+            try e.ldVal(d, i.a);
+            switch (e.p.locs[i.b]) {
+                .reg => |x| try e.rr(w, &.{opc}, d, @intCast(x)),
+                .slot => |s| try e.rm(w, &.{opc}, d, RSP, slotDisp(s)),
+                .none => unreachable,
+            }
+        },
+        else => return false,
+    }
+    return true;
 }
 
 /// movdqu xmm`x`, [base+disp]
