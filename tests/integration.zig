@@ -5827,6 +5827,44 @@ test "TCP echo between a Linux client and a 9front server [50]" {
     try std.testing.expectEqualStrings("ping\n", r.out);
 }
 
+/// Runs net.c's `case` in a Linux program whose /net is another h9's,
+/// served with --serve-net and mounted before its own, under a policy
+/// that lets the client reach only the server: every socket is the
+/// serving machine's.
+fn servedNetCase(comptime src: std.builtin.SourceLocation, case: []const u8) !void {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(src, &le);
+    const e = try serveEnv(src);
+    var t = try startServer(e, &.{ "--net=enable", "--serve", "tcp!127.0.0.1!0", "--serve-root", "/net", "--serve-net" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    var cb: [256]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cb, "/9/bin/srv -b '{s}' hostnet /net >/dev/null && /mnt/term/cwd/net {s}", .{ addr, case });
+    const r = try runLinux(&le, true, &.{ "--net-allow", addr, "sh", "-c", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    var wb: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&wb, "ok {s}\n", .{case}), r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "TCP echo through another h9's /net, mounted, with listen and accept [50, 35]" {
+    try servedNetCase(@src(), "tcp_echo");
+}
+
+test "non-blocking connect and accept through a mounted /net [50, 35]" {
+    try servedNetCase(@src(), "nb_connect");
+}
+
+test "shutdown(SHUT_WR) and EPOLLRDHUP through a mounted /net [50, 35]" {
+    try servedNetCase(@src(), "half_close");
+}
+
+test "a Linux process that exits holding a mounted /net's connection closes it [50, 35]" {
+    try servedNetCase(@src(), "exit_eof");
+}
+
 test "Go net/http server and client in one Linux program [50]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
