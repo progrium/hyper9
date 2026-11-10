@@ -555,13 +555,14 @@ test "devfs checks the file it opened, not the path it was given [baseline]" {
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "one\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f.orig", .data = "one\n" });
 
     // Reading (OREAD), overwriting with truncation (OWRITE|OTRUNC, through
     // the deferred ftruncate), and listing the directory (the fdopendir
     // path) all go through the refactored fsopen and still work on an
-    // in-policy file.
-    const r = try run(e, &.{ "--cwd", s.path, "--rc", "cat f && echo two >f && cat f && ls ." });
+    // in-policy file. Each backend starts from its own copy of f, as the
+    // one before it overwrote it.
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", "cp f.orig f && cat f && echo two >f && cat f && ls ." });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "one\n") != null);
@@ -2194,9 +2195,10 @@ test "an unhandled note kills the process with the note as its status [baseline]
     // An inner rc waits for sleep and nothing else: rc drops the wait record
     // of a background child that exits while it waits for a foreground one
     // (echo, here). The note goes out once sleep has exec'd, as before that
-    // the child is still rc, which would catch it.
+    // the child is still rc, which would catch it. The status names sleep's
+    // pid, which differs between backends, so sed drops it.
     const script =
-        \\rc -c 'sleep 1000 & wait $apid; echo $status' &
+        \\rc -c 'sleep 1000 & wait $apid; echo $status | sed ''s/^sleep [0-9]+: /sleep: /''' &
         \\w=$apid
         \\p=()
         \\while(~ $#p 0) p=`{awk 'FNR==1 && $1=="sleep" {split(FILENAME, a, "/"); print a[3]}' /proc/*/status >[2]/dev/null}
