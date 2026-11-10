@@ -57,6 +57,7 @@ const web_slice_ns = 2 * std.time.ns_per_ms;
 const coro = if (web) @import("../web/coro.zig") else struct {};
 /// The web host's T1, whose regions are keyed by this backend's arena pages.
 const wasm_t1 = @import("vcpu").wasm_t1;
+const dispatch = @import("vcpu").dispatch;
 
 fn monoNs() u64 {
     var t: std.os.wasi.timestamp_t = 0;
@@ -219,6 +220,10 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .amd64 => return error.WrongArch,
                 }
                 if (opts.arch == .arm64 and @hasDecl(A64, "deterministic")) A64.deterministic = deterministicFromEnv();
+                if (build_options.jit and !web) {
+                    if (std.c.getenv("H9_JIT_HOT")) |v| dispatch.hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch dispatch.hot;
+                    if (std.c.getenv("H9_JIT_COLD")) |v| dispatch.cold_branches = std.fmt.parseInt(u32, std.mem.span(v), 10) catch dispatch.cold_branches;
+                }
                 if (tierFromEnv()) |t| {
                     const ok = switch (opts.arch) {
                         .arm64 => applyTier(A64, t),

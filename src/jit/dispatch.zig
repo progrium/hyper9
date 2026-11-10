@@ -47,9 +47,27 @@ pub const Config = struct {
     pc_align: u8 = 4,
     /// Run opt.zig's passes on each region.
     optimize: bool = true,
+    /// Entries to a block before it's compiled: below that, `run` returns
+    /// `.cold` and T0 runs it. 0 or 1 compiles every block on its first
+    /// entry. Large programs (Bun, a JIT's runtime) run most of their
+    /// code only a few times, and compiling all of it costs more than
+    /// interpreting it.
+    hot: u32 = 0,
 };
 
-pub const Result = enum { svc, interrupted, t0 };
+/// What the Guest does next: `.cold` is as `.t0`, but runs T0 on through
+/// a few taken branches, so the next block's head comes back to be
+/// counted.
+pub const Result = enum { svc, interrupted, t0, cold };
+
+/// The native Guests' `Config.hot` and the taken branches T0 runs on a
+/// `.cold` return; zemu sets them from H9_JIT_HOT and H9_JIT_COLD. With
+/// every block compiled on first entry, Claude Code's `--help` on ha64
+/// compiled 283K regions, entered about 3 times each, and filled the
+/// 64 MiB cache 27 times: 19 s, against 6 s in T0 alone. At 32 entries
+/// it compiles 9K and takes 5 s, and its TUI starts in 19 s, not 93.
+pub var hot: u32 = 32;
+pub var cold_branches: u32 = 8;
 
 /// Counts, for tests and stats.
 pub const Stats = struct {
@@ -57,6 +75,7 @@ pub const Stats = struct {
     entries: u64 = 0,
     linked: u64 = 0,
     t0: u64 = 0,
+    cold: u64 = 0,
 };
 
 /// Runs compiled code from the Cpu's PC. The Runtime's cache must be set.
@@ -72,6 +91,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config, stats: ?*Stats) Result
         s.entries += st.entries;
         s.linked += st.linked;
         s.t0 += st.t0;
+        s.cold += st.cold;
     };
     // Compiled code can't store to the code it came from: such a store
     // leaves, and T0 does it.
@@ -85,7 +105,13 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config, stats: ?*Stats) Result
             st.t0 += 1;
             return .t0;
         };
-        const tb = c.lookup(&rt.jump, pc, page, view) orelse compile(gpa, c, view, pc, page, cfg, &st) catch |e| switch (e) {
+        const tb = c.lookup(&rt.jump, pc, page, view) orelse blk: {
+            if (cfg.hot > 1 and !rt.hot.bump(pc, page, cfg.hot)) {
+                st.cold += 1;
+                return .cold;
+            }
+            break :blk compile(gpa, c, view, pc, page, cfg, &st);
+        } catch |e| switch (e) {
             error.Full => {
                 rt.requestFlush();
                 return .interrupted;
@@ -305,7 +331,7 @@ const Machine = struct {
                     _ = cache_mod.clearRequest(&m.rt.ctx, ~@as(u32, 0));
                     m.jit.?.reset();
                 },
-                .t0 => {
+                .t0, .cold => {
                     const before = m.cpu.retired;
                     const e = a64.t0.run(&m.machine, 1);
                     m.rt.ctx.retired += m.cpu.retired - before;
