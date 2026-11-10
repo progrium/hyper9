@@ -82,6 +82,12 @@ pub fn isCall(i: ir.Inst) bool {
     return i.op == .@"call.interp" or i.op == .@"call.helper" or (i.op == .copy and copyByInterp(i.aux));
 }
 
+/// Whether a call.helper may read or write guest register slots (else it's
+/// ir.helper_no_regs: dirty chunks stay dirty and pending flags pending).
+pub fn touchesRegs(i: ir.Inst) bool {
+    return i.op != .@"call.helper" or i.aux2 & ir.helper_no_regs == 0;
+}
+
 /// Whether a copy op runs through the interpreter: TBL and TBX with a
 /// list of more than one register (its registers must be consecutive,
 /// which field rewriting can't keep; copy.zig doesn't make them).
@@ -270,7 +276,8 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
             while (j < last) : (j += 1) {
                 const nx = r.insts.items[j];
                 switch (nx.op) {
-                    .@"call.interp", .@"call.helper", .copy, .@"pending.flags" => break,
+                    .@"call.interp", .copy, .@"pending.flags" => break,
+                    .@"call.helper" => if (touchesRegs(nx)) break,
                     .setreg => if (accessBytes(r, nx)) |sz| if (nx.aux < i.aux + 4 and i.aux < nx.aux + sz) break,
                     else => {},
                 }
@@ -434,7 +441,10 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                         .@"pending.flags" => if (p.chunkAt(i.aux, 4)) |k| {
                             d |= @as(ChunkSet, 1) << @intCast(k);
                         },
-                        .@"call.interp", .@"call.helper" => d = 0,
+                        .@"call.interp" => d = 0,
+                        .@"call.helper" => if (touchesRegs(i)) {
+                            d = 0;
+                        },
                         .copy => if (isCall(i)) {
                             d = 0;
                         } else {

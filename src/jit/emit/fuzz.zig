@@ -252,6 +252,11 @@ const G = struct {
             const nargs = g.rnd.uintAtMost(u32, 3);
             var args: [3]Ref = .{ ir.none, ir.none, ir.none };
             for (args[0..nargs]) |*a| a.* = try g.val(.i64);
+            if (g.chance(40)) {
+                // Helper 2 touches no register: ir.helper_no_regs.
+                _ = try g.emit(.{ .op = .@"call.helper", .ty = .i64, .a = args[0], .b = args[1], .c = args[2], .aux = 2, .aux2 = ir.helper_no_regs });
+                return;
+            }
             _ = try g.emit(.{ .op = .@"call.helper", .ty = if (ret) .i64 else .none, .a = args[0], .b = args[1], .c = args[2], .aux = if (ret) 0 else 1 });
         } else {
             _ = try g.cond();

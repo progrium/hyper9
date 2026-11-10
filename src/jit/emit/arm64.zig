@@ -920,7 +920,8 @@ fn lower(e: *E, idx: usize) EmitError!void {
     const W = ty.bits();
     const sf = W > 32;
     if (e.pend) |p| switch (i.op) {
-        .@"call.interp", .@"call.helper", .copy => try flushPend(e),
+        .@"call.interp", .copy => try flushPend(e),
+        .@"call.helper" => if (regalloc.touchesRegs(i)) try flushPend(e),
         .setreg => if (sizeLog2(ta)) |sz| if (i.aux < p.off + 4 and p.off < i.aux + (@as(u64, 1) << sz)) {
             e.pend = null;
         },
@@ -1306,12 +1307,17 @@ fn lower(e: *E, idx: usize) EmitError!void {
         },
         .copy => try copyOp(e, idx),
         .@"call.helper" => {
-            try e.writeback(e.dirty);
-            e.dirty = 0;
+            // A helper_no_regs helper leaves guest registers alone: no
+            // write-back or reload, and the chunks just kept like values.
+            const regs = regalloc.touchesRegs(i);
+            if (regs) {
+                try e.writeback(e.dirty);
+                e.dirty = 0;
+            }
             const args = [3]Ref{ i.a, i.b, i.c };
             const scr = [3]u5{ S0, S1, S2 };
             for (args, scr) |v, s| if (v != ir.none) try e.mov(s, try e.src(v, s));
-            const save = e.saveMask(idx, false);
+            const save = e.saveMask(idx, !regs);
             try e.saveRegs(save);
             // Missing arguments are 0, as in ir_eval.
             if (e.fp) try fpLeave(e);
@@ -1324,7 +1330,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.mov(SD, 0);
             try e.restoreRegs(save);
             if (e.fp) try fpEnter(e, false);
-            try e.loadChunks();
+            if (regs) try e.loadChunks();
             if (ty != .none) try e.finish(idx, SD);
         },
         .poll => {
