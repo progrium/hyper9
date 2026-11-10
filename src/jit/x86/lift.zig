@@ -1460,72 +1460,32 @@ const Lifter = struct {
             try l.store(k, a32, try b.un(.trunc, .i16, cw));
             return true;
         }
-        try l.esGuard(k);
+        // One call: the wait, the access, the note, and the operation,
+        // refusing (with nothing changed) for T0 to run it.
         const a32 = try l.linear(k);
-        const zero = try b.konst(.i64, 0);
+        arg.kind = switch (form) {
+            .arith => .arith_mem,
+            .fldcw => .fldcw,
+            .fild32 => .fild32,
+            .fld64 => .fld64,
+            .fst64 => .fst64,
+            .fist => .fist,
+            .fnstcw => unreachable,
+        };
         switch (form) {
-            .arith => {
-                // The load, then the note (the helper's), as T0 has it.
-                const size: u8 = switch (op) {
-                    4 => 8,
-                    6 => 2,
-                    else => 4,
-                };
-                const v64 = if (size == 8) try l.load(k, 8, a32) else try b.un(.zext, .i64, try l.load(k, size, a32));
-                arg.kind = .arith_mem;
-                _ = try l.fastCall(arg, v64, try b.un(.zext, .i64, a32));
-                // It may raise an unmasked exception: ES again.
-                l.es_ok = false;
-                return true;
-            },
-            .fldcw => {
-                const v = try b.un(.zext, .i64, try l.load(k, 2, a32));
-                arg.kind = .fldcw;
-                _ = try l.fastCall(arg, v, zero);
-                l.es_ok = false;
-                return true;
+            .fst64 => arg.pop = r == 3,
+            .fist => {
+                arg.i = r;
+                arg.pop = op == 7;
             },
             else => {},
         }
-        // The note (c is the address), before the access, which may fault:
-        // a call of its own before a load, the first half's before a store.
-        const a64 = try b.un(.zext, .i64, a32);
+        const st = try l.fastCall(arg, try b.un(.zext, .i64, a32), try b.konst(.i64, 0));
+        try l.guard(k, try b.icmp(.ne, st, try b.konst(.i64, 0)), true);
+        // Arithmetic, FLDCW, and FIST may raise an unmasked exception.
         switch (form) {
-            .fld64, .fild32 => {
-                arg.kind = .note;
-                _ = try l.fastCall(arg, zero, a64);
-                const v = if (form == .fld64) try l.load(k, 8, a32) else try b.un(.zext, .i64, try l.load(k, 4, a32));
-                arg.kind = if (form == .fld64) .fld64 else .fild32;
-                const st = try l.fastCall(arg, v, zero);
-                try l.guard(k, try b.icmp(.ne, st, zero), true);
-            },
-            .fst64, .fist => {
-                const size: u8 = if (form == .fst64) 8 else if (op == 7) 2 else 4;
-                if (form == .fst64) {
-                    arg.kind = .fst64;
-                } else {
-                    arg.kind = .fist;
-                    arg.i = r;
-                    arg.pop = size == 2;
-                }
-                const ok = try l.fastCall(arg, zero, a64);
-                try l.guard(k, try b.icmp(.eq, ok, try b.konst(.i64, @bitCast(helpers.refuse))), true);
-                // The guard started a block, and values don't cross: the
-                // value again (this half changes nothing), and the address.
-                const z0 = try b.konst(.i64, 0);
-                const a = try l.linear(k);
-                const bits = try l.fastCall(arg, z0, try b.un(.zext, .i64, a));
-                const v = if (size == 8) bits else try b.un(.trunc, tyOf(size), bits);
-                try l.store(k, a, v);
-                if (form == .fst64) {
-                    arg.kind = .fst64_done;
-                    arg.pop = r == 3;
-                } else arg.kind = .fist_done;
-                _ = try l.fastCall(arg, z0, z0);
-                // An unmasked PE still stores, and sets ES.
-                if (form == .fist) l.es_ok = false;
-            },
-            else => unreachable,
+            .arith, .fldcw, .fist => l.es_ok = false,
+            else => {},
         }
         return true;
     }

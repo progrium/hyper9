@@ -89,26 +89,25 @@ fn x87Helper(c: *Ctx, a: u64, addr: u64, _: u64) callconv(.c) u64 {
 }
 
 /// x87fast's kinds: the x87's data movement, the bulk of what x87 code
-/// runs (awk's: 88% of its x87 instructions), each done straight on the
-/// Fpu when it's exact and raises nothing. Otherwise the helper changes
-/// nothing and returns `refuse`, and the region's guard runs the
-/// instruction on T0. The memory forms' wait is the lifter's (`wait`),
-/// and their last-instruction note `note` before a load and the first
-/// half's before a store, c the operand's linear address: before the
-/// access, as T0 orders them, so a fault finds it made. A refusal after
-/// the note is fine, since T0 makes the same note.
+/// runs (awk's: 88% of its x87 instructions), and the arithmetic with a
+/// memory operand, each done straight on the Fpu when it's exact and
+/// raises nothing. Otherwise the helper changes nothing and returns
+/// `refuse`, and the region's guard runs the instruction on T0.
 ///
-/// The lifter's x87 code names no Fpu byte with getreg or setreg, so
-/// every call is `helper_no_regs`: these touch only the Fpu (and EIP,
-/// put back), and read the segment selectors.
+/// A memory form is one call, b the operand's linear address: the wait
+/// (refusing with ES set), the access through the lift.Mem in
+/// ctx.frontend (refusing if it would fault, or crosses a page), the
+/// last-instruction note, and the operation, in T0's order, everything
+/// checked before anything is written.
+///
+/// None touches a Cpu byte the region names (getreg, setreg), so every
+/// call is `helper_no_regs`: they change only the Fpu, guest memory, and
+/// EIP (put back), and read the segment selectors.
 pub const Fast = enum(u8) {
-    /// FLD m64fp: b is the double.
+    /// FLD m64fp.
     fld64,
-    /// FST and FSTP m64fp, first half: the double ST(0) rounds to, or
-    /// `refuse`. Changes nothing, so the store can fault after it.
+    /// FST and FSTP m64fp (`pop`).
     fst64,
-    /// The second half, after the store: PE and C1, and the pop for FSTP.
-    fst64_done,
     /// FLD ST(i).
     fld_st,
     /// FST and FSTP ST(i).
@@ -117,27 +116,21 @@ pub const Fast = enum(u8) {
     fld_const,
     /// FXCH ST(i).
     fxch,
-    /// D8, DA, DC, and DE's arithmetic and compares with a memory operand:
-    /// b is the operand, c its linear address (for the note).
+    /// D8, DA, DC, and DE's arithmetic and compares with a memory operand.
     arith_mem,
-    /// FILD m32int: b is the integer.
+    /// FILD m32int.
     fild32,
-    /// FIST, FISTP, and FISTTP to m16int or m32int (i is r, `pop` m16),
-    /// first half: the integer, or `refuse`. Changes nothing.
+    /// FIST, FISTP, and FISTTP to m16int or m32int (i is r, `pop` m16).
     fist,
-    /// The second half, after the store: the status word, and the pop.
-    fist_done,
-    /// FLDCW: b is the word.
+    /// FLDCW.
     fldcw,
-    /// The wait: `refuse` with an unmasked exception pending (ES), for
-    /// #MF on T0. Changes nothing.
+    /// The wait (FWAIT): `refuse` with an unmasked exception pending (ES),
+    /// for #MF on T0. Changes nothing.
     wait,
     /// FNSTCW's word.
     fnstcw,
     /// FNSTSW's word: the status word with TOP in it.
     fnstsw,
-    /// The note alone, before a load that may fault (c the address).
-    note,
 };
 
 /// x87fast's first argument.
@@ -165,61 +158,72 @@ const PE: u16 = 1 << 5;
 const PM: u16 = 1 << 5;
 const ES: u16 = 1 << 7;
 
-fn x87Fast(c: *Ctx, a: u64, b: u64, c_: u64) callconv(.c) u64 {
+fn x87Fast(c: *Ctx, a: u64, b: u64, _: u64) callconv(.c) u64 {
     const cpu = c.cpuPtr(Cpu);
     const p = &cpu.fpu;
     const arg: FastArg = @bitCast(a);
+    const addr: u32 = @truncate(b);
     switch (arg.kind) {
         .wait => if (p.sw & ES != 0) return refuse,
         .fnstcw => return p.cw,
         .fnstsw => return (p.sw & ~@as(u16, 0x3800)) | (@as(u16, p.top) << 11),
-        .note => note(cpu, arg, c_),
-        .fld64 => {
-            const v = f80Of(b) orelse return refuse;
-            if (!empty(p, 7)) return refuse;
+        .fld64, .fild32 => {
+            if (p.sw & ES != 0 or !empty(p, 7)) return refuse;
+            const v = if (arg.kind == .fld64)
+                f80Of(read(c, addr, u64) orelse return refuse) orelse return refuse
+            else
+                f80_mod.fromI32(@bitCast(read(c, addr, u32) orelse return refuse));
+            note(cpu, arg, addr);
             push(p, v);
             p.sw &= ~C1;
         },
         .fst64 => {
-            note(cpu, arg, c_);
-            return f64Of(p) orelse refuse;
-        },
-        .arith_mem => {
-            const eip = cpu.eip;
-            cpu.eip = arg.pc;
-            defer cpu.eip = eip;
-            var x: exec.Exec(*lift.Mem) = .{ .c = cpu, .m = undefined, .opts = .{}, .addr = @truncate(c_) };
-            x.ibuf = .{ .op = .x87, .entry = 0, .opcode = 0xd8 | @as(u16, arg.op), .len = 0, .size = 4, .seg = @enumFromInt(arg.seg), .modrm = arg.modrm, .mem = true };
-            x.i = &x.ibuf;
-            x87.arithMem(&x, arg.op, @truncate(arg.modrm >> 3), b);
-        },
-        .fild32 => {
-            if (!empty(p, 7)) return refuse;
-            push(p, f80_mod.fromI32(@bitCast(@as(u32, @truncate(b)))));
-            p.sw &= ~C1;
-        },
-        .fist, .fist_done => {
-            const size: u8 = if (arg.pop) 2 else 4;
-            if (arg.kind == .fist) note(cpu, arg, c_);
-            const r = x87.fistPeek(p, size, arg.i) orelse return refuse;
-            if (arg.kind == .fist) return @as(u64, @as(u32, @bitCast(@as(i32, @truncate(r.n))))) & (if (size == 2) @as(u64, 0xffff) else 0xffff_ffff);
-            p.sw = r.sw;
-            if (arg.i != 2) pop(p);
-        },
-        .fldcw => {
-            p.cw = (@as(u16, @truncate(b)) & 0x1f3f) | 0x40;
-            x87.summarize(p);
-        },
-        .fst64_done => {
-            const v = st(p, 0);
-            const lost = v.signif & 0x7ff;
+            if (p.sw & ES != 0) return refuse;
+            const v = f64Of(p) orelse return refuse;
+            const dst = writable(c, addr, 8) orelse return refuse;
+            note(cpu, arg, addr);
+            std.mem.writeInt(u64, dst[0..8], v, .little);
+            const lost = st(p, 0).signif & 0x7ff;
             if (lost != 0) {
                 p.sw |= PE;
                 // Rounded up, in magnitude: nearest took the half above.
-                const up = lost > 0x400 or (lost == 0x400 and v.signif & 0x800 != 0);
+                const x = st(p, 0);
+                const up = lost > 0x400 or (lost == 0x400 and x.signif & 0x800 != 0);
                 p.sw = if (up) p.sw | C1 else p.sw & ~C1;
             } else p.sw &= ~C1;
             if (arg.pop) pop(p);
+        },
+        .fist => {
+            if (p.sw & ES != 0) return refuse;
+            const size: u8 = if (arg.pop) 2 else 4;
+            const r = x87.fistPeek(p, size, arg.i) orelse return refuse;
+            const dst = writable(c, addr, size) orelse return refuse;
+            note(cpu, arg, addr);
+            const n: u32 = @bitCast(@as(i32, @truncate(r.n)));
+            if (size == 2) std.mem.writeInt(u16, dst[0..2], @truncate(n), .little) else std.mem.writeInt(u32, dst[0..4], n, .little);
+            p.sw = r.sw;
+            if (arg.i != 2) pop(p);
+        },
+        .arith_mem => {
+            if (p.sw & ES != 0) return refuse;
+            const v: u64 = switch (arg.op) {
+                4 => read(c, addr, u64) orelse return refuse,
+                6 => read(c, addr, u16) orelse return refuse,
+                else => read(c, addr, u32) orelse return refuse,
+            };
+            const eip = cpu.eip;
+            cpu.eip = arg.pc;
+            defer cpu.eip = eip;
+            var x: exec.Exec(*lift.Mem) = .{ .c = cpu, .m = undefined, .opts = .{}, .addr = addr };
+            x.ibuf = .{ .op = .x87, .entry = 0, .opcode = 0xd8 | @as(u16, arg.op), .len = 0, .size = 4, .seg = @enumFromInt(arg.seg), .modrm = arg.modrm, .mem = true };
+            x.i = &x.ibuf;
+            x87.arithMem(&x, arg.op, @truncate(arg.modrm >> 3), v);
+        },
+        .fldcw => {
+            if (p.sw & ES != 0) return refuse;
+            const v = read(c, addr, u16) orelse return refuse;
+            p.cw = (v & 0x1f3f) | 0x40;
+            x87.summarize(p);
         },
         .fld_st, .fst_st, .fld_const, .fxch => {
             if (p.sw & ES != 0) return refuse;
@@ -250,6 +254,25 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, c_: u64) callconv(.c) u64 {
         },
     }
     return 0;
+}
+
+fn mem(c: *Ctx) *lift.Mem {
+    return @ptrFromInt(@as(usize, @intCast(c.frontend)));
+}
+
+/// A T-sized read at addr, or null if it would fault or crosses a page
+/// (T0 does those).
+fn read(c: *Ctx, addr: u32, comptime T: type) ?T {
+    const n = @sizeOf(T);
+    if (addr & 0xfff > 0x1000 - n) return null;
+    const h = mem(c).translate(addr, .read) orelse return null;
+    return std.mem.readInt(T, h[0..n], .little);
+}
+
+/// Where n bytes at addr can be written, or null as for `read`.
+fn writable(c: *Ctx, addr: u32, n: u32) ?[*]u8 {
+    if (addr & 0xfff > 0x1000 - n) return null;
+    return mem(c).translate(addr, .write);
 }
 
 /// The last-instruction note, as T0 makes it for a memory form: FOP,

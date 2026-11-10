@@ -892,7 +892,10 @@ pub const Env = struct {
         var exp_diff = exp_a - exp_b;
         var exp_z: i32 = undefined;
         var sig_extra: u64 = 0;
-        var sig128: u128 = undefined;
+        // The 128-bit difference as two halves (u128 shifts are calls on
+        // 32-bit hosts such as wasm32).
+        var z_hi: u64 = undefined;
+        var z_lo: u64 = undefined;
         if (exp_diff > 0) {
             // expABigger
             if (exp_a == 0x7FFF) {
@@ -901,12 +904,13 @@ pub const Env = struct {
             }
             if (exp_b == 0) exp_diff -= 1;
             if (exp_diff != 0) {
-                const r = shiftRightJam128(@as(u128, sig_b) << 64, @intCast(exp_diff));
-                sig_b = hi(r);
-                sig_extra = lo(r);
+                const r = shiftRightJam64Hi(sig_b, @intCast(exp_diff));
+                sig_b = r.v;
+                sig_extra = r.extra;
             }
             exp_z = exp_a;
-            sig128 = (@as(u128, sig_a) << 64) -% (@as(u128, sig_b) << 64 | sig_extra);
+            z_lo = 0 -% sig_extra;
+            z_hi = sig_a -% sig_b -% @intFromBool(sig_extra != 0);
         } else if (exp_diff < 0) {
             // expBBigger
             if (exp_b == 0x7FFF) {
@@ -915,29 +919,31 @@ pub const Env = struct {
             }
             if (exp_a == 0) exp_diff += 1;
             if (exp_diff != 0) {
-                const r = shiftRightJam128(@as(u128, sig_a) << 64, @intCast(-exp_diff));
-                sig_a = hi(r);
-                sig_extra = lo(r);
+                const r = shiftRightJam64Hi(sig_a, @intCast(-exp_diff));
+                sig_a = r.v;
+                sig_extra = r.extra;
             }
             exp_z = exp_b;
             sign_z = !sign_z;
-            sig128 = (@as(u128, sig_b) << 64) -% (@as(u128, sig_a) << 64 | sig_extra);
+            z_lo = 0 -% sig_extra;
+            z_hi = sig_b -% sig_a -% @intFromBool(sig_extra != 0);
         } else {
             if (exp_a == 0x7FFF) {
                 if ((sig_a | sig_b) & 0x7FFFFFFFFFFFFFFF != 0) return env.propagateNanUI(ui_a64, ui_a0, ui_b64, ui_b0);
                 return env.invalid();
             }
             exp_z = if (exp_a == 0) 1 else exp_a;
+            z_lo = 0;
             if (sig_b < sig_a) {
-                sig128 = (@as(u128, sig_a) << 64) -% (@as(u128, sig_b) << 64);
+                z_hi = sig_a - sig_b;
             } else if (sig_a < sig_b) {
                 sign_z = !sign_z;
-                sig128 = (@as(u128, sig_b) << 64) -% (@as(u128, sig_a) << 64);
+                z_hi = sig_b - sig_a;
             } else {
                 return pack(env.rounding == .min, 0, 0);
             }
         }
-        return env.normRoundPack(sign_z, exp_z, hi(sig128), lo(sig128), env.precision);
+        return env.normRoundPack(sign_z, exp_z, z_hi, z_lo, env.precision);
     }
 
     fn normRoundPack(env: *Env, sign: bool, exp_in: i32, sig_in: u64, sig_extra_in: u64, precision: Precision) F80 {
@@ -952,9 +958,9 @@ pub const Env = struct {
         const shift = @clz(sig);
         exp -= @as(i32, shift);
         if (shift != 0 and shift != 64) {
-            const x = (@as(u128, sig) << 64 | sig_extra) << shift;
-            sig = hi(x);
-            sig_extra = lo(x);
+            const sh: u6 = @intCast(shift);
+            sig = sig << sh | sig_extra >> @intCast(64 - @as(u7, sh));
+            sig_extra <<= sh;
         }
         return env.roundPack(sign, exp, sig, sig_extra, precision);
     }
@@ -1119,7 +1125,8 @@ pub const Env = struct {
     /// The 8086 rule: a signaling NaN raises invalid; a quiet NaN wins over
     /// a signaling one; between two of the same kind, the larger
     /// significand wins. The result is always quiet.
-    fn propagateNanUI(env: *Env, ui_a64: u16, ui_a0: u64, ui_b64: u16, ui_b0: u64) F80 {
+    noinline fn propagateNanUI(env: *Env, ui_a64: u16, ui_a0: u64, ui_b64: u16, ui_b0: u64) F80 {
+        @branchHint(.cold);
         const sig_nan_a = isSigNanUI(ui_a64, ui_a0);
         const sig_nan_b = isSigNanUI(ui_b64, ui_b0);
         const a: F80 = .{ .sign_exp = ui_a64, .signif = ui_a0 | 0xC000000000000000 };
@@ -1239,6 +1246,20 @@ fn shiftRightJam64Extra(a: u64, extra: u64, dist: u32) Sig64Extra {
     }
     z.extra |= @intFromBool(extra != 0);
     return z;
+}
+
+/// shiftRightJam128 of a:0 by dist (not 0), as halves.
+fn shiftRightJam64Hi(a: u64, dist: u32) Sig64Extra {
+    if (dist < 64) {
+        const d: u6 = @intCast(dist);
+        return .{ .v = a >> d, .extra = a << @intCast(64 - @as(u7, d)) };
+    }
+    if (dist < 128) {
+        const d: u6 = @intCast(dist - 64);
+        const lost = if (d == 0) 0 else a << @intCast(64 - @as(u7, d));
+        return .{ .v = 0, .extra = a >> d | @intFromBool(lost != 0) };
+    }
+    return .{ .v = 0, .extra = @intFromBool(a != 0) };
 }
 
 fn shiftRightJam128(a: u128, dist: u32) u128 {
