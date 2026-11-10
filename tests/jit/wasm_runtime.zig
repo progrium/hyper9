@@ -35,6 +35,14 @@ export fn jit_slow_cas(ctx: *Ctx, va: u64, size_log2: u32, expected: u64, new: u
 export fn jit_interp(ctx: *Ctx, handle: u64, pc: u64) u32 {
     return vcpu.a64.lift.interp(ctx, handle, pc);
 }
+export fn jit_ext(ctx: *Ctx, code: u64, io: [*]u8, aux: u64, aux2: u64) void {
+    vcpu.ir_eval.evalExtC(ctx, code, io, aux, aux2);
+}
+/// Where FP and vector ops stage their operands for jit_ext.
+var ext_io: [48]u8 align(16) = undefined;
+fn extIo() u32 {
+    return @intFromPtr(&ext_io);
+}
 export fn jit_helper(_: *Ctx, _: u64, _: u64, _: u64, _: u64) u64 {
     return 0;
 }
@@ -48,13 +56,17 @@ fn emitModule(r: *const ir.Region) !u32 {
     var a = try vcpu.alloc.spillAll(gpa, r);
     defer a.deinit(gpa);
     module.clearRetainingCapacity();
-    _ = try vcpu.emit.wasm.emit(gpa, r, &a, &module);
+    var b: vcpu.emit.wasm.Batch = .{};
+    defer b.deinit(gpa);
+    try vcpu.emit.wasm.emitBatch(gpa, &.{r}, .{ .ext_io = extIo() }, &module, &b);
     return @intCast(module.items.len);
 }
 
 export fn case_count() u32 {
     if (all.len == 0) {
-        all = cases.generate(gpa) catch return 0;
+        const ints = cases.generate(gpa) catch return 0;
+        const exts = cases.generateExt(gpa) catch return 0;
+        all = std.mem.concat(gpa, cases.Case, &.{ ints, exts }) catch return 0;
         env = gpa.create(cases.Env) catch return 0;
     }
     return @intCast(all.len);
@@ -132,7 +144,7 @@ fn batchPrepare(first: u32, count: u32, br_table: bool) !u32 {
     module.clearRetainingCapacity();
     var b: vcpu.emit.wasm.Batch = .{};
     defer b.deinit(gpa);
-    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions }, &module, &b);
+    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions, .ext_io = extIo() }, &module, &b);
     return @intCast(module.items.len);
 }
 
@@ -385,7 +397,7 @@ fn benchBatch(n: u32, br_table: bool) !u32 {
     module.clearRetainingCapacity();
     var b: vcpu.emit.wasm.Batch = .{};
     defer b.deinit(gpa);
-    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions }, &module, &b);
+    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions, .ext_io = extIo() }, &module, &b);
     return @intCast(module.items.len);
 }
 

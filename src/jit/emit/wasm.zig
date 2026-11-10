@@ -55,6 +55,7 @@
 //! | interp | (i32 ctx, i64 handle, i64 pc) -> i32 | ctx.InterpFn |
 //! | helper | (i32 ctx, i64 index, i64 a, i64 b, i64 c) -> i64 | the helper table |
 //! | slow_cas | (i32 ctx, i64 va, i32 size_log2, i64 expected, i64 new) -> i32 | mem.SlowCasFn |
+//! | ext | (i32 ctx, i64 code, i32 io, i64 aux, i64 aux2) | ir_eval.evalExtC, for FP and vector ops |
 //! | table | table funcref | the function table regions are installed in (with cells only) |
 //! | base | global i32 | the table slot of "r0"; "rK" is at base + K (with cells only) |
 //!
@@ -92,6 +93,10 @@ pub const Options = struct {
     /// their target up in the vCPU's jump cache (ctx.jump, whose entries'
     /// `code` the runtime sets to a table slot) and tail-call it on a hit.
     jump: bool = false,
+    /// The address of 48 bytes, 16-aligned, where an FP or vector op that
+    /// isn't lowered stages its operands for `ext` (ir_eval.evalExtC). 0:
+    /// such ops are unsupported.
+    ext_io: u32 = 0,
 };
 
 pub const Layout = enum {
@@ -131,6 +136,7 @@ pub fn emit(gpa: Allocator, r: *const ir.Region, _: *const alloc_mod.Allocation,
 
 const I32 = 0x7F;
 const I64 = 0x7E;
+const V128 = 0x7B;
 const VOID = 0x40;
 
 // Function indexes: the imports, then the body, then the wrappers.
@@ -140,7 +146,8 @@ const F_SLOW_STORE = 2;
 const F_INTERP = 3;
 const F_HELPER = 4;
 const F_SLOW_CAS = 5;
-const F_BODY = 6;
+const F_EXT = 6;
+const F_BODY = 7;
 
 // Type indexes.
 const T_ENTRY = 0;
@@ -200,6 +207,11 @@ const W = struct {
         try w.byte(0);
         try w.uleb(offset);
     }
+    /// A SIMD instruction (the 0xFD prefix).
+    fn simd(w: *W, op: u32) !void {
+        try w.byte(0xFD);
+        try w.uleb(op);
+    }
     fn call(w: *W, f: u32) !void {
         try w.byte(0x10);
         try w.uleb(f);
@@ -220,6 +232,7 @@ fn wt(t: Type) ?u8 {
     return switch (t) {
         .i1, .i8, .i16, .i32 => I32,
         .i64, .flags => I64,
+        .v128 => V128,
         else => null,
     };
 }
@@ -234,6 +247,7 @@ fn byteSize(t: Type) ?u32 {
         .i16 => 2,
         .i32 => 4,
         .i64, .flags => 8,
+        .v128 => 16,
         else => null,
     };
 }
@@ -311,29 +325,46 @@ fn clobbers(r: *const ir.Region, k: usize, off: u64, n: u64) bool {
             const m = byteSize(r.insts.items[i.a].ty) orelse 8;
             break :blk i.aux < off + n and off < i.aux + m;
         },
-        else => false,
+        // An FP op ORs the exceptions it raises into a u32 in the Cpu.
+        else => i.op.isFp() and i.aux2 != 0 and i.aux2 - 1 < off + n and off < i.aux2 - 1 + 4,
     };
 }
 
 const Pools = struct {
     free32: std.ArrayList(u32) = .empty,
     free64: std.ArrayList(u32) = .empty,
+    free128: std.ArrayList(u32) = .empty,
     n32: u32 = 0,
     n64: u32 = 0,
+    n128: u32 = 0,
 
+    fn list(p: *Pools, w: u8) *std.ArrayList(u32) {
+        return switch (w) {
+            I32 => &p.free32,
+            I64 => &p.free64,
+            else => &p.free128,
+        };
+    }
+    fn count(p: *Pools, w: u8) *u32 {
+        return switch (w) {
+            I32 => &p.n32,
+            I64 => &p.n64,
+            else => &p.n128,
+        };
+    }
     fn take(p: *Pools, w: u8) u32 {
-        const fl = if (w == I32) &p.free32 else &p.free64;
-        if (fl.pop()) |x| return x;
-        const n = if (w == I32) &p.n32 else &p.n64;
+        if (p.list(w).pop()) |x| return x;
+        const n = p.count(w);
         n.* += 1;
         return n.* - 1;
     }
     fn give(p: *Pools, gpa: Allocator, w: u8, x: u32) !void {
-        try (if (w == I32) &p.free32 else &p.free64).append(gpa, x);
+        try p.list(w).append(gpa, x);
     }
     fn deinit(p: *Pools, gpa: Allocator) void {
         p.free32.deinit(gpa);
         p.free64.deinit(gpa);
+        p.free128.deinit(gpa);
     }
 };
 
@@ -613,6 +644,7 @@ const Label = union(enum) {
 /// Fixed locals after the parameters, by wasm type.
 const fixed32 = enum(u32) { code, cell, cpu, tlb, ent, blk, sv, s0, s1, s2 };
 const fixed64 = enum(u32) { va, sv, s0, s1, s2 };
+const fixed128 = enum(u32) { v };
 
 const E = struct {
     gpa: Allocator,
@@ -635,6 +667,8 @@ const E = struct {
     reg64: u32 = 0,
     pool32: u32 = 0,
     pool64: u32 = 0,
+    base128: u32 = 0,
+    pool128: u32 = 0,
     // The region being emitted.
     r: *const ir.Region = undefined,
     plan: *const Plan = undefined,
@@ -650,7 +684,14 @@ const E = struct {
         return if (w == I32) e.l32(.s0) + k else e.l64(.s0) + k;
     }
     fn poolLocal(e: *const E, w: u8, k: u32) u32 {
-        return if (w == I32) e.pool32 + k else e.pool64 + k;
+        return switch (w) {
+            I32 => e.pool32 + k,
+            I64 => e.pool64 + k,
+            else => e.pool128 + k,
+        };
+    }
+    fn l128(e: *const E, f: fixed128) u32 {
+        return e.base128 + @intFromEnum(f);
     }
 
     fn push(e: *E, l: Label) !void {
@@ -832,6 +873,11 @@ const E = struct {
             .@"const" => unreachable,
             .getreg => if (e.regOf(i.aux)) |g| {
                 try w.get(g.local);
+            } else if (t == .v128) {
+                try w.get(e.l32(.cpu));
+                try w.simd(0x00); // v128.load
+                try w.bytes(&.{0});
+                try w.uleb(i.aux);
             } else {
                 try w.get(e.l32(.cpu));
                 try w.memop(loadOp(t), i.aux);
@@ -839,6 +885,12 @@ const E = struct {
             .setreg => if (e.regOf(i.aux)) |g| {
                 try e.val(i.a);
                 try w.set(g.local);
+            } else if (ta == .v128) {
+                try w.get(e.l32(.cpu));
+                try e.val(i.a);
+                try w.simd(0x0B); // v128.store
+                try w.bytes(&.{0});
+                try w.uleb(i.aux);
             } else {
                 try w.get(e.l32(.cpu));
                 try e.val(i.a);
@@ -1085,6 +1137,7 @@ const E = struct {
                 try w.byte(0xAD);
             },
             .load, .store => try e.memOp(i),
+            .@"v.load", .@"v.store" => try e.vmemOp(i),
             .cas => {
                 // Always the runtime's, as on arm64.
                 const f: ir.MemFlags = @bitCast(i.aux);
@@ -1174,8 +1227,172 @@ const E = struct {
                 try e.leaveCode(.indirect);
             },
             .br, .brcond => unreachable, // the control flow's
-            else => if (i.op.isPure() and wt(t) != null) try e.fallback(i) else return error.Unsupported,
+            else => if (i.op.isPure() and wt(t) != null)
+                try e.fallback(i)
+            else if (i.op.isExt())
+                try e.extOp(i)
+            else
+                return error.Unsupported,
         }
+    }
+
+    /// An FP or vector op through `ext` (ir_eval.evalExtC): its operands
+    /// staged at Options.ext_io, 16 bytes each, and its result read back.
+    fn extOp(e: *E, i: ir.Inst) !void {
+        const io = e.opts.ext_io;
+        if (io == 0) return error.Unsupported;
+        const w = &e.w;
+        for (i.operands(), 0..) |o, k| {
+            if (o == ir.none) continue;
+            const at: u32 = io + 16 * @as(u32, @intCast(k));
+            try w.i32c(at);
+            if (e.ty(o) == .v128) {
+                try e.val(o);
+                try w.simd(0x0B);
+                try w.bytes(&.{ 0, 0 });
+            } else {
+                try e.val64(o);
+                try w.memop(0x37, 0);
+                try w.i32c(at + 8);
+                try w.i64c(0);
+                try w.memop(0x37, 0);
+            }
+        }
+        try w.get(0);
+        try w.i64c(ir_eval.fallbackCode(i.op, i.ty, e.ty(i.a)));
+        try w.i32c(io);
+        try w.i64c(i.aux);
+        try w.i64c(i.aux2);
+        try w.call(F_EXT);
+        switch (wt(i.ty) orelse return) {
+            V128 => {
+                try w.i32c(io);
+                try w.simd(0x00);
+                try w.bytes(&.{ 0, 0 });
+            },
+            I64 => {
+                try w.i32c(io);
+                try w.memop(0x29, 0);
+            },
+            else => {
+                try w.i32c(io);
+                try w.memop(0x28, 0);
+            },
+        }
+    }
+
+    /// v.load and v.store: 16 bytes through the TLB, or two 8-byte halves
+    /// through the slow path (as x64.zig does).
+    fn vmemOp(e: *E, i: ir.Inst) !void {
+        const w = &e.w;
+        const f: ir.MemFlags = @bitCast(i.aux);
+        const store = i.op == .@"v.store";
+        const va = e.l64(.va);
+        const ent = e.l32(.ent);
+        const v = e.l128(.v);
+        try e.val64(i.a);
+        if (store) {
+            try e.val(i.b);
+            try w.set(v);
+        }
+        try w.set(va);
+        if (f.aligned) {
+            try w.get(va);
+            try w.i64c(15);
+            try w.byte(0x83);
+            try w.byte(0x50);
+            try w.byte(0x45);
+            try e.open(0x04, .other);
+            try w.get(0);
+            try w.get(va);
+            try w.memop(0x37, ctx.off.exit_addr);
+            try w.get(0);
+            try w.i64c(@as(u64, @intFromEnum(if (store) mem.Access.write else mem.Access.read)) | (@as(u64, @intFromEnum(mem.FaultKind.alignment)) << 8));
+            try w.memop(0x37, ctx.off.exit_info);
+            try e.retireOn(i.retired);
+            try e.leave(.fault, i.aux2);
+            try e.end();
+        }
+        const table: u32 = if (store) mem.tlb_write_off else 0;
+        try w.get(e.l32(.tlb));
+        try w.get(va);
+        try w.i64c(mem.page_shift);
+        try w.byte(0x88);
+        try w.byte(0xA7);
+        try w.i32c(mem.entries - 1);
+        try w.byte(0x71);
+        try w.i32c(4);
+        try w.byte(0x74);
+        try w.byte(0x6A);
+        try w.tee(ent);
+        try w.memop(0x29, table);
+        try w.get(va);
+        try w.i64c(mem.page_shift);
+        try w.byte(0x88);
+        try w.byte(0x51);
+        try w.get(va);
+        try w.i64c(mem.page_size - 1);
+        try w.byte(0x83);
+        try w.i64c(mem.page_size - 16);
+        try w.byte(0x58);
+        try w.byte(0x71);
+        try w.bytes(&.{ 0x04, VOID });
+        try e.push(.other);
+        try w.get(va);
+        try w.get(ent);
+        try w.memop(0x29, table + 8);
+        try w.byte(0x7C);
+        try w.byte(0xA7);
+        if (store) {
+            try w.get(v);
+            try w.simd(0x0B);
+            try w.bytes(&.{ 0, 0 });
+        } else {
+            try w.simd(0x00);
+            try w.bytes(&.{ 0, 0 });
+            try w.set(v);
+        }
+        try w.byte(0x05); // else: two halves through the slow path
+        for (0..2) |half| {
+            try w.get(0);
+            try w.get(va);
+            if (half == 1) {
+                try w.i64c(8);
+                try w.byte(0x7C);
+            }
+            try w.i32c(3);
+            if (store) {
+                try w.get(v);
+                try w.simd(0x1D); // i64x2.extract_lane
+                try w.byte(@intCast(half));
+                try w.call(F_SLOW_STORE);
+            } else try w.call(F_SLOW_LOAD);
+            try w.tee(e.l32(.code));
+            try e.open(0x04, .other);
+            try e.retireOn(i.retired);
+            try w.get(0);
+            try w.i64c(i.aux2);
+            try w.memop(0x37, ctx.off.exit_pc);
+            try e.br(.exit);
+            try e.end();
+            if (!store) {
+                if (half == 0) {
+                    try w.get(0);
+                    try w.memop(0x29, ctx.off.scratch);
+                    try w.simd(0x12); // i64x2.splat
+                    try w.set(v);
+                } else {
+                    try w.get(v);
+                    try w.get(0);
+                    try w.memop(0x29, ctx.off.scratch);
+                    try w.simd(0x1E); // i64x2.replace_lane
+                    try w.byte(1);
+                    try w.set(v);
+                }
+            }
+        }
+        try e.end();
+        if (!store) try w.get(v);
     }
 
     /// NZCV of a + b or a - b, eagerly, as ir_eval packs it.
@@ -1574,9 +1791,16 @@ fn function(
             try regs.append(gpa, .{ .off = @intCast(i.aux), .ty = t, .size = byteSize(t).? });
         }
         const g = &regs.items[gop.value_ptr.*];
-        if (g.size != byteSize(t).?) g.bad = true;
+        if (g.size != byteSize(t).? or t == .v128) g.bad = true;
         g.size = @max(g.size, byteSize(t).?);
         if (i.op == .setreg) g.written = true;
+    };
+    // A word an FP op ORs its exceptions into, and anything overlapping it,
+    // stays in the Cpu, which the op writes.
+    for (regions) |r| for (r.insts.items) |i| if (i.op.isFp() and i.aux2 != 0) {
+        for (regs.items) |*g| if (g.off < i.aux2 - 1 + 4 and i.aux2 - 1 < g.off + g.size) {
+            g.bad = true;
+        };
     };
     // Overlapping accesses at different offsets: neither is promoted.
     std.mem.sort(Reg, regs.items, {}, struct {
@@ -1637,6 +1861,9 @@ fn function(
     e.base64 = e.pool32 + pools.n32;
     e.reg64 = e.base64 + nf64;
     e.pool64 = e.reg64 + nr64;
+    const nf128: u32 = @typeInfo(fixed128).@"enum".fields.len;
+    e.base128 = e.pool64 + pools.n64;
+    e.pool128 = e.base128 + nf128;
     {
         var k32: u32 = 0;
         var k64: u32 = 0;
@@ -1649,11 +1876,13 @@ fn function(
         };
     }
     const w = &e.w;
-    try w.uleb(2);
+    try w.uleb(3);
     try w.uleb(nf32 + nr32 + pools.n32);
     try w.byte(I32);
     try w.uleb(nf64 + nr64 + pools.n64);
     try w.byte(I64);
+    try w.uleb(nf128 + pools.n128);
+    try w.byte(V128);
 
     // Entry: the Cpu and TLB pointers, and the registers.
     try w.get(0);
@@ -1774,6 +2003,7 @@ fn module(gpa: Allocator, bodies: []const []const u8, n: usize, opts: Options, o
         &.{ 5, I32, I64, I64, I64, I64, 1, I64 }, // helper
         &.{ 2, I32, I32, 1, I32 }, // body
         &.{ 5, I32, I64, I32, I64, I64, 1, I32 }, // slow_cas
+        &.{ 5, I32, I64, I32, I64, I64, 0 }, // ext
     };
     try sec.uleb(types.len);
     for (types) |t| {
@@ -1783,7 +2013,7 @@ fn module(gpa: Allocator, bodies: []const []const u8, n: usize, opts: Options, o
     try m.section(1, sec.b.items);
 
     sec.b.clearRetainingCapacity();
-    const imports = [_]struct { []const u8, u32 }{ .{ "eval", 1 }, .{ "slow_load", 2 }, .{ "slow_store", 3 }, .{ "interp", 4 }, .{ "helper", 5 }, .{ "slow_cas", 7 } };
+    const imports = [_]struct { []const u8, u32 }{ .{ "eval", 1 }, .{ "slow_load", 2 }, .{ "slow_store", 3 }, .{ "interp", 4 }, .{ "helper", 5 }, .{ "slow_cas", 7 }, .{ "ext", 8 } };
     try sec.uleb(imports.len + 1 + @as(u32, if (chaining) 2 else 0));
     for (imports) |imp| {
         try sec.name("env");

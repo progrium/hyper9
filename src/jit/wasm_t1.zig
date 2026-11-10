@@ -31,7 +31,7 @@
 //! - imports h9.jit_compile(ptr, len, base, n, status) and
 //!   h9.jit_drop(base, n);
 //! - exports jit_eval, jit_slow_load, jit_slow_store, jit_slow_cas,
-//!   jit_interp, and jit_helper, which the modules import, and
+//!   jit_interp, jit_helper, and jit_ext, which the modules import, and
 //!   jit_table_base(n), which the host calls once with the table's size
 //!   before h9 starts: slots from there on are the JIT's.
 
@@ -571,7 +571,7 @@ fn buildBatch(entries: []*Entry) !void {
     defer out.deinit(gpa);
     var wb: wasm.Batch = .{};
     defer wb.deinit(gpa);
-    try wasm.emitBatch(gpa, regions, .{ .cells = @intCast(@intFromPtr(cells.ptr)), .jump = true }, &out, &wb);
+    try wasm.emitBatch(gpa, regions, .{ .cells = @intCast(@intFromPtr(cells.ptr)), .jump = true, .ext_io = @intCast(@intFromPtr(&ext_io)) }, &out, &wb);
     // Which key each cell links to: the target on a page its sources came
     // from, if every source in the batch that uses it agrees.
     const targets = try gpa.alloc(?Key, cells.len);
@@ -632,6 +632,7 @@ comptime {
         @export(&jit_slow_cas, .{ .name = "jit_slow_cas" });
         @export(&jit_interp, .{ .name = "jit_interp" });
         @export(&jit_helper, .{ .name = "jit_helper" });
+        @export(&jit_ext, .{ .name = "jit_ext" });
     }
 }
 
@@ -663,6 +664,13 @@ fn jit_slow_cas(cx: *Ctx, va: u64, size_log2: u32, expected: u64, new: u64) call
 fn jit_interp(cx: *Ctx, handle: u64, pc: u64) callconv(.c) u32 {
     const f: ctx_mod.InterpFn = @ptrFromInt(@as(usize, @intCast(cx.interp)));
     return f(cx, handle, pc);
+}
+
+/// Where FP and vector ops stage their operands for jit_ext.
+var ext_io: [48]u8 align(16) = undefined;
+
+fn jit_ext(cx: *Ctx, code: u64, io: [*]u8, aux: u64, aux2: u64) callconv(.c) void {
+    ir_eval.evalExtC(cx, code, io, aux, aux2);
 }
 
 fn jit_helper(cx: *Ctx, index: u64, a: u64, b: u64, c: u64) callconv(.c) u64 {
