@@ -29,9 +29,17 @@ const t0 = @import("../../interp/a64/exec.zig");
 const Cpu = t0.Cpu;
 const L = lift.L;
 
-/// Whether the lifter emits copies. Off until the arm64 emitter lowers
-/// `copy`; fuzz-a64 turns it on to check the plans on ir_eval.
+/// Whether the lifter emits copies. They're for arm64 hosts, whose
+/// emitter runs them natively (elsewhere a copy is a call into T0, slower
+/// than the lifted ops). Off until real programs run with them: fuzz-a64
+/// agrees, but h9's T1 on an M3 doesn't (a MOVZ copied is enough to break
+/// rc). fuzz-a64 turns it on with H9_FUZZ_COPY=1.
 pub var enabled: bool = false;
+
+/// Whether FP and saturating instructions (aux bit 34) are copied. The
+/// arm64 emitter runs those through T0 until it carries the guest's FPCR
+/// and FPSR natively, so until then lift_simd.zig's ops serve them better.
+pub var fp: bool = false;
 
 pub const Plan = struct {
     aux: u64,
@@ -84,7 +92,6 @@ fn touchesFp(k: sd.Kind) bool {
 /// The copy op for instruction `w`, or null if it doesn't qualify.
 pub fn plan(w: u32, o: dec.Op) ?Plan {
     if (o.k == .undef or o.k == .next_page) return null;
-    if (w & 0x1f00_0000 == 0x1000_0000) return null; // ADR, ADRP
     // TBL and TBX of more than one register: the list must be consecutive
     // registers, which a field rewrite can't keep.
     if (o.k.isSimd()) switch (sd.ofKind(o.k)) {
@@ -146,7 +153,10 @@ pub fn plan(w: u32, o: dec.Op) ?Plan {
     var aux: u64 = w;
     if (r.flags == .r or r.flags == .rw) aux |= reads_nzcv;
     if (r.flags == .w or r.flags == .rw) aux |= writes_nzcv;
-    if (o.k.isSimd() and touchesFp(sd.ofKind(o.k))) aux |= fp_bit;
+    if (o.k.isSimd() and touchesFp(sd.ofKind(o.k))) {
+        if (!fp) return null;
+        aux |= fp_bit;
+    }
     var aux2: u64 = 0;
     for (desc, 0..) |d, f| aux2 |= @as(u64, d) << @intCast(16 * f);
     return .{ .aux = aux, .aux2 = aux2, .gp_written = got_write };
@@ -188,7 +198,10 @@ test "plans: fields, ZR, SP, and what doesn't qualify" {
     try testing.expectEqual(@as(?Plan, null), plan(0xf9400020, dec.decode(0xf9400020, 0)));
     try testing.expectEqual(@as(?Plan, null), plan(0x10000000, dec.decode(0x10000000, 0x1000)));
     try testing.expectEqual(@as(?Plan, null), plan(0x14000000, dec.decode(0x14000000, 0)));
-    // fadd d0, d1, d2: V fields and FP
+    // fadd d0, d1, d2: V fields and FP, when FP is copied
+    const fp_was = fp;
+    defer fp = fp_was;
+    fp = true;
     const fa = plan(0x1e622820, dec.decode(0x1e622820, 0)).?;
     try testing.expect(fa.aux & fp_bit != 0);
     try testing.expectEqual(vOff(0) | D_V | D_WRITE, @as(u16, @truncate(fa.aux2)));

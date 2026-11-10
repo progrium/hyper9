@@ -151,8 +151,11 @@ test "fuzz-a64: FP and SIMD programs agree region by region, lifted" {
 test "fuzz-a64: programs agree region by region with copies" {
     const copy = @import("../a64/copy.zig");
     const was = copy.enabled;
+    const fp_was = copy.fp;
     copy.enabled = true;
+    copy.fp = true;
     defer copy.enabled = was;
+    defer copy.fp = fp_was;
     const gpa = std.testing.allocator;
     const s = try gpa.create(Space);
     defer gpa.destroy(s);
