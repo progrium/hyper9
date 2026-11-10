@@ -133,7 +133,7 @@ fn forward(r: *ir.Region, blk: ir.Block, repl: []Ref) !void {
                 i.* = .{ .op = .br, .aux = if (c & 1 == 1) i.aux else i.aux2 };
             },
             else => if (i.op.isPure()) {
-                fold(insts, idx, repl);
+                fold(insts, blk.start, idx, repl);
             } else if (excWord(i.*)) |w| forget(&known, &nk, w, 4),
         }
     }
@@ -145,7 +145,7 @@ fn constOf(insts: []const Inst, x: Ref) ?u64 {
     return if (d.op == .@"const") d.aux else null;
 }
 
-fn fold(insts: []Inst, idx: usize, repl: []Ref) void {
+fn fold(insts: []Inst, start: usize, idx: usize, repl: []Ref) void {
     const i = &insts[idx];
     if (i.op == .@"const") return;
     const ca = constOf(insts, i.a);
@@ -159,15 +159,8 @@ fn fold(insts: []Inst, idx: usize, repl: []Ref) void {
         return;
     }
     switch (i.op) {
-        .@"nzcv.cond", .@"eflags.cond" => {
-            const f = insts[i.a];
-            const p = if (i.op == .@"nzcv.cond" and f.op == .@"nzcv.sub")
-                subPredA64(i.aux)
-            else if (i.op == .@"eflags.cond" and f.op == .@"eflags.sub")
-                subPredX86(i.aux)
-            else
-                null;
-            if (p) |pred| i.* = .{ .op = .icmp, .ty = .i1, .a = f.a, .b = f.b, .aux = @intFromEnum(pred) };
+        .@"nzcv.cond", .@"eflags.cond" => if (compareOf(insts, start, idx)) |cmp| {
+            i.* = .{ .op = .icmp, .ty = .i1, .a = cmp.a, .b = cmp.b, .aux = @intFromEnum(cmp.pred) };
         },
         .select => if (ca) |c| {
             repl[idx] = if (c & 1 == 1) i.b else i.c;
@@ -177,6 +170,74 @@ fn fold(insts: []Inst, idx: usize, repl: []Ref) void {
         },
         else => {},
     }
+}
+
+const Compare = struct { pred: ir.Pred, a: Ref, b: Ref };
+
+/// The comparison a condition on flags (`insts[idx]`, an `nzcv.cond` or
+/// `eflags.cond`) makes, if it's one: of a subtract's operands; of a
+/// decrement's operand and 1; or of a logic result and 0. The constant is
+/// one the block already has before `idx` (the lifters make the 1 for
+/// the decrement itself).
+fn compareOf(insts: []const Inst, start: usize, idx: usize) ?Compare {
+    const i = insts[idx];
+    const f = insts[i.a];
+    const x86 = i.op == .@"eflags.cond";
+    switch (f.op) {
+        .@"nzcv.sub", .@"eflags.sub" => {
+            const p = (if (x86) subPredX86(i.aux) else subPredA64(i.aux)) orelse return null;
+            return .{ .pred = p, .a = f.a, .b = f.b };
+        },
+        .@"eflags.dec" => {
+            // a - 1, with OF at the most negative a: the signed conditions
+            // compare a with 1 exactly; S and NS don't.
+            const p: ir.Pred = switch (i.aux) {
+                4 => .eq,
+                5 => .ne,
+                12 => .slt,
+                13 => .sge,
+                14 => .sle,
+                15 => .sgt,
+                else => return null,
+            };
+            const one = findConst(insts, start, idx, insts[f.a].ty, 1) orelse return null;
+            return .{ .pred = p, .a = f.a, .b = one };
+        },
+        .@"nzcv.logic", .@"eflags.logic" => {
+            // N and Z from the result; C and V clear.
+            const p: ir.Pred = if (x86) switch (i.aux) {
+                4, 6 => .eq, // E, BE
+                5, 7 => .ne, // NE, A
+                8, 12 => .slt, // S, L
+                9, 13 => .sge, // NS, GE
+                14 => .sle,
+                15 => .sgt,
+                else => return null,
+            } else switch (i.aux) {
+                0 => .eq,
+                1 => .ne,
+                4, 11 => .slt, // MI, LT
+                5, 10 => .sge, // PL, GE
+                12 => .sgt,
+                13 => .sle,
+                else => return null,
+            };
+            const zero = findConst(insts, start, idx, insts[f.a].ty, 0) orelse return null;
+            return .{ .pred = p, .a = f.a, .b = zero };
+        },
+        else => return null,
+    }
+}
+
+/// A `const` of type `ty` and value `v` in [start, idx), if there's one.
+fn findConst(insts: []const Inst, start: usize, idx: usize, ty: ir.Type, v: u64) ?Ref {
+    var j = idx;
+    while (j > start) {
+        j -= 1;
+        const c = insts[j];
+        if (c.op == .@"const" and c.ty == ty and c.aux == v) return @intCast(j);
+    }
+    return null;
 }
 
 /// The comparison arm64's condition `cc` makes of `a - b`'s flags, if
@@ -441,7 +502,7 @@ test "opt: an fp op that ORs into FPSR reads and writes it" {
     , got);
 }
 
-test "opt: conditions on a subtract's flags become comparisons" {
+test "opt: conditions on a subtract's, a decrement's, or a logic op's flags become comparisons" {
     const preds = [_]struct { cc: u8, x86: bool }{
         .{ .cc = 0, .x86 = false },  .{ .cc = 1, .x86 = false },  .{ .cc = 2, .x86 = false },  .{ .cc = 3, .x86 = false },
         .{ .cc = 8, .x86 = false },  .{ .cc = 9, .x86 = false },  .{ .cc = 10, .x86 = false }, .{ .cc = 11, .x86 = false },
@@ -465,5 +526,36 @@ test "opt: conditions on a subtract's flags become comparisons" {
             const got = ir_eval.evalPure(.icmp, .i1, ty, x, y, 0, @intFromEnum(pred));
             try testing.expectEqual(want, got);
         };
+    };
+}
+
+test "opt: decrement and logic conditions agree with the flags" {
+    const vals = [_]u64{ 0, 1, 2, 0x7f, 0x80, 0xff, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 0x7fff_ffff_ffff_ffff, 0x8000_0000_0000_0000, 0xffff_ffff_ffff_ffff };
+    const Case = struct { fop: ir.Op, cop: ir.Op, c: u64, ccs: []const u8, tys: []const ir.Type };
+    const cases = [_]Case{
+        .{ .fop = .@"eflags.dec", .cop = .@"eflags.cond", .c = 1, .ccs = &.{ 4, 5, 12, 13, 14, 15 }, .tys = &.{ .i8, .i16, .i32 } },
+        .{ .fop = .@"eflags.logic", .cop = .@"eflags.cond", .c = 0, .ccs = &.{ 4, 5, 6, 7, 8, 9, 12, 13, 14, 15 }, .tys = &.{ .i8, .i16, .i32 } },
+        .{ .fop = .@"nzcv.logic", .cop = .@"nzcv.cond", .c = 0, .ccs = &.{ 0, 1, 4, 5, 10, 11, 12, 13 }, .tys = &.{ .i32, .i64 } },
+    };
+    var insts: [4]Inst = undefined;
+    for (cases) |cs| for (cs.tys) |ty| for (cs.ccs) |cc| {
+        insts[0] = .{ .op = .getreg, .ty = ty };
+        insts[1] = .{ .op = .@"const", .ty = ty, .aux = cs.c };
+        insts[2] = .{ .op = cs.fop, .ty = .flags, .a = 0, .b = if (cs.fop == .@"eflags.dec") 1 else none };
+        insts[3] = .{ .op = cs.cop, .ty = .i1, .a = 2, .aux = cc };
+        const cmp = compareOf(&insts, 0, 3).?;
+        try testing.expectEqual(@as(Ref, 0), cmp.a);
+        try testing.expectEqual(@as(Ref, 1), cmp.b);
+        for (vals) |a| {
+            const x = a & ty.mask();
+            // The incoming flags for dec: carry set, which dec keeps.
+            const f = ir_eval.evalPure(cs.fop, .flags, ty, x, ir_eval.CF, 0, 0);
+            const want = ir_eval.evalPure(cs.cop, .i1, .flags, f, 0, 0, cc);
+            const got = ir_eval.evalPure(.icmp, .i1, ty, x, cs.c, 0, @intFromEnum(cmp.pred));
+            testing.expectEqual(want, got) catch |e| {
+                std.debug.print("{t} {t} cc {d} a {x}\n", .{ cs.fop, ty, cc, x });
+                return e;
+            };
+        }
     };
 }
