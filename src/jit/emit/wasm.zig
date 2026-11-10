@@ -648,7 +648,7 @@ const Label = union(enum) {
 };
 
 /// Fixed locals after the parameters, by wasm type.
-const fixed32 = enum(u32) { code, cell, cpu, tlb, ent, blk, sv, s0, s1, s2, poff };
+const fixed32 = enum(u32) { code, cell, cpu, tlb, ent, blk, sv, s0, s1, s2, poff, va32 };
 const fixed64 = enum(u32) { va, sv, s0, s1, s2, pa, pb, pc, pcode, rp };
 const fixed128 = enum(u32) { v };
 
@@ -1827,10 +1827,24 @@ const E = struct {
         const vt: Type = if (store) e.ty(i.b) else i.ty;
         const vw = wt(vt).?;
         const sv = if (vw == I32) e.l32(.sv) else e.l64(.sv);
-        try e.val64(i.a);
+        // A 32-bit guest's address (a zext of an i32): the TLB index, the
+        // page check, and the host address in i32, from va32.
+        const ai = e.r.insts.items[i.a];
+        const narrow = ai.op == .zext and e.plan.kind[i.a] != .konst and e.ty(ai.a) == .i32;
+        const va32 = e.l32(.va32);
+        if (narrow) {
+            if (e.plan.kind[i.a] == .inl) try e.val(ai.a) else {
+                try e.val(i.a);
+                try w.byte(0xA7); // i32.wrap_i64
+            }
+        } else try e.val64(i.a);
         if (store) {
             try e.val(i.b);
             try w.set(sv);
+        }
+        if (narrow) {
+            try w.tee(va32);
+            try w.byte(0xAD); // i64.extend_i32_u
         }
         try w.set(va);
         if (f.aligned and n > 1) {
@@ -1852,10 +1866,16 @@ const E = struct {
         }
         // ent = tlb + ((va >> 12) & 255) * 16, in the read or write table
         try w.get(e.l32(.tlb));
-        try w.get(va);
-        try w.i64c(mem.page_shift);
-        try w.byte(0x88);
-        try w.byte(0xA7);
+        if (narrow) {
+            try w.get(va32);
+            try w.i32c(mem.page_shift);
+            try w.byte(0x76); // i32.shr_u
+        } else {
+            try w.get(va);
+            try w.i64c(mem.page_shift);
+            try w.byte(0x88);
+            try w.byte(0xA7);
+        }
         try w.i32c(mem.entries - 1);
         try w.byte(0x71);
         try w.i32c(4);
@@ -1864,24 +1884,45 @@ const E = struct {
         try w.tee(ent);
         // hit = tag == va >> 12 && (va & 0xfff) <= page - n
         try w.memop(0x29, @as(u32, if (store) mem.tlb_write_off else 0));
-        try w.get(va);
-        try w.i64c(mem.page_shift);
-        try w.byte(0x88);
-        try w.byte(0x51);
-        try w.get(va);
-        try w.i64c(mem.page_size - 1);
-        try w.byte(0x83);
-        try w.i64c(mem.page_size - n);
-        try w.byte(0x58); // le_u
+        if (narrow) {
+            try w.get(va32);
+            try w.i32c(mem.page_shift);
+            try w.byte(0x76);
+            try w.byte(0xAD); // i64.extend_i32_u
+            try w.byte(0x51);
+            try w.get(va32);
+            try w.i32c(mem.page_size - 1);
+            try w.byte(0x71);
+            try w.i32c(mem.page_size - n);
+            try w.byte(0x4D); // i32.le_u
+        } else {
+            try w.get(va);
+            try w.i64c(mem.page_shift);
+            try w.byte(0x88);
+            try w.byte(0x51);
+            try w.get(va);
+            try w.i64c(mem.page_size - 1);
+            try w.byte(0x83);
+            try w.i64c(mem.page_size - n);
+            try w.byte(0x58); // le_u
+        }
         try w.byte(0x71); // i32.and
         try w.bytes(&[_]u8{ 0x04, if (store) VOID else vw });
         try e.push(.other);
-        // Fast path: host = (va + delta) as i32.
-        try w.get(va);
-        try w.get(ent);
-        try w.memop(0x29, @as(u32, if (store) mem.tlb_write_off else 0) + 8);
-        try w.byte(0x7C);
-        try w.byte(0xA7);
+        // Fast path: host = (va + delta) as i32 (delta's low word, for a
+        // narrow address).
+        if (narrow) {
+            try w.get(va32);
+            try w.get(ent);
+            try w.memop(0x28, @as(u32, if (store) mem.tlb_write_off else 0) + 8);
+            try w.byte(0x6A);
+        } else {
+            try w.get(va);
+            try w.get(ent);
+            try w.memop(0x29, @as(u32, if (store) mem.tlb_write_off else 0) + 8);
+            try w.byte(0x7C);
+            try w.byte(0xA7);
+        }
         if (store) {
             try w.get(sv);
             try w.memop(switch (f.size) {

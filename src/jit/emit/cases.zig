@@ -398,6 +398,27 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  exit.chain #0x200 !3
         ) });
     };
+    // A 32-bit guest's addresses (zext of an i32): the TLB in i32, on a
+    // page, at its end, across it, and unmapped.
+    for ([_]u64{ data_va + 8, data_va + 0xffc, data_va + 0xffe, data_va + 0x10000 }) |start| {
+        try list.append(gpa, .{ .regs = .{ start, 0x1122_3344_5566_7788, 0, 0, 0, 0, 0, 0 }, .text = try gpa.dupe(u8,
+            \\b0:
+            \\  %0 = getreg:i32 #0x0
+            \\  %1 = zext:i64 %0
+            \\  %2 = getreg:i32 #0x8
+            \\  store %1, %2 #0x2 @0x100 !1
+            \\  %3 = zext:i64 %0
+            \\  %4 = load:i16 %3 #0x1 @0x104 !2
+            \\  %5 = zext:i64 %4
+            \\  setreg %5 #0x10
+            \\  %6 = zext:i64 %0
+            \\  %7 = load:i32 %6 #0x2 @0x108 !3
+            \\  %8 = zext:i64 %7
+            \\  setreg %8 #0x18
+            \\  setreg %1 #0x20
+            \\  exit.chain #0x200 !4
+        ) });
+    }
     // A helper_no_regs call between a register's writes and its reads,
     // and with flags pending: neither need be written first.
     for ([_]u64{ data_va, data_va + 0x10000 }) |start| {
