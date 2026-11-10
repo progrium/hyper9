@@ -2875,10 +2875,14 @@ test "random 386 programs agree with T0 natively, region by region" {
 const irfuzz = @import("fuzz.zig");
 
 /// Runs `r` natively in `region` (reset first).
+/// Region `r` through jit/opt, as the pipeline gives it, then emitted and
+/// run (callers check it against ir_eval on `r` itself).
 fn runNative(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env, r: *const ir.Region, c: cases.Case) !cases.Result {
+    var ro = try irfuzz.optimized(gpa, r);
+    defer ro.deinit(gpa);
     var code: std.ArrayList(u8) = .empty;
     defer code.deinit(gpa);
-    const out = try emitRegion(gpa, r, &code);
+    const out = try emitRegion(gpa, &ro, &code);
     region.reset();
     const off = region.alloc(code.items.len, 16) orelse return error.TooLarge;
     region.write(off, code.items);
@@ -2903,7 +2907,8 @@ fn stillDiffers(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env
     const pid = linux.fork();
     if (pid == 0) {
         _ = linux.syscall1(.alarm, 1);
-        const got = runNative(gpa, region, env, &r, c) catch linux.exit(2);
+        // opt making an invalid region counts as differing.
+        const got = runNative(gpa, region, env, &r, c) catch |err| linux.exit(if (err == error.Invalid) 1 else 2);
         linux.exit(if (cases.same(want, got)) 0 else 1);
     }
     var status: u32 = 0;
@@ -2945,9 +2950,31 @@ fn reduce(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env, text
     return std.mem.join(gpa, "\n", lines.items);
 }
 
-/// Random regions per `zig build vcpu`, from fuzz_seed.
+/// Random regions per `zig build vcpu`, from fuzz_seed; H9_FUZZ_COUNT and
+/// H9_FUZZ_SEED override them.
 const fuzz_count = 3000;
 const fuzz_seed = 0x5eed;
+
+/// An integer from the environment (Linux, without libc), or `default`.
+fn envInt(name: []const u8, default: u64) u64 {
+    const linux = std.os.linux;
+    const fd = linux.open("/proc/self/environ", .{}, 0);
+    if (@as(isize, @bitCast(fd)) < 0) return default;
+    defer _ = linux.close(@intCast(fd));
+    var buf: [1 << 16]u8 = undefined;
+    var n: usize = 0;
+    while (n < buf.len) {
+        const k = linux.read(@intCast(fd), buf[n..].ptr, buf.len - n);
+        if (@as(isize, @bitCast(k)) <= 0) break;
+        n += k;
+    }
+    var it = std.mem.splitScalar(u8, buf[0..n], 0);
+    while (it.next()) |kv| {
+        if (kv.len > name.len and std.mem.startsWith(u8, kv, name) and kv[name.len] == '=')
+            return std.fmt.parseInt(u64, kv[name.len + 1 ..], 0) catch default;
+    }
+    return default;
+}
 
 test "random regions match ir_eval" {
     if (!supported or builtin.os.tag != .linux or !codemem.available()) return error.SkipZigTest;
@@ -2956,8 +2983,10 @@ test "random regions match ir_eval" {
     defer gpa.destroy(env);
     var region = try codemem.Region.init(1 << 20);
     defer region.deinit();
-    for (0..fuzz_count) |n| {
-        const seed = fuzz_seed +% n;
+    const count = envInt("H9_FUZZ_COUNT", fuzz_count);
+    const first = envInt("H9_FUZZ_SEED", fuzz_seed);
+    for (0..count) |n| {
+        const seed = first +% n;
         var prng: std.Random.DefaultPrng = .init(seed);
         const rnd = prng.random();
         var r = try irfuzz.generate(gpa, rnd, .{ .lazy_records = true });
