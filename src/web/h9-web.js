@@ -36,6 +36,19 @@ const PAGE = 65536;
  * from its import section, or 0 if it imports none.
  */
 export function importedMemoryPages(bytes) {
+  return importedMin(bytes, 2) ?? 0;
+}
+
+/**
+ * The minimum size of the function table a module imports (h9.wasm
+ * imports its own, so the JIT can grow it), or null if it imports none.
+ */
+export function importedTableSize(bytes) {
+  return importedMin(bytes, 1);
+}
+
+// The minimum of the first import of `want` kind (1 table, 2 memory).
+function importedMin(bytes, want) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let i = 8;
   const leb = () => {
@@ -55,16 +68,83 @@ export function importedMemoryPages(bytes) {
         skipName();
         const kind = b[i++];
         if (kind === 0) leb();
-        else if (kind === 1) { i++; limits(); }
-        else if (kind === 2) return limits();
+        else if (kind === 1) { i++; const m = limits(); if (want === 1) return m; }
+        else if (kind === 2) { const m = limits(); if (want === 2) return m; }
         else if (kind === 3) i += 2;
         else if (kind === 4) { i++; leb(); }
       }
-      return 0;
+      return null;
     }
     i = end;
   }
-  return 0;
+  return null;
+}
+
+/**
+ * The JIT's side of the host (src/jit/emit/wasm.zig): compiles the modules
+ * h9's JIT builds in its memory, asynchronously, and installs their
+ * regions in h9's function table. h9 calls a region there through a
+ * function pointer, and regions tail-call each other through it.
+ *
+ * - memory and table: h9's memory and the function table it imports.
+ * - exports(): h9's exports, once it's instantiated. Modules import its
+ *   jit_eval, jit_slow_load, jit_slow_store, jit_interp, and jit_helper as
+ *   they are, so no JS frame sits between a region and h9 and JSPI can
+ *   suspend through both.
+ *
+ * Returns h9's imports, and settled() for tests, a Promise for every
+ * compile started since the last call:
+ *
+ * - jit_compile(ptr, len, base, n, status): copies the module at
+ *   ptr..ptr+len, compiles it off the thread, installs its exports r0 to
+ *   r{n-1} at table slots base to base+n-1 (growing the table to fit; the
+ *   slots are null until then), and sets the i32 at `status` to 1, or to
+ *   -1 if it failed or the slots were dropped first. h9 keeps interpreting
+ *   until it sees 1.
+ * - jit_drop(base, n): nulls those slots and cancels a compile still on
+ *   its way to them. h9 unlinks the chain cells that point at them first.
+ */
+export function jitImports({ memory, table, exports, log = console.error }) {
+  let env = null;
+  const pending = new Map(); // base -> the compile that owns it
+  let started = [];
+  const setStatus = (at, v) => { new Int32Array(memory.buffer, at >>> 0, 1)[0] = v; };
+  return {
+    jit_compile(ptr, len, base, n, status) {
+      base >>>= 0;
+      n >>>= 0;
+      if (table.length < base + n) table.grow(base + n - table.length);
+      const bytes = new Uint8Array(memory.buffer, ptr >>> 0, len >>> 0).slice();
+      const token = {};
+      pending.set(base, token);
+      started.push(WebAssembly.compile(bytes).then((mod) => {
+        if (!env) {
+          const x = exports();
+          env = { memory, table, eval: x.jit_eval, slow_load: x.jit_slow_load, slow_store: x.jit_slow_store, interp: x.jit_interp, helper: x.jit_helper };
+        }
+        return WebAssembly.instantiate(mod, { env: { ...env, base: new WebAssembly.Global({ value: 'i32' }, base) } });
+      }).then((inst) => {
+        if (pending.get(base) !== token) return setStatus(status, -1);
+        pending.delete(base);
+        for (let k = 0; k < n; k++) table.set(base + k, inst.exports[`r${k}`]);
+        setStatus(status, 1);
+      }, (e) => {
+        if (pending.get(base) === token) pending.delete(base);
+        log(`jit: ${e.message}`);
+        setStatus(status, -1);
+      }));
+    },
+    jit_drop(base, n) {
+      base >>>= 0;
+      pending.delete(base);
+      for (let k = 0; k < n >>> 0; k++) table.set(base + k, null);
+    },
+    settled() {
+      const all = started;
+      started = [];
+      return Promise.all(all);
+    },
+  };
 }
 
 // Runs fn on a later turn of the event loop. setTimeout(0) is clamped to
@@ -94,6 +174,8 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
   const h9mod = h9 instanceof WebAssembly.Module ? h9 : new WebAssembly.Module(h9);
   const v86mod = v86 instanceof WebAssembly.Module ? v86 : new WebAssembly.Module(v86);
   const h9pages = importedMemoryPages(h9 instanceof WebAssembly.Module ? new Uint8Array(0) : h9);
+  // h9's own function table, which the JIT installs regions in.
+  const h9tableSize = h9 instanceof WebAssembly.Module ? null : importedTableSize(h9);
 
   // v86, first: it owns the memory's low part (its register block, data
   // and stack), and h9 is linked to start at 16 MiB.
@@ -172,7 +254,9 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
     fatal = e;
     finish(e instanceof Exit ? e.code : Promise.reject(e));
   };
-  let entry;
+  let entry, hx;
+  const h9table = h9tableSize === null ? null : new WebAssembly.Table({ element: 'anyfunc', initial: h9tableSize });
+  const jit = h9table && jitImports({ memory: mem, table: h9table, exports: () => hx, log });
   const h9imports = {
     park: new WebAssembly.Suspending((id, ms) => {
       if (permits.delete(id)) return 1;
@@ -206,16 +290,17 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
     stop_signals: () => host.stopSignals(),
     set_raw: (on) => host.setRaw(!!on),
     ...wsImports(() => mem, str),
+    ...(jit ? { jit_compile: jit.jit_compile, jit_drop: jit.jit_drop } : {}),
   };
   const wimports = wasi(mem);
   wimports.proc_exit = (code) => { throw new Exit(code); };
   const inst = new WebAssembly.Instance(h9mod, {
-    env: { memory: mem },
+    env: { memory: mem, ...(h9table ? { __indirect_function_table: h9table } : {}) },
     wasi_snapshot_preview1: wimports,
     h9: h9imports,
     v86: v86imports,
   });
-  const hx = inst.exports;
+  hx = inst.exports;
   entry = WebAssembly.promising(hx.h9_coro_entry);
   // _start is the first coroutine, on the linker's stack.
   WebAssembly.promising(hx._start)().then(() => finish(0), die);

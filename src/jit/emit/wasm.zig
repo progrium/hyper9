@@ -269,6 +269,8 @@ const Plan = struct {
 const Reg = struct {
     off: u32,
     ty: Type,
+    /// The widest access's size in bytes.
+    size: u32,
     local: u32 = 0,
     written: bool = false,
     bad: bool = false,
@@ -361,7 +363,7 @@ fn planRegion(gpa: Allocator, r: *const ir.Region, promoted: *const std.AutoHash
             } else if (i.op == .getreg and promoted.contains(@intCast(i.aux))) {
                 p.kind[k] = .alias;
                 const reg = regs[promoted.get(@intCast(i.aux)).?];
-                for (k + 1..last[k]) |j| if (p.kind[j] == .root and clobbers(r, j, reg.off, byteSize(reg.ty).?)) {
+                for (k + 1..last[k]) |j| if (p.kind[j] == .root and clobbers(r, j, reg.off, reg.size)) {
                     p.kind[k] = .root;
                     break;
                 };
@@ -1445,10 +1447,11 @@ pub fn emitBatch(gpa: Allocator, regions: []const *const ir.Region, opts: Option
                     const gop = try e.promoted.getOrPut(gpa, @intCast(i.aux));
                     if (!gop.found_existing) {
                         gop.value_ptr.* = @intCast(regs.items.len);
-                        try regs.append(gpa, .{ .off = @intCast(i.aux), .ty = t });
+                        try regs.append(gpa, .{ .off = @intCast(i.aux), .ty = t, .size = byteSize(t).? });
                     }
                     const g = &regs.items[gop.value_ptr.*];
-                    if (byteSize(g.ty) != byteSize(t)) g.bad = true;
+                    if (g.size != byteSize(t).?) g.bad = true;
+                    g.size = @max(g.size, byteSize(t).?);
                     if (i.op == .setreg) g.written = true;
                 },
                 .@"exit.chain" => if (opts.cells != 0 and !e.cells.contains(i.aux)) {
@@ -1466,7 +1469,7 @@ pub fn emitBatch(gpa: Allocator, regions: []const *const ir.Region, opts: Option
         }
     }.lt);
     for (regs.items, 0..) |*a, k| for (regs.items[k + 1 ..]) |*b| {
-        if (a.off + byteSize(a.ty).? <= b.off) break;
+        if (a.off + a.size <= b.off) break;
         a.bad = true;
         b.bad = true;
     };
@@ -1751,7 +1754,7 @@ test "values: dead code, trees, and pooled locals" {
         \\  exit.chain #0x0
     );
     defer r.deinit(gpa);
-    var regs = [_]Reg{ .{ .off = 0, .ty = .i64 }, .{ .off = 8, .ty = .i64 }, .{ .off = 16, .ty = .i64 }, .{ .off = 24, .ty = .i64 } };
+    var regs = [_]Reg{ .{ .off = 0, .ty = .i64, .size = 8 }, .{ .off = 8, .ty = .i64, .size = 8 }, .{ .off = 16, .ty = .i64, .size = 8 }, .{ .off = 24, .ty = .i64, .size = 8 } };
     var promoted: std.AutoHashMapUnmanaged(u32, u32) = .empty;
     defer promoted.deinit(gpa);
     for (regs, 0..) |g, k| try promoted.put(gpa, g.off, @intCast(k));

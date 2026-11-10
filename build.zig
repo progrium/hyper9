@@ -1676,6 +1676,8 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     });
     runtime.entry = .disabled;
     runtime.rdynamic = true;
+    // Imported, as h9.wasm's is, so h9-web.js's JIT installer can grow it.
+    runtime.import_table = true;
     const node_run = b.addSystemCommand(&.{ node, "tests/jit/run.mjs" });
     node_run.addFileArg(runtime.getEmittedBin());
     node_run.expectExitCode(0);
