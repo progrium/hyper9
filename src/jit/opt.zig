@@ -290,11 +290,25 @@ fn subPredX86(cc: u64) ?ir.Pred {
     };
 }
 
-/// Marks `setreg`s a later one in the block overwrites before anything can
-/// see the slot.
+/// Marks `setreg`s and `pending.flags` a later write in the block makes
+/// unobservable before anything can see the slot.
+///
+/// A `setreg` overwrites its bytes. A `pending.flags` of kind 0 or 1 only
+/// merges its mask into the word at aux, keeping the other bits, so it
+/// covers nothing but an earlier pending.flags of the same kind at the same
+/// offset (one of another kind is written first). Kind 2 overwrites the
+/// 16-byte record at aux + 4, so it covers writes inside that, and an
+/// earlier kind 2 at the same offset.
 fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
-    // Slots written later in the block, with no barrier since.
-    var later: [64]Known = undefined;
+    const W = struct {
+        off: u64,
+        size: u32,
+        /// A full overwrite of [off, off+size), or a pending.flags merge
+        /// of this kind at off.
+        merge: ?u64,
+    };
+    // Writes later in the block, with no barrier since.
+    var later: [64]W = undefined;
     var nl: usize = 0;
     const insts = r.insts.items;
     var idx = blk.start + blk.len;
@@ -305,25 +319,47 @@ fn deadWrites(r: *ir.Region, blk: ir.Block, dead: []bool) void {
             nl = 0;
             continue;
         }
-        switch (i.op) {
-            .getreg => forget(&later, &nl, i.aux, sizeOf(i.ty)),
-            // Flags pending at a slot are written there before anything
-            // can see it, unless a later write to the slot drops them: as
-            // a store for this pass.
-            .setreg, .@"pending.flags" => {
-                const sz: u32 = if (i.op == .setreg) sizeOf(insts[i.a].ty) else 4;
-                const covered = for (later[0..nl]) |k| {
-                    if (k.off <= i.aux and i.aux + sz <= k.off + k.size) break true;
-                } else false;
-                if (covered) {
-                    dead[idx] = true;
-                } else if (nl < later.len) {
-                    later[nl] = .{ .off = i.aux, .size = sz, .ref = none };
-                    nl += 1;
+        // What this write does, as a W.
+        const w: ?W = switch (i.op) {
+            .setreg => .{ .off = i.aux, .size = sizeOf(insts[i.a].ty), .merge = null },
+            .@"pending.flags" => if (i.aux2 == 2)
+                .{ .off = i.aux + 4, .size = 16, .merge = null }
+            else
+                .{ .off = i.aux, .size = 4, .merge = i.aux2 },
+            else => null,
+        };
+        if (w) |me| {
+            const covered = for (later[0..nl]) |k| {
+                if (k.merge) |km| {
+                    // A merge covers only the same merge.
+                    if (me.merge != null and me.merge.? == km and me.off == k.off) break true;
+                } else if (k.off <= me.off and me.off + me.size <= k.off + k.size) {
+                    // A full overwrite covers what's inside it, merge or not.
+                    break true;
                 }
-            },
-            else => if (excWord(i)) |w| forget(&later, &nl, w, 4),
+            } else false;
+            if (covered) {
+                dead[idx] = true;
+            } else if (nl < later.len) {
+                later[nl] = me;
+                nl += 1;
+            }
+            continue;
         }
+        switch (i.op) {
+            .getreg => forgetW(W, &later, &nl, i.aux, sizeOf(i.ty)),
+            else => if (excWord(i)) |x| forgetW(W, &later, &nl, x, 4),
+        }
+    }
+}
+
+fn forgetW(comptime W: type, list: []W, n: *usize, off: u64, size: u32) void {
+    var j: usize = 0;
+    while (j < n.*) {
+        if (overlaps(list[j].off, list[j].size, off, size)) {
+            list[j] = list[n.* - 1];
+            n.* -= 1;
+        } else j += 1;
     }
 }
 
@@ -706,4 +742,37 @@ test "opt: a lazy pending.flags keeps its flags op, constant operands and all" {
         if (x.op == .@"pending.flags") break x;
     } else unreachable;
     try std.testing.expectEqual(ir.Op.@"eflags.sub", r.insts.items[p.a].op);
+}
+
+test "opt: pending.flags of another kind at one word isn't covered" {
+    // eflags then nzcv at 0x30: both merges stay (ir_eval writes both).
+    const got = try optimized(
+        \\region 0x1000
+        \\b0:
+        \\  %0 = getreg:i32 #0x8
+        \\  %1 = eflags.logic:flags %0
+        \\  pending.flags %1 #0x30 @0x1
+        \\  %3 = nzcv.logic:flags %0
+        \\  pending.flags %3 #0x30
+        \\  exit.chain #0x1004
+        \\
+    );
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.count(u8, got, "pending.flags") == 2);
+}
+
+test "opt: a pending.flags merge doesn't cover an earlier setreg" {
+    const got = try optimized(
+        \\region 0x1000
+        \\b0:
+        \\  %0 = const:i32 #0x202
+        \\  setreg %0 #0x30
+        \\  %2 = getreg:i32 #0x8
+        \\  %3 = eflags.logic:flags %2
+        \\  pending.flags %3 #0x30 @0x1
+        \\  exit.chain #0x1004
+        \\
+    );
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "setreg") != null);
 }
