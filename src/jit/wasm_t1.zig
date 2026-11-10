@@ -598,6 +598,10 @@ fn build(cfg: Config) void {
     };
 }
 
+/// The most IR instructions a batch has to be emitted as one function.
+/// awk's hot loop is a batch of 64 regions and about 3300.
+pub var one_function_max: usize = 4096;
+
 fn buildBatch(entries: []*Entry) !void {
     const gpa = st.gpa;
     const n: u32 = @intCast(entries.len);
@@ -615,11 +619,18 @@ fn buildBatch(entries: []*Entry) !void {
     const cells = try gpa.alloc(u32, @max(nchains, 1));
     errdefer gpa.free(cells);
     @memset(cells, 0);
+    // A small batch is one function, so a chain between its regions is a
+    // branch that keeps the registers in locals; a big one is a function
+    // per region, since V8's optimizing time grows faster than the
+    // function (emit/wasm.zig, Layout).
+    var size: usize = 0;
+    for (regions) |r| size += r.insts.items.len;
+    const layout: wasm.Layout = if (size <= one_function_max) .br_table else .functions;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     var wb: wasm.Batch = .{};
     defer wb.deinit(gpa);
-    try wasm.emitBatch(gpa, regions, .{ .cells = @intCast(@intFromPtr(cells.ptr)), .jump = true, .ext_io = @intCast(@intFromPtr(&ext_io)), .helpers = st.helpers }, &out, &wb);
+    try wasm.emitBatch(gpa, regions, .{ .cells = @intCast(@intFromPtr(cells.ptr)), .jump = true, .ext_io = @intCast(@intFromPtr(&ext_io)), .helpers = st.helpers, .layout = layout }, &out, &wb);
     // Which key each cell links to: the target on a page its sources came
     // from, if every source in the batch that uses it agrees.
     const targets = try gpa.alloc(?Key, cells.len);
