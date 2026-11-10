@@ -1747,6 +1747,16 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     }) else null;
     const fuzz_options = b.addOptions();
     fuzz_options.addOption(bool, "unicorn", unicorn != null);
+    // zig build fuzz-long: both fuzzers with the region check, generated
+    // code (--native), and lockstep when Unicorn is built in, for
+    // -Dfuzz-minutes (default 60), -Dfuzz-jobs processes each (default 2),
+    // tallying divergences instead of stopping. Each job starts its seeds
+    // 2^40 apart from -Dfuzz-seed (default: from the clock).
+    const fuzz_long = b.step("fuzz-long", "Run fuzz-a64 and fuzz-x86 with the region check and --native for an hour across seeds (-Dfuzz-minutes, -Dfuzz-jobs, -Dfuzz-seed)");
+    const fuzz_minutes = b.option(u32, "fuzz-minutes", "zig build fuzz-long: how long to fuzz (default 60)") orelse 60;
+    const fuzz_jobs = b.option(u32, "fuzz-jobs", "zig build fuzz-long: processes per fuzzer (default 2)") orelse 2;
+    const fuzz_seed = b.option(u64, "fuzz-seed", "zig build fuzz-long: the first seed (default: from the clock)") orelse
+        @as(u64, @truncate(@as(u128, @bitCast(@as(i128, std.Io.Timestamp.now(b.graph.io, .real).nanoseconds)))));
     for ([_][]const u8{ "a64", "x86" }) |arch| {
         const exe = b.addExecutable(.{
             .name = b.fmt("fuzz-{s}", .{arch}),
@@ -1766,6 +1776,13 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
         run.has_side_effects = true;
         if (b.args) |a| run.addArgs(a);
         b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)", .{arch})).dependOn(&run.step);
+        for (0..fuzz_jobs) |j| {
+            const long = b.addRunArtifact(exe);
+            long.has_side_effects = true;
+            long.setName(b.fmt("fuzz-{s} job {d}", .{ arch, j }));
+            long.addArgs(&.{ "--native", "--keep-going", "--len", "64", "--minutes", b.fmt("{d}", .{fuzz_minutes}), "--seed", b.fmt("{d}", .{fuzz_seed +% (@as(u64, j) << 40)}) });
+            fuzz_long.dependOn(&long.step);
+        }
     }
     _ = vcpu;
 

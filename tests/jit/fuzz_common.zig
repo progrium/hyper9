@@ -6,6 +6,7 @@ const std = @import("std");
 pub const usage =
     \\  --seed N       first seed (default: from the clock); program i uses seed+i
     \\  --iters N      programs to run (default 1000)
+    \\  --minutes N    run programs for N minutes instead of --iters (zig build fuzz-long)
     \\  --len N        instructions per program (default 32)
     \\  --no-check     skip the region check
     \\  --no-lockstep  skip lockstep
@@ -20,6 +21,8 @@ pub fn Args(comptime Class: type) type {
     return struct {
         seed: u64,
         iters: u64 = 1000,
+        /// With --minutes: when to stop, in the clock's nanoseconds.
+        deadline: ?i96 = null,
         len: u32 = 32,
         check: bool = true,
         lockstep: bool = true,
@@ -44,6 +47,11 @@ pub fn Args(comptime Class: type) type {
                     i += 1;
                 } else if (std.mem.eql(u8, a, "--iters")) {
                     args.iters = try std.fmt.parseInt(u64, next, 0);
+                    i += 1;
+                } else if (std.mem.eql(u8, a, "--minutes")) {
+                    const m = try std.fmt.parseInt(u64, next, 0);
+                    args.deadline = std.Io.Timestamp.now(init.io, .awake).nanoseconds + @as(i96, m) * 60 * std.time.ns_per_s;
+                    args.iters = std.math.maxInt(u64);
                     i += 1;
                 } else if (std.mem.eql(u8, a, "--len")) {
                     args.len = try std.fmt.parseInt(u32, next, 0);
@@ -79,6 +87,15 @@ pub fn Args(comptime Class: type) type {
             };
             if (args.nclasses == 0) return error.Usage;
             return args;
+        }
+
+        /// Whether to run program `i`: below --iters, and before the
+        /// deadline (looked at every 64 programs).
+        pub fn more(a: *const Self, i: u64, io: std.Io) bool {
+            if (i >= a.iters) return false;
+            const d = a.deadline orelse return true;
+            if (i % 64 != 0) return true;
+            return std.Io.Timestamp.now(io, .awake).nanoseconds < d;
         }
 
         pub fn classes(a: *const Self) []const Class {

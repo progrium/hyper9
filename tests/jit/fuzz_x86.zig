@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
     const run = try check.Run.init(gpa, &x86.guest, check.mapBacking(&s.map));
     defer run.deinit();
     var i: u64 = 0;
-    while (i < args.iters) : (i += 1) {
+    while (args.more(i, init.io)) : (i += 1) {
         const seed = args.seed +% i;
         var prng = std.Random.DefaultPrng.init(seed);
         const code = gen.program(prng.random(), .{ .len = @min(args.len, 1024), .classes = args.classes() }, &buf);
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("seed {d}: program {x}\n{s}\n", .{ seed, code, report.written() });
         std.process.exit(1);
     }
-    std.debug.print("fuzz-x86: {d} programs, {d} diverged; {d} instructions stepped, {d} region-checked\n", .{ args.iters, failed, steps, checked });
+    std.debug.print("fuzz-x86: {d} programs, {d} diverged; {d} instructions stepped, {d} region-checked\n", .{ i, failed, steps, checked });
     if (native) |n| std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
     tally.print();
     if (failed != 0) std.process.exit(1);

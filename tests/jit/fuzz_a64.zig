@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var retired: u64 = 0;
     var known: KnownCounts = .initFill(0);
     var i: u64 = 0;
-    while (i < args.iters) : (i += 1) {
+    while (args.more(i, init.io)) : (i += 1) {
         const seed = args.seed +% i;
         var prng = std.Random.DefaultPrng.init(seed);
         const words = gen.program(prng.random(), .{ .len = @min(args.len, 1024), .classes = args.classes() }, &buf);
@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s}\n", .{report.written()});
         std.process.exit(1);
     }
-    std.debug.print("fuzz-a64: {d} programs, {d} diverged; {d} instructions region-checked\n", .{ args.iters, failed, retired });
+    std.debug.print("fuzz-a64: {d} programs, {d} diverged; {d} instructions region-checked\n", .{ i, failed, retired });
     if (native) |n| std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
     tally.print();
     if (options.unicorn) for (std.enums.values(lockstep.Known)) |k| if (known.get(k) != 0)
