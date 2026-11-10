@@ -148,9 +148,14 @@ pub fn exitFor(c: *Ctx, cpu: *Cpu, e: cpu_mod.Exit, pc: u32) u32 {
             count(c);
             return @intFromEnum(Exit.svc);
         },
-        // Not retired, as check.zig's rules have it (T0 counts it in
-        // Cpu.retired); EIP is past it.
-        .breakpoint => return @intFromEnum(Exit.brk),
+        // Not retired, as check.zig's rules have it, and left at the
+        // INT3: whoever takes the exit (dispatch's caller) runs it again
+        // on T0, which raises it with EIP past it.
+        .breakpoint => {
+            cpu.eip = pc;
+            c.exit_pc = pc;
+            return @intFromEnum(Exit.brk);
+        },
         .fault => |f| {
             c.exit_pc = pc;
             c.exit_addr = f.addr;
@@ -159,8 +164,10 @@ pub fn exitFor(c: *Ctx, cpu: *Cpu, e: cpu_mod.Exit, pc: u32) u32 {
         },
         .exception => |v| {
             if (v == cpu_mod.vec_ud) return @intFromEnum(Exit.undef);
-            // INTO's #OF leaves EIP past it, as T0 does, but like any
-            // exit at a fault it isn't counted here.
+            // At the instruction, as for a fault, so T0 runs it again
+            // and raises it: INTO's #OF, a trap, leaves EIP past it there.
+            cpu.eip = pc;
+            c.exit_pc = pc;
             c.exit_addr = 0;
             c.exit_info = (exception_kind << 8) | (@as(u64, v) << 16);
             return @intFromEnum(Exit.fault);

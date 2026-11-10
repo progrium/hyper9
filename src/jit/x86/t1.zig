@@ -275,3 +275,17 @@ test "h86 T1: a counted loop chains, and a store to its own code retranslates" {
     try testing.expectEqual(@as(u32, 5), p.t1.cpu.r[0]);
     try testing.expect(p.t1.stats.compiled > 1);
 }
+
+test "h86 T1: INT3 and INTO's #OF come back with EIP past them, as on T0" {
+    const c = try testCache(1 << 20);
+    defer freeCache(c);
+    const p = try Pair.init(c, eval_emit.emitter_def);
+    defer p.deinit();
+    // movl %eax, 0 after each: running on past the trap would fault.
+    const brk = [_]u8{ 0x40, 0xcc, 0xa3, 0, 0, 0, 0 }; // incl %eax; int3; movl %eax, 0
+    try expectSame(p.t1, p.t0, &brk, @splat(0), 0x2, 0);
+    try testing.expectEqual(@as(u32, gen.code_va + 2), p.t1.cpu.eip);
+    const into = [_]u8{ 0xb8, 0xff, 0xff, 0xff, 0x7f, 0x40, 0xce, 0xa3, 0, 0, 0, 0 }; // movl $0x7fffffff, %eax; incl %eax; into; movl %eax, 0
+    try expectSame(p.t1, p.t0, &into, @splat(0), 0x2, 0);
+    try testing.expectEqual(@as(u32, gen.code_va + 7), p.t1.cpu.eip);
+}
