@@ -196,6 +196,20 @@ fn run(comptime k: K, m: *Machine, o: *const Op, pc: u64) Next {
             cpu.v[o.d] = r;
         },
         .f_mov, .f_abs, .f_neg, .f_sqrt, .f_cvt, .f_rint, .f_cmp, .f_ccmp, .f_mov_i, .f_mul, .f_div, .f_add, .f_sub, .f_max, .f_min, .f_maxnm, .f_minnm, .f_nmul, .f_csel, .f_madd, .f_msub, .f_nmadd, .f_nmsub, .f_toint, .f_fromint, .f_mov_tog, .f_mov_fromg => fpScalar(k, cpu, o),
+        .vf_maxnm, .vf_minnm, .vf_mla, .vf_mls, .vf_add, .vf_sub, .vf_mulx, .vf_cmeq, .vf_max, .vf_min, .vf_recps, .vf_rsqrts, .vf_maxnmp, .vf_minnmp, .vf_addp, .vf_maxp, .vf_minp, .vf_abd, .vf_mul, .vf_cmge, .vf_cmgt, .vf_acge, .vf_acgt, .vf_div, .vf_cmgt0, .vf_cmeq0, .vf_cmlt0, .vf_cmge0, .vf_cmle0, .vf_abs, .vf_neg, .vf_sqrt, .vf_rint, .vf_toint, .vf_fromint, .vf_recpe, .vf_rsqrte, .vf_recpx, .vf_maxnmv, .vf_minnmv, .vf_maxv, .vf_minv, .vf_mla_e, .vf_mls_e, .vf_mul_e, .vf_mulx_e => fpVec(k, cpu, o),
+        .vf_cvtn, .vf_cvtxn, .vf_cvtl => fpCvtVec(k, cpu, o),
+        .urecpe, .ursqrte => {
+            const n = cpu.v[o.n];
+            var r: u128 = 0;
+            for (0..count(o, u32)) |i| {
+                const a = lane(n, u32, i);
+                const v: u32 = if (k == .urecpe)
+                    (if (a >> 31 == 0) 0xffff_ffff else recipEstimate(a >> 23) << 23)
+                else if (a >> 30 == 0) 0xffff_ffff else rsqrtEstimate(a >> 23) << 23;
+                put(&r, u32, i, v);
+            }
+            cpu.v[o.d] = r;
+        },
         _ => return exec.undef(m, pc),
     }
     if (qc) cpu.fpsr |= QC;
@@ -828,6 +842,299 @@ fn fpScalar(comptime k: K, cpu: *Cpu, o: *const Op) void {
             };
             cpu.v[o.d] = r;
             cpu.fpsr |= fpsrBits(e.flags);
+        },
+        else => unreachable,
+    }
+}
+
+// ---------------------------------------------------------------- AdvSIMD FP
+
+/// RecipEstimate: a in [256, 512) to an estimate in [256, 512).
+fn recipEstimate(a0: u32) u32 {
+    const a = a0 * 2 + 1;
+    const b = (@as(u32, 1) << 19) / a;
+    return (b + 1) / 2;
+}
+
+/// RecipSqrtEstimate: a in [128, 512) to an estimate in [256, 512).
+fn rsqrtEstimate(a0: u32) u32 {
+    var a: u64 = a0;
+    if (a < 256) {
+        a = a * 2 + 1;
+    } else {
+        a = (a >> 1) << 1;
+        a = (a + 1) * 2;
+    }
+    var b: u64 = 512;
+    while (a * (b + 1) * (b + 1) < (1 << 28)) b += 1;
+    return @intCast((b + 1) / 2);
+}
+
+/// FRECPE: FPRecipEstimate.
+fn frecpe(comptime T: type, e: *sf.Env, a: T) T {
+    const F = sf.Fmt(T);
+    if (sf.pickNan(T, e, &.{a})) |r| return r;
+    const x = sf.daz(T, e, a);
+    const sign = x & F.sign_bit;
+    const mag = x & ~F.sign_bit;
+    if (mag == F.inf) return sign;
+    if (mag == 0) {
+        e.flags |= sf.ZE;
+        return sign | F.inf;
+    }
+    const N = @bitSizeOf(T);
+    // |a| < 2^-128 (single) or 2^-1024 (double): the result overflows.
+    const tiny: T = if (N == 32) 0x0020_0000 else 0x0004_0000_0000_0000;
+    if (mag < tiny) {
+        const to_inf = switch (e.rounding) {
+            .near_even, .near_away => true,
+            .up => sign == 0,
+            .down => sign != 0,
+            .zero, .odd => false,
+        };
+        e.flags |= sf.OE | sf.PE;
+        return sign | (if (to_inf) F.inf else F.max_finite);
+    }
+    // |a| >= 2^126 (2^1022) with FZ: the result underflows to zero.
+    const big: T = if (N == 32) 0x7e80_0000 else 0x7fd0_0000_0000_0000;
+    if (e.ftz and mag >= big) {
+        e.flags |= sf.UE;
+        return sign;
+    }
+    var fraction: u64 = if (N == 32) @as(u64, mag & F.frac_mask) << 29 else mag & F.frac_mask;
+    var exp: i32 = @intCast(mag >> F.frac_bits);
+    if (exp == 0) {
+        if (fraction >> 51 & 1 == 0) {
+            exp = -1;
+            fraction = (fraction << 2) & ((1 << 52) - 1);
+        } else {
+            fraction = (fraction << 1) & ((1 << 52) - 1);
+        }
+    }
+    const scaled: u32 = @intCast(0x100 | (fraction >> 44));
+    var result_exp: i32 = (if (N == 32) 253 else 2045) - exp;
+    const est = recipEstimate(scaled);
+    fraction = @as(u64, est & 0xff) << 44;
+    if (result_exp == 0) {
+        fraction = 1 << 51 | fraction >> 1;
+    } else if (result_exp == -1) {
+        fraction = 1 << 50 | fraction >> 2;
+        result_exp = 0;
+    }
+    const re: T = @intCast(result_exp);
+    return if (N == 32) sign | re << 23 | @as(T, @intCast(fraction >> 29)) else sign | re << 52 | @as(T, @intCast(fraction));
+}
+
+/// FRSQRTE: FPRSqrtEstimate.
+fn frsqrte(comptime T: type, e: *sf.Env, a: T) T {
+    const F = sf.Fmt(T);
+    if (sf.pickNan(T, e, &.{a})) |r| return r;
+    const x = sf.daz(T, e, a);
+    const sign = x & F.sign_bit;
+    const mag = x & ~F.sign_bit;
+    if (mag == 0) {
+        e.flags |= sf.ZE;
+        return sign | F.inf;
+    }
+    if (sign != 0) {
+        e.flags |= sf.IE;
+        return sf.defaultNan(T, e);
+    }
+    if (mag == F.inf) return 0;
+    const N = @bitSizeOf(T);
+    var fraction: u64 = if (N == 32) @as(u64, mag & F.frac_mask) << 29 else mag & F.frac_mask;
+    var exp: i32 = @intCast(mag >> F.frac_bits);
+    if (exp == 0) {
+        while (fraction >> 51 & 1 == 0) {
+            fraction = (fraction << 1) & ((1 << 52) - 1);
+            exp -= 1;
+        }
+        fraction = (fraction << 1) & ((1 << 52) - 1);
+    }
+    const scaled: u32 = if (exp & 1 == 0) @intCast(0x100 | (fraction >> 44)) else @intCast(0x80 | (fraction >> 45));
+    const result_exp: i32 = @divFloor((if (N == 32) @as(i32, 380) else 3068) - exp, 2);
+    const est: T = rsqrtEstimate(scaled) & 0xff;
+    const re: T = @intCast(result_exp);
+    return if (N == 32) re << 23 | est << 15 else re << 52 | est << 44;
+}
+
+/// FRECPX.
+fn frecpx(comptime T: type, e: *sf.Env, a: T) T {
+    const F = sf.Fmt(T);
+    if (sf.pickNan(T, e, &.{a})) |r| return r;
+    const x = sf.daz(T, e, a);
+    const sign = x & F.sign_bit;
+    const exp = (x >> F.frac_bits) & F.exp_max;
+    const ne: T = if (exp == 0) F.exp_max - 1 else ~exp & F.exp_max;
+    return sign | ne << F.frac_bits;
+}
+
+/// FRECPS and FRSQRTS: 2 - n*m, and (3 - n*m) / 2, fused.
+fn stepFused(comptime T: type, e: *sf.Env, a: T, b: T, comptime rsqrt: bool) T {
+    const F = sf.Fmt(T);
+    const n = a ^ F.sign_bit;
+    if (sf.pickNan(T, e, &.{ n, b })) |r| return r;
+    const x = sf.daz(T, e, n);
+    const y = sf.daz(T, e, b);
+    const one: T = if (T == u32) 0x3f80_0000 else 0x3ff0_0000_0000_0000;
+    const two: T = if (T == u32) 0x4000_0000 else 0x4000_0000_0000_0000;
+    const three: T = if (T == u32) 0x4040_0000 else 0x4008_0000_0000_0000;
+    if ((sf.isInf(T, x) and sf.isZero(T, y)) or (sf.isZero(T, x) and sf.isInf(T, y)))
+        return if (rsqrt) one | (@as(T, 1) << (F.frac_bits - 1)) else two;
+    if (rsqrt) return sf.mulAddScaled(T, e, x, y, three, -1);
+    return sf.mulAdd(T, e, x, y, two);
+}
+
+fn fpElem(comptime k: K, comptime T: type, e: *sf.Env, a: T, b: T, d: T, o: *const Op) T {
+    const F = sf.Fmt(T);
+    return switch (k) {
+        .vf_maxnm => maxMin(T, e, a, b, true, true),
+        .vf_minnm => maxMin(T, e, a, b, false, true),
+        .vf_max => maxMin(T, e, a, b, true, false),
+        .vf_min => maxMin(T, e, a, b, false, false),
+        .vf_mla, .vf_mla_e => mulAdd(T, e, d, a, b),
+        .vf_mls, .vf_mls_e => mulAdd(T, e, d, a ^ F.sign_bit, b),
+        .vf_add => sf.add(T, e, a, b),
+        .vf_sub => sf.sub(T, e, a, b),
+        .vf_mul, .vf_mul_e => sf.mul(T, e, a, b),
+        .vf_div => sf.div(T, e, a, b),
+        .vf_mulx, .vf_mulx_e => blk: {
+            if (sf.pickNan(T, e, &.{ a, b })) |r| break :blk r;
+            const x = sf.daz(T, e, a);
+            const y = sf.daz(T, e, b);
+            if ((sf.isInf(T, x) and sf.isZero(T, y)) or (sf.isZero(T, x) and sf.isInf(T, y))) {
+                const two: T = if (T == u32) 0x4000_0000 else 0x4000_0000_0000_0000;
+                break :blk two | ((x ^ y) & F.sign_bit);
+            }
+            break :blk sf.mul(T, e, x, y);
+        },
+        .vf_abd => sf.sub(T, e, a, b) & ~F.sign_bit,
+        .vf_recps => stepFused(T, e, a, b, false),
+        .vf_rsqrts => stepFused(T, e, a, b, true),
+        .vf_cmeq => ones(T, sf.compare(T, e, a, b, false) == .eq),
+        .vf_cmge => ones(T, switch (sf.compare(T, e, a, b, true)) {
+            .gt, .eq => true,
+            else => false,
+        }),
+        .vf_cmgt => ones(T, sf.compare(T, e, a, b, true) == .gt),
+        .vf_acge => ones(T, switch (sf.compare(T, e, a & ~F.sign_bit, b & ~F.sign_bit, true)) {
+            .gt, .eq => true,
+            else => false,
+        }),
+        .vf_acgt => ones(T, sf.compare(T, e, a & ~F.sign_bit, b & ~F.sign_bit, true) == .gt),
+        .vf_cmgt0 => ones(T, sf.compare(T, e, a, 0, true) == .gt),
+        .vf_cmge0 => ones(T, switch (sf.compare(T, e, a, 0, true)) {
+            .gt, .eq => true,
+            else => false,
+        }),
+        .vf_cmeq0 => ones(T, sf.compare(T, e, a, 0, false) == .eq),
+        .vf_cmle0 => ones(T, switch (sf.compare(T, e, a, 0, true)) {
+            .lt, .eq => true,
+            else => false,
+        }),
+        .vf_cmlt0 => ones(T, sf.compare(T, e, a, 0, true) == .lt),
+        .vf_abs => a & ~F.sign_bit,
+        .vf_neg => a ^ F.sign_bit,
+        .vf_sqrt => sf.sqrt(T, e, a),
+        .vf_rint => blk: {
+            const ri = o.imm & 7;
+            const rnd: sf.Rounding = if (ri == 7) e.rounding else @enumFromInt(ri);
+            break :blk sf.roundToInt(T, e, a, rnd, o.imm & 8 != 0);
+        },
+        .vf_toint => blk: {
+            const rnd: sf.Rounding = @enumFromInt(o.imm & 7);
+            const fbits: u32 = @intCast(o.imm >> 8);
+            break :blk if (o.a == 1) toIntSat(T, T, e, a, rnd, fbits) else @bitCast(toIntSat(T, Signed(T), e, a, rnd, fbits));
+        },
+        .vf_fromint => blk: {
+            const fbits: u32 = @intCast(o.imm);
+            break :blk if (o.a == 1) sf.fromFixed(T, T, e, a, fbits) else sf.fromFixed(T, Signed(T), e, @bitCast(a), fbits);
+        },
+        .vf_recpe => frecpe(T, e, a),
+        .vf_rsqrte => frsqrte(T, e, a),
+        .vf_recpx => frecpx(T, e, a),
+        .vf_maxnmp, .vf_maxnmv => maxMin(T, e, a, b, true, true),
+        .vf_minnmp, .vf_minnmv => maxMin(T, e, a, b, false, true),
+        .vf_maxp, .vf_maxv => maxMin(T, e, a, b, true, false),
+        .vf_minp, .vf_minv => maxMin(T, e, a, b, false, false),
+        .vf_addp => sf.add(T, e, a, b),
+        else => unreachable,
+    };
+}
+
+fn fpVec(comptime k: K, cpu: *Cpu, o: *const Op) void {
+    switch (o.x) {
+        inline 2, 3 => |x| {
+            const T = FT(x);
+            var e = env(cpu.fpcr, x);
+            const n = cpu.v[o.n];
+            const m = cpu.v[o.m];
+            const dd = cpu.v[o.d];
+            var r: u128 = 0;
+            switch (k) {
+                .vf_maxnmp, .vf_minnmp, .vf_addp, .vf_maxp, .vf_minp => {
+                    if (o.sh & sd.SCALAR != 0) {
+                        put(&r, T, 0, fpElem(k, T, &e, lane(n, T, 0), lane(n, T, 1), 0, o));
+                    } else {
+                        const c = count(o, T);
+                        for (0..c) |i| {
+                            const j = 2 * i;
+                            const p = if (j < c) lane(n, T, j) else lane(m, T, j - c);
+                            const q = if (j + 1 < c) lane(n, T, j + 1) else lane(m, T, j + 1 - c);
+                            put(&r, T, i, fpElem(k, T, &e, p, q, 0, o));
+                        }
+                    }
+                },
+                .vf_maxnmv, .vf_minnmv, .vf_maxv, .vf_minv => {
+                    // Reduce: the halves, then the two results.
+                    if (T != u32) unreachable;
+                    const lo = fpElem(k, T, &e, lane(n, T, 0), lane(n, T, 1), 0, o);
+                    const hi = fpElem(k, T, &e, lane(n, T, 2), lane(n, T, 3), 0, o);
+                    put(&r, T, 0, fpElem(k, T, &e, lo, hi, 0, o));
+                },
+                else => {
+                    const indexed = k == .vf_mla_e or k == .vf_mls_e or k == .vf_mul_e or k == .vf_mulx_e;
+                    const bi = if (indexed) lane(m, T, @intCast(o.imm & 3)) else 0;
+                    for (0..count(o, T)) |i| {
+                        put(&r, T, i, fpElem(k, T, &e, lane(n, T, i), if (indexed) bi else lane(m, T, i), lane(dd, T, i), o));
+                    }
+                },
+            }
+            cpu.v[o.d] = r;
+            cpu.fpsr |= fpsrBits(e.flags);
+        },
+        else => unreachable,
+    }
+}
+
+/// FCVTN, FCVTXN, and FCVTL.
+fn fpCvtVec(comptime k: K, cpu: *Cpu, o: *const Op) void {
+    switch (o.x) {
+        inline 1...3 => |x| {
+            if (k == .vf_cvtl) {
+                if (x == 1) unreachable;
+                const W = FT(x);
+                const N = FT(x - 1);
+                var e = envFz(cpu.fpcr, x - 1 != 1, true);
+                const lanes = 16 / @sizeOf(W);
+                const off: usize = if (o.sh & sd.Q != 0) lanes else 0;
+                var r: u128 = 0;
+                for (0..lanes) |i| put(&r, W, i, sf.convert(W, N, &e, lane(cpu.v[o.n], N, i + off)));
+                cpu.v[o.d] = r;
+                cpu.fpsr |= fpsrBits(e.flags);
+            } else {
+                if (x == 3) unreachable;
+                const N = FT(x);
+                const W = FT(x + 1);
+                var e = envFz(cpu.fpcr, true, x != 1);
+                if (k == .vf_cvtxn) e.rounding = .odd;
+                const scalar = o.sh & sd.SCALAR != 0;
+                const lanes: usize = if (scalar) 1 else 8 / @sizeOf(N);
+                var r: u128 = 0;
+                for (0..lanes) |i| put(&r, N, i, sf.convert(N, W, &e, lane(cpu.v[o.n], W, i)));
+                cpu.v[o.d] = if (!scalar and o.sh & sd.Q != 0) (cpu.v[o.d] & std.math.maxInt(u64)) | r << 64 else r;
+                cpu.fpsr |= fpsrBits(e.flags);
+            }
         },
         else => unreachable,
     }

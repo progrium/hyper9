@@ -451,6 +451,11 @@ pub fn sqrt(comptime T: type, env: *Env, a: T) T {
 /// default NaN. Arm's rule for inf * 0 + qNaN (the default NaN) is its
 /// caller's to apply first.
 pub fn mulAdd(comptime T: type, env: *Env, a: T, b: T, c: T) T {
+    return mulAddScaled(T, env, a, b, c, 0);
+}
+
+/// (a * b + c) * 2^scale, rounded once (Arm's FRSQRTS halves its sum).
+pub fn mulAddScaled(comptime T: type, env: *Env, a: T, b: T, c: T, scale: i32) T {
     if (isNan(T, a) or isNan(T, b)) return pickNan(T, env, &.{ a, b, c }).?;
     var den = false;
     const x = unpack(T, env, a, &den);
@@ -473,11 +478,11 @@ pub fn mulAdd(comptime T: type, env: *Env, a: T, b: T, c: T) T {
     if (z.kind == .inf) return signed(T, z.sign, Fmt(T).inf);
     if (x.kind == .zero or y.kind == .zero) {
         if (z.kind == .zero) return signed(T, if (ps == z.sign) ps else env.rounding == .down, 0);
-        return round(T, env, z.sign, z.sig, z.exp);
+        return round(T, env, z.sign, z.sig, z.exp + scale);
     }
     const P = @as(u128, x.sig) * y.sig;
     const pe = x.exp + y.exp;
-    if (z.kind == .zero) return round(T, env, ps, P, pe);
+    if (z.kind == .zero) return round(T, env, ps, P, pe + scale);
     // Both at 128 bits up in 256, the smaller exponent's shifted down.
     var pw = @as(u256, P) << 128;
     var cw = @as(u256, z.sig) << 128;
@@ -505,7 +510,7 @@ pub fn mulAdd(comptime T: type, env: *Env, a: T, b: T, c: T) T {
         sum = jamShift(u256, sum, @intCast(n - 126));
         e += n - 126;
     }
-    return round(T, env, sign, @intCast(sum), e);
+    return round(T, env, sign, @intCast(sum), e + scale);
 }
 
 /// MINSS and its kin: a < b ? a : b, so a NaN in either, or two zeros,

@@ -279,6 +279,68 @@ pub const Kind = enum(u16) {
     /// FMOV from general register n, with f_mov_tog's x.
     f_mov_fromg,
 
+    // ---- AdvSIMD FP: x is the format (2 S, 3 D), elementwise over the
+    // shape as the integer kinds; d = n op m
+    vf_maxnm,
+    vf_minnm,
+    /// d += n * m, fused
+    vf_mla,
+    vf_mls,
+    vf_add,
+    vf_sub,
+    vf_mulx,
+    vf_cmeq,
+    vf_max,
+    vf_min,
+    vf_recps,
+    vf_rsqrts,
+    /// Pairwise over n:m (scalar: n's two elements).
+    vf_maxnmp,
+    vf_minnmp,
+    vf_addp,
+    vf_maxp,
+    vf_minp,
+    vf_abd,
+    vf_mul,
+    vf_cmge,
+    vf_cmgt,
+    vf_acge,
+    vf_acgt,
+    vf_div,
+    vf_cmgt0,
+    vf_cmeq0,
+    vf_cmlt0,
+    vf_cmge0,
+    vf_cmle0,
+    vf_abs,
+    vf_neg,
+    vf_sqrt,
+    /// imm as f_rint's.
+    vf_rint,
+    /// imm as f_toint's; a 1 unsigned.
+    vf_toint,
+    /// imm the fraction bits; a 1 unsigned.
+    vf_fromint,
+    vf_recpe,
+    vf_rsqrte,
+    vf_recpx,
+    urecpe,
+    ursqrte,
+    /// FCVTN, FCVTXN: x the narrow format, n wide; Q the "2" form.
+    vf_cvtn,
+    vf_cvtxn,
+    /// FCVTL: x the wide format, from n's lower or (Q) upper half.
+    vf_cvtl,
+    vf_maxnmv,
+    vf_minnmv,
+    vf_maxv,
+    vf_minv,
+    /// By element: m's element imm.
+    vf_mla_e,
+    vf_mls_e,
+    vf_mul_e,
+    vf_mulx_e,
+
     // ---- permute, extract, and table lookup
     uzp1,
     uzp2,
@@ -681,7 +743,7 @@ fn threeSame(w: u32, scalar: bool, q: u32) d.Op {
     const u = bit(w, 29);
     const size = bits(w, 23, 22);
     const opc = bits(w, 15, 11);
-    if (opc >= 0b11000) return none; // FP: later
+    if (opc >= 0b11000) return fpThreeSame(w, scalar, q);
     const e: Entry = if (u == 0) switch (opc) {
         0b00000 => three(.shadd, .no_d),
         0b00001 => .{ .k = .sqadd, .rule = .any, .scalar = .any },
@@ -758,6 +820,103 @@ fn threeSame(w: u32, scalar: bool, q: u32) d.Op {
     return op(e.k, w, if (e.rule == .logical) 0 else size, q);
 }
 
+fn fpThreeSame(w: u32, scalar: bool, q: u32) d.Op {
+    const u = bit(w, 29);
+    const a = bit(w, 23);
+    const sz = bit(w, 22);
+    const opc = bits(w, 15, 11);
+    const E = struct { k: Kind, sc: bool = false };
+    const e: E = if (u == 0) switch (opc) {
+        0b11000 => .{ .k = if (a == 0) .vf_maxnm else .vf_minnm },
+        0b11001 => .{ .k = if (a == 0) .vf_mla else .vf_mls },
+        0b11010 => .{ .k = if (a == 0) .vf_add else .vf_sub },
+        0b11011 => if (a == 0) .{ .k = .vf_mulx, .sc = true } else return none,
+        0b11100 => if (a == 0) .{ .k = .vf_cmeq, .sc = true } else return none,
+        0b11110 => .{ .k = if (a == 0) .vf_max else .vf_min },
+        0b11111 => .{ .k = if (a == 0) .vf_recps else .vf_rsqrts, .sc = true },
+        else => return none,
+    } else switch (opc) {
+        0b11000 => .{ .k = if (a == 0) .vf_maxnmp else .vf_minnmp },
+        0b11010 => if (a == 0) .{ .k = .vf_addp } else .{ .k = .vf_abd, .sc = true },
+        0b11011 => if (a == 0) .{ .k = .vf_mul } else return none,
+        0b11100 => .{ .k = if (a == 0) .vf_cmge else .vf_cmgt, .sc = true },
+        0b11101 => .{ .k = if (a == 0) .vf_acge else .vf_acgt, .sc = true },
+        0b11110 => .{ .k = if (a == 0) .vf_maxp else .vf_minp },
+        0b11111 => if (a == 0) .{ .k = .vf_div } else return none,
+        else => return none,
+    };
+    if (scalar) {
+        if (!e.sc) return none;
+        return op(e.k, w, 2 + sz, SCALAR);
+    }
+    if (sz == 1 and q == 0) return none;
+    return op(e.k, w, 2 + sz, q);
+}
+
+fn fpTwoMisc(w: u32, scalar: bool, q: u32) d.Op {
+    const u = bit(w, 29);
+    const a = bit(w, 23);
+    const sz = bit(w, 22);
+    const opc = bits(w, 16, 12);
+    // rounding codes, as f_rint's and f_toint's
+    const Sc = enum { no, yes, only };
+    const E = struct { k: Kind, sc: Sc = .no, imm: u64 = 0 };
+    const e: E = if (u == 0) switch (opc) {
+        0b10110 => if (a == 0 and !scalar) {
+            var o = op(.vf_cvtn, w, 1 + sz, q);
+            o.m = 0;
+            return o;
+        } else return none,
+        0b10111 => if (a == 0 and !scalar) {
+            var o = op(.vf_cvtl, w, 2 + sz, q);
+            o.m = 0;
+            return o;
+        } else return none,
+        0b11000 => .{ .k = .vf_rint, .imm = if (a == 0) 0 else 2 },
+        0b11001 => .{ .k = .vf_rint, .imm = if (a == 0) 1 else 3 },
+        0b11010 => .{ .k = .vf_toint, .sc = .yes, .imm = if (a == 0) 0 else 2 },
+        0b11011 => .{ .k = .vf_toint, .sc = .yes, .imm = if (a == 0) 1 else 3 },
+        0b11100 => if (a == 0) .{ .k = .vf_toint, .sc = .yes, .imm = 4 } else if (sz == 0) .{ .k = .urecpe } else return none,
+        0b11101 => if (a == 0) .{ .k = .vf_fromint, .sc = .yes } else .{ .k = .vf_recpe, .sc = .yes },
+        0b01100 => if (a == 1) .{ .k = .vf_cmgt0, .sc = .yes } else return none,
+        0b01101 => if (a == 1) .{ .k = .vf_cmeq0, .sc = .yes } else return none,
+        0b01110 => if (a == 1) .{ .k = .vf_cmlt0, .sc = .yes } else return none,
+        0b01111 => if (a == 1) .{ .k = .vf_abs } else return none,
+        0b11111 => if (a == 1) .{ .k = .vf_recpx, .sc = .only } else return none,
+        else => return none,
+    } else switch (opc) {
+        0b10110 => if (a == 0 and sz == 1) {
+            var o = op(.vf_cvtxn, w, 2, if (scalar) SCALAR else q);
+            o.m = 0;
+            return o;
+        } else return none,
+        0b11000 => if (a == 0) .{ .k = .vf_rint, .imm = 4 } else return none,
+        0b11001 => .{ .k = .vf_rint, .imm = if (a == 0) 7 | 8 else 7 },
+        0b11010 => .{ .k = .vf_toint, .sc = .yes, .imm = if (a == 0) 0 else 2 },
+        0b11011 => .{ .k = .vf_toint, .sc = .yes, .imm = if (a == 0) 1 else 3 },
+        0b11100 => if (a == 0) .{ .k = .vf_toint, .sc = .yes, .imm = 4 } else if (sz == 0) .{ .k = .ursqrte } else return none,
+        0b11101 => if (a == 0) .{ .k = .vf_fromint, .sc = .yes } else .{ .k = .vf_rsqrte, .sc = .yes },
+        0b01100 => if (a == 1) .{ .k = .vf_cmge0, .sc = .yes } else return none,
+        0b01101 => if (a == 1) .{ .k = .vf_cmle0, .sc = .yes } else return none,
+        0b01111 => if (a == 1) .{ .k = .vf_neg } else return none,
+        0b11111 => if (a == 1) .{ .k = .vf_sqrt } else return none,
+        else => return none,
+    };
+    switch (e.sc) {
+        .no => if (scalar) return none,
+        .yes => {},
+        .only => if (!scalar) return none,
+    }
+    if (!scalar and sz == 1 and q == 0) return none;
+    var o = op(e.k, w, 2 + sz, if (scalar) SCALAR else q);
+    o.m = 0;
+    o.imm = e.imm;
+    o.a = @intCast(u);
+    // FCVT*U and UCVTF are U's; the rest don't use a.
+    if (e.k != .vf_toint and e.k != .vf_fromint) o.a = 0;
+    return o;
+}
+
 fn sizeOk(rule: Rule, size: u32, q: u32) bool {
     return switch (rule) {
         .any => size != 3 or q == 1,
@@ -804,6 +963,7 @@ fn twoMisc(w: u32, scalar: bool, q: u32) d.Op {
     const u = bit(w, 29);
     const size = bits(w, 23, 22);
     const opc = bits(w, 16, 12);
+    if (opc >= 0b11000 or (opc >= 0b01100 and opc <= 0b01111) or opc == 0b10110 or opc == 0b10111) return fpTwoMisc(w, scalar, q);
     const Sc = enum { no, d_only, any, narrow };
     const e: struct { k: Kind, rule: Rule, sc: Sc = .no } = if (u == 0) switch (opc) {
         0b00000 => .{ .k = .rev64, .rule = .no_d },
@@ -866,7 +1026,12 @@ fn across(w: u32, q: u32) d.Op {
         0b01010 => if (u == 0) .smaxv else .umaxv,
         0b11010 => if (u == 0) .sminv else .uminv,
         0b11011 => if (u == 0) .addv else return none,
-        else => return none, // FP: later
+        0b01100, 0b01111 => {
+            if (u != 1 or bit(w, 22) != 0 or q != 1) return none;
+            const mn = bit(w, 23) == 1;
+            return op(if (opc == 0b01100) (if (mn) .vf_minnmv else .vf_maxnmv) else (if (mn) .vf_minv else .vf_maxv), w, 2, Q);
+        },
+        else => return none,
     };
     if (size == 3 or (size == 2 and q == 0)) return none;
     return op(k, w, size, q);
@@ -878,7 +1043,17 @@ fn pairwise(w: u32) d.Op {
         if (bits(w, 23, 22) != 3) return none;
         return op(.addp, w, 3, Q | SCALAR);
     }
-    return none; // FP: later
+    if (bit(w, 29) != 1) return none;
+    const mn = bit(w, 23) == 1;
+    const k: Kind = switch (bits(w, 16, 12)) {
+        0b01100 => if (mn) .vf_minnmp else .vf_maxnmp,
+        0b01101 => if (mn) return none else .vf_addp,
+        0b01111 => if (mn) .vf_minp else .vf_maxp,
+        else => return none,
+    };
+    var o = op(k, w, 2 + bit(w, 22), SCALAR);
+    o.m = 0;
+    return o;
 }
 
 /// Bits 28:24 = 01111 (vector) and 11111 (scalar): modified immediate,
@@ -979,7 +1154,8 @@ fn shiftImm(w: u32, scalar: bool, q: u32) d.Op {
         0b10010 => .{ .k = .sqshrn, .left = false, .shape = .narrow, .sc = .any },
         0b10011 => .{ .k = .sqrshrn, .left = false, .shape = .narrow, .sc = .any },
         0b10100 => .{ .k = .sshll, .left = true, .shape = .long, .sc = .no },
-        else => return none, // SCVTF and FCVTZS (fixed): later
+        0b11100, 0b11111 => return fixedShift(w, scalar, q, sz, right),
+        else => return none,
     } else switch (opc) {
         0b00000 => .{ .k = .ushr, .left = false },
         0b00010 => .{ .k = .usra, .left = false },
@@ -994,6 +1170,7 @@ fn shiftImm(w: u32, scalar: bool, q: u32) d.Op {
         0b10010 => .{ .k = .uqshrn, .left = false, .shape = .narrow, .sc = .any },
         0b10011 => .{ .k = .uqrshrn, .left = false, .shape = .narrow, .sc = .any },
         0b10100 => .{ .k = .ushll, .left = true, .shape = .long, .sc = .no },
+        0b11100, 0b11111 => return fixedShift(w, scalar, q, sz, right),
         else => return none,
     };
     if (e.shape != .same and sz == 3) return none;
@@ -1007,6 +1184,40 @@ fn shiftImm(w: u32, scalar: bool, q: u32) d.Op {
     var o = op(e.k, w, sz, if (scalar) SCALAR else q);
     o.m = 0;
     o.imm = if (e.left) left else right;
+    return o;
+}
+
+/// SCVTF, UCVTF, FCVTZS, and FCVTZU (vector and scalar, fixed-point).
+fn fixedShift(w: u32, scalar: bool, q: u32, sz: u32, fbits: u32) d.Op {
+    if (sz < 2) return none; // half: FP16
+    if (!scalar and sz == 3 and q == 0) return none;
+    const to = bits(w, 15, 11) == 0b11111;
+    var o = op(if (to) .vf_toint else .vf_fromint, w, sz, if (scalar) SCALAR else q);
+    o.m = 0;
+    o.a = @intCast(bit(w, 29));
+    o.imm = if (to) 3 | @as(u64, fbits) << 8 else fbits;
+    return o;
+}
+
+fn fpByElement(w: u32, scalar: bool, q: u32) d.Op {
+    const u = bit(w, 29);
+    const k: Kind = switch (bits(w, 15, 12)) {
+        0b0001 => if (u == 0) .vf_mla_e else return none,
+        0b0101 => if (u == 0) .vf_mls_e else return none,
+        0b1001 => if (u == 0) .vf_mul_e else .vf_mulx_e,
+        else => return none,
+    };
+    if (bit(w, 23) != 1) return none; // half: FP16
+    const sz = bit(w, 22);
+    var idx: u32 = undefined;
+    if (sz == 0) {
+        idx = bit(w, 11) << 1 | bit(w, 21);
+    } else {
+        if (bit(w, 21) != 0 or (!scalar and q == 0)) return none;
+        idx = bit(w, 11);
+    }
+    var o = op(k, w, 2 + sz, if (scalar) SCALAR else q);
+    o.imm = idx;
     return o;
 }
 
@@ -1025,14 +1236,16 @@ fn byElement(w: u32, scalar: bool, q: u32) d.Op {
         0b1011 => .{ .k = .sqdmull_e, .shape = .long, .sc = true },
         0b1100 => .{ .k = .sqdmulh_e, .shape = .same, .sc = true },
         0b1101 => .{ .k = .sqrdmulh_e, .shape = .same, .sc = true },
-        else => return none, // FMLA, FMLS, FMUL: later
+        0b0001, 0b0101, 0b1001 => return fpByElement(w, scalar, q),
+        else => return none,
     } else switch (opc) {
         0b0000 => .{ .k = .mla_e, .shape = .same },
         0b0010 => .{ .k = .umlal_e, .shape = .long },
         0b0100 => .{ .k = .mls_e, .shape = .same },
         0b0110 => .{ .k = .umlsl_e, .shape = .long },
         0b1010 => .{ .k = .umull_e, .shape = .long },
-        else => return none, // FMULX, RDM: later or not v8.0
+        0b1001 => return fpByElement(w, scalar, q),
+        else => return none, // RDM: not v8.0
     };
     if (scalar and !e.sc) return none;
     var idx: u32 = undefined;
@@ -1087,6 +1300,10 @@ fn uses(k: Kind) Uses {
         .saddlv, .uaddlv, .smaxv, .umaxv, .sminv, .uminv, .addv => .{},
         .sshr, .ushr, .srshr, .urshr, .shl, .sqshlu, .sqshl_i, .uqshl_i, .sshll, .ushll => .{},
         .f_mov, .f_abs, .f_neg, .f_sqrt, .f_cvt, .f_rint => .{},
+        .vf_mla, .vf_mls, .vf_mla_e, .vf_mls_e => .{ .d = .vrw, .m = .vr },
+        .vf_cvtn, .vf_cvtxn => .{ .d = .vrw },
+        .vf_cmgt0, .vf_cmeq0, .vf_cmlt0, .vf_cmge0, .vf_cmle0, .vf_abs, .vf_neg, .vf_sqrt, .vf_rint, .vf_toint, .vf_fromint => .{},
+        .vf_recpe, .vf_rsqrte, .vf_recpx, .urecpe, .ursqrte, .vf_cvtl, .vf_maxnmv, .vf_minnmv, .vf_maxv, .vf_minv => .{},
         .f_cmp => .{ .d = .none, .m = .vr, .flags = .w },
         .f_ccmp => .{ .d = .none, .m = .vr, .flags = .rw },
         .f_csel => .{ .m = .vr, .flags = .r },
@@ -1140,7 +1357,7 @@ pub fn regs(o: d.Op) d.Regs {
     var du = u.d;
     // The narrowing ops read d only for their "2" forms.
     switch (k) {
-        .addhn, .raddhn, .subhn, .rsubhn, .xtn, .sqxtn, .uqxtn, .sqxtun, .shrn, .rshrn, .sqshrn, .uqshrn, .sqrshrn, .uqrshrn, .sqshrun, .sqrshrun => {
+        .vf_cvtn, .vf_cvtxn, .addhn, .raddhn, .subhn, .rsubhn, .xtn, .sqxtn, .uqxtn, .sqxtun, .shrn, .rshrn, .sqshrn, .uqshrn, .sqrshrn, .uqrshrn, .sqshrun, .sqrshrun => {
             if (o.sh != Q) du = .vw;
         },
         // FMOV V.D[1], Xn keeps the lower half.
