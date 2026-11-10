@@ -607,7 +607,12 @@ const Lifter = struct {
     fn endBlock(l: *Lifter, e: End) !void {
         try l.leave();
         switch (e) {
-            .br, .brcond => try l.retireAll(),
+            // Pending flags would stay pending into the next block, which
+            // may read them from the Cpu: written now.
+            .br, .brcond => {
+                try l.fl.settle(l.b);
+                try l.retireAll();
+            },
             // An exit carries the count.
             else => l.count = 0,
         }
@@ -649,6 +654,7 @@ const Lifter = struct {
     fn guard(l: *Lifter, k: usize, c: Ref, slow_if: bool) !void {
         const b = l.b;
         try l.leave();
+        try l.fl.settle(b);
         try l.retireAll();
         const slow = try b.block();
         const cont = try b.block();
@@ -1054,6 +1060,7 @@ const Lifter = struct {
             .stc => try l.fl.modify(b, .@"or", xf.CF),
             .cmc => try l.fl.modify(b, .xor, xf.CF),
             .cld, .std => {
+                try l.fl.settle(b);
                 const old = try b.getreg(.i32, xf.bits_off);
                 const v = if (i.op == .cld)
                     try b.bin(.@"and", .i32, old, try l.k32(~xf.DF))
@@ -1964,6 +1971,7 @@ const Lifter = struct {
         const b = l.b;
         const size = i.size;
         const T = tyOf(size);
+        try l.fl.settle(b);
         const df = try b.bin(.@"and", .i32, try b.getreg(.i32, xf.bits_off), try l.k32(xf.DF));
         const back = try b.icmp(.ne, df, try l.k32(0));
         const d = try l.sel(.i32, back, try l.k32(@as(u32, 0) -% size), try l.k32(size));
@@ -2157,6 +2165,7 @@ const Lifter = struct {
         const ecx = try l.getR(1, 4);
         var fin = try b.icmp(.eq, ecx, try l.k32(0));
         if (i.op == .cmps or i.op == .scas) {
+            try l.fl.settle(b);
             const z = try b.bin(.@"and", .i32, try b.getreg(.i32, xf.bits_off), try l.k32(xf.ZF));
             // REPE stops on ZF clear, REPNE on ZF set.
             const stop = try b.icmp(if (i.rep == .rep) .eq else .ne, z, try l.k32(0));

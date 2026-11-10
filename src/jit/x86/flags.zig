@@ -51,6 +51,10 @@ pub const State = struct {
     cur: ?Ref = null,
     /// `cur` hasn't been written to `Cpu.fl.bits` yet.
     dirty: bool = false,
+    /// `cur` is in a `pending.flags` (see `flush`).
+    pending: bool = false,
+    /// `Cpu.fl.bits` but the arithmetic flags, while `pending`.
+    rest: ?Ref = null,
 
     /// The current flags as a value.
     pub fn get(s: *State, b: *ir.Builder) !Ref {
@@ -74,21 +78,38 @@ pub const State = struct {
     }
 
     /// Writes the flags back, keeping the bits of EFLAGS that aren't
-    /// arithmetic (DF and the rest).
+    /// arithmetic (DF and the rest), as `pending.flags`: emitters store
+    /// them only on a way out (an exit, a fault, a call), so a load or
+    /// store that doesn't fault costs nothing. Nothing may read
+    /// `Cpu.fl.bits` while they're pending: `settle` first.
     pub fn flush(s: *State, b: *ir.Builder) !void {
         if (!s.dirty) return;
-        const p = try b.un(.@"eflags.pack", .i32, s.cur.?);
-        const old = try b.getreg(.i32, bits_off);
-        const keep = try b.bin(.@"and", .i32, old, try b.konst(.i32, ~@as(u64, arith)));
-        try b.setreg(bits_off, try b.bin(.@"or", .i32, keep, p));
+        if (!s.pending) {
+            // EFLAGS' other bits, for `settle`, while the slot may be read.
+            const old = try b.getreg(.i32, bits_off);
+            s.rest = try b.bin(.@"and", .i32, old, try b.konst(.i32, ~@as(u64, arith)));
+        }
+        try b.pendingFlags(s.cur.?, bits_off, .eflags);
+        s.pending = true;
         s.dirty = false;
     }
 
+    /// Writes pending flags to `Cpu.fl.bits` now, so it can be read.
+    pub fn settle(s: *State, b: *ir.Builder) !void {
+        try s.flush(b);
+        if (!s.pending) return;
+        const p = try b.un(.@"eflags.pack", .i32, s.cur.?);
+        try b.setreg(bits_off, try b.bin(.@"or", .i32, s.rest.?, p));
+        s.pending = false;
+    }
+
     /// A new block, or after something (`call.interp`) that may have
-    /// changed the flags in Cpu. Flush first.
+    /// changed the flags in Cpu (and wrote any pending). Flush first.
     pub fn forget(s: *State) void {
         std.debug.assert(!s.dirty);
         s.cur = null;
+        s.pending = false;
+        s.rest = null;
     }
 
     /// Changes the flags in `mask` with `op` (and, or, xor) and `v`, as
