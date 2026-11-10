@@ -315,6 +315,16 @@ pub const Fxsave = extern struct {
     }
 };
 
+/// h9's own emulator (vmm/zemu.zig) when it's the one built in, for
+/// benchmarks: its `retired_total`. Null otherwise.
+pub const zemu: ?type = if (have_emu and build_options.emu == .zig) emu else null;
+
+/// Guest instructions the emulator has retired so far, where it counts
+/// them (-Demu=zig); null otherwise.
+pub fn emuRetired() ?u64 {
+    return if (comptime zemu) |z| z.retired_total.load(.monotonic) else null;
+}
+
 /// The emulator's version (Unicorn's, e.g. "2.1"), or null if it isn't built in.
 pub fn emuVersion(buf: []u8) ?[]const u8 {
     return if (have_emu) emu.version(buf) else null;

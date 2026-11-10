@@ -86,6 +86,11 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
     c.t0.tpidr = e.tls;
 }
 
+/// Instructions retired, for zemu.retired_total.
+pub fn retired(c: *const Cpu) u64 {
+    return c.t0.retired;
+}
+
 pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     c.machine = .init(&c.t0, ctx, &c.cache, if (deterministic) null else clock);
     ctx.frontend = @intFromPtr(&c.machine);

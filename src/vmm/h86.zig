@@ -78,6 +78,11 @@ const TlbMem = tlb.TlbMem;
 
 /// Runs T0 until an exit. An exit request (ctx.exit_request, which zemu
 /// clears) or a spent ctx.budget gives `.interrupted`.
+/// Instructions retired, for zemu.retired_total.
+pub fn retired(cpu: *const Cpu) u64 {
+    return cpu.c.retired;
+}
+
 pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     const c = &cpu.c;
     c.icache = &cpu.icache;

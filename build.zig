@@ -755,7 +755,8 @@ fn addComputeBenches(b: *std.Build, bench: *std.Build.Step.Compile) void {
             exe.entry = .{ .symbol_name = "_start" };
             exe.pie = false;
             exe.bundle_compiler_rt = true;
-            const bin = b.addObjCopy(exe.getEmittedBin(), .{ .format = .bin, .only_section = ".text" }).getOutput();
+            // The whole image: the linker scripts keep only text.
+            const bin = b.addObjCopy(exe.getEmittedBin(), .{ .format = .bin }).getOutput();
             bench.root_module.addAnonymousImport(b.fmt("bench_{s}_{s}", .{ name, a.name }), .{ .root_source_file = bin });
         }
         bench.root_module.addCSourceFile(.{ .file = b.path(b.fmt("tests/bench/{s}.c", .{name})), .flags = &.{ "-O2", "-ffp-contract=off", b.fmt("-Dcompute=bench_{s}", .{name}) } });

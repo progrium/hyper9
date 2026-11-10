@@ -117,6 +117,17 @@ const computes = [_]Compute{
     .{ .name = "fp", .native = bench_fp, .arm64 = @embedFile("bench_fp_arm64"), .i386 = @embedFile("bench_fp_386") },
 };
 
+/// Counts ECX down from 10⁹, then exits(nil).
+const loop_386 = [_]u8{
+    0xb9, 0x00, 0xca, 0x9a, 0x3b, // movl  $1000000000, %ecx
+    0x49, // decl  %ecx
+    0x75, 0xfd, // jne   .-1
+    0x83, 0xec, 0x10, // subl  $16, %esp
+    0xc7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00, // movl  $0, 4(%esp)        nil
+    0xb8, 0x08, 0x00, 0x00, 0x00, // movl  $8, %eax           EXITS
+    0xcd, 0x40, // int   $64
+};
+
 const Case = struct {
     name: []const u8,
     arch: aout.Arch,
@@ -126,6 +137,7 @@ const Case = struct {
 const cases = [_]Case{
     .{ .name = "loop", .arch = .arm64, .text = &loop_arm64 },
     .{ .name = "loop", .arch = .amd64, .text = &loop_amd64 },
+    .{ .name = "loop", .arch = .i386, .text = &loop_386 },
     .{ .name = "pwrite", .arch = .arm64, .text = &syscall_arm64 },
     .{ .name = "pwrite", .arch = .amd64, .text = &syscall_amd64 },
 };
@@ -141,11 +153,14 @@ pub fn main(init: std.process.Init) !void {
     // zig build bench -- compute: the compute benchmarks only.
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     const compute_only = argv.len > 1 and std.mem.eql(u8, argv[1], "compute");
-    if (!compute_only) try w.print("{s: <7} {s: <6} {s: <4} {s: >8}  {s}\n", .{ "case", "arch", "vmm", "time", "rate" });
-    if (!compute_only) for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| {
+    if (!compute_only) try w.print("{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "case", "arch", "vmm", "time", "rate" });
+    if (!compute_only) for (cases) |c| for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| for (tiersOf(kind)) |tier| {
+        if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
+        defer _ = unsetenv("H9_EMU_TIER");
         const ns = try runOne(gpa, io, kind, c) orelse continue;
         const s = @as(f64, @floatFromInt(ns)) / 1e9;
-        try w.print("{s: <7} {t: <6} {t: <4} {d: >7.2}s  ", .{ c.name, c.arch, kind, s });
+        var lb: [16]u8 = undefined;
+        try w.print("{s: <7} {t: <6} {s: <7} {d: >7.2}s  ", .{ c.name, c.arch, tierLabel(&lb, kind, tier), s });
         if (std.mem.eql(u8, c.name, "loop")) {
             try w.print("{d:.2} G instructions/s\n", .{2 * loop_iters / s / 1e9});
         } else {
@@ -155,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
     };
     try w.flush();
 
-    try w.print("\n{s: <7} {s: <6} {s: <7} {s: >8}  {s}\n", .{ "compute", "arch", "vmm", "time", "vs native" });
+    try w.print("\n{s: <7} {s: <6} {s: <7} {s: >8}  {s: <10} {s}\n", .{ "compute", "arch", "vmm", "time", "vs native", "rate (where the emulator counts)" });
     for (computes) |c| {
         const t0 = std.Io.Timestamp.now(io, .awake);
         const want = c.native();
@@ -166,15 +181,17 @@ pub fn main(init: std.process.Init) !void {
         for ([_]aout.Arch{ .arm64, .i386 }) |arch| {
             const text = if (arch == .arm64) c.arm64 else c.i386;
             for ([_]vmm.BackendKind{ .hvf, .kvm, .native, .emu }) |kind| {
-                const tiers: []const ?[:0]const u8 = if (kind == .emu) &.{ "t0", "t1" } else &.{null};
-                for (tiers) |tier| {
+                for (tiersOf(kind)) |tier| {
                     if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
                     defer _ = unsetenv("H9_EMU_TIER");
+                    const before = vmm.emuRetired();
                     const r = try runText(gpa, io, kind, arch, text) orelse continue;
+                    const insns: ?u64 = if (kind == .emu) if (vmm.emuRetired()) |n| n - before.? else null else null;
                     const s = @as(f64, @floatFromInt(r.ns)) / 1e9;
                     const label = if (tier) |t| try std.fmt.allocPrint(gpa, "emu/{s}", .{t}) else try std.fmt.allocPrint(gpa, "{t}", .{kind});
                     defer gpa.free(label);
-                    try w.print("{s: <7} {t: <6} {s: <7} {d: >7.3}s  {d:.1}x", .{ c.name, arch, label, s, s / (@as(f64, @floatFromInt(native_ns)) / 1e9) });
+                    try w.print("{s: <7} {t: <6} {s: <7} {d: >7.3}s  {d: <10.1}", .{ c.name, arch, label, s, s / (@as(f64, @floatFromInt(native_ns)) / 1e9) });
+                    if (insns) |n| try w.print(" {d:.2} G instructions/s ({d} M)", .{ @as(f64, @floatFromInt(n)) / s / 1e9, n / 1_000_000 });
                     if (!std.mem.eql(u8, r.msg[0..@min(r.msg.len, 8)], &hex) or r.msg.len != 8) {
                         try w.print("  WRONG: exited \"{s}\", want {s}\n", .{ r.msg, &hex });
                         bad = true;
@@ -186,6 +203,17 @@ pub fn main(init: std.process.Init) !void {
     }
     try w.flush();
     if (bad) std.process.exit(1);
+}
+
+/// The emulator once per tier (H9_EMU_TIER) where it has tiers
+/// (-Demu=zig); every other backend once.
+fn tiersOf(kind: vmm.BackendKind) []const ?[:0]const u8 {
+    return if (kind == .emu and vmm.zemu != null) &.{ "t0", "t1" } else &.{null};
+}
+
+fn tierLabel(buf: []u8, kind: vmm.BackendKind, tier: ?[]const u8) []const u8 {
+    const t = tier orelse return @tagName(kind);
+    return std.fmt.bufPrint(buf, "{t}/{s}", .{ kind, t }) catch @tagName(kind);
 }
 
 var msg_buf: [64]u8 = undefined;
@@ -222,10 +250,11 @@ fn runText(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout
 /// The wall time of one run of `c` on `kind`, including machine setup, or
 /// null if `kind` can't run `c.arch` here.
 fn runOne(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, c: Case) !?i96 {
-    const bytes = try gpa.alloc(u8, aout.header_size + c.text.len);
+    const hs = c.arch.headerSize();
+    const bytes = try gpa.alloc(u8, hs + c.text.len);
     defer gpa.free(bytes);
-    aout.writeTextHeader(bytes[0..aout.header_size], c.arch, c.text.len);
-    @memcpy(bytes[aout.header_size..], c.text);
+    aout.writeTextHeader(bytes[0..hs], c.arch, c.text.len);
+    @memcpy(bytes[hs..], c.text);
 
     var discard: std.Io.Writer.Discarding = .init(&.{});
     const start: std.Io.Timestamp = .now(io, .awake);
