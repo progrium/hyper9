@@ -131,11 +131,6 @@ has the design.
   starts in a few seconds.</li>
 <li>No OpenGL or Vulkan, clipboard, or keyboard layout other than US.</li>
 <li>Resizing h9's window doesn't resize Wine's screen.</li>
-<li>In the browser, the Start menu takes Wine's desktop down with it;
-  on the same CPU outside the browser it opens.
-  And the demo runs h86 without its wasm JIT tier: with it,
-  Wine reads garbled bytes now and then and draws nothing.
-  Both are bugs in h86 on wasm, not in Wine.</li>
 <li>Alpine's 32-bit musl rounds wrongly at the x87 precision Windows
   programs run with, which made every window 96 times too big;
   the demo preloads a <tt>roundf</tt> that doesn't care.</li>
