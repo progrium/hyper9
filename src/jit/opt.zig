@@ -11,6 +11,10 @@
 //!   becomes a constant; `select` on a constant condition becomes its arm;
 //!   `brcond` on one becomes `br`; adding, subtracting, or-ing, or xor-ing
 //!   0, and shifting by 0, become the operand.
+//! - **Compare and branch.** A condition on the flags of a subtract
+//!   (`nzcv.sub`, `eflags.sub`) that is a plain comparison of its operands
+//!   becomes an `icmp` of them, so the flags are computed only where
+//!   something stores them.
 //! - **Dead register writes.** A `setreg` that a later `setreg` in the
 //!   block overwrites, with nothing between that can leave, call out, or
 //!   read the slot, goes. This is where flag liveness lands: the lifter
@@ -153,6 +157,16 @@ fn fold(insts: []Inst, idx: usize, repl: []Ref) void {
         return;
     }
     switch (i.op) {
+        .@"nzcv.cond", .@"eflags.cond" => {
+            const f = insts[i.a];
+            const p = if (i.op == .@"nzcv.cond" and f.op == .@"nzcv.sub")
+                subPredA64(i.aux)
+            else if (i.op == .@"eflags.cond" and f.op == .@"eflags.sub")
+                subPredX86(i.aux)
+            else
+                null;
+            if (p) |pred| i.* = .{ .op = .icmp, .ty = .i1, .a = f.a, .b = f.b, .aux = @intFromEnum(pred) };
+        },
         .select => if (ca) |c| {
             repl[idx] = if (c & 1 == 1) i.b else i.c;
         },
@@ -161,6 +175,41 @@ fn fold(insts: []Inst, idx: usize, repl: []Ref) void {
         },
         else => {},
     }
+}
+
+/// The comparison arm64's condition `cc` makes of `a - b`'s flags, if
+/// it's one (MI, PL, VS, and VC aren't).
+fn subPredA64(cc: u64) ?ir.Pred {
+    return switch (cc) {
+        0 => .eq,
+        1 => .ne,
+        2 => .uge, // CS
+        3 => .ult, // CC
+        8 => .ugt, // HI
+        9 => .ule, // LS
+        10 => .sge,
+        11 => .slt,
+        12 => .sgt,
+        13 => .sle,
+        else => null,
+    };
+}
+
+/// The same for x86's condition codes (O, NO, S, NS, P, and NP aren't).
+fn subPredX86(cc: u64) ?ir.Pred {
+    return switch (cc) {
+        2 => .ult, // B
+        3 => .uge, // AE
+        4 => .eq,
+        5 => .ne,
+        6 => .ule, // BE
+        7 => .ugt, // A
+        12 => .slt, // L
+        13 => .sge, // GE
+        14 => .sle, // LE
+        15 => .sgt, // G
+        else => null,
+    };
 }
 
 /// Marks `setreg`s a later one in the block overwrites before anything can
@@ -368,4 +417,31 @@ test "opt: an fp op that ORs into FPSR reads and writes it" {
         \\  exit.chain #0x1004
         \\
     , got);
+}
+
+test "opt: conditions on a subtract's flags become comparisons" {
+    const preds = [_]struct { cc: u8, x86: bool }{
+        .{ .cc = 0, .x86 = false },  .{ .cc = 1, .x86 = false },  .{ .cc = 2, .x86 = false },  .{ .cc = 3, .x86 = false },
+        .{ .cc = 8, .x86 = false },  .{ .cc = 9, .x86 = false },  .{ .cc = 10, .x86 = false }, .{ .cc = 11, .x86 = false },
+        .{ .cc = 12, .x86 = false }, .{ .cc = 13, .x86 = false }, .{ .cc = 2, .x86 = true },   .{ .cc = 3, .x86 = true },
+        .{ .cc = 4, .x86 = true },   .{ .cc = 5, .x86 = true },   .{ .cc = 6, .x86 = true },   .{ .cc = 7, .x86 = true },
+        .{ .cc = 12, .x86 = true },  .{ .cc = 13, .x86 = true },  .{ .cc = 14, .x86 = true },  .{ .cc = 15, .x86 = true },
+    };
+    // Each mapping agrees with the flags' own condition on edge values.
+    const vals = [_]u64{ 0, 1, 2, 0x7f, 0x80, 0xff, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff, 0x7fff_ffff_ffff_ffff, 0x8000_0000_0000_0000, 0xffff_ffff_ffff_ffff };
+    for (preds) |pc| for ([_]ir.Type{ .i8, .i32, .i64 }) |ty| {
+        if (!pc.x86 and ty == .i8) continue;
+        if (pc.x86 and ty == .i64) continue;
+        const pred = (if (pc.x86) subPredX86(pc.cc) else subPredA64(pc.cc)).?;
+        for (vals) |a| for (vals) |b| {
+            const x = a & ty.mask();
+            const y = b & ty.mask();
+            const fop: ir.Op = if (pc.x86) .@"eflags.sub" else .@"nzcv.sub";
+            const cop: ir.Op = if (pc.x86) .@"eflags.cond" else .@"nzcv.cond";
+            const f = ir_eval.evalPure(fop, .flags, ty, x, y, 0, 0);
+            const want = ir_eval.evalPure(cop, .i1, .flags, f, 0, 0, pc.cc);
+            const got = ir_eval.evalPure(.icmp, .i1, ty, x, y, 0, @intFromEnum(pred));
+            try testing.expectEqual(want, got);
+        };
+    };
 }
