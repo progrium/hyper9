@@ -702,6 +702,11 @@ const E = struct {
     cfg: *const Cfg = undefined,
     /// The block's `pending.flags`, not yet written (pendingFlags).
     pend: ?Pend = null,
+    /// Per block of the region: the flags pending on entry, left by
+    /// every predecessor, and whether its own end leaves them so
+    /// (flowPend).
+    pin: []?Pend = &.{},
+    keep: []bool = &.{},
 
     fn l32(e: *const E, f: fixed32) u32 {
         return e.base32 + @intFromEnum(f);
@@ -1929,7 +1934,7 @@ const E = struct {
     /// A block's instructions but its terminator.
     fn body(e: *E, b: BlockId) !void {
         const blk = e.r.blocks.items[b];
-        e.pend = null;
+        e.pend = e.pin[b];
         // What came before is unknown here.
         @memset(e.dirty, true);
         for (blk.start..blk.start + blk.len - 1) |idx| {
@@ -1940,8 +1945,93 @@ const E = struct {
                 if (e.plan.used[idx]) try e.w.set(e.poolLocal(wt(i.ty).?, e.plan.loc[idx])) else try e.w.byte(0x1A);
             }
         }
-        // Every terminator is a way out of the block.
-        try e.flushPending();
+        // Every terminator is a way out of the block, but a branch to
+        // blocks that take the flags still pending.
+        if (!e.keep[b]) try e.flushPending();
+    }
+
+    /// The Pend a `pending.flags` makes.
+    fn pendOf(e: *const E, i: ir.Inst) Pend {
+        const a = e.r.insts.items[i.a];
+        const lazy = i.aux2 == 1 and e.plan.kind[i.a] == .inl and switch (a.op) {
+            .@"eflags.add", .@"eflags.sub", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.logic", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => true,
+            else => false,
+        };
+        return .{ .op = a.op, .ta = e.ty(a.a), .off = @intCast(i.aux), .lazy = lazy, .mask = if (i.aux2 == 1) @intCast(ir_eval.eflags_mask) else 0xf000_0000 };
+    }
+
+    /// Which blocks take pending flags from their predecessors instead
+    /// of each predecessor writing them: a block whose predecessors all
+    /// end with the same Pend (and that isn't the entry) starts with it,
+    /// and a block whose successors all start with it leaves it pending.
+    /// One pass in reverse postorder: a back edge's source isn't done
+    /// yet, so a loop header starts with none.
+    fn flowPend(e: *E) !void {
+        const n = e.r.blocks.items.len;
+        e.pin = try e.gpa.alloc(?Pend, n);
+        @memset(e.pin, null);
+        e.keep = try e.gpa.alloc(bool, n);
+        @memset(e.keep, false);
+        const out = try e.gpa.alloc(?Pend, n);
+        defer e.gpa.free(out);
+        const done = try e.gpa.alloc(bool, n);
+        defer e.gpa.free(done);
+        @memset(done, false);
+        // Predecessor counts, to know when all have been seen.
+        const npred = try e.gpa.alloc(u32, n);
+        defer e.gpa.free(npred);
+        @memset(npred, 0);
+        for (e.cfg.order) |b| {
+            const s = succs(e.r, b);
+            for (s[0][0..s[1]]) |t| npred[t] += 1;
+        }
+        const seen = try e.gpa.alloc(u32, n);
+        defer e.gpa.free(seen);
+        @memset(seen, 0);
+        const meet = try e.gpa.alloc(?Pend, n);
+        defer e.gpa.free(meet);
+        @memset(meet, null);
+        const mixed = try e.gpa.alloc(bool, n);
+        defer e.gpa.free(mixed);
+        @memset(mixed, false);
+        for (e.cfg.order) |b| {
+            if (b != 0 and seen[b] == npred[b] and !mixed[b]) e.pin[b] = meet[b];
+            var st = e.pin[b];
+            const blk = e.r.blocks.items[b];
+            for (blk.start..blk.start + blk.len - 1) |idx| {
+                if (e.plan.kind[idx] != .root) continue;
+                const i = e.r.insts.items[idx];
+                switch (i.op) {
+                    .@"pending.flags" => st = e.pendOf(i),
+                    .setreg => if (st) |p| if (i.aux < p.off + 4 and p.off < i.aux + byteSize(e.ty(i.a)).?) {
+                        st = null;
+                    },
+                    .@"call.interp", .copy => st = null,
+                    .@"call.helper" => if (i.aux2 & ir.helper_no_regs == 0) {
+                        st = null;
+                    },
+                    else => {},
+                }
+            }
+            out[b] = st;
+            done[b] = true;
+            const s = succs(e.r, b);
+            for (s[0][0..s[1]]) |t| {
+                if (seen[t] == 0) meet[t] = st else if (!std.meta.eql(meet[t], st)) mixed[t] = true;
+                if (st == null) mixed[t] = true;
+                seen[t] += 1;
+            }
+        }
+        for (e.cfg.order) |b| {
+            if (out[b] == null) continue;
+            const s = succs(e.r, b);
+            if (s[1] == 0) continue;
+            var all = true;
+            for (s[0][0..s[1]]) |t| if (e.pin[t] == null) {
+                all = false;
+            };
+            e.keep[b] = all;
+        }
     }
 
     /// `pending.flags`: an eflags op used only here is kept as its
@@ -1952,11 +2042,9 @@ const E = struct {
         const w = &e.w;
         if (e.pend) |p| if (p.off != i.aux or p.mask != @as(u32, if (i.aux2 == 0) 0xf000_0000 else @intCast(ir_eval.eflags_mask))) try e.flushPending();
         const a = e.r.insts.items[i.a];
-        const ta = e.ty(a.a);
-        const lazy = i.aux2 == 1 and e.plan.kind[i.a] == .inl and switch (a.op) {
-            .@"eflags.add", .@"eflags.sub", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.logic", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => true,
-            else => false,
-        };
+        const np = e.pendOf(i);
+        const ta = np.ta;
+        const lazy = np.lazy;
         if (lazy) {
             // As eflagsOf takes them: a and b masked to ta (but inc's and
             // dec's b, which is flags), c as it is.
@@ -1982,7 +2070,7 @@ const E = struct {
         try w.set(e.l64(.pcode));
         try w.i32c(@intCast(i.aux));
         try w.set(e.l32(.poff));
-        e.pend = .{ .op = a.op, .ta = ta, .off = @intCast(i.aux), .lazy = lazy, .mask = if (i.aux2 == 1) @intCast(ir_eval.eflags_mask) else 0xf000_0000 };
+        e.pend = np;
     }
 
     /// Writes the block's pending flags, if any, and forgets them.
@@ -2331,6 +2419,13 @@ fn function(
         e.r = r;
         e.plan = &plans[ri];
         e.cfg = &cfgs[ri];
+        try e.flowPend();
+        defer {
+            gpa.free(e.pin);
+            gpa.free(e.keep);
+            e.pin = &.{};
+            e.keep = &.{};
+        }
         if (opts.structured and cfgs[ri].reducible) {
             batch.structured += 1;
             try e.tree(0);
