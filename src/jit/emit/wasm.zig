@@ -2413,10 +2413,13 @@ fn function(
             try w.get(0);
             try w.memop(0x29, ctx.off.exit_pc);
             try w.tee(pc);
+            // ctx.jumpIndex: ((pc ^ pc >> 12) >> 2) & (jump_entries - 1)
             try w.get(pc);
-            try w.i64c(10);
+            try w.i64c(12);
             try w.byte(0x88); // i64.shr_u
             try w.byte(0x85); // i64.xor
+            try w.i64c(2);
+            try w.byte(0x88); // i64.shr_u
             try w.byte(0xA7); // i32.wrap_i64
             try w.i32c(ctx.jump_entries - 1);
             try w.byte(0x71);

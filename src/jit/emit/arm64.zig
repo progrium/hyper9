@@ -1422,8 +1422,9 @@ fn lower(e: *E, idx: usize) EmitError!void {
             const miss = try e.label();
             try e.ldrCtx(IP0, ctx.off.jump);
             try e.cbz(true, IP0, miss);
-            try e.dpShift(0x4A000000, true, IP1, v, v, 1, 10); // eor x17, v, v, lsr #10
-            try e.ubfx(IP1, IP1, 0, 10);
+            // ctx.jumpIndex: ((pc ^ pc >> 12) >> 2) & (jump_entries - 1)
+            try e.dpShift(0x4A000000, true, IP1, v, v, 1, 12); // eor x17, v, v, lsr #12
+            try e.ubfx(IP1, IP1, 2, std.math.log2_int(u32, ctx.jump_entries));
             try e.movImm(T0, @sizeOf(ctx.JumpEntry));
             try e.put(0x9B000000 | @as(u32, T0) << 16 | @as(u32, IP0) << 10 | @as(u32, IP1) << 5 | IP0); // madd x16, x17, x13, x16
             try e.ldrCtx2(IP1, IP0, 0);

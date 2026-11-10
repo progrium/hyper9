@@ -1075,10 +1075,12 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             try e.ldCtx(R10, ctx.off.jump);
             try e.rr(true, &.{0x85}, R10, R10); // test r10, r10
             const none = try e.fwd(CC.e);
+            // ctx.jumpIndex: ((pc ^ pc >> 12) >> 2) & (jump_entries - 1)
             try e.mov(RCX, RAX);
-            try e.shiftImm(true, 5, RCX, 10); // shr rcx, 10
+            try e.shiftImm(true, 5, RCX, 12); // shr rcx, 12
             try e.rr(true, &.{0x31}, RAX, RCX); // xor rcx, rax
-            try e.aluImm(false, 4, RCX, ctx.jump_entries - 1); // and ecx, 1023
+            try e.shiftImm(true, 5, RCX, 2); // shr rcx, 2
+            try e.aluImm(false, 4, RCX, ctx.jump_entries - 1); // and ecx, 4095
             try e.rr(true, &.{0x6b}, RCX, RCX); // imul rcx, rcx, 24
             try e.b(@sizeOf(ctx.JumpEntry));
             try e.rr(true, &.{0x01}, RCX, R10); // add r10, rcx

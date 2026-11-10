@@ -94,7 +94,7 @@ comptime {
 /// entry, to jump to with the context register and stack as at a chain
 /// site. (cache.JumpCache owns the table; any thread may invalidate an
 /// entry by writing its `pc`, and only its vCPU fills it.)
-pub const jump_entries = 1024;
+pub const jump_entries = 4096;
 pub const JumpEntry = extern struct {
     pc: u64 = std.math.maxInt(u64),
     /// The *cache.Tb, for the runtime.
@@ -102,8 +102,13 @@ pub const JumpEntry = extern struct {
     /// The executable address of the translation's chain entry.
     code: u64 = 0,
 };
+/// The PC xor-folded with its bits 12 up, then the bits above arm64's
+/// instruction alignment. On py-sum (CPython's computed goto: some 17,500
+/// targets over a billion transfers) this misses 0.024% (arm64) and
+/// 0.013% (386) of the time, against 0.06% and 5.7% for pc ^ pc >> 10 at
+/// 1024 entries.
 pub fn jumpIndex(pc: u64) usize {
-    return @intCast((pc ^ (pc >> 10)) & (jump_entries - 1));
+    return @intCast(((pc ^ (pc >> 12)) >> 2) & (jump_entries - 1));
 }
 
 comptime {
