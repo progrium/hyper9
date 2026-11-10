@@ -307,7 +307,11 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                 if (far != null and active.items[far.?].end > end) {
                     const victim = active.items[far.?].v;
                     p.locs[idx] = p.locs[victim];
-                    p.locs[victim] = .{ .slot = try newSlot(gpa, &p, &free_slots) };
+                    // A fresh slot: a reused one may have held a value
+                    // during the victim's life so far.
+                    if (p.slots >= 4000) return error.TooLarge;
+                    p.locs[victim] = .{ .slot = p.slots };
+                    p.slots += 1;
                 } else {
                     p.locs[idx] = .{ .slot = try newSlot(gpa, &p, &free_slots) };
                 }

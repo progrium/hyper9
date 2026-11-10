@@ -299,7 +299,8 @@ pub fn generate(gpa: std.mem.Allocator, rnd: std.Random, opts: Options) !ir.Regi
         for (&g.pool.values) |*l| l.clearRetainingCapacity();
         const pc: u64 = 0x1000 + 0x100 * bi;
         if (g.chance(40)) try g.b.poll(pc);
-        const n = rnd.uintLessThan(u32, opts.max_insts + 1);
+        // Some blocks are long, as lifted ones are, for register pressure.
+        const n = rnd.uintLessThan(u32, if (g.chance(15)) opts.max_insts * 6 else opts.max_insts + 1);
         for (0..n) |k| try g.inst(pc + 4 * k);
         const last = bi + 1 == nb;
         const t = rnd.uintLessThan(u32, 100);
@@ -355,5 +356,34 @@ test "generated regions verify and run in ir_eval" {
         defer r.deinit(gpa);
         const c: cases.Case = .{ .text = "", .regs = regs(prng.random()), .budget = budget(prng.random()) };
         _ = try env.evalCase(gpa, &r, c);
+    }
+}
+
+test "regalloc never gives one place to two live values" {
+    const regalloc = @import("../regalloc.zig");
+    const gpa = std.testing.allocator;
+    var prng: std.Random.DefaultPrng = .init(2);
+    const host: regalloc.Host = .{ .regs = &.{ 0, 1, 2, 3, 23, 24 }, .pin_regs = &.{ 24, 23 }, .max_pinned = 1, .callee_saved = 3 << 23 };
+    for (0..300) |_| {
+        var r = try generate(gpa, prng.random(), .{ .max_insts = 80 });
+        defer r.deinit(gpa);
+        var p = try regalloc.plan(gpa, &r, host, null);
+        defer p.deinit(gpa);
+        for (r.blocks.items) |blk| {
+            for (blk.start..blk.start + blk.len) |x| for (x + 1..blk.start + blk.len) |y| {
+                if (p.end[x] <= y) continue; // x is dead by y's definition
+                const same = switch (p.locs[x]) {
+                    .reg => |a| p.locs[y] == .reg and p.locs[y].reg == a,
+                    .slot => |a| p.locs[y] == .slot and (p.locs[y].slot == a or
+                        (r.insts.items[x].ty == .v128 and p.locs[y].slot == a + 1) or
+                        (r.insts.items[y].ty == .v128 and p.locs[y].slot + 1 == a)),
+                    .none => false,
+                };
+                if (same) {
+                    std.debug.print("%{d} and %{d} share {any}\n", .{ x, y, p.locs[x] });
+                    return error.TestExpectedEqual;
+                }
+            };
+        }
     }
 }

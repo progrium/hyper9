@@ -1909,6 +1909,13 @@ test "an IR file runs the same natively (H9_IR_FILE, H9_IR_REGS)" {
     defer gpa.destroy(env);
     var r = try cases.parse(gpa, c);
     defer r.deinit(gpa);
+    if (getenv("H9_IR_EMIT_ONLY") != null) {
+        var code: std.ArrayList(u8) = .empty;
+        defer code.deinit(gpa);
+        _ = try emitRegion(gpa, &r, &code);
+        dumpCode(code.items);
+        return;
+    }
     const want = try env.evalCase(gpa, &r, c);
     const got = try runNative(gpa, env, &r, c);
     std.debug.print("want {any}\n got {any}\n", .{ want, got });
