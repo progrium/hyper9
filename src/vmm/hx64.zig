@@ -15,11 +15,29 @@ const x86cpu = @import("vcpu").x86.cpu;
 const tlb = @import("vcpu").x86.tlb;
 const exec = @import("vcpu").x86.exec;
 const dispatch = @import("vcpu").dispatch;
+const cache = @import("vcpu").cache;
+const emitter = @import("vcpu").emitter;
+const lift = @import("vcpu").x86jit.lift;
+const helpers = @import("vcpu").x86jit.helpers;
+const check_vmm = @import("vcpu").check_vmm;
+const build_options = @import("build_options");
 
-/// Which tier runs guest code. T1 isn't wired in yet, so both run T0.
-/// H9_EMU_TIER picks either (zemu.applyTier).
+/// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
+/// when the backend has a code cache and this host an emitter, as for
+/// h86. T1 is the default on x86-64 and arm64 hosts; the web host runs T0
+/// until wasm_t1 is tried in long mode. H9_EMU_TIER picks either
+/// (zemu.applyTier).
 pub const Tier = enum { t0, t1 };
-pub var tier: Tier = .t0;
+pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) {
+    .x86_64, .aarch64 => .t1,
+    else => .t0,
+};
+/// T1's emitter; null where this host has none, or in a -Dno-jit build.
+pub var t1_emitter: ?emitter.Emitter = if (!build_options.jit) null else switch (builtin.cpu.arch) {
+    .aarch64 => @import("vcpu").emit.arm64.emitter_def,
+    .x86_64 => @import("vcpu").emit.x64.emitter_def,
+    else => null,
+};
 pub var t1_stats: dispatch.Stats = .{};
 
 pub const arch: vmm.Arch = .amd64;
@@ -31,14 +49,17 @@ pub const Cpu = struct {
     /// allocates on first use and points `c` at.
     icache: ?*exec.ICacheOf(.long) = null,
     pages: ?*exec.PageCacheOf(.long) = null,
+    /// -Djit-check's state (src/jit/check/vmm.zig).
+    check: check_vmm.State = .{},
 };
 
 /// What the decode caches come from: the web host has no threads, so no
 /// SmpAllocator.
 const icache_gpa = if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator;
 
-/// Frees the decode caches.
+/// Frees -Djit-check's state and the decode caches.
 pub fn deinit(cpu: *Cpu) void {
+    if (build_options.jit_check) cpu.check.deinit();
     if (cpu.icache) |ic| icache_gpa.destroy(ic);
     cpu.icache = null;
     if (cpu.pages) |pc| {
@@ -166,13 +187,75 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     var m: tlb.TlbMem = .init(ctx);
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;
+    // The lifter's call.helper table (x87).
+    if (build_options.jit) ctx.helpers = helpers.tableAddr();
+    // -Djit-check: every region lifted and checked against T0, in T1's loop.
+    if (build_options.jit_check) return runT1(cpu, ctx, &m, t1_emitter orelse undefined);
+    if (build_options.jit and builtin.cpu.arch != .wasm32 and tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(cpu, ctx, &m, em);
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
+    return exitOf(c, ctx, runT0(c, ctx, &m, budget));
+}
+
+/// T0 for up to `budget` instructions, counting them in ctx.
+fn runT0(c: *x86cpu.Cpu64, ctx: *Ctx, m: *tlb.TlbMem, budget: u64) x86cpu.Exit64 {
+    const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     const before = c.retired;
-    const e = tlb.runIn(.long, c, &m, .{ .budget = budget, .stop = stop });
+    const e = tlb.runIn(.long, c, m, .{ .budget = budget, .stop = stop });
     const ran = c.retired - before;
     ctx.retired +%= ran;
     if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(ran, std.math.maxInt(i63)));
-    return exitOf(c, ctx, e);
+    return e;
+}
+
+/// `TlbMem.translate` for a lift.Mem64.
+fn translate64(p: *anyopaque, va: u64, access: x86cpu.Access) ?[*]u8 {
+    const m: *tlb.TlbMem = @ptrCast(@alignCast(p));
+    return m.translate(va, access);
+}
+
+/// T1: compiled code, with T0 for each instruction that raises an
+/// exception or stores to code, as h86's runT1. Compiled code spends
+/// ctx.budget and counts ctx.retired itself; `call.interp` reaches T0's
+/// memory through a lift.Mem64 in ctx.frontend.
+fn runT1(cpu: *Cpu, ctx: *Ctx, m: *tlb.TlbMem, em: emitter.Emitter) vmm.Error!vmm.Exit {
+    const c = &cpu.c;
+    var lm: lift.Mem64 = .{ .ctx = m, .translateFn = translate64 };
+    ctx.frontend = @intFromPtr(&lm);
+    // The lifter's getreg and setreg offsets are into x86cpu.Cpu64.
+    const outer = ctx.cpu;
+    ctx.cpu = @intFromPtr(c);
+    defer ctx.cpu = outer;
+    ctx.interp = @intFromPtr(&lift.interpLong);
+    const cfg: dispatch.Config = .{
+        .frontend = lift.frontendFor(.long),
+        .emitter = em,
+        .pc_off = @offsetOf(x86cpu.Cpu64, "rip"),
+        .pc_bytes = 8,
+        .pc_align = 1,
+    };
+    while (true) {
+        // T0 counts Cpu64.retired again in each `call.interp`: ctx's count
+        // is the one that holds.
+        const before = ctx.retired;
+        const c_before = c.retired;
+        const r = if (build_options.jit_check)
+            check_vmm.run(&cpu.check, &@import("vcpu").check.x86.guest64, c, ctx, tier == .t1)
+        else
+            dispatch.run(icache_gpa, ctx, cfg, &t1_stats);
+        c.retired = c_before +% (ctx.retired -% before);
+        switch (r) {
+            // Compiled code leaves Cpu64.fl's bits current, and RIP past
+            // the SYSCALL.
+            .svc => return exitOf(c, ctx, .syscall),
+            .interrupted => return .interrupted,
+            .t0 => {
+                if (ctx.budget <= 0) return .interrupted;
+                const e = runT0(c, ctx, m, 1);
+                if (e != .stopped) return exitOf(c, ctx, e);
+                if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
+            },
+        }
+    }
 }
 
 /// 9front's VectorSYSCALL (pc/io.h), which its amd64 kernel puts in
