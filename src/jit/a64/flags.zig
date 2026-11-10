@@ -4,10 +4,10 @@
 //!
 //! Within a block the lifter keeps the latest flags value (`cur`): a
 //! condition reads it directly, with no round trip through the Cpu. The
-//! value goes back to Cpu.nzcv (`sync`) before anything that can leave the
-//! region or look at the Cpu (a load, a store, `call.interp`, and the
-//! block's terminator), so guest state is exact there, as the IR's rules
-//! ask. `dead` uses decode.zig's read and write sets to skip computing
+//! value goes back to Cpu.nzcv (`sync`, as a `pending.flags` the emitter
+//! writes only on the way out) before anything that can leave the region
+//! or look at the Cpu (a load, a store, `call.interp`, and the block's
+//! terminator), so guest state is exact there, as the IR's rules ask. `dead` uses decode.zig's read and write sets to skip computing
 //! flags that the next instruction to touch them overwrites first.
 
 const std = @import("std");
@@ -43,10 +43,13 @@ pub const Flags = struct {
         f.dirty = true;
     }
 
-    /// Writes the flags back to the Cpu if they're newer there.
+    /// Makes the flags the Cpu's if they're newer there, as a
+    /// `pending.flags`: written before anything outside the block can see
+    /// the slot (an exit, a fault, a call), so a load or store between
+    /// costs nothing on its way through.
     pub fn sync(f: *Flags, b: *ir.Builder) !void {
         if (!f.dirty) return;
-        try b.setreg(off, try b.un(.@"nzcv.pack", .i32, f.cur.?));
+        try b.pendingFlags(f.cur.?, off, .nzcv);
         f.dirty = false;
     }
 
