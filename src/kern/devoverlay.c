@@ -87,6 +87,7 @@ enum
 
 static char Efull[] = "file system full";
 static char Enotempty[] = "directory not empty";
+static char Elocked[] = "file is locked";	/* ramfs's */
 
 typedef struct Inst Inst;
 typedef struct Node Node;
@@ -129,6 +130,7 @@ struct Node
 	uchar	*direct[Ndirect];
 	uchar	***ind;		/* Perpage pointers to pages of Perpage block pointers */
 	char	*link;		/* an Nlink's target */
+	int	excl;		/* a DMEXCL file that a chan has open */
 };
 
 struct Inst
@@ -158,6 +160,7 @@ struct Ovc
 	long	ndir;
 	Node	*lnk;		/* with a ref: the link the walk's last name followed, or nil */
 	char	*lpath;		/* lnk's path */
+	int	excl;		/* this chan holds node's DMEXCL open */
 	int	nlinks;		/* links followed in this walk */
 };
 
@@ -719,6 +722,8 @@ ovcfree(Ovc *o)
 	if(o->lower != nil)
 		cclose(o->lower);
 	qlock(&in->ql);
+	if(o->excl)
+		o->node->excl = 0;
 	nodeunref(in, o->node);
 	nodeunref(in, o->lnk);
 	qunlock(&in->ql);
@@ -1822,6 +1827,9 @@ ovopen(Chan *c, int omode)
 	refresh(c);
 	if(o->node != nil && o->node->kind == Nlink)
 		error(Enonexist);	/* a link whose target is missing */
+	/* Exclusive use, as 9front's file servers do: one open at a time. */
+	if(o->node != nil && (o->node->mode & DMEXCL) && o->node->excl)
+		error(Elocked);
 	if(c->qid.type & QTDIR){
 		if(mode != OREAD || (omode & OTRUNC))
 			error(Eisdir);
@@ -1853,6 +1861,10 @@ ovopen(Chan *c, int omode)
 			n->mtime = seconds();
 		}
 		c->qid = n->qid;
+	}
+	if(o->node != nil && (o->node->mode & DMEXCL) && (c->qid.type & QTDIR) == 0){
+		o->node->excl = 1;
+		o->excl = 1;
 	}
 	if(omode & ORCLOSE)
 		c->flag |= CRCLOSE;
@@ -1954,6 +1966,10 @@ ovcreate(Chan *c, char *name, int omode, ulong perm)
 	o->node = ch;
 	c->qid = ch->qid;
 	changed(in, o->path);
+	if((ch->mode & DMEXCL) && (perm & DMDIR) == 0){
+		ch->excl = 1;
+		o->excl = 1;
+	}
 	if(omode & ORCLOSE)
 		c->flag |= CRCLOSE;
 	c->mode = openmode(omode);

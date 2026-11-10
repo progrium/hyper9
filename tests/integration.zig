@@ -1119,6 +1119,17 @@ test "a new file in an ephemeral cwd is readable and absent on the host afterwar
     try std.testing.expect(!s.exists("f"));
 }
 
+test "an exclusive-use file in the overlay opens once at a time [6]" {
+    const e = try env(@src());
+    // DMEXCL (chmod +l), as 9front's file servers keep it: a second open
+    // while one is open fails, and succeeds once that one is closed.
+    const r = try run(e, &.{ "--rc", "touch /tmp/f && chmod +l /tmp/f && { cat /tmp/f >[2=1] } </tmp/f; cat /tmp/f && echo again" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try expectIn(r.out, "file is locked");
+    try expectIn(r.out, "again\n");
+}
+
 test "writing an existing host file changes it in the guest only [6]" {
     const e = try env(@src());
     var s: Scratch = undefined;
