@@ -1685,8 +1685,13 @@ host$ h9 --net-allow 'tcp!127.0.0.1!5640' --rc 'wsmount -b ws://127.0.0.1:5640/ 
 
 In the browser demo, add `--serve-origin` with the page's origin (and a
 `--serve-token` beyond loopback), then type the same `wsmount -b` line.
-Linux programs don't use the mount, since their sockets are devip's own
-([remote-net](design/remote-net.md) proposes that).
+Linux programs use the mount too, since their sockets open `/net`
+through the namespace: from busybox, `/9/bin/wsmount -b
+ws://127.0.0.1:5640/ /net` and then `wget` fetches through the host. Each
+connection carries about 7 sockets waiting at once, since each holds one
+of the server's 8 exportfs processes; mount `/net` over more connections
+for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`
+reports it, so an unconnected server can't tell its clients apart.
 
 Mounting a remote 9P server the network policy allows:
 

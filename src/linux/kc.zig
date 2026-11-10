@@ -38,6 +38,10 @@ const real = struct {
     extern fn h9so_hasv6() c_int;
     extern fn h9so_ifaddrs(a: [*]IfAddr, max: c_int) c_int;
     extern fn h9_linux_sockctl(fd: c_int, msg: [*:0]const u8) c_int;
+    extern fn h9_linux_rattach(datafd: c_int, ctlfd: c_int, id: c_int, udp: c_int, open: c_int) c_int;
+    extern fn h9_linux_rconvid(fd: c_int) c_int;
+    extern fn h9_linux_rclose(fd: c_int) void;
+    extern fn h9_linux_raccept(fd: c_int, cloexec: c_int) c_int;
     extern fn h9_linux_syncfs(fd: c_int) c_int;
     extern fn h9_linux_sync() c_int;
 };
@@ -130,6 +134,16 @@ const stub = struct {
     }
     fn h9_linux_sockctl(_: c_int, _: [*:0]const u8) c_int {
         return -1;
+    }
+    fn h9_linux_rattach(_: c_int, _: c_int, _: c_int, _: c_int, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_linux_rconvid(_: c_int) c_int {
+        return -1;
+    }
+    fn h9_linux_rclose(_: c_int) void {}
+    fn h9_linux_raccept(_: c_int, _: c_int) c_int {
+        return -9;
     }
     fn h9_linux_syncfs(_: c_int) c_int {
         return -1;
@@ -232,6 +246,31 @@ pub fn pipeQueued(fd: i32) i64 {
 
 pub fn soError(fd: i32) u32 {
     return @intCast(c.h9_linux_soerror(fd));
+}
+
+/// Attaches a conversation from a mounted /net (not devip's), open on
+/// `data` and `ctl`, to the kernel's read-ahead (src/kern/linuxnet.c),
+/// under the Linux layer's `id`. `open`: it's connected already.
+pub fn rattach(data: i32, ctl: i32, id: u32, udp: bool, open: bool) Error!void {
+    _ = try check(c.h9_linux_rattach(data, ctl, @intCast(id), @intFromBool(udp), @intFromBool(open)));
+}
+
+/// The id fd's mounted conversation was attached under, or null.
+pub fn rconvId(fd: i32) ?u32 {
+    const r = c.h9_linux_rconvid(fd);
+    return if (r < 0) null else @intCast(r);
+}
+
+/// accept on a listening mounted conversation: a new fd for the waiting
+/// call's ctl, or -errno (-EAGAIN when none waits yet).
+pub fn raccept(fd: i32, cloexec: bool) i64 {
+    return c.h9_linux_raccept(fd, @intFromBool(cloexec));
+}
+
+/// fd is closing: a mounted conversation goes with its description's
+/// last fd.
+pub fn rclose(fd: i32) void {
+    c.h9_linux_rclose(fd);
 }
 
 /// Writes a control message to the conversation behind socket fd.
