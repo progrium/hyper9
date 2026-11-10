@@ -2557,9 +2557,12 @@ fn function(
         };
     };
     // A slot flags are pending for is written in the exit tail, through
-    // the Cpu, so it stays there.
+    // the Cpu, so it stays there, and so does a lazy record's (the kind
+    // byte a front end clears, say), or flushRegs would write it over
+    // the record.
     for (regions) |rg| for (rg.insts.items) |i| if (i.op == .@"pending.flags") {
-        for (regs.items) |*g| if (g.off < i.aux + 4 and i.aux < g.off + g.size) {
+        const end = i.aux + 4 + @as(u64, if (i.aux2 == 2) @sizeOf(ir.LazyRecord) else 0);
+        for (regs.items) |*g| if (g.off < end and i.aux < g.off + g.size) {
             g.bad = true;
         };
     };

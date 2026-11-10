@@ -25,14 +25,12 @@ const build_options = @import("build_options");
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter, as for
-/// h86. T1 is the default on x86-64 and arm64 hosts. The web host's T1
-/// (wasm_t1.zig, runWasmT1) is there but not the default yet: the wasm
-/// emitter can leave a lazy flags record with size 0 in long mode (seen
-/// in musl's printf core under busybox sh), which Flags.get then trips
-/// on. H9_EMU_TIER picks either (zemu.applyTier).
+/// h86, and on the web host its own (wasm_t1.zig, runWasmT1). T1 is the
+/// default on x86-64, arm64, and the web. H9_EMU_TIER picks either
+/// (zemu.applyTier).
 pub const Tier = enum { t0, t1 };
 pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) {
-    .x86_64, .aarch64 => .t1,
+    .x86_64, .aarch64, .wasm32 => .t1,
     else => .t0,
 };
 /// T1's emitter; null where this host has none, or in a -Dno-jit build.

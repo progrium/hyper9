@@ -796,7 +796,9 @@ pub fn generateLazyFlags(gpa: std.mem.Allocator) ![]Case {
     }
     // Lazy records (pending.flags @0x2): from each kind of flags op, used
     // only there or also by a branch, written on a fault, at an exit,
-    // replaced, and dropped by a setreg.
+    // replaced, and dropped by a setreg. b1 clears the record's kind byte
+    // first, as the x86 lifter's settle does, so an emitter must keep
+    // that byte in the Cpu, not in a register it writes back later.
     for ([_]u64{ data_va, data_va + 0x10000 }) |start| for ([_][]const u8{
         "eflags.add:flags %1, %2",       "eflags.sub:flags %1, %2",
         "eflags.adc:flags %1, %2, %4",   "eflags.sbb:flags %1, %2, %4",
@@ -823,6 +825,8 @@ pub fn generateLazyFlags(gpa: std.mem.Allocator) ![]Case {
             \\  %7 = eflags.cond:i1 %5 #0x4
             \\  brcond %7 -> b1 b2
             \\b1:
+            \\  %15 = const:i8
+            \\  setreg %15 #0x24
             \\  %12 = getreg:{1s} #0x8
             \\  %13 = eflags.logic:flags %12
             \\  pending.flags %13 #0x20 @0x2
