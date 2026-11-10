@@ -27,6 +27,10 @@ pub var t1_emitter: ?emitter.Emitter = switch (builtin.cpu.arch) {
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};
+/// CNTVCT_EL0 from instructions retired rather than the host's counter
+/// (design/0019's deterministic mode); zemu sets it from
+/// H9_EMU_DETERMINISTIC at create.
+pub var deterministic = false;
 
 pub const arch: vmm.Arch = .arm64;
 pub const ready = true;
@@ -83,7 +87,7 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
 }
 
 pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
-    c.machine = .init(&c.t0, ctx, &c.cache, clock);
+    c.machine = .init(&c.t0, ctx, &c.cache, if (deterministic) null else clock);
     ctx.frontend = @intFromPtr(&c.machine);
     // -Djit-check: every region lifted and checked against T0, in T1's
     // loop (src/jit/check/vmm.zig); the emitter only runs them with tier t1.

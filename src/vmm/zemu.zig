@@ -65,8 +65,24 @@ fn monoNs() u64 {
     return t;
 }
 
-/// The code cache's size, per backend.
+/// The code cache's size, per backend: 64 MiB, or H9_EMU_CACHE bytes
+/// (tests that need it to fill, tests/a64.zig).
 const cache_size = 64 << 20;
+
+fn cacheSize() usize {
+    if (!builtin.link_libc) return cache_size;
+    const v = std.c.getenv("H9_EMU_CACHE") orelse return cache_size;
+    return std.fmt.parseInt(usize, std.mem.span(v), 0) catch cache_size;
+}
+
+/// H9_EMU_DETERMINISTIC=1: a Guest with a `deterministic` flag derives
+/// its counter from instructions retired (design/0019's deterministic
+/// mode), set at create like the tier.
+fn deterministicFromEnv() bool {
+    if (!builtin.link_libc) return false;
+    const v = std.c.getenv("H9_EMU_DETERMINISTIC") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
+}
 
 const Impl = Emu(ha64, h86);
 pub const Backend = Impl.EmuBackend;
@@ -174,6 +190,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .i386 => if (!X86.ready) return error.WrongArch,
                     .amd64 => return error.WrongArch,
                 }
+                if (opts.arch == .arm64 and @hasDecl(A64, "deterministic")) A64.deterministic = deterministicFromEnv();
                 if (tierFromEnv()) |t| {
                     const ok = switch (opts.arch) {
                         .arm64 => applyTier(A64, t),
@@ -200,7 +217,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 errdefer b.code.deinit(gpa);
                 if (build_options.jit and codemem.available()) {
                     const c = try gpa.create(cache.Cache);
-                    if (cache.Cache.init(gpa, cache_size)) |v| {
+                    if (cache.Cache.init(gpa, cacheSize())) |v| {
                         c.* = v;
                         b.jit = c;
                     } else |_| gpa.destroy(c);

@@ -1658,6 +1658,20 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_embed.step);
     }
 
+    // The arm64 JIT plan's [a64-jit] cases, through the vmm interface on
+    // T0 and T1; they skip without -Demu=zig. Not in zig build test until
+    // the two T0 cases tests/a64.zig names pass.
+    const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/a64.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "h9", .module = mod.mod }},
+    }) });
+    linkUnicorn(a64_jit);
+    const a64_jit_run = b.addRunArtifact(a64_jit);
+    b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=zig)").dependOn(&a64_jit_run.step);
+
     // The speed numbers in SPEC.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
     const bench = b.addExecutable(.{
