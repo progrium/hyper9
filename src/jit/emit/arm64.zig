@@ -96,6 +96,7 @@ pub const host: regalloc.Host = .{
     .pin_regs = &.{ 28, 27, 26, 25, 24, 23, 15, 14, 8, 7 },
     .max_pinned = 10,
     .callee_saved = 0x3F << 23,
+    .guest_nzcv = @offsetOf(@import("../../interp/a64/exec.zig").Cpu, "nzcv"),
 };
 
 /// The callee-saved pairs the prologue stores above x29/x30, at
@@ -622,7 +623,7 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region) ![]Decide {
                         need[o] = true;
                     };
                     clobber = switch (i.op) {
-                        .poll, .@"call.interp", .@"call.helper", .cas => true,
+                        .poll, .@"call.interp", .@"call.helper", .cas, .copy => true,
                         else => fallsBack(i.op) or i.op.isExt(),
                     };
                 },
@@ -1198,6 +1199,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.restoreRegs(save);
             try e.loadChunks();
         },
+        .copy => try copyOp(e, idx),
         .@"call.helper" => {
             try e.writeback(e.dirty);
             e.dirty = 0;
@@ -1507,6 +1509,131 @@ fn vmemOp(e: *E, idx: usize) !void {
         .retired = i.retired,
         .tso = tso,
     } });
+}
+
+/// A guest arm64 instruction run as itself (ir.zig, Op.copy), its register
+/// fields rewritten to the host registers holding the guest's: a pinned
+/// chunk's register, or a scratch register (x9-x11, x13; v0-v3) loaded
+/// from the Cpu and stored back. Guest NZCV goes through host NZCV. FP and
+/// saturating ones (which need the guest FPCR and FPSR) run through the
+/// interpreter for now, as ir_eval runs every copy.
+fn copyOp(e: *E, idx: usize) !void {
+    const i = e.r.insts.items[idx];
+    if (regalloc.isCall(i)) {
+        try e.writeback(e.dirty);
+        e.dirty = 0;
+        const save = e.saveMask(idx, false);
+        try e.saveRegs(save);
+        try e.mov(0, CTX);
+        try e.movImm(1, i.aux & 0xffff_ffff);
+        try e.movImm(2, 0);
+        try e.ldrCtx(IP0, ctx.off.interp);
+        try e.call(IP0);
+        try e.cbnz(false, 0, e.epilogue);
+        try e.restoreRegs(save);
+        return e.loadChunks();
+    }
+    const fields = regalloc.copyFields(i.aux2);
+    const scratch_x = [4]u5{ S0, S1, S2, T0 };
+    var regs: [4]u5 = undefined;
+    var nx: usize = 0;
+    var nv: u5 = 0;
+    var word: u32 = @truncate(i.aux);
+    const pos = [4]u5{ 0, 5, 16, 10 };
+    for (fields, 0..) |fo, k| {
+        const f = fo orelse continue;
+        // The same register in two fields gets one host register.
+        var reg: ?u5 = null;
+        for (fields[0..k], 0..) |go, j| if (go) |g| if (g.off == f.off and g.vec == f.vec) {
+            reg = regs[j];
+        };
+        if (reg == null) {
+            // Loaded if any field naming the register reads it.
+            var read = false;
+            for (fields[k..]) |go| if (go) |g| if (g.off == f.off and g.vec == f.vec and g.read) {
+                read = true;
+            };
+            if (f.vec) {
+                // v0-v3: under 16, for the by-element forms' 4-bit Rm.
+                reg = nv;
+                nv += 1;
+                if (read) try vldst(e, false, reg.?, f.off);
+            } else if (exactChunk(e, f.off, 8)) |c| {
+                reg = c;
+            } else {
+                reg = scratch_x[nx];
+                nx += 1;
+                if (read) try readGuest(e, f.off, 8, reg.?);
+            }
+        }
+        regs[k] = reg.?;
+        var field: u32 = reg.?;
+        if (f.vec and k == 2) {
+            // A by-element op with H lanes has a 4-bit Rm and its index's M
+            // bit in bit 20: the field isn't the register number there.
+            const n = (f.off - a64_v_off) / 16;
+            if ((word >> 16) & 31 != n) field |= 16;
+        }
+        word = (word & ~(@as(u32, 31) << pos[k])) | field << pos[k];
+    }
+    const nz = host.guest_nzcv.?;
+    if (i.aux & regalloc.copy_reads_nzcv != 0) {
+        try readGuest(e, nz, 4, IP0);
+        try e.put(0xD51B4200 | @as(u32, IP0)); // msr nzcv, x16
+    }
+    try e.put(word);
+    if (i.aux & regalloc.copy_writes_nzcv != 0) {
+        try e.put(0xD53B4200 | @as(u32, IP0)); // mrs x16, nzcv
+        try writeGuest(e, nz, 4, IP0);
+    }
+    for (fields, 0..) |fo, k| {
+        const f = fo orelse continue;
+        if (!f.write) continue;
+        var dup = false;
+        for (fields[0..k]) |go| if (go) |g| if (g.write and g.off == f.off and g.vec == f.vec) {
+            dup = true;
+        };
+        if (dup) continue;
+        if (f.vec) try vldst(e, true, regs[k], f.off) else try writeGuest(e, f.off, 8, regs[k]);
+    }
+}
+
+const a64_v_off: u32 = @offsetOf(@import("../../interp/a64/exec.zig").Cpu, "v");
+
+/// The register of the chunk that is exactly `bytes` bytes at `off`.
+fn exactChunk(e: *E, off: u64, bytes: u64) ?u5 {
+    const k = e.p.chunkAt(off, bytes) orelse return null;
+    const c = e.p.chunks[k];
+    return if (c.off == off and c.bytes == bytes) @intCast(c.reg) else null;
+}
+
+/// rd = the guest's `bytes` bytes at Cpu offset `off`, from its chunk or
+/// the Cpu.
+fn readGuest(e: *E, off: u64, bytes: u32, rd: u5) !void {
+    if (e.p.chunkAt(off, bytes)) |k| {
+        const c = e.p.chunks[k];
+        if (c.bytes == bytes) return e.mov(rd, @intCast(c.reg));
+        return e.ubfx(rd, @intCast(c.reg), @intCast((off - c.off) * 8), bytes * 8);
+    }
+    try e.ldst(false, @intCast(std.math.log2_int(u32, bytes)), rd, CPU, off);
+}
+
+/// The guest's `bytes` bytes at Cpu offset `off` = rs's low bytes.
+fn writeGuest(e: *E, off: u64, bytes: u32, rs: u5) !void {
+    if (e.p.chunkAt(off, bytes)) |k| {
+        const c = e.p.chunks[k];
+        if (c.bytes == bytes) try e.mov(@intCast(c.reg), rs) else try e.bfi(@intCast(c.reg), rs, @intCast((off - c.off) * 8), bytes * 8);
+        e.dirty |= @as(regalloc.ChunkSet, 1) << @intCast(k);
+        return;
+    }
+    try e.ldst(true, @intCast(std.math.log2_int(u32, bytes)), rs, CPU, off);
+}
+
+/// LDR or STR Qt, [Cpu + off].
+fn vldst(e: *E, store: bool, qt: u5, off: u64) !void {
+    try e.movImm(IP1, off);
+    try e.dp(0x0B000000, true, IP1, CPU, IP1);
+    try e.put((if (store) @as(u32, 0x3D800000) else 0x3DC00000) | @as(u32, IP1) << 5 | qt);
 }
 
 /// cas through the runtime's slow_cas (an inline host CAS behind the TLB

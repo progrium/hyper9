@@ -42,7 +42,50 @@ pub const Host = struct {
     /// Bit n set: host register n survives a call. Values live across a
     /// call.interp or call.helper prefer these.
     callee_saved: u64,
+    /// The front end's NZCV word in the Cpu, which `copy` ops read and
+    /// write (ha64's Cpu.nzcv), if the host runs copy ops natively.
+    guest_nzcv: ?u32 = null,
 };
+
+/// A `copy` op's register field (ir.zig, Op.copy).
+pub const CopyField = struct {
+    off: u32,
+    read: bool,
+    write: bool,
+    /// A 16-byte V register, else an 8-byte X register.
+    vec: bool,
+};
+
+/// The fields of a copy op's aux2, in Rd, Rn, Rm, Ra order; null where a
+/// field isn't a register.
+pub fn copyFields(aux2: u64) [4]?CopyField {
+    var out: [4]?CopyField = undefined;
+    for (&out, 0..) |*f, k| {
+        const d: u16 = @truncate(aux2 >> @intCast(16 * k));
+        f.* = if (d == 0) null else .{ .off = d & 0x1fff, .read = d & 0x2000 != 0, .write = d & 0x4000 != 0, .vec = d & 0x8000 != 0 };
+    }
+    return out;
+}
+
+pub const copy_reads_nzcv: u64 = 1 << 32;
+pub const copy_writes_nzcv: u64 = 1 << 33;
+/// FP or saturating: the host runs it through the interpreter for now.
+pub const copy_fp: u64 = 1 << 34;
+
+/// Whether the op calls out of generated code (and so reads and writes the
+/// Cpu): call.interp, call.helper, and copy ops run through the interpreter.
+pub fn isCall(i: ir.Inst) bool {
+    return i.op == .@"call.interp" or i.op == .@"call.helper" or (i.op == .copy and copyByInterp(i.aux));
+}
+
+/// Whether a copy op runs through the interpreter: FP and saturating ones,
+/// and TBL and TBX with a list of more than one register (its registers
+/// must be consecutive, which field rewriting can't keep).
+pub fn copyByInterp(aux: u64) bool {
+    const w: u32 = @truncate(aux);
+    const tbl_list = w & 0xbf208c00 == 0x0e000000 and (w >> 13) & 3 != 0;
+    return aux & copy_fp != 0 or tbl_list;
+}
 
 pub const Chunk = struct {
     /// Byte offset in the Cpu.
@@ -108,6 +151,14 @@ pub const Plan = struct {
         return m;
     }
 
+    /// The chunk holding all of the `bytes` bytes at Cpu offset `off`.
+    pub fn chunkAt(p: *const Plan, off: u64, bytes: u64) ?u8 {
+        for (p.chunks, 0..) |c, k| {
+            if (off >= c.off and off + bytes <= c.off + c.bytes) return @intCast(k);
+        }
+        return null;
+    }
+
     /// The value's register, or null for a slot or none.
     pub fn reg(p: *const Plan, v: ir.Ref) ?u8 {
         return switch (p.locs[v]) {
@@ -129,6 +180,16 @@ fn accessBytes(r: *const ir.Region, i: ir.Inst) ?u32 {
         .v128 => 16,
         else => null,
     };
+}
+
+/// Counts an access of `bytes` bytes at Cpu offset `off`.
+fn access(gpa: std.mem.Allocator, words: *std.AutoArrayHashMapUnmanaged(u64, WordInfo), off: u64, bytes: u32) !void {
+    const lo: u32 = @intCast(off % 8);
+    if (lo + bytes > 8) return markBad(gpa, words, off, bytes);
+    const gop = try words.getOrPut(gpa, off / 8);
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+    gop.value_ptr.span |= @truncate(((@as(u32, 1) << @intCast(bytes)) - 1) << @intCast(lo));
+    gop.value_ptr.uses += 1;
 }
 
 /// Marks the words a `bytes`-byte access at `off` touches as unpinnable.
@@ -191,22 +252,18 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
         // An fp op ORs its exceptions into the 4-byte word at aux2 - 1,
         // which a chunk mustn't hold.
         if (i.op.isFp() and i.aux2 != 0) try markBad(gpa, &words, i.aux2 - 1, 4);
-        if (i.op != .getreg and i.op != .setreg) continue;
-        const q = i.aux / 8;
-        const lo: u32 = @intCast(i.aux % 8);
-        const gop = try words.getOrPut(gpa, q);
-        if (!gop.found_existing) gop.value_ptr.* = .{};
-        const w = gop.value_ptr;
-        const size = accessBytes(r, i) orelse {
-            w.bad = true;
-            continue;
-        };
-        if (lo + size > 8) {
-            try markBad(gpa, &words, i.aux, size);
+        if (i.op == .copy and !copyByInterp(i.aux)) {
+            // A copied instruction's X registers are 8-byte accesses (it
+            // wants them in host registers), its V registers aren't
+            // pinned, and its NZCV is the guest's word.
+            for (copyFields(i.aux2)) |f| if (f) |x| {
+                if (x.vec) try markBad(gpa, &words, x.off, 16) else try access(gpa, &words, x.off, 8);
+            };
+            if (host.guest_nzcv) |nz| if (i.aux & (copy_reads_nzcv | copy_writes_nzcv) != 0) try access(gpa, &words, nz, 4);
             continue;
         }
-        w.span |= @truncate(((@as(u32, 1) << @intCast(size)) - 1) << @intCast(lo));
-        w.uses += 1;
+        if (i.op != .getreg and i.op != .setreg) continue;
+        if (accessBytes(r, i)) |size| try access(gpa, &words, i.aux, size) else try markBad(gpa, &words, i.aux, 8);
     }
     var cands: std.ArrayList(Chunk) = .empty;
     defer cands.deinit(gpa);
@@ -234,12 +291,7 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
     }
     for (r.insts.items, 0..) |i, idx| {
         if (i.op != .getreg and i.op != .setreg) continue;
-        for (p.chunks, 0..) |c, k| {
-            if (i.aux >= c.off and i.aux < c.off + c.bytes) {
-                p.chunk_of[idx] = @intCast(k);
-                break;
-            }
-        }
+        if (p.chunkAt(i.aux, 1)) |k| p.chunk_of[idx] = k;
     }
 
     // Values: linear scan in each block.
@@ -259,8 +311,7 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
         calls.clearRetainingCapacity();
         var free = value_regs;
         for (blk.start..blk.start + blk.len) |idx| {
-            const op = r.insts.items[idx].op;
-            if (op == .@"call.interp" or op == .@"call.helper") try calls.append(gpa, @intCast(idx));
+            if (isCall(r.insts.items[idx])) try calls.append(gpa, @intCast(idx));
         }
         for (blk.start..blk.start + blk.len) |idx| {
             const i = r.insts.items[idx];
@@ -340,6 +391,16 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                             d |= @as(ChunkSet, 1) << @intCast(p.chunk_of[idx]);
                         },
                         .@"call.interp", .@"call.helper" => d = 0,
+                        .copy => if (isCall(i)) {
+                            d = 0;
+                        } else {
+                            for (copyFields(i.aux2)) |f| if (f) |x| if (x.write and !x.vec) {
+                                if (p.chunkAt(x.off, 8)) |k| d |= @as(ChunkSet, 1) << @intCast(k);
+                            };
+                            if (i.aux & copy_writes_nzcv != 0) if (host.guest_nzcv) |nz| if (p.chunkAt(nz, 4)) |k| {
+                                d |= @as(ChunkSet, 1) << @intCast(k);
+                            };
+                        },
                         .br => {
                             if (p.dirty_in[i.aux] | d != p.dirty_in[i.aux]) changed = true;
                             p.dirty_in[i.aux] |= d;
