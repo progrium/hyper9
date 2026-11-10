@@ -88,7 +88,10 @@ fn backendId(b: vmm.Backend) usize {
 pub const Error = error{ OutOfMemory, NoSpace, Io };
 
 /// The pages of chunk `index` of the file open as `fd`, read from it if
-/// no process maps them yet. The Mm's addChunk takes its own reference.
+/// no process maps them yet, with a reference for the caller. It's taken
+/// under the table's lock, so the last mapping going meanwhile (another
+/// process's munmap, as when the sender of a memfd unmaps it as the
+/// receiver maps it) can't free them (`released`).
 pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path: []const u8, writable: bool) Error!*mm.Pages {
     const key: Key = .{ .backend = backendId(backend), .file = file, .index = index };
     lock();
@@ -96,6 +99,7 @@ pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path
     if (table.get(key)) |e| {
         e.writable = e.writable or writable;
         if (writable) postFile(e, fd);
+        _ = e.pages.refs.fetchAdd(1, .acq_rel);
         return e.pages;
     }
     const mem = backend.allocPages(mm.pages_per_chunk) catch return error.NoSpace;
@@ -112,7 +116,8 @@ pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path
     errdefer gpa.destroy(p);
     const pz = try gpa.dupeZ(u8, path);
     errdefer gpa.free(pz);
-    p.* = .{ .mem = mem, .refs = .init(1), .file = e, .release = released };
+    // The table's reference and the caller's.
+    p.* = .{ .mem = mem, .refs = .init(2), .file = e, .release = released };
     e.* = .{ .key = key, .backend = backend, .pages = p, .writable = writable, .path = pz };
     try table.put(gpa, key, e);
     if (writable) postFile(e, fd);
