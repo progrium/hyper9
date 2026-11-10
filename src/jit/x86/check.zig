@@ -121,10 +121,14 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, 
     return res;
 }
 
+/// Where runChecked also checks each region as this host's generated
+/// code: the native fuzz tests set it.
+pub var run_native: ?*Native = null;
+
 pub fn runChecked(gpa: std.mem.Allocator, m: *Machine, start: Cpu, budget: i64) !Result {
     const r = try check.Run.init(gpa, guest, check.mapBacking(&m.map));
     defer r.deinit();
-    const res = try checkRegions(gpa, r, &m.map, start, budget, 1000, null);
+    const res = try checkRegions(gpa, r, &m.map, start, budget, 1000, run_native);
     if (!res.ok) {
         std.debug.print("h86 region check failed:\n{s}\n", .{r.report.items});
         return error.Diverged;
@@ -660,6 +664,19 @@ test "fuzz-x87: random x87 programs agree region by region" {
     try fuzzX87(testing.allocator, 0x87, 1000);
 }
 
+/// Runs `f` with each region also checked as this host's code.
+pub fn natively(f: anytype, args: anytype) !void {
+    var n = Native.init() catch return error.SkipZigTest;
+    defer n.deinit();
+    run_native = &n;
+    defer run_native = null;
+    try @call(.auto, f, args);
+}
+
+test "fuzz-x87 natively" {
+    try natively(fuzzX87, .{ testing.allocator, 0x870, 300 });
+}
+
 /// Random SSE and SSE2 programs over random data: the scalar arithmetic,
 /// conversions, compares, and moves, and the 128-bit moves and logic, on
 /// registers and [ebx+d8], with LDMXCSR from random data now and then
@@ -725,4 +742,8 @@ pub fn fuzzSse(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
 
 test "fuzz-sse: random SSE and SSE2 programs agree region by region" {
     try fuzzSse(testing.allocator, 0x55e, 1000);
+}
+
+test "fuzz-sse natively" {
+    try natively(fuzzSse, .{ testing.allocator, 0x55f, 300 });
 }

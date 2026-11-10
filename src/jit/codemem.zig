@@ -288,7 +288,7 @@ const linux = struct {
     fn detect() bool {
         mode = .dual;
         if (probe()) return true;
-        if (arch != .x86_64 or !translated()) return false;
+        if (!translated()) return false;
         mode = .rwx;
         return probe();
     }
@@ -311,7 +311,9 @@ const linux = struct {
             if (L.errno(got) != .SUCCESS or got == 0) break;
             n += got;
         }
-        return isArmCpuinfo(buf[0..n]);
+        // arm64 under QEMU user mode on an x86 kernel (testing the arm64
+        // emitter there) is the other way round.
+        return if (arch == .x86_64) isArmCpuinfo(buf[0..n]) else isX86Cpuinfo(buf[0..n]);
     }
 
     fn map(n: usize) Error!Region {
@@ -554,6 +556,10 @@ test "code written on one thread runs on another" {
 fn isArmCpuinfo(text: []const u8) bool {
     return std.mem.indexOf(u8, text, "CPU implementer") != null and
         std.mem.indexOf(u8, text, "vendor_id") == null;
+}
+
+fn isX86Cpuinfo(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "vendor_id") != null;
 }
 
 test "cpuinfo: arm64 kernels are translated hosts, x86 ones aren't" {

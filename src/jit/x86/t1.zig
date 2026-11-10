@@ -191,8 +191,25 @@ fn expectSame(t1: *Machine, t0m: *Machine, prog: []const u8, regs: [8]u32, eflag
     }
 }
 
+/// This host's emitter, if it has one.
+const host_emitter: ?emitter_mod.Emitter = switch (builtin.cpu.arch) {
+    .x86_64 => @import("../emit/x64.zig").emitter_def,
+    .aarch64 => @import("../emit/arm64.zig").emitter_def,
+    else => null,
+};
+
 pub fn testCache(size: usize) !*cache_mod.Cache {
     if (!eval_emit.supported or !codemem.available()) return error.SkipZigTest;
+    return newCache(size);
+}
+
+/// A cache for generated code alone (no eval_emit stubs).
+fn hostCache(size: usize) !*cache_mod.Cache {
+    if (host_emitter == null or !codemem.available()) return error.SkipZigTest;
+    return newCache(size);
+}
+
+fn newCache(size: usize) !*cache_mod.Cache {
     const c = try testing.allocator.create(cache_mod.Cache);
     errdefer testing.allocator.destroy(c);
     c.* = try cache_mod.Cache.init(testing.allocator, size);
@@ -229,7 +246,7 @@ const Pair = struct {
 
 fn randomPrograms(em: emitter_mod.Emitter, n: usize) !void {
     // A small cache, so it fills and flushes now and then.
-    const c = try testCache(codemem.granule);
+    const c = try (if (std.mem.eql(u8, em.name, eval_emit.emitter_def.name)) testCache(codemem.granule) else hostCache(codemem.granule));
     defer freeCache(c);
     const p = try Pair.init(c, em);
     defer p.deinit();
@@ -253,8 +270,7 @@ test "h86 T1: random programs agree with T0 through dispatch, with flushes" {
 }
 
 test "h86 T1: the same through this host's emitter" {
-    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
-    try randomPrograms(@import("../emit/x64.zig").emitter_def, 1000);
+    try randomPrograms(host_emitter orelse return error.SkipZigTest, 1000);
 }
 
 test "h86 T1: a counted loop chains, and a store to its own code retranslates" {
@@ -293,7 +309,7 @@ test "h86 T1: INT3 and INTO's #OF come back with EIP past them, as on T0" {
 }
 
 fn fpPrograms(em: emitter_mod.Emitter) !void {
-    const c = try testCache(1 << 20);
+    const c = try (if (std.mem.eql(u8, em.name, eval_emit.emitter_def.name)) testCache(1 << 20) else hostCache(1 << 20));
     defer freeCache(c);
     const p = try Pair.init(c, em);
     defer p.deinit();
@@ -337,6 +353,5 @@ test "h86 T1: SSE2 and x87 through dispatch agree with T0" {
 }
 
 test "h86 T1: SSE2 and x87 as this host's code" {
-    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
-    try fpPrograms(@import("../emit/x64.zig").emitter_def);
+    try fpPrograms(host_emitter orelse return error.SkipZigTest);
 }
