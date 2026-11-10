@@ -1,0 +1,64 @@
+//! Test and fuzzing support: compiles IR regions with this host's emitter
+//! (x64.zig or arm64.zig) into code memory, for check.zig's `.entry` tier.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const ir = @import("../ir.zig");
+const ctx = @import("../ctx.zig");
+const alloc_mod = @import("../alloc.zig");
+const codemem = @import("../codemem.zig");
+const emitter = @import("../emitter.zig");
+
+const host = switch (builtin.cpu.arch) {
+    .x86_64 => @import("x64.zig"),
+    .aarch64 => @import("arm64.zig"),
+    else => null,
+};
+
+/// Whether this host has an emitter and code memory works.
+pub fn available() bool {
+    return @TypeOf(host) != @TypeOf(null) and codemem.available();
+}
+
+pub const name = if (@TypeOf(host) != @TypeOf(null)) @tagName(builtin.cpu.arch) else "none";
+
+/// A code region that `compile` fills, resetting it when full (which
+/// invalidates every entry it returned before).
+pub const Native = struct {
+    code: codemem.Region,
+    /// Regions compiled, and those the emitter declined.
+    compiled: u64 = 0,
+    unsupported: u64 = 0,
+
+    pub fn init() !Native {
+        if (!available()) return error.JitUnavailable;
+        return .{ .code = try codemem.Region.init(8 << 20) };
+    }
+
+    pub fn deinit(n: *Native) void {
+        n.code.deinit();
+    }
+
+    /// The region's entry, or null if the emitter doesn't support it.
+    pub fn compile(n: *Native, gpa: std.mem.Allocator, reg: *const ir.Region) !?ctx.EntryFn {
+        if (@TypeOf(host) == @TypeOf(null)) return null;
+        var a = try alloc_mod.spillAll(gpa, reg);
+        defer a.deinit(gpa);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(gpa);
+        const out = host.emit(gpa, reg, &a, &buf) catch |e| switch (e) {
+            error.Unsupported => {
+                n.unsupported += 1;
+                return null;
+            },
+            else => |x| return x,
+        };
+        const off = n.code.alloc(buf.items.len, 16) orelse blk: {
+            n.code.reset();
+            break :blk n.code.alloc(buf.items.len, 16) orelse return error.TooLarge;
+        };
+        n.code.write(off, buf.items);
+        n.compiled += 1;
+        return n.code.entry(off + out.entry);
+    }
+};

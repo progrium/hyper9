@@ -9,6 +9,7 @@ pub const usage =
     \\  --len N        instructions per program (default 32)
     \\  --no-check     skip the region check
     \\  --no-lockstep  skip lockstep
+    \\  --native       also run each checked region as this host's generated code
     \\  --keep-going   tally divergences by what differs instead of stopping
     \\  --trace        print each seed and program before running it
     \\  --without C,.. leave out instruction classes
@@ -22,6 +23,7 @@ pub fn Args(comptime Class: type) type {
         len: u32 = 32,
         check: bool = true,
         lockstep: bool = true,
+        native: bool = false,
         keep_going: bool = false,
         trace: bool = false,
         without: std.EnumSet(Class) = .initEmpty(),
@@ -48,6 +50,8 @@ pub fn Args(comptime Class: type) type {
                     i += 1;
                 } else if (std.mem.eql(u8, a, "--no-check")) {
                     args.check = false;
+                } else if (std.mem.eql(u8, a, "--native")) {
+                    args.native = true;
                 } else if (std.mem.eql(u8, a, "--no-lockstep")) {
                     args.lockstep = false;
                 } else if (std.mem.eql(u8, a, "--keep-going")) {

@@ -16,6 +16,7 @@ const Exit = ctx_mod.Exit;
 pub const Cpu = cpu_mod.Cpu;
 const page_size = mem.page_size;
 const guest = &check.x86.guest;
+const Native = @import("../emit/native.zig").Native;
 
 // ---------------------------------------------------------------- machine
 
@@ -72,8 +73,9 @@ pub const Result = struct {
 /// against T0 with `r` (which holds the report of a divergence), commits
 /// T1's memory and Cpu, and goes on until an exit that doesn't continue.
 /// An instruction the lifter can't start on (an unreadable PC) runs on T0
-/// alone.
-pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, start: Cpu, budget: i64, max_regions: u32) !Result {
+/// alone. With `native`, each region that agrees under ir_eval is checked
+/// again as this host's generated code.
+pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, start: Cpu, budget: i64, max_regions: u32, native: ?*Native) !Result {
     const backing = check.mapBacking(map);
     var cpu = start;
     var res: Result = .{ .exit = .chain, .pc = start.eip, .regions = 0, .retired = 0 };
@@ -97,6 +99,12 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, 
             res.ok = false;
             return res;
         }
+        if (native) |n| if (try n.compile(gpa, &reg)) |f| {
+            if (!try r.check(.{ .entry = f }, std.mem.asBytes(&cpu), .{ .budget = budget })) {
+                res.ok = false;
+                return res;
+            }
+        };
         res.regions += 1;
         const o = r.out[check.Run.t1];
         res.retired += o.retired;
@@ -116,7 +124,7 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, 
 pub fn runChecked(gpa: std.mem.Allocator, m: *Machine, start: Cpu, budget: i64) !Result {
     const r = try check.Run.init(gpa, guest, check.mapBacking(&m.map));
     defer r.deinit();
-    const res = try checkRegions(gpa, r, &m.map, start, budget, 1000);
+    const res = try checkRegions(gpa, r, &m.map, start, budget, 1000, null);
     if (!res.ok) {
         std.debug.print("h86 region check failed:\n{s}\n", .{r.report.items});
         return error.Diverged;

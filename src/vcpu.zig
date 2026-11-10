@@ -48,6 +48,7 @@ pub const emit = struct {
     pub const wasm = @import("jit/emit/wasm.zig");
     pub const x64 = @import("jit/emit/x64.zig");
     pub const cases = @import("jit/emit/cases.zig");
+    pub const native = @import("jit/emit/native.zig");
 };
 
 test {

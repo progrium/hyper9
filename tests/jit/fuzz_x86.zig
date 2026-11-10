@@ -53,6 +53,11 @@ pub fn main(init: std.process.Init) !void {
 
     const s = try gpa.create(Space);
     defer gpa.destroy(s);
+    var native: ?vcpu.emit.native.Native = if (args.native) vcpu.emit.native.Native.init() catch |e| {
+        std.debug.print("--native: no {s} emitter here ({t})\n", .{ vcpu.emit.native.name, e });
+        std.process.exit(2);
+    } else null;
+    defer if (native) |*n| n.deinit();
     var tally: common.Tally = .{};
     defer tally.deinit(gpa);
     var report: std.Io.Writer.Allocating = .init(gpa);
@@ -79,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
             cpu.r = regs.r;
             cpu.eip = gen.code_va;
             cpu.fl.set(regs.eflags);
-            const out = vcpu.x86jit.check.checkRegions(gpa, run, &s.map, cpu, std.math.maxInt(i64), 4096) catch |e| blk: {
+            const out = vcpu.x86jit.check.checkRegions(gpa, run, &s.map, cpu, std.math.maxInt(i64), 4096, if (native) |*n| n else null) catch |e| blk: {
                 try report.writer.print("region check: {t}\n", .{e});
                 break :blk vcpu.x86jit.check.Result{ .exit = .chain, .pc = 0, .regions = 0, .retired = 0, .ok = false };
             };
@@ -101,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
     std.debug.print("fuzz-x86: {d} programs, {d} diverged; {d} instructions stepped, {d} region-checked\n", .{ args.iters, failed, steps, checked });
+    if (native) |n| std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
     tally.print();
     if (failed != 0) std.process.exit(1);
 }

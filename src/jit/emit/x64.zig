@@ -978,29 +978,15 @@ test "chain sites link, and the jump cache finds a target inline" {
 // ---------------------------------------------------------------- random regions
 
 const check = @import("../check.zig");
-
-/// Emits `reg` into `code` (reset when full) and returns its entry.
-fn load(gpa: std.mem.Allocator, code: *codemem.Region, reg: *const ir.Region) !ctx.EntryFn {
-    var a = try alloc_mod.spillAll(gpa, reg);
-    defer a.deinit(gpa);
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(gpa);
-    const out = try emit(gpa, reg, &a, &buf);
-    const off = code.alloc(buf.items.len, 16) orelse blk: {
-        code.reset();
-        break :blk code.alloc(buf.items.len, 16) orelse return error.TooLarge;
-    };
-    code.write(off, buf.items);
-    return code.entry(off + out.entry);
-}
+const native_mod = @import("native.zig");
 
 /// Checks one lifted region from Cpu `start`: with ir_eval, and then, if
 /// that agrees with T0, natively. Returns false on a native divergence
 /// (printed), null if ir_eval itself diverges (the lifter's, not ours),
 /// and true otherwise, leaving the native run's results in `run`.
-fn checkNative(gpa: std.mem.Allocator, run: *check.Run, code: *codemem.Region, reg: *const ir.Region, start: []const u8) !?bool {
+fn checkNative(gpa: std.mem.Allocator, run: *check.Run, code: *native_mod.Native, reg: *const ir.Region, start: []const u8) !?bool {
     if (!try run.check(.{ .ir_eval = reg }, start, .{})) return null;
-    const f = try load(gpa, code, reg);
+    const f = (try code.compile(gpa, reg)).?;
     if (try run.check(.{ .entry = f }, start, .{})) return true;
     std.debug.print("x86-64 code diverges:\n{s}", .{run.report.items});
     ir.print(reg, &std.debug.lockStderr(&.{}).file_writer.interface) catch {};
@@ -1018,7 +1004,7 @@ test "random arm64 programs agree with T0 natively, region by region" {
     s.load(&.{}, 0);
     const run = try check.Run.init(gpa, &check.a64.guest, check.mapBacking(&s.map));
     defer run.deinit();
-    var code = try codemem.Region.init(4 << 20);
+    var code = try native_mod.Native.init();
     defer code.deinit();
     var prng = std.Random.DefaultPrng.init(0x64);
     var buf: [65]u32 = undefined;
@@ -1074,7 +1060,7 @@ test "random 386 programs agree with T0 natively, region by region" {
     s.load(&.{}, 0);
     const run = try check.Run.init(gpa, &X86.guest, check.mapBacking(&s.map));
     defer run.deinit();
-    var code = try codemem.Region.init(4 << 20);
+    var code = try native_mod.Native.init();
     defer code.deinit();
     var buf: [mem.page_size - 16]u8 = undefined;
     var regions: u32 = 0;

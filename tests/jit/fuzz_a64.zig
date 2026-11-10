@@ -30,6 +30,11 @@ pub fn main(init: std.process.Init) !void {
     const run = try check.Run.init(gpa, &a64.guest, check.mapBacking(&s.map));
     defer run.deinit();
 
+    var native: ?vcpu.emit.native.Native = if (args.native) vcpu.emit.native.Native.init() catch |e| {
+        std.debug.print("--native: no {s} emitter here ({t})\n", .{ vcpu.emit.native.name, e });
+        std.process.exit(2);
+    } else null;
+    defer if (native) |*n| n.deinit();
     var tally: common.Tally = .{};
     defer tally.deinit(gpa);
     var report: std.Io.Writer.Allocating = .init(gpa);
@@ -52,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         var bad = false;
         if (args.check) {
             s.load(words, seed);
-            const out = fuzz.checkRegions(gpa, run, s, start, 4096) catch |e| blk: {
+            const out = fuzz.checkRegions(gpa, run, s, start, 4096, if (native) |*n| n else null) catch |e| blk: {
                 try report.writer.print("region check: {t}\n", .{e});
                 break :blk fuzz.Outcome{ .ok = false };
             };
@@ -78,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
     std.debug.print("fuzz-a64: {d} programs, {d} diverged; {d} instructions region-checked\n", .{ args.iters, failed, retired });
+    if (native) |n| std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
     tally.print();
     if (failed != 0) std.process.exit(1);
 }

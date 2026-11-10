@@ -9,6 +9,7 @@ const a64 = @import("a64.zig");
 const gen = @import("gen_a64.zig");
 const mem = @import("../../interp/mem.zig");
 const ctx_mod = @import("../ctx.zig");
+const Native = @import("../emit/native.zig").Native;
 
 pub const page_size = mem.page_size;
 
@@ -52,8 +53,9 @@ pub const Outcome = struct {
 
 /// Checks a region at a time from `start` until a region leaves other
 /// than to the next PC, committing each agreed region's memory to the
-/// space. `r` holds the report of a divergence.
-pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, s: *Space, start: a64.Cpu, max_regions: u32) !Outcome {
+/// space. `r` holds the report of a divergence. With `native`, each region
+/// that agrees under ir_eval is checked again as this host's generated code.
+pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, s: *Space, start: a64.Cpu, max_regions: u32, native: ?*Native) !Outcome {
     var out: Outcome = .{};
     var cpu = start;
     var backing = check.mapBacking(&s.map);
@@ -64,6 +66,12 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, s: *Space, start: a64
             out.ok = false;
             return out;
         }
+        if (native) |n| if (try n.compile(gpa, &reg)) |f| {
+            if (!try r.check(.{ .entry = f }, std.mem.asBytes(&cpu), .{})) {
+                out.ok = false;
+                return out;
+            }
+        };
         out.regions += 1;
         out.retired += r.out[check.Run.t1].retired;
         out.exit = r.out[check.Run.t1].exit;
@@ -105,7 +113,7 @@ test "fuzz-a64: random programs agree region by region" {
     for (0..200) |i| {
         const words = gen.program(prng.random(), .{ .len = 48 }, &buf);
         s.load(words, i);
-        const out = try checkRegions(gpa, r, s, s.cpu(prng.random()), 64);
+        const out = try checkRegions(gpa, r, s, s.cpu(prng.random()), 64, null);
         if (!out.ok) {
             std.debug.print("program {d} diverges:\n{s}\n", .{ i, r.report.items });
             return error.Diverged;
