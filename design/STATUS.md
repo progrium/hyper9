@@ -48,6 +48,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [cow-fork](0121-cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [ci](ci.md) | draft |  | Continuous integration |
+| [h86-ha64](h86-ha64.md) | draft |  | h86 and ha64, h9's own CPUs for the emulator |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-cmd](host-cmd.md) | draft |  | Rethinking host commands |
@@ -107,6 +108,7 @@ flowchart LR
   p_cow_fork["#35;121 cow-fork<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
+  p_h86_ha64["h86-ha64<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
