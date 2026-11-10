@@ -933,6 +933,23 @@ test "rfork with RFMEM shares data and bss but not the stack [95]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+test "an RFMEM process can use pages another just grew, without a syscall [95]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try buildC(e, &s, "rfgrow", @embedFile("fixtures/rfmem/rfgrow.c"));
+    // Two CPUs at least, so the child spins while the parent grows the
+    // break. Before native carried out queued mappings on a fault, the
+    // child's first write to the new pages was "sys: trap: fault write"
+    // (rio's procs malloc'ing from one heap, in 9/UX's GUI tests).
+    const r = try run(e, &.{ "--sandbox", s.path, "--timeout", "60s", "--cpus", "4", "--rc", "./rfgrow 32" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("32 rounds\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "concurrent processes contending for one environment don't hang" {
     const e = try env(@src());
     // 8 processes sharing /env, each creating 150 variables, then running

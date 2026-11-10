@@ -387,6 +387,9 @@ pub const AddressSpace = struct {
     regions: std.ArrayList(Region) = .empty,
     /// Requests the stub hasn't carried out yet.
     ops: std.ArrayList(abi.Op) = .empty,
+    /// Counts the requests ever queued, so `run` can tell whether the
+    /// mappings changed while the guest ran.
+    gen: u64 = 0,
     /// Requests taken off `ops` that a stub thread is carrying out now.
     /// They aren't in `ops`, but aren't done either.
     inflight: usize = 0,
@@ -442,6 +445,7 @@ pub const AddressSpace = struct {
         try as.regions.ensureUnusedCapacity(gpa, 1);
         try as.ops.append(gpa, .{ .va = va, .len = mem.len, .off = off, .prot = prot(perms), .kind = .map });
         as.regions.appendAssumeCapacity(.{ .va = va, .mem = mem });
+        as.gen +%= 1;
     }
 
     pub fn unmap(as: *AddressSpace, va: u64) void {
@@ -453,6 +457,7 @@ pub const AddressSpace = struct {
             // than leaving them reachable, so the region stays too.
             as.ops.append(as.backend.gpa, .{ .va = va, .len = r.mem.len, .off = 0, .prot = 0, .kind = .unmap }) catch return;
             _ = as.regions.swapRemove(i);
+            as.gen +%= 1;
             return;
         };
     }
@@ -540,6 +545,12 @@ pub const AddressSpace = struct {
         as.lockSpin();
         defer as.lock.unlock();
         return as.ops.items.len != 0 or as.inflight != 0;
+    }
+
+    fn genNow(as: *AddressSpace) u64 {
+        as.lockSpin();
+        defer as.lock.unlock();
+        return as.gen;
     }
 
     /// The stub thread for vCPU `v` to run on: the one it ran last if
@@ -673,7 +684,25 @@ pub const Vcpu = struct {
         const k = try as.takeThread(stub, s);
         defer as.putThread(k);
         const ctl = &stub.ctls[k];
+        while (true) {
+            // The requests queued by now are carried out before the guest
+            // runs (below).
+            const gen = as.genNow();
+            const exit = try v.runOnce(as, stub, k, ctl);
+            if (exit != .fault or as.genNow() == gen) return exit;
+            // A fault while another thread changed the mappings may be on
+            // a page the stub hadn't mapped yet: an RFMEM process (a
+            // libthread proc) touching heap that another one's brk just
+            // grew, while this one stayed in user mode, so its stub never
+            // stopped to carry out the request. `runOnce` has read back
+            // the registers as at the fault, so run it again, with the
+            // requests carried out; a real fault faults again with no new
+            // requests in between.
+        }
+    }
 
+    fn runOnce(v: *Vcpu, as: *AddressSpace, stub: *Stub, k: usize, ctl: *abi.Ctl) vmm.Error!vmm.Exit {
+        const s = v.s;
         // Another vCPU's flush may have taken this one's requests (a page
         // its last fault mapped) off the queue without carrying them out
         // yet. Waiting on `ctl_lock` waits for that flush, so the guest
