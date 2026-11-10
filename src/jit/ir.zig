@@ -197,6 +197,18 @@ pub const Op = enum(u16) {
     @"eflags.pack" = 104,
     /// flags = the flags bits of the i32 a.
     @"eflags.unpack" = 105,
+    /// Flags of a left shift (SHL, SHLD): a is the source shifted by
+    /// count - 1, b the result. CF = msb(a), OF = msb(a ^ b), AF = 0, and
+    /// SF ZF PF from b. The undefined flags are QEMU's, so lockstep with
+    /// Unicorn matches. A count of 0 never gets here: it keeps the flags.
+    @"eflags.shl" = 106,
+    /// Flags of a right shift (SHR, SAR, SHRD): a is the source shifted by
+    /// count - 1, b the result. CF = a & 1, OF = msb(a ^ b), AF = 0, SF ZF
+    /// PF from b.
+    @"eflags.shr" = 107,
+    /// Flags of MUL and IMUL: a is 1 if the result overflowed its low
+    /// half, else 0; b is the low half. CF = OF = a, AF = 0, SF ZF PF from b.
+    @"eflags.mul" = 108,
 
     // ---- memory. Guest addresses are a's value (i64; an i32 address is
     // zero-extended). aux is a MemFlags; aux2 is the guest PC to report
@@ -475,6 +487,10 @@ fn checkInst(r: *const Region, i: *const Inst) ?[]const u8 {
             if (i.ty != .flags) return "flags op gives flags";
             if ((ta != .i8 and ta != .i16 and ta != .i32) or ta != tb) return "eflags operands must be i8, i16, or i32, of one type";
         },
+        .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" => {
+            if (i.ty != .flags) return "flags op gives flags";
+            if ((ta != .i8 and ta != .i16 and ta != .i32) or ta != tb) return "eflags operands must be i8, i16, or i32, of one type";
+        },
         .@"eflags.adc", .@"eflags.sbb" => {
             if (i.ty != .flags) return "flags op gives flags";
             if ((ta != .i8 and ta != .i16 and ta != .i32) or ta != tb or tc != .flags) return "eflags carry ops take two ints and flags";
@@ -723,6 +739,7 @@ test "op numbers are stable" {
     try std.testing.expectEqual(@as(u16, 16), @intFromEnum(Op.add));
     try std.testing.expectEqual(@as(u16, 64), @intFromEnum(Op.@"nzcv.add"));
     try std.testing.expectEqual(@as(u16, 96), @intFromEnum(Op.@"eflags.add"));
+    try std.testing.expectEqual(@as(u16, 108), @intFromEnum(Op.@"eflags.mul"));
     try std.testing.expectEqual(@as(u16, 128), @intFromEnum(Op.load));
     try std.testing.expectEqual(@as(u16, 160), @intFromEnum(Op.@"call.interp"));
     try std.testing.expectEqual(@as(u16, 192), @intFromEnum(Op.br));

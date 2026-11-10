@@ -197,6 +197,9 @@ pub fn evalPure(op: Op, ty: Type, ta: Type, a: u64, b: u64, c: u64, aux: u64) u6
         .@"eflags.logic" => szp(a & ta.mask(), abits),
         .@"eflags.inc" => (eflagsAdd(a & ta.mask(), 1, 0, abits) & ~CF) | (b & CF),
         .@"eflags.dec" => (eflagsSub(a & ta.mask(), 1, 0, abits) & ~CF) | (b & CF),
+        .@"eflags.shl" => szp(b & ta.mask(), abits) | (if (msb(a, abits) == 1) CF else 0) | (if (msb(a ^ b, abits) == 1) OF else 0),
+        .@"eflags.shr" => szp(b & ta.mask(), abits) | (if (a & 1 == 1) CF else 0) | (if (msb(a ^ b, abits) == 1) OF else 0),
+        .@"eflags.mul" => szp(b & ta.mask(), abits) | (if (a & ta.mask() != 0) CF | OF else 0),
         .@"eflags.cond" => @intFromBool(eflagsCond(a, aux)),
         .@"eflags.pack", .@"eflags.unpack" => a & eflags_mask,
         else => unreachable, // not pure
@@ -389,6 +392,14 @@ test "EFLAGS for add, sub, inc, and logic" {
     try testing.expectEqual(CF | ZF | PF | AF, evalPure(.@"eflags.inc", .flags, .i8, 0xff, CF, 0, 0));
     try testing.expectEqual(ZF | PF | AF, evalPure(.@"eflags.inc", .flags, .i8, 0xff, 0, 0, 0));
     try testing.expectEqual(ZF | PF, evalPure(.@"eflags.logic", .flags, .i32, 0, 0, 0, 0));
+    // SHL 0x81, 1 at 8 bits: pre 0x81, result 0x02: CF, and OF (CF != msb(res)).
+    try testing.expectEqual(CF | OF, evalPure(.@"eflags.shl", .flags, .i8, 0x81, 0x02, 0, 0));
+    // SHR 0x03, 1: pre 0x03, result 0x01: CF, no OF, PF clear (one bit).
+    try testing.expectEqual(CF, evalPure(.@"eflags.shr", .flags, .i8, 0x03, 0x01, 0, 0));
+    // SAR 0x80000000, 1 at 32 bits: pre the source, result 0xc0000000: SF PF.
+    try testing.expectEqual(SF | PF, evalPure(.@"eflags.shr", .flags, .i32, 0x8000_0000, 0xc000_0000, 0, 0));
+    // MUL that overflowed, low half 0: CF OF ZF PF.
+    try testing.expectEqual(CF | OF | ZF | PF, evalPure(.@"eflags.mul", .flags, .i16, 1, 0, 0, 0));
     // JL after CMP -1, 0; JBE after CMP 0, 0.
     try testing.expect(eflagsCond(evalPure(.@"eflags.sub", .flags, .i32, 0xffff_ffff, 0, 0, 0), 12));
     try testing.expect(eflagsCond(evalPure(.@"eflags.sub", .flags, .i32, 0, 0, 0, 0), 6));

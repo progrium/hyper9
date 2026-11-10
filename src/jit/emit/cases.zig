@@ -151,6 +151,17 @@ pub fn generate(gpa: std.mem.Allocator) ![]Case {
             \\  %12 = getreg:i32 #0x0
             \\  %13 = getreg:i32 #0x8
             \\  %9 = eflags.sub:flags %12, %13
+            \\  %14 = eflags.shl:flags %12, %13
+            \\  %15 = eflags.shr:flags %13, %12
+            \\  %16 = trunc:i8 %12
+            \\  %17 = trunc:i8 %13
+            \\  %18 = eflags.mul:flags %16, %17
+            \\  %19 = eflags.pack:i32 %14
+            \\  %20 = eflags.pack:i32 %15
+            \\  %21 = eflags.pack:i32 %18
+            \\  %22 = xor:i32 %19, %20
+            \\  %23 = add:i32 %22, %21
+            \\  setreg %23 #0x0
             \\  %10 = eflags.cond:i1 %9 #0x{1x}
             \\  %11 = zext:i64 %10
             \\  setreg %11 #0x38
