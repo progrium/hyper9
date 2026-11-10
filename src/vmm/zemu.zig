@@ -90,6 +90,10 @@ pub const Vcpu = Impl.EmuVcpu;
 ///     pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit;
 ///     /// Optional: frees what the Cpu owns, when its vCPU is destroyed.
 ///     pub fn deinit(cpu: *Cpu) void;
+///     /// Optional: which tier runs guest code, an enum with t0 and t1.
+///     /// H9_EMU_TIER=t0 or t1 sets it at create (`applyTier`); unset, the
+///     /// Guest's own default stands.
+///     pub var tier: enum { t0, t1, ... };
 ///
 /// The ctx is a `cache.Runtime`'s (`cache.Runtime.of(ctx)`), which holds
 /// the vCPU's jump cache and the backend's code cache, null when the host
@@ -103,6 +107,21 @@ pub const Vcpu = Impl.EmuVcpu;
 /// set. T0 reads code through `mem.fastExec` and `mem.probe(.exec)`, and a
 /// lifter through `View.source`, which mark the pages read as holding
 /// code; `mem.probe(.write)` gives a host pointer for an atomic.
+/// H9_EMU_TIER, if set: "t0" or "t1".
+pub fn tierFromEnv() ?[]const u8 {
+    if (!builtin.link_libc) return null;
+    const v = std.c.getenv("H9_EMU_TIER") orelse return null;
+    return std.mem.span(v);
+}
+
+/// Sets Guest G's `tier` from `name` ("t0" or "t1"), if G has one. Returns
+/// false if the name isn't one of G's tiers.
+pub fn applyTier(comptime G: type, name: []const u8) bool {
+    if (!@hasDecl(G, "tier")) return true;
+    G.tier = std.meta.stringToEnum(@TypeOf(G.tier), name) orelse return false;
+    return true;
+}
+
 pub fn Emu(comptime A64: type, comptime X86: type) type {
     return struct {
         pub const Cpu = union(enum) {
@@ -149,6 +168,14 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .arm64 => if (!A64.ready) return error.WrongArch,
                     .i386 => if (!X86.ready) return error.WrongArch,
                     .amd64 => return error.WrongArch,
+                }
+                if (tierFromEnv()) |t| {
+                    const ok = switch (opts.arch) {
+                        .arm64 => applyTier(A64, t),
+                        .i386 => applyTier(X86, t),
+                        .amd64 => unreachable,
+                    };
+                    if (!ok) std.log.warn("H9_EMU_TIER={s}: not t0 or t1; using the default", .{t});
                 }
                 const limit = opts.memory orelse if (web) web_default_memory else vmm.default_memory;
                 if (limit > (if (web) web_max_memory else vmm.max_memory)) return error.OutOfGuestMemory;
@@ -705,6 +732,17 @@ const Toy = struct {
 };
 
 const T = Emu(Toy, Toy);
+
+test "applyTier sets a Guest's tier by name" {
+    const G = struct {
+        pub var tier: enum { t0, t1 } = .t0;
+    };
+    try testing.expect(applyTier(G, "t1"));
+    try testing.expectEqual(.t1, G.tier);
+    try testing.expect(!applyTier(G, "t2"));
+    try testing.expectEqual(.t1, G.tier);
+    try testing.expect(applyTier(struct {}, "t1"));
+}
 
 fn testBackend() !*T.EmuBackend {
     return T.EmuBackend.create(testing.allocator, testing.io, .{ .arch = .arm64, .memory = 64 << 20 });
