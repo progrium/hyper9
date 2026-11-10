@@ -320,7 +320,7 @@ const Reg = struct {
 fn clobbers(r: *const ir.Region, k: usize, off: u64, n: u64) bool {
     const i = r.insts.items[k];
     return switch (i.op) {
-        .@"call.interp", .@"call.helper" => true,
+        .@"call.interp", .@"call.helper", .copy => true,
         .setreg => blk: {
             const m = byteSize(r.insts.items[i.a].ty) orelse 8;
             break :blk i.aux < off + n and off < i.aux + m;
@@ -1177,6 +1177,17 @@ const E = struct {
                     try e.br(.exit);
                     try e.end();
                 }
+            },
+            .copy => {
+                // As call.interp on the guest word, at PC 0; it can't leave
+                // (ir.zig, Op.copy).
+                try e.flushRegs();
+                try w.get(0);
+                try w.i64c(i.aux & 0xffff_ffff);
+                try w.i64c(0);
+                try w.call(F_INTERP);
+                try w.byte(0x1A); // drop
+                try e.loadRegs();
             },
             .@"call.helper" => {
                 try w.get(0);

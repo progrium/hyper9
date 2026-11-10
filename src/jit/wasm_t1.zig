@@ -88,6 +88,9 @@ pub const Stats = struct {
 
 /// Entries before a block is compiled.
 pub var hot: u32 = 50;
+/// Dispatcher visits, across all vCPUs, before anything is compiled: a
+/// short-lived program (rc starting up, echo) never pays for a compile.
+pub var warmup: u64 = 0;
 /// Regions per module, at most.
 pub var batch_max: u32 = 64;
 /// Dispatcher visits a queued region waits for others before its batch
@@ -393,6 +396,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
         st.tuned = true;
         if (std.c.getenv("H9_JIT_HOT")) |v| hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch hot;
         if (std.c.getenv("H9_JIT_PATIENCE")) |v| patience = std.fmt.parseInt(u32, std.mem.span(v), 10) catch patience;
+        if (std.c.getenv("H9_JIT_WARMUP")) |v| warmup = std.fmt.parseInt(u64, std.mem.span(v), 10) catch warmup;
     }
     if (st.flush_wanted or st.used_slots > max_slots - batch_max or st.map.count() > max_entries) flush();
     settle(&stats);
@@ -433,7 +437,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
         if (e.state != .live) {
             if (e.state == .cold) {
                 e.hits += 1;
-                if (e.hits >= hot) queue(e, view, cfg);
+                if (e.hits >= hot and st.visits >= warmup) queue(e, view, cfg);
             }
             return cold();
         }
