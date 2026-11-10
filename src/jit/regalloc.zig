@@ -299,6 +299,10 @@ pub fn planExtended(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, vir
                 }
             }
             p.end[i.a] = @max(p.end[i.a], @as(u32, @intCast(j)));
+            // A lazy record (aux2 2) is written from the producer's operands.
+            if (i.aux2 == 2) for (r.insts.items[i.a].operands()) |o| if (o != ir.none) {
+                p.end[o] = @max(p.end[o], @as(u32, @intCast(j)));
+            };
         }
     }
 
@@ -323,7 +327,8 @@ pub fn planExtended(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, vir
             continue;
         }
         if (i.op == .@"pending.flags") {
-            try access(gpa, &words, i.aux, 4);
+            // Lazy (aux2 2): a record after the word, which stays as it is.
+            if (i.aux2 == 2) try markBad(gpa, &words, i.aux + 4, 16) else try access(gpa, &words, i.aux, 4);
             continue;
         }
         if (i.op != .getreg and i.op != .setreg) continue;
@@ -454,7 +459,7 @@ pub fn planExtended(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, vir
                         .setreg => if (p.chunk_of[idx] != no_chunk) {
                             d |= @as(ChunkSet, 1) << @intCast(p.chunk_of[idx]);
                         },
-                        .@"pending.flags" => if (p.chunkAt(i.aux, 4)) |k| {
+                        .@"pending.flags" => if (i.aux2 != 2) if (p.chunkAt(i.aux, 4)) |k| {
                             d |= @as(ChunkSet, 1) << @intCast(k);
                         },
                         .@"call.interp" => d = 0,

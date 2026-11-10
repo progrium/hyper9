@@ -29,6 +29,8 @@ pub const Options = struct {
 const fuel_off = 56;
 /// pending.flags writes 48 or 52, which nothing else reads or writes.
 const pending_off = 48;
+/// A lazy pending.flags (aux2 2) at 24 has its record at 28..43.
+const lazy_off = 24;
 
 const int_tys = [_]Type{ .i8, .i16, .i32, .i64 };
 
@@ -103,7 +105,7 @@ const G = struct {
         const n: u32 = @intCast(ty.bits() / 8);
         // Mostly aligned, sometimes not; anywhere in the 64 bytes.
         if (g.chance(5)) return g.emit(.{ .op = .getreg, .ty = ty, .aux = fuel_off + 8 - n });
-        var off = g.rnd.uintLessThan(u32, pending_off - n + 1);
+        var off = g.rnd.uintLessThan(u32, g.regLimit() - n + 1);
         if (g.chance(75)) off -= off % n;
         return g.emit(.{ .op = .getreg, .ty = ty, .aux = off });
     }
@@ -111,7 +113,7 @@ const G = struct {
     fn setreg(g: *G) !void {
         const ty = g.pick(Type, &.{ .i8, .i16, .i32, .i64, .i64, .i64, .flags });
         const n: u32 = @intCast(ty.bits() / 8);
-        var off = g.rnd.uintLessThan(u32, pending_off - n + 1);
+        var off = g.rnd.uintLessThan(u32, g.regLimit() - n + 1);
         if (g.chance(75)) off -= off % n;
         _ = try g.b.emit(.{ .op = .setreg, .a = try g.val(ty), .aux = off });
     }
@@ -133,6 +135,24 @@ const G = struct {
         }
         const ty = g.pick(Type, &.{ .i8, .i16, .i32 });
         const op = g.pick(Op, &.{ .@"eflags.add", .@"eflags.sub", .@"eflags.sub", .@"eflags.logic", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" });
+        const a = try g.val(ty);
+        return switch (op) {
+            .@"eflags.logic" => g.emit(.{ .op = op, .ty = .flags, .a = a }),
+            .@"eflags.inc", .@"eflags.dec" => g.emit(.{ .op = op, .ty = .flags, .a = a, .b = try g.val(.flags) }),
+            .@"eflags.adc", .@"eflags.sbb" => g.emit(.{ .op = op, .ty = .flags, .a = a, .b = try g.val(ty), .c = try g.val(.flags) }),
+            else => g.emit(.{ .op = op, .ty = .flags, .a = a, .b = try g.val(ty) }),
+        };
+    }
+
+    /// Guest registers below this are the region's to read and write: the
+    /// rest hold pending flags (and a lazy record), and the loop counter.
+    fn regLimit(g: *G) u32 {
+        return if (g.uniform_pend and g.pend_kind == 2) lazy_off else pending_off;
+    }
+
+    fn eflagsProducer(g: *G) !Ref {
+        const ty = g.pick(Type, &.{ .i8, .i16, .i32 });
+        const op = g.pick(Op, &.{ .@"eflags.add", .@"eflags.sub", .@"eflags.logic", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" });
         const a = try g.val(ty);
         return switch (op) {
             .@"eflags.logic" => g.emit(.{ .op = op, .ty = .flags, .a = a }),
@@ -241,9 +261,11 @@ const G = struct {
                 // Mostly one slot and kind per region, as lifters make them
                 // (and as arm64's lazy flags want).
                 const one = g.uniform_pend;
-                const off = if (one) pending_off else pending_off + 4 * g.rnd.uintLessThan(u64, 2);
+                const off: u64 = if (one and g.pend_kind == 2) lazy_off else if (one) pending_off else pending_off + 4 * g.rnd.uintLessThan(u64, 2);
                 const kind = if (one) g.pend_kind else g.rnd.uintLessThan(u64, 2);
-                _ = try g.b.emit(.{ .op = .@"pending.flags", .a = try g.flags(), .aux = off, .aux2 = kind });
+                // A lazy record (aux2 2) takes an eflags producer's operands.
+                const f = if (kind == 2) try g.eflagsProducer() else try g.flags();
+                _ = try g.b.emit(.{ .op = .@"pending.flags", .a = f, .aux = off, .aux2 = kind });
                 return;
             }
             _ = try g.getreg(g.pick(Type, &.{ .i8, .i16, .i32, .i64, .flags }));
@@ -312,7 +334,7 @@ pub fn generate(gpa: std.mem.Allocator, rnd: std.Random, opts: Options) !ir.Regi
     defer g.deinit();
     const nb = 1 + rnd.uintLessThan(u32, opts.max_blocks);
     g.uniform_pend = g.chance(70);
-    g.pend_kind = rnd.uintLessThan(u64, 2);
+    g.pend_kind = rnd.uintLessThan(u64, 3);
     for (0..nb) |_| _ = try g.b.block();
     for (0..nb) |bi| {
         const blk: ir.BlockId = @intCast(bi);

@@ -398,7 +398,7 @@ fn lazyFlags(gpa: std.mem.Allocator, r: *const ir.Region) !Lazy {
                 l.edge_pend[k] = true;
                 const term = r.insts.items[last];
                 const succ = [2]u64{ term.aux, if (t == .brcond) term.aux2 else term.aux };
-                for (succ) |sb| if (l.need_full[sb] and l.carry_ok[sb]) {
+                for (succ) |sb| if (l.need_full[sb] and l.carry_ok[sb] and group != 2) {
                     l.carried_in[sb] = true;
                 };
                 break;
@@ -887,7 +887,7 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
                     } else need[i.a] = true;
                 },
                 // Lazy, edge by edge: a producer is recomputed where needed.
-                .@"pending.flags" => if (!(edge_pend[idx] and rematerializable(r.insts.items[i.a].op))) {
+                .@"pending.flags" => if (i.aux2 != 2 and !(edge_pend[idx] and rematerializable(r.insts.items[i.a].op))) {
                     need[i.a] = true;
                 },
                 else => {
@@ -904,6 +904,20 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region, edge_pend: []const bool) 
                 live = .{ .ref = @intCast(idx), .mode = if (i.op == .icmp) .icmp else if (eflagsKind(i.op) != null) .eflags else .nzcv };
             } else if (clobber) live = .{};
         }
+    }
+    // Flags whose only uses are lazy records (pending.flags aux2 2) aren't
+    // computed at all: the record takes the operands.
+    {
+        const rec = try gpa.alloc(u32, n);
+        defer gpa.free(rec);
+        @memset(rec, 0);
+        for (r.insts.items) |i| if (i.op == .@"pending.flags" and i.aux2 == 2) {
+            rec[i.a] += 1;
+        };
+        for (r.insts.items, 0..) |i, idx| if (rec[idx] != 0 and rec[idx] == uses[idx] and ir.lazyKind(i.op) != null) {
+            d[idx].skip = true;
+            d[idx].virtual = true;
+        };
     }
     // Constants an add, sub, compare, or shift takes as an immediate; one
     // nothing else reads isn't materialized at all.
@@ -1147,6 +1161,7 @@ fn emitStub(e: *E, s: Stub) !void {
 
 /// Writes pending flags (packed for their group) to the guest.
 fn writePend(e: *E, p: Pend) !void {
+    if (p.group == 2) return writeRecord(e, p);
     var skip: ?u32 = null;
     const f = if (p.carried) blk: {
         // From the lz slots, if anything's carried: evalOpC(code, a, b, c).
@@ -1178,6 +1193,63 @@ fn writePend(e: *E, p: Pend) !void {
     try e.dp(0x2A000000, false, IP0, IP0, IP1); // orr w16, w16, w17
     try writeGuest(e, p.off, 4, IP0);
     if (skip) |l| e.bind(l);
+}
+
+/// A lazy pending.flags (aux2 2): ir.LazyRecord at off + 4, from the
+/// producer's operands, as ir.lazyRecord makes it.
+fn writeRecord(e: *E, p: Pend) !void {
+    const f = e.r.insts.items[p.v];
+    const ta = e.r.insts.items[f.a].ty;
+    const W = ta.bits();
+    const kind = ir.lazyKind(f.op).?;
+    const a = try e.src(f.a, S0);
+    const base = p.off + 4;
+    // kind | size << 8 | cin << 16
+    try e.movImm(IP0, @as(u64, @intFromEnum(kind)) | @as(u64, W / 8) << 8);
+    const cin: ?Ref = switch (f.op) {
+        .@"eflags.adc", .@"eflags.sbb" => f.c,
+        .@"eflags.inc", .@"eflags.dec" => f.b,
+        else => null,
+    };
+    if (cin) |c| {
+        try e.ubfx(IP1, try e.src(c, S2), 0, 1);
+        try e.dpShift(0x2A000000, false, IP0, IP0, IP1, 0, 16);
+    }
+    try e.ldst(true, 2, IP0, CPU, base);
+    switch (kind) {
+        .add, .sub => {
+            const b = try e.src(f.b, S1);
+            try e.ldst(true, 2, a, CPU, base + 4);
+            try e.ldst(true, 2, b, CPU, base + 8);
+            try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, false, IP0, a, b);
+            if (cin != null) try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, false, IP0, IP0, IP1);
+            if (W < 32) try e.zx(IP0, IP0, W);
+            try e.ldst(true, 2, IP0, CPU, base + 12);
+        },
+        .logic => {
+            try e.ldst(true, 2, ZR, CPU, base + 4);
+            try e.ldst(true, 2, ZR, CPU, base + 8);
+            try e.ldst(true, 2, a, CPU, base + 12);
+        },
+        .inc, .dec => {
+            try e.ldst(true, 2, a, CPU, base + 4);
+            try e.movImm(IP0, 1);
+            try e.ldst(true, 2, IP0, CPU, base + 8);
+            try e.put((if (kind == .inc) @as(u32, 0x11000400) else 0x51000400) | @as(u32, a) << 5 | IP0); // a ± 1
+            if (W < 32) try e.zx(IP0, IP0, W);
+            try e.ldst(true, 2, IP0, CPU, base + 12);
+        },
+        .shl, .shr, .mul => {
+            const b = try e.src(f.b, S1);
+            if (kind == .mul) {
+                try e.logImm(0, false, IP0, a, 0, 1);
+                try e.ldst(true, 2, IP0, CPU, base + 4);
+            } else try e.ldst(true, 2, a, CPU, base + 4);
+            try e.ldst(true, 2, ZR, CPU, base + 8);
+            try e.ldst(true, 2, b, CPU, base + 12);
+        },
+        .none => unreachable,
+    }
 }
 
 /// Carries lazy pending flags over an edge in the lz slots: the producer's
@@ -1243,7 +1315,7 @@ fn rematFlags(e: *E, v: Ref) !u5 {
 fn edgeTo(e: *E, t: u32, fallthrough_ok: bool) !void {
     const lz = &e.lazy;
     if (e.pend) |p| if (p.edge) {
-        if (lz.need_full[t] and lz.carry_ok[t]) {
+        if (lz.need_full[t] and lz.carry_ok[t] and p.group != 2) {
             try carryPend(e, p);
         } else if (lz.need_full[t] and !(lz.entry_poll[t] and !lz.need_after_poll[t])) {
             try writePend(e, p);
