@@ -1816,19 +1816,19 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     }) else null;
     const fuzz_options = b.addOptions();
     fuzz_options.addOption(bool, "unicorn", unicorn != null);
-    // zig build fuzz-long: both fuzzers with the region check, generated
+    // zig build fuzz-long: the three fuzzers with the region check, generated
     // code (--native), and lockstep when Unicorn is built in, for
     // -Dfuzz-minutes (default 60), -Dfuzz-jobs processes each (default 2),
     // tallying divergences instead of stopping. Each job starts its seeds
     // 2^40 apart from -Dfuzz-seed (default: from the clock).
-    const fuzz_long = b.step("fuzz-long", "Run fuzz-a64 and fuzz-x86 with the region check and --native for an hour across seeds (-Dfuzz-minutes, -Dfuzz-jobs, -Dfuzz-seed)");
+    const fuzz_long = b.step("fuzz-long", "Run fuzz-a64, fuzz-x86, and fuzz-x64 with the region check and --native for an hour across seeds (-Dfuzz-minutes, -Dfuzz-jobs, -Dfuzz-seed)");
     const fuzz_minutes = b.option(u32, "fuzz-minutes", "zig build fuzz-long: how long to fuzz (default 60)") orelse 60;
     const fuzz_jobs = b.option(u32, "fuzz-jobs", "zig build fuzz-long: processes per fuzzer (default 2)") orelse 2;
     const fuzz_seed = b.option(u64, "fuzz-seed", "zig build fuzz-long: the first seed (default: from the clock)") orelse
         @as(u64, @truncate(@as(u128, @bitCast(@as(i128, std.Io.Timestamp.now(b.graph.io, .real).nanoseconds)))));
-    var fuzz_exes: [2]*std.Build.Step.Compile = undefined;
+    var fuzz_exes: [3]*std.Build.Step.Compile = undefined;
     var fuzz_i: usize = 0;
-    for ([_][]const u8{ "a64", "x86" }) |arch| {
+    for ([_][]const u8{ "a64", "x86", "x64" }) |arch| {
         const exe = b.addExecutable(.{
             .name = b.fmt("fuzz-{s}", .{arch}),
             .root_module = b.createModule(.{
@@ -1865,27 +1865,6 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     fuzz_long.dependOn(&long.step);
     _ = vcpu;
 
-    // hx64's fuzzer (design/hcpu.md). Until long-mode T0 runs, it runs
-    // the programs on Unicorn alone; it joins fuzz-long once T0 and the
-    // lifter run long mode.
-    const fuzz_x64 = b.addExecutable(.{
-        .name = "fuzz-x64",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/jit/fuzz_x64.zig"),
-            .target = target,
-            .optimize = fuzz_optimize,
-            .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
-        }),
-    });
-    fuzz_x64.root_module.addOptions("fuzz_options", fuzz_options);
-    if (fuzz_lockstep) |ls| {
-        fuzz_x64.root_module.addImport("lockstep", ls);
-        linkUnicorn(fuzz_x64);
-    }
-    const fuzz_x64_run = b.addRunArtifact(fuzz_x64);
-    fuzz_x64_run.has_side_effects = true;
-    if (b.args) |a| fuzz_x64_run.addArgs(a);
-    b.step("fuzz-x64", "Fuzz the x64 T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)").dependOn(&fuzz_x64_run.step);
     addX64check(b, fuzz_vcpu);
 
     const litmus = b.addExecutable(.{

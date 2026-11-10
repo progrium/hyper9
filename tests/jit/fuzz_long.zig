@@ -1,4 +1,4 @@
-//! zig build fuzz-long: fuzz-a64 and fuzz-x86 with the region check,
+//! zig build fuzz-long: fuzz-a64, fuzz-x86, and fuzz-x64 with the region check,
 //! --native, and lockstep where Unicorn is built in, --jobs processes of
 //! each at once for --minutes, seeds 2^40 apart from --seed. (A Run step
 //! per job would run them one after another: zig build gives each one the

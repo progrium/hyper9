@@ -15,59 +15,187 @@
 //!
 //! The machine is tests/x86.zig's: code at 0x1000 (two pages, writable),
 //! data at 0x20000, stack at 0x21000, and nothing mapped at 0x3000 or
-//! 0x22000. The cases run on T0 (exec.runIn(.long)); T1 joins each when
-//! src/jit/x86/t1.zig runs long mode (workstream F). Until long-mode T0
-//! runs (workstreams A and B), they skip.
+//! 0x22000, over a View. Each case runs on T0 (exec.runIn(.long)), and on
+//! T1 through dispatch with ir_eval and with this host's emitter, but for
+//! the four-thread counters and the REP stop, which are T0's (on compiled
+//! code they're check/litmus_x86.zig's).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vcpu = @import("vcpu");
 const cpu_mod = vcpu.x86.cpu;
 const exec = vcpu.x86.exec;
+const lift = vcpu.x86jit.lift;
+const t1 = vcpu.x86jit.t1;
+const mem = vcpu.mem;
+const cache_mod = vcpu.cache;
+const dispatch = vcpu.dispatch;
 const Cpu = cpu_mod.Cpu64;
 const Exit = cpu_mod.Exit64;
 const testing = std.testing;
-const page_size = vcpu.mem.page_size;
+const page_size = mem.page_size;
 
 comptime {
     // The long-mode types the cases run on.
     _ = vcpu.x86.decode.InstOf(.long);
-    _ = vcpu.x86jit.lift.frontendFor(.long);
+    _ = lift.frontendFor(.long);
 }
 
 const code_va: u64 = 0x1000;
 const data_va: u64 = 0x20000;
 
-/// The tiers a case runs on: T0 alone so far.
-const Tier = enum { t0 };
+/// The tiers a case runs on.
+const Tier = enum { t0, t1_eval, t1_native };
+
+fn emitterOf(t: Tier) ?vcpu.emitter.Emitter {
+    return switch (t) {
+        .t0 => null,
+        .t1_eval => vcpu.emit.eval.emitter_def,
+        .t1_native => if (builtin.cpu.arch == .x86_64) vcpu.emit.x64.emitter_def else null,
+    };
+}
 
 /// Code pages at 0x1000 and 0x2000, data and stack at 0x20000 and
-/// 0x21000.
+/// 0x21000, over a View as t1.zig's Machine64 has them (its addresses are
+/// above 4 GiB; these cases' are tests/x86.zig's). T0 reaches memory
+/// through the View on every tier, and T1 runs through dispatch when the
+/// machine has a cache.
 const Machine = struct {
-    code: [2 * page_size]u8 align(page_size) = @splat(0xcc),
-    data: [2 * page_size]u8 align(page_size) = @splat(0),
+    pages: [4 * page_size]u8 align(page_size) = @splat(0),
+    maps: [2]mem.Mapping = undefined,
+    cp: mem.CodePages = undefined,
+    tlb: mem.Tlb = .{},
+    view: mem.View = undefined,
+    rt: cache_mod.Runtime = .{},
+    jit: ?*cache_mod.Cache = null,
     cpu: Cpu = .{},
+    pm: t1.ProbeMem64 = undefined,
+    lm: lift.Mem64 = undefined,
+    stats: dispatch.Stats = .{},
+    em: vcpu.emitter.Emitter = vcpu.emit.eval.emitter_def,
 
+    const code_len = 2 * page_size;
+
+    /// A machine on tier `t`, or null where the tier doesn't run here.
+    fn create(t: Tier) !?*Machine {
+        var cache: ?*cache_mod.Cache = null;
+        var em = vcpu.emit.eval.emitter_def;
+        if (t != .t0) {
+            em = emitterOf(t) orelse return null;
+            cache = t1.testCache(1 << 20) catch |e| {
+                if (e == error.SkipZigTest) return null;
+                return e;
+            };
+        }
+        errdefer if (cache) |c| t1.freeCache(c);
+        const m = try testing.allocator.create(Machine);
+        errdefer testing.allocator.destroy(m);
+        m.* = .{};
+        try m.init(cache);
+        m.em = em;
+        return m;
+    }
+
+    fn destroy(m: *Machine) void {
+        const cache = m.jit;
+        if (cache) |c| c.removeJumpCache(&m.rt.jump);
+        m.cp.deinit(testing.allocator);
+        testing.allocator.destroy(m);
+        if (cache) |c| t1.freeCache(c);
+    }
+
+    fn init(m: *Machine, jit: ?*cache_mod.Cache) !void {
+        const base = @intFromPtr(&m.pages);
+        @memset(m.pages[0..code_len], 0xcc);
+        m.maps = .{
+            .{ .va = code_va, .len = code_len, .host = base, .perms = .{ .exec = true, .write = true } },
+            .{ .va = data_va, .len = 2 * page_size, .host = base + code_len, .perms = .{ .write = true } },
+        };
+        m.cp = try .init(testing.allocator, base, m.pages.len, .{ .owner = m, .drop = dropHook, .invalidate = invHook });
+        m.view = .{ .maps = &m.maps, .code = &m.cp, .tlb = &m.tlb };
+        m.jit = jit;
+        m.rt = .{ .cache = jit };
+        m.rt.bind();
+        if (jit) |c| try c.addJumpCache(&m.rt.jump);
+        const cx = &m.rt.ctx;
+        cx.cpu = @intFromPtr(&m.cpu);
+        cx.tlb = @intFromPtr(&m.tlb);
+        cx.space = @intFromPtr(&m.view);
+        cx.slow_load = @intFromPtr(&mem.slowLoad);
+        cx.slow_store = @intFromPtr(&mem.slowStore);
+        cx.slow_cas = @intFromPtr(&mem.slowCas);
+        cx.interp = @intFromPtr(&lift.interpLong);
+        m.pm = .{ .ctx = cx };
+        m.lm = .{ .ctx = &m.pm, .translateFn = t1.ProbeMem64.translateFn };
+        cx.frontend = @intFromPtr(&m.lm);
+    }
+
+    fn dropHook(p: *anyopaque, host: usize, table: mem.Table) void {
+        const m: *Machine = @ptrCast(@alignCast(p));
+        mem.dropEntries(&m.tlb, host, table);
+    }
+    fn invHook(p: *anyopaque, page: u64) void {
+        const m: *Machine = @ptrCast(@alignCast(p));
+        if (m.jit) |c| c.invalidatePage(page);
+    }
+
+    /// T0's memory: the View, as on T1.
     pub fn translate(m: *Machine, va: u64, access: cpu_mod.Access) ?[*]u8 {
-        if (va >= code_va and va - code_va < m.code.len) return m.code[@intCast(va - code_va)..].ptr;
-        if (va >= data_va and va - data_va < m.data.len) return if (access == .exec) null else m.data[@intCast(va - data_va)..].ptr;
-        return null;
+        return m.pm.translate(va, access);
+    }
+
+    fn code(m: *Machine) *[code_len]u8 {
+        return m.pages[0..code_len];
+    }
+
+    fn data(m: *Machine) *[2 * page_size]u8 {
+        return m.pages[code_len..];
     }
 
     fn load(m: *Machine, prog: []const u8, regs: [16]u64) void {
-        @memcpy(m.code[0..prog.len], prog);
+        m.cp.invalidateRange(@intFromPtr(&m.pages), code_len);
+        @memcpy(m.code()[0..prog.len], prog);
         m.cpu = .{};
         m.cpu.r = regs;
         if (m.cpu.r[4] == 0) m.cpu.r[4] = data_va + page_size + page_size / 2;
         m.cpu.rip = code_va;
         m.cpu.fl.set(0x202);
+        m.tlb.flush();
+        m.rt.jump.clear();
     }
 
+    fn runT0(m: *Machine, budget: u64) Exit {
+        return exec.runIn(.long, &m.cpu, m, .{ .budget = budget });
+    }
+
+    /// Runs to the first exit but a stop: on T0 alone, or on T1 through
+    /// dispatch with T0 for what it hands back.
     fn run(m: *Machine) Exit {
-        return exec.runIn(.long, &m.cpu, m, .{});
+        if (m.jit == null) return m.runT0(100_000_000);
+        const cfg = t1.config64(m.em);
+        var rounds: u32 = 0;
+        while (rounds < 1_000_000) : (rounds += 1) {
+            const c_before = m.cpu.retired;
+            const before = m.rt.ctx.retired;
+            const r = dispatch.run(testing.allocator, &m.rt.ctx, cfg, &m.stats);
+            m.cpu.retired = c_before +% (m.rt.ctx.retired -% before);
+            switch (r) {
+                .svc => return .syscall,
+                .interrupted => {
+                    _ = cache_mod.clearRequest(&m.rt.ctx, ~@as(u32, 0));
+                    m.jit.?.reset();
+                },
+                .t0 => {
+                    const e = m.runT0(1);
+                    if (e != .stopped) return e;
+                },
+            }
+        }
+        @panic("ran too long");
     }
 
     fn word(m: *Machine, off: usize) *align(1) u64 {
-        return @ptrCast(m.data[off..][0..8]);
+        return @ptrCast(m.data()[off..][0..8]);
     }
 };
 
@@ -77,12 +205,17 @@ fn longRuns() bool {
 
 /// Runs `prog` on each tier with `regs` and calls `check` with the exit.
 fn onEachTier(prog: []const u8, regs: [16]u64, check: *const fn (t: Tier, m: *Machine, e: Exit) anyerror!void) !void {
+    return onEachTierWith(prog, regs, null, check);
+}
+
+/// onEachTier, with `setup` run on each machine after loading.
+fn onEachTierWith(prog: []const u8, regs: [16]u64, setup: ?*const fn (m: *Machine) void, check: *const fn (t: Tier, m: *Machine, e: Exit) anyerror!void) !void {
     if (!longRuns()) return error.SkipZigTest;
     for (std.enums.values(Tier)) |t| {
-        const m = try testing.allocator.create(Machine);
-        defer testing.allocator.destroy(m);
-        m.* = .{};
+        const m = try Machine.create(t) orelse continue;
+        defer m.destroy();
         m.load(prog, regs);
+        if (setup) |s| s(m);
         const e = m.run();
         check(t, m, e) catch |err| {
             std.debug.print("on {t}: exit {any}, rip {x}, rax {x}\n", .{ t, e, m.cpu.rip, m.cpu.r[0] });
@@ -247,21 +380,23 @@ test "arch_prctl's FS base reaches FS-relative loads on T0 and T1 [hcpu]" {
         0x64, 0x48, 0x89, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00, // movq %rax, %fs:0x18
         0x48, 0x8b, 0x14, 0x25, 0x10, 0x01, 0x02, 0x00, // movq 0x20110, %rdx: no base
     } ++ syscall;
-    if (!longRuns()) return error.SkipZigTest;
-    const m = try testing.allocator.create(Machine);
-    defer testing.allocator.destroy(m);
-    m.* = .{};
     var regs: [16]u64 = @splat(0);
     regs[3] = 0x20;
-    m.load(&prog, regs);
-    m.cpu.fs_base = data_va + 0x100;
-    m.word(0x110).* = 0xdead_beef_cafe_f00d;
-    m.word(0x120).* = 0x0123_4567_89ab_cdef;
-    try expectSyscall(m.run());
-    try testing.expectEqual(@as(u64, 0xdead_beef_cafe_f00d), m.cpu.r[0]);
-    try testing.expectEqual(@as(u64, 0x0123_4567_89ab_cdef), m.cpu.r[1]);
-    try testing.expectEqual(@as(u64, 0xdead_beef_cafe_f00d), m.word(0x118).*);
-    try testing.expectEqual(@as(u64, 0xdead_beef_cafe_f00d), m.cpu.r[2]);
+    try onEachTierWith(&prog, regs, struct {
+        fn f(m: *Machine) void {
+            m.cpu.fs_base = data_va + 0x100;
+            m.word(0x110).* = 0xdead_beef_cafe_f00d;
+            m.word(0x120).* = 0x0123_4567_89ab_cdef;
+        }
+    }.f, struct {
+        fn f(_: Tier, m: *Machine, e: Exit) !void {
+            try expectSyscall(e);
+            try testing.expectEqual(@as(u64, 0xdead_beef_cafe_f00d), m.cpu.r[0]);
+            try testing.expectEqual(@as(u64, 0x0123_4567_89ab_cdef), m.cpu.r[1]);
+            try testing.expectEqual(@as(u64, 0xdead_beef_cafe_f00d), m.word(0x118).*);
+            try testing.expectEqual(@as(u64, 0xdead_beef_cafe_f00d), m.cpu.r[2]);
+        }
+    }.f);
 }
 
 test "a DIV by zero gives vector 0 at the DIV [hcpu]" {
@@ -322,7 +457,7 @@ test "a REP MOVSB stopped by a fault is exact, and resumes [hcpu]" {
             try testing.expectEqual(@as(u64, 0x100), c.r[1]);
             try testing.expectEqual(@as(u64, 0x20100), c.r[6]);
             try testing.expectEqual(@as(u64, 0x22000), c.r[7]);
-            try testing.expectEqualSlices(u8, m.data[0..0x100], m.data[0x1f00..0x2000]);
+            try testing.expectEqualSlices(u8, m.data()[0..0x100], m.data()[0x1f00..0x2000]);
             c.r[1] = 0;
             try expectSyscall(m.run());
         }
@@ -339,17 +474,15 @@ test "a REP stopped between iterations on T0 resumes exactly [hcpu]" {
         0xb9, 0x00, 0x20, 0x00, 0x00, // movl $0x2000, %ecx
         0xf3, 0xac, // rep lodsb (at 0x1015)
     } ++ syscall;
-    const ref = try testing.allocator.create(Machine);
-    defer testing.allocator.destroy(ref);
-    ref.* = .{};
+    const ref = (try Machine.create(.t0)).?;
+    defer ref.destroy();
     ref.load(&prog, @splat(0));
     try expectSyscall(ref.run());
 
-    const m = try testing.allocator.create(Machine);
-    defer testing.allocator.destroy(m);
-    m.* = .{};
+    const m = (try Machine.create(.t0)).?;
+    defer m.destroy();
     m.load(&prog, @splat(0));
-    const word: *std.atomic.Value(u32) = @ptrCast(@alignCast(m.data[0x1ffc..][0..4]));
+    const word: *std.atomic.Value(u32) = @ptrCast(@alignCast(m.data()[0x1ffc..][0..4]));
     word.store(0, .monotonic);
     const c = &m.cpu;
     try testing.expectEqual(Exit.stopped, exec.runIn(.long, c, m, .{ .stop = word }));
@@ -358,10 +491,10 @@ test "a REP stopped between iterations on T0 resumes exactly [hcpu]" {
     try testing.expectEqual(@as(u64, 0x20000 + 4095), c.r[6]);
     word.store(0, .monotonic);
     try expectSyscall(exec.runIn(.long, c, m, .{ .stop = word }));
-    m.data[0x1ffc] = 1;
+    m.data()[0x1ffc] = 1;
     try testing.expectEqualSlices(u64, &ref.cpu.r, &c.r);
     try testing.expectEqual(ref.cpu.rip, c.rip);
-    try testing.expectEqualSlices(u8, &ref.data, &m.data);
+    try testing.expectEqualSlices(u8, ref.data(), m.data());
 }
 
 test "a store into the executing page takes effect at the next instruction [hcpu]" {
