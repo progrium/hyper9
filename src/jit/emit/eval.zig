@@ -3,7 +3,8 @@
 //! dispatcher, the code cache's chaining, invalidation, and flushes run on
 //! hosts that have no native emitter yet.
 //!
-//! The stub follows cache.zig's x86-64 contract: `push rbx; mov rbx, rdi`,
+//! The stub follows cache.zig's x86-64 contract: `push rbx; mov rbx, rdi`
+//! (rcx on Win64),
 //! then the chain entry, which calls `evalEntry(ctx, region)`. A `.chain`
 //! exit comes back with the index of the `exit.chain` it took in
 //! exit_info; the stub turns that into its chain site (`jmp rel32`,
@@ -23,6 +24,7 @@ const emitter = @import("../emitter.zig");
 const Ctx = ctx_mod.Ctx;
 
 pub const supported = builtin.cpu.arch == .x86_64;
+const win64 = builtin.os.tag == .windows;
 
 pub const emitter_def: emitter.Emitter = .{ .name = "ir_eval", .emit = emit };
 
@@ -75,6 +77,15 @@ fn evalEntry(cx: *Ctx, r: *const ir.Region) callconv(.c) u32 {
 
 const off_exit_info: u8 = @offsetOf(Ctx, "exit_info");
 
+/// Win64: push rbp, rbx, r12-r15, rsi, rdi; mov rbp, rsp; mov rbx, rcx.
+const win64_prologue = [_]u8{ 0x55, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x56, 0x57, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xcb };
+/// The way out from the chain entry's stack: pop rbx; ret, or on Win64
+/// mov rsp, rbp and the pops in reverse.
+const epilogue: []const u8 = if (win64)
+    &.{ 0x48, 0x89, 0xec, 0x5f, 0x5e, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0x5d, 0xc3 }
+else
+    &.{ 0x5b, 0xc3 };
+
 pub fn emit(out_gpa: std.mem.Allocator, r: *const ir.Region, _: *const alloc_mod.Allocation, out: *std.ArrayList(u8)) emitter.EmitError!emitter.Code {
     if (!supported) return error.Unsupported;
     const copy = clone(r) catch return error.OutOfMemory;
@@ -89,14 +100,20 @@ pub fn emit(out_gpa: std.mem.Allocator, r: *const ir.Region, _: *const alloc_mod
     };
     var b: std.ArrayList(u8) = .empty;
     defer b.deinit(gpa);
-    try B.put(&b, &.{ 0x53, 0x48, 0x89, 0xfb }); // push rbx; mov rbx, rdi
+    // The context arrives in the first argument register: rdi (SysV) or
+    // rcx (Win64). Win64 also wants 32 bytes of shadow space at a call,
+    // and the frame x64.zig's regions have, which the code region's
+    // unwind information describes (x64.win64_unwind).
+    try B.put(&b, if (win64) &win64_prologue else &.{ 0x53, 0x48, 0x89, 0xfb }); // push rbx; mov rbx, rdi
     code.chain_entry = @intCast(b.items.len);
-    try B.put(&b, &.{ 0x48, 0x89, 0xdf }); // mov rdi, rbx
-    try B.put(&b, &.{ 0x48, 0xbe }); // mov rsi, imm64
+    if (win64) try B.put(&b, &.{ 0x48, 0x83, 0xec, 0x28 }); // sub rsp, 40
+    try B.put(&b, if (win64) &.{ 0x48, 0x89, 0xd9 } else &.{ 0x48, 0x89, 0xdf }); // mov rcx / rdi, rbx
+    try B.put(&b, if (win64) &.{ 0x48, 0xba } else &.{ 0x48, 0xbe }); // mov rdx / rsi, imm64
     try B.imm(&b, @as(u64, @intFromPtr(copy)));
     try B.put(&b, &.{ 0x48, 0xb8 }); // mov rax, imm64
     try B.imm(&b, @as(u64, @intFromPtr(&evalEntry)));
     try B.put(&b, &.{ 0xff, 0xd0 }); // call rax
+    if (win64) try B.put(&b, &.{ 0x48, 0x83, 0xc4, 0x28 }); // add rsp, 40
     try B.put(&b, &.{ 0x83, 0xf8, 0x01 }); // cmp eax, 1 (.chain)
     try B.put(&b, &.{ 0x0f, 0x85 }); // jne done
     const jne_done = b.items.len;
@@ -116,7 +133,8 @@ pub fn emit(out_gpa: std.mem.Allocator, r: *const ir.Region, _: *const alloc_mod
         try B.put(&b, &.{ 0x48, 0x8d, 0x05 });
         try B.imm(&b, disp);
         try B.put(&b, &.{ 0x48, 0x89, 0x43, off_exit_info });
-        try B.put(&b, &.{ 0xb8, 1, 0, 0, 0, 0x5b, 0xc3 }); // mov eax, chain; pop rbx; ret
+        try B.put(&b, &.{ 0xb8, 1, 0, 0, 0 }); // mov eax, chain
+        try B.put(&b, epilogue);
         b.items[jne_next - 1] = @intCast(b.items.len - jne_next);
         code.chains[nsites] = .{ .site = @intCast(site), .pc = i.aux };
         nsites += 1;
@@ -124,7 +142,7 @@ pub fn emit(out_gpa: std.mem.Allocator, r: *const ir.Region, _: *const alloc_mod
     code.nchains = @intCast(nsites);
     // done: rax holds the exit.
     std.mem.writeInt(u32, b.items[jne_done..][0..4], @intCast(b.items.len - (jne_done + 4)), .little);
-    try B.put(&b, &.{ 0x5b, 0xc3 }); // pop rbx; ret
+    try B.put(&b, epilogue);
     // A chain index past the sites falls through here too, as `.chain`
     // with an exit_info that's no site, so it's never linked.
     try out.appendSlice(out_gpa, b.items);

@@ -217,7 +217,9 @@ pub const Cache = struct {
 
     pub fn init(gpa: std.mem.Allocator, size: usize) (codemem.Error)!Cache {
         const p = Patcher.host orelse return error.JitUnavailable;
-        return .{ .gpa = gpa, .region = try .init(size), .patcher = p, .tbs = .init(gpa) };
+        var region: codemem.Region = try .init(size);
+        if (builtin.cpu.arch == .x86_64) region.addUnwind(@import("emit/x64.zig").win64_unwind);
+        return .{ .gpa = gpa, .region = region, .patcher = p, .tbs = .init(gpa) };
     }
 
     pub fn deinit(c: *Cache) void {
@@ -516,7 +518,8 @@ const x64 = struct {
     fn build(gpa: std.mem.Allocator, next: ?u64, exit: ctx_mod.Exit, exit_pc: u64) !Built {
         var b: std.ArrayList(u8) = .empty;
         errdefer b.deinit(gpa);
-        try b.appendSlice(gpa, &.{ 0x53, 0x48, 0x89, 0xfb }); // push rbx; mov rbx, rdi
+        // push rbx; mov rbx, rdi (rcx on Win64)
+        try b.appendSlice(gpa, if (builtin.os.tag == .windows) &.{ 0x53, 0x48, 0x89, 0xcb } else &.{ 0x53, 0x48, 0x89, 0xfb });
         const chain_entry: u32 = @intCast(b.items.len);
         try b.appendSlice(gpa, &.{ 0x48, 0x83, 0x43, off_retired, 0x01 }); // add qword [rbx+retired], 1
         // A kick leaves here, as `poll` would.

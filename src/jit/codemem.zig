@@ -71,6 +71,9 @@ pub const Region = struct {
     /// Bump pointer: bytes handed out by `alloc`.
     used: usize = 0,
     os_handle: Handle,
+    /// Windows: the function table `addUnwind` registered, at the end of
+    /// the mapping (beyond `len`), to remove at deinit.
+    unwind: ?*const anyopaque = null,
 
     /// Maps `len` bytes (rounded up to `granule`) of code memory.
     pub fn init(len: usize) Error!Region {
@@ -80,8 +83,33 @@ pub const Region = struct {
     }
 
     pub fn deinit(r: *Region) void {
+        if (os == .windows) if (r.unwind) |t| {
+            _ = windows.RtlDeleteFunctionTable(t);
+        };
         host.unmap(r);
         r.* = undefined;
+    }
+
+    /// Windows x64: describes every function in the region to the OS
+    /// unwinder (stack walks, and exceptions passing through generated
+    /// code) with one UNWIND_INFO, `info`, that holds for all of them.
+    /// It and the function table take the region's last 64 bytes, which
+    /// `alloc` then never hands out. Call it once, before any `alloc`.
+    /// Elsewhere it does nothing: other hosts walk frame pointers.
+    pub fn addUnwind(r: *Region, info: []const u8) void {
+        if (os != .windows or arch != .x86_64) return;
+        std.debug.assert(r.used == 0 and info.len <= 48 and r.len > 64);
+        const tail: u32 = @intCast(r.len - 64);
+        // RUNTIME_FUNCTION: begin, end, and the UNWIND_INFO's address, as
+        // offsets from the region's executable start.
+        const table = [3]u32{ 0, tail, tail + 16 };
+        r.beginWrite();
+        @memcpy(r.rw[tail..][0..12], std.mem.sliceAsBytes(&table));
+        @memcpy(r.rw[tail + 16 ..][0..info.len], info);
+        r.commit(tail, 64);
+        r.len = tail;
+        const t: *const anyopaque = @ptrCast(r.rx + tail);
+        if (windows.RtlAddFunctionTable(t, 1, @intFromPtr(r.rx)) != 0) r.unwind = t;
     }
 
     /// Reserves `size` bytes aligned to `alignment` (a power of two), or
@@ -413,6 +441,8 @@ const windows = struct {
     extern "kernel32" fn CloseHandle(HANDLE) callconv(.winapi) BOOL;
     extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
     extern "kernel32" fn FlushInstructionCache(HANDLE, ?*const anyopaque, usize) callconv(.winapi) BOOL;
+    extern "kernel32" fn RtlAddFunctionTable(?*const anyopaque, u32, u64) callconv(.winapi) u8;
+    extern "kernel32" fn RtlDeleteFunctionTable(?*const anyopaque) callconv(.winapi) u8;
 
     fn map(n: usize) Error!Region {
         // The section's maximum protection has to allow execute so one view

@@ -51,7 +51,9 @@ pub const Native = struct {
 
     pub fn init() !Native {
         if (!available()) return error.JitUnavailable;
-        return .{ .code = try codemem.Region.init(8 << 20) };
+        var code: codemem.Region = try .init(8 << 20);
+        if (builtin.cpu.arch == .x86_64) code.addUnwind(@import("x64.zig").win64_unwind);
+        return .{ .code = code };
     }
 
     pub fn deinit(n: *Native) void {

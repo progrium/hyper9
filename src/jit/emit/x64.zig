@@ -101,6 +101,27 @@ const saved_regs: []const u8 = if (win64) &.{ RBX, R12, R13, R14, R15, RSI, RDI 
 /// Bytes from rbp down to the last push: rsp at the chain entry is rbp
 /// less this.
 const saved_bytes: u8 = 8 * saved_regs.len;
+/// How far below rbp the pushes end: rbp is set right after `push rbp`
+/// (a frame-pointer chain, for SysV stack walks), or on Win64 after every
+/// push, as its unwinder wants a frame register set last.
+const rbp_above: u8 = if (win64) 0 else saved_bytes;
+
+/// Win64's UNWIND_INFO for every region (codemem.Region.addUnwind): no
+/// prolog to undo partway (unwinding only ever starts in a body), rbp the
+/// frame register, and the codes in reverse prolog order: rsp = rbp, then
+/// the pushes, saved_regs backward and rbp last.
+pub const win64_unwind: []const u8 = blk: {
+    var b: []const u8 = &.{ 1, 0, saved_regs.len + 2, RBP };
+    b = b ++ &[_]u8{ 0, 3 }; // UWOP_SET_FPREG
+    var k = saved_regs.len;
+    while (k > 0) {
+        k -= 1;
+        b = b ++ &[_]u8{ 0, @as(u8, saved_regs[k]) << 4 }; // UWOP_PUSH_NONVOL
+    }
+    b = b ++ &[_]u8{ 0, RBP << 4 };
+    if ((saved_regs.len + 2) % 2 != 0) b = b ++ &[_]u8{ 0, 0 };
+    break :blk b;
+};
 /// Registers a call may clobber, of those regalloc hands out.
 const caller_saved_mask: u64 = if (win64) (1 << R8) else (1 << RSI) | (1 << RDI) | (1 << R8);
 /// Instructions retired since ctx.retired and ctx.budget were last
@@ -482,9 +503,9 @@ const E = struct {
         e.pending = k;
     }
 
-    /// lea rsp, [rbp - saved_bytes]: the frame torn down to the pushes.
+    /// lea rsp, [rbp - rbp_above]: the frame torn down to the pushes.
     fn dropFrame(e: *E) !void {
-        try e.bs(&.{ 0x48, 0x8d, 0x65, @bitCast(-@as(i8, saved_bytes)) });
+        try e.bs(&.{ 0x48, 0x8d, 0x65, @bitCast(-@as(i8, rbp_above)) });
     }
 };
 
@@ -528,14 +549,15 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
 
     // Prologue.
     try e.b(0x55); // push rbp
-    try e.bs(&.{ 0x48, 0x89, 0xe5 }); // mov rbp, rsp
+    if (!win64) try e.bs(&.{ 0x48, 0x89, 0xe5 }); // mov rbp, rsp
     for (saved_regs) |x| {
         try e.rex(false, 0, 0, x);
         try e.b(0x50 + (x & 7)); // push
     }
+    if (win64) try e.bs(&.{ 0x48, 0x89, 0xe5 }); // mov rbp, rsp: as win64_unwind says
     try e.mov(CTX, if (win64) RCX else RDI);
     // The chain entry: linked sites and jump-cache hits land here, with rbx
-    // the context and rsp at rbp - saved_bytes (the frame torn down).
+    // the context and rsp at rbp - rbp_above (the frame torn down).
     e.code.chain_entry = @intCast(e.pos());
     // The pushes leave rsp 8 off 16-byte alignment (an odd number of
     // them); the frame puts it back.
