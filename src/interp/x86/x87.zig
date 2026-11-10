@@ -236,20 +236,16 @@ const Op = struct {
         const by_zero = (k == 6 and b.signif == 0 and !b.isNan()) or (k == 7 and a.signif == 0 and !a.isNan());
         if (!by_zero) o.denormals(a, b, b_den);
         const r = compute(&o.env, k, a, b);
-        if (o.env.flags.inexact) {
-            var e = o.chop();
-            o.roundedUp(r, compute(&e, k, a, b));
-        }
+        // C1: rounded up, as rounding toward zero would show (f80.zig
+        // tracks it, so the operation isn't done twice).
+        if (o.env.flags.inexact) o.c1 = o.env.rounded_up;
         return r;
     }
 
     /// FSQRT, at the control word's precision.
     fn arithSqrt(o: *Op, a: F80) F80 {
         const r = o.env.sqrt(a);
-        if (o.env.flags.inexact) {
-            var e = o.chop();
-            o.roundedUp(r, e.sqrt(a));
-        }
+        if (o.env.flags.inexact) o.c1 = o.env.rounded_up;
         return r;
     }
 
@@ -581,7 +577,12 @@ fn fist(x: anytype, a: u32, size: u8, r: u3) !void {
 /// lifted code (jit/x86/helpers.zig), which has done the wait and the load.
 /// Nothing in it traps.
 pub fn arithMem(x: anytype, op: u3, r: u3, v: u64) void {
-    const p = &x.c.fpu;
+    note(x);
+    arithMemOp(&x.c.fpu, op, r, v);
+}
+
+/// arithMem without the note, which the caller makes.
+pub fn arithMemOp(p: *Fpu, op: u3, r: u3, v: u64) void {
     var o = Op.begin(p);
     var b: F80 = undefined;
     var b_den = false;
@@ -598,7 +599,6 @@ pub fn arithMem(x: anytype, op: u3, r: u3, v: u64) void {
         6 => b = sf.fromI32(@as(i16, @bitCast(@as(u16, @truncate(v))))),
         else => unreachable,
     }
-    note(x);
     arithOrCompare(&o, r, 0, b, b_den, false);
 }
 

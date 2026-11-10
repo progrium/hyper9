@@ -211,13 +211,8 @@ fn x87Fast(c: *Ctx, a: u64, b: u64, _: u64) callconv(.c) u64 {
                 6 => read(c, addr, u16) orelse return refuse,
                 else => read(c, addr, u32) orelse return refuse,
             };
-            const eip = cpu.eip;
-            cpu.eip = arg.pc;
-            defer cpu.eip = eip;
-            var x: exec.Exec(*lift.Mem) = .{ .c = cpu, .m = undefined, .opts = .{}, .addr = addr };
-            x.ibuf = .{ .op = .x87, .entry = 0, .opcode = 0xd8 | @as(u16, arg.op), .len = 0, .size = 4, .seg = @enumFromInt(arg.seg), .modrm = arg.modrm, .mem = true };
-            x.i = &x.ibuf;
-            x87.arithMem(&x, arg.op, @truncate(arg.modrm >> 3), v);
+note(cpu, arg, addr);
+            x87.arithMemOp(p, arg.op, @truncate(arg.modrm >> 3), v);
         },
         .fldcw => {
             if (p.sw & ES != 0) return refuse;

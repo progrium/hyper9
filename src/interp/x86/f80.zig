@@ -171,6 +171,10 @@ pub const Env = struct {
     rounding: Rounding = .near_even,
     precision: Precision = .p80,
     flags: Flags = .{},
+    /// The last rounded result is larger in magnitude than the exact one
+    /// (the x87's C1 after an inexact result): what rounding toward zero
+    /// instead would have shown, without computing it again.
+    rounded_up: bool = false,
 
     // Arithmetic.
 
@@ -990,25 +994,31 @@ pub const Env = struct {
                         if (is_tiny) env.flags.underflow = true;
                         env.flags.inexact = true;
                     }
+                    const trunc = sig & ~round_mask;
                     sig +%= round_increment;
                     exp = @intFromBool(sig & 0x8000000000000000 != 0);
                     round_increment = round_mask + 1;
                     if (near_even and round_bits << 1 == round_increment) round_mask |= round_increment;
                     sig &= ~round_mask;
+                    env.rounded_up = sig != trunc;
                     return pack(sign, exp, sig);
                 }
                 if (0x7FFE < exp or (exp == 0x7FFE and sig +% round_increment < sig))
                     return env.overflow(sign, round_mask);
             }
             if (round_bits != 0) env.flags.inexact = true;
+            const trunc = sig & ~round_mask;
             sig +%= round_increment;
             if (sig < round_increment) {
                 exp += 1;
                 sig = 0x8000000000000000;
+                env.rounded_up = true;
+                return pack(sign, exp, sig);
             }
             round_increment = round_mask + 1;
             if (near_even and round_bits << 1 == round_increment) round_mask |= round_increment;
             sig &= ~round_mask;
+            env.rounded_up = sig != trunc;
             return pack(sign, exp, sig);
         }
         var do_increment = 0x8000000000000000 <= sig_extra;
@@ -1027,23 +1037,29 @@ pub const Env = struct {
                 do_increment = 0x8000000000000000 <= sig_extra;
                 if (!near_even and mode != .near_max_mag) do_increment = toward and sig_extra != 0;
                 if (do_increment) {
+                    const trunc = sig;
                     sig +%= 1;
                     if (sig_extra & 0x7FFFFFFFFFFFFFFF == 0 and near_even) sig &= ~@as(u64, 1);
                     exp = @intFromBool(sig & 0x8000000000000000 != 0);
-                }
+                    env.rounded_up = sig != trunc;
+                } else env.rounded_up = false;
                 return pack(sign, exp, sig);
             }
             if (0x7FFE < exp or (exp == 0x7FFE and sig == 0xFFFFFFFFFFFFFFFF and do_increment))
                 return env.overflow(sign, 0);
         }
         if (sig_extra != 0) env.flags.inexact = true;
+        env.rounded_up = false;
         if (do_increment) {
+            const trunc = sig;
             sig +%= 1;
             if (sig == 0) {
                 exp += 1;
                 sig = 0x8000000000000000;
-            } else if (sig_extra & 0x7FFFFFFFFFFFFFFF == 0 and near_even) {
-                sig &= ~@as(u64, 1);
+                env.rounded_up = true;
+            } else {
+                if (sig_extra & 0x7FFFFFFFFFFFFFFF == 0 and near_even) sig &= ~@as(u64, 1);
+                env.rounded_up = sig != trunc;
             }
         }
         return pack(sign, exp, sig);
@@ -1053,8 +1069,9 @@ pub const Env = struct {
         env.flags.overflow = true;
         env.flags.inexact = true;
         const mode = env.rounding;
-        if (mode == .near_even or mode == .near_max_mag or mode == (if (sign) Rounding.min else Rounding.max))
-            return pack(sign, 0x7FFF, 0x8000000000000000);
+        // Toward zero gives the largest finite value: an infinity is up.
+        env.rounded_up = mode == .near_even or mode == .near_max_mag or mode == (if (sign) Rounding.min else Rounding.max);
+        if (env.rounded_up) return pack(sign, 0x7FFF, 0x8000000000000000);
         return pack(sign, 0x7FFE, ~round_mask);
     }
 
@@ -1325,4 +1342,43 @@ test "simple values" {
 
 test "testfloat sample" {
     try @import("f80_vectors.zig").run(@embedFile("f80-vectors.txt"));
+}
+
+test "rounded_up is what rounding toward zero would show" {
+    // x87.zig's C1 after an inexact add, sub, mul, div, or sqrt: the
+    // result differs from the one rounded toward zero. Random operands
+    // across the exponent range, including tiny and huge results.
+    var prng = std.Random.DefaultPrng.init(0x87c1);
+    const rnd = prng.random();
+    var checked: usize = 0;
+    for (0..60000) |n| {
+        const exp_a: u16 = if (n % 4 == 0) rnd.int(u15) else 0x3FFF -% 70 +% rnd.uintLessThan(u16, 140);
+        const exp_b: u16 = if (n % 4 == 1) rnd.int(u15) else 0x3FFF -% 70 +% rnd.uintLessThan(u16, 140);
+        const sa: u64 = rnd.int(u64) | (if (exp_a == 0) @as(u64, 0) else 1 << 63);
+        const sb: u64 = rnd.int(u64) | (if (exp_b == 0) @as(u64, 0) else 1 << 63);
+        const a: F80 = .{ .sign_exp = exp_a | (@as(u16, rnd.int(u1)) << 15), .signif = sa };
+        const b: F80 = .{ .sign_exp = exp_b | (@as(u16, rnd.int(u1)) << 15), .signif = sb };
+        const k = n % 5;
+        for ([_]Rounding{ .near_even, .min, .max, .min_mag }) |mode| {
+            for ([_]Precision{ .p32, .p64, .p80 }) |prec| {
+                var e: Env = .{ .rounding = mode, .precision = prec };
+                var t: Env = .{ .rounding = .min_mag, .precision = prec };
+                const r, const z = switch (k) {
+                    0 => .{ e.add(a, b), t.add(a, b) },
+                    1 => .{ e.sub(a, b), t.sub(a, b) },
+                    2 => .{ e.mul(a, b), t.mul(a, b) },
+                    3 => .{ e.div(a, b), t.div(a, b) },
+                    else => .{ e.sqrt(.{ .sign_exp = a.sign_exp & 0x7FFF, .signif = a.signif }), t.sqrt(.{ .sign_exp = a.sign_exp & 0x7FFF, .signif = a.signif }) },
+                };
+                if (!e.flags.inexact) continue;
+                checked += 1;
+                const up = (r.sign_exp & 0x7FFF) != (z.sign_exp & 0x7FFF) or r.signif != z.signif;
+                if (up != e.rounded_up) {
+                    std.debug.print("op {d} mode {s} prec {s}: a {x}/{x} b {x}/{x} r {x}/{x} chop {x}/{x} rounded_up {}\n", .{ k, @tagName(mode), @tagName(prec), a.sign_exp, a.signif, b.sign_exp, b.signif, r.sign_exp, r.signif, z.sign_exp, z.signif, e.rounded_up });
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    }
+    try std.testing.expect(checked > 100000);
 }
