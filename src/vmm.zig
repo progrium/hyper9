@@ -15,7 +15,13 @@ pub const ia32 = @import("arch/i386.zig"); // `i386` is a primitive type name
 const hvf = if (have_hvf) @import("vmm/hvf.zig") else @import("vmm/none.zig");
 const kvm = if (have_kvm) @import("vmm/kvm.zig") else @import("vmm/none.zig");
 const whp = if (have_whp) @import("vmm/whp.zig") else @import("vmm/none.zig");
-const emu = if (have_emu) @import("vmm/emu.zig") else @import("vmm/none.zig");
+/// The emulator: Unicorn (-Demu=unicorn), or h9's own CPUs (-Demu=zig),
+/// which pick ha64 or h86 by the binary's architecture (vmm/zemu.zig).
+const emu = if (!have_emu) @import("vmm/none.zig") else switch (build_options.emu) {
+    .unicorn => @import("vmm/emu.zig"),
+    .zig => @import("vmm/zemu.zig"),
+    .none => unreachable,
+};
 const v86 = if (have_v86) @import("vmm/v86.zig") else @import("vmm/none.zig");
 const nat = if (have_native) @import("vmm/native.zig") else @import("vmm/none.zig");
 

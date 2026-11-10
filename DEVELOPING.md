@@ -306,6 +306,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
 | `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, emu on Unicorn, and v86 for the browser host), with the guest-physical allocator and page tables the hypervisor backends share |
+| `src/vcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (`-Demu=zig`): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
@@ -315,6 +316,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
 | `tests/fixtures` | test programs and binary generators; `segattach/` holds the arm64 programs for the segattach backend cases and `gfx/` those for the `[gfx]` cases, assembled at build time |
 | `tests/web/` | the browser host's Playwright check and the v86 layout check |
+| `tests/jit/` | the wasm emitter's check under Node: a runtime module standing in for h9.wasm, and the driver |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source, `h9-web`) into `dist/` |
 | `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |

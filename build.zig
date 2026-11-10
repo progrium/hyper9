@@ -336,7 +336,10 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
 }
 
-pub const Emu = enum { none, unicorn };
+/// none: no emulator. unicorn: Unicorn (GPLv2). zig: h9's own CPUs, ha64
+/// for arm64 guests and h86 for 386 (src/vcpu.zig; in progress on the vcpu
+/// branch, so it isn't usable yet).
+pub const Emu = enum { none, unicorn, zig };
 
 /// Where -Demu=unicorn gets Unicorn: the PyPI wheels' libunicorn.a, or a
 /// build from the patched source (build/unicorn.zig).
@@ -780,6 +783,8 @@ const ModuleParts = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     emu: Emu,
+    /// With -Demu=zig: build the JIT tier, not just the interpreter.
+    jit: bool,
     unicorn: ?*std.Build.Module,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
@@ -832,6 +837,7 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
 
     const options = b.addOptions();
     options.addOption(Emu, "emu", p.emu);
+    options.addOption(bool, "jit", p.jit);
     options.addOption(bool, "kern", p.have_drawterm);
     options.addOption(bool, "host_cmd", p.host_cmd);
     options.addOption([]const u8, "gfx", @tagName(gfx));
@@ -888,7 +894,8 @@ pub fn build(b: *std.Build) void {
     // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
     // while design/host-cmd rethinks them.
     const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in (GPLv2 Unicorn: dev, CI and the h9-emu release only)") orelse .none;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or zig (h9's own, in progress)") orelse .none;
+    const no_jit = b.option(bool, "no-jit", "With -Demu=zig: the interpreter tier only, as on hosts that forbid generated code") orelse false;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
@@ -967,6 +974,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .emu = emu,
+        .jit = !no_jit,
         .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),
@@ -1469,6 +1477,7 @@ pub fn build(b: *std.Build) void {
     };
     const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    addVcpuTests(b, test_step, target, optimize);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
@@ -1584,4 +1593,38 @@ fn hostHasHvf(b: *std.Build) bool {
         else => false,
     };
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
+}
+
+/// The emulator's own CPUs (src/vcpu.zig): the JIT layer's unit tests,
+/// natively, and the wasm emitter's under Node when Node is installed
+/// (tests/jit/run.mjs). `zig build vcpu` runs just these.
+fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const step = b.step("vcpu", "Run the emulator CPU and JIT tests (src/vcpu.zig), natively and under Node");
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/vcpu.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run = b.addRunArtifact(tests);
+    step.dependOn(&run.step);
+    test_step.dependOn(&run.step);
+
+    const node = b.findProgram(&.{"node"}, &.{}) catch return;
+    const runtime = b.addExecutable(.{
+        .name = "jit-runtime",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/jit/wasm_runtime.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
+            // Debug: optimizing the stand-in T0's dispatch for wasm takes minutes.
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) }},
+        }),
+    });
+    runtime.entry = .disabled;
+    runtime.rdynamic = true;
+    const node_run = b.addSystemCommand(&.{ node, "tests/jit/run.mjs" });
+    node_run.addFileArg(runtime.getEmittedBin());
+    node_run.expectExitCode(0);
+    step.dependOn(&node_run.step);
+    test_step.dependOn(&node_run.step);
 }
