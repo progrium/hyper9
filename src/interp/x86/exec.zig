@@ -111,6 +111,85 @@ pub const ICache = struct {
     }
 };
 
+/// Decoded instructions by page, as ha64's decode cache keeps them, for
+/// memories that track code (a `codeEpoch` method). A page maps each
+/// offset to the instruction decoded there, if any, so a fetch on the page
+/// the last one was on is an index, with no translation or hash. A page
+/// holds while its host page is the same; the whole cache goes when code
+/// is invalidated (CodePages.epoch moves) or `pool` fills. Pages are
+/// direct-mapped by virtual page and allocated as first used; one evicted
+/// leaves its instructions in `pool` until it is next emptied. An
+/// instruction that crosses a page isn't kept here.
+pub const PageCache = struct {
+    pub const nslots = 1024;
+    pub const ninst = 65535;
+    gpa: std.mem.Allocator,
+    slots: [nslots]?*Page,
+    pool: [ninst]Inst,
+    /// Entries of `pool` in use.
+    used: u32,
+    /// The code epoch the pages of generation `gen` were filled in.
+    epoch: usize,
+    gen: u32,
+
+    pub const Page = struct {
+        vp: u32,
+        /// The generation it was filled in; 0 is never valid.
+        gen: u32,
+        /// The host address of the page.
+        host: usize,
+        /// By offset: 1 + the index in `pool` of the instruction there, or 0.
+        idx: [page_size]u16,
+    };
+
+    /// An empty cache in place, which allocates pages from `gpa`.
+    pub fn init(pc: *PageCache, gpa: std.mem.Allocator) void {
+        pc.gpa = gpa;
+        pc.slots = @splat(null);
+        pc.used = 0;
+        pc.epoch = 0;
+        pc.gen = 1;
+    }
+
+    pub fn deinit(pc: *PageCache) void {
+        for (&pc.slots) |*s| if (s.*) |p| {
+            pc.gpa.destroy(p);
+            s.* = null;
+        };
+    }
+
+    /// Starts a new generation, dropping every page.
+    fn drop(pc: *PageCache) void {
+        pc.used = 0;
+        pc.gen +%= 1;
+        if (pc.gen == 0) {
+            for (pc.slots) |s| if (s) |p| {
+                p.gen = 0;
+            };
+            pc.gen = 1;
+        }
+    }
+
+    /// The page for `vp` at host page `host`, emptied if it held another,
+    /// or null if there's no memory for it.
+    fn page(pc: *PageCache, vp: u32, host: usize) ?*Page {
+        const s = &pc.slots[(vp ^ (vp >> 10)) & (nslots - 1)];
+        const p = s.* orelse blk: {
+            const p = pc.gpa.create(Page) catch return null;
+            p.gen = 0;
+            s.* = p;
+            break :blk p;
+        };
+        if (p.gen != pc.gen or p.vp != vp or p.host != host) {
+            p.vp = vp;
+            p.gen = pc.gen;
+            p.host = host;
+            @memset(&p.idx, 0);
+        }
+        return p;
+    }
+};
+
 /// An instruction left: `Exec.exit` says how.
 pub const Trap = error{Trap};
 
@@ -229,6 +308,13 @@ pub fn Exec(comptime M: type) type {
         exit: Exit = .stopped,
         /// Instructions run in this call.
         n: u64 = 0,
+        /// The PageCache page the last fetch was on, and its virtual page
+        /// (no_vp for none). Kept for one call, which a mapping change ends
+        /// (it is a syscall).
+        cur: *PageCache.Page = undefined,
+        cur_vp: u32 = no_vp,
+
+        const no_vp = std.math.maxInt(u32);
 
         fn loop(x: *X) Exit {
             return if (x.opts.branches != 0) x.loopFor(true) else x.loopFor(false);
@@ -275,31 +361,51 @@ pub fn Exec(comptime M: type) type {
 
         // ------------------------------------------------------ memory
 
-        pub fn ptr(x: *X, va: u32, access: Access) Trap![*]u8 {
+        /// A host pointer to `va`'s byte for an access, good to the end of
+        /// its page. Inline as far as a memory's `hit` (a TLB hit) goes.
+        pub inline fn ptr(x: *X, va: u32, access: Access) Trap![*]u8 {
+            if (has_hit) if (x.m.hit(va, access)) |p| return p;
+            return x.ptrMiss(va, access);
+        }
+
+        noinline fn ptrMiss(x: *X, va: u32, access: Access) Trap![*]u8 {
             return x.m.translate(va, access) orelse x.pageFault(va, access);
         }
 
         /// The bytes of [va, va+size) for writing (or a locked access),
         /// translated, both pages if it crosses.
-        fn ref(x: *X, va: u32, size: u8, access: Access) Trap!Ref {
+        inline fn ref(x: *X, va: u32, size: u8, access: Access) Trap!Ref {
+            const off = va & (page_size - 1);
+            if (off + size <= page_size) return .{ .p = try x.ptr(va, access) };
+            return x.refSplit(va, access);
+        }
+
+        noinline fn refSplit(x: *X, va: u32, access: Access) Trap!Ref {
             const off = va & (page_size - 1);
             const p = try x.ptr(va, access);
-            if (off + size <= page_size) return .{ .p = p };
             const k = page_size - off;
             const q = try x.ptr(va +% k, access);
             return .{ .p = p, .q = q, .k = k };
         }
 
-        pub fn load(x: *X, va: u32, size: u8) Trap!u32 {
+        pub inline fn load(x: *X, va: u32, size: u8) Trap!u32 {
             const off = va & (page_size - 1);
             if (off + size <= page_size) return ld(try x.ptr(va, .read), size);
+            return x.loadSplit(va, size);
+        }
+
+        noinline fn loadSplit(x: *X, va: u32, size: u8) Trap!u32 {
             const r = try x.ref(va, size, .read);
             return r.get(size);
         }
 
-        pub fn store(x: *X, va: u32, size: u8, v: u32) Trap!void {
+        pub inline fn store(x: *X, va: u32, size: u8, v: u32) Trap!void {
             const off = va & (page_size - 1);
             if (off + size <= page_size) return st(try x.ptr(va, .write), size, v);
+            return x.storeSplit(va, size, v);
+        }
+
+        noinline fn storeSplit(x: *X, va: u32, size: u8, v: u32) Trap!void {
             const r = try x.ref(va, size, .write);
             r.put(size, v);
         }
@@ -353,7 +459,7 @@ pub fn Exec(comptime M: type) type {
 
         /// The memory operand's linear address, faulting through a null
         /// FS or GS.
-        fn linear(x: *X, offset: u32) Trap!u32 {
+        inline fn linear(x: *X, offset: u32) Trap!u32 {
             const s = @intFromEnum(x.i.seg);
             if (s >= 4) {
                 if (x.c.seg_null & (@as(u8, 1) << @intCast(s)) != 0) return x.exc(cpu_mod.vec_gp);
@@ -384,7 +490,7 @@ pub fn Exec(comptime M: type) type {
         }
 
         /// Reads operand `o` at `size` bytes.
-        fn get(x: *X, comptime o: Opd, size: u8) Trap!u32 {
+        inline fn get(x: *X, comptime o: Opd, size: u8) Trap!u32 {
             return switch (o) {
                 .E => if (x.i.mem) x.load(x.addr, size) else getReg(x.c, x.i.rm(), size),
                 .O => x.load(x.addr, size),
@@ -400,7 +506,7 @@ pub fn Exec(comptime M: type) type {
         }
 
         /// Writes operand `o`.
-        fn put(x: *X, comptime o: Opd, size: u8, v: u32) Trap!void {
+        inline fn put(x: *X, comptime o: Opd, size: u8, v: u32) Trap!void {
             if (x.isMem(o)) return x.store(x.addr, size, v);
             setReg(x.c, x.regOf(o), size, v);
         }
@@ -408,7 +514,7 @@ pub fn Exec(comptime M: type) type {
         /// Reads, changes, and writes operand `o` with `f.apply`, which
         /// may run more than once for a locked operand. Returns the old
         /// value.
-        fn modify(x: *X, comptime o: Opd, size: u8, f: anytype) Trap!u32 {
+        inline fn modify(x: *X, comptime o: Opd, size: u8, f: anytype) Trap!u32 {
             if (x.isMem(o)) {
                 const r = try x.ref(x.addr, size, .write);
                 if (x.i.lock) return locked(r, size, f);
@@ -438,13 +544,13 @@ pub fn Exec(comptime M: type) type {
 
         // ------------------------------------------------------ stack
 
-        fn push(x: *X, size: u8, v: u32) Trap!void {
+        inline fn push(x: *X, size: u8, v: u32) Trap!void {
             const sp = x.c.r[4] -% size;
             try x.store(sp, size, v);
             x.c.r[4] = sp;
         }
 
-        fn pop(x: *X, size: u8) Trap!u32 {
+        inline fn pop(x: *X, size: u8) Trap!u32 {
             const v = try x.load(x.c.r[4], size);
             x.c.r[4] +%= size;
             return v;
@@ -457,8 +563,59 @@ pub fn Exec(comptime M: type) type {
             else => M,
         };
         const tracks_code = @typeInfo(MemT) == .@"struct" and @hasDecl(MemT, "codeEpoch");
+        const has_hit = @typeInfo(MemT) == .@"struct" and @hasDecl(MemT, "hit");
 
-        fn fetch(x: *X) Trap!*const Inst {
+        inline fn fetch(x: *X) Trap!*const Inst {
+            if (tracks_code) if (x.c.pages) |pc| if (x.m.codeEpoch()) |epoch| {
+                const eip = x.c.eip;
+                if (eip >> 12 == x.cur_vp and epoch == pc.epoch) {
+                    const k = x.cur.idx[eip & (page_size - 1)];
+                    if (k != 0) return &pc.pool[k - 1];
+                }
+                return x.fetchPage(pc, epoch);
+            };
+            return x.fetchEntry();
+        }
+
+        /// A fetch the current page doesn't have: through the PageCache,
+        /// decoding it there.
+        noinline fn fetchPage(x: *X, pc: *PageCache, epoch: usize) Trap!*const Inst {
+            if (epoch != pc.epoch) {
+                pc.epoch = epoch;
+                pc.drop();
+                x.cur_vp = no_vp;
+            }
+            const eip = x.c.eip;
+            const vp = eip >> 12;
+            const off = eip & (page_size - 1);
+            if (vp != x.cur_vp or x.cur.gen != pc.gen) {
+                const host = @intFromPtr(try x.ptr(eip, .exec)) - off;
+                x.cur = pc.page(vp, host) orelse return x.fetchEntry();
+                x.cur_vp = vp;
+            }
+            const k = x.cur.idx[off];
+            if (k != 0) return &pc.pool[k - 1];
+            const base: [*]u8 = @ptrFromInt(x.cur.host);
+            const inst = dec.decode(base[off..][0..@min(page_size - off, dec.max_len)]) catch |e| switch (e) {
+                error.TooLong => return x.exc(cpu_mod.vec_gp),
+                // It crosses the page.
+                error.Truncated => return x.fetchEntry(),
+            };
+            if (pc.used == PageCache.ninst) {
+                const host = x.cur.host;
+                pc.drop();
+                // Its page is allocated.
+                x.cur = pc.page(vp, host).?;
+            }
+            const at = pc.used;
+            pc.pool[at] = inst;
+            pc.used = at + 1;
+            x.cur.idx[off] = @intCast(at + 1);
+            return &pc.pool[at];
+        }
+
+        /// A fetch through the ICache, or decoded each time.
+        noinline fn fetchEntry(x: *X) Trap!*const Inst {
             const eip = x.c.eip;
             const p = try x.ptr(eip, .exec);
             const avail = page_size - (eip & (page_size - 1));

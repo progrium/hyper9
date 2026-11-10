@@ -25,13 +25,23 @@ pub const TlbMem = struct {
         };
     }
 
+    /// `translate` on a TLB hit, or null.
+    pub inline fn hit(m: *TlbMem, va: u32, access: cpu_mod.Access) ?[*]u8 {
+        const h = switch (access) {
+            .read => mem.fast(m.tlb, va, 1, false),
+            .write => mem.fast(m.tlb, va, 1, true),
+            .exec => mem.fastExec(m.tlb, va, 1),
+        } orelse return null;
+        return @ptrFromInt(h);
+    }
+
     pub fn translate(m: *TlbMem, va: u32, access: cpu_mod.Access) ?[*]u8 {
-        const hit = switch (access) {
+        const h = switch (access) {
             .read => mem.fast(m.tlb, va, 1, false),
             .write => mem.fast(m.tlb, va, 1, true),
             .exec => mem.fastExec(m.tlb, va, 1),
         };
-        if (hit) |h| return @ptrFromInt(h);
+        if (h) |a| return @ptrFromInt(a);
         return mem.probe(m.ctx, va, switch (access) {
             .read => .read,
             .write => .write,

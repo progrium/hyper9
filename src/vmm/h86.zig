@@ -48,9 +48,10 @@ pub const ready = true;
 
 pub const Cpu = struct {
     c: x86cpu.Cpu = .{},
-    /// T0's decoded instructions, which `run` allocates on first use and
-    /// points `c` at.
+    /// T0's decoded instructions, by address and by page, which `run`
+    /// allocates on first use and points `c` at.
     icache: ?*exec.ICache = null,
+    pages: ?*exec.PageCache = null,
     /// -Djit-check's state (src/jit/check/vmm.zig).
     check: check_vmm.State = .{},
 };
@@ -59,11 +60,16 @@ pub const Cpu = struct {
 /// SmpAllocator.
 const icache_gpa = if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator;
 
-/// Frees -Djit-check's state and the decode cache.
+/// Frees -Djit-check's state and the decode caches.
 pub fn deinit(c: *Cpu) void {
     if (build_options.jit_check) c.check.deinit();
     if (c.icache) |ic| icache_gpa.destroy(ic);
     c.icache = null;
+    if (c.pages) |pc| {
+        pc.deinit();
+        icache_gpa.destroy(pc);
+    }
+    c.pages = null;
 }
 
 pub fn getUreg(c: *const Cpu, u: *vmm.Ureg) void {
@@ -102,7 +108,14 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
             cpu.icache = ic;
         } else |_| {}
     }
+    if (cpu.pages == null) {
+        if (icache_gpa.create(exec.PageCache)) |pc| {
+            pc.init(icache_gpa);
+            cpu.pages = pc;
+        } else |_| {}
+    }
     c.icache = cpu.icache;
+    c.pages = cpu.pages;
     var m: TlbMem = .init(ctx);
     const stop: *const std.atomic.Value(u32) = @ptrCast(&ctx.exit_request);
     if (stop.load(.acquire) != 0) return .interrupted;

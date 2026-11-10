@@ -95,6 +95,9 @@ pub const Cpu = struct {
     retired: u64 = 0,
     /// T0's decoded-instruction cache, which the owner allocates.
     icache: ?*@import("exec.zig").ICache = null,
+    /// T0's decode cache by page, used where memory tracks code, which the
+    /// owner allocates.
+    pages: ?*@import("exec.zig").PageCache = null,
 
     pub inline fn esp(c: *const Cpu) u32 {
         return c.r[4];
