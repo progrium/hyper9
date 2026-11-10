@@ -236,6 +236,9 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *tlb.TlbMem, em: emitter.Emitter) vmm.Error!vm
     while (true) {
         // T0 counts Cpu64.retired again in each `call.interp`: ctx's count
         // is the one that holds.
+        // ctx.retired runs on from Cpu64.retired, so lift.interp can read the
+        // count mid-region (RDTSC).
+        ctx.retired = c.retired;
         const before = ctx.retired;
         const c_before = c.retired;
         const r = if (build_options.jit_check)

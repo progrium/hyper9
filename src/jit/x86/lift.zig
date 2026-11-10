@@ -118,7 +118,10 @@ pub const Mem64 = MemOf(.long);
 /// instruction again at the PC it's given, so the handle needs no decode
 /// cache.
 pub const Kind = enum(u8) {
-    /// Run the instruction (`len` bytes) on T0.
+    /// Run the instruction (`len` bytes) on T0. An `arg` of 1 says it
+    /// reads the instruction count (RDTSC): the handler sets Cpu.retired
+    /// to ctx.retired first, which the vmm keeps equal at region entry and
+    /// the block has brought up to date.
     step = 0,
     /// Run up to a page's worth of a REP string instruction's iterations
     /// (`arg` is the element size), leaving ECX, ESI, and EDI exact. Returns
@@ -172,6 +175,9 @@ fn interpMode(comptime mode: Mode, c: *Ctx, h: u64, pc64: u64) u32 {
     const ip = pcOf(mode, cpu);
     ip.* = pc;
     if (kind == .step) {
+        // In a region, Cpu.retired is as of the region's entry (plus the
+        // T0 steps since), while ctx.retired runs on from it.
+        if (((h >> 16) & 0xff) == 1) cpu.retired = c.retired;
         const r = exec.stepIn(mode, cpu, m);
         cpu.fl.materialize();
         if (r) |e| return exitForIn(mode, c, cpu, e, pc);
@@ -947,8 +953,13 @@ fn LifterOf(comptime mode: Mode) type {
         }
 
         fn callInterp(l: *Self, k: usize) !void {
+            // RDTSC reads the instruction count (Cpu.retired, as T0 has
+            // it): the block retires what it has first, so ctx.retired is
+            // current, and the handler brings the Cpu's count up to it.
+            const counts = l.insns[k].i.op == .rdtsc;
+            if (counts) try l.retireAll();
             try l.leave();
-            try l.b.interp(handle(.step, l.insns[k].i.len, 0), l.insns[k].pc);
+            try l.b.interp(handle(.step, l.insns[k].i.len, @intFromBool(counts)), l.insns[k].pc);
             l.fl.forget();
             l.seg_ok = 0;
             l.mx_ok = false;

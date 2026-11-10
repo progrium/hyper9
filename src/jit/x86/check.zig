@@ -97,12 +97,12 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, 
             else => return e,
         };
         defer reg.deinit(gpa);
-        if (!try r.check(.{ .ir_eval = &reg }, std.mem.asBytes(&cpu), .{ .budget = budget })) {
+        if (!try r.check(.{ .ir_eval = &reg }, std.mem.asBytes(&cpu), .{ .budget = budget, .retired = cpu.retired })) {
             res.ok = false;
             return res;
         }
         if (native) |n| if (try n.compile(gpa, &reg)) |f| {
-            if (!try r.check(.{ .entry = f }, std.mem.asBytes(&cpu), .{ .budget = budget })) {
+            if (!try r.check(.{ .entry = f }, std.mem.asBytes(&cpu), .{ .budget = budget, .retired = cpu.retired })) {
                 res.ok = false;
                 return res;
             }
@@ -111,7 +111,11 @@ pub fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, 
         const o = r.out[check.Run.t1];
         res.retired += o.retired;
         r.shadow[check.Run.t1].commit();
+        // T0 counts Cpu.retired again in each call.interp: ctx's count is
+        // the one that holds, as the vmm has it.
+        const entry = cpu.retired;
         @memcpy(std.mem.asBytes(&cpu), r.cpu[check.Run.t1]);
+        cpu.retired = entry +% o.retired;
         res.exit = o.exit;
         res.pc = o.pc;
         res.cpu = cpu;
@@ -371,6 +375,24 @@ fn bitSetup(c: *Cpu) void {
     c.r[3] = Machine.data_va + 0x300;
     c.r[6] = Machine.data_va + 0x100;
     c.r[7] = Machine.data_va + 0x200;
+}
+
+test "check/x86: RDTSC mid-region reads the count as T0 has it" {
+    // movl $3, %ecx; l: mfence; lfence; rdtsc; addl %eax, %ebx; decl %ecx; jnz l
+    // int $0x80
+    const code = [_]u8{
+        0xb9, 0x03, 0x00, 0x00, 0x00,
+        0x0f, 0xae, 0xf0, 0x0f, 0xae, 0xe8, 0x0f, 0x31, 0x01, 0xc3, 0x49, 0x75, 0xf3,
+        0xcd, 0x80,
+    };
+    const S = struct {
+        fn setup(c: *Cpu) void {
+            c.retired = 1000;
+        }
+    };
+    const r = try expectRun(&code, S.setup);
+    try testing.expectEqual(Exit.svc, r.exit);
+    try testing.expectEqual(@as(u64, 1 + 6 * 3 + 1), r.retired);
 }
 
 test "check/x86: rotates, SHLD, BT*, BSF/BSR, POP to memory, and single string ops" {
@@ -900,12 +922,12 @@ pub fn checkRegions64(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map
             else => return e,
         };
         defer reg.deinit(gpa);
-        if (!try r.check(.{ .ir_eval = &reg }, std.mem.asBytes(&cpu), .{ .budget = budget })) {
+        if (!try r.check(.{ .ir_eval = &reg }, std.mem.asBytes(&cpu), .{ .budget = budget, .retired = cpu.retired })) {
             res.ok = false;
             return res;
         }
         if (native) |n| if (try n.compile(gpa, &reg)) |f| {
-            if (!try r.check(.{ .entry = f }, std.mem.asBytes(&cpu), .{ .budget = budget })) {
+            if (!try r.check(.{ .entry = f }, std.mem.asBytes(&cpu), .{ .budget = budget, .retired = cpu.retired })) {
                 res.ok = false;
                 return res;
             }
@@ -914,7 +936,11 @@ pub fn checkRegions64(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map
         const o = r.out[check.Run.t1];
         res.retired += o.retired;
         r.shadow[check.Run.t1].commit();
+        // T0 counts Cpu.retired again in each call.interp: ctx's count is
+        // the one that holds, as the vmm has it.
+        const entry = cpu.retired;
         @memcpy(std.mem.asBytes(&cpu), r.cpu[check.Run.t1]);
+        cpu.retired = entry +% o.retired;
         res.exit = o.exit;
         res.pc = o.pc;
         res.cpu = cpu;
@@ -1055,6 +1081,23 @@ test "check/x64: 32-bit writes zero the upper half, and 8-bit ones with REX name
             regs64Setup(c);
             c.r[13] = 0;
             c.fl.set(0x2); // ZF clear
+        }
+    };
+    _ = try expectRun64(&code, S.setup);
+}
+
+test "check/x64: RDTSC mid-region reads the count as T0 has it" {
+    // mov ecx, 3; l: mfence; lfence; rdtsc; add rbx, rax; dec ecx; jnz l
+    // syscall
+    const code = [_]u8{
+        0xb9, 0x03, 0x00, 0x00, 0x00,
+        0x0f, 0xae, 0xf0, 0x0f, 0xae, 0xe8, 0x0f, 0x31, 0x48, 0x01, 0xc3, 0xff, 0xc9, 0x75, 0xf1,
+        0x0f, 0x05,
+    };
+    const S = struct {
+        fn setup(c: *Cpu64) void {
+            regs64Setup(c);
+            c.retired = 1 << 33;
         }
     };
     _ = try expectRun64(&code, S.setup);
