@@ -42,6 +42,12 @@ other work asks the owner for changes rather than editing it.
   backend derives them. T1-versus-T0 checks compare only the low 16 bits.
 - `cas` goes through `Ctx.slow_cas` on every emitter for now. `MemFlags.rmw`
   makes a load's fault report a write.
+- Chaining: `emitter.Code` reports `chain_entry` and its chain sites (one
+  per `exit.chain`, up to `max_chains`). An unlinked site falls through to
+  the exit, which sets exit_info to the site's executable address
+  (cache.zig's contract). `Ctx.jump` points at the vCPU's jump cache
+  (`ctx.JumpEntry`, `ctx.jumpIndex`), so `exit.indirect` can look up its
+  target inline and jump to the hit's chain entry.
 - `exit_pc` is the PC to resume at, except for a fault, where it's the
   faulting instruction.
 - Flags are values, per guest: `nzcv.*` and `eflags.*`. `ir_eval` computes them

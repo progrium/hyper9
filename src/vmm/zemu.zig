@@ -451,6 +451,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 if (s.as.load(.monotonic) == null) return error.BadAddress;
                 const b = s.backend;
                 const cx = &s.rt.ctx;
+                s.rt.bind();
                 cx.tlb = @intFromPtr(&s.tlb);
                 cx.space = @intFromPtr(&s.view);
                 cx.slow_load = @intFromPtr(&mem.slowLoad);

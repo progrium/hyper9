@@ -62,6 +62,8 @@ pub const Tb = struct {
     off: u32,
     len: u32,
     chain_entry: u32,
+    /// The chain entry's executable address.
+    chain_addr: u64 = 0,
     entry: ctx_mod.EntryFn,
     outs: [max_chains]Out = @splat(.{}),
     nouts: u8 = 0,
@@ -91,13 +93,20 @@ pub const Tb = struct {
 
 // ---------------------------------------------------------------- jump cache
 
-pub const jump_entries = 1024;
+/// The layout is the runtime ABI's (ctx.JumpEntry), so generated code can
+/// look up `exit.indirect` inline through Ctx.jump.
+pub const jump_entries = ctx_mod.jump_entries;
 
 pub const JumpEntry = extern struct {
     pc: u64 = invalid,
     tb: u64 = 0,
+    code: u64 = 0,
     pub const invalid: u64 = std.math.maxInt(u64);
 };
+
+comptime {
+    std.debug.assert(@sizeOf(JumpEntry) == @sizeOf(ctx_mod.JumpEntry) and @offsetOf(JumpEntry, "code") == @offsetOf(ctx_mod.JumpEntry, "code"));
+}
 
 /// A vCPU's jump cache. Only its own vCPU fills it; any thread may clear
 /// an entry.
@@ -105,7 +114,7 @@ pub const JumpCache = extern struct {
     e: [jump_entries]JumpEntry = @splat(.{}),
 
     pub fn index(pc: u64) usize {
-        return @intCast((pc ^ (pc >> 10)) & (jump_entries - 1));
+        return ctx_mod.jumpIndex(pc);
     }
 
     pub fn clear(j: *JumpCache) void {
@@ -123,6 +132,7 @@ pub const JumpCache = extern struct {
         const e = &j.e[index(tb.pc)];
         st64(&e.pc, JumpEntry.invalid);
         st64(&e.tb, @intFromPtr(tb));
+        st64(&e.code, tb.chain_addr);
         st64(&e.pc, tb.pc);
     }
 
@@ -267,6 +277,7 @@ pub const Cache = struct {
             .off = off,
             .len = @intCast(code.len),
             .chain_entry = off + n.chain_entry,
+            .chain_addr = @intFromPtr(c.region.entry(off + n.chain_entry)),
             .entry = c.region.entry(off + n.entry),
             .nouts = @intCast(n.chains.len),
         };
@@ -433,6 +444,12 @@ pub const Runtime = struct {
     cache: ?*Cache = null,
     /// Set by `requestFlush`; the vmm layer flushes when it sees it.
     flush_wanted: ?*std.atomic.Value(bool) = null,
+
+    /// Points ctx.jump at the jump cache. Call it once the Runtime is in
+    /// its final place.
+    pub fn bind(rt: *Runtime) void {
+        rt.ctx.jump = @intFromPtr(&rt.jump);
+    }
 
     pub fn of(ctx: *Ctx) *Runtime {
         return @fieldParentPtr("ctx", ctx);

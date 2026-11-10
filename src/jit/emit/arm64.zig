@@ -41,6 +41,7 @@ const E = struct {
     out: *std.ArrayList(u8),
     base: usize,
     fixups: std.ArrayList(Fixup) = .empty,
+    code: emitter.Code = .{},
 
     fn put(e: *E, w: u32) !void {
         try e.out.appendSlice(e.gpa, std.mem.asBytes(&std.mem.nativeToLittle(u32, w)));
@@ -159,6 +160,10 @@ pub fn emit(gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc_mod.All
     try e.put(0xF9000BF3); // str x19, [sp, #16]
     try e.put(0x910003FD); // mov x29, sp
     try e.mov(CTX, 0);
+    // The chain entry: linked sites and jump-cache hits land here, with x19
+    // the context and sp at x29 (the frame torn down), and set up this
+    // region's own frame.
+    e.code.chain_entry = @intCast(e.pos());
     if (frame >> 12 != 0) try e.put(0xD1400000 | (frame >> 12) << 10 | SP << 5 | SP); // sub sp, sp, #hi, lsl 12
     if (frame & 0xfff != 0) try e.put(0xD1000000 | (frame & 0xfff) << 10 | SP << 5 | SP);
 
@@ -184,7 +189,8 @@ pub fn emit(gpa: std.mem.Allocator, r: *const ir.Region, a: *const alloc_mod.All
             .b19 => w | (d & 0x7ffff) << 5,
         });
     }
-    return .{ .entry = 0 };
+    e.code.entry = 0;
+    return e.code;
 }
 
 fn slotOf(a: *const alloc_mod.Allocation, ref: ir.Ref) u32 {
@@ -363,13 +369,45 @@ fn lower(e: *E, r: *const ir.Region, a: *const alloc_mod.Allocation, idx: usize)
             try e.branch(.b19, 0xB5000000, @intCast(i.aux)); // cbnz x0, then
             try e.branch(.b26, 0x14000000, @intCast(i.aux2));
         },
-        .@"exit.chain" => try e.leave(.chain, i.aux, i.retired),
+        .@"exit.chain" => {
+            // The chain site (cache.zig's contract): the frame torn down,
+            // then one B, unlinked as b .+4, falling through to the exit,
+            // which names the site in exit_info.
+            try e.retireOn(i.retired);
+            try e.put(0x910003BF); // mov sp, x29
+            const site = e.pos();
+            try e.put(0x14000001); // b .+4
+            if (e.code.nchains < emitter.max_chains) {
+                e.code.chains[e.code.nchains] = .{ .site = @intCast(site), .pc = i.aux };
+                e.code.nchains += 1;
+            }
+            const back: u32 = @bitCast(@as(i32, @intCast(@as(isize, @intCast(site)) - @as(isize, @intCast(e.pos())))));
+            try e.put(0x10000000 | (back & 3) << 29 | ((back >> 2) & 0x7ffff) << 5 | 1); // adr x1, site
+            try e.strCtx(1, ctx.off.exit_info);
+            try e.leave(.chain, i.aux, 0);
+        },
         .@"exit.svc" => try e.leave(.svc, i.aux, i.retired),
         .@"exit.brk" => try e.leave(.brk, i.aux, i.retired),
         .@"exit.undef" => try e.leave(.undef, i.aux, i.retired),
         .@"exit.indirect" => {
             try e.retireOn(i.retired);
             try e.strCtx(0, ctx.off.exit_pc);
+            // The jump cache, inline: a hit goes straight to the target's
+            // chain entry.
+            try e.ldrCtx(9, ctx.off.jump);
+            const none = try e.fwd(0xB4000009); // cbz x9, miss
+            try e.put(0xCA40280A); // eor x10, x0, x0, lsr #10
+            try e.put(0xD340254A); // ubfx x10, x10, #0, #10
+            try e.movImm(11, @sizeOf(ctx.JumpEntry));
+            try e.put(0x9B0B2549); // madd x9, x10, x11, x9
+            try e.put(0xF940012C); // ldr x12, [x9]
+            try e.put(0xEB00019F); // cmp x12, x0
+            const miss = try e.fwd(0x54000001); // b.ne miss
+            try e.put(0xF9400930); // ldr x16, [x9, #16]
+            try e.put(0x910003BF); // mov sp, x29
+            try e.put(0xD61F0200); // br x16
+            e.land19(none);
+            e.land19(miss);
             try e.put(0x52800000 | @as(u32, @intFromEnum(ctx.Exit.indirect)) << 5);
             try e.branch(.b26, 0x14000000, epilogue);
         },
@@ -473,4 +511,68 @@ test "emitted code matches ir_eval on the shared cases" {
         const got = env.result(@enumFromInt(x.entry(out.entry)(cx)));
         cases.expectSame(n, c, want, got) catch |err| return err;
     }
+}
+
+test "chain sites link, and the jump cache finds a target inline" {
+    if (!testexec.supported) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    // A adds 1 to x0 and chains to 0x2000; B adds 10 and leaves through
+    // svc. C jumps to x1 indirectly.
+    const texts = [_][]const u8{
+        "region 0x1000\nb0:\n %0 = getreg:i64 #0x0\n %1 = const:i64 #0x1\n %2 = add:i64 %0, %1\n setreg %2 #0x0\n retire #0x1\n exit.chain #0x2000\n",
+        "region 0x2000\nb0:\n poll #0x2000\n %0 = getreg:i64 #0x0\n %1 = const:i64 #0xa\n %2 = add:i64 %0, %1\n setreg %2 #0x0\n exit.svc #0x2004 !1\n",
+        "region 0x3000\nb0:\n %0 = getreg:i64 #0x8\n exit.indirect %0 !2\n",
+    };
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(gpa);
+    var outs: [3]emitter.Code = undefined;
+    var starts: [3]u32 = undefined;
+    for (texts, 0..) |t, k| {
+        var r = try ir.parse(gpa, t);
+        defer r.deinit(gpa);
+        var a = try alloc_mod.spillAll(gpa, &r);
+        defer a.deinit(gpa);
+        while (code.items.len % 16 != 0) try code.append(gpa, 0);
+        starts[k] = @intCast(code.items.len);
+        outs[k] = try emit(gpa, &r, &a, &code);
+    }
+    try std.testing.expectEqual(@as(u8, 1), outs[0].nchains);
+    try std.testing.expectEqual(@as(u64, 0x2000), outs[0].chains[0].pc);
+    const x = try testexec.load(code.items);
+    defer x.deinit();
+    var regs: [2]u64 = .{ 5, 0x2000 };
+    var tlb: mem.Tlb = .{};
+    var cx: ctx.Ctx = .{ .cpu = @intFromPtr(&regs), .tlb = @intFromPtr(&tlb) };
+
+    // Unlinked: A leaves with .chain, naming its site.
+    try std.testing.expectEqual(ctx.Exit.chain, @as(ctx.Exit, @enumFromInt(x.entry(starts[0])(&cx))));
+    try std.testing.expectEqual(@as(u64, 0x2000), cx.exit_pc);
+    const site = starts[0] + outs[0].chains[0].site;
+    try std.testing.expectEqual(@intFromPtr(x.mem.ptr) + site, cx.exit_info);
+
+    // Linked: A runs straight into B.
+    const target = starts[1] + outs[1].chain_entry;
+    const d: u32 = @bitCast(@as(i32, @intCast(@as(isize, target) - @as(isize, site))) >> 2);
+    var patched = try gpa.dupe(u8, code.items);
+    defer gpa.free(patched);
+    std.mem.writeInt(u32, patched[site..][0..4], 0x14000000 | (d & 0x3ffffff), .little);
+    const y = try testexec.load(patched);
+    defer y.deinit();
+    regs = .{ 5, 0x2000 };
+    cx.retired = 0;
+    try std.testing.expectEqual(ctx.Exit.svc, @as(ctx.Exit, @enumFromInt(y.entry(starts[0])(&cx))));
+    try std.testing.expectEqual(@as(u64, 16), regs[0]);
+    try std.testing.expectEqual(@as(u64, 2), cx.retired);
+
+    // Indirect: a miss leaves; a jump-cache hit runs B.
+    var jc: [ctx.jump_entries]ctx.JumpEntry = @splat(.{});
+    cx.jump = @intFromPtr(&jc);
+    regs = .{ 5, 0x2000 };
+    try std.testing.expectEqual(ctx.Exit.indirect, @as(ctx.Exit, @enumFromInt(y.entry(starts[2])(&cx))));
+    try std.testing.expectEqual(@as(u64, 0x2000), cx.exit_pc);
+    jc[ctx.jumpIndex(0x2000)] = .{ .pc = 0x2000, .code = @intFromPtr(y.mem.ptr) + target };
+    cx.retired = 0;
+    try std.testing.expectEqual(ctx.Exit.svc, @as(ctx.Exit, @enumFromInt(y.entry(starts[2])(&cx))));
+    try std.testing.expectEqual(@as(u64, 15), regs[0]);
+    try std.testing.expectEqual(@as(u64, 3), cx.retired);
 }

@@ -52,6 +52,9 @@ pub const Ctx = extern struct {
     helpers: u64 = 0,
     /// mem.SlowCasFn: `cas` (every emitter's path today, and ir_eval's).
     slow_cas: u64 = 0,
+    /// *[jump_entries]JumpEntry: this vCPU's jump cache (cache.JumpCache),
+    /// for `exit.indirect` to look up inline. 0 when there's none.
+    jump: u64 = 0,
 
     pub fn cpuPtr(c: *Ctx, comptime T: type) *T {
         return @ptrFromInt(@as(usize, @intCast(c.cpu)));
@@ -76,15 +79,40 @@ pub const off = struct {
     pub const interp = @offsetOf(Ctx, "interp");
     pub const helpers = @offsetOf(Ctx, "helpers");
     pub const slow_cas = @offsetOf(Ctx, "slow_cas");
+    pub const jump = @offsetOf(Ctx, "jump");
 };
 
 comptime {
     // The layout is part of the ABI: wasm modules hard-code these.
     std.debug.assert(off.cpu == 0 and off.tlb == 8 and off.exit_request == 16 and off.budget == 24);
-    std.debug.assert(off.exit_pc == 40 and off.scratch == 64 and off.interp == 104 and off.slow_cas == 120 and @sizeOf(Ctx) == 128);
+    std.debug.assert(off.exit_pc == 40 and off.scratch == 64 and off.interp == 104 and off.slow_cas == 120 and off.jump == 128 and @sizeOf(Ctx) == 136);
 }
 
-/// Why generated code returned. 0 is never returned: it means "carry on"
+/// The jump cache's layout, for generated code's inline lookup at
+/// `exit.indirect`: entry `jumpIndex(pc)` of the table at ctx.jump hits if
+/// its `pc` is the target. `code` is then the target translation's chain
+/// entry, to jump to with the context register and stack as at a chain
+/// site. (cache.JumpCache owns the table; any thread may invalidate an
+/// entry by writing its `pc`, and only its vCPU fills it.)
+pub const jump_entries = 1024;
+pub const JumpEntry = extern struct {
+    pc: u64 = std.math.maxInt(u64),
+    /// The *cache.Tb, for the runtime.
+    tb: u64 = 0,
+    /// The executable address of the translation's chain entry.
+    code: u64 = 0,
+};
+pub fn jumpIndex(pc: u64) usize {
+    return @intCast((pc ^ (pc >> 10)) & (jump_entries - 1));
+}
+
+comptime {
+    std.debug.assert(@sizeOf(JumpEntry) == 24 and @offsetOf(JumpEntry, "code") == 16);
+}
+
+/// Why generated code returned. At `.chain`, exit_info is the executable
+/// address of the chain site the region left through (cache.zig links it),
+/// or 0 where there's none (ir_eval, wasm). 0 is never returned: it means "carry on"
 /// where a call out of generated code reports success.
 pub const Exit = enum(u32) {
     /// Not an exit: the call succeeded.
