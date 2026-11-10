@@ -152,6 +152,13 @@ fn free(s: *Seg) void {
     gpa.destroy(s);
 }
 
+/// Drops a reference to one of a segment's chunks taken outside any Mm
+/// (shmat's, for the chunks it didn't map), freeing the segment if that
+/// was the last attachment of a removed one.
+pub fn drop(p: *mm.Pages) void {
+    if (p.refs.fetchSub(1, .acq_rel) == 2) released(p);
+}
+
 /// Pages.release: no address space attaches one of the segment's chunks.
 fn released(p: *mm.Pages) void {
     const s: *Seg = @ptrCast(@alignCast(p.file.?));
