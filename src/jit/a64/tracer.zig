@@ -209,3 +209,29 @@ test "tracer bullet: T0, ir_eval, and native arm64 agree on a counted loop" {
     got.retired = want.retired;
     try std.testing.expect(got.eql(want));
 }
+
+test "T0 stops after a given number of taken branches, at the target" {
+    // The page-at-a-time loop is too big a function for wasm engines in
+    // Debug builds (State.runT0).
+    if (@import("builtin").cpu.arch == .wasm32) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const s = try gpa.create(State);
+    defer gpa.destroy(s);
+    const want = try s.runT0();
+
+    _ = s.reset();
+    defer s.cache.deinit();
+    // Three taken b.ne: three setup instructions and three passes of the
+    // seven-instruction loop, stopped at the loop's head.
+    try std.testing.expectEqual(t0.Exit.interrupted, t0.runBranches(&s.machine, std.math.maxInt(u64), 3));
+    try std.testing.expectEqual(@as(u64, code_va + 12), s.cpu.pc);
+    try std.testing.expectEqual(@as(u64, 3 + 3 * 7), s.cpu.retired);
+    try std.testing.expectEqual(@as(u64, 97), s.cpu.r[1]);
+    // The step budget still holds, and stops first when it's smaller.
+    try std.testing.expectEqual(t0.Exit.interrupted, t0.runBranches(&s.machine, 5, 3));
+    try std.testing.expectEqual(@as(u64, 3 + 3 * 7 + 5), s.cpu.retired);
+    // Run on, the loop ends at the SVC with T0's result.
+    try std.testing.expectEqual(t0.Exit.syscall, t0.run(&s.machine, std.math.maxInt(u64)));
+    try std.testing.expectEqual(want.x[0], s.cpu.r[0]);
+    try std.testing.expectEqual(want.x[4], s.cpu.r[4]);
+}

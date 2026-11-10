@@ -1323,12 +1323,12 @@ pub fn build(b: *std.Build) void {
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
     // -Dweb runs them on the web host under Node instead: h9-node on h9's
     // own 386 CPU (h86), with the root's 386 binaries
-    // (design/0012-browser-host.md).
-    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386)") orelse false;
+    // (design/0012-browser-host.md), or with -Darch=arm64 on ha64.
+    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386, or arm64 with -Darch=arm64)") orelse false;
     const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
-        .arch = "386",
+        .arch = test_arch orelse "386",
         .web = true,
         .step = web.install,
         // With -Demu=unicorn, the native h9 serves the WebSocket cases'

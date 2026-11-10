@@ -19,7 +19,7 @@ This describes, as built on the `vcpu` branch, what h9's own CPUs share: the emu
 
 ## Overview
 
-`-Demu=zig` builds the emulator backend on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries and h86 for 386 binaries, picked by the binary's architecture when the backend is created. amd64 binaries need Unicorn (`-Demu=unicorn`), and fail with `WrongArch` otherwise. The web build always uses h86, its only backend.
+`-Demu=zig` builds the emulator backend on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries and h86 for 386 binaries, picked by the binary's architecture when the backend is created. amd64 binaries need Unicorn (`-Demu=unicorn`), and fail with `WrongArch` otherwise. The web build has the same two CPUs, with T1 on wasm for both.
 
 Both CPUs are user mode only. There's no guest kernel, MMU, interrupt delivery, or devices: a system call, a fault, a breakpoint, or an undefined instruction ends `run` with a vmm exit, as the shim does on a hypervisor, and the Ureg's trap fields are what the real kernel would put there.
 
@@ -148,10 +148,10 @@ The litmus tests ([Testing](#testing)) check store buffering, message passing, a
 
 ## The web host
 
-The browser host runs h86 only, with T1 in `src/jit/wasm_t1.zig` instead of `dispatch.zig`, since compiling wasm is asynchronous and costs a module per batch:
+The browser host runs h86 and ha64, each with T1 in `src/jit/wasm_t1.zig` instead of `dispatch.zig`, since compiling wasm is asynchronous and costs a module per batch:
 
 - **Warm-up.** A vCPU compiles nothing until it has retired 2M instructions, so a short program (rc starting up, `echo`) never pays for the first compile.
-- **Hot entries.** The dispatcher counts entries to each block, keyed as native translations are. T0 runs cold code to its eighth taken branch and comes back, so block heads get counted. At 50 entries a block is lifted and queued.
+- **Hot entries.** The dispatcher counts entries to each block, keyed as native translations are. T0 runs cold code to its eighth taken branch and comes back, so block heads get counted; both CPUs' T0s can stop after a given number of taken branches for this. At 50 entries a block is lifted and queued.
 - **Batches.** A queue of 64, or one that has waited 2,000 dispatcher visits, becomes one module. `h9-web.js` compiles it off the thread and installs its regions into slots of h9's own function table. T0 keeps running meanwhile; a batch's status word says when its slots are live.
 - **Chain cells.** Each batch has a cell per distinct chain target, holding the target's slot once it's live (and on a page its source came from) and 0 otherwise.
 - **Invalidation** nulls a page's regions' slots and clears cells pointing at them. **Flushing** happens past 65,536 slots or 131,072 counted blocks.
