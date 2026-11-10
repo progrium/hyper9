@@ -245,6 +245,8 @@ const Decide = struct {
     /// brcond and select: branch or select on this arm64 condition of NZCV
     /// rather than on an i1 register. eflags.cond: compute from NZCV.
     host_cc: ?Cond = null,
+    /// Operand b is a constant the instruction takes as an immediate.
+    imm_b: bool = false,
 };
 
 const E = struct {
@@ -597,6 +599,19 @@ fn hostCond(r: *const ir.Region, v: Ref, live: Live) ?Cond {
     return null;
 }
 
+/// Whether `i` can take operand b, the constant `v`, as an immediate.
+fn immB(r: *const ir.Region, i: ir.Inst, v: u64) bool {
+    const ta = r.insts.items[i.a].ty;
+    const W = ta.bits();
+    return switch (i.op) {
+        .add, .sub => (W == 32 or W == 64) and v < 4096,
+        .shl, .lshr, .ashr => W == 32 or W == 64,
+        .icmp => (W == 32 or W == 64) and v < 4096,
+        .@"nzcv.add", .@"nzcv.sub" => v < 4096,
+        else => false,
+    };
+}
+
 /// Decides, for each instruction, where flags and conditions live. The
 /// lowering follows these decisions exactly, so it leaves NZCV as this
 /// pass models it.
@@ -673,6 +688,26 @@ fn decide(gpa: std.mem.Allocator, r: *const ir.Region) ![]Decide {
             if (producesFlags(i.op)) {
                 live = .{ .ref = @intCast(idx), .mode = if (i.op == .icmp) .icmp else if (eflagsKind(i.op) != null) .eflags else .nzcv };
             } else if (clobber) live = .{};
+        }
+    }
+    // Constants an add, sub, compare, or shift takes as an immediate; one
+    // nothing else reads isn't materialized at all.
+    const imm_uses = try gpa.alloc(u32, n);
+    defer gpa.free(imm_uses);
+    @memset(imm_uses, 0);
+    for (r.insts.items, 0..) |i, idx| {
+        if (d[idx].skip or i.b == ir.none or i.a == i.b) continue;
+        const c = r.insts.items[i.b];
+        if (c.op != .@"const") continue;
+        if (immB(r, i, c.aux)) {
+            d[idx].imm_b = true;
+            imm_uses[i.b] += 1;
+        }
+    }
+    for (r.insts.items, 0..) |i, idx| {
+        if (i.op == .@"const" and !d[idx].skip and uses[idx] == imm_uses[idx]) {
+            d[idx].skip = true;
+            d[idx].virtual = true;
         }
     }
     // A flags producer or condition nothing reads from a register stays
@@ -964,60 +999,26 @@ fn lower(e: *E, idx: usize) EmitError!void {
             if (e.fp and i.aux == host.guest_fpsr.?) try e.put(0xD51B4420 | @as(u32, ZR)); // msr fpsr, xzr: the guest's write replaces what's pending
             if (e.fp and i.aux == host.guest_fpcr.?) try e.put(0xD51B4400 | @as(u32, v)); // msr fpcr
         },
-        .add, .sub, .mul, .@"and", .@"or", .xor, .andn, .udiv => {
+        .add, .sub => if (dd.imm_b) {
             const a = try e.src(i.a, S0);
-            const bb = try e.src(i.b, S1);
             const rd = e.dst(idx);
-            try e.dp(switch (i.op) {
-                .add => 0x0B000000,
-                .sub => 0x4B000000,
-                .mul => 0x1B007C00,
-                .@"and" => 0x0A000000,
-                .@"or" => 0x2A000000,
-                .xor => 0x4A000000,
-                .andn => 0x0A200000,
-                .udiv => 0x1AC00800,
-                else => unreachable,
-            }, sf, rd, a, bb);
-            if (W < 32 and (i.op == .add or i.op == .sub or i.op == .mul)) try e.zx(rd, rd, W);
+            const imm: u32 = @intCast(r.insts.items[i.b].aux);
+            try e.put((if (i.op == .add) @as(u32, 0x11000000) else 0x51000000) | (if (sf) @as(u32, 0x8000_0000) else 0) | imm << 10 | @as(u32, a) << 5 | rd);
             try e.finish(idx, rd);
-        },
-        .shl, .lshr, .ashr, .ror, .rol => {
-            var a = try e.src(i.a, S0);
-            var amt = try e.src(i.b, S1);
+        } else try binOp(e, idx),
+        .mul, .@"and", .@"or", .xor, .andn, .udiv => try binOp(e, idx),
+        .shl, .lshr, .ashr => if (dd.imm_b) {
+            const a = try e.src(i.a, S0);
             const rd = e.dst(idx);
-            if (i.op == .rol) {
-                try e.dp(0x4B000000, sf, IP0, ZR, amt); // neg
-                amt = IP0;
+            const k: u32 = @intCast(r.insts.items[i.b].aux % W);
+            switch (i.op) {
+                .shl => try e.lslImm(sf, rd, a, k),
+                .lshr => try e.lsrImm(sf, rd, a, k),
+                else => try e.sbfm(sf, rd, a, k, W - 1),
             }
-            if (W < 32) {
-                try e.logImm(0, false, IP0, amt, 0, std.math.log2_int(u32, W)); // amount mod W
-                amt = IP0;
-                switch (i.op) {
-                    .ashr => {
-                        try e.sbfm(false, IP1, a, 0, W - 1);
-                        a = IP1;
-                    },
-                    .ror, .rol => {
-                        // Replicate the value across 32 bits; a 32-bit rotate
-                        // by less than W then rotates it at W.
-                        try e.dpShift(0x2A000000, false, IP1, a, a, 0, W);
-                        if (W == 8) try e.dpShift(0x2A000000, false, IP1, IP1, IP1, 0, 16);
-                        a = IP1;
-                    },
-                    else => {},
-                }
-            }
-            try e.dp(switch (i.op) {
-                .shl => 0x1AC02000,
-                .lshr => 0x1AC02400,
-                .ashr => 0x1AC02800,
-                .ror, .rol => 0x1AC02C00,
-                else => unreachable,
-            }, sf, rd, a, amt);
-            if (W < 32 and i.op != .lshr) try e.zx(rd, rd, W);
             try e.finish(idx, rd);
-        },
+        } else try shiftOp(e, idx),
+        .ror, .rol => try shiftOp(e, idx),
         .mulhu, .mulhs => {
             const a = try e.src(i.a, S0);
             const bb = try e.src(i.b, S1);
@@ -1155,7 +1156,17 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.put(0x9A800000 | @as(u32, c) << 16 | @as(u32, cc) << 12 | @as(u32, bb) << 5 | @as(u32, rd)); // csel
             try e.finish(idx, rd);
         },
-        .icmp => {
+        .icmp => if (dd.imm_b) {
+            // 32 or 64 bits against a 12-bit constant.
+            const a = try e.src(i.a, S0);
+            const imm: u32 = @intCast(r.insts.items[i.b].aux);
+            try e.put(0x71000000 | (if (ta.bits() > 32) @as(u32, 0x8000_0000) else 0) | imm << 10 | @as(u32, a) << 5 | ZR); // cmp #imm
+            if (!dd.virtual) {
+                const rd = e.dst(idx);
+                try e.cset(rd, pred_cond[@intCast(i.aux)]);
+                try e.finish(idx, rd);
+            }
+        } else {
             var a = try e.src(i.a, S0);
             var bb = try e.src(i.b, S1);
             const bits = ta.bits();
@@ -1183,6 +1194,13 @@ fn lower(e: *E, idx: usize) EmitError!void {
             }
             switch (i.op) {
                 .@"nzcv.logic" => try e.dp(0x6A000000, s64, ZR, a, a), // tst
+                .@"nzcv.add", .@"nzcv.sub" => if (dd.imm_b) {
+                    const imm: u32 = @intCast(r.insts.items[i.b].aux);
+                    try e.put((if (i.op == .@"nzcv.add") @as(u32, 0x31000000) else 0x71000000) | (if (s64) @as(u32, 0x8000_0000) else 0) | imm << 10 | @as(u32, a) << 5 | ZR); // adds/subs zr, a, #imm
+                } else {
+                    const bb = try e.src(i.b, S1);
+                    try e.dp(if (i.op == .@"nzcv.add") 0x2B000000 else 0x6B000000, s64, ZR, a, bb);
+                },
                 else => {
                     const bb = try e.src(i.b, S1);
                     try e.dp(switch (i.op) {
@@ -1445,6 +1463,70 @@ fn lower(e: *E, idx: usize) EmitError!void {
         },
         else => if (i.op.isPure()) try fallback(e, idx) else return error.Unsupported,
     }
+}
+
+fn binOp(e: *E, idx: usize) EmitError!void {
+    const r = e.r;
+    const i = r.insts.items[idx];
+    const W = i.ty.bits();
+    const sf = W > 32;
+    const a = try e.src(i.a, S0);
+    const bb = try e.src(i.b, S1);
+    const rd = e.dst(idx);
+    try e.dp(switch (i.op) {
+        .add => 0x0B000000,
+        .sub => 0x4B000000,
+        .mul => 0x1B007C00,
+        .@"and" => 0x0A000000,
+        .@"or" => 0x2A000000,
+        .xor => 0x4A000000,
+        .andn => 0x0A200000,
+        .udiv => 0x1AC00800,
+        else => unreachable,
+    }, sf, rd, a, bb);
+    if (W < 32 and (i.op == .add or i.op == .sub or i.op == .mul)) try e.zx(rd, rd, W);
+    try e.finish(idx, rd);
+}
+
+fn shiftOp(e: *E, idx: usize) EmitError!void {
+    const r = e.r;
+    const i = r.insts.items[idx];
+    const W = i.ty.bits();
+    const sf = W > 32;
+    var a = try e.src(i.a, S0);
+    var amt = try e.src(i.b, S1);
+    const rd = e.dst(idx);
+    if (i.op == .rol) {
+        try e.dp(0x4B000000, sf, IP0, ZR, amt); // neg
+        amt = IP0;
+    }
+    if (W < 32) {
+        try e.logImm(0, false, IP0, amt, 0, std.math.log2_int(u32, W)); // amount mod W
+        amt = IP0;
+        switch (i.op) {
+            .ashr => {
+                try e.sbfm(false, IP1, a, 0, W - 1);
+                a = IP1;
+            },
+            .ror, .rol => {
+                // Replicate the value across 32 bits; a 32-bit rotate
+                // by less than W then rotates it at W.
+                try e.dpShift(0x2A000000, false, IP1, a, a, 0, W);
+                if (W == 8) try e.dpShift(0x2A000000, false, IP1, IP1, IP1, 0, 16);
+                a = IP1;
+            },
+            else => {},
+        }
+    }
+    try e.dp(switch (i.op) {
+        .shl => 0x1AC02000,
+        .lshr => 0x1AC02400,
+        .ashr => 0x1AC02800,
+        .ror, .rol => 0x1AC02C00,
+        else => unreachable,
+    }, sf, rd, a, amt);
+    if (W < 32 and i.op != .lshr) try e.zx(rd, rd, W);
+    try e.finish(idx, rd);
 }
 
 /// An EFLAGS producer: its flags into NZCV (operands shifted to the top of
