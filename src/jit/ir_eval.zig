@@ -168,7 +168,8 @@ pub fn evalPure(op: Op, ty: Type, ta: Type, a: u64, b: u64, c: u64, aux: u64) u6
         .ctz => if (a & m == 0) bits else @ctz(a),
         .popcnt => @popCount(a & m),
         .rbit => @bitReverse(a & m) >> @intCast(64 - bits),
-        .bswap => @byteSwap(a & m) >> @intCast(64 - bits),
+        // One byte or less has nothing to swap.
+        .bswap => if (bits <= 8) a & m else @byteSwap(a & m) >> @intCast(64 - bits),
         .zext => a & ta.mask(),
         .sext => @bitCast(sx(a, abits)),
         .trunc => a,
@@ -763,6 +764,8 @@ test "integer semantics at each width" {
     try testing.expectEqual(@as(u64, 31), evalPure(.clz, .i32, .i32, 1, 0, 0, 0));
     try testing.expectEqual(@as(u64, 0x8000_0000), evalPure(.rbit, .i32, .i32, 1, 0, 0, 0));
     try testing.expectEqual(@as(u64, 0x0403_0201), evalPure(.bswap, .i32, .i32, 0x0102_0304, 0, 0, 0));
+    try testing.expectEqual(@as(u64, 1), evalPure(.bswap, .i1, .i1, 1, 0, 0, 0));
+    try testing.expectEqual(@as(u64, 0xab), evalPure(.bswap, .i8, .i8, 0xab, 0, 0, 0));
     try testing.expectEqual(@as(u64, 0xffff_ffff_ffff_ff80), evalPure(.sext, .i64, .i8, 0x80, 0, 0, 0));
     try testing.expectEqual(@as(u64, 1), evalPure(.icmp, .i1, .i32, 0xffff_ffff, 0, 0, @intFromEnum(ir.Pred.slt)));
 }
