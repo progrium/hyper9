@@ -88,8 +88,11 @@ const nextTask = (() => {
  *   waitSignal() -> Promise<number>, stopSignals(), setRaw(on).
  * - stats({ maxStack }): called once h9 ends, with the deepest any
  *   coroutine's stack got at a park, in bytes.
+ * - gfx: a GfxHost, the page's canvas in a Worker
+ *   (design/0120-browser-gfx.md); without one, --gfx fails as on a build
+ *   without graphics.
  */
-export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
+export async function run({ h9, v86, wasi, host, log = console.error, stats, gfx }) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const h9mod = h9 instanceof WebAssembly.Module ? h9 : new WebAssembly.Module(h9);
   const v86mod = v86 instanceof WebAssembly.Module ? v86 : new WebAssembly.Module(v86);
@@ -206,6 +209,7 @@ export async function run({ h9, v86, wasi, host, log = console.error, stats }) {
     stop_signals: () => host.stopSignals(),
     set_raw: (on) => host.setRaw(!!on),
     ...wsImports(() => mem, str),
+    ...(gfx ?? noGfx).imports(() => mem),
   };
   const wimports = wasi(mem);
   wimports.proc_exit = (code) => { throw new Exit(code); };
@@ -337,6 +341,149 @@ function wsImports(memory, str) {
   };
 }
 
+// Graphics (design/0120-browser-gfx.md). src/kern/gfx-web.c's imports:
+// the screen is in wasm memory, and the host copies changed rectangles
+// onto an OffscreenCanvas once a frame; the page's input waits in a queue
+// for gfxinput, a kernel process, to take with gfx_wait.
+
+/** The events gfx_wait hands to gfx-web.c, four ints each. */
+export const GfxEv = { key: 1, mouse: 2, resize: 3, paste: 4 };
+
+// A host with no canvas: h9-node, or a page that passed no gfx option.
+const noGfx = {
+  imports: () => ({
+    gfx_present: () => 0,
+    gfx_size: () => {},
+    gfx_screen: () => {},
+    gfx_flush: () => {},
+    gfx_wait: new WebAssembly.Suspending(async () => 0),
+    gfx_paste: () => 0,
+    gfx_snarf: () => {},
+    gfx_cursor: () => {},
+  }),
+};
+
+/** Whether this JS engine can draw on an OffscreenCanvas from a Worker. */
+export function canDrawInWorker() {
+  return typeof OffscreenCanvas === 'function' && typeof requestAnimationFrame === 'function';
+}
+
+/**
+ * The canvas's side of a machine, in its Worker: `canvas` is the
+ * OffscreenCanvas the page transferred, `width` and `height` the screen's
+ * size in its pixels, and `post` sends the page the cursor and the snarf
+ * buffer ({ type: 'cursor', data } and { type: 'snarf', text }). The page's
+ * events go in through `input`, `paste` and `resize`.
+ */
+export class GfxHost {
+  constructor({ canvas, width, height, post }) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d', { alpha: false });
+    if (!this.ctx) throw new Error("this browser can't draw from a Worker");
+    this.size = [width | 0, height | 0];
+    this.post = post;
+    this.screen = null; // { base, stride, dx, dy }, in wasm memory
+    this.dirty = null;  // [minx, miny, maxx, maxy]
+    this.framing = false;
+    this.q = [];        // events, four ints each
+    this.pastes = [];   // pasted texts, as UTF-8
+    this.waiter = null;
+    this.memory = null;
+    this.raf = typeof requestAnimationFrame === 'function' ? (f) => requestAnimationFrame(f) : (f) => setTimeout(f, 16);
+  }
+
+  #push(...ev) {
+    this.q.push(ev);
+    const w = this.waiter;
+    this.waiter = null;
+    w?.();
+  }
+
+  /** A key (rune, down) or the pointer (x, y, Plan 9 buttons). */
+  input(ev) {
+    if (Array.isArray(ev) && ev.length === 4) this.#push(ev[0] | 0, ev[1] | 0, ev[2] | 0, ev[3] | 0);
+  }
+
+  /** Text pasted into the canvas, which replaces the snarf buffer. */
+  paste(text) {
+    const b = new TextEncoder().encode(String(text));
+    this.pastes.push(b);
+    this.#push(GfxEv.paste, b.length, 0, 0);
+  }
+
+  /** The canvas's new size, in the screen's pixels. */
+  resize(width, height) {
+    this.size = [width | 0, height | 0];
+    this.#push(GfxEv.resize, width | 0, height | 0, 0);
+  }
+
+  // Copies the dirty rectangle of the screen onto the canvas, with each
+  // pixel's X byte set to 255, outside any coroutine.
+  #frame() {
+    this.framing = false;
+    const s = this.screen, d = this.dirty;
+    this.dirty = null;
+    if (!s || !d) return;
+    const [x0, y0] = [Math.max(0, d[0]), Math.max(0, d[1])];
+    const [x1, y1] = [Math.min(s.dx, d[2]), Math.min(s.dy, d[3])];
+    const w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0) return;
+    const src = new Uint8Array(this.memory().buffer);
+    const img = new ImageData(w, h);
+    const px = img.data;
+    for (let y = 0; y < h; y++) {
+      const at = s.base + (y0 + y) * s.stride + x0 * 4;
+      px.set(src.subarray(at, at + w * 4), y * w * 4);
+    }
+    const u = new Uint32Array(px.buffer);
+    for (let i = 0; i < u.length; i++) u[i] |= 0xff000000;
+    this.ctx.putImageData(img, x0, y0);
+  }
+
+  #mark(r) {
+    const d = this.dirty;
+    this.dirty = d ? [Math.min(d[0], r[0]), Math.min(d[1], r[1]), Math.max(d[2], r[2]), Math.max(d[3], r[3])] : r;
+    if (!this.framing) {
+      this.framing = true;
+      this.raf(() => this.#frame());
+    }
+  }
+
+  imports(memory) {
+    this.memory = memory;
+    const u8 = (p, n) => new Uint8Array(memory().buffer, p >>> 0, n >>> 0);
+    return {
+      gfx_present: () => 1,
+      gfx_size: (p) => { new Int32Array(memory().buffer, p >>> 0, 2).set(this.size); },
+      gfx_screen: (base, stride, dx, dy) => {
+        this.screen = { base: base >>> 0, stride, dx, dy };
+        if (this.canvas.width !== dx || this.canvas.height !== dy) {
+          this.canvas.width = dx;
+          this.canvas.height = dy;
+        }
+        this.#mark([0, 0, dx, dy]);
+      },
+      gfx_flush: (x0, y0, x1, y1) => this.#mark([x0, y0, x1, y1]),
+      gfx_wait: new WebAssembly.Suspending(async (p, n) => {
+        while (!this.q.length) await new Promise((res) => { this.waiter = res; });
+        const k = Math.min(this.q.length, (n / 4) | 0);
+        const out = new Int32Array(memory().buffer, p >>> 0, k * 4);
+        for (let i = 0; i < k; i++) out.set(this.q.shift(), i * 4);
+        return k * 4;
+      }),
+      gfx_paste: (p, n) => {
+        const b = this.pastes.shift();
+        if (!b) return 0;
+        const take = Math.min(n, b.length);
+        u8(p, take).set(b.subarray(0, take));
+        return take;
+      },
+      gfx_snarf: (p, n) => this.post({ type: 'snarf', text: new TextDecoder().decode(u8(p, n)) }),
+      gfx_cursor: (p) => this.post({ type: 'cursor', data: p ? u8(p, 72).slice() : null }),
+    };
+  }
+}
+
 // The h9 flags for a policy object, which takes Policy's fields under
 // their CLI names: profile, write, net, memory, timeout, pids, cpus,
 // readable, writable and readDeny (lists), env (an object), strict.
@@ -351,6 +498,188 @@ function policyFlags(policy = {}) {
   return f;
 }
 
+// The page's side of a canvas (design/0120-browser-gfx.md).
+
+// KeyboardEvent.key's named keys, as keyboard.h's runes.
+const KF = 0xF000, Spec = 0xF800;
+const namedKeys = {
+  Enter: 0x0a, Backspace: 0x08, Tab: 0x09, Escape: 0x1b, Delete: 0x7f,
+  Home: KF | 0x0D, ArrowUp: KF | 0x0E, ArrowDown: Spec | 0x00, PageUp: KF | 0x0F,
+  ArrowLeft: KF | 0x11, ArrowRight: KF | 0x12, PageDown: KF | 0x13, Insert: KF | 0x14,
+  Alt: KF | 0x15, Shift: KF | 0x16, Control: KF | 0x17, End: KF | 0x18, PrintScreen: KF | 0x10,
+  ScrollLock: KF | 0x19, CapsLock: Spec | 0x64, NumLock: Spec | 0x65, AltGraph: Spec | 0x67, Meta: Spec | 0x68,
+  F1: KF | 1, F2: KF | 2, F3: KF | 3, F4: KF | 4, F5: KF | 5, F6: KF | 6,
+  F7: KF | 7, F8: KF | 8, F9: KF | 9, F10: KF | 10, F11: KF | 11, F12: KF | 12,
+};
+
+/** The Plan 9 rune for a KeyboardEvent, or null if it isn't one. */
+export function keyRune(e) {
+  if (e.key in namedKeys) return namedKeys[e.key];
+  const cps = [...e.key];
+  return cps.length === 1 ? cps[0].codePointAt(0) : null;
+}
+
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform ?? '');
+
+/**
+ * Plan 9's buttons (left 1, middle 2, right 4) for a PointerEvent, whose
+ * `buttons` has left 1, right 2, middle 4. A left click with Alt (Option)
+ * held is the middle button, and with Cmd on macOS, or Ctrl elsewhere,
+ * the right, for trackpads and one-button mice.
+ */
+export function plan9Buttons(e) {
+  const b = e.buttons;
+  let p = (b & 4 ? 2 : 0) | (b & 2 ? 4 : 0);
+  if (b & 1) p |= e.altKey ? 2 : (isMac ? e.metaKey : e.ctrlKey) ? 4 : 1;
+  return p;
+}
+
+/**
+ * The screen's size for a canvas whose content box is css (CSS pixels)
+ * and dev (device pixels) wide and high: device pixels for scale 0, CSS
+ * pixels for 1, and device pixels divided by N otherwise.
+ */
+export function screenSize(scale, css, dev) {
+  if (scale === 0) return dev.map((v) => Math.max(1, Math.round(v)));
+  if (scale === 1) return css.map((v) => Math.max(1, Math.round(v)));
+  return dev.map((v) => Math.max(1, Math.floor(v / scale)));
+}
+
+// /dev/cursor's 72 bytes (the offset, then clr and set) as a CSS cursor:
+// set bits black, clr bits white, the rest transparent.
+function cssCursor(data) {
+  if (!data) return '';
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const off = [dv.getInt32(0, true), dv.getInt32(4, true)];
+  const c = document.createElement('canvas');
+  c.width = c.height = 16;
+  const g = c.getContext('2d');
+  const img = g.createImageData(16, 16);
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const bit = 0x80 >> (x & 7), at = y * 2 + (x >> 3);
+      const v = data[40 + at] & bit ? 0 : data[8 + at] & bit ? 255 : -1;
+      if (v < 0) continue;
+      img.data.set([v, v, v, 255], (y * 16 + x) * 4);
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const hot = off.map((v) => Math.min(15, Math.max(0, -v)));
+  return `url(${c.toDataURL()}) ${hot[0]} ${hot[1]}, default`;
+}
+
+// Wires the canvas's events to the Worker, once the canvas is the
+// Worker's. Returns what the page does with the Worker's messages.
+function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
+  const send = (ev) => worker.postMessage({ type: 'gfx', ev });
+  if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = 0;
+  canvas.style.touchAction = 'none';
+  let screen = size;
+  let held = 0;
+  const at = (e) => {
+    const fx = screen[0] / (canvas.clientWidth || screen[0]);
+    const fy = screen[1] / (canvas.clientHeight || screen[1]);
+    return [Math.floor(e.offsetX * fx), Math.floor(e.offsetY * fy)];
+  };
+  const pointer = (e) => {
+    held = plan9Buttons(e);
+    send([GfxEv.mouse, ...at(e), held]);
+  };
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.focus();
+    canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    pointer(e);
+  });
+  canvas.addEventListener('pointermove', pointer);
+  canvas.addEventListener('pointerup', (e) => {
+    pointer(e);
+    if (!e.buttons && canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  // One wheel click per line, or per 50 pixels: button 8 up, 16 down.
+  let wheel = 0;
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    wheel += e.deltaMode === 1 ? e.deltaY : e.deltaMode === 2 ? e.deltaY * 3 : e.deltaY / 50;
+    const xy = at(e);
+    while (Math.abs(wheel) >= 1) {
+      send([GfxEv.mouse, ...xy, held | (wheel < 0 ? 8 : 16)]);
+      send([GfxEv.mouse, ...xy, held]);
+      wheel -= Math.sign(wheel);
+    }
+  }, { passive: false });
+
+  // Keys reach the guest only while the canvas has focus. Each key's
+  // release sends the rune its press did, even if Shift changed in between.
+  const down = new Map();
+  canvas.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.key === 'Process' || e.key === 'Dead') return;
+    // Let Ctrl-V and Cmd-V through, so the paste event fires.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && clipboard) return;
+    const r = keyRune(e);
+    if (r === null) return;
+    e.preventDefault();
+    down.set(e.code || e.key, r);
+    send([GfxEv.key, r, 1, 0]);
+  });
+  canvas.addEventListener('keyup', (e) => {
+    const k = e.code || e.key;
+    const r = down.get(k) ?? keyRune(e);
+    down.delete(k);
+    if (r === null) return;
+    e.preventDefault();
+    send([GfxEv.key, r, 0, 0]);
+  });
+  // Text an input method composed, rune by rune.
+  canvas.addEventListener('compositionend', (e) => {
+    for (const ch of e.data ?? '') {
+      const r = ch.codePointAt(0);
+      send([GfxEv.key, r, 1, 0]);
+      send([GfxEv.key, r, 0, 0]);
+    }
+  });
+  canvas.addEventListener('blur', () => {
+    for (const r of down.values()) send([GfxEv.key, r, 0, 0]);
+    down.clear();
+  });
+  if (clipboard) {
+    canvas.addEventListener('paste', (e) => {
+      e.preventDefault();
+      worker.postMessage({ type: 'gfx-paste', text: e.clipboardData?.getData('text/plain') ?? '' });
+    });
+  }
+
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(([ent]) => {
+      const css = [ent.contentRect.width, ent.contentRect.height];
+      // The device-pixel box is exact where CSS times the ratio rounds,
+      // but it ignores an emulated ratio (DevTools, Playwright), so it's
+      // taken only when the two agree to within a pixel.
+      const est = css.map((v) => v * devicePixelRatio);
+      const dpb = ent.devicePixelContentBoxSize?.[0];
+      const dev = dpb && Math.abs(dpb.inlineSize - est[0]) <= 1 && Math.abs(dpb.blockSize - est[1]) <= 1 ? [dpb.inlineSize, dpb.blockSize] : est;
+      const s = screenSize(scale, css, dev);
+      if (s[0] === screen[0] && s[1] === screen[1]) return;
+      screen = s;
+      worker.postMessage({ type: 'gfx-size', width: s[0], height: s[1] });
+    });
+    try { ro.observe(canvas, { box: 'device-pixel-content-box' }); } catch { ro.observe(canvas); }
+  }
+
+  return (m) => {
+    switch (m.type) {
+      case 'cursor': canvas.style.cursor = cssCursor(m.data); return true;
+      case 'snarf': {
+        const fire = () => events.dispatchEvent(Object.assign(new Event('snarf'), { text: m.text }));
+        if (navigator.clipboard?.writeText) navigator.clipboard.writeText(m.text).catch(fire); else fire();
+        return true;
+      }
+    }
+    return false;
+  };
+}
+
 /**
  * A machine in its own Worker (design/0012-browser-host.md), from the
  * page:
@@ -362,24 +691,51 @@ function policyFlags(policy = {}) {
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
  * - tty: the terminal is one to Linux programs (isatty, termios and raw
  *   mode), as a host terminal is; for a terminal that handles raw mode
+ * - gfx: { canvas, clipboard, scale }, a <canvas> for /dev/draw,
+ *   /dev/mouse, /dev/cursor, and /dev/kbd (design/0120-browser-gfx.md).
+ *   clipboard is "page" (the default: a paste into the canvas fills
+ *   /dev/snarf, and a write to it is copied to the page's clipboard) or
+ *   "private" (--gfx=noclip). scale is --gfx-scale: 0 (the default)
+ *   draws in device pixels, 1 in CSS pixels, and N in device pixels
+ *   divided by N. The canvas moves into the Worker at run.
  *
  * machine.run(argv) runs h9 with the flags and argv (['rc', '-i'], say)
  * and resolves to its exit status. machine.input(bytes or string) types,
- * machine.interrupt() is the interrupt key, and machine.terminate() ends
- * the Worker.
+ * machine.interrupt() is the interrupt key, machine.hangup() posts
+ * hangup, as closing a native window does, and machine.terminate() ends
+ * the Worker. The machine is an EventTarget: with gfx, a write to
+ * /dev/snarf that the page's clipboard refuses fires a `snarf` event
+ * whose `text` is what was written.
  */
-export async function createMachine({ root, memory, policy, terminal, tty = false } = {}) {
+export async function createMachine({ root, memory, policy, terminal, tty = false, gfx } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
+  if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
+  const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
+  const scale = Math.max(0, Math.min(255, gfx?.scale ?? 0) | 0);
   const worker = new Worker(new URL('worker.js', import.meta.url), { type: 'module' });
   const enc = new TextEncoder();
+  const events = new EventTarget();
   let started = false;
-  return {
+  return Object.assign(events, {
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
       const flags = [...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
+      let onGfx = () => false;
+      let start = {}, transfer = [];
+      if (gfx) {
+        const c = gfx.canvas;
+        const css = [c.clientWidth, c.clientHeight];
+        const size = screenSize(scale, css, css.map((v) => v * devicePixelRatio));
+        const off = c.transferControlToOffscreen();
+        start = { gfx: { canvas: off, width: size[0], height: size[1] } };
+        transfer = [off];
+        flags.push(clipboard ? '--gfx' : '--gfx=noclip', `--gfx-scale=${scale}`);
+        onGfx = attachCanvas(c, worker, { clipboard, scale, size, events });
+      }
       return new Promise((resolve, reject) => {
         worker.onmessage = ({ data: m }) => {
+          if (onGfx(m)) return;
           switch (m.type) {
             case 'output': terminal?.write(m.data, m.fd); break;
             case 'raw': terminal?.setRaw?.(m.on); break;
@@ -388,7 +744,7 @@ export async function createMachine({ root, memory, policy, terminal, tty = fals
           }
         };
         worker.onerror = (e) => reject(new Error(e.message));
-        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)), tty });
+        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)), tty, ...start }, transfer);
       });
     },
     input(data) {
@@ -397,6 +753,7 @@ export async function createMachine({ root, memory, policy, terminal, tty = fals
       worker.postMessage({ type: 'input', data: b }, [b.buffer]);
     },
     interrupt() { worker.postMessage({ type: 'interrupt' }); },
+    hangup() { worker.postMessage({ type: 'hangup' }); },
     terminate() { worker.terminate(); },
-  };
+  });
 }

@@ -674,7 +674,7 @@ const Web = struct {
 
 /// h9.wasm, the JS host, v86.wasm and the demo page, installed in
 /// zig-out/web.
-fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts) Web {
+fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts, gfx: Gfx) Web {
     const target = webTarget(b, false);
     var p = parts;
     p.target = target;
@@ -685,7 +685,7 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts)
     // The browser runs 386 only (design/0087-builtin-root.md, Open issues: every
     // byte is downloaded per page load).
     p.builtin_root = builtinRoot(b, p.builtin_dir, pin(p.pins, "NINEFRONT_RELEASE"), &.{"386"}, .quiet);
-    const mod = addH9Module(b, p, .none, false).mod;
+    const mod = addH9Module(b, p, gfx, false).mod;
     const exe = b.addExecutable(.{
         .name = "h9",
         .root_module = b.createModule(.{
@@ -755,11 +755,15 @@ pub const Gfx = enum {
     win32,
     /// drawterm's gui-cocoa, built with the macOS SDK.
     cocoa,
+    /// A page's canvas, on the browser host (src/kern/gfx-web.c,
+    /// design/0120-browser-gfx.md).
+    web,
 
     fn default(t: std.Target) Gfx {
         return switch (t.os.tag) {
             .macos => .cocoa,
             .windows => .win32,
+            .wasi => .web,
             else => .none,
         };
     }
@@ -771,6 +775,7 @@ pub const Gfx = enum {
             .cocoa => if (t.os.tag != .macos) "Cocoa is macOS only" else null,
             .win32 => if (t.os.tag != .windows) "Win32 is Windows only" else null,
             .x11 => if (t.os.tag != .linux) "X11 is built for Linux only" else if (t.abi.isMusl()) "X11 needs a glibc target, such as -Dtarget=x86_64-linux-gnu, to link the system's libX11" else null,
+            .web => if (t.os.tag != .wasi) "web is the browser host's backend (zig build web)" else null,
         };
     }
 };
@@ -817,8 +822,8 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
 
     const web = os == .wasi;
     // The web host's kern turns on wasm exception handling, for setjmp
-    // and longjmp, and has no GUI or host commands.
-    const kern = addKern(b, if (web) webTarget(b, true) else target, optimize, web, p.host_cmd and !web, if (web) .none else gfx, exported);
+    // and longjmp, and has no host commands.
+    const kern = addKern(b, if (web) webTarget(b, true) else target, optimize, web, p.host_cmd and !web, gfx, exported);
     if (web) mod.addAnonymousImport("shim_i386", .{ .root_source_file = shimI386(b) });
     if (!p.have_drawterm) {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
@@ -860,6 +865,7 @@ fn addGfxSources(b: *std.Build, kern: *std.Build.Step.Compile, gfx: Gfx, flags: 
     switch (gfx) {
         .none => unreachable,
         .headless => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-headless.c"}, .flags = flags }),
+        .web => m.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"gfx-web.c"}, .flags = flags }),
         .x11 => {
             m.addCMacro("H9_GFX_X11", "1");
             m.addCSourceFiles(.{ .root = b.path(drawterm ++ "/gui-x11"), .files = &.{"x11.c"}, .flags = gui_exit });
@@ -894,7 +900,11 @@ pub fn build(b: *std.Build) void {
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
 
-    const gfx = b.option(Gfx, "gfx", "GUI backend for --gfx (design/0015-gfx.md): cocoa, win32, x11, headless (tests) or none (default: cocoa on macOS, win32 on Windows, none elsewhere)") orelse Gfx.default(target.result);
+    const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/0015-gfx.md): cocoa, win32, x11, web, headless (tests) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, none elsewhere)");
+    const gfx = gfx_opt orelse Gfx.default(target.result);
+    // zig build web's: web, the browser host's only GUI backend, unless
+    // -Dgfx=none leaves graphics out (design/0120-browser-gfx.md).
+    const web_gfx: Gfx = if (gfx_opt == .none) .none else .web;
     if (gfx.unsupported(target.result)) |why| b.getInstallStep().dependOn(&b.addFail(b.fmt("-Dgfx={t}: {s}", .{ gfx, why })).step);
 
     // Unicorn's translated header, shared by every h9 module.
@@ -989,7 +999,7 @@ pub fn build(b: *std.Build) void {
     // The browser host (design/0012-browser-host.md): h9 for wasm32-wasi
     // with its JS host, v86.wasm and a demo page, in zig-out/web.
     const web_step = b.step("web", "Build the browser host into zig-out/web (design/0012-browser-host.md)");
-    const web = addWeb(b, optimize, parts);
+    const web = addWeb(b, optimize, parts, web_gfx);
     web_step.dependOn(web.install);
     // The demo page's root archive, from a 386 root tree and the paths
     // src/web/root.list names; left out without one.
@@ -1028,7 +1038,15 @@ pub fn build(b: *std.Build) void {
     web_test.has_side_effects = true;
     web_test.expectExitCode(0);
     web_test.step.dependOn(web.install);
-    b.step("web-test", "Run the browser host's demo page in Chromium with Playwright (needs a 386 root for root.h9a)").dependOn(&web_test.step);
+    // Graphics on the canvas (tests/web/gfx.mjs, design/0120-browser-gfx.md).
+    const web_gfx_test = b.addSystemCommand(&.{ "node", "tests/web/gfx.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
+    web_gfx_test.setCwd(b.path("."));
+    web_gfx_test.has_side_effects = true;
+    web_gfx_test.expectExitCode(0);
+    web_gfx_test.step.dependOn(web.install);
+    const web_test_step = b.step("web-test", "Run the browser host's demo page and its canvas cases in Chromium with Playwright (needs a 386 root for root.h9a)");
+    web_test_step.dependOn(&web_test.step);
+    if (web_gfx != .none) web_test_step.dependOn(&web_gfx_test.step);
 
     const exe = b.addExecutable(.{
         .name = "h9",

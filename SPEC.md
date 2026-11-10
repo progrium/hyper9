@@ -384,11 +384,11 @@ Freed pages and executable mappings call `jit_dirty_cache`, so recycled pages ne
 
 `h9-node` runs the CLI under Node 24 or later, with the same flags as `h9`; it's how the integration suite tests the web host.
 
-In a page, `createMachine({ root, memory, policy, terminal })` from `h9-web.js` starts one machine in its own Worker (`src/web/worker.js`) and `machine.run(argv)` resolves to the exit status.
+In a page, `createMachine({ root, memory, policy, terminal, gfx })` from `h9-web.js` starts one machine in its own Worker (`src/web/worker.js`) and `machine.run(argv)` resolves to the exit status. `gfx` gives it a canvas ([Graphics](#graphics---gfx)).
 
 `root` is a root archive's URL, or a `ws://` or `wss://` URL of a 9P server, under which WASI sees an empty tree; the page edits and echoes lines in cooked mode, passes keys in raw mode, and sends the interrupt key as `Machine.Signals.interrupt`.
 
-The demo page (`index.html`) runs an interactive rc, over `?root=` when given.
+The demo page (`index.html`) runs an interactive rc, over `?root=` when given, or with `?rio`, rio and acme on a canvas.
 
 ## Guest shims and ABI
 
@@ -912,6 +912,17 @@ The window opens lazily, on the first walk below `#i` or open of `/dev/snarf`, s
 The console stays the host terminal, so `/dev/cons` and kernel prints still go there.
 
 On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, which gives AppKit the main thread and runs the machine on another; an embedder using `--gfx` on macOS does the same.
+
+#### On the browser host
+
+Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](design/0120-browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
+
+- **The screen** is `gscreen` in wasm memory as `XBGR32`, at the size the page reports. `flushmemscreen` only adds a rectangle to the host's dirty rectangle; once a frame (`requestAnimationFrame` in the Worker), outside any coroutine, the host copies that rectangle's rows from wasm memory into an `ImageData`, sets each pixel's X byte to 255, and `putImageData`s it. `screensize` tells the host the new image's address, stride, and size, and the host resizes the canvas's buffer to match.
+- **Input** is a queue in the host, four ints per event: a key (rune, down), the pointer (x, y, Plan 9 buttons), a resize, or a paste's length. `gfxinput`, a kernel process started by `screeninit`, takes them through the Suspending `gfx_wait` (saving what's per thread around it, as every Suspending import does) and calls `h9_kbdkey`, `absmousetrack`, and `screenresize`, so the input paths run with `up` set.
+- **The page** (`createMachine`) maps pointer events (with capture while a button is down, the wheel as buttons 8 and 16, and Alt- and Cmd- or Ctrl-click as buttons 2 and 3) and keys (`KeyboardEvent.key` to `keyboard.h`'s runes, sent only while the canvas has focus, a release sending its press's rune, and every held key released on blur) to the Worker, and posts the screen's size from a `ResizeObserver`: device pixels for scale 0, CSS pixels for 1, and device pixels divided by N otherwise.
+- **The clipboard.** In `page` mode `/dev/snarf` is a buffer in `gfx-web.c`. A `paste` event on the focused canvas replaces it, and a write to it is posted to the page, which calls `navigator.clipboard.writeText` and fires `snarf` on the machine if that's refused. `private` is `--gfx=noclip`, `gfx.c`'s own buffer.
+- **The cursor**: `setcursor` posts `/dev/cursor`'s 72 bytes, or nothing for the arrow, and the page draws them into a PNG for the canvas's CSS `cursor`. `mouseset` does nothing, since a page can't move the pointer.
+- `machine.hangup()` posts `hangup` through the Worker's signals, as a closed window does. The plan's `gfx:` line says `clipboard=page`, with caveats for the page's clipboard and the canvas.
 
 ## Serving
 

@@ -101,7 +101,7 @@ zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd,
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, v86.wasm, h9-node, the demo page)
 zig build integration -Dweb   # the integration cases through h9-node on v86 (Node 24 or later)
-zig build web-test # the demo page in Chromium, with Playwright
+zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in Chromium with Playwright
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
@@ -168,7 +168,10 @@ drawterm's Cocoa on macOS and Win32 on Windows by default, `none` on Linux.
 `-Dgfx=x11` builds the X11 backend for Linux, which links the host's libX11
 (and needs the libXt headers), so it builds natively against glibc, not for
 a musl target. `-Dgfx=none` leaves graphics out; `-Dgfx=headless` is a screen
-in memory, which the backend tests use whatever `-Dgfx` is.
+in memory, which the backend tests use whatever `-Dgfx` is. `zig build web`
+always builds `web`, the browser host's canvas backend
+([browser-gfx](design/0120-browser-gfx.md)), unless `-Dgfx=none` leaves it
+out.
 
 ### Browser host
 
