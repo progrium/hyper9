@@ -122,6 +122,10 @@ pub fn Engine(comptime arch: Arch) type {
             var engine: ?*uc.uc_engine = null;
             try ok(uc.uc_open(a, mode, &engine));
             errdefer _ = uc.uc_close(engine);
+            // Unicorn's default arm64 CPU is a Cortex-A72 (Armv8.0): the
+            // "max" model has the extensions ha64 runs too, such as LSE.
+            // uc_ctl_set_cpu_model: UC_CTL_WRITE(UC_CTL_CPU_MODEL, 1).
+            if (arch == .arm64) try ok(uc.uc_ctl(engine, uc.UC_CTL_CPU_MODEL | (1 << 26) | (1 << 30), @as(c_int, uc.UC_CPU_ARM64_MAX)));
             s.* = .{ .gpa = gpa, .engine = engine.?, .mirrors = try gpa.alloc(Mirror, regions.len) };
             var made: usize = 0;
             errdefer {
@@ -340,7 +344,45 @@ pub const Known = enum {
     /// A misaligned LDAR or STLR: an alignment fault, where Unicorn allows
     /// it within 16 bytes.
     misaligned_ldar_stlr,
+    /// LDSMAX or LDSMIN of a byte, halfword, or word: QEMU 5.0's
+    /// single-threaded fetch-and-op compares without sign-extending memory
+    /// (fixed in QEMU 5.1, "tcg: Fix do_nonatomic_op_* vs signed
+    /// operations"), so Unicorn stores the wrong one.
+    signed_ldop_narrow,
+    /// A store exclusive of another size than the load exclusive before
+    /// it (CONSTRAINED UNPREDICTABLE): QEMU compares and swaps at the
+    /// store's size but checks the status against the whole loaded value,
+    /// so it can store and still return status 1.
+    exclusive_size_mismatch,
 };
+
+/// The size in bytes of arm64 load or store exclusive `word` (both
+/// registers of a pair), and whether it loads; null for anything else.
+pub fn exclusiveA64(word: u32) ?struct { load: bool, bytes: u8 } {
+    // Load/store exclusive: bits 29:24 001000 with o2 (bit 23) clear.
+    if (word & 0x3F800000 != 0x08000000) return null;
+    const size: u3 = @intCast(word >> 30);
+    const pair = word >> 21 & 1 != 0;
+    if (pair and size < 2) return null;
+    return .{ .load = word >> 22 & 1 != 0, .bytes = @as(u8, 1) << size << @intFromBool(pair) };
+}
+
+/// Whether store exclusive `word`, after which T0 and Unicorn differ, is
+/// a known divergence given `last_load_bytes`, the size of the load
+/// exclusive before it.
+pub fn knownA64Exclusive(word: u32, last_load_bytes: u8) ?Known {
+    const e = exclusiveA64(word) orelse return null;
+    if (e.load or last_load_bytes == 0 or e.bytes == last_load_bytes) return null;
+    return .exclusive_size_mismatch;
+}
+
+/// Whether arm64 instruction `word`, after which T0 and Unicorn differ, is
+/// a known divergence in its result.
+pub fn knownA64Result(word: u32) ?Known {
+    // LD<op> with o3 0 and opc 100 (SMAX) or 101 (SMIN), below 64 bits.
+    if (word & 0x3F20EC00 == 0x38204000 and word >> 30 != 3) return .signed_ldop_narrow;
+    return null;
+}
 
 /// Whether arm64 instruction `word`, on which T0 took an alignment fault
 /// and Unicorn stopped with `u`, is a known divergence.

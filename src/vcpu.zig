@@ -30,6 +30,7 @@ pub const a64 = struct {
     pub const exec = @import("interp/a64/exec.zig");
     pub const simd_decode = @import("interp/a64/simd_decode.zig");
     pub const simd_exec = @import("interp/a64/simd_exec.zig");
+    pub const ext = @import("interp/a64/ext.zig");
     pub const lift = @import("jit/a64/lift.zig");
     pub const lift_simd = @import("jit/a64/lift_simd.zig");
     pub const copy = @import("jit/a64/copy.zig");

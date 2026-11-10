@@ -54,6 +54,10 @@ pub const Class = enum {
     simd,
     /// AdvSIMD structure loads and stores through x20.
     simd_mem,
+    /// CRC32 and CRC32C (FEAT_CRC32; ha64's ext.zig).
+    crc,
+    /// LSE atomics on x20 (FEAT_LSE): LDADD and the rest, SWP, CAS, CASP.
+    lse,
 };
 
 pub const Options = struct {
@@ -240,6 +244,35 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
             if (simd_gen.word(r)) |w| break w;
         },
         .simd_mem => simd_gen.memWord(r, base_reg),
+        // CRC32B H W X and CRC32CB CH CW CX: only X has sf
+        .crc => blk: {
+            const sz = r.uintLessThan(u32, 4);
+            const xf: u32 = if (sz == 3) 1 else 0;
+            break :blk (xf << 31) | 0x1AC04000 | (rm << 16) | (r.uintLessThan(u32, 2) << 12) | (sz << 10) | (src(r) << 5) | d;
+        },
+        .lse => blk: {
+            const size = r.uintLessThan(u32, 4);
+            const ar = r.uintLessThan(u32, 4); // acquire, release
+            const rs = src(r);
+            switch (r.uintLessThan(u32, 4)) {
+                // LDADD LDCLR LDEOR LDSET LDSMAX LDSMIN LDUMAX LDUMIN, and
+                // now and then their ST aliases (Rt = ZR)
+                0 => {
+                    const t: u32 = if (r.uintLessThan(u32, 4) == 0) 31 else d;
+                    break :blk (size << 30) | 0x38200000 | (ar << 22) | (rs << 16) | (r.uintLessThan(u32, 8) << 12) | (base_reg << 5) | t;
+                },
+                // SWP
+                1 => break :blk (size << 30) | 0x38208000 | (ar << 22) | (rs << 16) | (base_reg << 5) | d,
+                // CAS: L is bit 22, o0 bit 15
+                2 => break :blk (size << 30) | 0x08A07C00 | ((ar >> 1) << 22) | ((ar & 1) << 15) | (rs << 16) | (base_reg << 5) | d,
+                // CASP of W or X pairs: Rs and Rt even, below x15
+                else => {
+                    const ps = (r.uintLessThan(u32, 7)) * 2;
+                    const pt = (r.uintLessThan(u32, 7)) * 2;
+                    break :blk (sf << 30) | 0x08207C00 | ((ar >> 1) << 22) | ((ar & 1) << 15) | (ps << 16) | (base_reg << 5) | pt;
+                },
+            }
+        },
         // B.cond, CBZ, CBNZ, TBZ, TBNZ, B: forward, within the program
         .branch => blk: {
             const k = 1 + r.uintLessThan(u32, @max(1, @min(8, n - i)));

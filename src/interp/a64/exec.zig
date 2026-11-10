@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 pub const dec = @import("decode.zig");
 const mem = @import("../mem.zig");
 const simd_exec = @import("simd_exec.zig");
+const ext = @import("ext.zig");
 const Ctx = @import("../../jit/ctx.zig").Ctx;
 
 const Kind = dec.Kind;
@@ -314,6 +315,10 @@ pub fn step(m: *Machine, o: *const Op, pc: u64) Next {
 inline fn dispatch(m: *Machine, o: *const Op, pc: u64) Next {
     const k = @intFromEnum(o.k);
     if (k < dec.simd_base) return handlers[k](m, o, pc);
+    if (k >= dec.ext_base) {
+        const e = k - dec.ext_base;
+        return if (e < ext.handlers.len) ext.handlers[e](m, o, pc) else undef(m, pc);
+    }
     const s = k - dec.simd_base;
     if (s < simd_exec.handlers.len) return simd_exec.handlers[s](m, o, pc);
     return undef(m, pc);

@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const simd = @import("simd_decode.zig");
+const ext = @import("ext.zig");
 
 pub const ZR = 31;
 pub const SINK = 32;
@@ -37,6 +38,13 @@ pub const nslots = 34;
 
 /// Kinds at and above this are simd_decode.zig's.
 pub const simd_base: u16 = 0x100;
+/// Kinds at and above this are ext.zig's: the optional extensions (CRC32,
+/// and the cryptographic ones).
+pub const ext_base: u16 = 0x400;
+
+comptime {
+    std.debug.assert(@typeInfo(simd.Kind).@"enum".fields.len <= ext_base - simd_base);
+}
 
 pub const Kind = enum(u16) {
     /// Not implemented, or unallocated: faults with EC 0.
@@ -307,7 +315,11 @@ pub const Kind = enum(u16) {
     _,
 
     pub fn isSimd(k: Kind) bool {
-        return @intFromEnum(k) >= simd_base;
+        return @intFromEnum(k) >= simd_base and @intFromEnum(k) < ext_base;
+    }
+
+    pub fn isExt(k: Kind) bool {
+        return @intFromEnum(k) >= ext_base;
     }
 };
 
@@ -439,6 +451,7 @@ pub const Regs = struct {
 
 pub fn info(k: Kind) Info {
     if (k.isSimd()) return simd.info(k);
+    if (k.isExt()) return ext.info(k);
     return switch (k) {
         .undef => .{ .ctrl = .undef },
         .next_page => .{ .ctrl = .page_end },
@@ -864,7 +877,7 @@ fn dpReg(w: u32) Op {
                 };
                 return .{ .k = k, .d = rdz(rd), .n = rz(rn) };
             }
-            // data processing (2 source); CRC32 is an extension, left out
+            // data processing (2 source); CRC32 is an extension, in ext.zig
             const k: Kind = switch (bits(w, 15, 10)) {
                 0b000010 => if (sf) .udiv_x else .udiv_w,
                 0b000011 => if (sf) .sdiv_x else .sdiv_w,
@@ -872,7 +885,7 @@ fn dpReg(w: u32) Op {
                 0b001001 => if (sf) .lsrv_x else .lsrv_w,
                 0b001010 => if (sf) .asrv_x else .asrv_w,
                 0b001011 => if (sf) .rorv_x else .rorv_w,
-                else => return .{},
+                else => return ext.decodeDp2(w) orelse .{},
             };
             return .{ .k = k, .d = rdz(rd), .n = rz(rn), .m = rz(rm) };
         },

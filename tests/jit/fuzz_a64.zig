@@ -124,6 +124,8 @@ fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *s
     var c: vcpu.ctx.Ctx = .{ .cpu = @intFromPtr(&cpu), .tlb = @intFromPtr(&tlb) };
     const bound = try a64.Bound.init(gpa, &c, a64.t0.mapSpace(&s.map));
     defer bound.deinit(gpa);
+    // The size of the last load exclusive, for knownA64Exclusive.
+    var load_bytes: u8 = 0;
     var n: u64 = 0;
     while (n < 1 << 16) : (n += 1) {
         const pc = cpu.pc;
@@ -147,9 +149,14 @@ fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *s
         if (lockstep.diff(.arm64, canon(&cpu), e.getState(), 0, w)) bad = true;
         if (e.diffMemory(w)) bad = true;
         if (bad) {
+            if (same_exit) if (lockstep.knownA64Result(word)) |k| return .{ .known = k };
+            if (same_exit) if (lockstep.knownA64Exclusive(word, load_bytes)) |k| return .{ .known = k };
             if (same_exit) try w.print("after {x} ({x:0>8})\n", .{ pc, word });
             return .diverged;
         }
+        if (lockstep.exclusiveA64(word)) |x| if (x.load) {
+            load_bytes = x.bytes;
+        };
         if (e0 != .ok) return .agree;
     }
     return .agree;
