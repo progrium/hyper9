@@ -274,7 +274,9 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                 if (x.vec) try markBad(gpa, &words, x.off, 16) else try access(gpa, &words, x.off, 8);
             };
             if (host.guest_nzcv) |nz| if (i.aux & (copy_reads_nzcv | copy_writes_nzcv) != 0) try access(gpa, &words, nz, 4);
-            if (i.aux & copy_fp != 0) for ([2]?u32{ host.guest_fpcr, host.guest_fpsr }) |w| if (w) |o| try access(gpa, &words, o, 4);
+            // FPCR and FPSR stay in the Cpu: the emitter keeps the guest's
+            // in the host's registers across the region.
+            if (i.aux & copy_fp != 0) for ([2]?u32{ host.guest_fpcr, host.guest_fpsr }) |w| if (w) |o| try markBad(gpa, &words, o, 4);
             continue;
         }
         if (i.op != .getreg and i.op != .setreg) continue;
@@ -413,9 +415,6 @@ pub fn plan(gpa: std.mem.Allocator, r: *const ir.Region, host: Host, virtual: ?[
                                 if (p.chunkAt(x.off, 8)) |k| d |= @as(ChunkSet, 1) << @intCast(k);
                             };
                             if (i.aux & copy_writes_nzcv != 0) if (host.guest_nzcv) |nz| if (p.chunkAt(nz, 4)) |k| {
-                                d |= @as(ChunkSet, 1) << @intCast(k);
-                            };
-                            if (i.aux & copy_fp != 0) if (host.guest_fpsr) |o| if (p.chunkAt(o, 4)) |k| {
                                 d |= @as(ChunkSet, 1) << @intCast(k);
                             };
                         },

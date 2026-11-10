@@ -90,7 +90,9 @@ const caller_saved_mask: u64 = blk: {
 const nzcv_save = caller_saved.len;
 const va_save = nzcv_save + 1;
 const io_save = va_save + 1;
-const save_slots: u32 = io_save + 6;
+/// The host's FPCR, in a region that runs FP copies under the guest's.
+const fpcr_save = io_save + 6;
+const save_slots: u32 = fpcr_save + 1;
 
 pub const host: regalloc.Host = .{
     .regs = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 23, 24, 25, 26, 27, 28 },
@@ -249,6 +251,13 @@ const E = struct {
     code: emitter.Code = .{},
     table_label: [2]?u32 = .{ null, null },
     epilogue: u32 = 0,
+    /// The epilogue past its FP part, for paths that did it already (and
+    /// tore the frame down).
+    epilogue_plain: u32 = 0,
+    /// The region runs FP copies: the guest's FPCR is the host's while it
+    /// runs, and host FPSR collects their exceptions until an exit, a call,
+    /// or a read of the guest's FPSR moves them into it.
+    fp: bool = false,
     dirty: regalloc.ChunkSet = 0,
     block: ir.BlockId = 0,
 
@@ -498,12 +507,15 @@ const E = struct {
     /// Sets exit_pc and leaves with `code`, after writing back `dirty` and
     /// counting `retired`.
     fn leave(e: *E, code: ctx.Exit, pc: u64, dirty: regalloc.ChunkSet, retired: u32) !void {
+        return e.leaveTo(code, pc, dirty, retired, e.epilogue);
+    }
+    fn leaveTo(e: *E, code: ctx.Exit, pc: u64, dirty: regalloc.ChunkSet, retired: u32, to: u32) !void {
         try e.writeback(dirty);
         try e.retireOn(retired);
         try e.movImm(IP0, pc);
         try e.strCtx(IP0, ctx.off.exit_pc);
         try e.put(0x52800000 | @as(u32, @intFromEnum(code)) << 5);
-        try e.b(e.epilogue);
+        try e.b(to);
     }
 };
 
@@ -677,6 +689,10 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     defer e.deinit();
     for (r.blocks.items) |_| _ = try e.label();
     e.epilogue = try e.label();
+    e.epilogue_plain = try e.label();
+    for (r.insts.items) |i| {
+        if (i.op == .copy and i.aux & regalloc.copy_fp != 0 and !regalloc.isCall(i)) e.fp = true;
+    }
 
     // Prologue.
     const frame: u32 = ((p.slots + save_slots) * 8 + 15) & ~@as(u32, 15);
@@ -694,6 +710,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     try e.put(0x910003BF); // mov sp, x29
     if (frame >> 12 != 0) try e.put(0xD1400000 | (frame >> 12) << 10 | @as(u32, SP) << 5 | @as(u32, SP));
     if (frame & 0xfff != 0) try e.put(0xD1000000 | (frame & 0xfff) << 10 | @as(u32, SP) << 5 | @as(u32, SP));
+    if (e.fp) try fpEnter(&e, true);
     try e.loadChunks();
 
     for (r.blocks.items, 0..) |blk, bi| {
@@ -708,6 +725,8 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
 
     // Epilogue: w0 holds the exit code.
     e.bind(e.epilogue);
+    if (e.fp) try fpLeave(&e);
+    e.bind(e.epilogue_plain);
     try e.put(0x910003BF); // mov sp, x29
     for (saved_pairs, 0..) |pr, k| try e.put(0xA9400000 | @as(u32, @intCast(2 + 2 * k)) << 15 | @as(u32, pr[1]) << 10 | @as(u32, SP) << 5 | @as(u32, pr[0]));
     try e.put(0xA8C00000 | @as(u32, save_bytes / 8) << 15 | 30 << 10 | @as(u32, SP) << 5 | @as(u32, FP)); // ldp x29, x30, [sp], #save
@@ -846,6 +865,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.finish(idx, rd);
         },
         .getreg => {
+            if (e.fp and i.aux == host.guest_fpsr.?) try fpFlush(e);
             const rd = e.dst(idx);
             const ck = e.p.chunk_of[idx];
             if (ck != regalloc.no_chunk) {
@@ -870,6 +890,8 @@ fn lower(e: *E, idx: usize) EmitError!void {
             } else {
                 try e.ldst(true, sizeLog2(ta) orelse return error.Unsupported, v, CPU, i.aux);
             }
+            if (e.fp and i.aux == host.guest_fpsr.?) try e.put(0xD51B4420 | @as(u32, ZR)); // msr fpsr, xzr: the guest's write replaces what's pending
+            if (e.fp and i.aux == host.guest_fpcr.?) try e.put(0xD51B4400 | @as(u32, v)); // msr fpcr
         },
         .add, .sub, .mul, .@"and", .@"or", .xor, .andn, .udiv => {
             const a = try e.src(i.a, S0);
@@ -1185,6 +1207,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             e.dirty = 0;
             const save = e.saveMask(idx, false);
             try e.saveRegs(save);
+            if (e.fp) try fpLeave(e);
             try e.mov(0, CTX);
             try e.movImm(1, r.handles.items[@intCast(i.aux)]);
             try e.movImm(2, i.aux2);
@@ -1200,6 +1223,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
                 e.bind(on);
             }
             try e.restoreRegs(save);
+            if (e.fp) try fpEnter(e, false);
             try e.loadChunks();
         },
         .copy => try copyOp(e, idx),
@@ -1212,6 +1236,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             const save = e.saveMask(idx, false);
             try e.saveRegs(save);
             // Missing arguments are 0, as in ir_eval.
+            if (e.fp) try fpLeave(e);
             for (args, scr, 1..) |v, s, k| try e.mov(@intCast(k), if (v != ir.none) s else ZR);
             try e.mov(0, CTX);
             try e.ldrCtx(IP0, ctx.off.helpers);
@@ -1219,6 +1244,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.call(IP0);
             try e.mov(SD, 0);
             try e.restoreRegs(save);
+            if (e.fp) try fpEnter(e, false);
             try e.loadChunks();
             if (ty != .none) try e.finish(idx, SD);
         },
@@ -1270,6 +1296,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             // through to the exit, which names the site in exit_info.
             try e.writeback(e.dirty);
             try e.retireOn(i.retired);
+            if (e.fp) try fpLeave(e);
             try e.put(0x910003BF); // mov sp, x29
             const site = e.pos();
             try e.put(chain_unlinked);
@@ -1294,7 +1321,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             const back: u32 = @bitCast(@as(i32, @intCast(@as(isize, @intCast(site)) - @as(isize, @intCast(e.pos())))));
             try e.put(0x10000000 | (back & 3) << 29 | ((back >> 2) & 0x7ffff) << 5 | @as(u32, IP0)); // adr x16, site
             try e.strCtx(IP0, ctx.off.exit_info);
-            try e.leave(.chain, i.aux, 0, 0);
+            try e.leaveTo(.chain, i.aux, 0, 0, e.epilogue_plain);
         },
         .@"exit.svc" => try e.leave(.svc, i.aux, e.dirty, i.retired),
         .@"exit.brk" => try e.leave(.brk, i.aux, e.dirty, i.retired),
@@ -1304,6 +1331,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.writeback(e.dirty);
             try e.retireOn(i.retired);
             try e.strCtx(v, ctx.off.exit_pc);
+            if (e.fp) try fpLeave(e);
             // The jump cache, inline: a hit goes straight to the target's
             // chain entry.
             const miss = try e.label();
@@ -1321,7 +1349,7 @@ fn lower(e: *E, idx: usize) EmitError!void {
             try e.put(0xD61F0000 | @as(u32, IP0) << 5); // br x16
             e.bind(miss);
             try e.put(0x52800000 | @as(u32, @intFromEnum(ctx.Exit.indirect)) << 5);
-            try e.b(e.epilogue);
+            try e.b(e.epilogue_plain);
         },
         else => if (i.op.isPure()) try fallback(e, idx) else return error.Unsupported,
     }
@@ -1541,6 +1569,7 @@ fn copyOp(e: *E, idx: usize) !void {
         e.dirty = 0;
         const save = e.saveMask(idx, false);
         try e.saveRegs(save);
+        if (e.fp) try fpLeave(e);
         try e.mov(0, CTX);
         try e.movImm(1, i.aux & 0xffff_ffff);
         try e.movImm(2, 0);
@@ -1548,6 +1577,7 @@ fn copyOp(e: *E, idx: usize) !void {
         try e.call(IP0);
         try e.cbnz(false, 0, e.epilogue);
         try e.restoreRegs(save);
+        if (e.fp) try fpEnter(e, false);
         return e.loadChunks();
     }
     const fields = regalloc.copyFields(i.aux2);
@@ -1593,33 +1623,16 @@ fn copyOp(e: *E, idx: usize) !void {
         word = (word & ~(@as(u32, 31) << pos[k])) | field << pos[k];
     }
     const nz = host.guest_nzcv.?;
-    const fp = i.aux & regalloc.copy_fp != 0;
     if (i.aux & regalloc.copy_reads_nzcv != 0) {
         try readGuest(e, nz, 4, IP0);
         try e.put(0xD51B4200 | @as(u32, IP0)); // msr nzcv, x16
-    }
-    if (fp) {
-        // The guest's FPCR for this instruction, the host's kept in the
-        // save area, and a clear FPSR to collect its exceptions.
-        try e.put(0xD53B4400 | @as(u32, IP0)); // mrs x16, fpcr
-        try e.strSlot(IP0, e.saveArea(va_save));
-        try readGuest(e, host.guest_fpcr.?, 4, IP0);
-        try e.put(0xD51B4400 | @as(u32, IP0)); // msr fpcr, x16
-        try e.put(0xD51B4420 | @as(u32, ZR)); // msr fpsr, xzr
     }
     try e.put(word);
     if (i.aux & regalloc.copy_writes_nzcv != 0) {
         try e.put(0xD53B4200 | @as(u32, IP0)); // mrs x16, nzcv
         try writeGuest(e, nz, 4, IP0);
     }
-    if (fp) {
-        try e.put(0xD53B4420 | @as(u32, IP0)); // mrs x16, fpsr
-        try readGuest(e, host.guest_fpsr.?, 4, IP1);
-        try e.dp(0x2A000000, false, IP1, IP1, IP0);
-        try writeGuest(e, host.guest_fpsr.?, 4, IP1);
-        try e.ldrSlot(IP0, e.saveArea(va_save));
-        try e.put(0xD51B4400 | @as(u32, IP0)); // msr fpcr, x16
-    }
+
     for (fields, 0..) |fo, k| {
         const f = fo orelse continue;
         if (!f.write) continue;
@@ -1632,6 +1645,53 @@ fn copyOp(e: *E, idx: usize) !void {
     }
 }
 
+
+/// Moves the exceptions host FPSR collected into the guest's FPSR, and
+/// clears it. Uses x16, x17.
+fn fpFlush(e: *E) !void {
+    const done = try e.label();
+    try e.put(0xD53B4420 | @as(u32, IP0)); // mrs x16, fpsr
+    try e.cbz(true, IP0, done);
+    try e.ldst(false, 2, IP1, CPU, host.guest_fpsr.?);
+    try e.dp(0x2A000000, false, IP1, IP1, IP0);
+    try e.ldst(true, 2, IP1, CPU, host.guest_fpsr.?);
+    try e.put(0xD51B4420 | @as(u32, ZR)); // msr fpsr, xzr
+    e.bind(done);
+}
+
+/// Leaving an FP region, or calling out of it: FPSR flushed, and the host's
+/// FPCR back. Uses x16, x17 and NZCV; needs the frame.
+fn fpLeave(e: *E) !void {
+    try fpFlush(e);
+    const same = try e.label();
+    try e.ldrSlot(IP0, e.saveArea(fpcr_save));
+    try e.put(0xD53B4400 | @as(u32, IP1)); // mrs x17, fpcr
+    try e.dp(0x6B000000, true, ZR, IP0, IP1);
+    try e.bcond(EQ, same);
+    try e.put(0xD51B4400 | @as(u32, IP0)); // msr fpcr, x16
+    e.bind(same);
+}
+
+/// Entering an FP region (at its chain entry, `entry`), or back from a call:
+/// the guest's FPCR, written only if it differs, since MSR FPCR is slow.
+fn fpEnter(e: *E, entry: bool) !void {
+    const same = try e.label();
+    try e.put(0xD53B4400 | @as(u32, IP0)); // mrs x16, fpcr
+    if (entry) {
+        try e.strSlot(IP0, e.saveArea(fpcr_save));
+        // Whatever the host left in FPSR isn't the guest's.
+        const clear = try e.label();
+        try e.put(0xD53B4420 | @as(u32, IP1)); // mrs x17, fpsr
+        try e.cbz(true, IP1, clear);
+        try e.put(0xD51B4420 | @as(u32, ZR)); // msr fpsr, xzr
+        e.bind(clear);
+    }
+    try e.ldst(false, 2, IP1, CPU, host.guest_fpcr.?);
+    try e.dp(0x6B000000, true, ZR, IP0, IP1);
+    try e.bcond(EQ, same);
+    try e.put(0xD51B4400 | @as(u32, IP1)); // msr fpcr, x17
+    e.bind(same);
+}
 
 /// The register of the chunk that is exactly `bytes` bytes at `off`.
 fn exactChunk(e: *E, off: u64, bytes: u64) ?u5 {
