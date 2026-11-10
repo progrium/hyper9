@@ -148,6 +148,8 @@ const E = struct {
     /// then hold only what native ops raised since they were last cleared,
     /// all of it already in the guest's words (see fpNative).
     watch: bool = false,
+    /// The next instruction was lowered with this one (condNow).
+    skip_next: bool = false,
 
     fn pos(e: *E) usize {
         return e.out.items.len - e.base;
@@ -402,6 +404,35 @@ const E = struct {
         if (e.watch) try clearHostFlags(e);
     }
 
+    /// With the host's flags just set as an eflags.* op at `idx` defines
+    /// them: if the next instruction is an eflags.cond of it, computes the
+    /// condition now with a setcc (instead of a popfq later), and has the
+    /// emit loop skip it. inc and dec leave the host's CF alone, so for
+    /// them only conditions without CF.
+    fn condNow(e: *E, r: *const ir.Region, idx: usize, no_cf: bool) !void {
+        if (idx + 1 >= r.insts.items.len) return;
+        const n = r.insts.items[idx + 1];
+        if (n.op != .@"eflags.cond" or n.a != idx) return;
+        const cc: u8 = @intCast(n.aux);
+        if (no_cf and (cc == CC.b or cc == CC.ae or cc == CC.be or cc == CC.a)) return;
+        try e.bs(&.{ 0x41, 0x0f, 0x90 + cc, 0xc3 }); // setcc r11b
+        try e.bs(&.{ 0x45, 0x0f, 0xb6, 0xdb }); // movzx r11d, r11b
+        try e.stVal(@intCast(idx + 1), R11);
+        e.skip_next = true;
+    }
+
+    /// condNow for nzcv.sub and nzcv.sbc, and the nzcv.cond after.
+    fn condNowNzcv(e: *E, r: *const ir.Region, idx: usize) !void {
+        if (idx + 1 >= r.insts.items.len) return;
+        const n = r.insts.items[idx + 1];
+        if (n.op != .@"nzcv.cond" or n.a != idx or n.aux >= 14) return;
+        const cc = nzcv_cc[@intCast(n.aux)];
+        try e.bs(&.{ 0x41, 0x0f, 0x90 + cc, 0xc3 }); // setcc r11b
+        try e.bs(&.{ 0x45, 0x0f, 0xb6, 0xdb }); // movzx r11d, r11b
+        try e.stVal(@intCast(idx + 1), R11);
+        e.skip_next = true;
+    }
+
     /// lea rsp, [rbp - saved_bytes]: the frame torn down to the pushes.
     fn dropFrame(e: *E) !void {
         try e.bs(&.{ 0x48, 0x8d, 0x65, @bitCast(-@as(i8, saved_bytes)) });
@@ -476,6 +507,10 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
                 continue;
             }
             try lower(&e, r, idx);
+            if (e.skip_next) {
+                e.skip_next = false;
+                idx += 1;
+            }
             // The guest set an exception word: start the host's flags over.
             if (e.watch and r.insts.items[idx].op == .setreg and setsWatched(r, r.insts.items[idx])) try clearHostFlags(&e);
         }
@@ -716,6 +751,9 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
                 },
                 else => unreachable,
             }
+            // After a subtract the host's CF is Arm's !C, the form
+            // nzcv_cc is for.
+            if (i.op == .@"nzcv.sub" or i.op == .@"nzcv.sbc") try e.condNowNzcv(r, idx);
             try hostFlags(e);
             const invert_c = i.op == .@"nzcv.sub" or i.op == .@"nzcv.sbc";
             try packNzcv(e, invert_c, i.op == .@"nzcv.logic");
@@ -772,6 +810,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
                 },
                 else => unreachable,
             }
+            try e.condNow(r, idx, i.op == .@"eflags.inc" or i.op == .@"eflags.dec");
             try hostFlags(e);
             try e.aluImm(false, 4, RAX, @intCast(mask));
             if (i.op == .@"eflags.inc" or i.op == .@"eflags.dec") {
@@ -2080,3 +2119,4 @@ test "random regions match ir_eval" {
         return error.TestExpectedEqual;
     }
 }
+
