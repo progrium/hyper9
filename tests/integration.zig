@@ -1982,7 +1982,8 @@ test "--timeout stops a console read on a terminal at once [baseline]" {
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "500ms", "--rc", "echo ready; read" });
+        var tb: [16]u8 = undefined;
+        var t = try spawnTerm(e, backend, &.{ "--timeout", slowTimeout(&tb, 500), "--rc", "echo ready; read" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         // Before the reader thread, the read held the machine until a
@@ -2243,9 +2244,10 @@ test "an unhandled note kills the process with the note as its status [baseline]
 test "--timeout posts hangup before tearing down [baseline]" {
     const e = try env(@src());
     // rc must define sighup before the timeout, which takes a few guest
-    // process starts on a slow host.
+    // process starts on a slow host (or under -Djit-check), and the
+    // timeout must come before sleep's 10 s.
     var tb: [16]u8 = undefined;
-    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 300), "--rc", "fn sighup { echo got hangup }; sleep 10; echo after" });
+    const r = try run(e, &.{ "--timeout", slowTimeout(&tb, 2_000), "--rc", "fn sighup { echo got hangup }; sleep 10; echo after" });
     defer r.deinit();
     // rc execs a last simple command in place, dropping its handler, so
     // sleep isn't last here.
