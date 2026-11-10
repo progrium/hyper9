@@ -141,6 +141,12 @@ pub const Vcpu = Impl.EmuVcpu;
 /// which has no 64-bit atomics.)
 pub var retired_total: std.atomic.Value(if (web) usize else u64) = .init(0);
 
+/// Host addresses of the last vCPU run, for benchmarks that vary with
+/// layout: its Cpu (the arm64 vector registers where it has them), the
+/// guest arena, the code cache's region, and the run loop's stack.
+pub const Layout = struct { cpu: usize = 0, arena: usize = 0, code: usize = 0, stack: usize = 0 };
+pub var layout: Layout = .{};
+
 /// T1's dispatch counts so far, both guests' together (native hosts).
 pub fn t1Stats() [4]u64 {
     const a = ha64.t1_stats;
@@ -620,6 +626,15 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     const exit = switch (s.cpu) {
                         inline else => |*c, a| blk: {
                             cx.cpu = @intFromPtr(c);
+                            if (!web) {
+                                var here: u8 = 0;
+                                layout = .{
+                                    .cpu = if (@hasField(@TypeOf(c.*), "t0") and @hasField(@TypeOf(c.t0), "v")) @intFromPtr(&c.t0.v) else @intFromPtr(c),
+                                    .arena = @intFromPtr(b.arena.mem.ptr),
+                                    .code = if (b.jit) |j| @intFromPtr(j.region.exec(0)) else 0,
+                                    .stack = @intFromPtr(&here),
+                                };
+                            }
                             if (std.debug.runtime_safety) s.running.store(true, .seq_cst);
                             defer if (std.debug.runtime_safety) s.running.store(false, .seq_cst);
                             const G = Guest(a);

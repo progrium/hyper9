@@ -331,6 +331,16 @@ pub fn emuT1Stats() ?[4]u64 {
     return if (comptime zemu) |z| z.t1Stats() else null;
 }
 
+/// Host addresses of the emulator's last vCPU run (Cpu, guest arena,
+/// code region, stack), where it's built in (-Demu=zig); null otherwise.
+pub fn emuLayout() ?[4]usize {
+    if (comptime zemu) |z| {
+        const l = z.layout;
+        return .{ l.cpu, l.arena, l.code, l.stack };
+    }
+    return null;
+}
+
 /// The emulator's version (Unicorn's, e.g. "2.1"), or null if it isn't built in.
 pub fn emuVersion(buf: []u8) ?[]const u8 {
     return if (have_emu) emu.version(buf) else null;

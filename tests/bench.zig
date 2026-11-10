@@ -272,6 +272,9 @@ pub fn main(init: std.process.Init) !void {
                     try w.print("{s: <7} {t: <6} {s: <7} {d: >7.3}s  {d: <10.1}", .{ c.name, arch, label, s, s / (@as(f64, @floatFromInt(native_ns)) / 1e9) });
                     if (insns) |n| try w.print(" {d:.2} G instructions/s ({d} M)", .{ @as(f64, @floatFromInt(n)) / s / 1e9, n / 1_000_000 });
                     if (st) |v| try w.print("  [compiled {d}, entries {d}, linked {d}, t0 {d}]", .{ v[0], v[1], v[2], v[3] });
+                    // Where things sat, modulo 16 KiB, for runs that vary
+                    // from process to process.
+                    if (st != null) if (vmm.emuLayout()) |l| try w.print("  [mod 16K: cpu.v 0x{x}, arena 0x{x}, code 0x{x}, stack 0x{x}]", .{ l[0] % 16384, l[1] % 16384, l[2] % 16384, l[3] % 16384 });
                     if (!std.mem.eql(u8, r.msg[0..@min(r.msg.len, 8)], &hex) or r.msg.len != 8) {
                         try w.print("  WRONG: exited \"{s}\", want {s}\n", .{ r.msg, &hex });
                         bad = true;
