@@ -1072,3 +1072,7 @@ fn mapFill(p: *anyopaque, tlb: *mem.Tlb, va: u64, acc: mem.Access) Fill {
     }
     return .{ .fault = .unmapped };
 }
+
+test {
+    _ = @import("oracle_test.zig");
+}
