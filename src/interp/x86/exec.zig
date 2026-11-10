@@ -63,6 +63,20 @@ pub fn step(c: *Cpu, mem: anytype) ?Exit {
     return null;
 }
 
+/// Decoded instructions by address, direct-mapped, each with the bytes
+/// it was decoded from: a hit is used only if memory still holds them.
+pub const ICache = struct {
+    pub const n = 2048;
+    e: [n]Entry = @splat(.{}),
+
+    pub const Entry = struct {
+        eip: u32 = 0,
+        valid: bool = false,
+        bytes: [dec.max_len]u8 = undefined,
+        inst: Inst = undefined,
+    };
+};
+
 /// An instruction left: `Exec.exit` says how.
 pub const Trap = error{Trap};
 
@@ -396,10 +410,16 @@ pub fn Exec(comptime M: type) type {
             const p = try x.ptr(eip, .exec);
             const avail = page_size - (eip & (page_size - 1));
             if (avail >= dec.max_len) {
-                return dec.decode(p[0..dec.max_len]) catch |e| switch (e) {
-                    error.TooLong => x.exc(cpu_mod.vec_gp),
-                    error.Truncated => unreachable,
-                };
+                const ic = x.c.icache orelse return x.decodeWhole(p);
+                // A hit must still match the bytes in memory, so code
+                // written since (by any vCPU or the host) is decoded again.
+                const k = (eip ^ (eip >> 9)) & (ICache.n - 1);
+                const e = &ic.e[k];
+                if (e.eip == eip and e.valid and std.mem.eql(u8, e.bytes[0..e.inst.len], p[0..e.inst.len])) return e.inst;
+                const inst = try x.decodeWhole(p);
+                e.* = .{ .eip = eip, .valid = true, .inst = inst, .bytes = undefined };
+                @memcpy(e.bytes[0..inst.len], p[0..inst.len]);
+                return inst;
             }
             var buf: [dec.max_len]u8 = undefined;
             @memcpy(buf[0..avail], p[0..avail]);
@@ -411,6 +431,13 @@ pub fn Exec(comptime M: type) type {
             return dec.decode(buf[0..len]) catch |e| switch (e) {
                 error.TooLong => x.exc(cpu_mod.vec_gp),
                 error.Truncated => x.pageFault(eip +% avail, .exec),
+            };
+        }
+
+        fn decodeWhole(x: *X, p: [*]u8) Trap!Inst {
+            return dec.decode(p[0..dec.max_len]) catch |e| switch (e) {
+                error.TooLong => x.exc(cpu_mod.vec_gp),
+                error.Truncated => unreachable,
             };
         }
 
@@ -1390,4 +1417,22 @@ test "rep movsb across pages and a fault resumes exactly" {
     try std.testing.expectEqual(Exit.breakpoint, run(&c, &m, .{}));
     try std.testing.expectEqualSlices(u8, buf[0xff0..0x1030], buf[0x1ff8..0x2038]);
     try std.testing.expectEqual(@as(u32, 0), c.r[1]);
+}
+
+test "a store into the code takes effect at the next instruction" {
+    var c: Cpu = .{};
+    var ic: ICache = .{};
+    c.icache = &ic;
+    // Runs a MOV, patches its immediate, and runs it again, with the
+    // decoded-instruction cache on:
+    //   0: b8 01 00 00 00        movl $1, %eax
+    //   5: 85 db                 testl %ebx, %ebx
+    //   7: 75 0b                 jne done
+    //   9: 43                    incl %ebx
+    //   a: c6 05 01 00 01 00 07  movb $7, 0x10001
+    //  11: eb ed                 jmp 0
+    //  13: cc                    done: int3
+    const code = [_]u8{ 0xb8, 1, 0, 0, 0, 0x85, 0xdb, 0x75, 0x0a, 0x43, 0xc6, 0x05, 0x01, 0x00, 0x01, 0x00, 0x07, 0xeb, 0xed, 0xcc };
+    try std.testing.expectEqual(Exit.breakpoint, try runCode(&code, &c));
+    try std.testing.expectEqual(@as(u32, 7), c.r[0]);
 }

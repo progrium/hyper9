@@ -88,6 +88,8 @@ pub const Cpu = struct {
     ecode: u32 = 0,
     /// Guest instructions retired.
     retired: u64 = 0,
+    /// T0's decoded-instruction cache, which the owner allocates.
+    icache: ?*@import("exec.zig").ICache = null,
 
     pub inline fn esp(c: *const Cpu) u32 {
         return c.r[4];
