@@ -86,8 +86,12 @@ const io_base = staging + 40;
 const mxcsr_tmp = staging + 32;
 /// The guest's flags word while pending.flags defers it (E.pend_off).
 const pend_slot = io_base + 48;
+/// The same_page hint's pairs: a page number and its TLB delta, each
+/// saved by an access that a later one in its block names (hintPlan).
+const hint_slots = 4;
+const hint_base = pend_slot + 8;
 /// Where a call keeps the live values of caller-saved registers.
-const save_base = pend_slot + 8;
+const save_base = hint_base + 16 * hint_slots;
 const slots_base = save_base + 8 * 16;
 
 /// The callee-saved registers every region pushes after rbp, in order.
@@ -162,6 +166,11 @@ const E = struct {
     /// memory except while flags are pending, and goes out at every exit
     /// and call (syncPend); null when each pending.flags writes at once.
     pend_off: ?i32 = null,
+    /// Per instruction: the hint pair a load or store saves its page and
+    /// delta to (a later access names it), or -1; and the pair it may
+    /// take them from instead of the TLB (its same_page hint), or -1.
+    hint_save: []i8 = &.{},
+    hint_use: []i8 = &.{},
 
     /// pend_slot to the guest's word. r10 and r11 only.
     fn syncPend(e: *E) !void {
@@ -507,6 +516,11 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     if (p.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
     var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len, .r = r, .p = &p };
     defer e.fixups.deinit(gpa);
+    e.hint_save = try gpa.alloc(i8, r.insts.items.len);
+    defer gpa.free(e.hint_save);
+    e.hint_use = try gpa.alloc(i8, r.insts.items.len);
+    defer gpa.free(e.hint_use);
+    hintPlan(r, e.hint_save, e.hint_use);
     const block_pos = try gpa.alloc(usize, r.blocks.items.len);
     defer gpa.free(block_pos);
 
@@ -1247,19 +1261,9 @@ fn vmemOp(e: *E, i: ir.Inst, dst: ir.Ref) !void {
         e.land(ok);
     }
     const table: i32 = if (store) mem.tlb_write_off else mem.tlb_read_off;
-    try e.mov(R10, RAX);
-    try e.shiftImm(true, 5, R10, mem.page_shift);
-    try e.ldCtx(R11, ctx.off.tlb);
-    try e.rr(false, &.{ 0x0f, 0xb6 }, RDX, R10);
-    try e.shiftImm(false, 4, RDX, 4);
-    try e.rr(true, &.{0x01}, RDX, R11);
-    try e.rm(true, &.{0x39}, R10, R11, table);
+    try tlbLookup(e, 16, table);
     const miss1 = try e.fwd(CC.ne);
-    try e.mov(RDX, RAX);
-    try e.aluImm(false, 4, RDX, mem.page_size - 1);
-    try e.aluImm(false, 7, RDX, mem.page_size - 16);
-    const miss2 = try e.fwd(CC.a);
-    try e.rm(true, &.{0x03}, RAX, R11, table + 8);
+    try e.rm(true, &.{0x03}, RAX, RDX, table + 8);
     if (store) {
         try vload(e, 0, RSP, slotDisp(e.vslot(i.b)));
         try vstore(e, RAX, 0, 0);
@@ -1269,7 +1273,6 @@ fn vmemOp(e: *E, i: ir.Inst, dst: ir.Ref) !void {
     }
     const join = try e.fwd(null);
     e.land(miss1);
-    e.land(miss2);
     // Two halves, the low first; the address is kept in the io area.
     try e.store(RSP, io_base, RAX);
     for (0..2) |h| {
@@ -1924,6 +1927,70 @@ fn fallback(e: *E, i: ir.Inst, ta: Type) !void {
 
 /// A load or store through the TLB, with the slow path inline after the
 /// fast path's jump over it. rax is the address, rcx the value to store.
+/// rdx = this va's entry in the TLB (less `table`), and the flags set by
+/// comparing its tag with the page of the access's last byte: equal (ZF)
+/// only if every byte of the `n` at rax is on a page the TLB holds, since
+/// the entry is the first byte's (a page and the next never share one).
+/// rax is kept; r10 is clobbered.
+fn tlbLookup(e: *E, n: u32, table: i32) !void {
+    comptime std.debug.assert(mem.page_shift == 12 and mem.entries == 256 and @sizeOf(mem.TlbEntry) == 16);
+    try e.rr(false, &.{0x89}, RAX, RDX); // mov edx, eax
+    try e.shiftImm(false, 5, RDX, 8); // shr edx, 8
+    try e.aluImm(false, 4, RDX, 0xff0); // and edx, 0xff0: ((va >> 12) & 255) * 16
+    try e.rm(true, &.{0x03}, RDX, CTX, ctx.off.tlb); // add rdx, [rbx+tlb]
+    if (n > 1) {
+        try e.rm(true, &.{0x8d}, R10, RAX, @intCast(n - 1)); // lea r10, [rax+n-1]
+    } else try e.mov(R10, RAX);
+    try e.shiftImm(true, 5, R10, mem.page_shift); // shr r10, 12
+    try e.rm(true, &.{0x39}, R10, RDX, table); // cmp [rdx+table], r10
+}
+
+/// Which loads and stores save their page and TLB delta for a later one
+/// to reuse (MemFlags.same_page), in which of the hint_slots pairs, and
+/// which may reuse them: those whose hint names an access of the same
+/// block, with no call between that could change the TLB, whose pair no
+/// other access has taken since.
+fn hintPlan(r: *const ir.Region, save: []i8, use: []i8) void {
+    @memset(save, -1);
+    @memset(use, -1);
+    for (r.blocks.items) |blk| {
+        // The accesses that some later one names.
+        const end = blk.start + blk.len;
+        var named = std.StaticBitSet(4096).initEmpty();
+        if (blk.len > named.capacity()) continue;
+        for (blk.start..end) |k| {
+            const i = r.insts.items[k];
+            if (i.op != .load and i.op != .store) continue;
+            const f: ir.MemFlags = @bitCast(i.aux);
+            if (f.same_page == 0 or f.same_page > k - blk.start) continue;
+            named.set(k - f.same_page - blk.start);
+        }
+        var owner: [hint_slots]usize = @splat(std.math.maxInt(usize));
+        var next: u8 = 0;
+        var last_call: usize = blk.start;
+        for (blk.start..end) |k| {
+            const i = r.insts.items[k];
+            switch (i.op) {
+                .@"call.interp", .@"call.helper", .copy => last_call = k + 1,
+                .load, .store => {
+                    const f: ir.MemFlags = @bitCast(i.aux);
+                    if (f.same_page != 0 and f.same_page <= k - blk.start) {
+                        const j = k - f.same_page;
+                        const sj = save[j];
+                        if (sj >= 0 and owner[@intCast(sj)] == j and j >= last_call and r.insts.items[j].op == i.op) use[k] = sj;
+                    }
+                    if (named.isSet(k - blk.start)) {
+                        save[k] = @intCast(next);
+                        owner[next] = k;
+                        next = (next + 1) % hint_slots;
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+}
+
 fn memOp(e: *E, i: ir.Inst) !void {
     const f: ir.MemFlags = @bitCast(i.aux);
     const store = i.op == .store;
@@ -1940,20 +2007,42 @@ fn memOp(e: *E, i: ir.Inst) !void {
         e.land(ok);
     }
     const table: i32 = if (store) mem.tlb_write_off else mem.tlb_read_off;
-    // r10 = &tlb.{read,write}[(va >> 12) & 255]
-    try e.mov(R10, RAX);
-    try e.shiftImm(true, 5, R10, mem.page_shift); // shr r10, 12
-    try e.ldCtx(R11, ctx.off.tlb);
-    try e.rr(false, &.{ 0x0f, 0xb6 }, RDX, R10); // movzx edx, r10b
-    try e.shiftImm(false, 4, RDX, 4); // shl edx, 4
-    try e.rr(true, &.{0x01}, RDX, R11); // add r11, rdx
-    try e.rm(true, &.{0x39}, R10, R11, table); // cmp [r11+table], r10
+    const save: ?i32 = if (e.hint_save[e.idx] >= 0) hint_base + 16 * @as(i32, e.hint_save[e.idx]) else null;
+    var hinted: ?usize = null;
+    if (e.hint_use[e.idx] >= 0) {
+        // The page an earlier access in the block found: every byte on it
+        // takes its delta, with no TLB load.
+        const pair: i32 = hint_base + 16 * @as(i32, e.hint_use[e.idx]);
+        try e.mov(R10, RAX);
+        try e.shiftImm(true, 5, R10, mem.page_shift); // shr r10, 12
+        try e.rm(true, &.{0x3b}, R10, RSP, pair); // cmp r10, [rsp+page]
+        const other = try e.fwd(CC.ne);
+        var cross: ?usize = null;
+        if (n > 1) {
+            try e.rm(true, &.{0x8d}, RDX, RAX, @intCast(n - 1)); // lea rdx, [rax+n-1]
+            try e.shiftImm(true, 5, RDX, mem.page_shift);
+            try e.rr(true, &.{0x39}, R10, RDX); // cmp rdx, r10
+            cross = try e.fwd(CC.ne);
+        }
+        try e.load(RDX, RSP, pair + 8);
+        if (save) |sv| {
+            try e.store(RSP, sv, R10);
+            try e.store(RSP, sv + 8, RDX);
+        }
+        try e.rr(true, &.{0x01}, RDX, RAX); // add rax, rdx
+        hinted = try e.fwd(null);
+        e.land(other);
+        if (cross) |c| e.land(c);
+    }
+    try tlbLookup(e, n, table);
     const miss1 = try e.fwd(CC.ne);
-    try e.mov(RDX, RAX);
-    try e.aluImm(false, 4, RDX, mem.page_size - 1); // and edx, 0xfff
-    try e.aluImm(false, 7, RDX, @intCast(mem.page_size - n)); // cmp edx, page - n
-    const miss2 = try e.fwd(CC.a);
-    try e.rm(true, &.{0x03}, RAX, R11, table + 8); // add rax, [r11+delta]
+    if (save) |sv| {
+        try e.store(RSP, sv, R10); // the page (the tag, which matched)
+        try e.load(RDX, RDX, table + 8);
+        try e.store(RSP, sv + 8, RDX);
+        try e.rr(true, &.{0x01}, RDX, RAX); // add rax, rdx
+    } else try e.rm(true, &.{0x03}, RAX, RDX, table + 8); // add rax, [rdx+delta]
+    if (hinted) |h| e.land(h);
     if (store) {
         switch (f.size) {
             0 => try e.bs(&.{ 0x88, 0x08 }), // mov [rax], cl
@@ -1972,7 +2061,12 @@ fn memOp(e: *E, i: ir.Inst) !void {
     const join = try e.fwd(null);
     // Slow path.
     e.land(miss1);
-    e.land(miss2);
+    if (save) |sv| {
+        // No page for a later access to take: `invalid`, which no page
+        // number (va >> 12) equals.
+        try e.movImm(R10, mem.TlbEntry.invalid);
+        try e.store(RSP, sv, R10);
+    }
     if (store) {
         try e.ldCtx(R11, ctx.off.slow_store);
         try e.call(&.{ .{ .reg = RAX }, .{ .imm = f.size }, .{ .reg = RCX } });
