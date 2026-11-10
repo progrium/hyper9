@@ -147,3 +147,27 @@ test "fuzz-a64: FP and SIMD programs agree region by region, lifted" {
         }
     }
 }
+
+test "fuzz-a64: programs agree region by region with copies" {
+    const copy = @import("../a64/copy.zig");
+    const was = copy.enabled;
+    copy.enabled = true;
+    defer copy.enabled = was;
+    const gpa = std.testing.allocator;
+    const s = try gpa.create(Space);
+    defer gpa.destroy(s);
+    s.load(&.{}, 0);
+    const r = try check.Run.init(gpa, &a64.guest, check.mapBacking(&s.map));
+    defer r.deinit();
+    var prng = std.Random.DefaultPrng.init(0xc0b1);
+    var buf: [65]u32 = undefined;
+    for (0..300) |i| {
+        const words = gen.program(prng.random(), .{ .len = 48 }, &buf);
+        s.load(words, i);
+        const out = try checkRegions(gpa, r, s, s.cpu(prng.random()), 64, null);
+        if (!out.ok) {
+            std.debug.print("program {d} diverges:\n{s}\n", .{ i, r.report.items });
+            return error.Diverged;
+        }
+    }
+}

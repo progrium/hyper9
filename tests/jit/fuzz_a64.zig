@@ -24,6 +24,9 @@ pub fn main(init: std.process.Init) !void {
     if (!options.unicorn and args.lockstep) args.lockstep = false;
     // Check FP and SIMD lifting whatever this host's emitter takes.
     vcpu.a64.lift_simd.enabled = true;
+    // H9_FUZZ_COPY=1: copy register-only instructions (copy.zig), checked
+    // on ir_eval and, with --native, by the arm64 emitter's lowering.
+    if (std.c.getenv("H9_FUZZ_COPY")) |v| vcpu.a64.copy.enabled = v[0] == '1';
     std.debug.print("fuzz-a64: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
 
     const s = try gpa.create(fuzz.Space);

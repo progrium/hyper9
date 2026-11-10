@@ -34,6 +34,7 @@ const flags_mod = @import("flags.zig");
 const dec = @import("../../interp/a64/decode.zig");
 const t0 = @import("../../interp/a64/exec.zig");
 const lift_simd = @import("lift_simd.zig");
+const copy = @import("copy.zig");
 
 const Kind = dec.Kind;
 const Cpu = t0.Cpu;
@@ -205,11 +206,17 @@ pub fn lift(b: *Builder, src: fe.Source, pc: u64, limits: fe.Limits) fe.LiftErro
         while (!leader[last + 1]) last += 1;
         while (true) {
             const in = insns[i];
-            switch (in.how) {
+            // On arm64 hosts, a register-only instruction runs as itself.
+            const cp: ?copy.Plan = if (copy.enabled and (in.how == .lift or in.how == .interp)) copy.plan(in.word, in.op) else null;
+            if (cp) |c| {
+                try copy.emit(&l, c);
+                l.pending += 1;
+            } else switch (in.how) {
                 .lift => if (in.op.k.isSimd()) {
                     // A run of FP/SIMD instructions: lift_simd.zig's.
                     var j = i;
-                    while (j < last and insns[j + 1].how == .lift and insns[j + 1].op.k.isSimd()) j += 1;
+                    while (j < last and insns[j + 1].how == .lift and insns[j + 1].op.k.isSimd() and
+                        !(copy.enabled and copy.plan(insns[j + 1].word, insns[j + 1].op) != null)) j += 1;
                     try lift_simd.run(&l, insns[i .. j + 1]);
                     i = j;
                 } else {
