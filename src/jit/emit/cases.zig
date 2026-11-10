@@ -774,5 +774,48 @@ pub fn generatePending(gpa: std.mem.Allocator) ![]Case {
             \\{2s}
         , .{ op, grp, tail }) });
     };
+    // A countdown loop (subs; b.ne): the compare, the flags, and the
+    // branch may share the host's flags, and a poll may leave mid-loop.
+    for ([_]i64{ std.math.maxInt(i64), 3 }) |budget| {
+        try list.append(gpa, .{ .regs = .{ 5, 0, 0, 0xdead_beef_ffff_ffff, 0, 0, 0, 0 }, .budget = budget, .text = try gpa.dupe(u8,
+            \\b0:
+            \\  poll #0x40
+            \\  %1 = getreg:i64 #0x0
+            \\  %2 = const:i64 #0x1
+            \\  %3 = sub:i64 %1, %2
+            \\  %4 = nzcv.sub:flags %1, %2
+            \\  setreg %3 #0x0
+            \\  %6 = icmp:i1 %1, %2 #0x1
+            \\  pending.flags %4 #0x18
+            \\  retire #0x2
+            \\  brcond %6 -> b0 b1
+            \\b1:
+            \\  exit.chain #0x0
+        ) });
+    }
+    // Flags pending from an op that isn't kept in host flags (adc, and
+    // an add with two uses) and from one that is.
+    try list.append(gpa, .{ .regs = .{ 0xffff_ffff, 1, 0, 0xdead_beef_ffff_ffff, 0, 0, 0, 0 }, .text = try gpa.dupe(u8,
+        \\b0:
+        \\  %0 = getreg:i32 #0x0
+        \\  %1 = getreg:i32 #0x8
+        \\  %2 = nzcv.add:flags %0, %1
+        \\  pending.flags %2 #0x18
+        \\  %4 = nzcv.adc:flags %0, %1, %2
+        \\  pending.flags %4 #0x18
+        \\  br -> b1
+        \\b1:
+        \\  %7 = getreg:i32 #0x0
+        \\  %8 = getreg:i32 #0x8
+        \\  %9 = icmp:i1 %7, %8 #0x2
+        \\  brcond %9 -> b2 b3
+        \\b2:
+        \\  %11 = getreg:i32 #0x8
+        \\  %12 = nzcv.add:flags %11, %11
+        \\  pending.flags %12 #0x18
+        \\  exit.chain #0x0
+        \\b3:
+        \\  exit.chain #0x4
+    ) });
     return list.toOwnedSlice(gpa);
 }

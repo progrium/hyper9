@@ -88,6 +88,10 @@ const io_base = staging + 40;
 const mxcsr_tmp = staging + 32;
 /// The guest's flags word while pending.flags defers it (E.pend_off).
 const pend_slot = io_base + 48;
+/// NZCV pending in the host's form (E.raw_inv), the 4 bytes after
+/// pend_slot: OF from seto, then lahf's byte. 0xff in the first means
+/// nothing is pending there, and pend_slot holds the flags too.
+const raw_slot = pend_slot + 4;
 /// The same_page hint's pairs: a page number and its TLB delta, each
 /// saved by an access that a later one in its block names (hintPlan).
 const hint_slots = 4;
@@ -164,6 +168,10 @@ const epilogue = std.math.maxInt(u32);
 
 const Fixup = struct { pos: usize, target: u32 };
 
+/// A poll's way out, emitted after the blocks: the jcc's rel32 to land,
+/// and what leave() needs.
+const Cold = struct { at: usize, pc: u64, retired: u64, dirty: regalloc.ChunkSet };
+
 const E = struct {
     gpa: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -189,6 +197,19 @@ const E = struct {
     /// memory except while flags are pending, and goes out at every exit
     /// and call (syncPend); null when each pending.flags writes at once.
     pend_off: ?i32 = null,
+    /// With pend_off, for nzcv: pending.flags keeps the host's flags
+    /// as they are (raw_slot), packing them only at syncPend. True when
+    /// the region's flags ops leave CF as Arm's !C (subtracts), false
+    /// when as C (adds and logic ops); null when they mix, or for eflags.
+    raw_inv: ?bool = null,
+    /// The flags op whose host flags are in EFLAGS now (sameFlags tells
+    /// which others it serves), or null. Ops that keep EFLAGS leave it
+    /// (keepsFlags); movImm then doesn't use xor.
+    hf: ?ir.Ref = null,
+    /// lower() set hf (to a new op, or kept it).
+    hf_set: bool = false,
+    /// Poll exits, emitted out of line after the blocks.
+    cold: std.ArrayList(Cold) = .empty,
     /// Per instruction: the hint pair a load or store saves its page and
     /// delta to (a later access names it), or -1; and the pair it may
     /// take them from instead of the TLB (its same_page hint), or -1.
@@ -198,6 +219,29 @@ const E = struct {
     /// pend_slot to the guest's word. r10 and r11 only.
     fn syncPend(e: *E) !void {
         const off = e.pend_off orelse return;
+        if (e.raw_inv) |inv| {
+            // Host flags pending: NZCV from them into pend_slot first.
+            try e.rm(false, &.{0x80}, 7, RSP, raw_slot); // cmp byte [rsp+raw], 0xff
+            try e.b(0xff);
+            const none = try e.fwd(CC.e);
+            try e.rm(false, &.{ 0x0f, 0xb6 }, R11, RSP, raw_slot + 1); // movzx r11d, lahf's byte
+            try e.mov(R10, R11);
+            try e.aluImm(false, 4, R10, 1);
+            if (inv) try e.aluImm(false, 6, R10, 1);
+            try e.shiftImm(false, 4, R10, 29); // C
+            try e.aluImm(false, 4, R11, 0xc0);
+            try e.shiftImm(false, 4, R11, 24); // N, Z
+            try e.rr(false, &.{0x09}, R10, R11);
+            try e.rm(false, &.{ 0x0f, 0xb6 }, R10, RSP, raw_slot); // movzx r10d, OF
+            try e.shiftImm(false, 4, R10, 28); // V
+            try e.rr(false, &.{0x09}, R10, R11);
+            try e.rm(false, &.{0x8b}, R10, RSP, pend_slot);
+            try e.aluImm(false, 4, R10, 0x0fff_ffff);
+            try e.rr(false, &.{0x09}, R10, R11);
+            try e.rm(false, &.{0x89}, R11, RSP, pend_slot);
+            try e.rawNone();
+            e.land(none);
+        }
         try e.rm(false, &.{0x8b}, R11, RSP, pend_slot); // mov r11d, [rsp+pend]
         try e.ldCtx(R10, ctx.off.cpu);
         try e.rm(false, &.{0x89}, R11, R10, off); // mov [cpu+off], r11d
@@ -209,6 +253,16 @@ const E = struct {
         try e.ldCtx(R10, ctx.off.cpu);
         try e.rm(false, &.{0x8b}, RAX, R10, off);
         try e.rm(false, &.{0x89}, RAX, RSP, pend_slot);
+        if (e.raw_inv != null) try e.rawNone();
+    }
+    fn setHf(e: *E, v: ir.Ref) void {
+        e.hf = v;
+        e.hf_set = true;
+    }
+    /// raw_slot holds nothing pending. Leaves EFLAGS alone.
+    fn rawNone(e: *E) !void {
+        try e.rm(false, &.{0xc6}, 0, RSP, raw_slot); // mov byte [rsp+raw], 0xff
+        try e.b(0xff);
     }
 
     fn pos(e: *E) usize {
@@ -355,7 +409,7 @@ const E = struct {
     }
 
     fn movImm(e: *E, dst: u8, imm: u64) !void {
-        if (imm == 0) {
+        if (imm == 0 and e.hf == null) {
             try e.rr(false, &.{0x31}, dst, dst); // xor r32, r32
         } else if (imm <= std.math.maxInt(u32)) {
             try e.rex(false, 0, 0, dst);
@@ -422,7 +476,7 @@ const E = struct {
         if (n > std.math.maxInt(i32)) {
             try e.movImm(R10, n);
             try e.rr(true, &.{0x01}, R10, PENDING); // add r9, r10
-        } else try e.aluImm(true, 0, PENDING, @intCast(n));
+        } else try e.rm(true, &.{0x8d}, PENDING, PENDING, @intCast(n)); // lea r9, [r9+n]: EFLAGS kept
     }
     /// ctx.retired += pending, ctx.budget -= pending, pending = 0.
     fn flush(e: *E) !void {
@@ -539,6 +593,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     if (p.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
     var e: E = .{ .gpa = gpa, .out = out, .base = out.items.len, .r = r, .p = &p };
     defer e.fixups.deinit(gpa);
+    defer e.cold.deinit(gpa);
     e.hint_save = try gpa.alloc(i8, r.insts.items.len);
     defer gpa.free(e.hint_save);
     e.hint_use = try gpa.alloc(i8, r.insts.items.len);
@@ -568,6 +623,7 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     try e.rr(false, &.{0x31}, PENDING, PENDING); // xor r9d, r9d: nothing pending
     try e.loadChunks();
     e.pend_off = pendMode(r, &p);
+    if (e.pend_off != null) e.raw_inv = rawMode(r);
     try e.reloadPend();
     for (r.insts.items) |i| {
         if (i.op.isFp() and i.aux2 != 0) e.watch = true;
@@ -578,19 +634,19 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
         block_pos[bi] = e.pos();
         e.block = @intCast(bi);
         e.dirty = p.dirty_in[bi];
+        e.hf = null;
         var idx = blk.start;
         while (idx < blk.start + blk.len) : (idx += 1) {
             e.idx = idx;
-            if (try fusedBranch(&e, r, idx)) {
-                idx += 1;
-                continue;
-            }
             if (e.pending == idx) {
                 e.pending = null;
+                e.hf = null;
                 try e.stVal(@intCast(idx), R11);
                 continue;
             }
+            e.hf_set = false;
             try lower(&e, r, idx);
+            if (!e.hf_set and !keepsFlags(&e, r, idx)) e.hf = null;
             if (e.pend_off) |po| switch (r.insts.items[idx].op) {
                 // The callee may have changed the word; a setreg over it
                 // drops what's pending.
@@ -602,6 +658,14 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
             // The guest set an exception word: start the host's flags over.
             if (e.watch and r.insts.items[idx].op == .setreg and setsWatched(r, r.insts.items[idx])) try clearHostFlags(&e);
         }
+    }
+
+    // The polls' ways out.
+    for (e.cold.items) |c| {
+        e.land(c.at);
+        e.dirty = c.dirty;
+        e.hf = null;
+        try e.leave(.interrupted, c.pc, c.retired);
     }
 
     // Epilogue: eax holds the exit code.
@@ -729,7 +793,9 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
     const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
     const dst: ir.Ref = @intCast(idx);
     if (i.op.isExt() or ty == .v128 or (i.op == .setreg and ta == .v128)) return lowerExt(e, r, i, dst);
+    if (try inFlags(e, r, idx)) return;
     if (try direct(e, i, dst)) return;
+    if (try chunkMove(e, r, idx)) return;
     if (i.a != ir.none) try e.ldVal(RAX, i.a);
     if (i.b != ir.none) try e.ldVal(RCX, i.b);
     if (i.c != ir.none) try e.ldVal(RDX, i.c);
@@ -784,8 +850,9 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         },
         .add, .sub, .@"and", .@"or", .xor, .mul => {
             switch (i.op) {
-                .add => try e.rr(true, &.{0x01}, RCX, RAX),
-                .sub => try e.rr(true, &.{0x29}, RCX, RAX),
+                // At i32 too, so EFLAGS are the op's (flagSrc).
+                .add => try e.rr(ty != .i32, &.{0x01}, RCX, RAX),
+                .sub => try e.rr(ty != .i32, &.{0x29}, RCX, RAX),
                 .@"and" => try e.rr(true, &.{0x21}, RCX, RAX),
                 .@"or" => try e.rr(true, &.{0x09}, RCX, RAX),
                 .xor => try e.rr(true, &.{0x31}, RCX, RAX),
@@ -793,6 +860,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
                 else => unreachable,
             }
             try maskTo(e, ty);
+            if ((i.op == .add or i.op == .sub) and native(ty)) e.setHf(dst);
         },
         .andn => {
             try e.rr(true, &.{0xf7}, 2, RCX); // not rcx
@@ -856,6 +924,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         .icmp => if (native(ta)) {
             try e.rr(ta == .i64, &.{0x39}, RCX, RAX); // cmp rax, rcx
             try e.setcc(pred_cc[@intCast(i.aux)]);
+            e.setHf(dst);
         } else if (ta == .i8 or ta == .i16) {
             // Widened to 32 bits, signed for the signed predicates.
             const signed = i.aux >= @intFromEnum(ir.Pred.slt);
@@ -1028,9 +1097,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
         .poll => {
             // The budget alone: a request lowers it too (cache.request).
             try e.rm(true, &.{0x39}, PENDING, CTX, ctx.off.budget); // cmp [budget], r9: budget - pending
-            const ok = try e.fwd(CC.g);
-            try e.leave(.interrupted, i.aux, i.retired);
-            e.land(ok);
+            try e.cold.append(e.gpa, .{ .at = try e.fwd(CC.le), .pc = i.aux, .retired = i.retired, .dirty = e.dirty });
         },
         .retire => try e.retireLater(i.aux),
         .@"pending.flags" => {
@@ -1043,6 +1110,22 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
                 if (i.aux < c.off + c.bytes and c.off < i.aux + 4) over |= @as(regalloc.ChunkSet, 1) << @intCast(k);
             }
             try e.aluImm(false, 4, RAX, @bitCast(mask)); // and eax, mask
+            if (e.raw_inv) |inv| {
+                // To raw_slot's form: V, then N Z and C as lahf has them.
+                try e.mov(RCX, RAX);
+                try e.shiftImm(false, 5, RCX, 28);
+                try e.aluImm(false, 4, RCX, 1);
+                try e.rm(false, &.{0x88}, RCX, RSP, raw_slot); // mov [rsp+raw], cl
+                try e.mov(RDX, RAX);
+                try e.shiftImm(false, 5, RDX, 24);
+                try e.aluImm(false, 4, RDX, 0xc0);
+                try e.shiftImm(false, 5, RAX, 29);
+                try e.aluImm(false, 4, RAX, 1);
+                if (inv) try e.aluImm(false, 6, RAX, 1);
+                try e.rr(false, &.{0x09}, RDX, RAX);
+                try e.rm(false, &.{0x88}, RAX, RSP, raw_slot + 1); // mov [rsp+raw+1], al
+                return;
+            }
             if (e.pend_off != null) {
                 // Merged into pend_slot (pendMode saw to it that no chunk
                 // holds the word).
@@ -1064,11 +1147,10 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
                 if (over & (@as(regalloc.ChunkSet, 1) << @intCast(k)) != 0) try e.chunkAccess(k, false);
             }
         },
-        .br => try e.jmpTo(null, @intCast(i.aux)),
+        .br => if (i.aux != e.block + 1) try e.jmpTo(null, @intCast(i.aux)),
         .brcond => {
             try e.rr(false, &.{0x85}, RAX, RAX);
-            try e.jmpTo(CC.ne, @intCast(i.aux));
-            try e.jmpTo(null, @intCast(i.aux2));
+            try branch(e, CC.ne, i);
         },
         .@"exit.chain" => {
             try e.writeback(e.dirty);
@@ -1144,23 +1226,193 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
     if (ty != .none) try e.stVal(dst, RAX);
 }
 
-/// An icmp whose one use is the brcond right after it: cmp and jcc,
-/// without the i1. Returns false, emitting nothing, otherwise.
-fn fusedBranch(e: *E, r: *const ir.Region, idx: usize) !bool {
+// ---- EFLAGS across ops
+//
+// A compare feeding a brcond, and an nzcv op feeding pending.flags, can
+// stay in the host's EFLAGS from where they're computed to their use, if
+// every op between leaves EFLAGS alone or would set them the same way
+// (sameFlags). Then the compare is a jcc, and pending.flags stores lahf
+// and seto (raw_slot) rather than packing NZCV.
+
+/// The host flags an op leaves, where two ops can share them: those of
+/// `sub` (or `add`) a, b at `ty`. sub, nzcv.sub, and icmp (a cmp) give
+/// the same ones.
+const FlagSrc = struct { add: bool, a: ir.Ref, b: ir.Ref, ty: Type };
+
+fn flagSrc(r: *const ir.Region, idx: usize) ?FlagSrc {
     const i = r.insts.items[idx];
-    if (i.op != .icmp or idx + 1 >= r.insts.items.len or e.p.uses[idx] != 1) return false;
-    const n = r.insts.items[idx + 1];
-    if (n.op != .brcond or n.a != idx) return false;
-    const ta = r.insts.items[i.a].ty;
-    if (!native(ta)) return false;
-    try e.ldVal(RAX, i.a);
-    switch (e.p.locs[i.b]) {
-        .reg => |x| try e.rr(ta == .i64, &.{0x3b}, RAX, @intCast(x)), // cmp rax, b
-        .slot => |s| try e.rm(ta == .i64, &.{0x3b}, RAX, RSP, slotDisp(s)),
-        .none => unreachable,
+    const ta: Type = if (i.a != ir.none) r.insts.items[i.a].ty else .none;
+    return switch (i.op) {
+        .add, .sub => if (native(i.ty)) .{ .add = i.op == .add, .a = i.a, .b = i.b, .ty = i.ty } else null,
+        .@"nzcv.add", .@"nzcv.sub", .icmp => if (native(ta)) .{ .add = i.op == .@"nzcv.add", .a = i.a, .b = i.b, .ty = ta } else null,
+        else => null,
+    };
+}
+
+fn sameFlags(r: *const ir.Region, x: usize, y: usize) bool {
+    const fx = flagSrc(r, x) orelse return false;
+    const fy = flagSrc(r, y) orelse return false;
+    return std.meta.eql(fx, fy);
+}
+
+/// getreg or setreg `idx` is only moves: a whole chunk (not i1, which
+/// maskTo ands), or the Cpu in memory.
+fn movesOnly(e: *const E, r: *const ir.Region, idx: usize) bool {
+    const i = r.insts.items[idx];
+    const t = if (i.op == .getreg) i.ty else r.insts.items[i.a].ty;
+    const sz = sizeLog2(t) orelse return false;
+    if (i.op == .setreg and e.watch and setsWatched(r, i)) return false;
+    const ck = e.p.chunk_of[idx];
+    if (ck == regalloc.no_chunk) return std.math.cast(i32, i.aux) != null;
+    const c = e.p.chunks[ck];
+    return i.aux == c.off and (@as(u32, 1) << @intCast(sz)) == c.bytes;
+}
+
+/// Ops that leave EFLAGS as they are (lower doesn't set hf for them).
+fn keepsFlags(e: *const E, r: *const ir.Region, idx: usize) bool {
+    const i = r.insts.items[idx];
+    return switch (i.op) {
+        .@"const" => true,
+        .retire => i.aux <= std.math.maxInt(i32),
+        .getreg, .setreg => movesOnly(e, r, idx),
+        else => false,
+    };
+}
+
+/// Whether EFLAGS as op `src` set them get past op `j` unchanged.
+fn passes(e: *const E, r: *const ir.Region, j: usize, src: usize) bool {
+    const n = r.insts.items[j];
+    return switch (n.op) {
+        .@"const", .retire, .getreg, .setreg => keepsFlags(e, r, j),
+        .add, .sub, .icmp => sameFlags(r, src, j),
+        .@"nzcv.add", .@"nzcv.sub" => sameFlags(r, src, j) and deferNzcv(e, r, j),
+        .@"pending.flags" => e.raw_inv != null and deferNzcv(e, r, n.a),
+        else => false,
+    };
+}
+
+/// The one use of `idx`, later in its block, when it's of op `op` and
+/// EFLAGS from `idx` reach it; else null.
+fn flagUse(e: *const E, r: *const ir.Region, idx: usize, op: Op) ?usize {
+    if (e.p.uses[idx] != 1) return null;
+    const blk = r.blocks.items[e.block];
+    var k = idx + 1;
+    while (k < blk.start + blk.len) : (k += 1) {
+        const n = r.insts.items[k];
+        if (n.op == op and n.a == idx) return k;
+        if (!passes(e, r, k, idx)) return null;
     }
-    try e.jmpTo(pred_cc[@intCast(i.aux)], @intCast(n.aux));
-    try e.jmpTo(null, @intCast(n.aux2));
+    return null;
+}
+
+/// An icmp that's only its brcond's jcc.
+fn deferIcmp(e: *const E, r: *const ir.Region, idx: usize) bool {
+    const i = r.insts.items[idx];
+    if (i.op != .icmp or !native(r.insts.items[i.a].ty)) return false;
+    return flagUse(e, r, idx, .brcond) != null;
+}
+
+/// An nzcv op that's only its pending.flags' raw store.
+fn deferNzcv(e: *const E, r: *const ir.Region, idx: usize) bool {
+    const inv = e.raw_inv orelse return false;
+    const i = r.insts.items[idx];
+    const want = switch (i.op) {
+        .@"nzcv.sub" => true,
+        .@"nzcv.add", .@"nzcv.logic" => false,
+        else => return false,
+    };
+    if (want != inv or !native(r.insts.items[i.a].ty)) return false;
+    return flagUse(e, r, idx, .@"pending.flags") != null;
+}
+
+/// For pendMode's nzcv word: raw_slot's sense of CF (E.raw_inv), if the
+/// region's pending flags agree on it.
+fn rawMode(r: *const ir.Region) ?bool {
+    var inv: ?bool = null;
+    for (r.insts.items) |i| if (i.op == .@"pending.flags") {
+        if (i.aux2 != 0) return null;
+        const want = switch (r.insts.items[i.a].op) {
+            .@"nzcv.sub", .@"nzcv.sbc" => true,
+            .@"nzcv.add", .@"nzcv.adc", .@"nzcv.logic" => false,
+            else => continue,
+        };
+        if (inv) |v| {
+            if (v != want) return null;
+        } else inv = want;
+    };
+    return inv;
+}
+
+/// brcond `i` on host condition `cc`, falling through where it can.
+fn branch(e: *E, cc: u8, i: ir.Inst) !void {
+    const next = e.block + 1;
+    if (i.aux2 == next) {
+        try e.jmpTo(cc, @intCast(i.aux));
+    } else if (i.aux == next) {
+        try e.jmpTo(cc ^ 1, @intCast(i.aux2));
+    } else {
+        try e.jmpTo(cc, @intCast(i.aux));
+        try e.jmpTo(null, @intCast(i.aux2));
+    }
+}
+
+/// The ops kept in EFLAGS (deferIcmp, deferNzcv), the pending.flags and
+/// brcond that use them, and nothing else (false).
+fn inFlags(e: *E, r: *const ir.Region, idx: usize) !bool {
+    const i = r.insts.items[idx];
+    switch (i.op) {
+        .icmp, .@"nzcv.add", .@"nzcv.sub", .@"nzcv.logic" => {
+            if (!(if (i.op == .icmp) deferIcmp(e, r, idx) else deferNzcv(e, r, idx))) return false;
+            if (e.hf) |h| if (sameFlags(r, h, idx)) {
+                e.hf_set = true;
+                return true;
+            };
+            const w = r.insts.items[i.a].ty == .i64;
+            try e.ldVal(RAX, i.a);
+            if (i.op == .@"nzcv.logic") {
+                try e.rr(w, &.{0x85}, RAX, RAX); // test rax, rax
+            } else {
+                const opc: u8 = if (i.op == .@"nzcv.add") 0x03 else 0x3b; // add/cmp rax, b
+                switch (e.p.locs[i.b]) {
+                    .reg => |x| try e.rr(w, &.{opc}, RAX, @intCast(x)),
+                    .slot => |s| try e.rm(w, &.{opc}, RAX, RSP, slotDisp(s)),
+                    .none => unreachable,
+                }
+            }
+            e.setHf(@intCast(idx));
+            return true;
+        },
+        .@"pending.flags" => {
+            if (e.raw_inv == null or !deferNzcv(e, r, i.a)) return false;
+            try e.rm(false, &.{ 0x0f, 0x90 }, 0, RSP, raw_slot); // seto [rsp+raw]
+            try e.b(0x9f); // lahf
+            try e.rm(false, &.{0x88}, 4, RSP, raw_slot + 1); // mov [rsp+raw+1], ah
+            e.hf_set = true;
+            return true;
+        },
+        .brcond => {
+            if (!deferIcmp(e, r, i.a)) return false;
+            try branch(e, pred_cc[@intCast(r.insts.items[i.a].aux)], i);
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// getreg or setreg of a whole chunk, straight between its register and
+/// the value's (movesOnly).
+fn chunkMove(e: *E, r: *const ir.Region, idx: usize) !bool {
+    const i = r.insts.items[idx];
+    if (i.op != .getreg and i.op != .setreg) return false;
+    const ck = e.p.chunk_of[idx];
+    if (ck == regalloc.no_chunk or !movesOnly(e, r, idx)) return false;
+    const creg: u8 = @intCast(e.p.chunks[ck].reg);
+    if (i.op == .getreg) {
+        try e.stVal(@intCast(idx), creg);
+    } else {
+        try e.ldVal(creg, i.a);
+        e.dirty |= @as(regalloc.ChunkSet, 1) << @intCast(ck);
+    }
     return true;
 }
 
@@ -1191,6 +1443,7 @@ fn direct(e: *E, i: ir.Inst, dst: ir.Ref) !bool {
                 .slot => |s| try e.rm(w, &.{opc}, d, RSP, slotDisp(s)),
                 .none => unreachable,
             }
+            if (i.op == .add or i.op == .sub) e.setHf(dst);
         },
         else => return false,
     }
@@ -2509,5 +2762,4 @@ test "random regions match ir_eval" {
         return error.TestExpectedEqual;
     }
 }
-
 
