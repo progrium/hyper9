@@ -42,6 +42,7 @@ pub fn main(init: std.process.Init) !void {
     var buf: [1025]u32 = undefined;
     var failed: u64 = 0;
     var retired: u64 = 0;
+    var known: KnownCounts = .initFill(0);
     var i: u64 = 0;
     while (i < args.iters) : (i += 1) {
         const seed = args.seed +% i;
@@ -69,7 +70,11 @@ pub fn main(init: std.process.Init) !void {
         }
         if (args.lockstep and !bad) {
             s.load(words, seed);
-            if (try lockstepProgram(gpa, s, start, &report.writer)) bad = true;
+            switch (try lockstepProgram(gpa, s, start, &report.writer)) {
+                .agree => {},
+                .diverged => bad = true,
+                .known => |k| known.getPtr(k).* += 1,
+            }
         }
         if (!bad) continue;
         failed += 1;
@@ -85,17 +90,22 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("fuzz-a64: {d} programs, {d} diverged; {d} instructions region-checked\n", .{ args.iters, failed, retired });
     if (native) |n| std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
     tally.print();
+    if (options.unicorn) for (std.enums.values(lockstep.Known)) |k| if (known.get(k) != 0)
+        std.debug.print("  known divergence {t}: {d} (T0 is architectural)\n", .{ k, known.get(k) });
     if (failed != 0) std.process.exit(1);
 }
 
-/// T0 against Unicorn, an instruction at a time, to the SVC. Returns
-/// whether they diverged (and writes how to `w`).
-fn lockstepProgram(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *std.Io.Writer) !bool {
+const KnownCounts = if (options.unicorn) std.EnumArray(lockstep.Known, u64) else std.EnumArray(enum { none }, u64);
+const Lockstep = union(enum) { agree, diverged, known: if (options.unicorn) lockstep.Known else enum { none } };
+
+/// T0 against Unicorn, an instruction at a time, to the SVC. Writes how
+/// they diverged to `w`.
+fn lockstepProgram(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *std.Io.Writer) !Lockstep {
     if (options.unicorn) return lockstepUnicorn(gpa, s, start, w);
-    return false;
+    return .agree;
 }
 
-fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *std.Io.Writer) !bool {
+fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *std.Io.Writer) !Lockstep {
     const E = lockstep.Engine(.arm64);
     const e = try E.init(gpa, &.{
         .{ .va = gen.code_va, .mem = &s.code, .exec = true },
@@ -114,25 +124,29 @@ fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *s
         const word = std.mem.readInt(u32, s.code[@intCast(pc - gen.code_va)..][0..4], .little);
         const e0: vcpu.ctx.Exit = @enumFromInt(a64.step(&c));
         const e1 = try e.step();
+        const alignment = e0 == .fault and (c.exit_info >> 8) & 0xff == @intFromEnum(vcpu.mem.FaultKind.alignment);
+        if (lockstep.knownA64(word, alignment, e1)) |k| return .{ .known = k };
         const same_exit = switch (e1) {
             .next => e0 == .ok,
             .syscall => e0 == .svc,
             .breakpoint => e0 == .brk,
             .undef => e0 == .undef,
             .fault => |f| e0 == .fault and f.addr == c.exit_addr,
-            .exception => false,
+            // QEMU raises some data aborts (a misaligned LDXR) itself,
+            // without the address.
+            .exception => |v| v == 4 and e0 == .fault,
         };
         var bad = !same_exit;
-        if (!same_exit) try w.print("exit at {x} ({x:0>8}): T0 {t}, unicorn {any}\n", .{ pc, word, e0, e1 });
+        if (!same_exit) try w.print("exit: at {x} ({x:0>8}) T0 {t} (addr {x}, info {x}), unicorn {any}\n", .{ pc, word, e0, c.exit_addr, c.exit_info, e1 });
         if (lockstep.diff(.arm64, canon(&cpu), e.getState(), 0, w)) bad = true;
         if (e.diffMemory(w)) bad = true;
         if (bad) {
             if (same_exit) try w.print("after {x} ({x:0>8})\n", .{ pc, word });
-            return true;
+            return .diverged;
         }
-        if (e0 != .ok) return false;
+        if (e0 != .ok) return .agree;
     }
-    return false;
+    return .agree;
 }
 
 fn canon(c: *const a64.Cpu) lockstep.A64 {

@@ -791,6 +791,9 @@ const ModuleParts = struct {
     emu: Emu,
     /// With -Demu=zig: build the JIT tier, not just the interpreter.
     jit: bool,
+    /// With -Demu=zig: run every region through the T1-against-T0 check
+    /// (src/jit/check/vmm.zig).
+    jit_check: bool,
     unicorn: ?*std.Build.Module,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
@@ -844,6 +847,7 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     const options = b.addOptions();
     options.addOption(Emu, "emu", p.emu);
     options.addOption(bool, "jit", p.jit);
+    options.addOption(bool, "jit_check", p.jit_check);
     options.addOption(bool, "kern", p.have_drawterm);
     options.addOption(bool, "host_cmd", p.host_cmd);
     options.addOption([]const u8, "gfx", @tagName(gfx));
@@ -901,6 +905,7 @@ pub fn build(b: *std.Build) void {
     // while design/host-cmd rethinks them.
     const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
     var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or zig (h9's own, in progress)") orelse .none;
+    const jit_check = b.option(bool, "jit-check", "With -Demu=zig: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
     const no_jit = b.option(bool, "no-jit", "With -Demu=zig: the interpreter tier only, as on hosts that forbid generated code") orelse false;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
@@ -981,6 +986,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .emu = emu,
         .jit = !no_jit,
+        .jit_check = jit_check,
         .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),

@@ -330,6 +330,28 @@ pub fn Engine(comptime arch: Arch) type {
     };
 }
 
+/// Divergences where T0 is architectural and Unicorn isn't. The caller
+/// stops comparing the program there (T0 has faulted; Unicorn ran on),
+/// and counts them by name.
+pub const Known = enum {
+    /// A misaligned STXR or STXP with no monitor: an alignment fault,
+    /// where QEMU returns status 1 without checking alignment.
+    misaligned_stxr_without_monitor,
+    /// A misaligned LDAR or STLR: an alignment fault, where Unicorn allows
+    /// it within 16 bytes.
+    misaligned_ldar_stlr,
+};
+
+/// Whether arm64 instruction `word`, on which T0 took an alignment fault
+/// and Unicorn stopped with `u`, is a known divergence.
+pub fn knownA64(word: u32, t0_alignment_fault: bool, u: Stop) ?Known {
+    if (!t0_alignment_fault or u != .next) return null;
+    if (word & 0x3FE07C00 == 0x08007C00 or word & 0xBFE00000 == 0x88200000) return .misaligned_stxr_without_monitor;
+    const ldar_stlr = word & 0x3FFFFC00;
+    if (ldar_stlr == 0x08DFFC00 or ldar_stlr == 0x089FFC00) return .misaligned_ldar_stlr;
+    return null;
+}
+
 /// Writes each difference between T0's state `a` and Unicorn's `b`;
 /// returns whether there were any. `flag_mask` limits the x86 flags
 /// compared to those the instruction defines.

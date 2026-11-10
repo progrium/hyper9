@@ -12,6 +12,8 @@ const cache = @import("../jit/cache.zig");
 const dispatch = @import("../jit/dispatch.zig");
 const emitter = @import("../jit/emitter.zig");
 const lift = @import("../jit/a64/lift.zig");
+const build_options = @import("build_options");
+const check_vmm = @import("../jit/check/vmm.zig");
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter.
@@ -34,11 +36,14 @@ pub const Cpu = struct {
     machine: t0.Machine = undefined,
     /// The ESR of the last exit, for the Ureg's `type`.
     esr: u64 = 0,
+    /// -Djit-check's state.
+    check: check_vmm.State = .{},
 };
 
 /// Frees the decode cache.
 pub fn deinit(c: *Cpu) void {
     c.cache.deinit();
+    c.check.deinit();
 }
 
 pub fn getUreg(c: *const Cpu, u: *vmm.Ureg) void {
@@ -79,6 +84,8 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
 pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     c.machine = .init(&c.t0, ctx, &c.cache, clock);
     ctx.frontend = @intFromPtr(&c.machine);
+    // -Djit-check: every region lifted and checked against T0 (src/jit/check/vmm.zig).
+    if (build_options.jit_check) return exitOf(c, check_vmm.runA64(&c.check, &c.t0, ctx));
     if (tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, em);
     // A spent budget (ctx.budget) gives `.interrupted`, as an exit request does.
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);

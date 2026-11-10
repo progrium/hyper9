@@ -85,7 +85,9 @@ pub fn step(c: *Ctx) u32 {
     if (f.host == 0 or pc & 3 != 0) {
         c.exit_pc = pc;
         c.exit_addr = pc;
-        c.exit_info = @intFromEnum(mem.Access.exec) | (@as(u64, @intFromEnum(f.fault)) << 8);
+        const fsc: u64 = if (f.fault == .unmapped) 0x07 else 0x0f;
+        const esr: u64 = (t0.EC_IABT_LOWER << 26) | (1 << 25) | fsc;
+        c.exit_info = @intFromEnum(mem.Access.exec) | (@as(u64, @intFromEnum(f.fault)) << 8) | (esr << 16);
         return @intFromEnum(Exit.fault);
     }
     const word = std.mem.readInt(u32, @as(*const [4]u8, @ptrFromInt(f.host)), .little);

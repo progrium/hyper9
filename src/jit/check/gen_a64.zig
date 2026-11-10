@@ -15,6 +15,8 @@ pub const data_va: u64 = 0x20000;
 pub const base_reg = 20;
 pub const bad_reg = 21;
 pub const index_reg = 22;
+/// x23 holds a misaligned address in the data page.
+pub const odd_reg = 23;
 pub const bad_va: u64 = 0x7000_0000;
 
 pub const Class = enum {
@@ -36,6 +38,7 @@ pub const Class = enum {
     ldst_bad,
     ldp_stp,
     exclusive,
+    acqrel,
     dmb,
     branch,
     adc,
@@ -134,7 +137,8 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
             if (l == 1 and t2 == d) t2 = (d + 1) & 15; // LDP with Rt == Rt2 is unpredictable
             break :blk (opc << 30) | 0x29000000 | (l << 22) | (r.uintLessThan(u32, 60) << 15) | (t2 << 10) | (base_reg << 5) | d;
         },
-        // LDXR, or STXR with status s ≠ t, both on x20
+        // LDXR, or STXR with status s ≠ t, on x20 or now and then the
+        // misaligned x22 (which faults)
         .exclusive => blk: {
             const size: u32 = 2 + sf;
             var t2 = reg(r);
@@ -152,10 +156,17 @@ pub fn one(r: std.Random, c: Class, i: u32, n: u32) u32 {
                 3 => break :blk (size << 30) | 0x085FFC00 | (base_reg << 5) | d,
                 else => {},
             }
-            if (r.boolean()) break :blk (size << 30) | 0x085F7C00 | (base_reg << 5) | d;
+            const base: u32 = if (r.uintLessThan(u32, 32) == 0) odd_reg else base_reg;
+            if (r.boolean()) break :blk (size << 30) | 0x085F7C00 | (base << 5) | d;
             var s = reg(r);
             if (s == d) s = (d + 1) & 15;
-            break :blk (size << 30) | 0x08007C00 | (s << 16) | (base_reg << 5) | d;
+            break :blk (size << 30) | 0x08007C00 | (s << 16) | (base << 5) | d;
+        },
+        // LDAR, STLR, on x20 or the misaligned x22
+        .acqrel => {
+            const size: u32 = r.uintLessThan(u32, 4);
+            const base: u32 = if (r.uintLessThan(u32, 32) == 0) odd_reg else base_reg;
+            return (size << 30) | (if (r.boolean()) @as(u32, 0x08DFFC00) else 0x089FFC00) | (base << 5) | d;
         },
         .dmb => 0xD5033BBF, // DMB ISH
         // ADC ADCS SBC SBCS
@@ -247,13 +258,29 @@ pub fn program(r: std.Random, opts: Options, out: []u32) []u32 {
         out[i] = one(r, c, @intCast(i), n);
     }
     // A store-exclusive whose size isn't its load-exclusive's is
-    // CONSTRAINED UNPREDICTABLE: give each STXR the last LDXR's size.
-    var size: ?u32 = null;
+    // CONSTRAINED UNPREDICTABLE: give each store-exclusive the shape of
+    // the last load-exclusive (a single register of its size, or a W pair).
+    const Last = union(enum) { none, single: u32, pair };
+    var last: Last = .none;
     for (out[0..n]) |*w| {
-        if (w.* & 0x3FFFFC00 == 0x085F7C00) size = w.* >> 30;
-        if (w.* & 0x3FE0FC00 == 0x08007C00) {
-            if (size) |sz| w.* = (w.* & 0x3FFFFFFF) | (sz << 30);
-            size = null;
+        const x = w.*;
+        if (x & 0x3FFF7C00 == 0x085F7C00) last = .{ .single = x >> 30 } // LDXR, LDAXR
+        else if (x & 0xBFFF8000 == 0x887F0000) last = .pair // LDXP (W)
+        else if (x & 0x3FE07C00 == 0x08007C00 or x & 0xBFE00000 == 0x88200000) {
+            const rs = (x >> 16) & 31;
+            const rn = (x >> 5) & 31;
+            const rt = x & 31;
+            const o0 = x & 0x8000;
+            switch (last) {
+                .none => {},
+                .single => |sz| w.* = (sz << 30) | 0x08007C00 | o0 | (rs << 16) | (rn << 5) | rt,
+                .pair => {
+                    var rt2 = (rt + 1) & 15;
+                    if (rt2 == rs) rt2 = (rt + 2) & 15;
+                    w.* = 0x88200000 | o0 | (rs << 16) | (rt2 << 10) | (rn << 5) | rt;
+                },
+            }
+            last = .none;
         }
     }
     out[n] = 0xD4000001; // svc #0
@@ -281,6 +308,7 @@ pub fn registers(r: std.Random) struct { x: [31]u64, nzcv: u32 } {
     for (0..16) |i| x[i] = value(r);
     x[base_reg] = data_va;
     x[bad_reg] = bad_va;
+    x[odd_reg] = data_va + 0x101 + 2 * r.uintLessThan(u64, 4);
     x[index_reg] = r.uintLessThan(u64, 256) * 8;
     return .{ .x = x, .nzcv = r.uintLessThan(u32, 16) << 28 };
 }

@@ -165,7 +165,7 @@ fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *vcpu.ctx.Ct
             .exception => |v| e0 == .fault and c.exit_info >> 8 == v,
         };
         var bad = !same;
-        if (!same) try w.print("exit at {x} ({x}): T0 {t} (info {x}), unicorn {any}\n", .{ pc, bytes[0..@min(bytes.len, if (inst) |in| in.len else 8)], e0, c.exit_info, st });
+        if (!same) try w.print("exit: at {x} ({x}) T0 {t} (info {x}), unicorn {any}\n", .{ pc, bytes[0..@min(bytes.len, if (inst) |in| in.len else 8)], e0, c.exit_info, st });
         // At an exit only the PC and the registers are compared: a
         // faulting instruction's partial effects are its own business.
         const mask: u32 = if (e0 == .ok) lockstep.x86_status_flags & ~fx.flags_undefined else 0;
