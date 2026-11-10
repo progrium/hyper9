@@ -655,3 +655,65 @@ pub fn fuzzX87(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
 test "fuzz-x87: random x87 programs agree region by region" {
     try fuzzX87(testing.allocator, 0x87, 1000);
 }
+
+/// Random SSE and SSE2 programs over random data: the scalar arithmetic,
+/// conversions, compares, and moves, and the 128-bit moves and logic, on
+/// registers and [ebx+d8], with LDMXCSR from random data now and then
+/// (which T0 then runs the rest under), and SETB after compares.
+pub fn fuzzSse(gpa: std.mem.Allocator, seed: u64, count: usize) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rng = prng.random();
+    const m = try gpa.create(Machine);
+    defer gpa.destroy(m);
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(gpa);
+    const ops = [_]u8{ 0x10, 0x11, 0x28, 0x29, 0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f, 0x5a, 0x2a, 0x2c, 0x2d, 0x2e, 0x2f, 0x54, 0x55, 0x56, 0x57, 0x6e, 0x7e, 0xd6, 0x6f, 0x7f, 0xef, 0xdb, 0xeb, 0xdf };
+    const pfx = [_]?u8{ null, 0x66, 0xf3, 0xf2 };
+    for (0..count) |iter| {
+        m.* = .{};
+        m.init();
+        for (&m.data) |*b| b.* = rng.int(u8);
+        code.clearRetainingCapacity();
+        // Fill the registers from memory first.
+        for (0..8) |r| try code.appendSlice(gpa, &.{ 0x0f, 0x10, 0x43 | @as(u8, @intCast(r)) << 3, @intCast(r * 16) });
+        for (0..4 + rng.uintLessThan(usize, 24)) |_| {
+            if (rng.uintLessThan(u8, 30) == 0) {
+                // ldmxcsr d8(%ebx)
+                try code.appendSlice(gpa, &.{ 0x0f, 0xae, 0x53, rng.uintLessThan(u8, 0x70) & ~@as(u8, 3) });
+                continue;
+            }
+            if (rng.uintLessThan(u8, 6) == 0) {
+                try code.appendSlice(gpa, &.{ 0x0f, 0x92, 0xc1 }); // setb %cl
+                continue;
+            }
+            const op = ops[rng.uintLessThan(usize, ops.len)];
+            if (pfx[rng.uintLessThan(usize, 4)]) |p| try code.append(gpa, p);
+            try code.appendSlice(gpa, &.{ 0x0f, op });
+            var reg = rng.uintLessThan(u8, 8);
+            var rm = rng.uintLessThan(u8, 8);
+            // General registers these write or read: EAX to EDX only, so
+            // EBX (the base) and ESP stay put.
+            if (op == 0x2c or op == 0x2d) reg &= 1;
+            if (op == 0x7e or op == 0x2a or op == 0x6e) rm &= 1;
+            if (rng.boolean()) {
+                const disp = if (rng.uintLessThan(u8, 4) == 0) rng.uintLessThan(u8, 0x70) else rng.uintLessThan(u8, 0x70) & ~@as(u8, 15);
+                try code.appendSlice(gpa, &.{ 0x43 | reg << 3, disp });
+            } else try code.append(gpa, 0xc0 | reg << 3 | rm);
+        }
+        try code.appendSlice(gpa, &.{ 0xcd, 0x80 });
+        m.load(code.items);
+        var c = randomCpu(m, rng);
+        c.r[3] = Machine.data_va + 0x100;
+        c.r[4] = Machine.stack_va + 0x800;
+        _ = runChecked(gpa, m, c, std.math.maxInt(i64)) catch |e| {
+            std.debug.print("fuzz-sse: seed {d}, program {d}: {s}\ncode:", .{ seed, iter, @errorName(e) });
+            for (code.items) |b| std.debug.print(" {x:0>2}", .{b});
+            std.debug.print("\n", .{});
+            return e;
+        };
+    }
+}
+
+test "fuzz-sse: random SSE and SSE2 programs agree region by region" {
+    try fuzzSse(testing.allocator, 0x55e, 1000);
+}

@@ -25,6 +25,7 @@ const Cpu = cpu_mod.Cpu;
 
 pub const arith = t0.arith;
 pub const CF = t0.CF;
+pub const PF = t0.PF;
 pub const ZF = t0.ZF;
 pub const DF = t0.DF;
 pub const OF = t0.OF;

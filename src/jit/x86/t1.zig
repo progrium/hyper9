@@ -181,6 +181,7 @@ fn expectSame(t1: *Machine, t0m: *Machine, prog: []const u8, regs: [8]u32, eflag
     const e1 = try t1.run();
     const same = sameExit(e0, e1) and std.mem.eql(u32, &t0m.cpu.r, &t1.cpu.r) and t0m.cpu.eip == t1.cpu.eip and
         t0m.cpu.fl.get() == t1.cpu.fl.get() and std.mem.eql(u8, &t0m.pages, &t1.pages) and
+        std.mem.eql(u128, &t0m.cpu.xmm, &t1.cpu.xmm) and t0m.cpu.mxcsr == t1.cpu.mxcsr and std.meta.eql(t0m.cpu.fpu, t1.cpu.fpu) and
         t0m.rt.ctx.retired == t1.rt.ctx.retired and t0m.cpu.retired == t1.cpu.retired;
     if (!same) {
         std.debug.print("T1 and T0 differ: exits {any} / {any}, eip {x} / {x}, eflags {x} / {x}, retired {d} / {d} (Cpu {d} / {d})\n", .{ e1, e0, t1.cpu.eip, t0m.cpu.eip, t1.cpu.fl.get(), t0m.cpu.fl.get(), t1.rt.ctx.retired, t0m.rt.ctx.retired, t1.cpu.retired, t0m.cpu.retired });
@@ -289,4 +290,53 @@ test "h86 T1: INT3 and INTO's #OF come back with EIP past them, as on T0" {
     const into = [_]u8{ 0xb8, 0xff, 0xff, 0xff, 0x7f, 0x40, 0xce, 0xa3, 0, 0, 0, 0 }; // movl $0x7fffffff, %eax; incl %eax; into; movl %eax, 0
     try expectSame(p.t1, p.t0, &into, @splat(0), 0x2, 0);
     try testing.expectEqual(@as(u32, gen.code_va + 7), p.t1.cpu.eip);
+}
+
+fn fpPrograms(em: emitter_mod.Emitter) !void {
+    const c = try testCache(1 << 20);
+    defer freeCache(c);
+    const p = try Pair.init(c, em);
+    defer p.deinit();
+    // SSE2 scalar double and x87 over random data at EBX.
+    const prog = [_]u8{
+        0xf2, 0x0f, 0x10, 0x03, // movsd (%ebx), %xmm0
+        0xf2, 0x0f, 0x10, 0x4b, 0x08, // movsd 8(%ebx), %xmm1
+        0xf2, 0x0f, 0x58, 0xc1, // addsd %xmm1, %xmm0
+        0xf2, 0x0f, 0x59, 0x43, 0x10, // mulsd 16(%ebx), %xmm0
+        0xf2, 0x0f, 0x51, 0xd0, // sqrtsd %xmm0, %xmm2
+        0xf2, 0x0f, 0x2c, 0xc2, // cvttsd2si %xmm2, %eax
+        0xf2, 0x0f, 0x2a, 0xd9, // cvtsi2sd %ecx, %xmm3
+        0x66, 0x0f, 0x2e, 0xc3, // ucomisd %xmm3, %xmm0
+        0x0f, 0x92, 0xc2, // setb %dl
+        0x66, 0x0f, 0x57, 0xe4, // xorpd %xmm4, %xmm4
+        0x66, 0x0f, 0x28, 0x6b, 0x20, // movapd 32(%ebx), %xmm5
+        0x66, 0x0f, 0x54, 0xcd, // andpd %xmm5, %xmm1
+        0xf2, 0x0f, 0x11, 0x4b, 0x30, // movsd %xmm1, 48(%ebx)
+        0xf2, 0x0f, 0x5a, 0xf0, // cvtsd2ss %xmm0, %xmm6
+        0xf3, 0x0f, 0x11, 0x73, 0x38, // movss %xmm6, 56(%ebx)
+        0xdd, 0x03, // fldl (%ebx)
+        0xdc, 0x43, 0x08, // faddl 8(%ebx)
+        0xdd, 0x5b, 0x40, // fstpl 64(%ebx)
+        0xd9, 0xe8, 0xd9, 0xee, // fld1; fldz
+        0xdf, 0xf1, // fcomip %st(1), %st
+        0xdd, 0xd8, // fstp %st(0)
+        0xcd, 0x80,
+    };
+    var prng = std.Random.DefaultPrng.init(0xf9);
+    for (0..300) |i| {
+        const regs = gen.registers(prng.random());
+        expectSame(p.t1, p.t0, &prog, regs.r, regs.eflags, i) catch |e| {
+            std.debug.print("seed {d}\n", .{i});
+            return e;
+        };
+    }
+}
+
+test "h86 T1: SSE2 and x87 through dispatch agree with T0" {
+    try fpPrograms(eval_emit.emitter_def);
+}
+
+test "h86 T1: SSE2 and x87 as this host's code" {
+    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    try fpPrograms(@import("../emit/x64.zig").emitter_def);
 }

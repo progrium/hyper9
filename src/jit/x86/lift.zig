@@ -194,6 +194,55 @@ const seg_null_off = @offsetOf(Cpu, "seg_null");
 const fpu_sw_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "sw");
 const fpu_top_off = @offsetOf(Cpu, "fpu") + @offsetOf(cpu_mod.Fpu, "top");
 const x87_ES: u16 = 1 << 7;
+const xmm_off = @offsetOf(Cpu, "xmm");
+const mxcsr_off = @offsetOf(Cpu, "mxcsr");
+/// MXCSR's controls (DAZ, the masks, RC, FZ) that lifted SSE assumes: the
+/// power-on 0x1F80, everything masked, round to nearest. Anything else
+/// runs on T0.
+const mxcsr_controls: u32 = 0xffc0;
+const mxcsr_default: u32 = 0x1f80;
+
+/// The x86 FP environment under MXCSR's default controls.
+fn extAux(rounding: u3, exact: bool) u64 {
+    return @bitCast(ir.ExtAux{ .rounding = rounding, .exact = exact });
+}
+const fp_aux2: u64 = 1 + mxcsr_off;
+const round_zero: u3 = 3;
+
+const Pfx = enum { none, p66, f3, f2 };
+
+fn pfxOf(i: *const Inst) Pfx {
+    return switch (i.rep) {
+        .rep => .f3,
+        .repne => .f2,
+        .none => if (i.opsize) .p66 else .none,
+    };
+}
+
+/// The SSE and SSE2 forms `Lifter.sse` lifts: scalar single and double
+/// arithmetic, moves, conversions, and compares, and the 128-bit moves and
+/// logic. MMX forms (no 66 prefix on the integer ones) stay on T0.
+fn sseLifted(i: *const Inst) bool {
+    if (i.addr16 or i.lock) return false;
+    const p = pfxOf(i);
+    const op: u8 = @truncate(i.opcode);
+    if (i.opcode >> 8 != 0x0f) return false;
+    return switch (op) {
+        0x10, 0x11 => true,
+        0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f => p == .f2 or p == .f3,
+        0x5a => p == .f2 or p == .f3,
+        0x2a, 0x2c, 0x2d => p == .f2 or p == .f3,
+        0x2e, 0x2f => p == .none or p == .p66,
+        0x28, 0x29 => p == .none or p == .p66,
+        0x54, 0x55, 0x56, 0x57 => p == .none or p == .p66,
+        0x6e => p == .p66,
+        0x7e => p == .p66 or p == .f3,
+        0xd6 => p == .p66,
+        0x6f, 0x7f => p == .p66 or p == .f3,
+        0xef, 0xdb, 0xeb, 0xdf => p == .p66,
+        else => false,
+    };
+}
 
 const ESP = 4;
 
@@ -201,6 +250,8 @@ fn tyOf(size: u8) Type {
     return switch (size) {
         1 => .i8,
         2 => .i16,
+        8 => .i64,
+        16 => .v128,
         else => .i32,
     };
 }
@@ -217,6 +268,8 @@ fn log2(size: u8) u3 {
     return switch (size) {
         1 => 0,
         2 => 1,
+        8 => 3,
+        16 => 4,
         else => 2,
     };
 }
@@ -303,6 +356,7 @@ fn classify(i: *const Inst) Class {
         // binary has) to T0.
         .x87 => if (i.addr16) .interp else .lifted,
         .fwait => .lifted,
+        .sse => if (sseLifted(i)) .lifted else .interp,
         .jcc => if (near32) .cond else .stop,
         .loop, .loope, .loopne, .jcxz => if (near32 and !i.addr16) .cond else .stop,
         .jmp => if (near32) .jump else .stop,
@@ -364,6 +418,8 @@ const Lifter = struct {
     count: u64 = 0,
     /// FS and GS (bits 4 and 5) checked non-null in this block.
     seg_ok: u8 = 0,
+    /// MXCSR's controls checked in this block (see `sse`).
+    mx_ok: bool = false,
     leader: []bool = &.{},
     loop_head: []bool = &.{},
     block_of: []ir.BlockId = &.{},
@@ -450,7 +506,7 @@ const Lifter = struct {
                 .written = x.flags_written & xf.arith,
                 .barrier = !inline_(in.class) or x.mem_read or x.mem_write or in.i.mem and in.i.op != .lea and in.i.op != .nop or
                     in.i.op == .div or in.i.op == .idiv or isString(in.i.op) or isAtomic(&in.i) or
-                    in.i.op == .x87 or in.i.op == .fwait,
+                    in.i.op == .x87 or in.i.op == .fwait or in.i.op == .sse,
             };
             ends[k] = l.leader[k + 1] or switch (in.class) {
                 .lifted, .interp => isString(in.i.op) or isAtomic(&in.i),
@@ -503,6 +559,7 @@ const Lifter = struct {
         l.b.begin(id);
         l.fl.forget();
         l.seg_ok = 0;
+        l.mx_ok = false;
     }
 
     /// Writes the flags back, and stamps what's done on the ops that can
@@ -579,8 +636,10 @@ const Lifter = struct {
         b.retired = 1;
         try b.exit(.@"exit.chain", l.next(k));
         const ok = l.seg_ok;
+        const mx = l.mx_ok;
         l.startBlock(cont);
         l.seg_ok = ok;
+        l.mx_ok = mx;
     }
 
     fn callInterp(l: *Lifter, k: usize) !void {
@@ -588,6 +647,7 @@ const Lifter = struct {
         try l.b.interp(handle(.step, l.insns[k].i.len, 0), l.insns[k].pc);
         l.fl.forget();
         l.seg_ok = 0;
+        l.mx_ok = false;
     }
 
     // ------------------------------------------------------ operands
@@ -775,7 +835,7 @@ const Lifter = struct {
         }
         // The memory operand's address comes first: its guard has to
         // run before anything else of the instruction.
-        const addr: ?Ref = if (i.mem and i.op != .lea and i.op != .nop) try l.linear(k) else null;
+        const addr: ?Ref = if (i.mem and i.op != .lea and i.op != .nop and i.op != .sse) try l.linear(k) else null;
         const size = i.size;
         const T = tyOf(size);
         var consumed: usize = 1;
@@ -842,6 +902,7 @@ const Lifter = struct {
             .shld, .shrd => try l.shiftDouble(k, addr),
             .bt, .bts, .btr, .btc => try l.bitTest(k, addr),
             .x87 => try l.x87(k),
+            .sse => try l.sse(k),
             .fwait => {
                 // #MF for a pending unmasked exception, through T0.
                 const sw = try b.getreg(.i16, fpu_sw_off);
@@ -1215,6 +1276,185 @@ const Lifter = struct {
         const st = try b.emit(.{ .op = .@"call.helper", .ty = .i64, .a = try b.konst(.i64, @bitCast(arg)), .b = addr, .c = zero, .aux = @intFromEnum(helpers.Index.x87) });
         if (fx.flags_written != 0) l.fl.forget();
         try l.guard(k, try b.icmp(.ne, st, zero), true);
+    }
+
+    fn xmmOff(n: u3) u64 {
+        return xmm_off + @as(u64, n) * 16;
+    }
+
+    /// MXCSR's controls are the default, or T0 runs the instruction:
+    /// once a block, as the FS and GS check is.
+    fn mxGuard(l: *Lifter, k: usize) !void {
+        if (l.mx_ok) return;
+        const b = l.b;
+        const mx = try b.getreg(.i32, mxcsr_off);
+        const c = try b.bin(.@"and", .i32, mx, try l.k32(mxcsr_controls));
+        try l.guard(k, try b.icmp(.ne, c, try l.k32(mxcsr_default)), true);
+        l.mx_ok = true;
+    }
+
+    /// A 16-byte aligned operand, or #GP on T0.
+    fn alignGuard(l: *Lifter, k: usize, addr: Ref) !void {
+        const b = l.b;
+        const low = try b.bin(.@"and", .i32, addr, try l.k32(15));
+        try l.guard(k, try b.icmp(.ne, low, try l.k32(0)), true);
+    }
+
+    /// The xmm or memory source of `size` bytes (4, 8, or 16), as i32,
+    /// i64, or v128.
+    fn xsrc(l: *Lifter, k: usize, addr: ?Ref, size: u8) !Ref {
+        const i = &l.insns[k].i;
+        const b = l.b;
+        if (i.mem) {
+            try l.leave();
+            if (size == 16) return b.emit(.{ .op = .@"v.load", .ty = .v128, .a = addr.?, .aux = @bitCast(ir.MemFlags{ .size = 4 }), .aux2 = l.insns[k].pc });
+            return l.load(k, size, addr.?);
+        }
+        return b.getreg(tyOf(size), xmmOff(i.rm()));
+    }
+
+    fn xstore(l: *Lifter, k: usize, addr: Ref, v: Ref) !void {
+        const b = l.b;
+        if (b.r.insts.items[v].ty == .v128) {
+            try l.leave();
+            _ = try b.emit(.{ .op = .@"v.store", .a = addr, .b = v, .aux = @bitCast(ir.MemFlags{ .size = 4 }), .aux2 = l.insns[k].pc });
+            return;
+        }
+        try l.store(k, addr, v);
+    }
+
+    fn fpOp(l: *Lifter, op: ir.Op, ty: Type, a: Ref, bv: Ref, rounding: u3, exact: bool) !Ref {
+        return l.b.emit(.{ .op = op, .ty = ty, .a = a, .b = bv, .aux = extAux(rounding, exact), .aux2 = fp_aux2 });
+    }
+
+    /// SSE and SSE2, as `sseLifted` lists them. An `fp.*` op raises into
+    /// MXCSR's flags; with every exception masked (mxGuard), none traps.
+    fn sse(l: *Lifter, k: usize) !void {
+        const b = l.b;
+        const i = &l.insns[k].i;
+        const p = pfxOf(i);
+        const op: u8 = @truncate(i.opcode);
+        const d = xmmOff(i.reg());
+        // The guards first: each starts a block, and values don't cross.
+        const fp = switch (op) {
+            0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f, 0x5a, 0x2a, 0x2c, 0x2d, 0x2e, 0x2f => true,
+            else => false,
+        };
+        if (fp) try l.mxGuard(k);
+        var addr: ?Ref = if (i.mem) try l.linear(k) else null;
+        // A 16-byte memory operand must be aligned (#GP), but for MOVUPS,
+        // MOVUPD, and MOVDQU.
+        const aligned = switch (op) {
+            0x28, 0x29, 0x54, 0x55, 0x56, 0x57, 0xef, 0xdb, 0xeb, 0xdf => true,
+            0x6f, 0x7f => p == .p66,
+            else => false,
+        };
+        if (addr) |a| if (aligned) {
+            try l.alignGuard(k, a);
+            addr = try l.linear(k);
+        };
+        switch (op) {
+            0x10, 0x11, 0x28, 0x29, 0x6f, 0x7f => {
+                // MOVUPS/PD, MOVSS, MOVSD, MOVAPS/PD, MOVDQA, MOVDQU.
+                const size: u8 = if (op <= 0x11 and p == .f3) 4 else if (op <= 0x11 and p == .f2) 8 else 16;
+                const is_load = op == 0x10 or op == 0x28 or op == 0x6f;
+                if (is_load) {
+                    const v = try l.xsrc(k, addr, size);
+                    if (size < 16 and i.mem) {
+                        // From memory, the rest of the register is zeroed.
+                        try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = if (size == 4) try b.un(.zext, .i64, v) else v, .b = try b.konst(.i64, 0) }));
+                    } else try b.setreg(d, v);
+                } else {
+                    const v = try b.getreg(tyOf(size), d);
+                    if (addr) |a| try l.xstore(k, a, v) else try b.setreg(xmmOff(i.rm()), v);
+                }
+            },
+            0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f => {
+                const size: u8 = if (p == .f2) 8 else 4;
+                const T = tyOf(size);
+                const y = try l.xsrc(k, addr, size);
+                const x = try b.getreg(T, d);
+                const r = switch (op) {
+                    0x51 => try b.emit(.{ .op = .@"fp.sqrt", .ty = T, .a = y, .aux = extAux(0, false), .aux2 = fp_aux2 }),
+                    else => try l.fpOp(switch (op) {
+                        0x58 => .@"fp.add",
+                        0x59 => .@"fp.mul",
+                        0x5c => .@"fp.sub",
+                        0x5d => .@"fp.min",
+                        0x5e => .@"fp.div",
+                        else => .@"fp.max",
+                    }, T, x, y, 0, false),
+                };
+                try b.setreg(d, r);
+            },
+            0x5a => {
+                // CVTSD2SS, CVTSS2SD.
+                const from: u8 = if (p == .f2) 8 else 4;
+                const y = try l.xsrc(k, addr, from);
+                try b.setreg(d, try b.emit(.{ .op = .@"fp.cvt", .ty = tyOf(12 - from), .a = y, .aux = extAux(0, false), .aux2 = fp_aux2 }));
+            },
+            0x2a => {
+                // CVTSI2SS, CVTSI2SD: from a general register or m32.
+                const v = if (addr) |a| try l.load(k, 4, a) else try l.getR(i.rm(), 4);
+                const T: Type = if (p == .f2) .i64 else .i32;
+                try b.setreg(d, try b.emit(.{ .op = .@"fp.fromsint", .ty = T, .a = v, .aux = extAux(0, false), .aux2 = fp_aux2 }));
+            },
+            0x2c, 0x2d => {
+                // CVTT and CVT, SS and SD, to a general register.
+                const y = try l.xsrc(k, addr, if (p == .f2) 8 else 4);
+                const r = try b.emit(.{ .op = .@"fp.tosint", .ty = .i32, .a = y, .aux = extAux(if (op == 0x2c) round_zero else 0, false), .aux2 = fp_aux2 });
+                try l.setR(i.reg(), 4, r);
+            },
+            0x2e, 0x2f => {
+                // UCOMISS/SD and COMISS/SD: ZF PF CF from the order, the
+                // other arithmetic flags clear.
+                const size: u8 = if (p == .p66) 8 else 4;
+                const T = tyOf(size);
+                const y = try l.xsrc(k, addr, size);
+                const x = try b.getreg(T, d);
+                const ord = try l.fpOp(.@"fp.cmp", .i8, x, y, 0, op == 0x2f);
+                // Order 0 lt, 1 eq, 2 gt, 3 unordered, through a table in
+                // a constant: CF, ZF, 0, ZF|PF|CF, a byte each.
+                const tbl: u64 = (@as(u64, xf.ZF | xf.PF | xf.CF) << 24) | (@as(u64, xf.ZF) << 8) | xf.CF;
+                const sh = try b.bin(.shl, .i32, try b.un(.zext, .i32, ord), try l.k32(3));
+                const bits = try b.bin(.@"and", .i32, try b.bin(.lshr, .i32, try l.k32(tbl), sh), try l.k32(0xff));
+                // Flags written whole: what the instruction writes, as
+                // eflags.unpack of the packed bits.
+                l.fl.set(try b.un(.@"eflags.unpack", .flags, bits));
+            },
+            0x54, 0x55, 0x56, 0x57, 0xef, 0xdb, 0xeb, 0xdf => {
+                const y = try l.xsrc(k, addr, 16);
+                const x = try b.getreg(.v128, d);
+                const aux: u64 = @bitCast(ir.ExtAux{ .esize = 3 });
+                const r = switch (op) {
+                    0x54, 0xdb => try b.emit(.{ .op = .@"v.and", .ty = .v128, .a = x, .b = y, .aux = aux }),
+                    0x55, 0xdf => try b.emit(.{ .op = .@"v.andn", .ty = .v128, .a = y, .b = x, .aux = aux }),
+                    0x56, 0xeb => try b.emit(.{ .op = .@"v.or", .ty = .v128, .a = x, .b = y, .aux = aux }),
+                    else => try b.emit(.{ .op = .@"v.xor", .ty = .v128, .a = x, .b = y, .aux = aux }),
+                };
+                try b.setreg(d, r);
+            },
+            0x6e => {
+                // MOVD xmm, r/m32: the rest zeroed.
+                const v = if (addr) |a| try l.load(k, 4, a) else try l.getR(i.rm(), 4);
+                try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = try b.un(.zext, .i64, v), .b = try b.konst(.i64, 0) }));
+            },
+            0x7e => if (p == .p66) {
+                // MOVD r/m32, xmm.
+                const v = try b.getreg(.i32, d);
+                if (addr) |a| try l.store(k, a, v) else try l.setR(i.rm(), 4, v);
+            } else {
+                // MOVQ xmm, xmm/m64: the high half zeroed.
+                const v = try l.xsrc(k, addr, 8);
+                try b.setreg(d, try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = v, .b = try b.konst(.i64, 0) }));
+            },
+            0xd6 => {
+                // MOVQ xmm/m64, xmm: to a register, the high half zeroed.
+                const v = try b.getreg(.i64, d);
+                if (addr) |a| try l.store(k, a, v) else try b.setreg(xmmOff(i.rm()), try b.emit(.{ .op = .@"v.make", .ty = .v128, .a = v, .b = try b.konst(.i64, 0) }));
+            },
+            else => unreachable,
+        }
     }
 
     fn rotate(l: *Lifter, k: usize, addr: ?Ref) !void {
