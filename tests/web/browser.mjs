@@ -37,7 +37,6 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.goto(url);
   const term = page.locator('#term');
   // The terminal's text, without the cursor at its end.
   const text = () => term.evaluate((e) => e.textContent.slice(0, -1));
@@ -57,42 +56,47 @@ try {
     console.log(`ok: ${name} (${Date.now() - t0} ms)`);
   };
 
-  await step('rc prompts', () => expect(/% $/, 0, 60_000));
-  await term.focus();
-  await step('ls /bin | wc -l counts the archive\'s /bin', async () => {
-    const at = (await text()).length;
-    await page.keyboard.type('ls /bin | wc -l\n');
-    const t = await expect(/\d+\n% $/, at);
-    const n = Number(t.match(/(\d+)\n% $/)[1]);
-    if (n < 40) throw new Error(`only ${n} in /bin`);
-  });
-  await step('the interrupt key stops cat and rc carries on', async () => {
-    let at = (await text()).length;
-    await page.keyboard.type('cat\n');
-    await page.waitForTimeout(500);
-    await page.keyboard.press('Control+c');
-    await expect(/% $/, at);
-    at = (await text()).length;
-    await page.keyboard.type('echo x^y\n');
-    await expect(/xy\n% $/, at);
-  });
-  await step('a pipeline runs while a process spins', async () => {
-    const at = (await text()).length;
-    await page.keyboard.type('{while(){}} & s=$apid; echo hello | tr h H; echo kill >/proc/$s/note\n');
-    await expect(/Hello\n(.|\n)*% $/, at);
-  });
-  await step('on-screen keyboard input reaches rc', async () => {
-    // A phone's keyboard comes up for the focused textarea, and inserts
-    // text and deletes without key events.
-    await page.evaluate(() => document.activeElement.blur());
-    await term.click();
-    if (await page.evaluate(() => document.activeElement.id) !== 'kbd') throw new Error('a tap on the terminal does not focus its input');
-    const at = (await text()).length;
-    await page.keyboard.insertText('echo helo');
-    await page.locator('#kbd').evaluate((k) => { k.value = ''; k.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward' })); });
-    await page.keyboard.insertText('lo\n');
-    await expect(/echo hello\nhello\n% $/, at);
-  });
+  // rc on each 386 CPU: v86's, and h9's own (h86, ?backend=emu).
+  for (const backend of ['v86', 'emu']) {
+    await page.goto(`${url}?backend=${backend}`);
+    const on = (name, f) => step(`${backend}: ${name}`, f);
+    await on('rc prompts', () => expect(/% $/, 0, 60_000));
+    await term.focus();
+    await on('ls /bin | wc -l counts the archive\'s /bin', async () => {
+      const at = (await text()).length;
+      await page.keyboard.type('ls /bin | wc -l\n');
+      const t = await expect(/\d+\n% $/, at);
+      const n = Number(t.match(/(\d+)\n% $/)[1]);
+      if (n < 40) throw new Error(`only ${n} in /bin`);
+    });
+    await on('the interrupt key stops cat and rc carries on', async () => {
+      let at = (await text()).length;
+      await page.keyboard.type('cat\n');
+      await page.waitForTimeout(500);
+      await page.keyboard.press('Control+c');
+      await expect(/% $/, at);
+      at = (await text()).length;
+      await page.keyboard.type('echo x^y\n');
+      await expect(/xy\n% $/, at);
+    });
+    await on('a pipeline runs while a process spins', async () => {
+      const at = (await text()).length;
+      await page.keyboard.type('{while(){}} & s=$apid; echo hello | tr h H; echo kill >/proc/$s/note\n');
+      await expect(/Hello\n(.|\n)*% $/, at);
+    });
+    await on('on-screen keyboard input reaches rc', async () => {
+      // A phone's keyboard comes up for the focused textarea, and inserts
+      // text and deletes without key events.
+      await page.evaluate(() => document.activeElement.blur());
+      await term.click();
+      if (await page.evaluate(() => document.activeElement.id) !== 'kbd') throw new Error('a tap on the terminal does not focus its input');
+      const at = (await text()).length;
+      await page.keyboard.insertText('echo helo');
+      await page.locator('#kbd').evaluate((k) => { k.value = ''; k.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward' })); });
+      await page.keyboard.insertText('lo\n');
+      await expect(/echo hello\nhello\n% $/, at);
+    });
+  }
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
 
   // With linux.h9a, ?linux runs Alpine's 386 busybox sh, jq and sqlite3

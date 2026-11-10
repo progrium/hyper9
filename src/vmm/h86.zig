@@ -131,7 +131,7 @@ fn runT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!v
         // the one that holds.
         const before = ctx.retired;
         const c_before = c.retired;
-        const r = dispatch.run(std.heap.smp_allocator, ctx, cfg, &t1_stats);
+        const r = dispatch.run(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator, ctx, cfg, &t1_stats);
         c.retired = c_before +% (ctx.retired -% before);
         switch (r) {
             // Compiled code leaves Cpu.fl's bits current (lift.zig).

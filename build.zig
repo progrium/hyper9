@@ -1270,8 +1270,9 @@ pub fn build(b: *std.Build) void {
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
     // -Dweb runs them on the web host under Node instead: h9-node on the v86
     // backend, with the root's 386 binaries (design/0012-browser-host.md).
-    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (v86, 386)") orelse false;
-    const backend_list = if (test_web) "v86" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
+    // -Dbackends=emu runs them there on h9's own 386 CPU (h86) instead.
+    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (v86, or -Dbackends=emu, 386)") orelse false;
+    const backend_list = if (test_web) want_backends orelse "v86" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
         .arch = "386",
@@ -1527,6 +1528,9 @@ pub fn build(b: *std.Build) void {
     };
     const test_step = b.step("test", "Run unit tests and the backend tests (not the integration cases)");
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
+    // h9.wasm too, so a change to the shared vmm or JIT code that breaks
+    // wasm32 (64-bit atomics, threads) is caught where it's made.
+    test_step.dependOn(&web.exe.step);
     addVcpuTests(b, test_step, target, optimize);
     addJitTestTools(b, test_step, target, optimize, unicorn_mod);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);

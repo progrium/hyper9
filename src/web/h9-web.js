@@ -444,6 +444,7 @@ function policyFlags(policy = {}) {
  * - root: the root archive's URL (default root.h9a beside this file), or
  *   a ws:// or wss:// URL of a 9P server (design/0021-websocket-9p.md)
  * - memory: --memory, such as '256M'
+ * - backend: --backend: 'v86' (v86's CPU) or 'emu' (h9's own, h86)
  * - policy: see policyFlags
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
  * - tty: the terminal is one to Linux programs (isatty, termios and raw
@@ -454,7 +455,7 @@ function policyFlags(policy = {}) {
  * machine.interrupt() is the interrupt key, and machine.terminate() ends
  * the Worker.
  */
-export async function createMachine({ root, memory, policy, terminal, tty = false } = {}) {
+export async function createMachine({ root, memory, backend, policy, terminal, tty = false } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const worker = new Worker(new URL('worker.js', import.meta.url), { type: 'module' });
   const enc = new TextEncoder();
@@ -463,7 +464,7 @@ export async function createMachine({ root, memory, policy, terminal, tty = fals
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
-      const flags = [...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
+      const flags = [...(backend ? ['--backend', backend] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       return new Promise((resolve, reject) => {
         worker.onmessage = ({ data: m }) => {
           switch (m.type) {

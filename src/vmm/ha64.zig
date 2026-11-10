@@ -102,7 +102,7 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
     const cfg: dispatch.Config = .{ .frontend = lift.frontend, .emitter = em, .pc_off = @offsetOf(t0.Cpu, "pc") };
     while (true) {
         const before = ctx.retired;
-        const r = dispatch.run(std.heap.smp_allocator, ctx, cfg, &t1_stats);
+        const r = dispatch.run(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator, ctx, cfg, &t1_stats);
         c.t0.retired +%= ctx.retired -% before;
         switch (r) {
             .svc => return exitOf(c, .syscall),
