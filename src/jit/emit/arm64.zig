@@ -1465,7 +1465,7 @@ fn vmemOp(e: *E, idx: usize) !void {
     const i = e.r.insts.items[idx];
     const f: ir.MemFlags = @bitCast(i.aux);
     const store = i.op == .@"v.store";
-    const tso = e.r.tso;
+    const tso = e.r.tso and tsoOn();
     const va = try e.src(i.a, S0);
     const slot = e.p.locs[if (store) i.b else idx].slot;
     if (f.aligned) {
@@ -1636,6 +1636,23 @@ fn vldst(e: *E, store: bool, qt: u5, off: u64) !void {
     try e.put((if (store) @as(u32, 0x3D800000) else 0x3DC00000) | @as(u32, IP1) << 5 | qt);
 }
 
+/// H9_TSO=off ignores Region.tso: for measuring what TSO costs, never
+/// for running guests (x86 programs can then see reorderings).
+fn tsoOn() bool {
+    const S = struct {
+        var known: std.atomic.Value(u8) = .init(0);
+    };
+    switch (S.known.load(.monotonic)) {
+        1 => return false,
+        2 => return true,
+        else => {},
+    }
+    const getenv = @extern(*const fn ([*:0]const u8) callconv(.c) ?[*:0]const u8, .{ .name = "getenv" });
+    const off = if (getenv("H9_TSO")) |v| std.mem.eql(u8, std.mem.span(v), "off") else false;
+    S.known.store(if (off) 1 else 2, .monotonic);
+    return !off;
+}
+
 /// Whether the host has FEAT_LRCPC (LDAPR): every Apple core does, and
 /// Linux reports it in AT_HWCAP. Tests and benchmarks can turn it off.
 pub var use_lrcpc: bool = true;
@@ -1742,7 +1759,7 @@ fn memOp(e: *E, idx: usize) !void {
     const val: u5 = if (store) try e.src(i.b, S1) else 0;
     const rd: u5 = if (store) 0 else e.dst(idx);
 
-    const tso = e.r.tso;
+    const tso = e.r.tso and tsoOn();
     if (f.aligned and n > 1) {
         const l = try e.label();
         try e.stubs.append(e.gpa, .{ .misaligned = .{ .label = l, .va = va, .acc = if (store or f.rmw) .write else .read, .dirty = e.dirty, .pc = i.aux2, .retired = i.retired } });
