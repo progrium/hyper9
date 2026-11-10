@@ -2196,6 +2196,13 @@ writing, and it counts against `--memory`; when memory runs out, writes fail
 with `file system full`. Renaming a host directory inside an overlay is
 refused with `permission denied`.
 
+**Exclusive-use files.** In an overlay (the root, `/tmp`, ephemeral paths),
+a file with the `l` mode bit (`DMEXCL`, set by `create` or `chmod +l`) can
+be open only once at a time in the machine, as on 9front's file servers: a
+second open fails with `file is locked` until the first is closed. Host
+directories have no such bit, so it isn't kept there: a file created with it
+on a shared host path opens as often as any other.
+
 **`/tmp`.** Every machine has its own `/tmp`, an overlay in memory over the
 root tree's empty `/tmp`, in both profiles. It's not your host's temporary
 directory and it disappears with the machine. Under `--write=none` it's
