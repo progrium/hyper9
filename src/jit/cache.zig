@@ -178,7 +178,8 @@ fn store32(r: *codemem.Region, off: u32, v: u32) void {
 fn arm64Patch(r: *codemem.Region, site: u32, target: ?u32) void {
     std.debug.assert(site % 4 == 0);
     const words: i64 = if (target) |t| (@as(i64, t) - @as(i64, site)) >> 2 else 1;
-    store32(r, site, 0x14000000 | @as(u32, @truncate(@as(u64, @bitCast(words)))) & 0x03ffffff);
+    // Zig's | and & share a precedence: the mask needs its parentheses.
+    store32(r, site, 0x14000000 | (@as(u32, @truncate(@as(u64, @bitCast(words)))) & 0x03ffffff));
 }
 
 fn x64Patch(r: *codemem.Region, site: u32, target: ?u32) void {
