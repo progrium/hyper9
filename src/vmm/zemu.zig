@@ -75,6 +75,17 @@ fn cacheSize() usize {
     return std.fmt.parseInt(usize, std.mem.span(v), 0) catch cache_size;
 }
 
+/// Whether this process can generate code: codemem.available(), unless
+/// H9_EMU_NO_CODEGEN=1 says to act as a host that refuses it would (iOS,
+/// or a hardened runtime without the JIT entitlement), so that the
+/// fallback to T0 can be tested anywhere.
+fn codegenAvailable() bool {
+    if (builtin.link_libc) if (std.c.getenv("H9_EMU_NO_CODEGEN")) |v| {
+        if (std.mem.eql(u8, std.mem.span(v), "1")) return false;
+    };
+    return codemem.available();
+}
+
 /// H9_EMU_DETERMINISTIC=1: a Guest with a `deterministic` flag derives
 /// its counter from instructions retired (design/0019's deterministic
 /// mode), set at create like the tier.
@@ -220,7 +231,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     .invalidate = invalidate,
                 });
                 errdefer b.code.deinit(gpa);
-                if (build_options.jit and codemem.available()) {
+                if (build_options.jit and codegenAvailable()) {
                     const c = try gpa.create(cache.Cache);
                     if (cache.Cache.init(gpa, cacheSize())) |v| {
                         c.* = v;

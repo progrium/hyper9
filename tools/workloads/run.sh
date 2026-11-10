@@ -6,6 +6,8 @@
 #   t1       h9 --backend emu, the zig emulator's default (JIT) tier
 #   t0       the same with H9_EMU_TIER=t0, the interpreter alone
 #   unicorn  h9 built with -Demu=unicorn
+#   nojit    h9 built with -Demu=zig -Dno-jit (in .local/workloads/h9-nojit),
+#            T0 with no code generator compiled in
 #   native   the host itself, chrooted (as root), for 386 Linux on an
 #            x86-64 Linux host; skipped elsewhere
 #   hvf, kvm h9 with that hardware backend (H9 for its binary, default
@@ -67,14 +69,16 @@ native_ok=0
 
 h9() { # tier arch cwd cmd
 	local tier=$1 arch=$2 cwd=$3 cmd=$4 bin root
-	local backend=emu
+	local backend=emu te=""
+	case $tier in t0 | t1) te="H9_EMU_TIER=$tier" ;; esac
 	case $tier in
 	unicorn) bin="$W/h9-unicorn/bin/h9" ;;
+	nojit) bin="$W/h9-nojit/bin/h9" ;;
 	hvf | kvm) bin="${H9:-$W/h9-zig/bin/h9}" backend=$tier ;;
 	*) bin="$W/h9-zig/bin/h9" ;;
 	esac
 	if [ "$arch" = 9front ]; then
-		H9_EMU_TIER=$tier $to "$bin" --backend $backend --arch 386 --root "$NINE" --rc "$cmd"
+		env $te $to "$bin" --backend $backend --arch 386 --root "$NINE" --rc "$cmd"
 		return
 	fi
 	root="$W/alpine-$arch"
@@ -83,7 +87,7 @@ h9() { # tier arch cwd cmd
 		return
 	fi
 	# --net enable: the Go program serves HTTP on loopback.
-	H9_EMU_TIER=$tier $to "$bin" --backend $backend --arch "$arch" --root "$root" --net enable sh -c "cd ${cwd:-/} && $cmd"
+	env $te $to "$bin" --backend $backend --arch "$arch" --root "$root" --net enable sh -c "cd ${cwd:-/} && $cmd"
 }
 
 table="$OUT/results.md"
