@@ -1,4 +1,4 @@
-//! ITIMER_REAL for Linux programs (design/0018-linux-personality.md,
+//! ITIMER_REAL for Linux programs (design/linux-personality.md,
 //! "Signals"): setitimer and alarm. One kernel process serves every
 //! process's timer, waking at least every `tick` while any is set, and
 //! posts SIGALRM's note to a process whose timer is due, through a

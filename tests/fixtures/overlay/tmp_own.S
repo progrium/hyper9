@@ -1,5 +1,5 @@
 // Writes /tmp/f, waits while another machine looks for it, then reads it
-// back (tests/backends.zig, design/0006-ephemeral-writes.md).
+// back (tests/backends.zig, design/ephemeral-writes.md).
 
 #include "lib.S"
 

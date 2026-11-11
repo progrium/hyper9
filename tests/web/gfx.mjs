@@ -1,7 +1,7 @@
-// Graphics on the browser host (design/0120-browser-gfx.md) in Chromium:
+// Graphics on the browser host (design/browser-gfx.md) in Chromium:
 // serves zig-out/web and a test page beside it, and runs machines with a
 // canvas through createMachine. Each case is named as the proposal names
-// it, with the proposal's tag, [120].
+// it, with the proposal's tag, [browser-gfx].
 //
 //     node tests/web/gfx.mjs [zig-out/web]
 //
@@ -162,7 +162,7 @@ async function test(name, f) {
 const field = (s, i) => s.slice(i * 12, i * 12 + 12).trim();
 
 try {
-  await test('a draw client\'s image reaches the canvas [120]', async () => {
+  await test('a draw client\'s image reaches the canvas [browser-gfx]', async () => {
     const { page, until } = await machine({ scale: 1 }, ['/tmp/draw']);
     await until('the draw', (s) => s.out.includes('drawn'));
     let px;
@@ -178,7 +178,7 @@ try {
     await page.close();
   });
 
-  await test('rio starts, and a window\'s rc runs a command typed into it [120]', async () => {
+  await test('rio starts, and a window\'s rc runs a command typed into it [browser-gfx]', async () => {
     const { page, until } = await machine({ scale: 1 }, ['rio', '-i', 'window rc']);
     await page.evaluate(() => navigator.clipboard.writeText(''));
     const c = page.locator('#c');
@@ -198,7 +198,7 @@ try {
     await page.close();
   });
 
-  await test('a paste into the canvas reaches /dev/snarf [120]', async () => {
+  await test('a paste into the canvas reaches /dev/snarf [browser-gfx]', async () => {
     const { page, until } = await machine({ scale: 1 }, ['rc', '-c', 'echo ready; x=(); while(~ $#x 0){ sleep 1; x=`{cat /dev/snarf} }; echo snarf: $x']);
     await until('ready', (s) => s.out.includes('ready'));
     await page.evaluate(() => navigator.clipboard.writeText('pasted text'));
@@ -208,7 +208,7 @@ try {
     await page.close();
   });
 
-  await test('resizing the canvas resizes the screen [120]', async () => {
+  await test('resizing the canvas resizes the screen [browser-gfx]', async () => {
     const { page, until } = await machine({ scale: 1 }, ['rc', '-c',
       'for(i in `{seq 40}){ dd -bs 144 -count 1 </dev/draw/new >[2]/dev/null; echo; sleep 1 }']);
     const sizes = (s) => s.out.split('\n').filter((l) => l.length >= 144).map((l) => `${field(l, 6)}x${field(l, 7)}`);
@@ -220,7 +220,7 @@ try {
     await page.close();
   });
 
-  await test('keys typed outside the canvas don\'t reach /dev/kbd [120]', async () => {
+  await test('keys typed outside the canvas don\'t reach /dev/kbd [browser-gfx]', async () => {
     const { page, until } = await machine({ scale: 1 }, ['rc', '-c', 'echo ready; cat /dev/kbd']);
     await until('ready', (s) => s.out.includes('ready'));
     await page.waitForTimeout(1000);
@@ -234,7 +234,7 @@ try {
     await page.close();
   });
 
-  await test('machine.hangup posts hangup and ends the run [120]', async () => {
+  await test('machine.hangup posts hangup and ends the run [browser-gfx]', async () => {
     const { page, until } = await machine({ scale: 1 }, ['rc', '-c', 'echo ready; sleep 100']);
     await until('ready', (s) => s.out.includes('ready'));
     const t0 = Date.now();

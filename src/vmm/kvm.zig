@@ -1,4 +1,4 @@
-//! KVM backend (Linux, arm64 and x86_64). See design/0016-kvm.md.
+//! KVM backend (Linux, arm64 and x86_64). See design/kvm.md.
 //!
 //! Guest memory is one RAM region at ram_gpa (gphys.zig), mapped once as
 //! KVM memory slot 0. On arm64 the tables, kernel half, shim and system

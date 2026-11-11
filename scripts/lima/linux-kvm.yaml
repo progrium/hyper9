@@ -1,5 +1,5 @@
 # Ubuntu 24.04 arm64 guest with nested virtualization, for testing h9's KVM
-# backend (design/0016-kvm.md). Needs an M3 or later and macOS 15.
+# backend (design/kvm.md). Needs an M3 or later and macOS 15.
 # Created by scripts/lima/vm; see scripts/lima/README.md.
 base: template:ubuntu-24.04
 vmType: vz

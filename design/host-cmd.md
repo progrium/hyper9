@@ -35,7 +35,7 @@ Problems found while adding the tests:
 
 ## Proposal
 
-Replace devcmd with an h9 device, `#C` still, in `src/kern/devhcmd.c` with its host side in Zig (`src/hostcmd.zig`). It follows devhstream's pattern ([websocket-9p](0021-websocket-9p.md)).
+Replace devcmd with an h9 device, `#C` still, in `src/kern/devhcmd.c` with its host side in Zig (`src/hostcmd.zig`). It follows devhstream's pattern ([websocket-9p](websocket-9p.md)).
 
 - **Per machine.** Conversations belong to the machine that made them, as `/net/ws`'s do. A machine lists and opens only its own.
 - **Interruptible.** Zig starts the process (`std.process.Child`) and has a host thread per pipe that queues output in the machine's pages. A guest read sleeps on a Rendez, so a note interrupts it with `Eintr`. A write to stdin is queued the same way. The machine's end kills its commands and their process groups, as `hostcmd.c` does now.
@@ -68,12 +68,12 @@ When this lands, `-Dhost-cmd` goes away and host commands are built in everywher
 
 The guest can run only the host programs the user names, with the scrubbed environment, in host directories it could already see. A named program still runs as the host user with full rights. A command such as `sh` or `python` is equivalent to `'*'`, and the plan says so: names that are interpreters get a caveat. Commands from separate machines in one process are isolated from each other. The process group is killed when the machine ends.
 
-## Done when
+## Done criteria
 
-- `h9 --host-cmd uname hcmd uname -s` prints the host's kernel name, and `h9 --host-cmd uname hcmd sh -c true` fails with "sh: not allowed".
-- `h9 --host-cmd make --cwd proj --rc 'cd sub; hcmd make'` runs `make` in `proj/sub`.
-- Ctrl-C during `hcmd sleep 100` returns at once, and no `sleep` is left on the host.
-- Integration cases:
+- [ ] `h9 --host-cmd uname hcmd uname -s` prints the host's kernel name, and `h9 --host-cmd uname hcmd sh -c true` fails with "sh: not allowed".
+- [ ] `h9 --host-cmd make --cwd proj --rc 'cd sub; hcmd make'` runs `make` in `proj/sub`.
+- [ ] Ctrl-C during `hcmd sleep 100` returns at once, and no `sleep` is left on the host.
+- [ ] Integration cases:
   - `host commands are limited to the named ones [host-cmd]`
   - `a host command gets a scrubbed environment [host-cmd]`
   - `dir outside the shared trees is refused [host-cmd]`

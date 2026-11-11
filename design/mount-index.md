@@ -4,7 +4,7 @@ title: Metadata indexes for 9P roots and mounts
 status: draft
 created: 2026-11-09
 authors: [progrium]
-depends: [13, 21, 32]
+depends: [9p-roots, websocket-9p, guest-tools]
 areas: [cli, kern]
 ---
 
@@ -14,7 +14,7 @@ Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A [9P root](0013-9p-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its qid, mode, length, mtime, and owner, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server. Each directory is checked against the server once per run, in one pipelined batch when the tree is mounted, and each file is checked when it's opened. Anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers.
+A [9P root](9p-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its qid, mode, length, mtime, and owner, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server. Each directory is checked against the server once per run, in one pipelined batch when the tree is mounted, and each file is checked when it's opened. Anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers.
 
 The index is either a file at the top of the tree, `/.h9index`, or, for the root, one given with `--root-index FILE|URL`, so it can be layered over a server that can't be written to. A server that keeps its `/.h9index` current as the tree changes makes this work for mutable trees too, such as home directories: they're fast from the first `ls`, and only what changed since the index was written is demoted. A new guest command, `mkindex`, builds it by walking a mounted tree, so the qids in it are the server's own. The index is text on the wire and a compiled binary form in the cache.
 
@@ -22,11 +22,11 @@ The index is either a file at the top of the tree, `/.h9index`, or, for the root
 
 ### h9 today
 
-- **[9p-roots](0013-9p-roots.md)** mounts a 9P server at `/` through devmnt: a `tcp!` dial string, a unix socket, or, with [websocket-9p](0021-websocket-9p.md), a `ws://` or `wss://` URL, which [schemeless-roots](0076-schemeless-roots.md) lets you write without the scheme.
+- **[9p-roots](9p-roots.md)** mounts a 9P server at `/` through devmnt: a `tcp!` dial string, a unix socket, or, with [websocket-9p](websocket-9p.md), a `ws://` or `wss://` URL, which [schemeless-roots](schemeless-roots.md) lets you write without the scheme.
 - **devmnt sends one request per operation and waits for its reply.** Its caller is a guest process, so latency per operation, not bandwidth, is what a remote root costs. devmnt has no cache of its own in drawterm's tree.
 - **Startup is mostly metadata.** Before a program does useful work, rc searches `$path`, a Linux program's loader probes library directories, and the program stats and opens its configuration. Each name looked up is a `Twalk`, often followed by a `Tstat`, and a missing name is a full round trip that returns nothing.
-- **[overlay](0011-overlay.md)** puts `#O` over the root by default, so the guest's writes to the root land in memory and never reach the server. A root mounted that way is read-only as far as the server is concerned.
-- **[dotl](0022-dotl.md)** (draft) puts a translator between devmnt and every 9P connection, which answers some requests from compound .L.Z replies. It caches attributes only until the next mutation, because ZeroFS's trees are mutable, and only within one connection.
+- **[overlay](overlay.md)** puts `#O` over the root by default, so the guest's writes to the root land in memory and never reach the server. A root mounted that way is read-only as far as the server is concerned.
+- **[dotl](dotl.md)** (draft) puts a translator between devmnt and every 9P connection, which answers some requests from compound .L.Z replies. It caches attributes only until the next mutation, because ZeroFS's trees are mutable, and only within one connection.
 
 ### The opportunity
 
@@ -53,7 +53,7 @@ A path is everything from the first field to the first space, so a name with a s
 
 ### Building one: `mkindex`
 
-`mkindex [-o FILE] [DIR]` is an rc script in [guest-tools](0032-guest-tools.md)' `/bin`, beside `wsmount`. It walks `DIR` (default `/`) with `walk(1)`'s `-e` format and writes the index to standard output or FILE:
+`mkindex [-o FILE] [DIR]` is an rc script in [guest-tools](guest-tools.md)' `/bin`, beside `wsmount`. It walks `DIR` (default `/`) with `walk(1)`'s `-e` format and writes the index to standard output or FILE:
 
 ```
 h9 --root wss://roots.example/alpine mkindex / >alpine.h9index
@@ -62,7 +62,7 @@ h9 --rc 'wsmount wss://fs.example/data /n/d && mkindex /n/d' >data.h9index
 
 It stats the tree through devmnt, so every qid in the index is what the server reports, which matters because h9 later pairs stats from the index with opens from the server. It works on any tree h9 can mount, including one whose host files you can't see. It skips `/.h9index` itself, and, under the root, the paths the namespace builder binds over it (`/dev`, `/proc`, `/mnt/term`, `/tmp`, and the rest of [policy](../src/policy.zig)'s binds), by walking the mount's own channel through `/srv/root` rather than the guest's `/`.
 
-`walk` isn't in [builtin-root](0087-builtin-root.md)'s command set, so this proposal adds it there, so `mkindex` works over a root that has no 9front commands, such as a Linux image, with `--builtin=before`.
+`walk` isn't in [builtin-root](builtin-root.md)'s command set, so this proposal adds it there, so `mkindex` works over a root that has no 9front commands, such as a Linux image, with `--builtin=before`.
 
 ### Using one
 
@@ -90,7 +90,7 @@ The cache directory is created mode 0700, and its files 0600. Entries not used f
 
 ### Serving from the index
 
-The index sits between devmnt and the server's connection, as a new kernel device, `#ι`, which devmnt mounts in place of the connection's channel. Like [devhstream](../src/kern/devhstream.c), its logic is Zig (`src/rootindex.zig`), a state machine over 9P messages with no I/O of its own, and the device moves bytes between it, devmnt, and the connection. When [dotl](0022-dotl.md)'s translator exists, the index layer sits above it and still speaks only 9P2000.
+The index sits between devmnt and the server's connection, as a new kernel device, `#ι`, which devmnt mounts in place of the connection's channel. Like [devhstream](../src/kern/devhstream.c), its logic is Zig (`src/rootindex.zig`), a state machine over 9P messages with no I/O of its own, and the device moves bytes between it, devmnt, and the connection. When [dotl](dotl.md)'s translator exists, the index layer sits above it and still speaks only 9P2000.
 
 It keeps every fid devmnt uses, and each is either **real** (the server has it) or **virtual** (only the index knows it, by its path):
 
@@ -185,28 +185,28 @@ The cache is per user, mode 0700, and each compiled file is checked against its 
 
 A URL index is fetched by h9 on the host, like a WebSocket root, under the root's TLS and proxy settings, and not under the guest's `--net` policy.
 
-## Done when
+## Done criteria
 
 Integration cases tagged `[mount-index]`. The server is the second h9 serving the test root with exportfs, as in 9p-roots' cases, behind a relay that counts T-messages:
 
-- `test "mkindex lists every name in the test root with the server's qids [mount-index]"`
-- `test "mkindex marks a directory with a name containing a newline unindexed [mount-index]"`
-- `test "a root with /.h9index runs /bin/ls [mount-index]"`
-- `test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]"`
-- `test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]"`
-- `test "--root-index FILE is used over a root without /.h9index [mount-index]"`
-- `test "a second run uses the cache and doesn't read /.h9index [mount-index]"`
-- `test "a file added after indexing is found, by demoting its directory [mount-index]"`
-- `test "a file removed after indexing is not found [mount-index]"`
-- `test "a file changed in place reads the server's contents [mount-index]"`
-- `test "a malformed index is ignored and the root still mounts [mount-index]"`
-- `test "an unreadable --root-index exits 125 [mount-index]"`
-- `test "--index none ignores /.h9index [mount-index]"`
-- `test "a namespace-file mount of a server with /.h9index uses it [mount-index]"`
-- `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
-- `test "a rewritten /.h9index is fetched on the next mount [mount-index]"`
-- `test "--root-index with a host-directory root is a usage error [mount-index]"`
-- `test "--print shows the index source and entry count [mount-index]"`
+- [ ] `test "mkindex lists every name in the test root with the server's qids [mount-index]"`
+- [ ] `test "mkindex marks a directory with a name containing a newline unindexed [mount-index]"`
+- [ ] `test "a root with /.h9index runs /bin/ls [mount-index]"`
+- [ ] `test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]"`
+- [ ] `test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]"`
+- [ ] `test "--root-index FILE is used over a root without /.h9index [mount-index]"`
+- [ ] `test "a second run uses the cache and doesn't read /.h9index [mount-index]"`
+- [ ] `test "a file added after indexing is found, by demoting its directory [mount-index]"`
+- [ ] `test "a file removed after indexing is not found [mount-index]"`
+- [ ] `test "a file changed in place reads the server's contents [mount-index]"`
+- [ ] `test "a malformed index is ignored and the root still mounts [mount-index]"`
+- [ ] `test "an unreadable --root-index exits 125 [mount-index]"`
+- [ ] `test "--index none ignores /.h9index [mount-index]"`
+- [ ] `test "a namespace-file mount of a server with /.h9index uses it [mount-index]"`
+- [ ] `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
+- [ ] `test "a rewritten /.h9index is fetched on the next mount [mount-index]"`
+- [ ] `test "--root-index with a host-directory root is a usage error [mount-index]"`
+- [ ] `test "--print shows the index source and entry count [mount-index]"`
 
 Unit tests for `src/rootindex.zig`, with recorded conversations: walks, stats, and directory reads answered locally; virtual fids made real; flushes; demotion on a mismatched open; and the parser's limits.
 

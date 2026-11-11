@@ -34,7 +34,7 @@ pub const Host = struct {
     /// in ms on the awake clock, 0 for none.
     last_interrupt_ms: i64 = 0,
     /// The host signal that started a teardown, for the exit code of a
-    /// run that ends `h9: machine stopped` (design/0033-exit-status.md): INT for
+    /// run that ends `h9: machine stopped` (design/exit-status.md): INT for
     /// a second Ctrl-C, HUP or TERM for a hangup. 0 until one does; the
     /// first one wins.
     stop_signal: std.atomic.Value(u8) = .init(0),

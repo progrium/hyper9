@@ -1,4 +1,4 @@
-# The browser host's root archive (design/0012-browser-host.md): the
+# The browser host's root archive (design/browser-host.md): the
 # paths, relative to the 386 root tree, that `zig build web` packs into
 # zig-out/web/root.h9a for the demo page. A path ending in / is an empty
 # directory, such as a mount point. tools/webroot.zig reads this.
@@ -76,7 +76,7 @@ adm/timezone/GMT
 386/bin/wc
 386/bin/xd
 
-# rio and acme, for a page with a canvas (design/0120-browser-gfx.md):
+# rio and acme, for a page with a canvas (design/browser-gfx.md):
 # window, which rio's -i runs, and the font both open by default.
 386/bin/rio
 386/bin/acme

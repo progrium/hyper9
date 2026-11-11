@@ -1,6 +1,6 @@
 // Serves HTTP on loopback and fetches from it, in one process: Go's
 // netpoller on epoll, with goroutines on several threads
-// (design/0050-linux-net.md, design/0049-linux-threads.md).
+// (design/linux-net.md, design/linux-threads.md).
 package main
 
 import (

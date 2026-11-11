@@ -21,7 +21,7 @@ scratch disk, and unpacks it into `.local/9front/root-<release>`, with
 `.local/9front/root` linked to it. The image itself isn't modified. It's the
 host-tree root h9 serves as `/`. Boot kernels, `/sys/doc`, and `/sys/src` are
 left out; pass `--src` to keep `/sys/src`, which
-[self-hosting](design/0010-self-host.md) needs. Options go after `--`:
+[self-hosting](design/self-host.md) needs. Options go after `--`:
 `zig build mkroot -- --src`.
 
 The tree has the host's architecture's binaries unless `--arch` names
@@ -43,7 +43,7 @@ clean tree; it merges upstream into the subtree and keeps our local changes.
 
 ### Linux (KVM)
 
-On Linux, h9 uses KVM ([kvm](design/0016-kvm.md)) on arm64 and x86\_64. It
+On Linux, h9 uses KVM ([kvm](design/kvm.md)) on arm64 and x86\_64. It
 needs read and write access to `/dev/kvm`, usually through the `kvm` group
 (`sudo usermod -aG kvm $USER`, then log in again), and inside a VM, nested
 virtualization. `h9 --check` says which is missing. `zig build mkroot` needs
@@ -66,7 +66,7 @@ it to kick them; an embedder must leave it to h9.
 
 On x86\_64 Linux hosts without a usable KVM (containers, CI, and cloud VMs
 without nested virtualization), h9 can run amd64 binaries on the native
-backend ([native-backend](design/0095-native-backend.md)): guest code runs
+backend ([native-backend](design/native-backend.md)): guest code runs
 directly on the host CPU in a small stub process per address space (with a
 thread per thread of a Linux program), and the kernel turns every guest
 syscall into a signal the stub hands to h9 (Syscall User Dispatch, Linux 5.11
@@ -94,8 +94,8 @@ zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
-zig build proposal -Dp=baseline  # one proposal's demos and integration cases (by slug or id)
-zig build design -- check        # validate design/ and the test tags (also list, ready, graph, new, file)
+zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
+zig build design -- check        # validate design/, the test tags, and links to design/ (also list, ready, new, propose, log, sign)
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
@@ -109,7 +109,7 @@ zig build -Demu=hcpu -Dhcpu-debug  # src/interp and src/jit built Debug too (by 
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
-`zig build slim` builds [9box](design/0064-multicall.md) inside the h9 it
+`zig build slim` builds [9box](design/multicall.md) inside the h9 it
 just built, against the root tree: 9front's own commands, compiled from the
 pinned source with their globals renamed so they share one link, chosen by
 the name they run as: the 42 commands basic operation needs.
@@ -125,7 +125,7 @@ It needs `/sys/src`, from `zig build mkroot -- --src` or the checkout
 without it.
 
 `zig build` embeds the same trees as h9's
-[built-in root](design/0087-builtin-root.md), `#Hroot`, which h9 uses when it
+[built-in root](design/builtin-root.md), `#Hroot`, which h9 uses when it
 finds no root tree, so `h9 --rc 'ls'` works with nothing but the binary. It
 takes `slim-<release>-<arch>` for each architecture the build runs (the
 target's, and with `-Demu=unicorn` also `amd64` and `386`) from
@@ -158,7 +158,7 @@ fetches it. The prebuilt libraries exist for macOS arm64 and Linux musl only,
 so Windows (`-Dtarget=aarch64-windows` or `x86_64-windows`) always builds
 from source. kern builds for Windows with drawterm's win32 files, so h9.exe
 runs programs on the emulator, and host paths are `/C:/...` in `#U`. On
-Windows x86\_64, h9.exe also has the WHP backend ([whp](design/0017-whp.md)):
+Windows x86\_64, h9.exe also has the WHP backend ([whp](design/whp.md)):
 it needs the Windows Hypervisor Platform feature (Settings >
 Optional features, or `DISM /Online /Enable-Feature
 /FeatureName:HypervisorPlatform`, then restart), and loads
@@ -167,14 +167,14 @@ falls back to the emulator, without it.
 
 ### Graphics
 
-`-Dgfx` picks the GUI backend for `--gfx` ([gfx](design/0015-gfx.md)):
+`-Dgfx` picks the GUI backend for `--gfx` ([gfx](design/gfx.md)):
 drawterm's Cocoa on macOS and Win32 on Windows by default, `none` on Linux.
 `-Dgfx=x11` builds the X11 backend for Linux, which links the host's libX11
 (and needs the libXt headers), so it builds natively against glibc, not for
 a musl target. `-Dgfx=none` leaves graphics out; `-Dgfx=headless` is a screen
 in memory, which the backend tests use whatever `-Dgfx` is. `zig build web`
 always builds `web`, the browser host's canvas backend
-([browser-gfx](design/0120-browser-gfx.md)), unless `-Dgfx=none` leaves it
+([browser-gfx](design/browser-gfx.md)), unless `-Dgfx=none` leaves it
 out.
 
 ### Wine
@@ -210,7 +210,7 @@ zig build web                  # packs it into zig-out/web/wine.h9a, from src/we
 ### Browser host
 
 `zig build web` builds h9 for wasm32-wasi
-([browser-host](design/0012-browser-host.md)). It runs 9front's 386 binaries
+([browser-host](design/browser-host.md)). It runs 9front's 386 binaries
 on h9's own CPU (h86, with its wasm JIT tier), and needs JavaScript Promise
 Integration (Chrome 137 or later, Node 24 or later). With a 386 root tree
 (`zig build mkroot -- --arch 386`, linked or copied as
@@ -252,7 +252,7 @@ The demos and the integration tests use the root tree from
 skip and only the hello demos run. Each case is tagged with the proposal it
 proves (`test "echo [baseline]"`); cases for a proposal that isn't implemented
 yet skip in `zig build integration` unless `-Dpending` is given, and
-`zig build proposal -Dp=<slug or id>` runs one proposal's cases whatever its
+`zig build proposal -Dp=<slug>` runs one proposal's cases whatever its
 status. Interactive cases run h9 on a terminal the test creates
 ([tests/term.zig](tests/term.zig): a pty, or ConPTY on Windows), so they need
 no human and no `ssh -t`.

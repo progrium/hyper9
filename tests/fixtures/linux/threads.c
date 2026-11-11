@@ -1,4 +1,4 @@
-/* Threads (design/0049-linux-threads.md): each case named on the command
+/* Threads (design/linux-threads.md): each case named on the command
  * line prints "ok NAME" or "FAIL NAME: why". "all" runs the ones that
  * return; exit_main, exit_thread and exec_thread end the process. */
 #define _GNU_SOURCE

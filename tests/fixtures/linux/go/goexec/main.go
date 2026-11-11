@@ -1,7 +1,7 @@
 // Runs itself as a child from several goroutines at once, each locked to
 // its own thread, so the thread that forks a child isn't always the one
 // that waits for it, then removes a filled directory under /tmp, and
-// prints "ok goexec". go build does both (design/0049-linux-threads.md).
+// prints "ok goexec". go build does both (design/linux-threads.md).
 package main
 
 import (

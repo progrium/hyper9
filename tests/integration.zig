@@ -9,12 +9,12 @@
 //! `zig build install-tests` builds this file for another target, and
 //! `scripts/lima/vm test` runs it in a test VM with the same variables.
 //!
-//! Each case is tagged with the proposal it proves, by slug or id, at the
+//! Each case is tagged with the proposal it proves, by slug, at the
 //! end of its name: `test "ls /bin | wc -l (demo) [baseline]"`. A case
 //! whose proposal isn't implemented skips unless H9_TEST_PENDING is set;
 //! the build passes those proposals' tags in (`design.pending_tags`, from
 //! design/), so a case stops skipping in the commit that marks its
-//! proposal implemented. `zig build proposal -Dp=<id or slug>` runs one
+//! proposal implemented. `zig build proposal -Dp=<slug>` runs one
 //! proposal's cases, and `zig build design -- check` checks the tags.
 //!
 //! Interactive cases run h9 on a terminal from tests/term.zig. Their
@@ -71,7 +71,7 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
     return .{ .h9 = h9, .root = root, .backends = backends, .arch = arch };
 }
 
-/// Cases the web host can't run (design/0012-browser-host.md), skipped
+/// Cases the web host can't run (design/browser-host.md), skipped
 /// when H9_TEST_WEB is set (-Dweb): by name, those that need a host TTY,
 /// POSIX signals, or what a page's WebSocket can't do; by tag, the
 /// network's, 9P roots', and serving's proposals, since the web host has
@@ -89,7 +89,7 @@ const web_skips = [_][]const u8{
     // A 9P root over TCP.
     "a write to a 9P root under the default profile doesn't reach the server",
     // A page's WebSocket can't set headers or a CA, use a proxy, or ping;
-    // the browser does those (design/0021-websocket-9p.md).
+    // the browser does those (design/websocket-9p.md).
     "--root-header is sent, and @FILE reads headers from a file",
     "header in ctl is sent with the handshake",
     "wsmount mounts a ws:// URL with flags and headers",
@@ -347,7 +347,7 @@ test "no root tree gives 125 for a guest program [baseline]" {
     defer environ.deinit();
     _ = environ.swapRemove("H9ROOT");
     // Without --builtin=off, the built-in root is used instead
-    // (design/0087-builtin-root.md).
+    // (design/builtin-root.md).
     for ([_][]const []const u8{ &.{ h9, "--builtin=off", "echo", "x" }, &.{ h9, "--builtin=off", "--rc", "echo x" } }) |argv| {
         var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .environ_map = &environ, .create_no_window = true });
         defer child.kill(io);
@@ -500,7 +500,7 @@ test "default profile: the cwd is writable and the root tree isn't written [base
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(s.exists("f"));
-    // The write succeeds in the root's overlay (design/0011-overlay.md);
+    // The write succeeds in the root's overlay (design/overlay.md);
     // --write=scope makes it fail.
     const ro = try run(e, &.{ "--cwd", s.path, "touch", "/lib/h9-test" });
     defer ro.deinit();
@@ -631,7 +631,7 @@ test "--print shows the plan and doesn't run [baseline]" {
 test "--strict refuses what this build can't enforce [baseline]" {
     const e = try env(@src());
     // This build enforces every capability it knows, since
-    // design/0011-overlay.md made --write=overlay enforceable, so there's
+    // design/overlay.md made --write=overlay enforceable, so there's
     // nothing left to refuse.
     const ok = try run(e, &.{ "--strict", "--profile=tight", "echo", "ok" });
     defer ok.deinit();
@@ -653,7 +653,7 @@ test "--timeout stops the program [baseline]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "200ms", "sleep", "10" });
     defer r.deinit();
-    // 124, as coreutils timeout (design/0033-exit-status.md).
+    // 124, as coreutils timeout (design/exit-status.md).
     try std.testing.expectEqual(124, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
 }
@@ -692,7 +692,7 @@ test "ls /bin | wc -l (demo) [baseline]" {
     var bin_buf: [32]u8 = undefined;
     const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{e.arch orelse "arm64"});
     // #H/bin, h9's own commands, is in the union too
-    // (design/0032-guest-tools.md); the guest counts it.
+    // (design/guest-tools.md); the guest counts it.
     const h = try run(e, &.{ "--rc", "ls '#H/bin' | wc -l" });
     defer h.deinit();
     const in_h = try std.fmt.parseInt(usize, std.mem.trim(u8, h.out, " \n"), 10);
@@ -769,7 +769,7 @@ fn kvmLimit(e: Env) !?u32 {
     return try std.fmt.parseInt(u32, it.next() orelse return null, 10);
 }
 
-test "--check reports kvm and its vCPU limit [16]" {
+test "--check reports kvm and its vCPU limit [kvm]" {
     const e = try env(@src());
     const n = try kvmLimit(e) orelse return error.SkipZigTest;
     try std.testing.expect(n > 8);
@@ -779,7 +779,7 @@ test "--check reports kvm and its vCPU limit [16]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/echo runs") != null);
 }
 
-test "auto uses kvm when /dev/kvm is usable [16]" {
+test "auto uses kvm when /dev/kvm is usable [kvm]" {
     const e = try env(@src());
     _ = try kvmLimit(e) orelse return error.SkipZigTest;
     const r = try runOn(e, "auto", &.{"--check"}, null);
@@ -791,7 +791,7 @@ test "auto uses kvm when /dev/kvm is usable [16]" {
     try std.testing.expectEqualStrings("", w.err);
 }
 
-test "without access to /dev/kvm, auto falls back to the emulator with a warning [16]" {
+test "without access to /dev/kvm, auto falls back to the emulator with a warning [kvm]" {
     const e = try env(@src());
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // Runs where this user can't open /dev/kvm (not in the kvm group).
@@ -812,7 +812,7 @@ test "without access to /dev/kvm, auto falls back to the emulator with a warning
     try std.testing.expect(std.mem.indexOf(u8, r.err, "warning: no access to /dev/kvm (is your user in the kvm group?); using the emulator") != null);
 }
 
-test "more live processes than KVM's owned vCPUs run on the pool [16]" {
+test "more live processes than KVM's owned vCPUs run on the pool [kvm]" {
     const e = try env(@src());
     _ = try kvmLimit(e) orelse return error.SkipZigTest;
     // KVM's limit is capped by the file descriptors left: with 330 of
@@ -831,7 +831,7 @@ test "more live processes than KVM's owned vCPUs run on the pool [16]" {
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
 }
 
-test "more processes over a machine's life than KVM's vCPU limit [16]" {
+test "more processes over a machine's life than KVM's vCPU limit [kvm]" {
     const e = try env(@src());
     const n = try kvmLimit(e) orelse return error.SkipZigTest;
     var buf: [128]u8 = undefined;
@@ -857,7 +857,7 @@ fn requireWhp(e: Env) !void {
     if (std.mem.indexOf(u8, r.out, "backend whp: ok") == null) return error.SkipZigTest;
 }
 
-test "--check reports whp and its vCPU limit [17]" {
+test "--check reports whp and its vCPU limit [whp]" {
     const e = try env(@src());
     try requireWhp(e);
     const r = try runOn(e, "auto", &.{"--check"}, null);
@@ -866,7 +866,7 @@ test "--check reports whp and its vCPU limit [17]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "backend whp: ok, 64 vCPUs") != null);
 }
 
-test "auto uses whp when the feature is enabled [17]" {
+test "auto uses whp when the feature is enabled [whp]" {
     const e = try env(@src());
     try requireWhp(e);
     const r = try runOn(e, "auto", &.{"--check"}, null);
@@ -874,7 +874,7 @@ test "auto uses whp when the feature is enabled [17]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses whp)") != null);
 }
 
-test "more live processes than WHP's owned vCPUs run on the pool [17]" {
+test "more live processes than WHP's owned vCPUs run on the pool [whp]" {
     const e = try env(@src());
     try requireWhp(e);
     // 80 processes alive at once, past the 56 that own a vCPU.
@@ -884,7 +884,7 @@ test "more live processes than WHP's owned vCPUs run on the pool [17]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "h9.exe starts and falls back to the emulator without the WHP feature [17]" {
+test "h9.exe starts and falls back to the emulator without the WHP feature [whp]" {
     if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
     const e = try env(@src());
     const r = try runOn(e, "auto", &.{"--check"}, null);
@@ -897,7 +897,7 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [17]"
     }
 }
 
-/// Skips unless the native backend runs here (design/0095-native-backend.md):
+/// Skips unless the native backend runs here (design/native-backend.md):
 /// Linux x86_64 with Syscall User Dispatch and seccomp, and amd64 binaries.
 fn requireNative(e: Env) !void {
     if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
@@ -907,7 +907,7 @@ fn requireNative(e: Env) !void {
     if (std.mem.indexOf(u8, r.out, "backend native: ok") == null) return error.SkipZigTest;
 }
 
-test "--check reports native and runs its trap probe [95]" {
+test "--check reports native and runs its trap probe [native-backend]" {
     const e = try env(@src());
     try requireNative(e);
     // The backend runs its probe (a guest syscall with each of a list of
@@ -919,7 +919,7 @@ test "--check reports native and runs its trap probe [95]" {
     try expectIn(r.out, "/bin/echo runs (amd64)");
 }
 
-test "auto never selects native; it stays an explicit opt-in [95]" {
+test "auto never selects native; it stays an explicit opt-in [native-backend]" {
     // The native backend shares h9's address space and is not a security
     // boundary, so `auto` must not pick it silently (design/0095, Security;
     // security audit 2026-11-09). On a host with a hypervisor or the
@@ -938,7 +938,7 @@ test "auto never selects native; it stays an explicit opt-in [95]" {
     try std.testing.expectEqualStrings("", w.err);
 }
 
-test "rfork with RFMEM shares data and bss but not the stack [95]" {
+test "rfork with RFMEM shares data and bss but not the stack [native-backend]" {
     const e = try env(@src());
     try requireNative(e);
     var s: Scratch = undefined;
@@ -952,7 +952,7 @@ test "rfork with RFMEM shares data and bss but not the stack [95]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "an RFMEM process can use pages another just grew, without a syscall [95]" {
+test "an RFMEM process can use pages another just grew, without a syscall [native-backend]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1024,7 +1024,7 @@ test "--ns replays a namespace file [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// A root's default command (design/0081-default-command.md). The stock tree
+// A root's default command (design/default-command.md). The stock tree
 // has no /rc/lib/rcmain.local, so these union one from a scratch dir onto
 // /rc/lib with --ns; rcmain and /bin/test come from the root.
 
@@ -1038,7 +1038,7 @@ fn defaultCommand(s: *Scratch, script: []const u8) !void {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = "bind -a /mnt/term/cwd/lib /rc/lib\n" });
 }
 
-test "--rc alone runs the root's rcmain.local, then stdin [81]" {
+test "--rc alone runs the root's rcmain.local, then stdin [default-command]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try defaultCommand(&s, "echo hello from the root\n");
@@ -1049,7 +1049,7 @@ test "--rc alone runs the root's rcmain.local, then stdin [81]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "an exec in rcmain.local sets the exit status [81]" {
+test "an exec in rcmain.local sets the exit status [default-command]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try defaultCommand(&s, "exec test -e /no/such/file\n");
@@ -1066,7 +1066,7 @@ test "an exec in rcmain.local sets the exit status [81]" {
     try std.testing.expectEqual(0, ok.code);
 }
 
-test "--rc alone without rcmain.local is a plain rc [81]" {
+test "--rc alone without rcmain.local is a plain rc [default-command]" {
     const e = try env(@src());
     const r = try runIn(e, &.{"--rc"}, "echo plain; test -e /no/such/file\n");
     defer r.deinit();
@@ -1078,7 +1078,7 @@ test "--rc alone without rcmain.local is a plain rc [81]" {
     try std.testing.expectEqual(0, none.code);
 }
 
-test "--rc alone on a terminal is an interactive login rc [81]" {
+test "--rc alone on a terminal is an interactive login rc [default-command]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try defaultCommand(&s, "echo hello from the root\n");
@@ -1099,7 +1099,7 @@ test "--rc alone on a terminal is an interactive login rc [81]" {
     }
 }
 
-test "--rc 'cmd' doesn't read rcmain.local [81]" {
+test "--rc 'cmd' doesn't read rcmain.local [default-command]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try defaultCommand(&s, "echo hello from the root\n");
@@ -1110,7 +1110,7 @@ test "--rc 'cmd' doesn't read rcmain.local [81]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// Ephemeral writes and a private /tmp (design/0006-ephemeral-writes.md).
+// Ephemeral writes and a private /tmp (design/ephemeral-writes.md).
 
 /// `h9 --cwd <s> --write=ephemeral args...`.
 fn runEph(e: Env, s: *Scratch, args: []const []const u8) !Result {
@@ -1126,7 +1126,7 @@ fn hostFile(s: *Scratch, name: []const u8, buf: []u8) ?[]u8 {
     return s.tmp.dir.readFile(std.testing.io, name, buf) catch null;
 }
 
-test "a new file in an ephemeral cwd is readable and absent on the host afterwards [6]" {
+test "a new file in an ephemeral cwd is readable and absent on the host afterwards [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1138,7 +1138,7 @@ test "a new file in an ephemeral cwd is readable and absent on the host afterwar
     try std.testing.expect(!s.exists("f"));
 }
 
-test "an exclusive-use file in the overlay opens once at a time [6]" {
+test "an exclusive-use file in the overlay opens once at a time [ephemeral-writes]" {
     const e = try env(@src());
     // DMEXCL (chmod +l), as 9front's file servers keep it: a second open
     // while one is open fails, and succeeds once that one is closed.
@@ -1149,7 +1149,7 @@ test "an exclusive-use file in the overlay opens once at a time [6]" {
     try expectIn(r.out, "again\n");
 }
 
-test "writing an existing host file changes it in the guest only [6]" {
+test "writing an existing host file changes it in the guest only [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1162,7 +1162,7 @@ test "writing an existing host file changes it in the guest only [6]" {
     try std.testing.expectEqualStrings("host\n", hostFile(&s, "f", &b).?);
 }
 
-test "removing a host file hides it in the guest only [6]" {
+test "removing a host file hides it in the guest only [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1174,7 +1174,7 @@ test "removing a host file hides it in the guest only [6]" {
     try std.testing.expect(s.exists("f"));
 }
 
-test "rm then recreate, as mk clean && mk does, works [6]" {
+test "rm then recreate, as mk clean && mk does, works [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1188,7 +1188,7 @@ test "rm then recreate, as mk clean && mk does, works [6]" {
     try std.testing.expectEqualStrings("old\n", hostFile(&s, "x.o", &b).?);
 }
 
-test "a file rename moves it in the guest only [6]" {
+test "a file rename moves it in the guest only [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1201,7 +1201,7 @@ test "a file rename moves it in the guest only [6]" {
     try std.testing.expect(!s.exists("b"));
 }
 
-test "renaming a host directory is refused [6]" {
+test "renaming a host directory is refused [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1215,7 +1215,7 @@ test "renaming a host directory is refused [6]" {
     try std.testing.expect(!s.exists("e"));
 }
 
-test "ls of an overlaid directory lists each name once [6]" {
+test "ls of an overlaid directory lists each name once [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1227,7 +1227,7 @@ test "ls of an overlaid directory lists each name once [6]" {
     try std.testing.expectEqualStrings("a\nb\nc\n", r.out);
 }
 
-test "a --writable path inside a read-only cwd is ephemeral [6]" {
+test "a --writable path inside a read-only cwd is ephemeral [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1244,7 +1244,7 @@ test "a --writable path inside a read-only cwd is ephemeral [6]" {
     try std.testing.expect(!s.exists("out/f"));
 }
 
-test "--read-deny still hides a path inside an ephemeral tree [6]" {
+test "--read-deny still hides a path inside an ephemeral tree [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1259,7 +1259,7 @@ test "--read-deny still hides a path inside an ephemeral tree [6]" {
     try std.testing.expectEqual(1, r.code);
 }
 
-test "the tight profile's cwd is ephemeral under --write=ephemeral [6]" {
+test "the tight profile's cwd is ephemeral under --write=ephemeral [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1271,7 +1271,7 @@ test "the tight profile's cwd is ephemeral under --write=ephemeral [6]" {
     try std.testing.expect(!s.exists("f"));
 }
 
-test "/tmp is private and writable in both profiles [6]" {
+test "/tmp is private and writable in both profiles [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1293,14 +1293,14 @@ test "/tmp is private and writable in both profiles [6]" {
     }
 }
 
-test "/tmp is read-only under --write=none [6]" {
+test "/tmp is read-only under --write=none [ephemeral-writes]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--write=none", "--rc", "echo x > /tmp/f" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
 }
 
-test "filling an overlay fails with file system full and the machine carries on [6]" {
+test "filling an overlay fails with file system full and the machine carries on [ephemeral-writes]" {
     const e = try env(@src());
     // A failed write keeps nothing, so up to one 4 MiB block is free again
     // for rm to run.
@@ -1310,7 +1310,7 @@ test "filling an overlay fails with file system full and the machine carries on 
     try std.testing.expectEqualStrings("small\n", r.out);
 }
 
-test "creating empty files until memory runs out fails with file system full [6]" {
+test "creating empty files until memory runs out fails with file system full [ephemeral-writes]" {
     const e = try env(@src());
     // rc makes the files itself, without forking: no memory is left for
     // another process. A redirection with no command doesn't set $status
@@ -1324,7 +1324,7 @@ test "creating empty files until memory runs out fails with file system full [6]
     try std.testing.expect(std.mem.indexOf(u8, r.err, "never") == null);
 }
 
-test "renaming a directory marker is refused [6]" {
+test "renaming a directory marker is refused [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1338,7 +1338,7 @@ test "renaming a directory marker is refused [6]" {
     try std.testing.expect(!s.exists("e"));
 }
 
-test "--strict accepts --write=ephemeral, and --print shows the overlays [6]" {
+test "--strict accepts --write=ephemeral, and --print shows the overlays [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1356,7 +1356,7 @@ test "--strict accepts --write=ephemeral, and --print shows the overlays [6]" {
     try std.testing.expectEqual(0, ok.code);
 }
 
-test "--print output with overlays replays with --ns [6]" {
+test "--print output with overlays replays with --ns [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1375,7 +1375,7 @@ test "--print output with overlays replays with --ns [6]" {
     try std.testing.expect(!s.exists("f"));
 }
 
-test "removing every .c file in a source tree leaves the host unchanged (demo) [6]" {
+test "removing every .c file in a source tree leaves the host unchanged (demo) [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1387,7 +1387,7 @@ test "removing every .c file in a source tree leaves the host unchanged (demo) [
     try std.testing.expect(s.exists("cat.c") and s.exists("ls.c") and !s.exists("x"));
 }
 
-// The root's overlay (design/0011-overlay.md).
+// The root's overlay (design/overlay.md).
 
 /// Fails if the root tree on the host has `rel`.
 fn expectRootLacks(e: Env, rel: []const u8) !void {
@@ -1396,7 +1396,7 @@ fn expectRootLacks(e: Env, rel: []const u8) !void {
     return error.RootWasWritten;
 }
 
-test "a write to the root under the default profile succeeds and leaves the root tree unchanged [11]" {
+test "a write to the root under the default profile succeeds and leaves the root tree unchanged [overlay]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1408,7 +1408,7 @@ test "a write to the root under the default profile succeeds and leaves the root
     try expectRootLacks(e, "lib/h9-overlay");
 }
 
-test "a file written in /lib reads back and isn't in the root tree (demo) [11]" {
+test "a file written in /lib reads back and isn't in the root tree (demo) [overlay]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--rc", "echo hi > /lib/x && cat /lib/x" });
     defer r.deinit();
@@ -1417,7 +1417,7 @@ test "a file written in /lib reads back and isn't in the root tree (demo) [11]" 
     try expectRootLacks(e, "lib/x");
 }
 
-test "mk install into the root works and leaves the root tree unchanged (demo) [11]" {
+test "mk install into the root works and leaves the root tree unchanged (demo) [overlay]" {
     const e = try env(@src());
     // Needs /sys/src (zig build mkroot -- --src).
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "sys/src/cmd/cat.c"), .{}) catch return error.SkipZigTest;
@@ -1441,7 +1441,7 @@ test "mk install into the root works and leaves the root tree unchanged (demo) [
     try expectRootLacks(e, "sys/src/cmd/cat.7");
 }
 
-test "removing a root file hides it in the guest only [11]" {
+test "removing a root file hides it in the guest only [overlay]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--rc", "rm /lib/namespace && ls /lib/namespace; ls /lib | grep -c '^namespace$'" });
     defer r.deinit();
@@ -1450,7 +1450,7 @@ test "removing a root file hides it in the guest only [11]" {
     try std.Io.Dir.cwd().access(std.testing.io, try hostPath(e.root, "lib/namespace"), .{});
 }
 
-test "$home exists and is writable when the root has no /usr/$user [11]" {
+test "$home exists and is writable when the root has no /usr/$user [overlay]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--rc", "echo $user; test -d $home && echo x > $home/f && cat $home/f" });
     defer r.deinit();
@@ -1465,7 +1465,7 @@ test "$home exists and is writable when the root has no /usr/$user [11]" {
     try expectRootLacks(e, home);
 }
 
-test "the cwd still writes the host under --write=overlay [11]" {
+test "the cwd still writes the host under --write=overlay [overlay]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1477,7 +1477,7 @@ test "the cwd still writes the host under --write=overlay [11]" {
     try expectRootLacks(e, "lib/h9-overlay-cwd");
 }
 
-test "--write=scope keeps the root read-only [11]" {
+test "--write=scope keeps the root read-only [overlay]" {
     const e = try env(@src());
     for ([_][]const u8{ "--profile=default", "--profile=tight" }) |prof| {
         const r = try run(e, &.{ prof, "--write=scope", "--rc", "echo x > /lib/h9-overlay-scope" });
@@ -1488,7 +1488,7 @@ test "--write=scope keeps the root read-only [11]" {
     try expectRootLacks(e, "lib/h9-overlay-scope");
 }
 
-test "--writable on the root writes the host, with no overlay [11]" {
+test "--writable on the root writes the host, with no overlay [overlay]" {
     const e = try env(@src());
     const name = "lib/h9-overlay-writable";
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, hostPath(e.root, name) catch unreachable) catch {};
@@ -1503,7 +1503,7 @@ test "--writable on the root writes the host, with no overlay [11]" {
     try std.testing.expectEqualStrings("kept\n", try std.Io.Dir.cwd().readFile(std.testing.io, try hostPath(e.root, name), &buf));
 }
 
-test "--write=ephemeral overlays the root as well [11]" {
+test "--write=ephemeral overlays the root as well [overlay]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1516,7 +1516,7 @@ test "--write=ephemeral overlays the root as well [11]" {
     try expectRootLacks(e, "lib/h9-overlay-eph");
 }
 
-test "--strict --write=overlay is accepted [11]" {
+test "--strict --write=overlay is accepted [overlay]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--strict", "--write=overlay", "echo", "ok" });
     defer r.deinit();
@@ -1529,7 +1529,7 @@ test "--strict --write=overlay is accepted [11]" {
     try std.testing.expect(std.mem.indexOf(u8, p.out, "unenforced") == null);
 }
 
-test "--print output with the root overlay replays with --ns [11]" {
+test "--print output with the root overlay replays with --ns [overlay]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1549,7 +1549,7 @@ test "--print output with the root overlay replays with --ns [11]" {
     try expectRootLacks(e, "lib/h9-overlay-ns");
 }
 
-test "the tight profile's root is an overlay [11]" {
+test "the tight profile's root is an overlay [overlay]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -1563,7 +1563,7 @@ test "the tight profile's root is an overlay [11]" {
     try expectRootLacks(e, "lib/h9-overlay-tight");
 }
 
-test "a write to the root fails with file system full when memory runs out [11]" {
+test "a write to the root fails with file system full when memory runs out [overlay]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--memory", "32m", "--rc", "dd -if /dev/zero -of /lib/big -bs 4194304 -count 16; rm /lib/big; echo small > /lib/s && cat /lib/s" });
     defer r.deinit();
@@ -1574,7 +1574,7 @@ test "a write to the root fails with file system full when memory runs out [11]"
 
 const notice = "h9: changes to the root under ";
 
-test "the discarded-changes notice is printed on a terminal and not otherwise [11]" {
+test "the discarded-changes notice is printed on a terminal and not otherwise [overlay]" {
     const e = try env(@src());
     const script = "echo x > /lib/h9-notice; mkdir /sys/h9-notice; echo done";
     const r = try run(e, &.{ "--rc", script });
@@ -1591,7 +1591,7 @@ test "the discarded-changes notice is printed on a terminal and not otherwise [1
     }
 }
 
-test "changes only under $home, or only by the namespace builder, print no notice [11]" {
+test "changes only under $home, or only by the namespace builder, print no notice [overlay]" {
     const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -1606,7 +1606,7 @@ test "changes only under $home, or only by the namespace builder, print no notic
     }
 }
 
-// Self-hosting (design/0010-self-host.md): the root's compilers and mk
+// Self-hosting (design/self-host.md): the root's compilers and mk
 // build 9front's own source, and acid debugs live processes. The builds
 // use the root's /sys/src (zig build mkroot -- --src), or else H9_TEST_SRC,
 // a checkout's sys directory, bound over /sys; they skip without either.
@@ -1662,7 +1662,7 @@ fn expectOk(r: Result, want: []const u8) !void {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "7c and 7l build ls in the cwd, and it runs [10]" {
+test "7c and 7l build ls in the cwd, and it runs [self-host]" {
     const e = try env(@src());
     const src = try selfSrc(e);
     const a = selfArch(e);
@@ -1676,7 +1676,7 @@ test "7c and 7l build ls in the cwd, and it runs [10]" {
     try std.testing.expect(s.exists(try std.fmt.bufPrint(&buf, "{s}.ls", .{a.o})));
 }
 
-test "mk builds ls and cat with the stock cmd/mkfile, byte-identical to the root's [10]" {
+test "mk builds ls and cat with the stock cmd/mkfile, byte-identical to the root's [self-host]" {
     const e = try env(@src());
     const src = try selfSrc(e);
     const a = selfArch(e);
@@ -1698,7 +1698,7 @@ test "mk builds ls and cat with the stock cmd/mkfile, byte-identical to the root
     try expectRootLacks(e, try std.fmt.bufPrint(&buf, "sys/src/cmd/{s}.ls", .{a.o}));
 }
 
-test "mk builds a library into the cwd against the read-only root [10]" {
+test "mk builds a library into the cwd against the read-only root [self-host]" {
     const e = try env(@src());
     const src = try selfSrc(e);
     var s: Scratch = undefined;
@@ -1713,14 +1713,14 @@ test "mk builds a library into the cwd against the read-only root [10]" {
     try std.testing.expect(s.exists("libbio.a"));
 }
 
-test "mk install into a read-only root fails with permission denied [10]" {
+test "mk install into a read-only root fails with permission denied [self-host]" {
     const e = try env(@src());
     const src = try selfSrc(e);
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
     // --write=scope keeps the root read-only; the default profile's
-    // overlay would take the install in memory (design/0011-overlay.md).
+    // overlay would take the install in memory (design/overlay.md).
     const r = try runSelf(e, &s, src, &.{"--write=scope"}, "bind -bc /mnt/term/cwd /sys/src/cmd && cd /sys/src/cmd && mk cat.install >/dev/null", null);
     defer r.deinit();
     errdefer std.debug.print("stderr:\n{s}\n", .{r.err});
@@ -1728,7 +1728,7 @@ test "mk install into a read-only root fails with permission denied [10]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") != null);
 }
 
-test "NPROC defaults to the vCPU limit, and --env overrides it [10]" {
+test "NPROC defaults to the vCPU limit, and --env overrides it [self-host]" {
     const e = try env(@src());
     const two = try run(e, &.{ "--cpus", "2", "--rc", "echo $NPROC" });
     defer two.deinit();
@@ -1743,7 +1743,7 @@ test "NPROC defaults to the vCPU limit, and --env overrides it [10]" {
     try std.testing.expect(n >= 1 and n <= @max(1, try std.Thread.getCpuCount()));
 }
 
-test "parallel mk builds 7c repeatedly without hanging [10]" {
+test "parallel mk builds 7c repeatedly without hanging [self-host]" {
     const e = try env(@src());
     const src = try selfSrc(e);
     const a = selfArch(e);
@@ -1765,7 +1765,7 @@ test "parallel mk builds 7c repeatedly without hanging [10]" {
     try expectOk(r, "     12\n");
 }
 
-test "/proc/n/segment lists Stack first [10]" {
+test "/proc/n/segment lists Stack first [self-host]" {
     const e = try env(@src());
     // libmach's stacktop reads the first line.
     const r = try run(e, &.{ "--rc", "sed 1q /proc/$pid/segment | awk '{print $1}'" });
@@ -1808,7 +1808,7 @@ fn runDebug(e: Env, script: []const u8, stdin: ?[]const u8) !Result {
     return runInFor(e, &.{ "--cwd", s.path, "--timeout", slowTimeout(&tb, 60_000), "--rc", cmd }, stdin, 90_000);
 }
 
-test "/proc/n/regs and fpregs read a stopped process's registers [10]" {
+test "/proc/n/regs and fpregs read a stopped process's registers [self-host]" {
     const e = try env(@src());
     const r = try runDebug(e,
         \\run thrice
@@ -1825,7 +1825,7 @@ test "/proc/n/regs and fpregs read a stopped process's registers [10]" {
     try expectOk(r, try std.fmt.bufPrint(&buf, "1\nStopped\nregs: a Ureg\npc in text 1\nfpregs {d}\nstatus target: Killed\n", .{fp}));
 }
 
-test "/proc/n/mem reads a variable and a write to text doesn't reach a sibling [10]" {
+test "/proc/n/mem reads a variable and a write to text doesn't reach a sibling [self-host]" {
     const e = try env(@src());
     // The parent and child share text until the write, which gives the
     // parent its own copy.
@@ -1847,7 +1847,7 @@ test "/proc/n/mem reads a variable and a write to text doesn't reach a sibling [
     try expectOk(r, "0x5eedf00d\n1\n1\nchild 1\nparent 2\nstatus \n");
 }
 
-test "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address [10]" {
+test "/proc/n/mem writes to text are fetched by the next run, including a rewrite of the same address [self-host]" {
     const e = try env(@src());
     // target isn't sharing its text, so the writes go to the same pages
     // each time, and only the code-cache invalidation makes them seen.
@@ -1868,7 +1868,7 @@ test "/proc/n/mem writes to text are fetched by the next run, including a rewrit
     try expectOk(r, "1\n2\n3\nstatus \n");
 }
 
-test "ctl hang stops a process at exec, and start runs it [10]" {
+test "ctl hang stops a process at exec, and start runs it [self-host]" {
     const e = try env(@src());
     const r = try runDebug(e,
         \\run hang
@@ -1881,7 +1881,7 @@ test "ctl hang stops a process at exec, and start runs it [10]" {
     try expectOk(r, "echo Stopped\nhang\nstatus \n");
 }
 
-test "ctl stop stops a process spinning in guest code [10]" {
+test "ctl stop stops a process spinning in guest code [self-host]" {
     const e = try env(@src());
     // The emulator passes the CPU on only at an exit, so target spin makes
     // a syscall every few milliseconds; on a hypervisor, stop kicks the
@@ -1899,7 +1899,7 @@ test "ctl stop stops a process spinning in guest code [10]" {
     try expectOk(r, "Stopped\n0\nstatus target: Killed\n");
 }
 
-test "a BRK posts sys: breakpoint [10]" {
+test "a BRK posts sys: breakpoint [self-host]" {
     const e = try env(@src());
     const r = try runDebug(e,
         \\run thrice
@@ -1920,7 +1920,7 @@ test "a BRK posts sys: breakpoint [10]" {
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "1\nstatus target: sys: breakpoint pc=0x{x}\n", .{pc}), r.out[0 .. nl + 1]);
 }
 
-test "acid attaches and prints registers and a stack trace [10]" {
+test "acid attaches and prints registers and a stack trace [self-host]" {
     const e = try env(@src());
     var tb: [16]u8 = undefined;
     const r = try runIn(e, &.{ "--timeout", slowTimeout(&tb, 60_000), "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" }, "regs()\nstk()\n");
@@ -2073,12 +2073,12 @@ test "a second Ctrl-C within a second tears the machine down [baseline]" {
         try t.send("\x03");
         try t.drain(100);
         try t.send("\x03");
-        // 128 + SIGINT (design/0033-exit-status.md).
+        // 128 + SIGINT (design/exit-status.md).
         try std.testing.expectEqual(130, try t.wait(slow(5_000)));
     }
 }
 
-test "a program killed by interrupt exits 130, with nothing printed [33]" {
+test "a program killed by interrupt exits 130, with nothing printed [exit-status]" {
     const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -2106,7 +2106,7 @@ fn noteToSleep(buf: []u8, note: []const u8) ![]const u8 {
     , .{note});
 }
 
-test "a program killed by hangup exits 129 and prints the note [33]" {
+test "a program killed by hangup exits 129 and prints the note [exit-status]" {
     const e = try env(@src());
     var buf: [512]u8 = undefined;
     const r = try run(e, &.{ "--timeout", "30s", "--rc", try noteToSleep(&buf, "hangup") });
@@ -2116,7 +2116,7 @@ test "a program killed by hangup exits 129 and prints the note [33]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "rc: hangup") != null);
 }
 
-test "a fault exits 139 and prints the note [33]" {
+test "a fault exits 139 and prints the note [exit-status]" {
     const e = try env(@src());
     // A program that writes through a nil pointer, built in the guest.
     const script =
@@ -2138,7 +2138,7 @@ test "a fault exits 139 and prints the note [33]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "rc: sys: trap: fault") != null);
 }
 
-test "--timeout exits 124 [33]" {
+test "--timeout exits 124 [exit-status]" {
     const e = try env(@src());
     // rc catches the hangup --timeout posts, so the machine is torn down
     // after the grace period: still a timeout, not "machine stopped".
@@ -2148,7 +2148,7 @@ test "--timeout exits 124 [33]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "rc: h9: timeout") != null);
 }
 
-test "a note that isn't a signal exits 1 and prints it [33]" {
+test "a note that isn't a signal exits 1 and prints it [exit-status]" {
     const e = try env(@src());
     var buf: [512]u8 = undefined;
     const r = try run(e, &.{ "--timeout", "30s", "--rc", try noteToSleep(&buf, "goodbye") });
@@ -2218,7 +2218,7 @@ test "SIGTERM posts hangup [baseline]" {
     }
 }
 
-test "a run torn down after SIGTERM exits 143 [33]" {
+test "a run torn down after SIGTERM exits 143 [exit-status]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     var it = backendList(e);
@@ -2322,7 +2322,7 @@ test "/proc/n has status, fd, ns and args [baseline]" {
     try std.testing.expect(try std.fmt.parseInt(usize, std.mem.trim(u8, ls.out, " \n"), 10) >= 2);
 }
 
-test "seg attaches a shared segment and reads zero [4]" {
+test "seg attaches a shared segment and reads zero [segattach]" {
     const e = try env(@src());
     const r = try run(e, &.{ "seg", "-r", "shared", "0x1000", "0" });
     defer r.deinit();
@@ -2330,7 +2330,7 @@ test "seg attaches a shared segment and reads zero [4]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "seg attaches a memory segment and writes a word [4]" {
+test "seg attaches a memory segment and writes a word [segattach]" {
     const e = try env(@src());
     const r = try run(e, &.{ "seg", "-L", "-w", "memory", "0x1000", "8", "0x12345678" });
     defer r.deinit();
@@ -2338,7 +2338,7 @@ test "seg attaches a memory segment and writes a word [4]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "an unknown class is a bad arg [4]" {
+test "an unknown class is a bad arg [segattach]" {
     const e = try env(@src());
     const r = try run(e, &.{ "seg", "-r", "tmu", "0x1000", "0" });
     defer r.deinit();
@@ -2346,7 +2346,7 @@ test "an unknown class is a bad arg [4]" {
     try std.testing.expectEqual(1, r.code);
 }
 
-test "--memory caps segattach [4]" {
+test "--memory caps segattach [segattach]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--memory", "8m", "seg", "-r", "memory", "0x2000000", "0" });
     defer r.deinit();
@@ -2354,7 +2354,7 @@ test "--memory caps segattach [4]" {
     try std.testing.expectEqual(1, r.code);
 }
 
-// rendezvous and semaphores (design/0003-semaphores.md). The programs are
+// rendezvous and semaphores (design/semaphores.md). The programs are
 // tests/fixtures/sema/sema.c, one per argument, built inside the guest
 // with the architecture's compiler and loader (7c and 7l on arm64) into
 // a scratch directory given with --sandbox.
@@ -2400,43 +2400,43 @@ fn expectSema(e: Env, flags: []const []const u8, cmd: []const u8, want: []const 
     try std.testing.expectEqual(0, r.code);
 }
 
-test "rendezvous swaps values between two processes [3]" {
+test "rendezvous swaps values between two processes [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema swap", "child got 11\nparent got 22\n");
 }
 
-test "contended qlock parks and wakes through rendezvous [3]" {
+test "contended qlock parks and wakes through rendezvous [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema qlock", "2000\n");
 }
 
-test "semacquire waits for semrelease across RFMEM processes [3]" {
+test "semacquire waits for semrelease across RFMEM processes [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema wait", "semacquire 1 waited\n");
 }
 
-test "semaphores keep a shared counter exact under contention [3]" {
+test "semaphores keep a shared counter exact under contention [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema count", "2000 1\n");
     try expectSema(e, &.{ "--cpus", "1" }, "./sema count", "2000 1\n");
 }
 
-test "semacquire without block and tsemacquire with 0 ms don't wait [3]" {
+test "semacquire without block and tsemacquire with 0 ms don't wait [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema nowait", "0 0 1 1 0 at once\n");
 }
 
-test "tsemacquire times out, or returns early on semrelease [3]" {
+test "tsemacquire times out, or returns early on semrelease [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema timeout", "timeout 0 in time\nrelease 1 early\n");
 }
 
-test "a note interrupts rendezvous and semacquire, and the handler runs [3]" {
+test "a note interrupts rendezvous and semacquire, and the handler runs [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema interrupt", "rendezvous ~0, handled 1\nsemacquire -1 'interrupted', handled 2\n");
 }
 
-test "bad semaphore addresses and values fail as on 9front [3]" {
+test "bad semaphore addresses and values fail as on 9front [semaphores]" {
     const e = try env(@src());
     try expectSema(e, &.{}, "./sema badaddr",
         \\odd -1 'bad arg in system call'
@@ -2451,7 +2451,7 @@ test "bad semaphore addresses and values fail as on 9front [3]" {
     );
 }
 
-test "ps shows processes blocked in Rendezvous and Semacquire [3]" {
+test "ps shows processes blocked in Rendezvous and Semacquire [semaphores]" {
     const e = try env(@src());
     // ps cuts the state to 8 characters. The parent waits for both.
     try expectSema(e, &.{},
@@ -2459,7 +2459,7 @@ test "ps shows processes blocked in Rendezvous and Semacquire [3]" {
     , "Await\nRendezvo\nSemacqui\n");
 }
 
-test "--timeout stops processes blocked in rendezvous and semacquire [3]" {
+test "--timeout stops processes blocked in rendezvous and semacquire [semaphores]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -2477,7 +2477,7 @@ test "--timeout stops processes blocked in rendezvous and semacquire [3]" {
     try std.testing.expect(took < 10_000 * @as(i64, @intCast(std.mem.count(u8, e.backends, ",") + 1)));
 }
 
-// The network policy (design/0005-net-policy.md). The cases listen on
+// The network policy (design/net-policy.md). The cases listen on
 // 127.0.0.1 themselves, and the guest writes /net ctl files from rc, so
 // they need no client program the root tree doesn't have.
 
@@ -2531,7 +2531,7 @@ fn expectNoConnection(srv: *std.Io.net.Server) !void {
     try std.testing.expectEqualStrings("marker", try acceptLine(srv, &buf));
 }
 
-test "the default profile refuses announce [5]" {
+test "the default profile refuses announce [net-policy]" {
     const e = try env(@src());
     const r = try run(e, &.{ "aux/listen1", "-t", "tcp!127.0.0.1!39517", "/bin/cat" });
     defer r.deinit();
@@ -2543,7 +2543,7 @@ test "the default profile refuses announce [5]" {
     try std.testing.expect(r.code != 0);
 }
 
-test "--net=enable allows a server [5]" {
+test "--net=enable allows a server [net-policy]" {
     const e = try env(@src());
     const io = std.testing.io;
     var probe = try listenLocal();
@@ -2589,7 +2589,7 @@ test "--net=enable allows a server [5]" {
     }
 }
 
-test "outbound allows connect [5]" {
+test "outbound allows connect [net-policy]" {
     const e = try env(@src());
     var srv = try listenLocal();
     defer srv.deinit(std.testing.io);
@@ -2607,7 +2607,7 @@ test "outbound allows connect [5]" {
     }
 }
 
-test "outbound refuses link-local without patterns [5]" {
+test "outbound refuses link-local without patterns [net-policy]" {
     const e = try env(@src());
     var cmd_buf: [256]u8 = undefined;
     const cmd = try rcDial(&cmd_buf, "169.254.169.254!80", "x");
@@ -2619,7 +2619,7 @@ test "outbound refuses link-local without patterns [5]" {
     }
 }
 
-test "a pattern allows link-local [5]" {
+test "a pattern allows link-local [net-policy]" {
     const e = try env(@src());
     var cmd_buf: [256]u8 = undefined;
     // The policy refuses the connect at once, so a short --timeout is
@@ -2632,7 +2632,7 @@ test "a pattern allows link-local [5]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") == null);
 }
 
-test "--net-allow refuses a connect outside it, and the host sees nothing [5]" {
+test "--net-allow refuses a connect outside it, and the host sees nothing [net-policy]" {
     const e = try env(@src());
     var srv = try listenLocal();
     defer srv.deinit(std.testing.io);
@@ -2645,7 +2645,7 @@ test "--net-allow refuses a connect outside it, and the host sees nothing [5]" {
     try expectNoConnection(&srv);
 }
 
-test "--net-allow allows a matching CIDR and port [5]" {
+test "--net-allow allows a matching CIDR and port [net-policy]" {
     const e = try env(@src());
     var srv = try listenLocal();
     defer srv.deinit(std.testing.io);
@@ -2665,7 +2665,7 @@ test "--net-allow allows a matching CIDR and port [5]" {
     }
 }
 
-test "a name pattern allows a connect through cs [5]" {
+test "a name pattern allows a connect through cs [net-policy]" {
     const e = try env(@src());
     var srv = try listenLocal();
     defer srv.deinit(std.testing.io);
@@ -2691,7 +2691,7 @@ test "a name pattern allows a connect through cs [5]" {
     }
 }
 
-test "a name outside --net-allow isn't resolved [5]" {
+test "a name outside --net-allow isn't resolved [net-policy]" {
     const e = try env(@src());
     // localhost resolves on every host, so the refusal comes before the
     // host's resolver.
@@ -2700,7 +2700,7 @@ test "a name outside --net-allow isn't resolved [5]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "translating tcp!localhost!80: no translation for host found") != null);
 }
 
-test "a UDP announce is refused under outbound [5]" {
+test "a UDP announce is refused under outbound [net-policy]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--rc", "<>[3] /net/udp/clone { echo 'announce 127.0.0.1!39517' >[1=3] }" });
     defer r.deinit();
@@ -2708,7 +2708,7 @@ test "a UDP announce is refused under outbound [5]" {
     try std.testing.expect(r.code != 0);
 }
 
-test "--net-allow with --net=disable is a usage error [5]" {
+test "--net-allow with --net=disable is a usage error [net-policy]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--net=disable", "--net-allow", "tcp!*!*", "echo" });
     defer r.deinit();
@@ -2720,7 +2720,7 @@ test "--net-allow with --net=disable is a usage error [5]" {
     try std.testing.expect(std.mem.indexOf(u8, bad.err, "tcp!10.0.0.0/33!*") != null);
 }
 
-test "--print shows net-allow patterns and caveats [5]" {
+test "--print shows net-allow patterns and caveats [net-policy]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--print", "--net-allow", "tcp!*.example.com!443", "--net-allow", "udp!10.0.0.53!53", "echo" });
     defer r.deinit();
@@ -2734,7 +2734,7 @@ test "--print shows net-allow patterns and caveats [5]" {
     try std.testing.expect(std.mem.indexOf(u8, d.out, "except link-local") != null);
 }
 
-test "--strict accepts --net=outbound [5]" {
+test "--strict accepts --net=outbound [net-policy]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--strict", "--net=outbound", "echo", "ok" });
     defer r.deinit();
@@ -2742,11 +2742,11 @@ test "--strict accepts --net=outbound [5]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// devsrv, /srv, and mount (design/0008-devsrv.md). Mount points are made
+// devsrv, /srv, and mount (design/devsrv.md). Mount points are made
 // in the machine's private /tmp, since the root tree's /n and /mnt are
 // mostly mntgen's on 9front and may lack the names a case wants.
 
-test "ramfs posts to /srv and another process mounts it [8]" {
+test "ramfs posts to /srv and another process mounts it [devsrv]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S r && mkdir /tmp/r && mount -c /srv/r /tmp/r && echo hi >/tmp/r/x && cat /tmp/r/x" });
     defer r.deinit();
@@ -2754,7 +2754,7 @@ test "ramfs posts to /srv and another process mounts it [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "ramfs -S tmp, mount and ls (demo) [8]" {
+test "ramfs -S tmp, mount and ls (demo) [devsrv]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S tmp && mkdir /tmp/n && mount -c /srv/tmp /tmp/n && touch /tmp/n/a && ls /tmp/n" });
     defer r.deinit();
@@ -2762,7 +2762,7 @@ test "ramfs -S tmp, mount and ls (demo) [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a posted pipe is a named pipe [8]" {
+test "a posted pipe is a named pipe [devsrv]" {
     const e = try env(@src());
     // srv(3)'s example in rc: the right side posts its fd 0, the read end
     // of the pipe, and exits; the data waits in the pipe until it's read
@@ -2773,7 +2773,7 @@ test "a posted pipe is a named pipe [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "mount without auth works through fauth [8]" {
+test "mount without auth works through fauth [devsrv]" {
     const e = try env(@src());
     // Not mount -n: amount calls fauth, the server answers that it needs
     // no authentication, and mount goes on without an auth fd. (-c only
@@ -2787,7 +2787,7 @@ test "mount without auth works through fauth [8]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, " mount ") != null);
 }
 
-test "unmount takes a mount out of the namespace [8]" {
+test "unmount takes a mount out of the namespace [devsrv]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S r && mkdir /tmp/r && mount -c /srv/r /tmp/r && touch /tmp/r/x && ls /tmp/r && unmount /tmp/r && ls /tmp/r && echo done" });
     defer r.deinit();
@@ -2795,7 +2795,7 @@ test "unmount takes a mount out of the namespace [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "srvfs reexports a directory through /srv [8]" {
+test "srvfs reexports a directory through /srv [devsrv]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "mkdir /tmp/d /tmp/m && echo exported >/tmp/d/f && srvfs sfs /tmp/d && mount -c /srv/sfs /tmp/m && cat /tmp/m/f" });
     defer r.deinit();
@@ -2803,7 +2803,7 @@ test "srvfs reexports a directory through /srv [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "exportfs -S serves a posted channel [8]" {
+test "exportfs -S serves a posted channel [devsrv]" {
     const e = try env(@src());
     // exportfs reads and writes 9P on fds 0 and 1, one end of a pipe; the
     // other end is posted as /srv/e, and exportfs passes it to /srv/r.
@@ -2825,7 +2825,7 @@ test "exportfs -S serves a posted channel [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "/proc/n/ns prints a mount of /srv/x as /srv/x [8]" {
+test "/proc/n/ns prints a mount of /srv/x as /srv/x [devsrv]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S x && mkdir /tmp/x && mount -c /srv/x /tmp/x && grep /tmp/x /proc/$pid/ns" });
     defer r.deinit();
@@ -2833,7 +2833,7 @@ test "/proc/n/ns prints a mount of /srv/x as /srv/x [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a server's /srv entry goes when it exits [8]" {
+test "a server's /srv entry goes when it exits [devsrv]" {
     const e = try env(@src());
     // ramfs posts /srv/r with ORCLOSE, and its server process holds that
     // fd; killing the server closes it, which removes the entry.
@@ -2851,7 +2851,7 @@ test "a server's /srv entry goes when it exits [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a second create of a /srv name fails [8]" {
+test "a second create of a /srv name fails [devsrv]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "20s", "--rc", "ramfs -S r && ! ramfs -S r && echo refused" });
     defer r.deinit();
@@ -2860,7 +2860,7 @@ test "a second create of a /srv name fails [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "clone makes a private board, and closing it clears it [8]" {
+test "clone makes a private board, and closing it clears it [devsrv]" {
     const e = try env(@src());
     // The board lives while fd 3, its lease, is open; a pipe end posted on
     // it is reachable as /srv/<board>/p, and goes with the board.
@@ -2880,7 +2880,7 @@ test "clone makes a private board, and closing it clears it [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "factotum starts and serves /mnt/factotum [8]" {
+test "factotum starts and serves /mnt/factotum [devsrv]" {
     const e = try env(@src());
     // -n skips secstore. The mount point comes from /tmp if the root
     // tree's /mnt lacks it, as without 9front's mntgen.
@@ -2891,7 +2891,7 @@ test "factotum starts and serves /mnt/factotum [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "plumber starts and serves /mnt/plumb [8]" {
+test "plumber starts and serves /mnt/plumb [devsrv]" {
     const e = try env(@src());
     const script =
         \\mkdir -p /tmp/m/plumb /tmp/m/temp && bind -a /tmp/m /mnt || exit setup
@@ -2906,7 +2906,7 @@ test "plumber starts and serves /mnt/plumb [8]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// Go compatibility (design/0007-go-compat.md). The Go cases run the
+// Go compatibility (design/go-compat.md). The Go cases run the
 // plan9/amd64 programs from tests/fixtures/go, which `zig build
 // go-fixtures` builds into H9_TEST_GO, on the native backend where the
 // build runs the cases on it (H9_TEST_GO_BACKEND), else on the emulator.
@@ -2940,7 +2940,7 @@ fn goEnv(comptime src: std.builtin.SourceLocation, g: *GoEnv) !void {
 }
 
 /// The backend the Go cases run on: the native backend when the build
-/// says it's in the list (Linux x86_64, design/0095-native-backend.md), else
+/// says it's in the list (Linux x86_64, design/native-backend.md), else
 /// the emulator.
 fn goBackend() []const u8 {
     const v = getenv(3, "H9_TEST_GO_BACKEND") orelse return "emu";
@@ -2989,7 +2989,7 @@ fn expectGoOk(r: Result) !void {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a Go hello world prints and exits 0 [7]" {
+test "a Go hello world prints and exits 0 [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3000,7 +3000,7 @@ test "a Go hello world prints and exits 0 [7]" {
     try expectGoOk(r);
 }
 
-test "goroutines sleep 100 ms and the elapsed time is right [7]" {
+test "goroutines sleep 100 ms and the elapsed time is right [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3012,7 +3012,7 @@ test "goroutines sleep 100 ms and the elapsed time is right [7]" {
     try std.testing.expect(ms >= 100 and ms < slow(200));
 }
 
-test "time.Now has sub-second resolution and matches the host [7]" {
+test "time.Now has sub-second resolution and matches the host [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3028,7 +3028,7 @@ test "time.Now has sub-second resolution and matches the host [7]" {
     try std.testing.expect(try lineInt(i64, r.out, 1) >= 10 * std.time.ns_per_ms);
 }
 
-test "runtime.NumCPU follows --cpus [7]" {
+test "runtime.NumCPU follows --cpus [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3038,7 +3038,7 @@ test "runtime.NumCPU follows --cpus [7]" {
     try std.testing.expectEqualStrings("2 2\n", r.out);
 }
 
-test "os.Getpid and os.Getppid match /proc [7]" {
+test "os.Getpid and os.Getppid match /proc [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3057,7 +3057,7 @@ test "os.Getpid and os.Getppid match /proc [7]" {
     try std.testing.expectEqualStrings(ppid, proc.next().?);
 }
 
-test "CPU-bound goroutines run on several processes [7]" {
+test "CPU-bound goroutines run on several processes [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3073,7 +3073,7 @@ test "CPU-bound goroutines run on several processes [7]" {
     try expectGoOk(r);
 }
 
-test "os/exec runs a child and gets its exit status [7]" {
+test "os/exec runs a child and gets its exit status [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3087,7 +3087,7 @@ test "os/exec runs a child and gets its exit status [7]" {
     try std.testing.expect(std.mem.endsWith(u8, r.out, ": 7'\n"));
 }
 
-test "a nil dereference becomes a panic that recover catches [7]" {
+test "a nil dereference becomes a panic that recover catches [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3097,7 +3097,7 @@ test "a nil dereference becomes a panic that recover catches [7]" {
     try std.testing.expectEqualStrings("recovered: runtime error: invalid memory address or nil pointer dereference\n", r.out);
 }
 
-test "os/signal receives interrupt on Ctrl-C [7]" {
+test "os/signal receives interrupt on Ctrl-C [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3113,7 +3113,7 @@ test "os/signal receives interrupt on Ctrl-C [7]" {
     try std.testing.expectEqual(0, try t.wait(slow(10_000)));
 }
 
-test "os.Exit(3) exits with status 3 [7]" {
+test "os.Exit(3) exits with status 3 [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3124,7 +3124,7 @@ test "os.Exit(3) exits with status 3 [7]" {
     try std.testing.expectEqual(3, r.code);
 }
 
-test "a numeric exits string becomes the exit code [7]" {
+test "a numeric exits string becomes the exit code [go-compat]" {
     const e = try env(@src());
     {
         const r = try run(e, &.{ "--rc", "exit 3" });
@@ -3150,7 +3150,7 @@ test "a numeric exits string becomes the exit code [7]" {
     }
 }
 
-test "net/http fetches from a listener the test opens [7]" {
+test "net/http fetches from a listener the test opens [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3184,7 +3184,7 @@ test "net/http fetches from a listener the test opens [7]" {
     try std.testing.expectEqualStrings("200\nhi from host\n", r.out);
 }
 
-test "syscall.Gettimeofday has microsecond resolution [7]" {
+test "syscall.Gettimeofday has microsecond resolution [go-compat]" {
     var g: GoEnv = undefined;
     try goEnv(@src(), &g);
     defer g.deinit();
@@ -3196,7 +3196,7 @@ test "syscall.Gettimeofday has microsecond resolution [7]" {
     try std.testing.expect(try lineInt(u32, r.out, 0) >= 4);
 }
 
-test "/dev/bintime has four words and a monotonic clock [7]" {
+test "/dev/bintime has four words and a monotonic clock [go-compat]" {
     const e = try env(@src());
     // The clock differs from run to run, so each backend is checked on its
     // own rather than compared with the others.
@@ -3240,7 +3240,7 @@ fn checkBintime(e: Env, backend: []const u8) !void {
     try std.testing.expect(word(b, 0) > word(a, 0));
 }
 
-// 9P roots (design/0013-9p-roots.md). The server is a second h9 serving
+// 9P roots (design/9p-roots.md). The server is a second h9 serving
 // the test root tree read-only with exportfs behind aux/listen1 -t, so no
 // host 9P server is needed. Cases compare a run over the 9P root with the
 // same run over the host tree, whose namespace is otherwise the same.
@@ -3430,7 +3430,7 @@ const FakeAttach = struct {
     }
 };
 
-test "a TCP 9P root runs /bin/ls [13]" {
+test "a TCP 9P root runs /bin/ls [9p-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3487,7 +3487,7 @@ const UnixRelay = struct {
     }
 };
 
-test "a unix socket 9P root runs /bin/ls [13]" {
+test "a unix socket 9P root runs /bin/ls [9p-roots]" {
     if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     var srv: RootServer = undefined;
@@ -3507,7 +3507,7 @@ test "a unix socket 9P root runs /bin/ls [13]" {
     try expectSameAsHost(e, sock, &.{ "/bin/ls", "/" });
 }
 
-test "rc pipelines and exec run from a 9P root [13]" {
+test "rc pipelines and exec run from a 9P root [9p-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3515,7 +3515,7 @@ test "rc pipelines and exec run from a 9P root [13]" {
     try expectSameAsHost(e, srv.dial(), &.{ "--rc", "ls /bin | grep -c '/cat$'; echo a b c | wc -w; exec /bin/echo done" });
 }
 
-test "the host cwd is bound over a 9P root [13]" {
+test "the host cwd is bound over a 9P root [9p-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3532,7 +3532,7 @@ test "the host cwd is bound over a 9P root [13]" {
     try std.testing.expect(s.exists("g"));
 }
 
-test "a 9P root works under --net=disable [13]" {
+test "a 9P root works under --net=disable [9p-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3544,7 +3544,7 @@ test "a 9P root works under --net=disable [13]" {
     try std.testing.expect(r.code != 0);
 }
 
-test "--root-spec is sent as the attach name [13]" {
+test "--root-spec is sent as the attach name [9p-roots]" {
     const e = try env(@src());
     var f: FakeAttach = undefined;
     try f.start("no such tree");
@@ -3560,7 +3560,7 @@ test "--root-spec is sent as the attach name [13]" {
     try std.testing.expectEqual(125, r.code);
 }
 
-test "--root-user is sent as the attach uname [13]" {
+test "--root-user is sent as the attach uname [9p-roots]" {
     const e = try env(@src());
     for ([_]?[]const u8{ "glenda", null }) |user| {
         var f: FakeAttach = undefined;
@@ -3588,7 +3588,7 @@ test "--root-user is sent as the attach uname [13]" {
     }
 }
 
-test "the guest mounts /srv/root at a second path [13]" {
+test "the guest mounts /srv/root at a second path [9p-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3600,7 +3600,7 @@ test "the guest mounts /srv/root at a second path [13]" {
     try std.testing.expectEqualStrings("/srv/root\n/tmp/r/rc/bin/lc\n", r.out);
 }
 
-test "an unreachable 9P root exits 125 [13]" {
+test "an unreachable 9P root exits 125 [9p-roots]" {
     const e = try env(@src());
     var probe = try listenLocal();
     const port = probe.socket.address.getPort();
@@ -3614,7 +3614,7 @@ test "an unreachable 9P root exits 125 [13]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, try std.fmt.bufPrint(&want, "root {s}: ", .{dial})) != null);
 }
 
-test "a 9P root that wants authentication exits 125 [13]" {
+test "a 9P root that wants authentication exits 125 [9p-roots]" {
     const e = try env(@src());
     var f: FakeAttach = undefined;
     try f.start("authentication required");
@@ -3628,7 +3628,7 @@ test "a 9P root that wants authentication exits 125 [13]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, ": authentication required") != null);
 }
 
-test "--write=none with a 9P root is a usage error [13]" {
+test "--write=none with a 9P root is a usage error [9p-roots]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--root", "tcp!127.0.0.1!1", "--write=none", "/bin/echo" });
     defer r.deinit();
@@ -3636,7 +3636,7 @@ test "--write=none with a 9P root is a usage error [13]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "--write=none can't be enforced on a 9P root") != null);
 }
 
-test "a unix socket root on Windows exits 125 [13]" {
+test "a unix socket root on Windows exits 125 [9p-roots]" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const e = try env(@src());
     const r = try run(e, &.{ "--root", "unix!C:/fs.sock", "/bin/echo" });
@@ -3645,7 +3645,7 @@ test "a unix socket root on Windows exits 125 [13]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "unix socket roots need a POSIX host") != null);
 }
 
-test "--print shows a 9P root, and its output replays with --ns [13]" {
+test "--print shows a 9P root, and its output replays with --ns [9p-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3659,7 +3659,7 @@ test "--print shows a 9P root, and its output replays with --ns [13]" {
     var want: [96]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, p.out, "  mount '#s/root' / ''") != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}\n", .{srv.dial()})) != null);
-    // Under the root's overlay (design/0011-overlay.md) nothing reaches
+    // Under the root's overlay (design/overlay.md) nothing reaches
     // the server; under --write=scope its server decides.
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") == null);
     const sp = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--print", "ls" });
@@ -3672,7 +3672,7 @@ test "--print shows a 9P root, and its output replays with --ns [13]" {
     try expectSameAsHost(e, srv.dial(), &.{ "--cwd", s.path, "--ns", "ns", "/bin/ls", "/", "/bin/ls" });
 }
 
-test "a write to a 9P root under the default profile doesn't reach the server [11]" {
+test "a write to a 9P root under the default profile doesn't reach the server [overlay]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3695,7 +3695,7 @@ test "a write to a 9P root under the default profile doesn't reach the server [1
     try expectRootLacks(e, "lib/h9-overlay-9p");
 }
 
-test "--check runs /bin/echo from a 9P root [13]" {
+test "--check runs /bin/echo from a 9P root [9p-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3707,7 +3707,7 @@ test "--check runs /bin/echo from a 9P root [13]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
 }
 
-// h9's own commands in #H (design/0032-guest-tools.md). Debug builds serve
+// h9's own commands in #H (design/guest-tools.md). Debug builds serve
 // tests/fixtures/guest in #H too: `h9-guest-test` and an `echo` that the
 // root's must beat. The build sets H9_TEST_GUEST_TOOLS when it served them.
 
@@ -3717,7 +3717,7 @@ fn needGuestTest() !void {
     if (getenv(3, "H9_TEST_GUEST_TOOLS") == null) return error.SkipZigTest;
 }
 
-test "#H/bin is bound after /bin and its scripts run [32]" {
+test "#H/bin is bound after /bin and its scripts run [guest-tools]" {
     const e = try env(@src());
     try needGuestTest();
     const r = try run(e, &.{ "--rc", "h9-guest-test a b" });
@@ -3734,7 +3734,7 @@ test "#H/bin is bound after /bin and its scripts run [32]" {
     try std.testing.expect(h_at > rc_at);
 }
 
-test "a root command of the same name wins over #H's [32]" {
+test "a root command of the same name wins over #H's [guest-tools]" {
     const e = try env(@src());
     try needGuestTest();
     const r = try run(e, &.{ "--rc", "echo hi; grep -s 'echo from' '#H/bin/echo' && echo shadowed" });
@@ -3743,7 +3743,7 @@ test "a root command of the same name wins over #H's [32]" {
     try std.testing.expectEqualStrings("hi\nshadowed\n", r.out);
 }
 
-test "#H refuses writes [32]" {
+test "#H refuses writes [guest-tools]" {
     const e = try env(@src());
     try needGuestTest();
     // rc gives up on a whole -c script when a redirection fails, so the
@@ -3765,7 +3765,7 @@ test "#H refuses writes [32]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") != null);
 }
 
-test "--no-guest-tools leaves out the bind and masks #H [32]" {
+test "--no-guest-tools leaves out the bind and masks #H [guest-tools]" {
     const e = try env(@src());
     const p = try run(e, &.{ "--no-guest-tools", "--print", "ls" });
     defer p.deinit();
@@ -3785,7 +3785,7 @@ test "--no-guest-tools leaves out the bind and masks #H [32]" {
     }
 }
 
-test "--print shows the #H bind [32]" {
+test "--print shows the #H bind [guest-tools]" {
     const e = try env(@src());
     for ([_][]const u8{ "--profile=default", "--profile=tight" }) |prof| {
         const p = try run(e, &.{ prof, "--print", "ls" });
@@ -3860,7 +3860,7 @@ test "#C runs a host command and reports its exit status [baseline]" {
     try std.testing.expect(std.mem.endsWith(u8, r.out, " 0 0 0 'exit: 3'"));
 }
 
-test "hcmd passes stdin, output, errors, arguments and the exit status [baseline, 32]" {
+test "hcmd passes stdin, output, errors, arguments and the exit status [baseline, guest-tools]" {
     try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
@@ -3882,7 +3882,7 @@ test "hcmd passes stdin, output, errors, arguments and the exit status [baseline
     try std.testing.expectEqualStrings("", n.out);
 }
 
-test "hcmd runs in the host directory the guest's comes from [baseline, 32]" {
+test "hcmd runs in the host directory the guest's comes from [baseline, guest-tools]" {
     try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
@@ -3902,7 +3902,7 @@ test "hcmd runs in the host directory the guest's comes from [baseline, 32]" {
     try std.testing.expectEqualStrings(sub, std.mem.trimEnd(u8, d.out, "\n"));
 }
 
-test "hcmd without --host-cmd says how to turn host commands on [32]" {
+test "hcmd without --host-cmd says how to turn host commands on [guest-tools]" {
     try needHostCmd();
     const e = try env(@src());
     const r = try run(e, &.{ "hcmd", "true" });
@@ -3911,7 +3911,7 @@ test "hcmd without --host-cmd says how to turn host commands on [32]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "--host-cmd") != null);
 }
 
-test "a hangup kills hcmd's host command [baseline, 32]" {
+test "a hangup kills hcmd's host command [baseline, guest-tools]" {
     try needHostCmd();
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
@@ -3954,7 +3954,7 @@ test "a machine's host commands die with it [baseline]" {
     try std.testing.expect(!s.exists("raw"));
 }
 
-// 9P over WebSocket (design/0021-websocket-9p.md). The server is 9p-roots'
+// 9P over WebSocket (design/websocket-9p.md). The server is 9p-roots'
 // RootServer with tests/wsrelay.zig in front of it, relaying WebSocket
 // messages to its TCP port. /net/ws cases use the relay in echo mode.
 
@@ -4025,7 +4025,7 @@ fn expectIn(haystack: []const u8, needle: []const u8) !void {
     }
 }
 
-test "a ws:// root runs /bin/ls [21]" {
+test "a ws:// root runs /bin/ls [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4034,7 +4034,7 @@ test "a ws:// root runs /bin/ls [21]" {
     try std.testing.expectEqualStrings("/9p", w.relay.target());
 }
 
-test "rc pipelines and exec run from a ws:// root [21]" {
+test "rc pipelines and exec run from a ws:// root [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4042,7 +4042,7 @@ test "rc pipelines and exec run from a ws:// root [21]" {
     try expectSameAsHost(e, w.url(), &.{ "--rc", "ls /bin | grep -c '/cat$'; echo a b c | wc -w; exec /bin/echo done" });
 }
 
-test "a ws:// root works when the server splits and coalesces 9P messages [21]" {
+test "a ws:// root works when the server splits and coalesces 9P messages [websocket-9p]" {
     const e = try env(@src());
     for ([_]wsrelay.Options{ .{ .split = true }, .{ .coalesce = true }, .{ .split = true, .coalesce = true } }) |o| {
         var w: WsRoot = undefined;
@@ -4052,7 +4052,7 @@ test "a ws:// root works when the server splits and coalesces 9P messages [21]" 
     }
 }
 
-test "a ws:// root works with a server that selects no subprotocol [21]" {
+test "a ws:// root works with a server that selects no subprotocol [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{ .subprotocol = false });
@@ -4060,7 +4060,7 @@ test "a ws:// root works with a server that selects no subprotocol [21]" {
     try expectSameAsHost(e, w.url(), &.{ "/bin/ls", "/" });
 }
 
-test "--root-header is sent, and @FILE reads headers from a file [21]" {
+test "--root-header is sent, and @FILE reads headers from a file [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{ .require_header = "Authorization: Bearer s3cret" });
@@ -4081,7 +4081,7 @@ test "--root-header is sent, and @FILE reads headers from a file [21]" {
     try expectIn(r.err, "server answered 401 Unauthorized");
 }
 
-test "a handshake answered with 401 exits 125 with the status [21]" {
+test "a handshake answered with 401 exits 125 with the status [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{ .status = 401 });
@@ -4095,7 +4095,7 @@ test "a handshake answered with 401 exits 125 with the status [21]" {
     try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: {s}", .{ rl.url(), why }));
 }
 
-test "an unreachable ws:// root exits 125 [21]" {
+test "an unreachable ws:// root exits 125 [websocket-9p]" {
     const e = try env(@src());
     var probe = try listenLocal();
     const port = probe.socket.address.getPort();
@@ -4110,7 +4110,7 @@ test "an unreachable ws:// root exits 125 [21]" {
     try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: {s}", .{ url, why }));
 }
 
-test "a server close makes guest file operations fail [21]" {
+test "a server close makes guest file operations fail [websocket-9p]" {
     const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -4126,7 +4126,7 @@ test "a server close makes guest file operations fail [21]" {
     }
 }
 
-test "an idle ws:// root pings, and a server that stops answering fails it [21]" {
+test "an idle ws:// root pings, and a server that stops answering fails it [websocket-9p]" {
     const e = try env(@src());
     // H9_TEST_KEEPALIVE shortens the keepalive's 30 s idle time to 1 s:
     // h9 pings after 1 s without a frame and fails the connection 1 s
@@ -4160,7 +4160,7 @@ test "an idle ws:// root pings, and a server that stops answering fails it [21]"
     }
 }
 
-test "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it [21]" {
+test "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4179,7 +4179,7 @@ test "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it [
     try std.testing.expectEqual(1, p.connects.load(.acquire));
 }
 
-test "a proxy answering 407 exits 125 with the status [21]" {
+test "a proxy answering 407 exits 125 with the status [websocket-9p]" {
     const e = try env(@src());
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, 407);
@@ -4189,7 +4189,7 @@ test "a proxy answering 407 exits 125 with the status [21]" {
     try expectIn(r.err, "root ws://127.0.0.1:1/9p: proxy answered 407 Proxy Authentication Required");
 }
 
-test "a /net/ws connect ignores HTTP_PROXY [21]" {
+test "a /net/ws connect ignores HTTP_PROXY [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
@@ -4205,7 +4205,7 @@ test "a /net/ws connect ignores HTTP_PROXY [21]" {
     try std.testing.expectEqual(0, p.connects.load(.acquire));
 }
 
-test "--root-ca with a ws:// root is a usage error [21]" {
+test "--root-ca with a ws:// root is a usage error [websocket-9p]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -4219,7 +4219,7 @@ test "--root-ca with a ws:// root is a usage error [21]" {
     try expectIn(r.err, "--root-ca needs a wss:// root");
 }
 
-test "a note interrupts a read waiting on a ws:// root [21]" {
+test "a note interrupts a read waiting on a ws:// root [websocket-9p]" {
     const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -4245,7 +4245,7 @@ test "a note interrupts a read waiting on a ws:// root [21]" {
     }
 }
 
-test "a namespace file mounts a ws:// URL [21]" {
+test "a namespace file mounts a ws:// URL [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4268,7 +4268,7 @@ test "a namespace file mounts a ws:// URL [21]" {
     try expectIn(none.err, "--write=none can't be enforced on a WebSocket mount");
 }
 
-test "a host-made stream isn't reachable through /net/ws or an attach spec [21]" {
+test "a host-made stream isn't reachable through /net/ws or an attach spec [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4278,7 +4278,7 @@ test "a host-made stream isn't reachable through /net/ws or an attach spec [21]"
     try std.testing.expectEqualStrings("/net/ws/clone\ndone\n", r.out);
 }
 
-test "the guest connects /net/ws and mounts its data [21]" {
+test "the guest connects /net/ws and mounts its data [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4292,7 +4292,7 @@ test "the guest connects /net/ws and mounts its data [21]" {
     try std.testing.expectEqualStrings("/tmp/fs/rc/bin/lc\n", r.out);
 }
 
-test "wsmount mounts a ws:// URL with flags and headers [21, 32]" {
+test "wsmount mounts a ws:// URL with flags and headers [websocket-9p, guest-tools]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{ .require_header = "X-Token: t0k" });
@@ -4305,7 +4305,7 @@ test "wsmount mounts a ws:// URL with flags and headers [21, 32]" {
     try std.testing.expectEqualStrings("/tmp/fs/rc/bin/lc\n", r.out);
 }
 
-test "a /net/ws conversation reports its URL and status [21]" {
+test "a /net/ws conversation reports its URL and status [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
@@ -4318,7 +4318,7 @@ test "a /net/ws conversation reports its URL and status [21]" {
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}\nEstablished 9p\nClosed 1000 \n", .{rl.url()}), r.out);
 }
 
-test "a guest WebSocket mount can be posted to /srv and mounted again [21]" {
+test "a guest WebSocket mount can be posted to /srv and mounted again [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4333,7 +4333,7 @@ test "a guest WebSocket mount can be posted to /srv and mounted again [21]" {
     try std.testing.expectEqualStrings("/tmp/a/rc/bin/lc\n/tmp/b/rc/bin/lc\n", r.out);
 }
 
-test "header in ctl is sent with the handshake [21]" {
+test "header in ctl is sent with the handshake [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{ .require_header = "X-Token: t0k" });
@@ -4353,7 +4353,7 @@ test "header in ctl is sent with the handshake [21]" {
 /// Reads one text message from conversation $n, as rc runs it.
 const read_text = "dd -bs 8192 -count 1 </net/ws/$n/text >[2]/dev/null; echo";
 
-test "text writes are sent as text messages and text reads return one message each [21]" {
+test "text writes are sent as text messages and text reads return one message each [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
@@ -4365,7 +4365,7 @@ test "text writes are sent as text messages and text reads return one message ea
     try std.testing.expectEqualStrings("hello\ntwo words\n", r.out);
 }
 
-test "a text read with a short buffer fails and leaves the message queued [21]" {
+test "a text read with a short buffer fails and leaves the message queued [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
@@ -4377,7 +4377,7 @@ test "a text read with a short buffer fails and leaves the message queued [21]" 
     try std.testing.expect(std.mem.endsWith(u8, r.out, "hello\n"));
 }
 
-test "a text write that isn't valid utf-8 fails and sends nothing [21]" {
+test "a text write that isn't valid utf-8 fails and sends nothing [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
@@ -4393,7 +4393,7 @@ test "a text write that isn't valid utf-8 fails and sends nothing [21]" {
     try std.testing.expectEqualStrings("ok\n", r.out);
 }
 
-test "text from the server doesn't appear on data, nor binary on text [21]" {
+test "text from the server doesn't appear on data, nor binary on text [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{ .send_text = "greeting" });
@@ -4405,7 +4405,7 @@ test "text from the server doesn't appear on data, nor binary on text [21]" {
     try std.testing.expectEqualStrings("bin\ngreeting\n", r.out);
 }
 
-test "a ws:// root fails on a text message from the server [21]" {
+test "a ws:// root fails on a text message from the server [websocket-9p]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{ .send_text = "hello" });
@@ -4417,14 +4417,14 @@ test "a ws:// root fails on a text message from the server [21]" {
     try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: ", .{w.url()}));
 }
 
-test "--net=disable leaves /net/ws unbound and #ℏ masked [21]" {
+test "--net=disable leaves /net/ws unbound and #ℏ masked [websocket-9p]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--net=disable", "--rc", "ls /net/ws >[2]/dev/null || echo unbound; ls '#ℏ' >[2]/dev/null || echo masked" });
     defer r.deinit();
     try std.testing.expectEqualStrings("unbound\nmasked\n", r.out);
 }
 
-test "--net-allow refuses a /net/ws connect to a host it doesn't cover [21]" {
+test "--net-allow refuses a /net/ws connect to a host it doesn't cover [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
@@ -4437,7 +4437,7 @@ test "--net-allow refuses a /net/ws connect to a host it doesn't cover [21]" {
     try std.testing.expectEqual(0, rl.accepted.load(.acquire));
 }
 
-test "--net-allow refuses a name before it's resolved [21]" {
+test "--net-allow refuses a name before it's resolved [websocket-9p]" {
     const e = try env(@src());
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{});
@@ -4452,7 +4452,7 @@ test "--net-allow refuses a name before it's resolved [21]" {
     try std.testing.expectEqual(0, rl.accepted.load(.acquire));
 }
 
-test "a /net/ws connect to a link-local address is refused without patterns [21]" {
+test "a /net/ws connect to a link-local address is refused without patterns [websocket-9p]" {
     const e = try env(@src());
     var cmd: [512]u8 = undefined;
     const c = try rcWs(&cmd, "ws://169.254.169.254/", "", "echo connected");
@@ -4464,7 +4464,7 @@ test "a /net/ws connect to a link-local address is refused without patterns [21]
     }
 }
 
-test "a note interrupts a /net/ws connect [21]" {
+test "a note interrupts a /net/ws connect [websocket-9p]" {
     const e = try env(@src());
     // It takes the TCP connection but never answers the handshake.
     var srv = try listenLocal();
@@ -4490,7 +4490,7 @@ test "a note interrupts a /net/ws connect [21]" {
     }
 }
 
-test "a machine can't open more than 32 conversations [21]" {
+test "a machine can't open more than 32 conversations [websocket-9p]" {
     const e = try env(@src());
     for ([_]u32{ 32, 33 }) |count| {
         var cmd: std.ArrayList(u8) = .empty;
@@ -4509,7 +4509,7 @@ test "a machine can't open more than 32 conversations [21]" {
     }
 }
 
-test "--print elides a ws:// root's query and header values [21]" {
+test "--print elides a ws:// root's query and header values [websocket-9p]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p?token=s3cret", "--root-header", "Authorization: Bearer s3cret", "--print", "ls" });
     defer r.deinit();
@@ -4519,7 +4519,7 @@ test "--print elides a ws:// root's query and header values [21]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "s3cret") == null);
 }
 
-test "--write=none with a ws:// root is a usage error [21]" {
+test "--write=none with a ws:// root is a usage error [websocket-9p]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--write=none", "/bin/echo" });
     defer r.deinit();
@@ -4578,7 +4578,7 @@ fn runBare(e: Env, cwd: ?[]const u8, args: []const []const u8, vars: []const [2]
     return .{ .code = code, .out = out, .err = err_out };
 }
 
-test "a schemeless --root prints as its wss:// URL [76]" {
+test "a schemeless --root prints as its wss:// URL [schemeless-roots]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--root", "fs.example.com/9p?token=s3cret", "--print", "ls" });
     defer r.deinit();
@@ -4590,7 +4590,7 @@ test "a schemeless --root prints as its wss:// URL [76]" {
     try expectIn(b.out, "# wss://fs.example.com/");
 }
 
-test "a schemeless loopback root is ws:// and runs /bin/ls [76]" {
+test "a schemeless loopback root is ws:// and runs /bin/ls [schemeless-roots]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{});
@@ -4600,7 +4600,7 @@ test "a schemeless loopback root is ws:// and runs /bin/ls [76]" {
     try expectSameAsHost(e, url["ws://".len..], &.{ "/bin/ls", "/" });
 }
 
-test "an existing directory with a dotted name is a host root, not a URL [76]" {
+test "an existing directory with a dotted name is a host root, not a URL [schemeless-roots]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -4619,7 +4619,7 @@ test "an existing directory with a dotted name is a host root, not a URL [76]" {
     try std.testing.expectEqualStrings("hi\n", echo.out);
 }
 
-test "an unreachable schemeless root exits 125 naming both readings [76]" {
+test "an unreachable schemeless root exits 125 naming both readings [schemeless-roots]" {
     const e = try env(@src());
     var probe = try listenLocal();
     const port = probe.socket.address.getPort();
@@ -4635,7 +4635,7 @@ test "an unreachable schemeless root exits 125 naming both readings [76]" {
     try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: no such path, so h9 read it as ws://{s}", .{ arg, arg }));
 }
 
-test "$H9ROOT is read as a schemeless root [76]" {
+test "$H9ROOT is read as a schemeless root [schemeless-roots]" {
     const e = try env(@src());
     const r = try runBare(e, null, &.{ "--print", "ls" }, &.{.{ "H9ROOT", "fs.example.com/9p" }});
     defer r.deinit();
@@ -4643,7 +4643,7 @@ test "$H9ROOT is read as a schemeless root [76]" {
     try expectIn(r.out, "# wss://fs.example.com/9p");
 }
 
-test "--root-ca is accepted with a schemeless root [76]" {
+test "--root-ca is accepted with a schemeless root [schemeless-roots]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -4662,7 +4662,7 @@ test "--root-ca is accepted with a schemeless root [76]" {
     try expectIn(l.err, "--root-ca needs a wss:// root");
 }
 
-test "a missing path without a dotted host is still not found [76]" {
+test "a missing path without a dotted host is still not found [schemeless-roots]" {
     const e = try env(@src());
     for ([_][]const u8{ "no-such-root", "./9front.img", "dist/root" }) |arg| {
         const r = try run(e, &.{ "--root", arg, "/bin/echo" });
@@ -4686,7 +4686,7 @@ fn wssUrl(buf: []u8) ![]const u8 {
 // -Dweb with -Demu=unicorn for their servers; these check what's
 // particular to it.
 
-test "a ws:// root runs /bin/ls on the web host [21, 12]" {
+test "a ws:// root runs /bin/ls on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
     var w: WsRoot = undefined;
@@ -4695,7 +4695,7 @@ test "a ws:// root runs /bin/ls on the web host [21, 12]" {
     try expectSameAsHost(e, w.url(), &.{ "/bin/ls", "/", "/bin/ls" });
 }
 
-test "root_headers is an error on the web host [21, 12]" {
+test "root_headers is an error on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
     const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--root-header", "Authorization: Bearer x", "/bin/echo" });
@@ -4704,7 +4704,7 @@ test "root_headers is an error on the web host [21, 12]" {
     try expectIn(r.err, "--root-header isn't available on the web host");
 }
 
-test "the guest mounts a /net/ws conversation on the web host [21, 12]" {
+test "the guest mounts a /net/ws conversation on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
     var w: WsRoot = undefined;
@@ -4720,7 +4720,7 @@ test "the guest mounts a /net/ws conversation on the web host [21, 12]" {
     try std.testing.expectEqualStrings(host.out, r.out);
 }
 
-test "text messages round-trip through /net/ws on the web host [21, 12]" {
+test "text messages round-trip through /net/ws on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
     var rl: wsrelay.Relay = undefined;
@@ -4733,7 +4733,7 @@ test "text messages round-trip through /net/ws on the web host [21, 12]" {
     try std.testing.expectEqualStrings("héllo\n", r.out);
 }
 
-test "--net=outbound binds only /net/ws on the web host [21, 12]" {
+test "--net=outbound binds only /net/ws on the web host [websocket-9p, browser-host]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
     const r = try run(e, &.{ "--net=outbound", "--rc", "ls /net; ls '#I' >[2]/dev/null || echo no ip" });
@@ -4746,7 +4746,7 @@ test "--net=outbound binds only /net/ws on the web host [21, 12]" {
     try std.testing.expect(std.mem.indexOf(u8, p.out, "unenforced") == null);
 }
 
-test "a wss:// root runs /bin/ls [21]" {
+test "a wss:// root runs /bin/ls [websocket-9p]" {
     const e = try env(@src());
     var buf: [1024]u8 = undefined;
     const url = try wssUrl(&buf);
@@ -4758,7 +4758,7 @@ test "a wss:// root runs /bin/ls [21]" {
     try std.testing.expectEqualStrings("/bin/ls\n", r.out);
 }
 
-test "--root-ca trusts a private CA, and the host bundle doesn't [21]" {
+test "--root-ca trusts a private CA, and the host bundle doesn't [websocket-9p]" {
     const e = try env(@src());
     var buf: [1024]u8 = undefined;
     const url = try wssUrl(&buf);
@@ -4776,7 +4776,7 @@ test "--root-ca trusts a private CA, and the host bundle doesn't [21]" {
     try expectIn(refused.err, "certificate: unknown authority");
 }
 
-// 9box, the multi-call binary (design/0064-multicall.md). The tree comes from
+// 9box, the multi-call binary (design/multicall.md). The tree comes from
 // `zig build slim`, in .local/9front/slim-*, whose path the build passes as
 // H9_TEST_SLIM_ROOT; the cases skip without it. They run with `--root`
 // after the test root's.
@@ -4814,7 +4814,7 @@ fn expectSameAsStock(e: Env, root: []const u8, args: []const []const u8) !void {
     try std.testing.expectEqual(stock.code, r.code);
 }
 
-test "9box runs a command through a hard link [64]" {
+test "9box runs a command through a hard link [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     // The tree's commands are hard links to 9box, unless it was built with
@@ -4827,7 +4827,7 @@ test "9box runs a command through a hard link [64]" {
     try expectSameAsStock(e, slim, &.{ "--rc", "echo hello world | wc; echo a b | sed 's/a/x/'" });
 }
 
-test "9box runs a command through a #! stub [64]" {
+test "9box runs a command through a #! stub [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     var s: Scratch = undefined;
@@ -4852,7 +4852,7 @@ test "9box runs a command through a #! stub [64]" {
     try expectIn(no.err, "9box: no command nope");
 }
 
-test "an rc script runs when /bin/rc is a stub [64]" {
+test "an rc script runs when /bin/rc is a stub [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     const io = std.testing.io;
@@ -4881,7 +4881,7 @@ test "an rc script runs when /bin/rc is a stub [64]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "9box CMD ARGS and an unknown command [64]" {
+test "9box CMD ARGS and an unknown command [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     const r = try runRoot(e, slim, &.{ "/bin/9box", "echo", "a", "b" });
@@ -4899,7 +4899,7 @@ test "9box CMD ARGS and an unknown command [64]" {
     try expectIn(no.err, "no command nope");
 }
 
-test "ramfs runs from the box [64]" {
+test "ramfs runs from the box [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     const r = try runRoot(e, slim, &.{ "--rc", "ramfs -m /n && echo inram >/n/f && ls /n && cat /n/f" });
@@ -4908,7 +4908,7 @@ test "ramfs runs from the box [64]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "argv0 is the command's own name [64]" {
+test "argv0 is the command's own name [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     // Usage lines print argv0, which ARGBEGIN sets from the command's argv;
@@ -4937,12 +4937,12 @@ fn expectCorpus(e: Env, tree: []const u8) !void {
     try expectSameAsStock(e, tree, args.items);
 }
 
-test "each boxed command matches its stock binary on the corpus [64]" {
+test "each boxed command matches its stock binary on the corpus [multicall]" {
     const e = try env(@src());
     try expectCorpus(e, try slimTree(e));
 }
 
-test "a 9P root serving 9box under every name [64]" {
+test "a 9P root serving 9box under every name [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
     // exportfs serves the slim tree's hard links as they are: 9box's bytes
@@ -4961,7 +4961,7 @@ test "a 9P root serving 9box under every name [64]" {
     try std.testing.expectEqualStrings("/bin/9box\n/bin/sed\nx b\nboxed\n", r.out);
 }
 
-test "without --gfx, #i, #m and #b are masked [15]" {
+test "without --gfx, #i, #m and #b are masked [gfx]" {
     const e = try env(@src());
     for ([_][]const u8{ "#i", "#m", "#b" }) |dev| {
         const r = try run(e, &.{ "ls", dev });
@@ -4972,7 +4972,7 @@ test "without --gfx, #i, #m and #b are masked [15]" {
     }
 }
 
-test "--gfx on a build without graphics exits 125 [15]" {
+test "--gfx on a build without graphics exits 125 [gfx]" {
     const e = try env(@src());
     const v = try runProcess(&.{ e.h9, "--version" }, null);
     defer gpa.free(v.stdout);
@@ -4981,7 +4981,7 @@ test "--gfx on a build without graphics exits 125 [15]" {
     try expectGfxNotBuilt(e);
 }
 
-test "h9-node has no canvas, so --gfx exits 125 as a build without graphics does [120]" {
+test "h9-node has no canvas, so --gfx exits 125 as a build without graphics does [browser-gfx]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
     try expectGfxNotBuilt(e);
@@ -4995,7 +4995,7 @@ fn expectGfxNotBuilt(e: Env) !void {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "graphics aren't built into this h9") != null);
 }
 
-// Contained trees (design/0034-symlinks-in-root.md). The root for these is
+// Contained trees (design/symlinks-in-root.md). The root for these is
 // a small tree in a scratch directory: a few of the root's commands,
 // copied, the mount points the namespace builder binds onto, and links.
 
@@ -5027,7 +5027,7 @@ fn linkTree(e: Env, s: *Scratch, out: []u8) ![]const u8 {
     return std.fmt.bufPrint(out, "{s}/tree", .{s.path});
 }
 
-test "absolute symlink in a contained tree resolves inside it [34]" {
+test "absolute symlink in a contained tree resolves inside it [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5045,7 +5045,7 @@ test "absolute symlink in a contained tree resolves inside it [34]" {
     try std.testing.expectEqual(0, k.code);
 }
 
-test "symlink with .. stops at the top of a contained tree [34]" {
+test "symlink with .. stops at the top of a contained tree [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5058,7 +5058,7 @@ test "symlink with .. stops at the top of a contained tree [34]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "symlink loop is too many symbolic links [34]" {
+test "symlink loop is too many symbolic links [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5071,7 +5071,7 @@ test "symlink loop is too many symbolic links [34]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
 }
 
-test "contained tree still honours --read-deny [34]" {
+test "contained tree still honours --read-deny [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5091,7 +5091,7 @@ test "contained tree still honours --read-deny [34]" {
     try std.testing.expect(std.mem.indexOf(u8, l.out, "/etc/hello") != null);
 }
 
-test "uncontained bind follows host symlinks as before [34]" {
+test "uncontained bind follows host symlinks as before [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5121,7 +5121,7 @@ test "uncontained bind follows host symlinks as before [34]" {
     try std.testing.expectEqualStrings("", c.out);
 }
 
-test "--print's #U!c bind replays with --ns [34]" {
+test "--print's #U!c bind replays with --ns [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5143,7 +5143,7 @@ test "--print's #U!c bind replays with --ns [34]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "ls -l /bin in a contained tree with links (demo) [34]" {
+test "ls -l /bin in a contained tree with links (demo) [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5157,7 +5157,7 @@ test "ls -l /bin in a contained tree with links (demo) [34]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/cat") != null);
 }
 
-// The Linux personality (design/0018-linux-personality.md): static Linux
+// The Linux personality (design/linux-personality.md): static Linux
 // programs from tests/fixtures/linux (H9_TEST_LINUX) and an Alpine root
 // from scripts/fetch.sh (H9_TEST_LINUX_ROOT/alpine-<arch>).
 
@@ -5235,7 +5235,7 @@ fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Res
     return first orelse error.SkipZigTest;
 }
 
-test "a static Linux program runs and exits with its status (demo) [18]" {
+test "a static Linux program runs and exits with its status (demo) [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     const r = try runLinux(&le, false, &.{ "/mnt/term/cwd/hello", "x", "y" });
@@ -5245,7 +5245,7 @@ test "a static Linux program runs and exits with its status (demo) [18]" {
     try std.testing.expectEqual(3, r.code);
 }
 
-test "files, fork, vfork, exec, pipes, signals and mmap work for a Linux program [18]" {
+test "files, fork, vfork, exec, pipes, signals and mmap work for a Linux program [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     const r = try runLinux(&le, false, &.{"/mnt/term/cwd/probe"});
@@ -5256,7 +5256,7 @@ test "files, fork, vfork, exec, pipes, signals and mmap work for a Linux program
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a Linux program killed by a signal exits 128+N, and a handler can catch a fault [18]" {
+test "a Linux program killed by a signal exits 128+N, and a handler can catch a fault [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     const term = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "term" });
@@ -5272,7 +5272,7 @@ test "a Linux program killed by a signal exits 128+N, and a handler can catch a 
     try std.testing.expectEqual(4, caught.code);
 }
 
-test "rt_sigreturn can't raise a Linux program's privilege [18]" {
+test "rt_sigreturn can't raise a Linux program's privilege [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     const r = try runLinux(&le, false, &.{"/mnt/term/cwd/sigreturn"});
@@ -5282,7 +5282,7 @@ test "rt_sigreturn can't raise a Linux program's privilege [18]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "busybox sh runs a pipeline from the Linux root, and /proc describes it (demo) [18]" {
+test "busybox sh runs a pipeline from the Linux root, and /proc describes it (demo) [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     const r = try runLinux(&le, false, &.{ "sh", "-c", "echo a b c | wc -w; cat /proc/self/comm; grep -c ^processor /proc/cpuinfo >/dev/null && echo cpuinfo; ./hello | head -1; exit 7" });
@@ -5292,7 +5292,7 @@ test "busybox sh runs a pipeline from the Linux root, and /proc describes it (de
     try std.testing.expectEqual(7, r.code);
 }
 
-test "/proc/self/stat and status describe a Linux process [18]" {
+test "/proc/self/stat and status describe a Linux process [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // Redis reads /proc/self/stat every second; reading it overran the
@@ -5304,7 +5304,7 @@ test "/proc/self/stat and status describe a Linux process [18]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "ln -s makes links a Linux program follows, renames and removes, and sh waits on a background job [18]" {
+test "ln -s makes links a Linux program follows, renames and removes, and sh waits on a background job [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // /usr/lib is in the root's overlay; a relative link resolves from its
@@ -5326,7 +5326,7 @@ test "ln -s makes links a Linux program follows, renames and removes, and sh wai
     try std.testing.expectEqual(0, r.code);
 }
 
-test "/proc/self/exe is the file a Linux program runs, its links followed [18]" {
+test "/proc/self/exe is the file a Linux program runs, its links followed [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // Zig finds its lib directory beside /proc/self/exe, so a link to it
@@ -5339,7 +5339,7 @@ test "/proc/self/exe is the file a Linux program runs, its links followed [18]" 
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP client may bind port 0 [50]" {
+test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP client may bind port 0 [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // Alpine's minirootfs has no /etc/resolv.conf: devlinux's is unioned
@@ -5362,12 +5362,12 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
     try std.testing.expectEqualStrings("dns\nsize\netc\n1\nmade\n0\n", r.out);
 }
 
-// 32-bit x86 Linux programs (design/0105-linux-i386.md): Alpine's x86 root
+// 32-bit x86 Linux programs (design/linux-i386.md): Alpine's x86 root
 // and the 386 fixtures on the emulator, whatever the host. With
 // -Darch=386 the cases above run them too.
 // 32-bit Wine takes a second TLS entry for %fs, beside libc's %gs, and
 // returns from its syscalls with IRET (tests/fixtures/linux/tls386.c).
-test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET returns at ring 3 [105]" {
+test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET returns at ring 3 [linux-i386]" {
     try skipPending(@src().fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
     const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
@@ -5383,7 +5383,7 @@ test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
 }
 
-test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [105]" {
+test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [linux-i386]" {
     try skipPending(@src().fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
     const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
@@ -5413,7 +5413,7 @@ test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fo
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
 }
 
-test "a mode set by mkdir, creat, or chmod reads back, as databases check of their data directories [18]" {
+test "a mode set by mkdir, creat, or chmod reads back, as databases check of their data directories [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // PostgreSQL won't start unless its data directory is 0700 or 0750.
@@ -5430,7 +5430,7 @@ test "a mode set by mkdir, creat, or chmod reads back, as databases check of the
     try std.testing.expectEqualStrings("700\n600\n750\n640\n", r.out);
 }
 
-test "9front and Linux programs share pipelines both ways (demo) [18]" {
+test "9front and Linux programs share pipelines both ways (demo) [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // Linux sh runs 9front programs under /9 ...
@@ -5447,7 +5447,7 @@ test "9front and Linux programs share pipelines both ways (demo) [18]" {
     try std.testing.expect(std.mem.indexOf(u8, nine.out, "linux: signal 15") != null);
 }
 
-test "a Linux program runs a #!/bin/rc script with 9front's rc [18]" {
+test "a Linux program runs a #!/bin/rc script with 9front's rc [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // The Linux root has no /bin/rc, so it's 9front's; a script under /9,
@@ -5459,40 +5459,40 @@ test "a Linux program runs a #!/bin/rc script with 9front's rc [18]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "usage: wsmount") != null);
 }
 
-// What databases need of files (design/0018-linux-personality.md),
+// What databases need of files (design/linux-personality.md),
 // through tests/fixtures/linux/files.c, which prints "ok NAME" per case.
 
-test "fcntl record locks conflict across processes, wait, and go when the owner closes an fd or exits [18]" {
+test "fcntl record locks conflict across processes, wait, and go when the owner closes an fd or exits [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "posix_locks" }, "ok posix_locks\n");
 }
 
-test "OFD locks belong to the open file, and flock shares, excludes and follows dup [18]" {
+test "OFD locks belong to the open file, and flock shares, excludes and follows dup [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "ofd_flock" }, "ok ofd_flock\n");
 }
 
-test "exec closing a child's last close-on-exec fd of a file releases its flock [18]" {
+test "exec closing a child's last close-on-exec fd of a file releases its flock [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "flock_exec" }, "ok flock_exec\n");
 }
 
-test "processes mapping a file MAP_SHARED see each other's stores, read and write agree, and the file keeps them [18]" {
+test "processes mapping a file MAP_SHARED see each other's stores, read and write agree, and the file keeps them [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "shared_map" }, "ok shared_map\n");
 }
 
-test "fsync works, and wait4 and getrusage report CPU time [18]" {
+test "fsync works, and wait4 and getrusage report CPU time [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "fsync_rusage" }, "ok fsync_rusage\n");
 }
 
-test "fsync on a directory, syncfs and sync reach the host [18]" {
+test "fsync on a directory, syncfs and sync reach the host [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "dir_sync" }, "ok dir_sync\n");
@@ -5544,19 +5544,19 @@ test "fsync on a directory, syncfs and sync reach the host [18]" {
     try std.testing.expect(syncfs and sync);
 }
 
-test "page-by-page preads read ahead, and see writes and truncates at once [18]" {
+test "page-by-page preads read ahead, and see writes and truncates at once [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "read_cache" }, "ok read_cache\n");
 }
 
-test "fallocate grows a file, KEEP_SIZE doesn't, and holes are EOPNOTSUPP [18]" {
+test "fallocate grows a file, KEEP_SIZE doesn't, and holes are EOPNOTSUPP [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "falloc" }, "ok falloc\n");
 }
 
-test "rename across directories moves in an overlay, and is the host's rename in a host tree [18]" {
+test "rename across directories moves in an overlay, and is the host's rename in a host tree [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "rename_across" }, "ok rename_across\n");
@@ -5574,43 +5574,43 @@ test "rename across directories moves in an overlay, and is the host's rename in
     try std.testing.expectEqualStrings("ok rename_across\n", p.stdout);
 }
 
-test "an arm64 Linux program can read the ID registers, as HWCAP_CPUID says [18]" {
+test "an arm64 Linux program can read the ID registers, as HWCAP_CPUID says [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "id_regs" }, "ok id_regs\n");
 }
 
-test "madvise MADV_FREE is EINVAL, and MADV_DONTNEED zeroes [18]" {
+test "madvise MADV_FREE is EINVAL, and MADV_DONTNEED zeroes [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "madv_free" }, "ok madv_free\n");
 }
 
-test "MADV_DONTNEED on the program's own data segment leaves the file's bytes [18]" {
+test "MADV_DONTNEED on the program's own data segment leaves the file's bytes [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "image_dontneed" }, "ok image_dontneed\n");
 }
 
-test "a path through /proc/self/fd/N walks on from the directory the fd names [18]" {
+test "a path through /proc/self/fd/N walks on from the directory the fd names [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_fd_dir" }, "ok proc_fd_dir\n");
 }
 
-test "System V shared memory: a keyed segment, shared across fork, its attach count, and removal [18]" {
+test "System V shared memory: a keyed segment, shared across fork, its attach count, and removal [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "sysv_shm" }, "ok sysv_shm\n");
 }
 
-test "a process that exits with a file mapped shared writes it back on the way out [18]" {
+test "a process that exits with a file mapped shared writes it back on the way out [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "map_exit" }, "ok map_exit\n");
 }
 
-test "prctl PR_SET_NAME keeps the first 15 bytes of a longer name [18]" {
+test "prctl PR_SET_NAME keeps the first 15 bytes of a longer name [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "prctl_name" }, "ok prctl_name\n");
@@ -5638,73 +5638,73 @@ test "with --gfx, a Linux program opens the window's draw files through /dev/9 [
     try netCase(&le, &.{ "--gfx", "/mnt/term/cwd/files", "dev9" }, "ok dev9 gfx\n");
 }
 
-test "a fixed MAP_SHARED file mapping can sit at any page beside private ones, even across a MiB, and fork, munmap, and remap keep it right [18]" {
+test "a fixed MAP_SHARED file mapping can sit at any page beside private ones, even across a MiB, and fork, munmap, and remap keep it right [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "fixed_shared" }, "ok fixed_shared\n");
 }
 
-test "a MAP_PRIVATE file mapping sees the file's changes until it writes a page, and its writes stay its own [18]" {
+test "a MAP_PRIVATE file mapping sees the file's changes until it writes a page, and its writes stay its own [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "private_sees" }, "ok private_sees\n");
 }
 
-test "on amd64, arch_prctl ARCH_SET_GS sets the GS base a %gs load reads, and fork keeps it [18]" {
+test "on amd64, arch_prctl ARCH_SET_GS sets the GS base a %gs load reads, and fork keeps it [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "gs_base" }, "ok gs_base\n");
 }
 
-test "process-shared semaphores in MAP_SHARED memory work across fork, on pages touched only after it [18]" {
+test "process-shared semaphores in MAP_SHARED memory work across fork, on pages touched only after it [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "shared_sem" }, "ok shared_sem\n");
 }
 
-test "signalfd turns blocked signals into reads, and wakes epoll from itself and another process [18]" {
+test "signalfd turns blocked signals into reads, and wakes epoll from itself and another process [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "signal_fd" }, "ok signal_fd\n");
 }
 
-test "setitimer and alarm deliver SIGALRM, once or repeating [18]" {
+test "setitimer and alarm deliver SIGALRM, once or repeating [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "itimer" }, "ok itimer\n");
 }
 
-test "root can become another user and its groups, and can't come back [18]" {
+test "root can become another user and its groups, and can't come back [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "creds" }, "ok creds\n");
 }
 
-test "a process past 100 fds gets no Plan 9 warning on its stderr [18]" {
+test "a process past 100 fds gets no Plan 9 warning on its stderr [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "many_fds" }, "ok many_fds\n");
 }
 
-test "an open file survives unlink for ftruncate, fstat, and mmap, and memfd_create makes one [18]" {
+test "an open file survives unlink for ftruncate, fstat, and mmap, and memfd_create makes one [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "unlinked" }, "ok unlinked\n");
 }
 
-test "a memfd passed with SCM_RIGHTS keeps its data after the sender unmaps and closes it [18]" {
+test "a memfd passed with SCM_RIGHTS keeps its data after the sender unmaps and closes it [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "shm_pass" }, "ok shm_pass\n");
 }
 
-test "a private file mapping reads each page from its file offset on first touch, after close, fork, mremap, and MADV_DONTNEED [18]" {
+test "a private file mapping reads each page from its file offset on first touch, after close, fork, mremap, and MADV_DONTNEED [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "lazy_map" }, "ok lazy_map\n");
 }
 
-// Readiness and sockets (design/0050-linux-net.md), through
+// Readiness and sockets (design/linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 
 fn netCase(le: *const LinuxEnv, args: []const []const u8, want: []const u8) !void {
@@ -5715,115 +5715,115 @@ fn netCase(le: *const LinuxEnv, args: []const []const u8, want: []const u8) !voi
     try std.testing.expectEqual(0, r.code);
 }
 
-test "poll on a pipe wakes when the writer writes [50]" {
+test "poll on a pipe wakes when the writer writes [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "poll_pipe" }, "ok poll_pipe\n");
 }
 
-test "O_NONBLOCK read on an empty pipe is EAGAIN, and select agrees [50]" {
+test "O_NONBLOCK read on an empty pipe is EAGAIN, and select agrees [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "nonblock_pipe" }, "ok nonblock_pipe\n");
 }
 
-test "readv from a pipe returns what's there once a buffer fills [50]" {
+test "readv from a pipe returns what's there once a buffer fills [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "readv_pipe" }, "ok readv_pipe\n");
 }
 
-test "epoll edge-triggered on a pipe [50]" {
+test "epoll edge-triggered on a pipe [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "epoll_et" }, "ok epoll_et\n");
 }
 
-test "eventfd counts and wakes epoll [50]" {
+test "eventfd counts and wakes epoll [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "eventfd" }, "ok eventfd\n");
 }
 
-test "named and abstract Unix sockets: bind, listen, epoll, accept, connect, and refused once closed [50]" {
+test "named and abstract Unix sockets: bind, listen, epoll, accept, connect, and refused once closed [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "unix_sock" }, "ok unix_sock\nok unix_abstract\n");
 }
 
-test "SCM_RIGHTS passes fds over a Unix socket, one batch per message, with MSG_CMSG_CLOEXEC [50]" {
+test "SCM_RIGHTS passes fds over a Unix socket, one batch per message, with MSG_CMSG_CLOEXEC [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "scm_rights" }, "ok scm_rights\n");
 }
 
-test "SEQPACKET socket pairs keep message bounds, pass SCM_CREDENTIALS, and stay sockets through SCM_RIGHTS [50]" {
+test "SEQPACKET socket pairs keep message bounds, pass SCM_CREDENTIALS, and stay sockets through SCM_RIGHTS [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/net", "seqpacket" }, "ok seqpacket\n");
 }
 
-test "socket under --net=disable is EACCES [50]" {
+test "socket under --net=disable is EACCES [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=disable", "/mnt/term/cwd/net", "disabled" }, "ok disabled\n");
 }
 
-test "TCP echo between a Linux client and server, with getpeername [50]" {
+test "TCP echo between a Linux client and server, with getpeername [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "tcp_echo" }, "ok tcp_echo\n");
 }
 
-test "non-blocking connect is EINPROGRESS, then writable, then SO_ERROR 0 [50]" {
+test "non-blocking connect is EINPROGRESS, then writable, then SO_ERROR 0 [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "nb_connect" }, "ok nb_connect\n");
 }
 
-test "shutdown(SHUT_WR) shows the peer EOF and EPOLLRDHUP [50]" {
+test "shutdown(SHUT_WR) shows the peer EOF and EPOLLRDHUP [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "half_close" }, "ok half_close\n");
 }
 
-test "a Linux process that exits holding a TCP connection closes it [50]" {
+test "a Linux process that exits holding a TCP connection closes it [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "exit_eof" }, "ok exit_eof\n");
 }
 
-test "IPv4 and IPV6_V6ONLY IPv6 wildcard listeners share a port, or IPv6 is EAFNOSUPPORT without it [50]" {
+test "IPv4 and IPV6_V6ONLY IPv6 wildcard listeners share a port, or IPv6 is EAFNOSUPPORT without it [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "dual_bind" }, "ok dual_bind\n");
 }
 
-test "netlink lists loopback for getifaddrs, and a listener on 127.0.0.1 reports it [50]" {
+test "netlink lists loopback for getifaddrs, and a listener on 127.0.0.1 reports it [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "ifaddrs" }, "ok ifaddrs\n");
 }
 
-test "a netlink MSG_PEEK|MSG_TRUNC read sizes the next message and leaves it queued [50]" {
+test "a netlink MSG_PEEK|MSG_TRUNC read sizes the next message and leaves it queued [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "netlink_peek" }, "ok netlink_peek\n");
 }
 
-test "UDP sendto and recvfrom on an unconnected socket [50]" {
+test "UDP sendto and recvfrom on an unconnected socket [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp" }, "ok udp\n");
 }
 
-test "sendmmsg and recvmmsg batch datagrams, and UDP_SEGMENT and UDP_GRO are refused, as QUIC stacks need [50]" {
+test "sendmmsg and recvmmsg batch datagrams, and UDP_SEGMENT and UDP_GRO are refused, as QUIC stacks need [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "udp_mmsg" }, "ok udp_mmsg\n");
 }
 
-test "two sendtos to one peer from a socket bound to port 0, under --net outbound, as musl's resolver does [50]" {
+test "two sendtos to one peer from a socket bound to port 0, under --net outbound, as musl's resolver does [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
@@ -5840,13 +5840,13 @@ test "two sendtos to one peer from a socket bound to port 0, under --net outboun
     try std.testing.expectEqualStrings("B", second.data);
 }
 
-test "more than 30 TCP connections at once [50]" {
+test "more than 30 TCP connections at once [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "many" }, "ok many\n");
 }
 
-test "TCP echo between a Linux client and a 9front server [50]" {
+test "TCP echo between a Linux client and a 9front server [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // aux/listen1 runs cat (a 9front path: listen1 is a 9front program)
@@ -5879,30 +5879,30 @@ fn servedNetCase(comptime src: std.builtin.SourceLocation, case: []const u8) !vo
     try std.testing.expectEqual(0, r.code);
 }
 
-test "TCP echo through another h9's /net, mounted, with listen and accept [50, 35]" {
+test "TCP echo through another h9's /net, mounted, with listen and accept [linux-net, serve]" {
     try servedNetCase(@src(), "tcp_echo");
 }
 
-test "non-blocking connect and accept through a mounted /net [50, 35]" {
+test "non-blocking connect and accept through a mounted /net [linux-net, serve]" {
     try servedNetCase(@src(), "nb_connect");
 }
 
-test "shutdown(SHUT_WR) and EPOLLRDHUP through a mounted /net [50, 35]" {
+test "shutdown(SHUT_WR) and EPOLLRDHUP through a mounted /net [linux-net, serve]" {
     try servedNetCase(@src(), "half_close");
 }
 
-test "a Linux process that exits holding a mounted /net's connection closes it [50, 35]" {
+test "a Linux process that exits holding a mounted /net's connection closes it [linux-net, serve]" {
     try servedNetCase(@src(), "exit_eof");
 }
 
-test "Go net/http server and client in one Linux program [50]" {
+test "Go net/http server and client in one Linux program [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try goLinux(&le);
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/go/nethttp" }, "ok nethttp\n");
 }
 
-// Threads (design/0049-linux-threads.md), through
+// Threads (design/linux-threads.md), through
 // tests/fixtures/linux/threads.c, which prints "ok NAME" per case, and the
 // Go programs in tests/fixtures/linux/go (built when go is on PATH).
 
@@ -5916,21 +5916,21 @@ fn threadCase(le: *const LinuxEnv, name: []const u8) !void {
     try netCase(le, &.{ "/mnt/term/cwd/threads", name }, try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name}));
 }
 
-test "pthreads program with 8 threads and a mutex [49]" {
+test "pthreads program with 8 threads and a mutex [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "mutex");
     try threadCase(&le, "condvar");
 }
 
-test "thread-local storage, timed waits and fork from a thread [49]" {
+test "thread-local storage, timed waits and fork from a thread [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "timed_tls");
     try threadCase(&le, "fork_thread");
 }
 
-test "a Linux program's termios reaches the host terminal: echo off keeps lines, ICANON off is raw and keeps echo [18]" {
+test "a Linux program's termios reaches the host terminal: echo off keeps lines, ICANON off is raw and keeps echo [linux-personality]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5956,7 +5956,7 @@ test "a Linux program's termios reaches the host terminal: echo off keeps lines,
     }
 }
 
-test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMIN 0, and sees the terminal's size [18]" {
+test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMIN 0, and sees the terminal's size [linux-personality]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // no termios to check
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5978,7 +5978,7 @@ test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMI
     }
 }
 
-test "Go linux binary starts goroutines and sleeps [49]" {
+test "Go linux binary starts goroutines and sleeps [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try goLinux(&le);
@@ -5989,44 +5989,44 @@ test "Go linux binary starts goroutines and sleeps [49]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "/proc lists a thread group once, with its threads under task, and statm reads, as htop needs [49]" {
+test "/proc lists a thread group once, with its threads under task, and statm reads, as htop needs [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "proc_threads");
 }
 
-test "/proc/meminfo counts a process's memory once however many threads it has [49]" {
+test "/proc/meminfo counts a process's memory once however many threads it has [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "meminfo_threads");
 }
 
-test "Go os/exec waits for a child from another thread, and RemoveAll empties a /tmp directory [49]" {
+test "Go os/exec waits for a child from another thread, and RemoveAll empties a /tmp directory [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try goLinux(&le);
     try netCase(&le, &.{"/mnt/term/cwd/go/goexec"}, "ok goexec\n");
 }
 
-test "munmap while another thread reads: no stale access after return [49]" {
+test "munmap while another thread reads: no stale access after return [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "munmap");
 }
 
-test "a store or read(2) racing another thread's mprotect in the same chunk neither faults nor EFAULTs [49]" {
+test "a store or read(2) racing another thread's mprotect in the same chunk neither faults nor EFAULTs [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "remap_race");
 }
 
-test "threads faulting pages in while others munmap don't fault twice on a mapped page [95]" {
+test "threads faulting pages in while others munmap don't fault twice on a mapped page [native-backend]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "fault_race");
 }
 
-test "exit_group kills every thread [49]" {
+test "exit_group kills every thread [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // From the main thread, with threads blocked and spinning ...
@@ -6041,20 +6041,20 @@ test "exit_group kills every thread [49]" {
     try std.testing.expectEqual(7, thread_exit.code);
 }
 
-test "execve from a non-leader thread [49]" {
+test "execve from a non-leader thread [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/threads", "exec_thread" }, "ok exec_thread\n");
 }
 
-test "tgkill interrupts a thread in a busy loop [49]" {
+test "tgkill interrupts a thread in a busy loop [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "tgkill_busy");
     try threadCase(&le, "tgkill_wait");
 }
 
-test "CLONE_CHILD_CLEARTID wakes pthread_join [49]" {
+test "CLONE_CHILD_CLEARTID wakes pthread_join [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     // Each join waits on the thread's clear-tid word; the leader's own
@@ -6063,25 +6063,25 @@ test "CLONE_CHILD_CLEARTID wakes pthread_join [49]" {
     try netCase(&le, &.{ "/mnt/term/cwd/threads", "leader_exit" }, "ok leader_exit\n");
 }
 
-test "a thread spinning without syscalls doesn't starve the others on the emulator [49]" {
+test "a thread spinning without syscalls doesn't starve the others on the emulator [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try threadCase(&le, "spin");
 }
 
-test "Go GC with a goroutine in a call-free loop, at 1 ms slices [49]" {
+test "Go GC with a goroutine in a call-free loop, at 1 ms slices [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try goLinux(&le);
     try netCase(&le, &.{"/mnt/term/cwd/go/gcloop"}, "ok gcloop 20\n");
 }
 
-// The browser host's cases (design/0012-browser-host.md). They run on
+// The browser host's cases (design/browser-host.md). They run on
 // every backend; what they guard is the web host's: coroutines that park
 // for the event loop, a JIT over recycled pages, and stacks without
 // guard pages.
 
-test "a spinning process doesn't starve a pipeline [12]" {
+test "a spinning process doesn't starve a pipeline [browser-host]" {
     const e = try env(@src());
     // The spinner makes no system calls, so only preemption lets the
     // pipeline run.
@@ -6092,7 +6092,7 @@ test "a spinning process doesn't starve a pipeline [12]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a console read parks and resumes on input [12]" {
+test "a console read parks and resumes on input [browser-host]" {
     const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -6108,7 +6108,7 @@ test "a console read parks and resumes on input [12]" {
     }
 }
 
-test "a note interrupts a parked console read [12]" {
+test "a note interrupts a parked console read [browser-host]" {
     const e = try env(@src());
     var it = backendList(e);
     while (it.next()) |backend| {
@@ -6121,7 +6121,7 @@ test "a note interrupts a parked console read [12]" {
     }
 }
 
-test "errno survives a park [12]" {
+test "errno survives a park [browser-host]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -6146,7 +6146,7 @@ test "errno survives a park [12]" {
     try std.testing.expectEqual(8, std.mem.count(u8, r.out, "\n"));
 }
 
-test "exec into recycled pages doesn't run stale JIT code [12]" {
+test "exec into recycled pages doesn't run stale JIT code [browser-host]" {
     const e = try env(@src());
     // Each program's pages are freed when it exits and handed to the
     // next, so echo's compiled text would run in basename's place.
@@ -6157,7 +6157,7 @@ test "exec into recycled pages doesn't run stale JIT code [12]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "RFMEM processes see each other's writes [12]" {
+test "RFMEM processes see each other's writes [browser-host]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -6173,7 +6173,7 @@ test "RFMEM processes see each other's writes [12]" {
     }
 }
 
-test "a coroutine stack overflow panics instead of corrupting [12]" {
+test "a coroutine stack overflow panics instead of corrupting [browser-host]" {
     const e = try env(@src());
     // Coroutines are the web host's; native kernel processes are threads
     // with guard pages.
@@ -6189,7 +6189,7 @@ test "a coroutine stack overflow panics instead of corrupting [12]" {
     }
 }
 
-// The built-in root (design/0087-builtin-root.md): `#Hroot`, multicall's tree
+// The built-in root (design/builtin-root.md): `#Hroot`, multicall's tree
 // of 9front's commands built into h9. Cases that run its commands skip
 // when the build embedded none for the architecture under test (a
 // development build without `zig build slim`'s tree).
@@ -6249,7 +6249,7 @@ fn h9Copy(e: Env, s: *Scratch) ![]const u8 {
     return std.fs.path.join(gpa, &.{ s.path, name });
 }
 
-test "with no root found, --rc runs from the built-in root [87]" {
+test "with no root found, --rc runs from the built-in root [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -6265,7 +6265,7 @@ test "with no root found, --rc runs from the built-in root [87]" {
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}\n/mnt/term/cwd\n", .{testArch(e)}), r.out);
 }
 
-test "--builtin=only ignores H9ROOT [87]" {
+test "--builtin=only ignores H9ROOT [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     var argv: std.ArrayList([]const u8) = .empty;
@@ -6285,7 +6285,7 @@ test "--builtin=only ignores H9ROOT [87]" {
     try std.testing.expectEqualStrings("builtin\n", r.stdout);
 }
 
-test "--builtin=only with --root is a usage error [87]" {
+test "--builtin=only with --root is a usage error [builtin-root]" {
     const e = try env(@src());
     const r = try runProcess(&.{ e.h9, "--builtin=only", "--root", e.root, "--rc", "echo x" }, null);
     defer gpa.free(r.stdout);
@@ -6293,7 +6293,7 @@ test "--builtin=only with --root is a usage error [87]" {
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, r.term);
 }
 
-test "--builtin=off without a root is exit 125 as before [87]" {
+test "--builtin=off without a root is exit 125 as before [builtin-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -6306,7 +6306,7 @@ test "--builtin=off without a root is exit 125 as before [87]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "no root tree found") != null);
 }
 
-test "--builtin=before runs the box's ls and the root's other commands [87]" {
+test "--builtin=before runs the box's ls and the root's other commands [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     const r = try run(e, &.{ "--builtin=before", "--rc", "cmp -s /bin/ls /bin/9box && echo boxed; test -x /bin/mk && echo mk" });
@@ -6315,7 +6315,7 @@ test "--builtin=before runs the box's ls and the root's other commands [87]" {
     try std.testing.expectEqualStrings("boxed\nmk\n", r.out);
 }
 
-test "--builtin=after leaves the root's ls and fills a missing command [87]" {
+test "--builtin=after leaves the root's ls and fills a missing command [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     const io = std.testing.io;
@@ -6343,7 +6343,7 @@ test "--builtin=after leaves the root's ls and fills a missing command [87]" {
     try std.testing.expectEqualStrings("own\n      1\n", r.out);
 }
 
-test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [87]" {
+test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [builtin-root]" {
     const e = try env(@src());
     const io = std.testing.io;
     var s: Scratch = undefined;
@@ -6365,7 +6365,7 @@ test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [87]"
         try std.testing.expect(std.mem.indexOf(u8, r.out, want) != null);
 }
 
-test "the built-in root refuses writes and /tmp is writable in memory [87]" {
+test "the built-in root refuses writes and /tmp is writable in memory [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -6377,7 +6377,7 @@ test "the built-in root refuses writes and /tmp is writable in memory [87]" {
     try std.testing.expectEqualStrings("refused\ny\n", r.out);
 }
 
-test "--print shows the #Hroot bind as builtin [87]" {
+test "--print shows the #Hroot bind as builtin [builtin-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -6394,7 +6394,7 @@ test "--print shows the #Hroot bind as builtin [87]" {
     try std.testing.expect(std.mem.indexOf(u8, b.out, try std.fmt.bufPrint(&want, "  bind '#Hroot/{s}/bin' /bin ", .{testArch(e)})) != null);
 }
 
-test "--ns replays a plan printed over the built-in root [87]" {
+test "--ns replays a plan printed over the built-in root [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -6412,7 +6412,7 @@ test "--ns replays a plan printed over the built-in root [87]" {
     try std.testing.expectEqualStrings("builtin\n", r.out);
 }
 
-test "--check passes with only the built-in root [87]" {
+test "--check passes with only the built-in root [builtin-root]" {
     const e = try env(@src());
     // --check runs the host's architecture.
     if (e.arch != null) return error.SkipZigTest;
@@ -6425,7 +6425,7 @@ test "--check passes with only the built-in root [87]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
 }
 
-test "a Linux root alone gets the built-in root as its /9, and --builtin=off leaves it out [87]" {
+test "a Linux root alone gets the built-in root as its /9, and --builtin=off leaves it out [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -6445,7 +6445,7 @@ test "a Linux root alone gets the built-in root as its /9, and --builtin=off lea
     try std.testing.expect(std.mem.indexOf(u8, off.out, "#Hroot") == null);
 }
 
-test "a missing command names the built-in root in its error [87]" {
+test "a missing command names the built-in root in its error [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
     const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "mk" });
@@ -6454,7 +6454,7 @@ test "a missing command names the built-in root in its error [87]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "not in the built-in root; pass --root or set H9ROOT") != null);
 }
 
-// Serving the namespace (design/0035-serve.md). A server is h9 on a
+// Serving the namespace (design/serve.md). A server is h9 on a
 // terminal from tests/term.zig, so the cases can signal it and read its
 // "serve: ADDR" lines; a client is a second h9 with the listener as its
 // 9P root, which mounts the connection's /srv/root at /mnt/temp to look
@@ -6664,7 +6664,7 @@ const Sock = struct {
     }
 };
 
-test "an h9 root over --serve unix! lists the served tree [35]" {
+test "an h9 root over --serve unix! lists the served tree [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6678,7 +6678,7 @@ test "an h9 root over --serve unix! lists the served tree [35]" {
     try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
 }
 
-test "an h9 root over --serve tcp! lists the served tree [35]" {
+test "an h9 root over --serve tcp! lists the served tree [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6691,7 +6691,7 @@ test "an h9 root over --serve tcp! lists the served tree [35]" {
     try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
 }
 
-test "an h9 ws:// root over --serve ws:// lists the served tree [35]" {
+test "an h9 ws:// root over --serve ws:// lists the served tree [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6705,7 +6705,7 @@ test "an h9 ws:// root over --serve ws:// lists the served tree [35]" {
     try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
 }
 
-test "a guest mounts a --serve ws:// listener through /net/ws [35]" {
+test "a guest mounts a --serve ws:// listener through /net/ws [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6722,7 +6722,7 @@ test "a guest mounts a --serve ws:// listener through /net/ws [35]" {
     try std.testing.expectEqualStrings("served\n", r.out);
 }
 
-test "--serve-root exports only that subtree [35]" {
+test "--serve-root exports only that subtree [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6741,7 +6741,7 @@ test "--serve-root exports only that subtree [35]" {
     try std.testing.expectEqualStrings("served\nsubtree\n", r.out);
 }
 
-test "--serve under --write=none refuses writes [35]" {
+test "--serve under --write=none refuses writes [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--write=none", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
     defer t.deinit();
@@ -6754,7 +6754,7 @@ test "--serve under --write=none refuses writes [35]" {
     try std.testing.expectEqualStrings("refused\n", r.out);
 }
 
-test "--read-deny paths aren't visible through --serve [35]" {
+test "--read-deny paths aren't visible through --serve [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6771,7 +6771,7 @@ test "--read-deny paths aren't visible through --serve [35]" {
     try std.testing.expectEqualStrings("served\nhidden\n", r.out);
 }
 
-test "clients see the plan's namespace, not the program's later binds [35]" {
+test "clients see the plan's namespace, not the program's later binds [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6786,7 +6786,7 @@ test "clients see the plan's namespace, not the program's later binds [35]" {
     try std.testing.expectEqualStrings("plan\n", r.out);
 }
 
-test "listeners close and clients see hangups when the program exits [35]" {
+test "listeners close and clients see hangups when the program exits [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -6810,7 +6810,7 @@ test "listeners close and clients see hangups when the program exits [35]" {
     try std.testing.expectError(error.ConnectionRefused, Sock.dial(try addrPort(addr)));
 }
 
-test "a ws:// listener refuses an unlisted Origin with 403 [35]" {
+test "a ws:// listener refuses an unlisted Origin with 403 [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-origin", "http://ok.example", "--rc", "echo ready; sleep 60" });
     defer t.deinit();
@@ -6829,7 +6829,7 @@ test "a ws:// listener refuses an unlisted Origin with 403 [35]" {
     }
 }
 
-test "a ws:// listener with --serve-token refuses a request without it [35]" {
+test "a ws:// listener with --serve-token refuses a request without it [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -6860,7 +6860,7 @@ test "a ws:// listener with --serve-token refuses a request without it [35]" {
     }
 }
 
-test "a ws:// listener accepts the token in the query [35]" {
+test "a ws:// listener accepts the token in the query [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -6883,7 +6883,7 @@ test "a ws:// listener accepts the token in the query [35]" {
     try expectServed(e, try std.fmt.bufPrint(&ub, "{s}?token=ab%2bc/%3d", .{addr}), "/mnt/temp/mnt/term/cwd/marker");
 }
 
-test "the 33rd connection is refused [35]" {
+test "the 33rd connection is refused [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0" });
     defer t.deinit();
@@ -6918,7 +6918,7 @@ test "the 33rd connection is refused [35]" {
     }
 }
 
-test "clients exporting at the --pids cap don't stop the program's rfork [35]" {
+test "clients exporting at the --pids cap don't stop the program's rfork [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--pids", "8", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; read >/dev/null; echo a | cat; echo forked" });
     defer t.deinit();
@@ -6944,7 +6944,7 @@ test "clients exporting at the --pids cap don't stop the program's rfork [35]" {
     try std.testing.expectEqual(0, try t.wait(slow(10_000)));
 }
 
-test "--serve with no program serves until a hangup and exits 0 [35]" {
+test "--serve with no program serves until a hangup and exits 0 [serve]" {
     // It ends the server with SIGHUP, which Windows has no way to send.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try serveEnv(@src());
@@ -6964,7 +6964,7 @@ test "--serve with no program serves until a hangup and exits 0 [35]" {
     try std.testing.expect(!pathExists(sock));
 }
 
-test "--serve tcp!127.0.0.1!0 prints the bound address [35]" {
+test "--serve tcp!127.0.0.1!0 prints the bound address [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0" });
     defer t.deinit();
@@ -6987,7 +6987,7 @@ fn staleSocket(path: []const u8) !void {
     try std.testing.expect(pathExists(path));
 }
 
-test "a stale unix socket is replaced and removed at exit [35]" {
+test "a stale unix socket is replaced and removed at exit [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -7007,7 +7007,7 @@ test "a stale unix socket is replaced and removed at exit [35]" {
     try std.testing.expect(!s.exists("fs.sock.lock"));
 }
 
-test "a unix socket path that isn't a socket exits 125 [35]" {
+test "a unix socket path that isn't a socket exits 125 [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -7025,7 +7025,7 @@ test "a unix socket path that isn't a socket exits 125 [35]" {
     try std.testing.expectEqualStrings("keep\n", try s.tmp.dir.readFile(std.testing.io, "fs.sock", &buf));
 }
 
-test "a ws:// listener pings an idle client and closes one that stops answering [35]" {
+test "a ws:// listener pings an idle client and closes one that stops answering [serve]" {
     const e = try serveEnv(@src());
     // H9_TEST_KEEPALIVE shortens the keepalive's 30 s idle time to 1 s:
     // the listener pings after 1 s idle and fails the connection 1 s
@@ -7045,7 +7045,7 @@ test "a ws:// listener pings an idle client and closes one that stops answering 
     try k.expectClosed(slow(10_000));
 }
 
-test "an address in use exits 125 [35]" {
+test "an address in use exits 125 [serve]" {
     const e = try serveEnv(@src());
     var srv = try listenLocal();
     defer srv.deinit(std.testing.io);
@@ -7058,7 +7058,7 @@ test "an address in use exits 125 [35]" {
     try expectIn(r.err, "address in use");
 }
 
-test "a client doesn't see /net without --serve-net [35]" {
+test "a client doesn't see /net without --serve-net [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--rc", "test -e /net/tcp/clone && echo ready; sleep 60" });
     defer t.deinit();
@@ -7070,7 +7070,7 @@ test "a client doesn't see /net without --serve-net [35]" {
     try std.testing.expectEqualStrings("nonet\n", r.out);
 }
 
-test "--serve-net exports /net and the plan shows a caveat [35]" {
+test "--serve-net exports /net and the plan shows a caveat [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "--serve-net", "--rc", "echo ready; sleep 60" });
     defer t.deinit();
@@ -7085,7 +7085,7 @@ test "--serve-net exports /net and the plan shows a caveat [35]" {
     try expectIn(p.out, "/net served on tcp!127.0.0.1!5640: clients can dial out from the host's address");
 }
 
-test "--serve-origin '*' without --serve-token exits 2 [35]" {
+test "--serve-origin '*' without --serve-token exits 2 [serve]" {
     const e = try serveEnv(@src());
     const r = try run(e, &.{ "--serve", "ws://127.0.0.1:0/9p", "--serve-origin", "*", "--rc", "echo ran" });
     defer r.deinit();
@@ -7093,7 +7093,7 @@ test "--serve-origin '*' without --serve-token exits 2 [35]" {
     try std.testing.expectEqualStrings("", r.out);
 }
 
-test "a connection past 8 blocking requests fails them without affecting another [35]" {
+test "a connection past 8 blocking requests fails them without affecting another [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -7122,7 +7122,7 @@ test "a connection past 8 blocking requests fails them without affecting another
     try std.testing.expect(failed > 0);
 }
 
-test "--serve works over a root without /bin/exportfs [35]" {
+test "--serve works over a root without /bin/exportfs [serve]" {
     const e = try serveEnv(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -7140,7 +7140,7 @@ test "--serve works over a root without /bin/exportfs [35]" {
     try expectServed(e, addr, "/mnt/temp/mnt/term/cwd/marker");
 }
 
-test "$serve lists the bound addresses [35]" {
+test "$serve lists the bound addresses [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -7161,7 +7161,7 @@ test "$serve lists the bound addresses [35]" {
     try expectIn(r.err, tcp);
 }
 
-test "an interrupt to the program leaves clients connected [35]" {
+test "an interrupt to the program leaves clients connected [serve]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--serve", "tcp!127.0.0.1!0", "rc", "-i" });
     defer t.deinit();
@@ -7180,7 +7180,7 @@ test "an interrupt to the program leaves clients connected [35]" {
     _ = try t.wait(slow(10_000));
 }
 
-test "two runs on one stale unix socket: one listens, one exits 125 [35]" {
+test "two runs on one stale unix socket: one listens, one exits 125 [serve]" {
     // It stops the winner with SIGTERM, which Windows has no way to send.
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try serveEnv(@src());
@@ -7212,7 +7212,7 @@ test "two runs on one stale unix socket: one listens, one exits 125 [35]" {
     try std.testing.expect(!pathExists(sock));
 }
 
-test "--print lists listeners and elides the token [35]" {
+test "--print lists listeners and elides the token [serve]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -7238,7 +7238,7 @@ test "--print lists listeners and elides the token [35]" {
     try std.testing.expect(!pathExists(sock));
 }
 
-// 9P2000.L (design/0022-dotl.md). The server is tests/dotlserver.zig's,
+// 9P2000.L (design/dotl.md). The server is tests/dotlserver.zig's,
 // a tree in memory behind a loopback port, made fresh per connection.
 
 fn dotlTree(s: *@import("dotlserver.zig").Server) !void {
@@ -7262,7 +7262,7 @@ fn dotlRun(e: Env, d: *DotlServer, script: []const u8) !Result {
     return run(e, &.{ "--net-allow", allow, "--rc", cmd });
 }
 
-test "the guest mounts a .L server with dotlfs, under the network policy [22]" {
+test "the guest mounts a .L server with dotlfs, under the network policy [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7281,7 +7281,7 @@ test "the guest mounts a .L server with dotlfs, under the network policy [22]" {
     try std.testing.expect(std.mem.indexOf(u8, no.out, "mounted") == null);
 }
 
-test "a .L mount lists, reads, writes and removes [22]" {
+test "a .L mount lists, reads, writes and removes [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7301,7 +7301,7 @@ test "a .L mount lists, reads, writes and removes [22]" {
     try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8\n", r.out);
 }
 
-test "a .L.Z mount lists, reads, writes and removes, with compound requests [22]" {
+test "a .L.Z mount lists, reads, writes and removes, with compound requests [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7324,7 +7324,7 @@ test "a .L.Z mount lists, reads, writes and removes, with compound requests [22]
     try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8 notes\nd-rwxr-xr-x 0 /n/l/lib/full\n--rw-r--r-- 8 /n/l/lib/notes\none\ntwo\n9P2000.L.Z\n", r.out);
 }
 
-test "a symlink in a .L mount is followed and can't leave the mount [22]" {
+test "a symlink in a .L mount is followed and can't leave the mount [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7342,7 +7342,7 @@ test "a symlink in a .L mount is followed and can't leave the mount [22]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
 }
 
-test "Rlerror errnos become 9front error strings [22]" {
+test "Rlerror errnos become 9front error strings [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7359,7 +7359,7 @@ test "Rlerror errnos become 9front error strings [22]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "already exists") != null);
 }
 
-test "a .L mount attaches as the host uid, not 0, without --user-map [22]" {
+test "a .L mount attaches as the host uid, not 0, without --user-map [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7392,7 +7392,7 @@ fn dotlRootTree(s: *@import("dotlserver.zig").Server) !void {
     _ = try s.add("rc/lib/rcmain", .file, try dir.readFileAlloc(std.testing.io, "rc/lib/rcmain", s.arena.allocator(), .limited(1 << 20)));
 }
 
-test "a 9P2000.L root lists, reads, writes and removes [22]" {
+test "a 9P2000.L root lists, reads, writes and removes [dotl]" {
     const e = try env(@src());
     dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
@@ -7415,7 +7415,7 @@ test "a 9P2000.L root lists, reads, writes and removes [22]" {
     try std.testing.expectEqualStrings("hello from .L\none\ntwo\nnew\n/usr/glenda/full\n/usr/glenda/made\n9P2000.L\n", r.out);
 }
 
-test "a 9P2000 root goes through the translator unchanged [22]" {
+test "a 9P2000 root goes through the translator unchanged [dotl]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -7427,7 +7427,7 @@ test "a 9P2000 root goes through the translator unchanged [22]" {
     try std.testing.expectEqualStrings("9P2000\n/bin/ls\n", r.out);
 }
 
-test "a 9P2000.L.Z mount resumes a write the server dropped, applied once [22]" {
+test "a 9P2000.L.Z mount resumes a write the server dropped, applied once [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
@@ -7453,7 +7453,7 @@ test "a 9P2000.L.Z mount resumes a write the server dropped, applied once [22]" 
     try std.testing.expectEqual(2, d.connections.load(.acquire));
 }
 
-test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [22]" {
+test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
@@ -7471,7 +7471,7 @@ test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [22]" {
     try std.testing.expectEqualStrings("x\ny\n", r.out);
 }
 
-test "a .L.Z root survives the server restarting mid-write [22]" {
+test "a .L.Z root survives the server restarting mid-write [dotl]" {
     const e = try env(@src());
     dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
@@ -7494,7 +7494,7 @@ test "a .L.Z root survives the server restarting mid-write [22]" {
     try std.testing.expectEqualStrings("new\n9P2000.L.Z reconnects 1\n", r.out);
 }
 
-test "a 9P2000.L.Z mount moves to the next address when the server isn't the leader [22]" {
+test "a 9P2000.L.Z mount moves to the next address when the server isn't the leader [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
@@ -7518,7 +7518,7 @@ test "a 9P2000.L.Z mount moves to the next address when the server isn't the lea
     try std.testing.expectEqual(2, d.connections.load(.acquire));
 }
 
-test "a .L.Z unix socket root survives the server restarting mid-write [22]" {
+test "a .L.Z unix socket root survives the server restarting mid-write [dotl]" {
     if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
@@ -7550,7 +7550,7 @@ test "a .L.Z unix socket root survives the server restarting mid-write [22]" {
     try std.testing.expectEqualStrings("new\n9P2000.L.Z reconnects 1\n", r.out);
 }
 
-test "the guest can't dial a host unix socket through #ℓ [22]" {
+test "the guest can't dial a host unix socket through #ℓ [dotl]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--rc", "{ n=`{cat}; echo dial unix!/tmp/x.sock >/net/dotl/$n/ctl } <>/net/dotl/clone" });
     defer r.deinit();
@@ -7559,7 +7559,7 @@ test "the guest can't dial a host unix socket through #ℓ [22]" {
     try expectIn(r.err, "unix sockets are for roots");
 }
 
-test "an h9 root over --serve speaks 9P2000.L through both translators [22]" {
+test "an h9 root over --serve speaks 9P2000.L through both translators [dotl]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
     try serveScratch(&s);
@@ -7581,7 +7581,7 @@ test "an h9 root over --serve speaks 9P2000.L through both translators [22]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "a .L client of --serve under --write=none gets EROFS [22]" {
+test "a .L client of --serve under --write=none gets EROFS [dotl]" {
     const e = try serveEnv(@src());
     var t = try startServer(e, &.{ "--write=none", "--serve", "tcp!127.0.0.1!0", "--rc", "echo ready; sleep 60" });
     defer t.deinit();

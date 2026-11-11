@@ -10,7 +10,7 @@
  * Served: args, ctl (kill, hang, nohang, close, closefiles, stop, start,
  * waitstop, startstop), fd, fpregs, mem, note, noteid, notepg, ns, ppid,
  * regs, segment, status, text and wait. The debugging files and ctl
- * messages, which acid uses, are design/0010-self-host.md's: memory and
+ * messages, which acid uses, are design/self-host.md's: memory and
  * registers come from the Zig process through h9_procdebug, and the
  * stopping is proc.c's. kregs, kfpregs, proc, profile, syscall, trace and
  * watchpt have no meaning here, nor do traceme, startsyscall, profile,
@@ -402,7 +402,7 @@ readns1(Chan *c, Groups *g, char *buf, int nbuf)
 	} else {
 		c->nrock = i;
 		int2flag(f->mflag, flag);
-		/* A posted channel prints as its /srv name, as on 9front (design/0008-devsrv.md). */
+		/* A posted channel prints as its /srv name, as on 9front (design/devsrv.md). */
 		if(strcmp(chanpath(f->to), "#M") == 0)
 			i = snprint(buf, nbuf, *f->spec?
 				"mount %s %q %q %q\n": "mount %s %q %q\n", flag,

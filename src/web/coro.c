@@ -1,5 +1,5 @@
 /*
- * Coroutines on JSPI: see coro.h and design/0012-browser-host.md.
+ * Coroutines on JSPI: see coro.h and design/browser-host.md.
  *
  * wasm globals aren't per stack, so a park saves and restores everything
  * that's per thread on native hosts: the shadow stack pointer, errno and

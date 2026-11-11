@@ -1,6 +1,6 @@
 /*
  * h9's side of drawterm's screen interface when a GUI backend is built in
- * (design/0015-gfx.md): what drawterm's main.c and cpu.c would define, and
+ * (design/gfx.md): what drawterm's main.c and cpu.c would define, and
  * wrappers around the backend's screeninit and clipboard. The backend's
  * own source is compiled unmodified, with src/kern/gfx-gui.h renaming the
  * entry points wrapped here. src/kern/nogfx.c replaces this file and the

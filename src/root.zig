@@ -1,7 +1,7 @@
 //! h9: run 9front executables on host hypervisors.
 
 pub const aout = @import("aout.zig");
-/// Linux ELF binaries (design/0018-linux-personality.md).
+/// Linux ELF binaries (design/linux-personality.md).
 pub const linux_elf = @import("linux/elf.zig");
 pub const vmm = @import("vmm.zig");
 pub const loader = @import("loader.zig");
@@ -21,7 +21,7 @@ pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
 pub const hstream = @import("hstream.zig");
-/// `--serve` listeners (design/0035-serve.md).
+/// `--serve` listeners (design/serve.md).
 pub const serve = @import("serve.zig");
 pub const gfx = @import("gfx.zig");
 pub const web = @import("web.zig");
@@ -37,9 +37,9 @@ pub const build_info = struct {
     pub const drawterm_rev: []const u8 = o.drawterm_rev;
     /// Built with -Dhost-cmd: #C, --host-cmd and hcmd.
     pub const host_cmd: bool = o.host_cmd;
-    /// The GUI backend for --gfx (design/0015-gfx.md), or "none".
+    /// The GUI backend for --gfx (design/gfx.md), or "none".
     pub const gfx: []const u8 = o.gfx;
-    /// The built-in root (design/0087-builtin-root.md).
+    /// The built-in root (design/builtin-root.md).
     pub const builtin_root = @import("machine.zig").builtin_root;
 };
 

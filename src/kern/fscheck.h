@@ -12,7 +12,7 @@ enum {
 };
 
 /*
- * Contained trees (design/0034-symlinks-in-root.md): h9_fs_resolvein's
+ * Contained trees (design/symlinks-in-root.md): h9_fs_resolvein's
  * results, and the most links one walk follows.
  */
 enum {

@@ -61,14 +61,14 @@ if (!haveJSPI) {
 } else {
   // ?root=ws://host/9p runs over a 9P server instead of root.h9a,
   // ?linux runs Alpine's arm64 busybox sh over linux.h9a, a Linux root
-  // (design/0018-linux-personality.md), on ha64, h9's own arm64 CPU, with
+  // (design/linux-personality.md), on ha64, h9's own arm64 CPU, with
   // nine-arm64.h9a's 9front commands at /9 when the build has them, so
   // /9/bin/wsmount can mount a host's /net.
   // ?backend= picks the backend (emu, h9's own CPUs, is the only one; v86
   // is its old name).
   const params = new URLSearchParams(location.search);
   const linux = params.has('linux');
-  // ?rio runs rio with acme in a canvas (design/0120-browser-gfx.md).
+  // ?rio runs rio with acme in a canvas (design/browser-gfx.md).
   document.getElementById('rio').onclick = () => { location.search = params.has('rio') ? '' : '?rio'; };
   if (params.has('rio')) await runRio(params);
   else if (params.has('wine')) await runWine(params);

@@ -1,5 +1,5 @@
 /*
- * Readiness for Linux processes (design/0050-linux-net.md): h9_poll asks
+ * Readiness for Linux processes (design/linux-net.md): h9_poll asks
  * each fd's channel whether a read or write would block, and sleeps
  * until one wouldn't or the timeout passes. Pipes and other qio queues
  * wake pollers from qio's own wakeups (h9_qwake, a hook in kern/qio.c),

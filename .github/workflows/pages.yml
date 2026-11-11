@@ -1,5 +1,5 @@
 # Publishes the project pages (site/*.html) to GitHub Pages, with the
-# browser host (design/0012-browser-host.md) built from main in demo/ as
+# browser host (design/browser-host.md) built from main in demo/ as
 # the page's live demo.
 #
 # The demo's root archive needs a 386 root. Building one with

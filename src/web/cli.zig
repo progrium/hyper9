@@ -1,4 +1,4 @@
-//! The CLI's host side on the web host (design/0012-browser-host.md): its
+//! The CLI's host side on the web host (design/browser-host.md): its
 //! stdin, Ctrl-C and raw mode come from the JS host (h9-web.js), which
 //! has them from Node's process or from the page's terminal. Each blocking
 //! call is a Suspending import, so it parks only the coroutine making it.

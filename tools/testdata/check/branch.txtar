@@ -1,0 +1,60 @@
+Branches: implemented needs [main], main is only for implemented, and a
+branch that can't be found is a warning.
+
+error: design/a.md: implemented, so `branch` must be [main]
+error: design/b.md: implemented, so `branch` must be [main]
+error: design/c.md:8: `branch` has main, but the status is `accepted`
+warning: design/d.md:8: branch `gone` wasn't found
+
+-- .branches --
+work 1
+feature/e 3
+-- design/a.md --
+---
+slug: a
+title: A
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/b.md --
+---
+slug: b
+title: B
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: []
+branch: [main, work]
+---
+-- design/c.md --
+---
+slug: c
+title: C
+status: accepted
+created: 2026-11-03
+authors: [progrium]
+depends: []
+branch: [main]
+---
+-- design/d.md --
+---
+slug: d
+title: D
+status: accepted
+created: 2026-11-03
+authors: [progrium]
+depends: []
+branch: [work, gone]
+---
+-- design/e.md --
+---
+slug: e
+title: E
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+branch: [feature/e]
+---

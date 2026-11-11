@@ -1,5 +1,5 @@
 // Reads /dev/draw/new and writes the 144 bytes of screen information to
-// stdout (tests/backends.zig, design/0015-gfx.md).
+// stdout (tests/backends.zig, design/gfx.md).
 
 #include "lib.S"
 

@@ -1,4 +1,4 @@
-//! h9's own guest commands (design/0032-guest-tools.md): the tree under
+//! h9's own guest commands (design/guest-tools.md): the tree under
 //! src/guest/, read by build.zig at configure time and written out as a
 //! Zig table that src/kern.zig hands to `#H` (src/kern/devhtools.c).
 //!
@@ -8,9 +8,9 @@
 //! with `.` are left out, so a `.gitkeep` can hold an empty directory.
 //!
 //! The same table, built with `buildRoot` and written with `renderRoot`,
-//! is the built-in root `#Hroot` serves (design/0087-builtin-root.md): the mount
+//! is the built-in root `#Hroot` serves (design/builtin-root.md): the mount
 //! points h9 binds onto, and for each architecture the build embeds,
-//! multicall's tree of 9front's commands (design/0064-multicall.md). Its
+//! multicall's tree of 9front's commands (design/multicall.md). Its
 //! executables are 9front binaries rather than rc scripts, entries with
 //! the same bytes share them, and the bytes are embedded with @embedFile
 //! rather than written into the generated source.

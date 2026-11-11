@@ -1,6 +1,6 @@
 // Runs the garbage collector while a goroutine spins in a loop with no
 // calls, which only a signal (SIGURG, by tgkill) can preempt, and prints
-// "ok gcloop" (design/0049-linux-threads.md).
+// "ok gcloop" (design/linux-threads.md).
 package main
 
 import (

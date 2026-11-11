@@ -1,4 +1,4 @@
-//! WebSocket (RFC 6455) for 9P over WebSocket (design/0021-websocket-9p.md):
+//! WebSocket (RFC 6455) for 9P over WebSocket (design/websocket-9p.md):
 //! URLs, the opening handshake, frame encoding and decoding, and masking,
 //! as pure functions over `std.Io.Reader` and `std.Io.Writer`, with no
 //! sockets. Both sides are here: the client that src/hstream.zig runs, and
@@ -39,7 +39,7 @@ pub const Close = struct {
     pub const going_away = 1001;
     pub const protocol_error = 1002;
     /// A data type the endpoint can't accept: a text message on a
-    /// served 9P stream (design/0035-serve.md).
+    /// served 9P stream (design/serve.md).
     pub const unsupported_data = 1003;
     pub const invalid_data = 1007;
     pub const too_big = 1009;
@@ -414,7 +414,7 @@ pub fn reasonPhrase(status: u16) []const u8 {
     };
 }
 
-/// What a WebSocket listener accepts (design/0035-serve.md, "WebSocket
+/// What a WebSocket listener accepts (design/serve.md, "WebSocket
 /// listeners").
 pub const ServerPolicy = struct {
     /// The one path upgrades are answered on.

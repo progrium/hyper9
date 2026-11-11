@@ -1,8 +1,8 @@
 //! Plan 9 errors and Dirs in Linux's terms, both ways: errno numbers from
 //! error strings and back, `stat`, `statx` and `d_type` from a `Dir`, a
 //! `Dir` from .L's `stat`, open modes, and users by name and number.
-//! Shared by the Linux personality (design/0018-linux-personality.md,
-//! "Users and stat") and 9P2000.L (design/0022-dotl.md), which names this
+//! Shared by the Linux personality (design/linux-personality.md,
+//! "Users and stat") and 9P2000.L (design/dotl.md), which names this
 //! file. The two share the mappings and `/etc/passwd` parsing here, not
 //! the policy: each decides which user is which number.
 
@@ -78,7 +78,7 @@ pub const E = struct {
 };
 
 /// The Plan 9 error string for an errno, what a .L server's Rlerror becomes
-/// (design/0022-dotl.md, "Errors"). `errno` maps each back to the same
+/// (design/dotl.md, "Errors"). `errno` maps each back to the same
 /// number; one with no string here is "errno N", which `errno` reads too.
 pub fn errstr(e: u32, buf: *[16]u8) []const u8 {
     const table = [_]struct { u16, []const u8 }{
@@ -340,7 +340,7 @@ fn sec32(s: u64) u32 {
     return @intCast(@min(s, std.math.maxInt(u32)));
 }
 
-/// The Dir 9P2000 shows for a .L file (design/0022-dotl.md, "`Dir` from a
+/// The Dir 9P2000 shows for a .L file (design/dotl.md, "`Dir` from a
 /// Linux `stat`"): its permission bits with DMDIR for a directory, its
 /// size, and its times in seconds. `uid` and `gid` are the names the user
 /// map gives its numbers; `muid` is the uid. The qid's type is derived
@@ -419,7 +419,7 @@ pub fn createMode(perm: u32) u32 {
 }
 
 /// What a 9P2000 wstat asks of a .L server: a rename, then a Tsetattr
-/// (design/0022-dotl.md, "Twstat"). `valid` is 0 when nothing but the name
+/// (design/dotl.md, "Twstat"). `valid` is 0 when nothing but the name
 /// changes; `sync` is set for the null wstat, which becomes a Tfsync.
 pub const Wstat = struct {
     rename: ?[]const u8 = null,
@@ -513,7 +513,7 @@ pub const Passwd = struct {
     }
 };
 
-/// dotl's user map (design/0022-dotl.md, "The user map"): .L carries
+/// dotl's user map (design/dotl.md, "The user map"): .L carries
 /// numbers and 9P2000 names. `--user-map` gives a passwd file; without
 /// one the machine's user is `uid` (the host's uid) and any other number N
 /// is the name "N". 0 is sent only for a name the map gives uid 0.
@@ -528,7 +528,7 @@ pub const UserMap = struct {
     /// The default `uid` for a host uid (`getuid()`, or null on Windows,
     /// which has none). A host root is sent as nobody, so that running h9
     /// as root doesn't claim root on a server without `--user-map` saying
-    /// so (design/0022-dotl.md, Security).
+    /// so (design/dotl.md, Security).
     pub fn hostUid(host: ?u32) u32 {
         const h = host orelse return 1000;
         return if (h == 0) nobody else h;

@@ -1,5 +1,5 @@
 /*
- * rendezvous and semaphores. See design/0003-semaphores.md.
+ * rendezvous and semaphores. See design/semaphores.md.
  *
  * The semaphore code is 9front's (port/sysproc.c at the pinned release),
  * ported closely, races and comments included, since it was checked with

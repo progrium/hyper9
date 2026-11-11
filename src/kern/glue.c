@@ -1,7 +1,7 @@
 /*
  * h9's replacement for drawterm's main.c and cpu.c: boots drawterm's kern
  * without a cpu connection. The screen is src/kern/gfx.c with a GUI
- * backend, or src/kern/nogfx.c without one (design/0015-gfx.md). See SPEC.md,
+ * backend, or src/kern/nogfx.c without one (design/gfx.md). See SPEC.md,
  * "Kernel: drawterm kern/ and the Zig seam".
  */
 
@@ -34,7 +34,7 @@ extern ulong kerndate;
 /* Compose sequences only matter for GUI keyboard input. */
 long latin1(Rune *k, int n) { USED(k, n); return -1; }
 
-/* devtls's in-kernel factotum path, unused: a guest runs its own factotum and posts it in /srv (design/0008-devsrv.md). */
+/* devtls's in-kernel factotum path, unused: a guest runs its own factotum and posts it in /srv (design/devsrv.md). */
 void *auth_allocrpc(int afd) { USED(afd); werrstr("no factotum"); return nil; }
 void auth_freerpc(void *rpc) { USED(rpc); }
 int auth_rpc(void *rpc, char *verb, void *a, int n) { USED(rpc, verb, a, n); return -1; }
@@ -187,7 +187,7 @@ h9_fd2path(int fd, char *buf, uint nbuf)
  * the 9P channel on fd with devmnt's mntauth, and returns a new fd, close
  * on exec, on the auth channel; or -1 with the error string set, which is
  * the server's ("authentication not required", say) when it refuses.
- * design/0008-devsrv.md.
+ * design/devsrv.md.
  */
 int
 h9_fauth(int fd, char *aname)

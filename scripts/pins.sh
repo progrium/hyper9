@@ -14,7 +14,7 @@ NINEFRONT_386_ISO_SHA256=068e8ff723a3e5b8c6fdec4862f53e0b7d04e04b3b54baca022b9d2
 
 HYPERLINUX_REPO=https://github.com/zw3rk/hyper-linux
 
-# Go for the go-compat fixtures and go-stdtest (design/0007-go-compat.md):
+# Go for the go-compat fixtures and go-stdtest (design/go-compat.md):
 # GOTOOLCHAIN=go$GO_VERSION makes any installed Go fetch this exact release.
 GO_VERSION=1.27.3
 
@@ -34,7 +34,7 @@ x86_64-linux-musl musllinux_1_2_x86_64 73d2eb557cc0255f18c55b15951c46dff1c07f996
 UNICORN_SRC_URL=https://github.com/unicorn-engine/unicorn/archive/refs/tags/$UNICORN_VERSION.tar.gz
 UNICORN_SRC_SHA256=ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4
 
-# An Alpine root for the Linux personality's tests (design/0018-linux-personality.md):
+# An Alpine root for the Linux personality's tests (design/linux-personality.md):
 # the alpine:3.22.2 image's single layer from Docker Hub, by digest, unpacked
 # into .local/linux/alpine-<arch>.
 ALPINE_VERSION=3.22.2

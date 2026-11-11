@@ -1,5 +1,5 @@
 /*
- * #O: copy-on-write overlays (design/0006-ephemeral-writes.md).
+ * #O: copy-on-write overlays (design/ephemeral-writes.md).
  *
  * An instance is a tree in memory, optionally above a lower directory
  * (a chan of another device, usually #U). Walks look in memory first and
@@ -41,7 +41,7 @@
  * Tracking: once h9_overlay_track gives an instance a tracker, each
  * create, copy-up, remove and wstat calls h9_overlay_changed with the
  * changed path, for the root overlay's discarded-changes notice
- * (design/0011-overlay.md). Writes to a file already in memory aren't
+ * (design/overlay.md). Writes to a file already in memory aren't
  * reported again: its create or copy-up was.
  *
  * Locking: each instance's tree is guarded by its QLock, held across

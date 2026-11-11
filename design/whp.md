@@ -1,0 +1,136 @@
+---
+issue: 17
+slug: whp
+title: WHP backend
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: [kvm]
+areas: [vmm, build, tests]
+branch: [main]
+---
+ 
+# Proposal: WHP backend
+
+Nov 9, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
+## Abstract
+ 
+A vmm backend for the Windows Hypervisor Platform, `src/vmm/whp.zig`, on x86\_64 first. It runs [kvm](kvm.md)'s amd64 shim, page tables, and CPU state unchanged, setting the state through WHP's register calls. `WinHvPlatform.dll` is loaded at run time, so one `h9.exe` starts on every Windows machine and falls back to the emulator where the feature isn't enabled. Windows on ARM follows once its WHP support can be tested. The suite that passes on HVF, KVM, and the emulator passes on WHP.
+ 
+## Background
+ 
+This was milestone M9 in SPEC.md, before milestones became proposals ([#1](proposals.md)).
+ 
+### The vmm contract
+ 
+From SPEC.md's Hypervisor layer: the partition is created with `WHvCreatePartition` and `WHvSetupPartition`, memory is mapped with `WHvMapGpaRange`, vCPUs run with `WHvRunVirtualProcessor`, and a kick is `WHvCancelRunVirtualProcessor`. Access needs the optional Windows Hypervisor Platform feature. The portability rules are the same as for KVM: an `OUT` doorbell on x86, one memory region mapped once, 4K guest pages, and a vCPU kept on its thread.
+ 
+### h9 on Windows today
+ 
+- **`h9.exe` runs on Windows arm64,** on the emulator only, with kern built from drawterm's win32 files (`devfs-win32.c`, `devip-win32.c`, `devlfd-win32.c`, `win32.c`) and `src/kern/glue-win32.c`. Unicorn is built from source there (`-Dunicorn=source`).
+- **No x86\_64 Windows build** is made or tested. The Lima `windows` VM is arm64, under QEMU with no nested virtualization, so it has no WHP.
+- **`--backend whp`** parses and returns `BackendNotBuilt`.
+### What WHP differs in, beside KVM
+ 
+- **The partition's processor count is fixed** at setup: `WHvPartitionPropertyCodeProcessorCount` must be set before `WHvSetupPartition`, and every `WHvCreateVirtualProcessor` takes an index below it.
+- **Registers** are read and written in batches by name with `WHvGetVirtualProcessorRegisters` and `WHvSetVirtualProcessorRegisters`. That covers the general registers, `RIP`, `RFLAGS`, the control registers, `EFER`, the segment and descriptor-table registers, MSRs such as `STAR`, `LSTAR`, `SFMASK`, `KERNEL_GS_BASE`, and `FS_BASE`, and the x87, XMM, and MXCSR state.
+- **I/O exits don't advance `RIP`.** On an `OUT`, the exit context gives the instruction's length, and the host moves `RIP` past it, as `hvf.zig` does for its doorbell store.
+- **The library** is `WinHvPlatform.dll`, present only when the feature is enabled. Zig's MinGW has no import library for it.
+## Proposal
+ 
+### The backend
+ 
+`src/vmm/whp.zig`, built for `x86_64-windows`. Its structs and the WHP functions it uses are declared in `src/vmm/whp_abi.zig`.
+ 
+**Loading.** `Backend.create` calls `LoadLibraryW(L"WinHvPlatform.dll")` and `GetProcAddress` for each function. A missing DLL or function is `HypervisorUnavailable`, as is `WHvGetCapability(WHvCapabilityCodeHypervisorPresent)` reporting none. `h9.exe` has no static import of the DLL, so it starts, and `auto` falls back to the emulator, on machines without the feature.
+ 
+| Step | Call |
+| --- | --- |
+| Partition | `WHvCreatePartition`; `WHvSetPartitionProperty` for the processor count (below) and the CPUID and XSAVE features (with XSAVE and AVX cleared, as on KVM); `WHvSetupPartition` |
+| Memory | `VirtualAlloc` of the RAM region, then one `WHvMapGpaRange` with read, write, and execute, at the same guest-physical address as on KVM |
+| vCPU | `WHvCreateVirtualProcessor` with an index from a bitmap of free slots, as `hvf.zig` hands out shared-page slots; `WHvDeleteVirtualProcessor` at destroy, which frees the index |
+| CPU state | `x86.zig`'s values ([kvm](kvm.md)): `CR0`, `CR4`, `EFER`, `GDTR`, `IDTR`, `TR`, and the segment registers, then the SYSCALL MSRs, in one `WHvSetVirtualProcessorRegisters` call |
+| Ureg | In the shared page, as on KVM |
+| FP/SIMD, thread pointer | `FpMmx0`–`7`, `FpControlStatus`, `Xmm0`–`15`, `XmmControlStatus`, and `FsBase`, in one batch each way, assembled into and from the FXSAVE image |
+| Switch address space | The shared page's next-CR3 word, which the shim loads, as on KVM |
+| Run | `WHvRunVirtualProcessor` |
+| Doorbell exit | `WHvRunVpExitReasonX64IoPortAccess` on the doorbell port. The backend sets `RIP` to the exit context's `Rip` plus `InstructionLength`, then decodes the shared page |
+| Kick | `WHvCancelRunVirtualProcessor`, which makes the run return `WHvRunVpExitReasonCanceled`, `.interrupted` |
+ 
+Every other exit reason is `.other` with the reason. No exception exits are requested, so guest faults reach the shim's IDT, as on KVM, and no interrupt controller is emulated.
+ 
+**A kick before the run.** `WHvCancelRunVirtualProcessor` affects only a run in progress, so a kick that comes before `WHvRunVirtualProcessor` would be lost. `kick` also sets a flag on the vCPU, which `run` checks before entering and clears when it returns `.interrupted`, as the emulator's `kick` does.
+ 
+**The processor count.** h9 sets it to 64, HVF's measured limit, and `maxVcpus` returns it, so the vCPU pool and `--cpus` work as on HVF. Raising it waits for WHP's own limit to be measured (Open issues).
+ 
+### Selection and `--check`
+ 
+- `vmm.Kind` gains `whp`. `vmm.create(.whp)` creates it, and `auto` tries it first on Windows x86\_64, falling back to the emulator, with a warning, on `HypervisorUnavailable`.
+- `tools.explain` says: "no usable hypervisor (enable the Windows Hypervisor Platform feature: Settings > Optional features, or `DISM /Online /Enable-Feature /FeatureName:HypervisorPlatform`, then restart)".
+- `--check` reports WHP with the partition's processor count as its vCPU limit.
+### Builds and tests
+ 
+- **`x86_64-windows`** becomes a built and tested target for `h9.exe` and `h9-emu.exe`, beside `aarch64-windows`. drawterm's win32 kern files and `glue-win32.c` are already architecture-independent.
+- **On `aarch64-windows`,** `whp.zig` isn't built yet: the stub's `BackendNotBuilt` stays until the arm64 step.
+- **A test machine:** a Windows 11 x86\_64 Lima instance, `windows-amd64`, on an x86\_64 Linux host with nested virtualization (KVM with `nested=1`), with the Windows Hypervisor Platform feature enabled by `provision.ps1`. `scripts/lima/vm test windows-amd64` runs with `H9_TEST_BACKENDS=whp,emu`.
+### Windows on ARM, later
+ 
+The arm64 backend runs the arm64 shim and page tables, as KVM's arm64 path does: system registers by name through `WHvSetVirtualProcessorRegisters`, the doorbell as a memory-access exit on the unmapped doorbell page, and the PC advanced by the host as on HVF. It's a second step of this proposal, started once WHP's arm64 support is confirmed on a test machine (Open issues).
+ 
+## Rationale
+ 
+**Load the DLL at run time.** A static import of `WinHvPlatform.dll` would make Windows refuse to start `h9.exe` on any machine without the feature, before `auto` could fall back to the emulator. Loading it in `create` gives one binary for every Windows machine, and also removes the need for an import library, which Zig's MinGW doesn't have.
+ 
+**Share KVM's amd64 shim and state.** WHP lets the host set the same state KVM does, by name, so the shim, page tables, descriptor tables, and MSR values are the same, and the backends differ only in how they're set and how exits are reported. That's why this proposal depends on [kvm](kvm.md): the amd64 pieces are built and tested there first, on hardware that's easier to get.
+ 
+**x86\_64 first.** Windows x86\_64 machines with the feature are common, and its WHP API is the long-established one. Windows on ARM's WHP support is newer and harder to test, since the arm64 Lima VM has no nested virtualization.
+ 
+**A fixed processor count of 64.** WHP needs a number before any vCPU exists, and the pool needs `maxVcpus` to be the real limit. 64 is HVF's, the pool is already shaped around it, and it's well within what Hyper-V partitions allow. The open issue is whether a higher number costs anything.
+ 
+**A pre-run kick flag.** HVF's and KVM's kicks are both remembered until the next run (KVM's through `immediate_exit`), and the backend tests check that a kick racing the start of a run isn't lost. WHP's cancel isn't, so the flag gives it the same contract.
+ 
+## Compatibility
+ 
+- **`--backend auto`** on Windows x86\_64 uses WHP when the feature is enabled, where it used the emulator. Output and exit codes are the same.
+- **`--backend whp`** works on x86\_64 where it gave "not built into this h9". On arm64 it's unchanged until the arm64 step.
+- **`--check`** lists WHP on Windows x86\_64.
+- **Releases** gain `x86_64-windows` builds of `h9` and `h9-emu`.
+- **`Machine.Options`:** unchanged.
+- **Vendored tree:** unchanged.
+## Security
+ 
+- **What the guest reaches:** nothing new. WHP gives the isolation HVF and KVM do, and every exit comes back to h9.
+- **The DLL** is loaded by name from the system directory (`LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_SYSTEM32`), so a `WinHvPlatform.dll` placed beside `h9.exe` or in the cwd isn't loaded.
+- **The feature** gives the h9 process the right to create partitions, which is what the backend needs. Nothing else is asked for.
+- **The shim** and its page permissions are KVM's, with the same supervisor-only kernel half.
+## Done criteria
+ 
+- [x] `tests/backends.zig` runs every backend case on `whp` on Windows x86\_64, with traces identical to the emulator's, including the kick race.
+- [x] The `[baseline]` integration cases pass with `H9_TEST_BACKENDS=whp` on `windows-amd64`, with a root that has `/amd64/bin` ([i386](i386.md)'s `zig build mkroot -- --arch`).
+- [x] Cases tagged `[whp]`, which skip where WHP isn't usable:
+  - `test "--check reports whp and its vCPU limit [whp]"`
+  - `test "auto uses whp when the feature is enabled [whp]"`
+  - `test "more live processes than WHP's owned vCPUs run on the pool [whp]"`
+- [x] `test "h9.exe starts and falls back to the emulator without the WHP feature [whp]"`, on a machine without the feature.
+- [x] Demo: on Windows x86\_64 with the feature, `h9 --check` reports `backend whp: ok, 64 vCPUs`, and `h9 ls /bin` runs on it.
+## Implementation
+ 
+1. With [kvm](kvm.md)'s amd64 path implemented: the `x86_64-windows` build of `h9.exe` and the tests, running on the emulator.
+2. The `windows-amd64` Lima instance, with the feature enabled.
+3. `whp_abi.zig` and `whp.zig`: loading, the partition, memory, vCPUs, CPU state from `x86.zig`, I/O exits, FP state, kicks, and the pre-run flag. `vmm.Kind.whp`, `auto`, `--check`, and `tools.explain`. The backend and `[whp]` cases pass.
+4. The `[baseline]` cases on `windows-amd64`.
+5. README (backends, enabling the feature, the Lima instance), `scripts/release.sh`, and SPEC.md: the Hypervisor layer's built backends, the `Kind` comment, and the vCPU limits paragraph. Set `status: implemented` for x86\_64, with an Updates note for the arm64 step if it's still to come.
+## Open issues
+ 
+- Whether the Windows Hypervisor Platform's arm64 support is solid enough to target, or whether Windows on ARM waits. (Moved from SPEC.md's Open questions.) A test machine for it is the first need: arm64 hardware running Windows with the feature, since the Lima VM can't nest.
+- WHP's vCPU limit: the largest processor count a partition accepts, measured as HVF's was, and whether setting it higher than 64 costs memory or setup time.
+- Whether an AppContainer or restricted token can still use WHP. (A research note planned for this proposal, for [host-sandbox](host-sandbox.md).)
+- The cost of a syscall round trip on WHP, against HVF's 1.1 µs, since each exit goes through the Windows hypervisor and back to user mode.
+ 
+
+## Updates
+
+- 2026-11-09: Marked implemented on Windows x86\_64. On a Windows Server 2022 VM with the feature, the `[baseline]` integration cases pass with an `/amd64` root from `zig build mkroot -- --arch amd64`, as do three of the `[whp]` cases. The whole integration run had 217 passed and 0 failed after the Windows fixes in [#140](https://github.com/progrium/hyper9/pull/140). WHP's backend cases in `tests/backends.zig` pass. Not yet run:
+  - **The fallback case,** `h9.exe starts and falls back to the emulator without the WHP feature`, needs a Windows x86\_64 machine without the feature, such as an EC2 instance family without nested virtualization.
+  - **The arm64 step** waits for a Windows on ARM machine with the feature. EC2 has none: its Windows AMIs are x86\_64 only, and its nested virtualization covers only some Intel families.

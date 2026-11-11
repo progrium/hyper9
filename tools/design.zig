@@ -1,6 +1,6 @@
-//! The design tool: lists, checks and files the proposals under design/
-//! (design/0001-proposals.md). Run as `zig build design -- <command>` from
-//! the repository root.
+//! The design tool: lists, checks, proposes, and signs the proposals under
+//! design/ (design/proposals.md, design/proposal-flow.md). Run as
+//! `zig build design -- <command>` from the repository root.
 
 const std = @import("std");
 const fm = @import("frontmatter.zig");
@@ -11,23 +11,25 @@ const Diags = fm.Diags;
 const usage =
     \\usage: zig build design -- <command> [args]
     \\
-    \\  list [--status S] [--area A]    proposals, their status, and ready or what they need
-    \\  ready                           accepted proposals whose dependencies are all implemented
+    \\  list [--status S] [--area A]    proposals, their status, and ready, in progress, stalled, or what they need
+    \\  ready                           accepted proposals with no branch whose dependencies are all implemented
     \\  graph                           the dependency graph, as Mermaid
     \\  status                          rewrite design/STATUS.md, the proposal table and graph
     \\  new <slug> [--title T] [--author LOGIN]
     \\                                  start a draft from design/TEMPLATE.md
-    \\  file <slug> [--yes] [--dry-run] [--issue N]
-    \\                                  create its GitHub issue (or use issue N), number it, and commit
-    \\  fix                             rewrite slug references to filed proposals as numbers
-    \\  check                           validate the proposals and test tags
+    \\  propose <slug> [--yes] [--dry-run] [--issue N]
+    \\                                  open its GitHub issue (or use issue N), set `issue`, make it proposed, and commit
+    \\  log <slug>                      its status and branch changes, from git
+    \\  sign <slug or spec>             sign a doc you've reviewed (interactive; see design/README.md, Signature)
+    \\  close-issues [--dry-run]        close the issues of implemented, declined, and superseded proposals (main's workflow runs it)
+    \\  check                           validate the proposals, test tags, signatures, and links to design/
     \\
 ;
 
-/// Most proposals that can be in a final comment period at once.
-const max_fcp = 3;
+/// Days without a commit before a branch's work counts as stalled.
+const stalled_days = 7;
 
-/// An integration case and its tags (`test "name [a, b]"`).
+/// An integration or web case and its tags (`test "name [a, b]"`).
 const Case = struct {
     file: []const u8,
     line: u32,
@@ -37,27 +39,53 @@ const Case = struct {
     raw: []const u8,
 };
 
-/// The repository as the tool sees it: the proposals and the tagged cases.
+/// A person who can sign, from design/SIGNERS.
+const Signer = struct { login: []const u8, name: []const u8 };
+
+/// The repository as the tool sees it.
 const Repo = struct {
     arena: std.mem.Allocator,
     io: std.Io,
     root: std.Io.Dir,
     ps: []Proposal,
     cases: []Case,
+    /// Text files to check links in, relative to the root.
+    files: []const []const u8,
+    /// Seconds since each branch's last commit, by name, or null when
+    /// branches weren't read (no git).
+    branches: ?std.StringHashMapUnmanaged(i64),
+    /// From design/SIGNERS, or null if there's no such file.
+    signers: ?[]const Signer,
 
-    fn load(arena: std.mem.Allocator, io: std.Io, root: std.Io.Dir, diags: *Diags) !Repo {
+    const Source = enum {
+        /// The files git tracks, and its branches.
+        git,
+        /// Every file under the root, and branch ages from a `.branches`
+        /// file (`name days` per line), for the check fixtures.
+        walk,
+    };
+
+    fn load(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir, diags: *Diags, source: Source) !Repo {
+        var r: Repo = .{ .arena = arena, .io = io, .root = root, .ps = &.{}, .cases = &.{}, .files = &.{}, .branches = null, .signers = null };
+        r.cases = try scanCases(arena, io, root);
+        r.signers = try loadSigners(arena, io, root);
+        switch (source) {
+            .git => {
+                r.files = gitFiles(gpa, io, arena) catch &.{};
+                r.branches = gitBranches(gpa, io, arena) catch null;
+            },
+            .walk => {
+                r.files = try walkFiles(arena, gpa, io, root);
+                r.branches = try fixtureBranches(arena, io, root);
+            },
+        }
         var design = root.openDir(io, "design", .{ .iterate = true }) catch |err| {
             diags.err("design/: {t}", .{err});
-            return .{ .arena = arena, .io = io, .root = root, .ps = &.{}, .cases = &.{} };
+            return r;
         };
         defer design.close(io);
-        return .{
-            .arena = arena,
-            .io = io,
-            .root = root,
-            .ps = try fm.scan(arena, io, design, diags),
-            .cases = try scanCases(arena, io, root),
-        };
+        r.ps = try fm.scan(arena, io, design, diags);
+        return r;
     }
 
     fn resolve(r: Repo, ref: []const u8) ?usize {
@@ -65,49 +93,97 @@ const Repo = struct {
     }
 };
 
-/// Integration cases with tags, from tests/*.zig.
+/// Cases with tags, from tests/*.zig and tests/web/*.mjs.
 fn scanCases(arena: std.mem.Allocator, io: std.Io, root: std.Io.Dir) ![]Case {
     var out: std.ArrayList(Case) = .empty;
-    var dir = root.openDir(io, "tests", .{ .iterate = true }) catch return out.items;
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (try it.next(io)) |e| {
-        if (e.kind != .file or !std.mem.endsWith(u8, e.name, ".zig")) continue;
-        const file = try std.fmt.allocPrint(arena, "tests/{s}", .{e.name});
-        const text = try dir.readFileAlloc(io, e.name, arena, .limited(1 << 24));
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        var lineno: u32 = 0;
-        while (lines.next()) |line| {
-            lineno += 1;
-            const name = testName(line) orelse continue;
-            const tags = fm.testTags(name) orelse continue;
-            var list: std.ArrayList([]const u8) = .empty;
-            var ts = std.mem.splitScalar(u8, tags, ',');
-            while (ts.next()) |t| try list.append(arena, std.mem.trim(u8, t, " "));
-            try out.append(arena, .{ .file = file, .line = lineno, .name = name, .tags = list.items, .raw = tags });
+    for ([_]struct { dir: []const u8, ext: []const u8 }{ .{ .dir = "tests", .ext = ".zig" }, .{ .dir = "tests/web", .ext = ".mjs" } }) |src| {
+        var dir = root.openDir(io, src.dir, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |e| {
+            if (e.kind != .file or !std.mem.endsWith(u8, e.name, src.ext)) continue;
+            const file = try std.fmt.allocPrint(arena, "{s}/{s}", .{ src.dir, e.name });
+            const text = try dir.readFileAlloc(io, e.name, arena, .limited(1 << 24));
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            var lineno: u32 = 0;
+            while (lines.next()) |line| {
+                lineno += 1;
+                const name = fm.caseName(line) orelse continue;
+                const tags = fm.testTags(name) orelse continue;
+                var list: std.ArrayList([]const u8) = .empty;
+                var ts = std.mem.splitScalar(u8, tags, ',');
+                while (ts.next()) |t| try list.append(arena, std.mem.trim(u8, t, " "));
+                try out.append(arena, .{ .file = file, .line = lineno, .name = name, .tags = list.items, .raw = tags });
+            }
         }
     }
     return out.items;
 }
 
-/// The name in a `test "name" {` line.
-fn testName(line: []const u8) ?[]const u8 {
-    const t = std.mem.trimStart(u8, line, " \t");
-    if (!std.mem.startsWith(u8, t, "test \"")) return null;
-    const end = std.mem.lastIndexOf(u8, t, "\" {") orelse return null;
-    if (end < 6) return null;
-    return t[6..end];
+fn loadSigners(arena: std.mem.Allocator, io: std.Io, root: std.Io.Dir) !?[]const Signer {
+    const text = root.readFileAlloc(io, "design/SIGNERS", arena, .limited(1 << 16)) catch return null;
+    var out: std.ArrayList(Signer) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        try out.append(arena, .{ .login = line[0..sp], .name = std.mem.trim(u8, line[sp + 1 ..], " \t") });
+    }
+    return out.items;
 }
 
-/// A proposal with an issue. The baseline (id 0) has none, so it keeps its
-/// slug everywhere.
-fn filed(p: Proposal) bool {
-    return if (p.id) |id| id != 0 else false;
+fn gitFiles(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator) ![]const []const u8 {
+    const out = try run(gpa, io, arena, &.{ "git", "ls-files" });
+    var list: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, out, '\n');
+    while (it.next()) |f| try list.append(arena, f);
+    return list.items;
 }
 
-fn label(p: Proposal, buf: []u8) []const u8 {
-    if (!filed(p)) return p.slug;
-    return p.name(buf);
+/// Local branches and origin's, by name, with the age of their last commit.
+fn gitBranches(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator) !std.StringHashMapUnmanaged(i64) {
+    const out = try run(gpa, io, arena, &.{ "git", "for-each-ref", "--format=%(refname) %(committerdate:unix)", "refs/heads", "refs/remotes/origin" });
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var map: std.StringHashMapUnmanaged(i64) = .empty;
+    var it = std.mem.tokenizeScalar(u8, out, '\n');
+    while (it.next()) |line| {
+        const sp = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+        const ref = line[0..sp];
+        const name = if (std.mem.startsWith(u8, ref, "refs/heads/")) ref["refs/heads/".len..] else if (std.mem.startsWith(u8, ref, "refs/remotes/origin/")) ref["refs/remotes/origin/".len..] else continue;
+        if (std.mem.eql(u8, name, "HEAD")) continue;
+        const when = std.fmt.parseInt(i64, line[sp + 1 ..], 10) catch continue;
+        const age = now - when;
+        const e = try map.getOrPut(arena, name);
+        if (!e.found_existing or age < e.value_ptr.*) e.value_ptr.* = age;
+    }
+    return map;
+}
+
+fn fixtureBranches(arena: std.mem.Allocator, io: std.Io, root: std.Io.Dir) !?std.StringHashMapUnmanaged(i64) {
+    const text = root.readFileAlloc(io, ".branches", arena, .limited(1 << 16)) catch return null;
+    var map: std.StringHashMapUnmanaged(i64) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var parts = std.mem.tokenizeScalar(u8, line, ' ');
+        const name = parts.next() orelse continue;
+        const days = std.fmt.parseInt(i64, parts.next() orelse continue, 10) catch continue;
+        try map.put(arena, name, days * std.time.s_per_day);
+    }
+    return map;
+}
+
+fn walkFiles(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    var top = try root.openDir(io, ".", .{ .iterate = true });
+    defer top.close(io);
+    var w = try top.walk(gpa);
+    defer w.deinit();
+    while (try w.next(io)) |e| {
+        if (e.kind != .file) continue;
+        try list.append(arena, try arena.dupe(u8, e.path));
+    }
+    return list.items;
 }
 
 // ---- check ----
@@ -115,61 +191,99 @@ fn label(p: Proposal, buf: []u8) []const u8 {
 /// Validates everything `check` covers. Errors and warnings go to `diags`.
 fn check(r: Repo, diags: *Diags) !void {
     const ps = r.ps;
-    var buf: [64]u8 = undefined;
-    var fcp: std.ArrayList([]const u8) = .empty;
+    var buf: [256]u8 = undefined;
 
     for (ps, 0..) |p, i| {
         if (fm.validSlug(p.slug)) {
             const want = p.expectedFile(&buf);
             if (!std.mem.eql(u8, want, p.file)) diags.err("design/{s}: should be named design/{s}", .{ p.file, want });
-            if (p.id == null and std.ascii.isDigit(p.slug[0])) diags.warn("design/{s}: slug `{s}` starts with a digit, so the draft sorts among the filed proposals; start it with a letter", .{ p.file, p.slug });
         }
         for (ps[0..i]) |q| {
             if (p.slug.len > 0 and std.mem.eql(u8, p.slug, q.slug)) diags.err("design/{s}: slug `{s}` is also used by design/{s}", .{ p.file, p.slug, q.file });
-            if (p.id != null and p.id == q.id) diags.err("design/{s}: id {d} is also used by design/{s}", .{ p.file, p.id.?, q.file });
+            if (p.issue != null and p.issue == q.issue) diags.err("design/{s}: issue #{d} is also design/{s}'s", .{ p.file, p.issue.?, q.file });
         }
-        if (p.status != .draft and p.id == null) diags.err("design/{s}: status `{t}` needs an id; file it first (zig build design -- file {s})", .{ p.file, p.status, p.slug });
+        if (p.status == .proposed and p.issue == null) diags.err("design/{s}: proposed, but it has no `issue`; zig build design -- propose {s} opens one", .{ p.file, p.slug });
+        if (p.issue == null and p.slug.len > 0 and std.ascii.isDigit(p.slug[0])) diags.err("design/{s}: slug `{s}` starts with a digit; start it with a letter", .{ p.file, p.slug });
         if (p.status == .superseded and p.superseded_by == null) diags.err("design/{s}: superseded, but `superseded-by` isn't set", .{p.file});
         if (p.status != .superseded and p.superseded_by != null) diags.err("design/{s}:{d}: `superseded-by` is set, but the status is `{t}`", .{ p.file, p.superseded_line, p.status });
         if (p.status == .declined and !hasSection(p.body, "Declined")) diags.err("design/{s}: declined, but it has no `## Declined` section giving the reason", .{p.file});
-        if (p.status.inFcp()) try fcp.append(r.arena, p.file);
 
+        // Branches.
+        if (p.status == .implemented and !(p.branch.len == 1 and p.onMain()))
+            diags.err("design/{s}: implemented, so `branch` must be [main]", .{p.file});
+        if (p.status != .implemented and p.onMain())
+            diags.err("design/{s}:{d}: `branch` has main, but the status is `{t}`; main is only for implemented proposals", .{ p.file, p.branch_line, p.status });
+        if (r.branches) |bs| for (p.branch) |b| {
+            if (std.mem.eql(u8, b, "main")) continue;
+            if (!bs.contains(b)) diags.warn("design/{s}:{d}: branch `{s}` wasn't found; fetch it, or take it out of `branch` if it's gone", .{ p.file, p.branch_line, b });
+        };
+
+        // Done criteria.
+        if (hasSection(p.body, "Done when")) diags.err("design/{s}: `## Done when` is now `## Done criteria`, a checklist", .{p.file});
+        if (try fm.doneCriteria(r.arena, p.body)) |items| {
+            const body_line = bodyStart(p);
+            var settled: usize = 0;
+            for (items) |item| switch (item.mark) {
+                .none => diags.err("design/{s}:{d}: a Done criteria item must be a checkbox: `- [ ]`, `- [x]`, or `- [~] Waived: why`", .{ p.file, body_line + item.line }),
+                .open => if (p.status == .implemented) diags.err("design/{s}:{d}: implemented, but this Done criteria item isn't checked; check it, or waive it with `- [~] Waived: why`", .{ p.file, body_line + item.line }),
+                .done, .waived => settled += 1,
+            };
+            if ((p.status == .proposed or p.status == .accepted) and items.len > 0 and settled == items.len)
+                diags.warn("design/{s}: every Done criteria item is checked or waived, but it's `{t}`; is it implemented?", .{ p.file, p.status });
+        }
+
+        // References.
         for (p.depends) |ref| {
+            if (fm.isId(ref)) {
+                diags.err("design/{s}:{d}: depends on `{s}`; refer to proposals by slug{s}", .{ p.file, p.depends_line, ref, try bySlug(r, ref) });
+                continue;
+            }
             const j = r.resolve(ref) orelse {
                 diags.err("design/{s}:{d}: depends on `{s}`, which isn't a proposal", .{ p.file, p.depends_line, ref });
                 continue;
             };
             const q = ps[j];
             if (j == i) diags.err("design/{s}:{d}: depends on itself", .{ p.file, p.depends_line });
-            if (!fm.isId(ref) and filed(q)) diags.warn("design/{s}:{d}: `{s}` is #{d} now; zig build design -- fix rewrites it", .{ p.file, p.depends_line, ref, q.id.? });
-            if (p.status == .implemented and q.status != .implemented) diags.err("design/{s}: implemented, but its dependency {s} is `{t}`", .{ p.file, label(q, &buf), q.status });
-            if (p.status == .accepted and q.status == .declined) diags.err("design/{s}: accepted, but it depends on {s}, which was declined", .{ p.file, label(q, &buf) });
+            if (p.status == .implemented and q.status != .implemented) diags.err("design/{s}: implemented, but its dependency {s} is `{t}`", .{ p.file, q.slug, q.status });
+            if (p.status == .accepted and q.status == .declined) diags.err("design/{s}: accepted, but it depends on {s}, which was declined", .{ p.file, q.slug });
         }
         if (p.superseded_by) |ref| {
-            if (r.resolve(ref)) |j| {
-                if (!fm.isId(ref) and filed(ps[j])) diags.warn("design/{s}:{d}: `{s}` is #{d} now; zig build design -- fix rewrites it", .{ p.file, p.superseded_line, ref, ps[j].id.? });
-            } else diags.err("design/{s}:{d}: superseded by `{s}`, which isn't a proposal", .{ p.file, p.superseded_line, ref });
+            if (fm.isId(ref)) {
+                diags.err("design/{s}:{d}: superseded by `{s}`; refer to proposals by slug{s}", .{ p.file, p.superseded_line, ref, try bySlug(r, ref) });
+            } else if (r.resolve(ref) == null) diags.err("design/{s}:{d}: superseded by `{s}`, which isn't a proposal", .{ p.file, p.superseded_line, ref });
         }
-    }
 
-    if (fcp.items.len > max_fcp) {
-        const list = try std.mem.join(r.arena, ", ", fcp.items);
-        diags.err("{d} proposals are in a final comment period, more than {d}: {s}", .{ fcp.items.len, max_fcp, list });
+        // Signatures.
+        const path = try std.fmt.allocPrint(r.arena, "design/{s}", .{p.file});
+        checkSignatures(r, diags, path, p.body, bodyStart(p));
     }
+    if (r.root.readFileAlloc(r.io, "SPEC.md", r.arena, .limited(1 << 24))) |spec| {
+        checkSignatures(r, diags, "SPEC.md", spec, 0);
+    } else |_| {}
 
     try checkCycles(r, diags);
 
     for (r.cases) |c| {
         const canonical = try fm.canonicalTags(r.arena, c.raw);
-        if (!std.mem.eql(u8, canonical, c.raw)) diags.err("{s}:{d}: write the tags as [{s}], so zig build proposal -Dp finds them; zig build design -- fix rewrites them", .{ c.file, c.line, canonical });
+        if (!std.mem.eql(u8, canonical, c.raw)) diags.err("{s}:{d}: write the tags as [{s}], so zig build proposal -Dp finds them", .{ c.file, c.line, canonical });
     }
     for (r.cases) |c| for (c.tags) |t| {
-        const j = r.resolve(t) orelse {
-            diags.err("{s}:{d}: tag `{s}` isn't a proposal", .{ c.file, c.line, t });
-            continue;
-        };
-        if (!fm.isId(t) and filed(ps[j])) diags.warn("{s}:{d}: tag `{s}` is #{d} now; zig build design -- fix rewrites it", .{ c.file, c.line, t, ps[j].id.? });
+        if (fm.isId(t)) {
+            diags.err("{s}:{d}: tag `{s}`; tag cases with a proposal's slug{s}", .{ c.file, c.line, t, try bySlug(r, t) });
+        } else if (r.resolve(t) == null) diags.err("{s}:{d}: tag `{s}` isn't a proposal", .{ c.file, c.line, t });
     };
+
+    try checkLinks(r, diags);
+}
+
+/// `, `slug`` for a number that's some proposal's id, for messages.
+fn bySlug(r: Repo, ref: []const u8) ![]const u8 {
+    const j = r.resolve(ref) orelse return "";
+    return std.fmt.allocPrint(r.arena, " (#{s} is `{s}`)", .{ ref, r.ps[j].slug });
+}
+
+fn bodyStart(p: Proposal) u32 {
+    return p.body_offset;
 }
 
 /// Reports each dependency cycle once, as a path.
@@ -189,39 +303,188 @@ fn visit(r: Repo, diags: *Diags, color: []u8, path: []usize, depth: usize, i: us
         if (j == i) continue; // reported as "depends on itself"
         if (color[j] == 1) {
             var s: std.ArrayList(u8) = .empty;
-            var buf: [64]u8 = undefined;
             const start = std.mem.indexOfScalar(usize, path[0 .. depth + 1], j).?;
-            for (path[start .. depth + 1]) |k| try s.print(r.arena, "{s} -> ", .{label(r.ps[k], &buf)});
-            try s.appendSlice(r.arena, label(r.ps[j], &buf));
+            for (path[start .. depth + 1]) |k| try s.print(r.arena, "{s} -> ", .{r.ps[k].slug});
+            try s.appendSlice(r.arena, r.ps[j].slug);
             diags.err("dependency cycle: {s}", .{s.items});
         } else if (color[j] == 0) try visit(r, diags, color, path, depth + 1, j);
     }
     color[i] = 2;
 }
 
+// ---- signatures ----
+
+const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+const Signature = struct {
+    /// `Nov 11, 2026`.
+    date: []const u8,
+    name: []const u8,
+};
+
+/// Parses a signature line in either form: `Mon D, YYYY · Name, h.d.a.`
+/// with h.d.a. as an `<abbr>` or as a link to README's Signature section.
+fn parseSignature(line: []const u8) ?Signature {
+    const sep = " · ";
+    const at = std.mem.indexOf(u8, line, sep) orelse return null;
+    const date = line[0..at];
+    if (!validSigDate(date)) return null;
+    const rest = line[at + sep.len ..];
+    // The abbr's title has commas of its own, so find the mark, not a comma.
+    const comma = std.mem.indexOf(u8, rest, ", <abbr ") orelse std.mem.lastIndexOf(u8, rest, ", ") orelse return null;
+    const name = rest[0..comma];
+    const mark = rest[comma + 2 ..];
+    if (name.len == 0) return null;
+    const link = std.mem.eql(u8, mark, "[h.d.a.](README.md#signature)") or std.mem.eql(u8, mark, "[h.d.a.](design/README.md#signature)");
+    const abbr = std.mem.startsWith(u8, mark, "<abbr title=\"") and std.mem.endsWith(u8, mark, "\">h.d.a.</abbr>");
+    if (!link and !abbr) return null;
+    return .{ .date = date, .name = name };
+}
+
+fn validSigDate(d: []const u8) bool {
+    if (d.len < 11) return false;
+    var month_ok = false;
+    for (months) |m| month_ok = month_ok or std.mem.eql(u8, d[0..3], m);
+    if (!month_ok or d[3] != ' ') return false;
+    const comma = std.mem.indexOfScalar(u8, d, ',') orelse return false;
+    const day = std.fmt.parseInt(u8, d[4..comma], 10) catch return false;
+    if (day < 1 or day > 31 or d[4] == '0') return false;
+    if (comma + 2 > d.len or d[comma + 1] != ' ') return false;
+    const year = d[comma + 2 ..];
+    if (year.len != 4) return false;
+    _ = std.fmt.parseInt(u16, year, 10) catch return false;
+    return true;
+}
+
+/// `Nov 11, 2026` from `2026-11-11`.
+fn sigDate(arena: std.mem.Allocator, iso: []const u8) ![]const u8 {
+    const month = try std.fmt.parseInt(u8, iso[5..7], 10);
+    const day = try std.fmt.parseInt(u8, iso[8..10], 10);
+    return std.fmt.allocPrint(arena, "{s} {d}, {s}", .{ months[month - 1], day, iso[0..4] });
+}
+
+/// The signature lines of a doc: lines between its `# ` title and its
+/// first `## ` heading that mention h.d.a. Each is a candidate, valid or not.
+fn preambleLines(text: []const u8, out: anytype) void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var lineno: u32 = 0;
+    var titled = false;
+    while (lines.next()) |raw| {
+        lineno += 1;
+        const line = std.mem.trimEnd(u8, raw, " \r");
+        if (std.mem.startsWith(u8, line, "## ")) return;
+        if (std.mem.startsWith(u8, line, "# ")) {
+            titled = true;
+            continue;
+        }
+        if (titled and std.mem.indexOf(u8, line, "h.d.a.") != null) out.found(lineno, line);
+    }
+}
+
+fn checkSignatures(r: Repo, diags: *Diags, path: []const u8, text: []const u8, offset: u32) void {
+    const V = struct {
+        r: Repo,
+        diags: *Diags,
+        path: []const u8,
+        offset: u32,
+        fn found(v: @This(), lineno: u32, line: []const u8) void {
+            const sig = parseSignature(line) orelse {
+                v.diags.err("{s}:{d}: not a signature line: write `Mon D, YYYY · Full Name, [h.d.a.](README.md#signature)`, or use zig build design -- sign", .{ v.path, v.offset + lineno });
+                return;
+            };
+            const signers = v.r.signers orelse return;
+            for (signers) |s| if (std.mem.eql(u8, s.name, sig.name)) return;
+            v.diags.err("{s}:{d}: signed by `{s}`, who isn't in design/SIGNERS", .{ v.path, v.offset + lineno, sig.name });
+        }
+    };
+    preambleLines(text, V{ .r = r, .diags = diags, .path = path, .offset = offset });
+}
+
+// ---- links ----
+
+/// Fails on a link to a file under design/ that doesn't exist: `design/<name>.md`
+/// anywhere, and `](<name>.md` within design/. Generated and vendored files
+/// are left out, as are names with capitals that aren't README, TEMPLATE,
+/// or STATUS, which can't be slugs (`design/NNNN-shortname.md`).
+fn checkLinks(r: Repo, diags: *Diags) !void {
+    for (r.files) |path| {
+        if (std.mem.startsWith(u8, path, "third_party/") or std.mem.startsWith(u8, path, "tools/testdata/") or
+            std.mem.startsWith(u8, path, ".git/") or std.mem.eql(u8, path, status_path)) continue;
+        const text = r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 22)) catch continue;
+        if (std.mem.indexOfScalar(u8, text, 0) != null) continue; // binary
+        const in_design = std.mem.startsWith(u8, path, "design/");
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        var lineno: u32 = 0;
+        while (lines.next()) |line| {
+            lineno += 1;
+            var pos: usize = 0;
+            while (std.mem.indexOfPos(u8, line, pos, "design/")) |at| {
+                pos = at + "design/".len;
+                if (at > 0 and (std.ascii.isAlphanumeric(line[at - 1]) or line[at - 1] == '-' or line[at - 1] == '_')) continue;
+                if (docName(line[pos..])) |name| try expectDoc(r, diags, path, lineno, name);
+            }
+            if (!in_design) continue;
+            pos = 0;
+            while (std.mem.indexOfPos(u8, line, pos, "](")) |at| {
+                pos = at + 2;
+                if (docName(line[pos..])) |name| try expectDoc(r, diags, path, lineno, name);
+            }
+        }
+    }
+}
+
+/// `x` from `x.md...` when x is a plain name (letters, digits, dashes).
+fn docName(s: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < s.len and (std.ascii.isAlphanumeric(s[i]) or s[i] == '-')) i += 1;
+    if (i == 0 or !std.mem.startsWith(u8, s[i..], ".md")) return null;
+    const after = i + 3;
+    if (after < s.len and (std.ascii.isAlphanumeric(s[after]) or s[after] == '-' or s[after] == '_')) return null;
+    return s[0..i];
+}
+
+fn expectDoc(r: Repo, diags: *Diags, path: []const u8, lineno: u32, name: []const u8) !void {
+    for ([_][]const u8{ "README", "TEMPLATE", "STATUS" }) |n| if (std.mem.eql(u8, name, n)) return;
+    for (name) |c| if (std.ascii.isUpper(c)) return;
+    for (r.ps) |p| if (std.mem.eql(u8, p.file[0 .. p.file.len - 3], name)) return;
+    const msg_path = try std.fmt.allocPrint(r.arena, "design/{s}.md", .{name});
+    diags.err("{s}:{d}: links to {s}, which doesn't exist", .{ path, lineno, msg_path });
+}
+
 // ---- list, ready, graph, status ----
 
-/// What a proposal is waiting for: `ready` for an accepted proposal with
-/// everything it depends on implemented, else the unimplemented ones.
+/// What a proposal is doing or waiting for: in progress or stalled on its
+/// branch, ready for an accepted proposal with no branch and everything it
+/// depends on implemented, or the unimplemented dependencies.
 fn state(r: Repo, p: Proposal, out: *std.ArrayList(u8)) !void {
-    switch (p.status) {
-        .implemented, .declined, .superseded => return,
-        else => {},
+    if (p.status.closed()) return;
+    for (p.branch) |b| {
+        if (out.items.len > 0) try out.appendSlice(r.arena, "; ");
+        const age = if (r.branches) |bs| bs.get(b) else null;
+        if (age) |a| {
+            const days = @divFloor(a, std.time.s_per_day);
+            if (days > stalled_days) {
+                try out.print(r.arena, "stalled on {s} ({d} days)", .{ b, days });
+            } else try out.print(r.arena, "in progress on {s}", .{b});
+        } else if (r.branches != null) {
+            try out.print(r.arena, "stalled: {s} not found", .{b});
+        } else try out.print(r.arena, "on {s}", .{b});
     }
     var first = true;
     for (p.depends) |ref| {
         const j = r.resolve(ref) orelse continue;
         const q = r.ps[j];
         if (q.status == .implemented) continue;
+        if (first and out.items.len > 0) try out.appendSlice(r.arena, "; ");
         try out.appendSlice(r.arena, if (first) "needs " else ", ");
         try out.appendSlice(r.arena, q.slug);
         first = false;
     }
-    if (first and p.status == .accepted) try out.appendSlice(r.arena, "ready");
+    if (first and p.status == .accepted and p.branch.len == 0) try out.appendSlice(r.arena, "ready");
 }
 
 fn isReady(r: Repo, p: Proposal) bool {
-    if (p.status != .accepted) return false;
+    if (p.status != .accepted or p.branch.len > 0) return false;
     for (p.depends) |ref| {
         const j = r.resolve(ref) orelse return false;
         if (r.ps[j].status != .implemented) return false;
@@ -235,9 +498,9 @@ fn hasArea(p: Proposal, area: []const u8) bool {
 }
 
 fn listCmd(r: Repo, w: *std.Io.Writer, status: ?Status, area: ?[]const u8, ready_only: bool) !void {
-    const Row = struct { id: []const u8, slug: []const u8, status: []const u8, state: []const u8, title: []const u8 };
+    const Row = struct { slug: []const u8, id: []const u8, status: []const u8, state: []const u8, title: []const u8 };
     var rows: std.ArrayList(Row) = .empty;
-    try rows.append(r.arena, .{ .id = "ID", .slug = "SLUG", .status = "STATUS", .state = "STATE", .title = "TITLE" });
+    try rows.append(r.arena, .{ .slug = "SLUG", .id = "ISSUE", .status = "STATUS", .state = "STATE", .title = "TITLE" });
     for (r.ps) |p| {
         if (status) |s| if (p.status != s) continue;
         if (area) |a| if (!hasArea(p, a)) continue;
@@ -245,8 +508,8 @@ fn listCmd(r: Repo, w: *std.Io.Writer, status: ?Status, area: ?[]const u8, ready
         var st: std.ArrayList(u8) = .empty;
         try state(r, p, &st);
         try rows.append(r.arena, .{
-            .id = if (p.id) |id| try std.fmt.allocPrint(r.arena, "{d}", .{id}) else "-",
             .slug = p.slug,
+            .id = if (p.issue) |id| try std.fmt.allocPrint(r.arena, "#{d}", .{id}) else "-",
             .status = @tagName(p.status),
             .state = if (st.items.len > 0) st.items else "-",
             .title = p.title,
@@ -254,10 +517,10 @@ fn listCmd(r: Repo, w: *std.Io.Writer, status: ?Status, area: ?[]const u8, ready
     }
     var widths = [_]usize{0} ** 4;
     for (rows.items) |row| {
-        for ([_][]const u8{ row.id, row.slug, row.status, row.state }, 0..) |cell, k| widths[k] = @max(widths[k], cell.len);
+        for ([_][]const u8{ row.slug, row.id, row.status, row.state }, 0..) |cell, k| widths[k] = @max(widths[k], cell.len);
     }
     for (rows.items) |row| {
-        for ([_][]const u8{ row.id, row.slug, row.status, row.state }, 0..) |cell, k| {
+        for ([_][]const u8{ row.slug, row.id, row.status, row.state }, 0..) |cell, k| {
             try w.writeAll(cell);
             try w.splatByteAll(' ', widths[k] - cell.len + 2);
         }
@@ -283,16 +546,12 @@ fn graph(r: Repo, w: *std.Io.Writer) !void {
     for (r.ps) |p| {
         if (p.slug.len == 0) continue;
         const class = switch (p.status) {
-            .draft, .@"likely-accept", .@"likely-decline", .hold => "draft",
+            .draft, .proposed, .hold => "draft",
             .accepted => "accepted",
             .implemented => "implemented",
             .declined, .superseded => "closed",
         };
-        const id = try nodeId(r.arena, p.slug);
-        // #35; is Mermaid's escape for #.
-        if (filed(p)) {
-            try w.print("  {s}[\"#35;{d} {s}<br/>{t}\"]:::{s}\n", .{ id, p.id.?, p.slug, p.status, class });
-        } else try w.print("  {s}[\"{s}<br/>{t}\"]:::{s}\n", .{ id, p.slug, p.status, class });
+        try w.print("  {s}[\"{s}<br/>{t}\"]:::{s}\n", .{ try nodeId(r.arena, p.slug), p.slug, p.status, class });
     }
     for (r.ps) |p| for (p.depends) |ref| {
         const j = r.resolve(ref) orelse continue;
@@ -313,16 +572,18 @@ fn statusFile(r: Repo) ![]const u8 {
         \\
         \\# Proposal status
         \\
-        \\Every proposal under [design/](README.md), its status, and ready or what it needs. `zig build design -- list` prints the same from any checkout.
+        \\Every proposal under [design/](README.md), in the order they were written, with its issue, its status, and whether it's ready, in progress, stalled, or what it needs. `zig build design -- list` prints the same from any checkout.
         \\
-        \\| Proposal | Status | State | Title |
-        \\| --- | --- | --- | --- |
+        \\| Proposal | Issue | Status | State | Title |
+        \\| --- | --- | --- | --- | --- |
         \\
     );
     for (r.ps) |p| {
         var st: std.ArrayList(u8) = .empty;
         try state(r, p, &st);
-        try w.print("| [{s}]({s}) | {t} | {s} | {s} |\n", .{ p.slug, p.file, p.status, st.items, p.title });
+        var issue: []const u8 = "";
+        if (p.issue) |id| issue = try std.fmt.allocPrint(r.arena, "[#{d}](../../../issues/{d})", .{ id, id });
+        try w.print("| [{s}]({s}) | {s} | {t} | {s} | {s} |\n", .{ p.slug, p.file, issue, p.status, st.items, p.title });
     }
     try w.writeAll("\n```mermaid\n");
     try graph(r, w);
@@ -332,126 +593,6 @@ fn statusFile(r: Repo) ![]const u8 {
 
 fn statusCmd(r: Repo) !void {
     try r.root.writeFile(r.io, .{ .sub_path = status_path, .data = try statusFile(r) });
-}
-
-// ---- fix ----
-
-/// Rewrites references to proposals in `which` (by index) that are written
-/// as slugs, in frontmatter and test tags, to their numbers. With `which`
-/// null, every filed proposal. Returns the files it changed.
-fn fix(r: Repo, which: ?usize) ![]const []const u8 {
-    var changed: std.ArrayList([]const u8) = .empty;
-    const Ctx = struct {
-        r: Repo,
-        which: ?usize,
-        fn map(c: @This(), ref: []const u8) ?[]const u8 {
-            if (fm.isId(ref)) return null;
-            const j = c.r.resolve(ref) orelse return null;
-            if (c.which) |w| if (w != j) return null;
-            const p = c.r.ps[j];
-            if (!filed(p)) return null;
-            return std.fmt.allocPrint(c.r.arena, "{d}", .{p.id.?}) catch null;
-        }
-    };
-    const ctx: Ctx = .{ .r = r, .which = which };
-
-    for (r.ps) |p| {
-        const path = try std.fmt.allocPrint(r.arena, "design/{s}", .{p.file});
-        const text = try r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 22));
-        if (try rewriteFrontmatter(r.arena, text, ctx)) |out| {
-            try r.root.writeFile(r.io, .{ .sub_path = path, .data = out });
-            try changed.append(r.arena, path);
-        }
-    }
-    var seen: std.ArrayList([]const u8) = .empty;
-    for (r.cases) |c| {
-        var dup = false;
-        for (seen.items) |s| dup = dup or std.mem.eql(u8, s, c.file);
-        if (dup) continue;
-        try seen.append(r.arena, c.file);
-        const text = try r.root.readFileAlloc(r.io, c.file, r.arena, .limited(1 << 24));
-        if (try rewriteTags(r.arena, text, ctx)) |out| {
-            try r.root.writeFile(r.io, .{ .sub_path = c.file, .data = out });
-            try changed.append(r.arena, c.file);
-        }
-    }
-    return changed.items;
-}
-
-/// Rewrites a list or scalar of references; null if nothing changed.
-fn mapRefs(arena: std.mem.Allocator, items: []const u8, ctx: anytype) !?[]const u8 {
-    if (std.mem.trim(u8, items, " \t").len == 0) return null;
-    var out: std.ArrayList(u8) = .empty;
-    var any = false;
-    var it = std.mem.splitScalar(u8, items, ',');
-    var first = true;
-    while (it.next()) |raw| {
-        const t = std.mem.trim(u8, raw, " \t");
-        if (!first) try out.appendSlice(arena, ", ");
-        first = false;
-        if (ctx.map(t)) |m| {
-            try out.appendSlice(arena, m);
-            any = true;
-        } else try out.appendSlice(arena, t);
-    }
-    return if (any) out.items else null;
-}
-
-fn rewriteFrontmatter(arena: std.mem.Allocator, text: []const u8, ctx: anytype) !?[]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var any = false;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    var fences: u8 = 0;
-    var first = true;
-    while (lines.next()) |line| {
-        if (!first) try out.append(arena, '\n');
-        first = false;
-        const cr = std.mem.endsWith(u8, line, "\r");
-        const bare = std.mem.trimEnd(u8, line, "\r");
-        if (std.mem.eql(u8, bare, "---")) fences +|= 1;
-        // Keys and values are read as frontmatter.parse reads them.
-        if (fences == 1) if (std.mem.indexOfScalar(u8, bare, ':')) |colon| {
-            const key = bare[0..colon];
-            const value = std.mem.trim(u8, bare[colon + 1 ..], " \t");
-            const list = std.mem.eql(u8, key, "depends") and value.len >= 2 and value[0] == '[' and value[value.len - 1] == ']';
-            const scalar = std.mem.eql(u8, key, "superseded-by") and value.len > 0;
-            if (list or scalar) {
-                const items = if (list) value[1 .. value.len - 1] else value;
-                if (try mapRefs(arena, items, ctx)) |m| {
-                    if (list) try out.print(arena, "depends: [{s}]", .{m}) else try out.print(arena, "superseded-by: {s}", .{m});
-                    if (cr) try out.append(arena, '\r');
-                    any = true;
-                    continue;
-                }
-            }
-        };
-        try out.appendSlice(arena, line);
-    }
-    return if (any) out.items else null;
-}
-
-fn rewriteTags(arena: std.mem.Allocator, text: []const u8, ctx: anytype) !?[]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var any = false;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    var first = true;
-    while (lines.next()) |line| {
-        if (!first) try out.append(arena, '\n');
-        first = false;
-        if (testName(line)) |name| if (fm.testTags(name)) |tags| {
-            const mapped = try mapRefs(arena, tags, ctx);
-            const canonical = try fm.canonicalTags(arena, tags);
-            const m: ?[]const u8 = mapped orelse if (std.mem.eql(u8, canonical, tags)) null else canonical;
-            if (m) |new_tags| {
-                const start = @intFromPtr(tags.ptr) - @intFromPtr(line.ptr);
-                try out.print(arena, "{s}{s}{s}", .{ line[0..start], new_tags, line[start + tags.len ..] });
-                any = true;
-                continue;
-            }
-        };
-        try out.appendSlice(arena, line);
-    }
-    return if (any) out.items else null;
 }
 
 // ---- new ----
@@ -465,6 +606,14 @@ fn today(io: std.Io) [10]u8 {
     var out: [10]u8 = undefined;
     _ = std.fmt.bufPrint(&out, "{d:0>4}-{d:0>2}-{d:0>2}", .{ yd.year, md.month.numeric(), @as(u8, md.day_index) + 1 }) catch unreachable;
     return out;
+}
+
+/// The local date where `date` exists, else UTC.
+fn localToday(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator) ![]const u8 {
+    const local = run(gpa, io, arena, &.{ "date", "+%Y-%m-%d" }) catch "";
+    const t = std.mem.trim(u8, local, " \n");
+    if (t.len == 10) return t;
+    return arena.dupe(u8, &today(io));
 }
 
 /// The template with its frontmatter replaced and its title filled in.
@@ -483,6 +632,7 @@ fn fromTemplate(arena: std.mem.Allocator, template: []const u8, slug: []const u8
         \\authors: [{s}]
         \\depends: []
         \\areas: []
+        \\branch: []
         \\---
         \\{s}
     , .{ slug, title, date, author, filled });
@@ -506,7 +656,7 @@ fn newCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
     }
     const s = slug orelse fail("new: which slug?\n{s}", .{usage});
     if (!fm.validSlug(s)) fail("new: bad slug `{s}`: lowercase words of letters and digits joined by dashes, not all digits", .{s});
-    if (std.ascii.isDigit(s[0])) fail("new: bad slug `{s}`: start it with a letter, so the draft's file sorts after the filed ones", .{s});
+    if (std.ascii.isDigit(s[0])) fail("new: bad slug `{s}`: start it with a letter", .{s});
     if (r.resolve(s) != null) fail("new: `{s}` is already a proposal", .{s});
     const t = title orelse try titleFromSlug(r.arena, s);
     if (fm.plainScalarProblem(t)) |why| fail("new: the title can't be used as is: {s}, which YAML would read differently", .{why});
@@ -514,11 +664,7 @@ fn newCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
         fail("new: couldn't get your GitHub login from gh; pass --author LOGIN", .{}));
     const template = r.root.readFileAlloc(r.io, "design/TEMPLATE.md", r.arena, .limited(1 << 20)) catch |err|
         fail("new: design/TEMPLATE.md: {t}", .{err});
-    // The local date where `date` exists, else UTC.
-    var utc = today(r.io);
-    const local = run(gpa, r.io, r.arena, &.{ "date", "+%Y-%m-%d" }) catch "";
-    const date = if (std.mem.trim(u8, local, " \n").len == 10) std.mem.trim(u8, local, " \n") else &utc;
-    const text = try fromTemplate(r.arena, template, s, t, std.mem.trim(u8, a, " \n"), date);
+    const text = try fromTemplate(r.arena, template, s, t, std.mem.trim(u8, a, " \n"), try localToday(gpa, r.io, r.arena));
     const path = try std.fmt.allocPrint(r.arena, "design/{s}.md", .{s});
     try r.root.writeFile(r.io, .{ .sub_path = path, .data = text, .flags = .{ .exclusive = true } });
     std.debug.print("{s}\n", .{path});
@@ -531,7 +677,7 @@ fn titleFromSlug(arena: std.mem.Allocator, slug: []const u8) ![]const u8 {
     return out;
 }
 
-// ---- file ----
+// ---- propose ----
 
 /// Whether the body has a `## <name>` heading.
 fn hasSection(body: []const u8, name: []const u8) bool {
@@ -551,13 +697,16 @@ fn abstract(body: []const u8) []const u8 {
     return std.mem.trim(u8, rest[0..end], " \n");
 }
 
-/// Inserts `id: N` before the `slug:` line of the frontmatter.
-fn withId(arena: std.mem.Allocator, text: []const u8, id: u32) ![]const u8 {
+/// Sets `issue: N` (before the `slug:` line) and `status: proposed` in the
+/// frontmatter.
+fn proposedText(arena: std.mem.Allocator, text: []const u8, id: u32) ![]const u8 {
     const at = std.mem.indexOf(u8, text, "\nslug:") orelse return error.NoSlugLine;
-    return std.fmt.allocPrint(arena, "{s}\nid: {d}{s}", .{ text[0..at], id, text[at..] });
+    const with_id = try std.fmt.allocPrint(arena, "{s}\nissue: {d}{s}", .{ text[0..at], id, text[at..] });
+    const st = std.mem.indexOf(u8, with_id, "\nstatus: draft\n") orelse return error.NotDraft;
+    return std.fmt.allocPrint(arena, "{s}\nstatus: proposed\n{s}", .{ with_id[0..st], with_id[st + "\nstatus: draft\n".len ..] });
 }
 
-fn fileCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
+fn proposeCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
     var slug: ?[]const u8 = null;
     var yes = false;
     var dry_run = false;
@@ -571,137 +720,291 @@ fn fileCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
             dry_run = true;
         } else if (std.mem.eql(u8, a, "--issue") and k + 1 < args.len) {
             k += 1;
-            existing = std.fmt.parseInt(u32, args[k], 10) catch fail("file: --issue needs an issue number, not `{s}`", .{args[k]});
-            if (existing == 0) fail("file: --issue needs an issue number, not 0", .{});
+            existing = std.fmt.parseInt(u32, args[k], 10) catch fail("propose: --issue needs an issue number, not `{s}`", .{args[k]});
+            if (existing == 0) fail("propose: --issue needs an issue number, not 0", .{});
         } else if (slug == null and a.len > 0 and a[0] != '-') {
             slug = a;
-        } else fail("file: unexpected `{s}`\n{s}", .{ a, usage });
+        } else fail("propose: unexpected `{s}`\n{s}", .{ a, usage });
     }
-    const s = slug orelse fail("file: which slug?\n{s}", .{usage});
-    const i = r.resolve(s) orelse fail("file: `{s}` isn't a proposal", .{s});
+    const s = slug orelse fail("propose: which slug?\n{s}", .{usage});
+    const i = r.resolve(s) orelse fail("propose: `{s}` isn't a proposal", .{s});
     const p = r.ps[i];
-    if (fm.isId(s) or p.id != null) fail("file: {s} is already filed", .{s});
-    if (p.status != .draft) fail("file: {s} is `{t}`, not a draft", .{ s, p.status });
-    if (!p.ok) fail("file: design/{s} has frontmatter errors; run zig build design -- check", .{p.file});
+    if (p.issue) |id| fail("propose: {s} already has an issue, #{d}", .{ p.slug, id });
+    if (p.status != .draft) fail("propose: {s} is `{t}`, not a draft", .{ p.slug, p.status });
+    if (!p.ok) fail("propose: design/{s} has frontmatter errors; run zig build design -- check", .{p.file});
     const summary = abstract(p.body);
-    if (summary.len == 0) fail("file: design/{s} has no Abstract to put in the issue", .{p.file});
+    if (summary.len == 0) fail("propose: design/{s} has no Abstract to put in the issue", .{p.file});
     const title = try std.fmt.allocPrint(r.arena, "proposal: {s}", .{p.title});
     if (existing) |id| {
-        if (r.resolve(try std.fmt.allocPrint(r.arena, "{d}", .{id}))) |j| fail("file: #{d} is already design/{s}", .{ id, r.ps[j].file });
-        std.debug.print("numbering design/{s} for the existing issue #{d}; nothing is created on GitHub\n", .{ p.file, id });
+        if (r.resolve(try std.fmt.allocPrint(r.arena, "{d}", .{id}))) |j| fail("propose: #{d} is already design/{s}", .{ id, r.ps[j].file });
+        std.debug.print("setting design/{s}'s issue to the existing # #{d}, and its status to proposed; nothing is created on GitHub\n", .{ p.file, id });
         if (dry_run) return;
-        return number(r, gpa, p, id);
+        return markProposed(r, gpa, p, id);
     }
 
     std.debug.print(
-        \\This creates a GitHub issue with gh, as the account gh is logged in as:
+        \\This opens a GitHub issue with gh, as the account gh is logged in as:
         \\
         \\  title:  {s}
         \\  label:  Proposal
         \\  body:   the Abstract of design/{s}, and a link to the file
         \\
-        \\then renames design/{s} to design/NNNN-{s}.md (NNNN is the issue number),
-        \\sets its id, rewrites references to `{s}` as the number, and commits.
+        \\then sets its issue to the issue's number and its status to proposed, and commits.
         \\
-    , .{ title, p.file, p.file, p.slug, p.slug });
+    , .{ title, p.file });
+    // A retried run, or an issue opened by hand, shouldn't get a twin. The
+    // REST API, since GraphQL isn't reachable everywhere gh is.
+    var quoted: std.ArrayList(u8) = .empty;
+    for (title) |c| {
+        if (c == '"' or c == '\\') try quoted.append(r.arena, '\\');
+        try quoted.append(r.arena, c);
+    }
+    const jq = try std.fmt.allocPrint(r.arena, ".[] | select(.title == \"{s}\") | .number", .{quoted.items});
+    if (run(gpa, r.io, r.arena, &.{ "gh", "api", "--paginate", "repos/{owner}/{repo}/issues?state=open&labels=Proposal&per_page=100", "--jq", jq })) |found| {
+        var nums = std.mem.tokenizeAny(u8, found, " \n");
+        if (nums.next()) |n| fail("propose: issue #{s} is open with the same title; use --issue {s}", .{ n, n });
+    } else |_| fail("propose: gh couldn't list the open proposal issues; is gh logged in?", .{});
     if (dry_run) {
         std.debug.print("\n--dry-run: nothing changed. The issue body would be:\n\n{s}\n", .{summary});
         return;
     }
-    if (!yes and !try confirm(r.io, "File it? [y/N] ")) fail("file: not filed", .{});
+    if (!yes and !try confirm(r.io, "Propose it? [y/N] ")) fail("propose: not proposed", .{});
 
     const repo_info = run(gpa, r.io, r.arena, &.{ "gh", "api", "repos/{owner}/{repo}", "--jq", ".html_url + \" \" + .default_branch" }) catch
-        fail("file: gh couldn't read the repository; is gh logged in?", .{});
+        fail("propose: gh couldn't read the repository; is gh logged in?", .{});
     var parts = std.mem.splitScalar(u8, std.mem.trim(u8, repo_info, " \n"), ' ');
     const html = parts.next() orelse "";
     const branch = parts.next() orelse "main";
 
-    const body_arg = try std.fmt.allocPrint(r.arena, "body={s}", .{summary});
+    const body_arg = try std.fmt.allocPrint(r.arena, "body={s}\n\nDesign doc: {s}/blob/{s}/design/{s} (on {s} once merged)", .{ summary, html, branch, p.file, branch });
     const title_arg = try std.fmt.allocPrint(r.arena, "title={s}", .{title});
     const out = run(gpa, r.io, r.arena, &.{ "gh", "api", "repos/{owner}/{repo}/issues", "-f", title_arg, "-f", body_arg, "-f", "labels[]=Proposal", "--jq", ".number" }) catch
-        fail("file: gh couldn't create the issue", .{});
-    const id = std.fmt.parseInt(u32, std.mem.trim(u8, out, " \n"), 10) catch fail("file: unexpected answer from gh: {s}", .{out});
-    std.debug.print("created issue #{d}\n", .{id});
-
-    var link_buf: [256]u8 = undefined;
-    const new_file = std.fmt.bufPrint(&link_buf, "{d:0>4}-{s}.md", .{ id, p.slug }) catch unreachable;
-    const linked = try std.fmt.allocPrint(r.arena, "body={s}\n\nDesign doc: {s}/blob/{s}/design/{s} (on {s} once merged)", .{ summary, html, branch, new_file, branch });
-    const patch_path = try std.fmt.allocPrint(r.arena, "repos/{{owner}}/{{repo}}/issues/{d}", .{id});
-    _ = run(gpa, r.io, r.arena, &.{ "gh", "api", "-X", "PATCH", patch_path, "-f", linked }) catch
-        std.debug.print("warning: couldn't add the design doc link to #{d}\n", .{id});
-    try number(r, gpa, p, id);
+        fail("propose: gh couldn't create the issue", .{});
+    const id = std.fmt.parseInt(u32, std.mem.trim(u8, out, " \n"), 10) catch fail("propose: unexpected answer from gh: {s}", .{out});
+    std.debug.print("opened issue #{d}\n", .{id});
+    try markProposed(r, gpa, p, id);
 }
 
-/// Renames a draft to its numbered file, sets its id, rewrites references
-/// to its slug as the number, and commits those files.
-fn number(r: Repo, gpa: std.mem.Allocator, p: Proposal, id: u32) !void {
-    var name_buf: [256]u8 = undefined;
-    const new_file = std.fmt.bufPrint(&name_buf, "{d:0>4}-{s}.md", .{ id, p.slug }) catch unreachable;
-    const old_path = try std.fmt.allocPrint(r.arena, "design/{s}", .{p.file});
-    const new_path = try std.fmt.allocPrint(r.arena, "design/{s}", .{new_file});
-    // A draft that was never committed has nothing to remove from git.
-    const tracked = blk: {
-        const out = run(gpa, r.io, r.arena, &.{ "git", "ls-files", "--", old_path }) catch break :blk false;
-        break :blk std.mem.trim(u8, out, " \n").len > 0;
-    };
-
-    const text = try r.root.readFileAlloc(r.io, old_path, r.arena, .limited(1 << 22));
-    try r.root.writeFile(r.io, .{ .sub_path = new_path, .data = try withId(r.arena, text, id), .flags = .{ .exclusive = true } });
-    try r.root.deleteFile(r.io, old_path);
-
-    var changed: std.ArrayList([]const u8) = .empty;
-    try changed.append(r.arena, new_path);
-    for (try relinkFiles(r, gpa, p.file, new_file)) |f| try addOnce(r.arena, &changed, f);
-
-    // Reload, so the renamed proposal resolves by its number.
-    var diags: Diags = .{ .gpa = r.arena };
-    const r2 = try Repo.load(r.arena, r.io, r.root, &diags);
-    for (try fix(r2, r2.resolve(p.slug))) |f| try addOnce(r.arena, &changed, f);
-
-    var add: std.ArrayList([]const u8) = .empty;
-    try add.appendSlice(r.arena, &.{ "git", "add", "--" });
-    try add.appendSlice(r.arena, changed.items);
-    _ = run(gpa, r.io, r.arena, add.items) catch fail("file: git add failed; the files are changed but not committed", .{});
-    if (tracked) _ = run(gpa, r.io, r.arena, &.{ "git", "rm", "-q", "--cached", "--", old_path }) catch
-        fail("file: git rm of {s} failed; the other changes are staged", .{old_path});
-    const msg = try std.fmt.allocPrint(r.arena, "design: file {s} as #{d}", .{ p.slug, id });
-    var commit: std.ArrayList([]const u8) = .empty;
-    try commit.appendSlice(r.arena, &.{ "git", "commit", "-q", "-m", msg, "--" });
-    if (tracked) try commit.append(r.arena, old_path);
-    try commit.appendSlice(r.arena, changed.items);
-    _ = run(gpa, r.io, r.arena, commit.items) catch fail("file: git commit failed; the changes are staged", .{});
+fn markProposed(r: Repo, gpa: std.mem.Allocator, p: Proposal, id: u32) !void {
+    const path = try std.fmt.allocPrint(r.arena, "design/{s}", .{p.file});
+    const text = try r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 22));
+    const out = proposedText(r.arena, text, id) catch fail("propose: design/{s} has no `status: draft` line to change", .{p.file});
+    try r.root.writeFile(r.io, .{ .sub_path = path, .data = out });
+    const msg = try std.fmt.allocPrint(r.arena, "design: propose {s} as #{d}", .{ p.slug, id });
+    _ = run(gpa, r.io, r.arena, &.{ "git", "add", "--", path }) catch fail("propose: git add failed; the file is changed but not committed", .{});
+    _ = run(gpa, r.io, r.arena, &.{ "git", "commit", "-q", "-m", msg, "--", path }) catch fail("propose: git commit failed; the change is staged", .{});
     std.debug.print("{s}\n", .{msg});
 }
 
-fn addOnce(arena: std.mem.Allocator, list: *std.ArrayList([]const u8), item: []const u8) !void {
-    for (list.items) |x| if (std.mem.eql(u8, x, item)) return;
-    try list.append(arena, item);
+// ---- log ----
+
+/// Prints each commit that changed the proposal's status, branch, or id,
+/// following renames, oldest first.
+fn logCmd(r: Repo, gpa: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
+    if (args.len != 1) fail("log: which slug?\n{s}", .{usage});
+    const i = r.resolve(args[0]) orelse fail("log: `{s}` isn't a proposal", .{args[0]});
+    const path = try std.fmt.allocPrint(r.arena, "design/{s}", .{r.ps[i].file});
+    // git can't combine --follow with --reverse, so the commits come
+    // newest first and are printed the other way round.
+    const out = run(gpa, r.io, r.arena, &.{ "git", "log", "--follow", "--date=short", "--format=@@commit %h %ad %s", "-p", "--", path }) catch
+        fail("log: git log failed", .{});
+    const text = try formatLog(r.arena, out);
+    var rows: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |row| try rows.append(r.arena, row);
+    std.mem.reverse([]const u8, rows.items);
+    for (rows.items) |row| try w.print("{s}\n", .{row});
 }
 
-/// Rewrites links to a renamed proposal in the files git tracks:
-/// `design/<old>` anywhere, and `](<old>` in design/ itself. Returns the
-/// files it changed.
-fn relinkFiles(r: Repo, gpa: std.mem.Allocator, old: []const u8, new: []const u8) ![]const []const u8 {
-    var changed: std.ArrayList([]const u8) = .empty;
-    const files = run(gpa, r.io, r.arena, &.{ "git", "ls-files" }) catch return changed.items;
-    const long_old = try std.fmt.allocPrint(r.arena, "design/{s}", .{old});
-    const long_new = try std.fmt.allocPrint(r.arena, "design/{s}", .{new});
-    const short_old = try std.fmt.allocPrint(r.arena, "]({s}", .{old});
-    const short_new = try std.fmt.allocPrint(r.arena, "]({s}", .{new});
-    var it = std.mem.tokenizeScalar(u8, files, '\n');
-    while (it.next()) |path| {
-        if (std.mem.startsWith(u8, path, "third_party/") or std.mem.startsWith(u8, path, "tools/testdata/")) continue;
-        // Only main regenerates it, after the rename merges.
-        if (std.mem.eql(u8, path, status_path)) continue;
-        const text = r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 24)) catch continue;
-        if (std.mem.indexOfScalar(u8, text, 0) != null) continue; // binary
-        var out = try std.mem.replaceOwned(u8, r.arena, text, long_old, long_new);
-        if (std.mem.startsWith(u8, path, "design/")) out = try std.mem.replaceOwned(u8, r.arena, out, short_old, short_new);
-        if (std.mem.eql(u8, out, text)) continue;
-        try r.root.writeFile(r.io, .{ .sub_path = path, .data = out });
-        try changed.append(r.arena, path);
+fn formatLog(arena: std.mem.Allocator, gitlog: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var head: []const u8 = "";
+    var changes: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, gitlog, '\n');
+    while (true) {
+        const next = lines.next();
+        if (next == null or std.mem.startsWith(u8, next.?, "@@commit ")) {
+            if (head.len > 0 and changes.items.len > 0) {
+                // `%h %ad %s` as `date hash: changes (subject)`.
+                var parts = std.mem.splitScalar(u8, head, ' ');
+                const hash = parts.next() orelse "";
+                const date = parts.next() orelse "";
+                try out.print(arena, "{s} {s}  {s}  ({s})\n", .{ date, hash, changes.items, parts.rest() });
+            }
+            const line = next orelse break;
+            head = line["@@commit ".len..];
+            changes = .empty;
+            continue;
+        }
+        const line = next.?;
+        for ([_][]const u8{ "+status: ", "+branch: ", "+issue: ", "+id: " }) |key| {
+            if (!std.mem.startsWith(u8, line, key)) continue;
+            if (changes.items.len > 0) try changes.appendSlice(arena, ", ");
+            try changes.appendSlice(arena, line[1..]);
+        }
     }
-    return changed.items;
+    return out.items;
+}
+
+// ---- close-issues ----
+
+/// Closes the open issues of implemented, declined, and superseded
+/// proposals, with a comment saying why: completed for implemented, not
+/// planned for the rest. Run by the workflow on main.
+fn closeIssuesCmd(r: Repo, gpa: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
+    var dry_run = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--dry-run")) dry_run = true else fail("close-issues: unexpected `{s}`\n{s}", .{ a, usage });
+    }
+    for (r.ps) |p| {
+        const n = p.issue orelse continue;
+        if (!p.status.closed()) continue;
+        const path = try std.fmt.allocPrint(r.arena, "repos/{{owner}}/{{repo}}/issues/{d}", .{n});
+        const open = run(gpa, r.io, r.arena, &.{ "gh", "api", path, "--jq", ".state" }) catch {
+            std.debug.print("warning: couldn't read #{d}\n", .{n});
+            continue;
+        };
+        if (!std.mem.eql(u8, std.mem.trim(u8, open, " \n"), "open")) continue;
+        const reason = if (p.status == .implemented) "completed" else "not_planned";
+        try w.print("#{d} {s}: {t}, closing as {s}\n", .{ n, p.slug, p.status, reason });
+        if (dry_run) continue;
+        const body = try std.fmt.allocPrint(r.arena, "body=[{s}](../blob/main/design/{s}) is `{t}` now, so this issue is closed.", .{ p.slug, p.file, p.status });
+        _ = run(gpa, r.io, r.arena, &.{ "gh", "api", try std.fmt.allocPrint(r.arena, "{s}/comments", .{path}), "-f", body }) catch
+            std.debug.print("warning: couldn't comment on #{d}\n", .{n});
+        _ = run(gpa, r.io, r.arena, &.{ "gh", "api", "-X", "PATCH", path, "-f", "state=closed", "-f", try std.fmt.allocPrint(r.arena, "state_reason={s}", .{reason}) }) catch
+            std.debug.print("warning: couldn't close #{d}\n", .{n});
+    }
+}
+
+// ---- sign ----
+
+fn signerByLogin(r: Repo, login: []const u8) ?Signer {
+    for (r.signers orelse return null) |s| if (std.ascii.eqlIgnoreCase(s.login, login)) return s;
+    return null;
+}
+
+fn signerByName(r: Repo, name: []const u8) ?Signer {
+    for (r.signers orelse return null) |s| if (std.mem.eql(u8, s.name, name)) return s;
+    return null;
+}
+
+/// The doc with `name`'s signature dated `date` (`Nov 11, 2026`): an older
+/// signature of theirs is replaced, otherwise the new one goes after the
+/// title and any other signatures. Fails if they already signed that day.
+fn signedText(arena: std.mem.Allocator, text: []const u8, name: []const u8, date: []const u8, link: []const u8) ![]const u8 {
+    const sig = try std.fmt.allocPrint(arena, "{s} · {s}, [h.d.a.]({s})", .{ date, name, link });
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var titled = false;
+    var done = false;
+    var last_sig: ?usize = null; // offset in out just after the last signature line
+    var title_end: ?usize = null;
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(arena, '\n');
+        first = false;
+        const bare = std.mem.trimEnd(u8, line, " \r");
+        if (!done and std.mem.startsWith(u8, bare, "## ")) done = true;
+        if (!done and std.mem.startsWith(u8, bare, "# ") and !titled) {
+            titled = true;
+            try out.appendSlice(arena, line);
+            title_end = out.items.len;
+            continue;
+        }
+        if (!done and titled) if (parseSignature(bare)) |s| {
+            if (std.mem.eql(u8, s.name, name)) {
+                if (std.mem.eql(u8, s.date, date)) return error.AlreadySigned;
+                try out.appendSlice(arena, sig);
+                done = true;
+                last_sig = null;
+                title_end = null;
+                // Mark as replaced.
+                while (lines.next()) |rest| {
+                    try out.append(arena, '\n');
+                    try out.appendSlice(arena, rest);
+                }
+                return out.items;
+            }
+            try out.appendSlice(arena, line);
+            last_sig = out.items.len;
+            continue;
+        };
+        try out.appendSlice(arena, line);
+    }
+    const at = last_sig orelse title_end orelse return error.NoTitle;
+    const insert = if (last_sig != null) try std.fmt.allocPrint(arena, "\n{s}", .{sig}) else try std.fmt.allocPrint(arena, "\n\n{s}", .{sig});
+    return std.fmt.allocPrint(arena, "{s}{s}{s}", .{ out.items[0..at], insert, out.items[at..] });
+}
+
+fn signCmd(r: Repo, gpa: std.mem.Allocator, env: *const std.process.Environ.Map, args: []const []const u8) !void {
+    var target: ?[]const u8 = null;
+    var login: ?[]const u8 = null;
+    var date_iso: ?[]const u8 = null;
+    var k: usize = 0;
+    while (k < args.len) : (k += 1) {
+        if (std.mem.eql(u8, args[k], "--login") and k + 1 < args.len) {
+            k += 1;
+            login = args[k];
+        } else if (std.mem.eql(u8, args[k], "--date") and k + 1 < args.len) {
+            k += 1;
+            date_iso = args[k];
+        } else if (target == null and args[k].len > 0 and args[k][0] != '-') {
+            target = args[k];
+        } else fail("sign: unexpected `{s}`\n{s}", .{ args[k], usage });
+    }
+    const t = target orelse fail("sign: which doc? A proposal's slug, or spec", .{});
+    if (r.signers == null) fail("sign: there's no design/SIGNERS", .{});
+
+    // --login and --date are for the /sign workflow, which has already
+    // checked who commented; anywhere else, signing is interactive.
+    const from_comment = login != null or date_iso != null;
+    if (from_comment) {
+        const ev = env.get("GITHUB_EVENT_NAME") orelse "";
+        if (!std.mem.eql(u8, ev, "issue_comment")) fail("sign: --login and --date are only for the /sign workflow", .{});
+        if (login == null or date_iso == null) fail("sign: the workflow passes both --login and --date", .{});
+    } else if (!(std.Io.File.stdin().isTty(r.io) catch false)) {
+        fail("sign: run it yourself at a terminal; a signature is your own sign-off (design/README.md, Signature)", .{});
+    }
+
+    var path: []const u8 = "SPEC.md";
+    var link: []const u8 = "design/README.md#signature";
+    var title: []const u8 = "SPEC.md";
+    if (!std.mem.eql(u8, t, "spec")) {
+        const i = r.resolve(t) orelse fail("sign: `{s}` isn't a proposal", .{t});
+        path = try std.fmt.allocPrint(r.arena, "design/{s}", .{r.ps[i].file});
+        link = "README.md#signature";
+        title = r.ps[i].title;
+    }
+
+    const signer: Signer = if (login) |l| signerByLogin(r, l) orelse fail("sign: `{s}` isn't in design/SIGNERS", .{l}) else blk: {
+        if (run(gpa, r.io, r.arena, &.{ "gh", "api", "user", "--jq", ".login" })) |out| {
+            if (signerByLogin(r, std.mem.trim(u8, out, " \n"))) |s| break :blk s;
+        } else |_| {}
+        if (run(gpa, r.io, r.arena, &.{ "git", "config", "user.name" })) |out| {
+            if (signerByName(r, std.mem.trim(u8, out, " \n"))) |s| break :blk s;
+        } else |_| {}
+        fail("sign: neither your gh login nor git's user.name is in design/SIGNERS", .{});
+    };
+    const iso = date_iso orelse try localToday(gpa, r.io, r.arena);
+    if (!(iso.len == 10 and iso[4] == '-' and iso[7] == '-')) fail("sign: --date must be YYYY-MM-DD", .{});
+    const date = try sigDate(r.arena, iso);
+
+    if (!from_comment) {
+        std.debug.print("Signing {s} (\"{s}\") as {s}, dated {s}.\nThis says you directed it, reviewed the whole doc, and take responsibility for it.\nType `{s}` to confirm: ", .{ path, title, signer.name, date, t });
+        var buf: [256]u8 = undefined;
+        var rd = std.Io.File.stdin().readerStreaming(r.io, &buf);
+        const line = (rd.interface.takeDelimiter('\n') catch null) orelse "";
+        if (!std.mem.eql(u8, std.mem.trim(u8, line, " \r\t"), t)) fail("sign: not signed", .{});
+    }
+
+    const text = try r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 24));
+    const out = signedText(r.arena, text, signer.name, date, link) catch |err| switch (err) {
+        error.AlreadySigned => fail("sign: {s} already has {s}'s signature dated {s}", .{ path, signer.name, date }),
+        error.NoTitle => fail("sign: {s} has no `# ` title to sign under", .{path}),
+        else => return err,
+    };
+    try r.root.writeFile(r.io, .{ .sub_path = path, .data = out });
+    std.debug.print("signed {s}\n", .{path});
 }
 
 fn confirm(io: std.Io, prompt: []const u8) !bool {
@@ -746,7 +1049,7 @@ pub fn main(init: std.process.Init) !u8 {
     const rest = args[1..];
 
     var diags: Diags = .{ .gpa = arena };
-    const r = try Repo.load(arena, io, std.Io.Dir.cwd(), &diags);
+    const r = try Repo.load(arena, init.gpa, io, std.Io.Dir.cwd(), &diags, .git);
 
     var buf: [4096]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &buf);
@@ -785,10 +1088,17 @@ pub fn main(init: std.process.Init) !u8 {
         try statusCmd(r);
     } else if (std.mem.eql(u8, cmd, "new")) {
         try newCmd(r, init.gpa, rest);
-    } else if (std.mem.eql(u8, cmd, "file")) {
-        try fileCmd(r, init.gpa, rest);
-    } else if (std.mem.eql(u8, cmd, "fix")) {
-        for (try fix(r, null)) |f| try w.print("{s}\n", .{f});
+    } else if (std.mem.eql(u8, cmd, "propose")) {
+        try proposeCmd(r, init.gpa, rest);
+    } else if (std.mem.eql(u8, cmd, "log")) {
+        try logCmd(r, init.gpa, w, rest);
+    } else if (std.mem.eql(u8, cmd, "close-issues")) {
+        try closeIssuesCmd(r, init.gpa, w, rest);
+    } else if (std.mem.eql(u8, cmd, "sign")) {
+        try signCmd(r, init.gpa, init.environ_map, rest);
+    } else if (std.mem.eql(u8, cmd, "file") or std.mem.eql(u8, cmd, "fix")) {
+        std.debug.print("design: `{s}` is gone; see design/proposal-flow.md (`file` is now `propose`, and nothing needs `fix`)\n", .{cmd});
+        return 2;
     } else {
         std.debug.print("design: unknown command `{s}`\n{s}", .{ cmd, usage });
         return 2;
@@ -802,7 +1112,8 @@ pub fn main(init: std.process.Init) !u8 {
 // txtar-style file: comment lines first, each `error: text` or
 // `warning: text` that check must report (as a substring), then files as
 // `-- path --` followed by their contents. The fixture must produce
-// exactly the listed messages.
+// exactly the listed messages. A `.branches` file gives branch ages in
+// days (`name days` per line); without one, branches aren't checked.
 test "check fixtures" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -842,7 +1153,7 @@ test "check fixtures" {
         if (cur) |path| try writeFixture(io, tmp.dir, path, content.items);
 
         var diags: Diags = .{ .gpa = arena };
-        const r = try Repo.load(arena, io, tmp.dir, &diags);
+        const r = try Repo.load(arena, gpa, io, tmp.dir, &diags, .walk);
         try check(r, &diags);
         expectMessages(e.name, "error", want_err.items, diags.errors.items) catch |err| return err;
         expectMessages(e.name, "warning", want_warn.items, diags.warnings.items) catch |err| return err;
@@ -870,26 +1181,28 @@ fn expectMessages(fixture: []const u8, kind: []const u8, want: []const []const u
     return error.TestUnexpectedResult;
 }
 
-test "fix rewrites slug references to numbers" {
+test "state: ready, in progress, and stalled" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const Ctx = struct {
-        fn map(_: @This(), ref: []const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, ref, "devsrv")) "12" else null;
-        }
+    var bs: std.StringHashMapUnmanaged(i64) = .empty;
+    try bs.put(arena, "fresh", 2 * std.time.s_per_day);
+    try bs.put(arena, "old", 12 * std.time.s_per_day);
+    var ps = [_]Proposal{
+        .{ .file = "a.md", .slug = "a", .status = .accepted },
+        .{ .file = "b.md", .slug = "b", .status = .accepted, .branch = &.{"fresh"} },
+        .{ .file = "c.md", .slug = "c", .status = .draft, .branch = &.{"old"} },
+        .{ .file = "d.md", .slug = "d", .status = .accepted, .branch = &.{"gone"} },
+        .{ .file = "e.md", .slug = "e", .status = .accepted, .depends = &.{"c"} },
     };
-    const fmtext = "---\nslug: gfx\ndepends: [devsrv, 7]\n---\ndepends: [devsrv]\n";
-    try std.testing.expectEqualStrings("---\nslug: gfx\ndepends: [12, 7]\n---\ndepends: [devsrv]\n", (try rewriteFrontmatter(arena, fmtext, Ctx{})).?);
-    const tests = "test \"ramfs posts to /srv [devsrv]\" {\n    const x = 1;\n}\n";
-    try std.testing.expectEqualStrings("test \"ramfs posts to /srv [12]\" {\n    const x = 1;\n}\n", (try rewriteTags(arena, tests, Ctx{})).?);
-    try std.testing.expect(try rewriteTags(arena, "test \"x [baseline]\" {\n", Ctx{}) == null);
-    // Spacing the parser accepts, and CRLF lines.
-    try std.testing.expectEqualStrings("---\r\ndepends: [12]\r\n---\r\n", (try rewriteFrontmatter(arena, "---\r\ndepends:  [devsrv] \r\n---\r\n", Ctx{})).?);
-    try std.testing.expectEqualStrings("---\nsuperseded-by: 12\n---\n", (try rewriteFrontmatter(arena, "---\nsuperseded-by:devsrv\n---\n", Ctx{})).?);
-    try std.testing.expect(try rewriteFrontmatter(arena, "---\ndepends: []\n---\n", Ctx{}) == null);
-    // Tags are rewritten to the canonical spacing.
-    try std.testing.expectEqualStrings("test \"x [baseline, 12]\" {\n", (try rewriteTags(arena, "test \"x [baseline,devsrv]\" {\n", Ctx{})).?);
+    const r: Repo = .{ .arena = arena, .io = std.testing.io, .root = std.Io.Dir.cwd(), .ps = &ps, .cases = &.{}, .files = &.{}, .branches = bs, .signers = null };
+    const want = [_][]const u8{ "ready", "in progress on fresh", "stalled on old (12 days)", "stalled: gone not found", "needs c" };
+    for (ps, want) |p, w| {
+        var st: std.ArrayList(u8) = .empty;
+        try state(r, p, &st);
+        try std.testing.expectEqualStrings(w, st.items);
+    }
+    try std.testing.expect(isReady(r, ps[0]) and !isReady(r, ps[1]));
 }
 
 test "new fills the template" {
@@ -905,6 +1218,7 @@ test "new fills the template" {
         \\authors: [progrium]
         \\depends: []
         \\areas: []
+        \\branch: []
         \\---
         \\
         \\# Proposal: KVM backend
@@ -912,11 +1226,67 @@ test "new fills the template" {
     , out);
 }
 
-test "file helpers" {
+test "propose helpers" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     try std.testing.expect(hasSection("\n# P\n\n## Declined\n\nNo.\n", "Declined"));
     try std.testing.expect(!hasSection("\n# P\n\n### Declined\n\n## Declined later\n", "Declined"));
     try std.testing.expectEqualStrings("Short.", abstract("\n# P\n\n## Abstract\n\nShort.\n\n## Background\n\nLong.\n"));
-    try std.testing.expectEqualStrings("---\nid: 9\nslug: a\n---\n", try withId(arena_state.allocator(), "---\nslug: a\n---\n", 9));
+    try std.testing.expectEqualStrings("---\nissue: 9\nslug: a\nstatus: proposed\n---\n", try proposedText(arena_state.allocator(), "---\nslug: a\nstatus: draft\n---\n", 9));
+}
+
+test "signatures" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const abbr = "Nov 3, 2026 · Jeff Lindsay, <abbr title=\"AI-assisted work, directed by the named person.\">h.d.a.</abbr>";
+    try std.testing.expectEqualStrings("Jeff Lindsay", parseSignature(abbr).?.name);
+    try std.testing.expectEqualStrings("Nov 11, 2026", parseSignature("Nov 11, 2026 · Jeff Lindsay, [h.d.a.](README.md#signature)").?.date);
+    try std.testing.expect(parseSignature("Nov 11 2026 · Jeff Lindsay, h.d.a.") == null);
+    try std.testing.expect(parseSignature("Sometime · Jeff Lindsay, [h.d.a.](README.md#signature)") == null);
+    try std.testing.expectEqualStrings("Nov 11, 2026", try sigDate(arena, "2026-11-11"));
+    try std.testing.expectEqualStrings("Mar 2, 2027", try sigDate(arena, "2027-03-02"));
+
+    const link = "README.md#signature";
+    // A new signature goes under the title.
+    try std.testing.expectEqualStrings(
+        "---\nslug: a\n---\n\n# Proposal: A\n\nNov 11, 2026 · Jeff Lindsay, [h.d.a.](README.md#signature)\n\n## Abstract\n",
+        try signedText(arena, "---\nslug: a\n---\n\n# Proposal: A\n\n## Abstract\n", "Jeff Lindsay", "Nov 11, 2026", link),
+    );
+    // An older one by the same person is replaced.
+    const old = "# Proposal: A\n\n" ++ abbr ++ "\n\n## Abstract\n";
+    try std.testing.expectEqualStrings(
+        "# Proposal: A\n\nNov 11, 2026 · Jeff Lindsay, [h.d.a.](README.md#signature)\n\n## Abstract\n",
+        try signedText(arena, old, "Jeff Lindsay", "Nov 11, 2026", link),
+    );
+    // Someone else's stays, and the new one follows it.
+    try std.testing.expectEqualStrings(
+        "# Proposal: A\n\n" ++ abbr ++ "\nNov 11, 2026 · Ada Lovelace, [h.d.a.](README.md#signature)\n\n## Abstract\n",
+        try signedText(arena, old, "Ada Lovelace", "Nov 11, 2026", link),
+    );
+    try std.testing.expectError(error.AlreadySigned, signedText(arena, old, "Jeff Lindsay", "Nov 3, 2026", link));
+}
+
+test "log" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const gitlog =
+        \\@@commit 4be5ab3 2026-11-07 design: draft browser-gfx
+        \\
+        \\diff --git a/design/browser-gfx.md b/design/browser-gfx.md
+        \\+status: draft
+        \\+Some body text.
+        \\@@commit 0b1c2d3 2026-11-08 design: tidy browser-gfx
+        \\-old
+        \\+new
+        \\@@commit 196b924 2026-11-11 design: 120 implemented
+        \\-status: accepted
+        \\+status: implemented
+        \\+branch: [main]
+        \\
+    ;
+    try std.testing.expectEqualStrings(
+        "2026-11-07 4be5ab3  status: draft  (design: draft browser-gfx)\n2026-11-11 196b924  status: implemented, branch: [main]  (design: 120 implemented)\n",
+        try formatLog(arena_state.allocator(), gitlog),
+    );
 }

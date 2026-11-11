@@ -84,7 +84,7 @@ The demo can also be <a href="demo/?linux">opened on its own page</a>.
 <p>
 The browser has no hypervisor,
 so ha64 decodes the arm64 instructions itself, compiled to WebAssembly
-(<a href="https://github.com/progrium/hyper9/blob/main/design/h86-ha64.md">h86 and ha64</a>).
+(<a href="https://github.com/progrium/hyper9/blob/main/design/hcpu.md">h86 and ha64</a>).
 The Linux system calls reach h9 as they do on an arm64 host,
 as an <tt>SVC</tt> exit with the Linux ABI's registers.
 </p>
@@ -135,7 +135,7 @@ Each of these has been run in h9, most of them from Alpine's packages:
 
 <p>
 Each one turned up something missing,
-and the <a href="https://github.com/progrium/hyper9/blob/main/design/0018-linux-personality.md#updates">proposal's Updates</a>
+and the <a href="https://github.com/progrium/hyper9/blob/main/design/linux-personality.md#updates">proposal's Updates</a>
 say what each needed.
 </p>
 
@@ -173,10 +173,10 @@ and h9 dispatches it by the process's personality.
 </ul>
 
 <p>
-The <a href="https://github.com/progrium/hyper9/blob/main/design/0018-linux-personality.md">Linux personality proposal</a>
+The <a href="https://github.com/progrium/hyper9/blob/main/design/linux-personality.md">Linux personality proposal</a>
 has the design, with
-<a href="https://github.com/progrium/hyper9/blob/main/design/0049-linux-threads.md">threads</a> and
-<a href="https://github.com/progrium/hyper9/blob/main/design/0050-linux-net.md">networking</a>
+<a href="https://github.com/progrium/hyper9/blob/main/design/linux-threads.md">threads</a> and
+<a href="https://github.com/progrium/hyper9/blob/main/design/linux-net.md">networking</a>
 in proposals of their own.
 The <a href="https://github.com/progrium/hyper9/blob/main/SPEC.md#linux-personality">design document</a>
 describes what's built.

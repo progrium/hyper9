@@ -1,6 +1,6 @@
 /*
  * tls386: what 32-bit Wine needs from i386 Linux's segments
- * (design/0105-linux-i386.md, "TLS"). libc has TLS entry 6 for %gs, so
+ * (design/linux-i386.md, "TLS"). libc has TLS entry 6 for %gs, so
  * set_thread_area with entry -1 gives 7; %fs loaded with it reads its own
  * base while %gs keeps libc's; a new base reaches a loaded %fs; a signal
  * handler's return keeps %fs; and IRET and far RET return at ring 3, as

@@ -1,5 +1,5 @@
 /*
- * #λ: the Linux view's root (design/0018-linux-personality.md, "The Linux
+ * #λ: the Linux view's root (design/linux-personality.md, "The Linux
  * view"). Its root directory holds 9, tmp and mnt/term as mount points,
  * and it serves dev, proc and sys itself. The namespace builder binds the
  * Linux root tree after it, so the tree's own files show through, and
@@ -389,7 +389,7 @@ linuxgen(Chan *c, char *name, Dirtab *dt, int ntab, int s, Dir *dp)
 /*
  * #λ is the Linux view's top; #λetc is a directory of files the
  * machine makes for a root that lacks them, bound after the root's /etc
- * (design/0050-linux-net.md, "DNS").
+ * (design/linux-net.md, "DNS").
  */
 static Chan*
 linuxattach(char *spec)

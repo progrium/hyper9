@@ -8,7 +8,7 @@
 //! `--print`'s trailing ro/rw/eph/9p/builtin column and `<id>` console placeholder
 //! are accepted, so its output replays as-is. A `bind` from a bare `#O` makes
 //! a fresh copy-on-write overlay over whatever its target is at that point
-//! in the replay (design/0006-ephemeral-writes.md); the machine does that. `.` (include) and `chdev`, and
+//! in the replay (design/ephemeral-writes.md); the machine does that. `.` (include) and `chdev`, and
 //! `$var` expansion, aren't supported.
 
 const std = @import("std");

@@ -1,5 +1,5 @@
 /*
- * h9's hooks for drawterm's devcons (design/0007-go-compat.md): #c/pid,
+ * h9's hooks for drawterm's devcons (design/go-compat.md): #c/pid,
  * #c/ppid, nanosecond /dev/bintime and /dev/time, and a /dev/sysstat line
  * per CPU. The C side is src/kern/consx.c; the clock and the CPU count
  * are Zig leaves (src/kern.zig). None of them fail or raise kernel errors.

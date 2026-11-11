@@ -1,5 +1,5 @@
 # slim: the commands 9box builds, what basic operation needs
-# (design/0064-multicall.md). One command per line: its name, and its directory
+# (design/multicall.md). One command per line: its name, and its directory
 # under /sys/src/cmd (. for a single-file command, the default).
 
 # Shell and files

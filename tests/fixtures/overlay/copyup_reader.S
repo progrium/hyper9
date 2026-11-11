@@ -1,6 +1,6 @@
 // Opens f in an ephemeral cwd, and an rfork child writes it, copying it
 // up; the parent's open fd still reads the old contents
-// (tests/backends.zig, design/0006-ephemeral-writes.md). A new open sees
+// (tests/backends.zig, design/ephemeral-writes.md). A new open sees
 // the child's write.
 
 #include "lib.S"

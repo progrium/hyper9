@@ -1,4 +1,4 @@
-//! Host streams (design/0021-websocket-9p.md): WebSocket connections h9
+//! Host streams (design/websocket-9p.md): WebSocket connections h9
 //! makes on the host and hands to the kernel through devhstream
 //! (src/kern/devhstream.c), which devmnt can mount. A stream is made by h9
 //! for a `ws://` root or a namespace-file mount (host-made), or by the
@@ -17,12 +17,12 @@
 //! the machine's page allocator (kern.Pages), so they count against
 //! `--memory`; data and text together are capped at `ws.max_message`.
 //!
-//! On the web host (design/0021-websocket-9p.md, "On the browser host")
+//! On the web host (design/websocket-9p.md, "On the browser host")
 //! the JS host's WebSocket connects, does TLS and frames, through the
 //! `h9_ws_*` imports below; each stream's reader is a coroutine parked
 //! in `ws_recv`. ws.zig, TLS, proxies and the keepalive aren't used there.
 //!
-//! Accepted streams (design/0035-serve.md) are the other direction: a
+//! Accepted streams (design/serve.md) are the other direction: a
 //! connection a `--serve` listener accepted, handed to the kernel the same
 //! way. A WebSocket one (`server`) does the server's side of the
 //! handshake and reads masked frames; a unix or TCP one (`raw`) carries
@@ -300,7 +300,7 @@ pub const Mode = enum {
     raw,
 };
 
-/// An accepted stream's listener (design/0035-serve.md): its WebSocket
+/// An accepted stream's listener (design/serve.md): its WebSocket
 /// checks, and what to tell it. Must outlive the stream's thread.
 pub const Served = struct {
     /// A WebSocket listener's checks; null for unix and TCP.
@@ -315,10 +315,10 @@ pub const Served = struct {
     done: *const fn (ctx: *anyopaque, handed: bool) void,
 };
 
-/// The dialect slot (design/0035-serve.md, "Each connection"): what
+/// The dialect slot (design/serve.md, "Each connection"): what
 /// serves a connection whose first message has type `typ`. Every
 /// connection goes to an exportfs through a `#ℓ` conversation's server
-/// side (design/0022-dotl.md), which translates a 9P2000.L client and
+/// side (design/dotl.md), which translates a 9P2000.L client and
 /// passes any other version to exportfs to answer.
 pub const Dialect = enum { exportfs };
 
@@ -653,7 +653,7 @@ pub fn release(id: u32) void {
 }
 
 /// Takes a connection a listener accepted, for the machine `owner`
-/// (design/0035-serve.md), and starts its thread, which does a WebSocket
+/// (design/serve.md), and starts its thread, which does a WebSocket
 /// listener's handshake, waits for the first 9P message, and calls
 /// `served.ready` with the stream's id if the dialect slot takes it.
 /// `peer` is what `remote` says. The stream holds the connection from

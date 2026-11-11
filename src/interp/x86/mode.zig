@@ -1,5 +1,5 @@
 //! The x86 CPU's comptime mode: `.legacy` is h86, a flat 32-bit protected
-//! mode 386; `.long` is hx64, 64-bit long mode (design/0174-hcpu.md, hx64). The
+//! mode 386; `.long` is hx64, 64-bit long mode (design/hcpu.md, hx64). The
 //! encoding table, the decoder, T0, the Cpu, and the lifter each take it as
 //! a comptime parameter, so one set of semantics serves both and the 386
 //! path pays nothing at run time for long mode.

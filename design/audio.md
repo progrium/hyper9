@@ -4,7 +4,7 @@ title: Audio (--audio)
 status: draft
 created: 2026-11-07
 authors: [progrium]
-depends: [12]
+depends: [browser-host]
 areas: [cli, kern, build, sandbox, tests]
 ---
 
@@ -12,7 +12,7 @@ areas: [cli, kern, build, sandbox, tests]
 
 ## Abstract
 
-`--audio` gives a machine the host's sound output as `/dev/audio` and `/dev/volume`, served by drawterm's devaudio (`#A`) over a host backend. On Linux and Windows, the backends are drawterm's own: PipeWire or ALSA, and Win32, picked by a build option as `-Dgfx` picks a GUI. drawterm has no Core Audio backend, so macOS gets a small one of h9's own. On the [browser host](0012-browser-host.md), a Web Audio backend sends samples to an AudioWorklet in the page, and a write to `/dev/audio` parks its coroutine until the worklet has room. Playback is all `--audio` grants. Recording needs `--audio=record`. Without either, `#A` is masked, as `#i` is without `--gfx`.
+`--audio` gives a machine the host's sound output as `/dev/audio` and `/dev/volume`, served by drawterm's devaudio (`#A`) over a host backend. On Linux and Windows, the backends are drawterm's own: PipeWire or ALSA, and Win32, picked by a build option as `-Dgfx` picks a GUI. drawterm has no Core Audio backend, so macOS gets a small one of h9's own. On the [browser host](browser-host.md), a Web Audio backend sends samples to an AudioWorklet in the page, and a write to `/dev/audio` parks its coroutine until the worklet has room. Playback is all `--audio` grants. Recording needs `--audio=record`. Without either, `#A` is masked, as `#i` is without `--gfx`.
 
 ## Background
 
@@ -47,7 +47,7 @@ Things to note:
 - **No macOS backend.** drawterm's `Make.osx-cocoa` sets `AUDIO=none`.
 - **ALSA opens the microphone on every open.** `audiodevopen` opens both the playback and capture PCMs, whatever mode `/dev/audio` is opened in, so a program that only plays still opens the host's capture device.
 - **Writes can't always be interrupted.** ALSA, OSS, and sndio block in a host call, and Win32 polls with a host sleep. drawterm's `sleep` raises `Eintr` when a note is pending, but these never reach it, so a large write runs to the end before a note is seen. Only the PipeWire backend waits in the kernel.
-- **Linking.** PipeWire and ALSA are shared libraries, so, like X11 for [gfx](0015-gfx.md), they need a glibc target. h9's Linux releases are static musl.
+- **Linking.** PipeWire and ALSA are shared libraries, so, like X11 for [gfx](gfx.md), they need a glibc target. h9's Linux releases are static musl.
 - **A PipeWire bug.** `on_process` returns with `pwstate.lk` held when `pw_stream_dequeue_buffer` gives no buffer, so the next write deadlocks. It's an upstream fix to send.
 
 ## Proposal
@@ -130,7 +130,7 @@ const m = await createMachine({
 - **The worklet** converts each 16-bit interleaved buffer to the two 32-bit float channels Web Audio uses, and plays it out in 128-frame render quanta. When its queue is empty, it outputs silence and posts nothing until it has room to report.
 - **Closing** posts a drain message. The worklet answers once its queue is empty, which wakes the closer through `audiopump`.
 
-So a guest can never get more than about 200 ms ahead of the speakers, the Worker never busy-waits, and nothing needs `SharedArrayBuffer` or cross-origin isolation, which [browser-host](0012-browser-host.md) avoids.
+So a guest can never get more than about 200 ms ahead of the speakers, the Worker never busy-waits, and nothing needs `SharedArrayBuffer` or cross-origin isolation, which [browser-host](browser-host.md) avoids.
 
 **Autoplay.** Browsers start an `AudioContext` suspended until the user interacts with the page. While it's suspended, the worklet plays nothing and reports no room, so a write parks until the context runs, and no samples are dropped. `createMachine` resumes the context on the page's first `pointerdown` or `keydown`. If the guest opens `/dev/audio` while the context is suspended, the machine fires an `audioblocked` event, so the page can show a "click to enable sound" control that calls `m.audio.resume()`.
 
@@ -140,7 +140,7 @@ So a guest can never get more than about 200 ms ahead of the speakers, the Worke
 
 ### Relation to gfx
 
-Audio doesn't depend on [gfx](0015-gfx.md) or [browser-gfx](0120-browser-gfx.md) (proposed in #58). It follows their shape: a device that's built in but masked until a flag grants it, a wrapper in `src/kern/` around drawterm's device, a `-D` build option per host with a headless backend for tests, and an error naming the backend when a machine asks for something this build doesn't have. A machine can have both, and `h9 --gfx --audio rio` gives rio's programs a window and sound.
+Audio doesn't depend on [gfx](gfx.md) or [browser-gfx](browser-gfx.md) (proposed in #58). It follows their shape: a device that's built in but masked until a flag grants it, a wrapper in `src/kern/` around drawterm's device, a `-D` build option per host with a headless backend for tests, and an error naming the backend when a machine asks for something this build doesn't have. A machine can have both, and `h9 --gfx --audio rio` gives rio's programs a window and sound.
 
 ### The plan
 
@@ -192,30 +192,30 @@ Audio doesn't depend on [gfx](0015-gfx.md) or [browser-gfx](0120-browser-gfx.md)
 - **Between machines,** only the machine with audio has `#A` unmasked, and `AudioInUse` keeps a second from opening the host's device.
 - **The page.** On the browser host, the sound and the microphone go through the page's `AudioContext`, under the browser's autoplay and permission rules. The guest reaches neither except through `audio-web.c`.
 
-## Done when
+## Done criteria
 
 Backend cases in `tests/backends.zig`, on the headless backend, tagged `[audio]`:
 
-- `test "--audio binds /dev/audio and /dev/volume [audio]"`
-- `test "samples written to /dev/audio reach the backend in order [audio]"`
-- `test "a write blocks while the backend's buffer is full and finishes as it drains [audio]"`
-- `test "a note interrupts a write blocked on a full buffer [audio]"`
-- `test "closing /dev/audio waits for buffered samples to play [audio]"`
-- `test "with --audio, opening /dev/audio for reading fails [audio]"`
-- `test "with --audio=record, reading /dev/audio returns the backend's samples [audio]"`
-- `test "/dev/volume scales samples and reports the machine's level [audio]"`
-- `test "a second machine in the process gets AudioInUse [audio]"`
+- [ ] `test "--audio binds /dev/audio and /dev/volume [audio]"`
+- [ ] `test "samples written to /dev/audio reach the backend in order [audio]"`
+- [ ] `test "a write blocks while the backend's buffer is full and finishes as it drains [audio]"`
+- [ ] `test "a note interrupts a write blocked on a full buffer [audio]"`
+- [ ] `test "closing /dev/audio waits for buffered samples to play [audio]"`
+- [ ] `test "with --audio, opening /dev/audio for reading fails [audio]"`
+- [ ] `test "with --audio=record, reading /dev/audio returns the backend's samples [audio]"`
+- [ ] `test "/dev/volume scales samples and reports the machine's level [audio]"`
+- [ ] `test "a second machine in the process gets AudioInUse [audio]"`
 
 Integration cases, on any build:
 
-- `test "without --audio, #A is masked [audio]"`
-- `test "--audio on a build without audio exits 125 [audio]"`, in a `-Daudio=none` build.
-- `test "--sandbox refuses --audio=record [audio]"`
+- [ ] `test "without --audio, #A is masked [audio]"`
+- [ ] `test "--audio on a build without audio exits 125 [audio]"`, in a `-Daudio=none` build.
+- [ ] `test "--sandbox refuses --audio=record [audio]"`
 
 The backend cases also run under Node on v86 with the headless backend, and Playwright cases in Chromium, on the demo page with autoplay allowed:
 
-- `test "samples written to /dev/audio reach the AudioWorklet [audio]"`: the worklet's test hook counts the frames it played.
-- `test "writes park until the AudioContext is resumed [audio]"`: with the context suspended, a write doesn't finish and `audioblocked` fires. After `m.audio.resume()`, it finishes.
+- [ ] `test "samples written to /dev/audio reach the AudioWorklet [audio]"`: the worklet's test hook counts the frames it played.
+- [ ] `test "writes park until the AudioContext is resumed [audio]"`: with the context suspended, a write doesn't finish and `audioblocked` fires. After `m.audio.resume()`, it finishes.
 
 Demos, by hand, one per backend: `h9 --audio play song.mp3` plays on macOS, Windows, and Linux (PipeWire), and Ctrl-C stops it at once. `h9 --audio=record rc -c 'dd -if /dev/audio -of /tmp/r -count 400; cat /tmp/r > /dev/audio'` plays back what was recorded, on macOS and on Linux with `-Daudio=alsa`. On the demo page, a "play" button plays a WAV in Chrome after one click.
 

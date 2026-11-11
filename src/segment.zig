@@ -1,7 +1,7 @@
 //! A process's memory segments: text, data (data and bss together) and
 //! stack, plus up to five that segattach adds (`shared` and `memory`), each
 //! a set of pages from the backend's allocator that it can free again. See
-//! SPEC.md, "Process model", and design/0004-segattach.md.
+//! SPEC.md, "Process model", and design/segattach.md.
 //!
 //! A segment can be attached to several address spaces (rfork with RFMEM
 //! shares text, data and bss), and a change to it, such as brk growing the
@@ -11,7 +11,7 @@
 //! segment grows without copying. Semaphore wait lists (src/kern/sema.c)
 //! are keyed by the host address of the guest word, so they rely on a
 //! segment's pages never moving while it's shared; copy-on-write or
-//! compaction would have to change that key (design/0003-semaphores.md). The stack grows down on demand, as
+//! compaction would have to change that key (design/semaphores.md). The stack grows down on demand, as
 //! 9front's does: it starts with what the arguments need plus some
 //! headroom, and `Segs.growStack` extends it on faults and at syscalls.
 

@@ -1,11 +1,10 @@
 Declined proposals need a `## Declined` section giving the reason: one
 with it passes, and one with only a `### Declined` heading fails.
 
-error: design/0002-b.md: declined, but it has no `## Declined` section
+error: design/b.md: declined, but it has no `## Declined` section
 
--- design/0001-a.md --
+-- design/a.md --
 ---
-id: 1
 slug: a
 title: A
 status: declined
@@ -16,16 +15,11 @@ depends: []
 
 # Proposal: A
 
-## Abstract
-
-A.
-
 ## Declined
 
 - 2026-11-09: Not worth the cost.
--- design/0002-b.md --
+-- design/b.md --
 ---
-id: 2
 slug: b
 title: B
 status: declined

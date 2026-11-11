@@ -1,6 +1,6 @@
 /*
  * The host-socket calls (hostsock.h) on the web host
- * (design/0012-browser-host.md), built instead of hostsock-posix.c.
+ * (design/browser-host.md), built instead of hostsock-posix.c.
  * There's no socket API in a browser and the policy masks #I there, so
  * these fail or do nothing, as devip-wasm.c's so_ calls do.
  */

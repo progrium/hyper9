@@ -19,17 +19,17 @@ pub const WriteMode = enum {
     /// Persist writes to the writable paths only.
     scope,
     /// Writable paths are copy-on-write overlays in memory, discarded at
-    /// exit (design/0006-ephemeral-writes.md).
+    /// exit (design/ephemeral-writes.md).
     ephemeral,
     /// Like scope, with a copy-on-write overlay over the root: writes to
-    /// the root succeed and are discarded at exit (design/0011-overlay.md).
+    /// the root succeed and are discarded at exit (design/overlay.md).
     /// The default.
     overlay,
 };
 
 pub const NetMode = enum {
     disable,
-    /// Clients work, `announce` is refused (design/0005-net-policy.md).
+    /// Clients work, `announce` is refused (design/net-policy.md).
     outbound,
     enable,
 };
@@ -72,11 +72,11 @@ pub const Policy = struct {
 
 /// How a bound tree can be changed: not at all, on the host, in an
 /// overlay in memory (`eph`), which never writes the host, or as a 9P
-/// root's server decides (`9p`, design/0013-9p-roots.md), or never, as
-/// constant data in the h9 binary (`builtin`, design/0087-builtin-root.md).
+/// root's server decides (`9p`, design/9p-roots.md), or never, as
+/// constant data in the h9 binary (`builtin`, design/builtin-root.md).
 pub const Access = enum { ro, rw, eph, @"9p", builtin };
 
-/// How the built-in root (design/0087-builtin-root.md), `#Hroot`, takes part in
+/// How the built-in root (design/builtin-root.md), `#Hroot`, takes part in
 /// the namespace.
 pub const Builtin = enum {
     /// Not at all.
@@ -122,7 +122,7 @@ pub const Bind = struct {
     /// overlays whatever `to` is at that point (src/newns.zig).
     lower: ?[]const u8 = null,
     /// `lower` is a contained tree, through `#U!c`
-    /// (design/0034-symlinks-in-root.md).
+    /// (design/symlinks-in-root.md).
     contained: bool = false,
     /// A mount of the 9P server posted at `from` (`#s/root`), rather than
     /// a bind, with the attach name `spec`.
@@ -136,12 +136,12 @@ pub const Bind = struct {
     pub const Flag = enum { repl, before, after };
 };
 
-/// A 9P server as the root (design/0013-9p-roots.md): the machine
+/// A 9P server as the root (design/9p-roots.md): the machine
 /// connects to it, posts the connection as `#s/root` and mounts that at /.
 pub const NinePRoot = struct {
     kind: enum { tcp, unix, ws },
     /// The dial string, `tcp!host!port` or `unix!path`, or a `ws://` or
-    /// `wss://` URL (design/0021-websocket-9p.md), for the plan and errors.
+    /// `wss://` URL (design/websocket-9p.md), for the plan and errors.
     addr: []const u8,
     /// The attach name.
     spec: []const u8 = "",
@@ -156,7 +156,7 @@ pub const NinePRoot = struct {
     proxy: ?[]const u8 = null,
 };
 
-/// The listeners that serve the namespace over 9P (design/0035-serve.md),
+/// The listeners that serve the namespace over 9P (design/serve.md),
 /// as the plan shows them.
 pub const Serve = struct {
     pub const Listener = struct {
@@ -184,7 +184,7 @@ pub const Serve = struct {
 pub const hstream_dev = "ℏ";
 
 /// The 9P2000.L device, `#ℓ`, whose tree is the guest's /net/dotl
-/// (design/0022-dotl.md).
+/// (design/dotl.md).
 pub const dotl_dev = "ℓ";
 
 /// Where a 9P root's connection is posted, and the board name it's under.
@@ -242,16 +242,16 @@ pub const Plan = struct {
     guest_cwd: ?[]const u8,
     /// The 9P root to connect before the namespace is built, if any.
     root_9p: ?NinePRoot = null,
-    /// The machine's window, with --gfx (design/0015-gfx.md).
+    /// The machine's window, with --gfx (design/gfx.md).
     gfx: ?Gfx = null,
     /// Whether the root is under a copy-on-write overlay
-    /// (design/0011-overlay.md): the bind of `#O` onto `/`. The builder
+    /// (design/overlay.md): the bind of `#O` onto `/`. The builder
     /// makes `$home` in it, and the machine reports the guest's changes.
     root_overlay: bool = false,
     /// The host's DNS servers: a connect to port 53 on one is allowed
     /// even when it's link-local, as a cloud VM's resolver is.
     nameservers: []const [16]u8 = &.{},
-    /// The `--serve` listeners (design/0035-serve.md), if any.
+    /// The `--serve` listeners (design/serve.md), if any.
     serve: ?Serve = null,
 
     /// Checks `op` on the resolved host path `path`.
@@ -315,7 +315,7 @@ pub const Plan = struct {
         if (p.pids) |n| {
             try w.print(" pids={d}", .{n});
             // Serving's processes are counted on their own
-            // (design/0035-serve.md, "Limits").
+            // (design/serve.md, "Limits").
             if (p.serve != null) try w.print(" (+{d} serving)", .{n});
         }
         if (p.cpus) |n| try w.print(" cpus={d}", .{n});
@@ -432,7 +432,7 @@ const ElidedUserinfo = struct {
     }
 };
 
-/// A machine's window (design/0015-gfx.md), as the plan shows it.
+/// A machine's window (design/gfx.md), as the plan shows it.
 pub const Gfx = struct {
     /// The GUI backend's name: cocoa, win32, x11, web or headless.
     backend: []const u8,
@@ -441,7 +441,7 @@ pub const Gfx = struct {
     clipboard: bool = true,
     scale: u8 = 1,
 
-    /// The browser host's canvas (design/0120-browser-gfx.md).
+    /// The browser host's canvas (design/browser-gfx.md).
     pub fn isWeb(g: Gfx) bool {
         return std.mem.eql(u8, g.backend, "web");
     }
@@ -454,27 +454,27 @@ pub const Inputs = struct {
     /// A 9P server as the root, instead of a host tree.
     root_9p: ?NinePRoot = null,
     /// Resolve the root tree's symlinks inside it, through `#U!c`
-    /// (`--root-contained`, design/0034-symlinks-in-root.md).
+    /// (`--root-contained`, design/symlinks-in-root.md).
     root_contained: bool = false,
     /// Host directory bound at /mnt/term/cwd.
     cwd: ?[]const u8,
     arch: aout.Arch,
     /// Bind h9's own commands (`#H/bin`) after /bin; false leaves out
-    /// the bind and masks `#H` (design/0032-guest-tools.md).
+    /// the bind and masks `#H` (design/guest-tools.md).
     guest_tools: bool = true,
-    /// A Linux root tree, the Linux view's / (design/0018-linux-personality.md).
+    /// A Linux root tree, the Linux view's / (design/linux-personality.md).
     linux_root: ?[]const u8 = null,
     /// The host's DNS servers, which port 53 may reach even when they're
-    /// link-local (design/0050-linux-net.md).
+    /// link-local (design/linux-net.md).
     nameservers: []const []const u8 = &.{},
     /// A host window: `#i`, `#m` and `#b` on /dev. Without one they're
-    /// masked (design/0015-gfx.md).
+    /// masked (design/gfx.md).
     gfx: ?Gfx = null,
-    /// The built-in root (design/0087-builtin-root.md).
+    /// The built-in root (design/builtin-root.md).
     builtin: Builtin = .off,
     /// What the plan says about the built-in root beside its bind.
     builtin_note: ?[]const u8 = null,
-    /// `--serve` listeners (design/0035-serve.md).
+    /// `--serve` listeners (design/serve.md).
     serve: ?Serve = null,
 };
 
@@ -485,7 +485,7 @@ fn hostWritable(writable: []const []const u8, path: []const u8, allowed: bool) b
     return false;
 }
 
-/// The Linux view's device (design/0018-linux-personality.md, "The Linux
+/// The Linux view's device (design/linux-personality.md, "The Linux
 /// view"): `#λ`, devlinux.
 pub const linux_view = "#\u{3bb}";
 
@@ -527,7 +527,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
     }
-    // The web host never has them (design/0012-browser-host.md).
+    // The web host never has them (design/browser-host.md).
     if (pol.host_cmd and (web or !@import("build_options").host_cmd)) {
         err_msg.* = if (web) "--host-cmd: the web host has no host commands (zig build -Dhost-cmd builds them natively)" else "--host-cmd: this h9 was built without host commands (zig build -Dhost-cmd)";
         return error.Conflict;
@@ -586,7 +586,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (in.root) |root| for (pol.writable) |w| if (std.mem.eql(u8, w, root)) {
         root_rw = can_write and !eph;
     };
-    // The root's overlay (design/0011-overlay.md): under overlay and
+    // The root's overlay (design/overlay.md): under overlay and
     // ephemeral, over any kind of root, unless the root writes the host.
     const root_overlay = (write == .overlay or eph) and !root_rw and (other_root or builtin_is_root);
 
@@ -619,7 +619,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
-    // The window's devices (design/0015-gfx.md), after the console so
+    // The window's devices (design/gfx.md), after the console so
     // /dev/cons stays the terminal.
     if (in.gfx != null) for ([_][]const u8{ "#i", "#m", "#b" }) |d| {
         try binds.append(arena, .{ .from = d, .to = "/dev", .flag = .after });
@@ -627,7 +627,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     try binds.append(arena, .{ .from = "#e", .to = "/env", .create = true, .optional = true });
     try binds.append(arena, .{ .from = "#d", .to = "/fd", .optional = true });
     try binds.append(arena, .{ .from = "#p", .to = "/proc", .optional = true });
-    // The machine's own service registry (design/0008-devsrv.md): it shows
+    // The machine's own service registry (design/devsrv.md): it shows
     // nothing outside the machine, so it's in both profiles.
     try binds.append(arena, .{ .from = "#s", .to = "/srv", .create = true, .optional = true });
     if (net != .disable and web) {
@@ -637,7 +637,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "#I", .to = "/net", .optional = true });
         try binds.append(arena, .{ .from = "#" ++ hstream_dev, .to = "/net", .flag = .after, .optional = true, .note = "WebSockets, under --net" });
     }
-    // 9P2000.L mounts (design/0022-dotl.md) reach nothing by themselves:
+    // 9P2000.L mounts (design/dotl.md) reach nothing by themselves:
     // a conversation translates a connection the guest already has.
     try binds.append(arena, .{ .from = "#" ++ dotl_dev, .to = "/net", .flag = .after, .optional = true, .note = "9P2000.L mounts" });
     if (has_root) {
@@ -648,7 +648,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
         // --builtin=after: the box fills what the root lacks.
         if (builtin_bin == .after) try binds.append(arena, .{ .from = boxed, .to = "/bin", .flag = .after, .access = .builtin, .optional = true });
-        // h9's own commands (design/0032-guest-tools.md), after the root's
+        // h9's own commands (design/guest-tools.md), after the root's
         // so a root command of the same name wins.
         if (in.guest_tools) try binds.append(arena, .{ .from = "#H/bin", .to = "/bin", .flag = .after, .optional = true, .note = "h9's commands" });
     }
@@ -711,7 +711,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     for (pol.read_deny) |p| try rules.append(arena, .{ .path = p, .kind = .deny });
 
-    // The Linux view (design/0018-linux-personality.md): the Linux root
+    // The Linux view (design/linux-personality.md): the Linux root
     // after devlinux's own directories, and the shared trees on its mount
     // points, only with a Linux root: without one, a Linux binary from a
     // host path sees devlinux's own tree.
@@ -812,7 +812,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
     // A Linux program resolves names itself, through the host's DNS
-    // servers (design/0050-linux-net.md).
+    // servers (design/linux-net.md).
     var nameservers: std.ArrayList([16]u8) = .empty;
     if (in.linux_root != null and net != .disable) for (in.nameservers) |ns| {
         if (parseIp(ns)) |a| try nameservers.append(arena, a);
@@ -993,7 +993,7 @@ fn writeDuration(n: u64, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.print("{d}ns", .{n});
 }
 
-// The network policy (design/0005-net-policy.md).
+// The network policy (design/net-policy.md).
 
 /// devip's operations, matching H9_NETCONNECT and H9_NETANNOUNCE in
 /// src/kern/netcheck.h.
@@ -1349,7 +1349,7 @@ test "compile: --write=none conflicts with --writable" {
     try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .write = .none, .writable = &.{"/w"} }, &msg));
 }
 
-test "compile: --root-contained (design/0034-symlinks-in-root.md)" {
+test "compile: --root-contained (design/symlinks-in-root.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1379,7 +1379,7 @@ test "compile: --root-contained (design/0034-symlinks-in-root.md)" {
     _ = try compile(a, .{ .root = null, .linux_root = "/l", .cwd = "/w", .arch = .amd64, .root_contained = true }, .{}, &msg);
 }
 
-test "compile: the root's overlay (design/0011-overlay.md)" {
+test "compile: the root's overlay (design/overlay.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1494,7 +1494,7 @@ fn bindList(arena: std.mem.Allocator, p: Plan) ![]const u8 {
     return out.written();
 }
 
-test "compile: the built-in root as / (design/0087-builtin-root.md)" {
+test "compile: the built-in root as / (design/builtin-root.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1541,7 +1541,7 @@ test "compile: the built-in root as / (design/0087-builtin-root.md)" {
     try t.expect(std.mem.indexOf(u8, try bindList(a, bare), "/bin") == null);
 }
 
-test "compile: --builtin=only conflicts with another root (design/0087-builtin-root.md)" {
+test "compile: --builtin=only conflicts with another root (design/builtin-root.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
@@ -1550,7 +1550,7 @@ test "compile: --builtin=only conflicts with another root (design/0087-builtin-r
     try t.expectError(error.Conflict, compile(arena.allocator(), .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!h!564" }, .cwd = "/w", .arch = .arm64, .builtin = .only }, .{}, &msg));
 }
 
-test "compile: --builtin=before and after layer the box's /bin (design/0087-builtin-root.md)" {
+test "compile: --builtin=before and after layer the box's /bin (design/builtin-root.md)" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1830,7 +1830,7 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     try t.expectEqual(Verdict.read_only, e.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, e.check("/w/out/f", .write));
     try t.expectEqual(Verdict.allow, e.check("/w/out/f", .read));
-    // The root is read-only to devfs, under an overlay (design/0011-overlay.md).
+    // The root is read-only to devfs, under an overlay (design/overlay.md).
     try t.expectEqualStrings("#U/r", Find.bind(e, "/").?.from);
     try t.expectEqual(Verdict.read_only, e.check("/r/f", .create));
     for (e.caveats) |c| try t.expect(std.mem.indexOf(u8, c, "hardlinks") == null);

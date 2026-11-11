@@ -1,5 +1,5 @@
 /*
- * devip's host socket layer on the web host (design/0012-browser-host.md),
+ * devip's host socket layer on the web host (design/browser-host.md),
  * built instead of devip-posix.c. There's no socket API in a browser, and
  * the policy masks #I there, but devip.c links against these.
  */

@@ -1,5 +1,5 @@
 /*
- * The browser host's GUI backend (-Dgfx=web, design/0120-browser-gfx.md):
+ * The browser host's GUI backend (-Dgfx=web, design/browser-gfx.md):
  * drawterm's screen interface on a page's <canvas>, which the page has
  * moved into h9's Worker as an OffscreenCanvas. The JS half is gfxImports
  * in src/web/h9-web.js, which owns the canvas, and createMachine's event

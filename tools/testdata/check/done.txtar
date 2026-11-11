@@ -1,0 +1,73 @@
+Done criteria: every item is a checkbox, an implemented proposal has none
+open, a proposal with every item settled but not implemented gets a
+warning, and the old Done when heading is refused.
+
+error: design/a.md:15: a Done criteria item must be a checkbox
+error: design/b.md:16: implemented, but this Done criteria item isn't checked
+error: design/d.md: `## Done when` is now `## Done criteria`
+warning: design/c.md: every Done criteria item is checked or waived, but it's `accepted`
+
+-- design/a.md --
+---
+slug: a
+title: A
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+
+# Proposal: A
+
+## Done criteria
+
+- [ ] Fine.
+- Not a checkbox.
+-- design/b.md --
+---
+slug: b
+title: B
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: []
+branch: [main]
+---
+
+# Proposal: B
+
+## Done criteria
+
+- [x] Done.
+- [ ] Not done.
+-- design/c.md --
+---
+slug: c
+title: C
+status: accepted
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+
+# Proposal: C
+
+## Done criteria
+
+- [x] Done.
+- [~] Waived: not needed.
+-- design/d.md --
+---
+slug: d
+title: D
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+
+# Proposal: D
+
+## Done when
+
+- Old style.

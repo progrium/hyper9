@@ -1,4 +1,4 @@
-//! The 386 instruction inventory (design/0019-zig-interpreter.md, and the
+//! The 386 instruction inventory (design/zig-interpreter.md, and the
 //! 386 plan's first step): finds the code in every 386 binary under the
 //! given paths, decodes it with h86's decoder (src/interp/x86/decode.zig),
 //! and reports what it uses and what T0 can't run.

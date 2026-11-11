@@ -1,7 +1,7 @@
 /*
  * h9: the host-socket calls devip's h9 additions use (hostsock-posix.c,
  * hostsock-win32.c), for the Linux socket calls
- * (design/0050-linux-net.md). They raise kernel errors as devip's so_
+ * (design/linux-net.md). They raise kernel errors as devip's so_
  * calls do.
  */
 
@@ -39,7 +39,7 @@ int	h9so_hasv6(void);
 
 /*
  * The host's interface addresses, for the Linux layer's netlink
- * (design/0050-linux-net.md): up to max, loopback included; the count.
+ * (design/linux-net.md): up to max, loopback included; the count.
  * addr is devip's 16 bytes, v4 mapped. 0 where the host can't say.
  * In hostif-posix.c, apart from drawterm's headers.
  */

@@ -1,6 +1,6 @@
 /*
  * A small debugger for the self-host cases (tests/integration.zig,
- * design/0010-self-host.md), built in the guest. Addresses are hex.
+ * design/self-host.md), built in the guest. Addresses are hex.
  *
  *	dbg peek pid addr		print the long at addr
  *	dbg copy pid from to n		copy n bytes of pid's memory from to to

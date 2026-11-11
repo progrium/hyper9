@@ -150,7 +150,7 @@ h9_fs_checkname(char *path, int op)
 }
 
 /*
- * Contained trees (design/0034-symlinks-in-root.md). The walk is done here
+ * Contained trees (design/symlinks-in-root.md). The walk is done here
  * one element at a time with lstat, instead of by the host's stat, so a
  * link is read relative to the tree as openat2's RESOLVE_IN_ROOT reads it:
  * an absolute target starts again at top, and ".." stops there. top is
@@ -693,7 +693,7 @@ h9_fs_checkw(wchar_t *path, int op)
 }
 
 /*
- * Contained trees on Windows (design/0034-symlinks-in-root.md): as on
+ * Contained trees on Windows (design/symlinks-in-root.md): as on
  * POSIX, with a reparse point's target in place of readlink. Symlinks and
  * junctions are followed; other reparse points are refused. An absolute
  * target, "C:\x", "\x" or a junction's "\??\C:\x", starts again at top:
@@ -955,7 +955,7 @@ extern int h9_overlay_move(Chan*, Chan*, char*);
 /*
  * The target of the link that path's last name is, through #U and an
  * overlay over it, for the Linux personality's readlinkat and lstat
- * (design/0034-symlinks-in-root.md). Plan 9 programs never see links,
+ * (design/symlinks-in-root.md). Plan 9 programs never see links,
  * so it's a leaf, not a 9P message. Returns the target's length, with
  * it in buf, or -1 with the error in errstr, as the sys* wrappers do.
  */

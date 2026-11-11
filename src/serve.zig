@@ -1,4 +1,4 @@
-//! Serving the namespace over 9P (design/0035-serve.md): the host side.
+//! Serving the namespace over 9P (design/serve.md): the host side.
 //! `--serve` listeners on unix sockets, TCP and WebSocket, each with a
 //! thread that accepts connections and hands them to src/hstream.zig as
 //! accepted streams. Once a stream's first 9P message has passed the

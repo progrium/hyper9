@@ -1,4 +1,4 @@
-// The browser host's demo page in Chromium (design/0012-browser-host.md):
+// The browser host's demo page in Chromium (design/browser-host.md):
 // serves zig-out/web, opens index.html and drives rc through its terminal.
 //
 //     node tests/web/browser.mjs [zig-out/web]
@@ -120,7 +120,7 @@ try {
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
 
   // With linux.h9a, ?linux runs Alpine's arm64 busybox sh, jq and sqlite3
-  // on ha64 (design/h86-ha64.md).
+  // on ha64 (design/hcpu.md).
   if (await readFile(path.join(dir, 'linux.h9a')).then(() => true, () => false)) {
     await page.goto(`${url}?linux`);
     await step('busybox sh prompts over linux.h9a', () => expect(/# $/, 0, 60_000));
@@ -168,7 +168,7 @@ try {
   }
 
   // With H9_TEST_WS_ROOT, a ws:// URL of a 9P server serving a 386 root,
-  // the page runs over it (design/0021-websocket-9p.md).
+  // the page runs over it (design/websocket-9p.md).
   const ws = process.env.H9_TEST_WS_ROOT;
   if (ws) {
     await page.goto(`${url}?root=${encodeURIComponent(ws)}`);

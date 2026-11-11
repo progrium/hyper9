@@ -43,7 +43,7 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
     }
 }
 
-/// The --check line for the GUI backend (design/0015-gfx.md). On X11 it
+/// The --check line for the GUI backend (design/gfx.md). On X11 it
 /// opens and closes `$DISPLAY`, without a window. A missing display isn't
 /// a failure: only --gfx needs one.
 fn checkGfx(w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -73,7 +73,7 @@ pub const CheckOptions = struct {
     arch: ?vmm.Arch = null,
     memory: ?u64 = null,
     /// The built-in root, as the CLI resolved --builtin
-    /// (design/0087-builtin-root.md): without a root, anything but `.off`
+    /// (design/builtin-root.md): without a root, anything but `.off`
     /// checks it instead.
     builtin: h9.policy.Builtin = .off,
     /// The root tree as given (for messages), or null if none was found.

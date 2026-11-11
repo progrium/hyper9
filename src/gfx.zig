@@ -1,11 +1,11 @@
 //! Graphics: one host window per process, drawn by drawterm's GUI backends
-//! (design/0015-gfx.md). A machine with `Options.gfx` claims the screen,
+//! (design/gfx.md). A machine with `Options.gfx` claims the screen,
 //! and its namespace gets `#i`, `#m` and `#b` on /dev; every other machine
 //! has them masked. The backend is chosen at build time (`-Dgfx`).
 //!
 //! The kernel side is src/kern/gfx.c, with the backend's own source, or
 //! src/kern/nogfx.c without one. On the browser host the backend is a
-//! page's canvas (src/kern/gfx-web.c, design/0120-browser-gfx.md).
+//! page's canvas (src/kern/gfx-web.c, design/browser-gfx.md).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -121,7 +121,7 @@ pub fn acquire(io: std.Io, claim: *const Claim, opts: Options) Error!void {
 fn claimScreen(io: std.Io, claim: *const Claim, opts: Options) Error!void {
     // The browser host's h9.wasm has the canvas backend, but only a page
     // that passed a canvas has a screen; h9-node never does, and says so
-    // as a build without graphics would (design/0120-browser-gfx.md).
+    // as a build without graphics would (design/browser-gfx.md).
     if (backend == .web and c.h9_gfx_web_present() == 0) return error.GfxNotBuilt;
     if (unavailable() != null) return error.GfxUnavailable;
     if (owner.cmpxchgStrong(null, claim, .acq_rel, .acquire) != null) return error.GfxInUse;

@@ -1,4 +1,4 @@
-//! NETLINK_ROUTE for the Linux personality (design/0050-linux-net.md):
+//! NETLINK_ROUTE for the Linux personality (design/linux-net.md):
 //! the dumps that list interfaces and their addresses, which Go's
 //! net.Interfaces and net.InterfaceAddrs and musl's getifaddrs make.
 //! Everything else is answered with EOPNOTSUPP. The interfaces are the

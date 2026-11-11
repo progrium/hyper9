@@ -1,4 +1,4 @@
-// #H within one machine (tests/backends.zig, design/0032-guest-tools.md):
+// #H within one machine (tests/backends.zig, design/guest-tools.md):
 // the test-only script is on /bin after the root's directories and reads
 // back as an rc script, #H/bin lists, and every write, create, remove,
 // truncating open and wstat fails with "permission denied".

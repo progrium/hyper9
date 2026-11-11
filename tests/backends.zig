@@ -94,7 +94,7 @@ test "hello amd64" {
     try expectAll(.amd64, bytes, hello_result);
 }
 
-test "hello 386 [9]" {
+test "hello 386 [i386]" {
     const bytes = try image(std.testing.allocator, .i386, &hello.i386_text);
     defer std.testing.allocator.free(bytes);
     try expectAll(.i386, bytes, hello_result);
@@ -131,7 +131,7 @@ test "exits with a message amd64" {
     try expectAll(.amd64, bytes, exits_result);
 }
 
-test "a guest syscall with any value in AX traps to h9 [95]" {
+test "a guest syscall with any value in AX traps to h9 [native-backend]" {
     // 9front takes the number from BP and ignores AX, so a guest may leave
     // anything there; on native, the host kernel mustn't act on any of
     // them (a patched kernel ran 335 and 336 before seccomp saw them).
@@ -172,7 +172,7 @@ test "a guest syscall with any value in AX traps to h9 [95]" {
     });
 }
 
-test "a guest that jumps into the stub can't open a host file [95]" {
+test "a guest that jumps into the stub can't open a host file [native-backend]" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -219,7 +219,7 @@ test "a guest that jumps into the stub can't open a host file [95]" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, path, .{}));
 }
 
-test "two vCPUs run one address space at once, and a shootdown reaches both [95]" {
+test "two vCPUs run one address space at once, and a shootdown reaches both [native-backend]" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     // A sets the first word of data and waits for the second; B waits for
@@ -309,7 +309,7 @@ test "two vCPUs run one address space at once, and a shootdown reaches both [95]
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "exits with a message 386 [9]" {
+test "exits with a message 386 [i386]" {
     // The syscall number in AX, arguments from SP+4; call/pop finds msg.
     const code = [_]u8{
         0x83, 0xec, 0x10, // subl  $0x10, %esp
@@ -353,7 +353,7 @@ test "fault on unmapped memory amd64" {
     }, 2);
 }
 
-test "fault on unmapped memory 386 [9]" {
+test "fault on unmapped memory 386 [i386]" {
     try expectFault(.i386, &[_]u8{
         0x31, 0xc9, // xorl  %ecx, %ecx
         0x8b, 0x01, // movl  (%ecx), %eax
@@ -363,7 +363,7 @@ test "fault on unmapped memory 386 [9]" {
 /// Runs `text`, which ends in a breakpoint instruction at `bp_off`: the
 /// vCPU exits with `.breakpoint`, the PC left at a BRK and past an INT3
 /// (`pc_off`), and a process with no debugger or note handler dies with
-/// `sys: breakpoint` (design/0010-self-host.md).
+/// `sys: breakpoint` (design/self-host.md).
 fn expectBreakpoint(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -401,7 +401,7 @@ fn expectBreakpoint(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
     });
 }
 
-test "BRK exits as a breakpoint on every backend [10]" {
+test "BRK exits as a breakpoint on every backend [self-host]" {
     try expectBreakpoint(.arm64, &words(&.{
         0xd503201f, // nop
         0xd4200000, // brk  #0 (libmach's bpinst64)
@@ -465,7 +465,7 @@ test "kick interrupts a running vcpu amd64" {
     try expectKick(.amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
 
-test "kick interrupts a running vcpu 386 [9]" {
+test "kick interrupts a running vcpu 386 [i386]" {
     try expectKick(.i386, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
 
@@ -523,7 +523,7 @@ test "a kick racing the start of a run isn't lost amd64" {
     try expectKickRace(.amd64, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
 
-test "a kick racing the start of a run isn't lost 386 [9]" {
+test "a kick racing the start of a run isn't lost 386 [i386]" {
     try expectKickRace(.i386, &[_]u8{ 0xeb, 0xfe }); // jmp .
 }
 
@@ -739,13 +739,13 @@ fn noteProgramI386(comptime with_handler: bool) [0x74]u8 {
     };
 }
 
-test "a note handler catches a note and noted(NCONT) resumes 386 [9]" {
+test "a note handler catches a note and noted(NCONT) resumes 386 [i386]" {
     const img = try image(std.testing.allocator, .i386, &noteProgramI386(true));
     defer std.testing.allocator.free(img);
     try expectNotes(.i386, img, "exited ", "sys: bad sys call");
 }
 
-test "an unhandled note kills the process with the note and pc 386 [9]" {
+test "an unhandled note kills the process with the note and pc 386 [i386]" {
     const img = try image(std.testing.allocator, .i386, &noteProgramI386(false));
     defer std.testing.allocator.free(img);
     try expectNotes(.i386, img, "killed sys: bad sys call pc=0x", "");
@@ -1191,7 +1191,7 @@ test "pooled vCPUs carry FP state and fork across processes amd64" {
     try expectPooled(.amd64, &code);
 }
 
-test "pooled vCPUs carry FP state and fork across processes 386 [9]" {
+test "pooled vCPUs carry FP state and fork across processes 386 [i386]" {
     // As the amd64 test, with xmm3, MXCSR, the x87 control word and ST0.
     // The Tos comes in AX, and its pid is at 48 with 4-byte pointers.
     const code = [_]u8{
@@ -1329,47 +1329,47 @@ fn expectRun(text: []const u8, root: ?[]const u8, timeout_ns: u64, want_status: 
 /// the stack's 16 MiB.
 const seg_low = "0x7fefef000";
 
-test "a shared segment is the same pages in an rfork child [4]" {
+test "a shared segment is the same pages in an rfork child [segattach]" {
     try expectSeg(@embedFile("seg_shared_rfork"), null, "exited ", "");
 }
 
-test "a memory segment is copied by rfork and shared with RFMEM [4]" {
+test "a memory segment is copied by rfork and shared with RFMEM [segattach]" {
     try expectSeg(@embedFile("seg_memory_rfork"), null, "exited ", "");
 }
 
-test "segattach at 0 goes below the stack, and an overlap fails [4]" {
+test "segattach at 0 goes below the stack, and an overlap fails [segattach]" {
     try expectSeg(@embedFile("seg_place"), null, "exited segments overlap", "");
 }
 
-test "a sixth segment fails with virtual memory allocation failed [4]" {
+test "a sixth segment fails with virtual memory allocation failed [segattach]" {
     try expectSeg(@embedFile("seg_sixth"), null, "exited virtual memory allocation failed", "");
 }
 
-test "segdetach unmaps, and the stack can't be detached [4]" {
+test "segdetach unmaps, and the stack can't be detached [segattach]" {
     try expectSeg(@embedFile("seg_detach"), null, "killed sys: trap: fault read addr=" ++ seg_low ++ " pc=", "");
 }
 
-test "segbrk grows and shrinks, and won't shrink a shared segment [4]" {
+test "segbrk grows and shrinks, and won't shrink a shared segment [segattach]" {
     try expectSeg(@embedFile("seg_segbrk"), null, "exited device or object already in use", "");
 }
 
-test "segfree zeroes the span [4]" {
+test "segfree zeroes the span [segattach]" {
     try expectSeg(@embedFile("seg_segfree"), null, "exited ", "");
 }
 
-test "a write to an SG_RONLY segment faults [4]" {
+test "a write to an SG_RONLY segment faults [segattach]" {
     try expectSeg(@embedFile("seg_ronly"), null, "killed sys: trap: fault write addr=" ++ seg_low ++ " pc=", "");
 }
 
-test "executing from an attached segment posts an exec fault [4]" {
+test "executing from an attached segment posts an exec fault [segattach]" {
     try expectSeg(@embedFile("seg_execfault"), null, "killed sys: trap: fault exec addr=" ++ seg_low ++ " pc=", "");
 }
 
-test "segattach just above the break trims the headroom, and the data survives [4]" {
+test "segattach just above the break trims the headroom, and the data survives [segattach]" {
     try expectSeg(@embedFile("seg_headroom"), null, "exited ", "");
 }
 
-test "exec keeps segments and drops SG_CEXEC ones [4]" {
+test "exec keeps segments and drops SG_CEXEC ones [segattach]" {
     // exec_a execs /b, which is exec_b.
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1395,15 +1395,15 @@ fn kernPath(out: []u8, p: []const u8) []const u8 {
     return out[0 .. p.len + 1];
 }
 
-test "brk stops below an attached segment [4]" {
+test "brk stops below an attached segment [segattach]" {
     try expectSeg(@embedFile("seg_brkstop"), null, "exited segments overlap", "");
 }
 
-test "a detached shared segment stays mapped in a sibling [4]" {
+test "a detached shared segment stays mapped in a sibling [segattach]" {
     try expectSeg(@embedFile("seg_sibling"), null, "killed sys: trap: fault read addr=" ++ seg_low ++ " pc=", "ok");
 }
 
-test "/proc/n/segment lists every segment [4]" {
+test "/proc/n/segment lists every segment [segattach]" {
     try expectSeg(@embedFile("seg_procseg"), null, "exited ",
         \\Stack     7feff0000 7ffff0000    1
         \\Text   R     10000    11000    1
@@ -1557,34 +1557,34 @@ test "segments: /proc/n/segment's text" {
     }.f);
 }
 
-// rendezvous and semaphores (design/0003-semaphores.md), from the programs
+// rendezvous and semaphores (design/semaphores.md), from the programs
 // in tests/fixtures/sema.
 
-test "rendezvous swaps values between an rfork child and its parent [3]" {
+test "rendezvous swaps values between an rfork child and its parent [semaphores]" {
     try expectRun(@embedFile("sema_rendezvous"), null, 10 * std.time.ns_per_s, "exited ", "cp");
 }
 
-test "semacquire waits for an RFMEM child's semrelease, and the non-blocking and timed forms [3]" {
+test "semacquire waits for an RFMEM child's semrelease, and the non-blocking and timed forms [semaphores]" {
     try expectRun(@embedFile("sema_semacquire"), null, 10 * std.time.ns_per_s, "exited ", "");
 }
 
-test "a semaphore keeps a shared counter exact under contention [3]" {
+test "a semaphore keeps a shared counter exact under contention [semaphores]" {
     try expectRun(@embedFile("sema_count"), null, 60 * std.time.ns_per_s, "exited ", "");
 }
 
-test "semaphores in text, negative values and negative counts are bad args [3]" {
+test "semaphores in text, negative values and negative counts are bad args [semaphores]" {
     try expectRun(@embedFile("sema_badarg"), null, 10 * std.time.ns_per_s, "exited bad arg in system call", "");
 }
 
-test "an odd semaphore address posts sys: odd address [3]" {
+test "an odd semaphore address posts sys: odd address [semaphores]" {
     try expectRun(@embedFile("sema_odd"), null, 10 * std.time.ns_per_s, "killed sys: odd address pc=", "");
 }
 
-test "an unmapped semaphore address is a bad address [3]" {
+test "an unmapped semaphore address is a bad address [semaphores]" {
     try expectRun(@embedFile("sema_unmapped"), null, 10 * std.time.ns_per_s, "killed sys: bad address in syscall pc=", "");
 }
 
-test "a note interrupts rendezvous and semacquire, and the handler runs [3]" {
+test "a note interrupts rendezvous and semacquire, and the handler runs [semaphores]" {
     try expectRun(@embedFile("sema_interrupt"), null, 300 * std.time.ns_per_ms, "killed h9: timeout", "hhrinterrupted");
 }
 
@@ -1631,16 +1631,16 @@ const denied = "exited permission denied";
 const refused = "exited Connection refused";
 
 // devip binds only for a nonzero port, so the announces name one.
-test "the default profile refuses announce, and enable allows it [5]" {
+test "the default profile refuses announce, and enable allows it [net-policy]" {
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "announce 127.0.0.1!39517" }, .{}, denied);
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "announce 127.0.0.1!39517" }, .{ .net = .enable }, "exited ");
 }
 
-test "a UDP announce is refused under outbound [5]" {
+test "a UDP announce is refused under outbound [net-policy]" {
     try expectNet(net_ctl, &.{ "t", "#I/udp/clone", "announce 127.0.0.1!39517" }, .{}, denied);
 }
 
-test "outbound allows connect, except to link-local [5]" {
+test "outbound allows connect, except to link-local [net-policy]" {
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, .{}, refused);
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 169.254.169.254!80" }, .{}, denied);
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 169.254.169.254!80" }, .{ .net = .enable }, denied);
@@ -1648,7 +1648,7 @@ test "outbound allows connect, except to link-local [5]" {
     try expectNet(net_ctl, &.{ "t", "#I/udp/clone", "connect fe80::1!53" }, .{}, denied);
 }
 
-test "--net-allow allows a matching CIDR and port, and refuses the rest [5]" {
+test "--net-allow allows a matching CIDR and port, and refuses the rest [net-policy]" {
     const pol: h9.Policy = .{ .net_allow = &.{"tcp!127.0.0.0/8!1-2"} };
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, refused);
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!3" }, pol, denied);
@@ -1657,19 +1657,19 @@ test "--net-allow allows a matching CIDR and port, and refuses the rest [5]" {
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!3 4000" }, pol, denied);
 }
 
-test "a name outside --net-allow isn't resolved [5]" {
+test "a name outside --net-allow isn't resolved [net-policy]" {
     try expectNet(net_ctl, &.{ "t", "#I/cs", "tcp!localhost!1" }, .{ .net_allow = &.{"tcp!127.0.0.1!1"} }, "exited no translation for host found");
     try expectNet(net_ctl, &.{ "t", "#I/cs", "tcp!127.0.0.1!1" }, .{ .net_allow = &.{"tcp!127.0.0.1!1"} }, "exited ");
 }
 
-test "a name pattern allows a connect through cs, and only through cs [5]" {
+test "a name pattern allows a connect through cs, and only through cs [net-policy]" {
     const pol: h9.Policy = .{ .net_allow = &.{"tcp!localhost!1"} };
     try expectNet(net_cs, &.{ "t", "tcp!localhost!1" }, pol, refused);
     try expectNet(net_ctl, &.{ "t", "#I/tcp/clone", "connect 127.0.0.1!1" }, pol, denied);
     try expectNet(net_cs, &.{ "t", "tcp!localhost!2" }, pol, "exited no translation for host found");
 }
 
-// Overlays (design/0006-ephemeral-writes.md).
+// Overlays (design/ephemeral-writes.md).
 
 /// A host root tree with the mount points the namespace builder needs.
 const OverlayRoot = struct {
@@ -1703,8 +1703,8 @@ fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.
     return runOverlayTools(kind, r, text, pol, true, sb, null);
 }
 
-/// `runOverlay`, with `guest_tools` (design/0032-guest-tools.md) as given,
-/// and the run's root changes (design/0011-overlay.md) in `changes`.
+/// `runOverlay`, with `guest_tools` (design/guest-tools.md) as given,
+/// and the run's root changes (design/overlay.md) in `changes`.
 fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, guest_tools: bool, sb: []u8, changes: ?*h9.RootChanges) !?[]const u8 {
     const gpa = std.testing.allocator;
     const bytes = try image(gpa, .arm64, text);
@@ -1736,7 +1736,7 @@ fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol
     };
 }
 
-test "two machines in one host process each get their own /tmp [6]" {
+test "two machines in one host process each get their own /tmp [ephemeral-writes]" {
     // HVF allows one VM per host process, so its second machine is the
     // emulator. KVM allows several.
     var ran: usize = 0;
@@ -1772,7 +1772,7 @@ test "two machines in one host process each get their own /tmp [6]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "two machines in one host process each see only their own root changes [11]" {
+test "two machines in one host process each see only their own root changes [overlay]" {
     // HVF allows one VM per host process, so its second machine is the
     // emulator. KVM allows several.
     var ran: usize = 0;
@@ -1815,7 +1815,7 @@ test "two machines in one host process each see only their own root changes [11]
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "a copy-up while another process has the lower file open leaves that reader on the old contents [6]" {
+test "a copy-up while another process has the lower file open leaves that reader on the old contents [ephemeral-writes]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
@@ -1833,7 +1833,7 @@ test "a copy-up while another process has the lower file open leaves that reader
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "posting, opening and removing in /srv, and clone boards [8]" {
+test "posting, opening and removing in /srv, and clone boards [devsrv]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
@@ -1848,7 +1848,7 @@ test "posting, opening and removing in /srv, and clone boards [8]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "two machines in one process have separate /srv [8]" {
+test "two machines in one process have separate /srv [devsrv]" {
     // HVF allows one VM per host process, so its second machine is the
     // emulator. KVM allows several.
     var ran: usize = 0;
@@ -1883,7 +1883,7 @@ test "two machines in one process have separate /srv [8]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "a machine's posted channels are closed when it ends [8]" {
+test "a machine's posted channels are closed when it ends [devsrv]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
@@ -1900,10 +1900,10 @@ test "a machine's posted channels are closed when it ends [8]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-// #H (design/0032-guest-tools.md), with the test-only script that Debug
+// #H (design/guest-tools.md), with the test-only script that Debug
 // builds serve from tests/fixtures/guest.
 
-test "#H/bin is on /bin, reads back, and refuses every change [32]" {
+test "#H/bin is on /bin, reads back, and refuses every change [guest-tools]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
@@ -1918,7 +1918,7 @@ test "#H/bin is on /bin, reads back, and refuses every change [32]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "guest_tools = false leaves #H/bin off /bin and masks #H [32]" {
+test "guest_tools = false leaves #H/bin off /bin and masks #H [guest-tools]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var r: OverlayRoot = .{ .tmp = undefined };
@@ -1935,7 +1935,7 @@ test "guest_tools = false leaves #H/bin off /bin and masks #H [32]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "KVM reuses destroyed vCPUs past its limit, with none of the last user's state [16]" {
+test "KVM reuses destroyed vCPUs past its limit, with none of the last user's state [kvm]" {
     const gpa = std.testing.allocator;
     const arch = vmm.host_arch orelse return error.SkipZigTest;
     var b = vmm.create(gpa, std.testing.io, .kvm, .{ .arch = arch }) catch |e| switch (e) {
@@ -1985,7 +1985,7 @@ fn arm64Zero() vmm.arm64.Ureg {
     return .{};
 }
 
-// Graphics (design/0015-gfx.md), on the headless backend: a screen in
+// Graphics (design/gfx.md), on the headless backend: a screen in
 // memory that the test acts on as a window system would.
 
 const gfx = h9.gfx;
@@ -2011,7 +2011,7 @@ const GfxRun = struct {
         guest: ?[]const u8 = null,
         argv: []const []const u8 = &.{"t"},
         root: ?[]const u8 = null,
-        /// A Linux root, for a Linux guest (design/0018-linux-personality.md).
+        /// A Linux root, for a Linux guest (design/linux-personality.md).
         linux_root: ?[]const u8 = null,
         cwd: ?[]const u8 = null,
         arch: vmm.Arch = .arm64,
@@ -2101,11 +2101,11 @@ fn expectGfx(text: []const u8, clipboard: bool, act: ?*const fn () void, check: 
 
 fn noCheck(_: []const u8) anyerror!void {}
 
-test "--gfx binds /dev/draw, /dev/mouse, /dev/cursor and /dev/kbd [15]" {
+test "--gfx binds /dev/draw, /dev/mouse, /dev/cursor and /dev/kbd [gfx]" {
     try expectGfx(@embedFile("gfx_binds"), true, null, noCheck);
 }
 
-test "reading /dev/draw/new reports the screen's size [15]" {
+test "reading /dev/draw/new reports the screen's size [gfx]" {
     try expectGfx(@embedFile("gfx_drawnew"), true, null, struct {
         fn check(out: []const u8) !void {
             // Twelve fields of 12 bytes: client, image id, chan, repl,
@@ -2128,7 +2128,7 @@ fn pixelAt(px: []const u8, dx: u32, x: u32, y: u32) u32 {
     return std.mem.readInt(u32, px[(y * dx + x) * 4 ..][0..4], .little) & 0xFFFFFF;
 }
 
-test "a draw client's image reaches the screen [15]" {
+test "a draw client's image reaches the screen [gfx]" {
     try expectGfx(@embedFile("gfx_draw"), true, null, struct {
         fn check(_: []const u8) !void {
             const sz = gfx.headless.size().?;
@@ -2144,7 +2144,7 @@ test "a draw client's image reaches the screen [15]" {
     }.check);
 }
 
-test "a key injected into the window reaches /dev/kbd [15]" {
+test "a key injected into the window reaches /dev/kbd [gfx]" {
     try expectGfx(@embedFile("gfx_kbd"), true, struct {
         fn act() void {
             gfx.headless.key('a');
@@ -2160,7 +2160,7 @@ test "a key injected into the window reaches /dev/kbd [15]" {
     }.check);
 }
 
-test "a mouse event injected into the window reaches /dev/mouse [15]" {
+test "a mouse event injected into the window reaches /dev/mouse [gfx]" {
     try expectGfx(@embedFile("gfx_mouse"), true, struct {
         fn act() void {
             gfx.headless.mouse(100, 200, 1);
@@ -2178,7 +2178,7 @@ test "a mouse event injected into the window reaches /dev/mouse [15]" {
     }.check);
 }
 
-test "/dev/snarf reads and writes the host clipboard [15]" {
+test "/dev/snarf reads and writes the host clipboard [gfx]" {
     gfx.headless.setClipboard("host");
     try expectGfx(@embedFile("gfx_snarf"), true, null, struct {
         fn check(out: []const u8) !void {
@@ -2190,7 +2190,7 @@ test "/dev/snarf reads and writes the host clipboard [15]" {
     }.check);
 }
 
-test "with --gfx=noclip, /dev/snarf keeps its text but leaves the host clipboard alone [15]" {
+test "with --gfx=noclip, /dev/snarf keeps its text but leaves the host clipboard alone [gfx]" {
     gfx.headless.setClipboard("host");
     try expectGfx(@embedFile("gfx_snarf"), false, null, struct {
         fn check(out: []const u8) !void {
@@ -2203,7 +2203,7 @@ test "with --gfx=noclip, /dev/snarf keeps its text but leaves the host clipboard
     }.check);
 }
 
-test "closing the window posts hangup and ends the run [15]" {
+test "closing the window posts hangup and ends the run [gfx]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .native, .emu }) |kind| {
         var g: GfxRun = .{};
@@ -2220,7 +2220,7 @@ test "closing the window posts hangup and ends the run [15]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "a second machine in the process gets GfxInUse [15]" {
+test "a second machine in the process gets GfxInUse [gfx]" {
     const gpa = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -2252,7 +2252,7 @@ fn gfxRoot(buf: []u8) ?[]const u8 {
     return p;
 }
 
-test "rio starts, and a window's rc runs a command typed into it [15]" {
+test "rio starts, and a window's rc runs a command typed into it [gfx]" {
     var rb: [std.fs.max_path_bytes]u8 = undefined;
     const root = gfxRoot(&rb) orelse return error.SkipZigTest;
     var ran: usize = 0;
@@ -2279,7 +2279,7 @@ test "rio starts, and a window's rc runs a command typed into it [15]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-test "acme starts inside rio [15]" {
+test "acme starts inside rio [gfx]" {
     var rb: [std.fs.max_path_bytes]u8 = undefined;
     const root = gfxRoot(&rb) orelse return error.SkipZigTest;
     var ran: usize = 0;

@@ -1,5 +1,5 @@
 # Builds 9box, a multi-call binary of the commands in ./slim, for $objtype,
-# from /sys/src (design/0064-multicall.md). Run it in a writable copy of this
+# from /sys/src (design/multicall.md). Run it in a writable copy of this
 # directory. Each command builds in obj/$objtype/NAME (see mkcmd), and the
 # box is $O.9box.
 </$objtype/mkfile

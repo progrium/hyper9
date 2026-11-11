@@ -1,7 +1,7 @@
 //! Linux syscall numbers for arm64 (the generic table), amd64 and i386, from
 //! the kernel's headers (include/uapi/asm-generic/unistd.h,
 //! arch/x86/entry/syscalls/syscall_64.tbl and syscall_32.tbl). Generated;
-//! see design/0018-linux-personality.md and design/0105-linux-i386.md.
+//! see design/linux-personality.md and design/linux-i386.md.
 //!
 //! i386 names that the other tables use for a different call are renamed:
 //! its old `select`, `mmap`, `getrlimit`, `stat`, `statfs` and 16-bit id

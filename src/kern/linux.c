@@ -1,5 +1,5 @@
 /*
- * Kernel helpers for the Linux personality (design/0018-linux-personality.md):
+ * Kernel helpers for the Linux personality (design/linux-personality.md):
  * the per-process root swap at exec, walks relative to a directory fd,
  * fd flags, and await without blocking. Each returns -1 with the error
  * string set on failure, as glue.c's wrappers do.
@@ -532,7 +532,7 @@ h9_linux_fchdir(int fd)
 }
 
 /*
- * futex (design/0049-linux-threads.md): waiters queued by key (the
+ * futex (design/linux-threads.md): waiters queued by key (the
  * address space) and guest address, sleeping with drawterm's sleep, so a
  * note interrupts them as it does any wait. The value check and the
  * enqueue are under the same lock a waker takes, so a wake after the

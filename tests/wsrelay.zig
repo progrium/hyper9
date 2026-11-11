@@ -1,4 +1,4 @@
-//! A WebSocket server for the websocket-9p cases (design/0021-websocket-9p.md),
+//! A WebSocket server for the websocket-9p cases (design/websocket-9p.md),
 //! built from src/ws.zig's server side. It accepts WebSocket connections on
 //! a loopback port and relays each one's binary messages to a TCP server,
 //! normally a second h9 running exportfs. Options make it misbehave in the
