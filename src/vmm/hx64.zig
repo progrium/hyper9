@@ -55,9 +55,8 @@ pub const Cpu = struct {
     check: check_vmm.State = .{},
 };
 
-/// What the decode caches come from: the web host has no threads, so no
-/// SmpAllocator.
-const icache_gpa = if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator;
+/// What the decode caches come from.
+const icache_gpa = vmm.host_gpa;
 
 /// Frees -Djit-check's state and the decode caches.
 pub fn deinit(cpu: *Cpu) void {
@@ -304,7 +303,7 @@ fn runWasmT1(c: *x86cpu.Cpu64, ctx: *Ctx, m: *tlb.TlbMem) vmm.Error!vmm.Exit {
         ctx.retired = c.retired;
         const before = ctx.retired;
         const c_before = c.retired;
-        const r = wasm_t1.run(std.heap.c_allocator, ctx, cfg);
+        const r = wasm_t1.run(vmm.host_gpa, ctx, cfg);
         c.retired = c_before +% (ctx.retired -% before);
         switch (r) {
             .svc => return exitOf(c, ctx, .syscall),

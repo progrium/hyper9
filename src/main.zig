@@ -19,6 +19,14 @@ pub const panic = std.debug.FullPanic(struct {
     }
 }.f);
 
+/// On the web host, std.heap.page_allocator is h9's (web/heap.zig), whose
+/// memory comes in big steps.
+pub const os = if (web) struct {
+    pub const heap = struct {
+        pub const page_allocator = h9.web.heap.allocator;
+    };
+} else struct {};
+
 /// Exit codes for h9's own failures (SPEC.md, "Exit codes").
 const exit_failed = 125;
 const exit_not_executable = 126;
