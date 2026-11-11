@@ -157,12 +157,16 @@ pub const Page = struct {
     ops: [ops_per_page + 1]Op,
     /// The host address of the text it was decoded from.
     host: usize = 0,
+    /// Its arena page's CodePages generation when it was decoded.
+    gen: u32 = 0,
 };
 
 /// Decoded pages by virtual page number, each with the host page it was
 /// decoded from. A lookup checks the page still maps there (a TLB hit, as
-/// a mapping change flushes the TLB), and the whole cache goes when any
-/// page's code is invalidated (CodePages.epoch moves: a store to code).
+/// a mapping change flushes the TLB) and that its code hasn't been
+/// invalidated since (CodePages.gen). When any page's is
+/// (CodePages.epoch moves: a store to code), the next lookup skips the
+/// last-page shortcut and checks.
 pub const Cache = struct {
     gpa: std.mem.Allocator,
     pages: std.AutoHashMapUnmanaged(u64, *Page) = .empty,
@@ -187,13 +191,15 @@ pub const Cache = struct {
         c.last = null;
     }
 
-    /// Flushes the cache if code was invalidated since it last looked.
+    /// Notes that code was invalidated since it last looked: the next
+    /// `get` checks its page's generation.
     inline fn check(c: *Cache, m: *Machine) void {
         if (m.space != null) return;
         const code = m.view().code orelse return;
         const e = code.epoch.load(.monotonic);
         if (e != c.epoch) {
-            c.flush();
+            c.last_vp = std.math.maxInt(u64);
+            c.last = null;
             c.epoch = e;
         }
     }
@@ -223,7 +229,16 @@ pub const Cache = struct {
             m.exit = .{ .fault = fault(va, .exec, .unmapped) };
             return null;
         };
-        if (!gop.found_existing or gop.value_ptr.*.host != h) {
+        // Code pages are tracked in the View's arena; a Space's aren't.
+        const code: ?*mem.CodePages = if (m.space == null) m.view().code else null;
+        const apage: ?u64 = if (code) |cp| cp.pageOf(h) else null;
+        // Marked before its generation is read, so a store after this
+        // invalidates the page and moves the generation. An exec TLB hit
+        // doesn't mean it's marked: `invalidate` clears the bit before it
+        // drops the exec entries.
+        if (apage) |ap| if (!code.?.isCode(ap)) code.?.mark(ap);
+        const g: u32 = if (apage) |ap| code.?.gen(ap) else 0;
+        if (!gop.found_existing or gop.value_ptr.*.host != h or gop.value_ptr.*.gen != g) {
             if (!gop.found_existing) {
                 gop.value_ptr.* = c.gpa.create(Page) catch {
                     _ = c.pages.remove(vp);
@@ -233,6 +248,7 @@ pub const Cache = struct {
             }
             const p = gop.value_ptr.*;
             p.host = h;
+            p.gen = g;
             decodePage(p, base, @ptrFromInt(h));
         }
         c.last_vp = vp;
