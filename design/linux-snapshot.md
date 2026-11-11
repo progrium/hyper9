@@ -118,7 +118,7 @@ An image is tied to h9's image version and to the read set, so a new h9 or Claud
 
 An image is the process's memory, so it holds whatever the process held: images must be made from a clean root with no credentials, and the maker refuses if the read set includes `~/.claude/.credentials.json` or the environment has an API key.
 
-Every restore of one image starts with the same memory. Crypto is fresh on h9 today, since BoringSSL takes new entropy per call, but JSC's `Math.random` state, any UUID entropy Bun buffers, and Claude Code's session id repeat across restores. If h9 implements `MADV_WIPEONFORK` (and fails `madvise` with unknown advice, as Linux does), a restore must wipe those pages as a fork would, or BoringSSL would then repeat its stream too. The session id repeating is a correctness issue for telemetry and session files, not a secret; whether that's acceptable, or needs a fresh id after restore from Claude Code, is an open issue.
+Every restore of one image starts with the same memory. Crypto is fresh on h9 today, since BoringSSL takes new entropy per call, but JSC's `Math.random` state, any UUID entropy Bun buffers, and Claude Code's session id repeat across restores. If h9 implements `MADV_WIPEONFORK` (and fails `madvise` with unknown advice, as Linux does), a restore must wipe those pages as a fork would, or BoringSSL would then repeat its stream too. The session id repeating is a correctness issue for telemetry and session files, not a secret. Claude Code's `/clear` (aliases `/reset` and `/new`) is described in its bundle as "Start a new session with empty context", so the page can send it when the prompt first appears after login, which gives each visitor a new id; it doesn't reseed `Math.random`, which nothing unique depends on.
 
 A restore parses an image the page fetched, so the parser must treat it as untrusted, like a root archive. An image controls only the guest's memory, registers, and objects the guest could have made itself, and the policy applies to everything it reopens.
 
@@ -143,7 +143,7 @@ A rough cost is four to five weeks of focused work for v1, which saves only what
 
 ## Open issues
 
-- Is a repeated session id, `Math.random` seed, and Bun UUID buffer acceptable for the browser demo, or does it need a fresh-id hook in Claude Code?
+- Does `/clear` after login really give a new session id (check it in the prototype), and is a repeated `Math.random` seed and Bun UUID buffer acceptable for the browser demo?
 - How slow are the first keystrokes on a cold T1, and does shipping compiled regions with the image pay for itself?
 - Should the page keep a returning user's `~/.claude` (in IndexedDB, say)? Then their read set differs and they'd cold-boot, unless the snapshot moves earlier for them.
 - Should `idle` be the only condition, or should there be a syscall-pattern trigger for programs that never settle?
