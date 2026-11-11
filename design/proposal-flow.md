@@ -190,3 +190,4 @@ This proposal is the first to use the new flow: it goes from `draft` to `impleme
 
 - 2026-11-11: Merged in #175. design-status's first run on main closed #120 with `close-issues`. #35 had already been closed by GitHub when #175 merged, because the PR's description said it would "close #35", so `close-issues` found it closed and left it alone.
 - 2026-11-11: The first `/sign proposal-flow` comment, on #177, found the proposal already signed that day, but the workflow's reply failed with a 403. Commenting on a PR through the issues API needs `pull-requests: write`, and design-sign had `read`. #177 fixes the permission, and the `/sign` item stays open until a comment gets its reply.
+- 2026-11-11: #177 merged the `pull-requests: write` fix to design-sign.
