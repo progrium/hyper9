@@ -1,5 +1,6 @@
 # Regenerates design/STATUS.md (the proposal table and graph) on main after
-# each merge. PRs never commit it, so they can't conflict over it
+# each merge, and daily, since in progress and stalled change as branches
+# age. PRs never commit it, so they can't conflict over it
 # (design/README.md, The tool).
 name: design status
 
@@ -10,6 +11,8 @@ on:
       - "design/**"
       - "tools/design.zig"
       - "tools/frontmatter.zig"
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -27,6 +30,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+      # The tips of every branch, for in progress and stalled.
+      - run: git fetch -q --no-tags --depth=1 origin '+refs/heads/*:refs/remotes/origin/*'
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0

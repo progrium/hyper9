@@ -6,6 +6,7 @@ created: 2026-11-11
 authors: [progrium]
 depends: [proposals]
 areas: [process, build, tests]
+branch: [claude/project-thread-2k7msi]
 ---
 
 # Proposal: a proposal lifecycle for building first, branches, Done criteria, and easier signing
@@ -67,7 +68,7 @@ The Done when section is renamed Done criteria and written as a checklist. Each 
 
 - `- [ ]` not done yet
 - `- [x]` done
-- `- [~]` waived, followed by the reason: `- [~] Waived: the headless cases don't run on the web host; the Chromium cases cover the same paths.`
+- `- [~]` waived, with the reason after the item: `- [~] The headless cases pass on the web host. Waived: they run on native backends only, and the Chromium cases cover the same paths.`
 
 Prose between items is allowed, for context. Checking or waiving an item is the one edit allowed to an accepted proposal's body. A waived item also gets a dated note under Updates if the reason needs more than a line.
 
@@ -80,11 +81,11 @@ A proposal's body says what changes and why, and never what's built so far ("hx6
 ### The tool
 
 - `new <slug>` is unchanged, except that the template has Done criteria as a checklist.
-- `file` is renamed `propose`. It opens the issue, sets `id`, and sets `status: proposed`, with no rename. `--issue N`, `--dry-run`, and `--yes` stay. Before creating an issue, it looks for an open one with the same title, so a retried run doesn't open a duplicate (#78 and #81, #79 and #87, and #80 and #95 are duplicates from re-filing).
+- `file` is renamed `propose`. It opens the issue, sets `id`, and sets `status: proposed`, with no rename. `--issue N`, `--dry-run`, and `--yes` stay. Before creating an issue, it looks for an open Proposal issue with the same title, through the REST API, so a retried run doesn't open a duplicate (#78 and #81, #79 and #87, and #80 and #95 are duplicates from re-filing).
 - `fix` is removed, since there are no numbers to rewrite.
 - `log <slug>` prints the proposal's status and branch changes, with commits and dates, from the history of its frontmatter. It replaces one commit per status change as the record of decisions, so that rule is dropped.
 - `list`, `ready`, and `status` show ready, in progress, and stalled.
-- `check` validates `branch`, the Done criteria checklist, slug-only references, and links to `design/*.md` from any tracked file, not just from `design/`. It scans test tags in `tests/**/*.zig` and `tests/web/*.mjs`, and `zig build proposal -Dp=<slug>` runs the web cases too.
+- `check` validates `branch`, the Done criteria checklist, slug-only references, and links to `design/*.md` from any tracked file, not just from `design/`. It scans test tags in `tests/*.zig` and `tests/web/*.mjs`, and `zig build proposal -Dp=<slug>` runs the web cases too.
 
 ### Signing
 
@@ -145,17 +146,17 @@ Nothing changes for the guest. The signing workflow writes to PR branches, so it
 
 ## Done criteria
 
-- [ ] `zig build design -- check` passes on main after the migration, with no numbered filename, no numeric reference, and no dead link to `design/` from any tracked file.
-- [ ] `check` fails on each of: `implemented` without `branch: [main]`, `main` in `branch` on a proposal that isn't implemented, an unchecked Done criteria item on an implemented proposal, a Done criteria item that isn't a checkbox, a number in `depends` or a test tag, and a `likely-accept` or `likely-decline` status. Each has a case in `tools/testdata/check/`.
-- [ ] `check` warns on an accepted proposal whose Done criteria are all checked or waived, and on a branch it can't find.
-- [ ] `zig build design -- list` shows in progress for a proposal whose branch has a recent commit, and stalled for one whose branch is older than 7 days, with cases for both against a test repository.
-- [ ] `zig build design -- propose <slug> --dry-run` shows the issue it would open and `status: proposed`, without renaming the file, and refuses when an open issue has the same title.
-- [ ] `zig build design -- log browser-gfx` prints its status changes with their commits.
+- [x] `zig build design -- check` passes on main after the migration, with no numbered filename, no numeric reference, and no dead link to `design/` from any tracked file.
+- [x] `check` fails on each of: `implemented` without `branch: [main]`, `main` in `branch` on a proposal that isn't implemented, an unchecked Done criteria item on an implemented proposal, a Done criteria item that isn't a checkbox, a number in `depends` or a test tag, and a `likely-accept` or `likely-decline` status. Each has a case in `tools/testdata/check/`.
+- [x] `check` warns on an accepted proposal whose Done criteria are all checked or waived, and on a branch it can't find.
+- [x] `zig build design -- list` shows in progress for a proposal whose branch has a recent commit, and stalled for one whose branch is older than 7 days or gone, with a unit test of each.
+- [x] `zig build design -- propose <slug> --dry-run` shows the issue it would open and `status: proposed`, without renaming the file, and refuses when an open issue has the same title.
+- [x] `zig build design -- log browser-gfx` prints its status changes with their commits.
 - [ ] `zig build proposal -Dp=browser-gfx` runs the Chromium cases in `tests/web/gfx.mjs`.
-- [ ] `zig build design -- sign proposal-flow` adds a signature in the short form with today's date, refuses when stdin isn't a terminal, and refuses unless the typed slug matches.
+- [x] `zig build design -- sign proposal-flow` adds a signature in the short form with today's date, refuses when stdin isn't a terminal, and refuses unless the typed slug matches.
 - [ ] A `/sign <slug>` comment on a PR from a login in `design/SIGNERS` adds the signature on the PR's branch, and the same comment from a login that isn't listed does nothing but reply.
-- [ ] `check` fails on a signature line in neither form, or naming someone not in `design/SIGNERS`.
-- [ ] design/README.md, TEMPLATE.md, AGENTS.md, and DEVELOPING.md describe the new states, `branch`, Done criteria, `propose`, and `log`, and nothing describes `likely-accept`, `fix`, or numbered filenames, and README's Signature section describes the short form, `sign`, and `/sign`.
+- [x] `check` fails on a signature line in neither form, or naming someone not in `design/SIGNERS`.
+- [x] design/README.md, TEMPLATE.md, AGENTS.md, and DEVELOPING.md describe the new states, `branch`, Done criteria, `propose`, and `log`, and nothing describes `likely-accept`, `fix`, or numbered filenames, and README's Signature section describes the short form, `sign`, and `/sign`.
 
 ## Implementation
 
@@ -163,7 +164,7 @@ Nothing changes for the guest. The signing workflow writes to PR branches, so it
 2. Add the computed in progress and stalled to `list`, `ready`, and `status`, reading branches from git.
 3. Rename `file` to `propose`, with the duplicate-issue check. Add `log`, and remove `fix`.
 4. Scan `tests/web/*.mjs` for tags, and register the web cases with `zig build proposal`.
-5. Write the migration as a one-time mode of the tool (`zig build design -- migrate`), run it, and commit the result alone, so the mechanical change is reviewable apart from the tool.
+5. Write the migration as a one-time script, run it, and commit the result alone, so the mechanical change is reviewable apart from the tool. The script isn't kept, since it has nothing left to do once it has run.
 6. Add `design/SIGNERS`, `sign`, and the `/sign` workflow, and the `check` rule for signature lines.
 7. Rewrite design/README.md, TEMPLATE.md, and the design parts of AGENTS.md and DEVELOPING.md. AGENTS.md's "draft one and stop" becomes: stop and draft one unless the person you're working for directs the work, in which case the PR adds or updates the proposal, its `branch`, and its Done criteria as it goes. The rule about signature lines also forbids running `sign`, posting `/sign`, and editing `design/SIGNERS`.
 8. Add a dated note under the Updates section of [proposals](proposals.md) that points here, and set this proposal to `implemented` with `branch: [main]`.

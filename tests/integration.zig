@@ -9,12 +9,12 @@
 //! `zig build install-tests` builds this file for another target, and
 //! `scripts/lima/vm test` runs it in a test VM with the same variables.
 //!
-//! Each case is tagged with the proposal it proves, by slug or id, at the
+//! Each case is tagged with the proposal it proves, by slug, at the
 //! end of its name: `test "ls /bin | wc -l (demo) [baseline]"`. A case
 //! whose proposal isn't implemented skips unless H9_TEST_PENDING is set;
 //! the build passes those proposals' tags in (`design.pending_tags`, from
 //! design/), so a case stops skipping in the commit that marks its
-//! proposal implemented. `zig build proposal -Dp=<id or slug>` runs one
+//! proposal implemented. `zig build proposal -Dp=<slug>` runs one
 //! proposal's cases, and `zig build design -- check` checks the tags.
 //!
 //! Interactive cases run h9 on a terminal from tests/term.zig. Their

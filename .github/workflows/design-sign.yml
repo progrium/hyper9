@@ -1,0 +1,82 @@
+# Signs a proposal or SPEC.md when a signer comments `/sign <slug>` (or
+# `/sign spec`) on a PR: adds the commenter's signature, dated the day of
+# the comment, on the PR's branch, and replies with the commit
+# (design/README.md, Signature). Only logins in design/SIGNERS on main can
+# sign, never a bot, and only on PRs from this repository.
+name: design sign
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: design-sign-${{ github.event.issue.number }}
+
+jobs:
+  sign:
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/sign ') && github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.issue.number }}
+      LOGIN: ${{ github.event.comment.user.login }}
+      BODY: ${{ github.event.comment.body }}
+      WHEN: ${{ github.event.comment.created_at }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Check the comment, the signer, and the PR
+        id: req
+        run: |
+          reply() { gh api "repos/$REPO/issues/$PR/comments" -f body="$1" > /dev/null; }
+          target=$(printf '%s\n' "$BODY" | head -n1 | sed -n 's/^\/sign \([a-z0-9-]*\)[[:space:]]*$/\1/p')
+          if [ -z "$target" ]; then
+            reply "Not signed: write \`/sign <slug>\` or \`/sign spec\` on a line of its own."
+            exit 1
+          fi
+          if ! grep -qE "^$LOGIN[[:space:]]" design/SIGNERS; then
+            reply "Not signed: \`$LOGIN\` isn't in design/SIGNERS on main."
+            exit 1
+          fi
+          head=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.repo.full_name + " " + .head.ref')
+          if [ "${head%% *}" != "$REPO" ]; then
+            reply "Not signed: the PR's branch isn't in this repository."
+            exit 1
+          fi
+          cp design/SIGNERS "$RUNNER_TEMP/SIGNERS"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "branch=${head#* }" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.req.outputs.branch }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Sign and push
+        env:
+          TARGET: ${{ steps.req.outputs.target }}
+          BRANCH: ${{ steps.req.outputs.branch }}
+        run: |
+          reply() { gh api "repos/$REPO/issues/$PR/comments" -f body="$1" > /dev/null; }
+          # Main's signers, not the branch's.
+          cp "$RUNNER_TEMP/SIGNERS" design/SIGNERS
+          if ! out=$(zig build design -- sign "$TARGET" --login "$LOGIN" --date "${WHEN:0:10}" 2>&1); then
+            git checkout -- design/SIGNERS
+            reply "Not signed: $(printf '%s' "$out" | grep '^design:' | head -n1)"
+            exit 1
+          fi
+          git checkout -- design/SIGNERS
+          path=$(git diff --name-only | head -n1)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "design: sign $TARGET, from $LOGIN's /sign comment" -- "$path"
+          git push -q origin "HEAD:$BRANCH"
+          reply "Signed $path in $(git rev-parse --short HEAD), from $LOGIN's comment."

@@ -94,8 +94,8 @@ zig build test     # unit tests, and the backend tests on every backend built in
 zig build kern     # compiles drawterm's kern and the libraries it uses
 zig build embed    # builds docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed
 zig build integration  # real 9front binaries from the root tree through the h9 CLI
-zig build proposal -Dp=baseline  # one proposal's demos and integration cases (by slug or id)
-zig build design -- check        # validate design/ and the test tags (also list, ready, graph, new, file)
+zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
+zig build design -- check        # validate design/, the test tags, and links to design/ (also list, ready, new, propose, log, sign)
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
 zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
@@ -252,7 +252,7 @@ The demos and the integration tests use the root tree from
 skip and only the hello demos run. Each case is tagged with the proposal it
 proves (`test "echo [baseline]"`); cases for a proposal that isn't implemented
 yet skip in `zig build integration` unless `-Dpending` is given, and
-`zig build proposal -Dp=<slug or id>` runs one proposal's cases whatever its
+`zig build proposal -Dp=<slug>` runs one proposal's cases whatever its
 status. Interactive cases run h9 on a terminal the test creates
 ([tests/term.zig](tests/term.zig): a pty, or ConPTY on Windows), so they need
 no human and no `ssh -t`.

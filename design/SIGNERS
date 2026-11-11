@@ -1,0 +1,5 @@
+# Who can sign a proposal or SPEC.md (design/README.md, Signature): a GitHub
+# login, then the full name its signatures carry. The /sign workflow reads
+# this file from main, so a PR can't add its own signer. Only the person a
+# line names adds or changes it.
+progrium Jeff Lindsay

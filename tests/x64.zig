@@ -1,6 +1,6 @@
 //! zig build x64-jit (and hcpu): hx64's cases, tagged [174], each to run
 //! on T0 alone and on T1 through dispatch, as tests/x86.zig runs h86's.
-//! design/hcpu.md's Done when lists them: the long-mode ones,
+//! design/hcpu.md's Done criteria lists them: the long-mode ones,
 //!
 //! - a 32-bit write zeroes the upper half of a 64-bit register
 //! - a RIP-relative load reads past the instruction

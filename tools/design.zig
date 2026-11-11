@@ -749,13 +749,18 @@ fn proposeCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
         \\then sets its id to the issue number and its status to proposed, and commits.
         \\
     , .{ title, p.file });
-    // A retried run, or an issue opened by hand, shouldn't get a twin.
-    const jq = try std.fmt.allocPrint(r.arena, ".[] | select(.title == \"{s}\") | .number", .{title});
-    const search = try std.fmt.allocPrint(r.arena, "{s} in:title", .{p.title});
-    if (run(gpa, r.io, r.arena, &.{ "gh", "issue", "list", "--state", "open", "--search", search, "--json", "number,title", "--jq", jq })) |found| {
-        const n = std.mem.trim(u8, found, " \n");
-        if (n.len > 0) fail("propose: issue #{s} is open with the same title; use --issue {s}", .{ n, n });
-    } else |_| if (!dry_run) fail("propose: gh couldn't search the issues; is gh logged in?", .{});
+    // A retried run, or an issue opened by hand, shouldn't get a twin. The
+    // REST API, since GraphQL isn't reachable everywhere gh is.
+    var quoted: std.ArrayList(u8) = .empty;
+    for (title) |c| {
+        if (c == '"' or c == '\\') try quoted.append(r.arena, '\\');
+        try quoted.append(r.arena, c);
+    }
+    const jq = try std.fmt.allocPrint(r.arena, ".[] | select(.title == \"{s}\") | .number", .{quoted.items});
+    if (run(gpa, r.io, r.arena, &.{ "gh", "api", "--paginate", "repos/{owner}/{repo}/issues?state=open&labels=Proposal&per_page=100", "--jq", jq })) |found| {
+        var nums = std.mem.tokenizeAny(u8, found, " \n");
+        if (nums.next()) |n| fail("propose: issue #{s} is open with the same title; use --issue {s}", .{ n, n });
+    } else |_| fail("propose: gh couldn't list the open proposal issues; is gh logged in?", .{});
     if (dry_run) {
         std.debug.print("\n--dry-run: nothing changed. The issue body would be:\n\n{s}\n", .{summary});
         return;
@@ -796,9 +801,16 @@ fn logCmd(r: Repo, gpa: std.mem.Allocator, w: *std.Io.Writer, args: []const []co
     if (args.len != 1) fail("log: which slug?\n{s}", .{usage});
     const i = r.resolve(args[0]) orelse fail("log: `{s}` isn't a proposal", .{args[0]});
     const path = try std.fmt.allocPrint(r.arena, "design/{s}", .{r.ps[i].file});
-    const out = run(gpa, r.io, r.arena, &.{ "git", "log", "--follow", "--reverse", "--date=short", "--format=@@commit %h %ad %s", "-p", "--", path }) catch
+    // git can't combine --follow with --reverse, so the commits come
+    // newest first and are printed the other way round.
+    const out = run(gpa, r.io, r.arena, &.{ "git", "log", "--follow", "--date=short", "--format=@@commit %h %ad %s", "-p", "--", path }) catch
         fail("log: git log failed", .{});
-    try w.writeAll(try formatLog(r.arena, out));
+    const text = try formatLog(r.arena, out);
+    var rows: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |row| try rows.append(r.arena, row);
+    std.mem.reverse([]const u8, rows.items);
+    for (rows.items) |row| try w.print("{s}\n", .{row});
 }
 
 fn formatLog(arena: std.mem.Allocator, gitlog: []const u8) ![]const u8 {
