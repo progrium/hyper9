@@ -11,6 +11,8 @@ branch: [claude/project-thread-2k7msi]
 
 # Proposal: a proposal lifecycle for building first, branches, Done criteria, and easier signing
 
+Nov 11, 2026 · Jeff Lindsay, [h.d.a.](README.md#signature)
+
 ## Abstract
 
 The proposal process from [proposals](proposals.md) assumes a proposal is designed, filed, discussed in a final comment period, and accepted before any work starts. In practice, work often starts on a branch first, and the proposal is written alongside the code or after it. This proposal changes the lifecycle to fit. It drops the final comment period. It adds a `proposed` state for a proposal filed as an issue for feedback, which is optional, as `accepted` is. It adds a `branch` field that says where a proposal's work lives, from which the tool computes in progress and stalled. Files are named by slug alone, and proposals are referred to by slug everywhere. Done when becomes Done criteria, a checklist that `check` holds an implemented proposal to. Signing gets a shorter line, a `/sign` PR comment, and a `sign` command, all of which still need the named person to act.
