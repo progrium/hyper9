@@ -7380,6 +7380,30 @@ test "a .L.Z unix socket root survives the server restarting mid-write [dotl]" {
     try std.testing.expectEqualStrings("new\n9P2000.L.Z reconnects 1\n", r.out);
 }
 
+test "a namespace file mounts a .L server by its dial string, under the network policy [dotl]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, dotlTree);
+    defer d.finish(std.testing.io);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var ns_buf: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns_buf, "mount -c {s} /mnt/temp\n", .{d.dial()}) });
+    var allow_buf: [64]u8 = undefined;
+    const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--net-allow", allow, "--rc", "cat /mnt/temp/etc/motd; cat /net/dotl/*/status" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hello from .L\n9P2000.L\n", r.out);
+    // Not allowed, it isn't mounted, and the run goes on, as newns
+    // skips a mount that fails.
+    const no = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--net-allow", "tcp!127.0.0.1!1", "--rc", "test -e /mnt/temp/etc/motd || echo skipped" });
+    defer no.deinit();
+    try std.testing.expectEqualStrings("skipped\n", no.out);
+}
+
 test "the guest can't dial a host unix socket through #ℓ [dotl]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--rc", "{ n=`{cat}; echo dial unix!/tmp/x.sock >/net/dotl/$n/ctl } <>/net/dotl/clone" });

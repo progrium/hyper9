@@ -3277,12 +3277,26 @@ pub const Machine = struct {
             } else kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
             // A WebSocket URL is connected by h9, as a root is; unlike
             // other failures, one that fails stops the run.
+            // Its connection goes through a `#ℓ` conversation
+            // (design/dotl.md), so a 9P2000.L server works too.
             .mount => |mt| if (ws.Url.is(mt.file)) {
                 if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a WebSocket mount", .{ws.Url.elide(mt.file)});
-                const fd = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
+                const conn = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
+                const data = dotlConv("fd {d}", conn);
+                kern.close(conn) catch {};
+                const fd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
                 defer kern.close(fd) catch {};
                 _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch
                     return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+            } else if (std.mem.startsWith(u8, mt.file, "tcp!")) {
+                // A dial string, which `#ℓ` dials under the network
+                // policy, as dotlfs does, and dials again if a 9P2000.L.Z
+                // server goes. Like any other mount, one that fails is
+                // skipped.
+                if (m.plan.write == .none) return m.fail("mount {s}: --write=none can't be enforced on a 9P mount", .{mt.file});
+                const fd = dotlConv("dial {s}", mt.file) catch continue;
+                defer kern.close(fd) catch {};
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
             } else {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
                 defer kern.close(fd) catch {};
