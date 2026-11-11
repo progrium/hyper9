@@ -1,12 +1,12 @@
 # src/jit: the emulator's JIT layer
 
-Shared by ha64 (arm64 guests), h86 (386 guests), and hx64 (amd64 guests,
-in progress on the `hx64` branch). Built with `-Demu=hcpu`; tested with
+Shared by ha64 (arm64 guests), h86 (386 guests), and hx64 (amd64 guests).
+Built with `-Demu=hcpu`; tested with
 `zig build hcpu`.
 
 The specs describe what's built: [spec/jit.md](../../spec/jit.md) for this
-layer, and [spec/h86.md](../../spec/h86.md) and [spec/ha64.md](../../spec/ha64.md)
-for the two CPUs.
+layer, and [spec/h86.md](../../spec/h86.md), [spec/ha64.md](../../spec/ha64.md),
+and [spec/hx64.md](../../spec/hx64.md) for the three CPUs.
 
 ## Contracts
 

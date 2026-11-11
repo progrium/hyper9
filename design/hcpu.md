@@ -12,7 +12,7 @@ areas: [vmm, build, web, tests]
 
 ## Abstract
 
-hcpu is h9's family of user-mode CPUs written in Zig: h86 for 386 programs, ha64 for arm64 programs, and hx64 for amd64 programs. Together they make up the emulator backend in place of Unicorn and replace v86 in the browser host. Each has two tiers: an interpreter, T0, which is the fallback and the oracle, and a JIT, T1, which lifts regions of guest code to a small IR shared by every CPU and emits arm64, x86-64, or wasm code from it. Any instruction T1 doesn't lift runs through T0 from inside compiled code, so each CPU runs every instruction it advertises on both tiers. None emulates a system: a system call or a fault is a vmm exit, as on every backend. Guest threads run in parallel, where Unicorn runs one at a time. The code is MIT, so the emulator can ship in `h9` itself, and the browser host becomes one module with no guest kernel. h86 and ha64 were built first, on the `vcpu` branch, and this proposal records their design; [spec/h86.md](../spec/h86.md), [spec/ha64.md](../spec/ha64.md), and [spec/jit.md](../spec/jit.md) describe what was built. hx64 isn't built yet. It's h86 extended to long mode, so that with all three, h9 needs no Unicorn for any guest.
+hcpu is h9's family of user-mode CPUs written in Zig: h86 for 386 programs, ha64 for arm64 programs, and hx64 for amd64 programs. Together they make up the emulator backend in place of Unicorn and replace v86 in the browser host. Each has two tiers: an interpreter, T0, which is the fallback and the oracle, and a JIT, T1, which lifts regions of guest code to a small IR shared by every CPU and emits arm64, x86-64, or wasm code from it. Any instruction T1 doesn't lift runs through T0 from inside compiled code, so each CPU runs every instruction it advertises on both tiers. None emulates a system: a system call or a fault is a vmm exit, as on every backend. Guest threads run in parallel, where Unicorn runs one at a time. The code is MIT, so the emulator can ship in `h9` itself, and the browser host becomes one module with no guest kernel. h86 and ha64 were built first, on the `vcpu` branch (#156), and hx64, which is h86 extended to long mode, followed (#168), so with all three, h9 needs no Unicorn for any guest. This proposal records their design; [spec/h86.md](../spec/h86.md), [spec/ha64.md](../spec/ha64.md), [spec/hx64.md](../spec/hx64.md), and [spec/jit.md](../spec/jit.md) describe what was built.
 
 ## Background
 
@@ -34,13 +34,13 @@ The browser host ([browser-host](0012-browser-host.md)) ran 386 programs on v86,
 
 ### The plans
 
-[zig-interpreter](0019-zig-interpreter.md) proposed an arm64 interpreter in Zig for 9front's subset, and its spike ran 300 to 500 M instructions/s, exited for a system call in 13 ns, and needed no guest lock. Two later plans built on it: an arm64 JIT on rv64.js's design, to replace Unicorn for arm64 and reach rv64.js's speed class, and a rewrite of v86's 386 core in Zig as a user-mode CPU, to replace v86 in the browser and Unicorn for 386 on native hosts. They agreed on one JIT layer under both, and a third plan split the work into parallel streams around fixed contracts (the IR, its reference evaluator, the runtime ABI, and the TLB) with an IR evaluator in the middle, so lifters and emitters could each be tested alone. They were posted in project threads, not filed, and the code came first on the `vcpu` branch. This proposal combines them, as built, and adds hx64, which the 386 plan left for later.
+[zig-interpreter](0019-zig-interpreter.md) proposed an arm64 interpreter in Zig for 9front's subset, and its spike ran 300 to 500 M instructions/s, exited for a system call in 13 ns, and needed no guest lock. Two later plans built on it: an arm64 JIT on rv64.js's design, to replace Unicorn for arm64 and reach rv64.js's speed class, and a rewrite of v86's 386 core in Zig as a user-mode CPU, to replace v86 in the browser and Unicorn for 386 on native hosts. They agreed on one JIT layer under both, and a third plan split the work into parallel streams around fixed contracts (the IR, its reference evaluator, the runtime ABI, and the TLB) with an IR evaluator in the middle, so lifters and emitters could each be tested alone. They were posted in project threads, not filed, and the code came first on the `vcpu` branch. This proposal combines them, as built, and adds hx64, which the 386 plan left for later and which was built after them.
 
 ## Proposal
 
 ### Three CPUs, two tiers, one JIT layer
 
-`-Demu=hcpu` builds the emulator backend (`src/vmm/hcpu.zig`) on three Guests: ha64 (`src/vmm/ha64.zig`) for arm64 binaries, h86 (`src/vmm/h86.zig`) for 386 binaries, and hx64 (`src/vmm/hx64.zig`) for amd64 binaries, picked by the binary's architecture when the backend is created. Until hx64 lands, amd64 binaries keep needing Unicorn.
+`-Demu=hcpu` builds the emulator backend (`src/vmm/hcpu.zig`) on three Guests: ha64 (`src/vmm/ha64.zig`) for arm64 binaries, h86 (`src/vmm/h86.zig`) for 386 binaries, and hx64 (`src/vmm/hx64.zig`) for amd64 binaries, picked by the binary's architecture when the backend is created, so no guest architecture needs Unicorn.
 
 The names are "h" and the instruction set's short name: 86 for the 386, A64 (Arm's name for arm64's instruction set), and x64 (the name the JIT's x86-64 emitter already has). hcpu names the family, and the code uses it throughout: `src/hcpu.zig` is the module root for the CPUs and the JIT layer (imported as `hcpu`), `src/vmm/hcpu.zig` is the vmm backend over the Guests, `-Demu=hcpu` builds it in, `zig build hcpu` and `zig build hcpu-web` run its tests, and `-Dhcpu-debug` builds it with `-Doptimize` instead of ReleaseFast. Unicorn's backend is `src/vmm/unicorn.zig`, built with `-Demu=unicorn`, so each backend file is named for what it runs, as `kvm.zig` and `hvf.zig` are. The module and the backend stay separate: the module depends only on the standard library, so it builds ReleaseFast inside a Debug `h9` and builds alone for the tools and fuzzers, while the backend depends on the vmm layer. Source trees stay named by instruction set (`src/{interp,jit}/{x86,a64}/`), and hx64 lives in the `x86` trees with h86, since it's the same decoder and interpreter in another mode.
 
@@ -95,7 +95,7 @@ The web build runs h86 inside `h9.wasm`, with T1 compiling hot blocks into batch
 ### Build and selection
 
 - `-Demu=hcpu` builds every CPU and both tiers; `-Dno-jit` builds T0 alone, as for iOS; `zig build web` always uses h86 with the wasm JIT.
-- Once Done when passes for h86 and ha64, `-Demu=hcpu` becomes the default for the MIT `h9`, so `auto`'s fallback without a hypervisor runs arm64 and 386 programs with no Unicorn. `-Demu=unicorn` stays for `h9-emu` and amd64 guests until hx64 lands, and for lockstep testing after that. Once hx64 passes Done when, `h9-emu` is no longer released.
+- Once Done when passes for h86 and ha64, `-Demu=hcpu` becomes the default for the MIT `h9`, so `auto`'s fallback without a hypervisor runs arm64 and 386 programs with no Unicorn. `-Demu=unicorn` stays for `h9-emu` until hx64 passes Done when too, and for lockstep testing after that. Then `h9-emu` is no longer released.
 - `vmm.Kind` keeps one `emu`. `--version` and `--check` report `hcpu (jit)` or `hcpu (interpreter)`. `H9_EMU_TIER` picks a tier for tests.
 
 ### Testing
@@ -132,7 +132,7 @@ T0 is checked against Unicorn in lockstep, Berkeley TestFloat (for the FP librar
 - **`Machine.Options` and the vmm interface.** Unchanged. `Backend.hwcaps` reports the emulator's arm64 extensions under `-Demu=hcpu`.
 - **Guests.** A 9front process sees the same Ureg, notes, and FP state, on every CPU. The 386 FXSAVE image's last-instruction fields, which Unicorn left zero, are filled. Linux arm64 programs see LSE, CRC32, AES, PMULL, SHA1, and SHA256 in `AT_HWCAP` on the emulator. CPUID on h86 and hx64 reports "GenuineIntel", family 6, and SSE2. amd64 programs that Unicorn ran with its CPU's later extensions see SSE2 only, as h86's 386 programs do.
 - **The browser host.** The page's API is unchanged. `zig-out/web/` loses `v86.wasm` and its licence, and the download shrinks from 3.82 MB to 3.68 MB.
-- **Build and releases.** `-Demu=hcpu`, `-Dno-jit`, `-Djit-check`, `-Djit-verify`, and `-Dhcpu-debug` are new. The code was built with `-Demu=zig`, `-Dvcpu-debug`, `zig build vcpu`, a `vcpu` module, and a `zemu.zig` backend, all renamed to hcpu before release, with no aliases. The release `h9` gains an emulator once the default switches. `h9-emu` stays until hx64 lands.
+- **Build and releases.** `-Demu=hcpu`, `-Dno-jit`, `-Djit-check`, `-Djit-verify`, and `-Dhcpu-debug` are new. The code was built with `-Demu=zig`, `-Dvcpu-debug`, `zig build vcpu`, a `vcpu` module, and a `zemu.zig` backend, all renamed to hcpu before release, with no aliases. The release `h9` gains an emulator once the default switches. `h9-emu` stays until hx64 passes Done when.
 - **Licences.** h9 stays MIT. `f80.zig` keeps SoftFloat's BSD-3 notice; nothing is copied from v86's or rv64.js's code.
 - **zig-interpreter.** This proposal includes and widens it, so it should be marked superseded by this one once this is filed.
 - **Root tree and `third_party/`.** Unchanged.
@@ -188,7 +188,7 @@ In the browser the boundary improves: there's no guest kernel whose page tables 
 
 ## Implementation
 
-h86 and ha64 were done on the `vcpu` branch, in parallel threads around the contracts:
+h86 and ha64 were done on the `vcpu` branch, in parallel threads around the contracts, and merged in #156:
 
 1. The contracts and a tracer bullet: the IR, `ir_eval`, the runtime ABI, the TLB entry and slow-path signatures, the front-end and emitter interfaces, and a counted arm64 loop run on T0, in `ir_eval`, natively, and in wasm.
 2. SoftFloat's `extF80` ported to Zig, passing TestFloat's level 1 and 2 vectors, and a shared binary16, 32, and 64 library.
@@ -198,20 +198,22 @@ h86 and ha64 were done on the `vcpu` branch, in parallel threads around the cont
 6. Both lifters, with flags as values, h86's lazy flag records, x87 helpers, and SSE and AdvSIMD lifting; the region check, the fuzzers, the litmus tests, and `-Djit-check`.
 7. h86 in the browser: T0, then wasm T1, then the default, and v86 retired.
 
+hx64 was done on the `hx64` branch and merged in #168, with hot-block compiling after it:
+
+8. Widen the lazy flags record and `eflags.*` to 64 bits, in the IR, `ir_eval`, and the three emitters, with h86's cases passing unchanged.
+9. hx64's T0: long mode as a comptime mode of the encoding table, decoder, and `exec.zig`, the Cpu and its Ureg and FXSAVE conversions, `CMPXCHG16B`, and `SYSCALL`; checked against Unicorn in lockstep and against the host CPU on x86-64.
+10. `src/vmm/hx64.zig` as a Guest of `src/vmm/hcpu.zig`, picked for amd64 binaries natively and on the web, with the amd64 root passing `[baseline]` and `[linux-personality]` on T0.
+11. The lifter in long mode, `fuzz-x64` and the region check for it, and `x64inv` from `x86inv` to rank what to lift.
+
+Along the way, the code took the hcpu name: the `vcpu` module, steps, and flag, and the `zemu` backend, were renamed (#172), and SPEC.md's Emulator backend section points to the CPUs' specs.
+
 Left:
 
-8. Retag the `[a64-jit]` and `[x86-jit]` cases as `[hcpu]` (at the end of the name, as `check` expects), add the `tests/backends.zig` runs on both tiers, and run Done when for h86 and ha64 on every host, including Windows.
-9. Lift LSE atomics to `cas` and a read-modify-write, and the MMX forms, as the inventories rank them.
-10. Merge the `vcpu` branch into main, update SPEC.md's Emulator backend section and MANUAL.md, make `-Demu=hcpu` the release default, and set `status: implemented`.
-11. A release later, make `--backend v86` a usage error.
-
-hx64, in parallel threads once 8 is in:
-
-12. Widen the lazy flags record and `eflags.*` to 64 bits, in the IR, `ir_eval`, and the three emitters, with h86's cases passing unchanged.
-13. hx64's T0: long mode as a comptime mode of the encoding table, decoder, and `exec.zig`, the Cpu and its Ureg and FXSAVE conversions, `CMPXCHG16B`, and `SYSCALL`; checked against Unicorn in lockstep and against the host CPU on x86-64.
-14. `src/vmm/hx64.zig` as a Guest of `src/vmm/hcpu.zig`, picked for amd64 binaries natively and on the web, with the amd64 root passing `[baseline]` and `[linux-personality]` on T0.
-15. The lifter in long mode, `fuzz-x64` and the region check for it, and `x64inv` from `x86inv` to rank what to lift.
-16. Run Done when for hx64, update SPEC.md, and stop releasing `h9-emu`.
+12. Retag the `[a64-jit]` and `[x86-jit]` cases as `[hcpu]` (at the end of the name, as `check` expects), add the `tests/backends.zig` runs on both tiers, and run Done when for h86 and ha64 on every host, including Windows.
+13. Lift LSE atomics to `cas` and a read-modify-write, and the MMX forms, as the inventories rank them.
+14. Update MANUAL.md, make `-Demu=hcpu` the release default, and set `status: implemented`.
+15. Run Done when for hx64 and stop releasing `h9-emu`.
+16. A release later, make `--backend v86` a usage error.
 
 ## Open issues
 
