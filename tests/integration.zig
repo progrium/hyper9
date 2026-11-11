@@ -126,9 +126,27 @@ fn skipWeb(name: []const u8) !void {
     };
 }
 
+/// Skips a case outside this run's shard. H9_TEST_SHARD is `I/N`, from
+/// zig build integration's -Dshards: the build runs the binary N times at
+/// once, and run I takes the cases whose names hash to I, so the N runs
+/// cover each case once between them. Unset, every case runs. Tests that
+/// don't come through here, such as tests/deadline.zig's, run in every
+/// shard.
+fn skipShard(name: []const u8) !void {
+    const v = getenv(3, "H9_TEST_SHARD") orelse return;
+    const slash = std.mem.indexOfScalar(u8, v, '/') orelse return;
+    const i = std.fmt.parseInt(u64, v[0..slash], 10) catch return;
+    const n = std.fmt.parseInt(u64, v[slash + 1 ..], 10) catch return;
+    if (n < 2) return;
+    if (std.hash.Wyhash.hash(0, name) % n != i) return error.SkipZigTest;
+}
+
 /// Skips a case tagged with a proposal that isn't implemented, unless
-/// H9_TEST_PENDING is set. `name` is the test's name as @src() gives it.
+/// H9_TEST_PENDING is set, and a case outside this run's shard
+/// (skipShard). Every case calls it first, directly or through env.
+/// `name` is the test's name as @src() gives it.
 fn skipPending(name: []const u8) !void {
+    try skipShard(name);
     if (name.len == 0 or name[name.len - 1] != ']') return;
     const open = std.mem.lastIndexOfScalar(u8, name, '[') orelse return;
     var tags = std.mem.splitScalar(u8, name[open + 1 .. name.len - 1], ',');
@@ -1934,12 +1952,17 @@ const prompt = "%";
 
 /// Runs `h9 --backend <backend> --root <root> args...` on a new terminal.
 fn spawnTerm(e: Env, backend: []const u8, args: []const []const u8) !Term {
+    return spawnTermEnv(e, backend, args, &.{});
+}
+
+/// `spawnTerm`, with `extra` (NAME=value strings) in h9's environment.
+fn spawnTermEnv(e: Env, backend: []const u8, args: []const []const u8, extra: []const []const u8) !Term {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
-    return Term.spawn(gpa, argv.items);
+    return Term.spawnEnv(gpa, argv.items, extra);
 }
 
 fn backendList(e: Env) std.mem.TokenIterator(u8, .scalar) {
@@ -6461,6 +6484,11 @@ fn startServer(e: Env, args: []const []const u8) !Term {
     return spawnTerm(e, firstBackend(e), args);
 }
 
+/// `startServer`, with `extra` (NAME=value strings) in h9's environment.
+fn startServerEnv(e: Env, args: []const []const u8, extra: []const []const u8) !Term {
+    return spawnTermEnv(e, firstBackend(e), args, extra);
+}
+
 /// Waits for the server's next "serve: ADDR" line and returns ADDR,
 /// copied into `buf`.
 fn servedAddr(t: *Term, buf: []u8) ![]const u8 {
@@ -6999,19 +7027,22 @@ test "a unix socket path that isn't a socket exits 125 [35]" {
 
 test "a ws:// listener pings an idle client and closes one that stops answering [35]" {
     const e = try serveEnv(@src());
-    var t = try startServer(e, &.{ "--serve", "ws://127.0.0.1:0/9p" });
+    // H9_TEST_KEEPALIVE shortens the keepalive's 30 s idle time to 1 s:
+    // the listener pings after 1 s idle and fails the connection 1 s
+    // after that; this client never answers.
+    var ka_buf: [32]u8 = undefined;
+    const ka = try std.fmt.bufPrint(&ka_buf, "H9_TEST_KEEPALIVE={d}", .{slow(1000)});
+    var t = try startServerEnv(e, &.{ "--serve", "ws://127.0.0.1:0/9p" }, &.{ka});
     defer t.deinit();
     var ab: [128]u8 = undefined;
     const port = try addrPort(try servedAddr(&t, &ab));
     const k = try Sock.dial(port);
     defer k.close();
     try std.testing.expectEqual(101, try k.upgrade("/9p", ""));
-    // The keepalive pings after 30 s idle and fails the connection 30 s
-    // after that; this client never answers.
     var hdr: [2]u8 = undefined;
-    try k.readFull(&hdr, 45_000);
+    try k.readFull(&hdr, slow(10_000));
     try std.testing.expectEqual(0x89, hdr[0]);
-    try k.expectClosed(45_000);
+    try k.expectClosed(slow(10_000));
 }
 
 test "an address in use exits 125 [35]" {
