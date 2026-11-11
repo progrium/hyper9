@@ -31,7 +31,6 @@ extern Dev mntdevtab;
 extern Dev lfddevtab;
 extern Dev audiodevtab;
 extern Dev kbddevtab;
-extern Dev cmddevtab;
 extern Dev envdevtab;
 extern Dev hconsdevtab;
 extern Dev dupdevtab;
@@ -140,9 +139,6 @@ Dev *devtab[] = {
 	&lfddevtab,
 	&audiodevtab,
 	&h9kbddevtab,
-#ifdef H9_HOSTCMD
-	&cmddevtab,	/* -Dhost-cmd only */
-#endif
 	&envdevtab,
 	&hconsdevtab,
 	&dupdevtab,

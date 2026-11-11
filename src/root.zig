@@ -35,8 +35,6 @@ pub const build_info = struct {
     pub const ninefront_release: []const u8 = o.ninefront_release;
     pub const ninefront_rev: []const u8 = o.ninefront_rev;
     pub const drawterm_rev: []const u8 = o.drawterm_rev;
-    /// Built with -Dhost-cmd: #C, --host-cmd and hcmd.
-    pub const host_cmd: bool = o.host_cmd;
     /// The GUI backend for --gfx (design/gfx.md), or "none".
     pub const gfx: []const u8 = o.gfx;
     /// The built-in root (design/builtin-root.md).

@@ -358,12 +358,12 @@ By default `h9` uses the host's hypervisor when it's available, and otherwise fa
 | Piece | Web host |
 | --- | --- |
 | Threads | Coroutines on JavaScript Promise Integration (`src/web/coro.c`): each kernel process, and each of h9's own threads (`web.Thread`), has its own shadow stack and its own suspendable wasm stack, started through the exported, `promising`-wrapped `h9_coro_entry`. Blocking parks through a `Suspending` import whose Promise the JS host resolves, so the event loop is the scheduler. Every Suspending import (park, yield, sleep, the console read, and the signal wait) saves and restores what's per thread natively: `__stack_pointer` (`src/web/stack.S`), `errno`, h9's Zig threadlocals, and drawterm's `up`. |
-| OS layer | `src/kern/os-wasm.c` instead of `posix.c`: `procsleep` and `procwakeup` park and unpark, `osyield` yields through a `MessageChannel`, timers park with a timeout, `#C` raises an error, and `devip-wasm.c` stubs the sockets. |
+| OS layer | `src/kern/os-wasm.c` instead of `posix.c`: `procsleep` and `procwakeup` park and unpark, `osyield` yields through a `MessageChannel`, timers park with a timeout, and `devip-wasm.c` stubs the sockets. |
 | Stacks | wasm has no guard pages, so each stack has a canary at its low end, and every park and coroutine exit also checks the stack pointer against it; either failing panics the machine with the coroutine's name. Kernel processes and h9's own coroutines get 320 KiB: the integration suite's deepest use at a park (149 KiB, in a guest process's syscall path, Debug build), doubled and rounded up. Stacks go on a free list when their coroutine ends. |
 | `std.Io` | `src/web/io.zig`: std's single-threaded implementation over WASI, with futex waits and sleeps that park. 64-bit atomics become plain values (`web.Atomic`), since wasm32 has no 64-bit atomic RMW. |
 | Files | WASI. Under Node, `h9-node` preopens `/`, so roots and `--cwd` are real host directories, resolved with readlink one component at a time since WASI has no realpath. In the browser, `src/web/wasi-mem.js` serves a read-only tree from `root.h9a`, which `tools/webroot.zig` packs from the 386 root and `src/web/root.list`. WASI has no permission bits, so `#U` (devfs, wrapped in `src/kern/devtab.c`) gives files and directories `rwxrwxr-x`; the policy, not the mode, decides access. |
 | Console | `src/web/cli.zig`: stdin, interrupt, hangup, and raw mode are imports the JS host serves, from Node's process or from the page's messages. |
-| Policy | `#C` and `#I` are always masked. `--host-cmd` is a usage error. The network is WebSockets only: `--net=outbound` (the default) and `enable` bind `#ℏ` alone at `/net`, and `disable` masks it. |
+| Policy | `#C` and `#I` are always masked. The network is WebSockets only: `--net=outbound` (the default) and `enable` bind `#ℏ` alone at `/net`, and `disable` masks it. |
 | WebSockets | `hstream.zig`'s web branch calls `h9-web.js`'s `h9_ws_*` imports, over the runtime's `WebSocket` ([websocket-9p](design/websocket-9p.md)): `ws_open` and `ws_send` return at once, `ws_opened` and `ws_recv` are Suspending, and a stream's reader is a coroutine parked in `ws_recv`, which hands over as many queued binary messages as fit. The browser does the handshake, TLS, proxies, and pongs, so `--root-header`, `--root-ca`, and `header` in `ctl` are errors, there's no keepalive, and a failed connection says only "connection failed". `--net-allow` checks a connect's name or literal address but can't check what a name resolves to, which the plan lists as a caveat. |
 
 ### The 386 CPU on the web
@@ -659,7 +659,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ### Reused as-is
 
-These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (for unix socket roots), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe, devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, devcmd, qio, and the auth code.
+These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (for unix socket roots), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe, devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
 
 We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`. The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
@@ -727,16 +727,6 @@ drawterm has no semaphores. 9front's code is ported closely, with the wait lists
 
 `rendezvous` is 9front's on drawterm's Rgrp, so `procinterrupt` still pulls a process out of it, but it also checks for a note that arrived before the process was on the list.
 
-#### Host command lifetime (`src/kern/hostcmd.c`)
-
-Host commands are built in only with `zig build -Dhost-cmd` (devtab.c lists devcmd under `H9_HOSTCMD`, `hcmd` comes from `src/guest-hostcmd/`, and the policy refuses `host_cmd` otherwise) while [host-cmd](design/host-cmd.md) rethinks them.
-
-drawterm's devcmd `#C` (under `--host-cmd`) kills a host command only when the last fd on its conversation closes, and a guest process reading its output waits in a host `read` no note interrupts, so a stopped machine could leave the command running after h9 exits.
-
-posix.c and win32.c are built with `oscmd`, `oscmdkill`, and `oscmdfree` renamed, and wrappers keep each running command with the machine that started it, found through the Fgrp that devcmd's kproc shares with the writer of `exec`.
-
-When the machine stops its processes, and when its last process is released, its commands are killed (SIGKILL to the process group on POSIX hosts; `TerminateProcess` on Windows), which ends the stuck reads; one started after that is killed at once.
-
 #### Sandbox hooks (`src/kern/fscheck.c`, `src/kern/netcheck.c`)
 
 The C side of the policy checks devfs and devip call; see Sandbox policy, "Vendor hooks".
@@ -781,7 +771,7 @@ Copy-on-write trees in memory over a lower directory, for the root's overlay, `-
 
 #### h9's guest commands `#H` (`src/kern/devhtools.c`)
 
-Commands that wrap h9's own devices (websocket-9p's `wsmount`, say, or `hcmd`, which runs host commands through `#C`) can't come from 9front, and h9 never writes into the root ([guest-tools](design/guest-tools.md)).
+Commands that wrap h9's own devices (websocket-9p's `wsmount`, say) can't come from 9front, and h9 never writes into the root ([guest-tools](design/guest-tools.md)).
 
 `src/guest/` holds them, laid out as the guest sees them, and the build embeds it in the binary as a generated table (`tools/guesttree.zig`): only rc scripts and data, so an executable that doesn't start with `#!/bin/rc` fails the build, and names starting with `.` are left out.
 
@@ -869,7 +859,7 @@ Each exec allocates and copies the box's text and data, so on the emulator rc's 
 
    Under the root's overlay it makes `/usr/$user` in the overlay if the root lacks it, so `$home` exists.
 
-   Then it sets the device mask: `#U` and `#C` always (unless `--host-fs` or `--host-cmd`), `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+   Then it sets the device mask: `#C` always (it isn't built; see [host-cmd](design/host-cmd.md)), `#U` unless `--host-fs`, `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 
@@ -974,7 +964,7 @@ Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths
 | --- | --- |
 | `env.scrub` | The host environment is never imported |
 | `kernel.isolation` | Guest syscalls are served by drawterm's kernel |
-| `ipc.restrict` | Host sockets are reachable only through `#U`, `#I`, or `#C`, which the policy controls |
+| `ipc.restrict` | Host sockets are reachable only through `#U` or `#I`, which the policy controls |
 | `fs.read.scope`, `fs.write.scope` | The namespace is an allowlist: only listed host paths are bound from `#U`, each read-only or read-write |
 | `fs.write.ephemeral` | Each path `scope` would make writable is a copy-on-write `#O` overlay over its `#U` tree instead; changes live in memory and vanish at exit |
 | `fs.write.overlay` | A copy-on-write `#O` overlay over the root, whatever kind of root it is, so writes to it succeed in memory and vanish at exit; under `--write=overlay` (the default) and `--write=ephemeral` |
@@ -1241,10 +1231,9 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--strict` | Refuses any requested capability this build can't enforce (exit 2) |
 | `--print` | Prints the compiled policy and namespace, then exits |
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
-| `--host-cmd` | Enables devcmd. Only in builds with `-Dhost-cmd`; otherwise the policy refuses it (exit 2) |
 | `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
 | `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](design/builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
-| `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` or `--host-cmd` |
+| `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` |
 | `--trace[=FILE]` | ratrace-style syscall log, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
@@ -1336,7 +1325,7 @@ pub const Options = struct {
     proxy: ?Proxy = null,               // HTTP CONNECT proxies for WebSocket roots and mounts; null: direct
     cwd: ?[]const u8 = null,
     env: []const EnvVar = &.{},
-    policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs, host_cmd
+    policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs
     guest_tools: bool = true,           // bind #H/bin, h9's own commands, after /bin; false masks #H
     builtin: policy.Builtin = .off,     // the built-in root #Hroot: .only, or .before/.after another root's /bin
     trace: ?*std.Io.Writer = null,

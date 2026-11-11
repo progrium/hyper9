@@ -222,7 +222,6 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .cpus = cfg.cpus,
         .cwd_writable = if (cfg.sandbox != null) true else null,
         .host_fs = cfg.host_fs,
-        .host_cmd = cfg.host_cmd,
     };
     const base: h9.Machine.Options = .{
         .backend = cfg.backend,

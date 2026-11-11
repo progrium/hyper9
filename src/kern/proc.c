@@ -376,33 +376,6 @@ h9_kern_putmach(void *m)
 }
 
 /*
- * The machine of the h9 process using Fgrp f, with a reference, or nil.
- * For a kproc, which shares the Fgrp of the process that made it
- * (hostcmd.c).
- */
-Hmach*
-h9_fgrpmach(Fgrp *f)
-{
-	Hproc *h;
-	Hmach *m;
-	int i;
-
-	if(f == nil)
-		return nil;
-	m = nil;
-	lock(&tablk);
-	for(i = 0; m == nil && i < PROCHASH; i++)
-		for(h = table[i]; h != nil; h = h->hash)
-			if(h->p != nil && h->p->fgrp == f){
-				m = h->mach;
-				incref(&m->ref);
-				break;
-			}
-	unlock(&tablk);
-	return m;
-}
-
-/*
  * Posts a note from the host side (Ctrl-C, hangup, a timeout) to machine
  * m: with all set, to every process; otherwise to the note group of its
  * first process (pid 1), which is the foreground group. Callable from any
@@ -1576,7 +1549,6 @@ h9_kern_release(void)
 	if(last){
 		h9_srvmachclose(m);
 		h9_hstream_machend(m);
-		h9_hostcmd_machend(m);
 	}
 }
 

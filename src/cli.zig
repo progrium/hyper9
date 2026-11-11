@@ -19,7 +19,7 @@ pub const usage =
     \\           [--net-allow PATTERN]... [--root-contained] [--user-map FILE]
     \\           [--builtin auto|only|before|after|off]
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
-    \\           [--ns FILE] [--host-fs] [--host-cmd] [--no-guest-tools]
+    \\           [--ns FILE] [--host-fs] [--no-guest-tools]
     \\           [--gfx[=noclip]] [--gfx-scale N]
     \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
     \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
@@ -102,7 +102,6 @@ pub const Config = struct {
     /// --ns: a namespace file, in newns syntax, replayed before the program.
     ns: ?[]const u8 = null,
     host_fs: bool = false,
-    host_cmd: bool = false,
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
     /// (design/guest-tools.md).
     guest_tools: bool = true,
@@ -181,8 +180,6 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.dump_on_fault = true;
         } else if (flag(a, "--host-fs")) {
             c.host_fs = true;
-        } else if (flag(a, "--host-cmd")) {
-            c.host_cmd = true;
         } else if (flag(a, "--no-guest-tools")) {
             c.guest_tools = false;
         } else if (flag(a, "--gfx")) {
@@ -307,7 +304,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     // --builtin=only is the root, so another can't be named.
     if (c.builtin == .only and c.root != null) return error.Usage;
     if (c.sandbox != null) {
-        if (c.host_fs or c.host_cmd or c.cwd != null) return error.Usage;
+        if (c.host_fs or c.cwd != null) return error.Usage;
         c.profile = .tight;
     }
     // The --serve flags apply to a --serve (design/serve.md), and
@@ -817,7 +814,6 @@ test "--sandbox and --rc" {
     try t.expectEqualStrings("echo x > f", c.rc.?);
     try t.expectEqual(@as(usize, 0), c.argv.len);
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--sandbox", "/w", "--host-fs", "ls" }));
-    try t.expectError(error.Usage, parse(a, &.{ "h9", "--sandbox", "/w", "--host-cmd", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--memory", "lots", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--timeout", "0", "ls" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--write", "maybe", "ls" }));

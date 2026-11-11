@@ -148,35 +148,6 @@ procwakeup(Proc *p)
 		h9_coro_unpark(op->coro);
 }
 
-/* #C isn't built: there are no host commands in a browser. */
-void*
-oscmd(char **argv, int nice, char *dir, Chan **fd)
-{
-	USED(argv, nice, dir, fd);
-	error("no host commands on the web host");
-	return nil;
-}
-
-int
-oscmdwait(void *c, char *status, int nstatus)
-{
-	USED(c, status, nstatus);
-	return -1;
-}
-
-int
-oscmdkill(void *c)
-{
-	USED(c);
-	return -1;
-}
-
-void
-oscmdfree(void *c)
-{
-	USED(c);
-}
-
 void
 randominit(void)
 {
@@ -294,11 +265,4 @@ h9_twait(uvlong when)
 	}
 	twaiter = nil;
 	tsignalled = 0;
-}
-
-/* src/kern/hostcmd.c isn't built: there are no host commands to kill. */
-void
-h9_hostcmd_machend(void *m)
-{
-	USED(m);
 }

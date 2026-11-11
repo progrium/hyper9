@@ -56,7 +56,6 @@ struct Hmach
 	ulong	nextnoteid;
 	int	nlive;		/* processes not yet released (h9_kern_release); under lk */
 	void	*srv;		/* devsrv.c's registry, made on first attach; under lk */
-	int	cmdsend;	/* its host commands are killed (hostcmd.c); under hostcmd.c's lock */
 };
 
 /* 9front's Note. One note posted to a group is shared by its queues. */
@@ -163,8 +162,6 @@ void	h9_srvmachfree(Hmach*);
 
 /* src/hstream.zig: closes the machine's host streams */
 void	h9_hstream_machend(void*);
-void	h9_hostcmd_machend(void*);
-Hmach*	h9_fgrpmach(Fgrp*);
 void	h9_kern_putmach(void*);
 
 /*

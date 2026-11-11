@@ -283,7 +283,6 @@ flags (manual chapter 23):
 | `cpus` | `--cpus` | Cap on vCPUs running guest code at once. |
 | `cwd_writable` | `--sandbox` | Whether the cwd is writable. Null: the profile's. |
 | `host_fs` | `--host-fs` | Bind the whole host filesystem at `/mnt/term`. |
-| `host_cmd` | `--host-cmd` | Leave `#C` (running host commands) unmasked. Only in builds with `-Dhost-cmd`; otherwise `init` fails with `PolicyConflict`. |
 
 Paths in it follow the same rule as `root` and `cwd`: absolute, symlinks
 resolved. Use `std.Io.Dir.cwd().realPathFileAlloc` on them, as the CLI does
