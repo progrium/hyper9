@@ -1944,11 +1944,14 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
         defer p.mm.unpin(&pn);
         const s = pn.s;
         if (dir == .write and is_pipe) return pipeWrite(p, fd, s);
-        const n = switch (dir) {
+        var n = switch (dir) {
             .read => kern.pread(@intCast(fd), s, off),
             .write => kern.pwrite(@intCast(fd), s, off),
         } catch return kerr();
-        if (dir == .read and is_pipe) return @intCast(pipeMore(p, fd, s, n));
+        if (dir == .read and is_pipe) n = pipeMore(p, fd, s, n);
+        // The kernel wrote guest memory: what was decoded from it goes.
+        if (dir == .read) p.mm.as.hostWrote(s[0..n]);
+        if (dir == .read and is_pipe) return @intCast(n);
         if (file) |k| fileIo(fd, k, off, s[0..n], dir);
         return @intCast(n);
     }

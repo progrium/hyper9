@@ -213,6 +213,18 @@ pub const CodePages = struct {
         c.hooks.invalidate(c.hooks.owner, page);
     }
 
+    /// After a store at `host` that took the slow path: if the page was
+    /// marked while the store was on its way (its check passed before
+    /// the mark's sweep, or `resolve` invalidated it just before), what
+    /// was decoded or compiled from it in between may predate the store,
+    /// so it goes now. The read-modify-write orders the store before the
+    /// bit is read, as `mark` orders the bit before the decode's reads.
+    pub fn stored(c: *CodePages, host: usize) void {
+        const p = c.pageOf(host) orelse return;
+        const old = c.bits[@intCast(p / word)].fetchOr(0, .seq_cst);
+        if (old & bit(p) != 0) c.invalidate(p);
+    }
+
     /// `invalidate` for every page of host range [host, host+len).
     pub fn invalidateRange(c: *CodePages, host: usize, len: usize) void {
         if (len == 0) return;
@@ -463,6 +475,10 @@ fn store(ctx: *Ctx, src: anytype, va: u64, size_log2: u32, value: u64) u32 {
         @memcpy(@as([*]u8, @ptrFromInt(p.a))[0..p.first], bytes[0..p.first]);
         if (p.first < n) @memcpy(@as([*]u8, @ptrFromInt(p.b))[0 .. n - p.first], bytes[p.first..n]);
     }
+    if (@TypeOf(src.*) == View) if (src.code) |c| {
+        c.stored(p.a);
+        if (p.first < n) c.stored(p.b);
+    };
     return 0;
 }
 
@@ -475,6 +491,7 @@ fn cas(ctx: *Ctx, src: anytype, va: u64, size_log2: u32, expected: u64, new: u64
         .fault => |k| return fault(ctx, va, .write, k),
     };
     ctx.scratch = casAt(h, size_log2, expected, new);
+    if (@TypeOf(src.*) == View) if (src.code) |c| c.stored(h);
     return 0;
 }
 

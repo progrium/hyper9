@@ -103,7 +103,7 @@ pub fn classify(o: dec.Op) How {
 /// Whether a non-branch instruction is lifted (else it's interpreted).
 pub fn lifts(o: dec.Op) bool {
     return switch (o.k) {
-        .ldxp, .clrex, .dc_zva => false,
+        .ldxp, .clrex, .dc_zva, .ic_ivau => false,
         // LSE atomics run on T0 until they're lifted to rmw and cas.
         .ldop, .cas, .casp => false,
         // ISB refetches what follows: T0 leaves the region after it.

@@ -210,8 +210,8 @@ pub const Kind = enum(u16) {
 
     // ---- system
     /// Hints (NOP, YIELD, WFE, WFI, SEV, SEVL, and the hint space later
-    /// architectures use, such as BTI and PACIASP), and the EL0 cache
-    /// maintenance that has no effect here (DC CVAU, CVAC, CIVAC, IC IVAU).
+    /// architectures use, such as BTI and PACIASP), and the EL0 data cache
+    /// maintenance that has no effect here (DC CVAU, CVAC, CIVAC).
     nop,
     clrex,
     /// DMB and DSB.
@@ -221,6 +221,9 @@ pub const Kind = enum(u16) {
     msr,
     /// DC ZVA: n holds the address.
     dc_zva,
+    /// IC IVAU: n holds the address. What was decoded or compiled from
+    /// its page goes, as a JIT that wrote code there asks.
+    ic_ivau,
 
     // ---- loads and stores of one register
     // _o is base + imm (unsigned offset, unscaled, and unprivileged); _m is
@@ -493,6 +496,7 @@ pub fn info(k: Kind) Info {
         .mrs => .{ .d = .w, .system = true },
         .msr => .{ .n = .r, .system = true },
         .dc_zva => .{ .n = .r, .mem = .store, .system = true },
+        .ic_ivau => .{ .n = .r, .system = true },
         .ldr_x_o, .ldr_w_o, .ldrb_o, .ldrh_o, .ldrsb_x_o, .ldrsb_w_o, .ldrsh_x_o, .ldrsh_w_o, .ldrsw_o => .{ .d = .w, .n = .r, .mem = .load },
         .str_x_o, .str_w_o, .strb_o, .strh_o => .{ .d = .r, .n = .r, .mem = .store },
         .ldr_vb_o, .ldr_vh_o, .ldr_vs_o, .ldr_vd_o, .ldr_vq_o => .{ .d = .w, .n = .r, .vreg = true, .mem = .load },
@@ -787,7 +791,8 @@ fn system(w: u32) Op {
     if (op0 == 1) { // SYS, SYSL
         if (l == 1 or op1 != 3) return .{};
         if (crn == 7 and crm == 4 and op2 == 1) return .{ .k = .dc_zva, .n = rz(rt) };
-        if (crn == 7 and op2 == 1 and (crm == 5 or crm == 10 or crm == 11 or crm == 14)) return .{ .k = .nop }; // IC IVAU, DC CVAC, CVAU, CIVAC
+        if (crn == 7 and crm == 5 and op2 == 1) return .{ .k = .ic_ivau, .n = rz(rt) };
+        if (crn == 7 and op2 == 1 and (crm == 10 or crm == 11 or crm == 14)) return .{ .k = .nop }; // DC CVAC, CVAU, CIVAC
         return .{};
     }
     const reg: u16 = @intCast(bits(w, 20, 5));
