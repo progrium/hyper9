@@ -247,8 +247,15 @@ static void nb_connect(void) {
 	int err = -1;
 	socklen_t el = sizeof err;
 	CHECK("nb_connect", getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0);
-	/* Non-blocking accept: one pending, then none. */
+	/*
+	 * Non-blocking accept: one pending, then none. The connect finishing
+	 * doesn't mean the listener has the call yet: through a mounted /net
+	 * the server answers listen separately, so wait for it to be readable,
+	 * as an event loop does before it accepts.
+	 */
 	fcntl(l, F_SETFL, O_NONBLOCK);
+	f = (struct pollfd){l, POLLIN, 0};
+	CHECK("nb_connect", poll(&f, 1, 5000) == 1 && (f.revents & POLLIN));
 	int a1 = accept4(l, 0, 0, SOCK_NONBLOCK);
 	CHECK("nb_connect", a1 >= 0);
 	CHECK("nb_connect", accept(l, 0, 0) < 0 && errno == EAGAIN);
