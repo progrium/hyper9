@@ -145,7 +145,7 @@ show the emulator alone.
   the Mac.
 - **The x86-64 host gives hx64 no advantage.** hx64's T1 is slower than
   ha64's there, even though the guest and the host share an architecture.
-- **v86 tracks h86's wasm T1.** It's about even with it on the x86-64 host,
+- **v86 tracks h86's wasm T1.** It's within 1.3 times of it either way on the x86-64 host,
   and up to 1.7 times faster on the Mac, where wasm costs h9 more.
 - **Go is hx64's outlier.** On the Mac, hx64's T1 takes 2.96 s against
   ha64's 0.55 s, a far wider gap than on any other workload.
