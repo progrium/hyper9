@@ -1,0 +1,45 @@
+Signatures: a line under the title that mentions h.d.a. must be in one of
+the two forms, and name someone in design/SIGNERS. Lines in the body
+aren't signatures.
+
+error: design/a.md:12: not a signature line
+error: design/b.md:12: signed by `Someone Else`, who isn't in design/SIGNERS
+error: SPEC.md:3: not a signature line
+
+-- design/SIGNERS --
+# login Full Name
+progrium Jeff Lindsay
+-- design/a.md --
+---
+slug: a
+title: A
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+
+# Proposal: A
+
+Nov 11 2026 · Jeff Lindsay, h.d.a.
+
+## Abstract
+
+The h.d.a. mark is explained in README.
+-- design/b.md --
+---
+slug: b
+title: B
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+
+# Proposal: B
+
+Nov 11, 2026 · Someone Else, [h.d.a.](README.md#signature)
+-- SPEC.md --
+# h9
+
+Jeff Lindsay, h.d.a.

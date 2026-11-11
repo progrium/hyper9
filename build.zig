@@ -291,20 +291,19 @@ fn designModule(b: *std.Build) *std.Build.Module {
     return S.m.?;
 }
 
-/// Test-name filters for the cases tagged with a proposal, by its slug or
-/// its id: `[x]`, `[x, `, `, x]` and `, x, ` for each.
+/// Test-name filters for the cases tagged with a proposal, by its slug:
+/// `[x]`, `[x, `, `, x]` and `, x, `.
 fn tagFilters(b: *std.Build, p: frontmatter.Proposal) []const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    var names: [2][]const u8 = .{ p.slug, "" };
-    var n: usize = 1;
-    if (p.id) |id| {
-        names[1] = b.fmt("{d}", .{id});
-        n = 2;
-    }
-    for (names[0..n]) |t| {
-        out.appendSlice(b.allocator, &.{ b.fmt("[{s}]", .{t}), b.fmt("[{s}, ", .{t}), b.fmt(", {s}]", .{t}), b.fmt(", {s}, ", .{t}) }) catch @panic("OOM");
-    }
-    return out.items;
+    const t = p.slug;
+    return b.allocator.dupe([]const u8, &.{ b.fmt("[{s}]", .{t}), b.fmt("[{s}, ", .{t}), b.fmt(", {s}]", .{t}), b.fmt(", {s}, ", .{t}) }) catch @panic("OOM");
+}
+
+/// Registers a web test file as a demo of each proposal one of its cases is
+/// tagged with, so `zig build proposal -Dp=...` runs the file. The file's
+/// cases run together; they aren't filtered by tag.
+fn addWebCases(b: *std.Build, demos: *std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)), file: []const u8, step: *std.Build.Step) void {
+    const text = b.build_root.handle.readFileAlloc(b.graph.io, file, b.allocator, .limited(1 << 24)) catch return;
+    for (proposals(b)) |p| if (p.slug.len > 0 and frontmatter.tagsCase(text, p.slug)) addDemo(b, demos, p.slug, step);
 }
 
 /// Registers a demo for the proposal with this slug, which
@@ -1224,6 +1223,8 @@ pub fn build(b: *std.Build) void {
     // Proposal demos that aren't integration cases, by the proposal's slug;
     // `zig build proposal -Dp=...` runs them along with its tagged cases.
     var demos: std.StringHashMapUnmanaged(std.ArrayList(*std.Build.Step)) = .empty;
+    addWebCases(b, &demos, "tests/web/browser.mjs", &web_test.step);
+    if (web_gfx != .none) addWebCases(b, &demos, "tests/web/gfx.mjs", &web_gfx_test.step);
 
     // Baseline demos: the host architecture's hello on the default backend,
     // and on the emulator when it's built in.
@@ -1530,14 +1531,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_wsrelay.addArgs(args);
     b.step("wsrelay", "Relay WebSockets to a TCP 9P server: zig build wsrelay -- LISTEN_PORT TARGET_PORT").dependOn(&run_wsrelay.step);
 
-    // One proposal's demos and integration cases (design/), whatever its
-    // status, by id or slug.
-    const proposal_step = b.step("proposal", "Run one proposal's demos and integration cases: -Dp=<id or slug>");
+    // One proposal's demos, web cases, and integration cases (design/),
+    // whatever its status, by slug.
+    const proposal_step = b.step("proposal", "Run one proposal's demos, web cases, and integration cases: -Dp=<slug>");
     // A demo registered for a slug that isn't a proposal would never run.
     var demo_slugs = demos.keyIterator();
     while (demo_slugs.next()) |slug| if (frontmatter.resolve(proposals(b), slug.*) == null)
         std.debug.panic("build.zig: addDemo for `{s}`, which isn't a proposal under design/", .{slug.*});
-    if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
+    if (b.option([]const u8, "p", "With zig build proposal: the proposal, by slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
             const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
@@ -1545,7 +1546,7 @@ pub fn build(b: *std.Build) void {
             proposal_step.dependOn(&run_cases.step);
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
         } else proposal_step.dependOn(&b.addFail(b.fmt("-Dp={s} isn't a proposal under design/", .{ref})).step);
-    } else proposal_step.dependOn(&b.addFail("zig build proposal needs -Dp=<id or slug>").step);
+    } else proposal_step.dependOn(&b.addFail("zig build proposal needs -Dp=<slug>").step);
 
     // The design tool (design/0001-proposals.md), run from the repository
     // root: zig build design -- check, list, ready and so on.
@@ -1559,6 +1560,8 @@ pub fn build(b: *std.Build) void {
     const run_design = b.addRunArtifact(design_tool);
     run_design.setCwd(b.path("."));
     run_design.has_side_effects = true;
+    // `sign` and `propose` ask questions on the terminal.
+    run_design.stdio = .inherit;
     if (b.args) |args| run_design.addArgs(args);
     b.step("design", "Run the design tool: zig build design -- <command> (help lists them)").dependOn(&run_design.step);
 

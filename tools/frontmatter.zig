@@ -1,4 +1,5 @@
-//! Proposals under design/: their frontmatter, parsed (design/0001-proposals.md).
+//! Proposals under design/: their frontmatter, parsed (design/proposals.md,
+//! design/proposal-flow.md).
 //! Shared by tools/design.zig and build.zig, so it does no I/O beyond
 //! reading the design directory, and never fails on a bad proposal: it
 //! reports it and carries on, and `zig build design -- check` decides.
@@ -11,53 +12,54 @@ const std = @import("std");
 
 pub const Status = enum {
     draft,
-    @"likely-accept",
-    @"likely-decline",
+    proposed,
     accepted,
     declined,
     hold,
     implemented,
     superseded,
 
-    /// The final comment period.
-    pub fn inFcp(s: Status) bool {
-        return s == .@"likely-accept" or s == .@"likely-decline";
+    /// Decided and closed: nothing is waiting on it.
+    pub fn closed(s: Status) bool {
+        return s == .implemented or s == .declined or s == .superseded;
     }
 };
 
 pub const Proposal = struct {
     /// File name within the design directory.
     file: []const u8,
-    /// The GitHub issue number, once filed; 0 for the baseline, which has none.
+    /// The GitHub issue number, once it has one.
     id: ?u32 = null,
     slug: []const u8 = "",
     title: []const u8 = "",
     status: Status = .draft,
     created: []const u8 = "",
     authors: []const []const u8 = &.{},
-    /// Ids or slugs, as written.
+    /// Slugs, as written.
     depends: []const []const u8 = &.{},
     areas: []const []const u8 = &.{},
+    /// The git branches where its work lives; `[main]` once implemented.
+    branch: []const []const u8 = &.{},
     superseded_by: ?[]const u8 = null,
-    /// Lines of `depends` and `superseded-by`, for messages.
+    /// Lines of `depends`, `branch`, and `superseded-by`, for messages.
     depends_line: u32 = 0,
+    branch_line: u32 = 0,
     superseded_line: u32 = 0,
-    /// Everything after the frontmatter.
+    /// Everything after the frontmatter, and the line of the file just
+    /// before it, so body line n is file line `body_offset + n`.
     body: []const u8 = "",
+    body_offset: u32 = 0,
     /// False when the frontmatter had errors; the fields may be partial.
     ok: bool = true,
 
-    /// `#42`, `#0` for the baseline, or the slug for a draft.
-    pub fn name(p: Proposal, buf: []u8) []const u8 {
-        if (p.id) |id| return std.fmt.bufPrint(buf, "#{d}", .{id}) catch p.slug;
-        return p.slug;
+    /// The file name the proposal should have: `slug.md`.
+    pub fn expectedFile(p: Proposal, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}.md", .{p.slug}) catch "";
     }
 
-    /// The file name the proposal should have: `NNNN-slug.md` once filed,
-    /// `slug.md` before.
-    pub fn expectedFile(p: Proposal, buf: []u8) []const u8 {
-        if (p.id) |id| return std.fmt.bufPrint(buf, "{d:0>4}-{s}.md", .{ id, p.slug }) catch "";
-        return std.fmt.bufPrint(buf, "{s}.md", .{p.slug}) catch "";
+    pub fn onMain(p: Proposal) bool {
+        for (p.branch) |b| if (std.mem.eql(u8, b, "main")) return true;
+        return false;
     }
 };
 
@@ -76,9 +78,9 @@ pub const Diags = struct {
     }
 };
 
-const keys = [_][]const u8{ "id", "slug", "title", "status", "created", "authors", "depends", "areas", "superseded-by" };
+const keys = [_][]const u8{ "id", "slug", "title", "status", "created", "authors", "depends", "areas", "branch", "superseded-by" };
 const required = [_][]const u8{ "slug", "title", "status", "created", "authors", "depends" };
-const lists = [_][]const u8{ "authors", "depends", "areas" };
+const lists = [_][]const u8{ "authors", "depends", "areas", "branch" };
 
 fn member(set: []const []const u8, s: []const u8) bool {
     for (set) |x| if (std.mem.eql(u8, x, s)) return true;
@@ -188,6 +190,10 @@ pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags
                 p.depends_line = lineno;
             }
             if (std.mem.eql(u8, key, "areas")) p.areas = items;
+            if (std.mem.eql(u8, key, "branch")) {
+                p.branch = items;
+                p.branch_line = lineno;
+            }
             continue;
         }
         if (value.len > 0 and value[0] == '[') {
@@ -216,7 +222,10 @@ pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags
             p.title = value;
         } else if (std.mem.eql(u8, key, "status")) {
             p.status = std.meta.stringToEnum(Status, value) orelse blk: {
-                diags.err("design/{s}:{d}: unknown status `{s}`", .{ file, lineno, value });
+                if (std.mem.eql(u8, value, "likely-accept") or std.mem.eql(u8, value, "likely-decline"))
+                    diags.err("design/{s}:{d}: `{s}` was removed with the final comment period; use `proposed`, `accepted`, or `declined`", .{ file, lineno, value })
+                else
+                    diags.err("design/{s}:{d}: unknown status `{s}`", .{ file, lineno, value });
                 p.ok = false;
                 break :blk .draft;
             };
@@ -249,6 +258,7 @@ pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags
         p.ok = false;
     }
     p.body = lines.rest();
+    p.body_offset = lineno;
     return p;
 }
 
@@ -273,7 +283,8 @@ fn parseList(arena: std.mem.Allocator, value: []const u8) ?[]const []const u8 {
     while (it.next()) |item| {
         const t = std.mem.trim(u8, item, " \t");
         if (t.len == 0) return null;
-        for (t) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.')) return null;
+        // `/` for branch names such as `fix/x`.
+        for (t) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '/')) return null;
         out.append(arena, t) catch return null;
     }
     return out.items;
@@ -286,7 +297,8 @@ pub fn isProposalFile(name: []const u8) bool {
         !std.mem.eql(u8, name, "STATUS.md");
 }
 
-/// Reads and parses every proposal in `dir`, sorted by file name.
+/// Reads and parses every proposal in `dir`, in the rough order they were
+/// written: by `created`, then by `id`, then by slug.
 pub fn scan(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, diags: *Diags) ![]Proposal {
     var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
@@ -304,10 +316,24 @@ pub fn scan(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, diags: *Diags
         const text = try dir.readFileAlloc(io, n, arena, .limited(1 << 22));
         p.* = parse(arena, n, text, diags);
     }
+    std.mem.sort(Proposal, out, {}, before);
     return out;
 }
 
-/// Looks a reference up by id (digits) or slug.
+fn before(_: void, a: Proposal, b: Proposal) bool {
+    switch (std.mem.order(u8, a.created, b.created)) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
+    }
+    const ai = a.id orelse std.math.maxInt(u32);
+    const bi = b.id orelse std.math.maxInt(u32);
+    if (ai != bi) return ai < bi;
+    return std.mem.order(u8, a.file, b.file) == .lt;
+}
+
+/// Looks a reference up by slug, or by issue number (digits), which the
+/// command line accepts but `check` refuses in a file.
 pub fn resolve(ps: []const Proposal, ref: []const u8) ?usize {
     if (isId(ref)) {
         const id = std.fmt.parseInt(u32, ref, 10) catch return null;
@@ -318,17 +344,52 @@ pub fn resolve(ps: []const Proposal, ref: []const u8) ?usize {
     return null;
 }
 
-/// The tags of proposals that aren't implemented: each one's slug, and its
-/// id once filed. The integration tests skip cases tagged with these.
+/// The slugs of proposals that aren't implemented. The integration tests
+/// skip cases tagged with these.
 pub fn pendingTags(arena: std.mem.Allocator, ps: []const Proposal) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (ps) |p| {
         if (p.status == .implemented or p.slug.len == 0) continue;
         if (out.items.len > 0) try out.append(arena, ' ');
         try out.appendSlice(arena, p.slug);
-        if (p.id) |id| try out.print(arena, " {d}", .{id});
     }
     return out.items;
+}
+
+/// One item of a Done criteria checklist.
+pub const Item = struct {
+    /// Line within the body, from 1.
+    line: u32,
+    mark: enum { open, done, waived, none },
+};
+
+/// The top-level list items of the `## Done criteria` section, or null if
+/// there is no such section. Indented items and prose are skipped, as are
+/// fenced code blocks.
+pub fn doneCriteria(arena: std.mem.Allocator, body: []const u8) !?[]const Item {
+    var out: std.ArrayList(Item) = .empty;
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    var lineno: u32 = 0;
+    var in = false;
+    var found = false;
+    var fence = false;
+    while (lines.next()) |raw| {
+        lineno += 1;
+        const line = std.mem.trimEnd(u8, raw, " \r");
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) fence = !fence;
+        if (fence) continue;
+        if (std.mem.startsWith(u8, line, "## ")) {
+            in = std.mem.eql(u8, line[3..], "Done criteria");
+            found = found or in;
+            continue;
+        }
+        if (!in) continue;
+        if (!(std.mem.startsWith(u8, line, "- ") or std.mem.startsWith(u8, line, "* "))) continue;
+        const rest = line[2..];
+        const mark: @FieldType(Item, "mark") = if (std.mem.startsWith(u8, rest, "[ ] ")) .open else if (std.mem.startsWith(u8, rest, "[x] ")) .done else if (std.mem.startsWith(u8, rest, "[~] ")) .waived else .none;
+        try out.append(arena, .{ .line = lineno, .mark = mark });
+    }
+    return if (found) out.items else null;
 }
 
 /// The tags as they should be written: trimmed, joined by ", ".
@@ -342,6 +403,39 @@ pub fn canonicalTags(arena: std.mem.Allocator, tags: []const u8) ![]const u8 {
         try out.appendSlice(arena, std.mem.trim(u8, t, " \t"));
     }
     return out.items;
+}
+
+/// The name in a Zig `test "name" {` line, or a web case's
+/// `test('name', ...` or `test("name", ...` line (tests/web/*.mjs).
+pub fn caseName(line: []const u8) ?[]const u8 {
+    const t = std.mem.trimStart(u8, line, " \t");
+    if (std.mem.startsWith(u8, t, "test \"")) {
+        const end = std.mem.lastIndexOf(u8, t, "\" {") orelse return null;
+        if (end < 6) return null;
+        return t[6..end];
+    }
+    const prefix = if (std.mem.startsWith(u8, t, "await test(")) "await test(" else if (std.mem.startsWith(u8, t, "test(")) "test(" else return null;
+    const rest = t[prefix.len..];
+    if (rest.len == 0 or (rest[0] != '\'' and rest[0] != '"')) return null;
+    const q = rest[0];
+    var i: usize = 1;
+    while (i < rest.len) : (i += 1) {
+        if (rest[i] == '\\') {
+            i += 1;
+        } else if (rest[i] == q) return rest[1..i];
+    }
+    return null;
+}
+
+/// Whether any case in `text` (a test file) is tagged with `slug`.
+pub fn tagsCase(text: []const u8, slug: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const tags = testTags(caseName(line) orelse continue) orelse continue;
+        var it = std.mem.splitScalar(u8, tags, ',');
+        while (it.next()) |t| if (std.mem.eql(u8, std.mem.trim(u8, t, " "), slug)) return true;
+    }
+    return false;
 }
 
 /// The tags at the end of a test name: `name [a, b]` gives a and b.
@@ -376,13 +470,14 @@ test "parse a proposal" {
     try std.testing.expectEqual(@as(usize, 0), d.errors.items.len);
     try std.testing.expect(p.ok);
     try std.testing.expectEqual(@as(?u32, 42), p.id);
+    try std.testing.expectEqual(@as(usize, 0), p.branch.len);
     try std.testing.expectEqual(Status.accepted, p.status);
     try std.testing.expectEqual(@as(usize, 2), p.depends.len);
     try std.testing.expectEqualStrings("symlinks-in-root", p.depends[1]);
     try std.testing.expectEqual(@as(?[]const u8, null), p.superseded_by);
     try std.testing.expect(std.mem.startsWith(u8, p.body, "\n# Proposal"));
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("0042-linux-personality.md", p.expectedFile(&buf));
+    try std.testing.expectEqualStrings("linux-personality.md", p.expectedFile(&buf));
 }
 
 test "plain scalars" {
@@ -397,6 +492,16 @@ test "plain scalars" {
     try std.testing.expect(plainScalarProblem("ends:") != null);
 }
 
+test "done criteria" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expect(try doneCriteria(arena, "\n## Abstract\n\n- x\n") == null);
+    const items = (try doneCriteria(arena, "\n## Done criteria\n\nProse.\n\n- [ ] a\n  - nested\n- [x] b\n- [~] Waived: c\n- d\n```\n- e\n```\n\n## Implementation\n\n- f\n")).?;
+    try std.testing.expectEqual(@as(usize, 4), items.len);
+    try std.testing.expect(items[0].mark == .open and items[1].mark == .done and items[2].mark == .waived and items[3].mark == .none);
+}
+
 test "slugs and tags" {
     try std.testing.expect(validSlug("linux-personality"));
     try std.testing.expect(validSlug("9p-roots"));
@@ -408,4 +513,10 @@ test "slugs and tags" {
     try std.testing.expectEqualStrings("a, b", testTags("x [a, b]").?);
     try std.testing.expect(testTags("x[a]") == null);
     try std.testing.expect(testTags("no tag") == null);
+    try std.testing.expectEqualStrings("a draw client\\'s image [browser-gfx]", caseName("  await test('a draw client\\'s image [browser-gfx]', async () => {").?);
+    try std.testing.expectEqualStrings("x [a]", caseName("test(\"x [a]\", f)").?);
+    try std.testing.expectEqualStrings("echo [baseline]", caseName("test \"echo [baseline]\" {").?);
+    try std.testing.expect(caseName("async function test(name, f) {") == null);
+    try std.testing.expect(tagsCase("await test('x [a, b]', f);\n", "b"));
+    try std.testing.expect(!tagsCase("await test('x [a, b]', f);\n", "c"));
 }

@@ -1,11 +1,14 @@
-References that don't resolve: in depends, superseded-by and a test tag;
-and tags written without the canonical ", " spacing.
+References that don't resolve, in depends, superseded-by, and a test
+tag; references by number, which must be slugs; and tags written without
+the canonical ", " spacing.
 
 error: design/a.md:7: depends on `nope`, which isn't a proposal
-error: design/a.md:7: depends on `99`, which isn't a proposal
-error: design/0040-b.md:9: superseded by `gone`, which isn't a proposal
+error: design/a.md:7: depends on `99`; refer to proposals by slug
+error: design/c.md:7: depends on `40`; refer to proposals by slug (#40 is `b`)
+error: design/b.md:9: superseded by `gone`, which isn't a proposal
 error: tests/integration.zig:3: tag `missing` isn't a proposal
 error: tests/integration.zig:5: write the tags as [a, b2]
+error: tests/integration.zig:7: tag `40`; tag cases with a proposal's slug (#40 is `b`)
 
 -- design/a.md --
 ---
@@ -25,7 +28,7 @@ created: 2026-11-03
 authors: [progrium]
 depends: []
 ---
--- design/0040-b.md --
+-- design/b.md --
 ---
 id: 40
 slug: b
@@ -36,10 +39,21 @@ authors: [progrium]
 depends: []
 superseded-by: gone
 ---
+-- design/c.md --
+---
+slug: c
+title: C
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: [40]
+---
 -- tests/integration.zig --
 test "fine [a]" {
 }
 test "lost [missing]" {
 }
 test "squashed [a,b2]" {
+}
+test "numbered [40]" {
 }

@@ -1,0 +1,50 @@
+Links to design/ that don't resolve, from anywhere, and relative links
+between docs in design/. Generated and vendored files are left out.
+
+error: src/a.zig:1: links to design/0012-devsrv.md, which doesn't exist
+error: design/a.md:12: links to design/gone.md, which doesn't exist
+error: DEVELOPING.md:2: links to design/wine-draw.md, which doesn't exist
+
+-- design/a.md --
+---
+slug: a
+title: A
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+
+# Proposal: A
+
+See [b](b.md), [README](README.md#signature), [the spec](../SPEC.md), and [gone](gone.md).
+-- design/b.md --
+---
+slug: b
+title: B
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/STATUS.md --
+[old](0012-devsrv.md) design/0012-devsrv.md
+-- src/a.zig --
+// The devsrv proposal (design/0012-devsrv.md); see also mydesign/x.md.
+-- DEVELOPING.md --
+Proposals are design/<slug>.md files.
+The Wine driver (design/wine-draw.md).
+-- third_party/x/README --
+design/old.md
+-- tools/testdata/check/x.txtar --
+design/old.md
+-- design/c.md --
+---
+slug: c
+title: C
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+Files were named design/NNNN-shortname.md.

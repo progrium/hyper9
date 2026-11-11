@@ -1,49 +1,97 @@
-A valid tree: a baseline, filed and draft proposals with dependencies,
-id and slug references, and tagged cases. No messages.
+A valid tree: an implemented baseline on main, an accepted proposal
+being worked on in a branch, a proposed one with an issue, a draft with
+its Done criteria, signatures in both forms, links, and tagged cases in
+Zig and in a web test. No messages.
 
+-- .branches --
+devsrv 2
 -- design/README.md --
-The process; not a proposal.
+The process; not a proposal. See [devsrv](devsrv.md) and [the template](TEMPLATE.md).
 -- design/TEMPLATE.md --
 ---
 slug: [slug]
 ---
--- design/0000-baseline.md --
+-- design/SIGNERS --
+progrium Jeff Lindsay
+-- design/baseline.md --
 ---
-id: 0
 slug: baseline
-title: Baseline
+title: BASELINE
 status: implemented
 created: 2026-11-03
 authors: [progrium]
 depends: []
+branch: [main]
 ---
--- design/0012-devsrv.md --
+
+# Proposal: Baseline
+
+Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work.">h.d.a.</abbr>
+
+## Done criteria
+
+- [x] It works.
+- [~] Waived: the slow demo never ran.
+-- design/devsrv.md --
 ---
 id: 12
 slug: devsrv
-title: devsrv and /srv
+title: DEVSRV
 status: accepted
 created: 2026-11-03
 authors: [progrium]
 depends: [baseline]
 areas: [kern]
+branch: [devsrv]
 ---
+
+# Proposal: devsrv
+
+Nov 11, 2026 · Jeff Lindsay, [h.d.a.](README.md#signature)
+
+## Done criteria
+
+Context for the list.
+
+- [x] One.
+  - A note under it.
+- [ ] Two.
 -- design/roots-9p.md --
 ---
+id: 13
 slug: roots-9p
-title: 9P roots
-status: draft
+title: ROOTS-9P
+status: proposed
 created: 2026-11-03
 authors: [progrium]
-depends: [12]
+depends: [devsrv]
 superseded-by:
 ---
+
+# Proposal: 9P roots
+
+## Done criteria
+
+- [ ] Mount one.
+-- SPEC.md --
+# h9
+
+Nov 2, 2026 · Jeff Lindsay, [h.d.a.](design/README.md#signature)
+
+See design/devsrv.md and design/README.md.
+-- src/main.zig --
+// devsrv (design/devsrv.md).
 -- tests/integration.zig --
 test "echo [baseline]" {
 }
-test "ramfs posts to /srv [12]" {
+test "ramfs posts to /srv [devsrv]" {
 }
-test "mount a 9P root [roots-9p, 12]" {
+test "mount a 9P root [roots-9p, devsrv]" {
 }
 test "untagged" {
 }
+-- tests/web/page.mjs --
+async function test(name, f) {
+}
+await test('the page\'s canvas [devsrv]', async () => {
+});
