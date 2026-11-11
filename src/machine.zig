@@ -235,10 +235,9 @@ pub const Machine = struct {
         /// /bin, and without one make it the root. `.off` leaves a machine
         /// without `root` with devices only.
         builtin: policy.Builtin = .off,
-        /// Receives a ratrace-style line per syscall.
+        /// Receives a ratrace-style line per syscall and, when a program
+        /// faults, the Ureg and a symbolized PC.
         trace: ?*std.Io.Writer = null,
-        /// On a fault, print the Ureg and a symbolized PC to `stdio.err`.
-        dump_on_fault: bool = false,
         /// A namespace file (newns syntax, src/newns.zig) to replay in the
         /// first process after the policy's namespace is built and before
         /// the program is looked up. It's a guest path, read as newns
@@ -925,7 +924,7 @@ pub const Machine = struct {
         extra: vmm.Extra = .{ .arm64 = .{} },
         /// The Tos address, for the pid at fork.
         tos: u64 = 0,
-        /// The a.out, for symbolizing faults with dump_on_fault.
+        /// The a.out, for symbolizing faults in the trace.
         image: ?[]u8 = null,
         msg_buf: [256]u8 = undefined,
         /// Set under `job.lock` once the process is tearing down
@@ -1182,7 +1181,7 @@ pub const Machine = struct {
 
         fn keepImage(p: *Proc, bytes: []const u8) void {
             if (p.image) |old| p.job.m.gpa.free(old);
-            p.image = if (p.job.m.opts.dump_on_fault) p.job.m.gpa.dupe(u8, bytes) catch null else null;
+            p.image = if (p.job.m.opts.trace != null) p.job.m.gpa.dupe(u8, bytes) catch null else null;
         }
 
         /// Frees the process and unregisters it. Called last on its thread;
@@ -1671,7 +1670,7 @@ pub const Machine = struct {
                         p.noteMem();
                         continue;
                     };
-                    if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, "");
+                    if (m.opts.trace) |w| dumpFault(w, &p.job.trace_lock, &u, f, "");
                     // A fault while the signal is blocked or ignored kills,
                     // as Linux's force_sig does.
                     const a = l.sig.actions[lsig.SIGSEGV];
@@ -1751,7 +1750,7 @@ pub const Machine = struct {
                         p.noteMem();
                         continue;
                     }
-                    if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, p.image orelse "");
+                    if (m.opts.trace) |w| dumpFault(w, &p.job.trace_lock, &u, f, p.image orelse "");
                     // 9front's faultnote; popnote adds the pc. If the note
                     // can't be queued, the fault would only repeat.
                     var buf: [kern.ERRMAX]u8 = undefined;
@@ -3450,9 +3449,12 @@ fn setFpsave(x: *vmm.Extra, img: []const u8) void {
     }
 }
 
-/// Prints a fault for `--dump-on-fault`: the Ureg, the faulting address and
-/// the PC symbolized from the a.out symbol table.
-fn dumpFault(w: *std.Io.Writer, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const u8) void {
+/// Prints a fault to the trace: the Ureg, the faulting address and the PC
+/// symbolized from the a.out symbol table. `lock` keeps it in one piece
+/// among the other processes' trace lines.
+fn dumpFault(w: *std.Io.Writer, lock: *std.atomic.Mutex, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const u8) void {
+    while (!lock.tryLock()) std.atomic.spinLoopHint();
+    defer lock.unlock();
     dumpFaultTo(w, u, f, bytes) catch {};
     w.flush() catch {};
 }

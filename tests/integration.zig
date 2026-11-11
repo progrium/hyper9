@@ -628,16 +628,6 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #b #i #m\n") != null);
 }
 
-test "--strict refuses what this build can't enforce [baseline]" {
-    const e = try env(@src());
-    // This build enforces every capability it knows, since
-    // design/overlay.md made --write=overlay enforceable, so there's
-    // nothing left to refuse.
-    const ok = try run(e, &.{ "--strict", "--profile=tight", "echo", "ok" });
-    defer ok.deinit();
-    try std.testing.expectEqual(0, ok.code);
-}
-
 test "--memory caps guest memory [baseline]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--memory", "64k", "echo", "x" });
@@ -1338,20 +1328,19 @@ test "renaming a directory marker is refused [ephemeral-writes]" {
     try std.testing.expect(!s.exists("e"));
 }
 
-test "--strict accepts --write=ephemeral, and --print shows the overlays [ephemeral-writes]" {
+test "--write=ephemeral runs, and --print shows the overlays [ephemeral-writes]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    const r = try runEph(e, &s, &.{ "--strict", "--print", "echo" });
+    const r = try runEph(e, &s, &.{ "--print", "echo" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "fs.write.ephemeral") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "unenforced") == null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "  bind -c '#O' /mnt/term/cwd ") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "  bind -c '#O' /tmp ") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "  eph  ") != null);
-    const ok = try runEph(e, &s, &.{ "--strict", "echo", "ok" });
+    const ok = try runEph(e, &s, &.{ "echo", "ok" });
     defer ok.deinit();
     try std.testing.expectEqual(0, ok.code);
 }
@@ -1516,17 +1505,16 @@ test "--write=ephemeral overlays the root as well [overlay]" {
     try expectRootLacks(e, "lib/h9-overlay-eph");
 }
 
-test "--strict --write=overlay is accepted [overlay]" {
+test "--write=overlay runs, and --print shows it enforced [overlay]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--strict", "--write=overlay", "echo", "ok" });
+    const r = try run(e, &.{ "--write=overlay", "echo", "ok" });
     defer r.deinit();
     try std.testing.expectEqualStrings("ok\n", r.out);
     try std.testing.expectEqual(0, r.code);
-    const p = try run(e, &.{ "--strict", "--print", "echo" });
+    const p = try run(e, &.{ "--print", "echo" });
     defer p.deinit();
     try std.testing.expectEqual(0, p.code);
     try std.testing.expect(std.mem.indexOf(u8, p.out, "fs.write.overlay") != null);
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "unenforced") == null);
 }
 
 test "--print output with the root overlay replays with --ns [overlay]" {
@@ -2734,9 +2722,9 @@ test "--print shows net-allow patterns and caveats [net-policy]" {
     try std.testing.expect(std.mem.indexOf(u8, d.out, "except link-local") != null);
 }
 
-test "--strict accepts --net=outbound [net-policy]" {
+test "--net=outbound runs [net-policy]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--strict", "--net=outbound", "echo", "ok" });
+    const r = try run(e, &.{ "--net=outbound", "echo", "ok" });
     defer r.deinit();
     try std.testing.expectEqualStrings("ok\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -4602,7 +4590,6 @@ test "--net=outbound binds only /net/ws on the web host [websocket-9p, browser-h
     const p = try run(e, &.{ "--net=outbound", "--print", "/bin/echo" });
     defer p.deinit();
     try expectIn(p.out, "bind '#ℏ' /net");
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "unenforced") == null);
 }
 
 test "a wss:// root runs /bin/ls [websocket-9p]" {

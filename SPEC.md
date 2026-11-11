@@ -958,7 +958,7 @@ The server Proc and its descendants are counted against `--pids` separately from
 
 ### Sandbox policy
 
-Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths, network rules, and limits. The capability model follows [isobox](https://github.com/can1357/isobox): named capabilities, profiles that set defaults, explicit flags that override them, a printable plan with caveats, and `--strict` to refuse anything the build can't enforce. Unlike isobox, enforcement lives in the shared kernel, so the capability set is the same on every vmm backend; there's no per-host intersection to compute.
+Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths, network rules, and limits. The capability model follows [isobox](https://github.com/can1357/isobox): named capabilities, profiles that set defaults, explicit flags that override them, and a printable plan with caveats. Unlike isobox, enforcement lives in the shared kernel, so the capability set is the same on every vmm backend; there's no per-host intersection to compute.
 
 | Capability | Mechanism |
 | --- | --- |
@@ -1114,7 +1114,7 @@ A WebSocket root's comment is its URL with the query elided (`?…`), its header
 
 The built-in root is printed as `bind '#Hroot' /` with `builtin` in the access column and what it holds in a comment (`h9 v0.2.0, 9front 11952 slim`, or `skeleton only`). It's constant data, so it has no access rule, `--writable` can't name it, and it's read-only whatever the flags; the root's overlay and `/tmp` go over it as over a 9P root, as bare `#O`s. `--builtin=before` and `--builtin=after` print their `#Hroot/$cputype/bin` bind with `builtin` too. The lines replay with `--ns` as ordinary binds, so a plan printed over the built-in root replays on any h9 of the same build.
 
-`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`. Requested capabilities the build can't enforce are listed on an `unenforced:` line, and `--strict` refuses them with exit 2; this build enforces every capability it knows, so the line doesn't appear.
+`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`.
 
 The root's overlay is printed as `bind -c '#O' /` with `eph` and, over a host tree, the root's path in a comment, and the root's access rule as `eph`. Replayed with `--ns`, the line overlays whatever `/` is at that point; binds made before it onto directories of the root (the builder's own, when replaying into a running plan) are hidden under it, and the replay's later lines redo them, except `#U` binds, which the device mask refuses. The guest's cwd stays where the builder put it.
 
@@ -1150,10 +1150,9 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 
 ### Debugging
 
-- `--trace` logs each syscall with its arguments, result, and error string, prefixed by pid, like 9front's ratrace.
+- `--trace` logs each syscall with its arguments, result, and error string, prefixed by pid, like 9front's ratrace. When the guest faults, it also logs the Ureg, the faulting address, and a PC symbolized from the a.out symbol table (`dumpFault` in `src/machine.zig`), under the same lock as the syscall lines.
 - acid (Plan 9's debugger) attaches to a live process through devproc's `mem`, `regs`, `fpregs`, `text`, and the `ctl` stop messages ([self-host](design/self-host.md)). A process stops only on its own thread, at a stop point: entering a syscall, delivering a note (which a `stop` kick forces for one spinning in guest code), a breakpoint exit, or before its first instruction after `exec` with `hang`. It saves its Ureg and Extra to its record (`Proc.dbg_ureg`, `dbg_extra` in `src/machine.zig`) and sleeps on the record (`h9_kern_stopwait` in `src/kern/proc.c`), holding no vCPU, so readers on other threads never touch a backend. Register writes are kept in the record and loaded, through `arch.sanitize`, when the process resumes. `mem` reads and writes go through `AddressSpace.copy`; a write into text first gives the process its own copy of a shared text segment (`Segs.ownText`, 9front's `txt2data`) and then calls `codeChanged`, which bumps the flush epoch on hvf and kvm (the shim invalidates the I-cache before its next entry) and makes emu flush Unicorn's whole translation cache before its next run. `kill`, `--timeout`, and teardown interrupt a stopped process.
 - `BRK` and `INT3` exit as `vmm.Exit.breakpoint`, and the machine posts `sys: breakpoint` with the debug flag, so a process without a handler dies with it and acid's `bpset`, `step`, and `next` work. The PC is left at the `BRK` on arm64 and after the `INT3` on x86, as on 9front.
-- `--dump-on-fault` prints the Ureg, the faulting address, and a symbolized PC from the a.out symbol table.
 - There's no gdb stub.
 
 ### Testing and CI
@@ -1228,16 +1227,14 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |
 | `--pids N`, `--cpus N` | Caps processes and concurrently running vCPUs |
 | `--timeout DURATION` | Posts `hangup` at a deadline, waits up to 2 s, then tears down the machine |
-| `--strict` | Refuses any requested capability this build can't enforce (exit 2) |
 | `--print` | Prints the compiled policy and namespace, then exits |
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
 | `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
 | `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](design/builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` |
-| `--trace[=FILE]` | ratrace-style syscall log, to stderr by default |
+| `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
-| `--dump-on-fault` | Prints the Ureg and a symbolized PC when the guest faults |
 | `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`). Exits 0, or 125 if h9 can't run programs from the root |
 | `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (42 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
@@ -1328,8 +1325,7 @@ pub const Options = struct {
     policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs
     guest_tools: bool = true,           // bind #H/bin, h9's own commands, after /bin; false masks #H
     builtin: policy.Builtin = .off,     // the built-in root #Hroot: .only, or .before/.after another root's /bin
-    trace: ?*std.Io.Writer = null,
-    dump_on_fault: bool = false,
+    trace: ?*std.Io.Writer = null,      // syscall lines, and a Ureg dump on each fault
     ns: ?[]const u8 = null,             // newns file to replay
     serve: []const Listen = &.{},       // .unix (path), .tcp (host!port), .ws (host:port/path); empty argv serves only
     serve_root: []const u8 = "/",       // the guest path each connection exports
@@ -1353,4 +1349,4 @@ pub fn serving(m: *const Machine) []const []const u8; // each listener's bound a
 - [9front drawterm (GitHub mirror)](https://github.com/9front/drawterm): `kern/sysfile.c`, `kern/dat.h`, `kern/devtab.c`, `LICENSE`
 - [hyper-linux](https://github.com/zw3rk/hyper-linux): `src/shim.S`, `src/thread.h`, `LICENSE`
 - [9front release announcement, OSnews](https://www.osnews.com/?p=145669)
-- [isobox](https://github.com/can1357/isobox): capability model, profiles, plan caveats, and `--strict`
+- [isobox](https://github.com/can1357/isobox): capability model, profiles, and plan caveats

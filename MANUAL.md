@@ -2105,7 +2105,6 @@ Files and sandbox (chapters 22 and 23):
 | `--serve-net` | Export `/net` too |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
-| `--strict` | Refuse, with exit 2, anything this build can't enforce |
 | `--print` | Print the compiled sandbox plan and exit without running |
 
 Limits (chapter 24):
@@ -2121,8 +2120,7 @@ Debugging (chapter 28):
 
 | Flag | Meaning |
 | --- | --- |
-| `--trace[=FILE]` | Log every system call, to standard error or to `FILE` |
-| `--dump-on-fault` | Print the registers and the symbolized PC when a program faults |
+| `--trace[=FILE]` | Log every system call, and the registers and symbolized PC when a program faults, to standard error or to `FILE` |
 | `--gfx[=noclip]` | Give the machine a host window, with `/dev/snarf` as the host clipboard, or private with `=noclip` (chapter 17) |
 | `--gfx-scale N` | The window's scale on macOS: 1 points, 0 backing pixels, N backing pixels divided by N |
 
@@ -2353,18 +2351,12 @@ caveats:
 | --- | --- |
 | `profile:` | The profile the defaults came from |
 | `enforces:` | The capabilities in force |
-| `unenforced:` | Shown only when you asked for something this build can't enforce yet |
 | `limits:` | The write and network modes, and any memory, timeout, process, and CPU caps |
 | `devmask:` | Devices a program can't attach by name after startup |
 | `net-allow:` | Shown only with `--net-allow`: the patterns |
 | `namespace:` | The namespace, in namespace-file syntax, with each host tree's access (`ro`, `rw`, `eph`, `9p`) at the end of its line; `<id>` stands for the machine's console number |
 | `access:` | The rules the host file system device checks: allowed read-only, read-write, ephemeral, or denied, by host path |
 | `caveats:` | What the sandbox doesn't cover in this configuration |
-
-**`--strict`.** When you ask for something this build can't enforce, h9 falls
-back to the safer choice and lists it as `unenforced`, and `--strict` refuses
-to run instead, with exit 2. This build enforces every capability it knows,
-so today `--strict` always runs.
 
 **Recipes**
 
@@ -2604,9 +2596,9 @@ host$ h9 --trace cat /lib/nosuch
 ...
 ```
 
-**Faults.** `--dump-on-fault` prints the registers, the faulting address, and
-the program counter, named by the a.out's symbol table, when a program takes
-a fault it doesn't handle.
+**Faults.** When a program takes a fault, `--trace` also logs the registers,
+the faulting address, and the program counter, named by the a.out's symbol
+table.
 
 **`/proc`.** `ps`, `pstree`, `/proc/n/status`, `/proc/n/fd` (open files),
 `/proc/n/ns` (the namespace) and `/proc/n/segment` (memory) work, and so

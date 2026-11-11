@@ -674,11 +674,6 @@ whole container in a few lines, and it replays with `--ns`, so you can save it
 as a starting point. And the `caveats:` section lists what this configuration
 doesn't protect against.
 
-`--strict` refuses to run, with exit 2, if a flag asks for something the
-build can't enforce. Every capability in today's build is enforced, so it
-always runs; keep it in scripts anyway, so a future flag can't silently give
-them a weaker sandbox than they asked for.
-
 ## 14. Registries: serving images over 9P
 
 Docker images move as tarballs through a registry. 9front roots can come
