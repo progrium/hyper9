@@ -7,6 +7,7 @@ created: 2026-11-05
 authors: [progrium]
 depends: [devsrv, ninep-roots, serve, guest-tools]
 areas: [cli, kern, sandbox]
+branch: [dotl]
 ---
 
 # Proposal: 9P2000.L and ZeroFS
