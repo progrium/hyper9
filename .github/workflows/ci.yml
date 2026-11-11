@@ -75,6 +75,8 @@ jobs:
           scripts/fetch.sh isoamd64
           . scripts/pins.sh
           zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
+      # diod, the 9P2000.L server the [dotl] cases run against.
+      - run: scripts/fetch.sh diod
       - run: zig build integration -Darch=amd64 -Dbackends=kvm -Droot="$PWD/.local/9front/rootamd64"
 
   # The demo page and its canvas cases in Chromium, over the 386 root.
