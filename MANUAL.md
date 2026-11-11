@@ -2736,6 +2736,9 @@ They change faster than this manual, as proposals land.
 - [Embedding h9 in a Zig program](docs/embedding.md): a Zig program that
   runs 9front programs in machines of its own, several at once, with
   captured I/O, a sandbox policy, and 9P roots.
+- [Running Claude Code in the browser](docs/claude-code-browser.md): a page
+  that runs Claude Code's arm64 Linux binary on ha64 in a tab, with its root
+  archive, memory, environment, terminal, and network.
 - [Building your own userland](docs/userland.md): a root of your own, from
   one Go program to a slim 9front, a layer over the stock root, or a tree
   served over 9P or WebSocket.
