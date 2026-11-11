@@ -2,7 +2,7 @@
 id: 120
 slug: browser-gfx
 title: Graphics on the browser host
-status: accepted
+status: implemented
 created: 2026-11-07
 authors: [progrium]
 depends: [12, 15]
