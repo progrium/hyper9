@@ -530,7 +530,6 @@ pub const Mm = struct {
     /// chunks there that are allocated, past any overlays.
     fn fillAllocated(m: *Mm, v: Vma, start: u64, end: u64) void {
         const s = v.src.?;
-        if (start < end) m.as.codeChanged(start, end - start);
         var ci = start / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
@@ -540,7 +539,10 @@ pub const Mm = struct {
             while (lo < hi) {
                 const b = c.backing(lo);
                 const e = @min(hi, b.end);
-                if (!b.overlay) s.fill(s, b.mem[0..@intCast(e - lo)], v.offset + (cs + lo - v.start));
+                if (!b.overlay) {
+                    s.fill(s, b.mem[0..@intCast(e - lo)], v.offset + (cs + lo - v.start));
+                    m.as.hostWrote(b.mem[0..@intCast(e - lo)]);
+                }
                 lo = e;
             }
         }
@@ -879,9 +881,6 @@ pub const Mm = struct {
 
     /// Zeroes the allocated pages in [start, end).
     fn zero(m: *Mm, start: u64, end: u64) void {
-        // What was decoded or compiled from these pages goes: a mapping
-        // made here later reuses them.
-        if (start < end) m.as.codeChanged(start, end - start);
         var ci = start / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
@@ -891,7 +890,13 @@ pub const Mm = struct {
             while (lo < hi) {
                 const b = c.backing(lo);
                 const e = @min(hi, b.end);
-                if (!b.overlay) @memset(b.mem[0..@intCast(e - lo)], 0);
+                if (!b.overlay) {
+                    @memset(b.mem[0..@intCast(e - lo)], 0);
+                    // What was decoded or compiled from these pages goes: a
+                    // mapping made here later reuses them. After the
+                    // write, so a decode during it goes too.
+                    m.as.hostWrote(b.mem[0..@intCast(e - lo)]);
+                }
                 lo = e;
             }
         }
@@ -1114,7 +1119,10 @@ pub const Mm = struct {
             const hi = @min(end, cs + b.end);
             const g = b.mem[0..@intCast(hi - at)];
             const h = buf[@intCast(at - va)..@intCast(hi - va)];
-            if (to_guest) @memcpy(g, h) else @memcpy(h, g);
+            if (to_guest) {
+                @memcpy(g, h);
+                m.as.hostWrote(g);
+            } else @memcpy(h, g);
             at = hi;
         }
     }
@@ -1136,6 +1144,7 @@ pub const Mm = struct {
             const b = c.backing(at - cs);
             const hi = @min(end, cs + b.end);
             f(ctx, b.mem[0..@intCast(hi - at)], at - va);
+            m.as.hostWrote(b.mem[0..@intCast(hi - at)]);
             at = hi;
         }
     }
@@ -1283,6 +1292,7 @@ pub const Mm = struct {
             const dc = try m.populate(dst + off);
             const do = (dst + off) % chunk_size;
             @memcpy(dc.backing(do).mem[0..page], from);
+            m.as.hostWrote(dc.backing(do).mem[0..page]);
         }
     }
 

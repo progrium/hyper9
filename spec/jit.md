@@ -79,7 +79,13 @@ An entry is filled only for a page the access is allowed on, so the tag compare 
 
 **No host faults.** Guest exceptions never come from host traps: no guard pages, no signal handlers, and no reliance on the host faulting on a bad address. Every access is bounds-checked against arena memory the address space owns.
 
-**Code pages.** `mem.CodePages` marks the arena pages that something was decoded or compiled from. A marked page never gets a write TLB entry, so a guest store to it reaches the slow path, which invalidates the page's translations and decode caches before the store. In T1 the store leaves the region instead (`View.code_stores = .exit`), and T0 does it. That keeps self-modifying code and Linux JITs correct with no instruction-cache maintenance from the guest.
+**Code pages.** `mem.CodePages` marks the arena pages that something was decoded or compiled from. A marked page never gets a write TLB entry, so a guest store to it reaches the slow path, which invalidates the page's translations and decode caches before the store. In T1 the store leaves the region instead (`View.code_stores = .exit`), and T0 does it. That keeps code a vCPU writes and then runs correct with no instruction-cache maintenance from the guest.
+
+Each page also has a generation, which every invalidate of it moves. A reader marks the page, reads its generation, and only then reads the code; afterwards it checks that the page is still marked at that generation. If an invalidate came in between, its stores may have taken a fast path the reader's copy never saw, so T0 marks and decodes again, and T1 drops the translation (`Cache.insert`). T0 keeps decoded pages until their generation moves, not just until any page's does. Three narrower windows are closed too:
+
+- A store that took the slow path checks the bit again after it lands (`CodePages.stored`), in case the page was marked while it was on its way.
+- On arm64, `IC IVAU`, which a JIT issues after writing code for another thread to run, invalidates its page. That covers a fast-path store already past its TLB check when the page was marked.
+- The host's own writes into guest memory (a read into a buffer, a file page filled, pages zeroed for reuse) invalidate the pages they wrote, after writing, through `vmm.AddressSpace.hostWrote`.
 
 ## The IR
 

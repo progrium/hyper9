@@ -506,6 +506,12 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 return true;
             }
 
+            /// The host wrote `bytes`, from this space's pages: what was
+            /// decoded or compiled from them goes (vmm.AddressSpace.hostWrote).
+            pub fn hostWrote(as: *EmuSpace, bytes: []const u8) void {
+                as.backend.code.invalidateRange(@intFromPtr(bytes.ptr), bytes.len);
+            }
+
             /// The host wrote code: what was decoded or compiled from those
             /// pages goes now, for every space mapping them.
             pub fn codeChanged(as: *EmuSpace, va: u64, len: u64) void {
