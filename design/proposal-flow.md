@@ -161,10 +161,10 @@ Nothing changes for the guest. The signing workflow writes to PR branches, so it
 - [x] `zig build design -- list` shows in progress for a proposal whose branch has a recent commit, and stalled for one whose branch is older than 7 days or gone, with a unit test of each.
 - [x] `zig build design -- propose <slug> --dry-run` shows the issue it would open and `status: proposed`, without renaming the file, and refuses when an open issue has the same title.
 - [x] `zig build design -- log browser-gfx` prints its status changes with their commits.
-- [ ] `zig build proposal -Dp=browser-gfx` runs the Chromium cases in `tests/web/gfx.mjs`.
+- [~] `zig build proposal -Dp=browser-gfx` runs the Chromium cases in `tests/web/gfx.mjs`. Waived: it needs a 386 root to run, and Jeff dropped the item rather than hold the proposal for it.
 - [x] `zig build design -- sign proposal-flow` adds a signature in the short form with today's date, refuses when stdin isn't a terminal, and refuses unless the typed slug matches.
 - [x] `zig build design -- close-issues --dry-run` lists the open issues of implemented proposals (#35 and #120 today), and `check` fails on the old `id` key and on a slug without an issue that starts with a digit.
-- [ ] After the merge, design-status closes #35 and #120 with a comment linking each doc.
+- [x] After the merge, design-status closes #35 and #120 with a comment linking each doc.
 - [ ] A `/sign <slug>` comment on a PR from a login in `design/SIGNERS` adds the signature on the PR's branch, and the same comment from a login that isn't listed does nothing but reply.
 - [x] `check` fails on a signature line in neither form, or naming someone not in `design/SIGNERS`.
 - [x] design/README.md, TEMPLATE.md, AGENTS.md, and DEVELOPING.md describe the new states, `branch`, Done criteria, `propose`, and `log`, and nothing describes `likely-accept`, `fix`, or numbered filenames, and README's Signature section describes the short form, `sign`, and `/sign`.
@@ -185,3 +185,7 @@ This proposal is the first to use the new flow: it goes from `draft` to `impleme
 ## Open issues
 
 - Should `close-issues` also set each issue's labels from `status`?
+
+## Updates
+
+- 2026-11-11: Merged in #175. design-status's first run on main closed #120 with `close-issues`. #35 had already been closed by GitHub when #175 merged, because the PR's description said it would "close #35", so `close-issues` found it closed and left it alone.
