@@ -20,7 +20,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [gfx](gfx.md) | [#15](../../../issues/15) | implemented |  | Graphics (--gfx) |
 | [kvm](kvm.md) | [#16](../../../issues/16) | implemented |  | KVM backend |
 | [whp](whp.md) | [#17](../../../issues/17) | implemented |  | WHP backend |
-| [zig-interpreter](zig-interpreter.md) | [#19](../../../issues/19) | proposed |  | A native Zig interpreter for the emulator |
+| [zig-interpreter](zig-interpreter.md) | [#19](../../../issues/19) | superseded |  | A native Zig interpreter for the emulator |
 | [baseline](baseline.md) |  | implemented |  | Baseline (h9 before proposals) |
 | [ci](ci.md) |  | draft |  | Continuous integration |
 | [hide-host-paths](hide-host-paths.md) |  | draft |  | Hide host paths in /proc/n/ns |
@@ -81,7 +81,7 @@ flowchart LR
   p_gfx["gfx<br/>implemented"]:::implemented
   p_kvm["kvm<br/>implemented"]:::implemented
   p_whp["whp<br/>implemented"]:::implemented
-  p_zig_interpreter["zig-interpreter<br/>proposed"]:::draft
+  p_zig_interpreter["zig-interpreter<br/>superseded"]:::closed
   p_baseline["baseline<br/>implemented"]:::implemented
   p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
