@@ -95,7 +95,7 @@ the agent's ordinary tools run too.
   so they're reviewed like code. An agent that wants to delegate starts a
   child machine whose policy can only be narrower than its own.
 
-**Builds on:** [9p-roots](../design/9p-roots.md),
+**Builds on:** [ninep-roots](../design/ninep-roots.md),
 [devsrv](../design/devsrv.md),
 [ephemeral-writes](../design/ephemeral-writes.md),
 [net-policy](../design/net-policy.md),
@@ -133,7 +133,7 @@ code.
   remote attestation.
 
 **Builds on:** [net-policy](../design/net-policy.md),
-[9p-roots](../design/9p-roots.md). Would pull forward
+[ninep-roots](../design/ninep-roots.md). Would pull forward
 [host-srv](../design/host-srv.md) (post `/out`),
 [root-auth](../design/root-auth.md) (per-analyst attaches),
 [host-sandbox](../design/host-sandbox.md) and
@@ -206,7 +206,7 @@ namespace is identical on every run.
 **Builds on:** [linux-personality](../design/linux-personality.md),
 [linux-net](../design/linux-net.md),
 [linux-threads](../design/linux-threads.md),
-[net-policy](../design/net-policy.md), [9p-roots](../design/9p-roots.md).
+[net-policy](../design/net-policy.md), [ninep-roots](../design/ninep-roots.md).
 Would pull forward [cow-fork](../design/cow-fork.md), since package managers
 fork large processes.
 
@@ -241,7 +241,7 @@ step runs on a Mac laptop, a Linux worker or the emulator.
 - The `--print` plan and the read log together are a provenance record
   (SLSA-style) for free.
 
-**Builds on:** [9p-roots](../design/9p-roots.md),
+**Builds on:** [ninep-roots](../design/ninep-roots.md),
 [websocket-9p](../design/websocket-9p.md),
 [overlay](../design/overlay.md), [kvm](../design/kvm.md),
 [serve](../design/serve.md). Would pull forward
@@ -413,7 +413,7 @@ states the program's entire world in a few lines anyone can read.
   and the browser host makes that a link rather than an install.
 - Fixity is built in: the tree's root hash is the archive's identity.
 
-**Builds on:** [9p-roots](../design/9p-roots.md),
+**Builds on:** [ninep-roots](../design/ninep-roots.md),
 [i386](../design/i386.md), [browser-host](../design/browser-host.md),
 [builtin-root](../design/builtin-root.md). Would pull forward
 [hcpu](../design/hcpu.md), the dependency-free emulator.
@@ -550,7 +550,7 @@ files it was given.
 - Users can also script the app from `rc`, and the same tree, exported with
   `--serve`, is a remote-control API for free.
 
-**Builds on:** [embedding](embedding.md), [9p-roots](../design/9p-roots.md),
+**Builds on:** [embedding](embedding.md), [ninep-roots](../design/ninep-roots.md),
 [devsrv](../design/devsrv.md),
 [linux-personality](../design/linux-personality.md),
 [serve](../design/serve.md). Would pull forward

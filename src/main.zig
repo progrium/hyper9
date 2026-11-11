@@ -512,7 +512,7 @@ fn linuxTree(arena: std.mem.Allocator, io: std.Io, arg: []const u8) ?[]const u8 
     return null;
 }
 
-/// Reads a --root or $H9ROOT value (design/9p-roots.md): a dial
+/// Reads a --root or $H9ROOT value (design/ninep-roots.md): a dial
 /// string, or a host path that's a directory (served through #U, which
 /// takes absolute paths with symlinks resolved) or a unix socket.
 fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!h9.Root {

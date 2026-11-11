@@ -107,7 +107,7 @@ different direction:
   Zig have all been run this way (see the
   [Linux personality page](../site/linux.html)).
 - **Image vs root.** A container starts from a layered image. h9 starts from a
-  root tree, a 9P server ([9p-roots](../design/9p-roots.md)), or one
+  root tree, a 9P server ([ninep-roots](../design/ninep-roots.md)), or one
   behind a WebSocket ([websocket-9p](../design/websocket-9p.md)), and
   composes layers with Plan 9 binds and a copy-on-write overlay. The overlay
   is the default ([overlay](../design/overlay.md)): writes to the root

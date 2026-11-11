@@ -15,7 +15,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [devsrv](devsrv.md) | [#8](../../../issues/8) | implemented |  | devsrv, /srv, and mount |
 | [self-host](self-host.md) | [#10](../../../issues/10) | implemented |  | Self-hosting |
 | [overlay](overlay.md) | [#11](../../../issues/11) | implemented |  | Copy-on-write overlay as the root's default |
-| [9p-roots](9p-roots.md) | [#13](../../../issues/13) | implemented |  | 9P roots |
+| [ninep-roots](ninep-roots.md) | [#13](../../../issues/13) | implemented |  | 9P roots |
 | [image-roots](image-roots.md) | [#14](../../../issues/14) | declined |  | Disk-image roots |
 | [gfx](gfx.md) | [#15](../../../issues/15) | implemented |  | Graphics (--gfx) |
 | [kvm](kvm.md) | [#16](../../../issues/16) | implemented |  | KVM backend |
@@ -45,7 +45,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | proposed | needs dotl | Credential helpers for WebSocket 9P |
 | [browser-gfx](browser-gfx.md) | [#120](../../../issues/120) | implemented |  | Graphics on the browser host |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
-| [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
+| [host-cmd](host-cmd.md) |  | draft | stalled: host-cmd not found | Rethinking host commands |
 | [overlay-export](overlay-export.md) |  | draft |  | Exporting a run's overlay changes |
 | [schemeless-roots](schemeless-roots.md) | [#76](../../../issues/76) | implemented |  | Schemeless roots |
 | [login-shell](login-shell.md) | [#89](../../../issues/89) | proposed | needs host-cmd | h9 as a login shell |
@@ -55,7 +55,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [tilde-roots](tilde-roots.md) | [#107](../../../issues/107) | proposed |  | Tilde roots from $H9ROOTPATH |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
-| [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
+| [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | stalled: wine-draw not found | Wine windows through draw |
 | [mount-index](mount-index.md) |  | draft |  | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | proposed |  | hcpu, h9's own CPUs for the emulator |
 | [proposal-flow](proposal-flow.md) |  | implemented |  | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
@@ -75,7 +75,7 @@ flowchart LR
   p_devsrv["devsrv<br/>implemented"]:::implemented
   p_self_host["self-host<br/>implemented"]:::implemented
   p_overlay["overlay<br/>implemented"]:::implemented
-  p_9p_roots["9p-roots<br/>implemented"]:::implemented
+  p_ninep_roots["ninep-roots<br/>implemented"]:::implemented
   p_image_roots["image-roots<br/>declined"]:::closed
   p_gfx["gfx<br/>implemented"]:::implemented
   p_kvm["kvm<br/>implemented"]:::implemented
@@ -122,10 +122,10 @@ flowchart LR
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
-  p_semaphores --> p_9p_roots
-  p_devsrv --> p_9p_roots
+  p_semaphores --> p_ninep_roots
+  p_devsrv --> p_ninep_roots
   p_devsrv --> p_image_roots
-  p_9p_roots --> p_image_roots
+  p_ninep_roots --> p_image_roots
   p_devsrv --> p_gfx
   p_kvm --> p_whp
   p_kvm --> p_host_sandbox
@@ -136,10 +136,10 @@ flowchart LR
   p_exit_status --> p_linux_personality
   p_net_policy --> p_websocket_9p
   p_devsrv --> p_websocket_9p
-  p_9p_roots --> p_websocket_9p
+  p_ninep_roots --> p_websocket_9p
   p_guest_tools --> p_websocket_9p
   p_devsrv --> p_dotl
-  p_9p_roots --> p_dotl
+  p_ninep_roots --> p_dotl
   p_serve --> p_dotl
   p_guest_tools --> p_dotl
   p_linux_personality --> p_linux_threads
@@ -150,16 +150,16 @@ flowchart LR
   p_builtin_root --> p_serve
   p_multicall --> p_builtin_root
   p_devsrv --> p_host_srv
-  p_9p_roots --> p_host_srv
+  p_ninep_roots --> p_host_srv
   p_websocket_9p --> p_host_srv
-  p_9p_roots --> p_root_auth
+  p_ninep_roots --> p_root_auth
   p_websocket_9p --> p_credential_helpers
   p_dotl --> p_credential_helpers
   p_browser_host --> p_browser_gfx
   p_gfx --> p_browser_gfx
   p_browser_host --> p_audio
   p_ephemeral_writes --> p_overlay_export
-  p_9p_roots --> p_schemeless_roots
+  p_ninep_roots --> p_schemeless_roots
   p_websocket_9p --> p_schemeless_roots
   p_default_command --> p_login_shell
   p_host_cmd --> p_login_shell
@@ -169,14 +169,14 @@ flowchart LR
   p_linux_threads --> p_linux_i386
   p_linux_net --> p_linux_i386
   p_browser_host --> p_linux_i386
-  p_9p_roots --> p_tilde_roots
+  p_ninep_roots --> p_tilde_roots
   p_websocket_9p --> p_tilde_roots
   p_schemeless_roots --> p_tilde_roots
   p_linux_personality --> p_cow_fork
   p_linux_threads --> p_cow_fork
   p_gfx --> p_wine_draw
   p_linux_personality --> p_wine_draw
-  p_9p_roots --> p_mount_index
+  p_ninep_roots --> p_mount_index
   p_websocket_9p --> p_mount_index
   p_guest_tools --> p_mount_index
   p_proposals --> p_proposal_flow

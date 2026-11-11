@@ -3232,7 +3232,7 @@ fn checkBintime(e: Env, backend: []const u8) !void {
     try std.testing.expect(word(b, 0) > word(a, 0));
 }
 
-// 9P roots (design/9p-roots.md). The server is a second h9 serving
+// 9P roots (design/ninep-roots.md). The server is a second h9 serving
 // the test root tree read-only with exportfs behind aux/listen1 -t, so no
 // host 9P server is needed. Cases compare a run over the 9P root with the
 // same run over the host tree, whose namespace is otherwise the same.
@@ -3422,7 +3422,7 @@ const FakeAttach = struct {
     }
 };
 
-test "a TCP 9P root runs /bin/ls [9p-roots]" {
+test "a TCP 9P root runs /bin/ls [ninep-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3479,7 +3479,7 @@ const UnixRelay = struct {
     }
 };
 
-test "a unix socket 9P root runs /bin/ls [9p-roots]" {
+test "a unix socket 9P root runs /bin/ls [ninep-roots]" {
     if (!std.Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     var srv: RootServer = undefined;
@@ -3499,7 +3499,7 @@ test "a unix socket 9P root runs /bin/ls [9p-roots]" {
     try expectSameAsHost(e, sock, &.{ "/bin/ls", "/" });
 }
 
-test "rc pipelines and exec run from a 9P root [9p-roots]" {
+test "rc pipelines and exec run from a 9P root [ninep-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3507,7 +3507,7 @@ test "rc pipelines and exec run from a 9P root [9p-roots]" {
     try expectSameAsHost(e, srv.dial(), &.{ "--rc", "ls /bin | grep -c '/cat$'; echo a b c | wc -w; exec /bin/echo done" });
 }
 
-test "the host cwd is bound over a 9P root [9p-roots]" {
+test "the host cwd is bound over a 9P root [ninep-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3524,7 +3524,7 @@ test "the host cwd is bound over a 9P root [9p-roots]" {
     try std.testing.expect(s.exists("g"));
 }
 
-test "a 9P root works under --net=disable [9p-roots]" {
+test "a 9P root works under --net=disable [ninep-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3536,7 +3536,7 @@ test "a 9P root works under --net=disable [9p-roots]" {
     try std.testing.expect(r.code != 0);
 }
 
-test "--root-spec is sent as the attach name [9p-roots]" {
+test "--root-spec is sent as the attach name [ninep-roots]" {
     const e = try env(@src());
     var f: FakeAttach = undefined;
     try f.start("no such tree");
@@ -3552,7 +3552,7 @@ test "--root-spec is sent as the attach name [9p-roots]" {
     try std.testing.expectEqual(125, r.code);
 }
 
-test "--root-user is sent as the attach uname [9p-roots]" {
+test "--root-user is sent as the attach uname [ninep-roots]" {
     const e = try env(@src());
     for ([_]?[]const u8{ "glenda", null }) |user| {
         var f: FakeAttach = undefined;
@@ -3580,7 +3580,7 @@ test "--root-user is sent as the attach uname [9p-roots]" {
     }
 }
 
-test "the guest mounts /srv/root at a second path [9p-roots]" {
+test "the guest mounts /srv/root at a second path [ninep-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3592,7 +3592,7 @@ test "the guest mounts /srv/root at a second path [9p-roots]" {
     try std.testing.expectEqualStrings("/srv/root\n/tmp/r/rc/bin/lc\n", r.out);
 }
 
-test "an unreachable 9P root exits 125 [9p-roots]" {
+test "an unreachable 9P root exits 125 [ninep-roots]" {
     const e = try env(@src());
     var probe = try listenLocal();
     const port = probe.socket.address.getPort();
@@ -3606,7 +3606,7 @@ test "an unreachable 9P root exits 125 [9p-roots]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, try std.fmt.bufPrint(&want, "root {s}: ", .{dial})) != null);
 }
 
-test "a 9P root that wants authentication exits 125 [9p-roots]" {
+test "a 9P root that wants authentication exits 125 [ninep-roots]" {
     const e = try env(@src());
     var f: FakeAttach = undefined;
     try f.start("authentication required");
@@ -3620,7 +3620,7 @@ test "a 9P root that wants authentication exits 125 [9p-roots]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, ": authentication required") != null);
 }
 
-test "--write=none with a 9P root is a usage error [9p-roots]" {
+test "--write=none with a 9P root is a usage error [ninep-roots]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--root", "tcp!127.0.0.1!1", "--write=none", "/bin/echo" });
     defer r.deinit();
@@ -3628,7 +3628,7 @@ test "--write=none with a 9P root is a usage error [9p-roots]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "--write=none can't be enforced on a 9P root") != null);
 }
 
-test "a unix socket root on Windows exits 125 [9p-roots]" {
+test "a unix socket root on Windows exits 125 [ninep-roots]" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const e = try env(@src());
     const r = try run(e, &.{ "--root", "unix!C:/fs.sock", "/bin/echo" });
@@ -3637,7 +3637,7 @@ test "a unix socket root on Windows exits 125 [9p-roots]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "unix socket roots need a POSIX host") != null);
 }
 
-test "--print shows a 9P root, and its output replays with --ns [9p-roots]" {
+test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3687,7 +3687,7 @@ test "a write to a 9P root under the default profile doesn't reach the server [o
     try expectRootLacks(e, "lib/h9-overlay-9p");
 }
 
-test "--check runs /bin/echo from a 9P root [9p-roots]" {
+test "--check runs /bin/echo from a 9P root [ninep-roots]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -3805,7 +3805,7 @@ test "--host-cmd is a usage error and #C and hcmd are absent [baseline]" {
     try std.testing.expectEqualStrings("absent\n", h.out);
 }
 
-// 9P over WebSocket (design/websocket-9p.md). The server is 9p-roots'
+// 9P over WebSocket (design/websocket-9p.md). The server is ninep-roots'
 // RootServer with tests/wsrelay.zig in front of it, relaying WebSocket
 // messages to its TCP port. /net/ws cases use the relay in echo mode.
 

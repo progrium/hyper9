@@ -70,7 +70,7 @@ pub const Policy = struct {
 
 /// How a bound tree can be changed: not at all, on the host, in an
 /// overlay in memory (`eph`), which never writes the host, or as a 9P
-/// root's server decides (`9p`, design/9p-roots.md), or never, as
+/// root's server decides (`9p`, design/ninep-roots.md), or never, as
 /// constant data in the h9 binary (`builtin`, design/builtin-root.md).
 pub const Access = enum { ro, rw, eph, @"9p", builtin };
 
@@ -134,7 +134,7 @@ pub const Bind = struct {
     pub const Flag = enum { repl, before, after };
 };
 
-/// A 9P server as the root (design/9p-roots.md): the machine
+/// A 9P server as the root (design/ninep-roots.md): the machine
 /// connects to it, posts the connection as `#s/root` and mounts that at /.
 pub const NinePRoot = struct {
     kind: enum { tcp, unix, ws },

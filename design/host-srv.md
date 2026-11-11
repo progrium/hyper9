@@ -4,7 +4,7 @@ title: Posting host connections to /srv
 status: draft
 created: 2026-11-06
 authors: [progrium]
-depends: [devsrv, 9p-roots, websocket-9p]
+depends: [devsrv, ninep-roots, websocket-9p]
 areas: [cli, kern]
 ---
 
@@ -12,11 +12,11 @@ areas: [cli, kern]
 
 ## Abstract
 
-h9 can connect to 9P servers on the host side and post each connection in the machine's `/srv` before the program starts: `--srv name=tcp!host!564`, `--srv name=unix!/run/fs.sock`, or `--srv name=wss://fs.example/9p`. Namespace files and guest programs mount them as `mount /srv/name /n/x`, as on 9front. h9 only connects and posts; the attach, with its spec and user, is made by whoever mounts the entry. Embedders can post a connection they've already opened, such as one end of a socketpair served by their own 9P server. This generalises how [9p-roots](9p-roots.md) posts its root as `/srv/root`, and is the client-side counterpart of [serve](serve.md).
+h9 can connect to 9P servers on the host side and post each connection in the machine's `/srv` before the program starts: `--srv name=tcp!host!564`, `--srv name=unix!/run/fs.sock`, or `--srv name=wss://fs.example/9p`. Namespace files and guest programs mount them as `mount /srv/name /n/x`, as on 9front. h9 only connects and posts; the attach, with its spec and user, is made by whoever mounts the entry. Embedders can post a connection they've already opened, such as one end of a socketpair served by their own 9P server. This generalises how [ninep-roots](ninep-roots.md) posts its root as `/srv/root`, and is the client-side counterpart of [serve](serve.md).
 
 ## Background
 
-- **9p-roots** connects to one server, posts its channel to `#s/root` by creating the entry and writing the connection's fd number into it, and mounts it at `/`. A guest can mount `/srv/root` again at another path, with another spec. Nothing else is posted by the host.
+- **ninep-roots** connects to one server, posts its channel to `#s/root` by creating the entry and writing the connection's fd number into it, and mounts it at `/`. A guest can mount `/srv/root` again at another path, with another spec. Nothing else is posted by the host.
 - **[devsrv](devsrv.md)** gives each machine its own `/srv` board. Its compatibility notes say `mount /srv/x …` lines in a namespace file work only if something posted `/srv/x` before the replay, which in practice nothing does.
 - **[websocket-9p](websocket-9p.md)** lets a namespace file mount a `ws://` or `wss://` URL directly: h9 connects a new stream for that line and mounts it. A `tcp!` or `unix!` source in a namespace file isn't accepted; it's opened as a guest path, which fails, and newns skips the line. Each URL line is its own connection, mounted at one place, with no name the guest can mount again.
 - **In the guest,** 9front's `srv tcp!fs!564 fs` dials through `/net`, under [net-policy](net-policy.md), and posts the connection. It needs `srv` in the root (the built-in root's box has it), it can't reach a unix socket, a WebSocket, or anything else devip doesn't dial, and it runs once the program does, so a namespace file can't mount what it posts.
@@ -37,7 +37,7 @@ ADDR takes `--root`'s connection forms, read the same way:
 - **`unix!path`:** a unix-domain socket. A bare host path is a unix socket too if it is one; anything else is an error ("srv fs: /run/fs.sock: not a socket"), exit 125. A directory isn't accepted, since posting is for connections.
 - **`ws://…`** and **`wss://…`:** a 9P server over a WebSocket, connected as websocket-9p connects a namespace file's URL: through `Machine.Options.proxy`, trusting the host's certificate bundle, with no extra headers. A token goes in the URL's query.
 
-NAME is a devsrv entry name: not empty, with no `/`, and not `.`, `..`, `clone`, or `root`. `root` is 9p-roots' post, whether or not the run has a 9P root, so a namespace file's `mount /srv/root` always means the root's server.
+NAME is a devsrv entry name: not empty, with no `/`, and not `.`, `..`, `clone`, or `root`. `root` is ninep-roots' post, whether or not the run has a 9P root, so a namespace file's `mount /srv/root` always means the root's server.
 
 These are usage errors (exit 2):
 
@@ -53,7 +53,7 @@ A connection that fails before the program runs exits 125 with the cause, as a r
 In the machine's first Proc, after the root is connected, posted, and mounted, and before any other bind and before the device mask is set, h9 handles each entry in the order given:
 
 1. **Connect.** A TCP entry is dialed through `#I/cs` and `#I/tcp/clone` by device path, with the machine's plan cleared for the dial, exactly as a TCP root is, so neither `--net` nor `--net-allow` sees it. A unix socket is connected by `h9_unixdial` and wrapped with devlfd's `lfdchan`. A URL is connected as a framed devhstream stream.
-2. **Post** the channel to the machine's board as `#s/NAME`, mode 0666, by creating the entry and writing the fd number into it, as 9p-roots does. The board holds the channel; h9 closes its own fd.
+2. **Post** the channel to the machine's board as `#s/NAME`, mode 0666, by creating the entry and writing the fd number into it, as ninep-roots does. The board holds the channel; h9 closes its own fd.
 3. **Nothing more.** h9 sends no `Tversion` and no `Tattach`. The first mount of `/srv/NAME` negotiates the version, and each mount attaches with the spec it names and the mounting process's user as `uname`, which is the machine's user. A server that wants authentication, or speaks a dialect devmnt doesn't, fails that mount, not the run (see Rationale).
 
 Then the plan's binds run, including `#s` at `/srv`, then the device mask, then the `--ns` replay, then the program. So a namespace file and the program both see every entry.
@@ -142,7 +142,7 @@ The heading is outside `namespace`, so a saved namespace isn't changed and newns
   - **Two h9s.** `h9 --serve unix!/tmp/a.sock`, then `h9 --srv a=unix!/tmp/a.sock --rc` mounts the first machine's namespace in the second with `mount /srv/a /n/a`. That's the demo once serve is built.
   - **Raw devhstream streams.** serve adds devhstream's raw host-made streams for its accepted connections. Once they exist, `unix` and `fd` sources move onto them, which brings both to Windows (see Rationale). Nothing here waits for that.
   - **Naming.** serve's plan heading is `serve` and this one's is `srv`, after the flags. Each lists what it opened, so a run with both shows its inbound and outbound connections side by side.
-- **[9p-roots](9p-roots.md).** The root is the one entry h9 also mounts. Its connect and post code is split out and shared, and `root` stays its name. `--root-spec` and `--root-user` have no `--srv` counterparts, since h9 doesn't attach.
+- **[ninep-roots](ninep-roots.md).** The root is the one entry h9 also mounts. Its connect and post code is split out and shared, and `root` stays its name. `--root-spec` and `--root-user` have no `--srv` counterparts, since h9 doesn't attach.
 - **[websocket-9p](websocket-9p.md).** `ws` sources connect as its namespace-file mounts do. Those mounts are unchanged: a URL on a `mount` line still makes its own connection.
 - **[dotl](dotl.md).** dotl puts roots' and namespace files' connections through its translator before devmnt sees them. Posted connections go through it the same way, before the post, so `--srv z=tcp!zerofs.example!5564` posts a translated channel and the guest's `mount /srv/z` works unchanged. Until dotl is built, a .L server fails the guest's mount at `Tversion`.
 - **[root-auth](root-auth.md).** h9 doesn't authenticate posted connections. A guest that holds a key in its own factotum can authenticate its own mount, since `amount` calls `fauth`; h9 doesn't give it one. Host-side authentication for entries is an open issue.
@@ -150,7 +150,7 @@ The heading is outside `namespace`, so a saved namespace isn't changed and newns
 
 ## Rationale
 
-**Connecting on the host, not letting the guest dial.** A guest's `srv` can post a TCP connection, but not a unix socket, a WebSocket through the host's proxy, or an embedder's fd, and it runs after the namespace is built, so namespace files can't use it. It also goes through `--net`, which is right for the guest's own connections and wrong for a server the operator named: a run under `--net=disable` that needs its build cache from a 9P server shouldn't have to open the network to the guest to get it. Connecting before the mask is what 9p-roots does for the same reasons, and the plan lists every entry, so nothing is reached that `--print` doesn't show.
+**Connecting on the host, not letting the guest dial.** A guest's `srv` can post a TCP connection, but not a unix socket, a WebSocket through the host's proxy, or an embedder's fd, and it runs after the namespace is built, so namespace files can't use it. It also goes through `--net`, which is right for the guest's own connections and wrong for a server the operator named: a run under `--net=disable` that needs its build cache from a 9P server shouldn't have to open the network to the guest to get it. Connecting before the mask is what ninep-roots does for the same reasons, and the plan lists every entry, so nothing is reached that `--print` doesn't show.
 
 **Posting, not mounting.** A `--srv` that also took a mount point would be a second, smaller namespace language beside `--ns`, without its flags or ordering. Posting leaves placement to newns, which already has `mount` with `-a`, `-b`, `-c`, and a spec, and gives the guest a name it can mount again later with another spec, as on 9front.
 
@@ -158,15 +158,15 @@ The heading is outside `namespace`, so a saved namespace isn't changed and newns
 
 **No attach at startup.** The spec and the user belong to the mount, and an entry may be mounted several times with different specs, or not at all. Sending `Tversion` early would catch a server that speaks the wrong dialect, but devmnt negotiates on the first mount anyway, and a guest's own `srv` post fails the same way at mount. A failed connection, which is the common case of a wrong address or a stopped server, is still caught before the program runs.
 
-**Posting the connection, not a placeholder or a device.** As in 9p-roots, `/srv/NAME` is a name 9front already has: newns, `mount`, `ns`, and `/proc/n/ns` work with it unchanged. A placeholder like `<srv:fs>` would need its own syntax in newns, and a device per entry would be a second registry beside devsrv.
+**Posting the connection, not a placeholder or a device.** As in ninep-roots, `/srv/NAME` is a name 9front already has: newns, `mount`, `ns`, and `/proc/n/ns` work with it unchanged. A placeholder like `<srv:fs>` would need its own syntax in newns, and a device per entry would be a second registry beside devsrv.
 
-**`lfdchan` for unix sockets and fds, for now.** It's what 9p-roots' unix roots use, so this adds no transport. devhstream's raw streams, which serve adds, would carry the same bytes through a reader thread and work on Windows, where a winsock handle can't go through devlfd's `ReadFile` and `WriteFile`. Moving every host-made connection onto them is one change, for roots and entries together, once serve has built them.
+**`lfdchan` for unix sockets and fds, for now.** It's what ninep-roots' unix roots use, so this adds no transport. devhstream's raw streams, which serve adds, would carry the same bytes through a reader thread and work on Windows, where a winsock handle can't go through devlfd's `ReadFile` and `WriteFile`. Moving every host-made connection onto them is one change, for roots and entries together, once serve has built them.
 
 **`Source`, not `Root`.** `Root` has `dir`, which isn't a connection, and the fd form is for embedders only. Keeping a separate union means neither type gains a variant the other must refuse.
 
-**Only `root` is reserved.** Other names a guest's servers post, such as `factotum`, `plumb`, or `rio.glenda.123`, are the operator's to take: posting one means a guest server that tries to post the same name fails with "file exists", as a second post does on 9front. `root` is reserved because 9p-roots' plan line and namespace files depend on its meaning, even in runs without a 9P root.
+**Only `root` is reserved.** Other names a guest's servers post, such as `factotum`, `plumb`, or `rio.glenda.123`, are the operator's to take: posting one means a guest server that tries to post the same name fails with "file exists", as a second post does on 9front. `root` is reserved because ninep-roots' plan line and namespace files depend on its meaning, even in runs without a 9P root.
 
-**Refusing `--write=none`, not ignoring it.** As for 9p-roots, `none` promises nothing is written, and h9 can't keep that for a server the guest mounts. A run that wants a posted server read-only asks the server for it (`exportfs -R`, u9fs on a read-only tree), or binds `#O` over the mount.
+**Refusing `--write=none`, not ignoring it.** As for ninep-roots, `none` promises nothing is written, and h9 can't keep that for a server the guest mounts. A run that wants a posted server read-only asks the server for it (`exportfs -R`, u9fs on a read-only tree), or binds `#O` over the mount.
 
 **A heading of its own in the plan.** A `post` line in `namespace` would need newns to parse it, and a replayed namespace would then make connections, which namespace files otherwise only do for URLs. A separate heading keeps `namespace` a namespace and matches serve's `serve` heading.
 
@@ -197,7 +197,7 @@ The heading is outside `namespace`, so a saved namespace isn't changed and newns
 
 ## Done criteria
 
-Integration cases tagged `[host-srv]`. The servers are the 9p-roots test server, a second h9 running `exportfs` behind `aux/listen1 -t`, its unix-socket relay, and websocket-9p's test relay. The embedder case uses a socketpair and the stub 9P server the 9p-roots cases use.
+Integration cases tagged `[host-srv]`. The servers are the ninep-roots test server, a second h9 running `exportfs` behind `aux/listen1 -t`, its unix-socket relay, and websocket-9p's test relay. The embedder case uses a socketpair and the stub 9P server the ninep-roots cases use.
 
 - [ ] `test "a namespace file mounts a server posted from a unix socket [host-srv]"`
 - [ ] `test "a guest program mounts a posted TCP server [host-srv]"`
@@ -222,12 +222,12 @@ Once serve is built, tagged with both:
 
 Demos:
 
-- [ ] `h9 --srv fs=tcp!localhost!5640 --rc 'mkdir /tmp/n && mount /srv/fs /tmp/n && ls /tmp/n'` lists the served tree, with the server started as for 9p-roots.
+- [ ] `h9 --srv fs=tcp!localhost!5640 --rc 'mkdir /tmp/n && mount /srv/fs /tmp/n && ls /tmp/n'` lists the served tree, with the server started as for ninep-roots.
 - [ ] With serve: `h9 --serve unix!/tmp/a.sock`, then `h9 --srv a=unix!/tmp/a.sock --rc 'mkdir /tmp/a && mount /srv/a /tmp/a && ls /tmp/a/mnt/term'`.
 
 ## Implementation
 
-1. Split 9p-roots' `connectRoot` in `src/machine.zig` into a connect (`tcp`, `unix`, `ws`, and `fd` through `lfdchan`) and a post to `#s/NAME`, with the root as their first caller and its errors unchanged.
+1. Split ninep-roots' `connectRoot` in `src/machine.zig` into a connect (`tcp`, `unix`, `ws`, and `fd` through `lfdchan`) and a post to `#s/NAME`, with the root as their first caller and its errors unchanged.
 2. `Machine.Srv` and `Machine.Options.srv`, and the loop after the root's mount that connects and posts each entry, with the errors and the fd's ownership.
 3. `--srv` in `src/cli.zig` and `src/main.zig`: the forms, the names, and the usage errors.
 4. The plan in `src/policy.zig`: the `srv` heading, the caveats, the `--write=none` conflict, and serve's caveat once serve exists. `--trace`'s connection lines.
