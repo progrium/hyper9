@@ -22,11 +22,22 @@
 # rather than holding back the rest of the site.
 #
 # The demo page's browser test gates the deploy.
+#
+# The build is slow, so pushes to main run it only when the site or the
+# browser host's own files change. Anything else that reaches the demo,
+# such as a kernel or hcpu change, deploys when someone runs it by hand:
+# "Run workflow" in the Actions tab, or `gh workflow run pages`.
 name: pages
 
 on:
   push:
     branches: [main]
+    paths:
+      - "site/**"
+      - "src/web/**"
+      - "src/web.zig"
+      - "tests/web/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
