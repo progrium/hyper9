@@ -46,7 +46,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | proposed | needs dotl | Credential helpers for WebSocket 9P |
 | [browser-gfx](browser-gfx.md) | [#120](../../../issues/120) | implemented |  | Graphics on the browser host |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
-| [host-cmd](host-cmd.md) |  | draft |  | Rethinking host commands |
+| [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
 | [overlay-export](overlay-export.md) |  | draft |  | Exporting a run's overlay changes |
 | [schemeless-roots](schemeless-roots.md) | [#76](../../../issues/76) | implemented |  | Schemeless roots |
 | [login-shell](login-shell.md) | [#89](../../../issues/89) | proposed | needs host-cmd | h9 as a login shell |
