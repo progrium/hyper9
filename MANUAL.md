@@ -2709,6 +2709,9 @@ They change faster than this manual, as proposals land.
 - [Emulator performance](docs/emu-performance.md): how fast the emulator
   CPUs run real programs, on each tier, natively and in WebAssembly, on
   arm64 and x86-64 hosts.
+- [What to build with h9](docs/inspiration.md): ideas for larger systems
+  with h9 as a building block, from agent workspaces and build caches to
+  plugin runtimes, each with a sketch and the proposals it builds on.
 
 ## Appendices
 

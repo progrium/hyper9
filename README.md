@@ -107,7 +107,8 @@ Build 9front software inside h9 with its own compilers and `mk`, run Go's
   [recipes](docs/recipes.md), [recreating Docker](docs/containers.md),
   [building your own userland](docs/userland.md),
   [embedding h9](docs/embedding.md),
-  [emulator performance](docs/emu-performance.md), and
+  [emulator performance](docs/emu-performance.md),
+  [ideas for what to build](docs/inspiration.md), and
   [how h9 compares](docs/comparison.md) to containers, sandboxes, and other
   ways to run Plan 9.
 - [SPEC.md](SPEC.md): how h9 works inside, as built.
