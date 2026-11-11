@@ -2038,7 +2038,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     test_step.dependOn(&x86_run.step);
     b.step("x86-jit", "Run the 386 JIT plan's [x86-jit] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
 
-    // hx64's [hcpu] cases, on T0 and T1 (design/0174-hcpu.md).
+    // hx64's [174] cases, on T0 and T1 (design/0174-hcpu.md).
     const x64 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/x64.zig"),
         .target = target,
@@ -2052,7 +2052,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     const x64_run = b.addRunArtifact(x64);
     step.dependOn(&x64_run.step);
     test_step.dependOn(&x64_run.step);
-    b.step("x64-jit", "Run hx64's [hcpu] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
+    b.step("x64-jit", "Run hx64's [174] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
 
     // h86's memory-model litmus tests: compiled code on host threads.
     // ReleaseSafe unless -Doptimize says otherwise, so the threads race.
