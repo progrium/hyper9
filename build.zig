@@ -953,9 +953,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
-    // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
-    // while design/host-cmd rethinks them.
-    const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
+    // Host commands (#C, --host-cmd, hcmd). They live on this branch, not
+    // main, while design/host-cmd rethinks them, so they're built in here
+    // unless -Dhost-cmd=false.
+    const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: on, on the host-cmd branch; design/host-cmd.md)") orelse true;
     var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or hcpu (h9's own CPUs)") orelse .none;
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out against Unicorn's JIT.

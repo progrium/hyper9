@@ -945,9 +945,9 @@ This is the core of the sandbox (chapter 23): the namespace h9 built is the
 whole of the host a program can reach. `--host-fs` leaves `#U` unmasked, and
 `--host-cmd` leaves `#C` unmasked.
 
-**Host commands.** *Only in an h9 built with `zig build -Dhost-cmd`; release
-builds leave them out while [host-cmd](design/host-cmd.md) rethinks them. In
-other builds `#C` and `hcmd` don't exist and `--host-cmd` exits 2.* Under
+**Host commands.** *Only on the `host-cmd` branch, where they're built in
+unless `zig build -Dhost-cmd=false`, while [host-cmd](design/host-cmd.md)
+rethinks them. Elsewhere `#C` and `hcmd` don't exist and `--host-cmd` exits 2.* Under
 `--host-cmd`, `hcmd cmd args...` runs `cmd` on the
 host, as you, with h9's host environment. Its standard input, output, and
 error are the guest's, and `hcmd` exits with its status: empty on success,
