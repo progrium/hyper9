@@ -503,7 +503,7 @@ export class GfxHost {
 
 // The h9 flags for a policy object, which takes Policy's fields under
 // their CLI names: profile, write, net, memory, timeout, pids, cpus,
-// readable, writable and readDeny (lists), env (an object), strict.
+// readable, writable, and readDeny (lists), and env (an object).
 function policyFlags(policy = {}) {
   const f = [];
   const one = { profile: '--profile', write: '--write', net: '--net', memory: '--memory', timeout: '--timeout', pids: '--pids', cpus: '--cpus' };
@@ -511,7 +511,6 @@ function policyFlags(policy = {}) {
   const many = { readable: '--readable', writable: '--writable', readDeny: '--read-deny' };
   for (const [k, flag] of Object.entries(many)) for (const v of policy[k] ?? []) f.push(flag, v);
   for (const [k, v] of Object.entries(policy.env ?? {})) f.push('--env', `${k}=${v}`);
-  if (policy.strict) f.push('--strict');
   return f;
 }
 

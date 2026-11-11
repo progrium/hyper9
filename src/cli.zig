@@ -24,7 +24,7 @@ pub const usage =
     \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
     \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
     \\           [--serve-net]
-    \\           [--strict] [--print] [--trace[=FILE]] [--dump-on-fault]
+    \\           [--print] [--trace[=FILE]]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
     \\       h9 [flags] --rc
@@ -59,7 +59,6 @@ pub const Config = struct {
     arch: ?vmm.Arch = null,
     /// --trace: null for none, "" for stderr, else a file.
     trace: ?[]const u8 = null,
-    dump_on_fault: bool = false,
     /// --root; null means $H9ROOT, then the default. See `rootArg`.
     root: ?[]const u8 = null,
     /// A second --root, for a machine with a 9front and a Linux root
@@ -110,7 +109,6 @@ pub const Config = struct {
     /// --gfx, --gfx=noclip and --gfx-scale: a host window
     /// (design/gfx.md); null without --gfx.
     gfx: ?gfx.Options = null,
-    strict: bool = false,
     print: bool = false,
     /// --serve addresses, checked (design/serve.md).
     serve: []const []const u8 = &.{},
@@ -176,8 +174,6 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (std.mem.startsWith(u8, a, "--trace=")) {
             c.trace = a["--trace=".len..];
             if (c.trace.?.len == 0) return error.Usage;
-        } else if (flag(a, "--dump-on-fault")) {
-            c.dump_on_fault = true;
         } else if (flag(a, "--host-fs")) {
             c.host_fs = true;
         } else if (flag(a, "--no-guest-tools")) {
@@ -212,8 +208,6 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             try serve_addrs.append(gpa, addr);
         } else if (flag(a, "--root-contained")) {
             c.root_contained = true;
-        } else if (flag(a, "--strict")) {
-            c.strict = true;
         } else if (flag(a, "--print")) {
             c.print = true;
         } else if (flag(a, "--check")) {
@@ -776,9 +770,9 @@ test "policy flags" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const c = try parse(arena.allocator(), &.{
-        "h9",       "--profile=tight", "--writable",    "./out",           "--readable=/src", "--read-deny", "/src/.env",
-        "--memory", "512m",            "--timeout",     "1m",              "--net=disable",   "--write",     "scope",
-        "--strict", "--print",         "--trace=t.log", "--dump-on-fault", "mk",
+        "h9",       "--profile=tight", "--writable", "./out", "--readable=/src", "--read-deny", "/src/.env",
+        "--memory", "512m",            "--timeout",  "1m",    "--net=disable",   "--write",     "scope",
+        "--print",  "--trace=t.log",   "mk",
     });
     try t.expectEqual(policy.Profile.tight, c.profile);
     try t.expectEqualStrings("./out", c.writable[0]);
@@ -788,7 +782,7 @@ test "policy flags" {
     try t.expectEqual(@as(?u64, std.time.ns_per_min), c.timeout_ns);
     try t.expectEqual(@as(?policy.NetMode, .disable), c.net);
     try t.expectEqual(@as(?policy.WriteMode, .scope), c.write);
-    try t.expect(c.strict and c.print and c.dump_on_fault);
+    try t.expect(c.print);
     try t.expectEqualStrings("t.log", c.trace.?);
     try t.expectEqualStrings("mk", c.argv[0]);
 }

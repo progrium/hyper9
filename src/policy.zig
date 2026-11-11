@@ -205,13 +205,6 @@ pub const Capability = enum {
     @"res.cpu",
     @"res.memory",
     @"res.pids",
-
-    /// Whether this build can enforce it.
-    pub fn enforceable(c: Capability) bool {
-        return switch (c) {
-            else => true,
-        };
-    }
 };
 
 pub const CapSet = std.EnumSet(Capability);
@@ -233,8 +226,6 @@ pub const Plan = struct {
     binds: []const Bind,
     rules: []const Rule,
     enforces: CapSet,
-    /// Requested but not enforceable by this build; `--strict` refuses them.
-    unenforced: CapSet,
     caveats: []const []const u8,
     /// Where the cwd lands in the guest; null without a root or cwd.
     guest_cwd: ?[]const u8,
@@ -301,12 +292,6 @@ pub const Plan = struct {
         var it = p.enforces.iterator();
         while (it.next()) |c| try w.print(" {t}", .{c});
         try w.writeAll("\n");
-        if (p.unenforced.count() > 0) {
-            try w.writeAll("unenforced:");
-            var u = p.unenforced.iterator();
-            while (u.next()) |c| try w.print(" {t}", .{c});
-            try w.writeAll("\n");
-        }
         try w.print("limits:   write={t} net={t}", .{ p.write, p.net });
         if (p.memory) |m| try w.print(" memory={f}", .{fmtSize(m)});
         if (p.timeout_ns) |d| try w.print(" timeout={f}", .{fmtDuration(d)});
@@ -494,10 +479,8 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     const write_req = pol.write orelse .overlay;
     const net = pol.net orelse (if (tight) NetMode.disable else .outbound);
 
-    // Every mode is enforceable now; `unenforced` stays for capabilities a
-    // future build knows but can't enforce. On the web host the network
-    // is WebSockets only (`/net/ws`), which the modes govern as natively.
-    const unenforced: CapSet = .initEmpty();
+    // On the web host the network is WebSockets only (`/net/ws`), which
+    // the modes govern as natively.
     const write = write_req;
 
     // h9 can't make devmnt read-only, so `none` can't be kept for a
@@ -861,7 +844,6 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .binds = binds.items,
         .rules = rules.items,
         .enforces = enforces,
-        .unenforced = unenforced,
         .caveats = caveats.items,
         .guest_cwd = guest_cwd,
         .root_9p = in.root_9p,
@@ -1398,7 +1380,6 @@ test "compile: the root's overlay (design/overlay.md)" {
         try t.expectEqual(Verdict.read_only, p.check("/r/lib/x", .create));
         try t.expectEqual(Verdict.allow, p.check("/r/lib/x", .read));
         try t.expect(p.enforces.contains(.@"fs.write.overlay"));
-        try t.expect(p.unenforced.count() == 0);
     }
     // The cwd still writes the host under overlay, and tight's stays
     // read-only.
@@ -1809,7 +1790,6 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     // Ephemeral: the cwd and writable paths are overlays, read-only to devfs.
     const e = try compile(arena.allocator(), in, .{ .write = .ephemeral, .writable = &.{"/w/out"} }, &msg);
     try t.expect(e.enforces.contains(.@"fs.write.ephemeral"));
-    try t.expect(e.unenforced.count() == 0);
     try t.expectEqual(WriteMode.ephemeral, e.write);
     const cwd = Find.bind(e, "/mnt/term/cwd").?;
     try t.expectEqualStrings("#O", cwd.from);

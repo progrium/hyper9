@@ -14,6 +14,9 @@ const Result = struct {
     status: []const u8,
     out: []const u8,
     trace: []const u8,
+    /// Whether `trace` need only start the trace, as a fault's register
+    /// dump, which varies by backend, follows it.
+    trace_prefix: bool = false,
 };
 
 /// Runs `bytes` on backend `kind`, or returns null if that backend can't run
@@ -71,7 +74,9 @@ fn expectAll(arch: aout.Arch, bytes: []const u8, want: Result) !void {
         errdefer std.debug.print("backend {t}, {t} binary\n", .{ kind, arch });
         try std.testing.expectEqualStrings(want.status, got.status);
         try std.testing.expectEqualStrings(want.out, got.out);
-        try std.testing.expectEqualStrings(want.trace, got.trace);
+        if (want.trace_prefix) {
+            try std.testing.expectStringStartsWith(got.trace, want.trace);
+        } else try std.testing.expectEqualStrings(want.trace, got.trace);
     }
     if (ran == 0) return error.SkipZigTest;
 }
@@ -335,7 +340,9 @@ fn expectFault(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
     try expectAll(arch, bytes, .{
         .status = try std.fmt.bufPrint(&buf, "killed \"sys: trap: fault read addr=0x0 pc=0x{x}\"", .{pc}),
         .out = "",
-        .trace = "",
+        // The trace dumps the fault (`dumpFault` in src/machine.zig).
+        .trace = "h9: fault: read addr=0x0 ",
+        .trace_prefix = true,
     });
 }
 

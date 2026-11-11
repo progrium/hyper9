@@ -265,13 +265,6 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         plan.print(&w.interface) catch {};
         w.interface.flush() catch {};
     }
-    if (cfg.strict and plan.unenforced.count() > 0) {
-        std.debug.print("h9: --strict: this build can't enforce:", .{});
-        var it = plan.unenforced.iterator();
-        while (it.next()) |c| std.debug.print(" {t}", .{c});
-        std.debug.print("\n", .{});
-        return 2;
-    }
     if (cfg.print) return 0;
 
     var trace_file: ?std.Io.File = null;
@@ -298,7 +291,6 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     opts.env = env.items;
     opts.signals = &host.signals;
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
-    opts.dump_on_fault = cfg.dump_on_fault;
     opts.ns = cfg.ns;
     opts.console_tty = (std.Io.File.stdin().isTty(io) catch false) and (std.Io.File.stdout().isTty(io) catch false);
     // A run that only serves doesn't read the console, so it can run in
