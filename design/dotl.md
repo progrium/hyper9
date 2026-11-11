@@ -5,7 +5,7 @@ title: 9P2000.L and ZeroFS
 status: accepted
 created: 2026-11-05
 authors: [progrium]
-depends: [devsrv, 9p-roots, serve, guest-tools]
+depends: [devsrv, ninep-roots, serve, guest-tools]
 areas: [cli, kern, sandbox]
 ---
 
@@ -52,7 +52,7 @@ ZeroFS doesn't send `Tremove`; removal is `Tunlinkat`. The crate also defines pl
 ### h9 today
 
 - **devmnt** is drawterm's 9P2000 client. `mntversion` sends `9P2000` and refuses a reply that doesn't start with it, and the rest of devmnt speaks only 9P2000's messages. So a .L server can't be mounted, at the root or anywhere else.
-- **Mounts** come from [9p-roots](9p-roots.md) (`--root tcp!…`, `unix!…`), [websocket-9p](websocket-9p.md) (`ws://`, `wss://`, and devhstream), namespace files, and [devsrv](devsrv.md)'s `mount` syscall in the guest. All of them end in devmnt.
+- **Mounts** come from [ninep-roots](ninep-roots.md) (`--root tcp!…`, `unix!…`), [websocket-9p](websocket-9p.md) (`ws://`, `wss://`, and devhstream), namespace files, and [devsrv](devsrv.md)'s `mount` syscall in the guest. All of them end in devmnt.
 - **Serving** is [serve](serve.md)'s: `--serve` listens on unix, TCP, and WebSocket addresses and gives each connection an `exportfs` of the machine's namespace, in 9P2000. Before exportfs, the client's first `Tversion` passes through a dialect slot, which serve leaves empty.
 - **The Linux personality** (draft) translates Linux syscalls onto drawterm's kernel. Its file calls build a Linux `stat` from a `Dir`, map users to numbers through the Linux root's `/etc/passwd`, and map error strings to errno in "one place, tested on its own". [symlinks-in-root](symlinks-in-root.md) (draft) resolves symlinks inside a bound tree, relative to its top, for the personality's Linux root. Those are most of what a .L translator needs. But it runs Linux *programs*: it has no `mount` in its table, Linux's 9P client is v9fs in the Linux kernel, and anything a Linux program serves on a socket is still .L bytes that devmnt can't read.
 
@@ -152,7 +152,7 @@ Without the extension, a drop is a hangup, as for any 9P mount. websocket-9p's "
 
 It follows devhstream's pattern and the seam rules: a kproc per conversation reads the server connection, the translator is called through leaves that take and return bytes and never raise, and a guest reading `data` sleeps on a Rendez. The namespace builder binds it with `bind -a '#ℓ' /net`.
 
-**Roots and namespace files** use it without being asked. 9p-roots' and websocket-9p's connections are put through a conversation before devmnt mounts them, so `--root tcp!zerofs.example!5564` works, and `mount 'tcp!zerofs.example!5564' /n/z` does in a namespace file.
+**Roots and namespace files** use it without being asked. ninep-roots' and websocket-9p's connections are put through a conversation before devmnt mounts them, so `--root tcp!zerofs.example!5564` works, and `mount 'tcp!zerofs.example!5564' /n/z` does in a namespace file.
 
 **In the guest,** `/bin/dotlfs`, an rc script that [guest-tools](guest-tools.md) ships in the guest's `/bin`, does the same: `dotlfs tcp!zerofs.example!5564 /n/z` writes `dial` to a new conversation and mounts its `data`, through devsrv's `mount`.
 
@@ -203,7 +203,7 @@ The personality then gets these from this proposal, each in its own stage and no
 
 ## Compatibility
 
-- **CLI:** new `--user-map FILE`. `--serve` listeners also answer 9P2000.L clients. 9p-roots' and websocket-9p's dial strings now also reach .L servers. No exit code changes; a server with an unknown dialect is exit 125 like any failed root.
+- **CLI:** new `--user-map FILE`. `--serve` listeners also answer 9P2000.L clients. ninep-roots' and websocket-9p's dial strings now also reach .L servers. No exit code changes; a server with an unknown dialect is exit 125 like any failed root.
 - **`Machine.Options`** gains `user_map: ?[]const u8`. Without it, the machine's user is the host uid on the wire.
 - **Behaviour of 9P2000 mounts:** unchanged, through passthrough. `status` shows `9P2000`.
 - **The root tree:** unchanged. `/bin/dotlfs` comes from [guest-tools](guest-tools.md)' `#H`.
@@ -238,7 +238,7 @@ Demos: `h9 --root tcp!localhost!5564 ls /` on a `zerofs` serving a 9front tree. 
 
 1. `src/dotl/wire.zig` and `attr.zig`: encoding for 9P2000, .L, and .L.Z, the errno table, the user map. Unit tests and fuzz targets.
 2. The client side with plain .L, and devdotl. `.L` roots, and `dotlfs` in `src/guest/bin`.
-3. Passthrough for 9P2000, and routing 9p-roots' and websocket-9p's connections through `#ℓ`.
+3. Passthrough for 9P2000, and routing ninep-roots' and websocket-9p's connections through `#ℓ`.
 4. `.L.Z`: the compound messages, envelopes, `Trebind` reconnect.
 5. The server side, in [serve](serve.md)'s dialect slot.
 6. In the Linux personality, once it's built: `mount -t 9p`, and `h9_readlink(Chan*)` answering from the translator's last link target. SPEC.md gets a "9P dialects" paragraph under Filesystem.

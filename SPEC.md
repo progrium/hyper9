@@ -121,7 +121,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | --- | --- | --- |
 | Product shape | A library plus a thin CLI; each invocation is one machine | One machine can hold a whole process tree. Keep the machine API free of CLI-global state. |
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
-| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([9p-roots](design/9p-roots.md), [websocket-9p](design/websocket-9p.md)); disk images were declined ([image-roots](design/image-roots.md)) |
+| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([ninep-roots](design/ninep-roots.md), [websocket-9p](design/websocket-9p.md)); disk images were declined ([image-roots](design/image-roots.md)) |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/self-host.md)), and a source of test binaries |
 | Language | Zig 0.16.x (`minimum_zig_version` in `build.zig.zon`) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
@@ -809,7 +809,7 @@ A missing architecture gets the skeleton only, with a warning; `-Drelease` fails
 
 ### Root filesystem
 
-The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([9p-roots](design/9p-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
+The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([ninep-roots](design/ninep-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
 
 A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](design/schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it.
 

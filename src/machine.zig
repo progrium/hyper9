@@ -152,7 +152,7 @@ pub const builtin_root = struct {
 };
 
 pub const Machine = struct {
-    /// The root tree (design/9p-roots.md): a host directory, or a 9P
+    /// The root tree (design/ninep-roots.md): a host directory, or a 9P
     /// server the machine connects to and mounts at /.
     pub const Root = union(enum) {
         /// A host directory, absolute and resolved, served through #U.
@@ -3125,7 +3125,7 @@ pub const Machine = struct {
     }
 
     /// Connects to a 9P root and posts the connection as `#s/root`
-    /// (design/9p-roots.md), where the board holds it for the
+    /// (design/ninep-roots.md), where the board holds it for the
     /// machine's life. h9 makes the connection, not the guest, so the
     /// network policy doesn't apply to it, and a TCP root is dialed through
     /// devip by device path whether or not `#I` is bound or masked later.

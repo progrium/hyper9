@@ -17,7 +17,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 ## Writing one
 
-`zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `host-sandbox`), unique, and never changed. Start it with a letter (`websocket-9p`, not `9p-websocket`): `new` refuses a slug that starts with a digit, and `check` fails on one without an issue. Proposals that already have one, like `9p-roots`, keep it. The file keeps that name for good. Write a line per paragraph.
+`zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `host-sandbox`), unique, and never changed. Start it with a letter (`websocket-9p`, not `9p-websocket`): `new` refuses a slug that starts with a digit, and `check` fails on one without an issue. Proposals that already have one, like `ninep-roots`, keep it. The file keeps that name for good. Write a line per paragraph.
 
 The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done criteria, Implementation, and Open issues, and, once decided, Updates or Declined. Rationale should cover the alternatives that were rejected, so the question isn't asked again.
 

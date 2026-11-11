@@ -20,7 +20,7 @@ Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Background
 
-- **h9 is a client only.** It mounts servers: host trees through devfs, 9P roots from [9p-roots](9p-roots.md), WebSocket roots and `/net/ws` from websocket-9p. It can't share a machine's namespace with anything outside the machine.
+- **h9 is a client only.** It mounts servers: host trees through devfs, 9P roots from [ninep-roots](ninep-roots.md), WebSocket roots and `/net/ws` from websocket-9p. It can't share a machine's namespace with anything outside the machine.
 - **Inside the machine, serving already works.** `exportfs` is in the root tree, and [devsrv](devsrv.md) notes that it needs nothing more than h9 already serves. A guest can run `aux/listen1 tcp!*!564 exportfs` itself under `--net=enable`. But the listener is then the guest's, on devip, subject to `--net` (`outbound` refuses `announce`). It can't take a unix socket or a WebSocket, and the plan doesn't show it.
 - **Two drafts each wanted a server.** websocket-9p listed `h9 --serve wss://…` as its other half. dotl had a `--serve` of its own for Linux clients. Both needed the same listener, the same exportfs-per-connection model, and the same policy, so this proposal is that shared part.
 - **devhstream** (websocket-9p) carries a host connection into the kernel as a channel, with a Zig reader thread and leaves that never block a guest thread. It is the device for host-made streams that no guest path names.
@@ -137,7 +137,7 @@ A machine serves at most 32 connections at once, across all its listeners. Beyon
 
 **A namespace snapshot, not the program's live namespace.** The program can `rfork n` and change its namespace at any time. A server that followed one process's namespace would race with it, and would end when that process does. The plan's namespace is what `--print` shows, so it's what a client gets.
 
-**devhstream for every connection.** Accepted unix and TCP connections could go through devlfd's `lfdchan`, as 9p-roots' unix roots do. devhstream already carries a WebSocket, has the reader-thread design that keeps a guest thread out of host calls, and works on every host. websocket-9p's open issues expected it to carry other host-made connections, and this is the first.
+**devhstream for every connection.** Accepted unix and TCP connections could go through devlfd's `lfdchan`, as ninep-roots' unix roots do. devhstream already carries a WebSocket, has the reader-thread design that keeps a guest thread out of host calls, and works on every host. websocket-9p's open issues expected it to carry other host-made connections, and this is the first.
 
 **Refusing `Origin` by default.** A loopback listener is reachable from every web page the host's browser opens, and WebSocket isn't subject to CORS. Without an origin check, any page could mount the machine. Clients that aren't browsers don't send `Origin`, so the default costs them nothing.
 

@@ -978,7 +978,7 @@ pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
 }
 
 /// Connects to the unix-domain socket at host path `path` and returns an
-/// fd on a channel for it (design/9p-roots.md). Fails on Windows.
+/// fd on a channel for it (design/ninep-roots.md). Fails on Windows.
 pub fn unixDial(path: [*:0]const u8) Error!u31 {
     return try check(c.h9_unixdial(path));
 }

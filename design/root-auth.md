@@ -4,7 +4,7 @@ title: Authenticated 9P roots
 status: draft
 created: 2026-11-06
 authors: [progrium]
-depends: [9p-roots]
+depends: [ninep-roots]
 areas: [cli, kern, sandbox]
 ---
 
@@ -12,11 +12,11 @@ areas: [cli, kern, sandbox]
 
 ## Abstract
 
-A [9P root](9p-roots.md) can be a server that wants `p9any` authentication, such as a 9front file server or `exportfs` behind `aux/listen1` without `-t`. h9 runs the client side of `p9any` (dp9ik, or p9sk1) on the host over the mount's auth fid before attaching, with a key given by `--root-auth`. The guest never holds the key.
+A [9P root](ninep-roots.md) can be a server that wants `p9any` authentication, such as a 9front file server or `exportfs` behind `aux/listen1` without `-t`. h9 runs the client side of `p9any` (dp9ik, or p9sk1) on the host over the mount's auth fid before attaching, with a key given by `--root-auth`. The guest never holds the key.
 
 ## Background
 
-- **9p-roots** mounts with no auth fd. A server that answers `Tauth` with a fid, rather than an error, gets "authentication required", exit 125.
+- **ninep-roots** mounts with no auth fd. A server that answers `Tauth` with a fid, rather than an error, gets "authentication required", exit 125.
 - **devmnt** already has `mntauth`, which sends `Tauth` and returns the auth fid as a channel, and drawterm's `bindmount` takes an auth channel. [devsrv](devsrv.md) serves the guest's `fauth` through `mntauth`.
 - **drawterm's `cpu.c`** has a `p9any` client: the negotiation, dp9ik, and p9sk1, ticket requests to an auth server (`authdial`, `gettickets`), and key lookup from a secstore-style list (`findkey`) or a prompt (`getkey`). It uses `libauthsrv` and `libsec`, which h9 already builds, and isn't itself built: `build.zig` leaves out `cpu.c` and `libauth`.
 

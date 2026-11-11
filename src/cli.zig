@@ -324,7 +324,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     return c;
 }
 
-/// What a --root or $H9ROOT value names (design/9p-roots.md).
+/// What a --root or $H9ROOT value names (design/ninep-roots.md).
 pub const RootArg = union(enum) {
     /// `tcp!host!port`, with `tcp!host` given port 564 (9fs).
     tcp: []const u8,

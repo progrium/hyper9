@@ -44,7 +44,7 @@ h9 gains a build of 9front's own commands as one statically linked multi-call bi
   - Programs with `threadmain` work through a private copy of libthread compiled with `-Dmain=_threadlibmain`. The dispatcher defines `threadmain` to call the chosen command's, and copies the command's `mainstacksize`, which is renamed like any other global, into libthread's before starting it. `ramfs`, `webfs`, `sshfs`, `mntgen`, `plumber`, and the rest of the thread programs in `slim` linked this way.
   - A directory command's objects come from its own mkfile: the prototype runs `mk`, reads the link line from `mk -n -a`, and rebuilds those objects with the flags. A local library named by `#pragma lib`, like `auth`'s `lib.7.a`, is linked once, unrenamed, since only the commands' own objects are renamed.
   - `sam` failed: a `-D` flag for its global `left` collided with a macro of the same name in another of its headers. `join`, `bzip2`, and `compress` are APE programs, linked against a different libc, and `bc`, `pc`, and `units` are single-file yacc programs the prototype didn't handle, so all of these are out of both sets for now.
-- **h9 reads the whole binary on each exec.** `readFile` in `src/machine.zig` stats the program and reads all of it; there's no text cache. A bigger binary costs more per exec, which matters most on [9P](9p-roots.md) and [WebSocket](websocket-9p.md) roots.
+- **h9 reads the whole binary on each exec.** `readFile` in `src/machine.zig` stats the program and reads all of it; there's no text cache. A bigger binary costs more per exec, which matters most on [9P](ninep-roots.md) and [WebSocket](websocket-9p.md) roots.
 
 ## Proposal
 

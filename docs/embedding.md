@@ -396,7 +396,7 @@ machine can see comes from these places, all set in `Options`:
 write mode decides whether writes reach the host, stay in memory, or fail.
 
 **A 9P server as the root.** Point `root` at any 9P2000 server and the
-machine mounts it at `/` ([9p-roots](../design/9p-roots.md)):
+machine mounts it at `/` ([ninep-roots](../design/ninep-roots.md)):
 
 ```zig
 .root = .{ .unix = "/tmp/myfs.sock" }, // or .{ .tcp = "tcp!127.0.0.1!5640" }

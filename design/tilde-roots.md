@@ -5,7 +5,7 @@ title: Tilde roots from $H9ROOTPATH
 status: proposed
 created: 2026-11-08
 authors: [progrium]
-depends: [9p-roots, websocket-9p, schemeless-roots]
+depends: [ninep-roots, websocket-9p, schemeless-roots]
 areas: [cli]
 ---
 
@@ -17,7 +17,7 @@ areas: [cli]
 
 ## Background
 
-A root is named in full every time. [9p-roots](9p-roots.md) gave `--root` dial strings and sockets beside host directories, [websocket-9p](websocket-9p.md) added `ws://` and `wss://` URLs, and [schemeless-roots](schemeless-roots.md) let a URL's scheme be left off. Each of these shortens or widens what one value can say, but the value still names one place, from its host down to its last path component.
+A root is named in full every time. [ninep-roots](ninep-roots.md) gave `--root` dial strings and sockets beside host directories, [websocket-9p](websocket-9p.md) added `ws://` and `wss://` URLs, and [schemeless-roots](schemeless-roots.md) let a URL's scheme be left off. Each of these shortens or widens what one value can say, but the value still names one place, from its host down to its last path component.
 
 In practice, most of someone's roots live in a few places: a server of root trees (`wss://roots.example.com/alpine`, `…/debian`, `…/9front`), a directory of unpacked trees (`~/roots/alpine`, `~/roots/9front`), and maybe a server on localhost while one is being worked on. What changes from run to run is the last part. Typing the rest is the same tax schemeless-roots removed for `wss://`, only longer, and a script that hardcodes it can't be pointed at a mirror or a local copy without editing it.
 
@@ -42,7 +42,7 @@ h9 --root=~alpine sh -c 'cat /etc/os-release'
 
 A `--root` or `$H9ROOT` value is a tilde root when `$H9ROOTPATH` is set, it starts with `~`, and it isn't `~/…`. Its rest is everything after the `~`, and may be empty. The rest has no whitespace, like any root value.
 
-For each prefix, in order, the candidate is the prefix followed by the rest, read by the rules `--root` already has (websocket-9p's prefix, 9p-roots' dial strings and paths, and schemeless-roots' fallback). A candidate that itself starts with `~` is an error rather than a second expansion.
+For each prefix, in order, the candidate is the prefix followed by the rest, read by the rules `--root` already has (websocket-9p's prefix, ninep-roots' dial strings and paths, and schemeless-roots' fallback). A candidate that itself starts with `~` is an error rather than a second expansion.
 
 A tilde root is read before the path check, so with `$H9ROOTPATH` set, a directory in the working directory named `~alpine` is reached as `./~alpine`. Without the variable, a value starting with `~` is read as it is today.
 
