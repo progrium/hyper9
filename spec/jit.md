@@ -159,8 +159,8 @@ The litmus tests ([Testing](#testing)) check store buffering, message passing, a
 The browser host runs h86 and ha64, each with T1 in `src/jit/wasm_t1.zig` instead of `dispatch.zig`, since compiling wasm is asynchronous and costs a module per batch:
 
 - **Warm-up.** A vCPU compiles nothing until it has retired 2M instructions, so a short program (rc starting up, `echo`) never pays for the first compile.
-- **Hot entries.** The dispatcher counts entries to each block, keyed as native translations are. T0 runs cold code to its eighth taken branch and comes back, so block heads get counted; both CPUs' T0s can stop after a given number of taken branches for this. At 50 entries a block is lifted and queued.
-- **Batches.** A queue of 64, or one that has waited 2,000 dispatcher visits, becomes one module. `h9-web.js` compiles it off the thread and installs its regions into slots of h9's own function table. T0 keeps running meanwhile; a batch's status word says when its slots are live.
+- **Hot entries.** The dispatcher counts entries to each block, keyed as native translations are. T0 runs cold code to its 64th taken branch and comes back, so block heads get counted; both CPUs' T0s can stop after a given number of taken branches for this. At 50 entries a block is lifted and queued.
+- **Batches.** A queue of 64, or one that has waited 10,000 dispatcher visits, becomes one module. `h9-web.js` compiles it off the thread and installs its regions into slots of h9's own function table. T0 keeps running meanwhile; a batch's status word says when its slots are live.
 - **Chain cells.** Each batch has a cell per distinct chain target, holding the target's slot once it's live (and on a page its source came from) and 0 otherwise. Live batches' cells are indexed by target, so a batch going live links its own cells and the cells waiting on its regions, and a region going clears only the cells that point at it.
 - **Invalidation** nulls a page's regions' slots and clears cells pointing at them. **Flushing** happens past 65,536 slots or 131,072 counted blocks.
 
@@ -186,7 +186,8 @@ h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_
 | `H9_EMU_NO_CODEGEN=1` | Act as a host that refuses generated code |
 | `H9_EMU_CACHE` | The code cache's size in bytes |
 | `H9_JIT_HOT` | Dispatches of a block before it's compiled, natively (default 32; 0 or 1 compiles on first entry) |
-| `H9_JIT_COLD` | Taken branches T0 runs for a block that isn't hot yet, natively (default 8) |
+| `H9_JIT_COLD` | Taken branches T0 runs for a block that isn't hot yet, natively (default 8); on the web host (default 64) |
+| `H9_JIT_PATIENCE`, `H9_JIT_BATCH`, `H9_JIT_WARMUP` | On the web host: dispatcher visits a queued region waits before its batch is built (default 10000), regions per batch (default 64), and instructions a vCPU retires before it compiles anything (default 2000000) |
 | `H9_PERF_MAP=1` | Each native compile appends `host-address length g:guest-pc ops:n` to `/tmp/perf-<pid>.map`, for attributing a profile's samples in compiled code to guest PCs. perf ignores the file, because the code is in a memfd mapping, so sample addresses are looked up in it by hand. |
 | `H9_JIT_DUMP` | A guest PC, in hex: its region's IR goes to `/tmp/h9-jit-dump.ir` and its code to `/tmp/h9-jit-dump.bin` |
 | `H9_EMU_DETERMINISTIC=1` | ha64's counter from instructions retired ([ha64](ha64.md)) |

@@ -100,12 +100,18 @@ pub var warmup: u64 = 2_000_000;
 /// Regions per module, at most.
 pub var batch_max: u32 = 64;
 /// Dispatcher visits a queued region waits for others before its batch
-/// is built anyway.
-pub var patience: u32 = 2000;
+/// is built anyway. Each module costs V8 a compile and h9 an emit, so
+/// fewer, fuller batches win: at 2000, Claude Code's start on ha64 built
+/// four times as many batches, most of them small.
+pub var patience: u32 = 10000;
 /// Taken branches T0 runs on a `.cold` return before it comes back: each
-/// round trip costs a lookup, so cold code runs a few blocks per visit
-/// and only a stint's first block is counted.
-pub var cold_branches: u32 = 8;
+/// round trip costs a lookup, so cold code runs many blocks per visit
+/// and only a stint's first block is counted. Large programs run most of
+/// their code a few times, so a longer stint compiles less of it. At 8,
+/// Claude Code's TUI on ha64 took 90 s in Chromium to reach its prompt;
+/// at 64, with `patience` at 10000, 68 s. Hot loops still get counted,
+/// as a stint ends inside them and comes back to their heads.
+pub var cold_branches: u32 = 64;
 const max_slots = 1 << 16;
 const max_entries = 1 << 17;
 const recent_n = 4096;
@@ -196,7 +202,7 @@ const State = struct {
     /// The jump cache the last run used, and the generation it had then.
     last_jump: usize = 0,
     last_gen: u32 = 0,
-    /// H9_JIT_HOT and H9_JIT_PATIENCE read.
+    /// The H9_JIT_* knobs read.
     tuned: bool = false,
 
     const Range = struct { base: u32, n: u32 };
@@ -465,6 +471,7 @@ pub fn run(gpa: std.mem.Allocator, cx: *Ctx, cfg: Config) Result {
         if (std.c.getenv("H9_JIT_PATIENCE")) |v| patience = std.fmt.parseInt(u32, std.mem.span(v), 10) catch patience;
         if (std.c.getenv("H9_JIT_COLD")) |v| cold_branches = std.fmt.parseInt(u32, std.mem.span(v), 10) catch cold_branches;
         if (std.c.getenv("H9_JIT_WARMUP")) |v| warmup = std.fmt.parseInt(u64, std.mem.span(v), 10) catch warmup;
+        if (std.c.getenv("H9_JIT_BATCH")) |v| batch_max = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch batch_max, 1, 1024);
     }
     if (st.flush_wanted or st.used_slots > max_slots - batch_max or st.map.count() > max_entries) flush();
     settle(&stats);
