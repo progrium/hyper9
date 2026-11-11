@@ -97,7 +97,6 @@ zig build integration  # real 9front binaries from the root tree through the h9 
 zig build proposal -Dp=baseline  # one proposal's demos, web cases, and integration cases, by slug
 zig build design -- check        # validate design/, the test tags, and links to design/ (also list, ready, new, propose, log, sign)
 zig build mkroot -- --src        # build the root tree from the pinned image (also --force, --arch arm64,386,amd64)
-zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd, hcmd), off by default (design/host-cmd.md)
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, h9-node, the demo page)
 zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later); -Darch=arm64 for ha64
@@ -220,10 +219,10 @@ The web host's only network is WebSockets: `#I` is masked, and `--net`
 (outbound by default) binds `/net/ws` alone at `/net`. The browser does the
 handshake, TLS, and proxies, so `--root-header`, `--root-ca`, and `header` in
 `ctl` are errors there, and `--net-allow` can't check what a name resolves
-to. `#C` is masked and `--host-cmd` is a usage error. A page embeds a
-machine with `createMachine({ root, memory, policy, terminal })` from
-`h9-web.js`, where `root` is a root archive's URL or a `ws://` or `wss://`
-URL; each machine runs in its own Worker.
+to. A page embeds a machine with
+`createMachine({ root, memory, policy, terminal })` from `h9-web.js`, where
+`root` is a root archive's URL or a `ws://` or `wss://` URL; each machine
+runs in its own Worker.
 
 ## Tests
 
@@ -323,7 +322,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/consin.zig` | a machine run's console input: the reader thread a guest's console read waits on, so notes can interrupt it |
 | `src/policy.zig` | the sandbox policy: profiles, the compiled plan, `--print`, and the access rules devfs checks |
 | `src/kern.zig`, `src/kern/` | the Zig/C seam into drawterm's kern; boot and spawn (`glue.c`), process records and notes (`proc.c`), our device table, the machine console `#y`, devenv, and devproc ported from 9front, the copy-on-write overlay device `#O` (`devoverlay.c`), h9's guest commands `#H` (`devhtools.c`), and the devfs policy hooks (`fscheck.c`) |
-| `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. `src/guest-hostcmd/` adds `hcmd` under `-Dhost-cmd` |
+| `src/guest/` | h9's own guest commands (rc scripts), as the guest sees them under `#H`; embedded by the build through `tools/guesttree.zig`. |
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |

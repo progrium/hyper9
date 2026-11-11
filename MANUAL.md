@@ -913,7 +913,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
 | `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22) |
-| `#C` | cmd | | Runs host commands. Only in builds with `-Dhost-cmd`, and masked unless `--host-cmd`. |
+| `#C` | cmd | | Host commands. Not built: they live on the [`host-cmd`](https://github.com/progrium/hyper9/tree/host-cmd) branch while [host-cmd](design/host-cmd.md) rethinks them. The letter stays masked. |
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
@@ -942,43 +942,12 @@ ls: #U/: mount/attach disallowed
 ```
 
 This is the core of the sandbox (chapter 23): the namespace h9 built is the
-whole of the host a program can reach. `--host-fs` leaves `#U` unmasked, and
-`--host-cmd` leaves `#C` unmasked.
+whole of the host a program can reach. `--host-fs` leaves `#U` unmasked.
 
-**Host commands.** *Only in an h9 built with `zig build -Dhost-cmd`; release
-builds leave them out while [host-cmd](design/host-cmd.md) rethinks them. In
-other builds `#C` and `hcmd` don't exist and `--host-cmd` exits 2.* Under
-`--host-cmd`, `hcmd cmd args...` runs `cmd` on the
-host, as you, with h9's host environment. Its standard input, output, and
-error are the guest's, and `hcmd` exits with its status: empty on success,
-the exit code (`3`), `killed`, or `signal: N`. It runs in the host directory
-the guest's current directory comes from, so `cd sub; hcmd make` under
-`/mnt/term/cwd` runs in `sub` of your host directory; where that isn't a
-host directory (`/tmp`, the root, an overlay), it runs in h9's own. `-d dir`
-names the host directory, and `-n` gives the command an empty standard
-input. An interrupt or a hangup kills the host command.
-
-Host commands die with the machine: when it ends, normally or at a timeout,
-any still running are killed, with their process groups, however they were
-started.
-
-```text
-$ h9 --host-cmd hcmd uname -s
-Linux
-$ echo hello | h9 --host-cmd --rc 'hcmd tr a-z A-Z'
-HELLO
-$ h9 hcmd true
-hcmd: host commands are off; run h9 with --host-cmd
-```
-
-`hcmd` drives `#C` as a program can directly: open `#C/cmd/clone` and read
-the connection number `n`, open `#C/cmd/n/wait` (the exit status is kept only
-while it's open), write `dir /host/path` and `exec cmd args...` to the clone
-file, which is the connection's `ctl`, then use `data` for standard input and
-output and `stderr`. `wait` holds one message, `pid 0 0 0 'exit string'`,
-with no newline. Writing `kill` to `ctl` stops the command. A process reading
-`data` or `stderr` waits on a host pipe, and a note can't interrupt that,
-which is why `hcmd` reads them in the background.
+**Host commands.** h9 doesn't run host programs from inside a machine: there's
+no `#C`, `hcmd`, or `--host-cmd`. That work lives on the [`host-cmd`](https://github.com/progrium/hyper9/tree/host-cmd)
+branch while [host-cmd](design/host-cmd.md) decides what host commands should
+be before they ship.
 
 ### 8. Processes
 
@@ -2122,7 +2091,7 @@ Files and sandbox (chapters 22 and 23):
 | Flag | Meaning |
 | --- | --- |
 | `--profile default\|tight` | The sandbox defaults; other flags override them |
-| `--sandbox DIR` | `--profile=tight` with only `DIR` bound, read-write, as the cwd. Can't be combined with `--cwd`, `--host-fs`, or `--host-cmd`. |
+| `--sandbox DIR` | `--profile=tight` with only `DIR` bound, read-write, as the cwd. Can't be combined with `--cwd` or `--host-fs`. |
 | `--readable PATH` | Share a host path read-only; repeatable |
 | `--writable PATH` | Share a host path read-write; repeatable |
 | `--read-deny PATH` | Hide a host path, even inside a shared tree; repeatable. The path needn't exist. |
@@ -2135,7 +2104,6 @@ Files and sandbox (chapters 22 and 23):
 | `--serve-origin ORIGIN` | An `Origin` WebSocket listeners accept, or `*` with a token; repeatable |
 | `--serve-net` | Export `/net` too |
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
-| `--host-cmd` | Leave `#C`, which runs host commands, unmasked. Only in builds with `-Dhost-cmd`; otherwise exit 2. |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
 | `--strict` | Refuse, with exit 2, anything this build can't enforce |
 | `--print` | Print the compiled sandbox plan and exit without running |

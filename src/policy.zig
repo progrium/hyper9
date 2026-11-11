@@ -66,8 +66,6 @@ pub const Policy = struct {
     cwd_writable: ?bool = null,
     /// Expose all of the host filesystem at /mnt/term.
     host_fs: bool = false,
-    /// Leave devcmd (`#C`) unmasked.
-    host_cmd: bool = false,
 };
 
 /// How a bound tree can be changed: not at all, on the host, in an
@@ -527,11 +525,6 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
     }
-    // The web host never has them (design/browser-host.md).
-    if (pol.host_cmd and (web or !@import("build_options").host_cmd)) {
-        err_msg.* = if (web) "--host-cmd: the web host has no host commands (zig build -Dhost-cmd builds them natively)" else "--host-cmd: this h9 was built without host commands (zig build -Dhost-cmd)";
-        return error.Conflict;
-    }
     if (net == .disable and pol.net_allow.len > 0) {
         err_msg.* = "--net-allow conflicts with --net=disable";
         return error.Conflict;
@@ -753,7 +746,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     }
 
     var devmask: std.ArrayList(u8) = .empty;
-    if (!pol.host_cmd or web) try devmask.append(arena, 'C');
+    // #C (host commands) isn't built while design/host-cmd.md rethinks
+    // it, and stays masked.
+    try devmask.append(arena, 'C');
     if (net == .disable or web) try devmask.append(arena, 'I');
     if (net == .disable) try devmask.appendSlice(arena, hstream_dev);
     if (!in.guest_tools) try devmask.append(arena, 'H');
@@ -836,7 +831,6 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             try caveats.append(arena, "the guest can draw anything in its window, including what looks like a host dialog");
         }
     }
-    if (pol.host_cmd) try caveats.append(arena, "#C runs host commands with the host user's rights");
     if (pol.host_fs) try caveats.append(arena, "--host-fs exposes the whole host filesystem");
     var serve_plan = in.serve;
     if (serve_plan) |*sv| {

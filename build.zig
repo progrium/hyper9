@@ -6,15 +6,16 @@ const guesttree = @import("tools/guesttree.zig");
 const drawterm = "third_party/drawterm";
 
 // drawterm's kern/Makefile OFILES with AUDIO=none, without devtab.c and
-// devenv.c (src/kern/ has our own) or devpipe.c (built with kern_notes
-// below), plus the OS files below.
+// devenv.c (src/kern/ has our own), devpipe.c (built with kern_notes
+// below), or devcmd.c (host commands live on the host-cmd branch while
+// design/host-cmd.md rethinks them), plus the OS files below.
 const kern_sources = [_][]const u8{
-    "alloc.c",    "allocb.c",        "chan.c",   "data.c",     "dev.c",
-    "devaudio.c", "devaudio-none.c", "devcmd.c", "devcons.c",  "devdraw.c",
-    "devip.c",    "devkbd.c",        "devmnt.c", "devmouse.c", "devroot.c",
-    "devssl.c",   "devtls.c",        "error.c",  "parse.c",    "pgrp.c",
-    "procinit.c", "rwlock.c",        "sleep.c",  "stub.c",     "sysfile.c",
-    "qio.c",      "qlock.c",         "term.c",   "waserror.c",
+    "alloc.c",    "allocb.c",        "chan.c",     "data.c",    "dev.c",
+    "devaudio.c", "devaudio-none.c", "devcons.c",  "devdraw.c", "devip.c",
+    "devkbd.c",   "devmnt.c",        "devmouse.c", "devroot.c", "devssl.c",
+    "devtls.c",   "error.c",         "parse.c",    "pgrp.c",    "procinit.c",
+    "rwlock.c",   "sleep.c",         "stub.c",     "sysfile.c", "qio.c",
+    "qlock.c",    "term.c",          "waserror.c",
 };
 // drawterm files that post notes, built so their notes reach h9's note
 // queue (src/kern/proc.c) instead of drawterm's postnote.
@@ -175,19 +176,18 @@ const Integration = struct {
 /// cases by name; with `pending`, cases tagged with a proposal that isn't
 /// implemented run instead of skipping. `it.arch`, if given, is passed to
 /// h9 as --arch (from -Darch). `guest_test` says h9 was built with
-/// -Dguest-test, and `host_cmd` that it was built with -Dhost-cmd. `src`,
-/// if given, is a 9front checkout's `sys` directory, which the self-host
-/// cases bind over /sys when the root lacks /sys/src. The cases are split
+/// -Dguest-test. `src`, if given, is a 9front checkout's `sys` directory,
+/// which the self-host cases bind over /sys when the root lacks /sys/src. The cases are split
 /// `shards` ways (H9_TEST_SHARD, tests/integration.zig's skipShard), one
 /// run of the same binary for each, which the build runner runs side by
 /// side: the cases mostly wait on h9, terminals, and sockets, so one run
 /// leaves most cores idle. `step` depends on every run.
-fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.builtin.OptimizeMode, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) []*std.Build.Step.Run {
+fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.builtin.OptimizeMode, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) []*std.Build.Step.Run {
     const tests = integrationTests(b, b.graph.host, optimize, filters);
     const n = @max(shards, 1);
     const runs = b.allocator.alloc(*std.Build.Step.Run, n) catch @panic("OOM");
     for (runs, 0..) |*r, i| {
-        r.* = addIntegrationRun(b, tests, it, root, backends, pending, go, guest_test, host_cmd, src);
+        r.* = addIntegrationRun(b, tests, it, root, backends, pending, go, guest_test, src);
         if (n > 1) {
             r.*.setName(b.fmt("integration {d}/{d}", .{ i + 1, n }));
             r.*.setEnvironmentVariable("H9_TEST_SHARD", b.fmt("{d}/{d}", .{ i, n }));
@@ -198,7 +198,7 @@ fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: s
 }
 
 /// One run of the integration binary `tests`, set up as addIntegration says.
-fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) *std.Build.Step.Run {
+fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(tests);
     // The self-host cases' source when the root has no /sys/src
     // (design/self-host.md).
@@ -208,8 +208,6 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     const h9_bin = it.bin;
     // h9 serves tests/fixtures/guest in #H (design/guest-tools.md).
     if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
-    // Built with -Dhost-cmd: the host command cases run.
-    if (host_cmd) run.setEnvironmentVariable("H9_TEST_HOST_CMD", "1");
     if (it.arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
     if (it.web) run.setEnvironmentVariable("H9_TEST_WEB", "1");
     if (it.server) |sv| run.setEnvironmentVariable("H9_TEST_SERVER", sv);
@@ -469,15 +467,14 @@ fn zonVersion(b: *std.Build) []const u8 {
     return rest[0 .. std.mem.indexOfScalar(u8, rest, '"') orelse return "unknown"];
 }
 
-/// The table of src/guest/ (with src/guest-hostcmd/ under -Dhost-cmd, and
-/// tests/fixtures/guest with `with_test`)
+/// The table of src/guest/ (with tests/fixtures/guest with `with_test`)
 /// as a generated Zig file, and the number of entries in its bin. A file
 /// the tree can't hold fails the build.
-fn guestTree(b: *std.Build, with_test: bool, host_cmd: bool) struct { file: std.Build.LazyPath, bin: usize } {
+fn guestTree(b: *std.Build, with_test: bool) struct { file: std.Build.LazyPath, bin: usize } {
     const io = b.graph.io;
     const wf = b.addWriteFiles();
     var inputs: std.ArrayList(guesttree.Input) = .empty;
-    for ([_][]const u8{ "src/guest", "src/guest-hostcmd", "tests/fixtures/guest" }, [_]bool{ true, host_cmd, with_test }) |sub, want| {
+    for ([_][]const u8{ "src/guest", "tests/fixtures/guest" }, [_]bool{ true, with_test }) |sub, want| {
         if (!want) continue;
         var dir = b.build_root.handle.openDir(io, sub, .{ .iterate = true }) catch continue;
         defer dir.close(io);
@@ -590,7 +587,7 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
 /// (design/browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
 /// place of posix.c, the coroutines it runs on (src/web/coro.c), and
 /// setjmp/longjmp on wasm exception handling.
-fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, web: bool, host_cmd: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
+fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, web: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
     const os = target.result.os.tag;
     const kern = b.addLibrary(.{
         .name = if (gfx == .headless and !exported) "kern-headless" else "kern",
@@ -612,20 +609,16 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .files = &kern_notes,
         .flags = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Dpostnote=h9_postnote"} }) catch @panic("OOM"),
     });
-    // oscmd and friends are renamed so src/kern/hostcmd.c can wrap them:
-    // a machine's host commands die with it. The web host has none, and
-    // os-wasm.c stubs them.
     kern.root_module.addCSourceFiles(.{
         .root = b.path(drawterm ++ "/kern"),
         .files = if (web) &kern_web else if (os == .windows) &kern_win32 else &kern_posix,
-        .flags = if (web) flags else std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-Doscmd=h9_dt_oscmd", "-Doscmdkill=h9_dt_oscmdkill", "-Doscmdfree=h9_dt_oscmdfree" } }) catch @panic("OOM"),
+        .flags = flags,
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
         .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c" },
         .flags = flags,
     });
-    if (!web) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostcmd.c"}, .flags = flags });
     // The Linux personality (design/linux-personality.md) and its host
     // sockets (design/linux-net.md).
     kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c" }, .flags = flags });
@@ -668,8 +661,6 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .files = &kern_port,
         .flags = flags,
     });
-    // devtab.c lists devcmd (#C) only under -Dhost-cmd.
-    if (host_cmd and !web) kern.root_module.addCMacro("H9_HOSTCMD", "1");
     return kern;
 }
 
@@ -702,7 +693,6 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     p.emu = .hcpu;
     p.jit = true;
     p.unicorn = null;
-    p.host_cmd = false;
     // The browser runs 386 only (design/builtin-root.md, Open issues: every
     // byte is downloaded per page load).
     p.builtin_root = builtinRoot(b, p.builtin_dir, pin(p.pins, "NINEFRONT_RELEASE"), &.{"386"}, .quiet);
@@ -842,7 +832,6 @@ const ModuleParts = struct {
     shim_amd64: std.Build.LazyPath,
     /// The native backend's stub, for Linux x86_64 hosts.
     native_stub: std.Build.LazyPath,
-    host_cmd: bool,
     guest_tree: std.Build.LazyPath,
     /// The built-in root (design/builtin-root.md).
     builtin_root: std.Build.LazyPath,
@@ -881,8 +870,8 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
 
     const web = os == .wasi;
     // The web host's kern turns on wasm exception handling, for setjmp
-    // and longjmp, and has no host commands.
-    const kern = addKern(b, if (web) webTarget(b, true) else target, optimize, web, p.host_cmd and !web, gfx, exported);
+    // and longjmp.
+    const kern = addKern(b, if (web) webTarget(b, true) else target, optimize, web, gfx, exported);
     if (!p.have_drawterm) {
         const fail = b.addFail(drawterm ++ " is missing; run scripts/vendor-drawterm.sh");
         kern.step.dependOn(&fail.step);
@@ -899,7 +888,6 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
     options.addOption(bool, "jit_check", p.jit_check);
     options.addOption(bool, "jit_verify", p.jit_verify);
     options.addOption(bool, "kern", p.have_drawterm);
-    options.addOption(bool, "host_cmd", p.host_cmd);
     options.addOption([]const u8, "gfx", @tagName(gfx));
     options.addOption([]const u8, "version", p.version);
     options.addOption([]const u8, "ninefront_release", pin(p.pins, "NINEFRONT_RELEASE"));
@@ -953,9 +941,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
-    // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
-    // while design/host-cmd rethinks them.
-    const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
     var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or hcpu (h9's own CPUs)") orelse .none;
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out against Unicorn's JIT.
@@ -1028,7 +1013,7 @@ pub fn build(b: *std.Build) void {
     // Debug builds also serve tests/fixtures/guest, for the integration
     // cases; release builds leave it out.
     const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .Debug);
-    const guest_tree = guestTree(b, guest_test, host_cmd);
+    const guest_tree = guestTree(b, guest_test);
 
     // For --version: scripts/release.sh passes -Dversion; otherwise git
     // describe, or build.zig.zon's version where there's no git checkout.
@@ -1055,7 +1040,6 @@ pub fn build(b: *std.Build) void {
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),
         .native_stub = native_stub.getEmittedBin(),
-        .host_cmd = host_cmd,
         .guest_tree = guest_tree.file,
         .builtin_root = builtin_root,
         .builtin_dir = builtin_dir,
@@ -1415,7 +1399,7 @@ pub fn build(b: *std.Build) void {
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const it_shards = b.option(u32, "shards", "Split the integration cases across this many runs at once (default 4; 1 runs them in one)") orelse 4;
     const integration_step = b.step("integration", "Run real 9front binaries from the root tree through h9");
-    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir)) |run_integration| {
+    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, src_dir)) |run_integration| {
         if (!test_web) run_integration.step.dependOn(linux_fixtures);
         // -Djit-check checks every region against T0, one region at a time
         // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
@@ -1538,7 +1522,7 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir)) |run_cases| {
+            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, src_dir)) |run_cases| {
                 if (!test_web) run_cases.step.dependOn(linux_fixtures);
             }
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
