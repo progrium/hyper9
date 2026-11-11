@@ -259,7 +259,9 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *tlb.TlbMem, em: emitter.Emitter) vmm.Error!vm
             // the SYSCALL.
             .svc => return exitOf(c, ctx, .syscall),
             .interrupted => return .interrupted,
-            .t0 => {
+            // No Config.hot here, so every block compiles and `.cold`
+            // doesn't come back; it would run as `.t0`.
+            .t0, .cold => {
                 if (ctx.budget <= 0) return .interrupted;
                 const e = runT0(c, ctx, m, 1);
                 if (e != .stopped) return exitOf(c, ctx, e);

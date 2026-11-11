@@ -185,7 +185,7 @@ const Machine = struct {
                     _ = cache_mod.clearRequest(&m.rt.ctx, ~@as(u32, 0));
                     m.jit.?.reset();
                 },
-                .t0 => {
+                .t0, .cold => {
                     const e = m.runT0(1);
                     if (e != .stopped) return e;
                 },
