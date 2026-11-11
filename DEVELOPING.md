@@ -273,6 +273,34 @@ the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os`
 runs one package). It's for finding gaps, not a gate, and nothing depends on
 it.
 
+### Workloads
+
+The workloads in [tests/workloads](tests/workloads) run real programs on
+real roots through `h9`, each timed: Python with its C modules, threads,
+subprocesses, and pip, git, sqlite3, jq, bash, and busybox's tools on a
+Linux root, and 9front's compilers and `mk` building awk and rc from
+`/sys/src`. A case is a short script, `NAME.sh` for `/bin/sh` on the Linux
+root or `NAME.rc` for rc on the 9front root, with `# expect:`,
+`# status:`, `# timeout:`, and `# known:` lines at the top
+([scripts/workloads.sh](scripts/workloads.sh) says what each does).
+`scripts/fetch.sh workloads` makes the Linux root,
+`.local/linux/workloads-amd64`, from the amd64 Alpine root and the
+packages pinned in `scripts/pins.sh`, and the 9front root is
+`.local/9front/rootamd64` (from `scripts/fetch.sh isoamd64` and
+`zig build isoroot`, as above) or `.local/9front/root`:
+
+```sh
+zig build workloads -Darch=amd64 -Dbackends=native
+zig build workloads -Darch=amd64 -Dbackends=native -- python git   # cases by name
+```
+
+The cases run in parallel and print a table of results and times. Each
+case's stdout and stderr are in `zig-out/workloads`. A case with a `known`
+line is expected to fail, and the run fails when it passes, so the line
+gets removed. The [workloads workflow](.github/workflows/workloads.yml)
+runs them every two days on main, unless nothing they depend on has
+changed since the last run that passed, and by hand on any branch.
+
 ### Test VMs
 
 [scripts/lima](scripts/lima/README.md) has Lima VMs (arm64 Linux, macOS, and

@@ -1162,6 +1162,7 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 - `zig build integration` runs real binaries from the root tree through the `h9` CLI as subprocesses, so each case gets a fresh kernel and checks exit codes end to end; it skips when there's no tree. `zig build proposal -Dp=baseline` runs the baseline's demos and cases. The Lima test VMs get the tree with `scripts/lima/vm push-root`.
 - `zig build integration -Dweb` runs the same cases through `h9-node` on h86 with the 386 root, or on ha64 with `-Darch=arm64`; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
 - CI runs `zig build design -- check` on every PR, and the unit and integration tests on PRs from proposal branches ([.github/workflows/ci.yml](.github/workflows/ci.yml)). Which workflows run what can change without a proposal ([design/README.md](design/README.md#checks)).
+- `zig build workloads` runs real programs (Python, pip, git, sqlite3, 9front's compilers, and `mk`) on a Linux root and a 9front root, in parallel and timed ([tests/workloads](tests/workloads)), every two days on main ([.github/workflows/workloads.yml](.github/workflows/workloads.yml)).
 
 ## CLI
 

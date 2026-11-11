@@ -1,0 +1,87 @@
+# Runs the workloads (tests/workloads, scripts/workloads.sh): real
+# programs, such as Python, pip, git, sqlite3, and 9front's compilers and
+# mk, on real roots through h9, with each case's time in the run's
+# summary. They need roots that PR checks don't fetch, so they run every
+# two days on main, and by hand ("Run workflow" in the Actions tab, or
+# `gh workflow run workloads --ref BRANCH`) on any branch.
+#
+# A scheduled run first checks whether anything that could change the
+# results has changed since the last run that passed, and skips the rest
+# if not, so a quiet stretch costs a few seconds of runner time. A run by
+# hand always runs.
+#
+# The cases run on the native backend, as ci.yml's integration cases do,
+# until KVM's failures on hosted runners are fixed.
+name: workloads
+
+on:
+  schedule:
+    # 07:00 UTC on odd days of the month.
+    - cron: "0 7 */2 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: workloads-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'schedule'
+      - id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != schedule ]; then echo run=true >>"$GITHUB_OUTPUT"; exit 0; fi
+          last=$(gh run list -R "$GITHUB_REPOSITORY" -w workloads -b main -s success -L 1 --json headSha -q '.[0].headSha')
+          if [ -z "$last" ] || ! git fetch -q --depth=1 origin "$last"; then echo run=true >>"$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --quiet "$last" HEAD -- src build.zig build tools scripts tests/workloads .github/workflows/workloads.yml; then
+            echo "Nothing has changed since $last, which passed."
+            echo run=false >>"$GITHUB_OUTPUT"
+          else
+            echo run=true >>"$GITHUB_OUTPUT"
+          fi
+
+  workloads:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/cache@v4
+        id: rootamd64
+        with:
+          path: .local/9front/rootamd64
+          key: ci-rootamd64-${{ hashFiles('scripts/pins.sh', 'tools/isoroot.zig') }}
+      - name: amd64 9front root from the ISO
+        if: steps.rootamd64.outputs.cache-hit != 'true'
+        run: |
+          scripts/fetch.sh isoamd64
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
+      - uses: actions/cache@v4
+        id: linux
+        with:
+          path: .local/linux/workloads-amd64
+          key: workloads-linux-amd64-${{ hashFiles('scripts/pins.sh') }}
+      - name: amd64 Linux root with the packages
+        if: steps.linux.outputs.cache-hit != 'true'
+        run: scripts/fetch.sh workloads
+      - run: zig build workloads -Darch=amd64 -Dbackends=native
+      - name: Keep the cases' output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workloads-output
+          path: zig-out/workloads

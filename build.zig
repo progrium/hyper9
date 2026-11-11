@@ -1407,6 +1407,26 @@ pub fn build(b: *std.Build) void {
         if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "4");
     }
 
+    // The workloads (tests/workloads): real programs on real roots, in
+    // parallel, timed, by scripts/workloads.sh. Too slow for every PR, so
+    // a workflow runs them every two days (.github/workflows/workloads.yml).
+    // -Darch and -Dbackends pick the roots' architecture and the backend
+    // (the first one listed), and arguments after -- pick cases by name.
+    const workloads_step = b.step("workloads", "Run the workloads in tests/workloads: real programs on real roots, timed (scripts/fetch.sh workloads for the Linux root)");
+    const run_workloads = b.addSystemCommand(&.{ "bash", "scripts/workloads.sh", h9_bin, b.getInstallPath(.prefix, "workloads") });
+    run_workloads.setCwd(b.path("."));
+    if (b.args) |args| run_workloads.addArgs(args);
+    run_workloads.setEnvironmentVariable("H9_WL_ARCH", test_arch orelse switch (target.result.cpu.arch) {
+        .x86_64 => "amd64",
+        .x86 => "386",
+        else => "arm64",
+    });
+    if (want_backends) |w| run_workloads.setEnvironmentVariable("H9_WL_BACKEND", std.mem.sliceTo(w, ','));
+    run_workloads.has_side_effects = true;
+    run_workloads.stdio = .inherit;
+    run_workloads.step.dependOn(signed_step);
+    workloads_step.dependOn(&run_workloads.step);
+
     // 9box and a slim root around it (design/multicall.md), built inside
     // the h9 just built, against the root tree. -Darch picks the
     // architecture, as for the integration cases.

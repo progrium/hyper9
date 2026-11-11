@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
 # libraries and the patched Unicorn source into .local, and on request
-# the release's 386 or amd64 ISO and the browser host's Linux demo root.
+# the release's 386 or amd64 ISO, the browser host's Linux demo root, and
+# the workloads' Linux root.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
-#                                 iso386 isoamd64 alpinearm64web; default
-#                                 all but the ISOs and alpinearm64web)
+#                                 iso386 isoamd64 alpinearm64web
+#                                 workloads; default all but the ISOs,
+#                                 alpinearm64web, and workloads)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -14,7 +16,7 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn unicorn-src} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web) ;;
+	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web|workloads) ;;
 	# v86 was the browser host's 386 CPU before h86, and alpine386web the
 	# Linux demo's root before it moved to arm64; nothing to fetch now.
 	v86|alpine386web) ;;
@@ -156,3 +158,26 @@ fi
 echo "linux/alpine-arm64-web: $(echo "$ALPINE_ARM64_WEB_PKGS" | awk 'NF{printf "%s ", $1}')"
 fi
 
+# The workloads' Linux root (tests/workloads): the amd64 Alpine root with
+# the pinned packages unpacked over a copy of it.
+if want workloads; then
+dir="$H9_LOCAL/linux/workloads-amd64"
+stamp=$(echo "$WORKLOADS_AMD64_PKGS" | shasum -a 256 | cut -d' ' -f1)
+if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
+	rm -rf "$dir" "$dir.tmp"
+	cp -a "$H9_LOCAL/linux/alpine-amd64" "$dir.tmp"
+	echo "$WORKLOADS_AMD64_PKGS" | while read -r repo f sha; do
+		[ -n "$f" ] || continue
+		apk="$H9_LOCAL/cache/$f"
+		curl -fsSL --retry 3 -o "$apk" "$ALPINE_PKG_BASE/$repo/x86_64/$f"
+		echo "$sha  $apk" | shasum -a 256 -c --quiet
+		# GNU tar warns about apk's own pax keywords; they don't matter.
+		tar -xzf "$apk" -C "$dir.tmp" --exclude='.SIGN.*' --exclude=.PKGINFO 2>&1 |
+			{ grep -v 'unknown extended header keyword' >&2 || true; }
+		rm -f "$apk"
+	done
+	echo "$stamp" >"$dir.tmp/.h9-stamp"
+	mv "$dir.tmp" "$dir"
+fi
+echo "linux/workloads-amd64: $(echo "$WORKLOADS_AMD64_PKGS" | awk 'NF{n++} END{print n " packages"}')"
+fi
