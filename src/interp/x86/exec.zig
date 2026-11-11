@@ -551,7 +551,7 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
         /// its page. Inline as far as a memory's `hit` (a TLB hit) goes.
         pub inline fn ptr(x: *X, va: W, access: Access) Trap![*]u8 {
             // Long mode's hit is out of line: inlined there, Zig 0.16.0's
-            // code generation segfaults (tests/a64.zig under -Demu=zig).
+            // code generation segfaults (tests/a64.zig under -Demu=hcpu).
             if (has_hit and !long) if (x.m.hit(va, access)) |p| return p;
             return x.ptrMiss(va, access);
         }

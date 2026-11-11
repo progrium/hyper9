@@ -3,7 +3,7 @@
 //!
 //! The TLB entry layout and the slow-path signatures are final: T0s and
 //! every emitter code against them. Behind the slow path is a `View`: a
-//! vCPU's copy of its address space's mappings, which vmm/zemu.zig keeps in
+//! vCPU's copy of its address space's mappings, which vmm/hcpu.zig keeps in
 //! step with the address space, and the backend's `CodePages`, which says
 //! which pages hold code. `Map` is a fixed list of mappings for tests.
 //!

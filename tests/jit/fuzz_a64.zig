@@ -9,8 +9,8 @@
 
 const std = @import("std");
 const options = @import("fuzz_options");
-const vcpu = @import("vcpu");
-const check = vcpu.check;
+const hcpu = @import("hcpu");
+const check = hcpu.check;
 const gen = check.gen_a64;
 const fuzz = check.fuzz_a64;
 const a64 = check.a64;
@@ -23,10 +23,10 @@ pub fn main(init: std.process.Init) !void {
     var args = try common.Args(gen.Class).parse("fuzz-a64", init);
     if (!options.unicorn and args.lockstep) args.lockstep = false;
     // Check FP and SIMD lifting whatever this host's emitter takes.
-    vcpu.a64.lift_simd.enabled = true;
+    hcpu.a64.lift_simd.enabled = true;
     // H9_FUZZ_COPY=1: copy register-only instructions (copy.zig), checked
     // on ir_eval and, with --native, by the arm64 emitter's lowering.
-    if (init.environ_map.get("H9_FUZZ_COPY")) |v| vcpu.a64.copy.enabled = v.len > 0 and v[0] == '1';
+    if (init.environ_map.get("H9_FUZZ_COPY")) |v| hcpu.a64.copy.enabled = v.len > 0 and v[0] == '1';
     std.debug.print("fuzz-a64: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
 
     const s = try gpa.create(fuzz.Space);
@@ -35,8 +35,8 @@ pub fn main(init: std.process.Init) !void {
     const run = try check.Run.init(gpa, &a64.guest, check.mapBacking(&s.map));
     defer run.deinit();
 
-    var native: ?vcpu.emit.native.Native = if (args.native) vcpu.emit.native.Native.init() catch |e| {
-        std.debug.print("--native: no {s} emitter here ({t})\n", .{ vcpu.emit.native.name, e });
+    var native: ?hcpu.emit.native.Native = if (args.native) hcpu.emit.native.Native.init() catch |e| {
+        std.debug.print("--native: no {s} emitter here ({t})\n", .{ hcpu.emit.native.name, e });
         std.process.exit(2);
     } else null;
     defer if (native) |*n| n.deinit();
@@ -94,8 +94,8 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("fuzz-a64: {d} programs, {d} diverged; {d} instructions region-checked\n", .{ i, failed, retired });
     if (native) |n| {
-        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
-        vcpu.emit.native.printFallbacks();
+        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ hcpu.emit.native.name, n.compiled, n.unsupported });
+        hcpu.emit.native.printFallbacks();
     }
     tally.print();
     if (options.unicorn) for (std.enums.values(lockstep.Known)) |k| if (known.get(k) != 0)
@@ -123,8 +123,8 @@ fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *s
     defer e.deinit();
     var cpu = start;
     try e.setState(canon(&cpu));
-    var tlb: vcpu.mem.Tlb = .{};
-    var c: vcpu.ctx.Ctx = .{ .cpu = @intFromPtr(&cpu), .tlb = @intFromPtr(&tlb) };
+    var tlb: hcpu.mem.Tlb = .{};
+    var c: hcpu.ctx.Ctx = .{ .cpu = @intFromPtr(&cpu), .tlb = @intFromPtr(&tlb) };
     const bound = try a64.Bound.init(gpa, &c, a64.t0.mapSpace(&s.map));
     defer bound.deinit(gpa);
     // The size of the last load exclusive, for knownA64Exclusive.
@@ -133,9 +133,9 @@ fn lockstepUnicorn(gpa: std.mem.Allocator, s: *fuzz.Space, start: a64.Cpu, w: *s
     while (n < 1 << 16) : (n += 1) {
         const pc = cpu.pc;
         const word = std.mem.readInt(u32, s.code[@intCast(pc - gen.code_va)..][0..4], .little);
-        const e0: vcpu.ctx.Exit = @enumFromInt(a64.step(&c));
+        const e0: hcpu.ctx.Exit = @enumFromInt(a64.step(&c));
         const e1 = try e.step();
-        const alignment = e0 == .fault and (c.exit_info >> 8) & 0xff == @intFromEnum(vcpu.mem.FaultKind.alignment);
+        const alignment = e0 == .fault and (c.exit_info >> 8) & 0xff == @intFromEnum(hcpu.mem.FaultKind.alignment);
         if (lockstep.knownA64(word, alignment, e1)) |k| return .{ .known = k };
         const same_exit = switch (e1) {
             .next => e0 == .ok,

@@ -16,7 +16,7 @@
 //!   the same way in every space sharing the source.
 //! - **The jump cache.** Each vCPU has 1024 direct-mapped entries from guest
 //!   PC to translation, for indirect branches and for the dispatcher. A
-//!   change to the vCPU's mappings clears it (vmm/zemu.zig).
+//!   change to the vCPU's mappings clears it (vmm/hcpu.zig).
 //! - **Invalidation.** `invalidatePage` drops every translation from an
 //!   arena page: out of the lookup table and every jump cache, and every
 //!   jump patched into it reset. Its code stays until the next flush, since
@@ -478,7 +478,7 @@ pub fn clearRequest(cx: *Ctx, bits: u32) u32 {
     return @atomicRmw(u32, &cx.exit_request, .And, ~bits, .seq_cst);
 }
 
-/// A vCPU's JIT state around its Ctx, which the vmm layer (vmm/zemu.zig)
+/// A vCPU's JIT state around its Ctx, which the vmm layer (vmm/hcpu.zig)
 /// embeds and a Guest's run loop finds from the Ctx it's given.
 /// Entries counted per block before T1 compiles it (dispatch.zig's
 /// `.cold`), direct-mapped by PC: a collision restarts the count, which

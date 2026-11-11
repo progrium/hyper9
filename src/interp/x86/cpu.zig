@@ -16,7 +16,7 @@ pub const Mode = @import("mode.zig").Mode;
 
 /// 9front's user code and data selectors (pc/mem.h UESEL and UDSEL), as
 /// src/arch/i386.zig has them. This module doesn't import that file, so
-/// it builds as a module of its own (src/vcpu.zig).
+/// it builds as a module of its own (src/hcpu.zig).
 pub const uesel: u16 = (4 << 3) | 3;
 pub const udsel: u16 = (3 << 3) | 3;
 
@@ -157,7 +157,7 @@ pub const Cpu = struct {
 
     /// The x87, MMX, and SSE state as an FXSAVE image, and the TLS base:
     /// `x` is a *vmm.X86Extra (taken as anytype so the interpreter builds
-    /// without the vmm layer, as src/vcpu.zig does).
+    /// without the vmm layer, as src/hcpu.zig does).
     pub fn getExtra(c: *const Cpu, x: anytype) void {
         x.* = .{};
         const fx = &x.fx;

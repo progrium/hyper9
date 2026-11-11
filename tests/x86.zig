@@ -1,4 +1,4 @@
-//! zig build vcpu (and x86-jit): the 386 JIT plan's [x86-jit] cases, each
+//! zig build hcpu (and x86-jit): the 386 JIT plan's [x86-jit] cases, each
 //! run on T0 alone and on T1 through dispatch, with ir_eval and with this
 //! host's emitter. The machine is src/jit/x86/t1.zig's: code at 0x1000
 //! (two pages, writable), data at 0x20000, stack at 0x21000, and nothing
@@ -9,10 +9,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const vcpu = @import("vcpu");
-const t1 = vcpu.x86jit.t1;
-const cpu_mod = vcpu.x86.cpu;
-const exec = vcpu.x86.exec;
+const hcpu = @import("hcpu");
+const t1 = hcpu.x86jit.t1;
+const cpu_mod = hcpu.x86.cpu;
+const exec = hcpu.x86.exec;
 const Exit = cpu_mod.Exit;
 const Machine = t1.Machine;
 const testing = std.testing;
@@ -23,21 +23,21 @@ const data_va: u32 = 0x20000;
 /// The tiers a case runs on.
 const Tier = enum { t0, t1_eval, t1_native };
 
-fn emitterOf(t: Tier) ?vcpu.emitter.Emitter {
+fn emitterOf(t: Tier) ?hcpu.emitter.Emitter {
     return switch (t) {
         .t0 => null,
-        .t1_eval => vcpu.emit.eval.emitter_def,
-        .t1_native => if (builtin.cpu.arch == .x86_64) vcpu.emit.x64.emitter_def else null,
+        .t1_eval => hcpu.emit.eval.emitter_def,
+        .t1_native => if (builtin.cpu.arch == .x86_64) hcpu.emit.x64.emitter_def else null,
     };
 }
 
 /// One machine on one tier, for a case.
 const Run = struct {
     m: *Machine,
-    cache: ?*vcpu.cache.Cache,
+    cache: ?*hcpu.cache.Cache,
 
     fn init(t: Tier) !?Run {
-        var cache: ?*vcpu.cache.Cache = null;
+        var cache: ?*hcpu.cache.Cache = null;
         if (t != .t0) {
             const em = emitterOf(t) orelse return null;
             // On some hosts SkipZigTest is testCache's only error, so no
@@ -65,7 +65,7 @@ const Run = struct {
     }
 
     fn data(r: Run, off: usize) *align(1) u32 {
-        return @ptrCast(r.m.pages[2 * vcpu.mem.page_size + off ..][0..4]);
+        return @ptrCast(r.m.pages[2 * hcpu.mem.page_size + off ..][0..4]);
     }
 };
 
@@ -150,7 +150,7 @@ test "[x86-jit] x87 results are the same bits on every host" {
     try onEachTier(&prog, @splat(0), struct {
         fn f(_: Tier, r: Run, e: Exit) !void {
             try expectSyscall(e);
-            const d = r.m.pages[2 * vcpu.mem.page_size ..];
+            const d = r.m.pages[2 * hcpu.mem.page_size ..];
             // sqrt(2) and 1/3, rounded to nearest in 64 bits, as an x87 has
             // them.
             try testing.expectEqual(@as(u64, 0xb504f333f9de6484), std.mem.readInt(u64, d[0x10..0x18], .little));
@@ -186,7 +186,7 @@ test "[x86-jit] a REP MOVSB stopped by a fault is exact, and resumes" {
             try testing.expectEqual(@as(u32, 0x100), c.r[1]);
             try testing.expectEqual(@as(u32, 0x20100), c.r[6]);
             try testing.expectEqual(@as(u32, 0x22000), c.r[7]);
-            const d = r.m.pages[2 * vcpu.mem.page_size ..];
+            const d = r.m.pages[2 * hcpu.mem.page_size ..];
             try testing.expectEqualSlices(u8, d[0..0x100], d[0x1f00..0x2000]);
             // Resuming with a count that fits finishes the copy.
             c.r[1] = 0;
@@ -220,7 +220,7 @@ test "[x86-jit] a REP stopped between iterations on T0 resumes exactly" {
     try testing.expectEqual(code_va + 0x14, c.eip);
     try testing.expectEqual(@as(u32, 0x2000 - 4095), c.r[1]);
     try testing.expectEqual(@as(u32, 0x20000 + 4095), c.r[6]);
-    try testing.expectEqual(@as(u32, r.m.pages[2 * vcpu.mem.page_size + 4094]), c.r[0] & 0xff);
+    try testing.expectEqual(@as(u32, r.m.pages[2 * hcpu.mem.page_size + 4094]), c.r[0] & 0xff);
     word.store(0, .monotonic);
     try expectSyscall(exec.run(c, &r.m.pm, .{ .stop = word }));
     // The flag word differs: the reference left it set.
@@ -336,11 +336,11 @@ test "[x86-jit] CPUID reports SSE2 and no AVX" {
 
 /// Four T0 vCPUs on host threads, over one code page and one data page.
 const Shared = struct {
-    code: [vcpu.mem.page_size]u8 align(vcpu.mem.page_size) = @splat(0xcc),
-    data: [vcpu.mem.page_size]u8 align(vcpu.mem.page_size) = @splat(0),
+    code: [hcpu.mem.page_size]u8 align(hcpu.mem.page_size) = @splat(0xcc),
+    data: [hcpu.mem.page_size]u8 align(hcpu.mem.page_size) = @splat(0),
 
     pub fn translate(s: *Shared, va: u32, access: cpu_mod.Access) ?[*]u8 {
-        const page = va & ~@as(u32, vcpu.mem.page_size - 1);
+        const page = va & ~@as(u32, hcpu.mem.page_size - 1);
         const off = va - page;
         if (page == code_va and access != .write) return s.code[off..].ptr;
         if (page == data_va) return s.data[off..].ptr;

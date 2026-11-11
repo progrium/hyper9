@@ -1,12 +1,12 @@
 # src/jit: the emulator's JIT layer
 
-Shared by ha64 (arm64 guests), h86 (386 guests), and hx64 (amd64 guests,
-in progress on the `hx64` branch). Built with `-Demu=zig`; tested with
-`zig build vcpu`.
+Shared by ha64 (arm64 guests), h86 (386 guests), and hx64 (amd64 guests).
+Built with `-Demu=hcpu`; tested with
+`zig build hcpu`.
 
 The specs describe what's built: [spec/jit.md](../../spec/jit.md) for this
-layer, and [spec/h86.md](../../spec/h86.md) and [spec/ha64.md](../../spec/ha64.md)
-for the two CPUs.
+layer, and [spec/h86.md](../../spec/h86.md), [spec/ha64.md](../../spec/ha64.md),
+and [spec/hx64.md](../../spec/hx64.md) for the three CPUs.
 
 ## Contracts
 
@@ -24,7 +24,7 @@ other work asks the owner for changes rather than editing it.
 
 ## hx64's contracts
 
-hx64 is h86 in long mode ([hcpu](../../design/hcpu.md), hx64), built in
+hx64 is h86 in long mode ([hcpu](../../design/0174-hcpu.md), hx64), built in
 parallel workstreams on the `hx64` branch
 (`/mnt/project-files/hx64/plan.md` in the project). These files fix what
 they code against. The contracts thread (S0) owns them: ask it for a
@@ -39,7 +39,7 @@ change, in a small commit, rather than editing them.
 | `../interp/x86/cpu.zig` (`Cpu64`, `Exit64`, `CpuOf`, `ExitOf`) | hx64's register file and exits |
 | `../interp/x86/exec.zig` (`runIn`, `stepIn`), `../interp/x86/tlb.zig` (`runIn`) | T0's entry points by mode |
 | `x86/lift.zig` (`frontendFor`, `liftIn`) | The lifter's entry points by mode |
-| `../vmm/zemu.zig` (`Emu` over three Guests) | The Guest interface, with hx64 for amd64 |
+| `../vmm/hcpu.zig` (`Emu` over three Guests) | The Guest interface, with hx64 for amd64 |
 
 Each workstream owns the code behind its entry points:
 
@@ -50,7 +50,7 @@ Each workstream owns the code behind its entry points:
 | B, T0 integer | `../interp/x86/exec.zig`, `../interp/x86/cpu.zig` (but `Cpu64`'s fields), `../interp/x86/flags.zig` (but `Lazy`) |
 | C, x87 and SSE | `../interp/x86/sse.zig`, `../interp/x86/x87.zig` |
 | D, oracles and tests | `../../tools/x86check/`, `../../tools/x64inv.zig`, `check/gen_x86.zig`, `check/x86.zig`, `check/litmus_x86.zig`, `../vmm/lockstep.zig`, `../../tests/x64.zig` |
-| E, the Guest | `../vmm/hx64.zig`, and hx64's part of `../vmm/zemu.zig` |
+| E, the Guest | `../vmm/hx64.zig`, and hx64's part of `../vmm/hcpu.zig` |
 | F, the lifter | `x86/lift.zig`, `x86/flags.zig`, `x86/helpers.zig`, `x86/t1.zig`, `x86/check.zig` |
 
 ## Rules of the IR

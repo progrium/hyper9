@@ -16,7 +16,7 @@
 //! pages the region touches, not the address space. That makes the same
 //! code usable from unit tests, the fuzzers, and the runtime: with
 //! `-Djit-check` the runtime runs every region through `Checker`, which
-//! commits the agreed memory and Cpu, so `zig build integration -Demu=zig
+//! commits the agreed memory and Cpu, so `zig build integration -Demu=hcpu
 //! -Djit-check` runs the integration suite with every region checked.
 //!
 //! The rules both tiers are held to (they're also the lifters'):

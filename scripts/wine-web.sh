@@ -5,7 +5,7 @@
 #
 #   scripts/wine-root.sh 386            # Alpine's 32-bit Wine, .local/linux/wine-386
 #   scripts/fetch.sh wine && zig build wine
-#   zig build -Demu=zig -Dgfx=headless -Doptimize=ReleaseSafe
+#   zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
 #   scripts/wine-web.sh
 #
 # It's the 386 Wine root with winedraw installed and a prefix made ahead

@@ -1,4 +1,4 @@
-//! zig build vcpu (and litmus-a64): ha64's memory-model litmus tests
+//! zig build hcpu (and litmus-a64): ha64's memory-model litmus tests
 //! (src/jit/check/litmus_a64.zig), on real host threads, on each tier: T0,
 //! the IR evaluator, and this host's emitter (through emit/native.zig).
 //!
@@ -17,9 +17,9 @@
 //! fails a test that writes to stderr; zig build litmus prints them all.
 
 const std = @import("std");
-const vcpu = @import("vcpu");
-const litmus = vcpu.check.litmus;
-const suite = vcpu.check.litmus_a64;
+const hcpu = @import("hcpu");
+const litmus = hcpu.check.litmus;
+const suite = hcpu.check.litmus_a64;
 
 const runs = 5000;
 
@@ -27,7 +27,7 @@ test "litmus-a64: ha64's barriers, acquire/release, and atomics on every tier" {
     const gpa = std.testing.allocator;
     var ok = true;
     for ([_]litmus.Tier{ .t0, .ir_eval, .native }) |tier| {
-        if (tier == .native and !vcpu.emit.native.available()) continue;
+        if (tier == .native and !hcpu.emit.native.available()) continue;
         for (suite.all) |t| {
             var tally = try litmus.run(gpa, &suite.arch, t, .{ .iterations = runs, .tier = tier });
             defer tally.deinit(gpa);

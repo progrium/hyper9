@@ -101,11 +101,11 @@ zig build -Dhost-cmd              # also build in host commands (#C, --host-cmd,
 zig build slim     # 9box, 9front's commands as one multi-call binary, and a slim root around it in .local/9front/slim-<release>-<arch>
 zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, h9-node, the demo page)
 zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later); -Darch=arm64 for ha64
-zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in Chromium with Playwright, and vcpu-web
-zig build vcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
-zig build x86-jit  # the 386 JIT's [x86-jit] cases (tests/x86.zig) on T0 and T1; zig build vcpu runs them too
-zig build x64-jit  # hx64's [hcpu] cases (tests/x64.zig) on T0 and T1; zig build vcpu runs them too (on the hx64 branch; fuzz-x64 and x64check are stubs there)
-zig build -Demu=zig -Dvcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
+zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in Chromium with Playwright, and hcpu-web
+zig build hcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
+zig build x86-jit  # the 386 JIT's [x86-jit] cases (tests/x86.zig) on T0 and T1; zig build hcpu runs them too
+zig build x64-jit  # hx64's [174] cases (tests/x64.zig) on T0 and T1; zig build hcpu runs them too
+zig build -Demu=hcpu -Dhcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
@@ -202,7 +202,7 @@ demo is 32-bit Wine in the browser host (`?wine`), over `wine.h9a`:
 
 ```sh
 scripts/wine-root.sh 386       # Alpine x86 with Wine 11, at .local/linux/wine-386
-zig build -Demu=zig -Dgfx=headless -Doptimize=ReleaseSafe
+zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
 scripts/wine-web.sh            # .local/linux/wine-web: the driver and a prefix, made by h9 on h86
 zig build web                  # packs it into zig-out/web/wine.h9a, from src/web/wine.list
 ```
@@ -344,7 +344,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
 | `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, and emu, on Unicorn or h9's own CPUs, which the browser host uses), with the guest-physical allocator and page tables the hypervisor backends share |
-| `src/vcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (`-Demu=zig`): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
+| `src/hcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (`-Demu=hcpu`): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |

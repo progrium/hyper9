@@ -15,11 +15,11 @@ pub const ia32 = @import("arch/i386.zig"); // `i386` is a primitive type name
 const hvf = if (have_hvf) @import("vmm/hvf.zig") else @import("vmm/none.zig");
 const kvm = if (have_kvm) @import("vmm/kvm.zig") else @import("vmm/none.zig");
 const whp = if (have_whp) @import("vmm/whp.zig") else @import("vmm/none.zig");
-/// The emulator: Unicorn (-Demu=unicorn), or h9's own CPUs (-Demu=zig),
-/// which pick ha64 or h86 by the binary's architecture (vmm/zemu.zig).
+/// The emulator: Unicorn (-Demu=unicorn), or h9's own CPUs (-Demu=hcpu),
+/// which pick ha64, h86, or hx64 by the binary's architecture (vmm/hcpu.zig).
 const emu = if (!have_emu) @import("vmm/none.zig") else switch (build_options.emu) {
-    .unicorn => @import("vmm/emu.zig"),
-    .zig => @import("vmm/zemu.zig"),
+    .unicorn => @import("vmm/unicorn.zig"),
+    .hcpu => @import("vmm/hcpu.zig"),
     .none => unreachable,
 };
 const nat = if (have_native) @import("vmm/native.zig") else @import("vmm/none.zig");
@@ -27,11 +27,11 @@ const nat = if (have_native) @import("vmm/native.zig") else @import("vmm/none.zi
 const have_hvf = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
 const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
-/// The web host has h9's own CPUs (-Demu=zig), but not Unicorn.
+/// The web host has h9's own CPUs (-Demu=hcpu), but not Unicorn.
 const have_emu = build_options.emu != .none and !(web and build_options.emu == .unicorn);
 /// The native backend (design/0095-native-backend.md): Linux x86_64 for now.
 const have_native = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
-/// The web host (design/0012-browser-host.md), whose backend is zemu.
+/// The web host (design/0012-browser-host.md), whose backend is hcpu.
 const web = builtin.os.tag == .wasi;
 
 pub const Arch = aout.Arch;
@@ -322,26 +322,26 @@ pub const Fxsave = extern struct {
     }
 };
 
-/// h9's own emulator (vmm/zemu.zig) when it's the one built in, for
+/// h9's own emulator (vmm/hcpu.zig) when it's the one built in, for
 /// benchmarks: its `retired_total`. Null otherwise.
-pub const zemu: ?type = if (have_emu and build_options.emu == .zig) emu else null;
+pub const hcpu: ?type = if (have_emu and build_options.emu == .hcpu) emu else null;
 
 /// Guest instructions the emulator has retired so far, where it counts
-/// them (-Demu=zig); null otherwise.
+/// them (-Demu=hcpu); null otherwise.
 pub fn emuRetired() ?u64 {
-    return if (comptime zemu) |z| z.retired_total.load(.monotonic) else null;
+    return if (comptime hcpu) |z| z.retired_total.load(.monotonic) else null;
 }
 
 /// T1's dispatch counts so far (compiled, entries, linked, t0), where
-/// the emulator has a T1 (-Demu=zig); null otherwise.
+/// the emulator has a T1 (-Demu=hcpu); null otherwise.
 pub fn emuT1Stats() ?[4]u64 {
-    return if (comptime zemu) |z| z.t1Stats() else null;
+    return if (comptime hcpu) |z| z.t1Stats() else null;
 }
 
 /// Host addresses of the emulator's last vCPU run (Cpu, guest arena,
-/// code region, stack), where it's built in (-Demu=zig); null otherwise.
+/// code region, stack), where it's built in (-Demu=hcpu); null otherwise.
 pub fn emuLayout() ?[4]usize {
-    if (comptime zemu) |z| {
+    if (comptime hcpu) |z| {
         const l = z.layout;
         return .{ l.cpu, l.arena, l.code, l.stack };
     }
@@ -442,7 +442,7 @@ pub const Backend = union(Kind) {
     /// finds what the CPU has by trying.
     pub fn hwcaps(b: Backend, arch: Arch) u64 {
         return switch (b) {
-            .emu => if (build_options.emu != .zig) 0 else switch (arch) {
+            .emu => if (build_options.emu != .hcpu) 0 else switch (arch) {
                 .arm64 => hwcap_arm64_aes | hwcap_arm64_pmull | hwcap_arm64_sha1 | hwcap_arm64_sha2 | hwcap_arm64_crc32 | hwcap_arm64_atomics,
                 else => 0,
             },

@@ -1,4 +1,4 @@
-//! The amd64 instruction inventory (design/hcpu.md, hx64): tools/x86inv.zig
+//! The amd64 instruction inventory (design/0174-hcpu.md, hx64): tools/x86inv.zig
 //! in long mode. Finds the code in every amd64 binary under the given
 //! paths, decodes it with hx64's decoder (src/interp/x86/decode.zig's
 //! long mode), and reports what it uses and what T0 can't run, which
@@ -24,9 +24,9 @@
 //! with T0's exec.stepIn(.long), in a scratch CPU and memory.
 
 const std = @import("std");
-const vcpu = @import("vcpu");
+const hcpu = @import("hcpu");
 const aout = @import("aout");
-const x86 = vcpu.x86;
+const x86 = hcpu.x86;
 const dec = x86.decode;
 const table = x86.table;
 const Cpu = x86.cpu.Cpu64;

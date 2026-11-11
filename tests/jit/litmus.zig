@@ -8,14 +8,14 @@
 //!   --seed S     the skew's seed
 
 const std = @import("std");
-const vcpu = @import("vcpu");
-const litmus = vcpu.check.litmus;
+const hcpu = @import("hcpu");
+const litmus = hcpu.check.litmus;
 
 const Suite = struct { arch: *const litmus.Arch, tests: []const *const litmus.Test };
 const suites = [_]Suite{
-    .{ .arch = &vcpu.check.litmus_a64.arch, .tests = &vcpu.check.litmus_a64.all },
-    .{ .arch = &vcpu.check.litmus_x86.arch, .tests = &vcpu.check.litmus_x86.all },
-    .{ .arch = &vcpu.check.litmus_x86.arch64, .tests = &vcpu.check.litmus_x86.all64 },
+    .{ .arch = &hcpu.check.litmus_a64.arch, .tests = &hcpu.check.litmus_a64.all },
+    .{ .arch = &hcpu.check.litmus_x86.arch, .tests = &hcpu.check.litmus_x86.all },
+    .{ .arch = &hcpu.check.litmus_x86.arch64, .tests = &hcpu.check.litmus_x86.all64 },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
         if (only) |o| if (std.mem.indexOf(u8, t.name, o) == null) continue;
         for ([_]litmus.Tier{ .t0, .ir_eval, .native }) |tr| {
             if (tier) |want| if (tr != want) continue;
-            if (tr == .native and !vcpu.emit.native.available()) continue;
+            if (tr == .native and !hcpu.emit.native.available()) continue;
             var o = opts;
             o.tier = tr;
             var tally = litmus.run(gpa, s.arch, t, o) catch |e| {

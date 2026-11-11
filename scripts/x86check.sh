@@ -15,7 +15,7 @@ mode=${3:-int}
 out=.zig-cache/x86check
 mkdir -p "$out"
 zig cc -target x86-linux-musl -O2 -fno-pie -no-pie tools/x86check/oracle.c -o "$out/oracle"
-zig build-exe -lc --dep vcpu -Mroot=tools/x86check/x86check.zig -Mvcpu=src/vcpu.zig -femit-bin="$out/x86check"
+zig build-exe -lc --dep hcpu -Mroot=tools/x86check/x86check.zig -Mhcpu=src/hcpu.zig -femit-bin="$out/x86check"
 "$out/x86check" gen "$n" "$seed" "$out/cases.bin" "$mode"
 "$out/oracle" < "$out/cases.bin" > "$out/answers.bin"
 "$out/x86check" cmp "$out/cases.bin" "$out/answers.bin"

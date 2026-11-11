@@ -7,36 +7,36 @@
 //! T0).
 
 const std = @import("std");
-const vcpu = @import("vcpu");
-const ir = vcpu.ir;
-const cases = vcpu.emit.cases;
-const tracer = vcpu.a64.tracer;
-const Ctx = vcpu.ctx.Ctx;
+const hcpu = @import("hcpu");
+const ir = hcpu.ir;
+const cases = hcpu.emit.cases;
+const tracer = hcpu.a64.tracer;
+const Ctx = hcpu.ctx.Ctx;
 
 const gpa = std.heap.wasm_allocator;
 
 export fn jit_eval(code: u64, a: u64, b: u64, c: u64, aux: u64) u64 {
-    return vcpu.ir_eval.evalOpC(code, a, b, c, aux);
+    return hcpu.ir_eval.evalOpC(code, a, b, c, aux);
 }
 // Whichever slow path the Ctx names: the emitter cases run over a mem.Map,
 // the tracer over a mem.View.
 export fn jit_slow_load(ctx: *Ctx, va: u64, size_log2: u32) u32 {
-    const f: vcpu.mem.SlowLoadFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_load)));
+    const f: hcpu.mem.SlowLoadFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_load)));
     return f(ctx, va, size_log2);
 }
 export fn jit_slow_store(ctx: *Ctx, va: u64, size_log2: u32, v: u64) u32 {
-    const f: vcpu.mem.SlowStoreFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_store)));
+    const f: hcpu.mem.SlowStoreFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_store)));
     return f(ctx, va, size_log2, v);
 }
 export fn jit_slow_cas(ctx: *Ctx, va: u64, size_log2: u32, expected: u64, new: u64) u32 {
-    const f: vcpu.mem.SlowCasFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_cas)));
+    const f: hcpu.mem.SlowCasFn = @ptrFromInt(@as(usize, @intCast(ctx.slow_cas)));
     return f(ctx, va, size_log2, expected, new);
 }
 export fn jit_interp(ctx: *Ctx, handle: u64, pc: u64) u32 {
-    return vcpu.a64.lift.interp(ctx, handle, pc);
+    return hcpu.a64.lift.interp(ctx, handle, pc);
 }
 export fn jit_ext(ctx: *Ctx, code: u64, io: [*]u8, aux: u64, aux2: u64) void {
-    vcpu.ir_eval.evalExtC(ctx, code, io, aux, aux2);
+    hcpu.ir_eval.evalExtC(ctx, code, io, aux, aux2);
 }
 /// Where FP and vector ops stage their operands for jit_ext.
 var ext_io: [48]u8 align(16) = undefined;
@@ -44,7 +44,7 @@ fn extIo() u32 {
     return @intFromPtr(&ext_io);
 }
 export fn jit_helper(ctx: *Ctx, index: u64, a: u64, b: u64, c: u64) u64 {
-    const hs: [*]const vcpu.ctx.HelperFn = @ptrFromInt(@as(usize, @intCast(ctx.helpers)));
+    const hs: [*]const hcpu.ctx.HelperFn = @ptrFromInt(@as(usize, @intCast(ctx.helpers)));
     return hs[@intCast(index)](ctx, a, b, c);
 }
 
@@ -54,12 +54,12 @@ var want: cases.Result = undefined;
 var module: std.ArrayList(u8) = .empty;
 
 fn emitModule(r: *const ir.Region) !u32 {
-    var a = try vcpu.alloc.spillAll(gpa, r);
+    var a = try hcpu.alloc.spillAll(gpa, r);
     defer a.deinit(gpa);
     module.clearRetainingCapacity();
-    var b: vcpu.emit.wasm.Batch = .{};
+    var b: hcpu.emit.wasm.Batch = .{};
     defer b.deinit(gpa);
-    try vcpu.emit.wasm.emitBatch(gpa, &.{r}, .{ .ext_io = extIo() }, &module, &b);
+    try hcpu.emit.wasm.emitBatch(gpa, &.{r}, .{ .ext_io = extIo() }, &module, &b);
     return @intCast(module.items.len);
 }
 
@@ -109,7 +109,7 @@ export fn tracer_prepare() u32 {
     var r = ts.liftRegion(gpa) catch return 0;
     defer r.deinit(gpa);
     const cx = ts.reset();
-    if (!ts.check(vcpu.ir_eval.run(gpa, &r, cx) catch return 0, t0_want)) return 0;
+    if (!ts.check(hcpu.ir_eval.run(gpa, &r, cx) catch return 0, t0_want)) return 0;
     return emitModule(&r) catch 0;
 }
 export fn tracer_reset() *Ctx {
@@ -144,9 +144,9 @@ fn batchPrepare(first: u32, count: u32, br_table: bool) !u32 {
         ptrs[k] = &rs[k];
     }
     module.clearRetainingCapacity();
-    var b: vcpu.emit.wasm.Batch = .{};
+    var b: hcpu.emit.wasm.Batch = .{};
     defer b.deinit(gpa);
-    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions, .ext_io = extIo() }, &module, &b);
+    try hcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions, .ext_io = extIo() }, &module, &b);
     return @intCast(module.items.len);
 }
 
@@ -156,7 +156,7 @@ export fn case_run(i: u32, slot: u32) u32 {
     var r = cases.parse(gpa, all[i]) catch return 0;
     defer r.deinit(gpa);
     const w = env.evalCase(gpa, &r, all[i]) catch return 0;
-    const f: vcpu.ctx.EntryFn = @ptrFromInt(slot);
+    const f: hcpu.ctx.EntryFn = @ptrFromInt(slot);
     const code = f(env.reset(all[i]));
     return @intFromBool(cases.same(w, env.result(@enumFromInt(code))));
 }
@@ -242,14 +242,14 @@ fn fuzzEmit(first: u32, count: u32, chaining: bool, flags: u32) !u32 {
     const ptrs = try gpa.alloc(*const ir.Region, count);
     defer gpa.free(ptrs);
     for (ptrs, 0..) |*p, k| p.* = &fz.regions.items[first + k];
-    var b: vcpu.emit.wasm.Batch = .{};
+    var b: hcpu.emit.wasm.Batch = .{};
     defer b.deinit(gpa);
     // The cells' address goes into the code, so allocate them first, one
     // per chain target there could be.
     const cells = try gpa.alloc(u32, fz.regions.items.len + 1);
     @memset(cells, 0);
     module.clearRetainingCapacity();
-    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .cells = if (chaining) @intFromPtr(cells.ptr) else 0, .structured = flags & 1 == 0, .layout = if (flags & 2 != 0) .br_table else .functions, .promote = fz_opts & 1 == 0 }, &module, &b);
+    try hcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .cells = if (chaining) @intFromPtr(cells.ptr) else 0, .structured = flags & 1 == 0, .layout = if (flags & 2 != 0) .br_table else .functions, .promote = fz_opts & 1 == 0 }, &module, &b);
     stats[9] += b.structured;
     stats[10] += b.dispatched;
     try fz.batches.append(gpa, .{ .first = first, .count = count, .cells = cells, .chains = try gpa.dupe(u64, b.chains.items), .chaining = chaining });
@@ -294,7 +294,7 @@ fn fuzzRun(start: u32, seed: u32, budget: u32) !u32 {
     cx.budget = budget;
     var k = start;
     const want_exit = while (true) {
-        const e = try vcpu.ir_eval.run(gpa, &fz.regions.items[k], cx);
+        const e = try hcpu.ir_eval.run(gpa, &fz.regions.items[k], cx);
         if (e != .chain or !batchOf(k).chaining) break e;
         stats[8] += 1;
         const p = cx.exit_pc;
@@ -306,7 +306,7 @@ fn fuzzRun(start: u32, seed: u32, budget: u32) !u32 {
 
     cx = env.reset(c);
     cx.budget = budget;
-    const f: vcpu.ctx.EntryFn = @ptrFromInt(fz.slots.items[start]);
+    const f: hcpu.ctx.EntryFn = @ptrFromInt(fz.slots.items[start]);
     const code = f(cx);
     const got = env.result(@enumFromInt(code));
     if (code < 8) stats[code] += 1;
@@ -337,7 +337,7 @@ export fn fuzz_text_len() u32 {
 
 /// Runs the tracer through the region installed at `slot`.
 export fn tracer_run(slot: u32) u32 {
-    const f: vcpu.ctx.EntryFn = @ptrFromInt(slot);
+    const f: hcpu.ctx.EntryFn = @ptrFromInt(slot);
     return tracer_finish(f(ts.reset()));
 }
 
@@ -397,9 +397,9 @@ fn benchBatch(n: u32, br_table: bool) !u32 {
     ptrs[0] = &loop;
     for (ptrs[1..], fz.regions.items[1..]) |*p, *r| p.* = r;
     module.clearRetainingCapacity();
-    var b: vcpu.emit.wasm.Batch = .{};
+    var b: hcpu.emit.wasm.Batch = .{};
     defer b.deinit(gpa);
-    try vcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions, .ext_io = extIo() }, &module, &b);
+    try hcpu.emit.wasm.emitBatch(gpa, ptrs, .{ .layout = if (br_table) .br_table else .functions, .ext_io = extIo() }, &module, &b);
     return @intCast(module.items.len);
 }
 
@@ -407,10 +407,10 @@ fn benchBatch(n: u32, br_table: bool) !u32 {
 export fn bench_run(slot: u32, iters: u32) u32 {
     var c: cases.Case = .{ .text = "", .regs = @splat(0) };
     c.regs[1] = iters;
-    const f: vcpu.ctx.EntryFn = @ptrFromInt(slot);
+    const f: hcpu.ctx.EntryFn = @ptrFromInt(slot);
     const code = f(env.reset(c));
     const n: u64 = iters;
-    return @intFromBool(code == @intFromEnum(vcpu.ctx.Exit.svc) and env.regs[0] == n * (n + 1) / 2);
+    return @intFromBool(code == @intFromEnum(hcpu.ctx.Exit.svc) and env.regs[0] == n * (n + 1) / 2);
 }
 
 /// A context to enter random regions with, for timing their first calls.

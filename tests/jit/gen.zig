@@ -7,9 +7,9 @@
 //! empty tank leaves with `exit.svc #out_of_fuel`.
 
 const std = @import("std");
-const vcpu = @import("vcpu");
-const ir = vcpu.ir;
-const data_va = vcpu.emit.cases.data_va;
+const hcpu = @import("hcpu");
+const ir = hcpu.ir;
+const data_va = hcpu.emit.cases.data_va;
 
 /// Register 7 of cases.Env's eight.
 pub const fuel_off = 56;

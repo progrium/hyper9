@@ -4,7 +4,7 @@ Programs people run, on each of the emulator's tiers, with their output
 checked against a reference (native, or Unicorn) and their wall time.
 
     tools/workloads/roots.sh     # the arm64 and 386 Alpine roots, once
-    zig build -Demu=zig -Doptimize=ReleaseFast -p .local/workloads/h9-zig
+    zig build -Demu=hcpu -Doptimize=ReleaseFast -p .local/workloads/h9-zig
     zig build -Demu=unicorn -Doptimize=ReleaseFast -p .local/workloads/h9-unicorn
     tools/workloads/run.sh       # every workload on every tier
     tools/workloads/run.sh a64-  # only those whose names contain a64-

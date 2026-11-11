@@ -64,7 +64,7 @@ jobs:
           scripts/fetch.sh wine
           scripts/wine-root.sh 386
           zig build wine
-          zig build -Demu=zig -Dgfx=headless -Doptimize=ReleaseSafe
+          zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
           scripts/wine-web.sh
       - uses: actions/cache@v4
         id: nine-arm64-web
@@ -74,7 +74,7 @@ jobs:
       - name: arm64 9front layer for the Linux page
         if: steps.nine-arm64-web.outputs.cache-hit != 'true'
         run: |
-          zig build -Demu=zig -Doptimize=ReleaseSafe
+          zig build -Demu=hcpu -Doptimize=ReleaseSafe
           scripts/nine-arm64-web.sh
       - run: zig build web -Doptimize=ReleaseSafe -Dweb-root=.local/9front/root386
       - name: Demo page in Chromium

@@ -1,8 +1,8 @@
-//! zig build a64-jit (and test, with -Demu=zig): the arm64 JIT plan's
+//! zig build a64-jit (and test, with -Demu=hcpu): the arm64 JIT plan's
 //! [a64-jit] cases, each run through the vmm interface on h9's own
-//! emulator (zemu and ha64), on T0 and on T1 (H9_EMU_TIER at create).
+//! emulator (hcpu and ha64), on T0 and on T1 (H9_EMU_TIER at create).
 //! T1 is this host's emitter: the x86-64 one here, the arm64 one on an
-//! arm64 Mac. Without -Demu=zig they skip.
+//! arm64 Mac. Without -Demu=hcpu they skip.
 //!
 //! The machine: code at 0x10000 (two pages, read, write, and execute), data
 //! at 0x20000 (a page), with x0 holding the data page's address, and
@@ -20,7 +20,7 @@ const page = vmm.page_size;
 
 const Tier = enum { t0, t1 };
 
-// zemu reads these with getenv, so they go through the C library's
+// hcpu reads these with getenv, so they go through the C library's
 // environment: setenv and unsetenv, or the CRT's _putenv_s on Windows,
 // where an empty value removes the variable.
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -48,11 +48,11 @@ const M = struct {
     code: []align(page) u8,
     data: []align(page) u8,
 
-    /// Null where there's no zemu with a JIT to test.
+    /// Null where there's no hcpu with a JIT to test.
     fn init(t: Tier, prog: []const u32, env: Env) !?M {
         var buf: [32]u8 = undefined;
         const v = vmm.emuVersion(&buf) orelse return null;
-        if (!std.mem.eql(u8, v, "zig (jit)")) return null;
+        if (!std.mem.eql(u8, v, "hcpu (jit)")) return null;
         setEnv("H9_EMU_TIER", @tagName(t));
         if (env.cache) |c| setEnv("H9_EMU_CACHE", c);
         if (env.deterministic) setEnv("H9_EMU_DETERMINISTIC", "1");

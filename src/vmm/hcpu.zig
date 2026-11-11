@@ -1,4 +1,4 @@
-//! The emulator backend on h9's own CPUs (-Demu=zig): ha64 for arm64
+//! The emulator backend on h9's own CPUs (-Demu=hcpu): ha64 for arm64
 //! binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by
 //! architecture at create.
 //!
@@ -27,17 +27,17 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const vmm = @import("../vmm.zig");
 const Arena = @import("arena.zig");
-const mem = @import("vcpu").mem;
-const ctx_mod = @import("vcpu").ctx;
+const mem = @import("hcpu").mem;
+const ctx_mod = @import("hcpu").ctx;
 const Ctx = ctx_mod.Ctx;
-const cache = @import("vcpu").cache;
-const codemem = @import("vcpu").codemem;
+const cache = @import("hcpu").cache;
+const codemem = @import("hcpu").codemem;
 const ha64 = @import("ha64.zig");
 const h86 = @import("h86.zig");
 const hx64 = @import("hx64.zig");
 
 pub fn version(buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "zig ({s})", .{if (build_options.jit) "jit" else "interpreter"}) catch "zig";
+    return std.fmt.bufPrint(buf, "hcpu ({s})", .{if (build_options.jit) "jit" else "interpreter"}) catch "hcpu";
 }
 
 /// Ctx.exit_request bits.
@@ -58,8 +58,8 @@ const web_budget: i64 = 64 * 1024;
 const web_slice_ns = 2 * std.time.ns_per_ms;
 const coro = if (web) @import("../web/coro.zig") else struct {};
 /// The web host's T1, whose regions are keyed by this backend's arena pages.
-const wasm_t1 = @import("vcpu").wasm_t1;
-const dispatch = @import("vcpu").dispatch;
+const wasm_t1 = @import("hcpu").wasm_t1;
+const dispatch = @import("hcpu").dispatch;
 
 fn monoNs() u64 {
     var t: std.os.wasi.timestamp_t = 0;
@@ -246,11 +246,11 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 }
                 // -Djit-verify (on in Debug and ReleaseSafe builds): every
                 // region verified after lifting and after opt, though the
-                // vcpu module itself is built ReleaseFast.
-                if (build_options.jit_verify) @import("vcpu").opt.verify = true;
+                // hcpu module itself is built ReleaseFast.
+                if (build_options.jit_verify) @import("hcpu").opt.verify = true;
                 const limit = opts.memory orelse if (web) web_default_memory else vmm.default_memory;
                 if (limit > (if (web) web_max_memory else vmm.max_memory)) return error.OutOfGuestMemory;
-                // Twice the cap in address space, as emu.zig does, so freed
+                // Twice the cap in address space, as unicorn.zig does, so freed
                 // ranges scattered through it don't run allocations out. Not
                 // on the web, where the arena is real memory in a 4 GiB space.
                 var arena = Arena.init(std.mem.alignForward(usize, @intCast(if (web) limit else 2 * limit), vmm.page_size)) catch return error.OutOfGuestMemory;
@@ -406,7 +406,7 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                     // Room to wait for every one of them: a vCPU not waited
                     // for could still be reading what the caller changes.
                     const waits: []Wait = if (b.vcpus.items.len <= stack.len) &stack else blk: {
-                        heap = b.gpa.alloc(Wait, b.vcpus.items.len) catch @panic("zemu: out of memory in a shootdown");
+                        heap = b.gpa.alloc(Wait, b.vcpus.items.len) catch @panic("hcpu: out of memory in a shootdown");
                         break :blk heap;
                     };
                     for (b.vcpus.items) |s| {

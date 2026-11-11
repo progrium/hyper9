@@ -10,11 +10,11 @@
 
 const std = @import("std");
 const options = @import("fuzz_options");
-const vcpu = @import("vcpu");
-const check = vcpu.check;
+const hcpu = @import("hcpu");
+const check = hcpu.check;
 const gen = check.gen_x86;
 const x86 = check.x86;
-const mem = vcpu.mem;
+const mem = hcpu.mem;
 const common = @import("fuzz_common.zig");
 const lockstep = if (options.unicorn) @import("lockstep") else struct {};
 
@@ -53,8 +53,8 @@ pub fn main(init: std.process.Init) !void {
 
     const s = try gpa.create(Space);
     defer gpa.destroy(s);
-    var native: ?vcpu.emit.native.Native = if (args.native) vcpu.emit.native.Native.init() catch |e| {
-        std.debug.print("--native: no {s} emitter here ({t})\n", .{ vcpu.emit.native.name, e });
+    var native: ?hcpu.emit.native.Native = if (args.native) hcpu.emit.native.Native.init() catch |e| {
+        std.debug.print("--native: no {s} emitter here ({t})\n", .{ hcpu.emit.native.name, e });
         std.process.exit(2);
     } else null;
     defer if (native) |*n| n.deinit();
@@ -84,9 +84,9 @@ pub fn main(init: std.process.Init) !void {
             cpu.r = regs.r;
             cpu.eip = gen.code_va;
             cpu.fl.set(regs.eflags);
-            const out = vcpu.x86jit.check.checkRegions(gpa, run, &s.map, cpu, std.math.maxInt(i64), 4096, if (native) |*n| n else null) catch |e| blk: {
+            const out = hcpu.x86jit.check.checkRegions(gpa, run, &s.map, cpu, std.math.maxInt(i64), 4096, if (native) |*n| n else null) catch |e| blk: {
                 try report.writer.print("region check: {t}\n", .{e});
-                break :blk vcpu.x86jit.check.Result{ .exit = .chain, .pc = 0, .regions = 0, .retired = 0, .ok = false };
+                break :blk hcpu.x86jit.check.Result{ .exit = .chain, .pc = 0, .regions = 0, .retired = 0, .ok = false };
             };
             checked += out.retired;
             if (!out.ok) {
@@ -107,8 +107,8 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("fuzz-x86: {d} programs, {d} diverged; {d} instructions stepped, {d} region-checked\n", .{ i, failed, steps, checked });
     if (native) |n| {
-        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
-        vcpu.emit.native.printFallbacks();
+        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ hcpu.emit.native.name, n.compiled, n.unsupported });
+        hcpu.emit.native.printFallbacks();
     }
     tally.print();
     if (failed != 0) std.process.exit(1);
@@ -125,7 +125,7 @@ fn runProgram(gpa: std.mem.Allocator, s: *Space, r: [8]u32, eflags: u32, with_un
     defer shadow.deinit();
     // T0 runs on the space's pages themselves (the shadow over them is
     // committed after each step), so Unicorn's mirror compares with them.
-    var c: vcpu.ctx.Ctx = .{ .cpu = @intFromPtr(&cpu), .space = @intFromPtr(&shadow) };
+    var c: hcpu.ctx.Ctx = .{ .cpu = @intFromPtr(&cpu), .space = @intFromPtr(&shadow) };
     if (with_unicorn) {
         if (options.unicorn) return lockstepRun(gpa, s, &cpu, &c, &shadow, w, steps);
     }
@@ -138,7 +138,7 @@ fn runProgram(gpa: std.mem.Allocator, s: *Space, r: [8]u32, eflags: u32, with_un
     return true;
 }
 
-fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *vcpu.ctx.Ctx, shadow: *check.Shadow, w: *std.Io.Writer, steps: *u64) !bool {
+fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *hcpu.ctx.Ctx, shadow: *check.Shadow, w: *std.Io.Writer, steps: *u64) !bool {
     const E = lockstep.Engine(.i386);
     const e = try E.init(gpa, &.{
         .{ .va = gen.code_va, .mem = &s.code, .exec = true },
@@ -153,11 +153,11 @@ fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *vcpu.ctx.Ct
         const pc = cpu.eip;
         const off = pc -% gen.code_va;
         const bytes = s.code[@min(off, page_size - 1)..@min(page_size, off + 15)];
-        const inst = vcpu.x86.decode.decode(bytes) catch null;
-        const fx = if (inst) |in| vcpu.x86.decode.effects(&in) else vcpu.x86.decode.Effects{};
+        const inst = hcpu.x86.decode.decode(bytes) catch null;
+        const fx = if (inst) |in| hcpu.x86.decode.effects(&in) else hcpu.x86.decode.Effects{};
         const r0 = x86.step(c);
         shadow.commit();
-        const e0: vcpu.ctx.Exit = @enumFromInt(r0);
+        const e0: hcpu.ctx.Exit = @enumFromInt(r0);
         // Unicorn's IDIV helper divides EDX:EAX = 2^63 by -1 in 64 bits,
         // which kills the host with SIGFPE. T0 raises #DE there (and left
         // EDX:EAX as they were); the program ends without asking Unicorn.
@@ -194,8 +194,8 @@ fn lockstepRun(gpa: std.mem.Allocator, s: *Space, cpu: *x86.Cpu, c: *vcpu.ctx.Ct
 
 /// The vector of the exception T0 raised, if it raised one (lift.exitFor's
 /// exit_info: exception_kind in bits 8-15, the vector above).
-fn exceptionOf(c: *const vcpu.ctx.Ctx, e: vcpu.ctx.Exit) ?u64 {
-    if (e != .fault or (c.exit_info >> 8) & 0xff != vcpu.x86jit.lift.exception_kind) return null;
+fn exceptionOf(c: *const hcpu.ctx.Ctx, e: hcpu.ctx.Exit) ?u64 {
+    if (e != .fault or (c.exit_info >> 8) & 0xff != hcpu.x86jit.lift.exception_kind) return null;
     return c.exit_info >> 16;
 }
 

@@ -22,8 +22,8 @@
 //! below).
 
 const std = @import("std");
-const vcpu = @import("vcpu");
-const x86 = vcpu.x86;
+const hcpu = @import("hcpu");
+const x86 = hcpu.x86;
 const table = x86.table;
 const dec = x86.decode;
 const flags = x86.flags;

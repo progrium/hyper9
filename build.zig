@@ -336,10 +336,10 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
 }
 
-/// none: no emulator. unicorn: Unicorn (GPLv2). zig: h9's own CPUs, ha64
-/// for arm64 guests and h86 for 386 (src/vcpu.zig; in progress on the vcpu
-/// branch, so it isn't usable yet).
-pub const Emu = enum { none, unicorn, zig };
+/// none: no emulator. unicorn: Unicorn (GPLv2, src/vmm/unicorn.zig). hcpu:
+/// h9's own CPUs (src/vmm/hcpu.zig on src/hcpu.zig): ha64 for arm64 guests,
+/// h86 for 386, and hx64 for amd64.
+pub const Emu = enum { none, unicorn, hcpu };
 
 /// Where -Demu=unicorn gets Unicorn: the PyPI wheels' libunicorn.a, or a
 /// build from the patched source (build/unicorn.zig).
@@ -679,8 +679,8 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     p.optimize = optimize;
     // h9's own CPUs (`--backend emu`, or `v86`, its old name). The JIT
     // tier here is the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig),
-    // not the native code cache, which zemu leaves out on the web.
-    p.emu = .zig;
+    // not the native code cache, which hcpu leaves out on the web.
+    p.emu = .hcpu;
     p.jit = true;
     p.unicorn = null;
     p.host_cmd = false;
@@ -808,16 +808,16 @@ const ModuleParts = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     emu: Emu,
-    /// With -Demu=zig: build the JIT tier, not just the interpreter.
+    /// With -Demu=hcpu: build the JIT tier, not just the interpreter.
     jit: bool,
-    /// With -Demu=zig: run every region through the T1-against-T0 check
+    /// With -Demu=hcpu: run every region through the T1-against-T0 check
     /// (src/jit/check/vmm.zig).
     jit_check: bool,
-    /// With -Demu=zig: ir.verify each region after lifting and after opt
-    /// (opt.verify), even where the vcpu module has no runtime safety.
+    /// With -Demu=hcpu: ir.verify each region after lifting and after opt
+    /// (opt.verify), even where the hcpu module has no runtime safety.
     jit_verify: bool,
-    /// How src/interp/ and src/jit/ (the vcpu module) are optimized.
-    vcpu_optimize: std.builtin.OptimizeMode,
+    /// How src/interp/ and src/jit/ (the hcpu module) are optimized.
+    hcpu_optimize: std.builtin.OptimizeMode,
     unicorn: ?*std.Build.Module,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
@@ -847,12 +847,12 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
         .target = target,
     };
     const mod = if (exported) b.addModule("h9", opts) else b.createModule(opts);
-    // The emulator's CPUs (src/vcpu.zig), as a module of their own, so
+    // The emulator's CPUs (src/hcpu.zig), as a module of their own, so
     // they can be optimized when the rest of h9 isn't.
-    mod.addImport("vcpu", b.createModule(.{
-        .root_source_file = b.path("src/vcpu.zig"),
+    mod.addImport("hcpu", b.createModule(.{
+        .root_source_file = b.path("src/hcpu.zig"),
         .target = target,
-        .optimize = p.vcpu_optimize,
+        .optimize = p.hcpu_optimize,
     }));
     if (p.unicorn) |uc| mod.addImport("unicorn", uc);
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
@@ -937,15 +937,15 @@ pub fn build(b: *std.Build) void {
     // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
     // while design/host-cmd rethinks them.
     const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or zig (h9's own, in progress)") orelse .none;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or hcpu (h9's own CPUs)") orelse .none;
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out against Unicorn's JIT.
-    const vcpu_debug = b.option(bool, "vcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
-    const vcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !vcpu_debug) .ReleaseFast else optimize;
-    const jit_check = b.option(bool, "jit-check", "With -Demu=zig: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
-    const jit_verify = b.option(bool, "jit-verify", "With -Demu=zig: verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
+    const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
+    const hcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !hcpu_debug) .ReleaseFast else optimize;
+    const jit_check = b.option(bool, "jit-check", "With -Demu=hcpu: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
+    const jit_verify = b.option(bool, "jit-verify", "With -Demu=hcpu: verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
         (optimize == .Debug or optimize == .ReleaseSafe);
-    const no_jit = b.option(bool, "no-jit", "With -Demu=zig: the interpreter tier only, as on hosts that forbid generated code") orelse false;
+    const no_jit = b.option(bool, "no-jit", "With -Demu=hcpu: the interpreter tier only, as on hosts that forbid generated code") orelse false;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
@@ -1031,7 +1031,7 @@ pub fn build(b: *std.Build) void {
         .jit = !no_jit,
         .jit_check = jit_check,
         .jit_verify = jit_verify,
-        .vcpu_optimize = vcpu_optimize,
+        .hcpu_optimize = hcpu_optimize,
         .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),
@@ -1462,7 +1462,7 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .optimize = .ReleaseSafe,
             .imports = &.{
-                .{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) },
+                .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) },
                 .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
             },
         }),
@@ -1481,7 +1481,7 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .optimize = .ReleaseSafe,
             .imports = &.{
-                .{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) },
+                .{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) },
                 .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
             },
         }),
@@ -1642,7 +1642,7 @@ pub fn build(b: *std.Build) void {
     // h9.wasm too, so a change to the shared vmm or JIT code that breaks
     // wasm32 (64-bit atomics, threads) is caught where it's made.
     test_step.dependOn(&web.exe.step);
-    addVcpuTests(b, test_step, target, optimize);
+    addHcpuTests(b, test_step, target, optimize);
     addJitTestTools(b, test_step, target, optimize, unicorn_mod);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
@@ -1723,7 +1723,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // The arm64 JIT plan's [a64-jit] cases, through the vmm interface on
-    // T0 and T1; they skip without -Demu=zig.
+    // T0 and T1; they skip without -Demu=hcpu.
     const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/a64.zig"),
         .target = target,
@@ -1738,7 +1738,7 @@ pub fn build(b: *std.Build) void {
     linkUnicorn(a64_jit);
     const a64_jit_run = b.addRunArtifact(a64_jit);
     test_step.dependOn(&a64_jit_run.step);
-    b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=zig)").dependOn(&a64_jit_run.step);
+    b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=hcpu)").dependOn(&a64_jit_run.step);
 
     // The speed numbers in SPEC.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
@@ -1766,7 +1766,7 @@ pub fn build(b: *std.Build) void {
         sign.addFileArg(bench.getEmittedBin());
         run_bench.step.dependOn(&sign.step);
     }
-    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; -Demu=zig for T0 and T1)").dependOn(&run_bench.step);
+    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; -Demu=hcpu for T0 and T1)").dependOn(&run_bench.step);
 
     // For running the tests in a VM (scripts/lima/vm test): the backend
     // tests and the integration tests, built for the target.
@@ -1788,7 +1788,7 @@ fn hostHasHvf(b: *std.Build) bool {
 /// zig build x64check [-- n [seed [int|x87|sse]]]: hx64's T0 against the
 /// host CPU in long mode (tools/x86check): n random instructions (default
 /// 100000) run natively by oracle64.c and on T0. x86-64 Linux hosts only.
-fn addX64check(b: *std.Build, vcpu: *std.Build.Module) void {
+fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
     const step = b.step("x64check", "Check hx64's T0 against the host CPU in long mode (-- [n [seed [int|x87|sse]]]; x86-64 Linux)");
     const host = b.graph.host.result;
     if (host.cpu.arch != .x86_64 or host.os.tag != .linux) {
@@ -1813,7 +1813,7 @@ fn addX64check(b: *std.Build, vcpu: *std.Build.Module) void {
             .target = b.graph.host,
             .optimize = .ReleaseSafe,
             .link_libc = true,
-            .imports = &.{.{ .name = "vcpu", .module = vcpu }},
+            .imports = &.{.{ .name = "hcpu", .module = hcpu }},
         }),
     });
     const a = b.args orelse &.{};
@@ -1914,7 +1914,7 @@ fn addWine(b: *std.Build, step: *std.Build.Step) void {
 /// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against
 /// Unicorn (with -Demu=unicorn), the fuzzers, and the litmus tests.
 fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, unicorn: ?*std.Build.Module) void {
-    const vcpu = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig"), .target = target, .optimize = optimize });
+    const hcpu = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig"), .target = target, .optimize = optimize });
     const lockstep_step = b.step("lockstep", "Run the lockstep tests against Unicorn (needs -Demu=unicorn)");
     const lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
         .root_source_file = b.path("src/vmm/lockstep.zig"),
@@ -1932,7 +1932,7 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     // The fuzzers: the region check always, lockstep with -Demu=unicorn.
     // ReleaseSafe unless -Doptimize says otherwise: fast, and still checked.
     const fuzz_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
-    const fuzz_vcpu = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig"), .target = target, .optimize = fuzz_optimize });
+    const fuzz_hcpu = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig"), .target = target, .optimize = fuzz_optimize });
     const fuzz_lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
         .root_source_file = b.path("src/vmm/lockstep.zig"),
         .target = target,
@@ -1960,7 +1960,7 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
                 .root_source_file = b.path(b.fmt("tests/jit/fuzz_{s}.zig", .{arch})),
                 .target = target,
                 .optimize = fuzz_optimize,
-                .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
+                .imports = &.{.{ .name = "hcpu", .module = fuzz_hcpu }},
             }),
         });
         exe.root_module.addOptions("fuzz_options", fuzz_options);
@@ -1988,9 +1988,9 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     long.addArgs(&.{ "--minutes", b.fmt("{d}", .{fuzz_minutes}), "--jobs", b.fmt("{d}", .{fuzz_jobs}), "--seed", b.fmt("{d}", .{fuzz_seed}) });
     for (fuzz_exes) |e| long.addArtifactArg(e);
     fuzz_long.dependOn(&long.step);
-    _ = vcpu;
+    _ = hcpu;
 
-    addX64check(b, fuzz_vcpu);
+    addX64check(b, fuzz_hcpu);
 
     const litmus = b.addExecutable(.{
         .name = "litmus",
@@ -1998,7 +1998,7 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
             .root_source_file = b.path("tests/jit/litmus.zig"),
             .target = target,
             .optimize = fuzz_optimize,
-            .imports = &.{.{ .name = "vcpu", .module = fuzz_vcpu }},
+            .imports = &.{.{ .name = "hcpu", .module = fuzz_hcpu }},
         }),
     });
     const litmus_run = b.addRunArtifact(litmus);
@@ -2007,14 +2007,14 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     b.step("litmus", "Run the threading litmus tests on every tier, with their outcome tallies (-- --iters N --tier T --only NAME)").dependOn(&litmus_run.step);
 }
 
-/// The emulator's own CPUs (src/vcpu.zig): the JIT layer's unit tests,
+/// The emulator's own CPUs (src/hcpu.zig): the JIT layer's unit tests,
 /// natively, and the wasm emitter's under Node when Node is installed
-/// (tests/jit/run.mjs). `zig build vcpu` runs just these. `zig build
-/// vcpu-web`, and `web-test` with it, runs the wasm emitter's in Chromium.
-fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    const step = b.step("vcpu", "Run the emulator CPU and JIT tests (src/vcpu.zig), natively and under Node");
+/// (tests/jit/run.mjs). `zig build hcpu` runs just these. `zig build
+/// hcpu-web`, and `web-test` with it, runs the wasm emitter's in Chromium.
+fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const step = b.step("hcpu", "Run the emulator CPU and JIT tests (src/hcpu.zig), natively and under Node");
     const tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/vcpu.zig"),
+        .root_source_file = b.path("src/hcpu.zig"),
         .target = target,
         .optimize = optimize,
     }) });
@@ -2027,8 +2027,8 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
         .root_source_file = b.path("tests/x86.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/vcpu.zig"),
+        .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/hcpu.zig"),
             .target = target,
             .optimize = optimize,
         }) }},
@@ -2038,13 +2038,13 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     test_step.dependOn(&x86_run.step);
     b.step("x86-jit", "Run the 386 JIT plan's [x86-jit] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
 
-    // hx64's [hcpu] cases, on T0 and T1 (design/hcpu.md).
+    // hx64's [174] cases, on T0 and T1 (design/0174-hcpu.md).
     const x64 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/x64.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/vcpu.zig"),
+        .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/hcpu.zig"),
             .target = target,
             .optimize = optimize,
         }) }},
@@ -2052,7 +2052,7 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     const x64_run = b.addRunArtifact(x64);
     step.dependOn(&x64_run.step);
     test_step.dependOn(&x64_run.step);
-    b.step("x64-jit", "Run hx64's [hcpu] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
+    b.step("x64-jit", "Run hx64's [174] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
 
     // h86's memory-model litmus tests: compiled code on host threads.
     // ReleaseSafe unless -Doptimize says otherwise, so the threads race.
@@ -2060,8 +2060,8 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
         .root_source_file = b.path("tests/jit/litmus_x86.zig"),
         .target = target,
         .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
-        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/vcpu.zig"),
+        .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/hcpu.zig"),
             .target = target,
             .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
         }) }},
@@ -2072,13 +2072,13 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     b.step("litmus-x86", "Run h86's memory-model litmus tests on compiled code").dependOn(&litmus_run.step);
 
     // ha64's memory-model litmus tests: every tier on host threads. About
-    // two minutes at 5000 runs a test, so in zig build vcpu, not test.
+    // two minutes at 5000 runs a test, so in zig build hcpu, not test.
     const litmus_a64 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/jit/litmus_a64.zig"),
         .target = target,
         .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
-        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
-            .root_source_file = b.path("src/vcpu.zig"),
+        .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/hcpu.zig"),
             .target = target,
             .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
         }) }},
@@ -2095,7 +2095,7 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
             .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
             // Debug: optimizing the stand-in T0's dispatch for wasm takes minutes.
             .optimize = .Debug,
-            .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) }},
+            .imports = &.{.{ .name = "hcpu", .module = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig") }) }},
         }),
     });
     runtime.entry = .disabled;
@@ -2113,6 +2113,6 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     browser_run.setCwd(b.path("."));
     browser_run.has_side_effects = true;
     browser_run.expectExitCode(0);
-    b.step("vcpu-web", "Run the wasm emitter's tests in Chromium with Playwright").dependOn(&browser_run.step);
+    b.step("hcpu-web", "Run the wasm emitter's tests in Chromium with Playwright").dependOn(&browser_run.step);
     if (b.top_level_steps.get("web-test")) |web_test| web_test.step.dependOn(&browser_run.step);
 }

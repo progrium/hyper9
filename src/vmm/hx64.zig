@@ -1,6 +1,6 @@
-//! hx64: h9's own CPU for amd64 binaries, as a Guest of vmm/zemu.zig
-//! (-Demu=zig), which has the interface. It's h86 in long mode
-//! (design/hcpu.md, hx64): the same decoder, T0, and lifter in
+//! hx64: h9's own CPU for amd64 binaries, as a Guest of vmm/hcpu.zig
+//! (-Demu=hcpu), which has the interface. It's h86 in long mode
+//! (design/0174-hcpu.md, hx64): the same decoder, T0, and lifter in
 //! src/interp/x86/ and src/jit/x86/, instantiated with `.long`.
 //!
 //! Guest code runs on T1 (the lifter's LifterOf(.long), through
@@ -11,24 +11,24 @@ const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
 const amd64 = @import("../arch/amd64.zig");
-const Ctx = @import("vcpu").ctx.Ctx;
-const x86cpu = @import("vcpu").x86.cpu;
-const tlb = @import("vcpu").x86.tlb;
-const exec = @import("vcpu").x86.exec;
-const dispatch = @import("vcpu").dispatch;
-const wasm_t1 = @import("vcpu").wasm_t1;
-const cache = @import("vcpu").cache;
-const emitter = @import("vcpu").emitter;
-const lift = @import("vcpu").x86jit.lift;
-const helpers = @import("vcpu").x86jit.helpers;
-const check_vmm = @import("vcpu").check_vmm;
+const Ctx = @import("hcpu").ctx.Ctx;
+const x86cpu = @import("hcpu").x86.cpu;
+const tlb = @import("hcpu").x86.tlb;
+const exec = @import("hcpu").x86.exec;
+const dispatch = @import("hcpu").dispatch;
+const wasm_t1 = @import("hcpu").wasm_t1;
+const cache = @import("hcpu").cache;
+const emitter = @import("hcpu").emitter;
+const lift = @import("hcpu").x86jit.lift;
+const helpers = @import("hcpu").x86jit.helpers;
+const check_vmm = @import("hcpu").check_vmm;
 const build_options = @import("build_options");
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter, as for
 /// h86, and on the web host its own (wasm_t1.zig, runWasmT1). T1 is the
 /// default on x86-64, arm64, and the web. H9_EMU_TIER picks either
-/// (zemu.applyTier).
+/// (hcpu.applyTier).
 pub const Tier = enum { t0, t1 };
 pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) {
     .x86_64, .aarch64, .wasm32 => .t1,
@@ -36,8 +36,8 @@ pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) 
 };
 /// T1's emitter; null where this host has none, or in a -Dno-jit build.
 pub var t1_emitter: ?emitter.Emitter = if (!build_options.jit) null else switch (builtin.cpu.arch) {
-    .aarch64 => @import("vcpu").emit.arm64.emitter_def,
-    .x86_64 => @import("vcpu").emit.x64.emitter_def,
+    .aarch64 => @import("hcpu").emit.arm64.emitter_def,
+    .x86_64 => @import("hcpu").emit.x64.emitter_def,
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};
@@ -161,12 +161,12 @@ pub fn setExtra(cpu: *Cpu, x: *const vmm.Extra) vmm.Error!void {
     c.gs_base = t.gs;
 }
 
-/// Instructions retired, for zemu.retired_total.
+/// Instructions retired, for hcpu.retired_total.
 pub fn retired(cpu: *const Cpu) u64 {
     return cpu.c.retired;
 }
 
-/// Runs T0 until an exit. An exit request (ctx.exit_request, which zemu
+/// Runs T0 until an exit. An exit request (ctx.exit_request, which hcpu
 /// clears) or a spent ctx.budget gives `.interrupted`.
 pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     const c = &cpu.c;
@@ -257,7 +257,7 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *tlb.TlbMem, em: emitter.Emitter) vmm.Error!vm
         const before = ctx.retired;
         const c_before = c.retired;
         const r = if (build_options.jit_check)
-            check_vmm.run(&cpu.check, &@import("vcpu").check.x86.guest64, c, ctx, tier == .t1)
+            check_vmm.run(&cpu.check, &@import("hcpu").check.x86.guest64, c, ctx, tier == .t1)
         else
             dispatch.run(icache_gpa, ctx, cfg, &t1_stats);
         c.retired = c_before +% (ctx.retired -% before);
@@ -320,7 +320,7 @@ fn runWasmT1(c: *x86cpu.Cpu64, ctx: *Ctx, m: *tlb.TlbMem) vmm.Error!vmm.Exit {
 }
 
 /// 9front's VectorSYSCALL (pc/io.h), which its amd64 kernel puts in
-/// Ureg.type for a system call, as emu.zig does.
+/// Ureg.type for a system call, as unicorn.zig does.
 const vector_syscall = 64;
 
 /// The vmm exit for T0's, leaving Ureg.type and the registers as the real

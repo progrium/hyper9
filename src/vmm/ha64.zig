@@ -1,38 +1,38 @@
-//! ha64: h9's own CPU for arm64 binaries, as a Guest of vmm/zemu.zig
-//! (-Demu=zig), which has the interface. Its CPU is in src/interp/a64/
+//! ha64: h9's own CPU for arm64 binaries, as a Guest of vmm/hcpu.zig
+//! (-Demu=hcpu), which has the interface. Its CPU is in src/interp/a64/
 //! (T0, the interpreter) and src/jit/a64/, with the shared JIT layer in
-//! src/jit/ (src/vcpu.zig). On the web host T1 is src/jit/wasm_t1.zig's,
+//! src/jit/ (src/hcpu.zig). On the web host T1 is src/jit/wasm_t1.zig's,
 //! compiling hot blocks to wasm.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
-const Ctx = @import("vcpu").ctx.Ctx;
-const t0 = @import("vcpu").a64.exec;
-const cache = @import("vcpu").cache;
-const dispatch = @import("vcpu").dispatch;
-const emitter = @import("vcpu").emitter;
-const lift = @import("vcpu").a64.lift;
-const wasm_t1 = @import("vcpu").wasm_t1;
+const Ctx = @import("hcpu").ctx.Ctx;
+const t0 = @import("hcpu").a64.exec;
+const cache = @import("hcpu").cache;
+const dispatch = @import("hcpu").dispatch;
+const emitter = @import("hcpu").emitter;
+const lift = @import("hcpu").a64.lift;
+const wasm_t1 = @import("hcpu").wasm_t1;
 const build_options = @import("build_options");
-const check_vmm = @import("vcpu").check_vmm;
+const check_vmm = @import("hcpu").check_vmm;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter, or on the
 /// web (wasm_t1.zig). T1 is the default; H9_EMU_TIER=t0 picks T0 alone
-/// (zemu.applyTier).
+/// (hcpu.applyTier).
 pub const Tier = enum { t0, t1 };
 pub var tier: Tier = if (build_options.jit) .t1 else .t0;
 /// T1's emitter; null where this host has none yet, or in a -Dno-jit
 /// build, which leaves src/jit/ out.
 pub var t1_emitter: ?emitter.Emitter = if (!build_options.jit) null else switch (builtin.cpu.arch) {
-    .aarch64 => @import("vcpu").emit.arm64.emitter_def,
-    .x86_64 => @import("vcpu").emit.x64.emitter_def,
+    .aarch64 => @import("hcpu").emit.arm64.emitter_def,
+    .x86_64 => @import("hcpu").emit.x64.emitter_def,
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};
 /// CNTVCT_EL0 from instructions retired rather than the host's counter
-/// (design/0019's deterministic mode); zemu sets it from
+/// (design/0019's deterministic mode); hcpu sets it from
 /// H9_EMU_DETERMINISTIC at create.
 pub var deterministic = false;
 
@@ -90,7 +90,7 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
     c.t0.tpidr = e.tls;
 }
 
-/// Instructions retired, for zemu.retired_total.
+/// Instructions retired, for hcpu.retired_total.
 pub fn retired(c: *const Cpu) u64 {
     return c.t0.retired;
 }
