@@ -68,6 +68,12 @@ pub const Result = enum { svc, interrupted, t0, cold };
 /// it compiles 9K and takes 5 s, and its TUI starts in 19 s, not 93.
 pub var hot: u32 = 32;
 pub var cold_branches: u32 = 8;
+/// A perf map (/tmp/perf-<pid>.map) that each compile appends its code's
+/// host range and guest PC to, for attributing profile samples in JIT
+/// code to guest PCs; zemu opens it when H9_PERF_MAP is set. -1 is off.
+pub var perf_fd: i32 = -1;
+/// A guest PC whose region's IR and code `compile` dumps (debugging).
+pub var dump_pc: u64 = 0;
 
 /// Counts, for tests and stats.
 pub const Stats = struct {
@@ -225,6 +231,7 @@ fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     const code = try cfg.emitter.emit(gpa, &r, &a, &out);
+    if (dump_pc != 0 and pc == dump_pc) dumpRegion(&r, out.items);
     var n: cache_mod.Cache.New = .{ .pc = pc, .page = page, .entry = code.entry, .chain_entry = code.chain_entry, .gen = gen1 };
     if (rd.second != cache_mod.no_page) {
         const va2 = rd.second << mem.page_shift;
@@ -242,7 +249,32 @@ fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64
     n.chains = chains[0..nc];
     const tb = try c.insert(out.items, n, view.code);
     st.compiled += 1;
+    if (perf_fd >= 0) perfMap(tb, r.insts.items.len);
     return tb;
+}
+
+fn dumpRegion(r: *const ir.Region, code: []const u8) void {
+    var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer aw.deinit();
+    ir.print(r, &aw.writer) catch {};
+    writeFile("/tmp/h9-jit-dump.ir", aw.written());
+    writeFile("/tmp/h9-jit-dump.bin", code);
+}
+
+fn writeFile(path: [*:0]const u8, bytes: []const u8) void {
+    if (builtin.os.tag != .linux) return;
+    const linux = std.os.linux;
+    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+    if (linux.errno(rc) != .SUCCESS) return;
+    const fd: i32 = @intCast(rc);
+    _ = linux.write(fd, bytes.ptr, bytes.len);
+    _ = linux.close(fd);
+}
+
+fn perfMap(tb: *const Tb, ops: usize) void {
+    var buf: [96]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{x} {x} g:{x} ops:{d}\n", .{ @intFromPtr(tb.entry), tb.len, tb.pc, ops }) catch return;
+    if (builtin.os.tag == .linux) _ = std.os.linux.write(perf_fd, line.ptr, line.len);
 }
 
 // ---------------------------------------------------------------- tests

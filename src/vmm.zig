@@ -94,6 +94,11 @@ pub const Options = struct {
 };
 
 /// The guest memory region when no cap is given.
+/// The backends' own allocations (decode caches, the JIT's state): on the
+/// web host, h9's allocator (web/heap.zig), whose wasm memory comes in big
+/// steps, since V8 does a full GC on each grow.
+pub const host_gpa: std.mem.Allocator = if (builtin.cpu.arch == .wasm32) @import("web/heap.zig").allocator else std.heap.smp_allocator;
+
 pub const default_memory: u64 = 1 << 30;
 /// The largest cap: HVF's default 36-bit IPA space, less the low 2 GiB.
 pub const max_memory: u64 = 32 << 30;

@@ -6,9 +6,12 @@
 //! ("chunks") pinned to host registers, written back to the Cpu only
 //! when dirty, and only where guest state must be exact: at exits, before
 //! call.interp and call.helper (which reload every chunk after), and on a
-//! slow path's fault exit. Each operation still loads its operands into
-//! rax (a), rcx (b), and rdx (c), computes into rax, and moves that to its
-//! value's register or slot.
+//! slow path's fault exit. Most operations still load their operands into
+//! rax (a), rcx (b), and rdx (c), compute into rax, and move that to their
+//! value's register or slot; `direct` computes the common ones straight
+//! into the value's register, with constants as immediates (`foldConst`).
+//! A load's or store's slow path goes after the blocks (`goCold`), so the
+//! fast path falls through.
 //!
 //! Fixed registers: rbx the Ctx (ctx.x64_ctx_reg), rbp the frame. rax,
 //! rcx, rdx, r10, r11, and xmm0 to xmm2 are scratch. Values take rsi, rdi,
@@ -172,6 +175,14 @@ const Fixup = struct { pos: usize, target: u32 };
 /// and what leave() needs.
 const Cold = struct { at: usize, pc: u64, retired: u64, dirty: regalloc.ChunkSet };
 
+/// Positions in `E.cold_code` are this plus the offset there, until it's
+/// appended after the blocks.
+const cold_at: usize = 1 << 40;
+
+/// A rel32 from one of main and cold code to the other, patched once the
+/// cold code has its place.
+const Cross = struct { at: usize, to: usize };
+
 const E = struct {
     gpa: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -215,6 +226,23 @@ const E = struct {
     /// take them from instead of the TLB (its same_page hint), or -1.
     hint_save: []i8 = &.{},
     hint_use: []i8 = &.{},
+    /// Slow paths, out of line (goCold), so the fast paths are dense.
+    cold_code: std.ArrayList(u8) = .empty,
+    in_cold: bool = false,
+    cross: std.ArrayList(Cross) = .empty,
+
+    /// What follows goes to the cold code, until goHot.
+    fn goCold(e: *E) !void {
+        std.debug.assert(!e.in_cold);
+        try e.cross.ensureUnusedCapacity(e.gpa, 4);
+        e.in_cold = true;
+    }
+    fn goHot(e: *E) void {
+        e.in_cold = false;
+    }
+    fn buf(e: *E) *std.ArrayList(u8) {
+        return if (e.in_cold) &e.cold_code else e.out;
+    }
 
     /// pend_slot to the guest's word. r10 and r11 only.
     fn syncPend(e: *E) !void {
@@ -266,13 +294,14 @@ const E = struct {
     }
 
     fn pos(e: *E) usize {
+        if (e.in_cold) return cold_at + e.cold_code.items.len;
         return e.out.items.len - e.base;
     }
     fn b(e: *E, v: u8) !void {
-        try e.out.append(e.gpa, v);
+        try e.buf().append(e.gpa, v);
     }
     fn bs(e: *E, v: []const u8) !void {
-        try e.out.appendSlice(e.gpa, v);
+        try e.buf().appendSlice(e.gpa, v);
     }
     fn d32(e: *E, v: u32) !void {
         try e.bs(std.mem.asBytes(&std.mem.nativeToLittle(u32, v)));
@@ -281,7 +310,8 @@ const E = struct {
         try e.bs(std.mem.asBytes(&std.mem.nativeToLittle(u64, v)));
     }
     fn patch32(e: *E, at: usize, v: u32) void {
-        std.mem.writeInt(u32, e.out.items[e.base + at ..][0..4], v, .little);
+        const bytes = if (at >= cold_at) e.cold_code.items[at - cold_at ..] else e.out.items[e.base + at ..];
+        std.mem.writeInt(u32, bytes[0..4], v, .little);
     }
 
     /// A REX prefix if it's needed (or forced by `w`).
@@ -337,12 +367,48 @@ const E = struct {
     fn stSlot(e: *E, slot: u32, src: u8) !void {
         try e.store(RSP, @intCast(slots_base + slot * 8), src);
     }
-    /// `dst` = value `v`, from its register or slot.
+    /// `dst` = value `v`, from its register or slot, or for a constant
+    /// kept nowhere (foldConst), its value. EFLAGS are kept.
     fn ldVal(e: *E, dst: u8, v: ir.Ref) !void {
         switch (e.p.locs[v]) {
             .reg => |x| try e.mov(dst, @intCast(x)),
             .slot => |s| try e.ldSlot(dst, s),
-            .none => unreachable,
+            .none => {
+                const k = e.r.insts.items[v];
+                std.debug.assert(k.op == .@"const");
+                const hf = e.hf;
+                e.hf = v; // not xor: it would change EFLAGS
+                defer e.hf = hf;
+                try e.movImm(dst, k.aux);
+            },
+        }
+    }
+    /// The ALU op whose "op reg, r/m" opcode is `opc` (add, or, and, sub,
+    /// xor, or cmp), with `d` and value `v`: v's register, its slot, or a
+    /// constant kept nowhere as an immediate. r10 is clobbered for a
+    /// constant that doesn't fit one.
+    fn aluVal(e: *E, w: bool, opc: u8, d: u8, v: ir.Ref) !void {
+        switch (e.p.locs[v]) {
+            .reg => |x| try e.rr(w, &.{opc}, d, @intCast(x)),
+            .slot => |s| try e.rm(w, &.{opc}, d, RSP, slotDisp(s)),
+            .none => {
+                const k = e.r.insts.items[v].aux;
+                if (immFits(w, k)) {
+                    const ext: u8 = switch (opc) {
+                        0x03 => 0,
+                        0x0b => 1,
+                        0x23 => 4,
+                        0x2b => 5,
+                        0x33 => 6,
+                        0x3b => 7,
+                        else => unreachable,
+                    };
+                    try e.aluImm(w, ext, d, @bitCast(@as(u32, @truncate(k))));
+                } else {
+                    try e.ldVal(R10, v);
+                    try e.rr(w, &.{opc}, d, R10);
+                }
+            },
         }
     }
     /// Value `v` = `src`.
@@ -427,12 +493,20 @@ const E = struct {
 
     /// op r/m, imm32 (sign-extended): /n of 0x81.
     fn aluImm(e: *E, w: bool, n: u8, dst: u8, imm: i32) !void {
+        if (imm >= -128 and imm <= 127) {
+            try e.rr(w, &.{0x83}, n, dst);
+            return e.b(@bitCast(@as(i8, @intCast(imm))));
+        }
         try e.rr(w, &.{0x81}, n, dst);
         try e.d32(@bitCast(imm));
     }
 
-    /// op qword [base+disp], imm32: /n of 0x81.
+    /// op qword [base+disp], imm32: /n of 0x81 (0x83 for an imm8).
     fn aluMemImm(e: *E, n: u8, base: u8, disp: i32, imm: i32) !void {
+        if (imm >= -128 and imm <= 127) {
+            try e.rm(true, &.{0x83}, n, base, disp);
+            return e.b(@bitCast(@as(i8, @intCast(imm))));
+        }
         try e.rm(true, &.{0x81}, n, base, disp);
         try e.d32(@bitCast(imm));
     }
@@ -461,7 +535,13 @@ const E = struct {
         return p;
     }
     fn land(e: *E, at: usize) void {
-        e.patch32(at, @bitCast(@as(i32, @intCast(@as(isize, @intCast(e.pos())) - @as(isize, @intCast(at + 4))))));
+        const to = e.pos();
+        if ((at >= cold_at) != (to >= cold_at)) {
+            // goCold made room.
+            e.cross.appendAssumeCapacity(.{ .at = at, .to = to });
+            return;
+        }
+        e.patch32(at, @bitCast(@as(i32, @intCast(@as(isize, @intCast(to)) - @as(isize, @intCast(at + 4))))));
     }
 
     /// ctx.retired += n, ctx.budget -= n. No registers.
@@ -602,6 +682,8 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
     if (p.slots > (std.math.maxInt(i32) - slots_base) / 8) return error.TooLarge;
     defer e.fixups.deinit(gpa);
     defer e.cold.deinit(gpa);
+    defer e.cold_code.deinit(gpa);
+    defer e.cross.deinit(gpa);
     e.hint_save = try gpa.alloc(i8, r.insts.items.len);
     defer gpa.free(e.hint_save);
     e.hint_use = try gpa.alloc(i8, r.insts.items.len);
@@ -671,6 +753,15 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
         try e.leave(.interrupted, c.pc, c.retired);
     }
 
+    // The slow paths.
+    const cold_pos = e.pos();
+    try e.out.appendSlice(gpa, e.cold_code.items);
+    const place = struct {
+        fn f(at: usize, cp: usize) usize {
+            return if (at >= cold_at) at - cold_at + cp else at;
+        }
+    }.f;
+
     // Epilogue: eax holds the exit code.
     const epi = e.pos();
     try e.dropFrame();
@@ -678,7 +769,13 @@ pub fn emitRegion(gpa: std.mem.Allocator, r: *const ir.Region, out: *std.ArrayLi
 
     for (e.fixups.items) |f| {
         const to = if (f.target == epilogue) epi else block_pos[f.target];
-        e.patch32(f.pos, @bitCast(@as(i32, @intCast(@as(isize, @intCast(to)) - @as(isize, @intCast(f.pos + 4))))));
+        const at = place(f.pos, cold_pos);
+        e.patch32(at, @bitCast(@as(i32, @intCast(@as(isize, @intCast(to)) - @as(isize, @intCast(at + 4))))));
+    }
+    for (e.cross.items) |c| {
+        const at = place(c.at, cold_pos);
+        const to = place(c.to, cold_pos);
+        e.patch32(at, @bitCast(@as(i32, @intCast(@as(isize, @intCast(to)) - @as(isize, @intCast(at + 4))))));
     }
     e.code.entry = 0;
     return e.code;
@@ -700,7 +797,7 @@ fn replan(e: *E, p: *regalloc.Plan, extend: []const u32) !void {
         e.block = @intCast(bi);
         for (blk.start..blk.start + blk.len) |idx| {
             alias[idx] = chunkAlias(e, r, idx) orelse 0xff;
-            virt[idx] = alias[idx] != 0xff or deferIcmp(e, r, idx) or deferNzcv(e, r, idx) or lazyOnly(e, r, idx);
+            virt[idx] = alias[idx] != 0xff or deferIcmp(e, r, idx) or deferNzcv(e, r, idx) or lazyOnly(e, r, idx) or foldConst(r, idx);
             any = any or virt[idx];
         }
     }
@@ -852,6 +949,8 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
     const dst: ir.Ref = @intCast(idx);
     if (i.op.isExt() or ty == .v128 or (i.op == .setreg and ta == .v128)) return lowerExt(e, r, i, dst);
     if (try inFlags(e, r, idx)) return;
+    // A constant kept nowhere: its uses take it as it is (foldConst).
+    if (i.op == .@"const" and e.p.locs[dst] == .none) return;
     if (try direct(e, i, dst)) return;
     if (try chunkMove(e, r, idx)) return;
     if (i.a != ir.none) try e.ldVal(RAX, i.a);
@@ -1215,6 +1314,7 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             try e.syncPend();
             try e.retireOn(i.retired);
             try e.dropFrame(); // the chain entry's stack
+            std.debug.assert(!e.in_cold);
             while ((e.pos() + 1) % 4 != 0) try e.b(0x90);
             const site = e.pos();
             try e.bs(&.{ 0xe9, 0, 0, 0, 0 }); // jmp .+5, until linked
@@ -1571,11 +1671,7 @@ fn inFlags(e: *E, r: *const ir.Region, idx: usize) !bool {
                 try e.rr(w, &.{0x85}, RAX, RAX); // test rax, rax
             } else {
                 const opc: u8 = if (i.op == .@"nzcv.add") 0x03 else 0x3b; // add/cmp rax, b
-                switch (e.p.locs[i.b]) {
-                    .reg => |x| try e.rr(w, &.{opc}, RAX, @intCast(x)),
-                    .slot => |s| try e.rm(w, &.{opc}, RAX, RSP, slotDisp(s)),
-                    .none => unreachable,
-                }
+                try e.aluVal(w, opc, RAX, i.b);
             }
             e.setHf(@intCast(idx));
             return true;
@@ -1620,8 +1716,40 @@ fn chunkMove(e: *E, r: *const ir.Region, idx: usize) !bool {
 /// its operands, so the result register can be written first. Returns
 /// false, emitting nothing, for the rest.
 fn direct(e: *E, i: ir.Inst, dst: ir.Ref) !bool {
+    if (i.op == .setreg and e.p.chunk_of[dst] == regalloc.no_chunk) {
+        // From the value's register straight to the Cpu.
+        const x: u8 = @intCast(e.p.reg(i.a) orelse return false);
+        const sz = sizeLog2(e.r.insts.items[i.a].ty) orelse return false;
+        const disp: i32 = std.math.cast(i32, i.aux) orelse return false;
+        try e.ldCtx(R10, ctx.off.cpu);
+        switch (sz) {
+            0 => {
+                // A byte store from sil or dil wants a REX.
+                try e.b(0x40 | ((x >> 3) << 2) | 1);
+                try e.b(0x88);
+                try e.modrmMem(x, R10, disp);
+            },
+            1 => try e.rm16(&.{0x89}, x, R10, disp),
+            2 => try e.rm(false, &.{0x89}, x, R10, disp),
+            else => try e.rm(true, &.{0x89}, x, R10, disp),
+        }
+        return true;
+    }
     const d: u8 = @intCast(e.p.reg(dst) orelse return false);
     switch (i.op) {
+        .getreg => {
+            // From the Cpu straight to the value's register.
+            if (e.p.chunk_of[dst] != regalloc.no_chunk) return false;
+            const sz = sizeLog2(i.ty) orelse return false;
+            const disp: i32 = std.math.cast(i32, i.aux) orelse return false;
+            try e.ldCtx(R10, ctx.off.cpu);
+            switch (sz) {
+                0 => try e.rm(false, &.{ 0x0f, 0xb6 }, d, R10, disp), // movzx d32, byte
+                1 => try e.rm(false, &.{ 0x0f, 0xb7 }, d, R10, disp),
+                2 => try e.rm(false, &.{0x8b}, d, R10, disp),
+                else => try e.rm(true, &.{0x8b}, d, R10, disp),
+            }
+        },
         .@"const" => try e.movImm(d, i.aux),
         .add, .sub, .@"and", .@"or", .xor => {
             if (i.ty != .i32 and i.ty != .i64) return false;
@@ -1636,16 +1764,53 @@ fn direct(e: *E, i: ir.Inst, dst: ir.Ref) !bool {
             };
             const w = i.ty == .i64;
             try e.ldVal(d, i.a);
-            switch (e.p.locs[i.b]) {
-                .reg => |x| try e.rr(w, &.{opc}, d, @intCast(x)),
-                .slot => |s| try e.rm(w, &.{opc}, d, RSP, slotDisp(s)),
-                .none => unreachable,
-            }
+            try e.aluVal(w, opc, d, i.b);
             if (i.op == .add or i.op == .sub) e.setHf(dst);
+        },
+        .shl, .lshr, .ashr, .ror, .rol => {
+            // By a constant: op d, imm8 (x86 takes it mod the width, as
+            // with cl).
+            if (i.ty != .i32 and i.ty != .i64) return false;
+            const k = e.r.insts.items[i.b];
+            if (k.op != .@"const") return false;
+            const n: u8 = switch (i.op) {
+                .shl => 4,
+                .lshr => 5,
+                .ashr => 7,
+                .ror => 1,
+                .rol => 0,
+                else => unreachable,
+            };
+            const w = i.ty == .i64;
+            try e.ldVal(d, i.a);
+            const by: u8 = @intCast(k.aux & (if (w) @as(u64, 63) else 31));
+            if (by != 0) {
+                try e.shiftImm(w, n, d, by);
+            } else if (!w) try e.rr(false, &.{0x89}, d, d); // mov d32, d32: zero-extended as the 32-bit op would
         },
         else => return false,
     }
     return true;
+}
+
+/// Whether constant `k` is the imm32 of an op of width w (64-bit ops
+/// sign-extend it).
+fn immFits(w: bool, k: u64) bool {
+    if (!w) return true;
+    const v: i64 = @bitCast(k);
+    return v >= std.math.minInt(i32) and v <= std.math.maxInt(i32);
+}
+
+/// A constant kept nowhere: every use reads it as an immediate (aluVal,
+/// direct's shifts) or materializes it where it's needed (ldVal), so it
+/// needs no register across its life.
+fn foldConst(r: *const ir.Region, idx: usize) bool {
+    const k = r.insts.items[idx];
+    if (k.op != .@"const") return false;
+    return switch (k.ty) {
+        .i1, .i8, .i16, .i32, .i64 => true,
+        else => false,
+    };
 }
 
 /// movdqu xmm`x`, [base+disp]
@@ -1815,7 +1980,11 @@ fn ldX(e: *E, x: u8, v: ir.Ref, t: Type) !void {
             try e.b(0xf3); // movq xmm, m64
             try e.rm(false, &.{ 0x0f, 0x7e }, x, RSP, slotDisp(s));
         },
-        .none => unreachable,
+        .none => {
+            // A constant kept nowhere (foldConst).
+            try e.ldVal(R10, v);
+            try sse(e, 0x66, true, &.{0x6e}, x, R10);
+        },
     }
 }
 
@@ -2518,13 +2687,15 @@ fn memOp(e: *E, i: ir.Inst) !void {
     if (f.size > 3) return error.Unsupported;
     if (f.aligned and n > 1) {
         try e.bs(&.{ 0xa8, @intCast(n - 1) }); // test al, n-1
-        const ok = try e.fwd(CC.e);
+        const bad = try e.fwd(CC.ne);
+        try e.goCold();
+        e.land(bad);
         try e.stCtx(ctx.off.exit_addr, RAX);
         const acc: u64 = if (store or f.rmw) @intFromEnum(mem.Access.write) else @intFromEnum(mem.Access.read);
         try e.movImm(RAX, acc | (@as(u64, @intFromEnum(mem.FaultKind.alignment)) << 8));
         try e.stCtx(ctx.off.exit_info, RAX);
         try e.leave(.fault, i.aux2, i.retired);
-        e.land(ok);
+        e.goHot();
     }
     const table: i32 = if (store) mem.tlb_write_off else mem.tlb_read_off;
     const save: ?i32 = if (e.hint_save[e.idx] >= 0) hint_base + 16 * @as(i32, e.hint_save[e.idx]) else null;
@@ -2570,6 +2741,13 @@ fn memOp(e: *E, i: ir.Inst) !void {
             2 => try e.bs(&.{ 0x89, 0x08 }),
             else => try e.bs(&.{ 0x48, 0x89, 0x08 }),
         }
+    } else if (f.signed) {
+        switch (f.size) {
+            0 => try e.bs(&.{ 0x48, 0x0f, 0xbe, 0x00 }), // movsx rax, byte [rax]
+            1 => try e.bs(&.{ 0x48, 0x0f, 0xbf, 0x00 }),
+            2 => try e.bs(&.{ 0x48, 0x63, 0x00 }), // movsxd rax, dword [rax]
+            else => try e.bs(&.{ 0x48, 0x8b, 0x00 }),
+        }
     } else {
         switch (f.size) {
             0 => try e.bs(&.{ 0x0f, 0xb6, 0x00 }), // movzx eax, byte [rax]
@@ -2578,8 +2756,8 @@ fn memOp(e: *E, i: ir.Inst) !void {
             else => try e.bs(&.{ 0x48, 0x8b, 0x00 }),
         }
     }
-    const join = try e.fwd(null);
-    // Slow path.
+    // Slow path, out of line.
+    try e.goCold();
     e.land(miss1);
     if (save) |sv| {
         // No page for a later access to take: `invalid`, which no page
@@ -2612,10 +2790,8 @@ fn memOp(e: *E, i: ir.Inst) !void {
     try e.mov(RAX, RCX);
     try e.jmpTo(null, epilogue);
     e.land(ok);
-    if (!store) try e.ldCtx(RAX, ctx.off.scratch);
-    e.land(join);
-    if (store and f.order == .seq_cst) try e.bs(&.{ 0x0f, 0xae, 0xf0 }); // mfence
     if (!store) {
+        try e.ldCtx(RAX, ctx.off.scratch);
         if (f.signed) {
             const t: Type = switch (f.size) {
                 0 => .i8,
@@ -2625,8 +2801,12 @@ fn memOp(e: *E, i: ir.Inst) !void {
             };
             try signExtend(e, t);
         }
-        try maskTo(e, i.ty);
     }
+    const join = try e.fwd(null);
+    e.goHot();
+    e.land(join);
+    if (store and f.order == .seq_cst) try e.bs(&.{ 0x0f, 0xae, 0xf0 }); // mfence
+    if (!store) try maskTo(e, i.ty);
 }
 
 // ---------------------------------------------------------------- tests
