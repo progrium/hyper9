@@ -4,8 +4,7 @@
  * and it serves dev, proc and sys itself. The namespace builder binds the
  * Linux root tree after it, so the tree's own files show through, and
  * binds the 9front root, /tmp, /mnt/term, the console and #d onto its
- * mount points, and the machine's 9front /dev onto dev/9, so a Linux
- * program reaches the window's draw files (design/wine-draw.md).
+ * mount points.
  *
  * The tree is a fixed table; /proc adds a directory for each of the
  * machine's processes, with the same entries for each, and /proc/n/fd
@@ -33,7 +32,7 @@ enum
 	Qroot = 0,
 	Q9, Qtmp, Qmnt, Qterm, Qtermcwd, Qdev, Qproc, Qsys,
 	/* dev */
-	Qnull, Qzero, Qfull, Qrandom, Qurandom, Qtty, Qconsole, Qfddir, Qstdin, Qstdout, Qstderr, Qpts, Qshm, Qdev9,
+	Qnull, Qzero, Qfull, Qrandom, Qurandom, Qtty, Qconsole, Qfddir, Qstdin, Qstdout, Qstderr, Qpts, Qshm,
 	/* proc */
 	Qself, Qthreadself, Qcpuinfo, Qmeminfo, Qstat, Quptime, Qmounts, Qloadavg, Qversion, Qfilesystems,
 	Qpsys, Qkernel, Qrandomdir, Quuid, Qbootid, Qvm, Qovercommit, Qosrelease, Qostype, Qhostname, Qpidmax,
@@ -91,7 +90,6 @@ static Lent tab[Nq] = {
 	[Qstderr]	{"stderr", Qdev, 0666, 1},
 	[Qpts]	{"pts", Qdev, DMDIR|0555},
 	[Qshm]	{"shm", Qdev, DMDIR|0777},
-	[Qdev9]	{"9", Qdev, DMDIR|0555},
 
 	[Qself]	{"self", Qproc, DMDIR|0555},
 	[Qthreadself]	{"thread-self", Qproc, DMDIR|0555},

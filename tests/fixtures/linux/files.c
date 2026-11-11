@@ -635,28 +635,6 @@ static void prctl_name(void) {
 	printf("ok prctl_name\n");
 }
 
-/* /dev/9 is the machine's 9front /dev (design/wine-draw.md): the console
- * files always, and the window's draw files only with --gfx, where
- * draw/new answers with the screen's 144 bytes of image info. */
-static void dev9(void) {
-	struct stat st;
-	char b[160];
-	CHECK("dev9", stat("/dev/9", &st) == 0 && S_ISDIR(st.st_mode));
-	CHECK("dev9", stat("/dev/9/cons", &st) == 0);
-	int fd = open("/dev/9/draw/new", O_RDWR);
-	if (fd < 0) {
-		CHECK("dev9", errno == ENOENT);
-		printf("ok dev9\n");
-		return;
-	}
-	CHECK("dev9", read(fd, b, sizeof b) == 144);
-	close(fd);
-	fd = open("/dev/9/winname", O_RDONLY);
-	CHECK("dev9", fd >= 0 && read(fd, b, sizeof b) > 0);
-	close(fd);
-	printf("ok dev9 gfx\n");
-}
-
 /* WebKit's shared memory: shm_open, unlink, then ftruncate and mmap
  * the open file; and memfd_create, which does the same in one call.
  * The file is gone from the directory but still sized, stat-able, and
@@ -855,7 +833,6 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
 		if (all || !strcmp(n, "private_sees")) private_sees();
 		if (all || !strcmp(n, "gs_base")) gs_base();
-		if (all || !strcmp(n, "dev9")) dev9();
 		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();

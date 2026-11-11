@@ -7,6 +7,7 @@ created: 2026-11-09
 authors: [progrium]
 depends: [gfx, linux-personality]
 areas: [linux, kern, build, tests]
+branch: [wine-draw]
 ---
 
 # Proposal: Wine windows through draw
@@ -99,4 +100,8 @@ Cases tagged `[wine-draw]`:
 - Whether a Linux root's Wine is the only target, or h9 should provide a Wine build with the driver in it, so the version always matches.
 - Keyboard layouts beyond US, and keys that `/dev/kbd` reports as runes with no scan code.
 - Whether the X server bridge in Rationale should come first, since it would cover both Wine and Linux X11 programs.
-- Wine can't reach Unix paths through its `Z:` drive. `Z:` is the symlink `dosdevices/z: -> /` in the prefix, and h9 resolves an absolute symlink inside the tree that holds it ([symlinks-in-root](symlinks-in-root.md)), so in a prefix under `/mnt/term` it names `/mnt/term`, and under `/tmp` it names `/tmp`. That's why Wine can't open a working directory under `/mnt/term` ("could not open working directory"), why `wine /mnt/term/cwd/prog.exe` segfaults while `wine prog.exe` runs, and likely why a `WINEDLLPATH` there isn't searched. A relative drive symlink works around it: with the prefix in the shared directory, `dosdevices/d: -> ../..` names that directory, Wine starts in `D:\`, and absolute paths under it run ([docs/windows.md](../docs/windows.md)). The fix is for h9 to resolve absolute symlinks in the Linux view rather than in the tree they're in, at least in trees the guest writes, such as `/tmp` and the overlays. It changes 0034's rule, so it needs its own proposal.
+- Wine can't reach Unix paths through its `Z:` drive. `Z:` is the symlink `dosdevices/z: -> /` in the prefix, and h9 resolves an absolute symlink inside the tree that holds it ([symlinks-in-root](symlinks-in-root.md)), so in a prefix under `/mnt/term` it names `/mnt/term`, and under `/tmp` it names `/tmp`. That's why Wine can't open a working directory under `/mnt/term` ("could not open working directory"), why `wine /mnt/term/cwd/prog.exe` segfaults while `wine prog.exe` runs, and likely why a `WINEDLLPATH` there isn't searched. A relative drive symlink works around it: with the prefix in the shared directory, `dosdevices/d: -> ../..` names that directory, Wine starts in `D:\`, and absolute paths under it run ([docs/windows.md](https://github.com/progrium/hyper9/blob/wine-draw/docs/windows.md) on the branch). The fix is for h9 to resolve absolute symlinks in the Linux view rather than in the tree they're in, at least in trees the guest writes, such as `/tmp` and the overlays. It changes 0034's rule, so it needs its own proposal.
+
+## Updates
+
+- 2026-11-11: **The work moved to the `wine-draw` branch.** The first version merged to main in #129 and came back out, so it can keep changing on [its branch](https://github.com/progrium/hyper9/tree/wine-draw) while the design is discussed on the issue. The general fixes that came with it stayed on main: i386's three TLS entries, h86's ring-3 IRET and far RET, `prctl(PR_SET_NAME)` truncating long names, the browser host's `env` option, shared files in web archives, `scripts/wine-root.sh`, and the console half of [Running Windows programs](../docs/windows.md). The driver, `/dev/9`, their cases, `zig build wine`, and the browser demo's `?wine` mode are on the branch. The [Wine page](../site/wine.html) stays on main, and the Pages workflow builds its demo from the branch.

@@ -18,6 +18,7 @@
      the column, centered, and scrolls on a narrow screen. */
   .wide { width: min(1060px, calc(100vw - 2em)); margin-left: 50%; transform: translateX(-50%); }
   iframe { width: 100%; height: 860px; border: 1px solid #888; }
+  .note { border: 1px solid #888; padding: 0.5em 1em; }
 </style>
 </head>
 <body>
@@ -34,6 +35,12 @@
 <h1>h9: Windows programs, through Wine</h1>
 
 <p class="authors"><a href="https://github.com/progrium">Jeff Lindsay</a>, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr></p>
+
+<p class="note"><b>Experimental.</b>
+Windows programs with windows, and this demo, live on h9's
+<a href="https://github.com/progrium/hyper9/tree/wine-draw"><tt>wine-draw</tt> branch</a>,
+not in main, while the work goes on there.
+The demo is built from that branch.</p>
 
 <h2 id="about">About</h2>
 
@@ -70,11 +77,11 @@ Wine starts a dozen processes before the first window,
 each loading its DLLs on an emulated CPU,
 and the page downloads Wine first, about 80 MB.
 It needs JavaScript Promise Integration, which Chrome and Edge have from version 137.
-The demo can also be <a href="demo/?wine">opened on its own page</a>.
+The demo can also be <a href="wine-demo/?wine">opened on its own page</a>.
 </p>
 
 <div class="wide">
-<iframe src="demo/?wine" title="h9 running Wine's desktop and Windows programs in the browser" loading="lazy"></iframe>
+<iframe src="wine-demo/?wine" title="h9 running Wine's desktop and Windows programs in the browser" loading="lazy"></iframe>
 </div>
 
 <p>
@@ -89,12 +96,15 @@ and <tt>IRET</tt> back to user mode, which Wine's system call return uses.
 
 <p>
 On an x86_64 Linux host, h9 runs 64-bit Wine the same way.
-<a href="https://github.com/progrium/hyper9/blob/main/docs/windows.md">Running Windows programs</a>
+Console programs run from main.
+Programs with windows need the <tt>wine-draw</tt> branch, whose
+<a href="https://github.com/progrium/hyper9/blob/wine-draw/docs/windows.md">Running Windows programs</a>
 walks through it: a Wine root, a prefix in your directory,
 then console programs and programs with windows.
 </p>
 
 <pre>
+git checkout wine-draw
 scripts/wine-root.sh                  # Alpine with Wine 11
 win hello.exe "two words" x           # a console program
 h9 --gfx --root "$WINEROOT" wine notepad

@@ -21,8 +21,6 @@
      doesn't zoom when it's focused. */
   /* ?rio: the screen, in CSS pixels' worth of device pixels. */
   #screen { flex: 1; min-height: 0; width: 100%; display: block; outline: none; background: #777; }
-  /* ?wine: the Wine desktop's own size. */
-  #screen.wine { flex: 0 0 auto; width: 1024px; height: 768px; margin: 8px auto; }
   #kbd { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; resize: none; caret-color: transparent; }
 </style>
 </head>
@@ -71,7 +69,6 @@ if (!haveJSPI) {
   // ?rio runs rio with acme in a canvas (design/browser-gfx.md).
   document.getElementById('rio').onclick = () => { location.search = params.has('rio') ? '' : '?rio'; };
   if (params.has('rio')) await runRio(params);
-  else if (params.has('wine')) await runWine(params);
   else {
     if (linux) document.getElementById('about').textContent = "h9: Alpine Linux's arm64 programs in a Web Worker. Type to busybox sh;";
     // The 9front layer is in a build that had arm64 9front commands
@@ -197,54 +194,6 @@ if (!haveJSPI) {
     const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
     if (code !== null) print(`\n[h9 exited ${code}]\n`);
   }
-}
-
-// Wine's own classic programs on a Windows desktop, on a canvas
-// (site/wine.html): 32-bit Wine over wine.h9a, an Alpine 386 root with
-// Wine, its display driver for draw (design/wine-draw.md) and a prefix made
-// ahead of time (scripts/wine-web.sh). The desktop is 1024x768, the size
-// the prefix's Wine desktop is set to. ?memory= sets --memory.
-async function runWine(params) {
-  document.getElementById('about').textContent = "h9: 32-bit Wine on Alpine Linux in a Web Worker. Wine's desktop takes a minute or so to come up; then double-click an icon.";
-  document.getElementById('rcnote').hidden = true;
-  document.getElementById('rio').hidden = true;
-  const canvas = document.createElement('canvas');
-  canvas.id = 'screen';
-  canvas.className = 'wine';
-  term.before(canvas);
-  term.style.flex = '0 0 auto';
-  term.style.maxHeight = '20vh';
-  const m = await createMachine({
-    root: 'wine.h9a',
-    memory: params.get('memory') ?? '768M',
-    gfx: { canvas, scale: 1 },
-    terminal: { write: (b) => print(dec.decode(b, { stream: true })) },
-  });
-  canvas.focus();
-  // The archive keeps no links: busybox makes its applets', and the
-  // prefix's C: and Z: drives are made here, in the root's overlay.
-  // ?start= names the program to open first, one of Wine's: a bare name.
-  // USER is the prefix's user, root (scripts/wine-web.sh): Wine takes its
-  // profile, C:\users\$USER, from it, and h9 sets it from 9front's user,
-  // glenda here. Without the profile, opening the Start menu brings
-  // Wine's desktop down.
-  const start = /^[a-z0-9]+$/.test(params.get('start') ?? '') ? params.get('start') : 'winemine';
-  const script = [
-    '/bin/busybox --install -s 2>/dev/null',
-    'export USER=root LOGNAME=root',
-    'ln -sfn ../drive_c /root/.wine/dosdevices/c:',
-    'ln -sfn / /root/.wine/dosdevices/z:',
-    'cd /root',
-    `/usr/bin/wine ${start} &`,
-    // A day at a time: a sleep past 2^31 ms would wake at once, and keep
-    // the CPU busy.
-    'while :; do sleep 86400; done',
-  ].join('\n');
-  const env = ['HOME=/root', 'PATH=/usr/bin:/bin', 'WINEPREFIX=/root/.wine', 'WINEDEBUG=-all',
-    'LD_PRELOAD=/usr/lib/wine/i386-unix/roundf386.so'];
-  const argv = [...env.flatMap((e) => ['--env', e]), '/bin/busybox', 'sh', '-c', script];
-  const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
-  if (code !== null) print(`\n[h9 exited ${code}]\n`);
 }
 
 // rio, with acme in a window, on a canvas in place of the terminal. The

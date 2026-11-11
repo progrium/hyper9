@@ -60,10 +60,3 @@ sqlite-3.49.2-r1.apk 23cc7ebfee1170d2e6be5740ef5eae1c522691e164e399629f914770537
 readline-8.2.13-r1.apk 334af29dbf6b5a71a87af4d6a58e2967a8f711a51d00093de0e1498daf83ceb2
 libncursesw-6.5_p20250503-r0.apk 419b375e8a4345e7172b1f0f3a3c57db61374f5408cdb875d9e860bd4c243aca
 "
-
-# Wine's headers, for winedraw (design/wine-draw.md): a display driver is
-# built against one release's driver interface (WINE_GDI_DRIVER_VERSION),
-# so this is the release the driver targets. Only include/ is fetched.
-WINE_REPO=https://github.com/wine-mirror/wine
-WINE_VERSION=11.0
-WINE_REV=db11d0fe6a169c457e23d007e20404643d067aa8
