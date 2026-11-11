@@ -38,7 +38,7 @@ jobs:
       - run: zig build design -- check
 
   test:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'temp-run-all/')
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +58,7 @@ jobs:
   #   echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
   #   sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
   integration:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'temp-run-all/')
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +80,7 @@ jobs:
 
   # The demo page and its canvas cases in Chromium, over the 386 root.
   web:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'temp-run-all/')
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
