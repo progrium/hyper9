@@ -249,7 +249,18 @@ pub const Cache = struct {
             const p = gop.value_ptr.*;
             p.host = h;
             p.gen = g;
-            decodePage(p, base, @ptrFromInt(h));
+            // An invalidate between the mark and the end of the decode (a
+            // store's slow path, from another vCPU) clears the bit and
+            // moves the generation: then later stores could take the
+            // fast path and miss this copy, so mark and decode again.
+            if (apage) |ap| {
+                while (true) {
+                    decodePage(p, base, @ptrFromInt(h));
+                    if (code.?.isCode(ap) and code.?.gen(ap) == p.gen) break;
+                    code.?.mark(ap);
+                    p.gen = code.?.gen(ap);
+                }
+            } else decodePage(p, base, @ptrFromInt(h));
         }
         c.last_vp = vp;
         c.last = gop.value_ptr.*;
@@ -469,8 +480,14 @@ pub fn load(m: *Machine, comptime T: type, va: u64, f: *MemFault) ?T {
 pub fn store(m: *Machine, comptime T: type, va: u64, v: T, f: *MemFault) bool {
     const n = @sizeOf(T);
     if ((va & (page_size - 1)) + n <= page_size) {
+        if (mem.fast(m.tlb(), va, n, true)) |h| {
+            rawStore(T, h, va, v);
+            return true;
+        }
         const h = host(m, va, n, .write, f) orelse return false;
         rawStore(T, h, va, v);
+        // A slow path's store: the page may have been marked meanwhile.
+        if (m.space == null) if (m.view().code) |c| c.stored(h);
         return true;
     }
     var hs: [n]usize = undefined;
@@ -1018,6 +1035,19 @@ fn dcZva(m: *Machine, o: *const Op, pc: u64) Next {
     return .next;
 }
 
+/// IC IVAU: the page's code is stale. A JIT writing code from one thread
+/// for another to run says so after its stores, so this is what makes
+/// sure no vCPU keeps what it decoded or compiled from the page before
+/// the last of them. An address that doesn't translate does nothing.
+fn icIvau(m: *Machine, o: *const Op) Next {
+    if (m.space != null) return .next;
+    const code = m.view().code orelse return .next;
+    var f: MemFault = undefined;
+    const h = host(m, m.cpu.r[o.n], 1, .read, &f) orelse return .next;
+    if (code.pageOf(h)) |p| code.invalidate(p);
+    return .next;
+}
+
 // ---------------------------------------------------------------- the handlers
 
 inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
@@ -1231,6 +1261,7 @@ inline fn exec(comptime k: Kind, m: *Machine, o: *const Op, pc: u64) Next {
         .mrs => return mrs(m, o),
         .msr => return msr(m, o),
         .dc_zva => return dcZva(m, o, pc),
+        .ic_ivau => return icIvau(m, o),
 
         .ldp_x, .ldp_w, .ldpsw, .stp_x, .stp_w, .ldp_vs, .ldp_vd, .ldp_vq, .stp_vs, .stp_vd, .stp_vq => return pair(k, m, o, pc),
         .ldxr => return ldxr(m, o, pc, false),

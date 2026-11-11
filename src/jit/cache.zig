@@ -260,6 +260,10 @@ pub const Cache = struct {
         entry: u32 = 0,
         chain_entry: u32 = 0,
         chains: []const Chain = &.{},
+        /// The pages' CodePages generations before anything was read from
+        /// them (each marked first), when `insert` is given the CodePages.
+        gen: ?u32 = null,
+        gen2: ?u32 = null,
     };
 
     /// Copies a translation into the region and makes it findable. Fails
@@ -288,7 +292,15 @@ pub const Cache = struct {
         };
         for (n.chains, 0..) |ch, i| tb.outs[i] = .{ .site = off + ch.site, .pc = ch.pc };
         try c.order.append(c.gpa, tb);
-        const stale = if (pages) |p| !p.isCode(n.page) or (n.page2 != no_page and !p.isCode(n.page2)) else false;
+        // Under the lock, as invalidatePage takes it after the generation
+        // moves: a translation that passes here is on its pages' lists
+        // before any later invalidate looks.
+        const stale = if (pages) |p|
+            !p.isCode(n.page) or (n.page2 != no_page and !p.isCode(n.page2)) or
+                (n.gen != null and p.gen(n.page) != n.gen.?) or
+                (n.page2 != no_page and n.gen2 != null and p.gen(n.page2) != n.gen2.?)
+        else
+            false;
         if (stale) {
             tb.valid.store(false, .release);
             return tb;

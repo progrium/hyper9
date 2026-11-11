@@ -568,6 +568,17 @@ pub const AddressSpace = union(enum) {
             inline else => |p| p.codeChanged(va, len),
         }
     }
+
+    /// Says the host wrote `mem`, guest memory it got from this space's
+    /// pages (a read into a buffer, a file page filled, pages zeroed for
+    /// reuse): a backend that tracks which pages hold code drops what it
+    /// decoded or compiled from them. Cheap for pages that hold none.
+    pub fn hostWrote(as: AddressSpace, mem: []const u8) void {
+        switch (as) {
+            .fake => {},
+            inline else => |p| if (@hasDecl(@TypeOf(p.*), "hostWrote")) p.hostWrote(mem),
+        }
+    }
 };
 
 test {

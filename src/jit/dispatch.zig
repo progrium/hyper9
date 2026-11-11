@@ -176,9 +176,19 @@ const Reader = struct {
     view: *mem.View,
     first: u64,
     second: u64 = cache_mod.no_page,
+    /// The arena page and its generation for the guest page after
+    /// `first`'s that a read reaches into first (`markGen`).
+    other: ?struct { vp: u64, page: u64, gen: u32 } = null,
 
     fn read(p: *anyopaque, va: u64, buf: []u8) usize {
         const r: *Reader = @ptrCast(@alignCast(p));
+        if (buf.len > 0 and r.other == null) {
+            const last = (va + buf.len - 1) >> mem.page_shift;
+            const vp = if (va >> mem.page_shift != r.first) va >> mem.page_shift else last;
+            if (vp != r.first) if (codePage(r.view, vp << mem.page_shift, 1)) |pg| {
+                r.other = .{ .vp = vp, .page = pg, .gen = markGen(r.view.code.?, pg) };
+            };
+        }
         const n = r.view.fetch(va, buf);
         if (n > 0) {
             const last = (va + n - 1) >> mem.page_shift;
@@ -188,6 +198,13 @@ const Reader = struct {
     }
 };
 
+/// Marks arena page `page` if it isn't, then reads its generation: an
+/// invalidate after this moves it, and `insert` sees that.
+fn markGen(code: *mem.CodePages, page: u64) u32 {
+    if (!code.isCode(page)) code.mark(page);
+    return code.gen(page);
+}
+
 pub const CompileError = error{ Full, OutOfMemory, Unsupported, TooLarge, Invalid };
 
 fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64, page: u64, cfg: Config, st: *Stats) CompileError!*Tb {
@@ -195,6 +212,7 @@ fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64
     defer r.deinit(gpa);
     var b = ir.Builder.init(gpa, &r);
     var rd: Reader = .{ .view = view, .first = pc >> mem.page_shift };
+    const gen1: ?u32 = if (view.code) |cp| markGen(cp, page) else null;
     // Two pages at most: the entry's and one other (the next, or a
     // traced jump's).
     var limits = cfg.limits;
@@ -207,11 +225,15 @@ fn compile(gpa: std.mem.Allocator, c: *cache_mod.Cache, view: *mem.View, pc: u64
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     const code = try cfg.emitter.emit(gpa, &r, &a, &out);
-    var n: cache_mod.Cache.New = .{ .pc = pc, .page = page, .entry = code.entry, .chain_entry = code.chain_entry };
+    var n: cache_mod.Cache.New = .{ .pc = pc, .page = page, .entry = code.entry, .chain_entry = code.chain_entry, .gen = gen1 };
     if (rd.second != cache_mod.no_page) {
         const va2 = rd.second << mem.page_shift;
         n.va2 = va2;
         n.page2 = codePage(view, va2, 1) orelse return error.Unsupported;
+        // The generation from before the page was read, if the page there
+        // is still the one read.
+        if (view.code != null) n.gen2 = if (rd.other) |o| (if (o.vp == rd.second and o.page == n.page2) o.gen else null) else null;
+        if (view.code != null and n.gen2 == null) return error.Unsupported;
     }
     var chains: [cache_mod.max_chains]cache_mod.Chain = undefined;
     const sites = code.chainSites();
@@ -563,4 +585,36 @@ test "dispatch: a store to the code being run finishes in T0 and retranslates" {
     };
     try expectSame(t1, t0m, &prog, &.{}, 0);
     try testing.expectEqual(@as(u64, 5), t1.cpu.r[0]);
+}
+
+test "dispatch: IC IVAU drops what was decoded or compiled from its page" {
+    const c = try testCache(1 << 20);
+    defer freeCache(c);
+    const ms = try testing.allocator.alloc(Machine, 2);
+    defer testing.allocator.free(ms);
+    ms[0] = .{};
+    ms[1] = .{};
+    try ms[0].init(null);
+    defer ms[0].deinit();
+    try ms[1].init(c);
+    defer ms[1].deinit();
+    const prog = [_]u32{
+        0x91000400, // add x0, x0, #1     (0x1000)
+        0xD4000001, // svc #0
+        0xD2820002, // movz x2, #0x1000   (0x1008)
+        0xD50B7522, // ic ivau, x2
+        0xD5033FDF, // isb
+        0x17FFFFFB, // b 0x1000
+    };
+    for (ms) |*m| {
+        m.load(&prog, &.{}, 0);
+        try testing.expectEqual(a64.t0.Exit.syscall, try m.run());
+        try testing.expectEqual(@as(u64, 1), m.cpu.r[0]);
+        // A store from another vCPU that was past its TLB check when the
+        // page was decoded: nothing invalidates the page for it.
+        std.mem.writeInt(u32, m.pages[0..4], 0x91000800, .little); // add x0, x0, #2
+        m.cpu.pc = Machine.code_va + 8;
+        try testing.expectEqual(a64.t0.Exit.syscall, try m.run());
+        try testing.expectEqual(@as(u64, 3), m.cpu.r[0]);
+    }
 }
