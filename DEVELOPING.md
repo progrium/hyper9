@@ -179,33 +179,13 @@ out.
 
 ### Wine
 
-`winedraw` is a Wine display driver that draws through the window's draw
-files, which Linux programs see at `/dev/9`, one draw layer per top-level
-window, and turns `/dev/mouse` and `/dev/kbd` into input
-([wine-draw](design/wine-draw.md), a draft). It builds against Wine 11.0's
-headers, and runs in an amd64 Linux root with Wine in it:
-
-```sh
-scripts/fetch.sh wine          # Wine's include/ at the pinned tag, into .local/src/wine
-zig build wine                 # zig-out/wine/x86_64-{unix,windows}/winedraw.{so,drv}
-scripts/wine-root.sh           # Alpine amd64 with Wine 11, at .local/linux/wine-amd64
-```
-
-[Running Windows programs](docs/windows.md) walks through installing it,
-from the root to a prefix that lasts between runs.
-
-`zig build wine` builds the driver for i386 too, in `zig-out/wine/i386-*`,
-with `roundf386.so`: Alpine's 32-bit musl gets `roundf` wrong at the x87
-precision Windows programs set, which makes every window 96 times too big,
-so 32-bit Wine runs with it in `LD_PRELOAD`. The [Wine page](site/wine.html)'s
-demo is 32-bit Wine in the browser host (`?wine`), over `wine.h9a`:
-
-```sh
-scripts/wine-root.sh 386       # Alpine x86 with Wine 11, at .local/linux/wine-386
-zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
-scripts/wine-web.sh            # .local/linux/wine-web: the driver and a prefix, made by h9 on h86
-zig build web                  # packs it into zig-out/web/wine.h9a, from src/web/wine.list
-```
+`scripts/wine-root.sh` makes an Alpine amd64 root with Wine 11 in it, at
+`.local/linux/wine-amd64`, for running Windows console programs
+([Running Windows programs](docs/windows.md)). `winedraw`, the Wine
+display driver over Plan 9 draw that gives Windows programs windows, and
+the [Wine page](site/wine.html)'s browser demo are experimental and live on
+the [`wine-draw` branch](https://github.com/progrium/hyper9/tree/wine-draw)
+([wine-draw](design/wine-draw.md)).
 
 ### Browser host
 
@@ -337,7 +317,6 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
 | `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, the clipboard), the headless test backend, and the stubs for builds without graphics |
-| `src/wine/` | winedraw, the Wine display driver over Plan 9 draw: its Unix library, its PE side, and `draw9.h`, a small draw client the `drawpeek` fixture shares |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |

@@ -9,11 +9,19 @@
 # over linux.h9a, Alpine's arm64 busybox, jq, and sqlite3 on ha64, h9's
 # own arm64 CPU (src/web/linux.list), with nine-arm64.h9a's slim arm64
 # 9front commands at /9, cross-compiled from the 386 root
-# (scripts/nine-arm64-web.sh, cached like Wine's). The Wine page's demo runs it over
-# wine.h9a, Alpine's 32-bit Wine with winedraw on h86 and a prefix made
-# ahead of time by h9 on the emulator (scripts/wine-web.sh, a few
-# minutes), cached until the scripts, the pins, or the driver change. The
-# demo page's browser test gates the deploy.
+# (scripts/nine-arm64-web.sh, cached until its inputs change).
+#
+# The Wine page (site/wine.html) is on main, but winedraw and its demo
+# live on the wine-draw branch (design/wine-draw.md), so its demo, in
+# wine-demo/, is that branch's browser host over its wine.h9a: Alpine's
+# 32-bit Wine with winedraw on h86 and a prefix made ahead of time by h9
+# on the emulator (the branch's scripts/wine-web.sh, a few minutes),
+# cached until the branch's scripts, pins, or driver change. It's built
+# from the branch's head at each run, so after a push to wine-draw, run
+# this workflow by hand to publish it. A failure there leaves the demo out
+# rather than holding back the rest of the site.
+#
+# The demo page's browser test gates the deploy.
 name: pages
 
 on:
@@ -54,19 +62,6 @@ jobs:
           . scripts/pins.sh
           zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.386.iso" .local/9front/root386
       - uses: actions/cache@v4
-        id: wine-web
-        with:
-          path: .local/linux/wine-web
-          key: pages-wine-web-${{ hashFiles('scripts/pins.sh', 'scripts/wine-root.sh', 'scripts/wine-web.sh', 'src/wine/**') }}
-      - name: Wine root for the Wine page
-        if: steps.wine-web.outputs.cache-hit != 'true'
-        run: |
-          scripts/fetch.sh wine
-          scripts/wine-root.sh 386
-          zig build wine
-          zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
-          scripts/wine-web.sh
-      - uses: actions/cache@v4
         id: nine-arm64-web
         with:
           path: .local/9front/slim-*-arm64
@@ -77,6 +72,35 @@ jobs:
           zig build -Demu=hcpu -Doptimize=ReleaseSafe
           scripts/nine-arm64-web.sh
       - run: zig build web -Doptimize=ReleaseSafe -Dweb-root=.local/9front/root386
+      # The Wine page's demo, from the wine-draw branch, in wine-draw/.
+      - uses: actions/checkout@v4
+        with:
+          ref: wine-draw
+          path: wine-draw
+      - uses: actions/cache@v4
+        id: wine-web
+        with:
+          path: wine-draw/.local/linux/wine-web
+          key: pages-wine-web-${{ hashFiles('wine-draw/scripts/pins.sh', 'wine-draw/scripts/wine-root.sh', 'wine-draw/scripts/wine-web.sh', 'wine-draw/src/wine/**') }}
+      - name: Wine root for the Wine page, from wine-draw
+        id: wine-root
+        if: steps.wine-web.outputs.cache-hit != 'true'
+        continue-on-error: true
+        working-directory: wine-draw
+        run: |
+          scripts/fetch.sh wine
+          scripts/wine-root.sh 386
+          zig build wine
+          zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
+          scripts/wine-web.sh
+      - name: The Wine page's demo, from wine-draw
+        id: wine-demo
+        if: steps.wine-root.outcome != 'failure'
+        continue-on-error: true
+        working-directory: wine-draw
+        run: |
+          zig build web -Doptimize=ReleaseSafe -Dweb-root="$GITHUB_WORKSPACE/.local/9front/root386"
+          test -f zig-out/web/wine.h9a
       - name: Demo page in Chromium
         run: |
           npm install --no-save --no-package-lock playwright@1.63.0
@@ -87,9 +111,16 @@ jobs:
         run: |
           mkdir -p _site/demo
           cp site/*.html _site/
-          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,root.h9a,linux.h9a,nine-arm64.h9a,wine.h9a,package.json} _site/demo/
+          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,root.h9a,linux.h9a,nine-arm64.h9a,package.json} _site/demo/
           cp LICENSE _site/demo/LICENSE
           cp third_party/drawterm/LICENSE _site/demo/LICENSE.drawterm
+      - name: Add the Wine page's demo
+        if: steps.wine-demo.outcome == 'success'
+        run: |
+          mkdir -p _site/wine-demo
+          cp wine-draw/zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,wine.h9a,package.json} _site/wine-demo/
+          cp wine-draw/LICENSE _site/wine-demo/LICENSE
+          cp wine-draw/third_party/drawterm/LICENSE _site/wine-demo/LICENSE.drawterm
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
