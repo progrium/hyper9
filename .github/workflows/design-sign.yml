@@ -12,7 +12,8 @@ on:
 permissions:
   contents: write
   issues: write
-  pull-requests: read
+  # Commenting on a PR through the issues API needs pull-requests: write.
+  pull-requests: write
 
 concurrency:
   group: design-sign-${{ github.event.issue.number }}
