@@ -1,6 +1,6 @@
 ---
 slug: proposal-flow
-title: A proposal lifecycle for building first, branches, and Done criteria
+title: A proposal lifecycle for building first, branches, Done criteria, and easier signing
 status: draft
 created: 2026-11-11
 authors: [progrium]
@@ -8,11 +8,11 @@ depends: [proposals]
 areas: [process, build, tests]
 ---
 
-# Proposal: a proposal lifecycle for building first, branches, and Done criteria
+# Proposal: a proposal lifecycle for building first, branches, Done criteria, and easier signing
 
 ## Abstract
 
-The proposal process from [proposals](0001-proposals.md) assumes a proposal is designed, filed, discussed in a final comment period, and accepted before any work starts. In practice, work often starts on a branch first, and the proposal is written alongside the code or after it. This proposal changes the lifecycle to fit. It drops the final comment period. It adds a `proposed` state for a proposal filed as an issue for feedback, which is optional, as `accepted` is. It adds a `branch` field that says where a proposal's work lives, from which the tool computes in progress and stalled. Files are named by slug alone, and proposals are referred to by slug everywhere. Done when becomes Done criteria, a checklist that `check` holds an implemented proposal to.
+The proposal process from [proposals](0001-proposals.md) assumes a proposal is designed, filed, discussed in a final comment period, and accepted before any work starts. In practice, work often starts on a branch first, and the proposal is written alongside the code or after it. This proposal changes the lifecycle to fit. It drops the final comment period. It adds a `proposed` state for a proposal filed as an issue for feedback, which is optional, as `accepted` is. It adds a `branch` field that says where a proposal's work lives, from which the tool computes in progress and stalled. Files are named by slug alone, and proposals are referred to by slug everywhere. Done when becomes Done criteria, a checklist that `check` holds an implemented proposal to. Signing gets a shorter line, a `/sign` PR comment, and a `sign` command, all of which still need the named person to act.
 
 ## Background
 
@@ -86,6 +86,16 @@ A proposal's body says what changes and why, and never what's built so far ("hx6
 - `list`, `ready`, and `status` show ready, in progress, and stalled.
 - `check` validates `branch`, the Done criteria checklist, slug-only references, and links to `design/*.md` from any tracked file, not just from `design/`. It scans test tags in `tests/**/*.zig` and `tests/web/*.mjs`, and `zig build proposal -Dp=<slug>` runs the web cases too.
 
+### Signing
+
+A signature still means what README's Signature section says: the named person directed the work, reviewed it closely enough to understand and defend it, and takes responsibility for it. What changes is how the line gets there. Today it's typed by hand, with an `<abbr>` tag, in a local checkout, and "a tool never adds it". That makes signing the slowest step for a doc that's otherwise ready. The rule becomes that only a deliberate act by the named person adds a signature, and there are three ways to do it:
+
+- **A shorter line.** A signature is `Nov 11, 2026 · Jeff Lindsay, [h.d.a.](README.md#signature)`, linking to the definition instead of carrying it in a tooltip. SPEC.md links `design/README.md#signature`. Existing signatures in the `<abbr>` form stay as they are, since a signature is never edited by anyone but the person it names, and both forms are valid.
+- **A PR comment.** A comment of `/sign <slug>` on a PR makes a workflow add the signature to that proposal on the PR's branch and commit it, dated the day of the comment, using the name for the commenter's login. `/sign spec` signs SPEC.md the same way. Logins and names come from `design/SIGNERS`, one `login Full Name` per line, and the workflow ignores comments from anyone else and from bots. It replies on the PR with the commit, or with why it didn't sign. GitHub vouches for who wrote the comment, and the doc can be read rendered on GitHub, from a phone, right before signing it.
+- **`zig build design -- sign <slug>`**, at a terminal. It adds the line with today's date and the name `design/SIGNERS` gives for the login in `gh` or, failing that, git's `user.name`. It runs only when stdin is a terminal, shows the doc's title and signer, and asks the person to type the slug to confirm they've reviewed it. It refuses a doc already signed today by the same person, and replaces an older signature by the same person with the new date.
+
+Agents never run `sign`, and never post `/sign`, write a signature line, or edit `design/SIGNERS`. AGENTS.md says so. `check` still doesn't enforce signatures, but it does check that a signature line is in one of the two forms and names someone in `design/SIGNERS`, so a typo doesn't pass as a signature.
+
 ### Running the checks
 
 README says that `check` is meant to run before every PR is merged, and that `status` runs on main after each merge. It doesn't say which workflow runs them or how, so CI can change without a proposal.
@@ -108,6 +118,10 @@ README says that `check` is meant to run before every PR is merged, and that `st
 
 **Tick Done criteria in a separate list, outside the body.** Keeping the items and their checkboxes together is easier to read, and checking off an item doesn't change the design, which is what the rule against editing an accepted body protects.
 
+**Keep signatures by hand only.** The point of hand-signing is that a person, not an agent, decides a doc is theirs. A PR comment or an interactive command is just as deliberate, and the comment is better evidence of who did it than a line anyone can type. What the rules need to stop is an agent signing, and AGENTS.md, the allowlist, the bot check, and the terminal check cover that.
+
+**Use GitHub's PR approval as the signature.** It's one click, but it approves a whole PR, not one doc, and it isn't in the doc where readers look. It also can't be given by a PR's own author, which is usually the person who'd sign.
+
 **A `Proposal:` trailer on implementation PRs**, so the tool can find drafts that merged code cites. It would catch a draft like wine-draw whose code merged. With `branch` and Done criteria, it's mostly covered, so it's left for later (see Open issues).
 
 ## Compatibility
@@ -127,7 +141,7 @@ Existing issues keep their numbers, and each proposal keeps its `id`. Old links 
 
 ## Security
 
-None. This changes the documentation process and its tool, not what a guest can reach.
+Nothing changes for the guest. The signing workflow writes to PR branches, so it runs only on `issue_comment` events for PRs from this repository, never from forks. It checks the commenter's login against `design/SIGNERS` on main, not on the PR's branch, so a PR can't add its own signer, and its token can write contents only.
 
 ## Done criteria
 
@@ -138,7 +152,10 @@ None. This changes the documentation process and its tool, not what a guest can 
 - [ ] `zig build design -- propose <slug> --dry-run` shows the issue it would open and `status: proposed`, without renaming the file, and refuses when an open issue has the same title.
 - [ ] `zig build design -- log browser-gfx` prints its status changes with their commits.
 - [ ] `zig build proposal -Dp=browser-gfx` runs the Chromium cases in `tests/web/gfx.mjs`.
-- [ ] design/README.md, TEMPLATE.md, AGENTS.md, and DEVELOPING.md describe the new states, `branch`, Done criteria, `propose`, and `log`, and nothing describes `likely-accept`, `fix`, or numbered filenames.
+- [ ] `zig build design -- sign proposal-flow` adds a signature in the short form with today's date, refuses when stdin isn't a terminal, and refuses unless the typed slug matches.
+- [ ] A `/sign <slug>` comment on a PR from a login in `design/SIGNERS` adds the signature on the PR's branch, and the same comment from a login that isn't listed does nothing but reply.
+- [ ] `check` fails on a signature line in neither form, or naming someone not in `design/SIGNERS`.
+- [ ] design/README.md, TEMPLATE.md, AGENTS.md, and DEVELOPING.md describe the new states, `branch`, Done criteria, `propose`, and `log`, and nothing describes `likely-accept`, `fix`, or numbered filenames, and README's Signature section describes the short form, `sign`, and `/sign`.
 
 ## Implementation
 
@@ -147,8 +164,9 @@ None. This changes the documentation process and its tool, not what a guest can 
 3. Rename `file` to `propose`, with the duplicate-issue check. Add `log`, and remove `fix`.
 4. Scan `tests/web/*.mjs` for tags, and register the web cases with `zig build proposal`.
 5. Write the migration as a one-time mode of the tool (`zig build design -- migrate`), run it, and commit the result alone, so the mechanical change is reviewable apart from the tool.
-6. Rewrite design/README.md, TEMPLATE.md, and the design parts of AGENTS.md and DEVELOPING.md. AGENTS.md's "draft one and stop" becomes: stop and draft one unless the person you're working for directs the work, in which case the PR adds or updates the proposal, its `branch`, and its Done criteria as it goes.
-7. Add a dated note under the Updates section of [proposals](0001-proposals.md) that points here, and set this proposal to `implemented` with `branch: [main]`.
+6. Add `design/SIGNERS`, `sign`, and the `/sign` workflow, and the `check` rule for signature lines.
+7. Rewrite design/README.md, TEMPLATE.md, and the design parts of AGENTS.md and DEVELOPING.md. AGENTS.md's "draft one and stop" becomes: stop and draft one unless the person you're working for directs the work, in which case the PR adds or updates the proposal, its `branch`, and its Done criteria as it goes. The rule about signature lines also forbids running `sign`, posting `/sign`, and editing `design/SIGNERS`.
+8. Add a dated note under the Updates section of [proposals](0001-proposals.md) that points here, and set this proposal to `implemented` with `branch: [main]`.
 
 This proposal is the first to use the new flow: it goes from `draft` to `implemented` in the PR that does the work.
 
