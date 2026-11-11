@@ -50,7 +50,7 @@ pub const Nr = enum(u64) {
     semacquire = 37,
     semrelease = 38,
     tsemacquire = 52,
-    /// The only underscore call h9 serves (design/0007-go-compat.md).
+    /// The only underscore call h9 serves (design/go-compat.md).
     _nsec = 53,
     _,
 };
@@ -340,7 +340,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
         },
         .mount => {
             // mount(int fd, int afd, char *old, int flag, char *aname)
-            // (design/0008-devsrv.md): drawterm's sysmount, which closes fd.
+            // (design/devsrv.md): drawterm's sysmount, which closes fd.
             const old = try gm.string(p.as, try a.u(2), &p.name_buf);
             const spec_va = try a.u(4);
             const spec: [:0]const u8 = if (spec_va == 0) "" else try gm.string(p.as, spec_va, &p.spec_buf);
@@ -483,7 +483,7 @@ fn serve(p: *Process, nr: Nr, a: Args) (gm.Error || std.mem.Allocator.Error)!Out
 }
 
 /// The host word behind a semaphore's guest address, checked as 9front's
-/// evenaddr and seg checks are (design/0003-semaphores.md): an odd address
+/// evenaddr and seg checks are (design/semaphores.md): an odd address
 /// posts "sys: odd address", an unmapped one is a bad address, and one
 /// outside a writable segment fails; those two fail with "bad arg in system
 /// call" and return null. A Plan 9 long is 32 bits, and an aligned one

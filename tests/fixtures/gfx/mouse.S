@@ -1,5 +1,5 @@
 // Opens /dev/mouse and writes what one read of it returns to stdout
-// (tests/backends.zig, design/0015-gfx.md). The test acts on the window
+// (tests/backends.zig, design/gfx.md). The test acts on the window
 // until the run ends: it moves the mouse and holds a button. The mouse
 // moves only once there's a screen, so it opens that first.
 

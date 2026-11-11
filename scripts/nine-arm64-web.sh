@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Makes the web demo's arm64 9front layer: the slim arm64 root
-# (design/0064-multicall.md) at .local/9front/slim-<release>-arm64, which
+# (design/multicall.md) at .local/9front/slim-<release>-arm64, which
 # `zig build web` packs into zig-out/web/nine-arm64.h9a with
-# src/web/nine-arm64.list for ?linux's /9 (design/0012-browser-host.md,
+# src/web/nine-arm64.list for ?linux's /9 (design/browser-host.md,
 # Updates):
 #
 #   zig build isoroot -- .local/9front/9front-<release>.386.iso .local/9front/root386

@@ -1,5 +1,5 @@
 // Posts a pipe end as /srv/m, waits while another machine looks for it,
-// then opens it (tests/backends.zig, design/0008-devsrv.md).
+// then opens it (tests/backends.zig, design/devsrv.md).
 
 #include "lib.S"
 

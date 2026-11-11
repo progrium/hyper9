@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // h9 on the web host's build, under Node 24 or later (JSPI on by default):
 // the same flags as the native h9, on h9's own 386 CPU (h86). The host
-// file system is WASI's, preopened at /. design/0012-browser-host.md.
+// file system is WASI's, preopened at /. design/browser-host.md.
 
 import fs from 'node:fs';
 import { WASI } from 'node:wasi';

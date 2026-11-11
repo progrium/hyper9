@@ -14,7 +14,7 @@
 - Every Plan 9 concept chapter has the same three parts: **In Plan 9** (how the
   real system works), **In h9** (what h9 does the same, differently, or not
   yet), and **Try it** (commands to paste).
-- Badges: *Not yet available ([gfx](design/0015-gfx.md))* marks something
+- Badges: *Not yet available ([gfx](design/gfx.md))* marks something
   that isn't built yet, linked to the [proposal](design/README.md) that adds
   it. A badge comes off when its proposal is marked implemented. A feature
   whose proposal was declined is said to be declined, with a link to why.
@@ -157,7 +157,7 @@ to `h9-emu` too. (When you build `h9-emu` from source it's still called
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | ✓ |
 | Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | ✓ |
 | Linux x86\_64 | ✓ (KVM; without it, `h9-emu`, or `--backend native` for a trusted guest), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
-| Windows on ARM | *Not yet available ([whp](design/0017-whp.md))* | ✓ |
+| Windows on ARM | *Not yet available ([whp](design/whp.md))* | ✓ |
 | Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | ✓, with an amd64 root tree |
 
 **Host requirements.** On macOS, h9 must be signed with the hypervisor
@@ -905,7 +905,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#y` | hcons | `/dev`, before `#c` | h9's per-machine console: `cons`, `consctl`, and `stderr`. Each machine gets its own, as `#y<id>`. |
 | `#e` | env | `/env` | 9front's environment device, one environment per group. No `#ec` (the config environment). |
 | `#d` | dup | `/fd` | Open file descriptors |
-| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine, with 9front's debugging files `mem`, `regs`, `fpregs`, and `text` for acid ([self-host](design/0010-self-host.md)). |
+| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine, with 9front's debugging files `mem`, `regs`, `fpregs`, and `text` for acid ([self-host](design/self-host.md)). |
 | `#s` | srv | `/srv` | 9front's service registry, one per machine |
 | `#\|` | pipe | | Pipes |
 | `#I` | ip | `/net` | The network, through the host's own stack: `cs`, `tcp`, `udp`. Masked under `--net=disable`. |
@@ -1542,7 +1542,7 @@ devices in Plan 9.
   `--write=none` with a 9P root is a usage error. A refused connection or attach is exit 125. The connection
   is plain, unencrypted 9P, so keep a TCP root on a trusted network. Unix
   socket roots need a macOS or Linux host.
-- **9P over WebSocket** ([websocket-9p](design/0021-websocket-9p.md)).
+- **9P over WebSocket** ([websocket-9p](design/websocket-9p.md)).
   `--root ws://host/path` or `wss://host/path` uses a 9P server behind a
   WebSocket as the root. h9 makes the connection on the host, offering the
   `9p` subprotocol, and mounts it like any 9P root. `--root-header 'Name:
@@ -1551,7 +1551,7 @@ devices in Plan 9.
   or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY`, and
   `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
   wss://fs.example/9p /n`. On the command line the scheme can be left off
-  ([schemeless-roots](design/0076-schemeless-roots.md)): a `--root` or
+  ([schemeless-roots](design/schemeless-roots.md)): a `--root` or
   `$H9ROOT` that isn't an existing path and looks like
   `host[:port][/path]`, with a dotted host, a bracketed address, a port, or
   `localhost`, is read as `wss://` plus the value, or `ws://` for
@@ -1565,7 +1565,7 @@ devices in Plan 9.
   stream, and its `text` file text messages, one per read and write.
   `wsmount [-h 'Name: value'] url mountpoint` dials a 9P server and mounts
   it. Guest connections don't use the host's proxies.
-- **Serving the machine** ([serve](design/0035-serve.md)). `--serve ADDR`
+- **Serving the machine** ([serve](design/serve.md)). `--serve ADDR`
   makes h9 a 9P server while the program runs: `unix!/path`,
   `tcp!host!port`, or `ws://host:port/path`, repeatable. Each connection
   gets its own `exportfs` of the machine's namespace as the plan built it,
@@ -1586,13 +1586,13 @@ devices in Plan 9.
   on loopback or a trusted network. A machine serves up to 32 connections,
   each with up to 8 exportfs processes; serving's processes count against
   `--pids` separately from the program's. Every listener also speaks
-  9P2000.L ([dotl](design/0022-dotl.md)), so Linux mounts it: `mount -t 9p
+  9P2000.L ([dotl](design/dotl.md)), so Linux mounts it: `mount -t 9p
   -o trans=unix,version=9p2000.L /path/h9.sock /mnt`. A .L client sees
   regular files and directories only, with every file owned by your host
   uid. Renames work only within a directory, and symlinks, device nodes,
   and hard links can't be made. Byte-range locks are advisory, shared by
   the machine's connections.
-- **9P2000.L servers** ([dotl](design/0022-dotl.md)). `dotlfs addr
+- **9P2000.L servers** ([dotl](design/dotl.md)). `dotlfs addr
   mountpoint [spec]` dials a server that speaks 9P2000.L, such as diod or
   ZeroFS, and mounts it. It also mounts a plain 9P2000 server, so it can be
   used without knowing which one is at the address. The dial goes through
@@ -1608,7 +1608,7 @@ devices in Plan 9.
   server too: `--root tcp!host!port` works with either. A file read from
   start to end is read a whole `msize` (up to 1 MiB) at a time, not
   devmnt's 32 KiB, and any write drops what was read ahead.
-- **Reconnecting to ZeroFS** ([dotl](design/0022-dotl.md)). With a server
+- **Reconnecting to ZeroFS** ([dotl](design/dotl.md)). With a server
   that speaks ZeroFS's 9P2000.L.Z, a TCP mount or root survives the
   connection dropping: h9 dials again for up to 120 seconds, a second apart,
   reopens every open file without truncating it, and resends each request
@@ -1625,9 +1625,9 @@ devices in Plan 9.
 - Not yet available: roots that need authentication
   ([root-auth](design/root-auth.md)); serving a machine's namespace to the
   host or the network as a 9P server from h9 itself, rather than with
-  `exportfs` inside the guest as below ([serve](design/0035-serve.md)).
+  `exportfs` inside the guest as below ([serve](design/serve.md)).
 - 9front disk images as roots were proposed and declined
-  ([image-roots](design/0014-image-roots.md)), since host directories, 9P
+  ([image-roots](design/image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an
   image, boot it in a VM and serve its file system over 9P, or copy its files
   out, as `zig build mkroot` does.
@@ -1750,7 +1750,7 @@ the run ends.
   dialog) as caveats.
 
 **In a browser.** On the browser host, a page's `<canvas>` is the window
-([browser-gfx](design/0120-browser-gfx.md)). `h9-web.js`'s
+([browser-gfx](design/browser-gfx.md)). `h9-web.js`'s
 `createMachine({ gfx: { canvas } })` moves the canvas into the machine's
 Worker, and rio and acme draw on it. The demo page's **rio** button runs
 `rio -i 'window acme'` that way.
@@ -1809,7 +1809,7 @@ live in `/sys/src`, and `mk install` copies results into `/$objtype/bin`.
 
 The compilers, linkers, and `mk` run, and rebuild 9front's userland from
 `/sys/src` byte for byte; that's how `zig build mkroot -- --arch` adds `/386` and
-`/amd64`. `acid` debugs a live process ([self-host](design/0010-self-host.md)).
+`/amd64`. `acid` debugs a live process ([self-host](design/self-host.md)).
 
 - You need `/sys/src` in the root tree for the headers and libraries to
   rebuild 9front itself: build the tree with `zig build mkroot -- --src`.
@@ -1914,7 +1914,7 @@ hello, world
 ### 20. Linux programs
 
 h9 runs Linux ELF programs as well as 9front ones
-([linux-personality](design/0018-linux-personality.md)). There's no Linux
+([linux-personality](design/linux-personality.md)). There's no Linux
 kernel: a Linux program's system calls are translated onto the same Plan 9
 kernel that serves 9front programs, so it runs in the same machine, with
 the same namespace, sandbox, network policy, and limits. Static and dynamic
@@ -2027,7 +2027,7 @@ the hypervisor (or, with `--backend native`, the native backend), at native
 speed apart from system calls. One for another architecture, such as an amd64 image on an Apple
 Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
 32-bit x86 programs run with `--arch 386` on the emulator
-([linux-i386](design/0105-linux-i386.md)).
+([linux-i386](design/linux-i386.md)).
 
 **Not yet.**
 
@@ -2041,7 +2041,7 @@ Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
 - Memory: `exec` copies the whole program image into the new process, so a
   large program that starts others, such as `zig cc` or a compiler driver,
   can need `--memory 3g` to `8g`
-  (*Not yet available ([cow-fork](design/0121-cow-fork.md))*).
+  (*Not yet available ([cow-fork](design/cow-fork.md))*).
 - CPU times in `/proc/stat` and `/proc/n/stat` read 0, so `top` and `htop`
   show 0%.
 - `symlink` works in overlays (the root and `/tmp`) and host trees on macOS
@@ -2101,7 +2101,7 @@ Machine:
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `native`, which shares h9's process and isn't a security boundary (chapter 23); pass `--backend native` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/0017-whp.md)). |
+| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `native`, which shares h9's process and isn't a security boundary (chapter 23); pass `--backend native` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/whp.md)). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
 | `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. A host directory can be a 9front tree or a Linux one, and `--root` can be given twice, once for each (chapter 20). Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
 | `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
@@ -2583,7 +2583,7 @@ about one.
 
 **The native backend** runs amd64 guest code directly on the CPU, with no
 hypervisor, so it works in containers without `/dev/kvm` and cloud VMs
-without nested virtualization ([native-backend](design/0095-native-backend.md)).
+without nested virtualization ([native-backend](design/native-backend.md)).
 Each address space is a tiny stub process that h9 starts; the kernel's
 Syscall User Dispatch turns every system call the guest makes into a signal
 h9 answers, and a seccomp filter kills the stub if guest code reaches the
@@ -2609,7 +2609,7 @@ guest code on one virtual CPU at a time, so CPU-bound programs don't get
 faster with more processes; blocking in the kernel still overlaps.
 
 **In a browser.** h9 also builds for WebAssembly, where the emulator runs
-386 programs ([browser-host](design/0012-browser-host.md)). `--backend v86`,
+386 programs ([browser-host](design/browser-host.md)). `--backend v86`,
 the browser's backend before the emulator replaced it, is another name for
 `emu`.
 
@@ -2645,7 +2645,7 @@ a fault it doesn't handle.
 does `acid`, Plan 9's debugger: `h9 --rc 'sleep 5 & sleep 1; acid $apid'`,
 then `stk()` for a stack trace; `new()`, `bpset`, `cont`, `step`, and `next`
 work too
-([self-host](design/0010-self-host.md)).
+([self-host](design/self-host.md)).
 
 **Whose error is it?**
 

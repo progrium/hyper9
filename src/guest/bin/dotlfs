@@ -1,6 +1,6 @@
 #!/bin/rc
 # dotlfs [-abcCL] addr[,addr...] mountpoint [spec]: mounts a 9P2000.L
-# server, or a 9P2000 one, through #ℓ (design/0022-dotl.md). addr is a
+# server, or a 9P2000 one, through #ℓ (design/dotl.md). addr is a
 # dial string, tcp!host!port, and the dial goes through #I under the
 # network policy. With 9P2000.L.Z the conversation redials the addresses
 # when the connection drops; -L offers plain 9P2000.L only.

@@ -1,5 +1,5 @@
 /* rt_sigreturn takes only what a user program may set
- * (design/0018-linux-personality.md, "Signals"): a handler rewrites its
+ * (design/linux-personality.md, "Signals"): a handler rewrites its
  * frame to ask for kernel privilege (EL1h with interrupts masked on arm64,
  * the kernel's code and stack selectors on amd64 and 386), and the
  * program must

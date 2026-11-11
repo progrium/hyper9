@@ -4,7 +4,7 @@
 //! The Pages workflow (.github/workflows/pages.yml) uses it to get a 386
 //! root for the browser host's root archive from the pinned 386 ISO
 //! (`scripts/fetch.sh iso386`), without the hour-long cross-compile that
-//! `zig build mkroot -- --arch 386` does (design/0009-i386.md chose the
+//! `zig build mkroot -- --arch 386` does (design/i386.md chose the
 //! cross-compile for development roots, and that still stands; the demo
 //! only needs the release's own binaries).
 //!

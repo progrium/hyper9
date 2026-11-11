@@ -1,5 +1,5 @@
 //! Windows Hypervisor Platform backend (Windows, x86_64). See
-//! design/0017-whp.md.
+//! design/whp.md.
 //!
 //! It runs the amd64 shim, page tables and CPU state that the KVM backend
 //! runs on x86_64 (x86.zig, pt_amd64.zig, src/arch/amd64/shim.S), setting

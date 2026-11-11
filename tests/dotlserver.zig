@@ -1,5 +1,5 @@
 //! A 9P2000.L server on a loopback port for the `[dotl]` cases
-//! (design/0022-dotl.md): src/dotl/testserver.zig's tree in memory, made
+//! (design/dotl.md): src/dotl/testserver.zig's tree in memory, made
 //! fresh for each connection by `fill`. No host 9P2000.L server (diod,
 //! zerofs) is needed.
 

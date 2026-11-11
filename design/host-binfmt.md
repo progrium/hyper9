@@ -18,15 +18,15 @@ On Linux, h9 can be registered with `binfmt_misc` for the 9front a.out magics, s
 
 ## Background
 
-This was an open question in SPEC.md, then in [kvm](0016-kvm.md), where it didn't belong: it has nothing to do with the backend.
+This was an open question in SPEC.md, then in [kvm](kvm.md), where it didn't belong: it has nothing to do with the backend.
 
 - **Today** a 9front binary on the host runs as `h9 ./prog`. SPEC.md's CLI rules make an argument starting with `./` or `../` a host path, and an absolute one a guest path.
-- **The magics** are big-endian at offset 0: arm64 (`R_MAGIC`) is `00 00 8c 47`, amd64 (`S_MAGIC`) is `00 00 8a 97`, and 386 (`I_MAGIC`, [i386](0009-i386.md)) is `00 00 01 eb`.
+- **The magics** are big-endian at offset 0: arm64 (`R_MAGIC`) is `00 00 8c 47`, amd64 (`S_MAGIC`) is `00 00 8a 97`, and 386 (`I_MAGIC`, [i386](i386.md)) is `00 00 01 eb`.
 - **`binfmt_misc`** matches a file's leading bytes and runs `interpreter path args...`, or with the `P` flag `interpreter path argv0 args...`. It can't add arguments of its own, and `path` is whatever was given to `execve`, relative or absolute. Registering a rule needs root.
 
 Non-goals:
 
-- **9front binaries run from a [linux-personality](0018-linux-personality.md) process.** That process's `execve` is a syscall served by h9, not by the host kernel, so `binfmt_misc` never sees it. The personality proposal covers it: each exec picks the personality by magic.
+- **9front binaries run from a [linux-personality](linux-personality.md) process.** That process's `execve` is a syscall served by h9, not by the host kernel, so `binfmt_misc` never sees it. The personality proposal covers it: each exec picks the personality by magic.
 - **Host Linux binaries.** The rules match only the a.out magics, never `\x7fELF`.
 - **macOS and Windows.** Neither has an equivalent. A Windows file association needs an extension, which 9front binaries don't have.
 
@@ -92,16 +92,16 @@ With the rule registered, any host process that runs a 9front binary starts a ne
 - **`H9FLAGS`** is the user's own environment, so it grants nothing they couldn't get by running h9 with those flags.
 - **Nested h9** is refused by default, above.
 - **`F`** makes the kernel hold the interpreter open. Replacing h9 on disk doesn't change the registered interpreter until the rule is registered again; the README says so.
-## Done when
+## Done criteria
 
-- These run `h9-binfmt` directly, so they need no root:
+- [ ] These run `h9-binfmt` directly, so they need no root:
   - `test "h9-binfmt runs a host path given as absolute [host-binfmt]"`
   - `test "h9-binfmt passes argv0 and flag-like arguments through [host-binfmt]"`
   - `test "h9-binfmt reads H9ROOT and H9FLAGS [host-binfmt]"`
   - `test "h9-binfmt refuses to run nested [host-binfmt]"`
   - `test "h9 --binfmt-conf prints a rule per architecture [host-binfmt]"`
-- `test "./hello runs through binfmt_misc [host-binfmt]"`, which skips unless the rule is registered. The Lima `linux` VM registers it when provisioned, so the case runs there.
-- Demo, in the `linux` VM: `sudo sh -c 'h9 --binfmt-conf > /etc/binfmt.d/h9.conf' && sudo systemctl restart systemd-binfmt`, then `./zig-out/fixtures/hello` and `h9 --check`.
+- [ ] `test "./hello runs through binfmt_misc [host-binfmt]"`, which skips unless the rule is registered. The Lima `linux` VM registers it when provisioned, so the case runs there.
+- [ ] Demo, in the `linux` VM: `sudo sh -c 'h9 --binfmt-conf > /etc/binfmt.d/h9.conf' && sudo systemctl restart systemd-binfmt`, then `./zig-out/fixtures/hello` and `h9 --check`.
 ## Implementation
 
 1. `h9-binfmt` in `main.zig`, `H9FLAGS`, and `H9_NESTED` set for devcmd's host commands. The cases that run it directly.

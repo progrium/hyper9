@@ -1,6 +1,6 @@
 //! zig build x64-jit (and hcpu): hx64's cases, tagged [174], each to run
 //! on T0 alone and on T1 through dispatch, as tests/x86.zig runs h86's.
-//! design/0174-hcpu.md's Done when lists them: the long-mode ones,
+//! design/hcpu.md's Done when lists them: the long-mode ones,
 //!
 //! - a 32-bit write zeroes the upper half of a 64-bit register
 //! - a RIP-relative load reads past the instruction
@@ -237,7 +237,7 @@ fn expectSyscall(e: Exit) !void {
 
 const syscall = [_]u8{ 0x0f, 0x05 };
 
-test "a 32-bit write zeroes the upper half of a 64-bit register [174]" {
+test "a 32-bit write zeroes the upper half of a 64-bit register [hcpu]" {
     const prog = [_]u8{
         0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, // movq $-1, %rax
         0x90, // nop (xchg %eax, %eax, which doesn't zero-extend)
@@ -268,7 +268,7 @@ test "a 32-bit write zeroes the upper half of a 64-bit register [174]" {
     }.f);
 }
 
-test "a RIP-relative load reads past the instruction [174]" {
+test "a RIP-relative load reads past the instruction [hcpu]" {
     const prog = [_]u8{
         0x48, 0x8d, 0x0d, 0xf9, 0xff, 0xff, 0xff, // leaq -7(%rip), %rcx: itself, 0x1000
         0x48, 0x8b, 0x05, 0x02, 0x00, 0x00, 0x00, // movq 2(%rip), %rax: 0x1010
@@ -288,7 +288,7 @@ test "a RIP-relative load reads past the instruction [174]" {
     }.f);
 }
 
-test "INT 0x80 in long mode raises #GP [174]" {
+test "INT 0x80 in long mode raises #GP [hcpu]" {
     // At the INT, with nothing done; INT $64 likewise.
     for ([_]u8{ 0x80, 0x40 }) |v| {
         const prog = [_]u8{ 0x90, 0xcd, v } ++ syscall;
@@ -339,7 +339,7 @@ fn fourThreads(prog: []const u8) !u64 {
     return std.mem.readInt(u64, s.data[0..8], .little);
 }
 
-test "four CMPXCHG16B threads lose no increments [174]" {
+test "four CMPXCHG16B threads lose no increments [hcpu]" {
     if (!longRuns()) return error.SkipZigTest;
     const n = 50_000;
     comptime std.debug.assert(n == 0xc350);
@@ -358,7 +358,7 @@ test "four CMPXCHG16B threads lose no increments [174]" {
     try testing.expectEqual(@as(u64, 4 * n), try fourThreads(&prog));
 }
 
-test "four LOCK XADD threads on T0 lose nothing [174]" {
+test "four LOCK XADD threads on T0 lose nothing [hcpu]" {
     if (!longRuns()) return error.SkipZigTest;
     const n = 200_000;
     comptime std.debug.assert(n == 0x30d40);
@@ -372,7 +372,7 @@ test "four LOCK XADD threads on T0 lose nothing [174]" {
     try testing.expectEqual(@as(u64, 4 * n), try fourThreads(&prog));
 }
 
-test "arch_prctl's FS base reaches FS-relative loads on T0 and T1 [174]" {
+test "arch_prctl's FS base reaches FS-relative loads on T0 and T1 [hcpu]" {
     // The base as arch_prctl(ARCH_SET_FS) leaves it in the Cpu.
     const prog = [_]u8{
         0x64, 0x48, 0x8b, 0x04, 0x25, 0x10, 0x00, 0x00, 0x00, // movq %fs:0x10, %rax
@@ -399,7 +399,7 @@ test "arch_prctl's FS base reaches FS-relative loads on T0 and T1 [174]" {
     }.f);
 }
 
-test "a DIV by zero gives vector 0 at the DIV [174]" {
+test "a DIV by zero gives vector 0 at the DIV [hcpu]" {
     const prog = [_]u8{
         0x31, 0xc9, // xorl %ecx, %ecx
         0x48, 0xf7, 0xf1, // divq %rcx (at 0x1002)
@@ -438,7 +438,7 @@ const rep_prog = [_]u8{
     0xf3, 0xa4, // rep movsb (at 0x100f)
 } ++ syscall;
 
-test "a REP MOVSB stopped by a fault is exact, and resumes [174]" {
+test "a REP MOVSB stopped by a fault is exact, and resumes [hcpu]" {
     var regs: [16]u64 = @splat(0);
     // The 32-bit moves zero these.
     regs[1] = 0xffff_ffff_0000_0000;
@@ -464,7 +464,7 @@ test "a REP MOVSB stopped by a fault is exact, and resumes [174]" {
     }.f);
 }
 
-test "a REP stopped between iterations on T0 resumes exactly [174]" {
+test "a REP stopped between iterations on T0 resumes exactly [hcpu]" {
     if (!longRuns()) return error.SkipZigTest;
     // The stop word is guest memory the program sets: T0 sees it between
     // REP iterations (every 4096), so the REP stops part way, at itself.
@@ -497,7 +497,7 @@ test "a REP stopped between iterations on T0 resumes exactly [174]" {
     try testing.expectEqualSlices(u8, ref.data(), m.data());
 }
 
-test "a store into the executing page takes effect at the next instruction [174]" {
+test "a store into the executing page takes effect at the next instruction [hcpu]" {
     const prog = [_]u8{
         0xc6, 0x05, 0x01, 0x00, 0x00, 0x00, 0x2a, // movb $0x2a, 1(%rip): 0x1008
         0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax (0x1007; its immediate at 0x1008)
@@ -510,7 +510,7 @@ test "a store into the executing page takes effect at the next instruction [174]
     }.f);
 }
 
-test "an instruction crossing into an unmapped page faults at its first byte [174]" {
+test "an instruction crossing into an unmapped page faults at its first byte [hcpu]" {
     // jmp to 0x2ffe, where movabs $imm, %rax runs into 0x3000.
     var prog: [0x2000]u8 = @splat(0x90);
     prog[0] = 0xe9;
@@ -534,7 +534,7 @@ test "an instruction crossing into an unmapped page faults at its first byte [17
     }.f);
 }
 
-test "CPUID reports SSE2 and no AVX [174]" {
+test "CPUID reports SSE2 and no AVX [hcpu]" {
     const prog = [_]u8{
         0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
         0x0f, 0xa2, // cpuid

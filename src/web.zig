@@ -1,4 +1,4 @@
-//! The web host (design/0012-browser-host.md): h9 on wasm32-wasi, in a
+//! The web host (design/browser-host.md): h9 on wasm32-wasi, in a
 //! Web Worker or under Node, with h9's own 386 CPU (h86) as its backend.
 
 const std = @import("std");

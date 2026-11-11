@@ -1,5 +1,5 @@
 //! Zig's side of the web host's coroutines (coro.c,
-//! design/0012-browser-host.md), and `Thread`, which stands in for
+//! design/browser-host.md), and `Thread`, which stands in for
 //! std.Thread where h9 starts a host thread of its own.
 
 const std = @import("std");

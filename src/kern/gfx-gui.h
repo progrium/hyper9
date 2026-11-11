@@ -1,7 +1,7 @@
 /*
  * Included ahead of a drawterm GUI backend's own source (build.zig passes
  * it with -include), so the vendored files compile unmodified
- * (design/0015-gfx.md):
+ * (design/gfx.md):
  *
  * - The backend's screeninit, clipread and clipwrite (and on X11,
  *   setcursor and mouseset) are renamed, so

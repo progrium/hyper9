@@ -107,7 +107,7 @@ pub const NULLSEL: u32 = 0;
 
 /// pc/io.h VectorSYSCALL: INT $64, which 9front puts in Ureg.trap.
 pub const vector_syscall = 64;
-/// Linux's int 0x80 (design/0105-linux-i386.md). Backends report both as a
+/// Linux's int 0x80 (design/linux-i386.md). Backends report both as a
 /// `.syscall` exit with the vector in Ureg.trap, and the process model
 /// takes each personality's own.
 pub const vector_linux = 0x80;

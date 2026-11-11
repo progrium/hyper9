@@ -1,4 +1,4 @@
-/* What databases need of files (design/0018-linux-personality.md): each
+/* What databases need of files (design/linux-personality.md): each
  * case named on the command line prints "ok NAME" or "FAIL NAME: why".
  * They work in the directory given by $DIR, or /tmp. */
 #define _GNU_SOURCE

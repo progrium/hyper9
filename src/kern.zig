@@ -503,7 +503,7 @@ pub fn setProcSegment(f: *const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_in
 
 /// Sets the hook ctl stop and startstop call, with the process's `aux`,
 /// so it checks for a stop request at its next stop point
-/// (design/0010-self-host.md). Called as the note kick hook is.
+/// (design/self-host.md). Called as the note kick hook is.
 pub fn setStopKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
     if (available) c.h9_stopkick = f;
 }
@@ -822,7 +822,7 @@ pub fn setPlan(p: ?*const policy.Plan) void {
 
 /// Where a machine's overlay memory comes from: its guest-physical page
 /// allocator, so ephemeral files count against `--memory`
-/// (design/0006-ephemeral-writes.md). Allocations are whole pages of
+/// (design/ephemeral-writes.md). Allocations are whole pages of
 /// `page_size` bytes; `alloc` returns null when the machine's memory is
 /// used up.
 pub const Pages = struct {
@@ -852,7 +852,7 @@ pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
 
 /// The target of the host link that `path`'s last name is, through `#U`
 /// and an overlay over it, as the link has it written
-/// (design/0034-symlinks-in-root.md). Fails with "not a symbolic link"
+/// (design/symlinks-in-root.md). Fails with "not a symbolic link"
 /// for anything else. For the Linux personality's readlinkat; Plan 9
 /// programs never see links.
 pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
@@ -986,7 +986,7 @@ pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
 }
 
 /// Connects to the unix-domain socket at host path `path` and returns an
-/// fd on a channel for it (design/0013-9p-roots.md). Fails on Windows.
+/// fd on a channel for it (design/9p-roots.md). Fails on Windows.
 pub fn unixDial(path: [*:0]const u8) Error!u31 {
     return try check(c.h9_unixdial(path));
 }
@@ -1200,7 +1200,7 @@ comptime {
     }
 }
 
-// The clock (design/0007-go-compat.md): one per host process, in
+// The clock (design/go-compat.md): one per host process, in
 // nanoseconds. Wall time is the host's real-time clock. Monotonic time is
 // the host's monotonic clock, offset so it starts at the wall time when
 // the clock is first read, so its values look like wall time but never
@@ -1275,7 +1275,7 @@ fn h9_cons_ncpu() callconv(.c) c_int {
     return @intCast(@min(cons_ncpu, std.math.maxInt(c_int)));
 }
 
-// h9's own guest commands (design/0032-guest-tools.md): the table build.zig
+// h9's own guest commands (design/guest-tools.md): the table build.zig
 // generates from src/guest/, as constant C structs. devhtools.c reads it
 // once at reset and never calls back into Zig.
 
@@ -1314,7 +1314,7 @@ fn h9_tools_table(n: *c_int) callconv(.c) [*]const Htool {
     return &tools_table;
 }
 
-/// The built-in root (design/0087-builtin-root.md), `#Hroot`: the same kind of
+/// The built-in root (design/builtin-root.md), `#Hroot`: the same kind of
 /// table, from multicall's trees. It has a 9front tree's modes, 0775 and
 /// 0664, though the device refuses every write, because an overlay over it
 /// (the root's, and `/tmp`'s) takes its permissions from the tree below:

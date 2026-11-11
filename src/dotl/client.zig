@@ -1,4 +1,4 @@
-//! The client side of the 9P2000.L translator (design/0022-dotl.md, "The
+//! The client side of the 9P2000.L translator (design/dotl.md, "The
 //! translator"): 9P2000 from devmnt on one side, a 9P2000.L server on the
 //! other.
 //!
@@ -60,7 +60,7 @@ pub const Dialect = enum {
 };
 
 /// Links followed in one walk before "too many symbolic links", as
-/// design/0034-symlinks-in-root.md has it.
+/// design/symlinks-in-root.md has it.
 pub const max_links = 40;
 
 /// Rlopenatread's bytes before its data: header, qid, iounit, eof, count.
@@ -190,7 +190,7 @@ const Entry = struct {
 };
 
 /// A walk that follows symbolic links inside the attach root, by
-/// design/0034-symlinks-in-root.md's rule: an absolute target is relative
+/// design/symlinks-in-root.md's rule: an absolute target is relative
 /// to the root, `..` stops there, and more than 40 links is an error.
 ///
 /// It first walks all the names in one Twalk. Only when that crosses a

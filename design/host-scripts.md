@@ -45,10 +45,10 @@ Alternatives:
 
 The interpreter is resolved in the guest, so a `#!/usr/bin/python` line can't run a host program. The script must be readable through the policy, so `--read-deny` and the tight profile apply to it like any other file. With the leading option nothing new is reachable.
 
-## Done when
+## Done criteria
 
-- `h9 ./greet world` runs a `#!/bin/rc` script in the host cwd and prints its arguments.
-- Integration cases: a host script in the cwd runs, with `$0` the guest path; a host script outside every bound path fails with a clear message; a missing interpreter gives 127.
+- [ ] `h9 ./greet world` runs a `#!/bin/rc` script in the host cwd and prints its arguments.
+- [ ] Integration cases: a host script in the cwd runs, with `$0` the guest path; a host script outside every bound path fails with a clear message; a missing interpreter gives 127.
 
 ## Implementation
 

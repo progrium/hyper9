@@ -2,7 +2,7 @@
 
 Nov 2, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
-This describes h9 as built. Changes to it go through proposals in [design/](design/README.md); the record of how h9 got here before proposals is the [baseline](design/0000-baseline.md).
+This describes h9 as built. Changes to it go through proposals in [design/](design/README.md); the record of how h9 got here before proposals is the [baseline](design/baseline.md).
 
 ## Contents
 
@@ -104,7 +104,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 
 - Start and run a 9front binary as fast as a native process: no VM image, no boot, no guest kernel.
 - One invocation can hold a whole process tree (rc pipelines, servers posting to /srv, rio, and its clients).
-- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, including on the browser host, which has no CPU to run natively on ([i386](design/0009-i386.md), [browser-host](design/0012-browser-host.md)).
+- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, including on the browser host, which has no CPU to run natively on ([i386](design/i386.md), [browser-host](design/browser-host.md)).
 - One host backend each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows), and a native backend for Linux x86\_64 hosts without KVM.
 - Self-hosting: the 9front compilers and mk run inside and can rebuild the 9front userland.
 
@@ -121,13 +121,13 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | --- | --- | --- |
 | Product shape | A library plus a thin CLI; each invocation is one machine | One machine can hold a whole process tree. Keep the machine API free of CLI-global state. |
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
-| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([9p-roots](design/0013-9p-roots.md), [websocket-9p](design/0021-websocket-9p.md)); disk images were declined ([image-roots](design/0014-image-roots.md)) |
-| Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/0010-self-host.md)), and a source of test binaries |
+| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([9p-roots](design/9p-roots.md), [websocket-9p](design/websocket-9p.md)); disk images were declined ([image-roots](design/image-roots.md)) |
+| Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/self-host.md)), and a source of test binaries |
 | Language | Zig 0.16.x (`minimum_zig_version` in `build.zig.zon`) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
-| Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/0015-gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
+| Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
-| Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/0019-zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
-| No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/0095-native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
+| Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
+| No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
 | Browser host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on h9's own CPU (h86) | One machine per Web Worker; the same build runs under Node for the tests |
 
 ## Architecture
@@ -190,7 +190,7 @@ A backend that can't run the binary's architecture fails with `WrongArch`; HVF r
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
-The interface was shaped around all three hypervisors, so the table and rules below cover WHP as well. HVF, KVM ([kvm](design/0016-kvm.md)), and WHP ([whp](design/0017-whp.md)) on Windows x86\_64 are built; WHP on Windows on ARM isn't yet (see WHP below).
+The interface was shaped around all three hypervisors, so the table and rules below cover WHP as well. HVF, KVM ([kvm](design/kvm.md)), and WHP ([whp](design/whp.md)) on Windows x86\_64 are built; WHP on Windows on ARM isn't yet (see WHP below).
 
 | Operation | macOS: Hypervisor.framework | Linux: KVM | Windows: WHP |
 | --- | --- | --- | --- |
@@ -243,7 +243,7 @@ The baseline and `[whp]` integration cases pass on a Windows x86\_64 VM, except 
 
 ## Native backend (`native`)
 
-The native backend ([native-backend](design/0095-native-backend.md), `src/vmm/native.zig`) runs amd64 guest code directly on the host CPU on Linux x86\_64, with no hypervisor and no emulator, so it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. It's MIT and built into every Linux x86\_64 `h9`.
+The native backend ([native-backend](design/native-backend.md), `src/vmm/native.zig`) runs amd64 guest code directly on the host CPU on Linux x86\_64, with no hypervisor and no emulator, so it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. It's MIT and built into every Linux x86\_64 `h9`.
 
 ### Stubs
 
@@ -315,7 +315,7 @@ Unicorn generates code for a single-threaded context (its `curr_cflags` never se
 
 So a backend runs guest code on one engine at a time, through a ticket lock held across each `uc_emu_start`; kernel calls run outside it, so processes still block in the kernel in parallel.
 
-The lock passes at exits, and is time-sliced: a waiter that has waited 1 ms for the same holder sets the holder's stop request, and the holder stops at its next block and returns `interrupted` ([linux-threads](design/0049-linux-threads.md)), so a guest spinning without syscalls (a spinlock waiting on another thread) doesn't hold the others off.
+The lock passes at exits, and is time-sliced: a waiter that has waited 1 ms for the same holder sets the holder's stop request, and the holder stops at its next block and returns `interrupted` ([linux-threads](design/linux-threads.md)), so a guest spinning without syscalls (a spinlock waiting on another thread) doesn't hold the others off.
 
 The stop is made from the block hook, not by `uc_emu_stop` from the waiter's thread, since an engine stopped from another thread can report the PC of an earlier block than the one it stopped in, and resuming it would run instructions twice. A kick that arrives while an engine waits for the lock is seen once it has it.
 
@@ -349,11 +349,11 @@ On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loo
 
 So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds.
 
-By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](design/0012-browser-host.md)).
+By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](design/browser-host.md)).
 
 ## Browser host (`web`)
 
-`zig build web` builds h9 for wasm32-wasi into `zig-out/web/` ([browser-host](design/0012-browser-host.md)). The kernel, the machine, and the CLI are the same code; what differs is underneath them. Native hosts are unchanged.
+`zig build web` builds h9 for wasm32-wasi into `zig-out/web/` ([browser-host](design/browser-host.md)). The kernel, the machine, and the CLI are the same code; what differs is underneath them. Native hosts are unchanged.
 
 | Piece | Web host |
 | --- | --- |
@@ -364,7 +364,7 @@ By default `h9` uses the host's hypervisor when it's available, and otherwise fa
 | Files | WASI. Under Node, `h9-node` preopens `/`, so roots and `--cwd` are real host directories, resolved with readlink one component at a time since WASI has no realpath. In the browser, `src/web/wasi-mem.js` serves a read-only tree from `root.h9a`, which `tools/webroot.zig` packs from the 386 root and `src/web/root.list`. WASI has no permission bits, so `#U` (devfs, wrapped in `src/kern/devtab.c`) gives files and directories `rwxrwxr-x`; the policy, not the mode, decides access. |
 | Console | `src/web/cli.zig`: stdin, interrupt, hangup, and raw mode are imports the JS host serves, from Node's process or from the page's messages. |
 | Policy | `#C` and `#I` are always masked. `--host-cmd` is a usage error. The network is WebSockets only: `--net=outbound` (the default) and `enable` bind `#ℏ` alone at `/net`, and `disable` masks it. |
-| WebSockets | `hstream.zig`'s web branch calls `h9-web.js`'s `h9_ws_*` imports, over the runtime's `WebSocket` ([websocket-9p](design/0021-websocket-9p.md)): `ws_open` and `ws_send` return at once, `ws_opened` and `ws_recv` are Suspending, and a stream's reader is a coroutine parked in `ws_recv`, which hands over as many queued binary messages as fit. The browser does the handshake, TLS, proxies, and pongs, so `--root-header`, `--root-ca`, and `header` in `ctl` are errors, there's no keepalive, and a failed connection says only "connection failed". `--net-allow` checks a connect's name or literal address but can't check what a name resolves to, which the plan lists as a caveat. |
+| WebSockets | `hstream.zig`'s web branch calls `h9-web.js`'s `h9_ws_*` imports, over the runtime's `WebSocket` ([websocket-9p](design/websocket-9p.md)): `ws_open` and `ws_send` return at once, `ws_opened` and `ws_recv` are Suspending, and a stream's reader is a coroutine parked in `ws_recv`, which hands over as many queued binary messages as fit. The browser does the handshake, TLS, proxies, and pongs, so `--root-header`, `--root-ca`, and `header` in `ctl` are errors, there's no keepalive, and a failed connection says only "connection failed". `--net-allow` checks a connect's name or literal address but can't check what a name resolves to, which the plan lists as a caveat. |
 
 ### The 386 CPU on the web
 
@@ -440,7 +440,7 @@ Pointers, argv, the words of the note frame, and the Tos's pointers follow the a
 
 9front's `libc/9syscall/sys.h` defines numbers 0–53; 48 and 49 are unused. The underscore entries (`_READ`, `_WRITE`, `_STAT`, `_NSEC`, and so on) are old compatibility calls that current libc doesn't use.
 
-h9 implements only the current calls, plus `_NSEC` (53), which Go's `syscall.Gettimeofday` uses ([go-compat](design/0007-go-compat.md)): as 9front's `sys_nsec`, it returns the wall time in nanoseconds in the return register on 64-bit machines, and on 386 stores it through its argument and returns 0. The others post "sys: bad sys call", as the real kernel does for unknown calls.
+h9 implements only the current calls, plus `_NSEC` (53), which Go's `syscall.Gettimeofday` uses ([go-compat](design/go-compat.md)): as 9front's `sys_nsec`, it returns the wall time in nanoseconds in the return register on 64-bit machines, and on 386 stores it through its argument and returns 0. The others post "sys: bad sys call", as the real kernel does for unknown calls.
 
 `mount`, `unmount`, and `fauth` are served by drawterm's `sysmount` and `sysunmount` and a `fauth` wrapper over devmnt's `mntauth` (`h9_fauth` in `src/kern/glue.c`), so a guest mounts any 9P server it has an fd for: a posted channel, a pipe it serves itself, or a network connection the policy allowed. `mount` blocks until the server answers `Tversion` and `Tattach`, and a note interrupts it as it does any devmnt RPC.
 
@@ -460,11 +460,11 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 | `exec` | Load the new a.out into fresh segments, rebuild page tables, reset registers, keep the fds (honouring close-on-exec) and segattach's segments (except `SG_CEXEC` ones) |
 | `exits` / `await` | Wait records queued on the parent Proc; the thread and vCPU are torn down |
 | `brk_` | Grow the data segment and map pages from the guest-physical allocator, up to the stack's floor or the lowest attached segment above it |
-| `segattach` / `segdetach` | Attach or detach a `shared` or `memory` segment, up to five per process, with 9front's placement rules; pages are allocated up front and never executable ([segattach](design/0004-segattach.md)) |
+| `segattach` / `segdetach` | Attach or detach a `shared` or `memory` segment, up to five per process, with 9front's placement rules; pages are allocated up front and never executable ([segattach](design/segattach.md)) |
 | `segbrk` / `segfree` / `segflush` | Move an attached segment's top; zero its pages in place; check the span and do nothing else |
 | `notify` / `noted` | Push a Ureg and the note string onto the user stack and point the PC at the handler; `noted` restores or kills the process |
-| `/proc/n/ctl` `stop` / `start` / `hang` | Park the process on its own thread at its next stop point (syscall entry, note delivery, a breakpoint exit, or before the first instruction after `exec` with `hang`), with its Ureg and Extra copied to its record ([self-host](design/0010-self-host.md)) |
-| `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.c`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](design/0003-semaphores.md)) |
+| `/proc/n/ctl` `stop` / `start` / `hang` | Park the process on its own thread at its next stop point (syscall entry, note delivery, a breakpoint exit, or before the first instruction after `exec` with `hang`), with its Ureg and Extra copied to its record ([self-host](design/self-host.md)) |
+| `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.c`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](design/semaphores.md)) |
 
 ### Threads
 
@@ -508,21 +508,21 @@ The emulator and the native backend have no vCPU limit, so every process owns an
 
 ## Go programs
 
-Go's `GOOS=plan9 GOARCH=amd64` binaries run unchanged ([go-compat](design/0007-go-compat.md)). Go has no `plan9/arm64` port and HVF runs arm64 only, so on an arm64 Mac they run on the emulator, through Unicorn, which isn't in the MIT build. On Linux x86\_64 they run natively, on KVM or the native backend, and on the emulator elsewhere. What the runtime and standard library need is served:
+Go's `GOOS=plan9 GOARCH=amd64` binaries run unchanged ([go-compat](design/go-compat.md)). Go has no `plan9/arm64` port and HVF runs arm64 only, so on an arm64 Mac they run on the emulator, through Unicorn, which isn't in the MIT build. On Linux x86\_64 they run natively, on KVM or the native backend, and on the emulator elsewhere. What the runtime and standard library need is served:
 
 - **Startup:** `/dev/sysstat` has a line per CPU, so `runtime.NumCPU` and the default `GOMAXPROCS` follow `--cpus` (or the host's count); `#c/pid` gives the pid; `/dev/bintime` is opened as fd 18 for the clock. `/dev/swap` isn't served, and the runtime's 4 KiB fallback is right.
-- **Threads:** each M is a process from `rfork(RFPROC|RFMEM|RFNOWAIT)`, and parks and wakes with `tsemacquire`, `semacquire`, and `semrelease` ([semaphores](design/0003-semaphores.md)).
+- **Threads:** each M is a process from `rfork(RFPROC|RFMEM|RFNOWAIT)`, and parks and wakes with `tsemacquire`, `semacquire`, and `semrelease` ([semaphores](design/semaphores.md)).
 - **Time:** `nanotime` uses `bintime`'s fourth word, the monotonic clock, and `walltime` its first; `syscall.Gettimeofday` uses `_NSEC`.
 - **Processes and notes:** `os/exec` forks with `RFPROC|RFFDG|RFREND`, lists fds in `#d`, writes `/env`, execs, and waits with `await`; `os.Getppid` reads `#c/ppid`; `Process.Kill` and `Signal` write `/proc/n/note`. Fault notes carry `addr=`, so a nil dereference becomes a panic, and `interrupt` reaches `os/signal`.
 - **Exit:** `os.Exit(n)` writes `n` as its `exits` string, which the CLI maps to exit code `n`.
-- **Executable and mounts:** `os.Executable` reads `/proc/n/text` ([self-host](design/0010-self-host.md)), and the `mount` syscall is served (see Syscall table). Execs of 9front commands need `/amd64/bin` in the root, which `zig build mkroot` builds on an x86\_64 host ([i386](design/0009-i386.md)).
+- **Executable and mounts:** `os.Executable` reads `/proc/n/text` ([self-host](design/self-host.md)), and the `mount` syscall is served (see Syscall table). Execs of 9front commands need `/amd64/bin` in the root, which `zig build mkroot` builds on an x86\_64 host ([i386](design/i386.md)).
 - **Not yet:** rfork copies the parent's memory eagerly, so a Go program that uses `os/exec` needs `--memory` of about 4 GB.
 
 The go-compat integration cases (tagged `[7]`) run the programs in `tests/fixtures/go` on the native backend where the build has it (Linux x86\_64), and on the emulator elsewhere, and `zig build go-stdtest` runs Go's own `time`, `syscall`, `os`, and `runtime` tests to find gaps.
 
 ## Linux personality
 
-Linux ELF binaries run next to 9front ones in the same machine ([linux-personality](design/0018-linux-personality.md)). The personality is picked at exec by the binary's format: `exec` of an ELF builds a Linux image, and a Linux `execve` of an a.out goes back to 9front. A Linux process keeps the same kernel `Proc`, fds, pipes, notes and namespace; only its syscall table and root differ.
+Linux ELF binaries run next to 9front ones in the same machine ([linux-personality](design/linux-personality.md)). The personality is picked at exec by the binary's format: `exec` of an ELF builds a Linux image, and a Linux `execve` of an a.out goes back to 9front. A Linux process keeps the same kernel `Proc`, fds, pipes, notes and namespace; only its syscall table and root differ.
 
 ### Loading
 
@@ -589,7 +589,7 @@ The environment goes both ways: a Linux program gets `/env` as `NAME=value` (wit
 `isatty` is true only when h9's own stdin and stdout are terminals. The console's termios is one per machine: `TCSETS` sets raw mode from `ICANON`, and, through the optional `echo` and `crnl` on `Machine.Stdio.raw`, the host's echo from `ECHO` and its CR-to-NL mapping from `ICRNL`; `TIOCGWINSZ` is the host terminal's size, through the hook's optional `size`, or 80x24. In non-canonical mode with `VMIN` 0, a console read waits at most `VTIME` tenths of a second and may return 0 bytes. consctl also takes `echooff` and `echoon`, which keep the line discipline.
 ### Sockets and readiness
 
-A socket ([linux-net](design/0050-linux-net.md)) is a `/net` conversation, its fd the conversation's data file. `socket(2)` opens `/net/tcp/clone` or `/net/udp/clone` in the process's namespace, in the 9front view, as `dial(2)` does, so it's devip's (`#I`) unless something else is mounted on `/net`. With devip's, `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
+A socket ([linux-net](design/linux-net.md)) is a `/net` conversation, its fd the conversation's data file. `socket(2)` opens `/net/tcp/clone` or `/net/udp/clone` in the process's namespace, in the 9front view, as `dial(2)` does, so it's devip's (`#I`) unless something else is mounted on `/net`. With devip's, `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
 
 A conversation from a mounted `/net`, such as another h9's served with `--serve-net`, is devmnt's, which can't say whether a read would block, so `src/kern/linuxnet.c` attaches it to a read-ahead: a kproc reads its data into a 64 KiB ring (UDP keeps each message's length), and `recv`, `MSG_PEEK`, a plain `read`, and readiness answer from the ring. A non-blocking connect writes `connect` to its `ctl` in a kproc, writable when done, with `SO_ERROR` from its error. A listening one has a kproc that opens `listen`, which waits in the server, and keeps one call for `accept`, readable while it waits. Sends write the data file. The description's last close writes `shutdown rdwr` (or 9front's `hangup`) and lets the conversation go. The serving machine's policy governs what its conversations reach.
 
@@ -612,7 +612,7 @@ Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's chann
 `poll`, `ppoll`, `select` and `pselect6` use it, `epoll` keeps interest lists in the Linux layer (edge-triggered by generation), and `#ε` serves eventfd and epoll instances. `O_NONBLOCK` asks first and returns `EAGAIN`, and a blocking socket read waits in `h9_poll` so a signal can interrupt it. A Linux pipe read takes everything queued.
 ### Threads
 
-A thread ([linux-threads](design/0049-linux-threads.md)) is its own kernel process, with its own `Proc`, vCPU lease and note queue, forked with `RFNOWAIT` (and `RFFDG` unless `CLONE_FILES`), sharing the creator's `Mm` and a thread group (`lsys.Group`), which holds the tgid, the members, the signal actions, fd flags, directory buffers, sockets and epoll sets.
+A thread ([linux-threads](design/linux-threads.md)) is its own kernel process, with its own `Proc`, vCPU lease and note queue, forked with `RFNOWAIT` (and `RFFDG` unless `CLONE_FILES`), sharing the creator's `Mm` and a thread group (`lsys.Group`), which holds the tgid, the members, the signal actions, fd flags, directory buffers, sockets and epoll sets.
 
 `getpid` is the tgid, `gettid` the process's own pid. A thread's forks are the leader's children (`RFLXTHREAD` in `src/kern/proc.c`), so any thread can wait for them, several at once, and `waitid` takes `WNOWAIT`.
 
@@ -636,7 +636,7 @@ System V shared memory (`src/linux/sysvshm.zig`): `shmget`, `shmat`, `shmdt` and
 `setitimer`'s `ITIMER_REAL` and `alarm` are served by one kernel process (`src/linux/itimer.zig`) that posts `alarm` to a due process through a reference to its kernel record (`h9_kern_selfref`), waking at least every 5 ms while any timer is set and ending two seconds after the last is cleared; the CPU-time timers are accepted and never fire. `sync_file_range` is a no-op, since `fsync` does the writing.
 ### 32-bit x86
 
-With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator ([linux-i386](design/0105-linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.
+With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator ([linux-i386](design/linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.
 
 Calls come through `int 0x80` and the i386 table; `ia32.serve` in `sys.zig` joins split 64-bit arguments, maps the `*_time64` calls and the `*32`/`*64` forms onto the generic calls, and serves the multiplexers (`socketcall`, `ipc`) and the old forms (`old_mmap`, `old_select`, the 64-byte `stat`), while the generic calls read `long`s, pointers, `iovec`s, `msghdr`s, `rusage`, and `siginfo` at the process's word size.
 
@@ -685,7 +685,7 @@ drawterm's has one machine-wide environment and imports the host process's envir
 
 #### devproc `#p`, from 9front (`src/kern/devproc.c`)
 
-rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](design/0010-self-host.md)).
+rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](design/self-host.md)).
 
 It serves h9's process records (`src/kern/proc.c`, shared through `src/kern/hproc.h`) instead of 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes.
 
@@ -753,7 +753,7 @@ The machine's last process to release its groups (`h9_kern_release` in `src/kern
 
 #### Host-stream device `#ℏ` (`src/kern/devhstream.c`, `src/hstream.zig`)
 
-WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](design/0021-websocket-9p.md)).
+WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](design/websocket-9p.md)).
 
 It follows devhcons's pattern: Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it.
 
@@ -767,11 +767,11 @@ A guest `connect` asks the net policy as a TCP dial would, through the same `net
 
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
-drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/0007-go-compat.md)).
+drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/go-compat.md)).
 
 So devcons calls hooks: `#c/pid` and `#c/ppid` (machine-local pids, as `$pid` and `/proc` have them, in 9front's 12-character format); `bintime` (wall nanoseconds, ticks, `fasthz`, and monotonic nanoseconds, big-endian, with a short read getting the leading words that fit); `time` (seconds, nanoseconds, ticks, and `fasthz`, in drawterm's text format); and `sysstat`, a line per CPU the machine may use, in 9front's ten columns with zeros for the counters h9 doesn't keep, so Go's `runtime.NumCPU` counts them.
 
-The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](design/0010-self-host.md)).
+The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](design/self-host.md)).
 
 The clock is one per host process (`src/kern.zig`): wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot; ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail.
 
@@ -781,7 +781,7 @@ Copy-on-write trees in memory over a lower directory, for the root's overlay, `-
 
 #### h9's guest commands `#H` (`src/kern/devhtools.c`)
 
-Commands that wrap h9's own devices (websocket-9p's `wsmount`, say, or `hcmd`, which runs host commands through `#C`) can't come from 9front, and h9 never writes into the root ([guest-tools](design/0032-guest-tools.md)).
+Commands that wrap h9's own devices (websocket-9p's `wsmount`, say, or `hcmd`, which runs host commands through `#C`) can't come from 9front, and h9 never writes into the root ([guest-tools](design/guest-tools.md)).
 
 `src/guest/` holds them, laid out as the guest sees them, and the build embeds it in the binary as a generated table (`tools/guesttree.zig`): only rc scripts and data, so an executable that doesn't start with `#!/bin/rc` fails the build, and names starting with `.` are left out.
 
@@ -795,9 +795,9 @@ Debug builds also serve `tests/fixtures/guest/` (`-Dguest-test`), for the integr
 
 #### The built-in root `#Hroot` (`src/kern/devhtools.c`)
 
-A root that's in the binary, so h9 runs with no tree to find ([builtin-root](design/0087-builtin-root.md)). It's a second table in `#H`, served by the same code with the same rules except its modes, a 9front tree's 0775 and 0664 so that an overlay over it can create files (the device itself still refuses every write), and a channel's `dev` says which table it's on, so the two trees' qids never meet in the mount table.
+A root that's in the binary, so h9 runs with no tree to find ([builtin-root](design/builtin-root.md)). It's a second table in `#H`, served by the same code with the same rules except its modes, a 9front tree's 0775 and 0664 so that an overlay over it can create files (the device itself still refuses every write), and a channel's `dev` says which table it's on, so the two trees' qids never meet in the mount table.
 
-Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](design/0064-multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`.
+Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](design/multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`.
 
 The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds its target's architecture, and with `-Demu=unicorn` also `amd64` and `386`, and the web host `386`.
 
@@ -819,9 +819,9 @@ A missing architecture gets the skeleton only, with a warning; `-Drelease` fails
 
 ### Root filesystem
 
-The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([9p-roots](design/0013-9p-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
+The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([9p-roots](design/9p-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
 
-A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](design/0076-schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it.
+A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](design/schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it.
 
 The path is tried first, so a directory named like a host stays a directory, and when such a root can't be reached h9 says it read the value as a URL.
 
@@ -833,11 +833,11 @@ h9 connects to a 9P root before the program runs:
 
 The connection is posted on the machine's `/srv` board as `root`, which holds it for the machine's life, and `#s/root` is mounted at `/` with no auth fd and `--root-spec` as the attach name. devmnt sends the calling process's user as the attach uname, so the first Proc takes on `--root-user` for the mount when one is given. Everything else is bound over the mount as over a host tree.
 
-A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks another dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, and h9 doesn't reconnect. Disk images aren't supported ([image-roots](design/0014-image-roots.md) was declined).
+A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks another dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, and h9 doesn't reconnect. Disk images aren't supported ([image-roots](design/image-roots.md) was declined).
 
 ### Slim roots
 
-`zig build slim` ([multicall](design/0064-multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
+`zig build slim` ([multicall](design/multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
 
 `tools/slim.zig` copies `src/9box/` into a fresh build directory and runs its mkfile inside the just-built h9, against the stock root, with the build directory as the only writable path and `/sys/src` from the root or the fetched checkout bound read-only.
 
@@ -911,7 +911,7 @@ On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, wh
 
 #### On the browser host
 
-Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](design/0120-browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
+Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](design/browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
 
 - **The screen** is `gscreen` in wasm memory as `XBGR32`, at the size the page reports. `flushmemscreen` only adds a rectangle to the host's dirty rectangle; once a frame (`requestAnimationFrame` in the Worker), outside any coroutine, the host copies that rectangle's rows from wasm memory into an `ImageData`, sets each pixel's X byte to 255, and `putImageData`s it. `screensize` tells the host the new image's address, stride, and size, and the host resizes the canvas's buffer to match.
 - **Input** is a queue in the host, four ints per event: a key (rune, down), the pointer (x, y, Plan 9 buttons), a resize, or a paste's length. `gfxinput`, a kernel process started by `screeninit`, takes them through the Suspending `gfx_wait` (saving what's per thread around it, as every Suspending import does) and calls `h9_kbdkey`, `absmousetrack`, and `screenresize`, so the input paths run with `up` set.
@@ -922,7 +922,7 @@ Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](des
 
 ## Serving
 
-`--serve` makes a machine a 9P server while its program runs ([serve](design/0035-serve.md)). `src/serve.zig` opens every listener before the program starts, so a failure is exit 125 with nothing run, and `Machine.serving()` and the guest's `$serve` (an rc list) give the bound addresses, port 0 resolved. The listeners close when the program exits, which hangs up every connection.
+`--serve` makes a machine a 9P server while its program runs ([serve](design/serve.md)). `src/serve.zig` opens every listener before the program starts, so a failure is exit 125 with nothing run, and `Machine.serving()` and the guest's `$serve` (an rc list) give the bound addresses, port 0 resolved. The listeners close when the program exits, which hangs up every connection.
 
 ### Listeners
 
@@ -1028,7 +1028,7 @@ Renaming a directory that has any rule strictly beneath it is refused ("permissi
 
 #### Contained trees
 
-A bind from `#U!c/path` ([symlinks-in-root](design/0034-symlinks-in-root.md)) is *contained*: devfs resolves its links itself, inside the tree, as `openat2`'s `RESOLVE_IN_ROOT` does.
+A bind from `#U!c/path` ([symlinks-in-root](design/symlinks-in-root.md)) is *contained*: devfs resolves its links itself, inside the tree, as `openat2`'s `RESOLVE_IN_ROOT` does.
 
 The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from the vendored `chan.c`), canonicalised.
 
@@ -1161,7 +1161,7 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 ### Debugging
 
 - `--trace` logs each syscall with its arguments, result, and error string, prefixed by pid, like 9front's ratrace.
-- acid (Plan 9's debugger) attaches to a live process through devproc's `mem`, `regs`, `fpregs`, `text`, and the `ctl` stop messages ([self-host](design/0010-self-host.md)). A process stops only on its own thread, at a stop point: entering a syscall, delivering a note (which a `stop` kick forces for one spinning in guest code), a breakpoint exit, or before its first instruction after `exec` with `hang`. It saves its Ureg and Extra to its record (`Proc.dbg_ureg`, `dbg_extra` in `src/machine.zig`) and sleeps on the record (`h9_kern_stopwait` in `src/kern/proc.c`), holding no vCPU, so readers on other threads never touch a backend. Register writes are kept in the record and loaded, through `arch.sanitize`, when the process resumes. `mem` reads and writes go through `AddressSpace.copy`; a write into text first gives the process its own copy of a shared text segment (`Segs.ownText`, 9front's `txt2data`) and then calls `codeChanged`, which bumps the flush epoch on hvf and kvm (the shim invalidates the I-cache before its next entry) and makes emu flush Unicorn's whole translation cache before its next run. `kill`, `--timeout`, and teardown interrupt a stopped process.
+- acid (Plan 9's debugger) attaches to a live process through devproc's `mem`, `regs`, `fpregs`, `text`, and the `ctl` stop messages ([self-host](design/self-host.md)). A process stops only on its own thread, at a stop point: entering a syscall, delivering a note (which a `stop` kick forces for one spinning in guest code), a breakpoint exit, or before its first instruction after `exec` with `hang`. It saves its Ureg and Extra to its record (`Proc.dbg_ureg`, `dbg_extra` in `src/machine.zig`) and sleeps on the record (`h9_kern_stopwait` in `src/kern/proc.c`), holding no vCPU, so readers on other threads never touch a backend. Register writes are kept in the record and loaded, through `arch.sanitize`, when the process resumes. `mem` reads and writes go through `AddressSpace.copy`; a write into text first gives the process its own copy of a shared text segment (`Segs.ownText`, 9front's `txt2data`) and then calls `codeChanged`, which bumps the flush epoch on hvf and kvm (the shim invalidates the I-cache before its next entry) and makes emu flush Unicorn's whole translation cache before its next run. `kill`, `--timeout`, and teardown interrupt a stopped process.
 - `BRK` and `INT3` exit as `vmm.Exit.breakpoint`, and the machine posts `sys: breakpoint` with the debug flag, so a process without a handler dies with it and acid's `bpset`, `step`, and `next` work. The PC is left at the `BRK` on arm64 and after the `INT3` on x86, as on 9front.
 - `--dump-on-fault` prints the Ureg, the faulting address, and a symbolized PC from the a.out symbol table.
 - There's no gdb stub.
@@ -1202,7 +1202,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | Absolute (`/bin/cat`) | A guest path, resolved in the guest namespace. To run an absolute host path, use the guest view of it (`/mnt/term/...`) or a relative path. |
 | Bare name or other relative path (`ls`, `aux/vga`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
-| `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell ([default-command](design/0081-default-command.md)). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
+| `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell ([default-command](design/default-command.md)). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
 | `--ns file` | Runs `newns` with the file before the program |
 
 A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
@@ -1243,7 +1243,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
 | `--host-cmd` | Enables devcmd. Only in builds with `-Dhost-cmd`; otherwise the policy refuses it (exit 2) |
 | `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
-| `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](design/0087-builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
+| `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](design/builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` or `--host-cmd` |
 | `--trace[=FILE]` | ratrace-style syscall log, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
@@ -1255,21 +1255,21 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 
 ### Default guest environment
 
-`user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the machine's architecture (`386` for 386), `sysname=h9`, `service=terminal`, `timezone` (copied from the root's `/adm/timezone/local`, as 9front's boot does), `serve` under `--serve` (see Serving), and `NPROC`, the CPUs the machine may use (`--cpus`, or the host's count capped by the vCPU limit), as `/dev/sysstat` lists them ([self-host](design/0010-self-host.md)). Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
+`user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the machine's architecture (`386` for 386), `sysname=h9`, `service=terminal`, `timezone` (copied from the root's `/adm/timezone/local`, as 9front's boot does), `serve` under `--serve` (see Serving), and `NPROC`, the CPUs the machine may use (`--cpus`, or the host's count capped by the vCPU limit), as `/dev/sysstat` lists them ([self-host](design/self-host.md)). Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | `exits(nil)` or `exits("")` |
-| 1–255 | An `exits` string that's that number in decimal: digits only, no sign, leading zero, or spaces. Nothing is printed, so rc's `exit 3` and Go's `os.Exit(3)` exit 3 ([go-compat](design/0007-go-compat.md)) |
+| 1–255 | An `exits` string that's that number in decimal: digits only, no sign, leading zero, or spaces. Nothing is printed, so rc's `exit 3` and Go's `os.Exit(3)` exit 3 ([go-compat](design/go-compat.md)) |
 | 1 | Any other `exits` string, including `"0"`, which is also printed to stderr; or the first process was killed by a note that isn't a signal |
 | 2 | Usage error |
 | 124 | `--timeout` stopped the program (`h9: prog: h9: timeout`), as coreutils `timeout` |
 | 125 | h9 itself failed: no hypervisor, VM creation failed, the root wasn't found, a 9P root's connection, handshake, or attach failed, a namespace file's WebSocket mount failed, or a `--serve` listener couldn't listen (`h9: serve tcp!127.0.0.1!5640: address in use`); or the run ended with `halted`, an unexpected VM exit, or an internal error |
 | 126 | The program was found but isn't a runnable a.out (bad magic or wrong architecture) |
 | 127 | The program wasn't found |
-| 128+N | The first process was killed by a note that's signal N ([exit-status](design/0033-exit-status.md)): see below |
+| 128+N | The first process was killed by a note that's signal N ([exit-status](design/exit-status.md)): see below |
 
 The 125–127 codes follow `env` and `docker run`. A guest can exit with them too, but h9 prints a message whenever it fails itself and a numeric `exits` prints nothing, so scripts can still tell h9 failures from guest failures. The mapping is in `src/cli.zig` and applies to every program; `Machine` returns the `exits` string unchanged, so library callers decide for themselves.
 

@@ -1,6 +1,6 @@
 /*
  * For "RFMEM processes see each other's writes" in tests/integration.zig
- * (design/0012-browser-host.md). A parent and an rfork(RFPROC|RFMEM)
+ * (design/browser-host.md). A parent and an rfork(RFPROC|RFMEM)
  * child spin on words in their shared data segment, without a syscall,
  * so each sees the other's write only through shared memory, and only
  * once preemption lets the other run.

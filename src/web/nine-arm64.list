@@ -1,6 +1,6 @@
 # The 9front layer the demo page's ?linux mode puts at /9 (src/web/index.html):
 # the paths, relative to the arm64 slim root `zig build slim -Darch=arm64`
-# makes (design/0064-multicall.md), that `zig build web` packs into
+# makes (design/multicall.md), that `zig build web` packs into
 # zig-out/web/nine-arm64.h9a. It's the machine's 9front root, so a Linux
 # program has /9/bin/rc and /9/bin/wsmount (MANUAL.md, "Try it"). The
 # commands are links to 9box, which tools/webroot.zig stores once.

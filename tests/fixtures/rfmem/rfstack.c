@@ -1,6 +1,6 @@
 /*
  * For "rfork with RFMEM shares data and bss but not the stack" in
- * tests/integration.zig (design/0095-native-backend.md). An rfork(RFPROC|RFMEM)
+ * tests/integration.zig (design/native-backend.md). An rfork(RFPROC|RFMEM)
  * child writes a data word, a bss word and a local on its stack; the
  * parent sees the first two and not the third.
  */

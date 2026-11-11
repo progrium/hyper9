@@ -1,4 +1,4 @@
-// One machine per Worker (design/0012-browser-host.md): runs h9 with the
+// One machine per Worker (design/browser-host.md): runs h9 with the
 // page's argv over the root archive or a ws:// root, and passes the console through
 // messages. The page's side is createMachine in h9-web.js.
 //
@@ -9,7 +9,7 @@
 // Worker to page: { type: 'output', fd, data }, { type: 'raw', on } and
 // { type: 'exit', code } or { type: 'error', message }.
 //
-// With a canvas (design/0120-browser-gfx.md), start's gfx is { canvas,
+// With a canvas (design/browser-gfx.md), start's gfx is { canvas,
 // width, height }, the OffscreenCanvas and the screen's size, and the page
 // sends { type: 'gfx', ev }, { type: 'gfx-paste', text } and
 // { type: 'gfx-size', width, height }; the Worker sends { type: 'cursor',
@@ -78,7 +78,7 @@ async function start({ argv, env = {}, root, layers = [], tty = false, gfx: canv
     return new Uint8Array(await r.arrayBuffer());
   };
   // A ws:// or wss:// root is served over a WebSocket
-  // (design/0021-websocket-9p.md), and WASI sees only the layers. An
+  // (design/websocket-9p.md), and WASI sees only the layers. An
   // archive root is the bottom layer, and root.h9a is the default when
   // there are no layers.
   const remote = typeof root === 'string' && /^wss?:/i.test(root);

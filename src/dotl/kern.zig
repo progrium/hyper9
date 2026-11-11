@@ -1,4 +1,4 @@
-//! The leaves devdotl.c (`#ℓ`, design/0022-dotl.md) calls the translator
+//! The leaves devdotl.c (`#ℓ`, design/dotl.md) calls the translator
 //! through: each takes and returns bytes and never raises, returning -1
 //! with the error in the caller's ERRMAX buffer. devdotl.c holds a lock
 //! per translator around every call.

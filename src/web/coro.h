@@ -1,6 +1,6 @@
 /*
  * Coroutines on JavaScript Promise Integration, for the web host
- * (design/0012-browser-host.md). Each kernel process, and each of h9's own
+ * (design/browser-host.md). Each kernel process, and each of h9's own
  * tasks that would be a thread natively, is a coroutine with its own
  * shadow stack. Blocking parks the coroutine and hands the event loop back
  * to the JS host (src/web/h9-web.js), which is the scheduler.

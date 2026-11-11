@@ -151,7 +151,7 @@ pub const Ram = struct {
 
 /// One process's address space over page tables of format `pt`.
 /// What each of a backend's vCPUs is running, so an `unmap` can wait until
-/// none still reaches the pages it removed (design/0049-linux-threads.md,
+/// none still reaches the pages it removed (design/linux-threads.md,
 /// "TLB shootdown"). A vCPU takes a slot when it's made, says which space
 /// it's entering before it reads the space's epoch, and counts each run
 /// as it leaves. Everything is sequentially consistent, so a vCPU that

@@ -1,4 +1,4 @@
-//! File locks for Linux programs (design/0018-linux-personality.md,
+//! File locks for Linux programs (design/linux-personality.md,
 //! "Files"): fcntl's POSIX record locks and open file description (OFD)
 //! locks, which conflict with each other, and flock's whole-file locks,
 //! which are separate, as on Linux. One table serves every machine in

@@ -1,5 +1,5 @@
 /*
- * #ℓ: 9P2000.L translation (design/0022-dotl.md). A conversation puts
+ * #ℓ: 9P2000.L translation (design/dotl.md). A conversation puts
  * the translator (src/dotl/client.zig) between devmnt and a server
  * connection: devmnt mounts the conversation's data file and speaks
  * 9P2000, and the translator speaks 9P2000.L to the server, or passes

@@ -1,6 +1,6 @@
 // Starts goroutines that each sleep 100 ms, waits for them, and prints
 // "ok goroutines" with the threads the runtime made
-// (design/0049-linux-threads.md).
+// (design/linux-threads.md).
 package main
 
 import (

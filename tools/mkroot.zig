@@ -9,13 +9,13 @@
 //!
 //! The tree leaves out what running programs doesn't need: boot kernels,
 //! /sys/doc and, unless --src is given, /sys/src (needed for self-hosting,
-//! design/0010-self-host.md). That's about 250 MB instead of 420 MB.
+//! design/self-host.md). That's about 250 MB instead of 420 MB.
 //!
 //! The tree has binaries for the host's architecture unless --arch names
 //! others. The image's are arm64, so an arm64 tree is just the image's;
 //! /386 and /amd64 are filled with binaries and libraries by
 //! cross-compiling the tree's own /sys/src inside h9
-//! (design/0009-i386.md): `cd /sys/src && objtype=386 mk install`, with the
+//! (design/i386.md): `cd /sys/src && objtype=386 mk install`, with the
 //! root writable. Without --src, /sys/src is copied in from the fetched
 //! checkout for the build and removed after. It needs a built h9
 //! (zig-out/bin/h9, or $H9), with the emulator on hosts without an arm64
@@ -653,7 +653,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (build.len > 0) checkH9(c);
     if (exists) {
         // An existing tree may predate a mount point (rio's /mnt/temp,
-        // design/0015-gfx.md).
+        // design/gfx.md).
         for (mount_points) |d| c.makePath(c.join(&.{ dest, d }));
         if (build.len == 0) {
             log("{s} exists (--force to rebuild); mount points added", .{c.rel(dest)});

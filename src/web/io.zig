@@ -1,4 +1,4 @@
-//! The web host's `std.Io` (design/0012-browser-host.md): std's
+//! The web host's `std.Io` (design/browser-host.md): std's
 //! single-threaded implementation over WASI, with blocking that parks the
 //! calling coroutine (src/web/coro.c) instead of a thread. A futex wait
 //! parks until a wake for the same address; a sleep parks on a timer.

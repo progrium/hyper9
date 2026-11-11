@@ -1,7 +1,7 @@
 //! The amd64 CPU state the host sets up for the amd64 shim
 //! (src/arch/amd64/shim.S), as plain values: the control registers, the
 //! descriptor table images, the SYSCALL MSRs and the CPUID mask. KVM sets
-//! them through its own calls, and WHP (design/0017-whp.md) can set the
+//! them through its own calls, and WHP (design/whp.md) can set the
 //! same state through its own.
 //!
 //! The shim runs in ring 0 in long mode from the kernel half. User code
@@ -60,7 +60,7 @@ pub const why_shim = 3;
 /// 9front's pc64 VectorSYSCALL, which the shim puts in Ureg.type.
 pub const vector_syscall = 64;
 pub const vector_pf = 14;
-/// INT3, whose gate user mode may reach (design/0010-self-host.md).
+/// INT3, whose gate user mode may reach (design/self-host.md).
 pub const vector_bp = 3;
 
 // pc64/mem.h's GDT: the same selectors as 9front's, so user code sees

@@ -1,6 +1,6 @@
 /*
  * A process for the self-host debugging cases (tests/integration.zig,
- * design/0010-self-host.md), built in the guest with the root's
+ * design/self-host.md), built in the guest with the root's
  * compiler. A debugger (dbg.c, or rc writing /proc/n/ctl) changes what
  * it does: answer, two and three are laid out in that order and the same
  * size, so copying two's or three's code over answer's makes answer

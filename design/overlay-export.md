@@ -4,7 +4,7 @@ title: Exporting a run's overlay changes
 status: draft
 created: 2026-11-07
 authors: [progrium]
-depends: [6]
+depends: [ephemeral-writes]
 areas: [sandbox, cli, kern]
 ---
 
@@ -14,21 +14,21 @@ areas: [sandbox, cli, kern]
 
 Add `--export-changes FILE`: when the run ends, h9 writes everything its `#O` overlays hold (files created or changed, and names removed) to FILE as a tar archive in the OCI layer format. Entries are guest paths. Removed names become `.wh.` whiteouts, and replaced directories are marked opaque. Nothing else about the run changes: writes still land in memory, and the host tree under each overlay is still never written. The `Machine` API gets the same option as a writer.
 
-This lets you keep what a run did without writing the host. You can read the archive, apply it yourself, or use it as a layer. It also replaces [overlay](0011-overlay.md)'s "changes to the root were discarded" notice with "changes saved to FILE" when the flag is given.
+This lets you keep what a run did without writing the host. You can read the archive, apply it yourself, or use it as a layer. It also replaces [overlay](overlay.md)'s "changes to the root were discarded" notice with "changes saved to FILE" when the flag is given.
 
 ## Background
 
 ### h9 today
 
-- **[ephemeral-writes](0006-ephemeral-writes.md)** added `#O` (`src/kern/devoverlay.c`). An instance is a tree in memory over a lower chan, made up of copies, whiteouts, and directory markers. `--write=ephemeral` puts one over the cwd and each `--writable` path, and every machine has one over `/tmp`.
-- **[overlay](0011-overlay.md)** puts one over the root by default and adds a count of discarded root changes to the run's status, so the CLI can print a notice on a terminal.
+- **[ephemeral-writes](ephemeral-writes.md)** added `#O` (`src/kern/devoverlay.c`). An instance is a tree in memory over a lower chan, made up of copies, whiteouts, and directory markers. `--write=ephemeral` puts one over the cwd and each `--writable` path, and every machine has one over `/tmp`.
+- **[overlay](overlay.md)** puts one over the root by default and adds a count of discarded root changes to the run's status, so the CLI can print a notice on a terminal.
 - **Changes are lost at exit.** SPEC.md says "Ephemeral changes can't be exported yet". An instance is freed when the last chan on it closes, which happens when the run's last process tears down its namespace. The only way to keep a change is to make its path `--writable`, which writes the host as the guest goes, with no review step and no undo.
 
 ### What people want from a run's changes
 
 - **See what a run changed.** After a build, an install script, or an unknown program runs under `--write=ephemeral`, you want to know which files it created, changed, or removed.
 - **Keep an install without letting the guest write the root.** For example, run `mk install` against the overlay, check the result, then apply it to `$H9ROOT` yourself.
-- **Make a layer.** [image-roots](0014-image-roots.md) and container tooling think in layers, and the memory tree already *is* a layer: copies are the files the layer adds, whiteouts are its deletions, and directory markers are the directories it passes through.
+- **Make a layer.** [image-roots](image-roots.md) and container tooling think in layers, and the memory tree already *is* a layer: copies are the files the layer adds, whiteouts are its deletions, and directory markers are the directories it passes through.
 
 ephemeral-writes said this already: "the memory tree … already is that diff, so the device keeps it walkable until the instance is freed. The export is its own proposal."
 
@@ -73,7 +73,7 @@ A guest could create a file that's literally named `.wh.foo` or `.wh..wh..opq`, 
 
 - **`Machine.Options.export_changes: ?*std.Io.Writer`.** When it's set, `run` writes the archive to it after the run's last process exits and before the run returns. An embedder can stream the archive anywhere: a file, a buffer, or a socket.
 - **`Machine.Options.export_tmp: bool`.** This includes `/tmp`.
-- **The run's status** reports how many entries were exported and how many names were skipped, next to [overlay](0011-overlay.md)'s count of discarded root changes. If writing to the writer fails, the run returns the guest's status anyway, and the status also carries the error, so a failed export never hides how the guest ended.
+- **The run's status** reports how many entries were exported and how many names were skipped, next to [overlay](overlay.md)'s count of discarded root changes. If writing to the writer fails, the run returns the guest's status anyway, and the status also carries the error, so a failed export never hides how the guest ended.
 
 ### Keeping instances alive until the export
 
@@ -92,7 +92,7 @@ If a machine is left `stuck` after a timeout, its processes still hold the names
 
 ### The CLI
 
-- **[overlay](0011-overlay.md)'s notice:** with `--export-changes`, the end-of-run line becomes "h9: changes saved to FILE (N entries)". It's printed to a terminal only, as before. Without the flag, the discarded notice adds the option: "h9: changes to the root were discarded (--export-changes FILE saves them; --writable "$H9ROOT" keeps them)".
+- **[overlay](overlay.md)'s notice:** with `--export-changes`, the end-of-run line becomes "h9: changes saved to FILE (N entries)". It's printed to a terminal only, as before. Without the flag, the discarded notice adds the option: "h9: changes to the root were discarded (--export-changes FILE saves them; --writable "$H9ROOT" keeps them)".
 - **Errors:** if writing the archive fails, h9 prints "h9: export: <error>" and exits 125 when the guest itself succeeded. A failed guest's status stands, so scripts still see why the guest failed.
 - **`--print`:** the plan gains `export: FILE` under `limits:`, and each exported overlay's namespace line gets `exp` after `eph`. `--ns` ignores that column, as it does other annotations.
 
@@ -114,7 +114,7 @@ namespace:
 
 **A file written by the host, not by the guest.** The guest only sees the merged tree. It can't tell a copied-up file from an unchanged one, and it can't see whiteouts at all. The device can, because its memory tree is the diff. Exporting from the host also means the guest never gets a host path to write to: the user picks FILE, and the guest only decides what goes in it.
 
-**Tar, and the OCI layer format in particular.** Tar is the one archive format every host has a reader for, including Windows' `tar.exe`. Plain tar can't represent a deletion. OCI's `.wh.` whiteouts and opaque markers are the standard way to do it: Docker, Podman, `umoci`, and `crane` all read them, and they map one-to-one onto `#O`'s nodes. A layer h9 writes can be stacked by those tools, and [image-roots](0014-image-roots.md) can take one later.
+**Tar, and the OCI layer format in particular.** Tar is the one archive format every host has a reader for, including Windows' `tar.exe`. Plain tar can't represent a deletion. OCI's `.wh.` whiteouts and opaque markers are the standard way to do it: Docker, Podman, `umoci`, and `crane` all read them, and they map one-to-one onto `#O`'s nodes. A layer h9 writes can be stacked by those tools, and [image-roots](image-roots.md) can take one later.
 
 **Rejected: writing a directory tree.** A plain directory is easy to browse, but it can't hold whiteouts unless it uses the same `.wh.` files. Writing many files on the host also means more ways to fail halfway, and it raises the question of what happens if the target directory already has files in it. An archive is one file, written in one pass.
 
@@ -122,7 +122,7 @@ namespace:
 
 **Rejected: exposing the upper tree to the guest, as `#O<n>/changes`.** The guest could then run its own `tar`. But 9P has no way to represent a whiteout or an opaque directory, so the guest would need a convention anyway, and the guest's tar would decide the format. This would also make a run's changes visible inside the run, which is a new thing for the guest to reach.
 
-**Rejected: also applying an archive at the start of a run (`--import-changes`).** That would let one run continue where another left off without writing the host. It's useful, but it brings back the problem [overlay](0011-overlay.md) solves: runs that depend on each other's leftovers. It's also not needed for any of the uses in Background. It can be its own proposal, and the format here doesn't get in its way.
+**Rejected: also applying an archive at the start of a run (`--import-changes`).** That would let one run continue where another left off without writing the host. It's useful, but it brings back the problem [overlay](overlay.md) solves: runs that depend on each other's leftovers. It's also not needed for any of the uses in Background. It can be its own proposal, and the format here doesn't get in its way.
 
 **Guest paths, one archive.** One archive keyed by guest path describes the run the way the guest saw it. It also stays unambiguous when overlays nest, for example a `--writable` path inside the cwd, because the inner overlay's entries carry the inner target's prefix. Under the default `--write=overlay`, only the root has an overlay that's exported, so the archive is the root's changes alone. Cwd entries, which carry `mnt/term/cwd/`, appear only under `--write=ephemeral`, and there the prefix is what tells them apart from root changes. Applying only the root's changes then takes a path filter (`tar -x -C "$H9ROOT" --exclude 'mnt/*'`).
 
@@ -144,7 +144,7 @@ namespace:
 
 - **CLI:** two new flags, `--export-changes FILE` and `--export-tmp`. Exit codes are unchanged, except that 125 can now also mean a failed export.
 - **`--print` and `--ns`:** a new `export=` limit and an `exp` column marker. `--ns` ignores both, so saved plans still replay.
-- **`Machine.Options`:** two new fields, `export_changes` and `export_tmp`. Both default to off. The run status gains the exported and skipped counts and the export error. That's the same status change [overlay](0011-overlay.md) makes for its discarded count, so the two should land as one status shape.
+- **`Machine.Options`:** two new fields, `export_changes` and `export_tmp`. Both default to off. The run status gains the exported and skipped counts and the export error. That's the same status change [overlay](overlay.md) makes for its discarded count, so the two should land as one status shape.
 - **Sandbox defaults:** unchanged. Nothing is exported unless asked.
 - **Root tree and `third_party/`:** unchanged.
 
@@ -156,23 +156,23 @@ namespace:
 - **Reads aren't widened.** The exporter only reads memory nodes. It never reads the lower tree, so a file hidden by `--read-deny` can't get into the archive. A directory marker's `Dir` is the snapshot devfs had already allowed the guest to stat.
 - **Between machines:** each machine exports only its own instances. The walk leaf checks that the instance belongs to the calling machine's pool, as attaching does.
 
-## Done when
+## Done criteria
 
 Integration cases tagged `[overlay-export]`:
 
-- `test "a new root file is exported at its guest path [overlay-export]"`
-- `test "a removed root file is exported as a .wh. whiteout [overlay-export]"`
-- `test "a directory removed and recreated is exported as opaque [overlay-export]"`
-- `test "cwd changes under --write=ephemeral are exported under mnt/term/cwd [overlay-export]"`
-- `test "/tmp is left out unless --export-tmp is given [overlay-export]"`
-- `test "a run with no changes writes an empty archive [overlay-export]"`
-- `test "changes are exported when the guest fails or times out [overlay-export]"`
-- `test "a file named .wh.x is skipped with a message [overlay-export]"`
-- `test "an unwritable export path is a usage error and nothing runs [overlay-export]"`
-- `test "--export-changes with --write=none is a usage error [overlay-export]"`
-- `test "the exported archive extracts with the host's tar [overlay-export]"`
-- `test "two identical runs give the same entries in the same order [overlay-export]"`
-- `test "--print shows the export limit and replays with --ns [overlay-export]"`
+- [ ] `test "a new root file is exported at its guest path [overlay-export]"`
+- [ ] `test "a removed root file is exported as a .wh. whiteout [overlay-export]"`
+- [ ] `test "a directory removed and recreated is exported as opaque [overlay-export]"`
+- [ ] `test "cwd changes under --write=ephemeral are exported under mnt/term/cwd [overlay-export]"`
+- [ ] `test "/tmp is left out unless --export-tmp is given [overlay-export]"`
+- [ ] `test "a run with no changes writes an empty archive [overlay-export]"`
+- [ ] `test "changes are exported when the guest fails or times out [overlay-export]"`
+- [ ] `test "a file named .wh.x is skipped with a message [overlay-export]"`
+- [ ] `test "an unwritable export path is a usage error and nothing runs [overlay-export]"`
+- [ ] `test "--export-changes with --write=none is a usage error [overlay-export]"`
+- [ ] `test "the exported archive extracts with the host's tar [overlay-export]"`
+- [ ] `test "two identical runs give the same entries in the same order [overlay-export]"`
+- [ ] `test "--print shows the export limit and replays with --ns [overlay-export]"`
 
 Backend case: two machines in one process, each exporting to its own writer, see only their own changes.
 
@@ -183,6 +183,6 @@ Demo: `h9 --export-changes out.tar --rc 'cd /sys/src/cmd && mk cat.install && rm
 1. `h9_overlay_walkchanges` in `src/kern/devoverlay.c`, with each node's opaque flag. The namespace builder records each instance's target and takes the extra reference when an export was asked for.
 2. `src/changes.zig`: the pax/OCI writer and the reserved-name check. Unit tests on a hand-built tree.
 3. `Machine.Options.export_changes` and `export_tmp`, and the export in `run` after the last process exits, then the status fields.
-4. The CLI: `--export-changes`, `--export-tmp`, opening FILE early, exit 125, `--print`'s `export=` and `exp`, and the notice wording shared with [overlay](0011-overlay.md).
+4. The CLI: `--export-changes`, `--export-tmp`, opening FILE early, exit 125, `--print`'s `export=` and `exp`, and the notice wording shared with [overlay](overlay.md).
 5. README's sandbox section, and SPEC.md: the CLI table, "Ephemeral changes can't be exported yet" replaced, and the plan example. Set `status: implemented`.
 

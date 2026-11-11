@@ -11,7 +11,7 @@
 //! Unicorn's virtual-TLB mode: a fill hook translates a guest address
 //! through the address space's regions, so a change to the address space
 //! never changes Unicorn's memory map, whose every change rebuilds it
-//! (design/0018-linux-personality.md, "The emulator in virtual-TLB mode").
+//! (design/linux-personality.md, "The emulator in virtual-TLB mode").
 
 const std = @import("std");
 const vmm = @import("../vmm.zig");
@@ -41,7 +41,7 @@ const trap_slots = 8;
 /// Where a 386 engine's GDT is, in every address space: the top page,
 /// above any user mapping (9front's stack ends at 0xDFFFF000 and a Linux
 /// process's address space at 0xC0000000). It holds the TLS segments Linux
-/// programs load %gs and %fs with (design/0105-linux-i386.md, "TLS"). Each
+/// programs load %gs and %fs with (design/linux-i386.md, "TLS"). Each
 /// engine has its own page, which the fill hook maps here read-only.
 const gdt_va: u64 = 0xFFFF_F000;
 /// Its entries: the null one, then up to Linux's last TLS entry, 8.
@@ -71,7 +71,7 @@ fn open(arch: vmm.Arch) vmm.Error!*uc.uc_engine {
 const tcg_buffer_size: u32 = 32 << 20;
 
 /// How long an engine runs guest code while another waits for the guest
-/// lock, before it's asked to stop (design/0049-linux-threads.md).
+/// lock, before it's asked to stop (design/linux-threads.md).
 const slice_ns = 1 * std.time.ns_per_ms;
 // uc_ctl_set_tcg_buffer_size is a macro: UC_CTL_WRITE(UC_CTL_TCG_BUFFER_SIZE, 1).
 const uc_ctl_set_tcg_buffer_size: c_uint = uc.UC_CTL_TCG_BUFFER_SIZE | (1 << 26) | (1 << 30);
@@ -105,7 +105,7 @@ pub const Backend = struct {
 
     /// Takes the guest lock for `s` (null: for a shootdown). A waiter that
     /// sees the same holder for a whole slice asks it to stop at its next
-    /// block (design/0049-linux-threads.md, "Time-slicing").
+    /// block (design/linux-threads.md, "Time-slicing").
     fn acquireGuest(b: *Backend, s: ?*State) void {
         const g = &b.guest;
         const ticket = g.next.fetchAdd(1, .acq_rel);
@@ -230,7 +230,7 @@ pub const AddressSpace = struct {
     /// Bumped by `codeChanged`, so vCPUs drop their translated blocks.
     code: std.atomic.Value(u64) = .init(0),
     /// Guards `regions`: threads of one process change and read them at
-    /// once (design/0049-linux-threads.md).
+    /// once (design/linux-threads.md).
     lock: std.atomic.Mutex = .unlocked,
 
     const Region = struct { va: u64, mem: []align(vmm.page_size) u8, perms: vmm.Perms };
@@ -286,7 +286,7 @@ pub const AddressSpace = struct {
 
     /// The host wrote code: vCPUs running this space flush their
     /// translated blocks before their next run. The whole cache goes;
-    /// design/0010-self-host.md leaves flushing only the written range
+    /// design/self-host.md leaves flushing only the written range
     /// (uc_ctl_remove_cache) until stepping shows the need.
     pub fn codeChanged(as: *AddressSpace, _: u64, _: u64) void {
         _ = as.code.fetchAdd(1, .release);
@@ -322,7 +322,7 @@ pub const AddressSpace = struct {
 /// stops itself, from a block hook on its own thread: stopping an engine
 /// from another thread with `uc_emu_stop` can leave its PC at an earlier
 /// block than the one it stopped at, so resuming would run instructions
-/// twice (design/0049-linux-threads.md, "Time-slicing on the emulator").
+/// twice (design/linux-threads.md, "Time-slicing on the emulator").
 const GuestLock = struct {
     next: std.atomic.Value(u32) = .init(0),
     serving: std.atomic.Value(u32) = .init(0),

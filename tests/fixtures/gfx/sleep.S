@@ -1,5 +1,5 @@
 // Sleeps for a minute, for the window to be closed (tests/backends.zig,
-// design/0015-gfx.md).
+// design/gfx.md).
 
 #include "lib.S"
 

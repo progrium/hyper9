@@ -1,4 +1,4 @@
-//! Makes the browser host's root archive (design/0012-browser-host.md)
+//! Makes the browser host's root archive (design/browser-host.md)
 //! from a root tree and a list of paths in it:
 //!
 //!     webroot ROOT LIST OUT

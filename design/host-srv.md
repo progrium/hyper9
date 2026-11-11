@@ -4,7 +4,7 @@ title: Posting host connections to /srv
 status: draft
 created: 2026-11-06
 authors: [progrium]
-depends: [8, 13, 21]
+depends: [devsrv, 9p-roots, websocket-9p]
 areas: [cli, kern]
 ---
 
@@ -12,16 +12,16 @@ areas: [cli, kern]
 
 ## Abstract
 
-h9 can connect to 9P servers on the host side and post each connection in the machine's `/srv` before the program starts: `--srv name=tcp!host!564`, `--srv name=unix!/run/fs.sock`, or `--srv name=wss://fs.example/9p`. Namespace files and guest programs mount them as `mount /srv/name /n/x`, as on 9front. h9 only connects and posts; the attach, with its spec and user, is made by whoever mounts the entry. Embedders can post a connection they've already opened, such as one end of a socketpair served by their own 9P server. This generalises how [9p-roots](0013-9p-roots.md) posts its root as `/srv/root`, and is the client-side counterpart of [serve](0035-serve.md).
+h9 can connect to 9P servers on the host side and post each connection in the machine's `/srv` before the program starts: `--srv name=tcp!host!564`, `--srv name=unix!/run/fs.sock`, or `--srv name=wss://fs.example/9p`. Namespace files and guest programs mount them as `mount /srv/name /n/x`, as on 9front. h9 only connects and posts; the attach, with its spec and user, is made by whoever mounts the entry. Embedders can post a connection they've already opened, such as one end of a socketpair served by their own 9P server. This generalises how [9p-roots](9p-roots.md) posts its root as `/srv/root`, and is the client-side counterpart of [serve](serve.md).
 
 ## Background
 
 - **9p-roots** connects to one server, posts its channel to `#s/root` by creating the entry and writing the connection's fd number into it, and mounts it at `/`. A guest can mount `/srv/root` again at another path, with another spec. Nothing else is posted by the host.
-- **[devsrv](0008-devsrv.md)** gives each machine its own `/srv` board. Its compatibility notes say `mount /srv/x …` lines in a namespace file work only if something posted `/srv/x` before the replay, which in practice nothing does.
-- **[websocket-9p](0021-websocket-9p.md)** lets a namespace file mount a `ws://` or `wss://` URL directly: h9 connects a new stream for that line and mounts it. A `tcp!` or `unix!` source in a namespace file isn't accepted; it's opened as a guest path, which fails, and newns skips the line. Each URL line is its own connection, mounted at one place, with no name the guest can mount again.
-- **In the guest,** 9front's `srv tcp!fs!564 fs` dials through `/net`, under [net-policy](0005-net-policy.md), and posts the connection. It needs `srv` in the root (the built-in root's box has it), it can't reach a unix socket, a WebSocket, or anything else devip doesn't dial, and it runs once the program does, so a namespace file can't mount what it posts.
+- **[devsrv](devsrv.md)** gives each machine its own `/srv` board. Its compatibility notes say `mount /srv/x …` lines in a namespace file work only if something posted `/srv/x` before the replay, which in practice nothing does.
+- **[websocket-9p](websocket-9p.md)** lets a namespace file mount a `ws://` or `wss://` URL directly: h9 connects a new stream for that line and mounts it. A `tcp!` or `unix!` source in a namespace file isn't accepted; it's opened as a guest path, which fails, and newns skips the line. Each URL line is its own connection, mounted at one place, with no name the guest can mount again.
+- **In the guest,** 9front's `srv tcp!fs!564 fs` dials through `/net`, under [net-policy](net-policy.md), and posts the connection. It needs `srv` in the root (the built-in root's box has it), it can't reach a unix socket, a WebSocket, or anything else devip doesn't dial, and it runs once the program does, so a namespace file can't mount what it posts.
 - **Embedders** who want to serve a host directory with their own 9P server, rather than devfs, have no way to hand the connection to the machine. Their only route is a listening socket that `--root` or the guest dials, which puts a listener on the host for something that never needed one.
-- **[serve](0035-serve.md)** is the other direction: h9 listens, and each accepted connection gets an `exportfs` of the machine's namespace. Its export includes `/srv`.
+- **[serve](serve.md)** is the other direction: h9 listens, and each accepted connection gets an `exportfs` of the machine's namespace. Its export includes `/srv`.
 
 ## Proposal
 
@@ -44,7 +44,7 @@ These are usage errors (exit 2):
 - a value without `=`, a NAME devsrv would refuse, `root`, or a NAME given twice;
 - an ADDR in none of the forms above;
 - `--srv` with `--write=none` (see The policy);
-- a `tcp!` or `unix!` ADDR on the [browser host](0012-browser-host.md), which has only the page's WebSocket.
+- a `tcp!` or `unix!` ADDR on the [browser host](browser-host.md), which has only the page's WebSocket.
 
 A connection that fails before the program runs exits 125 with the cause, as a root's does: `srv fs unix!/run/fs.sock: connection refused`, `srv web wss://fs.example/9p?…: server answered 401 Unauthorized`. A unix socket on a Windows host exits 125 with "unix sockets need a POSIX host", as for roots (see Rationale).
 
@@ -76,7 +76,7 @@ mount /srv/src /n/src work
 bind -c '#O' /n/src
 ```
 
-mounts the unix socket's server at `/n/fs`, writable through to that server, and the TCP server's `work` tree at `/n/src` under a fresh copy-on-write overlay, so writes there stay in memory ([ephemeral-writes](0006-ephemeral-writes.md)'s bare `#O`). The mount points must exist in the root, as for any mount. newns needs nothing new: these are ordinary mounts of posted channels, the kind devsrv already says it supports.
+mounts the unix socket's server at `/n/fs`, writable through to that server, and the TCP server's `work` tree at `/n/src` under a fresh copy-on-write overlay, so writes there stay in memory ([ephemeral-writes](ephemeral-writes.md)'s bare `#O`). The mount points must exist in the root, as for any mount. newns needs nothing new: these are ordinary mounts of posted channels, the kind devsrv already says it supports.
 
 In the guest, the same lines work in rc: `mount /srv/fs /n/fs` goes through `amount`, whose `fauth` gets "authentication not required" from a server that doesn't authenticate, and mounts. `/proc/n/ns` prints such a mount as `mount /srv/fs /n/fs`, from devsrv's `srvname`, not as the channel's own path, so `ns` output replays with `--ns` in another run given the same `--srv`, and the guest's view doesn't show the socket's host path.
 
@@ -130,23 +130,23 @@ The heading is outside `namespace`, so a saved namespace isn't changed and newns
 ### The policy
 
 - **The network policy** doesn't apply, as for a root's connection: h9 makes it, from an address the operator named, before the mask. `--net=disable` still masks `#I`, so the guest can't dial anything itself, and it can't dial anything else through a posted connection, which goes to one server.
-- **Writes** go to each server, which decides what's writable, as for a 9P root. h9 can't make devmnt read-only, and the guest makes the mounts, so `--write=none` with `--srv` is exit 2: "--write=none can't be enforced on servers posted with --srv". Under `--write=scope`, the default, the plan's caveat says so. A namespace file that wants writes kept off a server binds a bare `#O` over its mount, as above. [overlay](0011-overlay.md)'s default overlay covers the root, not mounts made after it.
+- **Writes** go to each server, which decides what's writable, as for a 9P root. h9 can't make devmnt read-only, and the guest makes the mounts, so `--write=none` with `--srv` is exit 2: "--write=none can't be enforced on servers posted with --srv". Under `--write=scope`, the default, the plan's caveat says so. A namespace file that wants writes kept off a server binds a bare `#O` over its mount, as above. [overlay](overlay.md)'s default overlay covers the root, not mounts made after it.
 - **Limits:** each entry is one host connection, fixed by the command line, and costs a devmnt channel per mount. `--memory` and `--pids` count what the guest does with them, as always.
 
 ### Other proposals
 
-- **[serve](0035-serve.md).**
+- **[serve](serve.md).**
   - **Clients reach posted servers.** serve exports `/srv` with the rest of the namespace, so a client can open `/srv/fs` through exportfs and mount it, as `import`ing `/srv` does on 9front, reaching the host's server through the machine as the machine's user. When a run has both, and `--serve-root` is `/`, the plan adds a caveat: `servers posted in /srv are reachable through --serve on tcp!0.0.0.0!5640`. `--serve-root` below `/` leaves `/srv` out.
   - **Mounts of posted servers** made by `--ns` are in the plan's namespace, so serve's snapshot has them at their mount points. Mounts the program makes later aren't, but the board isn't part of the namespace, so a client can still mount any entry through `/srv`.
-  - **Gateways.** The two compose into a bridge with h9's policy in the middle: `h9 --srv up=unix!/run/fs.sock --ns gw.ns --serve ws://127.0.0.1:8080/9p --serve-origin http://localhost:8000` makes a unix socket server reachable from a browser tab, through `--serve-root`, `--read-deny`, and `--write`. With [dotl](0022-dotl.md), the same bridge translates between 9P2000 and 9P2000.L.
+  - **Gateways.** The two compose into a bridge with h9's policy in the middle: `h9 --srv up=unix!/run/fs.sock --ns gw.ns --serve ws://127.0.0.1:8080/9p --serve-origin http://localhost:8000` makes a unix socket server reachable from a browser tab, through `--serve-root`, `--read-deny`, and `--write`. With [dotl](dotl.md), the same bridge translates between 9P2000 and 9P2000.L.
   - **Two h9s.** `h9 --serve unix!/tmp/a.sock`, then `h9 --srv a=unix!/tmp/a.sock --rc` mounts the first machine's namespace in the second with `mount /srv/a /n/a`. That's the demo once serve is built.
   - **Raw devhstream streams.** serve adds devhstream's raw host-made streams for its accepted connections. Once they exist, `unix` and `fd` sources move onto them, which brings both to Windows (see Rationale). Nothing here waits for that.
   - **Naming.** serve's plan heading is `serve` and this one's is `srv`, after the flags. Each lists what it opened, so a run with both shows its inbound and outbound connections side by side.
-- **[9p-roots](0013-9p-roots.md).** The root is the one entry h9 also mounts. Its connect and post code is split out and shared, and `root` stays its name. `--root-spec` and `--root-user` have no `--srv` counterparts, since h9 doesn't attach.
-- **[websocket-9p](0021-websocket-9p.md).** `ws` sources connect as its namespace-file mounts do. Those mounts are unchanged: a URL on a `mount` line still makes its own connection.
-- **[dotl](0022-dotl.md).** dotl puts roots' and namespace files' connections through its translator before devmnt sees them. Posted connections go through it the same way, before the post, so `--srv z=tcp!zerofs.example!5564` posts a translated channel and the guest's `mount /srv/z` works unchanged. Until dotl is built, a .L server fails the guest's mount at `Tversion`.
+- **[9p-roots](9p-roots.md).** The root is the one entry h9 also mounts. Its connect and post code is split out and shared, and `root` stays its name. `--root-spec` and `--root-user` have no `--srv` counterparts, since h9 doesn't attach.
+- **[websocket-9p](websocket-9p.md).** `ws` sources connect as its namespace-file mounts do. Those mounts are unchanged: a URL on a `mount` line still makes its own connection.
+- **[dotl](dotl.md).** dotl puts roots' and namespace files' connections through its translator before devmnt sees them. Posted connections go through it the same way, before the post, so `--srv z=tcp!zerofs.example!5564` posts a translated channel and the guest's `mount /srv/z` works unchanged. Until dotl is built, a .L server fails the guest's mount at `Tversion`.
 - **[root-auth](root-auth.md).** h9 doesn't authenticate posted connections. A guest that holds a key in its own factotum can authenticate its own mount, since `amount` calls `fauth`; h9 doesn't give it one. Host-side authentication for entries is an open issue.
-- **[child-machines](0109-child-machines.md).** A child's `#s` board is fresh, so it sees none of its parent's entries. Handing one over would be a `ctl` line there, naming a caller's `/srv` path to post on the child's board, under its rule that a child reaches only what the caller can.
+- **[child-machines](child-machines.md).** A child's `#s` board is fresh, so it sees none of its parent's entries. Handing one over would be a `ctl` line there, naming a caller's `/srv` path to post on the child's board, under its rule that a child reaches only what the caller can.
 
 ## Rationale
 
@@ -195,35 +195,35 @@ The heading is outside `namespace`, so a saved namespace isn't changed and newns
 - **Isolation between machines:** each machine dials its own connections and posts them on its own board, and an `fd` source is owned by one machine. Two machines that should share a server each get their own connection to it.
 - **Hostile servers:** devmnt is the same client that talks to 9P roots. A server can return anything in a file, and the guest runs what it chooses to from it, under its policy.
 
-## Done when
+## Done criteria
 
 Integration cases tagged `[host-srv]`. The servers are the 9p-roots test server, a second h9 running `exportfs` behind `aux/listen1 -t`, its unix-socket relay, and websocket-9p's test relay. The embedder case uses a socketpair and the stub 9P server the 9p-roots cases use.
 
-- `test "a namespace file mounts a server posted from a unix socket [host-srv]"`
-- `test "a guest program mounts a posted TCP server [host-srv]"`
-- `test "a guest program mounts a posted ws:// server [host-srv]"`
-- `test "one entry mounted with two specs uses one connection [host-srv]"`
-- `test "a posted TCP server works under --net=disable [host-srv]"`
-- `test "--net-allow doesn't see a posted connection [host-srv]"`
-- `test "an unreachable entry exits 125 [host-srv]"`
-- `test "an entry named root, a duplicate name, or a name with / exits 2 [host-srv]"`
-- `test "--write=none with --srv exits 2 [host-srv]"`
-- `test "/proc/n/ns prints a mount of a posted server as /srv/NAME [host-srv]"`
-- `test "removing /srv/NAME leaves its mounts working [host-srv]"`
-- `test "a server that hangs up fails the guest's reads [host-srv]"`
-- `test "--print lists entries under srv and elides a URL's query [host-srv]"`
-- `test "an embedder's socketpair is posted and mounted [host-srv]"`
-- `test "a unix socket entry on Windows exits 125 [host-srv]"`, on Windows hosts only.
+- [ ] `test "a namespace file mounts a server posted from a unix socket [host-srv]"`
+- [ ] `test "a guest program mounts a posted TCP server [host-srv]"`
+- [ ] `test "a guest program mounts a posted ws:// server [host-srv]"`
+- [ ] `test "one entry mounted with two specs uses one connection [host-srv]"`
+- [ ] `test "a posted TCP server works under --net=disable [host-srv]"`
+- [ ] `test "--net-allow doesn't see a posted connection [host-srv]"`
+- [ ] `test "an unreachable entry exits 125 [host-srv]"`
+- [ ] `test "an entry named root, a duplicate name, or a name with / exits 2 [host-srv]"`
+- [ ] `test "--write=none with --srv exits 2 [host-srv]"`
+- [ ] `test "/proc/n/ns prints a mount of a posted server as /srv/NAME [host-srv]"`
+- [ ] `test "removing /srv/NAME leaves its mounts working [host-srv]"`
+- [ ] `test "a server that hangs up fails the guest's reads [host-srv]"`
+- [ ] `test "--print lists entries under srv and elides a URL's query [host-srv]"`
+- [ ] `test "an embedder's socketpair is posted and mounted [host-srv]"`
+- [ ] `test "a unix socket entry on Windows exits 125 [host-srv]"`, on Windows hosts only.
 
 Once serve is built, tagged with both:
 
-- `test "a --serve client mounts a posted server through /srv [host-srv, serve]"`
-- `test "--print shows a caveat for posted servers under --serve-root / [host-srv, serve]"`
+- [ ] `test "a --serve client mounts a posted server through /srv [host-srv, serve]"`
+- [ ] `test "--print shows a caveat for posted servers under --serve-root / [host-srv, serve]"`
 
 Demos:
 
-- `h9 --srv fs=tcp!localhost!5640 --rc 'mkdir /tmp/n && mount /srv/fs /tmp/n && ls /tmp/n'` lists the served tree, with the server started as for 9p-roots.
-- With serve: `h9 --serve unix!/tmp/a.sock`, then `h9 --srv a=unix!/tmp/a.sock --rc 'mkdir /tmp/a && mount /srv/a /tmp/a && ls /tmp/a/mnt/term'`.
+- [ ] `h9 --srv fs=tcp!localhost!5640 --rc 'mkdir /tmp/n && mount /srv/fs /tmp/n && ls /tmp/n'` lists the served tree, with the server started as for 9p-roots.
+- [ ] With serve: `h9 --serve unix!/tmp/a.sock`, then `h9 --srv a=unix!/tmp/a.sock --rc 'mkdir /tmp/a && mount /srv/a /tmp/a && ls /tmp/a/mnt/term'`.
 
 ## Implementation
 
@@ -236,7 +236,7 @@ Demos:
 
 ## Open issues
 
-- **Dial strings in namespace files.** [dotl](0022-dotl.md) shows `mount 'tcp!zerofs.example!5564' /n/z` in a namespace file, which needs namespace files to accept `tcp!` and `unix!` sources as websocket-9p made them accept URLs. Nothing proposes that yet. Either dotl's example becomes `--srv z=tcp!…` with `mount /srv/z /n/z`, or a proposal adds the sources with the late-conflict caveat in Rationale.
+- **Dial strings in namespace files.** [dotl](dotl.md) shows `mount 'tcp!zerofs.example!5564' /n/z` in a namespace file, which needs namespace files to accept `tcp!` and `unix!` sources as websocket-9p made them accept URLs. Nothing proposes that yet. Either dotl's example becomes `--srv z=tcp!…` with `mount /srv/z /n/z`, or a proposal adds the sources with the late-conflict caveat in Rationale.
 - **Checking at startup.** A `Tversion` before posting would turn a wrong dialect into exit 125 rather than a failed mount. Whether that's worth a round trip per entry, and whether it confuses servers that expect one `Tversion` per connection, is unsettled.
 - **Host-side authentication.** [root-auth](root-auth.md)'s `p9any` on the host could authenticate entries too, but authentication happens per attach, and h9 doesn't attach. It would need h9 to answer the guest's `fauth` on the guest's behalf.
 - **Secrets on the command line.** A `ws` entry's token is in the process listing. `--srv NAME=@FILE`, reading the address from a file as `--root-header @FILE` does, or per-entry headers, would keep it out.

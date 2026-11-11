@@ -1,7 +1,7 @@
 /*
  * tsleep: sleep with a timeout, with 9front's contract (port/proc.c),
  * built only on drawterm's public sleep and wakeup. drawterm has no timers
- * and no tsleep. See design/0003-semaphores.md.
+ * and no tsleep. See design/semaphores.md.
  *
  * One timer kproc per kernel, started from h9_proc_boot, keeps a list of
  * deadlines sorted by host monotonic time, and waits on a host condition

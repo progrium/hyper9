@@ -107,7 +107,7 @@ struct Hproc
 	Hnote	*note[NNOTE];
 	Hnote	*lastnote;	/* the note being handled, or that killed it */
 
-	/* Debugging (design/0010-self-host.md); under nlk. */
+	/* Debugging (design/self-host.md); under nlk. */
 	int	procctl;	/* Pstopme or Ptraceme: stop at the next stop point */
 	int	stopped;	/* parked at a stop point until ctl start */
 	int	pdbg;		/* a debugger waits in stopr for it to stop */

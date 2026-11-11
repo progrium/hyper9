@@ -322,7 +322,7 @@ skips them silently.
 **Built as one binary.** Every 9front binary is a static link, so each
 copy above carries its own libc. `zig build slim`, from an h9 checkout with
 a root tree, builds the same kind of tree around
-[9box](../design/0064-multicall.md): 9front's own commands, from the pinned
+[9box](../design/multicall.md): 9front's own commands, from the pinned
 source, in one binary that picks the command by the name it runs as.
 
 ```sh
@@ -341,7 +341,7 @@ the tree as above; to box more of 9front's, add a line to `src/9box/slim`
 (its name and its directory under `/sys/src/cmd`).
 
 This tree is also built into h9 itself, as the built-in root h9 uses when it
-finds no other ([builtin-root](../design/0087-builtin-root.md)). `h9
+finds no other ([builtin-root](../design/builtin-root.md)). `h9
 --builtin=only` runs over it even when you have a root, and `h9 --root
 ~/slim --builtin=after` fills in any of its 42 commands your own tree
 leaves out.
@@ -422,7 +422,7 @@ from safest to least safe:
 - **A namespace file** can put a fresh overlay over one directory with
   `bind -c '#O' /lib`, leaving the rest read-only.
 
-The [overlay](../design/0011-overlay.md) proposal, accepted but not built
+The [overlay](../design/overlay.md) proposal, accepted but not built
 yet, makes copy-on-write over the root the default (`--write=overlay`), with
 the cwd and `--writable` paths still writing to the host.
 
@@ -588,7 +588,7 @@ welcome to box
   is refused with exit 125. A TCP root is plain 9P, so keep it on loopback or
   a network you trust.
 - **9P2000 or 9P2000.L.** Not 9P2000.u. A .L server goes through a
-  translator ([dotl](../design/0022-dotl.md)), so devmnt still speaks
+  translator ([dotl](../design/dotl.md)), so devmnt still speaks
   9P2000.
 - **Partial walks, as 9P specifies.** When a walk of several names fails
   partway, the server must answer with the names it did walk, not an error.
@@ -614,7 +614,7 @@ under `aux/listen1` in one h9 and uses it as the root of another. And with
 
 `--root` also takes `ws://` and `wss://` URLs, so a
 userland can be served by a web server, through proxies, and to an h9 in a
-browser tab once [browser-host](../design/0012-browser-host.md) exists.
+browser tab once [browser-host](../design/browser-host.md) exists.
 Any 9P server can sit behind a relay that carries 9P in binary WebSocket
 messages. h9 has one for testing, `zig build wsrelay`, which listens for
 WebSocket connections on one port and relays each to a TCP 9P server on
@@ -675,10 +675,10 @@ its binary, as the device `#H`, and binds `#H/bin` after everything else in
   where they land. A relative link that stays inside the tree works, but an
   absolute one points into the host's file system, not your tree, and fails
   as if its target didn't exist. Use relative links, hard links, or copies. The
-  [symlinks-in-root](../design/0034-symlinks-in-root.md) draft would resolve
+  [symlinks-in-root](../design/symlinks-in-root.md) draft would resolve
   them inside the tree.
 - **Disk images.** A 9front disk image as the root is the
-  [image-roots](../design/0014-image-roots.md) draft.
+  [image-roots](../design/image-roots.md) draft.
 - **From a Zig program.** `Machine.Options` takes the root and
   `guest_tools`, so an embedder can run its own userland without the CLI.
   See [Embedding h9 in a Zig program](embedding.md).

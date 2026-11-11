@@ -1,4 +1,4 @@
-//! The Linux syscall table (design/0018-linux-personality.md, "Syscalls"),
+//! The Linux syscall table (design/linux-personality.md, "Syscalls"),
 //! served by drawterm's kern on the calling process's own thread, as
 //! src/syscall.zig serves 9front's.
 //!
@@ -177,7 +177,7 @@ fn freeDirBuf(gpa: std.mem.Allocator, b: *DirBuf) void {
 /// counts its own reaped children.
 const WaitRec = struct { pid: u32, status: u32, user_ms: u64 = 0, sys_ms: u64 = 0 };
 
-/// What the threads of one process share (design/0049-linux-threads.md):
+/// What the threads of one process share (design/linux-threads.md):
 /// per-fd state, sockets and epoll interest lists, and its members, for
 /// signal actions, exit_group and execve. A process without threads is a
 /// group of one. Each member holds a reference.
@@ -192,7 +192,7 @@ pub const Group = struct {
     fdflags: std.AutoHashMapUnmanaged(i32, FdFlags) = .empty,
     dirbufs: std.AutoHashMapUnmanaged(i32, *DirBuf) = .empty,
     /// Sockets by conversation, and epoll interest lists by the #ε
-    /// instance's qid (design/0050-linux-net.md).
+    /// instance's qid (design/linux-net.md).
     /// Each on the heap, so a pointer to one stays good while other
     /// threads add more.
     socks: std.AutoHashMapUnmanaged(u32, *Sock) = .empty,
@@ -391,7 +391,7 @@ pub const Process = struct {
     /// Set when the last call returned -EINTR, with what restarts it.
     restart: ?Restart = null,
     /// The current call's timespecs are 32-bit: i386's calls other than
-    /// the *_time64 ones (design/0105-linux-i386.md).
+    /// the *_time64 ones (design/linux-i386.md).
     time32: bool = false,
     name_buf: [4096]u8 = undefined,
     name2_buf: [4096]u8 = undefined,
@@ -424,7 +424,7 @@ pub const Process = struct {
         return p.pid == p.g.tgid;
     }
 
-    /// The state a new thread starts with (design/0049-linux-threads.md):
+    /// The state a new thread starts with (design/linux-threads.md):
     /// the same memory and thread group, the creator's signal actions and
     /// mask, nothing pending.
     pub fn threadChild(p: *Process, tid: u32) Process {
@@ -1061,7 +1061,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
 
         // Processes.
         .exit, .exit_group => {
-            // exit ends only the calling thread (design/0049-linux-threads.md).
+            // exit ends only the calling thread (design/linux-threads.md).
             p.thread_exit = s == .exit;
             return .{ .exits = exitString(p, c.uint(0) & 0xff) };
         },
@@ -1331,7 +1331,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .ptrace, .bpf, .perf_event_open => return ret(-E.PERM),
         .seccomp => return ret(-E.INVAL),
         .io_uring_setup => return ret(-E.NOSYS),
-        // Readiness and sockets (design/0050-linux-net.md).
+        // Readiness and sockets (design/linux-net.md).
         .ppoll, .poll => return ret(try pollCall(p, s, c)),
         .pselect6, .select => return ret(try selectCall(p, s, c)),
         .socket => return ret(try socketCall(p, c.uint(0), c.uint(1), c.uint(2))),
@@ -1381,7 +1381,7 @@ fn lseek(p: *Process, fd: i32, off: i64, whence: i32) i64 {
     return r;
 }
 
-/// i386's calls (design/0105-linux-i386.md). Most are the generic calls with
+/// i386's calls (design/linux-i386.md). Most are the generic calls with
 /// 32-bit longs and pointers, which the helpers lay out by `Process.is32`;
 /// these are the ones whose numbering or arguments differ.
 const ia32 = struct {
@@ -1869,7 +1869,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     const len = @min(len_in, 0x7ffff000);
     p.mm.touch(buf, len, dir == .read) catch return -E.FAULT;
     // O_NONBLOCK, and reads and writes on sockets that a signal can
-    // interrupt (design/0050-linux-net.md): ask first, for the devices
+    // interrupt (design/linux-net.md): ask first, for the devices
     // that can block. A file is always ready.
     var is_pipe = false;
     if (off == -1) if (kc.fdInfo(fd) catch null) |info| {
@@ -2560,7 +2560,7 @@ fn kindOfDir(d: *const attr.Dir) attr.Kind {
     return switch (d.type) {
         '|' => .fifo,
         'c', 'y' => .chr,
-        // A conversation's data file is a socket's (design/0050-linux-net.md).
+        // A conversation's data file is a socket's (design/linux-net.md).
         'I' => if (d.qid_type & 0x80 == 0 and d.qid_path & 0xf == ip_qdata) .sock else .auto,
         else => if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else if (isListeningUnix(d)) .sock else .auto,
     };
@@ -2840,7 +2840,7 @@ fn link(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags: 
 }
 
 /// A link in an overlay is kept in memory; in a host tree it's a host
-/// symlink, the new name checked like a create (design/0018-linux-personality.md).
+/// symlink, the new name checked like a create (design/linux-personality.md).
 fn symlink(p: *Process, target_va: u64, newdir: i32, new_va: u64) Err!i64 {
     const target = try pathArg(p, target_va, &p.name2_buf);
     if (target.len == 0) return -E.NOENT;
@@ -3153,9 +3153,9 @@ fn defaultTermios() [60]u8 {
 /// in decimal, as APE's _exit writes it.
 /// -errno for clone flags h9 doesn't serve, or null. Threads need
 /// CLONE_THREAD, CLONE_SIGHAND and CLONE_VM together, as Linux does; memory
-/// is shared only with threads and vfork (design/0049-linux-threads.md).
+/// is shared only with threads and vfork (design/linux-threads.md).
 /// clone's thread pointer: the value itself, or on i386 the base of the
-/// struct user_desc it points at (design/0105-linux-i386.md, "TLS").
+/// struct user_desc it points at (design/linux-i386.md, "TLS").
 fn cloneTls(p: *Process, flags: u64, tls: u64) Err!u64 {
     if (!p.is32() or flags & CLONE_SETTLS == 0) return tls;
     return try p.readU32(tls + 4);
@@ -4033,7 +4033,7 @@ fn futexWord(p: *Process, va: u64) Err!*u32 {
     return @ptrCast(@alignCast(b.ptr));
 }
 
-/// futex (design/0049-linux-threads.md): waits keyed on the address
+/// futex (design/linux-threads.md): waits keyed on the address
 /// space and the guest address, so they're private to the process's
 /// threads (and a vfork child's), with or without FUTEX_PRIVATE_FLAG.
 /// A futex in a MAP_SHARED mapping (or a System V segment) is keyed on
@@ -4219,7 +4219,7 @@ fn frameCheck(p: *Process, u: *vmm.Ureg, x: *vmm.Extra, f: sig.Frame) !void {
     try sig.restore(p, &p.sig, u, x);
 }
 
-// Sockets and readiness (design/0050-linux-net.md). A socket is a /net
+// Sockets and readiness (design/linux-net.md). A socket is a /net
 // conversation: its fd is the conversation's data file, opened from
 // devip directly (#I), so --net and the policy's devip hooks apply as
 // they do for 9front programs. What Linux needs beyond the files goes
@@ -4594,7 +4594,7 @@ fn bindCall(p: *Process, fd: i32, va: u64, len: u64) Err!i64 {
     // A client's bind to any address and port 0, as busybox nslookup's
     // before its connect, needs no announce: where the policy refuses
     // one (--net outbound), the socket stays unbound and its connect or
-    // first sendto binds it, as Linux's do (design/0050-linux-net.md).
+    // first sendto binds it, as Linux's do (design/linux-net.md).
     if (r == -E.ACCES and any and a.port == 0) {
         so.s.bound_len = 0;
         return 0;

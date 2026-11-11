@@ -1,6 +1,6 @@
 # Proposals
 
-Design changes to h9 go through proposals: one Markdown file each in this directory, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. [SPEC.md](../SPEC.md) describes h9 as built; proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), and was itself adopted as [proposal 1](0001-proposals.md).
+Design changes to h9 go through proposals: one Markdown file each in this directory, with frontmatter for status and dependencies, numbered by the GitHub issue where it's discussed. [SPEC.md](../SPEC.md) describes h9 as built; proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), and was itself adopted as [proposal 1](proposals.md).
 
 ## When a proposal is needed
 
@@ -31,7 +31,7 @@ The signature is added by hand by the person it names, never by a tool or an age
 
 A draft has only its slug, and its file is `design/<slug>.md`. `zig build design -- file <slug>` creates the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract, and a link to the file as the body), renames the file to `design/NNNN-<slug>.md` with its `id` set to the issue number, rewrites references to the slug as the number and links to the old path, and commits. It asks first, as it creates the issue as the account `gh` is logged in as; `--dry-run` shows what it would do, and `--yes` skips the question. `--issue N` numbers the draft for an issue that already exists, without touching GitHub.
 
-Discussion happens on the issue. The doc is revised in commits. A proposal can't leave `draft` without an `id`: drafting needs no GitHub, but deciding needs an issue to discuss it on. The slug stays as an alias after filing, so a reference written before the number existed still resolves. The [baseline](0000-baseline.md), the work done before proposals, is `id: 0` and has no issue.
+Discussion happens on the issue. The doc is revised in commits. A proposal can't leave `draft` without an `id`: drafting needs no GitHub, but deciding needs an issue to discuss it on. The slug stays as an alias after filing, so a reference written before the number existed still resolves. The [baseline](baseline.md), the work done before proposals, is `id: 0` and has no issue.
 
 ## Frontmatter
 

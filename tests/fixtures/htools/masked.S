@@ -1,6 +1,6 @@
 // With guest_tools false (--no-guest-tools), the test-only script isn't on
 // /bin and #H can't be attached; exits with the attach's error
-// (tests/backends.zig, design/0032-guest-tools.md).
+// (tests/backends.zig, design/guest-tools.md).
 
 #include "lib.S"
 

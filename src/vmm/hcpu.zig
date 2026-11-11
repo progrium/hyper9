@@ -44,7 +44,7 @@ pub fn version(buf: []u8) []const u8 {
 pub const req_kick = cache.req_kick;
 pub const req_sync = cache.req_sync;
 
-/// The web host (design/0012-browser-host.md): one thread, whose
+/// The web host (design/browser-host.md): one thread, whose
 /// coroutines take turns, so a vCPU leaves guest code on a budget of
 /// instructions as well as on requests (see State.run).
 const web = builtin.os.tag == .wasi;

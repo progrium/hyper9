@@ -1,6 +1,6 @@
 # The C and Zig shadow stack pointer, which each coroutine has its own
 # value of (src/web/coro.c). There's no builtin to read or set a wasm
-# global from C. design/0012-browser-host.md.
+# global from C. design/browser-host.md.
 
 	.globaltype __stack_pointer, i32
 

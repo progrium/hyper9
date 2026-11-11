@@ -1,6 +1,6 @@
 /*
  * h9: host-socket calls for devip's h9 additions and the Linux socket
- * calls (design/0050-linux-net.md, src/kern/hostsock.h), and the watcher
+ * calls (design/linux-net.md, src/kern/hostsock.h), and the watcher
  * that wakes pollers when a socket they wait on becomes ready.
  */
 

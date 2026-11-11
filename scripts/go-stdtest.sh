@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs Go's standard library tests for time, syscall, os and runtime on the
-# emulator (design/0007-go-compat.md), and prints pass, skip and fail
+# emulator (design/go-compat.md), and prints pass, skip and fail
 # counts for each package. Not a gate: it finds gaps the go-compat cases
 # miss. `zig build go-stdtest -Demu=unicorn` runs it.
 #

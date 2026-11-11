@@ -1,5 +1,5 @@
 /*
- * The host side of 9P roots (design/0013-9p-roots.md): connecting a unix
+ * The host side of 9P roots (design/9p-roots.md): connecting a unix
  * socket root, and the user name devmnt sends in a root's attach.
  *
  * A unix socket root is connected by h9 on the host and wrapped as a

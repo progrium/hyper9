@@ -1,4 +1,4 @@
-// h9's JS host (design/0012-browser-host.md): instantiates h9.wasm, runs
+// h9's JS host (design/browser-host.md): instantiates h9.wasm, runs
 // its coroutines on JavaScript Promise Integration, and compiles the
 // modules its JIT builds (wasmJit). The same code runs under Node
 // (h9-node) and in a Web Worker (worker.js), with the page's side of it in
@@ -161,7 +161,7 @@ const nextTask = (() => {
  * - stats({ maxStack }): called once h9 ends, with the deepest any
  *   coroutine's stack got at a park, in bytes.
  * - gfx: a GfxHost, the page's canvas in a Worker
- *   (design/0120-browser-gfx.md); without one, --gfx fails as on a build
+ *   (design/browser-gfx.md); without one, --gfx fails as on a build
  *   without graphics.
  */
 export async function run({ h9, wasi, host, log = console.error, stats, gfx }) {
@@ -244,7 +244,7 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx }) {
   return done.finally(() => stats({ maxStack: Number(hx.h9_coro_maxdepth()) }));
 }
 
-// WebSockets for src/hstream.zig (design/0021-websocket-9p.md, "On the
+// WebSockets for src/hstream.zig (design/websocket-9p.md, "On the
 // browser host"): the page's WebSocket, or Node's, does the handshake,
 // TLS and framing. ws_opened and ws_recv are Suspending: each parks only
 // the stream's reader coroutine.
@@ -358,7 +358,7 @@ function wsImports(memory, str) {
   };
 }
 
-// Graphics (design/0120-browser-gfx.md). src/kern/gfx-web.c's imports:
+// Graphics (design/browser-gfx.md). src/kern/gfx-web.c's imports:
 // the screen is in wasm memory, and the host copies changed rectangles
 // onto an OffscreenCanvas once a frame; the page's input waits in a queue
 // for gfxinput, a kernel process, to take with gfx_wait.
@@ -515,7 +515,7 @@ function policyFlags(policy = {}) {
   return f;
 }
 
-// The page's side of a canvas (design/0120-browser-gfx.md).
+// The page's side of a canvas (design/browser-gfx.md).
 
 // KeyboardEvent.key's named keys, as keyboard.h's runes.
 const KF = 0xF000, Spec = 0xF800;
@@ -698,17 +698,17 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
 }
 
 /**
- * A machine in its own Worker (design/0012-browser-host.md), from the
+ * A machine in its own Worker (design/browser-host.md), from the
  * page:
  *
  * - root: the root archive's URL (default root.h9a beside this file,
  *   unless there are layers), or a ws:// or wss:// URL of a 9P server
- *   (design/0021-websocket-9p.md)
+ *   (design/websocket-9p.md)
  * - layers: more root archives, each a URL or { url, at }, unpacked in
  *   order over the root archive, a later file replacing an earlier one,
  *   each under its directory `at` (default /). Together they're the tree
  *   at /, h9's --root. A 9front tree layered at a Linux root's /9 is
- *   named by a second `--root /9` in argv (design/0018-linux-personality.md)
+ *   named by a second `--root /9` in argv (design/linux-personality.md)
  * - memory: --memory, such as '256M'
  * - backend: --backend: 'emu' (h9's own CPUs, h86, ha64, and hx64, the default) or 'v86', its old name
  * - arch: --arch: the guest's CPU, '386' (h86, the default), 'arm64'
@@ -719,7 +719,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * - tty: the terminal is one to Linux programs (isatty, termios and raw
  *   mode), as a host terminal is; for a terminal that handles raw mode
  * - gfx: { canvas, clipboard, scale }, a <canvas> for /dev/draw,
- *   /dev/mouse, /dev/cursor, and /dev/kbd (design/0120-browser-gfx.md).
+ *   /dev/mouse, /dev/cursor, and /dev/kbd (design/browser-gfx.md).
  *   clipboard is "page" (the default: a paste into the canvas fills
  *   /dev/snarf, and a write to it is copied to the page's clipboard) or
  *   "private" (--gfx=noclip). scale is --gfx-scale: 0 (the default)

@@ -1,4 +1,4 @@
-//! The arm64 instruction inventory (design/0019-zig-interpreter.md): decodes
+//! The arm64 instruction inventory (design/zig-interpreter.md): decodes
 //! the text of every arm64 binary under the given paths with ha64's own
 //! decoder (src/interp/a64/decode.zig) and reports which micro-ops they
 //! use, and every instruction word nothing implements.

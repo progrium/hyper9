@@ -1,4 +1,4 @@
-// A draw client (tests/backends.zig, design/0015-gfx.md): opens
+// A draw client (tests/backends.zig, design/gfx.md): opens
 // /dev/draw/new, opens its client's data file, and fills (10,10)-(60,60)
 // of the screen, image 0, with red, as libdraw would: 'b' allocates a
 // 1x1 replicated opaque red image, 'd' draws it through itself as the

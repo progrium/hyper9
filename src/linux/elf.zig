@@ -1,6 +1,6 @@
-//! The ELF loader for the Linux personality (design/0018-linux-personality.md,
+//! The ELF loader for the Linux personality (design/linux-personality.md,
 //! "The ELF loader"): static and dynamic ELF64 executables of the
-//! machine's architecture, or ELF32 ones for i386 (design/0105-linux-i386.md),
+//! machine's architecture, or ELF32 ones for i386 (design/linux-i386.md),
 //! the Linux initial stack and auxv, and a minimal vDSO on arm64.
 //!
 //! `check` validates an image, and the interpreter's, before exec tears
@@ -96,7 +96,7 @@ pub fn isElf(bytes: []const u8) bool {
 }
 
 /// The architecture an ELF binary is for, or null if it isn't one h9
-/// runs (design/0018: arm64 and amd64; design/0105-linux-i386.md: i386).
+/// runs (design/0018: arm64 and amd64; design/linux-i386.md: i386).
 pub fn machineArch(bytes: []const u8) ?vmm.Arch {
     if (!isElf(bytes) or bytes.len < @sizeOf(Ehdr32)) return null;
     return switch (std.mem.readInt(u16, bytes[18..20], .little)) {

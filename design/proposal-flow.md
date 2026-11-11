@@ -12,7 +12,7 @@ areas: [process, build, tests]
 
 ## Abstract
 
-The proposal process from [proposals](0001-proposals.md) assumes a proposal is designed, filed, discussed in a final comment period, and accepted before any work starts. In practice, work often starts on a branch first, and the proposal is written alongside the code or after it. This proposal changes the lifecycle to fit. It drops the final comment period. It adds a `proposed` state for a proposal filed as an issue for feedback, which is optional, as `accepted` is. It adds a `branch` field that says where a proposal's work lives, from which the tool computes in progress and stalled. Files are named by slug alone, and proposals are referred to by slug everywhere. Done when becomes Done criteria, a checklist that `check` holds an implemented proposal to. Signing gets a shorter line, a `/sign` PR comment, and a `sign` command, all of which still need the named person to act.
+The proposal process from [proposals](proposals.md) assumes a proposal is designed, filed, discussed in a final comment period, and accepted before any work starts. In practice, work often starts on a branch first, and the proposal is written alongside the code or after it. This proposal changes the lifecycle to fit. It drops the final comment period. It adds a `proposed` state for a proposal filed as an issue for feedback, which is optional, as `accepted` is. It adds a `branch` field that says where a proposal's work lives, from which the tool computes in progress and stalled. Files are named by slug alone, and proposals are referred to by slug everywhere. Done when becomes Done criteria, a checklist that `check` holds an implemented proposal to. Signing gets a shorter line, a `/sign` PR comment, and a `sign` command, all of which still need the named person to act.
 
 ## Background
 
@@ -166,7 +166,7 @@ Nothing changes for the guest. The signing workflow writes to PR branches, so it
 5. Write the migration as a one-time mode of the tool (`zig build design -- migrate`), run it, and commit the result alone, so the mechanical change is reviewable apart from the tool.
 6. Add `design/SIGNERS`, `sign`, and the `/sign` workflow, and the `check` rule for signature lines.
 7. Rewrite design/README.md, TEMPLATE.md, and the design parts of AGENTS.md and DEVELOPING.md. AGENTS.md's "draft one and stop" becomes: stop and draft one unless the person you're working for directs the work, in which case the PR adds or updates the proposal, its `branch`, and its Done criteria as it goes. The rule about signature lines also forbids running `sign`, posting `/sign`, and editing `design/SIGNERS`.
-8. Add a dated note under the Updates section of [proposals](0001-proposals.md) that points here, and set this proposal to `implemented` with `branch: [main]`.
+8. Add a dated note under the Updates section of [proposals](proposals.md) that points here, and set this proposal to `implemented` with `branch: [main]`.
 
 This proposal is the first to use the new flow: it goes from `draft` to `implemented` in the PR that does the work.
 

@@ -1,5 +1,5 @@
 //! Lockstep: a T0 against Unicorn, an instruction at a time, for arm64
-//! (ha64), i386 (h86), and amd64 (hx64). design/0019-zig-interpreter.md's lockstep,
+//! (ha64), i386 (h86), and amd64 (hx64). design/zig-interpreter.md's lockstep,
 //! generalized to both guests and kept free of either T0's types.
 //!
 //! Unicorn runs on a mirror: its own copies of the T0's pages, mapped with

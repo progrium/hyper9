@@ -1,6 +1,6 @@
 /*
  * drawterm's screen interface without a GUI backend (-Dgfx=none,
- * design/0015-gfx.md): there's no screen, so an attach of #i fails with
+ * design/gfx.md): there's no screen, so an attach of #i fails with
  * "no frame buffer", /dev/snarf with Egreg, and the mouse never moves.
  * Machines mask #b, #i and #m anyway, since --gfx can't be given.
  */

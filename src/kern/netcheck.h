@@ -1,5 +1,5 @@
 /*
- * h9's sandbox hooks for devip (design/0005-net-policy.md). The leaves
+ * h9's sandbox hooks for devip (design/net-policy.md). The leaves
  * are in Zig (src/kern.zig): each returns a verdict and raises no kernel
  * error; devip raises "permission denied" or "no translation for host
  * found" itself. The operations match policy.NetOp, and proto is devip's

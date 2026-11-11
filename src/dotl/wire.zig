@@ -1,4 +1,4 @@
-//! 9P's wire encoding in three dialects (design/0022-dotl.md): 9P2000,
+//! 9P's wire encoding in three dialects (design/dotl.md): 9P2000,
 //! which devmnt and exportfs speak; 9P2000.L, Linux's; and `9P2000.L.Z`,
 //! ZeroFS's extension of .L (ninep-proto 0.4.0's `wire_messages.rs`).
 //!

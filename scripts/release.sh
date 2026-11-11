@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$H9_ROOT"
 
 # Targets for each asset. h9 has a hypervisor backend only on macOS until
-# KVM and WHP are built (design/0016-kvm.md, design/0017-whp.md); h9-emu runs
+# KVM and WHP are built (design/kvm.md, design/whp.md); h9-emu runs
 # everywhere Unicorn builds.
 H9_TARGETS="aarch64-macos"
 EMU_TARGETS="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu x86_64-windows-gnu"
@@ -102,7 +102,7 @@ for t in $H9_TARGETS; do
 	archive "$work/$name" "$name"
 done
 
-# The browser host (design/0012-browser-host.md): one archive for every
+# The browser host (design/browser-host.md): one archive for every
 # platform.
 name="h9-web-$version"
 web_root=()

@@ -1,4 +1,4 @@
 #!/bin/rc
-# A test-only command in #H (design/0032-guest-tools.md), served by
+# A test-only command in #H (design/guest-tools.md), served by
 # Debug builds; see tests/integration.zig.
 echo h9 guest tools $*

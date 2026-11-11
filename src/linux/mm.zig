@@ -1,4 +1,4 @@
-//! A Linux process's address space (design/0018-linux-personality.md,
+//! A Linux process's address space (design/linux-personality.md,
 //! "Memory"): a sorted list of VMAs over the vmm's address space, with
 //! pages allocated on first touch.
 //!
@@ -51,7 +51,7 @@ pub const Layout = struct {
 
     /// 47 bits on arm64 and amd64, as on amd64 Linux, which arm64's 48-bit
     /// space also holds. i386 gets Linux's 3 GiB, below the emulator's
-    /// descriptor table at the top (design/0105-linux-i386.md), with PIEs at 4 MiB as Linux puts them.
+    /// descriptor table at the top (design/linux-i386.md), with PIEs at 4 MiB as Linux puts them.
     pub fn of(arch: vmm.Arch) Layout {
         const top: u64 = if (arch == .i386) 0xC000_0000 else 1 << 47;
         return .{

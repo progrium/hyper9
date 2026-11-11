@@ -4,7 +4,7 @@ Lima VMs for running h9 with the emu backend (`--backend emu`) on Linux,
 macOS, and Windows. None but `linux-kvm` has a usable hypervisor (no
 `/dev/kvm`, no nested Hypervisor.framework, no WHP), which is the case emu
 is for. `linux-kvm` has nested virtualization, for the KVM backend
-([kvm](../../design/0016-kvm.md)): `vm test linux-kvm` runs the tests with
+([kvm](../../design/kvm.md)): `vm test linux-kvm` runs the tests with
 `H9_TEST_BACKENDS=kvm,emu`. Nothing is
 installed for building: cross-compile h9 on the host and copy it in.
 

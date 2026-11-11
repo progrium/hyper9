@@ -1,4 +1,4 @@
-// WASI for the browser host (design/0012-browser-host.md): the calls
+// WASI for the browser host (design/browser-host.md): the calls
 // h9.wasm makes, over an in-memory tree loaded from the root archive that
 // `zig build web` makes (tools/webroot.zig). The tree is preopened at /
 // and read-only: the guest's writes go to h9's overlay, in memory. Output

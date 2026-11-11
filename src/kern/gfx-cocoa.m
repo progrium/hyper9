@@ -1,5 +1,5 @@
 /*
- * macOS --gfx (design/0015-gfx.md): closing the window or choosing Quit
+ * macOS --gfx (design/gfx.md): closing the window or choosing Quit
  * ends AppKit, which calls exit itself. h9 observes the app's termination
  * instead, and src/gfx.zig's handler takes it through the machine's
  * hangup path and exits with the run's status, as the Windows console's

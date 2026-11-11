@@ -1,4 +1,4 @@
-//! The server side of the 9P2000.L translator (design/0022-dotl.md,
+//! The server side of the 9P2000.L translator (design/dotl.md,
 //! "Serving 9P2000.L"): 9P2000.L from a Linux client on one side, 9P2000
 //! to the connection's exportfs on the other.
 //!
