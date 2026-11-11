@@ -20,7 +20,7 @@
 //!   pages), and 0 otherwise, which leaves to this dispatcher with
 //!   `.chain`. A cell is linked when its batch or its target goes live,
 //!   and cleared when its target goes (`links` finds them by key).
-//! - **Invalidation.** `invalidatePage` (from zemu's CodePages callback)
+//! - **Invalidation.** `invalidatePage` (from hcpu's CodePages callback)
 //!   drops every region from an arena page: its slot is nulled, cells
 //!   pointing at it are cleared, and a region still queued or compiling is
 //!   dropped when its batch settles. Compiled code can't store to code (the

@@ -61,7 +61,7 @@ pub const Config = struct {
 pub const Result = enum { svc, interrupted, t0, cold };
 
 /// The native Guests' `Config.hot` and the taken branches T0 runs on a
-/// `.cold` return; zemu sets them from H9_JIT_HOT and H9_JIT_COLD. With
+/// `.cold` return; hcpu sets them from H9_JIT_HOT and H9_JIT_COLD. With
 /// every block compiled on first entry, Claude Code's `--help` on ha64
 /// compiled 283K regions, entered about 3 times each, and filled the
 /// 64 MiB cache 27 times: 19 s, against 6 s in T0 alone. At 32 entries
@@ -70,7 +70,7 @@ pub var hot: u32 = 32;
 pub var cold_branches: u32 = 8;
 /// A perf map (/tmp/perf-<pid>.map) that each compile appends its code's
 /// host range and guest PC to, for attributing profile samples in JIT
-/// code to guest PCs; zemu opens it when H9_PERF_MAP is set. -1 is off.
+/// code to guest PCs; hcpu opens it when H9_PERF_MAP is set. -1 is off.
 pub var perf_fd: i32 = -1;
 /// A guest PC whose region's IR and code `compile` dumps (debugging).
 pub var dump_pc: u64 = 0;

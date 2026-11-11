@@ -4,7 +4,7 @@
 
 - Read [DEVELOPING.md](DEVELOPING.md) for setup, build commands, and repository layout.
 - Read [SPEC.md](SPEC.md) before changing architecture or behavior that crosses components. It describes h9 as built; verify in the source what is implemented today.
-- Read [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), and [spec/ha64.md](spec/ha64.md) before changing h9's own CPUs (`src/interp/`, `src/jit/`, and `src/vmm/zemu.zig`); like SPEC.md, they describe what's built.
+- Read [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), and [spec/ha64.md](spec/ha64.md) before changing h9's own CPUs (`src/interp/`, `src/jit/`, and `src/vmm/hcpu.zig`); like SPEC.md, they describe what's built.
 - Read [design/README.md](design/README.md) before changing anything a proposal covers. Changes to the design go through proposals in `design/`.
 - Check the existing code and tests before proposing or changing behavior. Keep changes focused and preserve established decisions unless the task explicitly calls for revisiting them.
 

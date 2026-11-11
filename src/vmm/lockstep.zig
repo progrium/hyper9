@@ -100,7 +100,7 @@ const x86_vector_bp = 3;
 const x86_vector_ud = 6;
 const x86_vector_plan9 = 64;
 const x86_vector_linux = 0x80;
-/// Where the i386 engine's GDT lives (as in vmm/emu.zig): flat 32-bit code
+/// Where the i386 engine's GDT lives (as in vmm/unicorn.zig): flat 32-bit code
 /// and data, so segment loads keep the 32-bit stack.
 const gdt_va: u64 = 0xFFFF_F000;
 

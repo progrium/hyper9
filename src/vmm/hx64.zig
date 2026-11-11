@@ -1,5 +1,5 @@
-//! hx64: h9's own CPU for amd64 binaries, as a Guest of vmm/zemu.zig
-//! (-Demu=zig), which has the interface. It's h86 in long mode
+//! hx64: h9's own CPU for amd64 binaries, as a Guest of vmm/hcpu.zig
+//! (-Demu=hcpu), which has the interface. It's h86 in long mode
 //! (design/hcpu.md, hx64): the same decoder, T0, and lifter in
 //! src/interp/x86/ and src/jit/x86/, instantiated with `.long`.
 //!
@@ -28,7 +28,7 @@ const build_options = @import("build_options");
 /// when the backend has a code cache and this host an emitter, as for
 /// h86, and on the web host its own (wasm_t1.zig, runWasmT1). T1 is the
 /// default on x86-64, arm64, and the web. H9_EMU_TIER picks either
-/// (zemu.applyTier).
+/// (hcpu.applyTier).
 pub const Tier = enum { t0, t1 };
 pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) {
     .x86_64, .aarch64, .wasm32 => .t1,
@@ -161,12 +161,12 @@ pub fn setExtra(cpu: *Cpu, x: *const vmm.Extra) vmm.Error!void {
     c.gs_base = t.gs;
 }
 
-/// Instructions retired, for zemu.retired_total.
+/// Instructions retired, for hcpu.retired_total.
 pub fn retired(cpu: *const Cpu) u64 {
     return cpu.c.retired;
 }
 
-/// Runs T0 until an exit. An exit request (ctx.exit_request, which zemu
+/// Runs T0 until an exit. An exit request (ctx.exit_request, which hcpu
 /// clears) or a spent ctx.budget gives `.interrupted`.
 pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     const c = &cpu.c;
@@ -320,7 +320,7 @@ fn runWasmT1(c: *x86cpu.Cpu64, ctx: *Ctx, m: *tlb.TlbMem) vmm.Error!vmm.Exit {
 }
 
 /// 9front's VectorSYSCALL (pc/io.h), which its amd64 kernel puts in
-/// Ureg.type for a system call, as emu.zig does.
+/// Ureg.type for a system call, as unicorn.zig does.
 const vector_syscall = 64;
 
 /// The vmm exit for T0's, leaving Ureg.type and the registers as the real

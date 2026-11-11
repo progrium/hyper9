@@ -1,5 +1,5 @@
-//! h86: h9's own CPU for 386 binaries, as a Guest of vmm/zemu.zig
-//! (-Demu=zig), which has the interface. Its CPU is in src/interp/x86/ and
+//! h86: h9's own CPU for 386 binaries, as a Guest of vmm/hcpu.zig
+//! (-Demu=hcpu), which has the interface. Its CPU is in src/interp/x86/ and
 //! src/jit/x86/, with the shared JIT layer in src/jit/ (src/hcpu.zig).
 //!
 //! T0, the interpreter (interp/x86/exec.zig), reaches guest memory through
@@ -28,7 +28,7 @@ const check_vmm = @import("hcpu").check_vmm;
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter. T1 is the
 /// default on x86-64 and arm64 hosts and on the web (wasm_t1.zig), where
-/// the 386 suite passes on it. H9_EMU_TIER picks either (zemu.applyTier).
+/// the 386 suite passes on it. H9_EMU_TIER picks either (hcpu.applyTier).
 pub const Tier = enum { t0, t1 };
 pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) {
     .x86_64, .aarch64, .wasm32 => .t1,
@@ -91,9 +91,9 @@ pub fn setExtra(c: *Cpu, x: *const vmm.Extra) vmm.Error!void {
 
 const TlbMem = tlb.TlbMem;
 
-/// Runs T0 until an exit. An exit request (ctx.exit_request, which zemu
+/// Runs T0 until an exit. An exit request (ctx.exit_request, which hcpu
 /// clears) or a spent ctx.budget gives `.interrupted`.
-/// Instructions retired, for zemu.retired_total.
+/// Instructions retired, for hcpu.retired_total.
 pub fn retired(cpu: *const Cpu) u64 {
     return cpu.c.retired;
 }

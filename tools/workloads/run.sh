@@ -6,7 +6,7 @@
 #   t1       h9 --backend emu, the zig emulator's default (JIT) tier
 #   t0       the same with H9_EMU_TIER=t0, the interpreter alone
 #   unicorn  h9 built with -Demu=unicorn
-#   nojit    h9 built with -Demu=zig -Dno-jit (in .local/workloads/h9-nojit),
+#   nojit    h9 built with -Demu=hcpu -Dno-jit (in .local/workloads/h9-nojit),
 #            T0 with no code generator compiled in
 #   native   the host itself, chrooted (as root), for 386 Linux on an
 #            x86-64 Linux host; skipped elsewhere
@@ -19,7 +19,7 @@
 # Needs tools/workloads/roots.sh first, a ReleaseFast h9 for each
 # emulator, and .local/9front/root (NINE_ROOT) for the 9front ones:
 #
-#   zig build -Demu=zig -Doptimize=ReleaseFast -p .local/workloads/h9-zig
+#   zig build -Demu=hcpu -Doptimize=ReleaseFast -p .local/workloads/h9-zig
 #   zig build -Demu=unicorn -Doptimize=ReleaseFast -p .local/workloads/h9-unicorn
 #
 # (on Linux, -Demu=unicorn also needs -Dtarget=<arch>-linux-musl). Outputs

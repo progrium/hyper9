@@ -40,7 +40,7 @@ The browser host ([browser-host](0012-browser-host.md)) ran 386 programs on v86,
 
 ### Three CPUs, two tiers, one JIT layer
 
-`-Demu=zig` builds the emulator backend (`src/vmm/zemu.zig`) on three Guests: ha64 (`src/vmm/ha64.zig`) for arm64 binaries, h86 (`src/vmm/h86.zig`) for 386 binaries, and hx64 (`src/vmm/hx64.zig`) for amd64 binaries, picked by the binary's architecture when the backend is created. Until hx64 lands, amd64 binaries keep needing Unicorn.
+`-Demu=hcpu` builds the emulator backend (`src/vmm/hcpu.zig`) on three Guests: ha64 (`src/vmm/ha64.zig`) for arm64 binaries, h86 (`src/vmm/h86.zig`) for 386 binaries, and hx64 (`src/vmm/hx64.zig`) for amd64 binaries, picked by the binary's architecture when the backend is created. Until hx64 lands, amd64 binaries keep needing Unicorn.
 
 The names are "h" and the instruction set's short name: 86 for the 386, A64 (Arm's name for arm64's instruction set), and x64 (the name the JIT's x86-64 emitter already has). hcpu names the family. Source trees stay named by instruction set (`src/{interp,jit}/{x86,a64}/`), and hx64 lives in the `x86` trees with h86, since it's the same decoder and interpreter in another mode.
 
@@ -62,7 +62,7 @@ The shared layer under `src/jit/` is guest-independent: the IR and its reference
 
 ### hx64
 
-hx64 is h86 extended, not a fourth design. amd64's long mode is the 386's encoding with REX prefixes, wider registers, and a few opcodes reassigned, and everything around the decoder (the IR, the emitters, the TLB, the code cache, `zemu`, SoftFloat, h86's x87 and SSE, and `Region.tso`) already handles 64-bit guests for ha64. The Linux personality already runs amd64 programs on KVM, the native backend, and Unicorn, so its system call arguments, numbers, signal frames, and `arch_prctl` are done, and Unicorn's amd64 code in `src/vmm/emu.zig` shows the Ureg and `SYSCALL` exit.
+hx64 is h86 extended, not a fourth design. amd64's long mode is the 386's encoding with REX prefixes, wider registers, and a few opcodes reassigned, and everything around the decoder (the IR, the emitters, the TLB, the code cache, `hcpu`, SoftFloat, h86's x87 and SSE, and `Region.tso`) already handles 64-bit guests for ha64. The Linux personality already runs amd64 programs on KVM, the native backend, and Unicorn, so its system call arguments, numbers, signal frames, and `arch_prctl` are done, and Unicorn's amd64 code in `src/vmm/unicorn.zig` shows the Ureg and `SYSCALL` exit.
 
 What's new:
 
@@ -70,7 +70,7 @@ What's new:
 - **State.** 16 general registers of 64 bits, RIP, 16 XMM registers, and the FS and GS bases. 32-bit writes zero the upper half, as the hardware does. `getUreg` and `setUreg` convert to and from 9front's amd64 Ureg, and `getExtra` and `setExtra` copy the FXSAVE image, as h86's do.
 - **Flags.** The lazy flags record (`flags.Lazy`, which the JIT writes as `ir.LazyRecord`) holds 32-bit operands, and the emitters, wasm's included, hard-code its layout. It widens to 64-bit operands and an operand size of 8 for h86 and hx64, h86 zero-extending into it, and `eflags.*` accept `i64` operands. That's the one contract change: existing ops gain a width, and none is renumbered.
 - **Lifting.** `src/jit/x86/lift.zig` takes the mode as a comptime parameter too: values are `i64` where the operand size is, addresses add RIP, and the extra registers are more chunks for the allocator to pin.
-- **Selection.** `zemu` picks hx64 for amd64 binaries natively and in the web build, which already runs ha64 as well as h86.
+- **Selection.** `hcpu` picks hx64 for amd64 binaries natively and in the web build, which already runs ha64 as well as h86.
 
 Speed on x86-64 hosts matters less than elsewhere, since amd64 programs there run on KVM, WHP, HVF, or the native backend at hardware speed. hx64 is for arm64 hosts, the browser, and x86-64 hosts where none of those works.
 
@@ -94,9 +94,9 @@ The web build runs h86 inside `h9.wasm`, with T1 compiling hot blocks into batch
 
 ### Build and selection
 
-- `-Demu=zig` builds every CPU and both tiers; `-Dno-jit` builds T0 alone, as for iOS; `zig build web` always uses h86 with the wasm JIT.
-- Once Done when passes for h86 and ha64, `-Demu=zig` becomes the default for the MIT `h9`, so `auto`'s fallback without a hypervisor runs arm64 and 386 programs with no Unicorn. `-Demu=unicorn` stays for `h9-emu` and amd64 guests until hx64 lands, and for lockstep testing after that. Once hx64 passes Done when, `h9-emu` is no longer released.
-- `vmm.Kind` keeps one `emu`. `--version` and `--check` report `zig (jit)` or `zig (interpreter)`. `H9_EMU_TIER` picks a tier for tests.
+- `-Demu=hcpu` builds every CPU and both tiers; `-Dno-jit` builds T0 alone, as for iOS; `zig build web` always uses h86 with the wasm JIT.
+- Once Done when passes for h86 and ha64, `-Demu=hcpu` becomes the default for the MIT `h9`, so `auto`'s fallback without a hypervisor runs arm64 and 386 programs with no Unicorn. `-Demu=unicorn` stays for `h9-emu` and amd64 guests until hx64 lands, and for lockstep testing after that. Once hx64 passes Done when, `h9-emu` is no longer released.
+- `vmm.Kind` keeps one `emu`. `--version` and `--check` report `hcpu (jit)` or `hcpu (interpreter)`. `H9_EMU_TIER` picks a tier for tests.
 
 ### Testing
 
@@ -129,10 +129,10 @@ T0 is checked against Unicorn in lockstep, Berkeley TestFloat (for the FP librar
 ## Compatibility
 
 - **CLI and exit codes.** Unchanged, apart from `--backend v86`, which stays an alias of `emu` for one release and is then a usage error.
-- **`Machine.Options` and the vmm interface.** Unchanged. `Backend.hwcaps` reports the emulator's arm64 extensions under `-Demu=zig`.
+- **`Machine.Options` and the vmm interface.** Unchanged. `Backend.hwcaps` reports the emulator's arm64 extensions under `-Demu=hcpu`.
 - **Guests.** A 9front process sees the same Ureg, notes, and FP state, on every CPU. The 386 FXSAVE image's last-instruction fields, which Unicorn left zero, are filled. Linux arm64 programs see LSE, CRC32, AES, PMULL, SHA1, and SHA256 in `AT_HWCAP` on the emulator. CPUID on h86 and hx64 reports "GenuineIntel", family 6, and SSE2. amd64 programs that Unicorn ran with its CPU's later extensions see SSE2 only, as h86's 386 programs do.
 - **The browser host.** The page's API is unchanged. `zig-out/web/` loses `v86.wasm` and its licence, and the download shrinks from 3.82 MB to 3.68 MB.
-- **Build and releases.** `-Demu=zig`, `-Dno-jit`, `-Djit-check`, `-Djit-verify`, and `-Dhcpu-debug` are new. The release `h9` gains an emulator once the default switches. `h9-emu` stays until hx64 lands.
+- **Build and releases.** `-Demu=hcpu`, `-Dno-jit`, `-Djit-check`, `-Djit-verify`, and `-Dhcpu-debug` are new. The release `h9` gains an emulator once the default switches. `h9-emu` stays until hx64 lands.
 - **Licences.** h9 stays MIT. `f80.zig` keeps SoftFloat's BSD-3 notice; nothing is copied from v86's or rv64.js's code.
 - **zig-interpreter.** This proposal includes and widens it, so it should be marked superseded by this one once this is filed.
 - **Root tree and `third_party/`.** Unchanged.
@@ -152,11 +152,11 @@ In the browser the boundary improves: there's no guest kernel whose page tables 
 
 ## Done when
 
-- `zig build integration -Demu=zig` with `H9_TEST_BACKENDS=emu` passes every `[baseline]`, `[linux-personality]`, and `[linux-threads]` case on T1 on macOS arm64, Linux arm64, Linux x86\_64, and Windows x86\_64, with the arm64 root, with `-Darch=386`, and with the amd64 root, and on T0 on Linux x86\_64.
+- `zig build integration -Demu=hcpu` with `H9_TEST_BACKENDS=emu` passes every `[baseline]`, `[linux-personality]`, and `[linux-threads]` case on T1 on macOS arm64, Linux arm64, Linux x86\_64, and Windows x86\_64, with the arm64 root, with `-Darch=386`, and with the amd64 root, and on T0 on Linux x86\_64.
 - On macOS arm64, `H9_TEST_BACKENDS=hvf,emu` passes on T1, so the syscall traces match HVF's.
-- `zig build integration -Demu=zig -Djit-check` passes with no divergence.
+- `zig build integration -Demu=hcpu -Djit-check` passes with no divergence.
 - `zig build integration -Dweb` passes every case it passed on v86, and `zig build web-test` passes in Chromium with no `v86.wasm`.
-- `zig build test -Demu=zig` passes `tests/backends.zig` on T0 and T1 for all three architectures.
+- `zig build test -Demu=hcpu` passes `tests/backends.zig` on T0 and T1 for all three architectures.
 - The cases in `tests/a64.zig`, `tests/x86.zig`, and `tests/x64.zig`, tagged `[hcpu]`, pass on T0 and T1:
   - `test "a store to a page of compiled code takes effect at the next instruction [hcpu]"`
   - `test "a fault in a compiled region reports the exact PC and registers [hcpu]"`
@@ -183,7 +183,7 @@ In the browser the boundary improves: there's no guest kernel whose page tables 
   - `test "four CMPXCHG16B threads lose no increments [hcpu]"`
   - `test "arch_prctl's FS base reaches FS-relative loads on T0 and T1 [hcpu]"`
 - `zig build fuzz-long` runs an hour on an arm64 and an x86-64 host with no divergence, and `zig build litmus` shows no forbidden outcome on any tier.
-- `zig build bench -Demu=zig` reports, on an M3 Max and an x86-64 Linux host, the bench loop at or under Unicorn's time for arm64, 386, and amd64, a system call round trip under 100 ns natively, and four busy threads at least 3× faster than one; SPEC.md gives the numbers.
+- `zig build bench -Demu=hcpu` reports, on an M3 Max and an x86-64 Linux host, the bench loop at or under Unicorn's time for arm64, 386, and amd64, a system call round trip under 100 ns natively, and four busy threads at least 3× faster than one; SPEC.md gives the numbers.
 - Demos: on a Linux arm64 host without KVM, from a default MIT build, `h9 --backend emu --root .local/linux/alpine-arm64 /bin/busybox sh -c 'i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'` runs faster than with `h9-emu`; on a Mac without Unicorn, `h9 --arch 386 --backend emu --root .local/linux/alpine-386 /bin/busybox sh -c 'echo hello; ls /etc | wc -l'` runs, and so does the same with `--arch amd64` and an amd64 Alpine root; and the `zig build web` demo page runs rc.
 
 ## Implementation
@@ -193,7 +193,7 @@ h86 and ha64 were done on the `vcpu` branch, in parallel threads around the cont
 1. The contracts and a tracer bullet: the IR, `ir_eval`, the runtime ABI, the TLB entry and slow-path signatures, the front-end and emitter interfaces, and a counted arm64 loop run on T0, in `ir_eval`, natively, and in wasm.
 2. SoftFloat's `extF80` ported to Zig, passing TestFloat's level 1 and 2 vectors, and a shared binary16, 32, and 64 library.
 3. Both T0s: ha64's integer, FP, AdvSIMD, and extensions, checked against the hardware; h86's integer, string, x87, MMX, SSE, and SSE2, checked against Unicorn.
-4. The JIT runtime (the dispatcher, code cache, chaining, jump cache, and invalidation), W^X code memory on macOS, Linux, and Windows, and `zemu` with no guest lock.
+4. The JIT runtime (the dispatcher, code cache, chaining, jump cache, and invalidation), W^X code memory on macOS, Linux, and Windows, and `hcpu` with no guest lock.
 5. The arm64 emitter with linear-scan allocation and verbatim copies, the x86-64 emitter, and the wasm emitter with structured control flow and chain cells.
 6. Both lifters, with flags as values, h86's lazy flag records, x87 helpers, and SSE and AdvSIMD lifting; the region check, the fuzzers, the litmus tests, and `-Djit-check`.
 7. h86 in the browser: T0, then wasm T1, then the default, and v86 retired.
@@ -202,14 +202,14 @@ Left:
 
 8. Retag the `[a64-jit]` and `[x86-jit]` cases as `[hcpu]` (at the end of the name, as `check` expects), add the `tests/backends.zig` runs on both tiers, and run Done when for h86 and ha64 on every host, including Windows.
 9. Lift LSE atomics to `cas` and a read-modify-write, and the MMX forms, as the inventories rank them.
-10. Merge `vcpu` into main, update SPEC.md's Emulator backend section and MANUAL.md, make `-Demu=zig` the release default, and set `status: implemented`.
+10. Merge `vcpu` into main, update SPEC.md's Emulator backend section and MANUAL.md, make `-Demu=hcpu` the release default, and set `status: implemented`.
 11. A release later, make `--backend v86` a usage error.
 
 hx64, in parallel threads once 8 is in:
 
 12. Widen the lazy flags record and `eflags.*` to 64 bits, in the IR, `ir_eval`, and the three emitters, with h86's cases passing unchanged.
 13. hx64's T0: long mode as a comptime mode of the encoding table, decoder, and `exec.zig`, the Cpu and its Ureg and FXSAVE conversions, `CMPXCHG16B`, and `SYSCALL`; checked against Unicorn in lockstep and against the host CPU on x86-64.
-14. `src/vmm/hx64.zig` as a Guest of `zemu`, picked for amd64 binaries natively and on the web, with the amd64 root passing `[baseline]` and `[linux-personality]` on T0.
+14. `src/vmm/hx64.zig` as a Guest of `hcpu`, picked for amd64 binaries natively and on the web, with the amd64 root passing `[baseline]` and `[linux-personality]` on T0.
 15. The lifter in long mode, `fuzz-x64` and the region check for it, and `x64inv` from `x86inv` to rank what to lift.
 16. Run Done when for hx64, update SPEC.md, and stop releasing `h9-emu`.
 

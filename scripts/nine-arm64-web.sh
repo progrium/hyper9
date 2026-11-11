@@ -30,4 +30,4 @@ if [ ! -f "$dir/arm64/lib/libc.a" ]; then
 	mv "$dir.tmp" "$dir"
 fi
 cd "$H9_ROOT"
-zig build slim -Darch=arm64 -Demu=zig -Droot="$dir"
+zig build slim -Darch=arm64 -Demu=hcpu -Droot="$dir"

@@ -283,7 +283,7 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-`-Demu=zig` builds it on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
+`-Demu=hcpu` builds it on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
 
 ### Scope
 
@@ -368,7 +368,7 @@ By default `h9` uses the host's hypervisor when it's available, and otherwise fa
 
 ### The 386 CPU on the web
 
-Web builds run 386 binaries on h9's own CPU, h86 (`src/vmm/h86.zig`, through `src/vmm/zemu.zig`), the only backend there; `--backend v86`, the name of the v86 backend it replaced, is an alias of `emu`. Guest memory is an arena grown with `memory.grow` in h9's own linear memory (`src/vmm/arena.zig`), 256 MiB by default.
+Web builds run 386 binaries on h9's own CPU, h86 (`src/vmm/h86.zig`, through `src/vmm/hcpu.zig`), the only backend there; `--backend v86`, the name of the v86 backend it replaced, is an alias of `emu`. Guest memory is an arena grown with `memory.grow` in h9's own linear memory (`src/vmm/arena.zig`), 256 MiB by default.
 
 T0 interprets; T1 (`src/jit/wasm_t1.zig`) counts entries to blocks and, once a vCPU has retired 2M instructions, lifts hot ones, batches them into a module (`src/jit/emit/wasm.zig`, a function per region, with chain cells and a jump-cache lookup for indirect branches), and has `h9-web.js` compile it asynchronously into table slots of h9's own function table; T0 runs until the batch is installed. `CodePages`' invalidation drops a page's regions and their slots.
 

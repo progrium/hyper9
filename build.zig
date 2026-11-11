@@ -336,9 +336,10 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
 }
 
-/// none: no emulator. unicorn: Unicorn (GPLv2). zig: h9's own CPUs (hcpu,
-/// src/hcpu.zig): ha64 for arm64 guests, h86 for 386, and hx64 for amd64.
-pub const Emu = enum { none, unicorn, zig };
+/// none: no emulator. unicorn: Unicorn (GPLv2, src/vmm/unicorn.zig). hcpu:
+/// h9's own CPUs (src/vmm/hcpu.zig on src/hcpu.zig): ha64 for arm64 guests,
+/// h86 for 386, and hx64 for amd64.
+pub const Emu = enum { none, unicorn, hcpu };
 
 /// Where -Demu=unicorn gets Unicorn: the PyPI wheels' libunicorn.a, or a
 /// build from the patched source (build/unicorn.zig).
@@ -678,8 +679,8 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     p.optimize = optimize;
     // h9's own CPUs (`--backend emu`, or `v86`, its old name). The JIT
     // tier here is the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig),
-    // not the native code cache, which zemu leaves out on the web.
-    p.emu = .zig;
+    // not the native code cache, which hcpu leaves out on the web.
+    p.emu = .hcpu;
     p.jit = true;
     p.unicorn = null;
     p.host_cmd = false;
@@ -807,12 +808,12 @@ const ModuleParts = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     emu: Emu,
-    /// With -Demu=zig: build the JIT tier, not just the interpreter.
+    /// With -Demu=hcpu: build the JIT tier, not just the interpreter.
     jit: bool,
-    /// With -Demu=zig: run every region through the T1-against-T0 check
+    /// With -Demu=hcpu: run every region through the T1-against-T0 check
     /// (src/jit/check/vmm.zig).
     jit_check: bool,
-    /// With -Demu=zig: ir.verify each region after lifting and after opt
+    /// With -Demu=hcpu: ir.verify each region after lifting and after opt
     /// (opt.verify), even where the hcpu module has no runtime safety.
     jit_verify: bool,
     /// How src/interp/ and src/jit/ (the hcpu module) are optimized.
@@ -936,15 +937,15 @@ pub fn build(b: *std.Build) void {
     // Host commands (#C, --host-cmd, hcmd) are left out unless asked for,
     // while design/host-cmd rethinks them.
     const host_cmd = b.option(bool, "host-cmd", "Build in host commands: #C, --host-cmd and hcmd (default: off; design/host-cmd.md)") orelse false;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or zig (h9's own, in progress)") orelse .none;
+    var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or hcpu (h9's own CPUs)") orelse .none;
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out against Unicorn's JIT.
     const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
     const hcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !hcpu_debug) .ReleaseFast else optimize;
-    const jit_check = b.option(bool, "jit-check", "With -Demu=zig: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
-    const jit_verify = b.option(bool, "jit-verify", "With -Demu=zig: verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
+    const jit_check = b.option(bool, "jit-check", "With -Demu=hcpu: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
+    const jit_verify = b.option(bool, "jit-verify", "With -Demu=hcpu: verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
         (optimize == .Debug or optimize == .ReleaseSafe);
-    const no_jit = b.option(bool, "no-jit", "With -Demu=zig: the interpreter tier only, as on hosts that forbid generated code") orelse false;
+    const no_jit = b.option(bool, "no-jit", "With -Demu=hcpu: the interpreter tier only, as on hosts that forbid generated code") orelse false;
     // No wheel exists for Windows, so it always builds from source.
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
@@ -1722,7 +1723,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // The arm64 JIT plan's [a64-jit] cases, through the vmm interface on
-    // T0 and T1; they skip without -Demu=zig.
+    // T0 and T1; they skip without -Demu=hcpu.
     const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/a64.zig"),
         .target = target,
@@ -1737,7 +1738,7 @@ pub fn build(b: *std.Build) void {
     linkUnicorn(a64_jit);
     const a64_jit_run = b.addRunArtifact(a64_jit);
     test_step.dependOn(&a64_jit_run.step);
-    b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=zig)").dependOn(&a64_jit_run.step);
+    b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=hcpu)").dependOn(&a64_jit_run.step);
 
     // The speed numbers in SPEC.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
@@ -1765,7 +1766,7 @@ pub fn build(b: *std.Build) void {
         sign.addFileArg(bench.getEmittedBin());
         run_bench.step.dependOn(&sign.step);
     }
-    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; -Demu=zig for T0 and T1)").dependOn(&run_bench.step);
+    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; -Demu=hcpu for T0 and T1)").dependOn(&run_bench.step);
 
     // For running the tests in a VM (scripts/lima/vm test): the backend
     // tests and the integration tests, built for the target.

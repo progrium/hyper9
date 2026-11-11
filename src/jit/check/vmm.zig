@@ -3,7 +3,7 @@
 //! `check.Checker`, which runs the region and T0 from the same state on
 //! shadows, panics if they differ, and commits the agreed result. So
 //!
-//!     zig build integration -Demu=zig -Djit-check
+//!     zig build integration -Demu=hcpu -Djit-check
 //!
 //! runs the integration suite with every region of every guest program
 //! checked against T0. Each region is optimized (opt.zig) as dispatch.zig
