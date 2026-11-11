@@ -207,9 +207,13 @@ A 386 root for the archive can also come straight from the release's 386 ISO,
 without cross-compiling: `scripts/fetch.sh iso386` fetches it, and
 `zig build isoroot -- .local/9front/9front-<release>.386.iso .local/9front/root386`
 ([tools/isoroot.zig](tools/isoroot.zig)) unpacks it in about 20 seconds.
-That's how the [pages workflow](.github/workflows/pages.yml) builds the demo on
-each push to main and publishes it with the project page,
-[site/index.html](site/index.html), to GitHub Pages.
+That's how the [pages workflow](.github/workflows/pages.yml) builds the demo
+and publishes it with the project page, [site/index.html](site/index.html),
+to GitHub Pages. It runs on pushes to main that change `site/`, `src/web/`,
+or `tests/web/`, and by hand (`gh workflow run pages`) for anything else.
+`scripts/fetch.sh isoamd64` fetches the amd64 ISO the same way, which is how
+the [ci workflow](.github/workflows/ci.yml) gets the amd64 root for the
+integration cases on KVM.
 
 The demo page runs over a WebSocket 9P server with `?root=ws://…/9p`. The
 integration run's WebSocket cases need `-Demu=unicorn` too (with

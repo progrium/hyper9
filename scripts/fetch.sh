@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
 # libraries and the patched Unicorn source into .local, and on request
-# the release's 386 ISO and the browser host's Linux demo root.
+# the release's 386 or amd64 ISO and the browser host's Linux demo root.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
-#                                 iso386 alpinearm64web; default all but
-#                                 iso386 and alpinearm64web)
+#                                 iso386 isoamd64 alpinearm64web; default
+#                                 all but the ISOs and alpinearm64web)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -14,7 +14,7 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn unicorn-src} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|iso386|alpinearm64web) ;;
+	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web) ;;
 	# v86 was the browser host's 386 CPU before h86, and alpine386web the
 	# Linux demo's root before it moved to arm64; nothing to fetch now.
 	v86|alpine386web) ;;
@@ -54,18 +54,21 @@ fi
 echo "9front/$img"
 fi
 
-# The 386 ISO, for zig build isoroot (the Pages workflow's 386 root).
-if want iso386; then
-iso="9front-$NINEFRONT_RELEASE.386.iso"
+# The release's 386 and amd64 ISOs, for zig build isoroot (the Pages
+# workflow's 386 root and CI's amd64 root).
+for arch in 386 amd64; do
+want "iso$arch" || continue
+iso="9front-$NINEFRONT_RELEASE.$arch.iso"
+if [ "$arch" = 386 ]; then sum=$NINEFRONT_386_ISO_SHA256; else sum=$NINEFRONT_AMD64_ISO_SHA256; fi
 if [ ! -f "$H9_LOCAL/9front/$iso" ]; then
 	curl -fL --progress-bar -o "$H9_LOCAL/9front/$iso.gz" "$NINEFRONT_ISO_URL/$iso.gz"
 	gunzip -c "$H9_LOCAL/9front/$iso.gz" >"$H9_LOCAL/9front/$iso.tmp"
-	echo "$NINEFRONT_386_ISO_SHA256  $H9_LOCAL/9front/$iso.tmp" | shasum -a 256 -c --quiet
+	echo "$sum  $H9_LOCAL/9front/$iso.tmp" | shasum -a 256 -c --quiet
 	mv "$H9_LOCAL/9front/$iso.tmp" "$H9_LOCAL/9front/$iso"
 	rm -f "$H9_LOCAL/9front/$iso.gz"
 fi
 echo "9front/$iso"
-fi
+done
 
 # Unicorn: headers and libunicorn.a for each target into .local/unicorn/<name>.
 if want unicorn; then

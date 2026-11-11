@@ -11,6 +11,9 @@ NINEFRONT_ISO_URL=https://9front.org/iso
 # the Pages workflow packs the browser host's demo archive from. The hash
 # is of the ISO after gunzip.
 NINEFRONT_386_ISO_SHA256=068e8ff723a3e5b8c6fdec4862f53e0b7d04e04b3b54baca022b9d2fe869035f
+# The release's amd64 ISO, unpacked the same way into the amd64 root CI
+# runs the integration cases on (.github/workflows/ci.yml).
+NINEFRONT_AMD64_ISO_SHA256=ee90b5e8a8d6b4ee8ad950322f91e338f698dae18c7f5e5800a650bbfa173fd9
 
 HYPERLINUX_REPO=https://github.com/zw3rk/hyper-linux
 

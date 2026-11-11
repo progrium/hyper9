@@ -1,0 +1,107 @@
+# Checks PRs (design/README.md, Checks). Every job starts at once.
+#
+# `check` runs on every PR: it's the only thing that enforces the proposal
+# rules, and it takes seconds. The tests run only on PRs from a proposal's
+# branch, which is named after its slug, so a PR from a `claude/` branch
+# gets `check` alone. A job skipped by its `if` never starts a runner.
+# "Run workflow" in the Actions tab (or `gh workflow run ci --ref BRANCH`)
+# runs everything on any branch.
+#
+# Commits that design-sign pushes with GITHUB_TOKEN don't start this
+# workflow (GitHub doesn't run workflows for them), so a PR's head after a
+# `/sign` has no results from it. Keep that in mind before making these
+# required checks.
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels the run for the one before it.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The tips of every branch, so `check` can find each proposal's.
+      - run: git fetch -q --no-tags --depth=1 origin '+refs/heads/*:refs/remotes/origin/*'
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build design -- check
+
+  test:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build test
+
+  # The integration cases on the native backend (Syscall User Dispatch),
+  # with the amd64 root unpacked from the release's ISO
+  # (tools/isoroot.zig), as pages does for 386, instead of mkroot's QEMU
+  # boot. KVM is the backend users get on Linux, and hosted runners have
+  # /dev/kvm, but three cases fail on it there (#183), so this moves to
+  # -Dbackends=kvm once they're fixed. That needs a step first that lets
+  # the runner open /dev/kvm:
+  #
+  #   echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+  #   sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+  integration:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/cache@v4
+        id: rootamd64
+        with:
+          path: .local/9front/rootamd64
+          key: ci-rootamd64-${{ hashFiles('scripts/pins.sh', 'tools/isoroot.zig') }}
+      - name: amd64 root from the ISO
+        if: steps.rootamd64.outputs.cache-hit != 'true'
+        run: |
+          scripts/fetch.sh isoamd64
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
+      - run: zig build integration -Darch=amd64 -Dbackends=native -Droot="$PWD/.local/9front/rootamd64"
+
+  # The demo page and its canvas cases in Chromium, over the 386 root.
+  web:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/cache@v4
+        id: root386
+        with:
+          path: .local/9front/root386
+          key: ci-root386-${{ hashFiles('scripts/pins.sh', 'tools/isoroot.zig') }}
+      - name: 386 root from the ISO
+        if: steps.root386.outputs.cache-hit != 'true'
+        run: |
+          scripts/fetch.sh iso386
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.386.iso" .local/9front/root386
+      - run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - run: zig build web-test -Doptimize=ReleaseSafe
