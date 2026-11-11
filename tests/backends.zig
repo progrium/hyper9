@@ -1387,8 +1387,12 @@ test "exec keeps segments and drops SG_CEXEC ones [segattach]" {
 
 /// A resolved host path in the form Options.root takes, as the CLI's
 /// kernPath makes it: unchanged on Unix, `/C:/a/b` for `C:\a\b` on Windows.
+/// Always written into `out`, so the result outlives `p`'s buffer.
 fn kernPath(out: []u8, p: []const u8) []const u8 {
-    if (@import("builtin").os.tag != .windows) return p;
+    if (@import("builtin").os.tag != .windows) {
+        @memcpy(out[0..p.len], p);
+        return out[0..p.len];
+    }
     out[0] = '/';
     for (p, out[1 .. p.len + 1]) |c, *o| o.* = if (c == '\\') '/' else c;
     if (p.len >= 2 and p[1] == ':') out[1] = std.ascii.toUpper(out[1]);
