@@ -9,6 +9,9 @@ pub const enabled = builtin.os.tag == .wasi;
 
 pub const coro = @import("web/coro.zig");
 
+/// The web host's allocator (std.heap.page_allocator there, and the vmm's).
+pub const heap = @import("web/heap.zig");
+
 /// A host thread: a coroutine on the web host.
 pub const Thread = if (enabled) coro.Thread else std.Thread;
 

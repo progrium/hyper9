@@ -41,7 +41,7 @@ pub const ready = true;
 
 pub const Cpu = struct {
     t0: t0.Cpu = .{},
-    cache: t0.Cache = .init(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator),
+    cache: t0.Cache = .init(vmm.host_gpa),
     machine: t0.Machine = undefined,
     /// The ESR of the last exit, for the Ureg's `type`.
     esr: u64 = 0,
@@ -124,7 +124,7 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
         const r = if (build_options.jit_check)
             check_vmm.run(&c.check, check_vmm.a64_guest, &c.t0, ctx, tier == .t1)
         else
-            dispatch.run(if (builtin.cpu.arch == .wasm32) std.heap.c_allocator else std.heap.smp_allocator, ctx, cfg, &t1_stats);
+            dispatch.run(vmm.host_gpa, ctx, cfg, &t1_stats);
         c.t0.retired +%= ctx.retired -% before;
         switch (r) {
             .svc => return exitOf(c, .syscall),
@@ -152,7 +152,7 @@ fn runWasmT1(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
         // As in runT1: ctx.retired runs on from Cpu.retired.
         ctx.retired = c.t0.retired;
         const before = ctx.retired;
-        const r = wasm_t1.run(std.heap.c_allocator, ctx, cfg);
+        const r = wasm_t1.run(vmm.host_gpa, ctx, cfg);
         c.t0.retired +%= ctx.retired -% before;
         switch (r) {
             .svc => return exitOf(c, .syscall),

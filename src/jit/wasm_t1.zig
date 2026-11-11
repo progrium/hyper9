@@ -18,7 +18,8 @@
 //!   A cell holds the target's slot once the target is live and lies on a
 //!   guest page its source came from (as cache.zig links only within those
 //!   pages), and 0 otherwise, which leaves to this dispatcher with
-//!   `.chain`. Cells are relinked whenever a batch installs or a region goes.
+//!   `.chain`. A cell is linked when its batch or its target goes live,
+//!   and cleared when its target goes (`links` finds them by key).
 //! - **Invalidation.** `invalidatePage` (from zemu's CodePages callback)
 //!   drops every region from an arena page: its slot is nulled, cells
 //!   pointing at it are cleared, and a region still queued or compiling is
@@ -178,6 +179,8 @@ const State = struct {
     map: std.AutoHashMapUnmanaged(Key, *Entry) = .empty,
     /// The map's recent hits, direct-mapped by PC, in front of it.
     recent: [recent_n]?*Entry = @splat(null),
+    /// Live batches' chain cells, by the key each links to.
+    links: std.AutoHashMapUnmanaged(Key, std.ArrayList(*u32)) = .empty,
     /// Entries by arena page (both of an entry's pages).
     pages: std.AutoHashMapUnmanaged(u64, std.ArrayList(*Entry)) = .empty,
     queue: std.ArrayList(*Entry) = .empty,
@@ -220,13 +223,10 @@ pub fn invalidatePage(page: u64) void {
     const kv = st.pages.fetchRemove(page) orelse return;
     var list = kv.value;
     defer list.deinit(st.gpa);
-    var any = false;
     for (list.items) |e| {
         if (e.dead) continue;
         kill(e);
-        any = true;
     }
-    if (any) relink();
 }
 
 /// Takes `e` out of the map and its other page's list, and its slot out
@@ -258,6 +258,7 @@ fn kill(e: *Entry) void {
         .pending => {},
         .live => {
             const b = e.batch.?;
+            setCells(e.key, 0);
             st.jump_gen +%= 1;
             if (on_wasm) host.jit_drop(e.slot, 1);
             b.live -= 1;
@@ -275,6 +276,7 @@ fn freeRegion(r: *ir.Region) void {
 fn freeBatch(b: *Batch) void {
     for (st.batches.items, 0..) |x, i| if (x == b) {
         _ = st.batches.swapRemove(i);
+        unlinkCells(b);
         break;
     };
     for (b.entries) |e| {
@@ -336,6 +338,9 @@ fn flush() void {
     st.pages.clearRetainingCapacity();
     for (st.pending.items) |b| b.dropped = true;
     st.jump_gen +%= 1;
+    var lit = st.links.valueIterator();
+    while (lit.next()) |l| l.deinit(st.gpa);
+    st.links.clearRetainingCapacity();
     while (st.batches.items.len > 0) {
         const b = st.batches.items[st.batches.items.len - 1];
         if (on_wasm) host.jit_drop(b.base, @intCast(b.entries.len));
@@ -346,7 +351,6 @@ fn flush() void {
 /// Batches whose compiles have settled: their regions go live, or fail.
 fn settle(s: *Stats) void {
     var i: usize = 0;
-    var changed = false;
     while (i < st.pending.items.len) {
         const b = st.pending.items[i];
         const status = @atomicLoad(i32, &b.status, .acquire);
@@ -379,15 +383,16 @@ fn settle(s: *Stats) void {
         }
         if (status == 1 and live > 0) {
             b.live = live;
-            st.batches.append(st.gpa, b) catch {
+            if (st.batches.append(st.gpa, b)) |_| {
+                linkCells(b);
+            } else |_| {
                 // Can't track it: drop its regions.
                 for (b.entries) |e| if (!e.dead) {
                     e.state = .failed;
                 };
                 if (on_wasm) host.jit_drop(b.base, @intCast(b.entries.len));
                 b.live = 0;
-            };
-            changed = true;
+            }
         }
         if (status != 1 or live == 0 or b.live == 0) {
             // Failed entries stay in the map, so T0 keeps them; the rest go.
@@ -401,19 +406,51 @@ fn settle(s: *Stats) void {
             for (b.entries) |e| e.batch = b;
         }
     }
-    if (changed) relink();
 }
 
-/// Points every live batch's cells at their targets' slots, where those
-/// are live, and clears the rest.
-fn relink() void {
-    for (st.batches.items) |b| {
-        for (b.cells, b.targets) |*cell, t| {
-            var v: u32 = 0;
-            if (t) |k| if (st.map.get(k)) |e| if (e.state == .live) {
-                v = e.slot;
-            };
-            @atomicStore(u32, cell, v, .release);
+/// A batch that's just gone live: its cells are noted under their
+/// targets' keys and pointed at those that are live, and every noted cell
+/// whose target is one of its regions is pointed at it. A cell's target
+/// and its batch are fixed, so `links` changes only here, in
+/// `unlinkCells`, and in a flush, and a link is made or broken one key at
+/// a time instead of over every batch.
+fn linkCells(b: *Batch) void {
+    for (b.cells, b.targets) |*cell, t| {
+        const k = t orelse continue;
+        const gop = st.links.getOrPut(st.gpa, k) catch {
+            // Untracked, so never linked: the chain exits instead.
+            @atomicStore(u32, cell, 0, .release);
+            continue;
+        };
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        gop.value_ptr.append(st.gpa, cell) catch {
+            @atomicStore(u32, cell, 0, .release);
+            continue;
+        };
+        const v: u32 = if (lookup(k)) |e| (if (e.state == .live) e.slot else 0) else 0;
+        @atomicStore(u32, cell, v, .release);
+    }
+    for (b.entries) |e| if (!e.dead and e.state == .live) setCells(e.key, e.slot);
+}
+
+/// Points every noted cell that targets `key` at `v` (0: unlinked).
+fn setCells(key: Key, v: u32) void {
+    const l = st.links.getPtr(key) orelse return;
+    for (l.items) |cell| @atomicStore(u32, cell, v, .release);
+}
+
+/// A batch that's going: its cells come out of `links`.
+fn unlinkCells(b: *Batch) void {
+    for (b.cells, b.targets) |*cell, t| {
+        const k = t orelse continue;
+        const l = st.links.getPtr(k) orelse continue;
+        for (l.items, 0..) |x, i| if (x == cell) {
+            _ = l.swapRemove(i);
+            break;
+        };
+        if (l.items.len == 0) {
+            l.deinit(st.gpa);
+            _ = st.links.remove(k);
         }
     }
 }

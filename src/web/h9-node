@@ -75,8 +75,10 @@ try {
       // Called through a JS function each: wasm calling Node's WASI
       // functions directly takes V8's fast API path, which crashes Node
       // on a JSPI coroutine's stack (it must run on the central stack).
+      // The i32s are made unsigned on the way: wasm passes them signed,
+      // and Node's WASI rejects a pointer past 2 GiB as negative.
       const out = {};
-      for (const [k, f] of Object.entries(imports)) out[k] = (...a) => f(...a);
+      for (const [k, f] of Object.entries(imports)) out[k] = (...a) => f(...a.map((x) => typeof x === 'number' ? x >>> 0 : x));
       return out;
     },
     host,

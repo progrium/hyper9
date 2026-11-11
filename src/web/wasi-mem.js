@@ -157,7 +157,11 @@ export function wasiImports({ memory, root, args, env, write, tty = false }) {
     return E.SUCCESS;
   };
 
-  return {
+  // wasm passes an i32 to JS signed, so a pointer past 2 GiB (guest memory
+  // over about 1G puts h9's heap there) arrives negative. Every i32 WASI
+  // takes is unsigned: pointers, lengths, fds, and flags.
+  const unsigned = (f) => (...a) => f(...a.map((x) => (typeof x === 'number' ? x >>> 0 : x)));
+  return Object.fromEntries(Object.entries({
     args_sizes_get: (pc, ps) => sizes(argv, pc, ps),
     args_get: (pp, pb) => fill(argv, pp, pb),
     environ_sizes_get: (pc, ps) => sizes(envv, pc, ps),
@@ -304,5 +308,5 @@ export function wasiImports({ memory, root, args, env, write, tty = false }) {
     path_link: () => E.ROFS,
     path_symlink: () => E.ROFS,
     proc_exit: (code) => { throw new Error(`exit ${code}`); },
-  };
+  }).map(([k, f]) => [k, unsigned(f)]));
 }
