@@ -44,7 +44,7 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [tilde-roots](0107-tilde-roots.md) | draft |  | Tilde roots from $H9ROOTPATH |
 | [child-machines](0109-child-machines.md) | draft |  | Child machines |
 | [credential-helpers](0119-credential-helpers.md) | draft | needs dotl | Credential helpers for WebSocket 9P |
-| [browser-gfx](0120-browser-gfx.md) | accepted | ready | Graphics on the browser host |
+| [browser-gfx](0120-browser-gfx.md) | implemented |  | Graphics on the browser host |
 | [cow-fork](0121-cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [wine-draw](0158-wine-draw.md) | draft |  | Wine windows through draw |
 | [audio](audio.md) | draft |  | Audio (--audio) |
@@ -104,7 +104,7 @@ flowchart LR
   p_tilde_roots["#35;107 tilde-roots<br/>draft"]:::draft
   p_child_machines["#35;109 child-machines<br/>draft"]:::draft
   p_credential_helpers["#35;119 credential-helpers<br/>draft"]:::draft
-  p_browser_gfx["#35;120 browser-gfx<br/>accepted"]:::accepted
+  p_browser_gfx["#35;120 browser-gfx<br/>implemented"]:::implemented
   p_cow_fork["#35;121 cow-fork<br/>draft"]:::draft
   p_wine_draw["#35;158 wine-draw<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
