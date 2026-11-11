@@ -7066,8 +7066,10 @@ test "--print lists listeners and elides the token [serve]" {
     try std.testing.expect(!pathExists(sock));
 }
 
-// 9P2000.L (design/dotl.md). The server is tests/dotlserver.zig's,
-// a tree in memory behind a loopback port, made fresh per connection.
+// 9P2000.L (design/dotl.md). Most cases use tests/dotlserver.zig's
+// server, a tree in memory behind a loopback port, made fresh per
+// connection, which can also drop connections and speak 9P2000.L.Z. The
+// rest use diod, a real .L server, below.
 
 fn dotlTree(s: *@import("dotlserver.zig").Server) !void {
     _ = try s.add("etc/motd", .file, "hello from .L\n");
@@ -7090,7 +7092,7 @@ fn dotlRun(e: Env, d: *DotlServer, script: []const u8) !Result {
     return run(e, &.{ "--net-allow", allow, "--rc", cmd });
 }
 
-test "the guest mounts a .L server with dotlfs, under the network policy [dotl]" {
+test "the guest mounts the in-memory .L server with dotlfs, under the network policy [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7152,7 +7154,7 @@ test "a .L.Z mount lists, reads, writes and removes, with compound requests [dot
     try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\nfull\nnotes\n--rw-r--r-- 8 notes\nd-rwxr-xr-x 0 /n/l/lib/full\n--rw-r--r-- 8 /n/l/lib/notes\none\ntwo\n9P2000.L.Z\n", r.out);
 }
 
-test "a symlink in a .L mount is followed and can't leave the mount [dotl]" {
+test "a symlink in the in-memory .L server is followed and can't leave the mount [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7170,7 +7172,7 @@ test "a symlink in a .L mount is followed and can't leave the mount [dotl]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
 }
 
-test "Rlerror errnos become 9front error strings [dotl]" {
+test "Rlerror errnos from the in-memory .L server become 9front error strings [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.start(std.testing.io, dotlTree);
@@ -7220,7 +7222,7 @@ fn dotlRootTree(s: *@import("dotlserver.zig").Server) !void {
     _ = try s.add("rc/lib/rcmain", .file, try dir.readFileAlloc(std.testing.io, "rc/lib/rcmain", s.arena.allocator(), .limited(1 << 20)));
 }
 
-test "a 9P2000.L root lists, reads, writes and removes [dotl]" {
+test "a 9P2000.L root from the in-memory server lists, reads, writes and removes [dotl]" {
     const e = try env(@src());
     dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
@@ -7387,6 +7389,230 @@ test "the guest can't dial a host unix socket through #ℓ [dotl]" {
     try expectIn(r.err, "unix sockets are for roots");
 }
 
+// The same against diod (`scripts/fetch.sh diod`, x86_64 Linux only),
+// serving a scratch directory: a .L server h9 didn't write.
+
+const Diod = struct {
+    child: std.process.Child,
+    port: u16,
+    s: Scratch,
+    dial_buf: [64]u8 = undefined,
+    allow_buf: [64]u8 = undefined,
+
+    /// Runs `setup`, an sh script, in a new scratch directory, and
+    /// serves the directory. diod running as root acts as whichever uid
+    /// attaches, so the tree is made writable by anyone; diod running as
+    /// anyone else is told to take only the host uid, which is what h9
+    /// should send.
+    fn start(d: *Diod, setup: []const u8) !void {
+        const io = std.testing.io;
+        const bin = getenv(5, "H9_TEST_DIOD") orelse return error.SkipZigTest;
+        std.Io.Dir.cwd().access(io, bin, .{}) catch return error.SkipZigTest;
+        try d.s.init();
+        errdefer d.s.deinit();
+        var script: std.ArrayList(u8) = .empty;
+        defer script.deinit(gpa);
+        try script.print(gpa, "set -e; cd '{s}'\n{s}\nchmod -R a+rwX .\n", .{ d.s.path, setup });
+        const r = try runProcessWith(&.{ "sh", "-c", script.items }, null, null, 30_000);
+        defer gpa.free(r.stdout);
+        defer gpa.free(r.stderr);
+        if (r.term != .exited or r.term.exited != 0) {
+            std.debug.print("diod tree: {s}\n", .{r.stderr});
+            return error.DiodSetup;
+        }
+        var probe = try listenLocal();
+        d.port = probe.socket.address.getPort();
+        probe.deinit(io);
+        var listen_buf: [32]u8 = undefined;
+        var uid_buf: [16]u8 = undefined;
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ bin, "-f", "-n", "-N", "-L", "stderr", "-l", try std.fmt.bufPrint(&listen_buf, "127.0.0.1:{d}", .{d.port}), "-e", d.s.path });
+        const uid = std.c.getuid();
+        if (uid != 0) try argv.appendSlice(gpa, &.{ "-u", try std.fmt.bufPrint(&uid_buf, "{d}", .{uid}) });
+        d.child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+        errdefer d.child.kill(io);
+        const ip = try std.Io.net.IpAddress.parse("127.0.0.1", d.port);
+        var tries: u32 = 0;
+        while (true) : (tries += 1) {
+            const c = ip.connect(io, .{ .mode = .stream }) catch |err| {
+                if (tries >= slow(100)) return err;
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            };
+            c.close(io);
+            break;
+        }
+    }
+
+    fn dial(d: *Diod) []const u8 {
+        return std.fmt.bufPrint(&d.dial_buf, "tcp!127.0.0.1!{d}", .{d.port}) catch unreachable;
+    }
+
+    fn allow(d: *Diod) []const u8 {
+        return std.fmt.bufPrint(&d.allow_buf, "tcp!127.0.0.1!{d}", .{d.port}) catch unreachable;
+    }
+
+    fn stop(d: *Diod) void {
+        d.child.kill(std.testing.io);
+        d.s.deinit();
+    }
+
+    /// Runs `script` in rc with the export mounted at /n/l by dotlfs.
+    fn rc(d: *Diod, e: Env, script: []const u8) !Result {
+        var cmd: std.ArrayList(u8) = .empty;
+        defer cmd.deinit(gpa);
+        try cmd.print(gpa, "mkdir -p /n/l; dotlfs {s} /n/l '{s}' || exit mount; {s}", .{ d.dial(), d.s.path, script });
+        return run(e, &.{ "--net-allow", d.allow(), "--rc", cmd.items });
+    }
+};
+
+/// dotlTree's files and links, for diod.
+const diod_tree =
+    \\mkdir -p etc usr/glenda/full
+    \\printf 'hello from .L\n' >etc/motd
+    \\printf 'root:x:0:0\n' >etc/passwd
+    \\printf 'one\ntwo\n' >usr/glenda/notes
+    \\: >usr/glenda/full/f
+    \\ln -s usr/glenda lib
+    \\ln -s /etc/passwd usr/abs
+    \\ln -s ../../../../etc/passwd usr/escape
+    \\ln -s loop usr/loop
+    \\ln -s nowhere usr/dangling
+;
+
+test "the guest mounts a .L server with dotlfs, under the network policy [dotl]" {
+    const e = try env(@src());
+    var d: Diod = undefined;
+    try d.start(diod_tree);
+    defer d.stop();
+    const r = try d.rc(e, "cat /n/l/etc/motd; ls /n/l/usr/glenda; cat /net/dotl/*/status");
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    // diod refuses 9P2000.L.Z with an error, and is offered .L.
+    try std.testing.expectEqualStrings("hello from .L\n/n/l/usr/glenda/full\n/n/l/usr/glenda/notes\n9P2000.L\n", r.out);
+    var cmd_buf: [512]u8 = undefined;
+    const no = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!1", "--rc", try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l && echo mounted", .{d.dial()}) });
+    defer no.deinit();
+    try std.testing.expect(no.code != 0);
+    try std.testing.expect(std.mem.indexOf(u8, no.out, "mounted") == null);
+}
+
+test "a .L mount of diod lists, reads, writes and removes [dotl]" {
+    const e = try env(@src());
+    var d: Diod = undefined;
+    try d.start(diod_tree);
+    defer d.stop();
+    // diod 1.0 has no Tunlinkat or Trenameat, so rm and mv take Tremove
+    // and Trename, and its directories are 0777 here, so so are the
+    // modes of what's made in them, by create(5).
+    const r = try d.rc(e,
+        \\cd /n/l/usr/glenda
+        \\echo new >made && cat made
+        \\echo more >>made && awk 'END{print NR}' made
+        \\mkdir dir && touch dir/x && ls dir
+        \\mv made renamed && ls
+        \\ls -l renamed | awk '{print $1, $6}'
+        \\rm renamed dir/x dir && ls
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("new\n2\ndir/x\ndir\nfull\nnotes\nrenamed\n--rw-rw-rw- 9\nfull\nnotes\n", r.out);
+    try std.testing.expect(!d.s.exists("usr/glenda/renamed"));
+}
+
+test "a symlink in a .L mount is followed and can't leave the mount [dotl]" {
+    const e = try env(@src());
+    var d: Diod = undefined;
+    try d.start(diod_tree);
+    defer d.stop();
+    const r = try d.rc(e,
+        \\cat /n/l/usr/abs /n/l/usr/escape /n/l/lib/notes
+        \\ls /n/l/usr
+        \\cd /n/l/usr && cat loop
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    // The links resolve inside the export, not to the host's /etc/passwd.
+    try std.testing.expectEqualStrings("root:x:0:0\nroot:x:0:0\none\ntwo\n/n/l/usr/abs\n/n/l/usr/escape\n/n/l/usr/glenda\n", r.out);
+    try expectIn(r.err, "too many symbolic links");
+}
+
+test "Rlerror errnos become 9front error strings [dotl]" {
+    const e = try env(@src());
+    var d: Diod = undefined;
+    try d.start(diod_tree);
+    defer d.stop();
+    const r = try d.rc(e,
+        \\cat /n/l/etc/nope
+        \\rm /n/l/usr/glenda/full
+        \\mkdir /n/l/etc
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try expectIn(r.err, "file does not exist: '/n/l/etc/nope'");
+    try expectIn(r.err, "directory not empty");
+    try expectIn(r.err, "already exists");
+}
+
+/// dotlRootTree's root, for diod: the mount points, rc, and a few
+/// programs from the test's root tree.
+fn diodRootTree(buf: []u8, e: Env) ![]const u8 {
+    const arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    };
+    return std.fmt.bufPrint(buf, diod_tree ++
+        \\
+        \\mkdir -p dev env fd proc srv net n tmp mnt/term/cwd bin {1s}/bin rc/lib
+        \\for p in rc echo ls cat rm; do cp '{0s}/{1s}/bin/'$p {1s}/bin/; done
+        \\cp '{0s}/rc/lib/rcmain' rc/lib/
+    , .{ e.root, arch });
+}
+
+test "a 9P2000.L root lists, reads, writes and removes [dotl]" {
+    const e = try env(@src());
+    var d: Diod = undefined;
+    var tree_buf: [2048]u8 = undefined;
+    try d.start(try diodRootTree(&tree_buf, e));
+    defer d.stop();
+    const r = try run(e, &.{
+        "--root", d.dial(), "--root-spec", d.s.path, "--write=scope", "--builtin=off", "--rc",
+        \\cat /etc/motd /usr/glenda/notes
+        \\echo new >/usr/glenda/made && cat /usr/glenda/made
+        \\rm /usr/glenda/notes && ls /usr/glenda
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("hello from .L\none\ntwo\nnew\n/usr/glenda/full\n/usr/glenda/made\n9P2000.L\n", r.out);
+}
+
+test "a .L root attaches as the host uid, not 0, without --user-map [dotl]" {
+    const e = try env(@src());
+    var d: Diod = undefined;
+    var tree_buf: [2048]u8 = undefined;
+    try d.start(try diodRootTree(&tree_buf, e));
+    defer d.stop();
+    // diod as root creates files as the uid that attached; as anyone
+    // else, it takes only the host uid.
+    const r = try run(e, &.{ "--root", d.dial(), "--root-spec", d.s.path, "--write=scope", "--builtin=off", "--rc", "echo x >/usr/glenda/f" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    var pb: [600]u8 = undefined;
+    const st = try runProcessWith(&.{ "stat", "-c", "%u", try scratchPath(&d.s, &pb, "usr/glenda/f") }, null, null, 10_000);
+    defer gpa.free(st.stdout);
+    defer gpa.free(st.stderr);
+    const uid = std.c.getuid();
+    var want_buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{d}\n", .{if (uid == 0) @as(u32, 65534) else uid}), st.stdout);
+}
+
 test "an h9 root over --serve speaks 9P2000.L through both translators [dotl]" {
     const e = try serveEnv(@src());
     var s: Scratch = undefined;
@@ -7407,6 +7633,60 @@ test "an h9 root over --serve speaks 9P2000.L through both translators [dotl]" {
     errdefer std.debug.print("client stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("9P2000.L\nhi\nd/\ng\nserved\n", r.out);
     try std.testing.expectEqual(0, r.code);
+}
+
+/// How to run a command as root to mount 9P over a unix socket, on Linux
+/// with 9p in /proc/filesystems (after a modprobe, if allowed): "" as
+/// root, "sudo -n " where sudo needs no password (the Lima VMs and CI's
+/// runners), or null if neither.
+fn v9fsAsRoot() ?[]const u8 {
+    if (builtin.os.tag != .linux) return null;
+    const pre: []const u8 = if (std.c.getuid() == 0) "" else "sudo -n ";
+    var cmd_buf: [64]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "{s}modprobe -q 9p; {s}true", .{ pre, pre }) catch return null;
+    const r = runProcessWith(&.{ "sh", "-c", cmd }, null, null, 10_000) catch return null;
+    gpa.free(r.stdout);
+    gpa.free(r.stderr);
+    if (r.term != .exited or r.term.exited != 0) return null;
+    var buf: [8192]u8 = undefined;
+    const fs = std.Io.Dir.cwd().readFile(std.testing.io, "/proc/filesystems", &buf) catch return null;
+    if (std.mem.indexOf(u8, fs, "\t9p\n") == null) return null;
+    return pre;
+}
+
+test "Linux v9fs mounts --serve over a unix socket [dotl]" {
+    const e = try serveEnv(@src());
+    // Linux's own 9P client, as root: in the linux-kvm VM, for one.
+    const sudo = v9fsAsRoot() orelse return error.SkipZigTest;
+    var s: Scratch = undefined;
+    try serveScratch(&s);
+    defer s.deinit();
+    var pb: [512]u8 = undefined;
+    var ab: [600]u8 = undefined;
+    var mb: [512]u8 = undefined;
+    const sock = try scratchPath(&s, &pb, "h9.sock");
+    const addr = try std.fmt.bufPrint(&ab, "unix!{s}", .{sock});
+    const mnt = try scratchPath(&s, &mb, "mnt");
+    try s.tmp.dir.createDir(std.testing.io, "mnt", .default_dir);
+    var t = try startServer(e, &.{ "--cwd", s.path, "--serve", addr, "--rc", "echo ready; sleep 60" });
+    defer t.deinit();
+    try t.expect("ready", slow(10_000));
+    var script: std.ArrayList(u8) = .empty;
+    defer script.deinit(gpa);
+    try script.print(gpa,
+        \\set -e
+        \\{2s}mount -t 9p -o trans=unix,version=9p2000.L '{0s}' '{1s}'
+        \\trap "{2s}umount -l '{1s}'" EXIT
+        \\ls '{1s}/bin' | grep -x rc
+        \\cat '{1s}/mnt/term/cwd/marker'
+        \\{2s}sh -c "echo hi >'{1s}/tmp/v9fs'" && cat '{1s}/tmp/v9fs' && {2s}rm '{1s}/tmp/v9fs'
+    , .{ sock, mnt, sudo });
+    const r = try runProcessWith(&.{ "sh", "-c", script.items }, null, null, 30_000);
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.stdout, r.stderr });
+    try std.testing.expect(r.term == .exited and r.term.exited == 0);
+    try std.testing.expectEqualStrings("rc\nserved\nhi\n", r.stdout);
 }
 
 test "a .L client of --serve under --write=none gets EROFS [dotl]" {

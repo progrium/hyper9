@@ -110,3 +110,17 @@ main py3-packaging-25.0-r0.apk 06ab1a2853857e1f53da6c4fceaec25ec3c942c24071f6598
 main py3-parsing-3.2.5-r0.apk eb98adcfe7a7242b8e4ff77a894e4b8ca3e5a62539c8fa96bc8d07ab9f49c38d
 community py3-pip-pyc-25.1.1-r0.apk e729558f32b18993f7dd3461c409e274a7be2c91686a9110e7a931a26ecbc07a
 "
+
+# diod, the 9P2000.L server the [dotl] cases run against (design/dotl.md),
+# from Ubuntu 24.04's packages with the libraries it links, so no build
+# is needed: `scripts/fetch.sh diod` unpacks them into .local/diod, with
+# .local/bin/diod running it. x86_64 Linux only; elsewhere those cases
+# are skipped. GPLv2: dev and CI only.
+DIOD_DEB_URL=http://archive.ubuntu.com/ubuntu/pool
+# path  sha256
+DIOD_DEBS="
+universe/d/diod/diod_1.0.24-5.1_amd64.deb afeca7f1839d5ed0a133aa5b0151b12742faabe516c5ffc3633e73afe0f3a9a0
+universe/l/lua5.1/liblua5.1-0_5.1.5-9build2_amd64.deb 2faa6821017f587d016afac1a30e092cc33fcc4ca0afac3349b6523aa8ade5bd
+universe/m/munge/libmunge2_0.5.15-4build1_amd64.deb 944e4d5b2c19c7351a3816daf569eda36cbd245102e8d33d178e54e6e560184f
+main/t/tcp-wrappers/libwrap0_7.6.q-33_amd64.deb 36118b862539868408ee056411d6e470068d14c46e5296b29bfb744770f5d2ce
+"

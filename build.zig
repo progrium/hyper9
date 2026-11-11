@@ -224,6 +224,9 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     // (design/linux-personality.md).
     run.setEnvironmentVariable("H9_TEST_LINUX", b.getInstallPath(.prefix, "fixtures/linux"));
     run.setEnvironmentVariable("H9_TEST_LINUX_ROOT", b.pathFromRoot(".local/linux"));
+    // diod, for the [dotl] cases against a real 9P2000.L server
+    // (scripts/fetch.sh diod); they skip without it.
+    run.setEnvironmentVariable("H9_TEST_DIOD", b.pathFromRoot(".local/bin/diod"));
     // The tree `zig build slim` makes, for the multicall cases, which skip
     // without it (design/multicall.md).
     const release = pin(b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
