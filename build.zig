@@ -1419,6 +1419,10 @@ pub fn build(b: *std.Build) void {
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
     const run_integration = addIntegration(b, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
     if (!test_web) run_integration.step.dependOn(linux_fixtures);
+    // -Djit-check checks every region against T0, one region at a time
+    // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
+    // set already).
+    if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "4");
     b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
 
     // 9box and a slim root around it (design/0064-multicall.md), built inside
@@ -1467,6 +1471,25 @@ pub fn build(b: *std.Build) void {
     run_x86inv.has_side_effects = true;
     if (b.args) |args| run_x86inv.addArgs(args) else run_x86inv.addArg(b.pathJoin(&.{ root, "386" }));
     b.step("x86-inventory", "Report the 386 instructions in binaries (default: the root tree's 386): zig build x86-inventory -- PATH...").dependOn(&run_x86inv.step);
+
+    // The amd64 instruction inventory over hx64's decoder and T0
+    // (tools/x64inv.zig): zig build x64-inventory -- PATH...
+    const x64inv = b.addExecutable(.{
+        .name = "x64inv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/x64inv.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "vcpu", .module = b.createModule(.{ .root_source_file = b.path("src/vcpu.zig") }) },
+                .{ .name = "aout", .module = b.createModule(.{ .root_source_file = b.path("src/aout.zig") }) },
+            },
+        }),
+    });
+    const run_x64inv = b.addRunArtifact(x64inv);
+    run_x64inv.has_side_effects = true;
+    if (b.args) |args| run_x64inv.addArgs(args) else run_x64inv.addArg(b.pathJoin(&.{ root, "amd64" }));
+    b.step("x64-inventory", "Report the amd64 instructions in binaries (default: the root tree's amd64): zig build x64-inventory -- PATH...").dependOn(&run_x64inv.step);
 
     const slim_tool = b.addExecutable(.{
         .name = "slim",
@@ -1762,6 +1785,57 @@ fn hostHasHvf(b: *std.Build) bool {
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
 }
 
+/// zig build x64check [-- n [seed [int|x87|sse]]]: hx64's T0 against the
+/// host CPU in long mode (tools/x86check): n random instructions (default
+/// 100000) run natively by oracle64.c and on T0. x86-64 Linux hosts only.
+fn addX64check(b: *std.Build, vcpu: *std.Build.Module) void {
+    const step = b.step("x64check", "Check hx64's T0 against the host CPU in long mode (-- [n [seed [int|x87|sse]]]; x86-64 Linux)");
+    const host = b.graph.host.result;
+    if (host.cpu.arch != .x86_64 or host.os.tag != .linux) {
+        step.dependOn(&b.addFail("x64check: needs an x86-64 Linux host, where the CPU is the oracle").step);
+        return;
+    }
+    const oracle = b.addExecutable(.{
+        .name = "oracle64",
+        .root_module = b.createModule(.{
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }),
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        }),
+    });
+    // No sanitizer: its traps are SIGILL, which the oracle takes as the
+    // guest's.
+    oracle.root_module.addCSourceFile(.{ .file = b.path("tools/x86check/oracle64.c"), .flags = &.{"-fno-sanitize=all"} });
+    const check = b.addExecutable(.{
+        .name = "x86check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/x86check/x86check.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+            .imports = &.{.{ .name = "vcpu", .module = vcpu }},
+        }),
+    });
+    const a = b.args orelse &.{};
+    const n = if (a.len > 0) a[0] else "100000";
+    const seed = if (a.len > 1) a[1] else "1";
+    const mode = if (a.len > 2) a[2] else "int";
+    const gen = b.addRunArtifact(check);
+    gen.addArgs(&.{ "gen64", n, seed });
+    const cases = gen.addOutputFileArg("cases.bin");
+    gen.addArg(mode);
+    const run = b.addRunArtifact(oracle);
+    run.addFileArg(cases);
+    const answers = run.addOutputFileArg("answers.bin");
+    const cmp = b.addRunArtifact(check);
+    cmp.has_side_effects = true;
+    cmp.setEnvironmentVariable("X86CHECK_MODE", mode);
+    cmp.addArg("cmp64");
+    cmp.addFileArg(cases);
+    cmp.addFileArg(answers);
+    step.dependOn(&cmp.step);
+}
+
 /// The steps behind `zig build wine` (design/wine-draw.md): winedraw for
 /// amd64 Wine and for 386 Wine, which the browser's Wine demo runs.
 fn addWine(b: *std.Build, step: *std.Build.Step) void {
@@ -1867,19 +1941,19 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     }) else null;
     const fuzz_options = b.addOptions();
     fuzz_options.addOption(bool, "unicorn", unicorn != null);
-    // zig build fuzz-long: both fuzzers with the region check, generated
+    // zig build fuzz-long: the three fuzzers with the region check, generated
     // code (--native), and lockstep when Unicorn is built in, for
     // -Dfuzz-minutes (default 60), -Dfuzz-jobs processes each (default 2),
     // tallying divergences instead of stopping. Each job starts its seeds
     // 2^40 apart from -Dfuzz-seed (default: from the clock).
-    const fuzz_long = b.step("fuzz-long", "Run fuzz-a64 and fuzz-x86 with the region check and --native for an hour across seeds (-Dfuzz-minutes, -Dfuzz-jobs, -Dfuzz-seed)");
+    const fuzz_long = b.step("fuzz-long", "Run fuzz-a64, fuzz-x86, and fuzz-x64 with the region check and --native for an hour across seeds (-Dfuzz-minutes, -Dfuzz-jobs, -Dfuzz-seed)");
     const fuzz_minutes = b.option(u32, "fuzz-minutes", "zig build fuzz-long: how long to fuzz (default 60)") orelse 60;
     const fuzz_jobs = b.option(u32, "fuzz-jobs", "zig build fuzz-long: processes per fuzzer (default 2)") orelse 2;
     const fuzz_seed = b.option(u64, "fuzz-seed", "zig build fuzz-long: the first seed (default: from the clock)") orelse
         @as(u64, @truncate(@as(u128, @bitCast(@as(i128, std.Io.Timestamp.now(b.graph.io, .real).nanoseconds)))));
-    var fuzz_exes: [2]*std.Build.Step.Compile = undefined;
+    var fuzz_exes: [3]*std.Build.Step.Compile = undefined;
     var fuzz_i: usize = 0;
-    for ([_][]const u8{ "a64", "x86" }) |arch| {
+    for ([_][]const u8{ "a64", "x86", "x64" }) |arch| {
         const exe = b.addExecutable(.{
             .name = b.fmt("fuzz-{s}", .{arch}),
             .root_module = b.createModule(.{
@@ -1915,6 +1989,8 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     for (fuzz_exes) |e| long.addArtifactArg(e);
     fuzz_long.dependOn(&long.step);
     _ = vcpu;
+
+    addX64check(b, fuzz_vcpu);
 
     const litmus = b.addExecutable(.{
         .name = "litmus",
@@ -1961,6 +2037,22 @@ fn addVcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     step.dependOn(&x86_run.step);
     test_step.dependOn(&x86_run.step);
     b.step("x86-jit", "Run the 386 JIT plan's [x86-jit] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
+
+    // hx64's [hcpu] cases, on T0 and T1 (design/hcpu.md).
+    const x64 = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/x64.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "vcpu", .module = b.createModule(.{
+            .root_source_file = b.path("src/vcpu.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) }},
+    }) });
+    const x64_run = b.addRunArtifact(x64);
+    step.dependOn(&x64_run.step);
+    test_step.dependOn(&x64_run.step);
+    b.step("x64-jit", "Run hx64's [hcpu] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
 
     // h86's memory-model litmus tests: compiled code on host threads.
     // ReleaseSafe unless -Doptimize says otherwise, so the threads race.

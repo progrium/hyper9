@@ -32,8 +32,13 @@ pub const Options = struct {
 const fuel_off = 56;
 /// pending.flags writes 48 or 52, which nothing else reads or writes.
 const pending_off = 48;
-/// A lazy pending.flags (aux2 2) at 24 has its record at 28..43.
+/// A lazy pending.flags (aux2 2) at 24 has its record (ir.LazyRecord) at
+/// 28..55, short of the loop counter.
 const lazy_off = 24;
+
+comptime {
+    std.debug.assert(lazy_off + 4 + @sizeOf(ir.LazyRecord) <= fuel_off);
+}
 
 const int_tys = [_]Type{ .i8, .i16, .i32, .i64 };
 
@@ -136,7 +141,7 @@ const G = struct {
             if (g.chance(50)) return g.emit(.{ .op = .@"nzcv.unpack", .ty = .flags, .a = try g.val(.i32) });
             return g.emit(.{ .op = .@"eflags.unpack", .ty = .flags, .a = try g.val(.i32) });
         }
-        const ty = g.pick(Type, &.{ .i8, .i16, .i32 });
+        const ty = g.pick(Type, &.{ .i8, .i16, .i32, .i32, .i64 });
         const op = g.pick(Op, &.{ .@"eflags.add", .@"eflags.sub", .@"eflags.sub", .@"eflags.logic", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" });
         const a = try g.val(ty);
         return switch (op) {
@@ -154,7 +159,7 @@ const G = struct {
     }
 
     fn eflagsProducer(g: *G) !Ref {
-        const ty = g.pick(Type, &.{ .i8, .i16, .i32 });
+        const ty = g.pick(Type, &.{ .i8, .i16, .i32, .i32, .i64 });
         const op = g.pick(Op, &.{ .@"eflags.add", .@"eflags.sub", .@"eflags.logic", .@"eflags.adc", .@"eflags.sbb", .@"eflags.inc", .@"eflags.dec", .@"eflags.shl", .@"eflags.shr", .@"eflags.mul" });
         const a = try g.val(ty);
         return switch (op) {

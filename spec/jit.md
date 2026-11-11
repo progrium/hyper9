@@ -1,6 +1,6 @@
 # The emulator's CPUs: the shared layer
 
-This describes, as built on the `vcpu` branch, what h9's own CPUs share: the emulator backend they run under (`zemu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [hcpu](../design/hcpu.md) proposal says why the CPUs exist and how they replace Unicorn and v86. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
+This describes, as built on the `vcpu` branch, what h9's own CPUs share: the emulator backend they run under (`zemu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU, [hx64](hx64.md) the amd64 one (h86 in long mode), and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [hcpu](../design/hcpu.md) proposal says why the CPUs exist and how they replace Unicorn and v86. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
 
 ## Contents
 
@@ -19,7 +19,7 @@ This describes, as built on the `vcpu` branch, what h9's own CPUs share: the emu
 
 ## Overview
 
-`-Demu=zig` builds the emulator backend on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries and h86 for 386 binaries, picked by the binary's architecture when the backend is created. amd64 binaries need Unicorn (`-Demu=unicorn`), and fail with `WrongArch` otherwise. The web build has the same two CPUs, with T1 on wasm for both.
+`-Demu=zig` builds the emulator backend on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the backend is created. The web build has the same three CPUs, with T1 on wasm for all of them.
 
 Both CPUs are user mode only. There's no guest kernel, MMU, interrupt delivery, or devices: a system call, a fault, a breakpoint, or an undefined instruction ends `run` with a vmm exit, as the shim does on a hypervisor, and the Ureg's trap fields are what the real kernel would put there.
 

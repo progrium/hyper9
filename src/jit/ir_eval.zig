@@ -771,7 +771,7 @@ const Pend = struct {
     /// lazy one, writes its record.
     fn write(p: Pend, cpu: [*]u8) void {
         if (p.kind == 2) {
-            @memcpy(cpu[@intCast(p.off + 4)..][0..16], std.mem.asBytes(&p.rec));
+            @memcpy(cpu[@intCast(p.off + 4)..][0..@sizeOf(ir.LazyRecord)], std.mem.asBytes(&p.rec));
             return;
         }
         const slot = cpu[@intCast(p.off)..][0..4];
@@ -871,6 +871,39 @@ test "EFLAGS for add, sub, inc, and logic" {
     // JL after CMP -1, 0; JBE after CMP 0, 0.
     try testing.expect(eflagsCond(evalPure(.@"eflags.sub", .flags, .i32, 0xffff_ffff, 0, 0, 0), 12));
     try testing.expect(eflagsCond(evalPure(.@"eflags.sub", .flags, .i32, 0, 0, 0, 0), 6));
+}
+
+test "EFLAGS at 64 bits" {
+    const max: u64 = std.math.maxInt(u64);
+    // A carry out of bit 63, and none from bit 31.
+    try testing.expectEqual(CF | ZF | PF | AF, evalPure(.@"eflags.add", .flags, .i64, max, 1, 0, 0));
+    try testing.expectEqual(@as(u64, 0), evalPure(.@"eflags.add", .flags, .i64, 0xffff_ffff, 1, 0, 0) & (CF | ZF));
+    // 0x7fff... + 1 overflows; ADC's carry in counts.
+    try testing.expectEqual(OF | SF | PF | AF, evalPure(.@"eflags.add", .flags, .i64, 0x7fff_ffff_ffff_ffff, 1, 0, 0));
+    try testing.expectEqual(CF | ZF | PF | AF, evalPure(.@"eflags.adc", .flags, .i64, max, 0, CF, 0));
+    // 0 - 1: CF SF; SBB borrows through its carry in.
+    try testing.expectEqual(CF | SF | PF | AF, evalPure(.@"eflags.sub", .flags, .i64, 0, 1, 0, 0));
+    try testing.expectEqual(CF | SF | PF | AF, evalPure(.@"eflags.sbb", .flags, .i64, 0, 0, CF, 0));
+    // A zero low half isn't ZF.
+    try testing.expectEqual(PF, evalPure(.@"eflags.logic", .flags, .i64, 0x1_0000_0000, 0, 0, 0));
+    try testing.expectEqual(OF | PF, evalPure(.@"eflags.dec", .flags, .i64, 0x8000_0000_0000_0000, 0, 0, 0) & ~AF);
+    try testing.expectEqual(CF | OF | ZF | PF, evalPure(.@"eflags.shl", .flags, .i64, 0x8000_0000_0000_0000, 0, 0, 0));
+    try testing.expectEqual(CF | OF | ZF | PF, evalPure(.@"eflags.mul", .flags, .i64, 1, 0, 0, 0));
+    // JL after CMP min, 1 and CMP 1, min, which overflow at 64 bits.
+    try testing.expect(eflagsCond(evalPure(.@"eflags.sub", .flags, .i64, 0x8000_0000_0000_0000, 1, 0, 0), 12));
+    try testing.expect(!eflagsCond(evalPure(.@"eflags.sub", .flags, .i64, 1, 0x8000_0000_0000_0000, 0, 0), 12));
+    try testing.expect(eflagsCond(evalPure(.@"eflags.sub", .flags, .i64, 0xffff_ffff_ffff_fffe, 1, 0, 0), 12));
+}
+
+test "a lazy record holds 64-bit operands" {
+    const rec = ir.lazyRecord(.@"eflags.sub", .i64, 0x1_0000_0000, 1, 0);
+    try testing.expectEqual(@as(u8, 8), rec.size);
+    try testing.expectEqual(@as(u64, 0x1_0000_0000), rec.a);
+    try testing.expectEqual(@as(u64, 0xffff_ffff), rec.res);
+    // Narrower operands are zero-extended.
+    const r8 = ir.lazyRecord(.@"eflags.add", .i8, 0xfff, 0x1, 0);
+    try testing.expectEqual(@as(u64, 0xff), r8.a);
+    try testing.expectEqual(@as(u64, 0), r8.res);
 }
 
 test "a counted loop runs to its exit" {
@@ -1132,7 +1165,7 @@ test "a lazy pending.flags writes its record and leaves the bits alone" {
     );
     defer r.deinit(gpa);
     try testing.expect(ir.verify(&r) == null);
-    var cpu: [12]u32 = .{ 0, 0, 0, 0, 0x202, 0, 0, 0, 0, 0, 0, 0 }; // bits at 0x10, record at 0x14
+    var cpu: [12]u32 align(8) = .{ 0, 0, 0, 0, 0x202, 0, 0, 0, 0, 0, 0, 0 }; // bits at 0x10, record at 0x14
     var tlb: mem.Tlb = .{};
     var c: Ctx = .{ .cpu = @intFromPtr(&cpu), .tlb = @intFromPtr(&tlb) };
     try testing.expectEqual(Exit.chain, try run(gpa, &r, &c));
@@ -1140,9 +1173,9 @@ test "a lazy pending.flags writes its record and leaves the bits alone" {
     const rec: *const ir.LazyRecord = @ptrCast(@alignCast(&cpu[5]));
     try testing.expectEqual(@intFromEnum(ir.LazyKind.sub), rec.kind);
     try testing.expectEqual(@as(u8, 4), rec.size);
-    try testing.expectEqual(@as(u32, 0), rec.a);
-    try testing.expectEqual(@as(u32, 1), rec.b);
-    try testing.expectEqual(@as(u32, 0xffff_ffff), rec.res);
+    try testing.expectEqual(@as(u64, 0), rec.a);
+    try testing.expectEqual(@as(u64, 1), rec.b);
+    try testing.expectEqual(@as(u64, 0xffff_ffff), rec.res);
     // Lazy and eager at one offset don't verify.
     var r2 = try ir.parse(gpa,
         \\b0:

@@ -1451,17 +1451,19 @@ fn lazyExtend(gpa: std.mem.Allocator, r: *const ir.Region) ![]u32 {
 }
 
 /// pending.flags `i`, lazily (aux2 = 2): ir.lazyRecord of its flags op's
-/// operands, stored at once at aux + 4.
+/// operands, stored at once at aux + 4. The operands are 64-bit slots:
+/// narrower ones are zero-extended into them.
 fn lazyStore(e: *E, r: *const ir.Region, i: ir.Inst) !void {
     const f = r.insts.items[i.a];
     const ft = r.insts.items[f.a].ty;
     const kind = ir.lazyKind(f.op).?;
     const size: u32 = ft.bits() / 8;
+    const w = size == 8;
     const d: i32 = std.math.cast(i32, i.aux + 4) orelse return error.Unsupported;
     // A chunk over the record goes out first and comes back after.
     var over: regalloc.ChunkSet = 0;
     for (e.p.chunks, 0..) |c, k| {
-        if (i.aux + 4 < c.off + c.bytes and c.off < i.aux + 20) over |= @as(regalloc.ChunkSet, 1) << @intCast(k);
+        if (i.aux + 4 < c.off + c.bytes and c.off < i.aux + 4 + @sizeOf(ir.LazyRecord)) over |= @as(regalloc.ChunkSet, 1) << @intCast(k);
     }
     try e.writeback(over & e.dirty);
     e.dirty &= ~over;
@@ -1484,37 +1486,43 @@ fn lazyStore(e: *E, r: *const ir.Region, i: ir.Inst) !void {
         try e.aluImm(false, 1, RDX, @bitCast(hdr));
         try e.rm(false, &.{0x89}, RDX, R10, d);
     } else try storeImm32(e, d, hdr);
+    // The operands stored whole: a (and b, for add, sub, shifts, and mul)
+    // zero-extended from 32 bits; narrower ones the masks below make so.
+    if (!w) {
+        try e.rr(false, &.{0x8b}, RAX, RAX); // mov eax, eax
+        if (kind == .add or kind == .sub or kind == .shl or kind == .shr or kind == .mul) try e.rr(false, &.{0x8b}, RCX, RCX);
+    }
     switch (kind) {
         .add, .sub => {
-            try e.rm(false, &.{0x89}, RAX, R10, d + 4);
-            try e.rm(false, &.{0x89}, RCX, R10, d + 8);
-            const opc: u8 = if (kind == .add) 0x03 else 0x2b; // add/sub r32, r/m32
-            try e.rr(false, &.{0x8b}, RDX, RAX);
-            try e.rr(false, &.{opc}, RDX, RCX);
-            if (cin != null) try e.rr(false, &.{opc}, RDX, R11);
+            try e.rm(true, &.{0x89}, RAX, R10, d + 4);
+            try e.rm(true, &.{0x89}, RCX, R10, d + 12);
+            const opc: u8 = if (kind == .add) 0x03 else 0x2b; // add/sub r, r/m
+            try e.rr(w, &.{0x8b}, RDX, RAX);
+            try e.rr(w, &.{opc}, RDX, RCX);
+            if (cin != null) try e.rr(w, &.{opc}, RDX, R11);
         },
         .logic => {
-            try storeImm32(e, d + 4, 0);
-            try storeImm32(e, d + 8, 0);
-            try e.rr(false, &.{0x8b}, RDX, RAX);
+            try storeImm64(e, d + 4, 0);
+            try storeImm64(e, d + 12, 0);
+            try e.rr(w, &.{0x8b}, RDX, RAX);
         },
         .inc, .dec => {
-            try e.rm(false, &.{0x89}, RAX, R10, d + 4);
-            try storeImm32(e, d + 8, 1);
-            try e.rr(false, &.{0x8b}, RDX, RAX);
-            try e.aluImm(false, if (kind == .inc) 0 else 5, RDX, 1);
+            try e.rm(true, &.{0x89}, RAX, R10, d + 4);
+            try storeImm64(e, d + 12, 1);
+            try e.rr(w, &.{0x8b}, RDX, RAX);
+            try e.aluImm(w, if (kind == .inc) 0 else 5, RDX, 1);
         },
         .shl, .shr => {
-            try e.rm(false, &.{0x89}, RAX, R10, d + 4);
-            try storeImm32(e, d + 8, 0);
-            try e.rr(false, &.{0x8b}, RDX, RCX);
+            try e.rm(true, &.{0x89}, RAX, R10, d + 4);
+            try storeImm64(e, d + 12, 0);
+            try e.rr(w, &.{0x8b}, RDX, RCX);
         },
         .mul => {
             try e.rr(false, &.{0x8b}, RDX, RAX);
             try e.aluImm(false, 4, RDX, 1);
-            try e.rm(false, &.{0x89}, RDX, R10, d + 4);
-            try storeImm32(e, d + 8, 0);
-            try e.rr(false, &.{0x8b}, RDX, RCX);
+            try e.rm(true, &.{0x89}, RDX, R10, d + 4);
+            try storeImm64(e, d + 12, 0);
+            try e.rr(w, &.{0x8b}, RDX, RCX);
         },
         .none => unreachable,
     }
@@ -1523,10 +1531,16 @@ fn lazyStore(e: *E, r: *const ir.Region, i: ir.Inst) !void {
         2 => try e.bs(&.{ 0x0f, 0xb7, 0xd2 }), // movzx edx, dx
         else => {},
     }
-    try e.rm(false, &.{0x89}, RDX, R10, d + 12);
+    try e.rm(true, &.{0x89}, RDX, R10, d + 20);
     for (e.p.chunks, 0..) |_, k| {
         if (over & (@as(regalloc.ChunkSet, 1) << @intCast(k)) != 0) try e.chunkAccess(k, false);
     }
+}
+
+/// mov qword [r10+d], imm (sign-extended from 32 bits).
+fn storeImm64(e: *E, d: i32, imm: u32) !void {
+    try e.rm(true, &.{0xc7}, 0, R10, d);
+    try e.d32(imm);
 }
 
 /// mov dword [r10+d], imm.

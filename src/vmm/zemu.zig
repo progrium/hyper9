@@ -1,10 +1,11 @@
 //! The emulator backend on h9's own CPUs (-Demu=zig): ha64 for arm64
-//! binaries and h86 for 386 binaries, picked by architecture at create.
-//! amd64 binaries need Unicorn (-Demu=unicorn).
+//! binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by
+//! architecture at create.
 //!
-//! This file is the part both share: guest memory, address spaces, vCPUs,
+//! This file is the part they share: guest memory, address spaces, vCPUs,
 //! kicks, and shootdowns. What's particular to an architecture is a Guest
-//! (ha64.zig, h86.zig): its register file and the loop that runs it.
+//! (ha64.zig, h86.zig, hx64.zig): its register file and the loop that
+//! runs it.
 //!
 //! There is no guest lock. Every vCPU runs guest code at once, and other
 //! threads reach a running vCPU only through its Ctx's exit-request word,
@@ -33,6 +34,7 @@ const cache = @import("vcpu").cache;
 const codemem = @import("vcpu").codemem;
 const ha64 = @import("ha64.zig");
 const h86 = @import("h86.zig");
+const hx64 = @import("hx64.zig");
 
 pub fn version(buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "zig ({s})", .{if (build_options.jit) "jit" else "interpreter"}) catch "zig";
@@ -95,13 +97,13 @@ fn deterministicFromEnv() bool {
     return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
-const Impl = Emu(ha64, h86);
+const Impl = Emu(ha64, h86, hx64);
 pub const Backend = Impl.EmuBackend;
 pub const AddressSpace = Impl.EmuSpace;
 pub const Vcpu = Impl.EmuVcpu;
 
-/// The backend over two Guests, one per architecture. A Guest is a type
-/// (in practice a file, ha64.zig or h86.zig) with:
+/// The backend over three Guests, one per architecture. A Guest is a type
+/// (in practice a file, ha64.zig, h86.zig, or hx64.zig) with:
 ///
 ///     pub const arch: vmm.Arch;
 ///     /// False until its T0 runs programs: create fails with WrongArch.
@@ -147,11 +149,12 @@ pub var retired_total: std.atomic.Value(if (web) usize else u64) = .init(0);
 pub const Layout = struct { cpu: usize = 0, arena: usize = 0, code: usize = 0, stack: usize = 0 };
 pub var layout: Layout = .{};
 
-/// T1's dispatch counts so far, both guests' together (native hosts).
+/// T1's dispatch counts so far, every guest's together (native hosts).
 pub fn t1Stats() [4]u64 {
     const a = ha64.t1_stats;
     const x = h86.t1_stats;
-    return .{ a.compiled + x.compiled, a.entries + x.entries, a.linked + x.linked, a.t0 + x.t0 };
+    const y = hx64.t1_stats;
+    return .{ a.compiled + x.compiled + y.compiled, a.entries + x.entries + y.entries, a.linked + x.linked + y.linked, a.t0 + x.t0 + y.t0 };
 }
 
 /// H9_EMU_TIER, if set: "t0" or "t1".
@@ -169,17 +172,19 @@ pub fn applyTier(comptime G: type, name: []const u8) bool {
     return true;
 }
 
-pub fn Emu(comptime A64: type, comptime X86: type) type {
+pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
     return struct {
         pub const Cpu = union(enum) {
             arm64: A64.Cpu,
             i386: X86.Cpu,
+            amd64: X64.Cpu,
         };
 
         fn Guest(comptime a: std.meta.Tag(Cpu)) type {
             return switch (a) {
                 .arm64 => A64,
                 .i386 => X86,
+                .amd64 => X64,
             };
         }
 
@@ -217,7 +222,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     // one this backend can't run, as for amd64.
                     .arm64 => if (!A64.ready) return error.WrongArch,
                     .i386 => if (!X86.ready) return error.WrongArch,
-                    .amd64 => return error.WrongArch,
+                    .amd64 => if (!X64.ready) return error.WrongArch,
                 }
                 if (opts.arch == .arm64 and @hasDecl(A64, "deterministic")) A64.deterministic = deterministicFromEnv();
                 if (build_options.jit and !web) {
@@ -228,7 +233,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                     const ok = switch (opts.arch) {
                         .arm64 => applyTier(A64, t),
                         .i386 => applyTier(X86, t),
-                        .amd64 => unreachable,
+                        .amd64 => applyTier(X64, t),
                     };
                     if (!ok) std.log.warn("H9_EMU_TIER={s}: not t0 or t1; using the default", .{t});
                 }
@@ -318,7 +323,7 @@ pub fn Emu(comptime A64: type, comptime X86: type) type {
                 s.* = .{ .backend = b, .cpu = switch (b.arch) {
                     .arm64 => .{ .arm64 = .{} },
                     .i386 => .{ .i386 = .{} },
-                    .amd64 => unreachable,
+                    .amd64 => .{ .amd64 = .{} },
                 } };
                 s.view = .{ .code = &b.code, .tlb = &s.tlb };
                 s.rt.cache = b.jit;
@@ -837,7 +842,24 @@ const Toy = struct {
     }
 };
 
-const T = Emu(Toy, Toy);
+/// A Guest that isn't ready: one whose T0 doesn't run programs yet.
+const Unready = struct {
+    pub const arch: vmm.Arch = .amd64;
+    pub const ready = false;
+    pub const Cpu = Toy.Cpu;
+    pub const getUreg = Toy.getUreg;
+    pub const setUreg = Toy.setUreg;
+    pub const getExtra = Toy.getExtra;
+    pub const setExtra = Toy.setExtra;
+    pub const run = Toy.run;
+};
+
+const T = Emu(Toy, Toy, Unready);
+
+test {
+    // hx64's own tests: its Ureg, FXSAVE, and exits.
+    _ = hx64;
+}
 
 test "applyTier sets a Guest's tier by name" {
     const G = struct {

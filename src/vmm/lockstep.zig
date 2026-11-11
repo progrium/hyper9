@@ -1,5 +1,5 @@
 //! Lockstep: a T0 against Unicorn, an instruction at a time, for arm64
-//! (ha64) and i386 (h86). design/0019-zig-interpreter.md's lockstep,
+//! (ha64), i386 (h86), and amd64 (hx64). design/0019-zig-interpreter.md's lockstep,
 //! generalized to both guests and kept free of either T0's types.
 //!
 //! Unicorn runs on a mirror: its own copies of the T0's pages, mapped with
@@ -19,7 +19,7 @@ const uc = @import("unicorn");
 
 pub const page_size = 4096;
 
-pub const Arch = enum { arm64, i386 };
+pub const Arch = enum { arm64, i386, amd64 };
 
 /// arm64 user state, canonical.
 pub const A64 = struct {
@@ -42,10 +42,25 @@ pub const X86 = struct {
     eflags: u32 = 0x202,
 };
 
+/// amd64 user state, canonical: the general registers, RIP, RFLAGS, the
+/// FS and GS bases, and SSE's registers. (x87 isn't compared: h86's
+/// lockstep leaves it out too, and x86check checks it against the host.)
+pub const X64 = struct {
+    /// RAX RCX RDX RBX RSP RBP RSI RDI R8-R15, in encoding order.
+    r: [16]u64 = @splat(0),
+    rip: u64 = 0,
+    rflags: u64 = 0x202,
+    fs_base: u64 = 0,
+    gs_base: u64 = 0,
+    xmm: [16]u128 = @splat(0),
+    mxcsr: u32 = 0x1f80,
+};
+
 pub fn State(comptime arch: Arch) type {
     return switch (arch) {
         .arm64 => A64,
         .i386 => X86,
+        .amd64 => X64,
     };
 }
 
@@ -118,6 +133,7 @@ pub fn Engine(comptime arch: Arch) type {
             const a: uc.uc_arch, const mode: uc.uc_mode = switch (arch) {
                 .arm64 => .{ uc.UC_ARCH_ARM64, uc.UC_MODE_ARM },
                 .i386 => .{ uc.UC_ARCH_X86, uc.UC_MODE_32 },
+                .amd64 => .{ uc.UC_ARCH_X86, uc.UC_MODE_64 },
             };
             var engine: ?*uc.uc_engine = null;
             try ok(uc.uc_open(a, mode, &engine));
@@ -148,6 +164,7 @@ pub fn Engine(comptime arch: Arch) type {
             try ok(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_INTR, @ptrCast(@constCast(&onIntr)), s, 1, 0));
             try ok(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_MEM_INVALID, @ptrCast(@constCast(&onMemInvalid)), s, 1, 0));
             if (arch == .i386) try s.flatSegments();
+            if (arch == .amd64) try ok(uc.uc_hook_add(s.engine, &h, uc.UC_HOOK_INSN, @ptrCast(@constCast(&onSyscall)), s, 1, 0, @as(c_int, uc.UC_X86_INS_SYSCALL)));
             if (arch == .arm64) {
                 // CNTKCTL_EL1: EL0 may read the counter, as on Linux and HVF.
                 var cp: uc.uc_arm64_cp_reg = .{ .crn = 14, .crm = 1, .op0 = 3, .op1 = 0, .op2 = 0, .val = 3 };
@@ -194,7 +211,19 @@ pub fn Engine(comptime arch: Arch) type {
                     x86_vector_ud => .undef,
                     else => .{ .exception = intno },
                 },
+                // SYSCALL is the system call (onSyscall).
+                .amd64 => switch (intno) {
+                    x86_vector_bp => .breakpoint,
+                    x86_vector_ud => .undef,
+                    else => .{ .exception = intno },
+                },
             };
+            _ = uc.uc_emu_stop(s.engine);
+        }
+
+        fn onSyscall(_: ?*uc.uc_engine, data: ?*anyopaque) callconv(.c) void {
+            const s: *Self = @ptrCast(@alignCast(data));
+            s.stop = .syscall;
             _ = uc.uc_emu_stop(s.engine);
         }
 
@@ -232,13 +261,21 @@ pub fn Engine(comptime arch: Arch) type {
 
         pub fn pc(s: *Self) u64 {
             var v: u64 = 0;
-            _ = uc.uc_reg_read(s.engine, if (arch == .arm64) uc.UC_ARM64_REG_PC else uc.UC_X86_REG_EIP, &v);
+            _ = uc.uc_reg_read(s.engine, pcReg(), &v);
             return if (arch == .i386) v & 0xffffffff else v;
         }
 
         fn setPc(s: *Self, v: u64) void {
             var x = v;
-            _ = uc.uc_reg_write(s.engine, if (arch == .arm64) uc.UC_ARM64_REG_PC else uc.UC_X86_REG_EIP, &x);
+            _ = uc.uc_reg_write(s.engine, pcReg(), &x);
+        }
+
+        fn pcReg() c_int {
+            return switch (arch) {
+                .arm64 => uc.UC_ARM64_REG_PC,
+                .i386 => uc.UC_X86_REG_EIP,
+                .amd64 => uc.UC_X86_REG_RIP,
+            };
         }
 
         fn rd(s: *Self, comptime T: type, reg: c_int) T {
@@ -261,6 +298,12 @@ pub fn Engine(comptime arch: Arch) type {
         }
 
         const x86_regs = [8]c_int{ uc.UC_X86_REG_EAX, uc.UC_X86_REG_ECX, uc.UC_X86_REG_EDX, uc.UC_X86_REG_EBX, uc.UC_X86_REG_ESP, uc.UC_X86_REG_EBP, uc.UC_X86_REG_ESI, uc.UC_X86_REG_EDI };
+        const x64_regs = [16]c_int{
+            uc.UC_X86_REG_RAX, uc.UC_X86_REG_RCX, uc.UC_X86_REG_RDX, uc.UC_X86_REG_RBX,
+            uc.UC_X86_REG_RSP, uc.UC_X86_REG_RBP, uc.UC_X86_REG_RSI, uc.UC_X86_REG_RDI,
+            uc.UC_X86_REG_R8,  uc.UC_X86_REG_R9,  uc.UC_X86_REG_R10, uc.UC_X86_REG_R11,
+            uc.UC_X86_REG_R12, uc.UC_X86_REG_R13, uc.UC_X86_REG_R14, uc.UC_X86_REG_R15,
+        };
 
         pub fn getState(s: *Self) St {
             var st: St = .{};
@@ -279,6 +322,15 @@ pub fn Engine(comptime arch: Arch) type {
                     for (x86_regs, 0..) |r, i| st.r[i] = s.rd(u32, r);
                     st.eip = s.rd(u32, uc.UC_X86_REG_EIP);
                     st.eflags = s.rd(u32, uc.UC_X86_REG_EFLAGS);
+                },
+                .amd64 => {
+                    for (x64_regs, 0..) |r, i| st.r[i] = s.rd(u64, r);
+                    st.rip = s.rd(u64, uc.UC_X86_REG_RIP);
+                    st.rflags = s.rd(u64, uc.UC_X86_REG_RFLAGS);
+                    st.fs_base = s.rd(u64, uc.UC_X86_REG_FS_BASE);
+                    st.gs_base = s.rd(u64, uc.UC_X86_REG_GS_BASE);
+                    for (0..16) |i| st.xmm[i] = s.rd(u128, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)));
+                    st.mxcsr = s.rd(u32, uc.UC_X86_REG_MXCSR);
                 },
             }
             return st;
@@ -300,6 +352,15 @@ pub fn Engine(comptime arch: Arch) type {
                     for (x86_regs, 0..) |r, i| try s.wr(u32, r, st.r[i]);
                     try s.wr(u32, uc.UC_X86_REG_EIP, st.eip);
                     try s.wr(u32, uc.UC_X86_REG_EFLAGS, st.eflags);
+                },
+                .amd64 => {
+                    for (x64_regs, 0..) |r, i| try s.wr(u64, r, st.r[i]);
+                    try s.wr(u64, uc.UC_X86_REG_RIP, st.rip);
+                    try s.wr(u64, uc.UC_X86_REG_RFLAGS, st.rflags);
+                    try s.wr(u64, uc.UC_X86_REG_FS_BASE, st.fs_base);
+                    try s.wr(u64, uc.UC_X86_REG_GS_BASE, st.gs_base);
+                    for (0..16) |i| try s.wr(u128, uc.UC_X86_REG_XMM0 + @as(c_int, @intCast(i)), st.xmm[i]);
+                    try s.wr(u32, uc.UC_X86_REG_MXCSR, st.mxcsr);
                 },
             }
         }
@@ -368,7 +429,66 @@ pub const Known = enum {
     /// the bytes on the page before, where T0 (and T1) check both pages
     /// first and write none.
     partial_page_cross_store,
+    /// amd64: an access to a non-canonical address, which is #GP on the
+    /// hardware (and T0), where Unicorn reports a page fault at it.
+    noncanonical_fault,
+    /// amd64: SHLD or SHRD with an imm8 and a RIP-relative operand: QEMU
+    /// takes RIP before the imm8, so its address is one byte short.
+    rip_rel_shxd_imm,
+    /// amd64: a 32-bit CMPXCHG writes both EAX and the destination in
+    /// QEMU, zero-extending each; the hardware writes only the one the
+    /// outcome names (the destination on success, EAX on failure), and
+    /// leaves the other's upper half.
+    cmpxchg32_zext,
 };
+
+/// Whether amd64 instruction `bytes`, after which T0 and Unicorn differ,
+/// is a 32-bit CMPXCHG (`cmpxchg32_zext`).
+pub fn knownX64Result(bytes: []const u8) ?Known {
+    var k: usize = 0;
+    var o16 = false;
+    while (k < bytes.len) : (k += 1) switch (bytes[k]) {
+        0x66 => o16 = true,
+        0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65 => {},
+        else => break,
+    };
+    if (k < bytes.len and bytes[k] & 0xF0 == 0x40) {
+        if (bytes[k] & 8 != 0) return null;
+        k += 1;
+    }
+    if (o16 or k + 1 >= bytes.len or bytes[k] != 0x0F or bytes[k + 1] != 0xB1) return null;
+    return .cmpxchg32_zext;
+}
+
+/// Whether amd64 instruction `bytes` is SHLD or SHRD with an imm8 and a
+/// RIP-relative operand, which Unicorn gets wrong (`rip_rel_shxd_imm`).
+pub fn knownX64Insn(bytes: []const u8) ?Known {
+    var k: usize = 0;
+    while (k < bytes.len) : (k += 1) switch (bytes[k]) {
+        0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65 => {},
+        else => break,
+    };
+    if (k < bytes.len and bytes[k] & 0xF0 == 0x40) k += 1;
+    if (k + 2 >= bytes.len or bytes[k] != 0x0F) return null;
+    if (bytes[k + 1] != 0xA4 and bytes[k + 1] != 0xAC) return null;
+    return if (bytes[k + 2] & 0xC7 == 0x05) .rip_rel_shxd_imm else null;
+}
+
+/// Whether amd64 address `va` is canonical: bits 63 to 47 all the same.
+pub fn canonical64(va: u64) bool {
+    const top = va >> 47;
+    return top == 0 or top == 0x1ffff;
+}
+
+/// Whether T0 raising #GP (`t0_gp`) where Unicorn stopped with `u` is a
+/// known amd64 divergence.
+pub fn knownX64(t0_gp: bool, u: Stop) ?Known {
+    if (!t0_gp) return null;
+    return switch (u) {
+        .fault => |f| if (!canonical64(f.addr)) .noncanonical_fault else null,
+        else => null,
+    };
+}
 
 /// The size in bytes of arm64 load or store exclusive `word` (both
 /// registers of a pair), and whether it loads; null for anything else.
@@ -443,6 +563,33 @@ pub fn diff(comptime arch: Arch, a: State(arch), b: State(arch), flag_mask: u32,
                 bad = true;
             }
         },
+        .amd64 => {
+            const names = [16][]const u8{ "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+            for (a.r, b.r, names) |x, y, n| if (x != y) {
+                w.print("{s}: T0 {x}, unicorn {x}\n", .{ n, x, y }) catch {};
+                bad = true;
+            };
+            if (a.rip != b.rip) {
+                w.print("rip: T0 {x}, unicorn {x}\n", .{ a.rip, b.rip }) catch {};
+                bad = true;
+            }
+            if ((a.rflags ^ b.rflags) & flag_mask != 0) {
+                w.print("rflags: T0 {x}, unicorn {x} (compared {x})\n", .{ a.rflags, b.rflags, flag_mask }) catch {};
+                bad = true;
+            }
+            if (a.fs_base != b.fs_base or a.gs_base != b.gs_base) {
+                w.print("fs/gs base: T0 {x} {x}, unicorn {x} {x}\n", .{ a.fs_base, a.gs_base, b.fs_base, b.gs_base }) catch {};
+                bad = true;
+            }
+            for (a.xmm, b.xmm, 0..) |x, y, i| if (x != y) {
+                w.print("xmm{d}: T0 {x:0>32}, unicorn {x:0>32}\n", .{ i, x, y }) catch {};
+                bad = true;
+            };
+            if (a.mxcsr != b.mxcsr) {
+                w.print("mxcsr: T0 {x}, unicorn {x}\n", .{ a.mxcsr, b.mxcsr }) catch {};
+                bad = true;
+            }
+        },
     }
     return bad;
 }
@@ -514,4 +661,63 @@ test "lockstep: unicorn steps i386 one instruction at a time" {
     try e.setState(st);
     try std.testing.expectEqual(Stop.syscall, try e.step());
     try std.testing.expectEqual(@as(u32, 0x100d), e.getState().eip);
+}
+
+test "lockstep: unicorn steps amd64 one instruction at a time" {
+    const gpa = std.testing.allocator;
+    var code: [page_size]u8 align(page_size) = @splat(0);
+    var data: [page_size]u8 align(page_size) = @splat(0);
+    const prog = [_]u8{
+        0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // movabs rax, 0x1122334455667788
+        0x48, 0x89, 0x01, // mov [rcx], rax
+        0x4c, 0x8b, 0x01, // mov r8, [rcx]
+        0x0f, 0x05, // syscall
+    };
+    @memcpy(code[0..prog.len], &prog);
+    const e = try Engine(.amd64).init(gpa, &.{ .{ .va = 0x1000, .mem = &code, .exec = true }, .{ .va = 0x20000, .mem = &data, .write = true } });
+    defer e.deinit();
+    var r: [16]u64 = @splat(0);
+    r[1] = 0x20000;
+    r[4] = 0x20800;
+    try e.setState(.{ .rip = 0x1000, .r = r });
+    try std.testing.expectEqual(Stop.next, try e.step());
+    try std.testing.expectEqual(Stop.next, try e.step());
+    try std.testing.expectEqual(Stop.next, try e.step());
+    try std.testing.expectEqual(@as(u64, 0x1122334455667788), e.getState().r[8]);
+    try std.testing.expectEqual(Stop.syscall, try e.step());
+    try std.testing.expectEqual(@as(u64, 0x1012), e.getState().rip);
+}
+
+test "lockstep: amd64 carries the FS and GS bases and SSE, and faults like long mode" {
+    const gpa = std.testing.allocator;
+    var code: [page_size]u8 align(page_size) = @splat(0);
+    var data: [page_size]u8 align(page_size) = @splat(0);
+    std.mem.writeInt(u64, data[0x18..0x20], 0xfeed_f00d_dead_beef, .little);
+    const prog = [_]u8{
+        0x64, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, // mov rax, fs:[8]
+        0x65, 0x48, 0x8b, 0x1c, 0x25, 0x10, 0x00, 0x00, 0x00, // mov rbx, gs:[0x10]
+        0x66, 0x41, 0x0f, 0xfe, 0xc1, // paddd xmm0, xmm9
+        0x48, 0x8b, 0x0c, 0x25, 0x00, 0x00, 0x00, 0x30, // mov rcx, [0x30000000]: unmapped
+    };
+    @memcpy(code[0..prog.len], &prog);
+    const e = try Engine(.amd64).init(gpa, &.{ .{ .va = 0x1000, .mem = &code, .exec = true }, .{ .va = 0x20000, .mem = &data, .write = true } });
+    defer e.deinit();
+    var st: X64 = .{ .rip = 0x1000, .fs_base = 0x20010, .gs_base = 0x20008 };
+    st.r[4] = 0x20800;
+    st.xmm[0] = 0x0000_0001_0000_0002_0000_0003_0000_0004;
+    st.xmm[9] = 0x0000_0010_0000_0020_0000_0030_ffff_ffff;
+    try e.setState(st);
+    try std.testing.expectEqual(Stop.next, try e.step());
+    try std.testing.expectEqual(Stop.next, try e.step());
+    try std.testing.expectEqual(Stop.next, try e.step());
+    const got = e.getState();
+    try std.testing.expectEqual(@as(u64, 0xfeed_f00d_dead_beef), got.r[0]);
+    try std.testing.expectEqual(@as(u64, 0xfeed_f00d_dead_beef), got.r[3]);
+    try std.testing.expectEqual(@as(u128, 0x0000_0011_0000_0022_0000_0033_0000_0003), got.xmm[0]);
+    try std.testing.expectEqual(@as(u64, 0x20010), got.fs_base);
+    switch (try e.step()) {
+        .fault => |f| try std.testing.expectEqual(@as(u64, 0x3000_0000), f.addr),
+        else => return error.WrongStop,
+    }
+    try std.testing.expectEqual(@as(u64, 0x1017), e.getState().rip);
 }

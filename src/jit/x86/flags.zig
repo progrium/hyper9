@@ -45,6 +45,15 @@ pub const OF = t0.OF;
 pub const bits_off = @offsetOf(Cpu, "fl") + @offsetOf(t0.Flags, "bits");
 pub const kind_off = @offsetOf(Cpu, "fl") + @offsetOf(t0.Flags, "lazy") + @offsetOf(t0.Lazy, "kind");
 
+/// `bits_off` and `kind_off` in the Cpu of `mode` (hx64's Cpu64 keeps h86's
+/// Flags at another offset).
+pub fn bitsOff(comptime mode: cpu_mod.Mode) u64 {
+    return @offsetOf(cpu_mod.CpuOf(mode), "fl") + @offsetOf(t0.Flags, "bits");
+}
+pub fn kindOff(comptime mode: cpu_mod.Mode) u64 {
+    return @offsetOf(cpu_mod.CpuOf(mode), "fl") + @offsetOf(t0.Flags, "lazy") + @offsetOf(t0.Lazy, "kind");
+}
+
 comptime {
     std.debug.assert(@intFromEnum(t0.Kind.none) == 0);
     std.debug.assert(@sizeOf(t0.Kind) == 1);
@@ -76,12 +85,16 @@ pub const State = struct {
     /// The region writes lazy records (see the top of this file). It
     /// holds for the whole region: `forget` keeps it.
     lazy: bool = false,
+    /// Where the Cpu keeps EFLAGS and the lazy kind: `bitsOff` and
+    /// `kindOff` of the lifter's mode.
+    bits_at: u64 = bits_off,
+    kind_at: u64 = kind_off,
 
     /// The current flags as a value.
     pub fn get(s: *State, b: *ir.Builder) !Ref {
         if (s.cur) |f| return f;
         if (s.entry_pending) return error.FlagsPending;
-        const v = try b.getreg(.i32, bits_off);
+        const v = try b.getreg(.i32, s.bits_at);
         const f = try b.un(.@"eflags.unpack", .flags, v);
         s.cur = f;
         s.dirty = false;
@@ -108,7 +121,7 @@ pub const State = struct {
         if (!s.dirty) return;
         if (!s.pending and !s.entry_pending) {
             // EFLAGS' other bits, for `settle`, while the slot may be read.
-            const old = try b.getreg(.i32, bits_off);
+            const old = try b.getreg(.i32, s.bits_at);
             s.rest = try b.bin(.@"and", .i32, old, try b.konst(.i32, ~@as(u64, arith)));
         }
         if (s.lazy) {
@@ -116,14 +129,14 @@ pub const State = struct {
             s.pending = true;
             s.dirty = false;
             if (ir.lazyKind(b.r.insts.items[f].op) != null) {
-                _ = try b.emit(.{ .op = .@"pending.flags", .a = f, .aux = bits_off, .aux2 = lazy_aux2 });
+                _ = try b.emit(.{ .op = .@"pending.flags", .a = f, .aux = s.bits_at, .aux2 = lazy_aux2 });
                 return;
             }
             // No record holds these (POPF, SAHF, a rotate, CLC, ...): the
             // bits, now.
             return s.writeBits(b);
         }
-        try b.pendingFlags(s.cur.?, bits_off, .eflags);
+        try b.pendingFlags(s.cur.?, s.bits_at, .eflags);
         s.pending = true;
         s.dirty = false;
     }
@@ -142,9 +155,9 @@ pub const State = struct {
         }
         const rest = s.rest orelse return error.FlagsPending;
         const p = try b.un(.@"eflags.pack", .i32, s.cur.?);
-        try b.setreg(bits_off, try b.bin(.@"or", .i32, rest, p));
+        try b.setreg(s.bits_at, try b.bin(.@"or", .i32, rest, p));
         // A record written before (at a way out) says nothing now.
-        if (s.lazy) try b.setreg(kind_off, try b.konst(.i8, 0));
+        if (s.lazy) try b.setreg(s.kind_at, try b.konst(.i8, 0));
         s.pending = false;
     }
 

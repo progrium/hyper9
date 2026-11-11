@@ -283,7 +283,7 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-`-Demu=zig` builds it on h9's own CPUs instead of Unicorn, ha64 for arm64 binaries and h86 for 386 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
+`-Demu=zig` builds it on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
 
 ### Scope
 

@@ -104,6 +104,7 @@ zig build integration -Dweb   # the integration cases through h9-node on h86 (No
 zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in Chromium with Playwright, and vcpu-web
 zig build vcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build x86-jit  # the 386 JIT's [x86-jit] cases (tests/x86.zig) on T0 and T1; zig build vcpu runs them too
+zig build x64-jit  # hx64's [hcpu] cases (tests/x64.zig) on T0 and T1; zig build vcpu runs them too (on the hx64 branch; fuzz-x64 and x64check are stubs there)
 zig build -Demu=zig -Dvcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```

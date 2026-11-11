@@ -11,8 +11,14 @@
 //! are listed with enough to find their length, as `.x87` and `.sse`, and
 //! their semantics live in x87.zig and sse.zig, keyed by opcode, prefix,
 //! and ModRM.
+//!
+//! hx64's long mode uses the same rows through its own slots (`slotIn`):
+//! the rows marked `inv64` are #UD there, `d64` and `rexw` say how REX.W
+//! and 66 size them, and `long_only` adds MOVSXD and SYSCALL.
 
 const std = @import("std");
+
+pub const Mode = @import("mode.zig").Mode;
 
 /// What an instruction does. ALU operations share one `op` per kind; the
 /// operand fields say where the operands come from.
@@ -148,6 +154,8 @@ pub const Op = enum(u8) {
     /// MMX, SSE, and SSE2, with FXSAVE, FXRSTOR, LDMXCSR, STMXCSR, and
     /// EMMS: sse.zig.
     sse,
+    /// SYSCALL, in long mode only: a system-call exit.
+    syscall,
 };
 
 /// Where an operand comes from.
@@ -227,6 +235,23 @@ pub const Entry = struct {
     sreg: u3 = 0,
     /// MOVZX and MOVSX: the source's size.
     src_size: Size = .b,
+
+    // Long mode (hx64). The legacy table ignores these.
+
+    /// The operand size defaults to 64 bits in long mode, and 0x66 makes
+    /// it 16 (32 can't be encoded): PUSH, POP, near JMP, CALL, RET, Jcc,
+    /// LOOP, JRCXZ, LEAVE, ENTER, PUSHF, and POPF.
+    d64: bool = false,
+    /// Invalid in long mode, so #UD there: PUSHA, POPA, the BCD
+    /// instructions, BOUND, LDS, LES, INTO, the one-byte segment pushes
+    /// and pops, SALC, and far CALL and JMP with an immediate pointer.
+    /// (40-4F are REX prefixes there, which the decoder takes before the
+    /// table.)
+    inv64: bool = false,
+    /// REX.W does more than make the operand size 8: MOV r64, imm64 (B8+r)
+    /// takes an 8-byte immediate, MOVSXD (63) replaces ARPL, and
+    /// CMPXCHG8B (0F C7 /1) becomes CMPXCHG16B.
+    rexw: bool = false,
 };
 
 /// One table row: an opcode (0x00-0xFF, or 0x0F00-0x0FFF for two-byte
@@ -583,7 +608,90 @@ pub const table: []const Row = blk: {
         span(0x0fd0, 0x0fff, .sse, .none);
 
     // 0F FF is UD0, which takes a ModRM byte; it stays #UD via sse.zig.
-    break :blk &(one ++ two);
+    break :blk &mark64(&(one ++ two));
+};
+
+/// Opcodes that are invalid in long mode, every form (`Entry.inv64`):
+/// the one-byte segment pushes and pops, the BCD instructions, PUSHA,
+/// POPA, BOUND, INTO, SALC, LES and LDS (C4 and C5, VEX there), 82 (an
+/// alias of 80), far CALL and JMP with an immediate pointer, and INC and
+/// DEC at 40-4F, which are REX prefixes.
+const inv64_ops = [_]u16{
+    0x06, 0x07, 0x0e, 0x16, 0x17, 0x1e, 0x1f, 0x27, 0x2f, 0x37, 0x3f,
+    0x60, 0x61, 0x62, 0x82, 0x9a, 0xc4, 0xc5, 0xce, 0xd4, 0xd5, 0xd6,
+    0xea,
+} ++ blk: {
+    var rex: [16]u16 = undefined;
+    for (&rex, 0..) |*o, k| o.* = 0x40 + k;
+    break :blk rex;
+};
+
+/// An opcode, and for a group its /digit.
+const Form = struct { opcode: u16, ext: ?u3 = null };
+
+/// Forms whose operand size defaults to 64 bits in long mode (`Entry.d64`).
+/// The near branches among them (Jcc, JMP, CALL, RET, LOOP, and JRCXZ)
+/// are always 64-bit: the decoder ignores 66 on them, as Intel's CPUs do.
+const d64_forms = [_]Form{
+    .{ .opcode = 0x68 },           .{ .opcode = 0x6a },           .{ .opcode = 0x8f, .ext = 0 },
+    .{ .opcode = 0x9c },           .{ .opcode = 0x9d },           .{ .opcode = 0xc2 },
+    .{ .opcode = 0xc3 },           .{ .opcode = 0xc8 },           .{ .opcode = 0xc9 },
+    .{ .opcode = 0xe0 },           .{ .opcode = 0xe1 },           .{ .opcode = 0xe2 },
+    .{ .opcode = 0xe3 },           .{ .opcode = 0xe8 },           .{ .opcode = 0xe9 },
+    .{ .opcode = 0xeb },           .{ .opcode = 0xff, .ext = 2 }, .{ .opcode = 0xff, .ext = 4 },
+    .{ .opcode = 0xff, .ext = 6 }, .{ .opcode = 0x0fa0 },         .{ .opcode = 0x0fa1 },
+    .{ .opcode = 0x0fa8 },         .{ .opcode = 0x0fa9 },
+} ++ blk: {
+    var f: [16 + 16 + 16]Form = undefined;
+    // PUSH and POP r64, Jcc rel8, and Jcc rel32.
+    for (0..16) |k| f[k] = .{ .opcode = 0x50 + k };
+    for (0..16) |k| f[16 + k] = .{ .opcode = 0x70 + k };
+    for (0..16) |k| f[32 + k] = .{ .opcode = 0x0f80 + k };
+    break :blk f;
+};
+
+/// Forms REX.W changes beyond the operand size (`Entry.rexw`): MOV r64,
+/// imm64 and CMPXCHG16B. MOVSXD is in `long_only`.
+const rexw_forms = [_]Form{
+    .{ .opcode = 0x0fc7, .ext = 1 },
+} ++ blk: {
+    var f: [8]Form = undefined;
+    for (0..8) |k| f[k] = .{ .opcode = 0xb8 + k };
+    break :blk f;
+};
+
+fn has(comptime forms: []const Form, row: Row) bool {
+    for (forms) |f| {
+        if (f.opcode == row.opcode and (f.ext == null or f.ext == row.ext)) return true;
+    }
+    return false;
+}
+
+fn hasOp(comptime ops: []const u16, opcode: u16) bool {
+    for (ops) |o| if (o == opcode) return true;
+    return false;
+}
+
+/// The rows with their long-mode fields set from the lists above.
+fn mark64(comptime rows: []const Row) [rows.len]Row {
+    @setEvalBranchQuota(1_000_000);
+    var out: [rows.len]Row = rows[0..rows.len].*;
+    for (&out) |*row| {
+        if (hasOp(&inv64_ops, row.opcode)) row.e.inv64 = true;
+        if (has(&d64_forms, row.*)) row.e.d64 = true;
+        if (has(&rexw_forms, row.*)) row.e.rexw = true;
+    }
+    return out;
+}
+
+/// Encodings that exist only in long mode, where they're #UD in legacy
+/// mode: MOVSXD in place of ARPL (which the legacy table doesn't list, as
+/// it's #UD outside the kernel's protected mode), and SYSCALL.
+pub const long_only: []const Row = &.{
+    r(0x63, .{ .op = .movsx, .modrm = true, .dst = .G, .src = .E, .src_size = .d, .rexw = true }),
+    // The kernel reads its arguments and writes RAX; SYSCALL itself
+    // writes RCX and R11 (decode.effectsIn says so).
+    r(0x0f05, .{ .op = .syscall, .ir = 0xff, .iw = eax | ecx, .end = true }),
 };
 
 fn lsegs(opcode: u16, sreg: u3) [8]Row {
@@ -606,27 +714,31 @@ pub inline fn index(opcode: u16) u9 {
     return if (opcode >= 0x0f00) @intCast(256 + (opcode & 0xff)) else @intCast(opcode);
 }
 
+/// Each mode's slots over one array of entries, so an entry index means
+/// the same in both. Long mode shares the legacy entries for the opcodes
+/// both have; `long_only`'s entries follow the legacy ones, and its #UD
+/// opcodes (`inv64`) point at entry 0.
 const Lookup = struct {
     slots: [512]Slot,
+    slots64: [512]Slot,
     entries: []const Entry,
 };
 
-const lookup: Lookup = blk: {
-    @setEvalBranchQuota(1_000_000);
+const ud_slot: Slot = .{ .first = 0, .grouped = false, .modrm = false };
+
+/// Lays `rows` out from `entries[n]`, filling `slots` for the opcodes
+/// they list, and returns the new end.
+fn place(comptime rows: []const Row, slots: *[512]Slot, entries: *[2048]Entry, n0: usize) usize {
     var grouped: [512]bool = @splat(false);
     var modrm: [512]bool = @splat(false);
     var count: [512]u16 = @splat(0);
-    for (table) |row| {
+    for (rows) |row| {
         const i = index(row.opcode);
         if (row.ext != null) grouped[i] = true;
         if (row.e.modrm) modrm[i] = true;
         count[i] += 1;
     }
-    var slots: [512]Slot = @splat(.{ .first = 0, .grouped = false, .modrm = false });
-    // Entry 0 is #UD, for opcodes not in the table.
-    var entries: [2048]Entry = undefined;
-    entries[0] = .{ .op = .ud, .end = true };
-    var n: usize = 1;
+    var n = n0;
     for (0..512) |i| {
         if (count[i] == 0) continue;
         if (grouped[i]) {
@@ -640,7 +752,7 @@ const lookup: Lookup = blk: {
             n += 1;
         }
     }
-    for (table) |row| {
+    for (rows) |row| {
         const s = slots[index(row.opcode)];
         if (!s.grouped) {
             entries[s.first] = row.e;
@@ -650,16 +762,56 @@ const lookup: Lookup = blk: {
         if (row.mod != .reg) entries[s.first + 2 * @as(usize, ext)] = row.e;
         if (row.mod != .mem) entries[s.first + 2 * @as(usize, ext) + 1] = row.e;
     }
+    return n;
+}
+
+const lookup: Lookup = blk: {
+    @setEvalBranchQuota(1_000_000);
+    var slots: [512]Slot = @splat(ud_slot);
+    // Entry 0 is #UD, for opcodes not in the table.
+    var entries: [2048]Entry = undefined;
+    entries[0] = .{ .op = .ud, .end = true };
+    var n = place(table, &slots, &entries, 1);
+    // Long mode: the legacy slots, less the opcodes invalid there, plus
+    // its own.
+    var slots64 = slots;
+    var inv: [512]u16 = @splat(0);
+    var all: [512]u16 = @splat(0);
+    for (table) |row| {
+        all[index(row.opcode)] += 1;
+        if (row.e.inv64) inv[index(row.opcode)] += 1;
+    }
+    for (0..512) |i| {
+        if (inv[i] == 0) continue;
+        if (inv[i] != all[i]) @compileError("an opcode only partly invalid in long mode");
+        slots64[i] = ud_slot;
+    }
+    for (long_only) |row| {
+        if (@as(u16, @bitCast(slots64[index(row.opcode)])) != 0) @compileError("a long-only opcode the legacy table has");
+    }
+    n = place(long_only, &slots64, &entries, n);
     const out = entries[0..n].*;
-    break :blk .{ .slots = slots, .entries = &out };
+    break :blk .{ .slots = slots, .slots64 = slots64, .entries = &out };
 };
 
-/// How many entries there are: entryAt takes 0 to entry_count - 1.
+/// How many entries there are, in both modes: entryAt takes 0 to
+/// entry_count - 1. A legacy slot never points past the legacy rows, so
+/// a long-only entry is reached only in long mode.
 pub const entry_count = lookup.entries.len;
 
 /// The slot for `opcode`.
 pub inline fn slot(opcode: u16) Slot {
     return lookup.slots[index(opcode)];
+}
+
+/// The slot for `opcode` in `mode`. In long mode, 40-4F are REX prefixes,
+/// which the decoder takes before it looks an opcode up, and are #UD here
+/// with the other `inv64` opcodes.
+pub inline fn slotIn(comptime mode: Mode, opcode: u16) Slot {
+    return switch (mode) {
+        .legacy => slot(opcode),
+        .long => lookup.slots64[index(opcode)],
+    };
 }
 
 /// The entry for `opcode` with ModRM byte `modrm` (ignored unless the
@@ -679,6 +831,38 @@ pub inline fn entryIndex(e: *const Entry) u16 {
 
 pub inline fn entryAt(i: u16) *const Entry {
     return &lookup.entries[i];
+}
+
+test "long mode's lookup" {
+    const t = std.testing;
+    // Shared with legacy: the same entry.
+    try t.expectEqual(entry(slot(0x01), 0xc0), entry(slotIn(.long, 0x01), 0xc0));
+    try t.expectEqual(Op.add, entry(slotIn(.long, 0x01), 0xc0).op);
+    // REX prefixes and the removed opcodes are #UD.
+    for ([_]u16{ 0x40, 0x48, 0x4f, 0x06, 0x1f, 0x27, 0x60, 0x62, 0x82, 0x9a, 0xc4, 0xce, 0xd4, 0xd6, 0xea }) |o| {
+        try t.expectEqual(Op.ud, entry(slotIn(.long, o), 0).op);
+        try t.expectEqual(@as(u14, 0), slotIn(.long, o).first);
+    }
+    try t.expectEqual(Op.inc, entry(slot(0x40), 0).op);
+    try t.expect(entry(slot(0x40), 0).inv64);
+    try t.expectEqual(Op.salc, entry(slot(0xd6), 0).op);
+    // MOVSXD only in long mode.
+    try t.expectEqual(Op.ud, entry(slot(0x63), 0xc1).op);
+    const movsxd = entry(slotIn(.long, 0x63), 0xc1);
+    try t.expectEqual(Op.movsx, movsxd.op);
+    try t.expect(movsxd.rexw and movsxd.src_size == .d);
+    try t.expect(entryIndex(movsxd) < entry_count);
+    try t.expectEqual(Op.ud, entry(slot(0x0f05), 0).op);
+    try t.expectEqual(Op.syscall, entry(slotIn(.long, 0x0f05), 0).op);
+    // d64 and rexw marks.
+    try t.expect(entry(slotIn(.long, 0x55), 0).d64);
+    try t.expect(entry(slotIn(.long, 0xff), 0x30).d64); // push r/m
+    try t.expect(entry(slotIn(.long, 0xff), 0xd0).d64); // call r/m
+    try t.expect(!entry(slotIn(.long, 0xff), 0xc0).d64); // inc r/m
+    try t.expect(entry(slotIn(.long, 0x0f84), 0).d64);
+    try t.expect(entry(slotIn(.long, 0xbb), 0).rexw);
+    try t.expect(entry(slotIn(.long, 0x0fc7), 0x0e).rexw);
+    try t.expect(!entry(slotIn(.long, 0x01), 0).rexw);
 }
 
 test "lookup" {

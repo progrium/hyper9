@@ -113,6 +113,56 @@ const nsec_amd64 = [_]u8{
     0x0f, 0x05, // syscall
 };
 
+/// `n` processes sharing memory (rfork(RFPROC|RFMEM) n-1 times), each
+/// counting RCX down from 2.5×10⁸; the first awaits the others, then all
+/// exit(nil). Four against one shows whether vCPUs run in parallel.
+fn procsAmd64(comptime n: u8) [0x7e]u8 {
+    var t = [_]u8{
+        0x48, 0x81, 0xec, 0x30, 0x01, 0x00, 0x00, // subq  $0x130, %rsp
+        0x41, 0xbd, n - 1, 0x00, 0x00, 0x00, // movl  $n-1, %r13d       to fork
+        0x41, 0xbe, 0x01, 0x00, 0x00, 0x00, // movl  $1, %r14d         the parent
+        // fork:
+        0x45, 0x85, 0xed, // testl %r13d, %r13d
+        0x74, 0x1d, // je    work
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x30, 0x00, 0x00, 0x00, // movq  $48, 8(%rsp)      RFPROC|RFMEM
+        0xbd, 0x13, 0x00, 0x00, 0x00, // movl  $19, %ebp          RFORK
+        0x0f, 0x05, // syscall
+        0x48, 0x85, 0xc0, // testq %rax, %rax
+        0x74, 0x05, // je    child
+        0x41, 0xff, 0xcd, // decl  %r13d
+        0xeb, 0xe1, // jmp   fork
+        // child:
+        0x45, 0x31, 0xf6, // xorl  %r14d, %r14d
+        // work:
+        0xb9, 0x80, 0xb2, 0xe6, 0x0e, // movl  $250000000, %ecx
+        0x48, 0xff, 0xc9, // decq  %rcx
+        0x75, 0xfb, // jne   .-3
+        0x45, 0x85, 0xf6, // testl %r14d, %r14d
+        0x74, 0x2a, // je    done
+        0x41, 0xbd, n - 1, 0x00, 0x00, 0x00, // movl  $n-1, %r13d       to await
+        // wait:
+        0x45, 0x85, 0xed, // testl %r13d, %r13d
+        0x74, 0x1f, // je    done
+        0x48, 0x8d, 0x44, 0x24, 0x40, // leaq  0x40(%rsp), %rax
+        0x48, 0x89, 0x44, 0x24, 0x08, // movq  %rax, 8(%rsp)     buf
+        0x48, 0xc7, 0x44, 0x24, 0x10, 0x80, 0x00, 0x00, 0x00, // movq  $0x80, 16(%rsp)   n
+        0xbd, 0x2f, 0x00, 0x00, 0x00, // movl  $47, %ebp          AWAIT
+        0x0f, 0x05, // syscall
+        0x41, 0xff, 0xcd, // decl  %r13d
+        0xeb, 0xdc, // jmp   wait
+        // done:
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)       nil
+        0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
+        0x0f, 0x05, // syscall
+    };
+    _ = &t;
+    return t;
+}
+
+const procs1_amd64 = procsAmd64(1);
+const procs4_amd64 = procsAmd64(4);
+const procs_iters = 250_000_000;
+
 comptime {
     // adr's and leaq's displacements point at the trailing "x".
     // adr is at 0x14 with a +0x34 offset; leaq ends at 0x1a with +0x33.
@@ -174,6 +224,8 @@ const cases = [_]Case{
     .{ .name = "pwrite", .arch = .amd64, .text = &syscall_amd64 },
     .{ .name = "nsec", .arch = .arm64, .text = &nsec_arm64 },
     .{ .name = "nsec", .arch = .amd64, .text = &nsec_amd64 },
+    .{ .name = "procs1", .arch = .amd64, .text = &procs1_amd64 },
+    .{ .name = "procs4", .arch = .amd64, .text = &procs4_amd64 },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -217,6 +269,10 @@ pub fn main(init: std.process.Init) !void {
         try w.print("{s: <7} {t: <6} {s: <7} {d: >7.2}s  ", .{ c.name, c.arch, tierLabel(&lb, kind, tier), s });
         if (std.mem.eql(u8, c.name, "loop")) {
             try w.print("{d:.2} G instructions/s\n", .{2 * loop_iters / s / 1e9});
+        } else if (std.mem.startsWith(u8, c.name, "procs")) {
+            // Each process's loop: equal to procs1's when they run in parallel.
+            const n: f64 = if (std.mem.eql(u8, c.name, "procs4")) 4 else 1;
+            try w.print("{d:.2} G instructions/s in all\n", .{n * 2 * procs_iters / s / 1e9});
         } else if (std.mem.eql(u8, c.name, "nsec")) {
             try w.print("{d:.0} ns per system call\n", .{s * 1e9 / syscall_iters});
         } else {
@@ -227,15 +283,15 @@ pub fn main(init: std.process.Init) !void {
     try w.flush();
 
     // The bare vCPU round trip: run returning .syscall and run again,
-    // with no system call served (SVC; B back to it).
+    // with no system call served (SVC or SYSCALL, and a branch back).
     if (loop_only) return w.flush();
-    if (!compute_only) for ([_]vmm.BackendKind{ .hvf, .emu }) |kind| for (tiersOf(kind)) |tier| {
+    if (!compute_only) for ([_]aout.Arch{ .arm64, .amd64 }) |arch| for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| for (tiersOf(kind)) |tier| {
         if (tier) |t| _ = setenv("H9_EMU_TIER", t, 1) else _ = unsetenv("H9_EMU_TIER");
         defer _ = unsetenv("H9_EMU_TIER");
-        var ns: i96 = try bareRoundTrip(gpa, io, kind) orelse continue;
-        for (1..repeat) |_| ns = @min(ns, (try bareRoundTrip(gpa, io, kind)).?);
+        var ns: i96 = try bareRoundTrip(gpa, io, kind, arch) orelse continue;
+        for (1..repeat) |_| ns = @min(ns, (try bareRoundTrip(gpa, io, kind, arch)).?);
         var lb: [16]u8 = undefined;
-        try w.print("{s: <7} {s: <6} {s: <7} {d: >7.2}s  {d:.0} ns per exit and re-entry\n", .{ "bare", "arm64", tierLabel(&lb, kind, tier), @as(f64, @floatFromInt(ns)) / 1e9, @as(f64, @floatFromInt(ns)) / bare_iters });
+        try w.print("{s: <7} {t: <6} {s: <7} {d: >7.2}s  {d:.0} ns per exit and re-entry\n", .{ "bare", arch, tierLabel(&lb, kind, tier), @as(f64, @floatFromInt(ns)) / 1e9, @as(f64, @floatFromInt(ns)) / bare_iters });
         try w.flush();
     };
 
@@ -310,18 +366,25 @@ var msg_buf: [64]u8 = undefined;
 /// One run of a compute text segment: its wall time and exit message.
 const bare_iters = 10_000_000;
 
-/// The time of `bare_iters` exits and re-entries of an arm64 vCPU on
-/// `kind`: SVC, then B back to it, at 0x10000.
-fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind) !?i96 {
-    var b = vmm.create(gpa, io, kind, .{ .arch = .arm64 }) catch |e| switch (e) {
+/// The time of `bare_iters` exits and re-entries of a vCPU on `kind`, at
+/// 0x10000: SVC then B back to it on arm64, SYSCALL then JMP back to it on
+/// amd64.
+fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind, arch: aout.Arch) !?i96 {
+    var b = vmm.create(gpa, io, kind, .{ .arch = arch }) catch |e| switch (e) {
         error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
         else => return e,
     };
     defer b.destroy();
     const page = try b.allocPages(1);
     defer b.freePages(page);
-    std.mem.writeInt(u32, page[0..4], 0xd4000001, .little); // svc #0
-    std.mem.writeInt(u32, page[4..8], 0x17ffffff, .little); // b .-4
+    switch (arch) {
+        .arm64 => {
+            std.mem.writeInt(u32, page[0..4], 0xd4000001, .little); // svc #0
+            std.mem.writeInt(u32, page[4..8], 0x17ffffff, .little); // b .-4
+        },
+        // syscall; jmp .-4
+        else => @memcpy(page[0..4], &[_]u8{ 0x0f, 0x05, 0xeb, 0xfc }),
+    }
     const as = try b.newAddressSpace();
     defer as.destroy();
     try as.map(0x10000, page, .{ .exec = true });
@@ -329,7 +392,7 @@ fn bareRoundTrip(gpa: std.mem.Allocator, io: std.Io, kind: vmm.BackendKind) !?i9
     var v = try b.createVcpu();
     defer v.destroy();
     try v.setAddressSpace(as);
-    var u: vmm.Ureg = .initExec(.arm64, 0x10000, 0, 0);
+    var u: vmm.Ureg = .initExec(arch, 0x10000, 0, 0);
     v.setUreg(&u);
     const start: std.Io.Timestamp = .now(io, .awake);
     for (0..bare_iters) |_| {

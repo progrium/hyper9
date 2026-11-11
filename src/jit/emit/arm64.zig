@@ -1196,11 +1196,13 @@ fn writePend(e: *E, p: Pend) !void {
 }
 
 /// A lazy pending.flags (aux2 2): ir.LazyRecord at off + 4, from the
-/// producer's operands, as ir.lazyRecord makes it.
+/// producer's operands, as ir.lazyRecord makes it. Its a, b, and res are
+/// 64-bit slots: narrower values are written as a word and a zero word.
 fn writeRecord(e: *E, p: Pend) !void {
     const f = e.r.insts.items[p.v];
     const ta = e.r.insts.items[f.a].ty;
     const W = ta.bits();
+    const x64 = W == 64;
     const kind = ir.lazyKind(f.op).?;
     const a = try e.src(f.a, S0);
     const base = p.off + 4;
@@ -1218,38 +1220,48 @@ fn writeRecord(e: *E, p: Pend) !void {
     try e.ldst(true, 2, IP0, CPU, base);
     switch (kind) {
         .add, .sub => {
+            // res first: a store whose offset needs a register takes IP1.
             const b = try e.src(f.b, S1);
-            try e.ldst(true, 2, a, CPU, base + 4);
-            try e.ldst(true, 2, b, CPU, base + 8);
-            try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, false, IP0, a, b);
-            if (cin != null) try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, false, IP0, IP0, IP1);
+            try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, x64, IP0, a, b);
+            if (cin != null) try e.dp(if (kind == .add) 0x0B000000 else 0x4B000000, x64, IP0, IP0, IP1);
             if (W < 32) try e.zx(IP0, IP0, W);
-            try e.ldst(true, 2, IP0, CPU, base + 12);
+            try recSlot(e, IP0, base + 20, x64);
+            try recSlot(e, a, base + 4, x64);
+            try recSlot(e, b, base + 12, x64);
         },
         .logic => {
-            try e.ldst(true, 2, ZR, CPU, base + 4);
-            try e.ldst(true, 2, ZR, CPU, base + 8);
-            try e.ldst(true, 2, a, CPU, base + 12);
+            try e.ldst(true, 3, ZR, CPU, base + 4);
+            try e.ldst(true, 3, ZR, CPU, base + 12);
+            try recSlot(e, a, base + 20, x64);
         },
         .inc, .dec => {
-            try e.ldst(true, 2, a, CPU, base + 4);
+            try recSlot(e, a, base + 4, x64);
             try e.movImm(IP0, 1);
-            try e.ldst(true, 2, IP0, CPU, base + 8);
-            try e.put((if (kind == .inc) @as(u32, 0x11000400) else 0x51000400) | @as(u32, a) << 5 | IP0); // a ± 1
+            try e.ldst(true, 3, IP0, CPU, base + 12);
+            const sf: u32 = if (x64) 0x8000_0000 else 0;
+            try e.put(sf | (if (kind == .inc) @as(u32, 0x11000400) else 0x51000400) | @as(u32, a) << 5 | IP0); // a ± 1
             if (W < 32) try e.zx(IP0, IP0, W);
-            try e.ldst(true, 2, IP0, CPU, base + 12);
+            try recSlot(e, IP0, base + 20, x64);
         },
         .shl, .shr, .mul => {
             const b = try e.src(f.b, S1);
             if (kind == .mul) {
                 try e.logImm(0, false, IP0, a, 0, 1);
-                try e.ldst(true, 2, IP0, CPU, base + 4);
-            } else try e.ldst(true, 2, a, CPU, base + 4);
-            try e.ldst(true, 2, ZR, CPU, base + 8);
-            try e.ldst(true, 2, b, CPU, base + 12);
+                try e.ldst(true, 3, IP0, CPU, base + 4);
+            } else try recSlot(e, a, base + 4, x64);
+            try e.ldst(true, 3, ZR, CPU, base + 12);
+            try recSlot(e, b, base + 20, x64);
         },
         .none => unreachable,
     }
+}
+
+/// One of a lazy record's 64-bit operand slots from register `r`: all of
+/// it at 64 bits, else its low word and a zero word.
+fn recSlot(e: *E, r: u5, off: u64, x64: bool) !void {
+    if (x64) return e.ldst(true, 3, r, CPU, off);
+    try e.ldst(true, 2, r, CPU, off);
+    try e.ldst(true, 2, ZR, CPU, off + 4);
 }
 
 /// Carries lazy pending flags over an edge in the lz slots: the producer's
@@ -1984,11 +1996,14 @@ fn eflagsOp(e: *E, idx: usize) !void {
 }
 
 /// An EFLAGS producer's flags into NZCV and, given `rd`, packed into rd.
+/// At 64 bits the operation is an X register's; PF and AF need only the
+/// low byte, so the packing works in W registers either way.
 fn eflagsCore(e: *E, idx: usize, rd_: ?u5) !void {
     const i = e.r.insts.items[idx];
     const ta = e.r.insts.items[i.a].ty;
     const W = ta.bits();
-    const s: u32 = 32 - W;
+    const x = W == 64;
+    const s: u32 = if (x) 0 else 32 - W;
     const a = try e.src(i.a, S0);
     var bb: u5 = ZR;
     const kind = eflagsKind(i.op).?;
@@ -2006,11 +2021,11 @@ fn eflagsCore(e: *E, idx: usize, rd_: ?u5) !void {
         sa = IP0;
     }
     switch (i.op) {
-        .@"eflags.logic" => try e.dp(0x6A000000, false, ZR, sa, sa),
-        .@"eflags.add" => try e.dpShift(0x2B000000, false, ZR, sa, bb, 0, s),
-        .@"eflags.sub" => try e.dpShift(0x6B000000, false, ZR, sa, bb, 0, s),
-        .@"eflags.inc" => try e.dp(0x2B000000, false, ZR, sa, bb),
-        .@"eflags.dec" => try e.dp(0x6B000000, false, ZR, sa, bb),
+        .@"eflags.logic" => try e.dp(0x6A000000, x, ZR, sa, sa),
+        .@"eflags.add" => try e.dpShift(0x2B000000, x, ZR, sa, bb, 0, s),
+        .@"eflags.sub" => try e.dpShift(0x6B000000, x, ZR, sa, bb, 0, s),
+        .@"eflags.inc" => try e.dp(0x2B000000, x, ZR, sa, bb),
+        .@"eflags.dec" => try e.dp(0x6B000000, x, ZR, sa, bb),
         else => unreachable,
     }
     const rd = rd_ orelse return;
@@ -2589,7 +2604,7 @@ fn pickVchunks(e: *E) void {
         const range: ?[2]u64 = switch (i.op) {
             .getreg => .{ i.aux, i.aux + @max(i.ty.bits() / 8, 1) },
             .setreg => .{ i.aux, i.aux + @max(r.insts.items[i.a].ty.bits() / 8, 1) },
-            .@"pending.flags" => .{ i.aux, i.aux + 4 },
+            .@"pending.flags" => .{ i.aux, i.aux + 4 + @as(u64, if (i.aux2 == 2) @sizeOf(ir.LazyRecord) else 0) },
             else => null,
         };
         const rg = range orelse continue;
@@ -2920,7 +2935,7 @@ test "emitted code matches ir_eval on the shared cases" {
     const gpa = std.testing.allocator;
     const env = try gpa.create(cases.Env);
     defer gpa.destroy(env);
-    for ([_]*const fn (std.mem.Allocator) anyerror![]cases.Case{ cases.generate, cases.generateExt }) |gen| {
+    for ([_]*const fn (std.mem.Allocator) anyerror![]cases.Case{ cases.generate, cases.generateExt, cases.generateLazyFlags }) |gen| {
         const all = try gen(gpa);
         defer cases.free(gpa, all);
         for (all, 0..) |c, n| try runCase(gpa, env, c, n);

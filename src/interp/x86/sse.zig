@@ -15,12 +15,24 @@
 //!
 //! 128-bit memory operands must be 16-byte aligned (#GP) except for the
 //! unaligned moves (MOVUPS, MOVUPD, MOVDQU).
+//!
+//! The same code serves hx64 in long mode, where the Exec's `c` is a
+//! `cpu.Cpu64` and its `i` a `decode.Inst64` (see `isLong`): REX.R and
+//! REX.B reach XMM8-15, REX.W widens the general-register operand of MOVD
+//! (to MOVQ), CVTSI2SS/SD, CVT(T)SS/SD2SI, and MOVNTI to 64 bits, and
+//! FXSAVE and FXRSTOR keep all 16 XMM registers, with REX.W picking the
+//! 64-bit FXSAVE64 layout for FIP and FDP. MMX registers and ModRM.reg's
+//! opcode extensions ignore REX. A memory operand's address is the Exec's
+//! `addr`, which RIP-relative addressing has already resolved.
 
 const std = @import("std");
 const cpu = @import("cpu.zig");
 const fp = @import("../softfloat.zig");
 const x87 = @import("x87.zig");
 const flags = @import("flags.zig");
+
+/// T0's long-mode Exec sends `.sse` entries here: this file takes hx64's.
+pub const long_mode = true;
 
 const Pfx = enum { none, p66, f3, f2 };
 
@@ -34,6 +46,53 @@ fn prefix(x: anytype) Pfx {
 
 fn ud(x: anytype) !void {
     return x.exc(cpu.vec_ud);
+}
+
+const isLong = x87.isLong;
+
+/// ModRM.reg as an MMX register, or as an opcode extension: REX.R doesn't
+/// reach either.
+fn mmReg(i: anytype) u3 {
+    return @truncate(i.modrm >> 3);
+}
+
+/// ModRM.rm as an MMX register: REX.B doesn't reach it.
+fn mmRm(i: anytype) u3 {
+    return @truncate(i.modrm);
+}
+
+/// The size of a general-register operand: 8 with REX.W in long mode,
+/// else 4.
+fn gprSize(x: anytype) u8 {
+    if (comptime isLong(@TypeOf(x))) return if (x.i.rex.w == 1) 8 else 4;
+    return 4;
+}
+
+/// Writes a 32-bit result to a general register, zero-extended into all 64
+/// bits in long mode, as every 32-bit destination is.
+fn putGpr32(x: anytype, n: anytype, v: u32) void {
+    if (comptime isLong(@TypeOf(x))) return x.writeReg(n, 8, v);
+    x.writeReg(n, 4, v);
+}
+
+/// A general register or memory operand of `size` 4 or 8, zero-extended.
+fn gprOrMem(x: anytype, size: u8) !u64 {
+    const i = x.i;
+    if (comptime isLong(@TypeOf(x))) {
+        if (size == 8) return if (i.mem) try x.load64(x.addr) else x.readReg(i.rm(), 8);
+    }
+    return @as(u32, @truncate(if (i.mem) try x.load(x.addr, 4) else x.readReg(i.rm(), 4)));
+}
+
+/// Stores `v` to a general register or memory operand of `size` 4 or 8.
+fn putGprOrMem(x: anytype, size: u8, v: u64) !void {
+    const i = x.i;
+    if (comptime isLong(@TypeOf(x))) {
+        if (size == 8) return if (i.mem) try x.store64(x.addr, v) else x.writeReg(i.rm(), 8, v);
+    }
+    if (i.mem) {
+        try x.store(x.addr, 4, @as(u32, @truncate(v)));
+    } else putGpr32(x, i.rm(), @truncate(v));
 }
 
 // ------------------------------------------------------------ registers
@@ -69,7 +128,7 @@ fn xsrc(x: anytype, size: u8, aligned: bool) !u128 {
 
 /// The r/m operand as an MMX value.
 fn msrc(x: anytype) !u64 {
-    if (!x.i.mem) return getMM(x, x.i.rm());
+    if (!x.i.mem) return getMM(x, mmRm(x.i));
     return x.load64(x.addr);
 }
 
@@ -170,7 +229,7 @@ pub fn exec(x: anytype) !void {
             } else {
                 for (0..2) |k| m |= (@as(u32, @truncate(v >> @intCast(64 * k + 63))) & 1) << @intCast(k);
             }
-            x.writeReg(i.reg(), 4, m);
+            putGpr32(x, i.reg(), m);
         },
         0x51, 0x58, 0x59, 0x5c, 0x5d, 0x5e, 0x5f => return arith(x, p, op),
         0x52, 0x53 => {
@@ -198,8 +257,12 @@ pub fn exec(x: anytype) !void {
         0xe6 => return cvtE6(x, p),
         0xc2 => return cmp(x, p),
         0xc3 => {
+            // MOVNTI, 64 bits with REX.W.
             if (p != .none or !i.mem) return ud(x);
-            try x.store(x.addr, 4, x.readReg(i.reg(), 4));
+            if (comptime isLong(@TypeOf(x))) {
+                if (gprSize(x) == 8) return x.store64(x.addr, x.readReg(i.reg(), 8));
+            }
+            try x.store(x.addr, 4, @as(u32, @truncate(x.readReg(i.reg(), 4))));
         },
         0xc6 => {
             if (p == .f3 or p == .f2) return ud(x);
@@ -478,13 +541,18 @@ fn cvt2a(x: anytype, p: Pfx) !void {
             }
         },
         .f3, .f2 => {
-            const v: i32 = @bitCast(if (i.mem) try x.load(x.addr, 4) else x.readReg(i.rm(), 4));
+            // CVTSI2SS and CVTSI2SD, from an i64 with REX.W.
+            const size = gprSize(x);
+            const raw = try gprOrMem(x, size);
+            const v: i64 = if (size == 8) @bitCast(raw) else @as(i32, @bitCast(@as(u32, @truncate(raw))));
             if (p == .f3) {
-                const r = fp.fromI32(u32, &e, v);
+                const r = fp.fromInt(u32, i64, &e, v);
                 try raise(x, &e);
                 d.* = (d.* & ~@as(u128, 0xffff_ffff)) | r;
             } else {
-                d.* = join(fp.fromI32(u64, &e, v), hi64(d.*));
+                const r = fp.fromInt(u64, i64, &e, v);
+                try raise(x, &e);
+                d.* = join(r, hi64(d.*));
             }
         },
     }
@@ -505,19 +573,29 @@ fn cvt2c(x: anytype, p: Pfx, trunc: bool) !void {
                 break :blk [2]i32{ fp.toI32(u32, &e, a[0], trunc), fp.toI32(u32, &e, a[1], trunc) };
             } else [2]i32{ fp.toI32(u64, &e, lo64(v), trunc), fp.toI32(u64, &e, hi64(v), trunc) };
             try raise(x, &e);
-            setMM(x, i.reg(), @as(u64, @as(u32, @bitCast(r[1]))) << 32 | @as(u32, @bitCast(r[0])));
+            setMM(x, mmReg(i), @as(u64, @as(u32, @bitCast(r[1]))) << 32 | @as(u32, @bitCast(r[0])));
         },
-        .f3 => {
-            const v = try xsrc(x, 4, false);
-            const r = fp.toI32(u32, &e, @truncate(v), trunc);
+        .f3, .f2 => {
+            // CVT(T)SS2SI and CVT(T)SD2SI, to an i64 with REX.W: NaNs and
+            // values out of range give the integer indefinite, the
+            // smallest integer, and raise IE.
+            const v = try xsrc(x, if (p == .f3) 4 else 8, false);
+            const rnd: fp.Rounding = if (trunc) .zero else e.rounding;
+            if (comptime isLong(@TypeOf(x))) if (gprSize(x) == 8) {
+                const r = if (p == .f3)
+                    fp.toInt(u32, i64, &e, @truncate(v), rnd)
+                else
+                    fp.toInt(u64, i64, &e, lo64(v), rnd);
+                try raise(x, &e);
+                x.writeReg(i.reg(), 8, @as(u64, @bitCast(r orelse std.math.minInt(i64))));
+                return;
+            };
+            const r = if (p == .f3)
+                fp.toI32(u32, &e, @truncate(v), trunc)
+            else
+                fp.toI32(u64, &e, lo64(v), trunc);
             try raise(x, &e);
-            x.writeReg(i.reg(), 4, @bitCast(r));
-        },
-        .f2 => {
-            const v = try xsrc(x, 8, false);
-            const r = fp.toI32(u64, &e, lo64(v), trunc);
-            try raise(x, &e);
-            x.writeReg(i.reg(), 4, @bitCast(r));
+            putGpr32(x, i.reg(), @bitCast(r));
         },
     }
 }
@@ -594,11 +672,11 @@ fn cvtE6(x: anytype, p: Pfx) !void {
 
 fn fxGroup(x: anytype) !void {
     const i = x.i;
-    switch (i.reg()) {
+    switch (mmReg(i)) {
         0 => return fxsave(x),
         1 => return fxrstor(x),
         2 => {
-            const v = try x.load(x.addr, 4);
+            const v: u32 = @truncate(try x.load(x.addr, 4));
             if (v & mxcsr_reserved != 0) return x.exc(cpu.vec_gp);
             x.c.mxcsr = v;
         },
@@ -607,26 +685,35 @@ fn fxGroup(x: anytype) !void {
     }
 }
 
+/// FXSAVE's image. In long mode it holds all 16 XMM registers, and
+/// FXSAVE64 (REX.W) keeps FIP and FDP as whole 64-bit addresses where
+/// FXSAVE keeps 32-bit offsets and a selector, which hx64 has none of and
+/// stores as 0. Bytes past the XMM registers aren't written.
 fn fxsave(x: anytype) !void {
     try alignCheck(x);
+    const long = comptime isLong(@TypeOf(x));
+    const nx = if (long) 16 else 8;
     const p = &x.c.fpu;
-    var b: [288]u8 = @splat(0);
+    var b: [160 + 16 * nx]u8 = @splat(0);
     std.mem.writeInt(u16, b[0..2], p.cw, .little);
     std.mem.writeInt(u16, b[2..4], x87.statusWord(p), .little);
     b[4] = p.tag;
     std.mem.writeInt(u16, b[6..8], p.fop, .little);
-    std.mem.writeInt(u64, b[8..16], p.fip & 0xffff_ffff_ffff, .little);
-    std.mem.writeInt(u64, b[16..24], p.fdp & 0xffff_ffff_ffff, .little);
+    const ptr_mask: u64 = if (!long) 0xffff_ffff_ffff else if (x.i.rex.w == 1) std.math.maxInt(u64) else 0xffff_ffff;
+    std.mem.writeInt(u64, b[8..16], p.fip & ptr_mask, .little);
+    std.mem.writeInt(u64, b[16..24], p.fdp & ptr_mask, .little);
     std.mem.writeInt(u32, b[24..28], x.c.mxcsr, .little);
     std.mem.writeInt(u32, b[28..32], 0xffff, .little);
     for (0..8) |k| std.mem.writeInt(u80, b[32 + 16 * k ..][0..10], x87.st(p, @intCast(k)).toBits(), .little);
-    for (0..8) |k| std.mem.writeInt(u128, b[160 + 16 * k ..][0..16], x.c.xmm[k], .little);
+    for (0..nx) |k| std.mem.writeInt(u128, b[160 + 16 * k ..][0..16], x.c.xmm[k], .little);
     try x.storeBytes(x.addr, &b);
 }
 
 fn fxrstor(x: anytype) !void {
     try alignCheck(x);
-    var b: [288]u8 = undefined;
+    const long = comptime isLong(@TypeOf(x));
+    const nx = if (long) 16 else 8;
+    var b: [160 + 16 * nx]u8 = undefined;
     try x.loadBytes(x.addr, &b);
     const mx = std.mem.readInt(u32, b[24..28], .little);
     if (mx & mxcsr_reserved != 0) return x.exc(cpu.vec_gp);
@@ -637,11 +724,12 @@ fn fxrstor(x: anytype) !void {
     p.sw = sw & ~@as(u16, 0x3800);
     p.tag = b[4];
     p.fop = std.mem.readInt(u16, b[6..8], .little) & 0x7ff;
-    p.fip = std.mem.readInt(u64, b[8..16], .little) & 0xffff_ffff_ffff;
-    p.fdp = std.mem.readInt(u64, b[16..24], .little) & 0xffff_ffff_ffff;
+    const ptr_mask: u64 = if (!long) 0xffff_ffff_ffff else if (x.i.rex.w == 1) std.math.maxInt(u64) else 0xffff_ffff;
+    p.fip = std.mem.readInt(u64, b[8..16], .little) & ptr_mask;
+    p.fdp = std.mem.readInt(u64, b[16..24], .little) & ptr_mask;
     x.c.mxcsr = mx;
     for (0..8) |k| p.st[x87.phys(p, @intCast(k))] = .fromBits(std.mem.readInt(u80, b[32 + 16 * k ..][0..10], .little));
-    for (0..8) |k| x.c.xmm[k] = std.mem.readInt(u128, b[160 + 16 * k ..][0..16], .little);
+    for (0..nx) |k| x.c.xmm[k] = std.mem.readInt(u128, b[160 + 16 * k ..][0..16], .little);
 }
 
 // ------------------------------------------------------------ integer SIMD
@@ -688,14 +776,14 @@ fn integer(x: anytype, p: Pfx, op: u8) !void {
                 // MOVQ2DQ.
                 if (i.mem) return ud(x);
                 try mmx(x);
-                xreg(x).* = getMM(x, i.rm());
+                xreg(x).* = getMM(x, mmRm(i));
                 return;
             },
             .f2 => {
                 // MOVDQ2Q.
                 if (i.mem) return ud(x);
                 try mmx(x);
-                setMM(x, i.reg(), lo64(x.c.xmm[i.rm()]));
+                setMM(x, mmReg(i), lo64(x.c.xmm[i.rm()]));
                 return;
             },
             .none => return ud(x),
@@ -746,8 +834,8 @@ fn mmxValid(i: anytype, op: u8) bool {
     return switch (op) {
         0xe7 => i.mem,
         0xd7, 0xc5, 0xf7 => !i.mem,
-        0x71, 0x72 => !i.mem and (i.reg() == 2 or i.reg() == 4 or i.reg() == 6),
-        0x73 => !i.mem and (i.reg() == 2 or i.reg() == 6),
+        0x71, 0x72 => !i.mem and (mmReg(i) == 2 or mmReg(i) == 4 or mmReg(i) == 6),
+        0x73 => !i.mem and (mmReg(i) == 2 or mmReg(i) == 6),
         0x6e, 0x7e, 0x6f, 0x7f, 0x70, 0xc4 => true,
         else => binop(u64, op, 0, 0) != null,
     };
@@ -765,28 +853,27 @@ fn integerOp(x: anytype, comptime W: type, op: u8) !void {
             return if (is_mmx) try msrc(xx) else try xsrc(xx, 16, true);
         }
         fn get(xx: anytype) W {
-            return if (is_mmx) getMM(xx, xx.i.reg()) else xx.c.xmm[xx.i.reg()];
+            return if (is_mmx) getMM(xx, mmReg(xx.i)) else xx.c.xmm[xx.i.reg()];
         }
         fn set(xx: anytype, v: W) void {
-            if (is_mmx) setMM(xx, xx.i.reg(), v) else xx.c.xmm[xx.i.reg()] = v;
+            if (is_mmx) setMM(xx, mmReg(xx.i), v) else xx.c.xmm[xx.i.reg()] = v;
         }
         fn rmGet(xx: anytype) W {
-            return if (is_mmx) getMM(xx, xx.i.rm()) else xx.c.xmm[xx.i.rm()];
+            return if (is_mmx) getMM(xx, mmRm(xx.i)) else xx.c.xmm[xx.i.rm()];
         }
         fn rmSet(xx: anytype, v: W) void {
-            if (is_mmx) setMM(xx, xx.i.rm(), v) else xx.c.xmm[xx.i.rm()] = v;
+            if (is_mmx) setMM(xx, mmRm(xx.i), v) else xx.c.xmm[xx.i.rm()] = v;
         }
     };
     switch (op) {
         // Moves.
         0x6e => {
-            const v = if (i.mem) try x.load(x.addr, 4) else x.readReg(i.rm(), 4);
-            S.set(x, v);
+            // MOVD, or MOVQ from a 64-bit register or memory with REX.W.
+            S.set(x, try gprOrMem(x, gprSize(x)));
             return;
         },
         0x7e => {
-            const v: u32 = @truncate(S.get(x));
-            if (i.mem) try x.store(x.addr, 4, v) else x.writeReg(i.rm(), 4, v);
+            try putGprOrMem(x, gprSize(x), lo64(S.get(x)));
             return;
         },
         0x6f => {
@@ -812,18 +899,18 @@ fn integerOp(x: anytype, comptime W: type, op: u8) !void {
             const n = @bitSizeOf(W) / 8;
             var m: u32 = 0;
             inline for (0..n) |k| m |= @as(u32, v[k] >> 7) << @intCast(k);
-            x.writeReg(i.reg(), 4, m);
+            putGpr32(x, i.reg(), m);
             return;
         },
         0xc5 => {
             if (i.mem) return ud(x);
             const n = @bitSizeOf(W) / 16;
             const v: [n]u16 = @bitCast(S.rmGet(x));
-            x.writeReg(i.reg(), 4, v[@as(usize, @truncate(i.imm)) % n]);
+            putGpr32(x, i.reg(), v[@as(usize, @truncate(i.imm)) % n]);
             return;
         },
         0xc4 => {
-            const w: u16 = @truncate(if (i.mem) try x.load(x.addr, 2) else x.readReg(i.rm(), 4));
+            const w: u16 = @truncate(if (i.mem) try x.load(x.addr, 2) else x.readReg(i.rm(), 2));
             const n = @bitSizeOf(W) / 16;
             var v: [n]u16 = @bitCast(S.get(x));
             v[@as(usize, @truncate(i.imm)) % n] = w;
@@ -844,19 +931,19 @@ fn integerOp(x: anytype, comptime W: type, op: u8) !void {
             const c: u64 = i.imm & 0xff;
             const v = S.rmGet(x);
             const r: W = switch (op) {
-                0x71 => switch (i.reg()) {
+                0x71 => switch (mmReg(i)) {
                     2 => shift(W, u16, v, c, .srl),
                     4 => shift(W, u16, v, c, .sra),
                     6 => shift(W, u16, v, c, .sll),
                     else => return ud(x),
                 },
-                0x72 => switch (i.reg()) {
+                0x72 => switch (mmReg(i)) {
                     2 => shift(W, u32, v, c, .srl),
                     4 => shift(W, u32, v, c, .sra),
                     6 => shift(W, u32, v, c, .sll),
                     else => return ud(x),
                 },
-                else => switch (i.reg()) {
+                else => switch (mmReg(i)) {
                     2 => shift(W, u64, v, c, .srl),
                     6 => shift(W, u64, v, c, .sll),
                     3, 7 => blk: {
@@ -864,7 +951,7 @@ fn integerOp(x: anytype, comptime W: type, op: u8) !void {
                         if (is_mmx) return ud(x);
                         if (c >= 16) break :blk 0;
                         const n: u7 = @intCast(c * 8);
-                        break :blk if (i.reg() == 3) v >> n else v << n;
+                        break :blk if (mmReg(i) == 3) v >> n else v << n;
                     },
                     else => return ud(x),
                 },
@@ -877,14 +964,10 @@ fn integerOp(x: anytype, comptime W: type, op: u8) !void {
             if (i.mem) return ud(x);
             const v = vec(W, u8, S.get(x));
             const m = vec(W, u8, S.rmGet(x));
-            const s = @intFromEnum(i.seg);
-            if (s >= 4 and x.c.seg_null & (@as(u8, 1) << @intCast(s)) != 0) return x.exc(cpu.vec_gp);
-            var a = x.c.r[7];
-            if (i.addr16) a &= 0xffff;
-            a +%= x.c.seg_base[s];
+            const a = try maskAddr(x);
             const n = @bitSizeOf(W) / 8;
             inline for (0..n) |k| {
-                if (m[k] & 0x80 != 0) try x.store(a +% @as(u32, @intCast(k)), 1, v[k]);
+                if (m[k] & 0x80 != 0) try x.store(a +% @as(@TypeOf(a), k), 1, v[k]);
             }
             return;
         },
@@ -893,6 +976,24 @@ fn integerOp(x: anytype, comptime W: type, op: u8) !void {
     const a = S.get(x);
     const b = try S.src(x);
     S.set(x, binop(W, op, a, b) orelse return ud(x));
+}
+
+/// MASKMOVQ's and MASKMOVDQU's address: DS:EDI, or another segment's;
+/// in long mode RDI (EDI with 67), plus FS's or GS's base.
+fn maskAddr(x: anytype) !@TypeOf(x.addr) {
+    const i = x.i;
+    const s = @intFromEnum(i.seg);
+    if (comptime isLong(@TypeOf(x))) {
+        var a = x.c.r[7];
+        if (i.addr32) a &= 0xffff_ffff;
+        if (i.seg == .fs) a +%= x.c.fs_base;
+        if (i.seg == .gs) a +%= x.c.gs_base;
+        return a;
+    }
+    if (s >= 4 and x.c.seg_null & (@as(u8, 1) << @intCast(s)) != 0) return x.exc(cpu.vec_gp);
+    var a = x.c.r[7];
+    if (i.addr16) a &= 0xffff;
+    return a +% x.c.seg_base[s];
 }
 
 const Shift = enum { sll, srl, sra };
@@ -1082,4 +1183,295 @@ fn mulhi(comptime W: type, comptime T: type, a: W, b: W) W {
         r[k] = @truncate(@as(u64, @bitCast(prod)) >> 16);
     }
     return @bitCast(r);
+}
+
+// ------------------------------------------------------------ tests
+
+const testing = std.testing;
+const decode = @import("decode.zig");
+
+/// A long-mode Exec for the tests here and in x87.zig, until T0 runs long
+/// mode: flat memory at `base`, and the operand's address computed as
+/// T0's is, RIP-relative included.
+pub const TestX64 = struct {
+    c: *cpu.Cpu64,
+    i: *const decode.Inst64,
+    addr: u64 = 0,
+    base: u64,
+    mem: []u8,
+    /// The vector the instruction raised, or 14 for a page fault.
+    vector: ?u8 = null,
+
+    pub const Trap = error{Trap};
+
+    pub fn exc(x: *TestX64, v: u8) Trap {
+        x.vector = v;
+        return error.Trap;
+    }
+
+    fn bytes(x: *TestX64, va: u64, n: usize) Trap![]u8 {
+        if (va < x.base or va - x.base + n > x.mem.len) return x.exc(cpu.vec_pf);
+        const o: usize = @intCast(va - x.base);
+        return x.mem[o..][0..n];
+    }
+
+    pub fn load(x: *TestX64, va: u64, size: u8) Trap!u64 {
+        var buf: [8]u8 = @splat(0);
+        @memcpy(buf[0..size], try x.bytes(va, size));
+        return std.mem.readInt(u64, &buf, .little);
+    }
+
+    pub fn store(x: *TestX64, va: u64, size: u8, v: u64) Trap!void {
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &buf, v, .little);
+        @memcpy(try x.bytes(va, size), buf[0..size]);
+    }
+
+    pub fn load64(x: *TestX64, va: u64) Trap!u64 {
+        return x.load(va, 8);
+    }
+
+    pub fn store64(x: *TestX64, va: u64, v: u64) Trap!void {
+        return x.store(va, 8, v);
+    }
+
+    pub fn loadBytes(x: *TestX64, va: u64, buf: []u8) Trap!void {
+        @memcpy(buf, try x.bytes(va, buf.len));
+    }
+
+    pub fn storeBytes(x: *TestX64, va: u64, buf: []const u8) Trap!void {
+        @memcpy(try x.bytes(va, buf.len), buf);
+    }
+
+    pub fn readReg(x: *const TestX64, n: u4, size: u8) u64 {
+        const v = x.c.r[n];
+        return if (size == 8) v else v & ((@as(u64, 1) << @intCast(8 * size)) - 1);
+    }
+
+    pub fn writeReg(x: *TestX64, n: u4, size: u8, v: u64) void {
+        const r = &x.c.r[n];
+        switch (size) {
+            8 => r.* = v,
+            4 => r.* = @as(u32, @truncate(v)),
+            else => {
+                const m = (@as(u64, 1) << @intCast(8 * size)) - 1;
+                r.* = (r.* & ~m) | (v & m);
+            },
+        }
+    }
+
+    /// Runs `i` (an sse or x87 instruction) at RIP, and moves RIP past it
+    /// unless it raised something.
+    pub fn run(c: *cpu.Cpu64, mem: []u8, base: u64, i: decode.Inst64) ?u8 {
+        var x: TestX64 = .{ .c = c, .i = &i, .base = base, .mem = mem };
+        if (i.mem) {
+            var a: u64 = i.disp;
+            if (i.rip_rel) a +%= c.rip + i.len;
+            if (i.base != decode.no_reg64) a +%= c.r[i.base];
+            if (i.index != decode.no_reg64) a +%= c.r[i.index] << i.scale;
+            if (i.addr32) a &= 0xffff_ffff;
+            if (i.seg == .fs) a +%= c.fs_base;
+            if (i.seg == .gs) a +%= c.gs_base;
+            x.addr = a;
+        }
+        const r = if (i.op == .x87) x87.exec(&x) else exec(&x);
+        r catch return x.vector;
+        c.rip += i.len;
+        return null;
+    }
+};
+
+/// A long-mode 0F xx instruction for the tests: `modrm` with REX's bits,
+/// a register form unless `mem`.
+fn inst(op: u8, pfx: Pfx, rex: u4, modrm: u8) decode.Inst64 {
+    return .{
+        .op = .sse,
+        .entry = 0,
+        .opcode = 0x0f00 | @as(u16, op),
+        .len = 5,
+        .size = if (rex & 8 != 0) 8 else 4,
+        .opsize = pfx == .p66,
+        .rep = switch (pfx) {
+            .f3 => .rep,
+            .f2 => .repne,
+            else => .none,
+        },
+        .rex = decode.Rex.of(0x40 | @as(u8, rex)),
+        .modrm = modrm,
+    };
+}
+
+/// The same with a memory operand at `addr` (as a disp32, no base).
+fn instMem(op: u8, pfx: Pfx, rex: u4, reg: u3, addr: u64) decode.Inst64 {
+    var i = inst(op, pfx, rex, 0x04 | @as(u8, reg) << 3);
+    i.mem = true;
+    i.disp = addr;
+    return i;
+}
+
+const test_base = 0x10000;
+
+fn f32bits(v: f32) u32 {
+    return @bitCast(v);
+}
+
+fn f64bits(v: f64) u64 {
+    return @bitCast(v);
+}
+
+test "long mode: XMM8-15 through REX.R and REX.B" {
+    var c: cpu.Cpu64 = .{ .rip = test_base };
+    var mem: [64]u8 align(16) = @splat(0);
+    c.xmm[12] = 0x1234_5678_9abc_def0_0fed_cba9_8765_4321;
+    // movaps %xmm12, %xmm9 (REX.R, REX.B)
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x28, .none, 0b0101, 0xc0 | 1 << 3 | 4)));
+    try testing.expectEqual(c.xmm[12], c.xmm[9]);
+    try testing.expectEqual(@as(u128, 0), c.xmm[1]);
+    try testing.expectEqual(@as(u128, 0), c.xmm[4]);
+    // addsd (mem), %xmm15
+    c.xmm[15] = f64bits(1.5);
+    std.mem.writeInt(u64, mem[16..24], f64bits(2.25), .little);
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, instMem(0x58, .f2, 0b0100, 7, test_base + 16)));
+    try testing.expectEqual(@as(u128, f64bits(3.75)), c.xmm[15]);
+    // psrlq $4, %xmm9: REX.B picks XMM9, and REX.R doesn't change /2.
+    var i = inst(0x73, .p66, 0b0101, 0xc0 | 2 << 3 | 1);
+    i.imm = 4;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, i));
+    try testing.expectEqual(c.xmm[12] >> 4 & ~(@as(u128, 0xf) << 124 | @as(u128, 0xf) << 60), c.xmm[9]);
+}
+
+test "long mode: a RIP-relative operand is the next instruction's RIP plus disp" {
+    var c: cpu.Cpu64 = .{ .rip = test_base + 0x20 };
+    var mem: [64]u8 align(16) = @splat(0);
+    std.mem.writeInt(u64, mem[0x38..0x40], 0x1122_3344_5566_7788, .little);
+    // movsd 0x13(%rip), %xmm8, 5 bytes long at 0x20: 0x20 + 5 + 0x13 = 0x38.
+    var i = inst(0x10, .f2, 0b0100, 0x05);
+    i.mem = true;
+    i.rip_rel = true;
+    i.disp = 0x13;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, i));
+    try testing.expectEqual(@as(u128, 0x1122_3344_5566_7788), c.xmm[8]);
+}
+
+test "long mode: MOVD and MOVQ with REX.W" {
+    var c: cpu.Cpu64 = .{ .rip = test_base };
+    var mem: [64]u8 align(16) = @splat(0);
+    c.r[11] = 0x8877_6655_4433_2211;
+    c.xmm[10] = std.math.maxInt(u128);
+    // movq %r11, %xmm10 (66 REX.WRB 0F 6E)
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x6e, .p66, 0b1101, 0xc0 | 2 << 3 | 3)));
+    try testing.expectEqual(@as(u128, 0x8877_6655_4433_2211), c.xmm[10]);
+    // movd %r11d, %xmm10: 32 bits, zero-extended.
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x6e, .p66, 0b0101, 0xc0 | 2 << 3 | 3)));
+    try testing.expectEqual(@as(u128, 0x4433_2211), c.xmm[10]);
+    // movq %xmm3, %r9 (66 REX.WB 0F 7E), then movd %xmm3, %r9d clears the
+    // upper half.
+    c.xmm[3] = 0xdead_beef_0000_0000_cafe_f00d_1234_5678;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x7e, .p66, 0b1001, 0xc0 | 3 << 3 | 1)));
+    try testing.expectEqual(@as(u64, 0xcafe_f00d_1234_5678), c.r[9]);
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x7e, .p66, 0b0001, 0xc0 | 3 << 3 | 1)));
+    try testing.expectEqual(@as(u64, 0x1234_5678), c.r[9]);
+    // movq %xmm3, (mem) with REX.W: 8 bytes.
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, instMem(0x7e, .p66, 0b1000, 3, test_base + 8)));
+    try testing.expectEqual(@as(u64, 0xcafe_f00d_1234_5678), std.mem.readInt(u64, mem[8..16], .little));
+    // movq %rax, %mm1 (REX.WR 0F 6E): MMX registers ignore REX.R.
+    c.r[0] = 0x0102_0304_0506_0708;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x6e, .none, 0b1100, 0xc0 | 1 << 3 | 0)));
+    try testing.expectEqual(@as(u64, 0x0102_0304_0506_0708), c.fpu.st[1].signif);
+    // movq %mm1, %r10 (REX.WB 0F 7E)
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x7e, .none, 0b1001, 0xc0 | 1 << 3 | 2)));
+    try testing.expectEqual(@as(u64, 0x0102_0304_0506_0708), c.r[10]);
+    // pmovmskb %xmm10, %r12d writes all 64 bits.
+    c.r[12] = std.math.maxInt(u64);
+    c.xmm[10] = 0x80;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0xd7, .p66, 0b0101, 0xc0 | 4 << 3 | 2)));
+    try testing.expectEqual(@as(u64, 1), c.r[12]);
+}
+
+test "long mode: 64-bit integer conversions" {
+    var c: cpu.Cpu64 = .{ .rip = test_base };
+    var mem: [64]u8 align(16) = @splat(0);
+    // cvtsi2sd %rax, %xmm1: 2^53 + 1 rounds to even, inexact.
+    c.r[0] = (1 << 53) + 1;
+    c.xmm[1] = @as(u128, 0xaaaa) << 64;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x2a, .f2, 0b1000, 0xc0 | 1 << 3 | 0)));
+    try testing.expectEqual(@as(u128, 0xaaaa) << 64 | f64bits(9007199254740992.0), c.xmm[1]);
+    try testing.expect(c.mxcsr & fp.PE != 0);
+    // cvtsi2ss (mem), %xmm2 with REX.W: an i64 from memory.
+    std.mem.writeInt(i64, mem[0..8], -(1 << 40), .little);
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, instMem(0x2a, .f3, 0b1000, 2, test_base)));
+    try testing.expectEqual(@as(u128, f32bits(-1099511627776.0)), c.xmm[2]);
+    // cvttsd2si %xmm3, %r8: truncates toward zero.
+    c.mxcsr = 0x1f80;
+    c.xmm[3] = f64bits(-2.75e12);
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x2c, .f2, 0b1100, 0xc0 | 0 << 3 | 3)));
+    try testing.expectEqual(@as(u64, @bitCast(@as(i64, -2_750_000_000_000))), c.r[8]);
+    // cvtsd2si %xmm3, %r8 out of range: the 64-bit integer indefinite, and IE.
+    c.xmm[3] = f64bits(1e19);
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x2d, .f2, 0b1100, 0xc0 | 0 << 3 | 3)));
+    try testing.expectEqual(@as(u64, 1 << 63), c.r[8]);
+    try testing.expect(c.mxcsr & fp.IE != 0);
+    // cvtss2si %xmm4, %r8d: 32 bits, zero-extended; round to nearest even.
+    c.r[8] = std.math.maxInt(u64);
+    c.xmm[4] = f32bits(-2.5);
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, inst(0x2d, .f3, 0b0100, 0xc0 | 0 << 3 | 4)));
+    try testing.expectEqual(@as(u64, @as(u32, @bitCast(@as(i32, -2)))), c.r[8]);
+    // An unmasked IE leaves the destination as it was.
+    c.mxcsr = 0x1f80 & ~@as(u32, 1 << 7);
+    c.r[8] = 7;
+    c.xmm[3] = f64bits(std.math.inf(f64));
+    try testing.expectEqual(@as(?u8, cpu.vec_xm), TestX64.run(&c, &mem, test_base, inst(0x2c, .f2, 0b1100, 0xc0 | 0 << 3 | 3)));
+    try testing.expectEqual(@as(u64, 7), c.r[8]);
+}
+
+test "long mode: FXSAVE64 and FXRSTOR64 keep XMM8-15 and 64-bit pointers" {
+    var c: cpu.Cpu64 = .{ .rip = test_base };
+    var mem: [1024]u8 align(16) = @splat(0xcc);
+    for (&c.xmm, 0..) |*v, k| v.* = @as(u128, k + 1) * 0x0101_0101_0101_0101_0101_0101_0101_0101;
+    c.fpu.fip = 0x7fff_1234_5678;
+    c.fpu.fdp = 0x0000_7fff_0000_9abc;
+    c.mxcsr = 0x1fa0;
+    // fxsave64 (mem): REX.W, 0F AE /0.
+    var save = instMem(0xae, .none, 0b1000, 0, test_base);
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, save));
+    try testing.expectEqual(@as(u64, 0x7fff_1234_5678), std.mem.readInt(u64, mem[8..16], .little));
+    try testing.expectEqual(@as(u64, 0x7fff_0000_9abc), std.mem.readInt(u64, mem[16..24], .little));
+    try testing.expectEqual(c.xmm[15], std.mem.readInt(u128, mem[400..416], .little));
+    // Nothing past the XMM registers.
+    try testing.expectEqual(@as(u8, 0xcc), mem[416]);
+    // Restore into a clean CPU with fxrstor64, REX.R set (still /1).
+    var d: cpu.Cpu64 = .{ .rip = test_base };
+    var rst = instMem(0xae, .none, 0b1100, 1, test_base);
+    try testing.expectEqual(null, TestX64.run(&d, &mem, test_base, rst));
+    try testing.expectEqual(c.xmm, d.xmm);
+    try testing.expectEqual(c.fpu.fip, d.fpu.fip);
+    try testing.expectEqual(c.fpu.fdp, d.fpu.fdp);
+    try testing.expectEqual(c.mxcsr, d.mxcsr);
+    // fxsave without REX.W keeps 32-bit offsets and no selectors.
+    save.rex.w = 0;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, save));
+    try testing.expectEqual(@as(u64, 0x1234_5678), std.mem.readInt(u64, mem[8..16], .little));
+    try testing.expectEqual(@as(u64, 0x9abc), std.mem.readInt(u64, mem[16..24], .little));
+    try testing.expectEqual(c.xmm[8], std.mem.readInt(u128, mem[288..304], .little));
+    rst.rex.w = 0;
+    try testing.expectEqual(null, TestX64.run(&d, &mem, test_base, rst));
+    try testing.expectEqual(@as(u64, 0x1234_5678), d.fpu.fip);
+    // Misaligned: #GP.
+    try testing.expectEqual(@as(?u8, cpu.vec_gp), TestX64.run(&c, &mem, test_base, instMem(0xae, .none, 0b1000, 0, test_base + 8)));
+}
+
+test "long mode: MASKMOVDQU stores to (RDI), or (EDI) with 67" {
+    var c: cpu.Cpu64 = .{ .rip = test_base };
+    var mem: [64]u8 align(16) = @splat(0);
+    c.r[7] = 0xffff_ffff_0000_0000 | (test_base + 16);
+    c.xmm[9] = 0x0807_0605_0403_0201;
+    c.xmm[10] = 0x80_00_80_00;
+    // maskmovdqu %xmm10, %xmm9 with addr32: EDI only.
+    var i = inst(0xf7, .p66, 0b0101, 0xc0 | 1 << 3 | 2);
+    i.addr32 = true;
+    try testing.expectEqual(null, TestX64.run(&c, &mem, test_base, i));
+    try testing.expectEqualSlices(u8, &.{ 0, 2, 0, 4, 0 }, mem[16..21]);
+    // Without 67, RDI's upper half is outside memory.
+    i.addr32 = false;
+    try testing.expectEqual(@as(?u8, cpu.vec_pf), TestX64.run(&c, &mem, test_base, i));
 }

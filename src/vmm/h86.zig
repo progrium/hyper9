@@ -169,6 +169,9 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!vmm.Ex
     while (true) {
         // T0 counts Cpu.retired again in each `call.interp`: ctx's count is
         // the one that holds.
+        // ctx.retired runs on from Cpu.retired, so lift.interp can read the
+        // count mid-region (RDTSC).
+        ctx.retired = c.retired;
         const before = ctx.retired;
         const c_before = c.retired;
         const r = if (build_options.jit_check)
@@ -207,6 +210,9 @@ fn runWasmT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem) vmm.Error!vmm.Exit {
         .pc_align = 1,
     };
     while (true) {
+        // ctx.retired runs on from Cpu.retired, so lift.interp can read the
+        // count mid-region (RDTSC).
+        ctx.retired = c.retired;
         const before = ctx.retired;
         const c_before = c.retired;
         const r = wasm_t1.run(std.heap.c_allocator, ctx, cfg);

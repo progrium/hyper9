@@ -59,19 +59,22 @@ pub const Kind = enum(u8) {
 };
 
 /// The JIT writes this record directly (ir.LazyRecord, which lift.zig
-/// asserts matches), so its layout is fixed.
+/// asserts matches), so its layout is fixed. The operands are 64 bits for
+/// hx64; h86 zero-extends into them. They sit at 4, 12, and 20, so in
+/// `Flags`, which is 8-aligned, each is 8-aligned.
 pub const Lazy = extern struct {
     kind: Kind = .none,
-    /// Operand size in bytes: 1, 2, or 4.
+    /// Operand size in bytes: 1, 2, 4, or 8 (8 only in long mode).
     size: u8 = 4,
     /// Carry in (ADC, SBB), or the CF that INC and DEC keep: 0 or 1.
     cin: u8 = 0,
     _pad: u8 = 0,
-    a: u32 = 0,
-    b: u32 = 0,
-    res: u32 = 0,
+    a: u64 align(4) = 0,
+    b: u64 align(4) = 0,
+    res: u64 align(4) = 0,
 };
 
+/// The sign bit and mask of a 1, 2, or 4-byte operand.
 pub inline fn signBit(size: u8) u32 {
     return @as(u32, 1) << @intCast(size * 8 - 1);
 }
@@ -80,8 +83,17 @@ pub inline fn sizeMask(size: u8) u32 {
     return if (size == 4) 0xffff_ffff else (@as(u32, 1) << @intCast(size * 8)) - 1;
 }
 
+/// The same for operands up to 8 bytes, as `Lazy` holds them.
+pub inline fn signBit64(size: u8) u64 {
+    return @as(u64, 1) << @intCast(size * 8 - 1);
+}
+
+pub inline fn sizeMask64(size: u8) u64 {
+    return if (size == 8) 0xffff_ffff_ffff_ffff else (@as(u64, 1) << @intCast(size * 8)) - 1;
+}
+
 /// PF: set when the low byte of the result has an even number of ones.
-pub inline fn parity(v: u32) bool {
+pub inline fn parity(v: u64) bool {
     return @popCount(@as(u8, @truncate(v))) & 1 == 0;
 }
 
@@ -103,8 +115,9 @@ pub fn condReads(cc: u4) u32 {
 }
 
 /// `lazy` sits right after `bits`, where a lazy pending.flags puts it.
+/// `bits` is 8-aligned so the record's operands are.
 pub const Flags = extern struct {
-    bits: u32 = res1,
+    bits: u32 align(8) = res1,
     lazy: Lazy = .{},
 
     /// EFLAGS, with every bit computed.
@@ -140,12 +153,12 @@ pub const Flags = extern struct {
     }
 
     /// Records an arithmetic result; see `Kind`.
-    pub inline fn record(f: *Flags, kind: Kind, size: u8, a: u32, b: u32, res: u32, cin: u1) void {
+    pub inline fn record(f: *Flags, kind: Kind, size: u8, a: u64, b: u64, res: u64, cin: u1) void {
         f.lazy = .{ .kind = kind, .size = size, .a = a, .b = b, .res = res, .cin = cin };
     }
 
     /// INC and DEC keep CF, which goes into `cin` first.
-    pub inline fn recordIncDec(f: *Flags, kind: Kind, size: u8, a: u32, res: u32) void {
+    pub inline fn recordIncDec(f: *Flags, kind: Kind, size: u8, a: u64, res: u64) void {
         const c: u1 = @intFromBool(f.cf());
         f.lazy = .{ .kind = kind, .size = size, .a = a, .b = 1, .res = res, .cin = c };
     }
@@ -156,7 +169,7 @@ pub const Flags = extern struct {
 
     pub fn cf(f: *const Flags) bool {
         const l = &f.lazy;
-        const m = sizeMask(l.size);
+        const m = sizeMask64(l.size);
         return switch (l.kind) {
             .none => f.bits & CF != 0,
             .add => blk: {
@@ -171,7 +184,7 @@ pub const Flags = extern struct {
             },
             .logic => false,
             .inc, .dec => l.cin == 1,
-            .shl => l.a & signBit(l.size) != 0,
+            .shl => l.a & signBit64(l.size) != 0,
             .shr => l.a & 1 != 0,
             .mul => l.a != 0,
         };
@@ -179,8 +192,8 @@ pub const Flags = extern struct {
 
     pub fn of(f: *const Flags) bool {
         const l = &f.lazy;
-        const sb = signBit(l.size);
-        const m = sizeMask(l.size);
+        const sb = signBit64(l.size);
+        const m = sizeMask64(l.size);
         return switch (l.kind) {
             .none => f.bits & OF != 0,
             .add => (l.a ^ l.res) & (l.b ^ l.res) & sb != 0,
@@ -204,12 +217,12 @@ pub const Flags = extern struct {
 
     pub fn zf(f: *const Flags) bool {
         if (f.lazy.kind == .none) return f.bits & ZF != 0;
-        return f.lazy.res & sizeMask(f.lazy.size) == 0;
+        return f.lazy.res & sizeMask64(f.lazy.size) == 0;
     }
 
     pub fn sf(f: *const Flags) bool {
         if (f.lazy.kind == .none) return f.bits & SF != 0;
-        return f.lazy.res & signBit(f.lazy.size) != 0;
+        return f.lazy.res & signBit64(f.lazy.size) != 0;
     }
 
     pub fn pf(f: *const Flags) bool {
@@ -222,12 +235,12 @@ pub const Flags = extern struct {
     pub fn cond(f: *const Flags, cc: u4) bool {
         const l = &f.lazy;
         if (l.kind == .sub and l.cin == 0) {
-            const m = sizeMask(l.size);
+            const m = sizeMask64(l.size);
             const a = l.a & m;
             const b = l.b & m;
-            const sh: u5 = @intCast(32 - @as(u32, l.size) * 8);
-            const sa: i32 = @as(i32, @bitCast(a << sh)) >> sh;
-            const sbv: i32 = @as(i32, @bitCast(b << sh)) >> sh;
+            const sh: u6 = @intCast(64 - @as(u32, l.size) * 8);
+            const sa: i64 = @as(i64, @bitCast(a << sh)) >> sh;
+            const sbv: i64 = @as(i64, @bitCast(b << sh)) >> sh;
             switch (@as(Cond, @enumFromInt(cc))) {
                 .b => return a < b,
                 .ae => return a >= b,
@@ -278,6 +291,26 @@ test "add and sub flags" {
     try std.testing.expect(f.cond(@intFromEnum(Cond.l)));
     // The general path agrees with the compare fast path.
     for (0..16) |cc| {
+        var g = f;
+        g.materialize();
+        try std.testing.expectEqual(f.cond(@intCast(cc)), g.cond(@intCast(cc)));
+    }
+}
+
+test "64-bit records" {
+    var f: Flags = .{};
+    // cmp 0x8000000000000000, 1 overflows; a 32-bit view wouldn't.
+    f.record(.sub, 8, 0x8000_0000_0000_0000, 1, 0x7fff_ffff_ffff_ffff, 0);
+    try std.testing.expect(f.of() and !f.sf() and !f.cf());
+    try std.testing.expect(f.cond(@intFromEnum(Cond.l)) and !f.cond(@intFromEnum(Cond.b)));
+    // add with a carry out of bit 63.
+    f.record(.add, 8, 0xffff_ffff_ffff_ffff, 2, 1, 0);
+    try std.testing.expect(f.cf() and !f.zf() and !f.of());
+    // A zero low half isn't ZF at 8 bytes.
+    f.record(.logic, 8, 0, 0, 0x1_0000_0000, 0);
+    try std.testing.expect(!f.zf() and f.pf());
+    for (0..16) |cc| {
+        f.record(.sub, 8, 0xffff_ffff_0000_0000, 0x1_0000_0000, 0xffff_fffe_0000_0000, 0);
         var g = f;
         g.materialize();
         try std.testing.expectEqual(f.cond(@intCast(cc)), g.cond(@intCast(cc)));

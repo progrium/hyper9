@@ -710,9 +710,10 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   at /, h9's --root. A 9front tree layered at a Linux root's /9 is
  *   named by a second `--root /9` in argv (design/0018-linux-personality.md)
  * - memory: --memory, such as '256M'
- * - backend: --backend: 'emu' (h9's own CPUs, h86 and ha64, the default) or 'v86', its old name
- * - arch: --arch: the guest's CPU, '386' (h86, the default) or 'arm64'
- *   (ha64); 'arm64' runs arm64 Linux programs, such as Alpine's
+ * - backend: --backend: 'emu' (h9's own CPUs, h86, ha64, and hx64, the default) or 'v86', its old name
+ * - arch: --arch: the guest's CPU, '386' (h86, the default), 'arm64'
+ *   (ha64), or 'amd64' (hx64); 'arm64' and 'amd64' run Linux programs
+ *   of their architecture, such as Alpine's
  * - policy: see policyFlags
  * - terminal: { write(bytes, fd), setRaw(on) }, where the console goes
  * - tty: the terminal is one to Linux programs (isatty, termios and raw

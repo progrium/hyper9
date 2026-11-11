@@ -680,9 +680,10 @@ fn flushRetiredW(w: *W, rp: u32) !void {
 /// old & ~mask | packed (pb holds the mask when pcode is 1).
 const Pend = struct { op: ir.Op, ta: Type, off: u32, lazy: bool, mask: u32, rec: bool = false };
 
-/// pcode for a lazy record (pending.flags aux2 = 2): its two words are in
-/// pa and pb, for aux + 4 and aux + 12.
-const pcode_rec: u64 = std.math.maxInt(u64);
+/// pcode for a lazy record (pending.flags aux2 = 2): this bit, with the
+/// record's header word (kind, size, and cin) in the low 32 bits, and its
+/// a, b, and res in pa, pb, and pc, for aux + 8, aux + 16, and aux + 24.
+const pcode_rec: u64 = 1 << 63;
 
 /// The pending.flags mask that tells kinds apart: 0 for a record.
 fn pendMask(aux2: u64) u32 {
@@ -1721,6 +1722,18 @@ const E = struct {
     fn eflagsOf(e: *E, op: ir.Op, ta: Type, src: ?ir.Inst) !void {
         const w = &e.w;
         const bits = ta.bits();
+        if (bits == 64) {
+            // Not lowered at 64 bits yet (a carry out of bit 63 needs
+            // more than i64 sums): ir_eval's evalOpC.
+            const incdec = op == .@"eflags.inc" or op == .@"eflags.dec";
+            try w.i64c(ir_eval.fallbackCode(op, .flags, ta));
+            try e.eflagsArg(src, 0, ta, true);
+            if (op == .@"eflags.logic") try w.i64c(0) else try e.eflagsArg(src, 1, ta, !incdec);
+            if (op == .@"eflags.adc" or op == .@"eflags.sbb") try e.eflagsArg(src, 2, ta, false) else try w.i64c(0);
+            try w.i64c(0);
+            try w.call(F_EVAL);
+            return;
+        }
         const a = e.scratch(I64, 0);
         const b = e.scratch(I64, 1);
         const r = e.scratch(I64, 2);
@@ -2086,10 +2099,10 @@ const E = struct {
         return .{ .op = a.op, .ta = e.ty(a.a), .off = @intCast(i.aux), .lazy = lazy, .mask = pendMask(i.aux2), .rec = i.aux2 == 2 };
     }
 
-    /// A lazy record's two words (ir.lazyRecord) into pa and pb: pa is
-    /// kind, size, and cin, then a; pb is b, then res. The flags op `f`
-    /// itself isn't emitted: its operands are values the planner kept
-    /// (extraOps).
+    /// A lazy record (ir.lazyRecord) into pa, pb, and pc, its a, b, and
+    /// res, with its header word (kind, size, and cin) in pcode's low bits
+    /// under pcode_rec. The flags op `f` itself isn't emitted: its operands
+    /// are values the planner kept (extraOps).
     fn pendingRecord(e: *E, f: ir.Inst, ta: Type) !void {
         const w = &e.w;
         const kind = ir.lazyKind(f.op).?;
@@ -2118,12 +2131,7 @@ const E = struct {
             try w.byte(0x83);
         } else try w.i64c(0);
         try w.set(cin);
-        // q = b | res << 32
-        switch (kind) {
-            .add, .sub => try w.get(pb),
-            .inc, .dec => try w.i64c(1),
-            else => try w.i64c(0),
-        }
+        // q = res
         switch (kind) {
             .add, .sub => {
                 try w.get(pa);
@@ -2145,32 +2153,41 @@ const E = struct {
             .shl, .shr, .mul => try w.get(pb),
             .none => unreachable,
         }
-        try w.i64c(32);
-        try w.byte(0x86); // i64.shl
-        try w.byte(0x84); // i64.or
         try w.set(q);
-        // pa = kind | size << 8 | cin << 16 | a << 32
-        try w.i64c(@as(u64, @intFromEnum(kind)) | (@as(u64, ta.bits() / 8) << 8));
-        try w.get(cin);
-        try w.i64c(16);
-        try w.byte(0x86);
-        try w.byte(0x84);
+        // pc = res; pb = b (1 for inc and dec, 0 but for add and sub);
+        // pa = a (CF and OF for mul, 0 for logic).
+        try w.get(q);
+        try w.set(pc);
         switch (kind) {
-            .logic => try w.i64c(0),
+            .add, .sub => {},
+            .inc, .dec => {
+                try w.i64c(1);
+                try w.set(pb);
+            },
+            else => {
+                try w.i64c(0);
+                try w.set(pb);
+            },
+        }
+        switch (kind) {
+            .logic => {
+                try w.i64c(0);
+                try w.set(pa);
+            },
             .mul => {
                 try w.get(pa);
                 try w.i64c(1);
                 try w.byte(0x83);
+                try w.set(pa);
             },
-            else => try w.get(pa),
+            else => {},
         }
-        try w.i64c(32);
-        try w.byte(0x86);
-        try w.byte(0x84);
-        try w.set(pa);
-        try w.get(q);
-        try w.set(pb);
-        try w.i64c(pcode_rec);
+        // pcode = pcode_rec | kind | size << 8 | cin << 16
+        try w.i64c(pcode_rec | @as(u64, @intFromEnum(kind)) | (@as(u64, ta.bits() / 8) << 8));
+        try w.get(cin);
+        try w.i64c(16);
+        try w.byte(0x86); // i64.shl
+        try w.byte(0x84); // i64.or
         try w.set(e.l64(.pcode));
     }
 
@@ -2301,11 +2318,14 @@ const E = struct {
         const w = &e.w;
         if (p.rec) {
             try w.get(e.l32(.cpu));
-            try w.get(e.l64(.pa));
-            try w.memop(0x37, p.off + 4);
-            try w.get(e.l32(.cpu));
-            try w.get(e.l64(.pb));
-            try w.memop(0x37, p.off + 12);
+            try w.get(e.l64(.pcode));
+            try w.byte(0xA7); // i32.wrap_i64
+            try w.memop(0x36, p.off + 4); // i32.store
+            for ([_]fixed64{ .pa, .pb, .pc }, 0..) |l, k| {
+                try w.get(e.l32(.cpu));
+                try w.get(e.l64(l));
+                try w.memop(0x37, p.off + 8 + 8 * k);
+            }
             try w.i64c(0);
             try w.set(e.l64(.pcode));
             return;
@@ -2537,11 +2557,11 @@ fn function(
         };
     };
     // A slot flags are pending for is written in the exit tail, through
-    // the Cpu, so it stays there: for a lazy record (aux2 = 2), the 16
-    // bytes after it too, or a chained region reads its kind byte stale
-    // from a local and an exit writes the local back over the record.
+    // the Cpu, so it stays there, and so does a lazy record's (the kind
+    // byte a front end clears, say), or flushRegs would write it over
+    // the record.
     for (regions) |rg| for (rg.insts.items) |i| if (i.op == .@"pending.flags") {
-        const end = i.aux + @as(u64, if (i.aux2 == 2) 4 + @sizeOf(ir.LazyRecord) else 4);
+        const end = i.aux + 4 + @as(u64, if (i.aux2 == 2) @sizeOf(ir.LazyRecord) else 0);
         for (regs.items) |*g| if (g.off < end and i.aux < g.off + g.size) {
             g.bad = true;
         };
@@ -2673,21 +2693,24 @@ fn function(
     try e.end(); // exit
     try flushRetiredW(w, e.l64(.rp));
     // Flags pending where the region left from inside a block: a lazy
-    // record's two words, or flags merged into their slot.
+    // record, or flags merged into their slot.
     try w.get(e.l64(.pcode));
-    try w.i64c(pcode_rec);
-    try w.byte(0x51); // i64.eq
+    try w.i64c(0);
+    try w.byte(0x53); // i64.lt_s: pcode_rec's bit
     try w.bytes(&.{ 0x04, VOID });
     try w.get(e.l32(.cpu));
     try w.get(e.l32(.poff));
     try w.byte(0x6A);
-    try w.get(e.l64(.pa));
-    try w.memop(0x37, 4);
-    try w.get(e.l32(.cpu));
-    try w.get(e.l32(.poff));
-    try w.byte(0x6A);
-    try w.get(e.l64(.pb));
-    try w.memop(0x37, 12);
+    try w.get(e.l64(.pcode));
+    try w.byte(0xA7); // i32.wrap_i64
+    try w.memop(0x36, 4); // i32.store
+    for ([_]fixed64{ .pa, .pb, .pc }, 0..) |l, k| {
+        try w.get(e.l32(.cpu));
+        try w.get(e.l32(.poff));
+        try w.byte(0x6A);
+        try w.get(e.l64(l));
+        try w.memop(0x37, 8 + 8 * k);
+    }
     try w.byte(0x05); // else
     try w.get(e.l64(.pcode));
     try w.byte(0x50); // i64.eqz
