@@ -59,7 +59,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed |  | Wine windows through draw |
 | [mount-index](mount-index.md) |  | draft |  | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | proposed |  | hcpu, h9's own CPUs for the emulator |
-| [proposal-flow](proposal-flow.md) |  | draft | in progress on claude/project-thread-2k7msi | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
+| [proposal-flow](proposal-flow.md) |  | implemented |  | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
 
 ```mermaid
 flowchart LR
@@ -120,7 +120,7 @@ flowchart LR
   p_wine_draw["wine-draw<br/>proposed"]:::draft
   p_mount_index["mount-index<br/>draft"]:::draft
   p_hcpu["hcpu<br/>proposed"]:::draft
-  p_proposal_flow["proposal-flow<br/>draft"]:::draft
+  p_proposal_flow["proposal-flow<br/>implemented"]:::implemented
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
