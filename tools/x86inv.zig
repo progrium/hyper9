@@ -22,9 +22,9 @@
 //! with T0's exec.step, in a scratch CPU and memory.
 
 const std = @import("std");
-const vcpu = @import("vcpu");
+const hcpu = @import("hcpu");
 const aout = @import("aout");
-const x86 = vcpu.x86;
+const x86 = hcpu.x86;
 const dec = x86.decode;
 const table = x86.table;
 const Cpu = x86.cpu.Cpu;

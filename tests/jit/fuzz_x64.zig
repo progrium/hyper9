@@ -17,12 +17,12 @@
 
 const std = @import("std");
 const options = @import("fuzz_options");
-const vcpu = @import("vcpu");
-const check = vcpu.check;
+const hcpu = @import("hcpu");
+const check = hcpu.check;
 const gen = check.gen_x86;
 const x86 = check.x86;
-const mem = vcpu.mem;
-const ctx_mod = vcpu.ctx;
+const mem = hcpu.mem;
+const ctx_mod = hcpu.ctx;
 const common = @import("fuzz_common.zig");
 const lockstep = if (options.unicorn) @import("lockstep") else struct {};
 
@@ -67,8 +67,8 @@ pub fn main(init: std.process.Init) !void {
 
     const s = try gpa.create(Space);
     defer gpa.destroy(s);
-    var native: ?vcpu.emit.native.Native = if (args.native) vcpu.emit.native.Native.init() catch |e| {
-        std.debug.print("--native: no {s} emitter here ({t})\n", .{ vcpu.emit.native.name, e });
+    var native: ?hcpu.emit.native.Native = if (args.native) hcpu.emit.native.Native.init() catch |e| {
+        std.debug.print("--native: no {s} emitter here ({t})\n", .{ hcpu.emit.native.name, e });
         std.process.exit(2);
     } else null;
     defer if (native) |*n| n.deinit();
@@ -127,8 +127,8 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("fuzz-x64: {d} programs, {d} diverged; {d} instructions stepped, {d} region-checked in {d} regions\n", .{ i, failed, steps, checked, regions });
     if (native) |n| {
-        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ vcpu.emit.native.name, n.compiled, n.unsupported });
-        vcpu.emit.native.printFallbacks();
+        std.debug.print("  {s} code: {d} regions run natively, {d} the emitter declined\n", .{ hcpu.emit.native.name, n.compiled, n.unsupported });
+        hcpu.emit.native.printFallbacks();
     }
     tally.print();
     if (failed != 0) std.process.exit(1);
@@ -139,13 +139,13 @@ const Checked = struct { ok: bool = true, retired: u64 = 0, regions: u64 = 0 };
 /// The region check over a whole program: each region the long-mode
 /// lifter takes runs in ir_eval (and natively) against T0; where it lifts
 /// nothing, T0 steps one instruction and the check goes on from there.
-fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, start: Cpu64, native: ?*vcpu.emit.native.Native) !Checked {
+fn checkRegions(gpa: std.mem.Allocator, r: *check.Run, map: *const mem.Map, start: Cpu64, native: ?*hcpu.emit.native.Native) !Checked {
     const backing = check.mapBacking(map);
     var cpu = start;
     var res: Checked = .{};
     var n: u32 = 0;
     while (n < 4096) : (n += 1) {
-        var reg = check.liftOpt(gpa, &x86.guest64, &backing, cpu.rip, .{ .lazy_eflags = native == null or vcpu.emit.native.lazy_eflags }) catch |e| switch (e) {
+        var reg = check.liftOpt(gpa, &x86.guest64, &backing, cpu.rip, .{ .lazy_eflags = native == null or hcpu.emit.native.lazy_eflags }) catch |e| switch (e) {
             error.Unsupported => {
                 var sh = check.Shadow.init(gpa, backing);
                 defer sh.deinit();
@@ -323,15 +323,15 @@ fn unicornIdivCrash(bytes: []const u8, rax: u64, rdx: u64) bool {
 /// The RFLAGS bits the instruction at `bytes` leaves undefined, as the
 /// decoder's effects have them; DIV and IDIV leave all six.
 fn undefinedFlags(bytes: []const u8) u32 {
-    const dec = vcpu.x86.decode;
+    const dec = hcpu.x86.decode;
     const i = dec.decodeIn(.long, bytes) catch return 0;
-    if (i.op == .div or i.op == .idiv) return vcpu.x86.flags.arith;
+    if (i.op == .div or i.op == .idiv) return hcpu.x86.flags.arith;
     return dec.effectsIn(.long, &i).flags_undefined;
 }
 
 /// The vector of the exception T0 raised, if it raised one.
 fn exceptionOf(c: *const ctx_mod.Ctx, e: ctx_mod.Exit) ?u64 {
-    if (e != .fault or (c.exit_info >> 8) & 0xff != vcpu.x86jit.lift.exception_kind) return null;
+    if (e != .fault or (c.exit_info >> 8) & 0xff != hcpu.x86jit.lift.exception_kind) return null;
     return c.exit_info >> 16;
 }
 

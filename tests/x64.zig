@@ -1,4 +1,4 @@
-//! zig build x64-jit (and vcpu): hx64's cases, tagged [hcpu], each to run
+//! zig build x64-jit (and hcpu): hx64's cases, tagged [hcpu], each to run
 //! on T0 alone and on T1 through dispatch, as tests/x86.zig runs h86's.
 //! design/hcpu.md's Done when lists them: the long-mode ones,
 //!
@@ -22,14 +22,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const vcpu = @import("vcpu");
-const cpu_mod = vcpu.x86.cpu;
-const exec = vcpu.x86.exec;
-const lift = vcpu.x86jit.lift;
-const t1 = vcpu.x86jit.t1;
-const mem = vcpu.mem;
-const cache_mod = vcpu.cache;
-const dispatch = vcpu.dispatch;
+const hcpu = @import("hcpu");
+const cpu_mod = hcpu.x86.cpu;
+const exec = hcpu.x86.exec;
+const lift = hcpu.x86jit.lift;
+const t1 = hcpu.x86jit.t1;
+const mem = hcpu.mem;
+const cache_mod = hcpu.cache;
+const dispatch = hcpu.dispatch;
 const Cpu = cpu_mod.Cpu64;
 const Exit = cpu_mod.Exit64;
 const testing = std.testing;
@@ -37,7 +37,7 @@ const page_size = mem.page_size;
 
 comptime {
     // The long-mode types the cases run on.
-    _ = vcpu.x86.decode.InstOf(.long);
+    _ = hcpu.x86.decode.InstOf(.long);
     _ = lift.frontendFor(.long);
 }
 
@@ -47,11 +47,11 @@ const data_va: u64 = 0x20000;
 /// The tiers a case runs on.
 const Tier = enum { t0, t1_eval, t1_native };
 
-fn emitterOf(t: Tier) ?vcpu.emitter.Emitter {
+fn emitterOf(t: Tier) ?hcpu.emitter.Emitter {
     return switch (t) {
         .t0 => null,
-        .t1_eval => vcpu.emit.eval.emitter_def,
-        .t1_native => if (builtin.cpu.arch == .x86_64) vcpu.emit.x64.emitter_def else null,
+        .t1_eval => hcpu.emit.eval.emitter_def,
+        .t1_native => if (builtin.cpu.arch == .x86_64) hcpu.emit.x64.emitter_def else null,
     };
 }
 
@@ -72,14 +72,14 @@ const Machine = struct {
     pm: t1.ProbeMem64 = undefined,
     lm: lift.Mem64 = undefined,
     stats: dispatch.Stats = .{},
-    em: vcpu.emitter.Emitter = vcpu.emit.eval.emitter_def,
+    em: hcpu.emitter.Emitter = hcpu.emit.eval.emitter_def,
 
     const code_len = 2 * page_size;
 
     /// A machine on tier `t`, or null where the tier doesn't run here.
     fn create(t: Tier) !?*Machine {
         var cache: ?*cache_mod.Cache = null;
-        var em = vcpu.emit.eval.emitter_def;
+        var em = hcpu.emit.eval.emitter_def;
         if (t != .t0) {
             em = emitterOf(t) orelse return null;
             cache = t1.testCache(1 << 20) catch |e| {
@@ -200,7 +200,7 @@ const Machine = struct {
 };
 
 fn longRuns() bool {
-    return vcpu.check.x86.longRuns();
+    return hcpu.check.x86.longRuns();
 }
 
 /// Runs `prog` on each tier with `regs` and calls `check` with the exit.

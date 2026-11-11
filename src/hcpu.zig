@@ -1,6 +1,7 @@
-//! The emulator's own CPUs (ha64 for arm64 guests, h86 for 386 guests):
-//! the shared JIT layer and the interpreter pieces both tiers use. The vmm
-//! backends in src/vmm/ha64.zig and h86.zig build on this.
+//! hcpu, the emulator's own CPUs (ha64 for arm64 guests, h86 for 386
+//! guests, and hx64 for amd64 guests): the shared JIT layer and the
+//! interpreter pieces both tiers use. The vmm backends in src/vmm/ha64.zig,
+//! h86.zig, and hx64.zig build on this.
 
 pub const ir = @import("jit/ir.zig");
 pub const ir_eval = @import("jit/ir_eval.zig");

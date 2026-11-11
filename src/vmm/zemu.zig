@@ -27,11 +27,11 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const vmm = @import("../vmm.zig");
 const Arena = @import("arena.zig");
-const mem = @import("vcpu").mem;
-const ctx_mod = @import("vcpu").ctx;
+const mem = @import("hcpu").mem;
+const ctx_mod = @import("hcpu").ctx;
 const Ctx = ctx_mod.Ctx;
-const cache = @import("vcpu").cache;
-const codemem = @import("vcpu").codemem;
+const cache = @import("hcpu").cache;
+const codemem = @import("hcpu").codemem;
 const ha64 = @import("ha64.zig");
 const h86 = @import("h86.zig");
 const hx64 = @import("hx64.zig");
@@ -58,8 +58,8 @@ const web_budget: i64 = 64 * 1024;
 const web_slice_ns = 2 * std.time.ns_per_ms;
 const coro = if (web) @import("../web/coro.zig") else struct {};
 /// The web host's T1, whose regions are keyed by this backend's arena pages.
-const wasm_t1 = @import("vcpu").wasm_t1;
-const dispatch = @import("vcpu").dispatch;
+const wasm_t1 = @import("hcpu").wasm_t1;
+const dispatch = @import("hcpu").dispatch;
 
 fn monoNs() u64 {
     var t: std.os.wasi.timestamp_t = 0;
@@ -246,8 +246,8 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 }
                 // -Djit-verify (on in Debug and ReleaseSafe builds): every
                 // region verified after lifting and after opt, though the
-                // vcpu module itself is built ReleaseFast.
-                if (build_options.jit_verify) @import("vcpu").opt.verify = true;
+                // hcpu module itself is built ReleaseFast.
+                if (build_options.jit_verify) @import("hcpu").opt.verify = true;
                 const limit = opts.memory orelse if (web) web_default_memory else vmm.default_memory;
                 if (limit > (if (web) web_max_memory else vmm.max_memory)) return error.OutOfGuestMemory;
                 // Twice the cap in address space, as emu.zig does, so freed

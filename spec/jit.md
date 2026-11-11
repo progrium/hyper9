@@ -1,6 +1,6 @@
 # The emulator's CPUs: the shared layer
 
-This describes, as built on the `vcpu` branch, what h9's own CPUs share: the emulator backend they run under (`zemu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU, [hx64](hx64.md) the amd64 one (h86 in long mode), and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [hcpu](../design/hcpu.md) proposal says why the CPUs exist and how they replace Unicorn and v86. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
+This describes, as built, what h9's own CPUs share: the emulator backend they run under (`zemu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU, [hx64](hx64.md) the amd64 one (h86 in long mode), and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [hcpu](../design/hcpu.md) proposal says why the CPUs exist and how they replace Unicorn and v86. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
 
 ## Contents
 
@@ -176,7 +176,7 @@ h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_
 | `-Dno-jit` | T0 only, as on hosts that forbid generated code; `src/jit/` is left out |
 | `-Djit-check` | Every region checked against T0 as it runs ([Testing](#testing)) |
 | `-Djit-verify` | Every region verified after lifting and after `opt` (on by default in Debug and ReleaseSafe builds) |
-| `-Dvcpu-debug` | `src/interp` and `src/jit` built Debug too; otherwise they're ReleaseFast in a Debug h9 |
+| `-Dhcpu-debug` | `src/interp` and `src/jit` built Debug too; otherwise they're ReleaseFast in a Debug h9 |
 
 `zig build web` always builds `-Demu=zig` with the wasm JIT. `--backend emu`, and `--backend v86` (the browser host's old backend, an alias), select the emulator; `--version` and `--check` report it as `zig (jit)` or `zig (interpreter)`.
 
@@ -197,17 +197,17 @@ h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_
 T0 is the oracle for T1, and Unicorn, Berkeley TestFloat, and the host CPU are the oracles for T0.
 
 - **Region check** (`src/jit/check.zig`). A lifted region, run by `ir_eval` or as host code, and T0 start from the same Cpu and memory, each on a copy-on-touch shadow of the pages, and must end with the same exit, exit PC, fault address and access, instructions retired, registers and flags, and memory. `-Djit-check` runs every region of every guest program through it, so `zig build integration -Demu=zig -Djit-check` checks the whole integration suite.
-- **Emitters against `ir_eval`.** `src/jit/emit/cases.zig` has a case for each op at each width, flags, memory with the slow path and faults, loops, and polls, and `emit/fuzz.zig` generates random regions. Native emitters run them natively; the wasm emitter runs them under Node and in Chromium (`zig build vcpu-web`).
+- **Emitters against `ir_eval`.** `src/jit/emit/cases.zig` has a case for each op at each width, flags, memory with the slow path and faults, loops, and polls, and `emit/fuzz.zig` generates random regions. Native emitters run them natively; the wasm emitter runs them under Node and in Chromium (`zig build hcpu-web`).
 - **Fuzzers.** `zig build fuzz-a64` and `fuzz-x86` run random valid programs on T0 and T1 a region at a time, and against Unicorn in lockstep with `-Demu=unicorn`; `zig build fuzz-long` runs both for an hour across seeds. `zig build lockstep` runs the lockstep tests.
 - **Litmus tests.** `zig build litmus` runs store buffering, message passing, and atomic counters on host threads, on T0, on T1 in `ir_eval`, and on T1 as host code, and tallies the outcomes.
-- **Cases.** `zig build vcpu` runs the CPU and JIT unit tests natively and under Node; `zig build a64-jit` and `x86-jit` run each CPU's backend cases on T0 and T1.
+- **Cases.** `zig build hcpu` runs the CPU and JIT unit tests natively and under Node; `zig build a64-jit` and `x86-jit` run each CPU's backend cases on T0 and T1.
 - **Benchmarks.** `zig build bench -Demu=zig` times the compute loop, system call round trips, and the compute benchmarks on T0 and T1, with T1's dispatch counts.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `src/vcpu.zig` | The module root for both CPUs and the JIT, built ReleaseFast |
+| `src/hcpu.zig` | The module root for both CPUs and the JIT, built ReleaseFast |
 | `src/vmm/zemu.zig` | The vmm backend over the two Guests |
 | `src/vmm/h86.zig`, `src/vmm/ha64.zig` | The Guests |
 | `src/interp/mem.zig` | The TLB, the slow paths, `View`, and `CodePages` |

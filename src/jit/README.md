@@ -2,7 +2,7 @@
 
 Shared by ha64 (arm64 guests), h86 (386 guests), and hx64 (amd64 guests,
 in progress on the `hx64` branch). Built with `-Demu=zig`; tested with
-`zig build vcpu`.
+`zig build hcpu`.
 
 The specs describe what's built: [spec/jit.md](../../spec/jit.md) for this
 layer, and [spec/h86.md](../../spec/h86.md) and [spec/ha64.md](../../spec/ha64.md)

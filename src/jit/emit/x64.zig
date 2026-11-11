@@ -3144,7 +3144,7 @@ fn reduce(gpa: std.mem.Allocator, region: *codemem.Region, env: *cases.Env, text
     return std.mem.join(gpa, "\n", lines.items);
 }
 
-/// Random regions per `zig build vcpu`, from fuzz_seed; H9_FUZZ_COUNT and
+/// Random regions per `zig build hcpu`, from fuzz_seed; H9_FUZZ_COUNT and
 /// H9_FUZZ_SEED override them.
 const fuzz_count = 3000;
 const fuzz_seed = 0x5eed;

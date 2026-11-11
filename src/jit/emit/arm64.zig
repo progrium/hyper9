@@ -2713,7 +2713,7 @@ fn tsoOn() bool {
         2 => return true,
         else => {},
     }
-    // Only where libc is linked (h9 itself; not the vcpu unit tests).
+    // Only where libc is linked (h9 itself; not the hcpu unit tests).
     if (!builtin.link_libc) return true;
     const getenv = @extern(*const fn ([*:0]const u8) callconv(.c) ?[*:0]const u8, .{ .name = "getenv" });
     const off = if (getenv("H9_TSO")) |v| std.mem.eql(u8, std.mem.span(v), "off") else false;

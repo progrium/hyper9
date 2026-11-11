@@ -132,7 +132,7 @@ T0 is checked against Unicorn in lockstep, Berkeley TestFloat (for the FP librar
 - **`Machine.Options` and the vmm interface.** Unchanged. `Backend.hwcaps` reports the emulator's arm64 extensions under `-Demu=zig`.
 - **Guests.** A 9front process sees the same Ureg, notes, and FP state, on every CPU. The 386 FXSAVE image's last-instruction fields, which Unicorn left zero, are filled. Linux arm64 programs see LSE, CRC32, AES, PMULL, SHA1, and SHA256 in `AT_HWCAP` on the emulator. CPUID on h86 and hx64 reports "GenuineIntel", family 6, and SSE2. amd64 programs that Unicorn ran with its CPU's later extensions see SSE2 only, as h86's 386 programs do.
 - **The browser host.** The page's API is unchanged. `zig-out/web/` loses `v86.wasm` and its licence, and the download shrinks from 3.82 MB to 3.68 MB.
-- **Build and releases.** `-Demu=zig`, `-Dno-jit`, `-Djit-check`, `-Djit-verify`, and `-Dvcpu-debug` are new. The release `h9` gains an emulator once the default switches. `h9-emu` stays until hx64 lands.
+- **Build and releases.** `-Demu=zig`, `-Dno-jit`, `-Djit-check`, `-Djit-verify`, and `-Dhcpu-debug` are new. The release `h9` gains an emulator once the default switches. `h9-emu` stays until hx64 lands.
 - **Licences.** h9 stays MIT. `f80.zig` keeps SoftFloat's BSD-3 notice; nothing is copied from v86's or rv64.js's code.
 - **zig-interpreter.** This proposal includes and widens it, so it should be marked superseded by this one once this is filed.
 - **Root tree and `third_party/`.** Unchanged.
@@ -146,7 +146,7 @@ On the emulator the isolation boundary is software, as it was with Unicorn. With
 - **W^X everywhere.** No page is writable and executable at once, except under a binary translator on Linux that misses writes through a second view, where codemem falls back to one RWX mapping.
 - **No host faults for guest behaviour.** A host fault inside generated code is a bug, and panics the machine.
 - **Decoding** reads only through the TLB, and the x86 decoder stops at 15 bytes in either mode. Register fields index fixed arrays, and the x87 stack index is masked.
-- **Checks.** `zig build vcpu` runs the region check, the fuzzers' unit runs, and the emitters' cases against `ir_eval`, and [ci](ci.md) would run them on every push.
+- **Checks.** `zig build hcpu` runs the region check, the fuzzers' unit runs, and the emitters' cases against `ir_eval`, and [ci](ci.md) would run them on every push.
 
 In the browser the boundary improves: there's no guest kernel whose page tables are all that stand between a process and the rest of guest RAM. The sandbox policy is unaffected, since it's enforced in the kernel above the vmm layer.
 

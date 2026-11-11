@@ -11,17 +11,17 @@ const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
 const amd64 = @import("../arch/amd64.zig");
-const Ctx = @import("vcpu").ctx.Ctx;
-const x86cpu = @import("vcpu").x86.cpu;
-const tlb = @import("vcpu").x86.tlb;
-const exec = @import("vcpu").x86.exec;
-const dispatch = @import("vcpu").dispatch;
-const wasm_t1 = @import("vcpu").wasm_t1;
-const cache = @import("vcpu").cache;
-const emitter = @import("vcpu").emitter;
-const lift = @import("vcpu").x86jit.lift;
-const helpers = @import("vcpu").x86jit.helpers;
-const check_vmm = @import("vcpu").check_vmm;
+const Ctx = @import("hcpu").ctx.Ctx;
+const x86cpu = @import("hcpu").x86.cpu;
+const tlb = @import("hcpu").x86.tlb;
+const exec = @import("hcpu").x86.exec;
+const dispatch = @import("hcpu").dispatch;
+const wasm_t1 = @import("hcpu").wasm_t1;
+const cache = @import("hcpu").cache;
+const emitter = @import("hcpu").emitter;
+const lift = @import("hcpu").x86jit.lift;
+const helpers = @import("hcpu").x86jit.helpers;
+const check_vmm = @import("hcpu").check_vmm;
 const build_options = @import("build_options");
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
@@ -36,8 +36,8 @@ pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) 
 };
 /// T1's emitter; null where this host has none, or in a -Dno-jit build.
 pub var t1_emitter: ?emitter.Emitter = if (!build_options.jit) null else switch (builtin.cpu.arch) {
-    .aarch64 => @import("vcpu").emit.arm64.emitter_def,
-    .x86_64 => @import("vcpu").emit.x64.emitter_def,
+    .aarch64 => @import("hcpu").emit.arm64.emitter_def,
+    .x86_64 => @import("hcpu").emit.x64.emitter_def,
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};
@@ -257,7 +257,7 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *tlb.TlbMem, em: emitter.Emitter) vmm.Error!vm
         const before = ctx.retired;
         const c_before = c.retired;
         const r = if (build_options.jit_check)
-            check_vmm.run(&cpu.check, &@import("vcpu").check.x86.guest64, c, ctx, tier == .t1)
+            check_vmm.run(&cpu.check, &@import("hcpu").check.x86.guest64, c, ctx, tier == .t1)
         else
             dispatch.run(icache_gpa, ctx, cfg, &t1_stats);
         c.retired = c_before +% (ctx.retired -% before);

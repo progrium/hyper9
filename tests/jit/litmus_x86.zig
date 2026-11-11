@@ -1,4 +1,4 @@
-//! zig build vcpu (and litmus-x86): h86's memory-model litmus tests, on
+//! zig build hcpu (and litmus-x86): h86's memory-model litmus tests, on
 //! real host threads running compiled h86 regions (this host's emitter,
 //! through emit/native.zig) over one shared data page.
 //!
@@ -17,14 +17,14 @@
 //! (src/jit/check/litmus.zig) is the place to fold these into later.
 
 const std = @import("std");
-const vcpu = @import("vcpu");
-const mem = vcpu.mem;
-const ir = vcpu.ir;
-const Ctx = vcpu.ctx.Ctx;
-const Exit = vcpu.ctx.Exit;
-const native = vcpu.emit.native;
-const lift = vcpu.x86jit.lift;
-const cpu_mod = vcpu.x86.cpu;
+const hcpu = @import("hcpu");
+const mem = hcpu.mem;
+const ir = hcpu.ir;
+const Ctx = hcpu.ctx.Ctx;
+const Exit = hcpu.ctx.Exit;
+const native = hcpu.emit.native;
+const lift = hcpu.x86jit.lift;
+const cpu_mod = hcpu.x86.cpu;
 const Cpu = cpu_mod.Cpu;
 const testing = std.testing;
 
@@ -153,7 +153,7 @@ const Space = struct {
     map: mem.Map = undefined,
     /// Compiled regions by PC, filled on first use under `lock`.
     lock: std.atomic.Value(bool) = .init(false),
-    entries: std.AutoHashMapUnmanaged(u32, vcpu.ctx.EntryFn) = .empty,
+    entries: std.AutoHashMapUnmanaged(u32, hcpu.ctx.EntryFn) = .empty,
     jit: native.Native,
     gpa: std.mem.Allocator,
 
@@ -178,12 +178,12 @@ const Space = struct {
         s.jit.code.reset();
     }
 
-    fn entry(s: *Space, pc: u32) !vcpu.ctx.EntryFn {
+    fn entry(s: *Space, pc: u32) !hcpu.ctx.EntryFn {
         while (s.lock.swap(true, .acquire)) std.atomic.spinLoopHint();
         defer s.lock.store(false, .release);
         if (s.entries.get(pc)) |e| return e;
-        const backing = vcpu.check.mapBacking(&s.map);
-        var reg = try vcpu.check.liftAt(s.gpa, &vcpu.check.x86.guest, &backing, pc, .{});
+        const backing = hcpu.check.mapBacking(&s.map);
+        var reg = try hcpu.check.liftAt(s.gpa, &hcpu.check.x86.guest, &backing, pc, .{});
         defer reg.deinit(s.gpa);
         if (!reg.tso) return error.NotTso;
         const e = try s.jit.compile(s.gpa, &reg) orelse return error.Unsupported;
@@ -223,7 +223,7 @@ const Vcpu = struct {
             .slow_cas = @intFromPtr(&mem.mapSlowCas),
             .interp = @intFromPtr(&lift.interp),
             .frontend = @intFromPtr(&v.lm),
-            .helpers = vcpu.x86jit.helpers.tableAddr(),
+            .helpers = hcpu.x86jit.helpers.tableAddr(),
         };
     }
 

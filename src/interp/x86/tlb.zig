@@ -1,6 +1,6 @@
 //! T0's view of guest memory in the vmm backend (src/vmm/h86.zig): the
 //! vCPU's TLB, and mem.probe on a miss. `run` is T0 over it, instantiated
-//! here so it builds with this module's optimization (src/vcpu.zig), not
+//! here so it builds with this module's optimization (src/hcpu.zig), not
 //! that of the module calling it.
 
 const std = @import("std");

@@ -1,6 +1,6 @@
 //! h86: h9's own CPU for 386 binaries, as a Guest of vmm/zemu.zig
 //! (-Demu=zig), which has the interface. Its CPU is in src/interp/x86/ and
-//! src/jit/x86/, with the shared JIT layer in src/jit/ (src/vcpu.zig).
+//! src/jit/x86/, with the shared JIT layer in src/jit/ (src/hcpu.zig).
 //!
 //! T0, the interpreter (interp/x86/exec.zig), reaches guest memory through
 //! the vCPU's TLB: mem.fast and mem.fastExec on a hit, and mem.probe, which
@@ -11,19 +11,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vmm = @import("../vmm.zig");
-const Ctx = @import("vcpu").ctx.Ctx;
-const mem = @import("vcpu").mem;
-const x86cpu = @import("vcpu").x86.cpu;
-const exec = @import("vcpu").x86.exec;
-const tlb = @import("vcpu").x86.tlb;
-const cache = @import("vcpu").cache;
-const dispatch = @import("vcpu").dispatch;
-const emitter = @import("vcpu").emitter;
-const lift = @import("vcpu").x86jit.lift;
-const helpers = @import("vcpu").x86jit.helpers;
-const wasm_t1 = @import("vcpu").wasm_t1;
+const Ctx = @import("hcpu").ctx.Ctx;
+const mem = @import("hcpu").mem;
+const x86cpu = @import("hcpu").x86.cpu;
+const exec = @import("hcpu").x86.exec;
+const tlb = @import("hcpu").x86.tlb;
+const cache = @import("hcpu").cache;
+const dispatch = @import("hcpu").dispatch;
+const emitter = @import("hcpu").emitter;
+const lift = @import("hcpu").x86jit.lift;
+const helpers = @import("hcpu").x86jit.helpers;
+const wasm_t1 = @import("hcpu").wasm_t1;
 const build_options = @import("build_options");
-const check_vmm = @import("vcpu").check_vmm;
+const check_vmm = @import("hcpu").check_vmm;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
 /// when the backend has a code cache and this host an emitter. T1 is the
@@ -37,8 +37,8 @@ pub var tier: Tier = if (!build_options.jit) .t0 else switch (builtin.cpu.arch) 
 /// T1's emitter; null where this host has none yet, or in a -Dno-jit
 /// build, which leaves src/jit/ out.
 pub var t1_emitter: ?emitter.Emitter = if (!build_options.jit) null else switch (builtin.cpu.arch) {
-    .aarch64 => @import("vcpu").emit.arm64.emitter_def,
-    .x86_64 => @import("vcpu").emit.x64.emitter_def,
+    .aarch64 => @import("hcpu").emit.arm64.emitter_def,
+    .x86_64 => @import("hcpu").emit.x64.emitter_def,
     else => null,
 };
 pub var t1_stats: dispatch.Stats = .{};
