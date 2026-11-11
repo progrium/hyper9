@@ -1,5 +1,5 @@
 ---
-id: 21
+issue: 21
 slug: websocket-9p
 title: 9P over WebSocket
 status: implemented

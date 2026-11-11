@@ -1,5 +1,5 @@
 ---
-id: 8
+issue: 8
 slug: devsrv
 title: devsrv, /srv, and mount
 status: implemented

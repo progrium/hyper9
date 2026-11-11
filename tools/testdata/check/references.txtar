@@ -30,7 +30,7 @@ depends: []
 ---
 -- design/b.md --
 ---
-id: 40
+issue: 40
 slug: b
 title: B
 status: superseded

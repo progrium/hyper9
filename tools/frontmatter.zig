@@ -28,8 +28,8 @@ pub const Status = enum {
 pub const Proposal = struct {
     /// File name within the design directory.
     file: []const u8,
-    /// The GitHub issue number, once it has one.
-    id: ?u32 = null,
+    /// The number of its GitHub issue, once it has one.
+    issue: ?u32 = null,
     slug: []const u8 = "",
     title: []const u8 = "",
     status: Status = .draft,
@@ -78,7 +78,7 @@ pub const Diags = struct {
     }
 };
 
-const keys = [_][]const u8{ "id", "slug", "title", "status", "created", "authors", "depends", "areas", "branch", "superseded-by" };
+const keys = [_][]const u8{ "issue", "slug", "title", "status", "created", "authors", "depends", "areas", "branch", "superseded-by" };
 const required = [_][]const u8{ "slug", "title", "status", "created", "authors", "depends" };
 const lists = [_][]const u8{ "authors", "depends", "areas", "branch" };
 
@@ -88,7 +88,7 @@ fn member(set: []const []const u8, s: []const u8) bool {
 }
 
 /// A slug: lowercase words of letters and digits joined by dashes. It
-/// can't be all digits, which would read as an id.
+/// can't be all digits, which would read as an issue number.
 pub fn validSlug(s: []const u8) bool {
     if (s.len == 0 or s[0] == '-' or isId(s)) return false;
     var prev_dash = false;
@@ -154,6 +154,11 @@ pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags
             p.ok = false;
             continue;
         }
+        if (std.mem.eql(u8, key, "id")) {
+            diags.err("design/{s}:{d}: `id` is now `issue`", .{ file, lineno });
+            p.ok = false;
+            continue;
+        }
         if (!member(&keys, key)) {
             diags.err("design/{s}:{d}: unknown key `{s}`", .{ file, lineno, key });
             p.ok = false;
@@ -202,14 +207,14 @@ pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags
             bad.append(arena, key) catch {};
             continue;
         }
-        if (std.mem.eql(u8, key, "id")) {
-            p.id = std.fmt.parseInt(u32, value, 10) catch blk: {
-                diags.err("design/{s}:{d}: `id` must be an issue number, not `{s}`", .{ file, lineno, value });
+        if (std.mem.eql(u8, key, "issue")) {
+            p.issue = std.fmt.parseInt(u32, value, 10) catch blk: {
+                diags.err("design/{s}:{d}: `issue` must be an issue number, not `{s}`", .{ file, lineno, value });
                 p.ok = false;
                 break :blk null;
             };
             if (value.len > 0 and value[0] == '+') {
-                diags.err("design/{s}:{d}: `id` must be an issue number, not `{s}`", .{ file, lineno, value });
+                diags.err("design/{s}:{d}: `issue` must be an issue number, not `{s}`", .{ file, lineno, value });
                 p.ok = false;
             }
         } else if (std.mem.eql(u8, key, "slug")) {
@@ -298,7 +303,7 @@ pub fn isProposalFile(name: []const u8) bool {
 }
 
 /// Reads and parses every proposal in `dir`, in the rough order they were
-/// written: by `created`, then by `id`, then by slug.
+/// written: by `created`, then by `issue`, then by slug.
 pub fn scan(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, diags: *Diags) ![]Proposal {
     var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
@@ -326,8 +331,8 @@ fn before(_: void, a: Proposal, b: Proposal) bool {
         .gt => return false,
         .eq => {},
     }
-    const ai = a.id orelse std.math.maxInt(u32);
-    const bi = b.id orelse std.math.maxInt(u32);
+    const ai = a.issue orelse std.math.maxInt(u32);
+    const bi = b.issue orelse std.math.maxInt(u32);
     if (ai != bi) return ai < bi;
     return std.mem.order(u8, a.file, b.file) == .lt;
 }
@@ -337,7 +342,7 @@ fn before(_: void, a: Proposal, b: Proposal) bool {
 pub fn resolve(ps: []const Proposal, ref: []const u8) ?usize {
     if (isId(ref)) {
         const id = std.fmt.parseInt(u32, ref, 10) catch return null;
-        for (ps, 0..) |p, i| if (p.id == id) return i;
+        for (ps, 0..) |p, i| if (p.issue == id) return i;
         return null;
     }
     for (ps, 0..) |p, i| if (std.mem.eql(u8, p.slug, ref)) return i;
@@ -453,7 +458,7 @@ test "parse a proposal" {
     var d: Diags = .{ .gpa = arena };
     const p = parse(arena, "0042-linux-personality.md",
         \\---
-        \\id: 42
+        \\issue: 42
         \\slug: linux-personality
         \\title: Linux personality
         \\status: accepted
@@ -469,7 +474,7 @@ test "parse a proposal" {
     , &d);
     try std.testing.expectEqual(@as(usize, 0), d.errors.items.len);
     try std.testing.expect(p.ok);
-    try std.testing.expectEqual(@as(?u32, 42), p.id);
+    try std.testing.expectEqual(@as(?u32, 42), p.issue);
     try std.testing.expectEqual(@as(usize, 0), p.branch.len);
     try std.testing.expectEqual(Status.accepted, p.status);
     try std.testing.expectEqual(@as(usize, 2), p.depends.len);

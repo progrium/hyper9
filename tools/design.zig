@@ -18,9 +18,10 @@ const usage =
     \\  new <slug> [--title T] [--author LOGIN]
     \\                                  start a draft from design/TEMPLATE.md
     \\  propose <slug> [--yes] [--dry-run] [--issue N]
-    \\                                  open its GitHub issue (or use issue N), set its id, make it proposed, and commit
+    \\                                  open its GitHub issue (or use issue N), set `issue`, make it proposed, and commit
     \\  log <slug>                      its status and branch changes, from git
     \\  sign <slug or spec>             sign a doc you've reviewed (interactive; see design/README.md, Signature)
+    \\  close-issues [--dry-run]        close the issues of implemented, declined, and superseded proposals (main's workflow runs it)
     \\  check                           validate the proposals, test tags, signatures, and links to design/
     \\
 ;
@@ -199,9 +200,10 @@ fn check(r: Repo, diags: *Diags) !void {
         }
         for (ps[0..i]) |q| {
             if (p.slug.len > 0 and std.mem.eql(u8, p.slug, q.slug)) diags.err("design/{s}: slug `{s}` is also used by design/{s}", .{ p.file, p.slug, q.file });
-            if (p.id != null and p.id == q.id) diags.err("design/{s}: id {d} is also used by design/{s}", .{ p.file, p.id.?, q.file });
+            if (p.issue != null and p.issue == q.issue) diags.err("design/{s}: issue #{d} is also design/{s}'s", .{ p.file, p.issue.?, q.file });
         }
-        if (p.status == .proposed and p.id == null) diags.err("design/{s}: proposed, but it has no id; zig build design -- propose {s} opens its issue", .{ p.file, p.slug });
+        if (p.status == .proposed and p.issue == null) diags.err("design/{s}: proposed, but it has no `issue`; zig build design -- propose {s} opens one", .{ p.file, p.slug });
+        if (p.issue == null and p.slug.len > 0 and std.ascii.isDigit(p.slug[0])) diags.err("design/{s}: slug `{s}` starts with a digit; start it with a letter", .{ p.file, p.slug });
         if (p.status == .superseded and p.superseded_by == null) diags.err("design/{s}: superseded, but `superseded-by` isn't set", .{p.file});
         if (p.status != .superseded and p.superseded_by != null) diags.err("design/{s}:{d}: `superseded-by` is set, but the status is `{t}`", .{ p.file, p.superseded_line, p.status });
         if (p.status == .declined and !hasSection(p.body, "Declined")) diags.err("design/{s}: declined, but it has no `## Declined` section giving the reason", .{p.file});
@@ -507,7 +509,7 @@ fn listCmd(r: Repo, w: *std.Io.Writer, status: ?Status, area: ?[]const u8, ready
         try state(r, p, &st);
         try rows.append(r.arena, .{
             .slug = p.slug,
-            .id = if (p.id) |id| try std.fmt.allocPrint(r.arena, "#{d}", .{id}) else "-",
+            .id = if (p.issue) |id| try std.fmt.allocPrint(r.arena, "#{d}", .{id}) else "-",
             .status = @tagName(p.status),
             .state = if (st.items.len > 0) st.items else "-",
             .title = p.title,
@@ -580,7 +582,7 @@ fn statusFile(r: Repo) ![]const u8 {
         var st: std.ArrayList(u8) = .empty;
         try state(r, p, &st);
         var issue: []const u8 = "";
-        if (p.id) |id| issue = try std.fmt.allocPrint(r.arena, "[#{d}](../../../issues/{d})", .{ id, id });
+        if (p.issue) |id| issue = try std.fmt.allocPrint(r.arena, "[#{d}](../../../issues/{d})", .{ id, id });
         try w.print("| [{s}]({s}) | {s} | {t} | {s} | {s} |\n", .{ p.slug, p.file, issue, p.status, st.items, p.title });
     }
     try w.writeAll("\n```mermaid\n");
@@ -654,6 +656,7 @@ fn newCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
     }
     const s = slug orelse fail("new: which slug?\n{s}", .{usage});
     if (!fm.validSlug(s)) fail("new: bad slug `{s}`: lowercase words of letters and digits joined by dashes, not all digits", .{s});
+    if (std.ascii.isDigit(s[0])) fail("new: bad slug `{s}`: start it with a letter", .{s});
     if (r.resolve(s) != null) fail("new: `{s}` is already a proposal", .{s});
     const t = title orelse try titleFromSlug(r.arena, s);
     if (fm.plainScalarProblem(t)) |why| fail("new: the title can't be used as is: {s}, which YAML would read differently", .{why});
@@ -694,11 +697,11 @@ fn abstract(body: []const u8) []const u8 {
     return std.mem.trim(u8, rest[0..end], " \n");
 }
 
-/// Sets `id: N` (before the `slug:` line) and `status: proposed` in the
+/// Sets `issue: N` (before the `slug:` line) and `status: proposed` in the
 /// frontmatter.
 fn proposedText(arena: std.mem.Allocator, text: []const u8, id: u32) ![]const u8 {
     const at = std.mem.indexOf(u8, text, "\nslug:") orelse return error.NoSlugLine;
-    const with_id = try std.fmt.allocPrint(arena, "{s}\nid: {d}{s}", .{ text[0..at], id, text[at..] });
+    const with_id = try std.fmt.allocPrint(arena, "{s}\nissue: {d}{s}", .{ text[0..at], id, text[at..] });
     const st = std.mem.indexOf(u8, with_id, "\nstatus: draft\n") orelse return error.NotDraft;
     return std.fmt.allocPrint(arena, "{s}\nstatus: proposed\n{s}", .{ with_id[0..st], with_id[st + "\nstatus: draft\n".len ..] });
 }
@@ -726,7 +729,7 @@ fn proposeCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
     const s = slug orelse fail("propose: which slug?\n{s}", .{usage});
     const i = r.resolve(s) orelse fail("propose: `{s}` isn't a proposal", .{s});
     const p = r.ps[i];
-    if (p.id) |id| fail("propose: {s} already has an issue, #{d}", .{ p.slug, id });
+    if (p.issue) |id| fail("propose: {s} already has an issue, #{d}", .{ p.slug, id });
     if (p.status != .draft) fail("propose: {s} is `{t}`, not a draft", .{ p.slug, p.status });
     if (!p.ok) fail("propose: design/{s} has frontmatter errors; run zig build design -- check", .{p.file});
     const summary = abstract(p.body);
@@ -734,7 +737,7 @@ fn proposeCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
     const title = try std.fmt.allocPrint(r.arena, "proposal: {s}", .{p.title});
     if (existing) |id| {
         if (r.resolve(try std.fmt.allocPrint(r.arena, "{d}", .{id}))) |j| fail("propose: #{d} is already design/{s}", .{ id, r.ps[j].file });
-        std.debug.print("setting design/{s}'s id to the existing issue #{d}, and its status to proposed; nothing is created on GitHub\n", .{ p.file, id });
+        std.debug.print("setting design/{s}'s issue to the existing # #{d}, and its status to proposed; nothing is created on GitHub\n", .{ p.file, id });
         if (dry_run) return;
         return markProposed(r, gpa, p, id);
     }
@@ -746,7 +749,7 @@ fn proposeCmd(r: Repo, gpa: std.mem.Allocator, args: []const []const u8) !void {
         \\  label:  Proposal
         \\  body:   the Abstract of design/{s}, and a link to the file
         \\
-        \\then sets its id to the issue number and its status to proposed, and commits.
+        \\then sets its issue to the issue's number and its status to proposed, and commits.
         \\
     , .{ title, p.file });
     // A retried run, or an issue opened by hand, shouldn't get a twin. The
@@ -834,13 +837,43 @@ fn formatLog(arena: std.mem.Allocator, gitlog: []const u8) ![]const u8 {
             continue;
         }
         const line = next.?;
-        for ([_][]const u8{ "+status: ", "+branch: ", "+id: " }) |key| {
+        for ([_][]const u8{ "+status: ", "+branch: ", "+issue: ", "+id: " }) |key| {
             if (!std.mem.startsWith(u8, line, key)) continue;
             if (changes.items.len > 0) try changes.appendSlice(arena, ", ");
             try changes.appendSlice(arena, line[1..]);
         }
     }
     return out.items;
+}
+
+// ---- close-issues ----
+
+/// Closes the open issues of implemented, declined, and superseded
+/// proposals, with a comment saying why: completed for implemented, not
+/// planned for the rest. Run by the workflow on main.
+fn closeIssuesCmd(r: Repo, gpa: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
+    var dry_run = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--dry-run")) dry_run = true else fail("close-issues: unexpected `{s}`\n{s}", .{ a, usage });
+    }
+    for (r.ps) |p| {
+        const n = p.issue orelse continue;
+        if (!p.status.closed()) continue;
+        const path = try std.fmt.allocPrint(r.arena, "repos/{{owner}}/{{repo}}/issues/{d}", .{n});
+        const open = run(gpa, r.io, r.arena, &.{ "gh", "api", path, "--jq", ".state" }) catch {
+            std.debug.print("warning: couldn't read #{d}\n", .{n});
+            continue;
+        };
+        if (!std.mem.eql(u8, std.mem.trim(u8, open, " \n"), "open")) continue;
+        const reason = if (p.status == .implemented) "completed" else "not_planned";
+        try w.print("#{d} {s}: {t}, closing as {s}\n", .{ n, p.slug, p.status, reason });
+        if (dry_run) continue;
+        const body = try std.fmt.allocPrint(r.arena, "body=[{s}](../blob/main/design/{s}) is `{t}` now, so this issue is closed.", .{ p.slug, p.file, p.status });
+        _ = run(gpa, r.io, r.arena, &.{ "gh", "api", try std.fmt.allocPrint(r.arena, "{s}/comments", .{path}), "-f", body }) catch
+            std.debug.print("warning: couldn't comment on #{d}\n", .{n});
+        _ = run(gpa, r.io, r.arena, &.{ "gh", "api", "-X", "PATCH", path, "-f", "state=closed", "-f", try std.fmt.allocPrint(r.arena, "state_reason={s}", .{reason}) }) catch
+            std.debug.print("warning: couldn't close #{d}\n", .{n});
+    }
 }
 
 // ---- sign ----
@@ -1059,6 +1092,8 @@ pub fn main(init: std.process.Init) !u8 {
         try proposeCmd(r, init.gpa, rest);
     } else if (std.mem.eql(u8, cmd, "log")) {
         try logCmd(r, init.gpa, w, rest);
+    } else if (std.mem.eql(u8, cmd, "close-issues")) {
+        try closeIssuesCmd(r, init.gpa, w, rest);
     } else if (std.mem.eql(u8, cmd, "sign")) {
         try signCmd(r, init.gpa, init.environ_map, rest);
     } else if (std.mem.eql(u8, cmd, "file") or std.mem.eql(u8, cmd, "fix")) {
@@ -1197,7 +1232,7 @@ test "propose helpers" {
     try std.testing.expect(hasSection("\n# P\n\n## Declined\n\nNo.\n", "Declined"));
     try std.testing.expect(!hasSection("\n# P\n\n### Declined\n\n## Declined later\n", "Declined"));
     try std.testing.expectEqualStrings("Short.", abstract("\n# P\n\n## Abstract\n\nShort.\n\n## Background\n\nLong.\n"));
-    try std.testing.expectEqualStrings("---\nid: 9\nslug: a\nstatus: proposed\n---\n", try proposedText(arena_state.allocator(), "---\nslug: a\nstatus: draft\n---\n", 9));
+    try std.testing.expectEqualStrings("---\nissue: 9\nslug: a\nstatus: proposed\n---\n", try proposedText(arena_state.allocator(), "---\nslug: a\nstatus: draft\n---\n", 9));
 }
 
 test "signatures" {

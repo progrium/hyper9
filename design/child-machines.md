@@ -1,5 +1,5 @@
 ---
-id: 109
+issue: 109
 slug: child-machines
 title: Child machines
 status: proposed

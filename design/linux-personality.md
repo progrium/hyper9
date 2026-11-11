@@ -1,5 +1,5 @@
 ---
-id: 18
+issue: 18
 slug: linux-personality
 title: Linux personality
 status: implemented

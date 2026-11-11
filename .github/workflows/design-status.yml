@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 # One run at a time, always on the newest main.
 concurrency:
@@ -36,6 +37,11 @@ jobs:
         with:
           version: 0.16.0
       - run: zig build design -- status
+      # A proposal's issue closes once it's implemented, declined, or
+      # superseded.
+      - run: zig build design -- close-issues
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Commit if changed
         run: |
           git diff --quiet -- design/STATUS.md && exit 0

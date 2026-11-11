@@ -1,5 +1,5 @@
 ---
-id: 120
+issue: 120
 slug: browser-gfx
 title: Graphics on the browser host
 status: implemented

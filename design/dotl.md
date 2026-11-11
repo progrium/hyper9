@@ -1,5 +1,5 @@
 ---
-id: 22
+issue: 22
 slug: dotl
 title: 9P2000.L and ZeroFS
 status: accepted

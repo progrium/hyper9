@@ -1,5 +1,5 @@
 ---
-id: 50
+issue: 50
 slug: linux-net
 title: Linux readiness and sockets
 status: implemented

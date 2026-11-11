@@ -1,5 +1,5 @@
 ---
-id: 10
+issue: 10
 slug: self-host
 title: Self-hosting
 status: implemented

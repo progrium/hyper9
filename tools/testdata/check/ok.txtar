@@ -34,7 +34,7 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work.">h.d.a.</abbr>
 - [~] Waived: the slow demo never ran.
 -- design/devsrv.md --
 ---
-id: 12
+issue: 12
 slug: devsrv
 title: DEVSRV
 status: accepted
@@ -58,7 +58,7 @@ Context for the list.
 - [ ] Two.
 -- design/roots-9p.md --
 ---
-id: 13
+issue: 13
 slug: roots-9p
 title: ROOTS-9P
 status: proposed

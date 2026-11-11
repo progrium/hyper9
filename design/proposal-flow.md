@@ -58,9 +58,13 @@ The tool reads branches from `refs/remotes/origin/`, falling back to local refs,
 
 ### Names and references
 
-Every proposal's file is `design/<slug>.md`, from its first draft on. Filing no longer renames anything. `depends`, `superseded-by`, test tags, and links all name proposals by slug, and `check` refuses a number in any of them. A slug is lowercase words of letters and digits joined by dashes, and can't be all digits. The rule that it must start with a letter goes away, since nothing sorts by filename any more.
+Every proposal's file is `design/<slug>.md`, from its first draft on. Filing no longer renames anything. `depends`, `superseded-by`, test tags, and links all name proposals by slug, and `check` refuses a number in any of them. A slug is lowercase words of letters and digits joined by dashes, and starts with a letter, as now: `new` refuses one that starts with a digit, and `check` fails on one without an issue, while `9p-roots`, which already has one, keeps its slug.
 
-`id` stays as an optional field: the number of the proposal's GitHub issue, when it has one. STATUS.md and `list` order proposals by `created`, then by `id`, which gives the rough order the numbered filenames gave.
+`id` is renamed `issue`, an optional field: the number of the proposal's GitHub issue, when it has one. Since proposals aren't numbered any more, the name says what the number is. STATUS.md and `list` order proposals by `created`, then by `issue`, which gives the rough order the numbered filenames gave.
+
+### Closing issues
+
+A proposal's issue closes when the proposal reaches main as `implemented` (completed), or as `declined` or `superseded` (not planned). `zig build design -- close-issues` closes each such issue that's still open, with a comment linking the doc, and the workflow that regenerates STATUS.md on main runs it after each merge. Today #35 and #120 are implemented and still open.
 
 ### Done criteria
 
@@ -81,8 +85,9 @@ A proposal's body says what changes and why, and never what's built so far ("hx6
 ### The tool
 
 - `new <slug>` is unchanged, except that the template has Done criteria as a checklist.
-- `file` is renamed `propose`. It opens the issue, sets `id`, and sets `status: proposed`, with no rename. `--issue N`, `--dry-run`, and `--yes` stay. Before creating an issue, it looks for an open Proposal issue with the same title, through the REST API, so a retried run doesn't open a duplicate (#78 and #81, #79 and #87, and #80 and #95 are duplicates from re-filing).
+- `file` is renamed `propose`. It opens the issue, sets `issue`, and sets `status: proposed`, with no rename. `--issue N`, `--dry-run`, and `--yes` stay. Before creating an issue, it looks for an open Proposal issue with the same title, through the REST API, so a retried run doesn't open a duplicate (#78 and #81, #79 and #87, and #80 and #95 are duplicates from re-filing).
 - `fix` is removed, since there are no numbers to rewrite.
+- `close-issues` closes the issues of proposals that are implemented, declined, or superseded, as above.
 - `log <slug>` prints the proposal's status and branch changes, with commits and dates, from the history of its frontmatter. It replaces one commit per status change as the record of decisions, so that rule is dropped.
 - `list`, `ready`, and `status` show ready, in progress, and stalled.
 - `check` validates `branch`, the Done criteria checklist, slug-only references, and links to `design/*.md` from any tracked file, not just from `design/`. It scans test tags in `tests/*.zig` and `tests/web/*.mjs`, and `zig build proposal -Dp=<slug>` runs the web cases too.
@@ -123,7 +128,9 @@ README says that `check` is meant to run before every PR is merged, and that `st
 
 **Use GitHub's PR approval as the signature.** It's one click, but it approves a whole PR, not one doc, and it isn't in the doc where readers look. It also can't be given by a PR's own author, which is usually the person who'd sign.
 
-**A `Proposal:` trailer on implementation PRs**, so the tool can find drafts that merged code cites. It would catch a draft like wine-draw whose code merged. With `branch` and Done criteria, it's mostly covered, so it's left for later (see Open issues).
+**A `Proposal:` trailer on implementation PRs**, so the tool can find drafts that merged code cites. It would catch a draft like wine-draw whose code merged, but `branch` and Done criteria cover most of that, and a trailer is one more thing every PR has to remember.
+
+**Drop the rule that slugs start with a letter**, since nothing sorts by filename any more. It's kept: a slug that starts with a letter reads as a name, and the rule costs nothing.
 
 ## Compatibility
 
@@ -131,14 +138,14 @@ The CLI, `Machine.Options`, sandbox defaults, the root tree, and `third_party/` 
 
 The migration is one mechanical change:
 
-- Every `design/NNNN-<slug>.md` is renamed `design/<slug>.md`, and the baseline loses `id: 0`.
+- Every `design/NNNN-<slug>.md` is renamed `design/<slug>.md`, `id` becomes `issue`, and the baseline loses `id: 0`.
 - Numeric references in `depends`, `superseded-by`, and test tags are rewritten as slugs (`[18]` becomes `[linux-personality]`, and `depends: [13, 21]` becomes `depends: [9p-roots, websocket-9p]`), as are links to the old paths in any tracked file.
 - Any proposal at `likely-accept` or `likely-decline` goes back to `draft`. None are today.
 - Every filed `draft` becomes `proposed`.
 - Done when is renamed Done criteria in every proposal, and its items become checkboxes. For implemented proposals, items are checked. browser-gfx's headless `[gfx]` item is waived with the reason from its Updates note.
 - `branch: [main]` is added to every implemented proposal.
 
-Existing issues keep their numbers, and each proposal keeps its `id`. Old links to `design/NNNN-<slug>.md` from outside the repository break. They can't be redirected from a Markdown repository, but the slug in the old filename finds the file.
+Existing issues keep their numbers, and each proposal keeps its number, as `issue`. Old links to `design/NNNN-<slug>.md` from outside the repository break. They can't be redirected from a Markdown repository, but the slug in the old filename finds the file.
 
 ## Security
 
@@ -154,6 +161,8 @@ Nothing changes for the guest. The signing workflow writes to PR branches, so it
 - [x] `zig build design -- log browser-gfx` prints its status changes with their commits.
 - [ ] `zig build proposal -Dp=browser-gfx` runs the Chromium cases in `tests/web/gfx.mjs`.
 - [x] `zig build design -- sign proposal-flow` adds a signature in the short form with today's date, refuses when stdin isn't a terminal, and refuses unless the typed slug matches.
+- [x] `zig build design -- close-issues --dry-run` lists the open issues of implemented proposals (#35 and #120 today), and `check` fails on the old `id` key and on a slug without an issue that starts with a digit.
+- [ ] After the merge, design-status closes #35 and #120 with a comment linking each doc.
 - [ ] A `/sign <slug>` comment on a PR from a login in `design/SIGNERS` adds the signature on the PR's branch, and the same comment from a login that isn't listed does nothing but reply.
 - [x] `check` fails on a signature line in neither form, or naming someone not in `design/SIGNERS`.
 - [x] design/README.md, TEMPLATE.md, AGENTS.md, and DEVELOPING.md describe the new states, `branch`, Done criteria, `propose`, and `log`, and nothing describes `likely-accept`, `fix`, or numbered filenames, and README's Signature section describes the short form, `sign`, and `/sign`.
@@ -173,6 +182,4 @@ This proposal is the first to use the new flow: it goes from `draft` to `impleme
 
 ## Open issues
 
-- Should the tool close a proposal's issue when it becomes implemented or declined, and set its labels from `status`? It would need `gh`, so it would run in the workflow on main, not in `check`.
-- Is 7 days the right cutoff for stalled, and should it be a setting?
-- Should implementation PRs carry a `Proposal: <slug>` trailer, so `check` can warn about a draft that merged code cites, as wine-draw's did?
+- Should `close-issues` also set each issue's labels from `status`?

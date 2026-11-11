@@ -1,5 +1,5 @@
 ---
-id: 49
+issue: 49
 slug: linux-threads
 title: Linux threads
 status: implemented

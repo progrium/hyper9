@@ -1,5 +1,5 @@
 ---
-id: 16
+issue: 16
 slug: kvm
 title: KVM backend
 status: implemented

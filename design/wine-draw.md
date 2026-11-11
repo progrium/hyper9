@@ -1,5 +1,5 @@
 ---
-id: 158
+issue: 158
 slug: wine-draw
 title: Wine windows through draw
 status: proposed

@@ -1,5 +1,5 @@
 ---
-id: 89
+issue: 89
 slug: login-shell
 title: h9 as a login shell
 status: proposed

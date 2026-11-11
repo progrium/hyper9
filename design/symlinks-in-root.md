@@ -1,5 +1,5 @@
 ---
-id: 34
+issue: 34
 slug: symlinks-in-root
 title: Symlinks resolved inside a bound tree
 status: implemented

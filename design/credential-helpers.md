@@ -1,5 +1,5 @@
 ---
-id: 119
+issue: 119
 slug: credential-helpers
 title: Credential helpers for WebSocket 9P
 status: proposed

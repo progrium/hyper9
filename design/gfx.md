@@ -1,5 +1,5 @@
 ---
-id: 15
+issue: 15
 slug: gfx
 title: Graphics (--gfx)
 status: implemented

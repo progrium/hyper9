@@ -1,5 +1,5 @@
 ---
-id: 33
+issue: 33
 slug: exit-status
 title: Host exit statuses for processes killed by notes
 status: implemented

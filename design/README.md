@@ -17,7 +17,7 @@ It isn't needed for bug fixes, workarounds, performance work that doesn't change
 
 ## Writing one
 
-`zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `9p-roots`), unique, not all digits, and never changed. The file keeps that name for good. Write a line per paragraph.
+`zig build design -- new <slug>` copies [TEMPLATE.md](TEMPLATE.md) to `design/<slug>.md` with the frontmatter filled in. A slug is lowercase words of letters and digits joined by dashes (`linux-personality`, `host-sandbox`), unique, and never changed. Start it with a letter (`websocket-9p`, not `9p-websocket`): `new` refuses a slug that starts with a digit, and `check` fails on one without an issue. Proposals that already have one, like `9p-roots`, keep it. The file keeps that name for good. Write a line per paragraph.
 
 The sections are Abstract, Background, Proposal, Rationale, Compatibility, Security, Done criteria, Implementation, and Open issues, and, once decided, Updates or Declined. Rationale should cover the alternatives that were rejected, so the question isn't asked again.
 
@@ -77,15 +77,15 @@ Branches are read from `refs/remotes/origin/` and local refs, so fetch them firs
 
 ## Filing an issue
 
-`zig build design -- propose <slug>` opens the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract, and a link to the file as the body), sets the proposal's `id` to the issue number and its status to `proposed`, and commits. Nothing is renamed. It asks first, as it creates the issue as the account `gh` is logged in as, and it refuses if an open issue already has the same title, so a retried run doesn't open a twin. `--dry-run` shows what it would do, `--yes` skips the question, and `--issue N` uses an issue that already exists, without touching GitHub.
+`zig build design -- propose <slug>` opens the GitHub issue (title `proposal: <title>`, the `Proposal` label, the Abstract, and a link to the file as the body), sets the proposal's `issue` to the issue's number and its status to `proposed`, and commits. Nothing is renamed. It asks first, as it creates the issue as the account `gh` is logged in as, and it refuses if an open issue already has the same title, so a retried run doesn't open a twin. `--dry-run` shows what it would do, `--yes` skips the question, and `--issue N` uses an issue that already exists, without touching GitHub.
 
-Discussion of a proposed proposal happens on its issue, and the doc is revised in commits. `id` is only the issue's number. Proposals are always referred to by slug: in `depends`, `superseded-by`, test tags, and links.
+Discussion of a proposed proposal happens on its issue, and the doc is revised in commits. `issue` is only the issue's number. Proposals are always referred to by slug: in `depends`, `superseded-by`, test tags, and links.
 
 ## Frontmatter
 
 ```yaml
 ---
-id: 42
+issue: 42
 slug: linux-personality
 title: Linux personality
 status: accepted
@@ -100,7 +100,7 @@ superseded-by:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `id` | no | The GitHub issue number, once it has one |
+| `issue` | no | The number of its GitHub issue, once it has one |
 | `slug` | always | Its permanent name, and its file's |
 | `title` | always | Also the issue title, after `proposal: ` |
 | `status` | always | See States |
@@ -111,7 +111,7 @@ superseded-by:
 | `branch` | when work has started; `[main]` once implemented | See Branches |
 | `superseded-by` | when `superseded` | The proposal that replaces it, by slug |
 
-The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), with no nesting, quoting, or multi-line values. Since nothing is quoted, a value can't contain `: ` or ` #` or start with a YAML indicator such as `#`, and list items are plain words. Only facts are stored. Whether a proposal is ready, in progress, or stalled, and what it blocks, are computed by the tool. STATUS.md lists proposals in the rough order they were written, by `created` and then `id`.
+The syntax is a strict subset of YAML: one `key: value` per line, values are scalars or flow lists (`[a, b]`), with no nesting, quoting, or multi-line values. Since nothing is quoted, a value can't contain `: ` or ` #` or start with a YAML indicator such as `#`, and list items are plain words. Only facts are stored. Whether a proposal is ready, in progress, or stalled, and what it blocks, are computed by the tool. STATUS.md lists proposals in the rough order they were written, by `created` and then `issue`.
 
 ## After acceptance
 
@@ -121,7 +121,7 @@ The PR that finishes a proposal updates SPEC.md to describe what was built, tags
 
 ## Declining
 
-A declined proposal stays in `design/`, as Go's do, so the next person with the idea finds the answer and the reasoning behind it. To decline one, set `status: declined` and add a Declined section at the end of the doc. The section is dated, says in a few lines why it was declined, and links the issue comment or discussion that decided it, if there is one. It also names what would change the answer, if anything, so a later proposal knows what it has to address. A proposal with an issue has the issue closed as not planned, linking the commit.
+A declined proposal stays in `design/`, as Go's do, so the next person with the idea finds the answer and the reasoning behind it. To decline one, set `status: declined` and add a Declined section at the end of the doc. The section is dated, says in a few lines why it was declined, and links the issue comment or discussion that decided it, if there is one. It also names what would change the answer, if anything, so a later proposal knows what it has to address. A proposal's issue is closed for it once the change reaches main, as below.
 
 The rest of the body isn't edited, as with an accepted proposal. A Declined section looks like this:
 
@@ -157,8 +157,9 @@ Cases are tagged with the proposal they prove, by slug, in brackets at the end o
 | `propose <slug> [--yes] [--dry-run] [--issue N]` | Opens its issue and makes it proposed, as above |
 | `log <slug>` | Its status and branch changes, with their commits |
 | `sign <slug or spec>` | Signs a doc you've reviewed, as above |
+| `close-issues [--dry-run]` | Closes the issues of implemented, declined, and superseded proposals; main's workflow runs it |
 | `check` | Validates the proposals, test tags, signatures, and links to `design/` |
 
-[STATUS.md](STATUS.md) is generated, and only main commits it: [.github/workflows/design-status.yml](../.github/workflows/design-status.yml) runs `status` after each push to main that touches `design/` or the tool, and daily, since in progress and stalled change as branches age. It commits the result if it changed. PRs leave it alone, even when they change a proposal's status or dependencies, so two open PRs never conflict over it. `list` and `ready` give the current state on any branch.
+[STATUS.md](STATUS.md) is generated, and only main commits it: [.github/workflows/design-status.yml](../.github/workflows/design-status.yml) runs `status` after each push to main that touches `design/` or the tool, and daily, since in progress and stalled change as branches age. It commits the result if it changed. The same workflow runs `close-issues`, which closes the open issue of each implemented proposal as completed, and of each declined or superseded one as not planned, with a comment linking the doc. PRs leave STATUS.md alone, even when they change a proposal's status or dependencies, so two open PRs never conflict over it. `list` and `ready` give the current state on any branch.
 
-`check` fails on bad frontmatter (including values YAML would read differently and the removed `likely-accept` and `likely-decline`), tags not written as `[a, b]`, a duplicate slug or id, a file not named for its slug, `proposed` without an `id`, a reference by number or one that doesn't resolve (in `depends`, `superseded-by`, or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, a declined proposal without a `## Declined` section, `superseded` without `superseded-by`, `implemented` without `branch: [main]` or `main` on anything else, a Done criteria item that isn't a checkbox or is open on an implemented proposal, a `## Done when` heading, a malformed signature or one by someone not in SIGNERS, and a link to a file under `design/` that doesn't exist, from any file git tracks outside `third_party/`.
+`check` fails on bad frontmatter (including values YAML would read differently and the removed `likely-accept` and `likely-decline`), tags not written as `[a, b]`, a duplicate slug or issue, a file not named for its slug, a slug starting with a digit on a proposal without an issue, `proposed` without an `issue`, the old `id` key, a reference by number or one that doesn't resolve (in `depends`, `superseded-by`, or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, a declined proposal without a `## Declined` section, `superseded` without `superseded-by`, `implemented` without `branch: [main]` or `main` on anything else, a Done criteria item that isn't a checkbox or is open on an implemented proposal, a `## Done when` heading, a malformed signature or one by someone not in SIGNERS, and a link to a file under `design/` that doesn't exist, from any file git tracks outside `third_party/`.

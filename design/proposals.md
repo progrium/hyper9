@@ -1,5 +1,5 @@
 ---
-id: 1
+issue: 1
 slug: proposals
 title: Proposals replace milestones and the design changelog
 status: implemented

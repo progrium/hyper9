@@ -1,5 +1,5 @@
 ---
-id: 76
+issue: 76
 slug: schemeless-roots
 title: Schemeless roots
 status: implemented

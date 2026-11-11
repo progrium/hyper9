@@ -1,5 +1,5 @@
 ---
-id: 13
+issue: 13
 slug: 9p-roots
 title: 9P roots
 status: implemented

@@ -1,5 +1,5 @@
 ---
-id: 5
+issue: 5
 slug: net-policy
 title: Outbound-only network by default, and --net-allow
 status: implemented

@@ -1,5 +1,5 @@
 ---
-id: 81
+issue: 81
 slug: default-command
 title: A default command from the root
 status: implemented

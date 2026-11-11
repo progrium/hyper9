@@ -1,5 +1,5 @@
 ---
-id: 174
+issue: 174
 slug: hcpu
 title: hcpu, h9's own CPUs for the emulator
 status: proposed

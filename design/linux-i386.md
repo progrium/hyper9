@@ -1,5 +1,5 @@
 ---
-id: 105
+issue: 105
 slug: linux-i386
 title: 32-bit x86 Linux programs
 status: implemented

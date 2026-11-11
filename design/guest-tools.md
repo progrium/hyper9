@@ -1,5 +1,5 @@
 ---
-id: 32
+issue: 32
 slug: guest-tools
 title: h9's own commands in the guest
 status: implemented

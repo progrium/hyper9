@@ -1,5 +1,5 @@
 ---
-id: 17
+issue: 17
 slug: whp
 title: WHP backend
 status: implemented

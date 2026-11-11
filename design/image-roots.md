@@ -1,5 +1,5 @@
 ---
-id: 14
+issue: 14
 slug: image-roots
 title: Disk-image roots
 status: declined

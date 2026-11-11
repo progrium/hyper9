@@ -1,5 +1,5 @@
 ---
-id: 4
+issue: 4
 slug: segattach
 title: segattach and shared segments
 status: implemented

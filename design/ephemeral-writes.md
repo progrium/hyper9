@@ -1,5 +1,5 @@
 ---
-id: 6
+issue: 6
 slug: ephemeral-writes
 title: Ephemeral writes and a private /tmp
 status: implemented

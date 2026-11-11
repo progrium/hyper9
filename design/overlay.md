@@ -1,5 +1,5 @@
 ---
-id: 11
+issue: 11
 slug: overlay
 title: Copy-on-write overlay as the root's default
 status: implemented

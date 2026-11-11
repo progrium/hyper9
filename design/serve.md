@@ -1,5 +1,5 @@
 ---
-id: 35
+issue: 35
 slug: serve
 title: Serving the namespace over 9P
 status: implemented

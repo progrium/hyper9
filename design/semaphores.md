@@ -1,5 +1,5 @@
 ---
-id: 3
+issue: 3
 slug: semaphores
 title: rendezvous and semaphores
 status: implemented

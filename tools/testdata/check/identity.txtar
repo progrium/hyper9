@@ -1,12 +1,15 @@
-Identity: a duplicate slug, a duplicate id, a file named for anything but
-its slug (including the old numbered names), and a proposed proposal with
-no issue.
+Identity: a duplicate slug, a duplicate issue, a file named for anything
+but its slug (including the old numbered names), a proposed proposal with
+no issue, a slug starting with a digit on a proposal with no issue (one
+with an issue, like 9p-roots, keeps it), and the old `id` key.
 
 error: design/dup2.md: slug `dup` is also used by design/dup.md
 error: design/dup2.md: should be named design/dup.md
-error: design/b.md: id 30 is also used by design/a.md
+error: design/b.md: issue #30 is also design/a.md's
 error: design/0030-c.md: should be named design/c.md
-error: design/later.md: proposed, but it has no id
+error: design/later.md: proposed, but it has no `issue`
+error: design/9lives.md: slug `9lives` starts with a digit
+error: design/old.md:2: `id` is now `issue`
 
 -- design/dup.md --
 ---
@@ -28,7 +31,7 @@ depends: []
 ---
 -- design/a.md --
 ---
-id: 30
+issue: 30
 slug: a
 title: A
 status: draft
@@ -38,7 +41,7 @@ depends: []
 ---
 -- design/b.md --
 ---
-id: 30
+issue: 30
 slug: b
 title: B
 status: draft
@@ -48,7 +51,7 @@ depends: []
 ---
 -- design/0030-c.md --
 ---
-id: 31
+issue: 31
 slug: c
 title: C
 status: draft
@@ -61,6 +64,35 @@ depends: []
 slug: later
 title: LATER
 status: proposed
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/9lives.md --
+---
+slug: 9lives
+title: Nine
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/9p-roots.md --
+---
+issue: 13
+slug: 9p-roots
+title: 9P roots
+status: proposed
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- design/old.md --
+---
+id: 5
+slug: old
+title: Old
+status: draft
 created: 2026-11-03
 authors: [progrium]
 depends: []

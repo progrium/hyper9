@@ -1,5 +1,5 @@
 ---
-id: 64
+issue: 64
 slug: multicall
 title: A multi-call 9front userland binary
 status: implemented

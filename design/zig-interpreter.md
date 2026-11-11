@@ -1,5 +1,5 @@
 ---
-id: 19
+issue: 19
 slug: zig-interpreter
 title: A native Zig interpreter for the emulator
 status: proposed
