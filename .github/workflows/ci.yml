@@ -47,9 +47,16 @@ jobs:
           version: 0.16.0
       - run: zig build test
 
-  # The integration cases on KVM, with the amd64 root unpacked from the
-  # release's ISO (tools/isoroot.zig), as pages does for 386, instead of
-  # mkroot's QEMU boot.
+  # The integration cases on the native backend (Syscall User Dispatch),
+  # with the amd64 root unpacked from the release's ISO
+  # (tools/isoroot.zig), as pages does for 386, instead of mkroot's QEMU
+  # boot. KVM is the backend users get on Linux, and hosted runners have
+  # /dev/kvm, but three cases fail on it there (#183), so this moves to
+  # -Dbackends=kvm once they're fixed. That needs a step first that lets
+  # the runner open /dev/kvm:
+  #
+  #   echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+  #   sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
   integration:
     if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'temp-run-all/')
     runs-on: ubuntu-latest
@@ -58,12 +65,6 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      # Hosted runners have /dev/kvm, but only root can open it.
-      - name: Let the runner open /dev/kvm
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
       - uses: actions/cache@v4
         id: rootamd64
         with:
@@ -75,7 +76,7 @@ jobs:
           scripts/fetch.sh isoamd64
           . scripts/pins.sh
           zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
-      - run: zig build integration -Darch=amd64 -Dbackends=kvm -Droot="$PWD/.local/9front/rootamd64"
+      - run: zig build integration -Darch=amd64 -Dbackends=native -Droot="$PWD/.local/9front/rootamd64"
 
   # The demo page and its canvas cases in Chromium, over the 386 root.
   web:
