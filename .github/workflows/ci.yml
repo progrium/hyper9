@@ -38,7 +38,7 @@ jobs:
       - run: zig build design -- check
 
   test:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'temp-run-all/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
   # release's ISO (tools/isoroot.zig), as pages does for 386, instead of
   # mkroot's QEMU boot.
   integration:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'temp-run-all/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,7 +79,7 @@ jobs:
 
   # The demo page and its canvas cases in Chromium, over the 386 root.
   web:
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'temp-run-all/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
