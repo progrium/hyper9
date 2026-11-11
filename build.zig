@@ -177,9 +177,29 @@ const Integration = struct {
 /// h9 as --arch (from -Darch). `guest_test` says h9 was built with
 /// -Dguest-test, and `host_cmd` that it was built with -Dhost-cmd. `src`,
 /// if given, is a 9front checkout's `sys` directory, which the self-host
-/// cases bind over /sys when the root lacks /sys/src.
-fn addIntegration(b: *std.Build, optimize: std.builtin.OptimizeMode, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) *std.Build.Step.Run {
-    const run = b.addRunArtifact(integrationTests(b, b.graph.host, optimize, filters));
+/// cases bind over /sys when the root lacks /sys/src. The cases are split
+/// `shards` ways (H9_TEST_SHARD, tests/integration.zig's skipShard), one
+/// run of the same binary for each, which the build runner runs side by
+/// side: the cases mostly wait on h9, terminals, and sockets, so one run
+/// leaves most cores idle. `step` depends on every run.
+fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: std.builtin.OptimizeMode, filters: []const []const u8, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) []*std.Build.Step.Run {
+    const tests = integrationTests(b, b.graph.host, optimize, filters);
+    const n = @max(shards, 1);
+    const runs = b.allocator.alloc(*std.Build.Step.Run, n) catch @panic("OOM");
+    for (runs, 0..) |*r, i| {
+        r.* = addIntegrationRun(b, tests, it, root, backends, pending, go, guest_test, host_cmd, src);
+        if (n > 1) {
+            r.*.setName(b.fmt("integration {d}/{d}", .{ i + 1, n }));
+            r.*.setEnvironmentVariable("H9_TEST_SHARD", b.fmt("{d}/{d}", .{ i, n }));
+        }
+        step.dependOn(&r.*.step);
+    }
+    return runs;
+}
+
+/// One run of the integration binary `tests`, set up as addIntegration says.
+fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, host_cmd: bool, src: ?[]const u8) *std.Build.Step.Run {
+    const run = b.addRunArtifact(tests);
     // The self-host cases' source when the root has no /sys/src
     // (design/0010-self-host.md).
     if (src) |dir| run.setEnvironmentVariable("H9_TEST_SRC", dir);
@@ -1417,13 +1437,15 @@ pub fn build(b: *std.Build) void {
         go_stdtest.dependOn(&run_stdtest.step);
     }
     const it_filters = b.option([]const []const u8, "filter", "Run only the integration cases whose names contain one of these") orelse &.{};
-    const run_integration = addIntegration(b, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
-    if (!test_web) run_integration.step.dependOn(linux_fixtures);
-    // -Djit-check checks every region against T0, one region at a time
-    // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
-    // set already).
-    if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "4");
-    b.step("integration", "Run real 9front binaries from the root tree through h9").dependOn(&run_integration.step);
+    const it_shards = b.option(u32, "shards", "Split the integration cases across this many runs at once (default 4; 1 runs them in one)") orelse 4;
+    const integration_step = b.step("integration", "Run real 9front binaries from the root tree through h9");
+    for (addIntegration(b, integration_step, it_shards, optimize, it_filters, it, root, backend_list, run_pending, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir)) |run_integration| {
+        if (!test_web) run_integration.step.dependOn(linux_fixtures);
+        // -Djit-check checks every region against T0, one region at a time
+        // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
+        // set already).
+        if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "4");
+    }
 
     // 9box and a slim root around it (design/0064-multicall.md), built inside
     // the h9 just built, against the root tree. -Darch picks the
@@ -1540,9 +1562,9 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "p", "With zig build proposal: the proposal, by id or slug")) |ref| {
         const ps = proposals(b);
         if (frontmatter.resolve(ps, ref)) |i| {
-            const run_cases = addIntegration(b, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir);
-            if (!test_web) run_cases.step.dependOn(linux_fixtures);
-            proposal_step.dependOn(&run_cases.step);
+            for (addIntegration(b, proposal_step, 1, optimize, tagFilters(b, ps[i]), it, root, backend_list, true, if (test_web) null else go_cases, guest_test, host_cmd and !test_web, src_dir)) |run_cases| {
+                if (!test_web) run_cases.step.dependOn(linux_fixtures);
+            }
             if (demos.get(ps[i].slug)) |steps| for (steps.items) |s| proposal_step.dependOn(s);
         } else proposal_step.dependOn(&b.addFail(b.fmt("-Dp={s} isn't a proposal under design/", .{ref})).step);
     } else proposal_step.dependOn(&b.addFail("zig build proposal needs -Dp=<id or slug>").step);
@@ -2007,20 +2029,59 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     b.step("litmus", "Run the threading litmus tests on every tier, with their outcome tallies (-- --iters N --tier T --only NAME)").dependOn(&litmus_run.step);
 }
 
+/// src/hcpu.zig's tests, split into parts by name filter: the three slow
+/// groups (the emitters', the checkers' with the litmus tests, and the 386
+/// JIT's, each about 20 s in Debug), and the rest. A test's name starts
+/// with its file's path under src/, dots for slashes, so the rest is every
+/// other file and directory in src/jit, src/interp, and src/hcpu.zig
+/// itself, listed from the tree so a new file lands in a part. A test in
+/// a file elsewhere that src/hcpu.zig reaches would be in no part: add
+/// its prefix here.
+fn hcpuTestParts(b: *std.Build) []const []const []const u8 {
+    const slow = [_][]const u8{ "emit", "check", "x86" };
+    var rest: std.ArrayList([]const u8) = .empty;
+    rest.appendSlice(b.allocator, &.{ "hcpu.", "interp." }) catch @panic("OOM");
+    const io = b.graph.io;
+    var dir = b.build_root.handle.openDir(io, "src/jit", .{ .iterate = true }) catch |err|
+        std.debug.panic("build.zig: can't list src/jit: {t}", .{err});
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch |err| std.debug.panic("build.zig: can't list src/jit: {t}", .{err})) |entry| {
+        const stem = switch (entry.kind) {
+            .directory => entry.name,
+            .file => if (std.mem.endsWith(u8, entry.name, ".zig")) entry.name[0 .. entry.name.len - 4] else continue,
+            else => continue,
+        };
+        for (slow) |sl| {
+            if (std.mem.eql(u8, stem, sl)) break;
+        } else rest.append(b.allocator, b.fmt("jit.{s}.", .{stem})) catch @panic("OOM");
+    }
+    var parts: std.ArrayList([]const []const u8) = .empty;
+    for (slow) |sl| parts.append(b.allocator, b.allocator.dupe([]const u8, &.{b.fmt("jit.{s}.", .{sl})}) catch @panic("OOM")) catch @panic("OOM");
+    parts.append(b.allocator, rest.items) catch @panic("OOM");
+    return parts.items;
+}
+
 /// The emulator's own CPUs (src/hcpu.zig): the JIT layer's unit tests,
 /// natively, and the wasm emitter's under Node when Node is installed
 /// (tests/jit/run.mjs). `zig build hcpu` runs just these. `zig build
 /// hcpu-web`, and `web-test` with it, runs the wasm emitter's in Chromium.
 fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const step = b.step("hcpu", "Run the emulator CPU and JIT tests (src/hcpu.zig), natively and under Node");
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
+    // A test binary runs its tests one at a time, and these take about a
+    // minute, so they're split by name into a few binaries the build
+    // runner runs side by side (hcpuTestParts).
+    const hcpu_mod = b.createModule(.{
         .root_source_file = b.path("src/hcpu.zig"),
         .target = target,
         .optimize = optimize,
-    }) });
-    const run = b.addRunArtifact(tests);
-    step.dependOn(&run.step);
-    test_step.dependOn(&run.step);
+    });
+    for (hcpuTestParts(b)) |filters| {
+        const tests = b.addTest(.{ .root_module = hcpu_mod, .filters = filters });
+        const run = b.addRunArtifact(tests);
+        step.dependOn(&run.step);
+        test_step.dependOn(&run.step);
+    }
 
     // The 386 JIT plan's [x86-jit] cases, on T0 and T1.
     const x86 = b.addTest(.{ .root_module = b.createModule(.{

@@ -27,7 +27,13 @@ pub const Term = struct {
 
     /// Starts `argv` (argv[0] a path) on a new 80x25 terminal.
     pub fn spawn(gpa: std.mem.Allocator, argv: []const []const u8) !Term {
-        return .{ .gpa = gpa, .sys = try Sys.spawn(gpa, argv) };
+        return spawnEnv(gpa, argv, &.{});
+    }
+
+    /// `spawn`, with `extra` (NAME=value strings) added to the program's
+    /// environment. Windows takes none yet.
+    pub fn spawnEnv(gpa: std.mem.Allocator, argv: []const []const u8, extra: []const []const u8) !Term {
+        return .{ .gpa = gpa, .sys = try Sys.spawn(gpa, argv, extra) };
     }
 
     /// Kills the program if it's still running and frees everything.
@@ -168,7 +174,7 @@ const Posix = struct {
     master: c_int,
     pid: c.pid_t,
 
-    fn spawn(gpa: std.mem.Allocator, argv: []const []const u8) !Posix {
+    fn spawn(gpa: std.mem.Allocator, argv: []const []const u8, extra: []const []const u8) !Posix {
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -176,6 +182,20 @@ const Posix = struct {
         // async-signal-safe calls are allowed after it.
         const args = try arena.allocSentinel(?[*:0]const u8, argv.len, null);
         for (argv, 0..) |a, i| args[i] = try arena.dupeZ(u8, a);
+        // The inherited environment, less the names `extra` sets, then
+        // `extra`.
+        var envs: std.ArrayList(?[*:0]const u8) = .empty;
+        var i: usize = 0;
+        inherited: while (c.environ[i]) |v| : (i += 1) {
+            const kv = std.mem.span(v);
+            for (extra) |x| {
+                const name = x[0 .. (std.mem.indexOfScalar(u8, x, '=') orelse x.len) + 1];
+                if (std.mem.startsWith(u8, kv, name)) continue :inherited;
+            }
+            try envs.append(arena, v);
+        }
+        for (extra) |x| try envs.append(arena, try arena.dupeZ(u8, x));
+        const envp = try envs.toOwnedSliceSentinel(arena, null);
 
         const o: c.O = .{ .ACCMODE = .RDWR, .NOCTTY = true };
         const master = posix_openpt(@bitCast(o));
@@ -200,7 +220,7 @@ const Posix = struct {
             _ = c.ioctl(slave, TIOCSCTTY, @as(c_int, 0));
             for (0..3) |fd| _ = c.dup2(slave, @intCast(fd));
             if (slave > 2) _ = c.close(slave);
-            _ = c.execve(args[0].?, args.ptr, @ptrCast(c.environ));
+            _ = c.execve(args[0].?, args.ptr, @ptrCast(envp.ptr));
             c._exit(127);
         }
         return .{ .master = master, .pid = pid };
@@ -320,7 +340,8 @@ const Windows = struct {
     out: ?HANDLE,
     process: HANDLE,
 
-    fn spawn(gpa: std.mem.Allocator, argv: []const []const u8) !Windows {
+    fn spawn(gpa: std.mem.Allocator, argv: []const []const u8, extra: []const []const u8) !Windows {
+        if (extra.len != 0) return error.Unsupported;
         var in_r: HANDLE = undefined;
         var in_w: HANDLE = undefined;
         var out_r: HANDLE = undefined;

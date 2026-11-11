@@ -261,6 +261,11 @@ no human and no `ssh -t`.
 built in and checks that each gives the same output and syscall trace.
 [tests/integration.zig](tests/integration.zig) runs real binaries from the
 root tree through `h9` itself, checking output and exit codes.
+`zig build integration` splits the cases four ways by a hash of their names
+and runs the four parts at once, since the cases mostly wait on h9,
+terminals, and sockets; `-Dshards=N` picks another count, and `-Dshards=1`
+runs them in one process. `zig build test` likewise runs
+[src/hcpu.zig](src/hcpu.zig)'s tests as four binaries split by name.
 `zig build install-tests` installs both, built for `-Dtarget`, as
 `zig-out/bin/backend-tests` and `zig-out/bin/integration-tests`, to run in a
 VM.
