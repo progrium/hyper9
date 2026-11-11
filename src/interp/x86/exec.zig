@@ -1166,6 +1166,9 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                     x.next = if (i.size == 2) t & 0xffff else t;
                 },
                 .retf, .iret => {
+                    // Long mode has no selectors in Cpu64 to check CS
+                    // against, so these stay #GP there, as before.
+                    if (long) return x.exc(cpu_mod.vec_gp);
                     // To the same privilege only: the popped CS must be
                     // the one running, since the segments are flat and
                     // there's one user code selector. Nothing changes
