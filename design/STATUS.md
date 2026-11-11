@@ -47,9 +47,9 @@ Every proposal under [design/](README.md), its status, and ready or what it need
 | [browser-gfx](0120-browser-gfx.md) | implemented |  | Graphics on the browser host |
 | [cow-fork](0121-cow-fork.md) | draft |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [wine-draw](0158-wine-draw.md) | draft |  | Wine windows through draw |
+| [hcpu](0174-hcpu.md) | draft |  | hcpu, h9's own CPUs for the emulator |
 | [audio](audio.md) | draft |  | Audio (--audio) |
 | [ci](ci.md) | draft |  | Continuous integration |
-| [hcpu](hcpu.md) | draft |  | hcpu, h9's own CPUs for the emulator |
 | [hide-host-paths](hide-host-paths.md) | draft |  | Hide host paths in /proc/n/ns |
 | [host-binfmt](host-binfmt.md) | draft |  | Running 9front binaries directly on Linux with binfmt_misc |
 | [host-cmd](host-cmd.md) | draft |  | Rethinking host commands |
@@ -107,9 +107,9 @@ flowchart LR
   p_browser_gfx["#35;120 browser-gfx<br/>implemented"]:::implemented
   p_cow_fork["#35;121 cow-fork<br/>draft"]:::draft
   p_wine_draw["#35;158 wine-draw<br/>draft"]:::draft
+  p_hcpu["#35;174 hcpu<br/>draft"]:::draft
   p_audio["audio<br/>draft"]:::draft
   p_ci["ci<br/>draft"]:::draft
-  p_hcpu["hcpu<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_binfmt["host-binfmt<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
