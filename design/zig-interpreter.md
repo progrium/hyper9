@@ -2,11 +2,12 @@
 issue: 19
 slug: zig-interpreter
 title: A native Zig interpreter for the emulator
-status: proposed
+status: superseded
 created: 2026-11-03
 authors: [progrium]
 depends: []
 areas: [vmm, build, tests]
+superseded-by: hcpu
 ---
 
 # Proposal: a native Zig interpreter for the emulator
@@ -252,3 +253,4 @@ The sandbox policy is unaffected: it's enforced in the kernel, above the vmm lay
   - **Decode cache.** Text is never written today. But brk and stack growth map new chunks, and each bumps `generation`, so the rule in Execution would drop every decoded page on heap growth. Only the TLB needs flushing then. Decoded pages should go only when an executable mapping changes, or live on the text segment, shared across fork. Decoding costs about 10 µs and 16 KiB per text page. [self-host](self-host.md)'s `/proc/n/mem` writes will need to invalidate.
   - **Lockstep cost.** Single-stepping Unicorn from C, with a batch register read, takes about 280 ns per instruction. That fits the backend tests and chosen cases, not every push.
   - **wasm32.** The core compiles once indices are cast to `usize`. Zig 0.16 rejects 64-bit `@atomicLoad`, `@atomicStore`, and `@cmpxchgStrong` with 32-bit pointers, so wasm32 would need a fallback. An optimized wasm32 build of the inlined dispatch didn't finish in 17 minutes; a native build takes about a minute.
+- 2026-11-11: **Superseded by [hcpu](hcpu.md).** hcpu's ha64 is this proposal's interpreter, widened to all of Armv8.0's A64 with FP, AdvSIMD, and LSE, as the T0 under a JIT. hcpu also carries over the lockstep check against Unicorn, the inventory tools, deterministic mode, the MIT emulator default, and parallel guest threads, and adds h86, hx64, and the browser host. Its design, not this one's, is what was built.
