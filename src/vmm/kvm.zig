@@ -328,8 +328,12 @@ fn vcpuLimit(vm: i32) u32 {
 }
 
 /// Shared pages sit in the kernel half one after another; this bounds
-/// how far they go.
+/// how far they go. Each live vCPU also takes one of gphys.Runners' slots.
 const max_slots = 1024;
+
+comptime {
+    std.debug.assert(max_slots <= gphys.Runners.capacity);
+}
 
 /// Clears what h9 hides from the guest in the supported CPUID, and notes
 /// whether the CPU has SMEP and SMAP.
