@@ -195,8 +195,15 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     if (build_options.jit_check) return runT1(cpu, ctx, &m, t1_emitter orelse undefined);
     if (build_options.jit and tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);
     if (build_options.jit and builtin.cpu.arch != .wasm32 and tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(cpu, ctx, &m, em);
-    const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
+    const left = loadBudget(ctx);
+    const budget: u64 = if (left <= 0) 0 else @intCast(left);
     return exitOf(c, ctx, runT0(c, ctx, &m, budget));
+}
+
+/// ctx.budget, read once: a kick stores to it from another thread
+/// (cache.requestExit). The web host has one thread and no 64-bit atomics.
+fn loadBudget(ctx: *Ctx) i64 {
+    return if (builtin.cpu.arch == .wasm32) ctx.budget else @atomicLoad(i64, &ctx.budget, .monotonic);
 }
 
 /// T0 for up to `budget` instructions, counting them in ctx.
@@ -240,6 +247,7 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *tlb.TlbMem, em: emitter.Emitter) vmm.Error!vm
         .pc_off = @offsetOf(x86cpu.Cpu64, "rip"),
         .pc_bytes = 8,
         .pc_align = 1,
+        .hot = dispatch.hot,
     };
     while (true) {
         // T0 counts Cpu64.retired again in each `call.interp`: ctx's count
@@ -259,9 +267,14 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *tlb.TlbMem, em: emitter.Emitter) vmm.Error!vm
             // the SYSCALL.
             .svc => return exitOf(c, ctx, .syscall),
             .interrupted => return .interrupted,
-            .t0 => {
-                if (ctx.budget <= 0) return .interrupted;
-                const e = runT0(c, ctx, m, 1);
+            // .cold: a block that isn't hot yet runs on T0 to a later
+            // taken branch, so that block's head comes back to be counted.
+            .t0, .cold => {
+                // A kick zeroes the budget from another thread, so it's
+                // read once.
+                const left = loadBudget(ctx);
+                if (left <= 0) return .interrupted;
+                const e = if (r == .t0) runT0(c, ctx, m, 1) else runT0Opts(c, ctx, m, @intCast(left), dispatch.cold_branches);
                 if (e != .stopped) return exitOf(c, ctx, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
             },
