@@ -1,4 +1,4 @@
-//! The amd64 instruction inventory (design/hcpu.md, hx64): tools/x86inv.zig
+//! The amd64 instruction inventory (design/0174-hcpu.md, hx64): tools/x86inv.zig
 //! in long mode. Finds the code in every amd64 binary under the given
 //! paths, decodes it with hx64's decoder (src/interp/x86/decode.zig's
 //! long mode), and reports what it uses and what T0 can't run, which

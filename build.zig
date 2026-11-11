@@ -2038,7 +2038,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     test_step.dependOn(&x86_run.step);
     b.step("x86-jit", "Run the 386 JIT plan's [x86-jit] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
 
-    // hx64's [hcpu] cases, on T0 and T1 (design/hcpu.md).
+    // hx64's [hcpu] cases, on T0 and T1 (design/0174-hcpu.md).
     const x64 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/x64.zig"),
         .target = target,

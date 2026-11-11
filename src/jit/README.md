@@ -24,7 +24,7 @@ other work asks the owner for changes rather than editing it.
 
 ## hx64's contracts
 
-hx64 is h86 in long mode ([hcpu](../../design/hcpu.md), hx64), built in
+hx64 is h86 in long mode ([hcpu](../../design/0174-hcpu.md), hx64), built in
 parallel workstreams on the `hx64` branch
 (`/mnt/project-files/hx64/plan.md` in the project). These files fix what
 they code against. The contracts thread (S0) owns them: ask it for a

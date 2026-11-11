@@ -1,6 +1,6 @@
 //! hx64: h9's own CPU for amd64 binaries, as a Guest of vmm/hcpu.zig
 //! (-Demu=hcpu), which has the interface. It's h86 in long mode
-//! (design/hcpu.md, hx64): the same decoder, T0, and lifter in
+//! (design/0174-hcpu.md, hx64): the same decoder, T0, and lifter in
 //! src/interp/x86/ and src/jit/x86/, instantiated with `.long`.
 //!
 //! Guest code runs on T1 (the lifter's LifterOf(.long), through
