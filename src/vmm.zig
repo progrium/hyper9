@@ -274,11 +274,16 @@ pub const Arm64Extra = struct {
 /// The x87, MMX and SSE state as FXSAVE stores it, and the thread pointer.
 pub const X86Extra = struct {
     fx: Fxsave = .{},
-    /// FS base on amd64; on 386, the base of the Linux TLS segment that
-    /// set_thread_area sets and selector 0x33 loads.
+    /// FS base on amd64; on 386, the base of Linux's first TLS segment,
+    /// GDT entry 6, which set_thread_area sets and selector 0x33 loads.
     tls: u64 = 0,
     /// GS base on amd64 (ARCH_SET_GS), which 64-bit Wine keeps its TEB in.
     gs: u64 = 0,
+    /// 386: the bases of TLS entries 7 and 8 (selectors 0x3b and 0x43),
+    /// which 32-bit Wine takes one of for %fs, and which of the three
+    /// entries set_thread_area has given out (bit 0 is entry 6).
+    tls_more: [2]u64 = @splat(0),
+    tls_used: u8 = 0,
 
     pub const init: X86Extra = .{ .fx = .{ .fcw = 0x037f, .mxcsr = 0x1f80 } };
 };

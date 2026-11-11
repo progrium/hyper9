@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h9: Windows programs, through Wine</title>
+<link rel="icon" href="data:,">
+<!-- Reached only from the ⊞ in the corner of linux.html, the way that page
+     is reached from the λ on the project page. Same plain style. -->
+<style>
+  body { max-width: 46em; margin: 1em auto; padding: 0 1em; background: #fff; color: #000; }
+  h1, .authors { text-align: center; }
+  .authors { font-size: 1.2em; font-weight: bold; margin-bottom: 0; }
+  .nav { text-align: center; }
+  abbr { text-decoration: none; border-bottom: 1px dotted; cursor: help; }
+  pre { margin-left: 2em; overflow-x: auto; }
+  /* The demo is a 1024x768 desktop, wider than the text: it breaks out of
+     the column, centered, and scrolls on a narrow screen. */
+  .wide { width: min(1060px, calc(100vw - 2em)); margin-left: 50%; transform: translateX(-50%); }
+  iframe { width: 100%; height: 860px; border: 1px solid #888; }
+</style>
+</head>
+<body>
+
+<p class="nav">[
+<a href="./">h9</a> |
+<a href="linux.html">Linux</a> |
+<a href="#about">about</a> |
+<a href="#demo">demo</a> |
+<a href="#trying">trying it</a> |
+<a href="#how">how it works</a> |
+<a href="#gaps">gaps</a> ]</p>
+
+<h1>h9: Windows programs, through Wine</h1>
+
+<p class="authors"><a href="https://github.com/progrium">Jeff Lindsay</a>, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr></p>
+
+<h2 id="about">About</h2>
+
+<p>
+h9 doesn't run Windows programs itself.
+It runs <a href="linux.html">Linux programs</a>,
+and <a href="https://www.winehq.org/">Wine</a> is a Linux program that runs Windows ones.
+So a Windows <tt>.exe</tt> runs in h9 as Wine's guest,
+with Wine's system calls going to h9's Plan 9 kernel like any Linux program's.
+</p>
+
+<p>
+There is no Linux kernel and no X server.
+Wine draws through <tt>winedraw</tt>, a display driver for Wine
+that h9 adds: each Windows window is a window on Plan 9's <tt>/dev/draw</tt>,
+and the mouse and keyboard come from <tt>/dev/mouse</tt> and <tt>/dev/kbd</tt>.
+</p>
+
+<h2 id="demo">Demo</h2>
+
+<p>
+Below is h9's browser host running Alpine Linux's 32-bit Wine 11,
+unchanged, on h9's own 386 CPU in a Web Worker.
+The desktop, its taskbar, and the programs on it are Wine's own:
+Minesweeper, Notepad, Clock, File Manager, WordPad,
+Command Prompt, Registry Editor, and Task Manager,
+each a Windows program Wine ships.
+Double-click an icon to start another.
+</p>
+
+<p>
+Give it a minute or two.
+Wine starts a dozen processes before the first window,
+each loading its DLLs on an emulated CPU,
+and the page downloads Wine first, about 80 MB.
+It needs JavaScript Promise Integration, which Chrome and Edge have from version 137.
+The demo can also be <a href="demo/?wine">opened on its own page</a>.
+</p>
+
+<div class="wide">
+<iframe src="demo/?wine" title="h9 running Wine's desktop and Windows programs in the browser" loading="lazy"></iframe>
+</div>
+
+<p>
+The browser has no amd64 CPU, so this is 32-bit Wine on
+<a href="https://github.com/progrium/hyper9/blob/main/design/0105-linux-i386.md">h9's 386 Linux support</a>.
+Wine needed two things from it that no other program had:
+three thread-local storage entries rather than one,
+and <tt>IRET</tt> back to user mode, which Wine's system call return uses.
+</p>
+
+<h2 id="trying">Trying it</h2>
+
+<p>
+On an x86_64 Linux host, h9 runs 64-bit Wine the same way.
+<a href="https://github.com/progrium/hyper9/blob/main/docs/windows.md">Running Windows programs</a>
+walks through it: a Wine root, a prefix in your directory,
+then console programs and programs with windows.
+</p>
+
+<pre>
+scripts/wine-root.sh                  # Alpine with Wine 11
+win hello.exe "two words" x           # a console program
+h9 --gfx --root "$WINEROOT" wine notepad
+</pre>
+
+<h2 id="how">How it works</h2>
+
+<ul>
+<li><b>One screen, many processes.</b> The first Wine process to draw
+  makes a public screen over h9's window, and each process after it
+  joins that screen. Every Windows top-level window is a window on it,
+  so the draw device stacks and clips windows across processes,
+  as it does for rio's.</li>
+<li><b>Surfaces.</b> Wine renders each window into memory, and the driver
+  sends the parts that changed through an image of its own,
+  in the pixel format Windows uses, which is the same as draw's.</li>
+<li><b>Input.</b> One Wine process reads the mouse and keyboard
+  for all of them, and Wine's server routes each event to the window
+  under the pointer or with the focus.</li>
+<li><b>The desktop.</b> Here Wine runs a desktop of its own,
+  with wallpaper, icons, and a taskbar,
+  drawn by Wine into the bottom window.</li>
+</ul>
+
+<p>
+The <a href="https://github.com/progrium/hyper9/blob/main/design/wine-draw.md">wine-draw proposal</a>
+has the design.
+</p>
+
+<h2 id="gaps">Gaps</h2>
+
+<ul>
+<li>Starting is slow on the emulator; a program after the first
+  starts in a few seconds.</li>
+<li>No OpenGL or Vulkan, clipboard, or keyboard layout other than US.</li>
+<li>Resizing h9's window doesn't resize Wine's screen.</li>
+<li>Alpine's 32-bit musl rounds wrongly at the x87 precision Windows
+  programs run with, which made every window 96 times too big;
+  the demo preloads a <tt>roundf</tt> that doesn't care.</li>
+</ul>
+
+</body>
+</html>

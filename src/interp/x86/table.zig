@@ -97,6 +97,11 @@ pub const Op = enum(u8) {
     call,
     call_ind,
     ret,
+    /// RETF and IRET to the same privilege: the only far returns ring 3
+    /// can make, which 32-bit Wine's syscall return uses to restore EFLAGS
+    /// with the jump.
+    retf,
+    iret,
     loop,
     loope,
     loopne,
@@ -471,12 +476,12 @@ pub const table: []const Row = blk: {
         g(0xc7, 0, .{ .op = .mov, .size = .v, .dst = .E, .src = .I, .imm = .v }),
         r(0xc8, .{ .op = .enter, .imm = .wb, .ir = esp | ebp, .iw = esp | ebp }),
         r(0xc9, .{ .op = .leave, .ir = esp | ebp, .iw = esp | ebp }),
-        r(0xca, .{ .op = .gp, .imm = .w, .end = true }),
-        r(0xcb, .{ .op = .gp, .end = true }),
+        r(0xca, .{ .op = .retf, .imm = .w, .ir = esp, .iw = esp, .end = true }),
+        r(0xcb, .{ .op = .retf, .ir = esp, .iw = esp, .end = true }),
         r(0xcc, .{ .op = .int3, .end = true }),
         r(0xcd, .{ .op = .int, .imm = .b, .end = true }),
         r(0xce, .{ .op = .into, .end = true }),
-        r(0xcf, .{ .op = .gp, .end = true }),
+        r(0xcf, .{ .op = .iret, .ir = esp, .iw = esp, .end = true }),
     } ++ grp2(0xd0, .b, .one, .none) ++ grp2(0xd1, .v, .one, .none) ++
         grp2(0xd2, .b, .CL, .none) ++ grp2(0xd3, .v, .CL, .none) ++ [_]Row{
         r(0xd4, .{ .op = .aam, .imm = .b, .ir = eax, .iw = eax, .end = true }),

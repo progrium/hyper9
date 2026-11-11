@@ -20,6 +20,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -626,6 +627,36 @@ static void many_fds(void) {
 	printf("ok many_fds\n");
 }
 
+/* PR_SET_NAME with a name longer than Linux's 15 bytes keeps the first
+ * 15, as Wine names its threads. */
+static void prctl_name(void) {
+	CHECK("prctl_name", prctl(PR_SET_NAME, "a-much-longer-thread-name", 0, 0, 0) == 0);
+	CHECK("prctl_name", prctl(PR_SET_NAME, "short", 0, 0, 0) == 0);
+	printf("ok prctl_name\n");
+}
+
+/* /dev/9 is the machine's 9front /dev (design/wine-draw.md): the console
+ * files always, and the window's draw files only with --gfx, where
+ * draw/new answers with the screen's 144 bytes of image info. */
+static void dev9(void) {
+	struct stat st;
+	char b[160];
+	CHECK("dev9", stat("/dev/9", &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK("dev9", stat("/dev/9/cons", &st) == 0);
+	int fd = open("/dev/9/draw/new", O_RDWR);
+	if (fd < 0) {
+		CHECK("dev9", errno == ENOENT);
+		printf("ok dev9\n");
+		return;
+	}
+	CHECK("dev9", read(fd, b, sizeof b) == 144);
+	close(fd);
+	fd = open("/dev/9/winname", O_RDONLY);
+	CHECK("dev9", fd >= 0 && read(fd, b, sizeof b) > 0);
+	close(fd);
+	printf("ok dev9 gfx\n");
+}
+
 /* WebKit's shared memory: shm_open, unlink, then ftruncate and mmap
  * the open file; and memfd_create, which does the same in one call.
  * The file is gone from the directory but still sized, stat-able, and
@@ -777,6 +808,41 @@ static void lazy_map(void) {
 	printf("ok lazy_map\n");
 }
 
+/* MADV_DONTNEED on a page of the program's own writable data segment,
+ * which the file backs, leaves the file's bytes: Bun's standalone
+ * executables (Claude Code) hand back the pages of their embedded
+ * sources in such a segment and read them again later. */
+static char image_page[2 * 4096] __attribute__((aligned(4096))) = {[0] = 'i', [4095] = 'm', [4096] = 'g'};
+
+static void image_dontneed(void) {
+	volatile char *p = image_page;
+	CHECK("image_dontneed", madvise(image_page, sizeof image_page, MADV_DONTNEED) == 0);
+	CHECK("image_dontneed", p[0] == 'i' && p[4095] == 'm' && p[4096] == 'g');
+	printf("ok image_dontneed\n");
+}
+
+/* A path through /proc/self/fd/N, for a directory opened O_PATH, walks
+ * on from that directory, as Claude Code makes its temp directories. */
+static void proc_fd_dir(void) {
+	char dir[64], via[96], file[96];
+	snprintf(dir, sizeof dir, "/tmp/procfd.%d", (int)getpid());
+	CHECK("proc_fd_dir", mkdir(dir, 0700) == 0);
+	int d = open(dir, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	CHECK("proc_fd_dir", d >= 0);
+	snprintf(via, sizeof via, "/proc/self/fd/%d/sub", d);
+	CHECK("proc_fd_dir", mkdir(via, 0700) == 0);
+	snprintf(via, sizeof via, "/proc/self/fd/%d/sub/f", d);
+	int f = open(via, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	CHECK("proc_fd_dir", f >= 0 && write(f, "hi", 2) == 2 && close(f) == 0);
+	snprintf(file, sizeof file, "%s/sub/f", dir);
+	struct stat st;
+	CHECK("proc_fd_dir", stat(file, &st) == 0 && st.st_size == 2);
+	CHECK("proc_fd_dir", unlink(via) == 0 && stat(file, &st) < 0 && errno == ENOENT);
+	snprintf(via, sizeof via, "/proc/self/fd/%d/sub", d);
+	CHECK("proc_fd_dir", rmdir(via) == 0 && close(d) == 0 && rmdir(dir) == 0);
+	printf("ok proc_fd_dir\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -789,6 +855,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
 		if (all || !strcmp(n, "private_sees")) private_sees();
 		if (all || !strcmp(n, "gs_base")) gs_base();
+		if (all || !strcmp(n, "dev9")) dev9();
+		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
 		if (all || !strcmp(n, "read_cache")) read_cache();
@@ -806,6 +874,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "unlinked")) unlinked();
 		if (all || !strcmp(n, "shm_pass")) shm_pass();
 		if (all || !strcmp(n, "lazy_map")) lazy_map();
+		if (all || !strcmp(n, "image_dontneed")) image_dontneed();
+		if (all || !strcmp(n, "proc_fd_dir")) proc_fd_dir();
 	}
 	return failed;
 }

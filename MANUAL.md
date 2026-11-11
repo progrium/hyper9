@@ -1672,6 +1672,31 @@ host$ h9 --root ws://localhost:8080/9p ls /
 host$ h9 --rc 'mkdir /tmp/fs && wsmount ws://localhost:8080/9p /tmp/fs && ls /tmp/fs'
 ```
 
+Sharing the host's network with a machine that has none, such as one in a
+browser tab. One h9 serves its `/net`, and the other mounts it before its
+own `/net/ws`, so `dial(2)` and `/net/tcp` go through the host, under the
+serving machine's `--net` and `--net-allow`. Here the second machine may
+only reach the listener, and still fetches from the host's port 8000:
+
+```sh
+host$ h9 --serve ws://127.0.0.1:5640/ --serve-root /net --serve-net &
+host$ h9 --net-allow 'tcp!127.0.0.1!5640' --rc 'wsmount -b ws://127.0.0.1:5640/ /net && cat /net/tcp/clone'
+```
+
+In the browser demo, add `--serve-origin` with the page's origin (and a
+`--serve-token` beyond loopback), then type the same `wsmount -b` line.
+Linux programs use the mount too, since their sockets open `/net`
+through the namespace: from busybox, `/9/bin/wsmount -b
+ws://127.0.0.1:5640/ /net` and then `wget` fetches through the host. The
+demo's `?linux` mode has `/9/bin/wsmount` as well: its page stacks a slim
+arm64 9front tree at `/9` over the Alpine archive with `createMachine`'s
+`layers`, a list of archives, each a URL or `{ url, at }`, unpacked in
+order, and names it with a second `--root /9`. Each
+connection carries about 7 sockets waiting at once, since each holds one
+of the server's 8 exportfs processes; mount `/net` over more connections
+for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`
+reports it, so an unconnected server can't tell its clients apart.
+
 Mounting a remote 9P server the network policy allows:
 
 ```sh
@@ -1895,7 +1920,7 @@ kernel that serves 9front programs, so it runs in the same machine, with
 the same namespace, sandbox, network policy, and limits. Static and dynamic
 programs for arm64 and amd64 run, built against musl or glibc; Alpine's
 busybox, `apk`, Python, SQLite, PostgreSQL, Redis, Git, the Go and Zig
-toolchains, fzf, htop, and ripgrep have all been run this way.
+toolchains, fzf, htop, ripgrep, and Claude Code have all been run this way.
 
 **A single binary.** A static Linux program on the host runs like a 9front
 one, by its host path, with no Linux tree at all:
@@ -1937,7 +1962,7 @@ ls`) is looked up on the Linux `PATH`, and an absolute path is a path in the
 Linux view, so `h9 --root ./alpine /9/bin/ls` runs 9front's `ls`. `--rc`
 always runs 9front's rc. Each program then runs as what it is: an ELF exec'd
 from 9front runs as Linux, and an a.out exec'd from Linux runs as 9front, so
-the two kinds pipe into each other freely. A 9front program reaches the
+the two kinds pipe into each other freely. A script that starts `#!/bin/rc` runs with 9front's rc when the Linux root has no `/bin/rc`, so `/9/bin/wsmount` works from busybox, and its mount is the shell's. A 9front program reaches the
 Linux tree as `'#λ'` (quoted in rc), so `'#λ'/bin/busybox ls` runs
 busybox from rc.
 
@@ -1949,7 +1974,7 @@ directories h9 provides on top:
 | `/9` | The machine's 9front root: `/9/bin/ls` is 9front's `ls` |
 | `/tmp` | The machine's private `/tmp`, the same files a 9front program sees there |
 | `/mnt/term` | The shared host paths; your cwd is `/mnt/term/cwd`, and programs start in it |
-| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, and `shm`, a private in-memory directory as a tmpfs would be |
+| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, `shm`, a private in-memory directory as a tmpfs would be, and `9`, the machine's 9front `/dev` as it was at start, so with `--gfx` a Linux program can open `/dev/9/draw`, `mouse`, and `kbd` |
 | `/proc`, `/sys` | What libc, busybox, Python, and htop read: `cpuinfo` (following `--cpus`), `meminfo`, `mounts`, and per-process `stat`, `status`, `maps`, `cmdline`, `exe`, `fd`, and `task` |
 | `/etc/resolv.conf` | Your host's DNS servers, when the root has none |
 
@@ -2719,6 +2744,9 @@ They change faster than this manual, as proposals land.
 - [Recreating Docker](docs/containers.md): Docker-style images, layers,
   volumes, ports, and limits, from slim root trees and Linux images pulled
   from Docker Hub to images served over 9P, ending in a docker-like CLI.
+- [Running Windows programs](docs/windows.md): Wine in a Linux root, a
+  prefix that lasts between runs, console programs, and programs with
+  windows through the `winedraw` display driver.
 
 ## Appendices
 

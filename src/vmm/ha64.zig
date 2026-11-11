@@ -1,7 +1,8 @@
 //! ha64: h9's own CPU for arm64 binaries, as a Guest of vmm/zemu.zig
 //! (-Demu=zig), which has the interface. Its CPU is in src/interp/a64/
 //! (T0, the interpreter) and src/jit/a64/, with the shared JIT layer in
-//! src/jit/ (src/vcpu.zig).
+//! src/jit/ (src/vcpu.zig). On the web host T1 is src/jit/wasm_t1.zig's,
+//! compiling hot blocks to wasm.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,12 +13,14 @@ const cache = @import("vcpu").cache;
 const dispatch = @import("vcpu").dispatch;
 const emitter = @import("vcpu").emitter;
 const lift = @import("vcpu").a64.lift;
+const wasm_t1 = @import("vcpu").wasm_t1;
 const build_options = @import("build_options");
 const check_vmm = @import("vcpu").check_vmm;
 
 /// Which tier runs guest code: T0 alone, or T1 (src/jit/dispatch.zig)
-/// when the backend has a code cache and this host an emitter. T1 is the
-/// default; H9_EMU_TIER=t0 picks T0 alone (zemu.applyTier).
+/// when the backend has a code cache and this host an emitter, or on the
+/// web (wasm_t1.zig). T1 is the default; H9_EMU_TIER=t0 picks T0 alone
+/// (zemu.applyTier).
 pub const Tier = enum { t0, t1 };
 pub var tier: Tier = if (build_options.jit) .t1 else .t0;
 /// T1's emitter; null where this host has none yet, or in a -Dno-jit
@@ -98,6 +101,7 @@ pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     // -Djit-check: every region lifted and checked against T0, in T1's
     // loop (src/jit/check/vmm.zig); the emitter only runs them with tier t1.
     if (build_options.jit_check) return runT1(c, ctx, t1_emitter orelse undefined);
+    if (build_options.jit and tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx);
     if (build_options.jit and tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, em);
     // A spent budget (ctx.budget) gives `.interrupted`, as an exit request does.
     const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
@@ -130,6 +134,36 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
                 const t0_before = c.t0.retired;
                 const e = t0.run(&c.machine, 1);
                 if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(c.t0.retired -% t0_before);
+                if (e != .interrupted) return exitOf(c, e);
+                if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
+            },
+        }
+    }
+}
+
+/// T1 on the web host (src/jit/wasm_t1.zig): compiled code for hot
+/// blocks, and T0 to the next few taken branches for cold ones, so their
+/// heads come back to be counted.
+fn runWasmT1(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
+    ctx.interp = @intFromPtr(&lift.interp);
+    const cfg: wasm_t1.Config = .{ .frontend = lift.frontend, .pc_off = @offsetOf(t0.Cpu, "pc") };
+    while (true) {
+        // As in runT1: ctx.retired runs on from Cpu.retired.
+        ctx.retired = c.t0.retired;
+        const before = ctx.retired;
+        const r = wasm_t1.run(std.heap.c_allocator, ctx, cfg);
+        c.t0.retired +%= ctx.retired -% before;
+        switch (r) {
+            .svc => return exitOf(c, .syscall),
+            .interrupted => return .interrupted,
+            .t0, .cold => {
+                if (ctx.budget <= 0) return .interrupted;
+                const t0_before = c.t0.retired;
+                const e = if (r == .t0)
+                    t0.run(&c.machine, 1)
+                else
+                    t0.runBranches(&c.machine, @intCast(ctx.budget), wasm_t1.cold_branches);
+                if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(c.t0.retired -% t0_before, std.math.maxInt(i63)));
                 if (e != .interrupted) return exitOf(c, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
             },

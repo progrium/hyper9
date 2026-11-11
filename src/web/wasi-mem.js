@@ -15,36 +15,59 @@ const RIGHTS = 0x1fffffffn;
 const TTY_RIGHTS = RIGHTS & ~((1n << 2n) | (1n << 5n));
 const PREOPEN = 3;
 
-/** Parses a root archive into a tree of { dir, mode, data, kids, ino }. */
-export function parseRoot(buf) {
+/**
+ * Parses a root archive into a tree of { dir, mode, data, kids, ino }, or,
+ * given `into`, a tree from an earlier parseRoot, adds the archive's
+ * entries to it under the directory `at`, as putNode does: one of the
+ * createMachine's layers.
+ */
+export function parseRoot(buf, into = null, at = '/') {
   const b = new Uint8Array(buf);
   const magic = new TextDecoder().decode(b.subarray(0, 8));
   if (magic !== 'h9root1\n') throw new Error('not an h9 root archive');
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  let ino = 1;
-  const root = { dir: true, mode: S_IFDIR | 0o775, kids: new Map(), ino: ino++ };
+  const root = into ?? { dir: true, mode: S_IFDIR | 0o775, kids: new Map(), ino: 1, nextIno: 2 };
+  const prefix = at.replace(/\/+$/, '');
   const dec = new TextDecoder();
   let i = 8;
+  // Each entry's data, for a later entry that shares it: size 0xffffffff
+  // and an earlier entry's index in place of data (tools/webroot.zig).
+  const datas = [];
   while (i < b.length) {
     const n = dv.getUint32(i, true); i += 4;
     const path = dec.decode(b.subarray(i, i + n)); i += n;
     const mode = dv.getUint32(i, true); i += 4;
     const size = dv.getUint32(i, true); i += 4;
-    const data = b.subarray(i, i + size); i += size;
-    const parts = path.split('/');
-    let d = root;
-    for (const p of parts.slice(0, -1)) {
-      let k = d.kids.get(p);
-      if (!k) { k = { dir: true, mode: S_IFDIR | 0o775, kids: new Map(), ino: ino++ }; d.kids.set(p, k); }
-      d = k;
-    }
-    const name = parts[parts.length - 1];
-    const dir = (mode & 0o170000) === S_IFDIR;
-    const old = d.kids.get(name);
-    if (old && dir) continue;
-    d.kids.set(name, dir ? { dir, mode, kids: new Map(), ino: ino++ } : { dir, mode, data, ino: ino++ });
+    let data;
+    if (size === 0xffffffff) { data = datas[dv.getUint32(i, true)]; i += 4; }
+    else { data = b.subarray(i, i + size); i += size; }
+    datas.push(data);
+    putNode(root, `${prefix}/${path}`, mode, data);
   }
   return root;
+}
+
+/**
+ * Adds a file or directory to a tree from parseRoot, making its parent
+ * directories. A file replaces what was at its path; a directory keeps an
+ * existing one. h9 looks names up in the tree on each walk, so
+ * this works while the machine runs, though a file the guest has written
+ * or removed at the path is the overlay's and hides it.
+ */
+export function putNode(root, path, mode, data) {
+  const parts = path.split('/').filter((p) => p !== '' && p !== '.');
+  if (!parts.length || parts.includes('..')) throw new Error(`bad path: ${path}`);
+  let d = root;
+  for (const p of parts.slice(0, -1)) {
+    let k = d.kids.get(p);
+    if (!k) { k = { dir: true, mode: S_IFDIR | 0o775, kids: new Map(), ino: root.nextIno++ }; d.kids.set(p, k); }
+    if (!k.dir) throw new Error(`not a directory: ${p} in ${path}`);
+    d = k;
+  }
+  const name = parts[parts.length - 1];
+  const dir = (mode & 0o170000) === S_IFDIR;
+  if (dir && d.kids.get(name)?.dir) return;
+  d.kids.set(name, dir ? { dir, mode, kids: new Map(), ino: root.nextIno++ } : { dir, mode, data, ino: root.nextIno++ });
 }
 
 /**

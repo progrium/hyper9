@@ -152,7 +152,7 @@ const sema_fixtures = [_][]const u8{
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
-const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files" };
+const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "drawpeek", "tls386" };
 
 /// Programs in tests/fixtures/gfx, for tests/backends.zig's [gfx] cases on
 /// the headless backend, with the same lib.S.
@@ -1086,6 +1086,39 @@ pub fn build(b: *std.Build) void {
         const archive = mk.addOutputFileArg("linux.h9a");
         web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "linux.h9a").step);
     } else |_| {}
+    // The 9front layer ?linux puts at /9 (nine-arm64.h9a), from the arm64
+    // slim root `zig build slim -Darch=arm64` makes and
+    // src/web/nine-arm64.list, so a Linux program there has rc and
+    // wsmount; left out without one.
+    const web_nine_root = b.option([]const u8, "web-nine-arm64-root", "arm64 9front root tree for ?linux's 9front layer (default .local/9front/slim-<release>-arm64)") orelse
+        b.pathFromRoot(b.fmt(".local/9front/slim-{s}-arm64", .{pin(pins, "NINEFRONT_RELEASE")}));
+    if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_nine_root, "arm64/bin/rc" }), .{})) {
+        const webroot = b.addExecutable(.{
+            .name = "webroot",
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        });
+        const mk = b.addRunArtifact(webroot);
+        mk.addArg(web_nine_root);
+        mk.addFileArg(b.path("src/web/nine-arm64.list"));
+        const archive = mk.addOutputFileArg("nine-arm64.h9a");
+        web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "nine-arm64.h9a").step);
+    } else |_| {}
+    // The demo page's Wine root archive for ?wine (site/wine.html), from
+    // the root scripts/wine-web.sh makes and src/web/wine.list; left out
+    // without one.
+    const web_wine_root = b.option([]const u8, "web-wine-root", "386 Wine root tree for the browser host's Wine archive (default .local/linux/wine-web)") orelse
+        b.pathFromRoot(".local/linux/wine-web");
+    if (std.Io.Dir.cwd().access(b.graph.io, b.pathJoin(&.{ web_wine_root, "root/.wine/system.reg" }), .{})) {
+        const webroot = b.addExecutable(.{
+            .name = "webroot",
+            .root_module = b.createModule(.{ .root_source_file = b.path("tools/webroot.zig"), .target = b.graph.host, .optimize = .ReleaseSafe }),
+        });
+        const mk = b.addRunArtifact(webroot);
+        mk.addArg(web_wine_root);
+        mk.addFileArg(b.path("src/web/wine.list"));
+        const archive = mk.addOutputFileArg("wine.h9a");
+        web.install.dependOn(&b.addInstallFileWithDir(archive, .{ .custom = "web" }, "wine.h9a").step);
+    } else |_| {}
     // The demo page in Chromium through Playwright (tests/web/browser.mjs).
     const web_test = b.addSystemCommand(&.{ "node", "tests/web/browser.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
     web_test.setCwd(b.path("."));
@@ -1172,12 +1205,21 @@ pub fn build(b: *std.Build) void {
         for (linux_fixture_names) |name| {
             const m = b.createModule(.{ .target = lt, .optimize = .ReleaseSmall, .link_libc = true });
             m.addCSourceFile(.{ .file = b.path(b.fmt("tests/fixtures/linux/{s}.c", .{name})), .flags = &.{ "-std=c11", "-D_GNU_SOURCE" } });
+            // drawpeek speaks draw through src/wine/draw9.h (design/wine-draw.md).
+            m.addIncludePath(b.path("src/wine"));
             const fx = b.addExecutable(.{ .name = name, .root_module = m, .linkage = .static });
             const inst = b.addInstallArtifact(fx, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("fixtures/linux/{s}", .{arch}) } } });
             linux_fixtures.dependOn(&inst.step);
         }
     }
     b.getInstallStep().dependOn(linux_fixtures);
+
+    // winedraw (design/wine-draw.md): Wine's display driver for draw, built
+    // with zig cc against the pinned Wine headers (scripts/fetch.sh wine),
+    // into zig-out/wine/x86_64-{windows,unix}, the layout of Wine's own
+    // lib/wine; and wdtest.exe, the Win32 program its cases run.
+    const wine_step = b.step("wine", "Build winedraw.drv and winedraw.so, Wine's display driver for draw, into zig-out/wine (needs scripts/fetch.sh wine)");
+    addWine(b, wine_step);
 
     // Proposal demos that aren't integration cases, by the proposal's slug;
     // `zig build proposal -Dp=...` runs them along with its tagged cases.
@@ -1323,12 +1365,12 @@ pub fn build(b: *std.Build) void {
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
     // -Dweb runs them on the web host under Node instead: h9-node on h9's
     // own 386 CPU (h86), with the root's 386 binaries
-    // (design/0012-browser-host.md).
-    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386)") orelse false;
+    // (design/0012-browser-host.md), or with -Darch=arm64 on ha64.
+    const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386, or arm64 with -Darch=arm64)") orelse false;
     const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
         .bin = b.getInstallPath(.{ .custom = "web" }, "h9-node"),
-        .arch = "386",
+        .arch = test_arch orelse "386",
         .web = true,
         .step = web.install,
         // With -Demu=unicorn, the native h9 serves the WebSocket cases'
@@ -1624,6 +1666,10 @@ pub fn build(b: *std.Build) void {
     const run_backend_tests = b.addRunArtifact(backend_tests);
     // The [gfx] cases that run rio and acme take them from the root tree.
     run_backend_tests.setEnvironmentVariable("H9_TEST_ROOT", root);
+    // The wine-draw case's driver and program, from zig build wine
+    // (design/wine-draw.md); it also needs H9_TEST_WINE_ROOT, from the
+    // environment.
+    run_backend_tests.setEnvironmentVariable("H9_TEST_WINE", b.getInstallPath(.prefix, ""));
     if (os == .macos and b.graph.host.result.os.tag == .macos) {
         const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
         sign.addFileArg(b.path("h9.entitlements"));
@@ -1788,6 +1834,81 @@ fn addX64check(b: *std.Build, vcpu: *std.Build.Module) void {
     cmp.addFileArg(cases);
     cmp.addFileArg(answers);
     step.dependOn(&cmp.step);
+}
+
+/// The steps behind `zig build wine` (design/wine-draw.md): winedraw for
+/// amd64 Wine and for 386 Wine, which the browser's Wine demo runs.
+fn addWine(b: *std.Build, step: *std.Build.Step) void {
+    const inc = ".local/src/wine/include";
+    b.build_root.handle.access(b.graph.io, inc ++ "/wine/gdi_driver.h", .{}) catch {
+        step.dependOn(&b.addFail(inc ++ " is missing; run scripts/fetch.sh wine").step);
+        return;
+    };
+    const builtin_tool = b.addExecutable(.{
+        .name = "winebuiltin",
+        .root_module = b.createModule(.{ .root_source_file = b.path("tools/winebuiltin.zig"), .target = b.graph.host }),
+    });
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = builtin_tool.root_module })).step);
+    const Arch = struct { unix: []const u8, pe: []const u8, dir: []const u8, entry: []const u8 };
+    const arches = [_]Arch{
+        .{ .unix = "x86_64-linux-musl", .pe = "x86_64-windows-gnu", .dir = "x86_64", .entry = "winedraw_entry" },
+        // stdcall decorates the entry point's name on 386.
+        .{ .unix = "x86-linux-musl", .pe = "x86-windows-gnu", .dir = "i386", .entry = "winedraw_entry@12" },
+    };
+    for (arches) |a| {
+        const zig = b.graph.zig_exe;
+        // winedraw.so needs win32u.so, which Wine provides: an empty library
+        // of that name makes the link list it (src/wine/win32u_stub.c).
+        const stub = b.addSystemCommand(&.{ zig, "cc", "-target", a.unix, "-shared", "-fPIC", "-Wl,-soname,win32u.so", "-o" });
+        const stub_so = stub.addOutputFileArg("win32u.so");
+        stub.addFileArg(b.path("src/wine/win32u_stub.c"));
+
+        const so = b.addSystemCommand(&.{ zig, "cc", "-target", a.unix, "-shared", "-fPIC", "-O2", "-Wall", "-DWINE_UNIX_LIB", "-D__WINESRC__", "-Wl,-soname,winedraw.so", "-Wl,-rpath,$ORIGIN" });
+        so.addPrefixedDirectoryArg("-I", b.path("src/wine"));
+        so.addPrefixedDirectoryArg("-I", b.path(inc));
+        so.addArg("-o");
+        const so_out = so.addOutputFileArg("winedraw.so");
+        so.addFileArg(b.path("src/wine/winedraw.c"));
+        so.addArg("-Wl,--no-as-needed");
+        so.addFileArg(stub_so);
+        so.addFileInput(b.path("src/wine/draw9.h"));
+        so.addFileInput(b.path("src/wine/unixlib.h"));
+
+        // The PE side links no C runtime, only kernel32 (src/wine/dllmain.c).
+        const obj = b.addSystemCommand(&.{ zig, "cc", "-target", a.pe, "-c", "-O2", "-Wall" });
+        obj.addPrefixedDirectoryArg("-I", b.path("src/wine"));
+        obj.addArg("-o");
+        const obj_out = obj.addOutputFileArg("dllmain.o");
+        obj.addFileArg(b.path("src/wine/dllmain.c"));
+        obj.addFileInput(b.path("src/wine/unixlib.h"));
+        const dll = b.addSystemCommand(&.{ zig, "cc", "-target", a.pe, "-shared", "-nostdlib", b.fmt("-Wl,--entry={s}", .{a.entry}), "-o" });
+        // Named as installed: Wine finds a builtin's file by the name in its
+        // export directory, which the linker takes from the output's.
+        const dll_out = dll.addOutputFileArg("winedraw.drv");
+        dll.addFileArg(obj_out);
+        dll.addArg("-lkernel32");
+        const mark = b.addRunArtifact(builtin_tool);
+        mark.addFileArg(dll_out);
+        const drv_out = mark.addOutputFileArg("winedraw.drv");
+
+        const exe = b.addSystemCommand(&.{ zig, "cc", "-target", a.pe, "-O2", "-Wall", "-o" });
+        const exe_out = exe.addOutputFileArg("wdtest.exe");
+        exe.addFileArg(b.path("tests/fixtures/wine/wdtest.c"));
+        exe.addArgs(&.{ "-luser32", "-lgdi32" });
+
+        step.dependOn(&b.addInstallFileWithDir(so_out, .{ .custom = b.fmt("wine/{s}-unix", .{a.dir}) }, "winedraw.so").step);
+        step.dependOn(&b.addInstallFileWithDir(drv_out, .{ .custom = b.fmt("wine/{s}-windows", .{a.dir}) }, "winedraw.drv").step);
+        step.dependOn(&b.addInstallFileWithDir(exe_out, .{ .custom = b.fmt("fixtures/wine/{s}", .{a.dir}) }, "wdtest.exe").step);
+
+        // 32-bit Wine needs a roundf that works at Windows' x87 precision,
+        // preloaded (src/wine/roundf386.c).
+        if (std.mem.eql(u8, a.dir, "i386")) {
+            const fix = b.addSystemCommand(&.{ zig, "cc", "-target", a.unix, "-shared", "-fPIC", "-O2", "-Wall", "-o" });
+            const fix_out = fix.addOutputFileArg("roundf386.so");
+            fix.addFileArg(b.path("src/wine/roundf386.c"));
+            step.dependOn(&b.addInstallFileWithDir(fix_out, .{ .custom = "wine/i386-unix" }, "roundf386.so").step);
+        }
+    }
 }
 
 /// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against

@@ -5342,6 +5342,24 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
 // 32-bit x86 Linux programs (design/0105-linux-i386.md): Alpine's x86 root
 // and the 386 fixtures on the emulator, whatever the host. With
 // -Darch=386 the cases above run them too.
+// 32-bit Wine takes a second TLS entry for %fs, beside libc's %gs, and
+// returns from its syscalls with IRET (tests/fixtures/linux/tls386.c).
+test "set_thread_area gives TLS entries 6 to 8, %fs keeps its own base, and IRET returns at ring 3 [105]" {
+    try skipPending(@src().fn_name);
+    const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
+    const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
+    var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(fixtures, "tls386"), .{}) catch return error.SkipZigTest;
+    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--cwd", fixtures, "/mnt/term/cwd/tls386" }, null, null, 60_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
+    errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
+    try std.testing.expectEqualStrings("ok tls386\n", p.stdout);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, p.term);
+}
+
 test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fork (demo) [105]" {
     try skipPending(@src().fn_name);
     const h9 = getenv(0, "H9_TEST_BIN") orelse return error.SkipZigTest;
@@ -5404,6 +5422,18 @@ test "9front and Linux programs share pipelines both ways (demo) [18]" {
     errdefer std.debug.print("stderr: {s}\n", .{nine.err});
     try std.testing.expect(std.mem.startsWith(u8, nine.out, "3\n"));
     try std.testing.expect(std.mem.indexOf(u8, nine.out, "linux: signal 15") != null);
+}
+
+test "a Linux program runs a #!/bin/rc script with 9front's rc [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // The Linux root has no /bin/rc, so it's 9front's; a script under /9,
+    // such as h9's wsmount, is opened by rc at its 9front path.
+    const r = try runLinux(&le, true, &.{ "sh", "-c", "printf '#!/bin/rc\\necho rc $*\\n' >/tmp/s && chmod +x /tmp/s && /tmp/s a b; /9/bin/wsmount; echo $?" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("rc a b\n1\n", r.out);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "usage: wsmount") != null);
 }
 
 // What databases need of files (design/0018-linux-personality.md),
@@ -5533,6 +5563,18 @@ test "madvise MADV_FREE is EINVAL, and MADV_DONTNEED zeroes [18]" {
     try netCase(&le, &.{ "/mnt/term/cwd/files", "madv_free" }, "ok madv_free\n");
 }
 
+test "MADV_DONTNEED on the program's own data segment leaves the file's bytes [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "image_dontneed" }, "ok image_dontneed\n");
+}
+
+test "a path through /proc/self/fd/N walks on from the directory the fd names [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_fd_dir" }, "ok proc_fd_dir\n");
+}
+
 test "System V shared memory: a keyed segment, shared across fork, its attach count, and removal [18]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5543,6 +5585,34 @@ test "a process that exits with a file mapped shared writes it back on the way o
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "map_exit" }, "ok map_exit\n");
+}
+
+test "prctl PR_SET_NAME keeps the first 15 bytes of a longer name [18]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "prctl_name" }, "ok prctl_name\n");
+}
+
+test "/dev/9 in the Linux view is the machine's 9front /dev, with no draw files without --gfx [wine-draw]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "dev9" }, "ok dev9\n");
+}
+
+/// Whether h9 was built with the headless window (-Dgfx=headless), whose
+/// screen the wine-draw cases can open without a display.
+fn headlessGfx(h9: []const u8) !bool {
+    const v = try runProcess(&.{ h9, "--version" }, null);
+    defer gpa.free(v.stdout);
+    defer gpa.free(v.stderr);
+    return std.mem.indexOf(u8, v.stdout, "gfx: headless\n") != null;
+}
+
+test "with --gfx, a Linux program opens the window's draw files through /dev/9 [wine-draw]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (!try headlessGfx(le.h9)) return error.SkipZigTest;
+    try netCase(&le, &.{ "--gfx", "/mnt/term/cwd/files", "dev9" }, "ok dev9 gfx\n");
 }
 
 test "a fixed MAP_SHARED file mapping can sit at any page beside private ones, even across a MiB, and fork, munmap, and remap keep it right [18]" {
@@ -5762,6 +5832,44 @@ test "TCP echo between a Linux client and a 9front server [50]" {
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqualStrings("ping\n", r.out);
+}
+
+/// Runs net.c's `case` in a Linux program whose /net is another h9's,
+/// served with --serve-net and mounted before its own, under a policy
+/// that lets the client reach only the server: every socket is the
+/// serving machine's.
+fn servedNetCase(comptime src: std.builtin.SourceLocation, case: []const u8) !void {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(src, &le);
+    const e = try serveEnv(src);
+    var t = try startServer(e, &.{ "--net=enable", "--serve", "tcp!127.0.0.1!0", "--serve-root", "/net", "--serve-net" });
+    defer t.deinit();
+    var ab: [128]u8 = undefined;
+    const addr = try servedAddr(&t, &ab);
+    var cb: [256]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cb, "/9/bin/srv -b '{s}' hostnet /net >/dev/null && /mnt/term/cwd/net {s}", .{ addr, case });
+    const r = try runLinux(&le, true, &.{ "--net-allow", addr, "sh", "-c", cmd });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    var wb: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&wb, "ok {s}\n", .{case}), r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "TCP echo through another h9's /net, mounted, with listen and accept [50, 35]" {
+    try servedNetCase(@src(), "tcp_echo");
+}
+
+test "non-blocking connect and accept through a mounted /net [50, 35]" {
+    try servedNetCase(@src(), "nb_connect");
+}
+
+test "shutdown(SHUT_WR) and EPOLLRDHUP through a mounted /net [50, 35]" {
+    try servedNetCase(@src(), "half_close");
+}
+
+test "a Linux process that exits holding a mounted /net's connection closes it [50, 35]" {
+    try servedNetCase(@src(), "exit_eof");
 }
 
 test "Go net/http server and client in one Linux program [50]" {

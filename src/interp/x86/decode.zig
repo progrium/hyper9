@@ -615,7 +615,7 @@ pub fn effectsIn(comptime mode: Mode, i: *const InstOf(mode)) EffectsOf(mode) {
     }
     switch (i.op) {
         .push, .push_sreg, .pusha, .pushf, .call, .call_ind => x.mem_write = true,
-        .pop, .pop_sreg, .popa, .popf, .ret, .bound, .lseg, .xlat => x.mem_read = true,
+        .pop, .pop_sreg, .popa, .popf, .ret, .retf, .iret, .bound, .lseg, .xlat => x.mem_read = true,
         .leave => x.mem_read = true,
         .enter => {
             x.mem_write = true;
@@ -701,7 +701,7 @@ pub fn effectsIn(comptime mode: Mode, i: *const InstOf(mode)) EffectsOf(mode) {
         .into => x.flags_read = flags.OF,
         .cld, .std => x.flags_written = flags.DF,
         .pushf => x.flags_read = A | flags.DF | flags.AC | flags.ID,
-        .popf => x.flags_written = A | flags.DF | flags.AC | flags.ID,
+        .popf, .iret => x.flags_written = A | flags.DF | flags.AC | flags.ID,
         .movs, .stos, .lods => x.flags_read = flags.DF,
         .cmps, .scas => {
             x.flags_read = flags.DF;

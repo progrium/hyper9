@@ -3,8 +3,9 @@
 //! (design/hcpu.md, hx64): the same decoder, T0, and lifter in
 //! src/interp/x86/ and src/jit/x86/, instantiated with `.long`.
 //!
-//! Guest code runs on T0 (tlb.runIn(.long)), with h86's decode caches.
-//! The lifter doesn't do long mode yet, so there's no T1 here.
+//! Guest code runs on T1 (the lifter's LifterOf(.long), through
+//! dispatch.zig natively and wasm_t1.zig on the web) or on T0
+//! (tlb.runIn(.long)), with h86's decode caches. spec/hx64.md has the rest.
 
 const std = @import("std");
 const builtin = @import("builtin");

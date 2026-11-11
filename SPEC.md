@@ -283,7 +283,7 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-`-Demu=zig` builds it on h9's own CPUs instead of Unicorn, ha64 for arm64 binaries and h86 for 386 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
+`-Demu=zig` builds it on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](spec/ha64.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), and [spec/jit.md](spec/jit.md) describe. This section describes the Unicorn backend.
 
 ### Scope
 
@@ -589,7 +589,9 @@ The environment goes both ways: a Linux program gets `/env` as `NAME=value` (wit
 `isatty` is true only when h9's own stdin and stdout are terminals. The console's termios is one per machine: `TCSETS` sets raw mode from `ICANON`, and, through the optional `echo` and `crnl` on `Machine.Stdio.raw`, the host's echo from `ECHO` and its CR-to-NL mapping from `ICRNL`; `TIOCGWINSZ` is the host terminal's size, through the hook's optional `size`, or 80x24. In non-canonical mode with `VMIN` 0, a console read waits at most `VTIME` tenths of a second and may return 0 bytes. consctl also takes `echooff` and `echoon`, which keep the line discipline.
 ### Sockets and readiness
 
-A socket ([linux-net](design/0050-linux-net.md)) is a `/net` conversation, its fd the conversation's data file opened from `#I`, so `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
+A socket ([linux-net](design/0050-linux-net.md)) is a `/net` conversation, its fd the conversation's data file. `socket(2)` opens `/net/tcp/clone` or `/net/udp/clone` in the process's namespace, in the 9front view, as `dial(2)` does, so it's devip's (`#I`) unless something else is mounted on `/net`. With devip's, `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
+
+A conversation from a mounted `/net`, such as another h9's served with `--serve-net`, is devmnt's, which can't say whether a read would block, so `src/kern/linuxnet.c` attaches it to a read-ahead: a kproc reads its data into a 64 KiB ring (UDP keeps each message's length), and `recv`, `MSG_PEEK`, a plain `read`, and readiness answer from the ring. A non-blocking connect writes `connect` to its `ctl` in a kproc, writable when done, with `SO_ERROR` from its error. A listening one has a kproc that opens `listen`, which waits in the server, and keeps one call for `accept`, readable while it waits. Sends write the data file. The description's last close writes `shutdown rdwr` (or 9front's `hangup`) and lets the conversation go. The serving machine's policy governs what its conversations reach.
 
 `connect`, `bind` and `listen` write control messages; devip gains `nbconnect` (a connect the host finishes in the background, writable when done, with `SO_ERROR` from the host socket), `shutdown`, `sockopt`, a socket for an announce on port 0, no `listen` for UDP, and 4096 TCP and 1024 UDP conversations.
 
@@ -1169,7 +1171,7 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 - Unit tests in Zig for the a.out loader, the page allocator, and the syscall decoders.
 - Integration tests run real 9front binaries from a pinned root tree. Each case is tagged with the proposal it proves, and skips while that proposal isn't implemented ([design/README.md](design/README.md#tests)).
 - `zig build integration` runs real binaries from the root tree through the `h9` CLI as subprocesses, so each case gets a fresh kernel and checks exit codes end to end; it skips when there's no tree. `zig build proposal -Dp=baseline` runs the baseline's demos and cases. The Lima test VMs get the tree with `scripts/lima/vm push-root`.
-- `zig build integration -Dweb` runs the same cases through `h9-node` on h86 with the 386 root; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
+- `zig build integration -Dweb` runs the same cases through `h9-node` on h86 with the 386 root, or on ha64 with `-Darch=arm64`; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
 - CI isn't set up yet ([ci](design/ci.md)).
 
 ## CLI

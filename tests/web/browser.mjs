@@ -50,6 +50,13 @@ try {
       await page.waitForTimeout(100);
     }
   };
+  // Drops files, [name, contents] pairs, on the terminal, as a drag from
+  // the desktop does.
+  const drop = (files) => term.evaluate((t, files) => {
+    const dt = new DataTransfer();
+    for (const [name, body] of files) dt.items.add(new File([body], name));
+    for (const type of ['dragover', 'drop']) t.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
+  }, files);
   const step = async (name, f) => {
     const t0 = Date.now();
     await f();
@@ -97,6 +104,18 @@ try {
       await page.keyboard.insertText('lo\n');
       await expect(/echo hello\nhello\n% $/, at);
     });
+    await on('dropped files land in /usr/glenda, with their paths typed', async () => {
+      await term.focus();
+      let at = (await text()).length;
+      await page.keyboard.type('cat ');
+      await drop([['notes.txt', 'dropped\n'], ['run me', '#!/bin/rc\necho ran $0\n']]);
+      await expect(/cat \/usr\/glenda\/notes.txt '\/usr\/glenda\/run me' $/, at);
+      await page.keyboard.type('\n');
+      await expect(/\ndropped\n#!\/bin\/rc\necho ran \$0\n% $/, at);
+      at = (await text()).length;
+      await page.keyboard.type("'/usr/glenda/run me'\n");
+      await expect(/\nran \/usr\/glenda\/run me\n% $/, at);
+    });
   }
   if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
 
@@ -115,6 +134,23 @@ try {
       const at = (await text()).length;
       await page.keyboard.type(`seq 3 | jq -s add; echo 'select 6*7;' | sqlite3\n`);
       await expect(/6\n42\n.*# $/, at);
+    });
+    // With nine-arm64.h9a, the page puts the arm64 slim root at /9, and
+    // a #!/bin/rc script runs with its rc (src/web/nine-arm64.list).
+    if (await readFile(path.join(dir, 'nine-arm64.h9a')).then(() => true, () => false)) {
+      await step("9front's rc runs from /9", async () => {
+        const at = (await text()).length;
+        await page.keyboard.type(`printf '#!/bin/rc\\necho rc on $cputype\\n' >/tmp/r; chmod +x /tmp/r; /tmp/r\n`);
+        await expect(/rc on arm64\n.*# $/, at);
+      });
+    }
+    await step('a dropped script lands in /root, and Enter runs it', async () => {
+      await term.focus();
+      const at = (await text()).length;
+      await drop([['hi.sh', '#!/bin/sh\necho hi from $0\n']]);
+      await expect(/\/root\/hi.sh $/, at);
+      await page.keyboard.type('\n');
+      await expect(/\nhi from \/root\/hi.sh\n.*# $/, at);
     });
     await step('dragging over the terminal selects its text, and typing still works', async () => {
       const box = await term.boundingBox();

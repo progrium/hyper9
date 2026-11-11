@@ -701,8 +701,14 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * A machine in its own Worker (design/0012-browser-host.md), from the
  * page:
  *
- * - root: the root archive's URL (default root.h9a beside this file), or
- *   a ws:// or wss:// URL of a 9P server (design/0021-websocket-9p.md)
+ * - root: the root archive's URL (default root.h9a beside this file,
+ *   unless there are layers), or a ws:// or wss:// URL of a 9P server
+ *   (design/0021-websocket-9p.md)
+ * - layers: more root archives, each a URL or { url, at }, unpacked in
+ *   order over the root archive, a later file replacing an earlier one,
+ *   each under its directory `at` (default /). Together they're the tree
+ *   at /, h9's --root. A 9front tree layered at a Linux root's /9 is
+ *   named by a second `--root /9` in argv (design/0018-linux-personality.md)
  * - memory: --memory, such as '256M'
  * - backend: --backend: 'emu' (h9's own CPUs, h86, ha64, and hx64, the default) or 'v86', its old name
  * - arch: --arch: the guest's CPU, '386' (h86, the default), 'arm64'
@@ -719,16 +725,23 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   "private" (--gfx=noclip). scale is --gfx-scale: 0 (the default)
  *   draws in device pixels, 1 in CSS pixels, and N in device pixels
  *   divided by N. The canvas moves into the Worker at run.
+ * - env: h9's own environment (an object), not its programs': the
+ *   emulator's knobs, such as H9_JIT_HOT (src/jit/wasm_t1.zig)
  *
  * machine.run(argv) runs h9 with the flags and argv (['rc', '-i'], say)
  * and resolves to its exit status. machine.input(bytes or string) types,
  * machine.interrupt() is the interrupt key, machine.hangup() posts
  * hangup, as closing a native window does, and machine.terminate() ends
- * the Worker. The machine is an EventTarget: with gfx, a write to
+ * the Worker. machine._put(path, data, mode) adds a file (bytes, an
+ * ArrayBuffer, or a string) to the root archive's tree at path, relative
+ * to the root, making its directories, while the machine runs or before;
+ * mode defaults to 0644. It's provisional, so the underscore: a file the
+ * guest has written or removed at path hides it, and there's nothing for
+ * a ws:// root. The machine is an EventTarget: with gfx, a write to
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ root, memory, backend, arch, policy, terminal, tty = false, gfx } = {}) {
+export async function createMachine({ root, layers = [], memory, backend, arch, policy, terminal, tty = false, gfx, env } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -765,13 +778,19 @@ export async function createMachine({ root, memory, backend, arch, policy, termi
           }
         };
         worker.onerror = (e) => reject(new Error(e.message));
-        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && String(new URL(root, location.href)), tty, ...start }, transfer);
+        const url = (u) => String(new URL(u, location.href));
+        const layerList = layers.map((l) => (typeof l === 'object' && !(l instanceof URL) ? { url: url(l.url), at: l.at ?? '/' } : { url: url(l), at: '/' }));
+        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && url(root), layers: layerList, tty, env, ...start }, transfer);
       });
     },
     input(data) {
       if (data === null) { worker.postMessage({ type: 'input', data: null }); return; }
       const b = typeof data === 'string' ? enc.encode(data) : new Uint8Array(data);
       worker.postMessage({ type: 'input', data: b }, [b.buffer]);
+    },
+    _put(path, data, mode = 0o644) {
+      const b = typeof data === 'string' ? enc.encode(data) : new Uint8Array(data).slice();
+      worker.postMessage({ type: 'put', path, data: b.buffer, mode: 0o100000 | (mode & 0o7777) }, [b.buffer]);
     },
     interrupt() { worker.postMessage({ type: 'interrupt' }); },
     hangup() { worker.postMessage({ type: 'hangup' }); },

@@ -2176,6 +2176,8 @@ pub const Machine = struct {
         var bytes = readLinux(arena, path) catch |err| return execError(err);
         var argv: []const []const u8 = argv0;
         var depth: usize = 0;
+        // Set when `#!/bin/rc` became 9front's rc (below).
+        var nine_rc = false;
         while (std.mem.startsWith(u8, bytes, "#!")) : (depth += 1) {
             if (depth >= 4) return failWith("too many levels of interpreters");
             const head = bytes[0..@min(bytes.len, 256)];
@@ -2183,8 +2185,19 @@ pub const Machine = struct {
             const line = std.mem.trim(u8, head[2..nl], " \t\r");
             if (line.len == 0) return failWith(ebadexec);
             const sp = std.mem.indexOfAny(u8, line, " \t") orelse line.len;
-            const interp = line[0..sp];
+            var interp = line[0..sp];
             const arg = std.mem.trim(u8, line[sp..], " \t");
+            // `#!/bin/rc` is a 9front script, such as h9's own wsmount: a
+            // Linux root has no /bin/rc, so it's 9front's, in the Linux
+            // view at /9/bin/rc. A root that has its own /bin/rc keeps it.
+            const rc_bytes: ?[]u8 = if (std.mem.eql(u8, interp, "/bin/rc")) readLinux(arena, interp) catch |err| switch (err) {
+                error.NotFound => blk: {
+                    interp = "/9/bin/rc";
+                    nine_rc = true;
+                    break :blk null;
+                },
+                else => return execError(err),
+            } else null;
             var next: std.ArrayList([]const u8) = .empty;
             next.append(arena, interp) catch return failWith("no memory");
             if (arg.len > 0) next.append(arena, arg) catch return failWith("no memory");
@@ -2192,7 +2205,7 @@ pub const Machine = struct {
             if (argv.len > 1) next.appendSlice(arena, argv[1..]) catch return failWith("no memory");
             argv = next.items;
             path = interp;
-            bytes = readLinux(arena, path) catch |err| return execError(err);
+            bytes = rc_bytes orelse readLinux(arena, path) catch |err| return execError(err);
         }
         if (!elf.isElf(bytes)) {
             // A 9front program: exec it as a 9front process does, back in
@@ -2200,6 +2213,16 @@ pub const Machine = struct {
             // Egrp (design/0018, "Environment").
             _ = aout.parse(bytes) catch return failWith(ebadexec);
             const v = vcpu orelse return failWith(ebadexec);
+            if (nine_rc) {
+                // exec would read the script's `#!/bin/rc` again in the
+                // Linux view, so it runs rc itself, and rc opens the script
+                // in the 9front view, where /9/x is /x.
+                const zargv = arena.alloc([:0]u8, argv.len) catch return failWith("no memory");
+                for (argv, zargv) |a, *z| z.* = arena.dupeZ(u8, if (std.mem.startsWith(u8, a, "/9/")) a[2..] else a) catch return failWith("no memory");
+                try m.exec(p, v, .{ .path = arena.dupeZ(u8, path) catch return failWith("no memory"), .argv = zargv });
+                nineEnv(envp);
+                return;
+            }
             const zargv = arena.alloc([:0]u8, argv0.len) catch return failWith("no memory");
             for (argv0, zargv) |a, *z| z.* = arena.dupeZ(u8, a) catch return failWith("no memory");
             try m.exec(p, v, .{ .path = arena.dupeZ(u8, path0) catch return failWith("no memory"), .argv = zargv });
@@ -2357,23 +2380,39 @@ pub const Machine = struct {
     }
 
     /// set_thread_area (`set`) or get_thread_area of a struct user_desc:
-    /// i386 Linux's one TLS segment, GDT entry 6, whose base is the thread
-    /// pointer that `Extra.tls` carries (design/0105-linux-i386.md, "TLS").
-    /// Entry -1 asks for a free one, and gets 6; entries 7 and 8, which
-    /// Linux also has, aren't there.
+    /// i386 Linux's three TLS segments, GDT entries 6 to 8, whose bases are
+    /// thread pointers that `Extra.tls` and `Extra.tls_more` carry
+    /// (design/0105-linux-i386.md, "TLS"). libc takes one for %gs, and
+    /// 32-bit Wine another for %fs. Entry -1 asks for a free one, as on
+    /// Linux; an empty descriptor frees the entry it names. Segments stay
+    /// flat whatever limit is asked for, so only the base is kept.
     fn threadArea(l: *lsys.Process, x: *vmm.X86Extra, set: bool, desc_va: u64) i64 {
         var d: [4]u32 = undefined;
         l.readMem(desc_va, std.mem.sliceAsBytes(&d)) catch return -attr.E.FAULT;
-        const entry = d[0];
+        const first = lsig.i386_tls_entry;
+        const n = lsig.i386_tls_entries;
+        var entry = d[0];
+        if (set and entry == 0xffff_ffff) {
+            const free = for (0..n) |i| {
+                if (x.tls_used & (@as(u8, 1) << @intCast(i)) == 0) break i;
+            } else return -attr.E.SRCH;
+            entry = first + @as(u32, @intCast(free));
+            l.writeU32(desc_va, entry) catch return -attr.E.FAULT;
+        }
+        if (entry < first or entry >= first + n) return -attr.E.INVAL;
+        const i = entry - first;
+        const bit = @as(u8, 1) << @intCast(i);
+        const base: *u64 = if (i == 0) &x.tls else &x.tls_more[i - 1];
         if (set) {
-            if (entry != lsig.i386_tls_entry and entry != 0xffff_ffff) return -attr.E.INVAL;
-            if (entry == 0xffff_ffff) l.writeU32(desc_va, lsig.i386_tls_entry) catch return -attr.E.FAULT;
-            x.tls = d[1];
+            // Linux's LDT_empty and LDT_zero: a descriptor that clears the
+            // entry (read_exec_only and seg_not_present, and nothing else).
+            const empty = d[1] == 0 and d[2] == 0 and (d[3] & 0x7f == 0x28 or d[3] & 0x7f == 0);
+            base.* = d[1];
+            if (empty) x.tls_used &= ~bit else x.tls_used |= bit;
             return 0;
         }
-        if (entry != lsig.i386_tls_entry) return -attr.E.INVAL;
         // A flat, 32-bit, writable data segment in pages, as set.
-        d = .{ entry, @truncate(x.tls), 0xfffff, 0x51 };
+        d = .{ entry, @truncate(base.*), 0xfffff, 0x51 };
         l.writeMem(desc_va, std.mem.sliceAsBytes(&d)) catch return -attr.E.FAULT;
         return 0;
     }

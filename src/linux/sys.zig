@@ -571,6 +571,7 @@ pub const Process = struct {
             if (!info.cexec) continue;
             releaseLocks(p, fd);
             unixClosed(p, fd);
+            kc.rclose(fd);
         }
         const g = p.g;
         g.lockSpin();
@@ -590,6 +591,7 @@ pub const Process = struct {
     fn fdClosed(p: *Process, fd: i32) void {
         releaseLocks(p, fd);
         unixClosed(p, fd);
+        kc.rclose(fd);
         const g = p.g;
         g.lockSpin();
         defer g.lock.unlock();
@@ -1699,7 +1701,42 @@ const ia32 = struct {
 // Files.
 
 fn pathArg(p: *Process, va: u64, buf: []u8) Err![:0]u8 {
-    return p.string(va, buf);
+    const path = try p.string(va, buf);
+    return throughProcLink(p, path, buf) orelse path;
+}
+
+/// `path` with a leading /proc link that has more after it
+/// (/proc/self/fd/N/name, /proc/self/cwd/name) replaced by the link's
+/// target, so the rest is walked from the directory it names, as Linux
+/// follows such a link. Claude Code makes its temp directories with
+/// mkdir("/proc/self/fd/N/name") on a directory it opened O_PATH. Null
+/// if `path` doesn't go through one. The target is the file's path now,
+/// not the open file itself, so a directory renamed since it was opened
+/// isn't followed.
+fn throughProcLink(p: *Process, path: [:0]u8, buf: []u8) ?[:0]u8 {
+    if (!std.mem.startsWith(u8, path, "/proc/")) return null;
+    var i: usize = "/proc/".len;
+    // The link is at most four elements deep: /proc/self/fd/N.
+    var depth: usize = 0;
+    while (depth < 4) : (depth += 1) {
+        i = std.mem.indexOfScalarPos(u8, path, i, '/') orelse return null;
+        if (procLink(p, path[0..i])) |target| {
+            if (target.len == 0 or target[0] != '/') return null;
+            // procLink's target is in name2_buf, which may be `buf`.
+            var rest_buf: [4096]u8 = undefined;
+            const rest = path[i..];
+            if (rest.len > rest_buf.len) return null;
+            @memcpy(rest_buf[0..rest.len], rest);
+            const t = if (std.mem.eql(u8, target, "/")) "" else target;
+            if (t.len + rest.len + 1 > buf.len) return null;
+            std.mem.copyForwards(u8, buf[0..t.len], t);
+            @memcpy(buf[t.len..][0..rest.len], rest_buf[0..rest.len]);
+            buf[t.len + rest.len] = 0;
+            return buf[0 .. t.len + rest.len :0];
+        }
+        i += 1;
+    }
+    return null;
 }
 
 /// Runs `f(path)` with relative paths walked from dirfd's directory.
@@ -1836,6 +1873,9 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     // that can block. A file is always ready.
     var is_pipe = false;
     if (off == -1) if (kc.fdInfo(fd) catch null) |info| {
+        // A socket from a mounted /net is read through the kernel's
+        // read-ahead, as recv reads it, and written as send writes.
+        if (info.dc == 'M' and !info.dir) if (sockOf(p, fd)) |so| if (so.conv & conv_remote != 0) return remoteRw(p, fd, so.s, buf, len, dir);
         if (dir == .read and info.dc == ev_dc) {
             if (sigfdOf(p, info.qpath) != null) return sigfdRead(p, fd, info.qpath, buf, len);
         }
@@ -2095,7 +2135,9 @@ fn rwv(p: *Process, fd: i32, iov: u64, cnt: u64, off_in: i64, comptime dir: Dir)
         if (len == 0) continue;
         if (dir == .read and total > 0) {
             if (stream == null) stream = if (kc.fdInfo(fd)) |info| switch (info.dc) {
-                'U', 'O', 'M' => false,
+                'U', 'O' => false,
+                // A file, unless it's a socket from a mounted /net.
+                'M' => kc.rconvId(fd) != null,
                 else => true,
             } else |_| true;
             if (stream.?) break;
@@ -2439,7 +2481,10 @@ pub fn releaseAllLocks(p: *Process) void {
     for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| releaseLocks(p, fd);
     locks.endedPosix(posixOwner(p).id);
     itimer.cancel(@intFromPtr(p.g));
-    for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| unixClosed(p, fd);
+    for (buf[0..@min(buf.len, kc.fds(&buf))]) |fd| {
+        unixClosed(p, fd);
+        kc.rclose(fd);
+    }
 }
 
 fn getdents(p: *Process, fd: i32, buf: u64, count: u32) Err!i64 {
@@ -4094,8 +4139,13 @@ fn prctl(p: *Process, op: i32, arg: u64) Err!i64 {
         PR_GET_DUMPABLE => return 1,
         PR_SET_NAME => {
             var b: [16]u8 = undefined;
+            // Linux keeps the first 15 bytes of a longer name. string
+            // fills b before it finds no NUL, so end the name there.
             const name = p.string(arg, &b) catch |e| switch (e) {
-                error.NameTooLong => b[0..15 :0],
+                error.NameTooLong => blk: {
+                    b[15] = 0;
+                    break :blk b[0..15 :0];
+                },
                 else => return e,
             };
             kern.setText(name);
@@ -4252,8 +4302,27 @@ pub const Sock = struct {
 /// fd isn't one.
 fn convOf(fd: i32) ?u32 {
     const info = kc.fdInfo(fd) catch return null;
+    if (info.dc == 'M' and !info.dir) return kc.rconvId(fd);
     if (info.dc != 'I' or info.dir or info.qpath & 0xf != ip_qdata) return null;
     return @intCast((info.qpath >> 4) & 0xfffff);
+}
+
+/// The bit that marks a conversation from a /net mounted from another
+/// machine (devmnt's, not devip's), which src/kern/linuxnet.c reads ahead.
+const conv_remote: u32 = 1 << 30;
+
+fn protoOf(conv: u32) u32 {
+    return (conv >> 12) & 0xff;
+}
+
+/// Opens path in the 9front view, where /net is the machine's (or what a
+/// program mounted there, such as another machine's served with
+/// --serve-net), whichever view the process is in.
+fn open9(path: [:0]const u8, mode: c_int) kern.Error!u31 {
+    const swap = kc.inView();
+    if (swap) kc.setSlash(false) catch {};
+    defer if (swap) kc.setSlash(true) catch {};
+    return kern.open(path, mode);
 }
 
 /// fd's socket state, made up for a conversation opened another way (by
@@ -4263,17 +4332,18 @@ fn sockOf(p: *Process, fd: i32) ?struct { conv: u32, s: *Sock } {
     p.g.lockSpin();
     defer p.g.lock.unlock();
     if (p.g.socks.get(conv)) |so| return .{ .conv = conv, .s = so };
-    p.g.putSock(conv, .{ .family = AF_INET, .stype = if (conv >> 12 == ip_udp) SOCK_DGRAM else SOCK_STREAM, .connected = true }) catch return null;
+    p.g.putSock(conv, .{ .family = AF_INET, .stype = if (protoOf(conv) == ip_udp) SOCK_DGRAM else SOCK_STREAM, .connected = true }) catch return null;
     return .{ .conv = conv, .s = p.g.socks.get(conv).? };
 }
 
 fn protoName(conv: u32) []const u8 {
-    return if (conv >> 12 == ip_udp) "udp" else "tcp";
+    return if (protoOf(conv) == ip_udp) "udp" else "tcp";
 }
 
 /// Opens one of a conversation's files.
 fn convOpen(conv: u32, file: []const u8, mode: c_int) kern.Error!u31 {
     var b: [64]u8 = undefined;
+    if (conv & conv_remote != 0) return open9(std.fmt.bufPrintZ(&b, "/net/{s}/{d}/{s}", .{ protoName(conv), conv & 0xfff, file }) catch unreachable, mode);
     const path = std.fmt.bufPrintZ(&b, "#I/{s}/{d}/{s}", .{ protoName(conv), conv & 0xfff, file }) catch unreachable;
     return kern.open(path, mode);
 }
@@ -4294,15 +4364,30 @@ fn netErr() i64 {
 }
 
 /// Opens a new conversation's data file for socket(2) and accept(2):
-/// `clone` is a clone or listen file, opened for its new ctl.
-fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool) Err!union(enum) { fd: u31, err: i64 } {
+/// `clone` is a clone or listen file, opened for its new ctl, in the
+/// 9front view's /net or devip's. A conversation from a mounted /net is
+/// attached to the kernel's read-ahead; `accepted` says it's connected.
+const ConvOpened = union(enum) { fd: u31, err: i64 };
+
+fn openConv(p: *Process, clone: [:0]const u8, proto: u32, cloexec: bool, accepted: bool) Err!ConvOpened {
     _ = p;
-    const ctl = kern.open(clone, kern.ORDWR) catch return .{ .err = netErr() };
+    const ctl = (if (clone[0] == '/') open9(clone, kern.ORDWR) else kern.open(clone, kern.ORDWR)) catch return .{ .err = netErr() };
+    return convFromCtl(ctl, proto, cloexec, accepted);
+}
+
+/// openConv's rest, from the new conversation's ctl, which it closes.
+fn convFromCtl(ctl: u31, proto: u32, cloexec: bool, accepted: bool) ConvOpened {
     defer kern.close(ctl) catch {};
     var b: [16]u8 = undefined;
     const n = kern.pread(ctl, &b, 0) catch return .{ .err = kerr() };
     const num = std.fmt.parseInt(u32, std.mem.trim(u8, b[0..n], " \n"), 10) catch return .{ .err = -E.IO };
-    const fd = convOpen(proto << 12 | num, "data", kern.ORDWR | if (cloexec) @as(c_int, OCEXEC) else 0) catch return .{ .err = kerr() };
+    const remote = if (kc.fdInfo(ctl)) |info| info.dc == 'M' else |_| false;
+    const conv = proto << 12 | num | if (remote) conv_remote else 0;
+    const fd = convOpen(conv, "data", kern.ORDWR | if (cloexec) @as(c_int, OCEXEC) else 0) catch return .{ .err = kerr() };
+    if (remote) kc.rattach(fd, ctl, conv, proto == ip_udp, accepted) catch {
+        kern.close(fd) catch {};
+        return .{ .err = kerr() };
+    };
     return .{ .fd = fd };
 }
 
@@ -4320,8 +4405,10 @@ fn socketCall(p: *Process, domain: u32, type_in: u32, protocol: u32) Err!i64 {
         SOCK_DGRAM => ip_udp,
         else => return -E.PROTONOSUPPORT,
     };
-    const clone: [:0]const u8 = if (proto == ip_tcp) "#I/tcp/clone" else "#I/udp/clone";
-    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0)) {
+    // Through the namespace, as dial(2) goes: /net is devip's unless
+    // something else is mounted there, such as another machine's /net.
+    const clone: [:0]const u8 = if (proto == ip_tcp) "/net/tcp/clone" else "/net/udp/clone";
+    const fd = switch (try openConv(p, clone, proto, type_in & SOCK_CLOEXEC != 0, false)) {
         .fd => |f| f,
         .err => |e| return e,
     };
@@ -4549,7 +4636,19 @@ fn acceptCall(p: *Process, fd: i32, addr: u64, lenp: u64, flags: u32) Err!i64 {
     }
     var b: [64]u8 = undefined;
     const listen = std.fmt.bufPrintZ(&b, "#I/{s}/{d}/listen", .{ protoName(conv), conv & 0xfff }) catch unreachable;
-    const nfd = switch (try openConv(p, listen, conv >> 12, flags & SOCK_CLOEXEC != 0)) {
+    // A mounted conversation's call was taken by the kernel's listener,
+    // which made it ready; devip's is opened here.
+    const opened = if (conv & conv_remote != 0) blk: {
+        const r = while (true) {
+            const r = kc.raccept(fd, false);
+            if (r != -E.AGAIN or flagsOf(p, fd).nonblock) break r;
+            const w = waitReady(fd, kc.POLLIN);
+            if (w < 0) return w;
+        };
+        if (r < 0) return r;
+        break :blk convFromCtl(@intCast(r), protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
+    } else try openConv(p, listen, protoOf(conv), flags & SOCK_CLOEXEC != 0, true);
+    const nfd = switch (opened) {
         .fd => |f| f,
         .err => |e| return e,
     };
@@ -4724,6 +4823,27 @@ const MsgHdr = struct {
     }
 };
 
+/// read and write on a socket from a mounted /net (see rwOne).
+fn remoteRw(p: *Process, fd: i32, s: *Sock, buf: u64, len_in: u64, comptime dir: Dir) Err!i64 {
+    const len = @min(len_in, 1 << 20);
+    const tmp = p.gpa.alloc(u8, len) catch return -E.NOMEM;
+    defer p.gpa.free(tmp);
+    switch (dir) {
+        .read => {
+            var from: kc.NetAddr = .{};
+            const r = recvBuf(p, fd, tmp, 0, &from);
+            if (r <= 0) return r;
+            const n: usize = @intCast(@min(r, @as(i64, @intCast(len))));
+            try p.writeMem(buf, tmp[0..n]);
+            return @intCast(n);
+        },
+        .write => {
+            try p.readMem(buf, tmp);
+            return sendBuf(p, fd, s, tmp, 0, 0, 0);
+        },
+    }
+}
+
 fn sendCall(p: *Process, fd: i32, buf_va: u64, len_in: u64, flags: u32, to_va: u64, to_len: u64) Err!i64 {
     const so = sockOf(p, fd) orelse {
         // send on a pipe from socketpair, or a Unix socket, is a write.
@@ -4797,6 +4917,10 @@ fn recvCall(p: *Process, fd: i32, buf_va: u64, len_in: u64, flags: u32, from_va:
     var from: kc.NetAddr = .{};
     const r = recvBuf(p, fd, tmp, flags, &from);
     if (r < 0) return r;
+    // A mounted /net's conversation has one peer, which it doesn't name.
+    if (so.conv & conv_remote != 0) if (so.s.peer) |pa| {
+        from = pa;
+    };
     const n: usize = @intCast(@min(r, @as(i64, @intCast(len))));
     try p.writeMem(buf_va, tmp[0..n]);
     if (from_va != 0) try writeSockaddr(p, from_va, from_len, so.s.family, from);
@@ -4906,7 +5030,10 @@ fn recvmsg(p: *Process, fd: i32, msg_va: u64, flags: u32) Err!i64 {
     var from: kc.NetAddr = .{};
     const r = recvBuf(p, fd, tmp, flags, &from);
     if (r < 0) return r;
-    const n: usize = @intCast(r);
+    if (so.conv & conv_remote != 0) if (so.s.peer) |pa| {
+        from = pa;
+    };
+    const n: usize = @intCast(@min(r, @as(i64, @intCast(total))));
     var off: usize = 0;
     var i: u64 = 0;
     while (i < m.iovlen and off < n) : (i += 1) {

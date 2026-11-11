@@ -2,8 +2,10 @@
 // page's argv over the root archive or a ws:// root, and passes the console through
 // messages. The page's side is createMachine in h9-web.js.
 //
-// Page to Worker: { type: 'start', argv, env, root, tty, gfx } once, then
-// { type: 'input', data }, { type: 'interrupt' } and { type: 'hangup' }.
+// Page to Worker: { type: 'start', argv, env, root, layers, tty, gfx } once, then
+// { type: 'input', data }, { type: 'interrupt' } and { type: 'hangup' },
+// and { type: 'put', path, data, mode } at any time, which adds a file to
+// the root's tree (before start, once it's loaded).
 // Worker to page: { type: 'output', fd, data }, { type: 'raw', on } and
 // { type: 'exit', code } or { type: 'error', message }.
 //
@@ -14,7 +16,7 @@
 // data } and { type: 'snarf', text }.
 
 import { run, Panic, GfxHost, canDrawInWorker } from './h9-web.js';
-import { parseRoot, wasiImports } from './wasi-mem.js';
+import { parseRoot, putNode, wasiImports } from './wasi-mem.js';
 
 const post = (m, t) => self.postMessage(m, t);
 
@@ -51,7 +53,18 @@ const host = {
 
 let gfx = null;
 
-async function start({ argv, env = {}, root, tty = false, gfx: canvas }) {
+// The root's tree, once loaded, and puts that came before it.
+let tree = null;
+const puts = [];
+const put = ({ path, data, mode }) => {
+  try {
+    putNode(tree, path, mode, new Uint8Array(data));
+  } catch (e) {
+    console.error(`h9: put ${path}: ${e.message}`);
+  }
+};
+
+async function start({ argv, env = {}, root, layers = [], tty = false, gfx: canvas }) {
   if (canvas) {
     if (!canDrawInWorker()) throw new Error("this browser can't draw from a Worker");
     gfx = new GfxHost({ ...canvas, post });
@@ -65,19 +78,26 @@ async function start({ argv, env = {}, root, tty = false, gfx: canvas }) {
     return new Uint8Array(await r.arrayBuffer());
   };
   // A ws:// or wss:// root is served over a WebSocket
-  // (design/0021-websocket-9p.md), and WASI sees an empty tree.
+  // (design/0021-websocket-9p.md), and WASI sees only the layers. An
+  // archive root is the bottom layer, and root.h9a is the default when
+  // there are no layers.
   const remote = typeof root === 'string' && /^wss?:/i.test(root);
-  const [h9, archive] = await Promise.all([
+  const base = remote ? [] : root ? [{ url: root }] : layers.length ? [] : [{ url: new URL('root.h9a', import.meta.url) }];
+  const all = [...base, ...layers];
+  const [h9, ...archives] = await Promise.all([
     fetchBytes(new URL('h9.wasm', import.meta.url)),
-    remote ? new TextEncoder().encode('h9root1\n') : fetchBytes(root ?? new URL('root.h9a', import.meta.url)),
+    ...all.map((l) => fetchBytes(l.url)),
   ]);
-  const tree = parseRoot(archive);
+  // Each layer adds its files over the ones before it, under its `at`.
+  tree = parseRoot(new TextEncoder().encode('h9root1\n'));
+  archives.forEach((a, i) => parseRoot(a, tree, all[i].at ?? '/'));
+  puts.splice(0).forEach(put);
   return run({
     h9,
     wasi: (memory) => wasiImports({
       memory,
       root: tree,
-      // The archive is the whole tree WASI sees, so the root is /.
+      // The layers are the whole tree WASI sees, so the root is /.
       args: ['h9', '--root', remote ? root : '/', ...argv],
       env: { PWD: '/', ...env },
       write: (fd, data) => post({ type: 'output', fd, data }, [data.buffer]),
@@ -101,6 +121,7 @@ self.onmessage = ({ data: m }) => {
       if (m.data === null) ended = true; else chunks.push(new Uint8Array(m.data));
       deliver();
       break;
+    case 'put': if (tree) put(m); else puts.push(m); break;
     case 'interrupt': raise(1); break;
     case 'hangup': raise(2); break;
     case 'gfx': gfx?.input(m.ev); break;

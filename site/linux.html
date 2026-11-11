@@ -15,6 +15,10 @@
   abbr { text-decoration: none; border-bottom: 1px dotted; cursor: help; }
   pre { margin-left: 2em; overflow-x: auto; }
   iframe { width: 100%; height: 26em; border: 1px solid #888; }
+  /* The way on to wine.html: in the corner, as the λ on the project page. */
+  .corner { margin: 3em calc(50% - 50vw + 1.2em + env(safe-area-inset-right, 0px)) 0 0; text-align: right; }
+  .winkey { font-family: monospace; font-size: 1.3em; color: #bbb; text-decoration: none; }
+  .winkey:hover { color: #000; }
 </style>
 </head>
 <body>
@@ -69,6 +73,8 @@ with a small Linux root loaded into memory.
 Try <tt>uname -a</tt>, <tt>ps</tt>, <tt>ls /proc</tt>,
 <tt>seq 5 | jq -s add</tt>, or
 <tt>echo 'select sqlite_version();' | sqlite3</tt>.
+A file dropped on the terminal lands in <tt>/root</tt>, and its path is typed,
+so a dropped script runs with Enter.
 It needs JavaScript Promise Integration, which Chrome and Edge have from version 137.
 The demo can also be <a href="demo/?linux">opened on its own page</a>.
 </p>
@@ -191,6 +197,8 @@ The three proposals are still drafts while these close:
 <li>CPU times in <tt>/proc</tt> read zero, so htop shows 0%.</li>
 <li>The emulator is much slower than a hypervisor for CPU-bound work.</li>
 </ul>
+
+<div class="corner"><a class="winkey" href="wine.html" aria-label="Windows programs in h9, through Wine">⊞</a></div>
 
 </body>
 </html>
