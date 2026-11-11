@@ -138,6 +138,11 @@ pub const CodePages = struct {
     /// Bumped by every `invalidate`, so a front end's decode cache can
     /// tell that some page lost its code since it last looked.
     epoch: std.atomic.Value(usize) = .init(0), // usize: wasm32 has no 64-bit atomics
+    /// Per page, bumped by every `invalidate` of it, so a decode cache can
+    /// drop just the pages that changed rather than everything at each
+    /// epoch: Bun's JIT (Claude Code) writes code pages all the time.
+    /// From page_allocator, which the OS zeroes as it's touched.
+    gens: []std.atomic.Value(u32),
     hooks: Hooks,
 
     pub const Hooks = struct {
@@ -153,11 +158,20 @@ pub const CodePages = struct {
         const pages = len / page_size;
         const bits = try gpa.alloc(std.atomic.Value(usize), (pages + word - 1) / word);
         @memset(bits, .init(0));
-        return .{ .base = base, .len = len, .bits = bits, .hooks = hooks };
+        errdefer gpa.free(bits);
+        const gens = try std.heap.page_allocator.alloc(std.atomic.Value(u32), pages);
+        return .{ .base = base, .len = len, .bits = bits, .gens = gens, .hooks = hooks };
     }
 
     pub fn deinit(c: *CodePages, gpa: std.mem.Allocator) void {
         gpa.free(c.bits);
+        std.heap.page_allocator.free(c.gens);
+    }
+
+    /// Page `page`'s generation: it changes whenever the page's code is
+    /// invalidated.
+    pub fn gen(c: *const CodePages, page: u64) u32 {
+        return c.gens[@intCast(page)].load(.acquire);
     }
 
     /// The arena page holding host address `host`, or null outside it.
@@ -192,6 +206,7 @@ pub const CodePages = struct {
     pub fn invalidate(c: *CodePages, page: u64) void {
         const old = c.bits[@intCast(page / word)].fetchAnd(~bit(page), .seq_cst);
         if (old & bit(page) == 0) return;
+        _ = c.gens[@intCast(page)].fetchAdd(1, .release);
         _ = c.epoch.fetchAdd(1, .seq_cst);
         // T0 fetching through an exec entry wouldn't mark the page again.
         c.hooks.drop(c.hooks.owner, c.hostOf(page), .exec);

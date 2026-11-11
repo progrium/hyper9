@@ -530,6 +530,7 @@ pub const Mm = struct {
     /// chunks there that are allocated, past any overlays.
     fn fillAllocated(m: *Mm, v: Vma, start: u64, end: u64) void {
         const s = v.src.?;
+        if (start < end) m.as.codeChanged(start, end - start);
         var ci = start / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
@@ -878,6 +879,9 @@ pub const Mm = struct {
 
     /// Zeroes the allocated pages in [start, end).
     fn zero(m: *Mm, start: u64, end: u64) void {
+        // What was decoded or compiled from these pages goes: a mapping
+        // made here later reuses them.
+        if (start < end) m.as.codeChanged(start, end - start);
         var ci = start / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
