@@ -677,6 +677,10 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     var p = parts;
     p.target = target;
     p.optimize = optimize;
+    // The web's mode can differ from -Doptimize's default (see the web
+    // step), so the vcpu module's mode and jit-verify's default follow it.
+    if (optimize != .Debug) p.vcpu_optimize = optimize;
+    if (!b.user_input_options.contains("jit-verify")) p.jit_verify = optimize == .Debug or optimize == .ReleaseSafe;
     // h9's own CPUs (`--backend emu`, or `v86`, its old name). The JIT
     // tier here is the wasm one (src/jit/wasm_t1.zig and emit/wasm.zig),
     // not the native code cache, which zemu leaves out on the web.
@@ -1053,7 +1057,11 @@ pub fn build(b: *std.Build) void {
     // The browser host (design/0012-browser-host.md): h9 for wasm32-wasi
     // with its JS host and a demo page, in zig-out/web.
     const web_step = b.step("web", "Build the browser host into zig-out/web (design/0012-browser-host.md)");
-    const web = addWeb(b, optimize, parts, web_gfx);
+    // ReleaseFast unless -Doptimize says otherwise: a Debug h9.wasm takes
+    // Claude Code's TUI boot in Chromium from about 97 s to 156 s, even
+    // with src/interp and src/jit already ReleaseFast.
+    const web_optimize: std.builtin.OptimizeMode = if (b.user_input_options.contains("optimize")) optimize else .ReleaseFast;
+    const web = addWeb(b, web_optimize, parts, web_gfx);
     web_step.dependOn(web.install);
     // The demo page's root archive, from a 386 root tree and the paths
     // src/web/root.list names; left out without one.

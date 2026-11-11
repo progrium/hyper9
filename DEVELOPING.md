@@ -209,7 +209,7 @@ zig build web                  # packs it into zig-out/web/wine.h9a, from src/we
 
 ### Browser host
 
-`zig build web` builds h9 for wasm32-wasi
+`zig build web` builds h9 for wasm32-wasi, in ReleaseFast unless `-Doptimize` says otherwise
 ([browser-host](design/0012-browser-host.md)). It runs 9front's 386 binaries
 on h9's own CPU (h86, with its wasm JIT tier), and needs JavaScript Promise
 Integration (Chrome 137 or later, Node 24 or later). With a 386 root tree
