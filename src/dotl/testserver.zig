@@ -81,6 +81,12 @@ pub const Server = struct {
     /// Answer `unknown` to any version but `version` exactly, as some
     /// .L servers do.
     strict_version: bool = false,
+    /// Answer an Rlerror (EIO) to any version but `version` exactly, as
+    /// diod does.
+    version_error: bool = false,
+    /// Have no Tunlinkat or Trenameat, only Tremove and Trename, and
+    /// refuse a Treaddir for more than msize less 24, as diod 1.0 does.
+    old: bool = false,
     /// Replies to mutations by op_id, kept across connections.
     done: std.AutoHashMapUnmanaged([16]u8, []u8) = .empty,
     /// Writes applied, across connections.
@@ -304,7 +310,10 @@ pub const Server = struct {
             .Tversion => |v| {
                 s.msize = @min(s.msize, v.msize);
                 var ver = s.version;
+                // version(5): a Tversion's tag is NOTAG.
+                if (tag != wire.notag) return s.lerr(tag, E.INVAL);
                 if (!std.mem.eql(u8, v.version, s.version)) {
+                    if (s.version_error) return s.lerr(tag, E.IO);
                     if (s.strict_version) {
                         ver = "unknown";
                     } else if (std.mem.eql(u8, s.version, wire.version_lz)) {
@@ -389,7 +398,10 @@ pub const Server = struct {
                 @memcpy(f.node.data.items[w.offset..end], w.data.bytes);
                 try s.send(tag, wire.common.Rwrite{ .count = @intCast(w.data.bytes.len) });
             },
-            .Treaddir => |r| try s.readDir(tag, r.fid, r.offset, r.count, false),
+            .Treaddir => |r| {
+                if (s.old and r.count > s.msize - wire.io_header) return s.lerr(tag, E.IO);
+                try s.readDir(tag, r.fid, r.offset, r.count, false);
+            },
             .Treaddirattr => |r| try s.readDir(tag, r.fid, r.offset, r.count, true),
             .Tlcreate => |cr| {
                 const f = s.fids.getPtr(cr.fid) orelse return s.lerr(tag, E.BADF);
@@ -420,7 +432,35 @@ pub const Server = struct {
                 n.mode = m.mode;
                 try s.send(tag, l.Rmkdir{ .qid = n.qid() });
             },
+            .Tremove => |rm| {
+                const f = s.fids.get(rm.fid) orelse return s.lerr(tag, E.BADF);
+                _ = s.fids.remove(rm.fid);
+                const n = f.node;
+                const p = n.parent orelse return s.lerr(tag, E.BUSY);
+                if (n.children.items.len != 0) return s.lerr(tag, E.NOTEMPTY);
+                for (p.children.items, 0..) |c, i| if (c == n) {
+                    _ = p.children.orderedRemove(i);
+                    break;
+                };
+                try s.send(tag, l.Rremove{});
+            },
+            .Trename => |r| {
+                const f = s.fids.get(r.fid) orelse return s.lerr(tag, E.BADF);
+                const nd = s.fids.get(r.dfid) orelse return s.lerr(tag, E.BADF);
+                const n = f.node;
+                const p = n.parent orelse return s.lerr(tag, E.BUSY);
+                if (nd.node.child(r.name) != null) return s.lerr(tag, E.EXIST);
+                for (p.children.items, 0..) |c, i| if (c == n) {
+                    _ = p.children.orderedRemove(i);
+                    break;
+                };
+                n.name = try a.dupe(u8, r.name);
+                n.parent = nd.node;
+                try nd.node.children.append(a, n);
+                try s.send(tag, l.Rrename{});
+            },
             .Tunlinkat => |u| {
+                if (s.old) return s.lerr(tag, E.OPNOTSUPP);
                 const f = s.fids.get(u.dirfid) orelse return s.lerr(tag, E.BADF);
                 const n = f.node.child(u.name) orelse return s.lerr(tag, E.NOENT);
                 if (n.kind == .dir and u.flags & L.AT_REMOVEDIR == 0) return s.lerr(tag, E.ISDIR);
@@ -433,6 +473,7 @@ pub const Server = struct {
                 try s.send(tag, l.Runlinkat{});
             },
             .Trenameat => |r| {
+                if (s.old) return s.lerr(tag, E.OPNOTSUPP);
                 const od = s.fids.get(r.olddirfid) orelse return s.lerr(tag, E.BADF);
                 const nd = s.fids.get(r.newdirfid) orelse return s.lerr(tag, E.BADF);
                 const n = od.node.child(r.oldname) orelse return s.lerr(tag, E.NOENT);
