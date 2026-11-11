@@ -2295,8 +2295,12 @@ test "notepg reaches the note group and not a new one [baseline]" {
 test "/proc/n has status, fd, ns and args [baseline]" {
     const e = try env(@src());
     // The times differ between runs, so only name, user and state; and
-    // with awk last, cat isn't exec'd in place of rc.
-    const st = try run(e, &.{ "--rc", "cat /proc/$pid/status | awk '{print $1, ($2 == ENVIRON[\"user\"]), $3}'" });
+    // with awk last, cat isn't exec'd in place of rc. rc forks awk after
+    // cat, so where processes run in parallel (KVM) cat can read rc's
+    // status while rc is still running or in another call (Close,
+    // Rfork) on the way to await: the block waits for Await first, and
+    // --timeout ends the run if rc never gets there.
+    const st = try run(e, &.{ "--timeout", "20s", "--rc", "p=$pid; { while(! ~ `{awk '{print $3}' /proc/$p/status} Await) sleep 0; cat /proc/$p/status } | awk '{print $1, ($2 == ENVIRON[\"user\"]), $3}'" });
     defer st.deinit();
     try std.testing.expectEqualStrings("rc 1 Await\n", st.out);
     const fd = try run(e, &.{ "--rc", "cat /proc/$pid/fd" });

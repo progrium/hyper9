@@ -157,10 +157,16 @@ pub const Ram = struct {
 /// as it leaves. Everything is sequentially consistent, so a vCPU that
 /// enters after a shootdown has looked reads the epoch `unmap` bumped.
 pub const Runners = struct {
-    taken: std.atomic.Value(u64) = .init(0),
-    slots: [64]Slot = @splat(.{}),
+    /// One bit per slot, in words of 64.
+    taken: [words]std.atomic.Value(u64) = @splat(.init(0)),
+    slots: [capacity]Slot = @splat(.{}),
 
-    pub const Index = u6;
+    /// As many vCPUs as any backend runs at once: KVM's limit is capped
+    /// at this (kvm.zig's max_slots), HVF's and WHP's are 64.
+    pub const capacity = 1024;
+    const words = capacity / 64;
+
+    pub const Index = std.math.IntFittingRange(0, capacity - 1);
 
     const Slot = struct {
         as: std.atomic.Value(?*const anyopaque) = .init(null),
@@ -171,16 +177,18 @@ pub const Runners = struct {
     };
 
     pub fn take(rs: *Runners, kick: *const fn (u64) void, arg: u64) vmm.CreateError!Index {
-        while (true) {
-            const t = rs.taken.load(.seq_cst);
-            if (t == std.math.maxInt(u64)) return error.HypervisorFailed;
-            const i: Index = @intCast(@ctz(~t));
-            if (rs.taken.cmpxchgWeak(t, t | (@as(u64, 1) << i), .seq_cst, .seq_cst) == null) {
+        for (&rs.taken, 0..) |*w, wi| while (true) {
+            const t = w.load(.seq_cst);
+            if (t == std.math.maxInt(u64)) break;
+            const b: u6 = @intCast(@ctz(~t));
+            if (w.cmpxchgWeak(t, t | (@as(u64, 1) << b), .seq_cst, .seq_cst) == null) {
+                const i: Index = @intCast(wi * 64 + b);
                 rs.slots[i].kick = kick;
                 rs.slots[i].arg = arg;
                 return i;
             }
-        }
+        };
+        return error.HypervisorFailed;
     }
 
     /// Sets the argument once the vCPU's own handle exists.
@@ -190,7 +198,7 @@ pub const Runners = struct {
 
     pub fn release(rs: *Runners, i: Index) void {
         rs.slots[i].as.store(null, .seq_cst);
-        _ = rs.taken.fetchAnd(~(@as(u64, 1) << i), .seq_cst);
+        _ = rs.taken[i / 64].fetchAnd(~(@as(u64, 1) << @intCast(i % 64)), .seq_cst);
     }
 
     /// Call before reading the space's epoch for a run.
@@ -205,22 +213,26 @@ pub const Runners = struct {
     }
 
     /// Kicks every vCPU running `as` and waits until each has left its
-    /// run; the next one flushes its TLB first.
+    /// run; the next one flushes its TLB first. Slots go 64 at a time, so
+    /// the wait list stays small on the stack.
     fn shootdown(rs: *Runners, as: *const anyopaque) void {
-        var wait: [64]struct { i: Index, runs: u64 } = undefined;
-        var n: usize = 0;
-        for (&rs.slots, 0..) |*sl, i| {
-            if (sl.as.load(.seq_cst) != as) continue;
-            const runs = sl.runs.load(.seq_cst);
-            // Checked again: it may have finished that run already.
-            if (sl.as.load(.seq_cst) != as) continue;
-            if (sl.kick) |k| k(sl.arg);
-            wait[n] = .{ .i = @intCast(i), .runs = runs };
-            n += 1;
-        }
-        for (wait[0..n]) |w| {
-            const sl = &rs.slots[w.i];
-            while (sl.as.load(.seq_cst) == as and sl.runs.load(.seq_cst) == w.runs) std.atomic.spinLoopHint();
+        for (0..words) |wi| {
+            if (rs.taken[wi].load(.seq_cst) == 0) continue;
+            var wait: [64]struct { i: Index, runs: u64 } = undefined;
+            var n: usize = 0;
+            for (rs.slots[wi * 64 ..][0..64], wi * 64..) |*sl, i| {
+                if (sl.as.load(.seq_cst) != as) continue;
+                const runs = sl.runs.load(.seq_cst);
+                // Checked again: it may have finished that run already.
+                if (sl.as.load(.seq_cst) != as) continue;
+                if (sl.kick) |k| k(sl.arg);
+                wait[n] = .{ .i = @intCast(i), .runs = runs };
+                n += 1;
+            }
+            for (wait[0..n]) |w| {
+                const sl = &rs.slots[w.i];
+                while (sl.as.load(.seq_cst) == as and sl.runs.load(.seq_cst) == w.runs) std.atomic.spinLoopHint();
+            }
         }
     }
 };
@@ -357,4 +369,21 @@ pub fn AddressSpace(comptime pt: type) type {
             as.ram.gpa.destroy(as);
         }
     };
+}
+
+fn noKick(_: u64) void {}
+
+test "Runners has a slot for every vCPU KVM allows, past the first 64" {
+    const rs = try std.testing.allocator.create(Runners);
+    defer std.testing.allocator.destroy(rs);
+    rs.* = .{};
+    for (0..Runners.capacity) |i| try std.testing.expectEqual(@as(Runners.Index, @intCast(i)), try rs.take(noKick, 0));
+    try std.testing.expectError(error.HypervisorFailed, rs.take(noKick, 0));
+    rs.release(70);
+    try std.testing.expectEqual(@as(Runners.Index, 70), try rs.take(noKick, 0));
+    // A shootdown waits only for slots running the space.
+    var as: u8 = 0;
+    rs.enter(130, &as);
+    rs.leave(130);
+    rs.shootdown(&as);
 }
