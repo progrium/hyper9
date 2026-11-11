@@ -149,7 +149,31 @@ pub const Next = union(enum) {
     exit,
 };
 
-pub const Handler = *const fn (m: *Machine, o: *const Op, pc: u64) Next;
+/// What a table handler returns: a Next packed in a u64, since wasm32
+/// returns a union through memory (a stack slot the caller reads back)
+/// and a u64 in a register. That's about a quarter of T0's time on the
+/// web. A jump is its target; `.next` and `.exit` are two misaligned
+/// addresses. A branch to one of those faults on alignment anyway, so
+/// `pack` raises that fault itself (counting the branch as not retired).
+pub const Handler = *const fn (m: *Machine, o: *const Op, pc: u64) u64;
+const packed_next: u64 = std.math.maxInt(u64);
+const packed_exit: u64 = std.math.maxInt(u64) - 1;
+
+pub inline fn pack(m: *Machine, n: Next) u64 {
+    return switch (n) {
+        .next => packed_next,
+        .exit => packed_exit,
+        .jump => |t| if (t != packed_next and t != packed_exit) t else blk: {
+            m.cpu.pc = t;
+            m.exit = .{ .fault = .{ .addr = t, .access = .exec, .kind = .alignment, .esr = (EC_PC_ALIGN << 26) | ESR_IL } };
+            break :blk packed_exit;
+        },
+    };
+}
+
+inline fn unpack(v: u64) Next {
+    return if (v == packed_next) .next else if (v == packed_exit) .exit else .{ .jump = v };
+}
 
 // ---------------------------------------------------------------- the decode cache
 
@@ -362,13 +386,13 @@ pub fn step(m: *Machine, o: *const Op, pc: u64) Next {
 
 inline fn dispatch(m: *Machine, o: *const Op, pc: u64) Next {
     const k = @intFromEnum(o.k);
-    if (k < dec.simd_base) return handlers[k](m, o, pc);
+    if (k < dec.simd_base) return unpack(handlers[k](m, o, pc));
     if (k >= dec.ext_base) {
         const e = k - dec.ext_base;
-        return if (e < ext.handlers.len) ext.handlers[e](m, o, pc) else undef(m, pc);
+        return if (e < ext.handlers.len) unpack(ext.handlers[e](m, o, pc)) else undef(m, pc);
     }
     const s = k - dec.simd_base;
-    if (s < simd_exec.handlers.len) return simd_exec.handlers[s](m, o, pc);
+    if (s < simd_exec.handlers.len) return unpack(simd_exec.handlers[s](m, o, pc));
     return undef(m, pc);
 }
 
@@ -381,8 +405,8 @@ const handlers: [dec.nkinds]Handler = blk: {
 
 fn handlerFor(comptime k: Kind) Handler {
     return &struct {
-        fn f(m: *Machine, o: *const Op, pc: u64) Next {
-            return exec(k, m, o, pc);
+        fn f(m: *Machine, o: *const Op, pc: u64) u64 {
+            return pack(m, exec(k, m, o, pc));
         }
     }.f;
 }

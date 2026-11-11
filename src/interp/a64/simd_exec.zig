@@ -41,8 +41,8 @@ pub const handlers = blk: {
 
 fn handlerFor(comptime k: K) exec.Handler {
     return &struct {
-        fn f(m: *Machine, o: *const Op, pc: u64) Next {
-            return run(k, m, o, pc);
+        fn f(m: *Machine, o: *const Op, pc: u64) u64 {
+            return exec.pack(m, run(k, m, o, pc));
         }
     }.f;
 }

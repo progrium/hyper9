@@ -368,7 +368,10 @@ pub const handlers = blk: {
 
 fn handlerFor(comptime k: Kind) exec.Handler {
     return &struct {
-        fn f(m: *Machine, o: *const Op, pc: u64) Next {
+        fn f(m: *Machine, o: *const Op, pc: u64) u64 {
+            return exec.pack(m, g(m, o, pc));
+        }
+        inline fn g(m: *Machine, o: *const Op, pc: u64) Next {
             _ = pc;
             const r = &m.cpu.r;
             const v = &m.cpu.v;
