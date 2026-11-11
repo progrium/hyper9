@@ -1,12 +1,12 @@
 ---
 slug: proposal-flow
 title: A proposal lifecycle for building first, branches, Done criteria, and easier signing
-status: draft
+status: implemented
 created: 2026-11-11
 authors: [progrium]
 depends: [proposals]
 areas: [process, build, tests]
-branch: [claude/project-thread-2k7msi]
+branch: [main]
 ---
 
 # Proposal: a proposal lifecycle for building first, branches, Done criteria, and easier signing
@@ -165,7 +165,7 @@ Nothing changes for the guest. The signing workflow writes to PR branches, so it
 - [x] `zig build design -- sign proposal-flow` adds a signature in the short form with today's date, refuses when stdin isn't a terminal, and refuses unless the typed slug matches.
 - [x] `zig build design -- close-issues --dry-run` lists the open issues of implemented proposals (#35 and #120 today), and `check` fails on the old `id` key and on a slug without an issue that starts with a digit.
 - [x] After the merge, design-status closes #35 and #120 with a comment linking each doc.
-- [ ] A `/sign <slug>` comment on a PR from a login in `design/SIGNERS` adds the signature on the PR's branch, and the same comment from a login that isn't listed does nothing but reply.
+- [x] A `/sign <slug>` comment on a PR from a login in `design/SIGNERS` adds the signature on the PR's branch, and the same comment from a login that isn't listed does nothing but reply.
 - [x] `check` fails on a signature line in neither form, or naming someone not in `design/SIGNERS`.
 - [x] design/README.md, TEMPLATE.md, AGENTS.md, and DEVELOPING.md describe the new states, `branch`, Done criteria, `propose`, and `log`, and nothing describes `likely-accept`, `fix`, or numbered filenames, and README's Signature section describes the short form, `sign`, and `/sign`.
 
@@ -191,3 +191,4 @@ This proposal is the first to use the new flow: it goes from `draft` to `impleme
 - 2026-11-11: Merged in #175. design-status's first run on main closed #120 with `close-issues`. #35 had already been closed by GitHub when #175 merged, because the PR's description said it would "close #35", so `close-issues` found it closed and left it alone.
 - 2026-11-11: The first `/sign proposal-flow` comment, on #177, found the proposal already signed that day, but the workflow's reply failed with a 403. Commenting on a PR through the issues API needs `pull-requests: write`, and design-sign had `read`. #177 fixes the permission, and the `/sign` item stays open until a comment gets its reply.
 - 2026-11-11: #177 merged the `pull-requests: write` fix to design-sign.
+- 2026-11-11: A `/sign proposal-flow` comment on #178 got the workflow's reply, which said the proposal was already signed that day. Implemented.
