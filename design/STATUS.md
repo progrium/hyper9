@@ -22,7 +22,6 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [whp](whp.md) | [#17](../../../issues/17) | implemented |  | WHP backend |
 | [zig-interpreter](zig-interpreter.md) | [#19](../../../issues/19) | superseded |  | A native Zig interpreter for the emulator |
 | [baseline](baseline.md) |  | implemented |  | Baseline (h9 before proposals) |
-| [ci](ci.md) |  | draft |  | Continuous integration |
 | [hide-host-paths](hide-host-paths.md) |  | draft |  | Hide host paths in /proc/n/ns |
 | [host-sandbox](host-sandbox.md) |  | draft |  | Host self-sandboxing |
 | [i386](i386.md) | [#9](../../../issues/9) | implemented |  | 386 binaries |
@@ -83,7 +82,6 @@ flowchart LR
   p_whp["whp<br/>implemented"]:::implemented
   p_zig_interpreter["zig-interpreter<br/>superseded"]:::closed
   p_baseline["baseline<br/>implemented"]:::implemented
-  p_ci["ci<br/>draft"]:::draft
   p_hide_host_paths["hide-host-paths<br/>draft"]:::draft
   p_host_sandbox["host-sandbox<br/>draft"]:::draft
   p_i386["i386<br/>implemented"]:::implemented
