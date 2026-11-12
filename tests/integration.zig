@@ -7283,7 +7283,7 @@ test "a 9P2000.L.Z mount resumes a write the server dropped, applied once [dotl]
     try std.testing.expectEqual(2, d.connections.load(.acquire));
 }
 
-test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [dotl]" {
+test "the in-memory .L.Z server's reconnect doesn't truncate a file opened with OTRUNC [dotl]" {
     const e = try env(@src());
     var d: DotlServer = undefined;
     try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
@@ -7301,7 +7301,7 @@ test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [dotl]" {
     try std.testing.expectEqualStrings("x\ny\n", r.out);
 }
 
-test "a .L.Z root survives the server restarting mid-write [dotl]" {
+test "a .L.Z root from the in-memory server survives it dropping the connection mid-write [dotl]" {
     const e = try env(@src());
     dotl_root_from = .{ .root = e.root, .arch = e.arch orelse switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
@@ -7657,6 +7657,229 @@ test "an h9 root over --serve speaks 9P2000.L through both translators [dotl]" {
     errdefer std.debug.print("client stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("9P2000.L\nhi\nd/\ng\nserved\n", r.out);
     try std.testing.expectEqual(0, r.code);
+}
+
+// The .L.Z cases against ZeroFS (`scripts/fetch.sh zerofs`), with its
+// in-memory store. ZeroFS has no local-file store, and the in-memory one
+// is gone when the server stops, so "the server restarting" is the
+// connection dropping under h9 instead: CutRelay closes it right after
+// passing on a Twrite, before the reply, as a crash or failover would.
+
+const ZeroFs = struct {
+    child: std.process.Child,
+    port: u16,
+    s: Scratch,
+    relay: CutRelay = undefined,
+    dial_buf: [64]u8 = undefined,
+    allow_buf: [64]u8 = undefined,
+
+    fn start(z: *ZeroFs) !void {
+        const io = std.testing.io;
+        const bin = getenv(5, "H9_TEST_ZEROFS") orelse return error.SkipZigTest;
+        std.Io.Dir.cwd().access(io, bin, .{}) catch return error.SkipZigTest;
+        try z.s.init();
+        errdefer z.s.deinit();
+        var probe = try listenLocal();
+        z.port = probe.socket.address.getPort();
+        probe.deinit(io);
+        var conf: std.ArrayList(u8) = .empty;
+        defer conf.deinit(gpa);
+        try conf.print(gpa,
+            \\[cache]
+            \\dir = "{s}/cache"
+            \\disk_size_gb = 1.0
+            \\memory_size_gb = 0.1
+            \\[storage]
+            \\url = "memory:///"
+            \\encryption_password = "h9-test-password"
+            \\[servers.ninep]
+            \\addresses = ["127.0.0.1:{d}"]
+            \\
+        , .{ z.s.path, z.port });
+        try z.s.tmp.dir.writeFile(io, .{ .sub_path = "zerofs.toml", .data = conf.items });
+        var pb: [600]u8 = undefined;
+        z.child = try std.process.spawn(io, .{ .argv = &.{ bin, "run", "--config", try scratchPath(&z.s, &pb, "zerofs.toml") }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+        errdefer z.child.kill(io);
+        const ip = try std.Io.net.IpAddress.parse("127.0.0.1", z.port);
+        var tries: u32 = 0;
+        while (true) : (tries += 1) {
+            const c = ip.connect(io, .{ .mode = .stream }) catch |err| {
+                if (tries >= slow(300)) return err;
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            };
+            c.close(io);
+            break;
+        }
+        try z.relay.start(z.port);
+    }
+
+    /// The relay's address, which h9 dials.
+    fn dial(z: *ZeroFs) []const u8 {
+        return std.fmt.bufPrint(&z.dial_buf, "tcp!127.0.0.1!{d}", .{z.relay.listen_port}) catch unreachable;
+    }
+
+    fn allow(z: *ZeroFs) []const u8 {
+        return std.fmt.bufPrint(&z.allow_buf, "tcp!127.0.0.1!{d}", .{z.relay.listen_port}) catch unreachable;
+    }
+
+    fn stop(z: *ZeroFs) void {
+        z.child.kill(std.testing.io);
+        z.s.deinit();
+    }
+
+    /// Runs `script` in rc with ZeroFS mounted at /n/z by dotlfs.
+    fn rc(z: *ZeroFs, e: Env, script: []const u8) !Result {
+        var cmd: std.ArrayList(u8) = .empty;
+        defer cmd.deinit(gpa);
+        try cmd.print(gpa, "mkdir -p /n/z; dotlfs -c {s} /n/z || exit mount; {s}", .{ z.dial(), script });
+        return run(e, &.{ "--net-allow", z.allow(), "--rc", cmd.items });
+    }
+};
+
+/// A TCP relay to a 9P server on loopback that, once armed, closes the
+/// connection right after passing on a Twrite, before its reply comes.
+/// Connections after that pass through.
+const CutRelay = struct {
+    srv: std.Io.net.Server,
+    to: u16,
+    listen_port: u16,
+    /// Twrites to pass before cutting; negative, none.
+    cut_after: std.atomic.Value(i32) = .init(-1),
+    cuts: std.atomic.Value(u32) = .init(0),
+    connections: std.atomic.Value(u32) = .init(0),
+
+    fn start(r: *CutRelay, to: u16) !void {
+        const srv = try listenLocal();
+        r.* = .{ .srv = srv, .to = to, .listen_port = srv.socket.address.getPort() };
+        const t = try std.Thread.spawn(.{}, accept, .{r});
+        t.detach();
+    }
+
+    fn arm(r: *CutRelay, writes: i32) void {
+        r.cut_after.store(writes, .release);
+    }
+
+    fn accept(r: *CutRelay) void {
+        const io = std.testing.io;
+        while (true) {
+            const c = deadline.accept(&r.srv, io) catch return;
+            const ip = std.Io.net.IpAddress.parse("127.0.0.1", r.to) catch unreachable;
+            const s = ip.connect(io, .{ .mode = .stream }) catch {
+                c.close(io);
+                continue;
+            };
+            _ = r.connections.fetchAdd(1, .acq_rel);
+            const t = std.Thread.spawn(.{}, UnixRelay.copy, .{ s, c }) catch return;
+            t.detach();
+            const t2 = std.Thread.spawn(.{}, up, .{ r, c, s }) catch return;
+            t2.detach();
+        }
+    }
+
+    /// Passes the client's messages on whole, cutting after the armed
+    /// Twrite.
+    fn up(r: *CutRelay, from: std.Io.net.Stream, to: std.Io.net.Stream) void {
+        const io = std.testing.io;
+        const buf = std.heap.page_allocator.alloc(u8, 16 << 20) catch return;
+        defer std.heap.page_allocator.free(buf);
+        var rd = from.reader(io, buf);
+        var w = to.writer(io, &.{});
+        while (true) {
+            const hdr = rd.interface.peek(5) catch break;
+            const size = std.mem.readInt(u32, hdr[0..4], .little);
+            if (size < 7 or size > buf.len) break;
+            const frame = rd.interface.take(size) catch break;
+            w.interface.writeAll(frame) catch break;
+            if (frame[4] == 118 and r.cut_after.fetchSub(1, .acq_rel) == 0) {
+                _ = r.cuts.fetchAdd(1, .acq_rel);
+                break;
+            }
+        }
+        to.shutdown(io, .both) catch {};
+        from.shutdown(io, .both) catch {};
+    }
+};
+
+test "a .L.Z mount of ZeroFS lists, reads, writes and removes [dotl]" {
+    const e = try env(@src());
+    var z: ZeroFs = undefined;
+    try z.start();
+    defer z.stop();
+    const r = try z.rc(e,
+        \\cat /net/dotl/*/status
+        \\cd /n/z
+        \\echo new >made && cat made
+        \\echo more >>made && awk 'END{print NR}' made
+        \\mkdir dir && touch dir/x && ls dir
+        \\mv made renamed && ls
+        \\ls -l renamed | awk '{print $1, $6}'
+        \\rm renamed dir/x dir && ls
+        \\rm nope
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    // rc creates with 0666, and ZeroFS's root is 0777, so create(5)
+    // leaves the file 0666.
+    try std.testing.expectEqualStrings("9P2000.L.Z\nnew\n2\ndir/x\ndir\nrenamed\n--rw-rw-rw- 9\n", r.out);
+    try expectIn(r.err, "file does not exist");
+}
+
+test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [dotl]" {
+    const e = try env(@src());
+    var z: ZeroFs = undefined;
+    try z.start();
+    defer z.stop();
+    const made = try z.rc(e, "echo old >/n/z/notes");
+    made.deinit();
+    // The first write to the file, opened with OTRUNC by >, is cut off.
+    // The open is replayed without O_TRUNC, and the write resent once.
+    z.relay.arm(0);
+    const r = try z.rc(e,
+        \\{ echo x; echo y } >/n/z/notes
+        \\cat /n/z/notes
+        \\cat /net/dotl/*/status
+    );
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("x\ny\n9P2000.L.Z reconnects 1\n", r.out);
+    try std.testing.expectEqual(1, z.relay.cuts.load(.acquire));
+}
+
+test "a .L.Z root survives the server restarting mid-write [dotl]" {
+    const e = try env(@src());
+    var z: ZeroFs = undefined;
+    try z.start();
+    defer z.stop();
+    // A small 9front root in ZeroFS, put there through a mount.
+    const arch = e.arch orelse switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86 => "386",
+        else => "amd64",
+    };
+    var fill_buf: [1024]u8 = undefined;
+    const fill = try z.rc(e, try std.fmt.bufPrint(&fill_buf,
+        \\cd /n/z && mkdir -p dev env fd proc srv net n tmp mnt/term/cwd bin usr/glenda {0s}/bin rc/lib
+        \\for(p in rc echo cat) cp /{0s}/bin/$p {0s}/bin/
+        \\cp /rc/lib/rcmain rc/lib/
+    , .{arch}));
+    defer fill.deinit();
+    if (fill.code != 0) std.debug.print("fill: {s}\n", .{fill.err});
+    try std.testing.expectEqual(0, fill.code);
+    z.relay.arm(1);
+    const r = try run(e, &.{
+        "--root", z.dial(), "--write=scope", "--builtin=off", "--rc",
+        \\{ echo one; echo two; echo three } >/usr/glenda/log
+        \\cat /usr/glenda/log
+        \\cat /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    // Each line once: the cut write was applied once, resent or not.
+    try std.testing.expectEqualStrings("one\ntwo\nthree\n9P2000.L.Z reconnects 1\n", r.out);
+    try std.testing.expectEqual(1, z.relay.cuts.load(.acquire));
 }
 
 /// How to run a command as root to mount 9P over a unix socket, on Linux

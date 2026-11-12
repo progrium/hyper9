@@ -96,6 +96,9 @@ pub const Server = struct {
     /// transport should close.
     drop_after_write: ?u32 = null,
     dropped: bool = false,
+    /// Handles each batch of requests fed at once last first, as a server
+    /// that answers concurrently may.
+    reverse: bool = false,
     /// Answers this many mutations with ENOTLEADER, without applying
     /// them, as an HA server that lost the lead would.
     not_leader: u32 = 0,
@@ -171,6 +174,11 @@ pub const Server = struct {
 
     /// Takes the client's bytes and answers whole requests.
     pub fn feed(s: *Server, bytes: []const u8) !void {
+        var batch: std.ArrayList([]u8) = .empty;
+        defer {
+            for (batch.items) |f| s.gpa.free(f);
+            batch.deinit(s.gpa);
+        }
         try s.in.appendSlice(s.gpa, bytes);
         while (try wire.header(s.in.items, s.msize)) |h| {
             if (s.dropped) return;
@@ -195,8 +203,16 @@ pub const Server = struct {
                 try s.held.append(s.gpa, frame);
                 continue;
             }
+            if (s.reverse) {
+                try batch.append(s.gpa, frame);
+                continue;
+            }
             defer s.gpa.free(frame);
             try s.handle(frame);
+        }
+        while (batch.pop()) |f| {
+            defer s.gpa.free(f);
+            if (!s.dropped) try s.handle(f);
         }
     }
 

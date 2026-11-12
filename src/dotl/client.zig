@@ -115,6 +115,10 @@ const Step = union(enum) {
     /// Resuming after a reconnect: 0 the Tversion, 1 a Trebind or the
     /// Tlopen that replays an open.
     reconnect: u32,
+    /// The Trebind of an open server fid: its reply sends the Tlopen that
+    /// replays the open. The server may answer requests in any order, so
+    /// the Tlopen waits for it.
+    rebound: u32,
 };
 
 const Pending = struct {
@@ -340,7 +344,7 @@ pub const Client = struct {
         var it = c.pending.iterator();
         while (it.next()) |e| switch (e.value_ptr.step) {
             .clunked => try done.append(c.gpa, e.key_ptr.*),
-            .reconnect => try done.append(c.gpa, e.key_ptr.*),
+            .reconnect, .rebound => try done.append(c.gpa, e.key_ptr.*),
             else => {},
         };
         for (done.items) |t| {
@@ -444,7 +448,7 @@ pub const Client = struct {
     /// Notes what a server fid is bound to from a request and its reply,
     /// for a reconnect's Trebind.
     fn track(c: *Client, p: Pending, msg: l.R) Allocator.Error!void {
-        if (c.dialect != .@"9P2000.L.Z" or p.step == .reconnect or lerror(msg) != null) return;
+        if (c.dialect != .@"9P2000.L.Z" or p.step == .reconnect or p.step == .rebound or lerror(msg) != null) return;
         const d = wire.decode(l.T, p.frame, std.math.maxInt(u32), p.enveloped) catch return;
         switch (d.msg) {
             .Tattach => |a| if (msg == .Rattach) {
@@ -503,14 +507,9 @@ pub const Client = struct {
                 while (it.next()) |e| {
                     const b = e.value_ptr;
                     const flags: u8 = L.REBIND_REPLAY | if (b.open != null) L.REBIND_OPENED else 0;
-                    try c.sendServer(null, l.Trebind{ .fid = e.key_ptr.*, .inode_id = b.inode, .root_inode = b.root, .flags = flags, .uname = b.uname, .n_uname = b.n_uname }, .{ .op = null, .step = .{ .reconnect = 1 } });
+                    const step: Step = if (b.open != null) .{ .rebound = e.key_ptr.* } else .{ .reconnect = 1 };
+                    try c.sendServer(null, l.Trebind{ .fid = e.key_ptr.*, .inode_id = b.inode, .root_inode = b.root, .flags = flags, .uname = b.uname, .n_uname = b.n_uname }, .{ .op = null, .step = step });
                     c.rebinds += 1;
-                    // The open is replayed in place, never truncating or
-                    // creating what the guest already has open.
-                    if (b.open) |o| {
-                        try c.sendServer(null, l.Tlopen{ .fid = e.key_ptr.*, .flags = o & ~@as(u32, L.TRUNC | L.CREATE | L.EXCL) }, .{ .op = null, .step = .{ .reconnect = 1 } });
-                        c.rebinds += 1;
-                    }
                 }
             },
             1 => {
@@ -520,6 +519,17 @@ pub const Client = struct {
             else => unreachable,
         }
         if (c.rebinds == 0) try c.resume_();
+    }
+
+    /// An open server fid is rebound: the open is replayed in place,
+    /// never truncating or creating what the guest already has open.
+    fn stepRebound(c: *Client, sfid: u32, msg: l.R) Allocator.Error!void {
+        var buf: [16]u8 = undefined;
+        var mbuf: [96]u8 = undefined;
+        if (lerror(msg)) |e| return c.fail(std.fmt.bufPrint(&mbuf, "reconnect: {s}", .{attr.errstr(e, &buf)}) catch "reconnect failed");
+        if (msg != .Rrebind) return c.unexpected();
+        const b = c.bound.get(sfid) orelse return c.fail("reconnect: an open fid went away");
+        try c.sendServer(null, l.Tlopen{ .fid = sfid, .flags = b.open.? & ~@as(u32, L.TRUNC | L.CREATE | L.EXCL) }, .{ .op = null, .step = .{ .reconnect = 1 } });
     }
 
     /// Every fid is rebound: what wasn't answered on the old connection,
@@ -616,7 +626,7 @@ pub const Client = struct {
         p.seq = c.next_seq;
         c.next_seq += 1;
         // While reconnecting only the reconnect's own requests go out.
-        p.sent = !c.reconnecting or p.step == .reconnect;
+        p.sent = !c.reconnecting or p.step == .reconnect or p.step == .rebound;
         if (p.sent) try c.out_server.appendSlice(c.gpa, p.frame);
         try c.pending.put(c.gpa, t, p);
         if (p.op) |op| op.outstanding += 1;
@@ -925,6 +935,7 @@ pub const Client = struct {
                 return c.maybeFlushed(f.op);
             },
             .reconnect => |n| return c.stepReconnect(n, msg),
+            .rebound => |sfid| return c.stepRebound(sfid, msg),
             else => {},
         }
         const op = p.op orelse {
@@ -937,7 +948,7 @@ pub const Client = struct {
             .resolve => |r| return c.stepResolve(r, msg),
             .main => |n| return c.stepOp(op, n, msg),
             .entry => |i| return c.stepEntry(op, i, msg),
-            .clunked, .flush, .reconnect => unreachable,
+            .clunked, .flush, .reconnect, .rebound => unreachable,
         }
     }
 
@@ -2283,12 +2294,18 @@ test "a reconnect rebinds fids, reopens without O_TRUNC, and resends a write onc
     // A request made while the connection is down waits for it.
     const tag2 = try h.send(p9.Twrite{ .fid = 1, .offset = 4, .data = .{ .bytes = "ef" } });
     h.s.reset();
+    // The new server answers out of order, as ZeroFS may: the reopen
+    // must wait for its fid's Trebind.
+    h.s.reverse = true;
     try h.c.reconnect();
     try h.pump();
-    const r = (try h.next()).?;
+    // Both writes are answered, in whatever order the server chose.
+    const r1 = (try h.next()).?;
+    const r2 = (try h.next()).?;
+    const r = if (r1.tag == tag) r1 else r2;
     try testing.expectEqual(tag, r.tag);
     try testing.expectEqual(@as(u32, 2), r.msg.Rwrite.count);
-    try testing.expectEqual(tag2, (try h.next()).?.tag);
+    try testing.expectEqual(tag2, if (r1.tag == tag) r2.tag else r1.tag);
     try testing.expectEqual(@as(u32, 1), h.s.replayed);
     try testing.expectEqualStrings("abcdef", h.s.lookup("usr/glenda/notes").?.data.items);
     try testing.expectEqual(@as(u32, 1), h.c.reconnects);

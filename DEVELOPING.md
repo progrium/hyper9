@@ -273,13 +273,18 @@ the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os`
 runs one package). It's for finding gaps, not a gate, and nothing depends on
 it.
 
-The [dotl](design/dotl.md) cases run against two 9P2000.L servers: the
-one in [src/dotl/testserver.zig](src/dotl/testserver.zig), in memory,
-which also speaks 9P2000.L.Z and can drop connections on cue, and diod.
+The [dotl](design/dotl.md) cases run against three 9P2000.L servers:
+the one in [src/dotl/testserver.zig](src/dotl/testserver.zig), in
+memory, which also speaks 9P2000.L.Z and can drop connections on cue,
+diod, and ZeroFS.
 `scripts/fetch.sh diod` unpacks Ubuntu 24.04's diod package and the
 libraries it links, at the hashes in [scripts/pins.sh](scripts/pins.sh),
 into `.local/diod`, with `.local/bin/diod` to run it (x86\_64 Linux only,
-and it needs `ar` and `zstd`); without it, diod's cases skip. "Linux v9fs
+and it needs `ar` and `zstd`); without it, diod's cases skip.
+`scripts/fetch.sh zerofs` builds ZeroFS from source at the commit in
+pins.sh with the host's cargo, which takes several minutes, into
+`.local/bin/zerofs`; without it, ZeroFS's .L.Z cases skip, and CI
+doesn't build it. "Linux v9fs
 mounts --serve over a unix socket" runs only on Linux with the kernel's
 9p, as root or with `sudo -n`, as in the `linux-kvm` VM.
 

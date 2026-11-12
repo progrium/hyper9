@@ -2,13 +2,13 @@
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
 # libraries and the patched Unicorn source into .local, and on request
 # the release's 386 or amd64 ISO, the browser host's Linux demo root, the
-# workloads' Linux root, and diod.
+# workloads' Linux root, diod, and ZeroFS.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
 #                                 iso386 isoamd64 alpinearm64web
-#                                 workloads diod; default all but the
-#                                 ISOs, alpinearm64web, workloads, and
-#                                 diod)
+#                                 workloads diod zerofs; default all but
+#                                 the ISOs, alpinearm64web, workloads,
+#                                 diod, and zerofs)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -17,7 +17,7 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn unicorn-src} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web|workloads|diod) ;;
+	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
 	# v86 was the browser host's 386 CPU before h86, and alpine386web the
 	# Linux demo's root before it moved to arm64; nothing to fetch now.
 	v86|alpine386web) ;;
@@ -213,4 +213,18 @@ LD_LIBRARY_PATH=$d/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 SH
 chmod +x "$H9_LOCAL/bin/diod"
 echo "diod: $(echo "$DIOD_DEBS" | awk 'NF{sub(/.*\//, "", $1); print $1; exit}')"
+fi
+
+# ZeroFS for the [dotl] cases: its source at the pinned commit, built
+# with the host's cargo (Rust 1.85 or later) into .local/zerofs, and
+# copied to .local/bin. The first build takes several minutes.
+if want zerofs; then
+command -v cargo >/dev/null || { echo "fetch: zerofs needs cargo" >&2; exit 1; }
+clone "$ZEROFS_REPO" zerofs "$ZEROFS_REV"
+if [ "$(cat "$H9_LOCAL/zerofs/.h9-stamp" 2>/dev/null || true)" != "$ZEROFS_REV" ]; then
+	(cd "$H9_LOCAL/src/zerofs/zerofs" && CARGO_TARGET_DIR="$H9_LOCAL/zerofs" cargo build -q --release --locked --bin zerofs)
+	echo "$ZEROFS_REV" >"$H9_LOCAL/zerofs/.h9-stamp"
+fi
+cp "$H9_LOCAL/zerofs/release/zerofs" "$H9_LOCAL/bin/zerofs"
+echo "zerofs: $ZEROFS_VERSION"
 fi

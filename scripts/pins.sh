@@ -124,3 +124,11 @@ universe/l/lua5.1/liblua5.1-0_5.1.5-9build2_amd64.deb 2faa6821017f587d016afac1a3
 universe/m/munge/libmunge2_0.5.15-4build1_amd64.deb 944e4d5b2c19c7351a3816daf569eda36cbd245102e8d33d178e54e6e560184f
 main/t/tcp-wrappers/libwrap0_7.6.q-33_amd64.deb 36118b862539868408ee056411d6e470068d14c46e5296b29bfb744770f5d2ce
 "
+
+# ZeroFS, the 9P2000.L.Z server the [dotl] cases also run against
+# (design/dotl.md), built from source at this release with the host's
+# cargo: `scripts/fetch.sh zerofs` puts it in .local/bin/zerofs.
+# Without it, those cases skip. AGPLv3: dev and CI only.
+ZEROFS_REPO=https://github.com/Barre/ZeroFS
+ZEROFS_VERSION=2.3.6
+ZEROFS_REV=9e5497ff22641531bafcb6b0d3072cf0df636f85
