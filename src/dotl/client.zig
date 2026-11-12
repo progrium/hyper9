@@ -115,6 +115,10 @@ const Step = union(enum) {
     /// Resuming after a reconnect: 0 the Tversion, 1 a Trebind or the
     /// Tlopen that replays an open.
     reconnect: u32,
+    /// The Trebind of an open server fid: its reply sends the Tlopen that
+    /// replays the open. The server may answer requests in any order, so
+    /// the Tlopen waits for it.
+    rebound: u32,
 };
 
 const Pending = struct {
@@ -280,8 +284,10 @@ pub const Client = struct {
         var c: Client = .{ .gpa = gpa, .opts = opts };
         c.msize = opts.msize;
         c.offered = if (opts.offer_lz) wire.version_lz else wire.version_l;
-        // Offer straight away; devmnt's Tversion waits for the answer.
-        try c.sendServer(0, wire.common.Tversion{ .msize = opts.msize, .version = c.offered }, .{ .op = null, .step = .{ .main = 0 } });
+        // Offer straight away; devmnt's Tversion waits for the answer. A
+        // Tversion's tag is NOTAG, as version(5) says, and ZeroFS's
+        // client codec insists on it.
+        try c.sendServer(wire.notag, wire.common.Tversion{ .msize = opts.msize, .version = c.offered }, .{ .op = null, .step = .{ .main = 0 } });
         return c;
     }
 
@@ -338,7 +344,7 @@ pub const Client = struct {
         var it = c.pending.iterator();
         while (it.next()) |e| switch (e.value_ptr.step) {
             .clunked => try done.append(c.gpa, e.key_ptr.*),
-            .reconnect => try done.append(c.gpa, e.key_ptr.*),
+            .reconnect, .rebound => try done.append(c.gpa, e.key_ptr.*),
             else => {},
         };
         for (done.items) |t| {
@@ -349,7 +355,7 @@ pub const Client = struct {
                 else => {},
             }
         }
-        try c.sendServer(null, wire.common.Tversion{ .msize = c.msize, .version = wire.version_lz }, .{ .op = null, .step = .{ .reconnect = 0 } });
+        try c.sendServer(wire.notag, wire.common.Tversion{ .msize = c.msize, .version = wire.version_lz }, .{ .op = null, .step = .{ .reconnect = 0 } });
     }
 
     /// Bytes to send to the server; `consumedServer` drops what was sent.
@@ -442,7 +448,7 @@ pub const Client = struct {
     /// Notes what a server fid is bound to from a request and its reply,
     /// for a reconnect's Trebind.
     fn track(c: *Client, p: Pending, msg: l.R) Allocator.Error!void {
-        if (c.dialect != .@"9P2000.L.Z" or p.step == .reconnect or lerror(msg) != null) return;
+        if (c.dialect != .@"9P2000.L.Z" or p.step == .reconnect or p.step == .rebound or lerror(msg) != null) return;
         const d = wire.decode(l.T, p.frame, std.math.maxInt(u32), p.enveloped) catch return;
         switch (d.msg) {
             .Tattach => |a| if (msg == .Rattach) {
@@ -501,14 +507,9 @@ pub const Client = struct {
                 while (it.next()) |e| {
                     const b = e.value_ptr;
                     const flags: u8 = L.REBIND_REPLAY | if (b.open != null) L.REBIND_OPENED else 0;
-                    try c.sendServer(null, l.Trebind{ .fid = e.key_ptr.*, .inode_id = b.inode, .root_inode = b.root, .flags = flags, .uname = b.uname, .n_uname = b.n_uname }, .{ .op = null, .step = .{ .reconnect = 1 } });
+                    const step: Step = if (b.open != null) .{ .rebound = e.key_ptr.* } else .{ .reconnect = 1 };
+                    try c.sendServer(null, l.Trebind{ .fid = e.key_ptr.*, .inode_id = b.inode, .root_inode = b.root, .flags = flags, .uname = b.uname, .n_uname = b.n_uname }, .{ .op = null, .step = step });
                     c.rebinds += 1;
-                    // The open is replayed in place, never truncating or
-                    // creating what the guest already has open.
-                    if (b.open) |o| {
-                        try c.sendServer(null, l.Tlopen{ .fid = e.key_ptr.*, .flags = o & ~@as(u32, L.TRUNC | L.CREATE | L.EXCL) }, .{ .op = null, .step = .{ .reconnect = 1 } });
-                        c.rebinds += 1;
-                    }
                 }
             },
             1 => {
@@ -518,6 +519,17 @@ pub const Client = struct {
             else => unreachable,
         }
         if (c.rebinds == 0) try c.resume_();
+    }
+
+    /// An open server fid is rebound: the open is replayed in place,
+    /// never truncating or creating what the guest already has open.
+    fn stepRebound(c: *Client, sfid: u32, msg: l.R) Allocator.Error!void {
+        var buf: [16]u8 = undefined;
+        var mbuf: [96]u8 = undefined;
+        if (lerror(msg)) |e| return c.fail(std.fmt.bufPrint(&mbuf, "reconnect: {s}", .{attr.errstr(e, &buf)}) catch "reconnect failed");
+        if (msg != .Rrebind) return c.unexpected();
+        const b = c.bound.get(sfid) orelse return c.fail("reconnect: an open fid went away");
+        try c.sendServer(null, l.Tlopen{ .fid = sfid, .flags = b.open.? & ~@as(u32, L.TRUNC | L.CREATE | L.EXCL) }, .{ .op = null, .step = .{ .reconnect = 1 } });
     }
 
     /// Every fid is rebound: what wasn't answered on the old connection,
@@ -614,7 +626,7 @@ pub const Client = struct {
         p.seq = c.next_seq;
         c.next_seq += 1;
         // While reconnecting only the reconnect's own requests go out.
-        p.sent = !c.reconnecting or p.step == .reconnect;
+        p.sent = !c.reconnecting or p.step == .reconnect or p.step == .rebound;
         if (p.sent) try c.out_server.appendSlice(c.gpa, p.frame);
         try c.pending.put(c.gpa, t, p);
         if (p.op) |op| op.outstanding += 1;
@@ -717,6 +729,12 @@ pub const Client = struct {
 
     fn request(c: *Client, tag: u16, msg: p9.T) Allocator.Error!void {
         if (c.dialect == .failed) return c.rerror(tag, c.err.?);
+        // A create's directory attributes, if a walk brought them, give
+        // its mode (create(5)) before the create drops them.
+        const create_dir: ?wire.Stat = switch (msg) {
+            .Tcreate => |cr| if (c.fids.get(cr.fid)) |f| c.cachedStat(f) else null,
+            else => null,
+        };
         switch (msg) {
             .Twrite, .Tcreate, .Tremove, .Twstat => c.dropAhead(),
             .Tclunk => |cl| if (c.fids.get(cl.fid)) |f| if (f.rclose) c.dropAhead(),
@@ -778,16 +796,10 @@ pub const Client = struct {
                 op.mode = cr.mode;
                 op.perm = cr.perm;
                 op.name = try op.allocator().dupe(u8, cr.name);
-                const gid = c.opts.users.number(c.opts.users.user);
-                if (cr.perm & wire.DMDIR != 0) {
-                    try c.send(op, l.Tmkdir{ .dfid = f.sfid, .name = op.name, .mode = attr.createMode(cr.perm), .gid = gid }, .{ .main = 0 });
-                } else if (c.dialect == .@"9P2000.L.Z") {
-                    // Created on a new server fid, with its attributes.
-                    op.sfid = try c.tmpSfid(op);
-                    try c.send(op, l.Tlcreateattr{ .dfid = f.sfid, .newfid = op.sfid, .name = op.name, .flags = attr.openFlags(cr.mode) | L.CREATE | L.EXCL, .mode = attr.createMode(cr.perm), .gid = gid }, .{ .main = 13 });
-                } else {
-                    try c.send(op, l.Tlcreate{ .fid = f.sfid, .name = op.name, .flags = attr.openFlags(cr.mode) | L.CREATE | L.EXCL, .mode = attr.createMode(cr.perm), .gid = gid }, .{ .main = 10 });
-                }
+                // The mode depends on the directory's (create(5)), from
+                // attributes held for it or a Tgetattr.
+                if (create_dir) |st| return c.createSend(op, f, st.mode);
+                try c.send(op, l.Tgetattr{ .fid = f.sfid, .request_mask = L.GETATTR_BASIC }, .{ .main = 20 });
             },
             .Tread => |r| {
                 const f = c.fids.get(r.fid) orelse return c.rerror(tag, "unknown fid");
@@ -923,6 +935,7 @@ pub const Client = struct {
                 return c.maybeFlushed(f.op);
             },
             .reconnect => |n| return c.stepReconnect(n, msg),
+            .rebound => |sfid| return c.stepRebound(sfid, msg),
             else => {},
         }
         const op = p.op orelse {
@@ -935,27 +948,30 @@ pub const Client = struct {
             .resolve => |r| return c.stepResolve(r, msg),
             .main => |n| return c.stepOp(op, n, msg),
             .entry => |i| return c.stepEntry(op, i, msg),
-            .clunked, .flush, .reconnect => unreachable,
+            .clunked, .flush, .reconnect, .rebound => unreachable,
         }
     }
 
     fn versioned(c: *Client, msg: l.R) Allocator.Error!void {
+        const offered_lz = c.offered.ptr == wire.version_lz.ptr;
         const v = switch (msg) {
             .Rversion => |v| v,
             .Rlerror => |e| {
+                // diod refuses a version it doesn't know with an error
+                // (EIO) rather than with "unknown": .L next, as below.
+                if (offered_lz) return c.offerL();
                 var buf: [16]u8 = undefined;
                 return c.fail(attr.errstr(e.ecode, &buf));
             },
             else => return c.fail("bad reply to Tversion"),
         };
-        if (std.mem.eql(u8, v.version, wire.version_lz) and c.offered.ptr == wire.version_lz.ptr) {
+        if (std.mem.eql(u8, v.version, wire.version_lz) and offered_lz) {
             c.dialect = .@"9P2000.L.Z";
         } else if (std.mem.eql(u8, v.version, wire.version_l)) {
             c.dialect = .@"9P2000.L";
-        } else if (std.mem.eql(u8, v.version, "unknown") and c.offered.ptr == wire.version_lz.ptr) {
+        } else if (std.mem.eql(u8, v.version, "unknown") and offered_lz) {
             // Some .L servers know only their own version string exactly.
-            c.offered = wire.version_l;
-            return c.sendServer(null, wire.common.Tversion{ .msize = c.opts.msize, .version = c.offered }, .{ .op = null, .step = .{ .main = 0 } });
+            return c.offerL();
         } else if (std.mem.eql(u8, v.version, wire.version_9p)) {
             c.dialect = .@"9P2000";
         } else {
@@ -965,6 +981,12 @@ pub const Client = struct {
         if (v.msize < 256 or v.msize > c.opts.msize) return c.fail("bad msize from the server");
         c.msize = v.msize;
         if (c.held_version) |h| try c.answerVersion(h.tag, h.msize);
+    }
+
+    /// Offers `9P2000.L` after a server refused `9P2000.L.Z`.
+    fn offerL(c: *Client) Allocator.Error!void {
+        c.offered = wire.version_l;
+        return c.sendServer(wire.notag, wire.common.Tversion{ .msize = c.opts.msize, .version = c.offered }, .{ .op = null, .step = .{ .main = 0 } });
     }
 
     fn answerVersion(c: *Client, tag: u16, msize: u32) Allocator.Error!void {
@@ -1138,6 +1160,20 @@ pub const Client = struct {
         }
     }
 
+    fn createSend(c: *Client, op: *Op, f: *Fid, dir_mode: u32) Allocator.Error!void {
+        const gid = c.opts.users.number(c.opts.users.user);
+        const mode = attr.createModeIn(op.perm, dir_mode);
+        if (op.perm & wire.DMDIR != 0) {
+            try c.send(op, l.Tmkdir{ .dfid = f.sfid, .name = op.name, .mode = mode, .gid = gid }, .{ .main = 0 });
+        } else if (c.dialect == .@"9P2000.L.Z") {
+            // Created on a new server fid, with its attributes.
+            op.sfid = try c.tmpSfid(op);
+            try c.send(op, l.Tlcreateattr{ .dfid = f.sfid, .newfid = op.sfid, .name = op.name, .flags = attr.openFlags(op.mode) | L.CREATE | L.EXCL, .mode = mode, .gid = gid }, .{ .main = 13 });
+        } else {
+            try c.send(op, l.Tlcreate{ .fid = f.sfid, .name = op.name, .flags = attr.openFlags(op.mode) | L.CREATE | L.EXCL, .mode = mode, .gid = gid }, .{ .main = 10 });
+        }
+    }
+
     fn stepCreate(c: *Client, op: *Op, n: u32, msg: l.R) Allocator.Error!void {
         const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
         // create(5) of a file that exists truncates it, unless DMEXCL: so
@@ -1149,6 +1185,11 @@ pub const Client = struct {
         }
         if (lerror(msg)) |e| return c.finishErrno(op, e);
         switch (n) {
+            // The directory's attributes, for the mode.
+            20 => {
+                if (msg != .Rgetattr) return c.unexpected();
+                return c.createSend(op, f, msg.Rgetattr.stat.mode);
+            },
             // A directory: Tmkdir, then walk to it and open it.
             0 => {
                 if (msg != .Rmkdir) return c.unexpected();
@@ -1258,6 +1299,27 @@ pub const Client = struct {
     }
 
     fn stepRemove(c: *Client, op: *Op, n: u32, msg: l.R) Allocator.Error!void {
+        if (n == 3) {
+            // The Tremove fallback: the server fid is gone either way.
+            try c.free_sfids.append(c.gpa, op.sfid);
+            if (lerror(msg)) |e| {
+                if (op.kind == .clunk) return c.finish(op, p9.Rclunk{});
+                return c.finishErrno(op, e);
+            }
+            if (msg != .Rremove) return c.unexpected();
+            if (op.kind == .clunk) return c.finish(op, p9.Rclunk{});
+            return c.finish(op, p9.Rremove{});
+        }
+        if (n == 2 and lerror(msg) == attr.E.OPNOTSUPP) {
+            // A server without Tunlinkat, such as diod 1.0: Tremove the
+            // fid itself, as Linux's v9fs falls back to.
+            try c.dropTmp(op, op.sfid);
+            const kv = c.fids.fetchRemove(op.fid) orelse return c.finishErr(op, "unknown fid");
+            if (c.bound.fetchRemove(kv.value.sfid)) |b| c.gpa.free(b.value.uname);
+            op.sfid = kv.value.sfid;
+            c.freeFid(kv.value);
+            return c.send(op, l.Tremove{ .fid = op.sfid }, .{ .main = 3 });
+        }
         if (lerror(msg)) |e| {
             try c.dropFid(op.fid);
             if (op.kind == .clunk) return c.finish(op, p9.Rclunk{});
@@ -1300,15 +1362,20 @@ pub const Client = struct {
     }
 
     fn stepWstat(c: *Client, op: *Op, n: u32, msg: l.R) Allocator.Error!void {
-        if (lerror(msg)) |e| return c.finishErrno(op, e);
         const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
+        if (n == 2 and lerror(msg) == attr.E.OPNOTSUPP) {
+            // A server without Trenameat, such as diod 1.0: Trename the
+            // fid into the same directory.
+            return c.send(op, l.Trename{ .fid = f.sfid, .dfid = op.sfid, .name = op.wstat.rename.? }, .{ .main = 2 });
+        }
+        if (lerror(msg)) |e| return c.finishErrno(op, e);
         switch (n) {
             1 => {
                 if (!try c.parentWalked(op, 0, msg)) return;
                 try c.send(op, l.Trenameat{ .olddirfid = op.sfid, .oldname = op.name, .newdirfid = op.sfid, .newname = op.wstat.rename.? }, .{ .main = 2 });
             },
             2 => {
-                if (msg != .Rrenameat) return c.unexpected();
+                if (msg != .Rrenameat and msg != .Rrename) return c.unexpected();
                 try c.dropTmp(op, op.sfid);
                 try c.renamed(f, op.wstat.rename.?);
                 op.wstat.rename = null;
@@ -1372,8 +1439,8 @@ pub const Client = struct {
     /// attributes.
     fn readDirMore(c: *Client, op: *Op, f: *Fid) Allocator.Error!void {
         if (c.dialect == .@"9P2000.L.Z")
-            return c.send(op, l.Treaddirattr{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - 11 }, .{ .main = 0 });
-        return c.send(op, l.Treaddir{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - 11 }, .{ .main = 0 });
+            return c.send(op, l.Treaddirattr{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - wire.io_header }, .{ .main = 0 });
+        return c.send(op, l.Treaddir{ .fid = f.sfid, .offset = f.cookie, .count = c.msize - wire.io_header }, .{ .main = 0 });
     }
 
     /// Returns whole Dirs from the fid's buffer, as many as fit.
@@ -1957,6 +2024,51 @@ test "reads, writes, creates, and removes" {
     try testing.expectEqual(@as(?*@import("testserver.zig").Node, null), h.s.lookup("etc/tmp"));
 }
 
+test "a server without Tunlinkat, Trenameat, or big Treaddirs, as diod 1.0 is" {
+    var h = try Harness.init(wire.version_l);
+    defer h.deinit();
+    h.s.old = true;
+    _ = try h.s.add("etc/motd", .file, "hello from .L\n");
+    _ = try h.s.add("etc/passwd", .file, "");
+    try h.mount();
+    var dirs = try h.ls(&.{"etc"}, 8192);
+    _ = &dirs;
+    try testing.expectEqual(@as(usize, 2), dirs.items.len);
+    // Rename by Trename.
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 2, .wnames = .init(&.{ "etc", "motd" }) });
+    var d = attr.Dir.keep;
+    d.name = "issue";
+    var buf: [128]u8 = undefined;
+    _ = try h.ok(p9.Twstat{ .fid = 2, .stat = .{ .bytes = try d.pack(&buf) } });
+    try testing.expect(h.s.lookup("etc/issue") != null);
+    // Remove by Tremove, with the fid gone either way.
+    _ = try h.ok(p9.Tremove{ .fid = 2 });
+    try testing.expectEqual(@as(?*@import("testserver.zig").Node, null), h.s.lookup("etc/issue"));
+    try testing.expectEqualStrings("unknown fid", try h.err(p9.Tstat{ .fid = 2 }));
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 3, .wnames = .init(&.{"etc"}) });
+    try testing.expectEqualStrings("directory not empty", try h.err(p9.Tremove{ .fid = 3 }));
+    // ORCLOSE too.
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 4, .wnames = .init(&.{"etc"}) });
+    _ = try h.ok(p9.Tcreate{ .fid = 4, .name = "tmp", .perm = 0o600, .mode = wire.OWRITE | wire.ORCLOSE });
+    _ = try h.ok(p9.Tclunk{ .fid = 4 });
+    try testing.expectEqual(@as(?*@import("testserver.zig").Node, null), h.s.lookup("etc/tmp"));
+}
+
+test "creates take the directory's permissions, as create(5) says" {
+    inline for (.{ wire.version_l, wire.version_lz }) |v| {
+        var h = try Harness.init(v);
+        defer h.deinit();
+        (try h.s.add("etc", .dir, "")).mode = 0o750;
+        try h.mount();
+        _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 2, .wnames = .init(&.{"etc"}) });
+        _ = try h.ok(p9.Tcreate{ .fid = 2, .name = "f", .perm = 0o666, .mode = wire.OWRITE });
+        _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 3, .wnames = .init(&.{"etc"}) });
+        _ = try h.ok(p9.Tcreate{ .fid = 3, .name = "d", .perm = wire.DMDIR | 0o777, .mode = wire.OREAD });
+        try testing.expectEqual(@as(u32, 0o640), h.s.lookup("etc/f").?.mode & 0o777);
+        try testing.expectEqual(@as(u32, 0o750), h.s.lookup("etc/d").?.mode & 0o777);
+    }
+}
+
 test "walks: partial, errors, and dotdot" {
     var h = try Harness.init(wire.version_l);
     defer h.deinit();
@@ -2152,6 +2264,18 @@ test "a server that answers unknown to .L.Z is offered .L" {
     try testing.expectEqualStrings("one\ntwo\n", got);
 }
 
+test "a server that refuses .L.Z with an error, as diod does, is offered .L" {
+    var h = try Harness.init(wire.version_l);
+    defer h.deinit();
+    h.s.version_error = true;
+    _ = try h.s.add("usr/glenda/notes", .file, "one\ntwo\n");
+    try h.mount();
+    try testing.expectEqual(Dialect.@"9P2000.L", h.c.version());
+    const got = try h.cat(5, &.{ "usr", "glenda", "notes" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("one\ntwo\n", got);
+}
+
 test "a reconnect rebinds fids, reopens without O_TRUNC, and resends a write once" {
     var h = try Harness.init(wire.version_lz);
     defer h.deinit();
@@ -2170,12 +2294,18 @@ test "a reconnect rebinds fids, reopens without O_TRUNC, and resends a write onc
     // A request made while the connection is down waits for it.
     const tag2 = try h.send(p9.Twrite{ .fid = 1, .offset = 4, .data = .{ .bytes = "ef" } });
     h.s.reset();
+    // The new server answers out of order, as ZeroFS may: the reopen
+    // must wait for its fid's Trebind.
+    h.s.reverse = true;
     try h.c.reconnect();
     try h.pump();
-    const r = (try h.next()).?;
+    // Both writes are answered, in whatever order the server chose.
+    const r1 = (try h.next()).?;
+    const r2 = (try h.next()).?;
+    const r = if (r1.tag == tag) r1 else r2;
     try testing.expectEqual(tag, r.tag);
     try testing.expectEqual(@as(u32, 2), r.msg.Rwrite.count);
-    try testing.expectEqual(tag2, (try h.next()).?.tag);
+    try testing.expectEqual(tag2, if (r1.tag == tag) r2.tag else r1.tag);
     try testing.expectEqual(@as(u32, 1), h.s.replayed);
     try testing.expectEqualStrings("abcdef", h.s.lookup("usr/glenda/notes").?.data.items);
     try testing.expectEqual(@as(u32, 1), h.c.reconnects);
@@ -2297,4 +2427,33 @@ test "a .L.Z walk that fails partway still answers how far it got" {
     const r = try h.rpc(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{ "etc", "nope" }) });
     try testing.expectEqual(@as(usize, 1), r.Rwalk.wqids.n);
     try testing.expectEqualStrings("file does not exist", try h.err(p9.Twalk{ .fid = 0, .newfid = 1, .wnames = .init(&.{"nope"}) }));
+}
+
+test "fuzz: hostile bytes from devmnt and from the server" {
+    try testing.fuzz({}, struct {
+        fn one(_: void, smith: *testing.Smith) anyerror!void {
+            var c = try Client.init(testing.allocator, .{ .users = .{ .user = "glenda", .uid = 1000 } });
+            defer c.deinit();
+            // A real negotiation first, to a dialect the input picks, so
+            // the hostile bytes reach the translating paths.
+            var buf: [64]u8 = undefined;
+            const v = switch (smith.index(3)) {
+                0 => wire.version_l,
+                1 => wire.version_lz,
+                else => wire.version_9p,
+            };
+            try c.fromMount(try wire.encode(&buf, wire.notag, wire.common.Tversion{ .msize = 8216, .version = wire.version_9p }, null));
+            try c.fromServer(try wire.encode(&buf, 0, wire.common.Rversion{ .msize = 8216, .version = v }, null));
+            // Then chunks to either side, and reconnects when the
+            // translator asks for one.
+            while (!smith.eos()) {
+                var in: [512]u8 = undefined;
+                const n = smith.slice(&in);
+                if (smith.value(bool)) try c.fromMount(in[0..n]) else try c.fromServer(in[0..n]);
+                c.consumedMount(c.toMount().len);
+                c.consumedServer(c.toServer().len);
+                if (c.canReconnect() and (c.want_reconnect or smith.index(8) == 0)) try c.reconnect();
+            }
+        }
+    }.one, .{});
 }

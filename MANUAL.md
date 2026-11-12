@@ -1572,9 +1572,13 @@ devices in Plan 9.
   the guest's user goes out as your host uid, and any other number shows as
   itself, such as `1000`. Running as root sends 65534 (nobody), never 0.
   `--user-map FILE` gives a file in `/etc/passwd` format to map names to
-  numbers both ways, and it's the only way to send 0. `/net/dotl/N/status`
-  says which dialect the server chose. A 9P root's address can be a .L
-  server too: `--root tcp!host!port` works with either. A file read from
+  numbers both ways, and it's the only way to send 0. A file or directory
+  made on the server gets its permissions from its directory, as on a
+  Plan 9 file server. `/net/dotl/N/status` says which dialect the server
+  chose. A 9P root's address can be a .L server too: `--root
+  tcp!host!port` works with either, and so does a namespace file's `mount
+  -c tcp!host!port /n/l`, which dials under `--net` and `--net-allow` like
+  `dotlfs`. A file read from
   start to end is read a whole `msize` (up to 1 MiB) at a time, not
   devmnt's 32 KiB, and any write drops what was read ahead.
 - **Reconnecting to ZeroFS** ([dotl](design/dotl.md)). With a server
@@ -1592,9 +1596,7 @@ devices in Plan 9.
   `9P2000.L.Z reconnects N` once a reconnect has happened. A unix socket
   root reconnects too, but a WebSocket root doesn't yet.
 - Not yet available: roots that need authentication
-  ([root-auth](design/root-auth.md)); serving a machine's namespace to the
-  host or the network as a 9P server from h9 itself, rather than with
-  `exportfs` inside the guest as below ([serve](design/serve.md)).
+  ([root-auth](design/root-auth.md)).
 - 9front disk images as roots were proposed and declined
   ([image-roots](design/image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an

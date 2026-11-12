@@ -61,6 +61,7 @@ This describes h9 as built. Changes to it go through proposals in [design/](desi
   - [Zig/C seam rules](#zigc-seam-rules)
 - [Filesystem, boot, and I/O](#filesystem-boot-and-io)
   - [Root filesystem](#root-filesystem)
+  - [9P dialects](#9p-dialects)
   - [Slim roots](#slim-roots)
   - [Boot sequence](#boot-sequence)
   - [Terminal](#terminal)
@@ -68,6 +69,7 @@ This describes h9 as built. Changes to it go through proposals in [design/](desi
 - [Serving](#serving)
   - [Listeners](#listeners)
   - [Streams](#streams)
+  - [9P2000.L clients](#9p2000l-clients)
   - [The server Proc](#the-server-proc)
   - [Process counts](#process-counts)
   - [The plan](#the-plan)
@@ -755,6 +757,16 @@ Received data is queued in the machine's pages, up to 16 MiB unread per stream.
 
 A guest `connect` asks the net policy as a TCP dial would, through the same `netLookup`, `netResolved`, and `netCheck` as devip and `cs`. The machine's end closes its streams (`h9_hstream_machend`, from `src/kern/proc.c`).
 
+#### 9P2000.L device `#ℓ` (`src/kern/devdotl.c`, `src/dotl/`)
+
+devmnt and exportfs speak only 9P2000, and most 9P servers outside Plan 9 speak 9P2000.L ([dotl](design/dotl.md)). A `#ℓ` conversation puts a translator between devmnt and a server connection, or between a client connection and an exportfs.
+
+Attached with no spec, the device serves `dotl/clone` and `dotl/N/{ctl,data,status}`, which `bind -a '#ℓ' /net` puts at `/net/dotl`. `ctl` takes `fd N` (the caller's fd N is the server connection), `dial ADDR[,ADDR…]` (a `tcp!` address dialed through `#I` under the dialer's plan, or `unix!PATH` when h9 dials a root itself, with no plan), `version 9P2000.L` (don't offer `.L.Z`), and `serve N` (the server side, for a client on fd N); `data` is 9P2000; `status` reads the dialect, `Hungup` and why, and `reconnects N` once the connection has been resumed.
+
+It follows devhstream's pattern and the seam rules: a kproc per conversation reads the server connection and feeds the translator, which is called through leaves in `src/dotl/kern.zig` that take and return bytes and never raise, under a QLock per conversation; a guest reading `data` sleeps on a Rendez until the translator has bytes for it, so a note interrupts it. The conversation ends when the last of its `ctl` and `data` is closed.
+
+The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
+
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
 drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/go-compat.md)).
@@ -823,7 +835,31 @@ h9 connects to a 9P root before the program runs:
 
 The connection is posted on the machine's `/srv` board as `root`, which holds it for the machine's life, and `#s/root` is mounted at `/` with no auth fd and `--root-spec` as the attach name. devmnt sends the calling process's user as the attach uname, so the first Proc takes on `--root-user` for the mount when one is given. Everything else is bound over the mount as over a host tree.
 
-A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks another dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, and h9 doesn't reconnect. Disk images aren't supported ([image-roots](design/image-roots.md) was declined).
+Each connection goes through a `#ℓ` conversation before it's posted (see [9P dialects](#9p-dialects)), so the server can speak 9P2000 or 9P2000.L; a TCP root, and a unix one whose path has no comma, is dialed by the conversation itself, so it can be dialed again. A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks an unknown dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, unless a 9P2000.L.Z server's connection is resumed. Disk images aren't supported ([image-roots](design/image-roots.md) was declined).
+
+### 9P dialects
+
+Every 9P connection h9 mounts, from a TCP, unix socket, or WebSocket root, a namespace file's `mount`, or the guest's `dotlfs`, goes through a `#ℓ` conversation's client side before devmnt sees it ([dotl](design/dotl.md)). The translator answers devmnt's `Tversion` with `9P2000` itself and sends its own, with tag `NOTAG`, offering `9P2000.L.Z` at an `msize` of up to 1 MiB:
+
+- `9P2000.L.Z` or `9P2000.L` translates, `.L.Z` with ZeroFS's extension.
+- `9P2000` passes bytes through both ways unchanged, so a 9front server costs a copy.
+- `unknown`, or an `Rlerror` (diod's answer), to the `.L.Z` offer gets an offer of `9P2000.L`; anything else fails the mount with "server speaks unknown 9P version X".
+
+Translating, the client side allocates the server's fids and tags, since one devmnt request can become several, and keeps each fid's path from its attach root. `Topen` is `Tlopen`, with `ORCLOSE` kept in the translator and done at clunk. `Tcreate` is `Tlcreate`, or `Tmkdir` then a walk and `Tlopen` for a directory, with the mode create(5)'s rule gives against the directory's (a .L server applies none). A create of an existing name without `DMEXCL` opens it truncated. Directory reads are `Treaddir` and a `Tgetattr` per entry, packed into `Dir`s. `Tstat` is `Tgetattr`, and `Twstat` a `Trenameat` for a name, then a `Tsetattr`, or `Tfsync` for the null wstat. `Tremove` is `Tunlinkat` on a fid walked to the parent. A server without `Tunlinkat` or `Trenameat` (diod 1.0) gets `Tremove` and `Trename` instead. `Rlerror` becomes the error string `attr.zig` gives for the errno ("errno N" for one it doesn't know). A `Tflush` of a request that became several flushes all of them, and a reply for an unknown tag fails the connection.
+
+Symlinks are followed during a walk with `Treadlink`, inside the mount by [symlinks-in-root](design/symlinks-in-root.md)'s rule: an absolute target starts at the attach root, `..` stops there, and more than 40 links in one walk is "too many symbolic links". A directory read lists a link as its target, and leaves out one that resolves to nothing. A device node, FIFO, or socket is a zero-length file that fails to open.
+
+The machine's user is sent as `n_uname` from `--user-map` (an `/etc/passwd` file read once), or else the host uid, which is 65534 when h9 runs as root and 1000 on Windows; 0 is sent only when the map says so. Any other number N is named "N" and back.
+
+A file read sequentially is read one upstream `msize` ahead, and devmnt's 32 KiB reads are answered from that; a seek, a write, or any mutation drops it.
+
+With `9P2000.L.Z`:
+
+- Walks are `Twalkgetattr`, a read-only open `Tlopenatread`, which brings up to an `msize` of the file, directory reads `Treaddirattr`, and creates `Tlcreateattr`. The attributes a reply brings answer only the fid's next request, unless a mutation came since.
+- Every mutation carries an envelope with an op_id from a random seed and a count.
+- A dialed conversation reconnects. When the connection drops, or the server answers `ENOTLEADER`, the kproc dials the addresses again, a second apart and round the list, for up to 120 seconds, under the first dial's plan, in a namespace of its own. The translator then negotiates again, rebinds every live server fid with `Trebind` by its inode and attach root, replays each open without `O_TRUNC`, `O_CREAT`, or `O_EXCL`, and resends every unanswered request in order, mutations with the retry flag, so the server applies each once. Read-ahead and held attributes are dropped. devmnt sees slow replies; after 120 seconds outstanding requests fail as on any hangup.
+
+A connection given by fd (`fd N`), such as a WebSocket root's or a unix root whose path has a comma, can't be redialed, so it hangs up as before.
 
 ### Slim roots
 
@@ -932,13 +968,19 @@ A machine serves at most 32 connections at once; past that a connection is close
 
 An accepted connection enters the kernel through devhstream as a host-made stream (`hstream.openAccepted`): raw for unix and TCP, whose bytes are queued as they arrive and written back unframed, or a server-side WebSocket, whose frames are sent unmasked and whose text messages close it with 1003.
 
-A server stream answers pings, pings after 30 s idle and fails a connection silent for another 30 s, and drops a client whose handshake hasn't finished within 60 s. The first message passes a dialect slot (`hstream.dialect`), where a `Tversion` is plain 9P2000 today and dotl's translator will hook in.
+A server stream answers pings, pings after 30 s idle and fails a connection silent for another 30 s, and drops a client whose handshake hasn't finished within 60 s. The first message passes a dialect slot (`hstream.dialect`), which takes a `Tversion` and refuses anything else. The stream then goes to a `#ℓ` conversation's server side (`serve N`), whose `data` the server Proc's exportfs serves.
+
+### 9P2000.L clients
+
+A `#ℓ` conversation's server side (`src/dotl/server.zig`) goes by the client's first `Tversion`: `9P2000.L` translates, `9P2000.L.Z` is answered with `9P2000.L` (version(5) lets a server pick), and anything else passes through for exportfs to answer, so a 9front or h9 client mounts as before ([dotl](design/dotl.md)). The `serve` heading of `--print` says its listeners speak both.
+
+Translating, it allocates exportfs's fids and tags, since one .L request can take several. `Tgetattr` is a `Tstat`, built into a Linux `stat` with numbers from the user map, and `Tsetattr` a `Twstat`. `Treaddir` reads the whole directory into a listing on the fid and hands out entry indexes as offsets; a `Treaddir` at offset 0, or any mutation through the connection, drops the listing. `Tlopen` is `Topen` and `Tlcreate` a `Tcreate`. `Tmkdir` is a walk, a create, and a clunk. `Tunlinkat` walks and removes. `Trenameat` within a directory is a `Twstat` of the name, replacing a name that's taken, and across directories is `EXDEV`. `Tfsync` is the null `Twstat`, and `Tstatfs` reports fixed sizes. `Tsymlink`, `Tmknod`, `Tlink`, and xattrs are `EOPNOTSUPP`. `Tlock` and `Tgetlock` use an advisory byte-range lock table shared by every connection the process serves, held by a connection and a client pid on a qid. exportfs's errors become errno through `attr.zig`, and `exportfs -R`'s "read only" is `EROFS`.
 
 ### The server Proc
 
 After the plan's namespace is built and before the program runs, the first Proc forks the server Proc with `RFNAMEG|RFFDG|RFENVG|RFNOTEG|RFNOWAIT`: its own copy of the plan's namespace, so binds the program makes later aren't served, and its own note group, so an interrupt from the console doesn't reach exportfs. Without `--serve-net` it unmounts `/net`.
 
-It takes each ready connection from `serve.Server.next`, opens its stream as an fd, and forks a Proc that dups it to 0 and 1 and execs `exportfs -r ROOT` (`-R` under `--write=none`): the root's `/bin/exportfs` if it has one, else the built-in root's `#Hroot/$cputype/bin/exportfs`.
+It takes each ready connection from `serve.Server.next`, opens its stream as an fd, puts it through a `#ℓ` conversation's server side, and forks a Proc that dups the conversation's `data` to 0 and 1 and execs `exportfs -r ROOT` (`-R` under `--write=none`): the root's `/bin/exportfs` if it has one, else the built-in root's `#Hroot/$cputype/bin/exportfs`.
 
 When exportfs exits, the stream closes and the connection's slot is freed.
 
