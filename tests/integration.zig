@@ -7883,14 +7883,14 @@ test "a .L.Z root survives the server restarting mid-write [dotl]" {
 }
 
 /// How to run a command as root to mount 9P over a unix socket, on Linux
-/// with 9p in /proc/filesystems (after a modprobe, if allowed): "" as
-/// root, "sudo -n " where sudo needs no password (the Lima VMs and CI's
-/// runners), or null if neither.
+/// with 9p and its unix transport in the kernel (after a modprobe, if
+/// allowed): "" as root, "sudo -n " where sudo needs no password (the
+/// Lima VMs and CI's runners), or null if neither.
 fn v9fsAsRoot() ?[]const u8 {
     if (builtin.os.tag != .linux) return null;
     const pre: []const u8 = if (std.c.getuid() == 0) "" else "sudo -n ";
-    var cmd_buf: [64]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "{s}modprobe -q 9p; {s}true", .{ pre, pre }) catch return null;
+    var cmd_buf: [96]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "{s}modprobe -q 9p; {s}modprobe -q 9pnet_fd; {s}true", .{ pre, pre, pre }) catch return null;
     const r = runProcessWith(&.{ "sh", "-c", cmd }, null, null, 10_000) catch return null;
     gpa.free(r.stdout);
     gpa.free(r.stderr);
@@ -7898,6 +7898,12 @@ fn v9fsAsRoot() ?[]const u8 {
     var buf: [8192]u8 = undefined;
     const fs = std.Io.Dir.cwd().readFile(std.testing.io, "/proc/filesystems", &buf) catch return null;
     if (std.mem.indexOf(u8, fs, "\t9p\n") == null) return null;
+    // And its unix transport, which a kernel can leave out, keeping only
+    // virtio's, as exe.dev's VMs do.
+    const ks = runProcessWith(&.{ "sh", "-c", "grep -qw p9_fd_create_unix /proc/kallsyms" }, null, null, 10_000) catch return null;
+    gpa.free(ks.stdout);
+    gpa.free(ks.stderr);
+    if (ks.term != .exited or ks.term.exited != 0) return null;
     return pre;
 }
 
