@@ -28,7 +28,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [browser-host](browser-host.md) | [#12](../../../issues/12) | implemented |  | A browser host on wasm, with v86 |
 | [linux-personality](linux-personality.md) | [#18](../../../issues/18) | implemented |  | Linux personality |
 | [websocket-9p](websocket-9p.md) | [#21](../../../issues/21) | implemented |  | 9P over WebSocket |
-| [dotl](dotl.md) | [#22](../../../issues/22) | accepted | ready | 9P2000.L and ZeroFS |
+| [dotl](dotl.md) | [#22](../../../issues/22) | implemented |  | 9P2000.L and ZeroFS |
 | [exit-status](exit-status.md) | [#33](../../../issues/33) | implemented |  | Host exit statuses for processes killed by notes |
 | [symlinks-in-root](symlinks-in-root.md) | [#34](../../../issues/34) | implemented |  | Symlinks resolved inside a bound tree |
 | [linux-threads](linux-threads.md) | [#49](../../../issues/49) | implemented |  | Linux threads |
@@ -42,7 +42,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [host-srv](host-srv.md) |  | draft |  | Posting host connections to /srv |
 | [root-auth](root-auth.md) |  | draft |  | Authenticated 9P roots |
 | [default-command](default-command.md) | [#81](../../../issues/81) | implemented |  | A default command from the root |
-| [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | proposed | needs dotl | Credential helpers for WebSocket 9P |
+| [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | proposed |  | Credential helpers for WebSocket 9P |
 | [browser-gfx](browser-gfx.md) | [#120](../../../issues/120) | implemented |  | Graphics on the browser host |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
@@ -88,7 +88,7 @@ flowchart LR
   p_browser_host["browser-host<br/>implemented"]:::implemented
   p_linux_personality["linux-personality<br/>implemented"]:::implemented
   p_websocket_9p["websocket-9p<br/>implemented"]:::implemented
-  p_dotl["dotl<br/>accepted"]:::accepted
+  p_dotl["dotl<br/>implemented"]:::implemented
   p_exit_status["exit-status<br/>implemented"]:::implemented
   p_symlinks_in_root["symlinks-in-root<br/>implemented"]:::implemented
   p_linux_threads["linux-threads<br/>implemented"]:::implemented
