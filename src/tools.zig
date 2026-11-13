@@ -90,6 +90,8 @@ pub const CheckOptions = struct {
     root_headers: []const []const u8 = &.{},
     root_ca: ?[]const u8 = null,
     proxy: h9.Machine.Proxy = .{},
+    /// --cred and $H9CRED (design/credential-helpers.md).
+    cred_helpers: []const h9.Machine.CredHelper = &.{},
     /// --index, --root-index, and the index cache (design/mount-index.md).
     index: h9.Machine.IndexMode = .auto,
     root_index: ?h9.Machine.RootIndex = null,
@@ -263,6 +265,7 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
         .root_headers = o.root_headers,
         .root_ca = o.root_ca,
         .proxy = o.proxy,
+        .cred_helpers = o.cred_helpers,
         .index = o.index,
         .root_index = o.root_index,
         .index_cache = o.index_cache,

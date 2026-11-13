@@ -8,11 +8,13 @@ const ws = @import("h9").ws;
 const RootChanges = @import("h9").RootChanges;
 const gfx = @import("h9").gfx;
 const serve = @import("h9").serve;
+const cred = @import("h9").cred;
 
 pub const usage =
     \\usage: h9 [--backend auto|hvf|kvm|whp|native|emu] [--arch arm64|amd64|386]
     \\           [--root DIR|DIAL|SOCKET|URL] [--root-spec NAME] [--root-user NAME]
     \\           [--root-header 'NAME: VALUE'|@FILE]... [--root-ca FILE] [--cwd DIR]
+    \\           [--cred 'PATTERN=COMMAND']...
     \\           [--root-index FILE|URL] [--index auto|none] [--index-cache DIR]
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
@@ -77,6 +79,9 @@ pub const Config = struct {
     root_headers: []const []const u8 = &.{},
     /// --root-ca: PEM certificates a wss:// root must chain to.
     root_ca: ?[]const u8 = null,
+    /// --cred values, `PATTERN=COMMAND`, checked
+    /// (design/credential-helpers.md).
+    cred: []const []const u8 = &.{},
     /// --root-index: an index for the 9P root, a host file or an
     /// `https://` or `http://` URL (design/mount-index.md).
     root_index: ?[]const u8 = null,
@@ -170,6 +175,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var read_deny: std.ArrayList([]const u8) = .empty;
     var net_allow: std.ArrayList([]const u8) = .empty;
     var root_headers: std.ArrayList([]const u8) = .empty;
+    var creds: std.ArrayList([]const u8) = .empty;
     var serve_addrs: std.ArrayList([]const u8) = .empty;
     var serve_origins: std.ArrayList([]const u8) = .empty;
     var gfx_scale: ?u8 = null;
@@ -261,6 +267,11 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             const h = v orelse return error.Usage;
             if (h.len == 0) return error.Usage;
             try root_headers.append(gpa, h);
+        } else if (value(args, &i, "--cred")) |v| {
+            const spec = v orelse return error.Usage;
+            const h = cred.parse(gpa, spec) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Usage;
+            gpa.free(h.argv);
+            try creds.append(gpa, spec);
         } else if (value(args, &i, "--user-map")) |v| {
             c.user_map = v orelse return error.Usage;
             if (c.user_map.?.len == 0) return error.Usage;
@@ -349,6 +360,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     c.read_deny = try read_deny.toOwnedSlice(gpa);
     c.net_allow = try net_allow.toOwnedSlice(gpa);
     c.root_headers = try root_headers.toOwnedSlice(gpa);
+    c.cred = try creds.toOwnedSlice(gpa);
     c.argv = args[i..];
     return c;
 }
@@ -708,6 +720,16 @@ test "--root-contained" {
     const d = try parse(t.allocator, &.{ "h9", "ls" });
     defer t.allocator.free(d.env);
     try t.expect(!d.root_contained);
+}
+
+test "--cred is checked and kept as given [credential-helpers]" {
+    const c = try parse(t.allocator, &.{ "h9", "--cred", "*.wanix.io=wanix token", "--cred=fs.example=cat /tmp/h", "ls" });
+    defer t.allocator.free(c.env);
+    defer t.allocator.free(c.cred);
+    try t.expectEqual(@as(usize, 2), c.cred.len);
+    try t.expectEqualStrings("fs.example=cat /tmp/h", c.cred[1]);
+    for ([_][]const u8{ "*=cat", "*.=cat", "wanix.io", "wanix.io=", "wss://wanix.io=cat" }) |bad|
+        try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--cred", bad, "ls" }));
 }
 
 test "--root-index, --index, --index-cache, and -v [mount-index]" {

@@ -152,6 +152,10 @@ pub const NinePRoot = struct {
     ca: ?[]const u8 = null,
     /// The proxy it goes through, if any.
     proxy: ?[]const u8 = null,
+    /// The credential helper that applies to it, as `PATTERN=COMMAND`
+    /// (design/credential-helpers.md); the plan never shows what it
+    /// prints.
+    cred: ?[]const u8 = null,
     /// Its metadata index (design/mount-index.md), as the plan shows it.
     index: Index = .auto,
 
@@ -409,6 +413,7 @@ fn rootNote(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u
         }
         if (r.proxy) |p| w.print("  via {f}", .{elideUserinfo(p)}) catch return error.OutOfMemory;
         if (r.ca) |ca| w.print("  --root-ca {s}", .{ca}) catch return error.OutOfMemory;
+        if (r.cred) |c| w.print("  cred {s}", .{c}) catch return error.OutOfMemory;
     } else w.writeAll(r.addr) catch return error.OutOfMemory;
     if (r.user) |u| w.print(" as {s}", .{u}) catch return error.OutOfMemory;
     (switch (r.index) {

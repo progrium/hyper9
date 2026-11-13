@@ -231,6 +231,27 @@ pub const Response = struct {
     /// The selected subprotocol, in `buf`, or null for none.
     protocol: ?[]const u8 = null,
     buf: [128]u8 = undefined,
+    /// If set, gets the status line and every header line as received,
+    /// for a credential helper's retry (design/credential-helpers.md).
+    head: ?*Head = null,
+
+    /// A response's head, as text: the status line and the headers, each
+    /// ending in CRLF. What doesn't fit is left out.
+    pub const Head = struct {
+        buf: [4096]u8 = undefined,
+        len: usize = 0,
+
+        pub fn text(h: *const Head) []const u8 {
+            return h.buf[0..h.len];
+        }
+
+        fn add(h: *Head, line: []const u8) void {
+            if (h.len + line.len + 2 > h.buf.len) return;
+            @memcpy(h.buf[h.len..][0..line.len], line);
+            @memcpy(h.buf[h.len + line.len ..][0..2], "\r\n");
+            h.len += line.len + 2;
+        }
+    };
 
     fn keep(r: *Response, used: *usize, s: []const u8) []const u8 {
         const n = @min(s.len, r.buf.len - used.*);
@@ -247,6 +268,10 @@ fn readHead(r: *Reader, resp: *Response, used: *usize, ctx: anytype, comptime he
     const status_line = try readLine(r);
     // HTTP/1.1 101 Switching Protocols
     if (!std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.BadResponse;
+    if (resp.head) |h| {
+        h.len = 0;
+        h.add(status_line);
+    }
     var parts = std.mem.splitScalar(u8, status_line, ' ');
     _ = parts.next();
     resp.status = std.fmt.parseInt(u16, parts.next() orelse return error.BadResponse, 10) catch return error.BadResponse;
@@ -255,6 +280,7 @@ fn readHead(r: *Reader, resp: *Response, used: *usize, ctx: anytype, comptime he
         const l = try readLine(r);
         if (l.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, l, ':') orelse return error.BadResponse;
+        if (resp.head) |h| h.add(l);
         header(ctx, std.mem.trim(u8, l[0..colon], " \t"), std.mem.trim(u8, l[colon + 1 ..], " \t"));
     }
 }
@@ -928,11 +954,14 @@ test "a recorded handshake: request, then the server's 101" {
     var r3: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: chat\r\n\r\n");
     try t.expectError(error.BadProtocol, readResponse(&r3, key, &.{subprotocol}, &other));
 
-    var denied: Response = .{};
-    var r4: Reader = .fixed("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+    // A head, for a credential helper's retry (design/credential-helpers.md).
+    var head: Response.Head = .{};
+    var denied: Response = .{ .head = &head };
+    var r4: Reader = .fixed("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer error=\"invalid_token\"\nContent-Length: 0\r\n\r\n");
     try t.expectError(error.Status, readResponse(&r4, key, &.{subprotocol}, &denied));
     try t.expectEqual(@as(u16, 401), denied.status);
     try t.expectEqualStrings("Unauthorized", denied.reason);
+    try t.expectEqualStrings("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer error=\"invalid_token\"\r\nContent-Length: 0\r\n", head.text());
 
     var bad: Response = .{};
     var r5: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n");

@@ -127,6 +127,7 @@ Every field but `stdio` has a default:
 | `root_user` | `?[]const u8` | machine's user | The uname h9 attaches to a 9P root with. |
 | `root_headers` | `[]const []const u8` | `&.{}` | Extra handshake headers for a `.ws` root, as `"Name: value"`. |
 | `root_ca` | `?[]const u8` | host's bundle | A PEM file a `wss://` root must chain to: a host path. |
+| `cred_helpers` | `[]const Machine.CredHelper` | `&.{}` | Credential helpers ([credential-helpers](../design/credential-helpers.md)) for the WebSocket handshakes h9 makes, the root's and `ns` mounts': `.{ .pattern = "*.example.com", .argv = &.{ "helper", "arg" } }`. The best match runs as `argv… get URL` before each one, and its `Name: value` lines go with it. The CLI fills it from `--cred` and `$H9CRED`. |
 | `proxy` | `?Machine.Proxy` | direct | Proxies for connections h9 makes itself (a `.ws` root, WebSocket mounts in `ns`): `.{ .http = ..., .https = ..., .no_proxy = ... }`. The CLI fills it from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; the library never reads the environment. Guest connections always go direct. |
 | `cwd` | `?[]const u8` | none | A host directory bound at `/mnt/term/cwd` and made the guest's cwd. |
 | `env` | `[]const EnvVar` | `&.{}` | Guest environment variables, beyond the defaults (`user`, `sysname`, `path`, and so on). |
