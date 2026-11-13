@@ -84,6 +84,7 @@ Thread programs, whose `main` is libthread's, are refused: the set has none, and
 
 - **By name.** The command is the last path element of `argv[0]`, and argv is passed on as it is. This is how hard links work.
 - **By stub.** When `argv[1]` is `-!`, the command is the last path element of `argv[2]`, and `argv[1]` and `argv[2]` are removed. This is how stubs work (below).
+- **By interpreter.** When the name isn't a command, and an argument is a file whose `#!` line names a command as its interpreter, with the line's other fields in the arguments before it, that command runs with argv as it is. exec of a `#!/bin/rc` script, when `/bin/rc` is a hard link to `9box`, starts `9box` with the script's name in `argv[0]` and its path after the line's arguments, as 9front's kernel does for any interpreter.
 - **As `9box CMD ARGS`.** When the name is `9box`, the first argument names the command.
 - **Bare.** `9box` with no arguments lists its commands.
 
@@ -120,10 +121,10 @@ That's the tree the guide's section 4 describes, built rather than copied. The r
 
 ### The set
 
-**`slim`**, the commands basic operation needs: a shell, the file and text commands scripts lean on, the common archive formats, and the namespace, process, and file-serving commands that make it 9front. That's what h9's own scripts in `#H` use, too. 42 commands:
+**`slim`**, the commands basic operation needs: a shell, the file and text commands scripts lean on, the common archive formats, and the namespace, process, and file-serving commands that make it 9front. That's what h9's own scripts in `#H` use, too. 43 commands:
 
 - Shell and files: `rc`, `echo`, `cat`, `ls`, `cp`, `mv`, `rm`, `mkdir`, `pwd`, `test`, `date`, `sleep`, `touch`, `chmod`, `du`, `basename`, `read`.
-- Text: `wc`, `sort`, `uniq`, `tr`, `sed`, `awk`, `grep`, `cmp`, `diff`, `tail`, `tee`, `xargs`.
+- Text: `wc`, `sort`, `uniq`, `tr`, `sed`, `awk`, `grep`, `cmp`, `diff`, `tail`, `tee`, `xargs`, `mc`.
 - Archives: `tar`, `gzip`, `gunzip`, `unzip`.
 - Namespace, processes, and serving: `bind`, `mount`, `unmount`, `ns`, `ps`, `srv`, `srvfs`, `exportfs`, `ramfs`.
 
@@ -209,3 +210,4 @@ Integration cases tagged `[multicall]`, run against the slim tree:
   - **`fcp` has no corpus entry**: its eight `RFMEM` workers hang h9 now and then, the stock binary too (2 runs in 10 copying `/lib/namespace` on the emulator). Another h9 bug of its own.
   - **`dev` is left out.** The compilers link `../cc/cc.a$O`, whose code calls back into each compiler's own functions, so a command's local libraries would have to be renamed with it (a compiler wrapper bound over `$CC` while they're rebuilt, say) rather than linked once as they are. That's follow-up work.
   - **Measured on the emulator** (x86\_64 Linux, Unicorn, release build of h9), the prototype's exec loop takes 18.4 and 18.1 s with separate binaries against 20.3 and 19.8 s from the basic box (+9.5%), and 18.4 and 17.7 s against 26.2 and 25.7 s for the larger set (+44%). BSS isn't what costs: a program with 4 MB of BSS runs 800 times in 4.42 s against 4.17 s for an empty one, while one with 4 MB of initialised data takes 8.32 s. `/bin/echo` from the larger box runs 800 times 5.6 s slower than the stock `echo`, and stripping the box's symbols (2.5 to 1.9 MB) saves only 0.4 s of that; a bare fork is 1.2 ms slower in a boxed rc. So the cost is allocating and copying 1.9 MB of text and data on every exec (on the emulator, mapping it in Unicorn too), and copying the data and BSS on every fork, not the zero pages themselves. The fix that helps every program is an exec image cache, the text shared between processes and the file read once (Open issues: exec cost on remote roots); whether the basic set needs it waits on the hypervisor measurement.
+- 2026-11-13: `lc` works in the slim tree and the built-in root. Any `#!/bin/rc` script failed with `9box: no command NAME` over a hard-link tree, h9's own `#H` scripts included, since exec puts the script's name in `argv[0]`; `9box` now falls back to the interpreter the script's `#!` line names. The set gains `mc`, and the tree `/rc/bin/lc` (`ls -pF $* | mc`) from the stock root. `mc` links the parts of libdraw it uses to find a window's width (it falls back to 80 columns with no `/dev/window` or `$font`), which adds 53 KB to the amd64 box (736 to 789 KB).

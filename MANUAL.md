@@ -229,9 +229,9 @@ host$ export H9ROOT=~/src/hyper9/.local/9front/root
 ```
 
 The built-in root is what lets a fresh install work with nothing but the
-h9 binary. It holds 42 of 9front's commands, built from the pinned
+h9 binary. It holds 43 of 9front's commands, built from the pinned
 release's own source into one program, `9box`: rc, the file and text tools
-(`ls`, `cat`, `sed`, `awk`, `grep`, `diff`, and so on), `tar` and `gzip`, and
+(`ls` and `lc`, `cat`, `sed`, `awk`, `grep`, `diff`, and so on), `tar` and `gzip`, and
 the namespace tools (`bind`, `mount`, `ns`, `ps`, `srv`, `exportfs`,
 `ramfs`). Everything else in the namespace, your cwd, `/tmp`, and the
 sandbox, is the same as over a full tree:
@@ -311,7 +311,7 @@ h9 fe6c65f
 drawterm be39bbaa88fd
 backends: kvm native
 gfx: none
-built-in root: 9front 11952 slim, amd64 (42 commands)
+built-in root: 9front 11952 slim, amd64 (43 commands)
 ```
 
 `h9 --help` (or `h9 -h` alone) prints the usage. Then run something:
@@ -1879,7 +1879,7 @@ hello, world
   root tree has `/amd64/bin` (`zig build mkroot` on x86\_64, or
   `--arch amd64`).
 - A Go program doesn't need a root tree to run. Without one it gets the
-  built-in root (chapter 2), with `/tmp`, your cwd, and its 42 commands;
+  built-in root (chapter 2), with `/tmp`, your cwd, and its 43 commands;
   give it `--root` for the full tree.
 
 ### 20. Linux programs
