@@ -59,6 +59,9 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [mount-index](mount-index.md) |  | draft |  | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | proposed |  | hcpu, h9's own CPUs for the emulator |
 | [proposal-flow](proposal-flow.md) |  | implemented |  | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
+| [kernel-serve](kernel-serve.md) |  | draft |  | A 9P server in the kernel |
+| [namespace-kernel](namespace-kernel.md) |  | draft | needs kernel-serve, port-streams | A namespace-only kernel build |
+| [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 
 ```mermaid
 flowchart LR
@@ -119,6 +122,9 @@ flowchart LR
   p_mount_index["mount-index<br/>draft"]:::draft
   p_hcpu["hcpu<br/>proposed"]:::draft
   p_proposal_flow["proposal-flow<br/>implemented"]:::implemented
+  p_kernel_serve["kernel-serve<br/>draft"]:::draft
+  p_namespace_kernel["namespace-kernel<br/>draft"]:::draft
+  p_port_streams["port-streams<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
@@ -180,4 +186,15 @@ flowchart LR
   p_websocket_9p --> p_mount_index
   p_guest_tools --> p_mount_index
   p_proposals --> p_proposal_flow
+  p_serve --> p_kernel_serve
+  p_dotl --> p_kernel_serve
+  p_browser_host --> p_namespace_kernel
+  p_kernel_serve --> p_namespace_kernel
+  p_port_streams --> p_namespace_kernel
+  p_dotl --> p_namespace_kernel
+  p_ephemeral_writes --> p_namespace_kernel
+  p_browser_host --> p_port_streams
+  p_websocket_9p --> p_port_streams
+  p_serve --> p_port_streams
+  p_dotl --> p_port_streams
 ```
