@@ -90,6 +90,8 @@ pub const CheckOptions = struct {
     root_headers: []const []const u8 = &.{},
     root_ca: ?[]const u8 = null,
     proxy: h9.Machine.Proxy = .{},
+    /// --cred and $H9CRED (design/credential-helpers.md).
+    cred_helpers: []const h9.Machine.CredHelper = &.{},
 };
 
 /// Probes the backends (creating a VM and running a tiny program on each,
@@ -252,6 +254,7 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
         .root_headers = o.root_headers,
         .root_ca = o.root_ca,
         .proxy = o.proxy,
+        .cred_helpers = o.cred_helpers,
         .policy = .{ .memory = o.memory, .timeout_ns = 10 * std.time.ns_per_s },
         .stdio = .{ .out = &out.writer, .err = &err.writer },
     }) catch |e| return .{ .err = e };

@@ -7,6 +7,7 @@ created: 2026-11-07
 authors: [progrium]
 depends: [websocket-9p, dotl]
 areas: [cli, kern, sandbox, web]
+branch: [credential-helpers]
 ---
 
 # Proposal: Credential helpers for WebSocket 9P
@@ -174,18 +175,18 @@ shows files owned by `progrium`. Restarting the server mid-`cat` of a large file
 
 **Cases:**
 
-- [ ] `test "a --cred helper's headers are sent with the root's handshake [credential-helpers]"`
-- [ ] `test "only the longest matching pattern's helper runs [credential-helpers]"`
-- [ ] `test "a namespace-file wss mount runs the helper during replay [credential-helpers]"`
+- [x] `test "a --cred helper's headers are sent with the root's handshake [credential-helpers]"`
+- [x] `test "only the longest matching pattern's helper runs [credential-helpers]"`
+- [x] `test "a namespace-file ws:// mount runs the helper during replay [credential-helpers]"`
 - [ ] `test "a .L.Z reconnect runs the helper again and sends the new token [credential-helpers]"`
-- [ ] `test "a 401 reruns the helper once with the response on stdin [credential-helpers]"`
-- [ ] `test "a helper failure before start exits 125 with its stderr [credential-helpers]"`
-- [ ] `test "a helper may not set reserved handshake headers [credential-helpers]"`
-- [ ] `test "--root-header wins over a helper's header of the same name [credential-helpers]"`
-- [ ] `test "guest /net/ws conversations never run a helper [credential-helpers]"`
+- [x] `test "a 401 reruns the helper once with the response on stdin [credential-helpers]"`
+- [x] `test "a helper failure before start exits 125 with its stderr [credential-helpers]"`
+- [x] `test "a helper may not set reserved handshake headers [credential-helpers]"`
+- [x] `test "--root-header wins over a helper's header of the same name [credential-helpers]"`
+- [x] `test "guest /net/ws conversations never run a helper [credential-helpers]"`
 - [ ] `test "9P-Uid and 9P-User name files without --user-map [credential-helpers]"`
 - [ ] `test "--user-map wins over 9P-Uid [credential-helpers]"`
-- [ ] `test "--print shows the pattern and command, not headers [credential-helpers]"`
+- [x] `test "--print shows the pattern and command, not headers [credential-helpers]"`
 
 A fixture helper prints a token that changes on every call, and a fixture server accepts only the newest token.
 
@@ -206,3 +207,7 @@ A fixture helper prints a token that changes on every call, and a fixture server
 - **The machine's user.** Should `9P-User` from the root also become the machine's user (`$user`, hostowner)? As written it only feeds the user map and the attach.
 - **Concurrency.** When many connections reconnect at once, should h9 coalesce helper runs per pattern?
 - **Windows:** command lookup and the controlling terminal.
+
+## Updates
+
+- 2026-11-13: A first iteration is on the `credential-helpers` branch: `src/cred.zig` (patterns, `pick`, running the helper with its timeout, checking and zeroing its output), `--cred` and `$H9CRED` into `Machine.Options.cred_helpers`, the helper run before the root's and a namespace file's WebSocket handshakes in `hstream.connect`, the 401 and 403 retry with the response on stdin, the plaintext warning for `ws://`, and the plan's `cred PATTERN=COMMAND`. The web host refuses `--cred` for now. Not built yet: the reconnect case, `9P-Uid` and `9P-User`, and the `h9-web.js` callback. Implementation step 4 doesn't hold as written: a WebSocket root or mount reaches `#ℓ` as `fd N`, not `dial`, so dotl never redials it, and the reconnect case needs `#ℓ` to redial through hstream before a helper can run on a reconnect. The namespace-file case is named for `ws://`, which the fixture server speaks; the helper runs the same way for `wss://`.

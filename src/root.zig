@@ -21,6 +21,8 @@ pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
 pub const hstream = @import("hstream.zig");
+/// Credential helpers for WebSocket handshakes (design/credential-helpers.md).
+pub const cred = @import("cred.zig");
 /// `--serve` listeners (design/serve.md).
 pub const serve = @import("serve.zig");
 pub const gfx = @import("gfx.zig");
@@ -54,6 +56,7 @@ test {
     _ = consin;
     _ = ws;
     _ = hstream;
+    _ = cred;
     _ = serve;
     _ = gfx;
     _ = @import("cpupool.zig");

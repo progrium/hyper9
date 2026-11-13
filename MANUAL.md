@@ -1519,7 +1519,23 @@ devices in Plan 9.
   a file, so a token stays out of `ps`. `wss` trusts the host's CA bundle,
   or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY`, and
   `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
-  wss://fs.example/9p /n`. On the command line the scheme can be left off
+  wss://fs.example/9p /n`. For a short-lived token, a credential helper
+  ([credential-helpers](design/credential-helpers.md)) is better than a
+  header: `--cred 'PATTERN=COMMAND'` runs `COMMAND get URL` on the host
+  before each handshake whose URL matches `PATTERN`, the root's and a
+  namespace file's mounts alike, and sends the `Name: value` lines it
+  prints with it. A pattern is a host, `*.` and a domain, or either with a
+  path (`progrium.wanix.io/data`), with no scheme, and only the longest
+  matching pattern's helper runs. If the server answers 401 or 403, the
+  helper runs once more with the response's status line and headers on
+  stdin, so it can refresh its token. A helper that exits nonzero fails the
+  handshake (exit 125 before the program starts) with the first line of its
+  stderr, and printing nothing means no credential. A `--root-header`
+  wins over a helper's header of the same name, `$H9CRED` adds entries
+  separated by `;`, and `--print` names the helper but never shows its
+  headers. A helper matching a `ws://` URL warns that its headers aren't
+  encrypted. Guest `/net/ws` connections never run a helper. On the
+  command line the scheme can be left off
   ([schemeless-roots](design/schemeless-roots.md)): a `--root` or
   `$H9ROOT` that isn't an existing path and looks like
   `host[:port][/path]`, with a dotted host, a bracketed address, a port, or
@@ -2081,6 +2097,7 @@ Machine:
 | `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
+| `--cred 'PATTERN=COMMAND'` | A credential helper for the WebSocket handshakes h9 makes, the root's and a namespace file's mounts: `COMMAND get URL` runs before each one whose URL matches `PATTERN`, and the `Name: value` lines it prints are sent with it (chapter 16); repeatable. `$H9CRED` adds more, separated by `;`. A bad pattern is exit 2, and a helper that fails before the program starts is exit 125. |
 | `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |

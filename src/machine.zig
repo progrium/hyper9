@@ -24,6 +24,7 @@ const web = @import("web.zig");
 const hstream = @import("hstream.zig");
 const dotl = @import("dotl/kern.zig");
 const ws = @import("ws.zig");
+const cred = @import("cred.zig");
 const serve = @import("serve.zig");
 const lsys = @import("linux/sys.zig");
 const lsig = @import("linux/signal.zig");
@@ -170,6 +171,9 @@ pub const Machine = struct {
     /// root and namespace-file mounts. Guest connections always go direct.
     pub const Proxy = ws.ProxyConfig;
 
+    /// A `--cred PATTERN=COMMAND` entry (design/credential-helpers.md).
+    pub const CredHelper = cred.Helper;
+
     /// A `--serve` listener's address (design/serve.md): a unix
     /// socket's host path, `host!port` for TCP, or `host:port/path` from
     /// a ws:// URL. Port 0 picks a free port.
@@ -192,6 +196,10 @@ pub const Machine = struct {
         /// PEM certificates a `wss` root must chain to, instead of the
         /// host's bundle: a host path.
         root_ca: ?[]const u8 = null,
+        /// Credential helpers for host-made WebSocket handshakes: the
+        /// root's and a namespace file's mounts, never a guest's
+        /// (design/credential-helpers.md).
+        cred_helpers: []const CredHelper = &.{},
         /// Resolve a host root tree's symlinks inside it: an absolute
         /// target starts at the tree's top, and `..` stops there
         /// (design/symlinks-in-root.md).
@@ -397,6 +405,7 @@ pub const Machine = struct {
                 .user = opts.root_user,
                 .headers = opts.root_headers,
                 .ca = opts.root_ca,
+                .cred = if (ws.Url.parse(u)) |url| if (cred.pick(opts.cred_helpers, url)) |h| try std.fmt.allocPrint(arena, "{f}", .{cred.describe(h.*)}) else null else |_| null,
                 .proxy = if (opts.proxy) |px| if (ws.Url.parse(u)) |url| px.pick(url) else |_| null else null,
             },
         };
@@ -3140,6 +3149,7 @@ pub const Machine = struct {
                 .headers = m.opts.root_headers,
                 .ca_file = m.opts.root_ca,
                 .proxy = m.opts.proxy orelse .{},
+                .cred = m.opts.cred_helpers,
             }, "root")),
             // `#ℓ` dials a TCP or unix socket root itself, so it can
             // dial again if the server goes (9P2000.L.Z). A comma would
@@ -3281,7 +3291,7 @@ pub const Machine = struct {
             // (design/dotl.md), so a 9P2000.L server works too.
             .mount => |mt| if (ws.Url.is(mt.file)) {
                 if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a WebSocket mount", .{ws.Url.elide(mt.file)});
-                const conn = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
+                const conn = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{}, .cred = m.opts.cred_helpers }, "mount");
                 const data = dotlConv("fd {d}", conn);
                 kern.close(conn) catch {};
                 const fd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });

@@ -39,6 +39,7 @@ const builtin = @import("builtin");
 const ws = @import("ws.zig");
 const kern = @import("kern.zig");
 const policy = @import("policy.zig");
+const cred = @import("cred.zig");
 
 const Io = std.Io;
 const net = std.Io.net;
@@ -288,6 +289,10 @@ pub const HostOptions = struct {
     /// the host's bundle.
     ca_file: ?[]const u8 = null,
     proxy: ws.ProxyConfig = .{},
+    /// Credential helpers (design/credential-helpers.md): the one whose
+    /// pattern matches the URL best runs before each handshake, and its
+    /// headers go with it, after `headers`, which win on a name.
+    cred: []const cred.Helper = &.{},
 };
 
 /// What's under a stream.
@@ -359,7 +364,7 @@ pub const Stream = struct {
     cancel: bool = false,
     /// The handshake completed, whatever happened since.
     opened: bool = false,
-    err_buf: [96]u8 = undefined,
+    err_buf: [128]u8 = undefined,
     err_len: usize = 0,
     close_code: u16 = 0,
     close_reason: [123]u8 = undefined,
@@ -378,6 +383,13 @@ pub const Stream = struct {
     /// Allowed addresses, for a guest connect, checked before the thread
     /// starts.
     addrs: []net.IpAddress = &.{},
+    /// A host-made stream's credential helper, copied from the pattern
+    /// that matched its URL (design/credential-helpers.md).
+    cred_helper: ?cred.Helper = null,
+    /// Why the helper failed, when connect returns error.CredHelper.
+    cred_why: cred.Why = .{},
+    /// The handshake was retried with the helper after a 401 or 403.
+    cred_retried: bool = false,
 
     /// Held while sending; the reader thread and the keepalive send pongs,
     /// pings and closes under it too.
@@ -413,6 +425,7 @@ pub const Stream = struct {
         gpa.free(s.addrs);
         if (s.ca_file) |f| gpa.free(f);
         if (s.proxy) |p| gpa.free(p);
+        if (s.cred_helper) |h| freeHelper(h);
         gpa.destroy(s);
     }
 
@@ -622,8 +635,31 @@ pub fn openHost(owner: usize, url: []const u8, o: HostOptions) OpenError!u32 {
     }
     if (o.ca_file) |f| s.ca_file = try gpa.dupe(u8, f);
     if (o.proxy.pick(u)) |p| s.proxy = try gpa.dupe(u8, p);
+    if (cred.pick(o.cred, u)) |h| s.cred_helper = try dupeHelper(h.*);
     try start(s);
     return s.id;
+}
+
+fn dupeHelper(h: cred.Helper) error{OutOfMemory}!cred.Helper {
+    const pattern = try gpa.dupe(u8, h.pattern);
+    errdefer gpa.free(pattern);
+    const argv = try gpa.alloc([]const u8, h.argv.len);
+    var n: usize = 0;
+    errdefer {
+        for (argv[0..n]) |a| gpa.free(a);
+        gpa.free(argv);
+    }
+    for (h.argv) |a| {
+        argv[n] = try gpa.dupe(u8, a);
+        n += 1;
+    }
+    return .{ .pattern = pattern, .argv = argv };
+}
+
+fn freeHelper(h: cred.Helper) void {
+    gpa.free(h.pattern);
+    for (h.argv) |a| gpa.free(a);
+    gpa.free(h.argv);
 }
 
 /// Why a stream failed to connect, or null if its handshake completed
@@ -830,7 +866,8 @@ fn run(s: *Stream) void {
     connect(s) catch |e| {
         s.lockS();
         if (!s.cancel) switch (e) {
-            error.HandshakeStatus => s.failLocked("server answered {d} {s}", .{ s.close_code, s.close_reason[0..s.close_reason_len] }),
+            error.HandshakeStatus => s.failLocked("server answered {d} {s}{s}", .{ s.close_code, s.close_reason[0..s.close_reason_len], if (s.cred_retried) " (after credential helper retry)" else "" }),
+            error.CredHelper => s.failLocked("{s}", .{s.cred_why.text()}),
             error.ProxyStatus => s.failLocked("proxy answered {d} {s}", .{ s.close_code, s.close_reason[0..s.close_reason_len] }),
             error.BadProtocol => if (s.conv == null)
                 s.failLocked("server didn't select the 9p subprotocol", .{})
@@ -879,6 +916,7 @@ fn finish(s: *Stream) void {
 
 const ConnectError = error{
     HandshakeStatus,
+    CredHelper,
     ProxyStatus,
     BadProtocol,
     BadProxy,
@@ -901,9 +939,60 @@ fn adopt(s: *Stream, c: *Conn) error{Canceled}!void {
 
 fn connect(s: *Stream) ConnectError!void {
     if (web.enabled) return webConnect(s);
-    const io = theIo();
     const url = ws.Url.parse(s.url) catch unreachable;
     const proxy: ?ws.Proxy = if (s.proxy) |p| ws.Proxy.parse(p) catch return error.BadProxy else null;
+    // With a credential helper, a 401 or 403 runs it once more, with the
+    // response on stdin, on a new connection (design/credential-helpers.md).
+    var head: ws.Response.Head = .{};
+    var prev: []const u8 = "";
+    while (true) {
+        var resp: ws.Response = .{};
+        handshake(s, url, proxy, prev, &head, &resp) catch |e| {
+            const retry = e == error.HandshakeStatus and s.cred_helper != null and !s.cred_retried and
+                (s.close_code == 401 or s.close_code == 403);
+            if (!retry) return e;
+            dropConn(s);
+            s.cred_retried = true;
+            prev = head.text();
+            continue;
+        };
+        return established(s, &resp);
+    }
+}
+
+/// Takes the connection back after a refused handshake, to make another.
+fn dropConn(s: *Stream) void {
+    const io = theIo();
+    s.wlock.lockUncancelable(io);
+    s.lockS();
+    const c = s.conn;
+    s.conn = null;
+    s.lock.unlock();
+    s.wlock.unlock(io);
+    if (c) |cn| cn.destroy();
+}
+
+/// The headers for a handshake: the stream's own and, with a helper,
+/// what it prints, which `out` holds until it's zeroed.
+fn credHeaders(s: *Stream, prev: []const u8, out: *cred.Output, list: *std.ArrayList([]const u8)) ConnectError!void {
+    const h = s.cred_helper orelse return list.appendSlice(gpa, headerSlices(s));
+    out.* = cred.run(gpa, theIo(), &h, s.url, prev, &s.cred_why) catch |e| return switch (e) {
+        error.Failed => error.CredHelper,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+    try cred.merge(gpa, headerSlices(s), out.headers, list);
+}
+
+/// Dials, goes through the proxy and TLS, and makes the handshake with
+/// the stream's headers and its helper's. Returns the 101's response.
+fn handshake(s: *Stream, url: ws.Url, proxy: ?ws.Proxy, prev: []const u8, head: *ws.Response.Head, resp: *ws.Response) ConnectError!void {
+    const io = theIo();
+    // Before dialing, so a slow helper doesn't hold a connection open.
+    var out: cred.Output = .{};
+    defer out.deinit(gpa);
+    var headers: std.ArrayList([]const u8) = .empty;
+    defer headers.deinit(gpa);
+    try credHeaders(s, prev, &out, &headers);
     // TCP: a guest's checked addresses, or the host's resolver.
     const stream: net.Stream = if (s.addrs.len > 0) blk: {
         var last: anyerror = error.UnknownHostName;
@@ -924,10 +1013,10 @@ fn connect(s: *Stream) ConnectError!void {
     // From here `finish` frees `c`.
     if (proxy) |p| {
         try ws.writeConnect(&c.sw.interface, p, url);
-        var resp: ws.Response = .{};
-        ws.readConnect(&c.sr.interface, &resp) catch |e| {
+        var presp: ws.Response = .{};
+        ws.readConnect(&c.sr.interface, &presp) catch |e| {
             if (e == error.Status) {
-                scratchStatus(s, resp);
+                scratchStatus(s, presp);
                 return error.ProxyStatus;
             }
             return e;
@@ -937,16 +1026,25 @@ fn connect(s: *Stream) ConnectError!void {
     var raw: [16]u8 = undefined;
     io.random(&raw);
     const key = ws.makeKey(&raw);
-    try ws.writeRequest(c.writer(), url, &key, protoSlices(s), headerSlices(s));
+    try ws.writeRequest(c.writer(), url, &key, protoSlices(s), headers.items);
     try c.flush();
-    var resp: ws.Response = .{};
-    ws.readResponse(c.reader(), &key, protoSlices(s), &resp) catch |e| {
+    // The helper's headers are sent: none of them stays in a buffer.
+    if (s.cred_helper != null) {
+        std.crypto.secureZero(u8, &c.tls_out);
+        std.crypto.secureZero(u8, &c.sock_out);
+    }
+    resp.* = .{ .head = if (s.cred_helper != null) head else null };
+    ws.readResponse(c.reader(), &key, protoSlices(s), resp) catch |e| {
         if (e == error.Status) {
-            scratchStatus(s, resp);
+            scratchStatus(s, resp.*);
             return error.HandshakeStatus;
         }
         return e;
     };
+}
+
+/// Marks the stream established after its handshake.
+fn established(s: *Stream, resp: *const ws.Response) ConnectError!void {
     s.lockS();
     defer s.lock.unlock();
     if (s.cancel) return error.Canceled;

@@ -107,7 +107,9 @@ const web_skips = [_][]const u8{
     // Browsers and Node fail a handshake that offered subprotocols and got none.
     "a ws:// root works with a server that selects no subprotocol",
 };
-const web_skip_tags = [_][]const u8{ "5", "13", "22", "35" };
+// credential-helpers: the web host has no processes to run a helper in;
+// its embedder callback isn't built yet.
+const web_skip_tags = [_][]const u8{ "5", "13", "22", "35", "credential-helpers" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -7954,4 +7956,239 @@ test "a .L client of --serve under --write=none gets EROFS [dotl]" {
     errdefer std.debug.print("client stdout: {s}\nclient stderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqualStrings("9P2000.L\n", r.out);
     try expectIn(r.err, "read-only file system");
+}
+
+// credential-helpers: --cred helpers for host-made WebSocket handshakes.
+
+/// A credential helper in `s`'s directory, `name`, running `body` with
+/// /bin/sh. h9 runs it as `name get URL`; `$d` is its directory, and
+/// every run appends `get URL | <stdin's first line, or "-">` to
+/// `$d/name.log`.
+fn credHelper(s: *Scratch, name: []const u8, body: []const u8) ![]const u8 {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var buf: [1024]u8 = undefined;
+    const script = try std.fmt.bufPrint(&buf,
+        \\#!/bin/sh
+        \\d=${{0%/*}}
+        \\in=$(cat)
+        \\first=$(printf '%s\n' "$in" | head -n 1 | tr -d '\r')
+        \\echo "$1 $2 | ${{first:--}}" >>"$d/{s}.log"
+        \\{s}
+        \\
+    , .{ name, body });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = script, .flags = .{ .permissions = .executable_file } });
+    return std.fmt.allocPrint(gpa, "{s}/{s}", .{ s.path, name });
+}
+
+/// The helper `name`'s log, or "" if it never ran.
+fn credLog(s: *Scratch, name: []const u8, buf: []u8) []const u8 {
+    var nb: [64]u8 = undefined;
+    const f = std.fmt.bufPrint(&nb, "{s}.log", .{name}) catch return "";
+    return s.tmp.dir.readFile(std.testing.io, f, buf) catch "";
+}
+
+/// `--cred PATTERN=PATH`, in `buf`.
+fn credArg(buf: []u8, pattern: []const u8, path: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}={s}", .{ pattern, path });
+}
+
+test "a --cred helper's headers are sent with the root's handshake [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const tok = try credHelper(&s, "tok", "echo 'Authorization: Bearer t1'; echo 'X-Extra: two'");
+    defer gpa.free(tok);
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .require_header = "Authorization: Bearer t1" });
+    defer w.stop();
+    var cb: [256]u8 = undefined;
+    try expectSameAsHostWith(e, w.url(), &.{ "--cred", try credArg(&cb, "127.0.0.1", tok) }, &.{ "/bin/ls", "/" });
+    try std.testing.expectEqualStrings("two", w.relay.header("X-Extra") orelse "");
+    var lb: [1024]u8 = undefined;
+    var want: [128]u8 = undefined;
+    try expectIn(credLog(&s, "tok", &lb), try std.fmt.bufPrint(&want, "get {s} | -\n", .{w.url()}));
+}
+
+test "only the longest matching pattern's helper runs [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const broad = try credHelper(&s, "broad", "echo 'Authorization: Bearer wrong'");
+    defer gpa.free(broad);
+    const narrow = try credHelper(&s, "narrow", "echo 'Authorization: Bearer right'");
+    defer gpa.free(narrow);
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .require_header = "Authorization: Bearer right" });
+    defer w.stop();
+    var b1: [256]u8 = undefined;
+    var b2: [256]u8 = undefined;
+    try expectSameAsHostWith(e, w.url(), &.{ "--cred", try credArg(&b1, "127.0.0.1", broad), "--cred", try credArg(&b2, "127.0.0.1/9p", narrow) }, &.{ "/bin/ls", "/" });
+    var lb: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings("", credLog(&s, "broad", &lb));
+}
+
+test "a namespace-file ws:// mount runs the helper during replay [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const tok = try credHelper(&s, "tok", "echo 'Authorization: Bearer t1'");
+    defer gpa.free(tok);
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .require_header = "Authorization: Bearer t1" });
+    defer w.stop();
+    var ns: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}' /n\n", .{w.url()}) });
+    var cb: [256]u8 = undefined;
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/ls", "/n/rc/bin/lc" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/n/rc/bin/lc\n", r.out);
+    // A ws:// match warns that the credential isn't encrypted.
+    try expectIn(r.err, "cross the network in plaintext");
+    // Without the helper, the mount's handshake is refused.
+    const no = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "/bin/echo" });
+    defer no.deinit();
+    try std.testing.expectEqual(125, no.code);
+    try expectIn(no.err, "server answered 401 Unauthorized");
+}
+
+test "a 401 reruns the helper once with the response on stdin [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // A cached token first; a fresh one once told the last was refused.
+    const tok = try credHelper(&s, "tok",
+        \\if [ -n "$in" ]; then echo 'Authorization: Bearer fresh'; else echo 'Authorization: Bearer stale'; fi
+    );
+    defer gpa.free(tok);
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .require_header = "Authorization: Bearer fresh" });
+    defer w.stop();
+    var cb: [256]u8 = undefined;
+    const cred = try credArg(&cb, "127.0.0.1", tok);
+    try expectSameAsHostWith(e, w.url(), &.{ "--cred", cred }, &.{ "/bin/ls", "/" });
+    var lb: [2048]u8 = undefined;
+    var want: [256]u8 = undefined;
+    try expectIn(credLog(&s, "tok", &lb), try std.fmt.bufPrint(&want, "get {0s} | -\nget {0s} | HTTP/1.1 401 Unauthorized\n", .{w.url()}));
+
+    // A server that refuses the fresh one too: one retry, then 125.
+    w.relay.opts.require_header = "Authorization: Bearer never";
+    try s.tmp.dir.deleteFile(std.testing.io, "tok.log");
+    const r = try run(e, &.{ "--root", w.url(), "--cred", cred, "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    var want2: [256]u8 = undefined;
+    try expectIn(r.err, try std.fmt.bufPrint(&want2, "root {s}: server answered 401 Unauthorized (after credential helper retry)", .{w.url()}));
+    const log = credLog(&s, "tok", &lb);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, log, "\n") % 2);
+    try std.testing.expectEqual(std.mem.count(u8, log, "| -\n"), std.mem.count(u8, log, "| HTTP/1.1 401"));
+}
+
+test "a helper failure before start exits 125 with its stderr [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const tok = try credHelper(&s, "tok", "echo 'tok: not logged in; run tok login' >&2; exit 1");
+    defer gpa.free(tok);
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var cb: [256]u8 = undefined;
+    const r = try run(e, &.{ "--root", w.url(), "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    var want: [256]u8 = undefined;
+    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: credential helper tok: tok: not logged in; run tok login", .{w.url()}));
+    // No handshake was made.
+    try std.testing.expectEqual(@as(u32, 0), w.relay.accepted.load(.acquire));
+}
+
+test "a helper may not set reserved handshake headers [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const tok = try credHelper(&s, "tok", "echo 'Authorization: Bearer s3cret'; echo 'Sec-WebSocket-Protocol: other'");
+    defer gpa.free(tok);
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var cb: [256]u8 = undefined;
+    const r = try run(e, &.{ "--root", w.url(), "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try expectIn(r.err, "credential helper tok: Sec-WebSocket-Protocol changes the handshake");
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "s3cret") == null);
+}
+
+test "--root-header wins over a helper's header of the same name [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const tok = try credHelper(&s, "tok", "echo 'Authorization: Bearer helper'; echo 'X-Extra: two'");
+    defer gpa.free(tok);
+    var w: WsRoot = undefined;
+    try w.start(e, .{ .require_header = "Authorization: Bearer mine" });
+    defer w.stop();
+    var cb: [256]u8 = undefined;
+    try expectSameAsHostWith(e, w.url(), &.{ "--cred", try credArg(&cb, "127.0.0.1", tok), "--root-header", "authorization: Bearer mine" }, &.{ "/bin/ls", "/" });
+    try std.testing.expectEqualStrings("two", w.relay.header("X-Extra") orelse "");
+}
+
+test "guest /net/ws conversations never run a helper [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const tok = try credHelper(&s, "tok", "echo 'X-Token: t0k'");
+    defer gpa.free(tok);
+    var rl: wsrelay.Relay = undefined;
+    try startEcho(&rl, .{ .require_header = "X-Token: t0k" });
+    defer rl.stop();
+    var cb: [256]u8 = undefined;
+    var cmd: [512]u8 = undefined;
+    const r = try run(e, &.{ "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", try rcWs(&cmd, rl.url(), "", "echo ok") });
+    defer r.deinit();
+    try std.testing.expect(r.code != 0);
+    try expectIn(r.err, "401");
+    var lb: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("", credLog(&s, "tok", &lb));
+}
+
+test "--print shows the pattern and command, not headers [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const tok = try credHelper(&s, "tok", "echo 'Authorization: Bearer s3cret'");
+    defer gpa.free(tok);
+    var cb: [256]u8 = undefined;
+    var want: [256]u8 = undefined;
+    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--cred", try credArg(&cb, "127.0.0.1", tok), "--cred", "other.example=never", "--print", "ls" });
+    defer r.deinit();
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, try std.fmt.bufPrint(&want, "# ws://127.0.0.1:1/9p  cred 127.0.0.1={s}", .{tok}));
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "s3cret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "other.example") == null);
+    // The plan is made without running it.
+    var lb: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("", credLog(&s, "tok", &lb));
+}
+
+test "a bad --cred or $H9CRED is a usage error [credential-helpers]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--cred", "*=cat", "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    const v = try runEnv(e, firstBackend(e), &.{"/bin/echo"}, &.{.{ "H9CRED", "wanix.io" }}, 30_000);
+    defer v.deinit();
+    try std.testing.expectEqual(2, v.code);
+    try expectIn(v.err, "$H9CRED: each entry is PATTERN=COMMAND");
 }
