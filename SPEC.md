@@ -871,9 +871,9 @@ For each command in `src/9box/slim` (a name and a directory under `/sys/src/cmd`
 
 A command's override of a libc function (ed's `mktemp`) is renamed too, unless libc's or libbio's own code calls it; that, initialising a library global other than `argv0`, or being a thread program, fails the build.
 
-`9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
+`9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), from the interpreter a `#!` script names when `argv[0]` isn't a command (a script such as `/rc/bin/lc` whose `#!/bin/rc` is a hard link to `9box` starts it with the script's name in `argv[0]`), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
 
-The tree is `9box`, a hard link or stub per command, `rcmain`, the time zone, and the mount points h9 binds onto. Its 42 commands are a 749 KB `9box` against 3.4 MB for the same binaries copied.
+The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 43 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied.
 
 Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
 
@@ -1279,7 +1279,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
 | `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`). Exits 0, or 125 if h9 can't run programs from the root |
-| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (42 commands)`, or `skeleton only`) |
+| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (43 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
 ### Default guest environment

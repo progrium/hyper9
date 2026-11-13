@@ -14,6 +14,7 @@
 //!     <arch>/bin/9box
 //!     <arch>/bin/<cmd>    hard links to 9box, or #!/bin/9box -! stubs
 //!     rc/lib/rcmain
+//!     rc/bin/lc
 //!     adm/timezone/local
 //!     bin dev env fd mnt/term/cwd n net proc srv tmp rc/bin    mount points
 //!
@@ -32,12 +33,14 @@ const usage = "usage: slim H9 ROOT SRC9BOX SYSSRC ARCH hard|stub|copy BUILD OUT\
 /// argv[2] (src/9box/9box.c).
 pub const stub = "#!/bin/9box -!\n";
 
-/// The directories h9 binds onto, which a host tree must have, and the
-/// empty /rc/bin it binds after /$cputype/bin.
+/// The directories h9 binds onto, which a host tree must have, and
+/// /rc/bin, which it binds after /$cputype/bin.
 const mount_points = [_][]const u8{ "bin", "dev", "env", "fd", "mnt/term/cwd", "n", "net", "proc", "srv", "tmp", "rc/bin" };
 
-/// Files copied from the stock root as they are.
-const root_files = [_][]const u8{ "rc/lib/rcmain", "adm/timezone/local" };
+/// Files copied from the stock root as they are: rcmain, which rc reads
+/// when it starts, and lc, the one rc script the set's commands make
+/// (`ls -pF | mc`).
+const root_files = [_][]const u8{ "rc/lib/rcmain", "rc/bin/lc", "adm/timezone/local" };
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print("slim: " ++ fmt ++ "\n", args);

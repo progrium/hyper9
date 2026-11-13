@@ -4731,6 +4731,35 @@ test "an rc script runs when /bin/rc is a stub [multicall]" {
     try std.testing.expectEqual(0, r.code);
 }
 
+test "an rc script runs when /bin/rc is a hard link [multicall]" {
+    const e = try env(@src());
+    const slim = try slimTree(e);
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const x: std.Io.Dir.CreateFileOptions = .{ .permissions = .executable_file };
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "greet", .data = "#!/bin/rc\necho $0 $*\n", .flags = x });
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "strict", .data = "#!/bin/rc -e\necho strict $*\n", .flags = x });
+    // exec of greet runs 9box as greet /mnt/term/cwd/greet a b, a name
+    // that isn't a command, so 9box runs the #! line's rc.
+    const r = try runRoot(e, slim, &.{ "--cwd", s.path, "--rc", "/mnt/term/cwd/greet a b; /mnt/term/cwd/strict c" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/mnt/term/cwd/greet a b\nstrict c\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "lc columnates a directory in the slim tree [multicall]" {
+    const e = try env(@src());
+    const slim = try slimTree(e);
+    const r = try runRoot(e, slim, &.{ "--rc", "lc /rc" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("bin/ lib/\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "9box CMD ARGS and an unknown command [multicall]" {
     const e = try env(@src());
     const slim = try slimTree(e);
@@ -6111,6 +6140,21 @@ test "--builtin=only ignores H9ROOT [builtin-root]" {
     errdefer std.debug.print("stderr: {s}\n", .{r.stderr});
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
     try std.testing.expectEqualStrings("builtin\n", r.stdout);
+}
+
+test "lc runs from the built-in root [builtin-root]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const h9 = try h9Copy(e, &s);
+    defer gpa.free(h9);
+    const r = try runNoRoot(e, h9, &.{ "--rc", "lc /rc; lc /rc/bin" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("bin/ lib/\nlc*\n", r.out);
+    try std.testing.expectEqual(0, r.code);
 }
 
 test "--builtin=only with --root is a usage error [builtin-root]" {

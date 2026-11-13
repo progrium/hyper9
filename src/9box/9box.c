@@ -7,6 +7,9 @@
  *	by name: the last element of argv[0], for hard links;
  *	by stub: when argv[1] is -! and argv[2] is a file starting
  *		#!/.../9box -!, the last element of argv[2], for stubs;
+ *	by interpreter: when argv[0] names no command, the command a
+ *		#!/.../CMD script in argv names, for rc scripts such as
+ *		/rc/bin/lc when /bin/rc is a hard link;
  *	as 9box CMD ARGS;
  *	and 9box alone lists the commands.
  */
@@ -56,6 +59,56 @@ isstub(char *path)
 	return n == 2 && strcmp(base(f[0]), "9box") == 0 && strcmp(f[1], "-!") == 0;
 }
 
+static Cmd*
+lookup(char *name)
+{
+	int i;
+
+	for(i = 0; i < nelem(cmds); i++)
+		if(strcmp(cmds[i].name, name) == 0)
+			return &cmds[i];
+	return nil;
+}
+
+/*
+ * The command a script names as its interpreter, when 9box was run for
+ * one: exec of a file starting #!/bin/rc, where /bin/rc is a link to
+ * 9box, starts 9box with the script's name in argv[0], not rc's. The
+ * kernel puts the #! line's arguments after argv[0] and then the
+ * script's path, so the script is argv[k] for a #! line of k fields,
+ * with fields 2 to k in argv[1] to argv[k-1].
+ */
+static Cmd*
+interp(int argc, char **argv)
+{
+	char buf[256], *f[32+1];
+	int fd, i, k, n;
+	Cmd *c;
+
+	for(k = 1; k < argc && k < nelem(f); k++){
+		fd = open(argv[k], OREAD);
+		if(fd < 0)
+			continue;
+		n = read(fd, buf, sizeof buf - 1);
+		close(fd);
+		if(n < 2 || buf[0] != '#' || buf[1] != '!')
+			continue;
+		buf[n] = 0;
+		if(strchr(buf, '\n') != nil)
+			*strchr(buf, '\n') = 0;
+		if(tokenize(buf+2, f, nelem(f)) != k)
+			continue;
+		for(i = 1; i < k; i++)
+			if(strcmp(f[i], argv[i]) != 0)
+				break;
+		if(i < k)
+			continue;
+		if((c = lookup(base(f[0]))) != nil)
+			return c;
+	}
+	return nil;
+}
+
 static void
 list(void)
 {
@@ -70,7 +123,6 @@ main(int argc, char **argv)
 {
 	char *name;
 	Cmd *c;
-	int i;
 
 	if(argc < 1)
 		exits("no name");
@@ -101,10 +153,10 @@ main(int argc, char **argv)
 	 * doesn't initialise it.
 	 */
 	argv0 = nil;
-	for(i = 0; i < nelem(cmds); i++){
-		c = &cmds[i];
-		if(strcmp(c->name, name) != 0)
-			continue;
+	c = lookup(name);
+	if(c == nil)
+		c = interp(argc, argv);
+	if(c != nil){
 		c->main(argc, argv);
 		exits(nil);
 	}
