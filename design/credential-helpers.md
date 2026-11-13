@@ -7,6 +7,7 @@ created: 2026-11-07
 authors: [progrium]
 depends: [websocket-9p, dotl]
 areas: [cli, kern, sandbox, web]
+branch: [credential-helpers]
 ---
 
 # Proposal: Credential helpers for WebSocket 9P
