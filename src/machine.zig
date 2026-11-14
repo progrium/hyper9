@@ -551,7 +551,7 @@ pub const Machine = struct {
         kern.setStopKick(Proc.stopKick);
         kern.setProcDebug(Proc.debug);
         kc.setGen(linuxGen);
-        kc.setPtyHup(ptyHup);
+        kc.setPtySig(ptySig);
         job.start_ns = kern.monoNs();
         job.m = &job.mc;
         job.pages = .{ .ctx = job, .alloc = Job.allocPages, .free = Job.freePages };
@@ -2771,7 +2771,13 @@ pub const Machine = struct {
     /// block it (`deliverLinux`); a thread's (tgkill) goes to that thread
     /// alone (design/linux-threads.md).
     fn linuxKill(ctx: *anyopaque, from: *lsys.Process, pid: i64, signo: u8, thread: ?lsys.ThreadKill) i64 {
-        const j: *Job = @ptrCast(@alignCast(ctx));
+        return postSignal(@ptrCast(@alignCast(ctx)), from, pid, signo, thread);
+    }
+
+    /// linuxKill's work; `from` may be null when pid names a process or
+    /// a group (pid > 0 or pid < -1).
+    fn postSignal(j: *Job, from_in: ?*lsys.Process, pid: i64, signo: u8, thread: ?lsys.ThreadKill) i64 {
+        if (from_in == null and (pid == 0 or pid == -1)) return -attr.E.INVAL;
         const Target = struct { pid: u32, linux: bool };
         var targets: [256]Target = undefined;
         var n: usize = 0;
@@ -2788,9 +2794,9 @@ pub const Machine = struct {
                 else if (pid > 0)
                     q.pid == pid
                 else if (pid == -1)
-                    leader and q.pid != from.tgid()
+                    leader and q.pid != from_in.?.tgid()
                 else if (pid == 0)
-                    leader and qg != null and qg.? == from.pgid
+                    leader and qg != null and qg.? == from_in.?.pgid
                 else
                     leader and qg != null and qg.? == @as(u64, @intCast(-pid));
                 if (!want or q.kproc == null) continue;
@@ -2813,15 +2819,14 @@ pub const Machine = struct {
         return 0;
     }
 
-    /// devpty's hangup (design/linux-pty.md): a master's last close
-    /// sends SIGHUP to its terminal's foreground group, from the process
-    /// that closed it. Nothing is sent from a process without a Zig
-    /// record.
-    fn ptyHup(fg: c_ulong, sid: c_ulong) callconv(.c) void {
-        _ = sid;
-        const closer: *Proc = @ptrCast(@alignCast(kern.aux() orelse return));
-        const l = closer.lx orelse return;
-        _ = linuxKill(closer.job, l, -@as(i64, @intCast(fg)), lsig.SIGHUP, null);
+    /// devpty's signals (design/linux-pty.md): SIGHUP to a terminal's
+    /// foreground group at its master's last close, and SIGINT, SIGQUIT,
+    /// and SIGTSTP for the ISIG characters written to the master, from
+    /// the process that closed or wrote it. A process without a Zig
+    /// record (a kernel process) sends nothing.
+    fn ptySig(pgrp: c_ulong, signo: c_int) callconv(.c) void {
+        const from: *Proc = @ptrCast(@alignCast(kern.aux() orelse return));
+        _ = postSignal(from.job, null, -@as(i64, @intCast(pgrp)), @intCast(signo), null);
     }
 
     fn linuxPgid(ctx: *anyopaque, pid: u32) ?u32 {

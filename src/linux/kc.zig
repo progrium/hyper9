@@ -48,7 +48,7 @@ const real = struct {
     extern fn h9_pty_set(fd: c_int, s: *const PtyState, what: c_int, excl: c_int) c_int;
     extern fn h9_pty_bysid(sid: c_ulong) c_int;
     extern fn h9_pty_queued(fd: c_int, wr: c_int, flush: c_int) c_long;
-    extern fn h9_pty_sethup(f: PtyHup) void;
+    extern fn h9_pty_setsig(f: PtySig) void;
 };
 
 /// devlinux's hook for its text files (src/kern/devlinux.c): the file's
@@ -168,7 +168,7 @@ const stub = struct {
     fn h9_pty_queued(_: c_int, _: c_int, _: c_int) c_long {
         return -1;
     }
-    fn h9_pty_sethup(_: PtyHup) void {}
+    fn h9_pty_setsig(_: PtySig) void {}
 };
 
 /// A pty pair's state (src/kern/devpty.c's Ptystate): the termios as
@@ -193,9 +193,10 @@ pub const PtyState = extern struct {
     pub const lock_bit = 1 << 4;
 };
 
-/// devpty's hangup hook: posts SIGHUP to group `fg` of the caller's
-/// machine once a master's last close hangs its pair up.
-pub const PtyHup = *const fn (fg: c_ulong, sid: c_ulong) callconv(.c) void;
+/// devpty's signal hook: posts Linux signal `signo` to process group
+/// `pgrp` of the caller's machine: SIGHUP once a master's last close
+/// hangs its pair up, and the ISIG characters' signals.
+pub const PtySig = *const fn (pgrp: c_ulong, signo: c_int) callconv(.c) void;
 
 /// The state of the pty pair fd is a side of, or null if it isn't one.
 pub fn ptyGet(fd: i32) ?PtyState {
@@ -233,8 +234,8 @@ pub fn ptyFlush(fd: i32, dir: enum { read, write }) void {
     _ = c.h9_pty_queued(fd, @intFromBool(dir == .write), 1);
 }
 
-pub fn setPtyHup(f: PtyHup) void {
-    c.h9_pty_sethup(f);
+pub fn setPtySig(f: PtySig) void {
+    c.h9_pty_setsig(f);
 }
 
 /// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.c).

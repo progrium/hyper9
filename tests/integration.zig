@@ -5606,6 +5606,18 @@ test "closing the master sends SIGHUP to the foreground group and hangs up the s
     try netCase(&le, &.{ "/mnt/term/cwd/pty", "hangup" }, "ok hangup\n");
 }
 
+test "a canonical pty edits lines and echoes [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "canon" }, "ok canon\n");
+}
+
+test "Ctrl-C written to the master interrupts the foreground group [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "intr" }, "ok intr\n");
+}
+
 test "Python's pty.spawn runs a command in a pty [linux-pty]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -5618,9 +5630,8 @@ test "Python's pty.spawn runs a command in a pty [linux-pty]" {
     const r = try runLinux(&le, false, &.{ "python3", "-c", "import pty; pty.spawn([\"tty\"])" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
-    // A raw pty passes the newline as it is; with the line discipline's
-    // ONLCR it would be CR LF.
-    try std.testing.expectEqualStrings("/dev/pts/0", std.mem.trimEnd(u8, r.out, "\r\n"));
+    // ONLCR makes the newline CR LF.
+    try std.testing.expectEqualStrings("/dev/pts/0\r\n", r.out);
     try std.testing.expectEqual(0, r.code);
 }
 
