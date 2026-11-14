@@ -23,6 +23,8 @@ const consin = @import("consin.zig");
 const web = @import("web.zig");
 const hstream = @import("hstream.zig");
 const dotl = @import("dotl/kern.zig");
+const rootindex = @import("rootindex.zig");
+const hidx = @import("rootindex/kern.zig");
 const ws = @import("ws.zig");
 const serve = @import("serve.zig");
 const lsys = @import("linux/sys.zig");
@@ -170,6 +172,18 @@ pub const Machine = struct {
     /// root and namespace-file mounts. Guest connections always go direct.
     pub const Proxy = ws.ProxyConfig;
 
+    /// Whether metadata indexes are used (design/mount-index.md): `auto`
+    /// uses one wherever one is found, `none` never.
+    pub const IndexMode = enum { auto, none };
+
+    /// An index for the 9P root given with the mount, instead of its
+    /// server's `/.h9index` (`--root-index`): a host file, or an
+    /// `https://` or `http://` URL.
+    pub const RootIndex = union(enum) {
+        path: []const u8,
+        url: []const u8,
+    };
+
     /// A `--serve` listener's address (design/serve.md): a unix
     /// socket's host path, `host!port` for TCP, or `host:port/path` from
     /// a ws:// URL. Port 0 picks a free port.
@@ -192,6 +206,21 @@ pub const Machine = struct {
         /// PEM certificates a `wss` root must chain to, instead of the
         /// host's bundle: a host path.
         root_ca: ?[]const u8 = null,
+        /// Metadata indexes for the 9P root and namespace-file mounts
+        /// (design/mount-index.md).
+        index: IndexMode = .auto,
+        /// The 9P root's index, instead of its server's `/.h9index`.
+        /// Needs a 9P root.
+        root_index: ?RootIndex = null,
+        /// Where compiled indexes are cached; null caches nothing. The
+        /// CLI's default is `$XDG_CACHE_HOME/h9/index` and the like.
+        index_cache: ?[]const u8 = null,
+        /// For the plan only (`--print`): a `--root-index` file's counts,
+        /// which the CLI reads it for.
+        root_index_counts: ?struct { entries: u32, dirs: u32 } = null,
+        /// Notes on `stdio.err` about how the run went (`-v`): the
+        /// index's validation, and the 9P requests it saved.
+        verbose: bool = false,
         /// Resolve a host root tree's symlinks inside it: an absolute
         /// target starts at the tree's top, and `..` stops there
         /// (design/symlinks-in-root.md).
@@ -355,6 +384,8 @@ pub const Machine = struct {
     /// The listeners' bound addresses, once a run has opened them; in
     /// `arena`.
     serve_addrs: []const []const u8 = &.{},
+    /// The 9P root's `#ι` conversation (design/mount-index.md), in a run.
+    hidx_root: ?u32 = null,
 
     /// Each `serve` listener's bound address, in the order given, with
     /// port 0 resolved, once a run has opened them; empty before.
@@ -381,6 +412,10 @@ pub const Machine = struct {
         }
         if (opts.builtin != .off) in.builtin_note = try builtin_root.describe(arena);
         if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
+        if (opts.root_index != null and (opts.root == null or opts.root.? == .dir)) {
+            err_msg.* = "--root-index needs a 9P root";
+            return error.Conflict;
+        }
         if (opts.root) |r| switch (r) {
             .dir => |d| in.root = d,
             .tcp => |a| in.root_9p = .{ .kind = .tcp, .addr = a, .spec = opts.root_spec, .user = opts.root_user },
@@ -400,6 +435,13 @@ pub const Machine = struct {
                 .proxy = if (opts.proxy) |px| if (ws.Url.parse(u)) |url| px.pick(url) else |_| null else null,
             },
         };
+        if (in.root_9p) |*r| r.index = if (opts.index == .none) .none else if (opts.root_index) |ri| .{ .given = .{
+            .from = switch (ri) {
+                inline else => |x| x,
+            },
+            .entries = if (opts.root_index_counts) |c| c.entries else null,
+            .dirs = if (opts.root_index_counts) |c| c.dirs else null,
+        } } else .auto;
         return policy.compile(arena, in, opts.policy, err_msg);
     }
 
@@ -597,6 +639,7 @@ pub const Machine = struct {
         m.root_changes = job.rootChanges();
         if (job.mach.load(.acquire)) |mc| {
             dotl.unregister(@intFromPtr(mc));
+            hidx.unregister(@intFromPtr(mc));
             mc.put();
         }
         // No process reads the console now. A reader thread still in a
@@ -1241,7 +1284,11 @@ pub const Machine = struct {
         j.mach.store(mc, .release);
         // What #ℓ's translators send as the machine's user.
         if (mc) |x| dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
+        // Where #ι caches compiled indexes.
+        if (mc) |x| hidx.register(@intFromPtr(x), .{ .cache_dir = m.opts.index_cache, .io = m.io });
         const r = m.startFirst(p);
+        // What the root's index saved, for -v.
+        if (m.opts.verbose) if (m.hidx_root) |n| m.indexCounts(n);
         // The status and err_msg can point into the Proc or its errstr,
         // which go when it exits.
         j.result = if (r) |st| switch (st) {
@@ -3165,12 +3212,204 @@ pub const Machine = struct {
     /// as `#s/root`.
     fn postDotl(m: *Machine, data: kern.Error!u31) RunError!void {
         const addr = m.plan.root_9p.?.addr;
-        const fd = data catch return m.fail("root {f}: {s}", .{ ws.Url.elide(addr), kern.errstr() });
+        const conn = data catch return m.fail("root {f}: {s}", .{ ws.Url.elide(addr), kern.errstr() });
+        const fd = try m.indexRoot(conn);
         defer kern.close(fd) catch {};
         const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
         defer kern.close(srv) catch {};
         var num: [16]u8 = undefined;
         _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
+    }
+
+    /// Puts the root's connection `conn` under a `#ι` conversation
+    /// (design/mount-index.md) and returns an fd on its data file, or
+    /// returns `conn` itself under `--index none`. Takes `conn`.
+    fn indexRoot(m: *Machine, conn: u31) RunError!u31 {
+        const r = m.plan.root_9p.?;
+        const shown = ws.Url.elide(r.addr);
+        // Under -v, the conversation counts requests even without an index.
+        if (m.opts.index == .none and !m.opts.verbose) return conn;
+        var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
+        const ctl = if (m.opts.index == .none) "" else if (m.opts.root_index) |given| blk: {
+            const got = m.giveRootIndex(given) catch |e| {
+                kern.close(conn) catch {};
+                return e;
+            };
+            const id = got orelse break :blk "";
+            break :blk std.fmt.bufPrint(&arg, "index {d}", .{id}) catch unreachable;
+        } else std.fmt.bufPrint(&arg, "server {s} {s}", .{ r.addr, r.spec }) catch return m.fail("root {f}: name too long", .{shown});
+        var n: u32 = 0;
+        const fd = hidxConv(ctl, conn, &n) catch {
+            kern.close(conn) catch {};
+            return m.fail("root {f}: index: {s}", .{ shown, kern.errstr() });
+        };
+        m.hidx_root = n;
+        return fd;
+    }
+
+    /// Reads, compiles, and hands `#ι` the `--root-index` index, and
+    /// returns its number; null when it's to be ignored. One that can't
+    /// be read fails the run, as an unreachable root does.
+    fn giveRootIndex(m: *Machine, given: RootIndex) RunError!?u32 {
+        const addr = m.plan.root_9p.?.addr;
+        const a = hidx.allocator;
+        const from = switch (given) {
+            inline else => |x| x,
+        };
+        const cache: ?rootindex.cache.Cache = if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
+        var etag: ?[]u8 = null;
+        defer if (etag) |e| a.free(e);
+        const text: []u8 = switch (given) {
+            .path => |path| std.Io.Dir.cwd().readFileAlloc(m.io, path, a, .limited(rootindex.max_text + 1)) catch |e| switch (e) {
+                error.StreamTooLong => {
+                    m.indexNote("index: {s} is larger than 256 MB; ignored", .{path});
+                    return null;
+                },
+                else => return m.fail("root {f}: --root-index {s}: {s}", .{ ws.Url.elide(addr), path, rootIndexError(e) }),
+            },
+            .url => |url| switch (hstream.fetchIndex(a, m.io, url, .{
+                .ca_file = m.opts.root_ca,
+                .proxy = m.opts.proxy orelse .{},
+                .cache = if (cache) |*c| c else null,
+            }, &m.msg_buf) catch |e| switch (e) {
+                error.TooBig => {
+                    m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(url)});
+                    return null;
+                },
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return m.fail("root {f}: --root-index {f}: {s}", .{ ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
+            }) {
+                .compiled => |b| return m.giveCompiled(b, from),
+                .text => |t| blk: {
+                    etag = t.etag;
+                    break :blk t.bytes;
+                },
+            },
+        };
+        defer a.free(text);
+        var vbuf: [64]u8 = undefined;
+        const version = rootindex.cache.textVersion(text, &vbuf);
+        const compiled = (if (cache) |*c| c.lookup(rootindex.cache.text_key, version) else null) orelse blk: {
+            var diag: rootindex.Diag = .{};
+            const b = rootindex.compile(a, text, &diag) catch |e| {
+                switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnknownVersion => m.indexNote("index: {f}: unknown format version; ignored", .{ws.Url.elide(from)}),
+                    error.TooBig => m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(from)}),
+                    error.BadIndex => m.indexNote("index: {f}: line {d}: {s}; ignored", .{ ws.Url.elide(from), diag.line, diag.msg }),
+                }
+                return null;
+            };
+            if (cache) |*c| c.store(rootindex.cache.text_key, version, b);
+            break :blk b;
+        };
+        if (cache) |*c| if (etag) |e| if (given == .url) c.storeEtag(given.url, e, version);
+        return m.giveCompiled(compiled, from);
+    }
+
+    /// Hands `#ι` a compiled index, which it then owns.
+    fn giveCompiled(m: *Machine, compiled: []u8, from: []const u8) RunError!?u32 {
+        const a = hidx.allocator;
+        const mc = kern.mach() orelse {
+            a.free(compiled);
+            return m.fail("root: not a machine process", .{});
+        };
+        const owner = @intFromPtr(mc);
+        mc.put();
+        var lb: [256]u8 = undefined;
+        return try hidx.give(owner, compiled, std.fmt.bufPrint(&lb, "{f}", .{ws.Url.elide(from)}) catch from);
+    }
+
+    fn rootIndexError(e: anyerror) []const u8 {
+        return switch (e) {
+            error.FileNotFound => "not found",
+            error.AccessDenied, error.PermissionDenied => "permission denied",
+            error.IsDir => "is a directory",
+            else => @errorName(e),
+        };
+    }
+
+    /// A note on stderr under `-v`.
+    fn indexNote(m: *Machine, comptime fmt: []const u8, args: anytype) void {
+        if (!m.opts.verbose) return;
+        m.opts.stdio.err.print("h9: " ++ fmt ++ "\n", args) catch {};
+        m.opts.stdio.err.flush() catch {};
+    }
+
+    /// Prints the notes of `#ι` conversation `n` under `-v`: how the index
+    /// was found and validated, or that there was none.
+    fn indexNotes(m: *Machine, n: u32, what: []const u8) void {
+        if (!m.opts.verbose) return;
+        var buf: [4096]u8 = undefined;
+        const st = hidxStatus(n, &buf) orelse return;
+        var any = false;
+        var lines = std.mem.splitScalar(u8, st, '\n');
+        while (lines.next()) |l| if (std.mem.startsWith(u8, l, "index: ")) {
+            m.indexNote("{s}", .{l});
+            any = true;
+        };
+        if (!any and std.mem.startsWith(u8, st, "index none")) m.indexNote("index: none for {s}", .{what});
+    }
+
+    /// Prints what the root's index saved, under `-v`.
+    fn indexCounts(m: *Machine, n: u32) void {
+        var buf: [4096]u8 = undefined;
+        const st = hidxStatus(n, &buf) orelse return;
+        var lines = std.mem.splitScalar(u8, st, '\n');
+        while (lines.next()) |l| if (std.mem.startsWith(u8, l, "requests ")) {
+            var f = std.mem.tokenizeScalar(u8, l, ' ');
+            _ = f.next();
+            const from = f.next() orelse return;
+            _ = f.next();
+            const sent = f.next() orelse return;
+            m.indexNote("index: devmnt sent the root {s} 9P requests; {s} went to the server", .{ from, sent });
+        };
+    }
+
+    /// `#ι` conversation `n`'s status.
+    fn hidxStatus(n: u32, buf: []u8) ?[]const u8 {
+        var path: [64]u8 = undefined;
+        const fd = kern.open(std.fmt.bufPrintZ(&path, "#" ++ policy.hidx_dev ++ "/hidx/{d}/status", .{n}) catch return null, kern.OREAD) catch return null;
+        defer kern.close(fd) catch {};
+        var got: usize = 0;
+        while (got < buf.len) {
+            const k = kern.pread(fd, buf[got..], @intCast(got)) catch return null;
+            if (k == 0) break;
+            got += k;
+        }
+        return buf[0..got];
+    }
+
+    /// Starts a `#ι` conversation over the connection `conn`, which it
+    /// closes, with the ctl message `ctl` ("server KEY", "index N", or
+    /// none for one that only counts), and returns an fd on its data file,
+    /// which devmnt mounts, and the conversation's number in `num`.
+    fn hidxConv(ctl: []const u8, conn: u31, num: *u32) kern.Error!u31 {
+        defer kern.close(conn) catch {};
+        const dev = "#" ++ policy.hidx_dev ++ "/hidx/";
+        const clone = try kern.open(dev ++ "clone", kern.ORDWR);
+        defer kern.close(clone) catch {};
+        var nbuf: [16]u8 = undefined;
+        const n = std.mem.trim(u8, nbuf[0..try kern.pread(clone, &nbuf, 0)], " \n");
+        num.* = std.fmt.parseInt(u32, n, 10) catch return error.Kern;
+        if (ctl.len > 0) _ = try kern.pwrite(clone, ctl, 0);
+        var cmd: [32]u8 = undefined;
+        _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "fd {d}", .{conn}) catch unreachable, 0);
+        var path: [64]u8 = undefined;
+        return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
+    }
+
+    /// A namespace-file mount's connection `conn` under `#ι`, using its
+    /// server's `/.h9index` (design/mount-index.md); `conn` itself under
+    /// `--index none`. Takes `conn`.
+    fn indexMount(m: *Machine, conn: u31, file: []const u8, spec: []const u8, num: *?u32) u31 {
+        if (m.opts.index == .none) return conn;
+        var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
+        const ctl = std.fmt.bufPrint(&arg, "server {s} {s}", .{ file, spec }) catch return conn;
+        var n: u32 = 0;
+        const fd = hidxConv(ctl, conn, &n) catch return conn;
+        num.* = n;
+        return fd;
     }
 
     /// Starts a `#ℓ` conversation with the ctl message `fmt` ("fd N" for
@@ -3227,6 +3466,7 @@ pub const Machine = struct {
         defer if (r.user != null) kern.setProcUser(saved[0..own.len :0]);
         const spec = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.spec});
         _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), kern.MREPL, spec) catch return m.fail("root {f}: {s}", .{ shown, kern.errstr() });
+        if (m.opts.index != .none) if (m.hidx_root) |n| m.indexNotes(n, "the root");
     }
 
     /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
@@ -3284,19 +3524,26 @@ pub const Machine = struct {
                 const conn = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
                 const data = dotlConv("fd {d}", conn);
                 kern.close(conn) catch {};
-                const fd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+                const dfd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+                // Through #ι, for the server's /.h9index (design/mount-index.md).
+                var num: ?u32 = null;
+                const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
                 defer kern.close(fd) catch {};
                 _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch
                     return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+                if (num) |n| m.indexNotes(n, mt.to);
             } else if (std.mem.startsWith(u8, mt.file, "tcp!")) {
                 // A dial string, which `#ℓ` dials under the network
                 // policy, as dotlfs does, and dials again if a 9P2000.L.Z
                 // server goes. Like any other mount, one that fails is
                 // skipped.
                 if (m.plan.write == .none) return m.fail("mount {s}: --write=none can't be enforced on a 9P mount", .{mt.file});
-                const fd = dotlConv("dial {s}", mt.file) catch continue;
+                const dfd = dotlConv("dial {s}", mt.file) catch continue;
+                var num: ?u32 = null;
+                const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
                 defer kern.close(fd) catch {};
-                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch continue;
+                if (num) |n| m.indexNotes(n, mt.to);
             } else {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
                 defer kern.close(fd) catch {};

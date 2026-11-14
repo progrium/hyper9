@@ -13,6 +13,7 @@ pub const usage =
     \\usage: h9 [--backend auto|hvf|kvm|whp|native|emu] [--arch arm64|amd64|386]
     \\           [--root DIR|DIAL|SOCKET|URL] [--root-spec NAME] [--root-user NAME]
     \\           [--root-header 'NAME: VALUE'|@FILE]... [--root-ca FILE] [--cwd DIR]
+    \\           [--root-index FILE|URL] [--index auto|none] [--index-cache DIR]
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
@@ -24,7 +25,7 @@ pub const usage =
     \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
     \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
     \\           [--serve-net]
-    \\           [--print] [--trace[=FILE]]
+    \\           [--print] [--trace[=FILE]] [-v|--verbose]
     \\           [--] program [args...]
     \\       h9 [flags] --rc 'command' [args...]
     \\       h9 [flags] --rc
@@ -51,6 +52,9 @@ pub const Mode = enum {
 /// are `policy.Builtin`'s.
 pub const BuiltinMode = enum { auto, only, before, after, off };
 
+/// --index (design/mount-index.md).
+pub const IndexMode = enum { auto, none };
+
 pub const Config = struct {
     mode: Mode = .run,
     backend: vmm.BackendKind = .auto,
@@ -73,6 +77,16 @@ pub const Config = struct {
     root_headers: []const []const u8 = &.{},
     /// --root-ca: PEM certificates a wss:// root must chain to.
     root_ca: ?[]const u8 = null,
+    /// --root-index: an index for the 9P root, a host file or an
+    /// `https://` or `http://` URL (design/mount-index.md).
+    root_index: ?[]const u8 = null,
+    /// --index: whether indexes are used.
+    index: IndexMode = .auto,
+    /// --index-cache: where compiled indexes are kept; null for the
+    /// default.
+    index_cache: ?[]const u8 = null,
+    /// -v or --verbose: notes on stderr, such as the index's validation.
+    verbose: bool = false,
     /// --user-map: a passwd file mapping names to the numbers a 9P2000.L
     /// server sees (design/dotl.md).
     user_map: ?[]const u8 = null,
@@ -165,6 +179,11 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
+        // -v is the one short flag, before the program.
+        if (std.mem.eql(u8, a, "-v")) {
+            c.verbose = true;
+            continue;
+        }
         if (!std.mem.startsWith(u8, a, "--")) break;
         if (std.mem.eql(u8, a, "--")) {
             i += 1;
@@ -210,6 +229,16 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.root_contained = true;
         } else if (flag(a, "--print")) {
             c.print = true;
+        } else if (flag(a, "--verbose")) {
+            c.verbose = true;
+        } else if (value(args, &i, "--root-index")) |v| {
+            c.root_index = v orelse return error.Usage;
+            if (c.root_index.?.len == 0) return error.Usage;
+        } else if (value(args, &i, "--index-cache")) |v| {
+            c.index_cache = v orelse return error.Usage;
+            if (c.index_cache.?.len == 0) return error.Usage;
+        } else if (value(args, &i, "--index")) |v| {
+            c.index = try enumValue(IndexMode, v);
         } else if (flag(a, "--check")) {
             if (c.mode != .run) return error.Usage;
             c.mode = .check;
@@ -679,6 +708,22 @@ test "--root-contained" {
     const d = try parse(t.allocator, &.{ "h9", "ls" });
     defer t.allocator.free(d.env);
     try t.expect(!d.root_contained);
+}
+
+test "--root-index, --index, --index-cache, and -v [mount-index]" {
+    const c = try parse(t.allocator, &.{ "h9", "--root", "tcp!fs!564", "--root-index", "x.h9index", "--index-cache=/tmp/c", "-v", "ls" });
+    try t.expectEqualStrings("x.h9index", c.root_index.?);
+    try t.expectEqualStrings("/tmp/c", c.index_cache.?);
+    try t.expect(c.verbose);
+    try t.expectEqual(IndexMode.auto, c.index);
+    try t.expectEqualStrings("ls", c.argv[0]);
+    const d = try parse(t.allocator, &.{ "h9", "--index", "none", "--verbose", "ls", "-v" });
+    try t.expectEqual(IndexMode.none, d.index);
+    try t.expect(d.verbose);
+    try t.expectEqualStrings("-v", d.argv[1]);
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--index", "some", "ls" }));
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-index", "", "ls" }));
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-index" }));
 }
 
 test "--root-header and --root-ca" {

@@ -933,7 +933,7 @@ fn connect(s: *Stream) ConnectError!void {
             return e;
         };
     }
-    if (url.tls) try startTls(s, c, url);
+    if (url.tls) try startTls(s.ca_file, c, url);
     var raw: [16]u8 = undefined;
     io.random(&raw);
     const key = ws.makeKey(&raw);
@@ -1133,13 +1133,12 @@ var bundle_lock: Io.RwLock = .init;
 var bundle: std.crypto.Certificate.Bundle = .empty;
 var bundle_loaded = false;
 
-fn startTls(s: *Stream, c: *Conn, url: ws.Url) ConnectError!void {
+fn startTls(ca_file: ?[]const u8, c: *Conn, url: ws.Url) ConnectError!void {
     const io = theIo();
     const now_ts = Io.Clock.real.now(io);
     var own: std.crypto.Certificate.Bundle = .empty;
     defer own.deinit(gpa);
     var own_lock: Io.RwLock = .init;
-    const ca_file = s.ca_file;
     if (ca_file) |path| {
         own.addCertsFromFilePath(gpa, io, now_ts, Io.Dir.cwd(), path) catch return error.BadCa;
         if (own.map.count() == 0) return error.BadCa;
@@ -2046,4 +2045,181 @@ test "the keepalive pings an idle stream" {
     while (!t.done.load(.acquire)) std.Thread.yield() catch {};
     if (t.err) |e| return e;
     try testing.expect(echo.pings.load(.acquire) >= 2);
+}
+
+// Fetching a `--root-index` URL (design/mount-index.md), with the
+// connection code WebSocket roots use: the proxy's CONNECT, then TLS for
+// `https`, then one GET.
+
+const rootindex = @import("rootindex.zig");
+
+pub const FetchOptions = struct {
+    /// A PEM file the server's certificate must chain to, instead of the
+    /// host's bundle (the root's `--root-ca`).
+    ca_file: ?[]const u8 = null,
+    proxy: ws.ProxyConfig = .{},
+    /// Where the last ETag and the compiled index are kept: a URL whose
+    /// ETag still matches isn't transferred again.
+    cache: ?*const rootindex.cache.Cache = null,
+};
+
+pub const Fetched = union(enum) {
+    /// The index's text, which the caller owns and caches, with its ETag
+    /// (also the caller's) for `cache.storeEtag`.
+    text: struct { bytes: []u8, etag: ?[]u8 },
+    /// Unchanged since the cached copy: its compiled form.
+    compiled: []u8,
+};
+
+/// Gets `url_s`, an `https://` or `http://` URL. A status other than
+/// 200 (or 304 for a cached copy) fails with `error.Status`, its line in
+/// `msg`.
+pub fn fetchIndex(alloc: std.mem.Allocator, io: Io, url_s: []const u8, o: FetchOptions, msg: []u8) anyerror!Fetched {
+    if (web.enabled) return error.Unsupported;
+    setIo(io);
+    // ws.Url parses ws:// and wss://; https:// is wss:// for a GET.
+    var ubuf: [4096]u8 = undefined;
+    const as_ws = if (std.mem.startsWith(u8, url_s, "https://"))
+        std.fmt.bufPrint(&ubuf, "wss://{s}", .{url_s["https://".len..]}) catch return error.BadUrl
+    else if (std.mem.startsWith(u8, url_s, "http://"))
+        std.fmt.bufPrint(&ubuf, "ws://{s}", .{url_s["http://".len..]}) catch return error.BadUrl
+    else
+        return error.BadUrl;
+    const url = try ws.Url.parse(as_ws);
+    var ebuf: [512]u8 = undefined;
+    const prior = if (o.cache) |c| c.lookupEtag(url_s, &ebuf) else null;
+    if (prior) |p| {
+        const r = try httpGet(alloc, io, url, o, p.etag, msg);
+        switch (r) {
+            .unchanged => if (o.cache.?.lookup(rootindex.cache.text_key, p.version)) |b| return .{ .compiled = b },
+            .body => |b| return .{ .text = .{ .bytes = b.bytes, .etag = b.etag } },
+        }
+    }
+    const r = try httpGet(alloc, io, url, o, null, msg);
+    return switch (r) {
+        .unchanged => error.BadResponse,
+        .body => |b| .{ .text = .{ .bytes = b.bytes, .etag = b.etag } },
+    };
+}
+
+/// What a fetch error means, for the machine's message; `msg` holds a
+/// status line.
+pub fn fetchError(e: anyerror, msg: []const u8) []const u8 {
+    return switch (e) {
+        error.Status => std.mem.sliceTo(msg, 0),
+        error.BadUrl => "not an https:// or http:// URL",
+        error.Unsupported => "URLs aren't fetched on the web host",
+        error.BadResponse => "not an HTTP response",
+        else => errName(e),
+    };
+}
+
+const Got = union(enum) {
+    unchanged,
+    body: struct { bytes: []u8, etag: ?[]u8 },
+};
+
+fn httpGet(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: FetchOptions, etag: ?[]const u8, msg: []u8) anyerror!Got {
+    const proxy_s = o.proxy.pick(url);
+    const proxy: ?ws.Proxy = if (proxy_s) |p| ws.Proxy.parse(p) catch return error.BadProxy else null;
+    const stream = try dial(io, if (proxy) |p| p.host else url.host, if (proxy) |p| p.port else url.port);
+    const c = Conn.create(stream) catch |e| {
+        stream.close(io);
+        return e;
+    };
+    defer c.destroy();
+    if (proxy) |p| {
+        try ws.writeConnect(&c.sw.interface, p, url);
+        var resp: ws.Response = .{};
+        ws.readConnect(&c.sr.interface, &resp) catch |e| {
+            if (e == error.Status) _ = std.fmt.bufPrintZ(msg, "proxy: {d} {s}", .{ resp.status, resp.reason }) catch {};
+            return e;
+        };
+    }
+    if (url.tls) try startTls(o.ca_file, c, url);
+    const w = c.writer();
+    try w.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: h9\r\nAccept-Encoding: identity\r\nConnection: close\r\n", .{ url.target, url.authority });
+    if (etag) |e| try w.print("If-None-Match: {s}\r\n", .{e});
+    try w.writeAll("\r\n");
+    try c.flush();
+    const r = c.reader();
+    const status_line = try httpLine(r);
+    if (!std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.BadResponse;
+    var parts = std.mem.splitScalar(u8, status_line, ' ');
+    _ = parts.next();
+    const status = std.fmt.parseInt(u16, parts.next() orelse return error.BadResponse, 10) catch return error.BadResponse;
+    if (status != 200 and status != 304) {
+        _ = std.fmt.bufPrintZ(msg, "{d} {s}", .{ status, parts.rest() }) catch {};
+        return error.Status;
+    }
+    var length: ?u64 = null;
+    var chunked = false;
+    var got_etag: ?[]u8 = null;
+    errdefer if (got_etag) |e| alloc.free(e);
+    while (true) {
+        const l = try httpLine(r);
+        if (l.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, l, ':') orelse return error.BadResponse;
+        const name = std.mem.trim(u8, l[0..colon], " \t");
+        const value = std.mem.trim(u8, l[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            length = std.fmt.parseInt(u64, value, 10) catch return error.BadResponse;
+        } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+            chunked = std.ascii.indexOfIgnoreCase(value, "chunked") != null;
+        } else if (std.ascii.eqlIgnoreCase(name, "etag") and got_etag == null and value.len <= 256) {
+            got_etag = try alloc.dupe(u8, value);
+        }
+    }
+    if (status == 304) {
+        if (got_etag) |e| alloc.free(e);
+        return .unchanged;
+    }
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(alloc);
+    const limit = rootindex.max_text;
+    if (chunked) {
+        while (true) {
+            const l = try httpLine(r);
+            const semi = std.mem.indexOfScalar(u8, l, ';') orelse l.len;
+            const n = std.fmt.parseInt(u64, std.mem.trim(u8, l[0..semi], " \t"), 16) catch return error.BadResponse;
+            if (n == 0) break;
+            if (body.items.len + n > limit) return error.TooBig;
+            try readInto(alloc, r, &body, @intCast(n));
+            _ = try httpLine(r);
+        }
+    } else if (length) |n| {
+        if (n > limit) return error.TooBig;
+        try readInto(alloc, r, &body, @intCast(n));
+    } else {
+        // To the end of the connection.
+        while (true) {
+            const b = r.peekGreedy(1) catch |e| switch (e) {
+                error.EndOfStream => break,
+                else => return e,
+            };
+            if (body.items.len + b.len > limit) return error.TooBig;
+            try body.appendSlice(alloc, b);
+            r.toss(b.len);
+        }
+    }
+    return .{ .body = .{ .bytes = try body.toOwnedSlice(alloc), .etag = got_etag } };
+}
+
+fn readInto(alloc: std.mem.Allocator, r: *Io.Reader, body: *std.ArrayList(u8), n: usize) !void {
+    var left = n;
+    while (left > 0) {
+        const b = try r.peekGreedy(1);
+        const k = @min(b.len, left);
+        try body.appendSlice(alloc, b[0..k]);
+        r.toss(k);
+        left -= k;
+    }
+}
+
+fn httpLine(r: *Io.Reader) ![]const u8 {
+    const l = r.takeDelimiterInclusive('\n') catch |e| return switch (e) {
+        error.StreamTooLong => error.BadResponse,
+        else => e,
+    };
+    return std.mem.trimEnd(u8, l, "\r\n");
 }
