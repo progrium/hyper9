@@ -42,6 +42,7 @@ extern Dev hstreamdevtab;
 extern Dev dotldevtab;
 extern Dev linuxdevtab;
 extern Dev evdevtab;
+extern Dev ptydevtab;
 
 #ifdef H9_WEB
 /*
@@ -150,6 +151,7 @@ Dev *devtab[] = {
 	&dotldevtab,
 	&linuxdevtab,
 	&evdevtab,
+	&ptydevtab,
 	0
 };
 

@@ -44,6 +44,11 @@ const real = struct {
     extern fn h9_linux_raccept(fd: c_int, cloexec: c_int) c_int;
     extern fn h9_linux_syncfs(fd: c_int) c_int;
     extern fn h9_linux_sync() c_int;
+    extern fn h9_pty_get(fd: c_int, s: *PtyState) c_int;
+    extern fn h9_pty_set(fd: c_int, s: *const PtyState, what: c_int, excl: c_int) c_int;
+    extern fn h9_pty_bysid(sid: c_ulong) c_int;
+    extern fn h9_pty_queued(fd: c_int, wr: c_int, flush: c_int) c_long;
+    extern fn h9_pty_sethup(f: PtyHup) void;
 };
 
 /// devlinux's hook for its text files (src/kern/devlinux.c): the file's
@@ -151,7 +156,86 @@ const stub = struct {
     fn h9_linux_sync() c_int {
         return -1;
     }
+    fn h9_pty_get(_: c_int, _: *PtyState) c_int {
+        return -1;
+    }
+    fn h9_pty_set(_: c_int, _: *const PtyState, _: c_int, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_pty_bysid(_: c_ulong) c_int {
+        return -1;
+    }
+    fn h9_pty_queued(_: c_int, _: c_int, _: c_int) c_long {
+        return -1;
+    }
+    fn h9_pty_sethup(_: PtyHup) void {}
 };
+
+/// A pty pair's state (src/kern/devpty.c's Ptystate): the termios as
+/// the personality keeps it, the window size (rows, cols, xpixel,
+/// ypixel), the foreground group and session (0 for none), the lock,
+/// and, read only, the pair's number, whether the fd is its master, and
+/// whether the slave is open.
+pub const PtyState = extern struct {
+    termios: [60]u8 = @splat(0),
+    winsz: [4]u16 = @splat(0),
+    fg: u32 = 0,
+    sid: u32 = 0,
+    locked: c_int = 0,
+    n: c_int = 0,
+    master: c_int = 0,
+    slaveopen: c_int = 0,
+
+    pub const termios_bit = 1 << 0;
+    pub const winsz_bit = 1 << 1;
+    pub const fg_bit = 1 << 2;
+    pub const sid_bit = 1 << 3;
+    pub const lock_bit = 1 << 4;
+};
+
+/// devpty's hangup hook: posts SIGHUP to group `fg` of the caller's
+/// machine once a master's last close hangs its pair up.
+pub const PtyHup = *const fn (fg: c_ulong, sid: c_ulong) callconv(.c) void;
+
+/// The state of the pty pair fd is a side of, or null if it isn't one.
+pub fn ptyGet(fd: i32) ?PtyState {
+    var s: PtyState = .{};
+    if (c.h9_pty_get(fd, &s) < 0) return null;
+    return s;
+}
+
+pub const PtySet = enum { set, if_free };
+
+/// Sets the fields `what` names (PtyState's bits) of fd's pair. With
+/// `.if_free`, only if the pair is no session's terminal: false when it
+/// was. error.Kern if fd isn't a pty.
+pub fn ptySet(fd: i32, s: *const PtyState, what: c_int, mode: PtySet) Error!bool {
+    const r = c.h9_pty_set(fd, s, what, @intFromBool(mode == .if_free));
+    if (r < 0) return error.Kern;
+    return r == 0;
+}
+
+/// The number of the caller's machine's pty that's session sid's
+/// controlling terminal, or null.
+pub fn ptyBySid(sid: u32) ?u32 {
+    const r = c.h9_pty_bysid(sid);
+    return if (r < 0) null else @intCast(r);
+}
+
+/// Bytes queued to read on pty fd (`.read`), or written and not read
+/// yet (`.write`); null if fd isn't a pty. `ptyFlush` drops them.
+pub fn ptyQueued(fd: i32, dir: enum { read, write }) ?u32 {
+    const r = c.h9_pty_queued(fd, @intFromBool(dir == .write), 0);
+    return if (r < 0) null else @intCast(r);
+}
+
+pub fn ptyFlush(fd: i32, dir: enum { read, write }) void {
+    _ = c.h9_pty_queued(fd, @intFromBool(dir == .write), 1);
+}
+
+pub fn setPtyHup(f: PtyHup) void {
+    c.h9_pty_sethup(f);
+}
 
 /// Linux's struct pollfd, which h9_poll fills in (src/kern/linuxnet.c).
 pub const PollFd = extern struct { fd: i32, events: i16, revents: i16 };

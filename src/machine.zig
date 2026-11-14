@@ -551,6 +551,7 @@ pub const Machine = struct {
         kern.setStopKick(Proc.stopKick);
         kern.setProcDebug(Proc.debug);
         kc.setGen(linuxGen);
+        kc.setPtyHup(ptyHup);
         job.start_ns = kern.monoNs();
         job.m = &job.mc;
         job.pages = .{ .ctx = job, .alloc = Job.allocPages, .free = Job.freePages };
@@ -2810,6 +2811,17 @@ pub const Machine = struct {
             _ = kern.postNote(t.pid, note, .user) catch {};
         }
         return 0;
+    }
+
+    /// devpty's hangup (design/linux-pty.md): a master's last close
+    /// sends SIGHUP to its terminal's foreground group, from the process
+    /// that closed it. Nothing is sent from a process without a Zig
+    /// record.
+    fn ptyHup(fg: c_ulong, sid: c_ulong) callconv(.c) void {
+        _ = sid;
+        const closer: *Proc = @ptrCast(@alignCast(kern.aux() orelse return));
+        const l = closer.lx orelse return;
+        _ = linuxKill(closer.job, l, -@as(i64, @intCast(fg)), lsig.SIGHUP, null);
     }
 
     fn linuxPgid(ctx: *anyopaque, pid: u32) ?u32 {

@@ -32,7 +32,7 @@ enum
 	Qroot = 0,
 	Q9, Qtmp, Qmnt, Qterm, Qtermcwd, Qdev, Qproc, Qsys,
 	/* dev */
-	Qnull, Qzero, Qfull, Qrandom, Qurandom, Qtty, Qconsole, Qfddir, Qstdin, Qstdout, Qstderr, Qpts, Qshm,
+	Qnull, Qzero, Qfull, Qrandom, Qurandom, Qtty, Qconsole, Qfddir, Qstdin, Qstdout, Qstderr, Qpts, Qptmx, Qshm,
 	/* proc */
 	Qself, Qthreadself, Qcpuinfo, Qmeminfo, Qstat, Quptime, Qmounts, Qloadavg, Qversion, Qfilesystems,
 	Qpsys, Qkernel, Qrandomdir, Quuid, Qbootid, Qvm, Qovercommit, Qosrelease, Qostype, Qhostname, Qpidmax,
@@ -89,6 +89,7 @@ static Lent tab[Nq] = {
 	[Qstdout]	{"stdout", Qdev, 0666, 1},
 	[Qstderr]	{"stderr", Qdev, 0666, 1},
 	[Qpts]	{"pts", Qdev, DMDIR|0555},
+	[Qptmx]	{"ptmx", Qdev, 0666, 1},	/* #τ/ptmx is bound on it (design/linux-pty.md) */
 	[Qshm]	{"shm", Qdev, DMDIR|0777},
 
 	[Qself]	{"self", Qproc, DMDIR|0555},

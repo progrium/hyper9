@@ -5561,6 +5561,69 @@ test "a private file mapping reads each page from its file offset on first touch
     try netCase(&le, &.{ "/mnt/term/cwd/files", "lazy_map" }, "ok lazy_map\n");
 }
 
+// Pseudoterminals (design/linux-pty.md), through
+// tests/fixtures/linux/pty.c, which prints "ok NAME" per case.
+
+test "posix_openpt, grantpt, unlockpt, and ptsname give an open slave [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "openpt" }, "ok openpt\n");
+}
+
+test "the master reads EOF once the slave closes [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "eof" }, "ok eof\n");
+}
+
+test "a raw pty passes bytes unchanged [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "raw" }, "ok raw\n");
+}
+
+test "a locked slave doesn't open, and TIOCGPTPEER opens it from the master [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "locked" }, "ok locked\n");
+}
+
+test "poll and O_NONBLOCK see a pty's queues [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "nonblock" }, "ok nonblock\n");
+}
+
+test "TIOCSWINSZ sends SIGWINCH to the foreground group [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "winch" }, "ok winch\n");
+}
+
+test "closing the master sends SIGHUP to the foreground group and hangs up the slave [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/pty", "hangup" }, "ok hangup\n");
+}
+
+test "Python's pty.spawn runs a command in a pty [linux-pty]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // The workloads' root (scripts/fetch.sh workloads) has Python.
+    if (!std.mem.eql(u8, le.arch, "amd64")) return error.SkipZigTest;
+    const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
+    var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    le.root = try std.fmt.bufPrint(&rb, "{s}/workloads-amd64", .{lr});
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.root, "usr/bin/python3"), .{}) catch return error.SkipZigTest;
+    const r = try runLinux(&le, false, &.{ "python3", "-c", "import pty; pty.spawn([\"tty\"])" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    // A raw pty passes the newline as it is; with the line discipline's
+    // ONLCR it would be CR LF.
+    try std.testing.expectEqualStrings("/dev/pts/0", std.mem.trimEnd(u8, r.out, "\r\n"));
+    try std.testing.expectEqual(0, r.code);
+}
+
 // Readiness and sockets (design/linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 

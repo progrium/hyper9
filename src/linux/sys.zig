@@ -380,6 +380,11 @@ pub const Process = struct {
     /// Whether the console is a terminal (isatty): the host's stdin and
     /// stdout both are.
     console_tty: bool = true,
+    /// Made a session leader by setsid: its first open of a pty slave
+    /// without O_NOCTTY makes that its controlling terminal, as on Linux.
+    /// The machine's first process leads a session too, but the console
+    /// is its terminal (design/linux-pty.md).
+    new_session: bool = false,
     /// The exe's guest path, for /proc/self/exe.
     exe: [256]u8 = undefined,
     exe_len: usize = 0,
@@ -1119,6 +1124,7 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             if (p.pgid == p.pid) return ret(-E.PERM);
             p.sid = p.pid;
             p.pgid = p.pid;
+            p.new_session = true;
             return ret(p.pid);
         },
         .getsid => return ret(if (c.int(0) == 0 or c.uint(0) == p.pid) p.sid else (p.host.pgidOf(p.host.ctx, c.uint(0)) orelse return ret(-E.SRCH))),
@@ -1764,8 +1770,14 @@ fn copyFlags(p: *Process, from: i32, to: i32) void {
 }
 
 fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 {
-    const path = try pathArg(p, path_va, &p.name_buf);
+    var path: [:0]const u8 = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) return -E.NOENT;
+    // /dev/tty is the session's pty when it has one, and the console
+    // otherwise (design/linux-pty.md).
+    var tty_buf: [32]u8 = undefined;
+    if (std.mem.eql(u8, path, "/dev/tty")) if (kc.ptyBySid(p.sid)) |n| {
+        path = std.fmt.bufPrintZ(&tty_buf, pty_dev ++ "/{d}", .{n}) catch unreachable;
+    };
     var omode: c_int = switch (flags & O_ACCMODE) {
         0 => kern.OREAD,
         1 => kern.OWRITE,
@@ -1809,6 +1821,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
         .nonblock = flags & O_NONBLOCK != 0,
         .path = flags & O_PATH != 0,
     });
+    if (flags & (O_NOCTTY | O_PATH) == 0) ptyOpened(p, fd);
     return fd;
 }
 
@@ -1872,6 +1885,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     // interrupt (design/linux-net.md): ask first, for the devices
     // that can block. A file is always ready.
     var is_pipe = false;
+    var is_pty = false;
     if (off == -1) if (kc.fdInfo(fd) catch null) |info| {
         // A socket from a mounted /net is read through the kernel's
         // read-ahead, as recv reads it, and written as send writes.
@@ -1894,8 +1908,13 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
         // reach the reader as an end of file. On Linux it does nothing.
         if (dir == .write and len == 0 and info.dc == '|') return 0;
     };
+    var pty_master = false;
     if (off == -1 and len > 0) if (kc.fdInfo(fd) catch null) |info| switch (info.dc) {
-        '|', 'I', 'y', ev_dc => {
+        '|', 'I', 'y', ev_dc, pty_dc => {
+            if (info.dc == pty_dc and !info.dir) {
+                is_pty = true;
+                pty_master = info.qpath & 0xf == pty_qmaster;
+            }
             const want: u32 = if (dir == .read) kc.POLLIN else kc.POLLOUT;
             is_pipe = info.dc == '|' and !info.dir;
             const vmin0 = if (dir == .read and info.dc == 'y') consoleReadWait(p) else null;
@@ -1943,11 +1962,13 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
         var pn = pinned;
         defer p.mm.unpin(&pn);
         const s = pn.s;
-        if (dir == .write and is_pipe) return pipeWrite(p, fd, s);
+        if (dir == .write and (is_pipe or is_pty)) return pipeWrite(p, fd, s);
         var n = switch (dir) {
             .read => kern.pread(@intCast(fd), s, off),
             .write => kern.pwrite(@intCast(fd), s, off),
         } catch return kerr();
+        // A master reads EIO once its slave has closed (design/linux-pty.md).
+        if (dir == .read and n == 0 and pty_master) return -E.IO;
         if (dir == .read and is_pipe) n = pipeMore(p, fd, s, n);
         // The kernel wrote guest memory: what was decoded from it goes.
         if (dir == .read) p.mm.as.hostWrote(s[0..n]);
@@ -1962,6 +1983,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     switch (dir) {
         .read => {
             var n = kern.pread(@intCast(fd), tmp, off) catch return kerr();
+            if (n == 0 and pty_master) return -E.IO;
             if (is_pipe) n = pipeMore(p, fd, tmp, n);
             if (file) |k| fileIo(fd, k, off, tmp[0..n], .read);
             p.mm.copy(buf, tmp[0..n], true) catch return -E.FAULT;
@@ -1969,7 +1991,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
         },
         .write => {
             p.mm.copy(buf, tmp, false) catch return -E.FAULT;
-            if (is_pipe) return pipeWrite(p, fd, tmp);
+            if (is_pipe or is_pty) return pipeWrite(p, fd, tmp);
             const n = kern.pwrite(@intCast(fd), tmp, off) catch return kerr();
             if (file) |k| fileIo(fd, k, off, tmp[0..n], .write);
             return @intCast(n);
@@ -2559,7 +2581,7 @@ fn getdents(p: *Process, fd: i32, buf: u64, count: u32) Err!i64 {
 fn kindOfDir(d: *const attr.Dir) attr.Kind {
     return switch (d.type) {
         '|' => .fifo,
-        'c', 'y' => .chr,
+        'c', 'y', pty_dc => if (d.type == pty_dc and d.qid_type & 0x80 != 0) .auto else .chr,
         // A conversation's data file is a socket's (design/linux-net.md).
         'I' => if (d.qid_type & 0x80 == 0 and d.qid_path & 0xf == ip_qdata) .sock else .auto,
         else => if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else if (isListeningUnix(d)) .sock else .auto,
@@ -2610,6 +2632,7 @@ fn statFd(p: *Process, fd: i32, buf: u64, fmt: StatFmt) Err!i64 {
     const n = kern.fstat(@intCast(fd), &b) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
+    if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
     // A pipe end's Dir is its directory's in some kernels; trust the fd.
     if (kc.fdInfo(fd)) |info| {
         if (info.dc == '|' and !info.dir) st = attr.Stat.fromDir(&d, if (unixOf(p, fd) != null) .sock else .fifo, 0, 0);
@@ -2643,7 +2666,8 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
     var b: [1024]u8 = undefined;
     const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
-    const st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
+    var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
+    if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
     try putStat(p, buf, &st, fmt);
     return 0;
 }
@@ -3002,6 +3026,12 @@ fn procLink(p: *Process, path: []const u8) ?[]const u8 {
         if (fd < 0) return null;
         const info = kc.fdInfo(fd) catch return null;
         if (info.dc == '|') return std.fmt.bufPrint(&p.name2_buf, "pipe:[{d}]", .{info.qpath}) catch null;
+        // A pty's side by its Linux name, however it was opened
+        // (TIOCGPTPEER, /dev/tty), for ttyname.
+        if (info.dc == pty_dc and !info.dir) return if (info.qpath & 0xf == pty_qslave)
+            std.fmt.bufPrint(&p.name2_buf, "/dev/pts/{d}", .{info.qpath >> 4}) catch null
+        else
+            "/dev/ptmx";
         kern.fd2path(@intCast(fd), &p.name2_buf) catch return null;
         return std.mem.sliceTo(&p.name2_buf, 0);
     }
@@ -3063,12 +3093,13 @@ fn ioctl(p: *Process, fd: i32, req: u32, arg: u64) Err!i64 {
         },
         FIONREAD => {
             _ = kc.fdInfo(fd) catch return -E.BADF;
-            try p.writeU32(arg, 0);
+            try p.writeU32(arg, kc.ptyQueued(fd, .read) orelse 0);
             return 0;
         },
         else => {},
     }
     _ = kc.fdInfo(fd) catch return -E.BADF;
+    if (kc.ptyGet(fd)) |st| return ptyIoctl(p, fd, st, req, arg);
     if (!isConsole(fd) or !p.console_tty) return -E.NOTTY;
     const con = &console_term;
     switch (req) {
@@ -3145,6 +3176,202 @@ fn defaultTermios() [60]u8 {
     const cc = [_]u8{ 3, 0x1c, 0x7f, 0x15, 4, 0, 1, 0, 0x11, 0x13, 0x1a };
     @memcpy(b[17..][0..cc.len], &cc);
     return b;
+}
+
+// Pseudoterminals (design/linux-pty.md): #τ, src/kern/devpty.c, keeps
+// each pair's queues and state; the ioctls are served here from it.
+// Data passes through raw: the termios is stored and not applied.
+
+pub const pty_dc: u16 = 0x3c4; // 'τ'
+const pty_dev = "#τ";
+/// devpty's qid types, in a qid path's low four bits; the pair's number
+/// is above them.
+const pty_qptmx = 1;
+const pty_qmaster = 2;
+const pty_qslave = 3;
+
+const TCSBRK = 0x5409;
+const TCXONC = 0x540a;
+const TCFLSH = 0x540b;
+const TIOCOUTQ = 0x5411;
+const TIOCNOTTY = 0x5422;
+const TCSBRKP = 0x5425;
+const TCGETS2 = 0x802c542a;
+const TCSETS2 = 0x402c542b;
+const TCSETSW2 = 0x402c542c;
+const TCSETSF2 = 0x402c542d;
+const TIOCGPTN = 0x80045430;
+const TIOCSPTLCK = 0x40045431;
+const TIOCGPTPEER = 0x5441;
+
+/// Linux's device numbers for a pty, which glibc's grantpt and ttyname
+/// check: ptmx (and every master) is 5,2, slave N is 136+N/256,N%256.
+fn ptyRdev(qpath: u64) u64 {
+    const n = qpath >> 4;
+    return switch (qpath & 0xf) {
+        pty_qslave => makedev(136 + @as(u32, @intCast(n >> 8)), @intCast(n & 0xff)),
+        else => makedev(5, 2),
+    };
+}
+
+fn makedev(major: u32, minor: u32) u64 {
+    return (@as(u64, major & 0xfff) << 8) | (minor & 0xff) | (@as(u64, minor & ~@as(u32, 0xff)) << 12) | (@as(u64, major & ~@as(u32, 0xfff)) << 32);
+}
+
+/// A slave opened without O_NOCTTY by a session leader that setsid made
+/// and that has no terminal becomes its controlling terminal, with the
+/// leader's group in the foreground.
+fn ptyOpened(p: *Process, fd: i32) void {
+    if (!p.new_session or p.sid != p.pid) return;
+    const info = kc.fdInfo(fd) catch return;
+    if (info.dc != pty_dc or info.qpath & 0xf != pty_qslave) return;
+    if (kc.ptyBySid(p.sid) != null) return;
+    const st: kc.PtyState = .{ .sid = p.sid, .fg = p.pgid };
+    _ = kc.ptySet(fd, &st, kc.PtyState.sid_bit | kc.PtyState.fg_bit, .if_free) catch {};
+}
+
+fn ptyIoctl(p: *Process, fd: i32, st_in: kc.PtyState, req: u32, arg: u64) Err!i64 {
+    const S = kc.PtyState;
+    var st = st_in;
+    const master = st.master != 0;
+    // Whether the pair is the caller's controlling terminal; a master
+    // answers for its slave, as on Linux.
+    const ours = st.sid != 0 and st.sid == p.sid;
+    switch (req) {
+        TIOCGPTN => {
+            if (!master) return -E.NOTTY;
+            try p.writeU32(arg, @intCast(st.n));
+            return 0;
+        },
+        TIOCSPTLCK => {
+            if (!master) return -E.NOTTY;
+            st.locked = @intFromBool(try p.readU32(arg) != 0);
+            _ = kc.ptySet(fd, &st, S.lock_bit, .set) catch return -E.BADF;
+            return 0;
+        },
+        TIOCGPTPEER => {
+            if (!master) return -E.NOTTY;
+            return ptyPeer(p, st, @truncate(arg));
+        },
+        TCGETS => {
+            // The kernel's struct termios is 36 bytes (see the console's).
+            try p.writeMem(arg, st.termios[0..36]);
+            return 0;
+        },
+        TCGETS2 => {
+            // struct termios2: the same, and the input and output speeds.
+            var b: [44]u8 = undefined;
+            @memcpy(b[0..36], st.termios[0..36]);
+            @memcpy(b[36..44], st.termios[36..44]);
+            if (std.mem.allEqual(u8, b[36..44], 0)) {
+                std.mem.writeInt(u32, b[36..40], 38400, .little);
+                std.mem.writeInt(u32, b[40..44], 38400, .little);
+            }
+            try p.writeMem(arg, &b);
+            return 0;
+        },
+        TCSETS, TCSETSW, TCSETSF, TCSETS2, TCSETSW2, TCSETSF2 => {
+            const two = req == TCSETS2 or req == TCSETSW2 or req == TCSETSF2;
+            try p.readMem(arg, st.termios[0..if (two) 44 else 36]);
+            if (req == TCSETSF or req == TCSETSF2) kc.ptyFlush(fd, .read);
+            _ = kc.ptySet(fd, &st, S.termios_bit, .set) catch return -E.BADF;
+            return 0;
+        },
+        TIOCGWINSZ => {
+            var b: [8]u8 = undefined;
+            for (st.winsz, 0..) |v, i| std.mem.writeInt(u16, b[2 * i ..][0..2], v, .little);
+            try p.writeMem(arg, &b);
+            return 0;
+        },
+        TIOCSWINSZ => {
+            var b: [8]u8 = undefined;
+            try p.readMem(arg, &b);
+            const old = st.winsz;
+            for (&st.winsz, 0..) |*v, i| v.* = std.mem.readInt(u16, b[2 * i ..][0..2], .little);
+            if (std.mem.eql(u16, &old, &st.winsz)) return 0;
+            _ = kc.ptySet(fd, &st, S.winsz_bit, .set) catch return -E.BADF;
+            // A new size is news to the foreground group.
+            if (st.fg != 0) _ = p.host.kill(p.host.ctx, p, -@as(i64, st.fg), sig.SIGWINCH, null);
+            return 0;
+        },
+        TIOCSCTTY => {
+            if (p.sid != p.pid) return -E.PERM;
+            if (ours) return 0;
+            // Another session's terminal, unless root steals it (arg 1).
+            if (st.sid != 0 and arg != 1) return -E.PERM;
+            if (kc.ptyBySid(p.sid) != null) return -E.PERM;
+            st.sid = p.sid;
+            st.fg = p.pgid;
+            _ = kc.ptySet(fd, &st, S.sid_bit | S.fg_bit, .set) catch return -E.BADF;
+            return 0;
+        },
+        TIOCNOTTY => {
+            if (!ours) return -E.NOTTY;
+            // The session leader gives the terminal up for its session.
+            if (p.sid == p.pid) {
+                st.sid = 0;
+                st.fg = 0;
+                _ = kc.ptySet(fd, &st, S.sid_bit | S.fg_bit, .set) catch return -E.BADF;
+            }
+            return 0;
+        },
+        TIOCGPGRP => {
+            if (!master and !ours) return -E.NOTTY;
+            try p.writeU32(arg, st.fg);
+            return 0;
+        },
+        TIOCSPGRP => {
+            if (!ours) return -E.NOTTY;
+            const pg = try p.readU32(arg);
+            if (@as(i32, @bitCast(pg)) < 0) return -E.INVAL;
+            st.fg = pg;
+            _ = kc.ptySet(fd, &st, S.fg_bit, .set) catch return -E.BADF;
+            return 0;
+        },
+        TIOCGSID => {
+            if (st.sid == 0 or (!master and !ours)) return -E.NOTTY;
+            try p.writeU32(arg, st.sid);
+            return 0;
+        },
+        TIOCOUTQ => {
+            try p.writeU32(arg, kc.ptyQueued(fd, .write) orelse 0);
+            return 0;
+        },
+        TCFLSH => {
+            // TCIFLUSH, TCOFLUSH, or TCIOFLUSH.
+            switch (arg) {
+                0 => kc.ptyFlush(fd, .read),
+                1 => kc.ptyFlush(fd, .write),
+                2 => {
+                    kc.ptyFlush(fd, .read);
+                    kc.ptyFlush(fd, .write);
+                },
+                else => return -E.INVAL,
+            }
+            return 0;
+        },
+        // A raw pty has no line to break or flow to stop.
+        TCSBRK, TCSBRKP, TCXONC => return 0,
+        else => return -E.NOTTY,
+    }
+}
+
+/// TIOCGPTPEER: the master's slave, opened with `flags` (O_ACCMODE,
+/// O_NONBLOCK, and O_CLOEXEC), without the path to it.
+fn ptyPeer(p: *Process, st: kc.PtyState, flags: u32) Err!i64 {
+    var omode: c_int = switch (flags & O_ACCMODE) {
+        0 => kern.OREAD,
+        1 => kern.OWRITE,
+        else => kern.ORDWR,
+    };
+    if (flags & O_CLOEXEC != 0) omode |= OCEXEC;
+    var b: [32]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&b, pty_dev ++ "/{d}", .{st.n}) catch unreachable;
+    const fd = kern.open(path, omode) catch return kerr();
+    p.fdClosed(fd);
+    if (flags & O_NONBLOCK != 0) setFlags(p, fd, .{ .nonblock = true });
+    if (flags & O_NOCTTY == 0) ptyOpened(p, fd);
+    return fd;
 }
 
 // Processes.

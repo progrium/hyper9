@@ -153,7 +153,7 @@ const sema_fixtures = [_][]const u8{
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
-const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386" };
+const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "pty" };
 
 /// Programs in tests/fixtures/gfx, for tests/backends.zig's [gfx] cases on
 /// the headless backend, with the same lib.S.
@@ -627,7 +627,7 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     });
     // The Linux personality (design/linux-personality.md) and its host
     // sockets (design/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c" }, .flags = flags });
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c", "devpty.c" }, .flags = flags });
     if (web) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
     } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
