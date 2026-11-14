@@ -301,6 +301,8 @@ const Rig = struct {
     l: layer.Layer,
     out: std.ArrayList(u8) = .empty,
     next_tag: u16 = 1,
+    /// Round trips to the server in the last `call`.
+    rounds: u32 = 0,
 
     /// A new connection to `srv`.
     fn init(srv: *Server, source: layer.Source, hooks: layer.Hooks) Rig {
@@ -316,6 +318,7 @@ const Rig = struct {
     /// Runs the server until the layer has nothing more for it.
     fn pump(r: *Rig) !void {
         while (r.l.toServer().len > 0) {
+            r.rounds += 1;
             const b = try gpa.dupe(u8, r.l.toServer());
             defer gpa.free(b);
             r.l.consumedServer(b.len);
@@ -342,6 +345,7 @@ const Rig = struct {
         const tag = r.next_tag;
         r.next_tag += 1;
         try r.send(tag, msg);
+        r.rounds = 0;
         try r.pump();
         return r.take(tag);
     }
@@ -415,7 +419,8 @@ test "walks, stats, and directory reads are answered from the index [mount-index
     try t.expect(r.l.serving());
     try t.expectEqual(@as(u32, 0), r.l.ndemoted);
     s.reset();
-    // A walk, a missing name, a partial walk, and a stat: no T-messages.
+    // A walk, a missing name, a partial walk, and a stat: no T-messages
+    // but validating /bin, the first time it's used.
     const w = try r.walk(1, 2, &.{ "bin", "ls" });
     try t.expectEqual(@as(usize, 2), nq(w));
     try t.expectEqual(s.nodes.items[s.lookupPath("/bin/ls").?].qid.path, w.msg.Rwalk.wqids.slice()[1].path);
@@ -445,7 +450,9 @@ test "walks, stats, and directory reads are answered from the index [mount-index
     const end = try r.call(p9.Tread{ .fid = 4, .offset = rd.msg.Rread.data.bytes.len, .count = 8192 });
     try t.expectEqual(@as(usize, 0), end.msg.Rread.data.bytes.len);
     _ = try r.call(p9.Tclunk{ .fid = 4 });
-    try t.expectEqual(@as(u32, 0), s.total());
+    try t.expectEqual(@as(u32, 1), s.count(p9.Twalk));
+    try t.expectEqual(@as(u32, 1), s.count(p9.Tstat));
+    try t.expectEqual(@as(u32, 3), s.total());
 }
 
 test "opening a file makes its fid real with one walk [mount-index]" {
@@ -456,8 +463,8 @@ test "opening a file makes its fid real with one walk [mount-index]" {
     var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
     defer r.deinit();
     try r.mount();
-    s.reset();
     _ = try r.walk(1, 2, &.{ "lib", "ndb", "local" });
+    s.reset();
     const o = try r.call(p9.Topen{ .fid = 2, .mode = wire.OREAD });
     try t.expect(o.msg == .Ropen);
     try t.expectEqual(@as(u32, 1), s.count(p9.Twalk));
@@ -507,12 +514,14 @@ test "files added and removed after indexing demote their directories [mount-ind
     var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
     defer r.deinit();
     try r.mount();
-    try t.expectEqual(@as(u32, 2), r.l.ndemoted);
     const w = try r.walk(1, 2, &.{ "usr", "new" });
     try t.expectEqual(@as(usize, 2), nq(w));
     const gone = try r.walk(1, 3, &.{ "bin", "cat" });
     try t.expectEqual(@as(usize, 1), nq(gone));
-    // /lib wasn't touched: still answered locally.
+    try t.expectEqual(@as(u32, 2), r.l.ndemoted);
+    // /lib wasn't touched: once validated, answered locally.
+    const nd0 = try r.walk(1, 4, &.{ "lib", "ndb", "x" });
+    try t.expectEqual(@as(usize, 2), nq(nd0));
     s.reset();
     const nd = try r.walk(1, 4, &.{ "lib", "ndb", "x" });
     try t.expectEqual(@as(usize, 2), nq(nd));
@@ -683,9 +692,62 @@ test "a given index is used over a server without /.h9index [mount-index]" {
     try r.mount();
     try t.expect(r.l.serving());
     s.reset();
+    // Validating /lib, and no Twalk for the name.
     const miss = try r.walk(1, 2, &.{ "lib", "nonesuch" });
     try t.expectEqual(@as(usize, 1), nq(miss));
-    try t.expectEqual(@as(u32, 0), s.total());
+    try t.expectEqual(@as(u32, 1), s.count(p9.Twalk));
+    try t.expectEqual(@as(u32, 1), s.count(p9.Tstat));
+}
+
+test "directories are validated as they're used, a walk's path at once [mount-index]" {
+    var s = try Server.init();
+    defer s.deinit();
+    try sampleTree(&s);
+    try withIndex(&s);
+    var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
+    defer r.deinit();
+    try r.mount();
+    // Only the root, at the mount.
+    try t.expectEqual(@as(u32, 1), r.l.checked);
+    s.reset();
+    // /lib and /lib/ndb together: their walks and stats go out before
+    // any reply.
+    const w = try r.walk(1, 2, &.{ "lib", "ndb", "local" });
+    try t.expectEqual(@as(usize, 3), nq(w));
+    try t.expectEqual(@as(u32, 3), r.l.checked);
+    try t.expectEqual(@as(u32, 2), s.count(p9.Tstat));
+    // Walks, stats, then clunks: one at a time would take five.
+    try t.expectEqual(@as(u32, 3), r.rounds);
+    // A directory's stat and its listing validate it too, once.
+    s.reset();
+    _ = try r.walk(1, 3, &.{"usr"});
+    _ = try r.call(p9.Tstat{ .fid = 3 });
+    _ = try r.walk(1, 4, &.{"usr"});
+    _ = try r.call(p9.Topen{ .fid = 4, .mode = wire.OREAD });
+    try t.expectEqual(@as(u32, 1), s.count(p9.Tstat));
+    try t.expectEqual(@as(u32, 4), r.l.checked);
+}
+
+test "a flush of a request waiting on validation is answered locally [mount-index]" {
+    var s = try Server.init();
+    defer s.deinit();
+    try sampleTree(&s);
+    try withIndex(&s);
+    var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
+    defer r.deinit();
+    try r.mount();
+    try r.send(50, p9.Twalk{ .fid = 1, .newfid = 2, .wnames = .init(&.{ "bin", "ls" }) });
+    try r.send(51, p9.Tflush{ .oldtag = 50 });
+    const f = try r.take(51);
+    try t.expect(f.msg == .Rflush);
+    // Validating /bin finishes, but the walk never runs, and its tag is
+    // free again.
+    try r.pump();
+    try t.expectEqual(@as(usize, 0), r.l.toMount().len);
+    try r.send(50, p9.Twalk{ .fid = 1, .newfid = 2, .wnames = .init(&.{ "bin", "ls" }) });
+    try r.pump();
+    const w = try r.take(50);
+    try t.expectEqual(@as(usize, 2), nq(w));
 }
 
 test "the root validates by its listing after /.h9index is written [mount-index]" {

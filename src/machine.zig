@@ -3365,6 +3365,9 @@ pub const Machine = struct {
         var buf: [4096]u8 = undefined;
         const st = hidxStatus(n, &buf) orelse return;
         var lines = std.mem.splitScalar(u8, st, '\n');
+        // What validating directories as they were used came to.
+        while (lines.next()) |l| if (std.mem.startsWith(u8, l, "end: ")) m.indexNote("{s}", .{l["end: ".len..]});
+        lines.reset();
         while (lines.next()) |l| if (std.mem.startsWith(u8, l, "requests ")) {
             var f = std.mem.tokenizeScalar(u8, l, ' ');
             _ = f.next();
@@ -3376,7 +3379,7 @@ pub const Machine = struct {
             if (boot == 0)
                 m.indexNote("index: devmnt sent the root {s} 9P requests; {d} went to the server", .{ from, sent })
             else
-                m.indexNote("index: devmnt sent the root {s} 9P requests; {d} went to the server, besides {d} to find and check the index", .{ from, sent -| boot, boot });
+                m.indexNote("index: devmnt sent the root {s} 9P requests; {d} went to the server, besides {d} to find the index and check directories", .{ from, sent -| boot, boot });
         };
     }
 

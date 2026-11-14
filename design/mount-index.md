@@ -83,7 +83,7 @@ When the root, or a namespace file's 9P server, is mounted:
 
 1. **Find the index.** For the root with `--root-index FILE` or `URL`, read it. Otherwise walk to `/.h9index` on the server and stat it; if it's missing, the mount is ordinary 9P and nothing below happens.
 2. **Use the cache.** A server index is cached under the server's address and attach spec, with the index file's qid and mtime as its version. If they match the cached entry, h9 uses the compiled form without reading the file. Otherwise it reads the file, compiles it, and replaces the entry. A file or URL index is cached by the SHA-256 of its text; a URL is fetched each run with `If-None-Match` on the last `ETag`, so an unchanged one costs a round trip and no transfer.
-3. **Validate the directories** (below), then start the program.
+3. **Validate the root** (below), then start the program. Every other directory is validated when it's first used.
 
 The compiled form is a single file built for mapping into memory: a header, an array of fixed-size entries (qid, mode, length, mtime, user indexes, a name's offset and length, the parent, and the first child and child count, with each directory's children contiguous and sorted by name), a user table, a string table, and a SHA-256 trailer over the rest. A walk is a binary search in a directory's children; a stat builds a `Dir` from an entry; a directory read goes through the children in order. Its layout is internal to h9, versioned in its header, and rebuilt from the text whenever the version differs.
 
@@ -98,9 +98,9 @@ It keeps every fid devmnt uses, and each is either **real** (the server has it) 
 | devmnt sends | With the index |
 | --- | --- |
 | `Tversion`, `Tauth`, `Tattach` | Forwarded. The attach fid is real. |
-| `Twalk` | If every step is a name looked up in an indexed, validated directory, answered locally, and `newfid` is virtual. A missing name gives the same `Rwalk` or `Rerror` the server would. Otherwise it's forwarded from the last real fid on the path, after making the starting fid real if it's virtual. |
+| `Twalk` | If every step is a name looked up in an indexed, validated directory, answered locally, after validating the directories on its path that aren't yet, and `newfid` is virtual. A missing name gives the same `Rwalk` or `Rerror` the server would. Otherwise it's forwarded from the last real fid on the path, after making the starting fid real if it's virtual. |
 | `Tstat` | A virtual fid's, or a real fid's whose entry is still valid, answered from the entry. |
-| `Topen` of a directory, then `Tread` | Answered locally from the children, as `Dir` records, if the directory is validated. |
+| `Topen` of a directory, then `Tread` | Answered locally from the children, as `Dir` records, once the directory is validated. |
 | `Topen` of a file | The fid is made real, by one `Twalk` from the attach fid along its path, and the open is forwarded. The reply's qid is checked against the entry (below). |
 | `Tread`, `Twrite` on a real fid | Forwarded. |
 | `Tcreate`, `Tremove`, `Twstat` | The fid is made real and the request forwarded. On success, the directory it changed is demoted. |
@@ -113,7 +113,7 @@ Making a virtual fid real is one `Twalk`, and devmnt would have sent that walk i
 
 The index is a hint, checked against the server:
 
-- **Directories are validated once per run, when the server is mounted.** h9 walks a fid to every indexed directory and stats it, with up to 64 requests outstanding at once, then clunks them. That's about two round trips for the whole tree plus the transfer. A directory whose qid.path, qid.vers, or mtime differs from its entry is **demoted**. Adding, removing, or renaming an entry changes a directory's qid.vers on 9front's file servers and its mtime on a Linux one, so a directory that validates has the listing the index says, and the index can answer "file does not exist" for it.
+- **Directories are validated once per run, when they're first used.** The root is validated when the server is mounted. Any other indexed directory is validated the first time a request needs the index to answer for it: a walk into or through it, a stat of it, or a read of its listing. The request waits while h9 walks a fid to the directory and stats it, then clunks the fid. A walk validates every directory on its path that isn't yet at once, with up to 64 requests outstanding, so a path costs about two round trips however deep it is, and each directory is validated at most once per run. A directory whose qid.path, qid.vers, or mtime differs from its entry is **demoted**. Adding, removing, or renaming an entry changes a directory's qid.vers on 9front's file servers and its mtime on a Linux one, so a directory that validates has the listing the index says, and the index can answer "file does not exist" for it.
 - **Files are checked when they're opened,** from the open's own reply, which carries the qid. A file whose qid.path or qid.vers differs is demoted, and devmnt's next stat of it goes to the server.
 - **Demoted** means served by plain 9P for the rest of the run: walks into or through a demoted directory are forwarded, and stats of a demoted entry go to the server. Nothing else in the index is affected.
 - **Mutations** forwarded through the mount demote what they touch. Under `#O`, the default for roots, the guest's writes don't reach the server at all. A writable mount, such as a home directory, demotes each directory as the guest changes it, and the rest of the index keeps answering.
@@ -123,7 +123,7 @@ The index is a hint, checked against the server:
 
 An index only stays useful for a tree that changes if the server keeps it current. That's the server's job, not h9's: a server that indexes a mutable tree, such as a gateway in front of ZeroFS serving home directories, rewrites `/.h9index` as the tree changes, by writing a new file and renaming it over the old one. It can rewrite on every change, or batch changes and rewrite every few seconds; either way, the index file's qid and mtime change, so the next mount fetches the new one. A home directory's index is small, a few hundred bytes a name, so refetching it whole is cheap.
 
-Whatever changed between the index's last rewrite and the mount is caught by validation and demoted, and whatever this run changes is demoted as it happens. So the index never needs to be exactly current to be correct: a server that rewrites it often keeps more of it useful, and one that never does degrades to plain 9P one directory at a time. Two clients writing the same tree see each other's changes as they would without an index, since every open and read goes to the server and every stale directory is demoted at the next mount.
+Whatever changed between the index's last rewrite and the mount is caught by validation and demoted, and whatever this run changes is demoted as it happens. So the index never needs to be exactly current to be correct: a server that rewrites it often keeps more of it useful, and one that never does degrades to plain 9P one directory at a time. Two clients writing the same tree see each other's changes as they would without an index, since every open and read goes to the server and every stale directory is demoted when the next run first uses it.
 
 What a run doesn't see is a change another client makes during the run to a directory this run already validated: a new name stays invisible to walks until the next mount, and a removed one still shows in listings, though opening it fails. That's the same as any client-side cache of a shared tree. A run that needs to see such changes immediately uses `--index none` (see Open issues for a per-mount switch).
 
@@ -132,8 +132,8 @@ What's not checked: a file whose contents change in place without a change to it
 ### What the user sees
 
 - `--print` shows the index in the root's line: `root wss://roots.example/alpine index=/.h9index 1482 entries 212 dirs`, or `index=none`.
-- `-v` reports the validation: how many directories were checked and demoted, and how long it took.
-- `--check` fetches and validates the index, and reports the same.
+- `-v` reports the validation: how long the root's took at the mount, and at the end of the run how many directories were checked as they were used and how many were demoted.
+- `--check` fetches the index, validates the root, and reports the same.
 
 ### Failures
 
@@ -145,9 +145,11 @@ An index never makes a root fail to mount that would have mounted without one:
 
 ## Rationale
 
-**Why an index, not a bigger cache in the translator.** A cache filled as the program runs saves the second lookup of a name, not the first, and startup is mostly first lookups. Only something that knows the tree beforehand can answer a first lookup, or a negative one, without asking. An index also tells h9 which directories exist, which is what lets it validate all of them in one pipelined batch even though devmnt can't pipeline.
+**Why an index, not a bigger cache in the translator.** A cache filled as the program runs saves the second lookup of a name, not the first, and startup is mostly first lookups. Only something that knows the tree beforehand can answer a first lookup, or a negative one, without asking. An index also tells h9 which directories exist, which is what lets it validate every directory on a walk's path at once even though devmnt can't pipeline.
 
 **Why validate at all.** Without validation the index would be a promise about a server the client doesn't control. With it, the worst a stale or wrong index does is cost the round trips it would have saved. A future content-addressed root, whose tree is pinned by hash, could skip validation safely; see Open issues.
+
+**Why validate on first use, not all at mount.** Validating every directory at mount is a few round trips, but thousands of small requests: 3377 for a 9front root of 1126 directories, which cost more than the round trips the index saves before the program runs. A session's start touches a few dozen directories, and validating those as they're used, a path's at once, starts sooner at every latency measured (see Updates). The cost is up to two round trips the first time each new path is used.
 
 **Why validate directories by stat, not by reading them.** Reading every directory validates every file too, but transfers the tree's metadata on every run, which is what the cache exists to avoid. A directory's stat changes when its listing does, which is what negative lookups depend on, and file changes are caught at open, which is what reads depend on.
 
@@ -220,7 +222,7 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
 3. The text parser and the compiled form, in `src/rootindex.zig`, with unit tests.
 4. The index layer's state machine, with recorded-conversation tests.
 5. `#ι` in `src/kern/devhidx.c`, and the root mount in `src/main.zig` and `src/machine.zig` putting it between devmnt and the connection when an index is found.
-6. Validation at mount, and demotion.
+6. Validation on first use, and demotion.
 7. The cache, `--root-index`, `--index`, `--index-cache`, `--print`, `-v`, and `--check`.
 8. Namespace-file mounts, through the same layer.
 9. URL indexes, through `src/ws.zig`'s HTTP client.
@@ -228,7 +230,7 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
 
 ## Open issues
 
-- **Lazy validation.** A 9front root has thousands of directories. Validating them all at mount is two round trips but a lot of small messages; validating each on first use costs a round trip per directory the program touches. Which default is better needs measuring on a real remote root, and maybe a threshold.
+- **Validating ahead.** A directory is validated on first use, so a program that walks into many new directories one at a time waits about two round trips for each. Validating a directory's subdirectories along with it, or the directories a previous run used, could hide some of that, at the cost of requests a run may not need.
 - **Per-mount control.** A namespace-file mount can't name an index other than its server's, or turn indexing off for itself alone, because `mount`'s flags are 9front's. A spec suffix or an h9-only flag would do it. The guest's own `mount` and `wsmount` could use the layer too, once roots prove it.
 - **Incremental updates.** A server rewriting a large mutable tree's index refetches it whole on every client. A later version could add a change log beside the index, so a client fetches only the entries since its cached version.
 - **Writing the index for ZeroFS.** ZeroFS doesn't write `/.h9index` itself. A gateway in front of it, or a periodic `mkindex`, would; which one is a deployment choice, not part of h9.
@@ -249,3 +251,14 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
   - **The cases use a small tree** copied from the test root (rc, the commands `mkindex` and the cases run, rcmain, the mount points, and `/lib/x`), served the same way, since `mkindex` over the whole test root through the test server takes minutes. Each case keeps its own `--index-cache`.
   - **`walk` joined the slim set** ([multicall](multicall.md)), with a corpus entry; the slim tree couldn't be rebuilt here, so the box's size wasn't measured again.
   - The demo, over `ws://` with 50 ms each way, hasn't been run yet.
+- 2026-11-14: **Directories are validated on first use,** not all at mount, which closes the lazy-validation open issue. Measured on a ReleaseFast build against diod serving the amd64 9front root (20,368 entries, 1,126 directories), behind a relay adding latency each way, best of three runs with a cached index:
+
+  | Each way | Command | No index | All at mount | On first use |
+  | --- | --- | --- | --- | --- |
+  | 5 ms | `rc -c 'echo hi'` | 6.35 s | 1.64 s | 1.20 s |
+  | 5 ms | interactive `rc`, exiting at once | 7.36 s | 1.83 s | 1.41 s |
+  | 25 ms | `rc -c 'echo hi'` | 14.69 s | 4.29 s | 3.23 s |
+  | 25 ms | `rc -c 'lc /lib'` | 27.78 s | 5.83 s | 4.98 s |
+  | 25 ms | interactive `rc`, exiting at once | 18.03 s | 4.76 s | 3.90 s |
+
+  `rc -c 'echo hi'` sent the server 357 requests without an index, and 30 with one, besides 3377 to validate every directory at mount or 44 to validate the 15 it used. On loopback all three take 0.04 s to 0.08 s. `-v`'s summary of the validation moved to the end of the run, since that's when it's known.

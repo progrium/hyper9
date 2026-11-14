@@ -1532,8 +1532,8 @@ devices in Plan 9.
   root, or a 9P server a namespace file mounts by dial string or URL, can
   come with an index: a text file, `/.h9index` at the top of its tree,
   listing every name with its qid, mode, length, mtime, and owners. h9 reads
-  it once, checks each directory against the server when the tree is
-  mounted, and then answers walks, stats, and directory reads from it, so
+  it once, checks each directory against the server the first time it's
+  used, and then answers walks, stats, and directory reads from it, so
   only opens and reads go to the server, and a name that isn't there costs
   no round trip. Anything that doesn't match the server is demoted to plain
   9P for the rest of the run, so a stale index costs time, never wrong
@@ -1546,8 +1546,9 @@ devices in Plan 9.
   `--index none` turns indexes off. Compiled indexes are cached across
   runs in `--index-cache DIR` (default `$XDG_CACHE_HOME/h9/index`,
   `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on
-  Windows), which is safe to delete. `-v` reports how the index was found
-  and checked, and how many of devmnt's requests reached the server.
+  Windows), which is safe to delete. `-v` reports how the index was found,
+  how many directories were checked, and how many of devmnt's requests
+  reached the server.
   `--print` shows the index on the root's line, and `--check` reports it.
   An index that doesn't parse is ignored, with a note under `-v`; a
   `--root-index` that can't be read is exit 125, and one with a host
@@ -1695,19 +1696,22 @@ of the server's 8 exportfs processes; mount `/net` over more connections
 for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`
 reports it, so an unconnected server can't tell its clients apart.
 
-An index for the root above, written once, then used on every run. The
-first run compiles and caches it; later ones read it from the cache:
+An index for a root, written once, then used on every run. The first run
+compiles and caches it; later ones read it from the cache. Here the root
+is a 9front tree that a Linux 9P server, diod, serves:
 
 ```sh
-host$ h9 --root 'tcp!127.0.0.1!5640' --index none mkindex / >root.h9index
-host$ h9 --root 'tcp!127.0.0.1!5640' --root-index root.h9index -v ls /bin/ls
-h9: index: root.h9index: 21430 entries, 1161 dirs; checked 1160 dirs in 1231 ms, 4 demoted
+host$ h9 --root 'tcp!127.0.0.1!5720' --index none mkindex / >root.h9index
+host$ h9 --root 'tcp!127.0.0.1!5720' --root-index root.h9index -v ls /bin/ls
+h9: index: root.h9index: 20368 entries, 1126 dirs (cached); root checked in 1 ms
 /bin/ls
-h9: index: devmnt sent the root 205 9P requests; 16 went to the server, besides 3473 to find and check the index
+h9: index: root.h9index: checked 13 of 1126 dirs as they were used, 0 demoted
+h9: index: devmnt sent the root 221 9P requests; 16 went to the server, besides 38 to find the index and check directories
 ```
 
-The check of every directory at mount is pipelined, so a remote root pays
-for it in a few round trips, and saves one for nearly every name the
+Each directory is checked the first time the program uses it, and the
+directories on one path are checked together, so a remote root pays about
+two round trips for each new path, and saves one for nearly every name the
 program looks up.
 
 Mounting a remote 9P server the network policy allows:
