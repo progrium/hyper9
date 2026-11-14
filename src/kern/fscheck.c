@@ -951,6 +951,8 @@ extern Chan *h9_overlay_lower(Chan*);
 extern int h9_overlay_readlink(Chan*, char*, int);
 extern void h9_overlay_symlink(Chan*, char*, char*);
 extern int h9_overlay_move(Chan*, Chan*, char*);
+/* third_party/drawterm/kern/chan.c: namec, not following a final link */
+extern Chan *h9_nameclink(char*, int);
 
 /*
  * The target of the link that path's last name is, through #U and an
@@ -975,7 +977,7 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 		up->errstr = p;
 		return -1;
 	}
-	c = namec(path, Aaccess, 0, 0);
+	c = h9_nameclink(path, Aaccess);
 	if((n = h9_overlay_readlink(c, buf, nbuf)) >= 0){
 		cclose(c);
 		poperror();
@@ -988,6 +990,38 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 	n = h9_fs_readlink(c, buf, nbuf);
 	if(n < 0)
 		error("not a symbolic link");
+	cclose(c);
+	poperror();
+	return n;
+}
+
+/*
+ * Writes the Dir in buf (a wstat message) to path's last name without
+ * following it if it's a link, for the Linux personality's rename within
+ * a directory: a link to an absolute path in an overlay is renamed
+ * itself, not the file it names (h9_nameclink). Returns the count, or -1
+ * with the error in errstr.
+ */
+int
+h9_fs_wstatlink(char *path, uchar *buf, int nbuf)
+{
+	Chan *volatile c;
+	char *p;
+	int n;
+
+	c = nil;
+	if(waserror()){
+		if(c != nil)
+			cclose(c);
+		p = up->syserrstr;
+		up->syserrstr = up->errstr;
+		up->errstr = p;
+		return -1;
+	}
+	c = h9_nameclink(path, Aaccess);
+	if(c->ismtpt)
+		error(Eismtpt);
+	n = devtab[c->type]->wstat(c, buf, nbuf);
 	cclose(c);
 	poperror();
 	return n;
@@ -1020,7 +1054,7 @@ h9_fs_renamepath(char *old, char *new)
 		up->errstr = p;
 		return -1;
 	}
-	oc = namec(old, Aaccess, 0, 0);
+	oc = h9_nameclink(old, Aaccess);
 	dir = strdup(new);
 	if(dir == nil)
 		error(Enomem);

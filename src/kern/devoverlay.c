@@ -17,11 +17,15 @@
  *	Nmark	a lower directory with changed children in memory; its Dir is
  *		a snapshot of the lower one's and its qid is the lower qid
  *	Nlink	a symbolic link made by the Linux personality (h9_overlay_symlink),
- *		holding its target. A walk follows it, as devfs follows a contained
- *		tree's links: an absolute target from the instance root, a
- *		relative one from the link's directory. The chan keeps the link
- *		beside the target, so remove and rename act on the link, and
- *		h9_overlay_readlink reads it. A final link whose target is
+ *		holding its target. A walk follows a relative target itself,
+ *		from the link's directory. An absolute target names a path in
+ *		the walking process's namespace, not in this instance (which
+ *		may be bound anywhere, as /tmp is), so the walk stops on the
+ *		link and leaves the path it names for namec's walk, which
+ *		starts again from the process's root (h9_overlay_walklink,
+ *		third_party/drawterm/kern/chan.c). The chan keeps a followed
+ *		link beside the target, so remove and rename act on the link,
+ *		and h9_overlay_readlink reads it. A final link whose target is
  *		missing, or that loops, is walked to as itself, and opening
  *		it fails. More than Maxlinks links in one walk is "too many
  *		symbolic links", as devfs's are.
@@ -166,6 +170,7 @@ struct Ovc
 	int	excl;		/* this chan holds node's DMEXCL open */
 	int	nlinks;		/* links followed in this walk */
 	int	loop;		/* node is a link walked to as itself because it loops */
+	char	*redir;		/* the walk stopped on a link to this path from the namespace's root, or nil */
 };
 
 static Lock instlock;
@@ -733,6 +738,7 @@ ovcfree(Ovc *o)
 	qunlock(&in->ql);
 	free(o->dir);
 	free(o->lpath);
+	free(o->redir);
 	free(o->path);
 	free(o);
 	instdecref(in);
@@ -1366,6 +1372,25 @@ h9_overlay_readlink(Chan *c, char *buf, int nbuf)
 	return n;
 }
 
+/*
+ * For namec's walk (third_party/drawterm/kern/chan.c): if c is an overlay
+ * chan whose walk stopped on a link to an absolute path, that path and
+ * any names the walk had left after the link, as names from the
+ * namespace's root, else nil. The string is c's, so it lasts until c is
+ * walked again or closed. The walk goes on from the calling process's
+ * root with them, so a link to /tmp/f made in /tmp, its own instance,
+ * names the namespace's /tmp/f, not tmp/f inside the instance.
+ */
+char*
+h9_overlay_walklink(Chan *c)
+{
+	Ovc *o;
+
+	if(devtab[c->type]->dc != 'O' || (o = c->aux) == nil)
+		return nil;
+	return o->redir;
+}
+
 /* Frees an instance that was made but never attached. */
 void
 h9_overlay_drop(int id)
@@ -1573,12 +1598,31 @@ linkpath(Node *l, char *lpath, char *rest)
 static int walkname(Ovc*, Chan*, char*);
 
 /*
+ * o is at an Nlink to an absolute path: records the path it names, with
+ * rest after it, as names from the namespace's root, for namec's walk to
+ * go on with (h9_overlay_walklink). The instance's own root is the
+ * namespace's only when it's bound at /, so the link isn't followed here.
+ */
+static void
+redirect(Ovc *o, char *rest)
+{
+	char *l;
+
+	l = o->node->link;
+	free(o->redir);
+	o->redir = nil;
+	o->redir = splice(l, strlen(l), rest);
+}
+
+/*
  * Walks o from the instance root along path, which it frees, following
  * links on the way. It's a loop, not a recursion, so a long chain of
- * links or a loop of them can't overflow the kernel's error stack: a link
- * or ".." puts what it names in front of the names still to walk, and the
- * walk starts again from the root. A missing name fails with Enonexist,
- * and more than Maxlinks links in the whole walk with Eloop.
+ * links or a loop of them can't overflow the kernel's error stack: a
+ * relative link or ".." puts what it names in front of the names still to
+ * walk, and the walk starts again from the root. A link to an absolute
+ * path ends the walk on the link, with that path and the names after it
+ * in o->redir (see redirect). A missing name fails with Enonexist, and
+ * more than Maxlinks links in the whole walk with Eloop.
  */
 static void
 walkpath(Ovc *o, Chan *nc, char *path)
@@ -1610,6 +1654,10 @@ again:
 				continue;
 			if(++o->nlinks > Maxlinks)
 				error(Eloop);
+			if(o->node->link[0] == '/'){
+				redirect(o, pathrest(cur, i));
+				break;
+			}
 			np = linkpath(o->node, o->path, pathrest(cur, i));
 		}
 		free(cur);
@@ -1629,6 +1677,8 @@ droplink(Ovc *o)
 	free(o->lpath);
 	o->lpath = nil;
 	o->loop = 0;
+	free(o->redir);
+	o->redir = nil;
 }
 
 /*
@@ -1645,6 +1695,11 @@ follow(Ovc *o, Chan *nc, int last)
 	l = o->node;
 	if(++o->nlinks > Maxlinks)
 		error(Eloop);
+	if(l->link[0] == '/'){
+		/* The chan stays on the link itself (see redirect). */
+		redirect(o, "");
+		return;
+	}
 	lpath = strdup(o->path);
 	if(lpath == nil)
 		error(Enomem);
@@ -1699,6 +1754,8 @@ onlink(Ovc *o)
 	free(o->path);
 	o->path = o->lpath;
 	o->lpath = nil;
+	free(o->redir);
+	o->redir = nil;
 }
 
 /*
@@ -1836,16 +1893,29 @@ ovwalk(Chan *c, Chan *nc, char **name, int nname)
 		no->lnk->ref++;
 	}
 	no->loop = o->loop;
+	if(o->redir != nil){
+		no->redir = strdup(o->redir);
+		if(no->redir == nil)
+			error(Enomem);
+	}
 	for(i = 0; i < nname; i++){
 		no->nlinks = 0;
 		if(!ovstep(no, nc, name[i], i == nname-1))
 			break;
 		wq->qid[i] = nc->qid;
+		/*
+		 * A link to an absolute path: the walk ends on it, short of
+		 * the names after it, and namec's goes on from the root.
+		 */
+		if(no->redir != nil){
+			i++;
+			break;
+		}
 	}
 	wq->nqid = i;
 	qunlock(&in->ql);
 	poperror();
-	if(i < nname){
+	if(i < nname && no->redir == nil){
 		ovcfree(no);
 		cclose(nc);
 		if(i == 0){

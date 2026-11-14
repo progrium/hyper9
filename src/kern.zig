@@ -220,6 +220,9 @@ const c_stub = struct {
     fn h9_fs_symlinkpath(_: [*:0]const u8, _: [*:0]const u8) c_int {
         return -1;
     }
+    fn h9_fs_wstatlink(_: [*:0]const u8, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
     fn h9_fs_renamepath(_: [*:0]const u8, _: [*:0]const u8) c_int {
         return 1;
     }
@@ -327,6 +330,7 @@ const c_real = struct {
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
     extern fn h9_fs_readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
     extern fn h9_fs_symlinkpath(path: [*:0]const u8, target: [*:0]const u8) c_int;
+    extern fn h9_fs_wstatlink(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
     extern fn h9_fs_renamepath(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
@@ -1048,6 +1052,12 @@ pub fn fstat(fd: u31, buf: []u8) Error!usize {
 
 pub fn wstat(name: [*:0]const u8, buf: []u8) Error!usize {
     return try check(c.syswstat(name, buf.ptr, clampLen(buf.len)));
+}
+
+/// wstat of `name` itself if it's a symbolic link, not of what it names,
+/// for the Linux personality's rename within a directory.
+pub fn wstatLink(name: [*:0]const u8, buf: []u8) Error!usize {
+    return try check(c.h9_fs_wstatlink(name, buf.ptr, clampLen(buf.len)));
 }
 
 pub fn fwstat(fd: u31, buf: []u8) Error!usize {

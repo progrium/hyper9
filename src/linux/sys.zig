@@ -2809,7 +2809,8 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
     const base = basename(new);
     if (base.len > 512) return -E.NAMETOOLONG;
     const msg = (Wstat{ .name = base }).encode(&b);
-    _ = at(olddir, old, usize, kern.wstat, .{ old, msg }) catch return kerr();
+    // A link is renamed itself, whatever it points at.
+    _ = at(olddir, old, usize, kern.wstatLink, .{ old, msg }) catch return kerr();
     return 0;
 }
 

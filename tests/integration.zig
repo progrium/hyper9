@@ -5205,6 +5205,58 @@ test "ln -s makes links a Linux program follows, renames and removes, and sh wai
     try std.testing.expectEqual(0, r.code);
 }
 
+test "an absolute symlink in /tmp names the namespace's path, not one inside /tmp's overlay [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // /tmp is an overlay of its own, so a link in it to /tmp/f was looked
+    // up as tmp/f inside that overlay, and was ENOENT. An absolute target
+    // is walked from the process's root, through its binds, whichever
+    // overlay holds the link, and the link itself is still what readlink,
+    // mv, and rm act on.
+    const script =
+        \\cd /tmp; echo hi > f; mkdir d; echo deep > d/x
+        \\ln -s /tmp/f l; ln -s /tmp/d dl; ln -s dl rel; ln -s /tmp/l chain
+        \\cat /tmp/l l dl/x rel/x chain; readlink l; cd dl && pwd && cat x; cd /tmp
+        \\ln -s /tmp/f /usr/lib/fromroot; cat /usr/lib/fromroot
+        \\ln -s /etc/os-release os; head -c 4 os; echo
+        \\ln -s /tmp/self self; cat self 2>&1; ln -s /tmp/none dang; cat dang 2>&1
+        \\echo more >> l; mv l l2; mv l2 d/l3; readlink d/l3; cat d/l3; rm d/l3 /usr/lib/fromroot
+        \\ls; cat f
+    ;
+    const r = try runLinux(&le, false, &.{ "sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings(
+        \\hi
+        \\hi
+        \\deep
+        \\deep
+        \\hi
+        \\/tmp/f
+        \\/tmp/dl
+        \\deep
+        \\hi
+        \\NAME
+        \\cat: can't open 'self': Symbolic link loop
+        \\cat: can't open 'dang': No such file or directory
+        \\/tmp/f
+        \\hi
+        \\more
+        \\chain
+        \\d
+        \\dang
+        \\dl
+        \\f
+        \\os
+        \\rel
+        \\self
+        \\hi
+        \\more
+        \\
+    , r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "a symlink loop in the overlay is ELOOP, and 40 links still resolve [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

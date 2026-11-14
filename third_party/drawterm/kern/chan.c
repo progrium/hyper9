@@ -758,6 +758,7 @@ cclone(Chan *c)
 
 /* h9: src/kern/devoverlay.c */
 extern int h9_overlay_lowerdev(int, int, Qid, int*, int*);
+extern char *h9_overlay_walklink(Chan*);
 /* h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h) */
 extern void h9_fs_anchor(Chan*);
 
@@ -872,6 +873,62 @@ ewalk(Chan *c, Chan *nc, char **name, int nname)
 	return wq;
 }
 
+static void parsename(char*, Elemlist*);
+static int walkx(Chan**, char**, int, int, int*, int, int);
+
+/*
+ * h9: *cp is an overlay chan whose walk stopped on a link to an absolute
+ * path, which names a path in the process's namespace, not in the
+ * overlay (src/kern/devoverlay.c, h9_overlay_walklink). The walk starts
+ * again from the process's root with that path, and then names, so a
+ * link in /tmp, an overlay of its own, to /tmp/f reaches /tmp/f. Each
+ * such link is a level of recursion, but walk raises no errors, so the
+ * kernel's error stack doesn't grow with it; more than 40 is "too many
+ * symbolic links", as Linux and devfs have it. Returns 0 with *cp the
+ * walked chan, or -1 with the error in errstr; either way *cp's old
+ * reference is gone.
+ */
+static int
+linkwalk(Chan **cp, char *link, char **names, int nnames, int follow, int nlinks)
+{
+	Elemlist e;
+	Chan *c;
+	char *s, *p;
+	long n;
+	int i, r;
+
+	if(nlinks >= 40){
+		cclose(*cp);
+		*cp = nil;
+		kstrcpy(up->errstr, "too many symbolic links", ERRMAX);
+		return -1;
+	}
+	n = strlen(link) + 2;
+	for(i = 0; i < nnames; i++)
+		n += strlen(names[i]) + 1;
+	s = smalloc(n);
+	p = seprint(s, s+n, "%s", link);
+	for(i = 0; i < nnames; i++)
+		p = seprint(p, s+n, "/%s", names[i]);
+	cclose(*cp);	/* link was *cp's */
+	*cp = nil;
+	memset(&e, 0, sizeof e);
+	parsename(s, &e);
+	free(s);
+	c = up->slash;
+	incref(&c->ref);
+	r = walkx(&c, e.elems, e.nelems, 0, nil, follow, nlinks+1);
+	free(e.name);
+	free(e.elems);
+	free(e.off);
+	if(r < 0){
+		cclose(c);
+		return -1;
+	}
+	*cp = c;
+	return 0;
+}
+
 /*
  * Either walks all the way or not at all.  No partial results in *cp.
  * *nerror is the number of names to display in an error message.
@@ -879,7 +936,19 @@ ewalk(Chan *c, Chan *nc, char **name, int nname)
 int
 walk(Chan **cp, char **names, int nnames, int nomount, int *nerror)
 {
+	return walkx(cp, names, nnames, nomount, nerror, 1, 0);
+}
+
+/*
+ * h9: walk, where follow says whether a link that's the last name is
+ * followed (linkwalk) or walked to as itself, and nlinks counts the links
+ * followed so far.
+ */
+static int
+walkx(Chan **cp, char **names, int nnames, int nomount, int *nerror, int follow, int nlinks)
+{
 	int dev, didmount, dotdot, i, n, nhave, ntry, type;
+	char *link;
 	Chan *c, *nc, *mtpt;
 	Path *path;
 	Mhead *mh, *nmh;
@@ -1023,6 +1092,22 @@ walk(Chan **cp, char **names, int nnames, int nomount, int *nerror)
 		putmhead(mh);
 		mh = nmh;
 		free(wq);
+
+		/* h9: a link to an absolute path, in an overlay (linkwalk) */
+		if((link = h9_overlay_walklink(c)) != nil && (nhave+n < nnames || follow)){
+			putmhead(mh);
+			pathclose(path);
+			if(linkwalk(&c, link, names+nhave+n, nnames-(nhave+n), follow, nlinks) < 0){
+				if(nerror)
+					*nerror = nhave+n;
+				return -1;
+			}
+			cclose(*cp);
+			*cp = c;
+			if(nerror)
+				*nerror = nnames;
+			return 0;
+		}
 	}
 	putmhead(mh);
 	c = cunique(c);
@@ -1192,8 +1277,28 @@ namelenerror(char *aname, int len, char *err)
  * can attach the correct name.  Sysstat and sys_stat need the
  * correct name so they can rewrite the stat info.
  */
+static Chan *namecx(char*, int, int, ulong, int);
+
 Chan*
 namec(char *aname, int amode, int omode, ulong perm)
+{
+	/* h9: remove acts on a link itself (linkwalk) */
+	return namecx(aname, amode, omode, perm, amode != Aremove);
+}
+
+/*
+ * h9: namec for Aaccess and the like that doesn't follow a link that's
+ * the last name (linkwalk), for the Linux personality's readlink and
+ * rename (src/kern/fscheck.c).
+ */
+Chan*
+h9_nameclink(char *aname, int amode)
+{
+	return namecx(aname, amode, 0, 0, 0);
+}
+
+static Chan*
+namecx(char *aname, int amode, int omode, ulong perm, int follow)
 {
 	int len, n, t, nomount;
 	Chan *volatile c;
@@ -1311,7 +1416,7 @@ namec(char *aname, int amode, int omode, ulong perm)
 		e.nelems--;
 	}
 
-	if(walk(&c, e.elems, e.nelems, nomount, &e.nerror) < 0){
+	if(walkx(&c, e.elems, e.nelems, nomount, &e.nerror, follow || amode == Acreate, 0) < 0){
 		if(e.nerror < 0 || e.nerror > e.nelems){
 			print("namec %s walk error nerror=%d\n", aname, e.nerror);
 			e.nerror = 0;
