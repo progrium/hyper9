@@ -211,10 +211,43 @@ pub fn errno(msg: []const u8) u16 {
         if (std.fmt.parseInt(u16, msg["errno ".len..], 10)) |e| return e else |_| {}
     }
     var lower: [128]u8 = undefined;
-    const n = @min(msg.len, lower.len);
-    const l = std.ascii.lowerString(lower[0..n], msg[0..n]);
+    const l = unquoted(msg, &lower);
     for (table) |e| if (std.mem.indexOf(u8, l, e[0]) != null) return e[1];
     return E.IO;
+}
+
+/// `msg` lowercased into `buf`, without the names it quotes, so only the
+/// error proper picks the errno. The kernel's walk errors quote the path
+/// with %#q ("file does not exist: '/nix/store/…-interrupted.nix'"), and
+/// a file name like that one once turned ENOENT into EINTR, so Nix
+/// retried the open millions of times. %q doubles a quote inside a name,
+/// and a quote after a letter or digit is an apostrophe ("can't assign
+/// requested address"), not an opening quote.
+fn unquoted(msg: []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < msg.len and n < buf.len) {
+        const c = msg[i];
+        if (c == '\'' and (i == 0 or !std.ascii.isAlphanumeric(msg[i - 1]))) {
+            i += 1;
+            while (i < msg.len) {
+                if (msg[i] == '\'') {
+                    if (i + 1 < msg.len and msg[i + 1] == '\'') {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        buf[n] = std.ascii.toLower(c);
+        n += 1;
+        i += 1;
+    }
+    return buf[0..n];
 }
 
 // Linux st_mode bits.
@@ -757,6 +790,23 @@ test "errno from strings" {
     try std.testing.expectEqual(@as(u16, E.PIPE), errno("write on closed pipe"));
     try std.testing.expectEqual(@as(u16, E.NOTEMPTY), errno("directory not empty"));
     try std.testing.expectEqual(@as(u16, E.IO), errno("ken has left the building"));
+}
+
+test "errno from the error, not the file name it quotes" {
+    // The kernel's walk errors, as namelenerror formats them.
+    try std.testing.expectEqual(@as(u16, E.NOENT), errno("file does not exist: '/nix/store/abc-source/nixos/nixos-rebuild-target-host-interrupted.nix'"));
+    try std.testing.expectEqual(@as(u16, E.NOENT), errno("file does not exist: '/tmp/permission denied'"));
+    try std.testing.expectEqual(@as(u16, E.NOTDIR), errno("not a directory: '/x/not found/y'"));
+    // %q doubles a quote inside a name.
+    try std.testing.expectEqual(@as(u16, E.NOENT), errno("file does not exist: '/tmp/it''s interrupted'"));
+    // A name cut off at ERRMAX has no closing quote.
+    try std.testing.expectEqual(@as(u16, E.NOENT), errno("file does not exist: '.../is a directory"));
+    // An error that's only a quoted name says nothing.
+    try std.testing.expectEqual(@as(u16, E.IO), errno("'interrupted'"));
+    // Apostrophes aren't quotes.
+    try std.testing.expectEqual(@as(u16, E.ADDRNOTAVAIL), errno("can't assign requested address"));
+    // The error after a long quoted name still counts.
+    try std.testing.expectEqual(@as(u16, E.ACCES), errno("'/" ++ "a" ** 200 ++ "' permission denied"));
 }
 
 test "stat from a Dir" {
