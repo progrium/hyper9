@@ -5205,6 +5205,41 @@ test "ln -s makes links a Linux program follows, renames and removes, and sh wai
     try std.testing.expectEqual(0, r.code);
 }
 
+test "a symlink loop in the overlay is ELOOP, and 40 links still resolve [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // A link to itself panicked the machine (the overlay's follow recursed,
+    // nesting error labels per link, past the kernel's error stack), and a
+    // loop was ENOENT. gnulib's configure makes one. Linux follows 40 links
+    // and fails the 41st with ELOOP; a loop is still a link to readlink,
+    // rename, and remove.
+    const script =
+        \\cd /usr/lib; ln -s loop loop; ln -s lb la; ln -s la lb
+        \\for p in loop la loop/x; do cat $p 2>&1; done
+        \\[ -L loop ] && readlink loop
+        \\mkdir d; echo deep > d/f; ln -s d c1
+        \\i=1; while [ $i -lt 40 ]; do ln -s c$i c$((i+1)); i=$((i+1)); done
+        \\cat c40/f; ln -s c40 c41; cat c41/f 2>&1
+        \\ln -s ../lib/./d/../d/f rel; cat rel
+        \\mv loop l2 && rm l2 la lb && echo removed
+    ;
+    const r = try runLinux(&le, false, &.{ "sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings(
+        \\cat: can't open 'loop': Symbolic link loop
+        \\cat: can't open 'la': Symbolic link loop
+        \\cat: can't open 'loop/x': Symbolic link loop
+        \\loop
+        \\deep
+        \\cat: can't open 'c41/f': Symbolic link loop
+        \\deep
+        \\removed
+        \\
+    , r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "/proc/self/exe is the file a Linux program runs, its links followed [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

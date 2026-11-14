@@ -22,7 +22,9 @@
  *		relative one from the link's directory. The chan keeps the link
  *		beside the target, so remove and rename act on the link, and
  *		h9_overlay_readlink reads it. A final link whose target is
- *		missing is walked to as itself, and opening it fails.
+ *		missing, or that loops, is walked to as itself, and opening
+ *		it fails. More than Maxlinks links in one walk is "too many
+ *		symbolic links", as devfs's are.
  *
  * Memory: data blocks, nodes, names and strings all come from the
  * machine's guest-physical page allocator through Zig leaves
@@ -88,6 +90,7 @@ enum
 static char Efull[] = "file system full";
 static char Enotempty[] = "directory not empty";
 static char Elocked[] = "file is locked";	/* ramfs's */
+static char Eloop[] = "too many symbolic links";	/* devfs's (fscheck.h) */
 
 typedef struct Inst Inst;
 typedef struct Node Node;
@@ -162,6 +165,7 @@ struct Ovc
 	char	*lpath;		/* lnk's path */
 	int	excl;		/* this chan holds node's DMEXCL open */
 	int	nlinks;		/* links followed in this walk */
+	int	loop;		/* node is a link walked to as itself because it loops */
 };
 
 static Lock instlock;
@@ -1477,17 +1481,17 @@ ovattach(char *spec)
 	return c;
 }
 
-/* Re-resolves o from the instance root along path, for "..". */
-static int ovstep(Ovc*, Chan*, char*, int);
-
+/* Puts o at the instance root. */
 static void
-ovreroot(Ovc *o, Chan *nc, char *path)
+ovroot(Ovc *o, Chan *nc)
 {
 	Inst *in;
-	char buf[Maxname], *p;
-	int i, n;
+	char *p;
 
 	in = o->inst;
+	p = strdup("");
+	if(p == nil)
+		error(Enomem);
 	if(o->lower != nil)
 		cclose(o->lower);
 	o->lower = nil;
@@ -1496,22 +1500,124 @@ ovreroot(Ovc *o, Chan *nc, char *path)
 	in->root->ref++;
 	if(in->lower != nil)
 		o->lower = cclone(in->lower);
-	p = o->path;
-	o->path = strdup("");
+	free(o->path);
+	o->path = p;
 	nc->qid = in->root->qid;
-	if(o->path == nil){
-		free(p);
+}
+
+/* What follows path's i'th name: the rest of its names, or "". */
+static char*
+pathrest(char *path, int i)
+{
+	char *s;
+
+	for(s = path; i-- >= 0; s++){
+		s = strchr(s, '/');
+		if(s == nil)
+			return "";
+	}
+	return s;
+}
+
+/*
+ * The names of a and b joined, with empty names (a//b, a leading or
+ * trailing /) dropped: a new string. Only a's first na bytes are used.
+ */
+static char*
+splice(char *a, int na, char *b)
+{
+	char *p, *s, *d;
+
+	p = malloc(na + 1 + strlen(b) + 1);
+	if(p == nil)
 		error(Enomem);
+	sprint(p, "%.*s/%s", na, a, b);
+	d = p;
+	for(s = p; *s != '\0'; s++)
+		if(*s != '/' || (d > p && d[-1] != '/'))
+			*d++ = *s;
+	if(d > p && d[-1] == '/')
+		d--;
+	*d = '\0';
+	return p;
+}
+
+/*
+ * The path from the instance root that link l, at path lpath, names, with
+ * rest after it: an absolute target from the root, a relative one from
+ * l's directory.
+ */
+static char*
+linkpath(Node *l, char *lpath, char *rest)
+{
+	char *s, *t, *p;
+	int n;
+
+	if(l->link[0] == '/')
+		n = 0;
+	else{
+		s = strrchr(lpath, '/');
+		n = s != nil ? s - lpath : 0;
 	}
-	n = npathelem(path);
+	t = splice(l->link, strlen(l->link), rest);
+	if(waserror()){
+		free(t);
+		nexterror();
+	}
+	p = splice(lpath, n, t);
+	poperror();
+	free(t);
+	return p;
+}
+
+static int walkname(Ovc*, Chan*, char*);
+
+/*
+ * Walks o from the instance root along path, which it frees, following
+ * links on the way. It's a loop, not a recursion, so a long chain of
+ * links or a loop of them can't overflow the kernel's error stack: a link
+ * or ".." puts what it names in front of the names still to walk, and the
+ * walk starts again from the root. A missing name fails with Enonexist,
+ * and more than Maxlinks links in the whole walk with Eloop.
+ */
+static void
+walkpath(Ovc *o, Chan *nc, char *path)
+{
+	char buf[Maxname], *np, *s;
+	char *volatile cur;
+	int i, n;
+
+	cur = path;
+	if(waserror()){
+		free(cur);
+		nexterror();
+	}
+again:
+	ovroot(o, nc);
+	n = npathelem(cur);
 	for(i = 0; i < n; i++){
-		pathelem(path, i, buf);
-		if(!ovstep(o, nc, buf, 0)){
-			free(p);
-			error(Enonexist);
+		pathelem(cur, i, buf);
+		if(strcmp(buf, ".") == 0)
+			continue;
+		if(strcmp(buf, "..") == 0){
+			/* o->path names no links, so its directory is ".."'s. */
+			s = strrchr(o->path, '/');
+			np = splice(o->path, s != nil ? s - o->path : 0, pathrest(cur, i));
+		}else{
+			if(!walkname(o, nc, buf))
+				error(Enonexist);
+			if(o->node == nil || o->node->kind != Nlink)
+				continue;
+			if(++o->nlinks > Maxlinks)
+				error(Eloop);
+			np = linkpath(o->node, o->path, pathrest(cur, i));
 		}
+		free(cur);
+		cur = np;
+		goto again;
 	}
-	free(p);
+	poperror();
+	free(cur);
 }
 
 /* Forgets the link a walk's last name followed. */
@@ -1522,60 +1628,41 @@ droplink(Ovc *o)
 	o->lnk = nil;
 	free(o->lpath);
 	o->lpath = nil;
+	o->loop = 0;
 }
 
 /*
  * o is at an Nlink: walks it to the link's target. last says this was
  * the walk's last name: then the chan keeps the link beside the target,
- * or stays on the link if the target is missing.
+ * or stays on the link if the target is missing or loops.
  */
 static void
 follow(Ovc *o, Chan *nc, int last)
 {
 	Node *l;
-	char *lpath, *tp, *s;
-	int n;
+	char *lpath, *tp;
 
 	l = o->node;
 	if(++o->nlinks > Maxlinks)
-		error("too many symbolic links");
+		error(Eloop);
 	lpath = strdup(o->path);
 	if(lpath == nil)
 		error(Enomem);
-	if(l->link[0] == '/'){
-		for(s = l->link; *s == '/'; s++)
-			;
-		tp = strdup(s);
-	}else{
-		s = strrchr(lpath, '/');
-		n = s != nil ? s - lpath : 0;
-		tp = malloc(n + 1 + strlen(l->link) + 1);
-		if(tp != nil){
-			if(n > 0)
-				sprint(tp, "%.*s/%s", n, lpath, l->link);
-			else
-				strcpy(tp, l->link);
-		}
-	}
-	if(tp == nil){
+	if(waserror()){
 		free(lpath);
-		error(Enomem);
+		nexterror();
 	}
-	/* Empty names (a//b, a trailing /) are dropped. */
-	for(s = tp; (s = strstr(s, "//")) != nil; )
-		memmove(s, s+1, strlen(s));
-	n = strlen(tp);
-	if(n > 0 && tp[n-1] == '/')
-		tp[n-1] = '\0';
+	tp = linkpath(l, lpath, "");
+	poperror();
 	l->ref++;
 	if(waserror()){
-		free(tp);
 		if(!last){
 			nodeunref(o->inst, l);
 			free(lpath);
 			nexterror();
 		}
-		/* A dangling link, walked to as itself. */
+		/* A dangling link, or a loop, walked to as itself. */
+		o->loop = strcmp(up->errstr, Eloop) == 0;
 		if(o->lower != nil)
 			cclose(o->lower);
 		o->lower = nil;
@@ -1586,9 +1673,8 @@ follow(Ovc *o, Chan *nc, int last)
 		nc->qid = l->qid;
 		return;
 	}
-	ovreroot(o, nc, tp);
+	walkpath(o, nc, tp);
 	poperror();
-	free(tp);
 	if(last){
 		o->lnk = l;
 		o->lpath = lpath;
@@ -1616,39 +1702,16 @@ onlink(Ovc *o)
 }
 
 /*
- * Walks o (and nc's qid) by one name; returns 0 if it isn't there. A link
- * is followed; last says the name is the walk's last (see follow).
+ * Walks o (and nc's qid) by one name, neither "." nor "..", without
+ * following a link; returns 0 if it isn't there.
  */
 static int
-ovstep(Ovc *o, Chan *nc, char *name, int last)
+walkname(Ovc *o, Chan *nc, char *name)
 {
 	Node *ch, *nn;
 	Chan *nl;
-	char *np, *dir, *s;
+	char *np;
 
-	if(strcmp(name, ".") == 0)
-		return 1;
-	droplink(o);
-	if(strcmp(name, "..") == 0){
-		if(o->path[0] == '\0')
-			return 1;
-		dir = strdup(o->path);
-		if(dir == nil)
-			error(Enomem);
-		s = strrchr(dir, '/');
-		if(s != nil)
-			*s = '\0';
-		else
-			dir[0] = '\0';
-		if(waserror()){
-			free(dir);
-			nexterror();
-		}
-		ovreroot(o, nc, dir);
-		poperror();
-		free(dir);
-		return 1;
-	}
 	if((nc->qid.type & QTDIR) == 0){
 		kstrcpy(up->errstr, Enotdir, ERRMAX);
 		return 0;
@@ -1692,9 +1755,39 @@ ovstep(Ovc *o, Chan *nc, char *name, int last)
 	nodeunref(o->inst, o->node);
 	o->node = nn;
 	nc->qid = nn != nil ? nn->qid : nl->qid;
-	if(nn != nil && nn->kind == Nlink){
-		if(waserror())
+	return 1;
+}
+
+/*
+ * Walks o (and nc's qid) by one name; returns 0 if it isn't there. A link
+ * is followed; last says the name is the walk's last (see follow). Too
+ * many links is raised as Eloop, as devfs does, so it isn't taken for a
+ * missing name.
+ */
+static int
+ovstep(Ovc *o, Chan *nc, char *name, int last)
+{
+	char *dir, *s;
+
+	if(strcmp(name, ".") == 0)
+		return 1;
+	droplink(o);
+	if(strcmp(name, "..") == 0){
+		if(o->path[0] == '\0')
+			return 1;
+		s = strrchr(o->path, '/');
+		dir = splice(o->path, s != nil ? s - o->path : 0, "");
+		walkpath(o, nc, dir);
+		return 1;
+	}
+	if(!walkname(o, nc, name))
+		return 0;
+	if(o->node != nil && o->node->kind == Nlink){
+		if(waserror()){
+			if(strcmp(up->errstr, Eloop) == 0)
+				nexterror();
 			return 0;	/* the error is in up->errstr */
+		}
 		follow(o, nc, last);
 		poperror();
 	}
@@ -1742,6 +1835,7 @@ ovwalk(Chan *c, Chan *nc, char **name, int nname)
 		no->lnk = o->lnk;
 		no->lnk->ref++;
 	}
+	no->loop = o->loop;
 	for(i = 0; i < nname; i++){
 		no->nlinks = 0;
 		if(!ovstep(no, nc, name[i], i == nname-1))
@@ -1826,7 +1920,7 @@ ovopen(Chan *c, int omode)
 	}
 	refresh(c);
 	if(o->node != nil && o->node->kind == Nlink)
-		error(Enonexist);	/* a link whose target is missing */
+		error(o->loop ? Eloop : Enonexist);	/* a link whose target is missing or loops */
 	/* Exclusive use, as 9front's file servers do: one open at a time. */
 	if(o->node != nil && (o->node->mode & DMEXCL) && o->node->excl)
 		error(Elocked);
