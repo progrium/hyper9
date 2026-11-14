@@ -589,6 +589,10 @@ A process's dot is renamed when it changes views. drawterm's `namec` doesn't cro
 The environment goes both ways: a Linux program gets `/env` as `NAME=value` (with `USER`, `LOGNAME`, `HOME` and a default `PATH`), and a 9front program exec'd from Linux gets `envp` written to `/env`.
 
 `isatty` is true only when h9's own stdin and stdout are terminals. The console's termios is one per machine: `TCSETS` sets raw mode from `ICANON`, and, through the optional `echo` and `crnl` on `Machine.Stdio.raw`, the host's echo from `ECHO` and its CR-to-NL mapping from `ICRNL`; `TIOCGWINSZ` is the host terminal's size, through the hook's optional `size`, or 80x24. In non-canonical mode with `VMIN` 0, a console read waits at most `VTIME` tenths of a second and may return 0 bytes. consctl also takes `echooff` and `echoon`, which keep the line discipline.
+
+Pseudoterminals ([linux-pty](design/linux-pty.md)) are `#τ` pairs: the Linux view binds `#τ` on `/dev/pts` and `#τ/ptmx` on `/dev/ptmx`, and `stat` gives them Linux's device numbers (5,2 for `ptmx` and every master, 136,N for slave N). Each open of `ptmx` makes a pair, numbered from 0 per machine, and returns its master; `#τ/N` is pair N's slave, which opens while the master is open and `TIOCSPTLCK` has unlocked it. The pair keeps the termios, window size, foreground group, session, and lock, which the ioctls on either side read and set: `TIOCGPTN`, `TIOCSPTLCK`, `TIOCGPTPEER`, the termios and termios2 calls, `TIOCGWINSZ` and `TIOCSWINSZ` (which sends `SIGWINCH` to the foreground group), `TIOCSCTTY`, `TIOCNOTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`, `FIONREAD`, `TIOCOUTQ`, and `TCFLSH`. A session leader that `setsid` made takes a slave it opens without `O_NOCTTY` as its controlling terminal; the machine's first process keeps the console. `/dev/tty` opens the session's pty when it has one, and the console otherwise, and `/proc/self/fd/N` names a pty's side as `/dev/pts/N` or `/dev/ptmx`.
+
+The pair's termios is applied as Linux's `N_TTY` does, in devpty.c: input written to the master goes through `ISTRIP`, `IGNCR`, `ICRNL`, and `INLCR`; with `ISIG`, `VINTR`, `VQUIT`, and `VSUSP` send `SIGINT`, `SIGQUIT`, and `SIGTSTP` to the foreground group (from the writing process) and, without `NOFLSH`, drop the pending input; with `ICANON`, `VERASE`, `VWERASE`, `VKILL`, and `VEOF` edit a line of up to 4096 bytes, which the slave reads whole, at most a line a read, when it ends at a newline, `VEOL`, `VEOL2`, or `VEOF` (on an empty line, an end of file). Echo follows `ECHO`, `ECHOE`, `ECHOK`, `ECHOKE`, `ECHONL`, and `ECHOCTL`, and the slave's output and echo go through `OPOST` with `ONLCR` and `OCRNL`. Without `ICANON` a slave read with `VMIN` 0 waits at most `VTIME` tenths of a second, as the console's does. Each direction queues 64 KiB; echo and finished lines are dropped when the slave's queue is full, as `N_TTY` drops input, and other writes wait for room. Until the slave first opens a master read waits; once the slave has closed, the master reads what's left and then `EIO`. The master's last close hangs the slave up (reads end, writes are `EIO`), ends its session's terminal, and sends `SIGHUP` to the foreground group.
 ### Sockets and readiness
 
 A socket ([linux-net](design/linux-net.md)) is a `/net` conversation, its fd the conversation's data file. `socket(2)` opens `/net/tcp/clone` or `/net/udp/clone` in the process's namespace, in the 9front view, as `dial(2)` does, so it's devip's (`#I`) unless something else is mounted on `/net`. With devip's, `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
@@ -711,9 +715,9 @@ A process takes its record's `debug` lock to swap its fd group, namespace, or do
 
 Serves `/fd/N`.
 
-#### The Linux view `#λ` (`src/kern/devlinux.c`) and eventfds `#ε` (`src/kern/linuxnet.c`)
+#### The Linux view `#λ` (`src/kern/devlinux.c`), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
 
-A Linux process's `/`, and its eventfd, epoll, and signalfd instances (see Linux personality).
+A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux personality).
 
 #### `tsleep` (`src/kern/tsleep.c`)
 

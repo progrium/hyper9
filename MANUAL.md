@@ -921,7 +921,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#A` | audio | | Present, but there's no sound to drive |
 | `#λ` | linux | A Linux process's `/` | The Linux view: `/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, and `/sys`, with the Linux root unioned after them (chapter 20) |
 | `#ε` | eventfd | | Linux `eventfd`, `epoll`, and `signalfd` instances |
-| `#τ` | pty | A Linux process's `/dev/pts` | Linux pseudoterminals: `ptmx`, which makes a pair and opens its master, and each pair's slave by number. Raw: data passes through unchanged ([linux-pty](design/linux-pty.md)). |
+| `#τ` | pty | A Linux process's `/dev/pts` | Linux pseudoterminals: `ptmx`, which makes a pair and opens its master, and each pair's slave by number, with Linux's line discipline: canonical editing, echo, and Ctrl-C ([linux-pty](design/linux-pty.md)). |
 
 9front's hardware devices aren't there: no `#S` disks, `#l` Ethernet, `#t`
 serial lines, `#v` VGA, or `#P` architecture, and no `#σ` shared-memory
@@ -1956,6 +1956,12 @@ Alpine's `/bin/ls -> /bin/busybox` reads the root's busybox
 overlay in memory and are thrown away at exit, as for a 9front root, so
 `apk add` works for the run; pass `--writable ./alpine` to keep what it
 installs. `h9 --print` shows the view as binds on `'#λ'`.
+
+**Pseudoterminals.** `/dev/ptmx` and `/dev/pts` work as on Linux, so
+tmux, `script`, `expect`, Python's `pty`, and Nix's builds get a terminal of
+their own, with canonical line editing, echo, Ctrl-C, Ctrl-\\, and Ctrl-Z,
+and `SIGWINCH` when the size changes. A pty belongs to its machine, and its
+numbers start at 0 in each machine.
 
 **Users and the environment.** A Linux program starts as uid 0, and `stat`
 shows every file as owned by it. That grants nothing: access is still the

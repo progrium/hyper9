@@ -88,9 +88,9 @@ Integration cases, tagged `[linux-pty]`, with the Alpine root:
 
 Step 2:
 
-- [ ] `test "a canonical pty edits lines and echoes [linux-pty]"`
-- [ ] `test "Ctrl-C written to the master interrupts the foreground group [linux-pty]"`
-- [ ] Demo: `tmux new -d 'sleep 1; echo hi > /tmp/x'` runs, and `tmux capture-pane` shows the shell.
+- [x] `test "a canonical pty edits lines and echoes [linux-pty]"`
+- [x] `test "Ctrl-C written to the master interrupts the foreground group [linux-pty]"`
+- [x] Demo: `tmux new -d 'sleep 1; echo hi > /tmp/x'` runs, and `tmux capture-pane` shows the shell.
 
 ## Implementation
 
@@ -115,3 +115,10 @@ Step 2:
   - The master's last close sends SIGHUP from the process that closed it. A close by a 9front process, or by the kernel at a machine's end, sends nothing.
   - Cases beyond the Done criteria cover a locked slave, `TIOCGPTPEER`, `poll` and `O_NONBLOCK`, and the hangup.
 - 2026-11-14: The Nix demo ran on the native backend with the `nix-bugs` branch merged in, which Nix needs for its other fixes: a `/bin/sh` derivation built with `sandbox = false`, and `nix profile install nixpkgs#hello` made a profile whose `hello` ran, in about 4 min 40 s with the nixpkgs download.
+- 2026-11-14: Step 2, the line discipline, is on the `linux-pty` branch too. Refinements made while building it:
+  - In canonical mode each finished line is a block of its own in the slave's queue, and a read takes at most one, so a read returns at most a line, as on Linux. `VEOF` on an empty line is an empty block, which reads as an end of file.
+  - Echo and finished lines go into their queues without waiting and are dropped when the queue is full, as `N_TTY` drops input beyond its buffer, so a master writer that doesn't read its echo can't deadlock. Raw input still waits for room.
+  - `VMIN` 0 reads are timed in the personality, as the console's are. `VMIN` above 1 reads return what's there, without waiting for `VMIN` bytes, and `VTIME` is only used with `VMIN` 0.
+  - Not done: `VLNEXT`, `VREPRINT`, `VDISCARD`, `IXON` flow control, `ECHOPRT`, `ONOCR`, `ONLRET`, `IUTF8`'s multibyte erase, and `TOSTOP`. `TIOCSTI` isn't served.
+  - The ISIG signals are sent from the process that writes the master. A write by a kernel process sends nothing.
+  - The tmux demo ran with tmux 3.5a added to the Alpine root: `tmux new -d sh`, `send-keys` of a command, of `sleep 30` and `C-c`, and of `stty size`, and `capture-pane` showed the prompt, the output, `^C`, and `24 80`.
