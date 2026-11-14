@@ -2467,11 +2467,12 @@ fn flockCall(p: *Process, fd: i32, op: u32) Err!i64 {
 
 /// Before fd closes: its POSIX locks on the file go (any close does
 /// that), and its OFD and flock locks if this is the description's last
-/// fd.
+/// fd. Directories too: flock takes any fd (Nix flocks each temporary
+/// directory it makes in its store, and a lock that outlived its fd
+/// blocked the next one made at the same path).
 fn releaseLocks(p: *Process, fd: i32) void {
     if (fd < 0) return;
     const info = kc.fdInfo(fd) catch return;
-    if (info.dir) return;
     const key = lockKey(info);
     locks.closedPosix(key, posixOwner(p).id);
     if (kc.fdChan(fd)) |ch| if (ch.refs <= 1) locks.closedOfd(key, ch.id);

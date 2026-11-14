@@ -5359,6 +5359,29 @@ test "exec closing a child's last close-on-exec fd of a file releases its flock 
     try netCase(&le, &.{ "/mnt/term/cwd/files", "flock_exec" }, "ok flock_exec\n");
 }
 
+test "a directory's flock goes when its last fd closes or its holder exits, in memory and on a host directory [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "dir_flock" }, "ok dir_flock\n");
+    // Nix's store is a host tree (--writable), where a reused directory
+    // keeps its qid.
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    const p = try runProcessWith(&.{
+        le.h9,      "--backend", it.next() orelse "auto", "--arch",   le.arch, "--root",              le.root,
+        "--cwd",    le.fixtures, "--writable",            s.path,     "env",   dir, "/mnt/term/cwd/files",
+        "dir_flock",
+    }, null, null, 120_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ p.stdout, p.stderr });
+    try std.testing.expectEqualStrings("ok dir_flock\n", p.stdout);
+}
+
 test "processes mapping a file MAP_SHARED see each other's stores, read and write agree, and the file keeps them [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

@@ -133,6 +133,36 @@ static void flock_exec(void) {
 	printf("ok flock_exec\n");
 }
 
+/* A directory's flock goes when its last fd closes, like a file's. Nix
+ * flocks each temporary directory it makes in its store; one that stayed
+ * locked blocked the next substitution forever. */
+static void dir_flock(void) {
+	const char *d = getenv("DIR");
+	snprintf(path, sizeof path, "%s/dflock", d ? d : "/tmp");
+	rmdir(path);
+	CHECK("dir_flock", mkdir(path, 0755) == 0);
+	int a = open(path, O_RDONLY | O_DIRECTORY);
+	int b = open(path, O_RDONLY | O_DIRECTORY);
+	CHECK("dir_flock", a >= 0 && b >= 0);
+	CHECK("dir_flock", flock(a, LOCK_EX) == 0);
+	CHECK("dir_flock", flock(b, LOCK_EX | LOCK_NB) < 0 && errno == EWOULDBLOCK);
+	close(a);
+	CHECK("dir_flock", flock(b, LOCK_EX | LOCK_NB) == 0);
+	close(b);
+	/* And at exit: a child's lock doesn't outlive it. */
+	pid_t c = fork();
+	if (c == 0) {
+		int f = open(path, O_RDONLY | O_DIRECTORY);
+		_exit(f >= 0 && flock(f, LOCK_EX) == 0 ? 0 : 1);
+	}
+	CHECK("dir_flock", child_status(c) == 0);
+	a = open(path, O_RDONLY | O_DIRECTORY);
+	CHECK("dir_flock", a >= 0 && flock(a, LOCK_EX | LOCK_NB) == 0);
+	close(a);
+	CHECK("dir_flock", rmdir(path) == 0);
+	printf("ok dir_flock\n");
+}
+
 static void shared_map(void) {
 	int fd = fresh("shm");
 	/* SQLite's -shm: grown by writing its last byte, then mapped at an offset. */
@@ -829,6 +859,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "posix_locks")) posix_locks();
 		if (all || !strcmp(n, "ofd_flock")) ofd_flock();
 		if (all || !strcmp(n, "flock_exec")) flock_exec();
+		if (all || !strcmp(n, "dir_flock")) dir_flock();
 		if (all || !strcmp(n, "shared_map")) shared_map();
 		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
 		if (all || !strcmp(n, "private_sees")) private_sees();
