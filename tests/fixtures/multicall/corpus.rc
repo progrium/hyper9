@@ -53,6 +53,7 @@ fn c_chmod { echo x >e/c; t chmod 600 e/c; ls -l e/c | awk '{print $1}'; t chmod
 fn c_du { t du -a d | sort }
 fn c_basename { t basename /a/b/c.c .c; t basename -d /a/b/c.c }
 fn c_read { t read -n 2 <lines }
+fn c_walk { t walk d | sort; t walk -f -e ps d | sort; t walk -d -n 0 d; t walk nonexistent }
 fn c_wc { t wc lines; t wc -l <nums }
 fn c_sort { t sort lines; t sort -n -k2 lines; t sort -r -u lines }
 fn c_uniq { t uniq lines; t uniq -c lines }

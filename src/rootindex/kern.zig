@@ -28,7 +28,7 @@ pub const Config = struct {
 };
 
 const Entry = struct { owner: usize, cfg: Config };
-const Given = struct { owner: usize, id: u32, compiled: []u8, label: []u8 };
+const Given = struct { owner: usize, id: u32, compiled: []u8, label: []u8, cached: bool };
 
 var mutex: std.atomic.Mutex = .unlocked;
 var configs: [64]?Entry = @splat(null);
@@ -76,15 +76,16 @@ fn configFor(owner: usize) Config {
 }
 
 /// Hands a compiled index (allocated with web.gpa, which `#ι` then owns)
-/// to machine `owner`'s next conversation that names the returned id.
-pub fn give(owner: usize, compiled: []u8, label: []const u8) error{OutOfMemory}!u32 {
+/// to machine `owner`'s next conversation that names the returned id;
+/// `cached` when it came from the cache, for the notes.
+pub fn give(owner: usize, compiled: []u8, label: []const u8, cached: bool) error{OutOfMemory}!u32 {
     const l = try gpa.dupe(u8, label);
     errdefer gpa.free(l);
     lock();
     defer mutex.unlock();
     const id = next_id;
     next_id += 1;
-    try given.append(gpa, .{ .owner = owner, .id = id, .compiled = compiled, .label = l });
+    try given.append(gpa, .{ .owner = owner, .id = id, .compiled = compiled, .label = l, .cached = cached });
     return id;
 }
 
@@ -162,7 +163,7 @@ fn h9_hidx_new(mach: ?*anyopaque, mode: c_int, arg: [*:0]const u8, err: [*]u8) c
                 return null;
             };
             c.label = g.label;
-            break :blk .{ .given = .{ .compiled = g.compiled, .label = c.label } };
+            break :blk .{ .given = .{ .compiled = g.compiled, .label = c.label, .cached = g.cached } };
         },
     };
     c.l = .init(gpa, source, hooks);

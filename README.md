@@ -28,7 +28,7 @@ zig build              # builds and signs zig-out/bin/h9
 h9 --check             # which backends work here, and why not
 ```
 
-That's enough to run h9's built-in root, 43 of 9front's commands inside the
+That's enough to run h9's built-in root, 44 of 9front's commands inside the
 binary itself:
 
 ```sh

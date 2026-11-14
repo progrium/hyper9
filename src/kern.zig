@@ -226,6 +226,9 @@ const c_stub = struct {
     fn h9_overlay_drop(_: c_int) void {}
     fn h9_overlay_track(_: c_int, _: ?*anyopaque) void {}
     fn h9_kern_release() void {}
+    fn h9_hidx_convstatus(_: c_int, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
     fn h9_unixdial(_: [*:0]const u8) c_int {
         return -1;
     }
@@ -332,6 +335,7 @@ const c_real = struct {
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
     extern fn h9_unixdial(path: [*:0]const u8) c_int;
+    extern fn h9_hidx_convstatus(n: c_int, buf: [*]u8, len: c_int) c_int;
     extern fn h9_kern_upuser() [*:0]const u8;
     extern fn h9_kern_setuser(name: [*:0]const u8) void;
     extern fn h9_hstream_wake(id: c_ulong) void;
@@ -979,6 +983,15 @@ pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
 
 /// Connects to the unix-domain socket at host path `path` and returns an
 /// fd on a channel for it (design/ninep-roots.md). Fails on Windows.
+/// The status of the caller's machine's `#ι` conversation `n`
+/// (src/kern/devhidx.c), read without a chan, since `#ι` is masked once
+/// the namespace is built; or null.
+pub fn hidxStatus(n: u32, buf: []u8) ?[]u8 {
+    const k = c.h9_hidx_convstatus(@intCast(n), buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));
+    if (k < 0) return null;
+    return buf[0..@intCast(k)];
+}
+
 pub fn unixDial(path: [*:0]const u8) Error!u31 {
     return try check(c.h9_unixdial(path));
 }

@@ -82,7 +82,7 @@ something the runtime does for you.
 | `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux personality) |
 | Running Linux images | `h9 --root ./alpine sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/linux-personality.md)) |
 | `FROM scratch` + static binaries | A slim root tree: Plan 9 binaries are statically linked ([section 4](#4-from-scratch-slim-images)) | main |
-| A busybox base image | `zig build slim`, or the built-in root h9 carries: 43 of 9front's commands in one binary | main |
+| A busybox base image | `zig build slim`, or the built-in root h9 carries: 44 of 9front's commands in one binary | main |
 | `ENTRYPOINT`, `CMD` | An rc script in the image, run by path; or `/rc/lib/rcmain.local`, run by `h9 --rc` | main |
 | `ENV`, `docker run -e` | `--env name=value`, or assignments in the entrypoint | main |
 | `WORKDIR` | `cd` in the namespace file | main |
@@ -115,7 +115,7 @@ something the runtime does for you.
 The root tree that `zig build mkroot` builds is h9's equivalent of a
 `debian` base image: about 250 MB of 9front, with every program and library
 file. Every `h9` command that doesn't pass `--root` already runs in it. (With
-no tree at all, h9 runs on a small built-in root of 43 commands, more like
+no tree at all, h9 runs on a small built-in root of 44 commands, more like
 `busybox`; see [manual, chapter 2](../MANUAL.md#2-installing).)
 
 Any other directory that looks like a 9front tree works as `--root`:
@@ -168,7 +168,7 @@ and the host's directories onto them:
 | `/rc/bin`, `/rc/lib/rcmain` | rc, if the image uses it: rc reads `rcmain` when it starts |
 
 **A busybox-style base.** `zig build slim` builds the closest thing to
-`busybox`: 43 of 9front's own commands as one multi-call binary of about
+`busybox`: 44 of 9front's own commands as one multi-call binary of about
 800 KB, `9box`, in a root tree with rc, the file and text tools, `tar`, and
 the namespace tools. The same tree is built into h9 as its built-in root, so an
 image can also leave the common commands out and borrow them at run time

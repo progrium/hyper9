@@ -62,6 +62,7 @@ This describes h9 as built. Changes to it go through proposals in [design/](desi
 - [Filesystem, boot, and I/O](#filesystem-boot-and-io)
   - [Root filesystem](#root-filesystem)
   - [9P dialects](#9p-dialects)
+  - [Metadata indexes](#metadata-indexes)
   - [Slim roots](#slim-roots)
   - [Boot sequence](#boot-sequence)
   - [Terminal](#terminal)
@@ -767,6 +768,12 @@ It follows devhstream's pattern and the seam rules: a kproc per conversation rea
 
 The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
 
+#### Index device `#ι` (`src/kern/devhidx.c`, `src/rootindex/`)
+
+Puts a metadata index between devmnt and a 9P connection ([mount-index](design/mount-index.md); see [Metadata indexes](#metadata-indexes)). It's laid out as `#ℓ` is, `hidx/clone` and `hidx/N/{ctl,data,status}`, but isn't bound anywhere, and it's masked once the namespace file is replayed, since a guest's conversation could read and write the host's index cache. `ctl` takes `server KEY` (use the server's `/.h9index`, cached under KEY, the address and attach spec), `index N` (use the compiled index the machine handed over as number N), neither (pass everything through, counting requests), and then `fd N` (the server connection, which starts the conversation); `data` is the 9P2000 devmnt mounts; `status` reads the index's label, counts, and how long its check took, the requests devmnt sent and how many reached the server, and the notes `-v` prints. h9 reads `status` through a leaf (`h9_hidx_convstatus`) rather than a chan, since `#ι` is masked by the end of the run.
+
+The kproc, the leaves (`src/rootindex/kern.zig`), and the locking follow `#ℓ`. A machine registers its cache directory with `kern.zig`, keyed by its `Hmach`, and hands over a `--root-index` it compiled with `give`, which a conversation takes once by number.
+
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
 drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/go-compat.md)).
@@ -861,6 +868,28 @@ With `9P2000.L.Z`:
 
 A connection given by fd (`fd N`), such as a WebSocket root's or a unix root whose path has a comma, can't be redialed, so it hangs up as before.
 
+### Metadata indexes
+
+A 9P root, and a 9P server a namespace file mounts by dial string or URL, goes through a `#ι` conversation above its `#ℓ` one ([mount-index](design/mount-index.md)), unless `--index none`. The conversation's layer (`src/rootindex/layer.zig`) is a state machine over 9P2000 bytes, with no I/O of its own, between devmnt and the server.
+
+The index is the server's `/.h9index`, or for the root a `--root-index` file or `https://` or `http://` URL. Its text is a line `h9index 1`, then a line per name sorted by path, `path qid.path(hex) qid.vers type mode(octal) length mtime uid gid`, with `type` one of `d`, `a`, `l`, and `-`, and then `!unindexed /dir` lines for directories whose listing isn't complete. `src/rootindex.zig` compiles it to a form checked by a SHA-256 trailer: a header, fixed 64-byte entries in breadth-first order with each directory's children contiguous and sorted, a user table, and strings. A line that doesn't parse, an unknown version, or text over 256 MB means no index, with a note under `-v`, and the mount is plain 9P.
+
+The first `Tattach` is held while the layer, with fids from `0xF0000000` and tags from `0xFFFE` down to `0xF000` of its own:
+
+1. clones the attach fid;
+2. walks to `/.h9index` and stats it, and looks its version (qid.path, qid.vers, mtime, and length) up in the cache under the server's key, or reads it, up to 16 reads in flight, compiles it, and stores it;
+3. walks to, stats, and clunks every indexed directory, up to 64 in flight, and demotes one whose qid.path, qid.vers, or mtime differs. Writing `/.h9index` changes the root's own mtime, so a root whose stat alone differs is checked by reading its listing instead: if the names and qids match the index, its entries stand and only its stat comes from the server.
+
+Later attaches pass through, so `mount /srv/root` sees the server itself. A devmnt tag of `0xF000` or above fails the conversation.
+
+Then a walk through validated, indexed directories is answered locally, with a missing name answered as the server would, and its fid is virtual; any other walk is forwarded, from the attach fid as one `Twalk` when its path is 16 names or fewer. `Tstat` of a virtual fid, or a real one whose entry stands, is answered from the entry, and a validated directory's `Topen` and `Tread`s from its children. A file's `Topen` makes the fid real, by walks of up to 16 names from the attach fid's clone, and is forwarded; a reply whose qid differs from the entry, or an open for writing, demotes it. `Tcreate`, `Tremove`, `Twstat`, and a `Twrite` demote what they change. `Tflush` is forwarded, so its `Rflush` can't overtake an earlier one's, except for a request still waiting on its fid to be made real, which is answered locally and never sent. A demoted entry is served by plain 9P for the rest of the run. Over a quarter of the directories demoted is a note under `-v` that the index looks stale.
+
+The cache (`src/rootindex/cache.zig`) is `--index-cache`, by default `$XDG_CACHE_HOME/h9/index` (or `~/.cache/h9/index`), `~/Library/Caches/h9/index` on macOS, and `%LOCALAPPDATA%\h9\index` on Windows, made 0700 with files 0600. A file is named for 12 bytes of its key's SHA-256 and 8 of its version's, and holds the compiled form, checked against its trailer on every read; storing a key's new version removes its others, and a write removes entries not used for 30 days. A `--root-index` text is keyed `text` and versioned by its SHA-256. A URL is fetched on the host by `hstream.fetchIndex`, through the root's `--root-ca` and proxies, with `If-None-Match` on the `ETag` kept beside it (`u-<hash>.etag`), so a `304` uses the cached form. A cache that can't be written isn't, and the index is used for that run.
+
+`--print` adds `index=/.h9index`, `index=none`, or `index=FILE N entries M dirs` (a URL with its query elided, and no counts) to the root's line; it reads a `--root-index` file to count it but connects to nothing. `-v` prints the notes, and at the end how many requests devmnt sent the root and how many reached the server, apart from those that found and checked the index. `--check` runs with `-v`'s notes and prints them under the root's line.
+
+`mkindex [-o FILE] [-s SPEC] [DIR]`, in `#H/bin`, writes the text with `walk -e qxsmUGp`, rebuilding each mode's `DM` bits from its symbolic mode and qid.type. For `/` it walks `/srv/root`, mounted with SPEC over `/tmp` in a namespace of its own, so nothing h9 binds over the root is listed. It leaves out `/.h9index`, a name with a space, a control character, or U+FFFD (a byte that isn't UTF-8), and the record before a line that isn't one (the rest of a name with a newline), and marks the directory `!unindexed`; a directory walk can't open or read is marked too, as is one whose listing devmnt refuses for a name with a newline in it.
+
 ### Slim roots
 
 `zig build slim` ([multicall](design/multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
@@ -873,7 +902,7 @@ A command's override of a libc function (ed's `mktemp`) is renamed too, unless l
 
 `9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), from the interpreter a `#!` script names when `argv[0]` isn't a command (a script such as `/rc/bin/lc` whose `#!/bin/rc` is a hard link to `9box` starts it with the script's name in `argv[0]`), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
 
-The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 43 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied.
+The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 44 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied, as measured with 43, before `walk` joined ([mount-index](design/mount-index.md)).
 
 Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
 
@@ -895,7 +924,7 @@ Each exec allocates and copies the box's text and data, so on the emulator rc's 
 
    Under the root's overlay it makes `/usr/$user` in the overlay if the root lacks it, so `$home` exists.
 
-   Then it sets the device mask: `#C` always (it isn't built; see [host-cmd](design/host-cmd.md)), `#U` unless `--host-fs`, `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+   Then it sets the device mask: `#C` always (it isn't built; see [host-cmd](design/host-cmd.md)), `#U` unless `--host-fs`, `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. `#ι` is masked too, but only after `--ns`'s file is replayed, since its 9P mounts go through it. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 
@@ -1114,7 +1143,7 @@ $ h9 --print --profile=tight --writable ./out --memory 512m --timeout 1m mk
 profile:  tight
 enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope ipc.restrict kernel.isolation net.disable proc.timeout res.memory
 limits:   write=overlay net=disable memory=512M timeout=1m
-devmask:  #C #I #ℏ #U #b #i #m
+devmask:  #C #I #ℏ #U #ι #b #i #m
 namespace:
   bind '#U/Users/me/h9root' /                             ro
   bind -c '#O' /                                          eph  # /Users/me/h9root
@@ -1250,6 +1279,10 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--root-user NAME` | The uname sent in h9's attaches to a 9P root. The machine's user by default |
 | `--root-header 'NAME: VALUE'\|@FILE` (repeatable) | A header for a WebSocket root's handshake, or one per line from a file (blank lines skipped). Headers that change the handshake (`Host`, `Upgrade`, `Connection`, `Sec-WebSocket-*`, `Content-Length`, `Transfer-Encoding`) are refused. Without a `ws://` or `wss://` root, a bad header or a missing file is exit 2 |
 | `--root-ca FILE` | A PEM bundle that a `wss://` root's certificate must chain to, instead of the host's. Without a `wss://` root, or a missing file, is exit 2. `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` choose an HTTP `CONNECT` proxy for WebSocket roots and mounts |
+| `--root-index FILE\|URL` | A metadata index for a 9P root, used instead of its `/.h9index` (see Metadata indexes). A URL is `https://` or `http://`. With a host directory root, exit 2; a file that can't be read or a URL that can't be fetched, exit 125 |
+| `--index auto\|none` | `auto`, the default, uses an index wherever one is found; `none` puts no `#ι` in any mount |
+| `--index-cache DIR` | Where compiled indexes are cached. By default `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
+| `-v`, `--verbose` | Notes on stderr about how the run went: each index's source, size, check, and demotions, and the root's request counts at the end. `-v` is the one short flag, and only before the program |
 | `--root-contained` | The root tree's symlinks resolve inside it: an absolute target starts at the tree's top and `..` stops there, as for a Linux root or a container image ("Contained trees"). With a 9P root, exit 2 |
 | `--env name=value` (repeatable) | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
@@ -1278,8 +1311,8 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
-| `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`). Exits 0, or 125 if h9 can't run programs from the root |
-| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (43 commands)`, or `skeleton only`) |
+| `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`), then a 9P root's index notes. Exits 0, or 125 if h9 can't run programs from the root |
+| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (44 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
 ### Default guest environment
@@ -1358,6 +1391,11 @@ pub const Options = struct {
     root_headers: []const []const u8 = &.{}, // handshake headers for a WebSocket root, checked
     root_ca: ?[]const u8 = null,        // PEM bundle for a wss:// root; null: the host's
     root_contained: bool = false,       // resolve a host root's symlinks inside it
+    index: IndexMode = .auto,           // .none: no metadata index for any mount
+    root_index: ?RootIndex = null,      // .path or .url: the 9P root's index, instead of its /.h9index
+    index_cache: ?[]const u8 = null,    // where compiled indexes are cached; null: nowhere
+    root_index_counts: ?struct { entries: u32, dirs: u32 } = null, // for --print only
+    verbose: bool = false,              // notes on stdio.err, such as the index's check
     linux_root: ?[]const u8 = null,     // the Linux view's /
     nameservers: []const []const u8 = &.{}, // the host's DNS servers, for a Linux root's resolv.conf
     nine_prog: bool = false,            // resolve the program in the 9front view even with a Linux root

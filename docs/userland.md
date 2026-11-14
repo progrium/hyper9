@@ -326,7 +326,7 @@ a root tree, builds the same kind of tree around
 source, in one binary that picks the command by the name it runs as.
 
 ```sh
-host$ zig build slim    # .local/9front/slim-11952-arm64: 43 commands
+host$ zig build slim    # .local/9front/slim-11952-arm64: 44 commands
 host$ h9 --root .local/9front/slim-11952-arm64 --rc 'ls /bin | wc -l'
 host$ du -sh .local/9front/slim-11952-arm64
 ```
@@ -343,7 +343,7 @@ the tree as above; to box more of 9front's, add a line to `src/9box/slim`
 This tree is also built into h9 itself, as the built-in root h9 uses when it
 finds no other ([builtin-root](../design/builtin-root.md)). `h9
 --builtin=only` runs over it even when you have a root, and `h9 --root
-~/slim --builtin=after` fills in any of its 43 commands your own tree
+~/slim --builtin=after` fills in any of its 44 commands your own tree
 leaves out.
 
 ## 5. Layering on the stock root instead of copying it

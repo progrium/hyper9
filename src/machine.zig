@@ -1340,6 +1340,7 @@ pub const Machine = struct {
             // it are made there.
             if (!cd) if (built.cwd) |at| kern.chdir(at) catch {};
         }
+        if (std.mem.indexOf(u8, m.plan.devmask, policy.hidx_dev) != null) kern.devmask(policy.hidx_dev);
         // The guest's changes to the root count from here
         // (design/overlay.md).
         if (root_ov) |id| {
@@ -3135,8 +3136,17 @@ pub const Machine = struct {
         try m.setEnv();
 
         // Existing binds keep working, but masked devices can't be attached
-        // again to reach more of the host.
-        if (m.plan.devmask.len > 0) kern.devmask(try std.fmt.bufPrintZ(&buf, "{s}", .{m.plan.devmask}));
+        // again to reach more of the host. #ι goes after the namespace
+        // file, whose 9P mounts are through it (startFirst).
+        var mask: [64]u8 = undefined;
+        var nm: usize = 0;
+        var dv = (std.unicode.Utf8View.init(m.plan.devmask) catch unreachable).iterator();
+        while (dv.nextCodepointSlice()) |d| if (!std.mem.eql(u8, d, policy.hidx_dev) and nm + d.len < mask.len) {
+            @memcpy(mask[nm..][0..d.len], d);
+            nm += d.len;
+        };
+        mask[nm] = 0;
+        if (nm > 0) kern.devmask(mask[0..nm :0]);
         return .{ .root_overlay = root_ov, .cwd = cwd_at };
     }
 
@@ -3239,10 +3249,8 @@ pub const Machine = struct {
             break :blk std.fmt.bufPrint(&arg, "index {d}", .{id}) catch unreachable;
         } else std.fmt.bufPrint(&arg, "server {s} {s}", .{ r.addr, r.spec }) catch return m.fail("root {f}: name too long", .{shown});
         var n: u32 = 0;
-        const fd = hidxConv(ctl, conn, &n) catch {
-            kern.close(conn) catch {};
-            return m.fail("root {f}: index: {s}", .{ shown, kern.errstr() });
-        };
+        defer kern.close(conn) catch {};
+        const fd = hidxConv(ctl, conn, &n) catch return m.fail("root {f}: index: {s}", .{ shown, kern.errstr() });
         m.hidx_root = n;
         return fd;
     }
@@ -3279,7 +3287,7 @@ pub const Machine = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return m.fail("root {f}: --root-index {f}: {s}", .{ ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
             }) {
-                .compiled => |b| return m.giveCompiled(b, from),
+                .compiled => |b| return m.giveCompiled(b, from, true),
                 .text => |t| blk: {
                     etag = t.etag;
                     break :blk t.bytes;
@@ -3289,7 +3297,8 @@ pub const Machine = struct {
         defer a.free(text);
         var vbuf: [64]u8 = undefined;
         const version = rootindex.cache.textVersion(text, &vbuf);
-        const compiled = (if (cache) |*c| c.lookup(rootindex.cache.text_key, version) else null) orelse blk: {
+        const hit = if (cache) |*c| c.lookup(rootindex.cache.text_key, version) else null;
+        const compiled = hit orelse blk: {
             var diag: rootindex.Diag = .{};
             const b = rootindex.compile(a, text, &diag) catch |e| {
                 switch (e) {
@@ -3304,11 +3313,11 @@ pub const Machine = struct {
             break :blk b;
         };
         if (cache) |*c| if (etag) |e| if (given == .url) c.storeEtag(given.url, e, version);
-        return m.giveCompiled(compiled, from);
+        return m.giveCompiled(compiled, from, hit != null);
     }
 
     /// Hands `#ι` a compiled index, which it then owns.
-    fn giveCompiled(m: *Machine, compiled: []u8, from: []const u8) RunError!?u32 {
+    fn giveCompiled(m: *Machine, compiled: []u8, from: []const u8, cached: bool) RunError!?u32 {
         const a = hidx.allocator;
         const mc = kern.mach() orelse {
             a.free(compiled);
@@ -3317,7 +3326,7 @@ pub const Machine = struct {
         const owner = @intFromPtr(mc);
         mc.put();
         var lb: [256]u8 = undefined;
-        return try hidx.give(owner, compiled, std.fmt.bufPrint(&lb, "{f}", .{ws.Url.elide(from)}) catch from);
+        return try hidx.give(owner, compiled, std.fmt.bufPrint(&lb, "{f}", .{ws.Url.elide(from)}) catch from, cached);
     }
 
     fn rootIndexError(e: anyerror) []const u8 {
@@ -3361,31 +3370,26 @@ pub const Machine = struct {
             _ = f.next();
             const from = f.next() orelse return;
             _ = f.next();
-            const sent = f.next() orelse return;
-            m.indexNote("index: devmnt sent the root {s} 9P requests; {s} went to the server", .{ from, sent });
+            const sent = std.fmt.parseInt(u64, f.next() orelse return, 10) catch return;
+            _ = f.next();
+            const boot = std.fmt.parseInt(u64, f.next() orelse "0", 10) catch 0;
+            if (boot == 0)
+                m.indexNote("index: devmnt sent the root {s} 9P requests; {d} went to the server", .{ from, sent })
+            else
+                m.indexNote("index: devmnt sent the root {s} 9P requests; {d} went to the server, besides {d} to find and check the index", .{ from, sent -| boot, boot });
         };
     }
 
     /// `#ι` conversation `n`'s status.
     fn hidxStatus(n: u32, buf: []u8) ?[]const u8 {
-        var path: [64]u8 = undefined;
-        const fd = kern.open(std.fmt.bufPrintZ(&path, "#" ++ policy.hidx_dev ++ "/hidx/{d}/status", .{n}) catch return null, kern.OREAD) catch return null;
-        defer kern.close(fd) catch {};
-        var got: usize = 0;
-        while (got < buf.len) {
-            const k = kern.pread(fd, buf[got..], @intCast(got)) catch return null;
-            if (k == 0) break;
-            got += k;
-        }
-        return buf[0..got];
+        return kern.hidxStatus(n, buf);
     }
 
-    /// Starts a `#ι` conversation over the connection `conn`, which it
-    /// closes, with the ctl message `ctl` ("server KEY", "index N", or
+    /// Starts a `#ι` conversation over the connection `conn`, which the
+    /// caller can close after, with the ctl message `ctl` ("server KEY", "index N", or
     /// none for one that only counts), and returns an fd on its data file,
     /// which devmnt mounts, and the conversation's number in `num`.
     fn hidxConv(ctl: []const u8, conn: u31, num: *u32) kern.Error!u31 {
-        defer kern.close(conn) catch {};
         const dev = "#" ++ policy.hidx_dev ++ "/hidx/";
         const clone = try kern.open(dev ++ "clone", kern.ORDWR);
         defer kern.close(clone) catch {};
@@ -3407,7 +3411,11 @@ pub const Machine = struct {
         var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
         const ctl = std.fmt.bufPrint(&arg, "server {s} {s}", .{ file, spec }) catch return conn;
         var n: u32 = 0;
-        const fd = hidxConv(ctl, conn, &n) catch return conn;
+        const fd = hidxConv(ctl, conn, &n) catch {
+            m.indexNote("index: none for {s}: {s}", .{ file, kern.errstr() });
+            return conn;
+        };
+        kern.close(conn) catch {};
         num.* = n;
         return fd;
     }

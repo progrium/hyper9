@@ -6,6 +6,7 @@ created: 2026-11-09
 authors: [progrium]
 depends: [ninep-roots, websocket-9p, guest-tools]
 areas: [cli, kern]
+branch: [mount-index]
 ---
 
 # Proposal: Metadata indexes for 9P roots and mounts
@@ -189,24 +190,24 @@ A URL index is fetched by h9 on the host, like a WebSocket root, under the root'
 
 Integration cases tagged `[mount-index]`. The server is the second h9 serving the test root with exportfs, as in ninep-roots' cases, behind a relay that counts T-messages:
 
-- [ ] `test "mkindex lists every name in the test root with the server's qids [mount-index]"`
-- [ ] `test "mkindex marks a directory with a name containing a newline unindexed [mount-index]"`
-- [ ] `test "a root with /.h9index runs /bin/ls [mount-index]"`
-- [ ] `test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]"`
-- [ ] `test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]"`
-- [ ] `test "--root-index FILE is used over a root without /.h9index [mount-index]"`
-- [ ] `test "a second run uses the cache and doesn't read /.h9index [mount-index]"`
-- [ ] `test "a file added after indexing is found, by demoting its directory [mount-index]"`
-- [ ] `test "a file removed after indexing is not found [mount-index]"`
-- [ ] `test "a file changed in place reads the server's contents [mount-index]"`
-- [ ] `test "a malformed index is ignored and the root still mounts [mount-index]"`
-- [ ] `test "an unreadable --root-index exits 125 [mount-index]"`
-- [ ] `test "--index none ignores /.h9index [mount-index]"`
-- [ ] `test "a namespace-file mount of a server with /.h9index uses it [mount-index]"`
-- [ ] `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
-- [ ] `test "a rewritten /.h9index is fetched on the next mount [mount-index]"`
-- [ ] `test "--root-index with a host-directory root is a usage error [mount-index]"`
-- [ ] `test "--print shows the index source and entry count [mount-index]"`
+- [x] `test "mkindex lists every name in the test root with the server's qids [mount-index]"`
+- [x] `test "mkindex marks a directory with a name containing a newline unindexed [mount-index]"`
+- [x] `test "a root with /.h9index runs /bin/ls [mount-index]"`
+- [x] `test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]"`
+- [x] `test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]"`
+- [x] `test "--root-index FILE is used over a root without /.h9index [mount-index]"`
+- [x] `test "a second run uses the cache and doesn't read /.h9index [mount-index]"`
+- [x] `test "a file added after indexing is found, by demoting its directory [mount-index]"`
+- [x] `test "a file removed after indexing is not found [mount-index]"`
+- [x] `test "a file changed in place reads the server's contents [mount-index]"`
+- [x] `test "a malformed index is ignored and the root still mounts [mount-index]"`
+- [x] `test "an unreadable --root-index exits 125 [mount-index]"`
+- [x] `test "--index none ignores /.h9index [mount-index]"`
+- [x] `test "a namespace-file mount of a server with /.h9index uses it [mount-index]"`
+- [x] `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
+- [x] `test "a rewritten /.h9index is fetched on the next mount [mount-index]"`
+- [x] `test "--root-index with a host-directory root is a usage error [mount-index]"`
+- [x] `test "--print shows the index source and entry count [mount-index]"`
 
 Unit tests for `src/rootindex.zig`, with recorded conversations: walks, stats, and directory reads answered locally; virtual fids made real; flushes; demotion on a mismatched open; and the parser's limits.
 
@@ -234,3 +235,17 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
 - **The browser host** has no cache directory. The embedder could pass the compiled index in, or h9-web could keep it in the Cache API.
 - **Skipping validation.** A root pinned by content hash can't change, so its index needs no checking, but 9P has no way to say a tree is pinned. That belongs with a content-addressed root kind, which this format is meant to grow into.
 - **The device's letter.** `#ι` is a placeholder.
+
+## Updates
+
+- 2026-11-14: Implemented on the `mount-index` branch, with all 18 cases passing on the native backend (amd64) and the layer's own unit tests (`src/rootindex/layer_test.zig`). Refinements and decisions made along the way:
+  - **The root is checked by its listing when only its stat differs.** Writing `/.h9index` changes the root directory's mtime, and on most servers its qid.vers, so a root indexed before its index was written would always be demoted. When the root's stat is all that differs, the layer reads its listing and keeps the root's entries if every name and qid matches the index, serving only the root's own stat from the server.
+  - **A server index's version is qid.path, qid.vers, mtime, and length,** not just the qid and mtime, so a rewrite within the same second is still seen on a server whose qid.vers or length changes with it.
+  - **`Tflush` is always forwarded,** except for a request still waiting on its fid to be made real, which was never sent and is answered locally. Answering a flush locally when the request it names was answered locally let its `Rflush` overtake an earlier flush's on the server, and devmnt, which drops a chain of flushes once the last is answered, printed "unexpected reply tag" at exit on a slow writable mount.
+  - **`#ι` is masked, after the namespace file.** A guest conversation could read and write the host's index cache: read another tree's cached index by naming its key, or plant one for a later run. It's masked once `--ns` is replayed, since its mounts go through `#ι`, and h9 reads a conversation's status at the end of the run through a leaf rather than a chan.
+  - **`-v` is new, with `--verbose`.** h9 had long flags only; `-v` is the one short flag, accepted only before the program. Its last note separates the requests that found and checked the index from devmnt's own: over the 9P test server, `ls /bin/ls` sent 205 requests from devmnt and 16 of them reached the server, besides 3473 pipelined ones that checked 1160 directories, and ran in 1.6 s against 2.4 s without the index.
+  - **`--print` counts only a `--root-index` FILE.** It connects to nothing, so a server's `/.h9index` shows as `index=/.h9index`, and a URL without counts.
+  - **`mkindex` takes `-s SPEC`,** since `/srv/root` is attached afresh and a root with `--root-spec` would otherwise attach the server's default tree. Its `!unindexed` lines come after the entries, since each must name an earlier directory. Over 9P, devmnt fails the whole directory read when a name has a newline ("bad character in file name"), so `walk` warns and lists nothing in it; `mkindex` marks a directory `walk` couldn't open or read, which covers that case.
+  - **The cases use a small tree** copied from the test root (rc, the commands `mkindex` and the cases run, rcmain, the mount points, and `/lib/x`), served the same way, since `mkindex` over the whole test root through the test server takes minutes. Each case keeps its own `--index-cache`.
+  - **`walk` joined the slim set** ([multicall](multicall.md)), with a corpus entry; the slim tree couldn't be rebuilt here, so the box's size wasn't measured again.
+  - The demo, over `ws://` with 50 ms each way, hasn't been run yet.
