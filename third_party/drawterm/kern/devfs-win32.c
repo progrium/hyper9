@@ -1154,6 +1154,23 @@ h9_fs_rename(Chan *c, Chan *dir, char *name)
 	return 1;
 }
 
+/* h9: Windows has no FIFOs (design/linux-fifo.md). */
+void
+h9_fs_mkfifo(Chan *c, char *name, ulong perm)
+{
+	USED(c);
+	USED(name);
+	USED(perm);
+	error(Eperm);
+}
+
+int
+h9_fs_isfifo(Chan *c)
+{
+	USED(c);
+	return 0;
+}
+
 /* h9: the target of the link c's last name was, as it's written. */
 int
 h9_fs_readlink(Chan *c, char *buf, int nbuf)

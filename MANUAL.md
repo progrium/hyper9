@@ -1956,6 +1956,16 @@ overlay in memory and are thrown away at exit, as for a 9front root, so
 `apk add` works for the run; pass `--writable ./alpine` to keep what it
 installs. `h9 --print` shows the view as binds on `'#λ'`.
 
+**Named pipes.** `mkfifo` and `mknod` with `S_IFIFO` make a FIFO that stays
+in the file system: in memory in an overlay, such as `/tmp`, and as a real
+host FIFO in a `--writable` directory. Every Linux process that opens it
+shares one pipe, with Linux's rules: a read open waits for a writer and a
+write open for a reader, `O_NONBLOCK` doesn't wait (a write open with no
+reader fails with `ENXIO`), and `O_RDWR` holds both ends. Machines in one
+h9 process that open the same host FIFO share it, but a program outside h9
+opening it doesn't reach h9's pipe. A 9front program sees a FIFO as an
+empty file it can list, read, and remove. Other device nodes can't be made.
+
 **Users and the environment.** A Linux program starts as uid 0, and `stat`
 shows every file as owned by it. That grants nothing: access is still the
 namespace's and the sandbox's, as in a rootless container. The `set*id`

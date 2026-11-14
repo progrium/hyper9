@@ -5218,6 +5218,72 @@ test "/proc/self/exe is the file a Linux program runs, its links followed [linux
     try std.testing.expectEqual(0, r.code);
 }
 
+// Named pipes (design/linux-fifo.md), with tests/fixtures/linux/fifo.c.
+
+/// Runs the fifo fixture's case `name` in the machine's /tmp, and then in
+/// a `--writable` host directory, where its FIFOs are host FIFOs.
+fn fifoCase(le: *const LinuxEnv, name: []const u8) !void {
+    var want_buf: [64]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name});
+    try netCase(le, &.{ "/mnt/term/cwd/fifo", name }, want);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
+    try netCase(le, &.{ "--writable", s.path, "env", dir, "/mnt/term/cwd/fifo", name }, want);
+}
+
+test "mkfifo makes a FIFO that stat reports [linux-fifo]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try fifoCase(&le, "make");
+    // The host sees a host FIFO, which stays after the machine ends.
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var sb: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    const script = try std.fmt.bufPrint(&sb, "mkfifo /mnt/term{s}/f && stat -c %F /mnt/term{s}/f && ls -l /mnt/term{s} | cut -c1", .{ s.path, s.path, s.path });
+    const r = try runLinux(&le, false, &.{ "--writable", s.path, "sh", "-c", script });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("fifo\nt\np\n", r.out);
+    const st = try s.tmp.dir.statFile(std.testing.io, "f", .{});
+    try std.testing.expectEqual(std.Io.File.Kind.named_pipe, st.kind);
+}
+
+test "a writer and a reader meet through a FIFO [linux-fifo]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{ "sh", "-c", "mkfifo /tmp/f; echo hi > /tmp/f & cat /tmp/f; wait; cat /tmp/f & echo again > /tmp/f; wait" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hi\nagain\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    try fifoCase(&le, "meet");
+}
+
+test "a nonblocking write open with no reader fails with ENXIO [linux-fifo]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try fifoCase(&le, "nonblock");
+    try fifoCase(&le, "epipe");
+}
+
+test "O_RDWR opens a FIFO without waiting [linux-fifo]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try fifoCase(&le, "rdwr");
+    // The job token pool that stdenv's fixupPhase and GNU make keep.
+    try fifoCase(&le, "tokens");
+}
+
+test "a FIFO open is interrupted by a signal [linux-fifo]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try fifoCase(&le, "intr");
+}
+
 test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP client may bind port 0 [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

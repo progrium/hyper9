@@ -398,6 +398,8 @@ fsstat(Chan *c, uchar *buf, int n)
 	d.muid = eve;
 	d.qid = c->qid;
 	d.mode = (c->qid.type<<24)|STMODE(&stbuf);
+	if(S_ISFIFO(stbuf.st_mode))
+		d.mode |= H9_DMFIFO;	/* h9 */
 	d.atime = stbuf.st_atime;
 	d.mtime = stbuf.st_mtime;
 	d.length = stbuf.st_size;
@@ -444,6 +446,26 @@ fsopen(Chan *c, int mode)
 		if((uif->dir = fdopendir(fd)) == NULL)
 			error(strerror(errno));
 		poperror();
+	}
+	else if(S_ISFIFO(uif->mode)) {
+		/*
+		 * h9: a host FIFO is opened only to check it, without waiting for
+		 * the other end, and never read or written (fsread, fswrite): a
+		 * Linux program's open joins h9's own pipe for it (src/kern/fifo.c),
+		 * and a Plan 9 program sees an empty file.
+		 */
+		if((fd = open(uif->path, O_RDONLY|O_NONBLOCK)) < 0)
+			error(strerror(errno));
+		if(waserror()){
+			close(fd);
+			nexterror();
+		}
+		h9_fs_notefd(fd, uif->path);
+		h9_fs_allowfd(fd, op);
+		if(mode & ORCLOSE)
+			h9_fs_allowfd(fd, H9_FSREMOVE);
+		poperror();
+		uif->fd = fd;
 	}
 	else {
 		m = fsomode(omode & 3);
@@ -619,6 +641,8 @@ fsread(Chan *c, void *va, long n, vlong offset)
 		return fsdirread(c, va, n, offset);
 
 	uif = c->aux;
+	if(S_ISFIFO(uif->mode))
+		return 0;	/* h9: see fsopen */
 	qlock(&uif->oq);
 	if(waserror()) {
 		qunlock(&uif->oq);
@@ -651,6 +675,8 @@ fswrite(Chan *c, void *va, long n, vlong offset)
 	Ufsinfo *uif;
 
 	uif = c->aux;
+	if(S_ISFIFO(uif->mode))
+		error(Eperm);	/* h9: see fsopen */
 	qlock(&uif->oq);
 	if(waserror()) {
 		qunlock(&uif->oq);
@@ -1013,6 +1039,8 @@ fsdirread(Chan *c, uchar *va, int count, ulong offset)
 		d.muid = eve;
 		d.qid = fsqid(&stbuf);
 		d.mode = (d.qid.type<<24)|STMODE(&stbuf);
+		if(S_ISFIFO(stbuf.st_mode))
+			d.mode |= H9_DMFIFO;	/* h9 */
 		d.atime = stbuf.st_atime;
 		d.mtime = stbuf.st_mtime;
 		d.length = stbuf.st_size;
@@ -1108,6 +1136,51 @@ h9_fs_symlink(Chan *c, char *name, char *target)
 		error(strerror(errno));
 	poperror();
 	close(dfd);
+}
+
+/*
+ * h9: makes name in the directory c a FIFO, for the Linux personality's
+ * mknodat (design/linux-fifo.md). The new name is checked like a create.
+ */
+void
+h9_fs_mkfifo(Chan *c, char *name, ulong perm)
+{
+#ifdef __wasi__
+	USED(c);
+	USED(name);
+	USED(perm);
+	error(Eperm);
+#else
+	Ufsinfo *uif;
+	int dfd;
+
+	if(devtab[c->type]->dc != 'U')
+		error(Eperm);
+	uif = c->aux;
+	dfd = open(uif->path, O_RDONLY|O_DIRECTORY);
+	if(dfd < 0)
+		error(strerror(errno));
+	if(waserror()){
+		close(dfd);
+		nexterror();
+	}
+	h9_fs_notefd(dfd, uif->path);
+	h9_fs_allowfd(dfd, H9_FSWALK);
+	h9_fs_allowat(dfd, name, H9_FSCREATE);
+	if(mkfifoat(dfd, name, perm & 0777) < 0)
+		error(strerror(errno));
+	poperror();
+	close(dfd);
+#endif
+}
+
+/* h9: whether the devfs chan c is a host FIFO's */
+int
+h9_fs_isfifo(Chan *c)
+{
+	if(devtab[c->type]->dc != 'U')
+		return 0;
+	return S_ISFIFO(((Ufsinfo*)c->aux)->mode);
 }
 
 /* h9: c moved to name in directory dir, for renameat across directories */

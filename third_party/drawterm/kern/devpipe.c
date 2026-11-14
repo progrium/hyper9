@@ -15,6 +15,8 @@ struct Pipe
 	ulong	path;
 	Queue	*q[2];
 	int	qref[2];
+	int	fifo;	/* h9: a Linux FIFO's pipe (h9_fifopipe) */
+	int	fref[2];	/* h9: a FIFO's opens for reading and for writing */
 };
 
 struct
@@ -177,6 +179,51 @@ pipestat(Chan *c, uchar *db, int n)
 }
 
 /*
+ * h9: a Linux FIFO's pipe (design/linux-fifo.md) has one queue, q[0],
+ * that every open reads and writes, as a Linux pipe does, whichever data
+ * file it's of. Its opens are counted by their mode: ORDWR is a reader and
+ * a writer. Once the last writer closes, readers drain the queue and then
+ * read EOF, as does a reader that opens with no writer; once the last
+ * reader closes, writes fail. A reader and a writer both open again make
+ * a working pipe, and the last close of all empties it.
+ */
+static void
+fifoopen(Pipe *p, int mode)
+{
+	if(mode != OWRITE)
+		p->fref[0]++;
+	if(mode != OREAD)
+		p->fref[1]++;
+	if(p->fref[0] > 0 && p->fref[1] > 0)
+		qreopen(p->q[0]);
+	else if(p->fref[1] == 0)
+		qhangup(p->q[0], 0);	/* a reader with no writer reads EOF */
+}
+
+static void
+fifoclose(Pipe *p, int mode)
+{
+	if(mode != OWRITE && --p->fref[0] == 0)
+		qhangup(p->q[0], 0);
+	if(mode != OREAD && --p->fref[1] == 0)
+		qhangup(p->q[0], 0);
+	if(p->fref[0] == 0 && p->fref[1] == 0){
+		qclose(p->q[0]);
+		qreopen(p->q[0]);
+	}
+}
+
+/*
+ * h9: a FIFO read at the end of a hung-up queue is EOF however often
+ * it's read, as on Linux; qread fails a fourth.
+ */
+static int
+fifoeof(Pipe *p)
+{
+	return p->fifo && qisclosed(p->q[0]) && qlen(p->q[0]) == 0;
+}
+
+/*
  *  if the stream doesn't exist, create it
  */
 static Chan*
@@ -195,6 +242,9 @@ pipeopen(Chan *c, int omode)
 
 	p = c->aux;
 	qlock(&p->lk);
+	if(p->fifo)
+		fifoopen(p, openmode(omode));
+	else
 	switch(NETTYPE(c->qid.path)){
 	case Qdata0:
 		p->qref[0]++;
@@ -220,7 +270,9 @@ pipeclose(Chan *c)
 	p = c->aux;
 	qlock(&p->lk);
 
-	if(c->flag & COPEN){
+	if((c->flag & COPEN) && p->fifo && NETTYPE(c->qid.path) != Qdir)
+		fifoclose(p, c->mode);
+	else if(c->flag & COPEN){
 		/*
 		 *  closing either side hangs up the stream
 		 */
@@ -246,7 +298,7 @@ pipeclose(Chan *c)
 	/*
 	 *  if both sides are closed, they are reusable
 	 */
-	if(p->qref[0] == 0 && p->qref[1] == 0){
+	if(!p->fifo && p->qref[0] == 0 && p->qref[1] == 0){
 		qreopen(p->q[0]);
 		qreopen(p->q[1]);
 	}
@@ -277,9 +329,10 @@ piperead(Chan *c, void *va, long n, vlong offset)
 	case Qdir:
 		return devdirread(c, va, n, pipedir, NPIPEDIR, pipegen);
 	case Qdata0:
-		return qread(p->q[0], va, n);
 	case Qdata1:
-		return qread(p->q[1], va, n);
+		if(fifoeof(p))
+			return 0;
+		return qread(p->q[NETTYPE(c->qid.path) == Qdata1 && !p->fifo], va, n);
 	default:
 		panic("piperead");
 	}
@@ -295,9 +348,10 @@ pipebread(Chan *c, long n, ulong offset)
 
 	switch(NETTYPE(c->qid.path)){
 	case Qdata0:
-		return qbread(p->q[0], n);
 	case Qdata1:
-		return qbread(p->q[1], n);
+		if(fifoeof(p))
+			return allocb(0);
+		return qbread(p->q[NETTYPE(c->qid.path) == Qdata1 && !p->fifo], n);
 	}
 
 	return devbread(c, n, offset);
@@ -325,7 +379,7 @@ pipewrite(Chan *c, void *va, long n, vlong offset)
 
 	switch(NETTYPE(c->qid.path)){
 	case Qdata0:
-		n = qwrite(p->q[1], va, n);
+		n = qwrite(p->q[p->fifo ? 0 : 1], va, n);
 		break;
 
 	case Qdata1:
@@ -358,7 +412,7 @@ pipebwrite(Chan *c, Block *bp, ulong offset)
 	p = c->aux;
 	switch(NETTYPE(c->qid.path)){
 	case Qdata0:
-		n = qbwrite(p->q[1], bp);
+		n = qbwrite(p->q[p->fifo ? 0 : 1], bp);
 		break;
 
 	case Qdata1:
@@ -407,6 +461,8 @@ h9_pipeq(Chan *c, int wr)
 	p = c->aux;
 	if(p == nil)
 		return nil;
+	if(p->fifo && NETTYPE(c->qid.path) != Qdir)
+		return p->q[0];
 	switch(NETTYPE(c->qid.path)){
 	case Qdata0:
 		return p->q[wr ? 1 : 0];
@@ -415,3 +471,32 @@ h9_pipeq(Chan *c, int wr)
 	}
 	return nil;
 }
+
+/*
+ * h9: a new pipe for a Linux FIFO (src/kern/fifo.c), as its directory's
+ * chan, and opens of its data file (see fifoopen).
+ */
+Chan*
+h9_fifopipe(void)
+{
+	Chan *c;
+
+	c = pipeattach(nil);
+	((Pipe*)c->aux)->fifo = 1;
+	return c;
+}
+
+/* h9: a FIFO's opens for reading (end 0) or writing (end 1), by its directory's chan. */
+int
+h9_fiforefs(Chan *dir, int end)
+{
+	Pipe *p;
+	int n;
+
+	p = dir->aux;
+	qlock(&p->lk);
+	n = p->fref[end != 0];
+	qunlock(&p->lk);
+	return n;
+}
+
