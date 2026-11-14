@@ -6,7 +6,7 @@ created: 2026-11-14
 authors: [progrium]
 depends: [linux-personality]
 areas: [kern, linux]
-branch: []
+branch: [linux-pty]
 ---
 
 # Proposal: Linux pseudoterminals
@@ -79,12 +79,12 @@ A pty pair is kernel memory and two queues inside one machine. It reaches nothin
 
 Integration cases, tagged `[linux-pty]`, with the Alpine root:
 
-- [ ] `test "posix_openpt, grantpt, unlockpt, and ptsname give an open slave [linux-pty]"`: a small C program opens a pair, writes to the master, reads from the slave, and the other way round.
-- [ ] `test "the master reads EOF once the slave closes [linux-pty]"`
-- [ ] `test "Python's pty.spawn runs a command in a pty [linux-pty]"`: `python3 -c 'import pty; pty.spawn(["tty"])'` prints `/dev/pts/0`, with the workloads root.
-- [ ] `test "a raw pty passes bytes unchanged [linux-pty]"`, after `cfmakeraw`.
-- [ ] `test "TIOCSWINSZ sends SIGWINCH to the foreground group [linux-pty]"`
-- [ ] Demo: the static Nix from the Nix spike builds a `derivation { builder = "/bin/sh"; … }` with `sandbox = false`, and `nix profile install nixpkgs#hello` makes a profile.
+- [x] `test "posix_openpt, grantpt, unlockpt, and ptsname give an open slave [linux-pty]"`: a small C program opens a pair, writes to the master, reads from the slave, and the other way round.
+- [x] `test "the master reads EOF once the slave closes [linux-pty]"`
+- [x] `test "Python's pty.spawn runs a command in a pty [linux-pty]"`: `python3 -c 'import pty; pty.spawn(["tty"])'` prints `/dev/pts/0`, with the workloads root.
+- [x] `test "a raw pty passes bytes unchanged [linux-pty]"`, after `cfmakeraw`.
+- [x] `test "TIOCSWINSZ sends SIGWINCH to the foreground group [linux-pty]"`
+- [x] Demo: the static Nix from the Nix spike builds a `derivation { builder = "/bin/sh"; … }` with `sandbox = false`, and `nix profile install nixpkgs#hello` makes a profile.
 
 Step 2:
 
@@ -105,3 +105,13 @@ Step 2:
 - Whether step 2 should be its own proposal, as README.md suggests for parts that finish at different times. It's kept here for now so the device's state is designed once.
 - How `/dev/tty` should pick between the console and a pty for a process that has neither as its controlling terminal.
 - Whether `TIOCSTI` should be served at all. Linux 6.2 and later make it optional, because it lets a program inject input.
+
+## Updates
+
+- 2026-11-14: Step 1 is on the `linux-pty` branch. Refinements made while building it:
+  - `#τ/N` is the slave itself, so there's no `#τ/N/ctl`: the personality reads and writes a pair's state through kernel calls on an fd of either side (`h9_pty_get` and `h9_pty_set` in devpty.c).
+  - A master read waits until the slave first opens, as on Linux, and reads EIO only once it has opened and closed. After the master closes, the slave reads an end of file and writes fail with EIO.
+  - A session leader that `setsid` made takes a slave it opens without `O_NOCTTY` as its controlling terminal, as on Linux. The machine's first process also leads a session, but its terminal is the console, so it doesn't. `/dev/tty` opens the session's pty when it has one, and the console otherwise, which settles the open issue about `/dev/tty` for now.
+  - The master's last close sends SIGHUP from the process that closed it. A close by a 9front process, or by the kernel at a machine's end, sends nothing.
+  - Cases beyond the Done criteria cover a locked slave, `TIOCGPTPEER`, `poll` and `O_NONBLOCK`, and the hangup.
+- 2026-11-14: The Nix demo ran on the native backend with the `nix-bugs` branch merged in, which Nix needs for its other fixes: a `/bin/sh` derivation built with `sandbox = false`, and `nix profile install nixpkgs#hello` made a profile whose `hello` ran, in about 4 min 40 s with the nixpkgs download.

@@ -921,6 +921,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#A` | audio | | Present, but there's no sound to drive |
 | `#λ` | linux | A Linux process's `/` | The Linux view: `/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, and `/sys`, with the Linux root unioned after them (chapter 20) |
 | `#ε` | eventfd | | Linux `eventfd`, `epoll`, and `signalfd` instances |
+| `#τ` | pty | A Linux process's `/dev/pts` | Linux pseudoterminals: `ptmx`, which makes a pair and opens its master, and each pair's slave by number. Raw: data passes through unchanged ([linux-pty](design/linux-pty.md)). |
 
 9front's hardware devices aren't there: no `#S` disks, `#l` Ethernet, `#t`
 serial lines, `#v` VGA, or `#P` architecture, and no `#σ` shared-memory
@@ -1945,7 +1946,7 @@ directories h9 provides on top:
 | `/9` | The machine's 9front root: `/9/bin/ls` is 9front's `ls` |
 | `/tmp` | The machine's private `/tmp`, the same files a 9front program sees there |
 | `/mnt/term` | The shared host paths; your cwd is `/mnt/term/cwd`, and programs start in it |
-| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, and `shm`, a private in-memory directory as a tmpfs would be |
+| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console, or the session's pty), `stdin`, `stdout`, `stderr`, `fd`, `ptmx` and `pts` (pseudoterminals), and `shm`, a private in-memory directory as a tmpfs would be |
 | `/proc`, `/sys` | What libc, busybox, Python, and htop read: `cpuinfo` (following `--cpus`), `meminfo`, `mounts`, and per-process `stat`, `status`, `maps`, `cmdline`, `exe`, `fd`, and `task` |
 | `/etc/resolv.conf` | Your host's DNS servers, when the root has none |
 
