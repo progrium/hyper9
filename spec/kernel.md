@@ -128,9 +128,9 @@ A process takes its record's `debug` lock to swap its fd group, namespace, or do
 
 Serves `/fd/N`.
 
-#### The Linux view `#λ` (`src/kern/devlinux.c`) and eventfds `#ε` (`src/kern/linuxnet.c`)
+#### The Linux view `#λ` (`src/kern/devlinux.c`), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
 
-A Linux process's `/`, and its eventfd, epoll, and signalfd instances (see Linux personality).
+A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux personality).
 
 #### `tsleep` (`src/kern/tsleep.c`)
 
