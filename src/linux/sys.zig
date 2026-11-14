@@ -91,6 +91,9 @@ pub const Host = struct {
     kill: *const fn (ctx: *anyopaque, from: *Process, pid: i64, signo: u8, thread: ?ThreadKill) i64,
     /// The process group of pid, or null if there's no such process.
     pgidOf: *const fn (ctx: *anyopaque, pid: u32) ?u32,
+    /// The caller's wait has consumed pid's exit: it's no longer a
+    /// zombie for kill to reach.
+    reaped: *const fn (ctx: *anyopaque, pid: u32) void,
 };
 
 /// A process's user and group ids. h9 has no users: they change what the
@@ -987,8 +990,10 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .renameat2 => return ret(try rename(p, c.int(0), c.a[1], c.int(2), c.a[3], c.uint(4))),
         .rename => return ret(try rename(p, AT_FDCWD, c.a[0], AT_FDCWD, c.a[1], 0)),
         .fchmod => return ret(try chmodFd(p, c.int(0), c.uint(1))),
-        .fchmodat => return ret(try chmodAt(p, c.int(0), c.a[1], c.uint(2))),
-        .chmod => return ret(try chmodAt(p, AT_FDCWD, c.a[0], c.uint(1))),
+        .fchmodat => return ret(try chmodAt(p, c.int(0), c.a[1], c.uint(2), 0)),
+        // glibc 2.39 and later try fchmodat2 first, for any fchmodat.
+        .fchmodat2 => return ret(try chmodAt(p, c.int(0), c.a[1], c.uint(2), c.uint(3))),
+        .chmod => return ret(try chmodAt(p, AT_FDCWD, c.a[0], c.uint(1), 0)),
         // Linux ids mean nothing to h9's access checks, so changing the
         // owner is accepted and has no effect.
         .fchownat, .fchown, .chown, .lchown => return ret(0),
@@ -2626,6 +2631,14 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
         return -E.NOENT;
     }
     if (flags & AT_SYMLINK_NOFOLLOW != 0) {
+        // /proc's links (exe, cwd, fd/N) are served by readlink, not by
+        // devlinux, and are links to lstat too: libstdc++'s
+        // filesystem::read_symlink lstats /proc/self/exe before reading it.
+        if (procLink(p, path)) |target| {
+            const st: attr.Stat = .{ .dev = 0, .ino = 0, .mode = attr.S_IFLNK | 0o777, .nlink = 1, .uid = 0, .gid = 0, .size = target.len, .atime = 0, .mtime = 0 };
+            try putStat(p, buf, &st, fmt);
+            return 0;
+        }
         if (at(dirfd, path, []u8, kern.readlink, .{ path, &p.name2_buf })) |target| {
             var b: [1024]u8 = undefined;
             // The link's own Dir, for its qid and times.
@@ -2878,9 +2891,32 @@ fn chmodFd(p: *Process, fd: i32, mode: u32) Err!i64 {
     return 0;
 }
 
-fn chmodAt(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
-    const path = try pathArg(p, path_va, &p.name_buf);
-    if (path.len == 0) return -E.NOENT;
+/// chmod, fchmodat, and fchmodat2, whose `flags` may be
+/// AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH. A link's own mode can't be
+/// changed, so AT_SYMLINK_NOFOLLOW on one is EOPNOTSUPP, as on Linux.
+/// /proc's links are followed to their targets: glibc and musl change
+/// a mode without following a link by opening the file O_PATH and
+/// calling chmod("/proc/self/fd/N").
+fn chmodAt(p: *Process, dirfd: i32, path_va: u64, mode: u32, flags: u32) Err!i64 {
+    if (flags & ~@as(u32, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0) return -E.INVAL;
+    var path = try pathArg(p, path_va, &p.name_buf);
+    if (path.len == 0) {
+        if (flags & AT_EMPTY_PATH == 0) return -E.NOENT;
+        if (dirfd != AT_FDCWD) return chmodFd(p, dirfd, mode);
+        p.name_buf[0] = '.';
+        p.name_buf[1] = 0;
+        path = p.name_buf[0..1 :0];
+    }
+    if (procLink(p, path)) |target| {
+        if (flags & AT_SYMLINK_NOFOLLOW != 0) return -E.OPNOTSUPP;
+        // A pipe's or socket's link names no file.
+        if (target.len == 0 or target[0] != '/' or target.len >= p.name_buf.len) return -E.OPNOTSUPP;
+        std.mem.copyForwards(u8, p.name_buf[0..target.len], target);
+        p.name_buf[target.len] = 0;
+        path = p.name_buf[0..target.len :0];
+    } else if (flags & AT_SYMLINK_NOFOLLOW != 0) {
+        if (at(dirfd, path, []u8, kern.readlink, .{ path, &p.name2_buf })) |_| return -E.OPNOTSUPP else |_| {}
+    }
     var b: [1024]u8 = undefined;
     const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
@@ -3282,7 +3318,9 @@ const Reaped = union(enum) { rec: WaitRec, none, nochild };
 
 fn reap(p: *Process, want: i32, block: bool, peek: bool) Err!Reaped {
     for (p.waits.items, 0..) |w, i| if (matches(p, want, w)) {
-        return .{ .rec = if (peek) w else p.waits.orderedRemove(i) };
+        if (peek) return .{ .rec = w };
+        p.host.reaped(p.host.ctx, w.pid);
+        return .{ .rec = p.waits.orderedRemove(i) };
     };
     var buf: [kern.ERRMAX + 128]u8 = undefined;
     while (true) {
@@ -3298,7 +3336,7 @@ fn reap(p: *Process, want: i32, block: bool, peek: bool) Err!Reaped {
         if (peek and want > 0) return .{ .rec = w };
         countChild(p, w);
         if (matches(p, want, w)) {
-            if (peek) p.waits.append(p.gpa, w) catch return error.NoMem;
+            if (peek) p.waits.append(p.gpa, w) catch return error.NoMem else p.host.reaped(p.host.ctx, w.pid);
             return .{ .rec = w };
         }
         p.waits.append(p.gpa, w) catch return error.NoMem;

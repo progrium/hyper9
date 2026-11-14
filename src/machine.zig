@@ -668,6 +668,14 @@ pub const Machine = struct {
         /// this is empty it stays empty.
         procs: std.ArrayList(*Proc) = .empty,
         next_pid: u32 = 1,
+        /// Linux processes that have exited and that their parents
+        /// haven't reaped. kill reaches them as on Linux, where signalling
+        /// a zombie, or a process group of only zombies, succeeds and does
+        /// nothing: Nix kills a builder's group after it exits and before
+        /// it's reaped. A parent's leave when it exits, and the oldest go
+        /// first if a parent never reaps.
+        zombies: [64]Zombie = undefined,
+        nzombies: usize = 0,
         /// Of `procs`: the program's, and the server Proc and its
         /// descendants, each counted against `--pids` on its own
         /// (design/serve.md, "Limits").
@@ -693,6 +701,31 @@ pub const Machine = struct {
         home_buf: [96]u8 = undefined,
         home: []const u8 = "",
         track: kern.OverlayTrack = undefined,
+
+        const Zombie = struct { pid: u32, pgid: u32, ppid: u32 };
+
+        /// Records an exiting Linux process, and forgets its children:
+        /// nothing can reap them now. Called with `lock` held.
+        fn addZombie(j: *Job, z: Zombie) void {
+            j.dropZombies(z.pid, .ppid);
+            if (j.nzombies == j.zombies.len) {
+                std.mem.copyForwards(Zombie, j.zombies[0 .. j.nzombies - 1], j.zombies[1..j.nzombies]);
+                j.nzombies -= 1;
+            }
+            j.zombies[j.nzombies] = z;
+            j.nzombies += 1;
+        }
+
+        /// Forgets the zombies whose `field` is `pid`. Called with `lock` held.
+        fn dropZombies(j: *Job, pid: u32, comptime field: enum { pid, ppid }) void {
+            var n: usize = 0;
+            for (j.zombies[0..j.nzombies]) |z| {
+                if (@field(z, @tagName(field)) == pid) continue;
+                j.zombies[n] = z;
+                n += 1;
+            }
+            j.nzombies = n;
+        }
 
         fn rootChanged(ctx: *anyopaque, path: []const u8) void {
             const j: *Job = @ptrCast(@alignCast(ctx));
@@ -1190,8 +1223,13 @@ pub const Machine = struct {
             const j = p.job;
             const gpa = j.m.gpa;
             const io = j.m.io;
+            // A Linux process is a zombie from here until its parent
+            // reaps it. It's recorded before its exit posts the wait
+            // record (kern.release), so the reap comes after.
+            const zombie: ?Job.Zombie = if (p.lx) |l| (if (l.isLeader()) .{ .pid = p.pid, .pgid = l.pgid, .ppid = kc.ppid() } else null) else null;
             j.lockSpin();
             p.exiting = true;
+            if (zombie) |z| j.addZombie(z);
             j.lock.unlock();
             // No kick hook may run on the Proc once it's freed.
             kern.setAux(null);
@@ -2039,7 +2077,7 @@ pub const Machine = struct {
                 .arch = m.arch,
                 .pid = p.pid,
                 .mm = prog.mm,
-                .host = .{ .ctx = j, .kill = linuxKill, .pgidOf = linuxPgid },
+                .host = .{ .ctx = j, .kill = linuxKill, .pgidOf = linuxPgid, .reaped = linuxReaped },
                 .pgid = p.pid,
                 .sid = p.pid,
                 .hwcap = lexec.hwcap(m.arch, m.backend),
@@ -2798,7 +2836,14 @@ pub const Machine = struct {
                 n += 1;
             }
         }
-        if (n == 0) return -attr.E.SRCH;
+        if (n == 0) {
+            if (thread != null or pid == -1) return -attr.E.SRCH;
+            j.lockSpin();
+            defer j.lock.unlock();
+            const pg: u32 = if (pid == 0) from.pgid else @intCast(@abs(pid));
+            for (j.zombies[0..j.nzombies]) |z| if (if (pid > 0) z.pid == pg else z.pgid == pg) return 0;
+            return -attr.E.SRCH;
+        }
         if (signo == 0) return 0;
         var buf: [32]u8 = undefined;
         const note = if (signo == lsig.SIGKILL) "kill" else if (thread != null) lsig.threadNote(signo, &buf) else lsig.signalNote(signo, &buf);
@@ -2810,6 +2855,13 @@ pub const Machine = struct {
             _ = kern.postNote(t.pid, note, .user) catch {};
         }
         return 0;
+    }
+
+    fn linuxReaped(ctx: *anyopaque, pid: u32) void {
+        const j: *Job = @ptrCast(@alignCast(ctx));
+        j.lockSpin();
+        defer j.lock.unlock();
+        j.dropZombies(pid, .pid);
     }
 
     fn linuxPgid(ctx: *anyopaque, pid: u32) ?u32 {

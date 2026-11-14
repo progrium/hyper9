@@ -920,6 +920,57 @@ static void proc_fd_dir(void) {
 	printf("ok proc_fd_dir\n");
 }
 
+/* fchmodat2 (glibc 2.39 and later try it first) with its flags, chmod
+ * through /proc/self/fd/N (the fallback glibc and musl use for
+ * AT_SYMLINK_NOFOLLOW), and /proc/self/exe as a link to lstat, which
+ * libstdc++'s filesystem::read_symlink checks before reading it. */
+static void chmod_links(void) {
+	struct stat st;
+	int fd = fresh("chmod");
+	CHECK("chmod_links", fd >= 0);
+	char file[256], link[256], via[64];
+	snprintf(file, sizeof file, "%s", path);
+	snprintf(link, sizeof link, "%s.link", file);
+	unlink(link);
+	CHECK("chmod_links", symlink("chmod", link) == 0);
+	CHECK("chmod_links", syscall(452, AT_FDCWD, file, 0600, 0) == 0 && stat(file, &st) == 0 && (st.st_mode & 0777) == 0600);
+	CHECK("chmod_links", syscall(452, AT_FDCWD, file, 0640, AT_SYMLINK_NOFOLLOW) == 0 && stat(file, &st) == 0 && (st.st_mode & 0777) == 0640);
+	CHECK("chmod_links", syscall(452, AT_FDCWD, link, 0644, 0) == 0 && stat(file, &st) == 0 && (st.st_mode & 0777) == 0644);
+	CHECK("chmod_links", syscall(452, AT_FDCWD, link, 0600, AT_SYMLINK_NOFOLLOW) < 0 && errno == EOPNOTSUPP);
+	CHECK("chmod_links", syscall(452, fd, "", 0604, AT_EMPTY_PATH) == 0 && stat(file, &st) == 0 && (st.st_mode & 0777) == 0604);
+	CHECK("chmod_links", syscall(452, AT_FDCWD, "", 0600, 0) < 0 && errno == ENOENT);
+	CHECK("chmod_links", syscall(452, AT_FDCWD, file, 0600, 0x8000) < 0 && errno == EINVAL);
+	int o = open(file, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+	CHECK("chmod_links", o >= 0);
+	snprintf(via, sizeof via, "/proc/self/fd/%d", o);
+	CHECK("chmod_links", chmod(via, 0611) == 0 && stat(file, &st) == 0 && (st.st_mode & 0777) == 0611);
+	CHECK("chmod_links", close(o) == 0 && close(fd) == 0 && unlink(link) == 0 && unlink(file) == 0);
+	char exe[256];
+	ssize_t n = readlink("/proc/self/exe", exe, sizeof exe);
+	CHECK("chmod_links", n > 0 && lstat("/proc/self/exe", &st) == 0 && S_ISLNK(st.st_mode) && st.st_size == n);
+	CHECK("chmod_links", stat("/proc/self/exe", &st) == 0 && S_ISREG(st.st_mode));
+	printf("ok chmod_links\n");
+}
+
+/* kill reaches a process that has exited and isn't reaped yet, and its
+ * process group, as Nix kills a builder's group after it exits; once
+ * it's reaped, it's ESRCH. */
+static void kill_zombie(void) {
+	pid_t c = fork();
+	if (c == 0) {
+		setpgid(0, 0);
+		_exit(0);
+	}
+	CHECK("kill_zombie", c > 0);
+	setpgid(c, c);
+	siginfo_t si;
+	CHECK("kill_zombie", waitid(P_PID, c, &si, WEXITED | WNOWAIT) == 0 && si.si_pid == c);
+	CHECK("kill_zombie", kill(-c, SIGKILL) == 0 && kill(c, 0) == 0);
+	CHECK("kill_zombie", child_status(c) == 0);
+	CHECK("kill_zombie", kill(-c, SIGKILL) < 0 && errno == ESRCH && kill(c, 0) < 0 && errno == ESRCH);
+	printf("ok kill_zombie\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -954,6 +1005,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "lazy_map")) lazy_map();
 		if (all || !strcmp(n, "image_dontneed")) image_dontneed();
 		if (all || !strcmp(n, "proc_fd_dir")) proc_fd_dir();
+		if (all || !strcmp(n, "chmod_links")) chmod_links();
+		if (all || !strcmp(n, "kill_zombie")) kill_zombie();
 	}
 	return failed;
 }

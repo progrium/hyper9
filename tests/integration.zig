@@ -5500,6 +5500,18 @@ test "a path through /proc/self/fd/N walks on from the directory the fd names [l
     try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_fd_dir" }, "ok proc_fd_dir\n");
 }
 
+test "fchmodat2 takes its flags, chmod follows /proc/self/fd/N, and /proc/self/exe is a link to lstat [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "chmod_links" }, "ok chmod_links\n");
+}
+
+test "kill reaches an exited process and its group until it's reaped [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "kill_zombie" }, "ok kill_zombie\n");
+}
+
 test "System V shared memory: a keyed segment, shared across fork, its attach count, and removal [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
