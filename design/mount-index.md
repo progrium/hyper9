@@ -15,7 +15,7 @@ Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A [9P root](ninep-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its qid, mode, length, mtime, and owner, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server. Each directory is checked against the server once per run, in one pipelined batch when the tree is mounted, and each file is checked when it's opened. Anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers.
+A [9P root](ninep-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its qid, mode, length, mtime, and owner, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server. Each directory is checked against the server once per run, the first time it's used, and each file is checked when it's opened. Anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers.
 
 The index is either a file at the top of the tree, `/.h9index`, or, for the root, one given with `--root-index FILE|URL`, so it can be layered over a server that can't be written to. A server that keeps its `/.h9index` current as the tree changes makes this work for mutable trees too, such as home directories: they're fast from the first `ls`, and only what changed since the index was written is demoted. A new guest command, `mkindex`, builds it by walking a mounted tree, so the qids in it are the server's own. The index is text on the wire and a compiled binary form in the cache.
 
@@ -143,13 +143,24 @@ An index never makes a root fail to mount that would have mounted without one:
 - An index that doesn't parse, whose format version h9 doesn't know, or that's larger than 256 MB, is ignored with a note under `-v`, and the mount is ordinary 9P. So is a cache file whose trailer doesn't match.
 - A cache directory that can't be written means the index is compiled in memory for this run only.
 
+### Performance
+
+Starting rc and running `echo hi`, over a 9front root of 20,368 names served by diod, with a relay adding latency each way:
+
+| Latency each way | No index | With an index |
+| --- | --- | --- |
+| 5 ms | 6.4 s | 1.2 s |
+| 25 ms | 14.7 s | 3.2 s |
+
+That run sends the server 357 requests without an index and 74 with one, 44 of them to check the 15 directories it used. On loopback both take 0.05 s.
+
 ## Rationale
 
 **Why an index, not a bigger cache in the translator.** A cache filled as the program runs saves the second lookup of a name, not the first, and startup is mostly first lookups. Only something that knows the tree beforehand can answer a first lookup, or a negative one, without asking. An index also tells h9 which directories exist, which is what lets it validate every directory on a walk's path at once even though devmnt can't pipeline.
 
 **Why validate at all.** Without validation the index would be a promise about a server the client doesn't control. With it, the worst a stale or wrong index does is cost the round trips it would have saved. A future content-addressed root, whose tree is pinned by hash, could skip validation safely; see Open issues.
 
-**Why validate on first use, not all at mount.** Validating every directory at mount is a few round trips, but thousands of small requests: 3377 for a 9front root of 1126 directories, which cost more than the round trips the index saves before the program runs. A session's start touches a few dozen directories, and validating those as they're used, a path's at once, starts sooner at every latency measured (see Updates). The cost is up to two round trips the first time each new path is used.
+**Why validate on first use, not all at mount.** Validating every directory at mount is a few round trips, but thousands of small requests: 3,377 for a 9front root of 1,126 directories. A session's start touches a few dozen directories, and validating those as they're used, a path's at once, started about a second sooner at 25 ms each way (see Updates). The cost is up to two round trips the first time each new path is used.
 
 **Why validate directories by stat, not by reading them.** Reading every directory validates every file too, but transfers the tree's metadata on every run, which is what the cache exists to avoid. A directory's stat changes when its listing does, which is what negative lookups depend on, and file changes are caught at open, which is what reads depend on.
 
@@ -251,14 +262,4 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
   - **The cases use a small tree** copied from the test root (rc, the commands `mkindex` and the cases run, rcmain, the mount points, and `/lib/x`), served the same way, since `mkindex` over the whole test root through the test server takes minutes. Each case keeps its own `--index-cache`.
   - **`walk` joined the slim set** ([multicall](multicall.md)), with a corpus entry; the slim tree couldn't be rebuilt here, so the box's size wasn't measured again.
   - The demo, over `ws://` with 50 ms each way, hasn't been run yet.
-- 2026-11-14: **Directories are validated on first use,** not all at mount, which closes the lazy-validation open issue. Measured on a ReleaseFast build against diod serving the amd64 9front root (20,368 entries, 1,126 directories), behind a relay adding latency each way, best of three runs with a cached index:
-
-  | Each way | Command | No index | All at mount | On first use |
-  | --- | --- | --- | --- | --- |
-  | 5 ms | `rc -c 'echo hi'` | 6.35 s | 1.64 s | 1.20 s |
-  | 5 ms | interactive `rc`, exiting at once | 7.36 s | 1.83 s | 1.41 s |
-  | 25 ms | `rc -c 'echo hi'` | 14.69 s | 4.29 s | 3.23 s |
-  | 25 ms | `rc -c 'lc /lib'` | 27.78 s | 5.83 s | 4.98 s |
-  | 25 ms | interactive `rc`, exiting at once | 18.03 s | 4.76 s | 3.90 s |
-
-  `rc -c 'echo hi'` sent the server 357 requests without an index, and 30 with one, besides 3377 to validate every directory at mount or 44 to validate the 15 it used. On loopback all three take 0.04 s to 0.08 s. `-v`'s summary of the validation moved to the end of the run, since that's when it's known.
+- 2026-11-14: **Directories are validated on first use,** not all at mount, which closes the lazy-validation open issue. Checking all 1,126 directories of a 9front root at mount took 3,377 requests, and at 25 ms each way `echo hi` started in 4.3 s, against 3.2 s validating on first use (see Performance). `-v`'s summary of the validation moved to the end of the run, since that's when it's known.
