@@ -625,7 +625,7 @@ test "--print shows the plan and doesn't run [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "profile:  tight\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "net.disable") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "memory=512M timeout=1m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #b #i #m\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "devmask:  #C #I #ℏ #U #ι #b #i #m\n") != null);
 }
 
 test "--memory caps guest memory [baseline]" {
@@ -3251,6 +3251,11 @@ const RootServer = struct {
     /// Serves the host tree `tree` instead, from a machine that still runs
     /// from the test root.
     fn startTree(s: *RootServer, e: Env, tree: ?[]const u8) !void {
+        return s.startServing(e, tree, false);
+    }
+
+    /// startTree, with the export writable when `writable`.
+    fn startServing(s: *RootServer, e: Env, tree: ?[]const u8, writable: bool) !void {
         const io = std.testing.io;
         var probe = try listenLocal();
         s.port = probe.socket.address.getPort();
@@ -3273,7 +3278,9 @@ const RootServer = struct {
             try argv.appendSlice(gpa, &.{ "--cwd", t });
             served = "/mnt/term/cwd";
         }
-        try argv.appendSlice(gpa, &.{ "aux/listen1", "-t", listen, "/bin/exportfs", "-R", "-r", served });
+        try argv.appendSlice(gpa, &.{ "aux/listen1", "-t", listen, "/bin/exportfs" });
+        if (!writable) try argv.append(gpa, "-R");
+        try argv.appendSlice(gpa, &.{ "-r", served });
         s.child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .create_no_window = true });
         errdefer s.child.kill(io);
         // Ready when it accepts; listen1 runs an exportfs for the probe,
@@ -3650,7 +3657,7 @@ test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     try std.testing.expectEqual(0, p.code);
     var want: [96]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, p.out, "  mount '#s/root' / ''") != null);
-    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}\n", .{srv.dial()})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}  index=/.h9index\n", .{srv.dial()})) != null);
     // Under the root's overlay (design/overlay.md) nothing reaches
     // the server; under --write=scope its server decides.
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") == null);
@@ -3697,6 +3704,604 @@ test "--check runs /bin/echo from a 9P root [ninep-roots]" {
     errdefer std.debug.print("stdout: {s}\n", .{r.out});
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
+}
+
+// Metadata indexes (design/mount-index.md). The server is a second h9
+// serving a small tree copied from the test root (a few commands,
+// rcmain, the mount points, and /lib/x) with exportfs, behind a relay
+// that counts the T-messages and keeps the names walked. Each case
+// keeps its compiled indexes in a cache of its own.
+
+/// A TCP relay to a RootServer that counts the T-messages it passes,
+/// the opens of a fid walked to /.h9index, and the names walked.
+const CountingRelay = struct {
+    srv: std.Io.net.Server,
+    port: u16,
+    thread: std.Thread = undefined,
+    tmsgs: std.atomic.Value(u32) = .init(0),
+    index_opens: std.atomic.Value(u32) = .init(0),
+    lock: std.atomic.Mutex = .unlocked,
+    /// Each name walked, after a newline.
+    names: [1 << 16]u8 = undefined,
+    names_len: usize = 0,
+    dial_buf: [64]u8 = undefined,
+
+    fn start(c: *CountingRelay, port: u16) !void {
+        c.* = .{ .srv = try listenLocal(), .port = port };
+        c.reset();
+        c.thread = try std.Thread.spawn(.{}, accept, .{c});
+        c.thread.detach();
+    }
+
+    fn dial(c: *CountingRelay) []const u8 {
+        return std.fmt.bufPrint(&c.dial_buf, "tcp!127.0.0.1!{d}", .{c.srv.socket.address.getPort()}) catch unreachable;
+    }
+
+    fn acquire(c: *CountingRelay) void {
+        while (!c.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn reset(c: *CountingRelay) void {
+        c.tmsgs.store(0, .release);
+        c.index_opens.store(0, .release);
+        c.acquire();
+        defer c.lock.unlock();
+        c.names[0] = '\n';
+        c.names_len = 1;
+    }
+
+    /// Whether a Twalk named `name` since the last reset.
+    fn walked(c: *CountingRelay, name: []const u8) bool {
+        c.acquire();
+        defer c.lock.unlock();
+        var buf: [256]u8 = undefined;
+        const want = std.fmt.bufPrint(&buf, "\n{s}\n", .{name}) catch return false;
+        return std.mem.indexOf(u8, c.names[0..c.names_len], want) != null;
+    }
+
+    fn accept(c: *CountingRelay) void {
+        const io = std.testing.io;
+        while (true) {
+            const conn = deadline.accept(&c.srv, io) catch return;
+            const ip = std.Io.net.IpAddress.parse("127.0.0.1", c.port) catch unreachable;
+            const s = ip.connect(io, .{ .mode = .stream }) catch {
+                conn.close(io);
+                continue;
+            };
+            const t = std.Thread.spawn(.{}, UnixRelay.copy, .{ s, conn }) catch return;
+            t.detach();
+            const t2 = std.Thread.spawn(.{}, count, .{ c, conn, s }) catch return;
+            t2.detach();
+        }
+    }
+
+    /// Copies 9P messages from `from` to `to`, counting them.
+    fn count(c: *CountingRelay, from: std.Io.net.Stream, to: std.Io.net.Stream) void {
+        const io = std.testing.io;
+        var rbuf: [1 << 17]u8 = undefined;
+        var r = from.reader(io, &rbuf);
+        var w = to.writer(io, &.{});
+        var index_fids: std.ArrayList(u32) = .empty;
+        defer index_fids.deinit(gpa);
+        while (true) {
+            const hdr = r.interface.peek(4) catch break;
+            const size = std.mem.readInt(u32, hdr[0..4], .little);
+            if (size < 7 or size > rbuf.len) break;
+            const m = r.interface.take(size) catch break;
+            c.saw(m, &index_fids) catch break;
+            w.interface.writeAll(m) catch break;
+        }
+        to.shutdown(io, .both) catch {};
+        from.shutdown(io, .both) catch {};
+    }
+
+    fn saw(c: *CountingRelay, m: []const u8, index_fids: *std.ArrayList(u32)) !void {
+        _ = c.tmsgs.fetchAdd(1, .acq_rel);
+        const fid = if (m.len >= 11) std.mem.readInt(u32, m[7..11], .little) else return;
+        switch (m[4]) {
+            110 => { // Twalk: fid[4] newfid[4] nwname[2] wname[s]...
+                if (m.len < 17) return;
+                const newfid = std.mem.readInt(u32, m[11..15], .little);
+                const n = std.mem.readInt(u16, m[15..17], .little);
+                var o: usize = 17;
+                var last: []const u8 = "";
+                c.acquire();
+                defer c.lock.unlock();
+                for (0..n) |_| {
+                    const name = FakeAttach.str(m, &o) orelse return;
+                    if (c.names_len + name.len + 1 <= c.names.len) {
+                        @memcpy(c.names[c.names_len..][0..name.len], name);
+                        c.names[c.names_len + name.len] = '\n';
+                        c.names_len += name.len + 1;
+                    }
+                    last = name;
+                }
+                if (std.mem.eql(u8, last, ".h9index")) try index_fids.append(gpa, newfid);
+            },
+            112 => if (std.mem.indexOfScalar(u32, index_fids.items, fid) != null) {
+                _ = c.index_opens.fetchAdd(1, .acq_rel);
+            },
+            120 => if (std.mem.indexOfScalar(u32, index_fids.items, fid)) |i| {
+                _ = index_fids.swapRemove(i);
+            },
+            else => {},
+        }
+    }
+};
+
+/// The index cases' tree and server: the tree at `tree`, served behind
+/// `relay`, and a cache at `cache`.
+const IndexRig = struct {
+    s: Scratch,
+    srv: RootServer,
+    relay: CountingRelay,
+    tree_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
+    cache_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
+    tree: []const u8 = "",
+    cache: []const u8 = "",
+
+    fn start(x: *IndexRig, e: Env, writable: bool) !void {
+        const io = std.testing.io;
+        try x.s.init();
+        errdefer x.s.deinit();
+        const d = x.s.tmp.dir;
+        const arch = testArch(e);
+        var b: [96]u8 = undefined;
+        for ([_][]const u8{ "bin", "dev", "env", "fd", "mnt/term/cwd", "n", "net", "proc", "srv", "tmp", "rc/bin", "rc/lib", "lib/x/sub" }) |p|
+            try d.createDirPath(io, try std.fmt.bufPrint(&b, "tree/{s}", .{p}));
+        try d.createDirPath(io, try std.fmt.bufPrint(&b, "tree/{s}/bin", .{arch}));
+        for ([_][]const u8{ "rc", "echo", "ls", "cat", "test", "walk", "awk", "sort", "mount" }) |cmd| {
+            var src: [64]u8 = undefined;
+            const rel = try std.fmt.bufPrint(&src, "{s}/bin/{s}", .{ arch, cmd });
+            try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try hostPath(e.root, rel), d, try std.fmt.bufPrint(&b, "tree/{s}", .{rel}), io, .{});
+        }
+        try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try hostPath(e.root, "rc/lib/rcmain"), d, "tree/rc/lib/rcmain", io, .{});
+        try d.writeFile(io, .{ .sub_path = "tree/lib/x/a", .data = "apple\n" });
+        try d.writeFile(io, .{ .sub_path = "tree/lib/x/b", .data = "banana\n" });
+        try d.writeFile(io, .{ .sub_path = "tree/lib/x/sub/c", .data = "cherry\n" });
+        x.tree = try std.fmt.bufPrint(&x.tree_buf, "{s}/tree", .{x.s.path});
+        x.cache = try std.fmt.bufPrint(&x.cache_buf, "{s}/cache", .{x.s.path});
+        try x.srv.startServing(e, x.tree, writable);
+        errdefer x.srv.stop();
+        try x.relay.start(x.srv.port);
+    }
+
+    fn stop(x: *IndexRig) void {
+        x.srv.stop();
+        x.s.deinit();
+    }
+
+    /// mkindex's index of the served tree, which the caller frees.
+    fn mkindex(x: *IndexRig, e: Env) ![]u8 {
+        const r = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--rc", "mkindex /" });
+        defer gpa.free(r.err);
+        errdefer gpa.free(r.out);
+        errdefer std.debug.print("mkindex: {s}\n", .{r.err});
+        try std.testing.expectEqual(0, r.code);
+        try std.testing.expect(std.mem.startsWith(u8, r.out, "h9index 1\n"));
+        return r.out;
+    }
+
+    /// Writes the served tree's /.h9index, indexed now.
+    fn index(x: *IndexRig, e: Env) !void {
+        const text = try x.mkindex(e);
+        defer gpa.free(text);
+        try x.write("tree/.h9index", text);
+    }
+
+    fn write(x: *IndexRig, rel: []const u8, data: []const u8) !void {
+        try x.s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = rel, .data = data });
+    }
+
+    /// Runs `args` over the relay, with -v and the case's cache, after
+    /// resetting the relay's counts.
+    fn run_(x: *IndexRig, e: Env, args: []const []const u8) !Result {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "--root", x.relay.dial(), "--index-cache", x.cache, "-v" });
+        try argv.appendSlice(gpa, args);
+        x.relay.reset();
+        return run(e, argv.items);
+    }
+
+    /// Waits out the second #U's mtimes are in, so a change after
+    /// indexing shows in a directory's qid.
+    fn tick() !void {
+        try std.testing.io.sleep(.fromMilliseconds(1100), .awake);
+    }
+};
+
+const x_listing = "/lib/x/a\n/lib/x/b\n/lib/x/sub\n";
+
+/// Adds every path under `dir`, as `prefix/name`, to `out`.
+fn hostNames(dir: std.Io.Dir, prefix: []const u8, out: *std.StringHashMapUnmanaged(void), arena: std.mem.Allocator) !void {
+    const io = std.testing.io;
+    var it = dir.iterate();
+    while (try it.next(io)) |ent| {
+        if (std.mem.eql(u8, ent.name, ".h9index")) continue;
+        const p = try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, ent.name });
+        try out.put(arena, p, {});
+        if (ent.kind == .directory) {
+            var sub = try dir.openDir(io, ent.name, .{ .iterate = true });
+            defer sub.close(io);
+            try hostNames(sub, p, out, arena);
+        }
+    }
+}
+
+/// The paths of an index's entries, in order.
+fn indexPaths(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = lines.next();
+    while (lines.next()) |l| {
+        if (l.len == 0 or l[0] == '!') continue;
+        try out.append(arena, l[0 .. std.mem.indexOfScalar(u8, l, ' ') orelse l.len]);
+    }
+    return out.items;
+}
+
+test "mkindex lists every name in the test root with the server's qids [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    const text = try x.mkindex(e);
+    defer gpa.free(text);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    errdefer std.debug.print("index:\n{s}", .{text});
+    // Every name in the tree, sorted, and nothing else.
+    var want: std.StringHashMapUnmanaged(void) = .empty;
+    try want.put(arena, "/", {});
+    var tree = try std.Io.Dir.cwd().openDir(std.testing.io, x.tree, .{ .iterate = true });
+    defer tree.close(std.testing.io);
+    try hostNames(tree, "", &want, arena);
+    const got = try indexPaths(arena, text);
+    try std.testing.expectEqual(want.count(), got.len);
+    for (got, 0..) |p, i| {
+        try std.testing.expect(want.contains(p));
+        if (i > 0) try std.testing.expect(std.mem.order(u8, got[i - 1], p) == .lt);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed") == null);
+    // The qid is the server's, as the guest sees it through /srv/root.
+    const q = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--rc", "mount /srv/root /n && walk -e q /n/lib/x/a" });
+    defer q.deinit();
+    const dot = std.mem.indexOfScalar(u8, q.out, '.') orelse return error.NoQid;
+    const at = std.mem.indexOf(u8, text, "\n/lib/x/a ") orelse return error.NoEntry;
+    const line = std.mem.sliceTo(text[at + 1 ..], '\n');
+    var f = std.mem.splitScalar(u8, line, ' ');
+    _ = f.next();
+    try std.testing.expectEqual(try std.fmt.parseInt(u64, q.out[0..dot], 16), try std.fmt.parseInt(u64, f.next().?, 16));
+    _ = f.next();
+    try std.testing.expectEqualStrings("-", f.next().?);
+    try std.testing.expectEqualStrings("0644", f.next().?);
+    try std.testing.expectEqualStrings("6", f.next().?);
+}
+
+test "mkindex marks a directory with a name containing a newline unindexed [mount-index]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    // devmnt fails a directory read with a newline in a name, so walk
+    // can't list /lib/x/sub; a space it lists, and mkindex leaves out.
+    try x.write("tree/lib/x/sub/new\nline", "x\n");
+    try x.write("tree/lib/x/with space", "x\n");
+    const text = try x.mkindex(e);
+    defer gpa.free(text);
+    errdefer std.debug.print("index:\n{s}", .{text});
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed /lib/x\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed /lib/x/sub\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed /\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/with") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/sub/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/a ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/sub ") != null);
+    // The index compiles, and h9 doesn't answer for either directory
+    // from it.
+    try x.write("tree/.h9index", text);
+    const r = try x.run_(e, &.{ "--rc", "ls /lib/x; cat /lib/x/sub/c" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(x_listing ++ "'/lib/x/with space'\ncherry\n", r.out);
+    try expectIn(r.err, "index: /.h9index: ");
+}
+
+test "a root with /.h9index runs /bin/ls [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    const r = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(x_listing, r.out);
+    try expectIn(r.err, "index: /.h9index: ");
+    try expectIn(r.err, " 0 demoted");
+}
+
+test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    const args: []const []const u8 = &.{ "--rc", "test -e /lib/x/zznope || echo absent; cat /lib/x/zznope2" };
+    const r = try x.run_(e, args);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("absent\n", r.out);
+    try expectIn(r.err, "zznope2");
+    try std.testing.expect(!x.relay.walked("zznope"));
+    try std.testing.expect(!x.relay.walked("zznope2"));
+    // Without the index, they go to the server.
+    var none: std.ArrayList([]const u8) = .empty;
+    defer none.deinit(gpa);
+    try none.appendSlice(gpa, &.{ "--index", "none" });
+    try none.appendSlice(gpa, args);
+    const n = try x.run_(e, none.items);
+    defer n.deinit();
+    try std.testing.expectEqualStrings("absent\n", n.out);
+    try std.testing.expect(x.relay.walked("zznope"));
+}
+
+test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    // The second run of each, so the indexed one is cached.
+    var counts: [2]u32 = undefined;
+    for ([_][]const u8{ "auto", "none" }, &counts) |mode, *c| {
+        for (0..2) |_| {
+            const r = try x.run_(e, &.{ "--index", mode, "--rc", "echo hi" });
+            defer r.deinit();
+            try std.testing.expectEqualStrings("hi\n", r.out);
+        }
+        c.* = x.relay.tmsgs.load(.acquire);
+    }
+    errdefer std.debug.print("indexed {d}, unindexed {d}\n", .{ counts[0], counts[1] });
+    try std.testing.expect(counts[0] < counts[1]);
+}
+
+test "--root-index FILE is used over a root without /.h9index [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    const text = try x.mkindex(e);
+    defer gpa.free(text);
+    try x.write("x.h9index", text);
+    const file = try std.fs.path.join(gpa, &.{ x.s.path, "x.h9index" });
+    defer gpa.free(file);
+    const r = try x.run_(e, &.{ "--root-index", file, "--rc", "ls /lib/x; test -e /lib/zznope || echo absent" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(x_listing ++ "absent\n", r.out);
+    var buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    try expectIn(r.err, try std.fmt.bufPrint(&buf, "index: {s}: ", .{file}));
+    try std.testing.expect(!x.relay.walked("zznope"));
+    try std.testing.expect(!x.relay.walked(".h9index"));
+}
+
+test "a second run uses the cache and doesn't read /.h9index [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    const first = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
+    defer first.deinit();
+    try std.testing.expectEqualStrings(x_listing, first.out);
+    try std.testing.expect(x.relay.index_opens.load(.acquire) > 0);
+    try std.testing.expect(std.mem.indexOf(u8, first.err, "(cached)") == null);
+    const second = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
+    defer second.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{second.err});
+    try std.testing.expectEqualStrings(x_listing, second.out);
+    try std.testing.expectEqual(0, x.relay.index_opens.load(.acquire));
+    try expectIn(second.err, "(cached)");
+}
+
+test "a file added after indexing is found, by demoting its directory [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    try IndexRig.tick();
+    try x.write("tree/lib/x/added", "added\n");
+    const r = try x.run_(e, &.{ "--rc", "cat /lib/x/added; ls /lib/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("added\n/lib/x/a\n/lib/x/added\n/lib/x/b\n/lib/x/sub\n", r.out);
+    try expectIn(r.err, " 1 demoted");
+}
+
+test "a file removed after indexing is not found [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    try IndexRig.tick();
+    try x.s.tmp.dir.deleteFile(std.testing.io, "tree/lib/x/b");
+    const r = try x.run_(e, &.{ "--rc", "test -e /lib/x/b || echo gone; ls /lib/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("gone\n/lib/x/a\n/lib/x/sub\n", r.out);
+}
+
+test "a file changed in place reads the server's contents [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    try IndexRig.tick();
+    try x.write("tree/lib/x/a", "a longer apple\n");
+    const r = try x.run_(e, &.{ "--rc", "cat /lib/x/a" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("a longer apple\n", r.out);
+}
+
+test "a malformed index is ignored and the root still mounts [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.write("tree/.h9index", "h9index 1\n/ not an entry\n");
+    const r = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings(x_listing, r.out);
+    try expectIn(r.err, "index: /.h9index: line 2: ");
+    try expectIn(r.err, "; ignored");
+    // So is one of a format version h9 doesn't know.
+    try x.write("tree/.h9index", "h9index 99\n");
+    const v = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
+    defer v.deinit();
+    try std.testing.expectEqualStrings(x_listing, v.out);
+    try expectIn(v.err, "unknown format version; ignored");
+}
+
+test "an unreadable --root-index exits 125 [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    const file = try std.fs.path.join(gpa, &.{ x.s.path, "missing.h9index" });
+    defer gpa.free(file);
+    const r = try x.run_(e, &.{ "--root-index", file, "/bin/ls", "/lib/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(125, r.code);
+    try expectIn(r.err, "--root-index");
+    try expectIn(r.err, "not found");
+}
+
+test "--index none ignores /.h9index [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    const r = try x.run_(e, &.{ "--index", "none", "--rc", "ls /lib/x; test -e /lib/zznope || echo absent" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings(x_listing ++ "absent\n", r.out);
+    try std.testing.expect(!x.relay.walked(".h9index"));
+    try std.testing.expect(x.relay.walked("zznope"));
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "index: /.h9index") == null);
+}
+
+test "a namespace-file mount of a server with /.h9index uses it [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var ns: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c {s} /n\n", .{x.relay.dial()}) });
+    x.relay.reset();
+    // The test root's own, with the server at /n.
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--index-cache", x.cache, "-v", "--rc", "ls /n/lib/x; test -e /n/lib/zznope || echo absent" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/n/lib/x/a\n/n/lib/x/b\n/n/lib/x/sub\nabsent\n", r.out);
+    try expectIn(r.err, "index: /.h9index: ");
+    try std.testing.expect(!x.relay.walked("zznope"));
+}
+
+test "a file created through a writable indexed mount is found by the next walk [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, true);
+    defer x.stop();
+    try x.index(e);
+    // --write=scope: writes to the 9P root go to its server.
+    const r = try x.run_(e, &.{ "--write=scope", "--rc", "echo made >/lib/x/made && cat /lib/x/made && ls /lib/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("made\n/lib/x/a\n/lib/x/b\n/lib/x/made\n/lib/x/sub\n", r.out);
+    try std.testing.expect(x.s.exists("tree/lib/x/made"));
+}
+
+test "a rewritten /.h9index is fetched on the next mount [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    const first = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
+    defer first.deinit();
+    try IndexRig.tick();
+    try x.write("tree/lib/x/later", "later\n");
+    try x.index(e);
+    const second = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
+    defer second.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{second.err});
+    try std.testing.expectEqualStrings("/lib/x/a\n/lib/x/b\n/lib/x/later\n/lib/x/sub\n", second.out);
+    try std.testing.expect(x.relay.index_opens.load(.acquire) > 0);
+    try std.testing.expect(std.mem.indexOf(u8, second.err, "(cached)") == null);
+    try expectIn(second.err, " 0 demoted");
+}
+
+test "--root-index with a host-directory root is a usage error [mount-index]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.h9index", .data = "h9index 1\n" });
+    const r = try run(e, &.{ "--cwd", s.path, "--root-index", "x.h9index", "/bin/ls", "/" });
+    defer r.deinit();
+    try std.testing.expectEqual(2, r.code);
+    try expectIn(r.err, "--root-index needs a 9P root");
+}
+
+test "--print shows the index source and entry count [mount-index]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    const text = try x.mkindex(e);
+    defer gpa.free(text);
+    try x.write("x.h9index", text);
+    const file = try std.fs.path.join(gpa, &.{ x.s.path, "x.h9index" });
+    defer gpa.free(file);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const n = (try indexPaths(arena_state.allocator(), text)).len;
+    var dirs: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |l| {
+        if (std.mem.indexOf(u8, l, " d 02") != null) dirs += 1;
+    }
+    const p = try run(e, &.{ "--root", x.srv.dial(), "--root-index", file, "--print", "true" });
+    defer p.deinit();
+    errdefer std.debug.print("stdout: {s}\n", .{p.out});
+    var buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    try expectIn(p.out, try std.fmt.bufPrint(&buf, "  index={s} {d} entries {d} dirs\n", .{ file, n, dirs }));
+    const auto = try run(e, &.{ "--root", x.srv.dial(), "--print", "true" });
+    defer auto.deinit();
+    try expectIn(auto.out, "  index=/.h9index\n");
+    const none = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--print", "true" });
+    defer none.deinit();
+    try expectIn(none.out, "  index=none\n");
 }
 
 // h9's own commands in #H (design/guest-tools.md). Debug builds serve
@@ -3763,7 +4368,7 @@ test "--no-guest-tools leaves out the bind and masks #H [guest-tools]" {
     defer p.deinit();
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#H/bin") == null);
     // The web host also masks #I, having no sockets.
-    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #b #i #m\n" else "devmask:  #C #H #U #b #i #m\n";
+    const want = if (getenv(3, "H9_TEST_WEB") != null) "devmask:  #C #I #H #U #ι #b #i #m\n" else "devmask:  #C #H #U #ι #b #i #m\n";
     try std.testing.expect(std.mem.indexOf(u8, p.out, want) != null);
     const r = try run(e, &.{ "--no-guest-tools", "ls", "#H" });
     defer r.deinit();

@@ -328,6 +328,35 @@ readable(void *a)
 	return cv->hungup || cv->ready;
 }
 
+/*
+ * Conversation n's status, for h9 itself, which reads it after #ι is
+ * masked; -1 for none.
+ */
+int
+h9_hidx_convstatus(int n, char *buf, int len)
+{
+	Conv *cv;
+	int k;
+
+	if(len <= 0)
+		return -1;
+	cv = lookup(n);
+	if(cv == nil)
+		return -1;
+	lock(&cv->lk);
+	if(!cv->started || cv->hungup || cv->closing){
+		unlock(&cv->lk);
+		return -1;
+	}
+	cv->refs++;
+	unlock(&cv->lk);
+	trlock(cv);
+	k = h9_hidx_status(cv->tr, buf, len);
+	trunlock(cv);
+	convdecref(cv);
+	return k;
+}
+
 static long
 dataread(Conv *cv, void *va, long n)
 {

@@ -761,6 +761,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (net == .disable) try devmask.appendSlice(arena, hstream_dev);
     if (!in.guest_tools) try devmask.append(arena, 'H');
     if (!pol.host_fs) try devmask.append(arena, 'U');
+    // h9's own mounts are through #ι by now, and a guest conversation
+    // could read the host's index cache.
+    try devmask.appendSlice(arena, hidx_dev);
     // Without a window, a guest can neither open one nor reach the screen
     // another machine in the process has.
     if (in.gfx == null) try devmask.appendSlice(arena, "bim");
@@ -1312,13 +1315,13 @@ test "compile: default and tight profiles" {
     const d = try compile(arena.allocator(), in, .{}, &msg);
     try t.expectEqual(Verdict.allow, d.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, d.check("/r/f", .create));
-    try t.expectEqualStrings("CUbim", d.devmask);
+    try t.expectEqualStrings("CU" ++ hidx_dev ++ "bim", d.devmask);
     try t.expect(!d.enforces.contains(.@"net.disable"));
     try t.expectEqual(@as(?u64, null), d.timeout_ns);
 
     const tt = try compile(arena.allocator(), in, .{ .profile = .tight }, &msg);
     try t.expectEqual(Verdict.read_only, tt.check("/w/f", .create));
-    try t.expectEqualStrings("CI" ++ hstream_dev ++ "Ubim", tt.devmask);
+    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ hidx_dev ++ "bim", tt.devmask);
     try t.expect(tt.enforces.contains(.@"net.disable"));
     try t.expect(tt.enforces.contains(.@"proc.timeout"));
 

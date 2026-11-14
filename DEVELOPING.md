@@ -111,7 +111,7 @@ zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree
 `zig build slim` builds [9box](design/multicall.md) inside the h9 it
 just built, against the root tree: 9front's own commands, compiled from the
 pinned source with their globals renamed so they share one link, chosen by
-the name they run as: the 43 commands basic operation needs.
+the name they run as: the 44 commands basic operation needs.
 `-Dslim-links=hard` (hard links to `9box`, the default) or `stub`
 (`#!/bin/9box -!` files, for trees without hard links), and `-Darch`;
 `-Dslim-links=copy` builds nothing and makes `slim-copy-*` with the same

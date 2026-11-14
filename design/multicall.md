@@ -197,6 +197,7 @@ Integration cases tagged `[multicall]`, run against the slim tree:
 
 ## Updates
 
+- 2026-11-14: `walk` joins `slim`, for [mount-index](mount-index.md)'s `mkindex`, so the set is 44 commands; the corpus has an entry for it. The sizes above are from the 43.
 - 2026-11-07: Filed as #64 and marked implemented. The Done-when checks that need a hypervisor host (the exec loop within 10% of separate binaries, and `--check` on the arm64 tree) are still to be run on one. The dependency on [self-host](self-host.md), still `accepted`, is dropped: what this needs from it, `mk` building 9front's commands inside h9, works today, and the build here does it.
 - 2026-11-07: One set. The proposal had `min`, `slim`, and `dev`; `slim` ran the exec loop 44% slower than separate binaries, so there's only the basic set, now named `slim`, and no `-Dslim-set`. The private libthread went with it, since the set has no thread program, and `mkcmd` refuses one. The notes below about `plumber`, `ed`, `dossrv`, `passwd`, `bc`, and the larger set's numbers are from building the larger set before it was dropped.
 - 2026-11-07: Implemented as proposed (`src/9box/`, `tools/slim.zig`, `zig build slim`), except the `dev` set, with these refinements:

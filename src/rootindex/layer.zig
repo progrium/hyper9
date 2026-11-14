@@ -60,7 +60,7 @@ pub const Source = union(enum) {
     none,
     /// A compiled index given with the mount (`--root-index`), owned by
     /// the layer from `init`, and what to call it.
-    given: struct { compiled: []u8, label: []const u8 },
+    given: struct { compiled: []u8, label: []const u8, cached: bool = false },
     /// The server's `/.h9index`, cached under `key`: its address and
     /// attach name.
     server: struct { key: []const u8 },
@@ -200,6 +200,8 @@ pub const Layer = struct {
     /// T-messages devmnt sent, and the layer sent the server.
     from_mount_t: u64 = 0,
     to_server_t: u64 = 0,
+    /// Of those, the ones sent to find and check the index.
+    boot_t: u64 = 0,
     /// Notes for `-v`, a line each.
     notes: std.ArrayList(u8) = .empty,
     err: ?[]const u8 = null,
@@ -212,7 +214,10 @@ pub const Layer = struct {
             .phase = if (source == .none) .passthrough else .attach,
         };
         switch (source) {
-            .given => |g| l.label = g.label,
+            .given => |g| {
+                l.label = g.label;
+                l.from_cache = g.cached;
+            },
             else => {},
         }
         return l;
@@ -315,12 +320,17 @@ pub const Layer = struct {
         try l.scratch.resize(l.gpa, @max(@as(usize, 1 << 16), @min(l.msize, 1 << 20)));
         const f = wire.encode(l.scratch.items, tag, msg, null) catch return l.fail("9P message too big");
         try l.out_server.appendSlice(l.gpa, f);
-        l.to_server_t += 1;
+        l.countSent();
     }
 
     fn forward(l: *Layer, frame: []const u8) Error!void {
         try l.out_server.appendSlice(l.gpa, frame);
+        l.countSent();
+    }
+
+    fn countSent(l: *Layer) void {
         l.to_server_t += 1;
+        if (l.phase == .bootstrap) l.boot_t += 1;
     }
 
     fn sendMount(l: *Layer, tag: u16, msg: anytype) Error!void {
@@ -531,15 +541,16 @@ pub const Layer = struct {
     }
 
     fn flush(l: *Layer, tag: u16, frame: []const u8, oldtag: u16) Error!void {
-        if (l.pending.getPtr(oldtag)) |p| {
-            if (!p.making_real) {
-                try l.pending.put(l.gpa, tag, .{ .kind = .flush, .oldtag = oldtag });
-                return l.forward(frame);
-            }
+        if (l.pending.getPtr(oldtag)) |p| if (p.making_real) {
             // Not sent yet: it never will be.
             p.flushed = true;
-        }
-        return l.sendMount(tag, p9.Rflush{});
+            return l.sendMount(tag, p9.Rflush{});
+        };
+        // To the server, even for a request the layer answered, so this
+        // Rflush can't overtake an earlier flush's of the same request:
+        // devmnt drops a chain of flushes when the last is answered.
+        try l.pending.put(l.gpa, tag, .{ .kind = .flush, .oldtag = oldtag });
+        return l.forward(frame);
     }
 
     fn walk(l: *Layer, tag: u16, frame: []const u8, w: p9.Twalk) Error!void {
@@ -1076,7 +1087,7 @@ pub const Layer = struct {
                 try w.print("index {s} entries {d} dirs {d} checked {d} demoted {d} ms {d}{s}\n", .{ l.label, x.n, x.ndirs, l.checked, l.ndemoted, l.t_ms, if (l.from_cache) " cached" else "" });
             },
         }
-        try w.print("requests {d} sent {d}\n", .{ l.from_mount_t, l.to_server_t });
+        try w.print("requests {d} sent {d} bootstrap {d}\n", .{ l.from_mount_t, l.to_server_t, l.boot_t });
         try w.writeAll(l.notes.items);
     }
 };
