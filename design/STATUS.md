@@ -62,6 +62,8 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [kernel-serve](kernel-serve.md) |  | draft |  | A 9P server in the kernel |
 | [namespace-kernel](namespace-kernel.md) |  | draft | needs kernel-serve, port-streams | A namespace-only kernel build |
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
+| [linux-fifo](linux-fifo.md) |  | draft |  | Linux named pipes |
+| [linux-pty](linux-pty.md) |  | draft |  | Linux pseudoterminals |
 
 ```mermaid
 flowchart LR
@@ -125,6 +127,8 @@ flowchart LR
   p_kernel_serve["kernel-serve<br/>draft"]:::draft
   p_namespace_kernel["namespace-kernel<br/>draft"]:::draft
   p_port_streams["port-streams<br/>draft"]:::draft
+  p_linux_fifo["linux-fifo<br/>draft"]:::draft
+  p_linux_pty["linux-pty<br/>draft"]:::draft
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
@@ -197,4 +201,6 @@ flowchart LR
   p_websocket_9p --> p_port_streams
   p_serve --> p_port_streams
   p_dotl --> p_port_streams
+  p_linux_personality --> p_linux_fifo
+  p_linux_personality --> p_linux_pty
 ```
