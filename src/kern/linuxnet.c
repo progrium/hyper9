@@ -26,6 +26,7 @@
 #include "hostsock.h"
 
 extern Queue*	h9_pipeq(Chan*, int);		/* kern/devpipe.c */
+extern Queue*	h9_ptyq(Chan*, int);		/* devpty.c */
 extern int	h9_ip_sfd(Chan*, int*);		/* kern/devip.c */
 extern long	h9_ip_ctl(Chan*, char*);	/* kern/devip.c */
 extern int	h9_cons_poll(ulong);		/* src/kern.zig */
@@ -54,6 +55,7 @@ enum {
 	LPOLLRDHUP = 0x2000,
 
 	Epsilon = 0x3B5,	/* #ε */
+	Tau = 0x3C4,	/* #τ, ptys (devpty.c) */
 };
 
 typedef struct Poller Poller;
@@ -1001,9 +1003,14 @@ chanready(Chan *c, int ev, int *sfd)
 	ev |= LPOLLERR | LPOLLHUP;
 	switch(dc){
 	case '|':
-		if((c->qid.type & QTDIR) || (rq = h9_pipeq(c, 0)) == nil)
+	case Tau:
+		if(dc == Tau)
+			rq = (c->qid.type & QTDIR) ? nil : h9_ptyq(c, 0);
+		else
+			rq = (c->qid.type & QTDIR) ? nil : h9_pipeq(c, 0);
+		if(rq == nil)
 			return (LPOLLIN|LPOLLOUT) & ev;
-		wq = h9_pipeq(c, 1);
+		wq = dc == Tau ? h9_ptyq(c, 1) : h9_pipeq(c, 1);
 		r = 0;
 		if(qcanread(rq))
 			r |= LPOLLIN;

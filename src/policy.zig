@@ -716,6 +716,10 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             };
         }
         try binds.append(arena, .{ .from = "#d", .to = lv ++ "/dev/fd", .optional = true });
+        // Pseudoterminals (design/linux-pty.md): /dev/pts is #τ, and
+        // /dev/ptmx its clone file.
+        try binds.append(arena, .{ .from = "#τ", .to = lv ++ "/dev/pts", .optional = true });
+        try binds.append(arena, .{ .from = "#τ/ptmx", .to = lv ++ "/dev/ptmx", .optional = true });
         // /dev/shm is a tmpfs on Linux: an empty writable tree of its
         // own, kept in memory, for shm_open and for scripts that keep
         // secrets off the disk (passage, pass).
