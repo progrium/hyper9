@@ -17,11 +17,12 @@
 //!
 //! At devmnt's first attach the layer holds the Rattach back while it
 //! finds the index (the one it was given, or the server's `/.h9index`,
-//! through the cache), and validates every indexed directory against the
-//! server, with up to 64 outstanding at once. A directory whose qid or
-//! mtime differs is demoted, and so is anything a mutation through the
-//! mount touches: a demoted entry is served by plain 9P for the rest of
-//! the connection. Later attaches, such as a guest's own mount of
+//! through the cache), and validates the root against the server. Every
+//! other indexed directory is validated the first time a request needs
+//! it, which waits: a walk validates the directories on its path at once,
+//! with up to 64 outstanding. A directory whose qid or mtime differs is
+//! demoted, and so is anything a mutation through the mount touches: a
+//! demoted entry is served by plain 9P for the rest of the connection. Later attaches, such as a guest's own mount of
 //! `/srv/root`, pass through, so `mkindex` sees the server.
 
 const std = @import("std");
@@ -109,6 +110,9 @@ const Pending = struct {
     oldtag: u16 = 0,
     /// Waiting for its fid to be made real, with the request to send.
     making_real: bool = false,
+    /// Waiting for directories to be validated, with the request to run
+    /// again then.
+    waiting: bool = false,
     frame: ?[]u8 = null,
     flushed: bool = false,
     aname: ?[]u8 = null,
@@ -135,6 +139,13 @@ const Slot = struct {
     pfid: ?u32 = null,
 };
 
+/// A devmnt request waiting on directories being validated.
+const Waiter = struct {
+    tag: u16,
+    deps: [wire.max_welem + 1]u32 = undefined,
+    ndeps: usize = 0,
+};
+
 pub const Phase = enum { attach, bootstrap, serving, passthrough, failed };
 
 pub const Layer = struct {
@@ -159,6 +170,10 @@ pub const Layer = struct {
     /// Entries whose own stat goes to the server though they still
     /// answer walks: the root, when only its listing validated.
     stale_stat: std.DynamicBitSetUnmanaged = .{},
+    /// Directories validated, and those queued or being validated.
+    valid: std.DynamicBitSetUnmanaged = .{},
+    queued: std.DynamicBitSetUnmanaged = .{},
+    waiters: std.ArrayList(Waiter) = .empty,
 
     fids: std.AutoHashMapUnmanaged(u32, Fid) = .empty,
     pending: std.AutoHashMapUnmanaged(u16, Pending) = .empty,
@@ -200,8 +215,11 @@ pub const Layer = struct {
     /// T-messages devmnt sent, and the layer sent the server.
     from_mount_t: u64 = 0,
     to_server_t: u64 = 0,
-    /// Of those, the ones sent to find and check the index.
+    /// Of those, the ones sent to find the index and validate
+    /// directories.
     boot_t: u64 = 0,
+    /// Whether the clunk being sent is validation's.
+    check_clunk: bool = false,
     /// Notes for `-v`, a line each.
     notes: std.ArrayList(u8) = .empty,
     err: ?[]const u8 = null,
@@ -233,8 +251,11 @@ pub const Layer = struct {
         l.fids.deinit(gpa);
         l.free_pfids.deinit(gpa);
         l.slots.deinit(gpa);
+        l.waiters.deinit(gpa);
         l.demoted.deinit(gpa);
         l.stale_stat.deinit(gpa);
+        l.valid.deinit(gpa);
+        l.queued.deinit(gpa);
         if (l.held_attach) |h| gpa.free(h);
         if (l.idx_buf.len > 0) gpa.free(l.idx_buf);
         if (l.index) |*x| x.deinit(gpa);
@@ -320,17 +341,17 @@ pub const Layer = struct {
         try l.scratch.resize(l.gpa, @max(@as(usize, 1 << 16), @min(l.msize, 1 << 20)));
         const f = wire.encode(l.scratch.items, tag, msg, null) catch return l.fail("9P message too big");
         try l.out_server.appendSlice(l.gpa, f);
-        l.countSent();
+        l.countSent(false);
     }
 
     fn forward(l: *Layer, frame: []const u8) Error!void {
         try l.out_server.appendSlice(l.gpa, frame);
-        l.countSent();
+        l.countSent(false);
     }
 
-    fn countSent(l: *Layer) void {
+    fn countSent(l: *Layer, check: bool) void {
         l.to_server_t += 1;
-        if (l.phase == .bootstrap) l.boot_t += 1;
+        if (l.phase == .bootstrap or check) l.boot_t += 1;
     }
 
     fn sendMount(l: *Layer, tag: u16, msg: anytype) Error!void {
@@ -357,6 +378,13 @@ pub const Layer = struct {
         const tag = l.allocTag() orelse return l.fail("out of private tags");
         try l.private.put(l.gpa, tag, what);
         try l.sendServer(tag, msg);
+        // Validating a directory counts with finding the index.
+        const check = switch (what) {
+            .val_walk, .val_stat, .list_walk, .list_open, .list_read => true,
+            .clunk => l.check_clunk,
+            else => false,
+        };
+        if (check and l.phase != .bootstrap) l.boot_t += 1;
     }
 
     fn allocPfid(l: *Layer) u32 {
@@ -387,10 +415,21 @@ pub const Layer = struct {
         }
     }
 
-    /// Whether the index answers lookups in entry `i`.
-    fn answerable(l: *const Layer, i: u32) bool {
+    /// Whether entry `i` is a directory the index can answer lookups in,
+    /// once it's validated.
+    fn indexedDir(l: *const Layer, i: u32) bool {
         const x = l.ix();
         return x.isDir(i) and !x.unindexed(i) and !l.isDemoted(i);
+    }
+
+    /// Whether the index answers lookups in entry `i`.
+    fn answerable(l: *const Layer, i: u32) bool {
+        return l.indexedDir(i) and l.valid.isSet(i);
+    }
+
+    /// Whether entry `i` must be validated before the index answers for it.
+    fn needsCheck(l: *const Layer, i: u32) bool {
+        return l.indexedDir(i) and !l.valid.isSet(i);
     }
 
     /// The entry `names` lead to from `node`, through answerable
@@ -398,8 +437,10 @@ pub const Layer = struct {
     fn resolve(l: *const Layer, node: ?u32, names: []const []const u8, last: ?wire.Qid) ?u32 {
         var cur = node orelse return null;
         const x = l.ix();
+        // The server's walk got there, so a directory not validated yet
+        // is passed through: the last qid is what's checked.
         for (names) |n| {
-            if (!l.answerable(cur)) return null;
+            if (!l.indexedDir(cur)) return null;
             cur = if (std.mem.eql(u8, n, "..")) x.parent(cur) else x.lookup(cur, n) orelse return null;
         }
         if (last) |q| if (x.qid(cur).path != q.path) return null;
@@ -433,6 +474,7 @@ pub const Layer = struct {
             .Tstat => |s| {
                 const f = l.fids.getPtr(s.fid) orelse return l.plain(tag, frame);
                 if (f.node) |n| if (!l.isDemoted(n) and !l.stale_stat.isSet(n)) {
+                    if (l.needsCheck(n)) return l.waitFor(tag, frame, &.{n});
                     var buf: [4096]u8 = undefined;
                     const dir = l.ix().dir(n);
                     if (dir.pack(&buf)) |packed_dir| {
@@ -443,7 +485,8 @@ pub const Layer = struct {
             },
             .Topen => |o| {
                 const f = l.fids.getPtr(o.fid) orelse return l.plain(tag, frame);
-                if (f.node) |n| if (l.answerable(n) and o.mode & 3 == wire.OREAD and o.mode & (wire.OTRUNC | wire.ORCLOSE) == 0 and f.open == .no) {
+                if (f.node) |n| if (l.indexedDir(n) and o.mode & 3 == wire.OREAD and o.mode & (wire.OTRUNC | wire.ORCLOSE) == 0 and f.open == .no) {
+                    if (l.needsCheck(n)) return l.waitFor(tag, frame, &.{n});
                     f.open = .local;
                     f.cursor = 0;
                     f.offset = 0;
@@ -541,6 +584,16 @@ pub const Layer = struct {
     }
 
     fn flush(l: *Layer, tag: u16, frame: []const u8, oldtag: u16) Error!void {
+        if (l.pending.getPtr(oldtag)) |p| if (p.waiting) {
+            // Never sent, and now never run.
+            var gone = l.pending.fetchRemove(oldtag).?.value;
+            freePending(l.gpa, &gone);
+            for (l.waiters.items, 0..) |w, i| if (w.tag == oldtag) {
+                _ = l.waiters.swapRemove(i);
+                break;
+            };
+            return l.sendMount(tag, p9.Rflush{});
+        };
         if (l.pending.getPtr(oldtag)) |p| if (p.making_real) {
             // Not sent yet: it never will be.
             p.flushed = true;
@@ -565,7 +618,10 @@ pub const Layer = struct {
         var qids: [wire.max_welem]wire.Qid = undefined;
         var i: usize = 0;
         while (i < names.len) : (i += 1) {
-            if (!l.answerable(cur)) break;
+            if (!l.answerable(cur)) {
+                if (l.needsCheck(cur)) return l.waitForPath(tag, frame, cur, names[i..]);
+                break;
+            }
             const next = if (std.mem.eql(u8, names[i], "..")) x.parent(cur) else x.lookup(cur, names[i]) orelse {
                 if (i == 0) return l.rerror(tag, enonexist);
                 return l.sendMount(tag, p9.Rwalk{ .wqids = .init(qids[0..i]) });
@@ -589,6 +645,70 @@ pub const Layer = struct {
             return l.sendServer(tag, p9.Twalk{ .fid = l.privroot.?, .newfid = w.newfid, .wnames = .init(all[0 .. prefix.len + names.len]) });
         }
         return l.viaReal(tag, frame, w.fid, .{ .kind = .walk, .fid = w.fid, .newfid = w.newfid, .node = f.node, .names = try dupeNames(l.gpa, names) });
+    }
+
+    /// Validates `from` and the directories `names` lead to from it in
+    /// the index, all at once, and runs the walk again after.
+    fn waitForPath(l: *Layer, tag: u16, frame: []const u8, from: u32, names: []const []const u8) Error!void {
+        const x = l.ix();
+        var deps: [wire.max_welem + 1]u32 = undefined;
+        var n: usize = 0;
+        var cur = from;
+        deps[n] = cur;
+        n += 1;
+        for (names) |name| {
+            if (!l.indexedDir(cur)) break;
+            cur = if (std.mem.eql(u8, name, "..")) x.parent(cur) else x.lookup(cur, name) orelse break;
+            if (l.needsCheck(cur) and std.mem.indexOfScalar(u32, deps[0..n], cur) == null) {
+                deps[n] = cur;
+                n += 1;
+            }
+        }
+        return l.waitFor(tag, frame, deps[0..n]);
+    }
+
+    /// Validates `deps`, and runs the request again once none is
+    /// waiting to be.
+    fn waitFor(l: *Layer, tag: u16, frame: []const u8, deps: []const u32) Error!void {
+        var w: Waiter = .{ .tag = tag };
+        for (deps) |e| {
+            if (!l.needsCheck(e)) continue;
+            w.deps[w.ndeps] = e;
+            w.ndeps += 1;
+            if (!l.queued.isSet(e)) {
+                l.queued.set(e);
+                try l.slots.append(l.gpa, .{ .entry = e });
+            }
+        }
+        try l.pending.put(l.gpa, tag, .{ .kind = .plain, .waiting = true, .frame = try l.gpa.dupe(u8, frame) });
+        try l.waiters.append(l.gpa, w);
+        try l.validateMore();
+        // Already done, if every dep was validated in the meantime.
+        return l.wake();
+    }
+
+    /// Runs again the requests whose directories are all validated now.
+    fn wake(l: *Layer) Error!void {
+        var ready: std.ArrayList(u16) = .empty;
+        defer ready.deinit(l.gpa);
+        var i: usize = 0;
+        while (i < l.waiters.items.len) {
+            const w = l.waiters.items[i];
+            const busy = for (w.deps[0..w.ndeps]) |e| {
+                if (l.queued.isSet(e)) break true;
+            } else false;
+            if (busy) {
+                i += 1;
+                continue;
+            }
+            try ready.append(l.gpa, w.tag);
+            _ = l.waiters.swapRemove(i);
+        }
+        for (ready.items) |tag| {
+            var p = (l.pending.fetchRemove(tag) orelse continue).value;
+            defer freePending(l.gpa, &p);
+            try l.request(p.frame.?);
+        }
     }
 
     fn forwardWalk(l: *Layer, tag: u16, frame: []const u8, w: p9.Twalk, node: ?u32) Error!void {
@@ -941,19 +1061,19 @@ pub const Layer = struct {
         const n = l.ix().n;
         try l.demoted.resize(l.gpa, n, false);
         try l.stale_stat.resize(l.gpa, n, false);
+        try l.valid.resize(l.gpa, n, false);
+        try l.queued.resize(l.gpa, n, false);
         try l.fids.put(l.gpa, l.attach_fid, .{ .real = true, .node = ri.root });
         return l.maybeValidate();
     }
 
-    /// Starts validating once both the root's clone and the index are in.
+    /// Starts validating the root once both its clone and the index are
+    /// in. The other directories wait until they're used.
     fn maybeValidate(l: *Layer) Error!void {
         if (l.root_clone_pending or l.index == null or l.phase != .bootstrap or l.slots.items.len > 0) return;
-        const x = l.ix();
-        for (0..x.n) |i| {
-            const e: u32 = @intCast(i);
-            if (x.isDir(e) and !x.unindexed(e)) try l.slots.append(l.gpa, .{ .entry = e });
-        }
-        if (l.slots.items.len == 0) return l.validated();
+        if (!l.needsCheck(ri.root)) return l.validated();
+        l.queued.set(ri.root);
+        try l.slots.append(l.gpa, .{ .entry = ri.root });
         try l.validateMore();
     }
 
@@ -1017,13 +1137,31 @@ pub const Layer = struct {
     fn valDone(l: *Layer, s: u32, clunk: bool) Error!void {
         const slot = &l.slots.items[s];
         if (slot.pfid) |pf| {
+            l.check_clunk = true;
+            defer l.check_clunk = false;
             if (clunk) try l.clunkPrivate(pf) else try l.free_pfids.append(l.gpa, pf);
             slot.pfid = null;
         }
-        l.checked += 1;
+        l.checkedOne(slot.entry);
         l.validating -= 1;
         try l.validateMore();
-        if (l.validating == 0 and l.slot_next == l.slots.items.len and !l.list_pending) return l.validated();
+        return l.checkDone();
+    }
+
+    fn checkedOne(l: *Layer, e: u32) void {
+        l.queued.unset(e);
+        if (!l.isDemoted(e)) l.valid.set(e);
+        l.checked += 1;
+    }
+
+    /// After a directory is validated: the bootstrap ends, or requests
+    /// waiting on it run.
+    fn checkDone(l: *Layer) Error!void {
+        switch (l.phase) {
+            .bootstrap => if (l.validating == 0 and l.slot_next == l.slots.items.len and !l.list_pending) return l.validated(),
+            .serving => return l.wake(),
+            else => {},
+        }
     }
 
     fn listRoot(l: *Layer) Error!void {
@@ -1053,30 +1191,30 @@ pub const Layer = struct {
     }
 
     fn listDone(l: *Layer, ok: bool) Error!void {
-        if (l.list_pfid != 0) try l.clunkPrivate(l.list_pfid);
+        if (l.list_pfid != 0) {
+            l.check_clunk = true;
+            defer l.check_clunk = false;
+            try l.clunkPrivate(l.list_pfid);
+        }
         l.list_pfid = 0;
         l.listing.clearAndFree(l.gpa);
         if (ok) l.stale_stat.set(ri.root) else l.demote(ri.root);
         l.list_pending = false;
-        l.checked += 1;
-        if (l.validating == 0 and l.slot_next == l.slots.items.len) return l.validated();
+        l.checkedOne(ri.root);
+        return l.checkDone();
     }
 
     fn validated(l: *Layer) Error!void {
         if (l.phase != .bootstrap) return;
         if (l.hooks.now_ns) |now| l.t_ms = (now() -| l.t_start) / std.time.ns_per_ms;
         const x = l.ix();
-        try l.note("index: {s}: {d} entries, {d} dirs{s}; checked {d} dirs in {d} ms, {d} demoted", .{ l.label, x.n, x.ndirs, if (l.from_cache) " (cached)" else "", l.checked, l.t_ms, l.ndemoted });
-        if (l.checked > 0 and l.ndemoted * 4 > l.checked) {
-            if (l.source == .server)
-                try l.note("index: {s} looks stale; rebuild it with mkindex", .{l.label})
-            else
-                try l.note("index: {s} looks stale", .{l.label});
-        }
+        try l.note("index: {s}: {d} entries, {d} dirs{s}; root {s} in {d} ms", .{ l.label, x.n, x.ndirs, if (l.from_cache) " (cached)" else "", if (l.isDemoted(ri.root)) "demoted" else "checked", l.t_ms });
         return l.finishBootstrap(.serving);
     }
 
-    /// What `#ι`'s status file reads: the index and what it's done.
+    /// What `#ι`'s status file reads: the index and what it's done. The
+    /// `end: ` lines are notes for the end of a run, on what validating
+    /// as directories were used came to.
     pub fn status(l: *const Layer, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (l.phase) {
             .failed => try w.print("failed {s}\n", .{l.err orelse ""}),
@@ -1085,6 +1223,13 @@ pub const Layer = struct {
             .serving => {
                 const x = l.ix();
                 try w.print("index {s} entries {d} dirs {d} checked {d} demoted {d} ms {d}{s}\n", .{ l.label, x.n, x.ndirs, l.checked, l.ndemoted, l.t_ms, if (l.from_cache) " cached" else "" });
+                try w.print("end: index: {s}: checked {d} of {d} dirs as they were used, {d} demoted\n", .{ l.label, l.checked, x.ndirs, l.ndemoted });
+                if (l.checked > 0 and l.ndemoted * 4 > l.checked) {
+                    if (l.source == .server)
+                        try w.print("end: index: {s} looks stale; rebuild it with mkindex\n", .{l.label})
+                    else
+                        try w.print("end: index: {s} looks stale\n", .{l.label});
+                }
             },
         }
         try w.print("requests {d} sent {d} bootstrap {d}\n", .{ l.from_mount_t, l.to_server_t, l.boot_t });
