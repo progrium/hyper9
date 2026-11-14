@@ -220,6 +220,9 @@ const c_stub = struct {
     fn h9_fs_symlinkpath(_: [*:0]const u8, _: [*:0]const u8) c_int {
         return -1;
     }
+    fn h9_fs_mkfifopath(_: [*:0]const u8, _: c_uint) c_int {
+        return -1;
+    }
     fn h9_fs_renamepath(_: [*:0]const u8, _: [*:0]const u8) c_int {
         return 1;
     }
@@ -327,6 +330,7 @@ const c_real = struct {
     extern fn h9_overlay_newpath(path: ?[*:0]const u8) c_int;
     extern fn h9_fs_readlinkpath(path: [*:0]const u8, buf: [*]u8, nbuf: c_int) c_int;
     extern fn h9_fs_symlinkpath(path: [*:0]const u8, target: [*:0]const u8) c_int;
+    extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
     extern fn h9_fs_renamepath(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
@@ -858,6 +862,14 @@ pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
 /// see links.
 pub fn symlink(path: [*:0]const u8, target: [*:0]const u8) Error!void {
     _ = try check(c.h9_fs_symlinkpath(path, target));
+}
+
+/// Makes `path` a FIFO with permissions `perm`: a node in memory in an
+/// overlay, or a host FIFO in a devfs tree, where the new name is checked
+/// like a create (design/linux-fifo.md). For the Linux personality's
+/// mknodat; Plan 9 programs see an empty file.
+pub fn mkfifo(path: [*:0]const u8, perm: u32) Error!void {
+    _ = try check(c.h9_fs_mkfifopath(path, perm));
 }
 
 /// Moves `old` to `new` in another directory with the host's rename,

@@ -951,6 +951,8 @@ extern Chan *h9_overlay_lower(Chan*);
 extern int h9_overlay_readlink(Chan*, char*, int);
 extern void h9_overlay_symlink(Chan*, char*, char*);
 extern int h9_overlay_move(Chan*, Chan*, char*);
+extern void h9_overlay_mkfifo(Chan*, char*, ulong);
+extern int h9_overlay_isfifo(Chan*);
 
 /*
  * The target of the link that path's last name is, through #U and an
@@ -1102,5 +1104,79 @@ h9_fs_symlinkpath(char *path, char *target)
 		cclose(c);
 	free(dir);
 	poperror();
+	return 0;
+}
+
+/*
+ * Makes path a FIFO, for the Linux personality's mknodat
+ * (design/linux-fifo.md): a node in memory in an overlay, or a host FIFO
+ * in a devfs tree, where the new name is checked like a create. Anywhere
+ * else, such as a 9P root, it's "operation not permitted". Returns 0, or
+ * -1 with the error in errstr.
+ */
+int
+h9_fs_mkfifopath(char *path, ulong perm)
+{
+	Chan *volatile c;
+	char *dir, *name, *p;
+
+	c = nil;
+	dir = nil;
+	if(waserror()){
+		if(c != nil)
+			cclose(c);
+		free(dir);
+		p = up->syserrstr;
+		up->syserrstr = up->errstr;
+		up->errstr = p;
+		return -1;
+	}
+	dir = strdup(path);
+	if(dir == nil)
+		error(Enomem);
+	name = strrchr(dir, '/');
+	if(name == nil){
+		name = dir;
+		c = namec(".", Aaccess, 0, 0);
+	}else{
+		*name++ = '\0';
+		c = namec(dir[0] != '\0' ? dir : "/", Aaccess, 0, 0);
+	}
+	if(name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+		error(Eexist);
+	if((c->qid.type & QTDIR) == 0)
+		error(Enotdir);
+	switch(devtab[c->type]->dc){
+	case 'O':
+		p = (char*)c;
+		c = nil;
+		h9_overlay_mkfifo((Chan*)p, name, perm);
+		break;
+	case 'U':
+		h9_fs_mkfifo(c, name, perm);
+		break;
+	default:
+		error("operation not permitted");	/* Linux's EPERM: no FIFOs here */
+	}
+	if(c != nil)
+		cclose(c);
+	free(dir);
+	poperror();
+	return 0;
+}
+
+/*
+ * Whether c is a FIFO's chan: an overlay's FIFO node, or a host FIFO in a
+ * devfs tree, directly or below an overlay.
+ */
+int
+h9_fs_chanisfifo(Chan *c)
+{
+	switch(devtab[c->type]->dc){
+	case 'O':
+		return h9_overlay_isfifo(c);
+	case 'U':
+		return h9_fs_isfifo(c);
+	}
 	return 0;
 }

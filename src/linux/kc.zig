@@ -44,6 +44,8 @@ const real = struct {
     extern fn h9_linux_raccept(fd: c_int, cloexec: c_int) c_int;
     extern fn h9_linux_syncfs(fd: c_int) c_int;
     extern fn h9_linux_sync() c_int;
+    extern fn h9_linux_isfifo(fd: c_int) c_int;
+    extern fn h9_linux_fifojoin(fd: c_int, mode: c_int, nonblock: c_int) c_int;
 };
 
 /// devlinux's hook for its text files (src/kern/devlinux.c): the file's
@@ -104,6 +106,12 @@ const stub = struct {
         return -1;
     }
     fn h9_linux_setgen(_: Gen) void {}
+    fn h9_linux_isfifo(_: c_int) c_int {
+        return 0;
+    }
+    fn h9_linux_fifojoin(_: c_int, _: c_int, _: c_int) c_int {
+        return -1;
+    }
     fn h9_poll(_: [*]PollFd, _: c_int, _: c_int, _: ?*c_uint, _: c_int) c_int {
         return -1;
     }
@@ -327,6 +335,22 @@ pub fn fdInfo(fd: i32) Error!FdInfo {
     var ce: c_int = 0;
     _ = try check(c.h9_linux_fdinfo(fd, &dc, &dev, &qp, &qt, &mode, &ce));
     return .{ .dc = @intCast(@as(u32, @bitCast(dc)) & 0x1fffff), .dev = dev, .qpath = qp, .dir = qt & 0x80 != 0, .mode = @intCast(mode & 3), .cexec = ce != 0 };
+}
+
+/// Whether fd is open on a FIFO's file (design/linux-fifo.md): an
+/// overlay's FIFO node or a host FIFO, which a Linux open joins the pipe
+/// of (`fifoJoin`) instead of keeping.
+pub fn isFifo(fd: i32) bool {
+    return c.h9_linux_isfifo(fd) > 0;
+}
+
+/// Replaces fd, open on a FIFO's file, with an open of the FIFO's pipe
+/// in `mode` (Plan 9's OREAD, OWRITE, or ORDWR), from the machine-wide
+/// table (src/kern/fifo.c). A read or write open waits for the other
+/// end unless `nonblock`; a nonblocking write open with no reader fails
+/// with "no reader", and a note interrupts the wait.
+pub fn fifoJoin(fd: i32, mode: c_int, nonblock: bool) Error!void {
+    _ = try check(c.h9_linux_fifojoin(fd, mode, @intFromBool(nonblock)));
 }
 
 /// syncfs(2): syncs the host file system behind fd's channel, if it's on

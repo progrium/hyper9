@@ -1844,6 +1844,96 @@ test "a copy-up while another process has the lower file open leaves that reader
     if (ran == 0) return error.SkipZigTest;
 }
 
+// Linux named pipes (design/linux-fifo.md).
+
+/// A run of `sh -c script` from the Alpine root in `H9_TEST_LINUX_ROOT`
+/// (scripts/fetch.sh), in host directory `dir`, writable.
+const LinuxSh = struct {
+    out: std.Io.Writer.Allocating = .init(std.testing.allocator),
+    err: std.Io.Writer.Allocating = .init(std.testing.allocator),
+    sb: [300]u8 = undefined,
+    got: anyerror!?[]const u8 = null,
+
+    fn run(l: *LinuxSh, kind: vmm.BackendKind, root: []const u8, dir: []const u8, script: []const u8) void {
+        l.got = l.runIt(kind, root, dir, script);
+    }
+
+    fn runIt(l: *LinuxSh, kind: vmm.BackendKind, root: []const u8, dir: []const u8, script: []const u8) !?[]const u8 {
+        const arch: vmm.Arch = switch (builtin.cpu.arch) {
+            .aarch64 => .arm64,
+            .x86_64 => .amd64,
+            else => return null,
+        };
+        var m = h9.Machine.init(std.testing.allocator, std.testing.io, .{
+            .backend = kind,
+            .arch = arch,
+            .linux_root = root,
+            .cwd = dir,
+            .policy = .{ .writable = &.{dir}, .timeout_ns = 20 * std.time.ns_per_s },
+            .stdio = .{ .out = &l.out.writer, .err = &l.err.writer },
+        }) catch |e| switch (e) {
+            error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return null,
+            else => return e,
+        };
+        defer m.deinit();
+        const status = try m.run(.{ .guest = "/bin/sh" }, &.{ "sh", "-c", script });
+        return switch (status) {
+            .exited => |t| try std.fmt.bufPrint(&l.sb, "exited {s}", .{t}),
+            .killed => |t| try std.fmt.bufPrint(&l.sb, "killed {s}", .{t}),
+        };
+    }
+
+    fn deinit(l: *LinuxSh) void {
+        l.out.deinit();
+        l.err.deinit();
+    }
+};
+
+test "two machines on one host FIFO share it [linux-fifo]" {
+    var map = try std.testing.environ.createMap(std.testing.allocator);
+    defer map.deinit();
+    const lr = map.get("H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
+    const arch_name = switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => return error.SkipZigTest,
+    };
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&rb, "{s}/alpine-{s}", .{ lr, arch_name });
+    var ob: [std.fs.max_path_bytes + 16]u8 = undefined;
+    std.Io.Dir.cwd().access(std.testing.io, try std.fmt.bufPrint(&ob, "{s}/etc/os-release", .{root}), .{}) catch return error.SkipZigTest;
+    var ran: usize = 0;
+    // HVF allows one VM per host process, so its second machine is the
+    // emulator. KVM allows several.
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .native, .native } }) |kinds| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var host: [std.fs.max_path_bytes]u8 = undefined;
+        var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const dir = kernPath(&kb, host[0..try tmp.dir.realPath(std.testing.io, &host)]);
+        // A makes the FIFO in its cwd, the host directory, and writes to
+        // it, waiting for a reader; B, a separate machine with the same
+        // cwd, finds it and reads what A wrote.
+        const script_a = "mkfifo f && echo shared > f";
+        const script_b = "while [ ! -p f ]; do sleep 0.05; done; cat f";
+        var a: LinuxSh = .{};
+        defer a.deinit();
+        const th = try std.Thread.spawn(.{}, LinuxSh.run, .{ &a, kinds[0], root, dir, script_a });
+        var b: LinuxSh = .{};
+        defer b.deinit();
+        b.run(kinds[1], root, dir, script_b);
+        th.join();
+        errdefer std.debug.print("backends {t} and {t}\nA: {s}\nB: {s}\n", .{ kinds[0], kinds[1], a.err.written(), b.err.written() });
+        const got_a = try a.got orelse continue;
+        const got_b = try b.got orelse continue;
+        try std.testing.expectEqualStrings("exited ", got_a);
+        try std.testing.expectEqualStrings("exited ", got_b);
+        try std.testing.expectEqualStrings("shared\n", b.out.written());
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
 test "posting, opening and removing in /srv, and clone boards [devsrv]" {
     var ran: usize = 0;
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {

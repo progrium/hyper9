@@ -897,6 +897,9 @@ fn oDirectory(a: vmm.Arch) u32 {
 const OTRUNC = 16;
 const OCEXEC = 32;
 const DMDIR: u32 = 0x80000000;
+/// The mode bit that marks a FIFO's Dir (src/kern/fscheck.h's H9_DMFIFO,
+/// 9P2000.u's DMNAMEDPIPE), since Plan 9 has no file types.
+const DMFIFO: u32 = 0x00200000;
 
 fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
     _ = u;
@@ -1324,6 +1327,8 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .link => return ret(try link(p, AT_FDCWD, c.a[0], AT_FDCWD, c.a[1], 0)),
         .symlinkat => return ret(try symlink(p, c.a[0], c.int(1), c.a[2])),
         .symlink => return ret(try symlink(p, c.a[0], AT_FDCWD, c.a[1])),
+        .mknodat => return ret(try mknod(p, c.int(0), c.a[1], c.uint(2))),
+        .mknod => return ret(try mknod(p, AT_FDCWD, c.a[0], c.uint(1))),
         .flock => return ret(try flockCall(p, c.int(0), c.uint(1))),
         .fadvise64 => return ret(0),
         .getxattr, .lgetxattr, .fgetxattr, .listxattr, .llistxattr, .flistxattr, .setxattr, .lsetxattr, .fsetxattr, .removexattr, .lremovexattr, .fremovexattr => return ret(-E.NOTSUP),
@@ -1802,6 +1807,20 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
             kern.close(fd) catch {};
             return -E.NOTDIR;
         }
+    }
+    // A FIFO's file is never kept open: the fd joins the FIFO's pipe
+    // instead, waiting for the other end (design/linux-fifo.md).
+    if (flags & O_PATH == 0 and kc.isFifo(fd)) {
+        const m: c_int = switch (flags & O_ACCMODE) {
+            0 => kern.OREAD,
+            1 => kern.OWRITE,
+            else => kern.ORDWR,
+        };
+        kc.fifoJoin(fd, m, flags & O_NONBLOCK != 0) catch {
+            const e = if (std.mem.eql(u8, kern.errstr(), "no reader")) -E.NXIO else kerr();
+            kern.close(fd) catch {};
+            return e;
+        };
     }
     p.fdClosed(fd);
     if (flags & (O_APPEND | O_NONBLOCK | O_PATH) != 0) setFlags(p, fd, .{
@@ -2562,7 +2581,7 @@ fn kindOfDir(d: *const attr.Dir) attr.Kind {
         'c', 'y' => .chr,
         // A conversation's data file is a socket's (design/linux-net.md).
         'I' => if (d.qid_type & 0x80 == 0 and d.qid_path & 0xf == ip_qdata) .sock else .auto,
-        else => if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else if (isListeningUnix(d)) .sock else .auto,
+        else => if (d.mode & DMFIFO != 0 and d.mode & DMDIR == 0) .fifo else if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else if (isListeningUnix(d)) .sock else .auto,
     };
 }
 
@@ -2836,6 +2855,32 @@ fn link(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags: 
         at(newdir, new, void, kern.remove, .{new}) catch {};
         return e;
     }
+    return 0;
+}
+
+/// mknod and mknodat (design/linux-fifo.md): S_IFIFO makes a FIFO, a
+/// node in an overlay or a host FIFO in a host tree, and S_IFREG (or no
+/// type) an empty file, as on Linux. Devices and sockets can't be made.
+fn mknod(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
+    const path = try pathArg(p, path_va, &p.name_buf);
+    if (path.len == 0) return -E.NOENT;
+    const perm = mode & 0o777 & ~p.umask;
+    const kind = mode & attr.S_IFMT;
+    switch (kind) {
+        attr.S_IFIFO, 0, attr.S_IFREG, attr.S_IFCHR, attr.S_IFBLK, attr.S_IFSOCK => {},
+        else => return -E.INVAL,
+    }
+    if (statExists(dirfd, path)) return -E.EXIST;
+    var lb: [16]u8 = undefined;
+    if (at(dirfd, path, []u8, kern.readlink, .{ path, &lb })) |_| return -E.EXIST else |_| {}
+    if (kind == attr.S_IFCHR or kind == attr.S_IFBLK or kind == attr.S_IFSOCK) return -E.PERM;
+    if (kind != attr.S_IFIFO) {
+        const OEXCL = 0x1000;
+        const fd = at(dirfd, path, u31, kern.create, .{ path, kern.OREAD | OEXCL, perm }) catch return kerr();
+        kern.close(fd) catch {};
+        return 0;
+    }
+    at(dirfd, path, void, kern.mkfifo, .{ path, perm }) catch return kerr();
     return 0;
 }
 
