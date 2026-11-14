@@ -11,9 +11,8 @@
  * also keeps the Linux state of the terminal: its termios, window size,
  * foreground process group, session, and lock. The Linux personality
  * reads and writes that through h9_pty_get and h9_pty_set, on an fd of
- * either side; the ioctls are its interface (src/linux/sys.zig), and the
- * state is only stored here. Data passes through unchanged: this is a raw
- * pty, without a line discipline.
+ * either side; the ioctls are its interface (src/linux/sys.zig). The
+ * termios is applied here, as a line discipline (below).
  *
  * Until the slave first opens, a master read waits, as on Linux. When
  * the slave's last open closes, the master reads what's left and then
@@ -21,7 +20,7 @@
  * opening the slave again reopens it. When the master closes, the slave
  * reads to an end of file, its writes fail with EIO, the session's
  * terminal is gone, and the foreground group is sent SIGHUP through
- * h9_ptyhup. A pair goes when both sides have closed, and its number is
+ * h9_ptysig. A pair goes when both sides have closed, and its number is
  * reused.
  *
  * Pairs belong to the machine of the process that opened ptmx, and
@@ -49,6 +48,20 @@ enum
 	Npty = 4096,		/* pairs per machine, as Linux's kernel.pty.max */
 	Ptyq = 64*1024,		/* each way, as Linux's N_TTY buffer */
 	Termlen = 60,		/* the personality's termios, of which the kernel's is the first 36 bytes */
+	Linemax = 4096,		/* a canonical line, as N_TTY's */
+	Chunk = 4096,		/* input taken through the line discipline at a time */
+	Maxsig = 8,
+
+	/* Linux's termios flags and c_cc indices. */
+	ISTRIP = 040, INLCR = 0100, IGNCR = 0200, ICRNL = 0400,
+	OPOST = 01, ONLCR = 04, OCRNL = 010,
+	ISIG = 01, ICANON = 02, ECHO = 010, ECHOE = 020, ECHOK = 040, ECHONL = 0100,
+	NOFLSH = 0200, ECHOCTL = 01000, ECHOKE = 04000, IEXTEN = 0100000,
+	VINTR = 0, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSWTC, VSTART, VSTOP, VSUSP,
+	VEOL, VREPRINT, VDISCARD, VWERASE, VLNEXT, VEOL2,
+	Ccoff = 17,
+
+	SIGHUP = 1, SIGINT = 2, SIGQUIT = 3, SIGTSTP = 20,
 };
 
 #define QTYPE(p)	((int)((p) & 0xf))
@@ -74,6 +87,9 @@ struct Pty
 	ulong	fg;	/* the foreground process group, or 0 */
 	ulong	sid;	/* the session it's the terminal of, or 0 */
 	int	locked;
+
+	uchar	line[Linemax];	/* the canonical line being edited */
+	int	nline;
 };
 
 /* The pair state h9_pty_get and h9_pty_set copy; src/linux/kc.zig's PtyState. */
@@ -109,10 +125,12 @@ static struct
 static uchar defterm[Termlen];
 
 /*
- * Posts SIGHUP to process group fg of the calling process's machine
- * (src/machine.zig), when a master's last close hangs the pair up.
+ * Posts Linux signal signo to process group pgrp of the calling
+ * process's machine (src/machine.zig): SIGHUP when a master's last
+ * close hangs the pair up, and SIGINT, SIGQUIT, and SIGTSTP for the
+ * ISIG characters.
  */
-void	(*h9_ptyhup)(ulong fg, ulong sid);
+void	(*h9_ptysig)(ulong pgrp, int signo);
 
 static void*
 upmach(void)
@@ -199,7 +217,7 @@ static void
 ptyinit(void)
 {
 	/* c_iflag ICRNL|IXON, c_oflag OPOST|ONLCR, c_cflag CS8|CREAD|B38400, c_lflag ISIG|ICANON|ECHO|ECHOE|ECHOK|IEXTEN|ECHOCTL|ECHOKE */
-	static uchar cc[] = {3, 0x1c, 0x7f, 0x15, 4, 0, 1, 0, 0x11, 0x13, 0x1a};
+	static uchar cc[] = {3, 0x1c, 0x7f, 0x15, 4, 0, 1, 0, 0x11, 0x13, 0x1a, 0, 0x12, 0x0f, 0x17, 0x16};	/* Linux's, through VLNEXT */
 	ulong f[4] = {0400|02000, 01|04, 060|0200|017, 01|02|010|020|040|0100000|01000|04000};
 	int i;
 
@@ -210,6 +228,323 @@ ptyinit(void)
 		defterm[4*i+3] = f[i]>>24;
 	}
 	memmove(defterm+17, cc, sizeof cc);
+}
+
+
+/*
+ * The line discipline (design/linux-pty.md, step 2), as Linux's N_TTY
+ * applies the pair's termios: input written to the master goes through
+ * the input flags, ISIG, canonical editing, and echo on its way to the
+ * slave, and the slave's writes through the output flags on their way
+ * to the master. Echo is the slave's output too, so it reaches the
+ * master after output processing. In canonical mode, each line (or a
+ * VEOF) is a block of its own in the slave's queue, and a read takes at
+ * most one, so it returns at most a line; an empty block is the end of
+ * file VEOF on an empty line makes. Echo and lines are added without
+ * waiting, and dropped when the queue is full, as N_TTY drops input
+ * beyond its buffer; raw input waits for room, as a master write
+ * does on Linux. VMIN and VTIME are the personality's (src/linux/sys.zig).
+ */
+
+static ulong
+flag(Pty *p, int off)
+{
+	uchar *t;
+
+	t = p->termios + off;
+	return t[0] | t[1]<<8 | t[2]<<16 | (ulong)t[3]<<24;
+}
+
+static int
+iscc(Pty *p, int c, int v)
+{
+	int cc;
+
+	cc = p->termios[Ccoff+v];
+	return cc != 0 && c == cc;	/* 0 is _POSIX_VDISABLE */
+}
+
+/* Output processing of c into b; returns the bytes it made. */
+static int
+opost(ulong oflag, int c, uchar *b)
+{
+	if(oflag & OPOST){
+		if(c == '\n' && (oflag & ONLCR)){
+			b[0] = '\r';
+			b[1] = '\n';
+			return 2;
+		}
+		if(c == '\r' && (oflag & OCRNL))
+			c = '\n';
+	}
+	b[0] = c;
+	return 1;
+}
+
+/* The width echo gives c: 2 for a control character shown as ^X. */
+static int
+ctlwidth(ulong lflag, int c)
+{
+	return (lflag & ECHOCTL) && (c < 0x20 || c == 0x7f) && c != '\t' && c != '\n' ? 2 : 1;
+}
+
+/* Echoes c into e (with output processing); returns the bytes. */
+static int
+echo1(Pty *p, ulong lflag, int c, uchar *e)
+{
+	if(ctlwidth(lflag, c) == 2){
+		e[0] = '^';
+		e[1] = c == 0x7f ? '?' : c + 0x40;
+		return 2;
+	}
+	return opost(flag(p, 4), c, e);
+}
+
+/* Erases the last character of the line, echoing it away if ECHOE. */
+static int
+erase1(Pty *p, ulong lflag, uchar *e)
+{
+	int c, w, n;
+
+	if(p->nline == 0)
+		return 0;
+	c = p->line[--p->nline];
+	if(!(lflag & ECHO))
+		return 0;
+	if(!(lflag & ECHOE))
+		return echo1(p, lflag, p->termios[Ccoff+VERASE], e);
+	n = 0;
+	for(w = ctlwidth(lflag, c); w > 0; w--){
+		memmove(e+n, "\b \b", 3);
+		n += 3;
+	}
+	return n;
+}
+
+typedef struct Seg Seg;
+struct Seg
+{
+	int	off;
+	int	len;
+	int	line;	/* a canonical line, added without waiting */
+};
+
+/*
+ * Takes up to Chunk bytes of master input through the discipline, under
+ * p->lk: what the slave gets in d (as segments in sg), echo in e, and
+ * signals in sigs. Returns how many segments.
+ */
+static int
+discipline(Pty *p, uchar *a, int n, uchar *d, Seg *sg, uchar *e, int *ne, int *sigs, int *nsig)
+{
+	ulong iflag, lflag;
+	int i, c, nd, ns, sig, raw0;
+
+	iflag = flag(p, 0);
+	lflag = flag(p, 12);
+	nd = ns = 0;
+	raw0 = -1;	/* where the raw segment being built starts in d */
+	*ne = 0;
+	*nsig = 0;
+	for(i = 0; i < n; i++){
+		c = a[i];
+		if(iflag & ISTRIP)
+			c &= 0x7f;
+		if(c == '\r'){
+			if(iflag & IGNCR)
+				continue;
+			if(iflag & ICRNL)
+				c = '\n';
+		}else if(c == '\n' && (iflag & INLCR))
+			c = '\r';
+		if(lflag & ISIG){
+			sig = 0;
+			if(iscc(p, c, VINTR))
+				sig = SIGINT;
+			else if(iscc(p, c, VQUIT))
+				sig = SIGQUIT;
+			else if(iscc(p, c, VSUSP))
+				sig = SIGTSTP;
+			if(sig != 0){
+				if(!(lflag & NOFLSH)){
+					qflush(p->in);
+					p->nline = 0;
+					/* Nothing written before it in this write reaches the slave either. */
+					ns = 0;
+					nd = 0;
+					raw0 = -1;
+				}
+				if(lflag & ECHO)
+					*ne += echo1(p, lflag, c, e + *ne);
+				if(*nsig < Maxsig)
+					sigs[(*nsig)++] = sig;
+				continue;
+			}
+		}
+		if(!(lflag & ICANON)){
+			if(raw0 < 0){
+				raw0 = nd;
+				sg[ns].off = nd;
+				sg[ns].len = 0;
+				sg[ns].line = 0;
+				ns++;
+			}
+			d[nd++] = c;
+			sg[ns-1].len++;
+			if(lflag & ECHO)
+				*ne += echo1(p, lflag, c, e + *ne);
+			continue;
+		}
+		if(iscc(p, c, VERASE)){
+			*ne += erase1(p, lflag, e + *ne);
+			continue;
+		}
+		if((lflag & IEXTEN) && iscc(p, c, VWERASE)){
+			while(p->nline > 0 && (p->line[p->nline-1] == ' ' || p->line[p->nline-1] == '\t'))
+				*ne += erase1(p, lflag, e + *ne);
+			while(p->nline > 0 && p->line[p->nline-1] != ' ' && p->line[p->nline-1] != '\t')
+				*ne += erase1(p, lflag, e + *ne);
+			continue;
+		}
+		if(iscc(p, c, VKILL)){
+			if((lflag & (ECHO|ECHOKE|ECHOE)) == (ECHO|ECHOKE|ECHOE)){
+				while(p->nline > 0)
+					*ne += erase1(p, lflag, e + *ne);
+			}else{
+				p->nline = 0;
+				if(lflag & ECHO){
+					*ne += echo1(p, lflag, c, e + *ne);
+					if(lflag & ECHOK)
+						*ne += opost(flag(p, 4), '\n', e + *ne);
+				}
+			}
+			continue;
+		}
+		if(iscc(p, c, VEOF) || c == '\n' || iscc(p, c, VEOL) || ((lflag & IEXTEN) && iscc(p, c, VEOL2))){
+			/* The line is done; VEOF itself isn't part of it. */
+			if(!iscc(p, c, VEOF)){
+				if(p->nline < Linemax)
+					p->line[p->nline++] = c;
+				if((lflag & ECHO) || (c == '\n' && (lflag & ECHONL)))
+					*ne += echo1(p, lflag, c, e + *ne);
+			}
+			memmove(d+nd, p->line, p->nline);
+			sg[ns].off = nd;
+			sg[ns].len = p->nline;
+			sg[ns].line = 1;
+			ns++;
+			nd += p->nline;
+			p->nline = 0;
+			raw0 = -1;
+			continue;
+		}
+		/* An ordinary character: kept, with room left for the newline. */
+		if(p->nline < Linemax-1){
+			p->line[p->nline++] = c;
+			if(lflag & ECHO)
+				*ne += echo1(p, lflag, c, e + *ne);
+		}
+	}
+	return ns;
+}
+
+static long
+masterwrite(Pty *p, uchar *a, long n)
+{
+	uchar *d, *e;
+	Seg *sg;
+	int i, m, ns, ne, nsig, sigs[Maxsig];
+	long done;
+	ulong fg;
+
+	/* d: the chunk and a line; e: echo, at most 6 bytes to erase each byte of the line and the chunk, and 3 to echo each of the chunk. */
+	d = smalloc(Chunk + Linemax);
+	e = smalloc(9*Chunk + 6*Linemax + 16);
+	sg = smalloc((Chunk+1) * sizeof *sg);
+	if(waserror()){
+		free(d);
+		free(e);
+		free(sg);
+		nexterror();
+	}
+	for(done = 0; done < n; done += m){
+		m = n - done;
+		if(m > Chunk)
+			m = Chunk;
+		lock(&p->lk);
+		ns = discipline(p, a+done, m, d, sg, e, &ne, sigs, &nsig);
+		fg = p->fg;
+		unlock(&p->lk);
+		if(ne > 0)
+			qiwrite(p->out, e, ne);
+		for(i = 0; i < ns; i++){
+			if(sg[i].line)
+				qiwrite(p->in, d+sg[i].off, sg[i].len);
+			else if(sg[i].len > 0)
+				qwrite(p->in, d+sg[i].off, sg[i].len);
+		}
+		for(i = 0; i < nsig; i++)
+			if(fg != 0 && h9_ptysig != nil)
+				h9_ptysig(fg, sigs[i]);
+	}
+	poperror();
+	free(d);
+	free(e);
+	free(sg);
+	return n;
+}
+
+static long
+slavewrite(Pty *p, uchar *a, long n)
+{
+	uchar *b;
+	ulong oflag;
+	long i, m, done;
+	int nb;
+
+	lock(&p->lk);
+	oflag = flag(p, 4);
+	unlock(&p->lk);
+	if(!(oflag & OPOST) || !(oflag & (ONLCR|OCRNL)))
+		return qwrite(p->out, a, n);
+	b = smalloc(2*Chunk);
+	if(waserror()){
+		free(b);
+		nexterror();
+	}
+	for(done = 0; done < n; done += m){
+		m = n - done;
+		if(m > Chunk)
+			m = Chunk;
+		nb = 0;
+		for(i = 0; i < m; i++)
+			nb += opost(oflag, a[done+i], b+nb);
+		qwrite(p->out, b, nb);
+	}
+	poperror();
+	free(b);
+	return n;
+}
+
+/* In canonical mode a read returns at most a line, the block it's in. */
+static long
+slaveread(Pty *p, uchar *va, long n)
+{
+	Block *b;
+	int canon;
+
+	lock(&p->lk);
+	canon = (flag(p, 12) & ICANON) != 0;
+	unlock(&p->lk);
+	if(!canon)
+		return qread(p->in, va, n);
+	b = qbread(p->in, n);
+	if(b == nil)
+		return 0;
+	n = BLEN(b);
+	memmove(va, b->rp, n);
+	freeb(b);
+	return n;
 }
 
 static int
@@ -389,8 +724,9 @@ ptyclose(Chan *c)
 	unlock(&p->lk);
 	if(gone)
 		freepty(p);
-	if(hup && h9_ptyhup != nil)
-		h9_ptyhup(fg, sid);
+	USED(sid);
+	if(hup && h9_ptysig != nil)
+		h9_ptysig(fg, SIGHUP);
 }
 
 static Pty*
@@ -418,7 +754,7 @@ ptyread(Chan *c, void *va, long n, vlong off)
 		return qread(p->out, va, n);
 	case Qslave:
 		p = chanpty(c);
-		return qread(p->in, va, n);
+		return slaveread(p, va, n);
 	}
 	error(Egreg);
 	return -1;
@@ -436,10 +772,10 @@ ptywrite(Chan *c, void *va, long n, vlong off)
 	switch(QTYPE(c->qid.path)){
 	case Qmaster:
 		p = chanpty(c);
-		return qwrite(p->in, va, n);
+		return masterwrite(p, va, n);
 	case Qslave:
 		p = chanpty(c);
-		return qwrite(p->out, va, n);
+		return slavewrite(p, va, n);
 	}
 	error(Eperm);
 	return -1;
@@ -557,8 +893,14 @@ h9_pty_set(int fd, Ptystate *s, int what, int excl)
 	if(excl && p->sid != 0)
 		r = 1;
 	else{
-		if(what & Stermios)
+		if(what & Stermios){
 			memmove(p->termios, s->termios, Termlen);
+			/* Out of canonical mode, a line being edited is input to read. */
+			if(!(flag(p, 12) & ICANON) && p->nline > 0){
+				qiwrite(p->in, p->line, p->nline);
+				p->nline = 0;
+			}
+		}
 		if(what & Swinsz)
 			memmove(p->winsz, s->winsz, sizeof p->winsz);
 		if(what & Sfg)
@@ -627,7 +969,7 @@ h9_pty_queued(int fd, int wr, int flush)
 }
 
 void
-h9_pty_sethup(void (*f)(ulong, ulong))
+h9_pty_setsig(void (*f)(ulong, int))
 {
-	h9_ptyhup = f;
+	h9_ptysig = f;
 }

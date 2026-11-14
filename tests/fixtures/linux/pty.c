@@ -23,8 +23,8 @@ static int failed;
 
 #define CHECK(name, cond) do { if (!(cond)) { printf("FAIL %s: %s (errno %d %s)\n", name, #cond, errno, strerror(errno)); failed = 1; return; } } while (0)
 
-/* A new pair: the master in *m, the slave opened by its name in *s. */
-static int pair(int *m, int *s, char *name, size_t n) {
+/* A new pair with its default termios: the master in *m, the slave opened by its name in *s. */
+static int cooked(int *m, int *s, char *name, size_t n) {
 	*m = posix_openpt(O_RDWR | O_NOCTTY);
 	if (*m < 0 || grantpt(*m) != 0 || unlockpt(*m) != 0)
 		return -1;
@@ -32,6 +32,15 @@ static int pair(int *m, int *s, char *name, size_t n) {
 		return -1;
 	*s = open(name, O_RDWR | O_NOCTTY);
 	return *s < 0 ? -1 : 0;
+}
+
+/* The same, in raw mode (cfmakeraw), so bytes pass unchanged. */
+static int pair(int *m, int *s, char *name, size_t n) {
+	struct termios t;
+	if (cooked(m, s, name, n) != 0 || tcgetattr(*s, &t) != 0)
+		return -1;
+	cfmakeraw(&t);
+	return tcsetattr(*s, TCSANOW, &t);
 }
 
 /* Reads exactly n bytes, or fails. */
@@ -94,7 +103,7 @@ static void raw(void) {
 	char name[64];
 	unsigned char out[256], in[256];
 	struct termios t;
-	CHECK("raw", pair(&m, &s, name, sizeof name) == 0);
+	CHECK("raw", cooked(&m, &s, name, sizeof name) == 0);
 	CHECK("raw", tcgetattr(s, &t) == 0 && (t.c_lflag & ICANON) && (t.c_lflag & ECHO));
 	cfmakeraw(&t);
 	CHECK("raw", tcsetattr(s, TCSANOW, &t) == 0);
@@ -126,7 +135,7 @@ static void locked(void) {
 	/* TIOCGPTPEER opens the slave without its name. */
 	int p = ioctl(m, TIOCGPTPEER, O_RDWR | O_NOCTTY);
 	char buf[64];
-	CHECK("locked", p >= 0 && write(m, "pe", 2) == 2 && readn(p, buf, 2) == 2);
+	CHECK("locked", p >= 0 && write(m, "pe\n", 3) == 3 && readn(p, buf, 3) == 3);
 	CHECK("locked", ttyname_r(p, buf, sizeof buf) == 0 && strcmp(buf, name) == 0);
 	close(p);
 	close(s);
@@ -213,6 +222,82 @@ static void winch(void) {
 	printf("ok winch\n");
 }
 
+/* Reads what's there within 200 ms, up to n bytes. */
+static int drain(int fd, char *buf, int n) {
+	int got = 0;
+	struct pollfd pf = {.fd = fd, .events = POLLIN};
+	while (got < n && poll(&pf, 1, 200) == 1 && (pf.revents & POLLIN)) {
+		int r = read(fd, buf + got, n - got);
+		if (r <= 0)
+			break;
+		got += r;
+	}
+	return got;
+}
+
+static void canon(void) {
+	int m, s;
+	char name[64], buf[64];
+	CHECK("canon", cooked(&m, &s, name, sizeof name) == 0);
+	/* DEL erases the b; the slave reads the line at the newline, ICRNL makes CR one. */
+	CHECK("canon", write(m, "ab\x7f" "c\r", 5) == 5);
+	int n = read(s, buf, sizeof buf);
+	CHECK("canon", n == 3 && memcmp(buf, "ac\n", 3) == 0);
+	/* Echo, with ECHOE's erase and ONLCR's CR LF. */
+	n = drain(m, buf, sizeof buf);
+	CHECK("canon", n == 8 && memcmp(buf, "ab\b \bc\r\n", 8) == 0);
+	/* A read returns one line, and the next one is still there. */
+	CHECK("canon", write(m, "one\ntwo\n", 8) == 8);
+	CHECK("canon", read(s, buf, sizeof buf) == 4 && read(s, buf, sizeof buf) == 4 && memcmp(buf, "two\n", 4) == 0);
+	drain(m, buf, sizeof buf);
+	/* Ctrl-U kills the line; Ctrl-W erases a word. */
+	CHECK("canon", write(m, "junk\x15keep this\x17that\n", 20) == 20);
+	n = read(s, buf, sizeof buf);
+	CHECK("canon", n == 10 && memcmp(buf, "keep that\n", 10) == 0);
+	drain(m, buf, sizeof buf);
+	/* VEOF ends a line without a newline, and on an empty line it's an end of file. */
+	CHECK("canon", write(m, "x\x04", 2) == 2 && read(s, buf, sizeof buf) == 1 && buf[0] == 'x');
+	CHECK("canon", write(m, "\x04", 1) == 1 && read(s, buf, sizeof buf) == 0);
+	drain(m, buf, sizeof buf);
+	/* The slave's newlines reach the master as CR LF. */
+	CHECK("canon", write(s, "hi\n", 3) == 3 && drain(m, buf, sizeof buf) == 4 && memcmp(buf, "hi\r\n", 4) == 0);
+	/* Without ECHO nothing comes back; without ICANON a byte is readable at once. */
+	struct termios t;
+	CHECK("canon", tcgetattr(s, &t) == 0);
+	t.c_lflag &= ~(ECHO | ICANON);
+	t.c_cc[VMIN] = 1;
+	CHECK("canon", tcsetattr(s, TCSANOW, &t) == 0);
+	CHECK("canon", write(m, "q", 1) == 1 && read(s, buf, sizeof buf) == 1 && buf[0] == 'q');
+	CHECK("canon", drain(m, buf, sizeof buf) == 0);
+	/* VMIN 0 and VTIME 0: a read with nothing there returns 0 at once. */
+	t.c_cc[VMIN] = 0;
+	t.c_cc[VTIME] = 0;
+	CHECK("canon", tcsetattr(s, TCSANOW, &t) == 0 && read(s, buf, sizeof buf) == 0);
+	close(s);
+	close(m);
+	printf("ok canon\n");
+}
+
+static void intr(void) {
+	int m, s, pp[2];
+	char name[64], b, buf[16];
+	CHECK("intr", cooked(&m, &s, name, sizeof name) == 0 && pipe(pp) == 0);
+	pid_t c = terminal_child(m, name, pp[1], SIGINT);
+	CHECK("intr", read(pp[0], &b, 1) == 1);
+	/* A line being typed goes with the interrupt. */
+	CHECK("intr", write(m, "half", 4) == 4 && write(m, "\x03", 1) == 1);
+	int r = status(c);
+	CHECK("intr", r == 0);
+	/* Echoed as ^C. */
+	int n = drain(m, buf, sizeof buf);
+	CHECK("intr", n == 6 && memcmp(buf, "half^C", 6) == 0);
+	int q = -1;
+	CHECK("intr", ioctl(s, FIONREAD, &q) == 0 && q == 0);
+	close(s);
+	close(m);
+	printf("ok intr\n");
+}
+
 static void hangup(void) {
 	int m, s, pp[2];
 	char name[64], b;
@@ -240,6 +325,8 @@ int main(int argc, char **argv) {
 		else if (strcmp(argv[i], "nonblock") == 0) nonblock();
 		else if (strcmp(argv[i], "winch") == 0) winch();
 		else if (strcmp(argv[i], "hangup") == 0) hangup();
+		else if (strcmp(argv[i], "canon") == 0) canon();
+		else if (strcmp(argv[i], "intr") == 0) intr();
 		else { printf("FAIL %s: no such case\n", argv[i]); failed = 1; }
 	}
 	return failed;

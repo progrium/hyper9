@@ -1917,7 +1917,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
             }
             const want: u32 = if (dir == .read) kc.POLLIN else kc.POLLOUT;
             is_pipe = info.dc == '|' and !info.dir;
-            const vmin0 = if (dir == .read and info.dc == 'y') consoleReadWait(p) else null;
+            const vmin0 = if (dir == .read and info.dc == 'y') consoleReadWait(p) else if (dir == .read and is_pty and !pty_master) ptyReadWait(fd) else null;
             if (vmin0) |ms| {
                 // VMIN 0: no input within VTIME is a read of 0 bytes.
                 if (ms == 0) {
@@ -3179,8 +3179,8 @@ fn defaultTermios() [60]u8 {
 }
 
 // Pseudoterminals (design/linux-pty.md): #τ, src/kern/devpty.c, keeps
-// each pair's queues and state; the ioctls are served here from it.
-// Data passes through raw: the termios is stored and not applied.
+// each pair's queues and state, and applies its termios as a line
+// discipline; the ioctls are served here from it, and VMIN 0 reads.
 
 pub const pty_dc: u16 = 0x3c4; // 'τ'
 const pty_dev = "#τ";
@@ -3350,10 +3350,20 @@ fn ptyIoctl(p: *Process, fd: i32, st_in: kc.PtyState, req: u32, arg: u64) Err!i6
             }
             return 0;
         },
-        // A raw pty has no line to break or flow to stop.
+        // There's no line to break or flow to stop.
         TCSBRK, TCSBRKP, TCXONC => return 0,
         else => return -E.NOTTY,
     }
+}
+
+/// A slave read's wait when its pair's termios is non-canonical with
+/// VMIN 0, as consoleReadWait's for the console.
+fn ptyReadWait(fd: i32) ?i32 {
+    const st = kc.ptyGet(fd) orelse return null;
+    const t = &st.termios;
+    const lflag = std.mem.readInt(u32, t[12..16], .little);
+    if (lflag & ICANON != 0 or t[17 + VMIN] != 0) return null;
+    return @as(i32, t[17 + VTIME]) * 100;
 }
 
 /// TIOCGPTPEER: the master's slave, opened with `flags` (O_ACCMODE,
