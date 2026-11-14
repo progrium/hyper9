@@ -79,6 +79,12 @@ pub fn main(init: std.process.Init) !u8 {
                 .root_headers = wo.headers,
                 .root_ca = wo.ca,
                 .proxy = wo.proxy,
+                .index = switch (cfg.index) {
+                    .auto => .auto,
+                    .none => .none,
+                },
+                .root_index = rootIndexArg(cfg.root_index),
+                .index_cache = cfg.index_cache orelse h9.rootindex.cache.Cache.defaultDir(arena, init.environ_map),
             }) catch exit_failed;
             w.interface.flush() catch {};
             return code;
@@ -232,6 +238,14 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .root_headers = wo.headers,
         .root_ca = wo.ca,
         .root_contained = cfg.root_contained,
+        .index = switch (cfg.index) {
+            .auto => .auto,
+            .none => .none,
+        },
+        .root_index = rootIndexArg(cfg.root_index),
+        .index_cache = cfg.index_cache orelse h9.rootindex.cache.Cache.defaultDir(arena, init.environ_map),
+        .root_index_counts = if (cfg.print) rootIndexCounts(arena, io, cfg.root_index) else null,
+        .verbose = cfg.verbose,
         .linux_root = linux_root,
         .nameservers = if (linux_root != null) try hostNameservers(arena, io) else &.{},
         .nine_prog = cfg.rc != null,
@@ -544,6 +558,28 @@ fn rootError(err: RootError) []const u8 {
         error.BadDial => "bad dial string or URL",
         error.OutOfMemory => "out of memory",
     };
+}
+
+/// --root-index's value: a URL by its scheme, and otherwise a host file.
+fn rootIndexArg(arg: ?[]const u8) ?h9.Machine.RootIndex {
+    const a = arg orelse return null;
+    if (std.mem.startsWith(u8, a, "https://") or std.mem.startsWith(u8, a, "http://")) return .{ .url = a };
+    return .{ .path = a };
+}
+
+/// For --print: a --root-index file's entry and directory counts, or
+/// null for a URL, which --print doesn't fetch, or a file that doesn't
+/// compile.
+fn rootIndexCounts(arena: std.mem.Allocator, io: std.Io, arg: ?[]const u8) @FieldType(h9.Machine.Options, "root_index_counts") {
+    const path = switch (rootIndexArg(arg) orelse return null) {
+        .path => |p| p,
+        .url => return null,
+    };
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(h9.rootindex.max_text)) catch return null;
+    var diag: h9.rootindex.Diag = .{};
+    const compiled = h9.rootindex.compile(arena, text, &diag) catch return null;
+    const ix = h9.rootindex.Index.init(compiled) catch return null;
+    return .{ .entries = ix.n, .dirs = ix.ndirs };
 }
 
 const WsOptions = struct {

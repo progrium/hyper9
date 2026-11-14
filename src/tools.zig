@@ -90,6 +90,10 @@ pub const CheckOptions = struct {
     root_headers: []const []const u8 = &.{},
     root_ca: ?[]const u8 = null,
     proxy: h9.Machine.Proxy = .{},
+    /// --index, --root-index, and the index cache (design/mount-index.md).
+    index: h9.Machine.IndexMode = .auto,
+    root_index: ?h9.Machine.RootIndex = null,
+    index_cache: ?[]const u8 = null,
 };
 
 /// Probes the backends (creating a VM and running a tiny program on each,
@@ -159,9 +163,15 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
         return exit_failed;
     }
     var why: [256]u8 = undefined;
-    const echo = runRoot(gpa, io, o, arch, &why);
+    var notes_buf: [2048]u8 = undefined;
+    var notes: std.Io.Writer = .fixed(&notes_buf);
+    const echo = runRoot(gpa, io, o, arch, &why, &notes);
     switch (echo) {
-        .ok => try w.print("ok, /bin/echo runs ({t})\n", .{arch}),
+        .ok => {
+            try w.print("ok, /bin/echo runs ({t})\n", .{arch});
+            // The index the root was mounted with, validated.
+            try w.writeAll(notes.buffered());
+        },
         .err => |e| {
             try w.print("{s}\n", .{switch (e) {
                 error.NotFound => "no /bin/echo (is it a 9front root tree?)",
@@ -237,7 +247,8 @@ fn probe(gpa: std.mem.Allocator, io: std.Io, k: vmm.BackendKind, arch: vmm.Arch,
 
 /// Runs `/bin/echo ok` from the root tree on the backend `o.backend` picks.
 /// A `.failed` message is in `why`.
-fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, why: []u8) Probe {
+/// The root's index notes, without their "h9: ", go to `notes`.
+fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, why: []u8, notes: *std.Io.Writer) Probe {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var err: std.Io.Writer.Allocating = .init(gpa);
@@ -252,6 +263,10 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
         .root_headers = o.root_headers,
         .root_ca = o.root_ca,
         .proxy = o.proxy,
+        .index = o.index,
+        .root_index = o.root_index,
+        .index_cache = o.index_cache,
+        .verbose = true,
         .policy = .{ .memory = o.memory, .timeout_ns = 10 * std.time.ns_per_s },
         .stdio = .{ .out = &out.writer, .err = &err.writer },
     }) catch |e| return .{ .err = e };
@@ -264,6 +279,10 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
     };
     // A stuck machine still uses `out`; don't free it under the process.
     if (m.stuck) std.process.exit(exit_failed);
+    var lines = std.mem.splitScalar(u8, err.written(), '\n');
+    while (lines.next()) |l| if (std.mem.startsWith(u8, l, "h9: index: ")) {
+        notes.print("{s}\n", .{l["h9: ".len..]}) catch {};
+    };
     if (st != .exited or st.exited.len != 0) return .{ .wrong = "it failed" };
     if (!std.mem.eql(u8, out.written(), "ok\n")) return .{ .wrong = "its output was wrong" };
     return .{ .ok = .{ .kind = m.backend.kind(), .max_vcpus = null, .us = 0 } };
