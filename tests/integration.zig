@@ -5613,6 +5613,12 @@ test "readv from a pipe returns what's there once a buffer fills [linux-net]" {
     try netCase(&le, &.{ "/mnt/term/cwd/net", "readv_pipe" }, "ok readv_pipe\n");
 }
 
+test "a pipe holds 64 KiB, as Linux's does [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/net", "pipe_capacity" }, "ok pipe_capacity\n");
+}
+
 test "epoll edge-triggered on a pipe [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

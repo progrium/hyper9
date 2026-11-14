@@ -72,6 +72,18 @@ h9_kern_boot(void)
 	kerndate = seconds();
 	eve = hostuser();
 
+	/*
+	 * Pipes hold 64 KiB, as Linux's do. devpipe's default for one
+	 * processor is 32 KiB, and bash writes a here-document smaller than
+	 * the pipe size it was built with (64 KiB on Linux) into a pipe
+	 * before anything reads it, so a 32 to 64 KiB one (autoconf's
+	 * config.status makes one) blocked forever. qio counts each block's
+	 * allocation, about 80 bytes more than its data, and stops a writer
+	 * only past the limit, so 72 KiB holds 64 KiB written at once or in
+	 * writes of 1 KiB or more. Smaller writes hold less, as in 9front.
+	 */
+	conf.pipeqsize = 72*1024;
+
 	osinit();
 	procinit0();
 	printinit();

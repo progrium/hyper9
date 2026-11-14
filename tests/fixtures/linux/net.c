@@ -95,6 +95,32 @@ static void nonblock_pipe(void) {
 	printf("ok nonblock_pipe\n");
 }
 
+/* A pipe holds 64 KiB, as Linux's does: 64 KiB written into an empty
+ * pipe, at once or 4 KiB at a time, goes in before anything reads it.
+ * bash counts on that for a here-document under its pipe size
+ * (autoconf's config.status makes one). */
+static int pipe_fill(int chunk) {
+	static char out[65536], in[65536];
+	int p[2];
+	if (pipe(p) != 0) return 0;
+	for (int i = 0; i < (int)sizeof out; i++) out[i] = i * 7;
+	alarm(10);
+	for (int o = 0; o < (int)sizeof out; o += chunk)
+		if (write(p[1], out + o, chunk) != chunk) return 0;
+	alarm(0);
+	close(p[1]);
+	int n = 0, r;
+	while (n < (int)sizeof in && (r = read(p[0], in + n, sizeof in - n)) > 0) n += r;
+	close(p[0]);
+	return n == (int)sizeof in && memcmp(in, out, sizeof in) == 0;
+}
+
+static void pipe_capacity(void) {
+	CHECK("pipe_capacity", pipe_fill(65536));
+	CHECK("pipe_capacity", pipe_fill(4096));
+	printf("ok pipe_capacity\n");
+}
+
 static void epoll_et(void) {
 	int p[2];
 	CHECK("epoll_et", pipe2(p, O_NONBLOCK) == 0);
@@ -697,6 +723,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "poll_pipe")) poll_pipe();
 		if (all || !strcmp(n, "nonblock_pipe")) nonblock_pipe();
 		if (all || !strcmp(n, "readv_pipe")) readv_pipe();
+		if (all || !strcmp(n, "pipe_capacity")) pipe_capacity();
 		if (all || !strcmp(n, "epoll_et")) epoll_et();
 		if (all || !strcmp(n, "eventfd")) eventfd_epoll();
 		if (all || !strcmp(n, "unix_sock")) unix_sock();
