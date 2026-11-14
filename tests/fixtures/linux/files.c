@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <grp.h>
+#include <poll.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <sys/auxv.h>
@@ -20,6 +21,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/select.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -588,6 +590,73 @@ static void signal_fd(void) {
 	printf("ok signal_fd\n");
 }
 
+static volatile int usr1s;
+static void on_usr1(int s) { (void)s; usr1s++; }
+
+/* wait_mask's waits, by number: pselect6, ppoll, and epoll_pwait, each
+ * with an empty mask and a 3 s timeout. */
+static int masked_wait(int how, int ep) {
+	sigset_t none;
+	sigemptyset(&none);
+	struct timespec ts = {.tv_sec = 3};
+	struct epoll_event out;
+	switch (how) {
+	case 0: return pselect(0, 0, 0, 0, &ts, &none);
+	case 1: return ppoll(0, 0, &ts, &none);
+	default: return epoll_pwait(ep, &out, 1, 3000, &none);
+	}
+}
+
+/* GNU make -j's loop: block a signal, then wait with it unblocked.
+ * One already pending when the wait starts ends it at once, and one
+ * that comes during it does too; either way its handler runs under the
+ * call's mask, and the blocking mask is back once the call returns. */
+static void wait_mask(void) {
+	static const char *names[] = {"wait_mask pselect6", "wait_mask ppoll", "wait_mask epoll_pwait"};
+	struct sigaction sa = {.sa_handler = on_usr1};
+	sigemptyset(&sa.sa_mask);
+	CHECK("wait_mask", sigaction(SIGUSR1, &sa, 0) == 0);
+	sigset_t blk, cur;
+	sigemptyset(&blk);
+	sigaddset(&blk, SIGUSR1);
+	CHECK("wait_mask", sigprocmask(SIG_BLOCK, &blk, 0) == 0);
+	int ep = epoll_create1(0);
+	CHECK("wait_mask", ep >= 0);
+	for (int how = 0; how < 3; how++) {
+		const char *n = names[how];
+		/* Pending before the call. */
+		usr1s = 0;
+		kill(getpid(), SIGUSR1);
+		CHECK(n, usr1s == 0);
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		int r = masked_wait(how, ep);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		CHECK(n, r < 0 && errno == EINTR);
+		CHECK(n, usr1s == 1);
+		CHECK(n, t1.tv_sec - t0.tv_sec < 2);
+		CHECK(n, sigprocmask(SIG_BLOCK, 0, &cur) == 0 && sigismember(&cur, SIGUSR1));
+		/* Sent by another process during the call. */
+		usr1s = 0;
+		pid_t parent = getpid();
+		pid_t c = fork();
+		if (c == 0) {
+			usleep(100000);
+			kill(parent, SIGUSR1);
+			_exit(0);
+		}
+		r = masked_wait(how, ep);
+		CHECK(n, r < 0 && errno == EINTR);
+		CHECK(n, usr1s == 1);
+		CHECK(n, sigprocmask(SIG_BLOCK, 0, &cur) == 0 && sigismember(&cur, SIGUSR1));
+		CHECK(n, child_status(c) == 0);
+	}
+	close(ep);
+	sigprocmask(SIG_UNBLOCK, &blk, 0);
+	signal(SIGUSR1, SIG_DFL);
+	printf("ok wait_mask\n");
+}
+
 static volatile int alarms;
 static void on_alarm(int s) { (void)s; alarms++; }
 
@@ -876,6 +945,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "map_exit")) map_exit();
 		if (all || !strcmp(n, "shared_sem")) shared_sem();
 		if (all || !strcmp(n, "signal_fd")) signal_fd();
+		if (all || !strcmp(n, "wait_mask")) wait_mask();
 		if (all || !strcmp(n, "itimer")) itimer();
 		if (all || !strcmp(n, "creds")) creds();
 		if (all || !strcmp(n, "many_fds")) many_fds();

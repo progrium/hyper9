@@ -5948,17 +5948,46 @@ fn pollCall(p: *Process, s: Sys, c: Call) Err!i64 {
     const pf = p.gpa.alloc(kc.PollFd, @max(n, 1)) catch return -E.NOMEM;
     defer p.gpa.free(pf);
     try p.readMem(fds, std.mem.sliceAsBytes(pf[0..n]));
-    var old_mask: ?u64 = null;
-    if (s == .ppoll and c.a[3] != 0) {
-        old_mask = p.sig.mask;
-        p.sig.mask = (try p.readU64(c.a[3])) & ~sig.unblockable;
-    }
-    defer if (old_mask) |m| {
-        p.sig.mask = m;
-    };
-    const r = kc.poll(pf[0..n], ms, null) catch return -E.INTR;
+    const mask: ?u64 = if (s == .ppoll and c.a[3] != 0) try p.readU64(c.a[3]) else null;
+    const r = try withCallMask(p, mask, pollWait, .{ p, pf[0..n], ms });
+    if (r < 0) return r;
     try p.writeMem(fds, std.mem.sliceAsBytes(pf[0..n]));
+    return r;
+}
+
+/// poll's and select's wait: as Linux's do_poll, fds ready now win, and
+/// otherwise a signal already deliverable ends the call before it sleeps.
+fn pollWait(p: *Process, pf: []kc.PollFd, ms: i64) Err!i64 {
+    const deliverable = p.sig.deliverable();
+    const r = kc.poll(pf, if (deliverable) 0 else ms, null) catch return -E.INTR;
+    if (r == 0 and deliverable) return -E.INTR;
     return @intCast(r);
+}
+
+/// Runs a wait under ppoll's, pselect6's, or epoll_pwait's signal mask,
+/// as rt_sigsuspend does: the caller's mask goes in `suspend_mask`, so a
+/// wait that ends with EINTR leaves both for the delivery, which runs the
+/// handler under the call's mask and puts the caller's back once it
+/// returns, or puts it back itself when no handler runs (machine.zig,
+/// deliverLinux). Putting it back here first would block the very signal
+/// the call unblocked, and leave it pending while the program waits again
+/// (GNU make -j blocks SIGCHLD and waits in pselect6 with it unblocked).
+/// Any other return puts the caller's mask back at once.
+fn withCallMask(p: *Process, mask: ?u64, comptime wait: anytype, args: anytype) Err!i64 {
+    const m = mask orelse return @call(.auto, wait, args);
+    p.sig.suspend_mask = p.sig.mask;
+    p.sig.mask = m & ~sig.unblockable;
+    const r = @call(.auto, wait, args) catch |e| {
+        restoreCallMask(p);
+        return e;
+    };
+    if (r != -E.INTR) restoreCallMask(p);
+    return r;
+}
+
+fn restoreCallMask(p: *Process) void {
+    if (p.sig.suspend_mask) |m| p.sig.mask = m;
+    p.sig.suspend_mask = null;
 }
 
 fn selectCall(p: *Process, s: Sys, c: Call) Err!i64 {
@@ -5995,19 +6024,14 @@ fn selectCall(p: *Process, s: Sys, c: Call) Err!i64 {
         pf[n] = .{ .fd = @intCast(fd), .events = ev, .revents = 0 };
         n += 1;
     }
-    var old_mask: ?u64 = null;
+    var mask: ?u64 = null;
     if (s == .pselect6 and c.a[5] != 0) {
         // {const sigset_t *ss; size_t ss_len}
         const sigset = try p.readPtr(c.a[5]);
-        if (sigset != 0) {
-            old_mask = p.sig.mask;
-            p.sig.mask = (try p.readU64(sigset)) & ~sig.unblockable;
-        }
+        if (sigset != 0) mask = try p.readU64(sigset);
     }
-    defer if (old_mask) |m| {
-        p.sig.mask = m;
-    };
-    _ = kc.poll(pf[0..n], ms, null) catch return -E.INTR;
+    const r = try withCallMask(p, mask, pollWait, .{ p, pf[0..n], ms });
+    if (r < 0) return r;
     var out: [3][16]u64 = @splat(@splat(0));
     var ready: i64 = 0;
     for (pf[0..n]) |f| {
@@ -6239,14 +6263,11 @@ fn epollCtl(p: *Process, epfd: i32, op: u32, fd: i32, ev_va: u64) Err!i64 {
 fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms: i32, sigmask_va: u64) Err!i64 {
     const ep = epollOf(p, epfd) orelse return if (kc.fdInfo(epfd)) |_| -E.INVAL else |_| -E.BADF;
     if (maxevents <= 0) return -E.INVAL;
-    var old_mask: ?u64 = null;
-    if (sigmask_va != 0) {
-        old_mask = p.sig.mask;
-        p.sig.mask = (try p.readU64(sigmask_va)) & ~sig.unblockable;
-    }
-    defer if (old_mask) |m| {
-        p.sig.mask = m;
-    };
+    const mask: ?u64 = if (sigmask_va != 0) try p.readU64(sigmask_va) else null;
+    return withCallMask(p, mask, epollLoop, .{ p, ep, events_va, maxevents, timeout_ms });
+}
+
+fn epollLoop(p: *Process, ep: *Epoll, events_va: u64, maxevents: i32, timeout_ms: i32) Err!i64 {
     const ev_size: u64 = if (p.arch != .arm64) 12 else 16;
     const deadline: ?i64 = if (timeout_ms >= 0) kern.monoNs() + @as(i64, timeout_ms) * std.time.ns_per_ms else null;
     // The entries are copied out under the group's lock, since other
@@ -6318,6 +6339,9 @@ fn epollWait(p: *Process, epfd: i32, events_va: u64, maxevents: i32, timeout_ms:
             if (left <= 0) return 0;
             ms = @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms);
         }
+        // Nothing's ready: a signal already deliverable (under
+        // epoll_pwait's mask, say) ends the call before it sleeps.
+        if (p.sig.deliverable()) return -E.INTR;
         // Sleep until something changes. An fd that's ready now but was
         // reported edge-triggered is left out, so it doesn't end the wait
         // at once; any wake ends it, and the loop asks again.

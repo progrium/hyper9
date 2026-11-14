@@ -5548,6 +5548,12 @@ test "signalfd turns blocked signals into reads, and wakes epoll from itself and
     try netCase(&le, &.{ "/mnt/term/cwd/files", "signal_fd" }, "ok signal_fd\n");
 }
 
+test "pselect6, ppoll, and epoll_pwait take a signal their mask unblocks, pending before the call or sent during it [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "wait_mask" }, "ok wait_mask\n");
+}
+
 test "setitimer and alarm deliver SIGALRM, once or repeating [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
