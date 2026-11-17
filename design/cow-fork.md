@@ -7,7 +7,7 @@ created: 2026-11-08
 authors: [progrium]
 depends: [linux-personality, linux-threads]
 areas: [linux, kern, vmm]
-branch: [cow-fork]
+branch: []
 ---
 
 # Proposal: Copy-on-write fork and demand-loaded file pages for Linux processes
