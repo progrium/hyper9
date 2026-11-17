@@ -2009,10 +2009,12 @@ Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
   `--no-hardlinks`.
 - Moving a directory across directories inside the root's overlay, or
   between two overlays, fails with `EXDEV`; `mv` falls back to copying.
-- Memory: `exec` copies the whole program image into the new process, so a
+- Memory: `fork` copies the parent's touched memory into the child, so a
   large program that starts others, such as `zig cc` or a compiler driver,
   can need `--memory 3g` to `8g`
-  (*Not yet available ([cow-fork](design/cow-fork.md))*).
+  (*Not yet available ([cow-fork](design/cow-fork.md))*). `exec` loads a
+  program's pages from its file as they're touched, so a large program
+  costs only what it uses.
 - CPU times in `/proc/stat` and `/proc/n/stat` read 0, so `top` and `htop`
   show 0%.
 - `symlink` works in overlays (the root and `/tmp`) and host trees on macOS
@@ -2657,8 +2659,14 @@ system call h9 doesn't serve (`ENOSYS`). `--trace` shows which, as
 what's known to be missing.
 
 **A large Linux program can't start others** (Zig reports
-`SystemResources`). `exec` copies the whole program image, so raise
+`SystemResources`). `fork` copies the parent's memory, so raise
 `--memory` (`3g` to `8g` for compilers such as `zig cc`).
+
+**A Linux program dies with `SIGSEGV` at an address it owns.** The machine
+may have run out of guest memory: a page the program may use that can't be
+allocated is a fault, as Linux's OOM killer would end the process.
+`--trace` says "virtual memory allocation failed (out of --memory)" before
+the registers. Raise `--memory`.
 
 **"no procs".** `--pids` is too low for what the program starts. A pipeline
 of `n` commands under `rc` needs `n + 1`.

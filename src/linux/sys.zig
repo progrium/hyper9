@@ -3475,13 +3475,14 @@ const FileCtx = struct {
 };
 
 /// The file of a lazily filled private mapping (`mm.Src`): a reference
-/// to the fd's channel, which outlives the fd.
-const LazyFile = struct {
+/// to the fd's channel, which outlives the fd. exec's segments use one
+/// too (elf.load).
+pub const LazyFile = struct {
     src: mm.Src = .{ .fill = fill, .free = free },
     gpa: std.mem.Allocator,
     ch: *anyopaque,
 
-    fn open(gpa: std.mem.Allocator, fd: i32) ?*LazyFile {
+    pub fn open(gpa: std.mem.Allocator, fd: i32) ?*LazyFile {
         const ch = kc.chanGet(fd) orelse return null;
         const lf = gpa.create(LazyFile) catch {
             kc.chanPut(ch);
@@ -3489,6 +3490,29 @@ const LazyFile = struct {
         };
         lf.* = .{ .gpa = gpa, .ch = ch };
         return lf;
+    }
+
+    /// Whether the file holds exactly `bytes`, by its length and its
+    /// first and last pages: exec opens the file it read again, and a
+    /// file replaced in between mustn't fill the image's pages.
+    pub fn holds(lf: *LazyFile, bytes: []const u8) bool {
+        var buf: [4096]u8 = undefined;
+        var one: [1]u8 = undefined;
+        const past = kc.chanPread(lf.ch, &one, bytes.len) catch return false;
+        if (past != 0) return false;
+        const head = bytes[0..@min(bytes.len, buf.len)];
+        const tail_off = bytes.len - @min(bytes.len, buf.len);
+        for ([_]u64{ 0, tail_off }) |off| {
+            const want = bytes[@intCast(off)..][0..head.len];
+            var done: usize = 0;
+            while (done < want.len) {
+                const n = kc.chanPread(lf.ch, buf[done..want.len], off + done) catch return false;
+                if (n == 0) return false;
+                done += n;
+            }
+            if (!std.mem.eql(u8, buf[0..want.len], want)) return false;
+        }
+        return true;
     }
 
     fn fill(s: *mm.Src, dst: []u8, off: u64) void {

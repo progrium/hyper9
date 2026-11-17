@@ -7,6 +7,7 @@ created: 2026-11-08
 authors: [progrium]
 depends: [linux-personality, linux-threads]
 areas: [linux, kern, vmm]
+branch: [cow-fork]
 ---
 
 # Proposal: Copy-on-write fork and demand-loaded file pages for Linux processes
@@ -84,7 +85,7 @@ Integration cases:
 - [ ] `test "a write after fork that finds no memory gets SIGSEGV, and the machine and the other process go on [cow-fork]"`
 - [ ] `test "MADV_DONTNEED after fork zeroes the range in one process only [cow-fork]"`
 - [ ] `test "a private mapping of a 200 MB file costs only the chunks touched, as VmRSS shows [cow-fork]"`
-- [ ] `test "an executable's untouched segments aren't loaded: a 170 MB static binary runs in 64 MB [cow-fork]"`
+- [x] `test "an executable's untouched segments aren't loaded: a 170 MB static binary runs in 64 MB [cow-fork]"`
 - [ ] The existing `MAP_SHARED`, System V, `vfork`, and thread cases in [18] and [49] pass unchanged.
 
 ## Implementation
@@ -99,3 +100,8 @@ Integration cases:
 - 9front `rfork` copies segments eagerly too, and [go-compat](go-compat.md)'s `os/exec` case needs `--memory 4G` for it. Copy-on-write segments would follow the same plan in `src/segment.zig`, but semaphores key waiters on host addresses ([semaphores](semaphores.md)), so moving a page under a waiter needs care. A separate proposal, or this one's scope?
 - Per-page copy-on-write, if chunk copies show up in long-lived forked servers.
 - Whether `exec` should still read the whole file for small executables, where one read is cheaper than many faults.
+
+## Updates
+
+- 2026-11-17: Step 3, `exec` through file mappings, is on the `cow-fork` branch, built on the lazily filled private mappings (`Vma.src`) that `mmap` already had, which cover step 2's mappings except for fork's handling of unloaded chunks. `elf.load` takes the image's file as a `Src` and maps each segment's whole file pages from it; a page two segments share and a segment's last file page (the start of the bss) are still copied in at exec. `exec` opens the file it read again and checks its length and first and last pages against what it read, and copies the image in, as before, when that fails or the program came from a host path. It still reads the whole file up front, against step 3's "reading headers only": that costs host memory during exec, not `--memory`. Found running Claude Code (a 370 MB Bun executable that execs itself again for ripgrep) on KVM under the default `--memory`: the second copy of its image ran the machine out of guest memory about one run in seven, which showed up as a `SIGSEGV` at the first touch of a new chunk. The peak guest memory of `claude -p` went from about 1 GB to about 500 MB, and of `claude --version` from 384 MB to 80 MB. The out-of-memory fault now says so under `--trace`.
+

@@ -218,7 +218,17 @@ pub const Loaded = struct {
 
 /// Maps `img`'s segments into `m`. A PIE goes at `base`, or for the
 /// interpreter (base null) wherever mmap would put it.
-pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8) Error!Loaded {
+///
+/// With `src`, the image's file, each segment's whole file pages are
+/// filled from it as the program touches them (`mm.Vma.src`), as Linux
+/// maps them, rather than copied in now. A large executable runs a small
+/// part of its pages, and every page copied counts against --memory: a
+/// Bun program such as Claude Code (370 MB) that execs itself again ran
+/// the machine out of guest memory. Pages that can't come from the file
+/// alone are still copied: a page two segments share, and a segment's
+/// last file page, whose bytes past p_filesz are the bss and read as
+/// zero. Without `src` every segment is copied.
+pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8, src: ?*mm.Src) Error!Loaded {
     const span = img.hi - img.lo;
     const bias: u64 = if (img.ehdr.type == ET_EXEC) 0 else blk: {
         const at = base orelse (m.findFree(span) orelse return error.NoSpace);
@@ -227,11 +237,12 @@ pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8) Error!Lo
     var phdr: u64 = 0;
     var prev_end: u64 = 0;
     const phsize = @as(u64, img.ehdr.phnum) * img.ehdr.phentsize;
-    for (img.phdrs()) |ph| {
+    for (img.phdrs(), 0..) |ph, i| {
         if (ph.type == PT_PHDR) phdr = bias + ph.vaddr;
         if (ph.type != PT_LOAD or ph.memsz == 0) continue;
         const prot: mm.Prot = .{ .read = ph.flags & 4 != 0, .write = ph.flags & 2 != 0, .exec = ph.flags & 1 != 0 };
-        var start = bias + ph.vaddr - ph.vaddr % page;
+        const seg_start = bias + ph.vaddr - ph.vaddr % page;
+        var start = seg_start;
         const end = std.mem.alignForward(u64, bias + ph.vaddr + ph.memsz, page);
         // Segments that share a page: the page takes both permissions.
         if (start < prev_end) {
@@ -241,16 +252,50 @@ pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8) Error!Lo
             }
             start = prev_end;
         }
-        if (start < end) try m.insert(.{
-            .start = start,
-            .end = end,
-            .prot = prot,
-            .kind = .file,
-            .name = .init(name),
-            .offset = ph.offset - ph.offset % page + (start - (bias + ph.vaddr - ph.vaddr % page)),
-        });
+        // [lazy_lo, lazy_hi): the whole file pages filled from `src`.
+        const file_end = bias + ph.vaddr + ph.filesz;
+        var lazy_lo = start;
+        var lazy_hi = start;
+        if (src != null and ph.filesz > 0) {
+            lazy_hi = @max(start, @min(end, file_end - file_end % page));
+            if (lazy_lo < lazy_hi and sharesPage(img, bias, i, lazy_lo)) lazy_lo += page;
+            if (lazy_lo < lazy_hi and sharesPage(img, bias, i, lazy_hi - page)) lazy_hi -= page;
+            if (lazy_lo >= lazy_hi) {
+                lazy_lo = start;
+                lazy_hi = start;
+            }
+        }
+        const v: mm.Vma = .{ .start = start, .end = end, .prot = prot, .kind = .file, .name = .init(name) };
+        const offset = ph.offset - ph.offset % page;
+        // The copied head, the lazy middle, and the copied tail, each its
+        // own VMA, since only the middle reads from the file.
+        const parts = [_]struct { lo: u64, hi: u64, lazy: bool }{
+            .{ .lo = start, .hi = lazy_lo, .lazy = false },
+            .{ .lo = lazy_lo, .hi = lazy_hi, .lazy = true },
+            .{ .lo = lazy_hi, .hi = end, .lazy = false },
+        };
+        for (parts) |pt| {
+            if (pt.lo >= pt.hi) continue;
+            var w = v;
+            w.start = pt.lo;
+            w.end = pt.hi;
+            w.offset = offset + (pt.lo - seg_start);
+            if (pt.lazy) w.src = src;
+            try m.insert(w);
+        }
         prev_end = @max(prev_end, end);
-        if (ph.filesz > 0) try m.hostWrite(bias + ph.vaddr, img.bytes[@intCast(ph.offset)..][0..@intCast(ph.filesz)]);
+        // The file bytes outside the lazy part: before it (in a page the
+        // previous segment shares) and after it.
+        if (ph.filesz > 0) {
+            const bytes = img.bytes[@intCast(ph.offset)..][0..@intCast(ph.filesz)];
+            const seg_va = bias + ph.vaddr;
+            if (lazy_lo == lazy_hi) {
+                try m.hostWrite(seg_va, bytes);
+            } else {
+                if (seg_va < lazy_lo) try m.hostWrite(seg_va, bytes[0..@intCast(lazy_lo - seg_va)]);
+                if (lazy_hi < file_end) try m.hostWrite(lazy_hi, bytes[@intCast(lazy_hi - seg_va)..]);
+            }
+        }
         // The file's tail of the last page (the start of the bss) may
         // hold bytes past filesz in a page that's zero already.
         if (phdr == 0 and ph.offset <= img.ehdr.phoff and img.ehdr.phoff + phsize <= ph.offset + ph.filesz) {
@@ -258,6 +303,18 @@ pub fn load(m: *mm.Mm, img: *const Image, base: ?u64, name: []const u8) Error!Lo
         }
     }
     return .{ .bias = bias, .entry = bias + img.ehdr.entry, .phdr = phdr, .end = bias + img.hi };
+}
+
+/// Whether the page at `va` holds part of a PT_LOAD segment other than
+/// `img`'s program header `which`.
+fn sharesPage(img: *const Image, bias: u64, which: usize, va: u64) bool {
+    for (img.phdrs(), 0..) |ph, i| {
+        if (i == which or ph.type != PT_LOAD or ph.memsz == 0) continue;
+        const lo = bias + ph.vaddr - ph.vaddr % page;
+        const hi = std.mem.alignForward(u64, bias + ph.vaddr + ph.memsz, page);
+        if (va + page > lo and va < hi) return true;
+    }
+    return false;
 }
 
 // auxv keys.

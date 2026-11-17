@@ -5124,6 +5124,17 @@ test "a static Linux program runs and exits with its status (demo) [linux-person
     try std.testing.expectEqual(3, r.code);
 }
 
+test "an executable's untouched segments aren't loaded: a 170 MB static binary runs in 64 MB [cow-fork]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "bigexe"), .{}) catch return error.SkipZigTest;
+    const r = try runLinux(&le, false, &.{ "--memory", "64m", "/mnt/term/cwd/bigexe" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("size 178257920 first A mid Z last B data 7 bss 0\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "files, fork, vfork, exec, pipes, signals and mmap work for a Linux program [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

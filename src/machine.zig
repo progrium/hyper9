@@ -1661,16 +1661,27 @@ pub const Machine = struct {
                     // thread's mmap or mprotect in the same chunk) may have
                     // caught the retry with the page briefly unmapped.
                     const same = f.addr == last_fault.addr and f.access == last_fault.access and u.pc() == last_fault.pc;
+                    // A page the VMA allows but that can't be allocated
+                    // (the machine's --memory is used up) is a fault too,
+                    // as Linux's OOM would end the process; the trace says
+                    // why, since the address alone looks like a bad one.
+                    var alloc_failed = false;
                     if (l.mm.fault(f.addr, switch (f.access) {
                         .read => .read,
                         .write => .write,
                         .exec => .exec,
-                    }) catch null) |gen| if (!same or gen != last_fault.gen) {
+                    }) catch blk: {
+                        alloc_failed = true;
+                        break :blk null;
+                    }) |gen| if (!same or gen != last_fault.gen) {
                         last_fault = .{ .addr = f.addr, .access = f.access, .pc = u.pc(), .gen = gen };
                         p.noteMem();
                         continue;
                     };
-                    if (m.opts.trace) |w| dumpFault(w, &p.job.trace_lock, &u, f, "");
+                    if (m.opts.trace) |w| {
+                        if (alloc_failed) traceLine(w, &p.job.trace_lock, "h9: fault: virtual memory allocation failed (out of --memory)\n");
+                        dumpFault(w, &p.job.trace_lock, &u, f, "");
+                    }
                     // A fault while the signal is blocked or ignored kills,
                     // as Linux's force_sig does.
                     const a = l.sig.actions[lsig.SIGSEGV];
@@ -1996,12 +2007,20 @@ pub const Machine = struct {
             const ib = readLinux(arena, ip) catch |err| return execError(err);
             interp = elf.check(ib, m.arch) catch return failWith(ebadexec);
         }
+        // The files they came from, to fill their pages from as they're
+        // touched (elf.load); without them, the pages are copied in.
+        const exe_src = imageSrc(m.gpa, path, bytes);
+        defer if (exe_src) |s| s.put();
+        const interp_src = if (interp) |ii| imageSrc(m.gpa, exe.interp.?, ii.bytes) else null;
+        defer if (interp_src) |s| s.put();
         var random: [16]u8 = undefined;
         m.io.random(&random);
         const prog = lexec.build(m.gpa, m.backend, .{
             .arch = m.arch,
             .exe = &exe,
             .interp = if (interp) |*ii| ii else null,
+            .exe_src = exe_src,
+            .interp_src = interp_src,
             .path = path,
             .argv = argv,
             .envp = envp,
@@ -2084,6 +2103,29 @@ pub const Machine = struct {
         var name_buf: [kern.ERRMAX]u8 = undefined;
         kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(path)}) catch "a.out");
         p.vforkRelease();
+    }
+
+    /// The file at `path` as an mm.Src, if it holds `bytes`, the image
+    /// exec read from it: looked up in the current view, then the Linux
+    /// view, as exec's callers read it from one or the other. Null when
+    /// neither holds it (a program loaded from the host, or a file
+    /// replaced since), and the image is copied in instead.
+    fn imageSrc(gpa: std.mem.Allocator, path: []const u8, bytes: []const u8) ?*lmm.Src {
+        var zbuf: [4096]u8 = undefined;
+        const zpath = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return null;
+        const in_view = kc.inView();
+        for ([_]bool{ false, true }) |linux| {
+            const swap = linux and !in_view;
+            if (linux and in_view) break;
+            if (swap) kc.setSlash(true) catch continue;
+            defer if (swap) kc.setSlash(false) catch {};
+            const fd = kern.open(zpath, kern.OREAD) catch continue;
+            defer kern.close(fd) catch {};
+            const lf = lsys.LazyFile.open(gpa, fd) orelse continue;
+            if (lf.holds(bytes)) return &lf.src;
+            lf.src.put();
+        }
+        return null;
     }
 
     /// Reads a file by its path in the Linux view, from either view. A
@@ -3461,6 +3503,14 @@ fn setFpsave(x: *vmm.Extra, img: []const u8) void {
             t.fx.mxcsr &= 0xffff;
         },
     }
+}
+
+/// Writes one line to the trace, under `lock`, as dumpFault does.
+fn traceLine(w: *std.Io.Writer, lock: *std.atomic.Mutex, line: []const u8) void {
+    while (!lock.tryLock()) std.atomic.spinLoopHint();
+    defer lock.unlock();
+    w.writeAll(line) catch {};
+    w.flush() catch {};
 }
 
 /// Prints a fault to the trace: the Ureg, the faulting address and the PC

@@ -530,12 +530,14 @@ Linux ELF binaries run next to 9front ones in the same machine ([linux-personali
 
 `src/linux/elf.zig` and `src/linux/exec.zig` load static and dynamic ELF for arm64 and amd64. ET_DYN programs load at a fixed PIE base and `PT_INTERP` (musl's `ld-musl`, read in the Linux view) at the first free range.
 
+A segment's whole file pages are a lazily filled private file mapping (`Vma.src`, see Memory) of the file exec read, opened again and checked against what was read, so a page counts against `--memory` only once it's touched. A page two segments share and a segment's last file page, whose bytes past `p_filesz` start the bss, are copied in at exec, as is the whole image when the file can't be opened again (a program loaded from a host path). exec still reads the whole file to check it.
+
 The stack carries argv, envp and auxv, with `AT_HWCAP` limited to what every backend has.
 
 arm64 gets a one-page vDSO holding `__kernel_rt_sigreturn`, with the `LINUX_2.6.39` version tables Go's vDSO lookup needs; amd64 has none, and musl's `syscall` fallback covers it.
 ### Memory
 
-`src/linux/mm.zig` keeps VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings copied at `mmap`, and shared mappings.
+`src/linux/mm.zig` keeps VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings filled from the file chunk by chunk on first touch (`Vma.src`), and shared mappings.
 
 A private mapping of a file that's also mapped shared is the exception: it maps the shared pages copy-on-write (`Vma.cow`), so it sees the file's changes until it writes a page, as on Linux; Wine reads wineserver's session memory through one.
 

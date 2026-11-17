@@ -1251,8 +1251,8 @@ pub const Mm = struct {
     /// or a private file mapping's as the file's. Shared ones keep their
     /// contents, as Linux's do.
     ///
-    /// A file mapping with no Src to read again (a program's ELF
-    /// segments, which elf.load copies in, or a private mapping copied
+    /// A file mapping with no Src to read again (the pages of a program's
+    /// ELF segments that elf.load copies in, or a private mapping copied
     /// at mmap) keeps its contents: on Linux those pages would read as
     /// the file's again, and zeros would be the file's only by chance.
     /// Bun's standalone executables (Claude Code's) hand back the pages
