@@ -13,7 +13,7 @@ branch: []
 
 ## Abstract
 
-A machine's namespace is set up with one family of flags, each of which becomes one line of the plan. Source flags bring a tree in from outside the machine: `--dir` for a host directory or file, `--url` for a 9P server over `tcp://`, `unix://`, `ws://`, or `wss://`, or a static tree over `http://` or `https://`, `--archive` for a tar unpacked into memory, `--builtin` for the built-in root, and `--tmp` for an empty tree in memory. `--bind` rearranges what's already inside. All of them take `SRC:DST[:OPTS]`, with options such as `ro`, `rw`, `eph`, `b`, `a`, `c`, and `r`. Mounts on `/` stack into one tree merged at every depth, which replaces the proposed `--layer`, and mounts on `#L` (devlinux, renamed from `#λ`) do the same for the Linux tree. `/` is built as on 9front: the kernel's `#/` first, with the root stack unioned behind it and bound at `/root`, so a remote root is never asked for `/dev` or `/proc`. `--root` and its `--root-*` flags are removed, and so is detecting a Linux tree by its contents. `--print` output is exactly what `--ns` replays, Linux trees and 9P options included. This proposal takes in [recursive-unions](recursive-unions.md)' union instances and [host-srv](host-srv.md)'s posting, and supersedes both.
+A machine's namespace is set up with one family of flags, each of which becomes one line of the plan. Mount flags bring a tree in from outside the machine: `--dir` for a host directory or file, `--url` for a 9P server over `tcp://`, `unix://`, `ws://`, or `wss://`, or a static tree over `http://` or `https://`, `--archive` for a tar unpacked into memory, `--builtin` for the built-in root, and `--tmp` for an empty tree in memory. `--bind` rearranges what's already inside. All of them take `SRC:DST[:OPTS]`, with options such as `ro`, `rw`, `eph`, `b`, `a`, `c`, and `r`. Mounts on `/` stack into one tree merged at every depth, which replaces the proposed `--layer`, and mounts on `#L` (devlinux, renamed from `#λ`) do the same for the Linux tree. `/` is built as on 9front: the kernel's `#/` first, with the root stack unioned behind it and bound at `/root`, so a remote root is never asked for `/dev` or `/proc`. `--root` and its `--root-*` flags are removed, and so is detecting a Linux tree by its contents. `--print` output is exactly what `--ns` replays, Linux trees and 9P options included. This proposal takes in [recursive-unions](recursive-unions.md)' union instances and [host-srv](host-srv.md)'s posting, and supersedes both.
 
 ## Background
 
@@ -45,9 +45,9 @@ h9 replaces `/` with the root tree instead. With a remote root, every lookup of 
 
 ## Proposal
 
-### Source flags
+### Mount flags
 
-Every source flag is `SRC:DST[:OPTS]` and repeatable. They're applied in the order given.
+Every mount flag is `SRC:DST[:OPTS]` and repeatable. They're applied in the order given, and `--help` lists them under Mounts. Only `--url` is a `mount` in Plan 9's sense, a 9P connection through devmnt. The others become `bind` lines in the plan, of `#U`, `#O`, or `#H`.
 
 | Flag | SRC | Becomes |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ A DST that doesn't exist is made as a directory in the overlay of the stack it's
 
 ### Stacks
 
-`/` and `#L` are always stacks: `#O` instances with an ordered list of members, merged at every depth (see Union instances). Each source flag with that destination adds a member. A later member goes on top, as in a Dockerfile, unless it says `a`, which puts it at the bottom, or `b`, which is the default and says so. So:
+`/` and `#L` are always stacks: `#O` instances with an ordered list of members, merged at every depth (see Union instances). Each mount flag with that destination adds a member. A later member goes on top, as in a Dockerfile, unless it says `a`, which puts it at the bottom, or `b`, which is the default and says so. So:
 
 ```sh
 h9 --builtin --dir ./base:/ --dir ./app:/ --archive ./fix.tgz:/ rc
@@ -108,7 +108,7 @@ Any other destination takes Plan 9's rules: the mount replaces what's there, `b`
 
 ### `--bind SRC:DST[:OPTS]`
 
-`--bind` binds a path already in the machine: SRC is a guest path or a `#` device, and DST is a guest path. Every `--bind` runs after every source flag, in the order given, and before `--ns`, so it can bind out of anything mounted. The options are `b`, `a`, `c`, and `r`.
+`--bind` binds a path already in the machine: SRC is a guest path or a `#` device, and DST is a guest path. Every `--bind` runs after every mount flag, in the order given, and before `--ns`, so it can bind out of anything mounted. The options are `b`, `a`, `c`, and `r`.
 
 ```sh
 h9 --url wss://fs.example/9front:/ --dir ./proj:/usr/glenda/proj:rw \
@@ -304,7 +304,7 @@ Integration cases:
 - [ ] `test "--url to /srv/NAME posts without mounting [mounts]"`
 - [ ] `test "--archive unpacks into memory, counted against --memory [mounts]"`
 - [ ] `test "--tmp makes an empty writable tree [mounts]"`
-- [ ] `test "--bind runs after every source, in order [mounts]"`
+- [ ] `test "--bind runs after every mount, in order [mounts]"`
 - [ ] `test "the long src= form takes values with colons and quoted commas [mounts]"`
 - [ ] `test "conflicting options are a usage error [mounts]"`
 - [ ] `test "--write=none rejects rw, eph, and 9P mounts [mounts]"`
