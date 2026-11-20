@@ -39,7 +39,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [multicall](multicall.md) | [#64](../../../issues/64) | implemented |  | A multi-call 9front userland binary |
 | [builtin-root](builtin-root.md) | [#87](../../../issues/87) | implemented |  | A built-in root |
 | [host-scripts](host-scripts.md) |  | draft |  | Running host scripts as the program |
-| [host-srv](host-srv.md) |  | draft |  | Posting host connections to /srv |
+| [host-srv](host-srv.md) |  | superseded |  | Posting host connections to /srv |
 | [root-auth](root-auth.md) |  | draft |  | Authenticated 9P roots |
 | [default-command](default-command.md) | [#81](../../../issues/81) | implemented |  | A default command from the root |
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | proposed | in progress on credential-helpers | Credential helpers for WebSocket 9P |
@@ -50,7 +50,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [schemeless-roots](schemeless-roots.md) | [#76](../../../issues/76) | implemented |  | Schemeless roots |
 | [login-shell](login-shell.md) | [#89](../../../issues/89) | proposed | needs host-cmd | h9 as a login shell |
 | [native-backend](native-backend.md) | [#95](../../../issues/95) | implemented |  | Native backend |
-| [recursive-unions](recursive-unions.md) | [#102](../../../issues/102) | proposed |  | Recursive unions and root layers |
+| [recursive-unions](recursive-unions.md) | [#102](../../../issues/102) | superseded |  | Recursive unions and root layers |
 | [linux-i386](linux-i386.md) | [#105](../../../issues/105) | implemented |  | 32-bit x86 Linux programs |
 | [tilde-roots](tilde-roots.md) | [#107](../../../issues/107) | proposed |  | Tilde roots from $H9ROOTPATH |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
@@ -105,7 +105,7 @@ flowchart LR
   p_multicall["multicall<br/>implemented"]:::implemented
   p_builtin_root["builtin-root<br/>implemented"]:::implemented
   p_host_scripts["host-scripts<br/>draft"]:::draft
-  p_host_srv["host-srv<br/>draft"]:::draft
+  p_host_srv["host-srv<br/>superseded"]:::closed
   p_root_auth["root-auth<br/>draft"]:::draft
   p_default_command["default-command<br/>implemented"]:::implemented
   p_credential_helpers["credential-helpers<br/>proposed"]:::draft
@@ -116,7 +116,7 @@ flowchart LR
   p_schemeless_roots["schemeless-roots<br/>implemented"]:::implemented
   p_login_shell["login-shell<br/>proposed"]:::draft
   p_native_backend["native-backend<br/>implemented"]:::implemented
-  p_recursive_unions["recursive-unions<br/>proposed"]:::draft
+  p_recursive_unions["recursive-unions<br/>superseded"]:::closed
   p_linux_i386["linux-i386<br/>implemented"]:::implemented
   p_tilde_roots["tilde-roots<br/>proposed"]:::draft
   p_child_machines["child-machines<br/>proposed"]:::draft
