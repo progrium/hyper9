@@ -177,7 +177,7 @@ Every plan starts with `#/` and puts the root stack behind it:
 
 The Linux view is built the same way: devlinux's own directories first, with `#Olinux` unioned after them at `#L`.
 
-**With nothing on `/`,** the source is `$H9ROOT`, then the development tree, then the built-in root, as now. `$H9ROOT` is read as a `--url` if it has `://`, and as a `--dir` otherwise. `--builtin` on `/` alongside other sources is an ordinary member, so what `--builtin=before` and `after` do now is `--builtin` on top of or at the bottom of the stack, and `--builtin=only` is `--builtin` alone.
+**With nothing on `/`,** the source is `$H9ROOT`, then the built-in root. The development tree, `.local/9front/root` beside the binary's source tree, is no longer looked for: a developer sets `$H9ROOT` or passes `--dir`. `$H9ROOT` is read as a `--url` if it has `://`, and as a `--dir` otherwise. `--builtin` on `/` alongside other sources is an ordinary member, so what `--builtin=before` and `after` do now is `--builtin` on top of or at the bottom of the stack, and `--builtin=only` is `--builtin` alone.
 
 ### Union instances
 
@@ -202,6 +202,7 @@ An `#O` instance has an ordered list of members and a mode. In `cow` mode, made 
 
 - `--root`, `--root-spec`, `--root-user`, `--root-header`, `--root-ca`, `--root-contained`, and `--builtin auto|only|before|after|off`. They're replaced by the flags and options above, with no aliases.
 - Detecting a Linux tree by its contents. A Linux tree is mounted on `#L`.
+- Looking for the development tree (`defaultRoot` in `src/main.zig`). The built-in root covers a fresh checkout, and `zig build mkroot` still makes `.local/9front/root` for `-Droot`, the demos, and the integration tests, which pass it explicitly.
 - `tcp!` and `unix!` dial strings on the command line. They stay in namespace files and `mount` inside the machine.
 - [recursive-unions](recursive-unions.md)' `--layer`, never built: repeated sources on `/` or `#L` do what it did.
 
@@ -248,6 +249,7 @@ The CLI fills both from its flags. On the browser host, `createMachine({ mounts,
 
 - **CLI:** new `--dir`, `--url`, `--archive`, `--tmp`, and `--bind`; `--builtin` takes a destination. `--root`, `--root-spec`, `--root-user`, `--root-header`, `--root-ca`, and `--root-contained` are removed, so scripts that use them fail with exit 2 and a message naming the replacement. Exit codes are unchanged.
 - **`$H9ROOT`:** still the default for `/`. A dial string in it is an error naming the URL form.
+- **The development tree:** a development build of `h9` with no `$H9ROOT` runs from the built-in root instead of `.local/9front/root`. `zig build mkroot` prints the `export H9ROOT=…` line to add.
 - **Schemeless URLs:** they mean `https://` or `http://` and probe for a WebSocket, not `wss://` or `ws://` directly. A WebSocket server answers the probe, so every URL that works now still works.
 - **`--print`:** every plan starts with `bind '#/' /`, and the root's lines change to the stack lines above. The Linux tree's lines change from `#λ` to `#L` and `#Olinux`, and they now replay.
 - **`--ns`:** files that worked before mean the same, with `#λ` as an alias. New: URLs in `mount`, settings words, `bind -r`, and named `#O` specs.
@@ -310,6 +312,7 @@ Integration cases:
 - [ ] `test "--write=none rejects rw, eph, and 9P mounts [mounts]"`
 - [ ] `test "--dir rw writes through to the host, and ro denies [mounts]"`
 - [ ] `test "--root and --root-spec fail with exit 2 naming the replacement [mounts]"`
+- [ ] `test "a development build without $H9ROOT runs from the built-in root [mounts]"`
 - [ ] `test "--print output with a Linux tree and 9P settings replays with --ns [mounts]"`
 - [ ] `test "#λ is an alias for #L in namespace files [mounts]"`
 - [ ] `test "bind -r merges directories below the bind point [mounts]"`
@@ -328,7 +331,7 @@ Browser host:
 
 1. `#O` members, `union` mode, the qid table, and named instances, with kernel tests beside the existing `#O` ones.
 2. `/` built as `#/` with `#Oroot` behind it and at `/root`, and the Linux tree as `#Olinux` at `#L`. Rename devlinux to `#L` and devlfd to `#φ`. Plan lines and `--print`.
-3. The mount model in `policy.zig` and `Machine.Options.mounts` and `binds`, with `Mount.parse` for the flag syntax and its long form, and the CLI flags. Remove `--root` and its family, and content detection.
+3. The mount model in `policy.zig` and `Machine.Options.mounts` and `binds`, with `Mount.parse` for the flag syntax and its long form, and the CLI flags. Remove `--root` and its family, content detection, and the development-tree lookup.
 4. `--url` with `tcp://`, `unix://`, `ws://`, and `wss://`, posting to `/srv/NAME`, and URLs and settings words in namespace-file `mount` lines.
 5. The probe, and static dotfs trees as a host-side 9P server, with the hash cache. Indexes on 9P servers and `index=`.
 6. `--archive` and `--tmp` natively, and `createMachine({ mounts, binds })` on the browser host.
