@@ -1,10 +1,11 @@
 ---
 slug: host-srv
 title: Posting host connections to /srv
-status: draft
+status: superseded
 created: 2026-11-06
 authors: [progrium]
 depends: [devsrv, ninep-roots, websocket-9p]
+superseded-by: mounts
 areas: [cli, kern]
 ---
 

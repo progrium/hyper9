@@ -2,10 +2,11 @@
 issue: 102
 slug: recursive-unions
 title: Recursive unions and root layers
-status: proposed
+status: superseded
 created: 2026-11-08
 authors: [progrium]
 depends: [overlay, linux-personality]
+superseded-by: mounts
 areas: [kern, cli, sandbox]
 ---
 
