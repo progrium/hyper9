@@ -47,13 +47,13 @@ h9 replaces `/` with the root tree instead. With a remote root, every lookup of 
 
 ### Mount flags
 
-Every mount flag is `SRC:DST[:OPTS]` and repeatable. They're applied in the order given, and `--help` lists them under Mounts. Only `--url` is a `mount` in Plan 9's sense, a 9P connection through devmnt. The others become `bind` lines in the plan, of `#U`, `#O`, or `#H`.
+Every mount flag is `SRC[:DST[:OPTS]]` and repeatable. DST defaults to `/`, so `h9 --url wss://reg.example/9front rc` uses a server as the root as `--root` did, and `--dir ./base --dir ./app` stacks `app` over `base`. `--tmp` requires a DST. They're applied in the order given, and `--help` lists them under Mounts. Only `--url` is a `mount` in Plan 9's sense, a 9P connection through devmnt. The others become `bind` lines in the plan, of `#U`, `#O`, or `#H`.
 
 | Flag | SRC | Becomes |
 | --- | --- | --- |
-| `--dir PATH:DST[:OPTS]` | A host directory or file | A bind of `#U/PATH` |
-| `--url URL:DST[:OPTS]` | A 9P server, or a static tree over HTTP (below) | A mount of the connection |
-| `--archive FILE:DST[:OPTS]` | A tar, a gzipped tar, or an `.h9a` | A tree unpacked into memory |
+| `--dir PATH[:DST[:OPTS]]` | A host directory or file | A bind of `#U/PATH` |
+| `--url URL[:DST[:OPTS]]` | A 9P server, or a static tree over HTTP (below) | A mount of the connection |
+| `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` | A tree unpacked into memory |
 | `--builtin[=DST[:OPTS]]` | The built-in root | A bind of `#Hroot` |
 | `--tmp DST` | Nothing | An empty tree in memory: `bind -c '#O' DST` over an empty instance |
 
@@ -145,7 +145,9 @@ Two options that conflict, such as `ro,rw` or `b,a`, are a usage error (exit 2).
 
 ### Parsing
 
-DST starts at the last `:` in the argument that's followed by `/` or `#`. Whatever follows DST after a `:` is OPTS. A URL's scheme separator, its port, and an image tag (`wss://h:8080/alpine:3.20`) never put `/` or `#` right after a `:`, so `--url wss://reg.example/alpine:3.20:/` is SRC `wss://reg.example/alpine:3.20` and DST `/`.
+DST starts at the last `:` in the argument that's followed by `/` or `#`, with two exceptions that are never separators: the `://` after a URL's scheme, and a drive letter's `:` at the start of a Windows path (`C:/roots/9front`). Whatever follows DST after a `:` is OPTS. A URL's port and an image tag (`wss://h:8080/alpine:3.20`) never put `/` or `#` right after a `:`, so `--url wss://reg.example/alpine:3.20:/` is SRC `wss://reg.example/alpine:3.20` and DST `/`.
+
+An argument with no separator is all SRC, and DST is `/`. Options need an explicit DST, since `--dir ./base:ro` could name a path: write `--dir ./base:/:ro`.
 
 For a value that has to contain `:` followed by `/`, or a `,`, there's a long form with keys, chosen when the argument starts with `src=`:
 
@@ -273,7 +275,7 @@ The CLI fills both from its flags. On the browser host, `createMachine({ mounts,
 ## Done criteria
 
 ```
-h9 --dir ~/9front:/ rc -c 'ls /root/rc/bin | sed 3q'
+h9 --dir ~/9front rc -c 'ls /root/rc/bin | sed 3q'
 h9 --builtin --dir ./app:/ --archive ./fix.tgz:/ --rc 'cat /lib/app.conf; cd /root && tar cf /fd/1 .' > merged.tar
 h9 --dir ./alpine:#L --dir ./etcfix:#L/etc sh -c 'cat /etc/resolv.conf; ls /etc | wc -l'
 h9 --url tcp://127.0.0.1:5640:/ --rc 'ls /'
@@ -307,6 +309,7 @@ Integration cases:
 - [ ] `test "--archive unpacks into memory, counted against --memory [mounts]"`
 - [ ] `test "--tmp makes an empty writable tree [mounts]"`
 - [ ] `test "--bind runs after every mount, in order [mounts]"`
+- [ ] `test "a mount flag without DST mounts on /, and a URL's :// and a drive letter aren't separators [mounts]"`
 - [ ] `test "the long src= form takes values with colons and quoted commas [mounts]"`
 - [ ] `test "conflicting options are a usage error [mounts]"`
 - [ ] `test "--write=none rejects rw, eph, and 9P mounts [mounts]"`
