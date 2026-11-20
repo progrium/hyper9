@@ -13,7 +13,7 @@ branch: []
 
 ## Abstract
 
-A machine's namespace is set up with one family of flags, each of which becomes one line of the plan. Mount flags bring a tree in from outside the machine: `--dir` for a host directory or file, `--url` for a 9P server over `tcp://`, `unix://`, `ws://`, or `wss://`, or a static tree over `http://` or `https://`, `--archive` for a tar unpacked into memory, `--builtin` for the built-in root, and `--tmp` for an empty tree in memory. `--bind` rearranges what's already inside. All of them take `SRC:DST[:OPTS]`, with options such as `ro`, `rw`, `eph`, `b`, `a`, `c`, and `r`. Mounts on `/` stack into one tree merged at every depth, which replaces the proposed `--layer`, and mounts on `#L` (devlinux, renamed from `#λ`) do the same for the Linux tree. `/` is built as on 9front: the kernel's `#/` first, with the root stack unioned behind it and bound at `/root`, so a remote root is never asked for `/dev` or `/proc`. `--root` and its `--root-*` flags are removed, and so is detecting a Linux tree by its contents. `--print` output is exactly what `--ns` replays, Linux trees and 9P options included. This proposal takes in [recursive-unions](recursive-unions.md)' union instances and [host-srv](host-srv.md)'s posting, and both are superseded by it.
+A machine's namespace is set up with one family of flags, each of which becomes one line of the plan. Mount flags bring a tree in from outside the machine: `--dir` for a host directory or file, `--url` for a 9P server over `tcp://`, `unix://`, `ws://`, or `wss://`, or a static tree over `http://` or `https://`, `--archive` for a tar unpacked into memory, `--builtin` for the built-in root, and `--tmp` for an empty tree in memory. `--bind` rearranges what's already inside, and `--ns` takes namespace lines inline, separated by `;`, or a host file as `--ns @FILE`. The mount flags and `--bind` all take `SRC:DST[:OPTS]`, with options such as `ro`, `rw`, `eph`, `b`, `a`, `c`, and `r`. Mounts on `/` stack into one tree merged at every depth, which replaces the proposed `--layer`, and mounts on `#L` (devlinux, renamed from `#λ`) do the same for the Linux tree. `/` is built as on 9front: the kernel's `#/` first, with the root stack unioned behind it and bound at `/root`, so a remote root is never asked for `/dev` or `/proc`. `--root` and its `--root-*` flags are removed, and so is detecting a Linux tree by its contents. `--print` output is exactly what `--ns` replays, Linux trees and 9P options included. This proposal takes in [recursive-unions](recursive-unions.md)' union instances and [host-srv](host-srv.md)'s posting, and both are superseded by it.
 
 ## Background
 
@@ -198,6 +198,16 @@ An `#O` instance has an ordered list of members and a mode. In `cow` mode, made 
 
 ### Namespace files
 
+**`--ns` takes namespace lines inline.** Its value is the namespace itself, with `;` between lines: `--ns "bind -b /mnt/term/cwd/bin /bin; mount -c tcp!fs!564 /n/fs"`. A value starting with `@` is a file instead: `--ns @ns` reads `ns`.
+
+- **Splitting.** A `;` outside single quotes ends a line, as a newline does, so `bind '/a;b' /x` stays one line. Quoting is unchanged, with `''` for a quote inside quotes.
+- **Comments.** `#` at the start of a word begins a comment, which ends at the next `;` or newline. Device names are quoted (`'#c'`), as now.
+- **`@FILE`** is a host path, resolved from h9's working directory and read by h9 before the machine starts, as `header=@FILE` is. It's read with h9's own permissions and isn't shared with the guest. A namespace file inside the root tree is no longer named directly; `--ns @$H9ROOT/lib/x.ns` or a copy on the host does the same.
+- **Repeatable.** Each `--ns` is replayed in the order given, after every `--bind`, so a file and a few inline lines combine: `--ns @base.ns --ns "bind -b /n/x/bin /bin"`.
+- **A bare word** that isn't a namespace command, such as `--ns ns` from today's syntax, is exit 125 with a hint: "--ns: unknown command 'ns' (for a file, use --ns @ns)".
+
+`--bind` stays, as a shorter way to write the most common line: `--bind /x:/bin:b` is `--ns "bind -b /x /bin"`.
+
 `--ns` lines accept the URL forms in `mount` lines, alongside `tcp!` dial strings, and accept `bind -r` and named `#O` specs. `--print` writes each flag as the lines it becomes, and every line names its sources by path or URL, never by instance number, so `--print` output replays, Linux tree and 9P settings included. A `mount` line takes the settings as trailing `key=value` words after its spec: `mount -c wss://fs.example/9p /n/fs '' header=@/mnt/term/cwd/h`.
 
 ### Removed
@@ -205,6 +215,7 @@ An `#O` instance has an ordered list of members and a mode. In `cow` mode, made 
 - `--root`, `--root-spec`, `--root-user`, `--root-header`, `--root-ca`, `--root-contained`, and `--builtin auto|only|before|after|off`. They're replaced by the flags and options above, with no aliases.
 - Detecting a Linux tree by its contents. A Linux tree is mounted on `#L`.
 - Looking for the development tree (`defaultRoot` in `src/main.zig`). The built-in root covers a fresh checkout, and `zig build mkroot` still makes `.local/9front/root` for `-Droot`, the demos, and the integration tests, which pass it explicitly.
+- `--ns FILE` with a bare guest path. It's `--ns @FILE`, read from the host.
 - `tcp!` and `unix!` dial strings on the command line. They stay in namespace files and `mount` inside the machine.
 - [recursive-unions](recursive-unions.md)' `--layer`, never built: repeated sources on `/` or `#L` do what it did.
 
@@ -226,6 +237,8 @@ The CLI fills both from its flags. On the browser host, `createMachine({ mounts,
 **Named flags, not one `--mount`.** One flag would have to work out the source's kind from its text. A host path, a URL, and a dial string overlap, `!` in dial strings needs quoting in some shells, and `wss://h:8080/x:/` is hard to split without knowing it's a URL. A flag per kind keeps each value's syntax its own, and the help groups them under Mounts.
 
 **URLs, not dial strings.** `tcp://` and `unix://` are what Docker and most tools use, they carry a spec in the path the way h9reg already uses a WebSocket URL's path, and they leave `!` out of shell commands. Namespace files keep dial strings, since nothing there is parsed by a shell.
+
+**Inline `--ns`, with `@` for files.** Short namespaces fit on the command line, as `--rc` does for rc, and `@` is the convention `header=@FILE` and curl already use. Reading the file on the host fits the `--print > ns` workflow and works whatever the root is. `--bind` is redundant with it, and kept because it's the line people write most.
 
 **Mount and bind are two flags.** A source from outside the machine and a path inside it both start with `/`. `--dir /sys/lib:/lib` and `--bind /sys/lib:/lib` mean different things, and a separate flag says which.
 
@@ -254,7 +267,7 @@ The CLI fills both from its flags. On the browser host, `createMachine({ mounts,
 - **The development tree:** a development build of `h9` with no `$H9ROOT` runs from the built-in root instead of `.local/9front/root`. `zig build mkroot` prints the `export H9ROOT=…` line to add.
 - **Schemeless URLs:** they mean `https://` or `http://` and probe for a WebSocket, not `wss://` or `ws://` directly. A WebSocket server answers the probe, so every URL that works now still works.
 - **`--print`:** every plan starts with `bind '#/' /`, and the root's lines change to the stack lines above. The Linux tree's lines change from `#λ` to `#L` and `#Olinux`, and they now replay.
-- **`--ns`:** files that worked before mean the same, with `#λ` as an alias. New: URLs in `mount`, settings words, `bind -r`, and named `#O` specs.
+- **`--ns`:** takes lines inline, and a file as `--ns @FILE`, a host path. `--ns FILE` stops working, with a hint naming `@`. Files that worked before mean the same, with `#λ` as an alias. New: URLs in `mount`, settings words, `bind -r`, and named `#O` specs.
 - **Root trees:** trees no longer need empty `dev`, `env`, `fd`, `net`, `proc`, or `srv`. Trees that have them still work. `/root` is the root stack, not the tree's own `/root`.
 - **`Machine.Options`:** the root fields become `mounts` and `binds`, which breaks embedders. There are none outside this repository.
 - **Browser host:** `createMachine`'s `root` and `layers` become `mounts`.
@@ -310,6 +323,10 @@ Integration cases:
 - [ ] `test "--tmp makes an empty writable tree [mounts]"`
 - [ ] `test "--bind runs after every mount, in order [mounts]"`
 - [ ] `test "a mount flag without DST mounts on /, and a URL's :// and a drive letter aren't separators [mounts]"`
+- [ ] `test "--ns splits inline lines on ; outside quotes [mounts]"`
+- [ ] `test "--ns comments end at ; [mounts]"`
+- [ ] `test "--ns @FILE reads a host file, and repeated --ns replay in order [mounts]"`
+- [ ] `test "--ns with a bare file name is exit 125 with a hint to use @ [mounts]"`
 - [ ] `test "the long src= form takes values with colons and quoted commas [mounts]"`
 - [ ] `test "conflicting options are a usage error [mounts]"`
 - [ ] `test "--write=none rejects rw, eph, and 9P mounts [mounts]"`
@@ -335,11 +352,12 @@ Browser host:
 1. `#O` members, `union` mode, the qid table, and named instances, with kernel tests beside the existing `#O` ones.
 2. `/` built as `#/` with `#Oroot` behind it and at `/root`, and the Linux tree as `#Olinux` at `#L`. Rename devlinux to `#L` and devlfd to `#φ`. Plan lines and `--print`.
 3. The mount model in `policy.zig` and `Machine.Options.mounts` and `binds`, with `Mount.parse` for the flag syntax and its long form, and the CLI flags. Remove `--root` and its family, content detection, and the development-tree lookup.
-4. `--url` with `tcp://`, `unix://`, `ws://`, and `wss://`, posting to `/srv/NAME`, and URLs and settings words in namespace-file `mount` lines.
-5. The probe, and static dotfs trees as a host-side 9P server, with the hash cache. Indexes on 9P servers and `index=`.
-6. `--archive` and `--tmp` natively, and `createMachine({ mounts, binds })` on the browser host.
-7. `bind -r` in namespace files, the `clone` control tree, the forked `bind`, and devproc's `bind -r` lines.
-8. MANUAL.md, README.md, the docs, the site, the workloads, and the h9reg and mkroot-9front READMEs. SPEC.md once built.
+4. Inline `--ns`, `@FILE` read on the host, and repeated `--ns`.
+5. `--url` with `tcp://`, `unix://`, `ws://`, and `wss://`, posting to `/srv/NAME`, and URLs and settings words in namespace-file `mount` lines.
+6. The probe, and static dotfs trees as a host-side 9P server, with the hash cache. Indexes on 9P servers and `index=`.
+7. `--archive` and `--tmp` natively, and `createMachine({ mounts, binds })` on the browser host.
+8. `bind -r` in namespace files, the `clone` control tree, the forked `bind`, and devproc's `bind -r` lines.
+9. MANUAL.md, README.md, the docs, the site, the workloads, and the h9reg and mkroot-9front READMEs. SPEC.md once built.
 
 ## Open issues
 
