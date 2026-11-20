@@ -129,7 +129,7 @@ pub const Backend = struct {
         b.* = .{
             .gpa = gpa,
             .io = io,
-            .ram = .{ .gpa = gpa, .io = io, .base = 0, .mem = mem },
+            .ram = .{ .gpa = gpa, .io = io, .base = 0, .mem = mem, .release = .{ .memfd = ram_fd } },
             .ram_fd = ram_fd,
             .stub_fd = stub_fd,
         };

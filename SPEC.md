@@ -206,7 +206,7 @@ The interface was shaped around all three hypervisors, so the table and rules be
 
 - **Exits:** the shim exits to the host by storing to an unmapped doorbell address (MMIO), or with `OUT` on x86. All three hypervisors hand that exit to userspace, so we don't depend on HVC or VMCALL handling, which differs across them. On arm64 KVM in particular, the kernel handles HVC itself unless hypercall filtering is configured.
 - **Threads:** a vCPU is created, run, and destroyed on one host thread, which is HVF's rule and the strictest of the three. `kick` is the only call allowed from another thread.
-- **Memory:** one large guest-physical region is mapped once at VM creation. A host-side page allocator hands out guest-physical pages from it. We never map per segment, because KVM caps the number of memory slots and mapping calls are slow everywhere.
+- **Memory:** one large guest-physical region is mapped once at VM creation. A host-side page allocator hands out guest-physical pages from it. We never map per segment, because KVM caps the number of memory slots and mapping calls are slow everywhere. The host backs the region's pages only when they're first touched, and freed pages go back to it (`src/vmm/gphys.zig`): each free range keeps the span of it that may be dirty, and once that span reaches 32 MiB it's released (`madvise(MADV_DONTNEED)` on KVM, a hole punched in the RAM file on the native backend, and, with the range taken out of the VM and put back, fresh pages mapped over it on HVF and a decommit and recommit on WHP). A smaller dirty span is zeroed as it's handed out again, so small frees and reallocations cost no syscalls, and never-used or released pages aren't touched when they're handed out.
 - **Page size:** guest page tables use 4K pages on every host, matching 9front's page size on both architectures. hyper-linux shows HVF guests can use 4K pages. Only the single host memory region has to be aligned to the host page size (16K on Apple Silicon).
 - **No hypervisor:** `create` fails cleanly with a clear message, and `auto` falls back to the emulator when it's built in. The native backend is never chosen automatically, since it shares h9's process and isn't a security boundary; it needs an explicit `--backend native`, and the CLI points at it when nothing else can run.
 
@@ -537,7 +537,7 @@ The stack carries argv, envp and auxv, with `AT_HWCAP` limited to what every bac
 arm64 gets a one-page vDSO holding `__kernel_rt_sigreturn`, with the `LINUX_2.6.39` version tables Go's vDSO lookup needs; amd64 has none, and musl's `syscall` fallback covers it.
 ### Memory
 
-`src/linux/mm.zig` keeps VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings filled from the file chunk by chunk on first touch (`Vma.src`), and shared mappings.
+`src/linux/mm.zig` keeps VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings filled from the file chunk by chunk on first touch (`Vma.src`), and shared mappings. `madvise(MADV_DONTNEED)` frees the private chunks it covers whole, so their memory goes back to the backend, and zeroes the rest.
 
 A private mapping of a file that's also mapped shared is the exception: it maps the shared pages copy-on-write (`Vma.cow`), so it sees the file's changes until it writes a page, as on Linux; Wine reads wineserver's session memory through one.
 

@@ -589,6 +589,7 @@ pub const AddressSpace = union(enum) {
 test {
     _ = ia32;
     _ = emu;
+    _ = @import("vmm/gphys.zig");
 }
 
 pub const Vcpu = union(Kind) {

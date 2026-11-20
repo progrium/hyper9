@@ -98,8 +98,35 @@ pub const Backend = struct {
             .ram = ram,
             .cr4 = x86.cr4(features & abi.ProcessorFeatures.smep != 0, features & abi.ProcessorFeatures.smap != 0),
         };
+        b.ram.release = .{ .custom = .{ .ctx = b, .f = releaseRam } };
         b.kernel_root = try pt.kernelRoot(&b.ram);
         return b;
+    }
+
+    /// Gives freed RAM back to the host (gphys.Ram.Release): the range is
+    /// decommitted and committed again, which leaves it zero and unbacked
+    /// but still committed, so the region stays whole. The partition maps
+    /// the range by host address, so it's taken out of the partition first
+    /// and put back after. Nothing maps the pages in the guest meanwhile,
+    /// since they're free.
+    fn releaseRam(ctx: *anyopaque, off: usize, len: usize) gphys.Ram.Release.Outcome {
+        const b: *Backend = @ptrCast(@alignCast(ctx));
+        const w = std.os.windows;
+        const gpa = b.ram.base + off;
+        const p = b.ram.mem.ptr + off;
+        if (!abi.succeeded(b.api.WHvUnmapGpaRange(b.partition, gpa, len))) return .kept;
+        var out: gphys.Ram.Release.Outcome = .kept;
+        var base: ?*anyopaque = p;
+        var n: w.SIZE_T = len;
+        if (w.ntdll.NtFreeVirtualMemory(w.GetCurrentProcess(), @ptrCast(&base), &n, .{ .DECOMMIT = true }) == .SUCCESS) {
+            base = p;
+            n = len;
+            if (w.ntdll.NtAllocateVirtualMemory(w.GetCurrentProcess(), @ptrCast(&base), 0, &n, .{ .COMMIT = true }, .{ .READWRITE = true }) != .SUCCESS)
+                return .lost;
+            out = .released;
+        }
+        if (!abi.succeeded(b.api.WHvMapGpaRange(b.partition, p, gpa, len, .{ .read = true, .write = true, .execute = true }))) return .lost;
+        return out;
     }
 
     pub fn destroy(b: *Backend) void {

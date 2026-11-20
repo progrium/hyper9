@@ -5476,6 +5476,12 @@ test "madvise MADV_FREE is EINVAL, and MADV_DONTNEED zeroes [linux-personality]"
     try netCase(&le, &.{ "/mnt/term/cwd/files", "madv_free" }, "ok madv_free\n");
 }
 
+test "MADV_DONTNEED over whole chunks frees them, and they read zero after [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "madv_release" }, "ok madv_release\n");
+}
+
 test "MADV_DONTNEED on the program's own data segment leaves the file's bytes [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
