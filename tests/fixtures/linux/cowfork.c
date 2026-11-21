@@ -12,18 +12,28 @@
  *   dontneed  MADV_DONTNEED after fork zeroes the range in one process
  *   filemap   a private mapping of a 200 MB file costs only the chunks
  *             touched, as VmRSS shows, in the parent and after fork
+ *   txtbsy    a running program's file can't be opened for writing or
+ *             truncated (ETXTBSY), and can once the program has exited
+ *   sigbus    a private mapping's pages past the end of its file (one
+ *             truncated under it) are SIGBUS to touch, and EFAULT to a
+ *             syscall, while the last page with file bytes reads them
+ *   maps      /proc/self/maps shows each file mapping, the segments of
+ *             this program included, as one line, not in pieces
+ *   hold      (for txtbsy) says "r" on stdout and waits for stdin's end
  */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/futex.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -282,6 +292,168 @@ static void filemap(void) {
 	printf("ok filemap\n");
 }
 
+/* Copies the file at `from` to `to`, executable. */
+static int copyfile(const char *from, const char *to) {
+	int in = open(from, O_RDONLY);
+	if (in < 0)
+		return -1;
+	int out = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+	if (out < 0) {
+		close(in);
+		return -1;
+	}
+	static char buf[1 << 16];
+	ssize_t n;
+	int r = 0;
+	while ((n = read(in, buf, sizeof buf)) > 0)
+		if (write(out, buf, n) != n) {
+			r = -1;
+			break;
+		}
+	if (n < 0)
+		r = -1;
+	close(in);
+	close(out);
+	return r;
+}
+
+static void txtbsy(const char *self) {
+	const char *path = "/tmp/cowfork.exe";
+	CHECK("txtbsy", copyfile(self, path) == 0 || copyfile("/proc/self/exe", path) == 0);
+	struct stat st0;
+	CHECK("txtbsy", stat(path, &st0) == 0);
+	int in[2], out[2];
+	CHECK("txtbsy", pipe(in) == 0 && pipe(out) == 0);
+	pid_t c = fork();
+	CHECK("txtbsy", c >= 0);
+	if (c == 0) {
+		dup2(in[0], 0);
+		dup2(out[1], 1);
+		close(in[1]);
+		close(out[0]);
+		execl(path, "cowfork.exe", "hold", (char *)NULL);
+		_exit(127);
+	}
+	close(in[0]);
+	close(out[1]);
+	char r;
+	CHECK("txtbsy", read(out[0], &r, 1) == 1 && r == 'r');
+	errno = 0;
+	CHECK("txtbsy", open(path, O_WRONLY) < 0 && errno == ETXTBSY);
+	errno = 0;
+	CHECK("txtbsy", open(path, O_RDWR | O_TRUNC) < 0 && errno == ETXTBSY);
+	errno = 0;
+	CHECK("txtbsy", truncate(path, 0) < 0 && errno == ETXTBSY);
+	struct stat st1;
+	CHECK("txtbsy", stat(path, &st1) == 0 && st1.st_size == st0.st_size);
+	int rfd = open(path, O_RDONLY);
+	CHECK("txtbsy", rfd >= 0);
+	close(rfd);
+	close(in[1]);
+	int status = child_status(c);
+	CHECK("txtbsy", WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	int wfd = open(path, O_WRONLY | O_TRUNC);
+	CHECK("txtbsy", wfd >= 0);
+	close(wfd);
+	CHECK("txtbsy", stat(path, &st1) == 0 && st1.st_size == 0);
+	unlink(path);
+	printf("ok txtbsy\n");
+}
+
+static void hold(void) {
+	char b;
+	if (write(1, "r", 1) != 1)
+		_exit(1);
+	while (read(0, &b, 1) > 0)
+		;
+	_exit(0);
+}
+
+static sigjmp_buf bus_jmp;
+static volatile int bus_code;
+static void *volatile bus_addr;
+
+static void on_bus(int sig, siginfo_t *si, void *uc) {
+	(void)sig;
+	(void)uc;
+	bus_code = si->si_code;
+	bus_addr = si->si_addr;
+	siglongjmp(bus_jmp, 1);
+}
+
+static void sigbus(void) {
+	const long pg = sysconf(_SC_PAGESIZE);
+	const char *path = "/tmp/cowfork.bus";
+	int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	CHECK("sigbus", fd >= 0);
+	static char buf[8192];
+	memset(buf, 'b', sizeof buf);
+	CHECK("sigbus", write(fd, buf, sizeof buf) == (ssize_t)sizeof buf);
+	volatile unsigned char *m = mmap(NULL, 4 * pg, PROT_READ, MAP_PRIVATE, fd, 0);
+	CHECK("sigbus", m != MAP_FAILED);
+	/* Truncated before the first touch: page 0 keeps 100 bytes of it. */
+	CHECK("sigbus", ftruncate(fd, 100) == 0);
+	close(fd);
+	unlink(path);
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_sigaction = on_bus;
+	sa.sa_flags = SA_SIGINFO;
+	sigemptyset(&sa.sa_mask);
+	CHECK("sigbus", sigaction(SIGBUS, &sa, NULL) == 0);
+	CHECK("sigbus", m[0] == 'b' && m[99] == 'b' && m[100] == 0 && m[pg - 1] == 0);
+	for (int i = 1; i < 4; i += 2) {
+		bus_code = 0;
+		bus_addr = NULL;
+		if (sigsetjmp(bus_jmp, 1) == 0) {
+			(void)m[i * pg + 7];
+			printf("FAIL sigbus: page %d read without SIGBUS\n", i);
+			failed = 1;
+			return;
+		}
+		CHECK("sigbus", bus_code == BUS_ADRERR && bus_addr == (void *)(m + i * pg + 7));
+	}
+	int p[2];
+	CHECK("sigbus", pipe(p) == 0);
+	errno = 0;
+	CHECK("sigbus", write(p[1], (void *)(m + pg), 16) < 0 && errno == EFAULT);
+	close(p[0]);
+	close(p[1]);
+	signal(SIGBUS, SIG_DFL);
+	munmap((void *)m, 4 * pg);
+	printf("ok sigbus\n");
+}
+
+static void maps(void) {
+	FILE *f = fopen("/proc/self/maps", "r");
+	CHECK("maps", f != NULL);
+	char line[512];
+	unsigned long pe = 0, po = 0;
+	char pperm[8] = "", pname[256] = "";
+	int self = 0;
+	while (fgets(line, sizeof line, f)) {
+		unsigned long s, e, o;
+		char perm[8], name[256] = "";
+		if (sscanf(line, "%lx-%lx %7s %lx %*s %*s %255s", &s, &e, perm, &o, name) < 4)
+			continue;
+		if (strstr(name, "cowfork"))
+			self++;
+		if (name[0] && name[0] != '[' && !strcmp(name, pname) && !strcmp(perm, pperm) && s == pe && o == po) {
+			printf("FAIL maps: %s in pieces at %lx\n", name, s);
+			failed = 1;
+			fclose(f);
+			return;
+		}
+		pe = e;
+		po = o + (e - s);
+		strcpy(pperm, perm);
+		strcpy(pname, name);
+	}
+	fclose(f);
+	CHECK("maps", self > 0);
+	printf("ok maps\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -296,6 +468,14 @@ int main(int argc, char **argv) {
 			dontneed();
 		else if (!strcmp(a, "filemap"))
 			filemap();
+		else if (!strcmp(a, "txtbsy"))
+			txtbsy(argv[0]);
+		else if (!strcmp(a, "hold"))
+			hold();
+		else if (!strcmp(a, "sigbus"))
+			sigbus();
+		else if (!strcmp(a, "maps"))
+			maps();
 		else {
 			printf("FAIL %s: no such case\n", a);
 			failed = 1;

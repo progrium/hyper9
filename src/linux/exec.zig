@@ -77,7 +77,8 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
     var entry = exe.entry;
     var interp_base: u64 = 0;
     if (a.interp) |ii| {
-        const l = try elf.load(m, ii, null, std.fs.path.basename(ii.interp orelse "ld.so"), a.interp_src);
+        // Named by its path, as Linux's /proc/n/maps names it.
+        const l = try elf.load(m, ii, null, a.exe.interp orelse "ld.so", a.interp_src);
         interp_base = l.bias + ii.lo;
         entry = l.entry;
     }
