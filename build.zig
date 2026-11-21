@@ -104,6 +104,9 @@ const kern_flags_common = [_][]const u8{
     "-Wno-missing-braces",
     "-D_THREAD_SAFE",
     "-fno-sanitize=undefined",
+    // drawterm's names (error, print, lock, panic) stay inside h9, so a
+    // shared build (docs/embedding/capi.zig) doesn't bind them to libc's.
+    "-fvisibility=hidden",
 };
 // PTHREAD, as Make.linux, makes libc/lock.c's Lock a pthread mutex. Without
 // it unlock is a plain store with no release ordering, so on arm64 another
@@ -1707,6 +1710,24 @@ pub fn build(b: *std.Build) void {
     // The integration cases are their own step, `zig build integration`, so
     // running both doesn't run them twice; `zig build test integration`
     // runs everything.
+
+    // docs/embedding/capi.zig: a proof-of-concept C ABI as a shared library.
+    const capi = b.addLibrary(.{
+        .name = "h9",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("docs/embedding/capi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "h9", .module = mod.mod }},
+        }),
+    });
+    if (os == .macos) {
+        addSdkPaths(b, capi.root_module);
+        capi.root_module.linkFramework("Hypervisor", .{});
+    }
+    b.step("capi", "Build docs/embedding/capi.zig as a shared library (proof of concept)").dependOn(&b.addInstallArtifact(capi, .{}).step);
 
     // docs/embedding/embed.zig, docs/embedding.md's example of embedding h9.
     const embed_example = b.addExecutable(.{
