@@ -74,8 +74,9 @@ pub const Cache = struct {
             d.deleteFile(c.io, n) catch {};
             return null;
         };
-        // Dir.setTimestampsNow doesn't build in Zig 0.16.0.
-        d.setTimestamps(c.io, n, .{ .modify_timestamp = .now, .access_timestamp = .now }) catch {};
+        // Dir.setTimestampsNow doesn't build in Zig 0.16.0, and
+        // setTimestamps panics (a TODO) on Windows.
+        if (builtin.os.tag != .windows) d.setTimestamps(c.io, n, .{ .modify_timestamp = .now, .access_timestamp = .now }) catch {};
         return bytes;
     }
 
@@ -148,7 +149,7 @@ pub const Cache = struct {
         const got = d.readFile(c.io, etagName(&nb, url), buf) catch return null;
         const nl = std.mem.indexOfScalar(u8, got, '\n') orelse return null;
         if (nl == 0 or nl + 1 >= got.len) return null;
-        d.setTimestamps(c.io, etagName(&nb, url), .{ .modify_timestamp = .now, .access_timestamp = .now }) catch {};
+        if (builtin.os.tag != .windows) d.setTimestamps(c.io, etagName(&nb, url), .{ .modify_timestamp = .now, .access_timestamp = .now }) catch {};
         return .{ .version = got[0..nl], .etag = got[nl + 1 ..] };
     }
 

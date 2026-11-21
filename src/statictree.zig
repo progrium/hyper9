@@ -734,7 +734,7 @@ pub const Server = struct {
         io.random(&rnd);
         const dir = try std.fmt.allocPrint(gpa, "{s}/h9-static-{x}", .{ std.mem.trimEnd(u8, tmp, "/\\"), &rnd });
         errdefer gpa.free(dir);
-        try std.Io.Dir.cwd().createDir(io, dir, .fromMode(0o700));
+        try std.Io.Dir.cwd().createDir(io, dir, if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700));
         errdefer std.Io.Dir.cwd().deleteDir(io, dir) catch {};
         const path = try std.fmt.allocPrint(gpa, "{s}/s", .{dir});
         defer gpa.free(path);

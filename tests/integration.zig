@@ -4304,8 +4304,10 @@ const CountingRelay = struct {
         var rbuf: [1 << 17]u8 = undefined;
         var r = from.reader(io, &rbuf);
         var w = to.writer(io, &.{});
+        // Not the testing allocator: the relay's threads are detached and
+        // can outlive the case, whose end checks for leaks.
         var index_fids: std.ArrayList(u32) = .empty;
-        defer index_fids.deinit(gpa);
+        defer index_fids.deinit(std.heap.page_allocator);
         while (true) {
             const hdr = r.interface.peek(4) catch break;
             const size = std.mem.readInt(u32, hdr[0..4], .little);
@@ -4339,7 +4341,7 @@ const CountingRelay = struct {
                     }
                     last = name;
                 }
-                if (std.mem.eql(u8, last, "index")) try index_fids.append(gpa, newfid);
+                if (std.mem.eql(u8, last, "index")) try index_fids.append(std.heap.page_allocator, newfid);
             },
             112 => if (std.mem.indexOfScalar(u32, index_fids.items, fid) != null) {
                 _ = c.index_opens.fetchAdd(1, .acq_rel);
@@ -4380,6 +4382,8 @@ const IndexRig = struct {
         }
         try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try hostPath(e.root, "rc/lib/rcmain"), d, "tree/rc/lib/rcmain", io, .{});
         try d.writeFile(io, .{ .sub_path = "tree/lib/x/a", .data = "apple\n" });
+        // 0644 whatever the umask (Ubuntu's is 002), for mkindex's case.
+        if (builtin.os.tag != .windows) try d.setFilePermissions(io, "tree/lib/x/a", .fromMode(0o644), .{});
         try d.writeFile(io, .{ .sub_path = "tree/lib/x/b", .data = "banana\n" });
         try d.writeFile(io, .{ .sub_path = "tree/lib/x/sub/c", .data = "cherry\n" });
         x.tree = try std.fmt.bufPrint(&x.tree_buf, "{s}/tree", .{x.s.path});
@@ -4516,7 +4520,9 @@ test "mkindex lists every name in the test root with the server's qids [mount-in
     var f = std.mem.splitScalar(u8, line, ' ');
     _ = f.next();
     try std.testing.expectEqualStrings("f", f.next().?);
-    try std.testing.expectEqualStrings("0644", f.next().?);
+    // Windows has no Unix modes for the server to report.
+    const mode = f.next().?;
+    if (builtin.os.tag != .windows) try std.testing.expectEqualStrings("0644", mode);
     try std.testing.expectEqualStrings("6", f.next().?);
     const k = (std.mem.indexOf(u8, line, " 9p.qid=") orelse return error.NoQid) + " 9p.qid=".len;
     const kdot = std.mem.indexOfScalarPos(u8, line, k, '.') orelse return error.NoQid;
@@ -7025,6 +7031,7 @@ test "Python's pty.spawn runs a command in a pty [linux-pty]" {
     const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
     var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     le.root = try std.fmt.bufPrint(&rb, "{s}/workloads-amd64", .{lr});
+    le.lmount = try std.fmt.bufPrint(&le.lbuf, "{s}:#L", .{le.root});
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.root, "usr/bin/python3"), .{}) catch return error.SkipZigTest;
     const r = try runLinux(&le, false, &.{ "python3", "-c", "import pty; pty.spawn([\"tty\"])" });
     defer r.deinit();
@@ -10141,7 +10148,9 @@ test "--user-map wins over 9P-Uid [credential-helpers]" {
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
-    try expectIn(r.out, " alice 1000 ");
+    // Only the owner: the group, 1000, shows as the machine's user where
+    // the host's uid is 1000 too, as for Ubuntu's first user.
+    try expectIn(r.out, " alice ");
     try std.testing.expectEqualStrings("", r.err);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "progrium") == null);
 }
