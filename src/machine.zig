@@ -177,7 +177,7 @@ pub const Machine = struct {
     pub const IndexMode = enum { auto, none };
 
     /// An index for the 9P root given with the mount, instead of its
-    /// server's `/.h9index` (`--root-index`): a host file, or an
+    /// server's `.fs/index` (`--root-index`): a host file, or an
     /// `https://` or `http://` URL.
     pub const RootIndex = union(enum) {
         path: []const u8,
@@ -209,7 +209,7 @@ pub const Machine = struct {
         /// Metadata indexes for the 9P root and namespace-file mounts
         /// (design/mount-index.md).
         index: IndexMode = .auto,
-        /// The 9P root's index, instead of its server's `/.h9index`.
+        /// The 9P root's index, instead of its server's `.fs/index`.
         /// Needs a 9P root.
         root_index: ?RootIndex = null,
         /// Where compiled indexes are cached; null caches nothing. The
@@ -3449,7 +3449,7 @@ pub const Machine = struct {
     }
 
     /// A namespace-file mount's connection `conn` under `#ι`, using its
-    /// server's `/.h9index` (design/mount-index.md); `conn` itself under
+    /// server's `.fs/index` (design/mount-index.md); `conn` itself under
     /// `--index none`. Takes `conn`.
     fn indexMount(m: *Machine, conn: u31, file: []const u8, spec: []const u8, num: *?u32) u31 {
         if (m.opts.index == .none) return conn;
@@ -3578,7 +3578,7 @@ pub const Machine = struct {
                 const data = dotlConv("fd {d}", conn);
                 kern.close(conn) catch {};
                 const dfd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
-                // Through #ι, for the server's /.h9index (design/mount-index.md).
+                // Through #ι, for the server's .fs/index (design/mount-index.md).
                 var num: ?u32 = null;
                 const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
                 defer kern.close(fd) catch {};

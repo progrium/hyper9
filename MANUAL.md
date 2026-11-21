@@ -1531,12 +1531,14 @@ devices in Plan 9.
   shows the URL h9 chose.
 - **Metadata indexes** ([mount-index](design/mount-index.md)). A 9P
   root, or a 9P server a namespace file mounts by dial string or URL, can
-  come with an index: a text file, `/.h9index` at the top of its tree,
-  listing every name with its qid, mode, length, mtime, and owners. h9 reads
-  it once, checks each directory against the server the first time it's
-  used, and then answers walks, stats, and directory reads from it, so
-  only opens and reads go to the server, and a name that isn't there costs
-  no round trip. Anything that doesn't match the server is demoted to plain
+  come with an index: dotfs's `.fs/index` at the top of its tree, a text
+  file in the `fsindex 1` format listing every name with its mode, length,
+  and mtime, and, in `9p.` fields, its qid and owners. h9 reads it once. A
+  server with dotfs's `.fs/events` tells h9 what changes, so nothing needs
+  checking; on any other, h9 checks each directory against the server the
+  first time it's used. Then it answers walks, stats, and directory reads
+  from the index, so only opens and reads go to the server, and a name
+  that isn't there costs no round trip. Anything that doesn't match the server is demoted to plain
   9P for the rest of the run, so a stale index costs time, never wrong
   answers. `mkindex [-o FILE] [-s SPEC] [DIR]` writes one from inside h9,
   for the tree at `DIR` (`/` by default, which it reads through
@@ -1553,10 +1555,12 @@ devices in Plan 9.
   `--print` shows the index on the root's line, and `--check` reports it.
   An index that doesn't parse is ignored, with a note under `-v`; a
   `--root-index` that can't be read is exit 125, and one with a host
-  directory root exit 2. A name with a space, a control character, or a
-  byte that isn't UTF-8 can't be listed, so `mkindex` leaves it out and h9
-  never answers for its directory from the index. A file changed in place
-  without reindexing shows its old length to `stat` until it's opened.
+  directory root exit 2. `mkindex` percent-escapes a name with a space or
+  a rune that isn't ASCII. A name with a control character, or a byte that
+  isn't UTF-8, can't be listed, so `mkindex` leaves it out and marks its
+  directory `9p.incomplete=1`, and h9 never answers for that directory
+  from the index. A file changed in place without reindexing shows its old
+  length to `stat` until it's opened, unless the server has `.fs/events`.
 - **WebSockets in the guest.** `/net/ws` is laid out like `/net/tcp` and
   follows `--net` and `--net-allow` as a TCP dial to the URL's host and port
   would. A conversation's `data` file carries binary messages as a byte
@@ -1703,11 +1707,11 @@ compiles and caches it; later ones read it from the cache. Here the root
 is a 9front tree that a Linux 9P server, diod, serves:
 
 ```sh
-host$ h9 --root 'tcp!127.0.0.1!5720' --index none mkindex / >root.h9index
-host$ h9 --root 'tcp!127.0.0.1!5720' --root-index root.h9index -v ls /bin/ls
-h9: index: root.h9index: 20368 entries, 1126 dirs (cached); root checked in 1 ms
+host$ h9 --root 'tcp!127.0.0.1!5720' --index none mkindex / >root.fsindex
+host$ h9 --root 'tcp!127.0.0.1!5720' --root-index root.fsindex -v ls /bin/ls
+h9: index: root.fsindex: 20368 entries, 1126 dirs (cached); root checked in 1 ms
 /bin/ls
-h9: index: root.h9index: checked 13 of 1126 dirs as they were used, 0 demoted
+h9: index: root.fsindex: checked 13 of 1126 dirs as they were used, 0 demoted
 h9: index: devmnt sent the root 221 9P requests; 16 went to the server, besides 38 to find the index and check directories
 ```
 
@@ -2131,7 +2135,7 @@ Machine:
 | `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
-| `--root-index FILE\|URL` | Use this metadata index for a 9P root instead of its `/.h9index` (chapter 16). A URL is `https://` or `http://`. With a host directory root, exit 2; one that can't be read, exit 125. |
+| `--root-index FILE\|URL` | Use this metadata index for a 9P root instead of its `.fs/index` (chapter 16). A URL is `https://` or `http://`. With a host directory root, exit 2; one that can't be read, exit 125. |
 | `--index auto\|none` | `auto` (the default) uses an index wherever one is found, for the root and for 9P servers a namespace file mounts; `none` never does |
 | `--index-cache DIR` | Where compiled indexes are kept. Default: `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
 | `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |

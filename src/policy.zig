@@ -156,7 +156,7 @@ pub const NinePRoot = struct {
     index: Index = .auto,
 
     pub const Index = union(enum) {
-        /// The server's `/.h9index`, if it has one.
+        /// The server's `.fs/index`, if it has one.
         auto,
         /// `--index none`.
         none,
@@ -412,7 +412,7 @@ fn rootNote(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u
     } else w.writeAll(r.addr) catch return error.OutOfMemory;
     if (r.user) |u| w.print(" as {s}", .{u}) catch return error.OutOfMemory;
     (switch (r.index) {
-        .auto => w.writeAll("  index=/.h9index"),
+        .auto => w.writeAll("  index=/.fs/index"),
         .none => w.writeAll("  index=none"),
         .given => |g| blk: {
             // A URL's query can hold a token.

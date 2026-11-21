@@ -86,7 +86,7 @@ h9 --rc 'wsmount wss://fs.example/data /n/d && mkdir -p /n/d/.fs && mkindex -o /
 
 It stats the tree through devmnt, so every qid in the index is what the server reports, which matters because h9 later pairs stats from the index with opens from the server. It works on any tree h9 can mount, including one whose host files you can't see. It skips `.fs` and everything in it, and, under the root, the paths the namespace builder binds over it (`/dev`, `/proc`, `/mnt/term`, `/tmp`, and the rest of [policy](../src/policy.zig)'s binds), by walking the mount's own channel through `/srv/root`, attached with `SPEC`, rather than the guest's `/`.
 
-devmnt can't read a directory with a name containing a newline ("bad character in file name"), and `walk` can't print one, so `mkindex` marks such a directory `9p.incomplete=1`, as it does any directory `walk` couldn't open or read, and h9 never answers for it from the index.
+devmnt can't read a directory with a name containing a newline ("bad character in file name"), and `walk` can't print one, so `mkindex` marks such a directory `9p.incomplete=1`, as it does any directory `walk` couldn't open or read, and h9 never answers for it from the index. A name with another control character, or with U+FFFD (a byte that isn't UTF-8, which `walk` can't print as it is), is left out the same way, and its directory marked.
 
 `walk` isn't in [builtin-root](builtin-root.md)'s command set, so this proposal adds it there, so `mkindex` works over a root that has no 9front commands, such as a Linux image, with `--builtin=before`.
 
@@ -236,24 +236,24 @@ A URL index is fetched by h9 on the host, like a WebSocket root, under the root'
 
 Integration cases tagged `[mount-index]`. The server is the second h9 serving the test root with exportfs, as in ninep-roots' cases, behind a relay that counts T-messages:
 
-- [ ] `test "mkindex lists every name in the test root with the server's qids [mount-index]"`
-- [ ] `test "mkindex escapes names with spaces and marks a directory it can't read incomplete [mount-index]"`
-- [ ] `test "a root with .fs/index runs /bin/ls [mount-index]"`
-- [ ] `test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]"`
-- [ ] `test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]"`
-- [ ] `test "--root-index FILE is used over a root without .fs/index [mount-index]"`
-- [ ] `test "a second run uses the cache and doesn't read .fs/index [mount-index]"`
-- [ ] `test "a file added after indexing is found, by demoting its directory [mount-index]"`
-- [ ] `test "a file removed after indexing is not found [mount-index]"`
-- [ ] `test "a file changed in place reads the server's contents [mount-index]"`
-- [ ] `test "a malformed index is ignored and the root still mounts [mount-index]"`
-- [ ] `test "an unreadable --root-index exits 125 [mount-index]"`
-- [ ] `test "--index none ignores .fs/index [mount-index]"`
-- [ ] `test "a namespace-file mount of a server with .fs/index uses it [mount-index]"`
-- [ ] `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
-- [ ] `test "a rewritten .fs/index is fetched on the next mount [mount-index]"`
-- [ ] `test "--root-index with a host-directory root is a usage error [mount-index]"`
-- [ ] `test "--print shows the index source and entry count [mount-index]"`
+- [x] `test "mkindex lists every name in the test root with the server's qids [mount-index]"`
+- [x] `test "mkindex escapes names with spaces and marks a directory it can't read incomplete [mount-index]"`
+- [x] `test "a root with .fs/index runs /bin/ls [mount-index]"`
+- [x] `test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]"`
+- [x] `test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]"`
+- [x] `test "--root-index FILE is used over a root without .fs/index [mount-index]"`
+- [x] `test "a second run uses the cache and doesn't read .fs/index [mount-index]"`
+- [x] `test "a file added after indexing is found, by demoting its directory [mount-index]"`
+- [x] `test "a file removed after indexing is not found [mount-index]"`
+- [x] `test "a file changed in place reads the server's contents [mount-index]"`
+- [x] `test "a malformed index is ignored and the root still mounts [mount-index]"`
+- [x] `test "an unreadable --root-index exits 125 [mount-index]"`
+- [x] `test "--index none ignores .fs/index [mount-index]"`
+- [x] `test "a namespace-file mount of a server with .fs/index uses it [mount-index]"`
+- [x] `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
+- [x] `test "a rewritten .fs/index is fetched on the next mount [mount-index]"`
+- [x] `test "--root-index with a host-directory root is a usage error [mount-index]"`
+- [x] `test "--print shows the index source and entry count [mount-index]"`
 
 Unit tests for `src/rootindex.zig` and the layer, with recorded conversations, since the test server has no `.fs/events`: the `fsindex 1` parser, its escaping, and its limits; walks, stats, and directory reads answered locally; virtual fids made real; flushes; demotion on a mismatched open; qids made up for an index without `9p.qid` and put in the server's replies; and, against a server with `.fs/events`, an index followed from its seq, records demoting what they change, and a stale index or a `reset` ending its use.
 
@@ -301,3 +301,8 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
   - The demo, over `ws://` with 50 ms each way, hasn't been run yet.
 - 2026-11-14: **Directories are validated on first use,** not all at mount, which closes the lazy-validation open issue. Checking all 1,126 directories of a 9front root at mount took 3,377 requests, and at 25 ms each way `echo hi` started in 4.3 s, against 3.2 s validating on first use (see Performance). `-v`'s summary of the validation moved to the end of the run, since that's when it's known.
 - 2026-11-21: **Rebased on dotfs's index extension.** The index is now `.fs/index` in dotfs's `fsindex 1` format ([9p-dotfs.md](https://github.com/progrium/dotfs/blob/main/docs/9p-dotfs.md)), not `/.h9index` in this proposal's own, so one format serves h9, dotfs's other clients, and dotfs servers. Paths are escaped, so there's no `!unindexed`; 9P's qid, owners, and mode bits travel in `9p.` fields, with a qid.path made up when there's none; and a server with `.fs/events` is followed from the index's seq instead of validated. The Done criteria are unchecked until the branch matches.
+- 2026-11-21: **The branch matches.** All 18 cases pass again on the native backend (amd64), with the layer's unit tests, including ones against a server with `.fs/events`, since the test server has none. Notes on the implementation:
+  - **The compiled form gained each entry's version and the index's seq** (72-byte entries, compiled version 2), so a followed index can compare the server's seq, and an open's qid.vers can be checked against the version.
+  - **Events are opened read-write to ask for `coalesce`,** and read-only when the server refuses, and the index waits for the stream's first record before serving. A record past the index's seq demotes the paths it names; one at or before it is already in the index. A `reset`, or the stream ending, stops the index's use for the rest of the run, with a note under `-v`.
+  - **Without `9p.qid`, a directory is validated by its mtime alone,** since its made-up qid can't be compared with the server's, and the layer rewrites the server's qid for an indexed path in `Rwalk`, `Ropen`, and `Rstat`, and keeps it for a demoted directory's children it still knows.
+  - **`mkindex` reads `walk`'s warnings whole.** A warning about a name with a newline goes on to the next line, which `mkindex` once took for the rest of a record and dropped the entry before it with.

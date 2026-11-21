@@ -3657,7 +3657,7 @@ test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     try std.testing.expectEqual(0, p.code);
     var want: [96]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, p.out, "  mount '#s/root' / ''") != null);
-    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}  index=/.h9index\n", .{srv.dial()})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}  index=/.fs/index\n", .{srv.dial()})) != null);
     // Under the root's overlay (design/overlay.md) nothing reaches
     // the server; under --write=scope its server decides.
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") == null);
@@ -3713,7 +3713,7 @@ test "--check runs /bin/echo from a 9P root [ninep-roots]" {
 // keeps its compiled indexes in a cache of its own.
 
 /// A TCP relay to a RootServer that counts the T-messages it passes,
-/// the opens of a fid walked to /.h9index, and the names walked.
+/// the opens of a fid walked to .fs/index, and the names walked.
 const CountingRelay = struct {
     srv: std.Io.net.Server,
     port: u16,
@@ -3816,7 +3816,7 @@ const CountingRelay = struct {
                     }
                     last = name;
                 }
-                if (std.mem.eql(u8, last, ".h9index")) try index_fids.append(gpa, newfid);
+                if (std.mem.eql(u8, last, "index")) try index_fids.append(gpa, newfid);
             },
             112 => if (std.mem.indexOfScalar(u32, index_fids.items, fid) != null) {
                 _ = c.index_opens.fetchAdd(1, .acq_rel);
@@ -3878,18 +3878,19 @@ const IndexRig = struct {
         errdefer gpa.free(r.out);
         errdefer std.debug.print("mkindex: {s}\n", .{r.err});
         try std.testing.expectEqual(0, r.code);
-        try std.testing.expect(std.mem.startsWith(u8, r.out, "h9index 1\n"));
+        try std.testing.expect(std.mem.startsWith(u8, r.out, "fsindex 1 seq 0\n"));
         return r.out;
     }
 
-    /// Writes the served tree's /.h9index, indexed now.
+    /// Writes the served tree's .fs/index, indexed now.
     fn index(x: *IndexRig, e: Env) !void {
         const text = try x.mkindex(e);
         defer gpa.free(text);
-        try x.write("tree/.h9index", text);
+        try x.write("tree/.fs/index", text);
     }
 
     fn write(x: *IndexRig, rel: []const u8, data: []const u8) !void {
+        if (std.fs.path.dirname(rel)) |d| try x.s.tmp.dir.createDirPath(std.testing.io, d);
         try x.s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = rel, .data = data });
     }
 
@@ -3918,7 +3919,7 @@ fn hostNames(dir: std.Io.Dir, prefix: []const u8, out: *std.StringHashMapUnmanag
     const io = std.testing.io;
     var it = dir.iterate();
     while (try it.next(io)) |ent| {
-        if (std.mem.eql(u8, ent.name, ".h9index")) continue;
+        if (std.mem.eql(u8, ent.name, ".fs")) continue;
         const p = try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, ent.name });
         try out.put(arena, p, {});
         if (ent.kind == .directory) {
@@ -3935,8 +3936,17 @@ fn indexPaths(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     _ = lines.next();
     while (lines.next()) |l| {
-        if (l.len == 0 or l[0] == '!') continue;
-        try out.append(arena, l[0 .. std.mem.indexOfScalar(u8, l, ' ') orelse l.len]);
+        if (l.len == 0) continue;
+        const esc = l[0 .. std.mem.indexOfScalar(u8, l, ' ') orelse l.len];
+        var p: std.ArrayList(u8) = .empty;
+        var i: usize = 0;
+        while (i < esc.len) : (i += 1) {
+            if (esc[i] == '%' and i + 2 < esc.len) {
+                try p.append(arena, try std.fmt.parseInt(u8, esc[i + 1 .. i + 3], 16));
+                i += 2;
+            } else try p.append(arena, esc[i]);
+        }
+        try out.append(arena, p.items);
     }
     return out.items;
 }
@@ -3964,7 +3974,7 @@ test "mkindex lists every name in the test root with the server's qids [mount-in
         try std.testing.expect(want.contains(p));
         if (i > 0) try std.testing.expect(std.mem.order(u8, got[i - 1], p) == .lt);
     }
-    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "9p.incomplete") == null);
     // The qid is the server's, as the guest sees it through /srv/root.
     const q = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--rc", "mount /srv/root /n && walk -e q /n/lib/x/a" });
     defer q.deinit();
@@ -3973,45 +3983,49 @@ test "mkindex lists every name in the test root with the server's qids [mount-in
     const line = std.mem.sliceTo(text[at + 1 ..], '\n');
     var f = std.mem.splitScalar(u8, line, ' ');
     _ = f.next();
-    try std.testing.expectEqual(try std.fmt.parseInt(u64, q.out[0..dot], 16), try std.fmt.parseInt(u64, f.next().?, 16));
-    _ = f.next();
-    try std.testing.expectEqualStrings("-", f.next().?);
+    try std.testing.expectEqualStrings("f", f.next().?);
     try std.testing.expectEqualStrings("0644", f.next().?);
     try std.testing.expectEqualStrings("6", f.next().?);
+    const k = (std.mem.indexOf(u8, line, " 9p.qid=") orelse return error.NoQid) + " 9p.qid=".len;
+    const kdot = std.mem.indexOfScalarPos(u8, line, k, '.') orelse return error.NoQid;
+    try std.testing.expectEqual(try std.fmt.parseInt(u64, q.out[0..dot], 16), try std.fmt.parseInt(u64, line[k..kdot], 16));
+    try std.testing.expect(std.mem.indexOf(u8, line, " 9p.uid=") != null);
 }
 
-test "mkindex marks a directory with a name containing a newline unindexed [mount-index]" {
+test "mkindex escapes names with spaces and marks a directory it can't read incomplete [mount-index]" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
     defer x.stop();
     // devmnt fails a directory read with a newline in a name, so walk
-    // can't list /lib/x/sub; a space it lists, and mkindex leaves out.
+    // can't list /lib/x/sub; a space and a rune that isn't ASCII are
+    // escaped.
     try x.write("tree/lib/x/sub/new\nline", "x\n");
     try x.write("tree/lib/x/with space", "x\n");
+    try x.write("tree/lib/x/caf\xc3\xa9", "x\n");
     const text = try x.mkindex(e);
     defer gpa.free(text);
     errdefer std.debug.print("index:\n{s}", .{text});
-    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed /lib/x\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed /lib/x/sub\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\n!unindexed /\n") == null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/with") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/with%20space f ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/caf%C3%A9 f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/sub/") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/a ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\n/lib/x/sub ") != null);
-    // The index compiles, and h9 doesn't answer for either directory
-    // from it.
-    try x.write("tree/.h9index", text);
+    const sub = std.mem.indexOf(u8, text, "\n/lib/x/sub d ") orelse return error.NoEntry;
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.sliceTo(text[sub + 1 ..], '\n'), " 9p.incomplete=1"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "9p.incomplete"));
+    // The index compiles, h9 answers for /lib/x from it, and not for
+    // /lib/x/sub.
+    try x.write("tree/.fs/index", text);
     const r = try x.run_(e, &.{ "--rc", "ls /lib/x; cat /lib/x/sub/c" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
-    try std.testing.expectEqualStrings(x_listing ++ "'/lib/x/with space'\ncherry\n", r.out);
-    try expectIn(r.err, "index: /.h9index: ");
+    try std.testing.expectEqualStrings("/lib/x/a\n/lib/x/b\n/lib/x/caf\xc3\xa9\n/lib/x/sub\n'/lib/x/with space'\ncherry\n", r.out);
+    try expectIn(r.err, "index: /.fs/index: ");
 }
 
-test "a root with /.h9index runs /bin/ls [mount-index]" {
+test "a root with .fs/index runs /bin/ls [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -4022,7 +4036,7 @@ test "a root with /.h9index runs /bin/ls [mount-index]" {
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings(x_listing, r.out);
-    try expectIn(r.err, "index: /.h9index: ");
+    try expectIn(r.err, "index: /.fs/index: ");
     try expectIn(r.err, " 0 demoted");
 }
 
@@ -4070,7 +4084,7 @@ test "an indexed root sends fewer T-messages than an unindexed one for rc -c ech
     try std.testing.expect(counts[0] < counts[1]);
 }
 
-test "--root-index FILE is used over a root without /.h9index [mount-index]" {
+test "--root-index FILE is used over a root without .fs/index [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -4088,10 +4102,10 @@ test "--root-index FILE is used over a root without /.h9index [mount-index]" {
     var buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
     try expectIn(r.err, try std.fmt.bufPrint(&buf, "index: {s}: ", .{file}));
     try std.testing.expect(!x.relay.walked("zznope"));
-    try std.testing.expect(!x.relay.walked(".h9index"));
+    try std.testing.expect(!x.relay.walked("index"));
 }
 
-test "a second run uses the cache and doesn't read /.h9index [mount-index]" {
+test "a second run uses the cache and doesn't read .fs/index [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -4159,16 +4173,16 @@ test "a malformed index is ignored and the root still mounts [mount-index]" {
     var x: IndexRig = undefined;
     try x.start(e, false);
     defer x.stop();
-    try x.write("tree/.h9index", "h9index 1\n/ not an entry\n");
+    try x.write("tree/.fs/index", "fsindex 1 seq 0\n/ not an entry\n");
     const r = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings(x_listing, r.out);
-    try expectIn(r.err, "index: /.h9index: line 2: ");
+    try expectIn(r.err, "index: /.fs/index: line 2: ");
     try expectIn(r.err, "; ignored");
     // So is one of a format version h9 doesn't know.
-    try x.write("tree/.h9index", "h9index 99\n");
+    try x.write("tree/.fs/index", "fsindex 99 seq 0\n");
     const v = try x.run_(e, &.{ "/bin/ls", "/lib/x" });
     defer v.deinit();
     try std.testing.expectEqualStrings(x_listing, v.out);
@@ -4190,7 +4204,7 @@ test "an unreadable --root-index exits 125 [mount-index]" {
     try expectIn(r.err, "not found");
 }
 
-test "--index none ignores /.h9index [mount-index]" {
+test "--index none ignores .fs/index [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -4199,12 +4213,12 @@ test "--index none ignores /.h9index [mount-index]" {
     const r = try x.run_(e, &.{ "--index", "none", "--rc", "ls /lib/x; test -e /lib/zznope || echo absent" });
     defer r.deinit();
     try std.testing.expectEqualStrings(x_listing ++ "absent\n", r.out);
-    try std.testing.expect(!x.relay.walked(".h9index"));
+    try std.testing.expect(!x.relay.walked("index"));
     try std.testing.expect(x.relay.walked("zznope"));
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "index: /.h9index") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "index: /.fs/index") == null);
 }
 
-test "a namespace-file mount of a server with /.h9index uses it [mount-index]" {
+test "a namespace-file mount of a server with .fs/index uses it [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -4222,7 +4236,7 @@ test "a namespace-file mount of a server with /.h9index uses it [mount-index]" {
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings("/n/lib/x/a\n/n/lib/x/b\n/n/lib/x/sub\nabsent\n", r.out);
-    try expectIn(r.err, "index: /.h9index: ");
+    try expectIn(r.err, "index: /.fs/index: ");
     try std.testing.expect(!x.relay.walked("zznope"));
 }
 
@@ -4241,7 +4255,7 @@ test "a file created through a writable indexed mount is found by the next walk 
     try std.testing.expect(x.s.exists("tree/lib/x/made"));
 }
 
-test "a rewritten /.h9index is fetched on the next mount [mount-index]" {
+test "a rewritten .fs/index is fetched on the next mount [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -4266,7 +4280,7 @@ test "--root-index with a host-directory root is a usage error [mount-index]" {
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.h9index", .data = "h9index 1\n" });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.h9index", .data = "fsindex 1 seq 0\n" });
     const r = try run(e, &.{ "--cwd", s.path, "--root-index", "x.h9index", "/bin/ls", "/" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
@@ -4289,7 +4303,9 @@ test "--print shows the index source and entry count [mount-index]" {
     var dirs: usize = 0;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |l| {
-        if (std.mem.indexOf(u8, l, " d 02") != null) dirs += 1;
+        var f = std.mem.splitScalar(u8, l, ' ');
+        _ = f.next();
+        if (std.mem.eql(u8, f.next() orelse "", "d")) dirs += 1;
     }
     const p = try run(e, &.{ "--root", x.srv.dial(), "--root-index", file, "--print", "true" });
     defer p.deinit();
@@ -4298,7 +4314,7 @@ test "--print shows the index source and entry count [mount-index]" {
     try expectIn(p.out, try std.fmt.bufPrint(&buf, "  index={s} {d} entries {d} dirs\n", .{ file, n, dirs }));
     const auto = try run(e, &.{ "--root", x.srv.dial(), "--print", "true" });
     defer auto.deinit();
-    try expectIn(auto.out, "  index=/.h9index\n");
+    try expectIn(auto.out, "  index=/.fs/index\n");
     const none = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--print", "true" });
     defer none.deinit();
     try expectIn(none.out, "  index=none\n");

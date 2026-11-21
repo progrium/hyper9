@@ -16,13 +16,20 @@
 //! from the bottom, never reaches.
 //!
 //! At devmnt's first attach the layer holds the Rattach back while it
-//! finds the index (the one it was given, or the server's `/.h9index`,
-//! through the cache), and validates the root against the server. Every
-//! other indexed directory is validated the first time a request needs
-//! it, which waits: a walk validates the directories on its path at once,
-//! with up to 64 outstanding. A directory whose qid or mtime differs is
-//! demoted, and so is anything a mutation through the mount touches: a
-//! demoted entry is served by plain 9P for the rest of the connection. Later attaches, such as a guest's own mount of
+//! finds the index (the one it was given, or the server's `.fs/index`,
+//! through the cache). A server with dotfs's `.fs/events` is followed:
+//! the stream's first record is the server's seq, which the index must
+//! have reached, and every later record demotes what it changes. Without
+//! events the layer validates the root against the server, and every
+//! other indexed directory the first time a request needs it, which
+//! waits: a walk validates the directories on its path at once, with up
+//! to 64 outstanding. A directory whose qid or mtime differs is demoted,
+//! and so is anything a mutation through the mount touches: a demoted
+//! entry is served by plain 9P for the rest of the connection.
+//!
+//! An entry without `9p.qid` has a made-up qid.path, which the layer
+//! also puts in the server's Rwalk, Ropen, and Rstat for its path, so a
+//! path has one qid however it's reached. Later attaches, such as a guest's own mount of
 //! `/srv/root`, pass through, so `mkindex` sees the server.
 
 const std = @import("std");
@@ -39,7 +46,7 @@ pub const enonexist = "file does not exist";
 
 /// Directories validated at once.
 pub const max_validating = 64;
-/// Reads of `/.h9index` outstanding at once.
+/// Reads of `.fs/index` outstanding at once.
 const max_reads = 16;
 const first_private_fid: u32 = 0xF0000000;
 const first_private_tag: u16 = 0xFFFE;
@@ -62,7 +69,7 @@ pub const Source = union(enum) {
     /// A compiled index given with the mount (`--root-index`), owned by
     /// the layer from `init`, and what to call it.
     given: struct { compiled: []u8, label: []const u8, cached: bool = false },
-    /// The server's `/.h9index`, cached under `key`: its address and
+    /// The server's `.fs/index`, cached under `key`: its address and
     /// attach name.
     server: struct { key: []const u8 },
 };
@@ -130,6 +137,10 @@ const Priv = union(enum) {
     list_walk,
     list_open,
     list_read: u64,
+    ev_walk,
+    ev_open: bool,
+    ev_setup,
+    ev_read: u64,
     make_real: struct { tag: u16, fid: u32, start: usize, end: usize },
     clunk: u32,
 };
@@ -165,7 +176,7 @@ pub const Layer = struct {
     msize: u32 = 1 << 24,
     index: ?Index = null,
     /// What the index is called in notes and status.
-    label: []const u8 = "/.h9index",
+    label: []const u8 = "/.fs/index",
     demoted: std.DynamicBitSetUnmanaged = .{},
     /// Entries whose own stat goes to the server though they still
     /// answer walks: the root, when only its listing validated.
@@ -188,7 +199,7 @@ pub const Layer = struct {
     root_clone_pending: bool = false,
     abandoning: bool = false,
 
-    // The server's /.h9index.
+    // The server's .fs/index.
     pidx: u32 = 0,
     idx_version: [96]u8 = undefined,
     idx_version_len: usize = 0,
@@ -220,6 +231,21 @@ pub const Layer = struct {
     boot_t: u64 = 0,
     /// Whether the clunk being sent is validation's.
     check_clunk: bool = false,
+    // Following .fs/events.
+    ev: enum { unknown, pending, none, ready, ended } = .unknown,
+    ev_pfid: u32 = 0,
+    /// The server's seq when the stream was opened.
+    ev_seq: u64 = 0,
+    /// Records read before the index was ready.
+    ev_backlog: std.ArrayList(u8) = .empty,
+    ev_records: u64 = 0,
+    /// Whether the index is followed: no directory needs validating.
+    following: bool = false,
+    /// Everything demoted: the stream ended or was reset.
+    stale_all: bool = false,
+    /// The first attach's user, for owners the index doesn't name.
+    uname: []u8 = &.{},
+
     /// Notes for `-v`, a line each.
     notes: std.ArrayList(u8) = .empty,
     err: ?[]const u8 = null,
@@ -243,7 +269,8 @@ pub const Layer = struct {
 
     pub fn deinit(l: *Layer) void {
         const gpa = l.gpa;
-        for ([_]*std.ArrayList(u8){ &l.in_mount, &l.in_server, &l.out_mount, &l.out_server, &l.deferred, &l.scratch, &l.notes, &l.listing }) |b| b.deinit(gpa);
+        for ([_]*std.ArrayList(u8){ &l.in_mount, &l.in_server, &l.out_mount, &l.out_server, &l.deferred, &l.scratch, &l.notes, &l.listing, &l.ev_backlog }) |b| b.deinit(gpa);
+        if (l.uname.len > 0) gpa.free(l.uname);
         var it = l.pending.valueIterator();
         while (it.next()) |p| freePending(gpa, p);
         l.pending.deinit(gpa);
@@ -378,9 +405,10 @@ pub const Layer = struct {
         const tag = l.allocTag() orelse return l.fail("out of private tags");
         try l.private.put(l.gpa, tag, what);
         try l.sendServer(tag, msg);
-        // Validating a directory counts with finding the index.
+        // Validating a directory, and following events, count with
+        // finding the index.
         const check = switch (what) {
-            .val_walk, .val_stat, .list_walk, .list_open, .list_read => true,
+            .val_walk, .val_stat, .list_walk, .list_open, .list_read, .ev_walk, .ev_open, .ev_setup, .ev_read => true,
             .clunk => l.check_clunk,
             else => false,
         };
@@ -404,7 +432,38 @@ pub const Layer = struct {
     }
 
     fn isDemoted(l: *const Layer, i: u32) bool {
-        return l.demoted.isSet(i);
+        return l.stale_all or l.demoted.isSet(i);
+    }
+
+    /// Entry `i` as a Dir, owned by the attach's user where the index
+    /// names nobody.
+    fn dirOf(l: *const Layer, i: u32) attr.Dir {
+        return l.ix().dir(i, if (l.uname.len > 0) l.uname else "none");
+    }
+
+    /// The qid devmnt sees for entry `i`'s path, given the server's `q`:
+    /// the server's own, but for a made-up qid.path.
+    fn mountQid(l: *const Layer, i: u32, q: wire.Qid) wire.Qid {
+        const x = l.ix();
+        if (x.givenQid(i)) return q;
+        return .{ .path = x.qid(i).path, .vers = q.vers, .type = q.type };
+    }
+
+    /// Puts made-up qid.paths in the server's `wqids` for the walk of
+    /// `names` from entry `from`. Returns whether any changed.
+    fn mountWalkQids(l: *const Layer, from: ?u32, names: []const []const u8, wqids: []wire.Qid) bool {
+        var cur = from orelse return false;
+        const x = l.ix();
+        var changed = false;
+        for (wqids, 0..) |*q, i| {
+            if (i >= names.len or !x.isDir(cur)) break;
+            cur = if (std.mem.eql(u8, names[i], "..")) x.parent(cur) else x.lookup(cur, names[i]) orelse break;
+            if (!x.givenQid(cur)) {
+                q.path = x.qid(cur).path;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     fn demote(l: *Layer, i: u32) void {
@@ -424,26 +483,30 @@ pub const Layer = struct {
 
     /// Whether the index answers lookups in entry `i`.
     fn answerable(l: *const Layer, i: u32) bool {
-        return l.indexedDir(i) and l.valid.isSet(i);
+        return l.indexedDir(i) and (l.following or l.valid.isSet(i));
     }
 
     /// Whether entry `i` must be validated before the index answers for it.
     fn needsCheck(l: *const Layer, i: u32) bool {
-        return l.indexedDir(i) and !l.valid.isSet(i);
+        return !l.following and l.indexedDir(i) and !l.valid.isSet(i);
     }
 
-    /// The entry `names` lead to from `node`, through answerable
-    /// directories, if its qid.path is `last`; or null.
-    fn resolve(l: *const Layer, node: ?u32, names: []const []const u8, last: ?wire.Qid) ?u32 {
+    /// The entry `names` lead to from `node`, if its qid.path is `last`
+    /// (where the index has the server's); or null. The server's walk got
+    /// there, so any directory is passed through, and one the index
+    /// can't answer for demotes the entry, whose stat then goes to the
+    /// server: the entry is kept for its qid.
+    fn resolve(l: *Layer, node: ?u32, names: []const []const u8, last: ?wire.Qid) ?u32 {
         var cur = node orelse return null;
         const x = l.ix();
-        // The server's walk got there, so a directory not validated yet
-        // is passed through: the last qid is what's checked.
+        var stale = false;
         for (names) |n| {
-            if (!l.indexedDir(cur)) return null;
+            if (!x.isDir(cur)) return null;
+            if (!l.indexedDir(cur)) stale = true;
             cur = if (std.mem.eql(u8, n, "..")) x.parent(cur) else x.lookup(cur, n) orelse return null;
         }
-        if (last) |q| if (x.qid(cur).path != q.path) return null;
+        if (last) |q| if (x.givenQid(cur) and x.qid(cur).path != q.path) return null;
+        if (stale) l.demote(cur);
         return cur;
     }
 
@@ -465,6 +528,7 @@ pub const Layer = struct {
             },
             .Tattach => |a| {
                 if (l.phase == .attach) {
+                    if (l.uname.len == 0) l.uname = try l.gpa.dupe(u8, a.uname);
                     try l.pending.put(l.gpa, tag, .{ .kind = .attach_first, .fid = a.fid });
                 } else try l.pending.put(l.gpa, tag, .{ .kind = .attach, .fid = a.fid });
                 return l.forward(frame);
@@ -476,7 +540,7 @@ pub const Layer = struct {
                 if (f.node) |n| if (!l.isDemoted(n) and !l.stale_stat.isSet(n)) {
                     if (l.needsCheck(n)) return l.waitFor(tag, frame, &.{n});
                     var buf: [4096]u8 = undefined;
-                    const dir = l.ix().dir(n);
+                    const dir = l.dirOf(n);
                     if (dir.pack(&buf)) |packed_dir| {
                         return l.sendMount(tag, p9.Rstat{ .stat = .{ .bytes = packed_dir } });
                     } else |_| {}
@@ -618,6 +682,8 @@ pub const Layer = struct {
         var qids: [wire.max_welem]wire.Qid = undefined;
         var i: usize = 0;
         while (i < names.len) : (i += 1) {
+            // .fs is the server's, never the index's.
+            if (cur == ri.root and std.mem.eql(u8, names[i], ri.fs_dir)) break;
             if (!l.answerable(cur)) {
                 if (l.needsCheck(cur)) return l.waitForPath(tag, frame, cur, names[i..]);
                 break;
@@ -728,7 +794,7 @@ pub const Layer = struct {
         defer out.deinit(l.gpa);
         var buf: [4096]u8 = undefined;
         while (f.cursor < c.count) {
-            const d = x.dir(c.first + f.cursor);
+            const d = l.dirOf(c.first + f.cursor);
             const b = d.pack(&buf) catch return l.fail("stat too big");
             if (out.items.len + b.len > max) break;
             try out.appendSlice(l.gpa, b);
@@ -767,10 +833,15 @@ pub const Layer = struct {
                 return l.bootstrap();
             },
             .attach => if (ok) try l.fids.put(l.gpa, p.fid, .{ .real = true, .node = null }),
-            .walk => if (d.msg == .Rwalk and d.msg.Rwalk.wqids.n == p.names.len) {
-                const q = if (p.names.len == 0) null else d.msg.Rwalk.wqids.slice()[p.names.len - 1];
-                const node = if (l.index != null) l.resolve(p.node, constNames(p.names), q) else null;
-                try l.fids.put(l.gpa, p.newfid, .{ .real = true, .node = node });
+            .walk => if (d.msg == .Rwalk) {
+                var wq = d.msg.Rwalk.wqids;
+                const changed = l.index != null and l.mountWalkQids(p.node, constNames(p.names), wq.qids[0..wq.n]);
+                if (wq.n == p.names.len) {
+                    const q = if (p.names.len == 0) null else wq.slice()[p.names.len - 1];
+                    const node = if (l.index != null) l.resolve(p.node, constNames(p.names), q) else null;
+                    try l.fids.put(l.gpa, p.newfid, .{ .real = true, .node = node });
+                }
+                if (changed) return l.sendMount(tag, p9.Rwalk{ .wqids = wq });
             },
             .walk_root => {
                 if (d.msg != .Rwalk) return l.out_mount.appendSlice(l.gpa, frame);
@@ -782,21 +853,36 @@ pub const Layer = struct {
                     };
                     return l.rerror(tag, enonexist);
                 }
-                const mine = got[p.prefix..];
+                var mq: [wire.max_welem]wire.Qid = undefined;
+                const mine = mq[0 .. got.len - p.prefix];
+                @memcpy(mine, got[p.prefix..]);
+                _ = l.mountWalkQids(p.node, constNames(p.names), mine);
                 if (mine.len == p.names.len) {
                     const q = if (mine.len == 0) null else mine[mine.len - 1];
                     try l.fids.put(l.gpa, p.newfid, .{ .real = true, .node = l.resolve(p.node, constNames(p.names), q) });
                 }
                 return l.sendMount(tag, p9.Rwalk{ .wqids = .init(mine) });
             },
-            .stat => {},
+            .stat => if (d.msg == .Rstat) if (l.fids.get(p.fid)) |f| if (f.node) |n| if (!l.ix().givenQid(n)) {
+                if (attr.Dir.parse(d.msg.Rstat.stat.bytes)) |parsed| {
+                    var dir = parsed[0];
+                    dir.qid_path = l.ix().qid(n).path;
+                    var buf: [1 << 16]u8 = undefined;
+                    if (dir.pack(&buf)) |b| return l.sendMount(tag, p9.Rstat{ .stat = .{ .bytes = b } }) else |_| {}
+                }
+            },
             .open => if (d.msg == .Ropen) {
                 if (l.fids.getPtr(p.fid)) |f| {
                     f.open = .real;
                     if (f.node) |n| {
+                        const x = l.ix();
                         const q = d.msg.Ropen.qid;
-                        const iq = l.ix().qid(n);
-                        if (q.path != iq.path or q.vers != iq.vers or p.mode & 3 != wire.OREAD and p.mode & 3 != wire.OEXEC or p.mode & wire.OTRUNC != 0) l.demote(n);
+                        const iq = x.qid(n);
+                        // Without the server's qid, only a version says
+                        // the file changed.
+                        const differs = if (x.givenQid(n)) q.path != iq.path or q.vers != iq.vers else x.version(n) != 0 and q.vers != iq.vers;
+                        if (differs or p.mode & 3 != wire.OREAD and p.mode & 3 != wire.OEXEC or p.mode & wire.OTRUNC != 0) l.demote(n);
+                        if (!x.givenQid(n)) return l.sendMount(tag, p9.Ropen{ .qid = l.mountQid(n, q), .iounit = d.msg.Ropen.iounit });
                     }
                 }
             },
@@ -849,7 +935,11 @@ pub const Layer = struct {
             },
             .server => {
                 l.pidx = l.allocPfid();
-                try l.privSend(.idx_walk, p9.Twalk{ .fid = l.attach_fid, .newfid = l.pidx, .wnames = .init(&.{ri.file_name}) });
+                try l.privSend(.idx_walk, p9.Twalk{ .fid = l.attach_fid, .newfid = l.pidx, .wnames = .init(&.{ ri.fs_dir, ri.index_name }) });
+                // At the same time: whether the server has events.
+                l.ev = .pending;
+                l.ev_pfid = l.allocPfid();
+                try l.privSend(.ev_walk, p9.Twalk{ .fid = l.attach_fid, .newfid = l.ev_pfid, .wnames = .init(&.{ ri.fs_dir, ri.events_name }) });
             },
         }
     }
@@ -861,6 +951,7 @@ pub const Layer = struct {
         if (l.index) |*x| x.deinit(l.gpa);
         l.index = null;
         if (!l.root_clone_pending) if (l.privroot) |pr| try l.clunkPrivate(pr);
+        try l.endEvents();
         return l.finishBootstrap(.passthrough);
     }
 
@@ -909,7 +1000,7 @@ pub const Layer = struct {
                 return l.maybeValidate();
             },
             .idx_walk => {
-                const found = msg == .Rwalk and msg.Rwalk.wqids.n == 1;
+                const found = msg == .Rwalk and msg.Rwalk.wqids.n == 2;
                 if (l.abandoning) return if (found) l.clunkPrivate(l.pidx);
                 if (!found) return l.abandon();
                 try l.privSend(.idx_stat, p9.Tstat{ .fid = l.pidx });
@@ -1000,6 +1091,30 @@ pub const Layer = struct {
                 if (l.listing.items.len > ri.max_text) return l.listDone(false);
                 try l.privSend(.{ .list_read = off + data.len }, p9.Tread{ .fid = l.list_pfid, .offset = off + data.len, .count = l.msize -| wire.io_header });
             },
+            .ev_walk => {
+                if (msg != .Rwalk or msg.Rwalk.wqids.n != 2) {
+                    try l.free_pfids.append(l.gpa, l.ev_pfid);
+                    return l.eventsNone();
+                }
+                if (l.abandoning) return l.clunkPrivate(l.ev_pfid);
+                // Read and write, to ask for coalescing; read-only if not.
+                try l.privSend(.{ .ev_open = true }, p9.Topen{ .fid = l.ev_pfid, .mode = wire.ORDWR });
+            },
+            .ev_open => |rdwr| {
+                if (l.abandoning) return l.clunkPrivate(l.ev_pfid);
+                if (msg != .Ropen) {
+                    if (rdwr) return l.privSend(.{ .ev_open = false }, p9.Topen{ .fid = l.ev_pfid, .mode = wire.OREAD });
+                    try l.clunkPrivate(l.ev_pfid);
+                    return l.eventsNone();
+                }
+                if (rdwr) return l.privSend(.ev_setup, p9.Twrite{ .fid = l.ev_pfid, .offset = 0, .data = .{ .bytes = "coalesce\n" } });
+                return l.evRead(0);
+            },
+            .ev_setup => {
+                if (l.abandoning) return l.clunkPrivate(l.ev_pfid);
+                return l.evRead(0);
+            },
+            .ev_read => |off| return l.evReplied(off, msg),
             .make_real => |m| {
                 if (msg != .Rwalk) return l.makeRealFailed(m.tag, m.fid, errText(msg), m.start > 0);
                 if (msg.Rwalk.wqids.n != m.end - m.start) return l.makeRealFailed(m.tag, m.fid, enonexist, m.start > 0);
@@ -1008,6 +1123,107 @@ pub const Layer = struct {
                 return l.madeReal(m.tag, m.fid);
             },
         }
+    }
+
+    // Following .fs/events.
+
+    fn evRead(l: *Layer, off: u64) Error!void {
+        try l.privSend(.{ .ev_read = off }, p9.Tread{ .fid = l.ev_pfid, .offset = off, .count = l.msize -| wire.io_header });
+    }
+
+    /// The server has no events: its index is validated.
+    fn eventsNone(l: *Layer) Error!void {
+        l.ev = .none;
+        l.ev_pfid = 0;
+        return l.maybeValidate();
+    }
+
+    /// Clunks the stream, if it's open.
+    fn endEvents(l: *Layer) Error!void {
+        if (l.ev == .ready and l.ev_pfid != 0) {
+            l.ev = .ended;
+            try l.clunkPrivate(l.ev_pfid);
+            l.ev_pfid = 0;
+        }
+    }
+
+    fn evReplied(l: *Layer, off: u64, msg: p9.R) Error!void {
+        if (l.abandoning or l.phase == .passthrough or l.phase == .failed) {
+            if (l.ev_pfid != 0) try l.clunkPrivate(l.ev_pfid);
+            l.ev_pfid = 0;
+            return;
+        }
+        const data = if (msg == .Rread) msg.Rread.data.bytes else "";
+        if (l.ev == .pending) {
+            // The first record is the server's seq.
+            const nl = std.mem.indexOfScalar(u8, data, '\n') orelse data.len;
+            var f = std.mem.tokenizeScalar(u8, data[0..nl], ' ');
+            const ok = std.mem.eql(u8, f.next() orelse "", "seq");
+            const seq = std.fmt.parseInt(u64, f.next() orelse "", 10) catch null;
+            if (!ok or seq == null) {
+                try l.clunkPrivate(l.ev_pfid);
+                return l.eventsNone();
+            }
+            l.ev = .ready;
+            l.ev_seq = seq.?;
+            if (nl < data.len) try l.ev_backlog.appendSlice(l.gpa, data[nl + 1 ..]);
+            try l.evRead(off + data.len);
+            return l.maybeValidate();
+        }
+        if (data.len == 0) {
+            // A reset ends the stream with a zero-byte read too.
+            if (l.phase == .serving and !l.stale_all) try l.note("index: {s}: the server's events ended; not used for the rest of the run", .{l.label});
+            l.stale_all = true;
+            l.ev = .ended;
+            try l.clunkPrivate(l.ev_pfid);
+            l.ev_pfid = 0;
+            return;
+        }
+        try l.evRead(off + data.len);
+        if (l.index == null or !l.following) return l.ev_backlog.appendSlice(l.gpa, data);
+        return l.evRecords(data);
+    }
+
+    /// Demotes what each record after the index's seq changes.
+    fn evRecords(l: *Layer, data: []const u8) Error!void {
+        var lines = std.mem.splitScalar(u8, data, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            var f = std.mem.splitScalar(u8, line, ' ');
+            const seq = std.fmt.parseInt(u64, f.next() orelse "", 10) catch continue;
+            const op = f.next() orelse continue;
+            if (std.mem.eql(u8, op, "reset")) {
+                if (!l.stale_all) try l.note("index: {s}: the server's events were reset; not used for the rest of the run", .{l.label});
+                l.stale_all = true;
+                continue;
+            }
+            if (seq <= l.ix().seq()) continue;
+            l.ev_records += 1;
+            if (std.mem.eql(u8, op, "put") or std.mem.eql(u8, op, "del") or std.mem.eql(u8, op, "flags")) {
+                try l.demotePath(f.next() orelse continue);
+            } else if (std.mem.eql(u8, op, "mv")) {
+                try l.demotePath(f.next() orelse continue);
+                try l.demotePath(f.next() orelse continue);
+            }
+        }
+    }
+
+    /// Demotes the entry at the escaped `path` and its directory, or,
+    /// for a path the index doesn't have, its nearest directory that it
+    /// does.
+    fn demotePath(l: *Layer, path: []const u8) Error!void {
+        const x = l.ix();
+        var cur: u32 = ri.root;
+        var it = std.mem.splitScalar(u8, path, '/');
+        _ = it.next();
+        var buf: [4096]u8 = undefined;
+        while (it.next()) |esc| {
+            if (esc.len == 0) continue;
+            const name = unescapeInto(&buf, esc) orelse return l.demote(cur);
+            cur = x.lookup(cur, name) orelse return l.demote(cur);
+        }
+        l.demote(cur);
+        l.demote(x.parent(cur));
     }
 
     fn cached(l: *Layer) ?[]u8 {
@@ -1032,7 +1248,7 @@ pub const Layer = struct {
         }
     }
 
-    /// Every read of /.h9index is back: compile it.
+    /// Every read of .fs/index is back: compile it.
     fn indexRead(l: *Layer) Error!void {
         try l.clunkPrivate(l.pidx);
         const text = l.idx_buf[0..@intCast(@min(l.idx_len, l.idx_eof))];
@@ -1070,7 +1286,23 @@ pub const Layer = struct {
     /// Starts validating the root once both its clone and the index are
     /// in. The other directories wait until they're used.
     fn maybeValidate(l: *Layer) Error!void {
-        if (l.root_clone_pending or l.index == null or l.phase != .bootstrap or l.slots.items.len > 0) return;
+        if (l.root_clone_pending or l.index == null or l.phase != .bootstrap or l.slots.items.len > 0 or l.ev == .pending) return;
+        if (l.ev == .ready) {
+            // Followed: exact if the index has the server's seq.
+            if (l.ix().seq() < l.ev_seq) {
+                try l.note("index: {s}: at seq {d}, older than the server's {d}; ignored", .{ l.label, l.ix().seq(), l.ev_seq });
+                return l.abandon();
+            }
+            l.following = true;
+            const backlog = l.ev_backlog;
+            l.ev_backlog = .empty;
+            defer {
+                var b = backlog;
+                b.deinit(l.gpa);
+            }
+            try l.evRecords(backlog.items);
+            return l.validated();
+        }
         if (!l.needsCheck(ri.root)) return l.validated();
         l.queued.set(ri.root);
         try l.slots.append(l.gpa, .{ .entry = ri.root });
@@ -1120,11 +1352,13 @@ pub const Layer = struct {
         const x = l.ix();
         const e = slot.entry;
         const q = x.qid(e);
-        const same = if (statOf(msg)) |st| st.qid_path == q.path and st.qid_vers == q.vers and st.mtime == x.mtime(e) and st.qid_type & wire.QTDIR != 0 else false;
+        // Without the server's qid, the mtime says whether it changed.
+        const given = x.givenQid(e);
+        const same = if (statOf(msg)) |st| (!given or st.qid_path == q.path and st.qid_vers == q.vers) and st.mtime == x.mtime(e) and st.qid_type & wire.QTDIR != 0 else false;
         if (!same) {
-            if (e == ri.root and statOf(msg) != null and statOf(msg).?.qid_path == q.path) {
-                // Writing /.h9index changes the root's own mtime, so the
-                // root is checked by its listing instead.
+            if (e == ri.root and statOf(msg) != null and (!given or statOf(msg).?.qid_path == q.path)) {
+                // Making .fs changes the root's own mtime, so the root is
+                // checked by its listing instead.
                 l.validating -= 1;
                 try l.listRoot();
                 return l.validateMore();
@@ -1171,7 +1405,7 @@ pub const Layer = struct {
     }
 
     /// Whether the root's listing, read from the server, is the index's:
-    /// the same names (but the index itself), with the same qid.paths.
+    /// the same names (but .fs), with the same qid.paths where it has them.
     fn listingMatches(l: *Layer) bool {
         const x = l.ix();
         var b = l.listing.items;
@@ -1179,15 +1413,14 @@ pub const Layer = struct {
         while (b.len > 0) {
             const d, const size = attr.Dir.parse(b) orelse return false;
             b = b[size..];
-            if (std.mem.eql(u8, d.name, ri.file_name)) continue;
+            if (std.mem.eql(u8, d.name, ri.fs_dir)) continue;
             const e = x.lookup(ri.root, d.name) orelse return false;
-            if (x.qid(e).path != d.qid_path) return false;
-            if (x.qid(e).vers != d.qid_vers or x.mtime(e) != d.mtime) l.demote(e);
+            const given = x.givenQid(e);
+            if (given and x.qid(e).path != d.qid_path) return false;
+            if (given and x.qid(e).vers != d.qid_vers or x.mtime(e) != d.mtime) l.demote(e);
             n += 1;
         }
-        var want = x.children(ri.root).count;
-        if (x.lookup(ri.root, ri.file_name) != null) want -= 1;
-        return n == want;
+        return n == x.children(ri.root).count;
     }
 
     fn listDone(l: *Layer, ok: bool) Error!void {
@@ -1208,7 +1441,10 @@ pub const Layer = struct {
         if (l.phase != .bootstrap) return;
         if (l.hooks.now_ns) |now| l.t_ms = (now() -| l.t_start) / std.time.ns_per_ms;
         const x = l.ix();
-        try l.note("index: {s}: {d} entries, {d} dirs{s}; root {s} in {d} ms", .{ l.label, x.n, x.ndirs, if (l.from_cache) " (cached)" else "", if (l.isDemoted(ri.root)) "demoted" else "checked", l.t_ms });
+        if (l.following)
+            try l.note("index: {s}: {d} entries, {d} dirs{s}; following the server's changes from seq {d}", .{ l.label, x.n, x.ndirs, if (l.from_cache) " (cached)" else "", x.seq() })
+        else
+            try l.note("index: {s}: {d} entries, {d} dirs{s}; root {s} in {d} ms", .{ l.label, x.n, x.ndirs, if (l.from_cache) " (cached)" else "", if (l.isDemoted(ri.root)) "demoted" else "checked", l.t_ms });
         return l.finishBootstrap(.serving);
     }
 
@@ -1223,7 +1459,10 @@ pub const Layer = struct {
             .serving => {
                 const x = l.ix();
                 try w.print("index {s} entries {d} dirs {d} checked {d} demoted {d} ms {d}{s}\n", .{ l.label, x.n, x.ndirs, l.checked, l.ndemoted, l.t_ms, if (l.from_cache) " cached" else "" });
-                try w.print("end: index: {s}: checked {d} of {d} dirs as they were used, {d} demoted\n", .{ l.label, l.checked, x.ndirs, l.ndemoted });
+                if (l.following)
+                    try w.print("end: index: {s}: followed {d} changes from the server, {d} dirs demoted\n", .{ l.label, l.ev_records, l.ndemoted })
+                else
+                    try w.print("end: index: {s}: checked {d} of {d} dirs as they were used, {d} demoted\n", .{ l.label, l.checked, x.ndirs, l.ndemoted });
                 if (l.checked > 0 and l.ndemoted * 4 > l.checked) {
                     if (l.source == .server)
                         try w.print("end: index: {s} looks stale; rebuild it with mkindex\n", .{l.label})
@@ -1236,6 +1475,23 @@ pub const Layer = struct {
         try w.writeAll(l.notes.items);
     }
 };
+
+/// Undoes dotfs's escaping of one name into `buf`; null if it doesn't fit
+/// or is malformed.
+fn unescapeInto(buf: []u8, f: []const u8) ?[]const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < f.len) : (i += 1) {
+        if (n >= buf.len) return null;
+        if (f[i] == '%') {
+            if (i + 2 >= f.len) return null;
+            buf[n] = std.fmt.parseInt(u8, f[i + 1 .. i + 3], 16) catch return null;
+            i += 2;
+        } else buf[n] = f[i];
+        n += 1;
+    }
+    return buf[0..n];
+}
 
 fn statOf(msg: p9.R) ?attr.Dir {
     if (msg != .Rstat) return null;

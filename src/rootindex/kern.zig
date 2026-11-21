@@ -129,7 +129,7 @@ fn storeHook(ctx: ?*anyopaque, key: []const u8, version: []const u8, compiled: [
     cache.store(key, version, compiled);
 }
 
-/// `mode` 0 passes through, 1 uses the server's /.h9index cached under
+/// `mode` 0 passes through, 1 uses the server's .fs/index cached under
 /// `arg`, and 2 the index machine `mach` gave as number `arg`.
 fn h9_hidx_new(mach: ?*anyopaque, mode: c_int, arg: [*:0]const u8, err: [*]u8) callconv(.c) ?*Conv {
     const owner = @intFromPtr(mach);

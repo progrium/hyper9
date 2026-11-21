@@ -30,8 +30,20 @@ const Server = struct {
     next_path: u64 = 100,
     clock: u32 = 1000,
     arena: std.heap.ArenaAllocator = .init(gpa),
-    /// Reads of /.h9index.
+    /// Reads of /.fs/index.
     index_reads: u32 = 0,
+    /// Whether indexText writes 9p.qid fields.
+    index_qids: bool = true,
+    /// The seq indexText writes, and .fs/events reports.
+    seq: u64 = 0,
+    /// .fs/events, if the server has it: its node, what's queued to read,
+    /// and a read waiting for records.
+    events: ?u32 = null,
+    ev_queue: std.ArrayList(u8) = .empty,
+    ev_wait: ?struct { tag: u16, count: u32 } = null,
+    ev_setup: std.ArrayList(u8) = .empty,
+    /// Replies sent after their request, to a read that waited.
+    late: std.ArrayList(u8) = .empty,
 
     fn init() !Server {
         var s: Server = .{};
@@ -43,6 +55,9 @@ const Server = struct {
         for (s.nodes.items) |*n| n.data.deinit(gpa);
         s.nodes.deinit(gpa);
         s.fids.deinit(gpa);
+        s.ev_queue.deinit(gpa);
+        s.ev_setup.deinit(gpa);
+        s.late.deinit(gpa);
         s.arena.deinit();
     }
 
@@ -119,32 +134,96 @@ const Server = struct {
         return w.buffered();
     }
 
-    /// The tree's index text, as mkindex writes it.
+    /// The tree's index text, as mkindex writes it, sorted by path.
     fn indexText(s: *const Server) ![]u8 {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const Line = struct { path: []const u8, line: []const u8 };
+        var lines: std.ArrayList(Line) = .empty;
+        for (s.nodes.items, 0..) |n, i| {
+            if (n.removed or s.underFs(@intCast(i))) continue;
+            var pbuf: [512]u8 = undefined;
+            const path = try a.dupe(u8, s.pathOf(@intCast(i), &pbuf));
+            var esc: std.ArrayList(u8) = .empty;
+            for (path) |c| if (c > 0x20 and c < 0x7f and c != '%') try esc.append(a, c) else try esc.print(a, "%{X:0>2}", .{c});
+            const d = s.dirOf(@intCast(i));
+            const dir = n.qid.type & wire.QTDIR != 0;
+            var w: std.ArrayList(u8) = .empty;
+            try w.print(a, "{s} {c} {o:0>4} {d} {d} {d} - -", .{ esc.items, @as(u8, if (dir) 'd' else 'f'), n.mode & 0o777, if (dir) 0 else d.length, n.mtime, n.qid.vers });
+            if (s.index_qids) try w.print(a, " 9p.qid={x}.{d} 9p.uid=glenda 9p.gid=sys", .{ n.qid.path, n.qid.vers });
+            try lines.append(a, .{ .path = path, .line = w.items });
+        }
+        std.mem.sortUnstable(Line, lines.items, {}, struct {
+            fn lt(_: void, x: Line, y: Line) bool {
+                return std.mem.order(u8, x.path, y.path) == .lt;
+            }
+        }.lt);
         var out: std.Io.Writer.Allocating = .init(gpa);
         errdefer out.deinit();
-        try out.writer.writeAll(ri.magic_line ++ "\n");
-        // Breadth first is parent first, which is all the format needs.
-        var order: std.ArrayList(u32) = .empty;
-        defer order.deinit(gpa);
-        try order.append(gpa, 0);
-        var at: usize = 0;
-        while (at < order.items.len) : (at += 1) {
-            for (s.nodes.items, 0..) |n, i| if (!n.removed and i != 0 and n.parent == order.items[at] and !std.mem.eql(u8, n.name, ri.file_name)) try order.append(gpa, @intCast(i));
-        }
-        var pbuf: [512]u8 = undefined;
-        for (order.items) |i| {
-            const n = &s.nodes.items[i];
-            const d = s.dirOf(i);
-            const ty: u8 = if (n.qid.type & wire.QTDIR != 0) 'd' else '-';
-            try out.writer.print("{s} {x:0>16} {d} {c} 0{o} {d} {d} glenda sys\n", .{ s.pathOf(i, &pbuf), n.qid.path, n.qid.vers, ty, n.mode, d.length, n.mtime });
-        }
+        try out.writer.print("{s} seq {d}\n", .{ ri.magic, s.seq });
+        for (lines.items) |l| try out.writer.print("{s}\n", .{l.line});
         return out.toOwnedSlice();
+    }
+
+    /// Whether node `i` is /.fs or in it.
+    fn underFs(s: *const Server, i: u32) bool {
+        var at = i;
+        while (at != 0) : (at = s.nodes.items[at].parent) {
+            if (s.nodes.items[at].parent == 0 and std.mem.eql(u8, s.nodes.items[at].name, ri.fs_dir)) return true;
+        }
+        return false;
+    }
+
+    /// Gives the server .fs/events, which starts at seq `s.seq`.
+    fn withEvents(s: *Server) !void {
+        if (s.lookupPath("/" ++ ri.fs_dir) == null) _ = try s.add("/" ++ ri.fs_dir, true, "");
+        s.events = try s.add("/" ++ ri.fs_dir ++ "/" ++ ri.events_name, false, "");
+    }
+
+    /// Sends a change record, answering a waiting read.
+    fn push(s: *Server, rec: []const u8) !void {
+        try s.ev_queue.appendSlice(gpa, rec);
+        try s.ev_queue.append(gpa, '\n');
+        if (s.ev_wait) |w| {
+            s.ev_wait = null;
+            var buf: [1 << 16]u8 = undefined;
+            try s.late.appendSlice(gpa, try s.evReply(w.tag, w.count, &buf));
+        }
+    }
+
+    fn evReply(s: *Server, tag: u16, want: u32, buf: []u8) ![]const u8 {
+        const n = @min(want, s.ev_queue.items.len);
+        var fb: [1 << 16]u8 = undefined;
+        @memcpy(fb[0..n], s.ev_queue.items[0..n]);
+        std.mem.copyForwards(u8, s.ev_queue.items, s.ev_queue.items[n..]);
+        s.ev_queue.items.len -= n;
+        return wire.encode(buf, tag, p9.Rread{ .data = .{ .bytes = fb[0..n] } }, null);
     }
 
     fn handle(s: *Server, frame: []const u8, out: *std.ArrayList(u8)) !void {
         const d = try wire.decode(p9.T, frame, 1 << 20, false);
         s.counts[frame[4]] += 1;
+        if (s.events) |ev| switch (d.msg) {
+            .Tread => |r| if (s.fids.get(r.fid) == ev) {
+                if (s.ev_queue.items.len == 0) {
+                    s.ev_wait = .{ .tag = d.tag, .count = r.count };
+                    return;
+                }
+                var eb: [1 << 16]u8 = undefined;
+                return out.appendSlice(gpa, try s.evReply(d.tag, r.count, &eb));
+            },
+            .Topen => |o| if (s.fids.get(o.fid) == ev) {
+                s.ev_queue.clearRetainingCapacity();
+                try s.ev_queue.print(gpa, "seq {d}\n", .{s.seq});
+            },
+            .Twrite => |w| if (s.fids.get(w.fid) == ev) {
+                try s.ev_setup.appendSlice(gpa, w.data.bytes);
+                var eb: [256]u8 = undefined;
+                return out.appendSlice(gpa, try wire.encode(&eb, d.tag, p9.Rwrite{ .count = @intCast(w.data.bytes.len) }, null));
+            },
+            else => {},
+        };
         var buf: [1 << 16]u8 = undefined;
         const r = s.answer(d.msg, &buf) catch |e| {
             const msg: []const u8 = switch (e) {
@@ -234,7 +313,7 @@ const Server = struct {
                     @memcpy(buf[0 .. end - off], all.items[off..end]);
                     return .{ .Rread = .{ .data = .{ .bytes = buf[0 .. end - off] } } };
                 }
-                if (std.mem.eql(u8, node.name, ri.file_name)) s.index_reads += 1;
+                if (std.mem.eql(u8, node.name, ri.index_name) and s.underFs(n)) s.index_reads += 1;
                 const off: usize = @intCast(@min(r.offset, node.data.items.len));
                 const end = @min(node.data.items.len, off + r.count);
                 @memcpy(buf[0 .. end - off], node.data.items[off..end]);
@@ -317,7 +396,14 @@ const Rig = struct {
 
     /// Runs the server until the layer has nothing more for it.
     fn pump(r: *Rig) !void {
-        while (r.l.toServer().len > 0) {
+        while (r.l.toServer().len > 0 or r.srv.late.items.len > 0) {
+            if (r.srv.late.items.len > 0) {
+                const late = try gpa.dupe(u8, r.srv.late.items);
+                defer gpa.free(late);
+                r.srv.late.clearRetainingCapacity();
+                for (late) |*c| try r.l.fromServer(c[0..1]);
+                continue;
+            }
             r.rounds += 1;
             const b = try gpa.dupe(u8, r.l.toServer());
             defer gpa.free(b);
@@ -387,14 +473,19 @@ fn sampleTree(s: *Server) !void {
 fn withIndex(s: *Server) !void {
     const text = try s.indexText();
     defer gpa.free(text);
-    _ = try s.add("/" ++ ri.file_name, false, text);
+    try withIndexText(s, text);
+}
+
+fn withIndexText(s: *Server, text: []const u8) !void {
+    if (s.lookupPath("/" ++ ri.fs_dir) == null) _ = try s.add("/" ++ ri.fs_dir, true, "");
+    _ = try s.add("/" ++ ri.fs_dir ++ "/" ++ ri.index_name, false, text);
 }
 
 fn nq(d: wire.Frame(p9.R)) usize {
     return d.msg.Rwalk.wqids.n;
 }
 
-test "without /.h9index the layer passes everything through [mount-index]" {
+test "without .fs/index the layer passes everything through [mount-index]" {
     var s = try Server.init();
     defer s.deinit();
     try sampleTree(&s);
@@ -633,7 +724,7 @@ test "a path deeper than 16 names is made real in steps [mount-index]" {
     try t.expectEqualStrings("deep", rd.msg.Rread.data.bytes);
 }
 
-test "a second run uses the cache and doesn't read /.h9index [mount-index]" {
+test "a second run uses the cache and doesn't read .fs/index [mount-index]" {
     var s = try Server.init();
     defer s.deinit();
     try sampleTree(&s);
@@ -654,7 +745,7 @@ test "a second run uses the cache and doesn't read /.h9index [mount-index]" {
     try t.expect(r.l.from_cache);
     try t.expectEqual(@as(u32, 0), s.index_reads);
     // A rewritten index is fetched again.
-    const idx = s.lookupPath("/" ++ ri.file_name).?;
+    const idx = s.lookupPath("/" ++ ri.fs_dir ++ "/" ++ ri.index_name).?;
     try s.nodes.items[idx].data.appendSlice(gpa, "");
     s.touch(idx);
     s.reset();
@@ -665,11 +756,11 @@ test "a second run uses the cache and doesn't read /.h9index [mount-index]" {
     try t.expect(s.index_reads > 0);
 }
 
-test "a malformed /.h9index is ignored and the mount works [mount-index]" {
+test "a malformed .fs/index is ignored and the mount works [mount-index]" {
     var s = try Server.init();
     defer s.deinit();
     try sampleTree(&s);
-    _ = try s.add("/" ++ ri.file_name, false, "h9index 1\n/ 1 0 d 020000000775 0 0 a b\nbroken\n");
+    try withIndexText(&s, "fsindex 1 seq 0\n/ d 0755 0 0 0 - -\nbroken\n");
     var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
     defer r.deinit();
     try r.mount();
@@ -679,7 +770,7 @@ test "a malformed /.h9index is ignored and the mount works [mount-index]" {
     try t.expectEqual(@as(usize, 2), nq(w));
 }
 
-test "a given index is used over a server without /.h9index [mount-index]" {
+test "a given index is used over a server without .fs/index [mount-index]" {
     var s = try Server.init();
     defer s.deinit();
     try sampleTree(&s);
@@ -750,7 +841,7 @@ test "a flush of a request waiting on validation is answered locally [mount-inde
     try t.expectEqual(@as(usize, 2), nq(w));
 }
 
-test "the root validates by its listing after /.h9index is written [mount-index]" {
+test "the root validates by its listing after .fs/index is written [mount-index]" {
     var s = try Server.init();
     defer s.deinit();
     try sampleTree(&s);
@@ -787,4 +878,92 @@ test "a second attach passes through [mount-index]" {
     const st = try r.call(p9.Tstat{ .fid = 11 });
     try t.expect(st.msg == .Rstat);
     try t.expectEqual(@as(u32, 1), s.count(p9.Tstat));
+}
+
+test "an index without 9p.qid gives each path one qid [mount-index]" {
+    var s = try Server.init();
+    defer s.deinit();
+    try sampleTree(&s);
+    s.index_qids = false;
+    try withIndex(&s);
+    var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
+    defer r.deinit();
+    try r.mount();
+    const made = ri.madeUpQidPath("/bin/ls");
+    const w = try r.walk(1, 2, &.{ "bin", "ls" });
+    try t.expectEqual(made, w.msg.Rwalk.wqids.slice()[1].path);
+    // The server's Ropen gets the same qid.path.
+    const o = try r.call(p9.Topen{ .fid = 2, .mode = wire.OREAD });
+    try t.expectEqual(made, o.msg.Ropen.qid.path);
+    // Once /bin is demoted, the server's walk does too.
+    _ = try r.walk(1, 3, &.{"bin"});
+    const c = try r.call(p9.Tcreate{ .fid = 3, .name = "new", .perm = 0o664, .mode = wire.OWRITE });
+    try t.expect(c.msg == .Rcreate);
+    s.reset();
+    const again = try r.walk(1, 4, &.{ "bin", "ls" });
+    try t.expect(s.count(p9.Twalk) > 0);
+    try t.expectEqual(made, again.msg.Rwalk.wqids.slice()[1].path);
+    try t.expectEqual(ri.madeUpQidPath("/bin"), again.msg.Rwalk.wqids.slice()[0].path);
+    const st = try r.call(p9.Tstat{ .fid = 4 });
+    const d, _ = attr.Dir.parse(st.msg.Rstat.stat.bytes).?;
+    try t.expectEqual(made, d.qid_path);
+    // Owners the index doesn't name are the attach's user.
+    try t.expectEqualStrings("glenda", d.uid);
+}
+
+test "a server with .fs/events is followed, not validated [mount-index]" {
+    var s = try Server.init();
+    defer s.deinit();
+    try sampleTree(&s);
+    s.seq = 5;
+    try s.withEvents();
+    try withIndex(&s);
+    var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
+    defer r.deinit();
+    try r.mount();
+    try t.expect(r.l.serving());
+    try t.expect(r.l.following);
+    try t.expect(std.mem.indexOf(u8, s.ev_setup.items, "coalesce") != null);
+    try t.expect(std.mem.indexOf(u8, r.l.notes.items, "following the server's changes from seq 5") != null);
+    // No directory is validated: a walk sends nothing.
+    s.reset();
+    const w = try r.walk(1, 2, &.{ "lib", "ndb", "local" });
+    try t.expectEqual(@as(usize, 3), nq(w));
+    const miss = try r.walk(1, 3, &.{ "bin", "nonesuch" });
+    try t.expectEqual(@as(usize, 1), nq(miss));
+    try t.expectEqual(@as(u32, 0), s.total());
+    // Another client adds /bin/new: its record demotes /bin.
+    _ = try s.add("/bin/new", false, "new");
+    try s.push("6 put /bin/new f 0664 3 2000 6 - - dev=other");
+    try r.pump();
+    const found = try r.walk(1, 3, &.{ "bin", "new" });
+    try t.expectEqual(@as(usize, 2), nq(found));
+    // /lib is still answered locally, and a record at or below the
+    // index's seq is dropped.
+    try s.push("4 del /lib/ndb/local");
+    try r.pump();
+    s.reset();
+    _ = try r.walk(1, 4, &.{ "lib", "ndb", "local" });
+    try t.expectEqual(@as(u32, 0), s.total());
+    // A reset ends the index's use.
+    try s.push("9 reset");
+    try r.pump();
+    s.reset();
+    _ = try r.walk(1, 5, &.{ "lib", "ndb", "local" });
+    try t.expect(s.count(p9.Twalk) > 0);
+}
+
+test "a followed index older than the server's seq is ignored [mount-index]" {
+    var s = try Server.init();
+    defer s.deinit();
+    try sampleTree(&s);
+    s.seq = 5;
+    try s.withEvents();
+    try withIndex(&s);
+    s.seq = 7;
+    var r = Rig.init(&s, .{ .server = .{ .key = "tcp!test" } }, .{});
+    defer r.deinit();
+    try r.mount();
+    try t.expectEqual(layer.Phase.passthrough, r.l.phase);
+    try t.expect(std.mem.indexOf(u8, r.l.notes.items, "older than the server's 7") != null);
 }

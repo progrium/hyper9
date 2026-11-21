@@ -10,7 +10,7 @@
  * Laid out like #ℓ, but bound nowhere: only h9 makes conversations.
  *
  *	hidx/clone	opening it makes a conversation and opens its ctl
- *	hidx/N/ctl	server KEY: use the server's /.h9index, cached
+ *	hidx/N/ctl	server KEY: use the server's .fs/index, cached
  *			under KEY; index ID: use the index the machine
  *			gave as ID; then fd N: the caller's fd N is the
  *			server connection, which starts it; reads give N

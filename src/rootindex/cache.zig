@@ -194,7 +194,7 @@ test "the cache keeps one version per key, checked [mount-index]" {
     const c: Cache = .{ .gpa = t.allocator, .io = io, .dir = dir };
     try t.expectEqual(@as(?[]u8, null), c.lookup("tcp!fs!564", "1.0.0.0"));
     var diag: ri.Diag = .{};
-    const a = try ri.compile(t.allocator, "h9index 1\n/ 1 0 d 020000000775 0 0 a b\n", &diag);
+    const a = try ri.compile(t.allocator, "fsindex 1 seq 0\n/ d 0755 0 0 0 - -\n", &diag);
     defer t.allocator.free(a);
     c.store("tcp!fs!564", "1.0.0.0", a);
     const got = c.lookup("tcp!fs!564", "1.0.0.0").?;
