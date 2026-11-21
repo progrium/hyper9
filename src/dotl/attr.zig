@@ -354,7 +354,7 @@ pub fn dirFromStat(st: *const wire.Stat, name: []const u8, uid: []const u8, gid:
         .qid_type = if (dir) wire.QTDIR else wire.QTFILE,
         .qid_vers = st.qid.vers,
         .qid_path = st.qid.path,
-        .mode = (st.mode & 0o777) | if (dir) DMDIR else 0,
+        .mode = (st.mode & 0o777) | (if (dir) DMDIR else 0) | (if (st.mode & S_IFMT == S_IFIFO) wire.DMNAMEDPIPE else 0),
         .atime = sec32(st.atime_sec),
         .mtime = sec32(st.mtime_sec),
         .length = if (st.mode & S_IFMT == S_IFREG) st.size else 0,

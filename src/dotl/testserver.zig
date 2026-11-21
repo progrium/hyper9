@@ -448,6 +448,14 @@ pub const Server = struct {
                 n.mode = m.mode;
                 try s.send(tag, l.Rmkdir{ .qid = n.qid() });
             },
+            .Tmknod => |m| {
+                const f = s.fids.get(m.dfid) orelse return s.lerr(tag, E.BADF);
+                if (m.mode & attr.S_IFMT != attr.S_IFIFO) return s.lerr(tag, E.PERM);
+                if (f.node.child(m.name) != null) return s.lerr(tag, E.EXIST);
+                const n = try s.newNode(f.node, m.name, .fifo);
+                n.mode = m.mode & 0o777;
+                try s.send(tag, l.Rmknod{ .qid = n.qid() });
+            },
             .Tremove => |rm| {
                 const f = s.fids.get(rm.fid) orelse return s.lerr(tag, E.BADF);
                 _ = s.fids.remove(rm.fid);

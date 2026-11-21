@@ -62,6 +62,9 @@ pub const DMDIR: u32 = 0x80000000;
 pub const DMAPPEND: u32 = 0x40000000;
 pub const DMEXCL: u32 = 0x20000000;
 pub const DMTMP: u32 = 0x04000000;
+/// 9P2000.u's DMNAMEDPIPE: h9 marks a FIFO's Dir with it, since Plan 9
+/// has no file types (design/linux-fifo.md).
+pub const DMNAMEDPIPE: u32 = 0x00200000;
 
 /// .L's open flags (Linux's generic values, which the protocol fixes
 /// whatever the host's architecture).
