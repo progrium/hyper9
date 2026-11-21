@@ -687,7 +687,11 @@ test "ls /bin | wc -l (demo) [baseline]" {
     const h = try run(e, &.{ "--rc", "ls '#H/bin' | wc -l" });
     defer h.deinit();
     const in_h = try std.fmt.parseInt(usize, std.mem.trim(u8, h.out, " \n"), 10);
-    const want = try countDir(e, bin) + try countDir(e, "rc/bin") + in_h;
+    // So is #H/over, h9's bind with -r, before the root's (design/mounts.md).
+    const o = try run(e, &.{ "--rc", "ls '#H/over' | wc -l" });
+    defer o.deinit();
+    const in_over = try std.fmt.parseInt(usize, std.mem.trim(u8, o.out, " \n"), 10);
+    const want = try countDir(e, bin) + try countDir(e, "rc/bin") + in_h + in_over;
     const got = try std.fmt.parseInt(usize, std.mem.trim(u8, r.out, " \n"), 10);
     try std.testing.expectEqual(want, got);
     try std.testing.expectEqual(0, r.code);
