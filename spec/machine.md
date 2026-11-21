@@ -22,7 +22,7 @@ A command's override of a libc function (ed's `mktemp`) is renamed too, unless l
 
 `9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), from the interpreter a `#!` script names when `argv[0]` isn't a command (a script such as `/rc/bin/lc` whose `#!/bin/rc` is a hard link to `9box` starts it with the script's name in `argv[0]`), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
 
-The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 43 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied.
+The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 44 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied, as measured with 43, before `walk` joined ([mount-index](../design/mount-index.md)).
 
 Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
 
@@ -44,7 +44,7 @@ Each exec allocates and copies the box's text and data, so on the emulator rc's 
 
    Under the root's overlay it makes `/usr/$user` in the overlay if the root lacks it, so `$home` exists.
 
-   Then it sets the device mask: `#C` always (it isn't built; see [host-cmd](../design/host-cmd.md)), `#U` unless `--host-fs`, `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+   Then it sets the device mask: `#C` always (it isn't built; see [host-cmd](../design/host-cmd.md)), `#U` unless `--host-fs`, `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. `#ι` is masked too, but only after `--ns`'s file is replayed, since its 9P mounts go through it. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 

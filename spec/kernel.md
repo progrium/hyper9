@@ -184,6 +184,12 @@ It follows devhstream's pattern and the seam rules: a kproc per conversation rea
 
 The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
 
+#### Index device `#ι` (`src/kern/devhidx.c`, `src/rootindex/`)
+
+Puts a metadata index between devmnt and a 9P connection ([mount-index](../design/mount-index.md); see [Metadata indexes](ninep.md#metadata-indexes)). It's laid out as `#ℓ` is, `hidx/clone` and `hidx/N/{ctl,data,status}`, but isn't bound anywhere, and it's masked once the namespace file is replayed, since a guest's conversation could read and write the host's index cache. `ctl` takes `server KEY` (use the server's `.fs/index`, cached under KEY, the address and attach spec), `index N` (use the compiled index the machine handed over as number N), neither (pass everything through, counting requests), and then `fd N` (the server connection, which starts the conversation); `data` is the 9P2000 devmnt mounts; `status` reads the index's label, counts, and how long its check took, the requests devmnt sent and how many reached the server, and the notes `-v` prints. h9 reads `status` through a leaf (`h9_hidx_convstatus`) rather than a chan, since `#ι` is masked by the end of the run.
+
+The kproc, the leaves (`src/rootindex/kern.zig`), and the locking follow `#ℓ`. A machine registers its cache directory with `kern.zig`, keyed by its `Hmach`, and hands over a `--root-index` it compiled with `give`, which a conversation takes once by number.
+
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
 drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](../design/go-compat.md)).

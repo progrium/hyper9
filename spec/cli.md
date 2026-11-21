@@ -57,6 +57,10 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--root-user NAME` | The uname sent in h9's attaches to a 9P root. The machine's user by default |
 | `--root-header 'NAME: VALUE'\|@FILE` (repeatable) | A header for a WebSocket root's handshake, or one per line from a file (blank lines skipped). Headers that change the handshake (`Host`, `Upgrade`, `Connection`, `Sec-WebSocket-*`, `Content-Length`, `Transfer-Encoding`) are refused. Without a `ws://` or `wss://` root, a bad header or a missing file is exit 2 |
 | `--root-ca FILE` | A PEM bundle that a `wss://` root's certificate must chain to, instead of the host's. Without a `wss://` root, or a missing file, is exit 2. `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` choose an HTTP `CONNECT` proxy for WebSocket roots and mounts |
+| `--root-index FILE\|URL` | A metadata index for a 9P root, used instead of its `.fs/index` (see Metadata indexes). A URL is `https://` or `http://`. With a host directory root, exit 2; a file that can't be read or a URL that can't be fetched, exit 125 |
+| `--index auto\|none` | `auto`, the default, uses an index wherever one is found; `none` puts no `#ι` in any mount |
+| `--index-cache DIR` | Where compiled indexes are cached. By default `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
+| `-v`, `--verbose` | Notes on stderr about how the run went: each index's source, size, check, and demotions, and the root's request counts at the end. `-v` is the one short flag, and only before the program |
 | `--root-contained` | The root tree's symlinks resolve inside it: an absolute target starts at the tree's top and `..` stops there, as for a Linux root or a container image ("Contained trees"). With a 9P root, exit 2 |
 | `--env name=value` (repeatable) | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
@@ -85,8 +89,8 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
-| `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`). Exits 0, or 125 if h9 can't run programs from the root |
-| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (43 commands)`, or `skeleton only`) |
+| `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`), then a 9P root's index notes. Exits 0, or 125 if h9 can't run programs from the root |
+| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (44 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
 ### Default guest environment
@@ -165,6 +169,11 @@ pub const Options = struct {
     root_headers: []const []const u8 = &.{}, // handshake headers for a WebSocket root, checked
     root_ca: ?[]const u8 = null,        // PEM bundle for a wss:// root; null: the host's
     root_contained: bool = false,       // resolve a host root's symlinks inside it
+    index: IndexMode = .auto,           // .none: no metadata index for any mount
+    root_index: ?RootIndex = null,      // .path or .url: the 9P root's index, instead of its .fs/index
+    index_cache: ?[]const u8 = null,    // where compiled indexes are cached; null: nowhere
+    root_index_counts: ?struct { entries: u32, dirs: u32 } = null, // for --print only
+    verbose: bool = false,              // notes on stdio.err, such as the index's check
     linux_root: ?[]const u8 = null,     // the Linux view's /
     nameservers: []const []const u8 = &.{}, // the host's DNS servers, for a Linux root's resolv.conf
     nine_prog: bool = false,            // resolve the program in the 9front view even with a Linux root
