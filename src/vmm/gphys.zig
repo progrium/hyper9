@@ -120,8 +120,10 @@ pub const Ram = struct {
         if (len < 16 * vmm.page_size) return error.OutOfGuestMemory;
         // Zeroed either way: fresh anonymous pages, or VirtualAlloc's.
         const mem = if (is_windows)
-            std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), len) catch
-                return error.OutOfGuestMemory
+            // rawAlloc, not alignedAlloc, which fills the region with
+            // undefined (0xaa) in safe builds and so dirties every page.
+            @as([*]align(std.heap.page_size_min) u8, @alignCast(std.heap.page_allocator.rawAlloc(len, .fromByteUnits(std.heap.page_size_min), @returnAddress()) orelse
+                return error.OutOfGuestMemory))[0..len]
         else
             std.posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0) catch
                 return error.OutOfGuestMemory;
@@ -129,7 +131,8 @@ pub const Ram = struct {
     }
 
     pub fn deinit(r: *Ram) void {
-        if (is_windows) std.heap.page_allocator.free(r.mem) else std.posix.munmap(r.mem);
+        // rawFree, as free would fill every page with undefined first.
+        if (is_windows) std.heap.page_allocator.rawFree(r.mem, .fromByteUnits(std.heap.page_size_min), @returnAddress()) else std.posix.munmap(r.mem);
         r.free.deinit(r.gpa);
         r.spare_roots.deinit(r.gpa);
     }

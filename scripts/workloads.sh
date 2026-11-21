@@ -42,8 +42,8 @@ if [ "${1:-}" = --one ]; then
 	known=$(hdr known | head -n1)
 	cases=$(cd "$(dirname "$file")" && pwd)
 	case $file in
-	*.sh) root=$H9_WL_LINUX_ROOT probe=etc/os-release cmd=(/bin/sh "/mnt/term/cwd/$name.sh") ;;
-	*.rc) root=$H9_WL_NINE_ROOT probe="$H9_WL_ARCH/bin/rc" cmd=(rc "/mnt/term/cwd/$name.rc") ;;
+	*.sh) root=$H9_WL_LINUX_ROOT mount=$root:#L probe=etc/os-release cmd=(/bin/sh "/mnt/term/cwd/$name.sh") ;;
+	*.rc) root=$H9_WL_NINE_ROOT mount=$root probe="$H9_WL_ARCH/bin/rc" cmd=(rc "/mnt/term/cwd/$name.rc") ;;
 	esac
 	if [ ! -e "$root/$probe" ]; then
 		printf '%s\tskip\t0\n' "$name" >"$out/$name.result"
@@ -52,7 +52,7 @@ if [ "${1:-}" = --one ]; then
 	now() { if [ -n "${EPOCHREALTIME:-}" ]; then echo "$EPOCHREALTIME"; else date +%s; fi; }
 	t0=$(now)
 	timeout "${timeout:-120}" "$h9" --backend "$H9_WL_BACKEND" --arch "$H9_WL_ARCH" \
-		--dir "$root" --cwd "$cases" "${cmd[@]}" >"$out/$name.out" 2>"$out/$name.err" </dev/null
+		--dir "$mount" --cwd "$cases" "${cmd[@]}" >"$out/$name.out" 2>"$out/$name.err" </dev/null
 	code=$?
 	secs=$(awk -v a="$t0" -v b="$(now)" 'BEGIN{printf "%.2f", b-a}')
 	why=
