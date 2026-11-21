@@ -63,7 +63,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [namespace-kernel](namespace-kernel.md) |  | draft | needs kernel-serve, port-streams | A namespace-only kernel build |
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | draft |  | Linux named pipes |
-| [linux-pty](linux-pty.md) |  | draft |  | Linux pseudoterminals |
+| [linux-pty](linux-pty.md) |  | implemented |  | Linux pseudoterminals |
 | [mounts](mounts.md) |  | draft |  | Mounts, binds, and a Plan 9 root |
 | [spec-split](spec-split.md) |  | implemented |  | Splitting SPEC.md into files under spec/ |
 
@@ -130,7 +130,7 @@ flowchart LR
   p_namespace_kernel["namespace-kernel<br/>draft"]:::draft
   p_port_streams["port-streams<br/>draft"]:::draft
   p_linux_fifo["linux-fifo<br/>draft"]:::draft
-  p_linux_pty["linux-pty<br/>draft"]:::draft
+  p_linux_pty["linux-pty<br/>implemented"]:::implemented
   p_mounts["mounts<br/>draft"]:::draft
   p_spec_split["spec-split<br/>implemented"]:::implemented
   p_semaphores --> p_go_compat
