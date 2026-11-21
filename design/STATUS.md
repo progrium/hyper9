@@ -56,7 +56,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
-| [mount-index](mount-index.md) |  | draft |  | Metadata indexes for 9P roots and mounts |
+| [mount-index](mount-index.md) |  | draft | in progress on mount-index | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | proposed |  | hcpu, h9's own CPUs for the emulator |
 | [proposal-flow](proposal-flow.md) |  | implemented |  | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
 | [kernel-serve](kernel-serve.md) |  | draft |  | A 9P server in the kernel |
