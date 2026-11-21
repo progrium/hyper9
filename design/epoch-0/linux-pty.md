@@ -11,6 +11,8 @@ branch: [main]
 
 # Proposal: Linux pseudoterminals
 
+Nov 21, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
+
 ## Abstract
 
 Serve Linux pseudoterminals: `/dev/ptmx` and `/dev/pts/N` in the Linux view, with a pty pair device in the kernel and the pty ioctls in the Linux personality. The first step is a raw pty, in which termios is stored but doesn't change the data. That's enough for Nix, which opens a pty for every build's log, and for `script` and node-pty in raw mode. The second step is a line discipline (canonical mode, echo, `ISIG`, and `SIGWINCH`) for shells, tmux, and screen inside a pty.
