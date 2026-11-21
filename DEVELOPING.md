@@ -112,7 +112,7 @@ zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree
 `zig build slim` builds [9box](design/multicall.md) inside the h9 it
 just built, against the root tree: 9front's own commands, compiled from the
 pinned source with their globals renamed so they share one link, chosen by
-the name they run as: the 42 commands basic operation needs.
+the name they run as: the 43 commands basic operation needs.
 `-Dslim-links=hard` (hard links to `9box`, the default) or `stub`
 (`#!/bin/9box -!` files, for trees without hard links), and `-Darch`;
 `-Dslim-links=copy` builds nothing and makes `slim-copy-*` with the same
@@ -179,33 +179,13 @@ out.
 
 ### Wine
 
-`winedraw` is a Wine display driver that draws through the window's draw
-files, which Linux programs see at `/dev/9`, one draw layer per top-level
-window, and turns `/dev/mouse` and `/dev/kbd` into input
-([wine-draw](design/wine-draw.md), a draft). It builds against Wine 11.0's
-headers, and runs in an amd64 Linux root with Wine in it:
-
-```sh
-scripts/fetch.sh wine          # Wine's include/ at the pinned tag, into .local/src/wine
-zig build wine                 # zig-out/wine/x86_64-{unix,windows}/winedraw.{so,drv}
-scripts/wine-root.sh           # Alpine amd64 with Wine 11, at .local/linux/wine-amd64
-```
-
-[Running Windows programs](docs/windows.md) walks through installing it,
-from the root to a prefix that lasts between runs.
-
-`zig build wine` builds the driver for i386 too, in `zig-out/wine/i386-*`,
-with `roundf386.so`: Alpine's 32-bit musl gets `roundf` wrong at the x87
-precision Windows programs set, which makes every window 96 times too big,
-so 32-bit Wine runs with it in `LD_PRELOAD`. The [Wine page](site/wine.html)'s
-demo is 32-bit Wine in the browser host (`?wine`), over `wine.h9a`:
-
-```sh
-scripts/wine-root.sh 386       # Alpine x86 with Wine 11, at .local/linux/wine-386
-zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
-scripts/wine-web.sh            # .local/linux/wine-web: the driver and a prefix, made by h9 on h86
-zig build web                  # packs it into zig-out/web/wine.h9a, from src/web/wine.list
-```
+`scripts/wine-root.sh` makes an Alpine amd64 root with Wine 11 in it, at
+`.local/linux/wine-amd64`, for running Windows console programs
+([Running Windows programs](docs/windows.md)). `winedraw`, the Wine
+display driver over Plan 9 draw that gives Windows programs windows, and
+the [Wine page](site/wine.html)'s browser demo are experimental and live on
+the [`wine-draw` branch](https://github.com/progrium/hyper9/tree/wine-draw)
+([wine-draw](design/wine-draw.md)).
 
 ### Browser host
 
@@ -228,9 +208,13 @@ A 386 root for the archive can also come straight from the release's 386 ISO,
 without cross-compiling: `scripts/fetch.sh iso386` fetches it, and
 `zig build isoroot -- .local/9front/9front-<release>.386.iso .local/9front/root386`
 ([tools/isoroot.zig](tools/isoroot.zig)) unpacks it in about 20 seconds.
-That's how the [pages workflow](.github/workflows/pages.yml) builds the demo on
-each push to main and publishes it with the project page,
-[site/index.html](site/index.html), to GitHub Pages.
+That's how the [pages workflow](.github/workflows/pages.yml) builds the demo
+and publishes it with the project page, [site/index.html](site/index.html),
+to GitHub Pages. It runs on pushes to main that change `site/`, `src/web/`,
+or `tests/web/`, and by hand (`gh workflow run pages`) for anything else.
+`scripts/fetch.sh isoamd64` fetches the amd64 ISO the same way, which is how
+the [ci workflow](.github/workflows/ci.yml) gets the amd64 root for the
+integration cases on KVM.
 
 The demo page runs over a WebSocket 9P server with `?root=ws://…/9p`. The
 integration run's WebSocket cases need `-Demu=unicorn` too (with
@@ -290,6 +274,49 @@ the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os`
 runs one package). It's for finding gaps, not a gate, and nothing depends on
 it.
 
+The [dotl](design/dotl.md) cases run against three 9P2000.L servers:
+the one in [src/dotl/testserver.zig](src/dotl/testserver.zig), in
+memory, which also speaks 9P2000.L.Z and can drop connections on cue,
+diod, and ZeroFS.
+`scripts/fetch.sh diod` unpacks Ubuntu 24.04's diod package and the
+libraries it links, at the hashes in [scripts/pins.sh](scripts/pins.sh),
+into `.local/diod`, with `.local/bin/diod` to run it (x86\_64 Linux only,
+and it needs `ar` and `zstd`); without it, diod's cases skip.
+`scripts/fetch.sh zerofs` builds ZeroFS from source at the commit in
+pins.sh with the host's cargo, which takes several minutes, into
+`.local/bin/zerofs`; without it, ZeroFS's .L.Z cases skip, and CI
+doesn't build it. "Linux v9fs
+mounts --serve over a unix socket" runs only on Linux with the kernel's
+9p, as root or with `sudo -n`, as in the `linux-kvm` VM.
+
+### Workloads
+
+The workloads in [tests/workloads](tests/workloads) run real programs on
+real roots through `h9`, each timed: Python with its C modules, threads,
+subprocesses, and pip, git, sqlite3, jq, bash, and busybox's tools on a
+Linux root, and 9front's compilers and `mk` building awk and rc from
+`/sys/src`. A case is a short script, `NAME.sh` for `/bin/sh` on the Linux
+root or `NAME.rc` for rc on the 9front root, with `# expect:`,
+`# status:`, `# timeout:`, and `# known:` lines at the top
+([scripts/workloads.sh](scripts/workloads.sh) says what each does).
+`scripts/fetch.sh workloads` makes the Linux root,
+`.local/linux/workloads-amd64`, from the amd64 Alpine root and the
+packages pinned in `scripts/pins.sh`, and the 9front root is
+`.local/9front/rootamd64` (from `scripts/fetch.sh isoamd64` and
+`zig build isoroot`, as above) or `.local/9front/root`:
+
+```sh
+zig build workloads -Darch=amd64 -Dbackends=native
+zig build workloads -Darch=amd64 -Dbackends=native -- python git   # cases by name
+```
+
+The cases run in parallel and print a table of results and times. Each
+case's stdout and stderr are in `zig-out/workloads`. A case with a `known`
+line is expected to fail, and the run fails when it passes, so the line
+gets removed. The [workloads workflow](.github/workflows/workloads.yml)
+runs them every two days on main, unless nothing they depend on has
+changed since the last run that passed, and by hand on any branch.
+
 ### Test VMs
 
 [scripts/lima](scripts/lima/README.md) has Lima VMs (arm64 Linux, macOS, and
@@ -337,7 +364,6 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | --- | --- |
 | `src/main.zig`, `src/cli.zig`, `src/stdin.zig`, `src/hostsig.zig`, `src/tools.zig` | CLI: entry point, flag parsing with no I/O, the host stdin reader (cancellable, for the console's reader thread), Ctrl-C, hangup, and raw mode on the host terminal, and `--check`/`--version` |
 | `src/gfx.zig`, `src/kern/gfx*.c`, `src/kern/nogfx.c` | `--gfx`: the window claim and `h9.gfx.main`, the kernel glue around drawterm's GUI backends (lazy `#i`, the kbdfs `/dev/kbd`, the clipboard), the headless test backend, and the stubs for builds without graphics |
-| `src/wine/` | winedraw, the Wine display driver over Plan 9 draw: its Unix library, its PE side, and `draw9.h`, a small draw client the `drawpeek` fixture shares |
 | `src/root.zig` | library root; [docs/embedding.md](docs/embedding.md) explains using it |
 | `docs/` | guides that go further than the manual; `docs/embedding/embed.zig` is the embedding guide's example program |
 | `src/machine.zig` | one machine: builds its namespace, runs a process, and serves its syscalls |

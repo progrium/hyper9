@@ -5,7 +5,7 @@ title: Disk-image roots
 status: declined
 created: 2026-11-03
 authors: [progrium]
-depends: [devsrv, 9p-roots]
+depends: [devsrv, ninep-roots]
 areas: [cli, kern, sandbox]
 ---
  
@@ -13,7 +13,7 @@ areas: [cli, kern, sandbox]
  
 ## Abstract
  
-`--root` takes a raw 9front disk image. h9 serves the image to the guest as a disk, `#S`, partitions it with 9front's own `diskparts`, and runs 9front's file server for it (gefs, cwfs, or hjfs) as a guest process, from the host root tree. The server posts itself to `/srv`, and h9 mounts it at `/`, as [9p-roots](9p-roots.md) mounts a server, before the program runs. Writes the file server makes land in memory unless the image is `--writable`, so the image is never changed by default.
+`--root` takes a raw 9front disk image. h9 serves the image to the guest as a disk, `#S`, partitions it with 9front's own `diskparts`, and runs 9front's file server for it (gefs, cwfs, or hjfs) as a guest process, from the host root tree. The server posts itself to `/srv`, and h9 mounts it at `/`, as [ninep-roots](ninep-roots.md) mounts a server, before the program runs. Writes the file server makes land in memory unless the image is `--writable`, so the image is never changed by default.
  
 ## Background
  
@@ -34,13 +34,13 @@ The pinned release's arm64 image, which `scripts/fetch.sh` downloads and `zig bu
  
 - **No disk device.** There's no `#S`, and devfs can only serve a host file as a file, without partitions.
 - **No posting or mounting from the guest** until [devsrv](devsrv.md).
-- **[9p-roots](9p-roots.md)** makes `--root` a union and mounts a 9P connection at `/` before the plan's other binds. A posted service is a 9P connection.
+- **[ninep-roots](ninep-roots.md)** makes `--root` a union and mounts a 9P connection at `/` before the plan's other binds. A posted service is a 9P connection.
 - **The file servers** are in the root tree: `/arm64/bin/gefs`, `cwfs64x`, and `hjfs`. They use `semacquire`, `rendezvous`, and many procs, which is why [semaphores](semaphores.md), and through it devsrv, come first.
 ## Proposal
  
 ### `--root IMAGE`
  
-`--root` (and `$H9ROOT`) accept a host path to a regular file as a raw disk image. [9p-roots](9p-roots.md)'s reading of `--root` gains that case: a directory is a host tree, a socket is a 9P root, and a regular file is an image. `Machine.Options.Root` gains `image: []const u8`, an absolute and resolved host path.
+`--root` (and `$H9ROOT`) accept a host path to a regular file as a raw disk image. [ninep-roots](ninep-roots.md)'s reading of `--root` gains that case: a directory is a host tree, a socket is a 9P root, and a regular file is an image. `Machine.Options.Root` gains `image: []const u8`, an absolute and resolved host path.
  
 | Flag | Meaning |
 | --- | --- |
@@ -86,7 +86,7 @@ For an image root, the machine boots its file server once, on its first `run`, a
    - **Memory:** gefs sizes its cache at 25% of `/dev/swap`'s memory, and assumes 512 MiB when it can't read it, which h9 doesn't serve, so h9 passes `-m` as 25% of `--memory` (in MiB). hjfs's default of 1000 buffers and cwfs's defaults are small enough to leave alone.
    - **cwfs's devices:** a cwfs config names its devices by the paths they had when it was made (`filsys main c(/dev/sdE0/fscache)(/dev/sdE0/fsworm)`), not `sdH0`. h9 writes a device map (`-m`) from the config's devices to the matching `sdH0` partitions.
 5. **Wait** until `/srv/root` is posted, up to 30 s, or until the server exits. A server that exits or times out is exit 125, with the boot step's output.
-6. **Each run's namespace:** a fresh Pgrp, as `newns`'s `clear` gives, in which `/srv/root` is mounted at `/` with `MREPL`. The rest of the plan's binds follow, as over a 9P root. The attach `uname` is [9p-roots](9p-roots.md)'s `--root-user`, which for an image root defaults to `glenda` rather than the machine's user (below).
+6. **Each run's namespace:** a fresh Pgrp, as `newns`'s `clear` gives, in which `/srv/root` is mounted at `/` with `MREPL`. The rest of the plan's binds follow, as over a 9P root. The attach `uname` is [ninep-roots](ninep-roots.md)'s `--root-user`, which for an image root defaults to `glenda` rather than the machine's user (below).
 7. **The device mask** gains `S`, so the program can't reach the raw image under its file server.
 
 **The server's processes** belong to the machine, not to a run: they show up in `ps`, keep running in their own namespace, which the server's `rfork(RFNAMEG)` gives it, and outlive each run. A run's end, its `--timeout`, and its `hangup` reach only the run's processes. The boot step's time doesn't count against the first run's `--timeout`; the 30 s wait bounds it instead.
@@ -146,7 +146,7 @@ The `boot:` section isn't part of the namespace, so `--ns` doesn't replay it. A 
 
 **`glenda` by default.** The machine's user is the right default for a 9P root, whose server maps permissions by the host user's name. An image's file server has its own user table, which the host user is almost never in, so that default would fail every attach.
 
-**Refusing `--write=none`,** as [9p-roots](9p-roots.md) does: the server has to write, and `none` promises that nothing is written.
+**Refusing `--write=none`,** as [ninep-roots](ninep-roots.md) does: the server has to write, and `none` promises that nothing is written.
  
 ## Compatibility
  

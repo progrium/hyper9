@@ -1,0 +1,12 @@
+# 9front's C compiler and linker build and run a program.
+# expect: hello from the compiler
+switch($objtype){
+case amd64
+	O=6
+case arm64
+	O=7
+case 386
+	O=8
+}
+cp /mnt/term/cwd/fixtures/hello.c /tmp/hello.c
+cd /tmp && $O^c hello.c && $O^l hello.$O && ./$O.out

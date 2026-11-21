@@ -41,6 +41,7 @@ const REG_CPSR = 34;
 extern "c" fn hv_vm_create(config: ?*anyopaque) hv_return_t;
 extern "c" fn hv_vm_destroy() hv_return_t;
 extern "c" fn hv_vm_map(addr: *anyopaque, ipa: u64, size: usize, flags: u64) hv_return_t;
+extern "c" fn hv_vm_unmap(ipa: u64, size: usize) hv_return_t;
 extern "c" fn hv_vm_get_max_vcpu_count(max: *u32) hv_return_t;
 extern "c" fn hv_vcpu_create(vcpu: *u64, exit: **HvExit, config: ?*anyopaque) hv_return_t;
 extern "c" fn hv_vcpu_destroy(vcpu: u64) hv_return_t;
@@ -82,8 +83,24 @@ pub const Backend = struct {
         const b = try gpa.create(Backend);
         errdefer gpa.destroy(b);
         b.* = .{ .gpa = gpa, .io = io, .ram = ram };
+        b.ram.release = .{ .custom = .{ .ctx = b, .f = releaseRam } };
         b.kernel_root = try pt.kernelRoot(&b.ram, doorbell_ipa);
         return b;
+    }
+
+    /// Gives freed RAM back to the host (gphys.Ram.Release): fresh zero
+    /// pages are mapped over the range, which HVF must see again, so the
+    /// range is taken out of the VM first and put back after. Nothing
+    /// maps the pages in the guest meanwhile, since they're free.
+    fn releaseRam(ctx: *anyopaque, off: usize, len: usize) gphys.Ram.Release.Outcome {
+        const b: *Backend = @ptrCast(@alignCast(ctx));
+        const ipa = b.ram.base + off;
+        if (hv_vm_unmap(ipa, len) != HV_SUCCESS) return .kept;
+        const p: [*]align(std.heap.page_size_min) u8 = @alignCast(b.ram.mem.ptr + off);
+        const r = std.c.mmap(p, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true }, -1, 0);
+        // Mapped over or not, the range is back in the VM as it was.
+        if (hv_vm_map(p, ipa, len, 0b111) != HV_SUCCESS) return .lost;
+        return if (r == std.c.MAP_FAILED) .kept else .released;
     }
 
     pub fn destroy(b: *Backend) void {

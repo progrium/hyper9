@@ -450,6 +450,16 @@ pub const l = struct {
         pub const id = 19;
         qid: Qid,
     };
+    /// 9P2000's Tremove, which .L keeps: servers without Tunlinkat,
+    /// such as diod 1.0, take it instead.
+    pub const Tremove = struct {
+        pub const id = 122;
+        pub const mutation = true;
+        fid: u32,
+    };
+    pub const Rremove = struct {
+        pub const id = 123;
+    };
     pub const Trename = struct {
         pub const id = 20;
         pub const mutation = true;
@@ -818,8 +828,8 @@ pub const l = struct {
         data: Data,
     };
 
-    pub const T = Union(&.{ Tstatfs, Tlopen, Tlcreate, Tsymlink, Tmknod, Trename, Treadlink, Tgetattr, Tsetattr, Txattrwalk, Txattrcreate, Treaddir, Tfsync, Tlock, Tgetlock, Tlink, Tmkdir, Trenameat, Tunlinkat, Tversion, Tauth, Tattach, Tflush, Twalk, Tread, Twrite, Tclunk, Tfallocate, Tlopenatread, Tfsyncdur, Tgetlineage, Tlopenat, Tlcreateattr, Tmkdirattr, Tsymlinkattr, Tmknodattr, Tlinkattr, Tsetattrattr, Trebind, Twalkgetattr, Treaddirattr });
-    pub const R = Union(&.{ Rlerror, Rstatfs, Rlopen, Rlcreate, Rsymlink, Rmknod, Rrename, Rreadlink, Rgetattr, Rsetattr, Rxattrwalk, Rxattrcreate, Rreaddir, Rfsync, Rlock, Rgetlock, Rlink, Rmkdir, Rrenameat, Runlinkat, Rversion, Rauth, Rattach, Rflush, Rwalk, Rread, Rwrite, Rclunk, Rfallocate, Rlopenatread, Rgetlineage, Rlopenat, Rlcreateattr, Rmkdirattr, Rsymlinkattr, Rmknodattr, Rlinkattr, Rsetattrattr, Rrebind, Rwalkgetattr, Rreaddirattr });
+    pub const T = Union(&.{ Tstatfs, Tlopen, Tlcreate, Tsymlink, Tmknod, Trename, Treadlink, Tgetattr, Tsetattr, Txattrwalk, Txattrcreate, Treaddir, Tfsync, Tlock, Tgetlock, Tlink, Tmkdir, Trenameat, Tunlinkat, Tremove, Tversion, Tauth, Tattach, Tflush, Twalk, Tread, Twrite, Tclunk, Tfallocate, Tlopenatread, Tfsyncdur, Tgetlineage, Tlopenat, Tlcreateattr, Tmkdirattr, Tsymlinkattr, Tmknodattr, Tlinkattr, Tsetattrattr, Trebind, Twalkgetattr, Treaddirattr });
+    pub const R = Union(&.{ Rlerror, Rstatfs, Rlopen, Rlcreate, Rsymlink, Rmknod, Rrename, Rreadlink, Rgetattr, Rsetattr, Rxattrwalk, Rxattrcreate, Rreaddir, Rfsync, Rlock, Rgetlock, Rlink, Rmkdir, Rrenameat, Runlinkat, Rremove, Rversion, Rauth, Rattach, Rflush, Rwalk, Rread, Rwrite, Rclunk, Rfallocate, Rlopenatread, Rgetlineage, Rlopenat, Rlcreateattr, Rmkdirattr, Rsymlinkattr, Rmknodattr, Rlinkattr, Rsetattrattr, Rrebind, Rwalkgetattr, Rreaddirattr });
 
     /// Whether a T-message of this type carries an envelope under .L.Z.
     pub fn isMutation(id: u8) bool {

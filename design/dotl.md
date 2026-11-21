@@ -2,11 +2,12 @@
 issue: 22
 slug: dotl
 title: 9P2000.L and ZeroFS
-status: accepted
+status: implemented
 created: 2026-11-05
 authors: [progrium]
-depends: [devsrv, 9p-roots, serve, guest-tools]
+depends: [devsrv, ninep-roots, serve, guest-tools]
 areas: [cli, kern, sandbox]
+branch: [main]
 ---
 
 # Proposal: 9P2000.L and ZeroFS
@@ -52,7 +53,7 @@ ZeroFS doesn't send `Tremove`; removal is `Tunlinkat`. The crate also defines pl
 ### h9 today
 
 - **devmnt** is drawterm's 9P2000 client. `mntversion` sends `9P2000` and refuses a reply that doesn't start with it, and the rest of devmnt speaks only 9P2000's messages. So a .L server can't be mounted, at the root or anywhere else.
-- **Mounts** come from [9p-roots](9p-roots.md) (`--root tcp!…`, `unix!…`), [websocket-9p](websocket-9p.md) (`ws://`, `wss://`, and devhstream), namespace files, and [devsrv](devsrv.md)'s `mount` syscall in the guest. All of them end in devmnt.
+- **Mounts** come from [ninep-roots](ninep-roots.md) (`--root tcp!…`, `unix!…`), [websocket-9p](websocket-9p.md) (`ws://`, `wss://`, and devhstream), namespace files, and [devsrv](devsrv.md)'s `mount` syscall in the guest. All of them end in devmnt.
 - **Serving** is [serve](serve.md)'s: `--serve` listens on unix, TCP, and WebSocket addresses and gives each connection an `exportfs` of the machine's namespace, in 9P2000. Before exportfs, the client's first `Tversion` passes through a dialect slot, which serve leaves empty.
 - **The Linux personality** (draft) translates Linux syscalls onto drawterm's kernel. Its file calls build a Linux `stat` from a `Dir`, map users to numbers through the Linux root's `/etc/passwd`, and map error strings to errno in "one place, tested on its own". [symlinks-in-root](symlinks-in-root.md) (draft) resolves symlinks inside a bound tree, relative to its top, for the personality's Linux root. Those are most of what a .L translator needs. But it runs Linux *programs*: it has no `mount` in its table, Linux's 9P client is v9fs in the Linux kernel, and anything a Linux program serves on a socket is still .L bytes that devmnt can't read.
 
@@ -152,7 +153,7 @@ Without the extension, a drop is a hangup, as for any 9P mount. websocket-9p's "
 
 It follows devhstream's pattern and the seam rules: a kproc per conversation reads the server connection, the translator is called through leaves that take and return bytes and never raise, and a guest reading `data` sleeps on a Rendez. The namespace builder binds it with `bind -a '#ℓ' /net`.
 
-**Roots and namespace files** use it without being asked. 9p-roots' and websocket-9p's connections are put through a conversation before devmnt mounts them, so `--root tcp!zerofs.example!5564` works, and `mount 'tcp!zerofs.example!5564' /n/z` does in a namespace file.
+**Roots and namespace files** use it without being asked. ninep-roots' and websocket-9p's connections are put through a conversation before devmnt mounts them, so `--root tcp!zerofs.example!5564` works, and `mount 'tcp!zerofs.example!5564' /n/z` does in a namespace file.
 
 **In the guest,** `/bin/dotlfs`, an rc script that [guest-tools](guest-tools.md) ships in the guest's `/bin`, does the same: `dotlfs tcp!zerofs.example!5564 /n/z` writes `dial` to a new conversation and mounts its `data`, through devsrv's `mount`.
 
@@ -203,7 +204,7 @@ The personality then gets these from this proposal, each in its own stage and no
 
 ## Compatibility
 
-- **CLI:** new `--user-map FILE`. `--serve` listeners also answer 9P2000.L clients. 9p-roots' and websocket-9p's dial strings now also reach .L servers. No exit code changes; a server with an unknown dialect is exit 125 like any failed root.
+- **CLI:** new `--user-map FILE`. `--serve` listeners also answer 9P2000.L clients. ninep-roots' and websocket-9p's dial strings now also reach .L servers. No exit code changes; a server with an unknown dialect is exit 125 like any failed root.
 - **`Machine.Options`** gains `user_map: ?[]const u8`. Without it, the machine's user is the host uid on the wire.
 - **Behaviour of 9P2000 mounts:** unchanged, through passthrough. `status` shows `9P2000`.
 - **The root tree:** unchanged. `/bin/dotlfs` comes from [guest-tools](guest-tools.md)' `#H`.
@@ -221,16 +222,16 @@ The personality then gets these from this proposal, each in its own stage and no
 
 Integration cases tagged `[dotl]`. The .L server is diod, or failing that the `ninep-proto` crate's test server, fetched by `scripts/fetch.sh` at a pinned release; the .L.Z server is `zerofs` with a local-file backend.
 
-- [ ] `test "a 9P2000.L root lists, reads, writes and removes [dotl]"`
-- [ ] `test "a 9P2000 root goes through the translator unchanged [dotl]"`
-- [ ] `test "a symlink in a .L mount is followed and can't leave the mount [dotl]"`
-- [ ] `test "Rlerror errnos become 9front error strings [dotl]"`
-- [ ] `test "the guest mounts a .L server with dotlfs, under the network policy [dotl]"`
-- [ ] `test "a .L.Z root survives the server restarting mid-write [dotl]"`
-- [ ] `test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [dotl]"`
-- [ ] `test "a .L root attaches as the host uid, not 0, without --user-map [dotl]"`
-- [ ] `test "Linux v9fs mounts --serve over a unix socket [dotl]"` (Linux only, in the `linux-kvm` VM, as root)
-- [ ] `test "a .L client of --serve under --write=none gets EROFS [dotl]"`
+- [x] `test "a 9P2000.L root lists, reads, writes and removes [dotl]"`
+- [x] `test "a 9P2000 root goes through the translator unchanged [dotl]"`
+- [x] `test "a symlink in a .L mount is followed and can't leave the mount [dotl]"`
+- [x] `test "Rlerror errnos become 9front error strings [dotl]"`
+- [x] `test "the guest mounts a .L server with dotlfs, under the network policy [dotl]"`
+- [x] `test "a .L.Z root survives the server restarting mid-write [dotl]"`
+- [x] `test "a .L.Z reconnect doesn't truncate a file opened with OTRUNC [dotl]"`
+- [x] `test "a .L root attaches as the host uid, not 0, without --user-map [dotl]"`
+- [~] `test "Linux v9fs mounts --serve over a unix socket [dotl]"` (Linux only, in the `linux-kvm` VM, as root). Waived: no machine at hand had a kernel with 9P's unix transport, so the case hasn't run yet. It skips on a kernel without that transport, and runs wherever there is one (see Updates).
+- [x] `test "a .L client of --serve under --write=none gets EROFS [dotl]"`
 
 Demos: `h9 --root tcp!localhost!5564 ls /` on a `zerofs` serving a 9front tree. `h9 --serve unix!/tmp/h9.sock rc` then, in another shell, `mount -t 9p -o trans=unix,version=9p2000.L /tmp/h9.sock /mnt && ls /mnt/bin`.
 
@@ -238,7 +239,17 @@ Demos: `h9 --root tcp!localhost!5564 ls /` on a `zerofs` serving a 9front tree. 
 
 1. `src/dotl/wire.zig` and `attr.zig`: encoding for 9P2000, .L, and .L.Z, the errno table, the user map. Unit tests and fuzz targets.
 2. The client side with plain .L, and devdotl. `.L` roots, and `dotlfs` in `src/guest/bin`.
-3. Passthrough for 9P2000, and routing 9p-roots' and websocket-9p's connections through `#ℓ`.
+3. Passthrough for 9P2000, and routing ninep-roots' and websocket-9p's connections through `#ℓ`.
 4. `.L.Z`: the compound messages, envelopes, `Trebind` reconnect.
 5. The server side, in [serve](serve.md)'s dialect slot.
 6. In the Linux personality, once it's built: `mount -t 9p`, and `h9_readlink(Chan*)` answering from the translator's last link target. SPEC.md gets a "9P dialects" paragraph under Filesystem.
+
+## Updates
+
+- 2026-11-11: Stages 1 to 5 of Implementation (the translator, `#ℓ`, `dotlfs`, .L and .L.Z roots, reconnect, read-ahead, the compound requests, and serving .L) reached main before this proposal was tracked, with their cases run against the in-memory server in `src/dotl/testserver.zig`. The `dotl` branch picks up from there.
+- 2026-11-11: Run against diod 1.0.24, the translator had five bugs the in-memory server didn't catch, now fixed. diod answers a `Tversion` of `9P2000.L.Z` with `Rlerror` (EIO), which failed the mount. The translator's `Tversion` used tag 0, not `NOTAG`. `Treaddir` asked for `msize` less 11, more than diod's limit of `msize` less 24. diod has no `Tunlinkat` or `Trenameat`, so the translator falls back to `Tremove` and `Trename` on `EOPNOTSUPP`, as Linux's v9fs does. And a .L server applies no create(5) permission rule, so every file rc made was 0666; the translator now applies it against the directory's mode. diod comes from `scripts/fetch.sh diod`, which unpacks Ubuntu 24.04's package at pinned hashes rather than building a pinned release, and its cases skip off x86\_64 Linux. The in-memory server's cases stay, renamed, since they cover .L.Z and run on every host.
+- 2026-11-11: Where what's built differs from the body. A server that answers `9P2000.L.Z` with `unknown` or an error is offered `9P2000.L`, rather than failing the mount, since diod and other .L servers do one or the other. `#ℓ`'s `dial` takes `tcp!` addresses, and `unix!` paths only when h9 dials a root itself, but not `ws://` or `wss://`: a WebSocket root or namespace-file mount is connected by h9 and handed over with `fd`, so it doesn't reconnect, and `dotlfs` can't dial a WebSocket. A namespace file's `mount` of a `tcp!` dial string goes through `#ℓ`'s `dial`, under the network policy, as `dotlfs` does.
+- 2026-11-11: Stage 6, the Linux personality's `mount -t 9p` and `h9_readlink(Chan*)` answering from the translator, isn't built. It isn't among the Done criteria and can follow in its own PR.
+- 2026-11-12: The two .L.Z criteria run against ZeroFS 2.3.6, built from source at a pinned commit by `scripts/fetch.sh zerofs`, and pass. ZeroFS keeps its files in an object store, so the cases give it an in-memory one, and rather than restart the server (which would lose them) a relay between h9 and ZeroFS cuts the connection right after forwarding a chosen `Twrite`, before its answer. That's the same failure from the translator's side: a write applied and not answered, then a new connection. ZeroFS found one more bug: the translator sent a reopened fid's `Tlopen` right behind its `Trebind`, and ZeroFS, which handles requests concurrently, could take the `Tlopen` first and answer EBADF. The `Tlopen` now waits for the `Rrebind`. ZeroFS's cases skip without `.local/bin/zerofs`, and CI doesn't build it, since that takes several minutes.
+- 2026-11-12: On an exe.dev Linux VM (Linux 6.12, x86\_64, with KVM), every dotl case passes on the kvm and native backends but the v9fs one. That VM's kernel has 9p with only the virtio transport (`CONFIG_NET_9P_FD` unset), so `mount -t 9p -o trans=unix` can't work there. The case now skips on such a kernel rather than failing, and still needs a run on a kernel with the fd transport, as stock distribution kernels have.
+- 2026-11-12: The v9fs criterion is waived for now, and dotl is implemented. A Linux machine with a stock distribution kernel can run the case as root, or with passwordless `sudo`, whenever one is at hand.

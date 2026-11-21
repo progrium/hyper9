@@ -61,6 +61,7 @@ This describes h9 as built. Changes to it go through proposals in [design/](desi
   - [Zig/C seam rules](#zigc-seam-rules)
 - [Filesystem, boot, and I/O](#filesystem-boot-and-io)
   - [Root filesystem](#root-filesystem)
+  - [9P dialects](#9p-dialects)
   - [Slim roots](#slim-roots)
   - [Boot sequence](#boot-sequence)
   - [Terminal](#terminal)
@@ -68,6 +69,7 @@ This describes h9 as built. Changes to it go through proposals in [design/](desi
 - [Serving](#serving)
   - [Listeners](#listeners)
   - [Streams](#streams)
+  - [9P2000.L clients](#9p2000l-clients)
   - [The server Proc](#the-server-proc)
   - [Process counts](#process-counts)
   - [The plan](#the-plan)
@@ -121,12 +123,12 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | --- | --- | --- |
 | Product shape | A library plus a thin CLI; each invocation is one machine | One machine can hold a whole process tree. Keep the machine API free of CLI-global state. |
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
-| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([9p-roots](design/9p-roots.md), [websocket-9p](design/websocket-9p.md)); disk images were declined ([image-roots](design/image-roots.md)) |
+| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([ninep-roots](design/ninep-roots.md), [websocket-9p](design/websocket-9p.md)); disk images were declined ([image-roots](design/image-roots.md)) |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/self-host.md)), and a source of test binaries |
 | Language | Zig 0.16.x (`minimum_zig_version` in `build.zig.zon`) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
-| Emulator | A user-mode emulator backend: Unicorn; a native Zig interpreter is proposed ([zig-interpreter](design/zig-interpreter.md)) | For development and CI on hosts and VMs without a usable hypervisor |
+| Emulator | A user-mode emulator backend: Unicorn (`-Demu=unicorn`), or h9's own CPUs, ha64, h86, and hx64 (`-Demu=hcpu`, [hcpu](design/hcpu.md)) | For development and CI on hosts and VMs without a usable hypervisor |
 | No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
 | Browser host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on h9's own CPU (h86) | One machine per Web Worker; the same build runs under Node for the tests |
 
@@ -204,7 +206,7 @@ The interface was shaped around all three hypervisors, so the table and rules be
 
 - **Exits:** the shim exits to the host by storing to an unmapped doorbell address (MMIO), or with `OUT` on x86. All three hypervisors hand that exit to userspace, so we don't depend on HVC or VMCALL handling, which differs across them. On arm64 KVM in particular, the kernel handles HVC itself unless hypercall filtering is configured.
 - **Threads:** a vCPU is created, run, and destroyed on one host thread, which is HVF's rule and the strictest of the three. `kick` is the only call allowed from another thread.
-- **Memory:** one large guest-physical region is mapped once at VM creation. A host-side page allocator hands out guest-physical pages from it. We never map per segment, because KVM caps the number of memory slots and mapping calls are slow everywhere.
+- **Memory:** one large guest-physical region is mapped once at VM creation. A host-side page allocator hands out guest-physical pages from it. We never map per segment, because KVM caps the number of memory slots and mapping calls are slow everywhere. The host backs the region's pages only when they're first touched, and freed pages go back to it (`src/vmm/gphys.zig`): each free range keeps the span of it that may be dirty, and once that span reaches 32 MiB it's released (`madvise(MADV_DONTNEED)` on KVM, a hole punched in the RAM file on the native backend, and, with the range taken out of the VM and put back, fresh pages mapped over it on HVF and a decommit and recommit on WHP). A smaller dirty span is zeroed as it's handed out again, so small frees and reallocations cost no syscalls, and never-used or released pages aren't touched when they're handed out.
 - **Page size:** guest page tables use 4K pages on every host, matching 9front's page size on both architectures. hyper-linux shows HVF guests can use 4K pages. Only the single host memory region has to be aligned to the host page size (16K on Apple Silicon).
 - **No hypervisor:** `create` fails cleanly with a clear message, and `auto` falls back to the emulator when it's built in. The native backend is never chosen automatically, since it shares h9's process and isn't a security boundary; it needs an explicit `--backend native`, and the CLI points at it when nothing else can run.
 
@@ -528,12 +530,14 @@ Linux ELF binaries run next to 9front ones in the same machine ([linux-personali
 
 `src/linux/elf.zig` and `src/linux/exec.zig` load static and dynamic ELF for arm64 and amd64. ET_DYN programs load at a fixed PIE base and `PT_INTERP` (musl's `ld-musl`, read in the Linux view) at the first free range.
 
+A segment's whole file pages are a lazily filled private file mapping (`Vma.src`, see Memory) of the file exec read, opened again and checked against what was read, so a page counts against `--memory` only once it's touched. A page two segments share and a segment's last file page, whose bytes past `p_filesz` start the bss, are copied in at exec, as is the whole image when the file can't be opened again (a program loaded from a host path). exec still reads the whole file to check it.
+
 The stack carries argv, envp and auxv, with `AT_HWCAP` limited to what every backend has.
 
 arm64 gets a one-page vDSO holding `__kernel_rt_sigreturn`, with the `LINUX_2.6.39` version tables Go's vDSO lookup needs; amd64 has none, and musl's `syscall` fallback covers it.
 ### Memory
 
-`src/linux/mm.zig` keeps VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings copied at `mmap`, and shared mappings.
+`src/linux/mm.zig` keeps VMAs over the vmm's regions, with lazy anonymous pages faulted in on first touch, 1 MiB chunk at a time, `brk`, `mmap`/`munmap`/`mprotect`/`mremap`, private file mappings filled from the file chunk by chunk on first touch (`Vma.src`), and shared mappings. `madvise(MADV_DONTNEED)` frees the private chunks it covers whole, so their memory goes back to the backend, and zeroes the rest.
 
 A private mapping of a file that's also mapped shared is the exception: it maps the shared pages copy-on-write (`Vma.cow`), so it sees the file's changes until it writes a page, as on Linux; Wine reads wineserver's session memory through one.
 
@@ -765,6 +769,16 @@ Received data is queued in the machine's pages, up to 16 MiB unread per stream.
 
 A guest `connect` asks the net policy as a TCP dial would, through the same `netLookup`, `netResolved`, and `netCheck` as devip and `cs`. The machine's end closes its streams (`h9_hstream_machend`, from `src/kern/proc.c`).
 
+#### 9P2000.L device `#ℓ` (`src/kern/devdotl.c`, `src/dotl/`)
+
+devmnt and exportfs speak only 9P2000, and most 9P servers outside Plan 9 speak 9P2000.L ([dotl](design/dotl.md)). A `#ℓ` conversation puts a translator between devmnt and a server connection, or between a client connection and an exportfs.
+
+Attached with no spec, the device serves `dotl/clone` and `dotl/N/{ctl,data,status}`, which `bind -a '#ℓ' /net` puts at `/net/dotl`. `ctl` takes `fd N` (the caller's fd N is the server connection), `dial ADDR[,ADDR…]` (a `tcp!` address dialed through `#I` under the dialer's plan, or `unix!PATH` when h9 dials a root itself, with no plan), `version 9P2000.L` (don't offer `.L.Z`), and `serve N` (the server side, for a client on fd N); `data` is 9P2000; `status` reads the dialect, `Hungup` and why, and `reconnects N` once the connection has been resumed.
+
+It follows devhstream's pattern and the seam rules: a kproc per conversation reads the server connection and feeds the translator, which is called through leaves in `src/dotl/kern.zig` that take and return bytes and never raise, under a QLock per conversation; a guest reading `data` sleeps on a Rendez until the translator has bytes for it, so a note interrupts it. The conversation ends when the last of its `ctl` and `data` is closed.
+
+The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
+
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
 drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](design/go-compat.md)).
@@ -819,7 +833,7 @@ A missing architecture gets the skeleton only, with a warning; `-Drelease` fails
 
 ### Root filesystem
 
-The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([9p-roots](design/9p-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
+The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([ninep-roots](design/ninep-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
 
 A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](design/schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it.
 
@@ -833,7 +847,31 @@ h9 connects to a 9P root before the program runs:
 
 The connection is posted on the machine's `/srv` board as `root`, which holds it for the machine's life, and `#s/root` is mounted at `/` with no auth fd and `--root-spec` as the attach name. devmnt sends the calling process's user as the attach uname, so the first Proc takes on `--root-user` for the mount when one is given. Everything else is bound over the mount as over a host tree.
 
-A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks another dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, and h9 doesn't reconnect. Disk images aren't supported ([image-roots](design/image-roots.md) was declined).
+Each connection goes through a `#ℓ` conversation before it's posted (see [9P dialects](#9p-dialects)), so the server can speak 9P2000 or 9P2000.L; a TCP root, and a unix one whose path has no comma, is dialed by the conversation itself, so it can be dialed again. A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks an unknown dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, unless a 9P2000.L.Z server's connection is resumed. Disk images aren't supported ([image-roots](design/image-roots.md) was declined).
+
+### 9P dialects
+
+Every 9P connection h9 mounts, from a TCP, unix socket, or WebSocket root, a namespace file's `mount`, or the guest's `dotlfs`, goes through a `#ℓ` conversation's client side before devmnt sees it ([dotl](design/dotl.md)). The translator answers devmnt's `Tversion` with `9P2000` itself and sends its own, with tag `NOTAG`, offering `9P2000.L.Z` at an `msize` of up to 1 MiB:
+
+- `9P2000.L.Z` or `9P2000.L` translates, `.L.Z` with ZeroFS's extension.
+- `9P2000` passes bytes through both ways unchanged, so a 9front server costs a copy.
+- `unknown`, or an `Rlerror` (diod's answer), to the `.L.Z` offer gets an offer of `9P2000.L`; anything else fails the mount with "server speaks unknown 9P version X".
+
+Translating, the client side allocates the server's fids and tags, since one devmnt request can become several, and keeps each fid's path from its attach root. `Topen` is `Tlopen`, with `ORCLOSE` kept in the translator and done at clunk. `Tcreate` is `Tlcreate`, or `Tmkdir` then a walk and `Tlopen` for a directory, with the mode create(5)'s rule gives against the directory's (a .L server applies none). A create of an existing name without `DMEXCL` opens it truncated. Directory reads are `Treaddir` and a `Tgetattr` per entry, packed into `Dir`s. `Tstat` is `Tgetattr`, and `Twstat` a `Trenameat` for a name, then a `Tsetattr`, or `Tfsync` for the null wstat. `Tremove` is `Tunlinkat` on a fid walked to the parent. A server without `Tunlinkat` or `Trenameat` (diod 1.0) gets `Tremove` and `Trename` instead. `Rlerror` becomes the error string `attr.zig` gives for the errno ("errno N" for one it doesn't know). A `Tflush` of a request that became several flushes all of them, and a reply for an unknown tag fails the connection.
+
+Symlinks are followed during a walk with `Treadlink`, inside the mount by [symlinks-in-root](design/symlinks-in-root.md)'s rule: an absolute target starts at the attach root, `..` stops there, and more than 40 links in one walk is "too many symbolic links". A directory read lists a link as its target, and leaves out one that resolves to nothing. A device node, FIFO, or socket is a zero-length file that fails to open.
+
+The machine's user is sent as `n_uname` from `--user-map` (an `/etc/passwd` file read once), or else the host uid, which is 65534 when h9 runs as root and 1000 on Windows; 0 is sent only when the map says so. Any other number N is named "N" and back.
+
+A file read sequentially is read one upstream `msize` ahead, and devmnt's 32 KiB reads are answered from that; a seek, a write, or any mutation drops it.
+
+With `9P2000.L.Z`:
+
+- Walks are `Twalkgetattr`, a read-only open `Tlopenatread`, which brings up to an `msize` of the file, directory reads `Treaddirattr`, and creates `Tlcreateattr`. The attributes a reply brings answer only the fid's next request, unless a mutation came since.
+- Every mutation carries an envelope with an op_id from a random seed and a count.
+- A dialed conversation reconnects. When the connection drops, or the server answers `ENOTLEADER`, the kproc dials the addresses again, a second apart and round the list, for up to 120 seconds, under the first dial's plan, in a namespace of its own. The translator then negotiates again, rebinds every live server fid with `Trebind` by its inode and attach root, replays each open without `O_TRUNC`, `O_CREAT`, or `O_EXCL`, and resends every unanswered request in order, mutations with the retry flag, so the server applies each once. Read-ahead and held attributes are dropped. devmnt sees slow replies; after 120 seconds outstanding requests fail as on any hangup.
+
+A connection given by fd (`fd N`), such as a WebSocket root's or a unix root whose path has a comma, can't be redialed, so it hangs up as before.
 
 ### Slim roots
 
@@ -845,9 +883,9 @@ For each command in `src/9box/slim` (a name and a directory under `/sys/src/cmd`
 
 A command's override of a libc function (ed's `mktemp`) is renamed too, unless libc's or libbio's own code calls it; that, initialising a library global other than `argv0`, or being a thread program, fails the build.
 
-`9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
+`9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), from the interpreter a `#!` script names when `argv[0]` isn't a command (a script such as `/rc/bin/lc` whose `#!/bin/rc` is a hard link to `9box` starts it with the script's name in `argv[0]`), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
 
-The tree is `9box`, a hard link or stub per command, `rcmain`, the time zone, and the mount points h9 binds onto. Its 42 commands are a 749 KB `9box` against 3.4 MB for the same binaries copied.
+The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 43 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied.
 
 Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
 
@@ -942,13 +980,19 @@ A machine serves at most 32 connections at once; past that a connection is close
 
 An accepted connection enters the kernel through devhstream as a host-made stream (`hstream.openAccepted`): raw for unix and TCP, whose bytes are queued as they arrive and written back unframed, or a server-side WebSocket, whose frames are sent unmasked and whose text messages close it with 1003.
 
-A server stream answers pings, pings after 30 s idle and fails a connection silent for another 30 s, and drops a client whose handshake hasn't finished within 60 s. The first message passes a dialect slot (`hstream.dialect`), where a `Tversion` is plain 9P2000 today and dotl's translator will hook in.
+A server stream answers pings, pings after 30 s idle and fails a connection silent for another 30 s, and drops a client whose handshake hasn't finished within 60 s. The first message passes a dialect slot (`hstream.dialect`), which takes a `Tversion` and refuses anything else. The stream then goes to a `#ℓ` conversation's server side (`serve N`), whose `data` the server Proc's exportfs serves.
+
+### 9P2000.L clients
+
+A `#ℓ` conversation's server side (`src/dotl/server.zig`) goes by the client's first `Tversion`: `9P2000.L` translates, `9P2000.L.Z` is answered with `9P2000.L` (version(5) lets a server pick), and anything else passes through for exportfs to answer, so a 9front or h9 client mounts as before ([dotl](design/dotl.md)). The `serve` heading of `--print` says its listeners speak both.
+
+Translating, it allocates exportfs's fids and tags, since one .L request can take several. `Tgetattr` is a `Tstat`, built into a Linux `stat` with numbers from the user map, and `Tsetattr` a `Twstat`. `Treaddir` reads the whole directory into a listing on the fid and hands out entry indexes as offsets; a `Treaddir` at offset 0, or any mutation through the connection, drops the listing. `Tlopen` is `Topen` and `Tlcreate` a `Tcreate`. `Tmkdir` is a walk, a create, and a clunk. `Tunlinkat` walks and removes. `Trenameat` within a directory is a `Twstat` of the name, replacing a name that's taken, and across directories is `EXDEV`. `Tfsync` is the null `Twstat`, and `Tstatfs` reports fixed sizes. `Tsymlink`, `Tmknod`, `Tlink`, and xattrs are `EOPNOTSUPP`. `Tlock` and `Tgetlock` use an advisory byte-range lock table shared by every connection the process serves, held by a connection and a client pid on a qid. exportfs's errors become errno through `attr.zig`, and `exportfs -R`'s "read only" is `EROFS`.
 
 ### The server Proc
 
 After the plan's namespace is built and before the program runs, the first Proc forks the server Proc with `RFNAMEG|RFFDG|RFENVG|RFNOTEG|RFNOWAIT`: its own copy of the plan's namespace, so binds the program makes later aren't served, and its own note group, so an interrupt from the console doesn't reach exportfs. Without `--serve-net` it unmounts `/net`.
 
-It takes each ready connection from `serve.Server.next`, opens its stream as an fd, and forks a Proc that dups it to 0 and 1 and execs `exportfs -r ROOT` (`-R` under `--write=none`): the root's `/bin/exportfs` if it has one, else the built-in root's `#Hroot/$cputype/bin/exportfs`.
+It takes each ready connection from `serve.Server.next`, opens its stream as an fd, puts it through a `#ℓ` conversation's server side, and forks a Proc that dups the conversation's `data` to 0 and 1 and execs `exportfs -r ROOT` (`-R` under `--write=none`): the root's `/bin/exportfs` if it has one, else the built-in root's `#Hroot/$cputype/bin/exportfs`.
 
 When exportfs exits, the stream closes and the connection's slot is freed.
 
@@ -968,7 +1012,7 @@ The server Proc and its descendants are counted against `--pids` separately from
 
 ### Sandbox policy
 
-Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths, network rules, and limits. The capability model follows [isobox](https://github.com/can1357/isobox): named capabilities, profiles that set defaults, explicit flags that override them, a printable plan with caveats, and `--strict` to refuse anything the build can't enforce. Unlike isobox, enforcement lives in the shared kernel, so the capability set is the same on every vmm backend; there's no per-host intersection to compute.
+Sandboxing is a `Policy` in `Machine.Options`: a set of capabilities, host paths, network rules, and limits. The capability model follows [isobox](https://github.com/can1357/isobox): named capabilities, profiles that set defaults, explicit flags that override them, and a printable plan with caveats. Unlike isobox, enforcement lives in the shared kernel, so the capability set is the same on every vmm backend; there's no per-host intersection to compute.
 
 | Capability | Mechanism |
 | --- | --- |
@@ -1124,7 +1168,7 @@ A WebSocket root's comment is its URL with the query elided (`?…`), its header
 
 The built-in root is printed as `bind '#Hroot' /` with `builtin` in the access column and what it holds in a comment (`h9 v0.2.0, 9front 11952 slim`, or `skeleton only`). It's constant data, so it has no access rule, `--writable` can't name it, and it's read-only whatever the flags; the root's overlay and `/tmp` go over it as over a 9P root, as bare `#O`s. `--builtin=before` and `--builtin=after` print their `#Hroot/$cputype/bin` bind with `builtin` too. The lines replay with `--ns` as ordinary binds, so a plan printed over the built-in root replays on any h9 of the same build.
 
-`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`. Requested capabilities the build can't enforce are listed on an `unenforced:` line, and `--strict` refuses them with exit 2; this build enforces every capability it knows, so the line doesn't appear.
+`--net-allow` patterns are printed in a `net-allow:` section after `devmask:`.
 
 The root's overlay is printed as `bind -c '#O' /` with `eph` and, over a host tree, the root's path in a comment, and the root's access rule as `eph`. Replayed with `--ns`, the line overlays whatever `/` is at that point; binds made before it onto directories of the root (the builder's own, when replaying into a running plan) are hidden under it, and the replay's later lines redo them, except `#U` binds, which the device mask refuses. The guest's cwd stays where the builder put it.
 
@@ -1160,10 +1204,9 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 
 ### Debugging
 
-- `--trace` logs each syscall with its arguments, result, and error string, prefixed by pid, like 9front's ratrace.
+- `--trace` logs each syscall with its arguments, result, and error string, prefixed by pid, like 9front's ratrace. When the guest faults, it also logs the Ureg, the faulting address, and a PC symbolized from the a.out symbol table (`dumpFault` in `src/machine.zig`), under the same lock as the syscall lines.
 - acid (Plan 9's debugger) attaches to a live process through devproc's `mem`, `regs`, `fpregs`, `text`, and the `ctl` stop messages ([self-host](design/self-host.md)). A process stops only on its own thread, at a stop point: entering a syscall, delivering a note (which a `stop` kick forces for one spinning in guest code), a breakpoint exit, or before its first instruction after `exec` with `hang`. It saves its Ureg and Extra to its record (`Proc.dbg_ureg`, `dbg_extra` in `src/machine.zig`) and sleeps on the record (`h9_kern_stopwait` in `src/kern/proc.c`), holding no vCPU, so readers on other threads never touch a backend. Register writes are kept in the record and loaded, through `arch.sanitize`, when the process resumes. `mem` reads and writes go through `AddressSpace.copy`; a write into text first gives the process its own copy of a shared text segment (`Segs.ownText`, 9front's `txt2data`) and then calls `codeChanged`, which bumps the flush epoch on hvf and kvm (the shim invalidates the I-cache before its next entry) and makes emu flush Unicorn's whole translation cache before its next run. `kill`, `--timeout`, and teardown interrupt a stopped process.
 - `BRK` and `INT3` exit as `vmm.Exit.breakpoint`, and the machine posts `sys: breakpoint` with the debug flag, so a process without a handler dies with it and acid's `bpset`, `step`, and `next` work. The PC is left at the `BRK` on arm64 and after the `INT3` on x86, as on 9front.
-- `--dump-on-fault` prints the Ureg, the faulting address, and a symbolized PC from the a.out symbol table.
 - There's no gdb stub.
 
 ### Testing and CI
@@ -1172,7 +1215,8 @@ Host paths given to `--readable` and `--writable` appear in the guest under `/mn
 - Integration tests run real 9front binaries from a pinned root tree. Each case is tagged with the proposal it proves, and skips while that proposal isn't implemented ([design/README.md](design/README.md#tests)).
 - `zig build integration` runs real binaries from the root tree through the `h9` CLI as subprocesses, so each case gets a fresh kernel and checks exit codes end to end; it skips when there's no tree. `zig build proposal -Dp=baseline` runs the baseline's demos and cases. The Lima test VMs get the tree with `scripts/lima/vm push-root`.
 - `zig build integration -Dweb` runs the same cases through `h9-node` on h86 with the 386 root, or on ha64 with `-Darch=arm64`; cases that need a host TTY, POSIX signals, TCP, or what a page's WebSocket can't do (headers, a proxy, `--root-ca`, pings) skip there by name or tag. websocket-9p's servers are a native h9 behind `tests/wsrelay.zig`, since the web host can't listen, so those cases need `-Demu=unicorn` as well to run there. `zig build web-test` drives the demo page in Chromium with Playwright (`tests/web/browser.mjs`).
-- CI isn't set up yet ([ci](design/ci.md)).
+- CI runs `zig build design -- check` on every PR, and the unit and integration tests on PRs from proposal branches ([.github/workflows/ci.yml](.github/workflows/ci.yml)). Which workflows run what can change without a proposal ([design/README.md](design/README.md#checks)).
+- `zig build workloads` runs real programs (Python, pip, git, sqlite3, 9front's compilers, and `mk`) on a Linux root and a 9front root, in parallel and timed ([tests/workloads](tests/workloads)), every two days on main ([.github/workflows/workloads.yml](.github/workflows/workloads.yml)).
 
 ## CLI
 
@@ -1238,19 +1282,17 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--memory SIZE` | Caps guest memory (`512m`, `2g`) |
 | `--pids N`, `--cpus N` | Caps processes and concurrently running vCPUs |
 | `--timeout DURATION` | Posts `hangup` at a deadline, waits up to 2 s, then tears down the machine |
-| `--strict` | Refuses any requested capability this build can't enforce (exit 2) |
 | `--print` | Prints the compiled policy and namespace, then exits |
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
 | `--host-cmd` | Enables devcmd. Only in builds with `-Dhost-cmd`; otherwise the policy refuses it (exit 2) |
 | `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
 | `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](design/builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` or `--host-cmd` |
-| `--trace[=FILE]` | ratrace-style syscall log, to stderr by default |
+| `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
 | `--gfx-scale N` | The window's scale, drawterm's `-x` (Cocoa only): 0 draws in backing pixels, 1 (the default) in points, N in backing pixels divided by N. Needs `--gfx` |
-| `--dump-on-fault` | Prints the Ureg and a symbolized PC when the guest faults |
 | `--check` | Runs a test program on each backend built in, or just `--backend`'s (on HVF this also checks the entitlement), reports the vCPU limit, and runs `/bin/echo` from the root tree, or from the built-in root when there's none (`root: built-in (9front 11952 slim, arm64; no tree found)`). Exits 0, or 125 if h9 can't run programs from the root |
-| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (42 commands)`, or `skeleton only`) |
+| `--version` | Prints the h9 version (`git describe`, or `-Dversion` in releases), the pinned 9front release and drawterm revision, the backends built in, the GUI backend (`gfx:`), and the built-in root's contents (`built-in root: 9front 11952 slim, arm64 amd64 386 (43 commands)`, or `skeleton only`) |
 | `--help`, `-h` | Prints the usage to stdout and exits 0 (`-h` only as the only argument) |
 
 ### Default guest environment
@@ -1339,8 +1381,7 @@ pub const Options = struct {
     policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs, host_cmd
     guest_tools: bool = true,           // bind #H/bin, h9's own commands, after /bin; false masks #H
     builtin: policy.Builtin = .off,     // the built-in root #Hroot: .only, or .before/.after another root's /bin
-    trace: ?*std.Io.Writer = null,
-    dump_on_fault: bool = false,
+    trace: ?*std.Io.Writer = null,      // syscall lines, and a Ureg dump on each fault
     ns: ?[]const u8 = null,             // newns file to replay
     serve: []const Listen = &.{},       // .unix (path), .tcp (host!port), .ws (host:port/path); empty argv serves only
     serve_root: []const u8 = "/",       // the guest path each connection exports
@@ -1364,4 +1405,4 @@ pub fn serving(m: *const Machine) []const []const u8; // each listener's bound a
 - [9front drawterm (GitHub mirror)](https://github.com/9front/drawterm): `kern/sysfile.c`, `kern/dat.h`, `kern/devtab.c`, `LICENSE`
 - [hyper-linux](https://github.com/zw3rk/hyper-linux): `src/shim.S`, `src/thread.h`, `LICENSE`
 - [9front release announcement, OSnews](https://www.osnews.com/?p=145669)
-- [isobox](https://github.com/can1357/isobox): capability model, profiles, plan caveats, and `--strict`
+- [isobox](https://github.com/can1357/isobox): capability model, profiles, and plan caveats

@@ -4,7 +4,7 @@ title: Metadata indexes for 9P roots and mounts
 status: draft
 created: 2026-11-09
 authors: [progrium]
-depends: [9p-roots, websocket-9p, guest-tools]
+depends: [ninep-roots, websocket-9p, guest-tools]
 areas: [cli, kern]
 ---
 
@@ -14,7 +14,7 @@ Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A [9P root](9p-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its qid, mode, length, mtime, and owner, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server. Each directory is checked against the server once per run, in one pipelined batch when the tree is mounted, and each file is checked when it's opened. Anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers.
+A [9P root](ninep-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its qid, mode, length, mtime, and owner, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server. Each directory is checked against the server once per run, in one pipelined batch when the tree is mounted, and each file is checked when it's opened. Anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers.
 
 The index is either a file at the top of the tree, `/.h9index`, or, for the root, one given with `--root-index FILE|URL`, so it can be layered over a server that can't be written to. A server that keeps its `/.h9index` current as the tree changes makes this work for mutable trees too, such as home directories: they're fast from the first `ls`, and only what changed since the index was written is demoted. A new guest command, `mkindex`, builds it by walking a mounted tree, so the qids in it are the server's own. The index is text on the wire and a compiled binary form in the cache.
 
@@ -22,7 +22,7 @@ The index is either a file at the top of the tree, `/.h9index`, or, for the root
 
 ### h9 today
 
-- **[9p-roots](9p-roots.md)** mounts a 9P server at `/` through devmnt: a `tcp!` dial string, a unix socket, or, with [websocket-9p](websocket-9p.md), a `ws://` or `wss://` URL, which [schemeless-roots](schemeless-roots.md) lets you write without the scheme.
+- **[ninep-roots](ninep-roots.md)** mounts a 9P server at `/` through devmnt: a `tcp!` dial string, a unix socket, or, with [websocket-9p](websocket-9p.md), a `ws://` or `wss://` URL, which [schemeless-roots](schemeless-roots.md) lets you write without the scheme.
 - **devmnt sends one request per operation and waits for its reply.** Its caller is a guest process, so latency per operation, not bandwidth, is what a remote root costs. devmnt has no cache of its own in drawterm's tree.
 - **Startup is mostly metadata.** Before a program does useful work, rc searches `$path`, a Linux program's loader probes library directories, and the program stats and opens its configuration. Each name looked up is a `Twalk`, often followed by a `Tstat`, and a missing name is a full round trip that returns nothing.
 - **[overlay](overlay.md)** puts `#O` over the root by default, so the guest's writes to the root land in memory and never reach the server. A root mounted that way is read-only as far as the server is concerned.
@@ -187,7 +187,7 @@ A URL index is fetched by h9 on the host, like a WebSocket root, under the root'
 
 ## Done criteria
 
-Integration cases tagged `[mount-index]`. The server is the second h9 serving the test root with exportfs, as in 9p-roots' cases, behind a relay that counts T-messages:
+Integration cases tagged `[mount-index]`. The server is the second h9 serving the test root with exportfs, as in ninep-roots' cases, behind a relay that counts T-messages:
 
 - [ ] `test "mkindex lists every name in the test root with the server's qids [mount-index]"`
 - [ ] `test "mkindex marks a directory with a name containing a newline unindexed [mount-index]"`

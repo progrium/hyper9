@@ -418,6 +418,23 @@ pub fn createMode(perm: u32) u32 {
     return perm & 0o777;
 }
 
+/// A create's mode under directory mode `dir`, by create(5)'s rule: a
+/// file's permissions are `perm & (~0666 | (dir & 0666))`, and a
+/// directory's `perm & (~0777 | (dir & 0777))`. A Plan 9 file server
+/// applies it, and a .L server doesn't, so the translator does.
+pub fn createModeIn(perm: u32, dir: u32) u32 {
+    const bits: u32 = if (perm & DMDIR != 0) 0o777 else 0o666;
+    return createMode(perm & (~bits | (dir & bits)));
+}
+
+test "creates take the directory's permissions, as create(5) says" {
+    try std.testing.expectEqual(@as(u32, 0o644), createModeIn(0o666, 0o755));
+    try std.testing.expectEqual(@as(u32, 0o755), createModeIn(DMDIR | 0o777, 0o755));
+    try std.testing.expectEqual(@as(u32, 0o640), createModeIn(0o640, 0o777));
+    // Execute bits on a file are the creator's own.
+    try std.testing.expectEqual(@as(u32, 0o755), createModeIn(0o777, 0o755));
+}
+
 /// What a 9P2000 wstat asks of a .L server: a rename, then a Tsetattr
 /// (design/dotl.md, "Twstat"). `valid` is 0 when nothing but the name
 /// changes; `sync` is set for the null wstat, which becomes a Tfsync.

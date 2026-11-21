@@ -229,9 +229,9 @@ host$ export H9ROOT=~/src/hyper9/.local/9front/root
 ```
 
 The built-in root is what lets a fresh install work with nothing but the
-h9 binary. It holds 42 of 9front's commands, built from the pinned
+h9 binary. It holds 43 of 9front's commands, built from the pinned
 release's own source into one program, `9box`: rc, the file and text tools
-(`ls`, `cat`, `sed`, `awk`, `grep`, `diff`, and so on), `tar` and `gzip`, and
+(`ls` and `lc`, `cat`, `sed`, `awk`, `grep`, `diff`, and so on), `tar` and `gzip`, and
 the namespace tools (`bind`, `mount`, `ns`, `ps`, `srv`, `exportfs`,
 `ramfs`). Everything else in the namespace, your cwd, `/tmp`, and the
 sandbox, is the same as over a full tree:
@@ -311,7 +311,7 @@ h9 fe6c65f
 drawterm be39bbaa88fd
 backends: kvm native
 gfx: none
-built-in root: 9front 11952 slim, amd64 (42 commands)
+built-in root: 9front 11952 slim, amd64 (43 commands)
 ```
 
 `h9 --help` (or `h9 -h` alone) prints the usage. Then run something:
@@ -1310,8 +1310,9 @@ protocols, with `secstore` keeping them encrypted.
   so it can't read anything you can't.
 - `factotum` runs (`auth/factotum -n` starts it without secstore) and serves
   `/mnt/factotum`, and `mount` works without authentication against servers
-  that don't ask for it. A 9P root that wants authentication isn't supported
-  yet (*Not yet available ([root-auth](design/root-auth.md))*).
+  that don't ask for it. A 9P root that wants authentication isn't supported;
+  [root-auth](design/root-auth.md) was declined in favor of authenticating
+  WebSocket roots.
 
 "Permission denied" in h9 can mean three things:
 
@@ -1603,9 +1604,13 @@ devices in Plan 9.
   the guest's user goes out as your host uid, and any other number shows as
   itself, such as `1000`. Running as root sends 65534 (nobody), never 0.
   `--user-map FILE` gives a file in `/etc/passwd` format to map names to
-  numbers both ways, and it's the only way to send 0. `/net/dotl/N/status`
-  says which dialect the server chose. A 9P root's address can be a .L
-  server too: `--root tcp!host!port` works with either. A file read from
+  numbers both ways, and it's the only way to send 0. A file or directory
+  made on the server gets its permissions from its directory, as on a
+  Plan 9 file server. `/net/dotl/N/status` says which dialect the server
+  chose. A 9P root's address can be a .L server too: `--root
+  tcp!host!port` works with either, and so does a namespace file's `mount
+  -c tcp!host!port /n/l`, which dials under `--net` and `--net-allow` like
+  `dotlfs`. A file read from
   start to end is read a whole `msize` (up to 1 MiB) at a time, not
   devmnt's 32 KiB, and any write drops what was read ahead.
 - **Reconnecting to ZeroFS** ([dotl](design/dotl.md)). With a server
@@ -1622,10 +1627,9 @@ devices in Plan 9.
   same way. `dotlfs -L` asks for plain .L. `/net/dotl/N/status` shows
   `9P2000.L.Z reconnects N` once a reconnect has happened. A unix socket
   root reconnects too, but a WebSocket root doesn't yet.
-- Not yet available: roots that need authentication
-  ([root-auth](design/root-auth.md)); serving a machine's namespace to the
-  host or the network as a 9P server from h9 itself, rather than with
-  `exportfs` inside the guest as below ([serve](design/serve.md)).
+- 9P roots that need authentication aren't supported. They were proposed
+  and declined ([root-auth](design/root-auth.md)) in favor of authenticating
+  WebSocket roots.
 - 9front disk images as roots were proposed and declined
   ([image-roots](design/image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an
@@ -1908,7 +1912,7 @@ hello, world
   root tree has `/amd64/bin` (`zig build mkroot` on x86\_64, or
   `--arch amd64`).
 - A Go program doesn't need a root tree to run. Without one it gets the
-  built-in root (chapter 2), with `/tmp`, your cwd, and its 42 commands;
+  built-in root (chapter 2), with `/tmp`, your cwd, and its 43 commands;
   give it `--root` for the full tree.
 
 ### 20. Linux programs
@@ -1974,7 +1978,7 @@ directories h9 provides on top:
 | `/9` | The machine's 9front root: `/9/bin/ls` is 9front's `ls` |
 | `/tmp` | The machine's private `/tmp`, the same files a 9front program sees there |
 | `/mnt/term` | The shared host paths; your cwd is `/mnt/term/cwd`, and programs start in it |
-| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, `shm`, a private in-memory directory as a tmpfs would be, and `9`, the machine's 9front `/dev` as it was at start, so with `--gfx` a Linux program can open `/dev/9/draw`, `mouse`, and `kbd` |
+| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, and `shm`, a private in-memory directory as a tmpfs would be |
 | `/proc`, `/sys` | What libc, busybox, Python, and htop read: `cpuinfo` (following `--cpus`), `meminfo`, `mounts`, and per-process `stat`, `status`, `maps`, `cmdline`, `exe`, `fd`, and `task` |
 | `/etc/resolv.conf` | Your host's DNS servers, when the root has none |
 
@@ -2038,10 +2042,12 @@ Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
   `--no-hardlinks`.
 - Moving a directory across directories inside the root's overlay, or
   between two overlays, fails with `EXDEV`; `mv` falls back to copying.
-- Memory: `exec` copies the whole program image into the new process, so a
+- Memory: `fork` copies the parent's touched memory into the child, so a
   large program that starts others, such as `zig cc` or a compiler driver,
   can need `--memory 3g` to `8g`
-  (*Not yet available ([cow-fork](design/cow-fork.md))*).
+  (*Not yet available ([cow-fork](design/cow-fork.md))*). `exec` loads a
+  program's pages from its file as they're touched, so a large program
+  costs only what it uses.
 - CPU times in `/proc/stat` and `/proc/n/stat` read 0, so `top` and `htop`
   show 0%.
 - `symlink` works in overlays (the root and `/tmp`) and host trees on macOS
@@ -2137,7 +2143,6 @@ Files and sandbox (chapters 22 and 23):
 | `--host-fs` | Show the whole host file system, read-only, at `/mnt/term` |
 | `--host-cmd` | Leave `#C`, which runs host commands, unmasked. Only in builds with `-Dhost-cmd`; otherwise exit 2. |
 | `--no-guest-tools` | Leave h9's own commands (`#H/bin`) off `/bin`, and mask `#H` |
-| `--strict` | Refuse, with exit 2, anything this build can't enforce |
 | `--print` | Print the compiled sandbox plan and exit without running |
 
 Limits (chapter 24):
@@ -2153,8 +2158,7 @@ Debugging (chapter 28):
 
 | Flag | Meaning |
 | --- | --- |
-| `--trace[=FILE]` | Log every system call, to standard error or to `FILE` |
-| `--dump-on-fault` | Print the registers and the symbolized PC when a program faults |
+| `--trace[=FILE]` | Log every system call, and the registers and symbolized PC when a program faults, to standard error or to `FILE` |
 | `--gfx[=noclip]` | Give the machine a host window, with `/dev/snarf` as the host clipboard, or private with `=noclip` (chapter 17) |
 | `--gfx-scale N` | The window's scale on macOS: 1 points, 0 backing pixels, N backing pixels divided by N |
 
@@ -2385,18 +2389,12 @@ caveats:
 | --- | --- |
 | `profile:` | The profile the defaults came from |
 | `enforces:` | The capabilities in force |
-| `unenforced:` | Shown only when you asked for something this build can't enforce yet |
 | `limits:` | The write and network modes, and any memory, timeout, process, and CPU caps |
 | `devmask:` | Devices a program can't attach by name after startup |
 | `net-allow:` | Shown only with `--net-allow`: the patterns |
 | `namespace:` | The namespace, in namespace-file syntax, with each host tree's access (`ro`, `rw`, `eph`, `9p`) at the end of its line; `<id>` stands for the machine's console number |
 | `access:` | The rules the host file system device checks: allowed read-only, read-write, ephemeral, or denied, by host path |
 | `caveats:` | What the sandbox doesn't cover in this configuration |
-
-**`--strict`.** When you ask for something this build can't enforce, h9 falls
-back to the safer choice and lists it as `unenforced`, and `--strict` refuses
-to run instead, with exit 2. This build enforces every capability it knows,
-so today `--strict` always runs.
 
 **Recipes**
 
@@ -2636,9 +2634,9 @@ host$ h9 --trace cat /lib/nosuch
 ...
 ```
 
-**Faults.** `--dump-on-fault` prints the registers, the faulting address, and
-the program counter, named by the a.out's symbol table, when a program takes
-a fault it doesn't handle.
+**Faults.** When a program takes a fault, `--trace` also logs the registers,
+the faulting address, and the program counter, named by the a.out's symbol
+table.
 
 **`/proc`.** `ps`, `pstree`, `/proc/n/status`, `/proc/n/fd` (open files),
 `/proc/n/ns` (the namespace) and `/proc/n/segment` (memory) work, and so
@@ -2695,8 +2693,14 @@ system call h9 doesn't serve (`ENOSYS`). `--trace` shows which, as
 what's known to be missing.
 
 **A large Linux program can't start others** (Zig reports
-`SystemResources`). `exec` copies the whole program image, so raise
+`SystemResources`). `fork` copies the parent's memory, so raise
 `--memory` (`3g` to `8g` for compilers such as `zig cc`).
+
+**A Linux program dies with `SIGSEGV` at an address it owns.** The machine
+may have run out of guest memory: a page the program may use that can't be
+allocated is a fault, as Linux's OOM killer would end the process.
+`--trace` says "virtual memory allocation failed (out of --memory)" before
+the registers. Raise `--memory`.
 
 **"no procs".** `--pids` is too low for what the program starts. A pipeline
 of `n` commands under `rc` needs `n + 1`.
@@ -2745,8 +2749,13 @@ They change faster than this manual, as proposals land.
   volumes, ports, and limits, from slim root trees and Linux images pulled
   from Docker Hub to images served over 9P, ending in a docker-like CLI.
 - [Running Windows programs](docs/windows.md): Wine in a Linux root, a
-  prefix that lasts between runs, console programs, and programs with
-  windows through the `winedraw` display driver.
+  prefix that lasts between runs, and console programs.
+- [Emulator performance](docs/emu-performance.md): how fast the emulator
+  CPUs run real programs, on each tier, natively and in WebAssembly, on
+  arm64 and x86-64 hosts.
+- [What to build with h9](docs/inspiration.md): ideas for larger systems
+  with h9 as a building block, from agent workspaces and build caches to
+  plugin runtimes, each with a sketch and the proposals it builds on.
 
 ## Appendices
 

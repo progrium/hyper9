@@ -448,6 +448,31 @@ static void madv_free(void) {
 	printf("ok madv_free\n");
 }
 
+/* MADV_DONTNEED over whole 1 MiB chunks frees them, so h9's resident
+ * size (which ru_maxrss reports) goes down, and the pages read zero and
+ * can be written again. */
+static long rss_kb(void) {
+	struct rusage ru;
+	return getrusage(RUSAGE_SELF, &ru) == 0 ? ru.ru_maxrss : -1;
+}
+
+static void madv_release(void) {
+	const size_t size = 8 << 20;
+	char *m = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("madv_release", m != MAP_FAILED);
+	long before = rss_kb();
+	for (size_t i = 0; i < size; i += 4096) m[i] = 1;
+	long full = rss_kb();
+	CHECK("madv_release", full - before >= 7 << 10);
+	CHECK("madv_release", madvise(m, size, MADV_DONTNEED) == 0);
+	CHECK("madv_release", full - rss_kb() >= 6 << 10);
+	for (size_t i = 0; i < size; i += 4096) CHECK("madv_release", m[i] == 0);
+	m[size / 2] = 2;
+	CHECK("madv_release", m[size / 2] == 2);
+	munmap(m, size);
+	printf("ok madv_release\n");
+}
+
 static void sysv_shm(void) {
 	/* PostgreSQL's interlock: a keyed segment, attached, its attach count read. */
 	int id = shmget(0x5a5a0001, 100, IPC_CREAT | IPC_EXCL | 0600);
@@ -633,28 +658,6 @@ static void prctl_name(void) {
 	CHECK("prctl_name", prctl(PR_SET_NAME, "a-much-longer-thread-name", 0, 0, 0) == 0);
 	CHECK("prctl_name", prctl(PR_SET_NAME, "short", 0, 0, 0) == 0);
 	printf("ok prctl_name\n");
-}
-
-/* /dev/9 is the machine's 9front /dev (design/wine-draw.md): the console
- * files always, and the window's draw files only with --gfx, where
- * draw/new answers with the screen's 144 bytes of image info. */
-static void dev9(void) {
-	struct stat st;
-	char b[160];
-	CHECK("dev9", stat("/dev/9", &st) == 0 && S_ISDIR(st.st_mode));
-	CHECK("dev9", stat("/dev/9/cons", &st) == 0);
-	int fd = open("/dev/9/draw/new", O_RDWR);
-	if (fd < 0) {
-		CHECK("dev9", errno == ENOENT);
-		printf("ok dev9\n");
-		return;
-	}
-	CHECK("dev9", read(fd, b, sizeof b) == 144);
-	close(fd);
-	fd = open("/dev/9/winname", O_RDONLY);
-	CHECK("dev9", fd >= 0 && read(fd, b, sizeof b) > 0);
-	close(fd);
-	printf("ok dev9 gfx\n");
 }
 
 /* WebKit's shared memory: shm_open, unlink, then ftruncate and mmap
@@ -855,7 +858,6 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "fixed_shared")) fixed_shared();
 		if (all || !strcmp(n, "private_sees")) private_sees();
 		if (all || !strcmp(n, "gs_base")) gs_base();
-		if (all || !strcmp(n, "dev9")) dev9();
 		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
@@ -863,6 +865,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "falloc")) falloc();
 		if (all || !strcmp(n, "rename_across")) rename_across();
 		if (all || !strcmp(n, "madv_free")) madv_free();
+		if (all || !strcmp(n, "madv_release")) madv_release();
 		if (all || !strcmp(n, "id_regs")) id_regs();
 		if (all || !strcmp(n, "sysv_shm")) sysv_shm();
 		if (all || !strcmp(n, "map_exit")) map_exit();

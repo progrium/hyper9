@@ -152,7 +152,7 @@ pub const builtin_root = struct {
 };
 
 pub const Machine = struct {
-    /// The root tree (design/9p-roots.md): a host directory, or a 9P
+    /// The root tree (design/ninep-roots.md): a host directory, or a 9P
     /// server the machine connects to and mounts at /.
     pub const Root = union(enum) {
         /// A host directory, absolute and resolved, served through #U.
@@ -235,10 +235,9 @@ pub const Machine = struct {
         /// /bin, and without one make it the root. `.off` leaves a machine
         /// without `root` with devices only.
         builtin: policy.Builtin = .off,
-        /// Receives a ratrace-style line per syscall.
+        /// Receives a ratrace-style line per syscall and, when a program
+        /// faults, the Ureg and a symbolized PC.
         trace: ?*std.Io.Writer = null,
-        /// On a fault, print the Ureg and a symbolized PC to `stdio.err`.
-        dump_on_fault: bool = false,
         /// A namespace file (newns syntax, src/newns.zig) to replay in the
         /// first process after the policy's namespace is built and before
         /// the program is looked up. It's a guest path, read as newns
@@ -928,7 +927,7 @@ pub const Machine = struct {
         extra: vmm.Extra = .{ .arm64 = .{} },
         /// The Tos address, for the pid at fork.
         tos: u64 = 0,
-        /// The a.out, for symbolizing faults with dump_on_fault.
+        /// The a.out, for symbolizing faults in the trace.
         image: ?[]u8 = null,
         msg_buf: [256]u8 = undefined,
         /// Set under `job.lock` once the process is tearing down
@@ -1185,7 +1184,7 @@ pub const Machine = struct {
 
         fn keepImage(p: *Proc, bytes: []const u8) void {
             if (p.image) |old| p.job.m.gpa.free(old);
-            p.image = if (p.job.m.opts.dump_on_fault) p.job.m.gpa.dupe(u8, bytes) catch null else null;
+            p.image = if (p.job.m.opts.trace != null) p.job.m.gpa.dupe(u8, bytes) catch null else null;
         }
 
         /// Frees the process and unregisters it. Called last on its thread;
@@ -1665,16 +1664,27 @@ pub const Machine = struct {
                     // thread's mmap or mprotect in the same chunk) may have
                     // caught the retry with the page briefly unmapped.
                     const same = f.addr == last_fault.addr and f.access == last_fault.access and u.pc() == last_fault.pc;
+                    // A page the VMA allows but that can't be allocated
+                    // (the machine's --memory is used up) is a fault too,
+                    // as Linux's OOM would end the process; the trace says
+                    // why, since the address alone looks like a bad one.
+                    var alloc_failed = false;
                     if (l.mm.fault(f.addr, switch (f.access) {
                         .read => .read,
                         .write => .write,
                         .exec => .exec,
-                    }) catch null) |gen| if (!same or gen != last_fault.gen) {
+                    }) catch blk: {
+                        alloc_failed = true;
+                        break :blk null;
+                    }) |gen| if (!same or gen != last_fault.gen) {
                         last_fault = .{ .addr = f.addr, .access = f.access, .pc = u.pc(), .gen = gen };
                         p.noteMem();
                         continue;
                     };
-                    if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, "");
+                    if (m.opts.trace) |w| {
+                        if (alloc_failed) traceLine(w, &p.job.trace_lock, "h9: fault: virtual memory allocation failed (out of --memory)\n");
+                        dumpFault(w, &p.job.trace_lock, &u, f, "");
+                    }
                     // A fault while the signal is blocked or ignored kills,
                     // as Linux's force_sig does.
                     const a = l.sig.actions[lsig.SIGSEGV];
@@ -1754,7 +1764,7 @@ pub const Machine = struct {
                         p.noteMem();
                         continue;
                     }
-                    if (m.opts.dump_on_fault) dumpFault(m.opts.stdio.err, &u, f, p.image orelse "");
+                    if (m.opts.trace) |w| dumpFault(w, &p.job.trace_lock, &u, f, p.image orelse "");
                     // 9front's faultnote; popnote adds the pc. If the note
                     // can't be queued, the fault would only repeat.
                     var buf: [kern.ERRMAX]u8 = undefined;
@@ -2000,12 +2010,20 @@ pub const Machine = struct {
             const ib = readLinux(arena, ip) catch |err| return execError(err);
             interp = elf.check(ib, m.arch) catch return failWith(ebadexec);
         }
+        // The files they came from, to fill their pages from as they're
+        // touched (elf.load); without them, the pages are copied in.
+        const exe_src = imageSrc(m.gpa, path, bytes);
+        defer if (exe_src) |s| s.put();
+        const interp_src = if (interp) |ii| imageSrc(m.gpa, exe.interp.?, ii.bytes) else null;
+        defer if (interp_src) |s| s.put();
         var random: [16]u8 = undefined;
         m.io.random(&random);
         const prog = lexec.build(m.gpa, m.backend, .{
             .arch = m.arch,
             .exe = &exe,
             .interp = if (interp) |*ii| ii else null,
+            .exe_src = exe_src,
+            .interp_src = interp_src,
             .path = path,
             .argv = argv,
             .envp = envp,
@@ -2088,6 +2106,29 @@ pub const Machine = struct {
         var name_buf: [kern.ERRMAX]u8 = undefined;
         kern.setText(std.fmt.bufPrintZ(&name_buf, "{s}", .{basename(path)}) catch "a.out");
         p.vforkRelease();
+    }
+
+    /// The file at `path` as an mm.Src, if it holds `bytes`, the image
+    /// exec read from it: looked up in the current view, then the Linux
+    /// view, as exec's callers read it from one or the other. Null when
+    /// neither holds it (a program loaded from the host, or a file
+    /// replaced since), and the image is copied in instead.
+    fn imageSrc(gpa: std.mem.Allocator, path: []const u8, bytes: []const u8) ?*lmm.Src {
+        var zbuf: [4096]u8 = undefined;
+        const zpath = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return null;
+        const in_view = kc.inView();
+        for ([_]bool{ false, true }) |linux| {
+            const swap = linux and !in_view;
+            if (linux and in_view) break;
+            if (swap) kc.setSlash(true) catch continue;
+            defer if (swap) kc.setSlash(false) catch {};
+            const fd = kern.open(zpath, kern.OREAD) catch continue;
+            defer kern.close(fd) catch {};
+            const lf = lsys.LazyFile.open(gpa, fd) orelse continue;
+            if (lf.holds(bytes)) return &lf.src;
+            lf.src.put();
+        }
+        return null;
     }
 
     /// Reads a file by its path in the Linux view, from either view. A
@@ -3129,7 +3170,7 @@ pub const Machine = struct {
     }
 
     /// Connects to a 9P root and posts the connection as `#s/root`
-    /// (design/9p-roots.md), where the board holds it for the
+    /// (design/ninep-roots.md), where the board holds it for the
     /// machine's life. h9 makes the connection, not the guest, so the
     /// network policy doesn't apply to it, and a TCP root is dialed through
     /// devip by device path whether or not `#I` is bound or masked later.
@@ -3281,12 +3322,26 @@ pub const Machine = struct {
             } else kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
             // A WebSocket URL is connected by h9, as a root is; unlike
             // other failures, one that fails stops the run.
+            // Its connection goes through a `#ℓ` conversation
+            // (design/dotl.md), so a 9P2000.L server works too.
             .mount => |mt| if (ws.Url.is(mt.file)) {
                 if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a WebSocket mount", .{ws.Url.elide(mt.file)});
-                const fd = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
+                const conn = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
+                const data = dotlConv("fd {d}", conn);
+                kern.close(conn) catch {};
+                const fd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
                 defer kern.close(fd) catch {};
                 _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch
                     return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+            } else if (std.mem.startsWith(u8, mt.file, "tcp!")) {
+                // A dial string, which `#ℓ` dials under the network
+                // policy, as dotlfs does, and dials again if a 9P2000.L.Z
+                // server goes. Like any other mount, one that fails is
+                // skipped.
+                if (m.plan.write == .none) return m.fail("mount {s}: --write=none can't be enforced on a 9P mount", .{mt.file});
+                const fd = dotlConv("dial {s}", mt.file) catch continue;
+                defer kern.close(fd) catch {};
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
             } else {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
                 defer kern.close(fd) catch {};
@@ -3453,9 +3508,20 @@ fn setFpsave(x: *vmm.Extra, img: []const u8) void {
     }
 }
 
-/// Prints a fault for `--dump-on-fault`: the Ureg, the faulting address and
-/// the PC symbolized from the a.out symbol table.
-fn dumpFault(w: *std.Io.Writer, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const u8) void {
+/// Writes one line to the trace, under `lock`, as dumpFault does.
+fn traceLine(w: *std.Io.Writer, lock: *std.atomic.Mutex, line: []const u8) void {
+    while (!lock.tryLock()) std.atomic.spinLoopHint();
+    defer lock.unlock();
+    w.writeAll(line) catch {};
+    w.flush() catch {};
+}
+
+/// Prints a fault to the trace: the Ureg, the faulting address and the PC
+/// symbolized from the a.out symbol table. `lock` keeps it in one piece
+/// among the other processes' trace lines.
+fn dumpFault(w: *std.Io.Writer, lock: *std.atomic.Mutex, u: *const vmm.Ureg, f: vmm.Fault, bytes: []const u8) void {
+    while (!lock.tryLock()) std.atomic.spinLoopHint();
+    defer lock.unlock();
     dumpFaultTo(w, u, f, bytes) catch {};
     w.flush() catch {};
 }

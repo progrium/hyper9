@@ -64,7 +64,7 @@ The namespace builder makes the overlay right after the root itself, before ever
   ...
 ```
  
-- **Any root:** the lower tree is whatever `/` is at that point: a host tree from `#U`, a [9P root](9p-roots.md)'s mount, or an [image root](image-roots.md)'s mount. So writes to a 9P root don't reach its server, and writes to an image root stay above its file server.
+- **Any root:** the lower tree is whatever `/` is at that point: a host tree from `#U`, a [9P root](ninep-roots.md)'s mount, or an [image root](image-roots.md)'s mount. So writes to a 9P root don't reach its server, and writes to an image root stay above its file server.
 - **Binds over the root still work.** `/dev`, `/bin`, `/mnt/term/cwd`, and the rest are bound onto directories reached through the overlay. A directory that's only in the lower tree keeps its lower qid, and so does a directory marker, which is what a lower directory becomes when its children change, so the mount table keeps matching it. Only a copied-up file gets a new qid, and nothing is bound onto files of the root.
 - **Writable paths inside the root** (`--writable "$H9ROOT"/usr/glenda`) are bound from `#U` over the overlay, so writes there go to the host, as the longest rule decides today.
 - **`$home`.** If the root has no `/usr/$user`, the builder creates it in the overlay, so a guest's home directory exists and is writable, and vanishes with the run.
@@ -75,7 +75,7 @@ The namespace builder makes the overlay right after the root itself, before ever
 - **`enforces:`** gains `fs.write.overlay` under `overlay` and `ephemeral`. `Capability.enforceable` returns true for it, so `--strict --write=overlay` is accepted.
 - **Caveats:**
   - "writes to the root are kept in memory, count against --memory, and are lost when the machine ends; when memory runs out they fail with \"file system full\""
-  - For a 9P or image root, the "writes to the 9P root go to its server" caveat and the `--write=none` conflict of [9p-roots](9p-roots.md) don't apply under `overlay` and `ephemeral`, since nothing reaches the server.
+  - For a 9P or image root, the "writes to the 9P root go to its server" caveat and the `--write=none` conflict of [ninep-roots](ninep-roots.md) don't apply under `overlay` and `ephemeral`, since nothing reaches the server.
 ```text
 $ h9 --print mk
 profile:  default
@@ -164,7 +164,7 @@ Integration cases tagged `[overlay]`:
 - [x] `test "a write to the root fails with file system full when memory runs out [overlay]"`: under a small `--memory`, the write fails and the guest keeps running.
 - [x] `test "the discarded-changes notice is printed on a terminal and not otherwise [overlay]"`: it names the changed top-level directories.
 - [x] `test "changes only under $home, or only by the namespace builder, print no notice [overlay]"`
-- [x] With [9p-roots](9p-roots.md) implemented, `test "a write to a 9P root under the default profile doesn't reach the server [overlay]"`.
+- [x] With [ninep-roots](ninep-roots.md) implemented, `test "a write to a 9P root under the default profile doesn't reach the server [overlay]"`.
 Backend case: two machines in one process each see only their own root changes.
  
 Measurement: the `[baseline]` suite and `zig build bench`, with and without the root overlay, recorded in SPEC.md. The default changes only if the overlay costs less than 5% of the suite's run time.

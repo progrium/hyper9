@@ -23,6 +23,11 @@ pub const Args = struct {
     exe: *const elf.Image,
     /// Its PT_INTERP, if it has one, checked.
     interp: ?*const elf.Image = null,
+    /// The files `exe` and `interp` were read from, to fill their
+    /// segments' pages from as they're touched (elf.load); null to copy
+    /// them in. build takes its own references.
+    exe_src: ?*mm.Src = null,
+    interp_src: ?*mm.Src = null,
     /// The path exec was given (AT_EXECFN) and the mapping's name.
     path: []const u8,
     argv: []const []const u8,
@@ -64,7 +69,7 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
         try m.hostWrite(vdso, &img);
     }
     const base: ?u64 = if (a.exe.ehdr.type == 3) m.lay.pie_base else null;
-    const exe = try elf.load(m, a.exe, base, a.path);
+    const exe = try elf.load(m, a.exe, base, a.path, a.exe_src);
     m.brk_start = std.mem.alignForward(u64, exe.end, vmm.page_size);
     // A little randomness-free gap, as Linux leaves one, so a heap that
     // grows doesn't run into the image's last page.
@@ -72,7 +77,7 @@ pub fn build(gpa: std.mem.Allocator, backend: vmm.Backend, a: Args) Error!Progra
     var entry = exe.entry;
     var interp_base: u64 = 0;
     if (a.interp) |ii| {
-        const l = try elf.load(m, ii, null, std.fs.path.basename(ii.interp orelse "ld.so"));
+        const l = try elf.load(m, ii, null, std.fs.path.basename(ii.interp orelse "ld.so"), a.interp_src);
         interp_base = l.bias + ii.lo;
         entry = l.entry;
     }

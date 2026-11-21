@@ -20,7 +20,7 @@ h9 builds a small read-only tree of its own scripts into its binary and serves i
 
 ## Background
 
-- **The root is 9front's, as is.** h9 binds a host tree, or with [9p-roots](9p-roots.md) a server's, as the guest's `/`, and adds devices and binds over it. It never writes files into the root, and a 9P root or image root can't be written anyway.
+- **The root is 9front's, as is.** h9 binds a host tree, or with [ninep-roots](ninep-roots.md) a server's, as the guest's `/`, and adds devices and binds over it. It never writes files into the root, and a 9P root or image root can't be written anyway.
 - **Proposals are starting to need commands.** websocket-9p's `wsmount` wraps `/net/ws` and `mount`. dotl's `dotlfs` wraps `#ℓ`. Each is a few lines of rc that exist only because of an h9 device, so 9front won't have them. Both drafts left "how is it shipped" open, and so would the next one.
 - **`/bin` is a union.** The plan binds `/$cputype/bin` at `/bin` and then `/rc/bin` after it (`src/policy.zig`), as 9front's namespace does.
 - **drawterm's devroot** keeps static files in tables compiled into the kernel (`addbootfile` puts them in `#/boot`), which shows the pattern, but its tables are fixed-size, and `#/` is the guest's root device for other purposes.

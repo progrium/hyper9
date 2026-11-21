@@ -132,8 +132,7 @@ Every field but `stdio` has a default:
 | `env` | `[]const EnvVar` | `&.{}` | Guest environment variables, beyond the defaults (`user`, `sysname`, `path`, and so on). |
 | `policy` | `Policy` | `.{}` | The sandbox: binds, write mode, network, limits. See [The sandbox policy](#the-sandbox-policy). |
 | `guest_tools` | `bool` | `true` | Binds h9's own commands (`#H/bin`, such as `wsmount`) after `/bin`. `false` leaves them out and masks `#H`, as `--no-guest-tools` does. |
-| `trace` | `?*std.Io.Writer` | none | Receives a ratrace-style line per syscall. |
-| `dump_on_fault` | `bool` | `false` | On a fault, prints the registers and a symbolized PC to `stdio.err`. |
+| `trace` | `?*std.Io.Writer` | none | Receives a ratrace-style line per syscall and, on a fault, the registers and a symbolized PC. |
 | `ns` | `?[]const u8` | none | A namespace file (newns syntax) to replay after the policy's namespace is built. It's a *guest* path, so a relative one is in the guest's cwd. |
 | `owned_vcpus` | `?u32` | backend's | For tests of the vCPU pool; leave it alone. |
 | `gfx` | `?Machine.Gfx` | none | A host window for this machine, as `--gfx` gives: `.{}`, or `.{ .clipboard = false }` for `--gfx=noclip` and `.scale` for `--gfx-scale`. Only one machine in the process can have it. See [Graphics](#graphics). |
@@ -291,10 +290,6 @@ resolved. Use `std.Io.Dir.cwd().realPathFileAlloc` on them, as the CLI does
 such as `write = .none` with `writable` paths or `net = .disable` with
 `net_allow` patterns, fail `init` with `PolicyConflict`.
 
-A policy the build can't enforce isn't an error. Check
-`m.plan.unenforced` (or the plan from `compilePlan`) and refuse to run if
-it's not empty, which is what `h9 --strict` does.
-
 ## Backends
 
 | `BackendKind` | Host | Runs | Built |
@@ -402,7 +397,7 @@ machine can see comes from these places, all set in `Options`:
 write mode decides whether writes reach the host, stay in memory, or fail.
 
 **A 9P server as the root.** Point `root` at any 9P2000 server and the
-machine mounts it at `/` ([9p-roots](../design/9p-roots.md)):
+machine mounts it at `/` ([ninep-roots](../design/ninep-roots.md)):
 
 ```zig
 .root = .{ .unix = "/tmp/myfs.sock" }, // or .{ .tcp = "tcp!127.0.0.1!5640" }

@@ -204,14 +204,20 @@ pub const Pool = struct {
         }
     }
 
-    /// With no vCPU for the pool, queued and future work fails.
+    /// A pool thread that got no vCPU leaves the work to the others; with
+    /// none left, queued and future work fails.
     fn failQueued(p: *Pool) void {
         p.lockSpin();
-        const items = p.queue.items;
-        p.queue = .empty;
         p.worker_count -= 1;
+        if (p.worker_count > 0) {
+            p.lock.unlock();
+            return;
+        }
+        var queued = p.queue;
+        p.queue = .empty;
         p.lock.unlock();
-        for (items) |l| l.finish(error.HypervisorFailed);
+        defer queued.deinit(p.gpa);
+        for (queued.items) |l| l.finish(error.HypervisorFailed);
     }
 };
 

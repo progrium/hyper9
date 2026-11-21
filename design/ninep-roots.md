@@ -1,6 +1,6 @@
 ---
 issue: 13
-slug: 9p-roots
+slug: ninep-roots
 title: 9P roots
 status: implemented
 created: 2026-11-03
@@ -165,22 +165,22 @@ caveats:
 
 ## Done criteria
 
-Integration cases tagged `[9p-roots]`. The server is a second h9 serving the test root tree with `aux/listen1 -t tcp!127.0.0.1!PORT /bin/exportfs -R -r /`, so no host 9P server is needed:
+Integration cases tagged `[ninep-roots]`. The server is a second h9 serving the test root tree with `aux/listen1 -t tcp!127.0.0.1!PORT /bin/exportfs -R -r /`, so no host 9P server is needed:
 
-- [x] `test "a TCP 9P root runs /bin/ls [9p-roots]"`
-- [x] `test "a unix socket 9P root runs /bin/ls [9p-roots]"`: a unix socket that the test relays to the TCP server.
-- [x] `test "rc pipelines and exec run from a 9P root [9p-roots]"`
-- [x] `test "the host cwd is bound over a 9P root [9p-roots]"`
-- [x] `test "a 9P root works under --net=disable [9p-roots]"`
-- [x] `test "--root-spec is sent as the attach name [9p-roots]"`
-- [x] `test "--root-user is sent as the attach uname [9p-roots]"`
-- [x] `test "the guest mounts /srv/root at a second path [9p-roots]"`
-- [x] `test "an unreachable 9P root exits 125 [9p-roots]"`
-- [x] `test "a 9P root that wants authentication exits 125 [9p-roots]"`
-- [x] `test "--write=none with a 9P root is a usage error [9p-roots]"`
-- [x] `test "a unix socket root on Windows exits 125 [9p-roots]"`, on Windows hosts only.
-- [x] `test "--print shows a 9P root, and its output replays with --ns [9p-roots]"`
-- [x] `test "--check runs /bin/echo from a 9P root [9p-roots]"`
+- [x] `test "a TCP 9P root runs /bin/ls [ninep-roots]"`
+- [x] `test "a unix socket 9P root runs /bin/ls [ninep-roots]"`: a unix socket that the test relays to the TCP server.
+- [x] `test "rc pipelines and exec run from a 9P root [ninep-roots]"`
+- [x] `test "the host cwd is bound over a 9P root [ninep-roots]"`
+- [x] `test "a 9P root works under --net=disable [ninep-roots]"`
+- [x] `test "--root-spec is sent as the attach name [ninep-roots]"`
+- [x] `test "--root-user is sent as the attach uname [ninep-roots]"`
+- [x] `test "the guest mounts /srv/root at a second path [ninep-roots]"`
+- [x] `test "an unreachable 9P root exits 125 [ninep-roots]"`
+- [x] `test "a 9P root that wants authentication exits 125 [ninep-roots]"`
+- [x] `test "--write=none with a 9P root is a usage error [ninep-roots]"`
+- [x] `test "a unix socket root on Windows exits 125 [ninep-roots]"`, on Windows hosts only.
+- [x] `test "--print shows a 9P root, and its output replays with --ns [ninep-roots]"`
+- [x] `test "--check runs /bin/echo from a 9P root [ninep-roots]"`
 
 Demo: `h9 --root tcp!localhost!5640 ls /` lists the served tree, with the server started as above.
 

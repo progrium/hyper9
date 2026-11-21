@@ -5,7 +5,7 @@ title: 9P over WebSocket
 status: implemented
 created: 2026-11-05
 authors: [progrium]
-depends: [net-policy, devsrv, 9p-roots, guest-tools]
+depends: [net-policy, devsrv, ninep-roots, guest-tools]
 areas: [cli, kern, sandbox, web]
 branch: [main]
 ---
@@ -16,7 +16,7 @@ Nov 5, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A 9P server can be reached over a WebSocket: `--root ws://host/path` or `wss://host/path`, and `mount 'wss://…' /n/x` in namespace files. h9 makes the connection on the host, before the program starts, and devmnt mounts it as it mounts a [9P root](9p-roots.md)'s connection. The WebSocket is carried into the kernel by a new host-stream device, `src/kern/devhstream.c`, built on the pattern devhcons uses for the console: leaf calls into Zig, a host reader thread, and the guest sleeping in the kernel. Natively, Zig does the TCP, TLS, and WebSocket framing. On the [browser host](browser-host.md), the page's own `WebSocket` does, which makes this the browser host's only way to reach a file server over the network.
+A 9P server can be reached over a WebSocket: `--root ws://host/path` or `wss://host/path`, and `mount 'wss://…' /n/x` in namespace files. h9 makes the connection on the host, before the program starts, and devmnt mounts it as it mounts a [9P root](ninep-roots.md)'s connection. The WebSocket is carried into the kernel by a new host-stream device, `src/kern/devhstream.c`, built on the pattern devhcons uses for the console: leaf calls into Zig, a host reader thread, and the guest sleeping in the kernel. Natively, Zig does the TCP, TLS, and WebSocket framing. On the [browser host](browser-host.md), the page's own `WebSocket` does, which makes this the browser host's only way to reach a file server over the network.
 
 The guest can open WebSockets too. The same device is bound at `/net/ws`, laid out like devip's `/net/tcp`, so a guest writes `connect wss://…` to a conversation's `ctl` and mounts its `data` with the ordinary `mount` command. A conversation's `text` file, beside `data`, sends and receives text messages, so guest programs can use it for any WebSocket service, not only 9P. [net-policy](net-policy.md)'s `--net` and `--net-allow` decide which URLs it may connect to. On the browser host, `/net/ws` is the guest's only network.
 
@@ -25,14 +25,14 @@ The guest can open WebSockets too. The same device is bound at `/net/ws`, laid o
 ### Why WebSocket
 
 - **The browser host has no sockets.** [browser-host](browser-host.md) masks `#I`, since a Worker can't open TCP connections. A WebSocket is the only bidirectional network transport a page has, so without it a browser h9 can only run what's in its root archive or what the embedder lends it through WASI.
-- **Natively, it's 9P that crosses the web's infrastructure.** A WebSocket goes through HTTP proxies, load balancers, and TLS terminators that plain TCP on port 564 doesn't, and `wss` gives the connection TLS and the HTTP layer's authentication (a bearer token, a cookie, a signed URL) without a factotum. [9p-roots](9p-roots.md) lists "the 9P root's connection isn't encrypted" as a caveat and leaves authentication open. For a root reached over `wss`, both have an answer.
+- **Natively, it's 9P that crosses the web's infrastructure.** A WebSocket goes through HTTP proxies, load balancers, and TLS terminators that plain TCP on port 564 doesn't, and `wss` gives the connection TLS and the HTTP layer's authentication (a bearer token, a cookie, a signed URL) without a factotum. [ninep-roots](ninep-roots.md) lists "the 9P root's connection isn't encrypted" as a caveat and leaves authentication open. For a root reached over `wss`, both have an answer.
 - **One URL for both hosts.** A server that speaks 9P over WebSocket can be the root of an h9 in a terminal and of an h9 in a browser tab, from the same `wss://` URL.
 
 There's no standard for 9P over WebSocket, but existing servers and bridges agree on the essentials: binary messages, with 9P's own size-prefixed messages as the payload.
 
 ### h9 today
 
-- **9P roots** are proposed in [9p-roots](9p-roots.md): `--root tcp!host!port` dials through devip and `--root unix!path` wraps a host socket with devlfd's `lfdchan`. Either way devmnt mounts the connection at `/` before any other bind, and the root's connection isn't subject to `--net`, since h9 makes it, not the guest.
+- **9P roots** are proposed in [ninep-roots](ninep-roots.md): `--root tcp!host!port` dials through devip and `--root unix!path` wraps a host socket with devlfd's `lfdchan`. Either way devmnt mounts the connection at `/` before any other bind, and the root's connection isn't subject to `--net`, since h9 makes it, not the guest.
 - **devmnt reads a byte stream.** `mntrpcread` in drawterm's `kern/devmnt.c` reads the size, type, and tag, then reads until it has the whole message, through the channel's `bread`. It doesn't need a message per read, so any channel that delivers the server's bytes in order can carry 9P.
 - **devhcons** (`src/kern/devhcons.c`) is a kernel device whose reads and writes are leaf calls into Zig (SPEC.md, seam rule 3). A Zig reader thread (`src/consin.zig`) does the host reads, and a guest read sleeps on a Rendez until there's input, so a note or a teardown interrupts it with `Eintr`.
 - **Guest mounts** come with [devsrv](devsrv.md), which serves the `mount`, `unmount`, and `fauth` syscalls. `mount` takes any open fd that speaks 9P, and the `mount` command opens any path, not only `/srv` entries.
@@ -49,7 +49,7 @@ There's no standard for 9P over WebSocket, but existing servers and bridges agre
 | `ws://host[:port][/path][?query]` | A WebSocket over TCP. Port 80 by default |
 | `wss://host[:port][/path][?query]` | A WebSocket over TLS, verified against the host's certificate bundle, or `--root-ca`'s (below). Port 443 by default |
 
-They're accepted wherever [9p-roots](9p-roots.md) accepts a dial string: `--root`, `$H9ROOT`, and the source of a `mount` line in a namespace file. A string with either prefix is a URL, so it can't be confused with a host path or a `tcp!` dial string.
+They're accepted wherever [ninep-roots](ninep-roots.md) accepts a dial string: `--root`, `$H9ROOT`, and the source of a `mount` line in a namespace file. A string with either prefix is a URL, so it can't be confused with a host path or a `tcp!` dial string.
 
 ### The wire
 
@@ -90,7 +90,7 @@ Guest conversations always go direct, whatever the environment. A proxy resolves
 
 ### The host-stream device
 
-`src/kern/devhstream.c` turns a host connection into a channel devmnt can mount. It's devhcons's design applied to a connection instead of a console. A stream is either framed, a WebSocket whose binary payloads are the bytes, or raw, a host connection whose bytes go through unchanged. This proposal makes framed streams; raw ones are for other host-made connections, such as [serve](serve.md)'s unix and TCP listeners and, later, 9p-roots' unix-socket roots on Windows, which devlfd can't carry. Both kinds share everything below:
+`src/kern/devhstream.c` turns a host connection into a channel devmnt can mount. It's devhcons's design applied to a connection instead of a console. A stream is either framed, a WebSocket whose binary payloads are the bytes, or raw, a host connection whose bytes go through unchanged. This proposal makes framed streams; raw ones are for other host-made connections, such as [serve](serve.md)'s unix and TCP listeners and, later, ninep-roots' unix-socket roots on Windows, which devlfd can't carry. Both kinds share everything below:
 
 - **Leaves** in `src/kern.zig`: `h9_hstream_read(id, buf, n)`, `h9_hstream_ready(id)`, `h9_hstream_write(id, buf, n)`, and `h9_hstream_close(id)`. They return a status and never raise kernel errors; the C side raises them.
 - **Reads** never block in a host call. A reader thread per stream, `src/hstream.zig`, reads frames and queues payload bytes, and calls `h9_hstream_wake(id)` when it queues some or the stream ends. A guest read sleeps on the stream's Rendez until the queue has bytes, so notes, `--timeout`, and teardown interrupt it as they do a devmnt RPC on any channel.
@@ -105,7 +105,7 @@ The Zig side is in two parts:
 
 ### `Machine.Options`
 
-[9p-roots](9p-roots.md)'s `Root` gains a case, and the options gain the headers:
+[ninep-roots](ninep-roots.md)'s `Root` gains a case, and the options gain the headers:
 
 ```zig
 pub const Root = union(enum) {
@@ -145,7 +145,7 @@ Then the plan's binds run over it, as over any root.
 - `root wss://fs.example/9p: proxy answered 407 Proxy Authentication Required`
 - `root wss://fs.example/9p: server answered 401 Unauthorized`
 - `root wss://fs.example/9p: server didn't select the 9p subprotocol`
-- and 9p-roots' `Tversion` and `Tattach` failures.
+- and ninep-roots' `Tversion` and `Tattach` failures.
 
 ### Namespace files
 
@@ -241,7 +241,7 @@ So a text client needs no `data` at all:
 
 ### The policy and the plan
 
-Everything [9p-roots](9p-roots.md) says about a 9P root applies to a WebSocket root, and to a WebSocket mount:
+Everything [ninep-roots](ninep-roots.md) says about a 9P root applies to a WebSocket root, and to a WebSocket mount:
 
 - Writes go to the server, which decides what's writable. `--write=none` with a WebSocket root, or with a namespace file that mounts one, is a usage error, exit 2. [overlay](overlay.md) covers a WebSocket root as any other.
 - `--net` doesn't apply to the connections h9 makes. The guest gets nothing through them: their channels aren't in `/net/ws`.
@@ -279,7 +279,7 @@ caveats:
   ...
 ```
 
-For a `ws://` URL, the plan has 9p-roots' caveat that the connection isn't encrypted. For `wss://` it doesn't. A root or mount that goes through a proxy has it in its comment, with userinfo elided (`via http://proxy.corp:3128`), and `--root-ca` is shown by path. Under `--net=disable`, `#ℏ` is on the `devmask:` line beside `#I`. `--trace` shows a guest's `connect` with its URL's query elided, as `--print` does.
+For a `ws://` URL, the plan has ninep-roots' caveat that the connection isn't encrypted. For `wss://` it doesn't. A root or mount that goes through a proxy has it in its comment, with userinfo elided (`via http://proxy.corp:3128`), and `--root-ca` is shown by path. Under `--net=disable`, `#ℏ` is on the `devmask:` line beside `#I`. `--trace` shows a guest's `connect` with its URL's query elided, as `--print` does.
 
 ### On the browser host
 
@@ -308,9 +308,9 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 **devhcons's pattern.** It's already how h9 gives the kernel a host stream that must not block a guest thread in a host call. Reusing it means interruption, teardown, and the seam rules work the way they already do for the console.
 
-**Not devlfd and a socketpair.** A relay thread copying between a WebSocket and one end of a socketpair, with the other end in `lfdchan`, would reuse drawterm code, but it adds a copy and a socket per connection, and devlfd's handle I/O doesn't suit sockets on Windows (see 9p-roots' Open issues). Leaves into Zig work the same on every host.
+**Not devlfd and a socketpair.** A relay thread copying between a WebSocket and one end of a socketpair, with the other end in `lfdchan`, would reuse drawterm code, but it adds a copy and a socket per connection, and devlfd's handle I/O doesn't suit sockets on Windows (see ninep-roots' Open issues). Leaves into Zig work the same on every host.
 
-**Not a bridge outside h9.** `websockify` in front of a `tcp!` root works natively once 9p-roots is built. It doesn't help the browser host, which can't dial TCP at all, and it leaves the TCP leg unencrypted and unauthenticated. Native support is what lets one `wss://` URL serve both hosts.
+**Not a bridge outside h9.** `websockify` in front of a `tcp!` root works natively once ninep-roots is built. It doesn't help the browser host, which can't dial TCP at all, and it leaves the TCP leg unencrypted and unauthenticated. Native support is what lets one `wss://` URL serve both hosts.
 
 **URLs, not a dial string.** A WebSocket endpoint is a URL with a path and a query, which a `!`-separated dial string can't hold without inventing an escaping. The `ws://` and `wss://` prefixes can't be confused with paths or dial strings, so both forms coexist.
 
@@ -344,13 +344,13 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 
 **Checking at connect, reusing net-policy's leaves.** A WebSocket is a TCP connection by the time anything leaves the host, so `tcp!host!port` patterns mean the same thing for both, and a user writes one allowlist. Checking the name before resolving keeps net-policy's guarantee that the guest can't make the host resolve names the allowlist doesn't cover.
 
-**No reconnect.** devmnt has no way to re-establish fids on a new connection, so a reconnected stream would be a new server as far as every open file is concerned. A hangup fails operations, as it does on 9front and for 9p-roots.
+**No reconnect.** devmnt has no way to re-establish fids on a new connection, so a reconnected stream would be a new server as far as every open file is concerned. A hangup fails operations, as it does on 9front and for ninep-roots.
 
-**Depending on 9p-roots, devsrv, and net-policy.** The `Root` union, `--root-spec`, `--root-user`, the root's post to `#s/root`, the plan's `mount` line, and the write policy are 9p-roots'. This proposal adds a transport to them. Guest mounts need devsrv's `mount` and `fauth` syscalls, and guest connects need net-policy's modes and leaves. The web half also needs [browser-host](browser-host.md), but the native half doesn't, so it's not in `depends`: the web backing is the last implementation step, and lands once browser-host is built.
+**Depending on ninep-roots, devsrv, and net-policy.** The `Root` union, `--root-spec`, `--root-user`, the root's post to `#s/root`, the plan's `mount` line, and the write policy are ninep-roots'. This proposal adds a transport to them. Guest mounts need devsrv's `mount` and `fauth` syscalls, and guest connects need net-policy's modes and leaves. The web half also needs [browser-host](browser-host.md), but the native half doesn't, so it's not in `depends`: the web backing is the last implementation step, and lands once browser-host is built.
 
 ## Compatibility
 
-- **`--root` and `$H9ROOT`** accept `ws://` and `wss://` URLs. Every form 9p-roots accepts means what it did.
+- **`--root` and `$H9ROOT`** accept `ws://` and `wss://` URLs. Every form ninep-roots accepts means what it did.
 - **`--root-header`** and **`--root-ca`** are new.
 - **`Machine.Options`:** `Root` gains `ws`, and `root_headers`, `root_ca`, and `proxy` are new.
 - **Environment:** `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` now affect WebSocket roots and namespace-file mounts. Nothing else h9 connects to uses them.
@@ -373,13 +373,13 @@ The page can't set headers on a `WebSocket`, so `root_headers` is an error on th
 - **The proxy environment** applies only to connections the operator named: the root and namespace-file mounts. It's the host's environment, the same trust as the host's resolver, and the plan shows which proxy each uses.
 - **Credentials.** Headers, URL queries, and proxy URLs can carry tokens. `--print` and `--trace` elide queries, userinfo, and header values. `--root-header @FILE` keeps a token out of the process listing. A token in a namespace file's URL is as visible as the file.
 - **A hostile server** can send anything. Frames are bounded, both queues are bounded together, text is checked as UTF-8 before a guest reads it, and devmnt rejects malformed 9P, so the worst it can do is fail the mount, or answer as slowly as it likes, which notes and `--timeout` cut short.
-- **Host-made connections bypass `--net`,** as 9p-roots' do. They're named in the plan, made before the program runs, and fixed for the run. The guest's own connections never bypass it.
+- **Host-made connections bypass `--net`,** as ninep-roots' do. They're named in the plan, made before the program runs, and fixed for the run. The guest's own connections never bypass it.
 - **Resources.** A machine has at most 32 conversations, buffered bytes count against `--memory`, and a `connect` blocks only its caller, interrupted by notes and `--timeout`.
 - **Isolation between machines:** each machine's streams are its own. A machine's `/net/ws` lists only its conversations, host-made streams are in no tree, and only the namespace builder of the machine that opened one mounts it.
 
 ## Done criteria
 
-Integration cases tagged `[websocket-9p]`. The server is 9p-roots' second h9, running `exportfs` behind `aux/listen1`, with `tests/wsrelay.zig` in front of it: a small host program, built from `src/ws.zig`'s server side, that accepts WebSocket connections and relays each to the TCP server. Options make it split and coalesce messages, select no subprotocol, demand a header, answer the handshake with an error, or stop answering pings. A small `CONNECT` proxy in the same program serves the proxy cases.
+Integration cases tagged `[websocket-9p]`. The server is ninep-roots' second h9, running `exportfs` behind `aux/listen1`, with `tests/wsrelay.zig` in front of it: a small host program, built from `src/ws.zig`'s server side, that accepts WebSocket connections and relays each to the TCP server. Options make it split and coalesce messages, select no subprotocol, demand a header, answer the handshake with an error, or stop answering pings. A small `CONNECT` proxy in the same program serves the proxy cases.
 
 - [x] `test "a ws:// root runs /bin/ls [websocket-9p]"`
 - [x] `test "rc pipelines and exec run from a ws:// root [websocket-9p]"`

@@ -1251,17 +1251,24 @@ pub const Mm = struct {
     /// or a private file mapping's as the file's. Shared ones keep their
     /// contents, as Linux's do.
     ///
-    /// A file mapping with no Src to read again (a program's ELF
-    /// segments, which elf.load copies in, or a private mapping copied
+    /// A file mapping with no Src to read again (the pages of a program's
+    /// ELF segments that elf.load copies in, or a private mapping copied
     /// at mmap) keeps its contents: on Linux those pages would read as
     /// the file's again, and zeros would be the file's only by chance.
     /// Bun's standalone executables (Claude Code's) hand back the pages
     /// of their embedded sources in the .bun section, a writable
     /// segment, and read them again later; zeroed, they parse as NULs.
     /// Pages the program wrote keep its writes rather than reverting.
+    ///
+    /// Whole chunks in the range whose pages would all read as zero or
+    /// as the file's again are freed, so the memory goes back to the
+    /// backend (and from there to the host): their next touch allocates
+    /// a fresh chunk, as their first did.
     pub fn discard(m: *Mm, start: u64, end: u64) void {
+        defer m.settle(false);
         m.lockSpin();
         defer m.lock.unlock();
+        m.dropWhole(start, end);
         for (m.vmas.items) |v| {
             if (v.end <= start or v.start >= end or v.shared) continue;
             if (v.src != null)
@@ -1270,6 +1277,32 @@ pub const Mm = struct {
                 continue
             else
                 m.zero(@max(v.start, start), @min(v.end, end));
+        }
+    }
+
+    /// For `discard`: frees the allocated chunks wholly inside [start,
+    /// end) that hold only private pages it would zero or fill from the
+    /// file again. A chunk with overlays, or whose pages someone else holds
+    /// (a pin, or a fork's shared mapping), is left to be zeroed in place.
+    fn dropWhole(m: *Mm, start: u64, end: u64) void {
+        var ci = std.math.divCeil(u64, start, chunk_size) catch unreachable;
+        while ((ci + 1) * chunk_size <= end) : (ci += 1) {
+            const c = m.chunks.get(ci) orelse continue;
+            if (c.overlays.items.len != 0 or c.pages.refs.load(.acquire) != 1) continue;
+            const cs = ci * chunk_size;
+            var i = m.indexAfter(cs);
+            if (i > 0 and m.vmas.items[i - 1].end > cs) i -= 1;
+            const ok = while (i < m.vmas.items.len and m.vmas.items[i].start < cs + chunk_size) : (i += 1) {
+                const v = m.vmas.items[i];
+                if (v.shared or (v.src == null and v.kind == .file and !v.cow)) break false;
+            } else true;
+            if (!ok) continue;
+            for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+            c.nruns = 0;
+            _ = m.chunks.remove(ci);
+            // A fault on it from another thread meanwhile is retried.
+            m.remaps +%= 1;
+            m.dropChunk(c);
         }
     }
 

@@ -1,10 +1,10 @@
 ---
 slug: root-auth
 title: Authenticated 9P roots
-status: draft
+status: declined
 created: 2026-11-06
 authors: [progrium]
-depends: [9p-roots]
+depends: [ninep-roots]
 areas: [cli, kern, sandbox]
 ---
 
@@ -12,11 +12,11 @@ areas: [cli, kern, sandbox]
 
 ## Abstract
 
-A [9P root](9p-roots.md) can be a server that wants `p9any` authentication, such as a 9front file server or `exportfs` behind `aux/listen1` without `-t`. h9 runs the client side of `p9any` (dp9ik, or p9sk1) on the host over the mount's auth fid before attaching, with a key given by `--root-auth`. The guest never holds the key.
+A [9P root](ninep-roots.md) can be a server that wants `p9any` authentication, such as a 9front file server or `exportfs` behind `aux/listen1` without `-t`. h9 runs the client side of `p9any` (dp9ik, or p9sk1) on the host over the mount's auth fid before attaching, with a key given by `--root-auth`. The guest never holds the key.
 
 ## Background
 
-- **9p-roots** mounts with no auth fd. A server that answers `Tauth` with a fid, rather than an error, gets "authentication required", exit 125.
+- **ninep-roots** mounts with no auth fd. A server that answers `Tauth` with a fid, rather than an error, gets "authentication required", exit 125.
 - **devmnt** already has `mntauth`, which sends `Tauth` and returns the auth fid as a channel, and drawterm's `bindmount` takes an auth channel. [devsrv](devsrv.md) serves the guest's `fauth` through `mntauth`.
 - **drawterm's `cpu.c`** has a `p9any` client: the negotiation, dp9ik, and p9sk1, ticket requests to an auth server (`authdial`, `gettickets`), and key lookup from a secstore-style list (`findkey`) or a prompt (`getkey`). It uses `libauthsrv` and `libsec`, which h9 already builds, and isn't itself built: `build.zig` leaves out `cpu.c` and `libauth`.
 
@@ -59,3 +59,7 @@ A [9P root](9p-roots.md) can be a server that wants `p9any` authentication, such
 - Whether the guest should also get a factotum holding the same key, so its own `mount /srv/root …` attaches can authenticate.
 - A Windows equivalent of `factotum`.
 - **The server side, for [serve](serve.md).** serve's TCP listeners are unauthenticated: a guest-side factotum for `exportfs` would put the key in the guest. h9 could instead run the server side of `p9any` on the host, in front of the connection, before handing it to exportfs, with a key given as `--root-auth` gives one. That needs the server half of dp9ik and p9sk1 (drawterm has only clients) and an auth server reachable from the host. A follow-up proposal, if a use appears that a WebSocket token or a unix socket's permissions can't serve.
+
+## Declined
+
+- 2026-11-20: Authentication for roots is focused on HTTP and WebSocket, through [credential-helpers](credential-helpers.md), not on `p9any` for 9P roots. A 9P root that needs authentication can be served over WebSocket and authenticated there. A server that has to be reached as plain 9P with `p9any`, and can't be put behind WebSocket, would reopen it.

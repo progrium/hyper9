@@ -60,7 +60,7 @@ The tool reads branches from `refs/remotes/origin/`, falling back to local refs,
 
 ### Names and references
 
-Every proposal's file is `design/<slug>.md`, from its first draft on. Filing no longer renames anything. `depends`, `superseded-by`, test tags, and links all name proposals by slug, and `check` refuses a number in any of them. A slug is lowercase words of letters and digits joined by dashes, and starts with a letter, as now: `new` refuses one that starts with a digit, and `check` fails on one without an issue, while `9p-roots`, which already has one, keeps its slug.
+Every proposal's file is `design/<slug>.md`, from its first draft on. Filing no longer renames anything. `depends`, `superseded-by`, test tags, and links all name proposals by slug, and `check` refuses a number in any of them. A slug is lowercase words of letters and digits joined by dashes, and starts with a letter, as now: `new` refuses one that starts with a digit, and `check` fails on one without an issue, while `9p-roots`, which already had one, kept its slug until it was renamed `ninep-roots`.
 
 `id` is renamed `issue`, an optional field: the number of the proposal's GitHub issue, when it has one. Since proposals aren't numbered any more, the name says what the number is. STATUS.md and `list` order proposals by `created`, then by `issue`, which gives the rough order the numbered filenames gave.
 
@@ -141,7 +141,7 @@ The CLI, `Machine.Options`, sandbox defaults, the root tree, and `third_party/` 
 The migration is one mechanical change:
 
 - Every `design/NNNN-<slug>.md` is renamed `design/<slug>.md`, `id` becomes `issue`, and the baseline loses `id: 0`.
-- Numeric references in `depends`, `superseded-by`, and test tags are rewritten as slugs (`[18]` becomes `[linux-personality]`, and `depends: [13, 21]` becomes `depends: [9p-roots, websocket-9p]`), as are links to the old paths in any tracked file.
+- Numeric references in `depends`, `superseded-by`, and test tags are rewritten as slugs (`[18]` becomes `[linux-personality]`, and `depends: [13, 21]` becomes `depends: [ninep-roots, websocket-9p]`), as are links to the old paths in any tracked file.
 - Any proposal at `likely-accept` or `likely-decline` goes back to `draft`. None are today.
 - Every filed `draft` becomes `proposed`.
 - Done when is renamed Done criteria in every proposal, and its items become checkboxes. For implemented proposals, items are checked. browser-gfx's headless `[gfx]` item is waived with the reason from its Updates note.

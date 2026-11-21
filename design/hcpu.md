@@ -147,7 +147,7 @@ On the emulator the isolation boundary is software, as it was with Unicorn. With
 - **W^X everywhere.** No page is writable and executable at once, except under a binary translator on Linux that misses writes through a second view, where codemem falls back to one RWX mapping.
 - **No host faults for guest behaviour.** A host fault inside generated code is a bug, and panics the machine.
 - **Decoding** reads only through the TLB, and the x86 decoder stops at 15 bytes in either mode. Register fields index fixed arrays, and the x87 stack index is masked.
-- **Checks.** `zig build hcpu` runs the region check, the fuzzers' unit runs, and the emitters' cases against `ir_eval`, and [ci](ci.md) would run them on every push.
+- **Checks.** `zig build hcpu` runs the region check, the fuzzers' unit runs, and the emitters' cases against `ir_eval`, and CI could run them on every push ([checks](README.md#checks)).
 
 In the browser the boundary improves: there's no guest kernel whose page tables are all that stand between a process and the rest of guest RAM. The sandbox policy is unaffected, since it's enforced in the kernel above the vmm layer.
 

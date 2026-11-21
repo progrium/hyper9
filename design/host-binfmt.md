@@ -1,7 +1,7 @@
 ---
 slug: host-binfmt
 title: Running 9front binaries directly on Linux with binfmt_misc
-status: draft
+status: declined
 created: 2026-11-05
 authors: [progrium]
 depends: []
@@ -114,3 +114,7 @@ With the rule registered, any host process that runs a 9front binary starts a ne
 - Whether `H9FLAGS` is wanted at all, or `H9ROOT` is enough.
 - Nested runs: refuse them, or have the outer h9 pass its policy (as a file or a descriptor) for the inner one to apply, so the inner one is no broader. Refusing is proposed.
 - The interpreter path `--binfmt-conf` writes: beside the running binary, or a fixed `/usr/local/bin`, with a flag to override.
+
+## Declined
+
+- 2026-11-20: It's out of scope for the project. Registering h9 with the host kernel's `binfmt_misc` is host integration h9 doesn't take on, and `h9 ./prog` already runs a 9front binary on Linux. Nothing planned would change the answer.

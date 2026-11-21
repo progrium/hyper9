@@ -6,23 +6,24 @@ created: 2026-11-07
 authors: [progrium]
 depends: []
 areas: [kern, sandbox, cli, build]
+branch: [host-cmd]
 ---
 
 # Proposal: Rethinking host commands
 
 ## Abstract
 
-Host commands run a program on the host from inside the machine. Today that's drawterm's devcmd (`#C`), unmasked by `--host-cmd`: any host program, as the host user, with h9's whole environment, in any host directory. It's now built in only with `zig build -Dhost-cmd`. This proposal decides what host commands should be before they ship again. It recommends replacing devcmd with an h9 device, kept per machine, whose reads a note can interrupt. The new device should run only the commands the policy names, with a scrubbed environment, in host directories the policy already shares. `hcmd` stays the guest's interface.
+Host commands run a program on the host from inside the machine. On the [`host-cmd`](https://github.com/progrium/hyper9/tree/host-cmd) branch, that's drawterm's devcmd (`#C`), unmasked by `--host-cmd`: any host program, as the host user, with h9's whole environment, in any host directory. This proposal decides what host commands should be before they ship again. It recommends replacing devcmd with an h9 device, kept per machine, whose reads a note can interrupt. The new device should run only the commands the policy names, with a scrubbed environment, in host directories the policy already shares. `hcmd` stays the guest's interface.
 
 ## Background
 
-What exists today:
+What the `host-cmd` branch has:
 
-- **devcmd** (`third_party/drawterm/kern/devcmd.c`): a guest opens `#C/cmd/clone`, writes `dir path` and `exec cmd args...` to `ctl`, uses `data` for stdin and stdout and `stderr` for stderr, and reads `wait` for the status. `oscmd` in `posix.c` forks, calls `setsid`, `chdir`s, and runs `execvp`. `win32.c` has a `CreateProcess` version.
+- **devcmd** ([`third_party/drawterm/kern/devcmd.c`](https://github.com/progrium/hyper9/blob/host-cmd/third_party/drawterm/kern/devcmd.c)): a guest opens `#C/cmd/clone`, writes `dir path` and `exec cmd args...` to `ctl`, uses `data` for stdin and stdout and `stderr` for stderr, and reads `wait` for the status. `oscmd` in `posix.c` forks, calls `setsid`, `chdir`s, and runs `execvp`. `win32.c` has a `CreateProcess` version.
 - **`--host-cmd`** leaves `#C` out of the device mask. The plan adds the caveat "#C runs host commands with the host user's rights". `--sandbox` refuses the flag.
-- **`hcmd`** (`src/guest-hostcmd/bin/hcmd`) wraps the protocol: it passes standard I/O through, exits with the command's status, maps the guest's cwd to a host directory from the `#U` binds in `/proc/$pid/ns`, and kills the command on an interrupt or hangup.
-- **`src/kern/hostcmd.c`** kills a machine's commands when the machine stops. It does this by renaming `oscmd` in the vendored `posix.c` and `win32.c`.
-- **`-Dhost-cmd`**: without it, devtab leaves devcmd out, `hcmd` isn't served, and the policy refuses `host_cmd` with exit 2. Releases don't pass it.
+- **`hcmd`** ([`src/guest-hostcmd/bin/hcmd`](https://github.com/progrium/hyper9/blob/host-cmd/src/guest-hostcmd/bin/hcmd)) wraps the protocol: it passes standard I/O through, exits with the command's status, maps the guest's cwd to a host directory from the `#U` binds in `/proc/$pid/ns`, and kills the command on an interrupt or hangup.
+- **[`src/kern/hostcmd.c`](https://github.com/progrium/hyper9/blob/host-cmd/src/kern/hostcmd.c)** kills a machine's commands when the machine stops. It does this by renaming `oscmd` in the vendored `posix.c` and `win32.c`.
+- **`-Dhost-cmd`**: without it, devtab leaves devcmd out, `hcmd` isn't served, and the policy refuses `host_cmd` with exit 2.
 
 Problems found while adding the tests:
 
@@ -58,7 +59,7 @@ When this lands, `-Dhost-cmd` goes away and host commands are built in everywher
 
 ## Compatibility
 
-- **CLI.** `--host-cmd` changes from a switch to `--host-cmd NAME`, and the bare form becomes a usage error (exit 2). `--host-cmd-env NAME` is new. Scripts written against today's flag already need `-Dhost-cmd`, so nothing that ships breaks.
+- **CLI.** `--host-cmd` changes from a switch to `--host-cmd NAME`, and the bare form becomes a usage error (exit 2). `--host-cmd-env NAME` is new. Main has no host commands, so nothing that ships breaks.
 - **`Machine.Options`.** `Policy.host_cmd: bool` becomes `host_cmds: []const []const u8`, plus `host_cmd_env`.
 - **Sandbox.** There's a new capability, `proc.host`. The default and tight profiles still have no host commands.
 - **`third_party/`.** devcmd stops being built and `oscmd` isn't used. `hostcmd.c` and the `-Doscmd` renames go away.
@@ -97,3 +98,7 @@ The guest can run only the host programs the user names, with the scrubbed envir
 - **Notes.** Should notes be forwarded as signals (`interrupt` as SIGINT, not a kill) so a host program can clean up?
 - **Patterns.** Is a name list enough, or should allowed commands also pin arguments?
 - **Limits.** Do `--pids` and `--memory` count host commands?
+
+## Updates
+
+- 2026-11-11: **The work moved to the `host-cmd` branch.** Host commands were on main behind `-Dhost-cmd` and came back out, so they can change on [their branch](https://github.com/progrium/hyper9/tree/host-cmd) while this proposal is worked out, rather than ship in a form it replaces. Main doesn't build devcmd, and has no `hostcmd.c`, `hcmd`, `--host-cmd`, `Policy.host_cmd`, or `-Dhost-cmd`. `#C` stays in the device mask, and `--host-cmd` is an unknown flag (exit 2). On the branch, host commands and their cases are built in by default, and `-Dhost-cmd=false` leaves them out.

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
 # libraries and the patched Unicorn source into .local, and on request
-# the release's 386 ISO, the browser host's Linux demo root, and Wine's
-# headers.
+# the release's 386 or amd64 ISO, the browser host's Linux demo root, the
+# workloads' Linux root, diod, and ZeroFS.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
-#                                 iso386 alpinearm64web wine; default all
-#                                 but iso386, alpinearm64web and wine)
+#                                 iso386 isoamd64 alpinearm64web
+#                                 workloads diod zerofs; default all but
+#                                 the ISOs, alpinearm64web, workloads,
+#                                 diod, and zerofs)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -15,7 +17,7 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn unicorn-src} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|iso386|alpinearm64web|wine) ;;
+	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
 	# v86 was the browser host's 386 CPU before h86, and alpine386web the
 	# Linux demo's root before it moved to arm64; nothing to fetch now.
 	v86|alpine386web) ;;
@@ -46,19 +48,6 @@ clone "$HYPERLINUX_REPO" hyper-linux
 clone "$NINEFRONT_REPO" 9front "$NINEFRONT_REV"
 fi
 
-# Wine's include/ at the pinned release, for zig build wine
-# (design/wine-draw.md): a sparse, blobless clone, about 20 MB.
-if want wine; then
-dir="$H9_LOCAL/src/wine"
-if [ "$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null || true)" != "$WINE_REV" ]; then
-	rm -rf "$dir"
-	git clone -q --filter=blob:none --no-checkout --depth 1 --branch "wine-$WINE_VERSION" "$WINE_REPO" "$dir"
-	git -C "$dir" sparse-checkout set --no-cone /include/
-	git -C "$dir" checkout -q --detach "$WINE_REV"
-fi
-echo "src/wine: $WINE_VERSION ($(git -C "$dir" rev-parse --short HEAD))"
-fi
-
 if want image; then
 img="9front-$NINEFRONT_RELEASE.arm64.qcow2"
 if [ ! -f "$H9_LOCAL/9front/$img" ]; then
@@ -68,18 +57,21 @@ fi
 echo "9front/$img"
 fi
 
-# The 386 ISO, for zig build isoroot (the Pages workflow's 386 root).
-if want iso386; then
-iso="9front-$NINEFRONT_RELEASE.386.iso"
+# The release's 386 and amd64 ISOs, for zig build isoroot (the Pages
+# workflow's 386 root and CI's amd64 root).
+for arch in 386 amd64; do
+want "iso$arch" || continue
+iso="9front-$NINEFRONT_RELEASE.$arch.iso"
+if [ "$arch" = 386 ]; then sum=$NINEFRONT_386_ISO_SHA256; else sum=$NINEFRONT_AMD64_ISO_SHA256; fi
 if [ ! -f "$H9_LOCAL/9front/$iso" ]; then
 	curl -fL --progress-bar -o "$H9_LOCAL/9front/$iso.gz" "$NINEFRONT_ISO_URL/$iso.gz"
 	gunzip -c "$H9_LOCAL/9front/$iso.gz" >"$H9_LOCAL/9front/$iso.tmp"
-	echo "$NINEFRONT_386_ISO_SHA256  $H9_LOCAL/9front/$iso.tmp" | shasum -a 256 -c --quiet
+	echo "$sum  $H9_LOCAL/9front/$iso.tmp" | shasum -a 256 -c --quiet
 	mv "$H9_LOCAL/9front/$iso.tmp" "$H9_LOCAL/9front/$iso"
 	rm -f "$H9_LOCAL/9front/$iso.gz"
 fi
 echo "9front/$iso"
-fi
+done
 
 # Unicorn: headers and libunicorn.a for each target into .local/unicorn/<name>.
 if want unicorn; then
@@ -167,3 +159,72 @@ fi
 echo "linux/alpine-arm64-web: $(echo "$ALPINE_ARM64_WEB_PKGS" | awk 'NF{printf "%s ", $1}')"
 fi
 
+# The workloads' Linux root (tests/workloads): the amd64 Alpine root with
+# the pinned packages unpacked over a copy of it.
+if want workloads; then
+dir="$H9_LOCAL/linux/workloads-amd64"
+stamp=$(echo "$WORKLOADS_AMD64_PKGS" | shasum -a 256 | cut -d' ' -f1)
+if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
+	rm -rf "$dir" "$dir.tmp"
+	cp -a "$H9_LOCAL/linux/alpine-amd64" "$dir.tmp"
+	echo "$WORKLOADS_AMD64_PKGS" | while read -r repo f sha; do
+		[ -n "$f" ] || continue
+		apk="$H9_LOCAL/cache/$f"
+		curl -fsSL --retry 3 -o "$apk" "$ALPINE_PKG_BASE/$repo/x86_64/$f"
+		echo "$sha  $apk" | shasum -a 256 -c --quiet
+		# GNU tar warns about apk's own pax keywords; they don't matter.
+		tar -xzf "$apk" -C "$dir.tmp" --exclude='.SIGN.*' --exclude=.PKGINFO 2>&1 |
+			{ grep -v 'unknown extended header keyword' >&2 || true; }
+		rm -f "$apk"
+	done
+	echo "$stamp" >"$dir.tmp/.h9-stamp"
+	mv "$dir.tmp" "$dir"
+fi
+echo "linux/workloads-amd64: $(echo "$WORKLOADS_AMD64_PKGS" | awk 'NF{n++} END{print n " packages"}')"
+fi
+
+# diod for the [dotl] cases: Ubuntu's packages, each checked against its
+# pinned hash and unpacked into .local/diod, and a wrapper in .local/bin
+# that finds the libraries there. A .deb is an ar archive around a
+# zstd-compressed tar, so this needs ar and zstd.
+if want diod; then
+if [ "$(uname -sm)" != "Linux x86_64" ]; then
+	echo "fetch: diod is for x86_64 Linux only" >&2; exit 1
+fi
+dir="$H9_LOCAL/diod"
+stamp=$(echo "$DIOD_DEBS" | shasum -a 256 | cut -d' ' -f1)
+if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
+	rm -rf "$dir" "$dir.tmp" && mkdir -p "$dir.tmp"
+	echo "$DIOD_DEBS" | while read -r path sha; do
+		[ -n "$path" ] || continue
+		deb="$H9_LOCAL/cache/${path##*/}"
+		curl -fsSL --retry 3 -o "$deb" "$DIOD_DEB_URL/$path"
+		echo "$sha  $deb" | shasum -a 256 -c --quiet
+		(cd "$H9_LOCAL/cache" && ar x "$deb" data.tar.zst && tar --zstd -xf data.tar.zst -C "$dir.tmp" && rm data.tar.zst)
+		rm -f "$deb"
+	done
+	echo "$stamp" >"$dir.tmp/.h9-stamp"
+	mv "$dir.tmp" "$dir"
+fi
+cat >"$H9_LOCAL/bin/diod" <<'SH'
+#!/bin/sh
+d=$(dirname "$0")/../diod
+LD_LIBRARY_PATH=$d/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} exec "$d/usr/sbin/diod" "$@"
+SH
+chmod +x "$H9_LOCAL/bin/diod"
+echo "diod: $(echo "$DIOD_DEBS" | awk 'NF{sub(/.*\//, "", $1); print $1; exit}')"
+fi
+
+# ZeroFS for the [dotl] cases: its source at the pinned commit, built
+# with the host's cargo (Rust 1.85 or later) into .local/zerofs, and
+# copied to .local/bin. The first build takes several minutes.
+if want zerofs; then
+command -v cargo >/dev/null || { echo "fetch: zerofs needs cargo" >&2; exit 1; }
+clone "$ZEROFS_REPO" zerofs "$ZEROFS_REV"
+if [ "$(cat "$H9_LOCAL/zerofs/.h9-stamp" 2>/dev/null || true)" != "$ZEROFS_REV" ]; then
+	(cd "$H9_LOCAL/src/zerofs/zerofs" && CARGO_TARGET_DIR="$H9_LOCAL/zerofs" cargo build -q --release --locked --bin zerofs)
+	echo "$ZEROFS_REV" >"$H9_LOCAL/zerofs/.h9-stamp"
+fi
+cp "$H9_LOCAL/zerofs/release/zerofs" "$H9_LOCAL/bin/zerofs"
+echo "zerofs: $ZEROFS_VERSION"
+fi

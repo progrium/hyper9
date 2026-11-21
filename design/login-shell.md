@@ -73,7 +73,7 @@ The README shows the install: `ln -s h9 h9sh`, adding its path to `/etc/shells`,
 - **Environment.** `TERM`, `LANG`, `LC_*`, `EDITOR`, `VISUAL`, `PAGER`, `TZ`, and `SSH_AUTH_SOCK` are copied into the guest's `/env` under their own names (see `--env-pass`).
 - **Interrupts.** A second Ctrl-C is an interrupt like the first, not a stop. SIGHUP and SIGTERM still stop the machine.
 
-The profile's caveat says what it is: "the shell profile gives the guest the host user's files, network, and programs; it isn't a sandbox". `--strict` refuses it.
+The profile's caveat says what it is: "the shell profile gives the guest the host user's files, network, and programs; it isn't a sandbox".
 
 ### `--env-pass NAME`
 
@@ -116,7 +116,7 @@ Listing the directory gives every allowed name found on `PATH`, once, in `PATH` 
 
 ## Security
 
-The shell profile intentionally gives the guest the host user's files, network, and programs, which is what a shell has. It's opt-in by name, refused by `--strict`, and never the default. `h9sh` adds nothing beyond that: what it runs non-interactively is the host's own `sh`. `#C/bin` exposes only what the host-cmd allowlist already allows. `--env-pass` copies only named variables, and `--print` shows the names. The terminal handoff gives a host program the terminal h9 already had; h9 restores the terminal's modes when it takes it back, so a program that leaves raw mode set doesn't break the session.
+The shell profile intentionally gives the guest the host user's files, network, and programs, which is what a shell has. It's opt-in by name and never the default. `h9sh` adds nothing beyond that: what it runs non-interactively is the host's own `sh`. `#C/bin` exposes only what the host-cmd allowlist already allows. `--env-pass` copies only named variables, and `--print` shows the names. The terminal handoff gives a host program the terminal h9 already had; h9 restores the terminal's modes when it takes it back, so a program that leaves raw mode set doesn't break the session.
 
 ## Done criteria
 
@@ -135,7 +135,6 @@ Integration cases, using `spawnTerm` where a terminal is needed:
 - [ ] `test "a host command on the console gets the terminal [login-shell]"`: `hcmd tty` prints a tty path, and `stty size` matches the terminal
 - [ ] `test "Ctrl-C reaches a host command on the console as SIGINT [login-shell]"`
 - [ ] `test "#C/bin runs host programs by name after the root's [login-shell]"`
-- [ ] `test "--strict refuses the shell profile [login-shell]"`
 
 ## Implementation
 
@@ -143,7 +142,7 @@ Integration cases, using `spawnTerm` where a terminal is needed:
 2. `interrupt_stops` in `src/hostsig.zig` and the machine.
 3. The `console` ctl message and the terminal handoff in host-cmd's device, and `hcmd -p`.
 4. `#C/bin`.
-5. The shell profile, its caveat, and `--strict`.
+5. The shell profile and its caveat.
 6. `h9sh`: the `argv[0]` check, the config file, the host-shell fallback, and `H9_NESTED`.
 7. README (installing as a login shell), MANUAL (a chapter on h9 as your shell), and SPEC.md.
 

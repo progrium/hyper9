@@ -1,0 +1,14 @@
+# mk builds awk and rc from /sys/src, and the new binaries run.
+# timeout: 300
+# expect: 6
+# expect: rc built
+switch($objtype){
+case amd64
+	O=6
+case arm64
+	O=7
+case 386
+	O=8
+}
+cd /sys/src/cmd/awk && mk >/dev/null >[2=1] && echo 1 2 3 | ./$O.out '{print $1+$2+$3}'
+cd /sys/src/cmd/rc && mk >/dev/null >[2=1] && ./$O.out -c 'echo rc built'

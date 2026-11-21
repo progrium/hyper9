@@ -5,7 +5,7 @@ title: Schemeless roots
 status: implemented
 created: 2026-11-08
 authors: [progrium]
-depends: [9p-roots, websocket-9p]
+depends: [ninep-roots, websocket-9p]
 areas: [cli]
 branch: [main]
 ---
@@ -20,7 +20,7 @@ Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Background
 
-[9p-roots](9p-roots.md) reads `--root` by prefix, then by stat: `tcp!` and `unix!` are dial strings, and anything else is a host path, which is a directory or a socket ([image-roots](image-roots.md) proposes a regular file as a disk image). [websocket-9p](websocket-9p.md) added `ws://` and `wss://` URLs, recognized by their prefix so that "it can't be confused with a host path or a `tcp!` dial string" (`cli.rootArg`, `ws.Url.is`).
+[ninep-roots](ninep-roots.md) reads `--root` by prefix, then by stat: `tcp!` and `unix!` are dial strings, and anything else is a host path, which is a directory or a socket ([image-roots](image-roots.md) proposes a regular file as a disk image). [websocket-9p](websocket-9p.md) added `ws://` and `wss://` URLs, recognized by their prefix so that "it can't be confused with a host path or a `tcp!` dial string" (`cli.rootArg`, `ws.Url.is`).
 
 So a WebSocket root has to be typed with its scheme. Almost every one is `wss://`: a page served over `https` can only open `wss://`, the servers people run for this sit behind TLS, and `ws://` is mostly for a server on localhost in a test. Typing `wss://` is the same small tax every time, and leaving it off today gives "root example.com/9p: not found", which says nothing about URLs.
 
@@ -75,7 +75,7 @@ The exit code is 125, as for any root that can't be reached.
 
 ## Rationale
 
-**Path first, then URL.** Checking for an existing path first means every value that works today keeps working, including a directory someone named `fs.example.com`. The cost is that the reading depends on the filesystem: the same `--root` can be a directory in one place and a URL in another. That's already true of 9p-roots' directory and socket, and `--print` shows which reading was taken. A URL-first rule would break relative paths with a dot in their first component, like `build.d/root`, for a small saving.
+**Path first, then URL.** Checking for an existing path first means every value that works today keeps working, including a directory someone named `fs.example.com`. The cost is that the reading depends on the filesystem: the same `--root` can be a directory in one place and a URL in another. That's already true of ninep-roots' directory and socket, and `--print` shows which reading was taken. A URL-first rule would break relative paths with a dot in their first component, like `build.d/root`, for a small saving.
 
 **Only a value that's shaped like a URL.** Without a shape check, every missing path would turn into a connection to somewhere, and a typo would become a DNS query and a confusing TLS error rather than "not found". Requiring a dotted host (or `localhost`, brackets, or a port) keeps most mistyped local paths out: `root`, `.local/9front/root`, `./9front.img`, and `dist/root` all stay paths. What's left are missing relative paths whose first component has a dot, such as `build.d/root`, `9front.img`, or `root.tar`; those dial, and the error says so.
 

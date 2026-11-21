@@ -78,7 +78,7 @@ A port of 9front's devsrv, kept close to it, with four changes:
    - `iseve` and `up->user` are drawterm's.
    - Everything else devsrv uses exists in drawterm: `devwalk`, `devpermcheck`, `fdtochan`, `RWLock`, and the error strings.
 3. **Device letter and registration.** `s`, added to `src/kern/devtab.c`.
-4. **Posting is split from the fd.** `srvwrite` turns the written fd into a channel with `fdtochan`, then calls `h9_srvpost(board, name, chan)`, which does the rest of 9front's post: the in-use and auth checks, and holding the reference. Nothing else calls it yet, but a host-side post (see [9p-roots](9p-roots.md)) can, without a guest fd.
+4. **Posting is split from the fd.** `srvwrite` turns the written fd into a channel with `fdtochan`, then calls `h9_srvpost(board, name, chan)`, which does the rest of 9front's post: the in-use and auth checks, and holding the reference. Nothing else calls it yet, but a host-side post (see [ninep-roots](ninep-roots.md)) can, without a guest fd.
 
 ### The namespace
 

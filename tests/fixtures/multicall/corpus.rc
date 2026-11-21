@@ -65,6 +65,7 @@ fn c_diff { t diff lines lines2; t diff -c lines lines2 | sed 1,2d }
 fn c_tail { t tail -3 nums; t tail +498 nums }
 fn c_tee { echo teed | t tee e/tee; cat e/tee }
 fn c_xargs { echo a b c d | t xargs -n2 echo x }
+fn c_mc { t mc -20 lines; ls -p d | t mc; echo a b c | t mc -t -10 }
 fn c_tar { t tar cf e/x.tar d; t tar tf e/x.tar | sort }
 fn c_gzip { gzip <nums >e/g.gz; st; gunzip <e/g.gz >e/g; cmp e/g nums && echo same }
 fn c_gunzip { gzip <d/a >e/h.gz; t gunzip <e/h.gz; t gunzip -z }

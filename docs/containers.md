@@ -82,7 +82,7 @@ something the runtime does for you.
 | `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux personality) |
 | Running Linux images | `h9 --root ./alpine sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/linux-personality.md)) |
 | `FROM scratch` + static binaries | A slim root tree: Plan 9 binaries are statically linked ([section 4](#4-from-scratch-slim-images)) | main |
-| A busybox base image | `zig build slim`, or the built-in root h9 carries: 42 of 9front's commands in one binary | main |
+| A busybox base image | `zig build slim`, or the built-in root h9 carries: 43 of 9front's commands in one binary | main |
 | `ENTRYPOINT`, `CMD` | An rc script in the image, run by path; or `/rc/lib/rcmain.local`, run by `h9 --rc` | main |
 | `ENV`, `docker run -e` | `--env name=value`, or assignments in the entrypoint | main |
 | `WORKDIR` | `cd` in the namespace file | main |
@@ -115,7 +115,7 @@ something the runtime does for you.
 The root tree that `zig build mkroot` builds is h9's equivalent of a
 `debian` base image: about 250 MB of 9front, with every program and library
 file. Every `h9` command that doesn't pass `--root` already runs in it. (With
-no tree at all, h9 runs on a small built-in root of 42 commands, more like
+no tree at all, h9 runs on a small built-in root of 43 commands, more like
 `busybox`; see [manual, chapter 2](../MANUAL.md#2-installing).)
 
 Any other directory that looks like a 9front tree works as `--root`:
@@ -168,8 +168,8 @@ and the host's directories onto them:
 | `/rc/bin`, `/rc/lib/rcmain` | rc, if the image uses it: rc reads `rcmain` when it starts |
 
 **A busybox-style base.** `zig build slim` builds the closest thing to
-`busybox`: 42 of 9front's own commands as one multi-call binary of about
-750 KB, `9box`, in a root tree with rc, the file and text tools, `tar`, and
+`busybox`: 43 of 9front's own commands as one multi-call binary of about
+800 KB, `9box`, in a root tree with rc, the file and text tools, `tar`, and
 the namespace tools. The same tree is built into h9 as its built-in root, so an
 image can also leave the common commands out and borrow them at run time
 with `--builtin=after`, which puts the built-in commands in `/bin` behind the
@@ -674,11 +674,6 @@ whole container in a few lines, and it replays with `--ns`, so you can save it
 as a starting point. And the `caveats:` section lists what this configuration
 doesn't protect against.
 
-`--strict` refuses to run, with exit 2, if a flag asks for something the
-build can't enforce. Every capability in today's build is enforced, so it
-always runs; keep it in scripts anyway, so a future flag can't silently give
-them a weaker sandbox than they asked for.
-
 ## 14. Registries: serving images over 9P
 
 Docker images move as tarballs through a registry. 9front roots can come
@@ -701,8 +696,9 @@ host$ h9 --root 'tcp!127.0.0.1!5640' --ns /app/ns --net=enable --cwd ./data serv
 it. Writes stay in the root's overlay, as for a directory root, so the
 server is only read. The connection is plain, unauthenticated 9P, so keep
 TCP roots on a trusted network ([manual, chapter
-16](../MANUAL.md#16-file-servers-srv-and-9p-mounts)); servers that ask for
-authentication are [proposed](../design/root-auth.md). On macOS and Linux a
+16](../MANUAL.md#16-file-servers-srv-and-9p-mounts)); 9P authentication for
+roots was proposed and declined ([root-auth](../design/root-auth.md)) in
+favor of authenticating WebSocket roots. On macOS and Linux a
 unix socket works too, as `--root unix!/path`.
 
 `--root-spec NAME` sends an attach name, so a 9P server that offers several
@@ -840,9 +836,9 @@ where there is one:
 - **Image files.** Images are directories or 9P servers. Attaching a
   single-file image read-only was proposed and declined
   ([image-roots](../design/image-roots.md)).
-- **Authenticated registries.** 9P roots can't ask for authentication yet
-  ([root-auth](../design/root-auth.md), a draft). WebSocket roots can send a
-  bearer token in a header.
+- **Authenticated registries.** 9P roots don't authenticate; that was
+  proposed and declined ([root-auth](../design/root-auth.md)). WebSocket
+  roots can send a bearer token in a header.
 - **A build cache, image IDs, and digests.** Build scripts start over each
   time; `tar | shasum` gives a digest if you need one.
 - **Network isolation between machines.** There's no private network: guests
