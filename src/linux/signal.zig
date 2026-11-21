@@ -54,6 +54,9 @@ pub const SI_USER: i32 = 0;
 pub const SI_KERNEL: i32 = 0x80;
 pub const SEGV_MAPERR: i32 = 1;
 pub const SEGV_ACCERR: i32 = 2;
+/// SIGBUS's si_code for an address with no object behind it (a file
+/// mapping's page past the file's end).
+pub const BUS_ADRERR: i32 = 2;
 pub const CLD_EXITED: i32 = 1;
 pub const CLD_KILLED: i32 = 2;
 pub const CLD_STOPPED: i32 = 5;

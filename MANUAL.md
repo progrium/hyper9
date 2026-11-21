@@ -2112,6 +2112,14 @@ Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
   `/proc/n/status` counts shared memory in each process that maps it, as
   Linux does, and `/proc/meminfo` counts it once for each process too, so
   `MemFree` reads low after a fork.
+- A running program's file can't be opened for writing or truncated: that's
+  `ETXTBSY`, as on Linux, since its pages are still read from the file. Write
+  a new file and rename it over the old one instead, as compilers and
+  package managers do. An fd opened for writing before the program started
+  isn't refused, so writing through one changes the running program's pages
+  it hasn't touched yet.
+- Touching a page of a file mapping that's wholly past the end of its file,
+  such as one truncated while it's mapped, is `SIGBUS`, as on Linux.
 - CPU times in `/proc/stat` and `/proc/n/stat` read 0, so `top` and `htop`
   show 0%.
 - `symlink` works in overlays (the root and `/tmp`) and host trees on macOS

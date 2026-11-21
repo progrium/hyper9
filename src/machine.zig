@@ -1736,12 +1736,16 @@ pub const Machine = struct {
                     // as Linux's OOM would end the process; the trace says
                     // why, since the address alone looks like a bad one.
                     var alloc_failed = false;
+                    // A page of a file mapping wholly past the file's end
+                    // (a file truncated under it, or a read that failed)
+                    // is SIGBUS, as on Linux.
+                    var bus = false;
                     if (l.mm.fault(f.addr, switch (f.access) {
                         .read => .read,
                         .write => .write,
                         .exec => .exec,
-                    }) catch blk: {
-                        alloc_failed = true;
+                    }) catch |e| blk: {
+                        if (e == error.Bus) bus = true else alloc_failed = true;
                         break :blk null;
                     }) |gen| if (!same or gen != last_fault.gen) {
                         last_fault = .{ .addr = f.addr, .access = f.access, .pc = u.pc(), .gen = gen };
@@ -1750,15 +1754,18 @@ pub const Machine = struct {
                     };
                     if (m.opts.trace) |w| {
                         if (alloc_failed) traceLine(w, &p.job.trace_lock, "h9: fault: virtual memory allocation failed (out of --memory)\n");
+                        if (bus) traceLine(w, &p.job.trace_lock, "h9: fault: file mapping past the file's end (SIGBUS)\n");
                         dumpFault(w, &p.job.trace_lock, &u, f, "");
                     }
+                    const signo: u32 = if (bus) lsig.SIGBUS else lsig.SIGSEGV;
                     // A fault while the signal is blocked or ignored kills,
                     // as Linux's force_sig does.
-                    const a = l.sig.actions[lsig.SIGSEGV];
-                    if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(lsig.SIGSEGV) != 0) {
-                        return .{ .killed = lsig.deathNote(lsig.SIGSEGV, &p.msg_buf) };
+                    const a = l.sig.actions[signo];
+                    if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(signo) != 0) {
+                        return .{ .killed = lsig.deathNote(signo, &p.msg_buf) };
                     }
-                    _ = l.sig.post(lsig.SIGSEGV, .{ .code = if (!l.mm.mapped(f.addr)) lsig.SEGV_MAPERR else lsig.SEGV_ACCERR, .addr = f.addr });
+                    const code: i32 = if (bus) lsig.BUS_ADRERR else if (!l.mm.mapped(f.addr)) lsig.SEGV_MAPERR else lsig.SEGV_ACCERR;
+                    _ = l.sig.post(signo, .{ .code = code, .addr = f.addr });
                     continue;
                 },
                 else => {},
@@ -2079,9 +2086,9 @@ pub const Machine = struct {
         }
         // The files they came from, to fill their pages from as they're
         // touched (elf.load); without them, the pages are copied in.
-        const exe_src = imageSrc(m.gpa, path, bytes);
+        const exe_src = imageSrc(m.gpa, path, bytes, false);
         defer if (exe_src) |s| s.put();
-        const interp_src = if (interp) |ii| imageSrc(m.gpa, exe.interp.?, ii.bytes) else null;
+        const interp_src = if (interp) |ii| imageSrc(m.gpa, exe.interp.?, ii.bytes, true) else null;
         defer if (interp_src) |s| s.put();
         var random: [16]u8 = undefined;
         m.io.random(&random);
@@ -2176,24 +2183,28 @@ pub const Machine = struct {
     }
 
     /// The file at `path` as an mm.Src, if it holds `bytes`, the image
-    /// exec read from it: looked up in the current view, then the Linux
-    /// view, as exec's callers read it from one or the other. Null when
-    /// neither holds it (a program loaded from the host, or a file
-    /// replaced since), and the image is copied in instead.
-    fn imageSrc(gpa: std.mem.Allocator, path: []const u8, bytes: []const u8) ?*lmm.Src {
+    /// exec read from it: looked up where exec read it, in the current
+    /// view and then the Linux view for a program (exec's callers read it
+    /// from one or the other), and with `linux_only` in the Linux view
+    /// alone, for the interpreter, which readLinux reads only there. Null
+    /// when none holds it (a program loaded from the host, or a file
+    /// replaced since), and the image is copied in instead. While a
+    /// process maps a program's file, the file is busy: a Linux open of it
+    /// for writing fails with ETXTBSY (LazyFile.openExec).
+    fn imageSrc(gpa: std.mem.Allocator, path: []const u8, bytes: []const u8, linux_only: bool) ?*lmm.Src {
         var zbuf: [4096]u8 = undefined;
         const zpath = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return null;
         const in_view = kc.inView();
         for ([_]bool{ false, true }) |linux| {
+            if (linux_only and !linux) continue;
+            if (linux and in_view and !linux_only) break;
             const swap = linux and !in_view;
-            if (linux and in_view) break;
             if (swap) kc.setSlash(true) catch continue;
             defer if (swap) kc.setSlash(false) catch {};
             const fd = kern.open(zpath, kern.OREAD) catch continue;
             defer kern.close(fd) catch {};
-            const lf = lsys.LazyFile.open(gpa, fd) orelse continue;
-            if (lf.holds(bytes)) return &lf.src;
-            lf.src.put();
+            const lf = lsys.LazyFile.openExec(gpa, fd, bytes, !linux_only) orelse continue;
+            return &lf.src;
         }
         return null;
     }

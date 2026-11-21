@@ -5781,6 +5781,50 @@ test "a private mapping of a 200 MB file costs only the chunks touched, as VmRSS
     try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "filemap" }, "ok filemap\n");
 }
 
+test "a running program's file is busy: opening it for writing or truncating it is ETXTBSY until it exits [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "txtbsy" }, "ok txtbsy\n");
+}
+
+test "a private mapping's pages past the end of its file are SIGBUS to touch and EFAULT to a syscall [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "sigbus" }, "ok sigbus\n");
+}
+
+test "/proc/self/maps shows a program's segments, read from its file as they're touched, one line each [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "maps" }, "ok maps\n");
+}
+
+test "a dynamic program and its interpreter run from their files' pages, each mapping one line in /proc/self/maps [cow-fork]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, false, &.{ "/bin/cat", "/proc/self/maps" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    // Alpine's cat is busybox, linked against musl, whose loader is the
+    // interpreter: both are mapped, and no file mapping is in pieces.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, " /bin/cat\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, " /lib/ld-musl-") != null);
+    var prev: struct { end: u64 = 0, off: u64 = 0, perms: []const u8 = "", name: []const u8 = "" } = .{};
+    var lines = std.mem.tokenizeScalar(u8, r.out, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.tokenizeScalar(u8, line, ' ');
+        const range = f.next() orelse continue;
+        const perms = f.next() orelse continue;
+        const off = std.fmt.parseInt(u64, f.next() orelse continue, 16) catch continue;
+        _ = f.next();
+        _ = f.next();
+        const name = f.rest();
+        const dash = std.mem.indexOfScalar(u8, range, '-') orelse continue;
+        const start = try std.fmt.parseInt(u64, range[0..dash], 16);
+        const end = try std.fmt.parseInt(u64, range[dash + 1 ..], 16);
+        if (name.len > 0 and name[0] != '[' and std.mem.eql(u8, name, prev.name) and std.mem.eql(u8, perms, prev.perms) and start == prev.end and off == prev.off) {
+            std.debug.print("{s} in pieces at {x}\n", .{ name, start });
+            return error.TestUnexpectedResult;
+        }
+        prev = .{ .end = end, .off = off + (end - start), .perms = perms, .name = name };
+    }
+}
+
 /// Runs tests/fixtures/linux/cowfork.c with `args`, its case last, and
 /// checks it prints `want` and exits 0, for the test at `src`.
 fn cowFork(comptime src: std.builtin.SourceLocation, args: []const []const u8, want: []const u8) !void {

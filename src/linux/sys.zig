@@ -1791,11 +1791,31 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     if (flags & O_TRUNC != 0 and flags & O_ACCMODE != 0) omode |= OTRUNC;
     if (flags & O_CLOEXEC != 0) omode |= OCEXEC;
     const want_dir = flags & oDirectory(p.arch) != 0;
+    // A running program's file opened for writing is ETXTBSY (`busy`):
+    // opened without OTRUNC first, so a refused open truncates nothing.
+    const guard = flags & O_ACCMODE != 0 and flags & O_PATH == 0 and busy.any();
+    const trunc = guard and omode & OTRUNC != 0;
     const fd: u31 = blk: {
-        if (at(dirfd, path, u31, kern.open, .{ path, omode })) |fd| {
+        if (at(dirfd, path, u31, kern.open, .{ path, if (trunc) omode & ~@as(c_int, OTRUNC) else omode })) |fd| {
             if (flags & O_CREAT != 0 and flags & O_EXCL != 0) {
                 kern.close(fd) catch {};
                 return -E.EXIST;
+            }
+            if (guard and busy.has(fd)) {
+                kern.close(fd) catch {};
+                return -E.TXTBSY;
+            }
+            if (trunc) {
+                var w: [64]u8 = undefined;
+                if (fileKey(fd)) |k| if (kern.fwstat(fd, (Wstat{ .length = 0 }).encode(&w))) |_| {
+                    _ = file_writes.fetchAdd(1, .monotonic);
+                    shmfile.truncated(k, 0);
+                    break :blk fd;
+                } else |_| {};
+                // Not a regular file, or one whose server won't take a
+                // length: open it again with OTRUNC, as without the guard.
+                kern.close(fd) catch {};
+                break :blk at(dirfd, path, u31, kern.open, .{ path, omode }) catch return kerr();
             }
             break :blk fd;
         } else |_| {
@@ -3022,6 +3042,11 @@ fn fallocate(p: *Process, fd: i32, mode: u32, off: u64, len: u64) Err!i64 {
 
 fn truncatePath(p: *Process, path_va: u64, len: u64) Err!i64 {
     const path = try pathArg(p, path_va, &p.name_buf);
+    // A running program's file is ETXTBSY (`busy`), as on Linux.
+    if (busy.any()) if (kern.open(path, kern.OREAD)) |fd| {
+        defer kern.close(fd) catch {};
+        if (busy.has(fd)) return -E.TXTBSY;
+    } else |_| {};
     var w: [64]u8 = undefined;
     _ = kern.wstat(path, (Wstat{ .length = len }).encode(&w)) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
@@ -3755,6 +3780,61 @@ const FileCtx = struct {
     }
 };
 
+/// The files of running executables whose pages are read from the file
+/// as they're touched (`LazyFile.openExec`), by lock key, with how many
+/// images map each. A Linux open of one for writing, or a truncate of it
+/// by path, fails with ETXTBSY, as on Linux (`busy.check`). A rename over
+/// it is fine: the image keeps the old file. Writes through an fd opened
+/// for writing before the exec, and from 9front programs, aren't refused.
+const busy = struct {
+    const gpa = @import("../web.zig").gpa;
+    var mutex: std.atomic.Mutex = .unlocked;
+    var table: std.AutoHashMapUnmanaged(locks.Key, u32) = .empty;
+    /// Entries, so opens can skip the table when no image is busy.
+    var live: std.atomic.Value(usize) = .init(0);
+
+    fn lock() void {
+        while (!mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    /// Marks `k` busy once more; false if there's no memory to.
+    fn add(k: locks.Key) bool {
+        lock();
+        defer mutex.unlock();
+        const e = table.getOrPut(gpa, k) catch return false;
+        if (!e.found_existing) {
+            e.value_ptr.* = 0;
+            _ = live.fetchAdd(1, .monotonic);
+        }
+        e.value_ptr.* += 1;
+        return true;
+    }
+
+    fn drop(k: locks.Key) void {
+        lock();
+        defer mutex.unlock();
+        const e = table.getPtr(k) orelse return;
+        e.* -= 1;
+        if (e.* == 0) {
+            _ = table.remove(k);
+            _ = live.fetchSub(1, .monotonic);
+        }
+    }
+
+    fn any() bool {
+        return live.load(.monotonic) != 0;
+    }
+
+    /// Whether fd's file is a busy executable's.
+    fn has(fd: i32) bool {
+        if (!any()) return false;
+        const k = fileKey(fd) orelse return false;
+        lock();
+        defer mutex.unlock();
+        return table.contains(k);
+    }
+};
+
 /// The file of a lazily filled private mapping (`mm.Src`): a reference
 /// to the fd's channel, which outlives the fd. exec's segments use one
 /// too (elf.load).
@@ -3762,6 +3842,8 @@ pub const LazyFile = struct {
     src: mm.Src = .{ .fill = fill, .free = free },
     gpa: std.mem.Allocator,
     ch: *anyopaque,
+    /// An executable's file, busy while this maps it (`openExec`).
+    busy_key: ?locks.Key = null,
 
     pub fn open(gpa: std.mem.Allocator, fd: i32) ?*LazyFile {
         const ch = kc.chanGet(fd) orelse return null;
@@ -3770,6 +3852,25 @@ pub const LazyFile = struct {
             return null;
         };
         lf.* = .{ .gpa = gpa, .ch = ch };
+        return lf;
+    }
+
+    /// `open` for an image exec loads, if fd's file holds `bytes`, the
+    /// image exec read (`holds`). With `deny_write`, for the program
+    /// itself, the file is busy (`busy`) until the last Mm mapping it lets
+    /// go, as Linux denies writes to a running executable: its untouched
+    /// pages are read from the file, so a rewrite in place would change
+    /// the program under it. Linux lets the interpreter go after exec, and
+    /// so does h9.
+    pub fn openExec(gpa: std.mem.Allocator, fd: i32, bytes: []const u8, deny_write: bool) ?*LazyFile {
+        const lf = open(gpa, fd) orelse return null;
+        if (!lf.holds(bytes)) {
+            lf.src.put();
+            return null;
+        }
+        if (deny_write) if (fileKey(fd)) |k| if (busy.add(k)) {
+            lf.busy_key = k;
+        };
         return lf;
     }
 
@@ -3796,8 +3897,8 @@ pub const LazyFile = struct {
         return true;
     }
 
-    fn fill(s: *mm.Src, dst: []u8, off: u64) void {
-        const lf: *LazyFile = @fieldParentPtr("src", s);
+    fn fill(s: *mm.Src, dst: []u8, off: u64) usize {
+        const lf: *LazyFile = @alignCast(@fieldParentPtr("src", s));
         var done: usize = 0;
         while (done < dst.len) {
             const n = kc.chanPread(lf.ch, dst[done..], off + done) catch break;
@@ -3805,10 +3906,12 @@ pub const LazyFile = struct {
             done += n;
         }
         @memset(dst[done..], 0);
+        return done;
     }
 
     fn free(s: *mm.Src) void {
-        const lf: *LazyFile = @fieldParentPtr("src", s);
+        const lf: *LazyFile = @alignCast(@fieldParentPtr("src", s));
+        if (lf.busy_key) |k| busy.drop(k);
         kc.chanPut(lf.ch);
         lf.gpa.destroy(lf);
     }

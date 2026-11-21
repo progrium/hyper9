@@ -126,6 +126,22 @@ pub const Vma = struct {
     /// rather than all of them at mmap, which for a shared library is
     /// mostly pages no one reads. Held by the Mm (`Mm.srcs`).
     src: ?*Src = null,
+    /// For a lazy mapping: the file offset where a fill found the file's
+    /// end (or a read failed). Its pages wholly past it aren't mapped
+    /// (`liveEnd`), and a touch there is SIGBUS, as Linux's is for a
+    /// mapping past the end of its file, rather than zeros the program
+    /// would run as code or read as data. It only comes down: a file
+    /// that grows again isn't read again for pages already found past it.
+    eof: u64 = std.math.maxInt(u64),
+
+    /// The end of the pages that can be mapped: `end`, or for a lazy
+    /// mapping that found its file's end, the first page wholly past it.
+    pub fn liveEnd(v: *const Vma) u64 {
+        if (v.src == null or v.eof == std.math.maxInt(u64)) return v.end;
+        const e = std.mem.alignForward(u64, v.eof, page);
+        if (e <= v.offset) return v.start;
+        return @min(v.end, v.start + (e - v.offset));
+    }
 
     pub const Name = struct {
         buf: [96]u8 = undefined,
@@ -152,8 +168,9 @@ const Run = struct { va: u64, len: u64, perms: vmm.Perms = .{} };
 pub const Src = struct {
     refs: std.atomic.Value(u32) = .init(1),
     /// Reads the file at `off` into `dst`, with zeros past its end or
-    /// after a failed read.
-    fill: *const fn (s: *Src, dst: []u8, off: u64) void,
+    /// after a failed read: the bytes read before either. It may block
+    /// (a 9P read), so `fault` calls it without the Mm's lock.
+    fill: *const fn (s: *Src, dst: []u8, off: u64) usize,
     /// Frees it, after its last reference.
     free: *const fn (s: *Src) void,
 
@@ -572,10 +589,11 @@ pub const Mm = struct {
         if (v.src) |s| {
             try m.ownRange(v.start, v.end, false);
             try m.srcs.ensureUnusedCapacity(m.gpa, 1);
-            try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+            const at = m.indexAfter(v.start);
+            try m.vmas.insert(m.gpa, at, v);
             if (std.mem.indexOfScalar(*Src, m.srcs.items, s) == null) m.srcs.appendAssumeCapacity(s.get());
             // Chunks allocated already won't be filled by `populate`.
-            m.fillAllocated(v, v.start, v.end);
+            m.fillAllocated(&m.vmas.items[at], v.start, v.end);
         } else try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
         try m.refreshRange(v.start, v.end);
     }
@@ -583,7 +601,7 @@ pub const Mm = struct {
     /// Reads the file pages of lazy VMA `v` over [start, end) into the
     /// chunks there that are allocated, past any overlays. The caller
     /// owns them first (`ownRange`).
-    fn fillAllocated(m: *Mm, v: Vma, start: u64, end: u64) void {
+    fn fillAllocated(m: *Mm, v: *Vma, start: u64, end: u64) void {
         const s = v.src.?;
         var ci = start / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
@@ -592,15 +610,20 @@ pub const Mm = struct {
             const cs = ci * chunk_size;
             var lo = @max(start, cs) - cs;
             const hi = @min(end, cs + chunk_size) - cs;
+            const live = v.liveEnd();
             while (lo < hi) {
                 const b = c.backing(lo);
                 const e = @min(hi, b.end);
                 if (!b.overlay) {
-                    s.fill(s, b.mem[0..@intCast(e - lo)], v.offset + (cs + lo - v.start));
+                    const off = v.offset + (cs + lo - v.start);
+                    const n = s.fill(s, b.mem[0..@intCast(e - lo)], off);
+                    if (n < e - lo) v.eof = @min(v.eof, off + n);
                     m.as.hostWrote(b.mem[0..@intCast(e - lo)]);
                 }
                 lo = e;
             }
+            // Pages found past the file's end are unmapped (`liveEnd`).
+            if (v.liveEnd() != live) m.remap(ci, c) catch {};
         }
     }
 
@@ -613,12 +636,89 @@ pub const Mm = struct {
         var i = m.indexAfter(cs);
         if (i > 0 and m.vmas.items[i - 1].end > cs) i -= 1;
         while (i < m.vmas.items.len and m.vmas.items[i].start < ce) : (i += 1) {
-            const v = m.vmas.items[i];
+            const v = &m.vmas.items[i];
             const s = v.src orelse continue;
             const lo = @max(v.start, cs);
             const hi = @min(v.end, ce);
             if (lo >= hi) continue;
-            s.fill(s, mem[@intCast(lo - cs)..@intCast(hi - cs)], v.offset + (lo - v.start));
+            const off = v.offset + (lo - v.start);
+            const n = s.fill(s, mem[@intCast(lo - cs)..@intCast(hi - cs)], off);
+            if (n < hi - lo) v.eof = @min(v.eof, off + n);
+        }
+    }
+
+    /// A read `fault` makes for a new chunk with the lock dropped: lazy
+    /// VMA [lo, hi) of the chunk from `src` at `off`, and what it read.
+    const Fill = struct { src: *Src, lo: u64, hi: u64, off: u64, n: u64 = 0 };
+    const max_fills = 8;
+
+    /// The reads that fill chunk `ci`'s lazy VMAs, into `out`: null if
+    /// there are more than it holds.
+    fn fillsOf(m: *Mm, ci: u64, out: *[max_fills]Fill) ?[]Fill {
+        const cs = ci * chunk_size;
+        const ce = cs + chunk_size;
+        var k: usize = 0;
+        var i = m.indexAfter(cs);
+        if (i > 0 and m.vmas.items[i - 1].end > cs) i -= 1;
+        while (i < m.vmas.items.len and m.vmas.items[i].start < ce) : (i += 1) {
+            const v = &m.vmas.items[i];
+            const s = v.src orelse continue;
+            const lo = @max(v.start, cs);
+            const hi = @min(v.end, ce);
+            if (lo >= hi) continue;
+            if (k == max_fills) return null;
+            out[k] = .{ .src = s, .lo = lo, .hi = hi, .off = v.offset + (lo - v.start) };
+            k += 1;
+        }
+        return out[0..k];
+    }
+
+    /// For `fault`, before it takes the lock: allocates the chunk holding
+    /// `va` if it's missing and has lazy VMAs, reading their file pages
+    /// with the lock dropped, so a slow read (a 9P server, a remote root)
+    /// doesn't hold off the Mm's other threads, spinning on the lock in
+    /// their own faults and syscalls. The chunk goes in only if nothing
+    /// got there first and its lazy VMAs are as they were; otherwise the
+    /// pages are freed, and `fault` populates it under the lock as usual.
+    fn fillUnlocked(m: *Mm, va: u64) void {
+        const ci = va / chunk_size;
+        var buf: [max_fills]Fill = undefined;
+        m.lockSpin();
+        if (m.srcs.items.len == 0 or m.chunks.get(ci) != null or m.find(va) == null) {
+            m.lock.unlock();
+            return;
+        }
+        const fills: []Fill = m.fillsOf(ci, &buf) orelse &.{};
+        if (fills.len == 0) {
+            m.lock.unlock();
+            return;
+        }
+        const p = m.newPages() catch {
+            m.lock.unlock();
+            return;
+        };
+        for (fills) |f| _ = f.src.get();
+        m.lock.unlock();
+        defer for (fills) |f| f.src.put();
+        const cs = ci * chunk_size;
+        for (fills) |*f| f.n = f.src.fill(f.src, p.mem[@intCast(f.lo - cs)..@intCast(f.hi - cs)], f.off);
+        m.lockSpin();
+        defer m.lock.unlock();
+        var now_buf: [max_fills]Fill = undefined;
+        const same = m.chunks.get(ci) == null and if (m.fillsOf(ci, &now_buf)) |now| now.len == fills.len and for (now, fills) |a, b| {
+            if (a.src != b.src or a.lo != b.lo or a.hi != b.hi or a.off != b.off) break false;
+        } else true else false;
+        if (same) {
+            for (fills) |f| if (f.n < f.hi - f.lo) {
+                const v = m.find(f.lo).?;
+                v.eof = @min(v.eof, f.off + f.n);
+            };
+            if (m.addChunk(ci, p, false)) |_| return else |_| {}
+        }
+        // A failed addChunk leaves the pages unreferenced, as in populate.
+        if (p.refs.load(.acquire) == 0) {
+            m.backend.freePages(p.mem);
+            m.gpa.destroy(p);
         }
     }
 
@@ -990,14 +1090,25 @@ pub const Mm = struct {
                 continue;
             };
             any = true;
-            var run_end = @min(v.end, cs + chunk_size);
+            // A lazy mapping's pages past its file's end stay unmapped,
+            // so a touch faults, and `fault` makes it SIGBUS.
+            const live = v.liveEnd();
+            if (va >= live) {
+                p += 1;
+                continue;
+            }
+            var run_end = @min(live, cs + chunk_size);
+            var whole = live == v.end;
             // Neighbouring VMAs with the same page permissions share one
             // run, so a heap of many small mappings (musl's malloc makes one
             // per group) stays a region per chunk, not one per mapping.
-            while (run_end < cs + chunk_size) {
+            while (whole and run_end < cs + chunk_size) {
                 const w = m.find(run_end) orelse break;
                 if (!std.meta.eql(w.prot.perms(), v.prot.perms())) break;
-                run_end = @min(w.end, cs + chunk_size);
+                const we = w.liveEnd();
+                if (we <= run_end) break;
+                run_end = @min(we, cs + chunk_size);
+                whole = we == w.end;
             }
             const b = c.backing(p * page);
             run_end = @min(run_end, cs + b.end);
@@ -1033,6 +1144,9 @@ pub const Mm = struct {
             const v = m.find(cs + p * page);
             w.* = if (v) |x| x.prot.perms() else null;
             if (v != null) any = true;
+            if (v) |x| if (cs + p * page >= x.liveEnd()) {
+                w.* = null;
+            };
             if (w.* != null and (c.cow or (v.?.cow and overlayAt(c, p * page) != null))) w.*.?.write = false;
         }
         if (!any) {
@@ -1160,8 +1274,11 @@ pub const Mm = struct {
     /// with no remap in between.
     ///
     /// A write to a chunk a fork shares copy-on-write copies it (`own`),
-    /// NoSpace if that finds no memory.
-    pub fn fault(m: *Mm, va: u64, access: Access) Error!?u64 {
+    /// NoSpace if that finds no memory. A page of a lazy file mapping
+    /// wholly past the file's end is Bus (SIGBUS). A new chunk's file
+    /// pages are read with the lock dropped (`fillUnlocked`).
+    pub fn fault(m: *Mm, va: u64, access: Access) (Error || error{Bus})!?u64 {
+        m.fillUnlocked(va);
         var copied = false;
         defer if (copied) m.settle(false);
         m.lockSpin();
@@ -1177,6 +1294,7 @@ pub const Mm = struct {
         };
         if (!ok) return null;
         const c = m.chunks.get(va / chunk_size) orelse try m.populate(va);
+        if (va - va % page >= v.liveEnd()) return error.Bus;
         if (access == .write) try m.own(va / chunk_size, c);
         if (access == .write and v.cow) try m.breakCow(va / chunk_size, c, va % chunk_size);
         return m.remaps;
@@ -1211,6 +1329,14 @@ pub const Mm = struct {
         while (ci * chunk_size < end) : (ci += 1) {
             const c = try m.populate(ci * chunk_size);
             if (write) try m.own(ci, c);
+        }
+        // A lazy mapping's pages past its file's end, found only once
+        // they're filled, are EFAULT to a syscall, as on Linux.
+        at = va;
+        while (at < end) {
+            const v = m.find(at).?;
+            if (v.liveEnd() < @min(v.end, end)) return error.BadAddress;
+            at = @min(v.end, end);
         }
         if (write) try m.unshare(va, end);
     }
@@ -1439,7 +1565,7 @@ pub const Mm = struct {
         defer m.lock.unlock();
         m.dropWhole(start, end);
         try m.ownRange(start, end, false);
-        for (m.vmas.items) |v| {
+        for (m.vmas.items) |*v| {
             if (v.end <= start or v.start >= end or v.shared) continue;
             if (v.src != null)
                 m.fillAllocated(v, @max(v.start, start), @min(v.end, end))
@@ -1528,8 +1654,17 @@ pub const Mm = struct {
     pub fn mapsText(m: *Mm, w: *std.Io.Writer) void {
         m.lockSpin();
         defer m.lock.unlock();
-        for (m.vmas.items) |v| {
-            if (v.pad) continue;
+        for (m.vmas.items, 0..) |v0, i| {
+            if (v0.pad) continue;
+            // A run of VMAs that are one file mapping in pieces (elf.load
+            // splits a segment where pages are copied in or read as
+            // they're touched) is one line, as Linux's one VMA is.
+            if (i + 1 < m.vmas.items.len and joins(v0, m.vmas.items[i + 1])) continue;
+            var v = v0;
+            var j = i;
+            while (j > 0 and joins(m.vmas.items[j - 1], m.vmas.items[j])) j -= 1;
+            v.start = m.vmas.items[j].start;
+            v.offset = m.vmas.items[j].offset;
             const name: []const u8 = switch (v.kind) {
                 .heap => "[heap]",
                 .stack => "[stack]",
@@ -1546,6 +1681,14 @@ pub const Mm = struct {
             if (name.len > 0) w.print("{s: >20}{s}", .{ "", name }) catch return;
             w.writeAll("\n") catch return;
         }
+    }
+
+    /// Whether VMA `b` continues `a` as one file mapping: adjacent, the
+    /// same file at the next offset, with the same permissions and kind.
+    fn joins(a: Vma, b: Vma) bool {
+        return a.kind == .file and b.kind == .file and a.end == b.start and !a.pad and !b.pad and
+            a.shared == b.shared and std.meta.eql(a.prot, b.prot) and
+            b.offset == a.offset + (a.end - a.start) and std.mem.eql(u8, a.name.slice(), b.name.slice());
     }
 };
 
@@ -1683,4 +1826,43 @@ test "pin returns null for a buffer that isn't one contiguous mapped run" {
     // reference left behind.
     try testing.expectEqual(@as(?Mm.Pinned, null), m.pin(va, 2 * page, false));
     try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
+}
+
+test "a lazy mapping's pages wholly past its file's end aren't live" {
+    var dummy: Src = .{ .fill = undefined, .free = undefined };
+    var v: Vma = .{ .start = 0x10000, .end = 0x14000, .prot = .{ .read = true }, .kind = .file, .offset = 0x2000, .src = &dummy };
+    try testing.expectEqual(@as(u64, 0x14000), v.liveEnd());
+    // The file ends 100 bytes into the mapping's second page: that page
+    // keeps them, and the two after it are past the end.
+    v.eof = 0x3000 + 100;
+    try testing.expectEqual(@as(u64, 0x12000), v.liveEnd());
+    v.eof = 0x3000;
+    try testing.expectEqual(@as(u64, 0x11000), v.liveEnd());
+    v.eof = 0x1000;
+    try testing.expectEqual(@as(u64, 0x10000), v.liveEnd());
+    v.eof = 0x9000;
+    try testing.expectEqual(@as(u64, 0x14000), v.liveEnd());
+    v.src = null;
+    try testing.expectEqual(@as(u64, 0x14000), v.liveEnd());
+}
+
+test "maps joins a file mapping's pieces, and nothing else" {
+    const a: Vma = .{ .start = 0x10000, .end = 0x12000, .prot = .{ .read = true, .exec = true }, .kind = .file, .name = .init("/bin/x"), .offset = 0x1000 };
+    var b = a;
+    b.start = 0x12000;
+    b.end = 0x20000;
+    b.offset = 0x3000;
+    try testing.expect(Mm.joins(a, b));
+    var c = b;
+    c.offset = 0x4000;
+    try testing.expect(!Mm.joins(a, c));
+    c = b;
+    c.prot.write = true;
+    try testing.expect(!Mm.joins(a, c));
+    c = b;
+    c.name = .init("/bin/y");
+    try testing.expect(!Mm.joins(a, c));
+    c = b;
+    c.kind = .anon;
+    try testing.expect(!Mm.joins(a, c));
 }
