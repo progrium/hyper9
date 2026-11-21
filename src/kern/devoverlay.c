@@ -1762,20 +1762,34 @@ static void
 unreroot(Unc *u, Chan *nc, char *path)
 {
 	char buf[Maxname];
+	char *volatile p;
 	int i, n;
 
+	/*
+	 * path is often u->path itself (uncreate, unremove), which is freed
+	 * below, so walk a copy of it.
+	 */
+	p = strdup(path);
+	if(p == nil)
+		error(Enomem);
+	if(waserror()){
+		free(p);
+		nexterror();
+	}
 	untop(u);
 	free(u->path);
 	u->path = strdup("");
 	if(u->path == nil)
 		error(Enomem);
 	nc->qid = unrootqid();
-	n = npathelem(path);
+	n = npathelem(p);
 	for(i = 0; i < n; i++){
-		pathelem(path, i, buf);
+		pathelem(p, i, buf);
 		if(!unstep(u, nc, buf))
 			error(Enonexist);
 	}
+	poperror();
+	free(p);
 }
 
 /*
