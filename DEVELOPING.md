@@ -379,7 +379,7 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/aout.zig` | a.out parser and arch layouts |
 | `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, and emu, on Unicorn or h9's own CPUs, which the browser host uses), with the guest-physical allocator and page tables the hypervisor backends share |
 | `src/hcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (`-Demu=hcpu`): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
-| `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`) and the demo page |
+| `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
 | `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers, and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |

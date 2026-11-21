@@ -9,6 +9,7 @@
 //! to exit, then stops the rest.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vmm = @import("vmm.zig");
 const loader = @import("loader.zig");
 const aout = @import("aout.zig");
@@ -27,6 +28,7 @@ const rootindex = @import("rootindex.zig");
 const hidx = @import("rootindex/kern.zig");
 const ws = @import("ws.zig");
 const cred = @import("cred.zig");
+const statictree = @import("statictree.zig");
 const serve = @import("serve.zig");
 const lsys = @import("linux/sys.zig");
 const lsig = @import("linux/signal.zig");
@@ -210,6 +212,9 @@ pub const Machine = struct {
         /// Where compiled indexes are cached; null caches nothing. The
         /// CLI's default is `$XDG_CACHE_HOME/h9/index` and the like.
         index_cache: ?[]const u8 = null,
+        /// A host directory for the sockets h9 serves static trees on, in
+        /// private directories of their own. The CLI's is `$TMPDIR`.
+        tmp_dir: []const u8 = default_tmp_dir,
         /// For the plan only (`--print`): an `index=` file's counts,
         /// which the CLI reads it for.
         root_index_counts: ?struct { entries: u32, dirs: u32 } = null,
@@ -371,6 +376,12 @@ pub const Machine = struct {
     hidx_root: ?u32 = null,
     /// The root's first 9P member went through `indexRoot`.
     root_indexed: bool = false,
+    /// The static dotfs trees h9 serves the kernel (design/mounts.md,
+    /// "Static trees"), until the run ends.
+    static_servers: std.ArrayList(*statictree.Server) = .empty,
+    /// The last `connectUrl` connected to a static tree, which has no
+    /// server for `#ι` to ask.
+    conn_static: bool = false,
 
     /// Each `serve` listener's bound address, in the order given, with
     /// port 0 resolved, once a run has opened them; empty before.
@@ -426,7 +437,7 @@ pub const Machine = struct {
                         .entries = if (opts.root_index_counts) |c| c.entries else null,
                         .dirs = if (opts.root_index_counts) |c| c.dirs else null,
                     } } else .auto;
-                }
+                } else if (opts.index == .none) r.index = .none;
                 b.note = try policy.rootNoteOf(arena, r.*);
             };
             plan.binds = bs;
@@ -503,6 +514,9 @@ pub const Machine = struct {
             g.signals.hangup(g.io);
         }
     };
+
+    /// `Options.tmp_dir`'s default.
+    pub const default_tmp_dir = if (builtin.os.tag == .windows) "C:\\Windows\\Temp" else "/tmp";
 
     pub fn deinit(m: *Machine) void {
         // A stuck process still uses the backend and the plan, so they're
@@ -649,6 +663,9 @@ pub const Machine = struct {
             hstream.unregisterHost(@intFromPtr(mc));
             mc.put();
         }
+        // The static trees the run's mounts served, now nothing dials them.
+        if (comptime !no_threads) for (job.mc.static_servers.items) |sv| sv.stop();
+        job.mc.static_servers.deinit(m.gpa);
         // No process reads the console now. A reader thread still in a
         // host read that can't be cancelled keeps the Job, leaked.
         const freed = if (job.con_in) |*in| in.stop(grace_ms) else true;
@@ -3506,16 +3523,36 @@ pub const Machine = struct {
         const what = if (is_root) "root" else "mount";
         var ib: [ws.max_user]u8 = undefined;
         var ident: ?hstream.Identity = null;
+        m.conn_static = false;
         const conn = if (is_root) try m.connectUrl(r, b.fd, host, "root", &ib, &ident) else try m.connectUrl(r, b.fd, host, "mount", &ib, &ident);
+        // A static tree answers walks from its index already.
+        const static = m.conn_static;
         // Through #ι (design/mount-index.md): the root's first 9P member
         // with its given index or its server's, and any other with its
         // server's `.fs/index`.
         var num: ?u32 = null;
         const first_root = is_root and !m.root_indexed;
-        const fd = if (std.mem.startsWith(u8, b.to, "/srv/")) conn else if (first_root) blk: {
+        const fd = if (std.mem.startsWith(u8, b.to, "/srv/") or static) conn else if (first_root) blk: {
             m.root_indexed = true;
             break :blk try m.indexRoot(r, conn);
-        } else m.indexMount(conn, r.addr, b.spec, &num);
+        } else switch (r.index) {
+            // `index=` on a mount: the index it names, as the root's.
+            .given => |g| blk: {
+                const got = m.giveRootIndex(what, r.addr, rootIndexOf(g.from)) catch |e| {
+                    kern.close(conn) catch {};
+                    return e;
+                };
+                const id = got orelse break :blk m.indexMount(conn, r.addr, b.spec, &num);
+                var arg: [32]u8 = undefined;
+                var n: u32 = 0;
+                defer kern.close(conn) catch {};
+                const f = hidxConv(std.fmt.bufPrint(&arg, "index {d}", .{id}) catch unreachable, conn, &n) catch return m.fail("{s} {f}: index: {s}", .{ what, shown, kern.errstr() });
+                num = n;
+                break :blk f;
+            },
+            else => m.indexMount(conn, r.addr, b.spec, &num),
+        };
+        if (first_root) m.root_indexed = true;
         defer kern.close(fd) catch {};
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
@@ -3583,12 +3620,19 @@ pub const Machine = struct {
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         switch (r.kind) {
             .ws => {
-                const conn = try m.connectStream(r.addr, .{
+                const conn = m.connectStream(r.addr, .{
                     .headers = r.headers,
                     .ca_file = r.ca,
                     .proxy = m.opts.proxy orelse .{},
                     .cred = m.opts.cred_helpers,
-                }, what, ib, ident);
+                    .static_tree = r.http != null,
+                }, what, ib, ident) catch |e| {
+                    // The probe (design/mounts.md): an `http` URL whose
+                    // server doesn't upgrade may be a static tree.
+                    const url = r.http orelse return e;
+                    if (e != error.NamespaceFailed or std.mem.indexOf(u8, m.err_msg, ": server answered ") == null) return e;
+                    return m.connectStatic(r, url, what);
+                };
                 defer kern.close(conn) catch {};
                 // --user-map and user= win over the server's names.
                 if (m.opts.user_map != null or r.user != null) ident.* = null;
@@ -3612,6 +3656,60 @@ pub const Machine = struct {
                 return dotlConv("fd {d}", conn) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
             },
         }
+    }
+
+    /// Serves the static dotfs tree at `url` (design/mounts.md, "Static
+    /// trees") on a host socket and returns an fd on a `#ℓ` conversation
+    /// dialed to it, as for a unix-socket server. `m.err_msg` holds why
+    /// the WebSocket handshake failed, for the message if there's no
+    /// tree either.
+    fn connectStatic(m: *Machine, r: policy.NinePRoot, url: []const u8, comptime what: []const u8) RunError!u31 {
+        const shown = ws.Url.elide(url);
+        // The browser host serves static trees with the page's fetch.
+        if (comptime no_threads) return m.fail(what ++ " {f}: static trees are served by the page here", .{shown}) else return m.serveStatic(r, url, what);
+    }
+
+    /// No host threads to serve static trees on: the browser host.
+    const no_threads = builtin.os.tag == .wasi or builtin.os.tag == .freestanding;
+
+    fn serveStatic(m: *Machine, r: policy.NinePRoot, url: []const u8, comptime what: []const u8) RunError!u31 {
+        const shown = ws.Url.elide(url);
+        var ws_why: [256]u8 = undefined;
+        const at = std.mem.indexOf(u8, m.err_msg, ": server answered ").?;
+        const ws_said = std.fmt.bufPrint(&ws_why, "{s}", .{m.err_msg[at + 2 ..]}) catch m.err_msg[at + 2 ..];
+        const gpa = m.gpa;
+        var bb: [std.fs.max_path_bytes]u8 = undefined;
+        const opts: statictree.Options = .{
+            .headers = r.headers,
+            .ca_file = r.ca,
+            .proxy = m.opts.proxy orelse .{},
+            .cred = m.opts.cred_helpers,
+            .blob_dir = if (m.opts.index_cache) |d| std.fmt.bufPrint(&bb, "{s}/blobs", .{d}) catch null else null,
+        };
+        var why_buf: [256]u8 = undefined;
+        var why_len: usize = 0;
+        const text = (statictree.fetchIndex(gpa, m.io, url, opts, &why_buf, &why_len) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        }) orelse return m.fail(what ++ " {f}: no 9P server (the WebSocket handshake: {s}) and no static tree (/.fs/index: {s})", .{ shown, ws_said, why_buf[0..why_len] });
+        defer gpa.free(text);
+        const tree = statictree.Tree.create(gpa, m.io, url, text, opts) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return m.fail(what ++ " {f}: static tree: /.fs/index: bad index", .{shown}),
+        };
+        const sv = statictree.Server.start(gpa, m.io, tree, m.opts.tmp_dir) catch |e| {
+            tree.destroy();
+            return m.fail(what ++ " {f}: static tree: can't serve it: {s}", .{ shown, @errorName(e) });
+        };
+        m.static_servers.append(gpa, sv) catch {
+            sv.stop();
+            return error.OutOfMemory;
+        };
+        m.conn_static = true;
+        // h9's own server, even for a namespace file's mount.
+        kern.setPlan(null);
+        defer kern.setPlan(&m.plan);
+        return dotlConv("dial {s}", sv.dial) catch return m.fail(what ++ " {f}: static tree: {s}", .{ shown, kern.errstr() });
     }
 
     /// Makes `$home`, `/usr/$user`, in the root's overlay if the root
@@ -3654,7 +3752,7 @@ pub const Machine = struct {
         if (m.opts.index == .none and !m.opts.verbose) return conn;
         var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
         const ctl = if (m.opts.index == .none) "" else if (m.opts.root_index) |given| blk: {
-            const got = m.giveRootIndex(r.addr, given) catch |e| {
+            const got = m.giveRootIndex("root", r.addr, given) catch |e| {
                 kern.close(conn) catch {};
                 return e;
             };
@@ -3668,10 +3766,10 @@ pub const Machine = struct {
         return fd;
     }
 
-    /// Reads, compiles, and hands `#ι` the root's `index=` index, and
-    /// returns its number; null when it's to be ignored. One that can't
+    /// Reads, compiles, and hands `#ι` a 9P member's `index=` index (the
+    /// root's, or a mount's), and returns its number; null when it's to be ignored. One that can't
     /// be read fails the run, as an unreachable root does.
-    fn giveRootIndex(m: *Machine, addr: []const u8, given: RootIndex) RunError!?u32 {
+    fn giveRootIndex(m: *Machine, what: []const u8, addr: []const u8, given: RootIndex) RunError!?u32 {
         const a = hidx.allocator;
         const from = switch (given) {
             inline else => |x| x,
@@ -3685,7 +3783,7 @@ pub const Machine = struct {
                     m.indexNote("index: {s} is larger than 256 MB; ignored", .{path});
                     return null;
                 },
-                else => return m.fail("root {f}: index={s}: {s}", .{ ws.Url.elide(addr), path, rootIndexError(e) }),
+                else => return m.fail("{s} {f}: index={s}: {s}", .{ what, ws.Url.elide(addr), path, rootIndexError(e) }),
             },
             .url => |url| switch (hstream.fetchIndex(a, m.io, url, .{
                 .ca_file = if (m.rootUrl()) |ru| ru.ca else null,
@@ -3697,7 +3795,7 @@ pub const Machine = struct {
                     return null;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return m.fail("root {f}: index={f}: {s}", .{ ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
+                else => return m.fail("{s} {f}: index={f}: {s}", .{ what, ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
             }) {
                 .compiled => |b| return m.giveCompiled(b, from, true),
                 .text => |t| blk: {
@@ -3739,6 +3837,12 @@ pub const Machine = struct {
         mc.put();
         var lb: [256]u8 = undefined;
         return try hidx.give(owner, compiled, std.fmt.bufPrint(&lb, "{f}", .{ws.Url.elide(from)}) catch from, cached);
+    }
+
+    /// An `index=` value: a URL by its scheme, and otherwise a host file.
+    fn rootIndexOf(from: []const u8) RootIndex {
+        if (std.mem.startsWith(u8, from, "https://") or std.mem.startsWith(u8, from, "http://")) return .{ .url = from };
+        return .{ .path = from };
     }
 
     fn rootIndexError(e: anyerror) []const u8 {

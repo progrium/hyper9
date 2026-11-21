@@ -728,7 +728,7 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     const dir: std.Build.InstallDir = .{ .custom = "web" };
     const all = b.step("web-install", "");
     all.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dir } }).step);
-    for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "index.html", "package.json" }) |f|
+    for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "statictree.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
     return .{ .exe = exe, .install = all };
 }

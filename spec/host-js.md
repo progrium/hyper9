@@ -35,7 +35,7 @@ Preemption is a budget: each slice runs 64K instructions at a time, and `run` yi
 
 `h9-node` runs the CLI under Node 24 or later, with the same flags as `h9`; it's how the integration suite tests the web host.
 
-In a page, `createMachine({ root, memory, policy, terminal, gfx })` from `h9-web.js` starts one machine in its own Worker (`src/web/worker.js`) and `machine.run(argv)` resolves to the exit status. `gfx` gives it a canvas ([Graphics](machine.md#graphics---gfx)).
+In a page, `createMachine({ mounts, binds, memory, policy, terminal, gfx })` from `h9-web.js` starts one machine in its own Worker (`src/web/worker.js`) and `machine.run(argv)` resolves to the exit status. `mounts` takes the CLI's mount flags as strings (`'--archive=stack.h9a:/'`) or objects (`{ archive }`, `{ url }`, `{ dir }`, `{ builtin }`, or `{ tmp }`, with `dst` and `opts`), and defaults to `root.h9a` on `/`; each archive is fetched and unpacked into the Worker's tree, and `binds` are `--bind` lines. A `{ url }` that's `http://` or `https://` and whose server doesn't upgrade is served as a static dotfs tree by `src/web/statictree.js`, a 9P2000 server over the page's `fetch` behind the WebSocket the kernel opened. `gfx` gives it a canvas ([Graphics](machine.md#graphics---gfx)).
 
 `root` is a root archive's URL, or a `ws://` or `wss://` URL of a 9P server, under which WASI sees an empty tree; the page edits and echoes lines in cooked mode, passes keys in raw mode, and sends the interrupt key as `Machine.Signals.interrupt`.
 

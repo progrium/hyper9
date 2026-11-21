@@ -102,7 +102,7 @@ const Raw = struct {
 /// Undoes dotfs's escaping: `%XX` for every byte but 0x21 to 0x7E other
 /// than `%`. A raw byte that should have been escaped is refused, and so
 /// `-` is left as it is: callers decide whether it means empty.
-fn unescape(arena: Allocator, f: []const u8) error{ OutOfMemory, Bad }![]u8 {
+pub fn unescape(arena: Allocator, f: []const u8) error{ OutOfMemory, Bad }![]u8 {
     var out: std.ArrayList(u8) = try .initCapacity(arena, f.len);
     var i: usize = 0;
     while (i < f.len) : (i += 1) {
@@ -266,7 +266,7 @@ pub fn compile(gpa: Allocator, text: []const u8, diag: *Diag) CompileError![]u8 
 
 /// A path as dotfs has it, unescaped: absolute, no empty, `.`, or `..`
 /// elements, no trailing slash but the root's, and no NUL.
-fn validPath(p: []const u8) bool {
+pub fn validPath(p: []const u8) bool {
     if (p.len == 0 or p[0] != '/') return false;
     if (p.len == 1) return true;
     var it = std.mem.splitScalar(u8, p[1..], '/');

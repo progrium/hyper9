@@ -72,7 +72,7 @@ import { createMachine } from './h9-web.js';
 const dec = new TextDecoder();
 window.t = { out: '', snarfs: [], code: undefined, error: undefined, m: null };
 window.start = async (gfx, argv) => {
-  const m = await createMachine({ root: 'root-test.h9a', gfx: { canvas: document.getElementById('c'), ...gfx },
+  const m = await createMachine({ mounts: [{ archive: 'root-test.h9a' }], gfx: { canvas: document.getElementById('c'), ...gfx },
     terminal: { write: (b) => { t.out += dec.decode(b, { stream: true }); } } });
   t.m = m;
   m.addEventListener('snarf', (e) => t.snarfs.push(e.text));

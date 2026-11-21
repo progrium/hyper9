@@ -313,11 +313,11 @@ Integration cases:
 - [x] `test "a missing DST is made in the root's overlay [mounts]"`
 - [x] `test "a missing DST under a read-only root is exit 125 [mounts]"`
 - [x] `test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mounts]"`
-- [ ] `test "--url http:// upgrades to a WebSocket when the server answers 101 [mounts]"`
-- [ ] `test "--url http:// falls back to a static dotfs tree [mounts]"`
-- [ ] `test "a static tree reads by Range and fails a read on a hash mismatch [mounts]"`
-- [ ] `test "a static tree loads a nested index on first use [mounts]"`
-- [ ] `test "a 9P server's .fs/index answers walks without the server [mounts]"`
+- [x] `test "--url http:// upgrades to a WebSocket when the server answers 101 [mounts]"`
+- [x] `test "--url http:// falls back to a static dotfs tree [mounts]"`
+- [x] `test "a static tree reads by Range and fails a read on a hash mismatch [mounts]"`
+- [x] `test "a static tree loads a nested index on first use [mounts]"`
+- [x] `test "a 9P server's .fs/index answers walks without the server [mounts]"`
 - [x] `test "--url to /srv/NAME posts without mounting [mounts]"`
 - [x] `test "--archive unpacks into memory, counted against --memory [mounts]"`
 - [x] `test "--tmp makes an empty writable tree [mounts]"`
@@ -344,8 +344,8 @@ Integration cases:
 
 Browser host:
 
-- [ ] `test('createMachine mounts an archive stack and a ws:// URL [mounts]')`
-- [ ] `test('createMachine mounts a static tree over fetch [mounts]')`
+- [x] `test('createMachine mounts an archive stack and a ws:// URL [mounts]')`
+- [x] `test('createMachine mounts a static tree over fetch [mounts]')`
 
 ## Implementation
 
@@ -367,3 +367,13 @@ Browser host:
 - **`#H/over` precedence.** Binding h9's `bind` before the root's `/bin` is the first time h9 shadows a root command. It may want to be part of `--builtin` on top of the stack.
 - **dotfs's static profile** isn't written in dotfs itself yet: the path mapping, `Accept-Encoding` for zstd, and Range reads. It belongs there, so other clients serve and read static trees the same way.
 - **`https://` archives.** `--archive` could take a URL, as the browser host's `layers` do now.
+
+## Updates
+
+- 2026-11-21: **Every case passes on the `mounts` branch,** on the native backend (amd64), with the browser cases in Chromium. Notes on the implementation:
+  - **A file up to 64 KiB is fetched whole,** not only its first `msize`, so a small file costs one request and is checked against its hash before any of it is read. A larger file is read by Range, a request per read, and is checked only when a server ignores the Range and sends it whole.
+  - **Checked contents are kept under `--index-cache DIR`'s `blobs`,** named by hash, so the cache that holds compiled indexes holds them too, and `--index-cache` in a case keeps its runs apart.
+  - **The host-side server listens in a private directory under `Machine.Options.tmp_dir`,** `$TMPDIR` from the CLI, and stops when the run ends, shutting down a connection the kernel still holds.
+  - **On the browser host, any failed WebSocket tries the index,** since a page's WebSocket doesn't say what the server answered. `src/web/statictree.js` serves the tree, BLAKE3 included, as a 9P2000 server behind the WebSocket the kernel opened, so the kernel side is the same as for a WebSocket server.
+  - **`index=` off `/` replaced [mount-index](mount-index.md)'s usage error,** whose case is waived there, by `test "index= on a mount off / names its index [mounts]"`.
+  - **An `http` URL's plan line keeps the `http` form,** so `--print` replays with the probe, and its note says "or a static tree".

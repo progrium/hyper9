@@ -167,6 +167,11 @@ pub const NinePRoot = struct {
     cred: ?[]const u8 = null,
     /// Its metadata index (design/mount-index.md), as the plan shows it.
     index: Index = .auto,
+    /// An `http://` or `https://` URL, or one without a scheme, as that:
+    /// `addr` is its WebSocket form, and when the handshake is answered
+    /// with anything but a 101, h9 fetches `http/.fs/index` for a static
+    /// tree instead (design/mounts.md, "The probe").
+    http: ?[]const u8 = null,
 
     pub const Index = union(enum) {
         /// The server's `.fs/index`, if it has one.
@@ -427,6 +432,7 @@ pub fn rootNoteOf(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]c
         if (std.mem.indexOfScalar(u8, r.addr, '?')) |q| {
             w.print("{s}…", .{r.addr[0 .. q + 1]}) catch return error.OutOfMemory;
         } else w.writeAll(r.addr) catch return error.OutOfMemory;
+        if (r.http != null) w.writeAll(" or a static tree") catch return error.OutOfMemory;
         if (r.headers.len > 0) {
             w.writeAll("  (") catch return error.OutOfMemory;
             for (r.headers, 0..) |h, i| {
@@ -927,9 +933,9 @@ fn isWs(url: []const u8) bool {
 /// The 9P connection a `--url` mount makes (design/mounts.md, "URLs"):
 /// `tcp://HOST:PORT[/SPEC]` dials `tcp!HOST!PORT`, `unix:///PATH` the
 /// socket at PATH, and `ws://` and `wss://` as they are. `http://` and
-/// `https://` are a WebSocket's (static dotfs trees aren't served yet),
-/// and a URL without a scheme is `ws://` for a loopback host and `wss://`
-/// for any other.
+/// `https://` probe for a WebSocket, and fall back to a static dotfs
+/// tree; a URL without a scheme is `http://` for a loopback host and
+/// `https://` for any other.
 pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!NinePRoot {
     var r: NinePRoot = .{ .kind = .ws, .addr = m.src, .user = m.user, .headers = m.headers, .ca = m.ca };
     const s = mount.scheme(m.src);
@@ -950,8 +956,10 @@ pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!Ni
             r.addr = try std.fmt.allocPrint(arena, "unix!{s}", .{rest});
         } else if (std.mem.eql(u8, sc, "http")) {
             r.addr = try std.fmt.allocPrint(arena, "ws://{s}", .{rest});
+            r.http = m.src;
         } else if (std.mem.eql(u8, sc, "https")) {
             r.addr = try std.fmt.allocPrint(arena, "wss://{s}", .{rest});
+            r.http = m.src;
         }
     } else {
         const host_end = std.mem.indexOfAny(u8, m.src, "/:") orelse m.src.len;
@@ -960,6 +968,7 @@ pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!Ni
         // A bare host is the server's top, `/`.
         const slash = if (std.mem.indexOfAny(u8, m.src, "/?#") == null) "/" else "";
         r.addr = try std.fmt.allocPrint(arena, "{s}://{s}{s}", .{ if (loop) "ws" else "wss", m.src, slash });
+        r.http = try std.fmt.allocPrint(arena, "{s}://{s}{s}", .{ if (loop) "http" else "https", m.src, slash });
     }
     if (m.spec) |sp| r.spec = sp;
     return r;
@@ -988,10 +997,13 @@ fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount,
             };
         },
         .url, .fd => {
-            const r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
+            var r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
+            // The root's is set with the machine's options.
+            if (m.index) |ix| r.index = .{ .given = .{ .from = ix } };
             return .{
-                // The URL h9 connects to, so a replay needs no scheme rule.
-                .from = if (r.kind == .ws) r.addr else m.src,
+                // The URL h9 connects to, so a replay needs no scheme
+                // rule: an `http` one probes again.
+                .from = if (r.kind == .ws) r.http orelse r.addr else m.src,
                 .to = to,
                 .flag = flag,
                 .mount = true,

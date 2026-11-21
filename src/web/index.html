@@ -75,8 +75,10 @@ if (!haveJSPI) {
     // (build.zig, web-nine-arm64-root).
     const nine = linux && (await fetch('nine-arm64.h9a', { method: 'HEAD', cache: 'no-cache' }).then((r) => r.ok, () => false));
     const m = await createMachine({
-      root: linux ? 'linux.h9a' : params.get('root') ?? undefined,
-      layers: nine ? [{ url: 'nine-arm64.h9a', at: '/9' }] : [],
+      // Alpine on #L and the 9front tree on / (design/mounts.md), or
+      // ?root=, an archive or a ws:// server.
+      mounts: linux ? [{ archive: 'linux.h9a', dst: '#L' }, ...(nine ? [{ archive: 'nine-arm64.h9a' }] : [])]
+        : params.has('root') ? [/^wss?:/i.test(params.get('root')) ? { url: params.get('root') } : { archive: params.get('root') }] : undefined,
       arch: linux ? 'arm64' : undefined,
       backend: params.get('backend') ?? undefined,
       terminal: { write: (b) => print(dec.decode(b, { stream: true })), setRaw: (on) => { raw = on; render(); } },
@@ -191,7 +193,7 @@ if (!haveJSPI) {
     // the start, in the root's overlay.
     // The tree is the Linux root, and the 9front layer at /9 is the
     // machine's 9front root; without it, the built-in root is.
-    const argv = linux ? ['--dir', '/:#L', ...(nine ? ['--dir', '/9'] : []), '/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
+    const argv = linux ? ['/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
     const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
     if (code !== null) print(`\n[h9 exited ${code}]\n`);
   }

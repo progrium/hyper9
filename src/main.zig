@@ -236,6 +236,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         },
         .root_index = rootIndexArg(rootIndexOf(mounts)),
         .index_cache = cfg.index_cache orelse h9.rootindex.cache.Cache.defaultDir(arena, init.environ_map),
+        .tmp_dir = tmpDir(init.environ_map),
         .root_index_counts = if (cfg.print) rootIndexCounts(arena, io, rootIndexOf(mounts)) else null,
         .verbose = cfg.verbose,
         .nine_prog = cfg.rc != null,
@@ -463,12 +464,6 @@ fn resolveMounts(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, env: *co
         if (m.stack()) |st| if (st[0] == .root) {
             on_root = true;
         };
-        // Only the root's index is read so far (design/mounts.md).
-        const on_root_stack = if (m.stack()) |st| st[0] == .root else false;
-        if (m.index != null and !on_root_stack) {
-            std.debug.print("h9: {s}: index= needs a 9P member on /\n", .{m.kind.flag()});
-            return error.Usage;
-        }
         try out.append(arena, try resolveMount(arena, io, m));
     }
     if (!on_root) {
@@ -545,6 +540,11 @@ fn rootShown(cfg: cli.Config, resolved: []const h9.Machine.Mount, env: *const st
 }
 
 /// The proxy environment, as curl reads it.
+/// Where static trees' sockets go: `$TMPDIR`, or `%TEMP%` on Windows.
+fn tmpDir(env: *const std.process.Environ.Map) []const u8 {
+    return env.get("TMPDIR") orelse env.get("TEMP") orelse h9.Machine.default_tmp_dir;
+}
+
 fn proxyFrom(env: *const std.process.Environ.Map) h9.Machine.Proxy {
     return .{
         .http = env.get("HTTP_PROXY") orelse env.get("http_proxy"),

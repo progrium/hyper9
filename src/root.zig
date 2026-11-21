@@ -77,4 +77,5 @@ test {
     _ = @import("dotl/kern.zig");
     _ = rootindex;
     _ = @import("rootindex/kern.zig");
+    _ = @import("statictree.zig");
 }

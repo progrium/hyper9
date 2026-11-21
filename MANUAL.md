@@ -857,6 +857,24 @@ You can change the namespace two ways:
 Because `--print`'s namespace section is in namespace-file syntax, you can
 save it, edit it, and replay it with `--ns`.
 
+h9's `bind` also takes `-r` ([mounts](design/mounts.md)): `bind -r new
+old` merges `new` with `old` at every depth, not only at the top, so a
+directory both have shows the files of both. `-b` puts `new` on top, the
+default, and `-a` at the bottom; `-c` sends creates to it. Removing a file
+from the top uncovers the one below. Each such union is an instance of
+`#O`, made by opening `#O/clone`, which reads back the union's number and
+takes `add [-a|-b] [-c] PATH` lines; `bind '#O'N` attaches it. A machine
+can attach only its own unions. `ns` prints a union as the `bind -r`
+lines that rebuild it, so its output replays with `--ns`:
+
+```text
+% mkdir /tmp/a /tmp/b /tmp/x
+% bind -r /tmp/b /tmp/x && bind -rb /tmp/a /tmp/x
+% ns | grep /tmp/x
+bind -rb /tmp/a /tmp/x
+bind -rb /tmp/b /tmp/x
+```
+
 **Try it**
 
 ```text
@@ -905,7 +923,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#ℏ` | hstream | `/net`, after `#I` | WebSockets, as `/net/ws` (chapter 16), and the connection behind a WebSocket root. Masked under `--net=disable`. |
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
-| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22) |
+| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22), and the unions `bind -r` makes (chapter 6) |
 | `#C` | cmd | | Host commands. Not built: they live on the [`host-cmd`](https://github.com/progrium/hyper9/tree/host-cmd) branch while [host-cmd](design/host-cmd.md) rethinks them. The letter stays masked. |
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
@@ -1542,8 +1560,38 @@ devices in Plan 9.
   send headers, so the callback answers `{ url }`, a URL to connect to
   instead, such as one with a single-use ticket in its query. On the command
   line the scheme can be left off: `--url fs.example.com/9p` is
-  `wss://fs.example.com/9p`, and `localhost`, `127.x.x.x`, and `[::1]`
-  are `ws://`. `--print` shows the URL h9 chose.
+  `https://fs.example.com/9p`, and `localhost`, `127.x.x.x`, and `[::1]`
+  are `http://`; both probe as below. `--print` shows the URL h9 chose.
+- **`http://` and `https://`: a WebSocket or a static tree**
+  ([mounts](design/mounts.md)). h9 first tries the URL as a WebSocket, in
+  its `ws://` or `wss://` form. If the server doesn't upgrade, h9 fetches
+  `URL/.fs/index`, and a `200` makes the URL a **static tree**: dotfs's
+  index served as plain files by any web server or CDN, with each file's
+  contents at `URL/PATH`. Walks, stats, and directory reads come from the
+  index. A directory flagged `i` has its own `URL/DIR/.fs/index`, fetched
+  the first time something walks into it. A file up to 64 KiB is fetched
+  whole on its first read; a larger one is read with Range requests. A
+  file whose index line has a `b3:` hash is checked against it, and a
+  mismatch fails the read with "content changed". Checked files are kept
+  by hash under `--index-cache DIR`'s `blobs`, so the next run, or another
+  tree with the same file, doesn't fetch it again. Files flagged `p` are
+  fetched at mount. A static tree is read-only: on `/` and `#L` writes go to
+  the overlay, as for any root, and elsewhere they fail with "read-only
+  file system". h9 serves the tree to the machine itself, on a unix socket
+  in a private directory under `$TMPDIR`. When there's no WebSocket and no
+  index either, the run exits 125 naming both:
+
+  ```sh
+  host$ h9 --url https://example.com/tree:/n/tree ls /n/tree
+  host$ h9 --url http://127.0.0.1:8000/:/n/x ls /n/x
+  h9: mount http://127.0.0.1:8000/: no 9P server (the WebSocket handshake: server answered 404 Not Found) and no static tree (/.fs/index: 404 Not Found)
+  ```
+
+  In a browser, the page serves static trees with its own `fetch`, under
+  its CORS rules, so a tree on another origin needs
+  `Access-Control-Allow-Origin` (and to allow the `Range` header); a
+  browser's WebSocket doesn't say why it failed, so any failure there tries
+  the index.
 - **Metadata indexes** ([mount-index](design/mount-index.md)). A 9P
   root, or a 9P server a namespace file mounts by dial string or URL, can
   come with an index: dotfs's `.fs/index` at the top of its tree, a text
@@ -1558,7 +1606,7 @@ devices in Plan 9.
   answers. `mkindex [-o FILE] [-s SPEC] [DIR]` writes one from inside h9,
   for the tree at `DIR` (`/` by default, which it reads through
   `/srv/root`, attached with `SPEC`, so the paths h9 binds over the root
-  are left out). `index=FILE|URL` on the root's `--url` uses an index from
+  are left out). `index=FILE|URL` on any `--url` uses an index from
   somewhere else, for a server you can't write to; a URL is `https://` or
   `http://`, fetched on the host with the root's `ca=` and proxies.
   `--index none` turns indexes off. Compiled indexes are cached across
@@ -1568,9 +1616,8 @@ devices in Plan 9.
   how many directories were checked, and how many of devmnt's requests
   reached the server.
   `--print` shows the index on the root's line, and `--check` reports it.
-  An index that doesn't parse is ignored, with a note under `-v`; an
-  `index=` that can't be read is exit 125, and one with no 9P server on
-  `/` exit 2. `mkindex` percent-escapes a name with a space or
+  An index that doesn't parse is ignored, with a note under `-v`, and an
+  `index=` that can't be read is exit 125. `mkindex` percent-escapes a name with a space or
   a rune that isn't ASCII. A name with a control character, or a byte that
   isn't UTF-8, can't be listed, so `mkindex` leaves it out and marks its
   directory `9p.incomplete=1`, and h9 never answers for that directory
@@ -1708,10 +1755,9 @@ In the browser demo, add `--serve-origin` with the page's origin (and a
 Linux programs use the mount too, since their sockets open `/net`
 through the namespace: from busybox, `/9/bin/wsmount -b
 ws://127.0.0.1:5640/ /net` and then `wget` fetches through the host. The
-demo's `?linux` mode has `/9/bin/wsmount` as well: its page stacks a slim
-arm64 9front tree at `/9` over the Alpine archive with `createMachine`'s
-`layers`, a list of archives, each a URL or `{ url, at }`, unpacked in
-order, and mounts it with `--dir /9` beside `--dir /:#L`. Each
+demo's `?linux` mode has `/9/bin/wsmount` as well: its page mounts the
+Alpine archive on `#L` and a slim arm64 9front tree on `/` with
+`createMachine`'s `mounts`. Each
 connection carries about 7 sockets waiting at once, since each holds one
 of the server's 8 exportfs processes; mount `/net` over more connections
 for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`
@@ -2189,7 +2235,7 @@ around a value with commas.
 | Flag | Meaning |
 | --- | --- |
 | `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw`. `contained` resolves its symlinks inside it, as a tree on `#L` always does. |
-| `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://...`, or `wss://...`. With no scheme, `ws://` for a loopback host and `wss://` for any other. A DST of `/srv/NAME` posts the connection there without mounting it. |
+| `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://...`, or `wss://...`. `http://...` and `https://...` are a WebSocket if the server upgrades, and otherwise a static tree (chapter 16). With no scheme, `http://` for a loopback host and `https://` for any other. A DST of `/srv/NAME` posts the connection there without mounting it. |
 | `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` (the browser host's root archive), unpacked into memory before the program runs. Its files count against `--memory`, and it takes writes in memory. Symbolic links are kept for Linux programs. |
 | `--builtin[=DST[:OPTS]]` | The built-in root. Bare, it's the bottom of `/`. |
 | `--tmp DST[:OPTS]` | An empty tree in memory |
@@ -2208,7 +2254,7 @@ around a value with commas.
 | `user=NAME` | | `--url`: the user name sent in attaches. Default: yours. |
 | `header='NAME: VALUE'\|@FILE` | | `--url` over `ws`, `wss`, `http`, or `https`: a handshake header, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one per line from a host file, so a token stays out of `ps`. |
 | `ca=FILE` | | `--url` over `wss` or `https`: trust this PEM file instead of the host's CA bundle |
-| `index=FILE\|URL` | | `--url` on `/`: the root's metadata index instead of its server's `.fs/index` (chapter 16). A URL is `https://` or `http://`. Without a 9P server on `/`, exit 2; one that can't be read, exit 125. |
+| `index=FILE\|URL` | | `--url`: a metadata index instead of its server's `.fs/index` (chapter 16). A URL is `https://` or `http://`. One that can't be read is exit 125. |
 
 `--root`, `--root-spec`, `--root-user`, `--root-header`, `--root-ca`,
 `--root-index`, `--root-contained`, and `--builtin MODE` were removed: each exits 2 with a

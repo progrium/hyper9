@@ -3711,6 +3711,341 @@ test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mount
     }
 }
 
+// Static dotfs trees (design/mounts.md, "Static trees"): StaticHttp serves
+// a host directory over plain HTTP, answering a WebSocket upgrade with 404,
+// as a static file host does, and logs each request.
+
+/// A plain HTTP server over a host directory, for static-tree cases. It
+/// serves `/t/PATH` from `dir/PATH`, honours one-part Range requests, and
+/// refuses WebSocket upgrades with a 404.
+const StaticHttp = struct {
+    srv: std.Io.net.Server,
+    port: u16,
+    dir: []const u8,
+    thread: std.Thread,
+    stopping: std.atomic.Value(bool) = .init(false),
+    mu: std.Io.Mutex = .init,
+    /// One line per request: `GET PATH`, `RANGE PATH`, or `UPGRADE PATH`.
+    log: std.ArrayList(u8) = .empty,
+    url_buf: [64]u8 = undefined,
+
+    fn start(h: *StaticHttp, dir: []const u8) !void {
+        h.* = .{ .srv = try listenLocal(), .port = 0, .dir = dir, .thread = undefined };
+        h.port = h.srv.socket.address.getPort();
+        h.thread = try std.Thread.spawn(.{}, loop, .{h});
+    }
+
+    fn url(h: *StaticHttp) []const u8 {
+        return std.fmt.bufPrint(&h.url_buf, "http://127.0.0.1:{d}/t", .{h.port}) catch unreachable;
+    }
+
+    fn stop(h: *StaticHttp) void {
+        const io = std.testing.io;
+        h.stopping.store(true, .release);
+        if (std.Io.net.IpAddress.parse("127.0.0.1", h.port)) |ip| {
+            if (ip.connect(io, .{ .mode = .stream })) |c| c.close(io) else |_| {}
+        } else |_| {}
+        h.thread.join();
+        h.srv.deinit(io);
+        h.log.deinit(gpa);
+    }
+
+    /// How many log lines are exactly `line`.
+    fn count(h: *StaticHttp, line: []const u8) usize {
+        const io = std.testing.io;
+        h.mu.lockUncancelable(io);
+        defer h.mu.unlock(io);
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, h.log.items, '\n');
+        while (it.next()) |l| if (std.mem.eql(u8, l, line)) {
+            n += 1;
+        };
+        return n;
+    }
+
+    fn reset(h: *StaticHttp) void {
+        const io = std.testing.io;
+        h.mu.lockUncancelable(io);
+        defer h.mu.unlock(io);
+        h.log.clearRetainingCapacity();
+    }
+
+    fn note(h: *StaticHttp, kind: []const u8, path: []const u8) void {
+        const io = std.testing.io;
+        h.mu.lockUncancelable(io);
+        defer h.mu.unlock(io);
+        h.log.print(gpa, "{s} {s}\n", .{ kind, path }) catch {};
+    }
+
+    fn loop(h: *StaticHttp) void {
+        const io = std.testing.io;
+        while (true) {
+            const c = deadline.accept(&h.srv, io) catch return;
+            if (h.stopping.load(.acquire)) {
+                c.close(io);
+                return;
+            }
+            h.serve(c);
+        }
+    }
+
+    fn serve(h: *StaticHttp, c: std.Io.net.Stream) void {
+        const io = std.testing.io;
+        defer c.close(io);
+        var rbuf: [4096]u8 = undefined;
+        var r = c.reader(io, &rbuf);
+        var wbuf: [4096]u8 = undefined;
+        var w = c.writer(io, &wbuf);
+        var target_buf: [512]u8 = undefined;
+        var target: []const u8 = "";
+        var range: ?[2]u64 = null;
+        var upgrade = false;
+        var first = true;
+        while (r.interface.takeDelimiterExclusive('\n')) |raw| {
+            r.interface.toss(1);
+            const line = std.mem.trimEnd(u8, raw, "\r");
+            if (line.len == 0) break;
+            if (first) {
+                first = false;
+                var it = std.mem.splitScalar(u8, line, ' ');
+                _ = it.next();
+                const t = it.next() orelse return;
+                target = std.fmt.bufPrint(&target_buf, "{s}", .{t}) catch return;
+                continue;
+            }
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            const name = line[0..colon];
+            const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+            if (std.ascii.eqlIgnoreCase(name, "upgrade")) upgrade = true;
+            if (std.ascii.eqlIgnoreCase(name, "range") and std.mem.startsWith(u8, value, "bytes=")) {
+                const dash = std.mem.indexOfScalar(u8, value, '-') orelse continue;
+                const a = std.fmt.parseInt(u64, value[6..dash], 10) catch continue;
+                const b = std.fmt.parseInt(u64, value[dash + 1 ..], 10) catch continue;
+                range = .{ a, b };
+            }
+        } else |_| return;
+        if (!std.mem.startsWith(u8, target, "/t")) return h.status(&w, "404 Not Found");
+        const path = if (target.len == 2) "/" else target[2..];
+        if (upgrade) {
+            h.note("UPGRADE", path);
+            return h.status(&w, "404 Not Found");
+        }
+        h.note(if (range != null) "RANGE" else "GET", path);
+        var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const host = std.fmt.bufPrint(&pb, "{s}{s}", .{ h.dir, path }) catch return;
+        const data = std.Io.Dir.cwd().readFileAlloc(io, host, gpa, .limited(16 << 20)) catch return h.status(&w, "404 Not Found");
+        defer gpa.free(data);
+        if (range) |rg| {
+            if (rg[0] >= data.len) return h.status(&w, "416 Range Not Satisfiable");
+            const last = @min(rg[1], data.len - 1);
+            const part = data[@intCast(rg[0])..@intCast(last + 1)];
+            w.interface.print("HTTP/1.1 206 Partial Content\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nConnection: close\r\n\r\n", .{ part.len, rg[0], last, data.len }) catch return;
+            w.interface.writeAll(part) catch return;
+        } else {
+            w.interface.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{data.len}) catch return;
+            w.interface.writeAll(data) catch return;
+        }
+        w.interface.flush() catch {};
+    }
+
+    fn status(_: *StaticHttp, w: *std.Io.net.Stream.Writer, s: []const u8) void {
+        w.interface.print("HTTP/1.1 {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{s}) catch return;
+        w.interface.flush() catch {};
+    }
+};
+
+/// A static tree in a scratch directory, served by a StaticHttp, with
+/// the run's cache in the scratch directory too: `/a`
+/// (`apple`), `/big` (100000 bytes, read by Range), `/bad` (whose index
+/// hash is wrong), `/l` (a link to a), and `/sub`, whose own index lists
+/// `/sub/b` (`banana`).
+const StaticRig = struct {
+    s: Scratch,
+    http: StaticHttp,
+    tree_buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
+
+    fn start(x: *StaticRig) !void {
+        try x.s.init();
+        errdefer x.s.deinit();
+        const io = std.testing.io;
+        const d = x.s.tmp.dir;
+        try d.createDirPath(io, "t/.fs");
+        try d.createDirPath(io, "t/sub/.fs");
+        const big = try gpa.alloc(u8, 100000);
+        defer gpa.free(big);
+        for (big, 0..) |*b, i| b.* = 'a' + @as(u8, @intCast(i % 26));
+        try d.writeFile(io, .{ .sub_path = "t/a", .data = "apple\n" });
+        try d.writeFile(io, .{ .sub_path = "t/big", .data = big });
+        try d.writeFile(io, .{ .sub_path = "t/bad", .data = "not what the index says\n" });
+        try d.writeFile(io, .{ .sub_path = "t/sub/b", .data = "banana\n" });
+        var ha: [64]u8 = undefined;
+        var hbig: [64]u8 = undefined;
+        var hb: [64]u8 = undefined;
+        var top: std.Io.Writer.Allocating = .init(gpa);
+        defer top.deinit();
+        try top.writer.print(
+            \\fsindex 1 seq 1
+            \\/ d 755 0 10 1 - -
+            \\/a f 644 6 10 1 b3:{s} -
+            \\/bad f 644 24 10 1 b3:{s} -
+            \\/big f 644 100000 10 1 b3:{s} -
+            \\/l l 777 1 10 1 - - a
+            \\/sub d 755 0 10 1 - i
+            \\
+        , .{ b3hex("apple\n", &ha), b3hex("something else\n", &hb), b3hex(big, &hbig) });
+        try d.writeFile(io, .{ .sub_path = "t/.fs/index", .data = top.written() });
+        var hs: [64]u8 = undefined;
+        var sub_buf: [256]u8 = undefined;
+        try d.writeFile(io, .{ .sub_path = "t/sub/.fs/index", .data = try std.fmt.bufPrint(&sub_buf, "fsindex 1 seq 1\n/ d 755 0 10 1 - -\n/b f 644 7 10 1 b3:{s} -\n", .{b3hex("banana\n", &hs)}) });
+        const tree = try std.fmt.bufPrint(&x.tree_buf, "{s}/t", .{x.s.path});
+        try x.http.start(tree);
+    }
+
+    fn stop(x: *StaticRig) void {
+        x.http.stop();
+        x.s.deinit();
+    }
+
+    /// `--url URL:/n/t` and `args` after it.
+    fn run_(x: *StaticRig, e: Env, args: []const []const u8) !Result {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        var ub: [128]u8 = undefined;
+        var cb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        try argv.appendSlice(gpa, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/n/t", .{x.http.url()}), "--index-cache", try std.fmt.bufPrint(&cb, "{s}/cache", .{x.s.path}) });
+        try argv.appendSlice(gpa, args);
+        x.http.reset();
+        return runOn(e, firstBackend(e), argv.items, null);
+    }
+};
+
+fn b3hex(data: []const u8, buf: *[64]u8) []const u8 {
+    var h: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(data, &h, .{});
+    return std.fmt.bufPrint(buf, "{x}", .{&h}) catch unreachable;
+}
+
+test "--url http:// upgrades to a WebSocket when the server answers 101 [mounts]" {
+    const e = try env(@src());
+    var w: WsRoot = undefined;
+    try w.start(e, .{});
+    defer w.stop();
+    var ub: [160]u8 = undefined;
+    const u = try std.fmt.bufPrint(&ub, "http://{s}:/n/fs", .{w.url()["ws://".len..]});
+    const r = try runOn(e, firstBackend(e), &.{ "--url", u, "--rc", "test -e /n/fs/lib/namespace && echo ws" }, null);
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("ws\n", r.out);
+    try std.testing.expectEqualStrings("/9p", w.relay.target());
+}
+
+test "--url http:// falls back to a static dotfs tree [mounts]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var x: StaticRig = undefined;
+    try x.start();
+    defer x.stop();
+    {
+        const r = try x.run_(e, &.{ "--rc", "ls /n/t; cat /n/t/a /n/t/l; cp /n/t/sub/b /n/t/a || echo read-only" });
+        defer r.deinit();
+        errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+        try std.testing.expectEqual(0, r.code);
+        try std.testing.expectEqualStrings("/n/t/a\n/n/t/bad\n/n/t/big\n/n/t/l\n/n/t/sub\napple\napple\nread-only\n", r.out);
+        try expectIn(r.err, "read-only file system");
+        // One probe, then the index.
+        try std.testing.expectEqual(1, x.http.count("UPGRADE /"));
+        try std.testing.expectEqual(1, x.http.count("GET /.fs/index"));
+        // a is fetched once, for both reads.
+        try std.testing.expectEqual(1, x.http.count("GET /a"));
+    }
+    {
+        // The next run finds a in the host's cache, by its hash.
+        const r = try x.run_(e, &.{ "--rc", "cat /n/t/a" });
+        defer r.deinit();
+        try std.testing.expectEqualStrings("apple\n", r.out);
+        try std.testing.expectEqual(0, x.http.count("GET /a"));
+    }
+    // With no index either, the message names both attempts.
+    try x.s.tmp.dir.deleteFile(std.testing.io, "t/.fs/index");
+    const r = try x.run_(e, &.{"/bin/echo"});
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try expectIn(r.err, "server answered 404");
+    try expectIn(r.err, "no static tree (/.fs/index: 404");
+}
+
+test "a static tree reads by Range and fails a read on a hash mismatch [mounts]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var x: StaticRig = undefined;
+    try x.start();
+    defer x.stop();
+    const r = try x.run_(e, &.{ "--rc", "wc -c </n/t/big; dd -if /n/t/big -bs 1 -iseek 99997 -count 3 >[2]/dev/null; echo; cat /n/t/bad || echo failed" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("100000\nbcd\nfailed\n", std.mem.trimStart(u8, r.out, " \t"));
+    try expectIn(r.err, "content changed");
+    try std.testing.expectEqual(0, x.http.count("GET /big"));
+    try std.testing.expect(x.http.count("RANGE /big") > 0);
+}
+
+test "a static tree loads a nested index on first use [mounts]" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const e = try env(@src());
+    var x: StaticRig = undefined;
+    try x.start();
+    defer x.stop();
+    {
+        const r = try x.run_(e, &.{ "--rc", "cat /n/t/a" });
+        defer r.deinit();
+        try std.testing.expectEqualStrings("apple\n", r.out);
+        try std.testing.expectEqual(0, x.http.count("GET /sub/.fs/index"));
+    }
+    const r = try x.run_(e, &.{ "--rc", "ls /n/t/sub; cat /n/t/sub/b" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/n/t/sub/b\nbanana\n", r.out);
+    try std.testing.expectEqual(1, x.http.count("GET /sub/.fs/index"));
+}
+
+test "index= on a mount off / names its index [mounts]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    const text = try x.mkindex(e);
+    defer gpa.free(text);
+    try x.write("given", text);
+    var ub: [std.Io.Dir.max_path_bytes + 128]u8 = undefined;
+    var db: [64]u8 = undefined;
+    x.relay.reset();
+    const r = try run(e, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/n/fs:index={s}/given", .{ dialUrl(&db, x.relay.dial()), x.s.path }), "--index-cache", x.cache, "-v", "--rc", "ls /n/fs/lib/x; test -e /n/fs/lib/zznope || echo absent" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/n/fs/lib/x/a\n/n/fs/lib/x/b\n/n/fs/lib/x/sub\nabsent\n", r.out);
+    try std.testing.expect(!x.relay.walked("zznope"));
+    // The server has no .fs/index of its own.
+    try std.testing.expect(!x.s.exists("tree/.fs/index"));
+}
+
+test "a 9P server's .fs/index answers walks without the server [mounts]" {
+    const e = try env(@src());
+    var x: IndexRig = undefined;
+    try x.start(e, false);
+    defer x.stop();
+    try x.index(e);
+    var ub: [128]u8 = undefined;
+    var db: [64]u8 = undefined;
+    x.relay.reset();
+    const r = try run(e, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/n/fs", .{dialUrl(&db, x.relay.dial())}), "--index-cache", x.cache, "-v", "--rc", "ls /n/fs/lib/x; test -e /n/fs/lib/zznope || echo absent" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("/n/fs/lib/x/a\n/n/fs/lib/x/b\n/n/fs/lib/x/sub\nabsent\n", r.out);
+    try std.testing.expect(!x.relay.walked("zznope"));
+}
+
 test "--print output with a Linux tree and 9P settings replays with --ns [mounts]" {
     const e = try env(@src());
     var le: LinuxEnv = undefined;
@@ -4468,19 +4803,6 @@ test "a rewritten .fs/index is fetched on the next mount [mount-index]" {
     try std.testing.expect(x.relay.index_opens.load(.acquire) > 0);
     try std.testing.expect(std.mem.indexOf(u8, second.err, "(cached)") == null);
     try expectIn(second.err, " 0 demoted");
-}
-
-test "index= without a 9P server on / is a usage error [mount-index]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.h9index", .data = "fsindex 1 seq 0\n" });
-    // On a --url elsewhere, with the root a host directory.
-    const r = try run(e, &.{ "--cwd", s.path, "--url", "tcp://127.0.0.1:1:/n/fs:index=x.h9index", "/bin/ls", "/" });
-    defer r.deinit();
-    try std.testing.expectEqual(2, r.code);
-    try expectIn(r.err, "index= needs a 9P member on /");
 }
 
 test "--print shows the index source and entry count [mount-index]" {
