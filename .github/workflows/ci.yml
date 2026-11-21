@@ -122,7 +122,7 @@ jobs:
           version: 0.16.0
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils libarchive-tools zstd
       # The arm64 image, the 386 and amd64 ISOs, and the Alpine roots.
-      - run: scripts/fetch.sh image iso386 isoamd64
+      - run: scripts/fetch.sh image iso386 isoamd64 alpine
       - run: zig build mkroot -- --arch arm64
       - run: |
           . scripts/pins.sh
