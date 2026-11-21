@@ -427,6 +427,10 @@ pub const Stream = struct {
     close_sent: bool = false,
     keepalive: ws.Keepalive = .{ .last_rx = 0 },
     thread: ?web.Thread = null,
+    /// A host-made stream's thread is connecting (and maybe running its
+    /// credential helper), under the table's lock. A hangup doesn't end
+    /// that early, so it's apart from `state`.
+    in_connect: bool = false,
 
     /// Unblocks the reader: shuts the connection, or closes the socket.
     fn shutdownConn(s: *Stream) void {
@@ -749,6 +753,28 @@ pub fn unregisterHost(owner: usize) void {
     };
 }
 
+/// Waits up to `ms` for machine `owner`'s host-made streams to finish
+/// connecting, and returns whether they did. A redial the machine made
+/// as it ended can still be in its handshake, running a credential helper
+/// through the process's Io, and the process mustn't exit under it.
+/// Streams already connected aren't waited for, nor are their readers.
+pub fn waitConnects(owner: usize, ms: u32) bool {
+    const io = theIo();
+    var waited: u32 = 0;
+    while (connecting(owner)) : (waited += 1) {
+        if (waited >= ms) return false;
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    return true;
+}
+
+fn connecting(owner: usize) bool {
+    lockTable();
+    defer table_lock.unlock();
+    for (table) |e| if (e) |s| if (s.owner == owner and s.in_connect) return true;
+    return false;
+}
+
 /// For devhstream.c's h9_hstream_dial: starts a host-made stream to
 /// `url` with the options machine `mach` registered, and returns its id,
 /// or -1 with the error in `err`.
@@ -935,9 +961,11 @@ fn start(s: *Stream) OpenError!void {
     s.lock.unlock();
     lockTable();
     s.refs += 1;
+    s.in_connect = true;
     table_lock.unlock();
     s.thread = web.Thread.spawn(.{}, run, .{s}) catch {
         s.fail("can't start a thread", .{});
+        endConnect(s);
         unref(s);
         return error.SystemResources;
     };
@@ -968,7 +996,9 @@ fn errName(e: anyerror) []const u8 {
 /// The thread: connects, handshakes, then reads until the stream ends.
 fn run(s: *Stream) void {
     defer unref(s);
-    connect(s) catch |e| {
+    const r = connect(s);
+    endConnect(s);
+    r catch |e| {
         s.lockS();
         if (!s.cancel) switch (e) {
             error.HandshakeStatus => s.failLocked("server answered {d} {s}{s}", .{ s.close_code, s.close_reason[0..s.close_reason_len], if (s.cred_retried) " (after credential helper retry)" else "" }),
@@ -993,6 +1023,13 @@ fn run(s: *Stream) void {
     };
     if (web.enabled) webReadLoop(s) else readLoop(s);
     finish(s);
+}
+
+/// Clears `in_connect`, whether the connect worked or not.
+fn endConnect(s: *Stream) void {
+    lockTable();
+    s.in_connect = false;
+    table_lock.unlock();
 }
 
 /// Ends the stream and frees its connection.
