@@ -1,0 +1,8 @@
+{
+  "name": "npm-greet",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node -e \"require('fs').writeFileSync('installed', 'yes')\""
+  }
+}

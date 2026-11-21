@@ -64,10 +64,11 @@ libncursesw-6.5_p20250503-r0.apk 419b375e8a4345e7172b1f0f3a3c57db61374f5408cdb87
 "
 
 # Alpine 3.22's x86_64 packages for the workloads (tests/workloads):
-# Python with pip, git, sqlite3, jq, xz, and bash, with the dependencies
-# the base image doesn't have. They're added to a copy of the amd64 root
-# as .local/linux/workloads-amd64 by `scripts/fetch.sh workloads`. Like
-# the web demo's, a bump on the mirror means a bump here.
+# Python with pip, Node.js with npm, git, sqlite3, jq, xz, and bash, with
+# the dependencies the base image doesn't have. They're added to a copy
+# of the amd64 root as .local/linux/workloads-amd64 by `scripts/fetch.sh
+# workloads`. Like the web demo's, a bump on the mirror means a bump
+# here.
 ALPINE_PKG_BASE=https://dl-cdn.alpinelinux.org/alpine/v3.22
 # repository  package-file  sha256
 WORKLOADS_AMD64_PKGS="
@@ -108,6 +109,13 @@ main py3-setuptools-80.9.0-r0.apk 53d35a4530371f61481fc800f18f226f68b3600140b851
 main py3-packaging-25.0-r0.apk 06ab1a2853857e1f53da6c4fceaec25ec3c942c24071f6598396d4e18ec68769
 main py3-parsing-3.2.5-r0.apk eb98adcfe7a7242b8e4ff77a894e4b8ca3e5a62539c8fa96bc8d07ab9f49c38d
 community py3-pip-pyc-25.1.1-r0.apk e729558f32b18993f7dd3461c409e274a7be2c91686a9110e7a931a26ecbc07a
+main nodejs-22.23.5-r0.apk 4584849b54f667cbb526778b05f5f414c01d3598e6c97afba77650a1a22c8475
+main ada-libs-2.9.2-r4.apk 183fd6d3164c8236b578b410d5ad9b19204d7d06f3dd60075c6a5466289fd483
+main icu-libs-76.1-r1.apk 0d6d3b9173f388f7450b168f8a98647f21356d1d4e5ae414e160db2843c6a2c8
+main icu-data-en-76.1-r1.apk bdb3507fd8eb21d0934ae2cc986f416d76d085dc27ca6b86b75643214eb5d0cb
+main simdjson-3.12.0-r0.apk e051fefd290e6b3658e5510a09785df6db2a2b2291f69f6ddfceefc03d7a811d
+main simdutf-7.2.1-r0.apk a29bb33167c1e2d478dab9e83172a8a455db41d62dcdfe34f680c4f18572bea0
+community npm-11.6.4-r0.apk d99a0e253f190f513fb80c1dfb7032dbb0a423f37c43b1e7fc333f2b29ddab1c
 "
 
 # diod, the 9P2000.L server the [dotl] cases run against (design/epoch-0/dotl.md),

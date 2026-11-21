@@ -300,7 +300,7 @@ mounts --serve over a unix socket" runs only on Linux with the kernel's
 
 The workloads in [tests/workloads](tests/workloads) run real programs on
 real roots through `h9`, each timed: Python with its C modules, threads,
-subprocesses, and pip, git, sqlite3, jq, bash, and busybox's tools on a
+subprocesses, and pip, npm, git, sqlite3, jq, bash, and busybox's tools on a
 Linux root, and 9front's compilers and `mk` building awk and rc from
 `/sys/src`. A case is a short script, `NAME.sh` for `/bin/sh` on the Linux
 root or `NAME.rc` for rc on the 9front root, with `# expect:`,
