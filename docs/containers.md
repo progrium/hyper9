@@ -696,8 +696,9 @@ host$ h9 --root 'tcp!127.0.0.1!5640' --ns /app/ns --net=enable --cwd ./data serv
 it. Writes stay in the root's overlay, as for a directory root, so the
 server is only read. The connection is plain, unauthenticated 9P, so keep
 TCP roots on a trusted network ([manual, chapter
-16](../MANUAL.md#16-file-servers-srv-and-9p-mounts)); servers that ask for
-authentication are [proposed](../design/root-auth.md). On macOS and Linux a
+16](../MANUAL.md#16-file-servers-srv-and-9p-mounts)); 9P authentication for
+roots was proposed and declined ([root-auth](../design/root-auth.md)) in
+favor of authenticating WebSocket roots. On macOS and Linux a
 unix socket works too, as `--root unix!/path`.
 
 `--root-spec NAME` sends an attach name, so a 9P server that offers several
@@ -835,9 +836,9 @@ where there is one:
 - **Image files.** Images are directories or 9P servers. Attaching a
   single-file image read-only was proposed and declined
   ([image-roots](../design/image-roots.md)).
-- **Authenticated registries.** 9P roots can't ask for authentication yet
-  ([root-auth](../design/root-auth.md), a draft). WebSocket roots can send a
-  bearer token in a header.
+- **Authenticated registries.** 9P roots don't authenticate; that was
+  proposed and declined ([root-auth](../design/root-auth.md)). WebSocket
+  roots can send a bearer token in a header.
 - **A build cache, image IDs, and digests.** Build scripts start over each
   time; `tar | shasum` gives a digest if you need one.
 - **Network isolation between machines.** There's no private network: guests

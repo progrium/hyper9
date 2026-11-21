@@ -1,7 +1,7 @@
 ---
 slug: root-auth
 title: Authenticated 9P roots
-status: draft
+status: declined
 created: 2026-11-06
 authors: [progrium]
 depends: [ninep-roots]
@@ -59,3 +59,7 @@ A [9P root](ninep-roots.md) can be a server that wants `p9any` authentication, s
 - Whether the guest should also get a factotum holding the same key, so its own `mount /srv/root …` attaches can authenticate.
 - A Windows equivalent of `factotum`.
 - **The server side, for [serve](serve.md).** serve's TCP listeners are unauthenticated: a guest-side factotum for `exportfs` would put the key in the guest. h9 could instead run the server side of `p9any` on the host, in front of the connection, before handing it to exportfs, with a key given as `--root-auth` gives one. That needs the server half of dp9ik and p9sk1 (drawterm has only clients) and an auth server reachable from the host. A follow-up proposal, if a use appears that a WebSocket token or a unix socket's permissions can't serve.
+
+## Declined
+
+- 2026-11-20: Authentication for roots is focused on HTTP and WebSocket, through [credential-helpers](credential-helpers.md), not on `p9any` for 9P roots. A 9P root that needs authentication can be served over WebSocket and authenticated there. A server that has to be reached as plain 9P with `p9any`, and can't be put behind WebSocket, would reopen it.

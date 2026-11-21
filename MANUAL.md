@@ -1279,8 +1279,9 @@ protocols, with `secstore` keeping them encrypted.
   so it can't read anything you can't.
 - `factotum` runs (`auth/factotum -n` starts it without secstore) and serves
   `/mnt/factotum`, and `mount` works without authentication against servers
-  that don't ask for it. A 9P root that wants authentication isn't supported
-  yet (*Not yet available ([root-auth](design/root-auth.md))*).
+  that don't ask for it. A 9P root that wants authentication isn't supported;
+  [root-auth](design/root-auth.md) was declined in favor of authenticating
+  WebSocket roots.
 
 "Permission denied" in h9 can mean three things:
 
@@ -1595,8 +1596,9 @@ devices in Plan 9.
   same way. `dotlfs -L` asks for plain .L. `/net/dotl/N/status` shows
   `9P2000.L.Z reconnects N` once a reconnect has happened. A unix socket
   root reconnects too, but a WebSocket root doesn't yet.
-- Not yet available: roots that need authentication
-  ([root-auth](design/root-auth.md)).
+- 9P roots that need authentication aren't supported. They were proposed
+  and declined ([root-auth](design/root-auth.md)) in favor of authenticating
+  WebSocket roots.
 - 9front disk images as roots were proposed and declined
   ([image-roots](design/image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an

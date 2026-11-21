@@ -583,9 +583,9 @@ welcome to box
 
 **What a server has to do for h9:**
 
-- **No authentication.** h9 doesn't authenticate to a root yet
-  ([root-auth](../design/root-auth.md) is a draft), so a server that wants it
-  is refused with exit 125. A TCP root is plain 9P, so keep it on loopback or
+- **No authentication.** h9 doesn't authenticate to a 9P root
+  ([root-auth](../design/root-auth.md) was declined in favor of WebSocket
+  authentication), so a server that wants it is refused with exit 125. A TCP root is plain 9P, so keep it on loopback or
   a network you trust.
 - **9P2000 or 9P2000.L.** Not 9P2000.u. A .L server goes through a
   translator ([dotl](../design/dotl.md)), so devmnt still speaks
