@@ -78,7 +78,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ### Reused as-is
 
-These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (for unix socket roots), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe, devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
+These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (for unix socket roots), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux personality's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
 
 We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`. The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
@@ -182,7 +182,7 @@ Attached with no spec, the device serves `dotl/clone` and `dotl/N/{ctl,data,stat
 
 It follows devhstream's pattern and the seam rules: a kproc per conversation reads the server connection and feeds the translator, which is called through leaves in `src/dotl/kern.zig` that take and return bytes and never raise, under a QLock per conversation; a guest reading `data` sleeps on a Rendez until the translator has bytes for it, so a note interrupts it. The conversation ends when the last of its `ctl` and `data` is closed.
 
-The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
+The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A create with `DMNAMEDPIPE` is a `Tmknod` of a FIFO, and a server's FIFO lists with `DMNAMEDPIPE` and opens without a server open, reading empty. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
 
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
@@ -196,7 +196,7 @@ The clock is one per host process (`src/kern.zig`): wall time from the host's re
 
 #### Overlay device `#O` (`src/kern/devoverlay.c`)
 
-Copy-on-write trees in memory over a lower directory, for the root's overlay, `--write=ephemeral`, and the private `/tmp` (see Sandbox policy). An instance can report each change to the machine, for the root's discarded-changes notice. A file in memory with `DMEXCL` is open on at most one chan at a time, as on 9front's file servers: another open fails with "file is locked" (ramfs's string) until that chan is closed; host files (`#U`) have no such bit. A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it.
+Copy-on-write trees in memory over a lower directory, for the root's overlay, `--write=ephemeral`, and the private `/tmp` (see Sandbox policy). An instance can report each change to the machine, for the root's discarded-changes notice. A file in memory with `DMEXCL` is open on at most one chan at a time, as on 9front's file servers: another open fails with "file is locked" (ramfs's string) until that chan is closed; host files (`#U`) have no such bit. A FIFO node (`Nfifo`, from the Linux personality's `mkfifo`) lists with `H9_DMFIFO` and isn't read or written itself, and a host FIFO below opens for writing without a copy-up. A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it.
 
 #### h9's guest commands `#H` (`src/kern/devhtools.c`)
 

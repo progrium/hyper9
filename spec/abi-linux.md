@@ -15,6 +15,7 @@ This describes, as built, the Linux personality: how Linux ELF binaries are load
   - [Sockets and readiness](#sockets-and-readiness)
   - [Threads](#threads)
   - [IPC for PostgreSQL](#ipc-for-postgresql)
+  - [Named pipes](#named-pipes)
   - [32-bit x86](#32-bit-x86)
   - [Not yet](#not-yet)
   - [Tests](#tests)
@@ -135,6 +136,14 @@ System V shared memory (`src/linux/sysvshm.zig`): `shmget`, `shmat`, `shmdt` and
 `signalfd` is an `#ε` eventfd the process model writes when a signal the fd's mask names is left pending, and a read takes the signals as `signalfd_siginfo`.
 
 `setitimer`'s `ITIMER_REAL` and `alarm` are served by one kernel process (`src/linux/itimer.zig`) that posts `alarm` to a due process through a reference to its kernel record (`h9_kern_selfref`), waking at least every 5 ms while any timer is set and ending two seconds after the last is cleared; the CPU-time timers are accepted and never fire. `sync_file_range` is a no-op, since `fsync` does the writing.
+### Named pipes
+
+`mkfifo` and `mknod(S_IFIFO)` make a FIFO file that stays in the file system ([linux-fifo](../design/linux-fifo.md)): an overlay node in overlays, a host FIFO on a host tree, and a `Tmknod` on a 9P2000.L root, with `EPERM` anywhere else. A FIFO's `Dir` carries `H9_DMFIFO` (9P2000.u's `DMNAMEDPIPE`, `0x00200000`), so `stat`, `lstat`, `fstat`, and `getdents` report `S_IFIFO` and `DT_FIFO`. `mknod` of a regular file makes one, and devices and sockets are `EPERM`.
+
+A Linux open of a FIFO (but not `O_PATH`) joins a pipe kept for that file in one table for the h9 process (`src/kern/fifo.c`), keyed by the file's device, instance, and qid path, with a host file's key leaving out devfs's attach number, so the machines of one h9 process that open one host FIFO share its pipe. The pipe is devpipe's, in FIFO mode: one queue that every open reads and writes, so read, write, poll, and fstat are a pipe's. The entry goes once nothing has the pipe open, and a later open starts afresh.
+
+The open rules are Linux's: `O_RDONLY` waits for a writer and `O_WRONLY` for a reader, and a signal interrupts the wait with `EINTR`. With `O_NONBLOCK`, a read open returns at once and a write open with no reader is `ENXIO`. `O_RDWR` returns at once, as both ends. A read with no writer left is EOF, and a write with no reader left is `EPIPE` and `SIGPIPE`.
+
 ### 32-bit x86
 
 With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator ([linux-i386](../design/linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.

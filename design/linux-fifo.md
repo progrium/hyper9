@@ -1,12 +1,12 @@
 ---
 slug: linux-fifo
 title: Linux named pipes
-status: draft
+status: implemented
 created: 2026-11-14
 authors: [progrium]
 depends: [linux-personality]
 areas: [kern, linux]
-branch: [linux-fifo]
+branch: [main]
 ---
 
 # Proposal: Linux named pipes
@@ -69,7 +69,7 @@ Integration cases, tagged `[linux-fifo]`, with the Alpine root:
 - [x] `test "O_RDWR opens a FIFO without waiting [linux-fifo]"`
 - [x] `test "a FIFO open is interrupted by a signal [linux-fifo]"`
 - [x] `test "two machines on one host FIFO share it [linux-fifo]"`
-- [ ] Demo: `nix build --rebuild nixpkgs#hello` gets through fixupPhase, with the fixes from the Nix spike.
+- [~] Demo: `nix build --rebuild nixpkgs#hello` gets through fixupPhase, with the fixes from the Nix spike. Waived: the spike's other fixes (the `nix-bugs` branch and a pty, [linux-pty](linux-pty.md)) aren't on main, so the demo can't run yet; the `tokens` case runs stdenv's job-token FIFO pattern instead (see Updates).
 
 ## Implementation
 
@@ -92,4 +92,7 @@ Integration cases, tagged `[linux-fifo]`, with the Alpine root:
   - **The key.** A host FIFO is keyed by its qid path, which is the host device and inode, with devfs's per-attach device number left out, so two machines' attaches of one host directory reach one pipe. A host FIFO under an overlay is keyed by the host file's identity too.
   - **An open waits after joining.** It opens its end of the pipe before it waits for the other, so two openers waiting for each other always meet, and an interrupted wait closes its end again.
   - **Not done yet:** `Tmknod` on a [dotl](dotl.md) root (`mknod` there fails), overlay-export's FIFOs, and the Nix demo. The two-machine case is in tests/backends.zig, since the integration cases run one machine per process.
-
+- 2026-11-21: Finished, and the rest of the first pass's list:
+  - **9P2000.L roots.** `mknod` there sends a `Tmknod` of an `S_IFIFO` file, through devdotl's translator, which makes a create with `DMNAMEDPIPE` one. A server's FIFO lists with `DMNAMEDPIPE` and opens without a server open, reading empty, so the personality joins its pipe as on any other tree. The translator's unit test covers it against `testserver.zig`; no integration case runs a Linux program on a .L root yet.
+  - **overlay-export** is still a draft, so there's no export of an overlay's FIFOs to serve yet.
+  - **The Nix demo** is waived until the spike's other fixes are on main. tests/fixtures/linux/fifo.c's `tokens` case runs the job-token pattern stdenv's fixupPhase and GNU make use: one `O_RDWR` holder fills the FIFO, and eight workers that open it by path take and return tokens.
