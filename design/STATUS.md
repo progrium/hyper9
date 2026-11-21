@@ -24,6 +24,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | draft |  | Linux named pipes |
 | [mounts](mounts.md) |  | draft |  | Mounts, binds, and a Plan 9 root |
+| [renames](renames.md) |  | draft | needs hcpu | Rename the parts, to ABI, engine, sud, and hcpu |
 
 ```mermaid
 flowchart LR
@@ -49,9 +50,11 @@ flowchart LR
   p_port_streams["port-streams<br/>draft"]:::draft
   p_linux_fifo["linux-fifo<br/>draft"]:::draft
   p_mounts["mounts<br/>draft"]:::draft
+  p_renames["renames<br/>draft"]:::draft
   p_host_cmd --> p_login_shell
   p_kernel_serve --> p_namespace_kernel
   p_port_streams --> p_namespace_kernel
+  p_hcpu --> p_renames
 ```
 
 ## Epoch 0
