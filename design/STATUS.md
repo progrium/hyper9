@@ -45,7 +45,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | proposed | in progress on credential-helpers | Credential helpers for WebSocket 9P |
 | [browser-gfx](browser-gfx.md) | [#120](../../../issues/120) | implemented |  | Graphics on the browser host |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
-| [host-cmd](host-cmd.md) |  | draft | stalled on host-cmd (9 days) | Rethinking host commands |
+| [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
 | [overlay-export](overlay-export.md) |  | draft |  | Exporting a run's overlay changes |
 | [schemeless-roots](schemeless-roots.md) | [#76](../../../issues/76) | implemented |  | Schemeless roots |
 | [login-shell](login-shell.md) | [#89](../../../issues/89) | proposed | needs host-cmd | h9 as a login shell |
@@ -55,7 +55,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [tilde-roots](tilde-roots.md) | [#107](../../../issues/107) | declined |  | Tilde roots from $H9ROOTPATH |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed |  | Copy-on-write fork and demand-loaded file pages for Linux processes |
-| [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | stalled on wine-draw (9 days) | Wine windows through draw |
+| [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
 | [mount-index](mount-index.md) |  | draft |  | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | proposed |  | hcpu, h9's own CPUs for the emulator |
 | [proposal-flow](proposal-flow.md) |  | implemented |  | A proposal lifecycle for building first, branches, Done criteria, and easier signing |
@@ -65,6 +65,7 @@ Every proposal under [design/](README.md), in the order they were written, with 
 | [linux-fifo](linux-fifo.md) |  | draft |  | Linux named pipes |
 | [linux-pty](linux-pty.md) |  | draft |  | Linux pseudoterminals |
 | [mounts](mounts.md) |  | draft |  | Mounts, binds, and a Plan 9 root |
+| [spec-split](spec-split.md) |  | implemented |  | Splitting SPEC.md into files under spec/ |
 
 ```mermaid
 flowchart LR
@@ -131,6 +132,7 @@ flowchart LR
   p_linux_fifo["linux-fifo<br/>draft"]:::draft
   p_linux_pty["linux-pty<br/>draft"]:::draft
   p_mounts["mounts<br/>draft"]:::draft
+  p_spec_split["spec-split<br/>implemented"]:::implemented
   p_semaphores --> p_go_compat
   p_semaphores --> p_devsrv
   p_ephemeral_writes --> p_overlay
@@ -212,4 +214,5 @@ flowchart LR
   p_linux_personality --> p_mounts
   p_builtin_root --> p_mounts
   p_symlinks_in_root --> p_mounts
+  p_proposal_flow --> p_spec_split
 ```
