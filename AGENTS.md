@@ -3,7 +3,7 @@
 ## Start here
 
 - Read [DEVELOPING.md](DEVELOPING.md) for setup, build commands, and repository layout.
-- Read [SPEC.md](SPEC.md) before changing architecture or behavior that crosses components. It describes h9 as built; verify in the source what is implemented today.
+- Read [SPEC.md](SPEC.md) before changing architecture or behavior that crosses components. It's the overview of the spec, and lists the files under `spec/` that describe each part of h9 as built; read the ones that cover what you're changing, and verify in the source what is implemented today.
 - Read [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), and [spec/ha64.md](spec/ha64.md) before changing h9's own CPUs (`src/interp/`, `src/jit/`, and `src/vmm/hcpu.zig`); like SPEC.md, they describe what's built.
 - Read [design/README.md](design/README.md) before changing anything a proposal covers. Changes to the design go through proposals in `design/`.
 - Check the existing code and tests before proposing or changing behavior. Keep changes focused and preserve established decisions unless the task explicitly calls for revisiting them.
@@ -24,7 +24,7 @@
 - Never edit an accepted proposal's body, except to check off or waive a Done criteria item: add a dated note under its Updates section, or draft a new proposal.
 - Never add, copy, or re-date a signature line (`Mon D, YYYY · Name, h.d.a.`) in a proposal or `SPEC.md`, run `zig build design -- sign`, post a `/sign` comment, or edit `design/SIGNERS`; only the named person signs, after reviewing the doc (see Signature in `design/README.md`). Don't remove an existing signature either. If you substantially change a signed doc, tell the user it may need re-signing.
 - Add a dependency you discover to the proposal's `depends` in the same PR, and say so.
-- The PR that finishes a proposal updates `SPEC.md` to describe what was built, checks off its Done criteria, and sets `status: implemented` and `branch: [main]`. `SPEC.md` describes only what's built.
+- The PR that finishes a proposal updates the spec to describe what was built (the file under `spec/` that covers it, or `SPEC.md` for the overview and the decisions table), checks off its Done criteria, and sets `status: implemented` and `branch: [main]`. The spec describes only what's built.
 - Bug fixes, workarounds, and refactors that don't change behavior need no proposal; explain them in code comments and commit messages.
 - Run `zig build design -- check` before opening a PR. Don't run `zig build design -- status` or commit `design/STATUS.md` in a PR: a workflow regenerates it on main after each merge, so PRs don't conflict over it.
 
