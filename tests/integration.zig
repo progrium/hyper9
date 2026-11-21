@@ -892,6 +892,7 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [whp]
     const e = try env(@src());
     const r = try runOn(e, "auto", &.{"--check"}, null);
     defer r.deinit();
+    errdefer std.debug.print("--check said:\n{s}\n", .{r.out});
     // For a machine without the feature; with it, the cases above apply.
     if (std.mem.indexOf(u8, r.out, "backend whp: ok") != null) return error.SkipZigTest;
     try std.testing.expect(std.mem.indexOf(u8, r.out, "backend whp: no usable hypervisor (enable the Windows Hypervisor Platform feature") != null);
