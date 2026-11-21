@@ -1730,7 +1730,8 @@ pub fn build(b: *std.Build) void {
     // else the emulator) for one machine, and the emulator for the second.
     // HVF allows one VM per host process.
     const hvf_host = os == .macos and target.result.cpu.arch == .aarch64 and b.graph.host.result.os.tag == .macos;
-    if (hvf_host or emu == .unicorn) {
+    const runs_here = os == b.graph.host.result.os.tag and target.result.cpu.arch == b.graph.host.result.cpu.arch;
+    if (hvf_host or (emu != .none and runs_here)) {
         const run_embed = b.addRunArtifact(embed_example);
         if (hvf_host) {
             const sign = b.addSystemCommand(&.{ "codesign", "--force", "--sign", "-", "--entitlements" });
@@ -1738,13 +1739,13 @@ pub fn build(b: *std.Build) void {
             sign.addFileArg(embed_example.getEmittedBin());
             run_embed.step.dependOn(&sign.step);
         }
-        const machines: []const u8 = if (emu == .unicorn) "2" else "1";
+        const machines: []const u8 = if (emu != .none) "2" else "1";
         run_embed.addArgs(&.{ "-j", machines });
         run_embed.addFileArg(host_hello);
         // Machine 0's backend isn't named: auto picks it when it runs.
         run_embed.addCheck(.{ .expect_stdout_match = "machine 0 (" });
         run_embed.addCheck(.{ .expect_stdout_match = "): exited \"\"\n  hello\n" });
-        if (emu == .unicorn) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (emu): exited \"\"\n  hello\n" });
+        if (emu != .none) run_embed.addCheck(.{ .expect_stdout_match = "machine 1 (emu): exited \"\"\n  hello\n" });
         run_embed.addCheck(.{ .expect_term = .{ .exited = 0 } });
         test_step.dependOn(&run_embed.step);
     }

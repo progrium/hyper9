@@ -78,7 +78,8 @@ adds the backend's own libraries.
 then the same three things the `h9` executable does:
 
 - on macOS, `linkFramework("Hypervisor")` and the SDK paths (`addSdkPaths`);
-- `linkUnicorn(exe)`, which links Unicorn when built with `-Demu=unicorn`;
+- `linkUnicorn(exe)`, which does nothing unless the build asks for the
+  Unicorn emulator with `-Demu=unicorn`, a development option;
 - on macOS, an ad-hoc `codesign` with [h9.entitlements](../h9.entitlements)
   before the program runs, because HVF refuses to create a VM without the
   hypervisor entitlement.
@@ -92,7 +93,7 @@ then the same three things the `h9` executable does:
 
 ```zig
 // build.zig
-const h9 = b.dependency("h9", .{ .target = target, .optimize = optimize, .emu = .unicorn });
+const h9 = b.dependency("h9", .{ .target = target, .optimize = optimize });
 const exe = b.addExecutable(.{ .name = "app", .root_module = b.createModule(.{
     .root_source_file = b.path("src/main.zig"),
     .target = target,
@@ -102,13 +103,20 @@ const exe = b.addExecutable(.{ .name = "app", .root_module = b.createModule(.{
 if (target.result.os.tag == .macos) exe.root_module.linkFramework("Hypervisor", .{});
 ```
 
-Drop `.emu = .unicorn` for the MIT build, which has HVF only. With it, the
-checkout needs Unicorn's prebuilt library in `.local/unicorn`
-(`scripts/fetch.sh`) and, as in this repository, Linux needs a musl target
-(`-Dtarget=x86_64-linux-musl`). On a Mac your build also has to sign the
-binary with the entitlement, as above, and set `SDKROOT` if Zig can't find
-the SDK (`scripts/env.sh` does). Unicorn is GPLv2, so a program that links
-it is a GPLv2 program; see [spec/engines.md](../spec/engines.md#emulator-backend-emu).
+That builds in the host's hypervisor backend and h9's own emulator, hcpu,
+which is the default (`.emu = .hcpu`) and needs no other libraries. Pass
+`.emu = .none` to leave the emulator out. Everything that goes into the
+program is MIT licensed, apart from drawterm's kernel, which is under
+drawterm's own license
+([third_party/drawterm/LICENSE](../third_party/drawterm/LICENSE)). The
+`.unicorn` emulator is GPLv2 and only for h9's own lockstep testing, so
+don't ship it ([spec/engines.md](../spec/engines.md#emulator-backend-emu)).
+
+On a Mac your build also has to sign the binary with the entitlement, as
+above, and set `SDKROOT` if Zig can't find the SDK (`scripts/env.sh` does).
+hcpu generates code in a `MAP_JIT` mapping, so a program signed with the
+hardened runtime, as notarization requires, also needs the
+`com.apple.security.cs.allow-jit` entitlement for the emulator to run.
 
 A fetched (URL or hash) dependency doesn't work yet: `build.zig.zon`'s
 `paths` leave out `third_party/` and `scripts/`, so drawterm's sources and
@@ -298,8 +306,8 @@ such as `write = .none` with `writable` paths or `net = .disable` with
 | `.hvf` | macOS on Apple Silicon | arm64 | always, on that host |
 | `.kvm` | Linux on arm64 or x86\_64, with access to `/dev/kvm` | the host's: arm64 or amd64 | always, on those hosts ([kvm](../design/epoch-0/kvm.md)) |
 | `.native` | Linux x86\_64, 5.11 or later | amd64 | always, on that host ([native-backend](../design/epoch-0/native-backend.md)) |
-| `.emu` | any | arm64, amd64, 386 | with `-Demu=unicorn` (GPLv2) |
-| `.whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 | on Windows x86\_64; incomplete ([whp](../design/epoch-0/whp.md)) |
+| `.whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 | always, on that host ([whp](../design/epoch-0/whp.md)) |
+| `.emu` | any | arm64, amd64, 386 | unless `-Demu=none` ([hcpu](../design/hcpu.md)) |
 
 On KVM, h9 blocks `SIGRTMIN + 1` in the threads that run vCPUs and sends it
 to kick them out of the guest. Leave that signal to h9: don't unblock it or
@@ -307,10 +315,11 @@ install a handler for it in threads that call into a machine.
 
 `.auto` uses the host's hypervisor if it's built in and can run `arch`. When
 the hypervisor is unavailable or can't run `arch`, it falls back to the
-native backend on Linux x86\_64, then to the emulator if that's built in,
-and otherwise returns the error. It doesn't fall back on any other failure.
-Check `m.backend.kind()` after `init` to see which one you got; the CLI
-warns when `.auto` lands on `.native` or `.emu`.
+emulator if that's built in, and otherwise returns the error. It never
+picks `.native`, which shares the host process and isn't a security
+boundary, so ask for that one by name for a guest you trust. It doesn't
+fall back on any other failure. Check `m.backend.kind()` after `init` to
+see which one you got; the CLI warns when `.auto` lands on `.emu`.
 
 `h9.vmm.Kind.built(.hvf)`, `.built(.kvm)`, and `.built(.emu)` tell you at run time what's
 compiled in, and `h9.vmm.host_arch` is the architecture that runs natively.
@@ -360,7 +369,7 @@ const Job = struct {
 `$machine` set per job and results printed in order:
 
 ```
-$ zig build embed -Demu=unicorn
+$ zig build embed
 $ zig-out/bin/embed -j 3 --dir .local/9front/root rc -c 'echo $machine'
 machine 0 (hvf): exited ""
   0
