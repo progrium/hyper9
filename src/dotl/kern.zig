@@ -78,9 +78,14 @@ fn putErr(err: [*]u8, msg: []const u8) void {
 /// server side, between a `--serve` client and its exportfs. devdotl.c
 /// calls the side next to devmnt or exportfs the "mount" side, and the
 /// network connection the "server" side, either way.
-const Tr = union(enum) {
-    client: client.Client,
-    server: server.Server,
+const Tr = struct {
+    side: union(enum) {
+        client: client.Client,
+        server: server.Server,
+    },
+    /// The server's name for the client, from a WebSocket handshake's
+    /// 9P-User (design/credential-helpers.md), which the user map holds.
+    ident: [32]u8 = undefined,
 };
 
 fn secondsNow() u32 {
@@ -97,21 +102,33 @@ fn secondsNow() u32 {
 }
 
 /// `mode` is 0 for a client offering 9P2000.L, 1 for one offering
-/// 9P2000.L.Z, and 2 for the server side.
-fn h9_dotl_new(mach: ?*anyopaque, mode: c_int, err: [*]u8) callconv(.c) ?*Tr {
+/// 9P2000.L.Z, and 2 for the server side. `uid` and `user` are the
+/// server's identity for the client, from a WebSocket handshake's 9P-Uid
+/// and 9P-User (design/credential-helpers.md), or -1 and null: without a
+/// `--user-map`, the map then takes them as the machine's user.
+fn h9_dotl_new(mach: ?*anyopaque, mode: c_int, uid: c_long, user: ?[*:0]const u8, err: [*]u8) callconv(.c) ?*Tr {
     const cfg = configFor(@intFromPtr(mach)) orelse Config{ .user = "none" };
-    const users: attr.UserMap = .{ .passwd = cfg.user_map, .user = cfg.user, .uid = hostUid() };
     const t = gpa.create(Tr) catch {
         putErr(err, "out of memory");
         return null;
     };
+    t.* = .{ .side = undefined };
+    var users: attr.UserMap = .{ .passwd = cfg.user_map, .user = cfg.user, .uid = hostUid() };
+    if (cfg.user_map == null and uid >= 0 and uid <= std.math.maxInt(u32)) if (user) |u| {
+        const name = std.mem.span(u);
+        if (name.len > 0 and name.len <= t.ident.len) {
+            @memcpy(t.ident[0..name.len], name);
+            users.user = t.ident[0..name.len];
+            users.uid = @intCast(uid);
+        }
+    };
     if (mode == 2) {
-        t.* = .{ .server = server.Server.init(gpa, .{ .users = users, .now = secondsNow }) };
+        t.side = .{ .server = server.Server.init(gpa, .{ .users = users, .now = secondsNow }) };
         return t;
     }
     var seed: [8]u8 = undefined;
     if (cfg.io) |io| io.random(&seed) else std.mem.writeInt(u64, &seed, @intFromPtr(mach) ^ @as(u64, @truncate(@intFromPtr(&seed))), .little);
-    t.* = .{ .client = client.Client.init(gpa, .{
+    t.side = .{ .client = client.Client.init(gpa, .{
         .users = users,
         .offer_lz = mode == 1,
         .op_seed = std.mem.readInt(u64, &seed, .little),
@@ -124,7 +141,7 @@ fn h9_dotl_new(mach: ?*anyopaque, mode: c_int, err: [*]u8) callconv(.c) ?*Tr {
 }
 
 fn h9_dotl_free(t: *Tr) callconv(.c) void {
-    switch (t.*) {
+    switch (t.side) {
         inline else => |*x| x.deinit(),
     }
     gpa.destroy(t);
@@ -132,7 +149,7 @@ fn h9_dotl_free(t: *Tr) callconv(.c) void {
 
 fn h9_dotl_frommount(t: *Tr, buf: [*]const u8, n: c_long, err: [*]u8) callconv(.c) c_int {
     const b = buf[0..@intCast(n)];
-    (switch (t.*) {
+    (switch (t.side) {
         .client => |*c| c.fromMount(b),
         .server => |*s| s.fromExport(b),
     }) catch {
@@ -144,7 +161,7 @@ fn h9_dotl_frommount(t: *Tr, buf: [*]const u8, n: c_long, err: [*]u8) callconv(.
 
 fn h9_dotl_fromserver(t: *Tr, buf: [*]const u8, n: c_long, err: [*]u8) callconv(.c) c_int {
     const b = buf[0..@intCast(n)];
-    (switch (t.*) {
+    (switch (t.side) {
         .client => |*c| c.fromServer(b),
         .server => |*s| s.fromClient(b),
     }) catch {
@@ -155,13 +172,13 @@ fn h9_dotl_fromserver(t: *Tr, buf: [*]const u8, n: c_long, err: [*]u8) callconv(
 }
 
 fn h9_dotl_takeserver(t: *Tr, buf: [*]u8, n: c_long) callconv(.c) c_long {
-    const b = switch (t.*) {
+    const b = switch (t.side) {
         .client => |*c| c.toServer(),
         .server => |*s| s.toClient(),
     };
     const k = @min(b.len, @as(usize, @intCast(n)));
     @memcpy(buf[0..k], b[0..k]);
-    switch (t.*) {
+    switch (t.side) {
         .client => |*c| c.consumedServer(k),
         .server => |*s| s.consumedClient(k),
     }
@@ -169,7 +186,7 @@ fn h9_dotl_takeserver(t: *Tr, buf: [*]u8, n: c_long) callconv(.c) c_long {
 }
 
 fn mountBytes(t: *Tr) []const u8 {
-    return switch (t.*) {
+    return switch (t.side) {
         .client => |*c| c.toMount(),
         .server => |*s| s.toExport(),
     };
@@ -179,7 +196,7 @@ fn h9_dotl_takemount(t: *Tr, buf: [*]u8, n: c_long) callconv(.c) c_long {
     const b = mountBytes(t);
     const k = @min(b.len, @as(usize, @intCast(n)));
     @memcpy(buf[0..k], b[0..k]);
-    switch (t.*) {
+    switch (t.side) {
         .client => |*c| c.consumedMount(k),
         .server => |*s| s.consumedExport(k),
     }
@@ -192,7 +209,7 @@ fn h9_dotl_mountready(t: *Tr) callconv(.c) c_int {
 
 fn h9_dotl_status(t: *Tr, buf: [*]u8, n: c_int) callconv(.c) c_int {
     const out = buf[0..@intCast(n)];
-    const s = switch (t.*) {
+    const s = switch (t.side) {
         .client => |*c| switch (c.version()) {
             .failed => std.fmt.bufPrint(out, "Hungup {s}", .{c.err orelse ""}),
             else => |v| if (c.reconnects != 0 or c.reconnecting)
@@ -210,7 +227,7 @@ fn h9_dotl_status(t: *Tr, buf: [*]u8, n: c_int) callconv(.c) c_int {
 
 /// Whether a dropped connection can be resumed (9P2000.L.Z).
 fn h9_dotl_canreconnect(t: *Tr) callconv(.c) c_int {
-    return switch (t.*) {
+    return switch (t.side) {
         .client => |*c| @intFromBool(c.canReconnect()),
         .server => 0,
     };
@@ -218,7 +235,7 @@ fn h9_dotl_canreconnect(t: *Tr) callconv(.c) c_int {
 
 /// Whether the server asked to be dropped (ENOTLEADER).
 fn h9_dotl_wantreconnect(t: *Tr) callconv(.c) c_int {
-    return switch (t.*) {
+    return switch (t.side) {
         .client => |*c| @intFromBool(c.want_reconnect),
         .server => 0,
     };
@@ -226,7 +243,7 @@ fn h9_dotl_wantreconnect(t: *Tr) callconv(.c) c_int {
 
 /// Resumes on a new connection; what to send is in takeserver.
 fn h9_dotl_reconnect(t: *Tr, err: [*]u8) callconv(.c) c_int {
-    switch (t.*) {
+    switch (t.side) {
         .client => |*c| c.reconnect() catch {
             putErr(err, "out of memory");
             return -1;

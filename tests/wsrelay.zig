@@ -29,6 +29,13 @@ pub const Options = struct {
     /// A header line, `Name: value`, the handshake must carry, or it's
     /// answered 401.
     require_header: ?[]const u8 = null,
+    /// A file holding the header line the handshake must carry, read at
+    /// each handshake, or it's answered 401: a credential helper writes
+    /// its newest token there (design/credential-helpers.md).
+    require_header_file: ?[]const u8 = null,
+    /// Header lines, each ending in CRLF, added to the 101, such as
+    /// 9P-Uid and 9P-User.
+    accept_headers: []const u8 = "",
     /// Answer every handshake with this status instead of 101.
     status: ?u16 = null,
     /// Don't answer pings.
@@ -185,6 +192,16 @@ pub const Relay = struct {
                 return;
             }
         }
+        if (rl.opts.require_header_file) |path| {
+            var fb: [512]u8 = undefined;
+            const want = std.mem.trim(u8, std.Io.Dir.cwd().readFile(io, path, &fb) catch "", " \r\n");
+            const colon = std.mem.indexOfScalar(u8, want, ':') orelse 0;
+            const got = q.header(want[0..colon]) orelse "";
+            if (colon == 0 or !std.mem.eql(u8, got, std.mem.trim(u8, want[colon + 1 ..], " "))) {
+                ws.writeStatus(&sw.interface, 401, "Unauthorized") catch {};
+                return;
+            }
+        }
         const backend: ?net.Stream = if (rl.opts.echo) null else blk: {
             const ip: net.IpAddress = .{ .ip4 = .loopback(rl.opts.target_port) };
             break :blk ip.connect(io, .{ .mode = .stream }) catch {
@@ -195,7 +212,12 @@ pub const Relay = struct {
         defer if (backend) |b| b.close(io);
         if (backend) |b| noDelay(b);
         var c: Conn = .{ .rl = rl, .w = &sw.interface };
-        ws.writeAccept(c.w, q.key, if (rl.opts.subprotocol and q.offers(ws.subprotocol)) ws.subprotocol else null) catch return;
+        if (rl.opts.accept_headers.len > 0) {
+            c.w.print("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n", .{&ws.acceptFor(q.key)}) catch return;
+            if (rl.opts.subprotocol and q.offers(ws.subprotocol)) c.w.print("Sec-WebSocket-Protocol: {s}\r\n", .{ws.subprotocol}) catch return;
+            c.w.print("{s}\r\n", .{rl.opts.accept_headers}) catch return;
+            c.w.flush() catch return;
+        } else ws.writeAccept(c.w, q.key, if (rl.opts.subprotocol and q.offers(ws.subprotocol)) ws.subprotocol else null) catch return;
         _ = rl.accepted.fetchAdd(1, .acq_rel);
         rl.track(st, true);
         defer rl.track(st, false);

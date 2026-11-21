@@ -1521,7 +1521,32 @@ devices in Plan 9.
   a file, so a token stays out of `ps`. `wss` trusts the host's CA bundle,
   or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY`, and
   `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
-  wss://fs.example/9p /n`. On the command line the scheme can be left off
+  wss://fs.example/9p /n`. For a short-lived token, a credential helper
+  ([credential-helpers](design/credential-helpers.md)) is better than a
+  header: `--cred 'PATTERN=COMMAND'` runs `COMMAND get URL` on the host
+  before each handshake whose URL matches `PATTERN`, the root's and a
+  namespace file's mounts alike, and sends the `Name: value` lines it
+  prints with it. A pattern is a host, `*.` and a domain, or either with a
+  path (`progrium.wanix.io/data`), with no scheme, and only the longest
+  matching pattern's helper runs. If the server answers 401 or 403, the
+  helper runs once more with the response's status line and headers on
+  stdin, so it can refresh its token. A helper that exits nonzero fails the
+  handshake (exit 125 before the program starts) with the first line of its
+  stderr, and printing nothing means no credential. A `--root-header`
+  wins over a helper's header of the same name, `$H9CRED` adds entries
+  separated by `;`, and `--print` names the helper but never shows its
+  headers. A helper matching a `ws://` URL warns that its headers aren't
+  encrypted. Guest `/net/ws` connections never run a helper. When a
+  `9P2000.L.Z` server's connection drops and h9 reconnects, the helper runs
+  again, so the new handshake gets a fresh token. A server can name the
+  uid it serves your files as by answering the handshake with `9P-Uid: N`
+  and `9P-User: NAME`: without `--user-map` or `--root-user`, files owned
+  by N show as NAME, and h9 attaches as NAME. In a browser, a page passes
+  `credentials: async (url, failed, helper) => …` to `h9-web.js`'s
+  `createMachine` in place of running helpers. A browser's WebSocket can't
+  send headers, so the callback answers `{ url }`, a URL to connect to
+  instead, such as one with a single-use ticket in its query. On the
+  command line the scheme can be left off
   ([schemeless-roots](design/epoch-0/schemeless-roots.md)): a `--root` or
   `$H9ROOT` that isn't an existing path and looks like
   `host[:port][/path]`, with a dotted host, a bracketed address, a port, or
@@ -2152,6 +2177,7 @@ Machine:
 | `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
+| `--cred 'PATTERN=COMMAND'` | A credential helper for the WebSocket handshakes h9 makes, the root's and a namespace file's mounts, and their reconnects: `COMMAND get URL` runs before each one whose URL matches `PATTERN`, and the `Name: value` lines it prints are sent with it (chapter 16); repeatable. `$H9CRED` adds more, separated by `;`. A bad pattern is exit 2, and a helper that fails before the program starts is exit 125. |
 | `--root-index FILE\|URL` | Use this metadata index for a 9P root instead of its `.fs/index` (chapter 16). A URL is `https://` or `http://`. With a host directory root, exit 2; one that can't be read, exit 125. |
 | `--index auto\|none` | `auto` (the default) uses an index wherever one is found, for the root and for 9P servers a namespace file mounts; `none` never does |
 | `--index-cache DIR` | Where compiled indexes are kept. Default: `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |

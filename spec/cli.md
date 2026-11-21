@@ -56,6 +56,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--root-spec NAME` | The attach name sent to a 9P root. Empty by default |
 | `--root-user NAME` | The uname sent in h9's attaches to a 9P root. The machine's user by default |
 | `--root-header 'NAME: VALUE'\|@FILE` (repeatable) | A header for a WebSocket root's handshake, or one per line from a file (blank lines skipped). Headers that change the handshake (`Host`, `Upgrade`, `Connection`, `Sec-WebSocket-*`, `Content-Length`, `Transfer-Encoding`) are refused. Without a `ws://` or `wss://` root, a bad header or a missing file is exit 2 |
+| `--cred PATTERN=COMMAND` (repeatable) | A credential helper for host-made WebSocket handshakes whose URL matches PATTERN (see [Credential helpers](ninep.md#credential-helpers)). `$H9CRED` adds a list of the same, separated by `;`, after these. A pattern that's empty, has a scheme, or has `*` anywhere but a leading `*.` followed by a domain, or an empty command, is exit 2 |
 | `--root-ca FILE` | A PEM bundle that a `wss://` root's certificate must chain to, instead of the host's. Without a `wss://` root, or a missing file, is exit 2. `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` choose an HTTP `CONNECT` proxy for WebSocket roots and mounts |
 | `--root-index FILE\|URL` | A metadata index for a 9P root, used instead of its `.fs/index` (see Metadata indexes). A URL is `https://` or `http://`. With a host directory root, exit 2; a file that can't be read or a URL that can't be fetched, exit 125 |
 | `--index auto\|none` | `auto`, the default, uses an index wherever one is found; `none` puts no `#ι` in any mount |
@@ -179,6 +180,7 @@ pub const Options = struct {
     nine_prog: bool = false,            // resolve the program in the 9front view even with a Linux root
     console_tty: bool = true,           // whether a Linux program's isatty is true on the console
     proxy: ?Proxy = null,               // HTTP CONNECT proxies for WebSocket roots and mounts; null: direct
+    cred_helpers: []const CredHelper = &.{}, // --cred and $H9CRED: { pattern, argv }, for host-made handshakes
     cwd: ?[]const u8 = null,
     env: []const EnvVar = &.{},
     policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs

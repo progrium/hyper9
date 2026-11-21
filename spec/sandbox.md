@@ -174,7 +174,7 @@ A 9P root has no access rule. Under the root's overlay, a bare `bind -c '#O' /` 
 
 `--write=none` with a 9P root is exit 2, because h9 can't make devmnt read-only.
 
-A WebSocket root's comment is its URL with the query elided (`?…`), its headers with their values as `…`, the proxy it goes through (credentials as `…@`) and `--root-ca`, and the unencrypted caveat applies to `ws://` but not `wss://`.
+A WebSocket root's comment is its URL with the query elided (`?…`), its headers with their values as `…`, the proxy it goes through (credentials as `…@`), `--root-ca`, and `cred PATTERN=COMMAND` for the credential helper that matches it, and the unencrypted caveat applies to `ws://` but not `wss://`. A helper's output never appears in the plan.
 
 `/net/ws`'s bind is printed as `bind -a '#ℏ' /net`, and `ℏ` joins the `devmask:` line under `--net=disable`. `--trace` prints no write data, so a URL written to a `ctl` doesn't appear in a trace.
 

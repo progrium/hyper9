@@ -4,6 +4,7 @@
 // file system is WASI's, preopened at /. design/epoch-0/browser-host.md.
 
 import fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import { WASI } from 'node:wasi';
 import { run, haveJSPI, Panic } from './h9-web.js';
 
@@ -56,6 +57,39 @@ const host = {
   setRaw: (on) => { if (stdin.isTTY) stdin.setRawMode(on); },
 };
 
+// --cred helpers (design/credential-helpers.md): Node runs the helper the
+// native h9 would, as `argv... get URL`, with why the last try failed on
+// stdin for a retry, and its stderr passed through. A browser's WebSocket
+// only says that a handshake failed, so that's all a retry's stdin has.
+const credentials = (url, failed, helper) => !helper ? null : new Promise((resolve, reject) => {
+  const name = helper[0].split('/').pop();
+  let p;
+  try {
+    p = spawn(helper[0], [...helper.slice(1), 'get', url], { stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e) {
+    return reject(new Error(`credential helper ${name}: ${e.message}`));
+  }
+  const out = [], err = [];
+  const timer = setTimeout(() => { p.kill('SIGKILL'); reject(new Error(`credential helper ${name}: no answer in 30 seconds`)); }, 30_000);
+  p.stdout.on('data', (b) => out.push(b));
+  p.stderr.on('data', (b) => { err.push(b); process.stderr.write(b); });
+  p.on('error', (e) => { clearTimeout(timer); reject(new Error(`credential helper ${name}: ${e.code === 'ENOENT' ? 'not found' : e.message}`)); });
+  p.on('close', (code, sig) => {
+    clearTimeout(timer);
+    const first = Buffer.concat(err).toString().split('\n').map((l) => l.trim()).find((l) => l);
+    if (sig) return reject(new Error(`credential helper ${name}: killed by signal ${sig}`));
+    if (code !== 0) return reject(new Error(`credential helper ${name}: ${first ?? `exit status ${code}`}`));
+    const text = Buffer.concat(out).toString();
+    out.forEach((b) => b.fill(0));
+    // Up to a blank line, as the native h9 reads it.
+    const lines = [];
+    for (const l of text.split('\n')) { if (!l.trim()) break; lines.push(l); }
+    resolve(lines);
+  });
+  p.stdin.on('error', () => {});
+  p.stdin.end(failed ? `${failed}\n` : '');
+});
+
 const env = { ...process.env, PWD: process.cwd() };
 const wasi = new WASI({
   version: 'preview1',
@@ -82,6 +116,7 @@ try {
       return out;
     },
     host,
+    credentials,
     // The integration suite's stack depths, for the default stack size.
     stats: process.env.H9_TEST_STACK_LOG ? ({ maxStack }) => fs.appendFileSync(process.env.H9_TEST_STACK_LOG, `${maxStack}\n`) : undefined,
   });

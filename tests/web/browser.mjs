@@ -181,6 +181,26 @@ try {
       const n = Number(t.match(/(\d+)\n% $/)[1]);
       if (n < 40) throw new Error(`only ${n} in /bin`);
     });
+    // A page's WebSocket sends no headers, so its credentials callback
+    // answers with the URL to connect to (design/credential-helpers.md).
+    await step("a credentials callback's url replaces the root's", async () => {
+      const r = await page.evaluate(async (ws) => {
+        const { createMachine } = await import('./h9-web.js');
+        const out = [], calls = [];
+        const terminal = { write: (b) => out.push(new TextDecoder().decode(b)), setRaw() {} };
+        const m = await createMachine({
+          root: 'ws://127.0.0.1:1/stale', terminal,
+          credentials: async (url, failed) => { calls.push([url, failed]); return { url: ws }; },
+        });
+        const code = await m.run(['/bin/ls', '/bin/rc']);
+        const h = await createMachine({ root: ws, terminal, credentials: async () => ['Authorization: Bearer x'] });
+        const code2 = await h.run(['/bin/echo']);
+        return { code, code2, out: out.join(''), calls };
+      }, ws);
+      if (r.code !== 0 || !r.out.includes('/bin/rc\n')) throw new Error(`over the callback's url: ${JSON.stringify(r)}`);
+      if (r.calls.length !== 1 || r.calls[0][0] !== 'ws://127.0.0.1:1/stale' || r.calls[0][1] !== null) throw new Error(`callback calls: ${JSON.stringify(r.calls)}`);
+      if (r.code2 !== 125 || !r.out.includes("can't send handshake headers")) throw new Error(`a header answer: ${JSON.stringify(r)}`);
+    });
     if (errors.length) throw new Error(`page errors:\n${errors.join('\n')}`);
   }
 } catch (e) {

@@ -79,6 +79,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .root_headers = wo.headers,
                 .root_ca = wo.ca,
                 .proxy = wo.proxy,
+                .cred_helpers = wo.cred,
                 .index = switch (cfg.index) {
                     .auto => .auto,
                     .none => .none,
@@ -237,6 +238,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .root_user = cfg.root_user,
         .root_headers = wo.headers,
         .root_ca = wo.ca,
+        .cred_helpers = wo.cred,
         .root_contained = cfg.root_contained,
         .index = switch (cfg.index) {
             .auto => .auto,
@@ -584,6 +586,7 @@ fn rootIndexCounts(arena: std.mem.Allocator, io: std.Io, arg: ?[]const u8) @Fiel
 
 const WsOptions = struct {
     headers: []const []const u8 = &.{},
+    cred: []const h9.Machine.CredHelper = &.{},
     ca: ?[]const u8 = null,
     proxy: h9.Machine.Proxy = .{},
 };
@@ -628,6 +631,7 @@ fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Ro
         } else try headers.append(arena, try checkHeader(h, h));
     }
     o.headers = headers.items;
+    o.cred = try credHelpers(arena, cfg, env);
     if (cfg.root_ca) |ca| {
         o.ca = realPath(io, arena, ca) catch {
             std.debug.print("h9: --root-ca {s}: not found\n", .{ca});
@@ -641,6 +645,27 @@ fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Ro
         .no_proxy = env.get("NO_PROXY") orelse env.get("no_proxy") orelse "",
     };
     return o;
+}
+
+/// --cred entries, then $H9CRED's (design/credential-helpers.md).
+/// cli.parse checked --cred's; a bad $H9CRED entry is a usage error.
+fn credHelpers(arena: std.mem.Allocator, cfg: cli.Config, env: *const std.process.Environ.Map) WsError![]const h9.Machine.CredHelper {
+    var list: std.ArrayList(h9.Machine.CredHelper) = .empty;
+    for (cfg.cred) |c| try list.append(arena, h9.cred.parse(arena, c) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    });
+    if (env.get("H9CRED")) |v| h9.cred.parseList(arena, v, &list) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.BadPattern, error.NoCommand => {
+            std.debug.print("h9: $H9CRED: {s}\n", .{if (e == error.BadPattern) "a pattern is a host, *.DOMAIN, or either with a path" else "each entry is PATTERN=COMMAND"});
+            return error.Usage;
+        },
+    };
+    // On the web host the embedder's credentials callback gets the
+    // matching helper's command to run, or not (design/credential-helpers.md,
+    // "Browser host").
+    return list.items;
 }
 
 const ServeOptions = struct {

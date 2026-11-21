@@ -59,13 +59,16 @@
 /* proc.c */
 extern void	h9_kprocdetach(void);
 
+/* devhstream.c: a host-made WebSocket's channel, connected. */
+extern Chan	*h9_hstream_dial(void *mach, char *url);
+
 /* src/kern.zig: the calling thread's sandbox plan. */
 extern void	*h9_plan_get(void);
 extern Chan	*h9_unixchan(char *path);
 extern void	h9_plan_set(void *plan);
 
 /* Implemented in Zig (src/dotl/kern.zig). */
-extern void	*h9_dotl_new(void *mach, int mode, char *err);
+extern void	*h9_dotl_new(void *mach, int mode, long uid, char *user, char *err);
 extern int	h9_dotl_canreconnect(void *t);
 extern int	h9_dotl_wantreconnect(void *t);
 extern int	h9_dotl_reconnect(void *t, char *err);
@@ -115,7 +118,9 @@ struct Conv
 	int	kpgone;		/* the reader has exited; under lk */
 	int	nolz;		/* ctl's version 9P2000.L */
 	int	serving;	/* ctl's serve: the server side */
-	char	*addrs;		/* dial's addresses, to redial */
+	long	iduid;		/* ctl's user: the server's uid for us, or -1 */
+	char	iduser[KNAMELEN];	/* and its name for us */
+	char	*addrs;		/* dial's or redial's addresses, to redial */
 	int	at;		/* which of them was dialed last */
 	void	*plan;		/* the dialer's plan, for redials */
 	Pgrp	*pg;		/* the reader's namespace, until it takes it */
@@ -182,6 +187,8 @@ newconv(void)
 			cv->addrs = nil;
 			cv->plan = nil;
 			cv->pg = nil;
+			cv->iduid = -1;
+			cv->iduser[0] = 0;
 			unlock(&cv->lk);
 			unlock(&convlk);
 			return cv;
@@ -327,7 +334,7 @@ dialone(char *ipport)
 }
 
 static Chan*
-dialaddr(char *addr)
+dialaddr(void *mach, char *addr)
 {
 	char buf[256], err[ERRMAX];
 	Chan *cs, *c;
@@ -343,6 +350,16 @@ dialaddr(char *addr)
 		if(h9_plan_get() != nil)
 			error("dial: unix sockets are for roots");
 		return h9_unixchan(addr+5);
+	}
+	/*
+	 * A WebSocket h9 makes itself (a root's or a namespace file's mount),
+	 * through hstream with the machine's handshake options, so a
+	 * credential helper runs again (design/credential-helpers.md).
+	 */
+	if(strncmp(addr, "ws://", 5) == 0 || strncmp(addr, "wss://", 6) == 0){
+		if(h9_plan_get() != nil)
+			error("dial: WebSockets are for h9's own mounts");
+		return h9_hstream_dial(mach, addr);
 	}
 	if(strncmp(addr, "tcp!", 4) != 0 && strncmp(addr, "net!", 4) != 0)
 		error("dial: only tcp addresses");
@@ -381,7 +398,7 @@ dialaddr(char *addr)
  * address *at and going round, and sets *at to it.
  */
 static Chan*
-dialany(char *addrs, int *at)
+dialany(void *mach, char *addrs, int *at)
 {
 	char err[ERRMAX], *list, *f[16];
 	Chan *c;
@@ -403,7 +420,7 @@ dialany(char *addrs, int *at)
 			strecpy(err, err+sizeof err, up->errstr);
 			continue;
 		}
-		c = dialaddr(f[(*at+i)%nf]);
+		c = dialaddr(mach, f[(*at+i)%nf]);
 		poperror();
 		if(c != nil)
 			*at = (*at+i)%nf;
@@ -470,7 +487,7 @@ redial(Conv *cv, int next)
 			return 0;
 		c = nil;
 		if(!waserror()){
-			c = dialany(cv->addrs, &cv->at);
+			c = dialany(cv->mach, cv->addrs, &cv->at);
 			poperror();
 		}
 		if(c != nil)
@@ -498,6 +515,24 @@ redial(Conv *cv, int next)
 	return 1;
 }
 
+/* Puts #/ for the calling kproc's dot and slash. */
+static void
+dropdot(void)
+{
+	Chan *c, *odot, *oslash;
+
+	c = devattach('/', "");
+	incref(&c->ref);
+	odot = up->dot;
+	oslash = up->slash;
+	up->dot = c;
+	up->slash = c;
+	if(odot != nil)
+		cclose(odot);
+	if(oslash != nil)
+		cclose(oslash);
+}
+
 /* The kproc: reads the server connection into the translator. */
 static void
 reader(void *a)
@@ -512,6 +547,13 @@ reader(void *a)
 	cv = a;
 	firstnl = lastnl = 0;
 	h9_kprocdetach();
+	/*
+	 * The reader can outlive the machine's namespace, whose dot and slash
+	 * it was made with: a root overlay's channels would be closed after
+	 * the overlay is gone. It names only devices (#I, a host socket, a
+	 * host stream), so it keeps #/ instead.
+	 */
+	dropdot();
 	/* A dialed conversation redials in a namespace of its own. */
 	lock(&cv->lk);
 	if(cv->pg != nil){
@@ -648,7 +690,7 @@ start(Conv *cv, Chan *c)
 	Proc *kp;
 	void *tr;
 
-	tr = h9_dotl_new(cv->mach, cv->serving ? 2 : !cv->nolz, err);
+	tr = h9_dotl_new(cv->mach, cv->serving ? 2 : !cv->nolz, cv->iduid, cv->iduid >= 0 ? cv->iduser : nil, err);
 	if(tr == nil){
 		cclose(c);
 		error(err);
@@ -697,7 +739,7 @@ ctlwrite(Conv *cv, char *a, long n)
 		if(cv->started)
 			error("already connected");
 		cv->at = 0;
-		c = dialany(cb->f[1], &cv->at);
+		c = dialany(cv->mach, cb->f[1], &cv->at);
 		pg = newpgrp();
 		if(up->pgrp != nil)
 			memmove(pg->devmask, up->pgrp->devmask, sizeof pg->devmask);
@@ -709,6 +751,38 @@ ctlwrite(Conv *cv, char *a, long n)
 		cv->pg = pg;
 		unlock(&cv->lk);
 		start(cv, c);
+	}else if(cb->nf == 2 && strcmp(cb->f[0], "redial") == 0){
+		/*
+		 * Before fd: the addresses to dial if the connection drops, for
+		 * a connection h9 made itself (a WebSocket root or mount), so
+		 * with no plan, as a root's dial has.
+		 */
+		if(cv->started)
+			error("already connected");
+		if(h9_plan_get() != nil)
+			error("redial: for h9's own connections");
+		pg = newpgrp();
+		if(up->pgrp != nil)
+			memmove(pg->devmask, up->pgrp->devmask, sizeof pg->devmask);
+		addrs = smalloc(strlen(cb->f[1])+1);
+		strcpy(addrs, cb->f[1]);
+		lock(&cv->lk);
+		free(cv->addrs);
+		cv->addrs = addrs;
+		cv->at = 0;
+		cv->plan = nil;
+		if(cv->pg != nil)
+			closepgrp(cv->pg);
+		cv->pg = pg;
+		unlock(&cv->lk);
+	}else if(cb->nf == 3 && strcmp(cb->f[0], "user") == 0){
+		/* Before fd: the server's uid and name for us (9P-Uid, 9P-User). */
+		if(cv->started)
+			error("already connected");
+		if(strlen(cb->f[2]) >= KNAMELEN || cb->f[2][0] == 0)
+			error("user: name too long");
+		cv->iduid = strtol(cb->f[1], nil, 10);
+		strecpy(cv->iduser, cv->iduser+sizeof cv->iduser, cb->f[2]);
 	}else if(cb->nf == 2 && strcmp(cb->f[0], "version") == 0){
 		if(cv->started)
 			error("already connected");

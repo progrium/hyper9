@@ -207,6 +207,17 @@ pub fn writeRequest(w: *Writer, url: Url, key: []const u8, protocols: []const []
     try w.flush();
 }
 
+/// The longest 9P-User h9 takes: the kernel's user names are 27 bytes.
+pub const max_user = 27;
+
+/// Whether `s` can be a user name: printable, with no space, colon, or
+/// slash, so it fits a ctl message and a passwd line.
+pub fn userName(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |ch| if (ch <= ' ' or ch >= 0x7f or ch == ':' or ch == '/') return false;
+    return true;
+}
+
 pub const HandshakeError = error{
     /// The server answered with a status other than 101; `Response`
     /// has it.
@@ -231,6 +242,35 @@ pub const Response = struct {
     /// The selected subprotocol, in `buf`, or null for none.
     protocol: ?[]const u8 = null,
     buf: [128]u8 = undefined,
+    /// The server's uid and name for the client, from a 101's 9P-Uid and
+    /// 9P-User headers (design/credential-helpers.md); the name is in
+    /// `user_buf`. Null unless both came and the name fits.
+    uid: ?u32 = null,
+    user: ?[]const u8 = null,
+    user_buf: [32]u8 = undefined,
+    /// A 9P-User too long for the kernel's 27-byte names.
+    user_too_long: bool = false,
+    /// If set, gets the status line and every header line as received,
+    /// for a credential helper's retry (design/credential-helpers.md).
+    head: ?*Head = null,
+
+    /// A response's head, as text: the status line and the headers, each
+    /// ending in CRLF. What doesn't fit is left out.
+    pub const Head = struct {
+        buf: [4096]u8 = undefined,
+        len: usize = 0,
+
+        pub fn text(h: *const Head) []const u8 {
+            return h.buf[0..h.len];
+        }
+
+        fn add(h: *Head, line: []const u8) void {
+            if (h.len + line.len + 2 > h.buf.len) return;
+            @memcpy(h.buf[h.len..][0..line.len], line);
+            @memcpy(h.buf[h.len + line.len ..][0..2], "\r\n");
+            h.len += line.len + 2;
+        }
+    };
 
     fn keep(r: *Response, used: *usize, s: []const u8) []const u8 {
         const n = @min(s.len, r.buf.len - used.*);
@@ -247,6 +287,10 @@ fn readHead(r: *Reader, resp: *Response, used: *usize, ctx: anytype, comptime he
     const status_line = try readLine(r);
     // HTTP/1.1 101 Switching Protocols
     if (!std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.BadResponse;
+    if (resp.head) |h| {
+        h.len = 0;
+        h.add(status_line);
+    }
     var parts = std.mem.splitScalar(u8, status_line, ' ');
     _ = parts.next();
     resp.status = std.fmt.parseInt(u16, parts.next() orelse return error.BadResponse, 10) catch return error.BadResponse;
@@ -255,6 +299,7 @@ fn readHead(r: *Reader, resp: *Response, used: *usize, ctx: anytype, comptime he
         const l = try readLine(r);
         if (l.len == 0) break;
         const colon = std.mem.indexOfScalar(u8, l, ':') orelse return error.BadResponse;
+        if (resp.head) |h| h.add(l);
         header(ctx, std.mem.trim(u8, l[0..colon], " \t"), std.mem.trim(u8, l[colon + 1 ..], " \t"));
     }
 }
@@ -278,6 +323,8 @@ pub fn readResponse(r: *Reader, key: []const u8, offered: []const []const u8, re
         connection: bool = false,
         accept: bool = false,
         extension: bool = false,
+        uid: ?u32 = null,
+        user_len: usize = 0,
         want: [28]u8,
         fn header(c: *@This(), name: []const u8, value: []const u8) void {
             if (std.ascii.eqlIgnoreCase(name, "upgrade")) {
@@ -293,12 +340,28 @@ pub fn readResponse(r: *Reader, key: []const u8, offered: []const []const u8, re
                 c.resp.protocol = c.resp.keep(&c.used, value);
             } else if (std.ascii.eqlIgnoreCase(name, "sec-websocket-extensions")) {
                 c.extension = value.len > 0;
+            } else if (std.ascii.eqlIgnoreCase(name, "9p-uid")) {
+                c.uid = std.fmt.parseInt(u32, value, 10) catch null;
+            } else if (std.ascii.eqlIgnoreCase(name, "9p-user")) {
+                if (value.len > max_user) {
+                    c.resp.user_too_long = true;
+                } else if (userName(value)) {
+                    @memcpy(c.resp.user_buf[0..value.len], value);
+                    c.user_len = value.len;
+                }
             }
         }
     };
     var ctx: Ctx = .{ .resp = resp, .want = acceptFor(key) };
     resp.protocol = null;
+    resp.uid = null;
+    resp.user = null;
+    resp.user_too_long = false;
     try readHead(r, resp, &ctx.used, &ctx, Ctx.header);
+    if (ctx.uid != null and ctx.user_len > 0) {
+        resp.uid = ctx.uid;
+        resp.user = resp.user_buf[0..ctx.user_len];
+    }
     if (resp.status != 101) return error.Status;
     if (!ctx.upgrade or !ctx.connection or !ctx.accept) return error.BadAccept;
     if (ctx.extension) return error.BadExtension;
@@ -918,6 +981,23 @@ test "a recorded handshake: request, then the server's 101" {
     try readResponse(&r1, key, &.{subprotocol}, &ok);
     try t.expectEqualStrings("9p", ok.protocol.?);
     try t.expectEqualStrings("rest", r1.buffered());
+    try t.expectEqual(@as(?u32, null), ok.uid);
+
+    // 9P-Uid and 9P-User (design/credential-helpers.md): both, or neither.
+    var who: Response = .{};
+    var rw: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n9P-Uid: 1000\r\n9p-user: progrium\r\n\r\n");
+    try readResponse(&rw, key, &.{subprotocol}, &who);
+    try t.expectEqual(@as(?u32, 1000), who.uid);
+    try t.expectEqualStrings("progrium", who.user.?);
+    var half: Response = .{};
+    var rh: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n9P-Uid: 1000\r\n9P-User: a name\r\n\r\n");
+    try readResponse(&rh, key, &.{subprotocol}, &half);
+    try t.expectEqual(@as(?[]const u8, null), half.user);
+    try t.expectEqual(@as(?u32, null), half.uid);
+    var long: Response = .{};
+    var rl: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n9P-Uid: 1\r\n9P-User: abcdefghijklmnopqrstuvwxyz0123\r\n\r\n");
+    try readResponse(&rl, key, &.{subprotocol}, &long);
+    try t.expect(long.user_too_long and long.user == null);
 
     // No subprotocol selected is fine; another one isn't.
     var none: Response = .{};
@@ -928,11 +1008,14 @@ test "a recorded handshake: request, then the server's 101" {
     var r3: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: chat\r\n\r\n");
     try t.expectError(error.BadProtocol, readResponse(&r3, key, &.{subprotocol}, &other));
 
-    var denied: Response = .{};
-    var r4: Reader = .fixed("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+    // A head, for a credential helper's retry (design/credential-helpers.md).
+    var head: Response.Head = .{};
+    var denied: Response = .{ .head = &head };
+    var r4: Reader = .fixed("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer error=\"invalid_token\"\nContent-Length: 0\r\n\r\n");
     try t.expectError(error.Status, readResponse(&r4, key, &.{subprotocol}, &denied));
     try t.expectEqual(@as(u16, 401), denied.status);
     try t.expectEqualStrings("Unauthorized", denied.reason);
+    try t.expectEqualStrings("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer error=\"invalid_token\"\r\nContent-Length: 0\r\n", head.text());
 
     var bad: Response = .{};
     var r5: Reader = .fixed("HTTP/1.1 101 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n");

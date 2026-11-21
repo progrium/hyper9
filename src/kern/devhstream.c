@@ -51,6 +51,8 @@ extern long	h9_hstream_read(ulong id, int kind, void *buf, long n, char *err);
 extern int	h9_hstream_ready(ulong id, int kind);
 extern long	h9_hstream_write(ulong id, int kind, void *buf, long n, char *err);
 extern int	h9_hstream_info(ulong id, int what, char *buf, int n);
+extern long	h9_hstream_redial(void *mach, char *url, long n, char *err);
+extern void	h9_hstream_release(ulong id);
 
 enum {
 	Hsdc		= 0x210F,	/* ℏ */
@@ -236,6 +238,50 @@ h9_hstream_wait(ulong id)
  * Makes a channel for host-made stream id and returns a new fd on it, or
  * -1 with the error string set. The channel holds the stream.
  */
+/* An open channel holding host-made stream id. */
+static Chan*
+hostchan(ulong id)
+{
+	Chan *c;
+
+	c = devattach(Hsdc, "");
+	c->qid.path = Qhost;
+	c->qid.type = QTFILE;
+	c->aux = (void*)(uintptr)id;
+	c->mode = ORDWR;
+	c->flag |= COPEN;
+	h9_hstream_incref(id);
+	return c;
+}
+
+/*
+ * For devdotl's redial (design/credential-helpers.md): connects a
+ * host-made stream to url for machine mach, with the handshake options
+ * the machine registered (src/hstream.zig), so its credential helper runs
+ * again, waits for it, and returns its channel. Raises the connect's
+ * error.
+ */
+Chan*
+h9_hstream_dial(void *mach, char *url)
+{
+	char err[ERRMAX];
+	Chan *c;
+	long id;
+
+	id = h9_hstream_redial(mach, url, strlen(url), err);
+	if(id < 0)
+		error(err);
+	if(waserror()){
+		h9_hstream_release(id);
+		nexterror();
+	}
+	waitconnect(id);
+	c = hostchan(id);
+	poperror();
+	h9_hstream_release(id);
+	return c;
+}
+
 int
 h9_hstream_fd(ulong id)
 {
@@ -249,13 +295,7 @@ h9_hstream_fd(ulong id)
 		up->errstr = p;
 		return -1;
 	}
-	c = devattach(Hsdc, "");
-	c->qid.path = Qhost;
-	c->qid.type = QTFILE;
-	c->aux = (void*)(uintptr)id;
-	c->mode = ORDWR;
-	c->flag |= COPEN;
-	h9_hstream_incref(id);
+	c = hostchan(id);
 	fd = newfd(c, 0);
 	if(fd < 0){
 		cclose(c);
