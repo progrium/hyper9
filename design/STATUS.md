@@ -23,7 +23,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [namespace-kernel](namespace-kernel.md) |  | draft | needs kernel-serve, port-streams | A namespace-only kernel build |
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | implemented |  | Linux named pipes |
-| [mounts](mounts.md) |  | draft |  | Mounts, binds, and a Plan 9 root |
+| [mounts](mounts.md) |  | draft | in progress on mounts | Mounts, binds, and a Plan 9 root |
 | [baseline-1](baseline-1.md) |  | draft | needs renames, cow-fork, retire-unicorn | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
