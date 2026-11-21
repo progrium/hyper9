@@ -895,6 +895,9 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [whp]
     errdefer std.debug.print("--check said:\n{s}\n", .{r.out});
     // For a machine without the feature; with it, the cases above apply.
     if (std.mem.indexOf(u8, r.out, "backend whp: ok") != null) return error.SkipZigTest;
+    // WHP runs amd64 only: with another root, it says so before it looks
+    // for a hypervisor.
+    if (std.mem.indexOf(u8, r.out, "backend whp: can't run this architecture") != null) return error.SkipZigTest;
     try std.testing.expect(std.mem.indexOf(u8, r.out, "backend whp: no usable hypervisor (enable the Windows Hypervisor Platform feature") != null);
     if (std.mem.indexOf(u8, r.out, "backend emu: ok") != null) {
         try std.testing.expect(std.mem.indexOf(u8, r.out, "backend auto: ok (uses emu)") != null);
