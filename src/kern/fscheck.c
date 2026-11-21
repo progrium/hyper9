@@ -54,7 +54,8 @@ canonical(char *path, char *buf)
 	{
 		int fd;
 
-		fd = open(path, O_EVTONLY|O_SYMLINK|O_CLOEXEC);
+		/* O_NONBLOCK: opening a FIFO waits for the other end otherwise. */
+		fd = open(path, O_EVTONLY|O_SYMLINK|O_NONBLOCK|O_CLOEXEC);
 		if(fd < 0)
 			return -1;
 		if(fcntl(fd, F_GETPATH, buf) < 0){
