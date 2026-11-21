@@ -43,7 +43,9 @@ func load() uintptr {
 
 func main() {
 	nw := 4
-	if len(os.Args) > 1 { fmt.Sscan(os.Args[1], &nw) }
+	if len(os.Args) > 1 {
+		fmt.Sscan(os.Args[1], &nw)
+	}
 	h := load()
 	var runAout func(prog *byte, n uintptr, outFd int, status *byte, cap uintptr) int32
 	var backend func(status *byte, cap uintptr) int32
