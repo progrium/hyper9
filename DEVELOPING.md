@@ -11,7 +11,7 @@ Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 
 ```sh
 . scripts/env.sh               # Zig cache and tools live in .local/ (gitignored); puts zig-out/bin (h9) on PATH
-./scripts/fetch.sh             # reference sources (9front at the pinned release), 9front arm64 image, prebuilt and patched-source Unicorn into .local/ (or name parts: fetch.sh iso386)
+./scripts/fetch.sh             # 9front source at the pinned release, 9front arm64 image, prebuilt and patched-source Unicorn, and the Alpine roots into .local/ (or name parts: fetch.sh iso386, fetch.sh alpine-amd64)
 zig build mkroot               # extracts the 9front root tree into .local/9front/root (~1 min, ~250 MB)
 ```
 
