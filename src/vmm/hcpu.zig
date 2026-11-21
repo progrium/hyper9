@@ -674,6 +674,13 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                         return e;
                     };
                     s.leave();
+                    // A fault on memory another thread mapped after this
+                    // view was synced (an RFMEM sibling's sbrk while this
+                    // one spins in guest code): sync and run the faulting
+                    // instruction again. Faults are exact, so it's
+                    // restartable; a real fault comes back with the view
+                    // current.
+                    if (exit == .fault and s.as.load(.monotonic).?.generation.load(.seq_cst) != s.generation) continue;
                     if (exit != .interrupted) return exit;
                     if (web and cx.budget <= 0 and @atomicLoad(u32, &cx.exit_request, .seq_cst) == 0) {
                         // The budget ran out. Past a slice, preempt: the

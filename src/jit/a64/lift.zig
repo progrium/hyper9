@@ -104,8 +104,10 @@ pub fn classify(o: dec.Op) How {
 pub fn lifts(o: dec.Op) bool {
     return switch (o.k) {
         .ldxp, .clrex, .dc_zva, .ic_ivau => false,
-        // LSE atomics run on T0 until they're lifted to rmw and cas.
-        .ldop, .cas, .casp => false,
+        // LSE atomics: CAS is a `cas`, and LDADD and the rest a loop of an
+        // rmw load and a `cas`. CASP stays on T0, as LDXP does.
+        .ldop, .cas => true,
+        .casp => false,
         // ISB refetches what follows: T0 leaves the region after it.
         .isb => false,
         // A pair of X registers is 16 bytes, wider than `cas`.
@@ -837,6 +839,17 @@ pub const L = struct {
                 try l.put(o.d, v);
             },
             .stxr, .stxp => try l.storeExclusive(in),
+            .cas => {
+                // CAS: Rs is the expected value, and gets the old one.
+                try l.flush();
+                const size: u3 = @intCast(o.x);
+                const addr = try l.x(o.n);
+                const exp = try l.narrow(try l.x(o.d), size);
+                const new = try l.narrow(try l.x(o.m), size);
+                const old = try b.cas(sizeType(size), addr, exp, new, .{ .size = size, .aligned = true, .order = .seq_cst }, in.pc);
+                try l.putT(o.d, old, sizeType(size));
+            },
+            .ldop => try l.atomicOp(in),
             .stlr => {
                 try l.flush();
                 const addr = try l.x(o.n);
@@ -909,6 +922,53 @@ pub const L = struct {
         if (o.sh == 1) _ = try b.emit(.{ .op = .fence });
         if (o.d != SINK and o.d != ZR) try b.setreg(regOff(o.d), try b.konst(.i64, 1));
         try b.br(join);
+
+        b.begin(join);
+        l.regs = @splat(null);
+        l.flags.clobber();
+    }
+
+    /// LDADD, LDCLR, LDEOR, LDSET, LDSMAX, LDSMIN, LDUMAX, LDUMIN, and SWP,
+    /// as a loop: an rmw load, the operation, and a `cas` of the old value
+    /// to the new one, again if another vCPU changed it in between. Rt gets
+    /// the old value. Like storeExclusive, it ends the current block.
+    fn atomicOp(l: *L, in: Insn) !void {
+        const o = in.op;
+        const b = l.b;
+        const size: u3 = @intCast(o.x);
+        const ty = sizeType(size);
+        try l.retireAll();
+        const loop = try b.block();
+        const join = try b.block();
+        try b.br(loop);
+
+        b.begin(loop);
+        const addr = try l.rawX(o.n);
+        const v = try l.narrow(try l.rawX(o.m), size);
+        const old = try b.load(ty, addr, .{ .size = size, .aligned = true, .rmw = true }, in.pc);
+        const new = switch (o.a) {
+            0 => try b.bin(.add, ty, old, v),
+            1 => try b.bin(.@"and", ty, old, try b.un(.not, ty, v)),
+            2 => try b.bin(.xor, ty, old, v),
+            3 => try b.bin(.@"or", ty, old, v),
+            4, 5, 6, 7 => blk: {
+                const p: ir.Pred = switch (o.a) {
+                    4 => .sgt,
+                    5 => .slt,
+                    6 => .ugt,
+                    else => .ult,
+                };
+                break :blk try b.emit(.{ .op = .select, .ty = ty, .a = try b.icmp(p, old, v), .b = old, .c = v });
+            },
+            else => v, // SWP
+        };
+        const got = try b.cas(ty, addr, old, new, .{ .size = size, .aligned = true, .order = .seq_cst }, in.pc);
+        const ok = try b.icmp(.eq, got, old);
+        if (o.d != SINK and o.d != ZR) {
+            const wide = if (ty == .i64) old else try b.un(.zext, .i64, old);
+            try b.setreg(regOff(o.d), try b.emit(.{ .op = .select, .ty = .i64, .a = ok, .b = wide, .c = try b.getreg(.i64, regOff(o.d)) }));
+        }
+        try b.brcond(ok, join, loop);
 
         b.begin(join);
         l.regs = @splat(null);
@@ -1174,4 +1234,14 @@ pub fn interp(c: *ctx_mod.Ctx, handle: u64, pc: u64) callconv(.c) u32 {
             },
         },
     }
+}
+
+/// The integer type of a 2^size-byte access.
+fn sizeType(size: u3) Type {
+    return switch (size) {
+        0 => .i8,
+        1 => .i16,
+        2 => .i32,
+        else => .i64,
+    };
 }
