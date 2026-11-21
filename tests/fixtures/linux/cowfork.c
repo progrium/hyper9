@@ -389,7 +389,15 @@ static void sigbus(void) {
 	static char buf[8192];
 	memset(buf, 'b', sizeof buf);
 	CHECK("sigbus", write(fd, buf, sizeof buf) == (ssize_t)sizeof buf);
-	volatile unsigned char *m = mmap(NULL, 4 * pg, PROT_READ, MAP_PRIVATE, fd, 0);
+	/* In a 1 MiB chunk of its own, which nothing has touched: h9 reads
+	 * a lazy mapping's pages at mmap where its chunk is allocated
+	 * already, so only there is a truncate before the first touch seen,
+	 * and where a mapping lands otherwise differs by architecture. */
+	const unsigned long mib = 1UL << 20;
+	char *res = mmap(NULL, 3 * mib, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("sigbus", res != MAP_FAILED);
+	char *at = (char *)(((unsigned long)res + mib - 1) & ~(mib - 1));
+	volatile unsigned char *m = mmap(at, 4 * pg, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0);
 	CHECK("sigbus", m != MAP_FAILED);
 	/* Truncated before the first touch: page 0 keeps 100 bytes of it. */
 	CHECK("sigbus", ftruncate(fd, 100) == 0);
