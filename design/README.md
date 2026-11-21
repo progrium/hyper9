@@ -141,7 +141,7 @@ Cases are tagged with the proposal they prove, by slug, in brackets at the end o
 
 ## Epochs
 
-The top of this directory holds the proposals still being decided or built. A proposal that's implemented, declined, or superseded is archived in the current epoch's folder, `epoch-N/`, by `zig build design -- archive`, which moves it and rewrites every link to it ([epochs](epoch-0/epochs.md)). An epoch is the work between two baselines: [baseline](epoch-0/baseline.md) opened epoch 0, and a proposal named `baseline-K` opens epoch K.
+The top of this directory holds the proposals still being decided or built. A proposal that's implemented, declined, or superseded is archived in the current epoch's folder, `epoch-N/`, by `zig build design -- archive`, which moves it and rewrites every link to it ([epochs](epoch-0/epochs.md)). An epoch is the work between two baselines: [baseline](epoch-0/baseline.md) opened epoch 0, and a proposal named `baseline-K` opens epoch K once it's implemented.
 
 Archiving isn't part of finishing a proposal. The PR that finishes one leaves its file where it is, and `archive` is run now and then in a PR of its own, and whenever a baseline is cut. It changes link targets in archived proposals, which is the one edit to an accepted proposal's body that isn't a Done criteria checkbox. A proposal keeps its slug in any folder, so test tags, `depends`, and `zig build proposal -Dp=<slug>` don't change. Link to an archived proposal as `design/epoch-N/<slug>.md`.
 

@@ -1178,12 +1178,14 @@ fn placeOf(places: []const Place, name: []const u8) ?[]const u8 {
 }
 
 /// The epoch that closed proposals are archived into: K once a
-/// `baseline-K` proposal exists, and 0 before the first one.
+/// `baseline-K` proposal is implemented, and 0 before the first one.
 fn currentEpoch(ps: []const Proposal) u32 {
     var cur: u32 = 0;
     for (ps) |p| {
         const prefix = "baseline-";
         if (!std.mem.startsWith(u8, p.slug, prefix)) continue;
+        // A baseline being drafted hasn't opened its epoch yet.
+        if (p.status != .implemented) continue;
         const k = std.fmt.parseInt(u32, p.slug[prefix.len..], 10) catch continue;
         cur = @max(cur, k);
     }
@@ -1570,6 +1572,11 @@ test "archive: links follow a proposal into its epoch folder" {
     };
     try std.testing.expectEqual(@as(u32, 0), currentEpoch(ps[0..1]));
     try std.testing.expectEqual(@as(u32, 1), currentEpoch(&ps));
+    const drafted = [_]Proposal{
+        .{ .file = "baseline.md", .slug = "baseline", .status = .implemented },
+        .{ .file = "baseline-1.md", .slug = "baseline-1", .status = .draft },
+    };
+    try std.testing.expectEqual(@as(u32, 0), currentEpoch(&drafted));
     try std.testing.expect(archivable(ps[0], 1));
     try std.testing.expect(!archivable(ps[1], 1)); // the baseline that opened this epoch
     try std.testing.expect(archivable(ps[2], 1));
