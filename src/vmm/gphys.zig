@@ -92,8 +92,8 @@ pub const Ram = struct {
     /// the range reading as zero, with no host memory behind it until it's
     /// touched.
     pub const Release = union(enum) {
-        /// Private anonymous memory (KVM): madvise(MADV_DONTNEED). Not on
-        /// Windows, whose backend sets `custom`.
+        /// Private anonymous memory (KVM): madvise(MADV_DONTNEED), on Linux
+        /// only; elsewhere it's kept, and zeroed by the caller.
         anon,
         /// A shared memory file mapped at `mem` (native): its pages are
         /// punched out of the file, so every mapping of them goes.
@@ -276,7 +276,9 @@ fn releaseHost(how: Ram.Release, mem: []u8, off: usize, len: usize) Ram.Release.
         .none => return .kept,
         .custom => |c| return c.f(c.ctx, off, len),
         .anon => {
-            if (is_windows) return .kept;
+            // Only Linux's MADV_DONTNEED zeroes private anonymous pages;
+            // macOS's leaves them as they were.
+            if (builtin.os.tag != .linux) return .kept;
             const p: [*]align(std.heap.page_size_min) u8 = @alignCast(mem.ptr + off);
             std.posix.madvise(p, len, std.posix.MADV.DONTNEED) catch return .kept;
             return .released;
@@ -532,7 +534,8 @@ test "Runners has a slot for every vCPU KVM allows, past the first 64" {
 }
 
 test "Ram: a big free goes back to the host and reads as zero; a small one is zeroed on reuse" {
-    if (is_windows) return error.SkipZigTest;
+    // `.anon` releases on Linux only.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Ram = try .init(std.testing.allocator, std.testing.io, 0, 128 << 20);
     defer r.deinit();
     const Count = struct {
