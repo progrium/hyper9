@@ -23,6 +23,10 @@
  *		beside the target, so remove and rename act on the link, and
  *		h9_overlay_readlink reads it. A final link whose target is
  *		missing is walked to as itself, and opening it fails.
+ *	Nfifo	a FIFO made by the Linux personality (h9_overlay_mkfifo,
+ *		design/linux-fifo.md): a file with no data, whose Dir has
+ *		H9_DMFIFO. A Linux open of it joins a pipe (src/kern/fifo.c);
+ *		a Plan 9 program reads it as empty and can't write it.
  *
  * Memory: data blocks, nodes, names and strings all come from the
  * machine's guest-physical page allocator through Zig leaves
@@ -55,6 +59,7 @@
 #include "dat.h"
 #include "fns.h"
 #include "error.h"
+#include "fscheck.h"
 
 /* Implemented in Zig (src/kern.zig). They never raise kernel errors. */
 extern void *h9_overlay_pool(void);
@@ -78,6 +83,7 @@ enum
 	Nwhite,
 	Nmark,
 	Nlink,
+	Nfifo,
 
 	Maxlinks	= 40,	/* links followed in one walk, as Linux allows */
 };
@@ -609,6 +615,8 @@ node2dir(Chan *c, Node *n, Dir *d)
 	d->dev = c->dev;
 	d->qid = n->qid;
 	d->mode = n->mode;
+	if(n->kind == Nfifo)
+		d->mode |= H9_DMFIFO;
 	d->atime = n->atime;
 	d->mtime = n->mtime;
 	d->length = (n->qid.type & QTDIR) ? 0 : n->length;
@@ -825,7 +833,7 @@ removedopen(Chan *c)
 
 	o = c->aux;
 	return (c->flag & COPEN) != 0 && o->node != nil && o->node != o->inst->root &&
-		o->node->parent == nil && o->node->kind == Ncopy;
+		o->node->parent == nil && (o->node->kind == Ncopy || o->node->kind == Nfifo);
 }
 
 /* Brings a chan up to date with the tree, for operations other than I/O on an open chan. */
@@ -1362,6 +1370,58 @@ h9_overlay_readlink(Chan *c, char *buf, int nbuf)
 	return n;
 }
 
+/*
+ * Makes name in the directory c a FIFO, for the Linux personality's
+ * mknodat. c is an overlay chan, which this closes.
+ */
+void
+h9_overlay_mkfifo(Chan *c, char *name, ulong perm)
+{
+	Ovc *o;
+	Inst *in;
+
+	if(waserror()){
+		cclose(c);
+		nexterror();
+	}
+	c = ovcreate(c, name, OREAD, perm & 0777);
+	poperror();
+	o = c->aux;
+	in = o->inst;
+	qlock(&in->ql);
+	o->node->kind = Nfifo;
+	qunlock(&in->ql);
+	cclose(c);
+}
+
+/*
+ * Whether the overlay chan c is a FIFO's: a FIFO node in memory, or a
+ * host FIFO in the lower tree.
+ */
+int
+h9_overlay_isfifo(Chan *c)
+{
+	Ovc *o;
+	Chan *l;
+	int r;
+
+	if(devtab[c->type]->dc != 'O')
+		return 0;
+	o = c->aux;
+	qlock(&o->inst->ql);
+	l = nil;
+	if(o->node != nil)
+		r = o->node->kind == Nfifo;
+	else{
+		r = 0;
+		l = o->lower;
+	}
+	qunlock(&o->inst->ql);
+	if(l != nil)
+		r = h9_fs_isfifo(l);
+	return r;
+}
+
 /* Frees an instance that was made but never attached. */
 void
 h9_overlay_drop(int id)
@@ -1837,6 +1897,13 @@ ovopen(Chan *c, int omode)
 			o->lower = devtab[o->lower->type]->open(o->lower, OREAD);
 			o->lopen = 1;
 		}
+	}else if(o->node == nil && h9_fs_isfifo(o->lower)){
+		/*
+		 * A host FIFO isn't copied up for a write: it has no data, and
+		 * a Linux open of it joins a pipe instead (src/kern/fifo.c).
+		 */
+		o->lower = devtab[o->lower->type]->open(o->lower, OREAD);
+		o->lopen = 1;
 	}else if(!iswrite(omode)){
 		if(o->node != nil)
 			ovperm(o->node->mode, omode);
@@ -2129,6 +2196,8 @@ ovwrite(Chan *c, void *a, long n, vlong off)
 		nexterror();
 	}
 	nd = o->node;
+	if(nd->kind == Nfifo)
+		error(Eperm);
 	if(nd->mode & DMAPPEND)
 		off = nd->length;
 	if(strcmp(nd->muid, ovuser()) != 0)

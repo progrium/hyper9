@@ -1,12 +1,12 @@
 ---
 slug: linux-fifo
 title: Linux named pipes
-status: draft
+status: implemented
 created: 2026-11-14
 authors: [progrium]
 depends: [linux-personality]
 areas: [kern, linux]
-branch: []
+branch: [main]
 ---
 
 # Proposal: Linux named pipes
@@ -63,13 +63,13 @@ Making a FIFO is a create in a directory, so it's checked like any create: `--wr
 
 Integration cases, tagged `[linux-fifo]`, with the Alpine root:
 
-- [ ] `test "mkfifo makes a FIFO that stat reports [linux-fifo]"`, in `/tmp` and on a `--writable` host directory.
-- [ ] `test "a writer and a reader meet through a FIFO [linux-fifo]"`: `mkfifo /tmp/f; echo hi > /tmp/f & cat /tmp/f` prints `hi`.
-- [ ] `test "a nonblocking write open with no reader fails with ENXIO [linux-fifo]"`
-- [ ] `test "O_RDWR opens a FIFO without waiting [linux-fifo]"`
-- [ ] `test "a FIFO open is interrupted by a signal [linux-fifo]"`
-- [ ] `test "two machines on one host FIFO share it [linux-fifo]"`
-- [ ] Demo: `nix build --rebuild nixpkgs#hello` gets through fixupPhase, with the fixes from the Nix spike.
+- [x] `test "mkfifo makes a FIFO that stat reports [linux-fifo]"`, in `/tmp` and on a `--writable` host directory.
+- [x] `test "a writer and a reader meet through a FIFO [linux-fifo]"`: `mkfifo /tmp/f; echo hi > /tmp/f & cat /tmp/f` prints `hi`.
+- [x] `test "a nonblocking write open with no reader fails with ENXIO [linux-fifo]"`
+- [x] `test "O_RDWR opens a FIFO without waiting [linux-fifo]"`
+- [x] `test "a FIFO open is interrupted by a signal [linux-fifo]"`
+- [x] `test "two machines on one host FIFO share it [linux-fifo]"`
+- [~] Demo: `nix build --rebuild nixpkgs#hello` gets through fixupPhase, with the fixes from the Nix spike. Waived: the spike's other fixes (the `nix-bugs` branch) aren't on main, so the demo can't run yet; the `tokens` case runs stdenv's job-token FIFO pattern instead (see Updates).
 
 ## Implementation
 
@@ -82,3 +82,17 @@ Integration cases, tagged `[linux-fifo]`, with the Alpine root:
 
 - Whether `mknod` should also make character devices for the few that matter (`/dev/null` in a chroot that a test builds), or keep failing them with `EPERM`.
 - Whether a FIFO's pipe should hold Linux's 64 KiB, or follow `F_SETPIPE_SZ`, which nothing in h9 serves yet.
+
+## Updates
+
+- 2026-11-14: A first pass on the `linux-fifo` branch refines the design:
+  - **How the personality tells a FIFO.** A FIFO's `Dir` carries a mode bit, `H9_DMFIFO` (9P2000.u's `DMNAMEDPIPE`, `0x00200000`), set by the overlay for an `Nfifo` node and by devfs for a host FIFO, so `stat`, `lstat`, and `getdents` need no extra kernel call per entry. An open asks the chan instead (`h9_linux_isfifo`, through `h9_fs_chanisfifo`), and then joins the pipe (`h9_linux_fifojoin`, src/kern/fifo.c).
+  - **devpipe gains a FIFO mode.** A Plan 9 pipe has two queues, one each way, and counts opens by end, so a FIFO's `O_RDWR` open couldn't read what it wrote, and its last writer's close would flush what a reader hadn't read yet. A FIFO's pipe (`h9_fifopipe`) has one queue that every open reads and writes, counts its opens by mode, hangs up when the last writer or reader goes, and reopens once both ends are open again. It's still a `#|` pipe, so read, write, poll, and fstat need no changes.
+  - **No close accounting.** The table keeps each pipe's directory and drops an entry once devpipe counts no opens, so `releaseLocks` isn't involved.
+  - **The key.** A host FIFO is keyed by its qid path, which is the host device and inode, with devfs's per-attach device number left out, so two machines' attaches of one host directory reach one pipe. A host FIFO under an overlay is keyed by the host file's identity too.
+  - **An open waits after joining.** It opens its end of the pipe before it waits for the other, so two openers waiting for each other always meet, and an interrupted wait closes its end again.
+  - **Not done yet:** `Tmknod` on a [dotl](epoch-0/dotl.md) root (`mknod` there fails), overlay-export's FIFOs, and the Nix demo. The two-machine case is in tests/backends.zig, since the integration cases run one machine per process.
+- 2026-11-21: Finished, and the rest of the first pass's list:
+  - **9P2000.L roots.** `mknod` there sends a `Tmknod` of an `S_IFIFO` file, through devdotl's translator, which makes a create with `DMNAMEDPIPE` one. A server's FIFO lists with `DMNAMEDPIPE` and opens without a server open, reading empty, so the personality joins its pipe as on any other tree. The translator's unit test covers it against `testserver.zig`; no integration case runs a Linux program on a .L root yet.
+  - **overlay-export** is still a draft, so there's no export of an overlay's FIFOs to serve yet.
+  - **The Nix demo** is waived until the spike's other fixes on `nix-bugs` are on main, now that [linux-pty](epoch-0/linux-pty.md) is. tests/fixtures/linux/fifo.c's `tokens` case runs the job-token pattern stdenv's fixupPhase and GNU make use: one `O_RDWR` holder fills the FIFO, and eight workers that open it by path take and return tokens.

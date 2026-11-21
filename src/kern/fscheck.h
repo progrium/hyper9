@@ -166,3 +166,17 @@ int	h9_fs_rename(Chan *c, Chan *dir, char *name);
 void	h9_fs_syncfs(Chan *c);
 void	h9_fs_sync(void);
 int	h9_fs_renamepath(char *old, char *new);
+/*
+ * FIFOs for the Linux personality (design/linux-fifo.md). A Dir marks one
+ * with H9_DMFIFO, 9P2000.u's DMNAMEDPIPE, since Plan 9 has no file types.
+ * h9_fs_mkfifo makes name in the devfs directory c a host FIFO, and
+ * h9_fs_isfifo says whether the devfs chan c is one. h9_fs_mkfifopath
+ * makes one by a path in the caller's namespace, in an overlay or a
+ * devfs tree (fscheck.c); 0, or -1 with the error in errstr.
+ * h9_fs_chanisfifo says whether any chan is a FIFO's, through an overlay.
+ */
+#define	H9_DMFIFO	0x00200000
+void	h9_fs_mkfifo(Chan *c, char *name, ulong perm);
+int	h9_fs_isfifo(Chan *c);
+int	h9_fs_mkfifopath(char *path, ulong perm);
+int	h9_fs_chanisfifo(Chan *c);

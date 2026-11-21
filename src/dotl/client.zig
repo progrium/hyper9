@@ -91,6 +91,9 @@ const Fid = struct {
     /// `ahead_gen` then).
     stat: ?wire.Stat = null,
     stat_gen: u64 = 0,
+    /// A FIFO, opened without the server (design/linux-fifo.md): a Linux
+    /// open joins h9's pipe for it, and anything else reads it as empty.
+    fifo: bool = false,
 };
 
 /// A hidden server fid at an attach's root, which outlives the fid devmnt
@@ -805,6 +808,7 @@ pub const Client = struct {
                 const f = c.fids.get(r.fid) orelse return c.rerror(tag, "unknown fid");
                 if (!f.open) return c.rerror(tag, "fid not open");
                 if (f.qid.type & wire.QTDIR != 0) return c.readDir(tag, r.fid, f, r.offset, r.count);
+                if (f.fifo) return c.sendMount(tag, wire.common.Rread{ .data = .{ .bytes = "" } });
                 // From what was read ahead, or a read of a whole upstream
                 // msize when this one follows the last.
                 if (f.eof_at == r.offset and r.offset == f.ahead_off + f.ahead.items.len) {
@@ -836,6 +840,7 @@ pub const Client = struct {
             .Twrite => |w| {
                 const f = c.fids.get(w.fid) orelse return c.rerror(tag, "unknown fid");
                 if (!f.open) return c.rerror(tag, "fid not open");
+                if (f.fifo) return c.rerror(tag, "permission denied");
                 const op = try c.newOp(tag, .write);
                 const n = @min(w.data.bytes.len, c.msize - wire.io_header);
                 try c.send(op, wire.common.Twrite{ .fid = f.sfid, .offset = w.offset, .data = .{ .bytes = w.data.bytes[0..n] } }, .{ .main = 0 });
@@ -1118,6 +1123,14 @@ pub const Client = struct {
             0 => {
                 if (msg != .Rgetattr) return c.unexpected();
                 const mode = msg.Rgetattr.stat.mode;
+                // A FIFO isn't opened on the server, where the open would
+                // wait for the other end.
+                if (mode & attr.S_IFMT == attr.S_IFIFO) {
+                    f.open = true;
+                    f.fifo = true;
+                    f.rclose = op.mode & wire.ORCLOSE != 0;
+                    return c.finish(op, p9.Ropen{ .qid = pq(f.qid), .iounit = 0 });
+                }
                 if (!attr.openable(mode)) return c.finishErr(op, "not a regular file");
                 op.dir = mode & attr.S_IFMT == attr.S_IFDIR;
                 if (op.dir and op.mode & 3 != wire.OREAD) return c.finishErrno(op, attr.E.ISDIR);
@@ -1165,6 +1178,10 @@ pub const Client = struct {
         const mode = attr.createModeIn(op.perm, dir_mode);
         if (op.perm & wire.DMDIR != 0) {
             try c.send(op, l.Tmkdir{ .dfid = f.sfid, .name = op.name, .mode = mode, .gid = gid }, .{ .main = 0 });
+        } else if (op.perm & wire.DMNAMEDPIPE != 0) {
+            // A FIFO, for the Linux personality's mknod: made, and walked
+            // to, but not opened (design/linux-fifo.md).
+            try c.send(op, l.Tmknod{ .dfid = f.sfid, .name = op.name, .mode = attr.S_IFIFO | (mode & 0o777), .major = 0, .minor = 0, .gid = gid }, .{ .main = 30 });
         } else if (c.dialect == .@"9P2000.L.Z") {
             // Created on a new server fid, with its attributes.
             op.sfid = try c.tmpSfid(op);
@@ -1228,6 +1245,21 @@ pub const Client = struct {
                 try c.clunk(f.sfid);
                 f.sfid = op.sfid;
                 return c.created(op, f, msg.Rlopen.qid);
+            },
+            // A FIFO: Tmknod, then walk to it.
+            30 => {
+                if (msg != .Rmknod) return c.unexpected();
+                op.sfid = try c.tmpSfid(op);
+                try c.send(op, wire.common.Twalk{ .fid = f.sfid, .newfid = op.sfid, .wnames = .init(&.{op.name}) }, .{ .main = 31 });
+            },
+            31 => {
+                if (msg != .Rwalk) return c.unexpected();
+                if (msg.Rwalk.wqids.n != 1) return c.finishErrno(op, attr.E.NOENT);
+                keep(op, op.sfid);
+                try c.clunk(f.sfid);
+                f.sfid = op.sfid;
+                f.fifo = true;
+                return c.created(op, f, msg.Rwalk.wqids.qids[0]);
             },
             // Tlcreateattr: the directory's fid stays as it was.
             13 => {
@@ -2154,9 +2186,23 @@ test "directory reads" {
     dirs = try h.ls(&.{"d"}, 8192);
     try testing.expectEqual(@as(usize, 44), dirs.items.len);
 
-    // A FIFO doesn't open.
+    // A FIFO opens without the server (design/linux-fifo.md), reads as
+    // empty, and can't be written; its Dir says it's one.
+    try testing.expect(hasName(dirs.items, "fifo").?.mode & wire.DMNAMEDPIPE != 0);
     _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 5, .wnames = .init(&.{ "d", "fifo" }) });
-    try testing.expectEqualStrings("not a regular file", try h.err(p9.Topen{ .fid = 5, .mode = wire.OREAD }));
+    _ = try h.ok(p9.Topen{ .fid = 5, .mode = wire.OREAD });
+    const fr = try h.ok(p9.Tread{ .fid = 5, .offset = 0, .count = 100 });
+    try testing.expectEqual(@as(usize, 0), fr.Rread.data.bytes.len);
+    _ = try h.ok(p9.Tclunk{ .fid = 5 });
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 5, .wnames = .init(&.{ "d", "fifo" }) });
+    _ = try h.ok(p9.Topen{ .fid = 5, .mode = wire.OWRITE });
+    try testing.expectEqualStrings("permission denied", try h.err(p9.Twrite{ .fid = 5, .offset = 0, .data = .{ .bytes = "x" } }));
+    _ = try h.ok(p9.Tclunk{ .fid = 5 });
+    // A create with DMNAMEDPIPE makes one with Tmknod.
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 5, .wnames = .init(&.{"d"}) });
+    _ = try h.ok(p9.Tcreate{ .fid = 5, .name = "made", .perm = wire.DMNAMEDPIPE | 0o600, .mode = wire.OREAD });
+    _ = try h.ok(p9.Tclunk{ .fid = 5 });
+    try testing.expect(h.s.lookup("d/made").?.kind == .fifo);
     // Nor does a directory for writing.
     _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 6, .wnames = .init(&.{"d"}) });
     try testing.expectEqualStrings("file is a directory", try h.err(p9.Topen{ .fid = 6, .mode = wire.OWRITE }));
