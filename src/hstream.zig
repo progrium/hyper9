@@ -390,6 +390,11 @@ pub const Stream = struct {
     cred_why: cred.Why = .{},
     /// The handshake was retried with the helper after a 401 or 403.
     cred_retried: bool = false,
+    /// The server's uid and name for the client, from the 101's 9P-Uid
+    /// and 9P-User (design/credential-helpers.md).
+    ident_uid: ?u32 = null,
+    ident_user: [ws.max_user]u8 = undefined,
+    ident_len: usize = 0,
 
     /// Held while sending; the reader thread and the keepalive send pongs,
     /// pings and closes under it too.
@@ -674,6 +679,86 @@ pub fn result(id: u32, buf: []u8) ?[]const u8 {
     const n = @min(e.len, buf.len);
     @memcpy(buf[0..n], e[0..n]);
     return buf[0..n];
+}
+
+/// The server's identity for the client, from a host-made stream's
+/// handshake (design/credential-helpers.md).
+pub const Identity = struct { uid: u32, user: []const u8 };
+
+/// Stream `id`'s 9P-Uid and 9P-User, copied into `buf`, or null if the
+/// server sent no identity.
+pub fn identity(id: u32, buf: *[ws.max_user]u8) ?Identity {
+    const s = get(id) orelse return null;
+    defer unref(s);
+    s.lockS();
+    defer s.lock.unlock();
+    const uid = s.ident_uid orelse return null;
+    @memcpy(buf[0..s.ident_len], s.ident_user[0..s.ident_len]);
+    return .{ .uid = uid, .user = buf[0..s.ident_len] };
+}
+
+// What each machine's host-made streams are made with, for `#ℓ`'s redials
+// (design/credential-helpers.md): the root's options for its URL, and
+// the mounts' for the rest.
+
+const HostEntry = struct { owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions };
+
+var hosts_lock: std.atomic.Mutex = .unlocked;
+var hosts: [64]?HostEntry = @splat(null);
+
+fn lockHosts() void {
+    while (!hosts_lock.tryLock()) std.atomic.spinLoopHint();
+}
+
+/// Registers machine `owner`'s options until `unregisterHost`. What they
+/// point to must outlive the registration.
+pub fn registerHost(owner: usize, root_url: ?[]const u8, root: HostOptions, mounts: HostOptions) void {
+    lockHosts();
+    defer hosts_lock.unlock();
+    for (&hosts) |*e| if (e.* == null or e.*.?.owner == owner) {
+        e.* = .{ .owner = owner, .root_url = root_url, .root = root, .mounts = mounts };
+        return;
+    };
+}
+
+pub fn unregisterHost(owner: usize) void {
+    lockHosts();
+    defer hosts_lock.unlock();
+    for (&hosts) |*e| if (e.* != null and e.*.?.owner == owner) {
+        e.* = null;
+    };
+}
+
+/// For devhstream.c's h9_hstream_dial: starts a host-made stream to
+/// `url` with the options machine `mach` registered, and returns its id,
+/// or -1 with the error in `err`.
+fn h9_hstream_redial(mach: ?*anyopaque, url: [*]const u8, n: c_long, err: [*]u8) callconv(.c) c_long {
+    const u = url[0..@intCast(n)];
+    const owner = @intFromPtr(mach);
+    const o: HostOptions = blk: {
+        lockHosts();
+        defer hosts_lock.unlock();
+        for (hosts) |e| if (e != null and e.?.owner == owner) {
+            const h = e.?;
+            break :blk if (h.root_url != null and std.mem.eql(u8, h.root_url.?, u)) h.root else h.mounts;
+        };
+        putErr(err, "redial: no options for this machine");
+        return -1;
+    };
+    const id = openHost(owner, u, o) catch |e| {
+        putErr(err, switch (e) {
+            error.BadUrl => "bad URL",
+            error.TooManyStreams => "too many streams",
+            error.OutOfMemory => "out of memory",
+            error.SystemResources => "can't start a thread",
+        });
+        return -1;
+    };
+    return @intCast(id);
+}
+
+fn h9_hstream_release(id: c_ulong) callconv(.c) void {
+    release(@truncate(id));
 }
 
 /// Drops the maker's reference, hanging up first if no channel holds the
@@ -1045,9 +1130,16 @@ fn handshake(s: *Stream, url: ws.Url, proxy: ?ws.Proxy, prev: []const u8, head: 
 
 /// Marks the stream established after its handshake.
 fn established(s: *Stream, resp: *const ws.Response) ConnectError!void {
+    if (resp.user_too_long)
+        std.debug.print("h9: warning: {f}: 9P-User is longer than {d} bytes, so it's ignored\n", .{ ws.Url.elide(s.url), ws.max_user });
     s.lockS();
     defer s.lock.unlock();
     if (s.cancel) return error.Canceled;
+    if (resp.user) |u| {
+        s.ident_uid = resp.uid;
+        @memcpy(s.ident_user[0..u.len], u);
+        s.ident_len = u.len;
+    }
     if (resp.protocol) |p| {
         const n = @min(p.len, s.selected.len);
         @memcpy(s.selected[0..n], p[0..n]);
@@ -1837,6 +1929,8 @@ comptime {
         @export(&h9_hstream_write, .{ .name = "h9_hstream_write" });
         @export(&h9_hstream_info, .{ .name = "h9_hstream_info" });
         @export(&h9_hstream_machend, .{ .name = "h9_hstream_machend" });
+        @export(&h9_hstream_redial, .{ .name = "h9_hstream_redial" });
+        @export(&h9_hstream_release, .{ .name = "h9_hstream_release" });
     }
 }
 

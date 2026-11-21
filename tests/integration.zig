@@ -9014,3 +9014,101 @@ test "a bad --cred or $H9CRED is a usage error [credential-helpers]" {
     try std.testing.expectEqual(2, v.code);
     try expectIn(v.err, "$H9CRED: each entry is PATTERN=COMMAND");
 }
+
+test "a .L.Z reconnect runs the helper again and sends the new token [credential-helpers]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // A new token on every call, and the server takes only the newest.
+    const tok = try credHelper(&s, "tok",
+        \\n=$(( $(cat "$d/count" 2>/dev/null || echo 0) + 1 ))
+        \\echo $n >"$d/count"
+        \\echo "Authorization: Bearer t$n" >"$d/want"
+        \\echo "Authorization: Bearer t$n"
+    );
+    defer gpa.free(tok);
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L.Z");
+    defer d.finish(std.testing.io);
+    // The server applies the second write and goes before answering it.
+    d.lock().drop_after_write = 1;
+    d.unlock();
+    const want = try std.fmt.allocPrint(gpa, "{s}/want", .{s.path});
+    defer gpa.free(want);
+    var rl: wsrelay.Relay = undefined;
+    try rl.start(std.testing.io, 0, .{ .target_port = d.port(), .require_header_file = want });
+    defer rl.stop();
+    var ns: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}' /n\n", .{rl.url()}) });
+    var cb: [256]u8 = undefined;
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc",
+        \\{ echo one; echo two; echo three } >/n/usr/glenda/log
+        \\cat /n/usr/glenda/log
+        \\grep -h reconnects /net/dotl/*/status
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("one\ntwo\nthree\n9P2000.L.Z reconnects 1\n", r.out);
+    // The reconnect's handshake carried the token the helper made for it.
+    var nb: [16]u8 = undefined;
+    const n = std.mem.trim(u8, try s.tmp.dir.readFile(std.testing.io, "count", &nb), "\n");
+    try std.testing.expect((try std.fmt.parseInt(u32, n, 10)) >= 2);
+    var hb: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&hb, "Bearer t{s}", .{n}), rl.header("Authorization") orelse "");
+}
+
+/// dotlTree, with /etc/motd owned by uid 4242.
+fn identTree(s: *@import("dotlserver.zig").Server) !void {
+    try dotlTree(s);
+    (try s.add("etc/owned", .file, "x\n")).uid = 4242;
+}
+
+test "9P-Uid and 9P-User name files without --user-map [credential-helpers]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, identTree);
+    defer d.finish(std.testing.io);
+    var rl: wsrelay.Relay = undefined;
+    try rl.start(std.testing.io, 0, .{ .target_port = d.port(), .accept_headers = "9P-Uid: 4242\r\n9P-User: progrium\r\n" });
+    defer rl.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var ns: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}' /n\n", .{rl.url()}) });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc", "ls -l /n/etc/owned /n/etc/motd" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    // The server's uid for us is our name, and our attach sends it.
+    try expectIn(r.out, " progrium 1000 ");
+    try expectIn(r.out, " 1000     1000 ");
+    try std.testing.expectEqual(@as(u32, 4242), d.n_uname);
+}
+
+test "--user-map wins over 9P-Uid [credential-helpers]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.start(std.testing.io, identTree);
+    defer d.finish(std.testing.io);
+    var rl: wsrelay.Relay = undefined;
+    try rl.start(std.testing.io, 0, .{ .target_port = d.port(), .accept_headers = "9P-Uid: 4242\r\n9P-User: progrium\r\n" });
+    defer rl.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var ns: [128]u8 = undefined;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}' /n\n", .{rl.url()}) });
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "passwd", .data = "alice:x:4242:4242::/:/bin/sh\n" });
+    const map = try std.fmt.allocPrint(gpa, "{s}/passwd", .{s.path});
+    defer gpa.free(map);
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--user-map", map, "--rc", "ls -l /n/etc/owned" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqual(0, r.code);
+    try expectIn(r.out, " alice 1000 ");
+    try std.testing.expectEqualStrings("", r.err);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "progrium") == null);
+}

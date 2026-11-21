@@ -376,6 +376,11 @@ pub const Machine = struct {
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
     err_buf: [256]u8 = undefined,
+    /// A WebSocket root's 9P-User (design/credential-helpers.md), the
+    /// uname of the root's attach when no --root-user or --user-map says
+    /// otherwise.
+    root_ident: [ws.max_user + 1]u8 = undefined,
+    root_ident_len: usize = 0,
     /// Why the last run failed with NamespaceFailed, NotFound or NotExecutable,
     /// or why init failed with PolicyConflict.
     err_msg: []const u8 = "",
@@ -649,6 +654,7 @@ pub const Machine = struct {
         if (job.mach.load(.acquire)) |mc| {
             dotl.unregister(@intFromPtr(mc));
             hidx.unregister(@intFromPtr(mc));
+            hstream.unregisterHost(@intFromPtr(mc));
             mc.put();
         }
         // No process reads the console now. A reader thread still in a
@@ -1292,9 +1298,16 @@ pub const Machine = struct {
         const mc = kern.mach();
         j.mach.store(mc, .release);
         // What #ℓ's translators send as the machine's user.
-        if (mc) |x| dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
-        // Where #ι caches compiled indexes.
-        if (mc) |x| hidx.register(@intFromPtr(x), .{ .cache_dir = m.opts.index_cache, .io = m.io });
+        if (mc) |x| {
+            dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
+            // Where #ι caches compiled indexes.
+            hidx.register(@intFromPtr(x), .{ .cache_dir = m.opts.index_cache, .io = m.io });
+            // What #ℓ redials a WebSocket root or mount with.
+            hstream.registerHost(@intFromPtr(x), if (m.opts.root) |r| switch (r) {
+                .ws => |u| u,
+                else => null,
+            } else null, m.rootStreamOptions(), m.mountStreamOptions());
+        }
         const r = m.startFirst(p);
         // What the root's index saved, for -v.
         if (m.opts.verbose) if (m.hidx_root) |n| m.indexCounts(n);
@@ -3260,12 +3273,20 @@ pub const Machine = struct {
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         const fd = switch (r) {
             .dir => unreachable,
-            .ws => |u| return m.postRoot(try m.connectStream(u, .{
-                .headers = m.opts.root_headers,
-                .ca_file = m.opts.root_ca,
-                .proxy = m.opts.proxy orelse .{},
-                .cred = m.opts.cred_helpers,
-            }, "root")),
+            .ws => |u| {
+                var ib: [ws.max_user]u8 = undefined;
+                var ident: ?hstream.Identity = null;
+                const conn = try m.connectStream(u, m.rootStreamOptions(), "root", &ib, &ident);
+                defer kern.close(conn) catch {};
+                // --user-map and --root-user win over the server's names.
+                if (m.opts.user_map != null or m.opts.root_user != null) ident = null;
+                if (ident) |id| {
+                    @memcpy(m.root_ident[0..id.user.len], id.user);
+                    m.root_ident[id.user.len] = 0;
+                    m.root_ident_len = id.user.len;
+                }
+                return m.postDotl(wsConv(conn, u, ident));
+            },
             // `#ℓ` dials a TCP or unix socket root itself, so it can
             // dial again if the server goes (9P2000.L.Z). A comma would
             // split the dial's list.
@@ -3506,11 +3527,49 @@ pub const Machine = struct {
         return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
     }
 
+    /// The handshake options for a WebSocket root, and for a namespace
+    /// file's WebSocket mounts.
+    fn rootStreamOptions(m: *const Machine) hstream.HostOptions {
+        return .{
+            .headers = m.opts.root_headers,
+            .ca_file = m.opts.root_ca,
+            .proxy = m.opts.proxy orelse .{},
+            .cred = m.opts.cred_helpers,
+        };
+    }
+
+    fn mountStreamOptions(m: *const Machine) hstream.HostOptions {
+        return .{ .proxy = m.opts.proxy orelse .{}, .cred = m.opts.cred_helpers };
+    }
+
+    /// A `#ℓ` conversation over WebSocket connection `conn` to `url`,
+    /// which `#ℓ` dials again through hstream if the connection drops and
+    /// the server speaks 9P2000.L.Z, so a credential helper runs again
+    /// (design/credential-helpers.md). `ident` is the server's 9P-Uid and
+    /// 9P-User, for the user map. Returns an fd on its data file.
+    fn wsConv(conn: u31, url: []const u8, ident: ?hstream.Identity) kern.Error!u31 {
+        const dev = "#" ++ policy.dotl_dev ++ "/dotl/";
+        const clone = try kern.open(dev ++ "clone", kern.ORDWR);
+        defer kern.close(clone) catch {};
+        var nbuf: [16]u8 = undefined;
+        const n = std.mem.trim(u8, nbuf[0..try kern.pread(clone, &nbuf, 0)], " \n");
+        var cmd: [std.fs.max_path_bytes + 16]u8 = undefined;
+        if (ident) |id|
+            _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "user {d} {s}", .{ id.uid, id.user }) catch return error.Kern, 0);
+        // A comma would split the dial's list, and a space the ctl message.
+        if (std.mem.indexOfAny(u8, url, ", \t") == null)
+            _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "redial {s}", .{url}) catch return error.Kern, 0);
+        _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "fd {d}", .{conn}) catch return error.Kern, 0);
+        var path: [64]u8 = undefined;
+        return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
+    }
+
     /// Connects a host-made WebSocket stream to `url` (`what` names it in
     /// errors: "root", or a namespace file's mount) and returns an fd on
-    /// its channel. The connect waits in the kernel, so a note or the
-    /// timeout interrupts it.
-    fn connectStream(m: *Machine, url: []const u8, o: hstream.HostOptions, comptime what: []const u8) RunError!u31 {
+    /// its channel, and in `ident` the server's 9P-Uid and 9P-User, if it
+    /// sent them, in `ib`. The connect waits in the kernel, so a note or
+    /// the timeout interrupts it.
+    fn connectStream(m: *Machine, url: []const u8, o: hstream.HostOptions, comptime what: []const u8, ib: *[ws.max_user]u8, ident: *?hstream.Identity) RunError!u31 {
         const shown = ws.Url.elide(url);
         hstream.setIo(m.io);
         const mc = kern.mach() orelse return m.fail(what ++ " {f}: not a machine process", .{shown});
@@ -3524,6 +3583,7 @@ pub const Machine = struct {
         } });
         defer hstream.release(id);
         kern.hstreamWait(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
+        ident.* = hstream.identity(id, ib);
         return kern.hstreamFd(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
     }
 
@@ -3541,8 +3601,10 @@ pub const Machine = struct {
         const own = kern.procUser();
         @memcpy(saved[0..own.len], own);
         saved[own.len] = 0;
-        if (r.user) |u| kern.setProcUser(try std.fmt.bufPrintZ(&buf2, "{s}", .{u}));
-        defer if (r.user != null) kern.setProcUser(saved[0..own.len :0]);
+        // --root-user, or else the server's 9P-User for us.
+        const as: ?[]const u8 = r.user orelse if (m.root_ident_len > 0) m.root_ident[0..m.root_ident_len] else null;
+        if (as) |u| kern.setProcUser(try std.fmt.bufPrintZ(&buf2, "{s}", .{u}));
+        defer if (as != null) kern.setProcUser(saved[0..own.len :0]);
         const spec = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.spec});
         _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), kern.MREPL, spec) catch return m.fail("root {f}: {s}", .{ shown, kern.errstr() });
         if (m.opts.index != .none) if (m.hidx_root) |n| m.indexNotes(n, "the root");
@@ -3600,8 +3662,15 @@ pub const Machine = struct {
             // (design/epoch-0/dotl.md), so a 9P2000.L server works too.
             .mount => |mt| if (ws.Url.is(mt.file)) {
                 if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a WebSocket mount", .{ws.Url.elide(mt.file)});
-                const conn = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{}, .cred = m.opts.cred_helpers }, "mount");
-                const data = dotlConv("fd {d}", conn);
+                var ib: [ws.max_user]u8 = undefined;
+                var ident: ?hstream.Identity = null;
+                const conn = try m.connectStream(mt.file, m.mountStreamOptions(), "mount", &ib, &ident);
+                if (m.opts.user_map != null) ident = null;
+                // h9's own connection, as a root's is: #ℓ redials it with
+                // no plan.
+                kern.setPlan(null);
+                const data = wsConv(conn, mt.file, ident);
+                kern.setPlan(&m.plan);
                 kern.close(conn) catch {};
                 const dfd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
                 // Through #ι, for the server's .fs/index (design/mount-index.md).
