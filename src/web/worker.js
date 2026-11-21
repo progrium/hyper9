@@ -9,6 +9,12 @@
 // Worker to page: { type: 'output', fd, data }, { type: 'raw', on } and
 // { type: 'exit', code } or { type: 'error', message }.
 //
+// With start's `credentials` set, the page has a credentials callback
+// (design/credential-helpers.md, "Browser host"): the Worker sends
+// { type: 'cred', id, url, failed, helper } before each handshake h9
+// makes, and the page answers { type: 'cred-reply', id, result } or
+// { type: 'cred-reply', id, error }.
+//
 // With a canvas (design/epoch-0/browser-gfx.md), start's gfx is { canvas,
 // width, height }, the OffscreenCanvas and the screen's size, and the page
 // sends { type: 'gfx', ev }, { type: 'gfx-paste', text } and
@@ -64,7 +70,16 @@ const put = ({ path, data, mode }) => {
   }
 };
 
-async function start({ argv, env = {}, root, layers = [], tty = false, gfx: canvas }) {
+// The page's answers to credentials requests, by id.
+const credWaits = new Map();
+let credNext = 1;
+const askPage = (url, failed, helper) => new Promise((resolve, reject) => {
+  const id = credNext++;
+  credWaits.set(id, { resolve, reject });
+  post({ type: 'cred', id, url, failed, helper });
+});
+
+async function start({ argv, env = {}, root, layers = [], tty = false, gfx: canvas, credentials = false }) {
   if (canvas) {
     if (!canDrawInWorker()) throw new Error("this browser can't draw from a Worker");
     gfx = new GfxHost({ ...canvas, post });
@@ -105,6 +120,7 @@ async function start({ argv, env = {}, root, layers = [], tty = false, gfx: canv
     }),
     host,
     gfx,
+    credentials: credentials ? askPage : undefined,
     log: (m) => console.log(m),
   });
 }
@@ -122,6 +138,12 @@ self.onmessage = ({ data: m }) => {
       deliver();
       break;
     case 'put': if (tree) put(m); else puts.push(m); break;
+    case 'cred-reply': {
+      const w = credWaits.get(m.id);
+      credWaits.delete(m.id);
+      if (m.error != null) w?.reject(new Error(m.error)); else w?.resolve(m.result);
+      break;
+    }
     case 'interrupt': raise(1); break;
     case 'hangup': raise(2); break;
     case 'gfx': gfx?.input(m.ev); break;

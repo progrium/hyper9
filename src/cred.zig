@@ -147,13 +147,18 @@ pub const Why = struct {
 
 pub const RunError = error{ Failed, OutOfMemory };
 
+/// Warns that `h`'s headers for `url` aren't encrypted, if it's ws://.
+pub fn warnPlain(h: Helper, url: []const u8) void {
+    if (std.mem.startsWith(u8, url, "ws://"))
+        std.debug.print("h9: warning: credential helper {s} for {f}: its headers cross the network in plaintext\n", .{ std.fs.path.basename(h.argv[0]), ws.Url.elide(url) });
+}
+
 /// Runs `h` as `argv… get URL`, with `prev` (the failed handshake's
 /// response, or empty) on stdin, for up to `timeout_s`. Its stderr is
 /// copied to h9's. On failure, `why` says why.
 pub fn run(gpa: Allocator, io: Io, h: *const Helper, url: []const u8, prev: []const u8, why: *Why) RunError!Output {
     const name = std.fs.path.basename(h.argv[0]);
-    if (std.mem.startsWith(u8, url, "ws://"))
-        std.debug.print("h9: warning: credential helper {s} for {f}: its headers cross the network in plaintext\n", .{ name, ws.Url.elide(url) });
+    warnPlain(h.*, url);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, h.argv);

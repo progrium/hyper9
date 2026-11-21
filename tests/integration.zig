@@ -106,10 +106,13 @@ const web_skips = [_][]const u8{
     "acid attaches and prints registers and a stack trace",
     // Browsers and Node fail a handshake that offered subprotocols and got none.
     "a ws:// root works with a server that selects no subprotocol",
+    // credential-helpers: the web host has no --root-header, and a page's
+    // WebSocket shows no response headers, so no 9P-Uid or 9P-User.
+    "--root-header wins over a helper's header of the same name",
+    "9P-Uid and 9P-User name files without --user-map",
+    "--user-map wins over 9P-Uid",
 };
-// credential-helpers: the web host has no processes to run a helper in;
-// its embedder callback isn't built yet.
-const web_skip_tags = [_][]const u8{ "5", "13", "22", "35", "credential-helpers" };
+const web_skip_tags = [_][]const u8{ "5", "13", "22", "35" };
 
 /// Whether the cases run on the web host (-Dweb).
 fn onWeb() bool {
@@ -8875,7 +8878,8 @@ test "a namespace-file ws:// mount runs the helper during replay [credential-hel
     const no = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "/bin/echo" });
     defer no.deinit();
     try std.testing.expectEqual(125, no.code);
-    try expectIn(no.err, "server answered 401 Unauthorized");
+    // A page's WebSocket reports no status.
+    try expectIn(no.err, if (onWeb()) "connection failed" else "server answered 401 Unauthorized");
 }
 
 test "a 401 reruns the helper once with the response on stdin [credential-helpers]" {
@@ -8896,7 +8900,9 @@ test "a 401 reruns the helper once with the response on stdin [credential-helper
     try expectSameAsHostWith(e, w.url(), &.{ "--cred", cred }, &.{ "/bin/ls", "/" });
     var lb: [2048]u8 = undefined;
     var want: [256]u8 = undefined;
-    try expectIn(credLog(&s, "tok", &lb), try std.fmt.bufPrint(&want, "get {0s} | -\nget {0s} | HTTP/1.1 401 Unauthorized\n", .{w.url()}));
+    // On the web host the failed response is only why the open failed.
+    const refused = if (onWeb()) "connection failed" else "HTTP/1.1 401";
+    try expectIn(credLog(&s, "tok", &lb), try std.fmt.bufPrint(&want, "get {0s} | -\nget {0s} | {1s}", .{ w.url(), refused }));
 
     // A server that refuses the fresh one too: one retry, then 125.
     w.relay.opts.require_header = "Authorization: Bearer never";
@@ -8905,10 +8911,10 @@ test "a 401 reruns the helper once with the response on stdin [credential-helper
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want2: [256]u8 = undefined;
-    try expectIn(r.err, try std.fmt.bufPrint(&want2, "root {s}: server answered 401 Unauthorized (after credential helper retry)", .{w.url()}));
+    try expectIn(r.err, try std.fmt.bufPrint(&want2, "root {s}: {s} (after credential helper retry)", .{ w.url(), if (onWeb()) "connection failed" else "server answered 401 Unauthorized" }));
     const log = credLog(&s, "tok", &lb);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, log, "\n") % 2);
-    try std.testing.expectEqual(std.mem.count(u8, log, "| -\n"), std.mem.count(u8, log, "| HTTP/1.1 401"));
+    try std.testing.expectEqual(std.mem.count(u8, log, "| -\n"), std.mem.count(u8, log, refused));
 }
 
 test "a helper failure before start exits 125 with its stderr [credential-helpers]" {
@@ -8979,7 +8985,7 @@ test "guest /net/ws conversations never run a helper [credential-helpers]" {
     const r = try run(e, &.{ "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", try rcWs(&cmd, rl.url(), "", "echo ok") });
     defer r.deinit();
     try std.testing.expect(r.code != 0);
-    try expectIn(r.err, "401");
+    try expectIn(r.err, if (onWeb()) "connection failed" else "401");
     var lb: [256]u8 = undefined;
     try std.testing.expectEqualStrings("", credLog(&s, "tok", &lb));
 }
@@ -9042,11 +9048,12 @@ test "a .L.Z reconnect runs the helper again and sends the new token [credential
     var ns: [128]u8 = undefined;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}' /n\n", .{rl.url()}) });
     var cb: [256]u8 = undefined;
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc",
+    const script =
         \\{ echo one; echo two; echo three } >/n/usr/glenda/log
         \\cat /n/usr/glenda/log
         \\grep -h reconnects /net/dotl/*/status
-    });
+    ;
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", script });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);

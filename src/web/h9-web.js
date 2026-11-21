@@ -163,8 +163,18 @@ const nextTask = (() => {
  * - gfx: a GfxHost, the page's canvas in a Worker
  *   (design/epoch-0/browser-gfx.md); without one, --gfx fails as on a build
  *   without graphics.
+ * - credentials(url, failed, helper): called before each WebSocket
+ *   handshake h9 makes, a root's or a namespace file's mount
+ *   (design/credential-helpers.md, "Browser host"). `failed` is null, or
+ *   why the last try failed, for a retry; `helper` is the matching
+ *   `--cred` helper's command as an array, or undefined. It returns (or
+ *   resolves to) null for no credential, header lines (a string or an
+ *   array of `Name: value` strings), or `{ url, headers }`, where `url`
+ *   is a URL to connect to instead, such as one with a single-use ticket
+ *   in its query. A browser's WebSocket can't send headers, so there only
+ *   `url` works. Throwing fails the handshake with the error's message.
  */
-export async function run({ h9, wasi, host, log = console.error, stats, gfx }) {
+export async function run({ h9, wasi, host, log = console.error, stats, gfx, credentials }) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   const h9mod = h9 instanceof WebAssembly.Module ? h9 : new WebAssembly.Module(h9);
   const h9pages = importedMemoryPages(h9 instanceof WebAssembly.Module ? new Uint8Array(0) : h9);
@@ -223,7 +233,7 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx }) {
     wait_signal: new WebAssembly.Suspending(() => host.waitSignal()),
     stop_signals: () => host.stopSignals(),
     set_raw: (on) => host.setRaw(!!on),
-    ...wsImports(() => mem, str),
+    ...wsImports(() => mem, str, credentials),
     ...(jit ? { jit_compile: jit.jit_compile, jit_drop: jit.jit_drop } : {}),
     ...(gfx ?? noGfx).imports(() => mem),
   };
@@ -248,7 +258,20 @@ export async function run({ h9, wasi, host, log = console.error, stats, gfx }) {
 // browser host"): the page's WebSocket, or Node's, does the handshake,
 // TLS and framing. ws_opened and ws_recv are Suspending: each parks only
 // the stream's reader coroutine.
-function wsImports(memory, str) {
+// Whether this host's WebSocket takes handshake headers: Node's does, as
+// an option a browser's doesn't have.
+const wsHeaders = typeof process !== 'undefined' && !!process.versions?.node;
+
+// A credentials callback's answer as ws_cred's text: `url URL` first, if
+// it gave one, then header lines.
+function credText(r) {
+  if (r == null) return null;
+  const lines = (h) => (h == null ? [] : Array.isArray(h) ? h : String(h).split('\n')).map((l) => l.trim()).filter((l) => l);
+  if (typeof r === 'object' && !Array.isArray(r)) return [...(r.url ? [`url ${r.url}`] : []), ...lines(r.headers)].join('\n');
+  return lines(r).join('\n');
+}
+
+function wsImports(memory, str, credentials) {
   const socks = new Map();
   let next = 1;
   const enc = new TextEncoder();
@@ -258,11 +281,37 @@ function wsImports(memory, str) {
   const poke = (s) => { const w = s.waiter; s.waiter = null; w?.(); };
   const until = (s, ready) => (ready() ? null : new Promise((res) => { s.waiter = res; }));
   return {
-    ws_open: (up, un, pp, pn) => {
+    ws_cred: new WebAssembly.Suspending(async (up, un, fp, fn, ap, an, op, on) => {
+      const helper = an ? str(ap, an).split('\n') : undefined;
+      const put = (t) => {
+        const b = enc.encode(t);
+        if (b.length >= on) return false;
+        u8(op, b.length).set(b);
+        return b.length;
+      };
+      const fail = (m) => { put(`${m}\0`) === false && put('credentials: error\0'); return -2; };
+      if (!credentials) return helper ? fail(`credential helper ${helper[0].split('/').pop()}: this host runs no helpers`) : -1;
+      let t;
+      try {
+        t = credText(await credentials(str(up, un), fn ? str(fp, fn) : null, helper));
+      } catch (e) {
+        return fail(e?.message ?? String(e));
+      }
+      if (t == null) return -1;
+      const n = put(t);
+      return n === false ? fail('credentials: answer too long') : n;
+    }),
+    ws_open: (up, un, pp, pn, hp, hn) => {
       let w;
       try {
         const protocols = pn ? str(pp, pn).split(',') : [];
-        w = new WebSocket(str(up, un), protocols);
+        const headers = {};
+        for (const l of hn ? str(hp, hn).split('\n') : []) {
+          const c = l.indexOf(':');
+          if (c > 0) headers[l.slice(0, c).trim()] = l.slice(c + 1).trim();
+        }
+        if (Object.keys(headers).length && !wsHeaders) return -2;
+        w = Object.keys(headers).length ? new WebSocket(str(up, un), { protocols, headers }) : new WebSocket(str(up, un), protocols);
       } catch {
         return -1;
       }
@@ -726,6 +775,14 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  *   divided by N. The canvas moves into the Worker at run.
  * - env: h9's own environment (an object), not its programs': the
  *   emulator's knobs, such as H9_JIT_HOT (src/jit/wasm_t1.zig)
+ * - credentials: async (url, failed, helper) => lines, the page's
+ *   credential helper (design/credential-helpers.md), called in place
+ *   of running a --cred helper, before each WebSocket handshake h9 makes:
+ *   url is the URL, failed is null or why the last try failed, and helper
+ *   is the matching --cred command's words, if any. It resolves to the
+ *   helper's output (`url URL` and header lines) or '' for none, and a
+ *   rejection fails the connection with its message. A browser can't
+ *   send headers on a WebSocket, so only a `url` line works there
  *
  * machine.run(argv) runs h9 with the flags and argv (['rc', '-i'], say)
  * and resolves to its exit status. machine.input(bytes or string) types,
@@ -740,7 +797,7 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ root, layers = [], memory, backend, arch, policy, terminal, tty = false, gfx, env } = {}) {
+export async function createMachine({ root, layers = [], memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -771,6 +828,12 @@ export async function createMachine({ root, layers = [], memory, backend, arch, 
           if (onGfx(m)) return;
           switch (m.type) {
             case 'output': terminal?.write(m.data, m.fd); break;
+            case 'cred':
+              Promise.resolve()
+                .then(() => credentials(m.url, m.failed, m.helper))
+                .then((result) => worker.postMessage({ type: 'cred-reply', id: m.id, result: result ?? null }),
+                  (e) => worker.postMessage({ type: 'cred-reply', id: m.id, error: String(e?.message ?? e) }));
+              break;
             case 'raw': terminal?.setRaw?.(m.on); break;
             case 'exit': resolve(m.code); worker.terminate(); break;
             case 'error': reject(new Error(m.message)); worker.terminate(); break;
@@ -779,7 +842,7 @@ export async function createMachine({ root, layers = [], memory, backend, arch, 
         worker.onerror = (e) => reject(new Error(e.message));
         const url = (u) => String(new URL(u, location.href));
         const layerList = layers.map((l) => (typeof l === 'object' && !(l instanceof URL) ? { url: url(l.url), at: l.at ?? '/' } : { url: url(l), at: '/' }));
-        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && url(root), layers: layerList, tty, env, ...start }, transfer);
+        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && url(root), layers: layerList, tty, env, credentials: typeof credentials === 'function', ...start }, transfer);
       });
     },
     input(data) {

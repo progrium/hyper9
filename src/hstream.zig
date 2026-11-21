@@ -79,8 +79,18 @@ pub const Kind = enum(c_int) { data = 0, text = 1 };
 /// `web.coro.blocking`.
 const js = struct {
     /// Starts a WebSocket to `url` offering the comma-separated
-    /// `protocols`; its id, or -1 if the URL is refused.
-    extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32) i32;
+    /// `protocols`, with `headers` (`Name: value` lines) in its handshake;
+    /// its id, -1 if the URL is refused, or -2 if headers were given and
+    /// this host's WebSocket can't send them (a browser's).
+    extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32, headers: [*]const u8, headers_n: u32) i32;
+    /// Asks the embedder's credentials callback for a host-made stream's
+    /// handshake (design/credential-helpers.md, "Browser host"): `failed`
+    /// is empty, or why the last try failed; `argv` is the matching
+    /// `--cred` helper's command, one word per line, or empty. Writes
+    /// `Name: value` lines to `out`, the first of which may instead be
+    /// `url URL`, a URL to connect to, and returns their length; -1 for no
+    /// credential; -2 with the error in `out`. Suspending.
+    extern "h9" fn ws_cred(url: [*]const u8, url_n: u32, failed: [*]const u8, failed_n: u32, argv: [*]const u8, argv_n: u32, out: [*]u8, out_n: u32) i32;
     /// Waits for the open: the selected subprotocol's length (in `sel`),
     /// or -1 if it failed or closed first.
     extern "h9" fn ws_opened(id: i32, sel: [*]u8, n: u32) i32;
@@ -1162,13 +1172,86 @@ fn webConnect(s: *Stream) ConnectError!void {
         if (i > 0) try protos.append(gpa, ',');
         try protos.appendSlice(gpa, p);
     }
-    const id = js.ws_open(s.url.ptr, @intCast(s.url.len), protos.items.ptr, @intCast(protos.items.len));
-    if (id < 0) {
-        s.lockS();
-        s.failLocked("this host refuses the url", .{});
-        s.lock.unlock();
-        return error.Canceled;
+    // A host-made stream asks the embedder's credentials callback before
+    // each try, and tries once more if one gave a credential and the
+    // open failed (design/credential-helpers.md, "Browser host").
+    var failed: [96]u8 = undefined;
+    var failed_len: usize = 0;
+    while (true) {
+        var out: [8192]u8 = undefined;
+        defer std.crypto.secureZero(u8, &out);
+        var got_cred = false;
+        var url: []const u8 = s.url;
+        var headers: []const u8 = "";
+        if (s.conv == null) {
+            const n = try webCred(s, failed[0..failed_len], &out);
+            if (n >= 0) {
+                got_cred = true;
+                const text = out[0..@intCast(n)];
+                headers = text;
+                // Named as native h9 names a helper's errors, when one matched.
+                var nb: [64]u8 = undefined;
+                const who = if (s.cred_helper) |h| std.fmt.bufPrint(&nb, "credential helper {s}", .{std.fs.path.basename(h.argv[0])}) catch "credential helper" else "credentials callback";
+                if (std.mem.startsWith(u8, text, "url ")) {
+                    const nl = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+                    url = std.mem.trim(u8, text[4..nl], " \t\r");
+                    headers = text[@min(nl + 1, text.len)..];
+                    if (!ws.Url.is(url)) return webFail(s, "{s}: not a ws:// or wss:// URL", .{who});
+                }
+                var lines = std.mem.splitScalar(u8, headers, '\n');
+                var i: usize = 0;
+                while (lines.next()) |l| {
+                    i += 1;
+                    if (std.mem.trim(u8, l, " \t\r").len == 0) continue;
+                    _ = ws.checkHeader(l) catch |e| return switch (e) {
+                        error.ReservedHeader => webFail(s, "{s}: {s} changes the handshake", .{ who, ws.headerName(l) }),
+                        error.BadHeader => webFail(s, "{s}: line {d} isn't a 'Name: value' header", .{ who, i }),
+                    };
+                }
+            }
+        }
+        const r = try webOpen(s, url, protos.items, headers, &failed, &failed_len);
+        if (r) return;
+        if (!got_cred or s.cred_retried) {
+            return webFail(s, "{s}{s}", .{ failed[0..failed_len], if (s.cred_retried) " (after credential helper retry)" else "" });
+        }
+        s.cred_retried = true;
     }
+}
+
+/// Fails the stream with an error, for `webConnect`.
+fn webFail(s: *Stream, comptime fmt: []const u8, args: anytype) ConnectError {
+    s.lockS();
+    defer s.lock.unlock();
+    s.failLocked(fmt, args);
+    return error.Canceled;
+}
+
+/// Asks the JS host for a host-made stream's credential (`js.ws_cred`).
+fn webCred(s: *Stream, failed: []const u8, out: *[8192]u8) ConnectError!i32 {
+    var argv: std.ArrayList(u8) = .empty;
+    defer argv.deinit(gpa);
+    if (s.cred_helper) |h| {
+        for (h.argv, 0..) |a, i| {
+            if (i > 0) try argv.append(gpa, '\n');
+            try argv.appendSlice(gpa, a);
+        }
+        cred.warnPlain(h, s.url);
+    }
+    const n = web.coro.blocking(js.ws_cred, .{ s.url.ptr, @as(u32, @intCast(s.url.len)), failed.ptr, @as(u32, @intCast(failed.len)), argv.items.ptr, @as(u32, @intCast(argv.items.len)), out, @as(u32, out.len) });
+    if (n == -2) {
+        const msg = std.mem.sliceTo(out, 0);
+        return webFail(s, "{s}", .{msg[0..@min(msg.len, 120)]});
+    }
+    return n;
+}
+
+/// One try at opening the JS host's WebSocket. Returns true once it's
+/// established, or false with why it failed in `why`, its socket freed.
+fn webOpen(s: *Stream, url: []const u8, protos: []const u8, headers: []const u8, why: *[96]u8, why_len: *usize) ConnectError!bool {
+    const id = js.ws_open(url.ptr, @intCast(url.len), protos.ptr, @intCast(protos.len), headers.ptr, @intCast(headers.len));
+    if (id == -2) return webFail(s, "this host's WebSocket can't send handshake headers; return a URL instead", .{});
+    if (id < 0) return webFail(s, "this host refuses the url", .{});
     {
         const io = theIo();
         s.wlock.lockUncancelable(io);
@@ -1184,16 +1267,30 @@ fn webConnect(s: *Stream) ConnectError!void {
     // From here `finish` frees the socket.
     var sel: [32]u8 = undefined;
     const n = web.coro.blocking(js.ws_opened, .{ id, &sel, @as(u32, sel.len) });
+    if (n < 0) {
+        var len: u32 = 0;
+        _ = js.ws_status(id, why, why.len, &len);
+        if (len == 0) {
+            const m = "connection failed";
+            @memcpy(why[0..m.len], m);
+            len = m.len;
+        }
+        why_len.* = len;
+        // Taken back, for another try.
+        const io = theIo();
+        s.wlock.lockUncancelable(io);
+        s.lockS();
+        s.sock = -1;
+        const cancel = s.cancel;
+        s.lock.unlock();
+        s.wlock.unlock(io);
+        js.ws_free(id);
+        if (cancel) return error.Canceled;
+        return false;
+    }
     s.lockS();
     defer s.lock.unlock();
     if (s.cancel) return error.Canceled;
-    if (n < 0) {
-        var why: [96]u8 = undefined;
-        var len: u32 = 0;
-        _ = js.ws_status(id, &why, why.len, &len);
-        s.failLocked("{s}", .{if (len > 0) why[0..len] else "connection failed"});
-        return error.Canceled;
-    }
     const got = sel[0..@intCast(n)];
     if (s.conv == null and !std.mem.eql(u8, got, ws.subprotocol)) {
         s.failLocked("server didn't select the 9p subprotocol", .{});
@@ -1206,6 +1303,7 @@ fn webConnect(s: *Stream) ConnectError!void {
     s.opened = true;
     s.state.store(.established, .release);
     wake(s.id);
+    return true;
 }
 
 /// `readLoop` on the web host: takes what the JS host's socket received

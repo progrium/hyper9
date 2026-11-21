@@ -662,12 +662,9 @@ fn credHelpers(arena: std.mem.Allocator, cfg: cli.Config, env: *const std.proces
             return error.Usage;
         },
     };
-    // The web host has no processes to run (design/credential-helpers.md,
+    // On the web host the embedder's credentials callback gets the
+    // matching helper's command to run, or not (design/credential-helpers.md,
     // "Browser host").
-    if (web and list.items.len > 0) {
-        std.debug.print("h9: --cred isn't available on the web host\n", .{});
-        return error.Usage;
-    }
     return list.items;
 }
 

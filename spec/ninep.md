@@ -5,6 +5,7 @@ This describes, as built, what a root can be, the 9P dialects h9 speaks to file 
 ## Contents
 
 - [Root filesystem](#root-filesystem)
+- [Credential helpers](#credential-helpers)
 - [9P dialects](#9p-dialects)
 - [Metadata indexes](#metadata-indexes)
 - [Serving](#serving)
@@ -33,6 +34,18 @@ The connection is posted on the machine's `/srv` board as `root`, which holds it
 
 Each connection goes through a `#ℓ` conversation before it's posted (see [9P dialects](#9p-dialects)), so the server can speak 9P2000 or 9P2000.L; a TCP root, and a unix one whose path has no comma, is dialed by the conversation itself, so it can be dialed again. A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks an unknown dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, unless a 9P2000.L.Z server's connection is resumed. Disk images aren't supported ([image-roots](../design/epoch-0/image-roots.md) was declined).
 
+## Credential helpers
+
+Before each WebSocket handshake h9 makes, for the root, a namespace file's `mount`, or a 9P2000.L.Z reconnect of either, it runs the credential helper whose `--cred PATTERN=COMMAND` matches the URL, and sends the headers it prints with the handshake ([credential-helpers](../design/credential-helpers.md), `src/cred.zig`). Guest `/net/ws` conversations never run one.
+
+- **Patterns** are scheme-less URL prefixes, matched on a host and path boundary, such as `wanix.io/data`, with a leading `*.` matching any subdomain of a domain that follows it. The longest matching pattern wins, and of equally long ones the first given. `--cred` entries come before `$H9CRED`'s, which is a list of the same separated by `;`; a bad entry in either is exit 2.
+- **The exchange:** the command is split on spaces and tabs and run as `argv… get URL` with the URL unelided, stdin empty, stdout piped, and stderr passed through. It has 30 seconds. Its output is `Name: value` lines up to a blank line or EOF, checked as `--root-header`'s are. A failure is exit 125 for the root, or the mount's error, with `credential helper NAME:` and the first line of its stderr or its exit status.
+- **A refusal:** when the server answers 401 or 403, the helper is run once more with the response's status line and headers on stdin, and its new headers are tried. A second refusal ends with `(after credential helper retry)`.
+- **Merging:** `--root-header` wins over a helper's header of the same name, compared without case.
+- **Secrets:** the output is zeroed once the handshake is sent. A match on a `ws://` URL warns that the headers cross the network in plaintext.
+
+A handshake's `101` may carry `9P-Uid: N` and `9P-User: NAME`, the uid the server serves files as for this client and its name. With neither `--user-map` nor `--root-user`, h9 writes them to the connection's `#ℓ` `ctl` as `user N NAME`, so the connection's user map maps N to NAME both ways and the attach sends NAME and N. A name longer than 27 bytes, or with a space, `:`, `/`, or a control character, is ignored, the former with a warning.
+
 ## 9P dialects
 
 Every 9P connection h9 mounts, from a TCP, unix socket, or WebSocket root, a namespace file's `mount`, or the guest's `dotlfs`, goes through a `#ℓ` conversation's client side before devmnt sees it ([dotl](../design/epoch-0/dotl.md)). The translator answers devmnt's `Tversion` with `9P2000` itself and sends its own, with tag `NOTAG`, offering `9P2000.L.Z` at an `msize` of up to 1 MiB:
@@ -55,7 +68,7 @@ With `9P2000.L.Z`:
 - Every mutation carries an envelope with an op_id from a random seed and a count.
 - A dialed conversation reconnects. When the connection drops, or the server answers `ENOTLEADER`, the kproc dials the addresses again, a second apart and round the list, for up to 120 seconds, under the first dial's plan, in a namespace of its own. The translator then negotiates again, rebinds every live server fid with `Trebind` by its inode and attach root, replays each open without `O_TRUNC`, `O_CREAT`, or `O_EXCL`, and resends every unanswered request in order, mutations with the retry flag, so the server applies each once. Read-ahead and held attributes are dropped. devmnt sees slow replies; after 120 seconds outstanding requests fail as on any hangup.
 
-A connection given by fd (`fd N`), such as a WebSocket root's or a unix root whose path has a comma, can't be redialed, so it hangs up as before.
+A connection given by fd (`fd N`), such as a unix root whose path has a comma, can't be redialed, so it hangs up as before. A WebSocket root's or a namespace file's WebSocket mount is given by fd too, but h9 writes its URL with `redial` first, so a reconnect opens a new host stream, running the credential helper again.
 
 ## Metadata indexes
 
