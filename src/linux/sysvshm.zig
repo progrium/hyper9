@@ -134,7 +134,7 @@ pub fn find(backend: vmm.Backend, id: i32) ?*Seg {
 /// Called with the lock held; returns with it released.
 pub fn remove(s: *Seg) void {
     s.removed = true;
-    if (s.nattch() == 0) {
+    if (s.nattch() == 0 and !owed(s)) {
         _ = table.remove(s.id);
         unlock();
         free(s);
@@ -156,14 +156,24 @@ fn free(s: *Seg) void {
 /// (shmat's, for the chunks it didn't map), freeing the segment if that
 /// was the last attachment of a removed one.
 pub fn drop(p: *mm.Pages) void {
-    if (p.refs.fetchSub(1, .acq_rel) == 2) released(p);
+    _ = p.pending.fetchAdd(1, .acq_rel);
+    _ = p.refs.fetchSub(1, .acq_rel);
+    released(p);
+}
+
+/// Whether a call to `released` is still owed for one of the segment's
+/// chunks (mm.Pages.pending), which then frees it instead.
+fn owed(s: *const Seg) bool {
+    for (s.pages) |q| if (q.pending.load(.acquire) != 0) return true;
+    return false;
 }
 
 /// Pages.release: no address space attaches one of the segment's chunks.
 fn released(p: *mm.Pages) void {
     const s: *Seg = @ptrCast(@alignCast(p.file.?));
     lock();
-    if (!s.removed) {
+    _ = p.pending.fetchSub(1, .acq_rel);
+    if (!s.removed or owed(s)) {
         unlock();
         return;
     }
