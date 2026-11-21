@@ -268,6 +268,24 @@ closing(Conv *cv)
 	return r;
 }
 
+/* Puts #/ for the calling kproc's dot and slash. */
+static void
+dropdot(void)
+{
+	Chan *c, *odot, *oslash;
+
+	c = devattach('/', "");
+	incref(&c->ref);
+	odot = up->dot;
+	oslash = up->slash;
+	up->dot = c;
+	up->slash = c;
+	if(odot != nil)
+		cclose(odot);
+	if(oslash != nil)
+		cclose(oslash);
+}
+
 /* The kproc: reads the server connection into the layer. */
 static void
 reader(void *a)
@@ -280,6 +298,12 @@ reader(void *a)
 
 	cv = a;
 	h9_kprocdetach();
+	/*
+	 * As #ℓ's reader: it can outlive the machine's namespace, whose root
+	 * overlay its dot and slash would be closed after, and it reads only
+	 * its server channel, so it keeps #/ instead.
+	 */
+	dropdot();
 	buf = smalloc(Bufsize);
 	for(;;){
 		if(waserror()){
