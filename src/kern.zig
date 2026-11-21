@@ -227,6 +227,16 @@ const c_stub = struct {
         return 1;
     }
     fn h9_overlay_drop(_: c_int) void {}
+    fn h9_overlay_union(_: [*:0]const u8, _: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
+        return -1;
+    }
+    fn h9_overlay_cowname(_: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_overlay_unionof(_: [*:0]const u8) c_int {
+        return -1;
+    }
+    fn h9_overlay_unpin(_: [*:0]const u8) void {}
     fn h9_overlay_track(_: c_int, _: ?*anyopaque) void {}
     fn h9_kern_release() void {}
     fn h9_hidx_convstatus(_: c_int, _: [*]u8, _: c_int) c_int {
@@ -336,6 +346,10 @@ const c_real = struct {
     extern fn h9_fs_mkfifopath(path: [*:0]const u8, perm: c_uint) c_int;
     extern fn h9_fs_renamepath(old: [*:0]const u8, new: [*:0]const u8) c_int;
     extern fn h9_overlay_drop(id: c_int) void;
+    extern fn h9_overlay_union(name: [*:0]const u8, path: [*:0]const u8, at: [*:0]const u8, flags: c_int) c_int;
+    extern fn h9_overlay_cowname(name: [*:0]const u8) c_int;
+    extern fn h9_overlay_unionof(path: [*:0]const u8) c_int;
+    extern fn h9_overlay_unpin(name: [*:0]const u8) void;
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
     extern fn h9_unixdial(path: [*:0]const u8) c_int;
@@ -881,6 +895,42 @@ pub fn mkfifo(path: [*:0]const u8, perm: u32) Error!void {
 /// Linux personality's renameat.
 pub fn renameAcross(old: [*:0]const u8, new: [*:0]const u8) Error!bool {
     return try check(c.h9_fs_renamepath(old, new)) == 0;
+}
+
+/// Where a union member goes (design/mounts.md, "Union instances").
+pub const UnionFlags = packed struct(c_int) {
+    /// At the bottom, not on top.
+    after: bool = false,
+    /// Creates may go to it.
+    create: bool = false,
+    _: u30 = 0,
+};
+
+/// Adds the directory `path` (in the caller's namespace) to a union,
+/// rooted at `at` ("" for its top). `spec` is a name (`root` for
+/// `#Oroot`, made empty if it doesn't exist), an instance number, or ""
+/// for a new unnamed union. Returns the union's instance number. A union
+/// made here stays pinned until it's attached, or `unionUnpin` (named)
+/// or `overlayDrop` (unnamed) drops it.
+pub fn unionAdd(name: [*:0]const u8, path: [*:0]const u8, at: [*:0]const u8, flags: UnionFlags) Error!u32 {
+    return try check(c.h9_overlay_union(name, path, at, @bitCast(flags)));
+}
+
+/// Gives the named union `#O<name>` a copy-on-write overlay over it,
+/// which attaching the name gives from then on. Returns its instance.
+pub fn unionCow(name: [*:0]const u8) Error!u32 {
+    return try check(c.h9_overlay_cowname(name));
+}
+
+/// The instance number of the union whose top `path` is, if it's one.
+pub fn unionOf(path: [*:0]const u8) ?u32 {
+    const r = c.h9_overlay_unionof(path);
+    return if (r < 0) null else @intCast(r);
+}
+
+/// Drops a named union, and its overlay, if they were never attached.
+pub fn unionUnpin(name: [*:0]const u8) void {
+    c.h9_overlay_unpin(name);
 }
 
 /// Frees an overlay made by `overlayNew` that was never attached.

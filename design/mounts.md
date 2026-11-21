@@ -6,7 +6,7 @@ created: 2026-11-20
 authors: [progrium]
 depends: [overlay, ninep-roots, websocket-9p, dotl, linux-personality, builtin-root, symlinks-in-root]
 areas: [cli, kern, sandbox, web, api]
-branch: []
+branch: [mounts]
 ---
 
 # Proposal: Mounts, binds, and a Plan 9 root

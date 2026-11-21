@@ -117,8 +117,9 @@ pub const Config = struct {
     timeout_ns: ?u64 = null,
     pids: ?u32 = null,
     cpus: ?u32 = null,
-    /// --ns: a namespace file, in newns syntax, replayed before the program.
-    ns: ?[]const u8 = null,
+    /// --ns values in order: namespace lines inline, with `;` between
+    /// them, or `@FILE` for a host file (design/mounts.md).
+    ns: []const []const u8 = &.{},
     host_fs: bool = false,
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
     /// (design/epoch-0/guest-tools.md).
@@ -178,6 +179,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var creds: std.ArrayList([]const u8) = .empty;
     var serve_addrs: std.ArrayList([]const u8) = .empty;
     var serve_origins: std.ArrayList([]const u8) = .empty;
+    var ns: std.ArrayList([]const u8) = .empty;
     var gfx_scale: ?u8 = null;
     // Long flags only (SPEC.md, "Parsing rules"); -h is accepted alone,
     // where it can't be a program's flag.
@@ -319,7 +321,9 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (value(args, &i, "--cpus")) |v| {
             c.cpus = try count(v);
         } else if (value(args, &i, "--ns")) |v| {
-            c.ns = v orelse return error.Usage;
+            const text = v orelse return error.Usage;
+            if (text.len == 0 or std.mem.eql(u8, text, "@")) return error.Usage;
+            try ns.append(gpa, text);
         } else if (value(args, &i, "--builtin")) |v| {
             c.builtin = try enumValue(BuiltinMode, v);
         } else if (value(args, &i, "--rc")) |v| {
@@ -361,6 +365,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     c.net_allow = try net_allow.toOwnedSlice(gpa);
     c.root_headers = try root_headers.toOwnedSlice(gpa);
     c.cred = try creds.toOwnedSlice(gpa);
+    c.ns = try ns.toOwnedSlice(gpa);
     c.argv = args[i..];
     return c;
 }
@@ -950,10 +955,13 @@ test "--pids, --cpus and --ns" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const c = try parse(a, &.{ "h9", "--pids", "32", "--cpus=2", "--ns", "ns", "rc" });
+    const c = try parse(a, &.{ "h9", "--pids", "32", "--cpus=2", "--ns", "@ns", "--ns=bind /a /b; bind /c /d", "rc" });
     try t.expectEqual(@as(?u32, 32), c.pids);
     try t.expectEqual(@as(?u32, 2), c.cpus);
-    try t.expectEqualStrings("ns", c.ns.?);
+    try t.expectEqual(@as(usize, 2), c.ns.len);
+    try t.expectEqualStrings("@ns", c.ns[0]);
+    try t.expectEqualStrings("bind /a /b; bind /c /d", c.ns[1]);
+    try t.expectError(error.Usage, parse(a, &.{ "h9", "--ns", "@", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--pids", "0", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--cpus", "x", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--ns" }));

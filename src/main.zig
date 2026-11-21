@@ -186,7 +186,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     const builtin_root = builtinFor(cfg.builtin, root != null);
     // Without a root tree only a host a.out can run; anything resolved in
     // the guest namespace would fail later as a misleading "not found".
-    if (root == null and linux_root == null and builtin_root == .off and (prog == .guest or cfg.ns != null)) {
+    if (root == null and linux_root == null and builtin_root == .off and (prog == .guest or cfg.ns.len > 0)) {
         std.debug.print("h9: no root tree found; pass --root or set H9ROOT\n", .{});
         return exit_failed;
     }
@@ -307,7 +307,22 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     opts.env = env.items;
     opts.signals = &host.signals;
     opts.trace = if (cfg.trace) |t| (if (t.len > 0) &trace_w.interface else &err_w.interface) else null;
-    opts.ns = cfg.ns;
+    // --ns @FILE is read on the host, with h9's own permissions, before
+    // the machine starts; inline lines are taken as they are
+    // (design/mounts.md, "Namespace files").
+    var ns_texts: std.ArrayList([]const u8) = .empty;
+    for (cfg.ns) |v| {
+        if (v[0] != '@') {
+            try ns_texts.append(arena, v);
+            continue;
+        }
+        const text = std.Io.Dir.cwd().readFileAlloc(io, v[1..], arena, .limited(1 << 20)) catch |e| {
+            std.debug.print("h9: --ns {s}: {s}\n", .{ v, if (e == error.FileNotFound) "not found" else @errorName(e) });
+            return exit_failed;
+        };
+        try ns_texts.append(arena, text);
+    }
+    opts.ns = ns_texts.items;
     opts.console_tty = (std.Io.File.stdin().isTty(io) catch false) and (std.Io.File.stdout().isTty(io) catch false);
     // A run that only serves doesn't read the console, so it can run in
     // the background without stopping on terminal input.

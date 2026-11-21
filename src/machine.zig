@@ -274,11 +274,12 @@ pub const Machine = struct {
         /// Receives a ratrace-style line per syscall and, when a program
         /// faults, the Ureg and a symbolized PC.
         trace: ?*std.Io.Writer = null,
-        /// A namespace file (newns syntax, src/newns.zig) to replay in the
-        /// first process after the policy's namespace is built and before
-        /// the program is looked up. It's a guest path, read as newns
-        /// would, so a relative one is in the guest's cwd.
-        ns: ?[]const u8 = null,
+        /// Namespaces (newns syntax, src/newns.zig, with `;` between
+        /// lines) to replay in order in the first process, after the
+        /// policy's namespace is built and before the program is looked
+        /// up (design/mounts.md, "Namespace files"). They're text: the
+        /// CLI reads `--ns @FILE` on the host.
+        ns: []const []const u8 = &.{},
         /// How many processes may own a vCPU before the rest share the
         /// pool (src/cpupool.zig); null means the backend's limit less the
         /// pool. For tests of the pool.
@@ -1349,12 +1350,11 @@ pub const Machine = struct {
         if (j.stopping.load(.acquire)) return .{ .killed = timeout_note };
         const built = try m.buildNamespace(j.con_id);
         const root_ov = built.root_overlay;
-        if (m.opts.ns) |path| {
-            var buf: [1024]u8 = undefined;
-            const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("--ns: name too long", .{});
-            const text = readFile(m.gpa, z) catch return m.fail("--ns {s}: {s}", .{ path, kern.errstr() });
-            defer m.gpa.free(text);
-            const cd = try m.replayNamespace(text, j.con_id);
+        if (m.opts.ns.len > 0) {
+            var cd = false;
+            for (m.opts.ns) |text| {
+                if (try m.replayNamespace(text, j.con_id)) cd = true;
+            }
             // The cwd is a chan from before the replay. Without a `cd` of
             // its own, the replay ends in the cwd as its binds left it: an
             // overlay over / (design/epoch-0/overlay.md) puts the cwd's
@@ -3647,6 +3647,37 @@ pub const Machine = struct {
         return id;
     }
 
+    /// `bind -r` (design/mounts.md, "Union instances"): `from` joins a
+    /// union merged at every depth at `to`, on top unless `after`, taking
+    /// creates with `create`. On a named union, `#O<name>`, it's added
+    /// there and nothing is bound. On a union already at `to`, it's
+    /// added to that one. Otherwise a new union of `from` and what `to`
+    /// is now is bound over `to`.
+    fn bindRecursive(from: [:0]const u8, to: [:0]const u8, after: bool, create: bool) kern.Error!void {
+        const flags: kern.UnionFlags = .{ .after = after, .create = create };
+        if (std.mem.startsWith(u8, to, "#O") and to.len > 2 and std.mem.indexOfScalar(u8, to, '/') == null) {
+            _ = try kern.unionAdd(to[2..], from, "", flags);
+            return;
+        }
+        var num: [16]u8 = undefined;
+        if (kern.unionOf(to)) |id| {
+            _ = try kern.unionAdd(std.fmt.bufPrintZ(&num, "{d}", .{id}) catch unreachable, from, "", flags);
+            return;
+        }
+        const id = try kern.unionAdd("", to, "", .{ .after = true });
+        _ = kern.unionAdd(std.fmt.bufPrintZ(&num, "{d}", .{id}) catch unreachable, from, "", flags) catch |e| {
+            kern.overlayDrop(id);
+            return e;
+        };
+        // Creatable: the union itself refuses a create without a member
+        // that takes them.
+        var spec: [16]u8 = undefined;
+        kern.bind(std.fmt.bufPrintZ(&spec, "#O{d}", .{id}) catch unreachable, to, kern.MREPL | kern.MCREATE) catch |e| {
+            kern.overlayDrop(id);
+            return e;
+        };
+    }
+
     /// Runs a namespace file's operations, as newns does: a failed bind or
     /// mount is skipped, and only a syntax error fails the run. The device
     /// mask is already set, so it can't reach masked devices. Returns
@@ -3659,11 +3690,17 @@ pub const Machine = struct {
         var line: usize = 0;
         const ops = newns.parse(arena, text, &line) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.Syntax => return m.fail("--ns: line {d}: syntax error", .{line}),
+            error.Syntax => {
+                const w = newns.firstWord(arena, text, line);
+                if (w.len > 0) return m.fail("--ns: unknown command '{s}' (for a file, use --ns @{s})", .{ w, w });
+                return m.fail("--ns: line {d}: syntax error", .{line});
+            },
         };
         for (ops) |op| switch (op) {
             // A bare #O is a fresh overlay over what the target is now.
-            .bind => |b| if (std.mem.eql(u8, b.from, "#O")) {
+            .bind => |b| if (b.flag.recursive) {
+                bindRecursive(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), b.flag.order == .after, b.flag.create) catch {};
+            } else if (std.mem.eql(u8, b.from, "#O")) {
                 const to = try m.nsPath(arena, b.to, con_id);
                 _ = overlay(to, to, mountFlag(b.flag)) catch {};
             } else kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},

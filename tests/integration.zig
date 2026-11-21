@@ -470,6 +470,13 @@ const Scratch = struct {
     tmp: std.testing.TmpDir,
     path: []const u8,
     buf: [std.Io.Dir.max_path_bytes]u8 = undefined,
+    ns_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined,
+
+    /// `@<scratch>/ns`: --ns's value for the namespace file `ns` the case
+    /// wrote, read on the host (design/mounts.md).
+    fn ns(s: *Scratch) []const u8 {
+        return std.fmt.bufPrint(&s.ns_buf, "@{s}/ns", .{s.path}) catch unreachable;
+    }
 
     fn init(s: *Scratch) !void {
         s.tmp = std.testing.tmpDir(.{});
@@ -1025,7 +1032,7 @@ test "--ns replays a namespace file [baseline]" {
     try s.init();
     defer s.deinit();
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = "bind /sys/lib /lib\n" });
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "ls", "-d", "/lib/acid" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "ls", "-d", "/lib/acid" });
     defer r.deinit();
     try std.testing.expectEqualStrings("/lib/acid\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -1050,7 +1057,7 @@ test "--rc alone runs the root's rcmain.local, then stdin [default-command]" {
     var s: Scratch = undefined;
     try defaultCommand(&s, "echo hello from the root\n");
     defer s.deinit();
-    const r = try runIn(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc" }, "echo from stdin $service\n");
+    const r = try runIn(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc" }, "echo from stdin $service\n");
     defer r.deinit();
     try std.testing.expectEqualStrings("hello from the root\nfrom stdin terminal\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -1062,12 +1069,12 @@ test "an exec in rcmain.local sets the exit status [default-command]" {
     try defaultCommand(&s, "exec test -e /no/such/file\n");
     defer s.deinit();
     // The exec replaces the login rc, so stdin is never read.
-    const r = try runIn(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc" }, "echo not reached\n");
+    const r = try runIn(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc" }, "echo not reached\n");
     defer r.deinit();
     try std.testing.expectEqualStrings("", r.out);
     try std.testing.expectEqual(1, r.code);
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/rcmain.local", .data = "exec echo hello from the root\n" });
-    const ok = try runIn(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc" }, "echo not reached\n");
+    const ok = try runIn(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc" }, "echo not reached\n");
     defer ok.deinit();
     try std.testing.expectEqualStrings("hello from the root\n", ok.out);
     try std.testing.expectEqual(0, ok.code);
@@ -1093,7 +1100,7 @@ test "--rc alone on a terminal is an interactive login rc [default-command]" {
     var it = backendList(e);
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--ns", "ns", "--rc" });
+        var t = try spawnTerm(e, backend, &.{ "--timeout", "60s", "--cwd", s.path, "--ns", s.ns(), "--rc" });
         defer t.deinit();
         try t.expect("hello from the root", slow(10_000));
         try t.expect(prompt, slow(10_000));
@@ -1111,7 +1118,7 @@ test "--rc 'cmd' doesn't read rcmain.local [default-command]" {
     var s: Scratch = undefined;
     try defaultCommand(&s, "echo hello from the root\n");
     defer s.deinit();
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc", "echo cmd" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc", "echo cmd" });
     defer r.deinit();
     try std.testing.expectEqualStrings("cmd\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -1374,7 +1381,7 @@ test "--print output with overlays replays with --ns [ephemeral-writes]" {
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
     // Under --write=none the replay's overlays make the cwd and /tmp writable.
-    const r = try run(e, &.{ "--cwd", s.path, "--write=none", "--ns", "ns", "--rc", "echo x > f && echo y > /tmp/g && cat f /tmp/g" });
+    const r = try run(e, &.{ "--cwd", s.path, "--write=none", "--ns", s.ns(), "--rc", "echo x > f && echo y > /tmp/g && cat f /tmp/g" });
     defer r.deinit();
     try std.testing.expectEqualStrings("x\ny\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -1547,7 +1554,7 @@ test "--print output with the root overlay replays with --ns [overlay]" {
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
     // Under --write=scope the root is read-only until the replay's overlay.
-    const r = try run(e, &.{ "--cwd", s.path, "--write=scope", "--ns", "ns", "--rc", "echo x > /lib/h9-overlay-ns && cat /lib/h9-overlay-ns" });
+    const r = try run(e, &.{ "--cwd", s.path, "--write=scope", "--ns", s.ns(), "--rc", "echo x > /lib/h9-overlay-ns && cat /lib/h9-overlay-ns" });
     defer r.deinit();
     try std.testing.expectEqualStrings("x\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -3688,7 +3695,7 @@ test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "\naccess:") orelse std.mem.indexOfPos(u8, p.out, start, "\ncaveats:") orelse return error.NoNamespace;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start .. end + 1] });
-    try expectSameAsHost(e, srv.dial(), &.{ "--cwd", s.path, "--ns", "ns", "/bin/ls", "/", "/bin/ls" });
+    try expectSameAsHost(e, srv.dial(), &.{ "--cwd", s.path, "--ns", s.ns(), "/bin/ls", "/", "/bin/ls" });
 }
 
 test "a write to a 9P root under the default profile doesn't reach the server [overlay]" {
@@ -4747,14 +4754,14 @@ test "a namespace file mounts a ws:// URL [websocket-9p]" {
     defer s.deinit();
     var ns: [128]u8 = undefined;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}?k=v' /n\n", .{w.url()}) });
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "/bin/ls", "/n/rc/bin/lc" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "/bin/ls", "/n/rc/bin/lc" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings("/n/rc/bin/lc\n", r.out);
     try std.testing.expectEqualStrings("/9p?k=v", w.relay.target());
     // Under --write=none, the mount can't be kept read-only.
-    const none = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--write=none", "/bin/echo" });
+    const none = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--write=none", "/bin/echo" });
     defer none.deinit();
     try std.testing.expectEqual(125, none.code);
     try expectIn(none.err, "--write=none can't be enforced on a WebSocket mount");
@@ -5657,7 +5664,7 @@ test "--print's #U!c bind replays with --ns [symlinks-in-root]" {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
     // Replayed over an uncontained root, the #U!c bind makes it contained
     // (--host-fs leaves #U unmasked, so the replay can attach it).
-    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--host-fs", "--write=scope", "--ns", "ns", "cat", "/etc/hello" });
+    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--host-fs", "--write=scope", "--ns", s.ns(), "cat", "/etc/hello" });
     defer r.deinit();
     try std.testing.expectEqualStrings("tree hello\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -7199,7 +7206,7 @@ test "--ns replays a plan printed over the built-in root [builtin-root]" {
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
     // Replayed over the full tree, the plan makes the built-in root `/`.
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc", "test -d /sys || echo builtin" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc", "test -d /sys || echo builtin" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("builtin\n", r.out);
@@ -8357,14 +8364,14 @@ test "a namespace file mounts a .L server by its dial string, under the network 
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns_buf, "mount -c {s} /mnt/temp\n", .{d.dial()}) });
     var allow_buf: [64]u8 = undefined;
     const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--net-allow", allow, "--rc", "cat /mnt/temp/etc/motd; cat /net/dotl/*/status" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--net-allow", allow, "--rc", "cat /mnt/temp/etc/motd; cat /net/dotl/*/status" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings("hello from .L\n9P2000.L\n", r.out);
     // Not allowed, it isn't mounted, and the run goes on, as newns
     // skips a mount that fails.
-    const no = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--net-allow", "tcp!127.0.0.1!1", "--rc", "test -e /mnt/temp/etc/motd || echo skipped" });
+    const no = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--net-allow", "tcp!127.0.0.1!1", "--rc", "test -e /mnt/temp/etc/motd || echo skipped" });
     defer no.deinit();
     try std.testing.expectEqualStrings("skipped\n", no.out);
 }
@@ -9257,4 +9264,131 @@ test "--user-map wins over 9P-Uid [credential-helpers]" {
     try expectIn(r.out, " alice 1000 ");
     try std.testing.expectEqualStrings("", r.err);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "progrium") == null);
+}
+
+// Mounts, binds, and a Plan 9 root (design/mounts.md).
+
+test "--ns splits inline lines on ; outside quotes [mounts]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--ns", "bind /sys/lib /lib; bind '/sys/lib;x' /n;bind /rc/bin /n", "--rc", "ls -d /lib/acid /n/lc" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/lib/acid\n/n/lc\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "--ns comments end at ; [mounts]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--ns", "# a comment; bind /sys/lib /lib # another; bind /rc/bin /n", "--rc", "ls -d /lib/acid /n/lc" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("/lib/acid\n/n/lc\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "--ns @FILE reads a host file, and repeated --ns replay in order [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = "bind /sys/lib /n\n" });
+    // The guest's cwd isn't the scratch directory, so only the host reads it.
+    const r = try run(e, &.{ "--ns", s.ns(), "--ns", "bind /rc/bin /n", "--rc", "ls -d /n/lc; test -e /n/acid || echo replaced" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/n/lc\nreplaced\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "--ns with a bare file name is exit 125 with a hint to use @ [mounts]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--ns", "ns", "/bin/echo" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try expectIn(r.err, "--ns: unknown command 'ns' (for a file, use --ns @ns)");
+}
+
+/// Two trees in the cwd for the union cases: `a` over `b`, each with a
+/// file `f` and a directory `d`, and names only one has.
+fn unionTrees(s: *Scratch) !void {
+    try s.init();
+    errdefer s.deinit();
+    const d = s.tmp.dir;
+    const io = std.testing.io;
+    try d.createDirPath(io, "a/d");
+    try d.createDirPath(io, "b/d/e");
+    try d.writeFile(io, .{ .sub_path = "a/f", .data = "A\n" });
+    try d.writeFile(io, .{ .sub_path = "b/f", .data = "B\n" });
+    try d.writeFile(io, .{ .sub_path = "a/d/h", .data = "ah\n" });
+    try d.writeFile(io, .{ .sub_path = "b/d/g", .data = "bg\n" });
+    try d.writeFile(io, .{ .sub_path = "b/d/e/x", .data = "bx\n" });
+}
+
+const union_ns = "bind -r /mnt/term/cwd/b /n; bind -r -b /mnt/term/cwd/a /n";
+const union_ns_c = "bind -r /mnt/term/cwd/b /n; bind -r -bc /mnt/term/cwd/a /n";
+
+test "bind -r merges directories below the bind point [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try unionTrees(&s);
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "cat /n/f /n/d/h /n/d/g /n/d/e/x; ls /n/d; cd /n/d/e && cat ../h" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("A\nah\nbg\nbx\n/n/d/e\n/n/d/g\n/n/d/h\nah\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "bind -r: creates go to the first -c member with the parent [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try unionTrees(&s);
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns_c, "--rc", "echo top > /n/new; echo deep > /n/d/new; mkdir /n/d/e/sub >[2]/dev/null || echo refused; echo more >> /n/d/g" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    try std.testing.expectEqualStrings("refused\n", r.out);
+    try std.testing.expect(s.exists("a/new"));
+    try std.testing.expect(s.exists("a/d/new"));
+    // b's directory e has no counterpart in a, and b doesn't take
+    // creates, so a create under it is refused.
+    try std.testing.expect(!s.exists("b/d/e/sub"));
+    // A write goes to the member that holds the file.
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("bg\nmore\n", try s.tmp.dir.readFile(std.testing.io, "b/d/g", &buf));
+    // Without a -c member, a create fails.
+    const no = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "echo x > /n/other" });
+    defer no.deinit();
+    try std.testing.expect(no.code != 0);
+    try expectIn(no.err, "mounted directory forbids creation");
+}
+
+test "bind -r: removing an upper file uncovers the lower one [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try unionTrees(&s);
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "rm /n/f && cat /n/f" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("B\n", r.out);
+    try std.testing.expect(!s.exists("a/f"));
+}
+
+test "bind -c '#O' over a union copies up and whites out [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try unionTrees(&s);
+    defer s.deinit();
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns ++ "; bind -c '#O' /n", "--rc", "echo more >> /n/d/g; cat /n/d/g; rm /n/f; test -e /n/f || echo gone; mkdir /n/z; ls /n" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("bg\nmore\ngone\n/n/d\n/n/z\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    // Nothing reached the host.
+    try std.testing.expect(s.exists("a/f"));
+    try std.testing.expect(s.exists("b/f"));
+    try std.testing.expect(!s.exists("a/z"));
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("bg\n", try s.tmp.dir.readFile(std.testing.io, "b/d/g", &buf));
 }
