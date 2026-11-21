@@ -1417,8 +1417,8 @@ pub fn build(b: *std.Build) void {
         if (!test_web) run_integration.step.dependOn(linux_fixtures);
         // -Djit-check checks every region against T0, one region at a time
         // across vCPUs: the cases' timeouts stretch (H9_TEST_SLOW, unless it's
-        // set already).
-        if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "4");
+        // set already). Eight processes contending for /env need about 40.
+        if (jit_check and b.graph.environ_map.get("H9_TEST_SLOW") == null) run_integration.setEnvironmentVariable("H9_TEST_SLOW", "40");
     }
 
     // The workloads (tests/workloads): real programs on real roots, in

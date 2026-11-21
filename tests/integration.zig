@@ -1320,7 +1320,7 @@ test "creating empty files until memory runs out fails with file system full [ep
     // when it works, so there's nothing to test in the loop; when one
     // fails, rc prints the error and leaves the script. About 30,000 files
     // fit; on WHP, whose exits are slower, making them takes about 45s.
-    const r = try runInFor(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" }, null, slow(120_000));
+    const r = try runInFor(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" }, null, 120_000);
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
