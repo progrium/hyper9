@@ -7,7 +7,7 @@ created: 2026-11-08
 authors: [progrium]
 depends: [linux-personality, linux-threads]
 areas: [linux, kern, vmm]
-branch: []
+branch: [cow-fork]
 ---
 
 # Proposal: Copy-on-write fork and demand-loaded file pages for Linux processes
@@ -80,11 +80,11 @@ Demos:
 
 Integration cases:
 
-- [ ] `test "a fork of a process with 600 MB of written heap runs under --memory 1g, and parent and child see their own writes [cow-fork]"`
-- [ ] `test "after fork, a read() into a buffer, a write from another thread, and a futex word change stay in the process that made them [cow-fork]"`
-- [ ] `test "a write after fork that finds no memory gets SIGSEGV, and the machine and the other process go on [cow-fork]"`
-- [ ] `test "MADV_DONTNEED after fork zeroes the range in one process only [cow-fork]"`
-- [ ] `test "a private mapping of a 200 MB file costs only the chunks touched, as VmRSS shows [cow-fork]"`
+- [x] `test "a fork of a process with 600 MB of written heap runs under --memory 1g, and parent and child see their own writes [cow-fork]"`
+- [x] `test "after fork, a read() into a buffer, a write from another thread, and a futex word change stay in the process that made them [cow-fork]"`
+- [x] `test "a write after fork that finds no memory gets SIGSEGV, and the machine and the other process go on [cow-fork]"`
+- [x] `test "MADV_DONTNEED after fork zeroes the range in one process only [cow-fork]"`
+- [x] `test "a private mapping of a 200 MB file costs only the chunks touched, as VmRSS shows [cow-fork]"`
 - [x] `test "an executable's untouched segments aren't loaded: a 170 MB static binary runs in 64 MB [cow-fork]"`
 - [ ] The existing `MAP_SHARED`, System V, `vfork`, and thread cases in [18] and [49] pass unchanged.
 
@@ -104,4 +104,4 @@ Integration cases:
 ## Updates
 
 - 2026-11-17: Step 3, `exec` through file mappings, is on the `cow-fork` branch, built on the lazily filled private mappings (`Vma.src`) that `mmap` already had, which cover step 2's mappings except for fork's handling of unloaded chunks. `elf.load` takes the image's file as a `Src` and maps each segment's whole file pages from it; a page two segments share and a segment's last file page (the start of the bss) are still copied in at exec. `exec` opens the file it read again and checks its length and first and last pages against what it read, and copies the image in, as before, when that fails or the program came from a host path. It still reads the whole file up front, against step 3's "reading headers only": that costs host memory during exec, not `--memory`. Found running Claude Code (a 370 MB Bun executable that execs itself again for ripgrep) on KVM under the default `--memory`: the second copy of its image ran the machine out of guest memory about one run in seven, which showed up as a `SIGSEGV` at the first touch of a new chunk. The peak guest memory of `claude -p` went from about 1 GB to about 500 MB, and of `claude --version` from 384 MB to 80 MB. The out-of-memory fault now says so under `--trace`.
-
+- 2026-11-21: Steps 1, 2, and 4 are on the `cow-fork` branch. `Mm.fork` shares each private chunk with the child, marked copy-on-write (`Chunk.cow`), and maps the parent's without write before `fork` returns; `Mm.own` copies a chunk, or keeps it if the other side has let go, before the first write to it from a fault or from the host (`touch`, `copy`, `hostSlice`, `hostEach`, `copyRange`, a pinned `read`, `insertFile`, and the zeroing in `unmap` and `MADV_DONTNEED`). The old pages' reference is dropped by `settle`, after the shootdown, so the other side can't reuse them as its own while this side's vCPUs can still read them. Step 2 needed no change: the lazily filled mappings (`Vma.src`) already gave the child its own reference on the file and left unloaded chunks to it. Two things the plan didn't name: a chunk a pin holds (a blocking `read` into it) is copied at `fork` rather than shared, as Linux copies pinned pages, and `hostSlice`, which hands out a pointer that must stay put (the futex word), owns the chunk even for a read; reading a path string goes through `copy` instead, so `execve` in a fork child doesn't copy the chunk its path is in. 9front's `rfork` is unchanged. Cases 1 to 5 pass on the native backend and the emulator (amd64), where `big` and `oom` fail on main with `ENOMEM` from `fork`; `zig cc -o hello hello.c` from a cold cache under the default `--memory` works on the native backend, where on main it fails with "failed to spawn zig clang: SystemResources". Not yet run on HVF or KVM. `/proc/meminfo` sums each process's memory, so it counts a shared chunk once per process and reads low after a fork.

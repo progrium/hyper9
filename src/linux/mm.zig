@@ -28,6 +28,14 @@
 //! brk, mremap), which look before they change it. While other processes
 //! share the Mm, a change that removes or narrows access is shot down on
 //! their vCPUs, and only then are pages freed.
+//!
+//! `fork` shares the parent's private chunks with the child copy-on-write
+//! (design/cow-fork.md): both Mms hold the chunk's `Pages`, mapped without
+//! write, and the first write to it by either side, from the guest (a
+//! fault) or from the host on its behalf (`own`), copies the pages, or
+//! keeps them if the other side has dropped them already. A chunk is the
+//! unit, as for allocation: a copy is up to a megabyte, less the zero
+//! pages `copySparse` skips.
 
 const std = @import("std");
 const vmm = @import("../vmm.zig");
@@ -196,6 +204,12 @@ const Chunk = struct {
     /// The regions of it mapped in the address space now.
     runs: [pages_per_chunk]Run = undefined,
     nruns: u16 = 0,
+    /// The pages may be shared with another Mm, copy-on-write, since a
+    /// fork: they're mapped without write, and are copied (or kept, if
+    /// no other Mm holds them) before anything writes them (`own`). Such
+    /// a chunk has no overlays: fork copies a chunk that has them, and
+    /// `insertFile` owns a chunk before it adds one.
+    cow: bool = false,
     /// Shared file mappings that don't sit at their offset's place in a
     /// chunk of their own, such as Wine's at 0x7ffe0000 beside private
     /// pages: their pages replace `mem`'s there. Sorted, not overlapping.
@@ -250,6 +264,11 @@ pub const Mm = struct {
     srcs: std.ArrayList(*Src) = .empty,
     /// Srcs no VMA uses any more, put by `settle`. Guarded by `lock`.
     dead_srcs: std.ArrayList(*Src) = .empty,
+    /// The pages of copy-on-write chunks that `own` copied or that went,
+    /// whose references `settle` drops once no vCPU of this Mm can read
+    /// them any more: until then, the other Mm mustn't reuse them as its
+    /// own and write them. Guarded by `lock`.
+    cow_old: std.ArrayList(*Pages) = .empty,
 
     /// Holds off other threads' layout changes (`op`).
     pub fn opLock(m: *Mm, io: std.Io) void {
@@ -291,6 +310,8 @@ pub const Mm = struct {
         m.srcs.deinit(m.gpa);
         for (m.dead_srcs.items) |s| s.put();
         m.dead_srcs.deinit(m.gpa);
+        for (m.cow_old.items) |p| m.dropCowOld(p);
+        m.cow_old.deinit(m.gpa);
         m.as.destroy();
         m.gpa.destroy(m);
     }
@@ -298,10 +319,17 @@ pub const Mm = struct {
     fn dropChunk(m: *Mm, c: *Chunk) void {
         _ = m.allocated.fetchSub(c.mem.len, .acq_rel);
         const p = c.pages;
+        const cow = c.cow;
         for (c.overlays.items) |o| m.dropRef(o.pages);
         c.overlays.deinit(m.gpa);
         m.gpa.destroy(c);
-        m.dropRef(p);
+        if (!cow) return m.dropRef(p);
+        // Another Mm may hold them, and take them for its own once this
+        // reference goes: not before this Mm's vCPUs can't read them.
+        m.cow_old.append(m.gpa, p) catch {
+            m.as.shootdown();
+            m.dropCowOld(p);
+        };
     }
 
     /// Drops this Mm's reference to `p`, freeing the pages once no vCPU
@@ -324,6 +352,12 @@ pub const Mm = struct {
         };
     }
 
+    /// Drops the reference of a chunk's pages that `own` replaced, which
+    /// the other Mm still holds or, if it let go meanwhile, no one does.
+    fn dropCowOld(m: *Mm, p: *Pages) void {
+        if (p.refs.fetchSub(1, .acq_rel) == 1) m.freeP(p);
+    }
+
     fn freeP(m: *Mm, p: *Pages) void {
         m.backend.freePages(p.mem);
         m.gpa.destroy(p);
@@ -340,8 +374,12 @@ pub const Mm = struct {
         m.unmapped_files = .empty;
         var srcs = m.dead_srcs;
         m.dead_srcs = .empty;
+        var old = m.cow_old;
+        m.cow_old = .empty;
         m.lock.unlock();
-        if ((narrowed or list.items.len > 0 or files.items.len > 0) and m.refs.load(.acquire) > 1) m.as.shootdown();
+        if ((narrowed or list.items.len > 0 or files.items.len > 0 or old.items.len > 0) and m.refs.load(.acquire) > 1) m.as.shootdown();
+        for (old.items) |p| m.dropCowOld(p);
+        old.deinit(m.gpa);
         for (list.items) |p| m.freeP(p);
         list.deinit(m.gpa);
         for (files.items) |p| p.release.?(p);
@@ -371,14 +409,28 @@ pub const Mm = struct {
     /// buffer. The slice and the references are taken under one lock, so a
     /// concurrent unmap either loses the race (and the pin keeps the pages)
     /// or wins it (and this returns null), with no window in between.
-    pub fn pin(m: *Mm, va: u64, len: u64) ?Pinned {
+    ///
+    /// With `write` (a read into the buffer), the chunks' pages are made
+    /// the Mm's own first, so the I/O can't land in pages a fork shares
+    /// copy-on-write; a fork while the pin is held copies them rather than
+    /// sharing them, as Linux copies pinned pages.
+    pub fn pin(m: *Mm, va: u64, len: u64, write: bool) ?Pinned {
         if (len == 0) return null;
+        var copied = false;
+        defer if (copied) m.settle(false);
         m.lockSpin();
-        defer m.lock.unlock();
-        return m.pinLocked(va, len) catch null;
+        defer {
+            copied = m.cow_old.items.len > 0;
+            m.lock.unlock();
+        }
+        return m.pinLocked(va, len, write) catch null;
     }
 
-    fn pinLocked(m: *Mm, va: u64, len: u64) Error!Pinned {
+    fn pinLocked(m: *Mm, va: u64, len: u64, write: bool) Error!Pinned {
+        if (write) {
+            var ci = va / chunk_size;
+            while (ci * chunk_size < va + len) : (ci += 1) if (m.chunks.get(ci)) |c| try m.own(ci, c);
+        }
         const s = gm.contiguous(m.as, va, len) orelse return error.BadAddress;
         var held: std.ArrayList(*Pages) = .empty;
         // On failure, give back the references already taken; each page
@@ -417,10 +469,11 @@ pub const Mm = struct {
         pn.held.deinit(m.gpa);
     }
 
-    /// Adds a chunk over `p` (taking a reference) at index `ci`, mapped.
-    fn addChunk(m: *Mm, ci: u64, p: *Pages) Error!*Chunk {
+    /// Adds a chunk over `p` (taking a reference) at index `ci`, mapped,
+    /// copy-on-write (`Chunk.cow`) if `cow`.
+    fn addChunk(m: *Mm, ci: u64, p: *Pages, cow: bool) Error!*Chunk {
         const c = try m.gpa.create(Chunk);
-        c.* = .{ .pages = p, .mem = p.mem };
+        c.* = .{ .pages = p, .mem = p.mem, .cow = cow };
         _ = p.refs.fetchAdd(1, .acq_rel);
         m.chunks.put(m.gpa, ci, c) catch {
             _ = p.refs.fetchSub(1, .acq_rel);
@@ -517,6 +570,7 @@ pub const Mm = struct {
         defer m.lock.unlock();
         if (!m.isFree(v.start, v.end)) return error.BadAddress;
         if (v.src) |s| {
+            try m.ownRange(v.start, v.end, false);
             try m.srcs.ensureUnusedCapacity(m.gpa, 1);
             try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
             if (std.mem.indexOfScalar(*Src, m.srcs.items, s) == null) m.srcs.appendAssumeCapacity(s.get());
@@ -527,12 +581,14 @@ pub const Mm = struct {
     }
 
     /// Reads the file pages of lazy VMA `v` over [start, end) into the
-    /// chunks there that are allocated, past any overlays.
+    /// chunks there that are allocated, past any overlays. The caller
+    /// owns them first (`ownRange`).
     fn fillAllocated(m: *Mm, v: Vma, start: u64, end: u64) void {
         const s = v.src.?;
         var ci = start / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
+            std.debug.assert(!c.cow);
             const cs = ci * chunk_size;
             var lo = @max(start, cs) - cs;
             const hi = @min(end, cs + chunk_size) - cs;
@@ -593,6 +649,8 @@ pub const Mm = struct {
         defer m.settle(true);
         m.lockSpin();
         defer m.lock.unlock();
+        // The pages zeroed below must be this Mm's alone.
+        try m.ownRange(start, end, true);
         try m.splitAt(start);
         try m.splitAt(end);
         var i = m.indexAfter(start);
@@ -743,6 +801,8 @@ pub const Mm = struct {
             const fo = v.offset + (at - v.start);
             const hi = @min(v.end, cs + chunk_size, at + (chunk_size - fo % chunk_size));
             const c = try m.populate(at);
+            // A copy-on-write chunk has no overlays (`Chunk.cow`).
+            try m.own(ci, c);
             try c.overlays.ensureUnusedCapacity(m.gpa, 1);
             const pg = try pagesFor(ctx, fo / chunk_size);
             var i: usize = 0;
@@ -826,7 +886,7 @@ pub const Mm = struct {
             while (ci * chunk_size < hi) : (ci += 1) {
                 const p = try f(ctx, ci);
                 defer m.dropRef(p);
-                _ = try m.addChunk(ci, p);
+                _ = try m.addChunk(ci, p, false);
             }
         }
     }
@@ -879,11 +939,13 @@ pub const Mm = struct {
         }
     }
 
-    /// Zeroes the allocated pages in [start, end).
+    /// Zeroes the allocated pages in [start, end), which the caller has
+    /// made the Mm's own (`ownRange`).
     fn zero(m: *Mm, start: u64, end: u64) void {
         var ci = start / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
+            std.debug.assert(!c.cow);
             const cs = ci * chunk_size;
             var lo = @max(start, cs) - cs;
             const hi = @min(end, cs + chunk_size) - cs;
@@ -942,8 +1004,9 @@ pub const Mm = struct {
             const n = (run_end - va) / page;
             if (v.prot.perms()) |perms_v| {
                 var perms = perms_v;
-                // Copy-on-write file pages fault on a write (`fault`).
-                if (b.overlay and v.cow) perms.write = false;
+                // Copy-on-write pages fault on a write (`fault`): file
+                // pages under a private mapping, or a fork's.
+                if ((b.overlay and v.cow) or c.cow) perms.write = false;
                 m.as.map(va, @alignCast(b.mem[0..@intCast(n * page)]), perms) catch return error.OutOfMemory;
                 c.runs[c.nruns] = .{ .va = va, .len = n * page, .perms = perms };
                 c.nruns += 1;
@@ -970,7 +1033,7 @@ pub const Mm = struct {
             const v = m.find(cs + p * page);
             w.* = if (v) |x| x.prot.perms() else null;
             if (v != null) any = true;
-            if (w.* != null and v.?.cow and overlayAt(c, p * page) != null) w.*.?.write = false;
+            if (w.* != null and (c.cow or (v.?.cow and overlayAt(c, p * page) != null))) w.*.?.write = false;
         }
         if (!any) {
             for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
@@ -1018,13 +1081,65 @@ pub const Mm = struct {
         }
     }
 
+    /// Makes chunk `ci`'s pages the Mm's own before anything writes them,
+    /// if a fork shares them copy-on-write (`Chunk.cow`): copies them,
+    /// or, if no other Mm holds them any more (it wrote first, or exited),
+    /// keeps them, and maps the chunk with write again. The chunk must
+    /// hold a VMA's pages. NoSpace if there's no memory for the copy, as
+    /// for a first touch.
+    fn own(m: *Mm, ci: u64, c: *Chunk) Error!void {
+        if (!c.cow) return;
+        std.debug.assert(c.overlays.items.len == 0);
+        const old = c.pages;
+        // Only this Mm can add a reference now: by forking, or pinning,
+        // both under `lock`.
+        if (old.refs.load(.acquire) == 1) {
+            c.cow = false;
+            return m.remap(ci, c);
+        }
+        try m.cow_old.ensureUnusedCapacity(m.gpa, 1);
+        const p = try m.newPages();
+        copySparse(p.mem, old.mem);
+        p.refs.store(1, .release);
+        c.pages = p;
+        c.mem = p.mem;
+        c.cow = false;
+        // The old pages stay readable until `settle` has shot them down
+        // on the other vCPUs; then the other Mm may have them for its own.
+        m.cow_old.appendAssumeCapacity(old);
+        m.dropRuns(ci, c, 0, chunk_size);
+        try m.remap(ci, c);
+    }
+
+    /// `own` for the copy-on-write chunks overlapping [start, end), before
+    /// the host writes pages there. With `drop_whole`, a chunk wholly
+    /// inside it is dropped instead, for a caller about to unmap all of
+    /// its pages: its next touch allocates a fresh one.
+    fn ownRange(m: *Mm, start: u64, end: u64, drop_whole: bool) Error!void {
+        var ci = start / chunk_size;
+        while (ci * chunk_size < end) : (ci += 1) {
+            const c = m.chunks.get(ci) orelse continue;
+            if (!c.cow) continue;
+            if (drop_whole and ci * chunk_size >= start and (ci + 1) * chunk_size <= end) {
+                for (c.runs[0..c.nruns]) |r| m.as.unmap(r.va);
+                c.nruns = 0;
+                _ = m.chunks.remove(ci);
+                // A fault on it from another thread meanwhile is retried.
+                m.remaps +%= 1;
+                m.dropChunk(c);
+                continue;
+            }
+            try m.own(ci, c);
+        }
+    }
+
     /// Allocates the chunk holding `va` if it isn't yet, and maps it.
     fn populate(m: *Mm, va: u64) Error!*Chunk {
         const ci = va / chunk_size;
         if (m.chunks.get(ci)) |c| return c;
         const p = try m.newPages();
         m.fillNew(ci, p.mem);
-        return m.addChunk(ci, p) catch |e| {
+        return m.addChunk(ci, p, false) catch |e| {
             // A failed addChunk leaves the pages unreferenced.
             if (p.refs.load(.acquire) == 0) {
                 m.backend.freePages(p.mem);
@@ -1043,9 +1158,17 @@ pub const Mm = struct {
     /// another thread mapped it, or a touch inside another thread's remap
     /// of the chunk; the caller gives up only if the same fault repeats
     /// with no remap in between.
+    ///
+    /// A write to a chunk a fork shares copy-on-write copies it (`own`),
+    /// NoSpace if that finds no memory.
     pub fn fault(m: *Mm, va: u64, access: Access) Error!?u64 {
+        var copied = false;
+        defer if (copied) m.settle(false);
         m.lockSpin();
-        defer m.lock.unlock();
+        defer {
+            copied = m.cow_old.items.len > 0;
+            m.lock.unlock();
+        }
         const v = m.find(va) orelse return null;
         const ok = switch (access) {
             .read => v.prot.read or v.prot.write or v.prot.exec,
@@ -1054,6 +1177,7 @@ pub const Mm = struct {
         };
         if (!ok) return null;
         const c = m.chunks.get(va / chunk_size) orelse try m.populate(va);
+        if (access == .write) try m.own(va / chunk_size, c);
         if (access == .write and v.cow) try m.breakCow(va / chunk_size, c, va % chunk_size);
         return m.remaps;
     }
@@ -1064,8 +1188,13 @@ pub const Mm = struct {
     /// BadAddress is EFAULT.
     pub fn touch(m: *Mm, va: u64, len: u64, write: bool) Error!void {
         if (len == 0) return;
+        var copied = false;
+        defer if (copied) m.settle(false);
         m.lockSpin();
-        defer m.lock.unlock();
+        defer {
+            copied = m.cow_old.items.len > 0;
+            m.lock.unlock();
+        }
         try m.touchLocked(va, len, write);
     }
 
@@ -1079,22 +1208,32 @@ pub const Mm = struct {
             at = @min(v.end, end);
         }
         var ci = va / chunk_size;
-        while (ci * chunk_size < end) : (ci += 1) _ = try m.populate(ci * chunk_size);
+        while (ci * chunk_size < end) : (ci += 1) {
+            const c = try m.populate(ci * chunk_size);
+            if (write) try m.own(ci, c);
+        }
         if (write) try m.unshare(va, end);
     }
 
     /// The host's view of [va, va+len), which must lie in one chunk, as
-    /// `touch` checks it: for a futex word or a piece of a string. The
-    /// slice stays valid while a VMA covers it, since a remap moves no
-    /// memory, where a translate through the address space can miss in
-    /// another thread's remap.
+    /// `touch` checks it: for a futex word. The slice stays valid while a
+    /// VMA covers it, since a remap moves no memory, where a translate
+    /// through the address space can miss in another thread's remap. A
+    /// copy-on-write chunk is made the Mm's own first, read or not, since
+    /// the copy a later write makes would move it.
     pub fn hostSlice(m: *Mm, va: u64, len: u64, write: bool) Error![]u8 {
         const end = std.math.add(u64, va, len) catch return error.BadAddress;
         if (len == 0 or (end - 1) / chunk_size != va / chunk_size) return error.BadAddress;
+        var copied = false;
+        defer if (copied) m.settle(false);
         m.lockSpin();
-        defer m.lock.unlock();
+        defer {
+            copied = m.cow_old.items.len > 0;
+            m.lock.unlock();
+        }
         try m.touchLocked(va, len, write);
         const c = m.chunks.get(va / chunk_size).?;
+        try m.own(va / chunk_size, c);
         const off = va % chunk_size;
         const b = c.backing(off);
         if (len > b.end - off) return error.BadAddress;
@@ -1107,8 +1246,13 @@ pub const Mm = struct {
     /// address space, another thread's remap can't make it miss.
     pub fn copy(m: *Mm, va: u64, buf: []u8, to_guest: bool) Error!void {
         if (buf.len == 0) return;
+        var copied = false;
+        defer if (copied) m.settle(false);
         m.lockSpin();
-        defer m.lock.unlock();
+        defer {
+            copied = m.cow_old.items.len > 0;
+            m.lock.unlock();
+        }
         try m.touchLocked(va, buf.len, to_guest);
         var at = va;
         const end = va + buf.len;
@@ -1133,11 +1277,16 @@ pub const Mm = struct {
     pub fn hostEach(m: *Mm, va: u64, len: u64, ctx: anytype, comptime f: fn (@TypeOf(ctx), []u8, u64) void) Error!void {
         var at = va;
         const end = va + len;
+        var copied = false;
+        defer if (copied) m.settle(false);
         m.lockSpin();
-        defer m.lock.unlock();
+        defer {
+            copied = m.cow_old.items.len > 0;
+            m.lock.unlock();
+        }
         while (at < end) {
             if (m.find(at) == null) return error.BadAddress;
-            _ = try m.populate(at);
+            try m.own(at / chunk_size, try m.populate(at));
             try m.unshare(at, @min(end, (at / chunk_size + 1) * chunk_size));
             const c = m.chunks.get(at / chunk_size).?;
             const cs = at - at % chunk_size;
@@ -1187,12 +1336,18 @@ pub const Mm = struct {
         return m.brk;
     }
 
-    /// A private copy for fork: the same VMAs, with the allocated pages
-    /// copied, except MAP_SHARED ones, whose pages are shared. (mmap
-    /// aligns shared mappings to chunks, so a chunk is all shared or not.)
+    /// A private copy for fork: the same VMAs, with MAP_SHARED pages
+    /// shared, and private ones shared copy-on-write (`Chunk.cow`), each
+    /// side's first write to a chunk copying it. (mmap aligns shared
+    /// mappings to chunks, so a chunk is all shared or not.) Before it
+    /// returns, the parent's chunks are mapped without write on all its
+    /// vCPUs (`settle`), so no later write of its threads reaches the
+    /// child. Chunks with overlays, and those a pin holds for I/O into
+    /// them, are copied now.
     pub fn fork(m: *Mm) (Error || vmm.CreateError)!*Mm {
         const n = try create(m.gpa, m.backend, m.lay);
         errdefer n.put();
+        defer m.settle(true);
         m.lockSpin();
         defer m.lock.unlock();
         try n.vmas.appendSlice(n.gpa, m.vmas.items);
@@ -1209,7 +1364,7 @@ pub const Mm = struct {
             while (ci * chunk_size < v.end) : (ci += 1) {
                 if (m.chunks.contains(ci)) continue;
                 const p = try m.newPages();
-                _ = m.addChunk(ci, p) catch |err| {
+                _ = m.addChunk(ci, p, false) catch |err| {
                     m.freeP(p);
                     return err;
                 };
@@ -1222,12 +1377,23 @@ pub const Mm = struct {
             // A chunk with overlays has private pages around them.
             const shared = c.overlays.items.len == 0 and if (m.find(ci * chunk_size)) |v| v.shared else false;
             if (shared) {
-                _ = try n.addChunk(ci, c.pages);
+                _ = try n.addChunk(ci, c.pages, false);
+                continue;
+            }
+            // A private chunk's other references are other Mms' (it's
+            // copy-on-write already) or pins'. A pin may be a read into
+            // the pages, which must stay this Mm's.
+            if (c.overlays.items.len == 0 and (c.cow or c.pages.refs.load(.acquire) == 1)) {
+                _ = try n.addChunk(ci, c.pages, true);
+                if (!c.cow) {
+                    c.cow = true;
+                    try m.remap(ci, c);
+                }
                 continue;
             }
             const p = try n.newPages();
             copySparse(p.mem, c.mem);
-            const nc = n.addChunk(ci, p) catch |err| {
+            const nc = n.addChunk(ci, p, false) catch |err| {
                 if (p.refs.load(.acquire) == 0) {
                     n.backend.freePages(p.mem);
                     n.gpa.destroy(p);
@@ -1263,12 +1429,16 @@ pub const Mm = struct {
     /// Whole chunks in the range whose pages would all read as zero or
     /// as the file's again are freed, so the memory goes back to the
     /// backend (and from there to the host): their next touch allocates
-    /// a fresh chunk, as their first did.
-    pub fn discard(m: *Mm, start: u64, end: u64) void {
+    /// a fresh chunk, as their first did. So are those a fork shares
+    /// copy-on-write, which only drops this Mm's reference; one the range
+    /// covers in part is copied first (`own`), so the other process's
+    /// pages stay as they are. NoSpace if that finds no memory.
+    pub fn discard(m: *Mm, start: u64, end: u64) Error!void {
         defer m.settle(false);
         m.lockSpin();
         defer m.lock.unlock();
         m.dropWhole(start, end);
+        try m.ownRange(start, end, false);
         for (m.vmas.items) |v| {
             if (v.end <= start or v.start >= end or v.shared) continue;
             if (v.src != null)
@@ -1283,12 +1453,13 @@ pub const Mm = struct {
     /// For `discard`: frees the allocated chunks wholly inside [start,
     /// end) that hold only private pages it would zero or fill from the
     /// file again. A chunk with overlays, or whose pages someone else holds
-    /// (a pin, or a fork's shared mapping), is left to be zeroed in place.
+    /// (a pin, or a fork's shared mapping), is left to be zeroed in place,
+    /// unless they're another Mm's copy-on-write.
     fn dropWhole(m: *Mm, start: u64, end: u64) void {
         var ci = std.math.divCeil(u64, start, chunk_size) catch unreachable;
         while ((ci + 1) * chunk_size <= end) : (ci += 1) {
             const c = m.chunks.get(ci) orelse continue;
-            if (c.overlays.items.len != 0 or c.pages.refs.load(.acquire) != 1) continue;
+            if (c.overlays.items.len != 0 or (c.pages.refs.load(.acquire) != 1 and !c.cow)) continue;
             const cs = ci * chunk_size;
             var i = m.indexAfter(cs);
             if (i > 0 and m.vmas.items[i - 1].end > cs) i -= 1;
@@ -1311,8 +1482,13 @@ pub const Mm = struct {
     /// are left unallocated at dst, zero or, in a lazily filled mapping
     /// moved with its file offset, the file's as at src.
     pub fn copyRange(m: *Mm, src: u64, dst: u64, len: u64) Error!void {
+        var copied = false;
+        defer if (copied) m.settle(false);
         m.lockSpin();
-        defer m.lock.unlock();
+        defer {
+            copied = m.cow_old.items.len > 0;
+            m.lock.unlock();
+        }
         const lazy = if (m.find(dst)) |v| v.src != null else false;
         var off: u64 = 0;
         while (off < len) : (off += page) {
@@ -1323,6 +1499,7 @@ pub const Mm = struct {
             // page the guest zeroed is copied too.
             if (!lazy and std.mem.allEqual(u8, from, 0)) continue;
             const dc = try m.populate(dst + off);
+            try m.own((dst + off) / chunk_size, dc);
             const do = (dst + off) % chunk_size;
             @memcpy(dc.backing(do).mem[0..page], from);
             m.as.hostWrote(dc.backing(do).mem[0..page]);
@@ -1436,7 +1613,7 @@ test "pin holds a guest buffer's pages across a concurrent unmap" {
     defer m.doomed.deinit(gpa);
 
     // Pin the page, as io() does before a blocking read or write.
-    var pinned = m.pin(va, page) orelse return error.PinFailed;
+    var pinned = m.pin(va, page, false) orelse return error.PinFailed;
     try testing.expectEqual(mem.ptr, pinned.s.ptr);
     try testing.expectEqual(@as(usize, page), pinned.s.len);
     try testing.expectEqual(@as(u32, 2), pages.refs.load(.acquire));
@@ -1476,7 +1653,7 @@ test "unpin releases its reference and frees nothing when the mapping stays" {
     defer m.chunks.deinit(gpa);
     defer m.doomed.deinit(gpa);
 
-    var pinned = m.pin(va, page) orelse return error.PinFailed;
+    var pinned = m.pin(va, page, false) orelse return error.PinFailed;
     try testing.expectEqual(@as(u32, 2), pages.refs.load(.acquire));
 
     // No unmap raced the I/O: unpin drops the pin's reference and the
@@ -1504,6 +1681,6 @@ test "pin returns null for a buffer that isn't one contiguous mapped run" {
 
     // Past the one mapped page: not translatable, so no pin and no stray
     // reference left behind.
-    try testing.expectEqual(@as(?Mm.Pinned, null), m.pin(va, 2 * page));
+    try testing.expectEqual(@as(?Mm.Pinned, null), m.pin(va, 2 * page, false));
     try testing.expectEqual(@as(u32, 1), pages.refs.load(.acquire));
 }

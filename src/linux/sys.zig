@@ -693,13 +693,12 @@ pub const Process = struct {
         while (i < buf.len) {
             const va_at = va + i;
             const n = @min(page - va_at % page, buf.len - i);
-            const s = p.mm.hostSlice(va_at, n, false) catch return error.Fault;
-            if (std.mem.indexOfScalar(u8, s, 0)) |z| {
-                @memcpy(buf[i..][0..z], s[0..z]);
-                buf[i + z] = 0;
-                return buf[0 .. i + z :0];
-            }
-            @memcpy(buf[i..][0..n], s);
+            // Through `copy`, which reads the pages under the Mm's lock,
+            // so another thread's write that copies them (a copy-on-write
+            // chunk after fork) can't move them under the read.
+            const s = buf[i..][0..n];
+            p.mm.copy(va_at, s, false) catch return error.Fault;
+            if (std.mem.indexOfScalar(u8, s, 0)) |z| return buf[0 .. i + z :0];
             i += n;
         }
         return error.NameTooLong;
@@ -846,7 +845,7 @@ fn memCall(p: *Process, s: Sys, c: Call) Err!Outcome {
             if (c.uint(2) == MADV_FREE) return ret(-E.INVAL);
             if (c.uint(2) == MADV_DONTNEED) {
                 const len = std.mem.alignForward(u64, c.a[1], page);
-                p.mm.discard(a, a + len);
+                p.mm.discard(a, a + len) catch return ret(-E.NOMEM);
             }
             return ret(0);
         },
@@ -1977,7 +1976,7 @@ fn rwOne(p: *Process, fd: i32, buf: u64, len_in: u64, off: i64, comptime dir: Di
     // pages behind it across the kernel call, so another thread's munmap,
     // mremap, or exit can't free the memory under a blocking read or write
     // into it (a use-after-free).
-    if (p.mm.pin(buf, len)) |pinned| {
+    if (p.mm.pin(buf, len, dir == .read)) |pinned| {
         var pn = pinned;
         defer p.mm.unpin(&pn);
         const s = pn.s;
