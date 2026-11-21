@@ -2736,11 +2736,26 @@ fn access(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
 }
 
 fn mkdir(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
-    const path = try pathArg(p, path_va, &p.name_buf);
+    var path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) return -E.NOENT;
-    if (isDir(p, dirfd, path)) return -E.EXIST;
+    // mkdir("a/") makes a, as on Linux; an exclusive create of a name
+    // with a trailing slash doesn't.
+    var n = path.len;
+    while (n > 1 and path[n - 1] == '/') n -= 1;
+    path[n] = 0;
+    path = path[0..n :0];
+    // Anything already at the path is EEXIST, as on Linux: a link, even
+    // a dangling one, and a file, which a create without OEXCL would open
+    // and truncate. OEXCL makes the create itself fail with EEXIST when
+    // another thread or process makes the directory after the check; a
+    // create without it opens the directory it finds with OTRUNC and
+    // fails with EISDIR, which Node's recursive mkdir takes as done
+    // before it has made the rest of the path.
+    if (statExists(dirfd, path)) return -E.EXIST;
+    if (at(dirfd, path, []u8, kern.readlink, .{ path, &p.name2_buf })) |_| return -E.EXIST else |_| {}
+    const OEXCL = 0x1000;
     const perm = DMDIR | (mode & 0o777 & ~p.umask);
-    const fd = at(dirfd, path, u31, kern.create, .{ path, kern.OREAD, perm }) catch return kerr();
+    const fd = at(dirfd, path, u31, kern.create, .{ path, kern.OREAD | OEXCL, perm }) catch return kerr();
     kern.close(fd) catch {};
     return 0;
 }

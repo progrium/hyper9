@@ -389,6 +389,11 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     // A serve-only run that a note ended exits 0, as a server its
     // operator stops does; the timeout still exits 124.
     if (serve_only and status == .killed and !std.mem.eql(u8, status.killed, "h9: timeout")) return 0;
+    // Always, since the guest's own error doesn't say: Linux's OOM killer
+    // leaves its note in the kernel log, which a guest has no way to read.
+    if (machine.out_of_memory) {
+        std.debug.print("h9: a process ran out of guest memory and was killed (SIGKILL); raise --memory\n", .{});
+    }
     // Only on a terminal: scripts rarely have one (design/epoch-0/overlay.md).
     if (machine.root_changes.changed and (std.Io.File.stderr().isTty(io) catch false)) {
         var nb: [512]u8 = undefined;
