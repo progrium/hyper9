@@ -24,7 +24,15 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | implemented |  | Linux named pipes |
 | [mounts](mounts.md) |  | draft |  | Mounts, binds, and a Plan 9 root |
+| [baseline-1](baseline-1.md) |  | draft | needs renames, cow-fork, retire-unicorn | Baseline 1 (h9 at the end of epoch 0) |
+| [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
+| [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
+| [kernel-port](kernel-port.md) |  | draft | needs baseline-1, namespace-kernel, kernel-serve | Port the kernel core to Zig, as an instance |
+| [memory-model](memory-model.md) |  | draft | needs baseline-1, cow-fork | One memory model under both ABIs |
+| [plan-format](plan-format.md) |  | draft | needs baseline-1, mounts, child-machines | The plan as a file, and the one way in |
 | [renames](renames.md) |  | draft | needs hcpu | Rename the parts, to ABI, engine, sud, and hcpu |
+| [retire-unicorn](retire-unicorn.md) |  | draft | needs hcpu | Retire Unicorn as an engine |
+| [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 
 ```mermaid
 flowchart LR
@@ -50,11 +58,34 @@ flowchart LR
   p_port_streams["port-streams<br/>draft"]:::draft
   p_linux_fifo["linux-fifo<br/>implemented"]:::implemented
   p_mounts["mounts<br/>draft"]:::draft
+  p_baseline_1["baseline-1<br/>draft"]:::draft
+  p_file_interface["file-interface<br/>draft"]:::draft
+  p_host_handles["host-handles<br/>draft"]:::draft
+  p_kernel_port["kernel-port<br/>draft"]:::draft
+  p_memory_model["memory-model<br/>draft"]:::draft
+  p_plan_format["plan-format<br/>draft"]:::draft
   p_renames["renames<br/>draft"]:::draft
+  p_retire_unicorn["retire-unicorn<br/>draft"]:::draft
+  p_scheduler["scheduler<br/>draft"]:::draft
   p_host_cmd --> p_login_shell
   p_kernel_serve --> p_namespace_kernel
   p_port_streams --> p_namespace_kernel
+  p_renames --> p_baseline_1
+  p_cow_fork --> p_baseline_1
+  p_retire_unicorn --> p_baseline_1
+  p_kernel_port --> p_file_interface
+  p_kernel_port --> p_host_handles
+  p_baseline_1 --> p_kernel_port
+  p_namespace_kernel --> p_kernel_port
+  p_kernel_serve --> p_kernel_port
+  p_baseline_1 --> p_memory_model
+  p_cow_fork --> p_memory_model
+  p_baseline_1 --> p_plan_format
+  p_mounts --> p_plan_format
+  p_child_machines --> p_plan_format
   p_hcpu --> p_renames
+  p_hcpu --> p_retire_unicorn
+  p_kernel_port --> p_scheduler
 ```
 
 ## Epoch 0
