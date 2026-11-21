@@ -11,7 +11,7 @@ branch: [main]
 
 # Proposal: Splitting SPEC.md into files under spec/
 
-[Sign here once you've reviewed the whole doc and take responsibility for it, by hand, with `zig build design -- sign <slug>`, or with a `/sign <slug>` comment on the PR, as described under Signature in README.md. Agents never sign.]
+Nov 21, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
 ## Abstract
 
