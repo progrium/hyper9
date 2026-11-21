@@ -492,8 +492,15 @@ kbdopen_(Chan *c, int omode)
 			kbdq9 = qopen(64*1024, Qmsg, 0, 0);
 			if(kbdq9 != nil)
 				qnoblock(kbdq9, 1);
-		} else
+		} else {
+			/*
+			 * qreopen keeps what the last reader left unread, so
+			 * without the flush a new reader starts mid-key, with
+			 * the 'c' or 'K' of a key typed for someone else.
+			 */
+			qflush(kbdq9);
 			qreopen(kbdq9);
+		}
 		nkbddown = 0;
 		kbdopen = 1;
 		unlock(&kbdlk);

@@ -400,7 +400,8 @@ test "run: headers from a helper, its stdin on a retry, and its failures [creden
     const missing: Helper = .{ .pattern = "x", .argv = &.{"/nonexistent/h9-cred-helper"} };
     try t.expectError(error.Failed, run(t.allocator, io, &missing, "wss://a.io/", "", &why));
     try t.expectEqualStrings("credential helper h9-cred-helper: not found", why.text());
-    const none: Helper = .{ .pattern = "x", .argv = &.{"/bin/true"} };
+    // /bin/true isn't on macOS (it's /usr/bin/true there); sh is on every host.
+    const none: Helper = .{ .pattern = "x", .argv = &.{ "/bin/sh", "-c", ":" } };
     o = try run(t.allocator, io, &none, "wss://a.io/", "", &why);
     try t.expectEqual(@as(usize, 0), o.headers.len);
     o.deinit(t.allocator);
