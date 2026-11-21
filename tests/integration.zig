@@ -6341,7 +6341,7 @@ test "after fork, a read() into a buffer, a write from another thread, and a fut
     try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "isolate" }, "ok isolate\n");
 }
 
-test "a write after fork that finds no memory gets SIGSEGV, and the machine and the other process go on [cow-fork]" {
+test "a write after fork that finds no memory gets SIGKILL, and the machine and the other process go on [cow-fork]" {
     try cowFork(@src(), &.{ "--memory", "256m", "/mnt/term/cwd/cowfork", "oom" }, "ok oom\n");
 }
 
@@ -6683,6 +6683,17 @@ test "mkdir of anything already there is EEXIST and leaves it alone, and makes d
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("made\n1\ndata\n1\n1\nc\n", r.out);
+}
+
+test "a Linux process that touches a page past --memory is killed, as by the OOM killer, and h9 says why [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // Each 1 MiB written takes a new chunk; 64m runs out well before 128.
+    const r = try runLinux(&le, false, &.{ "--memory", "64m", "sh", "-c", "head -c 134217728 /dev/zero | tr '\\000' x | (v=$(cat); echo ${#v}); echo status $?" });
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "status 137") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "ran out of guest memory") != null);
 }
 
 test "9front and Linux programs share pipelines both ways (demo) [linux-personality]" {

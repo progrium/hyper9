@@ -7,8 +7,8 @@
  *   isolate   after fork, a read() into a buffer, a write from another
  *             thread, and a futex word change stay in their process
  *   oom       a child's writes that need more memory than there is: it
- *             gets SIGSEGV, and the parent goes on (run under a small
- *             --memory)
+ *             gets SIGKILL, as from Linux's OOM killer, and the parent
+ *             goes on (run under a small --memory)
  *   dontneed  MADV_DONTNEED after fork zeroes the range in one process
  *   filemap   a private mapping of a 200 MB file costs only the chunks
  *             touched, as VmRSS shows, in the parent and after fork
@@ -210,7 +210,7 @@ static void oom(int mb) {
 		_exit(0);
 	}
 	int st = child_status(c);
-	CHECK("oom", WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+	CHECK("oom", WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL);
 	for (size_t off = 0; off < n; off += 4096)
 		CHECK("oom", h[off] == 0x77);
 	for (size_t off = 0; off < n; off += 4096)

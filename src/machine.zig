@@ -367,6 +367,9 @@ pub const Machine = struct {
     /// What the last run's guest changed in the root's overlay, discarded
     /// with it (design/epoch-0/overlay.md); empty without one.
     root_changes: RootChanges = .{},
+    /// Whether the last run killed a Linux process for a page past
+    /// `--memory`, as Linux's OOM killer would.
+    out_of_memory: bool = false,
     /// The machine's claim on the screen, with `Options.gfx`; in `arena`.
     gfx_claim: ?*gfx.Claim = null,
     /// The listeners' bound addresses, once a run has opened them; in
@@ -558,6 +561,7 @@ pub const Machine = struct {
     pub fn run(m: *Machine, prog: Program, argv: []const []const u8) RunError!Status {
         if (m.stuck) return error.Stuck;
         m.root_changes = .{};
+        m.out_of_memory = false;
         // The listeners are bound before anything runs, so one that can't
         // listen ends the run here (design/epoch-0/serve.md, "Flags").
         // The browser host can't listen, so its build leaves serving out.
@@ -650,6 +654,7 @@ pub const Machine = struct {
         if (!job.waitAll()) {
             m.stuck = true;
             m.root_changes = job.rootChanges();
+            m.out_of_memory = job.out_of_memory.load(.acquire);
             kern.removeConsole(job.con_id);
             job.con.reset();
             return .{ .killed = if (timed_out) timeout_note else stopped_note };
@@ -657,6 +662,7 @@ pub const Machine = struct {
         kern.removeConsole(job.con_id);
         job.con.reset();
         m.root_changes = job.rootChanges();
+        m.out_of_memory = job.out_of_memory.load(.acquire);
         if (job.mach.load(.acquire)) |mc| {
             dotl.unregister(@intFromPtr(mc));
             hidx.unregister(@intFromPtr(mc));
@@ -727,6 +733,8 @@ pub const Machine = struct {
         /// Set when the last process has exited.
         all_done: std.Io.Event = .unset,
         timed_out: std.atomic.Value(bool) = .init(false),
+        /// Set when a Linux process was killed for a page past --memory.
+        out_of_memory: std.atomic.Value(bool) = .init(false),
         /// Set to end every process; exit loops check it after every exit.
         stopping: std.atomic.Value(bool) = .init(false),
         /// Guards `procs`, `next_pid` and each Proc's `kproc` and `lease`.
@@ -1737,9 +1745,11 @@ pub const Machine = struct {
                     // caught the retry with the page briefly unmapped.
                     const same = f.addr == last_fault.addr and f.access == last_fault.access and u.pc() == last_fault.pc;
                     // A page the VMA allows but that can't be allocated
-                    // (the machine's --memory is used up) is a fault too,
-                    // as Linux's OOM would end the process; the trace says
-                    // why, since the address alone looks like a bad one.
+                    // (the machine's --memory is used up) ends the process
+                    // with SIGKILL, as Linux's OOM killer does, and h9 says
+                    // why after the run. A SIGSEGV, which it was, read as
+                    // a crash in the program: an npm install script exited
+                    // 139 under a small --memory, with nothing saying why.
                     var alloc_failed = false;
                     // A page of a file mapping wholly past the file's end
                     // (a file truncated under it, or a read that failed)
@@ -1761,6 +1771,10 @@ pub const Machine = struct {
                         if (alloc_failed) traceLine(w, &p.job.trace_lock, "h9: fault: virtual memory allocation failed (out of --memory)\n");
                         if (bus) traceLine(w, &p.job.trace_lock, "h9: fault: file mapping past the file's end (SIGBUS)\n");
                         dumpFault(w, &p.job.trace_lock, &u, f, "");
+                    }
+                    if (alloc_failed) {
+                        j.out_of_memory.store(true, .release);
+                        return .{ .killed = lsig.deathNote(lsig.SIGKILL, &p.msg_buf) };
                     }
                     const signo: u32 = if (bus) lsig.SIGBUS else lsig.SIGSEGV;
                     // A fault while the signal is blocked or ignored kills,

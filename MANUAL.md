@@ -2559,7 +2559,7 @@ host$ h9 --net-allow 'tcp!api.example.com!443' ./client
 
 | Flag | Units | Default | When a program hits it |
 | --- | --- | --- | --- |
-| `--memory SIZE` | Bytes, or `k`, `m`, `g`, `t` | 1 GB, at most 32 GB | Memory is allocated on demand from one region of this size. If the program doesn't fit at all, h9 exits 125 (`OutOfGuestMemory`). Later, growing memory fails (`malloc` returns nil) and creating `/tmp` or ephemeral files fails with `file system full`. |
+| `--memory SIZE` | Bytes, or `k`, `m`, `g`, `t` | 1 GB, at most 32 GB | Memory is allocated on demand from one region of this size. If the program doesn't fit at all, h9 exits 125 (`OutOfGuestMemory`). Later, growing memory fails (`malloc` returns nil), a Linux process touching a page there's no memory for is killed (`SIGKILL`), and creating `/tmp` or ephemeral files fails with `file system full`. |
 | `--pids N` | A count | Unlimited | `rfork` fails with `no procs`, and the program that tried gets the error |
 | `--cpus N` | A count | Unlimited (the host's CPUs, and 64 on macOS) | Nothing fails: past `N` running at once, processes wait their turn. `/dev/sysstat` and Go's `runtime.NumCPU` report `N`. |
 | `--timeout DURATION` | `ms`, `s`, `m`, `h`; a plain number is seconds | None (`tight`: 10 minutes) | Every process gets a `hangup` note; 2 s later the machine is stopped, and h9 prints `h9: PROG: h9: timeout` and exits 124 |
@@ -2841,10 +2841,11 @@ what's known to be missing.
 `SystemResources`). `fork` copies the parent's memory, so raise
 `--memory` (`3g` to `8g` for compilers such as `zig cc`).
 
-**A Linux program dies with `SIGSEGV` at an address it owns.** The machine
+**A Linux program is killed (`SIGKILL`, exit status 137).** The machine
 may have run out of guest memory: a page the program may use that can't be
-allocated is a fault, as Linux's OOM killer would end the process.
-`--trace` says "virtual memory allocation failed (out of --memory)" before
+allocated ends the process, as Linux's OOM killer would. h9 then prints "a
+process ran out of guest memory and was killed" after the run, and
+`--trace` says "virtual memory allocation failed (out of --memory)" with
 the registers. Raise `--memory`.
 
 **"no procs".** `--pids` is too low for what the program starts. A pipeline
