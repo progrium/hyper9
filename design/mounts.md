@@ -339,8 +339,8 @@ Integration cases:
 - [x] `test "bind -r: creates go to the first -c member with the parent [mounts]"`
 - [x] `test "bind -r: removing an upper file uncovers the lower one [mounts]"`
 - [x] `test "bind -c '#O' over a union copies up and whites out [mounts]"`
-- [ ] `test "ns prints unions as bind -r lines that replay [mounts]"`
-- [ ] `test "a guest can't attach another machine's union [mounts]"`
+- [x] `test "ns prints unions as bind -r lines that replay [mounts]"`
+- [x] `test "a guest can't attach another machine's union [mounts]"`
 
 Browser host:
 

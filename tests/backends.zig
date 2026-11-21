@@ -1849,8 +1849,11 @@ test "a copy-up while another process has the lower file open leaves that reader
 // Linux named pipes (design/linux-fifo.md).
 
 /// A run of `sh -c script` from the Alpine root in `H9_TEST_LINUX_ROOT`
-/// (scripts/fetch.sh), in host directory `dir`, writable.
+/// (scripts/fetch.sh), in host directory `dir`, writable. With `dst` "/"
+/// and `shell` "/bin/rc", a run of rc from a 9front root.
 const LinuxSh = struct {
+    dst: []const u8 = "#L",
+    shell: []const u8 = "/bin/sh",
     out: std.Io.Writer.Allocating = .init(std.testing.allocator),
     err: std.Io.Writer.Allocating = .init(std.testing.allocator),
     sb: [300]u8 = undefined,
@@ -1866,7 +1869,7 @@ const LinuxSh = struct {
             .x86_64 => .amd64,
             else => return null,
         };
-        const mounts = [_]h9.Machine.Mount{.{ .kind = .dir, .src = root, .dst = "#L" }};
+        const mounts = [_]h9.Machine.Mount{.{ .kind = .dir, .src = root, .dst = l.dst }};
         var m = h9.Machine.init(std.testing.allocator, std.testing.io, .{
             .backend = kind,
             .arch = arch,
@@ -1879,7 +1882,7 @@ const LinuxSh = struct {
             else => return e,
         };
         defer m.deinit();
-        const status = try m.run(.{ .guest = "/bin/sh" }, &.{ "sh", "-c", script });
+        const status = try m.run(.{ .guest = l.shell }, &.{ std.fs.path.basename(l.shell), "-c", script });
         return switch (status) {
             .exited => |t| try std.fmt.bufPrint(&l.sb, "exited {s}", .{t}),
             .killed => |t| try std.fmt.bufPrint(&l.sb, "killed {s}", .{t}),
@@ -1935,6 +1938,64 @@ test "two machines on one host FIFO share it [linux-fifo]" {
         ran += 1;
     }
     if (ran == 0) return error.SkipZigTest;
+}
+
+test "a guest can't attach another machine's union [mounts]" {
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = nineRoot(&rb) orelse return error.SkipZigTest;
+    var ran: usize = 0;
+    for ([_][2]vmm.BackendKind{ .{ .hvf, .emu }, .{ .kvm, .kvm }, .{ .native, .native } }) |kinds| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDirPath(std.testing.io, "a");
+        try tmp.dir.createDirPath(std.testing.io, "b");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a/marker", .data = "theirs\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b/mine", .data = "mine\n" });
+        var host: [std.fs.max_path_bytes]u8 = undefined;
+        var kb: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const dir = kernPath(&kb, host[0..try tmp.dir.realPath(std.testing.io, &host)]);
+        // A holds a union with marker in it until B is done. B makes its
+        // own after A's, so with a higher number, and tries every number
+        // up to it: it finds its own union's file, and never A's.
+        const script_a = "bind -r /mnt/term/cwd/a /n && touch /mnt/term/cwd/ready && while(! test -e /mnt/term/cwd/done) sleep 0.1; echo -n";
+        const script_b = "while(! test -e /mnt/term/cwd/ready) sleep 0.1; { n=`{read}; echo add /mnt/term/cwd/b >[1=0]; cat '#O'$n/mine; for(i in `{seq 0 $n}) cat '#O'$i/marker >[2]/dev/null } <>'#O/clone'; touch /mnt/term/cwd/done";
+        var a: LinuxSh = .{ .dst = "/", .shell = "/bin/rc" };
+        defer a.deinit();
+        const th = try std.Thread.spawn(.{}, LinuxSh.run, .{ &a, kinds[0], root, dir, script_a });
+        var b: LinuxSh = .{ .dst = "/", .shell = "/bin/rc" };
+        defer b.deinit();
+        b.run(kinds[1], root, dir, script_b);
+        // A waits for done, so B's failing to start mustn't leave it.
+        tmp.dir.writeFile(std.testing.io, .{ .sub_path = "done", .data = "" }) catch {};
+        th.join();
+        errdefer std.debug.print("backends {t} and {t}\nA: {s}\nB: {s}\n", .{ kinds[0], kinds[1], a.err.written(), b.err.written() });
+        const got_a = try a.got orelse continue;
+        const got_b = try b.got orelse continue;
+        try std.testing.expectEqualStrings("exited ", got_a);
+        try std.testing.expectEqualStrings("exited ", got_b);
+        try std.testing.expectEqualStrings("mine\n", b.out.written());
+        ran += 1;
+    }
+    if (ran == 0) return error.SkipZigTest;
+}
+
+/// The 9front root tree from H9_TEST_ROOT (zig build test sets it), with
+/// rc for the host's architecture, or null to skip.
+fn nineRoot(buf: []u8) ?[]const u8 {
+    var map = std.testing.environ.createMap(std.testing.allocator) catch return null;
+    defer map.deinit();
+    const v = map.get("H9_TEST_ROOT") orelse return null;
+    const path = std.Io.Dir.cwd().realPathFile(std.testing.io, v, buf) catch return null;
+    const p = buf[0..path];
+    const arch = switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => return null,
+    };
+    var lb: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const rc = std.fmt.bufPrint(&lb, "{s}/{s}/bin/rc", .{ p, arch }) catch return null;
+    std.Io.Dir.cwd().access(std.testing.io, rc, .{}) catch return null;
+    return p;
 }
 
 test "posting, opening and removing in /srv, and clone boards [devsrv]" {

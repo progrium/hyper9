@@ -1,0 +1,32 @@
+#!/bin/rc
+# bind [-abcCr] new old: 9front's bind(1), where -r makes a union of new
+# and old through #O's clone (design/mounts.md, "Union instances"). h9
+# binds it before /bin.
+rfork e
+fn usage { echo 'usage: bind [-b|-a|-c|-bc|-ac] [-r] new old' >[1=2]; exit usage }
+r=()
+order=-b
+create=()
+flags=()
+while(~ $1 -*){
+	switch($1){
+	case --
+		shift
+		break
+	case *
+		flags=($flags $1)
+		~ $1 *r* && r=1
+		~ $1 *a* && order=-a
+		~ $1 *b* && order=-b
+		~ $1 *c* && create=-c
+	}
+	shift
+}
+if(~ $#r 0)
+	exec /$cputype/bin/bind $flags $*
+~ $#* 2 || usage
+# old is a member, at the bottom, so the union shows what it showed.
+{ n=`{read}
+  echo add -a $2 >[1=0] || exit add
+  echo add $order $create $1 >[1=0] || exit add
+  /$cputype/bin/bind -c '#O'$n $2 } <>'#O/clone'

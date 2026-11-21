@@ -9917,6 +9917,29 @@ test "bind -r: creates go to the first -c member with the parent [mounts]" {
     try expectIn(no.err, "mounted directory forbids creation");
 }
 
+test "ns prints unions as bind -r lines that replay [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try unionTrees(&s);
+    defer s.deinit();
+    // A union from a namespace file, and one a guest makes with h9's bind.
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns, "--rc", "mkdir /tmp/x && bind -r /mnt/term/cwd/b /tmp/x && bind -rb /mnt/term/cwd/a /tmp/x && grep ' /(n|tmp/x)$' /proc/$pid/ns > /mnt/term/cwd/ns" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqual(0, r.code);
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "bind -rb /mnt/term/cwd/b /n\nbind -rb /mnt/term/cwd/a /n\nbind -rb /mnt/term/cwd/b /tmp/x\nbind -rb /mnt/term/cwd/a /tmp/x\n",
+        try s.tmp.dir.readFile(std.testing.io, "ns", &buf),
+    );
+    var nb: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const again = try run(e, &.{ "--cwd", s.path, "--ns", try std.fmt.bufPrint(&nb, "@{s}/ns", .{s.path}), "--rc", "cat /n/f /n/d/g /tmp/x/f /tmp/x/d/g" });
+    defer again.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{again.err});
+    try std.testing.expectEqualStrings("A\nbg\nA\nbg\n", again.out);
+    try std.testing.expectEqual(0, again.code);
+}
+
 test "bind -r: removing an upper file uncovers the lower one [mounts]" {
     const e = try env(@src());
     var s: Scratch = undefined;

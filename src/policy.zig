@@ -685,6 +685,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         // h9's own commands (design/epoch-0/guest-tools.md), after the root's
         // so a root command of the same name wins.
         if (in.guest_tools) try binds.append(arena, .{ .from = "#H/bin", .to = "/bin", .flag = .after, .optional = true, .note = "h9's commands" });
+        // h9's bind(1), with -r for unions (design/mounts.md), before the
+        // root's.
+        if (in.guest_tools) try binds.append(arena, .{ .from = "#H/over", .to = "/bin", .flag = .before, .optional = true, .note = "h9's bind, with -r" });
     }
 
     // A private /tmp in memory, over the root's own /tmp, in both

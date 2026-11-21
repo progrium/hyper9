@@ -2648,6 +2648,72 @@ h9_overlay_unionmount(char *spec, int fd, char *aname, char *at, int flags)
 	return id;
 }
 
+/* The unnamed union c is the top of, or nil. */
+static Inst*
+nsinst(Chan *c)
+{
+	Unc *u;
+
+	if(devtab[c->type]->dc != 'O' || !isunion(c))
+		return nil;
+	u = c->aux;
+	if(u->path[0] != '\0' || u->inst->name[0] != '\0')
+		return nil;
+	return u->inst;
+}
+
+/*
+ * in's members as bind -r lines onto old, in the order that makes them
+ * again: old's own member first (a union itself if bind -r made one over
+ * another, printed in turn), then those above it with -b and those
+ * below it with -a.
+ */
+static char*
+nsunion1(Inst *in, char *old, char *p, char *e, int depth)
+{
+	Member *m;
+	Inst *sub;
+	int i, j;
+
+	qlock(&in->ql);
+	j = in->nmem;
+	for(i = in->nmem-1; i >= 0; i--)
+		if(strcmp(chanpath(in->mem[i].root), old) == 0){
+			j = i;
+			break;
+		}
+	if(j < in->nmem && depth < 8 && (sub = nsinst(in->mem[j].root)) != nil && sub != in)
+		p = nsunion1(sub, old, p, e, depth+1);
+	for(i = j-1; i >= 0 && p < e; i--){
+		m = &in->mem[i];
+		if(m->at[0] == '\0')
+			p = seprint(p, e, m->create ? "bind -rbc %q %q\n" : "bind -rb %q %q\n", chanpath(m->root), old);
+	}
+	for(i = j+1; i < in->nmem && p < e; i++){
+		m = &in->mem[i];
+		if(m->at[0] == '\0')
+			p = seprint(p, e, m->create ? "bind -rac %q %q\n" : "bind -ra %q %q\n", chanpath(m->root), old);
+	}
+	qunlock(&in->ql);
+	return p;
+}
+
+/*
+ * For devproc's ns: if c is the top of an unnamed union bound at old,
+ * prints it as the bind -r lines that make it again and returns their
+ * length; otherwise -1. A member rooted below the top can't be written
+ * as a line and is left out.
+ */
+int
+h9_overlay_nsunion(Chan *c, char *old, char *buf, int nbuf)
+{
+	Inst *in;
+
+	if((in = nsinst(c)) == nil)
+		return -1;
+	return nsunion1(in, old, buf, buf+nbuf, 0) - buf;
+}
+
 /*
  * The number of the union whose top path is (in the caller's namespace),
  * or -1: for bind -r onto a union already there.
@@ -2758,6 +2824,236 @@ h9_overlay_unpin(char *name)
  * The device.
  */
 
+
+/*
+ * The control tree (design/mounts.md, "Union instances"): a bare #O
+ * attach is a directory with one file, clone. Opening clone makes an
+ * unnamed union owned by the opener's machine, unattached; reading it
+ * gives the union's number, and writes to it take
+ *
+ *	add [-a|-b] [-c] PATH	PATH's directory as a member, on top (-b,
+ *				the default) or at the bottom (-a); -c takes creates
+ *	del PATH		removes the member that is PATH's directory
+ *	cow			a copy-on-write instance over the union, which
+ *				attaching the union's number gives from then on
+ *
+ * with PATH resolved in the writer's namespace, so a member is a tree the
+ * writer could already walk. Binding #ON attaches it; closing clone
+ * before that lets it go. Its chans have dev Ctldev, and aux nil, or a
+ * Ctl once clone is open.
+ */
+#define Ctldev	((ulong)~0)	/* ulong is 32 bits here */
+
+enum
+{
+	Qctldir	= 0,
+	Qclone,
+};
+
+typedef struct Ctl Ctl;
+struct Ctl
+{
+	int	id;	/* the union clone made */
+	int	cow;	/* its cow instance, or -1 */
+};
+
+static Dirtab ctltab[] = {
+	".",		{Qctldir, 0, QTDIR},	0,	DMDIR|0555,
+	"clone",	{Qclone},		0,	0666,
+};
+
+static int
+isctl(Chan *c)
+{
+	return c->dev == Ctldev;
+}
+
+static Chan*
+ctlattach(void)
+{
+	Chan *c;
+
+	c = devattach('O', "");
+	c->dev = Ctldev;
+	mkqid(&c->qid, Qctldir, 0, QTDIR);
+	c->aux = nil;
+	return c;
+}
+
+static Walkqid*
+ctlwalk(Chan *c, Chan *nc, char **name, int nname)
+{
+	return devwalk(c, nc, name, nname, ctltab, nelem(ctltab), devgen);
+}
+
+static int
+ctlstat(Chan *c, uchar *db, int n)
+{
+	return devstat(c, db, n, ctltab, nelem(ctltab), devgen);
+}
+
+static Chan*
+ctlopen(Chan *c, int omode)
+{
+	Ctl *k;
+	Inst *in;
+
+	if(c->qid.path != Qclone)
+		return devopen(c, omode, ctltab, nelem(ctltab), devgen);
+	k = smalloc(sizeof(Ctl));
+	k->cow = -1;
+	if(waserror()){
+		free(k);
+		nexterror();
+	}
+	in = unnew(nil);
+	k->id = in->id;
+	poperror();
+	c = devopen(c, omode, ctltab, nelem(ctltab), devgen);
+	c->aux = k;
+	return c;
+}
+
+static void
+ctlclose(Chan *c)
+{
+	Ctl *k;
+
+	k = c->aux;
+	if(k == nil)
+		return;
+	c->aux = nil;
+	/* Never attached: they go now. The cow holds the union until it goes. */
+	if(k->cow >= 0)
+		h9_overlay_drop(k->cow);
+	h9_overlay_drop(k->id);
+	free(k);
+}
+
+static long
+ctlread(Chan *c, void *a, long n, vlong off)
+{
+	Ctl *k;
+	char buf[16];
+
+	if(c->qid.type & QTDIR)
+		return devdirread(c, a, n, ctltab, nelem(ctltab), devgen);
+	k = c->aux;
+	if(k == nil)
+		error(Ebadusefd);
+	snprint(buf, sizeof buf, "%d\n", k->id);
+	return readstr(off, a, n, buf);
+}
+
+/* The union clone made, with a reference; Enonexist if it's gone. */
+static Inst*
+ctlinst(Ctl *k)
+{
+	Inst *in;
+
+	lock(&instlock);
+	in = instlookup(k->id);
+	if(in == nil || in->mode != Union || in->pool != h9_overlay_pool()){
+		unlock(&instlock);
+		error(Enonexist);
+	}
+	in->ref++;
+	unlock(&instlock);
+	return in;
+}
+
+static long
+ctlwrite(Chan *c, void *a, long n, vlong)
+{
+	Ctl *k;
+	Cmdbuf *cb;
+	Inst *volatile in;
+	Inst *un, *cw;
+	Chan *volatile mc;
+	char ebuf[ERRMAX];
+	char *path;
+	int i, after, create, id;
+
+	if(c->qid.type & QTDIR)
+		error(Eisdir);
+	k = c->aux;
+	if(k == nil)
+		error(Ebadusefd);
+	cb = parsecmd(a, n);
+	in = nil;
+	mc = nil;
+	if(waserror()){
+		if(mc != nil)
+			cclose(mc);
+		if(in != nil)
+			instdecref(in);
+		free(cb);
+		nexterror();
+	}
+	if(cb->nf < 1)
+		error(Ebadctl);
+	if(strcmp(cb->f[0], "add") == 0){
+		after = 0;
+		create = 0;
+		for(i = 1; i < cb->nf-1; i++){
+			if(strcmp(cb->f[i], "-a") == 0)
+				after = 1;
+			else if(strcmp(cb->f[i], "-b") == 0)
+				after = 0;
+			else if(strcmp(cb->f[i], "-c") == 0)
+				create = 1;
+			else if(strcmp(cb->f[i], "-ac") == 0 || strcmp(cb->f[i], "-ca") == 0)
+				after = create = 1;
+			else if(strcmp(cb->f[i], "-bc") == 0 || strcmp(cb->f[i], "-cb") == 0)
+				create = 1;
+			else
+				error(Ebadctl);
+		}
+		if(cb->nf < 2)
+			error(Ebadctl);
+		path = cb->f[cb->nf-1];
+		in = ctlinst(k);
+		mc = namec(path, Aaccess, 0, 0);
+		unaddmember(in, mc, "", after, create);
+	}else if(strcmp(cb->f[0], "del") == 0){
+		if(cb->nf != 2)
+			error(Ebadctl);
+		in = ctlinst(k);
+		mc = namec(cb->f[1], Aaccess, 0, 0);
+		if(!undelmember(in, mc))
+			error("not a member");
+	}else if(strcmp(cb->f[0], "cow") == 0){
+		if(cb->nf != 1 || k->cow >= 0)
+			error(Ebadctl);
+		/* As h9_overlay_cowname does for a named union. */
+		un = ctlinst(k);
+		in = un;
+		mc = unattach(un, "");
+		in = nil;	/* mc holds the reference now */
+		id = h9_overlay_new(mc);
+		if(id < 0){
+			strecpy(ebuf, ebuf+sizeof ebuf, up->errstr);
+			error(ebuf);
+		}
+		lock(&instlock);
+		cw = instlookup(id);
+		if(cw != nil){
+			un->cow = cw;
+			cw->over = un;
+		}
+		unlock(&instlock);
+		k->cow = id;
+	}else
+		error(Ebadctl);
+	poperror();
+	if(mc != nil)
+		cclose(mc);
+	if(in != nil)
+		instdecref(in);
+	free(cb);
+	return n;
+}
+
 static Chan*
 ovattach(char *spec)
 {
@@ -2767,7 +3063,7 @@ ovattach(char *spec)
 	long id;
 
 	if(spec == nil || *spec == '\0')
-		error(Ebadarg);
+		return ctlattach();
 	if(unvalidname(spec)){
 		/* A named union, made empty on first use; or the cow over it. */
 		lock(&instlock);
@@ -2785,6 +3081,9 @@ ovattach(char *spec)
 			error(Ebadarg);
 		lock(&instlock);
 		in = instlookup(id);
+		/* A union clone gave a cow: the number stands for both. */
+		if(in != nil && in->mode == Union && in->name[0] == '\0' && in->cow != nil)
+			in = in->cow;
 	}
 	if(in == nil || in->pool != h9_overlay_pool()){
 		unlock(&instlock);
@@ -3055,6 +3354,8 @@ ovwalk(Chan *c, Chan *nc, char **name, int nname)
 	Ovc *o, *volatile no;
 	Inst *in;
 	int i;
+	if(isctl(c))
+		return ctlwalk(c, nc, name, nname);
 	if(isunion(c))
 		return unwalk(c, nc, name, nname);
 
@@ -3123,6 +3424,8 @@ ovstat(Chan *c, uchar *db, int n)
 	Inst *in;
 	Dir d;
 	int r;
+	if(isctl(c))
+		return ctlstat(c, db, n);
 	if(isunion(c))
 		return unstat(c, db, n);
 
@@ -3166,6 +3469,8 @@ ovopen(Chan *c, int omode)
 	uchar buf[1024+4*Maxname];
 	char strs[sizeof buf];
 	int mode;
+	if(isctl(c))
+		return ctlopen(c, omode);
 	if(isunion(c))
 		return unopen(c, omode);
 
@@ -3254,6 +3559,8 @@ ovcreate(Chan *c, char *name, int omode, ulong perm)
 	Node *dir, *ch;
 	char *volatile np;
 	int fresh;
+	if(isctl(c))
+		error(Eperm);
 	if(isunion(c))
 		return uncreate(c, name, omode, perm);
 
@@ -3392,6 +3699,8 @@ ovremove(Chan *c)
 {
 	Ovc *o;
 	Inst *in;
+	if(isctl(c))
+		error(Eperm);
 	if(isunion(c)){
 		unremove(c);
 		return;
@@ -3424,6 +3733,10 @@ ovclose(Chan *c)
 	Ovc *o;
 	Inst *in;
 
+	if(isctl(c)){
+		ctlclose(c);
+		return;
+	}
 	o = c->aux;
 	if(o == nil)
 		return;
@@ -3450,6 +3763,8 @@ ovread(Chan *c, void *a, long n, vlong off)
 	Ovc *o;
 	Inst *in;
 	long m, sz;
+	if(isctl(c))
+		return ctlread(c, a, n, off);
 	if(isunion(c))
 		return unread(c, a, n, off);
 
@@ -3488,6 +3803,8 @@ ovwrite(Chan *c, void *a, long n, vlong off)
 	Ovc *o;
 	Inst *in;
 	Node *nd;
+	if(isctl(c))
+		return ctlwrite(c, a, n, off);
 	if(isunion(c))
 		return unwrite(c, a, n, off);
 
@@ -3736,6 +4053,8 @@ ovwstat(Chan *c, uchar *db, int n)
 	Dir d;
 	char *strs;
 	int isdir, chname, chmode, chmtime, chlen, gone;
+	if(isctl(c))
+		error(Eperm);
 	if(isunion(c))
 		return unwstat(c, db, n);
 
