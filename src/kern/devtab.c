@@ -40,6 +40,7 @@ extern Dev srvdevtab;
 extern Dev htoolsdevtab;
 extern Dev hstreamdevtab;
 extern Dev dotldevtab;
+extern Dev hidxdevtab;
 extern Dev linuxdevtab;
 extern Dev evdevtab;
 extern Dev ptydevtab;
@@ -149,6 +150,7 @@ Dev *devtab[] = {
 	&htoolsdevtab,
 	&hstreamdevtab,
 	&dotldevtab,
+	&hidxdevtab,
 	&linuxdevtab,
 	&evdevtab,
 	&ptydevtab,

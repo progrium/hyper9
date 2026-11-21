@@ -152,6 +152,17 @@ pub const NinePRoot = struct {
     ca: ?[]const u8 = null,
     /// The proxy it goes through, if any.
     proxy: ?[]const u8 = null,
+    /// Its metadata index (design/mount-index.md), as the plan shows it.
+    index: Index = .auto,
+
+    pub const Index = union(enum) {
+        /// The server's `.fs/index`, if it has one.
+        auto,
+        /// `--index none`.
+        none,
+        /// `--root-index`: the file or URL, and for a file its counts.
+        given: struct { from: []const u8, entries: ?u32 = null, dirs: ?u32 = null },
+    };
 };
 
 /// The listeners that serve the namespace over 9P (design/serve.md),
@@ -184,6 +195,10 @@ pub const hstream_dev = "ℏ";
 /// The 9P2000.L device, `#ℓ`, whose tree is the guest's /net/dotl
 /// (design/dotl.md).
 pub const dotl_dev = "ℓ";
+
+/// The index layer's device, `#ι` (design/mount-index.md), which only
+/// h9 opens, for the 9P connections it makes.
+pub const hidx_dev = "ι";
 
 /// Where a 9P root's connection is posted, and the board name it's under.
 pub const root_srv = "#s/root";
@@ -396,6 +411,16 @@ fn rootNote(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u
         if (r.ca) |ca| w.print("  --root-ca {s}", .{ca}) catch return error.OutOfMemory;
     } else w.writeAll(r.addr) catch return error.OutOfMemory;
     if (r.user) |u| w.print(" as {s}", .{u}) catch return error.OutOfMemory;
+    (switch (r.index) {
+        .auto => w.writeAll("  index=/.fs/index"),
+        .none => w.writeAll("  index=none"),
+        .given => |g| blk: {
+            // A URL's query can hold a token.
+            const q = std.mem.indexOfScalar(u8, g.from, '?');
+            w.print("  index={s}{s}", .{ if (q) |i| g.from[0 .. i + 1] else g.from, if (q != null) "…" else "" }) catch break :blk error.WriteFailed;
+            if (g.entries) |n| w.print(" {d} entries {d} dirs", .{ n, g.dirs orelse 0 }) catch break :blk error.WriteFailed;
+        },
+    }) catch return error.OutOfMemory;
     return out.written();
 }
 
@@ -740,6 +765,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (net == .disable) try devmask.appendSlice(arena, hstream_dev);
     if (!in.guest_tools) try devmask.append(arena, 'H');
     if (!pol.host_fs) try devmask.append(arena, 'U');
+    // h9's own mounts are through #ι by now, and a guest conversation
+    // could read the host's index cache.
+    try devmask.appendSlice(arena, hidx_dev);
     // Without a window, a guest can neither open one nor reach the screen
     // another machine in the process has.
     if (in.gfx == null) try devmask.appendSlice(arena, "bim");
@@ -1291,13 +1319,13 @@ test "compile: default and tight profiles" {
     const d = try compile(arena.allocator(), in, .{}, &msg);
     try t.expectEqual(Verdict.allow, d.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, d.check("/r/f", .create));
-    try t.expectEqualStrings("CUbim", d.devmask);
+    try t.expectEqualStrings("CU" ++ hidx_dev ++ "bim", d.devmask);
     try t.expect(!d.enforces.contains(.@"net.disable"));
     try t.expectEqual(@as(?u64, null), d.timeout_ns);
 
     const tt = try compile(arena.allocator(), in, .{ .profile = .tight }, &msg);
     try t.expectEqual(Verdict.read_only, tt.check("/w/f", .create));
-    try t.expectEqualStrings("CI" ++ hstream_dev ++ "Ubim", tt.devmask);
+    try t.expectEqualStrings("CI" ++ hstream_dev ++ "U" ++ hidx_dev ++ "bim", tt.devmask);
     try t.expect(tt.enforces.contains(.@"net.disable"));
     try t.expect(tt.enforces.contains(.@"proc.timeout"));
 

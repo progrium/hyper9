@@ -229,7 +229,7 @@ host$ export H9ROOT=~/src/hyper9/.local/9front/root
 ```
 
 The built-in root is what lets a fresh install work with nothing but the
-h9 binary. It holds 43 of 9front's commands, built from the pinned
+h9 binary. It holds 44 of 9front's commands, built from the pinned
 release's own source into one program, `9box`: rc, the file and text tools
 (`ls` and `lc`, `cat`, `sed`, `awk`, `grep`, `diff`, and so on), `tar` and `gzip`, and
 the namespace tools (`bind`, `mount`, `ns`, `ps`, `srv`, `exportfs`,
@@ -311,7 +311,7 @@ h9 fe6c65f
 drawterm be39bbaa88fd
 backends: kvm native
 gfx: none
-built-in root: 9front 11952 slim, amd64 (43 commands)
+built-in root: 9front 11952 slim, amd64 (44 commands)
 ```
 
 `h9 --help` (or `h9 -h` alone) prints the usage. Then run something:
@@ -1530,6 +1530,38 @@ devices in Plan 9.
   `wss://fs.example.com/9p`, and `--root fs.example.com` is
   `wss://fs.example.com/`. An existing path always wins, and `--print`
   shows the URL h9 chose.
+- **Metadata indexes** ([mount-index](design/mount-index.md)). A 9P
+  root, or a 9P server a namespace file mounts by dial string or URL, can
+  come with an index: dotfs's `.fs/index` at the top of its tree, a text
+  file in the `fsindex 1` format listing every name with its mode, length,
+  and mtime, and, in `9p.` fields, its qid and owners. h9 reads it once. A
+  server with dotfs's `.fs/events` tells h9 what changes, so nothing needs
+  checking; on any other, h9 checks each directory against the server the
+  first time it's used. Then it answers walks, stats, and directory reads
+  from the index, so only opens and reads go to the server, and a name
+  that isn't there costs no round trip. Anything that doesn't match the server is demoted to plain
+  9P for the rest of the run, so a stale index costs time, never wrong
+  answers. `mkindex [-o FILE] [-s SPEC] [DIR]` writes one from inside h9,
+  for the tree at `DIR` (`/` by default, which it reads through
+  `/srv/root`, attached with `SPEC`, so the paths h9 binds over the root
+  are left out). `--root-index FILE|URL` uses an index from somewhere else
+  for the root, for a server you can't write to; a URL is `https://` or
+  `http://`, fetched on the host with the root's `--root-ca` and proxies.
+  `--index none` turns indexes off. Compiled indexes are cached across
+  runs in `--index-cache DIR` (default `$XDG_CACHE_HOME/h9/index`,
+  `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on
+  Windows), which is safe to delete. `-v` reports how the index was found,
+  how many directories were checked, and how many of devmnt's requests
+  reached the server.
+  `--print` shows the index on the root's line, and `--check` reports it.
+  An index that doesn't parse is ignored, with a note under `-v`; a
+  `--root-index` that can't be read is exit 125, and one with a host
+  directory root exit 2. `mkindex` percent-escapes a name with a space or
+  a rune that isn't ASCII. A name with a control character, or a byte that
+  isn't UTF-8, can't be listed, so `mkindex` leaves it out and marks its
+  directory `9p.incomplete=1`, and h9 never answers for that directory
+  from the index. A file changed in place without reindexing shows its old
+  length to `stat` until it's opened, unless the server has `.fs/events`.
 - **WebSockets in the guest.** `/net/ws` is laid out like `/net/tcp` and
   follows `--net` and `--net-allow` as a TCP dial to the URL's host and port
   would. A conversation's `data` file carries binary messages as a byte
@@ -1670,6 +1702,24 @@ connection carries about 7 sockets waiting at once, since each holds one
 of the server's 8 exportfs processes; mount `/net` over more connections
 for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`
 reports it, so an unconnected server can't tell its clients apart.
+
+An index for a root, written once, then used on every run. The first run
+compiles and caches it; later ones read it from the cache. Here the root
+is a 9front tree that a Linux 9P server, diod, serves:
+
+```sh
+host$ h9 --root 'tcp!127.0.0.1!5720' --index none mkindex / >root.fsindex
+host$ h9 --root 'tcp!127.0.0.1!5720' --root-index root.fsindex -v ls /bin/ls
+h9: index: root.fsindex: 20368 entries, 1126 dirs (cached); root checked in 1 ms
+/bin/ls
+h9: index: root.fsindex: checked 13 of 1126 dirs as they were used, 0 demoted
+h9: index: devmnt sent the root 221 9P requests; 16 went to the server, besides 38 to find the index and check directories
+```
+
+Each directory is checked the first time the program uses it, and the
+directories on one path are checked together, so a remote root pays about
+two round trips for each new path, and saves one for nearly every name the
+program looks up.
 
 Mounting a remote 9P server the network policy allows:
 
@@ -1882,7 +1932,7 @@ hello, world
   root tree has `/amd64/bin` (`zig build mkroot` on x86\_64, or
   `--arch amd64`).
 - A Go program doesn't need a root tree to run. Without one it gets the
-  built-in root (chapter 2), with `/tmp`, your cwd, and its 43 commands;
+  built-in root (chapter 2), with `/tmp`, your cwd, and its 44 commands;
   give it `--root` for the full tree.
 
 ### 20. Linux programs
@@ -2092,6 +2142,9 @@ Machine:
 | `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
+| `--root-index FILE\|URL` | Use this metadata index for a 9P root instead of its `.fs/index` (chapter 16). A URL is `https://` or `http://`. With a host directory root, exit 2; one that can't be read, exit 125. |
+| `--index auto\|none` | `auto` (the default) uses an index wherever one is found, for the root and for 9P servers a namespace file mounts; `none` never does |
+| `--index-cache DIR` | Where compiled indexes are kept. Default: `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
 | `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
@@ -2134,6 +2187,7 @@ Debugging (chapter 28):
 | Flag | Meaning |
 | --- | --- |
 | `--trace[=FILE]` | Log every system call, and the registers and symbolized PC when a program faults, to standard error or to `FILE` |
+| `-v`, `--verbose` | Notes on standard error about how the run went: for now, how each metadata index was found and checked, and the 9P requests it saved. `-v` is the one short flag, and only before the program. |
 | `--gfx[=noclip]` | Give the machine a host window, with `/dev/snarf` as the host clipboard, or private with `=noclip` (chapter 17) |
 | `--gfx-scale N` | The window's scale on macOS: 1 points, 0 backing pixels, N backing pixels divided by N |
 
@@ -2141,7 +2195,7 @@ Tools:
 
 | Flag | Meaning |
 | --- | --- |
-| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, `--builtin`, and `--memory`. |
+| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, `--root-index`, `--index`, `--index-cache`, `--builtin`, and `--memory`, and reports a 9P root's index. |
 | `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in, and the window code (`gfx:`) |
 | `--help`, `-h` | Print the usage to standard output |
 

@@ -24,6 +24,7 @@ pub const hstream = @import("hstream.zig");
 /// `--serve` listeners (design/serve.md).
 pub const serve = @import("serve.zig");
 pub const gfx = @import("gfx.zig");
+pub const rootindex = @import("rootindex.zig");
 pub const web = @import("web.zig");
 
 /// What this h9 was built from, for `--version`.
@@ -70,4 +71,6 @@ test {
     _ = @import("dotl/client.zig");
     _ = @import("dotl/server.zig");
     _ = @import("dotl/kern.zig");
+    _ = rootindex;
+    _ = @import("rootindex/kern.zig");
 }
