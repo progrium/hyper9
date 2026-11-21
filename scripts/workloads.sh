@@ -50,8 +50,32 @@ if [ "${1:-}" = --one ]; then
 		exit 0
 	fi
 	now() { if [ -n "${EPOCHREALTIME:-}" ]; then echo "$EPOCHREALTIME"; else date +%s; fi; }
+	# macOS has no timeout(1): kill the run from a watcher instead, and
+	# exit 124 as timeout(1) does.
+	limit() {
+		if command -v timeout >/dev/null; then
+			timeout "$@"
+			return
+		fi
+		local secs=$1 pid watcher code
+		shift
+		"$@" &
+		pid=$!
+		(sleep "$secs" && kill -TERM "$pid") 2>/dev/null &
+		watcher=$!
+		wait "$pid"
+		code=$?
+		if kill -0 "$watcher" 2>/dev/null; then
+			pkill -P "$watcher" 2>/dev/null
+			kill "$watcher" 2>/dev/null
+			wait "$watcher" 2>/dev/null
+		else
+			code=124
+		fi
+		return "$code"
+	}
 	t0=$(now)
-	timeout "${timeout:-120}" "$h9" --backend "$H9_WL_BACKEND" --arch "$H9_WL_ARCH" \
+	limit "${timeout:-120}" "$h9" --backend "$H9_WL_BACKEND" --arch "$H9_WL_ARCH" \
 		--dir "$mount" --cwd "$cases" "${cmd[@]}" >"$out/$name.out" 2>"$out/$name.err" </dev/null
 	code=$?
 	secs=$(awk -v a="$t0" -v b="$(now)" 'BEGIN{printf "%.2f", b-a}')
