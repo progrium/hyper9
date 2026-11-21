@@ -81,8 +81,8 @@ Demo: `h9 --gfx --root <alpine root with wine and the driver> wine notepad`, in 
 
 Cases tagged `[wine-draw]`:
 
-- [ ] Integration: "/dev/9 in the Linux view is the machine's 9front /dev, with no draw files without --gfx", and "with --gfx, a Linux program opens the window's draw files through /dev/9", which needs an h9 built with `-Dgfx=headless`.
-- [ ] Backend (`tests/backends.zig`, on the headless screen, whose test hooks inject input): "a Wine program draws on the window through winedraw, and gets clicks and keys". `wdtest.exe`, a Win32 program built with `zig cc -target x86_64-windows-gnu`, fills its client area with red; the test reads red from the screen, clicks until it turns green, and types `a` and `q`, which the program prints. It needs a root with Wine in it (`scripts/wine-root.sh`, named by `H9_TEST_WINE_ROOT`) and `zig build wine`'s files, and skips without them.
+- [x] Integration: "/dev/9 in the Linux view is the machine's 9front /dev, with no draw files without --gfx", and "with --gfx, a Linux program opens the window's draw files through /dev/9", which needs an h9 built with `-Dgfx=headless`.
+- [x] Backend (`tests/backends.zig`, on the headless screen, whose test hooks inject input): "a Wine program draws on the window through winedraw, and gets clicks and keys". `wdtest.exe`, a Win32 program built with `zig cc -target x86_64-windows-gnu`, fills its client area with red; the test reads red from the screen, clicks until it turns green, and types `a` and `q`, which the program prints. It needs a root with Wine in it (`scripts/wine-root.sh`, named by `H9_TEST_WINE_ROOT`) and `zig build wine`'s files, and skips without them.
 
 `tests/fixtures/linux/drawpeek` reads the window's pixels back through `/dev/9/draw`, to check a run by hand or save it as a PPM image.
 
