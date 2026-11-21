@@ -42,7 +42,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | Bare name or other relative path (`ls`, `aux/vga`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
 | `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell ([default-command](../design/epoch-0/default-command.md)). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
-| `--ns file` | Runs `newns` with the file before the program |
+| `--ns 'LINES'\|@FILE` | Replays namespace lines before the program |
 
 A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
 
@@ -52,21 +52,22 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|native\|whp\|emu\|v86` | `auto` (the default) uses the host hypervisor, and otherwise falls back to the emulator with a warning; it never selects native (not a security boundary), which needs an explicit `--backend native`. `v86` is an alias of `emu` |
 | `--arch arm64\|amd64\|386` | The architecture of the binaries to run, which also picks `/$cputype/bin`. Without it a host program runs as its header says, and a guest one as the host's architecture |
-| `--root DIR\|DIAL\|SOCKET\|URL` | The root tree: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host` for port 564, or `unix!path`), the path of a unix socket, or a `ws://` or `wss://` URL of a 9P server behind a WebSocket, whose scheme can be left off when the value isn't an existing path (`wss://`, or `ws://` for a loopback host). If omitted, use `$H9ROOT` (same forms), then the default install location (`.local/9front/root` in development builds until there's an installer), then the built-in root (`--builtin`). A path that's neither a directory nor a socket, a failed connection or attach, and a unix socket root on Windows are exit 125 |
-| `--root-spec NAME` | The attach name sent to a 9P root. Empty by default |
-| `--root-user NAME` | The uname sent in h9's attaches to a 9P root. The machine's user by default |
-| `--root-header 'NAME: VALUE'\|@FILE` (repeatable) | A header for a WebSocket root's handshake, or one per line from a file (blank lines skipped). Headers that change the handshake (`Host`, `Upgrade`, `Connection`, `Sec-WebSocket-*`, `Content-Length`, `Transfer-Encoding`) are refused. Without a `ws://` or `wss://` root, a bad header or a missing file is exit 2 |
-| `--cred PATTERN=COMMAND` (repeatable) | A credential helper for host-made WebSocket handshakes whose URL matches PATTERN (see [Credential helpers](ninep.md#credential-helpers)). `$H9CRED` adds a list of the same, separated by `;`, after these. A pattern that's empty, has a scheme, or has `*` anywhere but a leading `*.` followed by a domain, or an empty command, is exit 2 |
-| `--root-ca FILE` | A PEM bundle that a `wss://` root's certificate must chain to, instead of the host's. Without a `wss://` root, or a missing file, is exit 2. `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` choose an HTTP `CONNECT` proxy for WebSocket roots and mounts |
-| `--root-index FILE\|URL` | A metadata index for a 9P root, used instead of its `.fs/index` (see Metadata indexes). A URL is `https://` or `http://`. With a host directory root, exit 2; a file that can't be read or a URL that can't be fetched, exit 125 |
+| `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U` ([mounts](../design/mounts.md)); its path joins the access rules, readable, or writable with `rw`. `contained` resolves its symlinks inside it, as on `#L` always. A missing path is exit 125 |
+| `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://`, or `wss://`. `http://` and `https://` probe: a WebSocket if the server answers the upgrade with 101, and otherwise a static dotfs tree when `URL/.fs/index` answers 200 (see [Static trees](ninep.md#static-trees)); neither is exit 125, naming both. With no scheme, `http://` for a loopback host and `https://` for any other. A DST of `/srv/NAME` posts the connection without mounting it. `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` choose an HTTP `CONNECT` proxy for the connections h9 makes. Under `--write=none`, exit 2. A failed connection or attach is exit 125 |
+| `--archive FILE[:DST[:OPTS]]` | A tar, gzipped tar, or `.h9a`, unpacked once into an `#O` instance before the program runs, counted against `--memory` |
+| `--builtin[=DST[:OPTS]]` | The built-in root ([builtin-root](../design/epoch-0/builtin-root.md)). Bare, it's the bottom of `/` |
+| `--tmp DST[:OPTS]` | An empty tree in memory |
+| `--bind SRC:DST[:OPTS]` (repeatable) | A bind of a guest path or `#` device, run after every mount flag, in order; options `b`, `a`, `c`, and `r` |
+| Mount options | `ro`, `rw`, `eph` (writes in memory; the default on `/` and `#L`), `b` and `a` (on top of or at the bottom of a stack; before or after elsewhere), `c` (creates go here), `r` (merge at every depth), and for `--url` `spec=`, `user=`, `header='NAME: VALUE'\|@FILE` (repeatable; headers that change the handshake are refused), `ca=FILE`, and `index=FILE\|URL` (a metadata index instead of the server's `.fs/index`; one that can't be read is exit 125). A long form, `src=SRC,dst=DST,OPT,...`, takes values with colons, and double quotes around a value with commas. Conflicting options are exit 2 |
+| No mount on `/` | `$H9ROOT` (a URL if it has `://`, and otherwise a `--dir`), then the built-in root. `--root`, its `--root-*` flags, and `--builtin MODE` are exit 2, naming their replacement |
+| `--cred PATTERN=COMMAND` (repeatable) | A credential helper for the WebSocket handshakes and static-tree fetches h9 makes whose URL matches PATTERN (see [Credential helpers](ninep.md#credential-helpers)). `$H9CRED` adds a list of the same, separated by `;`, after these. A pattern that's empty, has a scheme, or has `*` anywhere but a leading `*.` followed by a domain, or an empty command, is exit 2 |
 | `--index auto\|none` | `auto`, the default, uses an index wherever one is found; `none` puts no `#ι` in any mount |
-| `--index-cache DIR` | Where compiled indexes are cached. By default `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
+| `--index-cache DIR` | Where compiled indexes, and static trees' checked files (under `blobs`), are cached. By default `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
 | `-v`, `--verbose` | Notes on stderr about how the run went: each index's source, size, check, and demotions, and the root's request counts at the end. `-v` is the one short flag, and only before the program |
-| `--root-contained` | The root tree's symlinks resolve inside it: an absolute target starts at the tree's top and `..` stops there, as for a Linux root or a container image ("Contained trees"). With a 9P root, exit 2 |
 | `--env name=value` (repeatable) | Sets a guest environment variable. The host environment isn't imported. |
 | `--cwd PATH` | The guest cwd. Defaults to `/mnt/term/cwd`, the host cwd bound into the guest |
 | `--rc 'cmd'` | See program resolution |
-| `--ns file` | Replays a namespace file (newns syntax: `bind`, `mount`, `unmount`, `cd`, `clear`, with `-a -b -c -C`) after the policy's namespace and before the program is looked up. It's a guest path, read as newns reads it, and `--print`'s namespace output replays as is, its `ro`/`rw`/`eph` column included; a bind from a bare `#O` makes a fresh overlay over its target. Failed operations are skipped, as in newns; a syntax error is exit 125. |
+| `--ns 'LINES'\|@FILE` (repeatable) | Replays namespace lines (newns syntax: `bind`, `mount`, `unmount`, `cd`, `clear`, with `-a -b -c -C`, and `bind -r`), separated by `;` outside quotes, or a host file read on the host with `@FILE`, in order after the mounts and binds and before the program is looked up. A bare file name is exit 125 with a hint to use `@`. `--print`'s namespace output replays as is, its `ro`/`rw`/`eph` column included; a bind from a bare `#O` makes a fresh overlay over its target. Failed operations are skipped, as in newns, but a URL mount that fails, and a syntax error, are exit 125. |
 | `--profile default\|tight` | Sets the sandbox defaults (see Sandbox policy). Explicit flags override it. |
 | `--readable PATH` (repeatable) | Binds a host path read-only at `/mnt/term/PATH` |
 | `--writable PATH` (repeatable) | Binds a host path read-write; under the cwd it overrides a read-only cwd |
@@ -85,7 +86,6 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--print` | Prints the compiled policy and namespace, then exits |
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
 | `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
-| `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](../design/epoch-0/builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` |
 | `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
@@ -164,30 +164,25 @@ On Windows the close handler waits out the grace period before returning, since 
 pub const Options = struct {
     backend: vmm.BackendKind = .auto,
     arch: ?vmm.Arch = null,             // null: the host's
-    root: ?Root = null,                 // .dir (host directory), .tcp (dial string), .unix (socket path) or .ws (URL)
-    root_spec: []const u8 = "",         // attach name for a 9P root
-    root_user: ?[]const u8 = null,      // attach uname for a 9P root; null: the machine's user
-    root_headers: []const []const u8 = &.{}, // handshake headers for a WebSocket root, checked
-    root_ca: ?[]const u8 = null,        // PEM bundle for a wss:// root; null: the host's
-    root_contained: bool = false,       // resolve a host root's symlinks inside it
+    mounts: []const Mount = &.{},       // the mount flags, in order: .dir, .url, .archive, .builtin, .tmp, or .fd, with dst and options
+    binds: []const Bind = &.{},         // --bind lines, after every mount
     index: IndexMode = .auto,           // .none: no metadata index for any mount
     root_index: ?RootIndex = null,      // .path or .url: the 9P root's index, instead of its .fs/index
-    index_cache: ?[]const u8 = null,    // where compiled indexes are cached; null: nowhere
+    index_cache: ?[]const u8 = null,    // where compiled indexes and static trees' files are cached; null: nowhere
+    tmp_dir: []const u8 = "/tmp",       // where static trees' sockets go; the CLI's is $TMPDIR
     root_index_counts: ?struct { entries: u32, dirs: u32 } = null, // for --print only
     verbose: bool = false,              // notes on stdio.err, such as the index's check
-    linux_root: ?[]const u8 = null,     // the Linux view's /
     nameservers: []const []const u8 = &.{}, // the host's DNS servers, for a Linux root's resolv.conf
-    nine_prog: bool = false,            // resolve the program in the 9front view even with a Linux root
+    nine_prog: bool = false,            // resolve the program in the 9front view even with a Linux tree
     console_tty: bool = true,           // whether a Linux program's isatty is true on the console
-    proxy: ?Proxy = null,               // HTTP CONNECT proxies for WebSocket roots and mounts; null: direct
+    proxy: ?Proxy = null,               // HTTP CONNECT proxies for the connections h9 makes; null: direct
     cred_helpers: []const CredHelper = &.{}, // --cred and $H9CRED: { pattern, argv }, for host-made handshakes
     cwd: ?[]const u8 = null,
     env: []const EnvVar = &.{},
     policy: Policy = .{},               // profile, binds, read-deny, net rules, limits, host_fs
     guest_tools: bool = true,           // bind #H/bin, h9's own commands, after /bin; false masks #H
-    builtin: policy.Builtin = .off,     // the built-in root #Hroot: .only, or .before/.after another root's /bin
     trace: ?*std.Io.Writer = null,      // syscall lines, and a Ureg dump on each fault
-    ns: ?[]const u8 = null,             // newns file to replay
+    ns: []const []const u8 = &.{},      // namespace text to replay, in order; the CLI reads --ns @FILE
     serve: []const Listen = &.{},       // .unix (path), .tcp (host!port), .ws (host:port/path); empty argv serves only
     serve_root: []const u8 = "/",       // the guest path each connection exports
     serve_token: ?[]const u8 = null,    // required on WebSocket listeners when set

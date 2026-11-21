@@ -77,16 +77,16 @@ Notes are signals (`src/linux/signal.zig`). `interrupt`, `hangup` and `alarm` ma
 Handlers get the kernel's frame layout on both architectures, and `rt_sigreturn` restores only what user code may set: NZCV on arm64, and on amd64 the user flags with `cs` and `ss` kept and a canonical `rip`. A note with no signal kills a Linux process. A process killed by a signal exits as the host would report it, 128 + N.
 ### The Linux view
 
-A Linux process's `/` is `#λ` (`src/kern/devlinux.c`), a small tree of mount points (`/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, `/sys`) with the Linux root unioned after it. `/9` is the machine's 9front root when there is one, and `/tmp` and `/mnt/term` are the 9front ones, so files pass between the two by the same names.
+A Linux process's `/` is `#L` (`src/kern/devlinux.c`; `#λ` is an alias in namespace files), a small tree of mount points (`/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, `/sys`) with the Linux tree's stack, `#Olinux`, unioned after it ([mounts](../design/mounts.md)): the mounts on `#L` and under it, such as `--dir ./alpine:#L`, merged at every depth. `/9` is the machine's 9front root when there is one, and `/tmp` and `/mnt/term` are the 9front ones, so files pass between the two by the same names.
 
 `/dev` serves `null`, `zero`, `full`, `random`, `urandom`, the console as `tty`, and `fd`, and `/dev/shm` is an ephemeral overlay of its own.
 
 `/proc` and `/sys` serve the files libc, busybox, Python and htop read (`self`, `cpuinfo`, `meminfo`, `stat`, `uptime`, `mounts`, per-process `maps`, `stat`, `statm`, `status`, `cmdline`, `exe`, `fd` and `task`), with `cpuinfo` following `--cpus`; only a thread group's leader is listed in `/proc`, and its other threads are under its `task`.
 
-A process's dot is renamed when it changes views. drawterm's `namec` doesn't cross mounts on a `#` path, so `#λ` is exempted (`third_party/drawterm/kern/chan.c`).
+A process's dot is renamed when it changes views. drawterm's `namec` doesn't cross mounts on a `#` path, so `#L` is exempted (`third_party/drawterm/kern/chan.c`).
 ### Roots, environment, and console
 
-`--root` may be given twice, one 9front tree and one Linux tree, told apart by their contents. With a Linux root, a bare program name is looked up on the Linux `PATH`; `--rc` still runs 9front's rc. A 9front process runs a Linux program by its `#λ` path.
+A Linux tree is whatever is mounted on `#L`; trees aren't told apart by their contents. With one, a bare program name is looked up on the Linux `PATH`; `--rc` still runs 9front's rc. A 9front process runs a Linux program by its `#L` path.
 
 The environment goes both ways: a Linux program gets `/env` as `NAME=value` (with `USER`, `LOGNAME`, `HOME` and a default `PATH`), and a 9front program exec'd from Linux gets `envp` written to `/env`.
 
@@ -105,7 +105,7 @@ A conversation from a mounted `/net`, such as another h9's served with `--serve-
 
 `recvfrom`, `sendto` and their flags go straight to the host socket, with the policy's connect check on a `sendto` address; an unbound UDP socket's first `sendto` connects it, since a bind is refused under the default policy, and a UDP bind to any address and port 0 that the policy refuses leaves the socket unbound for its `connect` or `sendto` to bind.
 
-DNS is the Linux program's own: when the Linux root has no `/etc/resolv.conf`, the machine binds `#λetc` (devlinux's attach for files a root may lack) after the root's `/etc`, which is bound over itself first with `MCREATE` so files made in `/etc` go to the root, and its `resolv.conf` names the host's DNS servers, read by the CLI from the host's `/etc/resolv.conf` (Google's public servers where it names none, as on Windows).
+DNS is the Linux program's own: when the Linux root has no `/etc/resolv.conf`, the machine binds `#Letc` (devlinux's attach for files a root may lack) after the root's `/etc`, which is bound over itself first with `MCREATE` so files made in `/etc` go to the root, and its `resolv.conf` names the host's DNS servers, read by the CLI from the host's `/etc/resolv.conf` (Google's public servers where it names none, as on Windows).
 
 Port 53 on those servers is allowed even when they're link-local, as a cloud VM's resolver is, and `--print` says so in a caveat; `--net-allow` patterns must cover them.
 

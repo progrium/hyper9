@@ -78,7 +78,7 @@ We vendor 9front drawterm's `kern/`, its libraries (libc, libdraw, libmemdraw, l
 
 ### Reused as-is
 
-These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (for unix socket roots), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux personality's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
+These are reused as-is: chan/dev/mount machinery, devroot, devcons (for everything but `cons` itself), devmnt (the 9P client), devlfd (`#φ`, for unix socket servers), devfs-posix, and devfs-win32 (the host filesystem, with h9's sandbox hook calls), devpipe (with a FIFO mode for the Linux personality's named pipes: one queue that every open reads and writes, with opens counted by mode), devip (with h9's network hook calls), devtls, devssl, devdraw, devmouse, devaudio, qio, and the auth code.
 
 We compile drawterm's `.c` files but not its `kern/devtab.c` or `kern/devenv.c`; our own copies live in `src/kern/`. The vendored tree's few changes are small and marked: the sandbox hooks (see Sandbox policy) and `Chan.srvname`, which `kern/chan.c`'s `chanfree` frees, as on 9front.
 
@@ -128,7 +128,7 @@ A process takes its record's `debug` lock to swap its fd group, namespace, or do
 
 Serves `/fd/N`.
 
-#### The Linux view `#λ` (`src/kern/devlinux.c`), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
+#### The Linux view `#L` (`src/kern/devlinux.c`, `#λ` before [mounts](../design/mounts.md)), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
 
 A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux personality).
 
@@ -188,7 +188,7 @@ The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P20
 
 Puts a metadata index between devmnt and a 9P connection ([mount-index](../design/mount-index.md); see [Metadata indexes](ninep.md#metadata-indexes)). It's laid out as `#ℓ` is, `hidx/clone` and `hidx/N/{ctl,data,status}`, but isn't bound anywhere, and it's masked once the namespace file is replayed, since a guest's conversation could read and write the host's index cache. `ctl` takes `server KEY` (use the server's `.fs/index`, cached under KEY, the address and attach spec), `index N` (use the compiled index the machine handed over as number N), neither (pass everything through, counting requests), and then `fd N` (the server connection, which starts the conversation); `data` is the 9P2000 devmnt mounts; `status` reads the index's label, counts, and how long its check took, the requests devmnt sent and how many reached the server, and the notes `-v` prints. h9 reads `status` through a leaf (`h9_hidx_convstatus`) rather than a chan, since `#ι` is masked by the end of the run.
 
-The kproc, the leaves (`src/rootindex/kern.zig`), and the locking follow `#ℓ`. A machine registers its cache directory with `kern.zig`, keyed by its `Hmach`, and hands over a `--root-index` it compiled with `give`, which a conversation takes once by number.
+The kproc, the leaves (`src/rootindex/kern.zig`), and the locking follow `#ℓ`. A machine registers its cache directory with `kern.zig`, keyed by its `Hmach`, and hands over an `index=` index it compiled with `give`, which a conversation takes once by number.
 
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
@@ -203,6 +203,13 @@ The clock is one per host process (`src/kern.zig`): wall time from the host's re
 #### Overlay device `#O` (`src/kern/devoverlay.c`)
 
 Copy-on-write trees in memory over a lower directory, for the root's overlay, `--write=ephemeral`, and the private `/tmp` (see Sandbox policy). An instance can report each change to the machine, for the root's discarded-changes notice. A file in memory with `DMEXCL` is open on at most one chan at a time, as on 9front's file servers: another open fails with "file is locked" (ramfs's string) until that chan is closed; host files (`#U`) have no such bit. A FIFO node (`Nfifo`, from the Linux personality's `mkfifo`) lists with `H9_DMFIFO` and isn't read or written itself, and a host FIFO below opens for writing without a copy-up. A union `bind -c` of a ramfs can't keep writes off the host, since a union sends every operation on an existing name to the member that has it.
+
+An instance is a copy-on-write tree or a **union** ([mounts](../design/mounts.md)): up to 64 members, each a directory chan rooted at a path in the union (`""` for its top, or a path such as `etc`), merged at every depth. A walk looks in each member from the top down, a directory lists every member's names once, the first member that has a name answers for it, and a create goes to the first `-c` member that has the parent. Removing a name from an upper member uncovers a lower one. A union's qids are its own, mapped from its members' in a table, so two members' files never share one. A `bind -c '#O'` over a union is a copy-on-write overlay of it that copies up and whites out.
+
+- **Named unions** are per machine pool: `#Oroot` is the root stack and `#Olinux` the Linux tree's. The namespace builder adds members with `h9_overlay_union` (a guest path) and `h9_overlay_unionmount` (a 9P connection by fd), and a union stays pinned until it's attached.
+- **Unnamed unions** are numbered, attached as `#ON`, and only by the machine pool that made them; another machine's number is "file does not exist".
+- **The clone tree.** A bare `#O` attach is a directory holding `clone` (0666). Opening it makes an unnamed, pinned union, and reading it gives the number. It takes `add [-a|-b] [-c] PATH` (a member, on top unless `-a`), `del PATH`, and `cow` (an overlay over the union, whose number replaces the union's for the rest of the open). Closing `clone` drops a union that was never attached. h9's `bind -r` (`#H/over/bind`, bound before `/bin`) is built on it.
+- **`ns`.** devproc's `ns` asks `h9_overlay_nsunion` for a mount whose chan is an unnamed union, and prints the union as the `bind -rb`, `bind -ra`, and `-c` lines that rebuild it from the member at the mount point, a member that's itself a union in turn, so the output replays.
 
 #### h9's guest commands `#H` (`src/kern/devhtools.c`)
 

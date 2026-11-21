@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
 
     var m = try h9.Machine.init(gpa, io, .{
         // Host paths must be absolute with symlinks resolved.
-        .root = .{ .dir = "/Users/me/9front/root" },
+        .mounts = &.{.{ .kind = .dir, .src = "/Users/me/9front/root" }},
         .stdio = .{ .out = &out.writer, .err = &out.writer },
     });
     defer m.deinit();
@@ -122,20 +122,20 @@ Every field but `stdio` has a default:
 | --- | --- | --- | --- |
 | `backend` | `vmm.BackendKind` | `.auto` | `.auto`, `.hvf`, `.kvm`, `.whp`, `.native`, `.emu`, `.v86` (an alias of `.emu`); one not built for this host fails with `BackendNotBuilt`. See [Backends](#backends). |
 | `arch` | `?vmm.Arch` | host's | `.arm64`, `.amd64`, or `.i386`. Read it from an a.out with `h9.aout.parse(bytes).arch`. |
-| `root` | `?Root` | none | `.{ .dir = path }`, `.{ .tcp = "tcp!host!564" }`, `.{ .unix = path }`, or `.{ .ws = "wss://host/9p" }`. Without one, only `.bytes` programs run. |
-| `root_spec` | `[]const u8` | `""` | The attach name for a 9P root. |
-| `root_user` | `?[]const u8` | machine's user | The uname h9 attaches to a 9P root with. |
-| `root_headers` | `[]const []const u8` | `&.{}` | Extra handshake headers for a `.ws` root, as `"Name: value"`. |
-| `root_ca` | `?[]const u8` | host's bundle | A PEM file a `wss://` root must chain to: a host path. |
+| `mounts` | `[]const Machine.Mount` | `&.{}` | The mount flags, in order ([mounts](../design/mounts.md)): each a `.kind` (`.dir`, `.url`, `.archive`, `.builtin`, `.tmp`, or `.fd` for a 9P connection you already hold), a `.src`, and a `.dst` (`/` by default), with `.access`, `.order`, `.create`, `.recursive`, and a `.url`'s `.spec`, `.user`, `.headers`, `.ca`, and `.index`. Mounts on `/` stack into the root, and mounts on `#L` into the Linux tree. `Machine.Mount.parse` takes a flag's `SRC:DST[:OPTS]` text. With nothing on `/`, the root is an empty tree in memory, so only `.bytes` programs run. |
+| `binds` | `[]const Machine.Bind` | `&.{}` | `--bind` lines, run after every mount, in order: `.src` and `.dst` guest paths, with `.order`, `.create`, and `.recursive`. `Machine.Bind.parse` takes `SRC:DST[:OPTS]`. |
+| `index` | `Machine.IndexMode` | `.auto` | `.none` turns off metadata indexes ([mount-index](../design/mount-index.md)), as `--index none` does. |
+| `root_index` | `?Machine.RootIndex` | none | The root's index, `.{ .path = ... }` or `.{ .url = ... }`, instead of its server's `.fs/index`. Another `.url` mount's is its `.index`. |
+| `index_cache` | `?[]const u8` | none | Where compiled indexes, and static trees' checked files, are cached. Null caches nothing. |
 | `cred_helpers` | `[]const Machine.CredHelper` | `&.{}` | Credential helpers ([credential-helpers](../design/credential-helpers.md)) for the WebSocket handshakes h9 makes, the root's and `ns` mounts': `.{ .pattern = "*.example.com", .argv = &.{ "helper", "arg" } }`. The best match runs as `argv… get URL` before each one, and its `Name: value` lines go with it. A `9P2000.L.Z` reconnect runs it again. The CLI fills it from `--cred` and `$H9CRED`. On the web host, the helper isn't run: `h9-web.js`'s `run` and `createMachine` take `credentials(url, failed, helper)`, which gets the matching entry's argv as `helper` and answers with header lines, or `{ url }` to connect to instead. |
-| `proxy` | `?Machine.Proxy` | direct | Proxies for connections h9 makes itself (a `.ws` root, WebSocket mounts in `ns`): `.{ .http = ..., .https = ..., .no_proxy = ... }`. The CLI fills it from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; the library never reads the environment. Guest connections always go direct. |
+| `proxy` | `?Machine.Proxy` | direct | Proxies for connections h9 makes itself (`.url` mounts, and mounts in `ns`): `.{ .http = ..., .https = ..., .no_proxy = ... }`. The CLI fills it from `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; the library never reads the environment. Guest connections always go direct. |
 | `tmp_dir` | `[]const u8` | `/tmp` | A host directory for the unix sockets h9 serves static dotfs trees on ([mounts](../design/mounts.md)), each in a private directory of its own. The CLI uses `$TMPDIR`. |
 | `cwd` | `?[]const u8` | none | A host directory bound at `/mnt/term/cwd` and made the guest's cwd. |
 | `env` | `[]const EnvVar` | `&.{}` | Guest environment variables, beyond the defaults (`user`, `sysname`, `path`, and so on). |
 | `policy` | `Policy` | `.{}` | The sandbox: binds, write mode, network, limits. See [The sandbox policy](#the-sandbox-policy). |
 | `guest_tools` | `bool` | `true` | Binds h9's own commands (`#H/bin`, such as `wsmount`) after `/bin`. `false` leaves them out and masks `#H`, as `--no-guest-tools` does. |
 | `trace` | `?*std.Io.Writer` | none | Receives a ratrace-style line per syscall and, on a fault, the registers and a symbolized PC. |
-| `ns` | `?[]const u8` | none | A namespace file (newns syntax) to replay after the policy's namespace is built. It's a *guest* path, so a relative one is in the guest's cwd. |
+| `ns` | `[]const []const u8` | `&.{}` | Namespaces to replay in order after the mounts and binds: each is newns text, with `;` between lines. The CLI reads `--ns @FILE` on the host and passes its text. |
 | `owned_vcpus` | `?u32` | backend's | For tests of the vCPU pool; leave it alone. |
 | `gfx` | `?Machine.Gfx` | none | A host window for this machine, as `--gfx` gives: `.{}`, or `.{ .clipboard = false }` for `--gfx=noclip` and `.scale` for `--gfx-scale`. Only one machine in the process can have it. See [Graphics](#graphics). |
 | `signals` | `?*Machine.Signals` | none | Lets you deliver Ctrl-C and hangup to a running machine. |
@@ -285,7 +285,7 @@ flags (manual chapter 23):
 | `cwd_writable` | `--sandbox` | Whether the cwd is writable. Null: the profile's. |
 | `host_fs` | `--host-fs` | Bind the whole host filesystem at `/mnt/term`. |
 
-Paths in it follow the same rule as `root` and `cwd`: absolute, symlinks
+Paths in it follow the same rule as `mounts` and `cwd`: absolute, symlinks
 resolved. Use `std.Io.Dir.cwd().realPathFileAlloc` on them, as the CLI does
 (`resolveAll` in [src/main.zig](../src/main.zig)). Contradictory settings,
 such as `write = .none` with `writable` paths or `net = .disable` with
@@ -393,44 +393,41 @@ There's no API for adding a kernel device in Zig yet: the device table is
 drawterm's, compiled in ([src/kern/devtab.c](../src/kern/devtab.c)). What a
 machine can see comes from these places, all set in `Options`:
 
-**Host directories.** `root = .{ .dir = ... }`, `cwd`, and the policy's
+**Host directories.** A `.dir` mount, `cwd`, and the policy's
 `readable` and `writable` paths are served by drawterm's devfs (`#U`). The
 write mode decides whether writes reach the host, stay in memory, or fail.
 
-**A 9P server as the root.** Point `root` at any 9P2000 server and the
-machine mounts it at `/` ([ninep-roots](../design/epoch-0/ninep-roots.md)):
+**9P servers.** A `.url` mount connects to any 9P2000 server, as the root
+on `/` or mounted anywhere else ([mounts](../design/mounts.md)):
 
 ```zig
-.root = .{ .unix = "/tmp/myfs.sock" }, // or .{ .tcp = "tcp!127.0.0.1!5640" }
-.root_spec = "main",                   // the attach name, if your server uses one
-.root_user = "glenda",                 // the attach uname
+.mounts = &.{
+    // tcp://HOST:PORT, unix:///PATH (not on Windows), ws://, or wss://
+    .{ .kind = .url, .src = "unix:///tmp/myfs.sock", .spec = "main", .user = "glenda" },
+    // Behind a WebSocket, mounted at /n/fs.
+    .{ .kind = .url, .src = "wss://fs.example/9p", .dst = "/n/fs", .headers = &.{"Authorization: Bearer ..."}, .ca = "/etc/myca.pem" },
+},
 ```
 
-or, for a server behind a WebSocket
-([websocket-9p](../design/epoch-0/websocket-9p.md)):
+An `http://` or `https://` URL is a WebSocket if the server upgrades, and
+otherwise a static dotfs tree that h9 serves the machine itself, on a unix
+socket under `tmp_dir`. An `.fd` mount takes a connection you already
+hold, in `.fd`. The machine connects once per run, before the program
+starts. The root's first 9P member is also posted as `/srv/root`, and a
+`.dst` of `/srv/NAME` posts a connection without mounting it. This is the
+way to give a machine files that come from your program rather than from
+disk: serve them with any 9P library, in-process on a thread or in another
+process, and the guest sees them as ordinary files.
 
-```zig
-.root = .{ .ws = "wss://fs.example/9p" },
-.root_headers = &.{"Authorization: Bearer ..."},
-.root_ca = "/etc/myca.pem", // only if it isn't signed by a CA the host trusts
-```
-
-The machine connects to the server once per run, posts the connection as
-`/srv/root`, and mounts it at `/`. This is the way to give a machine files
-that come from your program rather than from disk: serve them with any 9P
-library, in-process on a thread or in another process, and the guest sees
-them as ordinary files. `.unix` isn't supported on Windows; use `.tcp`.
-
-**More 9P servers, mounted before the program starts.** Set `ns` to a
-namespace file (manual chapter 25). Its `mount` lines can name a
-WebSocket URL, which h9 connects on the host, as it does a root, using
-`proxy`:
+**More 9P servers, from a namespace.** `ns` takes namespace text (manual
+chapter 25). Its `mount` lines can name any URL a `.url` mount takes,
+which h9 connects on the host using `proxy`:
 
 ```
 mount -c wss://fs.example/9p /n/fs
 ```
 
-A WebSocket mount that fails stops the run with `NamespaceFailed`, unlike
+A URL mount that fails stops the run with `NamespaceFailed`, unlike
 other namespace-file lines. It's refused under `write = .none`, which h9
 can't enforce on a server it doesn't control. The file's `bind`,
 `unmount`, and `cd` lines rearrange the rest of the namespace.
