@@ -494,7 +494,9 @@ fn resolveMount(arena: std.mem.Allocator, io: std.Io, given: h9.Machine.Mount) M
                 std.debug.print("h9: {s} {s}: not found\n", .{ m.kind.flag(), m.src });
                 return error.NotFound;
             };
-            m.src = kernPath(arena, real);
+            // An archive is read from the host, as is; a tree is bound
+            // through #U, which takes Windows paths as /C:/a/b.
+            m.src = if (m.kind == .archive) real else kernPath(arena, real);
         },
         .url => {
             // The page's (or Node's) WebSocket does the handshake and TLS,
