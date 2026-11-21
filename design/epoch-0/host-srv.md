@@ -147,7 +147,7 @@ The heading is outside `namespace`, so a saved namespace isn't changed and newns
 - **[websocket-9p](websocket-9p.md).** `ws` sources connect as its namespace-file mounts do. Those mounts are unchanged: a URL on a `mount` line still makes its own connection.
 - **[dotl](dotl.md).** dotl puts roots' and namespace files' connections through its translator before devmnt sees them. Posted connections go through it the same way, before the post, so `--srv z=tcp!zerofs.example!5564` posts a translated channel and the guest's `mount /srv/z` works unchanged. Until dotl is built, a .L server fails the guest's mount at `Tversion`.
 - **[root-auth](root-auth.md).** h9 doesn't authenticate posted connections. A guest that holds a key in its own factotum can authenticate its own mount, since `amount` calls `fauth`; h9 doesn't give it one. Host-side authentication for entries is an open issue.
-- **[child-machines](child-machines.md).** A child's `#s` board is fresh, so it sees none of its parent's entries. Handing one over would be a `ctl` line there, naming a caller's `/srv` path to post on the child's board, under its rule that a child reaches only what the caller can.
+- **[child-machines](../child-machines.md).** A child's `#s` board is fresh, so it sees none of its parent's entries. Handing one over would be a `ctl` line there, naming a caller's `/srv` path to post on the child's board, under its rule that a child reaches only what the caller can.
 
 ## Rationale
 

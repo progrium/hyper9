@@ -62,4 +62,4 @@ A [9P root](ninep-roots.md) can be a server that wants `p9any` authentication, s
 
 ## Declined
 
-- 2026-11-20: Authentication for roots is focused on HTTP and WebSocket, through [credential-helpers](credential-helpers.md), not on `p9any` for 9P roots. A 9P root that needs authentication can be served over WebSocket and authenticated there. A server that has to be reached as plain 9P with `p9any`, and can't be put behind WebSocket, would reopen it.
+- 2026-11-20: Authentication for roots is focused on HTTP and WebSocket, through [credential-helpers](../credential-helpers.md), not on `p9any` for 9P roots. A 9P root that needs authentication can be served over WebSocket and authenticated there. A server that has to be reached as plain 9P with `p9any`, and can't be put behind WebSocket, would reopen it.

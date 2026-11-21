@@ -1,5 +1,5 @@
 /*
- * #ℏ: host streams (design/websocket-9p.md). A WebSocket that h9
+ * #ℏ: host streams (design/epoch-0/websocket-9p.md). A WebSocket that h9
  * connects on the host becomes a channel devmnt can mount, and the guest
  * can open WebSockets of its own through /net/ws.
  *

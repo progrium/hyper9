@@ -1,5 +1,5 @@
 /* A static Linux program: prints its arguments and environment, touches a
- * megabyte of heap and exits 3 (design/linux-personality.md). */
+ * megabyte of heap and exits 3 (design/epoch-0/linux-personality.md). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

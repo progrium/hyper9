@@ -16,16 +16,16 @@ Compile the sandbox policy into a host sandbox as well, and apply it to the h9 p
 
 ## Background
 
-This was planned for after milestone M10 in SPEC.md, before milestones became proposals ([#1](proposals.md)). The design text below is SPEC.md's "Host self-sandboxing (future)" section as it stood there, including the macOS research note. Rationale, Compatibility, Security, and Implementation are to be written before filing.
+This was planned for after milestone M10 in SPEC.md, before milestones became proposals ([#1](epoch-0/proposals.md)). The design text below is SPEC.md's "Host self-sandboxing (future)" section as it stood there, including the macOS research note. Rationale, Compatibility, Security, and Implementation are to be written before filing.
 
 The guest is contained, but the h9 process runs drawterm's C kernel with the host user's full rights, and drawterm's `validaddr` is a no-op, so h9's own guest-address translation is the memory-safety boundary. Defence in depth is to compile the same policy into a host sandbox and apply it to h9 after VM creation and root setup, in a `src/hostjail.zig` with one implementation per OS, following the vmm pattern. Running h9 under gVisor doesn't work, because gVisor can't pass `/dev/kvm` through.
 
 This is future work. Each backend proposal records a research note so this can be built later:
 
 - **macOS (done, below):** whether `sandbox_init` with a generated SBPL profile can be applied after `hv_vm_create` and still allow HVF calls, and which profile rules that needs. See the research note below.
-- **macOS, [gfx](gfx.md):** which Mach and WindowServer lookups `--gfx` needs under Seatbelt.
-- **Linux, [kvm](kvm.md):** Landlock for paths and TCP ports plus seccomp, with `/dev/kvm` already open; the syscalls `KVM_RUN` and vCPU threads need; the Landlock ABI each target distro ships.
-- **Windows, [whp](whp.md):** whether an AppContainer or restricted token can still use WHP.
+- **macOS, [gfx](epoch-0/gfx.md):** which Mach and WindowServer lookups `--gfx` needs under Seatbelt.
+- **Linux, [kvm](epoch-0/kvm.md):** Landlock for paths and TCP ports plus seccomp, with `/dev/kvm` already open; the syscalls `KVM_RUN` and vCPU threads need; the Landlock ABI each target distro ships.
+- **Windows, [whp](epoch-0/whp.md):** whether an AppContainer or restricted token can still use WHP.
 
 **Research note: Seatbelt with HVF.** Tested on macOS 15.8.1 on an M3 Max with a small C program, ad-hoc signed with the hypervisor entitlement. It calls `hv_vm_create` and `hv_vm_map` on 16 MiB of guest RAM, then applies a profile with `sandbox_init_with_parameters`. That call is exported from libsystem_sandbox but not declared in `<sandbox.h>`, so it needs its own prototype. The profile was:
 

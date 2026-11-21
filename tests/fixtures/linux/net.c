@@ -1,4 +1,4 @@
-/* Readiness and sockets (design/linux-net.md): each case named on
+/* Readiness and sockets (design/epoch-0/linux-net.md): each case named on
  * the command line prints "ok NAME" or "FAIL NAME: why". "all" runs the
  * ones that need no network; the socket cases need --net=enable. */
 #define _GNU_SOURCE

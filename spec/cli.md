@@ -41,7 +41,7 @@ h9 --version | --check | --help      # tool functions; -h alone is --help
 | Absolute (`/bin/cat`) | A guest path, resolved in the guest namespace. To run an absolute host path, use the guest view of it (`/mnt/term/...`) or a relative path. |
 | Bare name or other relative path (`ls`, `aux/vga`) | Looked up in the guest namespace through `$path` (default `(. /bin)`) |
 | `--rc 'cmd'` | Runs `/bin/rc -c 'cmd'`; the remaining arguments become `$*` |
-| `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell ([default-command](../design/default-command.md)). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
+| `--rc` as the last argument | Runs a login rc: `rc -l -i` when h9's stdin is a host terminal, and otherwise `rc -l -c '. /fd/0'`, which reads stdin as a script. Either way rcmain sources `/rc/lib/rcmain.local` and then `$home/lib/profile` if they exist and `/bin/test` does, so a root sets its default command in `rcmain.local`, ending it with `exec prog` to replace the shell ([default-command](../design/epoch-0/default-command.md)). Without one, it's a plain rc. `--rc=` is still `rc -c ''` |
 | `--ns file` | Runs `newns` with the file before the program |
 
 A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` run directly. A host program (`./x`) must be an a.out; run a host script with `h9 rc ./x`.
@@ -84,7 +84,7 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 | `--print` | Prints the compiled policy and namespace, then exits |
 | `--host-fs` | Exposes all of `#U`, not just the root and cwd |
 | `--no-guest-tools` | Leaves out the `#H/bin` bind of h9's own commands and masks `#H` |
-| `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](../design/builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
+| `--builtin auto\|only\|before\|after\|off` | How the built-in root takes part ([builtin-root](../design/epoch-0/builtin-root.md)). `auto`, the default, is `only` when no 9front root is found and `off` otherwise; a Linux root alone doesn't count, so it gets the built-in root as its `/9`. `only` makes it `/` even if `$H9ROOT` or the development tree would give a root; with `--root` it's exit 2. `before` binds its `/$cputype/bin` before the root's `/bin`, so its commands win, and `after` binds it after the root's `/bin` and `/rc/bin`, to fill gaps; without a root, both are `only`. `off` is no built-in root, and no `/9` for a Linux root alone: with no root found, only a host a.out runs and anything else is exit 125. A program that isn't found over the built-in root alone is exit 127 with a hint to pass `--root` |
 | `--sandbox DIR` | The tight profile with only DIR bound, read-write, as the cwd. Can't be combined with `--host-fs` |
 | `--trace[=FILE]` | ratrace-style syscall log, with the Ureg and a symbolized PC when the guest faults, to stderr by default |
 | `--gfx[=noclip]` | Gives the machine one host window (see Graphics), with `/dev/draw`, `/dev/mouse`, `/dev/cursor`, and `/dev/kbd` in it, and `/dev/snarf` as the host clipboard; `=noclip` keeps `/dev/snarf` in the h9 process instead. Exit 125 if this build has no GUI backend, there's no display, or another machine in the process has the window |
@@ -95,21 +95,21 @@ A guest program follows `#!` as exec does, so rc scripts such as `man` and `lc` 
 
 ### Default guest environment
 
-`user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the machine's architecture (`386` for 386), `sysname=h9`, `service=terminal`, `timezone` (copied from the root's `/adm/timezone/local`, as 9front's boot does), `serve` under `--serve` (see Serving), and `NPROC`, the CPUs the machine may use (`--cpus`, or the host's count capped by the vCPU limit), as `/dev/sysstat` lists them ([self-host](../design/self-host.md)). Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
+`user` is the host user name, `home=/usr/$user`, `path=(. /bin)`, `cputype` and `objtype` come from the machine's architecture (`386` for 386), `sysname=h9`, `service=terminal`, `timezone` (copied from the root's `/adm/timezone/local`, as 9front's boot does), `serve` under `--serve` (see Serving), and `NPROC`, the CPUs the machine may use (`--cpus`, or the host's count capped by the vCPU limit), as `/dev/sysstat` lists them ([self-host](../design/epoch-0/self-host.md)). Everything else has to be passed with `--env`, which keeps host secrets out of the guest by default.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | `exits(nil)` or `exits("")` |
-| 1–255 | An `exits` string that's that number in decimal: digits only, no sign, leading zero, or spaces. Nothing is printed, so rc's `exit 3` and Go's `os.Exit(3)` exit 3 ([go-compat](../design/go-compat.md)) |
+| 1–255 | An `exits` string that's that number in decimal: digits only, no sign, leading zero, or spaces. Nothing is printed, so rc's `exit 3` and Go's `os.Exit(3)` exit 3 ([go-compat](../design/epoch-0/go-compat.md)) |
 | 1 | Any other `exits` string, including `"0"`, which is also printed to stderr; or the first process was killed by a note that isn't a signal |
 | 2 | Usage error |
 | 124 | `--timeout` stopped the program (`h9: prog: h9: timeout`), as coreutils `timeout` |
 | 125 | h9 itself failed: no hypervisor, VM creation failed, the root wasn't found, a 9P root's connection, handshake, or attach failed, a namespace file's WebSocket mount failed, or a `--serve` listener couldn't listen (`h9: serve tcp!127.0.0.1!5640: address in use`); or the run ended with `halted`, an unexpected VM exit, or an internal error |
 | 126 | The program was found but isn't a runnable a.out (bad magic or wrong architecture) |
 | 127 | The program wasn't found |
-| 128+N | The first process was killed by a note that's signal N ([exit-status](../design/exit-status.md)): see below |
+| 128+N | The first process was killed by a note that's signal N ([exit-status](../design/epoch-0/exit-status.md)): see below |
 
 The 125–127 codes follow `env` and `docker run`. A guest can exit with them too, but h9 prints a message whenever it fails itself and a numeric `exits` prints nothing, so scripts can still tell h9 failures from guest failures. The mapping is in `src/cli.zig` and applies to every program; `Machine` returns the `exits` string unchanged, so library callers decide for themselves.
 

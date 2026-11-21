@@ -1,6 +1,6 @@
 # Proposals
 
-Design changes to h9 go through proposals: one Markdown file each in this directory, named by its slug, with frontmatter for status, dependencies, and where its work lives. The spec describes h9 as built: [SPEC.md](../SPEC.md) is its overview, and the files under [spec/](../spec/) that it lists describe each part ([spec-split](spec-split.md)). Proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), was adopted as [proposals](proposals.md), and was reworked by [proposal-flow](proposal-flow.md) so work can start on a branch before or alongside its proposal.
+Design changes to h9 go through proposals: one Markdown file each in this directory, named by its slug, with frontmatter for status, dependencies, and where its work lives. The spec describes h9 as built: [SPEC.md](../SPEC.md) is its overview, and the files under [spec/](../spec/) that it lists describe each part ([spec-split](epoch-0/spec-split.md)). Proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), was adopted as [proposals](epoch-0/proposals.md), and was reworked by [proposal-flow](epoch-0/proposal-flow.md) so work can start on a branch before or alongside its proposal.
 
 ## When a proposal is needed
 
@@ -139,6 +139,12 @@ Cases are tagged with the proposal they prove, by slug, in brackets at the end o
 
 `zig build proposal -Dp=<slug>` runs one proposal's demos, integration cases, and web test files, whatever its status. Demos that aren't cases are registered for their proposal in `build.zig` (`addDemo`). A web test file runs whole, for any proposal one of its cases is tagged with.
 
+## Epochs
+
+The top of this directory holds the proposals still being decided or built. A proposal that's implemented, declined, or superseded is archived in the current epoch's folder, `epoch-N/`, by `zig build design -- archive`, which moves it and rewrites every link to it ([epochs](epoch-0/epochs.md)). An epoch is the work between two baselines: [baseline](epoch-0/baseline.md) opened epoch 0, and a proposal named `baseline-K` opens epoch K.
+
+Archiving isn't part of finishing a proposal. The PR that finishes one leaves its file where it is, and `archive` is run now and then in a PR of its own, and whenever a baseline is cut. It changes link targets in archived proposals, which is the one edit to an accepted proposal's body that isn't a Done criteria checkbox. A proposal keeps its slug in any folder, so test tags, `depends`, and `zig build proposal -Dp=<slug>` don't change. Link to an archived proposal as `design/epoch-N/<slug>.md`.
+
 ## Checks
 
 `check` is meant to run before every PR is merged, and `status` on main after each merge. Which workflows run them, and how, can change without a proposal.
@@ -158,8 +164,9 @@ Cases are tagged with the proposal they prove, by slug, in brackets at the end o
 | `log <slug>` | Its status and branch changes, with their commits |
 | `sign <slug or spec>` | Signs a doc you've reviewed, as above |
 | `close-issues [--dry-run]` | Closes the issues of implemented, declined, and superseded proposals; main's workflow runs it |
+| `archive [--dry-run]` | Moves implemented, declined, and superseded proposals into the current epoch's folder, and rewrites the links to them |
 | `check` | Validates the proposals, test tags, signatures, and links to `design/` |
 
 [STATUS.md](STATUS.md) is generated, and only main commits it: [.github/workflows/design-status.yml](../.github/workflows/design-status.yml) runs `status` after each push to main that touches `design/` or the tool, and daily, since in progress and stalled change as branches age. It commits the result if it changed. The same workflow runs `close-issues`, which closes the open issue of each implemented proposal as completed, and of each declined or superseded one as not planned, with a comment linking the doc. PRs leave STATUS.md alone, even when they change a proposal's status or dependencies, so two open PRs never conflict over it. `list` and `ready` give the current state on any branch.
 
-`check` fails on bad frontmatter (including values YAML would read differently and the removed `likely-accept` and `likely-decline`), tags not written as `[a, b]`, a duplicate slug or issue, a file not named for its slug, a slug starting with a digit on a proposal without an issue, `proposed` without an `issue`, the old `id` key, a reference by number or one that doesn't resolve (in `depends`, `superseded-by`, or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, a declined proposal without a `## Declined` section, `superseded` without `superseded-by`, `implemented` without `branch: [main]` or `main` on anything else, a Done criteria item that isn't a checkbox or is open on an implemented proposal, a `## Done when` heading, a malformed signature or one by someone not in SIGNERS, and a link to a file under `design/` that doesn't exist, from any file git tracks outside `third_party/`.
+`check` fails on bad frontmatter (including values YAML would read differently and the removed `likely-accept` and `likely-decline`), tags not written as `[a, b]`, a duplicate slug or issue, a file not named for its slug, a slug starting with a digit on a proposal without an issue, `proposed` without an `issue`, the old `id` key, a reference by number or one that doesn't resolve (in `depends`, `superseded-by`, or a test tag), a dependency cycle, an implemented proposal with a dependency that isn't, an accepted proposal that depends on a declined one, a declined proposal without a `## Declined` section, `superseded` without `superseded-by`, `implemented` without `branch: [main]` or `main` on anything else, a Done criteria item that isn't a checkbox or is open on an implemented proposal, a `## Done when` heading, a malformed signature or one by someone not in SIGNERS, a proposal in an epoch folder that isn't implemented, declined, or superseded, and a link to a file under `design/` that doesn't exist or has moved to an epoch folder, from any file git tracks outside `third_party/`.

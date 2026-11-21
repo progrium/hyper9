@@ -1,5 +1,5 @@
 /*
- * The headless GUI backend (-Dgfx=headless, design/gfx.md): a screen
+ * The headless GUI backend (-Dgfx=headless, design/epoch-0/gfx.md): a screen
  * in memory, for tests. It implements drawterm's screen interface as the
  * window-system backends do, without a window: flushes go nowhere and the
  * "host clipboard" is a buffer. src/gfx.zig's `headless` hooks inject

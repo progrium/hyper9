@@ -15,7 +15,7 @@ Nov 3, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-The work done before proposals: milestones M0 to M4, which [SPEC.md](../SPEC.md) describes. This file is its record. It holds those milestones as they were planned, SPEC.md's Changelog as it stood when [proposal 1](proposals.md) replaced it, and the open questions settled along the way. It has no issue, so its id is 0, and it isn't edited.
+The work done before proposals: milestones M0 to M4, which [SPEC.md](../../SPEC.md) describes. This file is its record. It holds those milestones as they were planned, SPEC.md's Changelog as it stood when [proposal 1](proposals.md) replaced it, and the open questions settled along the way. It has no issue, so its id is 0, and it isn't edited.
 
 ## Milestones
 

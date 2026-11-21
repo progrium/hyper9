@@ -20,7 +20,7 @@ h9 gains a build of 9front's own commands as one statically linked multi-call bi
 
 ## Background
 
-- **Slim roots are a recipe today.** [The userland guide](../docs/userland.md) section 4 builds a slim 9front by copying about 20 binaries and `/rc/lib/rcmain` out of the stock tree, which is about 250 MB. That works, but every binary is a separate static link, so each carries its own copy of libc and libbio, and the tree is as many files as commands.
+- **Slim roots are a recipe today.** [The userland guide](../../docs/userland.md) section 4 builds a slim 9front by copying about 20 binaries and `/rc/lib/rcmain` out of the stock tree, which is about 250 MB. That works, but every binary is a separate static link, so each carries its own copy of libc and libbio, and the tree is as many files as commands.
 - **9front builds itself in h9.** [self-host](self-host.md) measured `mk` in `/sys/src/cmd` rebuilding the shipped binaries byte for byte, and `cd /sys/src && mk install` in about a minute. So h9 can build a 9front program without a 9front machine, and this proposal relies on that.
 - **Commands collide when linked together.** A scan of 9front's `sys/src/cmd/*.c` at HEAD (a regular-expression pass, so approximate) finds 1233 non-static top-level functions across the single-file commands, of which 114 names are defined in more than one file: `main` in 136, `usage` in 75, `error` in 15, `emalloc` in 14, `erealloc` in 9. 9front's linkers reject a second definition of a function (`redefinition:` in `7l/obj.c`), merge uninitialised globals of the same name, and have no relocatable output (no `ld -r`), so renaming has to happen in the source, before compiling.
 - **`#!` keeps the script's name.** 9front's `sysexec` (`port/sysproc.c`) follows up to 8 levels of interpreters and builds argv as the interpreters' arguments, outermost first, then the script's full path, with `argv[0]` replaced by the script's last path element, then the caller's arguments. h9's `interpret` in `src/machine.zig` builds the same argv. So a two-line stub can turn any file into a command of a multi-call binary, on h9 and on 9front alike.
@@ -197,7 +197,7 @@ Integration cases tagged `[multicall]`, run against the slim tree:
 
 ## Updates
 
-- 2026-11-14: `walk` joins `slim`, for [mount-index](mount-index.md)'s `mkindex`, so the set is 44 commands; the corpus has an entry for it. The sizes above are from the 43.
+- 2026-11-14: `walk` joins `slim`, for [mount-index](../mount-index.md)'s `mkindex`, so the set is 44 commands; the corpus has an entry for it. The sizes above are from the 43.
 - 2026-11-07: Filed as #64 and marked implemented. The Done-when checks that need a hypervisor host (the exec loop within 10% of separate binaries, and `--check` on the arm64 tree) are still to be run on one. The dependency on [self-host](self-host.md), still `accepted`, is dropped: what this needs from it, `mk` building 9front's commands inside h9, works today, and the build here does it.
 - 2026-11-07: One set. The proposal had `min`, `slim`, and `dev`; `slim` ran the exec loop 44% slower than separate binaries, so there's only the basic set, now named `slim`, and no `-Dslim-set`. The private libthread went with it, since the set has no thread program, and `mkcmd` refuses one. The notes below about `plumber`, `ed`, `dossrv`, `passwd`, `bc`, and the larger set's numbers are from building the larger set before it was dropped.
 - 2026-11-07: Implemented as proposed (`src/9box/`, `tools/slim.zig`, `zig build slim`), except the `dev` set, with these refinements:

@@ -1,4 +1,4 @@
-//! System V shared memory (design/linux-personality.md, "Memory"):
+//! System V shared memory (design/epoch-0/linux-personality.md, "Memory"):
 //! shmget, shmat, shmdt and shmctl, as PostgreSQL uses them for the small
 //! segment that tells a new postmaster an old one's backends still run.
 //! A segment is a set of chunk pages (mm.Pages), one per 1 MiB of it,

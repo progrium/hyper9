@@ -17,9 +17,9 @@ This describes, as built, what a root can be, the 9P dialects h9 speaks to file 
 
 ## Root filesystem
 
-The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([ninep-roots](../design/ninep-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
+The root is either a directory holding an extracted 9front root, served through `#U` (devfs-posix or devfs-win32), which is the fastest path, with no 9P round trips; or a 9P server ([ninep-roots](../design/epoch-0/ninep-roots.md)), named by `--root tcp!host!port` (`tcp!host` means port 564), `unix!path`, the path of a unix socket, or a `ws://` or `wss://` URL.
 
-A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](../design/schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it.
+A value that isn't an existing path and is shaped like `host[:port][/path]` (a dotted host, a bracketed address, a port, or `localhost`, and nothing starting with `.`, `/`, `~`, or `-` or containing `\`, `!`, `@`, or whitespace) is a URL without its scheme ([schemeless-roots](../design/epoch-0/schemeless-roots.md)): `ws://` for `localhost`, `127.0.0.0/8`, and `[::1]`, and `wss://` otherwise, as `cli.schemelessRoot` reads it.
 
 The path is tried first, so a directory named like a host stays a directory, and when such a root can't be reached h9 says it read the value as a URL.
 
@@ -31,11 +31,11 @@ h9 connects to a 9P root before the program runs:
 
 The connection is posted on the machine's `/srv` board as `root`, which holds it for the machine's life, and `#s/root` is mounted at `/` with no auth fd and `--root-spec` as the attach name. devmnt sends the calling process's user as the attach uname, so the first Proc takes on `--root-user` for the mount when one is given. Everything else is bound over the mount as over a host tree.
 
-Each connection goes through a `#ℓ` conversation before it's posted (see [9P dialects](#9p-dialects)), so the server can speak 9P2000 or 9P2000.L; a TCP root, and a unix one whose path has no comma, is dialed by the conversation itself, so it can be dialed again. A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks an unknown dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, unless a 9P2000.L.Z server's connection is resumed. Disk images aren't supported ([image-roots](../design/image-roots.md) was declined).
+Each connection goes through a `#ℓ` conversation before it's posted (see [9P dialects](#9p-dialects)), so the server can speak 9P2000 or 9P2000.L; a TCP root, and a unix one whose path has no comma, is dialed by the conversation itself, so it can be dialed again. A refused connection, a failed `Tversion` or `Tattach` (a server that wants authentication, or one that speaks an unknown dialect) is exit 125 with the server's error; a hangup later fails file operations as devmnt does, unless a 9P2000.L.Z server's connection is resumed. Disk images aren't supported ([image-roots](../design/epoch-0/image-roots.md) was declined).
 
 ## 9P dialects
 
-Every 9P connection h9 mounts, from a TCP, unix socket, or WebSocket root, a namespace file's `mount`, or the guest's `dotlfs`, goes through a `#ℓ` conversation's client side before devmnt sees it ([dotl](../design/dotl.md)). The translator answers devmnt's `Tversion` with `9P2000` itself and sends its own, with tag `NOTAG`, offering `9P2000.L.Z` at an `msize` of up to 1 MiB:
+Every 9P connection h9 mounts, from a TCP, unix socket, or WebSocket root, a namespace file's `mount`, or the guest's `dotlfs`, goes through a `#ℓ` conversation's client side before devmnt sees it ([dotl](../design/epoch-0/dotl.md)). The translator answers devmnt's `Tversion` with `9P2000` itself and sends its own, with tag `NOTAG`, offering `9P2000.L.Z` at an `msize` of up to 1 MiB:
 
 - `9P2000.L.Z` or `9P2000.L` translates, `.L.Z` with ZeroFS's extension.
 - `9P2000` passes bytes through both ways unchanged, so a 9front server costs a copy.
@@ -43,7 +43,7 @@ Every 9P connection h9 mounts, from a TCP, unix socket, or WebSocket root, a nam
 
 Translating, the client side allocates the server's fids and tags, since one devmnt request can become several, and keeps each fid's path from its attach root. `Topen` is `Tlopen`, with `ORCLOSE` kept in the translator and done at clunk. `Tcreate` is `Tlcreate`, or `Tmkdir` then a walk and `Tlopen` for a directory, with the mode create(5)'s rule gives against the directory's (a .L server applies none). A create of an existing name without `DMEXCL` opens it truncated. Directory reads are `Treaddir` and a `Tgetattr` per entry, packed into `Dir`s. `Tstat` is `Tgetattr`, and `Twstat` a `Trenameat` for a name, then a `Tsetattr`, or `Tfsync` for the null wstat. `Tremove` is `Tunlinkat` on a fid walked to the parent. A server without `Tunlinkat` or `Trenameat` (diod 1.0) gets `Tremove` and `Trename` instead. `Rlerror` becomes the error string `attr.zig` gives for the errno ("errno N" for one it doesn't know). A `Tflush` of a request that became several flushes all of them, and a reply for an unknown tag fails the connection.
 
-Symlinks are followed during a walk with `Treadlink`, inside the mount by [symlinks-in-root](../design/symlinks-in-root.md)'s rule: an absolute target starts at the attach root, `..` stops there, and more than 40 links in one walk is "too many symbolic links". A directory read lists a link as its target, and leaves out one that resolves to nothing. A device node, FIFO, or socket is a zero-length file that fails to open.
+Symlinks are followed during a walk with `Treadlink`, inside the mount by [symlinks-in-root](../design/epoch-0/symlinks-in-root.md)'s rule: an absolute target starts at the attach root, `..` stops there, and more than 40 links in one walk is "too many symbolic links". A directory read lists a link as its target, and leaves out one that resolves to nothing. A device node, FIFO, or socket is a zero-length file that fails to open.
 
 The machine's user is sent as `n_uname` from `--user-map` (an `/etc/passwd` file read once), or else the host uid, which is 65534 when h9 runs as root and 1000 on Windows; 0 is sent only when the map says so. Any other number N is named "N" and back.
 
@@ -84,7 +84,7 @@ The cache (`src/rootindex/cache.zig`) is `--index-cache`, by default `$XDG_CACHE
 
 ## Serving
 
-`--serve` makes a machine a 9P server while its program runs ([serve](../design/serve.md)). `src/serve.zig` opens every listener before the program starts, so a failure is exit 125 with nothing run, and `Machine.serving()` and the guest's `$serve` (an rc list) give the bound addresses, port 0 resolved. The listeners close when the program exits, which hangs up every connection.
+`--serve` makes a machine a 9P server while its program runs ([serve](../design/epoch-0/serve.md)). `src/serve.zig` opens every listener before the program starts, so a failure is exit 125 with nothing run, and `Machine.serving()` and the guest's `$serve` (an rc list) give the bound addresses, port 0 resolved. The listeners close when the program exits, which hangs up every connection.
 
 ### Listeners
 
@@ -108,7 +108,7 @@ A server stream answers pings, pings after 30 s idle and fails a connection sile
 
 ### 9P2000.L clients
 
-A `#ℓ` conversation's server side (`src/dotl/server.zig`) goes by the client's first `Tversion`: `9P2000.L` translates, `9P2000.L.Z` is answered with `9P2000.L` (version(5) lets a server pick), and anything else passes through for exportfs to answer, so a 9front or h9 client mounts as before ([dotl](../design/dotl.md)). The `serve` heading of `--print` says its listeners speak both.
+A `#ℓ` conversation's server side (`src/dotl/server.zig`) goes by the client's first `Tversion`: `9P2000.L` translates, `9P2000.L.Z` is answered with `9P2000.L` (version(5) lets a server pick), and anything else passes through for exportfs to answer, so a 9front or h9 client mounts as before ([dotl](../design/epoch-0/dotl.md)). The `serve` heading of `--print` says its listeners speak both.
 
 Translating, it allocates exportfs's fids and tags, since one .L request can take several. `Tgetattr` is a `Tstat`, built into a Linux `stat` with numbers from the user map, and `Tsetattr` a `Twstat`. `Treaddir` reads the whole directory into a listing on the fid and hands out entry indexes as offsets; a `Treaddir` at offset 0, or any mutation through the connection, drops the listing. `Tlopen` is `Topen` and `Tlcreate` a `Tcreate`. `Tmkdir` is a walk, a create, and a clunk. `Tunlinkat` walks and removes. `Trenameat` within a directory is a `Twstat` of the name, replacing a name that's taken, and across directories is `EXDEV`. `Tfsync` is the null `Twstat`, and `Tstatfs` reports fixed sizes. `Tsymlink`, `Tmknod`, `Tlink`, and xattrs are `EOPNOTSUPP`. `Tlock` and `Tgetlock` use an advisory byte-range lock table shared by every connection the process serves, held by a connection and a client pid on a qid. exportfs's errors become errno through `attr.zig`, and `exportfs -R`'s "read only" is `EROFS`.
 

@@ -71,7 +71,7 @@ fn env(comptime src: std.builtin.SourceLocation) !Env {
     return .{ .h9 = h9, .root = root, .backends = backends, .arch = arch };
 }
 
-/// Cases the web host can't run (design/browser-host.md), skipped
+/// Cases the web host can't run (design/epoch-0/browser-host.md), skipped
 /// when H9_TEST_WEB is set (-Dweb): by name, those that need a host TTY,
 /// POSIX signals, or what a page's WebSocket can't do; by tag, the
 /// network's, 9P roots', and serving's proposals, since the web host has
@@ -89,7 +89,7 @@ const web_skips = [_][]const u8{
     // A 9P root over TCP.
     "a write to a 9P root under the default profile doesn't reach the server",
     // A page's WebSocket can't set headers or a CA, use a proxy, or ping;
-    // the browser does those (design/websocket-9p.md).
+    // the browser does those (design/epoch-0/websocket-9p.md).
     "--root-header is sent, and @FILE reads headers from a file",
     "header in ctl is sent with the handshake",
     "wsmount mounts a ws:// URL with flags and headers",
@@ -347,7 +347,7 @@ test "no root tree gives 125 for a guest program [baseline]" {
     defer environ.deinit();
     _ = environ.swapRemove("H9ROOT");
     // Without --builtin=off, the built-in root is used instead
-    // (design/builtin-root.md).
+    // (design/epoch-0/builtin-root.md).
     for ([_][]const []const u8{ &.{ h9, "--builtin=off", "echo", "x" }, &.{ h9, "--builtin=off", "--rc", "echo x" } }) |argv| {
         var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .environ_map = &environ, .create_no_window = true });
         defer child.kill(io);
@@ -500,7 +500,7 @@ test "default profile: the cwd is writable and the root tree isn't written [base
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(s.exists("f"));
-    // The write succeeds in the root's overlay (design/overlay.md);
+    // The write succeeds in the root's overlay (design/epoch-0/overlay.md);
     // --write=scope makes it fail.
     const ro = try run(e, &.{ "--cwd", s.path, "touch", "/lib/h9-test" });
     defer ro.deinit();
@@ -643,7 +643,7 @@ test "--timeout stops the program [baseline]" {
     const e = try env(@src());
     const r = try run(e, &.{ "--timeout", "200ms", "sleep", "10" });
     defer r.deinit();
-    // 124, as coreutils timeout (design/exit-status.md).
+    // 124, as coreutils timeout (design/epoch-0/exit-status.md).
     try std.testing.expectEqual(124, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "h9: timeout") != null);
 }
@@ -682,7 +682,7 @@ test "ls /bin | wc -l (demo) [baseline]" {
     var bin_buf: [32]u8 = undefined;
     const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{e.arch orelse "arm64"});
     // #H/bin, h9's own commands, is in the union too
-    // (design/guest-tools.md); the guest counts it.
+    // (design/epoch-0/guest-tools.md); the guest counts it.
     const h = try run(e, &.{ "--rc", "ls '#H/bin' | wc -l" });
     defer h.deinit();
     const in_h = try std.fmt.parseInt(usize, std.mem.trim(u8, h.out, " \n"), 10);
@@ -887,7 +887,7 @@ test "h9.exe starts and falls back to the emulator without the WHP feature [whp]
     }
 }
 
-/// Skips unless the native backend runs here (design/native-backend.md):
+/// Skips unless the native backend runs here (design/epoch-0/native-backend.md):
 /// Linux x86_64 with Syscall User Dispatch and seccomp, and amd64 binaries.
 fn requireNative(e: Env) !void {
     if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return error.SkipZigTest;
@@ -1014,7 +1014,7 @@ test "--ns replays a namespace file [baseline]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// A root's default command (design/default-command.md). The stock tree
+// A root's default command (design/epoch-0/default-command.md). The stock tree
 // has no /rc/lib/rcmain.local, so these union one from a scratch dir onto
 // /rc/lib with --ns; rcmain and /bin/test come from the root.
 
@@ -1100,7 +1100,7 @@ test "--rc 'cmd' doesn't read rcmain.local [default-command]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// Ephemeral writes and a private /tmp (design/ephemeral-writes.md).
+// Ephemeral writes and a private /tmp (design/epoch-0/ephemeral-writes.md).
 
 /// `h9 --cwd <s> --write=ephemeral args...`.
 fn runEph(e: Env, s: *Scratch, args: []const []const u8) !Result {
@@ -1376,7 +1376,7 @@ test "removing every .c file in a source tree leaves the host unchanged (demo) [
     try std.testing.expect(s.exists("cat.c") and s.exists("ls.c") and !s.exists("x"));
 }
 
-// The root's overlay (design/overlay.md).
+// The root's overlay (design/epoch-0/overlay.md).
 
 /// Fails if the root tree on the host has `rel`.
 fn expectRootLacks(e: Env, rel: []const u8) !void {
@@ -1594,7 +1594,7 @@ test "changes only under $home, or only by the namespace builder, print no notic
     }
 }
 
-// Self-hosting (design/self-host.md): the root's compilers and mk
+// Self-hosting (design/epoch-0/self-host.md): the root's compilers and mk
 // build 9front's own source, and acid debugs live processes. The builds
 // use the root's /sys/src (zig build mkroot -- --src), or else H9_TEST_SRC,
 // a checkout's sys directory, bound over /sys; they skip without either.
@@ -1708,7 +1708,7 @@ test "mk install into a read-only root fails with permission denied [self-host]"
     try s.init();
     defer s.deinit();
     // --write=scope keeps the root read-only; the default profile's
-    // overlay would take the install in memory (design/overlay.md).
+    // overlay would take the install in memory (design/epoch-0/overlay.md).
     const r = try runSelf(e, &s, src, &.{"--write=scope"}, "bind -bc /mnt/term/cwd /sys/src/cmd && cd /sys/src/cmd && mk cat.install >/dev/null", null);
     defer r.deinit();
     errdefer std.debug.print("stderr:\n{s}\n", .{r.err});
@@ -2061,7 +2061,7 @@ test "a second Ctrl-C within a second tears the machine down [baseline]" {
         try t.send("\x03");
         try t.drain(100);
         try t.send("\x03");
-        // 128 + SIGINT (design/exit-status.md).
+        // 128 + SIGINT (design/epoch-0/exit-status.md).
         try std.testing.expectEqual(130, try t.wait(slow(5_000)));
     }
 }
@@ -2346,7 +2346,7 @@ test "--memory caps segattach [segattach]" {
     try std.testing.expectEqual(1, r.code);
 }
 
-// rendezvous and semaphores (design/semaphores.md). The programs are
+// rendezvous and semaphores (design/epoch-0/semaphores.md). The programs are
 // tests/fixtures/sema/sema.c, one per argument, built inside the guest
 // with the architecture's compiler and loader (7c and 7l on arm64) into
 // a scratch directory given with --sandbox.
@@ -2469,7 +2469,7 @@ test "--timeout stops processes blocked in rendezvous and semacquire [semaphores
     try std.testing.expect(took < 10_000 * @as(i64, @intCast(std.mem.count(u8, e.backends, ",") + 1)));
 }
 
-// The network policy (design/net-policy.md). The cases listen on
+// The network policy (design/epoch-0/net-policy.md). The cases listen on
 // 127.0.0.1 themselves, and the guest writes /net ctl files from rc, so
 // they need no client program the root tree doesn't have.
 
@@ -2734,7 +2734,7 @@ test "--net=outbound runs [net-policy]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// devsrv, /srv, and mount (design/devsrv.md). Mount points are made
+// devsrv, /srv, and mount (design/epoch-0/devsrv.md). Mount points are made
 // in the machine's private /tmp, since the root tree's /n and /mnt are
 // mostly mntgen's on 9front and may lack the names a case wants.
 
@@ -2898,7 +2898,7 @@ test "plumber starts and serves /mnt/plumb [devsrv]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// Go compatibility (design/go-compat.md). The Go cases run the
+// Go compatibility (design/epoch-0/go-compat.md). The Go cases run the
 // plan9/amd64 programs from tests/fixtures/go, which `zig build
 // go-fixtures` builds into H9_TEST_GO, on the native backend where the
 // build runs the cases on it (H9_TEST_GO_BACKEND), else on the emulator.
@@ -2932,7 +2932,7 @@ fn goEnv(comptime src: std.builtin.SourceLocation, g: *GoEnv) !void {
 }
 
 /// The backend the Go cases run on: the native backend when the build
-/// says it's in the list (Linux x86_64, design/native-backend.md), else
+/// says it's in the list (Linux x86_64, design/epoch-0/native-backend.md), else
 /// the emulator.
 fn goBackend() []const u8 {
     const v = getenv(3, "H9_TEST_GO_BACKEND") orelse return "emu";
@@ -3232,7 +3232,7 @@ fn checkBintime(e: Env, backend: []const u8) !void {
     try std.testing.expect(word(b, 0) > word(a, 0));
 }
 
-// 9P roots (design/ninep-roots.md). The server is a second h9 serving
+// 9P roots (design/epoch-0/ninep-roots.md). The server is a second h9 serving
 // the test root tree read-only with exportfs behind aux/listen1 -t, so no
 // host 9P server is needed. Cases compare a run over the 9P root with the
 // same run over the host tree, whose namespace is otherwise the same.
@@ -3658,7 +3658,7 @@ test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     var want: [96]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, p.out, "  mount '#s/root' / ''") != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}  index=/.fs/index\n", .{srv.dial()})) != null);
-    // Under the root's overlay (design/overlay.md) nothing reaches
+    // Under the root's overlay (design/epoch-0/overlay.md) nothing reaches
     // the server; under --write=scope its server decides.
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") == null);
     const sp = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--print", "ls" });
@@ -4320,7 +4320,7 @@ test "--print shows the index source and entry count [mount-index]" {
     try expectIn(none.out, "  index=none\n");
 }
 
-// h9's own commands in #H (design/guest-tools.md). Debug builds serve
+// h9's own commands in #H (design/epoch-0/guest-tools.md). Debug builds serve
 // tests/fixtures/guest in #H too: `h9-guest-test` and an `echo` that the
 // root's must beat. The build sets H9_TEST_GUEST_TOOLS when it served them.
 
@@ -4426,7 +4426,7 @@ test "--host-cmd is a usage error and #C and hcmd are absent [baseline]" {
     try std.testing.expectEqualStrings("absent\n", h.out);
 }
 
-// 9P over WebSocket (design/websocket-9p.md). The server is ninep-roots'
+// 9P over WebSocket (design/epoch-0/websocket-9p.md). The server is ninep-roots'
 // RootServer with tests/wsrelay.zig in front of it, relaying WebSocket
 // messages to its TCP port. /net/ws cases use the relay in echo mode.
 
@@ -5247,7 +5247,7 @@ test "--root-ca trusts a private CA, and the host bundle doesn't [websocket-9p]"
     try expectIn(refused.err, "certificate: unknown authority");
 }
 
-// 9box, the multi-call binary (design/multicall.md). The tree comes from
+// 9box, the multi-call binary (design/epoch-0/multicall.md). The tree comes from
 // `zig build slim`, in .local/9front/slim-*, whose path the build passes as
 // H9_TEST_SLIM_ROOT; the cases skip without it. They run with `--root`
 // after the test root's.
@@ -5495,7 +5495,7 @@ fn expectGfxNotBuilt(e: Env) !void {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "graphics aren't built into this h9") != null);
 }
 
-// Contained trees (design/symlinks-in-root.md). The root for these is
+// Contained trees (design/epoch-0/symlinks-in-root.md). The root for these is
 // a small tree in a scratch directory: a few of the root's commands,
 // copied, the mount points the namespace builder binds onto, and links.
 
@@ -5657,7 +5657,7 @@ test "ls -l /bin in a contained tree with links (demo) [symlinks-in-root]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/cat") != null);
 }
 
-// The Linux personality (design/linux-personality.md): static Linux
+// The Linux personality (design/epoch-0/linux-personality.md): static Linux
 // programs from tests/fixtures/linux (H9_TEST_LINUX) and an Alpine root
 // from scripts/fetch.sh (H9_TEST_LINUX_ROOT/alpine-<arch>).
 
@@ -5873,7 +5873,7 @@ test "a Linux root without resolv.conf gets the host's DNS servers, and a UDP cl
     try std.testing.expectEqualStrings("dns\nsize\netc\n1\nmade\n0\n", r.out);
 }
 
-// 32-bit x86 Linux programs (design/linux-i386.md): Alpine's x86 root
+// 32-bit x86 Linux programs (design/epoch-0/linux-i386.md): Alpine's x86 root
 // and the 386 fixtures on the emulator, whatever the host. With
 // -Darch=386 the cases above run them too.
 // 32-bit Wine takes a second TLS entry for %fs, beside libc's %gs, and
@@ -5970,7 +5970,7 @@ test "a Linux program runs a #!/bin/rc script with 9front's rc [linux-personalit
     try std.testing.expect(std.mem.indexOf(u8, r.err, "usage: wsmount") != null);
 }
 
-// What databases need of files (design/linux-personality.md),
+// What databases need of files (design/epoch-0/linux-personality.md),
 // through tests/fixtures/linux/files.c, which prints "ok NAME" per case.
 
 test "fcntl record locks conflict across processes, wait, and go when the owner closes an fd or exits [linux-personality]" {
@@ -6199,7 +6199,7 @@ test "a private file mapping reads each page from its file offset on first touch
     try netCase(&le, &.{ "/mnt/term/cwd/files", "lazy_map" }, "ok lazy_map\n");
 }
 
-// Pseudoterminals (design/linux-pty.md), through
+// Pseudoterminals (design/epoch-0/linux-pty.md), through
 // tests/fixtures/linux/pty.c, which prints "ok NAME" per case.
 
 test "posix_openpt, grantpt, unlockpt, and ptsname give an open slave [linux-pty]" {
@@ -6273,7 +6273,7 @@ test "Python's pty.spawn runs a command in a pty [linux-pty]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-// Readiness and sockets (design/linux-net.md), through
+// Readiness and sockets (design/epoch-0/linux-net.md), through
 // tests/fixtures/linux/net.c, which prints "ok NAME" per case.
 
 fn netCase(le: *const LinuxEnv, args: []const []const u8, want: []const u8) !void {
@@ -6471,7 +6471,7 @@ test "Go net/http server and client in one Linux program [linux-net]" {
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/go/nethttp" }, "ok nethttp\n");
 }
 
-// Threads (design/linux-threads.md), through
+// Threads (design/epoch-0/linux-threads.md), through
 // tests/fixtures/linux/threads.c, which prints "ok NAME" per case, and the
 // Go programs in tests/fixtures/linux/go (built when go is on PATH).
 
@@ -6645,7 +6645,7 @@ test "Go GC with a goroutine in a call-free loop, at 1 ms slices [linux-threads]
     try netCase(&le, &.{"/mnt/term/cwd/go/gcloop"}, "ok gcloop 20\n");
 }
 
-// The browser host's cases (design/browser-host.md). They run on
+// The browser host's cases (design/epoch-0/browser-host.md). They run on
 // every backend; what they guard is the web host's: coroutines that park
 // for the event loop, a JIT over recycled pages, and stacks without
 // guard pages.
@@ -6758,7 +6758,7 @@ test "a coroutine stack overflow panics instead of corrupting [browser-host]" {
     }
 }
 
-// The built-in root (design/builtin-root.md): `#Hroot`, multicall's tree
+// The built-in root (design/epoch-0/builtin-root.md): `#Hroot`, multicall's tree
 // of 9front's commands built into h9. Cases that run its commands skip
 // when the build embedded none for the architecture under test (a
 // development build without `zig build slim`'s tree).
@@ -7038,7 +7038,7 @@ test "a missing command names the built-in root in its error [builtin-root]" {
     try std.testing.expect(std.mem.indexOf(u8, r.err, "not in the built-in root; pass --root or set H9ROOT") != null);
 }
 
-// Serving the namespace (design/serve.md). A server is h9 on a
+// Serving the namespace (design/epoch-0/serve.md). A server is h9 on a
 // terminal from tests/term.zig, so the cases can signal it and read its
 // "serve: ADDR" lines; a client is a second h9 with the listener as its
 // 9P root, which mounts the connection's /srv/root at /mnt/temp to look
@@ -7822,7 +7822,7 @@ test "--print lists listeners and elides the token [serve]" {
     try std.testing.expect(!pathExists(sock));
 }
 
-// 9P2000.L (design/dotl.md). Most cases use tests/dotlserver.zig's
+// 9P2000.L (design/epoch-0/dotl.md). Most cases use tests/dotlserver.zig's
 // server, a tree in memory behind a loopback port, made fresh per
 // connection, which can also drop connections and speak 9P2000.L.Z. The
 // rest use diod, a real .L server, below.

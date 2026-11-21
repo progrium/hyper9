@@ -1,4 +1,4 @@
-// Graphics on the browser host (design/browser-gfx.md) in Chromium:
+// Graphics on the browser host (design/epoch-0/browser-gfx.md) in Chromium:
 // serves zig-out/web and a test page beside it, and runs machines with a
 // canvas through createMachine. Each case is named as the proposal names
 // it, with the proposal's tag, [browser-gfx].

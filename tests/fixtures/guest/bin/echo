@@ -1,4 +1,4 @@
 #!/bin/rc
 # A test-only command named as one every root has: the root's must win
-# (design/guest-tools.md).
+# (design/epoch-0/guest-tools.md).
 echo echo from '#H'
