@@ -107,7 +107,7 @@ then console programs and programs with windows.
 git checkout wine-draw
 scripts/wine-root.sh                  # Alpine with Wine 11
 win hello.exe "two words" x           # a console program
-h9 --gfx --root "$WINEROOT" wine notepad
+h9 --gfx --dir "$WINEROOT":#L wine notepad
 </pre>
 
 <h2 id="how">How it works</h2>

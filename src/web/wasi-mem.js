@@ -18,8 +18,8 @@ const PREOPEN = 3;
 /**
  * Parses a root archive into a tree of { dir, mode, data, kids, ino }, or,
  * given `into`, a tree from an earlier parseRoot, adds the archive's
- * entries to it under the directory `at`, as putNode does: one of the
- * createMachine's layers.
+ * entries to it under the directory `at`, as putNode does: one of
+ * createMachine's archive mounts.
  */
 export function parseRoot(buf, into = null, at = '/') {
   const b = new Uint8Array(buf);

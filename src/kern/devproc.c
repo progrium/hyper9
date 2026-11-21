@@ -25,6 +25,8 @@
 #include "lib.h"
 #include "dat.h"
 #include "fns.h"
+
+extern int h9_overlay_nsunion(Chan*, char*, char*, int);
 #include "error.h"
 
 #include "hproc.h"
@@ -408,7 +410,8 @@ readns1(Chan *c, Groups *g, char *buf, int nbuf)
 				"mount %s %q %q %q\n": "mount %s %q %q\n", flag,
 				f->to->mchan->srvname != nil ? f->to->mchan->srvname : chanpath(f->to->mchan),
 				chanpath(f->umh->from), f->spec);
-		else
+		/* An unnamed union as the bind -r lines that make it (design/mounts.md). */
+		else if((i = h9_overlay_nsunion(f->to, chanpath(f->umh->from), buf, nbuf)) < 0)
 			i = snprint(buf, nbuf, "bind %s %q %q\n", flag,
 				chanpath(f->to), chanpath(f->umh->from));
 	}
@@ -520,7 +523,7 @@ procdebugio(Hproc *h, int what, int write, uvlong off, void *va, long n)
 static long
 procread(Chan *c, void *va, long n, vlong off)
 {
-	char statbuf[1024];
+	char statbuf[8192];	/* ns prints a union as a line per member */
 	ulong offset;
 	int i, j;
 	Hproc *h;

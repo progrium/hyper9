@@ -270,8 +270,8 @@ fn firstLine(s: []const u8) []const u8 {
     return "";
 }
 
-/// Appends `static` (`--root-header`'s), then the helper's headers whose
-/// names `static` doesn't have: a `--root-header` wins over a helper's
+/// Appends `static` (`header=`'s), then the helper's headers whose
+/// names `static` doesn't have: a `header=` wins over a helper's
 /// header of the same name.
 pub fn merge(gpa: Allocator, static: []const []const u8, got: []const []const u8, out: *std.ArrayList([]const u8)) Allocator.Error!void {
     try out.appendSlice(gpa, static);
@@ -356,7 +356,7 @@ test "parse and describe --cred [credential-helpers]" {
     try t.expectEqualStrings("b.io", list.items[1].pattern);
 }
 
-test "a helper's output is checked header lines, and --root-header wins on a name [credential-helpers]" {
+test "a helper's output is checked header lines, and header= wins on a name [credential-helpers]" {
     var why: Why = .{};
     const hs = try parseOutput(t.allocator, "Authorization: Bearer t1\r\nX-A: b\n\nignored: after blank\n", &why, "h");
     defer t.allocator.free(hs);

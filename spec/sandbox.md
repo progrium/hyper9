@@ -96,7 +96,7 @@ A listing shows each link with its target's `Dir` and leaves out a link whose ta
 
 `h9_fs_readlink` (and `h9_fs_readlinkpath` by guest path, through the root overlay; `kern.readlink`) gives a link's target as written, for the Linux personality; Plan 9 programs never see links.
 
-An uncontained `#U` attach is unchanged. `--root-contained` makes the root's bind and the root overlay's lower tree contained; other binds, including writable paths inside the root, stay uncontained. `--print` shows the root as `bind '#U!c/path' /`, which replays with `--ns` where `#U` isn't masked. Any other `#U` attach spec is "bad attach specifier".
+An uncontained `#U` attach is unchanged. `--dir PATH:DST:contained`, and every `--dir` on `#L`, makes that mount's bind contained; other binds, including writable paths inside it, stay uncontained. `--print` shows it as `bind '#U!c/path' DST`, which replays with `--ns` where `#U` isn't masked. Any other `#U` attach spec is "bad attach specifier".
 
 ### Default profile
 
@@ -168,13 +168,13 @@ caveats:
   - the h9 process itself is not host-sandboxed
 ```
 
-A 9P root is printed as `mount '#s/root' / '<spec>'` with `9p` in the access column and the dial string (and `--root-user`, as `as NAME`) in a comment. The spec is always written, `''` when empty, so a replay can tell it from the column; the line replays with `--ns` as an ordinary mount of the posted channel, a new attach on the same connection.
+A 9P mount is printed as `mount 'URL' DST '<spec>'`, followed by its settings as namespace files take them (`'user=NAME'`, `'ca=FILE'`, and a `'header=@FILE'`), with `9p` in the access column and the connection (and `user=`, as `as NAME`) in a comment; on a stack, as `mount -r 'URL' '#Oroot'`. The URL is the one h9 connects to: `http://` and `https://` stay as given, so a replay probes again, and their comment adds "or a static tree". The spec is always written, `''` when empty, so a replay can tell it from the column; the line replays with `--ns`, which connects again.
 
-A 9P root has no access rule. Under the root's overlay, a bare `bind -c '#O' /` after the mount, nothing reaches its server; under `--write=scope` the server decides what can be written, and the plan says so in a caveat. Another caveat covers a TCP root's unencrypted connection.
+A 9P mount has no access rule. On a stack under an overlay, nothing reaches its server; under `--write=scope` the server decides what can be written, and the plan says so in a caveat. Another caveat covers a TCP root's unencrypted connection.
 
-`--write=none` with a 9P root is exit 2, because h9 can't make devmnt read-only.
+`--write=none` with a 9P mount is exit 2, because h9 can't make devmnt read-only.
 
-A WebSocket root's comment is its URL with the query elided (`?…`), its headers with their values as `…`, the proxy it goes through (credentials as `…@`), `--root-ca`, and `cred PATTERN=COMMAND` for the credential helper that matches it, and the unencrypted caveat applies to `ws://` but not `wss://`. A helper's output never appears in the plan.
+A WebSocket mount's comment is its URL with the query elided (`?…`), its headers with their values as `…`, the proxy it goes through (credentials as `…@`), `ca=`, and `cred PATTERN=COMMAND` for the credential helper that matches it, and the unencrypted caveat applies to `ws://` but not `wss://`. A helper's output never appears in the plan.
 
 `/net/ws`'s bind is printed as `bind -a '#ℏ' /net`, and `ℏ` joins the `devmask:` line under `--net=disable`. `--trace` prints no write data, so a URL written to a `ctl` doesn't appear in a trace.
 

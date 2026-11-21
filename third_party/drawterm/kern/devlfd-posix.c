@@ -14,7 +14,7 @@ lfdchan(void *fd)
 	Chan *c;
 	
 	c = newchan();
-	c->type = devno('L');
+	c->type = devno(0x3C6);
 	c->aux = fd;
 	c->path = newpath("fd");
 	c->mode = ORDWR;
@@ -100,7 +100,7 @@ lfdwrite(Chan *c, void *buf, long n, vlong off)
 }
 
 Dev lfddevtab = {
-	'L',
+	0x3C6,	/* φ (h9: design/mounts.md) */
 	"lfd",
 	
 	devreset,

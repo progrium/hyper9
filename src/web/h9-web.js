@@ -4,6 +4,8 @@
 // (h9-node) and in a Web Worker (worker.js), with the page's side of it in
 // createMachine.
 
+import { openStatic, StaticTree, Session } from './statictree.js';
+
 /** Whether this JS engine has JSPI, which h9 needs. */
 export const haveJSPI = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
 
@@ -301,8 +303,9 @@ function wsImports(memory, str, credentials) {
       const n = put(t);
       return n === false ? fail('credentials: answer too long') : n;
     }),
-    ws_open: (up, un, pp, pn, hp, hn) => {
+    ws_open: (up, un, pp, pn, hp, hn, st) => {
       let w;
+      const url = str(up, un);
       try {
         const protocols = pn ? str(pp, pn).split(',') : [];
         const headers = {};
@@ -311,12 +314,12 @@ function wsImports(memory, str, credentials) {
           if (c > 0) headers[l.slice(0, c).trim()] = l.slice(c + 1).trim();
         }
         if (Object.keys(headers).length && !wsHeaders) return -2;
-        w = Object.keys(headers).length ? new WebSocket(str(up, un), { protocols, headers }) : new WebSocket(str(up, un), protocols);
+        w = Object.keys(headers).length ? new WebSocket(url, { protocols, headers }) : new WebSocket(url, protocols);
       } catch {
         return -1;
       }
       w.binaryType = 'arraybuffer';
-      const s = { w, q: [], cur: null, off: 0, open: 0, closed: false, code: 0, reason: '', err: '', waiter: null };
+      const s = { w, q: [], cur: null, off: 0, open: 0, closed: false, code: 0, reason: '', err: '', waiter: null, session: null, protocol: '' };
       w.onopen = () => { s.open = 1; poke(s); };
       w.onerror = () => { s.err = 'connection failed'; };
       w.onmessage = (e) => {
@@ -324,6 +327,26 @@ function wsImports(memory, str, credentials) {
         poke(s);
       };
       w.onclose = (e) => {
+        // An http(s) URL whose server didn't upgrade may be a static
+        // tree, served here (src/web/statictree.js).
+        if (st && s.open === 0 && !s.session) {
+          s.session = 'probing';
+          const http = url.replace(/^ws(s?):/, 'http$1:');
+          openStatic(http).then((t) => {
+            if (t instanceof StaticTree) {
+              s.session = new Session(t);
+              s.protocol = '9p';
+              s.open = 1;
+            } else {
+              s.closed = true;
+              s.code = 1006;
+              s.reason = `no WebSocket and no static tree (${t.message})`;
+              s.open = -1;
+            }
+            poke(s);
+          });
+          return;
+        }
         s.closed = true;
         s.code = e.wasClean ? e.code : 1006;
         s.reason = e.wasClean ? e.reason : (s.err || e.reason || 'connection failed');
@@ -339,7 +362,7 @@ function wsImports(memory, str, credentials) {
       if (!s) return -1;
       await until(s, () => s.open !== 0);
       if (s.open < 0) return -1;
-      const b = enc.encode(s.w.protocol).subarray(0, n);
+      const b = enc.encode(s.session ? s.protocol : s.w.protocol).subarray(0, n);
       u8(p, b.length).set(b);
       return b.length;
     }),
@@ -379,6 +402,11 @@ function wsImports(memory, str, credentials) {
     }),
     ws_send: (id, kind, p, n) => {
       const s = socks.get(id);
+      if (s?.session instanceof Session) {
+        if (s.closed) return -1;
+        s.session.feed(u8(p, n).slice(), (r) => { s.q.push({ text: false, b: r }); poke(s); });
+        return 0;
+      }
       if (!s || s.w.readyState !== 1) return -1;
       const b = u8(p, n).slice();
       s.w.send(kind ? new TextDecoder().decode(b) : b);
@@ -386,6 +414,12 @@ function wsImports(memory, str, credentials) {
     },
     ws_close: (id, code, p, n) => {
       const s = socks.get(id);
+      if (s?.session instanceof Session) {
+        s.closed = true;
+        s.code = 1000;
+        poke(s);
+        return;
+      }
       if (!s || s.w.readyState >= 2) return;
       // A page may only send 1000 or 3000 to 4999.
       try { s.w.close(code === 1000 || (code >= 3000 && code <= 4999) ? code : 1000, str(p, n)); } catch { s.w.close(); }
@@ -553,6 +587,55 @@ export class GfxHost {
 // The h9 flags for a policy object, which takes Policy's fields under
 // their CLI names: profile, write, net, memory, timeout, pids, cpus,
 // readable, writable, and readDeny (lists), and env (an object).
+/**
+ * A mount for createMachine (design/mounts.md): { kind, src, dst, opts },
+ * from a flag's string or an object.
+ */
+export function mountOf(m) {
+  const kinds = ['archive', 'url', 'dir', 'builtin', 'tmp'];
+  if (typeof m === 'string') {
+    const f = m.match(/^--(archive|url|dir|builtin|tmp)(?:[ =](.*))?$/s);
+    if (!f) throw new Error(`mount ${JSON.stringify(m)}: not --archive, --url, --dir, --builtin, or --tmp`);
+    const kind = f[1], arg = f[2] ?? '';
+    if (kind === 'builtin' || kind === 'tmp') {
+      const [dst = '', ...rest] = arg.split(':');
+      return { kind, src: '', dst, opts: rest.join(':') };
+    }
+    const at = dstStart(arg);
+    if (at < 0) return { kind, src: arg, dst: '', opts: '' };
+    const tail = arg.slice(at + 1);
+    const c = tail.indexOf(':');
+    return { kind, src: arg.slice(0, at), dst: c < 0 ? tail : tail.slice(0, c), opts: c < 0 ? '' : tail.slice(c + 1) };
+  }
+  if (m instanceof URL) return { kind: 'archive', src: String(m), dst: '', opts: '' };
+  const kind = kinds.find((k) => m[k] !== undefined && m[k] !== false);
+  if (!kind) throw new Error(`mount ${JSON.stringify(m)}: no archive, url, dir, builtin, or tmp`);
+  const src = kind === 'builtin' || kind === 'tmp' ? '' : String(m[kind]);
+  const opts = Array.isArray(m.opts) ? m.opts.join(',') : m.opts ?? '';
+  return { kind, src, dst: m.dst ?? '', opts };
+}
+
+// Where DST starts in a mount flag's value: the last `:` before `/` or `#`,
+// except a URL's `://` (as src/mount.zig's dstStart); -1 if there's none.
+function dstStart(arg) {
+  const sch = arg.match(/^[A-Za-z0-9+.-]+(?=:\/\/)/);
+  for (let i = arg.length - 2; i >= 0; i--) {
+    if (arg[i] !== ':' || (arg[i + 1] !== '/' && arg[i + 1] !== '#')) continue;
+    if (sch && i === sch[0].length) continue;
+    return i;
+  }
+  return -1;
+}
+
+/** A mount's flag for h9's argv, its source given as `src`. */
+export function mountFlag(m, src = m.src) {
+  const kind = m.kind === 'archive' ? 'dir' : m.kind;
+  const parts = kind === 'builtin' || kind === 'tmp' ? [] : [src];
+  if (m.dst || m.opts) parts.push(m.dst || '/');
+  if (m.opts) parts.push(m.opts);
+  return parts.length ? `--${kind}=${parts.join(':')}` : `--${kind}`;
+}
+
 function policyFlags(policy = {}) {
   const f = [];
   const one = { profile: '--profile', write: '--write', net: '--net', memory: '--memory', timeout: '--timeout', pids: '--pids', cpus: '--cpus' };
@@ -749,14 +832,15 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * A machine in its own Worker (design/epoch-0/browser-host.md), from the
  * page:
  *
- * - root: the root archive's URL (default root.h9a beside this file,
- *   unless there are layers), or a ws:// or wss:// URL of a 9P server
- *   (design/epoch-0/websocket-9p.md)
- * - layers: more root archives, each a URL or { url, at }, unpacked in
- *   order over the root archive, a later file replacing an earlier one,
- *   each under its directory `at` (default /). Together they're the tree
- *   at /, h9's --root. A 9front tree layered at a Linux root's /9 is
- *   named by a second `--root /9` in argv (design/epoch-0/linux-personality.md)
+ * - mounts: the machine's mounts (design/mounts.md), in order, each a
+ *   flag's string, such as '--archive=linux.h9a:#L' or
+ *   '--url wss://fs.example/9p:/n/fs', or an object: { archive: URL },
+ *   { url: URL }, { builtin: true }, or { tmp: true }, with dst (default
+ *   /) and opts ('ro', 'b', and so on, a string or a list). An archive is
+ *   fetched and its tree stacked where dst says. A static tree over
+ *   http:// or https:// is read with the page's fetch. With no mounts,
+ *   root.h9a beside this file is the root
+ * - binds: --bind lines, each 'SRC:DST[:OPTS]'
  * - memory: --memory, such as '256M'
  * - backend: --backend: 'emu' (h9's own CPUs, h86, ha64, and hx64, the default) or 'v86', its old name
  * - arch: --arch: the guest's CPU, '386' (h86, the default), 'arm64'
@@ -789,15 +873,15 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * machine.interrupt() is the interrupt key, machine.hangup() posts
  * hangup, as closing a native window does, and machine.terminate() ends
  * the Worker. machine._put(path, data, mode) adds a file (bytes, an
- * ArrayBuffer, or a string) to the root archive's tree at path, relative
- * to the root, making its directories, while the machine runs or before;
+ * ArrayBuffer, or a string) to the first archive's tree at path, relative
+ * to its top, making its directories, while the machine runs or before;
  * mode defaults to 0644. It's provisional, so the underscore: a file the
- * guest has written or removed at path hides it, and there's nothing for
- * a ws:// root. The machine is an EventTarget: with gfx, a write to
+ * guest has written or removed at path hides it, and there's nothing
+ * without an archive. The machine is an EventTarget: with gfx, a write to
  * /dev/snarf that the page's clipboard refuses fires a `snarf` event
  * whose `text` is what was written.
  */
-export async function createMachine({ root, layers = [], memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials } = {}) {
+export async function createMachine({ mounts, binds = [], memory, backend, arch, policy, terminal, tty = false, gfx, env, credentials } = {}) {
   if (!haveJSPI) throw new Error('this browser lacks JavaScript Promise Integration');
   if (gfx && typeof gfx.canvas?.transferControlToOffscreen !== 'function') throw new Error("this browser can't draw from a Worker");
   const clipboard = (gfx?.clipboard ?? 'page') !== 'private';
@@ -810,6 +894,7 @@ export async function createMachine({ root, layers = [], memory, backend, arch, 
     run(argv) {
       if (started) return Promise.reject(new Error('a machine runs once'));
       started = true;
+      const ms = (mounts ?? [{ archive: new URL('root.h9a', import.meta.url) }]).map(mountOf);
       const flags = [...(backend ? ['--backend', backend] : []), ...(arch ? ['--arch', arch] : []), ...(memory ? [`--memory=${memory}`] : []), ...policyFlags(policy)];
       let onGfx = () => false;
       let start = {}, transfer = [];
@@ -841,8 +926,9 @@ export async function createMachine({ root, layers = [], memory, backend, arch, 
         };
         worker.onerror = (e) => reject(new Error(e.message));
         const url = (u) => String(new URL(u, location.href));
-        const layerList = layers.map((l) => (typeof l === 'object' && !(l instanceof URL) ? { url: url(l.url), at: l.at ?? '/' } : { url: url(l), at: '/' }));
-        worker.postMessage({ type: 'start', argv: [...flags, ...argv], root: root && url(root), layers: layerList, tty, env, credentials: typeof credentials === 'function', ...start }, transfer);
+        for (const m of ms) if (m.kind === 'archive' || (m.kind === 'url' && /^https?:/i.test(m.src))) m.src = url(m.src);
+        const bindFlags = binds.flatMap((b) => ['--bind', b]);
+        worker.postMessage({ type: 'start', argv: [...flags, ...bindFlags, ...argv], mounts: ms, tty, env, credentials: typeof credentials === 'function', ...start }, transfer);
       });
     },
     input(data) {

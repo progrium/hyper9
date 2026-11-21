@@ -3,12 +3,12 @@
 //! its own environment, captures each machine's output in memory, and
 //! prints the results in order.
 //!
-//!     embed [-j N] [--root DIR] PROGRAM [ARG...]
+//!     embed [-j N] [--dir DIR] PROGRAM [ARG...]
 //!
 //! PROGRAM is read on the host when it starts with `./` or `../`, as with
 //! the CLI, or is any path and there's no root tree; it's a 9front a.out.
 //! Otherwise it's a guest path or name (`rc`, `/bin/ls`) in the root tree. Each machine sees its
-//! index in `$machine`, so `embed -j 3 --root R rc -c 'echo $machine'`
+//! index in `$machine`, so `embed -j 3 --dir R rc -c 'echo $machine'`
 //! prints 0, 1 and 2. `zig build embed` builds it, and `zig build test`
 //! runs it on the hello fixture.
 
@@ -16,7 +16,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const h9 = @import("h9");
 
-const usage = "usage: embed [-j N] [--root DIR] PROGRAM [ARG...]\n";
+const usage = "usage: embed [-j N] [--dir DIR] PROGRAM [ARG...]\n";
 
 /// One machine's run, filled in on its thread.
 const Job = struct {
@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (i + 1 >= args.len) break;
         if (std.mem.eql(u8, args[i], "-j")) {
             jobs_n = std.fmt.parseInt(usize, args[i + 1], 10) catch 0;
-        } else if (std.mem.eql(u8, args[i], "--root")) {
+        } else if (std.mem.eql(u8, args[i], "--dir")) {
             root_arg = args[i + 1];
         } else break;
     }
@@ -99,16 +99,16 @@ pub fn main(init: std.process.Init) !u8 {
         break :blk .{ .bytes = bytes };
     } else .{ .guest = argv[0] };
 
-    // Host paths in Options (root, cwd and the policy's) must be absolute
-    // with symlinks resolved.
-    const root: ?h9.Root = if (root_arg) |r|
-        .{ .dir = try std.Io.Dir.cwd().realPathFileAlloc(io, r, arena) }
+    // Host paths in Options (mounts, cwd and the policy's) must be
+    // absolute with symlinks resolved. The tree is the root, `/`.
+    const root: []const h9.Machine.Mount = if (root_arg) |r|
+        try arena.dupe(h9.Machine.Mount, &.{.{ .kind = .dir, .src = try std.Io.Dir.cwd().realPathFileAlloc(io, r, arena) }})
     else
-        null;
+        &.{};
 
     const base: h9.Machine.Options = .{
         .arch = arch,
-        .root = root,
+        .mounts = root,
         .policy = .{
             .net = .disable,
             .memory = 256 << 20,

@@ -8,7 +8,7 @@ pub const loader = @import("loader.zig");
 pub const segment = @import("segment.zig");
 pub const kern = @import("kern.zig");
 pub const Machine = @import("machine.zig").Machine;
-pub const Root = Machine.Root;
+pub const Mount = Machine.Mount;
 pub const Status = @import("machine.zig").Status;
 pub const RootChanges = @import("machine.zig").RootChanges;
 pub const Program = @import("machine.zig").Program;
@@ -53,6 +53,7 @@ test {
     _ = guestmem;
     _ = syscall;
     _ = policy;
+    _ = @import("mount.zig");
     _ = newns;
     _ = consin;
     _ = ws;
@@ -76,4 +77,5 @@ test {
     _ = @import("dotl/kern.zig");
     _ = rootindex;
     _ = @import("rootindex/kern.zig");
+    _ = @import("statictree.zig");
 }

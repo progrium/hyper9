@@ -3,8 +3,11 @@
 //! the machine runs the operations through the kernel.
 //!
 //! Supported: `bind`, `mount`, `unmount`, `cd` and `clear`, with the flags
-//! `-a`, `-b`, `-c` and `-C`, `#` comments, and `'` quoting (`''` is a
-//! literal quote). As in newns, a failed operation doesn't stop the replay.
+//! `-a`, `-b`, `-c`, `-C`, and `-r` (a union merged at every depth,
+//! design/mounts.md), `#` comments, and `'` quoting (`''` is a literal
+//! quote). A `;` outside quotes ends a line, as a newline does, so
+//! `--ns` takes a namespace inline, and a comment ends at either. As in
+//! newns, a failed operation doesn't stop the replay.
 //! `--print`'s trailing ro/rw/eph/9p/builtin column and `<id>` console placeholder
 //! are accepted, so its output replays as-is. A `bind` from a bare `#O` makes
 //! a fresh copy-on-write overlay over whatever its target is at that point
@@ -15,7 +18,9 @@ const std = @import("std");
 
 pub const Op = union(enum) {
     bind: struct { from: []const u8, to: []const u8, flag: Flag },
-    mount: struct { file: []const u8, to: []const u8, spec: []const u8, flag: Flag },
+    /// `settings` are a URL mount's trailing `key=value` words
+    /// (design/mounts.md, "Namespace files").
+    mount: struct { file: []const u8, to: []const u8, spec: []const u8, flag: Flag, settings: []const []const u8 = &.{} },
     unmount: struct { from: ?[]const u8, to: []const u8 },
     cd: []const u8,
     clear,
@@ -25,6 +30,8 @@ pub const Flag = struct {
     order: enum { repl, before, after } = .repl,
     create: bool = false,
     cache: bool = false,
+    /// `-r`: a union merged at every depth (design/mounts.md).
+    recursive: bool = false,
 };
 
 pub const Error = error{ OutOfMemory, Syntax };
@@ -37,13 +44,49 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, line_no: *usize) Error!
     line_no.* = 0;
     while (lines.next()) |raw| {
         line_no.* += 1;
-        var args: std.ArrayList([]const u8) = .empty;
-        try split(arena, raw, &args);
-        if (args.items.len == 0) continue;
-        const op = try parseLine(args.items);
-        try ops.append(arena, op);
+        var rest = raw;
+        while (rest.len > 0) {
+            var args: std.ArrayList([]const u8) = .empty;
+            rest = try split(arena, rest, &args);
+            if (args.items.len == 0) continue;
+            for (args.items) |*w| w.* = try alias(arena, w.*);
+            const op = try parseLine(args.items);
+            try ops.append(arena, op);
+        }
     }
     return ops.items;
+}
+
+/// devlinux was `#λ` before design/mounts.md renamed it `#L`, and
+/// namespace files may still name it so.
+fn alias(arena: std.mem.Allocator, w: []const u8) Error![]const u8 {
+    const old = "#\u{3bb}";
+    if (!std.mem.startsWith(u8, w, old)) return w;
+    return std.mem.concat(arena, u8, &.{ "#L", w[old.len..] });
+}
+
+/// Whether `word` is a command a namespace file can start a line with.
+pub fn isCommand(word: []const u8) bool {
+    for ([_][]const u8{ "bind", "mount", "unmount", "cd", "clear" }) |c| if (std.mem.eql(u8, word, c)) return true;
+    return false;
+}
+
+/// The first word of the line a syntax error is on, for `--ns`'s hint
+/// about a bare file name: empty if the line has none.
+pub fn firstWord(arena: std.mem.Allocator, text: []const u8, line_no: usize) []const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var n: usize = 0;
+    while (lines.next()) |raw| {
+        n += 1;
+        if (n != line_no) continue;
+        var rest = raw;
+        while (rest.len > 0) {
+            var args: std.ArrayList([]const u8) = .empty;
+            rest = split(arena, rest, &args) catch return "";
+            if (args.items.len > 0 and !isCommand(args.items[0])) return args.items[0];
+        }
+    }
+    return "";
 }
 
 fn parseLine(argv: []const []const u8) Error!Op {
@@ -56,17 +99,29 @@ fn parseLine(argv: []const []const u8) Error!Op {
             'b' => flag.order = .before,
             'c' => flag.create = true,
             'C' => flag.cache = true,
+            'r' => flag.recursive = true,
             else => return error.Syntax,
         };
     }
     var rest = argv[i..];
     // --print's access column. --print always writes a mount's spec, ''
-    // when empty, so a mount's column is its fourth word.
+    // when empty, so a mount's column comes after it and its settings.
     if (rest.len == 3 and std.mem.eql(u8, cmd, "bind") and isAccess(rest[2])) {
         rest = rest[0 .. rest.len - 1];
     }
-    if (rest.len == 4 and std.mem.eql(u8, cmd, "mount") and isAccess(rest[3])) {
+    if (rest.len >= 4 and std.mem.eql(u8, cmd, "mount") and isAccess(rest[rest.len - 1])) {
         rest = rest[0 .. rest.len - 1];
+    }
+    // A mount's settings: `key=value` words after its spec.
+    var nset: usize = 0;
+    if (std.mem.eql(u8, cmd, "mount")) {
+        while (rest.len - nset > 3 and isSetting(rest[rest.len - 1 - nset])) nset += 1;
+    }
+    if (nset > 0) {
+        const settings = rest[rest.len - nset ..];
+        rest = rest[0 .. rest.len - nset];
+        if (rest.len == 3) return .{ .mount = .{ .file = rest[0], .to = rest[1], .spec = rest[2], .flag = flag, .settings = settings } };
+        return error.Syntax;
     }
     if (std.mem.eql(u8, cmd, "bind") and rest.len == 2) return .{ .bind = .{ .from = rest[0], .to = rest[1], .flag = flag } };
     if (std.mem.eql(u8, cmd, "mount") and (rest.len == 2 or rest.len == 3))
@@ -78,18 +133,31 @@ fn parseLine(argv: []const []const u8) Error!Op {
     return error.Syntax;
 }
 
+fn isSetting(s: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, s, '=') orelse return false;
+    for ([_][]const u8{ "user", "header", "ca", "spec", "index", "auth" }) |k| if (std.mem.eql(u8, s[0..eq], k)) return true;
+    return false;
+}
+
 fn isAccess(s: []const u8) bool {
     for ([_][]const u8{ "ro", "rw", "eph", "9p", "builtin" }) |a| if (std.mem.eql(u8, s, a)) return true;
     return false;
 }
 
-/// Splits a line into arguments on blanks, honouring `'` quoting, and
-/// stops at an unquoted `#` that starts a word.
-fn split(arena: std.mem.Allocator, line: []const u8, out: *std.ArrayList([]const u8)) Error!void {
+/// Splits one line into arguments on blanks, honouring `'` quoting. It
+/// ends at a `;` outside quotes, or the end of `line`, and a `#` that
+/// starts a word begins a comment up to either. Returns what's left of
+/// `line` after the `;`.
+fn split(arena: std.mem.Allocator, line: []const u8, out: *std.ArrayList([]const u8)) Error![]const u8 {
     var i: usize = 0;
     while (true) {
         while (i < line.len and (line[i] == ' ' or line[i] == '\t' or line[i] == '\r')) i += 1;
-        if (i >= line.len or line[i] == '#') return;
+        if (i >= line.len) return line[line.len..];
+        if (line[i] == ';') return line[i + 1 ..];
+        if (line[i] == '#') {
+            const e = std.mem.indexOfScalarPos(u8, line, i, ';') orelse return line[line.len..];
+            return line[e + 1 ..];
+        }
         var word: std.ArrayList(u8) = .empty;
         var quoted = false;
         while (i < line.len) : (i += 1) {
@@ -101,7 +169,7 @@ fn split(arena: std.mem.Allocator, line: []const u8, out: *std.ArrayList([]const
                 } else quoted = !quoted;
                 continue;
             }
-            if (!quoted and (ch == ' ' or ch == '\t' or ch == '\r')) break;
+            if (!quoted and (ch == ' ' or ch == '\t' or ch == '\r' or ch == ';')) break;
             try word.append(arena, ch);
         }
         if (quoted) return error.Syntax;
@@ -178,4 +246,53 @@ test "syntax errors name the line" {
     try t.expectError(error.Syntax, parse(arena.allocator(), "bind -x /a /b\n", &line));
     try t.expectError(error.Syntax, parse(arena.allocator(), "bind 'open /b\n", &line));
     try t.expectError(error.Syntax, parse(arena.allocator(), "frob /a\n", &line));
+}
+
+test "; splits lines outside quotes [mounts]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var line: usize = 0;
+    const ops = try parse(arena.allocator(), "bind -b /a /bin; mount -c tcp!fs!564 /n/fs;bind '/a;b' /x", &line);
+    try t.expectEqual(@as(usize, 3), ops.len);
+    try t.expectEqualStrings("/a", ops[0].bind.from);
+    try t.expectEqualStrings("tcp!fs!564", ops[1].mount.file);
+    try t.expectEqualStrings("/a;b", ops[2].bind.from);
+}
+
+test "comments end at ; [mounts]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var line: usize = 0;
+    const ops = try parse(arena.allocator(), "# first; bind /a /b # trailing; bind /c /d", &line);
+    try t.expectEqual(@as(usize, 2), ops.len);
+    try t.expectEqualStrings("/a", ops[0].bind.from);
+    try t.expectEqualStrings("/c", ops[1].bind.from);
+}
+
+test "bind -r [mounts]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var line: usize = 0;
+    const ops = try parse(arena.allocator(), "bind -r -bc /a '#Oroot'", &line);
+    try t.expect(ops[0].bind.flag.recursive);
+    try t.expect(ops[0].bind.flag.create);
+    try t.expectEqual(.before, ops[0].bind.flag.order);
+    try t.expectEqualStrings("#Oroot", ops[0].bind.to);
+}
+
+test "a bare file name is a syntax error, with its word for the hint [mounts]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var line: usize = 0;
+    try t.expectError(error.Syntax, parse(arena.allocator(), "ns", &line));
+    try t.expectEqualStrings("ns", firstWord(arena.allocator(), "ns", line));
+}
+
+test "#λ is an alias for #L [mounts]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var line: usize = 0;
+    const ops = try parse(arena.allocator(), "bind /tmp '#\u{3bb}/tmp'; bind '#\u{3bb}etc' /n", &line);
+    try t.expectEqualStrings("#L/tmp", ops[0].bind.to);
+    try t.expectEqualStrings("#Letc", ops[1].bind.from);
 }

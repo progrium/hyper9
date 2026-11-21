@@ -536,7 +536,7 @@ fn addArch(c: Ctx, dest: []const u8, arch: []const u8, keep_src: bool, tmp_paren
     const term = blk: {
         defer if (copied and !keep_src) c.rmTree(src);
         var child = std.process.spawn(io, .{
-            .argv = &.{ h9, "--arch", "arm64", "--root", dest, "--writable", dest, "--rc", cmd },
+            .argv = &.{ h9, "--arch", "arm64", "--dir", dest, "--writable", dest, "--rc", cmd },
             .stdin = .ignore,
             .stdout = .{ .file = out },
             .stderr = .{ .file = out },

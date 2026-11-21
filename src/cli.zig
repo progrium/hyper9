@@ -9,20 +9,24 @@ const RootChanges = @import("h9").RootChanges;
 const gfx = @import("h9").gfx;
 const serve = @import("h9").serve;
 const cred = @import("h9").cred;
+const mount = @import("h9").policy.mount;
+
+/// Why the last `parse` failed, when there's more to say than the usage:
+/// a mount flag's mistake, or a removed flag's replacement.
+pub var why: []const u8 = "";
 
 pub const usage =
     \\usage: h9 [--backend auto|hvf|kvm|whp|native|emu] [--arch arm64|amd64|386]
-    \\           [--root DIR|DIAL|SOCKET|URL] [--root-spec NAME] [--root-user NAME]
-    \\           [--root-header 'NAME: VALUE'|@FILE]... [--root-ca FILE] [--cwd DIR]
-    \\           [--cred 'PATTERN=COMMAND']...
-    \\           [--root-index FILE|URL] [--index auto|none] [--index-cache DIR]
+    \\           [--dir PATH[:DST[:OPTS]]]... [--url URL[:DST[:OPTS]]]...
+    \\           [--archive FILE[:DST[:OPTS]]]... [--builtin[=DST[:OPTS]]]...
+    \\           [--tmp DST[:OPTS]]... [--bind SRC:DST[:OPTS]]... [--cwd DIR]
+    \\           [--cred 'PATTERN=COMMAND']... [--index auto|none] [--index-cache DIR]
     \\           [--env name=value]... [--profile default|tight] [--sandbox DIR]
     \\           [--readable PATH]... [--writable PATH]... [--read-deny PATH]...
     \\           [--write none|scope|ephemeral|overlay] [--net disable|outbound|enable]
-    \\           [--net-allow PATTERN]... [--root-contained] [--user-map FILE]
-    \\           [--builtin auto|only|before|after|off]
+    \\           [--net-allow PATTERN]... [--user-map FILE]
     \\           [--memory SIZE] [--timeout DURATION] [--pids N] [--cpus N]
-    \\           [--ns FILE] [--host-fs] [--no-guest-tools]
+    \\           [--ns 'LINE; LINE'|@FILE]... [--host-fs] [--no-guest-tools]
     \\           [--gfx[=noclip]] [--gfx-scale N]
     \\           [--serve unix!PATH|tcp!HOST!PORT|ws://HOST:PORT[/PATH]]...
     \\           [--serve-root PATH] [--serve-token @FILE] [--serve-origin ORIGIN]...
@@ -32,7 +36,7 @@ pub const usage =
     \\       h9 [flags] --rc 'command' [args...]
     \\       h9 [flags] --rc
     \\       h9 [flags] --serve ADDR...
-    \\       h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] [--builtin MODE] [--memory SIZE] --check
+    \\       h9 [--backend B] [mount flags] [--memory SIZE] --check
     \\       h9 --version
     \\       h9 --help
     \\
@@ -49,11 +53,6 @@ pub const Mode = enum {
     help,
 };
 
-/// --builtin (design/epoch-0/builtin-root.md): how the built-in root takes part.
-/// `auto` is `only` when no root is found and `off` otherwise; the rest
-/// are `policy.Builtin`'s.
-pub const BuiltinMode = enum { auto, only, before, after, off };
-
 /// --index (design/mount-index.md).
 pub const IndexMode = enum { auto, none };
 
@@ -65,26 +64,15 @@ pub const Config = struct {
     arch: ?vmm.Arch = null,
     /// --trace: null for none, "" for stderr, else a file.
     trace: ?[]const u8 = null,
-    /// --root; null means $H9ROOT, then the default. See `rootArg`.
-    root: ?[]const u8 = null,
-    /// A second --root, for a machine with a 9front and a Linux root
-    /// (design/epoch-0/linux-personality.md, "CLI and API").
-    root2: ?[]const u8 = null,
-    /// --root-spec: the attach name sent to a 9P root.
-    root_spec: []const u8 = "",
-    /// --root-user: the uname sent in attaches to a 9P root.
-    root_user: ?[]const u8 = null,
-    /// --root-header values as given: `Name: value`, or `@FILE` for a host
-    /// file of them (design/epoch-0/websocket-9p.md).
-    root_headers: []const []const u8 = &.{},
-    /// --root-ca: PEM certificates a wss:// root must chain to.
-    root_ca: ?[]const u8 = null,
+    /// The mount flags in order (design/mounts.md): --dir, --url,
+    /// --archive, --builtin, and --tmp. A --dir's path is as given; the
+    /// caller resolves it.
+    mounts: []const mount.Mount = &.{},
+    /// --bind values in order.
+    binds: []const mount.Bind = &.{},
     /// --cred values, `PATTERN=COMMAND`, checked
     /// (design/credential-helpers.md).
     cred: []const []const u8 = &.{},
-    /// --root-index: an index for the 9P root, a host file or an
-    /// `https://` or `http://` URL (design/mount-index.md).
-    root_index: ?[]const u8 = null,
     /// --index: whether indexes are used.
     index: IndexMode = .auto,
     /// --index-cache: where compiled indexes are kept; null for the
@@ -95,9 +83,6 @@ pub const Config = struct {
     /// --user-map: a passwd file mapping names to the numbers a 9P2000.L
     /// server sees (design/epoch-0/dotl.md).
     user_map: ?[]const u8 = null,
-    /// --root-contained: the root tree's symlinks resolve inside it
-    /// (design/epoch-0/symlinks-in-root.md).
-    root_contained: bool = false,
     /// --cwd: the host directory bound at /mnt/term/cwd; null means the
     /// host cwd.
     cwd: ?[]const u8 = null,
@@ -117,14 +102,13 @@ pub const Config = struct {
     timeout_ns: ?u64 = null,
     pids: ?u32 = null,
     cpus: ?u32 = null,
-    /// --ns: a namespace file, in newns syntax, replayed before the program.
-    ns: ?[]const u8 = null,
+    /// --ns values in order: namespace lines inline, with `;` between
+    /// them, or `@FILE` for a host file (design/mounts.md).
+    ns: []const []const u8 = &.{},
     host_fs: bool = false,
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
     /// (design/epoch-0/guest-tools.md).
     guest_tools: bool = true,
-    /// --builtin.
-    builtin: BuiltinMode = .auto,
     /// --gfx, --gfx=noclip and --gfx-scale: a host window
     /// (design/epoch-0/gfx.md); null without --gfx.
     gfx: ?gfx.Options = null,
@@ -174,10 +158,13 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     var writable: std.ArrayList([]const u8) = .empty;
     var read_deny: std.ArrayList([]const u8) = .empty;
     var net_allow: std.ArrayList([]const u8) = .empty;
-    var root_headers: std.ArrayList([]const u8) = .empty;
+    var mounts: std.ArrayList(mount.Mount) = .empty;
+    var binds: std.ArrayList(mount.Bind) = .empty;
     var creds: std.ArrayList([]const u8) = .empty;
+    why = "";
     var serve_addrs: std.ArrayList([]const u8) = .empty;
     var serve_origins: std.ArrayList([]const u8) = .empty;
+    var ns: std.ArrayList([]const u8) = .empty;
     var gfx_scale: ?u8 = null;
     // Long flags only (SPEC.md, "Parsing rules"); -h is accepted alone,
     // where it can't be a program's flag.
@@ -231,15 +218,10 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             const addr = v orelse return error.Usage;
             _ = serve.Listen.parse(addr) catch return error.Usage;
             try serve_addrs.append(gpa, addr);
-        } else if (flag(a, "--root-contained")) {
-            c.root_contained = true;
         } else if (flag(a, "--print")) {
             c.print = true;
         } else if (flag(a, "--verbose")) {
             c.verbose = true;
-        } else if (value(args, &i, "--root-index")) |v| {
-            c.root_index = v orelse return error.Usage;
-            if (c.root_index.?.len == 0) return error.Usage;
         } else if (value(args, &i, "--index-cache")) |v| {
             c.index_cache = v orelse return error.Usage;
             if (c.index_cache.?.len == 0) return error.Usage;
@@ -258,15 +240,6 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
             c.backend = try enumValue(vmm.BackendKind, v);
         } else if (value(args, &i, "--arch")) |v| {
             c.arch = vmm.Arch.fromName(v orelse return error.Usage) orelse return error.Usage;
-        } else if (value(args, &i, "--root-spec")) |v| {
-            c.root_spec = v orelse return error.Usage;
-        } else if (value(args, &i, "--root-user")) |v| {
-            c.root_user = v orelse return error.Usage;
-            if (c.root_user.?.len == 0) return error.Usage;
-        } else if (value(args, &i, "--root-header")) |v| {
-            const h = v orelse return error.Usage;
-            if (h.len == 0) return error.Usage;
-            try root_headers.append(gpa, h);
         } else if (value(args, &i, "--cred")) |v| {
             const spec = v orelse return error.Usage;
             const h = cred.parse(gpa, spec) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Usage;
@@ -275,17 +248,6 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (value(args, &i, "--user-map")) |v| {
             c.user_map = v orelse return error.Usage;
             if (c.user_map.?.len == 0) return error.Usage;
-        } else if (value(args, &i, "--root-ca")) |v| {
-            c.root_ca = v orelse return error.Usage;
-            if (c.root_ca.?.len == 0) return error.Usage;
-        } else if (value(args, &i, "--root")) |v| {
-            const r = v orelse return error.Usage;
-            // The last two count: one may be a 9front tree and one a Linux
-            // tree, and a later one of a kind replaces an earlier one.
-            if (c.root == null) c.root = r else if (c.root2 == null) c.root2 = r else {
-                c.root = c.root2;
-                c.root2 = r;
-            }
         } else if (value(args, &i, "--cwd")) |v| {
             c.cwd = v orelse return error.Usage;
         } else if (value(args, &i, "--env")) |v| {
@@ -319,9 +281,32 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         } else if (value(args, &i, "--cpus")) |v| {
             c.cpus = try count(v);
         } else if (value(args, &i, "--ns")) |v| {
-            c.ns = v orelse return error.Usage;
-        } else if (value(args, &i, "--builtin")) |v| {
-            c.builtin = try enumValue(BuiltinMode, v);
+            const text = v orelse return error.Usage;
+            if (text.len == 0 or std.mem.eql(u8, text, "@")) return error.Usage;
+            try ns.append(gpa, text);
+        } else if (removed(a)) |r| {
+            why = r;
+            return error.Usage;
+        } else if (flag(a, "--builtin") or std.mem.startsWith(u8, a, "--builtin=")) {
+            // No value but after `=`, so `--builtin rc` runs rc.
+            const v = if (a.len > "--builtin".len) a["--builtin=".len..] else "";
+            if (std.meta.stringToEnum(enum { auto, only, before, after, off }, v) != null or
+                (v.len == 0 and i + 1 < args.len and std.meta.stringToEnum(enum { auto, only, before, after, off }, args[i + 1]) != null))
+            {
+                why = "--builtin MODE was removed: use --builtin alone for the bottom of /, --builtin=/:b for its top, or a --dir or --url on / without --builtin to leave it out";
+                return error.Usage;
+            }
+            try mounts.append(gpa, try mountFlag(gpa, .builtin, v));
+        } else if (value(args, &i, "--dir")) |v| {
+            try mounts.append(gpa, try mountFlag(gpa, .dir, v orelse return error.Usage));
+        } else if (value(args, &i, "--url")) |v| {
+            try mounts.append(gpa, try mountFlag(gpa, .url, v orelse return error.Usage));
+        } else if (value(args, &i, "--archive")) |v| {
+            try mounts.append(gpa, try mountFlag(gpa, .archive, v orelse return error.Usage));
+        } else if (value(args, &i, "--tmp")) |v| {
+            try mounts.append(gpa, try mountFlag(gpa, .tmp, v orelse return error.Usage));
+        } else if (value(args, &i, "--bind")) |v| {
+            try binds.append(gpa, try bindFlag(gpa, v orelse return error.Usage));
         } else if (value(args, &i, "--rc")) |v| {
             // With no value, --rc is the last argument: a login rc.
             c.rc = v;
@@ -335,8 +320,6 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         if (c.gfx == null) return error.Usage;
         c.gfx.?.scale = n;
     }
-    // --builtin=only is the root, so another can't be named.
-    if (c.builtin == .only and c.root != null) return error.Usage;
     if (c.sandbox != null) {
         if (c.host_fs or c.cwd != null) return error.Usage;
         c.profile = .tight;
@@ -359,116 +342,53 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     c.writable = try writable.toOwnedSlice(gpa);
     c.read_deny = try read_deny.toOwnedSlice(gpa);
     c.net_allow = try net_allow.toOwnedSlice(gpa);
-    c.root_headers = try root_headers.toOwnedSlice(gpa);
     c.cred = try creds.toOwnedSlice(gpa);
+    c.mounts = try mounts.toOwnedSlice(gpa);
+    c.binds = try binds.toOwnedSlice(gpa);
+    c.ns = try ns.toOwnedSlice(gpa);
     c.argv = args[i..];
     return c;
 }
 
-/// What a --root or $H9ROOT value names (design/epoch-0/ninep-roots.md).
-pub const RootArg = union(enum) {
-    /// `tcp!host!port`, with `tcp!host` given port 564 (9fs).
-    tcp: []const u8,
-    /// `unix!path`: the socket's host path.
-    unix: []const u8,
-    /// A `ws://` or `wss://` URL (design/epoch-0/websocket-9p.md).
-    ws: []const u8,
-    /// Anything else: a host path, a directory or a socket, which the
-    /// caller tells apart with stat.
-    path: []const u8,
-};
-
-/// Reads a --root value. `tcp!` and `unix!` with nothing after them, or
-/// a TCP dial string with more than a host and a port, are errors.
-pub fn rootArg(arena: std.mem.Allocator, arg: []const u8) error{ OutOfMemory, BadDial }!RootArg {
-    if (ws.Url.is(arg)) {
-        _ = ws.Url.parse(arg) catch return error.BadDial;
-        return .{ .ws = arg };
-    }
-    if (std.mem.startsWith(u8, arg, "tcp!")) {
-        const rest = arg["tcp!".len..];
-        var parts = std.mem.splitScalar(u8, rest, '!');
-        const host = parts.next().?;
-        const port = parts.next();
-        if (host.len == 0 or parts.next() != null) return error.BadDial;
-        if (port) |p| {
-            if (p.len == 0) return error.BadDial;
-            return .{ .tcp = arg };
-        }
-        return .{ .tcp = try std.fmt.allocPrint(arena, "{s}!564", .{arg}) };
-    }
-    if (std.mem.startsWith(u8, arg, "unix!")) {
-        const path = arg["unix!".len..];
-        if (path.len == 0) return error.BadDial;
-        return .{ .unix = path };
-    }
-    return .{ .path = arg };
-}
-
-/// The URL a --root value without a scheme names
-/// (design/epoch-0/schemeless-roots.md), or null if it isn't shaped like
-/// one: `host[:port][/path][?query]`, where the host is `localhost`, a
-/// dotted name, or a bracketed IPv6 address, or there's a port. A
-/// loopback host (`localhost`, 127.0.0.0/8, `[::1]`) is `ws://`, any
-/// other `wss://`. The caller tries the value as a host path first.
-pub fn schemelessRoot(arena: std.mem.Allocator, arg: []const u8) error{OutOfMemory}!?[]const u8 {
-    if (arg.len == 0) return null;
-    switch (arg[0]) {
-        '.', '/', '~', '-' => return null,
-        else => {},
-    }
-    for (arg) |c| switch (c) {
-        '\\', '!', '@' => return null,
-        else => if (c <= ' ' or c == 0x7f) return null,
+/// The flags design/mounts.md removed, and what replaces each, for the
+/// usage error (exit 2) that names it.
+fn removed(a: []const u8) ?[]const u8 {
+    const list = [_]struct { []const u8, []const u8 }{
+        .{ "--root-spec", "--root-spec was removed: use spec=NAME, as in --url URL:/:spec=NAME" },
+        .{ "--root-user", "--root-user was removed: use user=NAME, as in --url URL:/:user=NAME" },
+        .{ "--root-header", "--root-header was removed: use header=, as in --url URL:/:header=@FILE" },
+        .{ "--root-ca", "--root-ca was removed: use ca=FILE, as in --url wss://HOST/PATH:/:ca=FILE" },
+        .{ "--root-index", "--root-index was removed: use index=FILE, as in --url URL:/:index=FILE" },
+        .{ "--root-contained", "--root-contained was removed: use the contained option, as in --dir PATH:/:contained" },
+        .{ "--root", "--root was removed: use --dir PATH for a host directory, or --url URL for a 9P server" },
     };
-    const end = std.mem.indexOfAny(u8, arg, "/?#") orelse arg.len;
-    const authority = arg[0..end];
-    var host = authority;
-    var has_port = false;
-    if (authority.len > 0 and authority[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
-        host = authority[1..close];
-        if (host.len == 0) return null;
-        for (host) |c| if (!std.ascii.isHex(c) and c != ':' and c != '.') return null;
-        const after = authority[close + 1 ..];
-        if (after.len > 0) {
-            if (after[0] != ':') return null;
-            has_port = true;
-        }
-    } else {
-        if (std.mem.indexOfScalar(u8, authority, ':')) |colon| {
-            host = authority[0..colon];
-            has_port = true;
-        }
-        if (!hostName(host)) return null;
-        if (!has_port and !std.ascii.eqlIgnoreCase(host, "localhost") and std.mem.indexOfScalar(u8, host, '.') == null) return null;
+    for (list) |e| {
+        if (std.mem.eql(u8, a, e[0]) or (std.mem.startsWith(u8, a, e[0]) and a[e[0].len] == '=')) return e[1];
     }
-    const scheme = if (loopback(host)) "ws://" else "wss://";
-    const slash = if (end == arg.len) "/" else "";
-    const url = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ scheme, arg, slash });
-    _ = ws.Url.parse(url) catch return null;
-    return url;
+    return null;
 }
 
-/// Letters, digits, `-`, and `.`, with no empty label and no label that
-/// starts or ends with `-`.
-fn hostName(h: []const u8) bool {
-    if (h.len == 0) return false;
-    var labels = std.mem.splitScalar(u8, h, '.');
-    while (labels.next()) |l| {
-        if (l.len == 0 or l.len > 63 or l[0] == '-' or l[l.len - 1] == '-') return false;
-        for (l) |c| if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
-    }
-    return true;
+/// Parses a mount flag's value, keeping its mistake in `why`.
+fn mountFlag(gpa: std.mem.Allocator, kind: mount.Kind, v: []const u8) Error!mount.Mount {
+    var w: []const u8 = "";
+    return mount.Mount.parse(gpa, kind, v, &w) catch |e| switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Usage => {
+            why = std.fmt.allocPrint(gpa, "{s} {s}: {s}", .{ kind.flag(), v, w }) catch w;
+            return error.Usage;
+        },
+    };
 }
 
-/// A literal loopback host: `localhost`, an IPv4 address in 127.0.0.0/8,
-/// or `::1`. Names aren't resolved, so the scheme never depends on DNS.
-fn loopback(h: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(h, "localhost")) return true;
-    if (std.mem.eql(u8, h, "::1") or std.mem.eql(u8, h, "0:0:0:0:0:0:0:1")) return true;
-    const a = std.Io.net.Ip4Address.parse(h, 0) catch return false;
-    return a.bytes[0] == 127;
+fn bindFlag(gpa: std.mem.Allocator, v: []const u8) Error!mount.Bind {
+    var w: []const u8 = "";
+    return mount.Bind.parse(v, &w) catch |e| switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Usage => {
+            why = std.fmt.allocPrint(gpa, "--bind {s}: {s}", .{ v, w }) catch w;
+            return error.Usage;
+        },
+    };
 }
 
 fn flag(a: []const u8, comptime name: []const u8) bool {
@@ -659,7 +579,7 @@ fn signalStatus(s: Signal) Exit {
 /// overlay are discarded (design/epoch-0/overlay.md): the changed top-level
 /// directories, and how to keep them. A 9P root keeps writes under
 /// `--write=scope`, since its server decides; a host tree takes
-/// `--writable` on the root.
+/// `rw` on its --dir.
 pub fn discardNotice(buf: []u8, c: *const RootChanges, ninep: bool) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
     noticeTo(&w, c, ninep) catch {};
@@ -670,7 +590,7 @@ fn noticeTo(w: *std.Io.Writer, c: *const RootChanges, ninep: bool) std.Io.Writer
     try w.writeAll("h9: changes to the root under ");
     for (c.dirs(), 0..) |*n, i| try w.print("{s}/{s}", .{ if (i > 0) ", " else "", n.slice() });
     if (c.more) try w.writeAll(if (c.count > 0) ", ..." else "...");
-    try w.print(" were discarded (rerun with {s} to keep them)", .{if (ninep) "--write=scope" else "--writable \"$H9ROOT\""});
+    try w.print(" were discarded (rerun with {s} to keep them)", .{if (ninep) "--write=scope" else "rw on the root, as in --dir PATH:/:rw,"});
 }
 
 const t = std.testing;
@@ -699,29 +619,6 @@ test "--backend=value and --" {
     try t.expectEqualStrings("--weird", c.argv[0]);
 }
 
-test "--root-spec and --root-user" {
-    const c = try parse(t.allocator, &.{ "h9", "--root", "tcp!fs!564", "--root-spec=other", "--root-user", "glenda", "ls" });
-    defer t.allocator.free(c.env);
-    try t.expectEqualStrings("tcp!fs!564", c.root.?);
-    try t.expectEqualStrings("other", c.root_spec);
-    try t.expectEqualStrings("glenda", c.root_user.?);
-    const d = try parse(t.allocator, &.{ "h9", "ls" });
-    defer t.allocator.free(d.env);
-    try t.expectEqualStrings("", d.root_spec);
-    try t.expectEqual(@as(?[]const u8, null), d.root_user);
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-user=", "ls" }));
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-spec" }));
-}
-
-test "--root-contained" {
-    const c = try parse(t.allocator, &.{ "h9", "--root", "/tree", "--root-contained", "ls" });
-    defer t.allocator.free(c.env);
-    try t.expect(c.root_contained);
-    const d = try parse(t.allocator, &.{ "h9", "ls" });
-    defer t.allocator.free(d.env);
-    try t.expect(!d.root_contained);
-}
-
 test "--cred is checked and kept as given [credential-helpers]" {
     const c = try parse(t.allocator, &.{ "h9", "--cred", "*.wanix.io=wanix token", "--cred=fs.example=cat /tmp/h", "ls" });
     defer t.allocator.free(c.env);
@@ -732,9 +629,8 @@ test "--cred is checked and kept as given [credential-helpers]" {
         try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--cred", bad, "ls" }));
 }
 
-test "--root-index, --index, --index-cache, and -v [mount-index]" {
-    const c = try parse(t.allocator, &.{ "h9", "--root", "tcp!fs!564", "--root-index", "x.h9index", "--index-cache=/tmp/c", "-v", "ls" });
-    try t.expectEqualStrings("x.h9index", c.root_index.?);
+test "--index, --index-cache, and -v, and --root-index is removed [mount-index]" {
+    const c = try parse(t.allocator, &.{ "h9", "--index-cache=/tmp/c", "-v", "ls" });
     try t.expectEqualStrings("/tmp/c", c.index_cache.?);
     try t.expect(c.verbose);
     try t.expectEqual(IndexMode.auto, c.index);
@@ -744,81 +640,58 @@ test "--root-index, --index, --index-cache, and -v [mount-index]" {
     try t.expect(d.verbose);
     try t.expectEqualStrings("-v", d.argv[1]);
     try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--index", "some", "ls" }));
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-index", "", "ls" }));
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-index" }));
+    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-index", "x", "ls" }));
 }
 
-test "--root-header and --root-ca" {
-    const c = try parse(t.allocator, &.{ "h9", "--root", "wss://fs/9p", "--root-header", "Authorization: Bearer x", "--root-header=@/tmp/h", "--root-ca", "ca.pem", "ls" });
-    defer t.allocator.free(c.env);
-    defer t.allocator.free(c.root_headers);
-    try t.expectEqual(@as(usize, 2), c.root_headers.len);
-    try t.expectEqualStrings("Authorization: Bearer x", c.root_headers[0]);
-    try t.expectEqualStrings("@/tmp/h", c.root_headers[1]);
-    try t.expectEqualStrings("ca.pem", c.root_ca.?);
-    try t.expectEqualStrings("wss://fs/9p", c.root.?);
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-header=", "ls" }));
-    try t.expectError(error.Usage, parse(t.allocator, &.{ "h9", "--root-ca" }));
-}
-
-test "rootArg reads dial strings and paths" {
+test "the mount flags parse in order, and --bind after them [mounts]" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try t.expectEqualStrings("tcp!fs.example!5640", (try rootArg(a, "tcp!fs.example!5640")).tcp);
-    try t.expectEqualStrings("tcp!fs.example!564", (try rootArg(a, "tcp!fs.example")).tcp);
-    try t.expectEqualStrings("/run/fs.sock", (try rootArg(a, "unix!/run/fs.sock")).unix);
-    try t.expectEqualStrings("/r", (try rootArg(a, "/r")).path);
-    try t.expectEqualStrings("tcpdir", (try rootArg(a, "tcpdir")).path);
-    try t.expectEqualStrings("wss://fs.example/9p?t=1", (try rootArg(a, "wss://fs.example/9p?t=1")).ws);
-    try t.expectEqualStrings("ws://127.0.0.1:8080", (try rootArg(a, "ws://127.0.0.1:8080")).ws);
-    for ([_][]const u8{ "tcp!", "tcp!!564", "tcp!h!", "tcp!h!1!x", "unix!", "ws://", "wss://h:0/" }) |bad| {
-        try t.expectError(error.BadDial, rootArg(a, bad));
-    }
+    const c = try parse(a, &.{ "h9", "--builtin", "--dir", "./base", "--url=tcp://fs:564/main:/n/fs:ro", "--archive", "fix.tgz:/:b", "--tmp", "/scratch", "--bind", "/n/fs/bin:/bin:a", "--builtin=/:b", "rc" });
+    try t.expectEqual(@as(usize, 6), c.mounts.len);
+    try t.expectEqual(mount.Kind.builtin, c.mounts[0].kind);
+    try t.expectEqual(mount.Order.after, c.mounts[0].order.?);
+    try t.expectEqualStrings("./base", c.mounts[1].src);
+    try t.expectEqualStrings("/", c.mounts[1].dst);
+    try t.expectEqualStrings("tcp://fs:564/main", c.mounts[2].src);
+    try t.expectEqualStrings("/n/fs", c.mounts[2].dst);
+    try t.expectEqual(mount.Access.ro, c.mounts[2].access.?);
+    try t.expectEqual(mount.Kind.tmp, c.mounts[4].kind);
+    try t.expectEqual(mount.Order.before, c.mounts[5].order.?);
+    try t.expectEqual(@as(usize, 1), c.binds.len);
+    try t.expectEqualStrings("/bin", c.binds[0].dst);
+    try t.expectEqualStrings("rc", c.argv[0]);
+    // A bare --builtin takes no value, so the program follows it.
+    const b = try parse(a, &.{ "h9", "--builtin", "ls" });
+    try t.expectEqualStrings("ls", b.argv[0]);
+    try t.expectError(error.Usage, parse(a, &.{ "h9", "--tmp", "", "ls" }));
+    try t.expectError(error.Usage, parse(a, &.{ "h9", "--dir", "./x:/:bogus", "ls" }));
+    try t.expectStringStartsWith(why, "--dir ./x:/:bogus: ");
 }
 
-test "schemelessRoot reads host/path as wss:// and leaves paths alone" {
+test "--root and its flags are removed, with their replacements named [mounts]" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const cases = [_][2][]const u8{
-        .{ "fs.example.com/9p", "wss://fs.example.com/9p" },
-        .{ "fs.example.com", "wss://fs.example.com/" },
-        .{ "fs.example.com:8443", "wss://fs.example.com:8443/" },
-        .{ "fs.example.com/9p?t=1", "wss://fs.example.com/9p?t=1" },
-        .{ "fs.example.com?t=1", "wss://fs.example.com?t=1" },
-        .{ "10.0.0.5/9p", "wss://10.0.0.5/9p" },
-        .{ "fs:8443/9p", "wss://fs:8443/9p" },
-        .{ "[2001:db8::1]:8443/9p", "wss://[2001:db8::1]:8443/9p" },
-        .{ "localhost:8080/9p", "ws://localhost:8080/9p" },
-        .{ "localhost/9p", "ws://localhost/9p" },
-        .{ "LOCALHOST", "ws://LOCALHOST/" },
-        .{ "127.0.0.1:8080/9p", "ws://127.0.0.1:8080/9p" },
-        .{ "127.1.2.3/9p", "ws://127.1.2.3/9p" },
-        .{ "[::1]:8080/9p", "ws://[::1]:8080/9p" },
-        .{ "localhost.example.com/9p", "wss://localhost.example.com/9p" },
-    };
-    for (cases) |c| {
-        const got = (try schemelessRoot(a, c[0])) orelse return error.TestExpectedUrl;
-        try t.expectEqualStrings(c[1], got);
-    }
-    for ([_][]const u8{
-        "",               "root",          "root/9p",       "dist/root",     "./9front.img", "../r",
-        "/abs/root",      "~/root",        "-x.y",          ".local/9front", "C:\\root",     "C:/root",
-        "tcp!h.x!564",    "u@fs.example",  "fs .example/x", "fs..example/x", "-fs.example",  "fs-.example/x",
-        "fs.example:0/x", "fs.example:x/", "[::1/x",        "[]:80/",        "[::1]x/",      "fs_x.example/",
-    }) |bad| {
-        if (try schemelessRoot(a, bad)) |u| {
-            std.debug.print("{s} -> {s}\n", .{ bad, u });
-            return error.TestUnexpectedUrl;
-        }
+    for ([_][]const []const u8{
+        &.{ "h9", "--root", "/r", "ls" },
+        &.{ "h9", "--root=/r", "ls" },
+        &.{ "h9", "--root-spec", "x", "ls" },
+        &.{ "h9", "--root-user=glenda", "ls" },
+        &.{ "h9", "--root-header", "A: b", "ls" },
+        &.{ "h9", "--root-ca", "ca.pem", "ls" },
+        &.{ "h9", "--root-contained", "ls" },
+        &.{ "h9", "--builtin", "only", "ls" },
+        &.{ "h9", "--builtin=off", "ls" },
+    }) |args| {
+        try t.expectError(error.Usage, parse(a, args));
+        try t.expect(std.mem.indexOf(u8, why, "was removed: ") != null);
     }
 }
 
-test "--root, --cwd and repeated --env" {
-    const c = try parse(t.allocator, &.{ "h9", "--root", "/r", "--cwd=/w", "--env", "a=1", "--env=b=x=y", "cat" });
+test "--cwd and repeated --env" {
+    const c = try parse(t.allocator, &.{ "h9", "--cwd=/w", "--env", "a=1", "--env=b=x=y", "cat" });
     defer t.allocator.free(c.env);
-    try t.expectEqualStrings("/r", c.root.?);
     try t.expectEqualStrings("/w", c.cwd.?);
     try t.expectEqual(@as(usize, 2), c.env.len);
     try t.expectEqualStrings("b=x=y", c.env[1]);
@@ -884,7 +757,7 @@ test "--rc alone is a login rc" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const login = try parse(a, &.{ "h9", "--root", "r", "--rc" });
+    const login = try parse(a, &.{ "h9", "--dir", "r", "--rc" });
     try t.expect(login.rc_login);
     try t.expectEqual(@as(?[]const u8, null), login.rc);
     try t.expectEqual(@as(usize, 0), login.argv.len);
@@ -893,9 +766,9 @@ test "--rc alone is a login rc" {
     try t.expect(!empty.rc_login);
     try t.expectEqualStrings("", empty.rc.?);
     // --rc takes the next argument as its value, wherever it is.
-    const flag_cmd = try parse(a, &.{ "h9", "--rc", "--root", "x" });
+    const flag_cmd = try parse(a, &.{ "h9", "--rc", "--dir", "x" });
     try t.expect(!flag_cmd.rc_login);
-    try t.expectEqualStrings("--root", flag_cmd.rc.?);
+    try t.expectEqualStrings("--dir", flag_cmd.rc.?);
     try t.expectEqualStrings("x", flag_cmd.argv[0]);
     // The last --rc wins.
     const last = try parse(a, &.{ "h9", "--rc", "ls", "--rc" });
@@ -910,20 +783,6 @@ test "--no-guest-tools" {
     const a = arena.allocator();
     try t.expect((try parse(a, &.{ "h9", "ls" })).guest_tools);
     try t.expect(!(try parse(a, &.{ "h9", "--no-guest-tools", "ls" })).guest_tools);
-}
-
-test "--builtin [builtin-root]" {
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    try t.expectEqual(BuiltinMode.auto, (try parse(a, &.{ "h9", "ls" })).builtin);
-    try t.expectEqual(BuiltinMode.only, (try parse(a, &.{ "h9", "--builtin=only", "ls" })).builtin);
-    try t.expectEqual(BuiltinMode.before, (try parse(a, &.{ "h9", "--builtin", "before", "--root", "/r", "ls" })).builtin);
-    try t.expectEqual(BuiltinMode.off, (try parse(a, &.{ "h9", "--builtin=off", "--check" })).builtin);
-    try t.expectError(error.Usage, parse(a, &.{ "h9", "--builtin=only", "--root", "/r", "ls" }));
-    try t.expectError(error.Usage, parse(a, &.{ "h9", "--root", "/r", "--builtin", "only", "ls" }));
-    try t.expectError(error.Usage, parse(a, &.{ "h9", "--builtin=always", "ls" }));
-    try t.expectError(error.Usage, parse(a, &.{ "h9", "--builtin" }));
 }
 
 test "--gfx, --gfx=noclip and --gfx-scale" {
@@ -950,10 +809,13 @@ test "--pids, --cpus and --ns" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const c = try parse(a, &.{ "h9", "--pids", "32", "--cpus=2", "--ns", "ns", "rc" });
+    const c = try parse(a, &.{ "h9", "--pids", "32", "--cpus=2", "--ns", "@ns", "--ns=bind /a /b; bind /c /d", "rc" });
     try t.expectEqual(@as(?u32, 32), c.pids);
     try t.expectEqual(@as(?u32, 2), c.cpus);
-    try t.expectEqualStrings("ns", c.ns.?);
+    try t.expectEqual(@as(usize, 2), c.ns.len);
+    try t.expectEqualStrings("@ns", c.ns[0]);
+    try t.expectEqualStrings("bind /a /b; bind /c /d", c.ns[1]);
+    try t.expectError(error.Usage, parse(a, &.{ "h9", "--ns", "@", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--pids", "0", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--cpus", "x", "rc" }));
     try t.expectError(error.Usage, parse(a, &.{ "h9", "--ns" }));
@@ -995,10 +857,10 @@ test "--check and --version" {
     defer arena.deinit();
     const a = arena.allocator();
     try t.expectEqual(Mode.version, (try parse(a, &.{ "h9", "--version" })).mode);
-    const c = try parse(a, &.{ "h9", "--backend", "emu", "--root=/r", "--check" });
+    const c = try parse(a, &.{ "h9", "--backend", "emu", "--dir=/r", "--check" });
     try t.expectEqual(Mode.check, c.mode);
     try t.expectEqual(vmm.BackendKind.emu, c.backend);
-    try t.expectEqualStrings("/r", c.root.?);
+    try t.expectEqualStrings("/r", c.mounts[0].src);
     try t.expectEqual(Mode.run, (try parse(a, &.{ "h9", "ls" })).mode);
     // A flag after the program is the program's.
     try t.expectEqual(Mode.run, (try parse(a, &.{ "h9", "ls", "--version" })).mode);
@@ -1155,12 +1017,12 @@ test "the discarded-changes notice names the top-level directories" {
     rc.note("usr/glendax", "usr/glenda");
     try t.expect(rc.changed);
     var buf: [512]u8 = undefined;
-    try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (rerun with --writable \"$H9ROOT\" to keep them)", discardNotice(&buf, &rc, false));
+    try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)", discardNotice(&buf, &rc, false));
     try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (rerun with --write=scope to keep them)", discardNotice(&buf, &rc, true));
     var many: RootChanges = .{};
     var nb: [8]u8 = undefined;
     for (0..RootChanges.max_names + 2) |i| many.note(try std.fmt.bufPrint(&nb, "d{d}/x", .{i}), "");
     try t.expect(many.more);
     try t.expectEqual(@as(usize, RootChanges.max_names), many.dirs().len);
-    try t.expect(std.mem.endsWith(u8, discardNotice(&buf, &many, false), "/d9, ... were discarded (rerun with --writable \"$H9ROOT\" to keep them)"));
+    try t.expect(std.mem.endsWith(u8, discardNotice(&buf, &many, false), "/d9, ... were discarded (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)"));
 }

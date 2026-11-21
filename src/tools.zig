@@ -72,27 +72,18 @@ pub const CheckOptions = struct {
     /// The guest architecture (--arch), or null for the host's.
     arch: ?vmm.Arch = null,
     memory: ?u64 = null,
-    /// The built-in root, as the CLI resolved --builtin
-    /// (design/epoch-0/builtin-root.md): without a root, anything but `.off`
-    /// checks it instead.
-    builtin: h9.policy.Builtin = .off,
-    /// The root tree as given (for messages), or null if none was found.
+    /// The mounts the CLI resolved (design/mounts.md), the root's among
+    /// them: with only the built-in root on `/`, it's checked.
+    mounts: []const h9.policy.mount.Mount = &.{},
+    /// The root as given, for messages: a path or URL, or null for the
+    /// built-in root.
     root_arg: ?[]const u8 = null,
-    /// The root resolved (a host directory for #U, or a 9P server), or
-    /// null if it couldn't be.
-    root: ?h9.Root = null,
-    /// Why `root_arg` couldn't be resolved.
-    root_err: []const u8 = "not found",
-    /// The attach name and uname for a 9P root.
-    root_spec: []const u8 = "",
-    root_user: ?[]const u8 = null,
-    /// A WebSocket root's headers, `--root-ca` and proxies.
-    root_headers: []const []const u8 = &.{},
-    root_ca: ?[]const u8 = null,
+    /// Why the root couldn't be resolved, if it couldn't.
+    root_err: ?[]const u8 = null,
     proxy: h9.Machine.Proxy = .{},
     /// --cred and $H9CRED (design/credential-helpers.md).
     cred_helpers: []const h9.Machine.CredHelper = &.{},
-    /// --index, --root-index, and the index cache (design/mount-index.md).
+    /// --index, `index=`, and the index cache (design/mount-index.md).
     index: h9.Machine.IndexMode = .auto,
     root_index: ?h9.Machine.RootIndex = null,
     index_cache: ?[]const u8 = null,
@@ -144,26 +135,18 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
 
     try checkGfx(w);
 
-    if (o.root == null and o.root_arg == null and o.builtin != .off) {
+    if (o.root_err) |e| {
+        try w.print("root {s}: {s}\n", .{ o.root_arg orelse "", e });
+        return exit_failed;
+    }
+    if (o.root_arg == null) {
         const br = build_options.builtin_root;
         if (!br.has(arch)) {
-            try w.print("root: built-in, skeleton only, with no commands for {s} (use --root DIR or $H9ROOT; zig build slim adds them)\n", .{arch.name()});
+            try w.print("root: built-in, skeleton only, with no commands for {s} (use --dir DIR or $H9ROOT; zig build slim adds them)\n", .{arch.name()});
             return exit_failed;
         }
-        try w.print("root: built-in (9front {s} {s}, {s}; {s}): ", .{ br.release, br.set, arch.name(), if (o.builtin == .only) "--builtin=only" else "no tree found" });
-    } else {
-        const root = o.root orelse {
-            if (o.root_arg) |r| try w.print("root {s}: {s}\n", .{ r, o.root_err }) else try w.writeAll("root: none (use --root DIR or $H9ROOT; zig build mkroot builds one)\n");
-            return exit_failed;
-        };
-        try w.print("root {s}: ", .{switch (root) {
-            .dir => |d| d,
-            // A 9P root as given, which is how its errors name it; a
-            // WebSocket root as its URL, which a schemeless root gains.
-            .tcp, .unix => o.root_arg orelse "",
-            .ws => |u| u,
-        }});
-    }
+        try w.print("root: built-in (9front {s} {s}, {s}): ", .{ br.release, br.set, arch.name() });
+    } else try w.print("root {s}: ", .{o.root_arg.?});
     if (failed) {
         try w.writeAll("not checked, no usable backend\n");
         return exit_failed;
@@ -262,12 +245,7 @@ fn runRoot(gpa: std.mem.Allocator, io: std.Io, o: CheckOptions, arch: vmm.Arch, 
     var m = h9.Machine.init(gpa, io, .{
         .backend = o.backend,
         .arch = arch,
-        .root = o.root,
-        .builtin = if (o.root == null) o.builtin else .off,
-        .root_spec = o.root_spec,
-        .root_user = o.root_user,
-        .root_headers = o.root_headers,
-        .root_ca = o.root_ca,
+        .mounts = o.mounts,
         .proxy = o.proxy,
         .cred_helpers = o.cred_helpers,
         .index = o.index,

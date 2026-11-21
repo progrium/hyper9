@@ -728,7 +728,7 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     const dir: std.Build.InstallDir = .{ .custom = "web" };
     const all = b.step("web-install", "");
     all.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = dir } }).step);
-    for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "index.html", "package.json" }) |f|
+    for ([_][]const u8{ "h9-web.js", "h9-node", "worker.js", "wasi-mem.js", "statictree.js", "index.html", "package.json" }) |f|
         all.dependOn(&b.addInstallFileWithDir(b.path(b.pathJoin(&.{ "src/web", f })), dir, f).step);
     return .{ .exe = exe, .install = all };
 }
@@ -1256,7 +1256,7 @@ pub fn build(b: *std.Build) void {
     };
 
     if (b.build_root.handle.readFileAlloc(b.graph.io, b.pathJoin(&.{ root, "lib/namespace" }), b.allocator, .limited(1 << 20))) |namespace| {
-        const cat_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "/bin/cat", "/lib/namespace" });
+        const cat_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "/bin/cat", "/lib/namespace" });
         cat_demo.expectStdOutEqual(namespace);
         cat_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &cat_demo.step);
@@ -1264,7 +1264,7 @@ pub fn build(b: *std.Build) void {
         // cwd is a fresh directory, so nothing is left behind if it doesn't.
         const tight_cwd = b.addWriteFiles();
         _ = tight_cwd.add(".keep", "");
-        const tight_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--profile=tight", "--cwd" });
+        const tight_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--profile=tight", "--cwd" });
         tight_demo.addDirectoryArg(tight_cwd.getDirectory());
         tight_demo.addArgs(&.{ "--rc", "echo x > /mnt/term/cwd/f" });
         tight_demo.expectExitCode(1);
@@ -1277,7 +1277,7 @@ pub fn build(b: *std.Build) void {
     // count is the root's two directories' entries and #H/bin's added
     // together (design/epoch-0/guest-tools.md).
     if (countBin(b, root)) |n| {
-        const ls_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
+        const ls_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--rc", "ls /bin | wc -l" });
         ls_demo.expectStdOutEqual(b.fmt("{d: >7}\n", .{n + guest_tree.bin}));
         ls_demo.step.dependOn(signed_step);
         addDemo(b, &demos, "baseline", &ls_demo.step);
@@ -1294,7 +1294,7 @@ pub fn build(b: *std.Build) void {
         const bind_src = if (root_src) "" else b.fmt("bind -a /mnt/term{s} /sys && ", .{src_dir.?});
         const ls_cwd = b.addWriteFiles();
         _ = ls_cwd.add(".keep", "");
-        const ls_build = b.addSystemCommand(&.{ h9_bin, "--root", root, "--arch", "arm64", "--timeout", "600s" });
+        const ls_build = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--arch", "arm64", "--timeout", "600s" });
         if (!root_src) ls_build.addArgs(&.{ "--readable", src_dir.? });
         ls_build.addArg("--cwd");
         ls_build.addDirectoryArg(ls_cwd.getDirectory());
@@ -1306,7 +1306,7 @@ pub fn build(b: *std.Build) void {
     }
     if (countBin(b, root) != null) {
         // acid attaches to a sleeping process and prints its stack.
-        const acid_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--arch", "arm64", "--timeout", "60s", "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" });
+        const acid_demo = b.addSystemCommand(&.{ h9_bin, "--dir", root, "--arch", "arm64", "--timeout", "60s", "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" });
         acid_demo.setStdIn(.{ .bytes = "stk()\n" });
         acid_demo.expectStdOutMatch("main(argv=");
         acid_demo.expectStdOutMatch("/sys/src/cmd/sleep.c:");

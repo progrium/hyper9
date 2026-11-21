@@ -81,8 +81,11 @@ const js = struct {
     /// Starts a WebSocket to `url` offering the comma-separated
     /// `protocols`, with `headers` (`Name: value` lines) in its handshake;
     /// its id, -1 if the URL is refused, or -2 if headers were given and
-    /// this host's WebSocket can't send them (a browser's).
-    extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32, headers: [*]const u8, headers_n: u32) i32;
+    /// this host's WebSocket can't send them (a browser's). With
+    /// `static_tree`, a server that doesn't upgrade is tried as a static
+    /// dotfs tree at the URL's `http` form, which the host then serves as
+    /// the socket's 9P server (design/mounts.md, "Static trees").
+    extern "h9" fn ws_open(url: [*]const u8, url_n: u32, protocols: [*]const u8, protocols_n: u32, headers: [*]const u8, headers_n: u32, static_tree: u32) i32;
     /// Asks the embedder's credentials callback for a host-made stream's
     /// handshake (design/credential-helpers.md, "Browser host"): `failed`
     /// is empty, or why the last try failed; `argv` is the matching
@@ -303,6 +306,10 @@ pub const HostOptions = struct {
     /// pattern matches the URL best runs before each handshake, and its
     /// headers go with it, after `headers`, which win on a name.
     cred: []const cred.Helper = &.{},
+    /// The URL was `http://` or `https://`: on the browser host, a server
+    /// that doesn't upgrade is tried as a static dotfs tree. Native h9
+    /// serves those itself (src/statictree.zig).
+    static_tree: bool = false,
 };
 
 /// What's under a stream.
@@ -387,7 +394,7 @@ pub const Stream = struct {
     url: []u8 = &.{},
     headers: std.ArrayList([]u8) = .empty,
     protocols: std.ArrayList([]u8) = .empty,
-    /// A host-made stream's `--root-ca` file and proxy URL, if any.
+    /// A host-made stream's `ca=` file and proxy URL, if any.
     ca_file: ?[]u8 = null,
     proxy: ?[]u8 = null,
     /// Allowed addresses, for a guest connect, checked before the thread
@@ -400,6 +407,8 @@ pub const Stream = struct {
     cred_why: cred.Why = .{},
     /// The handshake was retried with the helper after a 401 or 403.
     cred_retried: bool = false,
+    /// HostOptions.static_tree.
+    static_tree: bool = false,
     /// The server's uid and name for the client, from the 101's 9P-Uid
     /// and 9P-User (design/credential-helpers.md).
     ident_uid: ?u32 = null,
@@ -651,6 +660,7 @@ pub fn openHost(owner: usize, url: []const u8, o: HostOptions) OpenError!u32 {
     if (o.ca_file) |f| s.ca_file = try gpa.dupe(u8, f);
     if (o.proxy.pick(u)) |p| s.proxy = try gpa.dupe(u8, p);
     if (cred.pick(o.cred, u)) |h| s.cred_helper = try dupeHelper(h.*);
+    s.static_tree = o.static_tree;
     try start(s);
     return s.id;
 }
@@ -969,7 +979,7 @@ fn run(s: *Stream) void {
             else
                 s.failLocked("server selected a subprotocol that wasn't offered", .{}),
             error.BadProxy => s.failLocked("bad proxy URL", .{}),
-            error.BadCa => s.failLocked("--root-ca: can't read the certificates", .{}),
+            error.BadCa => s.failLocked("ca=: can't read the certificates", .{}),
             error.Bundle => s.failLocked("can't load the host's certificate bundle", .{}),
             else => s.failLocked("{s}", .{errName(e)}),
         } else s.failLocked("hangup", .{});
@@ -1249,7 +1259,7 @@ fn webCred(s: *Stream, failed: []const u8, out: *[8192]u8) ConnectError!i32 {
 /// One try at opening the JS host's WebSocket. Returns true once it's
 /// established, or false with why it failed in `why`, its socket freed.
 fn webOpen(s: *Stream, url: []const u8, protos: []const u8, headers: []const u8, why: *[96]u8, why_len: *usize) ConnectError!bool {
-    const id = js.ws_open(url.ptr, @intCast(url.len), protos.ptr, @intCast(protos.len), headers.ptr, @intCast(headers.len));
+    const id = js.ws_open(url.ptr, @intCast(url.len), protos.ptr, @intCast(protos.len), headers.ptr, @intCast(headers.len), @intFromBool(s.static_tree));
     if (id == -2) return webFail(s, "this host's WebSocket can't send handshake headers; return a URL instead", .{});
     if (id < 0) return webFail(s, "this host refuses the url", .{});
     {
@@ -2337,7 +2347,7 @@ test "the keepalive pings an idle stream" {
     try testing.expect(echo.pings.load(.acquire) >= 2);
 }
 
-// Fetching a `--root-index` URL (design/mount-index.md), with the
+// Fetching an `index=` URL (design/mount-index.md), with the
 // connection code WebSocket roots use: the proxy's CONNECT, then TLS for
 // `https`, then one GET.
 
@@ -2345,7 +2355,7 @@ const rootindex = @import("rootindex.zig");
 
 pub const FetchOptions = struct {
     /// A PEM file the server's certificate must chain to, instead of the
-    /// host's bundle (the root's `--root-ca`).
+    /// host's bundle (the root's `ca=`).
     ca_file: ?[]const u8 = null,
     proxy: ws.ProxyConfig = .{},
     /// Where the last ETag and the compiled index are kept: a URL whose
@@ -2410,6 +2420,77 @@ const Got = union(enum) {
 };
 
 fn httpGet(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: FetchOptions, etag: ?[]const u8, msg: []u8) anyerror!Got {
+    const r = try httpDo(alloc, io, url, .{ .ca_file = o.ca_file, .proxy = o.proxy }, .{ .etag = etag }, msg);
+    if (r.status == 304) {
+        if (r.etag) |e| alloc.free(e);
+        alloc.free(r.body);
+        return .unchanged;
+    }
+    if (r.status != 200) {
+        if (r.etag) |e| alloc.free(e);
+        alloc.free(r.body);
+        _ = std.fmt.bufPrintZ(msg, "{d} {s}", .{ r.status, r.reason() }) catch {};
+        return error.Status;
+    }
+    return .{ .body = .{ .bytes = r.body, .etag = r.etag } };
+}
+
+/// A request's extras, for `fetch`.
+pub const Request = struct {
+    /// If-None-Match.
+    etag: ?[]const u8 = null,
+    /// `Name: value` lines, already checked.
+    headers: []const []const u8 = &.{},
+    /// A byte range, both ends included.
+    range: ?struct { first: u64, last: u64 } = null,
+    /// Ask for zstd, and say whether the body came that way.
+    zstd: bool = false,
+    /// The most body taken; more fails with error.TooBig.
+    limit: usize = rootindex.max_text,
+};
+
+pub const Response = struct {
+    status: u16,
+    /// The caller's.
+    body: []u8,
+    etag: ?[]u8 = null,
+    /// The body is zstd (Content-Encoding).
+    zstd: bool = false,
+    reason_buf: [64]u8 = undefined,
+    reason_len: usize = 0,
+
+    pub fn reason(r: *const Response) []const u8 {
+        return r.reason_buf[0..r.reason_len];
+    }
+
+    pub fn deinit(r: *Response, alloc: std.mem.Allocator) void {
+        alloc.free(r.body);
+        if (r.etag) |e| alloc.free(e);
+    }
+};
+
+pub const GetOptions = struct {
+    ca_file: ?[]const u8 = null,
+    proxy: ws.ProxyConfig = .{},
+};
+
+/// GETs `url_s`, an `https://` or `http://` URL, through the proxy and
+/// TLS as a WebSocket root connects, and returns whatever status the
+/// server answers with (design/mounts.md, "Static trees").
+pub fn fetch(alloc: std.mem.Allocator, io: Io, url_s: []const u8, o: GetOptions, req: Request, msg: []u8) anyerror!Response {
+    if (web.enabled) return error.Unsupported;
+    setIo(io);
+    var ubuf: [4096]u8 = undefined;
+    const as_ws = if (std.mem.startsWith(u8, url_s, "https://"))
+        std.fmt.bufPrint(&ubuf, "wss://{s}", .{url_s["https://".len..]}) catch return error.BadUrl
+    else if (std.mem.startsWith(u8, url_s, "http://"))
+        std.fmt.bufPrint(&ubuf, "ws://{s}", .{url_s["http://".len..]}) catch return error.BadUrl
+    else
+        return error.BadUrl;
+    return httpDo(alloc, io, try ws.Url.parse(as_ws), o, req, msg);
+}
+
+fn httpDo(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: GetOptions, req: Request, msg: []u8) anyerror!Response {
     const proxy_s = o.proxy.pick(url);
     const proxy: ?ws.Proxy = if (proxy_s) |p| ws.Proxy.parse(p) catch return error.BadProxy else null;
     const stream = try dial(io, if (proxy) |p| p.host else url.host, if (proxy) |p| p.port else url.port);
@@ -2428,8 +2509,10 @@ fn httpGet(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: FetchOptions, etag:
     }
     if (url.tls) try startTls(o.ca_file, c, url);
     const w = c.writer();
-    try w.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: h9\r\nAccept-Encoding: identity\r\nConnection: close\r\n", .{ url.target, url.authority });
-    if (etag) |e| try w.print("If-None-Match: {s}\r\n", .{e});
+    try w.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: h9\r\nAccept-Encoding: {s}\r\nConnection: close\r\n", .{ url.target, url.authority, if (req.zstd) "zstd, identity" else "identity" });
+    if (req.etag) |e| try w.print("If-None-Match: {s}\r\n", .{e});
+    if (req.range) |rg| try w.print("Range: bytes={d}-{d}\r\n", .{ rg.first, rg.last });
+    for (req.headers) |h| try w.print("{s}\r\n", .{h});
     try w.writeAll("\r\n");
     try c.flush();
     const r = c.reader();
@@ -2438,14 +2521,13 @@ fn httpGet(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: FetchOptions, etag:
     var parts = std.mem.splitScalar(u8, status_line, ' ');
     _ = parts.next();
     const status = std.fmt.parseInt(u16, parts.next() orelse return error.BadResponse, 10) catch return error.BadResponse;
-    if (status != 200 and status != 304) {
-        _ = std.fmt.bufPrintZ(msg, "{d} {s}", .{ status, parts.rest() }) catch {};
-        return error.Status;
-    }
+    var out: Response = .{ .status = status, .body = &.{} };
+    const why = parts.rest();
+    out.reason_len = @min(why.len, out.reason_buf.len);
+    @memcpy(out.reason_buf[0..out.reason_len], why[0..out.reason_len]);
     var length: ?u64 = null;
     var chunked = false;
-    var got_etag: ?[]u8 = null;
-    errdefer if (got_etag) |e| alloc.free(e);
+    errdefer if (out.etag) |e| alloc.free(e);
     while (true) {
         const l = try httpLine(r);
         if (l.len == 0) break;
@@ -2456,18 +2538,18 @@ fn httpGet(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: FetchOptions, etag:
             length = std.fmt.parseInt(u64, value, 10) catch return error.BadResponse;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
             chunked = std.ascii.indexOfIgnoreCase(value, "chunked") != null;
-        } else if (std.ascii.eqlIgnoreCase(name, "etag") and got_etag == null and value.len <= 256) {
-            got_etag = try alloc.dupe(u8, value);
+        } else if (std.ascii.eqlIgnoreCase(name, "content-encoding")) {
+            out.zstd = std.ascii.indexOfIgnoreCase(value, "zstd") != null;
+        } else if (std.ascii.eqlIgnoreCase(name, "etag") and out.etag == null and value.len <= 256) {
+            out.etag = try alloc.dupe(u8, value);
         }
-    }
-    if (status == 304) {
-        if (got_etag) |e| alloc.free(e);
-        return .unchanged;
     }
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(alloc);
-    const limit = rootindex.max_text;
-    if (chunked) {
+    const limit = req.limit;
+    if (status == 304 or status == 204) {
+        // No body.
+    } else if (chunked) {
         while (true) {
             const l = try httpLine(r);
             const semi = std.mem.indexOfScalar(u8, l, ';') orelse l.len;
@@ -2492,7 +2574,8 @@ fn httpGet(alloc: std.mem.Allocator, io: Io, url: ws.Url, o: FetchOptions, etag:
             r.toss(b.len);
         }
     }
-    return .{ .body = .{ .bytes = try body.toOwnedSlice(alloc), .etag = got_etag } };
+    out.body = try body.toOwnedSlice(alloc);
+    return out;
 }
 
 fn readInto(alloc: std.mem.Allocator, r: *Io.Reader, body: *std.ArrayList(u8), n: usize) !void {

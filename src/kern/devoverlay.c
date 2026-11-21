@@ -66,6 +66,8 @@ extern void *h9_overlay_pool(void);
 extern void *h9_overlay_alloc(void *pool, ulong n);
 extern void h9_overlay_free(void *pool, void *p, ulong n);
 extern void h9_overlay_changed(void *track, char *path);
+/* src/kern/fscheck.c */
+extern void h9_fs_symlink(Chan*, char*, char*);
 
 enum
 {
@@ -100,6 +102,36 @@ typedef struct Node Node;
 typedef struct Ovc Ovc;
 typedef struct Pg Pg;
 typedef struct Chunk Chunk;
+typedef struct Member Member;
+typedef struct Qmap Qmap;
+typedef struct Unc Unc;
+
+enum
+{
+	Cow	= 0,
+	Union,
+
+	Maxmembers	= 64,
+	Qbuckets	= 256,
+};
+
+/* A union's member: a tree, rooted at a path in the union. */
+struct Member
+{
+	int	id;
+	Chan	*root;
+	char	*at;		/* "" for the union's top, or a path such as "etc" */
+	int	create;		/* creates may go here (bind -c) */
+};
+
+struct Qmap
+{
+	Qmap	*next;
+	int	type;
+	int	dev;
+	uvlong	path;
+	uvlong	qpath;
+};
 
 struct Pg
 {
@@ -152,6 +184,17 @@ struct Inst
 	Pg	*pages;		/* the small allocator's pages */
 	Chunk	*free[Nclass];
 	void	*track;	/* told of each change once set (h9_overlay_track), or nil */
+
+	/* Unions (design/mounts.md, "Union instances"); see below. */
+	int	mode;		/* Cow or Union */
+	char	name[16];	/* a named union's name ("root", "linux"), or "" */
+	Inst	*cow;		/* a named union's copy-on-write instance over it, not counted in ref */
+	Inst	*over;		/* a cow instance's named union, which points back here */
+	Member	*mem;		/* the members, top first; host memory */
+	int	nmem;
+	int	memgen;		/* the next member's id */
+	Qmap	**qtab;		/* (device, dev, qid path) to the instance's qid path */
+	ulong	qmem;		/* bytes of qid table and snapshots, counted against the pool */
 };
 
 /* A chan's state. */
@@ -169,6 +212,31 @@ struct Ovc
 	int	excl;		/* this chan holds node's DMEXCL open */
 	int	nlinks;		/* links followed in this walk */
 };
+
+/* A union chan's state. Its first field is the instance, as an Ovc's is. */
+struct Unc
+{
+	Inst	*inst;
+	char	*path;		/* names from the union's top */
+	int	n;		/* members with this name */
+	Chan	*mc[Maxmembers];	/* their chans: one for a file, each one's directory for a directory */
+	int	mid[Maxmembers];	/* their member ids */
+	int	mcreate[Maxmembers];
+	int	lopen;		/* mc[0] is open; file I/O goes to it */
+	uchar	*dir;		/* directory snapshot, from the pool */
+	long	ndir;
+	long	dircap;
+};
+
+
+static int
+isunion(Chan *c)
+{
+	Ovc *o;
+
+	o = c->aux;
+	return o != nil && o->inst->mode == Union;
+}
 
 static Lock instlock;
 static Inst *insts[Maxinst];
@@ -1147,6 +1215,7 @@ static void
 instfree(Inst *in)
 {
 	Pg *p, *np;
+	int i;
 
 	qlock(&in->ql);
 	nodeunref(in, in->root);
@@ -1159,6 +1228,11 @@ instfree(Inst *in)
 	qunlock(&in->ql);
 	if(in->lower != nil)
 		cclose(in->lower);
+	for(i = 0; i < in->nmem; i++){
+		cclose(in->mem[i].root);
+		free(in->mem[i].at);
+	}
+	free(in->mem);
 	free(in);
 }
 
@@ -1169,10 +1243,17 @@ instdecref(Inst *in)
 
 	lock(&instlock);
 	last = --in->ref == 0;
-	if(last)
+	if(last){
 		for(i = 0; i < Maxinst; i++)
 			if(insts[i] == in)
 				insts[i] = nil;
+		/* A named union's cow isn't counted in its ref: forget each other. */
+		if(in->over != nil)
+			in->over->cow = nil;
+		if(in->cow != nil)
+			in->cow->over = nil;
+		in->over = in->cow = nil;
+	}
 	unlock(&instlock);
 	if(last)
 		instfree(in);
@@ -1279,6 +1360,15 @@ h9_overlay_lower(Chan *c)
 
 	if(devtab[c->type]->dc != 'O')
 		return nil;
+	if(isunion(c)){
+		/* The member's chan that holds the name. */
+		Unc *u = c->aux;
+		if(u->n == 0)
+			return nil;
+		if(!u->lopen)
+			return cclone(u->mc[0]);
+		return nil;
+	}
 	o = c->aux;
 	qlock(&o->inst->ql);
 	if(waserror()){
@@ -1314,6 +1404,22 @@ h9_overlay_symlink(Chan *c, char *name, char *target)
 	}
 	if(strlen(target) >= 2048)
 		error(Etoolong);
+	if(isunion(c)){
+		/* On the first member that takes creates, if it's a host tree. */
+		Unc *u = c->aux;
+		int i;
+		for(i = 0; i < u->n; i++)
+			if(u->mcreate[i])
+				break;
+		if(i == u->n)
+			error(Enocreate);
+		if(devtab[u->mc[i]->type]->dc != 'U')
+			error(Eperm);
+		h9_fs_symlink(u->mc[i], name, target);
+		poperror();
+		cclose(c);
+		return;
+	}
 	c = ovcreate(c, name, OREAD, 0666);
 	poperror();
 	o = c->aux;
@@ -1351,7 +1457,7 @@ h9_overlay_readlink(Chan *c, char *buf, int nbuf)
 	Node *l;
 	int n;
 
-	if(devtab[c->type]->dc != 'O' || nbuf <= 0)
+	if(devtab[c->type]->dc != 'O' || nbuf <= 0 || isunion(c))
 		return -1;
 	o = c->aux;
 	qlock(&o->inst->ql);
@@ -1485,9 +1591,1468 @@ h9_overlay_lowerdev(int type, int dev, Qid qid, int *ltype, int *ldev)
 	return r;
 }
 
+static int ovname(char*);
+
+/*
+ * Unions (design/mounts.md, "Union instances").
+ *
+ * A union instance has no tree in memory: it has an ordered list of
+ * members, each a chan on another device's directory, rooted at the
+ * union's top or at a path below it (a member rooted at "etc" is walked
+ * only for etc and the paths under it). A walk walks each member that
+ * has the current directory to the same name, in order, top first. The
+ * first member that has the name decides what it is: a file is that
+ * member's file, and a directory is merged over every member with a
+ * directory by that name, at every depth. Walks are device walks, so a
+ * member is its own tree, not the mounts on it.
+ *
+ * Writes, removes and wstats go to the member that holds the name (the
+ * first), and creates go to the first member marked create that has the
+ * directory, or fail with "mounted directory forbids creation". A
+ * copy-on-write instance over a union (bind -c '#O' over it) keeps all
+ * of them in memory instead.
+ *
+ * Qids: each (device, dev, qid path) a member shows gets the union's own
+ * qid path from a table, so names from different members never share
+ * one, and the same file reached twice keeps one. The table and
+ * directory snapshots come from the machine's pages, as an overlay's
+ * data does.
+ *
+ * Named unions: "#Oroot" and "#Olinux" (any name of letters) are found
+ * by name in the attaching machine; a cow instance over a named union,
+ * made by h9_overlay_cowname, is what attaching the name gives from then
+ * on, so the name stands for the whole stack.
+ */
+
+static Qid
+unrootqid(void)
+{
+	Qid q;
+
+	mkqid(&q, 0, 0, QTDIR);
+	return q;
+}
+
+/* The union's qid for a member chan's. Under in->ql. */
+static Qid
+unqid(Inst *in, Chan *mc)
+{
+	Qmap *m;
+	Qid q;
+	ulong h;
+
+	h = (mc->qid.path ^ (mc->qid.path>>17) ^ (mc->type<<7) ^ mc->dev) % Qbuckets;
+	for(m = in->qtab[h]; m != nil; m = m->next)
+		if(m->type == mc->type && m->dev == mc->dev && m->path == mc->qid.path)
+			break;
+	if(m == nil){
+		m = ovmalloc(in, sizeof(Qmap));
+		if(m == nil)
+			error(Efull);
+		m->type = mc->type;
+		m->dev = mc->dev;
+		m->path = mc->qid.path;
+		m->qpath = ++in->qidgen;
+		m->next = in->qtab[h];
+		in->qtab[h] = m;
+	}
+	q = mc->qid;
+	q.path = m->qpath;
+	return q;
+}
+
+static Unc*
+uncnew(Inst *in, char *path)
+{
+	Unc *u;
+
+	u = mallocz(sizeof(Unc), 1);
+	if(u == nil)
+		error(Enomem);
+	u->path = strdup(path);
+	if(u->path == nil){
+		free(u);
+		error(Enomem);
+	}
+	u->inst = in;
+	return u;
+}
+
+static void
+unclear(Unc *u)
+{
+	int i;
+
+	for(i = 0; i < u->n; i++)
+		if(u->mc[i] != nil)
+			cclose(u->mc[i]);
+	u->n = 0;
+}
+
+static void
+undirfree(Unc *u)
+{
+	if(u->dir != nil)
+		h9_overlay_free(u->inst->pool, u->dir, u->dircap);
+	u->dir = nil;
+	u->ndir = 0;
+	u->dircap = 0;
+}
+
+static void
+uncfree(Unc *u)
+{
+	Inst *in;
+
+	if(u == nil)
+		return;
+	in = u->inst;
+	unclear(u);
+	undirfree(u);
+	free(u->path);
+	free(u);
+	instdecref(in);
+}
+
+static void
+unadd(Unc *u, Chan *c, Member *m)
+{
+	if(u->n >= Maxmembers){
+		cclose(c);
+		return;
+	}
+	u->mc[u->n] = c;
+	u->mid[u->n] = m->id;
+	u->mcreate[u->n] = m->create;
+	u->n++;
+}
+
+/* The index of member id in the instance, or -1 once it's gone. Under in->ql. */
+static int
+unmemidx(Inst *in, int id)
+{
+	int i;
+
+	for(i = 0; i < in->nmem; i++)
+		if(in->mem[i].id == id)
+			return i;
+	return -1;
+}
+
+/* Puts u at the union's top: each member rooted there. */
+static void
+untop(Unc *u)
+{
+	Inst *in;
+	int i;
+
+	in = u->inst;
+	unclear(u);
+	qlock(&in->ql);
+	for(i = 0; i < in->nmem; i++)
+		if(in->mem[i].at[0] == '\0')
+			unadd(u, cclone(in->mem[i].root), &in->mem[i]);
+	qunlock(&in->ql);
+}
+
+static int unstep(Unc*, Chan*, char*);
+
+/* Re-resolves u from the top along path, for "..". */
+static void
+unreroot(Unc *u, Chan *nc, char *path)
+{
+	char buf[Maxname];
+	int i, n;
+
+	untop(u);
+	free(u->path);
+	u->path = strdup("");
+	if(u->path == nil)
+		error(Enomem);
+	nc->qid = unrootqid();
+	n = npathelem(path);
+	for(i = 0; i < n; i++){
+		pathelem(path, i, buf);
+		if(!unstep(u, nc, buf))
+			error(Enonexist);
+	}
+}
+
+/*
+ * Walks u by one name; returns 0 (with the error set) if it isn't there.
+ * Members are taken in the instance's order: those that have u's
+ * directory, and those rooted at the new name.
+ */
+static int
+unstep(Unc *u, Chan *nc, char *name)
+{
+	Inst *in;
+	Chan *have[Maxmembers], *c;
+	int hid[Maxmembers], hcr[Maxmembers], hroot[Maxmembers], nh, i, j, k, decided;
+	Chan *got[Maxmembers];
+	int gid[Maxmembers], gcr[Maxmembers], ng;
+	char *np, *dir, *s, why[ERRMAX];
+
+	if(strcmp(name, ".") == 0)
+		return 1;
+	if(strcmp(name, "..") == 0){
+		if(u->path[0] == '\0')
+			return 1;
+		dir = strdup(u->path);
+		if(dir == nil)
+			error(Enomem);
+		s = strrchr(dir, '/');
+		if(s != nil)
+			*s = '\0';
+		else
+			dir[0] = '\0';
+		if(waserror()){
+			free(dir);
+			nexterror();
+		}
+		unreroot(u, nc, dir);
+		poperror();
+		free(dir);
+		return 1;
+	}
+	if((nc->qid.type & QTDIR) == 0){
+		kstrcpy(up->errstr, Enotdir, ERRMAX);
+		return 0;
+	}
+	in = u->inst;
+	np = pathjoin(u->path, name);
+
+	/*
+	 * In member order: u's chans (at the top, every member rooted there,
+	 * so members added since u was made are seen), and fresh roots of
+	 * members rooted at np, which aren't walked.
+	 */
+	nh = 0;
+	qlock(&in->ql);
+	for(i = 0; i < in->nmem && nh < Maxmembers; i++){
+		c = nil;
+		hroot[nh] = 0;
+		for(j = 0; j < u->n; j++)
+			if(u->mid[j] == in->mem[i].id)
+				break;
+		if(j < u->n)
+			c = cclone(u->mc[j]);
+		else if(u->path[0] == '\0' && in->mem[i].at[0] == '\0')
+			c = cclone(in->mem[i].root);
+		else if(strcmp(in->mem[i].at, np) == 0){
+			c = cclone(in->mem[i].root);
+			hroot[nh] = 1;
+		}
+		if(c == nil)
+			continue;
+		have[nh] = c;
+		hid[nh] = in->mem[i].id;
+		hcr[nh] = in->mem[i].create;
+		nh++;
+	}
+	qunlock(&in->ql);
+
+	ng = 0;
+	decided = 0;
+	why[0] = '\0';
+	for(k = 0; k < nh; k++){
+		c = have[k];
+		have[k] = nil;
+		/* A member rooted at np is its own root, not walked. */
+		if(!hroot[k]){
+			Chan *w;
+			up->errstr[0] = '\0';
+			w = lowerwalk1(c, name);
+			cclose(c);
+			if(w == nil){
+				/* The first member's reason, such as a link loop. */
+				if(why[0] == '\0')
+					utfecpy(why, why+sizeof why, up->errstr);
+				continue;
+			}
+			c = w;
+		}
+		if(!decided){
+			decided = 1;
+			got[ng] = c; gid[ng] = hid[k]; gcr[ng] = hcr[k]; ng++;
+			if((c->qid.type & QTDIR) == 0)
+				break;
+			continue;
+		}
+		if((c->qid.type & QTDIR) == 0){
+			cclose(c);	/* hidden by a directory above it */
+			continue;
+		}
+		got[ng] = c; gid[ng] = hid[k]; gcr[ng] = hcr[k]; ng++;
+	}
+	for(; k < nh; k++)
+		if(have[k] != nil)
+			cclose(have[k]);
+	if(ng == 0){
+		free(np);
+		kstrcpy(up->errstr, why[0] != '\0' ? why : Enonexist, ERRMAX);
+		return 0;
+	}
+	unclear(u);
+	for(i = 0; i < ng; i++){
+		u->mc[i] = got[i];
+		u->mid[i] = gid[i];
+		u->mcreate[i] = gcr[i];
+	}
+	u->n = ng;
+	free(u->path);
+	u->path = np;
+	qlock(&in->ql);
+	if(waserror()){
+		qunlock(&in->ql);
+		nexterror();
+	}
+	nc->qid = unqid(in, u->mc[0]);
+	poperror();
+	qunlock(&in->ql);
+	return 1;
+}
+
+static Walkqid*
+unwalk(Chan *c, Chan *nc, char **name, int nname)
+{
+	Walkqid *wq;
+	Unc *u, *volatile nu;
+	Inst *in;
+	int i;
+
+	u = c->aux;
+	in = u->inst;
+	wq = smalloc(sizeof(Walkqid)+(nname > 0 ? nname-1 : 0)*sizeof(Qid));
+	nc = devclone(c);
+	nc->type = 0;
+	nc->aux = nil;
+	nu = nil;
+	lock(&instlock);
+	in->ref++;
+	unlock(&instlock);
+	if(waserror()){
+		/* A member's error, such as a link loop, is the walk's. */
+		if(nu != nil)
+			uncfree(nu);
+		else
+			instdecref(in);
+		cclose(nc);
+		free(wq);
+		nexterror();
+	}
+	nu = uncnew(in, u->path);
+	for(i = 0; i < u->n; i++){
+		nu->mc[i] = cclone(u->mc[i]);
+		nu->mid[i] = u->mid[i];
+		nu->mcreate[i] = u->mcreate[i];
+		nu->n = i+1;
+	}
+	for(i = 0; i < nname; i++){
+		if(!unstep(nu, nc, name[i]))
+			break;
+		wq->qid[i] = nc->qid;
+	}
+	wq->nqid = i;
+	poperror();
+	if(i < nname){
+		uncfree(nu);
+		cclose(nc);
+		if(i == 0){
+			free(wq);
+			return nil;
+		}
+		wq->clone = nil;
+		return wq;
+	}
+	nc->aux = nu;
+	nc->type = c->type;
+	wq->clone = nc;
+	return wq;
+}
+
+static int
+unstat(Chan *c, uchar *db, int n)
+{
+	Unc *u;
+	Inst *in;
+	Dir d;
+	uchar buf[1024+4*Maxname];
+	char strs[sizeof buf], *s;
+	int r;
+
+	u = c->aux;
+	in = u->inst;
+	s = strrchr(u->path, '/');
+	s = s != nil ? s+1 : u->path;
+	if(u->path[0] == '\0' && (c->flag & COPEN) == 0)
+		untop(u);
+	if(u->n == 0){
+		/* The top of a union with no members there: an empty directory. */
+		memset(&d, 0, sizeof d);
+		d.name = "/";
+		d.uid = d.gid = d.muid = eve;
+		d.qid = unrootqid();
+		d.mode = DMDIR|0555;
+		d.atime = d.mtime = seconds();
+	}else{
+		lowerstat(u->mc[0], &d, buf, sizeof buf, strs);
+		qlock(&in->ql);
+		if(waserror()){
+			qunlock(&in->ql);
+			nexterror();
+		}
+		d.qid = u->path[0] == '\0' ? unrootqid() : unqid(in, u->mc[0]);
+		poperror();
+		qunlock(&in->ql);
+		if(u->path[0] == '\0')
+			d.name = "/";
+		else
+			d.name = s;
+		if(d.qid.type & QTDIR)
+			d.length = 0;
+	}
+	r = convD2M(&d, db, n);
+	if(r <= BIT16SZ)
+		error(Eshortstat);
+	return r;
+}
+
+/* Appends m bytes at p to u's snapshot. */
+static void
+undirput(Unc *u, uchar *p, long m)
+{
+	uchar *nb;
+	long cap;
+
+	if(u->ndir + m > u->dircap){
+		cap = (u->ndir + m) * 2 + 8192;
+		cap = (cap + Pgsize-1) & ~(Pgsize-1);
+		nb = h9_overlay_alloc(u->inst->pool, cap);
+		if(nb == nil)
+			error(Efull);
+		if(u->dir != nil){
+			memmove(nb, u->dir, u->ndir);
+			h9_overlay_free(u->inst->pool, u->dir, u->dircap);
+		}
+		u->dir = nb;
+		u->dircap = cap;
+	}
+	memmove(u->dir + u->ndir, p, m);
+	u->ndir += m;
+}
+
+/* Whether the snapshot has an entry by name. */
+static int
+undirhas(Unc *u, char *name, ulong *htab, int hsize)
+{
+	ulong h;
+	int i;
+	Dir d;
+	char strs[4*Maxname+16];
+	uchar *p;
+
+	h = namehash(name);
+	for(i = 0; i < hsize; i++){
+		ulong off = htab[(h + i) % hsize];
+		if(off == 0)
+			return 0;
+		p = u->dir + off - 1;
+		if(convM2D(p, BIT16SZ + GBIT16(p), &d, strs) > 0 && strcmp(d.name, name) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* Packs the merged directory into u's snapshot: each name once, the first member's entry. */
+static void
+unsnapshot(Chan *c)
+{
+	Unc *u;
+	Inst *in;
+	Chan *volatile lc;
+	Dir d;
+	uchar *volatile buf;
+	ulong *volatile htab;
+	uchar *p, *e;
+	char *strs;
+	long r, m;
+	vlong off;
+	int i, k, hsize, nent;
+
+	u = c->aux;
+	in = u->inst;
+	undirfree(u);
+	lc = nil;
+	buf = nil;
+	htab = nil;
+	hsize = 0;
+	nent = 0;
+	if(waserror()){
+		if(lc != nil)
+			cclose(lc);
+		free(buf);
+		free(htab);
+		nexterror();
+	}
+	buf = smalloc(8192 + 8192);
+	strs = (char*)buf + 8192;
+	for(i = 0; i < u->n; i++){
+		lc = cclone(u->mc[i]);
+		lc = devtab[lc->type]->open(lc, OREAD);
+		for(off = 0;; off += r){
+			r = devtab[lc->type]->read(lc, buf, 8192, off);
+			if(r <= 0)
+				break;
+			e = buf + r;
+			for(p = buf; p + BIT16SZ <= e; p += m){
+				m = BIT16SZ + GBIT16(p);
+				if(p + m > e || convM2D(p, m, &d, strs) != m)
+					break;
+				if(nent*2 >= hsize){
+					/* Rebuild the name table, twice as big. */
+					ulong *nt;
+					uchar *q;
+					long o2;
+					int ns;
+
+					ns = hsize ? hsize*2 : 256;
+					nt = mallocz(ns*sizeof(ulong), 1);
+					if(nt == nil)
+						error(Enomem);
+					for(o2 = 0; o2 + BIT16SZ <= u->ndir; o2 += BIT16SZ + GBIT16(u->dir+o2)){
+						Dir d2;
+						char s2[4*Maxname+16];
+						q = u->dir + o2;
+						if(convM2D(q, BIT16SZ + GBIT16(q), &d2, s2) <= 0)
+							continue;
+						for(k = namehash(d2.name) % ns; nt[k] != 0; k = (k+1) % ns)
+							;
+						nt[k] = o2 + 1;
+					}
+					free(htab);
+					htab = nt;
+					hsize = ns;
+				}
+				if(undirhas(u, d.name, htab, hsize))
+					continue;
+				qlock(&in->ql);
+				if(waserror()){
+					qunlock(&in->ql);
+					nexterror();
+				}
+				{
+					/* The entry's qid, as a walk to it gives it. */
+					Chan tmp;
+					memset(&tmp, 0, sizeof tmp);
+					tmp.type = d.type;
+					tmp.dev = d.dev;
+					tmp.qid = d.qid;
+					/* d.type and d.dev are the server's view; use the member chan's device. */
+					tmp.type = lc->type;
+					tmp.dev = lc->dev;
+					d.qid = unqid(in, &tmp);
+				}
+				poperror();
+				qunlock(&in->ql);
+				{
+					uchar ent[1024+4*Maxname];
+					long em;
+					em = convD2M(&d, ent, sizeof ent);
+					if(em <= BIT16SZ)
+						continue;
+					for(k = namehash(d.name) % hsize; htab[k] != 0; k = (k+1) % hsize)
+						;
+					htab[k] = u->ndir + 1;
+					undirput(u, ent, em);
+					nent++;
+				}
+			}
+		}
+		cclose(lc);
+		lc = nil;
+	}
+	poperror();
+	free(buf);
+	free(htab);
+}
+
+static Chan*
+unopen(Chan *c, int omode)
+{
+	Unc *u;
+	Inst *in;
+	int mode;
+
+	u = c->aux;
+	in = u->inst;
+	mode = openmode(omode);
+	if(c->qid.type & QTDIR){
+		if(mode != OREAD || (omode & OTRUNC))
+			error(Eisdir);
+		if(u->path[0] == '\0')
+			untop(u);
+		unsnapshot(c);
+	}else{
+		if(u->n == 0)
+			error(Enonexist);
+		u->mc[0] = devtab[u->mc[0]->type]->open(u->mc[0], omode & ~(ORCLOSE|OCEXEC));
+		u->lopen = 1;
+		qlock(&in->ql);
+		if(waserror()){
+			qunlock(&in->ql);
+			nexterror();
+		}
+		c->qid = unqid(in, u->mc[0]);
+		poperror();
+		qunlock(&in->ql);
+	}
+	if(omode & ORCLOSE)
+		c->flag |= CRCLOSE;
+	c->mode = mode;
+	c->flag |= COPEN;
+	c->offset = 0;
+	return c;
+}
+
+static long
+unread(Chan *c, void *a, long n, vlong off)
+{
+	Unc *u;
+	long m, sz;
+
+	u = c->aux;
+	if(u->lopen)
+		return devtab[u->mc[0]->type]->read(u->mc[0], a, n, off);
+	if((c->qid.type & QTDIR) == 0)
+		error(Eperm);
+	if(off == 0 || u->dir == nil)
+		unsnapshot(c);
+	for(m = 0; off + m + BIT16SZ <= u->ndir; m += sz){
+		sz = BIT16SZ + GBIT16(u->dir + off + m);
+		if(m + sz > n)
+			break;
+	}
+	if(m > 0)
+		memmove(a, u->dir + off, m);
+	return m;
+}
+
+static long
+unwrite(Chan *c, void *a, long n, vlong off)
+{
+	Unc *u;
+
+	u = c->aux;
+	if(c->qid.type & QTDIR)
+		error(Eisdir);
+	if(!u->lopen)
+		error(Eperm);
+	return devtab[u->mc[0]->type]->write(u->mc[0], a, n, off);
+}
+
+static Chan*
+uncreate(Chan *c, char *name, int omode, ulong perm)
+{
+	Unc *u;
+	Inst *in;
+	Chan *volatile nc;
+	char *np;
+	int i;
+
+	u = c->aux;
+	in = u->inst;
+	if((c->qid.type & QTDIR) == 0)
+		error(Enotdir);
+	if(!ovname(name))
+		error(strlen(name) >= Maxname ? Etoolong : Ebadchar);
+	if(u->path[0] == '\0')
+		untop(u);
+	for(i = 0; i < u->n; i++)
+		if(u->mcreate[i])
+			break;
+	if(i == u->n)
+		error(Enocreate);
+	np = pathjoin(u->path, name);
+	nc = cclone(u->mc[i]);
+	if(waserror()){
+		cclose(nc);
+		free(np);
+		nexterror();
+	}
+	nc = devtab[nc->type]->create(nc, name, omode & ~OCEXEC, perm);
+	poperror();
+	{
+		int id, cr;
+		id = u->mid[i];
+		cr = u->mcreate[i];
+		unclear(u);
+		u->mc[0] = nc;
+		u->mid[0] = id;
+		u->mcreate[0] = cr;
+		u->n = 1;
+	}
+	free(u->path);
+	u->path = np;
+	u->lopen = (nc->qid.type & QTDIR) == 0;
+	qlock(&in->ql);
+	if(waserror()){
+		qunlock(&in->ql);
+		nexterror();
+	}
+	c->qid = unqid(in, nc);
+	poperror();
+	qunlock(&in->ql);
+	if(!u->lopen){
+		/* A directory: readable as the new member directory, through a snapshot. */
+		cclose(u->mc[0]);
+		u->mc[0] = nil;
+		u->n = 0;
+		unreroot(u, c, np);
+		c->qid = c->qid;
+	}
+	if(omode & ORCLOSE)
+		c->flag |= CRCLOSE;
+	c->mode = openmode(omode);
+	c->flag |= COPEN;
+	c->offset = 0;
+	return c;
+}
+
+static void
+unremove(Chan *c)
+{
+	Unc *u;
+	Chan *mc;
+
+	u = c->aux;
+	if(waserror()){
+		c->aux = nil;
+		uncfree(u);
+		nexterror();
+	}
+	if(u->path[0] == '\0' || u->n == 0)
+		error(Eperm);
+	mc = u->mc[0];
+	u->mc[0] = nil;
+	if(u->lopen){
+		/* An open chan can't be removed by devfs and the like: a fresh one can. */
+		cclose(mc);
+		mc = nil;
+		unreroot(u, c, u->path);
+		mc = u->mc[0];
+		u->mc[0] = nil;
+	}
+	devtab[mc->type]->remove(mc);
+	poperror();
+	c->aux = nil;
+	uncfree(u);
+}
+
+static void
+unclose(Chan *c)
+{
+	Unc *u;
+	Chan *mc;
+
+	u = c->aux;
+	if(u == nil)
+		return;
+	if((c->flag & (COPEN|CRCLOSE)) == (COPEN|CRCLOSE) && u->n > 0 && !waserror()){
+		if(u->lopen){
+			cclose(u->mc[0]);
+			u->mc[0] = nil;
+			u->lopen = 0;
+			unreroot(u, c, u->path);
+		}
+		mc = u->mc[0];
+		u->mc[0] = nil;
+		devtab[mc->type]->remove(mc);
+		poperror();
+	}
+	c->aux = nil;
+	uncfree(u);
+}
+
+static int
+unwstat(Chan *c, uchar *db, int n)
+{
+	Unc *u;
+
+	u = c->aux;
+	if(u->n == 0 || u->path[0] == '\0')
+		error(Eperm);
+	return devtab[u->mc[0]->type]->wstat(u->mc[0], db, n);
+}
+
+/* A union chan at the top of in. */
+static Chan*
+unattach(Inst *in, char *spec)
+{
+	Chan *c;
+	Unc *u;
+
+	c = devattach('O', spec);
+	c->dev = in->id;
+	c->qid = unrootqid();
+	if(waserror()){
+		cclose(c);
+		nexterror();
+	}
+	u = uncnew(in, "");
+	c->aux = u;
+	untop(u);
+	poperror();
+	return c;
+}
+
+/* Makes a union instance for the calling thread's machine, unattached (pinned). */
+static Inst*
+unnew(char *name)
+{
+	Inst *in;
+	int i;
+
+	in = mallocz(sizeof(Inst), 1);
+	if(in == nil)
+		error(Enomem);
+	in->mode = Union;
+	in->pool = h9_overlay_pool();
+	in->ref = 1;
+	in->pinned = 1;
+	if(name != nil)
+		strecpy(in->name, in->name+sizeof in->name, name);
+	in->mem = mallocz(Maxmembers*sizeof(Member), 1);
+	if(in->mem == nil){
+		free(in);
+		error(Enomem);
+	}
+	in->qtab = ovmalloc(in, Qbuckets*sizeof(Qmap*));
+	if(in->qtab == nil){
+		instfree(in);
+		error(Efull);
+	}
+	lock(&instlock);
+	for(i = 0; i < Maxinst; i++)
+		if(insts[i] == nil)
+			break;
+	if(i == Maxinst){
+		unlock(&instlock);
+		instfree(in);
+		error("too many overlays");
+	}
+	in->id = nextid++;
+	insts[i] = in;
+	unlock(&instlock);
+	return in;
+}
+
+/* The named union of the calling thread's machine, or nil. Under instlock. */
+static Inst*
+unnamed(char *name)
+{
+	int i;
+	void *pool;
+
+	pool = h9_overlay_pool();
+	for(i = 0; i < Maxinst; i++)
+		if(insts[i] != nil && insts[i]->mode == Union && insts[i]->pool == pool &&
+		   strcmp(insts[i]->name, name) == 0)
+			return insts[i];
+	return nil;
+}
+
+static int
+unvalidname(char *s)
+{
+	int n;
+
+	for(n = 0; s[n] != '\0'; n++)
+		if(!(s[n] >= 'a' && s[n] <= 'z'))
+			return 0;
+	return n > 0 && n < 16;
+}
+
+/* Adds the directory c as a member of in, rooted at at, on top unless after. */
+static void
+unaddmember(Inst *in, Chan *c, char *at, int after, int create)
+{
+	Member *m;
+	char *a;
+
+	if((c->qid.type & QTDIR) == 0)
+		error(Enotdir);
+	a = strdup(at);
+	if(a == nil)
+		error(Enomem);
+	qlock(&in->ql);
+	if(in->nmem >= Maxmembers){
+		qunlock(&in->ql);
+		free(a);
+		error("too many union members");
+	}
+	if(after)
+		m = &in->mem[in->nmem];
+	else{
+		memmove(&in->mem[1], &in->mem[0], in->nmem*sizeof(Member));
+		m = &in->mem[0];
+	}
+	m->id = ++in->memgen;
+	m->root = cclone(c);
+	m->at = a;
+	m->create = create;
+	in->nmem++;
+	qunlock(&in->ql);
+}
+
+/* Removes the member whose root is the same file as c; 0 if none is. */
+static int
+undelmember(Inst *in, Chan *c)
+{
+	int i;
+	Chan *r;
+	char *a;
+
+	qlock(&in->ql);
+	for(i = 0; i < in->nmem; i++){
+		r = in->mem[i].root;
+		if(r->type == c->type && r->dev == c->dev && r->qid.path == c->qid.path)
+			break;
+	}
+	if(i == in->nmem){
+		qunlock(&in->ql);
+		return 0;
+	}
+	r = in->mem[i].root;
+	a = in->mem[i].at;
+	memmove(&in->mem[i], &in->mem[i+1], (in->nmem-i-1)*sizeof(Member));
+	in->nmem--;
+	qunlock(&in->ql);
+	cclose(r);
+	free(a);
+	return 1;
+}
+
+enum
+{
+	Uafter	= 1,	/* match h9_overlay_union's flags in src/kern.zig */
+	Ucreate	= 2,
+};
+
+static void
+unerrswap(void)
+{
+	char *p;
+
+	p = up->syserrstr;
+	up->syserrstr = up->errstr;
+	up->errstr = p;
+}
+
+/*
+ * For the namespace builder in Zig: adds the directory at path (in the
+ * caller's namespace) as a member of a union, rooted at at ("" for its
+ * top). spec names the union: a name ("root", made if it doesn't exist),
+ * an instance number, or "" for a new unnamed one. flags are Uafter (the
+ * bottom, not the top) and Ucreate. Returns the instance's number, or -1
+ * with the error as the sys* wrappers report it. A union made here is
+ * pinned until it's attached, h9_overlay_unpin drops a named one, or
+ * h9_overlay_drop an unnamed one.
+ */
+/* Adds the directory c to the union spec names; see h9_overlay_union. */
+static int
+unionchan(char *spec, Chan *c, char *at, int flags)
+{
+	Inst *volatile in;
+	char *e;
+	long id;
+
+	in = nil;
+	if(waserror()){
+		unerrswap();
+		return -1;
+	}
+	while(*at == '/')
+		at++;
+	if(spec[0] == '\0')
+		in = unnew(nil);
+	else if(unvalidname(spec)){
+		lock(&instlock);
+		in = unnamed(spec);
+		unlock(&instlock);
+		if(in == nil)
+			in = unnew(spec);
+	}else{
+		id = strtol(spec, &e, 10);
+		if(*e != '\0' || id < 0)
+			error(Ebadarg);
+		lock(&instlock);
+		in = instlookup(id);
+		if(in != nil && (in->mode != Union || in->pool != h9_overlay_pool()))
+			in = nil;
+		unlock(&instlock);
+		if(in == nil)
+			error(Enonexist);
+	}
+	unaddmember(in, c, at, flags & Uafter, flags & Ucreate);
+	poperror();
+	return in->id;
+}
+
+int
+h9_overlay_union(char *spec, char *path, char *at, int flags)
+{
+	Chan *c;
+	int id;
+
+	if(waserror()){
+		unerrswap();
+		return -1;
+	}
+	c = namec(path, Aaccess, 0, 0);
+	poperror();
+	id = unionchan(spec, c, at, flags);
+	cclose(c);
+	return id;
+}
+
+/*
+ * As h9_overlay_union, with the member a 9P connection: the server on fd
+ * (in the caller's fd table) attached with aname, as mount(2) would. fd
+ * is left open.
+ */
+int
+h9_overlay_unionmount(char *spec, int fd, char *aname, char *at, int flags)
+{
+	Chan *volatile bc, *volatile c;
+	int id;
+
+	bc = nil;
+	c = nil;
+	if(waserror()){
+		if(bc != nil)
+			cclose(bc);
+		if(c != nil)
+			cclose(c);
+		unerrswap();
+		return -1;
+	}
+	bc = fdtochan(fd, ORDWR, 0, 1);
+	c = mntattach(bc, nil, aname, 0);
+	cclose(bc);
+	bc = nil;
+	poperror();
+	/* Through a path, as h9_overlay_union takes one: the chan's own. */
+	id = unionchan(spec, c, at, flags);
+	cclose(c);
+	return id;
+}
+
+/* The unnamed union c is the top of, or nil. */
+static Inst*
+nsinst(Chan *c)
+{
+	Unc *u;
+
+	if(devtab[c->type]->dc != 'O' || !isunion(c))
+		return nil;
+	u = c->aux;
+	if(u->path[0] != '\0' || u->inst->name[0] != '\0')
+		return nil;
+	return u->inst;
+}
+
+/*
+ * in's members as bind -r lines onto old, in the order that makes them
+ * again: old's own member first (a union itself if bind -r made one over
+ * another, printed in turn), then those above it with -b and those
+ * below it with -a.
+ */
+static char*
+nsunion1(Inst *in, char *old, char *p, char *e, int depth)
+{
+	Member *m;
+	Inst *sub;
+	int i, j;
+
+	qlock(&in->ql);
+	j = in->nmem;
+	for(i = in->nmem-1; i >= 0; i--)
+		if(strcmp(chanpath(in->mem[i].root), old) == 0){
+			j = i;
+			break;
+		}
+	if(j < in->nmem && depth < 8 && (sub = nsinst(in->mem[j].root)) != nil && sub != in)
+		p = nsunion1(sub, old, p, e, depth+1);
+	for(i = j-1; i >= 0 && p < e; i--){
+		m = &in->mem[i];
+		if(m->at[0] == '\0')
+			p = seprint(p, e, m->create ? "bind -rbc %q %q\n" : "bind -rb %q %q\n", chanpath(m->root), old);
+	}
+	for(i = j+1; i < in->nmem && p < e; i++){
+		m = &in->mem[i];
+		if(m->at[0] == '\0')
+			p = seprint(p, e, m->create ? "bind -rac %q %q\n" : "bind -ra %q %q\n", chanpath(m->root), old);
+	}
+	qunlock(&in->ql);
+	return p;
+}
+
+/*
+ * For devproc's ns: if c is the top of an unnamed union bound at old,
+ * prints it as the bind -r lines that make it again and returns their
+ * length; otherwise -1. A member rooted below the top can't be written
+ * as a line and is left out.
+ */
+int
+h9_overlay_nsunion(Chan *c, char *old, char *buf, int nbuf)
+{
+	Inst *in;
+
+	if((in = nsinst(c)) == nil)
+		return -1;
+	return nsunion1(in, old, buf, buf+nbuf, 0) - buf;
+}
+
+/*
+ * The number of the union whose top path is (in the caller's namespace),
+ * or -1: for bind -r onto a union already there.
+ */
+int
+h9_overlay_unionof(char *path)
+{
+	Chan *c;
+	Unc *u;
+	int id;
+
+	if(waserror()){
+		unerrswap();
+		return -1;
+	}
+	c = namec(path, Aaccess, 0, 0);
+	id = -1;
+	if(devtab[c->type]->dc == 'O' && isunion(c)){
+		u = c->aux;
+		if(u->path[0] == '\0')
+			id = u->inst->id;
+	}
+	cclose(c);
+	poperror();
+	return id;
+}
+
+/*
+ * Gives the named union name a copy-on-write instance over it, which
+ * attaching the name gives from then on. Returns the cow instance's
+ * number, or -1 with the error set.
+ */
+int
+h9_overlay_cowname(char *name)
+{
+	Inst *u, *cw;
+	Chan *volatile c;
+	char spec[32];
+	int id;
+
+	c = nil;
+	if(waserror()){
+		if(c != nil)
+			cclose(c);
+		unerrswap();
+		return -1;
+	}
+	if(!unvalidname(name))
+		error(Ebadarg);
+	lock(&instlock);
+	u = unnamed(name);
+	unlock(&instlock);
+	if(u == nil){
+		u = unnew(name);
+		USED(u);
+	}
+	snprint(spec, sizeof spec, "#O%s", name);
+	c = namec(spec, Aaccess, 0, 0);
+	id = h9_overlay_new(c);
+	if(id < 0)
+		nexterror();
+	cclose(c);
+	c = nil;
+	lock(&instlock);
+	cw = instlookup(id);
+	u = unnamed(name);
+	if(cw != nil && u != nil){
+		if(u->cow != nil)
+			u->cow->over = nil;
+		u->cow = cw;
+		cw->over = u;
+	}
+	unlock(&instlock);
+	poperror();
+	return id;
+}
+
+/* Drops the pinned ref of a named union and its cow that were never attached. */
+void
+h9_overlay_unpin(char *name)
+{
+	Inst *u, *cw;
+	int du, dc;
+
+	lock(&instlock);
+	u = unnamed(name);
+	du = dc = 0;
+	cw = nil;
+	if(u != nil){
+		cw = u->cow;
+		if(cw != nil && cw->pinned){
+			cw->pinned = 0;
+			dc = 1;
+		}
+		if(u->pinned){
+			u->pinned = 0;
+			du = 1;
+		}
+	}
+	unlock(&instlock);
+	if(dc)
+		instdecref(cw);
+	if(du)
+		instdecref(u);
+}
+
 /*
  * The device.
  */
+
+
+/*
+ * The control tree (design/mounts.md, "Union instances"): a bare #O
+ * attach is a directory with one file, clone. Opening clone makes an
+ * unnamed union owned by the opener's machine, unattached; reading it
+ * gives the union's number, and writes to it take
+ *
+ *	add [-a|-b] [-c] PATH	PATH's directory as a member, on top (-b,
+ *				the default) or at the bottom (-a); -c takes creates
+ *	del PATH		removes the member that is PATH's directory
+ *	cow			a copy-on-write instance over the union, which
+ *				attaching the union's number gives from then on
+ *
+ * with PATH resolved in the writer's namespace, so a member is a tree the
+ * writer could already walk. Binding #ON attaches it; closing clone
+ * before that lets it go. Its chans have dev Ctldev, and aux nil, or a
+ * Ctl once clone is open.
+ */
+#define Ctldev	((ulong)~0)	/* ulong is 32 bits here */
+
+enum
+{
+	Qctldir	= 0,
+	Qclone,
+};
+
+typedef struct Ctl Ctl;
+struct Ctl
+{
+	int	id;	/* the union clone made */
+	int	cow;	/* its cow instance, or -1 */
+};
+
+static Dirtab ctltab[] = {
+	".",		{Qctldir, 0, QTDIR},	0,	DMDIR|0555,
+	"clone",	{Qclone},		0,	0666,
+};
+
+static int
+isctl(Chan *c)
+{
+	return c->dev == Ctldev;
+}
+
+static Chan*
+ctlattach(void)
+{
+	Chan *c;
+
+	c = devattach('O', "");
+	c->dev = Ctldev;
+	mkqid(&c->qid, Qctldir, 0, QTDIR);
+	c->aux = nil;
+	return c;
+}
+
+static Walkqid*
+ctlwalk(Chan *c, Chan *nc, char **name, int nname)
+{
+	return devwalk(c, nc, name, nname, ctltab, nelem(ctltab), devgen);
+}
+
+static int
+ctlstat(Chan *c, uchar *db, int n)
+{
+	return devstat(c, db, n, ctltab, nelem(ctltab), devgen);
+}
+
+static Chan*
+ctlopen(Chan *c, int omode)
+{
+	Ctl *k;
+	Inst *in;
+
+	if(c->qid.path != Qclone)
+		return devopen(c, omode, ctltab, nelem(ctltab), devgen);
+	k = smalloc(sizeof(Ctl));
+	k->cow = -1;
+	if(waserror()){
+		free(k);
+		nexterror();
+	}
+	in = unnew(nil);
+	k->id = in->id;
+	poperror();
+	c = devopen(c, omode, ctltab, nelem(ctltab), devgen);
+	c->aux = k;
+	return c;
+}
+
+static void
+ctlclose(Chan *c)
+{
+	Ctl *k;
+
+	k = c->aux;
+	if(k == nil)
+		return;
+	c->aux = nil;
+	/* Never attached: they go now. The cow holds the union until it goes. */
+	if(k->cow >= 0)
+		h9_overlay_drop(k->cow);
+	h9_overlay_drop(k->id);
+	free(k);
+}
+
+static long
+ctlread(Chan *c, void *a, long n, vlong off)
+{
+	Ctl *k;
+	char buf[16];
+
+	if(c->qid.type & QTDIR)
+		return devdirread(c, a, n, ctltab, nelem(ctltab), devgen);
+	k = c->aux;
+	if(k == nil)
+		error(Ebadusefd);
+	snprint(buf, sizeof buf, "%d\n", k->id);
+	return readstr(off, a, n, buf);
+}
+
+/* The union clone made, with a reference; Enonexist if it's gone. */
+static Inst*
+ctlinst(Ctl *k)
+{
+	Inst *in;
+
+	lock(&instlock);
+	in = instlookup(k->id);
+	if(in == nil || in->mode != Union || in->pool != h9_overlay_pool()){
+		unlock(&instlock);
+		error(Enonexist);
+	}
+	in->ref++;
+	unlock(&instlock);
+	return in;
+}
+
+static long
+ctlwrite(Chan *c, void *a, long n, vlong)
+{
+	Ctl *k;
+	Cmdbuf *cb;
+	Inst *volatile in;
+	Inst *un, *cw;
+	Chan *volatile mc;
+	char ebuf[ERRMAX];
+	char *path;
+	int i, after, create, id;
+
+	if(c->qid.type & QTDIR)
+		error(Eisdir);
+	k = c->aux;
+	if(k == nil)
+		error(Ebadusefd);
+	cb = parsecmd(a, n);
+	in = nil;
+	mc = nil;
+	if(waserror()){
+		if(mc != nil)
+			cclose(mc);
+		if(in != nil)
+			instdecref(in);
+		free(cb);
+		nexterror();
+	}
+	if(cb->nf < 1)
+		error(Ebadctl);
+	if(strcmp(cb->f[0], "add") == 0){
+		after = 0;
+		create = 0;
+		for(i = 1; i < cb->nf-1; i++){
+			if(strcmp(cb->f[i], "-a") == 0)
+				after = 1;
+			else if(strcmp(cb->f[i], "-b") == 0)
+				after = 0;
+			else if(strcmp(cb->f[i], "-c") == 0)
+				create = 1;
+			else if(strcmp(cb->f[i], "-ac") == 0 || strcmp(cb->f[i], "-ca") == 0)
+				after = create = 1;
+			else if(strcmp(cb->f[i], "-bc") == 0 || strcmp(cb->f[i], "-cb") == 0)
+				create = 1;
+			else
+				error(Ebadctl);
+		}
+		if(cb->nf < 2)
+			error(Ebadctl);
+		path = cb->f[cb->nf-1];
+		in = ctlinst(k);
+		mc = namec(path, Aaccess, 0, 0);
+		unaddmember(in, mc, "", after, create);
+	}else if(strcmp(cb->f[0], "del") == 0){
+		if(cb->nf != 2)
+			error(Ebadctl);
+		in = ctlinst(k);
+		mc = namec(cb->f[1], Aaccess, 0, 0);
+		if(!undelmember(in, mc))
+			error("not a member");
+	}else if(strcmp(cb->f[0], "cow") == 0){
+		if(cb->nf != 1 || k->cow >= 0)
+			error(Ebadctl);
+		/* As h9_overlay_cowname does for a named union. */
+		un = ctlinst(k);
+		in = un;
+		mc = unattach(un, "");
+		in = nil;	/* mc holds the reference now */
+		id = h9_overlay_new(mc);
+		if(id < 0){
+			strecpy(ebuf, ebuf+sizeof ebuf, up->errstr);
+			error(ebuf);
+		}
+		lock(&instlock);
+		cw = instlookup(id);
+		if(cw != nil){
+			un->cow = cw;
+			cw->over = un;
+		}
+		unlock(&instlock);
+		k->cow = id;
+	}else
+		error(Ebadctl);
+	poperror();
+	if(mc != nil)
+		cclose(mc);
+	if(in != nil)
+		instdecref(in);
+	free(cb);
+	return n;
+}
 
 static Chan*
 ovattach(char *spec)
@@ -1498,12 +3063,28 @@ ovattach(char *spec)
 	long id;
 
 	if(spec == nil || *spec == '\0')
-		error(Ebadarg);
-	id = strtol(spec, &e, 10);
-	if(*e != '\0' || id < 0)
-		error(Ebadarg);
-	lock(&instlock);
-	in = instlookup(id);
+		return ctlattach();
+	if(unvalidname(spec)){
+		/* A named union, made empty on first use; or the cow over it. */
+		lock(&instlock);
+		in = unnamed(spec);
+		unlock(&instlock);
+		if(in == nil)
+			unnew(spec);
+		lock(&instlock);
+		in = unnamed(spec);
+		if(in != nil && in->cow != nil)
+			in = in->cow;
+	}else{
+		id = strtol(spec, &e, 10);
+		if(*e != '\0' || id < 0)
+			error(Ebadarg);
+		lock(&instlock);
+		in = instlookup(id);
+		/* A union clone gave a cow: the number stands for both. */
+		if(in != nil && in->mode == Union && in->name[0] == '\0' && in->cow != nil)
+			in = in->cow;
+	}
 	if(in == nil || in->pool != h9_overlay_pool()){
 		unlock(&instlock);
 		error(Enonexist);
@@ -1517,8 +3098,13 @@ ovattach(char *spec)
 		instdecref(in);
 		nexterror();
 	}
+	if(in->mode == Union){
+		c = unattach(in, spec);
+		poperror();
+		return c;
+	}
 	c = devattach('O', spec);
-	c->dev = id;
+	c->dev = in->id;
 	c->qid = in->root->qid;
 	if(waserror()){
 		cclose(c);
@@ -1768,6 +3354,10 @@ ovwalk(Chan *c, Chan *nc, char **name, int nname)
 	Ovc *o, *volatile no;
 	Inst *in;
 	int i;
+	if(isctl(c))
+		return ctlwalk(c, nc, name, nname);
+	if(isunion(c))
+		return unwalk(c, nc, name, nname);
 
 	if(nc != nil)
 		panic("ovwalk: nc != nil");
@@ -1834,6 +3424,10 @@ ovstat(Chan *c, uchar *db, int n)
 	Inst *in;
 	Dir d;
 	int r;
+	if(isctl(c))
+		return ctlstat(c, db, n);
+	if(isunion(c))
+		return unstat(c, db, n);
 
 	o = c->aux;
 	in = o->inst;
@@ -1875,6 +3469,10 @@ ovopen(Chan *c, int omode)
 	uchar buf[1024+4*Maxname];
 	char strs[sizeof buf];
 	int mode;
+	if(isctl(c))
+		return ctlopen(c, omode);
+	if(isunion(c))
+		return unopen(c, omode);
 
 	o = c->aux;
 	in = o->inst;
@@ -1961,6 +3559,10 @@ ovcreate(Chan *c, char *name, int omode, ulong perm)
 	Node *dir, *ch;
 	char *volatile np;
 	int fresh;
+	if(isctl(c))
+		error(Eperm);
+	if(isunion(c))
+		return uncreate(c, name, omode, perm);
 
 	o = c->aux;
 	in = o->inst;
@@ -2097,6 +3699,12 @@ ovremove(Chan *c)
 {
 	Ovc *o;
 	Inst *in;
+	if(isctl(c))
+		error(Eperm);
+	if(isunion(c)){
+		unremove(c);
+		return;
+	}
 
 	o = c->aux;
 	in = o->inst;
@@ -2125,9 +3733,17 @@ ovclose(Chan *c)
 	Ovc *o;
 	Inst *in;
 
+	if(isctl(c)){
+		ctlclose(c);
+		return;
+	}
 	o = c->aux;
 	if(o == nil)
 		return;
+	if(isunion(c)){
+		unclose(c);
+		return;
+	}
 	in = o->inst;
 	if((c->flag & (COPEN|CRCLOSE)) == (COPEN|CRCLOSE)){
 		qlock(&in->ql);
@@ -2147,6 +3763,10 @@ ovread(Chan *c, void *a, long n, vlong off)
 	Ovc *o;
 	Inst *in;
 	long m, sz;
+	if(isctl(c))
+		return ctlread(c, a, n, off);
+	if(isunion(c))
+		return unread(c, a, n, off);
 
 	o = c->aux;
 	in = o->inst;
@@ -2183,6 +3803,10 @@ ovwrite(Chan *c, void *a, long n, vlong off)
 	Ovc *o;
 	Inst *in;
 	Node *nd;
+	if(isctl(c))
+		return ctlwrite(c, a, n, off);
+	if(isunion(c))
+		return unwrite(c, a, n, off);
 
 	o = c->aux;
 	in = o->inst;
@@ -2305,6 +3929,8 @@ h9_overlay_move(Chan *c, Chan *dc, char *name)
 	char *nm, *np, *oldpath;
 	int isdir, lowerex;
 
+	if(isunion(c) || isunion(dc))
+		return 1;
 	o = c->aux;
 	od = dc->aux;
 	in = o->inst;
@@ -2427,6 +4053,10 @@ ovwstat(Chan *c, uchar *db, int n)
 	Dir d;
 	char *strs;
 	int isdir, chname, chmode, chmtime, chlen, gone;
+	if(isctl(c))
+		error(Eperm);
+	if(isunion(c))
+		return unwstat(c, db, n);
 
 	o = c->aux;
 	in = o->inst;

@@ -74,6 +74,8 @@ pub const Server = struct {
     held: std.ArrayList([]u8) = .empty,
     /// Every request's type, in order.
     log: std.ArrayList(u8) = .empty,
+    /// Every name a Twalk asked for, one per line, across connections.
+    walked: std.ArrayList(u8) = .empty,
     /// The uname and n_uname of the last attach.
     attached_as: ?struct { []const u8, u32 } = null,
     /// `9P2000.L.Z` was negotiated on this connection.
@@ -137,6 +139,7 @@ pub const Server = struct {
         for (s.held.items) |h| s.gpa.free(h);
         s.held.deinit(s.gpa);
         s.log.deinit(s.gpa);
+        s.walked.deinit(s.gpa);
         s.arena.deinit();
         s.gpa.destroy(s);
     }
@@ -353,6 +356,10 @@ pub const Server = struct {
             .Twalk => |w| {
                 const f = s.fids.get(w.fid) orelse return s.lerr(tag, E.BADF);
                 if (w.newfid != w.fid and s.fids.contains(w.newfid)) return s.lerr(tag, E.BADF);
+                for (w.wnames.slice()) |name| {
+                    try s.walked.appendSlice(s.gpa, name);
+                    try s.walked.append(s.gpa, '\n');
+                }
                 var qids: [wire.max_welem]wire.Qid = undefined;
                 const n, const k = walkNames(f.node, w.wnames.slice(), &qids);
                 if (k == 0 and w.wnames.n != 0) return s.lerr(tag, if (n.kind != .dir) E.NOTDIR else E.NOENT);

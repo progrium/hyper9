@@ -122,14 +122,14 @@ jobs:
         run: |
           mkdir -p _site/demo
           cp site/*.html _site/
-          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,root.h9a,linux.h9a,nine-arm64.h9a,package.json} _site/demo/
+          cp zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,statictree.js,h9.wasm,root.h9a,linux.h9a,nine-arm64.h9a,package.json} _site/demo/
           cp LICENSE _site/demo/LICENSE
           cp third_party/drawterm/LICENSE _site/demo/LICENSE.drawterm
       - name: Add the Wine page's demo
         if: steps.wine-demo.outcome == 'success'
         run: |
           mkdir -p _site/wine-demo
-          cp wine-draw/zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,h9.wasm,wine.h9a,package.json} _site/wine-demo/
+          cp wine-draw/zig-out/web/{index.html,h9-web.js,worker.js,wasi-mem.js,statictree.js,h9.wasm,wine.h9a,package.json} _site/wine-demo/
           cp wine-draw/LICENSE _site/wine-demo/LICENSE
           cp wine-draw/third_party/drawterm/LICENSE _site/wine-demo/LICENSE.drawterm
       - uses: actions/upload-pages-artifact@v3

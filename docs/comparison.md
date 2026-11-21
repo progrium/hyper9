@@ -99,8 +99,8 @@ host kernel, fenced by namespaces, cgroups, and seccomp; on macOS and Windows
 it needs a Linux VM underneath. h9 covers a lot of the same ground from a
 different direction:
 
-- **Linux userland without a Linux kernel.** `h9 --root alpine sh` runs
-  Alpine's shell, and `h9 --root alpine --writable alpine apk add jq`
+- **Linux userland without a Linux kernel.** `h9 --dir alpine:#L sh` runs
+  Alpine's shell, and `h9 --dir alpine:#L:rw apk add jq`
   installs into the tree, as uid 0 the way a rootless container does. There's
   no Linux VM on macOS: Linux syscalls are translated onto h9's kernel in the
   h9 process. SQLite, PostgreSQL, Redis, git, CPython, the Go toolchain, and

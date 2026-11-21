@@ -41,8 +41,8 @@ scripts/lima/vm up linux                    # create (first time), start, provis
 scripts/lima/vm push linux zig-out/linux/bin/h9 zig-out/fixtures/hello  # into ~/h9
 scripts/lima/vm shell linux ./h9/h9 --backend emu ./h9/hello
 scripts/lima/vm push-root linux             # 9front root tree into ~/h9/root
-scripts/lima/vm shell linux ./h9/h9 --root h9/root /bin/cat /lib/namespace
-scripts/lima/vm shell windows 'cd h9 && h9.exe --root root /bin/cat /lib/namespace'
+scripts/lima/vm shell linux ./h9/h9 --dir h9/root /bin/cat /lib/namespace
+scripts/lima/vm shell windows 'cd h9 && h9.exe --dir root /bin/cat /lib/namespace'
 scripts/lima/vm down linux
 ```
 

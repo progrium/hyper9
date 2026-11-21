@@ -59,9 +59,9 @@ under(char *s, char *p)
 
 /*
  * Renames dot's path for the other view (design/0018, "The Linux view"):
- * going to Linux, a path under /tmp or /mnt/term is kept, one in #λ loses
+ * going to Linux, a path under /tmp or /mnt/term is kept, one in #L loses
  * the prefix, and any other gets /9 before it; going to 9front, /9 is
- * stripped and any other path gets #λ before it. dot becomes a walk to
+ * stripped and any other path gets #L before it. dot becomes a walk to
  * the new name from the new root, so its path is a proper one, if that
  * reaches the same directory; otherwise it's kept as it was.
  */
@@ -107,7 +107,7 @@ renamedot(int tolinux)
 }
 
 /*
- * Sets the calling process's root: the Linux view (#λ, renamed /) when
+ * Sets the calling process's root: the Linux view (#L, renamed /) when
  * linux is set, and the machine's 9front root (#/) otherwise. A Chan's
  * mounts are keyed by its qid, so a fresh attach sees the machine's binds.
  */
@@ -118,7 +118,7 @@ h9_linux_setslash(int tolinux)
 
 	if(waserror())
 		return syserr();
-	c = namec(tolinux ? "#λ" : "#/", Atodir, 0, 0);
+	c = namec(tolinux ? "#L" : "#/", Atodir, 0, 0);
 	pathclose(c->path);
 	c->path = newpath("/");
 	poperror();
@@ -131,7 +131,7 @@ h9_linux_setslash(int tolinux)
 int
 h9_linux_inview(void)
 {
-	return up->slash != nil && devtab[up->slash->type]->dc == L'λ';
+	return up->slash != nil && devtab[up->slash->type]->dc == 'L';
 }
 
 /*
@@ -149,7 +149,7 @@ samedir(Chan *a, Chan *b)
 /*
  * Whether c is what's mounted on the mount point d. Atodir leaves a chan
  * before its mount point, as cd does, so a directory with something
- * bound on it, such as the Linux view's /tmp, walks to #λ's own entry,
+ * bound on it, such as the Linux view's /tmp, walks to #L's own entry,
  * while the fd is the overlay's. Walks from d cross the mount.
  */
 static int

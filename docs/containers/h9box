@@ -42,7 +42,7 @@ die() { echo "h9box: $*" >&2; exit 1; }
 image() { echo "$BOX/images/$1"; }
 remote() { case $1 in *!* | ws://* | wss://*) true ;; *) false ;; esac; }
 
-# rootof IMAGE: what --root takes for it
+# rootof IMAGE: the image's directory, or a served image's address
 rootof() {
 	if remote "$1"; then echo "$1"; return; fi
 	[ -d "$(image "$1")" ] || die "no image $1"
@@ -55,6 +55,18 @@ linux() {
 		[ -f "$1/etc/os-release" ] || [ -f "$1/usr/lib/os-release" ] ||
 			ls "$1"/lib/ld-* >/dev/null 2>&1
 	}
+}
+
+# mountof ROOT: the flag and value that mount an image, one per line: a
+# served image as a --url, a Linux image on #L, and a 9front image on /
+mountof() {
+	if remote "$1"; then
+		printf -- '--url\n%s\n' "$(echo "$1" | sed 's/^tcp!\([^!]*\)!\(.*\)$/tcp:\/\/\1:\2/; s/^tcp!\([^!]*\)$/tcp:\/\/\1:564/; s/^unix!/unix:\/\//')"
+	elif linux "$1"; then
+		printf -- '--dir\n%s:#L\n' "$1"
+	else
+		printf -- '--dir\n%s\n' "$1"
+	fi
 }
 
 # clone SRC DST: copy a tree, sharing blocks where the file system can
@@ -70,7 +82,7 @@ clone() {
 # through h9 itself, which needs cat in the image.
 config() {
 	if remote "$1"; then
-		"$H9" --root "$1" cat "/box/$2" 2>/dev/null || true
+		"$H9" $(mountof "$1") cat "/box/$2" 2>/dev/null || true
 	else
 		cat "$1/box/$2" 2>/dev/null || true
 	fi
@@ -85,7 +97,7 @@ h9run() (
 	remote "$root" || ! linux "$root" || ns=
 	IFS=$nl
 	set -f
-	exec "$H9" --root "$root" $ns \
+	exec "$H9" $(mountof "$root") $ns \
 		$(config "$root" env | while IFS= read -r kv; do printf -- '--env\n%s\n' "$kv"; done) \
 		"$@"
 )

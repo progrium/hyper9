@@ -386,6 +386,7 @@ struct Rconv
 	int	rerr;	/* the reader's error: a Linux errno */
 	int	eof;
 	int	refs;	/* the table's, and each kproc's */
+	int	nk;	/* kprocs running: close waits for them */
 	Proc	*rk;	/* the reader, to interrupt at close */
 	Proc	*lk2;	/* the listener, to interrupt at close */
 	Chan	*dir;	/* the conversation's directory, for listen */
@@ -460,15 +461,8 @@ rgetfd(int fd)
 }
 
 static void
-rput(Rconv *r)
+rfree(Rconv *r)
 {
-	int last;
-
-	lock(&r->lk);
-	last = --r->refs == 0;
-	unlock(&r->lk);
-	if(!last)
-		return;
 	if(r->ctl != nil)
 		cclose(r->ctl);
 	if(r->dir != nil)
@@ -478,6 +472,36 @@ rput(Rconv *r)
 	cclose(r->data);
 	free(r->buf);
 	free(r);
+}
+
+static void
+rput(Rconv *r)
+{
+	int last;
+
+	lock(&r->lk);
+	last = --r->refs == 0;
+	unlock(&r->lk);
+	if(last)
+		rfree(r);
+}
+
+/*
+ * A kproc's end: drops its reference in the same lock that says it's
+ * gone, so h9_linux_rclose, waiting for nk to reach 0, makes the last
+ * close itself, while the machine whose chans r holds is still there.
+ */
+static void
+rkdone(Rconv *r)
+{
+	int last;
+
+	lock(&r->lk);
+	r->nk--;
+	last = --r->refs == 0;
+	unlock(&r->lk);
+	if(last)
+		rfree(r);
 }
 
 static int
@@ -550,7 +574,7 @@ rreader(void *a)
 	r->rk = nil;
 	unlock(&r->lk);
 	h9_pollwake();
-	rput(r);
+	rkdone(r);
 	pexit("", 0);
 }
 
@@ -562,6 +586,7 @@ rstartreader(Rconv *r)
 	lock(&r->lk);
 	r->state = RCopen;
 	r->refs++;
+	r->nk++;
 	unlock(&r->lk);
 	kp = kproc("rconv", rreader, r);
 	lock(&r->lk);
@@ -628,6 +653,7 @@ rlistener(void *a)
 	char *names[1];
 
 	r = a;
+	h9_kprocdetach();
 	names[0] = "listen";
 	for(;;){
 		while(!nocall(r)){
@@ -669,7 +695,7 @@ rlistener(void *a)
 	r->lk2 = nil;
 	r->lgone = 1;
 	unlock(&r->lk);
-	rput(r);
+	rkdone(r);
 	pexit("", 0);
 }
 
@@ -728,7 +754,7 @@ rconnector(void *a)
 			rstartreader(r);
 	}
 	h9_pollwake();
-	rput(r);
+	rkdone(r);
 	pexit("", 0);
 }
 
@@ -806,6 +832,7 @@ h9_linux_rclose(int fd)
 {
 	Chan *c;
 	Rconv *r, **l;
+	int i, n;
 
 	if(waserror())
 		return;
@@ -847,6 +874,28 @@ h9_linux_rclose(int fd)
 		procinterrupt(r->lk2);
 	unlock(&r->lk);
 	wakeup(&r->room);
+	/*
+	 * The kprocs go before r does: one that made the last close after
+	 * the machine ended would close chans in its freed memory. A connect
+	 * kproc ends when its connect does, at most the dial's timeout.
+	 */
+	for(i = 0; i < 1000; i++){
+		lock(&r->lk);
+		n = r->nk;
+		if(n > 0){
+			if(r->rk != nil)
+				procinterrupt(r->rk);
+			if(r->lk2 != nil)
+				procinterrupt(r->lk2);
+		}
+		unlock(&r->lk);
+		if(n == 0)
+			break;
+		if(waserror())
+			break;
+		tsleep(&up->sleep, return0, nil, 10);
+		poperror();
+	}
 	rput(r);	/* rget's */
 	rput(r);	/* the table's */
 }
@@ -959,6 +1008,7 @@ rsockctl(Rconv *r, char *msg)
 		r->state = RCconnecting;
 		r->err = 0;
 		r->refs++;
+		r->nk++;
 		unlock(&r->lk);
 		kproc("rconnect", rconnector, r);
 		return;
@@ -976,6 +1026,7 @@ rsockctl(Rconv *r, char *msg)
 			lock(&r->lk);
 			r->state = RClisten;
 			r->refs++;
+			r->nk++;
 			unlock(&r->lk);
 			kp = kproc("rlisten", rlistener, r);
 			lock(&r->lk);

@@ -113,27 +113,27 @@ Serve one h9's root tree to another:
 
 ```sh
 h9 --net=enable aux/listen1 -t 'tcp!127.0.0.1!5640' /bin/exportfs -R -r / &
-h9 --root 'tcp!127.0.0.1!5640' ls /
+h9 --url tcp://127.0.0.1:5640 ls /
 ```
 
 Serve a host directory from Go (it's served read-write, so use a copy):
 
 ```sh
 go run github.com/Harvey-OS/ninep/cmd/ufs@latest -root /tmp/rootcopy -addr 127.0.0.1:5640 &
-h9 --root 'tcp!127.0.0.1!5640' ls /
+h9 --url tcp://127.0.0.1:5640 ls /
 ```
 
 Put any of those behind a WebSocket:
 
 ```sh
 zig build wsrelay -- 8080 5640 &
-h9 --root ws://localhost:8080/9p ls /
+h9 --url ws://localhost:8080/9p ls /
 ```
 
 Use a root over `wss://` with a token kept out of `ps`:
 
 ```sh
-echo "Authorization: Bearer $TOKEN" > hdr && h9 --root wss://fs.example/9p --root-header @hdr ls /
+echo "Authorization: Bearer $TOKEN" > hdr && h9 --url wss://fs.example/9p:/:header=@hdr ls /
 ```
 
 Keep a project's mounts in a namespace file next to its code:
@@ -183,14 +183,14 @@ Skip the 9front root entirely, which Go doesn't need:
 
 ```sh
 mkdir -p goroot/{bin,dev,env,fd,mnt/term/cwd,net,proc,srv,tmp}
-h9 --root goroot ./hello
+h9 --dir goroot ./hello
 ```
 
 Run a package's tests on Plan 9:
 
 ```sh
 GOOS=plan9 GOARCH=amd64 go test -c -o pkg.test ./pkg
-h9 --root goroot --cwd ./pkg ./pkg.test -test.v
+h9 --dir goroot --cwd ./pkg ./pkg.test -test.v
 ```
 
 Serve HTTP from inside h9, sharing only the current directory, read-only:

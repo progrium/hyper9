@@ -400,7 +400,7 @@ pub fn atDir(fd: i32, comptime T: type, f: anytype, args: anytype) Error!T {
 
 pub const FdInfo = struct {
     /// The device's character: 'M' for a 9P mount, '|' for a pipe, 'y'
-    /// for the console, 'λ' for devlinux.
+    /// for the console, 'L' for devlinux.
     dc: u21,
     /// The channel's device instance (a mount's, for 'M').
     dev: u64,

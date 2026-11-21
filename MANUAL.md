@@ -202,26 +202,27 @@ hypervisor, but about an hour on the emulator, which x86\_64 hosts need
 because the compilers are arm64. On an existing tree it
 only adds what's missing. Appendix C describes what's in the tree.
 
-h9 looks for its root in this order:
+The root, `/`, is whatever the mount flags put there (chapter 21): `--dir
+PATH` for a host directory, or `--url URL` for a 9P server (chapter 16).
+With nothing on `/`, h9 uses:
 
-1. `--root` on the command line.
-2. The `H9ROOT` environment variable.
-3. `.local/9front/root` in the source tree, when you run the `h9` that
-   `zig build` put in `zig-out/bin`.
-4. The built-in root, a small read-only tree inside the h9 binary.
+1. The `H9ROOT` environment variable, read as a `--url` if it has `://`
+   and as a `--dir` otherwise.
+2. The built-in root, a small read-only tree inside the h9 binary.
 
-`--root` and `H9ROOT` take a directory, or a 9P server: a dial string such
-as `tcp!fs.example.com!564`, `unix!/path/to/socket`, the path of a unix
-socket, or a WebSocket URL (chapter 16). A `--root` directory can also be a
-Linux root, such as Alpine's, which comes on top of the 9front root rather
-than replacing it (chapter 20).
-
-So the development build finds its tree on its own. If you copy `h9`
-somewhere else, such as onto your `PATH`, set `H9ROOT` in your shell profile:
+So to use the tree you built, pass it, or set `H9ROOT` in your shell
+profile:
 
 ```sh
+host$ h9 --dir .local/9front/root ls /
 host$ export H9ROOT=~/src/hyper9/.local/9front/root
 ```
+
+Mount flags on `/` stack, a later one on top, as layers do in a
+Dockerfile: `--dir ./base --dir ./app` shows `app`'s files over `base`'s,
+merged at every depth. A Linux root, such as Alpine's, goes on `#L` with
+`--dir ./alpine:#L`, beside the 9front root rather than replacing it
+(chapter 20).
 
 The built-in root is what lets a fresh install work with nothing but the
 h9 binary. It holds 44 of 9front's commands, built from the pinned
@@ -242,17 +243,14 @@ tree. A command that isn't in the built-in root says so:
 
 ```sh
 host$ h9 mk
-h9: mk: not found (not in the built-in root; pass --root or set H9ROOT for the full 9front tree)
+h9: mk: not found (not in the built-in root; pass --dir or --url, or set H9ROOT, for the full 9front tree)
 ```
 
-`--builtin` changes how the built-in root is used. `--builtin=only` uses it
-even when `H9ROOT` or the development tree would give a root. With a root,
-`--builtin=before` puts its commands in `/bin` ahead of the root's, which
-saves reading them from a slow 9P or WebSocket root, and `--builtin=after`
-puts them behind, to fill in commands a slim root lacks. `--builtin=off`
-turns it off: then, without a root, h9 can still run a program from a host
-path (`h9 ./prog`), but the program sees only the kernel's devices, and
-anything else is an error (exit 125).
+`--builtin` puts the built-in root on `/` itself. Alone, it's the root
+even when `H9ROOT` is set. With other mounts on `/`, a bare `--builtin` is
+the bottom of the stack, filling in commands a slim root lacks, and
+`--builtin=/:b` is its top, which saves reading its commands from a slow
+9P or WebSocket root.
 
 A development build embeds the commands only if `zig build slim` has made
 them for the architecture (chapter 18); otherwise `zig build` warns, and the
@@ -324,10 +322,9 @@ If this fails, the message says why:
 
 | Message | Exit | Fix |
 | --- | --- | --- |
-| `h9: root DIR: not found` | 125 | Check `--root` or `H9ROOT`, or run `zig build mkroot` |
-| `h9: root DIR: not a directory or socket` | 125 | `--root` names a plain file |
-| `h9: no root tree found; pass --root or set H9ROOT` | 125 | Only with `--builtin=off`; see the lookup order above |
-| `h9: mk: not found (not in the built-in root; ...)` | 127 | The command is only in the full tree: pass `--root` or set `H9ROOT` |
+| `h9: --dir DIR: not found` | 125 | Check the path, or `H9ROOT`, or run `zig build mkroot` |
+| `h9: --root was removed: use --dir PATH ...` | 2 | `--root` and its `--root-*` flags are now mount flags (chapter 21) |
+| `h9: mk: not found (not in the built-in root; ...)` | 127 | The command is only in the full tree: pass `--dir` or set `H9ROOT` |
 | `h9: cannot create auto machine for arm64: no usable hypervisor (is h9 signed with h9.entitlements?)` | 125 | Only in an `h9` built with `-Demu=none`: build with `zig build`, which signs it and builds the emulator in |
 | `h9: cannot create emu machine for arm64: the emulator isn't built into this h9 (build it with -Demu=hcpu)` | 125 | The `h9` was built with `-Demu=none`; rebuild it without that |
 | `h9: warning: no usable hypervisor; using the emulator` | | Not an error: h9 fell back to the emulator |
@@ -362,7 +359,7 @@ explains how these two worlds are joined into one file tree, and chapter 22
 how to share more host directories.
 
 Everything after the program name goes to the program, so `h9 ls -l` passes
-`-l` to `ls`. h9's own options are long flags (`--root`, `--rc`, and so on)
+`-l` to `ls`. h9's own options are long flags (`--dir`, `--rc`, and so on)
 and must come *before* the program name:
 
 ```sh
@@ -860,6 +857,24 @@ You can change the namespace two ways:
 Because `--print`'s namespace section is in namespace-file syntax, you can
 save it, edit it, and replay it with `--ns`.
 
+h9's `bind` also takes `-r` ([mounts](design/mounts.md)): `bind -r new
+old` merges `new` with `old` at every depth, not only at the top, so a
+directory both have shows the files of both. `-b` puts `new` on top, the
+default, and `-a` at the bottom; `-c` sends creates to it. Removing a file
+from the top uncovers the one below. Each such union is an instance of
+`#O`, made by opening `#O/clone`, which reads back the union's number and
+takes `add [-a|-b] [-c] PATH` lines; `bind '#O'N` attaches it. A machine
+can attach only its own unions. `ns` prints a union as the `bind -r`
+lines that rebuild it, so its output replays with `--ns`:
+
+```text
+% mkdir /tmp/a /tmp/b /tmp/x
+% bind -r /tmp/b /tmp/x && bind -rb /tmp/a /tmp/x
+% ns | grep /tmp/x
+bind -rb /tmp/a /tmp/x
+bind -rb /tmp/b /tmp/x
+```
+
 **Try it**
 
 ```text
@@ -908,14 +923,14 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#ℏ` | hstream | `/net`, after `#I` | WebSockets, as `/net/ws` (chapter 16), and the connection behind a WebSocket root. Masked under `--net=disable`. |
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
-| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22) |
+| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22), and the unions `bind -r` makes (chapter 6) |
 | `#C` | cmd | | Host commands. Not built: they live on the [`host-cmd`](https://github.com/progrium/hyper9/tree/host-cmd) branch while [host-cmd](design/host-cmd.md) rethinks them. The letter stays masked. |
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
 | `#a`, `#D` | tls, ssl | | TLS and SSL record layers, for `tlsclient` and friends |
 | `#i`, `#m`, `#b` | draw, mouse, kbd | `/dev`, with `--gfx` | The window, its mouse and cursor, and its keyboard (chapter 17). Masked without `--gfx`. |
 | `#A` | audio | | Present, but there's no sound to drive |
-| `#λ` | linux | A Linux process's `/` | The Linux view: `/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, and `/sys`, with the Linux root unioned after them (chapter 20) |
+| `#L` | linux | A Linux process's `/` | The Linux view: `/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, and `/sys`, with the Linux root unioned after them (chapter 20) |
 | `#ε` | eventfd | | Linux `eventfd`, `epoll`, and `signalfd` instances |
 | `#τ` | pty | A Linux process's `/dev/pts` | Linux pseudoterminals: `ptmx`, which makes a pair and opens its master, and each pair's slave by number, with Linux's line discipline: canonical editing, echo, and Ctrl-C ([linux-pty](design/epoch-0/linux-pty.md)). |
 
@@ -1496,28 +1511,30 @@ devices in Plan 9.
   doesn't, so make the mount point first: `mkdir /n/x` works in the root's
   overlay, or make one in `/tmp` and union it onto `/mnt` with `bind -a` as
   in chapter 15.
-- **9P roots.** `--root` can be a 9P server instead of a directory: a dial
-  string `tcp!host!port` (`tcp!host` means port 564), `unix!/path`, or the
-  path of a unix socket. h9 connects before the program runs, posts the
-  connection as `/srv/root`, mounts it at `/`, and binds everything else over
-  it as usual. `--root-spec NAME` sets the attach name and `--root-user NAME`
-  the user name sent to the server (your user by default). The server must
-  not ask for authentication: `u9fs -a none`, or `exportfs` behind
-  `aux/listen1 -t`, such as another h9 serving its tree. By default writes
-  stay in the root's overlay and never reach the server; under
-  `--write=scope` they go to the server, which decides what's writable.
-  `--write=none` with a 9P root is a usage error. A refused connection or attach is exit 125. The connection
-  is plain, unencrypted 9P, so keep a TCP root on a trusted network. Unix
-  socket roots need a macOS or Linux host.
-- **9P over WebSocket** ([websocket-9p](design/epoch-0/websocket-9p.md)).
-  `--root ws://host/path` or `wss://host/path` uses a 9P server behind a
-  WebSocket as the root. h9 makes the connection on the host, offering the
-  `9p` subprotocol, and mounts it like any 9P root. `--root-header 'Name:
-  value'` adds a handshake header, and `--root-header @FILE` reads them from
-  a file, so a token stays out of `ps`. `wss` trusts the host's CA bundle,
-  or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY`, and
-  `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
-  wss://fs.example/9p /n`. For a short-lived token, a credential helper
+- **9P mounts and roots** ([mounts](design/mounts.md)). `--url` mounts a
+  9P server: `tcp://host:port`, `unix:///path`, or a WebSocket URL (below).
+  On `/`, its default, the server is the root, or a layer of it; on another
+  path it's mounted there, and on `/srv/NAME` it's posted without being
+  mounted, for a namespace file or a guest program to mount with its own
+  spec. h9 connects before the program runs. `spec=NAME` sets the attach
+  name (a `tcp://` URL's path does too), and `user=NAME` the user name sent
+  to the server (your user by default), as in `--url
+  tcp://fs:564:/:spec=main,user=glenda`. The server must not ask for
+  authentication: `u9fs -a none`, or `exportfs` behind `aux/listen1 -t`,
+  such as another h9 serving its tree. By default writes to a root stay in
+  its overlay and never reach the server; under `--write=scope`, or with
+  `rw`, they go to the server, which decides what's writable.
+  `--write=none` with a 9P mount is a usage error. A refused connection or
+  attach is exit 125. The connection is plain, unencrypted 9P, so keep a
+  TCP server on a trusted network. Unix sockets need a macOS or Linux host.
+- **9P over WebSocket** ([websocket-9p](design/epoch-0/websocket-9p.md)). `--url
+  ws://host/path` or `wss://host/path` uses a 9P server behind a
+  WebSocket. h9 makes the connection on the host, offering the `9p`
+  subprotocol. `header='Name: value'` adds a handshake header, and
+  `header=@FILE` reads them from a file, so a token stays out of `ps`.
+  `wss` trusts the host's CA bundle, or a PEM file given with `ca=FILE`.
+  `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` are honored. A namespace file
+  can mount a URL too: `mount -c wss://fs.example/9p /n`. For a short-lived token, a credential helper
   ([credential-helpers](design/credential-helpers.md)) is better than a
   header: `--cred 'PATTERN=COMMAND'` runs `COMMAND get URL` on the host
   before each handshake whose URL matches `PATTERN`, the root's and a
@@ -1528,7 +1545,7 @@ devices in Plan 9.
   helper runs once more with the response's status line and headers on
   stdin, so it can refresh its token. A helper that exits nonzero fails the
   handshake (exit 125 before the program starts) with the first line of its
-  stderr, and printing nothing means no credential. A `--root-header`
+  stderr, and printing nothing means no credential. A `header=`
   wins over a helper's header of the same name, `$H9CRED` adds entries
   separated by `;`, and `--print` names the helper but never shows its
   headers. A helper matching a `ws://` URL warns that its headers aren't
@@ -1536,21 +1553,45 @@ devices in Plan 9.
   `9P2000.L.Z` server's connection drops and h9 reconnects, the helper runs
   again, so the new handshake gets a fresh token. A server can name the
   uid it serves your files as by answering the handshake with `9P-Uid: N`
-  and `9P-User: NAME`: without `--user-map` or `--root-user`, files owned
+  and `9P-User: NAME`: without `--user-map` or `user=`, files owned
   by N show as NAME, and h9 attaches as NAME. In a browser, a page passes
   `credentials: async (url, failed, helper) => …` to `h9-web.js`'s
   `createMachine` in place of running helpers. A browser's WebSocket can't
   send headers, so the callback answers `{ url }`, a URL to connect to
-  instead, such as one with a single-use ticket in its query. On the
-  command line the scheme can be left off
-  ([schemeless-roots](design/epoch-0/schemeless-roots.md)): a `--root` or
-  `$H9ROOT` that isn't an existing path and looks like
-  `host[:port][/path]`, with a dotted host, a bracketed address, a port, or
-  `localhost`, is read as `wss://` plus the value, or `ws://` for
-  `localhost`, `127.x.x.x`, and `[::1]`. `--root fs.example.com/9p` is
-  `wss://fs.example.com/9p`, and `--root fs.example.com` is
-  `wss://fs.example.com/`. An existing path always wins, and `--print`
-  shows the URL h9 chose.
+  instead, such as one with a single-use ticket in its query. On the command
+  line the scheme can be left off: `--url fs.example.com/9p` is
+  `https://fs.example.com/9p`, and `localhost`, `127.x.x.x`, and `[::1]`
+  are `http://`; both probe as below. `--print` shows the URL h9 chose.
+- **`http://` and `https://`: a WebSocket or a static tree**
+  ([mounts](design/mounts.md)). h9 first tries the URL as a WebSocket, in
+  its `ws://` or `wss://` form. If the server doesn't upgrade, h9 fetches
+  `URL/.fs/index`, and a `200` makes the URL a **static tree**: dotfs's
+  index served as plain files by any web server or CDN, with each file's
+  contents at `URL/PATH`. Walks, stats, and directory reads come from the
+  index. A directory flagged `i` has its own `URL/DIR/.fs/index`, fetched
+  the first time something walks into it. A file up to 64 KiB is fetched
+  whole on its first read; a larger one is read with Range requests. A
+  file whose index line has a `b3:` hash is checked against it, and a
+  mismatch fails the read with "content changed". Checked files are kept
+  by hash under `--index-cache DIR`'s `blobs`, so the next run, or another
+  tree with the same file, doesn't fetch it again. Files flagged `p` are
+  fetched at mount. A static tree is read-only: on `/` and `#L` writes go to
+  the overlay, as for any root, and elsewhere they fail with "read-only
+  file system". h9 serves the tree to the machine itself, on a unix socket
+  in a private directory under `$TMPDIR`. When there's no WebSocket and no
+  index either, the run exits 125 naming both:
+
+  ```sh
+  host$ h9 --url https://example.com/tree:/n/tree ls /n/tree
+  host$ h9 --url http://127.0.0.1:8000/:/n/x ls /n/x
+  h9: mount http://127.0.0.1:8000/: no 9P server (the WebSocket handshake: server answered 404 Not Found) and no static tree (/.fs/index: 404 Not Found)
+  ```
+
+  In a browser, the page serves static trees with its own `fetch`, under
+  its CORS rules, so a tree on another origin needs
+  `Access-Control-Allow-Origin` (and to allow the `Range` header); a
+  browser's WebSocket doesn't say why it failed, so any failure there tries
+  the index.
 - **Metadata indexes** ([mount-index](design/mount-index.md)). A 9P
   root, or a 9P server a namespace file mounts by dial string or URL, can
   come with an index: dotfs's `.fs/index` at the top of its tree, a text
@@ -1565,9 +1606,9 @@ devices in Plan 9.
   answers. `mkindex [-o FILE] [-s SPEC] [DIR]` writes one from inside h9,
   for the tree at `DIR` (`/` by default, which it reads through
   `/srv/root`, attached with `SPEC`, so the paths h9 binds over the root
-  are left out). `--root-index FILE|URL` uses an index from somewhere else
-  for the root, for a server you can't write to; a URL is `https://` or
-  `http://`, fetched on the host with the root's `--root-ca` and proxies.
+  are left out). `index=FILE|URL` on any `--url` uses an index from
+  somewhere else, for a server you can't write to; a URL is `https://` or
+  `http://`, fetched on the host with the root's `ca=` and proxies.
   `--index none` turns indexes off. Compiled indexes are cached across
   runs in `--index-cache DIR` (default `$XDG_CACHE_HOME/h9/index`,
   `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on
@@ -1575,9 +1616,8 @@ devices in Plan 9.
   how many directories were checked, and how many of devmnt's requests
   reached the server.
   `--print` shows the index on the root's line, and `--check` reports it.
-  An index that doesn't parse is ignored, with a note under `-v`; a
-  `--root-index` that can't be read is exit 125, and one with a host
-  directory root exit 2. `mkindex` percent-escapes a name with a space or
+  An index that doesn't parse is ignored, with a note under `-v`, and an
+  `index=` that can't be read is exit 125. `mkindex` percent-escapes a name with a space or
   a rune that isn't ASCII. A name with a control character, or a byte that
   isn't UTF-8, can't be listed, so `mkindex` leaves it out and marks its
   directory `9p.incomplete=1`, and h9 never answers for that directory
@@ -1630,8 +1670,8 @@ devices in Plan 9.
   numbers both ways, and it's the only way to send 0. A file or directory
   made on the server gets its permissions from its directory, as on a
   Plan 9 file server. `/net/dotl/N/status` says which dialect the server
-  chose. A 9P root's address can be a .L server too: `--root
-  tcp!host!port` works with either, and so does a namespace file's `mount
+  chose. A `--url` can be a .L server too: `--url
+  tcp://host:port` works with either, and so does a namespace file's `mount
   -c tcp!host!port /n/l`, which dials under `--net` and `--net-allow` like
   `dotlfs`. A file read from
   start to end is read a whole `msize` (up to 1 MiB) at a time, not
@@ -1679,7 +1719,7 @@ One h9 serving its namespace, read-only, and another mounting it:
 
 ```sh
 host$ h9 --write=none --serve 'tcp!127.0.0.1!5640' &
-host$ h9 --root 'tcp!127.0.0.1!5640' --rc 'mount /srv/root /mnt/temp && ls /mnt/temp/mnt/term/cwd'
+host$ h9 --url tcp://127.0.0.1:5640:/srv/other --rc 'mount /srv/other /mnt/temp && ls /mnt/temp/mnt/term/cwd'
 ```
 
 The guest can do the same itself with `aux/listen1` under `--net=enable`,
@@ -1687,7 +1727,7 @@ since exportfs is in the root tree:
 
 ```sh
 host$ h9 --net=enable aux/listen1 -t 'tcp!127.0.0.1!5640' /bin/exportfs -R -r / &
-host$ h9 --root 'tcp!127.0.0.1!5640' ls /
+host$ h9 --url tcp://127.0.0.1:5640 ls /
 ```
 
 A root over a WebSocket, with the relay from h9's tests in front of the
@@ -1695,7 +1735,7 @@ server above, and a guest mount over one:
 
 ```sh
 host$ zig build wsrelay -- 8080 5640 &
-host$ h9 --root ws://localhost:8080/9p ls /
+host$ h9 --url ws://localhost:8080/9p ls /
 host$ h9 --rc 'mkdir /tmp/fs && wsmount ws://localhost:8080/9p /tmp/fs && ls /tmp/fs'
 ```
 
@@ -1715,10 +1755,9 @@ In the browser demo, add `--serve-origin` with the page's origin (and a
 Linux programs use the mount too, since their sockets open `/net`
 through the namespace: from busybox, `/9/bin/wsmount -b
 ws://127.0.0.1:5640/ /net` and then `wget` fetches through the host. The
-demo's `?linux` mode has `/9/bin/wsmount` as well: its page stacks a slim
-arm64 9front tree at `/9` over the Alpine archive with `createMachine`'s
-`layers`, a list of archives, each a URL or `{ url, at }`, unpacked in
-order, and names it with a second `--root /9`. Each
+demo's `?linux` mode has `/9/bin/wsmount` as well: its page mounts the
+Alpine archive on `#L` and a slim arm64 9front tree on `/` with
+`createMachine`'s `mounts`. Each
 connection carries about 7 sockets waiting at once, since each holds one
 of the server's 8 exportfs processes; mount `/net` over more connections
 for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`
@@ -1729,8 +1768,8 @@ compiles and caches it; later ones read it from the cache. Here the root
 is a 9front tree that a Linux 9P server, diod, serves:
 
 ```sh
-host$ h9 --root 'tcp!127.0.0.1!5720' --index none mkindex / >root.fsindex
-host$ h9 --root 'tcp!127.0.0.1!5720' --root-index root.fsindex -v ls /bin/ls
+host$ h9 --url tcp://127.0.0.1:5720 --index none mkindex / >root.fsindex
+host$ h9 --url tcp://127.0.0.1:5720:/:index=root.fsindex -v ls /bin/ls
 h9: index: root.fsindex: 20368 entries, 1126 dirs (cached); root checked in 1 ms
 /bin/ls
 h9: index: root.fsindex: checked 13 of 1126 dirs as they were used, 0 demoted
@@ -1865,7 +1904,7 @@ The compilers, linkers, and `mk` run, and rebuild 9front's userland from
   install that way first. To keep it, install with `--writable "$H9ROOT"`.
   On a terminal, h9 tells you when a run's changes to the root were
   discarded: `h9: changes to the root under /arm64, /sys were discarded
-  (rerun with --writable "$H9ROOT" to keep them)`.
+  (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)`.
 - `$objtype` is the machine's architecture; set it to cross-compile, as in
   `objtype=386 mk`. The arm64 root has no `/amd64/lib`, so run
   `objtype=amd64 mk libs` in `/sys/src` once, on a writable root, first.
@@ -1954,7 +1993,7 @@ hello, world
   `--arch amd64`).
 - A Go program doesn't need a root tree to run. Without one it gets the
   built-in root (chapter 2), with `/tmp`, your cwd, and its 44 commands;
-  give it `--root` for the full tree.
+  give it `--dir` for the full tree.
 
 ### 20. Linux programs
 
@@ -1980,36 +2019,33 @@ Go programs built with `GOOS=linux` work the same way, which is the fast
 way to run Go on an Apple Silicon Mac (chapter 19). A dynamic program needs
 its loader and libraries, so it needs a Linux root.
 
-**A Linux root.** `--root` takes a Linux file system as readily as a 9front
-one. h9 tells them apart by looking: a tree with `/etc/os-release` or a
-`/lib/ld-*` loader, and no `/rc/bin` or `/$cputype/bin`, is a Linux root.
-Alpine's minirootfs, or any container image unpacked to a directory, works:
+**A Linux root.** A Linux file system goes on `#L`, the Linux tree, with
+`--dir ./alpine:#L`, beside the 9front root on `/`. Alpine's minirootfs, or
+any container image unpacked to a directory, works:
 
 ```sh
 host$ mkdir alpine && curl -fsSL https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.2-aarch64.tar.gz | tar -xzf - -C alpine
-host$ h9 --root ./alpine sh -c 'cat /etc/alpine-release; id -u'
+host$ h9 --dir ./alpine:#L sh -c 'cat /etc/alpine-release; id -u'
 3.22.2
 0
-host$ h9 --root ./alpine sh
+host$ h9 --dir ./alpine:#L sh
 /mnt/term/cwd #
 ```
 
 [Recreating Docker](docs/containers.md) shows how to pull any image from
-Docker Hub this way. `--root` can be given twice, once for a 9front tree and
-once for a Linux one, in either order. With only a Linux root, the 9front
-side comes from the usual lookup (`$H9ROOT`, the development tree, then the
-built-in root), and `--builtin=off` leaves the machine with none. A Linux
-root has to be a host directory: 9P and WebSocket roots are always 9front
-trees.
+Docker Hub this way. Mounts on `#L` stack as mounts on `/` do, so a layer
+goes over a base with a second `--dir ./layer:#L`, and `--dir ./etc:#L/etc`
+mounts a tree at a path inside it. The 9front side comes from the mounts on
+`/`, or with none, `$H9ROOT` and then the built-in root.
 
-**Which program runs.** With a Linux root, a bare name (`h9 --root ./alpine
-ls`) is looked up on the Linux `PATH`, and an absolute path is a path in the
-Linux view, so `h9 --root ./alpine /9/bin/ls` runs 9front's `ls`. `--rc`
+**Which program runs.** With a Linux root, a bare name (`h9 --dir
+./alpine:#L ls`) is looked up on the Linux `PATH`, and an absolute path is a
+path in the Linux view, so `h9 --dir ./alpine:#L /9/bin/ls` runs 9front's
+`ls`. `--rc`
 always runs 9front's rc. Each program then runs as what it is: an ELF exec'd
 from 9front runs as Linux, and an a.out exec'd from Linux runs as 9front, so
 the two kinds pipe into each other freely. A script that starts `#!/bin/rc` runs with 9front's rc when the Linux root has no `/bin/rc`, so `/9/bin/wsmount` works from busybox, and its mount is the shell's. A 9front program reaches the
-Linux tree as `'#λ'` (quoted in rc), so `'#λ'/bin/busybox ls` runs
-busybox from rc.
+Linux tree as `#L`, so `#L/bin/busybox ls` runs busybox from rc.
 
 **The Linux view.** A Linux process's `/` is the Linux root, with a few
 directories h9 provides on top:
@@ -2025,10 +2061,11 @@ directories h9 provides on top:
 
 The root's symlinks always resolve inside it, as `chroot` would, so
 Alpine's `/bin/ls -> /bin/busybox` reads the root's busybox
-(`--root-contained` is implied). Writes to the root go to a copy-on-write
+(`contained` is implied). Writes to the root go to a copy-on-write
 overlay in memory and are thrown away at exit, as for a 9front root, so
-`apk add` works for the run; pass `--writable ./alpine` to keep what it
-installs. `h9 --print` shows the view as binds on `'#λ'`.
+`apk add` works for the run; mount it with `rw`, as in `--dir
+./alpine:#L:rw`, to keep what it installs. `h9 --print` shows the view as
+binds on `#L`.
 
 **Pseudoterminals.** `/dev/ptmx` and `/dev/pts` work as on Linux, so
 tmux, `script`, `expect`, Python's `pty`, and Nix's builds get a terminal of
@@ -2078,7 +2115,7 @@ killed by a signal exits as a host shell would report it, 128 plus the
 host's number for the signal:
 
 ```sh
-host$ h9 --root ./alpine sh -c 'kill -TERM $$'; echo $?
+host$ h9 --dir ./alpine:#L sh -c 'kill -TERM $$'; echo $?
 h9: sh: linux: signal 15
 143
 ```
@@ -2135,7 +2172,7 @@ Silicon Mac, runs only on the emulator, and much more slowly.
 h9 [flags] [--] program [args...]
 h9 [flags] --rc 'command' [args...]
 h9 [flags] --rc
-h9 [--backend B] [--root DIR|DIAL|SOCKET|URL] [--memory SIZE] --check
+h9 [--backend B] [mount flags] [--memory SIZE] --check
 h9 --version
 h9 --help          (or -h alone)
 ```
@@ -2148,8 +2185,8 @@ h9 --help          (or -h alone)
   doesn't start with `--`; everything from there on is the program and its
   arguments, so `h9 ls -l --help` passes both flags to `ls`. `--` ends h9's
   flags explicitly, for a program whose name starts with `--`.
-- A flag's value can be the next argument or follow `=`: `--root DIR` or
-  `--root=DIR`. Flags marked *repeatable* can be given more than once.
+- A flag's value can be the next argument or follow `=`: `--dir DIR` or
+  `--dir=DIR`, except `--builtin`'s, which only follows `=`. Flags marked *repeatable* can be given more than once.
 - `-h` is `--help` only when it's the only argument.
 - Running `h9` with no program (and no `--serve`), an unknown flag, or a bad value prints the
   usage to standard error and exits 2. A combination h9 refuses (such as
@@ -2177,23 +2214,51 @@ Machine:
 | --- | --- |
 | `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `native`, which shares h9's process and isn't a security boundary (chapter 23); pass `--backend native` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/epoch-0/whp.md)). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
-| `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. A host directory can be a 9front tree or a Linux one, and `--root` can be given twice, once for each (chapter 20). Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
-| `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
-| `--root-spec NAME` | The attach name sent to a 9P root. Default: empty. |
-| `--root-user NAME` | The user name sent to a 9P root. Default: your user name. |
 | `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
-| `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
-| `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
-| `--cred 'PATTERN=COMMAND'` | A credential helper for the WebSocket handshakes h9 makes, the root's and a namespace file's mounts, and their reconnects: `COMMAND get URL` runs before each one whose URL matches `PATTERN`, and the `Name: value` lines it prints are sent with it (chapter 16); repeatable. `$H9CRED` adds more, separated by `;`. A bad pattern is exit 2, and a helper that fails before the program starts is exit 125. |
-| `--root-index FILE\|URL` | Use this metadata index for a 9P root instead of its `.fs/index` (chapter 16). A URL is `https://` or `http://`. With a host directory root, exit 2; one that can't be read, exit 125. |
+| `--cred 'PATTERN=COMMAND'` | A credential helper for the WebSocket handshakes h9 makes, the `--url` mounts and a namespace file's, and their reconnects: `COMMAND get URL` runs before each one whose URL matches `PATTERN`, and the `Name: value` lines it prints are sent with it (chapter 16); repeatable. `$H9CRED` adds more, separated by `;`. A bad pattern is exit 2, and a helper that fails before the program starts is exit 125. |
 | `--index auto\|none` | `auto` (the default) uses an index wherever one is found, for the root and for 9P servers a namespace file mounts; `none` never does |
 | `--index-cache DIR` | Where compiled indexes are kept. Default: `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
-| `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
 | `--rc 'command'` | Run an rc command line instead of a program. It's always 9front's rc, even with a Linux root. |
 | `--rc` (last) | Run a login rc: the root's default command from `/rc/lib/rcmain.local`, then an interactive rc on a terminal, or commands from stdin otherwise |
-| `--ns FILE` | Replay a namespace file before running the program (chapter 25). `FILE` is a guest path; a relative one is in `/mnt/term/cwd`. |
+| `--ns 'LINE; LINE'\|@FILE` | Replay namespace lines before running the program (chapter 25): inline, with `;` between lines, or `@FILE` for a host file, read before the machine starts. Repeatable, replayed in order, after the mounts and `--bind`s. A bare file name is exit 125 with a hint to add `@`. |
+
+Mounts (chapter 25). Each is `SRC[:DST[:OPTS]]` and repeatable, applied
+in order. DST defaults to `/`. Mounts on `/` stack into the root, a later
+one on top unless it says `a`, and mounts on `#L` do the same for the
+Linux tree. With nothing on `/`, it's `$H9ROOT` (a `--url` if it has
+`://`, and otherwise a `--dir`), then the built-in root. A long form,
+`src=SRC,dst=DST,OPT,...`, takes values with colons, and double quotes
+around a value with commas.
+
+| Flag | Meaning |
+| --- | --- |
+| `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw`. `contained` resolves its symlinks inside it, as a tree on `#L` always does. |
+| `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://...`, or `wss://...`. `http://...` and `https://...` are a WebSocket if the server upgrades, and otherwise a static tree (chapter 16). With no scheme, `http://` for a loopback host and `https://` for any other. A DST of `/srv/NAME` posts the connection there without mounting it. |
+| `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` (the browser host's root archive), unpacked into memory before the program runs. Its files count against `--memory`, and it takes writes in memory. Symbolic links are kept for Linux programs. |
+| `--builtin[=DST[:OPTS]]` | The built-in root. Bare, it's the bottom of `/`. |
+| `--tmp DST[:OPTS]` | An empty tree in memory |
+| `--bind SRC:DST[:OPTS]` | Bind a path already in the machine: SRC is a guest path or `#` device. Every `--bind` runs after every mount flag. Its options are `b`, `a`, `c`, and `r`. |
+
+| Option | Long form | Meaning |
+| --- | --- | --- |
+| `ro` | `readonly` | Read-only |
+| `rw` | `readwrite` | Writes go to the source |
+| `eph` | `ephemeral` | Writes go to memory and vanish when the machine ends: the default on `/` and `#L` |
+| `b` | `before` | In front of what's at DST; on a stack, on top (the default there) |
+| `a` | `after` | Behind what's at DST; on a stack, at the bottom |
+| `c` | `create` | Creates go to this mount |
+| `r` | `recursive` | Merge with what's at DST at every depth, not only the top |
+| `spec=NAME` | | `--url`: the attach name. It wins over a `tcp://` URL's path. |
+| `user=NAME` | | `--url`: the user name sent in attaches. Default: yours. |
+| `header='NAME: VALUE'\|@FILE` | | `--url` over `ws`, `wss`, `http`, or `https`: a handshake header, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one per line from a host file, so a token stays out of `ps`. |
+| `ca=FILE` | | `--url` over `wss` or `https`: trust this PEM file instead of the host's CA bundle |
+| `index=FILE\|URL` | | `--url`: a metadata index instead of its server's `.fs/index` (chapter 16). A URL is `https://` or `http://`. One that can't be read is exit 125. |
+
+`--root`, `--root-spec`, `--root-user`, `--root-header`, `--root-ca`,
+`--root-index`, `--root-contained`, and `--builtin MODE` were removed: each exits 2 with a
+message naming its replacement.
 
 Files and sandbox (chapters 22 and 23):
 
@@ -2238,7 +2303,7 @@ Tools:
 
 | Flag | Meaning |
 | --- | --- |
-| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, `--root-index`, `--index`, `--index-cache`, `--builtin`, and `--memory`, and reports a 9P root's index. |
+| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, the mount flags, `--cred`, `--index`, `--index-cache`, and `--memory`, and reports a 9P root's index. |
 | `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in, and the window code (`gfx:`) |
 | `--help`, `-h` | Print the usage to standard output |
 
@@ -2349,7 +2414,7 @@ read-only.
   them, so a link inside a shared tree that points outside it fails as if
   the target didn't exist. Creating, removing, or renaming acts on the link
   itself.
-  With `--root-contained`, the root tree's links are read inside it
+  With the `contained` option, as in `--dir PATH:/:contained`, a tree's links are read inside it
   instead: an absolute target starts at the tree's top, and `..` stops
   there, so a Linux root's `/bin/ls -> /bin/busybox` works as it does in
   that system. A loop of links is "too many symbolic links".
@@ -2741,8 +2806,7 @@ work too
 ### 29. Troubleshooting and FAQ
 
 **Exit 125: h9 couldn't run anything.** The message says why: no root tree
-(`h9: no root tree found; pass --root or set H9ROOT`, chapter 2), a root
-that isn't there, no usable backend (`zig build` signs h9 on macOS; join the
+a root that isn't there (`h9: --dir DIR: not found`, chapter 2), no usable backend (`zig build` signs h9 on macOS; join the
 `kvm` group on Linux; or rebuild without `-Demu=none`; `h9 --check` says which backends
 work), a 9P root that refused the connection or wants authentication, or
 too little memory (`OutOfGuestMemory`: raise `--memory`).
@@ -2848,7 +2912,7 @@ They change faster than this manual, as proposals land.
   namespace. See `intro(5)`.
 
 - **9P root**: A root served by a 9P server over TCP or a unix socket instead of a host
-  directory, given with `--root tcp!host!port`. See chapter 16.
+  directory, given with `--url tcp://host:port`. See chapter 16.
 
 - **a.out**: Plan 9's executable format: a short header, then text, then data, then a
   symbol table. h9 loads a.outs itself, and Linux ELF binaries through the
@@ -2920,7 +2984,7 @@ They change faster than this manual, as proposals land.
 
 - **Linux personality, Linux view**: The part of h9 that runs Linux ELF programs by
   translating their system calls onto the Plan 9 kernel, and the file tree
-  a Linux process sees as `/` (the device `#λ`): the Linux root with `/9`,
+  a Linux process sees as `/` (the device `#L`): the Linux root with `/9`,
   `/tmp`, `/mnt/term`, `/dev`, and `/proc` added. See chapter 20.
 
 - **machine**: One h9 invocation: one namespace, console, environment, `/srv`, and process
@@ -2960,7 +3024,7 @@ They change faster than this manual, as proposals land.
   windows. Run it with `h9 --gfx rio`; see chapter 17.
 
 - **root tree**: The directory holding an extracted 9front file system, which h9 serves as
-  the guest's `/`. Chosen with `--root` or `$H9ROOT`; see Appendix C.
+  the guest's `/`. Chosen with `--dir` or `$H9ROOT`; see Appendix C.
 
 - **srv, /srv**: A directory where file servers post connections for others to mount. In h9
   each machine has its own. See `srv(3)` and `srv(4)`.
@@ -3100,7 +3164,7 @@ pass `--env home=/mnt/term/cwd` to keep files in your host directory.
 `.local/9front/root` linked to it, so a new release gets its own tree and the
 old one stays until you delete it.
 
-**Other roots.** Any 9front file tree works as `--root`, as long as it has
+**Other roots.** Any 9front file tree works as a `--dir` on `/`, as long as it has
 the mount points above and binaries for the architecture you run. A 9P
 server works too (chapter 16), and so does a Linux root, such as Alpine's
 (chapter 20).

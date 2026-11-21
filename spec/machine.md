@@ -30,15 +30,15 @@ Each exec allocates and copies the box's text and data, so on the emulator rc's 
 
 1. The kernel boots once per host process, on its own thread (see Process model).
 
-2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. For a 9P root it first connects, posts the connection as `#s/root`, and mounts it at `/`; a host root is bound at `/`, and the built-in root is `#Hroot` bound at `/`.
+2. For each machine, the namespace builder gives the first Proc a fresh Pgrp. It binds the kernel's `#/` at `/`, then adds each mount on `/` to the root stack, `#Oroot`, in order: a host tree from `#U`, a 9P server it connects to (the first one also posted as `#s/root`), an unpacked archive, the built-in root `#Hroot`, or an empty `#O` (also what a machine with nothing on `/` gets). It unions the stack after `#/` at `/`, binds it alone at `/root`, and does the same for mounts on `#L` with `#Olinux` ([mounts](../design/mounts.md)).
 
-   Under `--write=overlay` (the default) and `--write=ephemeral` a `#O` overlay goes over `/` next, before every other bind, so everything else is bound onto directories reached through it; a directory the overlay hasn't copied keeps its lower qid, so the mount table matches it.
+   Under `--write=overlay` (the default) and `--write=ephemeral` a `#O` overlay goes over the root stack next, before every other bind, so everything else is bound onto directories reached through it; a directory the overlay hasn't copied keeps its lower qid, so the mount table matches it.
 
    Then it binds the cwd and other allowed host paths from `#U` (or `#O` overlays over them under `--write=ephemeral`), a `#O` overlay over the root tree's `/tmp` (the guest's `/tmp` for a 9P or the built-in root), and `#c`, `#p`, `#d`, `#e`, `#s` (the machine's own `/srv`, with `-c`) and (unless the network is off) `#I` to their usual places, with `#ℏ` bound after it at `/net`, giving `/net/ws`, and `#H/bin` after the root's `/bin`, so h9's own commands are on the path and a root command of the same name wins.
 
-   With `--builtin=before` over another root, `#Hroot/$cputype/bin` is bound at `/bin` first and the root's `/$cputype/bin` after it; with `--builtin=after`, it's bound after the root's `/rc/bin`.
+   Mounts on other paths follow, made in the root's overlay when missing, then `--bind` lines, in order, then `--ns` lines. With guest tools, `#H/over` (h9's `bind`, which adds `-r`) is bound before `/bin`.
 
-   A namespace file's `mount` of a `ws://` or `wss://` URL connects a new stream during the replay, which runs before the device mask.
+   A namespace file's `mount` of a URL connects during the replay, which runs before the device mask.
 
    It binds the machine's console over `/dev/cons` and opens fds 0–2 on it; with `--gfx` it then binds `#i`, `#m`, and `#b` after it on `/dev`.
 
@@ -48,7 +48,7 @@ Each exec allocates and copies the box's text and data, so on the emulator rc's 
 
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 
-4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead, and `--ns file` runs `newns` with that file first.
+4. The CLI runs the binary directly with the given argv. `--rc` runs `/bin/rc -c` on the argument instead.
 
 The host's working directory is bound at the guest's `/mnt/term/cwd` and set as the guest's cwd, so that `h9 ls` lists what the user expects.
 

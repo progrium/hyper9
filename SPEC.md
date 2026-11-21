@@ -37,7 +37,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | --- | --- | --- |
 | Product shape | A library plus a thin CLI; each invocation is one machine | One machine can hold a whole process tree. Keep the machine API free of CLI-global state. |
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
-| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([ninep-roots](design/epoch-0/ninep-roots.md), [websocket-9p](design/epoch-0/websocket-9p.md)); disk images were declined ([image-roots](design/epoch-0/image-roots.md)) |
+| Root filesystem | Mount flags stacked into `#Oroot` behind the kernel's `#/`: host trees, 9P servers over TCP, a unix socket, or a WebSocket, static dotfs trees over HTTP, archives, and the built-in root | A 9P root is mounted through devmnt ([ninep-roots](design/epoch-0/ninep-roots.md), [websocket-9p](design/epoch-0/websocket-9p.md), [mounts](design/mounts.md)); disk images were declined ([image-roots](design/epoch-0/image-roots.md)) |
 | Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/epoch-0/self-host.md)), and a source of test binaries |
 | Language | Zig 0.16.x (`minimum_zig_version` in `build.zig.zon`) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/epoch-0/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
@@ -63,7 +63,7 @@ This file is the overview. Each part of h9 is described, as built, in a file und
 | [spec/kernel.md](spec/kernel.md) | The process model; and the kernel: drawterm's `kern/`, what h9 adds to it, and the Zig/C seam rules |
 | [spec/abi-plan9.md](spec/abi-plan9.md) | The 9front binary ABI, a.out loading, the syscall table, and Go programs |
 | [spec/abi-linux.md](spec/abi-linux.md) | The Linux personality |
-| [spec/ninep.md](spec/ninep.md) | The root filesystem, the 9P dialects, and serving |
+| [spec/ninep.md](spec/ninep.md) | Mounts and the root, static trees, the 9P dialects, and serving |
 | [spec/machine.md](spec/machine.md) | The boot sequence, slim roots, the terminal, and graphics |
 | [spec/sandbox.md](spec/sandbox.md) | The security stance and the sandbox policy |
 | [spec/cli.md](spec/cli.md) | The CLI: parsing, program resolution, flags, the default guest environment, exit codes, signals, and code structure |

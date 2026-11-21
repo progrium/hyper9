@@ -66,7 +66,7 @@ pub const Hooks = struct {
 pub const Source = union(enum) {
     /// No index: everything passes through.
     none,
-    /// A compiled index given with the mount (`--root-index`), owned by
+    /// A compiled index given with the mount (`index=`), owned by
     /// the layer from `init`, and what to call it.
     given: struct { compiled: []u8, label: []const u8, cached: bool = false },
     /// The server's `.fs/index`, cached under `key`: its address and

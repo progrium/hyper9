@@ -9,7 +9,8 @@
  *		#!/.../9box -!, the last element of argv[2], for stubs;
  *	by interpreter: when argv[0] names no command, the command a
  *		#!/.../CMD script in argv names, for rc scripts such as
- *		/rc/bin/lc when /bin/rc is a hard link;
+ *		/rc/bin/lc when /bin/rc is a hard link, and when argv[0]
+ *		names one but argv[1] is a script of the same name;
  *	as 9box CMD ARGS;
  *	and 9box alone lists the commands.
  */
@@ -154,6 +155,19 @@ main(int argc, char **argv)
 	 */
 	argv0 = nil;
 	c = lookup(name);
+	/*
+	 * A script named for a command, such as h9's own bind in #H/over,
+	 * run by a hard-linked rc: argv[0] is the script's name, so the
+	 * name would choose the command the script stands in for. The
+	 * kernel put the script's path after argv[0], under the same name,
+	 * so its interpreter wins then.
+	 */
+	if(c != nil && argc > 1 && strcmp(base(argv[1]), name) == 0){
+		Cmd *ic;
+
+		if((ic = interp(argc, argv)) != nil && ic != c)
+			c = ic;
+	}
 	if(c == nil)
 		c = interp(argc, argv);
 	if(c != nil){

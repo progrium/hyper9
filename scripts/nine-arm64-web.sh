@@ -26,7 +26,7 @@ h9=${H9:-$H9_ROOT/zig-out/bin/h9}
 if [ ! -f "$dir/arm64/lib/libc.a" ]; then
 	rm -rf "$dir" "$dir.tmp"
 	cp -a "$src" "$dir.tmp"
-	"$h9" --arch 386 --root "$dir.tmp" --writable "$dir.tmp" --rc 'cd /sys/src && objtype=arm64 mk libs'
+	"$h9" --arch 386 --dir "$dir.tmp:/:rw" --rc 'cd /sys/src && objtype=arm64 mk libs'
 	mv "$dir.tmp" "$dir"
 fi
 cd "$H9_ROOT"
