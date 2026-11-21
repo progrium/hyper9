@@ -132,3 +132,10 @@ main/t/tcp-wrappers/libwrap0_7.6.q-33_amd64.deb 36118b862539868408ee056411d6e470
 ZEROFS_REPO=https://github.com/Barre/ZeroFS
 ZEROFS_VERSION=2.3.6
 ZEROFS_REV=9e5497ff22641531bafcb6b0d3072cf0df636f85
+
+# Wine's headers, for winedraw (design/wine-draw.md): a display driver is
+# built against one release's driver interface (WINE_GDI_DRIVER_VERSION),
+# so this is the release the driver targets. Only include/ is fetched.
+WINE_REPO=https://github.com/wine-mirror/wine
+WINE_VERSION=11.0
+WINE_REV=db11d0fe6a169c457e23d007e20404643d067aa8

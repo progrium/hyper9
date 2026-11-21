@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
-# Makes an Alpine root with Wine 11 in it, for running Windows programs
-# (docs/windows.md):
+# Makes an Alpine root with Wine 11 in it, for the wine-draw case in
+# tests/backends.zig (design/wine-draw.md) and the web demo's Wine root
+# (scripts/wine-web.sh):
 #
 #   scripts/wine-root.sh [amd64|386]
 #
-# amd64 (the default) goes to .local/linux/wine-amd64, about 600 MB. 386
-# goes to .local/linux/wine-386: 32-bit Wine, which runs on h86. Wine comes
-# from Alpine's own packages, checked against the root's signing keys.
+# amd64 (the default) goes to .local/linux/wine-amd64, about 600 MB:
+#
+#   scripts/wine-root.sh && export H9_TEST_WINE_ROOT=$PWD/.local/linux/wine-amd64
+#   zig build wine test
+#
+# 386 goes to .local/linux/wine-386: 32-bit Wine, which runs on h86 and so
+# in the browser. Wine comes from Alpine's own packages, checked against
+# the root's signing keys, so its version is the one winedraw targets only
+# while Alpine 3.24 ships Wine 11.0 (WINE_VERSION in scripts/pins.sh).
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 

@@ -1947,7 +1947,7 @@ directories h9 provides on top:
 | `/9` | The machine's 9front root: `/9/bin/ls` is 9front's `ls` |
 | `/tmp` | The machine's private `/tmp`, the same files a 9front program sees there |
 | `/mnt/term` | The shared host paths; your cwd is `/mnt/term/cwd`, and programs start in it |
-| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, and `shm`, a private in-memory directory as a tmpfs would be |
+| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, `shm`, a private in-memory directory as a tmpfs would be, and `9`, the machine's 9front `/dev` as it was at start, so with `--gfx` a Linux program can open `/dev/9/draw`, `mouse`, and `kbd` |
 | `/proc`, `/sys` | What libc, busybox, Python, and htop read: `cpuinfo` (following `--cpus`), `meminfo`, `mounts`, and per-process `stat`, `status`, `maps`, `cmdline`, `exe`, `fd`, and `task` |
 | `/etc/resolv.conf` | Your host's DNS servers, when the root has none |
 
@@ -2717,7 +2717,8 @@ They change faster than this manual, as proposals land.
   volumes, ports, and limits, from slim root trees and Linux images pulled
   from Docker Hub to images served over 9P, ending in a docker-like CLI.
 - [Running Windows programs](docs/windows.md): Wine in a Linux root, a
-  prefix that lasts between runs, and console programs.
+  prefix that lasts between runs, console programs, and programs with
+  windows through the `winedraw` display driver.
 - [Emulator performance](docs/emu-performance.md): how fast the emulator
   CPUs run real programs, on each tier, natively and in WebAssembly, on
   arm64 and x86-64 hosts.

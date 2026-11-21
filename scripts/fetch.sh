@@ -2,13 +2,13 @@
 # Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
 # libraries and the patched Unicorn source into .local, and on request
 # the release's 386 or amd64 ISO, the browser host's Linux demo root, the
-# workloads' Linux root, diod, and ZeroFS.
+# workloads' Linux root, diod, ZeroFS, and Wine's headers.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
 #                                 iso386 isoamd64 alpinearm64web
-#                                 workloads diod zerofs; default all but
-#                                 the ISOs, alpinearm64web, workloads,
-#                                 diod, and zerofs)
+#                                 workloads diod zerofs wine; default all
+#                                 but the ISOs, alpinearm64web, workloads,
+#                                 diod, zerofs, and wine)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
@@ -17,7 +17,7 @@ mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
 parts=" ${*:-src image unicorn unicorn-src} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
+	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs|wine) ;;
 	# v86 was the browser host's 386 CPU before h86, and alpine386web the
 	# Linux demo's root before it moved to arm64; nothing to fetch now.
 	v86|alpine386web) ;;
@@ -46,6 +46,19 @@ clone() {
 if want src; then
 clone "$HYPERLINUX_REPO" hyper-linux
 clone "$NINEFRONT_REPO" 9front "$NINEFRONT_REV"
+fi
+
+# Wine's include/ at the pinned release, for zig build wine
+# (design/wine-draw.md): a sparse, blobless clone, about 20 MB.
+if want wine; then
+dir="$H9_LOCAL/src/wine"
+if [ "$(git -C "$dir" rev-parse -q --verify HEAD 2>/dev/null || true)" != "$WINE_REV" ]; then
+	rm -rf "$dir"
+	git clone -q --filter=blob:none --no-checkout --depth 1 --branch "wine-$WINE_VERSION" "$WINE_REPO" "$dir"
+	git -C "$dir" sparse-checkout set --no-cone /include/
+	git -C "$dir" checkout -q --detach "$WINE_REV"
+fi
+echo "src/wine: $WINE_VERSION ($(git -C "$dir" rev-parse --short HEAD))"
 fi
 
 if want image; then
