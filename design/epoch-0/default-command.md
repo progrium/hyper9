@@ -25,7 +25,7 @@ What exists today:
 - **`--rc 'cmd'`** runs `/bin/rc -c cmd`, and any remaining arguments become `$*` (`src/main.zig`). `--rc` needs a value: `h9 --rc` alone is a usage error, exit 2.
 - **`h9 rc`** runs rc with whatever flags follow. The interactive cases in `tests/integration.zig` pass `rc -i`, since the guest's stdin isn't named `/dev/cons` and rc doesn't turn on `-i` by itself.
 - **Bare `h9`** prints the usage and exits 2 (SPEC.md, CLI).
-- **[The userland guide](../docs/userland.md)** section 4 already shows a root carrying its own login setup in `/rc/lib/rcmain.local` and running it with `h9 --root ~/slim rc -l`. It also notes that `h9 --rc` doesn't read it.
+- **[The userland guide](../../docs/userland.md)** section 4 already shows a root carrying its own login setup in `/rc/lib/rcmain.local` and running it with `h9 --root ~/slim rc -l`. It also notes that `h9 --rc` doesn't read it.
 - **h9 sets the environment** a profile reads: `$user` is the host user, `$home` is `/usr/$user` (created in the overlay when the root lacks it), `$service` is `terminal`, and the cwd is `/mnt/term/cwd`.
 
 9front's `rcmain`, which every root already has, runs the login hook like this:

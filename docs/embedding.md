@@ -294,10 +294,10 @@ such as `write = .none` with `writable` paths or `net = .disable` with
 | `BackendKind` | Host | Runs | Built |
 | --- | --- | --- | --- |
 | `.hvf` | macOS on Apple Silicon | arm64 | always, on that host |
-| `.kvm` | Linux on arm64 or x86\_64, with access to `/dev/kvm` | the host's: arm64 or amd64 | always, on those hosts ([kvm](../design/kvm.md)) |
-| `.native` | Linux x86\_64, 5.11 or later | amd64 | always, on that host ([native-backend](../design/native-backend.md)) |
+| `.kvm` | Linux on arm64 or x86\_64, with access to `/dev/kvm` | the host's: arm64 or amd64 | always, on those hosts ([kvm](../design/epoch-0/kvm.md)) |
+| `.native` | Linux x86\_64, 5.11 or later | amd64 | always, on that host ([native-backend](../design/epoch-0/native-backend.md)) |
 | `.emu` | any | arm64, amd64, 386 | with `-Demu=unicorn` (GPLv2) |
-| `.whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 | on Windows x86\_64; incomplete ([whp](../design/whp.md)) |
+| `.whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 | on Windows x86\_64; incomplete ([whp](../design/epoch-0/whp.md)) |
 
 On KVM, h9 blocks `SIGRTMIN + 1` in the threads that run vCPUs and sends it
 to kick them out of the guest. Leave that signal to h9: don't unblock it or
@@ -396,7 +396,7 @@ machine can see comes from these places, all set in `Options`:
 write mode decides whether writes reach the host, stay in memory, or fail.
 
 **A 9P server as the root.** Point `root` at any 9P2000 server and the
-machine mounts it at `/` ([ninep-roots](../design/ninep-roots.md)):
+machine mounts it at `/` ([ninep-roots](../design/epoch-0/ninep-roots.md)):
 
 ```zig
 .root = .{ .unix = "/tmp/myfs.sock" }, // or .{ .tcp = "tcp!127.0.0.1!5640" }
@@ -405,7 +405,7 @@ machine mounts it at `/` ([ninep-roots](../design/ninep-roots.md)):
 ```
 
 or, for a server behind a WebSocket
-([websocket-9p](../design/websocket-9p.md)):
+([websocket-9p](../design/epoch-0/websocket-9p.md)):
 
 ```zig
 .root = .{ .ws = "wss://fs.example/9p" },

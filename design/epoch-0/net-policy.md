@@ -186,7 +186,7 @@ The second example needs [devsrv](devsrv.md) for `srv` to post to `/srv`; the co
 **Enforcement in devip, not the host.**
 - **Why not the host:** the host could filter instead, with seccomp and Landlock TCP ports on Linux, Seatbelt's `network-outbound` on macOS, or the Windows firewall. Those are per-OS. They can't all express CIDR ranges or names, and they apply to the whole h9 process, so every machine in an embedder gets the same rules.
 - **What devip gives:** filtering in devip makes the policy the same on every host and backend, per machine, as the rest of the sandbox already is.
-- **The host sandbox later:** [host-sandbox](host-sandbox.md) can still add a host-level layer as defence in depth, compiled from the same plan.
+- **The host sandbox later:** [host-sandbox](../host-sandbox.md) can still add a host-level layer as defence in depth, compiled from the same plan.
 
 **A hook in the vendored devip, not a wrapper device.**
 - **The wrapper alternative:** h9's own `src/kern/devtab.c` could put a wrapper in front of `ipdevtab` that inspects writes before passing them on. That keeps the vendored tree untouched.

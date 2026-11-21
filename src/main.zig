@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const h9 = @import("h9");
 const cli = @import("cli.zig");
 const tools = @import("tools.zig");
-/// The web host (design/browser-host.md) has its stdin, signals and
+/// The web host (design/epoch-0/browser-host.md) has its stdin, signals and
 /// terminal from the JS host.
 const web = h9.web.enabled;
 const web_cli = @import("web/cli.zig");
@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print(cli.usage, .{});
         return 2;
     };
-    // The browser host can't listen (design/serve.md).
+    // The browser host can't listen (design/epoch-0/serve.md).
     if (web and cfg.serve.len > 0) {
         std.debug.print("h9: --serve isn't available on the web host\n", .{});
         return 2;
@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !u8 {
         },
     }
     // --gfx: on macOS AppKit needs the main thread, so the run goes on
-    // another (design/gfx.md). Elsewhere this runs it directly.
+    // another (design/epoch-0/gfx.md). Elsewhere this runs it directly.
     if (cfg.gfx != null) {
         var ctx: GfxRun = .{ .init = init, .cfg = cfg };
         h9.gfx.main(GfxRun.work, &ctx);
@@ -127,7 +127,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     } else if (cfg.rc_login)
         // --rc alone is a login rc, which sources /rc/lib/rcmain.local, the
         // root's default command, and then $home/lib/profile
-        // (design/default-command.md). rcmain reads them only with -i or
+        // (design/epoch-0/default-command.md). rcmain reads them only with -i or
         // -c, and rc can't tell the guest's stdin is a terminal, so h9 asks
         // the host: -i on one, and otherwise -c reading stdin as a script.
         if (std.Io.File.stdin().isTty(io) catch false)
@@ -136,7 +136,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             &.{ "rc", "-l", "-c", ". /fd/0" }
     else
         cfg.argv;
-    // --serve with no program only serves (design/serve.md).
+    // --serve with no program only serves (design/epoch-0/serve.md).
     const serve_only = cfg.serve.len > 0 and argv.len == 0;
     const prog_arg = if (cfg.rc != null or cfg.rc_login) "/bin/rc" else if (serve_only) "serve" else argv[0];
 
@@ -166,7 +166,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     };
 
     // --root takes a 9front or a Linux tree, or one of each, and h9 tells
-    // them apart (design/linux-personality.md, "CLI and API").
+    // them apart (design/epoch-0/linux-personality.md, "CLI and API").
     var nine_arg: ?[]const u8 = null;
     var linux_root: ?[]const u8 = null;
     for ([_]?[]const u8{ cfg.root, cfg.root2 }) |given| {
@@ -368,7 +368,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             return exit_failed;
         }
         // Over the built-in root alone, the fix for a missing command is
-        // the full tree (design/builtin-root.md).
+        // the full tree (design/epoch-0/builtin-root.md).
         const hint = if (err == error.NotFound and prog == .guest and root == null and builtin_root != .off)
             " (not in the built-in root; pass --root or set H9ROOT for the full 9front tree)"
         else
@@ -387,7 +387,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     // A serve-only run that a note ended exits 0, as a server its
     // operator stops does; the timeout still exits 124.
     if (serve_only and status == .killed and !std.mem.eql(u8, status.killed, "h9: timeout")) return 0;
-    // Only on a terminal: scripts rarely have one (design/overlay.md).
+    // Only on a terminal: scripts rarely have one (design/epoch-0/overlay.md).
     if (machine.root_changes.changed and (std.Io.File.stderr().isTty(io) catch false)) {
         var nb: [512]u8 = undefined;
         std.debug.print("{s}\n", .{cli.discardNotice(&nb, &machine.root_changes, root != null and root.? != .dir)});
@@ -400,7 +400,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         },
         .killed => |msg| {
             // 128+N for a signal, 124 for --timeout, 125 for h9's own
-            // failures (design/exit-status.md).
+            // failures (design/epoch-0/exit-status.md).
             const s = cli.killedStatus(msg, host.stoppedBy());
             if (s.print) std.debug.print("h9: {s}: {s}\n", .{ prog_arg, msg });
             // The timed-out process is stuck in a host call; don't wait
@@ -449,7 +449,7 @@ fn realPath(io: std.Io, arena: std.mem.Allocator, p: []const u8) ![]u8 {
 }
 
 /// The root as given or found: --root, $H9ROOT, then the development
-/// tree. `--builtin=only` skips the last two (design/builtin-root.md);
+/// tree. `--builtin=only` skips the last two (design/epoch-0/builtin-root.md);
 /// --root with it is a usage error.
 fn rootArg(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, given: ?[]const u8, env: *const std.process.Environ.Map) ?[]const u8 {
     if (cfg.builtin == .only) return null;
@@ -480,7 +480,7 @@ fn defaultRoot(arena: std.mem.Allocator, io: std.Io) ?[]const u8 {
 }
 
 /// The host's DNS servers, from its /etc/resolv.conf, for a Linux root
-/// (design/linux-net.md). A host without one (Windows) or naming
+/// (design/epoch-0/linux-net.md). A host without one (Windows) or naming
 /// none gets Google's public servers, as Docker does.
 fn hostNameservers(arena: std.mem.Allocator, io: std.Io) error{OutOfMemory}![]const []const u8 {
     const fallback: []const []const u8 = &.{ "8.8.8.8", "8.8.4.4" };
@@ -526,7 +526,7 @@ fn linuxTree(arena: std.mem.Allocator, io: std.Io, arg: []const u8) ?[]const u8 
     return null;
 }
 
-/// Reads a --root or $H9ROOT value (design/ninep-roots.md): a dial
+/// Reads a --root or $H9ROOT value (design/epoch-0/ninep-roots.md): a dial
 /// string, or a host path that's a directory (served through #U, which
 /// takes absolute paths with symlinks resolved) or a unix socket.
 fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!h9.Root {
@@ -536,7 +536,7 @@ fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!
         .ws => |u| return .{ .ws = u },
         .path => |p| {
             // A missing path shaped like a URL is one without its scheme
-            // (design/schemeless-roots.md).
+            // (design/epoch-0/schemeless-roots.md).
             const real = realPath(io, arena, p) catch {
                 if (try cli.schemelessRoot(arena, p)) |u| return .{ .ws = u };
                 return error.NotFound;
@@ -590,7 +590,7 @@ const WsOptions = struct {
 
 const WsError = error{ Usage, NotFound, OutOfMemory };
 
-/// Reads the WebSocket root's flags (design/websocket-9p.md):
+/// Reads the WebSocket root's flags (design/epoch-0/websocket-9p.md):
 /// --root-header lines, from @FILE where given, checked; --root-ca,
 /// resolved; and the proxy environment, as curl reads it.
 fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Root, env: *const std.process.Environ.Map) WsError!WsOptions {
@@ -648,7 +648,7 @@ const ServeOptions = struct {
     token: ?[]const u8 = null,
 };
 
-/// Reads the --serve flags (design/serve.md): the addresses, which
+/// Reads the --serve flags (design/epoch-0/serve.md): the addresses, which
 /// cli.parse checked, and the token from its @FILE, trimmed.
 fn serveOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config) WsError!ServeOptions {
     var o: ServeOptions = .{};

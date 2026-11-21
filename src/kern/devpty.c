@@ -1,5 +1,5 @@
 /*
- * #τ: pseudoterminal pairs (design/linux-pty.md). The Linux view serves
+ * #τ: pseudoterminal pairs (design/epoch-0/linux-pty.md). The Linux view serves
  * /dev/ptmx as #τ/ptmx and /dev/pts as #τ itself.
  *
  *	#τ/ptmx	a clone file: each open makes a pair and returns its master
@@ -232,7 +232,7 @@ ptyinit(void)
 
 
 /*
- * The line discipline (design/linux-pty.md, step 2), as Linux's N_TTY
+ * The line discipline (design/epoch-0/linux-pty.md, step 2), as Linux's N_TTY
  * applies the pair's termios: input written to the master goes through
  * the input flags, ISIG, canonical editing, and echo on its way to the
  * slave, and the slave's writes through the output flags on their way

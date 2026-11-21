@@ -39,14 +39,14 @@ What h9 does today, measured with a ReleaseSafe `h9` built with `-Demu=unicorn -
 | The guest's `/env` | `user`, `home=/usr/$user`, `path=(. /bin)`, and h9's other defaults; no `TERM`, `LANG`, or `PATH` |
 | `--host-fs`, then `cd /mnt/term/home/user; hcmd pwd` | `/home/user`: hcmd maps the guest's directory to the host's |
 
-On HVF, `--check` reports a hello in 1.1 ms, so startup is a non-issue on a hypervisor; the native backend ([native-backend](native-backend.md)) would bring Linux hosts without KVM close to that.
+On HVF, `--check` reports a hello in 1.1 ms, so startup is a non-issue on a hypervisor; the native backend ([native-backend](epoch-0/native-backend.md)) would bring Linux hosts without KVM close to that.
 
 Related work:
 
-- [default-command](default-command.md) makes `h9 --rc` with no command line an interactive login rc (`rc -l -i`) on a terminal, reading `/rc/lib/rcmain.local` and `$home/lib/profile`.
+- [default-command](epoch-0/default-command.md) makes `h9 --rc` with no command line an interactive login rc (`rc -l -i`) on a terminal, reading `/rc/lib/rcmain.local` and `$home/lib/profile`.
 - [host-cmd](host-cmd.md) replaces devcmd with a per-machine device whose reads a note can interrupt, allowlists commands with `--host-cmd NAME`, and scrubs their environment. It leaves terminals as an open issue.
-- [builtin-root](builtin-root.md) gives h9 a root with no install, so `h9sh` works on a fresh machine.
-- [host-binfmt](host-binfmt.md) set the pattern for a second entry point chosen by `argv[0]` and settings read from the environment.
+- [builtin-root](epoch-0/builtin-root.md) gives h9 a root with no install, so `h9sh` works on a fresh machine.
+- [host-binfmt](epoch-0/host-binfmt.md) set the pattern for a second entry point chosen by `argv[0]` and settings read from the environment.
 
 ## Proposal
 

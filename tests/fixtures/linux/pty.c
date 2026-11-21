@@ -1,4 +1,4 @@
-/* Pseudoterminals (design/linux-pty.md): each case named on the command
+/* Pseudoterminals (design/epoch-0/linux-pty.md): each case named on the command
  * line prints "ok NAME" or "FAIL NAME: why". */
 #define _GNU_SOURCE
 #include <errno.h>

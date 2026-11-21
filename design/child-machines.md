@@ -35,13 +35,13 @@ The inner h9 starts, parses its flags, boots its kernel, and runs its probes. It
 
 **What exists that a child machine can use:**
 
-- **Several machines per host process.** An embedder, or the test suite, can run several `Machine`s in one process. They share the one drawterm kernel, and each first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, `/srv` board ([devsrv](devsrv.md)), and environment (SPEC.md, "Process model").
+- **Several machines per host process.** An embedder, or the test suite, can run several `Machine`s in one process. They share the one drawterm kernel, and each first Proc starts with a fresh Pgrp, Fgrp, and Egrp, so each has its own namespace, device mask, console, `/srv` board ([devsrv](epoch-0/devsrv.md)), and environment (SPEC.md, "Process model").
 - **One VM per process on HVF.** `hv_vm_create` succeeds once per host process (`src/vmm/hvf.zig`), so on macOS a second machine can't have a backend of its own. KVM, native, and emu have no such limit.
 - **One allocator per backend.** HVF, KVM, and native hand out guest pages, page tables included, from one `gphys.Ram`, reserved at `--memory` bytes; emu uses its arena (`src/vmm/arena.zig`). `--memory` is a cap on that allocator, `--pids` a cap on live processes in `rfork`, and `--cpus` the size of the run-slot pool (`src/cpupool.zig`).
 - **devcmd's shape.** `#C` runs host commands through a conversation: `clone`, `ctl` (`dir`, `exec`), `data`, `stderr`, and `wait` ([host-cmd](host-cmd.md)). `hcmd` wraps it.
-- **Guest tools.** `#H/bin` puts h9's own rc scripts on the guest's path ([guest-tools](guest-tools.md)).
+- **Guest tools.** `#H/bin` puts h9's own rc scripts on the guest's path ([guest-tools](epoch-0/guest-tools.md)).
 
-**Nested runs elsewhere.** [host-binfmt](host-binfmt.md) refuses to start an h9 from a host command a guest ran (`H9_NESTED`), because the new h9 would get the host user's rights and a fresh default policy, broader than the guest's. It leaves "carrying the policy across" open. [login-shell](login-shell.md) uses `H9_NESTED` the same way.
+**Nested runs elsewhere.** [host-binfmt](epoch-0/host-binfmt.md) refuses to start an h9 from a host command a guest ran (`H9_NESTED`), because the new h9 would get the host user's rights and a fresh default policy, broader than the guest's. It leaves "carrying the policy across" open. [login-shell](login-shell.md) uses `H9_NESTED` the same way.
 
 ## Proposal
 
@@ -77,7 +77,7 @@ Lines written to `ctl` set options before `exec`. Each matches a host flag, with
 
 `exec` compiles the child's plan and refuses it (the write fails with the conflict as its error) if it isn't within the parent's, as below. Once started, `ctl` accepts only `kill`. Closing the last fd of a child's conversation kills it, as does the parent's exit: a child never outlives the machine that started it.
 
-`wait` reads as the exit status the CLI would return ([exit-status](exit-status.md)): `0`, a status string, `130` for an interrupt, `124` for a timeout, and so on, so a script gets the same answer either way.
+`wait` reads as the exit status the CLI would return ([exit-status](epoch-0/exit-status.md)): `0`, a status string, `130` for an interrupt, `124` for a timeout, and so on, so a script gets the same answer either way.
 
 ### Paths are the caller's
 
@@ -128,7 +128,7 @@ h9 --memory 512m --pids 64 --net=disable --rc 'cd /sys/src/cmd && mk'
 - **The native backend inside the guest.** The Linux personality would have to provide Syscall User Dispatch, seccomp, memfds shared between processes, `execveat` of a memfd, `clone(CLONE_VM|CLONE_VFORK)`, real SIGSYS frames, and shared futexes across processes, only for this. Each inner syscall would cost four or five outer syscalls and two thread handoffs, which the native backend's spike measured at 1.4 to 27 µs each. amd64 only.
 - **The host's `/dev/kvm`, passed through.** Each inner machine would be a real VM beside the outer one, at close to flat speed, but the inner's RAM is scattered 1 MiB chunks of outer memory (a memory slot each), `kvm_run` would need a shadow copy, every ioctl would need checking, and it needs a Linux host with KVM: not the containers and cloud VMs the native backend exists for, and not macOS. Hardware nesting isn't possible, since guests run in user mode under the shim.
 - **A paravirtual vmm backend.** See Open issues: it's the right way to run a guest's own h9 build, and the later step, but it's more work than this and every inner syscall goes through two kernels.
-- **A host subprocess per child.** The same `#μ` interface, with the outer h9 starting a new host `h9` whose root is the caller's namespace over 9P ([serve](serve.md)'s `exportfs` per connection). It would isolate a crash in the child's kernel from the parent, but every file access would be 9P, a spawn costs milliseconds, memory could only be split by bookkeeping, and the browser host has no subprocesses. It can be added behind the same device later, if isolation turns out to matter more than speed.
+- **A host subprocess per child.** The same `#μ` interface, with the outer h9 starting a new host `h9` whose root is the caller's namespace over 9P ([serve](epoch-0/serve.md)'s `exportfs` per connection). It would isolate a crash in the child's kernel from the parent, but every file access would be 9P, a spawn costs milliseconds, memory could only be split by bookkeeping, and the browser host has no subprocesses. It can be added behind the same device later, if isolation turns out to matter more than speed.
 
 A child machine runs at exactly the parent's speed, on every backend and host, needs no hardware or kernel feature, and fits HVF's one VM per process. Most of it exists: several machines per process, devcmd's conversation shape, guest tools, and the namespace builder.
 

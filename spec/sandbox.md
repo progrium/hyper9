@@ -84,7 +84,7 @@ Renaming a directory that has any rule strictly beneath it is refused ("permissi
 
 ### Contained trees
 
-A bind from `#U!c/path` ([symlinks-in-root](../design/symlinks-in-root.md)) is *contained*: devfs resolves its links itself, inside the tree, as `openat2`'s `RESOLVE_IN_ROOT` does.
+A bind from `#U!c/path` ([symlinks-in-root](../design/epoch-0/symlinks-in-root.md)) is *contained*: devfs resolves its links itself, inside the tree, as `openat2`'s `RESOLVE_IN_ROOT` does.
 
 The tree's top is where namec's walk from the `#U!c` attach ends (`h9_fs_anchor`, called from the vendored `chan.c`), canonicalised.
 

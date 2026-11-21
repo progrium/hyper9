@@ -1,4 +1,4 @@
-// The browser host's demo page in Chromium (design/browser-host.md):
+// The browser host's demo page in Chromium (design/epoch-0/browser-host.md):
 // serves zig-out/web, opens index.html and drives rc through its terminal.
 //
 //     node tests/web/browser.mjs [zig-out/web]
@@ -168,7 +168,7 @@ try {
   }
 
   // With H9_TEST_WS_ROOT, a ws:// URL of a 9P server serving a 386 root,
-  // the page runs over it (design/websocket-9p.md).
+  // the page runs over it (design/epoch-0/websocket-9p.md).
   const ws = process.env.H9_TEST_WS_ROOT;
   if (ws) {
     await page.goto(`${url}?root=${encodeURIComponent(ws)}`);

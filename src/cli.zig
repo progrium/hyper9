@@ -47,7 +47,7 @@ pub const Mode = enum {
     help,
 };
 
-/// --builtin (design/builtin-root.md): how the built-in root takes part.
+/// --builtin (design/epoch-0/builtin-root.md): how the built-in root takes part.
 /// `auto` is `only` when no root is found and `off` otherwise; the rest
 /// are `policy.Builtin`'s.
 pub const BuiltinMode = enum { auto, only, before, after, off };
@@ -66,14 +66,14 @@ pub const Config = struct {
     /// --root; null means $H9ROOT, then the default. See `rootArg`.
     root: ?[]const u8 = null,
     /// A second --root, for a machine with a 9front and a Linux root
-    /// (design/linux-personality.md, "CLI and API").
+    /// (design/epoch-0/linux-personality.md, "CLI and API").
     root2: ?[]const u8 = null,
     /// --root-spec: the attach name sent to a 9P root.
     root_spec: []const u8 = "",
     /// --root-user: the uname sent in attaches to a 9P root.
     root_user: ?[]const u8 = null,
     /// --root-header values as given: `Name: value`, or `@FILE` for a host
-    /// file of them (design/websocket-9p.md).
+    /// file of them (design/epoch-0/websocket-9p.md).
     root_headers: []const []const u8 = &.{},
     /// --root-ca: PEM certificates a wss:// root must chain to.
     root_ca: ?[]const u8 = null,
@@ -88,10 +88,10 @@ pub const Config = struct {
     /// -v or --verbose: notes on stderr, such as the index's validation.
     verbose: bool = false,
     /// --user-map: a passwd file mapping names to the numbers a 9P2000.L
-    /// server sees (design/dotl.md).
+    /// server sees (design/epoch-0/dotl.md).
     user_map: ?[]const u8 = null,
     /// --root-contained: the root tree's symlinks resolve inside it
-    /// (design/symlinks-in-root.md).
+    /// (design/epoch-0/symlinks-in-root.md).
     root_contained: bool = false,
     /// --cwd: the host directory bound at /mnt/term/cwd; null means the
     /// host cwd.
@@ -116,15 +116,15 @@ pub const Config = struct {
     ns: ?[]const u8 = null,
     host_fs: bool = false,
     /// --no-guest-tools: leave out `#H/bin` and mask `#H`
-    /// (design/guest-tools.md).
+    /// (design/epoch-0/guest-tools.md).
     guest_tools: bool = true,
     /// --builtin.
     builtin: BuiltinMode = .auto,
     /// --gfx, --gfx=noclip and --gfx-scale: a host window
-    /// (design/gfx.md); null without --gfx.
+    /// (design/epoch-0/gfx.md); null without --gfx.
     gfx: ?gfx.Options = null,
     print: bool = false,
-    /// --serve addresses, checked (design/serve.md).
+    /// --serve addresses, checked (design/epoch-0/serve.md).
     serve: []const []const u8 = &.{},
     /// --serve-root: the guest path each connection exports.
     serve_root: ?[]const u8 = null,
@@ -138,7 +138,7 @@ pub const Config = struct {
     rc: ?[]const u8 = null,
     /// --rc as the last argument: a login rc, which runs the root's
     /// /rc/lib/rcmain.local, its default command
-    /// (design/default-command.md).
+    /// (design/epoch-0/default-command.md).
     rc_login: bool = false,
     /// The program followed by its arguments; with --rc, the arguments
     /// that become $*.
@@ -330,7 +330,7 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
         if (c.host_fs or c.cwd != null) return error.Usage;
         c.profile = .tight;
     }
-    // The --serve flags apply to a --serve (design/serve.md), and
+    // The --serve flags apply to a --serve (design/epoch-0/serve.md), and
     // any origin needs the token, or every page could mount the machine.
     const serving = serve_addrs.items.len > 0;
     if (!serving and (c.serve_root != null or c.serve_token != null or serve_origins.items.len > 0 or c.serve_net)) return error.Usage;
@@ -353,13 +353,13 @@ pub fn parse(gpa: std.mem.Allocator, args: []const []const u8) Error!Config {
     return c;
 }
 
-/// What a --root or $H9ROOT value names (design/ninep-roots.md).
+/// What a --root or $H9ROOT value names (design/epoch-0/ninep-roots.md).
 pub const RootArg = union(enum) {
     /// `tcp!host!port`, with `tcp!host` given port 564 (9fs).
     tcp: []const u8,
     /// `unix!path`: the socket's host path.
     unix: []const u8,
-    /// A `ws://` or `wss://` URL (design/websocket-9p.md).
+    /// A `ws://` or `wss://` URL (design/epoch-0/websocket-9p.md).
     ws: []const u8,
     /// Anything else: a host path, a directory or a socket, which the
     /// caller tells apart with stat.
@@ -394,7 +394,7 @@ pub fn rootArg(arena: std.mem.Allocator, arg: []const u8) error{ OutOfMemory, Ba
 }
 
 /// The URL a --root value without a scheme names
-/// (design/schemeless-roots.md), or null if it isn't shaped like
+/// (design/epoch-0/schemeless-roots.md), or null if it isn't shaped like
 /// one: `host[:port][/path][?query]`, where the host is `localhost`, a
 /// dotted name, or a bracketed IPv6 address, or there's a port. A
 /// loopback host (`localhost`, 127.0.0.0/8, `[::1]`) is `ws://`, any
@@ -487,7 +487,7 @@ fn value(args: []const []const u8, i: *usize, comptime name: []const u8) ??[]con
 /// A host exit code, and whether h9 prints the message behind it.
 pub const Exit = struct { code: u8, print: bool };
 
-/// The exit code for a program's `exits` string (design/go-compat.md):
+/// The exit code for a program's `exits` string (design/epoch-0/go-compat.md):
 /// 0 for an empty one, n for a decimal number from 1 to 255 (digits only,
 /// no sign or leading zero), and 1 for anything else. `print` says whether
 /// h9 writes the string to stderr, which it does only in the last case.
@@ -600,7 +600,7 @@ pub fn noteSignal(note: []const u8) ?Signal {
 }
 
 /// The exit code for a first process killed by a note
-/// (design/exit-status.md). `stopped_by` is the host signal that started a
+/// (design/epoch-0/exit-status.md). `stopped_by` is the host signal that started a
 /// teardown, for `h9: machine stopped`. `print` says whether h9 writes
 /// `h9: prog: note` to stderr: always, except for an interrupt or a
 /// closed pipe, which shells don't report either.
@@ -619,7 +619,7 @@ pub fn killedStatus(note: []const u8, stopped_by: ?Signal) Exit {
         std.mem.startsWith(u8, note, "sys: trap: unexpected exit") or
         std.mem.startsWith(u8, note, "h9: "))
         return .{ .code = exit_failed, .print = true };
-    // The Linux personality's notes (design/linux-personality.md).
+    // The Linux personality's notes (design/epoch-0/linux-personality.md).
     if (std.mem.startsWith(u8, note, "linux: signal ")) {
         const n = std.fmt.parseInt(u32, note["linux: signal ".len..], 10) catch return .{ .code = 1, .print = true };
         const s = Signal.fromLinux(n) orelse return .{ .code = 1, .print = true };
@@ -644,7 +644,7 @@ fn signalStatus(s: Signal) Exit {
 }
 
 /// The line h9 prints on a terminal when a run's changes to the root's
-/// overlay are discarded (design/overlay.md): the changed top-level
+/// overlay are discarded (design/epoch-0/overlay.md): the changed top-level
 /// directories, and how to keep them. A 9P root keeps writes under
 /// `--write=scope`, since its server decides; a host tree takes
 /// `--writable` on the root.

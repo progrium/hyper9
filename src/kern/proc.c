@@ -745,7 +745,7 @@ h9_kern_execnotes(void)
 }
 
 /*
- * Debugging (design/self-host.md): the process side of 9front's
+ * Debugging (design/epoch-0/self-host.md): the process side of 9front's
  * procctl. A debugger's ctl stop, startstop or an exec with hang set
  * makes a stop request; the Zig exit loop checks for one at each stop
  * point (entering a syscall, before running guest code again after a
@@ -1130,7 +1130,7 @@ h9_kern_spawn(char *name, void (*fn)(void*), void *arg)
  * h9_kern_spawn's cloning from the boot Proc, without a new thread. It
  * has no machine, so notes never reach it. For macOS --gfx, where AppKit
  * runs on the process's main thread and drawterm's Cocoa delegate sleeps
- * and starts kprocs there (design/gfx.md). Returns 0, or -1 if
+ * and starts kprocs there (design/epoch-0/gfx.md). Returns 0, or -1 if
  * allocation fails.
  */
 int
@@ -1617,7 +1617,7 @@ h9_kern_exit(void)
 		unlock(&ph->exl);
 		free(w);
 		h->parent = nil;
-		/* A Linux parent gets SIGCHLD (design/linux-personality.md). */
+		/* A Linux parent gets SIGCHLD (design/epoch-0/linux-personality.md). */
 		if(h9_wantchld != nil){
 			int want;
 			Hnote *n;

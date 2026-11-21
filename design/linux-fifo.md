@@ -21,7 +21,7 @@ Serve Linux FIFOs. `mkfifo` and `mknod(S_IFIFO)` make a FIFO file that stays in 
 
 Plan 9 has no FIFO file type. Its named pipe is a pipe posted in `/srv` (devsrv, srv(3)), which keeps a channel, not a path in a tree. A FIFO is an ordinary-looking name in a directory that any process can open by path. Every opener shares one pipe, which exists only while someone has it open.
 
-The personality already does the same kind of mapping for symbolic links, which 9P doesn't have either. An overlay keeps them as its own node kind (`Nlink`), and a host tree keeps them as host links ([symlinks-in-root](symlinks-in-root.md)). File locks also have a machine-wide table keyed by a file's kernel identity (src/linux/locks.zig), so programs in different machines on one host file see each other's locks.
+The personality already does the same kind of mapping for symbolic links, which 9P doesn't have either. An overlay keeps them as its own node kind (`Nlink`), and a host tree keeps them as host links ([symlinks-in-root](epoch-0/symlinks-in-root.md)). File locks also have a machine-wide table keyed by a file's kernel identity (src/linux/locks.zig), so programs in different machines on one host file see each other's locks.
 
 ## Proposal
 
@@ -29,7 +29,7 @@ The personality already does the same kind of mapping for symbolic links, which 
 
 - In an overlay (the root's, and `/tmp`), it's a new node kind, `Nfifo`, which keeps the mode and times and has no data. `stat` gives size 0.
 - On a host tree (`#U`), it's a host FIFO (`mkfifo(3)` on macOS and Linux). On Windows hosts, or a tree that refuses it, the call fails with `EPERM`, as `symlink` does there.
-- On a 9P2000.L root ([dotl](dotl.md)), it's `Tmknod`. Plain 9P roots fail with `EPERM`.
+- On a 9P2000.L root ([dotl](epoch-0/dotl.md)), it's `Tmknod`. Plain 9P roots fail with `EPERM`.
 
 The Linux personality tells a FIFO from a file the way it tells a link: by asking the device through a kernel call (`h9_fs_isfifo`, like `h9_fs_readlinkpath`), since a Plan 9 `Dir` has no type bits for it. `stat`, `lstat`, and `getdents` report `S_IFIFO` and `DT_FIFO`. `unlink` and `rename` work as on a file.
 

@@ -12,7 +12,7 @@ This describes, as built, how a machine's namespace is put together at boot, the
 
 ## Slim roots
 
-`zig build slim` ([multicall](../design/multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
+`zig build slim` ([multicall](../design/epoch-0/multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
 
 `tools/slim.zig` copies `src/9box/` into a fresh build directory and runs its mkfile inside the just-built h9, against the stock root, with the build directory as the only writable path and `/sys/src` from the root or the fetched checkout bound read-only.
 
@@ -86,7 +86,7 @@ On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, wh
 
 ### On the browser host
 
-Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](../design/browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
+Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](../design/epoch-0/browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
 
 - **The screen** is `gscreen` in wasm memory as `XBGR32`, at the size the page reports. `flushmemscreen` only adds a rectangle to the host's dirty rectangle; once a frame (`requestAnimationFrame` in the Worker), outside any coroutine, the host copies that rectangle's rows from wasm memory into an `ImageData`, sets each pixel's X byte to 255, and `putImageData`s it. `screensize` tells the host the new image's address, stride, and size, and the host resizes the canvas's buffer to match.
 - **Input** is a queue in the host, four ints per event: a key (rune, down), the pointer (x, y, Plan 9 buttons), a resize, or a paste's length. `gfxinput`, a kernel process started by `screeninit`, takes them through the Suspending `gfx_wait` (saving what's per thread around it, as every Suspending import does) and calls `h9_kbdkey`, `absmousetrack`, and `screenresize`, so the input paths run with `up` set.

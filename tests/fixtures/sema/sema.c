@@ -1,6 +1,6 @@
 /*
  * Test programs for the semaphores cases in tests/integration.zig
- * (design/semaphores.md), one per argument. Built inside the guest
+ * (design/epoch-0/semaphores.md), one per argument. Built inside the guest
  * with 7c and 7l. Semaphores and counters are in the data segment, which
  * rfork(RFPROC|RFMEM) children share.
  */

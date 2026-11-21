@@ -3,12 +3,12 @@
 > **Work in progress.** h9 is under active development and hasn't had a
 > security audit. Most of what this guide describes is built: 9front and
 > Linux programs, the HVF and KVM backends, the emulator, and the browser
-> host. The [Linux personality](../design/linux-personality.md) and its
-> [threads](../design/linux-threads.md) and
-> [sockets](../design/linux-net.md) are built but their proposals are
+> host. The [Linux personality](../design/epoch-0/linux-personality.md) and its
+> [threads](../design/epoch-0/linux-threads.md) and
+> [sockets](../design/epoch-0/linux-net.md) are built but their proposals are
 > still drafts while gaps close. Parts that are still drafts or not built
 > are marked *(planned)*, chief among them the
-> [WHP backend](../design/whp.md) for Windows. The
+> [WHP backend](../design/epoch-0/whp.md) for Windows. The
 > [proposal status](../design/STATUS.md) is the current state.
 >
 > This is a short map from things you may already know to h9. The
@@ -63,13 +63,13 @@ is a [non-goal](../SPEC.md#overview)). It runs one program, or one process
 tree, against a namespace it builds, and exits with it. You get a real 9front
 userland as host commands (`git log | h9 sort | h9 uniq -c`), rio and acme in
 a host window with `--gfx`, and the compilers and `mk` rebuilding 9front
-inside it ([self-host](../design/self-host.md)), but no 9front kernel
+inside it ([self-host](../design/epoch-0/self-host.md)), but no 9front kernel
 features beyond what drawterm's kernel and h9 add. h9 does use QEMU once:
 `zig build mkroot` boots the pinned 9front image to extract the full root
-tree. Without one, h9 falls back to a [built-in root](../design/builtin-root.md)
+tree. Without one, h9 falls back to a [built-in root](../design/epoch-0/builtin-root.md)
 of 42 9front commands in one multi-call binary. Using a 9front disk image
 directly as the root was proposed and declined
-([image-roots](../design/image-roots.md)): directories, 9P servers, and
+([image-roots](../design/epoch-0/image-roots.md)): directories, 9P servers, and
 overlays have covered every root so far.
 
 **9vx.** h9's closest ancestor: Plan 9 binaries running on a Unix host, with a
@@ -107,10 +107,10 @@ different direction:
   Zig have all been run this way (see the
   [Linux personality page](../site/linux.html)).
 - **Image vs root.** A container starts from a layered image. h9 starts from a
-  root tree, a 9P server ([ninep-roots](../design/ninep-roots.md)), or one
-  behind a WebSocket ([websocket-9p](../design/websocket-9p.md)), and
+  root tree, a 9P server ([ninep-roots](../design/epoch-0/ninep-roots.md)), or one
+  behind a WebSocket ([websocket-9p](../design/epoch-0/websocket-9p.md)), and
   composes layers with Plan 9 binds and a copy-on-write overlay. The overlay
-  is the default ([overlay](../design/overlay.md)): writes to the root
+  is the default ([overlay](../design/epoch-0/overlay.md)): writes to the root
   succeed and vanish at exit. Exporting a run's changes as an OCI layer is a
   draft ([overlay-export](../design/overlay-export.md), *planned*). See
   [userland.md](userland.md) for building your own root.
@@ -163,7 +163,7 @@ differences:
   process tree, and ends with it, so it can fence a single step of a
   pipeline (`git log | h9 sort`) as easily as a shell.
 - **A Linux kernel, or a syscall table.** sbx runs anything Linux runs,
-  Docker included. h9's [Linux personality](../design/linux-personality.md)
+  Docker included. h9's [Linux personality](../design/epoch-0/linux-personality.md)
   runs a growing set of programs and fails the rest with `ENOSYS`, and there's
   no Docker inside h9.
 - **Host files.** sbx shares the workspace whole, and can't hide a file in
@@ -172,7 +172,7 @@ differences:
   `--write=ephemeral`, and prints the result with `--print`.
 - **Network.** sbx filters by domain at an HTTP proxy and injects
   credentials. h9 filters `/net` dials by dial string with `--net-allow`, and
-  resolves only names a pattern covers ([net-policy](../design/net-policy.md)).
+  resolves only names a pattern covers ([net-policy](../design/epoch-0/net-policy.md)).
   h9 injects credentials only into WebSocket 9P handshakes, and that's a draft
   ([credential-helpers](../design/credential-helpers.md), *planned*).
 - **Images.** sbx starts from agent templates, with an image cache per
@@ -208,7 +208,7 @@ space behind a hypervisor and onto a Plan 9 kernel rather than NT. WSL 2 is a
 lightweight VM with a real Linux kernel, closer to Firecracker. On Windows,
 h9 mostly runs on the emulator today. Its WHP backend for the Windows
 Hypervisor Platform is built for x86\_64 but incomplete, and its proposal is
-a draft ([whp](../design/whp.md), *planned*).
+a draft ([whp](../design/epoch-0/whp.md), *planned*).
 
 ## Compatibility layers
 
@@ -227,13 +227,13 @@ h9-emu translates instructions with Unicorn, which is built on QEMU's CPU
 core, but h9 serves the syscalls itself rather than handing them to the host.
 Registering h9 with `binfmt_misc` the way qemu-user is registered, so
 `./prog` runs a 9front binary on Linux without typing `h9`, was proposed and
-declined as out of scope ([host-binfmt](../design/host-binfmt.md)). A 9front
+declined as out of scope ([host-binfmt](../design/epoch-0/host-binfmt.md)). A 9front
 binary runs as `h9 ./prog`.
 
 ## The browser and wasm
 
 **v86.** v86 emulates a whole x86 PC in the browser, and you boot an OS on
-it. h9's [browser host](../design/browser-host.md) works
+it. h9's [browser host](../design/epoch-0/browser-host.md) works
 differently: h9 itself is compiled to wasm and runs in a Web Worker, with its
 own 386 CPU (interpreted, and compiled to wasm when hot) and no PC around it. So in a browser tab, as on
 every other host, 9front's 386 binaries and Alpine's 386 Linux binaries

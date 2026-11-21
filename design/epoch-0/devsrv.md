@@ -117,7 +117,7 @@ A pipe mounted directly, as acme does, has no `srvname` and still prints as `#|/
 **`srvname` in drawterm's `Chan`, not in a table beside devsrv.**
 - **Why not a table:** drawterm frees and reuses `Chan`s in `kern/chan.c`, and nothing outside it sees that happen. A table keyed by `Chan*` would keep stale entries, and a reused `Chan` would print another channel's `/srv` name. Making the table safe means hooking `chanfree`, which is a vendor change anyway.
 - **Why the field:** it's three small edits, the same as 9front's, so the port and devproc stay close to 9front's code.
-- **What it's worth:** `/proc/n/ns` reads as it does on 9front. `--ns` can replay `mount /srv/x` lines when `/srv/x` is there at replay, which is rare today (see Compatibility). The line also shows less than the channel's path, in the spirit of [hide-host-paths](hide-host-paths.md).
+- **What it's worth:** `/proc/n/ns` reads as it does on 9front. `--ns` can replay `mount /srv/x` lines when `/srv/x` is there at replay, which is rare today (see Compatibility). The line also shows less than the channel's path, in the spirit of [hide-host-paths](../hide-host-paths.md).
 
 **`mount` and `fauth` here, not in a proposal of their own.** devsrv without `mount` is a registry nobody can use, since every client of a posted service mounts it. Every other server that mounts itself needs `mount` too. They're one change in practice, and the syscalls are thin, because drawterm already has the code behind them.
 

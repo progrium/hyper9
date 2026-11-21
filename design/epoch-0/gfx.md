@@ -201,11 +201,11 @@ Demos, by hand, one per backend: `h9 --gfx rio` opens a window with rio on macOS
 5. Win32: `-Dgfx=win32` as the Windows default. The Windows demo works.
 6. Cocoa: `h9_kern_adopt`, `h9.gfx.main`, and `gfx-cocoa.m`. The macOS demo works.
 7. With [devsrv](devsrv.md) implemented, the rio and acme cases.
-8. README: `--gfx` and the build option. SPEC.md: the Decisions table's Terminal row, the boot sequence's binds and device mask, the CLI flag table, seam rule 4's exception, and the Seatbelt research note if [host-sandbox](host-sandbox.md) hasn't taken it. Set `status: implemented`.
+8. README: `--gfx` and the build option. SPEC.md: the Decisions table's Terminal row, the boot sequence's binds and device mask, the CLI flag table, seam rule 4's exception, and the Seatbelt research note if [host-sandbox](../host-sandbox.md) hasn't taken it. Set `status: implemented`.
 
 ## Open issues
 
-- Which Mach and WindowServer lookups `--gfx` needs under Seatbelt is [host-sandbox](host-sandbox.md)'s open question, not this one's. Running `h9 --gfx rio` under a `(deny default)` profile with `(trace ...)` during step 6 would answer it; likely candidates are `com.apple.windowserver.active`, `com.apple.CARenderServer`, `com.apple.pasteboard.1`, and Metal's IOKit classes.
+- Which Mach and WindowServer lookups `--gfx` needs under Seatbelt is [host-sandbox](../host-sandbox.md)'s open question, not this one's. Running `h9 --gfx rio` under a `(deny default)` profile with `(trace ...)` during step 6 would answer it; likely candidates are `com.apple.windowserver.active`, `com.apple.CARenderServer`, `com.apple.pasteboard.1`, and Metal's IOKit classes.
 
 ## Updates
 
@@ -221,4 +221,4 @@ Demos, by hand, one per backend: `h9 --gfx rio` opens a window with rio on macOS
   - The test module (`zig build test` and `install-tests`) is always built with the headless backend, whatever `-Dgfx` is, so the `[gfx]` backend cases run on every host.
   - rio needs `/mnt/temp` in the root tree; `scripts/mkroot.py` now makes it, and adds the mount points to a tree it built before.
   - The X11 backend's `x11.c` includes `<X11/IntrinsicP.h>`, so `-Dgfx=x11` needs the libXt headers as well as libX11, and builds natively against glibc only; the emulator's prebuilt Unicorn is musl-only, so an X11 build with the emulator needs `-Dunicorn=source`.
-  - [host-sandbox](host-sandbox.md) already lists the Seatbelt question, so SPEC.md gets no research note.
+  - [host-sandbox](../host-sandbox.md) already lists the Seatbelt question, so SPEC.md gets no research note.

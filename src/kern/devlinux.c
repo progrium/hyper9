@@ -1,5 +1,5 @@
 /*
- * #λ: the Linux view's root (design/linux-personality.md, "The Linux
+ * #λ: the Linux view's root (design/epoch-0/linux-personality.md, "The Linux
  * view"). Its root directory holds 9, tmp and mnt/term as mount points,
  * and it serves dev, proc and sys itself. The namespace builder binds the
  * Linux root tree after it, so the tree's own files show through, and
@@ -89,7 +89,7 @@ static Lent tab[Nq] = {
 	[Qstdout]	{"stdout", Qdev, 0666, 1},
 	[Qstderr]	{"stderr", Qdev, 0666, 1},
 	[Qpts]	{"pts", Qdev, DMDIR|0555},
-	[Qptmx]	{"ptmx", Qdev, 0666, 1},	/* #τ/ptmx is bound on it (design/linux-pty.md) */
+	[Qptmx]	{"ptmx", Qdev, 0666, 1},	/* #τ/ptmx is bound on it (design/epoch-0/linux-pty.md) */
 	[Qshm]	{"shm", Qdev, DMDIR|0777},
 
 	[Qself]	{"self", Qproc, DMDIR|0555},
@@ -388,7 +388,7 @@ linuxgen(Chan *c, char *name, Dirtab *dt, int ntab, int s, Dir *dp)
 /*
  * #λ is the Linux view's top; #λetc is a directory of files the
  * machine makes for a root that lacks them, bound after the root's /etc
- * (design/linux-net.md, "DNS").
+ * (design/epoch-0/linux-net.md, "DNS").
  */
 static Chan*
 linuxattach(char *spec)

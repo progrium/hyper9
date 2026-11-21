@@ -12,7 +12,7 @@ areas: [cli, kern, build, sandbox, tests]
 
 ## Abstract
 
-`--audio` gives a machine the host's sound output as `/dev/audio` and `/dev/volume`, served by drawterm's devaudio (`#A`) over a host backend. On Linux and Windows, the backends are drawterm's own: PipeWire or ALSA, and Win32, picked by a build option as `-Dgfx` picks a GUI. drawterm has no Core Audio backend, so macOS gets a small one of h9's own. On the [browser host](browser-host.md), a Web Audio backend sends samples to an AudioWorklet in the page, and a write to `/dev/audio` parks its coroutine until the worklet has room. Playback is all `--audio` grants. Recording needs `--audio=record`. Without either, `#A` is masked, as `#i` is without `--gfx`.
+`--audio` gives a machine the host's sound output as `/dev/audio` and `/dev/volume`, served by drawterm's devaudio (`#A`) over a host backend. On Linux and Windows, the backends are drawterm's own: PipeWire or ALSA, and Win32, picked by a build option as `-Dgfx` picks a GUI. drawterm has no Core Audio backend, so macOS gets a small one of h9's own. On the [browser host](epoch-0/browser-host.md), a Web Audio backend sends samples to an AudioWorklet in the page, and a write to `/dev/audio` parks its coroutine until the worklet has room. Playback is all `--audio` grants. Recording needs `--audio=record`. Without either, `#A` is masked, as `#i` is without `--gfx`.
 
 ## Background
 
@@ -47,7 +47,7 @@ Things to note:
 - **No macOS backend.** drawterm's `Make.osx-cocoa` sets `AUDIO=none`.
 - **ALSA opens the microphone on every open.** `audiodevopen` opens both the playback and capture PCMs, whatever mode `/dev/audio` is opened in, so a program that only plays still opens the host's capture device.
 - **Writes can't always be interrupted.** ALSA, OSS, and sndio block in a host call, and Win32 polls with a host sleep. drawterm's `sleep` raises `Eintr` when a note is pending, but these never reach it, so a large write runs to the end before a note is seen. Only the PipeWire backend waits in the kernel.
-- **Linking.** PipeWire and ALSA are shared libraries, so, like X11 for [gfx](gfx.md), they need a glibc target. h9's Linux releases are static musl.
+- **Linking.** PipeWire and ALSA are shared libraries, so, like X11 for [gfx](epoch-0/gfx.md), they need a glibc target. h9's Linux releases are static musl.
 - **A PipeWire bug.** `on_process` returns with `pwstate.lk` held when `pw_stream_dequeue_buffer` gives no buffer, so the next write deadlocks. It's an upstream fix to send.
 
 ## Proposal
@@ -130,7 +130,7 @@ const m = await createMachine({
 - **The worklet** converts each 16-bit interleaved buffer to the two 32-bit float channels Web Audio uses, and plays it out in 128-frame render quanta. When its queue is empty, it outputs silence and posts nothing until it has room to report.
 - **Closing** posts a drain message. The worklet answers once its queue is empty, which wakes the closer through `audiopump`.
 
-So a guest can never get more than about 200 ms ahead of the speakers, the Worker never busy-waits, and nothing needs `SharedArrayBuffer` or cross-origin isolation, which [browser-host](browser-host.md) avoids.
+So a guest can never get more than about 200 ms ahead of the speakers, the Worker never busy-waits, and nothing needs `SharedArrayBuffer` or cross-origin isolation, which [browser-host](epoch-0/browser-host.md) avoids.
 
 **Autoplay.** Browsers start an `AudioContext` suspended until the user interacts with the page. While it's suspended, the worklet plays nothing and reports no room, so a write parks until the context runs, and no samples are dropped. `createMachine` resumes the context on the page's first `pointerdown` or `keydown`. If the guest opens `/dev/audio` while the context is suspended, the machine fires an `audioblocked` event, so the page can show a "click to enable sound" control that calls `m.audio.resume()`.
 
@@ -140,7 +140,7 @@ So a guest can never get more than about 200 ms ahead of the speakers, the Worke
 
 ### Relation to gfx
 
-Audio doesn't depend on [gfx](gfx.md) or [browser-gfx](browser-gfx.md) (proposed in #58). It follows their shape: a device that's built in but masked until a flag grants it, a wrapper in `src/kern/` around drawterm's device, a `-D` build option per host with a headless backend for tests, and an error naming the backend when a machine asks for something this build doesn't have. A machine can have both, and `h9 --gfx --audio rio` gives rio's programs a window and sound.
+Audio doesn't depend on [gfx](epoch-0/gfx.md) or [browser-gfx](epoch-0/browser-gfx.md) (proposed in #58). It follows their shape: a device that's built in but masked until a flag grants it, a wrapper in `src/kern/` around drawterm's device, a `-D` build option per host with a headless backend for tests, and an error naming the backend when a machine asks for something this build doesn't have. A machine can have both, and `h9 --gfx --audio rio` gives rio's programs a window and sound.
 
 ### The plan
 

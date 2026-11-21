@@ -95,12 +95,12 @@ the agent's ordinary tools run too.
   so they're reviewed like code. An agent that wants to delegate starts a
   child machine whose policy can only be narrower than its own.
 
-**Builds on:** [ninep-roots](../design/ninep-roots.md),
-[devsrv](../design/devsrv.md),
-[ephemeral-writes](../design/ephemeral-writes.md),
-[net-policy](../design/net-policy.md),
-[linux-personality](../design/linux-personality.md). Would pull forward
-[host-srv](../design/host-srv.md) (hand the broker's connection in
+**Builds on:** [ninep-roots](../design/epoch-0/ninep-roots.md),
+[devsrv](../design/epoch-0/devsrv.md),
+[ephemeral-writes](../design/epoch-0/ephemeral-writes.md),
+[net-policy](../design/epoch-0/net-policy.md),
+[linux-personality](../design/epoch-0/linux-personality.md). Would pull forward
+[host-srv](../design/epoch-0/host-srv.md) (hand the broker's connection in
 pre-dialed), [overlay-export](../design/overlay-export.md) (harvest the
 changes), [credential-helpers](../design/credential-helpers.md) and
 [child-machines](../design/child-machines.md).
@@ -132,10 +132,10 @@ code.
 - Later, KVM on attested hosts (SEV-SNP, TDX) could make the plan part of a
   remote attestation.
 
-**Builds on:** [net-policy](../design/net-policy.md),
-[ninep-roots](../design/ninep-roots.md). Would pull forward
-[host-srv](../design/host-srv.md) (post `/out`),
-[root-auth](../design/root-auth.md) (per-analyst attaches),
+**Builds on:** [net-policy](../design/epoch-0/net-policy.md),
+[ninep-roots](../design/epoch-0/ninep-roots.md). Would pull forward
+[host-srv](../design/epoch-0/host-srv.md) (post `/out`),
+[root-auth](../design/epoch-0/root-auth.md) (per-analyst attaches),
 [host-sandbox](../design/host-sandbox.md) and
 [hide-host-paths](../design/hide-host-paths.md).
 
@@ -168,11 +168,11 @@ access is unmounting, and auditing is logging 9P messages at the gateway.
 - A session recording is a log of 9P traffic, far smaller and easier to
   search than terminal video.
 
-**Builds on:** [websocket-9p](../design/websocket-9p.md),
-[net-policy](../design/net-policy.md),
-[browser-host](../design/browser-host.md). Would pull forward
+**Builds on:** [websocket-9p](../design/epoch-0/websocket-9p.md),
+[net-policy](../design/epoch-0/net-policy.md),
+[browser-host](../design/epoch-0/browser-host.md). Would pull forward
 [credential-helpers](../design/credential-helpers.md) (short-lived tokens,
-none in the namespace file) and [root-auth](../design/root-auth.md).
+none in the namespace file) and [root-auth](../design/epoch-0/root-auth.md).
 
 ### 4. A dependency firewall
 
@@ -203,10 +203,10 @@ namespace is identical on every run.
 - Developers run the same sandbox locally as a wrapper for the install
   command.
 
-**Builds on:** [linux-personality](../design/linux-personality.md),
-[linux-net](../design/linux-net.md),
-[linux-threads](../design/linux-threads.md),
-[net-policy](../design/net-policy.md), [ninep-roots](../design/ninep-roots.md).
+**Builds on:** [linux-personality](../design/epoch-0/linux-personality.md),
+[linux-net](../design/epoch-0/linux-net.md),
+[linux-threads](../design/epoch-0/linux-threads.md),
+[net-policy](../design/epoch-0/net-policy.md), [ninep-roots](../design/epoch-0/ninep-roots.md).
 Would pull forward [cow-fork](../design/cow-fork.md), since package managers
 fork large processes.
 
@@ -241,10 +241,10 @@ step runs on a Mac laptop, a Linux worker or the emulator.
 - The `--print` plan and the read log together are a provenance record
   (SLSA-style) for free.
 
-**Builds on:** [ninep-roots](../design/ninep-roots.md),
-[websocket-9p](../design/websocket-9p.md),
-[overlay](../design/overlay.md), [kvm](../design/kvm.md),
-[serve](../design/serve.md). Would pull forward
+**Builds on:** [ninep-roots](../design/epoch-0/ninep-roots.md),
+[websocket-9p](../design/epoch-0/websocket-9p.md),
+[overlay](../design/epoch-0/overlay.md), [kvm](../design/epoch-0/kvm.md),
+[serve](../design/epoch-0/serve.md). Would pull forward
 [overlay-export](../design/overlay-export.md) and
 [mount-index](../design/mount-index.md) (answer walks and stats without a
 round trip each).
@@ -277,8 +277,8 @@ loops, autotuners and property-based tests all want.
 - It nests: a variant can fan out again, giving tree search over program
   states.
 
-**Builds on:** [ephemeral-writes](../design/ephemeral-writes.md),
-[overlay](../design/overlay.md), [serve](../design/serve.md),
+**Builds on:** [ephemeral-writes](../design/epoch-0/ephemeral-writes.md),
+[overlay](../design/epoch-0/overlay.md), [serve](../design/epoch-0/serve.md),
 [embedding](embedding.md). Would pull forward
 [overlay-export](../design/overlay-export.md) and
 [child-machines](../design/child-machines.md) (a variant fans out from
@@ -311,11 +311,11 @@ a function platform's limits.
 - Actors in the style of Durable Objects fall out: a long-lived machine
   whose state is its own ramfs, reachable through `/srv` or `--serve`.
 
-**Builds on:** [devsrv](../design/devsrv.md),
-[net-policy](../design/net-policy.md), [go-compat](../design/go-compat.md),
-[linux-personality](../design/linux-personality.md),
-[kvm](../design/kvm.md), [serve](../design/serve.md). Would pull forward
-[host-srv](../design/host-srv.md).
+**Builds on:** [devsrv](../design/epoch-0/devsrv.md),
+[net-policy](../design/epoch-0/net-policy.md), [go-compat](../design/epoch-0/go-compat.md),
+[linux-personality](../design/epoch-0/linux-personality.md),
+[kvm](../design/epoch-0/kvm.md), [serve](../design/epoch-0/serve.md). Would pull forward
+[host-srv](../design/epoch-0/host-srv.md).
 
 ### 8. A flight recorder
 
@@ -344,7 +344,7 @@ replay means serving them back instead of making the real call.
 - The same log is a precise behavioural diff between two versions of a
   program.
 
-**Builds on:** the [baseline](../design/baseline.md)'s syscall dispatch and
+**Builds on:** the [baseline](../design/epoch-0/baseline.md)'s syscall dispatch and
 `--trace`, and the emulator. [hcpu](../design/hcpu.md)'s interpreter tier
 is a natural place for single-stepping and reverse execution. Needs a
 proposal of its own.
@@ -380,13 +380,13 @@ so there's nothing to uninstall.
   file, run. With the Linux personality, the same scheme distributes Linux
   tools without containers.
 
-**Builds on:** [websocket-9p](../design/websocket-9p.md),
-[devsrv](../design/devsrv.md),
-[linux-personality](../design/linux-personality.md),
-[symlinks-in-root](../design/symlinks-in-root.md). Would pull forward
-[recursive-unions](../design/recursive-unions.md) (merge package trees at
+**Builds on:** [websocket-9p](../design/epoch-0/websocket-9p.md),
+[devsrv](../design/epoch-0/devsrv.md),
+[linux-personality](../design/epoch-0/linux-personality.md),
+[symlinks-in-root](../design/epoch-0/symlinks-in-root.md). Would pull forward
+[recursive-unions](../design/epoch-0/recursive-unions.md) (merge package trees at
 every depth, not only `/bin`), [mount-index](../design/mount-index.md)
-(fast lazy fetch) and [host-srv](../design/host-srv.md) (post the cache).
+(fast lazy fetch) and [host-srv](../design/epoch-0/host-srv.md) (post the cache).
 
 ### 10. Executable archives
 
@@ -413,9 +413,9 @@ states the program's entire world in a few lines anyone can read.
   and the browser host makes that a link rather than an install.
 - Fixity is built in: the tree's root hash is the archive's identity.
 
-**Builds on:** [ninep-roots](../design/ninep-roots.md),
-[i386](../design/i386.md), [browser-host](../design/browser-host.md),
-[builtin-root](../design/builtin-root.md). Would pull forward
+**Builds on:** [ninep-roots](../design/epoch-0/ninep-roots.md),
+[i386](../design/epoch-0/i386.md), [browser-host](../design/epoch-0/browser-host.md),
+[builtin-root](../design/epoch-0/builtin-root.md). Would pull forward
 [hcpu](../design/hcpu.md), the dependency-free emulator.
 
 ## Personal and distributed computing
@@ -446,12 +446,12 @@ and the browser host makes it zero-install.
   ([idea 1](#1-agent-workspaces-where-credentials-are-file-servers)), and
   people and agents share one interface to the world.
 
-**Builds on:** [websocket-9p](../design/websocket-9p.md),
-[devsrv](../design/devsrv.md), [gfx](../design/gfx.md),
-[browser-host](../design/browser-host.md),
-[browser-gfx](../design/browser-gfx.md). Would pull forward
+**Builds on:** [websocket-9p](../design/epoch-0/websocket-9p.md),
+[devsrv](../design/epoch-0/devsrv.md), [gfx](../design/epoch-0/gfx.md),
+[browser-host](../design/epoch-0/browser-host.md),
+[browser-gfx](../design/epoch-0/browser-gfx.md). Would pull forward
 [credential-helpers](../design/credential-helpers.md) and
-[root-auth](../design/root-auth.md).
+[root-auth](../design/epoch-0/root-auth.md).
 
 ### 12. Borrow compute, keep your files
 
@@ -480,9 +480,9 @@ too, because listeners also speak 9P2000.L.
 - It works in reverse too: a browser tab mounts a server's dataset and runs
   the visualizer locally, so the bulk data never ships.
 
-**Builds on:** [serve](../design/serve.md),
-[websocket-9p](../design/websocket-9p.md), [kvm](../design/kvm.md),
-[browser-host](../design/browser-host.md), [dotl](../design/dotl.md).
+**Builds on:** [serve](../design/epoch-0/serve.md),
+[websocket-9p](../design/epoch-0/websocket-9p.md), [kvm](../design/epoch-0/kvm.md),
+[browser-host](../design/epoch-0/browser-host.md), [dotl](../design/epoch-0/dotl.md).
 Would pull forward [mount-index](../design/mount-index.md) to make remote
 walks cheap.
 
@@ -513,9 +513,9 @@ and "works in the page" are one claim.
   ([idea 5](#5-builds-keyed-by-what-they-read)), so the browser's result
   and the server's can't drift.
 
-**Builds on:** [browser-host](../design/browser-host.md),
-[browser-gfx](../design/browser-gfx.md), [i386](../design/i386.md),
-[websocket-9p](../design/websocket-9p.md), [overlay](../design/overlay.md).
+**Builds on:** [browser-host](../design/epoch-0/browser-host.md),
+[browser-gfx](../design/epoch-0/browser-gfx.md), [i386](../design/epoch-0/i386.md),
+[websocket-9p](../design/epoch-0/websocket-9p.md), [overlay](../design/epoch-0/overlay.md).
 Would pull forward [hcpu](../design/hcpu.md) for faster guest code in the
 page.
 
@@ -550,11 +550,11 @@ files it was given.
 - Users can also script the app from `rc`, and the same tree, exported with
   `--serve`, is a remote-control API for free.
 
-**Builds on:** [embedding](embedding.md), [ninep-roots](../design/ninep-roots.md),
-[devsrv](../design/devsrv.md),
-[linux-personality](../design/linux-personality.md),
-[serve](../design/serve.md). Would pull forward
-[host-srv](../design/host-srv.md), whose open-connection variant hands the
+**Builds on:** [embedding](embedding.md), [ninep-roots](../design/epoch-0/ninep-roots.md),
+[devsrv](../design/epoch-0/devsrv.md),
+[linux-personality](../design/epoch-0/linux-personality.md),
+[serve](../design/epoch-0/serve.md). Would pull forward
+[host-srv](../design/epoch-0/host-srv.md), whose open-connection variant hands the
 app's server to the machine without a socket.
 
 ## Where to start
@@ -562,7 +562,7 @@ app's server to the machine without a socket.
 Agent workspaces, read-keyed builds and fan-out share most of their parts
 (a daemon that embeds h9, a broker or content-addressed 9P server, and a
 way to harvest overlays), so building one makes the others cheaper.
-[host-srv](../design/host-srv.md) and
+[host-srv](../design/epoch-0/host-srv.md) and
 [overlay-export](../design/overlay-export.md) are the two open proposals
 that would help the most ideas.
 

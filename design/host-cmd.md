@@ -36,7 +36,7 @@ Problems found while adding the tests:
 
 ## Proposal
 
-Replace devcmd with an h9 device, `#C` still, in `src/kern/devhcmd.c` with its host side in Zig (`src/hostcmd.zig`). It follows devhstream's pattern ([websocket-9p](websocket-9p.md)).
+Replace devcmd with an h9 device, `#C` still, in `src/kern/devhcmd.c` with its host side in Zig (`src/hostcmd.zig`). It follows devhstream's pattern ([websocket-9p](epoch-0/websocket-9p.md)).
 
 - **Per machine.** Conversations belong to the machine that made them, as `/net/ws`'s do. A machine lists and opens only its own.
 - **Interruptible.** Zig starts the process (`std.process.Child`) and has a host thread per pipe that queues output in the machine's pages. A guest read sleeps on a Rendez, so a note interrupts it with `Eintr`. A write to stdin is queued the same way. The machine's end kills its commands and their process groups, as `hostcmd.c` does now.
@@ -52,9 +52,9 @@ When this lands, `-Dhost-cmd` goes away and host commands are built in everywher
 ## Rationale
 
 - **Keep devcmd and patch it.** Each fix touches `third_party/`: interruptible reads, per-machine tables, the status format, and an allowlist. That's most of the device, and AGENTS.md asks for project-owned code when the change is this large. The rename trick in `hostcmd.c` is fine for one hook but not for five.
-- **Remove host commands entirely.** A host shell can already drive h9 from outside (`h9 ... | host-cmd | h9 ...`), and [host-binfmt](host-binfmt.md) goes the other way. Running host tools from inside, such as a host compiler, `git`, or `open`, is still the request people make most, and `mk` recipes need it in-line. Keeping it behind a build flag until it's safe costs little.
+- **Remove host commands entirely.** A host shell can already drive h9 from outside (`h9 ... | host-cmd | h9 ...`), and [host-binfmt](epoch-0/host-binfmt.md) goes the other way. Running host tools from inside, such as a host compiler, `git`, or `open`, is still the request people make most, and `mk` recipes need it in-line. Keeping it behind a build flag until it's safe costs little.
 - **Run commands under the host sandbox.** [host-sandbox](host-sandbox.md) would confine h9 itself. Children inherit Seatbelt and Landlock, so commands would get the same limits for free, but only on hosts where that lands. The allowlist and the environment scrub are needed either way.
-- **A 9P server on the host instead of a device** (as in [host-srv](host-srv.md)). That's workable, but a device gives notes, per-machine lifetime, and the policy hook in one place, as devhstream did for WebSockets.
+- **A 9P server on the host instead of a device** (as in [host-srv](epoch-0/host-srv.md)). That's workable, but a device gives notes, per-machine lifetime, and the policy hook in one place, as devhstream did for WebSockets.
 - **Arguments as a list instead of `tokenize`.** Writing one argument per line after `exec` would avoid quoting, but rc's `echo` and the wider 9front tools already speak `tokenize`, so the quoting stays.
 
 ## Compatibility

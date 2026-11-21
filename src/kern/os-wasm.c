@@ -1,5 +1,5 @@
 /*
- * drawterm's OS layer for the web host (design/browser-host.md),
+ * drawterm's OS layer for the web host (design/epoch-0/browser-host.md),
  * built instead of kern/posix.c. Kernel processes are coroutines
  * (src/web/coro.c): blocking parks one and hands the event loop back to
  * the JS host. Everything runs on one thread, so a contended spin lock is

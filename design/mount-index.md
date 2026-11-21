@@ -15,7 +15,7 @@ Nov 8, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directe
 
 ## Abstract
 
-A [9P root](ninep-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its type, mode, length, and mtime, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server.
+A [9P root](epoch-0/ninep-roots.md), or a 9P server a namespace file mounts, can come with an index: one file listing every name in the tree with its type, mode, length, and mtime, and none of the contents. h9 reads it once, caches it on the host across runs, and answers walks, stats, and directory reads from it, so only opens and reads of files go to the server.
 
 The index is the **index extension of [dotfs](https://github.com/progrium/dotfs/blob/main/docs/9p-dotfs.md)**: the file `.fs/index` at the top of the tree, in the `fsindex 1` format. A dotfs server generates it, and one with dotfs's events extension, `.fs/events`, tells h9 about every change, so the index stays exact for the whole run, even for a tree other clients are writing. A plain 9P server can carry one as an ordinary file, written by a new guest command, `mkindex`, which walks the mounted tree so the qids in it are the server's own. Then each directory is checked against the server the first time it's used, and each file when it's opened. Either way, anything that doesn't match is demoted to plain 9P for the rest of the run, so a stale index costs round trips, never wrong answers. For the root, an index can also be given with `--root-index FILE|URL`, so it can be layered over a server that can't be written to.
 
@@ -23,11 +23,11 @@ The index is the **index extension of [dotfs](https://github.com/progrium/dotfs/
 
 ### h9 today
 
-- **[ninep-roots](ninep-roots.md)** mounts a 9P server at `/` through devmnt: a `tcp!` dial string, a unix socket, or, with [websocket-9p](websocket-9p.md), a `ws://` or `wss://` URL, which [schemeless-roots](schemeless-roots.md) lets you write without the scheme.
+- **[ninep-roots](epoch-0/ninep-roots.md)** mounts a 9P server at `/` through devmnt: a `tcp!` dial string, a unix socket, or, with [websocket-9p](epoch-0/websocket-9p.md), a `ws://` or `wss://` URL, which [schemeless-roots](epoch-0/schemeless-roots.md) lets you write without the scheme.
 - **devmnt sends one request per operation and waits for its reply.** Its caller is a guest process, so latency per operation, not bandwidth, is what a remote root costs. devmnt has no cache of its own in drawterm's tree.
 - **Startup is mostly metadata.** Before a program does useful work, rc searches `$path`, a Linux program's loader probes library directories, and the program stats and opens its configuration. Each name looked up is a `Twalk`, often followed by a `Tstat`, and a missing name is a full round trip that returns nothing.
-- **[overlay](overlay.md)** puts `#O` over the root by default, so the guest's writes to the root land in memory and never reach the server. A root mounted that way is read-only as far as the server is concerned.
-- **[dotl](dotl.md)** (draft) puts a translator between devmnt and every 9P connection, which answers some requests from compound .L.Z replies. It caches attributes only until the next mutation, because ZeroFS's trees are mutable, and only within one connection.
+- **[overlay](epoch-0/overlay.md)** puts `#O` over the root by default, so the guest's writes to the root land in memory and never reach the server. A root mounted that way is read-only as far as the server is concerned.
+- **[dotl](epoch-0/dotl.md)** (draft) puts a translator between devmnt and every 9P connection, which answers some requests from compound .L.Z replies. It caches attributes only until the next mutation, because ZeroFS's trees are mutable, and only within one connection.
 
 ### dotfs
 
@@ -77,7 +77,7 @@ A line h9 can't parse, lines out of order, or a path whose parent isn't an earli
 
 ### Building one: `mkindex`
 
-`mkindex [-o FILE] [-s SPEC] [DIR]` is an rc script in [guest-tools](guest-tools.md)' `/bin`, beside `wsmount`. It walks `DIR` (default `/`) with `walk(1)`'s `-e` format and writes an `fsindex 1` index to standard output or FILE, with seq and every version `0`, as for a read-only tree, no hashes or flags, and `9p.qid`, `9p.uid`, and `9p.gid` on every line, and `9p.mode` where the mode has `DM` bits beyond `DMDIR`:
+`mkindex [-o FILE] [-s SPEC] [DIR]` is an rc script in [guest-tools](epoch-0/guest-tools.md)' `/bin`, beside `wsmount`. It walks `DIR` (default `/`) with `walk(1)`'s `-e` format and writes an `fsindex 1` index to standard output or FILE, with seq and every version `0`, as for a read-only tree, no hashes or flags, and `9p.qid`, `9p.uid`, and `9p.gid` on every line, and `9p.mode` where the mode has `DM` bits beyond `DMDIR`:
 
 ```
 h9 --root wss://roots.example/alpine mkindex / >alpine.fsindex
@@ -88,7 +88,7 @@ It stats the tree through devmnt, so every qid in the index is what the server r
 
 devmnt can't read a directory with a name containing a newline ("bad character in file name"), and `walk` can't print one, so `mkindex` marks such a directory `9p.incomplete=1`, as it does any directory `walk` couldn't open or read, and h9 never answers for it from the index. A name with another control character, or with U+FFFD (a byte that isn't UTF-8, which `walk` can't print as it is), is left out the same way, and its directory marked.
 
-`walk` isn't in [builtin-root](builtin-root.md)'s command set, so this proposal adds it there, so `mkindex` works over a root that has no 9front commands, such as a Linux image, with `--builtin=before`.
+`walk` isn't in [builtin-root](epoch-0/builtin-root.md)'s command set, so this proposal adds it there, so `mkindex` works over a root that has no 9front commands, such as a Linux image, with `--builtin=before`.
 
 ### Using one
 
@@ -116,7 +116,7 @@ The cache directory is created mode 0700, and its files 0600. Entries not used f
 
 ### Serving from the index
 
-The index sits between devmnt and the server's connection, as a new kernel device, `#ι`, which devmnt mounts in place of the connection's channel. Like [devhstream](../src/kern/devhstream.c), its logic is Zig (`src/rootindex.zig`), a state machine over 9P messages with no I/O of its own, and the device moves bytes between it, devmnt, and the connection. When [dotl](dotl.md)'s translator exists, the index layer sits above it and still speaks only 9P2000.
+The index sits between devmnt and the server's connection, as a new kernel device, `#ι`, which devmnt mounts in place of the connection's channel. Like [devhstream](../src/kern/devhstream.c), its logic is Zig (`src/rootindex.zig`), a state machine over 9P messages with no I/O of its own, and the device moves bytes between it, devmnt, and the connection. When [dotl](epoch-0/dotl.md)'s translator exists, the index layer sits above it and still speaks only 9P2000.
 
 It keeps every fid devmnt uses, and each is either **real** (the server has it) or **virtual** (only the index knows it, by its path):
 
@@ -297,7 +297,7 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
   - **`--print` counts only a `--root-index` FILE.** It connects to nothing, so a server's `/.h9index` shows as `index=/.h9index`, and a URL without counts.
   - **`mkindex` takes `-s SPEC`,** since `/srv/root` is attached afresh and a root with `--root-spec` would otherwise attach the server's default tree. Its `!unindexed` lines come after the entries, since each must name an earlier directory. Over 9P, devmnt fails the whole directory read when a name has a newline ("bad character in file name"), so `walk` warns and lists nothing in it; `mkindex` marks a directory `walk` couldn't open or read, which covers that case.
   - **The cases use a small tree** copied from the test root (rc, the commands `mkindex` and the cases run, rcmain, the mount points, and `/lib/x`), served the same way, since `mkindex` over the whole test root through the test server takes minutes. Each case keeps its own `--index-cache`.
-  - **`walk` joined the slim set** ([multicall](multicall.md)), with a corpus entry; the slim tree couldn't be rebuilt here, so the box's size wasn't measured again.
+  - **`walk` joined the slim set** ([multicall](epoch-0/multicall.md)), with a corpus entry; the slim tree couldn't be rebuilt here, so the box's size wasn't measured again.
   - The demo, over `ws://` with 50 ms each way, hasn't been run yet.
 - 2026-11-14: **Directories are validated on first use,** not all at mount, which closes the lazy-validation open issue. Checking all 1,126 directories of a 9front root at mount took 3,377 requests, and at 25 ms each way `echo hi` started in 4.3 s, against 3.2 s validating on first use (see Performance). `-v`'s summary of the validation moved to the end of the run, since that's when it's known.
 - 2026-11-21: **Rebased on dotfs's index extension.** The index is now `.fs/index` in dotfs's `fsindex 1` format ([9p-dotfs.md](https://github.com/progrium/dotfs/blob/main/docs/9p-dotfs.md)), not `/.h9index` in this proposal's own, so one format serves h9, dotfs's other clients, and dotfs servers. Paths are escaped, so there's no `!unindexed`; 9P's qid, owners, and mode bits travel in `9p.` fields, with a qid.path made up when there's none; and a server with `.fs/events` is followed from the index's seq instead of validated. The Done criteria are unchecked until the branch matches.
