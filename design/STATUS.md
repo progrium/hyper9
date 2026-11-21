@@ -15,7 +15,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [overlay-export](overlay-export.md) |  | draft |  | Exporting a run's overlay changes |
 | [login-shell](login-shell.md) | [#89](../../../issues/89) | proposed | needs host-cmd | h9 as a login shell |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
-| [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed | in progress on cow-fork | Copy-on-write fork and demand-loaded file pages for Linux processes |
+| [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed | in progress on cow-fork; in progress on claude/project-thread-ipnqzx | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
 | [mount-index](mount-index.md) |  | draft | in progress on mount-index | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | proposed |  | hcpu, h9's own CPUs for the emulator |
