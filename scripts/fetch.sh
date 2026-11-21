@@ -1,29 +1,35 @@
 #!/usr/bin/env bash
-# Fetches reference sources, the pinned 9front arm64 image, prebuilt Unicorn
-# libraries and the patched Unicorn source into .local, and on request
-# the release's 386 or amd64 ISO, the browser host's Linux demo root, the
+# Fetches the 9front source at the pinned release, the pinned 9front arm64
+# image, prebuilt Unicorn libraries, the patched Unicorn source, and the
+# Alpine roots into .local, and on request the release's 386 or amd64 ISO,
+# one architecture's Alpine root, the browser host's Linux demo root, the
 # workloads' Linux root, diod, and ZeroFS.
 #
 #   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
-#                                 iso386 isoamd64 alpinearm64web
-#                                 workloads diod zerofs; default all but
-#                                 the ISOs, alpinearm64web, workloads,
-#                                 diod, and zerofs)
+#                                 alpine alpine-arm64 alpine-amd64
+#                                 alpine-386 iso386 isoamd64
+#                                 alpinearm64web workloads diod zerofs;
+#                                 default src, image, unicorn,
+#                                 unicorn-src, and alpine)
+#
+# alpine is all three alpine-<arch> roots. alpinearm64web needs
+# alpine-arm64 and workloads needs alpine-amd64, so each fetches it.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
 
 mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
-parts=" ${*:-src image unicorn unicorn-src} "
+parts=" ${*:-src image unicorn unicorn-src alpine} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
-	# v86 was the browser host's 386 CPU before h86, and alpine386web the
-	# Linux demo's root before it moved to arm64; nothing to fetch now.
-	v86|alpine386web) ;;
+	case $p in src|image|unicorn|unicorn-src|alpine|alpine-arm64|alpine-amd64|alpine-386|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
 	*) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
 done
 want() { [[ $parts == *" $1 "* ]]; }
+# The Alpine roots each part needs.
+want alpine && parts+="alpine-arm64 alpine-amd64 alpine-386 "
+want alpinearm64web && parts+="alpine-arm64 "
+want workloads && parts+="alpine-amd64 "
 
 # clone repo dir [rev]: a shallow clone at rev, or tracking the default
 # branch if rev is empty.
@@ -44,7 +50,6 @@ clone() {
 }
 
 if want src; then
-clone "$HYPERLINUX_REPO" hyper-linux
 clone "$NINEFRONT_REPO" 9front "$NINEFRONT_REV"
 fi
 
@@ -115,10 +120,12 @@ echo "src/unicorn: $UNICORN_VERSION + ${#patches[@]} patches"
 fi
 
 # Alpine roots for the Linux personality's tests: each a layer blob from
-# Docker Hub checked against its pinned digest, unpacked once.
+# Docker Hub checked against its pinned digest, unpacked once, for each
+# alpine-<arch> part asked for.
 mkdir -p "$H9_LOCAL/linux"
 echo "$ALPINE_LAYERS" | while read -r arch sha; do
 	[ -n "$arch" ] || continue
+	want "alpine-$arch" || continue
 	dir="$H9_LOCAL/linux/alpine-$arch"
 	if [ "$(cat "$dir/.h9-stamp" 2>/dev/null || true)" != "$sha" ]; then
 		tok=$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" |
