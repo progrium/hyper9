@@ -126,7 +126,11 @@ pub fn plan(w: u32, o: dec.Op) ?Plan {
     var sp_fields: u32 = 0;
     for (0..4) |f| {
         const p = dec.decode(withField(w, f, t), 0);
-        if (p.k == .undef) continue;
+        // A field that changes the instruction isn't a register field,
+        // whatever the other instruction reads: URSRA's bits 10 to 14 (in
+        // Ra's place) are its opcode, and with bit 10 clear the word is a
+        // by-element op whose Rm can be the probe.
+        if (p.k != o.k) continue;
         const pr = dec.regs(p);
         const gr = pr.read & tb != 0;
         const gw = pr.write & tb != 0;
@@ -137,7 +141,7 @@ pub fn plan(w: u32, o: dec.Op) ?Plan {
         const rv = fieldOf(w, f);
         const p2 = dec.decode(withField(w, f, t2), 0);
         const pr2 = dec.regs(p2);
-        const five = p2.k != .undef and ((pr2.read | pr2.write) & t2b != 0 or (pr2.vread | pr2.vwrite) & @as(u32, @truncate(t2b)) != 0);
+        const five = p2.k == o.k and ((pr2.read | pr2.write) & t2b != 0 or (pr2.vread | pr2.vwrite) & @as(u32, @truncate(t2b)) != 0);
         // A 4-bit field holding 16 or more: bit 4 isn't the register's.
         if (!five and rv >= 16) return null;
         if (vr or vw) {
@@ -217,6 +221,10 @@ test "plans: fields, ZR, SP, and what doesn't qualify" {
     const fa = plan(0x1e622820, dec.decode(0x1e622820, 0)).?;
     try testing.expect(fa.aux & fp_bit != 0);
     try testing.expectEqual(vOff(0) | D_V | D_WRITE, @as(u16, @truncate(fa.aux2)));
+    // ursra v13.2d, v3.2d, #16, whose opcode field holds 13 as Rd does:
+    // Rd and Rn mapped, and the opcode left alone
+    const ur = plan(0x6f70346d, dec.decode(0x6f70346d, 0)).?;
+    try testing.expectEqual(@as(u16, 0), @as(u16, @truncate(ur.aux2 >> 48)));
     // madd x0, x1, x2, x3: Ra mapped
     const ma = plan(0x9b020c20, dec.decode(0x9b020c20, 0)).?;
     try testing.expectEqual(gpOff(3) | D_READ, @as(u16, @truncate(ma.aux2 >> 48)));
