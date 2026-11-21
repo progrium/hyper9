@@ -243,8 +243,17 @@ h9_linux_fifojoin(int fd, int mode, int nonblock)
 		while(!arrived(&w)){
 			qunlock(&fifolk);
 			if(waserror()){
+				/*
+				 * A note that comes after the other end has
+				 * (a child's exit, say) doesn't undo the meeting,
+				 * which the restarted open couldn't find again
+				 * once the other end has gone. The note stays
+				 * pending for the syscall's return.
+				 */
 				qlock(&fifolk);
-				nexterror();
+				if(!arrived(&w))
+					nexterror();
+				break;
 			}
 			tsleep(&f->r, arrived, &w, 100);
 			poperror();
