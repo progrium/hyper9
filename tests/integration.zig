@@ -6174,12 +6174,7 @@ test "fsync on a directory, syncfs and sync reach the host [linux-personality]" 
     // host with a working strace, check that the host calls happen, on a
     // host directory (the guest's /tmp is in memory), and never on fd 0,
     // which a directory's devfs channel used to have as its file's fd.
-    if (builtin.os.tag != .linux) return;
-    if (runProcessWith(&.{ "strace", "-o", "/dev/null", "true" }, null, null, 10_000)) |p| {
-        defer gpa.free(p.stdout);
-        defer gpa.free(p.stderr);
-        if (p.term != .exited or p.term.exited != 0) return;
-    } else |_| return;
+    if (!haveStrace()) return;
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -6216,6 +6211,57 @@ test "fsync on a directory, syncfs and sync reach the host [linux-personality]" 
     // fsync and fdatasync on the directory.
     try std.testing.expect(dir_fsyncs >= 2);
     try std.testing.expect(syncfs and sync);
+}
+
+/// A Linux host with a working strace, for tests that check which host
+/// calls h9 makes.
+fn haveStrace() bool {
+    if (builtin.os.tag != .linux) return false;
+    const p = runProcessWith(&.{ "strace", "-o", "/dev/null", "true" }, null, null, 10_000) catch return false;
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    return p.term == .exited and p.term.exited == 0;
+}
+
+test "writes through an fd opened O_DSYNC or O_SYNC sync the host file [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "sync_open" }, "ok sync_open\n");
+    // The program never calls fsync: each write through an O_DSYNC or
+    // O_SYNC fd must make h9 fsync the host file, and a plain fd's must not.
+    if (!haveStrace()) return;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
+    var trace_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const trace = try std.fmt.bufPrint(&trace_buf, "{s}/trace", .{s.path});
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    const p = try runProcessWith(&.{
+        "strace", "-f",     "-y",    "-qq",                 "-e",                    "trace=fsync,fdatasync",
+        "-o",     trace,    le.h9,   "--backend",           it.next() orelse "auto", "--arch",
+        le.arch,  "--root", le.root, "--cwd",               le.fixtures,             "--writable",
+        s.path,   "env",    dir,     "/mnt/term/cwd/files", "sync_open",
+    }, null, null, 120_000);
+    defer gpa.free(p.stdout);
+    defer gpa.free(p.stderr);
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ p.stdout, p.stderr });
+    try std.testing.expectEqualStrings("ok sync_open\n", p.stdout);
+    const st = try s.tmp.dir.readFileAlloc(std.testing.io, "trace", gpa, .limited(1 << 20));
+    defer gpa.free(st);
+    errdefer std.debug.print("strace: {s}\n", .{st});
+    var counts = [_]usize{ 0, 0, 0 };
+    const names = [_][]const u8{ "odsync", "osync", "plain" };
+    var lines = std.mem.tokenizeScalar(u8, st, '\n');
+    while (lines.next()) |l| for (names, 0..) |n, i| {
+        var tail_buf: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+        if (std.mem.indexOf(u8, l, try std.fmt.bufPrint(&tail_buf, "{s}/{s}>)", .{ s.path, n })) != null) counts[i] += 1;
+    };
+    // write, writev, and pwrite through the O_DSYNC fd; one write through O_SYNC.
+    try std.testing.expect(counts[0] >= 3);
+    try std.testing.expect(counts[1] >= 1);
+    try std.testing.expectEqual(@as(usize, 0), counts[2]);
 }
 
 test "page-by-page preads read ahead, and see writes and truncates at once [linux-personality]" {

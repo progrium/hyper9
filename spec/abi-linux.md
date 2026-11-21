@@ -50,7 +50,7 @@ A shared file mapping sits at its file offset's place in a chunk, and its pages 
 
 `fcntl` record locks (POSIX, owned by the process and dropped when it closes any fd of the file or ends, and OFD, owned by the Chan) and `flock` locks are kept in one table for the h9 process (`src/linux/locks.zig`), keyed by the file's device, instance and qid path; `F_SETLKW` and blocking `flock` poll every 2 ms and a signal ends them.
 
-`fsync` and `fdatasync` are a wstat that changes nothing, which `#U` serves with the host's `fsync` of the open file or directory (`fcntl(F_FULLFSYNC)` first on macOS, which also flushes the drive's cache; `FlushFileBuffers` on Windows, where a directory has nothing to sync). `syncfs` is the host's `syncfs` on the fd's `#U` file system (on macOS, `sync` and then the fd's own `F_FULLFSYNC`), and `sync` is the host's `sync`.
+`fsync` and `fdatasync` are a wstat that changes nothing, which `#U` serves with the host's `fsync` of the open file or directory (`fcntl(F_FULLFSYNC)` first on macOS, which also flushes the drive's cache; `FlushFileBuffers` on Windows, where a directory has nothing to sync). `syncfs` is the host's `syncfs` on the fd's `#U` file system (on macOS, `sync` and then the fd's own `F_FULLFSYNC`), and `sync` is the host's `sync`. A `write`, `pwrite64`, `writev`, `pwritev`, or `sendfile` through an fd opened with `O_DSYNC` or `O_SYNC` is followed by that `fsync` before it returns, and a failed sync fails the write; `F_GETFL` reports the flag, and `F_SETFL` leaves it as `open` set it, as on Linux.
 
 `fallocate` mode 0 grows the file with a truncate up, `FALLOC_FL_KEEP_SIZE` does nothing, and the hole modes are `EOPNOTSUPP`.
 
