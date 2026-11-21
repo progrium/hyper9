@@ -3306,15 +3306,18 @@ pub const Machine = struct {
         var num: [24]u8 = undefined;
         var fresh: ?u32 = null;
         errdefer if (fresh) |id| kern.overlayDrop(id);
+        var hold: ?u31 = null;
+        defer if (hold) |fd| kern.close(fd) catch {};
         if (b.empty) {
             const id = try kern.overlayNew(null);
             fresh = id;
             from = std.fmt.bufPrintZ(&num, "#O{d}", .{id}) catch unreachable;
             if (b.archive) |path| {
                 // Attaching takes the instance's first ref, so it's no
-                // longer ours to drop.
+                // longer ours to drop. The fd holds it until the tree is
+                // bound.
                 const fd = try kern.open(from, kern.OREAD);
-                kern.close(fd) catch {};
+                hold = fd;
                 fresh = null;
                 const root = try std.fmt.allocPrintSentinel(m.gpa, "{s}", .{from}, 0);
                 defer m.gpa.free(root);
@@ -3338,13 +3341,159 @@ pub const Machine = struct {
     }
 
     /// Unpacks a host archive into the tree at `root` (a guest path), as
-    /// `--archive` does: a tar, or a gzipped one.
+    /// `--archive` does: a tar, a gzipped one, or an `.h9a`. Its files go into the
+    /// in-memory tree, so they count against `--memory`. Symbolic links
+    /// are kept for the Linux personality; hard links are copies.
     fn unpackArchive(m: *Machine, path: []const u8, root: [:0]const u8) !void {
-        _ = m;
-        _ = path;
-        _ = root;
-        return error.Unsupported;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(m.io, path, m.gpa, .limited(std.math.maxInt(u31))) catch |e| {
+            return m.fail("--archive {s}: {t}", .{ path, e });
+        };
+        defer m.gpa.free(bytes);
+        if (std.mem.startsWith(u8, bytes, h9a_magic)) return m.unpackH9a(path, bytes, root);
+        var fixed: std.Io.Reader = .fixed(bytes);
+        var window: [std.compress.flate.max_window_len]u8 = undefined;
+        var gz: std.compress.flate.Decompress = undefined;
+        const in: *std.Io.Reader = if (bytes.len >= 2 and bytes[0] == 0x1f and bytes[1] == 0x8b) blk: {
+            gz = .init(&fixed, .gzip, &window);
+            break :blk &gz.reader;
+        } else &fixed;
+        var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var it: std.tar.Iterator = .init(in, .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf });
+        var pbuf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        var tbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
+        while (it.next() catch |e| return m.fail("--archive {s}: {t}", .{ path, e })) |f| {
+            const rel = archiveName(f.name) orelse return m.fail("--archive {s}: {s}: a name outside the tree", .{ path, f.name });
+            if (rel.len == 0) continue;
+            const dst = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ root, rel }) catch return m.fail("--archive {s}: {s}: name too long", .{ path, f.name });
+            const parent = if (f.kind == .directory) rel else std.fs.path.dirname(rel) orelse "";
+            mkdirUnder(root, parent) catch return m.fail("--archive {s}: {s}: {s}", .{ path, f.name, kern.errstr() });
+            switch (f.kind) {
+                .directory => {},
+                .sym_link => {
+                    const target = std.fmt.bufPrintZ(&tbuf, "{s}", .{f.link_name}) catch return m.fail("--archive {s}: {s}: link too long", .{ path, f.name });
+                    kern.symlink(dst, target) catch return m.fail("--archive {s}: {s}: {s}", .{ path, f.name, kern.errstr() });
+                },
+                .file => {
+                    const fd = kern.create(dst, kern.OWRITE, @as(u32, @intCast(f.mode & 0o777)) | 0o200) catch return m.fail("--archive {s}: {s}: {s}", .{ path, f.name, kern.errstr() });
+                    defer kern.close(fd) catch {};
+                    var chunk: [64 * 1024]u8 = undefined;
+                    var w: FdWriter = .{ .fd = fd, .w = .{ .buffer = &chunk, .vtable = &FdWriter.vtable } };
+                    it.streamRemaining(f, &w.w) catch return m.fail("--archive {s}: {s}: {s}", .{ path, f.name, if (w.failed) kern.errstr() else "truncated" });
+                    w.w.flush() catch return m.fail("--archive {s}: {s}: {s}", .{ path, f.name, kern.errstr() });
+                },
+            }
+        }
     }
+
+    const h9a_magic = "h9root1\n";
+
+    /// Unpacks an `.h9a`, the browser host's root archive
+    /// (tools/webroot.zig): entries of a u32 path length, the path, a u32
+    /// POSIX mode, and a u32 size and the data, or 0xffffffff and the
+    /// index of an earlier entry with the same data.
+    fn unpackH9a(m: *Machine, path: []const u8, bytes: []const u8, root: [:0]const u8) !void {
+        var datas: std.ArrayList([]const u8) = .empty;
+        defer datas.deinit(m.gpa);
+        var at: usize = h9a_magic.len;
+        var pbuf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        const bad = "--archive {s}: a truncated .h9a";
+        while (at < bytes.len) {
+            if (bytes.len - at < 4) return m.fail(bad, .{path});
+            const plen = std.mem.readInt(u32, bytes[at..][0..4], .little);
+            at += 4;
+            if (bytes.len - at < @as(usize, plen) + 8) return m.fail(bad, .{path});
+            const name = bytes[at .. at + plen];
+            at += plen;
+            const mode = std.mem.readInt(u32, bytes[at..][0..4], .little);
+            const size = std.mem.readInt(u32, bytes[at + 4 ..][0..4], .little);
+            at += 8;
+            var data: []const u8 = "";
+            if (size == 0xffffffff) {
+                if (bytes.len - at < 4) return m.fail(bad, .{path});
+                const idx = std.mem.readInt(u32, bytes[at..][0..4], .little);
+                at += 4;
+                if (idx >= datas.items.len) return m.fail(bad, .{path});
+                data = datas.items[idx];
+            } else if (mode & 0o170000 != 0o040000) {
+                if (bytes.len - at < size) return m.fail(bad, .{path});
+                data = bytes[at .. at + size];
+                at += size;
+            }
+            try datas.append(m.gpa, data);
+            const rel = archiveName(name) orelse return m.fail("--archive {s}: {s}: a name outside the tree", .{ path, name });
+            if (rel.len == 0) continue;
+            const is_dir = mode & 0o170000 == 0o040000;
+            mkdirUnder(root, if (is_dir) rel else std.fs.path.dirname(rel) orelse "") catch return m.fail("--archive {s}: {s}: {s}", .{ path, name, kern.errstr() });
+            if (is_dir) continue;
+            const dst = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ root, rel }) catch return m.fail("--archive {s}: {s}: name too long", .{ path, name });
+            const fd = kern.create(dst, kern.OWRITE, (mode & 0o777) | 0o200) catch return m.fail("--archive {s}: {s}: {s}", .{ path, name, kern.errstr() });
+            defer kern.close(fd) catch {};
+            var w: FdWriter = .{ .fd = fd, .w = .{ .buffer = &.{}, .vtable = &FdWriter.vtable } };
+            w.all(data) catch return m.fail("--archive {s}: {s}: {s}", .{ path, name, kern.errstr() });
+        }
+    }
+
+    /// Makes the directories of `rel` under `root`, a device path such as
+    /// `#O5` that stat may not take.
+    fn mkdirUnder(root: []const u8, rel: []const u8) kern.Error!void {
+        var st: [512]u8 = undefined;
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        var i: usize = 0;
+        while (i < rel.len) : (i += 1) {
+            if (i + 1 < rel.len and rel[i + 1] != '/') continue;
+            const p = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ root, rel[0 .. i + 1] }) catch return error.Kern;
+            if (kern.stat(p, &st)) |_| continue else |_| {}
+            const fd = try kern.create(p, kern.OREAD, dmdir | 0o775);
+            kern.close(fd) catch {};
+        }
+    }
+
+    /// A tar member's name relative to the tree it unpacks into: without
+    /// a leading `/` or `./`, and "" for the tree itself. Null if it climbs
+    /// out with `..`.
+    fn archiveName(name: []const u8) ?[]const u8 {
+        var n = name;
+        while (true) {
+            if (std.mem.startsWith(u8, n, "/")) n = n[1..] else if (std.mem.startsWith(u8, n, "./")) n = n[2..] else break;
+        }
+        n = std.mem.trimEnd(u8, n, "/");
+        if (std.mem.eql(u8, n, ".")) return "";
+        var parts = std.mem.splitScalar(u8, n, '/');
+        while (parts.next()) |part| if (std.mem.eql(u8, part, "..")) return null;
+        return n;
+    }
+
+    /// A std.Io.Writer that writes to a kernel fd.
+    const FdWriter = struct {
+        fd: u31,
+        failed: bool = false,
+        w: std.Io.Writer,
+
+        const vtable: std.Io.Writer.VTable = .{ .drain = drain };
+
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *FdWriter = @fieldParentPtr("w", w);
+            try self.all(w.buffered());
+            w.end = 0;
+            var n: usize = 0;
+            for (data[0 .. data.len - 1]) |d| {
+                try self.all(d);
+                n += d.len;
+            }
+            const last = data[data.len - 1];
+            for (0..splat) |_| try self.all(last);
+            return n + last.len * splat;
+        }
+
+        fn all(self: *FdWriter, b: []const u8) std.Io.Writer.Error!void {
+            var off: usize = 0;
+            while (off < b.len) off += kern.pwrite(self.fd, b[off..], -1) catch {
+                self.failed = true;
+                return error.WriteFailed;
+            };
+        }
+    };
 
     /// A 9P line: connects to `b.url` and mounts it at `b.to`, adds it
     /// to the stack `b.to` names, or posts it at `/srv/NAME`. `host`
@@ -3840,7 +3989,31 @@ pub const Machine = struct {
                 return m.fail("--ns: line {d}: syntax error", .{line});
             },
         };
-        for (ops) |op| switch (op) {
+        for (ops) |op| {
+            // A missing target is made in the root's overlay, as a mount
+            // flag's is, so a printed plan replays (design/mounts.md,
+            // "Destinations").
+            switch (op) {
+                .bind => |b| m.replayTarget(try m.nsPath(arena, b.to, con_id)),
+                .mount => |mt| m.replayTarget(try m.nsPath(arena, mt.to, con_id)),
+                else => {},
+            }
+            try m.replayOp(arena, op, con_id, &cd);
+        }
+        return cd;
+    }
+
+    /// Makes a namespace line's missing target in the root's overlay, if
+    /// the root has one.
+    fn replayTarget(m: *Machine, to: [:0]const u8) void {
+        if (!m.plan.root_overlay or to.len < 2 or to[0] != '/') return;
+        var st: [512]u8 = undefined;
+        if (kern.stat(to, &st)) |_| return else |_| {}
+        mkdirAll(to) catch {};
+    }
+
+    fn replayOp(m: *Machine, arena: std.mem.Allocator, op: newns.Op, con_id: u32, cd: *bool) RunError!void {
+        switch (op) {
             // A bare #O is a fresh overlay over what the target is now.
             .bind => |b| if (b.flag.recursive) {
                 bindRecursive(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), b.flag.order == .after, b.flag.create) catch {};
@@ -3896,26 +4069,25 @@ pub const Machine = struct {
                 // server goes. Like any other mount, one that fails is
                 // skipped.
                 if (m.plan.write == .none) return m.fail("mount {s}: --write=none can't be enforced on a 9P mount", .{mt.file});
-                const dfd = dotlConv("dial {s}", mt.file) catch continue;
+                const dfd = dotlConv("dial {s}", mt.file) catch return;
                 var num: ?u32 = null;
                 const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
                 defer kern.close(fd) catch {};
-                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch continue;
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch return;
                 if (num) |n| m.indexNotes(n, mt.to);
             } else {
-                const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
+                const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch return;
                 defer kern.close(fd) catch {};
                 _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
             },
             .unmount => |u| kern.unmount(if (u.from) |f| try m.nsPath(arena, f, con_id) else null, try m.nsPath(arena, u.to, con_id)) catch {},
             .cd => |d| {
-                cd = true;
+                cd.* = true;
                 kern.chdir(try m.nsPath(arena, d, con_id)) catch {};
             },
             // newns's rfork(RFCNAMEG): an empty namespace, keeping the mask.
             .clear => kern.rfork(kern.RF.CNAMEG) catch {},
-        };
-        return cd;
+        }
     }
 
     /// A namespace-file path, with --print's `<id>` console placeholder

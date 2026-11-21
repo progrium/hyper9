@@ -3670,6 +3670,77 @@ test "spec= is sent as the attach name [mounts]" {
     try std.testing.expectEqual(125, r.code);
 }
 
+test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mounts]" {
+    const e = try env(@src());
+    var srv: RootServer = undefined;
+    try srv.start(e);
+    defer srv.stop();
+    var tb: [128]u8 = undefined;
+    const t = try run(e, &.{ "--url", try std.fmt.bufPrint(&tb, "{s}:/n/fs", .{srv.url()}), "--rc", "test -e /n/fs/lib/namespace && echo tcp" });
+    defer t.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{t.err});
+    try std.testing.expectEqualStrings("tcp\n", t.out);
+    if (std.Io.net.has_unix_sockets and builtin.os.tag != .windows) {
+        var s: Scratch = undefined;
+        try s.init();
+        defer s.deinit();
+        const sock = try std.fs.path.join(gpa, &.{ s.path, "fs.sock" });
+        defer gpa.free(sock);
+        var relay: UnixRelay = undefined;
+        try relay.start(sock, srv.port);
+        const u = try std.fmt.allocPrint(gpa, "unix://{s}:/n/fs", .{sock});
+        defer gpa.free(u);
+        const r = try runOn(e, firstBackend(e), &.{ "--url", u, "--rc", "test -e /n/fs/lib/namespace && echo unix" }, null);
+        defer r.deinit();
+        errdefer std.debug.print("stderr: {s}\n", .{r.err});
+        try std.testing.expectEqualStrings("unix\n", r.out);
+    }
+    // A tcp:// URL's path is the attach name, and spec= wins over it.
+    for ([_][2][]const u8{ .{ "/main:/", "main" }, .{ "/main:/:spec=other", "other" } }) |c| {
+        var f: FakeAttach = undefined;
+        try f.start("no such tree");
+        var ub: [128]u8 = undefined;
+        const r = runOn(e, firstBackend(e), &.{ "--url", try std.fmt.bufPrint(&ub, "{s}{s}", .{ f.url(), c[0] }), "/bin/echo" }, null) catch |err| {
+            f.finish();
+            return err;
+        };
+        defer r.deinit();
+        f.finish();
+        try std.testing.expect(f.attached);
+        try std.testing.expectEqualStrings(c[1], f.aname_());
+    }
+}
+
+test "--print output with a Linux tree and 9P settings replays with --ns [mounts]" {
+    const e = try env(@src());
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // A Linux tree from a 9P server, and the 9front root at /n/fs.
+    var lin: RootServer = undefined;
+    try lin.startTree(e, le.root);
+    defer lin.stop();
+    var nine: RootServer = undefined;
+    try nine.start(e);
+    defer nine.stop();
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var lb: [96]u8 = undefined;
+    var nb: [96]u8 = undefined;
+    const p = try run(e, &.{ "--url", try std.fmt.bufPrint(&lb, "{s}:#L:user=glenda", .{lin.url()}), "--url", try std.fmt.bufPrint(&nb, "{s}:/n/fs", .{nine.url()}), "--print", "--rc", "echo" });
+    defer p.deinit();
+    try expectIn(p.out, "  mount -r 'tcp://");
+    try expectIn(p.out, "'#Olinux' '' 'user=glenda' 9p");
+    const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
+    const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
+    // Replayed without the flags, it mounts both, making /n/fs.
+    const r = try run(e, &.{ "--net=enable", "--ns", s.ns(), "--rc", "cat '#L/etc/alpine-release' >/dev/null && echo linux; test -e /n/fs/lib/namespace && echo 9p" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("linux\n9p\n", r.out);
+}
+
 test "user= is sent as the attach uname [mounts]" {
     const e = try env(@src());
     for ([_]?[]const u8{ "glenda", null }) |user| {
@@ -3699,7 +3770,7 @@ test "user= is sent as the attach uname [mounts]" {
     }
 }
 
-test "a --url on /srv/NAME is posted there, and the guest mounts it [mounts]" {
+test "--url to /srv/NAME posts without mounting [mounts]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
@@ -5886,6 +5957,39 @@ test "a static Linux program runs and exits with its status (demo) [linux-person
     try std.testing.expectEqual(3, r.code);
 }
 
+test "--dir on #L makes a Linux tree, and /dev stays devlinux's [mounts]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // Alpine's /dev is empty on the host.
+    const r = try runLinux(&le, false, &.{ "/bin/sh", "-c", "cat /etc/alpine-release >/dev/null && echo alpine; test -c /dev/null && echo null" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("alpine\nnull\n", r.out);
+}
+
+test "--dir on #L/etc adds a member under the Linux tree's /etc [mounts]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{ .{ "etc/resolv.conf", "nameserver 192.0.2.1\n" }, .{ "etc/extra", "hi\n" } });
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/etc:#L/etc", .{s.path}), "/bin/sh", "-c", "cat /etc/resolv.conf /etc/extra; test -e /etc/passwd && echo passwd" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("nameserver 192.0.2.1\nhi\npasswd\n", r.out);
+}
+
+test "#λ is an alias for #L in namespace files [mounts]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    const r = try runLinux(&le, true, &.{ "--ns", "bind '#λ/etc' /lib", "--rc", "cat /lib/alpine-release >/dev/null && echo alpine" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("alpine\n", r.out);
+}
+
 test "an executable's untouched segments aren't loaded: a 170 MB static binary runs in 64 MB [cow-fork]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
@@ -7200,7 +7304,7 @@ test "lc runs from the built-in root [builtin-root]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "--root and --builtin MODE exit 2 naming the replacement [mounts]" {
+test "--root and --root-spec fail with exit 2 naming the replacement [mounts]" {
     const e = try env(@src());
     for ([_][]const []const u8{
         &.{ e.h9, "--builtin=only", "--rc", "echo x" },
@@ -7250,6 +7354,298 @@ test "--builtin at the bottom leaves the root's ls and fills a missing command [
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("own\n      1\n", r.out);
+}
+
+/// Writes `files`, each a path under the scratch directory and its
+/// contents, making their directories; a path ending in `*` is made
+/// executable, without the `*`.
+fn writeTree(s: *Scratch, files: []const [2][]const u8) !void {
+    const io = std.testing.io;
+    for (files) |f| {
+        const exec = std.mem.endsWith(u8, f[0], "*");
+        const p = if (exec) f[0][0 .. f[0].len - 1] else f[0];
+        if (std.fs.path.dirname(p)) |d| try s.tmp.dir.createDirPath(io, d);
+        try s.tmp.dir.writeFile(io, .{ .sub_path = p, .data = f[1], .flags = .{ .permissions = if (exec) .executable_file else .default_file } });
+    }
+}
+
+/// `<scratch>/rel`, in `buf`.
+fn under(s: *const Scratch, buf: []u8, rel: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ s.path, rel });
+}
+
+test "--dir on / binds a host tree behind #/ [mounts]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--dir", e.root, "--rc", "test -e /dev/cons && echo cons; ls /root/rc/bin | sed 3q | wc -l" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("cons\n      3\n", r.out);
+}
+
+test "/root is the root stack without the namespace's binds [mounts]" {
+    const e = try env(@src());
+    // The tree's /dev is an empty directory; the machine's is devcons's.
+    const r = try run(e, &.{ "--rc", "test -e /dev/cons && echo cons; test -e /root/dev/cons || echo tree; test -d /root/rc/bin && echo bin" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("cons\ntree\nbin\n", r.out);
+}
+
+test "a bare tree without mount points runs rc [mounts]" {
+    const e = try env(@src());
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // rc, echo, and rcmain, and no dev, env, fd, mnt, proc, srv, or tmp.
+    var bin: [64]u8 = undefined;
+    const arch_bin = try std.fmt.bufPrint(&bin, "bare/{s}/bin", .{testArch(e)});
+    try s.tmp.dir.createDirPath(io, arch_bin);
+    try s.tmp.dir.createDirPath(io, "bare/rc/lib");
+    var from: [64]u8 = undefined;
+    var to: [96]u8 = undefined;
+    for ([_][]const u8{ "rc", "echo" }) |cmd|
+        try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try hostPath(e.root, try std.fmt.bufPrint(&from, "{s}/bin/{s}", .{ testArch(e), cmd })), s.tmp.dir, try std.fmt.bufPrint(&to, "{s}/{s}", .{ arch_bin, cmd }), io, .{});
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try hostPath(e.root, "rc/lib/rcmain"), s.tmp.dir, "bare/rc/lib/rcmain", io, .{});
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const r = try run(e, &.{ "--dir", try under(&s, &p, "bare"), "--rc", "echo hi; cd /dev && echo dev; cd /mnt/term/cwd && echo cwd; echo t >/tmp/t && echo tmp" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hi\ndev\ncwd\ntmp\n", r.out);
+}
+
+test "sources on / stack, later on top, and merge at every depth [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{
+        .{ "a/lib/x", "A\n" }, .{ "a/lib/deep/a", "A\n" },
+        .{ "b/lib/x", "B\n" }, .{ "b/lib/deep/b", "B\n" },
+    });
+    var pa: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const r = try run(e, &.{ "--dir", e.root, "--dir", try under(&s, &pa, "a"), "--dir", try under(&s, &pb, "b"), "--rc", "cat /lib/x /lib/deep/a /lib/deep/b; test -e /lib/namespace && echo root" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("B\nA\nB\nroot\n", r.out);
+}
+
+test "b and a place a member on top of or at the bottom of a stack [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{ .{ "a/lib/x", "A\n" }, .{ "b/lib/x", "B\n" } });
+    var pa: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var pb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var ab: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const a = try under(&s, &pa, "a");
+    const b = try under(&s, &pb, "b");
+    // b after a, but at the bottom: a wins.
+    const after = try run(e, &.{ "--dir", e.root, "--dir", a, "--dir", try std.fmt.bufPrint(&ab, "{s}:/:a", .{b}), "--rc", "cat /lib/x" });
+    defer after.deinit();
+    try std.testing.expectEqualStrings("A\n", after.out);
+    // The root at the bottom, so a member before it in argv still sits on it.
+    var rb: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const before = try run(e, &.{ "--dir", a, "--dir", try std.fmt.bufPrint(&rb, "{s}:/:a", .{e.root}), "--dir", try std.fmt.bufPrint(&ab, "{s}:/:b", .{b}), "--rc", "cat /lib/x; test -e /lib/namespace && echo root" });
+    defer before.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{before.err});
+    try std.testing.expectEqualStrings("B\nroot\n", before.out);
+}
+
+test "--dir on another path replaces it, and r merges [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "lib/x", "A\n" }});
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const lib = try under(&s, &buf, "lib");
+    const r = try run(e, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}:/lib", .{lib}), "--rc", "test -e /lib/namespace || echo replaced; cat /lib/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("replaced\nA\n", r.out);
+    const m = try run(e, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}:/lib:r", .{lib}), "--rc", "test -e /lib/namespace && echo merged; cat /lib/x" });
+    defer m.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{m.err});
+    try std.testing.expectEqualStrings("merged\nA\n", m.out);
+}
+
+test "a missing DST is made in the root's overlay [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "d/x", "A\n" }});
+    var p: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const r = try run(e, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}:/app/data", .{try under(&s, &buf, "d")}), "--rc", "cat /app/data/x" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("A\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a missing DST under a read-only root is exit 125 [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "d/x", "A\n" }});
+    var p: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const r = try run(e, &.{ "--write=scope", "--dir", try std.fmt.bufPrint(&p, "{s}:/app/data", .{try under(&s, &buf, "d")}), "--rc", "cat /app/data/x" });
+    defer r.deinit();
+    try std.testing.expectEqual(125, r.code);
+    try expectIn(r.err, "/app/data does not exist (the root is read-only)");
+}
+
+/// A tar of `files`, each a path and its contents, written to `name` in
+/// the scratch directory.
+fn writeTar(s: *Scratch, name: []const u8, files: []const [2][]const u8) !void {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var t: std.tar.Writer = .{ .underlying_writer = &out.writer };
+    for (files) |f| try t.writeFileBytes(f[0], f[1], .{ .mode = 0o644 });
+    try t.finishPedantically();
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = out.written() });
+}
+
+test "--archive unpacks into memory, counted against --memory [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTar(&s, "fix.tar", &.{ .{ "lib/app.conf", "conf\n" }, .{ "lib/sub/d", "deep\n" } });
+    var ab: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const arc = try under(&s, &ab, "fix.tar");
+    // On /, over the root, and writable in memory.
+    const r = try run(e, &.{ "--dir", e.root, "--archive", arc, "--rc", "cat /lib/app.conf /lib/sub/d; test -e /lib/namespace && echo root; echo w >/lib/sub/w && cat /lib/sub/w" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("conf\ndeep\nroot\nw\n", r.out);
+    // Elsewhere, its own tree.
+    var nb: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const n = try run(e, &.{ "--archive", try std.fmt.bufPrint(&nb, "{s}:/n/a", .{arc}), "--rc", "cat /n/a/lib/app.conf" });
+    defer n.deinit();
+    try std.testing.expectEqualStrings("conf\n", n.out);
+    // A file bigger than --memory doesn't fit.
+    const big = try gpa.alloc(u8, 4 << 20);
+    defer gpa.free(big);
+    @memset(big, 'x');
+    try writeTar(&s, "big.tar", &.{.{ "big", big }});
+    const b = try run(e, &.{ "--memory", "2m", "--archive", try std.fmt.bufPrint(&nb, "{s}/big.tar:/n/a", .{s.path}), "--rc", "echo ran" });
+    defer b.deinit();
+    try std.testing.expectEqual(125, b.code);
+    try expectIn(b.err, "--archive ");
+    try expectIn(b.err, "file system full");
+}
+
+test "--tmp makes an empty writable tree [mounts]" {
+    const e = try env(@src());
+    const r = try run(e, &.{ "--tmp", "/scratch", "--rc", "ls /scratch | wc -l; echo y >/scratch/f && cat /scratch/f" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("      0\ny\n", r.out);
+}
+
+test "--bind runs after every mount, in order [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{
+        .{ "app/bin/tool*", "#!/bin/rc\necho mine\n" },
+        .{ "app/b1/t*", "#!/bin/rc\necho b1\n" },
+        .{ "app/b2/t*", "#!/bin/rc\necho b2\n" },
+    });
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const app = try std.fmt.bufPrint(&p, "{s}:/app", .{try under(&s, &buf, "app")});
+    // The bind comes first on the command line, and still sees /app.
+    const r = try run(e, &.{ "--bind", "/app/bin:/bin:b", "--dir", app, "--rc", "tool" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("mine\n", r.out);
+    // Two binds before /bin: the later one is on top.
+    const o = try run(e, &.{ "--dir", app, "--bind", "/app/b1:/bin:b", "--bind", "/app/b2:/bin:b", "--rc", "t" });
+    defer o.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{o.err});
+    try std.testing.expectEqualStrings("b2\n", o.out);
+}
+
+test "--write=none rejects rw, eph, and 9P mounts [mounts]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "d/x", "A\n" }});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const d = try under(&s, &buf, "d");
+    var p1: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    var p2: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    for ([_][2][]const u8{
+        .{ "--dir", try std.fmt.bufPrint(&p1, "{s}:/x:rw", .{d}) },
+        .{ "--dir", try std.fmt.bufPrint(&p2, "{s}:/x:eph", .{d}) },
+        .{ "--url", "tcp://127.0.0.1:1:/x" },
+    }) |m| {
+        const r = try run(e, &.{ "--write=none", m[0], m[1], "--rc", "echo" });
+        defer r.deinit();
+        try std.testing.expectEqual(2, r.code);
+        try expectIn(r.err, "--write=none ");
+    }
+}
+
+test "--dir rw writes through to the host, and ro denies [mounts]" {
+    const e = try env(@src());
+    const io = std.testing.io;
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try writeTree(&s, &.{.{ "d/x", "A\n" }});
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const d = try under(&s, &buf, "d");
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const w = try run(e, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}:/x:rw", .{d}), "--rc", "echo w >/x/new" });
+    defer w.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{w.err});
+    try std.testing.expectEqual(0, w.code);
+    const got = try s.tmp.dir.readFileAlloc(io, "d/new", gpa, .limited(64));
+    defer gpa.free(got);
+    try std.testing.expectEqualStrings("w\n", got);
+    const ro = try run(e, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}:/x:ro", .{d}), "--rc", "touch /x/new2 >[2]/dev/null || echo denied" });
+    defer ro.deinit();
+    try std.testing.expectEqualStrings("denied\n", ro.out);
+    try std.testing.expectError(error.FileNotFound, s.tmp.dir.access(io, "d/new2", .{}));
+}
+
+test "--builtin is a member of the / stack [mounts]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    // A tree with one file, and no programs: rc and ls come from the
+    // built-in root under it.
+    try writeTree(&s, &.{.{ "a/lib/x", "A\n" }});
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const r = try runNoRoot(e, e.h9, &.{ "--dir", try under(&s, &p, "a"), "--builtin", "--rc", "cat /lib/x; cmp -s /bin/ls /bin/9box && echo boxed" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("A\nboxed\n", r.out);
+}
+
+test "a development build without $H9ROOT runs from the built-in root [mounts]" {
+    const e = try env(@src());
+    try needBuiltin(e);
+    // The test h9 is in the checkout's zig-out, where .local/9front/root
+    // used to be the default.
+    const r = try runNoRoot(e, e.h9, &.{ "--rc", "test -d /sys || echo builtin" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("builtin\n", r.out);
 }
 
 test "a host a.out without a root sees /dev, /env, /proc, /tmp and its cwd [builtin-root]" {
@@ -7313,11 +7709,12 @@ test "--ns replays a plan printed over the built-in root [builtin-root]" {
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
-    // Replayed over the full tree, the plan makes the built-in root `/`.
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc", "test -d /sys || echo builtin" });
+    // Replayed over the full tree, the plan adds the built-in root to the
+    // stack, under the tree: the tree's ls, and the box's 9box.
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc", "test -d /sys && echo tree; cmp -s /bin/ls /bin/9box || echo own; test -x /bin/9box && echo builtin" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
-    try std.testing.expectEqualStrings("builtin\n", r.out);
+    try std.testing.expectEqualStrings("tree\nown\nbuiltin\n", r.out);
 }
 
 test "--check passes with only the built-in root [builtin-root]" {
@@ -8176,6 +8573,33 @@ fn dotlRun(e: Env, d: *DotlServer, script: []const u8) !Result {
     const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
     const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; {s}", .{ d.dial(), script });
     return run(e, &.{ "--net-allow", allow, "--rc", cmd });
+}
+
+test "a 9P root is never walked for dev, env, fd, proc, srv, or net [mounts]" {
+    const e = try env(@src());
+    var d: DotlServer = undefined;
+    try d.startShared(std.testing.io, dotlTree, "9P2000.L");
+    defer d.finish(std.testing.io);
+    var ub: [96]u8 = undefined;
+    // The served tree on top of the stack, so every walk into / that
+    // reaches the stack asks it first.
+    const r = try run(e, &.{ "--dir", e.root, "--url", try std.fmt.bufPrint(&ub, "{s}:/", .{d.url()}), "--rc", "cat /etc/motd; ls /dev/cons /env /fd /proc /srv /net >/dev/null && echo kernel" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("hello from .L\nkernel\n", r.out);
+    const s = d.lock();
+    defer d.unlock();
+    var it = std.mem.tokenizeScalar(u8, s.walked.items, '\n');
+    var etc = false;
+    while (it.next()) |name| {
+        if (std.mem.eql(u8, name, "etc")) etc = true;
+        for ([_][]const u8{ "dev", "env", "fd", "proc", "srv", "net" }) |k|
+            if (std.mem.eql(u8, name, k)) {
+                std.debug.print("walked {s}\n", .{k});
+                return error.TestUnexpectedResult;
+            };
+    }
+    try std.testing.expect(etc);
 }
 
 test "the guest mounts the in-memory .L server with dotlfs, under the network policy [dotl]" {

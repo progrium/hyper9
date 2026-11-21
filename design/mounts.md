@@ -300,45 +300,45 @@ h9 --dir ./data:/app/data:rw --tmp /scratch --bind /app/data/bin:/bin:b --rc 'my
 
 Integration cases:
 
-- [ ] `test "--dir on / binds a host tree behind #/ [mounts]"`
-- [ ] `test "a 9P root is never walked for dev, env, fd, proc, srv, or net [mounts]"`
-- [ ] `test "/root is the root stack without the namespace's binds [mounts]"`
-- [ ] `test "a bare tree without mount points runs rc [mounts]"`
-- [ ] `test "sources on / stack, later on top, and merge at every depth [mounts]"`
-- [ ] `test "b and a place a member on top of or at the bottom of a stack [mounts]"`
-- [ ] `test "--builtin is a member of the / stack [mounts]"`
-- [ ] `test "--dir on #L makes a Linux tree, and /dev stays devlinux's [mounts]"`
-- [ ] `test "--dir on #L/etc adds a member under the Linux tree's /etc [mounts]"`
-- [ ] `test "--dir on another path replaces it, and r merges [mounts]"`
-- [ ] `test "a missing DST is made in the root's overlay [mounts]"`
-- [ ] `test "a missing DST under a read-only root is exit 125 [mounts]"`
-- [ ] `test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mounts]"`
+- [x] `test "--dir on / binds a host tree behind #/ [mounts]"`
+- [x] `test "a 9P root is never walked for dev, env, fd, proc, srv, or net [mounts]"`
+- [x] `test "/root is the root stack without the namespace's binds [mounts]"`
+- [x] `test "a bare tree without mount points runs rc [mounts]"`
+- [x] `test "sources on / stack, later on top, and merge at every depth [mounts]"`
+- [x] `test "b and a place a member on top of or at the bottom of a stack [mounts]"`
+- [x] `test "--builtin is a member of the / stack [mounts]"`
+- [x] `test "--dir on #L makes a Linux tree, and /dev stays devlinux's [mounts]"`
+- [x] `test "--dir on #L/etc adds a member under the Linux tree's /etc [mounts]"`
+- [x] `test "--dir on another path replaces it, and r merges [mounts]"`
+- [x] `test "a missing DST is made in the root's overlay [mounts]"`
+- [x] `test "a missing DST under a read-only root is exit 125 [mounts]"`
+- [x] `test "--url tcp:// and unix:// mount 9P, with spec from the path or spec= [mounts]"`
 - [ ] `test "--url http:// upgrades to a WebSocket when the server answers 101 [mounts]"`
 - [ ] `test "--url http:// falls back to a static dotfs tree [mounts]"`
 - [ ] `test "a static tree reads by Range and fails a read on a hash mismatch [mounts]"`
 - [ ] `test "a static tree loads a nested index on first use [mounts]"`
 - [ ] `test "a 9P server's .fs/index answers walks without the server [mounts]"`
-- [ ] `test "--url to /srv/NAME posts without mounting [mounts]"`
-- [ ] `test "--archive unpacks into memory, counted against --memory [mounts]"`
-- [ ] `test "--tmp makes an empty writable tree [mounts]"`
-- [ ] `test "--bind runs after every mount, in order [mounts]"`
-- [ ] `test "a mount flag without DST mounts on /, and a URL's :// and a drive letter aren't separators [mounts]"`
-- [ ] `test "--ns splits inline lines on ; outside quotes [mounts]"`
-- [ ] `test "--ns comments end at ; [mounts]"`
-- [ ] `test "--ns @FILE reads a host file, and repeated --ns replay in order [mounts]"`
-- [ ] `test "--ns with a bare file name is exit 125 with a hint to use @ [mounts]"`
-- [ ] `test "the long src= form takes values with colons and quoted commas [mounts]"`
-- [ ] `test "conflicting options are a usage error [mounts]"`
-- [ ] `test "--write=none rejects rw, eph, and 9P mounts [mounts]"`
-- [ ] `test "--dir rw writes through to the host, and ro denies [mounts]"`
-- [ ] `test "--root and --root-spec fail with exit 2 naming the replacement [mounts]"`
-- [ ] `test "a development build without $H9ROOT runs from the built-in root [mounts]"`
-- [ ] `test "--print output with a Linux tree and 9P settings replays with --ns [mounts]"`
-- [ ] `test "#λ is an alias for #L in namespace files [mounts]"`
-- [ ] `test "bind -r merges directories below the bind point [mounts]"`
-- [ ] `test "bind -r: creates go to the first -c member with the parent [mounts]"`
-- [ ] `test "bind -r: removing an upper file uncovers the lower one [mounts]"`
-- [ ] `test "bind -c '#O' over a union copies up and whites out [mounts]"`
+- [x] `test "--url to /srv/NAME posts without mounting [mounts]"`
+- [x] `test "--archive unpacks into memory, counted against --memory [mounts]"`
+- [x] `test "--tmp makes an empty writable tree [mounts]"`
+- [x] `test "--bind runs after every mount, in order [mounts]"`
+- [x] `test "a mount flag without DST mounts on /, and a URL's :// and a drive letter aren't separators [mounts]"`
+- [x] `test "--ns splits inline lines on ; outside quotes [mounts]"`
+- [x] `test "--ns comments end at ; [mounts]"`
+- [x] `test "--ns @FILE reads a host file, and repeated --ns replay in order [mounts]"`
+- [x] `test "--ns with a bare file name is exit 125 with a hint to use @ [mounts]"`
+- [x] `test "the long src= form takes values with colons and quoted commas [mounts]"`
+- [x] `test "conflicting options are a usage error [mounts]"`
+- [x] `test "--write=none rejects rw, eph, and 9P mounts [mounts]"`
+- [x] `test "--dir rw writes through to the host, and ro denies [mounts]"`
+- [x] `test "--root and --root-spec fail with exit 2 naming the replacement [mounts]"`
+- [x] `test "a development build without $H9ROOT runs from the built-in root [mounts]"`
+- [x] `test "--print output with a Linux tree and 9P settings replays with --ns [mounts]"`
+- [x] `test "#λ is an alias for #L in namespace files [mounts]"`
+- [x] `test "bind -r merges directories below the bind point [mounts]"`
+- [x] `test "bind -r: creates go to the first -c member with the parent [mounts]"`
+- [x] `test "bind -r: removing an upper file uncovers the lower one [mounts]"`
+- [x] `test "bind -c '#O' over a union copies up and whites out [mounts]"`
 - [ ] `test "ns prints unions as bind -r lines that replay [mounts]"`
 - [ ] `test "a guest can't attach another machine's union [mounts]"`
 

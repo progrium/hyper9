@@ -2190,7 +2190,7 @@ around a value with commas.
 | --- | --- |
 | `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw`. `contained` resolves its symlinks inside it, as a tree on `#L` always does. |
 | `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://...`, or `wss://...`. With no scheme, `ws://` for a loopback host and `wss://` for any other. A DST of `/srv/NAME` posts the connection there without mounting it. |
-| `--archive FILE[:DST[:OPTS]]` | A tar or gzipped tar, unpacked into memory. *Not yet available.* |
+| `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` (the browser host's root archive), unpacked into memory before the program runs. Its files count against `--memory`, and it takes writes in memory. Symbolic links are kept for Linux programs. |
 | `--builtin[=DST[:OPTS]]` | The built-in root. Bare, it's the bottom of `/`. |
 | `--tmp DST[:OPTS]` | An empty tree in memory |
 | `--bind SRC:DST[:OPTS]` | Bind a path already in the machine: SRC is a guest path or `#` device. Every `--bind` runs after every mount flag. Its options are `b`, `a`, `c`, and `r`. |
