@@ -238,6 +238,8 @@ On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loo
 
 So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds.
 
+On hcpu, with `zig build bench -Demu=hcpu` ([hcpu](../design/hcpu.md#updates) has the table): on GitHub's macOS runner, an Apple silicon VM, the loop takes 1.09 s for arm64, 2.17 s for amd64, and 2.29 s for 386 on T1, against Unicorn's 3.14, 3.65, and 3.52 s there; on an x86-64 Linux VM, 0.60, 3.39, and 3.88 s, against 4.06, 6.37, and 5.59 s. T0 runs it in about 12 to 28 s. A `pwrite` round trip costs 0.5 to 1 µs, and a bare exit and re-entry 56 to 110 ns, since the emulator never leaves the process. Four busy amd64 threads run 3.3 to 4 times as fast as one on 4-core Linux hosts, where Unicorn's run no faster.
+
 By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](../design/epoch-0/browser-host.md)).
 
 ## Guest shims

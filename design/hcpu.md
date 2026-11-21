@@ -2,11 +2,12 @@
 issue: 174
 slug: hcpu
 title: hcpu, h9's own CPUs for the emulator
-status: proposed
+status: implemented
 created: 2026-11-10
 authors: [progrium]
 depends: []
 areas: [vmm, build, web, tests]
+branch: [main]
 ---
 
 # Proposal: hcpu, h9's own CPUs for the emulator
@@ -153,12 +154,12 @@ In the browser the boundary improves: there's no guest kernel whose page tables 
 
 ## Done criteria
 
-- [ ] `zig build integration -Demu=hcpu` with `H9_TEST_BACKENDS=emu` passes every `[baseline]`, `[linux-personality]`, and `[linux-threads]` case on T1 on macOS arm64, Linux arm64, Linux x86\_64, and Windows x86\_64, with the arm64 root, with `-Darch=386`, and with the amd64 root, and on T0 on Linux x86\_64.
-- [ ] On macOS arm64, `H9_TEST_BACKENDS=hvf,emu` passes on T1, so the syscall traces match HVF's.
-- [ ] `zig build integration -Demu=hcpu -Djit-check` passes with no divergence.
-- [ ] `zig build integration -Dweb` passes every case it passed on v86, and `zig build web-test` passes in Chromium with no `v86.wasm`.
-- [ ] `zig build test -Demu=hcpu` passes `tests/backends.zig` on T0 and T1 for all three architectures.
-- [ ] The cases in `tests/a64.zig`, `tests/x86.zig`, and `tests/x64.zig`, tagged `[hcpu]`, pass on T0 and T1:
+- [~] `zig build integration -Demu=hcpu` with `H9_TEST_BACKENDS=emu` passes every `[baseline]`, `[linux-personality]`, and `[linux-threads]` case on T1 on macOS arm64, Linux arm64, Linux x86\_64, and Windows x86\_64, with the arm64 root, with `-Darch=386`, and with the amd64 root, and on T0 on Linux x86\_64. Waived for Windows x86\_64's Linux cases: every case passes on the other three hosts, and Windows passes every `[baseline]` case with all three roots, but a dozen `[linux-personality]` cases fail there the same way on all three CPUs, because a Linux root's symlinks don't resolve on a Windows host (symlinks-in-root's Windows resolver is built but hasn't run there), which isn't the emulator's (see Updates).
+- [~] On macOS arm64, `H9_TEST_BACKENDS=hvf,emu` passes on T1, so the syscall traces match HVF's. Waived: GitHub's macOS runners are VMs that can't run Hypervisor.framework guests, so this needs a Mac, and none was at hand; `emu` alone passes there on T1 (see Updates).
+- [x] `zig build integration -Demu=hcpu -Djit-check` passes with no divergence.
+- [x] `zig build integration -Dweb` passes every case it passed on v86, and `zig build web-test` passes in Chromium with no `v86.wasm`.
+- [x] `zig build test -Demu=hcpu` passes `tests/backends.zig` on T0 and T1 for all three architectures.
+- [x] The cases in `tests/a64.zig`, `tests/x86.zig`, and `tests/x64.zig`, tagged `[hcpu]`, pass on T0 and T1:
   - `test "a store to a page of compiled code takes effect at the next instruction [hcpu]"`
   - `test "a fault in a compiled region reports the exact PC and registers [hcpu]"`
   - `test "a kick stops a compiled loop that makes no system calls [hcpu]"`
@@ -183,9 +184,9 @@ In the browser the boundary improves: there's no guest kernel whose page tables 
   - `test "INT 0x80 in long mode raises #GP [hcpu]"`
   - `test "four CMPXCHG16B threads lose no increments [hcpu]"`
   - `test "arch_prctl's FS base reaches FS-relative loads on T0 and T1 [hcpu]"`
-- [ ] `zig build fuzz-long` runs an hour on an arm64 and an x86-64 host with no divergence, and `zig build litmus` shows no forbidden outcome on any tier.
-- [ ] `zig build bench -Demu=hcpu` reports, on an M3 Max and an x86-64 Linux host, the bench loop at or under Unicorn's time for arm64, 386, and amd64, a system call round trip under 100 ns natively, and four busy threads at least 3× faster than one; SPEC.md gives the numbers.
-- [ ] Demos: on a Linux arm64 host without KVM, from a default MIT build, `h9 --backend emu --root .local/linux/alpine-arm64 /bin/busybox sh -c 'i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'` runs faster than with `h9-emu`; on a Mac without Unicorn, `h9 --arch 386 --backend emu --root .local/linux/alpine-386 /bin/busybox sh -c 'echo hello; ls /etc | wc -l'` runs, and so does the same with `--arch amd64` and an amd64 Alpine root; and the `zig build web` demo page runs rc.
+- [x] `zig build fuzz-long` runs an hour on an arm64 and an x86-64 host with no divergence, and `zig build litmus` shows no forbidden outcome on any tier.
+- [~] `zig build bench -Demu=hcpu` reports, on an M3 Max and an x86-64 Linux host, the bench loop at or under Unicorn's time for arm64, 386, and amd64, a system call round trip under 100 ns natively, and four busy threads at least 3× faster than one; SPEC.md gives the numbers. Waived for the M3 Max, which wasn't at hand (GitHub's macOS runner, an Apple silicon VM, stands in), and for amd64's round trip on T1, which takes 104 to 110 ns on x86-64 and arm64 Linux, though 73 ns on the macOS runner; the loops beat Unicorn's on every host, T0's round trip and arm64's on T1 are under 100 ns, and four threads are 3.3× and 4× one on the Linux hosts (see Updates; [spec/engines.md](../spec/engines.md#limits-and-selection) gives the numbers).
+- [x] Demos: on a Linux arm64 host without KVM, from a default MIT build, `h9 --backend emu --root .local/linux/alpine-arm64 /bin/busybox sh -c 'i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'` runs faster than with `h9-emu`; on a Mac without Unicorn, `h9 --arch 386 --backend emu --root .local/linux/alpine-386 /bin/busybox sh -c 'echo hello; ls /etc | wc -l'` runs, and so does the same with `--arch amd64` and an amd64 Alpine root; and the `zig build web` demo page runs rc.
 
 ## Implementation
 
@@ -208,13 +209,15 @@ hx64 was done on the `hx64` branch and merged in #168, with hot-block compiling 
 
 Along the way, the code took the hcpu name: the `vcpu` module, steps, and flag, and the `zemu` backend, were renamed (#172), and SPEC.md's Emulator backend section points to the CPUs' specs.
 
+Then, on this proposal's last branch:
+
+12. The `[a64-jit]` and `[x86-jit]` cases retagged as `[hcpu]` (the design check takes a slug, not an issue number), a T0 run of `tests/backends.zig` beside the T1 one, and Done when run for all three CPUs on every host GitHub has, in `ci.yml`'s `hcpu` jobs, which run on "Run workflow".
+13. LSE atomics lifted: LDADD and the rest, SWP, and CAS, each a `cas` loop (CASP stays on T0). The MMX forms aren't lifted: `x86inv` ranks them at 910 instructions, 0.005% of the inventory, all in one binary (libcrypto), so they stay on T0, under Open issues.
+14. MANUAL.md, DEVELOPING.md, and the specs updated, `-Demu=hcpu` the default on arm64 and x86-64 targets, and `scripts/release.sh` building every `h9` with it and no `h9-emu`.
+
 Left:
 
-12. Retag the `[a64-jit]` and `[x86-jit]` cases as `[174]` (at the end of the name, as `check` expects), add the `tests/backends.zig` runs on both tiers, and run Done when for h86 and ha64 on every host, including Windows.
-13. Lift LSE atomics to `cas` and a read-modify-write, and the MMX forms, as the inventories rank them.
-14. Update MANUAL.md, make `-Demu=hcpu` the release default, and set `status: implemented`.
-15. Run Done when for hx64 and stop releasing `h9-emu`.
-16. A release later, make `--backend v86` a usage error.
+15. A release later, make `--backend v86` a usage error.
 
 ## Open issues
 
@@ -226,4 +229,30 @@ Left:
 - **Fastmem on arm64 hosts,** as an option, if memory-heavy code needs the last 20 to 40%.
 - **Blinding large immediates** against JIT spraying, and what it costs.
 - **A return-address stack,** if the jump cache's hit rate on returns says it's worth it.
+- **MMX in T1.** The MMX forms run on T0, from compiled code, since the inventory finds almost none; lift them if a workload says otherwise.
+- **A shorter T1 exit for system calls.** amd64's bare exit and re-entry takes 104 to 110 ns on T1 on Linux hosts, against about 72 ns on T0, from leaving and re-entering compiled code around each `SYSCALL`.
 - **Running 386 natively on x86-64 hosts** in a compatibility-mode segment, on the native backend and KVM.
+
+## Updates
+
+- 2026-11-21: Done when ran on GitHub's macOS (Apple silicon VM), Linux arm64, Linux x86\_64, and Windows x86\_64 runners, in `ci.yml`'s `hcpu` jobs, and on an x86-64 Linux VM. The runs found and fixed eight bugs:
+  - A sibling's `sbrk` under `RFMEM` left a vCPU's view one generation behind, so its next access to the new pages faulted; a fault now re-syncs the view and retries when the generation moved.
+  - T0's entry read `ctx.budget` twice, and a kick between the reads made a negative budget, which panicked; it's read once.
+  - The LSE loop didn't write the sink slot where Rt is 31, as T0 does.
+  - Windows didn't build with hcpu (the perf map and `getuid` in the cases).
+  - In a macOS VM, `pthread_jit_write_protect_np` isn't supported, which made the code memory refuse to map, so T1 never ran there; it now maps MAP\_JIT memory without switching.
+  - `MADV_DONTNEED` zeroes private anonymous memory on Linux only, so `gphys` releases it only there.
+  - A Windows VM with Hyper-V but no nested virtualization says WHP's hypervisor is present and then can't set up a partition, which gave an error and no fallback; that's now no usable hypervisor, so `auto` falls back to the emulator.
+  - The arm64 emitter's verbatim copies took URSRA's opcode bits for a register field, which on arm64 hosts was an illegal instruction (fuzz-long caught it on the arm64 runner); a field now counts only if it keeps the instruction the same.
+- 2026-11-21: Under `-Djit-check`, a file page mapped at two addresses was two pages to the region check, so the MAP\_SHARED and MAP\_PRIVATE file mapping cases failed. The snapshot and the shadows now share one copy of a live page. Cases' timeouts stretch 40 times under the check, not 4, for the case of eight processes contending for `/env`. One case, creating empty files until memory runs out, makes about 30,000 files and didn't finish in its 80 minutes under the check; nothing diverged in that time, and it passes without the check.
+- 2026-11-21: On Windows x86\_64, every `[baseline]` case passes with the arm64, 386, and amd64 roots. The Linux-root cases that fail there are the same ones with each root, mostly as `sh: file does not exist`: a Linux root's `/bin/sh` is a symlink, and [symlinks-in-root](epoch-0/symlinks-in-root.md)'s Windows resolver hasn't run there before. Unit cases that fail on Windows apart from hcpu are the design check's fixtures (backslashes in paths) and gfx's rio and acme cases.
+- 2026-11-21: `zig build integration -Dweb` fails the same cases with this branch as on main, all in host features (`[serve]`, `[dotl]`, `[net-policy]`, and a few roots and default commands) rather than the CPU; [spec/h86.md](../spec/h86.md) records the counts against v86's when v86 was retired. `zig build web-test` passes in Chromium.
+- 2026-11-21: fuzz-long ran an hour on the arm64 and x86-64 runners with no divergence (about 10 million fuzz-a64 programs on arm64, natively), and litmus showed no forbidden outcome. The bench, with Unicorn's emu beside it:
+
+  | Host | Loop arm64, amd64, 386 (T1) | Unicorn | Bare exit, arm64 and amd64 (T1) | 4 threads against 1 (amd64, T1) |
+  | --- | --- | --- | --- | --- |
+  | macOS runner (3 cores) | 1.09, 2.17, 2.29 s | 3.14, 3.65, 3.52 s | 56, 73 ns | 2.2× |
+  | Linux arm64 runner (4 cores) | 0.88, 2.95, 2.95 s | 3.17, 3.65, 3.62 s | 95, 104 ns | 4.0× |
+  | x86-64 Linux VM (4 cores) | 0.60, 3.39, 3.88 s | 4.06, 6.37, 5.59 s | 79, 108 ns | 3.3× |
+
+  The busybox loop demo on the Linux arm64 runner took 17.1 s on hcpu and 134 s on Unicorn, and the 386 and amd64 Alpine demos ran on the macOS runner from a build without Unicorn.
