@@ -6793,7 +6793,7 @@ test "writes through an fd opened O_DSYNC or O_SYNC sync the host file [linux-pe
     const p = try runProcessWith(&.{
         "strace", "-f",     "-y",    "-qq",                 "-e",                    "trace=fsync,fdatasync",
         "-o",     trace,    le.h9,   "--backend",           it.next() orelse "auto", "--arch",
-        le.arch,  "--root", le.root, "--cwd",               le.fixtures,             "--writable",
+        le.arch,  "--dir",  le.lmount, "--cwd",               le.fixtures,             "--writable",
         s.path,   "env",    dir,     "/mnt/term/cwd/files", "sync_open",
     }, null, null, 120_000);
     defer gpa.free(p.stdout);
