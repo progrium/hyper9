@@ -26,11 +26,11 @@ Each CLI invocation is one machine: one host process with one VM. Each Plan 9 pr
 | `exec` | Load the new a.out into fresh segments, rebuild page tables, reset registers, keep the fds (honouring close-on-exec) and segattach's segments (except `SG_CEXEC` ones) |
 | `exits` / `await` | Wait records queued on the parent Proc; the thread and vCPU are torn down |
 | `brk_` | Grow the data segment and map pages from the guest-physical allocator, up to the stack's floor or the lowest attached segment above it |
-| `segattach` / `segdetach` | Attach or detach a `shared` or `memory` segment, up to five per process, with 9front's placement rules; pages are allocated up front and never executable ([segattach](../design/segattach.md)) |
+| `segattach` / `segdetach` | Attach or detach a `shared` or `memory` segment, up to five per process, with 9front's placement rules; pages are allocated up front and never executable ([segattach](../design/epoch-0/segattach.md)) |
 | `segbrk` / `segfree` / `segflush` | Move an attached segment's top; zero its pages in place; check the span and do nothing else |
 | `notify` / `noted` | Push a Ureg and the note string onto the user stack and point the PC at the handler; `noted` restores or kills the process |
-| `/proc/n/ctl` `stop` / `start` / `hang` | Park the process on its own thread at its next stop point (syscall entry, note delivery, a breakpoint exit, or before the first instruction after `exec` with `hang`), with its Ureg and Extra copied to its record ([self-host](../design/self-host.md)) |
-| `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.c`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](../design/semaphores.md)) |
+| `/proc/n/ctl` `stop` / `start` / `hang` | Park the process on its own thread at its next stop point (syscall entry, note delivery, a breakpoint exit, or before the first instruction after `exec` with `hang`), with its Ureg and Extra copied to its record ([self-host](../design/epoch-0/self-host.md)) |
+| `rendezvous` / `semacquire` / `tsemacquire` / `semrelease` | Host kernel primitives built on drawterm's sleep/wakeup (`src/kern/sema.c`): 9front's `rendezvous` on drawterm's rendezvous group, and 9front's semaphores, with the wait lists in a kernel-wide table keyed by the host address of the guest word; `tsemacquire` waits with `tsleep` ([semaphores](../design/epoch-0/semaphores.md)) |
 
 ### Threads
 
@@ -104,7 +104,7 @@ drawterm's has one machine-wide environment and imports the host process's envir
 
 #### devproc `#p`, from 9front (`src/kern/devproc.c`)
 
-rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](../design/self-host.md)).
+rc, kill, and ps need `/proc/n/{note,notepg,noteid,ctl,status,ns,fd,args,ppid,wait}`, and `segment` is served too; acid also needs `mem`, `regs`, `fpregs`, and `text` ([self-host](../design/epoch-0/self-host.md)).
 
 It serves h9's process records (`src/kern/proc.c`, shared through `src/kern/hproc.h`) instead of 9front's Proc table: a qid holds the machine-local pid, and every walk, open, read, and write looks it up in the caller's machine, so a machine can't see, signal, or kill another's processes.
 
@@ -128,9 +128,9 @@ A process takes its record's `debug` lock to swap its fd group, namespace, or do
 
 Serves `/fd/N`.
 
-#### The Linux view `#λ` (`src/kern/devlinux.c`) and eventfds `#ε` (`src/kern/linuxnet.c`)
+#### The Linux view `#λ` (`src/kern/devlinux.c`), eventfds `#ε` (`src/kern/linuxnet.c`), and ptys `#τ` (`src/kern/devpty.c`)
 
-A Linux process's `/`, and its eventfd, epoll, and signalfd instances (see Linux personality).
+A Linux process's `/`, its eventfd, epoll, and signalfd instances, and its pseudoterminals (see Linux personality).
 
 #### `tsleep` (`src/kern/tsleep.c`)
 
@@ -162,7 +162,7 @@ The machine's last process to release its groups (`h9_kern_release` in `src/kern
 
 #### Host-stream device `#ℏ` (`src/kern/devhstream.c`, `src/hstream.zig`)
 
-WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](../design/websocket-9p.md)).
+WebSockets, for roots, namespace-file mounts, and the guest's `/net/ws` ([websocket-9p](../design/epoch-0/websocket-9p.md)).
 
 It follows devhcons's pattern: Zig does TCP, TLS (`std.crypto.tls`) and the framing (`src/ws.zig`) on a host reader thread per stream, the guest sleeps on a Rendez in the kernel until the stream has data, and a note interrupts it.
 
@@ -176,7 +176,7 @@ A guest `connect` asks the net policy as a TCP dial would, through the same `net
 
 #### 9P2000.L device `#ℓ` (`src/kern/devdotl.c`, `src/dotl/`)
 
-devmnt and exportfs speak only 9P2000, and most 9P servers outside Plan 9 speak 9P2000.L ([dotl](../design/dotl.md)). A `#ℓ` conversation puts a translator between devmnt and a server connection, or between a client connection and an exportfs.
+devmnt and exportfs speak only 9P2000, and most 9P servers outside Plan 9 speak 9P2000.L ([dotl](../design/epoch-0/dotl.md)). A `#ℓ` conversation puts a translator between devmnt and a server connection, or between a client connection and an exportfs.
 
 Attached with no spec, the device serves `dotl/clone` and `dotl/N/{ctl,data,status}`, which `bind -a '#ℓ' /net` puts at `/net/dotl`. `ctl` takes `fd N` (the caller's fd N is the server connection), `dial ADDR[,ADDR…]` (a `tcp!` address dialed through `#I` under the dialer's plan, or `unix!PATH` when h9 dials a root itself, with no plan), `version 9P2000.L` (don't offer `.L.Z`), and `serve N` (the server side, for a client on fd N); `data` is 9P2000; `status` reads the dialect, `Hungup` and why, and `reconnects N` once the connection has been resumed.
 
@@ -184,13 +184,19 @@ It follows devhstream's pattern and the seam rules: a kproc per conversation rea
 
 The translator is `src/dotl/`: `wire.zig` encodes and bounds-checks 9P2000, 9P2000.L, and ZeroFS's 9P2000.L.Z; `attr.zig` maps `Dir` and Linux `stat`, error strings and errno, mode bits, and the user map; `client.zig` and `server.zig` are the two sides, each a state machine over bytes with no I/O of its own, tested against `testserver.zig`, a .L server in memory, and fuzzed. A create with `DMNAMEDPIPE` is a `Tmknod` of a FIFO, and a server's FIFO lists with `DMNAMEDPIPE` and opens without a server open, reading empty. A machine registers its user and `--user-map` with `kern.zig`, keyed by its `Hmach`.
 
+#### Index device `#ι` (`src/kern/devhidx.c`, `src/rootindex/`)
+
+Puts a metadata index between devmnt and a 9P connection ([mount-index](../design/mount-index.md); see [Metadata indexes](ninep.md#metadata-indexes)). It's laid out as `#ℓ` is, `hidx/clone` and `hidx/N/{ctl,data,status}`, but isn't bound anywhere, and it's masked once the namespace file is replayed, since a guest's conversation could read and write the host's index cache. `ctl` takes `server KEY` (use the server's `.fs/index`, cached under KEY, the address and attach spec), `index N` (use the compiled index the machine handed over as number N), neither (pass everything through, counting requests), and then `fd N` (the server connection, which starts the conversation); `data` is the 9P2000 devmnt mounts; `status` reads the index's label, counts, and how long its check took, the requests devmnt sent and how many reached the server, and the notes `-v` prints. h9 reads `status` through a leaf (`h9_hidx_convstatus`) rather than a chan, since `#ι` is masked by the end of the run.
+
+The kproc, the leaves (`src/rootindex/kern.zig`), and the locking follow `#ℓ`. A machine registers its cache directory with `kern.zig`, keyed by its `Hmach`, and hands over a `--root-index` it compiled with `give`, which a conversation takes once by number.
+
 #### devcons hooks (`src/kern/consx.c`, `consx.h`)
 
-drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](../design/go-compat.md)).
+drawterm's devcons gives whole-second time, three words of `bintime`, an empty `sysstat`, and no `pid` or `ppid`, and Go reads `#c/pid` by device path, which no bind can redirect ([go-compat](../design/epoch-0/go-compat.md)).
 
 So devcons calls hooks: `#c/pid` and `#c/ppid` (machine-local pids, as `$pid` and `/proc` have them, in 9front's 12-character format); `bintime` (wall nanoseconds, ticks, `fasthz`, and monotonic nanoseconds, big-endian, with a short read getting the leading words that fit); `time` (seconds, nanoseconds, ticks, and `fasthz`, in drawterm's text format); and `sysstat`, a line per CPU the machine may use, in 9front's ten columns with zeros for the counters h9 doesn't keep, so Go's `runtime.NumCPU` counts them.
 
-The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](../design/self-host.md)).
+The CPU count is `--cpus` if given, else the host's, capped by the backend's vCPU limit. The guest's `NPROC` is the same count, so `mk` runs that many jobs ([self-host](../design/epoch-0/self-host.md)).
 
 The clock is one per host process (`src/kern.zig`): wall time from the host's real-time clock, and monotonic time from its monotonic clock, offset to the wall time at the kernel's boot; ticks are the monotonic nanoseconds, so `fasthz` is 10⁹. Writes to `time` and `bintime` still fail.
 
@@ -200,7 +206,7 @@ Copy-on-write trees in memory over a lower directory, for the root's overlay, `-
 
 #### h9's guest commands `#H` (`src/kern/devhtools.c`)
 
-Commands that wrap h9's own devices (websocket-9p's `wsmount`, say) can't come from 9front, and h9 never writes into the root ([guest-tools](../design/guest-tools.md)).
+Commands that wrap h9's own devices (websocket-9p's `wsmount`, say) can't come from 9front, and h9 never writes into the root ([guest-tools](../design/epoch-0/guest-tools.md)).
 
 `src/guest/` holds them, laid out as the guest sees them, and the build embeds it in the binary as a generated table (`tools/guesttree.zig`): only rc scripts and data, so an executable that doesn't start with `#!/bin/rc` fails the build, and names starting with `.` are left out.
 
@@ -214,9 +220,9 @@ Debug builds also serve `tests/fixtures/guest/` (`-Dguest-test`), for the integr
 
 #### The built-in root `#Hroot` (`src/kern/devhtools.c`)
 
-A root that's in the binary, so h9 runs with no tree to find ([builtin-root](../design/builtin-root.md)). It's a second table in `#H`, served by the same code with the same rules except its modes, a 9front tree's 0775 and 0664 so that an overlay over it can create files (the device itself still refuses every write), and a channel's `dev` says which table it's on, so the two trees' qids never meet in the mount table.
+A root that's in the binary, so h9 runs with no tree to find ([builtin-root](../design/epoch-0/builtin-root.md)). It's a second table in `#H`, served by the same code with the same rules except its modes, a 9front tree's 0775 and 0664 so that an overlay over it can create files (the device itself still refuses every write), and a channel's `dev` says which table it's on, so the two trees' qids never meet in the mount table.
 
-Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](../design/multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`.
+Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](../design/epoch-0/multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`.
 
 The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds its target's architecture, and with `-Demu=unicorn` also `amd64` and `386`, and the web host `386`.
 

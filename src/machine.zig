@@ -23,6 +23,8 @@ const consin = @import("consin.zig");
 const web = @import("web.zig");
 const hstream = @import("hstream.zig");
 const dotl = @import("dotl/kern.zig");
+const rootindex = @import("rootindex.zig");
+const hidx = @import("rootindex/kern.zig");
 const ws = @import("ws.zig");
 const serve = @import("serve.zig");
 const lsys = @import("linux/sys.zig");
@@ -42,7 +44,7 @@ pub const Status = union(enum) {
 };
 
 /// What a run's guest changed in the root's overlay, which is discarded
-/// when the machine ends (design/overlay.md). Counting starts once
+/// when the machine ends (design/epoch-0/overlay.md). Counting starts once
 /// the namespace is built, so the `$home` the builder makes isn't a
 /// change. A value type: it holds its names.
 pub const RootChanges = struct {
@@ -119,11 +121,11 @@ pub const RunError = error{
     /// a host call, so the machine can't run another.
     Stuck,
     /// A `--serve` listener couldn't listen (exit code 125); see `err_msg`
-    /// (design/serve.md).
+    /// (design/epoch-0/serve.md).
     ServeFailed,
 } || kern.Error || vmm.CreateError || loader.Error;
 
-/// The built-in root `#Hroot` serves (design/builtin-root.md): what it
+/// The built-in root `#Hroot` serves (design/epoch-0/builtin-root.md): what it
 /// was built from, for the plan, `--version` and `--check`.
 pub const builtin_root = struct {
     const t = kern.builtin_root;
@@ -152,7 +154,7 @@ pub const builtin_root = struct {
 };
 
 pub const Machine = struct {
-    /// The root tree (design/ninep-roots.md): a host directory, or a 9P
+    /// The root tree (design/epoch-0/ninep-roots.md): a host directory, or a 9P
     /// server the machine connects to and mounts at /.
     pub const Root = union(enum) {
         /// A host directory, absolute and resolved, served through #U.
@@ -162,7 +164,7 @@ pub const Machine = struct {
         /// A unix-domain socket's host path. Not supported on Windows.
         unix: []const u8,
         /// A 9P server over a WebSocket: a ws:// or wss:// URL
-        /// (design/websocket-9p.md).
+        /// (design/epoch-0/websocket-9p.md).
         ws: []const u8,
     };
 
@@ -170,7 +172,19 @@ pub const Machine = struct {
     /// root and namespace-file mounts. Guest connections always go direct.
     pub const Proxy = ws.ProxyConfig;
 
-    /// A `--serve` listener's address (design/serve.md): a unix
+    /// Whether metadata indexes are used (design/mount-index.md): `auto`
+    /// uses one wherever one is found, `none` never.
+    pub const IndexMode = enum { auto, none };
+
+    /// An index for the 9P root given with the mount, instead of its
+    /// server's `.fs/index` (`--root-index`): a host file, or an
+    /// `https://` or `http://` URL.
+    pub const RootIndex = union(enum) {
+        path: []const u8,
+        url: []const u8,
+    };
+
+    /// A `--serve` listener's address (design/epoch-0/serve.md): a unix
     /// socket's host path, `host!port` for TCP, or `host:port/path` from
     /// a ws:// URL. Port 0 picks a free port.
     pub const Listen = serve.Listen;
@@ -192,17 +206,32 @@ pub const Machine = struct {
         /// PEM certificates a `wss` root must chain to, instead of the
         /// host's bundle: a host path.
         root_ca: ?[]const u8 = null,
+        /// Metadata indexes for the 9P root and namespace-file mounts
+        /// (design/mount-index.md).
+        index: IndexMode = .auto,
+        /// The 9P root's index, instead of its server's `.fs/index`.
+        /// Needs a 9P root.
+        root_index: ?RootIndex = null,
+        /// Where compiled indexes are cached; null caches nothing. The
+        /// CLI's default is `$XDG_CACHE_HOME/h9/index` and the like.
+        index_cache: ?[]const u8 = null,
+        /// For the plan only (`--print`): a `--root-index` file's counts,
+        /// which the CLI reads it for.
+        root_index_counts: ?struct { entries: u32, dirs: u32 } = null,
+        /// Notes on `stdio.err` about how the run went (`-v`): the
+        /// index's validation, and the 9P requests it saved.
+        verbose: bool = false,
         /// Resolve a host root tree's symlinks inside it: an absolute
         /// target starts at the tree's top, and `..` stops there
-        /// (design/symlinks-in-root.md).
+        /// (design/epoch-0/symlinks-in-root.md).
         root_contained: bool = false,
         /// A Linux root tree, absolute and resolved: the Linux view's /
-        /// (design/linux-personality.md).
+        /// (design/epoch-0/linux-personality.md).
         linux_root: ?[]const u8 = null,
         /// The host's DNS servers, as addresses: a Linux root without an
         /// /etc/resolv.conf gets one naming them, and the network policy
         /// lets port 53 reach them even when they're link-local
-        /// (design/linux-net.md). The CLI reads the host's
+        /// (design/epoch-0/linux-net.md). The CLI reads the host's
         /// resolv.conf.
         nameservers: []const []const u8 = &.{},
         /// Resolve a guest program in the 9front view even with a Linux
@@ -212,7 +241,7 @@ pub const Machine = struct {
         /// isatty: the CLI sets it when its stdin and stdout both are.
         console_tty: bool = true,
         /// An `/etc/passwd`-format file's contents, mapping user names to
-        /// the numbers a 9P2000.L server is sent (design/dotl.md,
+        /// the numbers a 9P2000.L server is sent (design/epoch-0/dotl.md,
         /// "The user map"). Without it, the machine's user is the host's
         /// uid, never 0.
         user_map: ?[]const u8 = null,
@@ -227,9 +256,9 @@ pub const Machine = struct {
         /// it, like `root` and `cwd`, must be absolute and resolved.
         policy: policy.Policy = .{},
         /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
-        /// bind out and masks `#H` (design/guest-tools.md).
+        /// bind out and masks `#H` (design/epoch-0/guest-tools.md).
         guest_tools: bool = true,
-        /// The built-in root, `#Hroot` (design/builtin-root.md): `.only`
+        /// The built-in root, `#Hroot` (design/epoch-0/builtin-root.md): `.only`
         /// makes it the root, and needs `root` null; `.before` and
         /// `.after` bind its commands before or after another root's
         /// /bin, and without one make it the root. `.off` leaves a machine
@@ -250,14 +279,14 @@ pub const Machine = struct {
         /// Host events to deliver while a run is in progress (Ctrl-C,
         /// hangup); see `Signals`.
         signals: ?*Signals = null,
-        /// A host window (design/gfx.md): `#i`, `#m` and `#b` on
+        /// A host window (design/epoch-0/gfx.md): `#i`, `#m` and `#b` on
         /// /dev, drawn by the GUI backend built in. One machine in the
         /// process can have it at a time; closing the window is a hangup.
         /// On macOS the program must run `h9.gfx.main` on its main thread.
         gfx: ?Gfx = null,
         /// Listeners that serve the machine's namespace over 9P while a run
         /// is in progress, each connection with its own exportfs
-        /// (design/serve.md). With an empty `argv`, `run` only serves,
+        /// (design/epoch-0/serve.md). With an empty `argv`, `run` only serves,
         /// until a note ends it.
         serve: []const Listen = &.{},
         /// The guest path each connection exports.
@@ -348,13 +377,15 @@ pub const Machine = struct {
     /// Holds a returned status message or `err_msg`.
     out_buf: [256]u8 = undefined,
     /// What the last run's guest changed in the root's overlay, discarded
-    /// with it (design/overlay.md); empty without one.
+    /// with it (design/epoch-0/overlay.md); empty without one.
     root_changes: RootChanges = .{},
     /// The machine's claim on the screen, with `Options.gfx`; in `arena`.
     gfx_claim: ?*gfx.Claim = null,
     /// The listeners' bound addresses, once a run has opened them; in
     /// `arena`.
     serve_addrs: []const []const u8 = &.{},
+    /// The 9P root's `#ι` conversation (design/mount-index.md), in a run.
+    hidx_root: ?u32 = null,
 
     /// Each `serve` listener's bound address, in the order given, with
     /// port 0 resolved, once a run has opened them; empty before.
@@ -381,6 +412,10 @@ pub const Machine = struct {
         }
         if (opts.builtin != .off) in.builtin_note = try builtin_root.describe(arena);
         if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
+        if (opts.root_index != null and (opts.root == null or opts.root.? == .dir)) {
+            err_msg.* = "--root-index needs a 9P root";
+            return error.Conflict;
+        }
         if (opts.root) |r| switch (r) {
             .dir => |d| in.root = d,
             .tcp => |a| in.root_9p = .{ .kind = .tcp, .addr = a, .spec = opts.root_spec, .user = opts.root_user },
@@ -400,6 +435,13 @@ pub const Machine = struct {
                 .proxy = if (opts.proxy) |px| if (ws.Url.parse(u)) |url| px.pick(url) else |_| null else null,
             },
         };
+        if (in.root_9p) |*r| r.index = if (opts.index == .none) .none else if (opts.root_index) |ri| .{ .given = .{
+            .from = switch (ri) {
+                inline else => |x| x,
+            },
+            .entries = if (opts.root_index_counts) |c| c.entries else null,
+            .dirs = if (opts.root_index_counts) |c| c.dirs else null,
+        } } else .auto;
         return policy.compile(arena, in, opts.policy, err_msg);
     }
 
@@ -498,7 +540,7 @@ pub const Machine = struct {
         if (m.stuck) return error.Stuck;
         m.root_changes = .{};
         // The listeners are bound before anything runs, so one that can't
-        // listen ends the run here (design/serve.md, "Flags").
+        // listen ends the run here (design/epoch-0/serve.md, "Flags").
         // The browser host can't listen, so its build leaves serving out.
         const srv: ?*serve.Server = if (comptime web.enabled) null else if (m.opts.serve.len > 0) blk: {
             var len: usize = 0;
@@ -551,6 +593,7 @@ pub const Machine = struct {
         kern.setStopKick(Proc.stopKick);
         kern.setProcDebug(Proc.debug);
         kc.setGen(linuxGen);
+        kc.setPtySig(ptySig);
         job.start_ns = kern.monoNs();
         job.m = &job.mc;
         job.pages = .{ .ctx = job, .alloc = Job.allocPages, .free = Job.freePages };
@@ -597,6 +640,7 @@ pub const Machine = struct {
         m.root_changes = job.rootChanges();
         if (job.mach.load(.acquire)) |mc| {
             dotl.unregister(@intFromPtr(mc));
+            hidx.unregister(@intFromPtr(mc));
             mc.put();
         }
         // No process reads the console now. A reader thread still in a
@@ -640,7 +684,7 @@ pub const Machine = struct {
         m: *Machine,
         mc: Machine,
         /// The machine's pages for `#O` overlays: ephemeral files count
-        /// against `--memory` (design/ephemeral-writes.md).
+        /// against `--memory` (design/epoch-0/ephemeral-writes.md).
         pages: kern.Pages = undefined,
         prog: Program,
         argv: []const []const u8,
@@ -670,10 +714,10 @@ pub const Machine = struct {
         next_pid: u32 = 1,
         /// Of `procs`: the program's, and the server Proc and its
         /// descendants, each counted against `--pids` on its own
-        /// (design/serve.md, "Limits").
+        /// (design/epoch-0/serve.md, "Limits").
         n_program: u32 = 0,
         n_serving: u32 = 0,
-        /// The listeners, with `--serve` (design/serve.md).
+        /// The listeners, with `--serve` (design/epoch-0/serve.md).
         srv: ?*serve.Server = null,
         /// The exportfs the server Proc runs, as a guest path.
         exportfs_buf: [64]u8 = undefined,
@@ -681,7 +725,7 @@ pub const Machine = struct {
         trace_lock: std.atomic.Mutex = .unlocked,
         /// vCPUs for the processes.
         pool: cpupool.Pool,
-        /// The CPUs /dev/sysstat lists (design/go-compat.md).
+        /// The CPUs /dev/sysstat lists (design/epoch-0/go-compat.md).
         ncpu: u32 = 1,
         /// When the run started, for /proc/uptime.
         start_ns: i64 = 0,
@@ -739,7 +783,7 @@ pub const Machine = struct {
         }
 
         /// Whose a new process is: the program's, or serving's, and then
-        /// which connection's, if any (design/serve.md).
+        /// which connection's, if any (design/epoch-0/serve.md).
         const Owner = union(enum) {
             program,
             serving: ?*Conn,
@@ -890,7 +934,7 @@ pub const Machine = struct {
         }
     };
 
-    /// One served connection (design/serve.md): how many processes
+    /// One served connection (design/epoch-0/serve.md): how many processes
     /// its exportfs and their children have, up to `serve.conn_procs`.
     /// Guarded by `Job.lock`; freed with its last process.
     const Conn = struct {
@@ -903,7 +947,7 @@ pub const Machine = struct {
         job: *Job,
         /// Machine-local pid.
         pid: u32,
-        /// The server Proc or one of its descendants (design/serve.md),
+        /// The server Proc or one of its descendants (design/epoch-0/serve.md),
         /// counted apart from the program's processes.
         serving: bool = false,
         /// The connection a serving process belongs to, if any.
@@ -946,7 +990,7 @@ pub const Machine = struct {
         in_sys: web.Atomic(u64) = .init(0),
         mem_kb: web.Atomic(u64) = .init(0),
         /// The Linux personality's state, while the process runs a Linux
-        /// binary (design/linux-personality.md). Its Mm owns `as`.
+        /// binary (design/epoch-0/linux-personality.md). Its Mm owns `as`.
         lx: ?*lsys.Process = null,
         /// Set in a vfork child: its parent waits on it until the child
         /// execs or exits.
@@ -954,7 +998,7 @@ pub const Machine = struct {
         /// Set by the stop kick hook when a debugger asks the process to
         /// stop, so the exit loop asks the kernel at its next stop point.
         stop_flag: std.atomic.Value(bool) = .init(false),
-        /// Debugging state (design/self-host.md), guarded by
+        /// Debugging state (design/epoch-0/self-host.md), guarded by
         /// `dbg_lock`, which /proc/n/mem, regs and fpregs take on the
         /// reading thread. It also guards `as` against exec swapping it.
         dbg_lock: std.atomic.Mutex = .unlocked,
@@ -1023,7 +1067,7 @@ pub const Machine = struct {
         }
 
         /// The kernel's hook for Linux's /proc/n/status: the thread group
-        /// and its size (design/linux-threads.md).
+        /// and its size (design/epoch-0/linux-threads.md).
         fn threads(aux: ?*anyopaque, tgid: *c_uint, n: *c_uint) callconv(.c) void {
             const p: *Proc = @ptrCast(@alignCast(aux orelse return));
             p.job.lockSpin();
@@ -1241,7 +1285,11 @@ pub const Machine = struct {
         j.mach.store(mc, .release);
         // What #ℓ's translators send as the machine's user.
         if (mc) |x| dotl.register(@intFromPtr(x), .{ .user = kern.user(), .user_map = m.opts.user_map, .io = m.io });
+        // Where #ι caches compiled indexes.
+        if (mc) |x| hidx.register(@intFromPtr(x), .{ .cache_dir = m.opts.index_cache, .io = m.io });
         const r = m.startFirst(p);
+        // What the root's index saved, for -v.
+        if (m.opts.verbose) if (m.hidx_root) |n| m.indexCounts(n);
         // The status and err_msg can point into the Proc or its errstr,
         // which go when it exits.
         j.result = if (r) |st| switch (st) {
@@ -1288,20 +1336,21 @@ pub const Machine = struct {
             const cd = try m.replayNamespace(text, j.con_id);
             // The cwd is a chan from before the replay. Without a `cd` of
             // its own, the replay ends in the cwd as its binds left it: an
-            // overlay over / (design/overlay.md) puts the cwd's
+            // overlay over / (design/epoch-0/overlay.md) puts the cwd's
             // mount point under the overlay, and the replay's binds onto
             // it are made there.
             if (!cd) if (built.cwd) |at| kern.chdir(at) catch {};
         }
+        if (std.mem.indexOf(u8, m.plan.devmask, policy.hidx_dev) != null) kern.devmask(policy.hidx_dev);
         // The guest's changes to the root count from here
-        // (design/overlay.md).
+        // (design/epoch-0/overlay.md).
         if (root_ov) |id| {
             j.home = std.fmt.bufPrint(&j.home_buf, "usr/{s}", .{kern.user()}) catch "";
             j.track = .{ .ctx = j, .changed = Job.rootChanged };
             kern.overlayTrack(id, &j.track);
         }
         // The server Proc gets a copy of the namespace as it is now, the
-        // plan's, before the program can change it (design/serve.md).
+        // plan's, before the program can change it (design/epoch-0/serve.md).
         if (!web.enabled and j.srv != null) {
             try m.startServer(p);
             if (j.argv.len == 0) return serveOnly(j);
@@ -1387,7 +1436,7 @@ pub const Machine = struct {
         return m.loop(p);
     }
 
-    /// Forks the server Proc (design/serve.md, "Each connection"):
+    /// Forks the server Proc (design/epoch-0/serve.md, "Each connection"):
     /// a copy of the first Proc's namespace, without `/net` unless
     /// `serve_net`, in a note group of its own, with no wait record for
     /// the program to see. It runs no guest code; it takes each ready
@@ -1444,7 +1493,7 @@ pub const Machine = struct {
             return;
         };
         hstream.release(id);
-        // Through a `#ℓ` conversation's server side (design/dotl.md),
+        // Through a `#ℓ` conversation's server side (design/epoch-0/dotl.md),
         // so a 9P2000.L client is translated and a 9P2000 one passes.
         const data = dotlConv("serve {d}", fd);
         kern.close(fd) catch {};
@@ -1695,7 +1744,7 @@ pub const Machine = struct {
             };
             // On 386, int 0x80 (Linux's call) is a general protection
             // fault for a 9front process, as its IDT gate allows only
-            // INT $64 from user mode (design/linux-i386.md).
+            // INT $64 from user mode (design/epoch-0/linux-i386.md).
             if (exit == .syscall and u == .i386 and u.i386.trap != vmm.ia32.vector_syscall) {
                 const note = "sys: trap: general protection violation";
                 if (!(kern.postNote(p.pid, note, .debug) catch false)) {
@@ -1786,7 +1835,7 @@ pub const Machine = struct {
         }
     }
 
-    /// A stop point (design/self-host.md): if a debugger asked the
+    /// A stop point (design/epoch-0/self-host.md): if a debugger asked the
     /// process to stop here, saves its registers for /proc/n/regs and
     /// fpregs, and parks on the process's own thread until ctl start,
     /// holding no vCPU. Registers the debugger wrote are loaded back
@@ -1936,7 +1985,7 @@ pub const Machine = struct {
     /// 9front's exit status for a broken noted.
     const suicide = "Suicide";
 
-    // The Linux personality (design/linux-personality.md): exec of an
+    // The Linux personality (design/epoch-0/linux-personality.md): exec of an
     // ELF binary, the exit loop's calls and signals, and clone.
 
     /// The environment a Linux program starts with, from /env: rc lists
@@ -2306,7 +2355,7 @@ pub const Machine = struct {
         if (u.* == .i386) {
             const r = &u.i386;
             // On 386 only int 0x80 is a Linux call: INT $64, 9front's, is
-            // a general protection fault, SIGSEGV (design/linux-i386.md).
+            // a general protection fault, SIGSEGV (design/epoch-0/linux-i386.md).
             if (r.trap != vmm.ia32.vector_linux) {
                 const a = l.sig.actions[lsig.SIGSEGV];
                 if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(lsig.SIGSEGV) != 0) {
@@ -2420,7 +2469,7 @@ pub const Machine = struct {
     /// set_thread_area (`set`) or get_thread_area of a struct user_desc:
     /// i386 Linux's three TLS segments, GDT entries 6 to 8, whose bases are
     /// thread pointers that `Extra.tls` and `Extra.tls_more` carry
-    /// (design/linux-i386.md, "TLS"). libc takes one for %gs, and
+    /// (design/epoch-0/linux-i386.md, "TLS"). libc takes one for %gs, and
     /// 32-bit Wine another for %fs. Entry -1 asks for a free one, as on
     /// Linux; an empty descriptor frees the entry it names. Segments stay
     /// flat whatever limit is asked for, so only the base is kept.
@@ -2645,7 +2694,7 @@ pub const Machine = struct {
                 // process without a handler.
                 const ns = lsig.noteSignal(text) orelse return p.keepNote(&msg);
                 // A process's signal that this thread blocks goes to one
-                // that doesn't, if there is one (design/linux-threads.md).
+                // that doesn't, if there is one (design/epoch-0/linux-threads.md).
                 if (ns.signo != lsig.SIGKILL and l.sig.mask & lsig.bit(ns.signo) != 0 and !lsig.isThreadNote(text)) {
                     if (l.g.unblocked(l.pid, ns.signo)) |tid| {
                         var nb: [32]u8 = undefined;
@@ -2810,9 +2859,15 @@ pub const Machine = struct {
     /// 9front processes, which never stop. A process's signal goes to its
     /// thread group's leader, which passes it on to a thread that doesn't
     /// block it (`deliverLinux`); a thread's (tgkill) goes to that thread
-    /// alone (design/linux-threads.md).
+    /// alone (design/epoch-0/linux-threads.md).
     fn linuxKill(ctx: *anyopaque, from: *lsys.Process, pid: i64, signo: u8, thread: ?lsys.ThreadKill) i64 {
-        const j: *Job = @ptrCast(@alignCast(ctx));
+        return postSignal(@ptrCast(@alignCast(ctx)), from, pid, signo, thread);
+    }
+
+    /// linuxKill's work; `from` may be null when pid names a process or
+    /// a group (pid > 0 or pid < -1).
+    fn postSignal(j: *Job, from_in: ?*lsys.Process, pid: i64, signo: u8, thread: ?lsys.ThreadKill) i64 {
+        if (from_in == null and (pid == 0 or pid == -1)) return -attr.E.INVAL;
         const Target = struct { pid: u32, linux: bool };
         var targets: [256]Target = undefined;
         var n: usize = 0;
@@ -2829,9 +2884,9 @@ pub const Machine = struct {
                 else if (pid > 0)
                     q.pid == pid
                 else if (pid == -1)
-                    leader and q.pid != from.tgid()
+                    leader and q.pid != from_in.?.tgid()
                 else if (pid == 0)
-                    leader and qg != null and qg.? == from.pgid
+                    leader and qg != null and qg.? == from_in.?.pgid
                 else
                     leader and qg != null and qg.? == @as(u64, @intCast(-pid));
                 if (!want or q.kproc == null) continue;
@@ -2852,6 +2907,16 @@ pub const Machine = struct {
             _ = kern.postNote(t.pid, note, .user) catch {};
         }
         return 0;
+    }
+
+    /// devpty's signals (design/epoch-0/linux-pty.md): SIGHUP to a terminal's
+    /// foreground group at its master's last close, and SIGINT, SIGQUIT,
+    /// and SIGTSTP for the ISIG characters written to the master, from
+    /// the process that closed or wrote it. A process without a Zig
+    /// record (a kernel process) sends nothing.
+    fn ptySig(pgrp: c_ulong, signo: c_int) callconv(.c) void {
+        const from: *Proc = @ptrCast(@alignCast(kern.aux() orelse return));
+        _ = postSignal(from.job, null, -@as(i64, @intCast(pgrp)), @intCast(signo), null);
     }
 
     fn linuxPgid(ctx: *anyopaque, pid: u32) ?u32 {
@@ -3130,13 +3195,22 @@ pub const Machine = struct {
         try m.setEnv();
 
         // Existing binds keep working, but masked devices can't be attached
-        // again to reach more of the host.
-        if (m.plan.devmask.len > 0) kern.devmask(try std.fmt.bufPrintZ(&buf, "{s}", .{m.plan.devmask}));
+        // again to reach more of the host. #ι goes after the namespace
+        // file, whose 9P mounts are through it (startFirst).
+        var mask: [64]u8 = undefined;
+        var nm: usize = 0;
+        var dv = (std.unicode.Utf8View.init(m.plan.devmask) catch unreachable).iterator();
+        while (dv.nextCodepointSlice()) |d| if (!std.mem.eql(u8, d, policy.hidx_dev) and nm + d.len < mask.len) {
+            @memcpy(mask[nm..][0..d.len], d);
+            nm += d.len;
+        };
+        mask[nm] = 0;
+        if (nm > 0) kern.devmask(mask[0..nm :0]);
         return .{ .root_overlay = root_ov, .cwd = cwd_at };
     }
 
     /// Makes `$home`, `/usr/$user`, in the root's overlay if the root
-    /// doesn't have it (design/overlay.md). Best effort: a run
+    /// doesn't have it (design/epoch-0/overlay.md). Best effort: a run
     /// without it works as it did with a read-only root.
     fn makeHome() void {
         var buf: [128]u8 = undefined;
@@ -3154,7 +3228,7 @@ pub const Machine = struct {
 
     /// Binds devlinux's /etc files after the Linux root's /etc when the
     /// root has no resolv.conf, as Alpine's minirootfs hasn't
-    /// (design/linux-net.md). Best effort: a root without /etc is
+    /// (design/epoch-0/linux-net.md). Best effort: a root without /etc is
     /// left as it is.
     fn linuxEtc() void {
         var st: [512]u8 = undefined;
@@ -3167,7 +3241,7 @@ pub const Machine = struct {
     }
 
     /// Connects to a 9P root and posts the connection as `#s/root`
-    /// (design/ninep-roots.md), where the board holds it for the
+    /// (design/epoch-0/ninep-roots.md), where the board holds it for the
     /// machine's life. h9 makes the connection, not the guest, so the
     /// network policy doesn't apply to it, and a TCP root is dialed through
     /// devip by device path whether or not `#I` is bound or masked later.
@@ -3196,7 +3270,7 @@ pub const Machine = struct {
     }
 
     /// Posts a root's connection `fd` as `#s/root`, through a `#ℓ`
-    /// conversation (design/dotl.md), so a 9P2000.L server works as a
+    /// conversation (design/epoch-0/dotl.md), so a 9P2000.L server works as a
     /// root and a 9P2000 one passes through. Closes `fd`.
     fn postRoot(m: *Machine, conn: u31) RunError!void {
         defer kern.close(conn) catch {};
@@ -3207,12 +3281,205 @@ pub const Machine = struct {
     /// as `#s/root`.
     fn postDotl(m: *Machine, data: kern.Error!u31) RunError!void {
         const addr = m.plan.root_9p.?.addr;
-        const fd = data catch return m.fail("root {f}: {s}", .{ ws.Url.elide(addr), kern.errstr() });
+        const conn = data catch return m.fail("root {f}: {s}", .{ ws.Url.elide(addr), kern.errstr() });
+        const fd = try m.indexRoot(conn);
         defer kern.close(fd) catch {};
         const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
         defer kern.close(srv) catch {};
         var num: [16]u8 = undefined;
         _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
+    }
+
+    /// Puts the root's connection `conn` under a `#ι` conversation
+    /// (design/mount-index.md) and returns an fd on its data file, or
+    /// returns `conn` itself under `--index none`. Takes `conn`.
+    fn indexRoot(m: *Machine, conn: u31) RunError!u31 {
+        const r = m.plan.root_9p.?;
+        const shown = ws.Url.elide(r.addr);
+        // Under -v, the conversation counts requests even without an index.
+        if (m.opts.index == .none and !m.opts.verbose) return conn;
+        var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
+        const ctl = if (m.opts.index == .none) "" else if (m.opts.root_index) |given| blk: {
+            const got = m.giveRootIndex(given) catch |e| {
+                kern.close(conn) catch {};
+                return e;
+            };
+            const id = got orelse break :blk "";
+            break :blk std.fmt.bufPrint(&arg, "index {d}", .{id}) catch unreachable;
+        } else std.fmt.bufPrint(&arg, "server {s} {s}", .{ r.addr, r.spec }) catch return m.fail("root {f}: name too long", .{shown});
+        var n: u32 = 0;
+        defer kern.close(conn) catch {};
+        const fd = hidxConv(ctl, conn, &n) catch return m.fail("root {f}: index: {s}", .{ shown, kern.errstr() });
+        m.hidx_root = n;
+        return fd;
+    }
+
+    /// Reads, compiles, and hands `#ι` the `--root-index` index, and
+    /// returns its number; null when it's to be ignored. One that can't
+    /// be read fails the run, as an unreachable root does.
+    fn giveRootIndex(m: *Machine, given: RootIndex) RunError!?u32 {
+        const addr = m.plan.root_9p.?.addr;
+        const a = hidx.allocator;
+        const from = switch (given) {
+            inline else => |x| x,
+        };
+        const cache: ?rootindex.cache.Cache = if (m.opts.index_cache) |d| .{ .gpa = a, .io = m.io, .dir = d } else null;
+        var etag: ?[]u8 = null;
+        defer if (etag) |e| a.free(e);
+        const text: []u8 = switch (given) {
+            .path => |path| std.Io.Dir.cwd().readFileAlloc(m.io, path, a, .limited(rootindex.max_text + 1)) catch |e| switch (e) {
+                error.StreamTooLong => {
+                    m.indexNote("index: {s} is larger than 256 MB; ignored", .{path});
+                    return null;
+                },
+                else => return m.fail("root {f}: --root-index {s}: {s}", .{ ws.Url.elide(addr), path, rootIndexError(e) }),
+            },
+            .url => |url| switch (hstream.fetchIndex(a, m.io, url, .{
+                .ca_file = m.opts.root_ca,
+                .proxy = m.opts.proxy orelse .{},
+                .cache = if (cache) |*c| c else null,
+            }, &m.msg_buf) catch |e| switch (e) {
+                error.TooBig => {
+                    m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(url)});
+                    return null;
+                },
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return m.fail("root {f}: --root-index {f}: {s}", .{ ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
+            }) {
+                .compiled => |b| return m.giveCompiled(b, from, true),
+                .text => |t| blk: {
+                    etag = t.etag;
+                    break :blk t.bytes;
+                },
+            },
+        };
+        defer a.free(text);
+        var vbuf: [64]u8 = undefined;
+        const version = rootindex.cache.textVersion(text, &vbuf);
+        const hit = if (cache) |*c| c.lookup(rootindex.cache.text_key, version) else null;
+        const compiled = hit orelse blk: {
+            var diag: rootindex.Diag = .{};
+            const b = rootindex.compile(a, text, &diag) catch |e| {
+                switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnknownVersion => m.indexNote("index: {f}: unknown format version; ignored", .{ws.Url.elide(from)}),
+                    error.TooBig => m.indexNote("index: {f} is larger than 256 MB; ignored", .{ws.Url.elide(from)}),
+                    error.BadIndex => m.indexNote("index: {f}: line {d}: {s}; ignored", .{ ws.Url.elide(from), diag.line, diag.msg }),
+                }
+                return null;
+            };
+            if (cache) |*c| c.store(rootindex.cache.text_key, version, b);
+            break :blk b;
+        };
+        if (cache) |*c| if (etag) |e| if (given == .url) c.storeEtag(given.url, e, version);
+        return m.giveCompiled(compiled, from, hit != null);
+    }
+
+    /// Hands `#ι` a compiled index, which it then owns.
+    fn giveCompiled(m: *Machine, compiled: []u8, from: []const u8, cached: bool) RunError!?u32 {
+        const a = hidx.allocator;
+        const mc = kern.mach() orelse {
+            a.free(compiled);
+            return m.fail("root: not a machine process", .{});
+        };
+        const owner = @intFromPtr(mc);
+        mc.put();
+        var lb: [256]u8 = undefined;
+        return try hidx.give(owner, compiled, std.fmt.bufPrint(&lb, "{f}", .{ws.Url.elide(from)}) catch from, cached);
+    }
+
+    fn rootIndexError(e: anyerror) []const u8 {
+        return switch (e) {
+            error.FileNotFound => "not found",
+            error.AccessDenied, error.PermissionDenied => "permission denied",
+            error.IsDir => "is a directory",
+            else => @errorName(e),
+        };
+    }
+
+    /// A note on stderr under `-v`.
+    fn indexNote(m: *Machine, comptime fmt: []const u8, args: anytype) void {
+        if (!m.opts.verbose) return;
+        m.opts.stdio.err.print("h9: " ++ fmt ++ "\n", args) catch {};
+        m.opts.stdio.err.flush() catch {};
+    }
+
+    /// Prints the notes of `#ι` conversation `n` under `-v`: how the index
+    /// was found and validated, or that there was none.
+    fn indexNotes(m: *Machine, n: u32, what: []const u8) void {
+        if (!m.opts.verbose) return;
+        var buf: [4096]u8 = undefined;
+        const st = hidxStatus(n, &buf) orelse return;
+        var any = false;
+        var lines = std.mem.splitScalar(u8, st, '\n');
+        while (lines.next()) |l| if (std.mem.startsWith(u8, l, "index: ")) {
+            m.indexNote("{s}", .{l});
+            any = true;
+        };
+        if (!any and std.mem.startsWith(u8, st, "index none")) m.indexNote("index: none for {s}", .{what});
+    }
+
+    /// Prints what the root's index saved, under `-v`.
+    fn indexCounts(m: *Machine, n: u32) void {
+        var buf: [4096]u8 = undefined;
+        const st = hidxStatus(n, &buf) orelse return;
+        var lines = std.mem.splitScalar(u8, st, '\n');
+        // What validating directories as they were used came to.
+        while (lines.next()) |l| if (std.mem.startsWith(u8, l, "end: ")) m.indexNote("{s}", .{l["end: ".len..]});
+        lines.reset();
+        while (lines.next()) |l| if (std.mem.startsWith(u8, l, "requests ")) {
+            var f = std.mem.tokenizeScalar(u8, l, ' ');
+            _ = f.next();
+            const from = f.next() orelse return;
+            _ = f.next();
+            const sent = std.fmt.parseInt(u64, f.next() orelse return, 10) catch return;
+            _ = f.next();
+            const boot = std.fmt.parseInt(u64, f.next() orelse "0", 10) catch 0;
+            if (boot == 0)
+                m.indexNote("index: devmnt sent the root {s} 9P requests; {d} went to the server", .{ from, sent })
+            else
+                m.indexNote("index: devmnt sent the root {s} 9P requests; {d} went to the server, besides {d} to find the index and check directories", .{ from, sent -| boot, boot });
+        };
+    }
+
+    /// `#ι` conversation `n`'s status.
+    fn hidxStatus(n: u32, buf: []u8) ?[]const u8 {
+        return kern.hidxStatus(n, buf);
+    }
+
+    /// Starts a `#ι` conversation over the connection `conn`, which the
+    /// caller can close after, with the ctl message `ctl` ("server KEY", "index N", or
+    /// none for one that only counts), and returns an fd on its data file,
+    /// which devmnt mounts, and the conversation's number in `num`.
+    fn hidxConv(ctl: []const u8, conn: u31, num: *u32) kern.Error!u31 {
+        const dev = "#" ++ policy.hidx_dev ++ "/hidx/";
+        const clone = try kern.open(dev ++ "clone", kern.ORDWR);
+        defer kern.close(clone) catch {};
+        var nbuf: [16]u8 = undefined;
+        const n = std.mem.trim(u8, nbuf[0..try kern.pread(clone, &nbuf, 0)], " \n");
+        num.* = std.fmt.parseInt(u32, n, 10) catch return error.Kern;
+        if (ctl.len > 0) _ = try kern.pwrite(clone, ctl, 0);
+        var cmd: [32]u8 = undefined;
+        _ = try kern.pwrite(clone, std.fmt.bufPrint(&cmd, "fd {d}", .{conn}) catch unreachable, 0);
+        var path: [64]u8 = undefined;
+        return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
+    }
+
+    /// A namespace-file mount's connection `conn` under `#ι`, using its
+    /// server's `.fs/index` (design/mount-index.md); `conn` itself under
+    /// `--index none`. Takes `conn`.
+    fn indexMount(m: *Machine, conn: u31, file: []const u8, spec: []const u8, num: *?u32) u31 {
+        if (m.opts.index == .none) return conn;
+        var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
+        const ctl = std.fmt.bufPrint(&arg, "server {s} {s}", .{ file, spec }) catch return conn;
+        var n: u32 = 0;
+        const fd = hidxConv(ctl, conn, &n) catch {
+            m.indexNote("index: none for {s}: {s}", .{ file, kern.errstr() });
+            return conn;
+        };
+        kern.close(conn) catch {};
+        num.* = n;
+        return fd;
     }
 
     /// Starts a `#ℓ` conversation with the ctl message `fmt` ("fd N" for
@@ -3269,6 +3536,7 @@ pub const Machine = struct {
         defer if (r.user != null) kern.setProcUser(saved[0..own.len :0]);
         const spec = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.spec});
         _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), kern.MREPL, spec) catch return m.fail("root {f}: {s}", .{ shown, kern.errstr() });
+        if (m.opts.index != .none) if (m.hidx_root) |n| m.indexNotes(n, "the root");
     }
 
     /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
@@ -3320,25 +3588,32 @@ pub const Machine = struct {
             // A WebSocket URL is connected by h9, as a root is; unlike
             // other failures, one that fails stops the run.
             // Its connection goes through a `#ℓ` conversation
-            // (design/dotl.md), so a 9P2000.L server works too.
+            // (design/epoch-0/dotl.md), so a 9P2000.L server works too.
             .mount => |mt| if (ws.Url.is(mt.file)) {
                 if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a WebSocket mount", .{ws.Url.elide(mt.file)});
                 const conn = try m.connectStream(mt.file, .{ .proxy = m.opts.proxy orelse .{} }, "mount");
                 const data = dotlConv("fd {d}", conn);
                 kern.close(conn) catch {};
-                const fd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+                const dfd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+                // Through #ι, for the server's .fs/index (design/mount-index.md).
+                var num: ?u32 = null;
+                const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
                 defer kern.close(fd) catch {};
                 _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch
                     return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
+                if (num) |n| m.indexNotes(n, mt.to);
             } else if (std.mem.startsWith(u8, mt.file, "tcp!")) {
                 // A dial string, which `#ℓ` dials under the network
                 // policy, as dotlfs does, and dials again if a 9P2000.L.Z
                 // server goes. Like any other mount, one that fails is
                 // skipped.
                 if (m.plan.write == .none) return m.fail("mount {s}: --write=none can't be enforced on a 9P mount", .{mt.file});
-                const fd = dotlConv("dial {s}", mt.file) catch continue;
+                const dfd = dotlConv("dial {s}", mt.file) catch continue;
+                var num: ?u32 = null;
+                const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
                 defer kern.close(fd) catch {};
-                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch {};
+                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch continue;
+                if (num) |n| m.indexNotes(n, mt.to);
             } else {
                 const fd = kern.open(try m.nsPath(arena, mt.file, con_id), kern.ORDWR) catch continue;
                 defer kern.close(fd) catch {};
@@ -3390,10 +3665,10 @@ pub const Machine = struct {
         // rc lists end each element with a NUL: path=(. /bin).
         try putEnv("path", ".\x00/bin\x00");
         // mk's job count, as 9front's termrc sets it from /dev/sysstat:
-        // the CPUs the machine may use (design/self-host.md).
+        // the CPUs the machine may use (design/epoch-0/self-host.md).
         var nproc_buf: [16]u8 = undefined;
         try putEnv("NPROC", std.fmt.bufPrint(&nproc_buf, "{d}", .{m.cpuCount()}) catch unreachable);
-        // The listeners' bound addresses, an rc list (design/serve.md).
+        // The listeners' bound addresses, an rc list (design/epoch-0/serve.md).
         if (m.serve_addrs.len > 0) {
             var list: std.ArrayList(u8) = .empty;
             defer list.deinit(m.gpa);

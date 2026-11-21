@@ -370,7 +370,7 @@ test "fault on unmapped memory 386 [i386]" {
 /// Runs `text`, which ends in a breakpoint instruction at `bp_off`: the
 /// vCPU exits with `.breakpoint`, the PC left at a BRK and past an INT3
 /// (`pc_off`), and a process with no debugger or note handler dies with
-/// `sys: breakpoint` (design/self-host.md).
+/// `sys: breakpoint` (design/epoch-0/self-host.md).
 fn expectBreakpoint(arch: aout.Arch, text: []const u8, pc_off: u64) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1568,7 +1568,7 @@ test "segments: /proc/n/segment's text" {
     }.f);
 }
 
-// rendezvous and semaphores (design/semaphores.md), from the programs
+// rendezvous and semaphores (design/epoch-0/semaphores.md), from the programs
 // in tests/fixtures/sema.
 
 test "rendezvous swaps values between an rfork child and its parent [semaphores]" {
@@ -1680,7 +1680,7 @@ test "a name pattern allows a connect through cs, and only through cs [net-polic
     try expectNet(net_cs, &.{ "t", "tcp!localhost!2" }, pol, "exited no translation for host found");
 }
 
-// Overlays (design/ephemeral-writes.md).
+// Overlays (design/epoch-0/ephemeral-writes.md).
 
 /// A host root tree with the mount points the namespace builder needs.
 const OverlayRoot = struct {
@@ -1714,8 +1714,8 @@ fn runOverlay(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.
     return runOverlayTools(kind, r, text, pol, true, sb, null);
 }
 
-/// `runOverlay`, with `guest_tools` (design/guest-tools.md) as given,
-/// and the run's root changes (design/overlay.md) in `changes`.
+/// `runOverlay`, with `guest_tools` (design/epoch-0/guest-tools.md) as given,
+/// and the run's root changes (design/epoch-0/overlay.md) in `changes`.
 fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol: h9.Policy, guest_tools: bool, sb: []u8, changes: ?*h9.RootChanges) !?[]const u8 {
     const gpa = std.testing.allocator;
     const bytes = try image(gpa, .arm64, text);
@@ -2001,7 +2001,7 @@ test "a machine's posted channels are closed when it ends [devsrv]" {
     if (ran == 0) return error.SkipZigTest;
 }
 
-// #H (design/guest-tools.md), with the test-only script that Debug
+// #H (design/epoch-0/guest-tools.md), with the test-only script that Debug
 // builds serve from tests/fixtures/guest.
 
 test "#H/bin is on /bin, reads back, and refuses every change [guest-tools]" {
@@ -2086,7 +2086,7 @@ fn arm64Zero() vmm.arm64.Ureg {
     return .{};
 }
 
-// Graphics (design/gfx.md), on the headless backend: a screen in
+// Graphics (design/epoch-0/gfx.md), on the headless backend: a screen in
 // memory that the test acts on as a window system would.
 
 const gfx = h9.gfx;
@@ -2112,7 +2112,7 @@ const GfxRun = struct {
         guest: ?[]const u8 = null,
         argv: []const []const u8 = &.{"t"},
         root: ?[]const u8 = null,
-        /// A Linux root, for a Linux guest (design/linux-personality.md).
+        /// A Linux root, for a Linux guest (design/epoch-0/linux-personality.md).
         linux_root: ?[]const u8 = null,
         cwd: ?[]const u8 = null,
         arch: vmm.Arch = .arm64,

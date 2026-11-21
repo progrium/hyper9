@@ -40,12 +40,14 @@ extern Dev srvdevtab;
 extern Dev htoolsdevtab;
 extern Dev hstreamdevtab;
 extern Dev dotldevtab;
+extern Dev hidxdevtab;
 extern Dev linuxdevtab;
 extern Dev evdevtab;
+extern Dev ptydevtab;
 
 #ifdef H9_WEB
 /*
- * devfs on the web host (design/browser-host.md). WASI has no
+ * devfs on the web host (design/epoch-0/browser-host.md). WASI has no
  * permission bits, so devfs gives every file mode 0, which devoverlay
  * takes as unwritable and ls shows as ----------. The policy, not the
  * mode, decides what the guest may do, so this device is devfs with
@@ -148,8 +150,10 @@ Dev *devtab[] = {
 	&htoolsdevtab,
 	&hstreamdevtab,
 	&dotldevtab,
+	&hidxdevtab,
 	&linuxdevtab,
 	&evdevtab,
+	&ptydevtab,
 	0
 };
 

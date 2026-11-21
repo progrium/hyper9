@@ -1,5 +1,5 @@
 /*
- * #s: service registry (design/devsrv.md), ported from 9front's
+ * #s: service registry (design/epoch-0/devsrv.md), ported from 9front's
  * port/devsrv.c at the pinned release.
  *
  * A file server posts a channel by creating a name here and writing the

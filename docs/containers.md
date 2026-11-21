@@ -80,9 +80,9 @@ something the runtime does for you.
 | The container's writable layer | The default, `--write=overlay`: the root takes writes in memory ([section 8](#8-the-containers-writable-layer)) | main |
 | `docker run --read-only` | `--write=scope`: the root is read-only, writable volumes still write | main |
 | `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux personality) |
-| Running Linux images | `h9 --root ./alpine sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/linux-personality.md)) |
+| Running Linux images | `h9 --root ./alpine sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/epoch-0/linux-personality.md)) |
 | `FROM scratch` + static binaries | A slim root tree: Plan 9 binaries are statically linked ([section 4](#4-from-scratch-slim-images)) | main |
-| A busybox base image | `zig build slim`, or the built-in root h9 carries: 43 of 9front's commands in one binary | main |
+| A busybox base image | `zig build slim`, or the built-in root h9 carries: 44 of 9front's commands in one binary | main |
 | `ENTRYPOINT`, `CMD` | An rc script in the image, run by path; or `/rc/lib/rcmain.local`, run by `h9 --rc` | main |
 | `ENV`, `docker run -e` | `--env name=value`, or assignments in the entrypoint | main |
 | `WORKDIR` | `cd` in the namespace file | main |
@@ -102,20 +102,20 @@ something the runtime does for you.
 | `docker run --stop-timeout`, job deadlines | `--timeout DURATION`, exit 124 | main |
 | `docker inspect` | `h9 --print` | main |
 | Pulling 9front images from a registry | `--root tcp!host!port` (a 9P server), read on demand | main |
-| The same, over HTTPS | `--root wss://host/path` ([websocket-9p](../design/websocket-9p.md)) | main |
+| The same, over HTTPS | `--root wss://host/path` ([websocket-9p](../design/epoch-0/websocket-9p.md)) | main |
 | Pulling a layer at run time | `mount 'wss://…' /dir` in the namespace file, or `wsmount` in the guest | main |
 | `docker save`, `docker load` | `tar` the root tree | main |
 | Multi-platform images | One tree with `/arm64/bin` and `/amd64/bin`; `--arch` picks | main |
 | `docker compose` | A shell script that starts several `h9`s ([section 15](#15-compose-several-machines)) | main |
-| `docker exec`, `docker ps`, detached containers | Nothing built in ([section 16](#16-running-containers-stop-logs-restart-exec)); serving a running machine's namespace is proposed | *Not yet available ([serve](../design/serve.md), draft)* |
-| Disk-image roots (like a squashfs image) | Declined: unpack the image, or serve it over 9P | ([image-roots](../design/image-roots.md), declined) |
+| `docker exec`, `docker ps`, detached containers | Nothing built in ([section 16](#16-running-containers-stop-logs-restart-exec)); serving a running machine's namespace is proposed | *Not yet available ([serve](../design/epoch-0/serve.md), draft)* |
+| Disk-image roots (like a squashfs image) | Declined: unpack the image, or serve it over 9P | ([image-roots](../design/epoch-0/image-roots.md), declined) |
 
 ## 3. Images are root trees
 
 The root tree that `zig build mkroot` builds is h9's equivalent of a
 `debian` base image: about 250 MB of 9front, with every program and library
 file. Every `h9` command that doesn't pass `--root` already runs in it. (With
-no tree at all, h9 runs on a small built-in root of 43 commands, more like
+no tree at all, h9 runs on a small built-in root of 44 commands, more like
 `busybox`; see [manual, chapter 2](../MANUAL.md#2-installing).)
 
 Any other directory that looks like a 9front tree works as `--root`:
@@ -168,7 +168,7 @@ and the host's directories onto them:
 | `/rc/bin`, `/rc/lib/rcmain` | rc, if the image uses it: rc reads `rcmain` when it starts |
 
 **A busybox-style base.** `zig build slim` builds the closest thing to
-`busybox`: 43 of 9front's own commands as one multi-call binary of about
+`busybox`: 44 of 9front's own commands as one multi-call binary of about
 800 KB, `9box`, in a root tree with rc, the file and text tools, `tar`, and
 the namespace tools. The same tree is built into h9 as its built-in root, so an
 image can also leave the common commands out and borrow them at run time
@@ -246,7 +246,7 @@ answers their system calls with the same Plan 9 kernel, so a Linux program
 gets the machine's sandbox, network policy, and limits like a 9front one.
 `--root` takes a Linux root as readily as a 9front one: h9 tells them apart by
 their contents (`/etc/os-release`, a `/lib/ld-*` loader, and no `/rc/bin`).
-It's built ([linux-personality](../design/linux-personality.md),
+It's built ([linux-personality](../design/epoch-0/linux-personality.md),
 and [manual, chapter 20](../MANUAL.md#20-linux-programs)), and runs Alpine's
 busybox, `apk`, Python, SQLite, PostgreSQL, Redis, and Git.
 
@@ -327,7 +327,7 @@ There's no image config file. Its parts go in two places:
 nothing: `h9 --rc`, with no command line, runs a login rc, which sources the
 root's `/rc/lib/rcmain.local` first. A file that sets up the namespace and
 ends with `exec serve` is the image's `CMD`, with nothing on the host to
-remember ([default-command](../design/default-command.md)):
+remember ([default-command](../design/epoch-0/default-command.md)):
 
 ```text
 # /rc/lib/rcmain.local: the greeter's default command
@@ -450,7 +450,7 @@ host$ h9 --readable ~/src/plugins --ns plugins.ns ls /bin
 ```
 
 **Layers from the network.** With
-[websocket-9p](../design/websocket-9p.md), a namespace file can mount a
+[websocket-9p](../design/epoch-0/websocket-9p.md), a namespace file can mount a
 9P server behind a WebSocket, and then bind from it like any other
 directory. The mount point has to exist in the image, or be made in the
 root's overlay first:
@@ -472,7 +472,7 @@ A Docker container gets a writable layer over its image, thrown away with
 `--rm`. h9 does the same by default: `--write=overlay` puts a copy-on-write
 overlay in memory over the root, whatever kind of root it is, so a program
 can create, change, and remove files anywhere in `/`, and the image on the
-host is never written ([overlay](../design/overlay.md)).
+host is never written ([overlay](../design/epoch-0/overlay.md)).
 
 ```sh
 host$ h9 --root ./images/base --rc 'echo installed > /sys/lib/x && cat /sys/lib/x'
@@ -697,7 +697,7 @@ it. Writes stay in the root's overlay, as for a directory root, so the
 server is only read. The connection is plain, unauthenticated 9P, so keep
 TCP roots on a trusted network ([manual, chapter
 16](../MANUAL.md#16-file-servers-srv-and-9p-mounts)); 9P authentication for
-roots was proposed and declined ([root-auth](../design/root-auth.md)) in
+roots was proposed and declined ([root-auth](../design/epoch-0/root-auth.md)) in
 favor of authenticating WebSocket roots. On macOS and Linux a
 unix socket works too, as `--root unix!/path`.
 
@@ -707,7 +707,7 @@ registry serves `name:tag`. `exportfs -r` serves one tree; a server that
 switches on the attach name would have to be written (`9p(2)`) or come from
 elsewhere.
 
-**Over HTTPS.** [websocket-9p](../design/websocket-9p.md) adds
+**Over HTTPS.** [websocket-9p](../design/epoch-0/websocket-9p.md) adds
 WebSocket roots, which go through HTTP proxies and TLS and can carry an
 `Authorization` header, as a registry pull does. The scheme can be left off,
 so `--root registry.example.com/greeter` means `wss://`:
@@ -822,7 +822,7 @@ host$ h9 --net-allow 'tcp!127.0.0.1!5650' --rc 'srv tcp!127.0.0.1!5650 c && mkdi
 
 That export is unauthenticated and read-write, so keep it on loopback and
 only for debugging. A machine serving its namespace as a built-in feature is
-the [serve](../design/serve.md) proposal, still a draft.
+the [serve](../design/epoch-0/serve.md) proposal, still a draft.
 
 ## 17. What's missing
 
@@ -830,14 +830,14 @@ Things Docker does that h9 doesn't, with the proposal that would change it
 where there is one:
 
 - **Exec, attach, and inspecting a running machine.** See section 16;
-  [serve](../design/serve.md) is a draft.
+  [serve](../design/epoch-0/serve.md) is a draft.
 - **Saving a run's changes.** The root's overlay is thrown away; exporting it
   as a layer is [overlay-export](../design/overlay-export.md), a draft.
 - **Image files.** Images are directories or 9P servers. Attaching a
   single-file image read-only was proposed and declined
-  ([image-roots](../design/image-roots.md)).
+  ([image-roots](../design/epoch-0/image-roots.md)).
 - **Authenticated registries.** 9P roots don't authenticate; that was
-  proposed and declined ([root-auth](../design/root-auth.md)). WebSocket
+  proposed and declined ([root-auth](../design/epoch-0/root-auth.md)). WebSocket
   roots can send a bearer token in a header.
 - **A build cache, image IDs, and digests.** Build scripts start over each
   time; `tar | shasum` gives a digest if you need one.
@@ -846,11 +846,11 @@ where there is one:
 - **Disk quotas.** Writes to writable host paths aren't capped.
 - **All of Linux.** The Linux personality runs a lot of Alpine, but not
   everything: job-control stops are ignored, `chown` does nothing, and some
-  system calls are missing. Its [proposal](../design/linux-personality.md)
+  system calls are missing. Its [proposal](../design/epoch-0/linux-personality.md)
   lists them.
 - **A daemon, an API, and Windows hypervisors.** h9 is a command, not a
   service. Windows mostly runs on the emulator: the
-  [whp](../design/whp.md) backend is built for x86\_64 but incomplete.
+  [whp](../design/epoch-0/whp.md) backend is built for x86\_64 but incomplete.
 
 ## 18. Putting it together: h9box
 

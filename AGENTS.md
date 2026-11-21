@@ -19,13 +19,14 @@
 ## Proposals
 
 - When a task would change anything listed under "When a proposal is needed" in `design/README.md`, find the proposal that covers it (`zig build design -- list`). If there's none, draft one with `zig build design -- new <slug>` and stop, unless the person you're working for directs you to build it. Then the PR adds or updates the proposal as it goes: its `branch` (the PR's branch), its Done criteria checkboxes, and its status.
-- Refer to proposals by slug everywhere: in `depends`, test tags, links (`design/<slug>.md`), comments, and PRs. Tag new cases with it: `test "name [slug]"`.
+- Refer to proposals by slug everywhere: in `depends`, test tags, links (`design/<slug>.md`, or `design/epoch-N/<slug>.md` once it's archived), comments, and PRs. Tag new cases with it: `test "name [slug]"`.
 - A proposal's body says what changes and why, never what's built so far. Record progress in `status`, `branch`, the Done criteria checkboxes, and dated Updates notes.
 - Never edit an accepted proposal's body, except to check off or waive a Done criteria item: add a dated note under its Updates section, or draft a new proposal.
 - Never add, copy, or re-date a signature line (`Mon D, YYYY · Name, h.d.a.`) in a proposal or `SPEC.md`, run `zig build design -- sign`, post a `/sign` comment, or edit `design/SIGNERS`; only the named person signs, after reviewing the doc (see Signature in `design/README.md`). Don't remove an existing signature either. If you substantially change a signed doc, tell the user it may need re-signing.
 - Add a dependency you discover to the proposal's `depends` in the same PR, and say so.
 - The PR that finishes a proposal updates the spec to describe what was built (the file under `spec/` that covers it, or `SPEC.md` for the overview and the decisions table), checks off its Done criteria, and sets `status: implemented` and `branch: [main]`. The spec describes only what's built.
 - Bug fixes, workarounds, and refactors that don't change behavior need no proposal; explain them in code comments and commit messages.
+- Closed proposals are archived in `design/epoch-N/` by `zig build design -- archive`, in a PR of its own. Don't run it in a PR that does anything else, and don't move a proposal by hand.
 - Run `zig build design -- check` before opening a PR. Don't run `zig build design -- status` or commit `design/STATUS.md` in a PR: a workflow regenerates it on main after each merge, so PRs don't conflict over it.
 
 ## Validate changes

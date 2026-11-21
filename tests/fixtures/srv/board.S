@@ -1,4 +1,4 @@
-// devsrv within one machine (tests/backends.zig, design/devsrv.md):
+// devsrv within one machine (tests/backends.zig, design/epoch-0/devsrv.md):
 // posting a pipe end, refusing a second post and a second create, reading
 // what's written to the pipe through /srv, an ORCLOSE entry going with its
 // fd, and a clone board whose entries go when its lease is closed.

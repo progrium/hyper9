@@ -229,6 +229,9 @@ const c_stub = struct {
     fn h9_overlay_drop(_: c_int) void {}
     fn h9_overlay_track(_: c_int, _: ?*anyopaque) void {}
     fn h9_kern_release() void {}
+    fn h9_hidx_convstatus(_: c_int, _: [*]u8, _: c_int) c_int {
+        return -1;
+    }
     fn h9_unixdial(_: [*:0]const u8) c_int {
         return -1;
     }
@@ -336,6 +339,7 @@ const c_real = struct {
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
     extern fn h9_unixdial(path: [*:0]const u8) c_int;
+    extern fn h9_hidx_convstatus(n: c_int, buf: [*]u8, len: c_int) c_int;
     extern fn h9_kern_upuser() [*:0]const u8;
     extern fn h9_kern_setuser(name: [*:0]const u8) void;
     extern fn h9_hstream_wake(id: c_ulong) void;
@@ -505,7 +509,7 @@ pub fn setProcSegment(f: *const fn (?*anyopaque, [*]u8, c_int) callconv(.c) c_in
 
 /// Sets the hook ctl stop and startstop call, with the process's `aux`,
 /// so it checks for a stop request at its next stop point
-/// (design/self-host.md). Called as the note kick hook is.
+/// (design/epoch-0/self-host.md). Called as the note kick hook is.
 pub fn setStopKick(f: *const fn (?*anyopaque) callconv(.c) void) void {
     if (available) c.h9_stopkick = f;
 }
@@ -818,7 +822,7 @@ pub fn setPlan(p: ?*const policy.Plan) void {
 
 /// Where a machine's overlay memory comes from: its guest-physical page
 /// allocator, so ephemeral files count against `--memory`
-/// (design/ephemeral-writes.md). Allocations are whole pages of
+/// (design/epoch-0/ephemeral-writes.md). Allocations are whole pages of
 /// `page_size` bytes; `alloc` returns null when the machine's memory is
 /// used up.
 pub const Pages = struct {
@@ -848,7 +852,7 @@ pub fn overlayNew(lower: ?[*:0]const u8) Error!u32 {
 
 /// The target of the host link that `path`'s last name is, through `#U`
 /// and an overlay over it, as the link has it written
-/// (design/symlinks-in-root.md). Fails with "not a symbolic link"
+/// (design/epoch-0/symlinks-in-root.md). Fails with "not a symbolic link"
 /// for anything else. For the Linux personality's readlinkat; Plan 9
 /// programs never see links.
 pub fn readlink(path: [*:0]const u8, buf: []u8) Error![]u8 {
@@ -990,7 +994,16 @@ pub fn fauth(fd: u31, aname: [*:0]const u8) Error!u31 {
 }
 
 /// Connects to the unix-domain socket at host path `path` and returns an
-/// fd on a channel for it (design/ninep-roots.md). Fails on Windows.
+/// fd on a channel for it (design/epoch-0/ninep-roots.md). Fails on Windows.
+/// The status of the caller's machine's `#ι` conversation `n`
+/// (src/kern/devhidx.c), read without a chan, since `#ι` is masked once
+/// the namespace is built; or null.
+pub fn hidxStatus(n: u32, buf: []u8) ?[]u8 {
+    const k = c.h9_hidx_convstatus(@intCast(n), buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int))));
+    if (k < 0) return null;
+    return buf[0..@intCast(k)];
+}
+
 pub fn unixDial(path: [*:0]const u8) Error!u31 {
     return try check(c.h9_unixdial(path));
 }
@@ -1204,7 +1217,7 @@ comptime {
     }
 }
 
-// The clock (design/go-compat.md): one per host process, in
+// The clock (design/epoch-0/go-compat.md): one per host process, in
 // nanoseconds. Wall time is the host's real-time clock. Monotonic time is
 // the host's monotonic clock, offset so it starts at the wall time when
 // the clock is first read, so its values look like wall time but never
@@ -1279,7 +1292,7 @@ fn h9_cons_ncpu() callconv(.c) c_int {
     return @intCast(@min(cons_ncpu, std.math.maxInt(c_int)));
 }
 
-// h9's own guest commands (design/guest-tools.md): the table build.zig
+// h9's own guest commands (design/epoch-0/guest-tools.md): the table build.zig
 // generates from src/guest/, as constant C structs. devhtools.c reads it
 // once at reset and never calls back into Zig.
 
@@ -1318,7 +1331,7 @@ fn h9_tools_table(n: *c_int) callconv(.c) [*]const Htool {
     return &tools_table;
 }
 
-/// The built-in root (design/builtin-root.md), `#Hroot`: the same kind of
+/// The built-in root (design/epoch-0/builtin-root.md), `#Hroot`: the same kind of
 /// table, from multicall's trees. It has a 9front tree's modes, 0775 and
 /// 0664, though the device refuses every write, because an overlay over it
 /// (the root's, and `/tmp`'s) takes its permissions from the tree below:

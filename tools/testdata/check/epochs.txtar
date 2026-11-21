@@ -1,0 +1,49 @@
+Epoch folders (design/epochs.md): only closed proposals are archived, and a
+link must name the folder a proposal is in.
+
+error: design/epoch-0/open.md: it's in an epoch folder, but its status is `draft`
+error: design/a.md:12: links to design/done.md, which is now design/epoch-0/done.md
+error: src/a.zig:1: links to design/done.md, which is now design/epoch-0/done.md
+error: design/epoch-0/done.md:14: links to design/epoch-0/a.md, which is now design/a.md
+error: design/epoch-0/done.md:15: links to design/epoch-1/done.md, which is now design/epoch-0/done.md
+
+-- design/a.md --
+---
+slug: a
+title: A
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+
+# Proposal: A
+
+See [done](done.md), which moved, and [done](epoch-0/done.md), where it is.
+-- design/epoch-0/done.md --
+---
+slug: done
+title: Done
+status: implemented
+created: 2026-11-03
+authors: [progrium]
+depends: []
+branch: [main]
+---
+
+# Proposal: Done
+
+See [a](../a.md), [open](open.md), [README](../README.md#signature), and [the spec](../../SPEC.md).
+But not [a](a.md), which isn't in this folder,
+or design/epoch-1/done.md, which is the wrong one.
+-- design/epoch-0/open.md --
+---
+slug: open
+title: Open
+status: draft
+created: 2026-11-03
+authors: [progrium]
+depends: []
+---
+-- src/a.zig --
+// The old place (design/done.md), and the new one (design/epoch-0/done.md).

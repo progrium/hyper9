@@ -1,5 +1,5 @@
-//! Proposals under design/: their frontmatter, parsed (design/proposals.md,
-//! design/proposal-flow.md).
+//! Proposals under design/: their frontmatter, parsed (design/epoch-0/proposals.md,
+//! design/epoch-0/proposal-flow.md).
 //! Shared by tools/design.zig and build.zig, so it does no I/O beyond
 //! reading the design directory, and never fails on a bad proposal: it
 //! reports it and carries on, and `zig build design -- check` decides.
@@ -26,7 +26,8 @@ pub const Status = enum {
 };
 
 pub const Proposal = struct {
-    /// File name within the design directory.
+    /// Path within the design directory: `slug.md`, or `epoch-N/slug.md`
+    /// once it's archived (design/epoch-0/epochs.md).
     file: []const u8,
     /// The number of its GitHub issue, once it has one.
     issue: ?u32 = null,
@@ -55,6 +56,17 @@ pub const Proposal = struct {
     /// The file name the proposal should have: `slug.md`.
     pub fn expectedFile(p: Proposal, buf: []u8) []const u8 {
         return std.fmt.bufPrint(buf, "{s}.md", .{p.slug}) catch "";
+    }
+
+    /// The file's name without its epoch folder.
+    pub fn base(p: Proposal) []const u8 {
+        return if (std.mem.lastIndexOfScalar(u8, p.file, '/')) |i| p.file[i + 1 ..] else p.file;
+    }
+
+    /// The epoch it's archived in, or null while it's at the top of design/.
+    pub fn epoch(p: Proposal) ?u32 {
+        const i = std.mem.indexOfScalar(u8, p.file, '/') orelse return null;
+        return epochOf(p.file[0..i]);
     }
 
     pub fn onMain(p: Proposal) bool {
@@ -118,7 +130,7 @@ fn validDate(s: []const u8) bool {
     return month >= 1 and month <= 12 and day >= 1 and day <= 31;
 }
 
-/// Parses one proposal. `file` is its name in the design directory, for
+/// Parses one proposal. `file` is its path within the design directory, for
 /// messages and the filename check. Problems go to `diags`, and the result
 /// has `ok` false.
 pub fn parse(arena: std.mem.Allocator, file: []const u8, text: []const u8, diags: *Diags) Proposal {
@@ -302,14 +314,33 @@ pub fn isProposalFile(name: []const u8) bool {
         !std.mem.eql(u8, name, "STATUS.md");
 }
 
-/// Reads and parses every proposal in `dir`, in the rough order they were
-/// written: by `created`, then by `issue`, then by slug.
+/// N from an epoch folder's name, `epoch-N`.
+pub fn epochOf(name: []const u8) ?u32 {
+    const prefix = "epoch-";
+    if (!std.mem.startsWith(u8, name, prefix) or name.len == prefix.len) return null;
+    for (name[prefix.len..]) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(u32, name[prefix.len..], 10) catch null;
+}
+
+/// Reads and parses every proposal in `dir` and its epoch folders, in the
+/// rough order they were written: by `created`, then by `issue`, then by slug.
 pub fn scan(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, diags: *Diags) ![]Proposal {
     var names: std.ArrayList([]const u8) = .empty;
+    var epochs: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
     while (try it.next(io)) |e| {
+        if (e.kind == .directory and epochOf(e.name) != null) try epochs.append(arena, try arena.dupe(u8, e.name));
         if (e.kind != .file or !isProposalFile(e.name)) continue;
         try names.append(arena, try arena.dupe(u8, e.name));
+    }
+    for (epochs.items) |name| {
+        var sub = try dir.openDir(io, name, .{ .iterate = true });
+        defer sub.close(io);
+        var sit = sub.iterate();
+        while (try sit.next(io)) |e| {
+            if (e.kind != .file or !isProposalFile(e.name)) continue;
+            try names.append(arena, try std.fmt.allocPrint(arena, "{s}/{s}", .{ name, e.name }));
+        }
     }
     std.mem.sort([]const u8, names.items, {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
@@ -524,4 +555,18 @@ test "slugs and tags" {
     try std.testing.expect(caseName("async function test(name, f) {") == null);
     try std.testing.expect(tagsCase("await test('x [a, b]', f);\n", "b"));
     try std.testing.expect(!tagsCase("await test('x [a, b]', f);\n", "c"));
+}
+
+test "epoch folders" {
+    try std.testing.expectEqual(@as(?u32, 0), epochOf("epoch-0"));
+    try std.testing.expectEqual(@as(?u32, 12), epochOf("epoch-12"));
+    try std.testing.expectEqual(@as(?u32, null), epochOf("epoch-"));
+    try std.testing.expectEqual(@as(?u32, null), epochOf("epoch-1a"));
+    try std.testing.expectEqual(@as(?u32, null), epochOf("epochs"));
+    const p: Proposal = .{ .file = "epoch-0/overlay.md" };
+    try std.testing.expectEqualStrings("overlay.md", p.base());
+    try std.testing.expectEqual(@as(?u32, 0), p.epoch());
+    const q: Proposal = .{ .file = "overlay.md" };
+    try std.testing.expectEqualStrings("overlay.md", q.base());
+    try std.testing.expectEqual(@as(?u32, null), q.epoch());
 }

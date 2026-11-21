@@ -14,7 +14,7 @@
 - Every Plan 9 concept chapter has the same three parts: **In Plan 9** (how the
   real system works), **In h9** (what h9 does the same, differently, or not
   yet), and **Try it** (commands to paste).
-- Badges: *Not yet available ([gfx](design/gfx.md))* marks something
+- Badges: *Not yet available ([gfx](design/epoch-0/gfx.md))* marks something
   that isn't built yet, linked to the [proposal](design/README.md) that adds
   it. A badge comes off when its proposal is marked implemented. A feature
   whose proposal was declined is said to be declined, with a link to why.
@@ -157,7 +157,7 @@ to `h9-emu` too. (When you build `h9-emu` from source it's still called
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | ✓ |
 | Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | ✓ |
 | Linux x86\_64 | ✓ (KVM; without it, `h9-emu`, or `--backend native` for a trusted guest), with an amd64 root tree (`zig build mkroot` on x86\_64) | ✓, with an amd64 root tree |
-| Windows on ARM | *Not yet available ([whp](design/whp.md))* | ✓ |
+| Windows on ARM | *Not yet available ([whp](design/epoch-0/whp.md))* | ✓ |
 | Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | ✓, with an amd64 root tree |
 
 **Host requirements.** On macOS, h9 must be signed with the hypervisor
@@ -229,7 +229,7 @@ host$ export H9ROOT=~/src/hyper9/.local/9front/root
 ```
 
 The built-in root is what lets a fresh install work with nothing but the
-h9 binary. It holds 43 of 9front's commands, built from the pinned
+h9 binary. It holds 44 of 9front's commands, built from the pinned
 release's own source into one program, `9box`: rc, the file and text tools
 (`ls` and `lc`, `cat`, `sed`, `awk`, `grep`, `diff`, and so on), `tar` and `gzip`, and
 the namespace tools (`bind`, `mount`, `ns`, `ps`, `srv`, `exportfs`,
@@ -311,7 +311,7 @@ h9 fe6c65f
 drawterm be39bbaa88fd
 backends: kvm native
 gfx: none
-built-in root: 9front 11952 slim, amd64 (43 commands)
+built-in root: 9front 11952 slim, amd64 (44 commands)
 ```
 
 `h9 --help` (or `h9 -h` alone) prints the usage. Then run something:
@@ -905,7 +905,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#y` | hcons | `/dev`, before `#c` | h9's per-machine console: `cons`, `consctl`, and `stderr`. Each machine gets its own, as `#y<id>`. |
 | `#e` | env | `/env` | 9front's environment device, one environment per group. No `#ec` (the config environment). |
 | `#d` | dup | `/fd` | Open file descriptors |
-| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine, with 9front's debugging files `mem`, `regs`, `fpregs`, and `text` for acid ([self-host](design/self-host.md)). |
+| `#p` | proc | `/proc` | The machine's processes only, numbered from 1 within the machine, with 9front's debugging files `mem`, `regs`, `fpregs`, and `text` for acid ([self-host](design/epoch-0/self-host.md)). |
 | `#s` | srv | `/srv` | 9front's service registry, one per machine |
 | `#\|` | pipe | | Pipes |
 | `#I` | ip | `/net` | The network, through the host's own stack: `cs`, `tcp`, `udp`. Masked under `--net=disable`. |
@@ -921,6 +921,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#A` | audio | | Present, but there's no sound to drive |
 | `#λ` | linux | A Linux process's `/` | The Linux view: `/9`, `/tmp`, `/mnt/term`, `/dev`, `/proc`, and `/sys`, with the Linux root unioned after them (chapter 20) |
 | `#ε` | eventfd | | Linux `eventfd`, `epoll`, and `signalfd` instances |
+| `#τ` | pty | A Linux process's `/dev/pts` | Linux pseudoterminals: `ptmx`, which makes a pair and opens its master, and each pair's slave by number, with Linux's line discipline: canonical editing, echo, and Ctrl-C ([linux-pty](design/epoch-0/linux-pty.md)). |
 
 9front's hardware devices aren't there: no `#S` disks, `#l` Ethernet, `#t`
 serial lines, `#v` VGA, or `#P` architecture, and no `#σ` shared-memory
@@ -1280,7 +1281,7 @@ protocols, with `secstore` keeping them encrypted.
 - `factotum` runs (`auth/factotum -n` starts it without secstore) and serves
   `/mnt/factotum`, and `mount` works without authentication against servers
   that don't ask for it. A 9P root that wants authentication isn't supported;
-  [root-auth](design/root-auth.md) was declined in favor of authenticating
+  [root-auth](design/epoch-0/root-auth.md) was declined in favor of authenticating
   WebSocket roots.
 
 "Permission denied" in h9 can mean three things:
@@ -1512,7 +1513,7 @@ devices in Plan 9.
   `--write=none` with a 9P root is a usage error. A refused connection or attach is exit 125. The connection
   is plain, unencrypted 9P, so keep a TCP root on a trusted network. Unix
   socket roots need a macOS or Linux host.
-- **9P over WebSocket** ([websocket-9p](design/websocket-9p.md)).
+- **9P over WebSocket** ([websocket-9p](design/epoch-0/websocket-9p.md)).
   `--root ws://host/path` or `wss://host/path` uses a 9P server behind a
   WebSocket as the root. h9 makes the connection on the host, offering the
   `9p` subprotocol, and mounts it like any 9P root. `--root-header 'Name:
@@ -1521,7 +1522,7 @@ devices in Plan 9.
   or a PEM file given with `--root-ca FILE`. `HTTPS_PROXY`, `HTTP_PROXY`, and
   `NO_PROXY` are honored. A namespace file can mount a URL too: `mount -c
   wss://fs.example/9p /n`. On the command line the scheme can be left off
-  ([schemeless-roots](design/schemeless-roots.md)): a `--root` or
+  ([schemeless-roots](design/epoch-0/schemeless-roots.md)): a `--root` or
   `$H9ROOT` that isn't an existing path and looks like
   `host[:port][/path]`, with a dotted host, a bracketed address, a port, or
   `localhost`, is read as `wss://` plus the value, or `ws://` for
@@ -1529,13 +1530,45 @@ devices in Plan 9.
   `wss://fs.example.com/9p`, and `--root fs.example.com` is
   `wss://fs.example.com/`. An existing path always wins, and `--print`
   shows the URL h9 chose.
+- **Metadata indexes** ([mount-index](design/mount-index.md)). A 9P
+  root, or a 9P server a namespace file mounts by dial string or URL, can
+  come with an index: dotfs's `.fs/index` at the top of its tree, a text
+  file in the `fsindex 1` format listing every name with its mode, length,
+  and mtime, and, in `9p.` fields, its qid and owners. h9 reads it once. A
+  server with dotfs's `.fs/events` tells h9 what changes, so nothing needs
+  checking; on any other, h9 checks each directory against the server the
+  first time it's used. Then it answers walks, stats, and directory reads
+  from the index, so only opens and reads go to the server, and a name
+  that isn't there costs no round trip. Anything that doesn't match the server is demoted to plain
+  9P for the rest of the run, so a stale index costs time, never wrong
+  answers. `mkindex [-o FILE] [-s SPEC] [DIR]` writes one from inside h9,
+  for the tree at `DIR` (`/` by default, which it reads through
+  `/srv/root`, attached with `SPEC`, so the paths h9 binds over the root
+  are left out). `--root-index FILE|URL` uses an index from somewhere else
+  for the root, for a server you can't write to; a URL is `https://` or
+  `http://`, fetched on the host with the root's `--root-ca` and proxies.
+  `--index none` turns indexes off. Compiled indexes are cached across
+  runs in `--index-cache DIR` (default `$XDG_CACHE_HOME/h9/index`,
+  `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on
+  Windows), which is safe to delete. `-v` reports how the index was found,
+  how many directories were checked, and how many of devmnt's requests
+  reached the server.
+  `--print` shows the index on the root's line, and `--check` reports it.
+  An index that doesn't parse is ignored, with a note under `-v`; a
+  `--root-index` that can't be read is exit 125, and one with a host
+  directory root exit 2. `mkindex` percent-escapes a name with a space or
+  a rune that isn't ASCII. A name with a control character, or a byte that
+  isn't UTF-8, can't be listed, so `mkindex` leaves it out and marks its
+  directory `9p.incomplete=1`, and h9 never answers for that directory
+  from the index. A file changed in place without reindexing shows its old
+  length to `stat` until it's opened, unless the server has `.fs/events`.
 - **WebSockets in the guest.** `/net/ws` is laid out like `/net/tcp` and
   follows `--net` and `--net-allow` as a TCP dial to the URL's host and port
   would. A conversation's `data` file carries binary messages as a byte
   stream, and its `text` file text messages, one per read and write.
   `wsmount [-h 'Name: value'] url mountpoint` dials a 9P server and mounts
   it. Guest connections don't use the host's proxies.
-- **Serving the machine** ([serve](design/serve.md)). `--serve ADDR`
+- **Serving the machine** ([serve](design/epoch-0/serve.md)). `--serve ADDR`
   makes h9 a 9P server while the program runs: `unix!/path`,
   `tcp!host!port`, or `ws://host:port/path`, repeatable. Each connection
   gets its own `exportfs` of the machine's namespace as the plan built it,
@@ -1556,13 +1589,13 @@ devices in Plan 9.
   on loopback or a trusted network. A machine serves up to 32 connections,
   each with up to 8 exportfs processes; serving's processes count against
   `--pids` separately from the program's. Every listener also speaks
-  9P2000.L ([dotl](design/dotl.md)), so Linux mounts it: `mount -t 9p
+  9P2000.L ([dotl](design/epoch-0/dotl.md)), so Linux mounts it: `mount -t 9p
   -o trans=unix,version=9p2000.L /path/h9.sock /mnt`. A .L client sees
   regular files and directories only, with every file owned by your host
   uid. Renames work only within a directory, and symlinks, device nodes,
   and hard links can't be made. Byte-range locks are advisory, shared by
   the machine's connections.
-- **9P2000.L servers** ([dotl](design/dotl.md)). `dotlfs addr
+- **9P2000.L servers** ([dotl](design/epoch-0/dotl.md)). `dotlfs addr
   mountpoint [spec]` dials a server that speaks 9P2000.L, such as diod or
   ZeroFS, and mounts it. It also mounts a plain 9P2000 server, so it can be
   used without knowing which one is at the address. The dial goes through
@@ -1582,7 +1615,7 @@ devices in Plan 9.
   `dotlfs`. A file read from
   start to end is read a whole `msize` (up to 1 MiB) at a time, not
   devmnt's 32 KiB, and any write drops what was read ahead.
-- **Reconnecting to ZeroFS** ([dotl](design/dotl.md)). With a server
+- **Reconnecting to ZeroFS** ([dotl](design/epoch-0/dotl.md)). With a server
   that speaks ZeroFS's 9P2000.L.Z, a TCP mount or root survives the
   connection dropping: h9 dials again for up to 120 seconds, a second apart,
   reopens every open file without truncating it, and resends each request
@@ -1597,10 +1630,10 @@ devices in Plan 9.
   `9P2000.L.Z reconnects N` once a reconnect has happened. A unix socket
   root reconnects too, but a WebSocket root doesn't yet.
 - 9P roots that need authentication aren't supported. They were proposed
-  and declined ([root-auth](design/root-auth.md)) in favor of authenticating
+  and declined ([root-auth](design/epoch-0/root-auth.md)) in favor of authenticating
   WebSocket roots.
 - 9front disk images as roots were proposed and declined
-  ([image-roots](design/image-roots.md)), since host directories, 9P
+  ([image-roots](design/epoch-0/image-roots.md)), since host directories, 9P
   servers, and overlays have covered every root so far. To run from an
   image, boot it in a VM and serve its file system over 9P, or copy its files
   out, as `zig build mkroot` does.
@@ -1670,6 +1703,24 @@ of the server's 8 exportfs processes; mount `/net` over more connections
 for more. A UDP socket on a mounted `/net` has one peer: `recvfrom`
 reports it, so an unconnected server can't tell its clients apart.
 
+An index for a root, written once, then used on every run. The first run
+compiles and caches it; later ones read it from the cache. Here the root
+is a 9front tree that a Linux 9P server, diod, serves:
+
+```sh
+host$ h9 --root 'tcp!127.0.0.1!5720' --index none mkindex / >root.fsindex
+host$ h9 --root 'tcp!127.0.0.1!5720' --root-index root.fsindex -v ls /bin/ls
+h9: index: root.fsindex: 20368 entries, 1126 dirs (cached); root checked in 1 ms
+/bin/ls
+h9: index: root.fsindex: checked 13 of 1126 dirs as they were used, 0 demoted
+h9: index: devmnt sent the root 221 9P requests; 16 went to the server, besides 38 to find the index and check directories
+```
+
+Each directory is checked the first time the program uses it, and the
+directories on one path are checked together, so a remote root pays about
+two round trips for each new path, and saves one for nearly every name the
+program looks up.
+
 Mounting a remote 9P server the network policy allows:
 
 ```sh
@@ -1723,7 +1774,7 @@ the run ends.
   dialog) as caveats.
 
 **In a browser.** On the browser host, a page's `<canvas>` is the window
-([browser-gfx](design/browser-gfx.md)). `h9-web.js`'s
+([browser-gfx](design/epoch-0/browser-gfx.md)). `h9-web.js`'s
 `createMachine({ gfx: { canvas } })` moves the canvas into the machine's
 Worker, and rio and acme draw on it. The demo page's **rio** button runs
 `rio -i 'window acme'` that way.
@@ -1782,7 +1833,7 @@ live in `/sys/src`, and `mk install` copies results into `/$objtype/bin`.
 
 The compilers, linkers, and `mk` run, and rebuild 9front's userland from
 `/sys/src` byte for byte; that's how `zig build mkroot -- --arch` adds `/386` and
-`/amd64`. `acid` debugs a live process ([self-host](design/self-host.md)).
+`/amd64`. `acid` debugs a live process ([self-host](design/epoch-0/self-host.md)).
 
 - You need `/sys/src` in the root tree for the headers and libraries to
   rebuild 9front itself: build the tree with `zig build mkroot -- --src`.
@@ -1881,13 +1932,13 @@ hello, world
   root tree has `/amd64/bin` (`zig build mkroot` on x86\_64, or
   `--arch amd64`).
 - A Go program doesn't need a root tree to run. Without one it gets the
-  built-in root (chapter 2), with `/tmp`, your cwd, and its 43 commands;
+  built-in root (chapter 2), with `/tmp`, your cwd, and its 44 commands;
   give it `--root` for the full tree.
 
 ### 20. Linux programs
 
 h9 runs Linux ELF programs as well as 9front ones
-([linux-personality](design/linux-personality.md)). There's no Linux
+([linux-personality](design/epoch-0/linux-personality.md)). There's no Linux
 kernel: a Linux program's system calls are translated onto the same Plan 9
 kernel that serves 9front programs, so it runs in the same machine, with
 the same namespace, sandbox, network policy, and limits. Static and dynamic
@@ -1947,7 +1998,7 @@ directories h9 provides on top:
 | `/9` | The machine's 9front root: `/9/bin/ls` is 9front's `ls` |
 | `/tmp` | The machine's private `/tmp`, the same files a 9front program sees there |
 | `/mnt/term` | The shared host paths; your cwd is `/mnt/term/cwd`, and programs start in it |
-| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console), `stdin`, `stdout`, `stderr`, `fd`, and `shm`, a private in-memory directory as a tmpfs would be |
+| `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty` (the console, or the session's pty), `stdin`, `stdout`, `stderr`, `fd`, `ptmx` and `pts` (pseudoterminals), and `shm`, a private in-memory directory as a tmpfs would be |
 | `/proc`, `/sys` | What libc, busybox, Python, and htop read: `cpuinfo` (following `--cpus`), `meminfo`, `mounts`, and per-process `stat`, `status`, `maps`, `cmdline`, `exe`, `fd`, and `task` |
 | `/etc/resolv.conf` | Your host's DNS servers, when the root has none |
 
@@ -1957,6 +2008,12 @@ Alpine's `/bin/ls -> /bin/busybox` reads the root's busybox
 overlay in memory and are thrown away at exit, as for a 9front root, so
 `apk add` works for the run; pass `--writable ./alpine` to keep what it
 installs. `h9 --print` shows the view as binds on `'#λ'`.
+
+**Pseudoterminals.** `/dev/ptmx` and `/dev/pts` work as on Linux, so
+tmux, `script`, `expect`, Python's `pty`, and Nix's builds get a terminal of
+their own, with canonical line editing, echo, Ctrl-C, Ctrl-\\, and Ctrl-Z,
+and `SIGWINCH` when the size changes. A pty belongs to its machine, and its
+numbers start at 0 in each machine.
 
 **Named pipes.** `mkfifo` and `mknod` with `S_IFIFO` make a FIFO that stays
 in the file system: in memory in an overlay, such as `/tmp`, and as a real
@@ -2010,7 +2067,7 @@ the hypervisor (or, with `--backend native`, the native backend), at native
 speed apart from system calls. One for another architecture, such as an amd64 image on an Apple
 Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
 32-bit x86 programs run with `--arch 386` on the emulator
-([linux-i386](design/linux-i386.md)).
+([linux-i386](design/epoch-0/linux-i386.md)).
 
 **Not yet.**
 
@@ -2086,7 +2143,7 @@ Machine:
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `native`, which shares h9's process and isn't a security boundary (chapter 23); pass `--backend native` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/whp.md)). |
+| `--backend auto\|hvf\|kvm\|whp\|native\|emu` | What runs guest code (chapter 27). `auto` (the default) uses the host's hypervisor when it can run the program's architecture, and otherwise the emulator, with a warning. It never selects `native`, which shares h9's process and isn't a security boundary (chapter 23); pass `--backend native` to choose it for a trusted guest. Naming one that isn't built in or can't run here is exit 125. `whp` is incomplete ([whp](design/epoch-0/whp.md)). |
 | `--arch arm64\|amd64\|386` | The architecture to run. It picks `/$cputype/bin` and sets `$cputype`. Default: a host program's own, and the host's for anything else. Only the emulator runs amd64 on arm64 hosts, and 386 anywhere. |
 | `--root DIR\|DIAL\|SOCKET\|URL` | The root: a host directory, a 9P server's dial string (`tcp!host!port`, `tcp!host`, `unix!path`), a unix socket's path, or a `ws://` or `wss://` URL (chapter 16), whose scheme can be left off: `wss://` is assumed, or `ws://` for a loopback host. A host directory can be a 9front tree or a Linux one, and `--root` can be given twice, once for each (chapter 20). Default: `$H9ROOT`, then `.local/9front/root` for a development build, then the built-in root. |
 | `--builtin auto\|only\|before\|after\|off` | The built-in root (chapter 2). `auto` (the default) uses it when no 9front root is found, so a Linux root alone gets it as `/9`. `only` uses it even when `$H9ROOT` would give a root, and can't be used with `--root`. `before` and `after` put its commands in `/bin` before or after a root's. `off` never uses it, and leaves a Linux root alone without `/9`. |
@@ -2095,6 +2152,9 @@ Machine:
 | `--user-map FILE` | A file in `/etc/passwd` format that maps user names to the numbers a 9P2000.L server sees, both ways. Without it, your user is sent as your host uid (65534 when you're root, never 0). |
 | `--root-header 'NAME: VALUE'\|@FILE` | A header for a WebSocket root's handshake, such as `Authorization: Bearer ...`; repeatable. `@FILE` reads one header per line from a file, so a token stays out of `ps`. |
 | `--root-ca FILE` | Trust this PEM file for a `wss://` root instead of the host's CA bundle |
+| `--root-index FILE\|URL` | Use this metadata index for a 9P root instead of its `.fs/index` (chapter 16). A URL is `https://` or `http://`. With a host directory root, exit 2; one that can't be read, exit 125. |
+| `--index auto\|none` | `auto` (the default) uses an index wherever one is found, for the root and for 9P servers a namespace file mounts; `none` never does |
+| `--index-cache DIR` | Where compiled indexes are kept. Default: `$XDG_CACHE_HOME/h9/index`, `~/Library/Caches/h9/index` on macOS, `%LOCALAPPDATA%\h9\index` on Windows |
 | `--root-contained` | Resolve the root tree's symlinks inside it: `/bin/ls -> /bin/busybox` reads the tree's `/bin/busybox`, not the host's, and `..` stops at the tree's top. For 9front trees with links; a Linux root is always contained. With a 9P root, exit 2. |
 | `--cwd DIR` | The host directory to bind at `/mnt/term/cwd` and start in, instead of the current one |
 | `--env name=value` | Set a guest environment variable; repeatable. The host environment is never imported. |
@@ -2137,6 +2197,7 @@ Debugging (chapter 28):
 | Flag | Meaning |
 | --- | --- |
 | `--trace[=FILE]` | Log every system call, and the registers and symbolized PC when a program faults, to standard error or to `FILE` |
+| `-v`, `--verbose` | Notes on standard error about how the run went: for now, how each metadata index was found and checked, and the 9P requests it saved. `-v` is the one short flag, and only before the program. |
 | `--gfx[=noclip]` | Give the machine a host window, with `/dev/snarf` as the host clipboard, or private with `=noclip` (chapter 17) |
 | `--gfx-scale N` | The window's scale on macOS: 1 points, 0 backing pixels, N backing pixels divided by N |
 
@@ -2144,7 +2205,7 @@ Tools:
 
 | Flag | Meaning |
 | --- | --- |
-| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, `--builtin`, and `--memory`. |
+| `--check` | Check each backend and the root, then exit 0 or 125 (chapter 2). Takes `--backend`, `--root`, `--root-spec`, `--root-user`, `--root-index`, `--index`, `--index-cache`, `--builtin`, and `--memory`, and reports a 9P root's index. |
 | `--version` | Print the version, the pinned 9front and drawterm revisions, the backends built in, and the window code (`gfx:`) |
 | `--help`, `-h` | Print the usage to standard output |
 
@@ -2559,7 +2620,7 @@ about one.
 
 **The native backend** runs amd64 guest code directly on the CPU, with no
 hypervisor, so it works in containers without `/dev/kvm` and cloud VMs
-without nested virtualization ([native-backend](design/native-backend.md)).
+without nested virtualization ([native-backend](design/epoch-0/native-backend.md)).
 Each address space is a tiny stub process that h9 starts; the kernel's
 Syscall User Dispatch turns every system call the guest makes into a signal
 h9 answers, and a seccomp filter kills the stub if guest code reaches the
@@ -2585,7 +2646,7 @@ guest code on one virtual CPU at a time, so CPU-bound programs don't get
 faster with more processes; blocking in the kernel still overlaps.
 
 **In a browser.** h9 also builds for WebAssembly, where the emulator runs
-386 programs ([browser-host](design/browser-host.md)). `--backend v86`,
+386 programs ([browser-host](design/epoch-0/browser-host.md)). `--backend v86`,
 the browser's backend before the emulator replaced it, is another name for
 `emu`.
 
@@ -2621,7 +2682,7 @@ table.
 does `acid`, Plan 9's debugger: `h9 --rc 'sleep 5 & sleep 1; acid $apid'`,
 then `stk()` for a stack trace; `new()`, `bpset`, `cont`, `step`, and `next`
 work too
-([self-host](design/self-host.md)).
+([self-host](design/epoch-0/self-host.md)).
 
 **Whose error is it?**
 

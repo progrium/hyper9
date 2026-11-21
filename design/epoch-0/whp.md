@@ -125,7 +125,7 @@ The arm64 backend runs the arm64 shim and page tables, as KVM's arm64 path does:
  
 - Whether the Windows Hypervisor Platform's arm64 support is solid enough to target, or whether Windows on ARM waits. (Moved from SPEC.md's Open questions.) A test machine for it is the first need: arm64 hardware running Windows with the feature, since the Lima VM can't nest.
 - WHP's vCPU limit: the largest processor count a partition accepts, measured as HVF's was, and whether setting it higher than 64 costs memory or setup time.
-- Whether an AppContainer or restricted token can still use WHP. (A research note planned for this proposal, for [host-sandbox](host-sandbox.md).)
+- Whether an AppContainer or restricted token can still use WHP. (A research note planned for this proposal, for [host-sandbox](../host-sandbox.md).)
 - The cost of a syscall round trip on WHP, against HVF's 1.1 µs, since each exit goes through the Windows hypervisor and back to user mode.
  
 

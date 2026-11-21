@@ -79,7 +79,7 @@ A backend that can't run the binary's architecture fails with `WrongArch`; HVF r
 
 The contract is in Plan 9 terms (address spaces, Ureg, syscall exits) rather than hardware terms such as guest-physical memory and page tables. That keeps page-table building inside the hypervisor backends, and lets the emulator implement the contract without emulating kernel mode or an MMU.
 
-The interface was shaped around all three hypervisors, so the table and rules below cover WHP as well. HVF, KVM ([kvm](../design/kvm.md)), and WHP ([whp](../design/whp.md)) on Windows x86\_64 are built; WHP on Windows on ARM isn't yet (see WHP below).
+The interface was shaped around all three hypervisors, so the table and rules below cover WHP as well. HVF, KVM ([kvm](../design/epoch-0/kvm.md)), and WHP ([whp](../design/epoch-0/whp.md)) on Windows x86\_64 are built; WHP on Windows on ARM isn't yet (see WHP below).
 
 | Operation | macOS: Hypervisor.framework | Linux: KVM | Windows: WHP |
 | --- | --- | --- | --- |
@@ -132,7 +132,7 @@ The baseline and `[whp]` integration cases pass on a Windows x86\_64 VM, except 
 
 ## Native backend (`native`)
 
-The native backend ([native-backend](../design/native-backend.md), `src/vmm/native.zig`) runs amd64 guest code directly on the host CPU on Linux x86\_64, with no hypervisor and no emulator, so it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. It's MIT and built into every Linux x86\_64 `h9`.
+The native backend ([native-backend](../design/epoch-0/native-backend.md), `src/vmm/native.zig`) runs amd64 guest code directly on the host CPU on Linux x86\_64, with no hypervisor and no emulator, so it runs where KVM can't: containers without `/dev/kvm` and cloud VMs without nested virtualization. It's MIT and built into every Linux x86\_64 `h9`.
 
 ### Stubs
 
@@ -204,7 +204,7 @@ Unicorn generates code for a single-threaded context (its `curr_cflags` never se
 
 So a backend runs guest code on one engine at a time, through a ticket lock held across each `uc_emu_start`; kernel calls run outside it, so processes still block in the kernel in parallel.
 
-The lock passes at exits, and is time-sliced: a waiter that has waited 1 ms for the same holder sets the holder's stop request, and the holder stops at its next block and returns `interrupted` ([linux-threads](../design/linux-threads.md)), so a guest spinning without syscalls (a spinlock waiting on another thread) doesn't hold the others off.
+The lock passes at exits, and is time-sliced: a waiter that has waited 1 ms for the same holder sets the holder's stop request, and the holder stops at its next block and returns `interrupted` ([linux-threads](../design/epoch-0/linux-threads.md)), so a guest spinning without syscalls (a spinlock waiting on another thread) doesn't hold the others off.
 
 The stop is made from the block hook, not by `uc_emu_stop` from the waiter's thread, since an engine stopped from another thread can report the PC of an earlier block than the one it stopped in, and resuming it would run instructions twice. A kick that arrives while an engine waits for the lock is seen once it has it.
 
@@ -238,7 +238,7 @@ On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loo
 
 So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds.
 
-By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](../design/browser-host.md)).
+By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](../design/epoch-0/browser-host.md)).
 
 ## Guest shims
 

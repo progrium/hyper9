@@ -17,7 +17,7 @@ NINEFRONT_AMD64_ISO_SHA256=ee90b5e8a8d6b4ee8ad950322f91e338f698dae18c7f5e5800a65
 
 HYPERLINUX_REPO=https://github.com/zw3rk/hyper-linux
 
-# Go for the go-compat fixtures and go-stdtest (design/go-compat.md):
+# Go for the go-compat fixtures and go-stdtest (design/epoch-0/go-compat.md):
 # GOTOOLCHAIN=go$GO_VERSION makes any installed Go fetch this exact release.
 GO_VERSION=1.27.3
 
@@ -37,7 +37,7 @@ x86_64-linux-musl musllinux_1_2_x86_64 73d2eb557cc0255f18c55b15951c46dff1c07f996
 UNICORN_SRC_URL=https://github.com/unicorn-engine/unicorn/archive/refs/tags/$UNICORN_VERSION.tar.gz
 UNICORN_SRC_SHA256=ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4
 
-# An Alpine root for the Linux personality's tests (design/linux-personality.md):
+# An Alpine root for the Linux personality's tests (design/epoch-0/linux-personality.md):
 # the alpine:3.22.2 image's single layer from Docker Hub, by digest, unpacked
 # into .local/linux/alpine-<arch>.
 ALPINE_VERSION=3.22.2
@@ -111,7 +111,7 @@ main py3-parsing-3.2.5-r0.apk eb98adcfe7a7242b8e4ff77a894e4b8ca3e5a62539c8fa96bc
 community py3-pip-pyc-25.1.1-r0.apk e729558f32b18993f7dd3461c409e274a7be2c91686a9110e7a931a26ecbc07a
 "
 
-# diod, the 9P2000.L server the [dotl] cases run against (design/dotl.md),
+# diod, the 9P2000.L server the [dotl] cases run against (design/epoch-0/dotl.md),
 # from Ubuntu 24.04's packages with the libraries it links, so no build
 # is needed: `scripts/fetch.sh diod` unpacks them into .local/diod, with
 # .local/bin/diod running it. x86_64 Linux only; elsewhere those cases
@@ -126,7 +126,7 @@ main/t/tcp-wrappers/libwrap0_7.6.q-33_amd64.deb 36118b862539868408ee056411d6e470
 "
 
 # ZeroFS, the 9P2000.L.Z server the [dotl] cases also run against
-# (design/dotl.md), built from source at this release with the host's
+# (design/epoch-0/dotl.md), built from source at this release with the host's
 # cargo: `scripts/fetch.sh zerofs` puts it in .local/bin/zerofs.
 # Without it, those cases skip. AGPLv3: dev and CI only.
 ZEROFS_REPO=https://github.com/Barre/ZeroFS

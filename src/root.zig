@@ -1,7 +1,7 @@
 //! h9: run 9front executables on host hypervisors.
 
 pub const aout = @import("aout.zig");
-/// Linux ELF binaries (design/linux-personality.md).
+/// Linux ELF binaries (design/epoch-0/linux-personality.md).
 pub const linux_elf = @import("linux/elf.zig");
 pub const vmm = @import("vmm.zig");
 pub const loader = @import("loader.zig");
@@ -21,9 +21,10 @@ pub const newns = @import("newns.zig");
 pub const consin = @import("consin.zig");
 pub const ws = @import("ws.zig");
 pub const hstream = @import("hstream.zig");
-/// `--serve` listeners (design/serve.md).
+/// `--serve` listeners (design/epoch-0/serve.md).
 pub const serve = @import("serve.zig");
 pub const gfx = @import("gfx.zig");
+pub const rootindex = @import("rootindex.zig");
 pub const web = @import("web.zig");
 
 /// What this h9 was built from, for `--version`.
@@ -35,9 +36,9 @@ pub const build_info = struct {
     pub const ninefront_release: []const u8 = o.ninefront_release;
     pub const ninefront_rev: []const u8 = o.ninefront_rev;
     pub const drawterm_rev: []const u8 = o.drawterm_rev;
-    /// The GUI backend for --gfx (design/gfx.md), or "none".
+    /// The GUI backend for --gfx (design/epoch-0/gfx.md), or "none".
     pub const gfx: []const u8 = o.gfx;
-    /// The built-in root (design/builtin-root.md).
+    /// The built-in root (design/epoch-0/builtin-root.md).
     pub const builtin_root = @import("machine.zig").builtin_root;
 };
 
@@ -70,4 +71,6 @@ test {
     _ = @import("dotl/client.zig");
     _ = @import("dotl/server.zig");
     _ = @import("dotl/kern.zig");
+    _ = rootindex;
+    _ = @import("rootindex/kern.zig");
 }

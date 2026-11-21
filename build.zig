@@ -23,7 +23,7 @@ const kern_notes = [_][]const u8{"devpipe.c"};
 // OS=posix (Make.unix), and OS=win32 with FS=fs-win32 (Make.win64).
 const kern_posix = [_][]const u8{ "devfs-posix.c", "devip-posix.c", "devlfd-posix.c", "posix.c" };
 const kern_win32 = [_][]const u8{ "devfs-win32.c", "devip-win32.c", "devlfd-win32.c", "win32.c" };
-// The web host (design/browser-host.md): devfs and devlfd build
+// The web host (design/epoch-0/browser-host.md): devfs and devlfd build
 // against wasi-libc; posix.c and devip-posix.c are replaced by
 // src/kern/os-wasm.c and devip-wasm.c.
 const kern_web = [_][]const u8{ "devfs-posix.c", "devlfd-posix.c" };
@@ -153,7 +153,7 @@ const sema_fixtures = [_][]const u8{
 const net_fixtures = [_][]const u8{ "ctl", "cs" };
 /// C programs in tests/fixtures/linux, built static for Linux on arm64 and
 /// amd64, for the linux-personality cases in tests/integration.zig.
-const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "bigexe", "fifo" };
+const linux_fixture_names = [_][]const u8{ "hello", "probe", "die", "sigreturn", "net", "threads", "files", "tls386", "bigexe", "pty", "fifo" };
 
 /// Programs in tests/fixtures/gfx, for tests/backends.zig's [gfx] cases on
 /// the headless backend, with the same lib.S.
@@ -201,12 +201,12 @@ fn addIntegration(b: *std.Build, step: *std.Build.Step, shards: u32, optimize: s
 fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integration, root: []const u8, backends: []const u8, pending: bool, go: ?GoFixtures, guest_test: bool, src: ?[]const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(tests);
     // The self-host cases' source when the root has no /sys/src
-    // (design/self-host.md).
+    // (design/epoch-0/self-host.md).
     if (src) |dir| run.setEnvironmentVariable("H9_TEST_SRC", dir);
     run.step.dependOn(it.step);
     if (it.server != null) run.step.dependOn(it.server_step);
     const h9_bin = it.bin;
-    // h9 serves tests/fixtures/guest in #H (design/guest-tools.md).
+    // h9 serves tests/fixtures/guest in #H (design/epoch-0/guest-tools.md).
     if (guest_test) run.setEnvironmentVariable("H9_TEST_GUEST_TOOLS", "1");
     if (it.arch) |a| run.setEnvironmentVariable("H9_TEST_ARCH", a);
     if (it.web) run.setEnvironmentVariable("H9_TEST_WEB", "1");
@@ -221,7 +221,7 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     run.setEnvironmentVariable("H9_TEST_ROOT", root);
     run.setEnvironmentVariable("H9_TEST_BACKENDS", backends);
     // The Linux fixtures and the Alpine roots from scripts/fetch.sh
-    // (design/linux-personality.md).
+    // (design/epoch-0/linux-personality.md).
     run.setEnvironmentVariable("H9_TEST_LINUX", b.getInstallPath(.prefix, "fixtures/linux"));
     run.setEnvironmentVariable("H9_TEST_LINUX_ROOT", b.pathFromRoot(".local/linux"));
     // diod, for the [dotl] cases against a real 9P2000.L server
@@ -231,7 +231,7 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     // (scripts/fetch.sh zerofs); they skip without it.
     run.setEnvironmentVariable("H9_TEST_ZEROFS", b.pathFromRoot(".local/bin/zerofs"));
     // The tree `zig build slim` makes, for the multicall cases, which skip
-    // without it (design/multicall.md).
+    // without it (design/epoch-0/multicall.md).
     const release = pin(b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "", "NINEFRONT_RELEASE");
     run.setEnvironmentVariable("H9_TEST_SLIM_ROOT", b.pathFromRoot(b.fmt(".local/9front/slim-{s}-{s}", .{ release, it.arch orelse "arm64" })));
     if (pending) run.setEnvironmentVariable("H9_TEST_PENDING", "1");
@@ -239,7 +239,7 @@ fn addIntegrationRun(b: *std.Build, tests: *std.Build.Step.Compile, it: Integrat
     return run;
 }
 
-/// The Go fixtures (tests/fixtures/go, design/go-compat.md): plan9/amd64
+/// The Go fixtures (tests/fixtures/go, design/epoch-0/go-compat.md): plan9/amd64
 /// binaries built with the pinned Go toolchain into `dir` by `step`.
 const GoFixtures = struct { dir: []const u8, step: *std.Build.Step };
 
@@ -508,9 +508,9 @@ fn guestTree(b: *std.Build, with_test: bool) struct { file: std.Build.LazyPath, 
     return .{ .file = wf.add("guest_tree.zig", out.written()), .bin = bin };
 }
 
-/// The built-in root `#Hroot` serves (design/builtin-root.md), as a
+/// The built-in root `#Hroot` serves (design/epoch-0/builtin-root.md), as a
 /// generated Zig file with its contents embedded beside it: the skeleton,
-/// and multicall's tree (`zig build slim`, design/multicall.md) for
+/// and multicall's tree (`zig build slim`, design/epoch-0/multicall.md) for
 /// each of `arches` found in `dir` for the pinned `release`. A missing or
 /// stale tree is left out with a warning (none when `quiet`), or fails the
 /// build when `required`.
@@ -590,7 +590,7 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
 
 /// drawterm's kern and the libraries it uses, as a static library for
 /// `target`. `web` builds it for the browser host
-/// (design/browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
+/// (design/epoch-0/browser-host.md): wasm32-wasi, with src/kern/os-wasm.c in
 /// place of posix.c, the coroutines it runs on (src/web/coro.c), and
 /// setjmp/longjmp on wasm exception handling.
 fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, web: bool, gfx: Gfx, exported: bool) *std.Build.Step.Compile {
@@ -622,12 +622,12 @@ fn addKern(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     });
     kern.root_module.addCSourceFiles(.{
         .root = b.path("src/kern"),
-        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c" },
+        .files = &.{ "glue.c", "proc.c", "devtab.c", "devhcons.c", "devenv.c", "devdup.c", "devproc.c", "devoverlay.c", "devsrv.c", "devhtools.c", "fscheck.c", "netcheck.c", "consx.c", "tsleep.c", "sema.c", "rootdial.c", "devhstream.c", "devdotl.c", "devhidx.c" },
         .flags = flags,
     });
-    // The Linux personality (design/linux-personality.md) and its host
-    // sockets (design/linux-net.md).
-    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c", "fifo.c" }, .flags = flags });
+    // The Linux personality (design/epoch-0/linux-personality.md) and its host
+    // sockets (design/epoch-0/linux-net.md).
+    kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "linux.c", "devlinux.c", "linuxnet.c", "devpty.c", "fifo.c" }, .flags = flags });
     if (web) {
         kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{"hostsock-wasm.c"}, .flags = flags });
     } else if (os != .windows) kern.root_module.addCSourceFiles(.{ .root = b.path("src/kern"), .files = &.{ "hostsock-posix.c", "hostif-posix.c" }, .flags = flags });
@@ -699,7 +699,7 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     p.emu = .hcpu;
     p.jit = true;
     p.unicorn = null;
-    // The browser runs 386 only (design/builtin-root.md, Open issues: every
+    // The browser runs 386 only (design/epoch-0/builtin-root.md, Open issues: every
     // byte is downloaded per page load).
     p.builtin_root = builtinRoot(b, p.builtin_dir, pin(p.pins, "NINEFRONT_RELEASE"), &.{"386"}, .quiet);
     const mod = addH9Module(b, p, gfx, false).mod;
@@ -781,7 +781,7 @@ fn pin(pins: []const u8, comptime name: []const u8) []const u8 {
     return "unknown";
 }
 
-/// The GUI backend behind --gfx (design/gfx.md), from -Dgfx.
+/// The GUI backend behind --gfx (design/epoch-0/gfx.md), from -Dgfx.
 pub const Gfx = enum {
     /// No screen: src/kern/nogfx.c, and --gfx fails with GfxNotBuilt.
     none,
@@ -794,7 +794,7 @@ pub const Gfx = enum {
     /// drawterm's gui-cocoa, built with the macOS SDK.
     cocoa,
     /// A page's canvas, on the browser host (src/kern/gfx-web.c,
-    /// design/browser-gfx.md).
+    /// design/epoch-0/browser-gfx.md).
     web,
 
     fn default(t: std.Target) Gfx {
@@ -839,7 +839,7 @@ const ModuleParts = struct {
     /// The native backend's stub, for Linux x86_64 hosts.
     native_stub: std.Build.LazyPath,
     guest_tree: std.Build.LazyPath,
-    /// The built-in root (design/builtin-root.md).
+    /// The built-in root (design/epoch-0/builtin-root.md).
     builtin_root: std.Build.LazyPath,
     /// Where its trees are, for the web host's.
     builtin_dir: []const u8,
@@ -960,10 +960,10 @@ pub fn build(b: *std.Build) void {
     const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
         if (os == .windows) UnicornFrom.source else .prebuilt;
 
-    const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/gfx.md): cocoa, win32, x11, web, headless (tests) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, none elsewhere)");
+    const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/epoch-0/gfx.md): cocoa, win32, x11, web, headless (tests) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, none elsewhere)");
     const gfx = gfx_opt orelse Gfx.default(target.result);
     // zig build web's: web, the browser host's only GUI backend, unless
-    // -Dgfx=none leaves graphics out (design/browser-gfx.md).
+    // -Dgfx=none leaves graphics out (design/epoch-0/browser-gfx.md).
     const web_gfx: Gfx = if (gfx_opt == .none) .none else .web;
     if (gfx.unsupported(target.result)) |why| b.getInstallStep().dependOn(&b.addFail(b.fmt("-Dgfx={t}: {s}", .{ gfx, why })).step);
 
@@ -983,7 +983,7 @@ pub fn build(b: *std.Build) void {
     });
     shim_obj.root_module.addAssemblyFile(b.path("src/arch/arm64/shim.S"));
     const shim_bin = b.addObjCopy(shim_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
-    // The amd64 shim, for KVM on x86_64 (design/kvm.md).
+    // The amd64 shim, for KVM on x86_64 (design/epoch-0/kvm.md).
     const shim_amd64_obj = b.addObject(.{
         .name = "shim_amd64",
         .root_module = b.createModule(.{
@@ -994,7 +994,7 @@ pub fn build(b: *std.Build) void {
     shim_amd64_obj.root_module.addAssemblyFile(b.path("src/arch/amd64/shim.S"));
     const shim_amd64_bin = b.addObjCopy(shim_amd64_obj.getEmittedBin(), .{ .format = .bin, .only_section = ".text" });
 
-    // The native backend's stub (design/native-backend.md): a freestanding
+    // The native backend's stub (design/epoch-0/native-backend.md): a freestanding
     // static program, linked high so the guest's whole layout is free, and
     // embedded in h9.
     const native_stub = b.addExecutable(.{
@@ -1015,7 +1015,7 @@ pub fn build(b: *std.Build) void {
     const kern_step = b.step("kern", "Compile drawterm's kern");
     const have_drawterm = if (b.build_root.handle.access(b.graph.io, drawterm ++ "/kern/sysfile.c", .{})) true else |_| false;
 
-    // h9's own guest commands, served by #H (design/guest-tools.md).
+    // h9's own guest commands, served by #H (design/epoch-0/guest-tools.md).
     // Debug builds also serve tests/fixtures/guest, for the integration
     // cases; release builds leave it out.
     const guest_test = b.option(bool, "guest-test", "Serve tests/fixtures/guest in #H too, for the integration cases (default: in Debug builds)") orelse (optimize == .Debug);
@@ -1026,12 +1026,12 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "Version h9 --version reports (default: git describe, else build.zig.zon's)") orelse gitVersion(b);
     const pins = b.build_root.handle.readFileAlloc(b.graph.io, "scripts/pins.sh", b.allocator, .limited(1 << 16)) catch "";
 
-    // The built-in root (design/builtin-root.md): multicall's trees for
+    // The built-in root (design/epoch-0/builtin-root.md): multicall's trees for
     // the architectures this build runs, from `zig build slim`. A release
     // fails without them; a development build gets the skeleton only.
     const builtin_dir = b.option([]const u8, "builtin-root", "Directory of zig build slim's trees for the built-in root (default .local/9front)") orelse
         b.pathFromRoot(".local/9front");
-    const release_build = b.option(bool, "release", "A release build: fail if the built-in root is missing an architecture's commands (design/builtin-root.md)") orelse false;
+    const release_build = b.option(bool, "release", "A release build: fail if the built-in root is missing an architecture's commands (design/epoch-0/builtin-root.md)") orelse false;
     const builtin_root = builtinRoot(b, builtin_dir, pin(pins, "NINEFRONT_RELEASE"), builtinArches(target.result, emu), if (release_build) .required else .warn);
 
     const parts: ModuleParts = .{
@@ -1059,9 +1059,9 @@ pub fn build(b: *std.Build) void {
     // The tests' module, with the headless backend for the [gfx] cases.
     const test_mod = if (gfx == .headless) mod else addH9Module(b, parts, .headless, false);
 
-    // The browser host (design/browser-host.md): h9 for wasm32-wasi
+    // The browser host (design/epoch-0/browser-host.md): h9 for wasm32-wasi
     // with its JS host and a demo page, in zig-out/web.
-    const web_step = b.step("web", "Build the browser host into zig-out/web (design/browser-host.md)");
+    const web_step = b.step("web", "Build the browser host into zig-out/web (design/epoch-0/browser-host.md)");
     const web = addWeb(b, optimize, parts, web_gfx);
     web_step.dependOn(web.install);
     // The demo page's root archive, from a 386 root tree and the paths
@@ -1118,7 +1118,7 @@ pub fn build(b: *std.Build) void {
     web_test.has_side_effects = true;
     web_test.expectExitCode(0);
     web_test.step.dependOn(web.install);
-    // Graphics on the canvas (tests/web/gfx.mjs, design/browser-gfx.md).
+    // Graphics on the canvas (tests/web/gfx.mjs, design/epoch-0/browser-gfx.md).
     const web_gfx_test = b.addSystemCommand(&.{ "node", "tests/web/gfx.mjs", b.getInstallPath(.{ .custom = "web" }, "") });
     web_gfx_test.setCwd(b.path("."));
     web_gfx_test.has_side_effects = true;
@@ -1190,7 +1190,7 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(out.*, .{ .custom = "fixtures" }, name).step);
     }
 
-    // Linux fixtures (tests/fixtures/linux, design/linux-personality.md):
+    // Linux fixtures (tests/fixtures/linux, design/epoch-0/linux-personality.md):
     // static musl programs for arm64, amd64, and 386, in fixtures/linux/<arch>.
     const linux_fixtures = b.step("linux-fixtures", "Build the Linux fixtures in tests/fixtures/linux (static musl, arm64, amd64, and 386)");
     for ([_][]const u8{ "arm64", "amd64", "386" }, [_]std.Target.Cpu.Arch{ .aarch64, .x86_64, .x86 }) |arch, cpu| {
@@ -1267,7 +1267,7 @@ pub fn build(b: *std.Build) void {
 
     // ls prints each member of the /bin union, duplicates and all, so the
     // count is the root's two directories' entries and #H/bin's added
-    // together (design/guest-tools.md).
+    // together (design/epoch-0/guest-tools.md).
     if (countBin(b, root)) |n| {
         const ls_demo = b.addSystemCommand(&.{ h9_bin, "--root", root, "--rc", "ls /bin | wc -l" });
         ls_demo.expectStdOutEqual(b.fmt("{d: >7}\n", .{n + guest_tree.bin}));
@@ -1275,7 +1275,7 @@ pub fn build(b: *std.Build) void {
         addDemo(b, &demos, "baseline", &ls_demo.step);
     }
 
-    // Self-host demos (design/self-host.md), with the root's arm64
+    // Self-host demos (design/epoch-0/self-host.md), with the root's arm64
     // binaries: they need /sys/src, the root's or `src_dir` bound over
     // /sys.
     const root_src = if (b.build_root.handle.access(b.graph.io, b.pathJoin(&.{ root, "sys/src/cmd/ls.c" }), .{})) |_| true else |_| false;
@@ -1339,7 +1339,7 @@ pub fn build(b: *std.Build) void {
             backends.appendSlice(b.allocator, "whp,") catch @panic("OOM")
         else |_| {}
     }
-    // The native backend (design/native-backend.md) runs amd64 on Linux
+    // The native backend (design/epoch-0/native-backend.md) runs amd64 on Linux
     // x86_64 when the kernel has Syscall User Dispatch and seccomp; h9
     // skips it where it can't run, as it does a backend that isn't built.
     if (os == .linux and b.graph.host.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and
@@ -1351,7 +1351,7 @@ pub fn build(b: *std.Build) void {
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
     // -Dweb runs them on the web host under Node instead: h9-node on h9's
     // own 386 CPU (h86), with the root's 386 binaries
-    // (design/browser-host.md), or with -Darch=arm64 on ha64.
+    // (design/epoch-0/browser-host.md), or with -Darch=arm64 on ha64.
     const test_web = b.option(bool, "web", "Run the integration cases on the web host under Node (386, or arm64 with -Darch=arm64)") orelse false;
     const backend_list = if (test_web) want_backends orelse "emu" else if (want_backends) |w| w else if (backends.items.len > 0) backends.items else "auto";
     const it: Integration = if (test_web) .{
@@ -1376,7 +1376,7 @@ pub fn build(b: *std.Build) void {
     const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
     if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
     const go_cases: ?GoFixtures = if (emu == .unicorn or std.mem.indexOf(u8, backend_list, "native") != null) go_fixtures else null;
-    // The Linux Go fixtures (design/linux-threads.md), with the same
+    // The Linux Go fixtures (design/epoch-0/linux-threads.md), with the same
     // toolchain, into fixtures/linux/<arch>/go.
     if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64", "386" }) |arch| {
         const dir = b.getInstallPath(.prefix, b.fmt("fixtures/linux/{s}/go", .{arch}));
@@ -1433,7 +1433,7 @@ pub fn build(b: *std.Build) void {
     run_workloads.step.dependOn(signed_step);
     workloads_step.dependOn(&run_workloads.step);
 
-    // 9box and a slim root around it (design/multicall.md), built inside
+    // 9box and a slim root around it (design/epoch-0/multicall.md), built inside
     // the h9 just built, against the root tree. -Darch picks the
     // architecture, as for the integration cases.
     const slim_links = b.option([]const u8, "slim-links", "With zig build slim: hard (hard links to 9box, the default), stub (#!/bin/9box -! files) or copy (no 9box: the same commands' binaries copied, in slim-copy-*)") orelse "hard";
@@ -1555,7 +1555,7 @@ pub fn build(b: *std.Build) void {
         } else proposal_step.dependOn(&b.addFail(b.fmt("-Dp={s} isn't a proposal under design/", .{ref})).step);
     } else proposal_step.dependOn(&b.addFail("zig build proposal needs -Dp=<slug>").step);
 
-    // The design tool (design/proposals.md), run from the repository
+    // The design tool (design/epoch-0/proposals.md), run from the repository
     // root: zig build design -- check, list, ready and so on.
     const design_tool = b.addExecutable(.{
         .name = "design",

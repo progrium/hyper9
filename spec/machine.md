@@ -12,7 +12,7 @@ This describes, as built, how a machine's namespace is put together at boot, the
 
 ## Slim roots
 
-`zig build slim` ([multicall](../design/multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
+`zig build slim` ([multicall](../design/epoch-0/multicall.md)) builds 9box, 9front's own commands as one statically linked multi-call binary, and a root tree around it in `.local/9front/slim-<release>-<arch>`; nothing in h9 itself changes.
 
 `tools/slim.zig` copies `src/9box/` into a fresh build directory and runs its mkfile inside the just-built h9, against the stock root, with the build directory as the only writable path and `/sys/src` from the root or the fetched checkout bound read-only.
 
@@ -22,7 +22,7 @@ A command's override of a libc function (ed's `mktemp`) is renamed too, unless l
 
 `9box.c` picks the command from the last element of `argv[0]` (hard links), from `argv[2]` when `argv[1]` is `-!` and `argv[2]` is a `#!/bin/9box -!` file (stubs, so nested interpreters keep the outer script's name), from the interpreter a `#!` script names when `argv[0]` isn't a command (a script such as `/rc/bin/lc` whose `#!/bin/rc` is a hard link to `9box` starts it with the script's name in `argv[0]`), or from its first argument when run as `9box`, and sets `argv0` to nil before running it.
 
-The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 43 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied.
+The tree is `9box`, a hard link or stub per command, `rcmain`, `/rc/bin/lc`, the time zone, and the mount points h9 binds onto. Its 44 commands are a 789 KB amd64 `9box` against 3.5 MB for the same binaries copied, as measured with 43, before `walk` joined ([mount-index](../design/mount-index.md)).
 
 Each exec allocates and copies the box's text and data, so on the emulator rc's exec loop runs 9% slower from the box than from separate binaries; an exec image cache would remove most of that (the proposal's Updates have the measurements).
 
@@ -44,7 +44,7 @@ Each exec allocates and copies the box's text and data, so on the emulator rc's 
 
    Under the root's overlay it makes `/usr/$user` in the overlay if the root lacks it, so `$home` exists.
 
-   Then it sets the device mask: `#C` always (it isn't built; see [host-cmd](../design/host-cmd.md)), `#U` unless `--host-fs`, `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
+   Then it sets the device mask: `#C` always (it isn't built; see [host-cmd](../design/host-cmd.md)), `#U` unless `--host-fs`, `#I` and `#ℏ` when the network is off, `#H` under `--no-guest-tools`, which also leaves out its bind, and `#b`, `#i`, and `#m` without `--gfx`. `#ι` is masked too, but only after `--ns`'s file is replayed, since its 9P mounts go through it. Existing binds keep working, but the guest can't attach a masked device again to reach more of the host.
 
 3. If the binary is given as a host path, it's loaded straight from the host. Otherwise it's looked up through the kernel along `$path`, so lookup works the same over 9P roots.
 
@@ -86,7 +86,7 @@ On macOS AppKit needs the main thread, so the CLI runs through `h9.gfx.main`, wh
 
 ### On the browser host
 
-Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](../design/browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
+Web builds have `web`, h9's own backend, `src/kern/gfx-web.c` ([browser-gfx](../design/epoch-0/browser-gfx.md)), compiled with `gfx.c` as `headless` is, without `gfx-gui.h`. Its JS half is `GfxHost` in `h9-web.js`, in the machine's Worker, which owns the page's canvas as an `OffscreenCanvas`; without one (`h9-node`, or a page that passed no `gfx`), `gfx_present` is 0 and `--gfx` fails with `GfxNotBuilt`.
 
 - **The screen** is `gscreen` in wasm memory as `XBGR32`, at the size the page reports. `flushmemscreen` only adds a rectangle to the host's dirty rectangle; once a frame (`requestAnimationFrame` in the Worker), outside any coroutine, the host copies that rectangle's rows from wasm memory into an `ImageData`, sets each pixel's X byte to 255, and `putImageData`s it. `screensize` tells the host the new image's address, stride, and size, and the host resizes the canvas's buffer to match.
 - **Input** is a queue in the host, four ints per event: a key (rune, down), the pointer (x, y, Plan 9 buttons), a resize, or a paste's length. `gfxinput`, a kernel process started by `screeninit`, takes them through the Suspending `gfx_wait` (saving what's per thread around it, as every Suspending import does) and calls `h9_kbdkey`, `absmousetrack`, and `screenresize`, so the input paths run with `up` set.

@@ -1,5 +1,5 @@
 //! The design tool: lists, checks, proposes, and signs the proposals under
-//! design/ (design/proposals.md, design/proposal-flow.md). Run as
+//! design/ (design/epoch-0/proposals.md, design/epoch-0/proposal-flow.md). Run as
 //! `zig build design -- <command>` from the repository root.
 
 const std = @import("std");
@@ -22,6 +22,8 @@ const usage =
     \\  log <slug>                      its status and branch changes, from git
     \\  sign <slug or spec>             sign a doc you've reviewed (interactive; see design/README.md, Signature)
     \\  close-issues [--dry-run]        close the issues of implemented, declined, and superseded proposals (main's workflow runs it)
+    \\  archive [--dry-run]             move implemented, declined, and superseded proposals into the current epoch's
+    \\                                  folder, design/epoch-N, and rewrite the links to them (design/epoch-0/epochs.md)
     \\  check                           validate the proposals, test tags, signatures, and links to design/
     \\
 ;
@@ -196,8 +198,10 @@ fn check(r: Repo, diags: *Diags) !void {
     for (ps, 0..) |p, i| {
         if (fm.validSlug(p.slug)) {
             const want = p.expectedFile(&buf);
-            if (!std.mem.eql(u8, want, p.file)) diags.err("design/{s}: should be named design/{s}", .{ p.file, want });
+            if (!std.mem.eql(u8, want, p.base())) diags.err("design/{s}: should be named design/{s}{s}", .{ p.file, p.file[0 .. p.file.len - p.base().len], want });
         }
+        if (p.epoch() != null and !p.status.closed())
+            diags.err("design/{s}: it's in an epoch folder, but its status is `{t}`; only implemented, declined, and superseded proposals are archived", .{ p.file, p.status });
         for (ps[0..i]) |q| {
             if (p.slug.len > 0 and std.mem.eql(u8, p.slug, q.slug)) diags.err("design/{s}: slug `{s}` is also used by design/{s}", .{ p.file, p.slug, q.file });
             if (p.issue != null and p.issue == q.issue) diags.err("design/{s}: issue #{d} is also design/{s}'s", .{ p.file, p.issue.?, q.file });
@@ -335,7 +339,8 @@ fn parseSignature(line: []const u8) ?Signature {
     const name = rest[0..comma];
     const mark = rest[comma + 2 ..];
     if (name.len == 0) return null;
-    const link = std.mem.eql(u8, mark, "[h.d.a.](README.md#signature)") or std.mem.eql(u8, mark, "[h.d.a.](design/README.md#signature)");
+    const link = std.mem.eql(u8, mark, "[h.d.a.](README.md#signature)") or std.mem.eql(u8, mark, "[h.d.a.](../README.md#signature)") or
+        std.mem.eql(u8, mark, "[h.d.a.](design/README.md#signature)");
     const abbr = std.mem.startsWith(u8, mark, "<abbr title=\"") and std.mem.endsWith(u8, mark, "\">h.d.a.</abbr>");
     if (!link and !abbr) return null;
     return .{ .date = date, .name = name };
@@ -402,8 +407,10 @@ fn checkSignatures(r: Repo, diags: *Diags, path: []const u8, text: []const u8, o
 
 // ---- links ----
 
-/// Fails on a link to a file under design/ that doesn't exist: `design/<name>.md`
-/// anywhere, and `](<name>.md` within design/. Generated and vendored files
+/// Fails on a link to a file under design/ that doesn't exist, or that has
+/// moved into an epoch folder: `design/<name>.md` and `design/epoch-N/<name>.md`
+/// anywhere, and `](<name>.md`, `](epoch-N/<name>.md`, and from an epoch
+/// folder `](../<name>.md` within design/. Generated and vendored files
 /// are left out, as are names with capitals that aren't README, TEMPLATE,
 /// or STATUS, which can't be slugs (`design/NNNN-shortname.md`).
 fn checkLinks(r: Repo, diags: *Diags) !void {
@@ -413,6 +420,8 @@ fn checkLinks(r: Repo, diags: *Diags) !void {
         const text = r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 22)) catch continue;
         if (std.mem.indexOfScalar(u8, text, 0) != null) continue; // binary
         const in_design = std.mem.startsWith(u8, path, "design/");
+        // The folder within design/ that a design file is in: "" or "epoch-N/".
+        const here = if (in_design) designDir(path["design/".len..]) else "";
         var lines = std.mem.splitScalar(u8, text, '\n');
         var lineno: u32 = 0;
         while (lines.next()) |line| {
@@ -421,13 +430,24 @@ fn checkLinks(r: Repo, diags: *Diags) !void {
             while (std.mem.indexOfPos(u8, line, pos, "design/")) |at| {
                 pos = at + "design/".len;
                 if (at > 0 and (std.ascii.isAlphanumeric(line[at - 1]) or line[at - 1] == '-' or line[at - 1] == '_')) continue;
-                if (docName(line[pos..])) |name| try expectDoc(r, diags, path, lineno, name);
+                const dir = epochPrefix(line[pos..]);
+                if (docName(line[pos + dir.len ..])) |name| try expectDoc(r, diags, path, lineno, dir, name);
             }
             if (!in_design) continue;
             pos = 0;
             while (std.mem.indexOfPos(u8, line, pos, "](")) |at| {
                 pos = at + 2;
-                if (docName(line[pos..])) |name| try expectDoc(r, diags, path, lineno, name);
+                var rest = line[pos..];
+                var dir = here;
+                if (here.len > 0 and std.mem.startsWith(u8, rest, "../")) {
+                    rest = rest[3..];
+                    dir = "";
+                }
+                if (dir.len == 0) {
+                    dir = epochPrefix(rest);
+                    rest = rest[dir.len..];
+                }
+                if (docName(rest)) |name| try expectDoc(r, diags, path, lineno, dir, name);
             }
         }
     }
@@ -443,11 +463,29 @@ fn docName(s: []const u8) ?[]const u8 {
     return s[0..i];
 }
 
-fn expectDoc(r: Repo, diags: *Diags, path: []const u8, lineno: u32, name: []const u8) !void {
-    for ([_][]const u8{ "README", "TEMPLATE", "STATUS" }) |n| if (std.mem.eql(u8, name, n)) return;
+/// `epoch-N/` at the start of `s`, or "".
+fn epochPrefix(s: []const u8) []const u8 {
+    const slash = std.mem.indexOfScalar(u8, s, '/') orelse return "";
+    return if (fm.epochOf(s[0..slash]) != null) s[0 .. slash + 1] else "";
+}
+
+/// The folder part of a path within design/: "" or `epoch-N/`.
+fn designDir(rel: []const u8) []const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, rel, '/')) |i| rel[0 .. i + 1] else "";
+}
+
+/// A link to `design/<dir><name>.md` must be to a proposal that's there.
+fn expectDoc(r: Repo, diags: *Diags, path: []const u8, lineno: u32, dir: []const u8, name: []const u8) !void {
+    if (dir.len == 0) for ([_][]const u8{ "README", "TEMPLATE", "STATUS" }) |n| if (std.mem.eql(u8, name, n)) return;
     for (name) |c| if (std.ascii.isUpper(c)) return;
-    for (r.ps) |p| if (std.mem.eql(u8, p.file[0 .. p.file.len - 3], name)) return;
-    const msg_path = try std.fmt.allocPrint(r.arena, "design/{s}.md", .{name});
+    const msg_path = try std.fmt.allocPrint(r.arena, "design/{s}{s}.md", .{ dir, name });
+    for (r.ps) |p| {
+        const base = p.base();
+        if (!std.mem.eql(u8, base[0 .. base.len - 3], name)) continue;
+        if (std.mem.eql(u8, p.file[0 .. p.file.len - base.len], dir)) return;
+        diags.err("{s}:{d}: links to {s}, which is now design/{s}", .{ path, lineno, msg_path, p.file });
+        return;
+    }
     diags.err("{s}:{d}: links to {s}, which doesn't exist", .{ path, lineno, msg_path });
 }
 
@@ -534,7 +572,9 @@ fn nodeId(arena: std.mem.Allocator, slug: []const u8) ![]const u8 {
     return out;
 }
 
-fn graph(r: Repo, w: *std.Io.Writer) !void {
+/// The dependency graph. `open_only` leaves out archived proposals and
+/// the edges from them, for STATUS.md.
+fn graph(r: Repo, w: *std.Io.Writer, open_only: bool) !void {
     try w.writeAll("flowchart LR\n");
     try w.writeAll(
         \\  classDef draft stroke-dasharray: 4 3
@@ -545,6 +585,7 @@ fn graph(r: Repo, w: *std.Io.Writer) !void {
     );
     for (r.ps) |p| {
         if (p.slug.len == 0) continue;
+        if (open_only and p.epoch() != null) continue;
         const class = switch (p.status) {
             .draft, .proposed, .hold => "draft",
             .accepted => "accepted",
@@ -555,6 +596,7 @@ fn graph(r: Repo, w: *std.Io.Writer) !void {
     }
     for (r.ps) |p| for (p.depends) |ref| {
         const j = r.resolve(ref) orelse continue;
+        if (open_only and (p.epoch() != null or r.ps[j].epoch() != null)) continue;
         try w.print("  {s} --> {s}\n", .{ try nodeId(r.arena, r.ps[j].slug), try nodeId(r.arena, p.slug) });
     };
 }
@@ -572,13 +614,14 @@ fn statusFile(r: Repo) ![]const u8 {
         \\
         \\# Proposal status
         \\
-        \\Every proposal under [design/](README.md), in the order they were written, with its issue, its status, and whether it's ready, in progress, stalled, or what it needs. `zig build design -- list` prints the same from any checkout.
+        \\Every proposal at the top of [design/](README.md), in the order they were written, with its issue, its status, and whether it's ready, in progress, stalled, or what it needs. The proposals archived in each epoch's folder follow the graph. `zig build design -- list` prints all of them from any checkout.
         \\
         \\| Proposal | Issue | Status | State | Title |
         \\| --- | --- | --- | --- | --- |
         \\
     );
     for (r.ps) |p| {
+        if (p.epoch() != null) continue;
         var st: std.ArrayList(u8) = .empty;
         try state(r, p, &st);
         var issue: []const u8 = "";
@@ -586,8 +629,24 @@ fn statusFile(r: Repo) ![]const u8 {
         try w.print("| [{s}]({s}) | {s} | {t} | {s} | {s} |\n", .{ p.slug, p.file, issue, p.status, st.items, p.title });
     }
     try w.writeAll("\n```mermaid\n");
-    try graph(r, w);
+    try graph(r, w, true);
     try w.writeAll("```\n");
+    var last: ?u32 = null;
+    for (r.ps) |p| if (p.epoch()) |n| {
+        if (last == null or n > last.?) last = n;
+    };
+    var n: u32 = 0;
+    while (last != null and n <= last.?) : (n += 1) {
+        var any = false;
+        for (r.ps) |p| {
+            if (p.epoch() != n) continue;
+            if (!any) try w.print("\n## Epoch {d}\n\nArchived in [epoch-{d}/](epoch-{d}/).\n\n| Proposal | Issue | Status | Title |\n| --- | --- | --- | --- |\n", .{ n, n, n });
+            any = true;
+            var issue: []const u8 = "";
+            if (p.issue) |id| issue = try std.fmt.allocPrint(r.arena, "[#{d}](../../../issues/{d})", .{ id, id });
+            try w.print("| [{s}]({s}) | {s} | {t} | {s} |\n", .{ p.slug, p.file, issue, p.status, p.title });
+        }
+    }
     return aw.written();
 }
 
@@ -972,7 +1031,7 @@ fn signCmd(r: Repo, gpa: std.mem.Allocator, env: *const std.process.Environ.Map,
     if (!std.mem.eql(u8, t, "spec")) {
         const i = r.resolve(t) orelse fail("sign: `{s}` isn't a proposal", .{t});
         path = try std.fmt.allocPrint(r.arena, "design/{s}", .{r.ps[i].file});
-        link = "README.md#signature";
+        link = if (r.ps[i].epoch() != null) "../README.md#signature" else "README.md#signature";
         title = r.ps[i].title;
     }
 
@@ -1083,7 +1142,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (std.mem.eql(u8, cmd, "ready")) {
         try listCmd(r, w, null, null, true);
     } else if (std.mem.eql(u8, cmd, "graph")) {
-        try graph(r, w);
+        try graph(r, w, false);
     } else if (std.mem.eql(u8, cmd, "status")) {
         try statusCmd(r);
     } else if (std.mem.eql(u8, cmd, "new")) {
@@ -1096,14 +1155,184 @@ pub fn main(init: std.process.Init) !u8 {
         try closeIssuesCmd(r, init.gpa, w, rest);
     } else if (std.mem.eql(u8, cmd, "sign")) {
         try signCmd(r, init.gpa, init.environ_map, rest);
+    } else if (std.mem.eql(u8, cmd, "archive")) {
+        try archiveCmd(r, init.gpa, w, rest);
     } else if (std.mem.eql(u8, cmd, "file") or std.mem.eql(u8, cmd, "fix")) {
-        std.debug.print("design: `{s}` is gone; see design/proposal-flow.md (`file` is now `propose`, and nothing needs `fix`)\n", .{cmd});
+        std.debug.print("design: `{s}` is gone; see design/epoch-0/proposal-flow.md (`file` is now `propose`, and nothing needs `fix`)\n", .{cmd});
         return 2;
     } else {
         std.debug.print("design: unknown command `{s}`\n{s}", .{ cmd, usage });
         return 2;
     }
     return 0;
+}
+
+// ---- archive ----
+
+/// Where a proposal is, or is about to be: its path within design/.
+const Place = struct { slug: []const u8, file: []const u8 };
+
+fn placeOf(places: []const Place, name: []const u8) ?[]const u8 {
+    for (places) |pl| if (std.mem.eql(u8, pl.slug, name)) return pl.file;
+    return null;
+}
+
+/// The epoch that closed proposals are archived into: K once a
+/// `baseline-K` proposal exists, and 0 before the first one.
+fn currentEpoch(ps: []const Proposal) u32 {
+    var cur: u32 = 0;
+    for (ps) |p| {
+        const prefix = "baseline-";
+        if (!std.mem.startsWith(u8, p.slug, prefix)) continue;
+        const k = std.fmt.parseInt(u32, p.slug[prefix.len..], 10) catch continue;
+        cur = @max(cur, k);
+    }
+    return cur;
+}
+
+/// Whether `archive` moves `p` into epoch `cur`: it's closed, it isn't
+/// archived yet, and it isn't the baseline that opened `cur`, which is
+/// archived with the epoch it opens.
+fn archivable(p: Proposal, cur: u32) bool {
+    if (p.epoch() != null or !p.status.closed() or !p.ok or p.slug.len == 0) return false;
+    var buf: [32]u8 = undefined;
+    const opener = std.fmt.bufPrint(&buf, "baseline-{d}", .{cur}) catch return true;
+    return !(cur > 0 and std.mem.eql(u8, p.slug, opener));
+}
+
+/// The text of the file at `path` (relative to the root, where it is or
+/// is about to be) with its links to proposals pointing at `places`:
+/// `design/<slug>.md` and `design/epoch-N/<slug>.md` anywhere, and the
+/// relative forms in a file under design/. With `moved_in`, the file has
+/// just moved from the top of design/ into an epoch folder, so its other
+/// relative links, outside code blocks, get a `../` too.
+fn relinked(arena: std.mem.Allocator, path: []const u8, text: []const u8, places: []const Place, moved_in: bool) ![]const u8 {
+    const in_design = std.mem.startsWith(u8, path, "design/");
+    const here = if (in_design) designDir(path["design/".len..]) else "";
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    var fenced = false;
+    while (lines.next()) |line| {
+        if (!first) try out.append(arena, '\n');
+        first = false;
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```")) fenced = !fenced;
+        var i: usize = 0;
+        while (i < line.len) {
+            const rest = line[i..];
+            const bounded = i == 0 or !(std.ascii.isAlphanumeric(line[i - 1]) or line[i - 1] == '-' or line[i - 1] == '_');
+            if (bounded and std.mem.startsWith(u8, rest, "design/")) {
+                const after = rest["design/".len..];
+                const dir = epochPrefix(after);
+                if (docName(after[dir.len..])) |name| if (placeOf(places, name)) |file| {
+                    try out.print(arena, "design/{s}", .{file});
+                    i += "design/".len + dir.len + name.len + ".md".len;
+                    continue;
+                };
+            }
+            if (in_design and std.mem.startsWith(u8, rest, "](")) {
+                try out.appendSlice(arena, "](");
+                i += 2;
+                const target = line[i..];
+                // Read the target from the folder the text was written in:
+                // a file that just moved was at the top of design/.
+                const was = if (moved_in) "" else here;
+                var t = target;
+                var used: usize = 0;
+                var inside = true;
+                if (std.mem.startsWith(u8, t, "../")) {
+                    if (was.len == 0) inside = false; // out of design/
+                    t = t[3..];
+                    used = 3;
+                }
+                if (was.len == 0 or used > 0) {
+                    const d = epochPrefix(t);
+                    t = t[d.len..];
+                    used += d.len;
+                }
+                if (inside) if (docName(t)) |name| if (placeOf(places, name)) |file| {
+                    try out.appendSlice(arena, try relativeTo(arena, here, file));
+                    i += used + name.len + ".md".len;
+                    continue;
+                };
+                if (moved_in and !fenced and relativeTarget(target)) try out.appendSlice(arena, "../");
+                continue;
+            }
+            try out.append(arena, line[i]);
+            i += 1;
+        }
+    }
+    return out.items;
+}
+
+/// The link from a file in design's folder `here` ("" or `epoch-N/`) to
+/// `file`, a path within design/.
+fn relativeTo(arena: std.mem.Allocator, here: []const u8, file: []const u8) ![]const u8 {
+    if (here.len == 0) return file;
+    if (std.mem.startsWith(u8, file, here)) return file[here.len..];
+    return std.fmt.allocPrint(arena, "../{s}", .{file});
+}
+
+/// Whether a link's target, as it starts at `s`, is a relative path: not
+/// an anchor, an absolute path, or a URL, and not text that only looks
+/// like a link in prose about links.
+fn relativeTarget(s: []const u8) bool {
+    const end = std.mem.indexOfAny(u8, s, ")") orelse return false;
+    const t = s[0..end];
+    if (t.len == 0 or t[0] == '#' or t[0] == '/' or t[0] == '<') return false;
+    if (std.mem.indexOfAny(u8, t, " `<>") != null) return false;
+    if (std.mem.indexOf(u8, t, "://") != null or std.mem.startsWith(u8, t, "mailto:")) return false;
+    return true;
+}
+
+fn archiveCmd(r: Repo, gpa: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
+    var dry = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--dry-run")) dry = true else fail("archive: unexpected `{s}`\n{s}", .{ a, usage });
+    }
+    const cur = currentEpoch(r.ps);
+    const places = try r.arena.alloc(Place, r.ps.len);
+    var moving: usize = 0;
+    for (r.ps, places) |p, *pl| {
+        pl.* = .{ .slug = p.slug, .file = p.file };
+        if (!archivable(p, cur)) continue;
+        pl.file = try std.fmt.allocPrint(r.arena, "epoch-{d}/{s}", .{ cur, p.file });
+        moving += 1;
+        try w.print("design/{s} -> design/{s}\n", .{ p.file, pl.file });
+    }
+    if (dry) {
+        try w.print("{d} to archive in design/epoch-{d}\n", .{ moving, cur });
+        return;
+    }
+    if (moving > 0) {
+        try r.root.createDirPath(r.io, try std.fmt.allocPrint(r.arena, "design/epoch-{d}", .{cur}));
+        for (r.ps, places) |p, pl| {
+            if (std.mem.eql(u8, p.file, pl.file)) continue;
+            _ = try run(gpa, r.io, r.arena, &.{
+                "git",                                                    "mv",
+                try std.fmt.allocPrint(r.arena, "design/{s}", .{p.file}), try std.fmt.allocPrint(r.arena, "design/{s}", .{pl.file}),
+            });
+        }
+    }
+    var changed: usize = 0;
+    for (r.files) |old| {
+        if (std.mem.startsWith(u8, old, "third_party/") or std.mem.startsWith(u8, old, "tools/testdata/") or
+            std.mem.startsWith(u8, old, ".git/") or std.mem.eql(u8, old, status_path)) continue;
+        var path = old;
+        var moved_in = false;
+        if (std.mem.startsWith(u8, old, "design/")) for (r.ps, places) |p, pl| {
+            if (!std.mem.eql(u8, old["design/".len..], p.file) or std.mem.eql(u8, p.file, pl.file)) continue;
+            path = try std.fmt.allocPrint(r.arena, "design/{s}", .{pl.file});
+            moved_in = true;
+        };
+        const text = r.root.readFileAlloc(r.io, path, r.arena, .limited(1 << 22)) catch continue;
+        if (std.mem.indexOfScalar(u8, text, 0) != null) continue; // binary
+        const out = try relinked(r.arena, path, text, places, moved_in);
+        if (std.mem.eql(u8, out, text)) continue;
+        try r.root.writeFile(r.io, .{ .sub_path = path, .data = out });
+        changed += 1;
+    }
+    try w.print("archived {d} in design/epoch-{d}, and rewrote links in {d} files\n", .{ moving, cur, changed });
 }
 
 // ---- tests ----
@@ -1273,7 +1502,7 @@ test "log" {
     const gitlog =
         \\@@commit 4be5ab3 2026-11-07 design: draft browser-gfx
         \\
-        \\diff --git a/design/browser-gfx.md b/design/browser-gfx.md
+        \\diff --git a/design/epoch-0/browser-gfx.md b/design/epoch-0/browser-gfx.md
         \\+status: draft
         \\+Some body text.
         \\@@commit 0b1c2d3 2026-11-08 design: tidy browser-gfx
@@ -1289,4 +1518,61 @@ test "log" {
         "2026-11-07 4be5ab3  status: draft  (design: draft browser-gfx)\n2026-11-11 196b924  status: implemented, branch: [main]  (design: 120 implemented)\n",
         try formatLog(arena_state.allocator(), gitlog),
     );
+}
+
+test "archive: links follow a proposal into its epoch folder" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Capitals keep `check` from reading these as links to real proposals.
+    const places = [_]Place{
+        .{ .slug = "Aa", .file = "Aa.md" },
+        .{ .slug = "Done", .file = "epoch-0/Done.md" },
+        .{ .slug = "Other", .file = "epoch-0/Other.md" },
+    };
+    // Anywhere in the tree, by path from the root.
+    try std.testing.expectEqualStrings(
+        "// design/epoch-0/Done.md and design/Aa.md, not mydesign/Done.md",
+        try relinked(arena, "src/x.zig", "// design/Done.md and design/Aa.md, not mydesign/Done.md", &places, false),
+    );
+    // From a proposal at the top of design/.
+    try std.testing.expectEqualStrings(
+        "[d](epoch-0/Done.md#x) [r](README.md) [s](../SPEC.md)",
+        try relinked(arena, "design/Aa.md", "[d](Done.md#x) [r](README.md) [s](../SPEC.md)", &places, false),
+    );
+    // In a proposal that has just moved: its Other relative links move too.
+    const moved = try relinked(arena, "design/epoch-0/Done.md",
+        \\[Aa](Aa.md) [o](Other.md) [r](README.md#signature) [s](../SPEC.md)
+        \\[i](../../../issues/3) [u](https://example.com/z.md) [h](#top) `](<name>.md`
+        \\```
+        \\[kept](../SPEC.md)
+        \\```
+    , &places, true);
+    try std.testing.expectEqualStrings(
+        \\[Aa](../Aa.md) [o](Other.md) [r](../README.md#signature) [s](../../SPEC.md)
+        \\[i](../../../../issues/3) [u](https://example.com/z.md) [h](#top) `](<name>.md`
+        \\```
+        \\[kept](../SPEC.md)
+        \\```
+    , moved);
+    // Running it again changes nothing.
+    try std.testing.expectEqualStrings(moved, try relinked(arena, "design/epoch-0/Done.md", moved, &places, false));
+    // When `a` is archived later, links from both folders follow it.
+    const later = [_]Place{ .{ .slug = "Aa", .file = "epoch-1/Aa.md" }, .{ .slug = "Done", .file = "epoch-0/Done.md" } };
+    try std.testing.expectEqualStrings("[Aa](../epoch-1/Aa.md)", try relinked(arena, "design/epoch-0/Done.md", "[Aa](../Aa.md)", &later, false));
+
+    const ps = [_]Proposal{
+        .{ .file = "baseline.md", .slug = "baseline", .status = .implemented },
+        .{ .file = "baseline-1.md", .slug = "baseline-1", .status = .implemented },
+        .{ .file = "x.md", .slug = "x", .status = .declined },
+        .{ .file = "y.md", .slug = "y", .status = .accepted },
+        .{ .file = "epoch-0/z.md", .slug = "z", .status = .implemented },
+    };
+    try std.testing.expectEqual(@as(u32, 0), currentEpoch(ps[0..1]));
+    try std.testing.expectEqual(@as(u32, 1), currentEpoch(&ps));
+    try std.testing.expect(archivable(ps[0], 1));
+    try std.testing.expect(!archivable(ps[1], 1)); // the baseline that opened this epoch
+    try std.testing.expect(archivable(ps[2], 1));
+    try std.testing.expect(!archivable(ps[3], 1));
+    try std.testing.expect(!archivable(ps[4], 1));
 }

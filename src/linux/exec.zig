@@ -1,4 +1,4 @@
-//! Building a Linux process image (design/linux-personality.md,
+//! Building a Linux process image (design/epoch-0/linux-personality.md,
 //! "Loading"): a fresh address space with the stack, the vDSO, the
 //! program and its interpreter, and the initial stack with argv, envp and
 //! auxv. The process model commits it only once it's built.
@@ -42,7 +42,7 @@ pub const Args = struct {
 /// registers that say the same; the rest are left for the program to
 /// discover by trying (design/0018, "Loading"). On amd64 and i386,
 /// AT_HWCAP is CPUID.1:EDX, the baseline x86-64 features, which both the
-/// emulator has (design/linux-i386.md). `backend` adds the
+/// emulator has (design/epoch-0/linux-i386.md). `backend` adds the
 /// optional features it runs (vmm.Backend.hwcaps).
 pub fn hwcap(arch: vmm.Arch, backend: vmm.Backend) u64 {
     return baseHwcap(arch) | backend.hwcaps(arch);

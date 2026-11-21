@@ -18,7 +18,7 @@ A Linux process's `fork` copies every allocated page of its parent today, and `e
 
 ## Background
 
-[linux-personality](linux-personality.md) left both as later work: "`fork` copies the VMAs eagerly, as `rfork` copies segments. Copy-on-write is later performance work." Its Memory section planned private file mappings filled "eagerly for small files, or chunk by chunk on fault", and only the eager half was built.
+[linux-personality](epoch-0/linux-personality.md) left both as later work: "`fork` copies the VMAs eagerly, as `rfork` copies segments. Copy-on-write is later performance work." Its Memory section planned private file mappings filled "eagerly for small files, or chunk by chunk on fault", and only the eager half was built.
 
 What's there now (`src/linux/mm.zig`):
 
@@ -37,7 +37,7 @@ The same pattern is common: shells, `make`, `git`, and Python's `subprocess` for
 
 - **Sharing at fork.** `Mm.fork` gives the child the parent's `Pages` for every private chunk, as it does for shared ones, and takes a reference on them. A private chunk whose `Pages` has more than one reference is copy-on-write in every Mm that holds it.
 - **Mapped without write.** `remap` and `remapShared` map a copy-on-write chunk's runs without write permission, whatever the VMA allows. Reads and execution of the shared pages go on at full speed in both processes.
-- **Before fork returns,** the parent's runs are remapped without write and shot down on the vCPUs of its other threads ([linux-threads](linux-threads.md)'s `settle`), so no write made after `fork` returns in the parent can reach the child. Writes other threads make during the `fork` call land before or after the snapshot, as on Linux.
+- **Before fork returns,** the parent's runs are remapped without write and shot down on the vCPUs of its other threads ([linux-threads](epoch-0/linux-threads.md)'s `settle`), so no write made after `fork` returns in the parent can reach the child. Writes other threads make during the `fork` call land before or after the snapshot, as on Linux.
 - **The first write** to a copy-on-write chunk faults. `Mm.fault` sees a write the VMA allows on a chunk whose `Pages` is shared and private: it allocates new pages, copies the old ones (`copySparse`), drops its reference on the old ones, and remaps the chunk writable. If its reference is the only one left (the other side wrote first, or exited), it remaps without copying.
 - **Writes by the host** on the guest's behalf (`touch` with `write`, `copy` to the guest, `hostSlice` with `write`, `hostWrite`) break the copy-on-write of the chunks they cover first, in the same way, so `read` into a buffer after `fork` doesn't write into the other process's pages.
 - **Running out.** A copy that finds no memory is what a first touch past `--memory` is today: a guest write gets `SIGSEGV`, with "virtual memory allocation failed" under `--debug`, and a syscall's buffer gets `EFAULT`. Linux's OOM killer would end some process in the same spot; `fork` itself no longer fails for want of memory.
@@ -97,7 +97,7 @@ Integration cases:
 
 ## Open issues
 
-- 9front `rfork` copies segments eagerly too, and [go-compat](go-compat.md)'s `os/exec` case needs `--memory 4G` for it. Copy-on-write segments would follow the same plan in `src/segment.zig`, but semaphores key waiters on host addresses ([semaphores](semaphores.md)), so moving a page under a waiter needs care. A separate proposal, or this one's scope?
+- 9front `rfork` copies segments eagerly too, and [go-compat](epoch-0/go-compat.md)'s `os/exec` case needs `--memory 4G` for it. Copy-on-write segments would follow the same plan in `src/segment.zig`, but semaphores key waiters on host addresses ([semaphores](epoch-0/semaphores.md)), so moving a page under a waiter needs care. A separate proposal, or this one's scope?
 - Per-page copy-on-write, if chunk copies show up in long-lived forked servers.
 - Whether `exec` should still read the whole file for small executables, where one read is cheaper than many faults.
 

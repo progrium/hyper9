@@ -29,9 +29,9 @@ const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or b
 const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
 /// The web host has h9's own CPUs (-Demu=hcpu), but not Unicorn.
 const have_emu = build_options.emu != .none and !(web and build_options.emu == .unicorn);
-/// The native backend (design/native-backend.md): Linux x86_64 for now.
+/// The native backend (design/epoch-0/native-backend.md): Linux x86_64 for now.
 const have_native = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
-/// The web host (design/browser-host.md), whose backend is hcpu.
+/// The web host (design/epoch-0/browser-host.md), whose backend is hcpu.
 const web = builtin.os.tag == .wasi;
 
 pub const Arch = aout.Arch;
@@ -40,7 +40,7 @@ pub const Arch = aout.Arch;
 pub const host_arch: ?Arch = switch (builtin.cpu.arch) {
     .aarch64 => .arm64,
     .x86_64 => .amd64,
-    // The web host runs 386 binaries on h86 (design/browser-host.md).
+    // The web host runs 386 binaries on h86 (design/epoch-0/browser-host.md).
     .wasm32 => .i386,
     else => null,
 };
@@ -57,7 +57,7 @@ pub const Kind = enum {
     whp,
     emu,
     /// Guest code on the host CPU in a stub process, with no hypervisor
-    /// (design/native-backend.md).
+    /// (design/epoch-0/native-backend.md).
     native,
 
     pub fn built(k: Kind) bool {
@@ -119,7 +119,7 @@ pub const Exit = union(enum) {
     /// A breakpoint instruction: BRK on arm64 (ESR class 0x3C, or the
     /// breakpoint classes 0x30 and 0x31), INT3 on amd64 and 386. The PC
     /// is left at the BRK, and after the INT3, as 9front leaves it
-    /// (design/self-host.md).
+    /// (design/epoch-0/self-host.md).
     breakpoint,
     interrupted,
     halted,
@@ -533,7 +533,7 @@ pub const AddressSpace = union(enum) {
         };
     }
     /// Returns once no vCPU other than the caller's can still reach what
-    /// `unmap` removed (design/linux-threads.md, "TLB shootdown"):
+    /// `unmap` removed (design/epoch-0/linux-threads.md, "TLB shootdown"):
     /// each one running the space has stopped and will see the change
     /// before its next guest instruction. Only then may the host reuse
     /// the pages.

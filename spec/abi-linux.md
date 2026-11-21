@@ -22,7 +22,7 @@ This describes, as built, the Linux personality: how Linux ELF binaries are load
 
 ## Linux personality
 
-Linux ELF binaries run next to 9front ones in the same machine ([linux-personality](../design/linux-personality.md)). The personality is picked at exec by the binary's format: `exec` of an ELF builds a Linux image, and a Linux `execve` of an a.out goes back to 9front. A Linux process keeps the same kernel `Proc`, fds, pipes, notes and namespace; only its syscall table and root differ.
+Linux ELF binaries run next to 9front ones in the same machine ([linux-personality](../design/epoch-0/linux-personality.md)). The personality is picked at exec by the binary's format: `exec` of an ELF builds a Linux image, and a Linux `execve` of an a.out goes back to 9front. A Linux process keeps the same kernel `Proc`, fds, pipes, notes and namespace; only its syscall table and root differ.
 
 ### Loading
 
@@ -89,9 +89,13 @@ A process's dot is renamed when it changes views. drawterm's `namec` doesn't cro
 The environment goes both ways: a Linux program gets `/env` as `NAME=value` (with `USER`, `LOGNAME`, `HOME` and a default `PATH`), and a 9front program exec'd from Linux gets `envp` written to `/env`.
 
 `isatty` is true only when h9's own stdin and stdout are terminals. The console's termios is one per machine: `TCSETS` sets raw mode from `ICANON`, and, through the optional `echo` and `crnl` on `Machine.Stdio.raw`, the host's echo from `ECHO` and its CR-to-NL mapping from `ICRNL`; `TIOCGWINSZ` is the host terminal's size, through the hook's optional `size`, or 80x24. In non-canonical mode with `VMIN` 0, a console read waits at most `VTIME` tenths of a second and may return 0 bytes. consctl also takes `echooff` and `echoon`, which keep the line discipline.
+
+Pseudoterminals ([linux-pty](../design/epoch-0/linux-pty.md)) are `#τ` pairs: the Linux view binds `#τ` on `/dev/pts` and `#τ/ptmx` on `/dev/ptmx`, and `stat` gives them Linux's device numbers (5,2 for `ptmx` and every master, 136,N for slave N). Each open of `ptmx` makes a pair, numbered from 0 per machine, and returns its master; `#τ/N` is pair N's slave, which opens while the master is open and `TIOCSPTLCK` has unlocked it. The pair keeps the termios, window size, foreground group, session, and lock, which the ioctls on either side read and set: `TIOCGPTN`, `TIOCSPTLCK`, `TIOCGPTPEER`, the termios and termios2 calls, `TIOCGWINSZ` and `TIOCSWINSZ` (which sends `SIGWINCH` to the foreground group), `TIOCSCTTY`, `TIOCNOTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`, `FIONREAD`, `TIOCOUTQ`, and `TCFLSH`. A session leader that `setsid` made takes a slave it opens without `O_NOCTTY` as its controlling terminal; the machine's first process keeps the console. `/dev/tty` opens the session's pty when it has one, and the console otherwise, and `/proc/self/fd/N` names a pty's side as `/dev/pts/N` or `/dev/ptmx`.
+
+The pair's termios is applied as Linux's `N_TTY` does, in devpty.c: input written to the master goes through `ISTRIP`, `IGNCR`, `ICRNL`, and `INLCR`; with `ISIG`, `VINTR`, `VQUIT`, and `VSUSP` send `SIGINT`, `SIGQUIT`, and `SIGTSTP` to the foreground group (from the writing process) and, without `NOFLSH`, drop the pending input; with `ICANON`, `VERASE`, `VWERASE`, `VKILL`, and `VEOF` edit a line of up to 4096 bytes, which the slave reads whole, at most a line a read, when it ends at a newline, `VEOL`, `VEOL2`, or `VEOF` (on an empty line, an end of file). Echo follows `ECHO`, `ECHOE`, `ECHOK`, `ECHOKE`, `ECHONL`, and `ECHOCTL`, and the slave's output and echo go through `OPOST` with `ONLCR` and `OCRNL`. Without `ICANON` a slave read with `VMIN` 0 waits at most `VTIME` tenths of a second, as the console's does. Each direction queues 64 KiB; echo and finished lines are dropped when the slave's queue is full, as `N_TTY` drops input, and other writes wait for room. Until the slave first opens a master read waits; once the slave has closed, the master reads what's left and then `EIO`. The master's last close hangs the slave up (reads end, writes are `EIO`), ends its session's terminal, and sends `SIGHUP` to the foreground group.
 ### Sockets and readiness
 
-A socket ([linux-net](../design/linux-net.md)) is a `/net` conversation, its fd the conversation's data file. `socket(2)` opens `/net/tcp/clone` or `/net/udp/clone` in the process's namespace, in the 9front view, as `dial(2)` does, so it's devip's (`#I`) unless something else is mounted on `/net`. With devip's, `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
+A socket ([linux-net](../design/epoch-0/linux-net.md)) is a `/net` conversation, its fd the conversation's data file. `socket(2)` opens `/net/tcp/clone` or `/net/udp/clone` in the process's namespace, in the 9front view, as `dial(2)` does, so it's devip's (`#I`) unless something else is mounted on `/net`. With devip's, `--net` and the policy's devip hooks apply as they do to 9front programs (a socket under `--net=disable` is `EACCES`).
 
 A conversation from a mounted `/net`, such as another h9's served with `--serve-net`, is devmnt's, which can't say whether a read would block, so `src/kern/linuxnet.c` attaches it to a read-ahead: a kproc reads its data into a 64 KiB ring (UDP keeps each message's length), and `recv`, `MSG_PEEK`, a plain `read`, and readiness answer from the ring. A non-blocking connect writes `connect` to its `ctl` in a kproc, writable when done, with `SO_ERROR` from its error. A listening one has a kproc that opens `listen`, which waits in the server, and keeps one call for `accept`, readable while it waits. Sends write the data file. The description's last close writes `shutdown rdwr` (or 9front's `hangup`) and lets the conversation go. The serving machine's policy governs what its conversations reach.
 
@@ -114,7 +118,7 @@ Readiness is kernel code (`src/kern/linuxnet.c`): `h9_poll` asks each fd's chann
 `poll`, `ppoll`, `select` and `pselect6` use it, `epoll` keeps interest lists in the Linux layer (edge-triggered by generation), and `#ε` serves eventfd and epoll instances. `O_NONBLOCK` asks first and returns `EAGAIN`, and a blocking socket read waits in `h9_poll` so a signal can interrupt it. A Linux pipe read takes everything queued.
 ### Threads
 
-A thread ([linux-threads](../design/linux-threads.md)) is its own kernel process, with its own `Proc`, vCPU lease and note queue, forked with `RFNOWAIT` (and `RFFDG` unless `CLONE_FILES`), sharing the creator's `Mm` and a thread group (`lsys.Group`), which holds the tgid, the members, the signal actions, fd flags, directory buffers, sockets and epoll sets.
+A thread ([linux-threads](../design/epoch-0/linux-threads.md)) is its own kernel process, with its own `Proc`, vCPU lease and note queue, forked with `RFNOWAIT` (and `RFFDG` unless `CLONE_FILES`), sharing the creator's `Mm` and a thread group (`lsys.Group`), which holds the tgid, the members, the signal actions, fd flags, directory buffers, sockets and epoll sets.
 
 `getpid` is the tgid, `gettid` the process's own pid. A thread's forks are the leader's children (`RFLXTHREAD` in `src/kern/proc.c`), so any thread can wait for them, several at once, and `waitid` takes `WNOWAIT`.
 
@@ -146,7 +150,7 @@ The open rules are Linux's: `O_RDONLY` waits for a writer and `O_WRONLY` for a r
 
 ### 32-bit x86
 
-With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator ([linux-i386](../design/linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.
+With `--arch 386` (the browser host's only architecture), i386 ELF32 programs run on the emulator ([linux-i386](../design/epoch-0/linux-i386.md)). The address space tops out at `0xC0000000`, with PIEs at `0x400000`.
 
 Calls come through `int 0x80` and the i386 table; `ia32.serve` in `sys.zig` joins split 64-bit arguments, maps the `*_time64` calls and the `*32`/`*64` forms onto the generic calls, and serves the multiplexers (`socketcall`, `ipc`) and the old forms (`old_mmap`, `old_select`, the 64-byte `stat`), while the generic calls read `long`s, pointers, `iovec`s, `msghdr`s, `rusage`, and `siginfo` at the process's word size.
 

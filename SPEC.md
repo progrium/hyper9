@@ -2,7 +2,7 @@
 
 Nov 2, 2026 · Jeff Lindsay, <abbr title="AI-assisted work substantially directed by the named person, who takes responsibility for the result.">h.d.a.</abbr>
 
-This describes h9 as built. Changes to it go through proposals in [design/](design/README.md); the record of how h9 got here before proposals is the [baseline](design/baseline.md).
+This describes h9 as built. Changes to it go through proposals in [design/](design/README.md); the record of how h9 got here before proposals is the [baseline](design/epoch-0/baseline.md).
 
 ## Contents
 
@@ -20,7 +20,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 
 - Start and run a 9front binary as fast as a native process: no VM image, no boot, no guest kernel.
 - One invocation can hold a whole process tree (rc pipelines, servers posting to /srv, rio, and its clients).
-- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, including on the browser host, which has no CPU to run natively on ([i386](design/i386.md), [browser-host](design/browser-host.md)).
+- Run native code only: arm64 9front binaries on arm64 hosts, amd64 binaries on x86\_64 hosts. 386 binaries run on the emulator, including on the browser host, which has no CPU to run natively on ([i386](design/epoch-0/i386.md), [browser-host](design/epoch-0/browser-host.md)).
 - One host backend each for Hypervisor.framework (macOS), KVM (Linux) and Windows Hypervisor Platform (Windows), and a native backend for Linux x86\_64 hosts without KVM.
 - Self-hosting: the 9front compilers and mk run inside and can rebuild the 9front userland.
 
@@ -37,13 +37,13 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | --- | --- | --- |
 | Product shape | A library plus a thin CLI; each invocation is one machine | One machine can hold a whole process tree. Keep the machine API free of CLI-global state. |
 | Plan 9 flavour | 9front only, at a pinned release | One syscall table and one a.out format per architecture |
-| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([ninep-roots](design/ninep-roots.md), [websocket-9p](design/websocket-9p.md)); disk images were declined ([image-roots](design/image-roots.md)) |
-| Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/self-host.md)), and a source of test binaries |
+| Root filesystem | Direct host tree, or a 9P server over TCP, a unix socket, or a WebSocket | A 9P root is mounted through devmnt ([ninep-roots](design/epoch-0/ninep-roots.md), [websocket-9p](design/epoch-0/websocket-9p.md)); disk images were declined ([image-roots](design/epoch-0/image-roots.md)) |
+| Toolchain inside | The 9front compilers (7c/6c, 7l/6l, mk) must run | It's a goal ([self-host](design/epoch-0/self-host.md)), and a source of test binaries |
 | Language | Zig 0.16.x (`minimum_zig_version` in `build.zig.zon`) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
-| Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
+| Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/epoch-0/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
 | Emulator | A user-mode emulator backend: Unicorn (`-Demu=unicorn`), or h9's own CPUs, ha64, h86, and hx64 (`-Demu=hcpu`, [hcpu](design/hcpu.md)) | For development and CI on hosts and VMs without a usable hypervisor |
-| No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
+| No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/epoch-0/native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
 | Browser host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on h9's own CPU (h86) | One machine per Web Worker; the same build runs under Node for the tests |
 
 ## Architecture
