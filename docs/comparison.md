@@ -225,10 +225,10 @@ one.
 binaries by translating instructions and passing syscalls to the host kernel.
 h9-emu translates instructions with Unicorn, which is built on QEMU's CPU
 core, but h9 serves the syscalls itself rather than handing them to the host.
-The [host-binfmt](../design/host-binfmt.md) draft *(planned)* would register
-h9 with `binfmt_misc` the way qemu-user is registered, so `./prog` runs a
-9front binary on Linux without typing `h9`. It matches only 9front's a.out
-magics: host Linux binaries still run natively.
+Registering h9 with `binfmt_misc` the way qemu-user is registered, so
+`./prog` runs a 9front binary on Linux without typing `h9`, was proposed and
+declined as out of scope ([host-binfmt](../design/host-binfmt.md)). A 9front
+binary runs as `h9 ./prog`.
 
 ## The browser and wasm
 
