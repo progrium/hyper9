@@ -229,13 +229,13 @@ step runs on a Mac laptop, a Linux worker or the emulator.
 **Sketch.**
 
 - A content-addressed 9P server fronts a blob store. Its attach spec names
-  a tree hash (`--root-spec tree:ab12…`), and it logs `(path, qid.version,
+  a tree hash (`spec=tree:ab12…` on its `--url`), and it logs `(path, qid.version,
   hash)` for every walk and read, per session.
 - A step's first run records its read set. The key is a hash of the
   command, the environment and that set. Later runs check the cache by
   re-validating the read set against the new tree, as Bazel's action cache
   does, but discovered rather than declared.
-- Workers attach with `--root wss://cas.example/9p` and
+- Workers attach with `--url wss://cas.example/9p` and
   `--write=ephemeral`. The coordinator collects the overlay as outputs and
   stores them back as blobs.
 - The `--print` plan and the read log together are a provenance record
@@ -463,7 +463,7 @@ side.
 **Why h9.** Remote development today means copying the repository to the
 remote (Codespaces, devcontainers, rsync). With `--serve`, an h9 on your
 laptop exports its namespace over a WebSocket, and a worker h9 attaches it
-as `--root` and runs there. Reads stream on demand, writes come back, and
+with `--url` and runs there. Reads stream on demand, writes come back, and
 the worker never gets more than the namespace you chose to export. Both
 ends are the same binary on any OS, and Linux hosts can mount the export
 too, because listeners also speak 9P2000.L.
@@ -473,7 +473,7 @@ too, because listeners also speak 9P2000.L.
 - On the laptop: `h9 --serve ws://127.0.0.1:9564/9p --serve-token @tok
   --serve-root /mnt/term/cwd`, behind a tunnel or relay.
 - A scheduler matches jobs to workers: a Linux box with KVM, a GPU host, a
-  browser tab. Workers run `h9 --root wss://relay/you/9p --write=ephemeral
+  browser tab. Workers run `h9 --url wss://relay/you/9p --write=ephemeral
   mk test`.
 - Write-back is a policy: none (results only), reviewed through the
   overlay, or live.

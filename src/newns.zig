@@ -18,7 +18,9 @@ const std = @import("std");
 
 pub const Op = union(enum) {
     bind: struct { from: []const u8, to: []const u8, flag: Flag },
-    mount: struct { file: []const u8, to: []const u8, spec: []const u8, flag: Flag },
+    /// `settings` are a URL mount's trailing `key=value` words
+    /// (design/mounts.md, "Namespace files").
+    mount: struct { file: []const u8, to: []const u8, spec: []const u8, flag: Flag, settings: []const []const u8 = &.{} },
     unmount: struct { from: ?[]const u8, to: []const u8 },
     cd: []const u8,
     clear,
@@ -47,11 +49,20 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, line_no: *usize) Error!
             var args: std.ArrayList([]const u8) = .empty;
             rest = try split(arena, rest, &args);
             if (args.items.len == 0) continue;
+            for (args.items) |*w| w.* = try alias(arena, w.*);
             const op = try parseLine(args.items);
             try ops.append(arena, op);
         }
     }
     return ops.items;
+}
+
+/// devlinux was `#λ` before design/mounts.md renamed it `#L`, and
+/// namespace files may still name it so.
+fn alias(arena: std.mem.Allocator, w: []const u8) Error![]const u8 {
+    const old = "#\u{3bb}";
+    if (!std.mem.startsWith(u8, w, old)) return w;
+    return std.mem.concat(arena, u8, &.{ "#L", w[old.len..] });
 }
 
 /// Whether `word` is a command a namespace file can start a line with.
@@ -94,12 +105,23 @@ fn parseLine(argv: []const []const u8) Error!Op {
     }
     var rest = argv[i..];
     // --print's access column. --print always writes a mount's spec, ''
-    // when empty, so a mount's column is its fourth word.
+    // when empty, so a mount's column comes after it and its settings.
     if (rest.len == 3 and std.mem.eql(u8, cmd, "bind") and isAccess(rest[2])) {
         rest = rest[0 .. rest.len - 1];
     }
-    if (rest.len == 4 and std.mem.eql(u8, cmd, "mount") and isAccess(rest[3])) {
+    if (rest.len >= 4 and std.mem.eql(u8, cmd, "mount") and isAccess(rest[rest.len - 1])) {
         rest = rest[0 .. rest.len - 1];
+    }
+    // A mount's settings: `key=value` words after its spec.
+    var nset: usize = 0;
+    if (std.mem.eql(u8, cmd, "mount")) {
+        while (rest.len - nset > 3 and isSetting(rest[rest.len - 1 - nset])) nset += 1;
+    }
+    if (nset > 0) {
+        const settings = rest[rest.len - nset ..];
+        rest = rest[0 .. rest.len - nset];
+        if (rest.len == 3) return .{ .mount = .{ .file = rest[0], .to = rest[1], .spec = rest[2], .flag = flag, .settings = settings } };
+        return error.Syntax;
     }
     if (std.mem.eql(u8, cmd, "bind") and rest.len == 2) return .{ .bind = .{ .from = rest[0], .to = rest[1], .flag = flag } };
     if (std.mem.eql(u8, cmd, "mount") and (rest.len == 2 or rest.len == 3))
@@ -109,6 +131,12 @@ fn parseLine(argv: []const []const u8) Error!Op {
     if (std.mem.eql(u8, cmd, "cd") and rest.len == 1) return .{ .cd = rest[0] };
     if (std.mem.eql(u8, cmd, "clear") and rest.len == 0) return .clear;
     return error.Syntax;
+}
+
+fn isSetting(s: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, s, '=') orelse return false;
+    for ([_][]const u8{ "user", "header", "ca", "spec", "index", "auth" }) |k| if (std.mem.eql(u8, s[0..eq], k)) return true;
+    return false;
 }
 
 fn isAccess(s: []const u8) bool {
@@ -258,4 +286,13 @@ test "a bare file name is a syntax error, with its word for the hint [mounts]" {
     var line: usize = 0;
     try t.expectError(error.Syntax, parse(arena.allocator(), "ns", &line));
     try t.expectEqualStrings("ns", firstWord(arena.allocator(), "ns", line));
+}
+
+test "#λ is an alias for #L [mounts]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var line: usize = 0;
+    const ops = try parse(arena.allocator(), "bind /tmp '#\u{3bb}/tmp'; bind '#\u{3bb}etc' /n", &line);
+    try t.expectEqualStrings("#L/tmp", ops[0].bind.to);
+    try t.expectEqualStrings("#Letc", ops[1].bind.from);
 }

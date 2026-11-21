@@ -155,19 +155,12 @@ pub const builtin_root = struct {
 };
 
 pub const Machine = struct {
-    /// The root tree (design/epoch-0/ninep-roots.md): a host directory, or a 9P
-    /// server the machine connects to and mounts at /.
-    pub const Root = union(enum) {
-        /// A host directory, absolute and resolved, served through #U.
-        dir: []const u8,
-        /// A TCP 9P server: a dial string, `tcp!host!port`.
-        tcp: []const u8,
-        /// A unix-domain socket's host path. Not supported on Windows.
-        unix: []const u8,
-        /// A 9P server over a WebSocket: a ws:// or wss:// URL
-        /// (design/epoch-0/websocket-9p.md).
-        ws: []const u8,
-    };
+    /// A mount (design/mounts.md): a host directory, a 9P server's URL,
+    /// an archive, the built-in root, or an empty tree, with its
+    /// destination and options. `Mount.parse` reads the flag syntax.
+    pub const Mount = policy.mount.Mount;
+    /// A `--bind` line: a path already in the machine, bound elsewhere.
+    pub const Bind = policy.mount.Bind;
 
     /// Proxies for the connections the machine makes itself: a WebSocket
     /// root and namespace-file mounts. Guest connections always go direct.
@@ -196,45 +189,33 @@ pub const Machine = struct {
         backend: vmm.BackendKind = .auto,
         /// Architecture of the binaries this machine runs; null means the host's.
         arch: ?vmm.Arch = null,
-        /// The guest's /: a host directory or a 9P server. Without one the
-        /// machine has only devices, so only host-path programs can run.
-        root: ?Root = null,
-        /// The attach name for a 9P root.
-        root_spec: []const u8 = "",
-        /// The uname for h9's attaches to a 9P root; null means the
-        /// machine's user.
-        root_user: ?[]const u8 = null,
-        /// Extra HTTP headers for a `ws` root's handshake, as `Name: value`.
-        root_headers: []const []const u8 = &.{},
-        /// PEM certificates a `wss` root must chain to, instead of the
-        /// host's bundle: a host path.
-        root_ca: ?[]const u8 = null,
-        /// Credential helpers for host-made WebSocket handshakes: the
-        /// root's and a namespace file's mounts, never a guest's
+        /// The mounts, in order (design/mounts.md). Mounts on `/` stack
+        /// into the root, and mounts on `#L` into the Linux tree. With
+        /// nothing on `/` the machine has only devices, so only host-path
+        /// programs can run. `.dir` and `.archive` sources are host paths,
+        /// absolute and resolved.
+        mounts: []const Mount = &.{},
+        /// `--bind` lines, run after every mount, in order.
+        binds: []const Bind = &.{},
+        /// Credential helpers for host-made WebSocket handshakes: its
+        /// mounts and a namespace file's, never a guest's
         /// (design/credential-helpers.md).
         cred_helpers: []const CredHelper = &.{},
         /// Metadata indexes for the 9P root and namespace-file mounts
         /// (design/mount-index.md).
         index: IndexMode = .auto,
-        /// The 9P root's index, instead of its server's `.fs/index`.
-        /// Needs a 9P root.
+        /// The 9P root's index (`index=` on a `--url` on `/`), instead of
+        /// its server's `.fs/index`. Needs a 9P member on `/`.
         root_index: ?RootIndex = null,
         /// Where compiled indexes are cached; null caches nothing. The
         /// CLI's default is `$XDG_CACHE_HOME/h9/index` and the like.
         index_cache: ?[]const u8 = null,
-        /// For the plan only (`--print`): a `--root-index` file's counts,
+        /// For the plan only (`--print`): an `index=` file's counts,
         /// which the CLI reads it for.
         root_index_counts: ?struct { entries: u32, dirs: u32 } = null,
         /// Notes on `stdio.err` about how the run went (`-v`): the
         /// index's validation, and the 9P requests it saved.
         verbose: bool = false,
-        /// Resolve a host root tree's symlinks inside it: an absolute
-        /// target starts at the tree's top, and `..` stops there
-        /// (design/epoch-0/symlinks-in-root.md).
-        root_contained: bool = false,
-        /// A Linux root tree, absolute and resolved: the Linux view's /
-        /// (design/epoch-0/linux-personality.md).
-        linux_root: ?[]const u8 = null,
         /// The host's DNS servers, as addresses: a Linux root without an
         /// /etc/resolv.conf gets one naming them, and the network policy
         /// lets port 53 reach them even when they're link-local
@@ -265,12 +246,6 @@ pub const Machine = struct {
         /// Bind h9's own commands, `#H/bin`, after /bin; false leaves the
         /// bind out and masks `#H` (design/epoch-0/guest-tools.md).
         guest_tools: bool = true,
-        /// The built-in root, `#Hroot` (design/epoch-0/builtin-root.md): `.only`
-        /// makes it the root, and needs `root` null; `.before` and
-        /// `.after` bind its commands before or after another root's
-        /// /bin, and without one make it the root. `.off` leaves a machine
-        /// without `root` with devices only.
-        builtin: policy.Builtin = .off,
         /// Receives a ratrace-style line per syscall and, when a program
         /// faults, the Ureg and a symbolized PC.
         trace: ?*std.Io.Writer = null,
@@ -377,11 +352,6 @@ pub const Machine = struct {
     arena: *std.heap.ArenaAllocator,
     msg_buf: [256]u8 = undefined,
     err_buf: [256]u8 = undefined,
-    /// A WebSocket root's 9P-User (design/credential-helpers.md), the
-    /// uname of the root's attach when no --root-user or --user-map says
-    /// otherwise.
-    root_ident: [ws.max_user + 1]u8 = undefined,
-    root_ident_len: usize = 0,
     /// Why the last run failed with NamespaceFailed, NotFound or NotExecutable,
     /// or why init failed with PolicyConflict.
     err_msg: []const u8 = "",
@@ -399,6 +369,8 @@ pub const Machine = struct {
     serve_addrs: []const []const u8 = &.{},
     /// The 9P root's `#ι` conversation (design/mount-index.md), in a run.
     hidx_root: ?u32 = null,
+    /// The root's first 9P member went through `indexRoot`.
+    root_indexed: bool = false,
 
     /// Each `serve` listener's bound address, in the order given, with
     /// port 0 resolved, once a run has opened them; empty before.
@@ -410,7 +382,7 @@ pub const Machine = struct {
     /// without creating one (for `--print`).
     pub fn compilePlan(arena: std.mem.Allocator, opts: Options, err_msg: *[]const u8) policy.CompileError!policy.Plan {
         const arch = opts.arch orelse vmm.host_arch orelse .arm64;
-        var in: policy.Inputs = .{ .root = null, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .root_contained = opts.root_contained, .linux_root = opts.linux_root, .nameservers = opts.nameservers, .builtin = opts.builtin };
+        var in: policy.Inputs = .{ .mounts = opts.mounts, .binds = opts.binds, .cwd = opts.cwd, .arch = arch, .guest_tools = opts.guest_tools, .nameservers = opts.nameservers };
         if (opts.serve.len > 0) {
             const ls = try arena.alloc(policy.Serve.Listener, opts.serve.len);
             for (ls, opts.serve) |*l, a| l.* = .{
@@ -423,41 +395,60 @@ pub const Machine = struct {
             };
             in.serve = .{ .listeners = ls, .root = opts.serve_root, .token = opts.serve_token != null, .origins = opts.serve_origins, .net = opts.serve_net, .only = false };
         }
-        if (opts.builtin != .off) in.builtin_note = try builtin_root.describe(arena);
-        if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
-        if (opts.root_index != null and (opts.root == null or opts.root.? == .dir)) {
-            err_msg.* = "--root-index needs a 9P root";
-            return error.Conflict;
-        }
-        if (opts.root) |r| switch (r) {
-            .dir => |d| in.root = d,
-            .tcp => |a| in.root_9p = .{ .kind = .tcp, .addr = a, .spec = opts.root_spec, .user = opts.root_user },
-            .unix => |path| in.root_9p = .{
-                .kind = .unix,
-                .addr = try std.fmt.allocPrint(arena, "unix!{s}", .{path}),
-                .spec = opts.root_spec,
-                .user = opts.root_user,
-            },
-            .ws => |u| in.root_9p = .{
-                .kind = .ws,
-                .addr = u,
-                .spec = opts.root_spec,
-                .user = opts.root_user,
-                .headers = opts.root_headers,
-                .ca = opts.root_ca,
-                .cred = if (ws.Url.parse(u)) |url| if (cred.pick(opts.cred_helpers, url)) |h| try std.fmt.allocPrint(arena, "{f}", .{cred.describe(h.*)}) else null else |_| null,
-                .proxy = if (opts.proxy) |px| if (ws.Url.parse(u)) |url| px.pick(url) else |_| null else null,
-            },
+        for (opts.mounts) |mt| if (mt.kind == .builtin) {
+            in.builtin_note = try builtin_root.describe(arena);
         };
-        if (in.root_9p) |*r| r.index = if (opts.index == .none) .none else if (opts.root_index) |ri| .{ .given = .{
-            .from = switch (ri) {
-                inline else => |x| x,
-            },
-            .entries = if (opts.root_index_counts) |c| c.entries else null,
-            .dirs = if (opts.root_index_counts) |c| c.dirs else null,
-        } } else .auto;
-        return policy.compile(arena, in, opts.policy, err_msg);
+        if (opts.gfx) |g| in.gfx = .{ .backend = @tagName(gfx.backend), .clipboard = g.clipboard, .scale = g.scale };
+        if (opts.root_index != null) {
+            var any = false;
+            for (opts.mounts) |mt| if (mt.kind == .url or mt.kind == .fd) if (mt.stack()) |st| if (st[0] == .root) {
+                any = true;
+            };
+            if (!any) {
+                err_msg.* = "index= needs a 9P member on /";
+                return error.Conflict;
+            }
+        }
+        var plan = try policy.compile(arena, in, opts.policy, err_msg);
+        // A WebSocket mount's credential helper, and the root's index,
+        // for the plan and the connection.
+        {
+            const bs = try arena.dupe(policy.Bind, plan.binds);
+            var root_done = false;
+            for (bs) |*b| if (b.url) |*r| {
+                if (r.kind == .ws) r.cred = if (ws.Url.parse(r.addr)) |url| if (cred.pick(opts.cred_helpers, url)) |h| try std.fmt.allocPrint(arena, "{f}", .{cred.describe(h.*)}) else null else |_| null;
+                if (!root_done and std.mem.eql(u8, b.to, policy.mount.Stack.root.dev())) {
+                    root_done = true;
+                    r.index = if (opts.index == .none) .none else if (opts.root_index) |ri| .{ .given = .{
+                        .from = switch (ri) {
+                            inline else => |x| x,
+                        },
+                        .entries = if (opts.root_index_counts) |c| c.entries else null,
+                        .dirs = if (opts.root_index_counts) |c| c.dirs else null,
+                    } } else .auto;
+                }
+                b.note = try policy.rootNoteOf(arena, r.*);
+            };
+            plan.binds = bs;
+        }
+        // A WebSocket mount's proxy, for the plan and the connection.
+        if (opts.proxy) |px| {
+            const bs = try arena.dupe(policy.Bind, plan.binds);
+            for (bs) |*b| if (b.url) |*r| if (r.kind == .ws) {
+                r.proxy = if (ws.Url.parse(r.addr)) |url| px.pick(url) else |_| null;
+                b.note = try policy.rootNoteOf(arena, r.*);
+            };
+            plan.binds = bs;
+        }
+        return plan;
     }
+
+    /// Whether the options put a tree on `#L`.
+    pub fn hasLinux(opts: Options) bool {
+        for (opts.mounts) |mt| if (mt.stack()) |st| if (st[0] == .linux) return true;
+        return false;
+    }
+
 
     /// On PolicyConflict, `conflict` (if given) explains it.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: Options) InitError!Machine {
@@ -1304,10 +1295,7 @@ pub const Machine = struct {
             // Where #ι caches compiled indexes.
             hidx.register(@intFromPtr(x), .{ .cache_dir = m.opts.index_cache, .io = m.io });
             // What #ℓ redials a WebSocket root or mount with.
-            hstream.registerHost(@intFromPtr(x), if (m.opts.root) |r| switch (r) {
-                .ws => |u| u,
-                else => null,
-            } else null, m.rootStreamOptions(), m.mountStreamOptions());
+            hstream.registerHost(@intFromPtr(x), if (m.rootUrl()) |r| if (r.kind == .ws) r.addr else null else null, m.rootStreamOptions(), m.mountStreamOptions());
         }
         const r = m.startFirst(p);
         // What the root's index saved, for -v.
@@ -1387,7 +1375,7 @@ pub const Machine = struct {
         const bytes = switch (j.prog) {
             .bytes => |b| b,
             .guest => |name| blk: {
-                if (m.opts.linux_root != null and !m.opts.nine_prog) {
+                if (hasLinux(m.opts) and !m.opts.nine_prog) {
                     // In the Linux view (design/0018, "CLI and API").
                     const a = arena.allocator();
                     const envp = linuxEnv(a) catch return error.OutOfMemory;
@@ -2210,7 +2198,7 @@ pub const Machine = struct {
     }
 
     /// Reads a file by its path in the Linux view, from either view. A
-    /// `#λ` path doesn't cross the mounts on #λ, as no `#` path does, so
+    /// `#L` path doesn't cross the mounts on #L, as no `#` path does, so
     /// from the 9front view the process's root is the Linux view's for
     /// the read.
     fn readLinux(arena: std.mem.Allocator, path: []const u8) RunError![]u8 {
@@ -3182,10 +3170,19 @@ pub const Machine = struct {
         var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
         var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
         var cwd_at: ?[:0]const u8 = null;
-        if (m.opts.root) |r| if (r != .dir) try m.connectRoot(r);
+        // Named unions the plan made but never bound go when it's built.
+        defer for ([_]policy.mount.Stack{ .root, .linux }) |st| kern.unionUnpin(st.name());
         for (m.plan.binds) |b| {
+            if (b.make) if (!try m.makeTarget(b)) continue;
+            if (b.make_from and m.plan.root_overlay) {
+                // Made through the stack's overlay: /root takes no creates.
+                var st: [512]u8 = undefined;
+                const rel = if (std.mem.startsWith(u8, b.from, "/root/")) b.from["/root".len..] else b.from;
+                const from = try std.fmt.bufPrintZ(&buf, "{s}{s}", .{ if (rel.len < b.from.len) policy.mount.Stack.root.dev() else "", rel });
+                if (kern.stat(from, &st)) |_| {} else |_| mkdirAll(from) catch {};
+            }
             if (b.mount) {
-                try m.mountRoot(b);
+                try m.mountUrl(b, true);
                 continue;
             }
             const from = if (b.console)
@@ -3199,10 +3196,23 @@ pub const Machine = struct {
             };
             if (b.create) flag |= kern.MCREATE;
             const to = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.to});
-            if (bindOrOverlay(from, b.lower, b.contained, to, flag, &buf)) |id| {
+            if (b.recursive or b.empty) {
+                m.bindMember(b, from, to, flag) catch {
+                    if (b.optional) continue;
+                    if (m.err_msg.len > 0) return error.NamespaceFailed;
+                    return m.fail("{s} {s}: {s}", .{ b.what orelse b.from, b.to, kern.errstr() });
+                };
+                continue;
+            }
+            // `bind -c '#O' '#Oroot'`: the stack's overlay.
+            if (std.mem.eql(u8, b.from, "#O")) if (stackName(b.to)) |sn| {
+                const id = kern.unionCow(sn.name) catch return m.fail("overlay {s}: {s}", .{ b.to, kern.errstr() });
+                if (std.mem.eql(u8, sn.name, "root")) root_ov = id;
+                continue;
+            };
+            if (bindOrOverlay(from, b.lower, b.contained, to, flag, &buf)) |_| {
                 if (std.mem.eql(u8, b.to, "/mnt/term/cwd")) cwd_at = "/mnt/term/cwd";
                 if (std.mem.eql(u8, b.to, policy.linux_view ++ "/mnt/term/cwd")) cwd_at = policy.linux_view ++ "/mnt/term/cwd";
-                if (std.mem.eql(u8, b.to, "/") and id != null) root_ov = id;
                 continue;
             } else |_| {}
             if (b.fallback) |fb| {
@@ -3216,7 +3226,7 @@ pub const Machine = struct {
         }
         if (cwd_at) |at| kern.chdir(at) catch return m.fail("cwd: {s}", .{kern.errstr()});
         if (m.plan.root_overlay) makeHome();
-        if (m.opts.linux_root != null) linuxEtc();
+        if (hasLinux(m.opts)) linuxEtc();
 
         // fds 0-2 on the console.
         const in = kern.open("/dev/cons", kern.OREAD) catch return m.fail("open /dev/cons: {s}", .{kern.errstr()});
@@ -3239,6 +3249,216 @@ pub const Machine = struct {
         mask[nm] = 0;
         if (nm > 0) kern.devmask(mask[0..nm :0]);
         return .{ .root_overlay = root_ov, .cwd = cwd_at };
+    }
+
+    /// A stack's name and the path below its top, from `#Oroot` or
+    /// `#Olinux/etc`; null for anything else.
+    fn stackName(to: []const u8) ?struct { name: [:0]const u8, at: []const u8 } {
+        for ([_]policy.mount.Stack{ .root, .linux }) |st| {
+            const dev = st.dev();
+            if (!std.mem.startsWith(u8, to, dev)) continue;
+            const rest = to[dev.len..];
+            if (rest.len == 0) return .{ .name = st.name(), .at = "" };
+            if (rest[0] == '/') return .{ .name = st.name(), .at = rest[1..] };
+        }
+        return null;
+    }
+
+    /// Makes a plan line's target in the root's overlay if it's missing
+    /// (design/mounts.md, "Destinations"). Returns false to skip an
+    /// optional line whose target can't be made.
+    fn makeTarget(m: *Machine, b: policy.Bind) RunError!bool {
+        if (b.to.len == 0 or b.to[0] != '/') return true;
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        var st: [512]u8 = undefined;
+        const to = try std.fmt.bufPrintZ(&buf, "{s}", .{b.to});
+        if (kern.stat(to, &st)) |_| return true else |_| {}
+        if (!m.plan.root_overlay) {
+            if (b.optional or b.fallback != null) return true;
+            return m.fail("{s}: {s} does not exist (the root is read-only)", .{ b.what orelse b.from, b.to });
+        }
+        mkdirAll(to) catch {
+            if (b.optional or b.fallback != null) return true;
+            return m.fail("{s}: can't make {s}: {s}", .{ b.what orelse b.from, b.to, kern.errstr() });
+        };
+        return true;
+    }
+
+    /// Makes `path` and its missing parents as directories.
+    fn mkdirAll(path: [:0]const u8) kern.Error!void {
+        var st: [512]u8 = undefined;
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        var i: usize = 1;
+        while (i <= path.len) : (i += 1) {
+            if (i < path.len and path[i] != '/') continue;
+            const p = std.fmt.bufPrintZ(&buf, "{s}", .{path[0..i]}) catch return error.Kern;
+            if (kern.stat(p, &st)) |_| continue else |_| {}
+            const fd = try kern.create(p, kern.OREAD, dmdir | 0o775);
+            kern.close(fd) catch {};
+        }
+    }
+
+    /// A `bind -r` line, or a `--tmp` or `--archive` tree: a member of a
+    /// stack when `to` names one, and otherwise a union at `to`, or the
+    /// empty tree bound there.
+    fn bindMember(m: *Machine, b: policy.Bind, from_in: [:0]const u8, to: [:0]const u8, flag: c_int) kern.Error!void {
+        var from = from_in;
+        var num: [24]u8 = undefined;
+        var fresh: ?u32 = null;
+        errdefer if (fresh) |id| kern.overlayDrop(id);
+        if (b.empty) {
+            const id = try kern.overlayNew(null);
+            fresh = id;
+            from = std.fmt.bufPrintZ(&num, "#O{d}", .{id}) catch unreachable;
+            if (b.archive) |path| {
+                // Attaching takes the instance's first ref, so it's no
+                // longer ours to drop.
+                const fd = try kern.open(from, kern.OREAD);
+                kern.close(fd) catch {};
+                fresh = null;
+                const root = try std.fmt.allocPrintSentinel(m.gpa, "{s}", .{from}, 0);
+                defer m.gpa.free(root);
+                m.unpackArchive(path, root) catch |e| {
+                    if (m.err_msg.len == 0) m.fail("--archive {s}: {t}", .{ path, e }) catch {};
+                    return error.Kern;
+                };
+            }
+        }
+        const flags: kern.UnionFlags = .{ .after = b.flag == .after, .create = b.create };
+        if (b.recursive) {
+            if (stackName(b.to)) |sn| {
+                var at: [std.fs.max_path_bytes + 1]u8 = undefined;
+                _ = try kern.unionAdd(sn.name, from, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch return error.Kern, flags);
+            } else try bindRecursive(from, to, b.flag == .after, b.create);
+            fresh = null;
+            return;
+        }
+        try kern.bind(from, to, flag | kern.MCREATE);
+        fresh = null;
+    }
+
+    /// Unpacks a host archive into the tree at `root` (a guest path), as
+    /// `--archive` does: a tar, or a gzipped one.
+    fn unpackArchive(m: *Machine, path: []const u8, root: [:0]const u8) !void {
+        _ = m;
+        _ = path;
+        _ = root;
+        return error.Unsupported;
+    }
+
+    /// A 9P line: connects to `b.url` and mounts it at `b.to`, adds it
+    /// to the stack `b.to` names, or posts it at `/srv/NAME`. `host`
+    /// says h9 makes the connection itself, outside the network policy,
+    /// as for a mount flag; a namespace file's is dialled under it.
+    fn mountUrl(m: *Machine, b: policy.Bind, host: bool) RunError!void {
+        const r = b.url.?;
+        const shown = ws.Url.elide(r.addr);
+        const is_root = std.mem.eql(u8, b.to, policy.mount.Stack.root.dev());
+        const what = if (is_root) "root" else "mount";
+        var ib: [ws.max_user]u8 = undefined;
+        var ident: ?hstream.Identity = null;
+        const conn = if (is_root) try m.connectUrl(r, b.fd, host, "root", &ib, &ident) else try m.connectUrl(r, b.fd, host, "mount", &ib, &ident);
+        // Through #ι (design/mount-index.md): the root's first 9P member
+        // with its given index or its server's, and any other with its
+        // server's `.fs/index`.
+        var num: ?u32 = null;
+        const first_root = is_root and !m.root_indexed;
+        const fd = if (std.mem.startsWith(u8, b.to, "/srv/")) conn else if (first_root) blk: {
+            m.root_indexed = true;
+            break :blk try m.indexRoot(r, conn);
+        } else m.indexMount(conn, r.addr, b.spec, &num);
+        defer kern.close(fd) catch {};
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
+        // The root's connection is also posted as `/srv/root`, for mkindex
+        // and a guest that mounts it with another spec.
+        if (first_root) {
+            const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ shown, policy.root_srv, kern.errstr() });
+            defer kern.close(srv) catch {};
+            var nb: [16]u8 = undefined;
+            _ = kern.pwrite(srv, std.fmt.bufPrint(&nb, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ shown, policy.root_srv, kern.errstr() });
+        }
+        if (std.mem.startsWith(u8, b.to, "/srv/")) {
+            const name = b.to["/srv/".len..];
+            const srv = kern.create(try std.fmt.bufPrintZ(&buf, "#s/{s}", .{name}), kern.OWRITE, 0o666) catch return m.fail("{s} {f}: post {s}: {s}", .{ what, shown, b.to, kern.errstr() });
+            defer kern.close(srv) catch {};
+            var nb: [16]u8 = undefined;
+            _ = kern.pwrite(srv, std.fmt.bufPrint(&nb, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("{s} {f}: post {s}: {s}", .{ what, shown, b.to, kern.errstr() });
+            return;
+        }
+        // devmnt sends the calling process's user as the attach uname, so
+        // the first Proc takes on `user=` for the attach.
+        var saved: [kern.ERRMAX]u8 = undefined;
+        const own = kern.procUser();
+        @memcpy(saved[0..own.len], own);
+        saved[own.len] = 0;
+        // `user=`, or else the server's 9P-User for us.
+        const as: ?[]const u8 = r.user orelse if (ident) |id| id.user else null;
+        if (as) |u| kern.setProcUser(try std.fmt.bufPrintZ(&buf2, "{s}", .{u}));
+        defer if (as != null) kern.setProcUser(saved[0..own.len :0]);
+        defer if (m.opts.index != .none) {
+            if (first_root) {
+                if (m.hidx_root) |n| m.indexNotes(n, "the root");
+            } else if (num) |n| m.indexNotes(n, b.to);
+        };
+        var specb: [256]u8 = undefined;
+        const spec = std.fmt.bufPrintZ(&specb, "{s}", .{b.spec}) catch return m.fail("{s} {f}: spec too long", .{ what, shown });
+        if (b.recursive) {
+            if (stackName(b.to)) |sn| {
+                var at: [std.fs.max_path_bytes + 1]u8 = undefined;
+                _ = kern.unionMount(sn.name, fd, spec, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch unreachable, .{ .after = b.flag == .after, .create = b.create }) catch
+                    return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
+                return;
+            }
+        }
+        var flag: c_int = switch (b.flag) {
+            .repl => kern.MREPL,
+            .before => kern.MBEFORE,
+            .after => kern.MAFTER,
+        };
+        if (b.create) flag |= kern.MCREATE;
+        _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), flag, spec) catch return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
+    }
+
+    /// Connects to a 9P server and returns an fd on a `#ℓ` conversation's
+    /// data file (design/dotl.md), so a 9P2000.L server works and a
+    /// 9P2000 one passes through. With `host`, h9 makes the connection,
+    /// not the guest, so the network policy doesn't apply to it, and a
+    /// TCP server is dialed through devip by device path whether or not
+    /// `#I` is bound or masked later.
+    fn connectUrl(m: *Machine, r: policy.NinePRoot, given: i32, host: bool, comptime what: []const u8, ib: *[ws.max_user]u8, ident: *?hstream.Identity) RunError!u31 {
+        const shown = ws.Url.elide(r.addr);
+        if (host) kern.setPlan(null);
+        defer if (host) kern.setPlan(&m.plan);
+        if (given >= 0) return dotlConv("fd {d}", given) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
+        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+        switch (r.kind) {
+            .ws => {
+                const conn = try m.connectStream(r.addr, .{
+                    .headers = r.headers,
+                    .ca_file = r.ca,
+                    .proxy = m.opts.proxy orelse .{},
+                    .cred = m.opts.cred_helpers,
+                }, what, ib, ident);
+                defer kern.close(conn) catch {};
+                // --user-map and user= win over the server's names.
+                if (m.opts.user_map != null or r.user != null) ident.* = null;
+                return wsConv(conn, r.addr, ident.*) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
+            },
+            // `#ℓ` dials a TCP or unix socket server itself, so it can
+            // dial again if the server goes (9P2000.L.Z). A comma would
+            // split the dial's list.
+            .tcp => return dotlConv("dial {s}", r.addr) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() }),
+            .unix => {
+                const path = r.addr["unix!".len..];
+                if (std.mem.indexOfScalar(u8, path, ',') == null)
+                    return dotlConv("dial {s}", r.addr) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
+                const conn = kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail(what ++ " {s}: name too long", .{r.addr})) catch
+                    return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
+                defer kern.close(conn) catch {};
+                return dotlConv("fd {d}", conn) catch return m.fail(what ++ " {s}: {s}", .{ r.addr, kern.errstr() });
+            },
+        }
     }
 
     /// Makes `$home`, `/usr/$user`, in the root's overlay if the root
@@ -3267,81 +3487,21 @@ pub const Machine = struct {
         const lv = policy.linux_view;
         if (kern.stat(lv ++ "/etc/resolv.conf", &st)) |_| return else |_| {}
         // /etc over itself first, creatable, so a file made in /etc (apk's
-        // own, say) goes to the root's directory, not to #λetc.
+        // own, say) goes to the root's directory, not to #Letc.
         kern.bind(lv ++ "/etc", lv ++ "/etc", kern.MREPL | kern.MCREATE) catch return;
         kern.bind(lv ++ "etc", lv ++ "/etc", kern.MAFTER) catch {};
-    }
-
-    /// Connects to a 9P root and posts the connection as `#s/root`
-    /// (design/epoch-0/ninep-roots.md), where the board holds it for the
-    /// machine's life. h9 makes the connection, not the guest, so the
-    /// network policy doesn't apply to it, and a TCP root is dialed through
-    /// devip by device path whether or not `#I` is bound or masked later.
-    fn connectRoot(m: *Machine, r: Root) RunError!void {
-        const addr = m.plan.root_9p.?.addr;
-        kern.setPlan(null);
-        defer kern.setPlan(&m.plan);
-        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
-        const fd = switch (r) {
-            .dir => unreachable,
-            .ws => |u| {
-                var ib: [ws.max_user]u8 = undefined;
-                var ident: ?hstream.Identity = null;
-                const conn = try m.connectStream(u, m.rootStreamOptions(), "root", &ib, &ident);
-                defer kern.close(conn) catch {};
-                // --user-map and --root-user win over the server's names.
-                if (m.opts.user_map != null or m.opts.root_user != null) ident = null;
-                if (ident) |id| {
-                    @memcpy(m.root_ident[0..id.user.len], id.user);
-                    m.root_ident[id.user.len] = 0;
-                    m.root_ident_len = id.user.len;
-                }
-                return m.postDotl(wsConv(conn, u, ident));
-            },
-            // `#ℓ` dials a TCP or unix socket root itself, so it can
-            // dial again if the server goes (9P2000.L.Z). A comma would
-            // split the dial's list.
-            .tcp => |a| return m.postDotl(dotlConv("dial {s}", a)),
-            .unix => |path| if (std.mem.indexOfScalar(u8, path, ',') == null)
-                return m.postDotl(dotlConv("dial unix!{s}", path))
-            else
-                kern.unixDial(std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return m.fail("root {s}: name too long", .{addr})),
-        } catch return m.fail("root {s}: {s}", .{ addr, kern.errstr() });
-        return m.postRoot(fd);
-    }
-
-    /// Posts a root's connection `fd` as `#s/root`, through a `#ℓ`
-    /// conversation (design/epoch-0/dotl.md), so a 9P2000.L server works as a
-    /// root and a 9P2000 one passes through. Closes `fd`.
-    fn postRoot(m: *Machine, conn: u31) RunError!void {
-        defer kern.close(conn) catch {};
-        return m.postDotl(dotlConv("fd {d}", conn));
-    }
-
-    /// Posts the data file of a `#ℓ` conversation, `data` from dotlConv,
-    /// as `#s/root`.
-    fn postDotl(m: *Machine, data: kern.Error!u31) RunError!void {
-        const addr = m.plan.root_9p.?.addr;
-        const conn = data catch return m.fail("root {f}: {s}", .{ ws.Url.elide(addr), kern.errstr() });
-        const fd = try m.indexRoot(conn);
-        defer kern.close(fd) catch {};
-        const srv = kern.create(policy.root_srv, kern.OWRITE, 0o666) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
-        defer kern.close(srv) catch {};
-        var num: [16]u8 = undefined;
-        _ = kern.pwrite(srv, std.fmt.bufPrint(&num, "{d}", .{fd}) catch unreachable, 0) catch return m.fail("root {f}: post {s}: {s}", .{ ws.Url.elide(addr), policy.root_srv, kern.errstr() });
     }
 
     /// Puts the root's connection `conn` under a `#ι` conversation
     /// (design/mount-index.md) and returns an fd on its data file, or
     /// returns `conn` itself under `--index none`. Takes `conn`.
-    fn indexRoot(m: *Machine, conn: u31) RunError!u31 {
-        const r = m.plan.root_9p.?;
+    fn indexRoot(m: *Machine, r: policy.NinePRoot, conn: u31) RunError!u31 {
         const shown = ws.Url.elide(r.addr);
         // Under -v, the conversation counts requests even without an index.
         if (m.opts.index == .none and !m.opts.verbose) return conn;
         var arg: [std.fs.max_path_bytes + 64]u8 = undefined;
         const ctl = if (m.opts.index == .none) "" else if (m.opts.root_index) |given| blk: {
-            const got = m.giveRootIndex(given) catch |e| {
+            const got = m.giveRootIndex(r.addr, given) catch |e| {
                 kern.close(conn) catch {};
                 return e;
             };
@@ -3355,11 +3515,10 @@ pub const Machine = struct {
         return fd;
     }
 
-    /// Reads, compiles, and hands `#ι` the `--root-index` index, and
+    /// Reads, compiles, and hands `#ι` the root's `index=` index, and
     /// returns its number; null when it's to be ignored. One that can't
     /// be read fails the run, as an unreachable root does.
-    fn giveRootIndex(m: *Machine, given: RootIndex) RunError!?u32 {
-        const addr = m.plan.root_9p.?.addr;
+    fn giveRootIndex(m: *Machine, addr: []const u8, given: RootIndex) RunError!?u32 {
         const a = hidx.allocator;
         const from = switch (given) {
             inline else => |x| x,
@@ -3373,10 +3532,10 @@ pub const Machine = struct {
                     m.indexNote("index: {s} is larger than 256 MB; ignored", .{path});
                     return null;
                 },
-                else => return m.fail("root {f}: --root-index {s}: {s}", .{ ws.Url.elide(addr), path, rootIndexError(e) }),
+                else => return m.fail("root {f}: index={s}: {s}", .{ ws.Url.elide(addr), path, rootIndexError(e) }),
             },
             .url => |url| switch (hstream.fetchIndex(a, m.io, url, .{
-                .ca_file = m.opts.root_ca,
+                .ca_file = if (m.rootUrl()) |ru| ru.ca else null,
                 .proxy = m.opts.proxy orelse .{},
                 .cache = if (cache) |*c| c else null,
             }, &m.msg_buf) catch |e| switch (e) {
@@ -3385,7 +3544,7 @@ pub const Machine = struct {
                     return null;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return m.fail("root {f}: --root-index {f}: {s}", .{ ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
+                else => return m.fail("root {f}: index={f}: {s}", .{ ws.Url.elide(addr), ws.Url.elide(url), hstream.fetchError(e, &m.msg_buf) }),
             }) {
                 .compiled => |b| return m.giveCompiled(b, from, true),
                 .text => |t| blk: {
@@ -3538,12 +3697,20 @@ pub const Machine = struct {
         return kern.open(std.fmt.bufPrintZ(&path, dev ++ "{s}/data", .{n}) catch unreachable, kern.ORDWR);
     }
 
+    /// The first 9P member of the root stack, if it has one: the root's
+    /// connection for redials, `-v`, and the index.
+    fn rootUrl(m: *const Machine) ?policy.NinePRoot {
+        for (m.plan.binds) |b| if (b.url) |r| if (std.mem.eql(u8, b.to, policy.mount.Stack.root.dev())) return r;
+        return null;
+    }
+
     /// The handshake options for a WebSocket root, and for a namespace
     /// file's WebSocket mounts.
     fn rootStreamOptions(m: *const Machine) hstream.HostOptions {
+        const r = m.rootUrl();
         return .{
-            .headers = m.opts.root_headers,
-            .ca_file = m.opts.root_ca,
+            .headers = if (r) |x| x.headers else &.{},
+            .ca_file = if (r) |x| x.ca else null,
             .proxy = m.opts.proxy orelse .{},
             .cred = m.opts.cred_helpers,
         };
@@ -3596,29 +3763,6 @@ pub const Machine = struct {
         kern.hstreamWait(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
         ident.* = hstream.identity(id, ib);
         return kern.hstreamFd(id) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
-    }
-
-    /// Mounts the 9P root's posted connection (`b.from`) at `b.to`. devmnt
-    /// sends the calling process's user as the attach uname, so the first
-    /// Proc takes on --root-user for the attach and gets its own back after.
-    fn mountRoot(m: *Machine, b: policy.Bind) RunError!void {
-        const r = m.plan.root_9p.?;
-        var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
-        var buf2: [std.fs.max_path_bytes + 8]u8 = undefined;
-        const shown = ws.Url.elide(r.addr);
-        const fd = kern.open(try std.fmt.bufPrintZ(&buf, "{s}", .{b.from}), kern.ORDWR) catch return m.fail("root {f}: {s}", .{ shown, kern.errstr() });
-        defer kern.close(fd) catch {};
-        var saved: [kern.ERRMAX]u8 = undefined;
-        const own = kern.procUser();
-        @memcpy(saved[0..own.len], own);
-        saved[own.len] = 0;
-        // --root-user, or else the server's 9P-User for us.
-        const as: ?[]const u8 = r.user orelse if (m.root_ident_len > 0) m.root_ident[0..m.root_ident_len] else null;
-        if (as) |u| kern.setProcUser(try std.fmt.bufPrintZ(&buf2, "{s}", .{u}));
-        defer if (as != null) kern.setProcUser(saved[0..own.len :0]);
-        const spec = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.spec});
-        _ = kern.mount(fd, -1, try std.fmt.bufPrintZ(&buf, "{s}", .{b.to}), kern.MREPL, spec) catch return m.fail("root {f}: {s}", .{ shown, kern.errstr() });
-        if (m.opts.index != .none) if (m.hidx_root) |n| m.indexNotes(n, "the root");
     }
 
     /// Binds `from` over `to`, or with `lower` (a host path), a fresh `#O`
@@ -3702,32 +3846,50 @@ pub const Machine = struct {
                 bindRecursive(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), b.flag.order == .after, b.flag.create) catch {};
             } else if (std.mem.eql(u8, b.from, "#O")) {
                 const to = try m.nsPath(arena, b.to, con_id);
-                _ = overlay(to, to, mountFlag(b.flag)) catch {};
+                // Onto a stack, it's the stack's overlay.
+                if (stackName(b.to)) |sn| {
+                    _ = kern.unionCow(sn.name) catch {};
+                } else _ = overlay(to, to, mountFlag(b.flag)) catch {};
             } else kern.bind(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), mountFlag(b.flag)) catch {},
             // A WebSocket URL is connected by h9, as a root is; unlike
             // other failures, one that fails stops the run.
             // Its connection goes through a `#ℓ` conversation
-            // (design/epoch-0/dotl.md), so a 9P2000.L server works too.
-            .mount => |mt| if (ws.Url.is(mt.file)) {
-                if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a WebSocket mount", .{ws.Url.elide(mt.file)});
-                var ib: [ws.max_user]u8 = undefined;
-                var ident: ?hstream.Identity = null;
-                const conn = try m.connectStream(mt.file, m.mountStreamOptions(), "mount", &ib, &ident);
-                if (m.opts.user_map != null) ident = null;
-                // h9's own connection, as a root's is: #ℓ redials it with
-                // no plan.
-                kern.setPlan(null);
-                const data = wsConv(conn, mt.file, ident);
-                kern.setPlan(&m.plan);
-                kern.close(conn) catch {};
-                const dfd = data catch return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
-                // Through #ι, for the server's .fs/index (design/mount-index.md).
-                var num: ?u32 = null;
-                const fd = m.indexMount(dfd, mt.file, mt.spec, &num);
-                defer kern.close(fd) catch {};
-                _ = kern.mount(fd, -1, try m.nsPath(arena, mt.to, con_id), mountFlag(mt.flag), try arena.dupeZ(u8, mt.spec)) catch
-                    return m.fail("mount {f}: {s}", .{ ws.Url.elide(mt.file), kern.errstr() });
-                if (num) |n| m.indexNotes(n, mt.to);
+            // (design/dotl.md), so a 9P2000.L server works too.
+            .mount => |mt| if (std.mem.indexOf(u8, mt.file, "://") != null) {
+                // A URL (design/mounts.md, "Namespace files"), connected
+                // as a mount flag's is, with the line's settings words;
+                // unlike other failures, one that fails stops the run.
+                if (m.plan.write == .none) return m.fail("mount {f}: --write=none can't be enforced on a {s} mount", .{ ws.Url.elide(mt.file), if (ws.Url.is(mt.file)) "WebSocket" else "9P" });
+                var mo: policy.mount.Mount = .{ .kind = .url, .src = mt.file, .dst = mt.to, .spec = if (mt.spec.len > 0) mt.spec else null };
+                var headers: std.ArrayList([]const u8) = .empty;
+                for (mt.settings) |kv| {
+                    const eq = std.mem.indexOfScalar(u8, kv, '=').?;
+                    const key = kv[0..eq];
+                    const val = kv[eq + 1 ..];
+                    if (std.mem.eql(u8, key, "user")) mo.user = val else if (std.mem.eql(u8, key, "ca")) mo.ca = val else if (std.mem.eql(u8, key, "spec")) mo.spec = val else if (std.mem.eql(u8, key, "header")) {
+                        if (val.len > 0 and val[0] == '@') {
+                            const htext = readFile(arena, try m.nsPath(arena, val[1..], con_id)) catch return m.fail("mount {f}: header={s}: {s}", .{ ws.Url.elide(mt.file), val, kern.errstr() });
+                            var lines = std.mem.splitScalar(u8, htext, '\n');
+                            while (lines.next()) |l| if (std.mem.trim(u8, l, " \t\r").len > 0) try headers.append(arena, std.mem.trim(u8, l, " \t\r"));
+                        } else try headers.append(arena, val);
+                    }
+                }
+                mo.headers = headers.items;
+                const r = try policy.ninePConn(arena, mo);
+                try m.mountUrl(.{
+                    .from = mt.file,
+                    .to = try m.nsPath(arena, mt.to, con_id),
+                    .flag = switch (mt.flag.order) {
+                        .repl => .repl,
+                        .before => .before,
+                        .after => .after,
+                    },
+                    .create = mt.flag.create,
+                    .recursive = mt.flag.recursive,
+                    .mount = true,
+                    .spec = r.spec,
+                    .url = r,
+                }, false);
             } else if (std.mem.startsWith(u8, mt.file, "tcp!")) {
                 // A dial string, which `#ℓ` dials under the network
                 // policy, as dotlfs does, and dials again if a 9P2000.L.Z

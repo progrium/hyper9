@@ -52,7 +52,7 @@ if [ "${1:-}" = --one ]; then
 	now() { if [ -n "${EPOCHREALTIME:-}" ]; then echo "$EPOCHREALTIME"; else date +%s; fi; }
 	t0=$(now)
 	timeout "${timeout:-120}" "$h9" --backend "$H9_WL_BACKEND" --arch "$H9_WL_ARCH" \
-		--root "$root" --cwd "$cases" "${cmd[@]}" >"$out/$name.out" 2>"$out/$name.err" </dev/null
+		--dir "$root" --cwd "$cases" "${cmd[@]}" >"$out/$name.out" 2>"$out/$name.err" </dev/null
 	code=$?
 	secs=$(awk -v a="$t0" -v b="$(now)" 'BEGIN{printf "%.2f", b-a}')
 	why=

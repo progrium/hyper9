@@ -33,6 +33,7 @@ pub const DotlServer = struct {
     n_uname: u32 = 0,
     attached: std.atomic.Value(bool) = .init(false),
     dial_buf: [64]u8 = undefined,
+    url_buf: [64]u8 = undefined,
     /// One tree for every connection, made by `startShared`: a new
     /// connection is the server restarting with its files kept, as for
     /// the 9P2000.L.Z cases. Used under `mu`.
@@ -74,6 +75,11 @@ pub const DotlServer = struct {
 
     pub fn dial(d: *DotlServer) []const u8 {
         return std.fmt.bufPrint(&d.dial_buf, "tcp!127.0.0.1!{d}", .{d.port()}) catch unreachable;
+    }
+
+    /// The server as a --url (design/mounts.md).
+    pub fn url(d: *DotlServer) []const u8 {
+        return std.fmt.bufPrint(&d.url_buf, "tcp://127.0.0.1:{d}", .{d.port()}) catch unreachable;
     }
 
     pub fn finish(d: *DotlServer, io: std.Io) void {

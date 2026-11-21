@@ -755,8 +755,9 @@ function attachCanvas(canvas, worker, { clipboard, scale, size, events }) {
  * - layers: more root archives, each a URL or { url, at }, unpacked in
  *   order over the root archive, a later file replacing an earlier one,
  *   each under its directory `at` (default /). Together they're the tree
- *   at /, h9's --root. A 9front tree layered at a Linux root's /9 is
- *   named by a second `--root /9` in argv (design/epoch-0/linux-personality.md)
+ *   at /, h9's `--dir /`. A Linux tree is mounted with `--dir /:#L` in
+ *   argv, and a 9front tree layered at its /9 with `--dir /9`
+ *   (design/mounts.md); a mount flag in argv replaces `--dir /`
  * - memory: --memory, such as '256M'
  * - backend: --backend: 'emu' (h9's own CPUs, h86, ha64, and hx64, the default) or 'v86', its old name
  * - arch: --arch: the guest's CPU, '386' (h86, the default), 'arm64'

@@ -173,7 +173,7 @@ an arm64 Mac. For a wasm tier, run the same command line through
 `zig-out/web/h9-node` with `H9_EMU_TIER` set to `t1` or `t0`:
 
     H9_EMU_TIER=t1 zig-out/web/h9-node --arch 386 \
-        --root .local/workloads/alpine-386 --net enable \
+        --dir .local/workloads/alpine-386:#L --net enable \
         sh -c "python3 /w/bench.py"
 
 `h9-node` needs Node 24 or later. On macOS, `roots.sh` installs packages

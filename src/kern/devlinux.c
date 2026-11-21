@@ -1,5 +1,5 @@
 /*
- * #λ: the Linux view's root (design/epoch-0/linux-personality.md, "The Linux
+ * #L: the Linux view's root (design/linux-personality.md, "The Linux
  * view"). Its root directory holds 9, tmp and mnt/term as mount points,
  * and it serves dev, proc and sys itself. The namespace builder binds the
  * Linux root tree after it, so the tree's own files show through, and
@@ -27,7 +27,7 @@
 
 enum
 {
-	Lambda = 0x3BB,
+	Devc = 'L',	/* #λ before design/mounts.md */
 
 	Qroot = 0,
 	Q9, Qtmp, Qmnt, Qterm, Qtermcwd, Qdev, Qproc, Qsys,
@@ -38,7 +38,7 @@ enum
 	Qpsys, Qkernel, Qrandomdir, Quuid, Qbootid, Qvm, Qovercommit, Qosrelease, Qostype, Qhostname, Qpidmax,
 	/* sys */
 	Qdevices, Qsystem, Qcpu, Qonline, Qpossible,
-	/* #λetc: an /etc to union after the root's */
+	/* #Letc: an /etc to union after the root's */
 	Qetc, Qresolv,
 	/* /proc/n */
 	Qpid, Qexe, Qcwd, Qmaps, Qpfd, Qpstat, Qstatus, Qstatm, Qcmdline, Qenviron, Qcomm, Qpmounts, Qtask,
@@ -67,7 +67,7 @@ struct Lent
 };
 
 static Lent tab[Nq] = {
-	[Qroot]	{"#λ", Qroot, DMDIR|0555},
+	[Qroot]	{"#L", Qroot, DMDIR|0555},
 	[Q9]	{"9", Qroot, DMDIR|0555},
 	[Qtmp]	{"tmp", Qroot, DMDIR|0777},
 	[Qmnt]	{"mnt", Qroot, DMDIR|0555},
@@ -386,7 +386,7 @@ linuxgen(Chan *c, char *name, Dirtab *dt, int ntab, int s, Dir *dp)
 }
 
 /*
- * #λ is the Linux view's top; #λetc is a directory of files the
+ * #L is the Linux view's top; #Letc is a directory of files the
  * machine makes for a root that lacks them, bound after the root's /etc
  * (design/epoch-0/linux-net.md, "DNS").
  */
@@ -396,13 +396,13 @@ linuxattach(char *spec)
 	Chan *c;
 
 	if(strcmp(spec, "etc") == 0){
-		c = devattach(Lambda, spec);
+		c = devattach(Devc, spec);
 		mkqid(&c->qid, mkpath(Qetc, 0, 0), 0, QTDIR);
 		return c;
 	}
 	if(*spec != 0)
 		error(Ebadspec);
-	return devattach(Lambda, spec);
+	return devattach(Devc, spec);
 }
 
 static Walkqid*
@@ -660,7 +660,7 @@ linuxwstat(Chan *c, uchar *db, int n)
 }
 
 Dev linuxdevtab = {
-	Lambda,
+	Devc,
 	"linux",
 
 	devreset,

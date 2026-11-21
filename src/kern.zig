@@ -236,6 +236,9 @@ const c_stub = struct {
     fn h9_overlay_unionof(_: [*:0]const u8) c_int {
         return -1;
     }
+    fn h9_overlay_unionmount(_: [*:0]const u8, _: c_int, _: [*:0]const u8, _: [*:0]const u8, _: c_int) c_int {
+        return -1;
+    }
     fn h9_overlay_unpin(_: [*:0]const u8) void {}
     fn h9_overlay_track(_: c_int, _: ?*anyopaque) void {}
     fn h9_kern_release() void {}
@@ -349,6 +352,7 @@ const c_real = struct {
     extern fn h9_overlay_union(name: [*:0]const u8, path: [*:0]const u8, at: [*:0]const u8, flags: c_int) c_int;
     extern fn h9_overlay_cowname(name: [*:0]const u8) c_int;
     extern fn h9_overlay_unionof(path: [*:0]const u8) c_int;
+    extern fn h9_overlay_unionmount(spec: [*:0]const u8, fd: c_int, aname: [*:0]const u8, at: [*:0]const u8, flags: c_int) c_int;
     extern fn h9_overlay_unpin(name: [*:0]const u8) void;
     extern fn h9_overlay_track(id: c_int, track: ?*anyopaque) void;
     extern fn h9_kern_release() void;
@@ -920,6 +924,12 @@ pub fn unionAdd(name: [*:0]const u8, path: [*:0]const u8, at: [*:0]const u8, fla
 /// which attaching the name gives from then on. Returns its instance.
 pub fn unionCow(name: [*:0]const u8) Error!u32 {
     return try check(c.h9_overlay_cowname(name));
+}
+
+/// As `unionAdd`, with the member the 9P server on `fd`, attached with
+/// `aname` as mount(2) would. `fd` stays open.
+pub fn unionMount(name: [*:0]const u8, fd: u31, aname: [*:0]const u8, at: [*:0]const u8, flags: UnionFlags) Error!u32 {
+    return try check(c.h9_overlay_unionmount(name, fd, aname, at, @bitCast(flags)));
 }
 
 /// The instance number of the union whose top `path` is, if it's one.

@@ -1297,6 +1297,7 @@ fn expectRun(text: []const u8, root: ?[]const u8, timeout_ns: u64, want_status: 
     const bytes = try image(gpa, .arm64, text);
     defer gpa.free(bytes);
     var ran: usize = 0;
+    const root_mount = [1]h9.Machine.Mount{.{ .kind = .dir, .src = root orelse "" }};
     for ([_]vmm.BackendKind{ .hvf, .kvm, .whp, .native, .emu }) |kind| {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
@@ -1305,7 +1306,7 @@ fn expectRun(text: []const u8, root: ?[]const u8, timeout_ns: u64, want_status: 
         var m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = .arm64,
-            .root = if (root) |d| .{ .dir = d } else null,
+            .mounts = if (root != null) &root_mount else &.{},
             .policy = .{ .timeout_ns = timeout_ns },
             .stdio = .{ .out = &out.writer, .err = &err.writer },
         }) catch |e| switch (e) {
@@ -1726,10 +1727,11 @@ fn runOverlayTools(kind: vmm.BackendKind, r: *OverlayRoot, text: []const u8, pol
     defer err.deinit();
     var p = pol;
     p.timeout_ns = 20 * std.time.ns_per_s;
+    const root_mount = [1]h9.Machine.Mount{.{ .kind = .dir, .src = r.path }};
     var m = h9.Machine.init(gpa, std.testing.io, .{
         .backend = kind,
         .arch = .arm64,
-        .root = .{ .dir = r.path },
+        .mounts = &root_mount,
         .cwd = r.cwd,
         .policy = p,
         .guest_tools = guest_tools,
@@ -2105,6 +2107,7 @@ const GfxRun = struct {
     done: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     started: bool = false,
+    mounts: [2]h9.Machine.Mount = undefined,
 
     const Opts = struct {
         /// An arm64 fixture's text, or else a guest program from `root`.
@@ -2128,11 +2131,19 @@ const GfxRun = struct {
             g.prog = .{ .bytes = g.bytes.? };
         } else g.prog = .{ .guest = o.guest.? };
         g.argv = o.argv;
+        var n: usize = 0;
+        if (o.root) |r| {
+            g.mounts[n] = .{ .kind = .dir, .src = r };
+            n += 1;
+        }
+        if (o.linux_root) |r| {
+            g.mounts[n] = .{ .kind = .dir, .src = r, .dst = "#L" };
+            n += 1;
+        }
         g.m = h9.Machine.init(gpa, std.testing.io, .{
             .backend = kind,
             .arch = o.arch,
-            .root = if (o.root) |r| .{ .dir = r } else null,
-            .linux_root = o.linux_root,
+            .mounts = g.mounts[0..n],
             .cwd = o.cwd,
             .policy = .{ .timeout_ns = o.timeout_s * std.time.ns_per_s },
             .gfx = .{ .clipboard = o.clipboard },

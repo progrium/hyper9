@@ -2653,7 +2653,7 @@ fn isListeningUnix(d: *const attr.Dir) bool {
 
 /// devlinux's device character and the qid bit it sets on its devices
 /// (src/kern/devlinux.c).
-pub const devlinux_dc: u16 = 0x3bb; // 'λ'
+pub const devlinux_dc: u16 = 'L';
 pub const devlinux_chr_bit: u64 = 1 << 40;
 
 /// `native` is the architecture's struct stat; `stat64` and `old32` are

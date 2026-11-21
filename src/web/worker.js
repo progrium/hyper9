@@ -112,8 +112,9 @@ async function start({ argv, env = {}, root, layers = [], tty = false, gfx: canv
     wasi: (memory) => wasiImports({
       memory,
       root: tree,
-      // The layers are the whole tree WASI sees, so the root is /.
-      args: ['h9', '--root', remote ? root : '/', ...argv],
+      // The layers are the whole tree WASI sees, so the root is /,
+      // unless argv mounts its own (design/mounts.md).
+      args: ['h9', ...(argv.some((a) => /^--(dir|url|archive|builtin)(=|$)/.test(a)) ? [] : remote ? ['--url', root] : ['--dir', '/']), ...argv],
       env: { PWD: '/', ...env },
       write: (fd, data) => post({ type: 'output', fd, data }, [data.buffer]),
       tty,

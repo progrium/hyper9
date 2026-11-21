@@ -84,17 +84,15 @@ const web_skips = [_][]const u8{
     "rawon puts the host terminal in raw mode until exit",
     "closing the terminal posts hangup",
     "SIGTERM posts hangup",
-    // A copy of h9-node alone has no h9.wasm beside it.
-    "no root tree gives 125 for a guest program",
     // A 9P root over TCP.
     "a write to a 9P root under the default profile doesn't reach the server",
     // A page's WebSocket can't set headers or a CA, use a proxy, or ping;
-    // the browser does those (design/epoch-0/websocket-9p.md).
-    "--root-header is sent, and @FILE reads headers from a file",
+    // the browser does those (design/websocket-9p.md).
+    "header= is sent, and header=@FILE reads headers from a file",
     "header in ctl is sent with the handshake",
     "wsmount mounts a ws:// URL with flags and headers",
     "--print elides a ws:// root's query and header values",
-    "--root-ca with a ws:// root is a usage error",
+    "ca= with a ws:// root is a usage error",
     "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it",
     "a proxy answering 407 exits 125 with the status",
     "an idle ws:// root pings, and a server that stops answering fails it",
@@ -106,9 +104,9 @@ const web_skips = [_][]const u8{
     "acid attaches and prints registers and a stack trace",
     // Browsers and Node fail a handshake that offered subprotocols and got none.
     "a ws:// root works with a server that selects no subprotocol",
-    // credential-helpers: the web host has no --root-header, and a page's
+    // credential-helpers: the web host has no header=, and a page's
     // WebSocket shows no response headers, so no 9P-Uid or 9P-User.
-    "--root-header wins over a helper's header of the same name",
+    "header= wins over a helper's header of the same name",
     "9P-Uid and 9P-User name files without --user-map",
     "--user-map wins over 9P-Uid",
 };
@@ -233,7 +231,8 @@ fn runOn(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const 
 fn runOnFor(e: Env, backend: []const u8, args: []const []const u8, stdin: ?[]const u8, ms: u32) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend });
+    if (!givesRoot(args)) try argv.appendSlice(gpa, &.{ "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     const r = try runProcessWith(argv.items, stdin, null, ms);
@@ -319,7 +318,7 @@ test "--check passes with the root tree, and --version and -h print to stdout [b
         try std.testing.expectEqual(0, r.code);
         try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/echo runs") != null);
     }
-    const missing = try runProcess(&.{ e.h9, "--root", "/nonexistent-h9-root", "--check" }, null);
+    const missing = try runProcess(&.{ e.h9, "--dir", "/nonexistent-h9-root", "--check" }, null);
     defer gpa.free(missing.stdout);
     defer gpa.free(missing.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 125 }, missing.term);
@@ -337,23 +336,13 @@ test "--check passes with the root tree, and --version and -h print to stdout [b
     try std.testing.expect(std.mem.startsWith(u8, h.stdout, "usage: h9"));
 }
 
-test "no root tree gives 125 for a guest program [baseline]" {
+test "a root that isn't there gives 125 for a guest program [mounts]" {
     const e = try env(@src());
     const io = std.testing.io;
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    // A copy of h9 has no .local/9front/root two levels up to default to.
-    const name = std.fs.path.basename(e.h9);
-    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), e.h9, s.tmp.dir, name, io, .{});
-    const h9 = try std.fs.path.join(gpa, &.{ s.path, name });
-    defer gpa.free(h9);
     var environ = try std.testing.environ.createMap(gpa);
     defer environ.deinit();
     _ = environ.swapRemove("H9ROOT");
-    // Without --builtin=off, the built-in root is used instead
-    // (design/epoch-0/builtin-root.md).
-    for ([_][]const []const u8{ &.{ h9, "--builtin=off", "echo", "x" }, &.{ h9, "--builtin=off", "--rc", "echo x" } }) |argv| {
+    for ([_][]const []const u8{ &.{ e.h9, "--dir", "/nonexistent-h9-root", "echo", "x" }, &.{ e.h9, "--dir", "/nonexistent-h9-root", "--rc", "echo x" } }) |argv| {
         var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .environ_map = &environ, .create_no_window = true });
         defer child.kill(io);
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 125 }, try child.wait(io));
@@ -830,7 +819,7 @@ test "more live processes than KVM's owned vCPUs run on the pool [kvm]" {
     // pipeline need the pool.
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "/bin/sh", "-c", "ulimit -n 330 && exec \"$@\"", "sh", e.h9, "--backend", "kvm", "--root", e.root });
+    try argv.appendSlice(gpa, &.{ "/bin/sh", "-c", "ulimit -n 330 && exec \"$@\"", "sh", e.h9, "--backend", "kvm", "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, &.{ "--rc", "c='echo deep'; for(i in `{seq 79}) c=$c^' | cat'; eval $c" });
     const r = try runProcess(argv.items, null);
@@ -848,7 +837,7 @@ test "more processes over a machine's life than KVM's vCPU limit [kvm]" {
     const script = try std.fmt.bufPrint(&buf, "for(i in `{{seq {d}}}) /bin/true; echo done", .{n + 16});
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", "kvm", "--root", e.root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", "kvm", "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, &.{ "--rc", script });
     const r = try runProcessWith(argv.items, null, null, 120_000);
@@ -1496,7 +1485,8 @@ test "--write=scope keeps the root read-only [overlay]" {
         const r = try run(e, &.{ prof, "--write=scope", "--rc", "echo x > /lib/h9-overlay-scope" });
         defer r.deinit();
         try std.testing.expectEqual(1, r.code);
-        try std.testing.expect(std.mem.indexOf(u8, r.err, "permission denied") != null);
+        // A stack with no member taking creates (design/mounts.md).
+        try std.testing.expect(std.mem.indexOf(u8, r.err, "mounted directory forbids creation") != null);
     }
     try expectRootLacks(e, "lib/h9-overlay-scope");
 }
@@ -1548,7 +1538,7 @@ test "--print output with the root overlay replays with --ns [overlay]" {
     defer s.deinit();
     const p = try run(e, &.{ "--cwd", s.path, "--print", "echo" });
     defer p.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "  bind -c '#O' / ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "  bind -c '#O' '#Oroot' ") != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the root are kept in memory") != null);
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
@@ -1598,7 +1588,7 @@ test "the discarded-changes notice is printed on a terminal and not otherwise [o
         errdefer std.debug.print("backend {s}\n", .{backend});
         var t = try spawnTerm(e, backend, &.{ "--rc", script });
         defer t.deinit();
-        try t.expect(notice ++ "/lib, /sys were discarded (rerun with --writable \"$H9ROOT\" to keep them)", slow(20_000));
+        try t.expect(notice ++ "/lib, /sys were discarded (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)", slow(20_000));
         try std.testing.expectEqual(0, try t.wait(slow(10_000)));
     }
 }
@@ -1974,7 +1964,8 @@ fn spawnTerm(e: Env, backend: []const u8, args: []const []const u8) !Term {
 fn spawnTermEnv(e: Env, backend: []const u8, args: []const []const u8, extra: []const []const u8) !Term {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend });
+    if (!givesRoot(args)) try argv.appendSlice(gpa, &.{ "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     return Term.spawnEnv(gpa, argv.items, extra);
@@ -2574,9 +2565,9 @@ test "--net=enable allows a server [net-policy]" {
     while (it.next()) |backend| {
         // The root's binaries are for -Darch's architecture, if any.
         const argv: []const []const u8 = if (e.arch) |a|
-            &.{ e.h9, "--backend", backend, "--arch", a, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" }
+            &.{ e.h9, "--backend", backend, "--arch", a, "--dir", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" }
         else
-            &.{ e.h9, "--backend", backend, "--root", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" };
+            &.{ e.h9, "--backend", backend, "--dir", e.root, "--net=enable", "--timeout", "20s", "aux/listen1", "-1", "-t", addr, "/bin/cat" };
         var child = try std.process.spawn(io, .{
             .argv = argv,
             .stdin = .ignore,
@@ -2968,7 +2959,7 @@ fn goBackend() []const u8 {
 
 /// The argv for running fixture `prog` with h9 flags `flags` and arguments `args`.
 fn goArgv(g: *const GoEnv, argv: *std.ArrayList([]const u8), flags: []const []const u8, prog: []const u8, args: []const []const u8) !void {
-    try argv.appendSlice(gpa, &.{ g.h9, "--backend", goBackend(), "--arch", "amd64", "--root", g.root.path, "--cwd", g.dir, "--timeout", "60s" });
+    try argv.appendSlice(gpa, &.{ g.h9, "--backend", goBackend(), "--arch", "amd64", "--dir", g.root.path, "--cwd", g.dir, "--timeout", "60s" });
     try argv.appendSlice(gpa, flags);
     try argv.append(gpa, try std.fmt.allocPrint(gpa, "/mnt/term/cwd/{s}", .{prog}));
     try argv.appendSlice(gpa, args);
@@ -3270,6 +3261,7 @@ const RootServer = struct {
     child: std.process.Child,
     port: u16,
     dial_buf: [64]u8 = undefined,
+    url_buf: [64]u8 = undefined,
 
     fn start(s: *RootServer, e: Env) !void {
         return s.startTree(e, null);
@@ -3295,8 +3287,8 @@ const RootServer = struct {
         // (H9_TEST_SERVER, from -Dweb -Demu=unicorn), or the case skips.
         if (onWeb()) {
             const server = getenv(6, "H9_TEST_SERVER") orelse return error.SkipZigTest;
-            try argv.appendSlice(gpa, &.{ server, "--backend", "auto", "--root", e.root, "--net=enable" });
-        } else try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", e.root, "--net=enable" });
+            try argv.appendSlice(gpa, &.{ server, "--backend", "auto", "--dir", e.root, "--net=enable" });
+        } else try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--dir", e.root, "--net=enable" });
         if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
         // The tree is the server's cwd, so it's /mnt/term/cwd wherever
         // it is on the host.
@@ -3329,6 +3321,11 @@ const RootServer = struct {
         return std.fmt.bufPrint(&s.dial_buf, "tcp!127.0.0.1!{d}", .{s.port}) catch unreachable;
     }
 
+    /// The server as a --url (design/mounts.md).
+    fn url(s: *RootServer) []const u8 {
+        return std.fmt.bufPrint(&s.url_buf, "tcp://127.0.0.1:{d}", .{s.port}) catch unreachable;
+    }
+
     /// Kills the server outright. Child.kill's SIGTERM is a hangup to h9,
     /// which listen1 doesn't end on, so h9 would wait out its 2.5 s grace
     /// period on every case that serves a root.
@@ -3338,20 +3335,102 @@ const RootServer = struct {
     }
 };
 
+/// `url` with `:/:OPTS`: a --url on `/` with options.
+fn urlOpts(buf: []u8, url: []const u8, opts: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}:/:{s}", .{ url, opts }) catch unreachable;
+}
+
+/// The flag that mounts `root` on `/` (design/mounts.md): `--dir` for
+/// a host path (starting with `/` or `.`), and `--url` for anything else.
+fn rootFlag(root: []const u8) [2][]const u8 {
+    const u = dialUrl(&root_url_buf, root);
+    const path = u.len > 0 and (u[0] == '/' or u[0] == '.' or (builtin.os.tag == .windows and u.len > 1 and u[1] == ':'));
+    return .{ if (path) "--dir" else "--url", u };
+}
+
+var root_url_buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+
+/// A dial string (`tcp!host!port`, `unix!path`) as the URL --url takes,
+/// and anything else as it is.
+fn dialUrl(buf: []u8, addr: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, addr, "tcp!")) {
+        var it = std.mem.splitScalar(u8, addr[4..], '!');
+        const host = it.next().?;
+        const port = it.next() orelse "564";
+        return std.fmt.bufPrint(buf, "tcp://{s}:{s}", .{ host, port }) catch unreachable;
+    }
+    if (std.mem.startsWith(u8, addr, "unix!")) return std.fmt.bufPrint(buf, "unix://{s}", .{addr[5..]}) catch unreachable;
+    return addr;
+}
+
+/// Whether `args` mounts something on `/` itself, so the harness leaves
+/// out its own `--dir` root.
+fn givesRoot(args: []const []const u8) bool {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--builtin")) {
+            return true;
+        } else if (std.mem.startsWith(u8, a, "--builtin=")) {
+            if (onRoot(a["--builtin=".len..], false)) return true;
+        } else inline for (.{ "--dir", "--url", "--archive" }) |f| {
+            if (std.mem.eql(u8, a, f) and i + 1 < args.len) {
+                i += 1;
+                if (onRoot(args[i], true)) return true;
+            } else if (std.mem.startsWith(u8, a, f ++ "=")) {
+                if (onRoot(a[f.len + 1 ..], true)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Whether a mount flag's value has `/` as its DST.
+fn onRoot(v: []const u8, has_src: bool) bool {
+    if (std.mem.indexOf(u8, v, "dst=")) |d| {
+        const rest = v[d + 4 ..];
+        const end = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+        return std.mem.eql(u8, rest[0..end], "/");
+    }
+    var part = v;
+    if (has_src) {
+        const skip = std.mem.indexOf(u8, v, "://");
+        var i = v.len;
+        part = "";
+        while (i > 0) {
+            i -= 1;
+            if (v[i] != ':' or i + 1 >= v.len or (v[i + 1] != '/' and v[i + 1] != '#')) continue;
+            if (skip != null and i == skip.?) continue;
+            if (i == 1 and std.ascii.isAlphabetic(v[0])) continue;
+            part = v[i + 1 ..];
+            break;
+        }
+    }
+    const dst = part[0 .. std.mem.indexOfScalar(u8, part, ':') orelse part.len];
+    return dst.len == 0 or std.mem.eql(u8, dst, "/");
+}
+
 /// Runs `args` over the 9P root `root` and over the host tree, and checks
 /// that both succeed with the same output.
 fn expectSameAsHost(e: Env, root: []const u8, args: []const []const u8) !void {
-    return expectSameAsHostWith(e, root, &.{}, args);
+    return expectSameAsHostWith(e, root, "", args);
 }
 
-/// expectSameAsHost, with `root_args` (flags that need the 9P root, such
-/// as --root-header) added to the run over the root only.
-fn expectSameAsHostWith(e: Env, root: []const u8, root_args: []const []const u8, args: []const []const u8) !void {
+/// expectSameAsHost, with `opts` (the root's options, such as header=)
+/// on the 9P root's --url.
+fn expectSameAsHostWith(e: Env, root: []const u8, opts: []const u8, args: []const []const u8) !void {
+    return expectSameAsHostFlags(e, root, opts, &.{}, args);
+}
+
+/// expectSameAsHostWith, with `root_args` (flags such as --cred) on the
+/// run over the 9P root.
+fn expectSameAsHostFlags(e: Env, root: []const u8, opts: []const u8, root_args: []const []const u8, args: []const []const u8) !void {
     const host = try run(e, args);
     defer host.deinit();
     var with_root: std.ArrayList([]const u8) = .empty;
     defer with_root.deinit(gpa);
-    try with_root.appendSlice(gpa, &.{ "--root", root });
+    var ub: [512]u8 = undefined;
+    try with_root.appendSlice(gpa, &rootFlag(if (opts.len > 0) urlOpts(&ub, root, opts) else root));
     try with_root.appendSlice(gpa, root_args);
     try with_root.appendSlice(gpa, args);
     const r = try run(e, with_root.items);
@@ -3374,6 +3453,7 @@ const FakeAttach = struct {
     aname_len: usize = 0,
     attached: bool = false,
     dial_buf: [64]u8 = undefined,
+    url_buf: [64]u8 = undefined,
 
     fn start(f: *FakeAttach, refusal: []const u8) !void {
         f.* = .{ .srv = try listenLocal(), .refusal = refusal };
@@ -3382,6 +3462,11 @@ const FakeAttach = struct {
 
     fn dial(f: *FakeAttach) []const u8 {
         return std.fmt.bufPrint(&f.dial_buf, "tcp!127.0.0.1!{d}", .{f.srv.socket.address.getPort()}) catch unreachable;
+    }
+
+    /// The server as a --url (design/mounts.md).
+    fn url(f: *FakeAttach) []const u8 {
+        return std.fmt.bufPrint(&f.url_buf, "tcp://127.0.0.1:{d}", .{f.srv.socket.address.getPort()}) catch unreachable;
     }
 
     /// Waits for the server's one connection to end.
@@ -3461,7 +3546,7 @@ test "a TCP 9P root runs /bin/ls [ninep-roots]" {
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
-    try expectSameAsHost(e, srv.dial(), &.{ "/bin/ls", "/", "/bin/ls" });
+    try expectSameAsHost(e, srv.url(), &.{ "/bin/ls", "/", "/bin/ls" });
     // A name: localhost is ::1 before 127.0.0.1 on macOS, and the server
     // is only on 127.0.0.1, so every address cs returns is tried.
     var buf: [64]u8 = undefined;
@@ -3526,11 +3611,9 @@ test "a unix socket 9P root runs /bin/ls [ninep-roots]" {
     defer gpa.free(sock);
     var relay: UnixRelay = undefined;
     try relay.start(sock, srv.port);
-    // Both spellings: unix!path, and the socket's path.
-    const dial = try std.fmt.allocPrint(gpa, "unix!{s}", .{sock});
-    defer gpa.free(dial);
-    try expectSameAsHost(e, dial, &.{ "/bin/ls", "/", "/bin/ls" });
-    try expectSameAsHost(e, sock, &.{ "/bin/ls", "/" });
+    const url = try std.fmt.allocPrint(gpa, "unix://{s}", .{sock});
+    defer gpa.free(url);
+    try expectSameAsHost(e, url, &.{ "/bin/ls", "/", "/bin/ls" });
 }
 
 test "rc pipelines and exec run from a 9P root [ninep-roots]" {
@@ -3538,7 +3621,7 @@ test "rc pipelines and exec run from a 9P root [ninep-roots]" {
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
-    try expectSameAsHost(e, srv.dial(), &.{ "--rc", "ls /bin | grep -c '/cat$'; echo a b c | wc -w; exec /bin/echo done" });
+    try expectSameAsHost(e, srv.url(), &.{ "--rc", "ls /bin | grep -c '/cat$'; echo a b c | wc -w; exec /bin/echo done" });
 }
 
 test "the host cwd is bound over a 9P root [ninep-roots]" {
@@ -3550,7 +3633,7 @@ test "the host cwd is bound over a 9P root [ninep-roots]" {
     try s.init();
     defer s.deinit();
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "from the host\n" });
-    const r = try run(e, &.{ "--root", srv.dial(), "--cwd", s.path, "--rc", "cat f; pwd; echo new > g" });
+    const r = try run(e, &.{ "--url", srv.url(), "--cwd", s.path, "--rc", "cat f; pwd; echo new > g" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
@@ -3563,19 +3646,20 @@ test "a 9P root works under --net=disable [ninep-roots]" {
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
-    try expectSameAsHost(e, srv.dial(), &.{ "--net=disable", "/bin/ls", "/bin/cat" });
+    try expectSameAsHost(e, srv.url(), &.{ "--net=disable", "/bin/ls", "/bin/cat" });
     // #I is still masked from the guest.
-    const r = try run(e, &.{ "--root", srv.dial(), "--net=disable", "--rc", "ls '#I'" });
+    const r = try run(e, &.{ "--url", srv.url(), "--net=disable", "--rc", "ls '#I'" });
     defer r.deinit();
     try std.testing.expect(r.code != 0);
 }
 
-test "--root-spec is sent as the attach name [ninep-roots]" {
+test "spec= is sent as the attach name [mounts]" {
     const e = try env(@src());
     var f: FakeAttach = undefined;
     try f.start("no such tree");
+    var ub: [128]u8 = undefined;
     // One backend: the server takes one connection.
-    const r = runOn(e, firstBackend(e), &.{ "--root", f.dial(), "--root-spec", "other", "/bin/echo" }, null) catch |err| {
+    const r = runOn(e, firstBackend(e), &.{ "--url", urlOpts(&ub, f.url(), "spec=other"), "/bin/echo" }, null) catch |err| {
         f.finish();
         return err;
     };
@@ -3586,15 +3670,16 @@ test "--root-spec is sent as the attach name [ninep-roots]" {
     try std.testing.expectEqual(125, r.code);
 }
 
-test "--root-user is sent as the attach uname [ninep-roots]" {
+test "user= is sent as the attach uname [mounts]" {
     const e = try env(@src());
     for ([_]?[]const u8{ "glenda", null }) |user| {
         var f: FakeAttach = undefined;
         try f.start("no");
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
-        try args.appendSlice(gpa, &.{ "--root", f.dial() });
-        if (user) |u| try args.appendSlice(gpa, &.{ "--root-user", u });
+        var ub: [128]u8 = undefined;
+        var ob: [64]u8 = undefined;
+        try args.appendSlice(gpa, &.{ "--url", if (user) |u| urlOpts(&ub, f.url(), try std.fmt.bufPrint(&ob, "user={s}", .{u})) else f.url() });
         try args.append(gpa, "/bin/echo");
         // One backend: the server takes one connection.
         const r = runOn(e, firstBackend(e), args.items, null) catch |err| {
@@ -3614,16 +3699,17 @@ test "--root-user is sent as the attach uname [ninep-roots]" {
     }
 }
 
-test "the guest mounts /srv/root at a second path [ninep-roots]" {
+test "a --url on /srv/NAME is posted there, and the guest mounts it [mounts]" {
     const e = try env(@src());
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
-    const r = try run(e, &.{ "--root", srv.dial(), "--rc", "ls /srv/root && mkdir /tmp/r && mount /srv/root /tmp/r && ls /tmp/r/rc/bin/lc" });
+    var ub: [128]u8 = undefined;
+    const r = try run(e, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/srv/fs", .{srv.url()}), "--rc", "ls /srv/fs && mkdir /tmp/r && mount /srv/fs /tmp/r && ls /tmp/r/rc/bin/lc" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
-    try std.testing.expectEqualStrings("/srv/root\n/tmp/r/rc/bin/lc\n", r.out);
+    try std.testing.expectEqualStrings("/srv/fs\n/tmp/r/rc/bin/lc\n", r.out);
 }
 
 test "an unreachable 9P root exits 125 [ninep-roots]" {
@@ -3632,19 +3718,19 @@ test "an unreachable 9P root exits 125 [ninep-roots]" {
     const port = probe.socket.address.getPort();
     probe.deinit(std.testing.io);
     var buf: [64]u8 = undefined;
-    const dial = try std.fmt.bufPrint(&buf, "tcp!127.0.0.1!{d}", .{port});
-    const r = try run(e, &.{ "--root", dial, "/bin/echo" });
+    const dial = try std.fmt.bufPrint(&buf, "tcp://127.0.0.1:{d}", .{port});
+    const r = try run(e, &.{ "--url", dial, "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [96]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, r.err, try std.fmt.bufPrint(&want, "root {s}: ", .{dial})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, try std.fmt.bufPrint(&want, "root tcp!127.0.0.1!{d}: ", .{port})) != null);
 }
 
 test "a 9P root that wants authentication exits 125 [ninep-roots]" {
     const e = try env(@src());
     var f: FakeAttach = undefined;
     try f.start("authentication required");
-    const r = runOn(e, firstBackend(e), &.{ "--root", f.dial(), "/bin/echo" }, null) catch |err| {
+    const r = runOn(e, firstBackend(e), &.{ "--url", f.url(), "/bin/echo" }, null) catch |err| {
         f.finish();
         return err;
     };
@@ -3656,7 +3742,7 @@ test "a 9P root that wants authentication exits 125 [ninep-roots]" {
 
 test "--write=none with a 9P root is a usage error [ninep-roots]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--root", "tcp!127.0.0.1!1", "--write=none", "/bin/echo" });
+    const r = try run(e, &.{ "--url", "tcp://127.0.0.1:1", "--write=none", "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "--write=none can't be enforced on a 9P root") != null);
@@ -3665,7 +3751,7 @@ test "--write=none with a 9P root is a usage error [ninep-roots]" {
 test "a unix socket root on Windows exits 125 [ninep-roots]" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const e = try env(@src());
-    const r = try run(e, &.{ "--root", "unix!C:/fs.sock", "/bin/echo" });
+    const r = try run(e, &.{ "--url", "unix:///C:/fs.sock", "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "unix socket roots need a POSIX host") != null);
@@ -3679,23 +3765,23 @@ test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    const p = try run(e, &.{ "--root", srv.dial(), "--cwd", s.path, "--print", "ls" });
+    const p = try run(e, &.{ "--url", srv.url(), "--cwd", s.path, "--print", "ls" });
     defer p.deinit();
     try std.testing.expectEqual(0, p.code);
     var want: [96]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "  mount '#s/root' / ''") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  mount -r '{s}' '#Oroot' ''", .{srv.url()})) != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}  index=/.fs/index\n", .{srv.dial()})) != null);
-    // Under the root's overlay (design/epoch-0/overlay.md) nothing reaches
+    // Under the root's overlay (design/overlay.md) nothing reaches
     // the server; under --write=scope its server decides.
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") == null);
-    const sp = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--print", "ls" });
+    const sp = try run(e, &.{ "--url", srv.url(), "--write=scope", "--print", "ls" });
     defer sp.deinit();
     try std.testing.expect(std.mem.indexOf(u8, sp.out, "writes to the 9P root go to its server") != null);
     // The namespace section, replayed after the plan's own.
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "\naccess:") orelse std.mem.indexOfPos(u8, p.out, start, "\ncaveats:") orelse return error.NoNamespace;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start .. end + 1] });
-    try expectSameAsHost(e, srv.dial(), &.{ "--cwd", s.path, "--ns", s.ns(), "/bin/ls", "/", "/bin/ls" });
+    try expectSameAsHost(e, srv.url(), &.{ "--cwd", s.path, "--ns", s.ns(), "/bin/ls", "/", "/bin/ls" });
 }
 
 test "a write to a 9P root under the default profile doesn't reach the server [overlay]" {
@@ -3705,16 +3791,16 @@ test "a write to a 9P root under the default profile doesn't reach the server [o
     defer srv.stop();
     // The server is a machine of its own, whose namespace outlives each
     // connection: a write that reached it would show in the next one.
-    const r = try run(e, &.{ "--root", srv.dial(), "--rc", "echo hi > /lib/h9-overlay-9p && cat /lib/h9-overlay-9p" });
+    const r = try run(e, &.{ "--url", srv.url(), "--rc", "echo hi > /lib/h9-overlay-9p && cat /lib/h9-overlay-9p" });
     defer r.deinit();
     try std.testing.expectEqualStrings("hi\n", r.out);
     try std.testing.expectEqual(0, r.code);
-    const after = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--rc", "test -e /lib/h9-overlay-9p && echo reached" });
+    const after = try run(e, &.{ "--url", srv.url(), "--write=scope", "--rc", "test -e /lib/h9-overlay-9p && echo reached" });
     defer after.deinit();
     try std.testing.expectEqualStrings("", after.out);
     // Under --write=scope the write goes to the server, whose export is
     // read-only (exportfs -R).
-    const sc = try run(e, &.{ "--root", srv.dial(), "--write=scope", "--rc", "echo x > /lib/h9-overlay-9p" });
+    const sc = try run(e, &.{ "--url", srv.url(), "--write=scope", "--rc", "echo x > /lib/h9-overlay-9p" });
     defer sc.deinit();
     try std.testing.expectEqual(1, sc.code);
     try std.testing.expect(std.mem.indexOf(u8, sc.err, "read only") != null);
@@ -3726,7 +3812,7 @@ test "--check runs /bin/echo from a 9P root [ninep-roots]" {
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
-    const r = try run(e, &.{ "--root", srv.dial(), "--check" });
+    const r = try run(e, &.{ "--url", srv.url(), "--check" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\n", .{r.out});
     try std.testing.expectEqual(0, r.code);
@@ -3900,7 +3986,7 @@ const IndexRig = struct {
 
     /// mkindex's index of the served tree, which the caller frees.
     fn mkindex(x: *IndexRig, e: Env) ![]u8 {
-        const r = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--rc", "mkindex /" });
+        const r = try run(e, &.{ "--url", x.srv.url(), "--index", "none", "--rc", "mkindex /" });
         defer gpa.free(r.err);
         errdefer gpa.free(r.out);
         errdefer std.debug.print("mkindex: {s}\n", .{r.err});
@@ -3922,11 +4008,20 @@ const IndexRig = struct {
     }
 
     /// Runs `args` over the relay, with -v and the case's cache, after
-    /// resetting the relay's counts.
-    fn run_(x: *IndexRig, e: Env, args: []const []const u8) !Result {
+    /// resetting the relay's counts. A leading `index=FILE` in `args` is
+    /// the relay's --url option.
+    fn run_(x: *IndexRig, e: Env, args_in: []const []const u8) !Result {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
-        try argv.appendSlice(gpa, &.{ "--root", x.relay.dial(), "--index-cache", x.cache, "-v" });
+        var args = args_in;
+        var ub: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+        var db: [64]u8 = undefined;
+        const url = dialUrl(&db, x.relay.dial());
+        const u = if (args.len > 0 and std.mem.startsWith(u8, args[0], "index=")) blk: {
+            defer args = args[1..];
+            break :blk try std.fmt.bufPrint(&ub, "{s}:/:{s}", .{ url, args[0] });
+        } else url;
+        try argv.appendSlice(gpa, &.{ "--url", u, "--index-cache", x.cache, "-v" });
         try argv.appendSlice(gpa, args);
         x.relay.reset();
         return run(e, argv.items);
@@ -4003,7 +4098,7 @@ test "mkindex lists every name in the test root with the server's qids [mount-in
     }
     try std.testing.expect(std.mem.indexOf(u8, text, "9p.incomplete") == null);
     // The qid is the server's, as the guest sees it through /srv/root.
-    const q = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--rc", "mount /srv/root /n && walk -e q /n/lib/x/a" });
+    const q = try run(e, &.{ "--url", x.srv.url(), "--index", "none", "--rc", "mount /srv/root /n && walk -e q /n/lib/x/a" });
     defer q.deinit();
     const dot = std.mem.indexOfScalar(u8, q.out, '.') orelse return error.NoQid;
     const at = std.mem.indexOf(u8, text, "\n/lib/x/a ") orelse return error.NoEntry;
@@ -4111,7 +4206,7 @@ test "an indexed root sends fewer T-messages than an unindexed one for rc -c ech
     try std.testing.expect(counts[0] < counts[1]);
 }
 
-test "--root-index FILE is used over a root without .fs/index [mount-index]" {
+test "index=FILE is used over a root without .fs/index [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
@@ -4121,7 +4216,8 @@ test "--root-index FILE is used over a root without .fs/index [mount-index]" {
     try x.write("x.h9index", text);
     const file = try std.fs.path.join(gpa, &.{ x.s.path, "x.h9index" });
     defer gpa.free(file);
-    const r = try x.run_(e, &.{ "--root-index", file, "--rc", "ls /lib/x; test -e /lib/zznope || echo absent" });
+    var ib: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try x.run_(e, &.{ try std.fmt.bufPrint(&ib, "index={s}", .{file}), "--rc", "ls /lib/x; test -e /lib/zznope || echo absent" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
@@ -4216,18 +4312,19 @@ test "a malformed index is ignored and the root still mounts [mount-index]" {
     try expectIn(v.err, "unknown format version; ignored");
 }
 
-test "an unreadable --root-index exits 125 [mount-index]" {
+test "an unreadable index= exits 125 [mount-index]" {
     const e = try env(@src());
     var x: IndexRig = undefined;
     try x.start(e, false);
     defer x.stop();
     const file = try std.fs.path.join(gpa, &.{ x.s.path, "missing.h9index" });
     defer gpa.free(file);
-    const r = try x.run_(e, &.{ "--root-index", file, "/bin/ls", "/lib/x" });
+    var ib: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try x.run_(e, &.{ try std.fmt.bufPrint(&ib, "index={s}", .{file}), "/bin/ls", "/lib/x" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(125, r.code);
-    try expectIn(r.err, "--root-index");
+    try expectIn(r.err, "index=");
     try expectIn(r.err, "not found");
 }
 
@@ -4302,16 +4399,17 @@ test "a rewritten .fs/index is fetched on the next mount [mount-index]" {
     try expectIn(second.err, " 0 demoted");
 }
 
-test "--root-index with a host-directory root is a usage error [mount-index]" {
+test "index= without a 9P server on / is a usage error [mount-index]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.h9index", .data = "fsindex 1 seq 0\n" });
-    const r = try run(e, &.{ "--cwd", s.path, "--root-index", "x.h9index", "/bin/ls", "/" });
+    // On a --url elsewhere, with the root a host directory.
+    const r = try run(e, &.{ "--cwd", s.path, "--url", "tcp://127.0.0.1:1:/n/fs:index=x.h9index", "/bin/ls", "/" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
-    try expectIn(r.err, "--root-index needs a 9P root");
+    try expectIn(r.err, "index= needs a 9P member on /");
 }
 
 test "--print shows the index source and entry count [mount-index]" {
@@ -4334,15 +4432,16 @@ test "--print shows the index source and entry count [mount-index]" {
         _ = f.next();
         if (std.mem.eql(u8, f.next() orelse "", "d")) dirs += 1;
     }
-    const p = try run(e, &.{ "--root", x.srv.dial(), "--root-index", file, "--print", "true" });
+    var ub: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    const p = try run(e, &.{ "--url", try std.fmt.bufPrint(&ub, "{s}:/:index={s}", .{ x.srv.url(), file }), "--print", "true" });
     defer p.deinit();
     errdefer std.debug.print("stdout: {s}\n", .{p.out});
     var buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
     try expectIn(p.out, try std.fmt.bufPrint(&buf, "  index={s} {d} entries {d} dirs\n", .{ file, n, dirs }));
-    const auto = try run(e, &.{ "--root", x.srv.dial(), "--print", "true" });
+    const auto = try run(e, &.{ "--url", x.srv.url(), "--print", "true" });
     defer auto.deinit();
     try expectIn(auto.out, "  index=/.fs/index\n");
-    const none = try run(e, &.{ "--root", x.srv.dial(), "--index", "none", "--print", "true" });
+    const none = try run(e, &.{ "--url", x.srv.url(), "--index", "none", "--print", "true" });
     defer none.deinit();
     try expectIn(none.out, "  index=none\n");
 }
@@ -4502,7 +4601,8 @@ fn runEnv(e: Env, backend: []const u8, args: []const []const u8, vars: []const [
     for (vars) |v| try map.put(v[0], v[1]);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend, "--root", e.root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", backend });
+    if (!givesRoot(args)) try argv.appendSlice(gpa, &.{ "--dir", e.root });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     const r = try runProcessWith(argv.items, null, &map, ms);
@@ -4559,22 +4659,22 @@ test "a ws:// root works with a server that selects no subprotocol [websocket-9p
     try expectSameAsHost(e, w.url(), &.{ "/bin/ls", "/" });
 }
 
-test "--root-header is sent, and @FILE reads headers from a file [websocket-9p]" {
+test "header= is sent, and header=@FILE reads headers from a file [mounts]" {
     const e = try env(@src());
     var w: WsRoot = undefined;
     try w.start(e, .{ .require_header = "Authorization: Bearer s3cret" });
     defer w.stop();
-    try expectSameAsHostWith(e, w.url(), &.{ "--root-header", "Authorization: Bearer s3cret" }, &.{ "/bin/ls", "/" });
+    try expectSameAsHostWith(e, w.url(), "header=Authorization: Bearer s3cret", &.{ "/bin/ls", "/" });
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "headers", .data = "Authorization: Bearer s3cret\n\nX-Other: two\n" });
-    const file = try std.fmt.allocPrint(gpa, "@{s}/headers", .{s.path});
+    const file = try std.fmt.allocPrint(gpa, "header=@{s}/headers", .{s.path});
     defer gpa.free(file);
-    try expectSameAsHostWith(e, w.url(), &.{ "--root-header", file }, &.{ "/bin/ls", "/" });
+    try expectSameAsHostWith(e, w.url(), file, &.{ "/bin/ls", "/" });
     try std.testing.expectEqualStrings("two", w.relay.header("X-Other") orelse "");
     // Without it, the server refuses the handshake.
-    const r = try run(e, &.{ "--root", w.url(), "/bin/echo" });
+    const r = try run(e, &.{ "--url", w.url(), "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     try expectIn(r.err, "server answered 401 Unauthorized");
@@ -4585,7 +4685,7 @@ test "a handshake answered with 401 exits 125 with the status [websocket-9p]" {
     var rl: wsrelay.Relay = undefined;
     try startEcho(&rl, .{ .status = 401 });
     defer rl.stop();
-    const r = try run(e, &.{ "--root", rl.url(), "/bin/echo" });
+    const r = try run(e, &.{ "--url", rl.url(), "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [128]u8 = undefined;
@@ -4601,7 +4701,7 @@ test "an unreachable ws:// root exits 125 [websocket-9p]" {
     probe.deinit(std.testing.io);
     var buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&buf, "ws://127.0.0.1:{d}/9p", .{port});
-    const r = try run(e, &.{ "--root", url, "/bin/echo" });
+    const r = try run(e, &.{ "--url", url, "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [128]u8 = undefined;
@@ -4617,7 +4717,7 @@ test "a server close makes guest file operations fail [websocket-9p]" {
         var w: WsRoot = undefined;
         try w.start(e, .{});
         defer w.stop();
-        var t = try spawnTerm(e, backend, &.{ "--root", w.url(), "--timeout", "60s", "--rc", "echo ready; sleep 2; /bin/echo after" });
+        var t = try spawnTerm(e, backend, &.{ "--url", w.url(), "--timeout", "60s", "--rc", "echo ready; sleep 2; /bin/echo after" });
         defer t.deinit();
         try t.expect("ready", slow(10_000));
         w.relay.hangupAll();
@@ -4638,7 +4738,7 @@ test "an idle ws:// root pings, and a server that stops answering fails it [webs
         try w.start(e, .{});
         defer w.stop();
         const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 4 / 1000});
-        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
+        const r = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stderr: {s}\n", .{r.err});
         try std.testing.expectEqual(0, r.code);
@@ -4650,7 +4750,7 @@ test "an idle ws:// root pings, and a server that stops answering fails it [webs
         try w.start(e, .{ .no_pong = true });
         defer w.stop();
         const cmd = try std.fmt.bufPrint(&cmd_buf, "sleep {d}; /bin/echo still", .{slow(1000) * 6 / 1000});
-        const r = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
+        const r = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "--rc", cmd }, &.{.{ "H9_TEST_KEEPALIVE", ka }}, slow(30_000));
         defer r.deinit();
         errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
         try std.testing.expect(r.code != 0);
@@ -4666,13 +4766,13 @@ test "a ws:// root goes through HTTP_PROXY with CONNECT, and NO_PROXY skips it [
     defer w.stop();
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, null);
-    const via = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "/bin/ls", "/bin/ls" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    const via = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "/bin/ls", "/bin/ls" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer via.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{via.err});
     try std.testing.expectEqual(0, via.code);
     try std.testing.expectEqualStrings("/bin/ls\n", via.out);
     try std.testing.expectEqual(1, p.connects.load(.acquire));
-    const direct = try runEnv(e, firstBackend(e), &.{ "--root", w.url(), "/bin/ls", "/bin/ls" }, &.{ .{ "http_proxy", p.url() }, .{ "NO_PROXY", "localhost,127.0.0.1" } }, 30_000);
+    const direct = try runEnv(e, firstBackend(e), &.{ "--url", w.url(), "/bin/ls", "/bin/ls" }, &.{ .{ "http_proxy", p.url() }, .{ "NO_PROXY", "localhost,127.0.0.1" } }, 30_000);
     defer direct.deinit();
     try std.testing.expectEqual(0, direct.code);
     try std.testing.expectEqual(1, p.connects.load(.acquire));
@@ -4682,7 +4782,7 @@ test "a proxy answering 407 exits 125 with the status [websocket-9p]" {
     const e = try env(@src());
     var p: wsrelay.Proxy = undefined;
     try p.start(std.testing.io, 407);
-    const r = try runEnv(e, firstBackend(e), &.{ "--root", "ws://127.0.0.1:1/9p", "/bin/echo" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
+    const r = try runEnv(e, firstBackend(e), &.{ "--url", "ws://127.0.0.1:1/9p", "/bin/echo" }, &.{.{ "HTTP_PROXY", p.url() }}, 30_000);
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     try expectIn(r.err, "root ws://127.0.0.1:1/9p: proxy answered 407 Proxy Authentication Required");
@@ -4704,7 +4804,7 @@ test "a /net/ws connect ignores HTTP_PROXY [websocket-9p]" {
     try std.testing.expectEqual(0, p.connects.load(.acquire));
 }
 
-test "--root-ca with a ws:// root is a usage error [websocket-9p]" {
+test "ca= with a ws:// root is a usage error [mounts]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -4712,10 +4812,12 @@ test "--root-ca with a ws:// root is a usage error [websocket-9p]" {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ca.pem", .data = "" });
     const ca = try std.fs.path.join(gpa, &.{ s.path, "ca.pem" });
     defer gpa.free(ca);
-    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--root-ca", ca, "/bin/echo" });
+    var ub: [512]u8 = undefined;
+    var ob: [512]u8 = undefined;
+    const r = try run(e, &.{ "--url", urlOpts(&ub, "ws://127.0.0.1:1/9p", try std.fmt.bufPrint(&ob, "ca={s}", .{ca})), "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
-    try expectIn(r.err, "--root-ca needs a wss:// root");
+    try expectIn(r.err, "ca= is for wss and https URLs");
 }
 
 test "a note interrupts a read waiting on a ws:// root [websocket-9p]" {
@@ -4726,7 +4828,7 @@ test "a note interrupts a read waiting on a ws:// root [websocket-9p]" {
         var w: WsRoot = undefined;
         try w.start(e, .{});
         defer w.stop();
-        var t = try spawnTerm(e, backend, &.{ "--root", w.url(), "--timeout", "60s", "rc", "-i" });
+        var t = try spawnTerm(e, backend, &.{ "--url", w.url(), "--timeout", "60s", "rc", "-i" });
         defer t.deinit();
         try t.expect(prompt, slow(10_000));
         // The server stops answering, so the exec's reads wait.
@@ -4772,7 +4874,7 @@ test "a host-made stream isn't reachable through /net/ws or an attach spec [webs
     var w: WsRoot = undefined;
     try w.start(e, .{});
     defer w.stop();
-    const r = try run(e, &.{ "--root", w.url(), "--rc", "ls /net/ws; for(i in 0 1 2 256 257) ls '#ℏ'$i >[2]/dev/null && echo reached $i; echo done" });
+    const r = try run(e, &.{ "--url", w.url(), "--rc", "ls /net/ws; for(i in 0 1 2 256 257) ls '#ℏ'$i >[2]/dev/null && echo reached $i; echo done" });
     defer r.deinit();
     try std.testing.expectEqualStrings("/net/ws/clone\ndone\n", r.out);
 }
@@ -4909,7 +5011,7 @@ test "a ws:// root fails on a text message from the server [websocket-9p]" {
     var w: WsRoot = undefined;
     try w.start(e, .{ .send_text = "hello" });
     defer w.stop();
-    const r = try run(e, &.{ "--root", w.url(), "/bin/echo" });
+    const r = try run(e, &.{ "--url", w.url(), "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [128]u8 = undefined;
@@ -5010,7 +5112,7 @@ test "a machine can't open more than 32 conversations [websocket-9p]" {
 
 test "--print elides a ws:// root's query and header values [websocket-9p]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p?token=s3cret", "--root-header", "Authorization: Bearer s3cret", "--print", "ls" });
+    const r = try run(e, &.{ "--url", "ws://127.0.0.1:1/9p?token=s3cret:/:header=Authorization: Bearer s3cret", "--print", "ls" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try expectIn(r.out, "# ws://127.0.0.1:1/9p?…  (Authorization: …)");
@@ -5020,7 +5122,7 @@ test "--print elides a ws:// root's query and header values [websocket-9p]" {
 
 test "--write=none with a ws:// root is a usage error [websocket-9p]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--write=none", "/bin/echo" });
+    const r = try run(e, &.{ "--url", "ws://127.0.0.1:1/9p", "--write=none", "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
     try expectIn(r.err, "--write=none can't be enforced on a WebSocket root");
@@ -5077,13 +5179,13 @@ fn runBare(e: Env, cwd: ?[]const u8, args: []const []const u8, vars: []const [2]
     return .{ .code = code, .out = out, .err = err_out };
 }
 
-test "a schemeless --root prints as its wss:// URL [schemeless-roots]" {
+test "a --url without a scheme prints as its wss:// URL [mounts]" {
     const e = try env(@src());
-    const r = try run(e, &.{ "--root", "fs.example.com/9p?token=s3cret", "--print", "ls" });
+    const r = try run(e, &.{ "--url", "fs.example.com/9p?token=s3cret", "--print", "ls" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try expectIn(r.out, "# wss://fs.example.com/9p?…");
-    const b = try run(e, &.{ "--root", "fs.example.com", "--print", "ls" });
+    const b = try run(e, &.{ "--url", "fs.example.com", "--print", "ls" });
     defer b.deinit();
     try std.testing.expectEqual(0, b.code);
     try expectIn(b.out, "# wss://fs.example.com/");
@@ -5099,7 +5201,7 @@ test "a schemeless loopback root is ws:// and runs /bin/ls [schemeless-roots]" {
     try expectSameAsHost(e, url["ws://".len..], &.{ "/bin/ls", "/" });
 }
 
-test "an existing directory with a dotted name is a host root, not a URL [schemeless-roots]" {
+test "a --dir with a dotted name is a host directory, not a URL [mounts]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5107,42 +5209,45 @@ test "an existing directory with a dotted name is a host root, not a URL [scheme
     var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, e.root, &root_buf);
     try symLinkOrSkip(s.tmp.dir, std.testing.io, root_buf[0..n], "fs.example.com", .{ .is_directory = true });
-    const r = try runBare(e, s.path, &.{ "--root", "fs.example.com", "--print", "ls" }, &.{});
+    const r = try runBare(e, s.path, &.{ "--dir", "fs.example.com", "--print", "ls" }, &.{});
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "wss://") == null);
-    const echo = try runBare(e, s.path, &.{ "--root", "fs.example.com", "/bin/echo", "hi" }, &.{});
+    const echo = try runBare(e, s.path, &.{ "--dir", "fs.example.com", "/bin/echo", "hi" }, &.{});
     defer echo.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{echo.err});
     try std.testing.expectEqual(0, echo.code);
     try std.testing.expectEqualStrings("hi\n", echo.out);
 }
 
-test "an unreachable schemeless root exits 125 naming both readings [schemeless-roots]" {
+test "an unreachable --url without a scheme exits 125 naming its ws:// URL [mounts]" {
     const e = try env(@src());
     var probe = try listenLocal();
     const port = probe.socket.address.getPort();
     probe.deinit(std.testing.io);
     var buf: [64]u8 = undefined;
     const arg = try std.fmt.bufPrint(&buf, "127.0.0.1:{d}/9p", .{port});
-    const r = try run(e, &.{ "--root", arg, "/bin/echo" });
+    const r = try run(e, &.{ "--url", arg, "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [160]u8 = undefined;
     const why = if (onWeb()) "connection failed" else "connection refused";
     try expectIn(r.err, try std.fmt.bufPrint(&want, "root ws://{s}: {s}", .{ arg, why }));
-    try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: no such path, so h9 read it as ws://{s}", .{ arg, arg }));
 }
 
-test "$H9ROOT is read as a schemeless root [schemeless-roots]" {
+test "$H9ROOT with :// is read as a --url, and otherwise as a --dir [mounts]" {
     const e = try env(@src());
-    const r = try runBare(e, null, &.{ "--print", "ls" }, &.{.{ "H9ROOT", "fs.example.com/9p" }});
+    const r = try runBare(e, null, &.{ "--print", "ls" }, &.{.{ "H9ROOT", "wss://fs.example.com/9p" }});
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try expectIn(r.out, "# wss://fs.example.com/9p");
+    const d = try runBare(e, null, &.{ "--print", "ls" }, &.{.{ "H9ROOT", "fs.example.com/9p" }});
+    defer d.deinit();
+    try std.testing.expectEqual(125, d.code);
+    try expectIn(d.err, "--dir fs.example.com/9p: not found");
 }
 
-test "--root-ca is accepted with a schemeless root [schemeless-roots]" {
+test "ca= is accepted on a --url without a scheme [mounts]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -5150,26 +5255,22 @@ test "--root-ca is accepted with a schemeless root [schemeless-roots]" {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ca.pem", .data = "" });
     const ca = try std.fs.path.join(gpa, &.{ s.path, "ca.pem" });
     defer gpa.free(ca);
-    const r = try run(e, &.{ "--root", "fs.example.com/9p", "--root-ca", ca, "--print", "ls" });
+    var ub: [512]u8 = undefined;
+    var ob: [512]u8 = undefined;
+    const r = try run(e, &.{ "--url", urlOpts(&ub, "fs.example.com/9p", try std.fmt.bufPrint(&ob, "ca={s}", .{ca})), "--print", "ls" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try expectIn(r.out, "wss://fs.example.com/9p");
-    // A loopback root is ws://, which takes no CA.
-    const l = try run(e, &.{ "--root", "localhost:8080/9p", "--root-ca", ca, "--print", "ls" });
-    defer l.deinit();
-    try std.testing.expectEqual(2, l.code);
-    try expectIn(l.err, "--root-ca needs a wss:// root");
 }
 
-test "a missing path without a dotted host is still not found [schemeless-roots]" {
+test "a missing --dir is not found [mounts]" {
     const e = try env(@src());
-    for ([_][]const u8{ "no-such-root", "./9front.img", "dist/root" }) |arg| {
-        const r = try run(e, &.{ "--root", arg, "/bin/echo" });
+    for ([_][]const u8{ "no-such-root", "./9front.img", "fs.example.com/9p" }) |arg| {
+        const r = try run(e, &.{ "--dir", arg, "/bin/echo" });
         defer r.deinit();
         try std.testing.expectEqual(125, r.code);
         var want: [96]u8 = undefined;
-        try expectIn(r.err, try std.fmt.bufPrint(&want, "root {s}: not found", .{arg}));
-        try std.testing.expect(std.mem.indexOf(u8, r.err, "read it as") == null);
+        try expectIn(r.err, try std.fmt.bufPrint(&want, "--dir {s}: not found", .{arg}));
     }
 }
 
@@ -5194,13 +5295,13 @@ test "a ws:// root runs /bin/ls on the web host [websocket-9p, browser-host]" {
     try expectSameAsHost(e, w.url(), &.{ "/bin/ls", "/", "/bin/ls" });
 }
 
-test "root_headers is an error on the web host [websocket-9p, browser-host]" {
+test "header= is an error on the web host [mounts, browser-host]" {
     const e = try env(@src());
     if (!onWeb()) return error.SkipZigTest;
-    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--root-header", "Authorization: Bearer x", "/bin/echo" });
+    const r = try run(e, &.{ "--url", "ws://127.0.0.1:1/9p:/:header=Authorization: Bearer x", "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(2, r.code);
-    try expectIn(r.err, "--root-header isn't available on the web host");
+    try expectIn(r.err, "header= isn't available on the web host");
 }
 
 test "the guest mounts a /net/ws conversation on the web host [websocket-9p, browser-host]" {
@@ -5249,14 +5350,14 @@ test "a wss:// root runs /bin/ls [websocket-9p]" {
     var buf: [1024]u8 = undefined;
     const url = try wssUrl(&buf);
     if (getenv(3, "H9_TEST_WSS_CA") != null) return error.SkipZigTest; // the next case's
-    const r = try run(e, &.{ "--root", url, "/bin/ls", "/bin/ls" });
+    const r = try run(e, &.{ "--url", url, "/bin/ls", "/bin/ls" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
     try std.testing.expectEqualStrings("/bin/ls\n", r.out);
 }
 
-test "--root-ca trusts a private CA, and the host bundle doesn't [websocket-9p]" {
+test "ca= trusts a private CA, and the host bundle doesn't [mounts]" {
     const e = try env(@src());
     var buf: [1024]u8 = undefined;
     const url = try wssUrl(&buf);
@@ -5264,11 +5365,13 @@ test "--root-ca trusts a private CA, and the host bundle doesn't [websocket-9p]"
     const v = getenv(3, "H9_TEST_WSS_CA") orelse return error.SkipZigTest;
     @memcpy(ca_buf[0..v.len], v);
     const ca = ca_buf[0..v.len];
-    const ok = try run(e, &.{ "--root", url, "--root-ca", ca, "/bin/ls", "/bin/ls" });
+    var ub: [2048]u8 = undefined;
+    var ob: [1024]u8 = undefined;
+    const ok = try run(e, &.{ "--url", urlOpts(&ub, url, try std.fmt.bufPrint(&ob, "ca={s}", .{ca})), "/bin/ls", "/bin/ls" });
     defer ok.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{ok.err});
     try std.testing.expectEqual(0, ok.code);
-    const refused = try run(e, &.{ "--root", url, "/bin/echo" });
+    const refused = try run(e, &.{ "--url", url, "/bin/echo" });
     defer refused.deinit();
     try std.testing.expectEqual(125, refused.code);
     try expectIn(refused.err, "certificate: unknown authority");
@@ -5290,11 +5393,18 @@ fn slimTree(e: Env) ![]const u8 {
     return t;
 }
 
+/// Runs `args` with the host tree `tree` on `/`, its symlinks
+/// resolving inside it.
+fn runContained(e: Env, tree: []const u8, args: []const []const u8) !Result {
+    var buf: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    return runRoot(e, try std.fmt.bufPrint(&buf, "{s}:/:contained", .{tree}), args);
+}
+
 /// Runs `args` with the root `root`.
 fn runRoot(e: Env, root: []const u8, args: []const []const u8) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ "--root", root });
+    try argv.appendSlice(gpa, &rootFlag(root));
     try argv.appendSlice(gpa, args);
     return run(e, argv.items);
 }
@@ -5561,12 +5671,12 @@ test "absolute symlink in a contained tree resolves inside it [symlinks-in-root]
     defer s.deinit();
     var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tree = try linkTree(e, &s, &tb);
-    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "cat", "/etc/hello" });
+    const r = try runContained(e, tree, &.{ "--cwd", s.path, "cat", "/etc/hello" });
     defer r.deinit();
     try std.testing.expectEqualStrings("tree hello\n", r.out);
     try std.testing.expectEqual(0, r.code);
     // A command reached through a link runs, and lists as its target.
-    const k = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "kitty", "/lib/hello" });
+    const k = try runContained(e, tree, &.{ "--cwd", s.path, "kitty", "/lib/hello" });
     defer k.deinit();
     try std.testing.expectEqualStrings("tree hello\n", k.out);
     try std.testing.expectEqual(0, k.code);
@@ -5579,7 +5689,7 @@ test "symlink with .. stops at the top of a contained tree [symlinks-in-root]" {
     defer s.deinit();
     var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tree = try linkTree(e, &s, &tb);
-    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "cat", "/etc/up" });
+    const r = try runContained(e, tree, &.{ "--cwd", s.path, "cat", "/etc/up" });
     defer r.deinit();
     try std.testing.expectEqualStrings("tree hello\n", r.out);
     try std.testing.expectEqual(0, r.code);
@@ -5592,7 +5702,7 @@ test "symlink loop is too many symbolic links [symlinks-in-root]" {
     defer s.deinit();
     var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tree = try linkTree(e, &s, &tb);
-    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "cat", "/etc/loop" });
+    const r = try runContained(e, tree, &.{ "--cwd", s.path, "cat", "/etc/loop" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "too many symbolic links") != null);
@@ -5607,11 +5717,11 @@ test "contained tree still honours --read-deny [symlinks-in-root]" {
     const tree = try linkTree(e, &s, &tb);
     var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const deny = try std.fmt.bufPrint(&db, "{s}/deny", .{tree});
-    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "--read-deny", deny, "cat", "/etc/pub" });
+    const r = try runContained(e, tree, &.{ "--cwd", s.path, "--read-deny", deny, "cat", "/etc/pub" });
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expectEqualStrings("", r.out);
-    const l = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "--read-deny", deny, "ls", "/", "/etc" });
+    const l = try runContained(e, tree, &.{ "--cwd", s.path, "--read-deny", deny, "ls", "/", "/etc" });
     defer l.deinit();
     try std.testing.expect(std.mem.indexOf(u8, l.out, "deny") == null);
     try std.testing.expect(std.mem.indexOf(u8, l.out, "/etc/pub") == null);
@@ -5642,7 +5752,7 @@ test "uncontained bind follows host symlinks as before [symlinks-in-root]" {
     try std.testing.expectEqual(1, h.code);
     // Contained, the same link is read inside the tree, where that host
     // path doesn't exist.
-    const c = try runRoot(e, tree, &.{ "--cwd", s.path, "--readable", other.path, "--root-contained", "cat", "/lib/host" });
+    const c = try runContained(e, tree, &.{ "--cwd", s.path, "--readable", other.path, "cat", "/lib/host" });
     defer c.deinit();
     try std.testing.expectEqual(1, c.code);
     try std.testing.expectEqualStrings("", c.out);
@@ -5655,10 +5765,10 @@ test "--print's #U!c bind replays with --ns [symlinks-in-root]" {
     defer s.deinit();
     var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tree = try linkTree(e, &s, &tb);
-    const p = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "--print", "cat" });
+    const p = try runContained(e, tree, &.{ "--cwd", s.path, "--print", "cat" });
     defer p.deinit();
     var want: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  bind '#U!c{s}' /", .{tree})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  bind -r '#U!c{s}' '#Oroot'", .{tree})) != null);
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
@@ -5677,7 +5787,7 @@ test "ls -l /bin in a contained tree with links (demo) [symlinks-in-root]" {
     defer s.deinit();
     var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tree = try linkTree(e, &s, &tb);
-    const r = try runRoot(e, tree, &.{ "--cwd", s.path, "--root-contained", "ls", "-l", "/bin" });
+    const r = try runContained(e, tree, &.{ "--cwd", s.path, "ls", "-l", "/bin" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/bin/kitty") != null);
@@ -5698,7 +5808,10 @@ const LinuxEnv = struct {
     nine: ?[]const u8,
     arch: []const u8,
     backends: []const u8,
+    /// `root:#L`, the --dir that mounts it (design/mounts.md).
+    lmount: []const u8 = "",
     buf: [2][std.Io.Dir.max_path_bytes]u8 = undefined,
+    lbuf: [std.Io.Dir.max_path_bytes + 3]u8 = undefined,
 };
 
 fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
@@ -5713,6 +5826,7 @@ fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
     const lr = getenv(3, "H9_TEST_LINUX_ROOT") orelse return error.SkipZigTest;
     le.* = .{ .h9 = h9, .root = undefined, .fixtures = undefined, .nine = null, .arch = arch, .backends = "auto" };
     le.root = try std.fmt.bufPrint(&le.buf[0], "{s}/alpine-{s}", .{ lr, arch });
+    le.lmount = try std.fmt.bufPrint(&le.lbuf, "{s}:#L", .{le.root});
     le.fixtures = try std.fmt.bufPrint(&le.buf[1], "{s}/{s}", .{ fx, arch });
     const io = std.testing.io;
     std.Io.Dir.cwd().access(io, try hostPath(le.root, "etc/os-release"), .{}) catch return error.SkipZigTest;
@@ -5727,7 +5841,7 @@ fn linuxEnv(comptime src: std.builtin.SourceLocation, le: *LinuxEnv) !void {
     }
 }
 
-/// Runs `h9 --root <alpine> [--root <9front>] --cwd <fixtures> args...` on
+/// Runs `h9 --dir <alpine>:#L [--dir <9front>] --cwd <fixtures> args...` on
 /// each backend, checking they agree, as `run` does.
 fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Result {
     if (with_nine and le.nine == null) return error.SkipZigTest;
@@ -5737,8 +5851,8 @@ fn runLinux(le: *const LinuxEnv, with_nine: bool, args: []const []const u8) !Res
     while (it.next()) |backend| {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
-        try argv.appendSlice(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--root", le.root });
-        if (with_nine) try argv.appendSlice(gpa, &.{ "--root", le.nine.? });
+        try argv.appendSlice(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount });
+        if (with_nine) try argv.appendSlice(gpa, &.{ "--dir", le.nine.? });
         try argv.appendSlice(gpa, &.{ "--cwd", le.fixtures });
         try argv.appendSlice(gpa, args);
         const p = try runProcessWith(argv.items, null, null, 120_000);
@@ -6071,6 +6185,7 @@ test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fo
     const fx = getenv(2, "H9_TEST_LINUX") orelse return error.SkipZigTest;
     var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var lb: [std.Io.Dir.max_path_bytes + 3]u8 = undefined;
     const root = try std.fmt.bufPrint(&rb, "{s}/alpine-386", .{lr});
     const fixtures = try std.fmt.bufPrint(&fb, "{s}/386", .{fx});
     std.Io.Dir.cwd().access(std.testing.io, try hostPath(root, "etc/os-release"), .{}) catch return error.SkipZigTest;
@@ -6085,7 +6200,7 @@ test "an Alpine x86 shell runs on the emulator, with TLS, signals, pipes, and fo
         \\echo $(ls /etc | grep -c release)
         \\/mnt/term/cwd/threads timed_tls fork_thread
     ;
-    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--root", root, "--cwd", fixtures, "/bin/sh", "-c", script }, null, null, 120_000);
+    const p = try runProcessWith(&.{ h9, "--backend", "emu", "--arch", "386", "--dir", try std.fmt.bufPrint(&lb, "{s}:#L", .{root}), "--cwd", fixtures, "/bin/sh", "-c", script }, null, null, 120_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
     if (std.mem.indexOf(u8, p.stderr, "emulator isn't built") != null) return error.SkipZigTest;
@@ -6120,8 +6235,8 @@ test "9front and Linux programs share pipelines both ways (demo) [linux-personal
     errdefer std.debug.print("stderr: {s}\n", .{lx.err});
     try std.testing.expectEqualStrings("2\n1\n", lx.out);
     try std.testing.expectEqual(0, lx.code);
-    // ... and rc runs Linux programs through #λ.
-    const nine = try runLinux(&le, true, &.{ "--rc", "echo hi | '#λ/usr/bin/wc' -c; '#λ/bin/sh' -c 'kill -TERM $$'; echo $status" });
+    // ... and rc runs Linux programs through #L.
+    const nine = try runLinux(&le, true, &.{ "--rc", "echo hi | '#L/usr/bin/wc' -c; '#L/bin/sh' -c 'kill -TERM $$'; echo $status" });
     defer nine.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{nine.err});
     try std.testing.expect(std.mem.startsWith(u8, nine.out, "3\n"));
@@ -6193,7 +6308,7 @@ test "fsync on a directory, syncfs and sync reach the host [linux-personality]" 
     const p = try runProcessWith(&.{
         "strace", "-f",     "-y",    "-qq",                 "-e",                    "trace=fsync,fdatasync,syncfs,sync",
         "-o",     trace,    le.h9,   "--backend",           it.next() orelse "auto", "--arch",
-        le.arch,  "--root", le.root, "--cwd",               le.fixtures,             "--writable",
+        le.arch,  "--dir", le.lmount, "--cwd",               le.fixtures,             "--writable",
         s.path,   "env",    dir,     "/mnt/term/cwd/files", "dir_sync",
     }, null, null, 120_000);
     defer gpa.free(p.stdout);
@@ -6294,7 +6409,7 @@ test "rename across directories moves in an overlay, and is the host's rename in
     var fb: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try std.Io.Dir.copyFile(std.Io.Dir.cwd(), try std.fmt.bufPrint(&fb, "{s}/files", .{le.fixtures}), sc.tmp.dir, "files", std.testing.io, .{});
     var bit = std.mem.tokenizeScalar(u8, le.backends, ',');
-    const p = try runProcessWith(&.{ le.h9, "--backend", bit.next() orelse "auto", "--arch", le.arch, "--root", le.root, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files rename_across" }, null, null, 120_000);
+    const p = try runProcessWith(&.{ le.h9, "--backend", bit.next() orelse "auto", "--arch", le.arch, "--dir", le.lmount, "--cwd", sc.path, "--writable", sc.path, "--env", "DIR=.", "sh", "-c", "./files rename_across" }, null, null, 120_000);
     defer gpa.free(p.stdout);
     defer gpa.free(p.stderr);
     errdefer std.debug.print("stderr: {s}\n", .{p.stderr});
@@ -6722,7 +6837,7 @@ test "a Linux program's termios reaches the host terminal: echo off keeps lines,
     var it = std.mem.tokenizeScalar(u8, le.backends, ',');
     while (it.next()) |backend| {
         errdefer std.debug.print("backend {s}\n", .{backend});
-        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--root", le.root, "--timeout", "120s", "/bin/sh", "-c", "stty -echo; echo ready1; read x; echo got=$x; stty echo raw; echo ready2; dd bs=1 count=1 2>/dev/null; stty sane; echo; echo done" });
+        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount, "--timeout", "120s", "/bin/sh", "-c", "stty -echo; echo ready1; read x; echo got=$x; stty echo raw; echo ready2; dd bs=1 count=1 2>/dev/null; stty sane; echo; echo done" });
         defer t.deinit();
         try t.expect("ready1", slow(30_000));
         try std.testing.expect(t.noEcho());
@@ -6750,7 +6865,7 @@ test "a Linux program in raw mode gets Enter as CR without ICRNL, polls with VMI
         errdefer std.debug.print("backend {s}\n", .{backend});
         // fzf tells Enter (CR) from Ctrl-J, and btop reads with VMIN 0
         // until a read returns nothing.
-        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--root", le.root, "--timeout", "120s", "/bin/sh", "-c", "echo size=$(stty size); stty raw -echo; echo ready; dd bs=1 count=2 2>/dev/null | od -An -c; stty min 0 time 0; echo poll=$(dd bs=1 count=1 2>/dev/null | wc -c); stty sane; echo done" });
+        var t = try Term.spawn(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount, "--timeout", "120s", "/bin/sh", "-c", "echo size=$(stty size); stty raw -echo; echo ready; dd bs=1 count=2 2>/dev/null | od -An -c; stty min 0 time 0; echo poll=$(dd bs=1 count=1 2>/dev/null | wc -c); stty sane; echo done" });
         defer t.deinit();
         try t.expect("size=25 80", slow(30_000));
         try t.expect("ready", slow(10_000));
@@ -7050,12 +7165,12 @@ test "with no root found, --rc runs from the built-in root [builtin-root]" {
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}\n/mnt/term/cwd\n", .{testArch(e)}), r.out);
 }
 
-test "--builtin=only ignores H9ROOT [builtin-root]" {
+test "--builtin alone ignores H9ROOT [mounts]" {
     const e = try env(@src());
     try needBuiltin(e);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--builtin=only" });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--builtin" });
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     // The full tree has /sys/src; the built-in root doesn't.
     try argv.appendSlice(gpa, &.{ "--rc", "test -d /sys || echo builtin" });
@@ -7085,37 +7200,31 @@ test "lc runs from the built-in root [builtin-root]" {
     try std.testing.expectEqual(0, r.code);
 }
 
-test "--builtin=only with --root is a usage error [builtin-root]" {
+test "--root and --builtin MODE exit 2 naming the replacement [mounts]" {
     const e = try env(@src());
-    const r = try runProcess(&.{ e.h9, "--builtin=only", "--root", e.root, "--rc", "echo x" }, null);
-    defer gpa.free(r.stdout);
-    defer gpa.free(r.stderr);
-    try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, r.term);
+    for ([_][]const []const u8{
+        &.{ e.h9, "--builtin=only", "--rc", "echo x" },
+        &.{ e.h9, "--root", e.root, "--rc", "echo x" },
+        &.{ e.h9, "--root-spec", "x", "--rc", "echo x" },
+    }) |argv| {
+        const r = try runProcess(argv, null);
+        defer gpa.free(r.stdout);
+        defer gpa.free(r.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 2 }, r.term);
+        try expectIn(r.stderr, " was removed: use ");
+    }
 }
 
-test "--builtin=off without a root is exit 125 as before [builtin-root]" {
-    const e = try env(@src());
-    var s: Scratch = undefined;
-    try s.init();
-    defer s.deinit();
-    const h9 = try h9Copy(e, &s);
-    defer gpa.free(h9);
-    const r = try runNoRoot(e, h9, &.{ "--builtin=off", "--rc", "echo x" });
-    defer r.deinit();
-    try std.testing.expectEqual(125, r.code);
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "no root tree found") != null);
-}
-
-test "--builtin=before runs the box's ls and the root's other commands [builtin-root]" {
+test "--builtin on top of the root stack runs the box's ls and the root's other commands [mounts]" {
     const e = try env(@src());
     try needBuiltin(e);
-    const r = try run(e, &.{ "--builtin=before", "--rc", "cmp -s /bin/ls /bin/9box && echo boxed; test -x /bin/mk && echo mk" });
+    const r = try run(e, &.{ "--dir", e.root, "--builtin=/:b", "--rc", "cmp -s /bin/ls /bin/9box && echo boxed; test -x /bin/mk && echo mk" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("boxed\nmk\n", r.out);
 }
 
-test "--builtin=after leaves the root's ls and fills a missing command [builtin-root]" {
+test "--builtin at the bottom leaves the root's ls and fills a missing command [mounts]" {
     const e = try env(@src());
     try needBuiltin(e);
     const io = std.testing.io;
@@ -7137,7 +7246,7 @@ test "--builtin=after leaves the root's ls and fills a missing command [builtin-
     try std.Io.Dir.copyFile(std.Io.Dir.cwd(), rcmain, s.tmp.dir, "root/rc/lib/rcmain", io, .{});
     const root = try std.fs.path.join(gpa, &.{ s.path, "root" });
     defer gpa.free(root);
-    const r = try runNoRoot(e, e.h9, &.{ "--root", root, "--builtin=after", "--rc", "cmp -s /bin/ls /bin/9box || echo own; echo filled | wc -l" });
+    const r = try runNoRoot(e, e.h9, &.{ "--dir", root, "--builtin", "--rc", "cmp -s /bin/ls /bin/9box || echo own; echo filled | wc -l" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("own\n      1\n", r.out);
@@ -7171,27 +7280,26 @@ test "the built-in root refuses writes and /tmp is writable in memory [builtin-r
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--cwd", s.path, "--write=scope", "--rc", "touch /usr/f >[2]/dev/null || echo refused; echo y >/tmp/f && cat /tmp/f" });
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin", "--cwd", s.path, "--write=scope", "--rc", "touch /usr/f >[2]/dev/null || echo refused; echo y >/tmp/f && cat /tmp/f" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("refused\ny\n", r.out);
 }
 
-test "--print shows the #Hroot bind as builtin [builtin-root]" {
+test "--print shows the #Hroot member as builtin [mounts]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--cwd", s.path, "--print", "--rc", "echo" });
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin", "--cwd", s.path, "--print", "--rc", "echo" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
-    const at = std.mem.indexOf(u8, r.out, "  bind '#Hroot' / ") orelse return error.NoBind;
+    const at = std.mem.indexOf(u8, r.out, "  bind -ra '#Hroot' '#Oroot' ") orelse return error.NoBind;
     const line = r.out[at..std.mem.indexOfScalarPos(u8, r.out, at, '\n').?];
     try std.testing.expect(std.mem.indexOf(u8, line, " builtin  # h9 ") != null);
-    const b = try run(e, &.{ "--builtin=before", "--print", "--rc", "echo" });
+    const b = try run(e, &.{ "--dir", e.root, "--builtin=/:b", "--print", "--rc", "echo" });
     defer b.deinit();
-    var want: [64]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, b.out, try std.fmt.bufPrint(&want, "  bind '#Hroot/{s}/bin' /bin ", .{testArch(e)})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, b.out, "  bind -rb '#Hroot' '#Oroot' ") != null);
 }
 
 test "--ns replays a plan printed over the built-in root [builtin-root]" {
@@ -7200,7 +7308,7 @@ test "--ns replays a plan printed over the built-in root [builtin-root]" {
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
-    const p = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--cwd", s.path, "--print", "--rc", "echo" });
+    const p = try runNoRoot(e, e.h9, &.{ "--builtin", "--cwd", s.path, "--print", "--rc", "echo" });
     defer p.deinit();
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
@@ -7217,7 +7325,7 @@ test "--check passes with only the built-in root [builtin-root]" {
     // --check runs the host's architecture.
     if (e.arch != null) return error.SkipZigTest;
     try needBuiltin(e);
-    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "--check" });
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin", "--check" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\n", .{r.out});
     try std.testing.expectEqual(0, r.code);
@@ -7225,7 +7333,7 @@ test "--check passes with only the built-in root [builtin-root]" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "ok, /bin/echo runs") != null);
 }
 
-test "a Linux root alone gets the built-in root as its /9, and --builtin=off leaves it out [builtin-root]" {
+test "a Linux root alone gets the built-in root as its /9, and a --dir on / replaces it [mounts]" {
     const e = try env(@src());
     try needBuiltin(e);
     var s: Scratch = undefined;
@@ -7236,11 +7344,13 @@ test "a Linux root alone gets the built-in root as its /9, and --builtin=off lea
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lin/etc/os-release", .data = "ID=test\n" });
     const lin = try std.fs.path.join(gpa, &.{ s.path, "lin" });
     defer gpa.free(lin);
-    const r = try runNoRoot(e, e.h9, &.{ "--root", lin, "--cwd", s.path, "--rc", "test -x '#\u{3bb}/9/bin/ls' && echo boxed" });
+    var lb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const lm = try std.fmt.bufPrint(&lb, "{s}:#L", .{lin});
+    const r = try runNoRoot(e, e.h9, &.{ "--dir", lm, "--cwd", s.path, "--rc", "test -x '#L/9/bin/ls' && echo boxed" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("boxed\n", r.out);
-    const off = try runNoRoot(e, e.h9, &.{ "--root", lin, "--cwd", s.path, "--builtin=off", "--print", "--rc", "echo" });
+    const off = try runNoRoot(e, e.h9, &.{ "--dir", lm, "--dir", e.root, "--cwd", s.path, "--print", "--rc", "echo" });
     defer off.deinit();
     try std.testing.expect(std.mem.indexOf(u8, off.out, "#Hroot") == null);
 }
@@ -7248,10 +7358,10 @@ test "a Linux root alone gets the built-in root as its /9, and --builtin=off lea
 test "a missing command names the built-in root in its error [builtin-root]" {
     const e = try env(@src());
     try needBuiltin(e);
-    const r = try runNoRoot(e, e.h9, &.{ "--builtin=only", "mk" });
+    const r = try runNoRoot(e, e.h9, &.{ "--builtin", "mk" });
     defer r.deinit();
     try std.testing.expectEqual(127, r.code);
-    try std.testing.expect(std.mem.indexOf(u8, r.err, "not in the built-in root; pass --root or set H9ROOT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err, "not in the built-in root; pass --dir or --url, or set H9ROOT") != null);
 }
 
 // Serving the namespace (design/epoch-0/serve.md). A server is h9 on a
@@ -7338,7 +7448,8 @@ fn runClient(e: Env, root: []const u8, args: []const []const u8) !Result {
     for ([_][]const u8{ "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy" }) |k| _ = map.swapRemove(k);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e), "--root", root });
+    try argv.appendSlice(gpa, &.{ e.h9, "--backend", firstBackend(e) });
+    try argv.appendSlice(gpa, &rootFlag(root));
     if (e.arch) |a| try argv.appendSlice(gpa, &.{ "--arch", a });
     try argv.appendSlice(gpa, args);
     const r = try runProcessWith(argv.items, null, &map, 60_000);
@@ -7356,7 +7467,10 @@ fn runClient(e: Env, root: []const u8, args: []const []const u8) !Result {
 /// A client on `addr` running `cmd` with the served tree at /mnt/temp.
 fn runServed(e: Env, addr: []const u8, cmd: []const u8) !Result {
     var buf: [1024]u8 = undefined;
-    return runClient(e, addr, &.{ "--rc", try std.fmt.bufPrint(&buf, "mount /srv/root /mnt/temp && {{ {s} }}", .{cmd}) });
+    var ub: [std.Io.Dir.max_path_bytes + 32]u8 = undefined;
+    var db: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
+    const srv = try std.fmt.bufPrint(&ub, "{s}:/srv/served", .{dialUrl(&db, addr)});
+    return runClient(e, e.root, &.{ "--url", srv, "--rc", try std.fmt.bufPrint(&buf, "mount /srv/served /mnt/temp && {{ {s} }}", .{cmd}) });
 }
 
 /// Checks that a client on `addr` reads the server's marker at `path`.
@@ -8205,7 +8319,7 @@ test "a 9P2000.L root from the in-memory server lists, reads, writes and removes
     try d.start(std.testing.io, dotlRootTree);
     defer d.finish(std.testing.io);
     const r = try run(e, &.{
-        "--root", d.dial(), "--write=scope", "--builtin=off", "--rc",
+        "--url", d.url(), "--write=scope", "--rc",
         \\cat /etc/motd /usr/glenda/notes
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\rm /usr/glenda/notes && ls /usr/glenda
@@ -8222,7 +8336,7 @@ test "a 9P2000 root goes through the translator unchanged [dotl]" {
     var srv: RootServer = undefined;
     try srv.start(e);
     defer srv.stop();
-    const r = try run(e, &.{ "--root", srv.dial(), "--rc", "cat /net/dotl/*/status; ls /bin/ls" });
+    const r = try run(e, &.{ "--url", srv.url(), "--rc", "cat /net/dotl/*/status; ls /bin/ls" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -8286,7 +8400,7 @@ test "a .L.Z root from the in-memory server survives it dropping the connection 
     d.lock().drop_after_write = 0;
     d.unlock();
     const r = try run(e, &.{
-        "--root", d.dial(), "--write=scope", "--builtin=off", "--rc",
+        "--url", d.url(), "--write=scope", "--rc",
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\cat /net/dotl/*/status
     });
@@ -8342,7 +8456,7 @@ test "a .L.Z unix socket root survives the server restarting mid-write [dotl]" {
     const sock = try scratchPath(&s, &pb, "fs.sock");
     try relay.start(sock, d.port());
     const r = try run(e, &.{
-        "--root", try std.fmt.bufPrint(&ab, "unix!{s}", .{sock}), "--write=scope", "--builtin=off", "--rc",
+        "--url", try std.fmt.bufPrint(&ab, "unix://{s}", .{sock}), "--write=scope", "--rc",
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\cat /net/dotl/*/status
     });
@@ -8393,6 +8507,7 @@ const Diod = struct {
     port: u16,
     s: Scratch,
     dial_buf: [64]u8 = undefined,
+    url_buf: [64]u8 = undefined,
     allow_buf: [64]u8 = undefined,
 
     /// Runs `setup`, an sh script, in a new scratch directory, and
@@ -8444,6 +8559,11 @@ const Diod = struct {
 
     fn dial(d: *Diod) []const u8 {
         return std.fmt.bufPrint(&d.dial_buf, "tcp!127.0.0.1!{d}", .{d.port}) catch unreachable;
+    }
+
+    /// The server as a --url (design/mounts.md).
+    fn url(d: *Diod) []const u8 {
+        return std.fmt.bufPrint(&d.url_buf, "tcp://127.0.0.1:{d}", .{d.port}) catch unreachable;
     }
 
     fn allow(d: *Diod) []const u8 {
@@ -8576,8 +8696,10 @@ test "a 9P2000.L root lists, reads, writes and removes [dotl]" {
     var tree_buf: [2048]u8 = undefined;
     try d.start(try diodRootTree(&tree_buf, e));
     defer d.stop();
+    var ub: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    var ob: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
     const r = try run(e, &.{
-        "--root", d.dial(), "--root-spec", d.s.path, "--write=scope", "--builtin=off", "--rc",
+        "--url", urlOpts(&ub, d.url(), try std.fmt.bufPrint(&ob, "spec={s}", .{d.s.path})), "--write=scope", "--rc",
         \\cat /etc/motd /usr/glenda/notes
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\rm /usr/glenda/notes && ls /usr/glenda
@@ -8597,7 +8719,9 @@ test "a .L root attaches as the host uid, not 0, without --user-map [dotl]" {
     defer d.stop();
     // diod as root creates files as the uid that attached; as anyone
     // else, it takes only the host uid.
-    const r = try run(e, &.{ "--root", d.dial(), "--root-spec", d.s.path, "--write=scope", "--builtin=off", "--rc", "echo x >/usr/glenda/f" });
+    var ub: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    var ob: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    const r = try run(e, &.{ "--url", urlOpts(&ub, d.url(), try std.fmt.bufPrint(&ob, "spec={s}", .{d.s.path})), "--write=scope", "--rc", "echo x >/usr/glenda/f" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -8644,6 +8768,7 @@ const ZeroFs = struct {
     s: Scratch,
     relay: CutRelay = undefined,
     dial_buf: [64]u8 = undefined,
+    url_buf: [64]u8 = undefined,
     allow_buf: [64]u8 = undefined,
 
     fn start(z: *ZeroFs) !void {
@@ -8690,6 +8815,11 @@ const ZeroFs = struct {
     /// The relay's address, which h9 dials.
     fn dial(z: *ZeroFs) []const u8 {
         return std.fmt.bufPrint(&z.dial_buf, "tcp!127.0.0.1!{d}", .{z.relay.listen_port}) catch unreachable;
+    }
+
+    /// The server as a --url (design/mounts.md).
+    fn url(z: *ZeroFs) []const u8 {
+        return std.fmt.bufPrint(&z.url_buf, "tcp://127.0.0.1:{d}", .{z.relay.listen_port}) catch unreachable;
     }
 
     fn allow(z: *ZeroFs) []const u8 {
@@ -8842,7 +8972,7 @@ test "a .L.Z root survives the server restarting mid-write [dotl]" {
     try std.testing.expectEqual(0, fill.code);
     z.relay.arm(1);
     const r = try run(e, &.{
-        "--root", z.dial(), "--write=scope", "--builtin=off", "--rc",
+        "--url", z.url(), "--write=scope", "--rc",
         \\{ echo one; echo two; echo three } >/usr/glenda/log
         \\cat /usr/glenda/log
         \\cat /net/dotl/*/status
@@ -8974,7 +9104,7 @@ test "a --cred helper's headers are sent with the root's handshake [credential-h
     try w.start(e, .{ .require_header = "Authorization: Bearer t1" });
     defer w.stop();
     var cb: [256]u8 = undefined;
-    try expectSameAsHostWith(e, w.url(), &.{ "--cred", try credArg(&cb, "127.0.0.1", tok) }, &.{ "/bin/ls", "/" });
+    try expectSameAsHostFlags(e, w.url(), "", &.{ "--cred", try credArg(&cb, "127.0.0.1", tok) }, &.{ "/bin/ls", "/" });
     try std.testing.expectEqualStrings("two", w.relay.header("X-Extra") orelse "");
     var lb: [1024]u8 = undefined;
     var want: [128]u8 = undefined;
@@ -8995,7 +9125,7 @@ test "only the longest matching pattern's helper runs [credential-helpers]" {
     defer w.stop();
     var b1: [256]u8 = undefined;
     var b2: [256]u8 = undefined;
-    try expectSameAsHostWith(e, w.url(), &.{ "--cred", try credArg(&b1, "127.0.0.1", broad), "--cred", try credArg(&b2, "127.0.0.1/9p", narrow) }, &.{ "/bin/ls", "/" });
+    try expectSameAsHostFlags(e, w.url(), "", &.{ "--cred", try credArg(&b1, "127.0.0.1", broad), "--cred", try credArg(&b2, "127.0.0.1/9p", narrow) }, &.{ "/bin/ls", "/" });
     var lb: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("", credLog(&s, "broad", &lb));
 }
@@ -9043,7 +9173,7 @@ test "a 401 reruns the helper once with the response on stdin [credential-helper
     defer w.stop();
     var cb: [256]u8 = undefined;
     const cred = try credArg(&cb, "127.0.0.1", tok);
-    try expectSameAsHostWith(e, w.url(), &.{ "--cred", cred }, &.{ "/bin/ls", "/" });
+    try expectSameAsHostFlags(e, w.url(), "", &.{ "--cred", cred }, &.{ "/bin/ls", "/" });
     var lb: [2048]u8 = undefined;
     var want: [256]u8 = undefined;
     // On the web host the failed response is only why the open failed.
@@ -9053,7 +9183,7 @@ test "a 401 reruns the helper once with the response on stdin [credential-helper
     // A server that refuses the fresh one too: one retry, then 125.
     w.relay.opts.require_header = "Authorization: Bearer never";
     try s.tmp.dir.deleteFile(std.testing.io, "tok.log");
-    const r = try run(e, &.{ "--root", w.url(), "--cred", cred, "/bin/echo" });
+    const r = try run(e, &.{ "--url", w.url(), "--cred", cred, "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want2: [256]u8 = undefined;
@@ -9074,7 +9204,7 @@ test "a helper failure before start exits 125 with its stderr [credential-helper
     try w.start(e, .{});
     defer w.stop();
     var cb: [256]u8 = undefined;
-    const r = try run(e, &.{ "--root", w.url(), "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/echo" });
+    const r = try run(e, &.{ "--url", w.url(), "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     var want: [256]u8 = undefined;
@@ -9094,14 +9224,14 @@ test "a helper may not set reserved handshake headers [credential-helpers]" {
     try w.start(e, .{});
     defer w.stop();
     var cb: [256]u8 = undefined;
-    const r = try run(e, &.{ "--root", w.url(), "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/echo" });
+    const r = try run(e, &.{ "--url", w.url(), "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/echo" });
     defer r.deinit();
     try std.testing.expectEqual(125, r.code);
     try expectIn(r.err, "credential helper tok: Sec-WebSocket-Protocol changes the handshake");
     try std.testing.expect(std.mem.indexOf(u8, r.err, "s3cret") == null);
 }
 
-test "--root-header wins over a helper's header of the same name [credential-helpers]" {
+test "header= wins over a helper's header of the same name [credential-helpers]" {
     const e = try env(@src());
     var s: Scratch = undefined;
     try s.init();
@@ -9112,7 +9242,7 @@ test "--root-header wins over a helper's header of the same name [credential-hel
     try w.start(e, .{ .require_header = "Authorization: Bearer mine" });
     defer w.stop();
     var cb: [256]u8 = undefined;
-    try expectSameAsHostWith(e, w.url(), &.{ "--cred", try credArg(&cb, "127.0.0.1", tok), "--root-header", "authorization: Bearer mine" }, &.{ "/bin/ls", "/" });
+    try expectSameAsHostFlags(e, w.url(), "header=authorization: Bearer mine", &.{ "--cred", try credArg(&cb, "127.0.0.1", tok) }, &.{ "/bin/ls", "/" });
     try std.testing.expectEqualStrings("two", w.relay.header("X-Extra") orelse "");
 }
 
@@ -9145,7 +9275,7 @@ test "--print shows the pattern and command, not headers [credential-helpers]" {
     defer gpa.free(tok);
     var cb: [256]u8 = undefined;
     var want: [256]u8 = undefined;
-    const r = try run(e, &.{ "--root", "ws://127.0.0.1:1/9p", "--cred", try credArg(&cb, "127.0.0.1", tok), "--cred", "other.example=never", "--print", "ls" });
+    const r = try run(e, &.{ "--url", "ws://127.0.0.1:1/9p", "--cred", try credArg(&cb, "127.0.0.1", tok), "--cred", "other.example=never", "--print", "ls" });
     defer r.deinit();
     try std.testing.expectEqual(0, r.code);
     try expectIn(r.out, try std.fmt.bufPrint(&want, "# ws://127.0.0.1:1/9p  cred 127.0.0.1={s}", .{tok}));

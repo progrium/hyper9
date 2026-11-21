@@ -87,7 +87,7 @@ echo "$ALPINE_LAYERS" | while read -r arch sha; do
 			--cache-dir "$L/cache/apk-$arch" -U add python3 sqlite git
 	else
 		printf '%s/main\n%s/community\n' "$REPO" "$REPO" >"$root/etc/apk/repositories"
-		"${H9:-h9}" --arch "$arch" --root "$root" --writable "$root" --net outbound \
+		"${H9:-h9}" --arch "$arch" --dir "$root:#L:rw" --net outbound \
 			apk add --no-cache --quiet python3 sqlite git
 	fi
 	mkdir -p "$root/w"

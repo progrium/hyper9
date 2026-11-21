@@ -1791,7 +1791,7 @@ unstep(Unc *u, Chan *nc, char *name)
 	int hid[Maxmembers], hcr[Maxmembers], hroot[Maxmembers], nh, i, j, k, decided;
 	Chan *got[Maxmembers];
 	int gid[Maxmembers], gcr[Maxmembers], ng;
-	char *np, *dir, *s;
+	char *np, *dir, *s, why[ERRMAX];
 
 	if(strcmp(name, ".") == 0)
 		return 1;
@@ -1854,16 +1854,22 @@ unstep(Unc *u, Chan *nc, char *name)
 
 	ng = 0;
 	decided = 0;
+	why[0] = '\0';
 	for(k = 0; k < nh; k++){
 		c = have[k];
 		have[k] = nil;
 		/* A member rooted at np is its own root, not walked. */
 		if(!hroot[k]){
 			Chan *w;
+			up->errstr[0] = '\0';
 			w = lowerwalk1(c, name);
 			cclose(c);
-			if(w == nil)
+			if(w == nil){
+				/* The first member's reason, such as a link loop. */
+				if(why[0] == '\0')
+					utfecpy(why, why+sizeof why, up->errstr);
 				continue;
+			}
 			c = w;
 		}
 		if(!decided){
@@ -1884,7 +1890,7 @@ unstep(Unc *u, Chan *nc, char *name)
 			cclose(have[k]);
 	if(ng == 0){
 		free(np);
-		kstrcpy(up->errstr, Enonexist, ERRMAX);
+		kstrcpy(up->errstr, why[0] != '\0' ? why : Enonexist, ERRMAX);
 		return 0;
 	}
 	unclear(u);
@@ -1926,13 +1932,14 @@ unwalk(Chan *c, Chan *nc, char **name, int nname)
 	in->ref++;
 	unlock(&instlock);
 	if(waserror()){
+		/* A member's error, such as a link loop, is the walk's. */
 		if(nu != nil)
 			uncfree(nu);
 		else
 			instdecref(in);
 		cclose(nc);
 		free(wq);
-		return nil;
+		nexterror();
 	}
 	nu = uncnew(in, u->path);
 	for(i = 0; i < u->n; i++){
@@ -2552,25 +2559,21 @@ unerrswap(void)
  * pinned until it's attached, h9_overlay_unpin drops a named one, or
  * h9_overlay_drop an unnamed one.
  */
-int
-h9_overlay_union(char *spec, char *path, char *at, int flags)
+/* Adds the directory c to the union spec names; see h9_overlay_union. */
+static int
+unionchan(char *spec, Chan *c, char *at, int flags)
 {
 	Inst *volatile in;
-	Chan *volatile c;
 	char *e;
 	long id;
 
-	c = nil;
 	in = nil;
 	if(waserror()){
-		if(c != nil)
-			cclose(c);
 		unerrswap();
 		return -1;
 	}
 	while(*at == '/')
 		at++;
-	c = namec(path, Aaccess, 0, 0);
 	if(spec[0] == '\0')
 		in = unnew(nil);
 	else if(unvalidname(spec)){
@@ -2592,9 +2595,57 @@ h9_overlay_union(char *spec, char *path, char *at, int flags)
 			error(Enonexist);
 	}
 	unaddmember(in, c, at, flags & Uafter, flags & Ucreate);
-	cclose(c);
 	poperror();
 	return in->id;
+}
+
+int
+h9_overlay_union(char *spec, char *path, char *at, int flags)
+{
+	Chan *c;
+	int id;
+
+	if(waserror()){
+		unerrswap();
+		return -1;
+	}
+	c = namec(path, Aaccess, 0, 0);
+	poperror();
+	id = unionchan(spec, c, at, flags);
+	cclose(c);
+	return id;
+}
+
+/*
+ * As h9_overlay_union, with the member a 9P connection: the server on fd
+ * (in the caller's fd table) attached with aname, as mount(2) would. fd
+ * is left open.
+ */
+int
+h9_overlay_unionmount(char *spec, int fd, char *aname, char *at, int flags)
+{
+	Chan *volatile bc, *volatile c;
+	int id;
+
+	bc = nil;
+	c = nil;
+	if(waserror()){
+		if(bc != nil)
+			cclose(bc);
+		if(c != nil)
+			cclose(c);
+		unerrswap();
+		return -1;
+	}
+	bc = fdtochan(fd, ORDWR, 0, 1);
+	c = mntattach(bc, nil, aname, 0);
+	cclose(bc);
+	bc = nil;
+	poperror();
+	/* Through a path, as h9_overlay_union takes one: the chan's own. */
+	id = unionchan(spec, c, at, flags);
+	cclose(c);
+	return id;
 }
 
 /*
@@ -2754,7 +2805,7 @@ ovattach(char *spec)
 		return c;
 	}
 	c = devattach('O', spec);
-	c->dev = id;
+	c->dev = in->id;
 	c->qid = in->root->qid;
 	if(waserror()){
 		cclose(c);

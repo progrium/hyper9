@@ -360,7 +360,7 @@ const Job = struct {
 
 ```
 $ zig build embed -Demu=unicorn
-$ zig-out/bin/embed -j 3 --root .local/9front/root rc -c 'echo $machine'
+$ zig-out/bin/embed -j 3 --dir .local/9front/root rc -c 'echo $machine'
 machine 0 (hvf): exited ""
   0
 machine 1 (emu): exited ""

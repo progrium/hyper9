@@ -189,8 +189,9 @@ if (!haveJSPI) {
     render();
     // The archive keeps no links, so busybox makes its applets' links at
     // the start, in the root's overlay.
-    // The 9front layer is the machine's 9front root, a second --root.
-    const argv = linux ? [...(nine ? ['--root', '/9'] : []), '/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
+    // The tree is the Linux root, and the 9front layer at /9 is the
+    // machine's 9front root; without it, the built-in root is.
+    const argv = linux ? ['--dir', '/:#L', ...(nine ? ['--dir', '/9'] : []), '/bin/busybox', 'sh', '-c', '/bin/busybox --install -s 2>/dev/null; cd /root; exec sh -i'] : ['rc', '-i'];
     const code = await m.run(argv).catch((e) => { print(`\n${e.message}\n`); return null; });
     if (code !== null) print(`\n[h9 exited ${code}]\n`);
   }

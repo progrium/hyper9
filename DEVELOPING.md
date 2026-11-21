@@ -120,7 +120,7 @@ commands copied from the root, to measure the box against
 It needs `/sys/src`, from `zig build mkroot -- --src` or the checkout
 `fetch.sh` makes, and takes a few minutes on the emulator. The tree is
 `9box`, its links, `rcmain`, and the mount points, and runs with
-`h9 --root .local/9front/slim-11952-arm64`. The `[64]` cases use it, and skip
+`h9 --dir .local/9front/slim-11952-arm64`. The `[64]` cases use it, and skip
 without it.
 
 `zig build` embeds the same trees as h9's
@@ -205,8 +205,8 @@ Integration (Chrome 137 or later, Node 24 or later). With a 386 root tree
 root archive, `root.h9a`, from the paths in `src/web/root.list`.
 
 ```sh
-zig-out/web/h9-node --root .local/9front/root386 --rc 'ls /bin | wc -l'   # the CLI under Node
-zig-out/web/h9-node --root ws://localhost:8080/9p ls /   # over a WebSocket 9P server
+zig-out/web/h9-node --dir .local/9front/root386 --rc 'ls /bin | wc -l'   # the CLI under Node
+zig-out/web/h9-node --url ws://localhost:8080/9p ls /    # over a WebSocket 9P server
 (cd zig-out/web && python3 -m http.server)   # then open http://localhost:8000 for an interactive rc
 zig build integration -Dweb -Droot=$PWD/.local/9front/root386
 ```
@@ -229,7 +229,7 @@ integration run's WebSocket cases need `-Demu=unicorn` too (with
 
 The web host's only network is WebSockets: `#I` is masked, and `--net`
 (outbound by default) binds `/net/ws` alone at `/net`. The browser does the
-handshake, TLS, and proxies, so `--root-header`, `--root-ca`, and `header` in
+handshake, TLS, and proxies, so a `--url`'s `header=` and `ca=`, and `header` in
 `ctl` are errors there, and `--net-allow` can't check what a name resolves
 to. A page embeds a machine with
 `createMachine({ root, memory, policy, terminal })` from `h9-web.js`, where

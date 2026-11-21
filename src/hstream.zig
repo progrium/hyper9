@@ -387,7 +387,7 @@ pub const Stream = struct {
     url: []u8 = &.{},
     headers: std.ArrayList([]u8) = .empty,
     protocols: std.ArrayList([]u8) = .empty,
-    /// A host-made stream's `--root-ca` file and proxy URL, if any.
+    /// A host-made stream's `ca=` file and proxy URL, if any.
     ca_file: ?[]u8 = null,
     proxy: ?[]u8 = null,
     /// Allowed addresses, for a guest connect, checked before the thread
@@ -969,7 +969,7 @@ fn run(s: *Stream) void {
             else
                 s.failLocked("server selected a subprotocol that wasn't offered", .{}),
             error.BadProxy => s.failLocked("bad proxy URL", .{}),
-            error.BadCa => s.failLocked("--root-ca: can't read the certificates", .{}),
+            error.BadCa => s.failLocked("ca=: can't read the certificates", .{}),
             error.Bundle => s.failLocked("can't load the host's certificate bundle", .{}),
             else => s.failLocked("{s}", .{errName(e)}),
         } else s.failLocked("hangup", .{});

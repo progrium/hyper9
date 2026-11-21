@@ -39,6 +39,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (web) web_pwd = init.environ_map.get("PWD") orelse "/";
 
     const cfg = cli.parse(arena, args) catch {
+        if (cli.why.len > 0) std.debug.print("h9: {s}\n", .{cli.why});
         std.debug.print(cli.usage, .{});
         return 2;
     };
@@ -57,34 +58,31 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         },
         .check => {
-            const root_arg = rootArg(arena, io, cfg, cfg.root2 orelse cfg.root, init.environ_map);
-            var root_err: []const u8 = "";
-            const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| blk: {
-                root_err = rootError(e);
-                break :blk null;
-            } else null;
-            const wo = wsOptions(arena, io, cfg, root, init.environ_map) catch |e| return wsExit(e);
+            var root_err: ?[]const u8 = null;
+            const ms = resolveMounts(arena, io, cfg, init.environ_map) catch |e| switch (e) {
+                error.Usage => return 2,
+                error.NotFound => blk: {
+                    root_err = "not found";
+                    break :blk &.{};
+                },
+                error.OutOfMemory => return exit_failed,
+            };
             var buf: [1024]u8 = undefined;
             var w = std.Io.File.stdout().writerStreaming(io, &buf);
             const code = tools.check(init.gpa, io, &w.interface, .{
                 .backend = cfg.backend,
                 .arch = cfg.arch,
                 .memory = cfg.memory,
-                .builtin = builtinFor(cfg.builtin, root_arg != null),
-                .root_arg = root_arg,
-                .root = root,
+                .mounts = ms,
+                .root_arg = rootShown(cfg, ms, init.environ_map),
                 .root_err = root_err,
-                .root_spec = cfg.root_spec,
-                .root_user = cfg.root_user,
-                .root_headers = wo.headers,
-                .root_ca = wo.ca,
-                .proxy = wo.proxy,
-                .cred_helpers = wo.cred,
+                .proxy = proxyFrom(init.environ_map),
+                .cred_helpers = credHelpers(arena, cfg, init.environ_map) catch |e| return if (e == error.Usage) 2 else exit_failed,
                 .index = switch (cfg.index) {
                     .auto => .auto,
                     .none => .none,
                 },
-                .root_index = rootIndexArg(cfg.root_index),
+                .root_index = rootIndexArg(rootIndexOf(ms)),
                 .index_cache = cfg.index_cache orelse h9.rootindex.cache.Cache.defaultDir(arena, init.environ_map),
             }) catch exit_failed;
             w.interface.flush() catch {};
@@ -166,32 +164,28 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .guest => .{ .guest = prog_arg },
     };
 
-    // --root takes a 9front or a Linux tree, or one of each, and h9 tells
-    // them apart (design/epoch-0/linux-personality.md, "CLI and API").
-    var nine_arg: ?[]const u8 = null;
-    var linux_root: ?[]const u8 = null;
-    for ([_]?[]const u8{ cfg.root, cfg.root2 }) |given| {
-        const r = given orelse continue;
-        if (linuxTree(arena, io, r)) |real| {
-            linux_root = real;
-        } else nine_arg = r; // a later 9front root replaces an earlier one, as before
-    }
-    const root_arg = rootArg(arena, io, cfg, nine_arg, init.environ_map);
-    const root = if (root_arg) |r| resolveRoot(arena, io, r) catch |e| {
-        std.debug.print("h9: root {s}: {s}\n", .{ r, rootError(e) });
-        return exit_failed;
-    } else null;
-    // Only a 9front root counts for `auto`: a Linux root alone gets the
-    // built-in root as its /9, which --builtin=off leaves out.
-    const builtin_root = builtinFor(cfg.builtin, root != null);
-    // Without a root tree only a host a.out can run; anything resolved in
-    // the guest namespace would fail later as a misleading "not found".
-    if (root == null and linux_root == null and builtin_root == .off and (prog == .guest or cfg.ns.len > 0)) {
-        std.debug.print("h9: no root tree found; pass --root or set H9ROOT\n", .{});
-        return exit_failed;
-    }
-    const wo = wsOptions(arena, io, cfg, root, init.environ_map) catch |e| return wsExit(e);
-    const so = serveOptions(arena, io, cfg) catch |e| return wsExit(e);
+    const mounts = resolveMounts(arena, io, cfg, init.environ_map) catch |e| return switch (e) {
+        error.Usage => 2,
+        error.NotFound, error.OutOfMemory => exit_failed,
+    };
+    // Only the built-in root on `/`: a missing command's fix is the full
+    // tree (design/builtin-root.md).
+    const builtin_only = blk: {
+        var saw = false;
+        for (mounts) |m| if (m.stack()) |st| if (st[0] == .root) {
+            if (m.kind != .builtin) break :blk false;
+            saw = true;
+        };
+        break :blk saw;
+    };
+    // A 9P server on `/` keeps writes under --write=scope.
+    const ninep_root = for (mounts) |m| {
+        if (m.stack()) |st| if (st[0] == .root and (m.kind == .url or m.kind == .fd)) break true;
+    } else false;
+    const so = serveOptions(arena, io, cfg) catch |e| return switch (e) {
+        error.Usage => 2,
+        error.NotFound, error.OutOfMemory => exit_failed,
+    };
     // H9_TEST_KEEPALIVE (milliseconds) shortens the WebSocket keepalive's
     // 30 s idle time, so the integration case that waits out a ping and a
     // missed pong takes seconds rather than two minutes. Tests only.
@@ -230,32 +224,25 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .cwd_writable = if (cfg.sandbox != null) true else null,
         .host_fs = cfg.host_fs,
     };
-    const base: h9.Machine.Options = .{
+    var base: h9.Machine.Options = .{
         .backend = cfg.backend,
         .arch = arch,
-        .root = root,
-        .root_spec = cfg.root_spec,
-        .root_user = cfg.root_user,
-        .root_headers = wo.headers,
-        .root_ca = wo.ca,
-        .cred_helpers = wo.cred,
-        .root_contained = cfg.root_contained,
+        .mounts = mounts,
+        .binds = cfg.binds,
+        .cred_helpers = credHelpers(arena, cfg, init.environ_map) catch |e| return if (e == error.Usage) 2 else exit_failed,
         .index = switch (cfg.index) {
             .auto => .auto,
             .none => .none,
         },
-        .root_index = rootIndexArg(cfg.root_index),
+        .root_index = rootIndexArg(rootIndexOf(mounts)),
         .index_cache = cfg.index_cache orelse h9.rootindex.cache.Cache.defaultDir(arena, init.environ_map),
-        .root_index_counts = if (cfg.print) rootIndexCounts(arena, io, cfg.root_index) else null,
+        .root_index_counts = if (cfg.print) rootIndexCounts(arena, io, rootIndexOf(mounts)) else null,
         .verbose = cfg.verbose,
-        .linux_root = linux_root,
-        .nameservers = if (linux_root != null) try hostNameservers(arena, io) else &.{},
         .nine_prog = cfg.rc != null,
-        .proxy = wo.proxy,
+        .proxy = if (web) null else proxyFrom(init.environ_map),
         .cwd = cwd,
         .policy = pol,
         .guest_tools = cfg.guest_tools,
-        .builtin = builtin_root,
         .gfx = cfg.gfx,
         .serve = so.listens,
         .serve_root = cfg.serve_root orelse "/",
@@ -266,6 +253,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         .stdio = undefined,
     };
 
+    if (h9.Machine.hasLinux(base)) base.nameservers = try hostNameservers(arena, io);
     var conflict: []const u8 = "";
     var plan = h9.Machine.compilePlan(arena, base, &conflict) catch |err| switch (err) {
         error.Conflict => {
@@ -385,16 +373,12 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             return exit_failed;
         }
         // Over the built-in root alone, the fix for a missing command is
-        // the full tree (design/epoch-0/builtin-root.md).
-        const hint = if (err == error.NotFound and prog == .guest and root == null and builtin_root != .off)
-            " (not in the built-in root; pass --root or set H9ROOT for the full 9front tree)"
+        // the full tree (design/builtin-root.md).
+        const hint = if (err == error.NotFound and prog == .guest and builtin_only)
+            " (not in the built-in root; pass --dir or --url, or set H9ROOT, for the full 9front tree)"
         else
             "";
         std.debug.print("h9: {s}: {s}{s}\n", .{ prog_arg, why, hint });
-        // A schemeless root's errors name its URL; say how h9 got there.
-        if (err == error.NamespaceFailed and root != null and root.? == .ws and !std.mem.eql(u8, root.?.ws, root_arg.?)) {
-            std.debug.print("h9: root {f}: no such path, so h9 read it as {f}\n", .{ h9.ws.Url.elide(root_arg.?), h9.ws.Url.elide(root.?.ws) });
-        }
         return switch (err) {
             error.NotFound => exit_not_found,
             error.NotExecutable => exit_not_executable,
@@ -407,7 +391,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
     // Only on a terminal: scripts rarely have one (design/epoch-0/overlay.md).
     if (machine.root_changes.changed and (std.Io.File.stderr().isTty(io) catch false)) {
         var nb: [512]u8 = undefined;
-        std.debug.print("{s}\n", .{cli.discardNotice(&nb, &machine.root_changes, root != null and root.? != .dir)});
+        std.debug.print("{s}\n", .{cli.discardNotice(&nb, &machine.root_changes, ninep_root)});
     }
     switch (status) {
         .exited => |msg| {
@@ -465,35 +449,102 @@ fn realPath(io: std.Io, arena: std.mem.Allocator, p: []const u8) ![]u8 {
     return path;
 }
 
-/// The root as given or found: --root, $H9ROOT, then the development
-/// tree. `--builtin=only` skips the last two (design/epoch-0/builtin-root.md);
-/// --root with it is a usage error.
-fn rootArg(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, given: ?[]const u8, env: *const std.process.Environ.Map) ?[]const u8 {
-    if (cfg.builtin == .only) return null;
-    return given orelse env.get("H9ROOT") orelse defaultRoot(arena, io);
+const MountError = error{ Usage, NotFound, OutOfMemory };
+
+/// The mount flags, resolved for the machine (design/mounts.md): a
+/// --dir's or --archive's host path made absolute, with symlinks
+/// resolved; a URL's `header=@FILE` read and every header checked; and
+/// `ca=` resolved. With nothing on `/`, `$H9ROOT` (a --url if it has
+/// `://`, and a --dir otherwise) and then the built-in root go there.
+fn resolveMounts(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, env: *const std.process.Environ.Map) MountError![]const h9.Machine.Mount {
+    var out: std.ArrayList(h9.Machine.Mount) = .empty;
+    var on_root = false;
+    for (cfg.mounts) |m| {
+        if (m.stack()) |st| if (st[0] == .root) {
+            on_root = true;
+        };
+        try out.append(arena, try resolveMount(arena, io, m));
+    }
+    if (!on_root) {
+        const m: h9.Machine.Mount = if (env.get("H9ROOT")) |r| blk: {
+            const kind: h9.policy.mount.Kind = if (std.mem.indexOf(u8, r, "://") != null) .url else .dir;
+            var w: []const u8 = "";
+            var m = h9.Machine.Mount.parse(arena, kind, r, &w) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Usage => {
+                    std.debug.print("h9: H9ROOT={s}: {s}\n", .{ r, w });
+                    return error.Usage;
+                },
+            };
+            // $H9ROOT names the root, so it's on `/` whatever it holds.
+            m.dst = "/";
+            break :blk try resolveMount(arena, io, m);
+        } else .{ .kind = .builtin, .order = .after };
+        try out.insert(arena, 0, m);
+    }
+    return out.items;
 }
 
-/// How the built-in root takes part, given --builtin and whether another
-/// root was found: `auto` is `only` without one and `off` with one, and
-/// `before` and `after` without one are `only`.
-fn builtinFor(mode: cli.BuiltinMode, have_root: bool) h9.policy.Builtin {
-    return switch (mode) {
-        .auto => if (have_root) .off else .only,
-        .only => .only,
-        .before => if (have_root) .before else .only,
-        .after => if (have_root) .after else .only,
-        .off => .off,
+fn resolveMount(arena: std.mem.Allocator, io: std.Io, given: h9.Machine.Mount) MountError!h9.Machine.Mount {
+    var m = given;
+    switch (m.kind) {
+        .dir, .archive => {
+            const real = realPath(io, arena, m.src) catch {
+                std.debug.print("h9: {s} {s}: not found\n", .{ m.kind.flag(), m.src });
+                return error.NotFound;
+            };
+            m.src = kernPath(arena, real);
+        },
+        .url => {
+            // The page's (or Node's) WebSocket does the handshake and TLS,
+            // with its own trust and proxy, and can't set headers.
+            if (web and (m.headers.len > 0 or m.ca != null)) {
+                std.debug.print("h9: --url {s}: {s} isn't available on the web host\n", .{ m.src, if (m.ca != null) "ca=" else "header=" });
+                return error.Usage;
+            }
+            var headers: std.ArrayList([]const u8) = .empty;
+            for (m.headers) |h| {
+                if (h[0] == '@') {
+                    const text = std.Io.Dir.cwd().readFileAlloc(io, h[1..], arena, .limited(1 << 20)) catch {
+                        std.debug.print("h9: --url {s}: header={s}: not found\n", .{ m.src, h });
+                        return error.NotFound;
+                    };
+                    var lines = std.mem.splitScalar(u8, text, '\n');
+                    while (lines.next()) |l| {
+                        if (std.mem.trim(u8, l, " \t\r").len == 0) continue;
+                        try headers.append(arena, try checkHeader(m.src, l, h));
+                    }
+                } else try headers.append(arena, try checkHeader(m.src, h, h));
+            }
+            m.headers = headers.items;
+            if (m.ca) |ca| m.ca = realPath(io, arena, ca) catch {
+                std.debug.print("h9: --url {s}: ca={s}: not found\n", .{ m.src, ca });
+                return error.NotFound;
+            };
+        },
+        .builtin, .tmp, .fd => {},
+    }
+    return m;
+}
+
+/// The root as --check names it: the source of the bottom mount on `/`,
+/// or null for the built-in root alone.
+fn rootShown(cfg: cli.Config, resolved: []const h9.Machine.Mount, env: *const std.process.Environ.Map) ?[]const u8 {
+    for (resolved) |m| if (m.stack()) |st| if (st[0] == .root and m.kind != .builtin) return m.src;
+    if (resolved.len == 0) {
+        for (cfg.mounts) |m| if (m.stack()) |st| if (st[0] == .root) return m.src;
+        return env.get("H9ROOT");
+    }
+    return null;
+}
+
+/// The proxy environment, as curl reads it.
+fn proxyFrom(env: *const std.process.Environ.Map) h9.Machine.Proxy {
+    return .{
+        .http = env.get("HTTP_PROXY") orelse env.get("http_proxy"),
+        .https = env.get("HTTPS_PROXY") orelse env.get("https_proxy"),
+        .no_proxy = env.get("NO_PROXY") orelse env.get("no_proxy") orelse "",
     };
-}
-
-/// The default root: .local/9front/root beside the h9 binary's source tree
-/// in development builds (zig-out/bin/h9 -> ../../.local/9front/root).
-fn defaultRoot(arena: std.mem.Allocator, io: std.Io) ?[]const u8 {
-    const exe = std.process.executablePathAlloc(io, arena) catch return null;
-    const dir = std.fs.path.dirname(exe) orelse return null;
-    const root = std.fs.path.join(arena, &.{ dir, "..", "..", ".local", "9front", "root" }) catch return null;
-    std.Io.Dir.cwd().access(io, root, .{}) catch return null;
-    return root;
 }
 
 /// The host's DNS servers, from its /etc/resolv.conf, for a Linux root
@@ -517,74 +568,21 @@ fn hostNameservers(arena: std.mem.Allocator, io: std.Io) error{OutOfMemory}![]co
     return if (out.items.len > 0) out.items else fallback;
 }
 
-const RootError = error{ NotFound, NotDirOrSocket, BadDial, OutOfMemory };
-
-/// The kern path of `arg` if it's a Linux root tree: a host directory
-/// with /etc/os-release or a /lib/ld-* loader, and neither /rc/bin nor a
-/// 9front /$objtype/bin.
-fn linuxTree(arena: std.mem.Allocator, io: std.Io, arg: []const u8) ?[]const u8 {
-    const cwd = std.Io.Dir.cwd();
-    // realPath, as resolveRoot does: WASI has no realpath, and the web
-    // host's root (its archive, at /) can be a Linux tree too.
-    const real = realPath(io, arena, arg) catch return null;
-    var dir = cwd.openDir(io, real, .{ .iterate = true }) catch return null;
-    defer dir.close(io);
-    for ([_][]const u8{ "rc/bin", "arm64/bin", "amd64/bin", "386/bin" }) |p| {
-        if (dir.access(io, p, .{})) |_| return null else |_| {}
-    }
-    if (dir.access(io, "etc/os-release", .{})) |_| return kernPath(arena, real) else |_| {}
-    if (dir.access(io, "usr/lib/os-release", .{})) |_| return kernPath(arena, real) else |_| {}
-    var lib = dir.openDir(io, "lib", .{ .iterate = true }) catch return null;
-    defer lib.close(io);
-    var it = lib.iterate();
-    while (it.next(io) catch null) |e| {
-        if (std.mem.startsWith(u8, e.name, "ld-")) return kernPath(arena, real);
-    }
+/// The `index=` of the first 9P member of `/`, which is the root's
+/// index (design/mount-index.md).
+fn rootIndexOf(mounts: []const h9.Machine.Mount) ?[]const u8 {
+    for (mounts) |m| if (m.kind == .url or m.kind == .fd) if (m.stack()) |st| if (st[0] == .root) return m.index;
     return null;
 }
 
-/// Reads a --root or $H9ROOT value (design/epoch-0/ninep-roots.md): a dial
-/// string, or a host path that's a directory (served through #U, which
-/// takes absolute paths with symlinks resolved) or a unix socket.
-fn resolveRoot(arena: std.mem.Allocator, io: std.Io, arg: []const u8) RootError!h9.Root {
-    switch (try cli.rootArg(arena, arg)) {
-        .tcp => |a| return .{ .tcp = a },
-        .unix => |p| return .{ .unix = p },
-        .ws => |u| return .{ .ws = u },
-        .path => |p| {
-            // A missing path shaped like a URL is one without its scheme
-            // (design/epoch-0/schemeless-roots.md).
-            const real = realPath(io, arena, p) catch {
-                if (try cli.schemelessRoot(arena, p)) |u| return .{ .ws = u };
-                return error.NotFound;
-            };
-            const st = std.Io.Dir.cwd().statFile(io, real, .{}) catch return error.NotFound;
-            return switch (st.kind) {
-                .directory => .{ .dir = kernPath(arena, real) },
-                .unix_domain_socket => .{ .unix = real },
-                else => error.NotDirOrSocket,
-            };
-        },
-    }
-}
-
-fn rootError(err: RootError) []const u8 {
-    return switch (err) {
-        error.NotFound => "not found",
-        error.NotDirOrSocket => "not a directory or socket",
-        error.BadDial => "bad dial string or URL",
-        error.OutOfMemory => "out of memory",
-    };
-}
-
-/// --root-index's value: a URL by its scheme, and otherwise a host file.
+/// An `index=` value: a URL by its scheme, and otherwise a host file.
 fn rootIndexArg(arg: ?[]const u8) ?h9.Machine.RootIndex {
     const a = arg orelse return null;
     if (std.mem.startsWith(u8, a, "https://") or std.mem.startsWith(u8, a, "http://")) return .{ .url = a };
     return .{ .path = a };
 }
 
-/// For --print: a --root-index file's entry and directory counts, or
+/// For --print: an `index=` file's entry and directory counts, or
 /// null for a URL, which --print doesn't fetch, or a file that doesn't
 /// compile.
 fn rootIndexCounts(arena: std.mem.Allocator, io: std.Io, arg: ?[]const u8) @FieldType(h9.Machine.Options, "root_index_counts") {
@@ -599,68 +597,8 @@ fn rootIndexCounts(arena: std.mem.Allocator, io: std.Io, arg: ?[]const u8) @Fiel
     return .{ .entries = ix.n, .dirs = ix.ndirs };
 }
 
-const WsOptions = struct {
-    headers: []const []const u8 = &.{},
-    cred: []const h9.Machine.CredHelper = &.{},
-    ca: ?[]const u8 = null,
-    proxy: h9.Machine.Proxy = .{},
-};
-
 const WsError = error{ Usage, NotFound, OutOfMemory };
 
-/// Reads the WebSocket root's flags (design/epoch-0/websocket-9p.md):
-/// --root-header lines, from @FILE where given, checked; --root-ca,
-/// resolved; and the proxy environment, as curl reads it.
-fn wsOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, root: ?h9.Root, env: *const std.process.Environ.Map) WsError!WsOptions {
-    const url: ?h9.ws.Url = if (root) |r| switch (r) {
-        .ws => |u| h9.ws.Url.parse(u) catch null,
-        else => null,
-    } else null;
-    // The page's (or Node's) WebSocket does the handshake and TLS, with
-    // its own trust and proxy, and can't set headers.
-    if (web and (cfg.root_headers.len > 0 or cfg.root_ca != null)) {
-        std.debug.print("h9: {s} isn't available on the web host\n", .{if (cfg.root_ca != null) "--root-ca" else "--root-header"});
-        return error.Usage;
-    }
-    if (cfg.root_headers.len > 0 and url == null) {
-        std.debug.print("h9: --root-header needs a ws:// or wss:// root\n", .{});
-        return error.Usage;
-    }
-    if (cfg.root_ca != null and (url == null or !url.?.tls)) {
-        std.debug.print("h9: --root-ca needs a wss:// root\n", .{});
-        return error.Usage;
-    }
-    var o: WsOptions = .{};
-    var headers: std.ArrayList([]const u8) = .empty;
-    for (cfg.root_headers) |h| {
-        if (h[0] == '@') {
-            const text = std.Io.Dir.cwd().readFileAlloc(io, h[1..], arena, .limited(1 << 20)) catch {
-                std.debug.print("h9: --root-header {s}: not found\n", .{h});
-                return error.NotFound;
-            };
-            var lines = std.mem.splitScalar(u8, text, '\n');
-            while (lines.next()) |l| {
-                if (std.mem.trim(u8, l, " \t\r").len == 0) continue;
-                try headers.append(arena, try checkHeader(l, h));
-            }
-        } else try headers.append(arena, try checkHeader(h, h));
-    }
-    o.headers = headers.items;
-    o.cred = try credHelpers(arena, cfg, env);
-    if (cfg.root_ca) |ca| {
-        o.ca = realPath(io, arena, ca) catch {
-            std.debug.print("h9: --root-ca {s}: not found\n", .{ca});
-            return error.NotFound;
-        };
-    }
-    if (web) return o;
-    o.proxy = .{
-        .http = env.get("HTTP_PROXY") orelse env.get("http_proxy"),
-        .https = env.get("HTTPS_PROXY") orelse env.get("https_proxy"),
-        .no_proxy = env.get("NO_PROXY") orelse env.get("no_proxy") orelse "",
-    };
-    return o;
-}
 
 /// --cred entries, then $H9CRED's (design/credential-helpers.md).
 /// cli.parse checked --cred's; a bad $H9CRED entry is a usage error.
@@ -710,21 +648,14 @@ fn serveOptions(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config) WsError!S
     return o;
 }
 
-fn checkHeader(line: []const u8, given: []const u8) WsError![]const u8 {
+fn checkHeader(src: []const u8, line: []const u8, given: []const u8) WsError![]const u8 {
     return h9.ws.checkHeader(line) catch |e| {
         const name = h9.ws.headerName(line);
         switch (e) {
-            error.ReservedHeader => std.debug.print("h9: --root-header{s}{s}: {s} changes the handshake\n", .{ if (given[0] == '@') " " else "", if (given[0] == '@') given else "", name }),
-            error.BadHeader => std.debug.print("h9: --root-header{s}{s}: '{s}' isn't a 'Name: value' header\n", .{ if (given[0] == '@') " " else "", if (given[0] == '@') given else "", line }),
+            error.ReservedHeader => std.debug.print("h9: --url {s}: header={s}: {s} changes the handshake\n", .{ src, given, name }),
+            error.BadHeader => std.debug.print("h9: --url {s}: header={s}: '{s}' isn't a 'Name: value' header\n", .{ src, given, line }),
         }
         return error.Usage;
-    };
-}
-
-fn wsExit(e: WsError) u8 {
-    return switch (e) {
-        error.Usage => 2,
-        error.NotFound, error.OutOfMemory => exit_failed,
     };
 }
 

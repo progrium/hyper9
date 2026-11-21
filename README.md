@@ -76,7 +76,7 @@ Run Linux programs, from a single static binary to a whole distribution:
 
 ```sh
 h9 ./hello                              # a static Linux ELF, no Linux tree needed
-h9 --root ./alpine sh                   # Alpine's minirootfs, or any unpacked image
+h9 --dir ./alpine:#L sh                 # Alpine's minirootfs, or any unpacked image
 ```
 
 Open rio, Plan 9's window system, in a host window:
@@ -89,10 +89,10 @@ Mount file systems over 9P and WebSocket, or serve a machine's namespace to
 other machines:
 
 ```sh
-h9 --root 'tcp!fs.example.com!564' ls /       # a 9P server as the root
-h9 --root fs.example.com/9p ls /              # the same over wss://
+h9 --url tcp://fs.example.com:564 ls /        # a 9P server as the root
+h9 --url fs.example.com/9p ls /               # the same over wss://
 h9 --serve unix!/tmp/h9.sock                  # export this machine's namespace, to Linux too
-h9 --root 'tcp!zerofs.local!5564' ls /        # a 9P2000.L server (ZeroFS, diod) too
+h9 --url tcp://zerofs.local:5564 ls /         # a 9P2000.L server (ZeroFS, diod) too
 ```
 
 Build 9front software inside h9 with its own compilers and `mk`, run Go's

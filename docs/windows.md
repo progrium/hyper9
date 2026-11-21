@@ -61,7 +61,7 @@ about half a minute:
 
 ```sh
 host$ mkdir ~/win && cd ~/win
-host$ h9 --backend native --root "$WINEROOT" --env WINEPREFIX=/mnt/term/cwd/prefix \
+host$ h9 --backend native --dir "$WINEROOT":#L --env WINEPREFIX=/mnt/term/cwd/prefix \
         sh -c 'wineboot -i; wineserver -w'
 host$ ln -s ../.. prefix/dosdevices/d:
 ```
@@ -83,7 +83,7 @@ does that, and sets the prefix:
 
 ```sh
 host$ win() {
-        h9 --backend native --root "$WINEROOT" \
+        h9 --backend native --dir "$WINEROOT":#L \
           --env WINEPREFIX=/mnt/term/cwd/prefix --env WINEDEBUG=-all \
           sh -c 'wine "$@"; s=$?; wineserver -w; exit $s' sh "$@"
       }

@@ -978,12 +978,16 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 		return -1;
 	}
 	c = namec(path, Aaccess, 0, 0);
-	if((n = h9_overlay_readlink(c, buf, nbuf)) >= 0){
-		cclose(c);
-		poperror();
-		return n;
-	}
-	if((l = h9_overlay_lower(c)) != nil){
+	/* Down through overlays and unions (design/mounts.md) to the tree
+	 * that holds the name. */
+	for(;;){
+		if((n = h9_overlay_readlink(c, buf, nbuf)) >= 0){
+			cclose(c);
+			poperror();
+			return n;
+		}
+		if((l = h9_overlay_lower(c)) == nil)
+			break;
 		cclose(c);
 		c = l;
 	}

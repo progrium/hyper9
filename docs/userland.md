@@ -105,13 +105,13 @@ Now the tree: the mount points from section 1, and the program in `/bin`.
 host$ cd ~/myland
 host$ mkdir -p root/{bin,dev,env,fd,proc,srv,net,tmp,mnt/term/cwd}
 host$ cp src/hello/hello root/bin/
-host$ h9 --root root hello
+host$ h9 --dir root hello
 hello from h9, cputype amd64
 bin dev env fd mnt net proc srv tmp
 ```
 
 That's a complete userland: one program, nine empty directories, and a
-machine that starts in milliseconds. `h9 --root root --print hello` shows
+machine that starts in milliseconds. `h9 --dir root --print hello` shows
 the namespace h9 built over it.
 
 ## 3. A userland from scratch, with its own init
@@ -221,16 +221,16 @@ host$ mkdir -p box/{bin,dev,env,fd,proc,srv,net,tmp,mnt/term/cwd,lib,usr/$USER}
 host$ cp src/box/box box/bin/
 host$ for c in echo cat ls put init; do ln box/bin/box box/bin/$c; done
 host$ echo 'welcome to box' > box/lib/motd
-host$ h9 --root box --check
+host$ h9 --dir box --check
 ...
 root /Users/me/myland/box: ok, /bin/echo runs (amd64)
-host$ h9 --root box cat /lib/motd
+host$ h9 --dir box cat /lib/motd
 welcome to box
 host$ cd ~/notes
-host$ h9 --root ~/myland/box --memory 4g init ls
+host$ h9 --dir ~/myland/box --memory 4g init ls
 notes.txt
 todo.txt
-host$ h9 --root ~/myland/box --memory 4g init cat /usr/me/todo.txt
+host$ h9 --dir ~/myland/box --memory 4g init cat /usr/me/todo.txt
 ...
 ```
 
@@ -265,8 +265,8 @@ host$ for c in rc echo cat ls grep sed wc sort test mkdir rm cp mv date bind mou
 > done
 host$ cp $src/rc/lib/rcmain $dst/rc/lib/
 host$ cp $src/adm/timezone/local $dst/adm/timezone/
-host$ h9 --root ~/slim --check
-host$ h9 --root ~/slim --rc 'ls /bin | wc -l'
+host$ h9 --dir ~/slim --check
+host$ h9 --dir ~/slim --rc 'ls /bin | wc -l'
 host$ du -sh ~/slim
 ```
 
@@ -276,7 +276,7 @@ with whatever they run. `h9 --trace` (manual chapter 28) shows each file a
 program opens, which is the quickest way to find what else a command needs:
 
 ```sh
-host$ h9 --root ~/slim --trace mk 2>&1 | grep -E 'open|exec' | grep -- '-1'
+host$ h9 --dir ~/slim --trace mk 2>&1 | grep -E 'open|exec' | grep -- '-1'
 ```
 
 **Your own profile.** rc runs `/rc/lib/rcmain` first, and with `-l` (a
@@ -290,7 +290,7 @@ prompt=('slim% ' '	')
 bind -c /mnt/term/cwd $home
 cd
 EOF
-host$ h9 --root ~/slim --rc
+host$ h9 --dir ~/slim --rc
 slim% pwd
 /usr/me
 ```
@@ -311,11 +311,11 @@ host$ cat > ~/slim/rc/lib/rcmain.local <<'EOF'
 bind -c /mnt/term/cwd $home
 exec ls -l $home
 EOF
-host$ h9 --root ~/slim --rc
+host$ h9 --dir ~/slim --rc
 ```
 
-A program named on the command line still overrides it: `h9 --root ~/slim
-ls` and `h9 --root ~/slim --rc 'cmd'` run only what they name. rcmain
+A program named on the command line still overrides it: `h9 --dir ~/slim
+ls` and `h9 --dir ~/slim --rc 'cmd'` run only what they name. rcmain
 checks each profile file with `/bin/test -r`, so a root without `/bin/test`
 skips them silently.
 
@@ -327,7 +327,7 @@ source, in one binary that picks the command by the name it runs as.
 
 ```sh
 host$ zig build slim    # .local/9front/slim-11952-arm64: 44 commands
-host$ h9 --root .local/9front/slim-11952-arm64 --rc 'ls /bin | wc -l'
+host$ h9 --dir .local/9front/slim-11952-arm64 --rc 'ls /bin | wc -l'
 host$ du -sh .local/9front/slim-11952-arm64
 ```
 
@@ -341,10 +341,10 @@ the tree as above; to box more of 9front's, add a line to `src/9box/slim`
 (its name and its directory under `/sys/src/cmd`).
 
 This tree is also built into h9 itself, as the built-in root h9 uses when it
-finds no other ([builtin-root](../design/epoch-0/builtin-root.md)). `h9
---builtin=only` runs over it even when you have a root, and `h9 --root
-~/slim --builtin=after` fills in any of its 44 commands your own tree
-leaves out.
+finds no other ([builtin-root](../design/builtin-root.md)). `h9
+--builtin` runs over it alone even when you have a root, and `h9 --dir
+~/slim --builtin` puts it under your tree, to fill in any of its 44
+commands your tree leaves out.
 
 ## 5. Layering on the stock root instead of copying it
 
@@ -403,7 +403,7 @@ exec h9 --readable "$layer" --ns "/mnt/term$layer/ns" "$@"
 The root is read-only unless you say otherwise. Three ways to change that,
 from safest to least safe:
 
-- **In memory, for one run.** `--write=ephemeral --writable ROOT` puts a
+- **In memory, for one run.** `--write=ephemeral` with `rw` on the root puts a
   copy-on-write overlay over the whole root. Programs can install, edit, and
   delete anything, see their changes for the rest of the run, and the host
   tree is never written. `--print` shows it as `bind -c '#O' / eph`. Under
@@ -411,13 +411,13 @@ from safest to least safe:
   at all.
 
   ```sh
-  host$ echo data | h9 --root ~/myland/box --write=ephemeral --writable ~/myland/box put /lib/x
+  host$ echo data | h9 --dir ~/myland/box:/:rw --write=ephemeral put /lib/x
   host$ ls ~/myland/box/lib
   motd
   ```
 
-- **For real.** `--writable ROOT` without `--write=ephemeral` lets programs
-  change the host tree. That's how you install into your userland from
+- **For real.** `rw` on the root, as in `--dir ~/myland/box:/:rw`, without
+  `--write=ephemeral` lets programs change the host tree. That's how you install into your userland from
   inside it, for example with `mk install` (manual chapter 18).
 - **A namespace file** can put a fresh overlay over one directory with
   `bind -c '#O' /lib`, leaving the rest read-only.
@@ -428,16 +428,15 @@ the cwd and `--writable` paths still writing to the host.
 
 ## 7. Serving a userland over 9P
 
-A root doesn't have to be a directory. `--root` also takes a 9P server: a
-dial string such as `tcp!host!port`, `unix!/path`, or the path of a unix
-socket (manual chapter 16). h9 connects before the program runs, mounts the
+A root doesn't have to be a directory. `--url` mounts a 9P server instead:
+`tcp://host:port` or `unix:///path` (manual chapter 16). h9 connects before the program runs, mounts the
 server at `/`, and binds its devices over it as for a directory. That opens
 up userlands that are programs:
 
 - one binary that carries its whole tree,
 - files made on demand (a `/lib/motd` from a database, a `/bin` that fetches
   programs as they're run),
-- one server holding several userlands, picked with `--root-spec`,
+- one server holding several userlands, picked with `spec=NAME`,
 - a tree shared by many machines at once, on one host or across a network.
 
 This server is written in Go with
@@ -563,10 +562,10 @@ host$ mkdir -p root/bin root/lib
 host$ cp ~/myland/src/box/box ~/myland/src/hello/hello root/bin/
 host$ cp ~/myland/box/lib/motd root/lib/
 host$ go build -o rootfs . && ./rootfs &
-host$ h9 --root 'tcp!127.0.0.1!5640' hello
+host$ h9 --url tcp://127.0.0.1:5640 hello
 hello from h9, cputype amd64
 bin dev env fd lib mnt net proc srv tmp
-host$ h9 --root 'tcp!127.0.0.1!5640' box cat /lib/motd /lib/uptime
+host$ h9 --url tcp://127.0.0.1:5640 box cat /lib/motd /lib/uptime
 welcome to box
 42s
 ```
@@ -577,7 +576,7 @@ socket works the same way, on macOS and Linux hosts:
 
 ```sh
 host$ ./rootfs unix /tmp/rootfs.sock &
-host$ h9 --root /tmp/rootfs.sock box cat /lib/motd
+host$ h9 --url unix:///tmp/rootfs.sock box cat /lib/motd
 welcome to box
 ```
 
@@ -612,7 +611,7 @@ under `aux/listen1` in one h9 and uses it as the root of another. And with
 
 ## 8. Serving it over WebSocket
 
-`--root` also takes `ws://` and `wss://` URLs, so a
+`--url` also takes `ws://` and `wss://` URLs, so a
 userland can be served by a web server, through proxies, and to an h9 in a
 browser tab once [browser-host](../design/epoch-0/browser-host.md) exists.
 Any 9P server can sit behind a relay that carries 9P in binary WebSocket
@@ -623,12 +622,13 @@ another. With `rootfs` from section 7:
 ```sh
 host$ ./rootfs &
 host$ zig build wsrelay -- 8080 5640 &
-host$ h9 --root ws://localhost:8080/9p box cat /lib/uptime
+host$ h9 --url ws://localhost:8080/9p box cat /lib/uptime
 2m13s
 ```
 
-`--root-header 'Authorization: Bearer ...'` (or `@FILE`) sends headers with
-the handshake, and `--root-ca FILE` trusts a private CA for `wss://`.
+`header='Authorization: Bearer ...'` (or `header=@FILE`) after the URL, as in
+`--url wss://host/9p:/:header=@FILE`, sends headers with the handshake, and
+`ca=FILE` trusts a private CA for `wss://`.
 
 The same URLs work in a namespace file's `mount` line, so a namespace file
 can attach a served tree anywhere in a local userland:
@@ -636,7 +636,7 @@ can attach a served tree anywhere in a local userland:
 ```sh
 host$ cat ns
 mount 'ws://127.0.0.1:8080/9p' /n/served
-host$ h9 --root ~/myland/box --ns ns ls /n/served/lib
+host$ h9 --dir ~/myland/box --ns ns ls /n/served/lib
 motd
 uptime
 ```
@@ -663,13 +663,13 @@ its binary, as the device `#H`, and binds `#H/bin` after everything else in
 ## 10. Shipping it
 
 - **A tarball and `H9ROOT`.** A host-directory root is portable as is.
-  Unpack it anywhere and point `H9ROOT` at it, or pass `--root`. Hard links,
+  Unpack it anywhere and point `H9ROOT` at it, or pass `--dir`. Hard links,
   as in section 3, survive `tar`.
 - **One binary.** `rootfs` from section 7 is the whole userland in one
   host program, for any host Go builds for.
-- **A wrapper.** A short script that sets `--root`, `--arch`, and any
+- **A wrapper.** A short script that sets `--dir`, `--arch`, and any
   `--ns` turns your userland into a command, as in section 5.
-- **Check it.** `h9 --root DIR --check` runs `/bin/echo` from the root,
+- **Check it.** `h9 --dir DIR --check` runs `/bin/echo` from the root,
   so include an `echo` if you want the check to pass.
 - **Symlinks.** h9 follows symlinks in a host tree on the host and checks
   where they land. A relative link that stays inside the tree works, but an

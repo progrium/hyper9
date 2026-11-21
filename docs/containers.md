@@ -75,21 +75,21 @@ something the runtime does for you.
 
 | Docker | h9 | Status |
 | --- | --- | --- |
-| `docker run IMAGE CMD` | `h9 --root IMAGE CMD` | main |
+| `docker run IMAGE CMD` | `h9 --dir IMAGE CMD` | main |
 | `docker run --rm` | Always | main |
 | The container's writable layer | The default, `--write=overlay`: the root takes writes in memory ([section 8](#8-the-containers-writable-layer)) | main |
 | `docker run --read-only` | `--write=scope`: the root is read-only, writable volumes still write | main |
 | `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux personality) |
-| Running Linux images | `h9 --root ./alpine sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/epoch-0/linux-personality.md)) |
+| Running Linux images | `h9 --dir ./alpine:#L sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/linux-personality.md)) |
 | `FROM scratch` + static binaries | A slim root tree: Plan 9 binaries are statically linked ([section 4](#4-from-scratch-slim-images)) | main |
 | A busybox base image | `zig build slim`, or the built-in root h9 carries: 44 of 9front's commands in one binary | main |
 | `ENTRYPOINT`, `CMD` | An rc script in the image, run by path; or `/rc/lib/rcmain.local`, run by `h9 --rc` | main |
 | `ENV`, `docker run -e` | `--env name=value`, or assignments in the entrypoint | main |
 | `WORKDIR` | `cd` in the namespace file | main |
 | Image layers | `bind -b` / `bind -a` lines in a namespace file, replayed with `--ns` | main |
-| `docker build`, `RUN` | A host script running `h9 --root IMAGE --writable IMAGE ...` against a copy of the base ([section 9](#9-building-images)) | main |
+| `docker build`, `RUN` | A host script running `h9 --dir IMAGE:/:rw ...` against a copy of the base ([section 9](#9-building-images)) | main |
 | Multi-stage builds | Compile with the full root tree, copy the binary into a slim one | main |
-| `docker commit` | Run with `--writable IMAGE` on a copy of the image | main |
+| `docker commit` | Run with `--dir IMAGE:/:rw` on a copy of the image | main |
 | `docker diff`, exporting a container's changes as a layer | Proposed | *Not yet available ([overlay-export](../design/overlay-export.md), draft)* |
 | `-v host:container`, `--mount type=bind` | `--cwd DIR`, `--readable PATH`, `--writable PATH` | main |
 | Hiding files from a bind mount | `--read-deny PATH` | main |
@@ -101,8 +101,8 @@ something the runtime does for you.
 | `docker stop` (SIGTERM, then SIGKILL) | SIGTERM to `h9`: a `hangup` note to every process, then a stop 2 s later, exit 143 | main |
 | `docker run --stop-timeout`, job deadlines | `--timeout DURATION`, exit 124 | main |
 | `docker inspect` | `h9 --print` | main |
-| Pulling 9front images from a registry | `--root tcp!host!port` (a 9P server), read on demand | main |
-| The same, over HTTPS | `--root wss://host/path` ([websocket-9p](../design/epoch-0/websocket-9p.md)) | main |
+| Pulling 9front images from a registry | `--url tcp://host:port` (a 9P server), read on demand | main |
+| The same, over HTTPS | `--url wss://host/path` ([websocket-9p](../design/websocket-9p.md)) | main |
 | Pulling a layer at run time | `mount 'wss://…' /dir` in the namespace file, or `wsmount` in the guest | main |
 | `docker save`, `docker load` | `tar` the root tree | main |
 | Multi-platform images | One tree with `/arm64/bin` and `/amd64/bin`; `--arch` picks | main |
@@ -114,14 +114,14 @@ something the runtime does for you.
 
 The root tree that `zig build mkroot` builds is h9's equivalent of a
 `debian` base image: about 250 MB of 9front, with every program and library
-file. Every `h9` command that doesn't pass `--root` already runs in it. (With
+file. Every `h9` command that doesn't mount something else on `/` already runs in it. (With
 no tree at all, h9 runs on a small built-in root of 44 commands, more like
 `busybox`; see [manual, chapter 2](../MANUAL.md#2-installing).)
 
-Any other directory that looks like a 9front tree works as `--root`:
+Any other directory that looks like a 9front tree works as the root, with `--dir`:
 
 ```sh
-host$ h9 --root ./images/greeter serve
+host$ h9 --dir ./images/greeter serve
 ```
 
 So an image is just a directory, and the usual tools work on it: `du`,
@@ -172,8 +172,8 @@ and the host's directories onto them:
 800 KB, `9box`, in a root tree with rc, the file and text tools, `tar`, and
 the namespace tools. The same tree is built into h9 as its built-in root, so an
 image can also leave the common commands out and borrow them at run time
-with `--builtin=after`, which puts the built-in commands in `/bin` behind the
-image's own. [Building your own userland](userland.md#4-a-slim-9front) covers
+with `--builtin`, which puts the built-in root under the image, so its
+commands in `/bin` come after the image's own. [Building your own userland](userland.md#4-a-slim-9front) covers
 both.
 
 **Your own selection.** Here's a script that makes a tree with exactly the
@@ -204,10 +204,10 @@ done
 ```sh
 host$ ./mkslim ./images/tools cat ls
 host$ du -sh ./images/tools
-host$ h9 --root ./images/tools --rc 'ls /bin; echo hello from a slim image'
+host$ h9 --dir ./images/tools --rc 'ls /bin; echo hello from a slim image'
 ```
 
-A program that isn't in the image fails as it would anywhere: `h9 --root
+A program that isn't in the image fails as it would anywhere: `h9 --dir
 ./images/tools sed` exits 127. A program that opens files the image doesn't
 have, such as `/lib/ndb/local`, `/sys/lib/tls/ca.pem`, or a font, fails when
 it opens them; `--trace` shows which file it was looking for ([manual,
@@ -231,7 +231,7 @@ main(void)
 host$ h9 --rc '7c hello.c && 7l -o hello hello.7'      # stage 1: the full root
 host$ mkdir -p images/hello/dev images/hello/bin images/hello/mnt/term/cwd images/hello/arm64/bin
 host$ cp hello images/hello/arm64/bin/                   # stage 2: three directories and one file
-host$ h9 --root ./images/hello hello
+host$ h9 --dir ./images/hello hello
 hello from a scratch image
 ```
 
@@ -244,9 +244,9 @@ through `--rc`.
 h9 runs Linux programs too. Its Linux personality loads ELF binaries and
 answers their system calls with the same Plan 9 kernel, so a Linux program
 gets the machine's sandbox, network policy, and limits like a 9front one.
-`--root` takes a Linux root as readily as a 9front one: h9 tells them apart by
-their contents (`/etc/os-release`, a `/lib/ld-*` loader, and no `/rc/bin`).
-It's built ([linux-personality](../design/epoch-0/linux-personality.md),
+A Linux root goes on `#L`, the Linux tree, with `--dir ./alpine:#L`, and the
+9front root stays on `/` beside it.
+It's built ([linux-personality](../design/linux-personality.md),
 and [manual, chapter 20](../MANUAL.md#20-linux-programs)), and runs Alpine's
 busybox, `apk`, Python, SQLite, PostgreSQL, Redis, and Git.
 
@@ -263,7 +263,7 @@ host$ manifest='application/vnd.oci.image.manifest.v1+json,application/vnd.docke
 host$ digest=$(reg manifests/$tag "$index" | jq -r --arg a $arch 'first(.manifests[] | select(.platform.architecture == $a)) | .digest')
 host$ mkdir -p images/alpine
 host$ for l in $(reg manifests/$digest "$manifest" | jq -r '.layers[].digest'); do reg blobs/$l '*/*' | tar -xzf - -C images/alpine; done
-host$ h9 --root ./images/alpine sh -c 'cat /etc/alpine-release; id -u'
+host$ h9 --dir ./images/alpine:#L sh -c 'cat /etc/alpine-release; id -u'
 3.22.2
 0
 ```
@@ -278,14 +278,14 @@ both. If you have Docker, `docker export $(docker create alpine) | tar -xf -
 Inside, it's that Linux system:
 
 ```sh
-host$ h9 --root ./images/alpine sh -c 'apk add --no-cache jq >/dev/null && echo "{\"a\":1}" | jq .a'
+host$ h9 --dir ./images/alpine:#L sh -c 'apk add --no-cache jq >/dev/null && echo "{\"a\":1}" | jq .a'
 1
-host$ h9 --root ./images/alpine sh -c '/9/bin/ls /9/bin | wc -l'
+host$ h9 --dir ./images/alpine:#L sh -c '/9/bin/ls /9/bin | wc -l'
 ```
 
 - **The writable layer** works as for any root: `apk add` writes to the
   root's overlay, and the package is gone when the machine ends. Run it with
-  `--writable ./images/alpine` to install into the image instead ([section
+  `--dir ./images/alpine:#L:rw` to install into the image instead ([section
   9](#9-building-images)).
 - **`/9`** is the machine's 9front root, so the two kinds of program share
   the machine: `sh -c '/9/bin/ls /9/bin | wc -l'` pipes a 9front `ls` into
@@ -475,7 +475,7 @@ can create, change, and remove files anywhere in `/`, and the image on the
 host is never written ([overlay](../design/epoch-0/overlay.md)).
 
 ```sh
-host$ h9 --root ./images/base --rc 'echo installed > /sys/lib/x && cat /sys/lib/x'
+host$ h9 --dir ./images/base --rc 'echo installed > /sys/lib/x && cat /sys/lib/x'
 installed
 host$ ls ./images/base/sys/lib/x
 ls: ./images/base/sys/lib/x: No such file or directory
@@ -521,7 +521,7 @@ copy is the new image:
 
 ```sh
 host$ cp -cR images/base/. images/base-with-ndb
-host$ h9 --root ./images/base-with-ndb --writable ./images/base-with-ndb \
+host$ h9 --dir ./images/base-with-ndb:/:rw \
 	--rc "echo 'sys=build ip=10.0.0.5' >> /lib/ndb/local"
 ```
 
@@ -551,10 +551,10 @@ cp -R app "$img/app"
 chmod +x "$img/app/bin/"*
 
 # RUN: steps that run inside the image and write to it
-h9 --root "$img" --writable "$img" --rc 'date > /app/built'
+h9 --dir "$img:/:rw" --rc 'date > /app/built'
 
 # a smoke test: does the entrypoint at least start?
-h9 --root "$img" --ns /app/ns --net=enable --timeout 2s serve 2>&1 | grep -q listening
+h9 --dir "$img" --ns /app/ns --net=enable --timeout 2s serve 2>&1 | grep -q listening
 echo built "$img"
 ```
 
@@ -581,7 +581,7 @@ skip what hasn't changed.
 
 ```sh
 host$ mkdir -p data
-host$ h9 --root ./images/greeter --ns /app/ns --net=enable --cwd ./data --env greeting=hi serve &
+host$ h9 --dir ./images/greeter --ns /app/ns --net=enable --cwd ./data --env greeting=hi serve &
 greeter: listening on 8080
 host$ curl -s localhost:8080
 hi from h9
@@ -666,7 +666,7 @@ and their access, and the caveats. It's the closest thing to `docker
 inspect`, and it works before the container exists:
 
 ```sh
-host$ h9 --print --root ./images/greeter --ns /app/ns --net=enable --cwd ./data --memory 256m serve
+host$ h9 --print --dir ./images/greeter --ns /app/ns --net=enable --cwd ./data --memory 256m serve
 ```
 
 Two things it shows that Docker users should know. The namespace part is the
@@ -689,7 +689,7 @@ Run it from the directory holding the images, so they're under
 host$ cd images
 host$ h9 --net=enable --write=none aux/listen1 -t 'tcp!127.0.0.1!5640' /bin/exportfs -R -r /mnt/term/cwd/greeter &
 host$ cd ..
-host$ h9 --root 'tcp!127.0.0.1!5640' --ns /app/ns --net=enable --cwd ./data serve
+host$ h9 --url tcp://127.0.0.1:5640 --ns /app/ns --net=enable --cwd ./data serve
 ```
 
 `--ns /app/ns` is read from the 9P root, so the image's config travels with
@@ -699,9 +699,9 @@ TCP roots on a trusted network ([manual, chapter
 16](../MANUAL.md#16-file-servers-srv-and-9p-mounts)); 9P authentication for
 roots was proposed and declined ([root-auth](../design/epoch-0/root-auth.md)) in
 favor of authenticating WebSocket roots. On macOS and Linux a
-unix socket works too, as `--root unix!/path`.
+unix socket works too, as `--url unix:///path`.
 
-`--root-spec NAME` sends an attach name, so a 9P server that offers several
+`spec=NAME`, as in `--url tcp://host:port:/:spec=NAME`, sends an attach name, so a 9P server that offers several
 trees under different names can serve several images on one port, the way a
 registry serves `name:tag`. `exportfs -r` serves one tree; a server that
 switches on the attach name would have to be written (`9p(2)`) or come from
@@ -710,11 +710,12 @@ elsewhere.
 **Over HTTPS.** [websocket-9p](../design/epoch-0/websocket-9p.md) adds
 WebSocket roots, which go through HTTP proxies and TLS and can carry an
 `Authorization` header, as a registry pull does. The scheme can be left off,
-so `--root registry.example.com/greeter` means `wss://`:
+so `--url registry.example.com/greeter` means `wss://`:
 
 ```sh
-host$ h9 --root wss://registry.example.com/greeter \
-	--root-header "Authorization: Bearer $TOKEN" --ns /app/ns --net=enable serve
+host$ echo "Authorization: Bearer $TOKEN" > hdr
+host$ h9 --url wss://registry.example.com/greeter:/:header=@hdr \
+	--ns /app/ns --net=enable serve
 ```
 
 To try it locally, the repo's test relay forwards WebSocket connections to the
@@ -722,7 +723,7 @@ exportfs above:
 
 ```sh
 host$ zig build wsrelay -- 8080 5640 &
-host$ h9 --root ws://localhost:8080/9p --ns /app/ns --net=enable --env port=8081 serve
+host$ h9 --url ws://localhost:8080/9p --ns /app/ns --net=enable --env port=8081 serve
 ```
 
 **Save and load.** An image directory is files, so `docker save` is `tar -C
@@ -744,7 +745,7 @@ set -u
 pids=
 trap 'kill $pids 2>/dev/null' EXIT INT TERM
 
-h9 --root ./images/greeter --ns /app/ns --net=enable --cwd ./data \
+h9 --dir ./images/greeter --ns /app/ns --net=enable --cwd ./data \
 	--env port=8080 --memory 256m serve &
 pids="$pids $!"
 sleep 1
@@ -795,7 +796,7 @@ being stopped on purpose:
 #!/bin/sh
 # keep the greeter up; give up if h9 itself can't start it
 while :; do
-	h9 --root ./images/greeter --ns /app/ns --net=enable --cwd ./data serve
+	h9 --dir ./images/greeter --ns /app/ns --net=enable --cwd ./data serve
 	code=$?
 	case $code in
 	2|125|126|127) echo "h9 failed ($code); not restarting" >&2; exit $code;;
@@ -952,7 +953,7 @@ The `build` function reads the Boxfile line by line:
 - `COPY --from=9front PROGRAM...` copies statically linked programs out of
   the full tree, and `rc`'s `rcmain` with them. `COPY --from=NAME SRC DEST`
   copies out of another image, which is a multi-stage build.
-- `RUN` is `h9 --root IMAGE --writable IMAGE` with the image's namespace and
+- `RUN` is `h9 --dir IMAGE --writable IMAGE` with the image's namespace and
   environment, running `--rc '...'`, or `/bin/sh -c '...'` in a Linux image,
   so it writes into the image being built ([section
   8](#8-the-containers-writable-layer), "Committing"). Its cwd is the build
@@ -993,7 +994,7 @@ host$ h9box inspect -p --memory=256m greeter
 directories, `tag` is a clone, `rm` is `rm -rf`, `save` and `load` are `tar`,
 and `serve` is the exportfs registry from [section
 14](#14-registries-serving-images-over-9p), for 9front images. An image name
-that's a dial string or a URL is used as `--root` directly, so a served image
+that's a dial string or a URL is mounted with `--url` directly, so a served image
 runs like a local one:
 
 ```sh

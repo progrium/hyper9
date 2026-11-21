@@ -92,20 +92,19 @@ as an <tt>SVC</tt> exit with the Linux ABI's registers.
 <h2 id="trying">Trying it</h2>
 
 <p>
-<tt>--root</tt> takes a Linux tree as well as a 9front one,
-and h9 tells them apart by looking, so there is no Linux flag.
+A Linux tree goes on <tt>#L</tt>, the Linux root, with <tt>--dir alpine:#L</tt>,
+and the 9front root stays on <tt>/</tt> beside it.
 Given a Linux root, a bare program name is found on the Linux <tt>PATH</tt>:
 </p>
 
 <pre>
-h9 --root alpine ls            # busybox's ls
-h9 --root alpine /9/bin/ls     # 9front's ls, from the same Linux root
-h9 --root alpine sh            # an Alpine shell
-h9 --root alpine --writable alpine apk add jq
+h9 --dir alpine:#L ls            # busybox's ls
+h9 --dir alpine:#L /9/bin/ls     # 9front's ls, from the same Linux root
+h9 --dir alpine:#L sh            # an Alpine shell
+h9 --dir alpine:#L:rw apk add jq # installs into the tree
 </pre>
 
 <p>
-<tt>--root</tt> can be given twice, once for each kind of tree.
 <tt>--rc</tt> still runs 9front's rc,
 and a 9front process runs a Linux program by its <tt>#λ</tt> path.
 <tt>scripts/fetch.sh</tt> fetches an Alpine root, pinned by digest,

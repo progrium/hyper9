@@ -78,7 +78,7 @@ h9() { # tier arch cwd cmd
 	*) bin="$W/h9-zig/bin/h9" ;;
 	esac
 	if [ "$arch" = 9front ]; then
-		env $te $to "$bin" --backend $backend --arch 386 --root "$NINE" --rc "$cmd"
+		env $te $to "$bin" --backend $backend --arch 386 --dir "$NINE" --rc "$cmd"
 		return
 	fi
 	root="$W/alpine-$arch"
@@ -87,7 +87,7 @@ h9() { # tier arch cwd cmd
 		return
 	fi
 	# --net enable: the Go program serves HTTP on loopback.
-	env $te $to "$bin" --backend $backend --arch "$arch" --root "$root" --net enable sh -c "cd ${cwd:-/} && $cmd"
+	env $te $to "$bin" --backend $backend --arch "$arch" --dir "$root:#L" --net enable sh -c "cd ${cwd:-/} && $cmd"
 }
 
 table="$OUT/results.md"

@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const aout = @import("aout.zig");
+pub const mount = @import("mount.zig");
 const web = @import("web.zig").enabled;
 
 pub const Profile = enum { default, tight };
@@ -74,21 +75,6 @@ pub const Policy = struct {
 /// constant data in the h9 binary (`builtin`, design/epoch-0/builtin-root.md).
 pub const Access = enum { ro, rw, eph, @"9p", builtin };
 
-/// How the built-in root (design/epoch-0/builtin-root.md), `#Hroot`, takes part in
-/// the namespace.
-pub const Builtin = enum {
-    /// Not at all.
-    off,
-    /// It's the root: `bind '#Hroot' /`. There must be no other root.
-    only,
-    /// Over another root, its `/$cputype/bin` is bound before the root's
-    /// `/bin`, so its commands win. Without another root, as `only`.
-    before,
-    /// Over another root, its `/$cputype/bin` is bound after the root's
-    /// `/bin` and `/rc/bin`, to fill gaps. Without another root, as `only`.
-    after,
-};
-
 /// The built-in root's device path.
 pub const builtin_dev = "#Hroot";
 
@@ -130,6 +116,29 @@ pub const Bind = struct {
     note: ?[]const u8 = null,
     /// With `console`: bind the console's `cons` file, not its directory.
     cons_file: bool = false,
+    /// `bind -r`: a union merged at every depth (design/mounts.md). On
+    /// `#Oroot` or `#Olinux`, optionally with a path below, it adds a
+    /// member to that stack.
+    recursive: bool = false,
+    /// Make `to` as a directory in the root's overlay if it's missing;
+    /// without an overlay, a missing `to` fails, or is skipped when
+    /// `optional`.
+    make: bool = false,
+    /// As `make`, for `from`: the root's `/mnt`, which 9front binds over
+    /// the kernel's.
+    make_from: bool = false,
+    /// With `from` `#O`: a fresh instance in memory only (`--tmp`), not an
+    /// overlay over `to`.
+    empty: bool = false,
+    /// With `empty`: the host archive unpacked into it (`--archive`).
+    archive: ?[]const u8 = null,
+    /// With `mount`: the 9P connection h9 makes, `from` being its URL. A
+    /// `to` of `/srv/NAME` posts it there without mounting it.
+    url: ?NinePRoot = null,
+    /// With `url`: a connection the embedder already holds, or -1.
+    fd: i32 = -1,
+    /// The flag this line came from, for errors (`--dir ./x:/app`).
+    what: ?[]const u8 = null,
 
     pub const Flag = enum { repl, before, after };
 };
@@ -148,7 +157,7 @@ pub const NinePRoot = struct {
     /// A WebSocket root's handshake headers, `Name: value`; the plan
     /// shows their names only.
     headers: []const []const u8 = &.{},
-    /// Its `--root-ca` file.
+    /// Its `ca=` file.
     ca: ?[]const u8 = null,
     /// The proxy it goes through, if any.
     proxy: ?[]const u8 = null,
@@ -248,9 +257,7 @@ pub const Plan = struct {
     caveats: []const []const u8,
     /// Where the cwd lands in the guest; null without a root or cwd.
     guest_cwd: ?[]const u8,
-    /// The 9P root to connect before the namespace is built, if any.
-    root_9p: ?NinePRoot = null,
-    /// The machine's window, with --gfx (design/epoch-0/gfx.md).
+    /// The machine's window, with --gfx (design/gfx.md).
     gfx: ?Gfx = null,
     /// Whether the root is under a copy-on-write overlay
     /// (design/epoch-0/overlay.md): the bind of `#O` onto `/`. The builder
@@ -338,19 +345,36 @@ pub const Plan = struct {
             defer line.deinit();
             const lw = &line.writer;
             lw.writeAll(if (b.mount) "  mount" else "  bind") catch return error.WriteFailed;
-            switch (b.flag) {
-                .repl => {},
-                .before => lw.writeAll(" -b") catch return error.WriteFailed,
-                .after => lw.writeAll(" -a") catch return error.WriteFailed,
+            if (b.recursive or b.flag != .repl or b.create) {
+                lw.writeAll(" -") catch return error.WriteFailed;
+                if (b.recursive) lw.writeAll("r") catch return error.WriteFailed;
+                switch (b.flag) {
+                    .repl => {},
+                    .before => lw.writeAll("b") catch return error.WriteFailed,
+                    .after => lw.writeAll("a") catch return error.WriteFailed,
+                }
+                if (b.create) lw.writeAll("c") catch return error.WriteFailed;
             }
-            if (b.create) lw.writeAll(if (b.flag == .repl) " -c" else "c") catch return error.WriteFailed;
-            // A target in #λ is quoted, since newns reads a word starting
+            // A target in #L is quoted, since newns reads a word starting
             // with # as a comment.
             const q = if (b.to.len > 0 and b.to[0] == '#') "'" else "";
-            lw.print(" '{s}{s}{s}' {s}{s}{s}", .{ b.from, if (b.console) "<id>" else "", if (b.cons_file) "/cons" else "", q, b.to, q }) catch return error.WriteFailed;
+            // A URL's query can hold a token, so it's elided, as in the
+            // note.
+            const from = if (b.url != null and b.url.?.kind == .ws) if (std.mem.indexOfScalar(u8, b.from, '?')) |i| b.from[0 .. i + 1] else b.from else b.from;
+            lw.print(" '{s}{s}{s}{s}' {s}{s}{s}", .{ from, if (from.len < b.from.len) "…" else "", if (b.console) "<id>" else "", if (b.cons_file) "/cons" else "", q, b.to, q }) catch return error.WriteFailed;
             // Always written for a mount, '' when empty, so newns can tell
             // the spec from the access column.
             if (b.mount) lw.print(" '{s}'", .{b.spec}) catch return error.WriteFailed;
+            // A 9P mount's settings, as namespace files take them
+            // (design/mounts.md, "Namespace files"); a header's value
+            // only when it's from a file.
+            if (b.url) |r| {
+                if (r.user) |u| lw.print(" 'user={s}'", .{u}) catch return error.WriteFailed;
+                if (r.ca) |ca| lw.print(" 'ca={s}'", .{ca}) catch return error.WriteFailed;
+                for (r.headers) |h| if (h.len > 0 and h[0] == '@') {
+                    lw.print(" 'header={s}'", .{h}) catch return error.WriteFailed;
+                };
+            }
             try w.writeAll(line.written());
             if (b.access) |a| {
                 const pad = 56 -| line.written().len;
@@ -395,8 +419,8 @@ pub const Plan = struct {
 pub const CompileError = error{ OutOfMemory, Conflict };
 
 /// A 9P root's comment in the plan: the dial string or URL, with a URL's
-/// query elided, header names, the proxy and `--root-ca`, and the user.
-fn rootNote(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u8 {
+/// query elided, header names, the proxy and `ca=`, and the user.
+pub fn rootNoteOf(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
     const w = &out.writer;
     if (r.kind == .ws) {
@@ -412,7 +436,7 @@ fn rootNote(arena: std.mem.Allocator, r: NinePRoot) error{OutOfMemory}![]const u
             w.writeAll(")") catch return error.OutOfMemory;
         }
         if (r.proxy) |p| w.print("  via {f}", .{elideUserinfo(p)}) catch return error.OutOfMemory;
-        if (r.ca) |ca| w.print("  --root-ca {s}", .{ca}) catch return error.OutOfMemory;
+        if (r.ca) |ca| w.print("  ca={s}", .{ca}) catch return error.OutOfMemory;
         if (r.cred) |c| w.print("  cred {s}", .{c}) catch return error.OutOfMemory;
     } else w.writeAll(r.addr) catch return error.OutOfMemory;
     if (r.user) |u| w.print(" as {s}", .{u}) catch return error.OutOfMemory;
@@ -461,30 +485,26 @@ pub const Gfx = struct {
 };
 
 pub const Inputs = struct {
-    /// Host root tree, or null for a 9P root or a machine with devices
-    /// only.
-    root: ?[]const u8,
-    /// A 9P server as the root, instead of a host tree.
-    root_9p: ?NinePRoot = null,
-    /// Resolve the root tree's symlinks inside it, through `#U!c`
-    /// (`--root-contained`, design/epoch-0/symlinks-in-root.md).
-    root_contained: bool = false,
+    /// The mounts, in the order given (design/mounts.md). `.dir` sources
+    /// are absolute host paths with symlinks resolved, and `.archive`
+    /// ones host paths h9 reads before the machine starts. Mounts on `/`
+    /// stack into the root, and on `#L` into the Linux tree; with none on
+    /// `/`, the root stack is empty and the machine has devices only.
+    mounts: []const mount.Mount = &.{},
+    /// `--bind` lines, run after every mount, in order.
+    binds: []const mount.Bind = &.{},
     /// Host directory bound at /mnt/term/cwd.
     cwd: ?[]const u8,
     arch: aout.Arch,
     /// Bind h9's own commands (`#H/bin`) after /bin; false leaves out
     /// the bind and masks `#H` (design/epoch-0/guest-tools.md).
     guest_tools: bool = true,
-    /// A Linux root tree, the Linux view's / (design/epoch-0/linux-personality.md).
-    linux_root: ?[]const u8 = null,
     /// The host's DNS servers, which port 53 may reach even when they're
     /// link-local (design/epoch-0/linux-net.md).
     nameservers: []const []const u8 = &.{},
     /// A host window: `#i`, `#m` and `#b` on /dev. Without one they're
     /// masked (design/epoch-0/gfx.md).
     gfx: ?Gfx = null,
-    /// The built-in root (design/epoch-0/builtin-root.md).
-    builtin: Builtin = .off,
     /// What the plan says about the built-in root beside its bind.
     builtin_note: ?[]const u8 = null,
     /// `--serve` listeners (design/epoch-0/serve.md).
@@ -498,9 +518,9 @@ fn hostWritable(writable: []const []const u8, path: []const u8, allowed: bool) b
     return false;
 }
 
-/// The Linux view's device (design/epoch-0/linux-personality.md, "The Linux
-/// view"): `#λ`, devlinux.
-pub const linux_view = "#\u{3bb}";
+/// The Linux view's device (design/linux-personality.md, "The Linux
+/// view"): `#L`, devlinux, which was `#λ` before design/mounts.md.
+pub const linux_view = "#L";
 
 /// Compiles a policy. Allocations go in `arena`. `err_msg` explains a
 /// Conflict.
@@ -515,25 +535,21 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     // h9 can't make devmnt read-only, so `none` can't be kept for a
     // server it doesn't control.
-    if (write == .none and in.root_9p != null) {
-        err_msg.* = if (in.root_9p.?.kind == .ws) "--write=none can't be enforced on a WebSocket root" else "--write=none can't be enforced on a 9P root";
-        return error.Conflict;
+    for (in.mounts) |m| {
+        if (write_req == .none and m.access != null and m.access.? != .ro) {
+            err_msg.* = try std.fmt.allocPrint(arena, "--write=none conflicts with {t}: {f}", .{ m.access.?, m });
+            return error.Conflict;
+        }
+        if (write == .none and (m.kind == .url or m.kind == .fd)) {
+            const what = if (std.mem.eql(u8, m.dst, "/")) "root" else "mount";
+            err_msg.* = try std.fmt.allocPrint(arena, "--write=none can't be enforced on a {s} {s}", .{ if (isWs(m.src)) "WebSocket" else "9P", what });
+            return error.Conflict;
+        }
+        if (m.contained and m.kind != .dir) {
+            err_msg.* = "contained needs a host directory";
+            return error.Conflict;
+        }
     }
-    // A Linux root is always contained, so the flag changes nothing there,
-    // as the manual's "for Linux roots" promises.
-    if (in.root_contained and in.root == null and in.linux_root == null) {
-        err_msg.* = "--root-contained needs a host directory as the root";
-        return error.Conflict;
-    }
-    const other_root = in.root != null or in.root_9p != null;
-    if (in.builtin == .only and other_root) {
-        err_msg.* = "--builtin=only conflicts with a root";
-        return error.Conflict;
-    }
-    // The built-in root is `/` when there's no other; over one it only
-    // adds its commands to /bin.
-    const builtin_is_root = in.builtin != .off and !other_root;
-    const builtin_bin: ?Builtin = if (other_root and in.builtin != .off and in.builtin != .only) in.builtin else null;
     if (write_req == .none and pol.writable.len > 0) {
         err_msg.* = "--write=none conflicts with --writable";
         return error.Conflict;
@@ -586,42 +602,54 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         }
     }{ .eph = eph };
 
-    // `--writable` on the root itself makes it write the host, except
-    // under ephemeral, where nothing does.
-    var root_rw = false;
-    if (in.root) |root| for (pol.writable) |w| if (std.mem.eql(u8, w, root)) {
-        root_rw = can_write and !eph;
+    // The stacks (design/mounts.md, "Stacks"): a member marked rw takes
+    // creates and writes, and the stack then has no overlay. Otherwise
+    // the stack is under one with --write=overlay or ephemeral.
+    var stack_rw = [2]bool{ false, false };
+    var stack_n = [2]usize{ 0, 0 };
+    for (in.mounts) |m| if (m.stack()) |st| {
+        stack_n[@intFromEnum(st[0])] += 1;
+        if (m.access == .rw and can_write and !eph) stack_rw[@intFromEnum(st[0])] = true;
+        // A 9P server decides what's writable under --write=scope, as
+        // before (design/ninep-roots.md).
+        if ((m.kind == .url or m.kind == .fd) and write == .scope and m.access != .ro) stack_rw[@intFromEnum(st[0])] = true;
     };
-    // The root's overlay (design/epoch-0/overlay.md): under overlay and
-    // ephemeral, over any kind of root, unless the root writes the host.
-    const root_overlay = (write == .overlay or eph) and !root_rw and (other_root or builtin_is_root);
+    // `--writable` on a stack's host directory makes it write the host,
+    // as `--writable "$H9ROOT"` did before.
+    for (in.mounts) |m| if (m.stack()) |st| if (m.kind == .dir and hostWritable(pol.writable, m.src, can_write and !eph)) {
+        stack_rw[@intFromEnum(st[0])] = true;
+    };
+    const overlay_mode = write == .overlay or eph;
+    const root_overlay = overlay_mode and !stack_rw[0];
+    const linux_overlay = overlay_mode and !stack_rw[1];
+    const has_linux = stack_n[1] > 0;
 
-    if (in.root) |root| {
-        // The overlay never writes its lower tree, so devfs keeps the
-        // root read-only (`allow_eph`).
-        try rules.append(arena, .{ .path = root, .kind = if (root_overlay) .allow_eph else if (root_rw) .allow_rw else .allow_ro });
-        // A contained root's links resolve inside it (#U!c).
-        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "#U{s}{s}", .{ if (in.root_contained) "!c" else "", root }), .to = "/", .create = root_rw, .access = if (root_rw) .rw else .ro });
+    // `/` on 9front's pattern (design/mounts.md, "Building /"): the
+    // kernel's `#/` first, so its names never reach the root tree, and
+    // the root stack after it and at /root.
+    try binds.append(arena, .{ .from = "#/", .to = "/", .note = "the kernel's names: bin dev env fd net proc root srv" });
+    for ([_]mount.Stack{ .root, .linux }) |st| {
+        const overlaid = if (st == .root) root_overlay else linux_overlay;
+        var first = true;
+        for (in.mounts) |m| {
+            const ms = m.stack() orelse continue;
+            if (ms[0] != st) continue;
+            const to = if (ms[1].len == 0) st.dev() else try std.fmt.allocPrint(arena, "{s}/{s}", .{ st.dev(), ms[1] });
+            const flag: Bind.Flag = if (m.order) |o| (if (o == .before) .before else .after) else if (first) .repl else .before;
+            first = false;
+            try binds.append(arena, try memberBind(arena, in, pol, m, to, flag, true, st == .linux, overlaid, can_write and !eph, &rules));
+        }
+        if (st == .linux and !has_linux) continue;
+        if (overlaid) try binds.append(arena, .{ .from = "#O", .to = st.dev(), .create = true, .access = .eph });
+        if (st == .root) {
+            try binds.append(arena, .{ .from = st.dev(), .to = "/", .flag = .after, .create = root_overlay or stack_rw[0] });
+            try binds.append(arena, .{ .from = st.dev(), .to = "/root", .note = "$rootdir: the root stack without the namespace's binds" });
+            // The kernel's `#/` has a `mnt`, so the root's comes before
+            // it, as 9front's /lib/namespace binds $rootdir/mnt.
+            try binds.append(arena, .{ .from = "/root/mnt", .to = "/mnt", .create = true, .optional = true, .make_from = true });
+        }
     }
-    // A 9P root isn't a host path, so it has no access rule: its server
-    // decides what can be written.
-    if (in.root_9p) |r| try binds.append(arena, .{
-        .from = root_srv,
-        .to = "/",
-        .mount = true,
-        .spec = r.spec,
-        .access = .@"9p",
-        .note = try rootNote(arena, r),
-    });
-    // The built-in root is constant data, so it has no access rule either,
-    // and is read-only whatever the flags.
-    if (builtin_is_root) try binds.append(arena, .{ .from = builtin_dev, .to = "/", .access = .builtin, .note = in.builtin_note });
-    // Right after the root, before every other bind, so the device sees
-    // only the root's own files and everything else is bound over it.
-    // Over a host tree the lower tree is the root's path through `#U`;
-    // over a 9P or the built-in root it's the bind, a bare `#O`.
-    if (root_overlay) try binds.append(arena, .{ .from = "#O", .to = "/", .create = true, .access = .eph, .lower = in.root, .contained = in.root_contained });
-    const has_root = other_root or builtin_is_root;
+    const has_root = true;
 
     try binds.append(arena, .{ .from = "#c", .to = "/dev", .optional = true });
     try binds.append(arena, .{ .from = "#y", .to = "/dev", .flag = .before, .console = true });
@@ -647,35 +675,17 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // a conversation translates a connection the guest already has.
     try binds.append(arena, .{ .from = "#" ++ dotl_dev, .to = "/net", .flag = .after, .optional = true, .note = "9P2000.L mounts" });
     if (has_root) {
-        const boxed = try std.fmt.allocPrint(arena, "{s}/{s}/bin", .{ builtin_dev, in.arch.name() });
-        // --builtin=before: the box's commands first, then the root's.
-        if (builtin_bin == .before) try binds.append(arena, .{ .from = boxed, .to = "/bin", .access = .builtin, .optional = true });
-        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .flag = if (builtin_bin == .before) .after else .repl, .optional = true });
+        try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
-        // --builtin=after: the box fills what the root lacks.
-        if (builtin_bin == .after) try binds.append(arena, .{ .from = boxed, .to = "/bin", .flag = .after, .access = .builtin, .optional = true });
-        // h9's own commands (design/epoch-0/guest-tools.md), after the root's
+        // h9's own commands (design/guest-tools.md), after the root's
         // so a root command of the same name wins.
         if (in.guest_tools) try binds.append(arena, .{ .from = "#H/bin", .to = "/bin", .flag = .after, .optional = true, .note = "h9's commands" });
     }
 
-    // A private /tmp in memory, over the root tree's own empty /tmp, in
-    // both profiles. --write=none leaves the root's read-only /tmp.
-    if (in.root) |root| if (write != .none) {
-        try binds.append(arena, .{
-            .from = "#O",
-            .to = "/tmp",
-            .create = true,
-            .access = .eph,
-            .lower = try std.fmt.allocPrint(arena, "{s}{s}tmp", .{ root, if (std.mem.endsWith(u8, root, "/")) "" else "/" }),
-            .optional = true,
-        });
-    };
-    // Over a 9P or the built-in root, the overlay's lower tree is the
-    // root's own /tmp: a bare #O, as in a namespace file.
-    if ((in.root_9p != null or builtin_is_root) and write != .none) {
-        try binds.append(arena, .{ .from = "#O", .to = "/tmp", .create = true, .access = .eph, .optional = true });
-    }
+    // A private /tmp in memory, over the root's own /tmp, in both
+    // profiles; made in the root's overlay if the root has none.
+    // --write=none leaves the root's read-only /tmp.
+    if (write != .none) try binds.append(arena, .{ .from = "#O", .to = "/tmp", .create = true, .access = .eph, .optional = true, .make = true });
 
     // Readable and writable paths outside the root and cwd appear under
     // /mnt/term at their host path, as in drawterm: the host's / is
@@ -688,7 +698,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     // --host-fs shows the whole host read-only; --writable still applies.
     if (pol.host_fs) try rules.append(arena, .{ .path = "/", .kind = .allow_ro });
     if (has_root and need_mnt_term) {
-        try binds.append(arena, .{ .from = "#U/", .to = "/mnt/term", .flag = .after, .access = if (pol.host_fs) .ro else null });
+        try binds.append(arena, .{ .from = "#U/", .to = "/mnt/term", .flag = .after, .access = if (pol.host_fs) .ro else null, .make = true });
     }
 
     var guest_cwd: ?[]const u8 = null;
@@ -697,6 +707,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (has_root) {
             var b = try acc.bind(arena, cwd, "/mnt/term/cwd", cwd_rw);
             b.fallback = "/mnt/term";
+            b.make = true;
             try binds.append(arena, b);
             guest_cwd = "/mnt/term/cwd";
         }
@@ -717,34 +728,30 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
 
     for (pol.read_deny) |p| try rules.append(arena, .{ .path = p, .kind = .deny });
 
-    // The Linux view (design/epoch-0/linux-personality.md): the Linux root
+    // Mounts on any other destination take Plan 9's rules: the mount
+    // replaces what's there, b and a make a one-level union with it, and
+    // r a union merged at every depth. A missing destination is made in
+    // the root's overlay.
+    for (in.mounts) |m| {
+        if (m.stack() != null) continue;
+        const flag: Bind.Flag = if (m.order) |o| (if (o == .before) .before else .after) else .repl;
+        var b = try memberBind(arena, in, pol, m, m.dst, flag, false, false, false, can_write and !eph, &rules);
+        b.recursive = m.recursive;
+        b.make = m.srvName() == null;
+        b.what = try std.fmt.allocPrint(arena, "{f}", .{m});
+        try binds.append(arena, b);
+    }
+
+    // The Linux view (design/linux-personality.md): the Linux stack
     // after devlinux's own directories, and the shared trees on its mount
-    // points, only with a Linux root: without one, a Linux binary from a
+    // points, only with a Linux tree: without one, a Linux binary from a
     // host path sees devlinux's own tree.
     const lv = linux_view;
-    if (in.linux_root) |lr| {
-        const lr_overlay = (write == .overlay or eph) and !hostWritable(pol.writable, lr, can_write and !eph);
-        const lr_rw = !lr_overlay and hostWritable(pol.writable, lr, can_write and !eph);
-        try rules.append(arena, .{ .path = lr, .kind = if (lr_overlay) .allow_eph else if (lr_rw) .allow_rw else .allow_ro });
-        if (lr_overlay) {
-            try binds.append(arena, .{ .from = "#O", .to = lv, .flag = .after, .create = true, .access = .eph, .lower = lr, .contained = true });
-        } else {
-            try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "#U!c{s}", .{lr}), .to = lv, .flag = .after, .create = lr_rw, .access = if (lr_rw) .rw else .ro });
-        }
-    }
-    if (in.linux_root != null) {
-        if (has_root) {
-            try binds.append(arena, .{ .from = "/", .to = lv ++ "/9", .note = "the 9front root" });
-            if (write != .none) try binds.append(arena, .{ .from = "/tmp", .to = lv ++ "/tmp", .create = true, .optional = true });
-            try binds.append(arena, .{ .from = "/mnt/term", .to = lv ++ "/mnt/term", .optional = true });
-        } else {
-            if (write != .none) try binds.append(arena, .{ .from = "#O", .to = lv ++ "/tmp", .create = true, .access = .eph, .optional = true });
-            if (guest_cwd == null) if (in.cwd) |cwd| {
-                var b = try acc.bind(arena, cwd, lv ++ "/mnt/term/cwd", cwd_rw);
-                b.fallback = lv ++ "/mnt/term";
-                try binds.append(arena, b);
-            };
-        }
+    if (has_linux) {
+        try binds.append(arena, .{ .from = mount.Stack.linux.dev(), .to = lv, .flag = .after, .create = linux_overlay or stack_rw[1] });
+        try binds.append(arena, .{ .from = "/", .to = lv ++ "/9", .note = "the 9front root" });
+        if (write != .none) try binds.append(arena, .{ .from = "/tmp", .to = lv ++ "/tmp", .create = true, .optional = true });
+        try binds.append(arena, .{ .from = "/mnt/term", .to = lv ++ "/mnt/term", .optional = true });
         try binds.append(arena, .{ .from = "#d", .to = lv ++ "/dev/fd", .optional = true });
         // Pseudoterminals (design/epoch-0/linux-pty.md): /dev/pts is #τ, and
         // /dev/ptmx its clone file.
@@ -761,6 +768,16 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             try binds.append(arena, .{ .from = "#y", .to = try std.fmt.allocPrint(arena, lv ++ "/dev/{s}", .{name}), .console = true, .optional = true, .cons_file = true });
         }
     }
+
+    // --bind runs after every mount, in the order given, and before --ns.
+    for (in.binds) |b| try binds.append(arena, .{
+        .from = b.src,
+        .to = b.dst,
+        .flag = if (b.order) |o| (if (o == .before) .before else .after) else .repl,
+        .create = b.create,
+        .recursive = b.recursive,
+        .what = try std.fmt.allocPrint(arena, "--bind {s}:{s}", .{ b.src, b.dst }),
+    });
 
     var devmask: std.ArrayList(u8) = .empty;
     // #C (host commands) isn't built while design/host-cmd.md rethinks
@@ -798,7 +815,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     for (rules.items) |r| switch (r.kind) {
         .allow_rw => any_rw = true,
         // The root's overlay has its own caveat.
-        .allow_eph => if (!(root_overlay and in.root != null and std.mem.eql(u8, r.path, in.root.?))) {
+        .allow_eph => if (!(root_overlay and isStackDir(in, r.path))) {
             any_eph = true;
         },
         else => {},
@@ -810,21 +827,23 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try caveats.append(arena, "hardlinks under writable paths can modify host files outside them");
         try caveats.append(arena, "writes to writable paths are not capped (no res.disk)");
     }
-    if (in.root_9p) |r| {
+    for (binds.items) |b| if (b.url) |r| {
+        const is_root = std.mem.eql(u8, b.to, mount.Stack.root.dev());
+        const what = if (is_root) "the 9P root" else try std.fmt.allocPrint(arena, "the 9P mount on {s}", .{b.to});
         // Under the root's overlay nothing reaches the server.
-        if (!root_overlay) try caveats.append(arena, "writes to the 9P root go to its server, which decides what can be written");
+        if (!(is_root and root_overlay)) try caveats.append(arena, try std.fmt.allocPrint(arena, "writes to {s} go to its server, which decides what can be written", .{what}));
         const plain = switch (r.kind) {
             .tcp => true,
             .unix => false,
             .ws => !std.mem.startsWith(u8, r.addr, "wss://"),
         };
-        if (plain) try caveats.append(arena, "the 9P root's connection isn't encrypted");
-    }
+        if (plain) try caveats.append(arena, try std.fmt.allocPrint(arena, "{s}'s connection isn't encrypted", .{what}));
+    };
     try caveats.append(arena, "paths are checked after resolving symlinks, so a host process renaming paths concurrently can race the check");
     // A Linux program resolves names itself, through the host's DNS
     // servers (design/epoch-0/linux-net.md).
     var nameservers: std.ArrayList([16]u8) = .empty;
-    if (in.linux_root != null and net != .disable) for (in.nameservers) |ns| {
+    if (has_linux and net != .disable) for (in.nameservers) |ns| {
         if (parseIp(ns)) |a| try nameservers.append(arena, a);
     };
     var ll_dns = false;
@@ -883,12 +902,104 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         .enforces = enforces,
         .caveats = caveats.items,
         .guest_cwd = guest_cwd,
-        .root_9p = in.root_9p,
         .root_overlay = root_overlay,
         .nameservers = nameservers.items,
         .gfx = in.gfx,
         .serve = serve_plan,
     };
+}
+
+
+/// Whether a URL is a WebSocket's, or will probe for one.
+fn isWs(url: []const u8) bool {
+    const s = mount.scheme(url) orelse return true;
+    return !std.mem.eql(u8, s, "tcp") and !std.mem.eql(u8, s, "unix");
+}
+
+/// The 9P connection a `--url` mount makes (design/mounts.md, "URLs"):
+/// `tcp://HOST:PORT[/SPEC]` dials `tcp!HOST!PORT`, `unix:///PATH` the
+/// socket at PATH, and `ws://` and `wss://` as they are. `http://` and
+/// `https://` are a WebSocket's (static dotfs trees aren't served yet),
+/// and a URL without a scheme is `ws://` for a loopback host and `wss://`
+/// for any other.
+pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!NinePRoot {
+    var r: NinePRoot = .{ .kind = .ws, .addr = m.src, .user = m.user, .headers = m.headers, .ca = m.ca };
+    const s = mount.scheme(m.src);
+    if (s) |sc| {
+        const rest = m.src[sc.len + 3 ..];
+        if (std.mem.eql(u8, sc, "tcp")) {
+            const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+            const hostport = rest[0..slash];
+            const colon = std.mem.lastIndexOfScalar(u8, hostport, ':') orelse hostport.len;
+            var host = hostport[0..colon];
+            if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host = host[1 .. host.len - 1];
+            const port = if (colon < hostport.len) hostport[colon + 1 ..] else "564";
+            r.kind = .tcp;
+            r.addr = try std.fmt.allocPrint(arena, "tcp!{s}!{s}", .{ host, port });
+            if (slash < rest.len) r.spec = rest[slash + 1 ..];
+        } else if (std.mem.eql(u8, sc, "unix")) {
+            r.kind = .unix;
+            r.addr = try std.fmt.allocPrint(arena, "unix!{s}", .{rest});
+        } else if (std.mem.eql(u8, sc, "http")) {
+            r.addr = try std.fmt.allocPrint(arena, "ws://{s}", .{rest});
+        } else if (std.mem.eql(u8, sc, "https")) {
+            r.addr = try std.fmt.allocPrint(arena, "wss://{s}", .{rest});
+        }
+    } else {
+        const host_end = std.mem.indexOfAny(u8, m.src, "/:") orelse m.src.len;
+        const host = m.src[0..host_end];
+        const loop = std.mem.eql(u8, host, "localhost") or std.mem.startsWith(u8, host, "127.") or std.mem.eql(u8, host, "[::1]");
+        // A bare host is the server's top, `/`.
+        const slash = if (std.mem.indexOfAny(u8, m.src, "/?#") == null) "/" else "";
+        r.addr = try std.fmt.allocPrint(arena, "{s}://{s}{s}", .{ if (loop) "ws" else "wss", m.src, slash });
+    }
+    if (m.spec) |sp| r.spec = sp;
+    return r;
+}
+
+/// A mount's line of the plan. `on_stack` makes it a member of the stack
+/// `to` names (`#Oroot`, `#Olinux/etc`); `overlaid` says that stack is
+/// under an overlay; `host_rw_ok` that a host path may be written.
+fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount, to: []const u8, flag: Bind.Flag, on_stack: bool, linux: bool, overlaid: bool, host_rw_ok: bool, rules: *std.ArrayList(Rule)) CompileError!Bind {
+    switch (m.kind) {
+        .dir => {
+            const want_rw = m.access == .rw or hostWritable(pol.writable, m.src, true);
+            const rw = want_rw and host_rw_ok;
+            // Under --write=ephemeral, rw is eph: nothing writes the host.
+            const e = !on_stack and (m.access == .eph or (want_rw and !host_rw_ok and pol.write == .ephemeral));
+            const contained = m.contained or linux;
+            try rules.append(arena, .{ .path = m.src, .kind = if (rw) .allow_rw else if (e or (on_stack and overlaid)) .allow_eph else .allow_ro });
+            if (e) return .{ .from = "#O", .to = to, .flag = flag, .create = true, .access = .eph, .lower = m.src, .contained = contained };
+            return .{
+                .from = try std.fmt.allocPrint(arena, "#U{s}{s}", .{ if (contained) "!c" else "", m.src }),
+                .to = to,
+                .flag = flag,
+                .recursive = on_stack,
+                .create = rw or (m.create and !on_stack),
+                .access = if (rw) .rw else .ro,
+            };
+        },
+        .url, .fd => {
+            const r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
+            return .{
+                // The URL h9 connects to, so a replay needs no scheme rule.
+                .from = if (r.kind == .ws) r.addr else m.src,
+                .to = to,
+                .flag = flag,
+                .mount = true,
+                .recursive = on_stack,
+                .create = m.create or (on_stack and !overlaid and host_rw_ok and m.access != .ro),
+                .spec = r.spec,
+                .access = .@"9p",
+                .url = r,
+                .fd = m.fd,
+                .note = try rootNoteOf(arena, r),
+            };
+        },
+        .builtin => return .{ .from = builtin_dev, .to = to, .flag = flag, .recursive = on_stack, .access = .builtin, .note = in.builtin_note },
+        .tmp => return .{ .from = "#O", .to = to, .flag = flag, .recursive = on_stack, .create = true, .access = .eph, .empty = true, .note = "an empty tree in memory" },
+        .archive => return .{ .from = "#O", .to = to, .flag = flag, .recursive = on_stack, .create = !on_stack, .access = .eph, .empty = true, .archive = m.src, .note = try std.fmt.allocPrint(arena, "the archive {s}", .{m.src}) },
+    }
 }
 
 const Place = union(enum) {
@@ -902,13 +1013,29 @@ const Place = union(enum) {
 /// Where a host path appears in the guest: inside the root tree, inside
 /// the cwd (the deeper of the two wins), or at /mnt/term/<path>.
 fn guestPlace(in: Inputs, p: []const u8) Place {
-    const in_root = if (in.root) |r| relUnder(r, p) else null;
+    // The deepest host directory on the root stack's top that holds p.
+    var root: ?[]const u8 = null;
+    var in_root: ?[]const u8 = null;
+    for (in.mounts) |m| {
+        if (m.kind != .dir or !std.mem.eql(u8, m.dst, "/")) continue;
+        const rel = relUnder(m.src, p) orelse continue;
+        if (root == null or m.src.len > root.?.len) {
+            root = m.src;
+            in_root = rel;
+        }
+    }
     const in_cwd = if (in.cwd) |c| relUnder(c, p) else null;
-    if (in_cwd != null and (in_root == null or in.cwd.?.len >= in.root.?.len)) {
+    if (in_cwd != null and (in_root == null or in.cwd.?.len >= root.?.len)) {
         return if (in_cwd.?.len == 0) .cwd_top else .{ .cwd = in_cwd.? };
     }
     if (in_root) |rel| return if (rel.len == 0) .root_top else .{ .root = rel };
     return .mnt_term;
+}
+
+/// Whether host path `p` is a directory on one of the stacks.
+fn isStackDir(in: Inputs, p: []const u8) bool {
+    for (in.mounts) |m| if (m.kind == .dir and m.stack() != null and std.mem.eql(u8, m.src, p)) return true;
+    return false;
 }
 
 /// The path of `p` relative to `dir` if `p` is `dir` or beneath it.
@@ -1288,6 +1415,8 @@ pub const NameTable = struct {
 
 const t = std.testing;
 
+const r_mounts = [_]mount.Mount{.{ .kind = .dir, .src = "/r" }};
+
 test "rules: deny wins, longest allow decides, ancestors are read-only" {
     const rules = [_]Rule{
         .{ .path = "/r", .kind = .allow_ro },
@@ -1319,7 +1448,7 @@ test "compile: default and tight profiles" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
-    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
+    const in: Inputs = .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 };
 
     const d = try compile(arena.allocator(), in, .{}, &msg);
     try t.expectEqual(Verdict.allow, d.check("/w/f", .create));
@@ -1353,232 +1482,15 @@ test "compile: --write=none conflicts with --writable" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
-    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
+    const in: Inputs = .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 };
     try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .write = .none, .writable = &.{"/w"} }, &msg));
-}
-
-test "compile: --root-contained (design/epoch-0/symlinks-in-root.md)" {
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var msg: []const u8 = "";
-    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64, .root_contained = true };
-    const p = try compile(a, in, .{}, &msg);
-    // The root's bind and its overlay's lower tree are contained; the rest
-    // aren't.
-    try t.expectEqualStrings("#U!c/r", p.binds[0].from);
-    try t.expectEqualStrings("/", p.binds[0].to);
-    try t.expectEqualStrings("#O", p.binds[1].from);
-    try t.expect(p.binds[1].contained);
-    for (p.binds[2..]) |b| try t.expect(!b.contained and !std.mem.startsWith(u8, b.from, "#U!c"));
-    // The access rules are on host paths, as before.
-    try t.expectEqual(Verdict.allow, p.check("/r/lib/x", .read));
-    var out: std.Io.Writer.Allocating = .init(a);
-    try p.print(&out.writer);
-    try t.expect(std.mem.indexOf(u8, out.written(), "  bind '#U!c/r' /") != null);
-    // Under --write=scope, there's no overlay.
-    const s = try compile(a, in, .{ .write = .scope }, &msg);
-    try t.expectEqualStrings("#U!c/r", s.binds[0].from);
-    try t.expect(!s.root_overlay);
-    // A 9P root isn't a host tree.
-    try t.expectError(error.Conflict, compile(a, .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!fs!564" }, .cwd = "/w", .arch = .arm64, .root_contained = true }, .{}, &msg));
-    try t.expect(std.mem.indexOf(u8, msg, "--root-contained") != null);
-    // A Linux root alone is a host tree, already contained.
-    _ = try compile(a, .{ .root = null, .linux_root = "/l", .cwd = "/w", .arch = .amd64, .root_contained = true }, .{}, &msg);
-}
-
-test "compile: the root's overlay (design/epoch-0/overlay.md)" {
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var msg: []const u8 = "";
-    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
-
-    const Find = struct {
-        /// The index of the first bind onto `to` from `from`.
-        fn at(p: Plan, from: []const u8, to: []const u8) ?usize {
-            for (p.binds, 0..) |b, i| if (std.mem.eql(u8, b.from, from) and std.mem.eql(u8, b.to, to)) return i;
-            return null;
-        }
-    };
-
-    // The default, in both profiles: #U then #O on /, before every other
-    // bind, and devfs keeps the root read-only.
-    for ([_]Profile{ .default, .tight }) |prof| {
-        const p = try compile(a, in, .{ .profile = prof }, &msg);
-        try t.expectEqual(WriteMode.overlay, p.write);
-        try t.expect(p.root_overlay);
-        try t.expectEqual(@as(?usize, 0), Find.at(p, "#U/r", "/"));
-        try t.expectEqual(@as(?usize, 1), Find.at(p, "#O", "/"));
-        const o = p.binds[1];
-        try t.expectEqualStrings("/r", o.lower.?);
-        try t.expect(o.create);
-        try t.expectEqual(Access.eph, o.access.?);
-        try t.expectEqual(Verdict.read_only, p.check("/r/lib/x", .create));
-        try t.expectEqual(Verdict.allow, p.check("/r/lib/x", .read));
-        try t.expect(p.enforces.contains(.@"fs.write.overlay"));
-    }
-    // The cwd still writes the host under overlay, and tight's stays
-    // read-only.
-    try t.expectEqual(Verdict.allow, (try compile(a, in, .{ .write = .overlay }, &msg)).check("/w/f", .create));
-    try t.expectEqual(Verdict.read_only, (try compile(a, in, .{ .profile = .tight }, &msg)).check("/w/f", .create));
-
-    // scope and none keep the root read-only, with no overlay.
-    for ([_]WriteMode{ .scope, .none }) |w| for ([_]Profile{ .default, .tight }) |prof| {
-        const p = try compile(a, in, .{ .profile = prof, .write = w }, &msg);
-        try t.expect(!p.root_overlay);
-        try t.expectEqual(@as(?usize, null), Find.at(p, "#O", "/"));
-        try t.expect(!p.enforces.contains(.@"fs.write.overlay"));
-    };
-
-    // Ephemeral overlays the root too, writable or not.
-    for ([_][]const []const u8{ &.{}, &.{"/r"} }) |wr| {
-        const p = try compile(a, in, .{ .write = .ephemeral, .writable = wr }, &msg);
-        try t.expect(p.root_overlay);
-        try t.expectEqual(@as(?usize, 0), Find.at(p, "#U/r", "/"));
-        try t.expectEqual(@as(?usize, 1), Find.at(p, "#O", "/"));
-        try t.expectEqual(Verdict.read_only, p.check("/r/f", .create));
-        try t.expect(p.enforces.contains(.@"fs.write.overlay"));
-        try t.expect(p.enforces.contains(.@"fs.write.ephemeral"));
-    }
-
-    // --writable on the root writes the host, with no overlay, under
-    // scope and overlay.
-    for ([_]WriteMode{ .scope, .overlay }) |w| {
-        const p = try compile(a, in, .{ .write = w, .writable = &.{"/r"} }, &msg);
-        try t.expect(!p.root_overlay);
-        try t.expectEqual(@as(?usize, null), Find.at(p, "#O", "/"));
-        try t.expect(p.binds[0].create);
-        try t.expectEqual(Access.rw, p.binds[0].access.?);
-        try t.expectEqual(Verdict.allow, p.check("/r/f", .create));
-    }
-
-    // A writable path inside the root is bound from #U over the overlay.
-    const g = try compile(a, in, .{ .writable = &.{"/r/usr/glenda"} }, &msg);
-    const gi = Find.at(g, "#U/r/usr/glenda", "/usr/glenda").?;
-    try t.expect(gi > Find.at(g, "#O", "/").?);
-    try t.expectEqual(Verdict.allow, g.check("/r/usr/glenda/x", .create));
-    try t.expectEqual(Verdict.read_only, g.check("/r/usr/x", .create));
-
-    // A 9P root: a bare #O over the mount, and no "server" caveat.
-    const nr = try compile(a, .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!h!564" }, .cwd = "/w", .arch = .arm64 }, .{}, &msg);
-    try t.expect(nr.root_overlay);
-    const ni = Find.at(nr, "#O", "/").?;
-    try t.expectEqual(@as(usize, 1), ni);
-    try t.expectEqual(@as(?[]const u8, null), nr.binds[ni].lower);
-    for (nr.caveats) |c| try t.expect(std.mem.indexOf(u8, c, "go to its server") == null);
-    const ns = try compile(a, .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!h!564" }, .cwd = "/w", .arch = .arm64 }, .{ .write = .scope }, &msg);
-    try t.expect(!ns.root_overlay);
-    var server = false;
-    for (ns.caveats) |c| if (std.mem.indexOf(u8, c, "go to its server") != null) {
-        server = true;
-    };
-    try t.expect(server);
-
-    // The plan as --print shows it.
-    const d = try compile(a, in, .{}, &msg);
-    var out: std.Io.Writer.Allocating = .init(t.allocator);
-    defer out.deinit();
-    try d.print(&out.writer);
-    const text = out.written();
-    try t.expect(std.mem.indexOf(u8, text, "enforces: env.scrub fs.read.scope fs.write.overlay fs.write.scope") != null);
-    try t.expect(std.mem.indexOf(u8, text, "limits:   write=overlay") != null);
-    try t.expect(std.mem.indexOf(u8, text, "  bind '#U/r' /") != null);
-    try t.expect(std.mem.indexOf(u8, text, "  bind -c '#O' /                                         eph  # /r\n") != null);
-    try t.expect(std.mem.indexOf(u8, text, "  eph  /r\n") != null);
-    try t.expect(std.mem.indexOf(u8, text, "writes to the root are kept in memory") != null);
-    try t.expect(std.mem.indexOf(u8, text, "ephemeral files count against --memory") == null);
-}
-
-/// The plan's binds, `from to` with the flag, one per line, for tests.
-fn bindList(arena: std.mem.Allocator, p: Plan) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(arena);
-    for (p.binds) |b| try out.writer.print("{s}{s} {s}\n", .{ switch (b.flag) {
-        .repl => "",
-        .before => "-b ",
-        .after => "-a ",
-    }, b.from, b.to });
-    return out.written();
-}
-
-test "compile: the built-in root as / (design/epoch-0/builtin-root.md)" {
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var msg: []const u8 = "";
-    const in: Inputs = .{ .root = null, .cwd = "/w", .arch = .arm64, .builtin = .only, .builtin_note = "h9 v0, 9front 11952 slim" };
-    const p = try compile(a, in, .{}, &msg);
-    // Read-only constant data with no access rule, under the root's
-    // overlay, then the usual namespace, with /tmp a bare #O and the cwd
-    // bound as over a host root.
-    try t.expectEqualStrings("#Hroot", p.binds[0].from);
-    try t.expectEqualStrings("/", p.binds[0].to);
-    try t.expectEqual(Access.builtin, p.binds[0].access.?);
-    try t.expectEqualStrings("#O", p.binds[1].from);
-    try t.expect(p.binds[1].lower == null);
-    try t.expect(p.root_overlay);
-    try t.expectEqualStrings("/mnt/term/cwd", p.guest_cwd.?);
-    const list = try bindList(a, p);
-    try t.expect(std.mem.indexOf(u8, list, "/arm64/bin /bin\n-a /rc/bin /bin\n-a #H/bin /bin\n") != null);
-    try t.expect(std.mem.indexOf(u8, list, "#O /tmp\n") != null);
-    for (p.rules) |r| try t.expect(!std.mem.eql(u8, r.path, "/"));
-    var out: std.Io.Writer.Allocating = .init(a);
-    try p.print(&out.writer);
-    const at = std.mem.indexOf(u8, out.written(), "  bind '#Hroot' / ") orelse return error.NoBind;
-    const line = out.written()[at..std.mem.indexOfScalarPos(u8, out.written(), at, '\n').?];
-    try t.expect(std.mem.endsWith(u8, line, " builtin  # h9 v0, 9front 11952 slim"));
-
-    // --write=none: no overlays, and the root stays read-only.
-    const none = try compile(a, in, .{ .write = .none }, &msg);
-    for (none.binds) |b| try t.expect(!std.mem.eql(u8, b.from, "#O"));
-    // Paths outside the cwd go under /mnt/term, as over any root.
-    const rd = try compile(a, in, .{ .readable = &.{"/src"} }, &msg);
-    try t.expect(std.mem.indexOf(u8, try bindList(a, rd), "#U/src /mnt/term/src\n") != null);
-    // before and after without another root are the same as only.
-    for ([_]Builtin{ .before, .after }) |m| {
-        var in2 = in;
-        in2.builtin = m;
-        try t.expectEqualStrings(list, try bindList(a, try compile(a, in2, .{}, &msg)));
-    }
-    // .off without a root: devices only.
-    var off = in;
-    off.builtin = .off;
-    const bare = try compile(a, off, .{}, &msg);
-    try t.expect(bare.guest_cwd == null);
-    try t.expect(std.mem.indexOf(u8, try bindList(a, bare), "/bin") == null);
-}
-
-test "compile: --builtin=only conflicts with another root (design/epoch-0/builtin-root.md)" {
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    var msg: []const u8 = "";
-    try t.expectError(error.Conflict, compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .builtin = .only }, .{}, &msg));
-    try t.expectEqualStrings("--builtin=only conflicts with a root", msg);
-    try t.expectError(error.Conflict, compile(arena.allocator(), .{ .root = null, .root_9p = .{ .kind = .tcp, .addr = "tcp!h!564" }, .cwd = "/w", .arch = .arm64, .builtin = .only }, .{}, &msg));
-}
-
-test "compile: --builtin=before and after layer the box's /bin (design/epoch-0/builtin-root.md)" {
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var msg: []const u8 = "";
-    const nine: NinePRoot = .{ .kind = .tcp, .addr = "tcp!fs.example.com!564" };
-    const before = try bindList(a, try compile(a, .{ .root = null, .root_9p = nine, .cwd = "/w", .arch = .arm64, .builtin = .before }, .{}, &msg));
-    try t.expect(std.mem.indexOf(u8, before, "#Hroot/arm64/bin /bin\n-a /arm64/bin /bin\n-a /rc/bin /bin\n-a #H/bin /bin\n") != null);
-    // The root is unchanged.
-    try t.expect(std.mem.indexOf(u8, before, "#Hroot /\n") == null);
-    const after = try bindList(a, try compile(a, .{ .root = "/r", .cwd = "/w", .arch = .amd64, .builtin = .after }, .{}, &msg));
-    try t.expect(std.mem.indexOf(u8, after, "/amd64/bin /bin\n-a /rc/bin /bin\n-a #Hroot/amd64/bin /bin\n-a #H/bin /bin\n") != null);
-    // .off over a root is today's plan.
-    const off = try bindList(a, try compile(a, .{ .root = "/r", .cwd = "/w", .arch = .arm64, .builtin = .off }, .{}, &msg));
-    try t.expect(std.mem.indexOf(u8, off, "#Hroot") == null);
 }
 
 test "compile: paths outside the root and cwd go under /mnt/term" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
-    const p = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64 }, .{ .readable = &.{"/src/proj"} }, &msg);
+    const p = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 }, .{ .readable = &.{"/src/proj"} }, &msg);
     var union_bind = false;
     var path_bind = false;
     for (p.binds) |b| {
@@ -1697,67 +1609,6 @@ test "net: port ranges and name wildcards" {
     try t.expect(!a.matchName(.tcp, "localhost", 1));
 }
 
-test "net: the plan's checks" {
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    var msg: []const u8 = "";
-    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
-
-    const d = try compile(arena.allocator(), in, .{}, &msg);
-    try t.expectEqual(NetMode.outbound, d.net);
-    try t.expect(d.enforces.contains(.@"net.outbound"));
-    try t.expect(!d.enforces.contains(.@"net.allow"));
-    try t.expect(d.netCheck(.connect, .tcp, &tip("127.0.0.1"), 80));
-    try t.expect(!d.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
-    try t.expect(!d.netCheck(.connect, .udp, &tip("fe80::1"), 53));
-    try t.expect(!d.netCheck(.announce, .tcp, &tip("127.0.0.1"), 8080));
-    try t.expect(d.netLookup(.tcp, "anything.example", 80));
-
-    const e = try compile(arena.allocator(), in, .{ .net = .enable }, &msg);
-    try t.expect(e.netCheck(.announce, .udp, &tip("0.0.0.0"), 53));
-    try t.expect(!e.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
-
-    // A Linux program's DNS may reach the host's link-local resolver on
-    // port 53 alone; without a Linux root nothing changes.
-    var lin = in;
-    lin.linux_root = "/l";
-    lin.nameservers = &.{ "169.254.169.254", "not an address" };
-    const dns = try compile(arena.allocator(), lin, .{}, &msg);
-    try t.expect(dns.netCheck(.connect, .udp, &tip("169.254.169.254"), 53));
-    try t.expect(dns.netCheck(.connect, .tcp, &tip("169.254.169.254"), 53));
-    try t.expect(!dns.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
-    try t.expect(!dns.netCheck(.connect, .udp, &tip("169.254.169.253"), 53));
-    lin.linux_root = null;
-    const nodns = try compile(arena.allocator(), lin, .{}, &msg);
-    try t.expect(!nodns.netCheck(.connect, .udp, &tip("169.254.169.254"), 53));
-
-    // Patterns are the whole policy.
-    const ll = try compile(arena.allocator(), in, .{ .net_allow = &.{"tcp!169.254.0.0/16!*"} }, &msg);
-    try t.expect(ll.netCheck(.connect, .tcp, &tip("169.254.169.254"), 80));
-    try t.expect(!ll.netCheck(.connect, .tcp, &tip("127.0.0.1"), 80));
-    try t.expect(!ll.netLookup(.tcp, "localhost", 80));
-    try t.expect(ll.names == null);
-    try t.expect(ll.enforces.contains(.@"net.allow"));
-
-    const nm = try compile(arena.allocator(), in, .{ .net_allow = &.{ "tcp!*.example.com!443", "udp!10.0.0.53!53" } }, &msg);
-    try t.expect(nm.netLookup(.tcp, "api.example.com", 443));
-    try t.expect(!nm.netLookup(.tcp, "api.example.com", 80));
-    try t.expect(!nm.netLookup(.udp, "api.example.com", 443));
-    try t.expect(!nm.netLookup(.tcp, "example.org", 443));
-    try t.expect(!nm.netCheck(.connect, .tcp, &tip("93.184.216.34"), 443));
-    nm.netResolved(.tcp, "api.example.com", 443, &.{ tip("93.184.216.34"), tip("2606:2800::1") });
-    try t.expect(nm.netCheck(.connect, .tcp, &tip("93.184.216.34"), 443));
-    try t.expect(nm.netCheck(.connect, .tcp, &tip("2606:2800::1"), 443));
-    try t.expect(!nm.netCheck(.connect, .tcp, &tip("93.184.216.34"), 80));
-    try t.expect(!nm.netCheck(.connect, .udp, &tip("93.184.216.34"), 443));
-    try t.expect(nm.netCheck(.connect, .udp, &tip("10.0.0.53"), 53));
-    try t.expect(!nm.netCheck(.connect, null, &tip("10.0.0.53"), 53));
-
-    try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .net = .disable, .net_allow = &.{"tcp!*!*"} }, &msg));
-    try t.expectError(error.Conflict, compile(arena.allocator(), in, .{ .net_allow = &.{"tcp!x!y"} }, &msg));
-    try t.expect(std.mem.indexOf(u8, msg, "tcp!x!y") != null);
-}
-
 test "net: the resolved-name table keeps the most recent entries" {
     const nt = try t.allocator.create(NameTable);
     defer t.allocator.destroy(nt);
@@ -1785,7 +1636,7 @@ test "net: --print shows patterns and caveats" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
-    const p = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64 }, .{ .net_allow = &.{ "tcp!*.example.com!443", "udp!10.0.0.53!53" } }, &msg);
+    const p = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 }, .{ .net_allow = &.{ "tcp!*.example.com!443", "udp!10.0.0.53!53" } }, &msg);
     var out: std.Io.Writer.Allocating = .init(t.allocator);
     defer out.deinit();
     try p.print(&out.writer);
@@ -1801,7 +1652,7 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
-    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
+    const in: Inputs = .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 };
 
     const Find = struct {
         fn bind(p: Plan, to: []const u8) ?Bind {
@@ -1816,7 +1667,7 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
         const p = try compile(arena.allocator(), in, .{ .profile = prof }, &msg);
         const tmp = Find.bind(p, "/tmp").?;
         try t.expectEqualStrings("#O", tmp.from);
-        try t.expectEqualStrings("/r/tmp", tmp.lower.?);
+        try t.expectEqual(@as(?[]const u8, null), tmp.lower);
         try t.expect(tmp.create);
         try t.expectEqual(Access.eph, tmp.access.?);
         try t.expect(!p.enforces.contains(.@"fs.write.ephemeral"));
@@ -1836,8 +1687,8 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     try t.expectEqual(Verdict.read_only, e.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, e.check("/w/out/f", .write));
     try t.expectEqual(Verdict.allow, e.check("/w/out/f", .read));
-    // The root is read-only to devfs, under an overlay (design/epoch-0/overlay.md).
-    try t.expectEqualStrings("#U/r", Find.bind(e, "/").?.from);
+    // The root is read-only to devfs, under an overlay (design/overlay.md).
+    try t.expectEqualStrings("#U/r", Find.bind(e, "#Oroot").?.from);
     try t.expectEqual(Verdict.read_only, e.check("/r/f", .create));
     for (e.caveats) |c| try t.expect(std.mem.indexOf(u8, c, "hardlinks") == null);
 
@@ -1853,7 +1704,7 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     try t.expect(std.mem.indexOf(u8, text, "limits:   write=ephemeral") != null);
     try t.expect(std.mem.indexOf(u8, text, "  bind -c '#O' /mnt/term/cwd") != null);
     try t.expect(std.mem.indexOf(u8, text, " eph  # /w\n") != null);
-    try t.expect(std.mem.indexOf(u8, text, " eph  # /r/tmp\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "  bind -c '#O' /tmp ") != null);
     try t.expect(std.mem.indexOf(u8, text, "  eph  /w\n") != null);
     try t.expect(std.mem.indexOf(u8, text, "ephemeral files count against --memory") != null);
 }
@@ -1862,7 +1713,7 @@ test "compile: #s at /srv in both profiles, and never masked" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var msg: []const u8 = "";
-    const in: Inputs = .{ .root = "/r", .cwd = "/w", .arch = .arm64 };
+    const in: Inputs = .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 };
     for ([_]Profile{ .default, .tight }) |prof| {
         const p = try compile(arena.allocator(), in, .{ .profile = prof }, &msg);
         var found = false;
@@ -1886,7 +1737,7 @@ test "compile: #H/bin after /rc/bin in both profiles, and guest_tools = false ma
     defer arena.deinit();
     var msg: []const u8 = "";
     for ([_]Profile{ .default, .tight }) |prof| {
-        const p = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64 }, .{ .profile = prof }, &msg);
+        const p = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 }, .{ .profile = prof }, &msg);
         var rc_at: ?usize = null;
         var h_at: ?usize = null;
         for (p.binds, 0..) |b, i| {
@@ -1905,7 +1756,7 @@ test "compile: #H/bin after /rc/bin in both profiles, and guest_tools = false ma
         try p.print(&out.writer);
         try t.expect(std.mem.indexOf(u8, out.written(), "  bind -a '#H/bin' /bin  # h9's commands\n") != null);
 
-        const off = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .guest_tools = false }, .{ .profile = prof }, &msg);
+        const off = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64, .guest_tools = false }, .{ .profile = prof }, &msg);
         for (off.binds) |b| try t.expect(!std.mem.startsWith(u8, b.from, "#H"));
         try t.expect(std.mem.indexOfScalar(u8, off.devmask, 'H') != null);
     }
@@ -1916,12 +1767,12 @@ test "compile: --gfx binds #i, #m and #b after the console, and masks them witho
     defer arena.deinit();
     var msg: []const u8 = "";
     for ([_]Profile{ .default, .tight }) |prof| {
-        const off = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64 }, .{ .profile = prof }, &msg);
+        const off = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64 }, .{ .profile = prof }, &msg);
         for ("bim") |d| try t.expect(std.mem.indexOfScalar(u8, off.devmask, d) != null);
         for (off.binds) |b| for ([_][]const u8{ "#i", "#m", "#b" }) |d| try t.expect(!std.mem.eql(u8, b.from, d));
         try t.expect(off.gfx == null);
 
-        const on = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .gfx = .{ .backend = "x11" } }, .{ .profile = prof }, &msg);
+        const on = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64, .gfx = .{ .backend = "x11" } }, .{ .profile = prof }, &msg);
         for ("bim") |d| try t.expect(std.mem.indexOfScalar(u8, on.devmask, d) == null);
         var y_at: ?usize = null;
         var want: usize = 0;
@@ -1946,7 +1797,7 @@ test "compile: --gfx binds #i, #m and #b after the console, and masks them witho
         try t.expect(std.mem.indexOf(u8, text, "host clipboard through /dev/snarf") != null);
         try t.expect(std.mem.indexOf(u8, text, "looks like a host dialog") != null);
 
-        const noclip = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .arm64, .gfx = .{ .backend = "cocoa", .clipboard = false, .scale = 2 } }, .{ .profile = prof }, &msg);
+        const noclip = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .arm64, .gfx = .{ .backend = "cocoa", .clipboard = false, .scale = 2 } }, .{ .profile = prof }, &msg);
         out.clearRetainingCapacity();
         try noclip.print(&out.writer);
         try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      cocoa scale=2 clipboard=private\n") != null);
@@ -1961,14 +1812,14 @@ test "compile: the browser host's canvas shows clipboard=page and its own caveat
     var msg: []const u8 = "";
     var out: std.Io.Writer.Allocating = .init(t.allocator);
     defer out.deinit();
-    const page = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .scale = 0 } }, .{}, &msg);
+    const page = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .scale = 0 } }, .{}, &msg);
     try page.print(&out.writer);
     try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      web scale=0 clipboard=page\n") != null);
     try t.expect(std.mem.indexOf(u8, out.written(), "the guest can write the page's clipboard, and read what the user pastes into its canvas") != null);
     try t.expect(std.mem.indexOf(u8, out.written(), "looks like the page's own UI or a browser dialog") != null);
     try t.expect(std.mem.indexOf(u8, out.written(), "host clipboard") == null);
 
-    const private = try compile(arena.allocator(), .{ .root = "/r", .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .clipboard = false, .scale = 2 } }, .{}, &msg);
+    const private = try compile(arena.allocator(), .{ .mounts = &r_mounts, .cwd = "/w", .arch = .i386, .gfx = .{ .backend = "web", .clipboard = false, .scale = 2 } }, .{}, &msg);
     out.clearRetainingCapacity();
     try private.print(&out.writer);
     try t.expect(std.mem.indexOf(u8, out.written(), "gfx:      web scale=2 clipboard=private\n") != null);
