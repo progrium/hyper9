@@ -2,7 +2,7 @@
 issue: 107
 slug: tilde-roots
 title: Tilde roots from $H9ROOTPATH
-status: proposed
+status: declined
 created: 2026-11-08
 authors: [progrium]
 depends: [ninep-roots, websocket-9p, schemeless-roots]
@@ -165,3 +165,7 @@ Demo: `H9ROOTPATH="localhost:8080/ $HOME/roots/" h9 --print --root=~9front ls` s
 - **The marker.** `~`, as proposed, or `+`, which no shell touches (see the table under Rationale). Accepting both would avoid the shell problem for `$H9ROOT` too, at the cost of two spellings for one thing.
 - **Other places a root is named.** The `--layer` flag of [recursive unions](https://github.com/progrium/hyper9/issues/102) would read tilde values the same way. Namespace files and `wsmount` could too, but their sources are guest names, and the guest has no `$H9ROOTPATH`. The browser host has no environment; `createMachine` could take a `rootPath` list, and the demo page could read it from its query.
 - **Keeping the probe's connection.** Handing the matched handshake's connection to the machine would save the extra handshake, but would need `Machine.Options` to take an open connection rather than a URL.
+
+## Declined
+
+- 2026-11-20: It isn't needed: naming a root in full, with [schemeless-roots](schemeless-roots.md) to shorten URLs, has been enough, and searching a list of prefixes at startup, with a WebSocket handshake to probe each server, probably isn't the right way to name roots. A need for short root names that full names can't meet would reopen it, through a new proposal with a different approach.
