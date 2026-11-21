@@ -1509,7 +1509,7 @@ devices in Plan 9.
   `--write=none` with a 9P mount is a usage error. A refused connection or
   attach is exit 125. The connection is plain, unencrypted 9P, so keep a
   TCP server on a trusted network. Unix sockets need a macOS or Linux host.
-- **9P over WebSocket** ([websocket-9p](design/websocket-9p.md)). `--url
+- **9P over WebSocket** ([websocket-9p](design/epoch-0/websocket-9p.md)). `--url
   ws://host/path` or `wss://host/path` uses a 9P server behind a
   WebSocket. h9 makes the connection on the host, offering the `9p`
   subprotocol. `header='Name: value'` adds a handshake header, and

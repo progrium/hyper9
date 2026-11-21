@@ -5,7 +5,7 @@
 //!
 //! Each machine registers its cache directory here, keyed by its kernel
 //! `Hmach`, as dotl/kern.zig keys user maps, and hands over the compiled
-//! indexes it read for `--root-index` with `give`, which a conversation
+//! indexes it read for `index=` with `give`, which a conversation
 //! then takes by number.
 
 const std = @import("std");

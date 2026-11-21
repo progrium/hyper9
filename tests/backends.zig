@@ -1866,10 +1866,11 @@ const LinuxSh = struct {
             .x86_64 => .amd64,
             else => return null,
         };
+        const mounts = [_]h9.Machine.Mount{.{ .kind = .dir, .src = root, .dst = "#L" }};
         var m = h9.Machine.init(std.testing.allocator, std.testing.io, .{
             .backend = kind,
             .arch = arch,
-            .linux_root = root,
+            .mounts = &mounts,
             .cwd = dir,
             .policy = .{ .writable = &.{dir}, .timeout_ns = 20 * std.time.ns_per_s },
             .stdio = .{ .out = &l.out.writer, .err = &l.err.writer },

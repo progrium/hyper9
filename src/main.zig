@@ -169,7 +169,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
         error.NotFound, error.OutOfMemory => exit_failed,
     };
     // Only the built-in root on `/`: a missing command's fix is the full
-    // tree (design/builtin-root.md).
+    // tree (design/epoch-0/builtin-root.md).
     const builtin_only = blk: {
         var saw = false;
         for (mounts) |m| if (m.stack()) |st| if (st[0] == .root) {
@@ -373,7 +373,7 @@ fn run(init: std.process.Init, cfg: cli.Config) !u8 {
             return exit_failed;
         }
         // Over the built-in root alone, the fix for a missing command is
-        // the full tree (design/builtin-root.md).
+        // the full tree (design/epoch-0/builtin-root.md).
         const hint = if (err == error.NotFound and prog == .guest and builtin_only)
             " (not in the built-in root; pass --dir or --url, or set H9ROOT, for the full 9front tree)"
         else
@@ -463,6 +463,12 @@ fn resolveMounts(arena: std.mem.Allocator, io: std.Io, cfg: cli.Config, env: *co
         if (m.stack()) |st| if (st[0] == .root) {
             on_root = true;
         };
+        // Only the root's index is read so far (design/mounts.md).
+        const on_root_stack = if (m.stack()) |st| st[0] == .root else false;
+        if (m.index != null and !on_root_stack) {
+            std.debug.print("h9: {s}: index= needs a 9P member on /\n", .{m.kind.flag()});
+            return error.Usage;
+        }
         try out.append(arena, try resolveMount(arena, io, m));
     }
     if (!on_root) {

@@ -1,5 +1,5 @@
 /*
- * #L: the Linux view's root (design/linux-personality.md, "The Linux
+ * #L: the Linux view's root (design/epoch-0/linux-personality.md, "The Linux
  * view"). Its root directory holds 9, tmp and mnt/term as mount points,
  * and it serves dev, proc and sys itself. The namespace builder binds the
  * Linux root tree after it, so the tree's own files show through, and

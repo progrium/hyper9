@@ -87,7 +87,7 @@ const web_skips = [_][]const u8{
     // A 9P root over TCP.
     "a write to a 9P root under the default profile doesn't reach the server",
     // A page's WebSocket can't set headers or a CA, use a proxy, or ping;
-    // the browser does those (design/websocket-9p.md).
+    // the browser does those (design/epoch-0/websocket-9p.md).
     "header= is sent, and header=@FILE reads headers from a file",
     "header in ctl is sent with the handshake",
     "wsmount mounts a ws:// URL with flags and headers",
@@ -191,7 +191,7 @@ const Result = struct {
     }
 };
 
-/// Runs `h9 --root <root> args...` on each backend and returns the first
+/// Runs `h9 --dir <root> args...` on each backend and returns the first
 /// result, after checking that every backend gave the same one.
 fn run(e: Env, args: []const []const u8) !Result {
     return runIn(e, args, null);
@@ -1955,7 +1955,7 @@ const enter = "\r";
 /// through, and draws the trailing space of "% " as a cursor movement.
 const prompt = "%";
 
-/// Runs `h9 --backend <backend> --root <root> args...` on a new terminal.
+/// Runs `h9 --backend <backend> --dir <root> args...` on a new terminal.
 fn spawnTerm(e: Env, backend: []const u8, args: []const []const u8) !Term {
     return spawnTermEnv(e, backend, args, &.{});
 }
@@ -3842,7 +3842,7 @@ test "--print shows a 9P root, and its output replays with --ns [ninep-roots]" {
     var want: [96]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  mount -r '{s}' '#Oroot' ''", .{srv.url()})) != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "9p  # {s}  index=/.fs/index\n", .{srv.dial()})) != null);
-    // Under the root's overlay (design/overlay.md) nothing reaches
+    // Under the root's overlay (design/epoch-0/overlay.md) nothing reaches
     // the server; under --write=scope its server decides.
     try std.testing.expect(std.mem.indexOf(u8, p.out, "writes to the 9P root go to its server") == null);
     const sp = try run(e, &.{ "--url", srv.url(), "--write=scope", "--print", "ls" });
@@ -4426,7 +4426,7 @@ test "a namespace-file mount of a server with .fs/index uses it [mount-index]" {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c {s} /n\n", .{x.relay.dial()}) });
     x.relay.reset();
     // The test root's own, with the server at /n.
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--index-cache", x.cache, "-v", "--rc", "ls /n/lib/x; test -e /n/lib/zznope || echo absent" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--index-cache", x.cache, "-v", "--rc", "ls /n/lib/x; test -e /n/lib/zznope || echo absent" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
@@ -5199,9 +5199,9 @@ test "--write=none with a ws:// root is a usage error [websocket-9p]" {
     try expectIn(r.err, "--write=none can't be enforced on a WebSocket root");
 }
 
-// schemeless-roots: a --root or $H9ROOT without a scheme.
+// schemeless-roots: a --url or $H9ROOT without a scheme.
 
-/// Runs `h9 args...` on the first backend without the case's --root, in
+/// Runs `h9 args...` on the first backend without the case's root, in
 /// `cwd` (if not null), with `vars` added to the environment.
 fn runBare(e: Env, cwd: ?[]const u8, args: []const []const u8, vars: []const [2][]const u8) !Result {
     var map = try std.testing.environ.createMap(gpa);
@@ -7223,7 +7223,7 @@ fn noRootEnv() !std.process.Environ.Map {
     return environ;
 }
 
-/// Runs `h9 args...` on the first backend, with no --root and no H9ROOT,
+/// Runs `h9 args...` on the first backend, with no root and no H9ROOT,
 /// in `cwd` if given.
 fn runNoRoot(e: Env, h9: []const u8, args: []const []const u8) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -7837,7 +7837,7 @@ fn pathExists(path: []const u8) bool {
     return true;
 }
 
-/// Runs a client, `h9 --root ROOT args...`, on the first backend, without
+/// Runs a client, `h9 --dir ROOT args...`, on the first backend, without
 /// the proxy variables, so a ws:// root on 127.0.0.1 is dialed directly.
 fn runClient(e: Env, root: []const u8, args: []const []const u8) !Result {
     var map = try std.testing.environ.createMap(gpa);
@@ -9567,7 +9567,7 @@ test "a namespace-file ws:// mount runs the helper during replay [credential-hel
     var ns: [128]u8 = undefined;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}' /n\n", .{w.url()}) });
     var cb: [256]u8 = undefined;
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/ls", "/n/rc/bin/lc" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--cred", try credArg(&cb, "127.0.0.1", tok), "/bin/ls", "/n/rc/bin/lc" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqual(0, r.code);
@@ -9575,7 +9575,7 @@ test "a namespace-file ws:// mount runs the helper during replay [credential-hel
     // A ws:// match warns that the credential isn't encrypted.
     try expectIn(r.err, "cross the network in plaintext");
     // Without the helper, the mount's handshake is refused.
-    const no = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "/bin/echo" });
+    const no = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "/bin/echo" });
     defer no.deinit();
     try std.testing.expectEqual(125, no.code);
     // A page's WebSocket reports no status.
@@ -9753,7 +9753,7 @@ test "a .L.Z reconnect runs the helper again and sends the new token [credential
         \\cat /n/usr/glenda/log
         \\grep -h reconnects /net/dotl/*/status
     ;
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", script });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", script });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -9785,7 +9785,7 @@ test "9P-Uid and 9P-User name files without --user-map [credential-helpers]" {
     defer s.deinit();
     var ns: [128]u8 = undefined;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = try std.fmt.bufPrint(&ns, "mount -c '{s}' /n\n", .{rl.url()}) });
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--rc", "ls -l /n/etc/owned /n/etc/motd" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--rc", "ls -l /n/etc/owned /n/etc/motd" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -9811,7 +9811,7 @@ test "--user-map wins over 9P-Uid [credential-helpers]" {
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "passwd", .data = "alice:x:4242:4242::/:/bin/sh\n" });
     const map = try std.fmt.allocPrint(gpa, "{s}/passwd", .{s.path});
     defer gpa.free(map);
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", "ns", "--user-map", map, "--rc", "ls -l /n/etc/owned" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--user-map", map, "--rc", "ls -l /n/etc/owned" });
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);

@@ -2337,7 +2337,7 @@ test "the keepalive pings an idle stream" {
     try testing.expect(echo.pings.load(.acquire) >= 2);
 }
 
-// Fetching a `--root-index` URL (design/mount-index.md), with the
+// Fetching an `index=` URL (design/mount-index.md), with the
 // connection code WebSocket roots use: the proxy's CONNECT, then TLS for
 // `https`, then one GET.
 
@@ -2345,7 +2345,7 @@ const rootindex = @import("rootindex.zig");
 
 pub const FetchOptions = struct {
     /// A PEM file the server's certificate must chain to, instead of the
-    /// host's bundle (the root's `--root-ca`).
+    /// host's bundle (the root's `ca=`).
     ca_file: ?[]const u8 = null,
     proxy: ws.ProxyConfig = .{},
     /// Where the last ETag and the compiled index are kept: a URL whose

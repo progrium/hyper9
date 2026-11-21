@@ -5,7 +5,7 @@
 //!
 //! A file is named for its key and version: a server index's key is its
 //! address and attach name, and its version the index file's qid, mtime,
-//! and length; a `--root-index` file or URL's key is `text` and its
+//! and length; an `index=` file or URL's key is `text` and its
 //! version the SHA-256 of its text. Storing an entry replaces the key's
 //! others. A hit touches the file, and entries not used for 30 days are
 //! removed when the cache is next written. The directory is made 0700
@@ -172,7 +172,7 @@ fn nowSeconds(io: Io) i64 {
     return @intCast(@divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
 }
 
-/// The key and version a `--root-index` text is cached under.
+/// The key and version an `index=` text is cached under.
 pub const text_key = "text";
 
 pub fn textVersion(text: []const u8, buf: *[64]u8) []const u8 {

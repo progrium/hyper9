@@ -80,7 +80,7 @@ something the runtime does for you.
 | The container's writable layer | The default, `--write=overlay`: the root takes writes in memory ([section 8](#8-the-containers-writable-layer)) | main |
 | `docker run --read-only` | `--write=scope`: the root is read-only, writable volumes still write | main |
 | `docker pull` from Docker Hub | The registry API and `tar` ([section 5](#5-linux-images-from-docker-hub)), or `h9box pull` | main (Linux personality) |
-| Running Linux images | `h9 --dir ./alpine:#L sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/linux-personality.md)) |
+| Running Linux images | `h9 --dir ./alpine:#L sh`: a Linux root, run by the Linux personality | main ([linux-personality](../design/epoch-0/linux-personality.md)) |
 | `FROM scratch` + static binaries | A slim root tree: Plan 9 binaries are statically linked ([section 4](#4-from-scratch-slim-images)) | main |
 | A busybox base image | `zig build slim`, or the built-in root h9 carries: 44 of 9front's commands in one binary | main |
 | `ENTRYPOINT`, `CMD` | An rc script in the image, run by path; or `/rc/lib/rcmain.local`, run by `h9 --rc` | main |
@@ -102,7 +102,7 @@ something the runtime does for you.
 | `docker run --stop-timeout`, job deadlines | `--timeout DURATION`, exit 124 | main |
 | `docker inspect` | `h9 --print` | main |
 | Pulling 9front images from a registry | `--url tcp://host:port` (a 9P server), read on demand | main |
-| The same, over HTTPS | `--url wss://host/path` ([websocket-9p](../design/websocket-9p.md)) | main |
+| The same, over HTTPS | `--url wss://host/path` ([websocket-9p](../design/epoch-0/websocket-9p.md)) | main |
 | Pulling a layer at run time | `mount 'wss://…' /dir` in the namespace file, or `wsmount` in the guest | main |
 | `docker save`, `docker load` | `tar` the root tree | main |
 | Multi-platform images | One tree with `/arm64/bin` and `/amd64/bin`; `--arch` picks | main |
@@ -246,7 +246,7 @@ answers their system calls with the same Plan 9 kernel, so a Linux program
 gets the machine's sandbox, network policy, and limits like a 9front one.
 A Linux root goes on `#L`, the Linux tree, with `--dir ./alpine:#L`, and the
 9front root stays on `/` beside it.
-It's built ([linux-personality](../design/linux-personality.md),
+It's built ([linux-personality](../design/epoch-0/linux-personality.md),
 and [manual, chapter 20](../MANUAL.md#20-linux-programs)), and runs Alpine's
 busybox, `apk`, Python, SQLite, PostgreSQL, Redis, and Git.
 

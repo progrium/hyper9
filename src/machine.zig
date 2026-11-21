@@ -173,7 +173,7 @@ pub const Machine = struct {
     pub const IndexMode = enum { auto, none };
 
     /// An index for the 9P root given with the mount, instead of its
-    /// server's `.fs/index` (`--root-index`): a host file, or an
+    /// server's `.fs/index` (`index=`): a host file, or an
     /// `https://` or `http://` URL.
     pub const RootIndex = union(enum) {
         path: []const u8,
@@ -191,8 +191,8 @@ pub const Machine = struct {
         arch: ?vmm.Arch = null,
         /// The mounts, in order (design/mounts.md). Mounts on `/` stack
         /// into the root, and mounts on `#L` into the Linux tree. With
-        /// nothing on `/` the machine has only devices, so only host-path
-        /// programs can run. `.dir` and `.archive` sources are host paths,
+        /// nothing on `/` the root is an empty tree in memory, so only
+        /// host-path programs can run. `.dir` and `.archive` sources are host paths,
         /// absolute and resolved.
         mounts: []const Mount = &.{},
         /// `--bind` lines, run after every mount, in order.
@@ -3570,7 +3570,7 @@ pub const Machine = struct {
     }
 
     /// Connects to a 9P server and returns an fd on a `#ℓ` conversation's
-    /// data file (design/dotl.md), so a 9P2000.L server works and a
+    /// data file (design/epoch-0/dotl.md), so a 9P2000.L server works and a
     /// 9P2000 one passes through. With `host`, h9 makes the connection,
     /// not the guest, so the network policy doesn't apply to it, and a
     /// TCP server is dialed through devip by device path whether or not
@@ -3592,6 +3592,10 @@ pub const Machine = struct {
                 defer kern.close(conn) catch {};
                 // --user-map and user= win over the server's names.
                 if (m.opts.user_map != null or r.user != null) ident.* = null;
+                // h9's own connection, even for a namespace file's
+                // mount: #ℓ redials it with no plan.
+                if (!host) kern.setPlan(null);
+                defer if (!host) kern.setPlan(&m.plan);
                 return wsConv(conn, r.addr, ident.*) catch return m.fail(what ++ " {f}: {s}", .{ shown, kern.errstr() });
             },
             // `#ℓ` dials a TCP or unix socket server itself, so it can
@@ -4027,7 +4031,7 @@ pub const Machine = struct {
             // A WebSocket URL is connected by h9, as a root is; unlike
             // other failures, one that fails stops the run.
             // Its connection goes through a `#ℓ` conversation
-            // (design/dotl.md), so a 9P2000.L server works too.
+            // (design/epoch-0/dotl.md), so a 9P2000.L server works too.
             .mount => |mt| if (std.mem.indexOf(u8, mt.file, "://") != null) {
                 // A URL (design/mounts.md, "Namespace files"), connected
                 // as a mount flag's is, with the line's settings words;

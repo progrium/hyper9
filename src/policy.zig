@@ -173,7 +173,7 @@ pub const NinePRoot = struct {
         auto,
         /// `--index none`.
         none,
-        /// `--root-index`: the file or URL, and for a file its counts.
+        /// `index=`: the file or URL, and for a file its counts.
         given: struct { from: []const u8, entries: ?u32 = null, dirs: ?u32 = null },
     };
 };
@@ -257,7 +257,7 @@ pub const Plan = struct {
     caveats: []const []const u8,
     /// Where the cwd lands in the guest; null without a root or cwd.
     guest_cwd: ?[]const u8,
-    /// The machine's window, with --gfx (design/gfx.md).
+    /// The machine's window, with --gfx (design/epoch-0/gfx.md).
     gfx: ?Gfx = null,
     /// Whether the root is under a copy-on-write overlay
     /// (design/epoch-0/overlay.md): the bind of `#O` onto `/`. The builder
@@ -518,7 +518,7 @@ fn hostWritable(writable: []const []const u8, path: []const u8, allowed: bool) b
     return false;
 }
 
-/// The Linux view's device (design/linux-personality.md, "The Linux
+/// The Linux view's device (design/epoch-0/linux-personality.md, "The Linux
 /// view"): `#L`, devlinux, which was `#λ` before design/mounts.md.
 pub const linux_view = "#L";
 
@@ -611,7 +611,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         stack_n[@intFromEnum(st[0])] += 1;
         if (m.access == .rw and can_write and !eph) stack_rw[@intFromEnum(st[0])] = true;
         // A 9P server decides what's writable under --write=scope, as
-        // before (design/ninep-roots.md).
+        // before (design/epoch-0/ninep-roots.md).
         if ((m.kind == .url or m.kind == .fd) and write == .scope and m.access != .ro) stack_rw[@intFromEnum(st[0])] = true;
     };
     // `--writable` on a stack's host directory makes it write the host,
@@ -620,7 +620,9 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         stack_rw[@intFromEnum(st[0])] = true;
     };
     const overlay_mode = write == .overlay or eph;
-    const root_overlay = overlay_mode and !stack_rw[0];
+    // With nothing on `/`, the root is an empty tree in memory, so the
+    // namespace's mount points, such as /mnt/term, can still be made.
+    const root_overlay = (overlay_mode and !stack_rw[0]) or stack_n[0] == 0;
     const linux_overlay = overlay_mode and !stack_rw[1];
     const has_linux = stack_n[1] > 0;
 
@@ -639,8 +641,11 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             first = false;
             try binds.append(arena, try memberBind(arena, in, pol, m, to, flag, true, st == .linux, overlaid, can_write and !eph, &rules));
         }
+        if (st == .root and stack_n[0] == 0) {
+            try binds.append(arena, .{ .from = "#O", .to = st.dev(), .recursive = true, .create = true, .access = .eph, .empty = true, .note = "nothing on /: an empty tree in memory" });
+        }
         if (st == .linux and !has_linux) continue;
-        if (overlaid) try binds.append(arena, .{ .from = "#O", .to = st.dev(), .create = true, .access = .eph });
+        if (overlaid and stack_n[@intFromEnum(st)] > 0) try binds.append(arena, .{ .from = "#O", .to = st.dev(), .create = true, .access = .eph });
         if (st == .root) {
             try binds.append(arena, .{ .from = st.dev(), .to = "/", .flag = .after, .create = root_overlay or stack_rw[0] });
             try binds.append(arena, .{ .from = st.dev(), .to = "/root", .note = "$rootdir: the root stack without the namespace's binds" });
@@ -677,7 +682,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     if (has_root) {
         try binds.append(arena, .{ .from = try std.fmt.allocPrint(arena, "/{s}/bin", .{in.arch.name()}), .to = "/bin", .optional = true });
         try binds.append(arena, .{ .from = "/rc/bin", .to = "/bin", .flag = .after, .optional = true });
-        // h9's own commands (design/guest-tools.md), after the root's
+        // h9's own commands (design/epoch-0/guest-tools.md), after the root's
         // so a root command of the same name wins.
         if (in.guest_tools) try binds.append(arena, .{ .from = "#H/bin", .to = "/bin", .flag = .after, .optional = true, .note = "h9's commands" });
     }
@@ -742,7 +747,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try binds.append(arena, b);
     }
 
-    // The Linux view (design/linux-personality.md): the Linux stack
+    // The Linux view (design/epoch-0/linux-personality.md): the Linux stack
     // after devlinux's own directories, and the shared trees on its mount
     // points, only with a Linux tree: without one, a Linux binary from a
     // host path sees devlinux's own tree.
@@ -1687,7 +1692,7 @@ test "compile: a private /tmp, and --write=ephemeral overlays the writable paths
     try t.expectEqual(Verdict.read_only, e.check("/w/f", .create));
     try t.expectEqual(Verdict.read_only, e.check("/w/out/f", .write));
     try t.expectEqual(Verdict.allow, e.check("/w/out/f", .read));
-    // The root is read-only to devfs, under an overlay (design/overlay.md).
+    // The root is read-only to devfs, under an overlay (design/epoch-0/overlay.md).
     try t.expectEqualStrings("#U/r", Find.bind(e, "#Oroot").?.from);
     try t.expectEqual(Verdict.read_only, e.check("/r/f", .create));
     for (e.caveats) |c| try t.expect(std.mem.indexOf(u8, c, "hardlinks") == null);

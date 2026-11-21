@@ -341,7 +341,7 @@ the tree as above; to box more of 9front's, add a line to `src/9box/slim`
 (its name and its directory under `/sys/src/cmd`).
 
 This tree is also built into h9 itself, as the built-in root h9 uses when it
-finds no other ([builtin-root](../design/builtin-root.md)). `h9
+finds no other ([builtin-root](../design/epoch-0/builtin-root.md)). `h9
 --builtin` runs over it alone even when you have a root, and `h9 --dir
 ~/slim --builtin` puts it under your tree, to fill in any of its 44
 commands your tree leaves out.

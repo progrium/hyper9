@@ -241,18 +241,18 @@ Integration cases tagged `[mount-index]`. The server is the second h9 serving th
 - [x] `test "a root with .fs/index runs /bin/ls [mount-index]"`
 - [x] `test "an indexed root sends no Twalk for a missing name in a validated directory [mount-index]"`
 - [x] `test "an indexed root sends fewer T-messages than an unindexed one for rc -c echo [mount-index]"`
-- [x] `test "--root-index FILE is used over a root without .fs/index [mount-index]"`
+- [x] `test "index=FILE is used over a root without .fs/index [mount-index]"`
 - [x] `test "a second run uses the cache and doesn't read .fs/index [mount-index]"`
 - [x] `test "a file added after indexing is found, by demoting its directory [mount-index]"`
 - [x] `test "a file removed after indexing is not found [mount-index]"`
 - [x] `test "a file changed in place reads the server's contents [mount-index]"`
 - [x] `test "a malformed index is ignored and the root still mounts [mount-index]"`
-- [x] `test "an unreadable --root-index exits 125 [mount-index]"`
+- [x] `test "an unreadable index= exits 125 [mount-index]"`
 - [x] `test "--index none ignores .fs/index [mount-index]"`
 - [x] `test "a namespace-file mount of a server with .fs/index uses it [mount-index]"`
 - [x] `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
 - [x] `test "a rewritten .fs/index is fetched on the next mount [mount-index]"`
-- [x] `test "--root-index with a host-directory root is a usage error [mount-index]"`
+- [x] `test "index= without a 9P server on / is a usage error [mount-index]"`
 - [x] `test "--print shows the index source and entry count [mount-index]"`
 
 Unit tests for `src/rootindex.zig` and the layer, with recorded conversations, since the test server has no `.fs/events`: the `fsindex 1` parser, its escaping, and its limits; walks, stats, and directory reads answered locally; virtual fids made real; flushes; demotion on a mismatched open; qids made up for an index without `9p.qid` and put in the server's replies; and, against a server with `.fs/events`, an index followed from its seq, records demoting what they change, and a stale index or a `reset` ending its use.

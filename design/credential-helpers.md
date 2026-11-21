@@ -182,7 +182,7 @@ shows files owned by `progrium`. Restarting the server mid-`cat` of a large file
 - [x] `test "a 401 reruns the helper once with the response on stdin [credential-helpers]"`
 - [x] `test "a helper failure before start exits 125 with its stderr [credential-helpers]"`
 - [x] `test "a helper may not set reserved handshake headers [credential-helpers]"`
-- [x] `test "--root-header wins over a helper's header of the same name [credential-helpers]"`
+- [x] `test "header= wins over a helper's header of the same name [credential-helpers]"`
 - [x] `test "guest /net/ws conversations never run a helper [credential-helpers]"`
 - [x] `test "9P-Uid and 9P-User name files without --user-map [credential-helpers]"`
 - [x] `test "--user-map wins over 9P-Uid [credential-helpers]"`
