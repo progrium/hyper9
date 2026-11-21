@@ -48,7 +48,7 @@ Time otherwise comes from `/dev/bintime`, which h9's devcons hooks serve in nano
 
 ## Go programs
 
-Go's `GOOS=plan9 GOARCH=amd64` binaries run unchanged ([go-compat](../design/epoch-0/go-compat.md)). Go has no `plan9/arm64` port and HVF runs arm64 only, so on an arm64 Mac they run on the emulator, through Unicorn, which isn't in the MIT build. On Linux x86\_64 they run natively, on KVM or the native backend, and on the emulator elsewhere. What the runtime and standard library need is served:
+Go's `GOOS=plan9 GOARCH=amd64` binaries run unchanged ([go-compat](../design/epoch-0/go-compat.md)). Go has no `plan9/arm64` port and HVF runs arm64 only, so on an arm64 Mac they run on the emulator, on hx64. On Linux x86\_64 they run natively, on KVM or the native backend, and on the emulator elsewhere. What the runtime and standard library need is served:
 
 - **Startup:** `/dev/sysstat` has a line per CPU, so `runtime.NumCPU` and the default `GOMAXPROCS` follow `--cpus` (or the host's count); `#c/pid` gives the pid; `/dev/bintime` is opened as fd 18 for the clock. `/dev/swap` isn't served, and the runtime's 4 KiB fallback is right.
 - **Threads:** each M is a process from `rfork(RFPROC|RFMEM|RFNOWAIT)`, and parks and wakes with `tsemacquire`, `semacquire`, and `semrelease` ([semaphores](../design/epoch-0/semaphores.md)).

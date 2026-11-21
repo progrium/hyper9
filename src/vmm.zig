@@ -348,7 +348,7 @@ pub fn emuLayout() ?[4]usize {
     return null;
 }
 
-/// The emulator's version (Unicorn's, e.g. "2.1"), or null if it isn't built in.
+/// The emulator's name and version ("hcpu (jit)", or "Unicorn 2.1"), or null if it isn't built in.
 pub fn emuVersion(buf: []u8) ?[]const u8 {
     return if (have_emu) emu.version(buf) else null;
 }

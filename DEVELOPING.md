@@ -50,13 +50,13 @@ virtualization. `h9 --check` says which is missing. `zig build mkroot` needs
 `qemu-system-aarch64`, `qemu-img`, and `bsdtar` (Debian and Ubuntu:
 `qemu-system-arm qemu-utils libarchive-tools`). KVM runs the host's
 architecture, so on x86\_64 the root needs `/amd64`, which `zig build mkroot`
-builds there by default, with an emulator h9 running the tree's arm64
+builds there by default, with h9's emulator running the tree's arm64
 compilers:
 
 ```sh
-zig build -Demu=unicorn -Dtarget=x86_64-linux-musl --prefix .local/h9-emu
-H9=.local/h9-emu/bin/h9 zig build mkroot     # /amd64 on x86_64 hosts
-zig build integration -Darch=amd64     # the cases on KVM (and emu, if built in)
+zig build                              # h9, with hcpu built in
+zig build mkroot                       # /amd64 on x86_64 hosts
+zig build integration -Darch=amd64     # the cases on KVM and emu
 ```
 
 The KVM backend blocks `SIGRTMIN + 1` in the threads that run vCPUs and uses
@@ -102,8 +102,8 @@ zig build web      # the browser host into zig-out/web (h9.wasm, h9-web.js, h9-n
 zig build integration -Dweb   # the integration cases through h9-node on h86 (Node 24 or later); -Darch=arm64 for ha64
 zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in Chromium with Playwright, and hcpu-web
 zig build hcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
-zig build x86-jit  # the 386 JIT's [x86-jit] cases (tests/x86.zig) on T0 and T1; zig build hcpu runs them too
-zig build x64-jit  # hx64's [174] cases (tests/x64.zig) on T0 and T1; zig build hcpu runs them too
+zig build x86-jit  # h86's [hcpu] cases (tests/x86.zig) on T0 and T1; zig build hcpu runs them too
+zig build x64-jit  # hx64's [hcpu] cases (tests/x64.zig) on T0 and T1; zig build hcpu runs them too
 zig build -Demu=hcpu -Dhcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
@@ -140,22 +140,30 @@ integration cases; release builds don't (`-Dguest-test` overrides it).
 
 ### The emulator, and Windows
 
-The emulator backend links the prebuilt Unicorn (GPLv2) fetched by
-`scripts/fetch.sh`, so it's opt-in and never part of the MIT `h9` build. It
-ships separately as `h9-emu` (see [Releases](#releases)):
+The emulator backend is hcpu, h9's own CPUs ([hcpu](design/hcpu.md)): ha64
+for arm64, h86 for 386, and hx64 for amd64, each with a JIT (T1) and an
+interpreter (T0). It's MIT, and `-Demu=hcpu` is the default on arm64 and
+x86-64 targets, so every `h9` has it; `-Demu=none` leaves it out, and
+`-Dno-jit` builds the interpreter alone. `H9_EMU_TIER=t0` or `t1` picks a
+tier at run time, for tests:
 
 ```sh
-zig build -Demu=unicorn                              # macOS arm64
-zig build -Demu=unicorn -Dtarget=aarch64-linux-musl  # Linux arm64 (also x86_64-linux-musl)
-zig build proposal -Dp=baseline -Demu=unicorn        # the baseline demos, adding h9 --backend emu ./hello
-zig build bench -Demu=unicorn                        # compute and syscall speed, emu vs the hypervisor
+zig build                                        # h9, with hcpu
+zig build -Dtarget=aarch64-linux-musl            # Linux arm64 (also x86_64-linux-musl, and the Windows targets)
+zig build test                                   # tests/backends.zig on T1 and on T0, and the CPUs' own cases
+zig build integration -Dbackends=emu             # the integration cases on hcpu
+zig build integration -Dbackends=emu -Djit-check # every compiled region checked against T0
+zig build bench                                  # compute and syscall speed, emu against the hypervisor
 ```
 
-`-Dunicorn=source` builds Unicorn from the patched source instead
-([third_party/unicorn](third_party/unicorn/README.md)); `scripts/fetch.sh`
-fetches it. The prebuilt libraries exist for macOS arm64 and Linux musl only,
-so Windows (`-Dtarget=aarch64-windows` or `x86_64-windows`) always builds
-from source. kern builds for Windows with drawterm's win32 files, so h9.exe
+`-Demu=unicorn` builds the Unicorn backend instead (GPLv2), for lockstep
+testing against hcpu (`zig build lockstep`, and the fuzzers' lockstep
+mode) and Go's own test suite (`zig build go-stdtest`); it's never
+released. It links the prebuilt Unicorn that `scripts/fetch.sh` fetches,
+or with `-Dunicorn=source`, the patched source
+([third_party/unicorn](third_party/unicorn/README.md)). The prebuilt
+libraries exist for macOS arm64 and Linux musl only, so Windows always
+builds it from source. kern builds for Windows with drawterm's win32 files, so h9.exe
 runs programs on the emulator, and host paths are `/C:/...` in `#U`. On
 Windows x86\_64, h9.exe also has the WHP backend ([whp](design/epoch-0/whp.md)):
 it needs the Windows Hypervisor Platform feature (Settings >
@@ -340,19 +348,15 @@ Each GitHub release has two sets of binaries, built by
 
 | Asset | License | Contents |
 | --- | --- | --- |
-| `h9-<version>-<target>` | MIT | `h9` with the hypervisor backends only (macOS arm64 for now) |
-| `h9-emu-<version>-<target>` | GPLv2 | `h9-emu`: h9 built with `-Demu=unicorn`, for macOS arm64, Linux arm64 and x86_64 (musl, static), and Windows arm64 and x86_64 |
-| `h9-emu-<version>-source.tar.gz` | GPLv2 and MIT | complete corresponding source for `h9-emu`: the h9 tree plus Unicorn's patched source in `.local/src/unicorn` |
+| `h9-<version>-<target>` | MIT | `h9`, with the hypervisor backends and hcpu, for macOS arm64, Linux arm64 and x86_64 (musl, static), and Windows arm64 and x86_64 |
 | `h9-web-<version>.tar.gz` | MIT | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, the demo page, and its root archive |
 | `SHA256SUMS` | | checksums |
 
-`h9-emu` takes the same flags as `h9` and runs on hosts without a usable
-hypervisor. It links Unicorn Engine, so the binary as a whole is GPLv2, with
-`COPYING`, `NOTICE`, and the MIT notices in each archive; see
-[LICENSE](LICENSE). The script builds every binary from the unpacked source
-tarball, with Unicorn from source (`-Dunicorn=source`), so the tarball is
-exactly what was built. It needs `scripts/fetch.sh` to have been run and runs
-on macOS, which cross-compiles the other targets.
+Releases used to include `h9-emu`, h9 built with Unicorn (GPLv2), for
+hosts without a usable hypervisor. hcpu replaced it, so it isn't released
+anymore. The script builds every binary from an unpacked `git archive` of
+the commit, so what ships is exactly what was committed, and runs on macOS,
+which cross-compiles the other targets.
 
 Release builds report the release's version in `--version` and `--check`;
 development builds report `git describe` (`-Dversion=V` overrides it).
@@ -386,5 +390,5 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `tests/web/` | the browser host's Playwright check |
 | `tests/jit/` | the wasm emitter's checks: a runtime module standing in for h9.wasm, a random region generator, the suite (`suite.mjs`) and its Node and Chromium drivers, and `bench.mjs`, which times installs and tier-up in V8 |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
-| `scripts/release.sh` | builds the release assets (`h9`, `h9-emu` and its source, `h9-web`) into `dist/` |
-| `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn, test VMs |
+| `scripts/release.sh` | builds the release assets (`h9` and `h9-web`) into `dist/` |
+| `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn (for `-Demu=unicorn`), test VMs |

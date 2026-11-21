@@ -1,33 +1,31 @@
 #!/usr/bin/env bash
 # Builds release assets into dist/<version>/ for a GitHub release:
 #
-#   h9-<version>-<target>.tar.gz|zip      MIT: h9 without the emulator
-#   h9-emu-<version>-<target>.tar.gz|zip  GPLv2: h9 with Unicorn (-Demu=unicorn)
-#   h9-emu-<version>-source.tar.gz        complete corresponding source for h9-emu
+#   h9-<version>-<target>.tar.gz|zip      MIT: h9, with hcpu, h9's own CPUs,
+#                                         as the emulator backend
 #   h9-web-<version>.tar.gz               MIT: the browser host
 #                                         (h9.wasm, h9-web.js, h9-node,
 #                                         the demo page and its root archive)
 #   SHA256SUMS
 #
-# Every binary is built from the unpacked source tarball, not the checkout,
-# so the tarball is exactly the source of what ships. Unicorn is always built
-# from source (-Dunicorn=source), never from the prebuilt wheels.
+# Every binary is built from an unpacked `git archive` of HEAD, not the
+# checkout, so what ships is exactly the commit. There's no GPL build:
+# hcpu (-Demu=hcpu, the default) replaced Unicorn and h9-emu
+# (design/hcpu.md).
 #
 #   scripts/release.sh [version]    (default: git describe --tags --always)
 #
-# Needs a clean checkout (tracked files), and the patched Unicorn source
-# from scripts/fetch.sh. The browser host's root archive comes from
-# the 386 root tree (scripts/mkroot.py --arch 386), when there is one. Runs on macOS, which can build every target.
+# Needs a clean checkout (tracked files). The browser host's root archive
+# comes from the 386 root tree (scripts/mkroot.py --arch 386), when there
+# is one. Runs on macOS, which can build every target.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$H9_ROOT/scripts/pins.sh"
 cd "$H9_ROOT"
 
-# Targets for each asset. h9 has a hypervisor backend only on macOS until
-# KVM and WHP are built (design/epoch-0/kvm.md, design/epoch-0/whp.md); h9-emu runs
-# everywhere Unicorn builds.
-H9_TARGETS="aarch64-macos"
-EMU_TARGETS="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu x86_64-windows-gnu"
+# Targets for h9. Each runs on its host's hypervisor where there is one,
+# and on hcpu where there isn't.
+H9_TARGETS="aarch64-macos aarch64-linux-musl x86_64-linux-musl aarch64-windows-gnu x86_64-windows-gnu"
 
 die() { echo "release: $*" >&2; exit 1; }
 
@@ -35,44 +33,13 @@ version=${1:-$(git describe --tags --always)}
 [ -z "$(git status --porcelain --untracked-files=no)" ] ||
 	die "uncommitted changes; release from a clean checkout"
 
-# Same stamp as fetch.sh: the source must match the pins and the patches.
-uc_src="$H9_LOCAL/src/unicorn"
-patches=("$H9_ROOT"/third_party/unicorn/patches/*.patch)
-stamp="$UNICORN_SRC_SHA256 $(cat "${patches[@]}" | shasum -a 256 | cut -d' ' -f1)"
-[ "$(cat "$uc_src/.h9-stamp" 2>/dev/null || true)" = "$stamp" ] ||
-	die "$uc_src is missing or stale; run scripts/fetch.sh"
-
 out="$H9_ROOT/dist/$version"
 work="$out/.work"
 rm -rf "$out" && mkdir -p "$work"
 
-# Source: the commit, plus Unicorn's patched source where build/unicorn.zig
-# expects it, so `zig build -Demu=unicorn -Dunicorn=source` works offline.
-srcname="h9-emu-$version-source"
-src="$work/$srcname"
+src="$work/h9-$version-source"
 mkdir -p "$src"
 git archive HEAD | tar -x -C "$src"
-mkdir -p "$src/.local/src/unicorn"
-cp -R "$uc_src/." "$src/.local/src/unicorn/"
-cat >"$src/SOURCE" <<EOF
-Complete corresponding source for h9-emu $version
-(h9 commit $(git rev-parse HEAD)).
-
-- h9's source (MIT, see LICENSE), with the patches to Unicorn and QEMU's
-  generated config headers in third_party/unicorn (GPLv2, see
-  third_party/unicorn/COPYING).
-- Unicorn Engine $UNICORN_VERSION ($UNICORN_SRC_URL,
-  sha256 $UNICORN_SRC_SHA256) in .local/src/unicorn, with
-  third_party/unicorn/patches already applied. Its own licence files
-  (COPYING, COPYING.LGPL2, COPYING_GLIB, qemu/LICENSE) are in that directory.
-
-Build with Zig $(zig version) (see DEVELOPING.md); for example:
-
-  zig build -Doptimize=ReleaseSafe -Demu=unicorn -Dunicorn=source -Dversion=$version -Dtarget=aarch64-linux-musl
-
-then rename zig-out/bin/h9 to h9-emu. Targets: $EMU_TARGETS.
-EOF
-tar -czf "$out/$srcname.tar.gz" -C "$work" "$srcname"
 
 # build <prefix> <target> [flags...]: builds h9 from the source tree.
 build() {
@@ -94,7 +61,7 @@ exe() { case "$1" in *windows*) echo "$2.exe" ;; *) echo "$2" ;; esac; }
 
 for t in $H9_TARGETS; do
 	name="h9-$version-$t"
-	build "$work/build-$t" "$t"
+	build "$work/build-$t" "$t" -Demu=hcpu
 	mkdir -p "$work/$name"
 	cp "$work/build-$t/bin/$(exe "$t" h9)" "$work/$name/"
 	cp "$src/LICENSE" "$work/$name/LICENSE"
@@ -112,31 +79,6 @@ cp -R "$work/build-web/web" "$work/$name"
 cp "$src/LICENSE" "$work/$name/LICENSE"
 cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
 archive "$work/$name" "$name"
-
-for t in $EMU_TARGETS; do
-	name="h9-emu-$version-$t"
-	build "$work/build-emu-$t" "$t" -Demu=unicorn -Dunicorn=source
-	mkdir -p "$work/$name"
-	cp "$work/build-emu-$t/bin/$(exe "$t" h9)" "$work/$name/$(exe "$t" h9-emu)"
-	cp "$src/third_party/unicorn/COPYING" "$work/$name/COPYING"
-	cp "$src/LICENSE" "$work/$name/LICENSE.h9"
-	cp "$src/third_party/drawterm/LICENSE" "$work/$name/LICENSE.drawterm"
-	cat >"$work/$name/NOTICE" <<EOF
-h9-emu is h9 built with the Unicorn Engine emulator backend.
-
-It includes Unicorn Engine $UNICORN_VERSION (https://www.unicorn-engine.org),
-which is based on QEMU, with h9's patches to it. The combined program is
-distributed under the GNU General Public License version 2; see COPYING.
-
-h9's own code is also available under the MIT license (LICENSE.h9), and
-drawterm's under its MIT license (LICENSE.drawterm).
-
-Complete corresponding source, including Unicorn's and QEMU's per-file
-licences: $srcname.tar.gz, attached to the same release at
-https://github.com/progrium/hp9/releases/tag/$version
-EOF
-	archive "$work/$name" "$name"
-done
 
 rm -rf "$work"
 (cd "$out" && shasum -a 256 h9-* >SHA256SUMS)

@@ -172,7 +172,7 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-`-Demu=hcpu` builds it on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), [spec/hx64.md](hx64.md), and [spec/jit.md](jit.md) describe. This section describes the Unicorn backend.
+`-Demu=hcpu`, the default on arm64 and x86-64 targets and what releases ship, builds it on h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), [spec/hx64.md](hx64.md), and [spec/jit.md](jit.md) describe ([hcpu](../design/hcpu.md)). `-Demu=unicorn` builds it on Unicorn instead, for lockstep testing against hcpu and for Go's own test suite; it isn't released. The rest of this section describes the Unicorn backend, apart from the hcpu numbers under Limits and selection.
 
 ### Scope
 
@@ -218,7 +218,7 @@ Guest pages come from the reserved range above, whose pages are zero and stay un
 
 The backend uses Unicorn Engine. It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses.
 
-It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into the MIT `h9` release build. Releases ship it separately as `h9-emu`, a GPLv2 binary built from source (`-Dunicorn=source`) with its complete corresponding source attached to the same release (`scripts/release.sh`); the two are separate programs side by side, so `h9` stays MIT.
+It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into a release. Before hcpu, releases shipped it separately as `h9-emu`, a GPLv2 binary with its complete corresponding source; hcpu replaced it, and it isn't released anymore.
 
 We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target.
 

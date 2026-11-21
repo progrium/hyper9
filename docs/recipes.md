@@ -173,7 +173,7 @@ h9 --write=ephemeral --writable "$H9ROOT" --rc 'mk install && hello'
 
 ## Go
 
-Run a Go program (on Apple Silicon, use `h9-emu`):
+Run a Go program (on Apple Silicon, it runs on the emulator):
 
 ```sh
 GOOS=plan9 GOARCH=amd64 go build -o hello . && h9 ./hello

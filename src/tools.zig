@@ -24,8 +24,8 @@ pub fn version(w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (k.built()) {
             try w.print(" {s}", .{f.name});
             if (k == .emu) {
-                var buf: [16]u8 = undefined;
-                try w.print(" (Unicorn {s})", .{vmm.emuVersion(&buf) orelse "?"});
+                var buf: [32]u8 = undefined;
+                try w.print(" ({s})", .{vmm.emuVersion(&buf) orelse "?"});
             }
             any = true;
         }
@@ -124,6 +124,10 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, o: CheckOpti
             .ok => |p| {
                 try w.print("ok", .{});
                 if (k == .auto) try w.print(" (uses {t})", .{p.kind});
+                if (k == .emu) {
+                    var buf: [32]u8 = undefined;
+                    if (vmm.emuVersion(&buf)) |v| try w.print(" ({s})", .{v});
+                }
                 if (p.max_vcpus) |n| try w.print(", {d} vCPUs", .{n});
                 try w.print(", hello in {d}.{d} ms\n", .{ p.us / 1000, p.us % 1000 / 100 });
             },
@@ -300,7 +304,7 @@ pub fn explain(want: vmm.BackendKind, err: anyerror) []const u8 {
             else => "no usable hypervisor",
         },
         error.BackendNotBuilt => switch (want) {
-            .emu, .auto => "the emulator isn't built into this h9 (use h9-emu from the releases, or build with -Demu=unicorn)",
+            .emu, .auto => "the emulator isn't built into this h9 (build it with -Demu=hcpu)",
             else => "not built into this h9",
         },
         error.WrongArch => "can't run this architecture",

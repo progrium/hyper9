@@ -438,9 +438,9 @@ fn checkH9(c: Ctx) void {
     if (archOf(builtin.cpu.arch) == arm64) return;
     const r = std.process.run(c.gpa, c.io, .{ .argv = &.{ h9, "--check" } }) catch |e| die("{s} --check: {t}", .{ h9, e });
     if (std.mem.indexOf(u8, r.stdout, "\nbackend emu: ok") != null) return;
-    die("{s} has no emulator, which building /{s} needs on this host to run the tree's arm64 compilers; build one and pass it as $H9:\n" ++
-        "  zig build -Demu=unicorn -Dtarget={t}-{t}{s} --prefix .local/h9-emu\n" ++
-        "  H9=.local/h9-emu/bin/h9 zig build mkroot", .{
+    die("{s} has no emulator, which building /{s} needs on this host to run the tree's arm64 compilers; build one with hcpu and pass it as $H9:\n" ++
+        "  zig build -Demu=hcpu -Dtarget={t}-{t}{s} --prefix .local/h9-hcpu\n" ++
+        "  H9=.local/h9-hcpu/bin/h9 zig build mkroot", .{
         h9,
         arches[archOf(builtin.cpu.arch)],
         builtin.cpu.arch,

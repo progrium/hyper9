@@ -581,6 +581,8 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
         .x86_64 => "amd64",
         else => null,
     };
+    // hcpu runs all three on any host.
+    if (emu == .hcpu) return &.{ "arm64", "amd64", "386" };
     if (emu == .unicorn) {
         return if (native != null and std.mem.eql(u8, native.?, "arm64")) &.{ "arm64", "amd64", "386" } else &.{ "amd64", "386" };
     }
@@ -947,7 +949,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
-    var emu = b.option(Emu, "emu", "Emulator backend to build in: unicorn (GPLv2: dev, CI and the h9-emu release only), or hcpu (h9's own CPUs)") orelse .none;
+    // hcpu is the default where it has a JIT, arm64 and x86-64 hosts, so
+    // `auto` falls back to it without a hypervisor (design/hcpu.md).
+    var emu = b.option(Emu, "emu", "Emulator backend to build in: hcpu (h9's own CPUs, the default on arm64 and x86-64), unicorn (GPLv2: dev and lockstep testing only), or none") orelse
+        switch (target.result.cpu.arch) {
+            .aarch64, .x86_64 => Emu.hcpu,
+            else => Emu.none,
+        };
     // T0 in a Debug build runs several times slower than in a release one,
     // enough for long integration cases to time out against Unicorn's JIT.
     const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
@@ -1345,7 +1353,7 @@ pub fn build(b: *std.Build) void {
     if (os == .linux and b.graph.host.result.os.tag == .linux and target.result.cpu.arch == .x86_64 and
         b.graph.host.result.cpu.arch == .x86_64 and std.mem.eql(u8, cases_arch, "amd64"))
         backends.appendSlice(b.allocator, "native,") catch @panic("OOM");
-    if (emu == .unicorn) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
+    if (emu != .none) backends.appendSlice(b.allocator, "emu,") catch @panic("OOM");
     // -Dbackends picks the backends instead, such as only `native` for a
     // quick run where there's no KVM.
     const want_backends = b.option([]const u8, "backends", "Backends to run the integration cases on, comma-separated (default: every one built in that runs here)");
@@ -1686,6 +1694,16 @@ pub fn build(b: *std.Build) void {
         run_backend_tests.step.dependOn(&sign.step);
     }
     test_step.dependOn(&run_backend_tests.step);
+    // With hcpu, the backend cases run on each tier: T1 (the default)
+    // above, and T0 here (design/hcpu.md).
+    if (emu == .hcpu and !no_jit) {
+        const run_t0 = b.addRunArtifact(backend_tests);
+        run_t0.setName("run test backends (hcpu T0)");
+        run_t0.setEnvironmentVariable("H9_TEST_ROOT", root);
+        run_t0.setEnvironmentVariable("H9_EMU_TIER", "t0");
+        run_t0.step.dependOn(&run_backend_tests.step);
+        test_step.dependOn(&run_t0.step);
+    }
     // The integration cases are their own step, `zig build integration`, so
     // running both doesn't run them twice; `zig build test integration`
     // runs everything.
@@ -1731,7 +1749,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_embed.step);
     }
 
-    // The arm64 JIT plan's [a64-jit] cases, through the vmm interface on
+    // ha64's [hcpu] cases, through the vmm interface on
     // T0 and T1; they skip without -Demu=hcpu.
     const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/a64.zig"),
@@ -1747,7 +1765,7 @@ pub fn build(b: *std.Build) void {
     linkUnicorn(a64_jit);
     const a64_jit_run = b.addRunArtifact(a64_jit);
     test_step.dependOn(&a64_jit_run.step);
-    b.step("a64-jit", "Run the arm64 JIT plan's [a64-jit] cases on T0 and T1 (tests/a64.zig; needs -Demu=hcpu)").dependOn(&a64_jit_run.step);
+    b.step("a64-jit", "Run ha64's [hcpu] cases on T0 and T1 (tests/a64.zig; needs -Demu=hcpu)").dependOn(&a64_jit_run.step);
 
     // The speed numbers in SPEC.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
@@ -1995,7 +2013,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
         test_step.dependOn(&run.step);
     }
 
-    // The 386 JIT plan's [x86-jit] cases, on T0 and T1.
+    // h86's [hcpu] cases, on T0 and T1.
     const x86 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/x86.zig"),
         .target = target,
@@ -2009,9 +2027,9 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     const x86_run = b.addRunArtifact(x86);
     step.dependOn(&x86_run.step);
     test_step.dependOn(&x86_run.step);
-    b.step("x86-jit", "Run the 386 JIT plan's [x86-jit] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
+    b.step("x86-jit", "Run h86's [hcpu] cases on T0 and T1 (tests/x86.zig)").dependOn(&x86_run.step);
 
-    // hx64's [174] cases, on T0 and T1 (design/hcpu.md).
+    // hx64's [hcpu] cases, on T0 and T1 (design/hcpu.md).
     const x64 = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/x64.zig"),
         .target = target,
@@ -2025,7 +2043,7 @@ fn addHcpuTests(b: *std.Build, test_step: *std.Build.Step, target: std.Build.Res
     const x64_run = b.addRunArtifact(x64);
     step.dependOn(&x64_run.step);
     test_step.dependOn(&x64_run.step);
-    b.step("x64-jit", "Run hx64's [174] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
+    b.step("x64-jit", "Run hx64's [hcpu] cases on T0 and T1 (tests/x64.zig)").dependOn(&x64_run.step);
 
     // h86's memory-model litmus tests: compiled code on host threads.
     // ReleaseSafe unless -Doptimize says otherwise, so the threads race.

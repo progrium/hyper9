@@ -26,7 +26,7 @@ pub fn version(buf: []u8) []const u8 {
     var major: c_uint = 0;
     var minor: c_uint = 0;
     _ = uc.uc_version(&major, &minor);
-    return std.fmt.bufPrint(buf, "{d}.{d}", .{ major, minor }) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "Unicorn {d}.{d}", .{ major, minor }) catch buf[0..0];
 }
 
 /// Where the arena sits in each engine's physical address space.

@@ -107,3 +107,64 @@ jobs:
           npm install --no-save --no-package-lock playwright@1.63.0
           npx playwright install --with-deps chromium
       - run: zig build web-test -Doptimize=ReleaseSafe
+
+  # hcpu's Done criteria (design/hcpu.md) on every host GitHub has: the
+  # roots once, then the unit and backend cases and the integration cases
+  # on the emulator, with the arm64 root, the 386 binaries, and the amd64
+  # root. Only on "Run workflow", since a full pass takes a few hours.
+  hcpu-roots:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-arm qemu-utils libarchive-tools zstd
+      # The arm64 image, the 386 and amd64 ISOs, and the Alpine roots.
+      - run: scripts/fetch.sh image iso386 isoamd64
+      - run: zig build mkroot -- --arch arm64
+      - run: |
+          . scripts/pins.sh
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.386.iso" .local/9front/root386
+          zig build isoroot -- ".local/9front/9front-$NINEFRONT_RELEASE.amd64.iso" .local/9front/rootamd64
+      - run: tar -C .local -cf roots.tar "9front/$(readlink .local/9front/root)" 9front/root 9front/root386 9front/rootamd64 linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hcpu-roots
+          path: roots.tar
+          retention-days: 3
+
+  hcpu:
+    if: github.event_name == 'workflow_dispatch'
+    needs: hcpu-roots
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04-arm, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: hcpu-roots
+      - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
+      - name: test, T1 and T0
+        if: always()
+        run: zig build test -Demu=hcpu
+      - name: integration, arm64 root
+        if: always()
+        run: zig build integration -Doptimize=ReleaseSafe -Demu=hcpu -Darch=arm64 -Dbackends=emu -Droot="$PWD/.local/9front/root"
+      - name: integration, 386
+        if: always()
+        run: zig build integration -Doptimize=ReleaseSafe -Demu=hcpu -Darch=386 -Dbackends=emu -Droot="$PWD/.local/9front/root386"
+      - name: integration, amd64 root
+        if: always()
+        run: zig build integration -Doptimize=ReleaseSafe -Demu=hcpu -Darch=amd64 -Dbackends=emu -Droot="$PWD/.local/9front/rootamd64"

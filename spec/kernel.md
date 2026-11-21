@@ -224,7 +224,7 @@ A root that's in the binary, so h9 runs with no tree to find ([builtin-root](../
 
 Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](../design/epoch-0/multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`.
 
-The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds its target's architecture, and with `-Demu=unicorn` also `amd64` and `386`, and the web host `386`.
+The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds its target's architecture, with `-Demu=hcpu` (the default) all three, with `-Demu=unicorn` also `amd64` and `386`, and the web host `386`.
 
 Entries with the same bytes share them (`tools/guesttree.zig`), so the command names cost a table entry each rather than a copy of `9box`, and the bytes are embedded with `@embedFile`.
 

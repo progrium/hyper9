@@ -47,8 +47,8 @@ brew install qemu
 zig build mkroot       # about a minute, ~250 MB in .local/9front/root
 ```
 
-Linux (KVM, or the native backend in containers and CI), Windows, the
-emulator build `h9-emu`, and the browser host are covered in the manual's
+Linux (KVM, the emulator, or the native backend in containers and CI),
+Windows, and the browser host are covered in the manual's
 [Installing](MANUAL.md#2-installing) chapter and in
 [DEVELOPING.md](DEVELOPING.md).
 
@@ -119,5 +119,4 @@ Build 9front software inside h9 with its own compilers and `mk`, run Go's
 
 ## License
 
-h9 is MIT licensed. `h9-emu`, the build with the Unicorn CPU emulator, is
-GPLv2 as a whole because Unicorn is. See [LICENSE](LICENSE).
+h9 is MIT licensed, emulator included. See [LICENSE](LICENSE).
