@@ -1,6 +1,6 @@
 # Proposals
 
-Design changes to h9 go through proposals: one Markdown file each in this directory, named by its slug, with frontmatter for status, dependencies, and where its work lives. [SPEC.md](../SPEC.md) describes h9 as built; proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), was adopted as [proposals](proposals.md), and was reworked by [proposal-flow](proposal-flow.md) so work can start on a branch before or alongside its proposal.
+Design changes to h9 go through proposals: one Markdown file each in this directory, named by its slug, with frontmatter for status, dependencies, and where its work lives. The spec describes h9 as built: [SPEC.md](../SPEC.md) is its overview, and the files under [spec/](../spec/) that it lists describe each part ([spec-split](spec-split.md)). Proposals say what changes and why. The order of work comes from the dependency graph, not from milestones. The process is adapted from Go's ([golang/proposal](https://github.com/golang/proposal)), was adopted as [proposals](proposals.md), and was reworked by [proposal-flow](proposal-flow.md) so work can start on a branch before or alongside its proposal.
 
 ## When a proposal is needed
 
@@ -54,7 +54,7 @@ A signature is dated, and re-signed with a new date after significant changes. A
 | `draft` | Being written. No issue is needed. |
 | `proposed` | Filed as a GitHub issue to get feedback there. Optional. |
 | `accepted` | Decided, and ready for someone to start or finish, but nobody is working on it now. Optional. |
-| `implemented` | Built and on main, with every Done criteria item checked or waived, and SPEC.md describing it. |
+| `implemented` | Built and on main, with every Done criteria item checked or waived, and the spec describing it. |
 | `declined` | Decided against; kept, with a Declined section giving the reason, so the reasoning can be found later. |
 | `hold` | Paused, with a reason on the issue, or in an Updates note if there's no issue. |
 | `superseded` | Replaced by `superseded-by`. |
@@ -117,7 +117,7 @@ The syntax is a strict subset of YAML: one `key: value` per line, values are sca
 
 An accepted proposal's body isn't edited, except to check off or waive its Done criteria. A discovery during implementation that refines the design gets a dated note under an Updates section at the end; one that changes the design gets a new proposal, which supersedes the old one or is added to its `depends`. A dependency found during implementation is added to `depends` in the same PR, with a line saying so.
 
-The PR that finishes a proposal updates SPEC.md to describe what was built, tags the passing cases, checks off its Done criteria, and sets `status: implemented` and `branch: [main]`. SPEC.md never describes unbuilt features, and proposals aren't updated to describe the current system. SPEC.md links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision.
+The PR that finishes a proposal updates the spec to describe what was built, in the file under `spec/` that covers it, or in SPEC.md for the overview and the decisions table; it tags the passing cases, checks off its Done criteria, and sets `status: implemented` and `branch: [main]`. The spec never describes unbuilt features, and proposals aren't updated to describe the current system. The spec links to a proposal only where the proposal gives more information or context, such as the alternatives behind a decision.
 
 ## Declining
 
