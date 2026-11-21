@@ -130,7 +130,10 @@ pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path
 fn released(p: *mm.Pages) void {
     const e: *Entry = @ptrCast(@alignCast(p.file.?));
     lock();
-    if (p.refs.load(.acquire) != 1) {
+    // Another Mm still owes a call (mm.Pages.pending), so the last one
+    // frees them; or a mapping took them meanwhile.
+    const owed = p.pending.fetchSub(1, .acq_rel) != 1;
+    if (owed or p.refs.load(.acquire) != 1) {
         mutex.unlock();
         return;
     }

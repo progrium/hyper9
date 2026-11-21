@@ -198,6 +198,11 @@ pub const Pages = struct {
     /// Called, outside any Mm's lock, when no Mm maps a table's pages any
     /// more (only the table's reference is left).
     release: ?*const fn (p: *Pages) void = null,
+    /// Calls to `release` owed by Mms that dropped a reference but haven't
+    /// settled yet. Several can be owed at once (one Mm unmaps, another
+    /// maps and unmaps before the first settles), so `release` frees the
+    /// pages only with the last, under the table's lock.
+    pending: std.atomic.Value(u32) = .init(0),
 };
 
 /// Shared file pages standing in for part of a chunk's own (`insertFile`):
@@ -352,16 +357,19 @@ pub const Mm = struct {
     /// Drops this Mm's reference to `p`, freeing the pages once no vCPU
     /// can reach them, or handing a file table's back to it.
     fn dropRef(m: *Mm, p: *Pages) void {
-        const was = p.refs.fetchSub(1, .acq_rel);
         if (p.release) |f| {
-            // The table's reference is the last: it may drop the pages.
-            if (was == 2) m.unmapped_files.append(m.gpa, p) catch {
+            // The table's `release` decides whether its reference is the
+            // last, so it may drop the pages. The call is owed before the
+            // reference goes, so no other Mm's call can free them first.
+            _ = p.pending.fetchAdd(1, .acq_rel);
+            _ = p.refs.fetchSub(1, .acq_rel);
+            m.unmapped_files.append(m.gpa, p) catch {
                 m.as.shootdown();
                 f(p);
             };
             return;
         }
-        if (was != 1) return;
+        if (p.refs.fetchSub(1, .acq_rel) != 1) return;
         // Another thread's vCPU may still reach them until `settle`.
         m.doomed.append(m.gpa, p) catch {
             m.as.shootdown();
