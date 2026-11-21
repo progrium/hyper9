@@ -964,7 +964,8 @@ pub const L = struct {
         };
         const got = try b.cas(ty, addr, old, new, .{ .size = size, .aligned = true, .order = .seq_cst }, in.pc);
         const ok = try b.icmp(.eq, got, old);
-        if (o.d != SINK and o.d != ZR) {
+        // T0 writes the sink slot too, where a 31 Rt goes.
+        if (o.d != ZR) {
             const wide = if (ty == .i64) old else try b.un(.zext, .i64, old);
             try b.setreg(regOff(o.d), try b.emit(.{ .op = .select, .ty = .i64, .a = ok, .b = wide, .c = try b.getreg(.i64, regOff(o.d)) }));
         }

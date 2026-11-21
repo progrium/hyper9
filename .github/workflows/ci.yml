@@ -172,3 +172,66 @@ jobs:
       - name: integration, amd64 root
         if: always()
         run: zig build integration -Doptimize=ReleaseSafe -Demu=hcpu -Darch=amd64 -Dbackends=emu -Droot="$PWD/.local/9front/rootamd64"
+
+  # The rest of hcpu's Done criteria that a hosted runner can show: an
+  # hour of fuzzing and the litmus tests on an arm64 and an x86-64 host,
+  # the bench against Unicorn, and the demos. A runner isn't an M3 Max,
+  # and its macOS has no HVF, so those numbers and the hvf,emu comparison
+  # are for a real Mac.
+  hcpu-fuzz:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build fuzz-long -Doptimize=ReleaseSafe
+      - if: always()
+        run: zig build litmus -Doptimize=ReleaseSafe
+
+  hcpu-demos:
+    if: github.event_name == 'workflow_dispatch'
+    needs: hcpu-roots
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: hcpu-roots
+      - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
+      - run: scripts/fetch.sh unicorn
+      - run: zig build -Doptimize=ReleaseSafe --prefix .local/h9-hcpu
+      - run: zig build -Doptimize=ReleaseSafe -Demu=unicorn --prefix .local/h9-unicorn
+      - name: bench, hcpu and Unicorn
+        if: always()
+        run: |
+          zig build bench -Demu=hcpu
+          zig build bench -Demu=unicorn
+      - name: the demos
+        if: always()
+        run: |
+          set -x
+          loop='i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'
+          if [ "$(uname)" = Linux ]; then
+            time .local/h9-hcpu/bin/h9 --backend emu --root .local/linux/alpine-arm64 /bin/busybox sh -c "$loop"
+            time .local/h9-unicorn/bin/h9 --backend emu --root .local/linux/alpine-arm64 /bin/busybox sh -c "$loop"
+          else
+            .local/h9-hcpu/bin/h9 --arch 386 --backend emu --root .local/linux/alpine-386 /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+            .local/h9-hcpu/bin/h9 --arch amd64 --backend emu --root .local/linux/alpine-amd64 /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+          fi
