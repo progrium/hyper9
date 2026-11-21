@@ -76,9 +76,15 @@ pub const Snapshot = struct {
 
     pub const Page = struct {
         /// The shadows' backing: the snapshot, then what T1 committed.
-        data: [page_size]u8 align(page_size),
+        data: *align(page_size) [page_size]u8,
         /// The snapshot as taken.
-        orig: [page_size]u8 align(page_size),
+        orig: *align(page_size) [page_size]u8,
+        /// What `data` and `orig` point to, or, where another page of the
+        /// region is the same live page (a file page mapped at two
+        /// addresses), that page's: one snapshot of it, so the shadows
+        /// see a store through one address through the other.
+        own_data: [page_size]u8 align(page_size),
+        own_orig: [page_size]u8 align(page_size),
         live: [*]u8,
         read: bool,
         write: bool,
@@ -108,7 +114,7 @@ pub const Snapshot = struct {
     fn page(p: *anyopaque, vp: u64) ?check.Backing.Page {
         const s: *Snapshot = @ptrCast(@alignCast(p));
         const pg = s.get(vp) orelse return null;
-        return .{ .host = &pg.data, .read = pg.read, .write = pg.write, .exec = pg.exec };
+        return .{ .host = pg.data, .read = pg.read, .write = pg.write, .exec = pg.exec };
     }
 
     fn get(s: *Snapshot, vp: u64) ?*Page {
@@ -130,8 +136,18 @@ pub const Snapshot = struct {
         pg.read = live.read;
         pg.write = live.write;
         pg.exec = live.exec;
-        copyLive(&pg.orig, live.host);
-        pg.data = pg.orig;
+        const same: ?*Page = for (s.pages.values()) |o| {
+            if (o.live == live.host) break o;
+        } else null;
+        if (same) |o| {
+            pg.data = o.data;
+            pg.orig = o.orig;
+        } else {
+            pg.data = &pg.own_data;
+            pg.orig = &pg.own_orig;
+            copyLive(pg.orig, live.host);
+            pg.data.* = pg.orig.*;
+        }
         s.pages.put(s.gpa, vp, pg) catch {
             s.free.append(s.gpa, pg) catch s.gpa.destroy(pg);
             s.oom = true;
@@ -151,7 +167,7 @@ pub const Snapshot = struct {
     /// optimized in any build: this module's own loops aren't in a Debug
     /// h9 on hosts whose Debug builds use Zig's own backend.)
     fn unchanged(s: *const Snapshot) bool {
-        for (s.pages.values()) |pg| if (!check.samePage(&pg.orig, pg.live[0..page_size])) return false;
+        for (s.pages.values()) |pg| if (!check.samePage(pg.orig, pg.live[0..page_size])) return false;
         return true;
     }
 
@@ -164,7 +180,7 @@ pub const Snapshot = struct {
             const c = e.value_ptr.*;
             if (!c.write) continue;
             const pg = s.pages.get(e.key_ptr.*) orelse continue;
-            if (check.samePage(&pg.orig, &c.data)) continue;
+            if (check.samePage(pg.orig, c.data)) continue;
             // A chunk at a time, through memcmp, then the words of the
             // chunks that differ.
             const chunk = 64;
@@ -494,4 +510,29 @@ test "jit check: the snapshot sees a store that lands after it, and the commit k
     try std.testing.expectEqual(@as(u64, 0x1122), live[0]);
     try std.testing.expectEqual(@as(u64, 7), live[1]);
     try std.testing.expectEqual(@as(u64, 9), live[2]);
+}
+
+test "jit check: a page mapped at two addresses is one page to the shadows" {
+    const gpa = std.testing.allocator;
+    var page: [mem.page_size]u8 align(mem.page_size) = @splat(0);
+    // One live page at 0x10000, writable, and at 0x20000, read-only, as
+    // a MAP_SHARED file page mapped twice.
+    const maps = [_]mem.Mapping{
+        .{ .va = 0x10000, .len = page.len, .host = @intFromPtr(&page), .perms = .{ .write = true } },
+        .{ .va = 0x20000, .len = page.len, .host = @intFromPtr(&page), .perms = .{} },
+    };
+    var tlb: mem.Tlb = .{};
+    var v: mem.View = .{ .maps = &maps, .tlb = &tlb };
+    var sn: Snapshot = .{ .gpa = gpa, .view = &v };
+    defer sn.deinit();
+    var sh = check.Shadow.init(gpa, sn.backing());
+    defer sh.deinit();
+    const w = sh.get(0x10).?;
+    const r = sh.get(0x20).?;
+    try std.testing.expect(w.write and !r.write);
+    // A store through the writable address is read through the other.
+    w.data[5] = 42;
+    try std.testing.expectEqual(@as(u8, 42), r.data[5]);
+    sn.commit(&sh, null);
+    try std.testing.expectEqual(@as(u8, 42), page[5]);
 }

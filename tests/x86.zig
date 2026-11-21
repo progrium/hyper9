@@ -1,4 +1,4 @@
-//! zig build hcpu (and x86-jit): the 386 JIT plan's [x86-jit] cases, each
+//! zig build hcpu (and x86-jit): h86's [hcpu] cases, each
 //! run on T0 alone and on T1 through dispatch, with ir_eval and with this
 //! host's emitter. The machine is src/jit/x86/t1.zig's: code at 0x1000
 //! (two pages, writable), data at 0x20000, stack at 0x21000, and nothing
@@ -94,7 +94,7 @@ fn expectSyscall(e: Exit) !void {
     if (e != .syscall) return error.WrongExit;
 }
 
-test "[x86-jit] a DIV by zero gives vector 0 at the DIV" {
+test "a DIV by zero gives vector 0 at the DIV [hcpu]" {
     const prog = [_]u8{
         0x31, 0xc9, // xorl %ecx, %ecx
         0xf7, 0xf1, // divl %ecx (at 0x1002)
@@ -110,7 +110,7 @@ test "[x86-jit] a DIV by zero gives vector 0 at the DIV" {
     }.f);
 }
 
-test "[x86-jit] fistp truncates under RC=chop" {
+test "fistp truncates under RC=chop [hcpu]" {
     const prog = [_]u8{
         0xc7, 0x05, 0x00, 0x00, 0x02, 0x00, 0xcd, 0xcc, 0x2c, 0x40, // movl $2.7f, 0x20000
         0xc7, 0x05, 0x04, 0x00, 0x02, 0x00, 0x7f, 0x0f, 0x00, 0x00, // movl $0xf7f, 0x20004
@@ -134,7 +134,7 @@ test "[x86-jit] fistp truncates under RC=chop" {
     }.f);
 }
 
-test "[x86-jit] x87 results are the same bits on every host" {
+test "x87 results are the same bits on every host [hcpu]" {
     const prog = [_]u8{
         0xd9, 0xe8, // fld1
         0xd9, 0xe8, // fld1
@@ -171,7 +171,7 @@ const rep_prog = [_]u8{
     0xcd, 0x80,
 };
 
-test "[x86-jit] a REP MOVSB stopped by a fault is exact, and resumes" {
+test "a REP MOVSB stopped by a fault is exact, and resumes [hcpu]" {
     try onEachTier(&rep_prog, @splat(0), struct {
         fn f(_: Tier, r: Run, e: Exit) !void {
             switch (e) {
@@ -195,7 +195,7 @@ test "[x86-jit] a REP MOVSB stopped by a fault is exact, and resumes" {
     }.f);
 }
 
-test "[x86-jit] a REP stopped between iterations on T0 resumes exactly" {
+test "a REP stopped between iterations on T0 resumes exactly [hcpu]" {
     // The stop word is guest memory the program sets: T0 sees it between
     // REP iterations (every 4096), so the REP stops part way, at itself.
     const prog = [_]u8{
@@ -230,7 +230,7 @@ test "[x86-jit] a REP stopped between iterations on T0 resumes exactly" {
     try testing.expectEqualSlices(u8, &ref.m.pages, &r.m.pages);
 }
 
-test "[x86-jit] flags a region leaves lazily are read by the next one" {
+test "flags a region leaves lazily are read by the next one [hcpu]" {
     // A shell's counted loop: CMP in one region, an indirect jump, and
     // the JL that reads its flags first thing in another region (busybox
     // sh's `while [ $i -lt 1000 ]` hung on the web host this way).
@@ -254,7 +254,7 @@ test "[x86-jit] flags a region leaves lazily are read by the next one" {
     }.f);
 }
 
-test "[x86-jit] a store into the executing page takes effect at the next instruction" {
+test "a store into the executing page takes effect at the next instruction [hcpu]" {
     const prog = [_]u8{
         0xc6, 0x05, 0x08, 0x10, 0x00, 0x00, 0x2a, // movb $0x2a, 0x1008
         0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax (0x1007; its immediate at 0x1008)
@@ -268,7 +268,7 @@ test "[x86-jit] a store into the executing page takes effect at the next instruc
     }.f);
 }
 
-test "[x86-jit] an instruction crossing into an unmapped page faults at its first byte" {
+test "an instruction crossing into an unmapped page faults at its first byte [hcpu]" {
     // jmp to 0x2ffe, where movl $imm, %eax runs into 0x3000.
     var prog: [0x1fff]u8 = @splat(0x90);
     prog[0] = 0xe9;
@@ -289,7 +289,7 @@ test "[x86-jit] an instruction crossing into an unmapped page faults at its firs
     }.f);
 }
 
-test "[x86-jit] an unknown GS selector raises #GP" {
+test "an unknown GS selector raises #GP [hcpu]" {
     const prog = [_]u8{
         0x66, 0xb8, 0x2b, 0x00, // movw $0x2b, %ax
         0x8e, 0xe8, // movw %ax, %gs (at 0x1004)
@@ -314,7 +314,7 @@ test "[x86-jit] an unknown GS selector raises #GP" {
     }.f);
 }
 
-test "[x86-jit] CPUID reports SSE2 and no AVX" {
+test "CPUID reports SSE2 and no AVX [hcpu]" {
     const prog = [_]u8{
         0xb8, 0x01, 0x00, 0x00, 0x00, // movl $1, %eax
         0x0f, 0xa2, // cpuid
@@ -348,7 +348,7 @@ const Shared = struct {
     }
 };
 
-test "[x86-jit] four LOCK XADD threads on T0 lose nothing" {
+test "four LOCK XADD threads on T0 lose nothing [hcpu]" {
     const n = 200_000;
     const s = try testing.allocator.create(Shared);
     defer testing.allocator.destroy(s);

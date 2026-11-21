@@ -1,5 +1,5 @@
-//! zig build a64-jit (and test, with -Demu=hcpu): the arm64 JIT plan's
-//! [a64-jit] cases, each run through the vmm interface on h9's own
+//! zig build a64-jit (and test, with -Demu=hcpu): ha64's cases, tagged
+//! [hcpu], each run through the vmm interface on h9's own
 //! emulator (hcpu and ha64), on T0 and on T1 (H9_EMU_TIER at create).
 //! T1 is this host's emitter: the x86-64 one here, the arm64 one on an
 //! arm64 Mac. Without -Demu=hcpu they skip.
@@ -200,7 +200,7 @@ fn expectFault(e: vmm.Exit, addr: u64) !void {
 
 // ---------------------------------------------------------------- cases
 
-test "[a64-jit] a store to a page of compiled code takes effect at the next instruction" {
+test "a store to a page of compiled code takes effect at the next instruction [hcpu]" {
     // x1 is an instruction, stored over `movz x2, #1` and then run: each
     // run's region was compiled with the last run's word there.
     const prog = [_]u32{
@@ -225,7 +225,7 @@ test "[a64-jit] a store to a page of compiled code takes effect at the next inst
     }
 }
 
-test "[a64-jit] a fault in a compiled region reports the exact PC and registers" {
+test "a fault in a compiled region reports the exact PC and registers [hcpu]" {
     const prog = [_]u32{
         movz(1, 5), // 0x00
         addi(2, 1, 1), // 0x04
@@ -271,7 +271,7 @@ const Runner = struct {
     }
 };
 
-test "[a64-jit] a kick stops a compiled loop that makes no system calls" {
+test "a kick stops a compiled loop that makes no system calls [hcpu]" {
     const prog = [_]u32{
         addi(5, 5, 1), // loop
         str(5, 0, 0),
@@ -312,7 +312,7 @@ fn counterTest(prog: []const u32) !void {
     }
 }
 
-test "[a64-jit] four LDXR/STXR threads lose no increments" {
+test "four LDXR/STXR threads lose no increments [hcpu]" {
     try counterTest(&.{
         movz(5, counter_n & 0xffff),
         movk16(5, counter_n >> 16),
@@ -326,7 +326,7 @@ test "[a64-jit] four LDXR/STXR threads lose no increments" {
     });
 }
 
-test "[a64-jit] four LDADD threads lose no increments" {
+test "four LDADD threads lose no increments [hcpu]" {
     try counterTest(&.{
         movz(1, 1),
         movz(5, counter_n & 0xffff),
@@ -338,7 +338,7 @@ test "[a64-jit] four LDADD threads lose no increments" {
     });
 }
 
-test "[a64-jit] unmapping a page another vCPU has cached faults its next access" {
+test "unmapping a page another vCPU has cached faults its next access [hcpu]" {
     // Each vCPU counts in its own word, forever.
     const prog = [_]u32{
         ldr(1, 0, 0), // loop
@@ -372,7 +372,7 @@ test "[a64-jit] unmapping a page another vCPU has cached faults its next access"
     }
 }
 
-test "[a64-jit] a full code cache flushes while other vCPUs run" {
+test "a full code cache flushes while other vCPUs run [hcpu]" {
     // Four vCPUs count; a fifth runs 1000 regions over and over, through a
     // cache too small for them, so it fills and flushes again and again.
     var prog: [2 * page / 4]u32 = undefined;
@@ -429,7 +429,7 @@ test "[a64-jit] a full code cache flushes while other vCPUs run" {
     }
 }
 
-test "[a64-jit] FP results and FPSR are the same bits on T0 and T1" {
+test "FP results and FPSR are the same bits on T0 and T1 [hcpu]" {
     const prog = [_]u32{
         fmovdx(0, 1),
         fmovdx(1, 2),
@@ -490,7 +490,7 @@ test "[a64-jit] FP results and FPSR are the same bits on T0 and T1" {
     }
 }
 
-test "[a64-jit] deterministic mode counts the same instructions on T0 and T1" {
+test "deterministic mode counts the same instructions on T0 and T1 [hcpu]" {
     // CNTVCT_EL0 is instructions retired: read after a loop, it's the
     // count so far, which must not depend on the tier.
     const prog = [_]u32{

@@ -18,6 +18,26 @@ const lockstep = if (options.unicorn) @import("lockstep") else struct {};
 
 const common = @import("fuzz_common.zig");
 
+/// The program being checked, for a crash in generated code to name.
+var crash_seed: ?u64 = null;
+var crash_words: []const u32 = &.{};
+
+/// A crash (SIGILL or SIGSEGV in generated code, say) names the seed and
+/// the program, and the instruction word at an illegal instruction.
+pub const debug = struct {
+    pub fn handleSegfault(addr: ?usize, name: []const u8, ctx: ?std.debug.CpuContextPtr) noreturn {
+        if (crash_seed) |seed| {
+            std.debug.print("fuzz-a64: {s} checking seed {d}; rerun with --seed {d} --iters 1\n", .{ name, seed, seed });
+            for (crash_words, 0..) |w, n| std.debug.print("  {x:0>4}: {x:0>8}\n", .{ gen.code_va + 4 * n, w });
+            if (addr) |a| if (std.mem.eql(u8, name, "Illegal instruction") and a & 3 == 0) {
+                const p: *const u32 = @ptrFromInt(a);
+                std.debug.print("  the word at {x}: {x:0>8}\n", .{ a, p.* });
+            };
+        }
+        std.debug.defaultHandleSegfault(addr, name, ctx);
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var args = try common.Args(gen.Class).parse("fuzz-a64", init);
@@ -58,6 +78,8 @@ pub fn main(init: std.process.Init) !void {
             for (words) |w| std.debug.print(" {x:0>8}", .{w});
             std.debug.print("\n", .{});
         }
+        crash_seed = seed;
+        crash_words = words;
         const start = s.cpu(prng.random());
         report.clearRetainingCapacity();
         var bad = false;

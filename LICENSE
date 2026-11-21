@@ -28,7 +28,8 @@ other licenses:
 - third_party/drawterm: MIT, see third_party/drawterm/LICENSE.
 - third_party/unicorn: GPLv2 (patches to Unicorn Engine and QEMU's generated
   configuration headers), see third_party/unicorn/COPYING.
-- Binaries built with -Demu=unicorn, released as "h9-emu", link Unicorn
-  Engine and are distributed under the GNU General Public License version 2.
-  h9's own source code in those binaries remains available under the MIT
-  license above.
+- Binaries built with -Demu=unicorn, for development and testing only (they
+  aren't released), link Unicorn Engine and are under the GNU General
+  Public License version 2. h9's own source code in those binaries remains
+  available under the MIT license above. The released h9 uses h9's own
+  emulator (-Demu=hcpu), which is MIT.

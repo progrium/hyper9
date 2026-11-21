@@ -8,7 +8,8 @@
 //! - macOS: one MAP_JIT mapping, so `rw` and `rx` are the same address. On
 //!   arm64 writing is switched per thread with pthread_jit_write_protect_np
 //!   (`beginWrite` turns writes on for the calling thread only, `commit`
-//!   turns them off), then sys_icache_invalidate.
+//!   turns them off), then sys_icache_invalidate. Where there's no switch,
+//!   as in a macOS VM, the mapping is RWX and `probe` checks that it works.
 //! - Linux: a memfd mapped twice, RW and RX, so no page is ever writable and
 //!   executable at the same address. arm64 cleans and invalidates the caches
 //!   by hand (`dc cvau` / `ic ivau`, as unicorn.zig's clearCache does).
@@ -271,8 +272,13 @@ const darwin = struct {
 
     const detect = probe;
 
+    /// Whether this process switches JIT write protection. A macOS VM on
+    /// Apple silicon (CI's runners) has none to switch: there a MAP_JIT
+    /// mapping is plainly RWX, as on an Intel Mac, and `probe` checks it.
+    var toggling: bool = toggles;
+
     fn map(n: usize) Error!Region {
-        if (toggles and pthread_jit_write_protect_supported_np() == 0) return error.JitUnavailable;
+        if (toggles and pthread_jit_write_protect_supported_np() == 0) toggling = false;
         // Without the allow-jit entitlement under the hardened runtime (or
         // on iOS without a debugger) this fails with EPERM.
         const p = mmap(null, n, prot_rwx, map_private | map_anon | map_jit, -1, 0);
@@ -286,7 +292,7 @@ const darwin = struct {
     }
 
     fn writeEnable(on: bool) void {
-        if (toggles) pthread_jit_write_protect_np(if (on) 0 else 1);
+        if (toggles and toggling) pthread_jit_write_protect_np(if (on) 0 else 1);
     }
 
     fn flush(_: [*]u8, rx: [*]u8, len: usize) void {

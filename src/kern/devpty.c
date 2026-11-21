@@ -61,7 +61,8 @@ enum
 	VEOL, VREPRINT, VDISCARD, VWERASE, VLNEXT, VEOL2,
 	Ccoff = 17,
 
-	SIGHUP = 1, SIGINT = 2, SIGQUIT = 3, SIGTSTP = 20,
+	/* Linux's signal numbers (the host's signal.h may define SIGHUP and the rest). */
+	Lsighup = 1, Lsigint = 2, Lsigquit = 3, Lsigtstp = 20,
 };
 
 #define QTYPE(p)	((int)((p) & 0xf))
@@ -360,11 +361,11 @@ discipline(Pty *p, uchar *a, int n, uchar *d, Seg *sg, uchar *e, int *ne, int *s
 		if(lflag & ISIG){
 			sig = 0;
 			if(iscc(p, c, VINTR))
-				sig = SIGINT;
+				sig = Lsigint;
 			else if(iscc(p, c, VQUIT))
-				sig = SIGQUIT;
+				sig = Lsigquit;
 			else if(iscc(p, c, VSUSP))
-				sig = SIGTSTP;
+				sig = Lsigtstp;
 			if(sig != 0){
 				if(!(lflag & NOFLSH)){
 					qflush(p->in);
@@ -726,7 +727,7 @@ ptyclose(Chan *c)
 		freepty(p);
 	USED(sid);
 	if(hup && h9_ptysig != nil)
-		h9_ptysig(fg, SIGHUP);
+		h9_ptysig(fg, Lsighup);
 }
 
 static Pty*

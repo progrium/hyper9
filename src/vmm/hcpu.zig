@@ -227,7 +227,8 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 if (opts.arch == .arm64 and @hasDecl(A64, "deterministic")) A64.deterministic = deterministicFromEnv();
                 if (build_options.jit and !web) {
                     if (std.c.getenv("H9_JIT_HOT")) |v| dispatch.hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch dispatch.hot;
-                    if (std.c.getenv("H9_PERF_MAP") != null and dispatch.perf_fd < 0) {
+                    // perf(1)'s map file, on POSIX hosts.
+                    if (builtin.os.tag != .windows and std.c.getenv("H9_PERF_MAP") != null and dispatch.perf_fd < 0) {
                         var path: [64:0]u8 = undefined;
                         if (std.fmt.bufPrintZ(&path, "/tmp/perf-{d}.map", .{std.c.getpid()})) |z| {
                             dispatch.perf_fd = std.c.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
@@ -674,6 +675,13 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                         return e;
                     };
                     s.leave();
+                    // A fault on memory another thread mapped after this
+                    // view was synced (an RFMEM sibling's sbrk while this
+                    // one spins in guest code): sync and run the faulting
+                    // instruction again. Faults are exact, so it's
+                    // restartable; a real fault comes back with the view
+                    // current.
+                    if (exit == .fault and s.as.load(.monotonic).?.generation.load(.seq_cst) != s.generation) continue;
                     if (exit != .interrupted) return exit;
                     if (web and cx.budget <= 0 and @atomicLoad(u32, &cx.exit_request, .seq_cst) == 0) {
                         // The budget ran out. Past a slice, preempt: the

@@ -1,4 +1,4 @@
-//! zig build x64-jit (and hcpu): hx64's cases, tagged [174], each to run
+//! zig build x64-jit (and hcpu): hx64's cases, tagged [hcpu], each to run
 //! on T0 alone and on T1 through dispatch, as tests/x86.zig runs h86's.
 //! design/hcpu.md's Done criteria lists them: the long-mode ones,
 //!

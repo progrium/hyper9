@@ -60,7 +60,7 @@ comes in.
 
 **The architecture.** Every binary in the tree must be for the architecture
 the machine runs. h9 runs your host's architecture on the hypervisor:
-arm64 on an Apple Silicon Mac. `h9-emu` also runs amd64 and 386 on the
+arm64 on an Apple Silicon Mac. It also runs amd64 and 386 on the
 emulator, and `--arch amd64` picks amd64. Without `--arch`, a program found
 by name is run as the host's architecture, so on a Mac an amd64-only tree
 needs `--arch amd64` or you get `wrong architecture` and exit 126.
@@ -69,8 +69,8 @@ needs `--arch amd64` or you get `wrong architecture` and exit 126.
 
 Go cross-compiles to Plan 9, so a userland can be built entirely on the
 host. Go has `plan9/amd64` and `plan9/386` ports but no `plan9/arm64`, so
-these examples are amd64 and need `h9-emu` on a Mac (the manual's chapter 2
-covers building it). On a Mac, add `--arch amd64` to every `h9` command in
+these examples are amd64 and run on the emulator on a Mac (the manual's
+chapter 27). On a Mac, add `--arch amd64` to every `h9` command in
 sections 2, 3, and 7; it's left out below. h9 also prints `h9: warning: no
 usable hypervisor; using the emulator`, which is left out of the output
 shown.

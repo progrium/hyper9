@@ -172,7 +172,7 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-`-Demu=hcpu` builds it on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), [spec/hx64.md](hx64.md), and [spec/jit.md](jit.md) describe. This section describes the Unicorn backend.
+`-Demu=hcpu`, the default on arm64 and x86-64 targets and what releases ship, builds it on h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), [spec/hx64.md](hx64.md), and [spec/jit.md](jit.md) describe ([hcpu](../design/hcpu.md)). `-Demu=unicorn` builds it on Unicorn instead, for lockstep testing against hcpu and for Go's own test suite; it isn't released. The rest of this section describes the Unicorn backend, apart from the hcpu numbers under Limits and selection.
 
 ### Scope
 
@@ -218,7 +218,7 @@ Guest pages come from the reserved range above, whose pages are zero and stay un
 
 The backend uses Unicorn Engine. It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses.
 
-It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into the MIT `h9` release build. Releases ship it separately as `h9-emu`, a GPLv2 binary built from source (`-Dunicorn=source`) with its complete corresponding source attached to the same release (`scripts/release.sh`); the two are separate programs side by side, so `h9` stays MIT.
+It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into a release. Before hcpu, releases shipped it separately as `h9-emu`, a GPLv2 binary with its complete corresponding source; hcpu replaced it, and it isn't released anymore.
 
 We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target.
 
@@ -237,6 +237,8 @@ Measured with `zig build bench -Demu=unicorn` ([tests/bench.zig](../tests/bench.
 On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loop takes 0.35 s for amd64, and a `pwrite` round trip about 28 µs, of which about 19 µs is the bare `OUT` exit and re-entry, each going through both hypervisors; KVM on bare metal is far cheaper.
 
 So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds.
+
+On hcpu, with `zig build bench -Demu=hcpu` ([hcpu](../design/hcpu.md#updates) has the table): on GitHub's macOS runner, an Apple silicon VM, the loop takes 1.09 s for arm64, 2.17 s for amd64, and 2.29 s for 386 on T1, against Unicorn's 3.14, 3.65, and 3.52 s there; on an x86-64 Linux VM, 0.60, 3.39, and 3.88 s, against 4.06, 6.37, and 5.59 s. T0 runs it in about 12 to 28 s. A `pwrite` round trip costs 0.5 to 1 µs, and a bare exit and re-entry 56 to 110 ns, since the emulator never leaves the process. Four busy amd64 threads run 3.3 to 4 times as fast as one on 4-core Linux hosts, where Unicorn's run no faster.
 
 By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](../design/epoch-0/browser-host.md)).
 

@@ -31,7 +31,7 @@ x86_64-linux-musl musllinux_1_2_x86_64 73d2eb557cc0255f18c55b15951c46dff1c07f996
 "
 # Unicorn source, for building it with Zig (build/unicorn.zig): fetch.sh
 # unpacks it into .local/src/unicorn and applies third_party/unicorn/patches.
-# Same version as the wheels. GPLv2: dev, CI and the h9-emu release.
+# Same version as the wheels. GPLv2: dev and lockstep testing only.
 UNICORN_SRC_URL=https://github.com/unicorn-engine/unicorn/archive/refs/tags/$UNICORN_VERSION.tar.gz
 UNICORN_SRC_SHA256=ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4
 

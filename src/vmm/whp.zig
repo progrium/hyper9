@@ -82,7 +82,10 @@ pub const Backend = struct {
         // refuses it is fine.
         const no_xsave: u64 = 0;
         _ = api.WHvSetPartitionProperty(p, .processor_xsave_features, &no_xsave, @sizeOf(u64));
-        try check(api.WHvSetupPartition(p));
+        // A Windows VM with Hyper-V but no nested virtualization (a CI
+        // runner, say) says the hypervisor is present and then can't set
+        // up a partition: there's no usable hypervisor, so auto falls back.
+        if (!abi.succeeded(api.WHvSetupPartition(p))) return error.HypervisorUnavailable;
 
         var ram: gphys.Ram = try .init(gpa, io, ram_gpa, opts.memory);
         errdefer ram.deinit();
