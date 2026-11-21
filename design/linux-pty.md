@@ -1,12 +1,12 @@
 ---
 slug: linux-pty
 title: Linux pseudoterminals
-status: draft
+status: implemented
 created: 2026-11-14
 authors: [progrium]
 depends: [linux-personality]
 areas: [kern, linux]
-branch: [linux-pty]
+branch: [main]
 ---
 
 # Proposal: Linux pseudoterminals
@@ -122,3 +122,4 @@ Step 2:
   - Not done: `VLNEXT`, `VREPRINT`, `VDISCARD`, `IXON` flow control, `ECHOPRT`, `ONOCR`, `ONLRET`, `IUTF8`'s multibyte erase, and `TOSTOP`. `TIOCSTI` isn't served.
   - The ISIG signals are sent from the process that writes the master. A write by a kernel process sends nothing.
   - The tmux demo ran with tmux 3.5a added to the Alpine root: `tmux new -d sh`, `send-keys` of a command, of `sleep 30` and `C-c`, and of `stty size`, and `capture-pane` showed the prompt, the output, `^C`, and `24 80`.
+- 2026-11-21: Rebased onto main and finished. With the line discipline, the Nix demo still builds a `/bin/sh` derivation with `nix-bugs` merged in, since Nix puts its pty in raw mode. The open issue about `/dev/tty` is settled as the Nov 14 note says, and `TIOCSTI` stays unserved.
