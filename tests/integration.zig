@@ -3823,7 +3823,7 @@ test "--host-cmd unmasks #C and says so in the plan [baseline]" {
     try std.testing.expect(std.mem.indexOf(u8, m.err, "mount/attach disallowed") != null);
     const p = try run(e, &.{ "--host-cmd", "--print", "ls" });
     defer p.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, p.out, "devmask:  #U\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, p.out, "devmask:  #U #b #i #m\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, p.out, "#C runs host commands with the host user's rights") != null);
 }
 
