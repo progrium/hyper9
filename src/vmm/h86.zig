@@ -124,7 +124,9 @@ pub fn run(cpu: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     if (build_options.jit_check) return runT1(cpu, ctx, &m, t1_emitter orelse undefined);
     if (build_options.jit and tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx, &m);
     if (build_options.jit and tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(cpu, ctx, &m, em);
-    const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
+    // Read once: a kick on another thread can drop it below 0 at any time.
+    const cur_budget = if (builtin.cpu.arch == .wasm32) ctx.budget else @atomicLoad(i64, &ctx.budget, .monotonic);
+    const budget: u64 = if (cur_budget <= 0) 0 else @intCast(cur_budget);
     return exitOf(c, ctx, runT0(c, ctx, &m, budget));
 }
 

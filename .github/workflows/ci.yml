@@ -155,7 +155,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: hcpu-roots
+      # Alpine's roots have symbolic links: on Windows, Git Bash's tar
+      # makes them native ones (the runner is an administrator).
       - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
+        env:
+          MSYS: winsymlinks:nativestrict
       - name: test, T1 and T0
         if: always()
         run: zig build test -Demu=hcpu

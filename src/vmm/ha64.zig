@@ -104,7 +104,9 @@ pub fn run(c: *Cpu, ctx: *Ctx) vmm.Error!vmm.Exit {
     if (build_options.jit and tier == .t1 and builtin.cpu.arch == .wasm32 and wasm_t1.available()) return runWasmT1(c, ctx);
     if (build_options.jit and tier == .t1) if (t1_emitter) |em| if (cache.Runtime.of(ctx).cache != null) return runT1(c, ctx, em);
     // A spent budget (ctx.budget) gives `.interrupted`, as an exit request does.
-    const budget: u64 = if (ctx.budget <= 0) 0 else @intCast(ctx.budget);
+    // Read once: a kick on another thread can drop it below 0 at any time.
+    const cur_budget = if (builtin.cpu.arch == .wasm32) ctx.budget else @atomicLoad(i64, &ctx.budget, .monotonic);
+    const budget: u64 = if (cur_budget <= 0) 0 else @intCast(cur_budget);
     const before = c.t0.retired;
     const e = t0.run(&c.machine, budget);
     if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(@min(c.t0.retired -% before, std.math.maxInt(i63)));

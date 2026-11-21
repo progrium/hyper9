@@ -42,11 +42,13 @@ const mount_points = [_][]const u8{
 };
 /// On-disk directories left out of the export: dist holds installer payloads.
 const exclude = [_][]const u8{"dist"};
-/// Left out when unpacking: kernels and boot files for real hardware, and
-/// documentation. bsdtar patterns, matched against the whole path.
+/// Left out when unpacking: kernels and boot files for real hardware,
+/// documentation, and what the image left in /tmp (the installer's
+/// timesync file and an empty `xxx`). bsdtar patterns, matched against the
+/// whole path.
 const skip = [_][]const u8{
     "arm64/9*", "arm64/s9*", "386/9boot*", "386/*.efi", "386/efiboot.fat",
-    "386/mbr",  "386/pbs",   "sys/doc",
+    "386/mbr",  "386/pbs",   "sys/doc",    "tmp/*",
 };
 const skip_src = [_][]const u8{"sys/src"};
 
