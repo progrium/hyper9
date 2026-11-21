@@ -5756,6 +5756,39 @@ test "an executable's untouched segments aren't loaded: a 170 MB static binary r
     try std.testing.expectEqual(0, r.code);
 }
 
+test "a fork of a process with 600 MB of written heap runs under --memory 1g, and parent and child see their own writes [cow-fork]" {
+    try cowFork(@src(), &.{ "--memory", "1g", "/mnt/term/cwd/cowfork", "big" }, "ok big\n");
+}
+
+test "after fork, a read() into a buffer, a write from another thread, and a futex word change stay in the process that made them [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "isolate" }, "ok isolate\n");
+}
+
+test "a write after fork that finds no memory gets SIGSEGV, and the machine and the other process go on [cow-fork]" {
+    try cowFork(@src(), &.{ "--memory", "256m", "/mnt/term/cwd/cowfork", "oom" }, "ok oom\n");
+}
+
+test "MADV_DONTNEED after fork zeroes the range in one process only [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "dontneed" }, "ok dontneed\n");
+}
+
+test "a private mapping of a 200 MB file costs only the chunks touched, as VmRSS shows [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "filemap" }, "ok filemap\n");
+}
+
+/// Runs tests/fixtures/linux/cowfork.c with `args`, its case last, and
+/// checks it prints `want` and exits 0, for the test at `src`.
+fn cowFork(comptime src: std.builtin.SourceLocation, args: []const []const u8, want: []const u8) !void {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(src, &le);
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "cowfork"), .{}) catch return error.SkipZigTest;
+    const r = try runLinux(&le, false, args);
+    defer r.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
+    try std.testing.expectEqualStrings(want, r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
 test "files, fork, vfork, exec, pipes, signals and mmap work for a Linux program [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

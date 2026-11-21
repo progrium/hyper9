@@ -2078,12 +2078,15 @@ Silicon Mac, runs only on the emulator (`h9-emu`), and much more slowly.
   `--no-hardlinks`.
 - Moving a directory across directories inside the root's overlay, or
   between two overlays, fails with `EXDEV`; `mv` falls back to copying.
-- Memory: `fork` copies the parent's touched memory into the child, so a
+- Memory: `fork` shares the parent's memory with the child copy-on-write,
+  and `exec` loads a program's pages from its file as they're touched, so a
   large program that starts others, such as `zig cc` or a compiler driver,
-  can need `--memory 3g` to `8g`
-  (*Not yet available ([cow-fork](design/cow-fork.md))*). `exec` loads a
-  program's pages from its file as they're touched, so a large program
-  costs only what it uses.
+  costs only what each process touches and writes. Running out shows up at
+  the write that needed a copy, as `SIGSEGV`, where Linux's OOM killer
+  would end some process; `fork` itself doesn't fail for want of memory.
+  `/proc/n/status` counts shared memory in each process that maps it, as
+  Linux does, and `/proc/meminfo` counts it once for each process too, so
+  `MemFree` reads low after a fork.
 - CPU times in `/proc/stat` and `/proc/n/stat` read 0, so `top` and `htop`
   show 0%.
 - `symlink` works in overlays (the root and `/tmp`) and host trees on macOS
