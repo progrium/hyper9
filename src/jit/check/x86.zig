@@ -67,7 +67,7 @@ pub const ShadowMem = struct {
             .exec => c.exec,
         };
         if (!ok) return null;
-        return @as([*]u8, &c.data) + (va & (mem.page_size - 1));
+        return @as([*]u8, c.data) + (va & (mem.page_size - 1));
     }
 };
 
@@ -180,7 +180,7 @@ pub const ShadowMem64 = struct {
             .exec => c.exec,
         };
         if (!ok) return null;
-        return @as([*]u8, &c.data) + (va & (mem.page_size - 1));
+        return @as([*]u8, c.data) + (va & (mem.page_size - 1));
     }
 };
 

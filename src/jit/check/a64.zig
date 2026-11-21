@@ -70,9 +70,9 @@ pub fn shadowFill(p: *anyopaque, tlb: *mem.Tlb, va: u64, acc: mem.Access) t0.Fil
     if (acc != .exec) {
         const table = if (acc == .write) &tlb.write else &tlb.read;
         const vp = va >> mem.page_shift;
-        table[@intCast(vp & (mem.entries - 1))] = .{ .tag = vp, .delta = @as(u64, @intFromPtr(&c.data)) -% (vp << mem.page_shift) };
+        table[@intCast(vp & (mem.entries - 1))] = .{ .tag = vp, .delta = @as(u64, @intFromPtr(c.data)) -% (vp << mem.page_shift) };
     }
-    return .{ .host = @intFromPtr(&c.data) + @as(usize, @intCast(va & (mem.page_size - 1))) };
+    return .{ .host = @intFromPtr(c.data) + @as(usize, @intCast(va & (mem.page_size - 1))) };
 }
 
 /// One T0 instruction, with the conventions of `check.Guest.step`.

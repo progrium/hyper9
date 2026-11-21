@@ -164,7 +164,12 @@ pub const Shadow = struct {
     oom: bool = false,
 
     pub const Copy = struct {
-        data: [page_size]u8 align(page_size),
+        /// The page's bytes: `own`, or, where another page of the shadow
+        /// is the same backing page (one file page mapped at two
+        /// addresses), that page's copy, so a store through either
+        /// address is seen through the other, as in live memory.
+        data: *align(page_size) [page_size]u8,
+        own: [page_size]u8 align(page_size),
         orig: [*]u8,
         read: bool,
         write: bool,
@@ -208,7 +213,12 @@ pub const Shadow = struct {
         c.read = pg.read;
         c.write = pg.write;
         c.exec = pg.exec;
-        @memcpy(&c.data, pg.host[0..page_size]);
+        c.data = for (s.pages.values()) |o| {
+            if (o.orig == pg.host) break o.data;
+        } else blk: {
+            @memcpy(&c.own, pg.host[0..page_size]);
+            break :blk &c.own;
+        };
         s.pages.put(s.gpa, vp, c) catch {
             s.free.append(s.gpa, c) catch s.gpa.destroy(c);
             s.oom = true;
@@ -232,7 +242,7 @@ pub const Shadow = struct {
 
     /// The bytes of page vp as this tier left them.
     pub fn view(s: *const Shadow, vp: u64) ?*const [page_size]u8 {
-        if (s.pages.get(vp)) |c| return &c.data;
+        if (s.pages.get(vp)) |c| return c.data;
         const pg = s.backing.page(s.backing.ctx, vp) orelse return null;
         return pg.host[0..page_size];
     }
@@ -242,7 +252,7 @@ pub const Shadow = struct {
         var it = s.pages.iterator();
         while (it.next()) |e| {
             const c = e.value_ptr.*;
-            if (c.write and !samePage(&c.data, c.orig[0..page_size])) @memcpy(c.orig[0..page_size], &c.data);
+            if (c.write and !samePage(c.data, c.orig[0..page_size])) @memcpy(c.orig[0..page_size], c.data);
         }
     }
 
@@ -255,10 +265,10 @@ pub const Shadow = struct {
             .exec => c.exec,
         };
         if (!allowed) return .{ .fault = .permission };
-        const host: usize = @intFromPtr(&c.data) + @as(usize, @intCast(va & (page_size - 1)));
+        const host: usize = @intFromPtr(c.data) + @as(usize, @intCast(va & (page_size - 1)));
         if (acc != .exec) {
             const table = if (acc == .write) &tlb.write else &tlb.read;
-            table[@intCast(vp & (mem.entries - 1))] = .{ .tag = vp, .delta = @as(u64, @intFromPtr(&c.data)) -% (vp << mem.page_shift) };
+            table[@intCast(vp & (mem.entries - 1))] = .{ .tag = vp, .delta = @as(u64, @intFromPtr(c.data)) -% (vp << mem.page_shift) };
         }
         return .{ .ok = @ptrFromInt(host) };
     }

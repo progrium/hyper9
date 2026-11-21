@@ -1320,7 +1320,7 @@ test "creating empty files until memory runs out fails with file system full [ep
     // when it works, so there's nothing to test in the loop; when one
     // fails, rc prints the error and leaves the script. About 30,000 files
     // fit; on WHP, whose exits are slower, making them takes about 45s.
-    const r = try runInFor(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" }, null, 120_000);
+    const r = try runInFor(e, &.{ "--memory", "32m", "--rc", "for(i in `{seq 150000}) >/tmp/e$i; exit never" }, null, slow(120_000));
     defer r.deinit();
     try std.testing.expectEqual(1, r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.err, "file system full") != null);
@@ -1924,7 +1924,10 @@ test "a BRK posts sys: breakpoint [self-host]" {
 test "acid attaches and prints registers and a stack trace [self-host]" {
     const e = try env(@src());
     var tb: [16]u8 = undefined;
-    const r = try runIn(e, &.{ "--timeout", slowTimeout(&tb, 60_000), "--rc", "sleep 5 & sleep 1; acid $apid; echo kill >/proc/$apid/ctl" }, "regs()\nstk()\n");
+    // The sleep has to outlast acid's start, which H9_TEST_SLOW slows too.
+    var sb: [96]u8 = undefined;
+    const script = try std.fmt.bufPrint(&sb, "sleep {d} & sleep 1; acid $apid; echo kill >/proc/$apid/ctl", .{slow(5)});
+    const r = try runIn(e, &.{ "--timeout", slowTimeout(&tb, 60_000), "--rc", script }, "regs()\nstk()\n");
     defer r.deinit();
     errdefer std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ r.out, r.err });
     // acid prints its registers by name: R0 on arm64, AX on x86, after a
