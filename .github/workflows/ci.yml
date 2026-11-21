@@ -217,12 +217,14 @@ jobs:
       - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
       - run: scripts/fetch.sh unicorn
       - run: zig build -Doptimize=ReleaseSafe --prefix .local/h9-hcpu
-      - run: zig build -Doptimize=ReleaseSafe -Demu=unicorn --prefix .local/h9-unicorn
+      # Unicorn's prebuilt Linux libraries are for musl.
+      - run: echo "UC_TARGET=$([ "$(uname)" = Linux ] && echo "-Dtarget=$(uname -m)-linux-musl")" >>"$GITHUB_ENV"
+      - run: zig build -Doptimize=ReleaseSafe -Demu=unicorn $UC_TARGET --prefix .local/h9-unicorn
       - name: bench, hcpu and Unicorn
         if: always()
         run: |
           zig build bench -Demu=hcpu
-          zig build bench -Demu=unicorn
+          zig build bench -Demu=unicorn $UC_TARGET
       - name: the demos
         if: always()
         run: |

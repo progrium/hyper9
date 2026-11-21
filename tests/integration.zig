@@ -792,6 +792,14 @@ test "without access to /dev/kvm, auto falls back to the emulator with a warning
     // Runs where this user can't open /dev/kvm (not in the kvm group).
     if (try kvmLimit(e) != null) return error.SkipZigTest;
     std.Io.Dir.accessAbsolute(std.testing.io, "/dev/kvm", .{}) catch return error.SkipZigTest;
+    // KVM runs the host's architecture only; another's gets a different
+    // reason (-Darch=arm64 or 386 on an x86-64 host).
+    const host_arch: []const u8 = switch (builtin.cpu.arch) {
+        .x86_64 => "amd64",
+        .aarch64 => "arm64",
+        else => return error.SkipZigTest,
+    };
+    if (e.arch) |a| if (!std.mem.eql(u8, a, host_arch)) return error.SkipZigTest;
     const k = try runOn(e, "kvm", &.{ "/bin/echo", "hi" }, null);
     defer k.deinit();
     try std.testing.expectEqual(125, k.code);
@@ -8356,7 +8364,8 @@ const Diod = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
         try argv.appendSlice(gpa, &.{ bin, "-f", "-n", "-N", "-L", "stderr", "-l", try std.fmt.bufPrint(&listen_buf, "127.0.0.1:{d}", .{d.port}), "-e", d.s.path });
-        const uid = std.c.getuid();
+        // diod runs only on Linux; this compiles for Windows too.
+        const uid: u32 = if (builtin.os.tag == .windows) 0 else std.c.getuid();
         if (uid != 0) try argv.appendSlice(gpa, &.{ "-u", try std.fmt.bufPrint(&uid_buf, "{d}", .{uid}) });
         d.child = try std.process.spawn(io, .{ .argv = argv.items, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
         errdefer d.child.kill(io);
@@ -8536,7 +8545,7 @@ test "a .L root attaches as the host uid, not 0, without --user-map [dotl]" {
     const st = try runProcessWith(&.{ "stat", "-c", "%u", try scratchPath(&d.s, &pb, "usr/glenda/f") }, null, null, 10_000);
     defer gpa.free(st.stdout);
     defer gpa.free(st.stderr);
-    const uid = std.c.getuid();
+    const uid: u32 = if (builtin.os.tag == .windows) 0 else std.c.getuid();
     var want_buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{d}\n", .{if (uid == 0) @as(u32, 65534) else uid}), st.stdout);
 }
@@ -8792,7 +8801,7 @@ test "a .L.Z root survives the server restarting mid-write [dotl]" {
 /// Lima VMs and CI's runners), or null if neither.
 fn v9fsAsRoot() ?[]const u8 {
     if (builtin.os.tag != .linux) return null;
-    const pre: []const u8 = if (std.c.getuid() == 0) "" else "sudo -n ";
+    const pre: []const u8 = if (builtin.os.tag == .windows or std.c.getuid() == 0) "" else "sudo -n ";
     var cmd_buf: [96]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s}modprobe -q 9p; {s}modprobe -q 9pnet_fd; {s}true", .{ pre, pre, pre }) catch return null;
     const r = runProcessWith(&.{ "sh", "-c", cmd }, null, null, 10_000) catch return null;

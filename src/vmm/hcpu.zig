@@ -227,7 +227,8 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 if (opts.arch == .arm64 and @hasDecl(A64, "deterministic")) A64.deterministic = deterministicFromEnv();
                 if (build_options.jit and !web) {
                     if (std.c.getenv("H9_JIT_HOT")) |v| dispatch.hot = std.fmt.parseInt(u32, std.mem.span(v), 10) catch dispatch.hot;
-                    if (std.c.getenv("H9_PERF_MAP") != null and dispatch.perf_fd < 0) {
+                    // perf(1)'s map file, on POSIX hosts.
+                    if (builtin.os.tag != .windows and std.c.getenv("H9_PERF_MAP") != null and dispatch.perf_fd < 0) {
                         var path: [64:0]u8 = undefined;
                         if (std.fmt.bufPrintZ(&path, "/tmp/perf-{d}.map", .{std.c.getpid()})) |z| {
                             dispatch.perf_fd = std.c.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
