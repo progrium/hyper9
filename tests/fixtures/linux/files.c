@@ -23,6 +23,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -319,6 +320,38 @@ static void dir_sync(void) {
 	CHECK("dir_sync", fsync(dfd) < 0 && errno == EBADF);
 	unlink(path);
 	printf("ok dir_sync\n");
+}
+
+static void sync_open(void) {
+	/* PostgreSQL's wal_sync_method open_datasync and open_sync: writes
+	 * through an fd opened O_DSYNC or O_SYNC are on disk when they return. */
+	int fd = fresh("odsync");
+	close(fd);
+	fd = open(path, O_RDWR | O_DSYNC);
+	CHECK("sync_open", fd >= 0);
+	int fl = fcntl(fd, F_GETFL);
+	CHECK("sync_open", (fl & O_DSYNC) == O_DSYNC && (fl & O_SYNC) != O_SYNC);
+	struct iovec iov[2] = {{"cd", 2}, {"ef", 2}};
+	CHECK("sync_open", write(fd, "ab", 2) == 2 && writev(fd, iov, 2) == 4 && pwrite(fd, "gh", 2, 6) == 2);
+	/* F_SETFL can't change them, on Linux as here. */
+	CHECK("sync_open", fcntl(fd, F_SETFL, O_NONBLOCK) == 0);
+	fl = fcntl(fd, F_GETFL);
+	CHECK("sync_open", (fl & O_DSYNC) == O_DSYNC && (fl & O_NONBLOCK) == O_NONBLOCK);
+	CHECK("sync_open", fcntl(fd, F_SETFL, 0) == 0 && (fcntl(fd, F_GETFL) & O_DSYNC) == O_DSYNC);
+	int d = dup(fd);
+	CHECK("sync_open", d >= 0 && (fcntl(d, F_GETFL) & O_DSYNC) == O_DSYNC && close(d) == 0);
+	char b[16];
+	CHECK("sync_open", pread(fd, b, sizeof b, 0) == 8 && memcmp(b, "abcdefgh", 8) == 0);
+	close(fd);
+	fd = fresh("osync");
+	close(fd);
+	fd = open(path, O_WRONLY | O_SYNC | O_APPEND);
+	CHECK("sync_open", fd >= 0 && (fcntl(fd, F_GETFL) & O_SYNC) == O_SYNC && write(fd, "x", 1) == 1);
+	close(fd);
+	fd = fresh("plain");
+	CHECK("sync_open", fd >= 0 && (fcntl(fd, F_GETFL) & (O_DSYNC | O_SYNC)) == 0 && write(fd, "x", 1) == 1);
+	close(fd);
+	printf("ok sync_open\n");
 }
 
 static void read_cache(void) {
@@ -861,6 +894,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "prctl_name")) prctl_name();
 		if (all || !strcmp(n, "fsync_rusage")) fsync_rusage();
 		if (all || !strcmp(n, "dir_sync")) dir_sync();
+		if (all || !strcmp(n, "sync_open")) sync_open();
 		if (all || !strcmp(n, "read_cache")) read_cache();
 		if (all || !strcmp(n, "falloc")) falloc();
 		if (all || !strcmp(n, "rename_across")) rename_across();

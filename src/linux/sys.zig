@@ -154,7 +154,11 @@ pub const FdFlags = packed struct(u8) {
     nonblock: bool = false,
     /// Opened with O_PATH.
     path: bool = false,
-    _: u5 = 0,
+    /// Opened with O_DSYNC: each write syncs the file before it returns.
+    dsync: bool = false,
+    /// Opened with O_SYNC, which Linux spells O_DSYNC plus __O_SYNC.
+    sync: bool = false,
+    _: u3 = 0,
 };
 
 /// Directory entries read but not yet returned by getdents64.
@@ -890,6 +894,9 @@ const O_NOCTTY = 0o400;
 const O_TRUNC = 0o1000;
 const O_APPEND = 0o2000;
 const O_NONBLOCK = 0o4000;
+const O_DSYNC = 0o10000;
+/// O_SYNC is __O_SYNC (0o4000000) with O_DSYNC.
+const O_SYNC = 0o4010000;
 const O_CLOEXEC = 0o2000000;
 const O_PATH = 0o10000000;
 
@@ -920,10 +927,10 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
         .read => return ret(try rw(p, c.int(0), c.a[1], c.a[2], -1, .read)),
         .write => {
             if (try passcredWrite(p, c.int(0), c.a[2])) |e| return ret(e);
-            return ret(try rw(p, c.int(0), c.a[1], c.a[2], -1, .write));
+            return ret(synced(p, c.int(0), try rw(p, c.int(0), c.a[1], c.a[2], -1, .write)));
         },
         .pread64 => return ret(try rw(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .read)),
-        .pwrite64 => return ret(try rw(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write)),
+        .pwrite64 => return ret(synced(p, c.int(0), try rw(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write))),
         .readv => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], -1, .read)),
         .writev => {
             if (passcred_live.load(.monotonic) > 0) {
@@ -932,11 +939,11 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
                 while (i < @min(c.a[2], 1024)) : (i += 1) total += (try p.iovec(c.a[1], i))[1];
                 if (try passcredWrite(p, c.int(0), total)) |e| return ret(e);
             }
-            return ret(try rwv(p, c.int(0), c.a[1], c.a[2], -1, .write));
+            return ret(synced(p, c.int(0), try rwv(p, c.int(0), c.a[1], c.a[2], -1, .write)));
         },
         .preadv => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .read)),
-        .pwritev => return ret(try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write)),
-        .sendfile => return ret(try sendfile(p, c.int(0), c.int(1), c.a[2], c.a[3], p.is32())),
+        .pwritev => return ret(synced(p, c.int(0), try rwv(p, c.int(0), c.a[1], c.a[2], @bitCast(c.a[3]), .write))),
+        .sendfile => return ret(synced(p, c.int(0), try sendfile(p, c.int(0), c.int(1), c.a[2], c.a[3], p.is32()))),
         .lseek => return ret(lseek(p, c.int(0), @bitCast(c.a[1]), c.int(2))),
         .dup => {
             const fd = c.int(0);
@@ -1460,7 +1467,7 @@ const ia32 = struct {
                 return ret(0);
             },
             .fcntl64 => s.* = .fcntl,
-            .sendfile64 => return ret(try sendfile(p, c.int(0), c.int(1), a[2], a[3], false)),
+            .sendfile64 => return ret(synced(p, c.int(0), try sendfile(p, c.int(0), c.int(1), a[2], a[3], false))),
             .waitpid => {
                 s.* = .wait4;
                 a[3] = 0;
@@ -1854,10 +1861,14 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
         };
     }
     p.fdClosed(fd);
-    if (flags & (O_APPEND | O_NONBLOCK | O_PATH) != 0) setFlags(p, fd, .{
+    const dsync = flags & O_PATH == 0 and flags & O_DSYNC != 0;
+    if (dsync) sync_opened.store(true, .monotonic);
+    if (flags & (O_APPEND | O_NONBLOCK | O_PATH) != 0 or dsync) setFlags(p, fd, .{
         .append = flags & O_APPEND != 0,
         .nonblock = flags & O_NONBLOCK != 0,
         .path = flags & O_PATH != 0,
+        .dsync = dsync,
+        .sync = dsync and flags & O_SYNC == O_SYNC,
     });
     if (flags & (O_NOCTTY | O_PATH) == 0) ptyOpened(p, fd);
     return fd;
@@ -2336,6 +2347,7 @@ fn fcntl(p: *Process, fd: i32, cmd: i32, arg: u64) Err!i64 {
             if (f.append) r |= O_APPEND;
             if (f.nonblock) r |= O_NONBLOCK;
             if (f.path) r |= O_PATH;
+            if (f.dsync) r |= if (f.sync) O_SYNC else O_DSYNC;
             return r;
         },
         F_SETFL => {
@@ -2343,6 +2355,7 @@ fn fcntl(p: *Process, fd: i32, cmd: i32, arg: u64) Err!i64 {
             var f = flagsOf(p, fd);
             f.append = arg & O_APPEND != 0;
             f.nonblock = arg & O_NONBLOCK != 0;
+            // As on Linux, F_SETFL leaves O_DSYNC and O_SYNC as open set them.
             setFlags(p, fd, f);
             return 0;
         },
@@ -2764,6 +2777,22 @@ fn fsync(fd: i32) i64 {
         return if (info.dc == 'U') -E.IO else 0;
     };
     return 0;
+}
+
+/// Set once any fd is opened with O_DSYNC or O_SYNC, so a write checks
+/// the fd's flags for them only after that.
+var sync_opened: std.atomic.Value(bool) = .init(false);
+
+/// After a write of `n` bytes to fd: an fd opened with O_DSYNC or O_SYNC
+/// syncs the file before the write returns, as Linux does, so what a
+/// database writes through one (PostgreSQL's wal_sync_method
+/// open_datasync or open_sync) survives the host losing power. The
+/// host's fsync covers both. A failed sync fails the write.
+fn synced(p: *Process, fd: i32, n: i64) i64 {
+    if (n <= 0 or !sync_opened.load(.monotonic)) return n;
+    if (!flagsOf(p, fd).dsync) return n;
+    const r = fsync(fd);
+    return if (r < 0) r else n;
 }
 
 /// syncfs: the host file system behind fd's channel (src/kern/linux.c).
