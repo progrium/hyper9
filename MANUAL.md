@@ -149,7 +149,7 @@ there isn't (chapter 27).
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | The emulator, for amd64 and 386 programs |
 | Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | The emulator |
 | Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`zig build mkroot` on x86\_64) | The emulator, or `--backend native` for a trusted guest |
-| Windows on ARM | *Not yet available ([whp](design/whp.md))* | The emulator |
+| Windows on ARM | *Not yet available ([whp](design/epoch-0/whp.md))* | The emulator |
 | Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | The emulator |
 
 (Before hcpu, the emulator was Unicorn, which is GPL-licensed, so it
@@ -2687,7 +2687,7 @@ to 32 times slower, and amd64 and 386 ones 25 to 99 times slower.
 
 **In a browser.** h9 also builds for WebAssembly, where the same emulator
 runs 386 and arm64 programs, its JIT compiling to WebAssembly
-([browser-host](design/browser-host.md)). `--backend v86`, the browser's
+([browser-host](design/epoch-0/browser-host.md)). `--backend v86`, the browser's
 backend before hcpu replaced it, is another name for `emu`, for one more
 release.
 
