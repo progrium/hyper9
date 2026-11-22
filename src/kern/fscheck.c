@@ -850,6 +850,13 @@ h9_fs_resolveinw(wchar_t *top, wchar_t *dir, char *rel, wchar_t *buf, int nbuf)
 				return H9_RESLOOP;
 			if(reparsetarget(next, target, nelem(target), &relative, 0) < 0)
 				return H9_RESNONEXIST;
+			/*
+			 * "\x", as tar makes "/x" from a Linux root, is relative to
+			 * the drive for Windows (the link is marked relative), but
+			 * from the tree's top here, as an absolute Linux link is.
+			 */
+			if(target[0] == L'\\' || target[0] == L'/')
+				relative = 0;
 			t = target;
 			if(!relative){
 				/* \??\C:\x, C:\x or \x: from top. */
