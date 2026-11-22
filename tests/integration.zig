@@ -5803,6 +5803,18 @@ fn runContained(e: Env, tree: []const u8, args: []const []const u8) !Result {
     return runRoot(e, try std.fmt.bufPrint(&buf, "{s}:/:contained", .{tree}), args);
 }
 
+/// Host path `p` as #U names it: as is, or on Windows "/C:/x" for "C:\x".
+fn kernPath(out: []u8, p: []const u8) []const u8 {
+    if (builtin.os.tag != .windows) {
+        @memcpy(out[0..p.len], p);
+        return out[0..p.len];
+    }
+    out[0] = '/';
+    for (p, out[1 .. p.len + 1]) |c, *o| o.* = if (c == '\\') '/' else c;
+    if (p.len >= 2 and p[1] == ':') out[1] = std.ascii.toUpper(out[1]);
+    return out[0 .. p.len + 1];
+}
+
 /// Runs `args` with the root `root`.
 fn runRoot(e: Env, root: []const u8, args: []const []const u8) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -6217,7 +6229,8 @@ test "--print's #U!c bind replays with --ns [symlinks-in-root]" {
     const p = try runContained(e, tree, &.{ "--cwd", s.path, "--print", "cat" });
     defer p.deinit();
     var want: [std.Io.Dir.max_path_bytes + 16]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  bind -r '#U!c{s}' '#Oroot'", .{tree})) != null);
+    var kb: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, p.out, try std.fmt.bufPrint(&want, "  bind -r '#U!c{s}' '#Oroot'", .{kernPath(&kb, tree)})) != null);
     const start = (std.mem.indexOf(u8, p.out, "namespace:\n") orelse return error.NoNamespace) + "namespace:\n".len;
     const end = std.mem.indexOfPos(u8, p.out, start, "access:\n") orelse p.out.len;
     try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ns", .data = p.out[start..end] });
