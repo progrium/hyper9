@@ -87,7 +87,12 @@ pub const TCR: u64 = 16 | // T0SZ
 pub const MAIR: u64 = 0xff; // attr 0: normal memory, write-back
 
 pub const SCTLR: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 << 20) | (1 << 11) | (1 << 8) | (1 << 7) | // RES1
-    (1 << 0) | (1 << 2) | (1 << 12); // M, C, I
+    (1 << 0) | (1 << 2) | (1 << 12) | // M, C, I
+    // What Linux lets EL0 do, which JITs such as V8 (node) rely on: DZE
+    // (DC ZVA), UCT (read CTR_EL0), nTWI and nTWE (WFI and WFE don't
+    // trap), and UCI (DC CVAU, DC CIVAC, IC IVAU and the like, to make
+    // freshly written code visible).
+    (1 << 14) | (1 << 15) | (1 << 16) | (1 << 18) | (1 << 26);
 
 /// CPACR_EL1: no FP/SIMD traps.
 pub const CPACR: u64 = 3 << 20;

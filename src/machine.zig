@@ -648,6 +648,10 @@ pub const Machine = struct {
         };
 
         const timed_out = job.waitFirst();
+        // A machine that's ending doesn't redial: a 9P2000.L.Z mount whose
+        // host stream drops as the processes stop would run its credential
+        // helper and dial again for nothing, maybe still at it as h9 exits.
+        if (job.mach.load(.acquire)) |mc| hstream.unregisterHost(@intFromPtr(mc));
         // The machine ends with its first process: any others are stopped,
         // as at a timeout.
         job.stopAll();
@@ -667,6 +671,7 @@ pub const Machine = struct {
             dotl.unregister(@intFromPtr(mc));
             hidx.unregister(@intFromPtr(mc));
             hstream.unregisterHost(@intFromPtr(mc));
+            _ = hstream.waitConnects(@intFromPtr(mc), grace_ms);
             mc.put();
         }
         // The static trees the run's mounts served, now nothing dials them.
