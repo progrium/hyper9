@@ -63,6 +63,7 @@ pub const why_irq = 3;
 /// System registers, in the op0:op1:CRn:CRm:op2 encoding that HVF's
 /// hv_sys_reg_t and KVM's KVM_REG_ARM64_SYSREG both use.
 pub const SYS_TPIDR_EL0: u16 = 0xde82;
+pub const SYS_TPIDRRO_EL0: u16 = 0xde83;
 pub const SYS_SCTLR_EL1: u16 = 0xc080;
 pub const SYS_CPACR_EL1: u16 = 0xc082;
 pub const SYS_TTBR0_EL1: u16 = 0xc100;
