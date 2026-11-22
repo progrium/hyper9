@@ -568,6 +568,11 @@ const State = struct {
             const id = if (r[0] == pt.SYS_SP_EL1) abi.ARM_SP_EL1 else abi.armSysreg(r[0]);
             try s.setReg(id, u64, r[1]);
         }
+        // The init leaves the EL0 thread registers UNKNOWN: KVM fills them
+        // with a marker (0x1de7ec7edbadc0de), and a reused vCPU, the last
+        // user's. A new user starts with them zero, as on the other backends.
+        try s.setReg(abi.armSysreg(pt.SYS_TPIDR_EL0), u64, 0);
+        try s.setReg(abi.armSysreg(pt.SYS_TPIDRRO_EL0), u64, 0);
         try s.enterArm();
     }
 
