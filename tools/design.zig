@@ -3,6 +3,7 @@
 //! `zig build design -- <command>` from the repository root.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const fm = @import("frontmatter.zig");
 const Proposal = fm.Proposal;
 const Status = fm.Status;
@@ -183,7 +184,11 @@ fn walkFiles(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, root:
     defer w.deinit();
     while (try w.next(io)) |e| {
         if (e.kind != .file) continue;
-        try list.append(arena, try arena.dupe(u8, e.path));
+        // Repo paths use slashes, as git and the links in the docs do; the
+        // walk gives backslashes on Windows.
+        const p = try arena.dupe(u8, e.path);
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, p, '\\', '/');
+        try list.append(arena, p);
     }
     return list.items;
 }
