@@ -111,8 +111,8 @@ different direction:
   behind a WebSocket ([websocket-9p](../design/epoch-0/websocket-9p.md)), and
   composes layers with Plan 9 binds and a copy-on-write overlay. The overlay
   is the default ([overlay](../design/epoch-0/overlay.md)): writes to the root
-  succeed and vanish at exit. Exporting a run's changes as an OCI layer is a
-  draft ([overlay-export](../design/overlay-export.md), *planned*). See
+  succeed and vanish at exit. Keeping a run's changes as an OCI layer on disk is a
+  draft ([upper-layers](../design/upper-layers.md), *planned*). See
   [userland.md](userland.md) for building your own root.
 - **Namespaces.** Linux bolted namespaces on; in Plan 9 every process already
   has its own, and the guest can rearrange it with `bind` and `mount` without

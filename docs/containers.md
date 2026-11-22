@@ -90,7 +90,7 @@ something the runtime does for you.
 | `docker build`, `RUN` | A host script running `h9 --dir IMAGE:/:rw ...` against a copy of the base ([section 9](#9-building-images)) | main |
 | Multi-stage builds | Compile with the full root tree, copy the binary into a slim one | main |
 | `docker commit` | Run with `--dir IMAGE:/:rw` on a copy of the image | main |
-| `docker diff`, exporting a container's changes as a layer | Proposed | *Not yet available ([overlay-export](../design/overlay-export.md), draft)* |
+| `docker diff`, keeping a container's changes as a layer | Proposed | *Not yet available ([upper-layers](../design/upper-layers.md), draft)* |
 | `-v host:container`, `--mount type=bind` | `--cwd DIR`, `--readable PATH`, `--writable PATH` | main |
 | Hiding files from a bind mount | `--read-deny PATH` | main |
 | `--tmpfs /tmp` | Always: every machine has a private `/tmp` in memory | main |
@@ -526,8 +526,8 @@ host$ h9 --dir ./images/base-with-ndb:/:rw \
 ```
 
 Saving a run's overlay changes afterwards, like `docker commit` of a stopped
-container or `docker diff`, isn't possible yet; exporting them as a tar
-layer is the [overlay-export](../design/overlay-export.md) draft.
+container or `docker diff`, isn't possible yet; writing them to a host
+directory as a layer is the [upper-layers](../design/upper-layers.md) draft.
 
 ## 9. Building images
 
@@ -832,8 +832,8 @@ where there is one:
 
 - **Exec, attach, and inspecting a running machine.** See section 16;
   [serve](../design/epoch-0/serve.md) is a draft.
-- **Saving a run's changes.** The root's overlay is thrown away; exporting it
-  as a layer is [overlay-export](../design/overlay-export.md), a draft.
+- **Saving a run's changes.** The root's overlay is thrown away; keeping it
+  as a layer on disk is [upper-layers](../design/upper-layers.md), a draft.
 - **Image files.** Images are directories or 9P servers. Attaching a
   single-file image read-only was proposed and declined
   ([image-roots](../design/epoch-0/image-roots.md)).
