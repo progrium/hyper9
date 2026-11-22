@@ -34,6 +34,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
 | [retire-unicorn](retire-unicorn.md) |  | draft |  | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
+| [fd-mounts](fd-mounts.md) |  | draft | needs mounts | Mounting a 9P connection from a host descriptor |
 
 ```mermaid
 flowchart LR
@@ -69,6 +70,7 @@ flowchart LR
   p_renames["renames<br/>draft"]:::draft
   p_retire_unicorn["retire-unicorn<br/>draft"]:::draft
   p_scheduler["scheduler<br/>draft"]:::draft
+  p_fd_mounts["fd-mounts<br/>draft"]:::draft
   p_host_cmd --> p_login_shell
   p_kernel_serve --> p_namespace_kernel
   p_port_streams --> p_namespace_kernel
@@ -88,6 +90,7 @@ flowchart LR
   p_hcpu --> p_renames
   p_hcpu --> p_retire_unicorn
   p_kernel_port --> p_scheduler
+  p_mounts --> p_fd_mounts
 ```
 
 ## Epoch 0
