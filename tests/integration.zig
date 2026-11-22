@@ -6689,7 +6689,7 @@ test "exec of a link and a #! interpreter reached through a link run [linux-syml
     // In the host tree: a link to busybox by an absolute guest path, and a
     // script whose interpreter is a link in the overlay.
     try symLinkOrSkip(s.tmp.dir, io, "/bin/busybox", "echo", .{});
-    try s.tmp.dir.writeFile(io, .{ .sub_path = "script", .data = "#!/root/b/sh\necho script ran\n", .flags = .{ .permissions = .fromMode(0o755) } });
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "script", .data = "#!/root/b/sh\necho script ran\n", .flags = .{ .permissions = .executable_file } });
     try symLinkOrSkip(s.tmp.dir, io, "script", "run", .{});
     const script =
         \\set -e
