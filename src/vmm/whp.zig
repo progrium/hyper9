@@ -239,12 +239,15 @@ fn msrName(index: u32) abi.RegisterName {
 /// The FXSAVE image's registers and FS (whose base is the TLS pointer), in
 /// the order getExtra and setExtra use.
 const extra_names = blk: {
-    var n: [8 + 1 + 16 + 1 + 1]abi.RegisterName = undefined;
+    var n: [8 + 1 + 16 + 1 + 1 + 1]abi.RegisterName = undefined;
     for (0..8) |i| n[i] = abi.RegisterName.fpMmx(i);
     n[8] = .fp_control_status;
     for (0..16) |i| n[9 + i] = abi.RegisterName.xmm(i);
     n[25] = .xmm_control_status;
     n[26] = .fs;
+    // The user's GS base (arch_prctl ARCH_SET_GS): at an exit the shim has
+    // swapped GS, so it's in KERNEL_GS_BASE, as on KVM.
+    n[27] = .kernel_gs_base;
     break :blk n;
 };
 
@@ -397,6 +400,7 @@ const State = struct {
         var fs = x86.null_data;
         fs.base = t.tls;
         vals[26] = segment(fs);
+        vals[27] = .of64(t.gs);
         try s.setRegs(&extra_names, &vals);
     }
 };
@@ -427,7 +431,7 @@ pub const Vcpu = struct {
         v.s.shared.ureg = u.amd64;
     }
 
-    /// The FXSAVE image and FS base, in one batch.
+    /// The FXSAVE image and the FS and GS bases, in one batch.
     pub fn getExtra(v: *Vcpu, x: *vmm.Extra) vmm.Error!void {
         var vals: [extra_names.len]abi.RegisterValue = undefined;
         try v.s.getRegs(&extra_names, &vals);
@@ -451,6 +455,7 @@ pub const Vcpu = struct {
         // KVM reports this too, so the two backends' images match.
         t.fx.mxcsr_mask = 0xffff;
         t.tls = vals[26].segment.base;
+        t.gs = vals[27].reg64;
     }
 
     pub fn setExtra(v: *Vcpu, x: *const vmm.Extra) vmm.Error!void {
