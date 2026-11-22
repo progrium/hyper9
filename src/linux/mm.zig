@@ -34,7 +34,7 @@
 //! write, and the first write to it by either side, from the guest (a
 //! fault) or from the host on its behalf (`own`), copies the pages, or
 //! keeps them if the other side has dropped them already. A chunk is the
-//! unit, as for allocation: a copy is up to a megabyte, less the zero
+//! unit, as for allocation: a copy is up to `chunk_size`, less the zero
 //! pages `copySparse` skips.
 
 const std = @import("std");
@@ -42,7 +42,13 @@ const vmm = @import("../vmm.zig");
 const gm = @import("../guestmem.zig");
 
 const page = vmm.page_size;
-pub const chunk_size: u64 = 1 << 20;
+/// 64 KiB: a multiple of every host's page size (16K on Apple silicon),
+/// and small enough that the pages a program unmaps don't stay allocated
+/// beside the few it keeps in the same chunk. With 1 MiB chunks, Zig's
+/// allocators, which map and unmap thousands of small regions across
+/// threads, kept over half a cold `zig build-exe`'s memory in chunks that
+/// held a page or two (design/cow-fork.md, Updates).
+pub const chunk_size: u64 = 64 << 10;
 pub const pages_per_chunk = chunk_size / page;
 
 /// Where things go in a Linux address space, by architecture.

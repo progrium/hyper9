@@ -6379,6 +6379,10 @@ test "a private mapping's pages past the end of its file are SIGBUS to touch and
     try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "sigbus" }, "ok sigbus\n");
 }
 
+test "pages a program unmaps don't stay allocated beside the ones it keeps: 64 MB unmapped but for a page a MiB, then 64 MB more, fit in 96 MB [cow-fork]" {
+    try cowFork(@src(), &.{ "--memory", "96m", "/mnt/term/cwd/cowfork", "holes" }, "ok holes\n");
+}
+
 test "/proc/self/maps shows a program's segments, read from its file as they're touched, one line each [cow-fork]" {
     try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "maps" }, "ok maps\n");
 }

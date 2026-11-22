@@ -17,6 +17,9 @@
  *   sigbus    a private mapping's pages past the end of its file (one
  *             truncated under it) are SIGBUS to touch, and EFAULT to a
  *             syscall, while the last page with file bytes reads them
+ *   holes     64 MB written, then unmapped but for one page in each MiB,
+ *             doesn't keep the rest allocated: another 64 MB fits beside
+ *             it (run under --memory 96m)
  *   maps      /proc/self/maps shows each file mapping, the segments of
  *             this program included, as one line, not in pieces
  *   hold      (for txtbsy) says "r" on stdout and waits for stdin's end
@@ -462,6 +465,26 @@ static void maps(void) {
 	printf("ok maps\n");
 }
 
+/* Unmapped pages don't stay allocated beside the ones a program keeps:
+ * of 64 MB written, all but the first page of each MiB is unmapped, and
+ * 64 MB more is written. Under --memory 96m that fits only if the
+ * unmapped pages went, as on Linux; with 1 MiB chunks it didn't. */
+static void holes(void) {
+	const size_t n = 64 * (size_t)MB, pg = 4096;
+	char *a = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("holes", a != MAP_FAILED);
+	memset(a, 'a', n);
+	for (size_t i = 0; i < n / MB; i++)
+		CHECK("holes", munmap(a + i * MB + pg, MB - pg) == 0);
+	char *b = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("holes", b != MAP_FAILED);
+	memset(b, 'b', n);
+	for (size_t i = 0; i < n / MB; i++)
+		CHECK("holes", a[i * MB] == 'a' && a[i * MB + pg - 1] == 'a');
+	CHECK("holes", b[0] == 'b' && b[n - 1] == 'b');
+	printf("ok holes\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -484,6 +507,8 @@ int main(int argc, char **argv) {
 			sigbus();
 		else if (!strcmp(a, "maps"))
 			maps();
+		else if (!strcmp(a, "holes"))
+			holes();
 		else {
 			printf("FAIL %s: no such case\n", a);
 			failed = 1;
