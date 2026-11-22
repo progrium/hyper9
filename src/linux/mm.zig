@@ -40,6 +40,7 @@
 const std = @import("std");
 const vmm = @import("../vmm.zig");
 const gm = @import("../guestmem.zig");
+const pagecache = @import("pagecache.zig");
 
 const page = vmm.page_size;
 /// 64 KiB: a multiple of every host's page size (16K on Apple silicon),
@@ -177,6 +178,11 @@ pub const Src = struct {
     /// after a failed read: the bytes read before either. It may block
     /// (a 9P read), so `fault` calls it without the Mm's lock.
     fill: *const fn (s: *Src, dst: []u8, off: u64) usize,
+    /// The file's shared pages for chunk `index` of it (pagecache.zig),
+    /// with a reference for the caller, or null if they can't be had (no
+    /// memory, or a file the cache can't tell apart from others). Null
+    /// for a Src whose chunks are never shared. It may block, as `fill`.
+    shared: ?*const fn (s: *Src, backend: vmm.Backend, index: u64) ?pagecache.Shared = null,
     /// Frees it, after its last reference.
     free: *const fn (s: *Src) void,
 
@@ -386,7 +392,18 @@ pub const Mm = struct {
     /// Drops the reference of a chunk's pages that `own` replaced, which
     /// the other Mm still holds or, if it let go meanwhile, no one does.
     fn dropCowOld(m: *Mm, p: *Pages) void {
+        // A page cache chunk's (`shareFile`): its table decides.
+        if (p.release) |f| return dropShared(p, f);
         if (p.refs.fetchSub(1, .acq_rel) == 1) m.freeP(p);
+    }
+
+    /// Drops a reference to a file table's pages that no vCPU of this Mm
+    /// can reach, calling the table's `release`, which frees them if
+    /// only its own reference is left.
+    fn dropShared(p: *Pages, f: *const fn (p: *Pages) void) void {
+        _ = p.pending.fetchAdd(1, .acq_rel);
+        _ = p.refs.fetchSub(1, .acq_rel);
+        f(p);
     }
 
     fn freeP(m: *Mm, p: *Pages) void {
@@ -661,6 +678,69 @@ pub const Mm = struct {
         }
     }
 
+    /// A chunk a page cache can give a lazy mapping's pages for whole
+    /// (`Src.shared`): one private file VMA covers it, and its offset in
+    /// the file is a whole number of chunks.
+    const Shareable = struct { src: *Src, index: u64, off: u64 };
+
+    fn shareable(m: *Mm, ci: u64) ?Shareable {
+        const cs = ci * chunk_size;
+        const v = m.find(cs) orelse return null;
+        const s = v.src orelse return null;
+        if (s.shared == null or v.shared or v.cow or v.pad or v.end < cs + chunk_size) return null;
+        if (cs >= v.liveEnd()) return null;
+        const off = v.offset + (cs - v.start);
+        if (off % chunk_size != 0) return null;
+        return .{ .src = s, .index = off / chunk_size, .off = off };
+    }
+
+    /// For `fillUnlocked`, with the lock held, which it drops: maps chunk
+    /// `ci` over the file's shared pages (pagecache.zig), copy-on-write,
+    /// as a fork's child maps its parent's, so a write copies them first;
+    /// they count once against --memory however many processes map
+    /// them. Got with the lock dropped, as a read may block. If they
+    /// can't be had, or the chunk changed meanwhile, `fault` reads the
+    /// chunk's pages as usual.
+    fn shareFile(m: *Mm, ci: u64, sh: Shareable) void {
+        _ = sh.src.get();
+        m.lock.unlock();
+        defer sh.src.put();
+        const got = sh.src.shared.?(sh.src, m.backend, sh.index) orelse return;
+        const p = got.pages;
+        m.lockSpin();
+        const same = m.chunks.get(ci) == null and if (m.shareable(ci)) |now| now.src == sh.src and now.index == sh.index else false;
+        if (same) {
+            if (got.n < chunk_size) {
+                const v = m.find(ci * chunk_size).?;
+                v.eof = @min(v.eof, sh.off + got.n);
+            }
+            if (m.addChunk(ci, p, true)) |_| {
+                // The chunk's reference stands for the caller's.
+                _ = p.refs.fetchSub(1, .acq_rel);
+                m.lock.unlock();
+                return;
+            } else |_| {}
+        }
+        m.lock.unlock();
+        dropShared(p, p.release.?);
+    }
+
+    /// `shareFile` with the lock held throughout, for the host's reads of
+    /// guest memory (`touch` for a read), which read the file under the
+    /// lock as `populate` does.
+    fn shareLocked(m: *Mm, ci: u64) void {
+        const sh = m.shareable(ci) orelse return;
+        const got = sh.src.shared.?(sh.src, m.backend, sh.index) orelse return;
+        const p = got.pages;
+        if (got.n < chunk_size) {
+            const v = m.find(ci * chunk_size).?;
+            v.eof = @min(v.eof, sh.off + got.n);
+        }
+        if (m.addChunk(ci, p, true)) |_| {
+            _ = p.refs.fetchSub(1, .acq_rel);
+        } else |_| dropShared(p, p.release.?);
+    }
+
     /// A read `fault` makes for a new chunk with the lock dropped: lazy
     /// VMA [lo, hi) of the chunk from `src` at `off`, and what it read.
     const Fill = struct { src: *Src, lo: u64, hi: u64, off: u64, n: u64 = 0 };
@@ -694,7 +774,7 @@ pub const Mm = struct {
     /// their own faults and syscalls. The chunk goes in only if nothing
     /// got there first and its lazy VMAs are as they were; otherwise the
     /// pages are freed, and `fault` populates it under the lock as usual.
-    fn fillUnlocked(m: *Mm, va: u64) void {
+    fn fillUnlocked(m: *Mm, va: u64, access: Access) void {
         const ci = va / chunk_size;
         var buf: [max_fills]Fill = undefined;
         m.lockSpin();
@@ -702,6 +782,8 @@ pub const Mm = struct {
             m.lock.unlock();
             return;
         }
+        // A write would copy a shared chunk at once.
+        if (access != .write) if (m.shareable(ci)) |sh| return m.shareFile(ci, sh);
         const fills: []Fill = m.fillsOf(ci, &buf) orelse &.{};
         if (fills.len == 0) {
             m.lock.unlock();
@@ -1030,6 +1112,14 @@ pub const Mm = struct {
         return m.find(va) != null;
     }
 
+    /// Whether `va`'s chunk is allocated, so a fault there isn't its
+    /// first touch.
+    pub fn touched(m: *Mm, va: u64) bool {
+        m.lockSpin();
+        defer m.lock.unlock();
+        return m.chunks.contains(va / chunk_size);
+    }
+
     /// Whether VMAs cover all of [start, end).
     pub fn covered(m: *Mm, start: u64, end: u64) bool {
         var at = start;
@@ -1292,7 +1382,7 @@ pub const Mm = struct {
     /// wholly past the file's end is Bus (SIGBUS). A new chunk's file
     /// pages are read with the lock dropped (`fillUnlocked`).
     pub fn fault(m: *Mm, va: u64, access: Access) (Error || error{Bus})!?u64 {
-        m.fillUnlocked(va);
+        m.fillUnlocked(va, access);
         var copied = false;
         defer if (copied) m.settle(false);
         m.lockSpin();
@@ -1341,6 +1431,7 @@ pub const Mm = struct {
         }
         var ci = va / chunk_size;
         while (ci * chunk_size < end) : (ci += 1) {
+            if (!write and m.chunks.get(ci) == null) m.shareLocked(ci);
             const c = try m.populate(ci * chunk_size);
             if (write) try m.own(ci, c);
         }

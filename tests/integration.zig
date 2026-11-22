@@ -6351,6 +6351,21 @@ test "an executable's untouched segments aren't loaded: a 170 MB static binary r
     try std.testing.expectEqual(0, r.code);
 }
 
+test "three processes running one 170 MB static binary and reading all of it share its pages: they fit in --memory 320m [cow-fork]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    std.Io.Dir.cwd().access(std.testing.io, try hostPath(le.fixtures, "bigexe"), .{}) catch return error.SkipZigTest;
+    const r = try runLinux(&le, false, &.{ "--memory", "320m", "/mnt/term/cwd/bigexe", "share", "3" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("ok share 3\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+}
+
+test "a write to a private file mapping whose pages are shared stays in it: not in another mapping, a child's, or the file [cow-fork]" {
+    try cowFork(@src(), &.{ "/mnt/term/cwd/cowfork", "privwrite" }, "ok privwrite\n");
+}
+
 test "a fork of a process with 600 MB of written heap runs under --memory 1g, and parent and child see their own writes [cow-fork]" {
     try cowFork(@src(), &.{ "--memory", "1g", "/mnt/term/cwd/cowfork", "big" }, "ok big\n");
 }

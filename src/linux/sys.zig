@@ -18,6 +18,7 @@ const kc = @import("kc.zig");
 pub const cputime = @import("cputime.zig");
 const locks = @import("locks.zig");
 const shmfile = @import("shmfile.zig");
+const pagecache = @import("pagecache.zig");
 const sysvshm = @import("sysvshm.zig");
 const itimer = @import("itimer.zig");
 const attr = @import("../dotl/attr.zig");
@@ -1844,6 +1845,7 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
                 if (fileKey(fd)) |k| if (kern.fwstat(fd, (Wstat{ .length = 0 }).encode(&w))) |_| {
                     _ = file_writes.fetchAdd(1, .monotonic);
                     shmfile.truncated(k, 0);
+                    pagecache.changed(k);
                     break :blk fd;
                 } else |_| {};
                 // Not a regular file, or one whose server won't take a
@@ -2117,7 +2119,10 @@ fn fileKey(fd: i32) ?locks.Key {
 /// After a read or write of `data` on a file: shared mappings of it see
 /// the write, or are what the read returns (shmfile.zig).
 fn fileIo(fd: i32, key: locks.Key, off: i64, data: []u8, dir: Dir) void {
-    if (dir == .write) _ = file_writes.fetchAdd(1, .monotonic);
+    if (dir == .write) {
+        _ = file_writes.fetchAdd(1, .monotonic);
+        pagecache.changed(key);
+    }
     if (data.len == 0 or !shmfile.mapped(key)) return;
     const pos: u64 = if (off >= 0) @intCast(off) else blk: {
         const cur = kern.seek(@intCast(fd), 0, 1) catch return;
@@ -3100,7 +3105,10 @@ fn truncateFd(p: *Process, fd: i32, len: u64) Err!i64 {
     var w: [64]u8 = undefined;
     _ = kern.fwstat(@intCast(fd), (Wstat{ .length = len }).encode(&w)) catch return kerr();
     _ = file_writes.fetchAdd(1, .monotonic);
-    if (fileKey(fd)) |k| shmfile.truncated(k, len);
+    if (fileKey(fd)) |k| {
+        shmfile.truncated(k, len);
+        pagecache.changed(k);
+    }
     return 0;
 }
 
@@ -3929,13 +3937,16 @@ const busy = struct {
 
 /// The file of a lazily filled private mapping (`mm.Src`): a reference
 /// to the fd's channel, which outlives the fd. exec's segments use one
-/// too (elf.load).
+/// too (elf.load). A regular file's chunks are shared through the page
+/// cache (pagecache.zig) where a mapping covers them whole.
 pub const LazyFile = struct {
     src: mm.Src = .{ .fill = fill, .free = free },
     gpa: std.mem.Allocator,
     ch: *anyopaque,
     /// An executable's file, busy while this maps it (`openExec`).
     busy_key: ?locks.Key = null,
+    /// The file as the page cache knows it, as of `open`.
+    id: ?pagecache.Id = null,
 
     pub fn open(gpa: std.mem.Allocator, fd: i32) ?*LazyFile {
         const ch = kc.chanGet(fd) orelse return null;
@@ -3943,8 +3954,34 @@ pub const LazyFile = struct {
             kc.chanPut(ch);
             return null;
         };
-        lf.* = .{ .gpa = gpa, .ch = ch };
+        lf.* = .{ .gpa = gpa, .ch = ch, .id = cacheId(fd) };
+        if (lf.id != null) lf.src.shared = shared;
         return lf;
+    }
+
+    /// fd's file's identity and version for the page cache, or null for
+    /// anything but a regular file whose stat says when it changed.
+    fn cacheId(fd: i32) ?pagecache.Id {
+        if (fd < 0) return null;
+        const k = fileKey(fd) orelse return null;
+        var st: [512]u8 = undefined;
+        const n = kern.fstat(@intCast(fd), &st) catch return null;
+        if (n < 41) return null;
+        return .{
+            .file = k,
+            .vers = std.mem.readInt(u32, st[9..13], .little),
+            .mtime = std.mem.readInt(u32, st[29..33], .little),
+            .length = std.mem.readInt(u64, st[33..41], .little),
+        };
+    }
+
+    fn shared(s: *mm.Src, backend: vmm.Backend, index: u64) ?pagecache.Shared {
+        const lf: *LazyFile = @alignCast(@fieldParentPtr("src", s));
+        return pagecache.get(backend, lf.id.?, index, lf, struct {
+            fn f(l: *LazyFile, dst: []u8, off: u64) usize {
+                return fill(&l.src, dst, off);
+            }
+        }.f);
     }
 
     /// `open` for an image exec loads, if fd's file holds `bytes`, the
@@ -4034,8 +4071,12 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
     // a file mapped shared, are overlays of the file's pages on chunks
     // that may hold other mappings (mm.insertFile).
     const fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
-    const delta: u64 = if (shared and !anon) off % mm.chunk_size else 0;
-    const span = if (shared) std.mem.alignForward(u64, delta + len, mm.chunk_size) else len;
+    // A private file mapping of a chunk or more sits at its offset's
+    // place in a chunk too, unless it's fixed, so the chunks it covers
+    // whole can be the page cache's (pagecache.zig).
+    const placed = shared or (!anon and len >= mm.chunk_size);
+    const delta: u64 = if (placed and !anon) off % mm.chunk_size else 0;
+    const span = if (placed) std.mem.alignForward(u64, delta + len, mm.chunk_size) else len;
     var start: u64 = undefined;
     if (fixed) {
         if (addr % page != 0) return -E.INVAL;
@@ -4048,8 +4089,8 @@ fn mmap(p: *Process, addr: u64, len_in: u64, prot_bits: u32, flags: u32, fd: i32
         if (hint >= mm.min_addr and hint < top and len <= top - hint and !shared and p.mm.isFree(hint, hint + len)) {
             start = hint;
         } else {
-            const at_ = p.mm.findFree(span + if (shared) mm.chunk_size else 0) orelse return -E.NOMEM;
-            start = if (shared) std.mem.alignForward(u64, at_, mm.chunk_size) + delta else at_;
+            const at_ = p.mm.findFree(span + if (placed) mm.chunk_size else 0) orelse return -E.NOMEM;
+            start = if (placed) std.mem.alignForward(u64, at_, mm.chunk_size) + delta else at_;
         }
     }
     var v: mm.Vma = .{ .start = start, .end = start + len, .prot = prot, .shared = shared, .kind = if (anon) .anon else .file, .offset = off };

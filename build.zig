@@ -1207,6 +1207,11 @@ pub fn build(b: *std.Build) void {
             const m = b.createModule(.{ .target = lt, .optimize = .ReleaseSmall, .link_libc = true });
             m.addCSourceFile(.{ .file = b.path(b.fmt("tests/fixtures/linux/{s}.c", .{name})), .flags = &.{ "-std=c11", "-D_GNU_SOURCE" } });
             const fx = b.addExecutable(.{ .name = name, .root_module = m, .linkage = .static });
+            // Segments aligned to 64K on every architecture, as arm64's
+            // linkers align them by default, so the [cow-fork] sharing
+            // case's blob sits at its offset's place in h9's chunks
+            // (src/linux/pagecache.zig) on amd64 too.
+            if (std.mem.eql(u8, name, "bigexe")) fx.link_z_max_page_size = 64 << 10;
             const inst = b.addInstallArtifact(fx, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("fixtures/linux/{s}", .{arch}) } } });
             linux_fixtures.dependOn(&inst.step);
         }
