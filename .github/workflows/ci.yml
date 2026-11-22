@@ -231,9 +231,9 @@ jobs:
           set -x
           loop='i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'
           if [ "$(uname)" = Linux ]; then
-            time .local/h9-hcpu/bin/h9 --backend emu --dir .local/linux/alpine-arm64 /bin/busybox sh -c "$loop"
-            time .local/h9-unicorn/bin/h9 --backend emu --dir .local/linux/alpine-arm64 /bin/busybox sh -c "$loop"
+            time .local/h9-hcpu/bin/h9 --backend emu --dir .local/linux/alpine-arm64:#L /bin/busybox sh -c "$loop"
+            time .local/h9-unicorn/bin/h9 --backend emu --dir .local/linux/alpine-arm64:#L /bin/busybox sh -c "$loop"
           else
-            .local/h9-hcpu/bin/h9 --arch 386 --backend emu --dir .local/linux/alpine-386 /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
-            .local/h9-hcpu/bin/h9 --arch amd64 --backend emu --dir .local/linux/alpine-amd64 /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+            .local/h9-hcpu/bin/h9 --arch 386 --backend emu --dir .local/linux/alpine-386:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
+            .local/h9-hcpu/bin/h9 --arch amd64 --backend emu --dir .local/linux/alpine-amd64:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
           fi
