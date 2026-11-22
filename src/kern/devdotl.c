@@ -73,7 +73,9 @@ extern int	h9_dotl_canreconnect(void *t);
 extern int	h9_dotl_wantreconnect(void *t);
 extern int	h9_dotl_reconnect(void *t, char *err);
 extern void	h9_dotl_free(void *t);
-extern int	h9_dotl_frommount(void *t, void *buf, long n, char *err);
+extern int	h9_dotl_frommount(void *t, void *buf, long n, int linkwalk, char *err);
+/* linux.c: whether up's walks stop at links (design/linux-symlinks.md) */
+extern int	h9_fs_linkwalk(void);
 extern int	h9_dotl_fromserver(void *t, void *buf, long n, char *err);
 extern long	h9_dotl_takeserver(void *t, void *buf, long n);
 extern long	h9_dotl_takemount(void *t, void *buf, long n);
@@ -672,7 +674,8 @@ datawrite(Conv *cv, void *va, long n)
 	if(cv->hungup)
 		error(cv->err);
 	trlock(cv);
-	r = h9_dotl_frommount(cv->tr, va, n, err);
+	/* devmnt writes a request in the process that makes it */
+	r = h9_dotl_frommount(cv->tr, va, n, h9_fs_linkwalk(), err);
 	trunlock(cv);
 	if(r < 0)
 		error(err);

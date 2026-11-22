@@ -6161,6 +6161,34 @@ test "uncontained bind follows host symlinks as before [symlinks-in-root]" {
     try std.testing.expectEqualStrings("", c.out);
 }
 
+test "a Linux program sees a .L mount's links and follows them from its own root [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (le.nine == null) return error.SkipZigTest;
+    var d: Diod = undefined;
+    try d.start(
+        \\mkdir -p usr/glenda
+        \\printf 'one\ntwo\n' >usr/glenda/notes
+        \\ln -s usr/glenda lib
+        \\ln -s /etc/alpine-release usr/abs
+        \\ln -s loop usr/loop
+        \\ln -s nowhere usr/dangling
+    );
+    defer d.stop();
+    // dotlfs mounts it in the 9front namespace, which a Linux program
+    // sees at /9. The absolute link names Alpine's file, not the export's.
+    var cmd: std.ArrayList(u8) = .empty;
+    defer cmd.deinit(gpa);
+    try cmd.print(gpa,
+        \\mkdir -p /n/l; dotlfs {s} /n/l '{s}' || exit mount
+        \\'#L/bin/busybox' sh -c 'cd /9/n/l/usr; ls; for f in abs dangling; do [ -L $f ] && readlink $f; done; cat ../lib/notes; cmp abs /etc/alpine-release && echo same; cat loop 2>&1 | grep -c "link loop"'
+    , .{ d.dial(), d.s.path });
+    const r = try runLinux(&le, true, &.{ "--net-allow", d.allow(), "--rc", cmd.items });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("abs\ndangling\nglenda\nloop\n/etc/alpine-release\nnowhere\none\ntwo\nsame\n1\n", r.out);
+}
+
 test "a 9front program's walk through a contained tree is unchanged [linux-symlinks]" {
     const e = try env(@src());
     var s: Scratch = undefined;

@@ -48,7 +48,7 @@ pub const Node = struct {
             .link => attr.S_IFLNK,
             .fifo => attr.S_IFIFO,
         };
-        return .{ .qid = n.qid(), .mode = fmt | n.mode, .uid = n.uid, .gid = n.gid, .nlink = 1, .size = n.data.items.len, .mtime_sec = n.mtime };
+        return .{ .qid = n.qid(), .mode = fmt | n.mode, .uid = n.uid, .gid = n.gid, .nlink = 1, .size = if (n.kind == .link) n.target.len else n.data.items.len, .mtime_sec = n.mtime };
     }
 
     pub fn child(n: *const Node, name: []const u8) ?*Node {

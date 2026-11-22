@@ -1663,7 +1663,9 @@ devices in Plan 9.
   `/net`, under `--net` and `--net-allow`. The server's symlinks are
   followed, but none can leave the mount: an absolute target starts at the
   mount's root, and `..` stops there. Dangling links aren't listed, and
-  devices and FIFOs can't be opened. A .L server knows users by number, so
+  devices and FIFOs can't be opened. A Linux program sees the links
+  themselves instead, dangling ones too, and follows them from its own `/`
+  as it does in a host tree (chapter 20). A .L server knows users by number, so
   the guest's user goes out as your host uid, and any other number shows as
   itself, such as `1000`. Running as root sends 65534 (nobody), never 0.
   `--user-map FILE` gives a file in `/etc/passwd` format to map names to
