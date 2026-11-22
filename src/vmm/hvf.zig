@@ -174,7 +174,7 @@ pub const Vcpu = struct {
 
     pub fn setAddressSpace(v: *Vcpu, as: *AddressSpace) vmm.Error!void {
         if (v.as == as and v.as_id == as.id) return;
-        try check(hv_vcpu_set_sys_reg(v.id, pt.SYS_TTBR0_EL1, as.root));
+        try check(hv_vcpu_set_sys_reg(v.id, pt.SYS_TTBR0_EL1, pt.ttbr0(as.root, as.asid)));
         v.as = as;
         v.as_id = as.id;
         v.epoch = as.epoch.load(.acquire);
@@ -225,6 +225,8 @@ pub const Vcpu = struct {
             v.epoch = epoch;
             v.shared.flush = 1;
         }
+        // A space without its own ASID shares 0 with others (pt.asids).
+        if (as.asid == 0) v.shared.flush = 1;
         if (v.fresh) {
             // Enter through the shim, which loads the Ureg (and flushes).
             try check(hv_vcpu_set_reg(v.id, REG_PC, pt.kva_shim + pt.shim_enter));

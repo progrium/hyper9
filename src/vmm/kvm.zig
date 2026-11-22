@@ -598,7 +598,7 @@ pub const Vcpu = struct {
         if (is_x86) {
             s.shared.next_cr3 = as.root;
         } else {
-            try s.setReg(abi.armSysreg(pt.SYS_TTBR0_EL1), u64, as.root);
+            try s.setReg(abi.armSysreg(pt.SYS_TTBR0_EL1), u64, pt.ttbr0(as.root, as.asid));
             s.shared.flush = 1;
         }
         s.as = as;
@@ -663,6 +663,8 @@ pub const Vcpu = struct {
             s.epoch = epoch;
             if (is_x86) s.shared.next_cr3 = as.root else s.shared.flush = 1;
         }
+        // A space without its own ASID shares 0 with others (pt.asids).
+        if (!is_x86 and as.asid == 0) s.shared.flush = 1;
         if (s.reenter) {
             if (is_x86) try s.reenterX86() else try s.enterArm();
             s.reenter = false;
