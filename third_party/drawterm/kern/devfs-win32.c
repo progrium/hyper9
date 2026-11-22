@@ -62,6 +62,31 @@ ownpath(Ufsinfo *uif)
 	return uif->lpath != nil ? uif->lpath : uif->path;
 }
 
+/*
+ * h9: a symbolic link or a junction, which a Linux process's walk stops
+ * at (design/linux-symlinks.md). FindFirstFile reads a name's own entry
+ * without following it, with the reparse tag in dwReserved0.
+ */
+static int
+wfdislink(WIN32_FIND_DATA *wfd)
+{
+	return (wfd->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+		&& (wfd->dwReserved0 == IO_REPARSE_TAG_SYMLINK || wfd->dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+}
+
+/* h9: a link's Dir, for a Linux process: DMSYMLINK, its target's length. */
+static void
+linkdir(wchar_t *path, Dir *d, Qid qid)
+{
+	char target[MAX_PATH*3];
+	int n;
+
+	d->qid = qid;
+	d->mode = (d->mode & ~DMDIR) | H9_DMSYMLINK;
+	n = h9_fs_readlinkw(path, target, sizeof target);
+	d->length = n > 0 ? n : 0;
+}
+
 static	wchar_t *catpath(wchar_t *, char *, wchar_t *);
 static	ulong	fsdirread(Chan*, uchar*, int, vlong);
 static	ulong	fsaccess(int);
@@ -341,6 +366,58 @@ fswalkin(Chan *c, char *name)
 	return 1;
 }
 
+/*
+ * h9: a walk for a Linux process (design/linux-symlinks.md), in either
+ * mode: the name is looked up as itself and checked by its own path, and
+ * a link (wfdislink) is walked to as itself, with QTSYMLINK in its qid,
+ * for the kernel's walk to follow. ".." stops at a contained tree's top.
+ */
+static int
+fswalklx(Chan *c, char *name)
+{
+	WIN32_FIND_DATA wfd;
+	HANDLE h;
+	wchar_t *p;
+	Ufsinfo *uif;
+
+	uif = c->aux;
+	if(strcmp(name, ".") == 0)
+		return 1;
+	if(strcmp(name, "..") == 0 && uif->top != nil && wcscmp(uif->path, uif->top) == 0)
+		return 1;
+	p = catpath(uif->path, name, nil);
+	if(h9_fs_checknamew(p, H9_FSWALK) < 0){
+		free(p);
+		return 0;
+	}
+	switch(pathtype(p)){
+	case TPATH_VOLUME:
+		if(!checkvolume(p)){
+			free(p);
+			return 0;
+		}
+	case TPATH_ROOT:
+		c->qid = wfdtoqid(p, nil);
+		break;
+
+	case TPATH_FILE:
+		if((h = FindFirstFile(p, &wfd)) == INVALID_HANDLE_VALUE){
+			free(p);
+			return 0;
+		}
+		FindClose(h);
+		c->qid = wfdtoqid(p, &wfd);
+		if(wfdislink(&wfd))
+			c->qid.type = H9_QTSYMLINK;
+		break;
+	}
+	free(uif->path);
+	uif->path = p;
+	free(uif->lpath);
+	uif->lpath = nil;
+	return 1;
+}
+
 static int
 fswalk1(Chan *c, char *name)
 {
@@ -350,6 +427,8 @@ fswalk1(Chan *c, char *name)
 	Ufsinfo *uif;
 	
 	uif = c->aux;
+	if(h9_fs_linkwalk())
+		return fswalklx(c, name);
 	if(uif->top != nil)
 		return fswalkin(c, name);
 	p = catpath(uif->path, name, nil);
@@ -398,6 +477,11 @@ fswalk(Chan *c, Chan *nc, char **name, int nname)
 		if((loop = fswalk1(nc, name[i])) <= 0)
 			break;
 		wq->qid[i] = nc->qid;
+		/* h9: a Linux process's walk stops at a link (fswalklx). */
+		if(nc->qid.type & H9_QTSYMLINK){
+			i++;
+			break;
+		}
 	}
 	if(i != nname){
 		cclose(nc);
@@ -429,6 +513,8 @@ fsstat(Chan *c, uchar *buf, int n)
 	uif = c->aux;
 	d.name = lastelem(c);
 	wfdtodir(uif->path, &d, nil);
+	if(c->qid.type & H9_QTSYMLINK)
+		linkdir(uif->path, &d, c->qid);	/* h9 */
 	d.type = 'U';
 	d.dev = c->dev;
 	return convD2M(&d, buf, n);
@@ -439,11 +525,14 @@ fsopen(Chan *c, int mode)
 {
 	wchar_t *p;
 	Ufsinfo *uif;
-	int omode, op;
+	int omode, op, lx;
 
 	omode = openmode(mode);
 
 	uif = c->aux;
+	/* h9: a link a Linux walk stopped at isn't followed (design/linux-symlinks.md). */
+	if(c->qid.type & H9_QTSYMLINK)
+		error(H9_ELOOP);
 	op = omode == OREAD && !(mode&OTRUNC) ? H9_FSREAD : H9_FSWRITE;
 	if(c->qid.type & QTDIR){
 		DIR *d;
@@ -500,19 +589,33 @@ fsopen(Chan *c, int mode)
 		 * (OPEN_EXISTING, then SetEndOfFile) until the check passes, so a
 		 * denied file keeps its contents.
 		 */
+		/*
+		 * h9: a Linux process's open doesn't follow a link swapped in
+		 * since its walk: it opens the reparse point itself and refuses
+		 * it (design/linux-symlinks.md).
+		 */
+		lx = h9_fs_linkwalk();
 		if((uif->fh = CreateFile(
 			uif->path,
 			access,
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,	/* h9: as POSIX, a file can be removed while open */
 			NULL,
 			OPEN_EXISTING,
-			FILE_ATTRIBUTE_NORMAL,
+			FILE_ATTRIBUTE_NORMAL | (lx ? FILE_FLAG_OPEN_REPARSE_POINT : 0),
 			0)) == INVALID_HANDLE_VALUE)
 			oserror();
 		if(waserror()){
 			CloseHandle(uif->fh);
 			uif->fh = INVALID_HANDLE_VALUE;
 			nexterror();
+		}
+		if(lx){
+			BY_HANDLE_FILE_INFORMATION fi;
+
+			if(!GetFileInformationByHandle(uif->fh, &fi))
+				oserror();
+			if(fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+				error(H9_ELOOP);
 		}
 		h9_fs_allowhandlew(uif->fh, op);
 		if(mode & ORCLOSE)
@@ -754,6 +857,18 @@ fsremove(Chan *c)
 				oserror();
 		}else if(!posixdelete(uif->lpath))
 			oserror();
+	} else if(c->qid.type & H9_QTSYMLINK){
+		/* h9: a link a Linux walk stopped at; a directory's needs RemoveDirectory. */
+		DWORD attr;
+
+		attr = GetFileAttributesW(uif->path);
+		if(attr == INVALID_FILE_ATTRIBUTES)
+			oserror();
+		if(attr & FILE_ATTRIBUTE_DIRECTORY){
+			if(!RemoveDirectory(uif->path))
+				oserror();
+		}else if(!posixdelete(uif->path))
+			oserror();
 	} else if(c->qid.type & QTDIR){
 		if(!RemoveDirectory(uif->path))
 			oserror();
@@ -938,10 +1053,12 @@ fsdirread(Chan *c, uchar *va, int count, vlong offset)
 	Ufsinfo *uif;
 	char de[MAX_PATH*3];
 	wchar_t *p;
+	int lx;
 
 	i = 0;
 	uif = c->aux;
 	errno = 0;
+	lx = h9_fs_linkwalk();	/* h9: links listed as links (design/linux-symlinks.md) */
 
 	t = pathtype(uif->path);
 	if(uif->offset != offset) {
@@ -995,7 +1112,7 @@ fsdirread(Chan *c, uchar *va, int count, vlong offset)
 		 * h9: in a contained tree, an entry is listed as its walk
 		 * resolves it, and a link whose target is missing isn't.
 		 */
-		if(uif->top != nil && t != TPATH_ROOT){
+		if(uif->top != nil && t != TPATH_ROOT && !lx){
 			wchar_t buf[MAX_PATH*4];
 			WIN32_FIND_DATA f;
 			HANDLE h;
@@ -1026,14 +1143,22 @@ fsdirread(Chan *c, uchar *va, int count, vlong offset)
 			p = catpath(uif->path, nil, uif->dir->drivep);
 		else
 			p = catpath(uif->path, nil, uif->dir->wfd.cFileName);
-		if(h9_fs_checkw(p, H9_FSWALK) < 0){
+		if((lx ? h9_fs_checknamew(p, H9_FSWALK) : h9_fs_checkw(p, H9_FSWALK)) < 0){
 			free(p);
 			continue;
 		}
 		if(t == TPATH_ROOT)
 			wfdtodir(p, &d, nil);
-		else
+		else{
 			wfdtodir(p, &d, &uif->dir->wfd);
+			if(lx && wfdislink(&uif->dir->wfd)){
+				Qid q;
+
+				q = d.qid;
+				q.type = H9_QTSYMLINK;
+				linkdir(p, &d, q);
+			}
+		}
 		free(p);
 		d.type = 'U';
 		d.dev = c->dev;

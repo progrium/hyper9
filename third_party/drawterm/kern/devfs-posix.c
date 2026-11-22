@@ -38,6 +38,12 @@ struct Ufsinfo
 	int	contained;
 	char*	top;
 	char*	lpath;
+	/*
+	 * h9: path holds no links (design/linux-symlinks.md): a Linux
+	 * process's walk, which looks each name up without following it,
+	 * made it, from a canonical path.
+	 */
+	int	canon;
 };
 
 /* h9: the chan's own name on the host: the link, not its target. */
@@ -45,6 +51,124 @@ static char*
 ownpath(Ufsinfo *uif)
 {
 	return uif->lpath != nil ? uif->lpath : uif->path;
+}
+
+/*
+ * h9: Linux symlinks (design/linux-symlinks.md). A Linux process's walk
+ * looks each name up with lstat and stops at a link, and its opens
+ * refuse links: lxopen opens a path that holds none (canon) without
+ * following any, so a link swapped in since the walk fails the open
+ * (ELOOP) instead of being followed by the host. On Linux that's an
+ * openat2 with RESOLVE_NO_SYMLINKS, elsewhere (and on Linux kernels
+ * without openat2) a chain of openats with O_NOFOLLOW from /. The web
+ * host has no / to start from, so its last name alone isn't followed.
+ */
+static int
+lxmode(Ufsinfo *uif)
+{
+	return uif->canon && h9_fs_linkwalk();
+}
+
+#if defined(__linux__)
+#include	<sys/syscall.h>
+#ifndef SYS_openat2
+#define	SYS_openat2	437
+#endif
+struct lxhow {
+	uvlong	flags;
+	uvlong	mode;
+	uvlong	resolve;
+};
+enum { LxResolveNoSymlinks = 0x04 };
+#endif
+
+static int
+lxopen(char *path, int flags, int mode)
+{
+#if defined(__wasi__)
+	return open(path, flags|O_NOFOLLOW, mode);
+#else
+	char name[NAME_MAX+1];
+	char *p, *e;
+	int fd, nfd, last, n;
+
+#if defined(__linux__)
+	{
+		struct lxhow how;
+
+		memset(&how, 0, sizeof how);
+		how.flags = flags|O_CLOEXEC;
+		how.mode = (flags & O_CREAT) ? mode : 0;
+		how.resolve = LxResolveNoSymlinks;
+		fd = syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof how);
+		if(fd >= 0 || (errno != ENOSYS && errno != EPERM))
+			return fd;
+	}
+#endif
+	if(path[0] != '/'){
+		errno = EINVAL;
+		return -1;
+	}
+	if((fd = open("/", O_RDONLY|O_DIRECTORY|O_CLOEXEC)) < 0)
+		return -1;
+	p = path;
+	for(;;){
+		while(*p == '/')
+			p++;
+		if(*p == 0){
+			/* path is "/" or ends in a slash: fd is the directory. */
+			if((flags & O_ACCMODE) != O_RDONLY){
+				close(fd);
+				errno = EISDIR;
+				return -1;
+			}
+			return fd;
+		}
+		e = strchr(p, '/');
+		n = e != nil ? e - p : strlen(p);
+		if(n > NAME_MAX){
+			close(fd);
+			errno = ENAMETOOLONG;
+			return -1;
+		}
+		memmove(name, p, n);
+		name[n] = 0;
+		p += n;
+		last = 1;
+		for(e = p; *e; e++)
+			if(*e != '/'){
+				last = 0;
+				break;
+			}
+		if(last)
+			nfd = openat(fd, name, flags|O_NOFOLLOW|O_CLOEXEC, mode);
+		else
+#ifdef O_SEARCH
+			nfd = openat(fd, name, O_SEARCH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+#else
+			nfd = openat(fd, name, O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+#endif
+		n = errno;
+		close(fd);
+		if(nfd < 0){
+			/* A link that isn't the last name is ENOTDIR from O_DIRECTORY. */
+			errno = n;
+			return -1;
+		}
+		fd = nfd;
+		if(last)
+			return fd;
+	}
+#endif
+}
+
+/* h9: open(2), or lxopen for a Linux process's walk. */
+static int
+fsopenpath(Ufsinfo *uif, char *path, int flags, int mode)
+{
+	if(lxmode(uif))
+		return lxopen(path, flags, mode);
+	return open(path, flags, mode);
 }
 
 
@@ -133,7 +257,7 @@ lastelem(char *s)
  * the policy or host error.
  */
 static int
-h9_parentfd(char *path, char *base)
+h9_parentfd(Ufsinfo *uif, char *path, char *base)
 {
 	char dir[PATH_MAX];
 	char *slash;
@@ -159,7 +283,7 @@ h9_parentfd(char *path, char *base)
 			memmove(dir, path, n);
 			dir[n] = 0;
 		}
-		fd = open(dir, O_RDONLY|O_DIRECTORY);
+		fd = fsopenpath(uif, dir, O_RDONLY|O_DIRECTORY, 0);
 	}
 	if(fd < 0)
 		error(strerror(errno));
@@ -200,6 +324,7 @@ fsattach(char *spec)
 	uif->gid = stbuf.st_gid;
 	uif->path = strdup("/");
 	uif->contained = contained;
+	uif->canon = 1;
 
 	c->aux = uif;
 	c->dev = devno++;
@@ -250,6 +375,7 @@ danglingwalk(Chan *c, char *name)
 	uif->path = path;
 	free(uif->lpath);
 	uif->lpath = nil;
+	uif->canon = 0;
 	uif->mode = stbuf.st_mode;
 	uif->uid = stbuf.st_uid;
 	uif->gid = stbuf.st_gid;
@@ -288,6 +414,7 @@ fswalkin(Chan *c, char *name)
 	uif->path = strdup(buf);
 	free(uif->lpath);
 	uif->lpath = lpath;
+	uif->canon = 1;	/* h9_fs_resolvein's paths hold no links */
 
 	uif->mode = stbuf.st_mode;
 	uif->uid = stbuf.st_uid;
@@ -295,6 +422,65 @@ fswalkin(Chan *c, char *name)
 
 	c->qid = fsqid(&stbuf);
 
+	return 1;
+}
+
+/*
+ * h9: a walk for a Linux process (design/linux-symlinks.md), in either
+ * mode: the name is looked up with lstat and checked by its own path,
+ * and a link is walked to as itself, with QTSYMLINK in its qid, for the
+ * kernel's walk to follow. ".." is the path's parent, since the path
+ * holds no links, and stops at a contained tree's top.
+ */
+static int
+fswalklx(Chan *c, char *name)
+{
+	char buf[PATH_MAX], *path, *s;
+	struct stat stbuf;
+	Ufsinfo *uif;
+
+	uif = c->aux;
+	if(!uif->canon){
+#if !defined(__wasi__)
+		if(realpath(uif->path, buf) == nil)
+			return 0;
+		free(uif->path);
+		uif->path = strdup(buf);
+#else
+		/* The web host's opens refuse only a last name that's a link (lxopen). */
+		USED(buf);
+#endif
+		free(uif->lpath);
+		uif->lpath = nil;
+		uif->canon = 1;
+	}
+	if(strcmp(name, ".") == 0)
+		return 1;
+	if(strcmp(name, "..") == 0){
+		path = strdup(uif->path);
+		if(uif->top == nil || strcmp(path, uif->top) != 0){
+			s = strrchr(path, '/');
+			if(s == path)
+				path[1] = 0;
+			else if(s != nil)
+				*s = 0;
+		}
+	}else
+		path = catpath(uif->path, name);
+	if(h9_fs_checkname(path, H9_FSWALK) < 0 || lstat(path, &stbuf) < 0){
+		free(path);
+		return 0;
+	}
+	free(uif->path);
+	uif->path = path;
+	free(uif->lpath);
+	uif->lpath = nil;
+	uif->mode = stbuf.st_mode;
+	uif->uid = stbuf.st_uid;
+	uif->gid = stbuf.st_gid;
+	c->qid = fsqid(&stbuf);
+	if(S_ISLNK(stbuf.st_mode))
+		c->qid.type |= H9_QTSYMLINK;
 	return 1;
 }
 
@@ -308,6 +494,8 @@ fswalk1(Chan *c, char *name)
 	/*print("** fs walk '%s' -> %s\n", path, name);  */
 
 	uif = c->aux;
+	if(h9_fs_linkwalk())
+		return fswalklx(c, name);
 	if(uif->top != nil)
 		return fswalkin(c, name);
 	path = catpath(uif->path, name);
@@ -317,6 +505,7 @@ fswalk1(Chan *c, char *name)
 	}
 	free(uif->path);
 	uif->path = path;
+	uif->canon = 0;
 
 	uif->mode = stbuf.st_mode;
 	uif->uid = stbuf.st_uid;
@@ -344,6 +533,11 @@ fswalk(Chan *c, Chan *nc, char **name, int nname)
 		if((loop = fswalk1(nc, name[i])) <= 0)
 			break;
 		wq->qid[i] = nc->qid;
+		/* h9: a Linux process's walk stops at a link (fswalklx). */
+		if(nc->qid.type & H9_QTSYMLINK){
+			i++;
+			break;
+		}
 	}
 	if(i != nname){
 		cclose(nc);
@@ -389,7 +583,11 @@ fsstat(Chan *c, uchar *buf, int n)
 	 */
 	if(openfile(c) && fstat(uif->fd, &stbuf) == 0)
 		;
-	else if(stat(uif->path, &stbuf) < 0 && lstat(ownpath(uif), &stbuf) < 0)
+	else if(c->qid.type & H9_QTSYMLINK){
+		/* h9: a link a Linux walk stopped at is itself, DMSYMLINK by its qid. */
+		if(lstat(uif->path, &stbuf) < 0)
+			error(strerror(errno));
+	}else if(stat(uif->path, &stbuf) < 0 && lstat(ownpath(uif), &stbuf) < 0)
 		error(strerror(errno));
 
 	d.name = lastelem(ownpath(uif));
@@ -418,6 +616,8 @@ fsopen(Chan *c, int mode)
 
 	uif = c->aux;
 	/* h9: a link walked to as itself has no target to open (danglingwalk). */
+	if(c->qid.type & H9_QTSYMLINK)
+		error(H9_ELOOP);	/* a Linux open that doesn't follow it */
 	if(S_ISLNK(uif->mode))
 		error(Enonexist);
 	op = omode == OREAD && !(mode&OTRUNC) ? H9_FSREAD : H9_FSWRITE;
@@ -433,7 +633,7 @@ fsopen(Chan *c, int mode)
 	if(c->qid.type & QTDIR) {
 		if(omode != OREAD)
 			error(Eperm);
-		if((fd = open(uif->path, O_RDONLY|O_DIRECTORY)) < 0)
+		if((fd = fsopenpath(uif, uif->path, O_RDONLY|O_DIRECTORY, 0)) < 0)
 			error(strerror(errno));
 		if(waserror()){
 			close(fd);
@@ -454,7 +654,7 @@ fsopen(Chan *c, int mode)
 		 * Linux program's open joins h9's own pipe for it (src/kern/fifo.c),
 		 * and a Plan 9 program sees an empty file.
 		 */
-		if((fd = open(uif->path, O_RDONLY|O_NONBLOCK)) < 0)
+		if((fd = fsopenpath(uif, uif->path, O_RDONLY|O_NONBLOCK, 0)) < 0)
 			error(strerror(errno));
 		if(waserror()){
 			close(fd);
@@ -472,7 +672,7 @@ fsopen(Chan *c, int mode)
 		/* A truncation needs write access and must wait for the check. */
 		if((mode & OTRUNC) && (m & O_ACCMODE) == O_RDONLY)
 			m = (m & ~O_ACCMODE) | O_RDWR;
-		if((fd = open(uif->path, m, 0666)) < 0)
+		if((fd = fsopenpath(uif, uif->path, m, 0666)) < 0)
 			error(strerror(errno));
 		if(waserror()){
 			close(fd);
@@ -523,7 +723,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 	 * of the name can't hand back a write to a file outside it. A truncation
 	 * waits for that check.
 	 */
-	dfd = open(uif->path, O_RDONLY|O_DIRECTORY);
+	dfd = fsopenpath(uif, uif->path, O_RDONLY|O_DIRECTORY, 0);
 	if(dfd < 0)
 		error(strerror(errno));
 	if(waserror()){
@@ -540,7 +740,7 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 			if(errno != EEXIST || mode & OEXCL)
 				error(strerror(errno));
 		}
-		if((fd = openat(dfd, name, O_RDONLY|O_DIRECTORY)) < 0)
+		if((fd = openat(dfd, name, O_RDONLY|O_DIRECTORY|(lxmode(uif) ? O_NOFOLLOW : 0))) < 0)
 			error(strerror(errno));
 		if(waserror()){
 			close(fd);
@@ -569,6 +769,8 @@ fscreate(Chan *c, char *name, int mode, ulong perm)
 		m = fsomode(m == OREAD ? ORDWR : m) | O_CREAT;
 		if(mode & OEXCL)
 			m |= O_EXCL;
+		if(lxmode(uif))
+			m |= O_NOFOLLOW;	/* h9: a Linux create doesn't follow a link left in its name */
 		if((fd = openat(dfd, name, m, uif->mode & perm & 0777)) < 0)
 			error(strerror(errno));
 		if(waserror()){
@@ -722,7 +924,7 @@ fsremove(Chan *c)
 		char base[NAME_MAX+1];
 		int dfd;
 
-		dfd = h9_parentfd(ownpath(uif), base);
+		dfd = h9_parentfd(uif, ownpath(uif), base);
 		if(waserror()){
 			close(dfd);
 			nexterror();
@@ -793,14 +995,15 @@ fswstat(Chan *c, uchar *buf, int n)
 		byfd = 1;
 		wfd = uif->fd;
 		stbuf = fdst;
-	}else if(stat(uif->path, &stbuf) < 0){
+	}else if((c->qid.type & H9_QTSYMLINK) != 0 || stat(uif->path, &stbuf) < 0){
+		/* h9: and a link a Linux walk stopped at is changed as itself. */
 		if(lstat(ownpath(uif), &stbuf) < 0 || !S_ISLNK(stbuf.st_mode))
 			error(strerror(errno));
 		if(h9_fs_checkname(ownpath(uif), H9_FSWRITE) < 0)
 			error(Eperm);
 	}else{
 		/* Truncation needs write access; it waits for the check below. */
-		if((opfd = open(uif->path, trunc ? O_RDWR : O_RDONLY)) < 0)
+		if((opfd = fsopenpath(uif, uif->path, trunc ? O_RDWR : O_RDONLY, 0)) < 0)
 			error(strerror(errno));
 		wfd = opfd;
 	}
@@ -857,7 +1060,7 @@ fswstat(Chan *c, uchar *buf, int n)
 		 * own canonical path (h9_fs_allowat), so a swapped parent component
 		 * can't steer the rename outside the policy.
 		 */
-		dfd = h9_parentfd(ownpath(uif), base);
+		dfd = h9_parentfd(uif, ownpath(uif), base);
 		if(waserror()){
 			close(dfd);
 			nexterror();
@@ -983,10 +1186,12 @@ fsdirread(Chan *c, uchar *va, int count, ulong offset)
 	char de[NAME_MAX];
 	struct stat stbuf;
 	Ufsinfo *uif;
+	int lx;
 
 /*print("fsdirread %s\n", chanpath(c));*/
 	i = 0;
 	uif = c->aux;
+	lx = h9_fs_linkwalk();
 
 	errno = 0;
 	if(uif->offset != offset) {
@@ -1007,6 +1212,20 @@ fsdirread(Chan *c, uchar *va, int count, ulong offset)
 			continue;
 
 		d.name = de;
+		/*
+		 * h9: for a Linux process, an entry is listed as itself, and a
+		 * link as a link, whether its target exists or not
+		 * (design/linux-symlinks.md).
+		 */
+		if(lx){
+			p = catpath(uif->path, de);
+			if(h9_fs_checkname(p, H9_FSWALK) < 0 || lstat(p, &stbuf) < 0){
+				free(p);
+				continue;
+			}
+			free(p);
+			goto Have;
+		}
 		/*
 		 * h9: in a contained tree, an entry is listed as its walk
 		 * resolves it, and a link whose target is missing isn't.
@@ -1034,10 +1253,13 @@ fsdirread(Chan *c, uchar *va, int count, ulong offset)
 		}
 		free(p);
 
+	Have:
 		d.uid = eve;
 		d.gid = eve;
 		d.muid = eve;
 		d.qid = fsqid(&stbuf);
+		if(S_ISLNK(stbuf.st_mode))
+			d.qid.type |= H9_QTSYMLINK;
 		d.mode = (d.qid.type<<24)|STMODE(&stbuf);
 		if(S_ISFIFO(stbuf.st_mode))
 			d.mode |= H9_DMFIFO;	/* h9 */
@@ -1078,6 +1300,7 @@ h9_fs_anchor(Chan *c)
 	uif->path = strdup(buf);
 	free(uif->lpath);
 	uif->lpath = nil;
+	uif->canon = 1;
 }
 
 /* h9: the target of the link c's last name was, as it's written. */
@@ -1122,7 +1345,7 @@ h9_fs_symlink(Chan *c, char *name, char *target)
 	 * name's own slot (h9_fs_allowat), so a swapped parent component can't
 	 * steer the create outside the policy.
 	 */
-	dfd = open(uif->path, O_RDONLY|O_DIRECTORY);
+	dfd = fsopenpath(uif, uif->path, O_RDONLY|O_DIRECTORY, 0);
 	if(dfd < 0)
 		error(strerror(errno));
 	if(waserror()){
@@ -1157,7 +1380,7 @@ h9_fs_mkfifo(Chan *c, char *name, ulong perm)
 	if(devtab[c->type]->dc != 'U')
 		error(Eperm);
 	uif = c->aux;
-	dfd = open(uif->path, O_RDONLY|O_DIRECTORY);
+	dfd = fsopenpath(uif, uif->path, O_RDONLY|O_DIRECTORY, 0);
 	if(dfd < 0)
 		error(strerror(errno));
 	if(waserror()){
@@ -1203,12 +1426,12 @@ h9_fs_rename(Chan *c, Chan *dir, char *name)
 	 * (h9_fs_allowfd/allowat), so a swapped parent component can't steer the
 	 * rename outside the policy. The source link is moved, not its target.
 	 */
-	sdfd = h9_parentfd(ownpath(uif), base);
+	sdfd = h9_parentfd(uif, ownpath(uif), base);
 	if(waserror()){
 		close(sdfd);
 		nexterror();
 	}
-	if((ddfd = open(duif->path, O_RDONLY|O_DIRECTORY)) < 0)
+	if((ddfd = fsopenpath(duif, duif->path, O_RDONLY|O_DIRECTORY, 0)) < 0)
 		error(strerror(errno));
 	if(waserror()){
 		close(ddfd);

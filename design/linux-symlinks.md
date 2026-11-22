@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [symlinks-in-root]
 areas: [kern, linux, sandbox]
-branch: [linux-symlinks]
+branch: [claude/project-thread-kcmhcu]
 ---
 
 # Proposal: Linux symlinks resolved in the guest's namespace
@@ -90,18 +90,18 @@ A Linux program's links now reach only names in its own namespace, each walked a
 
 Integration cases, tagged `[linux-symlinks]`, with the Alpine root:
 
-- [ ] `test "an absolute link in a bound host tree resolves from the Linux root [linux-symlinks]"`: a link `/app/x -> /opt/y` in a `--bind` of a cwd directory at `#L/app` opens `/opt/y` from another `--dir`.
-- [ ] `test "an absolute link in one #L layer resolves into another [linux-symlinks]"`
-- [ ] `test "a relative link resolves from its own directory across a bind [linux-symlinks]"`
-- [ ] `test "a dangling link lists and removes [linux-symlinks]"`: `ls` shows it, and `rm -r` of its directory succeeds, in a host tree and an overlay.
-- [ ] `test "lstat, readlink, and O_NOFOLLOW act on the link [linux-symlinks]"`
-- [ ] `test "a loop of links is ELOOP [linux-symlinks]"`
-- [ ] `test "exec of a link and a #! interpreter reached through a link run [linux-symlinks]"`
-- [ ] `test "an absolute link in a host tree to a host path the guest doesn't see fails [linux-symlinks]"`: `ENOENT`, where today the host follows it.
-- [ ] `test "getcwd and .. after a link name the target [linux-symlinks]"`
-- [ ] `test "a link in the middle of a path in a host tree resolves from the Linux root [linux-symlinks]"`
-- [ ] `test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]"`
-- [ ] `test "a 9front program's walk through a contained tree is unchanged [linux-symlinks]"`
+- [x] `test "an absolute link in a bound host tree resolves from the Linux root [linux-symlinks]"`: a link `/app/x -> /opt/y` in a `--bind` of a cwd directory at `#L/app` opens `/opt/y` from another `--dir`.
+- [x] `test "an absolute link in one #L layer resolves into another [linux-symlinks]"`
+- [x] `test "a relative link resolves from its own directory across a bind [linux-symlinks]"`
+- [x] `test "a dangling link lists and removes [linux-symlinks]"`: `ls` shows it, and `rm -r` of its directory succeeds, in a host tree and an overlay.
+- [x] `test "lstat, readlink, and O_NOFOLLOW act on the link [linux-symlinks]"`
+- [x] `test "a loop of links is ELOOP [linux-symlinks]"`
+- [x] `test "exec of a link and a #! interpreter reached through a link run [linux-symlinks]"`
+- [x] `test "an absolute link in a host tree to a host path the guest doesn't see fails [linux-symlinks]"`: `ENOENT`, where today the host follows it.
+- [x] `test "getcwd and .. after a link name the target [linux-symlinks]"`
+- [x] `test "a link in the middle of a path in a host tree resolves from the Linux root [linux-symlinks]"`
+- [x] `test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]"`
+- [x] `test "a 9front program's walk through a contained tree is unchanged [linux-symlinks]"`
 - [ ] Demo: h9build's `python-uv` example builds, and its app runs from separate runtime, deps, and app layers.
 
 ## Implementation
@@ -115,3 +115,12 @@ Integration cases, tagged `[linux-symlinks]`, with the Alpine root:
 
 - **Host paths in uncontained trees.** Whether an absolute target that doesn't resolve should be retried at `/mnt/term/<target>`, for projects with links to elsewhere on the host (see Rationale).
 - **Cost.** Every link restarts a walk. Host trees walk locally, but a link-heavy tree on a remote 9P mount (a Nix store) could be slow; the mount index ([mount-index](mount-index.md)) may need to carry link targets.
+
+## Updates
+
+- 2026-11-22: The first pass, on `claude/project-thread-kcmhcu`, builds the walk mode in devfs (posix and win32), the overlay, and unions, the kernel's following in `walk()`, and the Linux calls, with the cases above passing on the native backend. It also refines the design:
+  - **Which walks stop.** A process's walks stop at links when its root is the Linux view (`h9_fs_linkwalk`), so a device asks that rather than taking a flag through `Dev.walk`. Whether a lookup follows its last name is a per-process setting the Linux layer makes around a call (`h9_fs_nofollow`); a remove never follows it.
+  - **The link's chan.** A device's walk that stops at a link with names after it makes no clone, so `walk()` walks the names through the link again to read its target (`h9_fs_chanreadlink`), from the chan the walk was in, which may be a union member's.
+  - **Canonical paths.** A devfs chan's path may hold host links from the walk that bound it (a cwd under a linked directory). The first Linux walk from it `realpath`s it, so the paths it makes hold none, and an open can refuse every link with `openat2`'s `RESOLVE_NO_SYMLINKS`.
+  - **`/proc/self/fd/N`.** An open of one is fd N's dup (`#d/N`), as `/dev/fd/N`'s is, since devlinux has no file to open there.
+  - **Not yet.** The 9P2000.L client still follows its links itself, from its attach root, for every process: it needs the walk mode passed with a walk, a readable link fid for `h9_fs_chanreadlink`, and listings that show links. And the h9build demo hasn't been run.

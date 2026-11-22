@@ -11,6 +11,7 @@ This describes, as built, h9's security stance and the sandbox policy: what a gu
   - [Access rules](#access-rules)
   - [Path resolution](#path-resolution)
   - [Contained trees](#contained-trees)
+  - [Linux symlinks](#linux-symlinks)
   - [Default profile](#default-profile)
   - [Discarded root changes](#discarded-root-changes)
   - [The root overlay's cost](#the-root-overlays-cost)
@@ -74,7 +75,7 @@ The plan's rules are the root, the cwd, each `--readable` and `--writable` path,
 
 ### Path resolution
 
-devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host.
+For a 9front program, devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. A Linux program's walks don't follow them ([Linux symlinks](#linux-symlinks)).
 
 Every devfs path is resolved (`realpath`; on Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths) and the resolved path is checked against the access rules, on every host.
 
@@ -96,7 +97,21 @@ A listing shows each link with its target's `Dir` and leaves out a link whose ta
 
 `h9_fs_readlink` (and `h9_fs_readlinkpath` by guest path, through the root overlay; `kern.readlink`) gives a link's target as written, for the Linux personality; Plan 9 programs never see links.
 
+These rules are a 9front program's. For a Linux program the boundary is the process's root instead of the tree's top ([Linux symlinks](#linux-symlinks)).
+
 An uncontained `#U` attach is unchanged. `--dir PATH:DST:contained`, and every `--dir` on `#L`, makes that mount's bind contained; other binds, including writable paths inside it, stay uncontained. `--print` shows it as `bind '#U!c/path' DST`, which replays with `--ns` where `#U` isn't masked. Any other `#U` attach spec is "bad attach specifier".
+
+### Linux symlinks
+
+A Linux process's walks ([linux-symlinks](../design/linux-symlinks.md)) stop at a link instead of following it, and the kernel's walk follows it from the process's root, the Linux view, so a link resolves through the same mounts, binds, and `#L` layers as the path the program would get by writing its target out. A 9front process's walks are unchanged. A process walks this way when its root is the Linux view (`h9_fs_linkwalk`, `src/kern/linux.c`).
+
+A device's walk stops at the first link it meets: the link is the last qid of its `Walkqid`, with `H9_QTSYMLINK` (`0x02`, 9P2000.u's and .L's qid bit) in its type, and the names after it aren't walked. The link `stat`s with `H9_DMSYMLINK` (9P2000.u's `0x02000000`) and its own size and times, and a directory read lists it so, with or without a target. devfs (posix and win32, contained or not), the overlay's `Nlink` nodes and its lower tree's links, and a union's members stop this way.
+
+devfs looks each name up with `lstat` (on Windows, `FindFirstFile`, whose entry for a symbolic link or junction isn't followed) and checks it against the access rules by its own path (`h9_fs_checkname`) rather than its `realpath`. A walk's path holds no links, from a canonical start (the first such walk from a chan `realpath`s it), so `..` is its parent, and it stops at a contained tree's top. An open of the walked path doesn't follow a link that appeared since: on Linux it's an `openat2` with `RESOLVE_NO_SYMLINKS`, elsewhere (and on Linux kernels without `openat2`) a chain of `openat`s with `O_NOFOLLOW` from `/`, and on Windows an open of the reparse point itself, refused if it is one. A link swapped in after the walk fails the open ("too many symbolic links") instead of being followed by the host, and a create doesn't follow a link left in its name. The web host, with no `/` to start from, refuses a link only as the last name.
+
+`walk()` in the vendored `chan.c` follows a link when a walk stopped at one with names left, or at the last name of a lookup that follows links (`followlink`): it reads the target (`h9_fs_chanreadlink`, down through overlays and unions to the tree that holds it) and walks it, an absolute target from the process's root and a relative one from the link's directory as the walk reached it, then the rest of the path. A mount point before the link is crossed first. The result's name is the target's, so `..` after a link is the target's parent, and `getcwd` after a `chdir` through one is the target's path. More than 40 links in one lookup is "too many symbolic links". A lookup follows a link in its last name unless it's a remove or the call says not to (`h9_fs_nofollow`, per process): `lstat`, `readlink`, `rename`'s old name, and `O_NOFOLLOW`. `namec`'s `h9_fs_anchor` call, after the walk, is unchanged.
+
+A 9P2000.L mount still follows its own links, from its attach root, for every process ([ninep.md](ninep.md)).
 
 ### Default profile
 

@@ -180,3 +180,22 @@ void	h9_fs_mkfifo(Chan *c, char *name, ulong perm);
 int	h9_fs_isfifo(Chan *c);
 int	h9_fs_mkfifopath(char *path, ulong perm);
 int	h9_fs_chanisfifo(Chan *c);
+/*
+ * Linux symlinks (design/linux-symlinks.md). A Linux process's walks
+ * stop at a link instead of following it: the device ends the walk on
+ * the link, with H9_QTSYMLINK in its qid (so its Dir has H9_DMSYMLINK),
+ * and the kernel's walk (chan.c) follows it from the process's root or
+ * the link's directory. h9_fs_linkwalk says whether the calling
+ * process's walks stop at links: whether its root is the Linux view.
+ * h9_fs_nofollow sets whether its next lookup acts on a link in its
+ * last name rather than following it (lstat, readlink, O_NOFOLLOW) and
+ * returns what it was. h9_fs_chanreadlink puts the target of the link
+ * c is on in buf, through overlays and unions, and returns its length,
+ * or -1 if c isn't on one.
+ */
+#define	H9_QTSYMLINK	0x02
+#define	H9_DMSYMLINK	0x02000000
+int	h9_fs_linkwalk(void);
+int	h9_fs_nofollow(int on);
+int	h9_fs_nofollowing(void);
+int	h9_fs_chanreadlink(Chan *c, char *buf, int nbuf);

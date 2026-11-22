@@ -2059,9 +2059,15 @@ directories h9 provides on top:
 | `/proc`, `/sys` | What libc, busybox, Python, and htop read: `cpuinfo` (following `--cpus`), `meminfo`, `mounts`, and per-process `stat`, `status`, `maps`, `cmdline`, `exe`, `fd`, and `task` |
 | `/etc/resolv.conf` | Your host's DNS servers, when the root has none |
 
-The root's symlinks always resolve inside it, as `chroot` would, so
-Alpine's `/bin/ls -> /bin/busybox` reads the root's busybox
-(`contained` is implied). Writes to the root go to a copy-on-write
+A Linux program's symlinks resolve from its own `/`, the Linux view, as
+they would inside a container: Alpine's `/bin/ls -> /bin/busybox` reads
+the root's busybox, and an absolute link in any tree, whether the cwd, a
+`--writable` path, or one of several `--dir` layers on `#L`, names the
+guest's path, so a venv's `bin/python -> /opt/python/bin/python3`
+reaches the runtime in another layer. A link whose target is a host path
+the guest doesn't see at that path doesn't resolve. `lstat`, `readlink`,
+`O_NOFOLLOW`, and `ls -l` see links as links, dangling ones included, so
+`rm -r` of a directory with one in it works. Writes to the root go to a copy-on-write
 overlay in memory and are thrown away at exit, as for a 9front root, so
 `apk add` works for the run; mount it with `rw`, as in `--dir
 ./alpine:#L:rw`, to keep what it installs. `h9 --print` shows the view as
@@ -2234,7 +2240,7 @@ around a value with commas.
 
 | Flag | Meaning |
 | --- | --- |
-| `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw`. `contained` resolves its symlinks inside it, as a tree on `#L` always does. |
+| `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw`. `contained` resolves its symlinks inside it for 9front programs, as a tree on `#L` always does; a Linux program's links resolve from its own `/` (chapter 20). |
 | `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://...`, or `wss://...`. `http://...` and `https://...` are a WebSocket if the server upgrades, and otherwise a static tree (chapter 16). With no scheme, `http://` for a loopback host and `https://` for any other. A DST of `/srv/NAME` posts the connection there without mounting it. |
 | `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` (the browser host's root archive), unpacked into memory before the program runs. Its files count against `--memory`, and it takes writes in memory. Symbolic links are kept for Linux programs. |
 | `--builtin[=DST[:OPTS]]` | The built-in root. Bare, it's the bottom of `/`. |
@@ -2416,8 +2422,10 @@ read-only.
   itself.
   With the `contained` option, as in `--dir PATH:/:contained`, a tree's links are read inside it
   instead: an absolute target starts at the tree's top, and `..` stops
-  there, so a Linux root's `/bin/ls -> /bin/busybox` works as it does in
-  that system. A loop of links is "too many symbolic links".
+  there. A loop of links is "too many symbolic links". That's for 9front
+  programs: a Linux program's links resolve from its own `/`, the Linux
+  view, through every tree mounted there, and its opens never follow a
+  link on the host's terms (chapter 20).
 - **Hardlinks** can't be detected that way: a hardlink inside a writable
   path to a file outside it lets the guest change that file. `--print` lists
   this as a caveat.

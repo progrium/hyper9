@@ -965,12 +965,14 @@ extern int h9_overlay_isfifo(Chan*);
 int
 h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 {
-	Chan *c, *l;
+	Chan *volatile c;
 	char *p;
-	int n;
+	int n, nf;
 
 	c = nil;
+	nf = h9_fs_nofollow(1);
 	if(waserror()){
+		h9_fs_nofollow(nf);
 		if(c != nil)
 			cclose(c);
 		p = up->syserrstr;
@@ -978,25 +980,47 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
 		up->errstr = p;
 		return -1;
 	}
+	/* A Linux process's walk stops on the link (design/linux-symlinks.md). */
 	c = namec(path, Aaccess, 0, 0);
-	/* Down through overlays and unions (design/mounts.md) to the tree
-	 * that holds the name. */
-	for(;;){
-		if((n = h9_overlay_readlink(c, buf, nbuf)) >= 0){
-			cclose(c);
-			poperror();
-			return n;
-		}
-		if((l = h9_overlay_lower(c)) == nil)
-			break;
-		cclose(c);
-		c = l;
-	}
-	n = h9_fs_readlink(c, buf, nbuf);
+	h9_fs_nofollow(nf);
+	n = h9_fs_chanreadlink(c, buf, nbuf);
 	if(n < 0)
 		error("not a symbolic link");
 	cclose(c);
 	poperror();
+	return n;
+}
+
+/*
+ * The target of the link c is on: an overlay's own, or one in the tree
+ * that holds the name, down through overlays and unions (design/mounts.md).
+ * Its length, with it in buf, or -1 if c isn't on a link.
+ */
+int
+h9_fs_chanreadlink(Chan *c, char *buf, int nbuf)
+{
+	Chan *volatile l;
+	Chan *nl;
+	int n;
+
+	incref(&c->ref);
+	l = c;
+	if(waserror()){
+		cclose(l);
+		nexterror();
+	}
+	for(;;){
+		if((n = h9_overlay_readlink(l, buf, nbuf)) >= 0)
+			break;
+		if((nl = h9_overlay_lower(l)) == nil){
+			n = h9_fs_readlink(l, buf, nbuf);
+			break;
+		}
+		cclose(l);
+		l = nl;
+	}
+	poperror();
+	cclose(l);
 	return n;
 }
 
@@ -1027,7 +1051,15 @@ h9_fs_renamepath(char *old, char *new)
 		up->errstr = p;
 		return -1;
 	}
+	/* The link old names is moved, not its target. */
+	r = h9_fs_nofollow(1);
+	if(waserror()){
+		h9_fs_nofollow(r);
+		nexterror();
+	}
 	oc = namec(old, Aaccess, 0, 0);
+	poperror();
+	h9_fs_nofollow(r);
 	dir = strdup(new);
 	if(dir == nil)
 		error(Enomem);

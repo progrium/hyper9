@@ -22,7 +22,10 @@
  *		relative one from the link's directory. The chan keeps the link
  *		beside the target, so remove and rename act on the link, and
  *		h9_overlay_readlink reads it. A final link whose target is
- *		missing is walked to as itself, and opening it fails.
+ *		missing is walked to as itself, and opening it fails. Its qid
+ *		has H9_QTSYMLINK. A Linux process's walk doesn't follow it,
+ *		or a lower tree's link: it stops there, for the kernel's walk
+ *		to follow from the process's root (design/linux-symlinks.md).
  *	Nfifo	a FIFO made by the Linux personality (h9_overlay_mkfifo,
  *		design/linux-fifo.md): a file with no data, whose Dir has
  *		H9_DMFIFO. A Linux open of it joins a pipe (src/kern/fifo.c);
@@ -685,6 +688,13 @@ node2dir(Chan *c, Node *n, Dir *d)
 	d->mode = n->mode;
 	if(n->kind == Nfifo)
 		d->mode |= H9_DMFIFO;
+	/* A link is one only to a Linux process (design/linux-symlinks.md). */
+	if(n->kind == Nlink){
+		if(h9_fs_linkwalk())
+			d->mode |= H9_DMSYMLINK;
+		else
+			d->qid.type &= ~H9_QTSYMLINK;
+	}
 	d->atime = n->atime;
 	d->mtime = n->mtime;
 	d->length = (n->qid.type & QTDIR) ? 0 : n->length;
@@ -1437,6 +1447,7 @@ h9_overlay_symlink(Chan *c, char *name, char *target)
 		error(Efull);
 	}
 	n->kind = Nlink;
+	n->qid.type |= H9_QTSYMLINK;
 	n->link = s;
 	n->mode = 0777;
 	n->length = strlen(target);
@@ -1966,6 +1977,11 @@ unwalk(Chan *c, Chan *nc, char **name, int nname)
 		if(!unstep(nu, nc, name[i]))
 			break;
 		wq->qid[i] = nc->qid;
+		/* A Linux process's walk stops at a member's link (ovwalk). */
+		if(nc->qid.type & H9_QTSYMLINK){
+			i++;
+			break;
+		}
 	}
 	wq->nqid = i;
 	poperror();
@@ -3352,7 +3368,8 @@ ovstep(Ovc *o, Chan *nc, char *name, int last)
 	nodeunref(o->inst, o->node);
 	o->node = nn;
 	nc->qid = nn != nil ? nn->qid : nl->qid;
-	if(nn != nil && nn->kind == Nlink){
+	/* A Linux process's walk stops at the link (ovwalk). */
+	if(nn != nil && nn->kind == Nlink && !h9_fs_linkwalk()){
 		if(waserror())
 			return 0;	/* the error is in up->errstr */
 		follow(o, nc, last);
@@ -3411,6 +3428,11 @@ ovwalk(Chan *c, Chan *nc, char **name, int nname)
 		if(!ovstep(no, nc, name[i], i == nname-1))
 			break;
 		wq->qid[i] = nc->qid;
+		/* A Linux process's walk stops at a link, its own or the lower tree's. */
+		if(nc->qid.type & H9_QTSYMLINK){
+			i++;
+			break;
+		}
 	}
 	wq->nqid = i;
 	qunlock(&in->ql);
@@ -3498,7 +3520,7 @@ ovopen(Chan *c, int omode)
 	}
 	refresh(c);
 	if(o->node != nil && o->node->kind == Nlink)
-		error(Enonexist);	/* a link whose target is missing */
+		error(h9_fs_linkwalk() ? H9_ELOOP : Enonexist);	/* a link not followed, or whose target is missing */
 	/* Exclusive use, as 9front's file servers do: one open at a time. */
 	if(o->node != nil && (o->node->mode & DMEXCL) && o->node->excl)
 		error(Elocked);
