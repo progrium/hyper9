@@ -94,6 +94,9 @@ const Fid = struct {
     /// A FIFO, opened without the server (design/linux-fifo.md): a Linux
     /// open joins h9's pipe for it, and anything else reads it as empty.
     fifo: bool = false,
+    /// A link a Linux process's walk stopped at (design/linux-symlinks.md):
+    /// it opens without the server, to read, and reads as its target.
+    link: bool = false,
 };
 
 /// A hidden server fid at an attach's root, which outlives the fid devmnt
@@ -148,7 +151,7 @@ const Bound = struct {
     open: ?u32 = null,
 };
 
-const Kind = enum { version, attach, walk, open, create, read, readdir, write, clunk, remove, stat, wstat };
+const Kind = enum { version, attach, walk, open, create, read, readlink, readdir, write, clunk, remove, stat, wstat };
 
 const Op = struct {
     arena: std.heap.ArenaAllocator,
@@ -182,6 +185,9 @@ const Op = struct {
     entries_left: u32 = 0,
     /// The client's `ahead_gen` when a read was sent.
     ahead_gen: u64 = 0,
+    /// Came from a Linux process (`Client.linkwalk`): its walks stop at
+    /// links, and its directory reads list them.
+    linkwalk: bool = false,
 
     fn allocator(op: *Op) Allocator {
         return op.arena.allocator();
@@ -221,6 +227,11 @@ const Resolve = struct {
     /// end, when it went the whole way without a link.
     compound: bool = false,
     stat: ?wire.Stat = null,
+    /// A Linux process's walk: it stops at the first link, which is its
+    /// last qid, and doesn't follow it (design/linux-symlinks.md).
+    linkwalk: bool = false,
+    /// It ended on a link, with a fid there.
+    at_link: bool = false,
 
     // One name at a time: the fid walked so far, and what's left to walk,
     // with a marker after each of the original names.
@@ -282,6 +293,11 @@ pub const Client = struct {
     /// Counts mutations, which drop every fid's read-ahead: a read sent
     /// before one keeps nothing ahead.
     ahead_gen: u64 = 0,
+    /// Whether the requests `fromMount` takes next come from a Linux
+    /// process, whose walks stop at links and whose directory reads list
+    /// them (design/linux-symlinks.md). devmnt writes a request in the
+    /// process that makes it, so the caller sets it per write.
+    linkwalk: bool = false,
 
     pub fn init(gpa: Allocator, opts: Options) Allocator.Error!Client {
         var c: Client = .{ .gpa = gpa, .opts = opts };
@@ -701,7 +717,7 @@ pub const Client = struct {
 
     fn newOp(c: *Client, tag: u16, kind: Kind) Allocator.Error!*Op {
         const op = try c.gpa.create(Op);
-        op.* = .{ .arena = .init(c.gpa), .tag = tag, .kind = kind };
+        op.* = .{ .arena = .init(c.gpa), .tag = tag, .kind = kind, .linkwalk = c.linkwalk };
         try c.ops.put(c.gpa, tag, op);
         return op;
     }
@@ -785,6 +801,12 @@ pub const Client = struct {
                 const op = try c.newOp(tag, .open);
                 op.fid = o.fid;
                 op.mode = o.mode;
+                // A link opens only to read its target, without the server.
+                if (f.link) {
+                    if (o.mode & 3 != wire.OREAD and o.mode & 3 != wire.OEXEC) return c.finishErrno(op, attr.E.LOOP);
+                    f.open = true;
+                    return c.finish(op, p9.Ropen{ .qid = .{ .type = wire.QTSYMLINK, .vers = f.qid.vers, .path = f.qid.path }, .iounit = 0 });
+                }
                 // A walk's attributes answer the type check.
                 if (c.cachedStat(f)) |st| return c.stepOpen(op, 0, .{ .Rgetattr = .{ .valid = L.GETATTR_BASIC, .stat = st } });
                 try c.send(op, l.Tgetattr{ .fid = f.sfid, .request_mask = L.GETATTR_BASIC }, .{ .main = 0 });
@@ -809,6 +831,12 @@ pub const Client = struct {
                 if (!f.open) return c.rerror(tag, "fid not open");
                 if (f.qid.type & wire.QTDIR != 0) return c.readDir(tag, r.fid, f, r.offset, r.count);
                 if (f.fifo) return c.sendMount(tag, wire.common.Rread{ .data = .{ .bytes = "" } });
+                if (f.link) {
+                    const op = try c.newOp(tag, .readlink);
+                    op.offset = r.offset;
+                    op.count = r.count;
+                    return c.send(op, l.Treadlink{ .fid = f.sfid }, .{ .main = 0 });
+                }
                 // From what was read ahead, or a read of a whole upstream
                 // msize when this one follows the last.
                 if (f.eof_at == r.offset and r.offset == f.ahead_off + f.ahead.items.len) {
@@ -1032,6 +1060,14 @@ pub const Client = struct {
                     }
                 }
                 return c.finish(op, wire.common.Rread{ .data = .{ .bytes = data[0..got] } });
+            },
+            .readlink => {
+                if (lerror(msg)) |e| return c.finishErrno(op, e);
+                if (msg != .Rreadlink) return c.unexpected();
+                const target = msg.Rreadlink.target;
+                const from: usize = @intCast(@min(op.offset, target.len));
+                const k = @min(op.count, target.len - from);
+                return c.finish(op, wire.common.Rread{ .data = .{ .bytes = target[from..][0..k] } });
             },
             .readdir => return c.stepReaddir(op, msg),
             .write => {
@@ -1505,9 +1541,10 @@ pub const Client = struct {
             last = e.offset;
             if (std.mem.eql(u8, e.name, ".") or std.mem.eql(u8, e.name, "..")) continue;
             if (!validName(e.name)) continue;
-            // A link's attributes are its own: it's walked to its target.
+            // A link's attributes are its own: it's walked to its target,
+            // except for a Linux process, which lists the link.
             var st = e.stat;
-            if (st) |x| if (x.mode & attr.S_IFMT == attr.S_IFLNK) {
+            if (st) |x| if (x.mode & attr.S_IFMT == attr.S_IFLNK and !op.linkwalk) {
                 st = null;
             };
             try list.append(a, .{ .name = try a.dupe(u8, e.name), .stat = st, .ready = st != null });
@@ -1596,7 +1633,7 @@ pub const Client = struct {
     fn startResolve(c: *Client, op: *Op, slot: u32, f: *Fid, names: []const []const u8) Allocator.Error!*Resolve {
         const a = op.allocator();
         const r = try a.create(Resolve);
-        r.* = .{ .op = op, .slot = slot, .start = f.sfid, .root = f.root, .names = names };
+        r.* = .{ .op = op, .slot = slot, .start = f.sfid, .root = f.root, .names = names, .linkwalk = op.linkwalk };
         for (f.path.items) |p| try r.path.append(a, p);
         r.sfid = try c.tmpSfid(op);
         r.state = .fast;
@@ -1674,6 +1711,25 @@ pub const Client = struct {
                         keep(op, r.sfid);
                         c.free_sfids.append(c.gpa, r.sfid) catch {};
                         if (qids.len == 0) return c.resolveFail(r, attr.E.NOENT);
+                    }
+                    return c.resolveDone(r);
+                }
+                if (r.linkwalk) {
+                    // A Linux process's walk ends at the link, and the
+                    // kernel follows it: a fid there only when it's the
+                    // last name.
+                    const k = link.? + 1;
+                    for (qids[0..k], r.names[0..k]) |q, n| {
+                        try r.qids.append(a, q);
+                        try pathStep(a, &r.path, n);
+                    }
+                    if (k == r.names.len) {
+                        r.at_link = true;
+                    } else if (qids.len == r.names.len) {
+                        try c.dropTmp(op, r.sfid);
+                    } else {
+                        keep(op, r.sfid);
+                        c.free_sfids.append(c.gpa, r.sfid) catch {};
                     }
                     return c.resolveDone(r);
                 }
@@ -1792,14 +1848,17 @@ pub const Client = struct {
         if (r.err) |e| return c.finishErr(op, e);
         const qids = r.qids.items;
         var out: [wire.max_welem]wire.Qid = undefined;
-        for (qids, out[0..qids.len]) |q, *o| o.* = pq(q);
+        for (qids, out[0..qids.len]) |q, *o| o.* = if (r.linkwalk) pqLink(q) else pq(q);
         if (qids.len == r.names.len) {
             keep(op, r.sfid);
             const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
             const root = f.root;
-            const qid = if (qids.len == 0) f.qid else qids[qids.len - 1];
-            try c.addFid(op.newfid, r.sfid, root, r.path.items, pq(qid));
-            if (r.stat) |st| c.cacheStat(c.fids.get(op.newfid).?, st);
+            const link = if (qids.len == 0) f.link else r.at_link;
+            const qid = if (qids.len == 0) f.qid else pq(qids[qids.len - 1]);
+            try c.addFid(op.newfid, r.sfid, root, r.path.items, qid);
+            const nf = c.fids.get(op.newfid).?;
+            nf.link = link;
+            if (r.stat) |st| if (!link) c.cacheStat(nf, st);
         }
         return c.finish(op, wire.common.Rwalk{ .wqids = .init(out[0..qids.len]) });
     }
@@ -1808,6 +1867,12 @@ pub const Client = struct {
 /// A .L qid as devmnt sees it: QTDIR or a plain file.
 fn pq(q: wire.Qid) wire.Qid {
     return .{ .type = q.type & wire.QTDIR, .vers = q.vers, .path = q.path };
+}
+
+/// A .L qid as a Linux process's walk sees it, with QTSYMLINK on a link
+/// (design/linux-symlinks.md).
+fn pqLink(q: wire.Qid) wire.Qid {
+    return .{ .type = q.type & (wire.QTDIR | wire.QTSYMLINK), .vers = q.vers, .path = q.path };
 }
 
 fn frameSize(msg: anytype) usize {
@@ -2157,6 +2222,46 @@ test "symlinks are followed inside the mount" {
     try testing.expectEqualStrings("file does not exist", (try h.walk(0, 4, &.{"dangling"})).Rerror.ename);
     // A link that fails partway is a partial walk.
     try testing.expectEqual(@as(u16, 1), (try h.walk(0, 4, &.{ "usr", "loop" })).Rwalk.wqids.n);
+}
+
+test "a Linux process's walk stops at a link, which reads as its target and lists" {
+    for ([_][]const u8{ wire.version_l, wire.version_lz }) |v| {
+        var h = try Harness.init(v);
+        defer h.deinit();
+        _ = try h.s.add("usr/lib/x", .file, "x\n");
+        _ = try h.s.add("lib", .link, "usr/lib");
+        _ = try h.s.add("d/dangling", .link, "nowhere");
+        _ = try h.s.add("d/f", .file, "");
+        try h.mount();
+        h.c.linkwalk = true;
+        // A link before the last name ends the walk there, with no fid.
+        const w = try h.walk(0, 1, &.{ "lib", "x" });
+        try testing.expectEqual(@as(u16, 1), w.Rwalk.wqids.n);
+        try testing.expectEqual(wire.QTSYMLINK, w.Rwalk.wqids.qids[0].type);
+        try testing.expectEqualStrings("unknown fid", try h.err(p9.Tstat{ .fid = 1 }));
+        // At the last name, a fid on the link, which opens to read its
+        // target, and stats as a link.
+        const d = try h.walk(0, 2, &.{ "d", "dangling" });
+        try testing.expectEqual(@as(u16, 2), d.Rwalk.wqids.n);
+        try testing.expectEqual(wire.QTSYMLINK, d.Rwalk.wqids.qids[1].type);
+        const st = try h.ok(p9.Tstat{ .fid = 2 });
+        const sd, _ = attr.Dir.parse(st.Rstat.stat.bytes).?;
+        try testing.expect(sd.mode & wire.DMSYMLINK != 0);
+        try testing.expectEqual(@as(u64, 7), sd.length);
+        _ = try h.ok(p9.Twalk{ .fid = 2, .newfid = 3, .wnames = .{} });
+        try testing.expectEqualStrings("too many symbolic links", try h.err(p9.Topen{ .fid = 3, .mode = wire.OWRITE }));
+        const got = try h.cat(4, &.{"lib"});
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings("usr/lib", got);
+        // Listings show links, a dangling one too.
+        const dirs = try h.ls(&.{"d"}, 8192);
+        try testing.expectEqual(@as(usize, 2), dirs.items.len);
+        try testing.expect(hasName(dirs.items, "dangling").?.mode & wire.DMSYMLINK != 0);
+        // A 9front program's walk still follows the link.
+        h.c.linkwalk = false;
+        try testing.expectEqual(@as(u16, 2), (try h.walk(0, 5, &.{ "lib", "x" })).Rwalk.wqids.n);
+        try testing.expect(hasName((try h.ls(&.{"d"}, 8192)).items, "dangling") == null);
+    }
 }
 
 test "directory reads" {

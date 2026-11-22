@@ -350,16 +350,19 @@ fn sec32(s: u64) u32 {
 /// no use for .L's QTSYMLINK.
 pub fn dirFromStat(st: *const wire.Stat, name: []const u8, uid: []const u8, gid: []const u8) Dir {
     const dir = st.mode & S_IFMT == S_IFDIR;
+    // A link's own attributes, which only a Linux process's walk or
+    // listing gets (design/linux-symlinks.md); its length is its target's.
+    const link = st.mode & S_IFMT == S_IFLNK;
     return .{
         .type = 0,
         .dev = 0,
-        .qid_type = if (dir) wire.QTDIR else wire.QTFILE,
+        .qid_type = if (dir) wire.QTDIR else if (link) wire.QTSYMLINK else wire.QTFILE,
         .qid_vers = st.qid.vers,
         .qid_path = st.qid.path,
-        .mode = (st.mode & 0o777) | (if (dir) DMDIR else 0) | (if (st.mode & S_IFMT == S_IFIFO) wire.DMNAMEDPIPE else 0),
+        .mode = (st.mode & 0o777) | (if (dir) DMDIR else 0) | (if (st.mode & S_IFMT == S_IFIFO) wire.DMNAMEDPIPE else 0) | (if (link) wire.DMSYMLINK else 0),
         .atime = sec32(st.atime_sec),
         .mtime = sec32(st.mtime_sec),
-        .length = if (st.mode & S_IFMT == S_IFREG) st.size else 0,
+        .length = if (st.mode & S_IFMT == S_IFREG or link) st.size else 0,
         .name = name,
         .uid = uid,
         .gid = gid,

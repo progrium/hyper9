@@ -147,10 +147,15 @@ fn h9_dotl_free(t: *Tr) callconv(.c) void {
     gpa.destroy(t);
 }
 
-fn h9_dotl_frommount(t: *Tr, buf: [*]const u8, n: c_long, err: [*]u8) callconv(.c) c_int {
+/// `linkwalk` is whether the writer is a Linux process, whose walks stop
+/// at links (design/linux-symlinks.md).
+fn h9_dotl_frommount(t: *Tr, buf: [*]const u8, n: c_long, linkwalk: c_int, err: [*]u8) callconv(.c) c_int {
     const b = buf[0..@intCast(n)];
     (switch (t.side) {
-        .client => |*c| c.fromMount(b),
+        .client => |*c| blk: {
+            c.linkwalk = linkwalk != 0;
+            break :blk c.fromMount(b);
+        },
         .server => |*s| s.fromExport(b),
     }) catch {
         putErr(err, "out of memory");

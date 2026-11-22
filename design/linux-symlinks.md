@@ -102,6 +102,7 @@ Integration cases, tagged `[linux-symlinks]`, with the Alpine root:
 - [x] `test "a link in the middle of a path in a host tree resolves from the Linux root [linux-symlinks]"`
 - [x] `test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]"`
 - [x] `test "a 9front program's walk through a contained tree is unchanged [linux-symlinks]"`
+- [x] `test "a Linux program sees a .L mount's links and follows them from its own root [linux-symlinks]"`: a diod export's links list and read as links, and an absolute one resolves from the Linux root.
 - [ ] Demo: h9build's `python-uv` example builds, and its app runs from separate runtime, deps, and app layers.
 
 ## Implementation
@@ -123,4 +124,5 @@ Integration cases, tagged `[linux-symlinks]`, with the Alpine root:
   - **The link's chan.** A device's walk that stops at a link with names after it makes no clone, so `walk()` walks the names through the link again to read its target (`h9_fs_chanreadlink`), from the chan the walk was in, which may be a union member's.
   - **Canonical paths.** A devfs chan's path may hold host links from the walk that bound it (a cwd under a linked directory). The first Linux walk from it `realpath`s it, so the paths it makes hold none, and an open can refuse every link with `openat2`'s `RESOLVE_NO_SYMLINKS`.
   - **`/proc/self/fd/N`.** An open of one is fd N's dup (`#d/N`), as `/dev/fd/N`'s is, since devlinux has no file to open there.
-  - **Not yet.** The 9P2000.L client still follows its links itself, from its attach root, for every process: it needs the walk mode passed with a walk, a readable link fid for `h9_fs_chanreadlink`, and listings that show links. And the h9build demo hasn't been run.
+  - **Not yet.** The 9P2000.L client still follows its links itself, from its attach root, for every process: it needs the walk mode passed with a walk, a readable link fid for `h9_fs_chanreadlink`, and listings that show links (done below). And the h9build demo hasn't been run.
+- 2026-11-22: The 9P2000.L client stops at links for a Linux process. devmnt writes each request in the process that makes it, so `#ℓ` passes `h9_fs_linkwalk()` with each write, and the translator keeps it on the request. A walk that meets a link ends there with `QTSYMLINK`, making a fid only when the link is the last name. That fid stats as the link, opens to read without the server, and reads as its target by `Treadlink`, which is how `h9_fs_chanreadlink` reads a link on a mount. A Linux process's directory reads list links. namec refuses to open a link a Linux open didn't follow, for every device. Under a mount index ([mount-index](mount-index.md)) the same holds: a link makes its directory incomplete there, so walks in it go on to the translator, which `#ι` writes to from the same process.

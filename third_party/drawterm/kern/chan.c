@@ -1565,6 +1565,9 @@ namec(char *aname, int amode, int omode, ulong perm)
 			/* save registers else error() in open has wrong value of c saved */
 			saveregisters();
 
+			/* h9: a link a Linux open didn't follow (design/linux-symlinks.md) */
+			if((c->qid.type & Qtsymlink) != 0 && h9_fs_linkwalk())
+				error("too many symbolic links");
 			c = devtab[c->type]->open(c, omode&~OCEXEC);
 			if(omode & ORCLOSE)
 				c->flag |= CRCLOSE;

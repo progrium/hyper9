@@ -1005,6 +1005,32 @@ h9_fs_readlinkpath(char *path, char *buf, int nbuf)
  * that holds the name, down through overlays and unions (design/mounts.md).
  * Its length, with it in buf, or -1 if c isn't on a link.
  */
+/*
+ * A link on a 9P mount reads as its target: the 9P2000.L client opens a
+ * link a Linux process's walk stopped at without the server, and its
+ * reads are the server's Treadlink (src/dotl/client.zig).
+ */
+static int
+mntreadlink(Chan *c, char *buf, int nbuf)
+{
+	Chan *volatile r;
+	long n;
+
+	if(devtab[c->type]->dc != 'M' || (c->qid.type & H9_QTSYMLINK) == 0 || nbuf <= 0)
+		return -1;
+	r = cclone(c);
+	if(waserror()){
+		cclose(r);
+		nexterror();
+	}
+	r = devtab[r->type]->open(r, OREAD);
+	n = devtab[r->type]->read(r, buf, nbuf-1, 0);
+	poperror();
+	cclose(r);
+	buf[n] = 0;
+	return n;
+}
+
 int
 h9_fs_chanreadlink(Chan *c, char *buf, int nbuf)
 {
@@ -1023,6 +1049,8 @@ h9_fs_chanreadlink(Chan *c, char *buf, int nbuf)
 			break;
 		if((nl = h9_overlay_lower(l)) == nil){
 			n = h9_fs_readlink(l, buf, nbuf);
+			if(n < 0)
+				n = mntreadlink(l, buf, nbuf);
 			break;
 		}
 		cclose(l);
