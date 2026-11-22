@@ -6759,6 +6759,8 @@ fn fifoCase(le: *const LinuxEnv, name: []const u8) !void {
     var want_buf: [64]u8 = undefined;
     const want = try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name});
     try netCase(le, &.{ "/mnt/term/cwd/fifo", name }, want);
+    // Windows has no host FIFOs: mkfifo in a host tree fails there.
+    if (builtin.os.tag == .windows) return;
     var s: Scratch = undefined;
     try s.init();
     defer s.deinit();
@@ -6771,6 +6773,7 @@ test "mkfifo makes a FIFO that stat reports [linux-fifo]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try fifoCase(&le, "make");
+    if (builtin.os.tag == .windows) return;
     // The host sees a host FIFO, which stays after the machine ends.
     var s: Scratch = undefined;
     try s.init();
@@ -7119,6 +7122,9 @@ test "rename across directories moves in an overlay, and is the host's rename in
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
     try netCase(&le, &.{ "/mnt/term/cwd/files", "rename_across" }, "ok rename_across\n");
+    // On Windows a host tree's rename across directories is EXDEV, for
+    // the sandbox's sake (devfs-win32.c's h9_fs_rename).
+    if (builtin.os.tag == .windows) return;
     // In a writable host directory, as Redis's AOF dir is.
     var sc: Scratch = undefined;
     try sc.init();
@@ -7452,10 +7458,19 @@ test "two sendtos to one peer from a socket bound to port 0, under --net outboun
     try netCase(&le, &.{ "--net=outbound", "/mnt/term/cwd/net", "udp_twice", port }, "ok udp_twice\n");
     var buf: [16]u8 = undefined;
     const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(slow(5000)), .clock = .awake } };
-    const first = try sock.receiveTimeout(std.testing.io, &buf, timeout);
-    try std.testing.expectEqualStrings("A", first.data);
-    const second = try sock.receiveTimeout(std.testing.io, &buf, timeout);
-    try std.testing.expectEqualStrings("B", second.data);
+    // Windows' Io has no receive timeout; both datagrams are queued by
+    // the time the run ends, so a plain receive doesn't wait there.
+    const recv = struct {
+        fn f(s: *const std.Io.net.Socket, b: []u8, t: std.Io.Timeout) ![]const u8 {
+            const m = s.receiveTimeout(std.testing.io, b, t) catch |e| switch (e) {
+                error.ConcurrencyUnavailable => try s.receive(std.testing.io, b),
+                else => return e,
+            };
+            return m.data;
+        }
+    }.f;
+    try std.testing.expectEqualStrings("A", try recv(&sock, &buf, timeout));
+    try std.testing.expectEqualStrings("B", try recv(&sock, &buf, timeout));
 }
 
 test "more than 30 TCP connections at once [linux-net]" {
