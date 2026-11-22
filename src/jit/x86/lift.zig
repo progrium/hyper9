@@ -524,6 +524,8 @@ fn lifted64(i: *const dec.Inst64) bool {
         // With 67, ESI and EDI: T0's.
         .movs, .cmps, .stos, .lods, .scas => !i.addr32,
         .bsf, .bsr => true,
+        // POPCNT; 0F B8 without F3 is #UD, T0's.
+        .popcnt => i.rep == .rep,
         .mov, .movzx, .movsx, .lea, .bswap, .cbw, .cwd, .setcc, .cmovcc => true,
         // Register forms (with memory they're atomic, above).
         .xchg, .xadd, .cmpxchg => true,
@@ -1310,6 +1312,16 @@ fn LifterOf(comptime mode: Mode) type {
                         try l.setR(i.reg(), 8, try l.sel(.i64, zero, old64, try b.un(.zext, .i64, res)));
                     } else try l.setR(i.reg(), size, try l.sel(T, zero, try l.getR(i.reg(), size), res));
                     if (l.needFlags(k)) l.fl.set(try b.un(.@"eflags.logic", .flags, v));
+                },
+                .popcnt => if (!long) unreachable else {
+                    const v = try l.get(k, addr, e.src, size);
+                    try l.put(k, addr, e.dst, size, try b.un(.popcnt, T, v));
+                    // ZF for a zero source, and the other five clear.
+                    if (l.needFlags(k)) {
+                        const zero = try b.icmp(.eq, v, try b.konst(T, 0));
+                        const f = try l.sel(.i32, zero, try l.k32(xf.ZF), try l.k32(0));
+                        l.fl.set(try b.un(.@"eflags.unpack", .flags, f));
+                    }
                 },
                 .mul, .imul1 => {
                     const y = try l.get(k, addr, e.src, size);

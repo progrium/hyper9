@@ -1292,6 +1292,13 @@ pub fn ExecIn(comptime mode: Mode, comptime M: type) type {
                 // the switch from being exhaustive, so a new tag builds and
                 // is #UD here until T0 has its own prong; CPUID sits in it
                 // so the prong is never all-handled, which Zig rejects.
+                // POPCNT is F3 0F B8; without F3 it's #UD.
+                .popcnt => {
+                    if (!long or i.rep != .rep) return x.exc(cpu_mod.vec_ud);
+                    const v = try x.get(e.src, i.size);
+                    x.wr(i.reg(), i.size, @popCount(v));
+                    x.c.fl.setMasked(flags.arith, if (v == 0) flags.ZF else 0);
+                },
                 .syscall => {
                     if (!long) return x.exc(cpu_mod.vec_ud);
                     // RCX and R11 are left: the Guest gives them the
@@ -1996,11 +2003,17 @@ pub fn cpuidLeaf(leaf: u32) [4]u32 {
     };
 }
 
-/// CPUID for hx64: x86-64-v1, which is h86's leaf 1 with CMPXCHG16B
-/// (CX16), and leaf 0x80000001 with SYSCALL, NX, long mode, and
-/// LAHF/SAHF. No SSE3 or later, POPCNT, AVX, or OSXSAVE.
+/// CPUID for hx64: x86-64-v2, which is h86's leaf 1 with SSE3, SSSE3,
+/// CMPXCHG16B (CX16), SSE4.1, SSE4.2, and POPCNT, and leaf 0x80000001
+/// with SYSCALL, NX, long mode, and LAHF/SAHF. No MOVBE, PCLMULQDQ, AES,
+/// AVX, OSXSAVE, LZCNT (ABM), or BMI.
 pub fn cpuidLeaf64(leaf: u32) [4]u32 {
     const brand = "hx64 amd64 interpreter\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    const sse3: u32 = 1 << 0;
+    const ssse3: u32 = 1 << 9;
+    const sse41: u32 = 1 << 19;
+    const sse42: u32 = 1 << 20;
+    const popcnt: u32 = 1 << 23;
     const cx16: u32 = 1 << 13;
     const lahf_lm: u32 = 1 << 0;
     const syscall: u32 = 1 << 11;
@@ -2008,7 +2021,7 @@ pub fn cpuidLeaf64(leaf: u32) [4]u32 {
     const lm: u32 = 1 << 29;
     return switch (leaf) {
         0 => .{ 1, 0x756e6547, 0x6c65746e, 0x49656e69 },
-        1 => .{ 0x0000_06f1, (1 << 16) | (8 << 8), cx16, 0x078bfbff },
+        1 => .{ 0x0000_06f1, (1 << 16) | (8 << 8), sse3 | ssse3 | cx16 | sse41 | sse42 | popcnt, 0x078bfbff },
         0x8000_0000 => .{ 0x8000_0004, 0, 0, 0 },
         0x8000_0001 => .{ 0, 0, lahf_lm, syscall | nx | lm },
         0x8000_0002, 0x8000_0003, 0x8000_0004 => brandLeaf(brand, leaf),
@@ -2612,12 +2625,12 @@ test "LAHF and SAHF use AH whatever REX says, and CPUID reports long mode" {
     t.c.r[0] = 0x0100;
     _ = t.run(ti(0x9e, 0, 4, 1));
     try std.testing.expect(t.c.fl.cf() and !t.c.fl.zf());
-    // CPUID: CX16 in leaf 1, LM, SYSCALL, and LAHF in 0x80000001, and
-    // nothing past SSE2.
+    // CPUID: x86-64-v2 in leaf 1 (SSE3, SSSE3, CX16, SSE4.1, SSE4.2, and
+    // POPCNT, but no AVX or OSXSAVE), LM, SYSCALL, and LAHF in 0x80000001.
     t.c.r[0] = 0xffff_ffff_0000_0001;
     _ = t.run(ti(0x0fa2, 0, 4, 2));
-    try std.testing.expect(t.c.r[1] & (1 << 13) != 0);
-    try std.testing.expect(t.c.r[1] & 1 == 0 and t.c.r[1] & (1 << 28) == 0);
+    for ([_]u6{ 0, 9, 13, 19, 20, 23 }) |b| try std.testing.expect(t.c.r[1] & (@as(u64, 1) << b) != 0);
+    try std.testing.expect(t.c.r[1] & (1 << 27) == 0 and t.c.r[1] & (1 << 28) == 0);
     try std.testing.expect(t.c.r[2] & (1 << 26) != 0);
     t.c.r[0] = 0x8000_0001;
     _ = t.run(ti(0x0fa2, 0, 4, 2));

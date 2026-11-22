@@ -141,6 +141,9 @@ pub const Inst64 = struct {
     imm: u64 = 0,
     /// ENTER's nesting level.
     imm2: u16 = 0,
+    /// The third opcode byte of a 0F 38 or 0F 3A instruction (SSSE3,
+    /// SSE4.1, and SSE4.2), which `opcode` gives as 0x0f38 or 0x0f3a.
+    op3: u8 = 0,
 
     pub inline fn tableEntry(i: *const Inst64) *const table.Entry {
         return table.entryAt(i.entry);
@@ -389,10 +392,16 @@ fn decode64(code: []const u8) Error!Inst64 {
         rex = .{};
     };
     var opcode: u16 = b0;
+    var op3: u8 = 0;
     if (b0 == 0x0f) {
         if (p >= n) return short;
         opcode = 0x0f00 | @as(u16, code[p]);
         p += 1;
+        if (opcode == 0x0f38 or opcode == 0x0f3a) {
+            if (p >= n) return short;
+            op3 = code[p];
+            p += 1;
+        }
     }
     const s = table.slotIn(.long, opcode);
     var modrm: u8 = 0;
@@ -423,6 +432,7 @@ fn decode64(code: []const u8) Error!Inst64 {
         .seg = seg,
         .rex = rex,
         .modrm = modrm,
+        .op3 = op3,
     };
     const R = struct {
         code: []const u8,
@@ -527,7 +537,7 @@ const RW = enum { none, r, w, rw };
 /// How an operation treats its destination operand.
 fn dstAccess(op: Op) RW {
     return switch (op) {
-        .mov, .movzx, .movsx, .lea, .setcc, .pop, .lseg, .mov_from_sreg, .mov_sreg => .w,
+        .mov, .movzx, .movsx, .lea, .setcc, .pop, .lseg, .mov_from_sreg, .mov_sreg, .popcnt => .w,
         .cmp, .@"test", .bt, .bound => .r,
         .mul, .imul1, .div, .idiv, .push, .jmp_ind, .call_ind => .none,
         // CMOVcc writes its destination only when the condition holds.
@@ -688,6 +698,7 @@ pub fn effectsIn(comptime mode: Mode, i: *const InstOf(mode)) EffectsOf(mode) {
             x.flags_undefined = A & ~flags.ZF;
         },
         .cmpxchg8b => x.flags_written = flags.ZF,
+        .popcnt => x.flags_written = A,
         .jcc, .setcc, .cmovcc => x.flags_read = flags.condReads(i.cc()),
         .loope, .loopne => x.flags_read = flags.ZF,
         .lahf => x.flags_read = A & ~flags.OF,
@@ -779,6 +790,7 @@ fn sseEffects(i: anytype, x: anytype) void {
     const rm_gpr = if (i.mem) 0 else regBit(mode, i.rm());
     const reg_gpr = regBit(mode, i.reg());
     const op: u8 = @truncate(i.opcode);
+    if (mode == .long and (op == 0x38 or op == 0x3a)) return sse4Effects(i, x, p == .f2, rm_gpr, reg_gpr);
     switch (op) {
         // CVTSI2SS and CVTSI2SD.
         0x2a => if (p == .f3 or p == .f2) {
@@ -817,6 +829,42 @@ fn sseEffects(i: anytype, x: anytype) void {
         0xae => @as(u3, @truncate(i.modrm >> 3)) == 0 or @as(u3, @truncate(i.modrm >> 3)) == 3,
         else => false,
     };
+    if (store) x.mem_write = true else x.mem_read = true;
+}
+
+/// x86-64-v2's 0F 38 and 0F 3A forms (sse4.zig): CRC32, the PEXTRs and
+/// PINSRs, PTEST, and the string compares, which read and write general
+/// registers or flags, and their memory operands.
+fn sse4Effects(i: *const Inst64, x: anytype, f2: bool, rm_gpr: u16, reg_gpr: u16) void {
+    const A = flags.arith;
+    var store = false;
+    if (i.opcode == 0x0f38) switch (i.op3) {
+        // CRC32 (F2), or MOVBE, which is #UD.
+        0xf0, 0xf1 => if (f2) {
+            x.regs_read |= rm_gpr | reg_gpr;
+            x.regs_written |= reg_gpr;
+        },
+        // PTEST.
+        0x17 => x.flags_written = A,
+        else => {},
+    } else switch (i.op3) {
+        // PEXTRB, PEXTRW, PEXTRD and PEXTRQ, and EXTRACTPS.
+        0x14...0x17 => {
+            x.regs_written |= rm_gpr;
+            store = true;
+        },
+        // PINSRB, and PINSRD and PINSRQ.
+        0x20, 0x22 => x.regs_read |= rm_gpr,
+        // PCMPESTRM and PCMPESTRI read their lengths from RAX and RDX;
+        // the I forms write ECX.
+        0x60...0x63 => {
+            if (i.op3 <= 0x61) x.regs_read |= table.eax | table.edx;
+            if (i.op3 & 1 != 0) x.regs_written |= table.ecx;
+            x.flags_written = A;
+        },
+        else => {},
+    }
+    if (!i.mem) return;
     if (store) x.mem_write = true else x.mem_read = true;
 }
 
@@ -1013,6 +1061,39 @@ test "decode64: long-mode-only and removed encodings" {
     for ([_]u8{ 0x06, 0x07, 0x0e, 0x16, 0x17, 0x1e, 0x1f, 0x27, 0x2f, 0x37, 0x3f, 0x60, 0x61, 0x62, 0x82, 0x9a, 0xc4, 0xc5, 0xce, 0xd4, 0xd5, 0xd6, 0xea }) |o| {
         try t.expectEqual(Op.ud, (try d64(&.{ o, 0, 0, 0, 0, 0, 0 })).op);
     }
+    // x86-64-v2: the three-byte maps, with their third byte and imm8,
+    // and POPCNT.
+    // crc32q (%rsi), %rax (f2 48 0f 38 f1 06).
+    i = try d64(&.{ 0xf2, 0x48, 0x0f, 0x38, 0xf1, 0x06 });
+    try t.expectEqual(Op.sse, i.op);
+    try t.expectEqual(@as(u16, 0x0f38), i.opcode);
+    try t.expectEqual(@as(u8, 0xf1), i.op3);
+    try t.expectEqual(@as(u8, 6), i.len);
+    var x2 = effectsIn(.long, &i);
+    try t.expectEqual(@as(u16, 1 | 1 << 6), x2.regs_read);
+    try t.expectEqual(@as(u16, 1), x2.regs_written);
+    try t.expect(x2.mem_read and !x2.mem_write);
+    // pcmpistri $0x0c, 0x10(%rip), %xmm1 (66 0f 3a 63 0d disp32 0c).
+    i = try d64(&.{ 0x66, 0x0f, 0x3a, 0x63, 0x0d, 0x10, 0, 0, 0, 0x0c });
+    try t.expectEqual(@as(u8, 10), i.len);
+    try t.expectEqual(@as(u64, 0x0c), i.imm);
+    try t.expect(i.rip_rel);
+    x2 = effectsIn(.long, &i);
+    try t.expectEqual(@as(u16, 1 << 1), x2.regs_written);
+    try t.expectEqual(flags.arith, x2.flags_written);
+    // pextrq $1, %xmm2, %r9 (66 49 0f 3a 16 d1 01) writes R9.
+    i = try d64(&.{ 0x66, 0x49, 0x0f, 0x3a, 0x16, 0xd1, 0x01 });
+    try t.expectEqual(@as(u16, 1 << 9), effectsIn(.long, &i).regs_written);
+    // popcnt %r8, %rax (f3 49 0f b8 c0).
+    i = try d64(&.{ 0xf3, 0x49, 0x0f, 0xb8, 0xc0 });
+    try t.expectEqual(Op.popcnt, i.op);
+    x2 = effectsIn(.long, &i);
+    try t.expectEqual(@as(u16, 1 << 8), x2.regs_read);
+    try t.expectEqual(@as(u16, 1), x2.regs_written);
+    try t.expectEqual(flags.arith, x2.flags_written);
+    // A 0F 38 opcode cut short.
+    try t.expectError(error.Truncated, d64(&.{ 0x66, 0x0f, 0x38 }));
+    try t.expectEqual(Op.ud, (try d(&.{ 0x66, 0x0f, 0x38, 0x00, 0xc0 })).op);
     // The legacy decoder is untouched: 40 is inc %eax there.
     try t.expectEqual(Op.inc, (try d(&.{0x40})).op);
     try t.expectEqual(Op.daa, (try d(&.{0x27})).op);

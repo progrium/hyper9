@@ -256,3 +256,4 @@ Left:
   | x86-64 Linux VM (4 cores) | 0.60, 3.39, 3.88 s | 4.06, 6.37, 5.59 s | 79, 108 ns | 3.3× |
 
   The busybox loop demo on the Linux arm64 runner took 17.1 s on hcpu and 134 s on Unicorn, and the 386 and amd64 Alpine demos ran on the macOS runner from a build without Unicorn.
+- 2026-11-22: The first open issue's v2 half is built: hx64 runs SSE3, SSSE3, SSE4.1, SSE4.2 (with `CRC32`), and `POPCNT` on T0, with CPUID and the Linux personality's `/proc/cpuinfo` reporting them, and h86 stays at SSE2. T1 lifts `POPCNT` and runs the rest through `call.interp`. Claude Code's binary, which `SIGILL`ed at its first `POPCNT`, asked for it. `zig build x64check -- n seed v2` checks the new forms against the host CPU, which found one thing the SDM doesn't say: `DPPS` and `DPPD` sum in a different order for each lane on Intel's CPUs, which shows in which NaN each lane gets. v3 is still open.

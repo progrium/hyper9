@@ -49,6 +49,7 @@ pub const x86 = struct {
     pub const x87 = @import("interp/x86/x87.zig");
     pub const x87math = @import("interp/x86/x87math.zig");
     pub const sse = @import("interp/x86/sse.zig");
+    pub const sse4 = @import("interp/x86/sse4.zig");
     pub const tlb = @import("interp/x86/tlb.zig");
 };
 /// h86's front end: the lifter to the JIT IR.

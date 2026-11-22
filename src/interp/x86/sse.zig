@@ -30,13 +30,14 @@ const cpu = @import("cpu.zig");
 const fp = @import("../softfloat.zig");
 const x87 = @import("x87.zig");
 const flags = @import("flags.zig");
+const sse4 = @import("sse4.zig");
 
 /// T0's long-mode Exec sends `.sse` entries here: this file takes hx64's.
 pub const long_mode = true;
 
-const Pfx = enum { none, p66, f3, f2 };
+pub const Pfx = enum { none, p66, f3, f2 };
 
-fn prefix(x: anytype) Pfx {
+pub fn prefix(x: anytype) Pfx {
     return switch (x.i.rep) {
         .rep => .f3,
         .repne => .f2,
@@ -44,7 +45,7 @@ fn prefix(x: anytype) Pfx {
     };
 }
 
-fn ud(x: anytype) !void {
+pub fn ud(x: anytype) !void {
     return x.exc(cpu.vec_ud);
 }
 
@@ -52,31 +53,31 @@ const isLong = x87.isLong;
 
 /// ModRM.reg as an MMX register, or as an opcode extension: REX.R doesn't
 /// reach either.
-fn mmReg(i: anytype) u3 {
+pub fn mmReg(i: anytype) u3 {
     return @truncate(i.modrm >> 3);
 }
 
 /// ModRM.rm as an MMX register: REX.B doesn't reach it.
-fn mmRm(i: anytype) u3 {
+pub fn mmRm(i: anytype) u3 {
     return @truncate(i.modrm);
 }
 
 /// The size of a general-register operand: 8 with REX.W in long mode,
 /// else 4.
-fn gprSize(x: anytype) u8 {
+pub fn gprSize(x: anytype) u8 {
     if (comptime isLong(@TypeOf(x))) return if (x.i.rex.w == 1) 8 else 4;
     return 4;
 }
 
 /// Writes a 32-bit result to a general register, zero-extended into all 64
 /// bits in long mode, as every 32-bit destination is.
-fn putGpr32(x: anytype, n: anytype, v: u32) void {
+pub fn putGpr32(x: anytype, n: anytype, v: u32) void {
     if (comptime isLong(@TypeOf(x))) return x.writeReg(n, 8, v);
     x.writeReg(n, 4, v);
 }
 
 /// A general register or memory operand of `size` 4 or 8, zero-extended.
-fn gprOrMem(x: anytype, size: u8) !u64 {
+pub fn gprOrMem(x: anytype, size: u8) !u64 {
     const i = x.i;
     if (comptime isLong(@TypeOf(x))) {
         if (size == 8) return if (i.mem) try x.load64(x.addr) else x.readReg(i.rm(), 8);
@@ -85,7 +86,7 @@ fn gprOrMem(x: anytype, size: u8) !u64 {
 }
 
 /// Stores `v` to a general register or memory operand of `size` 4 or 8.
-fn putGprOrMem(x: anytype, size: u8, v: u64) !void {
+pub fn putGprOrMem(x: anytype, size: u8, v: u64) !void {
     const i = x.i;
     if (comptime isLong(@TypeOf(x))) {
         if (size == 8) return if (i.mem) try x.store64(x.addr, v) else x.writeReg(i.rm(), 8, v);
@@ -97,28 +98,28 @@ fn putGprOrMem(x: anytype, size: u8, v: u64) !void {
 
 // ------------------------------------------------------------ registers
 
-fn getMM(x: anytype, n: u3) u64 {
+pub fn getMM(x: anytype, n: u3) u64 {
     return x.c.fpu.st[n].signif;
 }
 
-fn setMM(x: anytype, n: u3, v: u64) void {
+pub fn setMM(x: anytype, n: u3, v: u64) void {
     x.c.fpu.st[n] = .{ .signif = v, .sign_exp = 0xffff };
 }
 
 /// The x87-to-MMX transition every MMX instruction makes.
-fn mmx(x: anytype) !void {
+pub fn mmx(x: anytype) !void {
     try x87.wait(x);
     x.c.fpu.top = 0;
     x.c.fpu.tag = 0xff;
 }
 
-fn alignCheck(x: anytype) !void {
+pub fn alignCheck(x: anytype) !void {
     if (x.addr & 15 != 0) return x.exc(cpu.vec_gp);
 }
 
 /// The r/m operand as an XMM value: a register, or `size` bytes of
 /// memory in the low bytes (16 checked for alignment when `aligned`).
-fn xsrc(x: anytype, size: u8, aligned: bool) !u128 {
+pub fn xsrc(x: anytype, size: u8, aligned: bool) !u128 {
     if (!x.i.mem) return x.c.xmm[x.i.rm()];
     if (size == 16 and aligned) try alignCheck(x);
     var buf: [16]u8 = @splat(0);
@@ -127,31 +128,31 @@ fn xsrc(x: anytype, size: u8, aligned: bool) !u128 {
 }
 
 /// The r/m operand as an MMX value.
-fn msrc(x: anytype) !u64 {
+pub fn msrc(x: anytype) !u64 {
     if (!x.i.mem) return getMM(x, mmRm(x.i));
     return x.load64(x.addr);
 }
 
-fn storeX(x: anytype, size: u8, v: u128, aligned: bool) !void {
+pub fn storeX(x: anytype, size: u8, v: u128, aligned: bool) !void {
     if (size == 16 and aligned) try alignCheck(x);
     var buf: [16]u8 = undefined;
     std.mem.writeInt(u128, &buf, v, .little);
     try x.storeBytes(x.addr, buf[0..size]);
 }
 
-fn xreg(x: anytype) *u128 {
+pub fn xreg(x: anytype) *u128 {
     return &x.c.xmm[x.i.reg()];
 }
 
-fn lo64(v: u128) u64 {
+pub fn lo64(v: u128) u64 {
     return @truncate(v);
 }
 
-fn hi64(v: u128) u64 {
+pub fn hi64(v: u128) u64 {
     return @truncate(v >> 64);
 }
 
-fn join(lo: u64, hi: u64) u128 {
+pub fn join(lo: u64, hi: u64) u128 {
     return @as(u128, hi) << 64 | lo;
 }
 
@@ -159,13 +160,13 @@ fn join(lo: u64, hi: u64) u128 {
 
 const mxcsr_reserved: u32 = 0xffff_0000;
 
-fn env(x: anytype) fp.Env {
+pub fn env(x: anytype) fp.Env {
     return fp.Env.fromMxcsr(x.c.mxcsr);
 }
 
 /// Sets the flags an operation raised in MXCSR, or raises #XM for an
 /// unmasked one, before anything is written.
-fn raise(x: anytype, e: *const fp.Env) !void {
+pub fn raise(x: anytype, e: *const fp.Env) !void {
     // DAZ's ID flag isn't x86's.
     var f: u32 = e.flags & 0x3f;
     const unmasked = f & ~(x.c.mxcsr >> 7) & 0x3f;
@@ -185,6 +186,12 @@ pub fn exec(x: anytype) !void {
     const i = x.i;
     const p = prefix(x);
     const op: u8 = @truncate(i.opcode);
+    // x86-64-v2: hx64 only.
+    if (comptime isLong(@TypeOf(x))) {
+        if (i.opcode == 0x0f38) return sse4.map38(x);
+        if (i.opcode == 0x0f3a) return sse4.map3a(x);
+        if (try sse4.sse3(x, p, op)) return;
+    }
     switch (op) {
         0x10...0x17 => return moves1x(x, op, p),
         0x28, 0x29 => {
@@ -383,7 +390,7 @@ fn rsqrt(a: u32) u32 {
 // whether the result with an unbounded exponent would have been inexact,
 // not whether the rounded, range-limited one is.
 
-fn unmaskedRange(x: anytype, raised: u8) bool {
+pub fn unmaskedRange(x: anytype, raised: u8) bool {
     const unmasked = raised & ~(x.c.mxcsr >> 7) & 0x3f;
     return unmasked & (fp.OE | fp.UE) != 0;
 }
@@ -407,7 +414,7 @@ fn fits(m: u256, p: u32) bool {
 }
 
 /// Whether the exact result of add, sub, mul, or div fits T's significand.
-fn exactUnbounded(comptime T: type, op: u8, a: T, b: T) bool {
+pub fn exactUnbounded(comptime T: type, op: u8, a: T, b: T) bool {
     const p = fp.Fmt(T).frac_bits + 1;
     const x = decompose(T, a);
     const y = decompose(T, b);
@@ -808,20 +815,20 @@ fn integer(x: anytype, p: Pfx, op: u8) !void {
     return integerOp(x, u128, op);
 }
 
-fn V(comptime W: type, comptime T: type) type {
+pub fn V(comptime W: type, comptime T: type) type {
     return @Vector(@bitSizeOf(W) / @bitSizeOf(T), T);
 }
 
-fn vec(comptime W: type, comptime T: type, v: W) V(W, T) {
+pub fn vec(comptime W: type, comptime T: type, v: W) V(W, T) {
     return @bitCast(v);
 }
 
-fn bits(comptime W: type, v: anytype) W {
+pub fn bits(comptime W: type, v: anytype) W {
     return @bitCast(v);
 }
 
 /// A lane-wise comparison's mask: all ones where true.
-fn mask(comptime W: type, comptime T: type, c: @Vector(@bitSizeOf(W) / @bitSizeOf(T), bool)) W {
+pub fn mask(comptime W: type, comptime T: type, c: @Vector(@bitSizeOf(W) / @bitSizeOf(T), bool)) W {
     const n = @bitSizeOf(W) / @bitSizeOf(T);
     const U = std.meta.Int(.unsigned, @bitSizeOf(T));
     const ones: @Vector(n, U) = @splat(std.math.maxInt(U));
@@ -1021,7 +1028,7 @@ fn shift(comptime W: type, comptime T: type, v: W, count: u64, how: Shift) W {
     };
 }
 
-fn signed(comptime W: type, comptime T: type, v: W) @Vector(@bitSizeOf(W) / @bitSizeOf(T), T) {
+pub fn signed(comptime W: type, comptime T: type, v: W) @Vector(@bitSizeOf(W) / @bitSizeOf(T), T) {
     return @bitCast(v);
 }
 
@@ -1160,7 +1167,7 @@ fn pack(comptime W: type, comptime From: type, comptime To: type, a: W, b: W) W 
     return @bitCast(r);
 }
 
-fn sat(comptime From: type, comptime To: type, v: From) To {
+pub fn sat(comptime From: type, comptime To: type, v: From) To {
     return @intCast(std.math.clamp(v, std.math.minInt(To), std.math.maxInt(To)));
 }
 

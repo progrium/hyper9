@@ -558,10 +558,60 @@ test "CPUID reports SSE2 and no AVX [hcpu]" {
             try testing.expect(ecx & (1 << 28) == 0); // AVX
             try testing.expect(ecx & (1 << 27) == 0); // OSXSAVE
             try testing.expect(ecx & (1 << 26) == 0); // XSAVE
-            try testing.expect(ecx & (1 << 0) == 0); // SSE3
+            // x86-64-v2: SSE3, SSSE3, SSE4.1, SSE4.2, and POPCNT.
+            for ([_]u5{ 0, 9, 19, 20, 23 }) |b| try testing.expect(ecx & (@as(u64, 1) << b) != 0);
             // Extended: long mode, and LAHF and SAHF in it.
             try testing.expect(m.cpu.r[2] & (1 << 29) != 0); // LM
             try testing.expect(m.cpu.r[1] & (1 << 0) != 0); // LAHF-SAHF
+        }
+    }.f);
+}
+
+/// CRC-32C of `v`'s 8 bytes, from `c`: what CRC32 accumulates.
+fn crc32c(c0: u32, v: u64) u32 {
+    var c = c0;
+    for (0..8) |k| {
+        c ^= @as(u8, @truncate(v >> @intCast(8 * k)));
+        for (0..8) |_| c = (c >> 1) ^ (0x82f6_3b78 & (0 -% (c & 1)));
+    }
+    return c;
+}
+
+test "x86-64-v2: POPCNT and its flags, CRC32, PSHUFB, and PCMPISTRI [hcpu]" {
+    const prog = [_]u8{
+        0x48, 0xb8, 0xf0, 0xf0, 0x34, 0x12, 0x00, 0x00, 0x00, 0x80, // movabsq $0x80000000_1234f0f0, %rax
+        0xf3, 0x48, 0x0f, 0xb8, 0xd8, // popcntq %rax, %rbx
+        0x31, 0xd2, // xorl %edx, %edx
+        0x66, 0xf3, 0x0f, 0xb8, 0xd2, // popcntw %dx, %dx
+        0x41, 0x0f, 0x94, 0xc0, // setz %r8b: 1
+        0xbe, 0xff, 0xff, 0xff, 0xff, // movl $-1, %esi
+        0xf2, 0x48, 0x0f, 0x38, 0xf1, 0xf0, // crc32q %rax, %rsi
+        0x66, 0x48, 0x0f, 0x6e, 0xc8, // movq %rax, %xmm1
+        0x66, 0x0f, 0xef, 0xd2, // pxor %xmm2, %xmm2
+        0x66, 0x0f, 0x38, 0x00, 0xca, // pshufb %xmm2, %xmm1: byte 0 everywhere
+        0x66, 0x48, 0x0f, 0x7e, 0xcf, // movq %xmm1, %rdi
+        // pcmpistri $0x0c, %xmm3, %xmm2: "lo" (xmm2) in "hello" (xmm3),
+        // equal ordered, which writes ECX (1 << 32 shows it zero-extends).
+        0x48, 0xb8, 'l', 'o', 0, 0, 0, 0, 0, 0, // movabsq $"lo", %rax
+        0x66, 0x48, 0x0f, 0x6e, 0xd0, // movq %rax, %xmm2
+        0x48, 0xb8, 'h', 'e', 'l', 'l', 'o', 0, 0, 0, // movabsq $"hello", %rax
+        0x66, 0x48, 0x0f, 0x6e, 0xd8, // movq %rax, %xmm3
+        0x48, 0xb9, 0, 0, 0, 0, 1, 0, 0, 0, // movabsq $1 << 32, %rcx
+        0x66, 0x0f, 0x3a, 0x63, 0xd3, 0x0c, // pcmpistri $0x0c, %xmm3, %xmm2
+        0x41, 0x0f, 0x92, 0xc1, // setc %r9b: a match
+        0x49, 0x89, 0xca, // movq %rcx, %r10
+    } ++ syscall;
+    try onEachTier(&prog, @splat(0), struct {
+        fn f(_: Tier, m: *Machine, e: Exit) !void {
+            try expectSyscall(e);
+            const r = &m.cpu.r;
+            try testing.expectEqual(@as(u64, 14), r[3]);
+            try testing.expectEqual(@as(u64, 0), r[2]);
+            try testing.expectEqual(@as(u64, 1), r[8] & 0xff);
+            try testing.expectEqual(@as(u64, crc32c(0xffff_ffff, 0x8000_0000_1234_f0f0)), r[6]);
+            try testing.expectEqual(@as(u64, 0xf0f0_f0f0_f0f0_f0f0), r[7]);
+            try testing.expectEqual(@as(u64, 1), r[9] & 0xff);
+            try testing.expectEqual(@as(u64, 3), r[10]);
         }
     }.f);
 }

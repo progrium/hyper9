@@ -71,16 +71,19 @@ const Extra = struct {
         _r2: [96]u8 = @splat(0),
     } = .{},
     tls: u64 = 0,
+    tls_more: [2]u64 = @splat(0),
+    tls_used: u8 = 0,
     gs: u64 = 0,
 };
 
-const Mode = enum { int, x87, sse };
+const Mode = enum { int, x87, sse, v2 };
 
 fn allowed(op: table.Op, mode: Mode) bool {
     switch (mode) {
         .int => {},
         .x87 => return op == .x87 or op == .fwait,
         .sse => return op == .sse,
+        .v2 => return false,
     }
     return switch (op) {
         .add, .@"or", .adc, .sbb, .@"and", .sub, .xor, .cmp, .@"test" => true,
@@ -180,6 +183,7 @@ fn edge(r: std.Random) u32 {
 fn gen(n: u32, seed: u64, out: *c.FILE, mode: Mode) !void {
     var prng: std.Random.DefaultPrng = .init(seed);
     const r = prng.random();
+    if (mode == .v2) die("v2 is long mode only: gen64");
     const rs = rows(mode);
     var made: u32 = 0;
     while (made < n) {
@@ -762,9 +766,40 @@ fn removed64(opcode: u16) bool {
     };
 }
 
+/// x86-64-v2's forms (`v2`): SSE3's in the 0F map, POPCNT, and the 0F 38
+/// and 0F 3A maps' SSSE3, SSE4.1, and SSE4.2, each with its mandatory
+/// prefix (none, 66, F3, or F2; `any` for SSSE3's MMX and XMM forms) and
+/// third opcode byte. Only these: the host has more in the same maps
+/// (MOVBE, AES, SHA, ADX, PCLMULQDQ), which hx64 doesn't report and
+/// raises #UD for.
+const V2 = struct { opcode: u16, op3: u8 = 0, pfx: u8, mod: table.Mod = .any };
+const any_pfx: u8 = 1;
+const v2_forms = blk: {
+    var f: []const V2 = &.{
+        .{ .opcode = 0x0f12, .pfx = 0xf3 },              .{ .opcode = 0x0f16, .pfx = 0xf3 },              .{ .opcode = 0x0f12, .pfx = 0xf2 },
+        .{ .opcode = 0x0fd0, .pfx = 0x66 },              .{ .opcode = 0x0fd0, .pfx = 0xf2 },              .{ .opcode = 0x0f7c, .pfx = 0x66 },
+        .{ .opcode = 0x0f7c, .pfx = 0xf2 },              .{ .opcode = 0x0f7d, .pfx = 0x66 },              .{ .opcode = 0x0f7d, .pfx = 0xf2 },
+        .{ .opcode = 0x0ff0, .pfx = 0xf2, .mod = .mem }, .{ .opcode = 0x0fb8, .pfx = 0xf3 },              .{ .opcode = 0x0f38, .op3 = 0x2a, .pfx = 0x66, .mod = .mem },
+        .{ .opcode = 0x0f38, .op3 = 0xf0, .pfx = 0xf2 }, .{ .opcode = 0x0f38, .op3 = 0xf1, .pfx = 0xf2 }, .{ .opcode = 0x0f3a, .op3 = 0x0f, .pfx = any_pfx },
+    };
+    for ([_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x1c, 0x1d, 0x1e }) |o| f = f ++ [_]V2{.{ .opcode = 0x0f38, .op3 = o, .pfx = any_pfx }};
+    for ([_]u8{ 0x10, 0x14, 0x15, 0x17, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2b, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41 }) |o| f = f ++ [_]V2{.{ .opcode = 0x0f38, .op3 = o, .pfx = 0x66 }};
+    for ([_]u8{ 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x14, 0x15, 0x16, 0x17, 0x20, 0x21, 0x22, 0x40, 0x41, 0x42, 0x60, 0x61, 0x62, 0x63 }) |o| f = f ++ [_]V2{.{ .opcode = 0x0f3a, .op3 = o, .pfx = 0x66 }};
+    break :blk f[0..f.len].*;
+};
+const v2_rows = blk: {
+    var rs: [v2_forms.len]table.Row = undefined;
+    for (v2_forms, 0..) |f, k| {
+        const op: table.Op = if (f.opcode == 0x0fb8) .popcnt else .sse;
+        rs[k] = .{ .opcode = f.opcode, .mod = f.mod, .e = .{ .op = op, .modrm = true, .dst = .G, .src = .E, .imm = if (f.opcode == 0x0f3a) .b else .none } };
+    }
+    break :blk rs;
+};
+
 /// The rows long mode draws from: the 386's, but INC and DEC's 40-4F
 /// (REX there) and far pointers.
 fn rows64(mode: Mode) []const table.Row {
+    if (mode == .v2) return &v2_rows;
     const S = struct {
         var buf: [table.table.len]table.Row = undefined;
         var n: [3]usize = .{ 0, 0, 0 };
@@ -860,6 +895,16 @@ fn gen64(n: u32, seed: u64, out: *c.FILE, mode: Mode) void {
                 else => 0xf2,
             };
             o16 = mandatory == 0x66;
+        } else if (mode == .v2) {
+            const f = v2_forms[row_ix];
+            mandatory = if (f.pfx == any_pfx) (if (r.boolean()) 0x66 else 0) else f.pfx;
+            o16 = mandatory == 0x66;
+            // POPCNT and CRC32 take 66 for a 16-bit operand.
+            if ((f.opcode == 0x0fb8 or f.op3 == 0xf1) and r.uintLessThan(u8, 4) == 0) {
+                pfx[np] = 0x66;
+                np += 1;
+                o16 = true;
+            }
         } else if (r.uintLessThan(u8, if (mode == .x87) 8 else 4) == 0 and e.op != .bswap) {
             pfx[np] = 0x66;
             np += 1;
@@ -896,6 +941,7 @@ fn gen64(n: u32, seed: u64, out: *c.FILE, mode: Mode) void {
         var w = switch (mode) {
             .int => r.boolean(),
             .sse => r.uintLessThan(u8, 4) == 0,
+            .v2 => r.uintLessThan(u8, 3) == 0,
             .x87 => r.uintLessThan(u8, 8) == 0,
         };
         if (row_ix == 0xffff) w = r.uintLessThan(u8, 8) != 0;
@@ -923,6 +969,10 @@ fn gen64(n: u32, seed: u64, out: *c.FILE, mode: Mode) void {
         body[nb] = @truncate(row.opcode);
         // B8+r, 50+r, ...: the register is in the opcode, extended by B.
         nb += 1;
+        if (mode == .v2 and (row.opcode == 0x0f38 or row.opcode == 0x0f3a)) {
+            body[nb] = v2_forms[row_ix].op3;
+            nb += 1;
+        }
         var mem = false;
         var rip_rel = false;
         var base: ?u4 = null;
@@ -1036,7 +1086,7 @@ fn gen64(n: u32, seed: u64, out: *c.FILE, mode: Mode) void {
         var target: ?u64 = null;
         if (mem and e.op != .lea) {
             var t = win_va + 0x80 + r.uintLessThan(u32, win_len - 0x100);
-            if (mode == .sse and r.uintLessThan(u8, 4) != 0) t &= ~@as(u32, 15);
+            if ((mode == .sse or mode == .v2) and r.uintLessThan(u8, 4) != 0) t &= ~@as(u32, 15);
             if (e.op == .cmpxchg8b and w and r.uintLessThan(u8, 4) != 0) t &= ~@as(u32, 15);
             if (mode != .int and t > win_va + win_len - 0x200 and r.boolean()) t -= 0x180;
             target = t;
