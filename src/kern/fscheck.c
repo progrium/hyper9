@@ -770,11 +770,20 @@ h9_fs_readlinkw(wchar_t *path, char *buf, int nbuf)
 {
 	wchar_t target[MAX_PATH*4];
 	int relative;
+	char *p;
 
 	if(reparsetarget(path, target, nelem(target), &relative, 1) < 0)
 		return -1;
 	if(WideCharToMultiByte(CP_UTF8, 0, target, -1, buf, nbuf, nil, nil) == 0)
 		return -1;
+	/*
+	 * A Linux link unpacked on Windows (tar, WSL) keeps its target with
+	 * backslashes, "\bin\busybox" for "/bin/busybox": the Linux view
+	 * (readlink, and the kernel's walk that follows it) wants slashes.
+	 */
+	for(p = buf; *p != 0; p++)
+		if(*p == '\\')
+			*p = '/';
 	return strlen(buf);
 }
 
