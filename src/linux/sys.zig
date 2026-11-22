@@ -2940,6 +2940,12 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
         const old_dir = isLdir(olddir, old);
         if (new_dir and !old_dir) return -E.ISDIR;
         if (!new_dir and old_dir) return -E.NOTDIR;
+        // In a host tree or an overlay, the host's or the overlay's own
+        // rename replaces the target at once, as Linux's does. Removing it
+        // and renaming over the gap raced: two renames onto one name (two
+        // Zig compiles writing one cache file) failed with EEXIST or
+        // ENOENT, or ENOTEMPTY on macOS.
+        if (at(olddir, old, bool, kern.renameAcross, .{ old, new }) catch false) return 0;
         at(newdir, new, void, kern.remove, .{new}) catch return kerr();
     }
     var b: [600]u8 = undefined;
