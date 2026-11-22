@@ -418,7 +418,7 @@ pub const Runners = struct {
     /// Kicks every vCPU running `as` and waits until each has left its
     /// run; the next one flushes its TLB first. Slots go 64 at a time, so
     /// the wait list stays small on the stack.
-    fn shootdown(rs: *Runners, as: *const anyopaque) void {
+    fn shootdown(rs: *Runners, io: std.Io, as: *const anyopaque) void {
         for (0..words) |wi| {
             if (rs.taken[wi].load(.seq_cst) == 0) continue;
             var wait: [64]struct { i: Index, runs: u64 } = undefined;
@@ -434,7 +434,19 @@ pub const Runners = struct {
             }
             for (wait[0..n]) |w| {
                 const sl = &rs.slots[w.i];
-                while (sl.as.load(.seq_cst) == as and sl.runs.load(.seq_cst) == w.runs) std.atomic.spinLoopHint();
+                // Spin a little, then sleep: the vCPU's thread needs a host
+                // CPU to take the kick and leave, and with more runnable
+                // threads than CPUs, spinning kept it off one. An mprotect
+                // loop racing two threads (the [linux-threads] remap_race
+                // case) took 28 s on two host CPUs, against 1.4 s on three;
+                // with the sleep it takes 8 s on two, and 1.4 s on eight.
+                var spins: u32 = 0;
+                while (sl.as.load(.seq_cst) == as and sl.runs.load(.seq_cst) == w.runs) {
+                    if (spins < 5000) {
+                        spins += 1;
+                        std.atomic.spinLoopHint();
+                    } else io.sleep(.fromMicroseconds(10), .awake) catch {};
+                }
             }
         }
     }
@@ -542,7 +554,7 @@ pub fn AddressSpace(comptime pt: type) type {
         /// Returns once no vCPU other than the caller's can still reach
         /// what `unmap` removed: see `Runners`.
         pub fn shootdown(as: *Self) void {
-            as.ram.runners.shootdown(as);
+            as.ram.runners.shootdown(as.ram.io, as);
         }
 
         /// Host view of [va, va+len) if it lies within one mapping.
@@ -596,7 +608,7 @@ test "Runners has a slot for every vCPU KVM allows, past the first 64" {
     var as: u8 = 0;
     rs.enter(130, &as);
     rs.leave(130);
-    rs.shootdown(&as);
+    rs.shootdown(std.testing.io, &as);
 }
 
 test "Ram: a big free goes back to the host and reads as zero; a small one is zeroed on reuse" {
