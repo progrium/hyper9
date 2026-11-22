@@ -208,6 +208,22 @@ pub const Backend = struct {
 
 pub const AddressSpace = gphys.AddressSpace(pt);
 
+/// The guest's time in WHvRunVirtualProcessor, which Windows doesn't
+/// count in the thread's times, for getrusage and wait4 (cputime.zig).
+const cputime = @import("../linux/cputime.zig");
+
+extern "kernel32" fn QueryPerformanceCounter(count: *i64) callconv(.winapi) c_int;
+extern "kernel32" fn QueryPerformanceFrequency(freq: *i64) callconv(.winapi) c_int;
+
+fn perfNs() u64 {
+    var c: i64 = 0;
+    var f: i64 = 0;
+    if (QueryPerformanceCounter(&c) == 0) return 0;
+    if (QueryPerformanceFrequency(&f) == 0 or f <= 0) return 0;
+    const cu: u128 = @intCast(@max(c, 0));
+    return @intCast(cu * std.time.ns_per_s / @as(u128, @intCast(f)));
+}
+
 /// WHV_X64_SEGMENT_REGISTER's attributes: the descriptor's access byte
 /// and flags nibble, as VMX lays them out.
 fn segment(x: x86.Segment) abi.RegisterValue {
@@ -486,7 +502,10 @@ pub const Vcpu = struct {
         if (s.kicked.swap(false, .seq_cst)) return .interrupted;
         while (true) {
             var exit: abi.RunVpExitContext = undefined;
-            try check(b.api.WHvRunVirtualProcessor(b.partition, s.slot, &exit, @sizeOf(abi.RunVpExitContext)));
+            const t0 = perfNs();
+            const hr = b.api.WHvRunVirtualProcessor(b.partition, s.slot, &exit, @sizeOf(abi.RunVpExitContext));
+            cputime.guest_ns +%= perfNs() -% t0;
+            try check(hr);
             switch (exit.exit_reason) {
                 .x64_io_port_access => {
                     const io = &exit.u.io_port_access;

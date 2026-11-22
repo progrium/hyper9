@@ -8,6 +8,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Time this thread's vCPU has spent running guest code where the host
+/// doesn't count it as the thread's own: WHP runs the guest in the
+/// hypervisor, outside the thread's user and kernel times. The WHP backend
+/// adds to it around each run; it counts as user time here.
+pub threadlocal var guest_ns: u64 = 0;
+
 pub const Times = struct {
     user_ns: u64 = 0,
     sys_ns: u64 = 0,
@@ -46,7 +52,7 @@ pub fn thread() Times {
             var user: u64 = 0;
             if (win.GetThreadTimes(win.GetCurrentThread(), &create, &exit, &kernel, &user) == 0) return .{};
             // 100 ns units.
-            return .{ .user_ns = user * 100, .sys_ns = kernel * 100 };
+            return .{ .user_ns = user * 100 +| guest_ns, .sys_ns = kernel * 100 };
         },
         else => return .{},
     }
