@@ -133,7 +133,7 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
             .interrupted => return .interrupted,
             .t0, .cold => {
                 // Read once: a kick on another thread can drop it below 0 at any time.
-                const left = @atomicLoad(i64, &ctx.budget, .monotonic);
+                const left = if (builtin.cpu.arch == .wasm32) ctx.budget else @atomicLoad(i64, &ctx.budget, .monotonic);
                 if (left <= 0) return .interrupted;
                 const t0_before = c.t0.retired;
                 const budget: u64 = if (r == .t0) 1 else @intCast(left);
