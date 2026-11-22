@@ -156,6 +156,8 @@ pub const Op = enum(u8) {
     sse,
     /// SYSCALL, in long mode only: a system-call exit.
     syscall,
+    /// POPCNT (F3 0F B8), in long mode only: x86-64-v2.
+    popcnt,
 };
 
 /// Where an operand comes from.
@@ -686,12 +688,28 @@ fn mark64(comptime rows: []const Row) [rows.len]Row {
 
 /// Encodings that exist only in long mode, where they're #UD in legacy
 /// mode: MOVSXD in place of ARPL (which the legacy table doesn't list, as
-/// it's #UD outside the kernel's protected mode), and SYSCALL.
+/// it's #UD outside the kernel's protected mode), SYSCALL, and what
+/// x86-64-v2 adds to h86's instructions, which hx64 has and h86 doesn't.
+///
+/// x86-64-v2's three-byte opcodes (0F 38 xx and 0F 3A xx: SSSE3,
+/// SSE4.1, and SSE4.2, with CRC32) are one row each, which the decoder
+/// reads the third byte after (`Inst64.op3`), and sse.zig sends to
+/// sse4.zig. Every one of them takes a ModRM byte, and every 0F 3A one an
+/// imm8. POPCNT is F3 0F B8; without F3, 0F B8 is #UD. 0F 7C and 7D are
+/// SSE3's horizontal adds and subtracts.
 pub const long_only: []const Row = &.{
     r(0x63, .{ .op = .movsx, .modrm = true, .dst = .G, .src = .E, .src_size = .d, .rexw = true }),
     // The kernel reads its arguments and writes RAX; SYSCALL itself
     // writes RCX and R11 (decode.effectsIn says so).
     r(0x0f05, .{ .op = .syscall, .ir = 0xff, .iw = eax | ecx, .end = true }),
+    // SSE3's HADDPS and PD, and HSUBPS and PD (66 and F2 0F 7C and 7D).
+    // Its other forms are in rows the legacy table has, which sse.zig
+    // takes only in long mode.
+    r(0x0f7c, .{ .op = .sse, .modrm = true }),
+    r(0x0f7d, .{ .op = .sse, .modrm = true }),
+    r(0x0f38, .{ .op = .sse, .modrm = true }),
+    r(0x0f3a, .{ .op = .sse, .modrm = true, .imm = .b }),
+    r(0x0fb8, .{ .op = .popcnt, .modrm = true, .dst = .G, .src = .E }),
 };
 
 fn lsegs(opcode: u16, sreg: u3) [8]Row {
@@ -854,6 +872,11 @@ test "long mode's lookup" {
     try t.expect(entryIndex(movsxd) < entry_count);
     try t.expectEqual(Op.ud, entry(slot(0x0f05), 0).op);
     try t.expectEqual(Op.syscall, entry(slotIn(.long, 0x0f05), 0).op);
+    // x86-64-v2's three-byte maps and POPCNT only in long mode.
+    for ([_]u16{ 0x0f38, 0x0f3a, 0x0fb8 }) |o| try t.expectEqual(Op.ud, entry(slot(o), 0xc0).op);
+    try t.expectEqual(Op.sse, entry(slotIn(.long, 0x0f38), 0xc0).op);
+    try t.expectEqual(Imm.b, entry(slotIn(.long, 0x0f3a), 0xc0).imm);
+    try t.expectEqual(Op.popcnt, entry(slotIn(.long, 0x0fb8), 0xc0).op);
     // d64 and rexw marks.
     try t.expect(entry(slotIn(.long, 0x55), 0).d64);
     try t.expect(entry(slotIn(.long, 0xff), 0x30).d64); // push r/m

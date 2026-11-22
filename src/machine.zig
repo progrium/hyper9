@@ -2877,6 +2877,10 @@ pub const Machine = struct {
             for (0..ncpu) |i| {
                 if (arm) {
                     w.print("processor\t: {d}\nBogoMIPS\t: 48.00\nFeatures\t: fp asimd cpuid\nCPU implementer\t: 0x00\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0x000\nCPU revision\t: 0\n\n", .{i}) catch {};
+                } else if (j.m.arch == .amd64) {
+                    // x86-64-v2, which hx64 has, and every host the other
+                    // backends run amd64 on.
+                    w.print("processor\t: {d}\nvendor_id\t: h9\ncpu family\t: 6\nmodel\t\t: 0\nmodel name\t: h9 virtual CPU\ncpu cores\t: {d}\nflags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2 pni ssse3 cx16 sse4_1 sse4_2 popcnt\n\n", .{ i, ncpu }) catch {};
                 } else {
                     w.print("processor\t: {d}\nvendor_id\t: h9\ncpu family\t: 6\nmodel\t\t: 0\nmodel name\t: h9 virtual CPU\ncpu cores\t: {d}\nflags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2\n\n", .{ i, ncpu }) catch {};
                 }

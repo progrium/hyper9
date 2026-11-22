@@ -1062,6 +1062,30 @@ fn lower(e: *E, r: *const ir.Region, idx: usize) EmitError!void {
             try e.rr(true, &.{ 0x0f, 0xbc }, RAX, RAX); // bsf rax, rax
             try e.rr(true, &.{ 0x0f, 0x44 }, RAX, RCX); // cmovz rax, rcx
         },
+        .popcnt => {
+            // The bit-slicing count, as the host may not have POPCNT (h9
+            // runs on x86-64-v1).
+            try maskTo(e, ty);
+            try e.mov(RCX, RAX);
+            try e.shiftImm(true, 5, RCX, 1); // shr rcx, 1
+            try e.movImm(RDX, 0x5555_5555_5555_5555);
+            try e.rr(true, &.{0x21}, RDX, RCX); // and rcx, rdx
+            try e.rr(true, &.{0x29}, RCX, RAX); // sub rax, rcx
+            try e.movImm(RDX, 0x3333_3333_3333_3333);
+            try e.mov(RCX, RAX);
+            try e.shiftImm(true, 5, RCX, 2); // shr rcx, 2
+            try e.rr(true, &.{0x21}, RDX, RCX); // and rcx, rdx
+            try e.rr(true, &.{0x21}, RDX, RAX); // and rax, rdx
+            try e.rr(true, &.{0x01}, RCX, RAX); // add rax, rcx
+            try e.mov(RCX, RAX);
+            try e.shiftImm(true, 5, RCX, 4); // shr rcx, 4
+            try e.rr(true, &.{0x01}, RCX, RAX); // add rax, rcx
+            try e.movImm(RDX, 0x0f0f_0f0f_0f0f_0f0f);
+            try e.rr(true, &.{0x21}, RDX, RAX); // and rax, rdx
+            try e.movImm(RDX, 0x0101_0101_0101_0101);
+            try e.rr(true, &.{ 0x0f, 0xaf }, RAX, RDX); // imul rax, rdx
+            try e.shiftImm(true, 5, RAX, 56); // shr rax, 56
+        },
         .bswap => if (native(ty)) {
             try e.rex(w, 0, 0, RAX);
             try e.bs(&.{ 0x0f, 0xc8 });

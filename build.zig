@@ -1818,11 +1818,11 @@ fn hostHasHvf(b: *std.Build) bool {
     return ok and std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \t\r\n"), "1");
 }
 
-/// zig build x64check [-- n [seed [int|x87|sse]]]: hx64's T0 against the
+/// zig build x64check [-- n [seed [int|x87|sse|v2]]]: hx64's T0 against the
 /// host CPU in long mode (tools/x86check): n random instructions (default
 /// 100000) run natively by oracle64.c and on T0. x86-64 Linux hosts only.
 fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
-    const step = b.step("x64check", "Check hx64's T0 against the host CPU in long mode (-- [n [seed [int|x87|sse]]]; x86-64 Linux)");
+    const step = b.step("x64check", "Check hx64's T0 against the host CPU in long mode (-- [n [seed [int|x87|sse|v2]]]; x86-64 Linux)");
     const host = b.graph.host.result;
     if (host.cpu.arch != .x86_64 or host.os.tag != .linux) {
         step.dependOn(&b.addFail("x64check: needs an x86-64 Linux host, where the CPU is the oracle").step);
