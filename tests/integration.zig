@@ -6502,6 +6502,21 @@ test "a Linux program killed by a signal exits 128+N, and a handler can catch a 
     try std.testing.expectEqual(4, caught.code);
 }
 
+test "an instruction an x86 CPU doesn't have is SIGILL for a Linux program, not SIGSEGV [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    if (std.mem.eql(u8, le.arch, "arm64")) return error.SkipZigTest;
+    const ill = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "ill" });
+    defer ill.deinit();
+    errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ ill.out, ill.err });
+    try std.testing.expectEqual(132, ill.code);
+    const caught = try runLinux(&le, false, &.{ "/mnt/term/cwd/die", "illhandled" });
+    defer caught.deinit();
+    // ILL_ILLOPN, as Linux's do_error_trap gives #UD.
+    try std.testing.expectEqualStrings("caught SIGILL code 2\n", caught.out);
+    try std.testing.expectEqual(5, caught.code);
+}
+
 test "rt_sigreturn can't raise a Linux program's privilege [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

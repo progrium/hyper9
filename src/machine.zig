@@ -1749,6 +1749,28 @@ pub const Machine = struct {
                             }
                         } else |_| {}
                     }
+                    // A CPU exception on x86 that isn't a page fault (an
+                    // instruction the CPU doesn't have, a divide by zero)
+                    // is its own signal, as on Linux, not a fault to
+                    // retry: every x86 backend reports it at the PC with
+                    // the vector in Ureg.type and the syndrome.
+                    const vector: ?u64 = switch (u) {
+                        .amd64 => |r| r.type,
+                        .i386 => |r| r.trap,
+                        .arm64 => null,
+                    };
+                    if (vector) |v| if (f.access == .exec and f.addr == u.pc() and f.syndrome == v) {
+                        if (lsig.x86Exception(v)) |e| {
+                            if (m.opts.trace) |w| dumpFault(w, &p.job.trace_lock, &u, f, "");
+                            const a = l.sig.actions[e.signo];
+                            if (a.handler == lsig.SIG_DFL or a.handler == lsig.SIG_IGN or l.sig.mask & lsig.bit(e.signo) != 0) {
+                                return .{ .killed = lsig.deathNote(e.signo, &p.msg_buf) };
+                            }
+                            _ = l.sig.post(e.signo, .{ .code = e.code, .addr = f.addr });
+                            last_fault = .{};
+                            continue;
+                        }
+                    };
                     // The same fault again at once, with no remap of the
                     // address space in between, means the retry didn't
                     // help: it's real. A remap between them (another

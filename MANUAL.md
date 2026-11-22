@@ -2161,6 +2161,10 @@ Silicon Mac, runs only on the emulator, and much more slowly.
   it hasn't touched yet.
 - Touching a page of a file mapping that's wholly past the end of its file,
   such as one truncated while it's mapped, is `SIGBUS`, as on Linux.
+- The emulator's amd64 CPU is x86-64-v1, with no SSE3 or later, `POPCNT`,
+  or AVX, so a program built for a newer CPU stops with `SIGILL` (exit 132)
+  at the first instruction it lacks, as it would on such a CPU. Claude
+  Code's binary is one; run it on KVM or the native backend.
 - CPU times in `/proc/stat` and `/proc/n/stat` read 0, so `top` and `htop`
   show 0%.
 - `symlink` works in overlays (the root and `/tmp`) and host trees on macOS
