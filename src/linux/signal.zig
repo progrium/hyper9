@@ -57,6 +57,9 @@ pub const SEGV_ACCERR: i32 = 2;
 /// SIGBUS's si_code for an address with no object behind it (a file
 /// mapping's page past the file's end).
 pub const BUS_ADRERR: i32 = 2;
+pub const BUS_ADRALN: i32 = 1;
+pub const ILL_ILLOPN: i32 = 2;
+pub const FPE_INTDIV: i32 = 1;
 pub const CLD_EXITED: i32 = 1;
 pub const CLD_KILLED: i32 = 2;
 pub const CLD_STOPPED: i32 = 5;
@@ -198,6 +201,25 @@ pub fn noteSignal(msg: []const u8) ?NoteSignal {
     if (starts(u8, msg, "sys: trap: misaligned") or starts(u8, msg, "sys: trap: alignment")) return .{ .signo = SIGBUS, .info = .{ .code = 1 } };
     if (starts(u8, msg, "sys: trap:")) return .{ .signo = SIGSEGV, .info = .{ .code = SI_KERNEL } };
     return null;
+}
+
+/// The signal Linux sends for an x86 CPU exception other than a page
+/// fault (arch/x86/kernel/traps.c), by vector: an instruction the CPU
+/// doesn't have (#UD) is SIGILL, a divide error SIGFPE, and so on. The
+/// backends report these as an exec fault at the PC with the vector in
+/// Ureg.type; without this, the fault path took #UD for a page fault and
+/// sent SIGSEGV, so a program that probes for an instruction with a SIGILL
+/// handler, or a binary built for a newer CPU than the emulator's, read as
+/// a crash with nothing to say why.
+pub fn x86Exception(vector: u64) ?struct { signo: u32, code: i32 } {
+    return switch (vector) {
+        0 => .{ .signo = SIGFPE, .code = FPE_INTDIV }, // #DE
+        6 => .{ .signo = SIGILL, .code = ILL_ILLOPN }, // #UD
+        16, 19 => .{ .signo = SIGFPE, .code = SI_KERNEL }, // #MF, #XM
+        17 => .{ .signo = SIGBUS, .code = BUS_ADRALN }, // #AC
+        14 => null, // #PF goes through the address space
+        else => if (vector < 32) .{ .signo = SIGSEGV, .code = SI_KERNEL } else null,
+    };
 }
 
 /// The note a signal is posted as: the known notes for the signals that
@@ -593,6 +615,15 @@ pub fn restore(p: anytype, s: *State, u: *vmm.Ureg, x: *vmm.Extra) FrameError!vo
     }
     s.mask = mask & ~unblockable;
     s.on_altstack = onStack(s, u.stackPointer());
+}
+
+test "x86 exceptions map to Linux's signals" {
+    try std.testing.expectEqual(SIGILL, x86Exception(6).?.signo);
+    try std.testing.expectEqual(SIGFPE, x86Exception(0).?.signo);
+    try std.testing.expectEqual(SIGSEGV, x86Exception(13).?.signo);
+    try std.testing.expectEqual(SIGBUS, x86Exception(17).?.signo);
+    try std.testing.expect(x86Exception(14) == null);
+    try std.testing.expect(x86Exception(64) == null);
 }
 
 test "note signals" {
