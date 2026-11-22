@@ -12,7 +12,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [credential-helpers](credential-helpers.md) | [#119](../../../issues/119) | implemented |  | Credential helpers for WebSocket 9P |
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
-| [overlay-export](overlay-export.md) |  | draft |  | Exporting a run's overlay changes |
+| [overlay-export](overlay-export.md) |  | superseded |  | Exporting a run's overlay changes |
 | [login-shell](login-shell.md) | [#89](../../../issues/89) | proposed | needs host-cmd | h9 as a login shell |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed | in progress on cow-fork; in progress on claude/project-thread-ipnqzx | Copy-on-write fork and demand-loaded file pages for Linux processes |
@@ -35,6 +35,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [retire-unicorn](retire-unicorn.md) |  | draft |  | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 | [fd-mounts](fd-mounts.md) |  | draft | needs mounts | Mounting a 9P connection from a host descriptor |
+| [upper-layers](upper-layers.md) |  | draft | needs mounts, linux-symlinks | Writable layers on the host |
 
 ```mermaid
 flowchart LR
@@ -48,7 +49,7 @@ flowchart LR
   p_credential_helpers["credential-helpers<br/>implemented"]:::implemented
   p_audio["audio<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
-  p_overlay_export["overlay-export<br/>draft"]:::draft
+  p_overlay_export["overlay-export<br/>superseded"]:::closed
   p_login_shell["login-shell<br/>proposed"]:::draft
   p_child_machines["child-machines<br/>proposed"]:::draft
   p_cow_fork["cow-fork<br/>proposed"]:::draft
@@ -71,6 +72,7 @@ flowchart LR
   p_retire_unicorn["retire-unicorn<br/>draft"]:::draft
   p_scheduler["scheduler<br/>draft"]:::draft
   p_fd_mounts["fd-mounts<br/>draft"]:::draft
+  p_upper_layers["upper-layers<br/>draft"]:::draft
   p_host_cmd --> p_login_shell
   p_kernel_serve --> p_namespace_kernel
   p_port_streams --> p_namespace_kernel
@@ -91,6 +93,9 @@ flowchart LR
   p_hcpu --> p_retire_unicorn
   p_kernel_port --> p_scheduler
   p_mounts --> p_fd_mounts
+  p_mounts --> p_upper_layers
+  p_linux_symlinks --> p_upper_layers
+  p_linux_fifo --> p_upper_layers
 ```
 
 ## Epoch 0
