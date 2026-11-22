@@ -1591,6 +1591,8 @@ h9_kern_exit(void)
 	Hproc *h, *ph;
 	Hwait *w;
 	Chan *c;
+	int want;
+	Hnote *n;
 
 	h = lookup(up);
 	if(h == nil){
@@ -1619,6 +1621,18 @@ h9_kern_exit(void)
 	/* A debugger waiting for it to stop finds it gone (9front's pexit). */
 	wakeup(&h->stopr);
 
+	/*
+	 * Close the fds before the parent hears of the exit, as 9front's
+	 * pexit does: a parent's wait that returns while the child's pipe or
+	 * FIFO ends are still open lets the next reader find a writer that's
+	 * about to go, read EOF, and leave the next writer waiting for good.
+	 * (drawterm's pexit would leak the fds' channels anyway.)
+	 */
+	if(up->fgrp != nil){
+		fgrpclose(up->fgrp);
+		up->fgrp = nil;
+	}
+
 	ph = h->parent;
 	if(ph != nil){
 		w = mallocz(sizeof *w, 1);
@@ -1630,6 +1644,22 @@ h9_kern_exit(void)
 			if(h->exitstr[0])
 				snprint(w->msg, sizeof w->msg, "%s %lud: %s", h->text, h->pid, h->exitstr);
 		}
+		/*
+		 * A Linux parent gets SIGCHLD (design/epoch-0/linux-personality.md),
+		 * posted under exl with the wait record, so that a wait sees the
+		 * record only once the signal is pending, as on Linux. Posted
+		 * after, it could reach a parent that had reaped the child and
+		 * gone on, and interrupt what it was blocked in then, such as a
+		 * FIFO's open, with EINTR. (pushnote takes nlk, which is never
+		 * held while taking exl.)
+		 */
+		want = 0;
+		if(h9_wantchld != nil){
+			lock(&ph->nlk);
+			want = ph->aux != nil && h9_wantchld(ph->aux);
+			unlock(&ph->nlk);
+		}
+		n = want ? mknote("linux: signal 17", NUser) : nil;
 		lock(&ph->exl);
 		if(!ph->dead){
 			ph->nchild--;
@@ -1640,22 +1670,17 @@ h9_kern_exit(void)
 				w = nil;
 				wakeup(&ph->waitr);
 			}
+			if(n != nil){
+				pushnote(ph, n);
+				n = nil;
+			}
 			wakewaits(ph);
 		}
 		unlock(&ph->exl);
+		if(n != nil)
+			freenote(n);
 		free(w);
 		h->parent = nil;
-		/* A Linux parent gets SIGCHLD (design/epoch-0/linux-personality.md). */
-		if(h9_wantchld != nil){
-			int want;
-			Hnote *n;
-
-			lock(&ph->nlk);
-			want = ph->aux != nil && h9_wantchld(ph->aux);
-			unlock(&ph->nlk);
-			if(want && (n = mknote("linux: signal 17", NUser)) != nil)
-				pushnote(ph, n);
-		}
 		putproc(ph);
 	}
 
@@ -1681,11 +1706,6 @@ h9_kern_exit(void)
 		h->egrp = nil;
 	}
 	putproc(h);
-	/* drawterm's pexit would leak the fds' channels. */
-	if(up->fgrp != nil){
-		fgrpclose(up->fgrp);
-		up->fgrp = nil;
-	}
 	pexit("", 1);
 }
 
