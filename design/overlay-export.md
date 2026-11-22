@@ -12,7 +12,7 @@ areas: [sandbox, cli, kern, api, web]
 
 ## Abstract
 
-Add `--export-eph FILE[:DST]`, a repeatable flag that writes the `eph` changes held in memory at DST to FILE when the run ends, as a tar archive in the OCI layer format. DST is named the way the mount flags name it: `/` (the default) and `#L` are the two stacks' overlays, and any other DST is an `eph` mount, `--tmp`, the cwd, or a path under one of them. Entries are relative to DST, so the archive applies to the tree that was mounted there, and `--archive FILE:DST` mounts it again in a later run. `--archive` learns the OCI whiteouts it needs for that: on a stack, a `.wh.` entry hides the name in the members below, and an opaque directory hides them all. Together the two flags make a run a layer, so a build can go step by step as a Dockerfile does, with each step's layer kept on the host and nothing in the host trees written. The `Machine` API and the browser host get the same thing as writers and byte arrays.
+Add `--export-eph MNT:FILE`, a repeatable flag that writes the `eph` changes held in memory at MNT, a guest path, to FILE, a host path, when the run ends, as a tar archive in the OCI layer format. The data flows left to right, as it does in every mount flag. MNT is a place a mount flag could name as its destination: `/` and `#L` are the two stacks' overlays, and any other MNT is an `eph` mount, `--tmp`, the cwd, or a path under one of them. Entries are relative to MNT, so the archive applies to the tree that was mounted there, and `--archive FILE:MNT` mounts it again in a later run. `--archive` learns the OCI whiteouts it needs for that: on a stack, a `.wh.` entry hides the name in the members below, and an opaque directory hides them all. Together the two flags make a run a layer, so a build can go step by step as a Dockerfile does, with each step's layer kept on the host and nothing in the host trees written. The `Machine` API and the browser host get the same thing as writers and byte arrays.
 
 ## Background
 
@@ -35,35 +35,35 @@ ephemeral-writes said this already: "the memory tree … already is that diff, s
 
 ### The flag
 
-`--export-eph FILE[:DST]` writes the changes in the overlay at DST to FILE, a host path. It's parsed as the mount flags are: DST starts at the last `:` followed by `/` or `#`, a drive letter's `:` isn't a separator, and with no DST it's `/`. So it reads as `--archive` does, with the data going the other way:
+`--export-eph MNT:FILE` writes the changes in the overlay at MNT to FILE. Both are required: MNT is a guest path, starting with `/` or `#`, and FILE is a host path, resolved as `--dir`'s is. MNT ends at the first `:`, so FILE can hold a drive letter (`/:C:/out/root.tar`). A guest path with a `:` in it takes the long form, `mnt=MNT,file=FILE`, quoted as the mount flags' long form is. It's `--archive FILE:MNT` turned around, as the data is:
 
 ```sh
-h9 --dir ./alpine:#L --export-eph deps.tar:#L sh -c 'apk add python3'
-h9 --dir ./alpine:#L --archive deps.tar:#L --export-eph app.tar:#L sh -c 'pip install -r req.txt'
+h9 --dir ./alpine:#L --export-eph '#L:deps.tar' sh -c 'apk add python3'
+h9 --dir ./alpine:#L --archive deps.tar:#L --export-eph '#L:app.tar' sh -c 'pip install -r req.txt'
 h9 --dir ./alpine:#L --archive deps.tar:#L --archive app.tar:#L python3 /app/main.py
 ```
 
-- **Repeatable,** once per DST. Two with the same DST, or two whose DSTs are in one instance with one under the other, are a usage error (exit 2). `/` and `/tmp` are different instances, so both can be exported.
+- **Repeatable,** once per MNT. Two with the same MNT, or two whose MNTs are in one instance with one under the other, are a usage error (exit 2). `/` and `/tmp` are different instances, so both can be exported.
 - **FILE** is created, or truncated, before the machine starts, and one that can't be opened for writing is a usage error and nothing runs. A pipe or a `/dev/fd/N` path is written as a stream. A FILE ending in `.gz` or `.tgz` is gzipped. There's no `-` for stdout, which the guest owns.
-- **When it's written:** after the run's last process exits, whether it exited, was killed, or timed out, and before the instances are freed. A run with no changes at DST writes an empty archive.
+- **When it's written:** after the run's last process exits, whether it exited, was killed, or timed out, and before the instances are freed. A run with no changes at MNT writes an empty archive.
 
 ### Destinations
 
-DST names a place in the plan, as a mount's DST does, and the plan decides which instance it is:
+MNT names a place in the plan, as a mount's destination does, and the plan decides which instance it is:
 
-| DST | The instance |
+| MNT | The instance |
 | --- | --- |
 | `/` | The root stack's overlay, `bind -c '#O' '#Oroot'` |
 | `#L` | The Linux stack's overlay, `bind -c '#O' '#Olinux'` |
 | `/tmp` | The machine's `/tmp` overlay |
-| Another mount's DST | That mount's instance, when it's `eph`, `--tmp`, or `--archive` off a stack. Under `--write=ephemeral` this includes `/mnt/term/cwd` and each `--writable` path's place under `/mnt/term`. |
+| Another mount's destination | That mount's instance, when it's `eph`, `--tmp`, or `--archive` off a stack. Under `--write=ephemeral` this includes `/mnt/term/cwd` and each `--writable` path's place under `/mnt/term`. |
 | A path under any of those | The same instance, with only the entries under that path, such as `#L/etc` or `/usr/glenda/lib` |
 
-A DST that resolves to no instance is a usage error naming the reason: "--export-eph deps.tar:#L: #L has no overlay (its member ./alpine is rw)", or "… /n/fs is a 9P mount". An export is of one instance only, so `/`'s doesn't include `/tmp` or the cwd, which are bound over it, and nothing is left out by a filter.
+An MNT that resolves to no instance is a usage error naming the reason: "--export-eph #L:deps.tar: #L has no overlay (its member ./alpine is rw)", or "… /n/fs is a 9P mount". An export is of one instance only, so `/`'s doesn't include `/tmp` or the cwd, which are bound over it, and nothing is left out by a filter.
 
 ### What's in the archive
 
-The archive is POSIX tar (pax), with the [OCI image layer](https://github.com/opencontainers/image-spec/blob/main/layer.md) conventions for deletions. Paths are relative to DST, so `tar -x -C ./alpine -f deps.tar` applies a `#L` export to the tree mounted there, and entries come depth-first by name, so two runs that make the same changes give the same entries in the same order.
+The archive is POSIX tar (pax), with the [OCI image layer](https://github.com/opencontainers/image-spec/blob/main/layer.md) conventions for deletions. Paths are relative to MNT, so `tar -x -C ./alpine -f deps.tar` applies a `#L` export to the tree mounted there, and entries come depth-first by name, so two runs that make the same changes give the same entries in the same order.
 
 | Node | Entry |
 | --- | --- |
@@ -85,7 +85,7 @@ The archive is POSIX tar (pax), with the [OCI image layer](https://github.com/op
 `--archive` reads an OCI layer as a layer:
 
 - **On a stack,** where its instance is a member, `.wh.<name>` hides `<name>` in the members below it, and `<dir>/.wh..wh..opq` hides everything below in `<dir>`. The members above it, and the stack's overlay, see the result. An `.h9a` has no whiteouts.
-- **Off a stack,** an archive replaces what's at DST or makes a one-level union with it, and there's nothing below for a whiteout to hide, so whiteouts are dropped.
+- **Off a stack,** an archive replaces what's at its destination or makes a one-level union with it, and there's nothing below for a whiteout to hide, so whiteouts are dropped.
 - **In the kernel,** the archive's instance keeps them as whiteout nodes, and a `union` instance asks a member that's an `#O` instance about a name before walking the members below. A whiteout ends the walk there as "does not exist", and an opaque directory ends the merge of that directory. Directory reads leave out the hidden names. A member of any other kind is walked as now.
 
 So the layers of a run are a stack again in the next: `--archive deps.tar:#L --archive app.tar:#L` puts `app` over `deps` over what's below, with `app`'s deletions applied, as an image's layers are.
@@ -96,7 +96,7 @@ An export is something h9 writes on the host, not a line of the namespace, so `-
 
 ```text
 limits:   write=overlay net=enable
-exports:  deps.tar:#L
+exports:  #L:deps.tar
 namespace:
   bind '#/' /
   …
@@ -111,7 +111,7 @@ The instance's line gets an `exported to FILE` note.
 
 - **`Machine.Options.exports: []const Export`,** each `.{ .dst = "#L", .writer = w }`. `run` writes each archive to its writer after the last process exits and before it returns. The CLI fills it from the flags, opening each FILE first.
 - **The run's status** gives, for each export, the entries written, the names skipped, and an error if the writer failed. A failed export never replaces the guest's own status.
-- **The browser host:** `createMachine({ mounts, exports: ['#L'] })`, and the run's result has `changes`, a `Uint8Array` per DST, which an `archive` mount takes back.
+- **The browser host:** `createMachine({ mounts, exports: ['#L'] })`, and the run's result has `changes`, a `Uint8Array` per MNT, which an `archive` mount takes back.
 
 ### Keeping instances alive until the export
 
@@ -127,7 +127,7 @@ int h9_overlay_walkchanges(int id, char *path, int (*fn)(void *arg, OvEntry *e),
 ### The CLI's notices
 
 - With `/` exported, [overlay](epoch-0/overlay.md)'s notice becomes "h9: changes to the root saved to root.tar (N entries)", on a terminal only, as before.
-- Without it, the notice suggests the export: "h9: changes to the root under /lib, /sys were discarded (--export-eph FILE saves them)".
+- Without it, the notice suggests the export: "h9: changes to the root under /lib, /sys were discarded (--export-eph /:FILE saves them)".
 - If an archive can't be written, h9 prints "h9: export: FILE: <error>" and exits 125 when the guest succeeded, and keeps the guest's status when it didn't.
 
 ## Rationale
@@ -142,9 +142,11 @@ int h9_overlay_walkchanges(int id, char *path, int (*fn)(void *arg, OvEntry *e),
 
 **An eph overlay over the stack, not an `rw` member.** A build that writes a host directory through an `rw` member gets the union's rules: no overlay, `EXDEV` for renames across directories, and changes that can't be told from what was there. An overlay records exactly what the step did, moves renamed files in memory, and leaves the host trees as they were, so a failed step leaves nothing behind.
 
-**A flag naming DST, not a mount option.** `export=FILE` on a mount reads well for `--dir ./src:/src:eph,export=src.tar`, but a stack's overlay belongs to no one mount, and `/tmp`'s and the cwd's come from `--write`, with no mount flag to put it on. A flag that names DST reaches all of them, and parses the same way.
+**A flag naming MNT, not a mount option.** `export=FILE` on a mount reads well for `--dir ./src:/src:eph,export=src.tar`, but a stack's overlay belongs to no one mount, and `/tmp`'s and the cwd's come from `--write`, with no mount flag to put it on. A flag that names MNT reaches all of them.
 
-**`--export-eph`, not `--export` or `--export-changes`.** `eph` is the word the mount options and `--print` already use for writes that land in memory, and every instance this flag can export is one `--print` marks `eph`: the stacks' overlays, `/tmp`, `--tmp`, and `--archive` off a stack. So the name says what's exported and why a DST must be one of those. A bare `--export` would read as `exportfs`, which serves a namespace in Plan 9, and h9 serves with `--serve`.
+**`MNT:FILE`, not `FILE:MNT`.** Every mount flag reads left to right, from where the data comes from to where it goes, and an export's data comes from the guest. `FILE:MNT` would have matched `--archive`'s text, but it reads as "put FILE at MNT", the opposite of what it does. Turned around, `--export-eph '#L:deps.tar'` and `--archive deps.tar:#L` are the round trip, each in the direction its data goes, as `docker cp` writes `CONTAINER:PATH` on whichever side is the source. MNT has no default, since an export of `/` and one of `#L` are different layers, and a flag that writes a file should say which.
+
+**`--export-eph`, not `--export` or `--export-changes`.** `eph` is the word the mount options and `--print` already use for writes that land in memory, and every instance this flag can export is one `--print` marks `eph`: the stacks' overlays, `/tmp`, `--tmp`, and `--archive` off a stack. So the name says what's exported and why MNT must be one of those. A bare `--export` would read as `exportfs`, which serves a namespace in Plan 9, and h9 serves with `--serve`.
 
 **Tar, and OCI's layer format.** Tar has a reader on every host, Windows' `tar.exe` included. Plain tar can't represent a deletion, and OCI's whiteouts and opaque markers are the common way to: Docker, Podman, `umoci`, and `crane` read them, and they map one to one onto `#O`'s nodes.
 
@@ -162,7 +164,7 @@ int h9_overlay_walkchanges(int id, char *path, int (*fn)(void *arg, OvEntry *e),
 
 ## Compatibility
 
-- **CLI:** `--export-eph FILE[:DST]`, repeatable. Exit codes are unchanged, except that 125 can also mean a failed export. The first draft's `--export-tmp` is dropped.
+- **CLI:** `--export-eph MNT:FILE`, repeatable. Exit codes are unchanged, except that 125 can also mean a failed export. The first draft's `--export-tmp` is dropped.
 - **`--archive`:** an archive with `.wh.` entries now deletes names on a stack instead of making files with those names. An OCI layer means that already, and no tree h9 makes has such names.
 - **`--print` and `--ns`:** an `exports:` line, which `--ns` never reads, and a note on an exported instance's line. Saved plans replay as before.
 - **`Machine.Options`:** `exports`, empty by default, and the run status's export counts and errors.
@@ -184,8 +186,8 @@ int h9_overlay_walkchanges(int id, char *path, int (*fn)(void *arg, OvEntry *e),
 Demo: three runs build an Alpine app in layers, with the host tree unchanged:
 
 ```sh
-h9 --dir ./alpine:#L --export-eph deps.tar:#L sh -c 'apk add python3 && rm /etc/motd'
-h9 --dir ./alpine:#L --archive deps.tar:#L --export-eph app.tar:#L sh -c 'mkdir -p /app/tmp && echo hi > /app/tmp/x && mv /app/tmp/x /app/x'
+h9 --dir ./alpine:#L --export-eph '#L:deps.tar' sh -c 'apk add python3 && rm /etc/motd'
+h9 --dir ./alpine:#L --archive deps.tar:#L --export-eph '#L:app.tar' sh -c 'mkdir -p /app/tmp && echo hi > /app/tmp/x && mv /app/tmp/x /app/x'
 h9 --dir ./alpine:#L --archive deps.tar:#L --archive app.tar:#L sh -c 'python3 -V; cat /app/x; test ! -e /etc/motd'
 tar -tvf deps.tar | grep -e usr/bin/python3 -e etc/.wh.motd
 ```
@@ -200,8 +202,8 @@ Integration cases:
 - [ ] `test "a path under an overlay exports only that subtree [overlay-export]"`
 - [ ] `test "the cwd under --write=ephemeral exports relative to the cwd [overlay-export]"`
 - [ ] `test "/ doesn't include /tmp, and /tmp exports when named [overlay-export]"`
-- [ ] `test "a DST with no overlay is a usage error naming why [overlay-export]"`
-- [ ] `test "two exports of one DST, or nested ones, are a usage error [overlay-export]"`
+- [ ] `test "an MNT with no overlay is a usage error naming why [overlay-export]"`
+- [ ] `test "two exports of one MNT, or nested ones, are a usage error [overlay-export]"`
 - [ ] `test "an unwritable FILE is a usage error and nothing runs [overlay-export]"`
 - [ ] `test "a FILE ending in .gz is gzipped [overlay-export]"`
 - [ ] `test "a run with no changes writes an empty archive [overlay-export]"`
@@ -223,7 +225,7 @@ Browser host:
 
 1. Whiteouts through unions: a `union` instance asks an `#O` member for a whiteout or an opaque directory before walking the members below, and directory reads leave hidden names out. Kernel tests beside the union ones.
 2. `src/changes.zig`: the pax and OCI writer, the reserved-name check, and the whiteout reader for `--archive`, with unit tests on hand-built trees.
-3. `h9_overlay_walkchanges` in `devoverlay.c`, the extra reference, and resolving each DST to an instance and a path in the plan.
+3. `h9_overlay_walkchanges` in `devoverlay.c`, the extra reference, and resolving each MNT to an instance and a path in the plan.
 4. `Machine.Options.exports`, the export in `run`, and the status fields.
 5. The CLI flag, opening FILE early, gzip by suffix, exit 125, `--print`'s `exports:` line and note, and the notice.
 6. The browser host's `exports` and `changes`.
@@ -237,4 +239,4 @@ Browser host:
 
 ## Updates
 
-- 2026-11-22: Rewritten for [mounts](mounts.md). Exports are per destination and relative to it, `--archive` reads OCI whiteouts so an export mounts again as a stack member, `--export-tmp` is gone, links and FIFOs are exported, and the flag is `--export-eph`, after the `eph` option it exports.
+- 2026-11-22: Rewritten for [mounts](mounts.md). Exports are per destination and relative to it, `--archive` reads OCI whiteouts so an export mounts again as a stack member, `--export-tmp` is gone, links and FIFOs are exported, and the flag is `--export-eph MNT:FILE`, named after the `eph` option it exports, with the data flowing left to right.
