@@ -164,6 +164,8 @@ pub const Vcpu = struct {
     as: ?*AddressSpace = null,
     as_id: u64 = 0,
     epoch: u64 = 0,
+    /// The backend's ASID generation when this vCPU last flushed.
+    asid_gen: u64 = 0,
 
     pub fn destroy(v: *Vcpu) void {
         _ = hv_vcpu_destroy(v.id);
@@ -227,6 +229,12 @@ pub const Vcpu = struct {
         }
         // A space without its own ASID shares 0 with others (pt.asids).
         if (as.asid == 0) v.shared.flush = 1;
+        // ASIDs have gone round since this vCPU last flushed (Ram.allocAsid).
+        const gen = v.backend.ram.asid_gen.load(.seq_cst);
+        if (gen != v.asid_gen) {
+            v.asid_gen = gen;
+            v.shared.flush = 1;
+        }
         if (v.fresh) {
             // Enter through the shim, which loads the Ureg (and flushes).
             try check(hv_vcpu_set_reg(v.id, REG_PC, pt.kva_shim + pt.shim_enter));
