@@ -28,7 +28,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
 | [kernel-port](kernel-port.md) |  | draft | needs baseline-1, namespace-kernel, kernel-serve | Port the kernel core to Zig, as an instance |
-| [linux-symlinks](linux-symlinks.md) |  | draft | in progress on linux-symlinks | Linux symlinks resolved in the guest's namespace |
+| [linux-symlinks](linux-symlinks.md) |  | draft | in progress on claude/project-thread-kcmhcu | Linux symlinks resolved in the guest's namespace |
 | [memory-model](memory-model.md) |  | draft | needs baseline-1, cow-fork | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, mounts, child-machines | The plan as a file, and the one way in |
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
