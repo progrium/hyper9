@@ -17,6 +17,13 @@
  *   sigbus    a private mapping's pages past the end of its file (one
  *             truncated under it) are SIGBUS to touch, and EFAULT to a
  *             syscall, while the last page with file bytes reads them
+ *   holes     64 MB written, then unmapped but for one page in each MiB,
+ *             doesn't keep the rest allocated: another 64 MB fits beside
+ *             it (run under --memory 96m)
+ *   privwrite a write to a private file mapping whose pages the page
+ *             cache shares stays in that mapping: another mapping of
+ *             the file, a child's after fork, and the file read the old
+ *             bytes, and the child reads the written ones in its copy
  *   maps      /proc/self/maps shows each file mapping, the segments of
  *             this program included, as one line, not in pieces
  *   hold      (for txtbsy) says "r" on stdout and waits for stdin's end
@@ -462,6 +469,73 @@ static void maps(void) {
 	printf("ok maps\n");
 }
 
+/* Unmapped pages don't stay allocated beside the ones a program keeps:
+ * of 64 MB written, all but the first page of each MiB is unmapped, and
+ * 64 MB more is written. Under --memory 96m that fits only if the
+ * unmapped pages went, as on Linux; with 1 MiB chunks it didn't. */
+static void holes(void) {
+	const size_t n = 64 * (size_t)MB, pg = 4096;
+	char *a = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("holes", a != MAP_FAILED);
+	memset(a, 'a', n);
+	for (size_t i = 0; i < n / MB; i++)
+		CHECK("holes", munmap(a + i * MB + pg, MB - pg) == 0);
+	char *b = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("holes", b != MAP_FAILED);
+	memset(b, 'b', n);
+	for (size_t i = 0; i < n / MB; i++)
+		CHECK("holes", a[i * MB] == 'a' && a[i * MB + pg - 1] == 'a');
+	CHECK("holes", b[0] == 'b' && b[n - 1] == 'b');
+	printf("ok holes\n");
+}
+
+/* A private file mapping read first (so its chunks are the page
+ * cache's, pagecache.zig) and then written: the write stays its own. */
+static void privwrite(void) {
+	const size_t n = 4 * (size_t)MB;
+	const char *path = "/tmp/cowfork.priv";
+	int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	CHECK("privwrite", fd >= 0);
+	static char buf[1 << 16];
+	for (size_t off = 0; off < n; off += sizeof buf) {
+		memset(buf, 'a' + (int)(off / MB), sizeof buf);
+		CHECK("privwrite", pwrite(fd, buf, sizeof buf, (off_t)off) == (ssize_t)sizeof buf);
+	}
+	char *a = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	CHECK("privwrite", a != MAP_FAILED);
+	CHECK("privwrite", a[0] == 'a' && a[MB] == 'b' && a[3 * MB + 5] == 'd');
+	a[MB] = 'X';
+	a[MB + 4096] = 'Y';
+	const char *b = mmap(NULL, n, PROT_READ, MAP_PRIVATE, fd, 0);
+	CHECK("privwrite", b != MAP_FAILED);
+	CHECK("privwrite", b[MB] == 'b' && b[MB + 4096] == 'b' && b[0] == 'a');
+	CHECK("privwrite", a[MB] == 'X' && a[MB + 4096] == 'Y' && a[MB + 1] == 'b');
+	pid_t c = fork();
+	CHECK("privwrite", c >= 0);
+	if (c == 0) {
+		const char *d = mmap(NULL, n, PROT_READ, MAP_PRIVATE, fd, 0);
+		CCHECK("privwrite", d != MAP_FAILED);
+		CCHECK("privwrite", d[MB] == 'b' && d[2 * MB] == 'c');
+		CCHECK("privwrite", a[MB] == 'X' && b[MB] == 'b');
+		a[2 * MB] = 'Z';
+		CCHECK("privwrite", d[2 * MB] == 'c' && b[2 * MB] == 'c');
+		_exit(0);
+	}
+	int st;
+	CHECK("privwrite", waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+	CHECK("privwrite", a[2 * MB] == 'c' && a[MB] == 'X');
+	char one;
+	CHECK("privwrite", pread(fd, &one, 1, MB) == 1 && one == 'b');
+	CHECK("privwrite", pread(fd, &one, 1, 2 * MB) == 1 && one == 'c');
+	/* A write to the file is seen by a mapping made after it. */
+	CHECK("privwrite", pwrite(fd, "W", 1, 3 * MB) == 1);
+	const char *e = mmap(NULL, n, PROT_READ, MAP_PRIVATE, fd, 0);
+	CHECK("privwrite", e != MAP_FAILED && e[3 * MB] == 'W');
+	close(fd);
+	unlink(path);
+	printf("ok privwrite\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -484,6 +558,10 @@ int main(int argc, char **argv) {
 			sigbus();
 		else if (!strcmp(a, "maps"))
 			maps();
+		else if (!strcmp(a, "holes"))
+			holes();
+		else if (!strcmp(a, "privwrite"))
+			privwrite();
 		else {
 			printf("FAIL %s: no such case\n", a);
 			failed = 1;

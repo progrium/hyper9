@@ -1731,7 +1731,13 @@ pub const Machine = struct {
                     // An EL0 read of an ID register, which Linux emulates
                     // (lexec.emulateIdRead): HVF reports it as a system
                     // register trap, the emulator as an invalid instruction.
-                    if (m.arch == .arm64 and f.access == .exec and f.addr == u.pc()) {
+                    // Only on a page that's there: the first fetch from a
+                    // page is a fault that allocates it, and reading the
+                    // instruction here would allocate it first, as the
+                    // host's copy rather than the page cache's
+                    // (pagecache.zig). An ID read there traps again once
+                    // the page is in.
+                    if (m.arch == .arm64 and f.access == .exec and f.addr == u.pc() and l.mm.touched(f.addr)) {
                         var w: [4]u8 = undefined;
                         if (l.readMem(f.addr, &w)) |_| {
                             if (lexec.emulateIdRead(std.mem.readInt(u32, &w, .little), l.hwcap)) |r| {

@@ -1,6 +1,6 @@
 //! Shared file mappings (design/epoch-0/linux-personality.md, "Memory"): the
-//! pages of MAP_SHARED mappings of one file, one set per 1 MiB chunk of
-//! it, shared by every process that maps that part of the file, so their
+//! pages of MAP_SHARED mappings of one file, one set per chunk (`mm.chunk_size`)
+//! of it, shared by every process that maps that part of the file, so their
 //! stores reach each other at once, as SQLite's WAL index (the -shm
 //! file) needs.
 //!

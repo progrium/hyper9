@@ -440,6 +440,7 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
         /// View before it runs guest code whenever `generation` has moved.
         pub const EmuSpace = struct {
             backend: *EmuBackend,
+            /// Sorted by address, not overlapping.
             regions: std.ArrayList(Region) = .empty,
             /// Bumped on every change. A usize: wasm32 has no 64-bit atomics.
             generation: std.atomic.Value(usize) = .init(1),
@@ -451,6 +452,17 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
 
             fn lockSpin(as: *EmuSpace) void {
                 while (!as.lock.tryLock()) std.atomic.spinLoopHint();
+            }
+
+            /// The index of the first region starting at or after `va`.
+            fn lowerBound(as: *const EmuSpace, va: u64) usize {
+                var lo: usize = 0;
+                var hi: usize = as.regions.items.len;
+                while (lo < hi) {
+                    const mid = (lo + hi) / 2;
+                    if (as.regions.items[mid].va < va) lo = mid + 1 else hi = mid;
+                }
+                return lo;
             }
 
             pub fn destroy(as: *EmuSpace) void {
@@ -470,28 +482,35 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 if (p < lo or p - lo > arena.len or m.len > arena.len - (p - lo)) return error.BadAddress;
                 as.lockSpin();
                 defer as.lock.unlock();
-                for (as.regions.items) |r| {
-                    if (va < r.va + r.mem.len and r.va < va + m.len) return error.BadAddress;
+                // Kept sorted, so this and `find` don't scan: a Linux
+                // process maps thousands of 64 KiB chunks.
+                const i = as.lowerBound(va);
+                if (i > 0) {
+                    const r = as.regions.items[i - 1];
+                    if (r.va + r.mem.len > va) return error.BadAddress;
                 }
-                try as.regions.append(as.backend.gpa, .{ .va = va, .mem = m, .perms = perms });
+                if (i < as.regions.items.len and as.regions.items[i].va < va + m.len) return error.BadAddress;
+                try as.regions.insert(as.backend.gpa, i, .{ .va = va, .mem = m, .perms = perms });
                 _ = as.generation.fetchAdd(1, .seq_cst);
             }
 
             pub fn unmap(as: *EmuSpace, va: u64) void {
                 as.lockSpin();
                 defer as.lock.unlock();
-                for (as.regions.items, 0..) |r, i| if (r.va == va) {
-                    _ = as.regions.swapRemove(i);
+                const i = as.lowerBound(va);
+                if (i < as.regions.items.len and as.regions.items[i].va == va) {
+                    _ = as.regions.orderedRemove(i);
                     _ = as.generation.fetchAdd(1, .seq_cst);
-                    return;
-                };
+                }
             }
 
             fn find(as: *EmuSpace, va: u64, len: u64) ?[]u8 {
-                for (as.regions.items) |r| {
-                    if (va >= r.va and va - r.va <= r.mem.len and len <= r.mem.len - (va - r.va)) {
-                        return r.mem[@intCast(va - r.va)..][0..@intCast(len)];
-                    }
+                // The last region starting at or before va.
+                const i = as.lowerBound(va +| 1);
+                if (i == 0) return null;
+                const r = as.regions.items[i - 1];
+                if (va >= r.va and va - r.va <= r.mem.len and len <= r.mem.len - (va - r.va)) {
+                    return r.mem[@intCast(va - r.va)..][0..@intCast(len)];
                 }
                 return null;
             }
@@ -586,25 +605,32 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 defer as.lock.unlock();
                 const gpa = s.backend.gpa;
                 // A mapping gone or changed may be in the TLB; a new one
-                // can't be.
+                // can't be. Both lists are sorted by address (`regions` is
+                // kept so) and don't overlap, so one walk finds whether
+                // each old mapping is still there: a scan of the regions
+                // for each was quadratic, which a Linux process's
+                // thousands of 64 KiB chunks made minutes long.
+                const old = s.maps;
+                var fresh: std.ArrayList(mem.Mapping) = .empty;
+                fresh.ensureTotalCapacity(gpa, as.regions.items.len) catch return error.OutOfGuestMemory;
+                for (as.regions.items) |r| fresh.appendAssumeCapacity(.{ .va = r.va, .len = r.mem.len, .host = @intFromPtr(r.mem.ptr), .perms = perms(r.perms) });
                 var dropped = s.generation == 0;
                 if (!dropped) {
-                    outer: for (s.maps.items) |old| {
-                        for (as.regions.items) |r| {
-                            if (r.va == old.va and @intFromPtr(r.mem.ptr) == old.host and r.mem.len == old.len and perms(r.perms) == old.perms) continue :outer;
+                    var j: usize = 0;
+                    for (old.items) |o| {
+                        while (j < fresh.items.len and fresh.items[j].va < o.va) j += 1;
+                        const n = if (j < fresh.items.len) fresh.items[j] else {
+                            dropped = true;
+                            break;
+                        };
+                        if (n.va != o.va or n.host != o.host or n.len != o.len or n.perms != o.perms) {
+                            dropped = true;
+                            break;
                         }
-                        dropped = true;
-                        break;
                     }
                 }
-                s.maps.clearRetainingCapacity();
-                s.maps.ensureTotalCapacity(gpa, as.regions.items.len) catch return error.OutOfGuestMemory;
-                for (as.regions.items) |r| s.maps.appendAssumeCapacity(.{ .va = r.va, .len = r.mem.len, .host = @intFromPtr(r.mem.ptr), .perms = perms(r.perms) });
-                std.mem.sortUnstable(mem.Mapping, s.maps.items, {}, struct {
-                    fn lt(_: void, a: mem.Mapping, b: mem.Mapping) bool {
-                        return a.va < b.va;
-                    }
-                }.lt);
+                s.maps.deinit(gpa);
+                s.maps = fresh;
                 s.view.maps = s.maps.items;
                 if (dropped) {
                     s.tlb.flush();

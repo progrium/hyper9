@@ -1,7 +1,7 @@
 //! System V shared memory (design/epoch-0/linux-personality.md, "Memory"):
 //! shmget, shmat, shmdt and shmctl, as PostgreSQL uses them for the small
 //! segment that tells a new postmaster an old one's backends still run.
-//! A segment is a set of chunk pages (mm.Pages), one per 1 MiB of it,
+//! A segment is a set of chunk pages (mm.Pages), one per chunk of it,
 //! held by this table and by every address space that attaches it; fork
 //! shares them as any MAP_SHARED mapping's. Its attach count is the
 //! pages' references less the table's. A removed segment goes once no
