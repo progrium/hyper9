@@ -1,7 +1,8 @@
 ---
 slug: overlay-export
 title: Exporting a run's overlay changes
-status: draft
+status: superseded
+superseded-by: upper-layers
 created: 2026-11-07
 authors: [progrium]
 depends: [ephemeral-writes]
@@ -186,3 +187,7 @@ Demo: `h9 --export-changes out.tar --rc 'cd /sys/src/cmd && mk cat.install && rm
 4. The CLI: `--export-changes`, `--export-tmp`, opening FILE early, exit 125, `--print`'s `export=` and `exp`, and the notice wording shared with [overlay](epoch-0/overlay.md).
 5. README's sandbox section, and SPEC.md: the CLI table, "Ephemeral changes can't be exported yet" replaced, and the plan example. Set `status: implemented`.
 
+
+## Updates
+
+- 2026-11-22: Superseded by [upper-layers](upper-layers.md). A writable layer on the host, with overlayfs's copy up and OCI's whiteouts, covers the uses here without a memory ceiling or an export step, and `tar` makes it an archive.
