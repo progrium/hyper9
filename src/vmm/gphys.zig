@@ -22,6 +22,9 @@ const vmm = @import("../vmm.zig");
 
 const is_windows = builtin.os.tag == .windows;
 
+/// The most ASIDs a page-table format may ask for.
+const max_asids = 256;
+
 pub const Ram = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -44,6 +47,9 @@ pub const Ram = struct {
     /// dead root to stay one (pt_amd64.zig).
     spare_roots: std.ArrayList(u64) = .empty,
     lock: std.Io.Mutex = .init,
+    /// ASIDs in use, for formats that tag TLB entries with one
+    /// (pt_arm64.zig's `asids`); 0 is never handed out.
+    asid_used: std.bit_set.StaticBitSet(max_asids) = .initEmpty(),
     /// The backend's vCPUs, for `AddressSpace.shootdown`.
     runners: Runners = .{},
 
@@ -267,6 +273,26 @@ pub const Ram = struct {
         r.spare_roots.append(r.gpa, pa) catch {};
     }
 
+    /// A free ASID below `n`, or 0 (shared, flushed on every entry) if
+    /// there's none.
+    pub fn allocAsid(r: *Ram, n: usize) u16 {
+        r.lock.lockUncancelable(r.io);
+        defer r.lock.unlock(r.io);
+        var i: usize = 1;
+        while (i < @min(n, max_asids)) : (i += 1) if (!r.asid_used.isSet(i)) {
+            r.asid_used.set(i);
+            return @intCast(i);
+        };
+        return 0;
+    }
+
+    pub fn freeAsid(r: *Ram, a: u16) void {
+        if (a == 0) return;
+        r.lock.lockUncancelable(r.io);
+        defer r.lock.unlock(r.io);
+        r.asid_used.unset(a);
+    }
+
     pub fn takeRoot(r: *Ram) ?u64 {
         r.lock.lockUncancelable(r.io);
         defer r.lock.unlock(r.io);
@@ -395,6 +421,9 @@ pub fn AddressSpace(comptime pt: type) type {
         /// Unique for the backend's life, so a vCPU can tell a new space at
         /// a reused address from the one it last ran.
         id: u64,
+        /// The space's ASID (pt_arm64.zig's `asids`), or 0: shared, so a
+        /// vCPU flushes its TLB every time it enters the space.
+        asid: u16 = 0,
         /// Bumped by `unmap`, so vCPUs that ran this space flush their TLBs.
         epoch: std.atomic.Value(u64) = .init(0),
         lock: std.atomic.Mutex = .unlocked,
@@ -430,6 +459,10 @@ pub fn AddressSpace(comptime pt: type) type {
             const as = try ram.gpa.create(Self);
             errdefer ram.gpa.destroy(as);
             as.* = .{ .ram = ram, .root = try pt.newRoot(ram, kernel_root), .id = id };
+            // A recycled ASID may still tag the last owner's entries: a
+            // vCPU switching to this space flushes before it runs (the
+            // shim's flush), which removes them everywhere.
+            if (@hasDecl(pt, "asids")) as.asid = ram.allocAsid(pt.asids);
             return as;
         }
 
@@ -513,6 +546,7 @@ pub fn AddressSpace(comptime pt: type) type {
         /// Frees the page tables; the mapped pages belong to the caller.
         pub fn destroy(as: *Self) void {
             pt.freeRoot(as.ram, as.root);
+            as.ram.freeAsid(as.asid);
             as.regions.deinit(as.ram.gpa);
             as.ram.gpa.destroy(as);
         }

@@ -117,6 +117,8 @@ pub fn sysregs(kernel_root: u64, shared_kva: u64) [8]struct { u16, u64 } {
 
 const PTE_VALID: u64 = 0b11; // page (L3) or table (L0-L2)
 const PTE_AF: u64 = 1 << 10;
+/// Not global: the entry is tagged with the ASID it was walked under.
+const PTE_NG: u64 = 1 << 11;
 const PTE_ISH: u64 = 3 << 8;
 const PTE_USER: u64 = 1 << 6;
 const PTE_RDONLY: u64 = 1 << 7;
@@ -131,7 +133,9 @@ pub fn pteAttrs(user: bool, perms: vmm.Perms) u64 {
     var d = PTE_VALID | PTE_AF | PTE_ISH;
     if (!perms.write) d |= PTE_RDONLY;
     if (user) {
-        d |= PTE_USER | PTE_PXN;
+        // User pages are per address space: nG, so a TLB entry from one
+        // space's walk can't serve another's (see `asids`).
+        d |= PTE_USER | PTE_PXN | PTE_NG;
         if (!perms.exec) d |= PTE_UXN;
     } else {
         d |= PTE_UXN;
@@ -142,6 +146,19 @@ pub fn pteAttrs(user: bool, perms: vmm.Perms) u64 {
 
 pub fn userAttrs(perms: vmm.Perms) u64 {
     return pteAttrs(true, perms);
+}
+
+/// Address spaces get ASIDs 1 to `asids` - 1 (8-bit ASIDs: TCR.AS is
+/// 0), so their TLB entries never stand in for one another's. Every space
+/// used ASID 0 with global user pages before, and on arm64 KVM a vCPU went
+/// on using entries from another space's walk: a process's loads and
+/// stores reached another's pages. A space the pool can't cover gets
+/// ASID 0, which a vCPU flushes on every entry instead.
+pub const asids = 256;
+
+/// TTBR0 for `root` under `asid`.
+pub fn ttbr0(root: u64, asid: u16) u64 {
+    return root | (@as(u64, asid) << 48);
 }
 
 /// TTBR0 and TTBR1 are separate roots, so a user root starts empty.
