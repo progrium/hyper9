@@ -385,6 +385,8 @@ const State = struct {
     as: ?*AddressSpace = null,
     as_id: u64 = 0,
     epoch: u64 = 0,
+    /// The backend's ASID generation when this vCPU last flushed.
+    asid_gen: u64 = 0,
     /// The vCPU was stopped outside the shim's save path: enter the shim
     /// at `restore` before the next run, so it loads the Ureg.
     reenter: bool = false,
@@ -663,8 +665,16 @@ pub const Vcpu = struct {
             s.epoch = epoch;
             if (is_x86) s.shared.next_cr3 = as.root else s.shared.flush = 1;
         }
-        // A space without its own ASID shares 0 with others (pt.asids).
-        if (!is_x86 and as.asid == 0) s.shared.flush = 1;
+        if (!is_x86) {
+            // A space without its own ASID shares 0 with others (pt.asids).
+            if (as.asid == 0) s.shared.flush = 1;
+            // ASIDs have gone round since this vCPU last flushed (Ram.allocAsid).
+            const gen = s.backend.ram.asid_gen.load(.seq_cst);
+            if (gen != s.asid_gen) {
+                s.asid_gen = gen;
+                s.shared.flush = 1;
+            }
+        }
         if (s.reenter) {
             if (is_x86) try s.reenterX86() else try s.enterArm();
             s.reenter = false;

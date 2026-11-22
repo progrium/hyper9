@@ -50,6 +50,12 @@ pub const Ram = struct {
     /// ASIDs in use, for formats that tag TLB entries with one
     /// (pt_arm64.zig's `asids`); 0 is never handed out.
     asid_used: std.bit_set.StaticBitSet(max_asids) = .initEmpty(),
+    /// Where the next ASID search starts: ASIDs go round, so a freed one
+    /// is handed out again only after the others have been.
+    asid_next: usize = 1,
+    /// Bumped each time the search wraps, and so before any ASID is used
+    /// again: a vCPU that sees it change flushes its TLB before it runs.
+    asid_gen: std.atomic.Value(u64) = .init(0),
     /// The backend's vCPUs, for `AddressSpace.shootdown`.
     runners: Runners = .{},
 
@@ -275,14 +281,37 @@ pub const Ram = struct {
 
     /// A free ASID below `n`, or 0 (shared, flushed on every entry) if
     /// there's none.
+    ///
+    /// A reused ASID can still tag entries from its last owner on some
+    /// host CPU, and the flush a vCPU does when it switches spaces didn't
+    /// reliably remove them on arm64 KVM: a process went on to use the
+    /// last owner's translations (a forked rc returned through a freed
+    /// heap word, 0xcafebabe). So, as Linux does on an ASID rollover,
+    /// reuse waits for the search to wrap, and the wrap makes every vCPU
+    /// flush before it runs again (`asid_gen`).
     pub fn allocAsid(r: *Ram, n: usize) u16 {
         r.lock.lockUncancelable(r.io);
         defer r.lock.unlock(r.io);
-        var i: usize = 1;
-        while (i < @min(n, max_asids)) : (i += 1) if (!r.asid_used.isSet(i)) {
-            r.asid_used.set(i);
-            return @intCast(i);
-        };
+        const top = @min(n, max_asids);
+        if (top <= 1) return 0;
+        if (r.asid_next >= top) {
+            r.asid_next = 1;
+            _ = r.asid_gen.fetchAdd(1, .seq_cst);
+        }
+        var i = r.asid_next;
+        var tried: usize = 0;
+        while (tried < top - 1) : (tried += 1) {
+            if (!r.asid_used.isSet(i)) {
+                r.asid_used.set(i);
+                r.asid_next = i + 1;
+                return @intCast(i);
+            }
+            i += 1;
+            if (i >= top) {
+                i = 1;
+                _ = r.asid_gen.fetchAdd(1, .seq_cst);
+            }
+        }
         return 0;
     }
 
