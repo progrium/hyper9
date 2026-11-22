@@ -50,6 +50,10 @@ const Entry = struct {
     /// mapping could write the pages, or empty (then the path is used).
     post: [24]u8 = undefined,
     post_len: u8 = 0,
+    /// The last mapping went and the pages are being written back: still
+    /// in the table, so a new mapping waits for the file to have them
+    /// instead of reading it first (`pagesFor`).
+    draining: bool = false,
 };
 
 var post_seq: std.atomic.Value(u32) = .init(0);
@@ -96,7 +100,13 @@ pub fn pagesFor(backend: vmm.Backend, file: locks.Key, index: u64, fd: u31, path
     const key: Key = .{ .backend = backendId(backend), .file = file, .index = index };
     lock();
     defer mutex.unlock();
-    if (table.get(key)) |e| {
+    while (table.get(key)) |e| {
+        if (e.draining) {
+            mutex.unlock();
+            std.atomic.spinLoopHint();
+            lock();
+            continue;
+        }
         e.writable = e.writable or writable;
         if (writable) postFile(e, fd);
         _ = e.pages.refs.fetchAdd(1, .acq_rel);
@@ -137,10 +147,16 @@ fn released(p: *mm.Pages) void {
         mutex.unlock();
         return;
     }
+    // Written back before the entry leaves the table: a process mapping
+    // the file meanwhile (the receiver of a memfd its sender has just
+    // unmapped) would otherwise read the file before the pages reach it.
+    e.draining = true;
+    mutex.unlock();
+    if (e.writable) writeBack(e);
+    lock();
     _ = table.remove(e.key);
     _ = live.fetchSub(1, .monotonic);
     mutex.unlock();
-    if (e.writable) writeBack(e);
     if (e.post_len != 0) kern.remove(e.post[0..e.post_len :0]) catch {};
     e.backend.freePages(p.mem);
     gpa.destroy(p);
