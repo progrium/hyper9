@@ -309,8 +309,10 @@ fn runWasmT1(c: *x86cpu.Cpu64, ctx: *Ctx, m: *tlb.TlbMem) vmm.Error!vmm.Exit {
             .svc => return exitOf(c, ctx, .syscall),
             .interrupted => return .interrupted,
             .t0, .cold => {
-                if (ctx.budget <= 0) return .interrupted;
-                const budget: u64 = if (r == .t0) 1 else @intCast(ctx.budget);
+                // Read once: a kick on another thread can drop it below 0 at any time.
+                const left = if (builtin.cpu.arch == .wasm32) ctx.budget else @atomicLoad(i64, &ctx.budget, .monotonic);
+                if (left <= 0) return .interrupted;
+                const budget: u64 = if (r == .t0) 1 else @intCast(left);
                 const e = runT0Opts(c, ctx, m, budget, if (r == .cold) wasm_t1.cold_branches else 0);
                 if (e != .stopped) return exitOf(c, ctx, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;

@@ -132,9 +132,11 @@ fn runT1(c: *Cpu, ctx: *Ctx, em: emitter.Emitter) vmm.Error!vmm.Exit {
             .svc => return exitOf(c, .syscall),
             .interrupted => return .interrupted,
             .t0, .cold => {
-                if (ctx.budget <= 0) return .interrupted;
+                // Read once: a kick on another thread can drop it below 0 at any time.
+                const left = @atomicLoad(i64, &ctx.budget, .monotonic);
+                if (left <= 0) return .interrupted;
                 const t0_before = c.t0.retired;
-                const budget: u64 = if (r == .t0) 1 else @intCast(ctx.budget);
+                const budget: u64 = if (r == .t0) 1 else @intCast(left);
                 const e = if (r == .t0) t0.run(&c.machine, 1) else t0.runBranches(&c.machine, budget, dispatch.cold_branches);
                 if (ctx.budget != std.math.maxInt(i64)) ctx.budget -= @intCast(c.t0.retired -% t0_before);
                 if (e != .interrupted) return exitOf(c, e);

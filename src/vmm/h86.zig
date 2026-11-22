@@ -185,8 +185,10 @@ fn runT1(cpu: *Cpu, ctx: *Ctx, m: *TlbMem, em: emitter.Emitter) vmm.Error!vmm.Ex
             .svc => return .syscall,
             .interrupted => return .interrupted,
             .t0, .cold => {
-                if (ctx.budget <= 0) return .interrupted;
-                const e = if (r == .t0) runT0(c, ctx, m, 1) else runT0Opts(c, ctx, m, @intCast(ctx.budget), dispatch.cold_branches);
+                // Read once: a kick on another thread can drop it below 0 at any time.
+                const left = if (builtin.cpu.arch == .wasm32) ctx.budget else @atomicLoad(i64, &ctx.budget, .monotonic);
+                if (left <= 0) return .interrupted;
+                const e = if (r == .t0) runT0(c, ctx, m, 1) else runT0Opts(c, ctx, m, @intCast(left), dispatch.cold_branches);
                 if (e != .stopped) return exitOf(c, ctx, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;
             },
@@ -222,8 +224,10 @@ fn runWasmT1(c: *x86cpu.Cpu, ctx: *Ctx, m: *TlbMem) vmm.Error!vmm.Exit {
             .svc => return .syscall,
             .interrupted => return .interrupted,
             .t0, .cold => {
-                if (ctx.budget <= 0) return .interrupted;
-                const budget: u64 = if (r == .t0) 1 else @intCast(ctx.budget);
+                // Read once: a kick on another thread can drop it below 0 at any time.
+                const left = if (builtin.cpu.arch == .wasm32) ctx.budget else @atomicLoad(i64, &ctx.budget, .monotonic);
+                if (left <= 0) return .interrupted;
+                const budget: u64 = if (r == .t0) 1 else @intCast(left);
                 const e = runT0Opts(c, ctx, m, budget, if (r == .cold) wasm_t1.cold_branches else 0);
                 if (e != .stopped) return exitOf(c, ctx, e);
                 if (@atomicLoad(u32, &ctx.exit_request, .seq_cst) != 0) return .interrupted;

@@ -8826,7 +8826,9 @@ test "$serve lists the bound addresses [serve]" {
     var pb: [512]u8 = undefined;
     var ab: [600]u8 = undefined;
     const unix = try std.fmt.bufPrint(&ab, "unix!{s}", .{try scratchPath(&s, &pb, "fs.sock")});
-    const r = try run(e, &.{ "--serve", unix, "--serve", "tcp!127.0.0.1!0", "--rc", "echo $#serve; echo $serve(1); echo $serve(2)" });
+    // One backend: the output depends on a port h9 picks,
+    // which a second backend's run wouldn't repeat.
+    const r = try runOn(e, firstBackend(e), &.{ "--serve", unix, "--serve", "tcp!127.0.0.1!0", "--rc", "echo $#serve; echo $serve(1); echo $serve(2)" }, null);
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     var lines = std.mem.splitScalar(u8, r.out, '\n');
@@ -8939,7 +8941,10 @@ fn dotlRun(e: Env, d: *DotlServer, script: []const u8) !Result {
     var cmd_buf: [1024]u8 = undefined;
     const allow = try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()});
     const cmd = try std.fmt.bufPrint(&cmd_buf, "mkdir -p /n/l; dotlfs {s} /n/l || exit mount; {s}", .{ d.dial(), script });
-    return run(e, &.{ "--net-allow", allow, "--rc", cmd });
+    // One backend: the server's state (its files, and a drop it's set to
+    // make) carries over from one run to the next, so a second backend's
+    // run can't match the first.
+    return runOn(e, firstBackend(e), &.{ "--net-allow", allow, "--rc", cmd }, null);
 }
 
 test "a 9P root is never walked for dev, env, fd, proc, srv, or net [mounts]" {
@@ -9190,11 +9195,13 @@ test "a .L.Z root from the in-memory server survives it dropping the connection 
     defer d.finish(std.testing.io);
     d.lock().drop_after_write = 0;
     d.unlock();
-    const r = try run(e, &.{
+    // One backend: the output depends on the server's state,
+    // which a second backend's run wouldn't repeat.
+    const r = try runOn(e, firstBackend(e), &.{
         "--url", d.url(), "--write=scope", "--rc",
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\cat /net/dotl/*/status
-    });
+    }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -9217,7 +9224,9 @@ test "a 9P2000.L.Z mount moves to the next address when the server isn't the lea
         \\echo led >/n/l/usr/glenda/log && cat /n/l/usr/glenda/log
         \\cat /net/dotl/*/status
     , .{d.dial()});
-    const r = try run(e, &.{ "--net-allow", "tcp!127.0.0.1!1", "--net-allow", try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()}), "--rc", cmd });
+    // One backend: the output depends on the server's state,
+    // which a second backend's run wouldn't repeat.
+    const r = try runOn(e, firstBackend(e), &.{ "--net-allow", "tcp!127.0.0.1!1", "--net-allow", try std.fmt.bufPrint(&allow_buf, "tcp!127.0.0.1!{d}", .{d.port()}), "--rc", cmd }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -9246,11 +9255,13 @@ test "a .L.Z unix socket root survives the server restarting mid-write [dotl]" {
     var relay: UnixRelay = undefined;
     const sock = try scratchPath(&s, &pb, "fs.sock");
     try relay.start(sock, d.port());
-    const r = try run(e, &.{
+    // One backend: the output depends on the server's state,
+    // which a second backend's run wouldn't repeat.
+    const r = try runOn(e, firstBackend(e), &.{
         "--url", try std.fmt.bufPrint(&ab, "unix://{s}", .{sock}), "--write=scope", "--rc",
         \\echo new >/usr/glenda/made && cat /usr/glenda/made
         \\cat /net/dotl/*/status
-    });
+    }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
@@ -10120,7 +10131,9 @@ test "a .L.Z reconnect runs the helper again and sends the new token [credential
         \\cat /n/usr/glenda/log
         \\grep -h reconnects /net/dotl/*/status
     ;
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", s.ns(), "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", script });
+    // One backend: the output depends on the server's state,
+    // which a second backend's run wouldn't repeat.
+    const r = try runOn(e, firstBackend(e), &.{ "--cwd", s.path, "--ns", s.ns(), "--cred", try credArg(&cb, "127.0.0.1", tok), "--rc", script }, null);
     defer r.deinit();
     errdefer std.debug.print("stdout: {s}\nstderr: {s}\n", .{ r.out, r.err });
     try std.testing.expectEqual(0, r.code);
