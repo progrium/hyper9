@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [symlinks-in-root]
 areas: [kern, linux, sandbox]
-branch: []
+branch: [linux-symlinks]
 ---
 
 # Proposal: Linux symlinks resolved in the guest's namespace
