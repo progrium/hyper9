@@ -11,6 +11,7 @@ const real = struct {
     extern fn h9_linux_inview() c_int;
     extern fn h9_linux_dotfd(fd: c_int) ?*anyopaque;
     extern fn h9_linux_dotrestore(old: ?*anyopaque) void;
+    extern fn h9_fs_nofollow(on: c_int) c_int;
     extern fn h9_linux_fdinfo(fd: c_int, dc: *c_int, dev: *c_uint, qpath: *u64, qtype: *c_int, mode: *c_int, cexec: *c_int) c_int;
     extern fn h9_linux_setcputime(user: c_ulong, sys: c_ulong) void;
     extern fn h9_linux_fdchan(fd: c_int, refs: *c_int) usize;
@@ -75,6 +76,9 @@ const stub = struct {
         return null;
     }
     fn h9_linux_dotrestore(_: ?*anyopaque) void {}
+    fn h9_fs_nofollow(_: c_int) c_int {
+        return 0;
+    }
     fn h9_linux_setcputime(_: c_ulong, _: c_ulong) void {}
     fn h9_linux_fdchan(_: c_int, _: *c_int) usize {
         return 0;
@@ -395,6 +399,15 @@ pub fn inView() bool {
 pub fn atDir(fd: i32, comptime T: type, f: anytype, args: anytype) Error!T {
     const old = c.h9_linux_dotfd(fd) orelse return error.Kern;
     defer c.h9_linux_dotrestore(old);
+    return @call(.auto, f, args);
+}
+
+/// Runs `f(args)` with its lookup acting on a link in the path's last
+/// name instead of following it (design/linux-symlinks.md): lstat,
+/// readlink, O_NOFOLLOW, AT_SYMLINK_NOFOLLOW.
+pub fn noFollow(comptime T: type, f: anytype, args: anytype) Error!T {
+    const old = c.h9_fs_nofollow(1);
+    defer _ = c.h9_fs_nofollow(old);
     return @call(.auto, f, args);
 }
 

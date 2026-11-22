@@ -157,6 +157,8 @@ pub fn errno(msg: []const u8) u16 {
         .{ "name too long", E.NAMETOOLONG },
         .{ "too many symbolic links", E.LOOP },
         .{ "too many levels of symbolic links", E.LOOP },
+        // musl's strerror(ELOOP), from a host open that refused a link.
+        .{ "symbolic link loop", E.LOOP },
         .{ "file system full", E.NOSPC },
         .{ "no space left", E.NOSPC },
         .{ "read-only file system", E.ROFS },

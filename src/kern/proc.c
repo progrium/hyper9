@@ -440,6 +440,34 @@ h9_uphproc(void)
 	return uphproc();
 }
 
+/*
+ * Whether the calling process's next lookup acts on a link in its last
+ * name (design/linux-symlinks.md, fscheck.h); h9_fs_nofollow sets it and
+ * returns what it was. A process that isn't h9's always follows.
+ */
+int
+h9_fs_nofollow(int on)
+{
+	Hproc *h;
+	int old;
+
+	if(up == nil || (h = lookup(up)) == nil)
+		return 0;
+	old = h->nofollow;
+	h->nofollow = on;
+	return old;
+}
+
+int
+h9_fs_nofollowing(void)
+{
+	Hproc *h;
+
+	if(up == nil || (h = lookup(up)) == nil)
+		return 0;
+	return h->nofollow;
+}
+
 /* The process with machine-local pid in machine m, with a reference, or nil. */
 Hproc*
 h9_pidlookup(Hmach *m, ulong pid)

@@ -6161,6 +6161,24 @@ test "uncontained bind follows host symlinks as before [symlinks-in-root]" {
     try std.testing.expectEqualStrings("", c.out);
 }
 
+test "a 9front program's walk through a contained tree is unchanged [linux-symlinks]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tree = try linkTree(e, &s, &tb);
+    // Links resolve inside the tree, and a listing shows their targets.
+    const r = try runContained(e, tree, &.{ "--cwd", s.path, "cat", "/etc/hello", "/etc/up" });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("tree hello\ntree hello\n", r.out);
+    try std.testing.expectEqual(0, r.code);
+    const l = try runContained(e, tree, &.{ "--cwd", s.path, "ls", "-l", "/etc/hello" });
+    defer l.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, l.out, "--rw") != null);
+    try std.testing.expectEqual(0, l.code);
+}
+
 test "--print's #U!c bind replays with --ns [symlinks-in-root]" {
     const e = try env(@src());
     var s: Scratch = undefined;
@@ -6502,6 +6520,235 @@ test "/proc/self/exe is the file a Linux program runs, its links followed [linux
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("/bin/busybox\n/bin/busybox\n", r.out);
     try std.testing.expectEqual(0, r.code);
+}
+
+// Linux symlinks (design/linux-symlinks.md). Each case runs sh in the
+// Alpine root with a scratch directory as its cwd, an uncontained host
+// tree, and its own trees mounted or bound into the Linux view: /srv is
+// a directory in the Alpine root to bind over.
+
+/// Runs `script` under sh in the Linux view with `s` as the cwd and
+/// `extra` flags after the Alpine root's, on each backend; checks it
+/// prints `want` and exits 0.
+fn linkCase(le: *const LinuxEnv, s: *const Scratch, extra: []const []const u8, script: []const u8, want: []const u8) !void {
+    var ran = false;
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    while (it.next()) |backend| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ le.h9, "--backend", backend, "--arch", le.arch, "--dir", le.lmount });
+        try argv.appendSlice(gpa, extra);
+        try argv.appendSlice(gpa, &.{ "--cwd", s.path, "sh", "-c", script });
+        const p = try runProcessWith(argv.items, null, null, 120_000);
+        defer gpa.free(p.stdout);
+        defer gpa.free(p.stderr);
+        errdefer std.debug.print("backend {s}\nstdout: {s}\nstderr: {s}\n", .{ backend, p.stdout, p.stderr });
+        try std.testing.expectEqualStrings(want, p.stdout);
+        try std.testing.expect(p.term == .exited and p.term.exited == 0);
+        ran = true;
+    }
+    if (!ran) return error.SkipZigTest;
+}
+
+/// `--dir <s>/name:dst` and `--bind /mnt/term/cwd/name:dst`, in buffers
+/// the case keeps.
+fn dirArg(buf: []u8, s: *const Scratch, name: []const u8, dst: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}:{s}", .{ s.path, name, dst });
+}
+
+fn bindArg(buf: []u8, name: []const u8, dst: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "/mnt/term/cwd/{s}:{s}", .{ name, dst });
+}
+
+/// The scratch trees most cases use: opt/y, a file, and app, with links
+/// to it: x (absolute), rel (relative, out of app), and mid (a directory
+/// link in the middle of a path).
+fn appTree(s: *Scratch) !void {
+    const io = std.testing.io;
+    const d = s.tmp.dir;
+    try d.createDirPath(io, "opt");
+    try d.createDirPath(io, "app");
+    try d.writeFile(io, .{ .sub_path = "opt/y", .data = "y\n" });
+    try symLinkOrSkip(d, io, "/opt/y", "app/x", .{});
+    try symLinkOrSkip(d, io, "../opt/y", "app/rel", .{});
+    try symLinkOrSkip(d, io, "/opt", "app/mid", .{});
+}
+
+test "an absolute link in a bound host tree resolves from the Linux root [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try appTree(&s);
+    var ob: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var ab: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    // The host has no /opt/y: the link names the guest's, another --dir.
+    try linkCase(&le, &s, &.{ "--dir", try dirArg(&ob, &s, "opt", "#L/opt"), "--bind", try bindArg(&ab, "app", "#L/srv") }, "cat /srv/x; readlink /srv/x", "y\n/opt/y\n");
+}
+
+test "an absolute link in one #L layer resolves into another [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const io = std.testing.io;
+    const d = s.tmp.dir;
+    // A runtime layer and a deps layer whose venv links into it, as
+    // h9build stacks an image's layers.
+    try d.createDirPath(io, "runtime/opt/rt/bin");
+    try d.createDirPath(io, "deps/app/venv/bin");
+    try d.writeFile(io, .{ .sub_path = "runtime/opt/rt/bin/python3", .data = "python\n" });
+    try symLinkOrSkip(d, io, "/opt/rt/bin/python3", "deps/app/venv/bin/python", .{});
+    var rb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var db: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try linkCase(&le, &s, &.{ "--dir", try dirArg(&rb, &s, "runtime", "#L"), "--dir", try dirArg(&db, &s, "deps", "#L") }, "cat /app/venv/bin/python; [ -L /app/venv/bin/python ] && echo link", "python\nlink\n");
+}
+
+test "a relative link resolves from its own directory across a bind [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try appTree(&s);
+    var ob: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var ab: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    // ../opt/y from /srv is the guest's /opt/y, not the host's sibling.
+    try s.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "opt/y", .data = "host sibling\n" });
+    var gb: Scratch = undefined;
+    try gb.init();
+    defer gb.deinit();
+    try gb.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "y", .data = "guest\n" });
+    var gob: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    _ = &ob;
+    const gopt = try std.fmt.bufPrint(&gob, "{s}:#L/opt", .{gb.path});
+    try linkCase(&le, &s, &.{ "--dir", gopt, "--bind", try bindArg(&ab, "app", "#L/srv") }, "cat /srv/rel; cd /srv; cat rel", "guest\nguest\n");
+}
+
+test "a dangling link lists and removes [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const io = std.testing.io;
+    const script =
+        \\set -e
+        \\ls pkg; rm -r pkg; [ ! -e pkg ]; echo host
+        \\cd /usr/lib; mkdir pkg; ln -s gone pkg/a; ls pkg; rm -r pkg; [ ! -e pkg ]; echo overlay
+    ;
+    // The script removes the links, so each backend gets them anew.
+    var it = std.mem.tokenizeScalar(u8, le.backends, ',');
+    while (it.next()) |backend| {
+        // Made on the host: one to nothing, one to a path only the guest has.
+        try s.tmp.dir.createDirPath(io, "pkg");
+        try symLinkOrSkip(s.tmp.dir, io, "gone", "pkg/a", .{});
+        try symLinkOrSkip(s.tmp.dir, io, "/etc/alpine-release", "pkg/b", .{});
+        var one = le;
+        one.backends = backend;
+        try linkCase(&one, &s, &.{}, script, "a\nb\nhost\na\noverlay\n");
+    }
+}
+
+/// Runs the symlink fixture's case `name` in the machine's /tmp, in the
+/// root's overlay, and in a `--writable` host directory.
+fn symlinkFixture(le: *const LinuxEnv, name: []const u8) !void {
+    var want_buf: [64]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "ok {s}\n", .{name});
+    try netCase(le, &.{ "/mnt/term/cwd/symlink", name }, want);
+    try netCase(le, &.{ "env", "DIR=/usr/lib", "/mnt/term/cwd/symlink", name }, want);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "DIR=/mnt/term{s}", .{s.path});
+    try netCase(le, &.{ "--writable", s.path, "env", dir, "/mnt/term/cwd/symlink", name }, want);
+}
+
+test "lstat, readlink, and O_NOFOLLOW act on the link [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try symlinkFixture(&le, "nofollow");
+}
+
+test "a loop of links is ELOOP [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try symlinkFixture(&le, "loop");
+}
+
+test "exec of a link and a #! interpreter reached through a link run [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const io = std.testing.io;
+    // In the host tree: a link to busybox by an absolute guest path, and a
+    // script whose interpreter is a link in the overlay.
+    try symLinkOrSkip(s.tmp.dir, io, "/bin/busybox", "echo", .{});
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "script", .data = "#!/root/b/sh\necho script ran\n", .flags = .{ .permissions = .fromMode(0o755) } });
+    try symLinkOrSkip(s.tmp.dir, io, "script", "run", .{});
+    const script =
+        \\set -e
+        \\./echo linked echo
+        \\mkdir -p /root/b; ln -s /bin/busybox /root/b/sh
+        \\./run
+    ;
+    try linkCase(&le, &s, &.{}, script, "linked echo\nscript ran\n");
+}
+
+test "an absolute link in a host tree to a host path the guest doesn't see fails [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const io = std.testing.io;
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "secret", .data = "host\n" });
+    var tb: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    // The host follows it today; the guest has no such path.
+    try symLinkOrSkip(s.tmp.dir, io, try std.fmt.bufPrint(&tb, "{s}/secret", .{s.path}), "h", .{});
+    try linkCase(&le, &s, &.{}, "[ -L h ] && echo link; cat h 2>&1 | grep -c 'No such file'; cat secret", "link\n1\nhost\n");
+}
+
+test "getcwd and .. after a link name the target [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const io = std.testing.io;
+    try s.tmp.dir.createDirPath(io, "a/b");
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "a/in-a", .data = "" });
+    try symLinkOrSkip(s.tmp.dir, io, "a/b", "bl", .{});
+    // sh's own cd is by name; the kernel's .. and getcwd are by the target.
+    const script =
+        \\cd bl; /bin/pwd; readlink /proc/self/cwd; ls ..; cd -P ..; /bin/pwd
+        \\cd /usr/lib; mkdir -p t/u; ln -s t/u tl; cd tl; /bin/pwd; ls ..
+    ;
+    try linkCase(&le, &s, &.{}, script, "/mnt/term/cwd/a/b\n/mnt/term/cwd/a/b\nb\nin-a\n/mnt/term/cwd/a\n/usr/lib/t/u\nu\n");
+}
+
+test "a link in the middle of a path in a host tree resolves from the Linux root [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try appTree(&s);
+    var ob: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var ab: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    // mid -> /opt, which only the guest has as a directory with y in it.
+    try linkCase(&le, &s, &.{ "--dir", try dirArg(&ob, &s, "opt", "#L/opt"), "--bind", try bindArg(&ab, "app", "#L/srv") }, "cat /srv/mid/y; cat app/mid/y", "y\ny\n");
+}
+
+test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try symlinkFixture(&le, "deleted");
 }
 
 // Named pipes (design/linux-fifo.md), with tests/fixtures/linux/fifo.c.

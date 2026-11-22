@@ -135,6 +135,17 @@ h9_linux_inview(void)
 }
 
 /*
+ * Whether the calling process's walks stop at links, for the kernel's
+ * walk to follow from its root (design/linux-symlinks.md): a Linux
+ * process's, whose root is the Linux view.
+ */
+int
+h9_fs_linkwalk(void)
+{
+	return up != nil && h9_linux_inview();
+}
+
+/*
  * Makes fd's directory the calling process's dot, for a walk relative to
  * it (openat and friends), and returns the old dot for h9_linux_dotrestore.
  * The fd's Chan is open and an open Chan can't be cloned, so dot is a

@@ -904,6 +904,10 @@ fn oDirectory(a: vmm.Arch) u32 {
     return if (a == .arm64) 0o40000 else 0o200000;
 }
 
+fn oNofollow(a: vmm.Arch) u32 {
+    return if (a == .arm64) 0o100000 else 0o400000;
+}
+
 /// Plan 9 open flags.
 const OTRUNC = 16;
 const OCEXEC = 32;
@@ -911,6 +915,9 @@ const DMDIR: u32 = 0x80000000;
 /// The mode bit that marks a FIFO's Dir (src/kern/fscheck.h's H9_DMFIFO,
 /// 9P2000.u's DMNAMEDPIPE), since Plan 9 has no file types.
 const DMFIFO: u32 = 0x00200000;
+/// 9P2000.u's DMSYMLINK: a link a Linux process's walk stopped at
+/// (design/linux-symlinks.md, src/kern/fscheck.h).
+const DMSYMLINK: u32 = 0x02000000;
 
 fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
     _ = u;
@@ -1762,6 +1769,13 @@ fn at(dirfd: i32, path: [:0]const u8, comptime T: type, f: anytype, args: anytyp
     return kc.atDir(dirfd, T, f, args);
 }
 
+/// `at`, acting on a link in the path's last name instead of following
+/// it (design/linux-symlinks.md).
+fn atNoFollow(dirfd: i32, path: [:0]const u8, comptime T: type, f: anytype, args: anytype) kern.Error!T {
+    if (dirfd == AT_FDCWD or (path.len > 0 and path[0] == '/')) return kc.noFollow(T, f, args);
+    return kc.atDir(dirfd, T, kc.noFollow, .{ T, f, args });
+}
+
 fn setFlags(p: *Process, fd: i32, f: FdFlags) void {
     p.g.lockSpin();
     defer p.g.lock.unlock();
@@ -1789,6 +1803,12 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     if (std.mem.eql(u8, path, "/dev/tty")) if (kc.ptyBySid(p.sid)) |n| {
         path = std.fmt.bufPrintZ(&tty_buf, pty_dev ++ "/{d}", .{n}) catch unreachable;
     };
+    // /proc/self/fd/N is the file fd N has, which may be gone from its
+    // directory or a pipe: it opens as fd N's dup (#d), as /dev/fd/N
+    // does, not by walking its target's name (design/linux-symlinks.md).
+    if (dirfd == AT_FDCWD or path[0] == '/') if (procFd(p, path)) |n| {
+        path = std.fmt.bufPrintZ(&tty_buf, "#d/{d}", .{n}) catch unreachable;
+    };
     var omode: c_int = switch (flags & O_ACCMODE) {
         0 => kern.OREAD,
         1 => kern.OWRITE,
@@ -1803,7 +1823,14 @@ fn openAt(p: *Process, dirfd: i32, path_va: u64, flags: u32, mode: u32) Err!i64 
     const guard = flags & O_ACCMODE != 0 and flags & O_PATH == 0 and busy.any();
     const trunc = guard and omode & OTRUNC != 0;
     const fd: u31 = blk: {
-        if (at(dirfd, path, u31, kern.open, .{ path, if (trunc) omode & ~@as(c_int, OTRUNC) else omode })) |fd| {
+        // O_NOFOLLOW opens a link as itself, which is ELOOP; with O_PATH
+        // it's followed, as before.
+        const nofollow = flags & oNofollow(p.arch) != 0 and flags & O_PATH == 0;
+        const opened = if (nofollow)
+            atNoFollow(dirfd, path, u31, kern.open, .{ path, if (trunc) omode & ~@as(c_int, OTRUNC) else omode })
+        else
+            at(dirfd, path, u31, kern.open, .{ path, if (trunc) omode & ~@as(c_int, OTRUNC) else omode });
+        if (opened) |fd| {
             if (flags & O_CREAT != 0 and flags & O_EXCL != 0) {
                 kern.close(fd) catch {};
                 return -E.EXIST;
@@ -2635,7 +2662,7 @@ fn kindOfDir(d: *const attr.Dir) attr.Kind {
         'c', 'y', pty_dc => if (d.type == pty_dc and d.qid_type & 0x80 != 0) .auto else .chr,
         // A conversation's data file is a socket's (design/epoch-0/linux-net.md).
         'I' => if (d.qid_type & 0x80 == 0 and d.qid_path & 0xf == ip_qdata) .sock else .auto,
-        else => if (d.mode & DMFIFO != 0 and d.mode & DMDIR == 0) .fifo else if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else if (isListeningUnix(d)) .sock else .auto,
+        else => if (d.mode & DMSYMLINK != 0 and d.mode & DMDIR == 0) .link else if (d.mode & DMFIFO != 0 and d.mode & DMDIR == 0) .fifo else if (d.type == devlinux_dc and d.qid_type & 0x80 == 0 and d.qid_path & devlinux_chr_bit != 0) .chr else if (isListeningUnix(d)) .sock else .auto,
     };
 }
 
@@ -2698,24 +2725,22 @@ fn statAt(p: *Process, dirfd: i32, path_va: u64, buf: u64, flags: u32, fmt: Stat
         if (flags & AT_EMPTY_PATH != 0) return statFd(p, if (dirfd == AT_FDCWD) -1 else dirfd, buf, fmt);
         return -E.NOENT;
     }
-    if (flags & AT_SYMLINK_NOFOLLOW != 0) {
-        if (at(dirfd, path, []u8, kern.readlink, .{ path, &p.name2_buf })) |target| {
-            var b: [1024]u8 = undefined;
-            // The link's own Dir, for its qid and times.
-            const parent = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch 0;
-            var st: attr.Stat = .{ .dev = 0, .ino = 0, .mode = attr.S_IFLNK | 0o777, .nlink = 1, .uid = 0, .gid = 0, .size = target.len, .atime = 0, .mtime = 0 };
-            if (parent > 0) if (attr.Dir.parse(b[0..parent])) |r| {
-                st.dev = attr.devNumber(&r[0]);
-                st.ino = r[0].qid_path ^ 0x8000000000000000;
-                st.mtime = r[0].mtime;
-                st.atime = r[0].atime;
-            };
-            try putStat(p, buf, &st, fmt);
-            return 0;
-        } else |_| {}
-    }
+    // A link is its own Dir when the walk stops at it (DMSYMLINK,
+    // design/linux-symlinks.md), which kindOfDir makes S_IFLNK. /proc's
+    // links are the Linux layer's (procLink), so they're made here.
     var b: [1024]u8 = undefined;
-    const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
+    if (flags & AT_SYMLINK_NOFOLLOW != 0 and path[0] == '/') if (procLink(p, path)) |target| {
+        const n = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return kerr();
+        const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
+        var st = attr.Stat.fromDir(&d, .link, 0, 0);
+        st.size = target.len;
+        try putStat(p, buf, &st, fmt);
+        return 0;
+    };
+    const n = (if (flags & AT_SYMLINK_NOFOLLOW != 0)
+        atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b })
+    else
+        at(dirfd, path, usize, kern.stat, .{ path, &b })) catch return kerr();
     const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
     var st = attr.Stat.fromDir(&d, kindOfDir(&d), 0, 0);
     if (d.type == pty_dc and d.qid_type & 0x80 == 0) st.rdev = ptyRdev(d.qid_path);
@@ -2776,6 +2801,21 @@ fn statExists(dirfd: i32, path: [:0]const u8) bool {
     var b: [512]u8 = undefined;
     _ = at(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
     return true;
+}
+
+/// Whether anything is at path, a link (even a dangling one) included.
+fn lexists(dirfd: i32, path: [:0]const u8) bool {
+    var b: [512]u8 = undefined;
+    _ = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
+    return true;
+}
+
+/// Whether path is a directory itself, not a link to one.
+fn isLdir(dirfd: i32, path: [:0]const u8) bool {
+    var b: [512]u8 = undefined;
+    const n = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch return false;
+    const d, _ = attr.Dir.parse(b[0..n]) orelse return false;
+    return d.mode & DMDIR != 0;
 }
 
 /// fsync and fdatasync: a wstat that changes nothing, which a host file
@@ -2876,23 +2916,23 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
             new_abs = true;
         }
         const base: i32 = if (old_abs and new_abs) AT_FDCWD else if (!old_abs and new_abs) olddir else if (olddir == newdir) olddir else return -E.XDEV;
-        if (!statExists(olddir, old)) return -E.NOENT;
-        if (flags & RENAME_NOREPLACE != 0 and statExists(newdir, new_full)) return -E.EXIST;
-        if (statExists(newdir, new_full)) {
-            const new_dir = isDir(p, newdir, new_full);
-            const old_dir = isDir(p, olddir, old);
+        if (!lexists(olddir, old)) return -E.NOENT;
+        if (flags & RENAME_NOREPLACE != 0 and lexists(newdir, new_full)) return -E.EXIST;
+        if (lexists(newdir, new_full)) {
+            const new_dir = isLdir(newdir, new_full);
+            const old_dir = isLdir(olddir, old);
             if (new_dir and !old_dir) return -E.ISDIR;
             if (!new_dir and old_dir) return -E.NOTDIR;
         }
         const moved = at(base, old, bool, kern.renameAcross, .{ old, new_full }) catch return kerr();
         return if (moved) 0 else -E.XDEV;
     }
-    if (!statExists(olddir, old)) return -E.NOENT;
+    if (!lexists(olddir, old)) return -E.NOENT;
     if (std.mem.eql(u8, old, new)) return 0;
-    if (statExists(newdir, new)) {
+    if (lexists(newdir, new)) {
         if (flags & RENAME_NOREPLACE != 0) return -E.EXIST;
-        const new_dir = isDir(p, newdir, new);
-        const old_dir = isDir(p, olddir, old);
+        const new_dir = isLdir(newdir, new);
+        const old_dir = isLdir(olddir, old);
         if (new_dir and !old_dir) return -E.ISDIR;
         if (!new_dir and old_dir) return -E.NOTDIR;
         at(newdir, new, void, kern.remove, .{new}) catch return kerr();
@@ -2901,7 +2941,7 @@ fn rename(p: *Process, olddir: i32, old_va: u64, newdir: i32, new_va: u64, flags
     const base = basename(new);
     if (base.len > 512) return -E.NAMETOOLONG;
     const msg = (Wstat{ .name = base }).encode(&b);
-    _ = at(olddir, old, usize, kern.wstat, .{ old, msg }) catch return kerr();
+    _ = atNoFollow(olddir, old, usize, kern.wstat, .{ old, msg }) catch return kerr();
     return 0;
 }
 
@@ -3119,19 +3159,7 @@ fn readlink(p: *Process, dirfd: i32, path_va: u64, buf: u64, len: u64) Err!i64 {
 /// The target of a /proc link: /proc/self/exe, /proc/self/cwd and
 /// /proc/self/fd/N for the calling process.
 fn procLink(p: *Process, path: []const u8) ?[]const u8 {
-    const self_prefixes = [_][]const u8{ "/proc/self/", "/proc/thread-self/" };
-    var rest: ?[]const u8 = null;
-    for (self_prefixes) |pre| if (std.mem.startsWith(u8, path, pre)) {
-        rest = path[pre.len..];
-    };
-    if (rest == null and std.mem.startsWith(u8, path, "/proc/")) {
-        const r = path["/proc/".len..];
-        const slash = std.mem.indexOfScalar(u8, r, '/') orelse return null;
-        const pid = std.fmt.parseInt(u32, r[0..slash], 10) catch return null;
-        if (pid != p.pid) return null;
-        rest = r[slash + 1 ..];
-    }
-    const r = rest orelse return null;
+    const r = procSelf(p, path) orelse return null;
     if (std.mem.eql(u8, r, "exe")) return p.exe[0..p.exe_len];
     if (std.mem.eql(u8, r, "cwd")) return kc.getcwd(&p.name2_buf) catch null;
     if (std.mem.startsWith(u8, r, "fd/")) {
@@ -3149,6 +3177,26 @@ fn procLink(p: *Process, path: []const u8) ?[]const u8 {
         return std.mem.sliceTo(&p.name2_buf, 0);
     }
     return null;
+}
+
+/// What follows /proc/self/, /proc/thread-self/, or /proc/<own pid>/ in
+/// path, or null.
+fn procSelf(p: *Process, path: []const u8) ?[]const u8 {
+    const self_prefixes = [_][]const u8{ "/proc/self/", "/proc/thread-self/" };
+    for (self_prefixes) |pre| if (std.mem.startsWith(u8, path, pre)) return path[pre.len..];
+    if (!std.mem.startsWith(u8, path, "/proc/")) return null;
+    const r = path["/proc/".len..];
+    const slash = std.mem.indexOfScalar(u8, r, '/') orelse return null;
+    const pid = std.fmt.parseInt(u32, r[0..slash], 10) catch return null;
+    if (pid != p.pid) return null;
+    return r[slash + 1 ..];
+}
+
+/// N, if path is the calling process's /proc/self/fd/N.
+fn procFd(p: *Process, path: []const u8) ?u31 {
+    const r = procSelf(p, path) orelse return null;
+    if (!std.mem.startsWith(u8, r, "fd/")) return null;
+    return std.fmt.parseInt(u31, r[3..], 10) catch null;
 }
 
 // Terminal.

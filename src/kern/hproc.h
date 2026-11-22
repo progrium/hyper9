@@ -116,6 +116,7 @@ struct Hproc
 	Chan	*textc;		/* the executed image, open, for /proc/n/text; or nil */
 
 	Hproc	*parent;	/* nil with RFNOWAIT or for a machine's first process */
+	int	nofollow;	/* the next lookup acts on a link in its last name (h9_fs_nofollow); only its own thread looks */
 	/*
 	 * A Linux thread's group leader (RFLXTHREAD), or nil: its forks are
 	 * the leader's children, and its Linux waits read the leader's wait

@@ -760,6 +760,16 @@ cclone(Chan *c)
 extern int h9_overlay_lowerdev(int, int, Qid, int*, int*);
 /* h9: devfs-posix.c and devfs-win32.c (src/kern/fscheck.h) */
 extern void h9_fs_anchor(Chan*);
+/* h9: Linux symlinks (design/linux-symlinks.md, src/kern/fscheck.h) */
+extern int h9_fs_linkwalk(void);
+extern int h9_fs_nofollowing(void);
+extern int h9_fs_chanreadlink(Chan*, char*, int);
+enum {
+	Qtsymlink	= 0x02,	/* H9_QTSYMLINK */
+	Maxlinks	= 40,	/* H9_MAXLINKS */
+	Linkbuf		= 4096,
+};
+static int walkl(Chan**, char**, int, int, int*, int, int*);
 
 /* also used by sysfile.c:/^mountfix */
 int
@@ -879,8 +889,101 @@ ewalk(Chan *c, Chan *nc, char **name, int nname)
 int
 walk(Chan **cp, char **names, int nnames, int nomount, int *nerror)
 {
+	int nlinks;
+
+	nlinks = 0;
+	return walkl(cp, names, nnames, nomount, nerror, 1, &nlinks);
+}
+
+/*
+ * h9: the link a Linux process's walk stopped at (design/linux-symlinks.md).
+ * c is the directory the walk had reached, path its name; the device's
+ * walk of the k names from names (k > 0) ended on a link, the last of
+ * them, and rest more names follow it. Walks the link's target and then
+ * the rest: an absolute target from the process's root, a relative one
+ * from the link's directory, so the result's name is the target's.
+ * Returns the walk's result, or nil with the error in errstr.
+ */
+static Chan*
+followlink(Chan *c, Path *path, char **names, int k, char **rest, int nrest, int nomount, int follow, int *nlinks)
+{
+	Walkqid *wq;
+	Chan *lc, *s;
+	char *t, *buf, **nn;
+	int n, nnn, i, r, abs;
+
+	if(++*nlinks > Maxlinks){
+		kstrcpy(up->errstr, "too many symbolic links", ERRMAX);
+		return nil;
+	}
+	/* The link itself, to read its target. */
+	if((wq = ewalk(c, nil, names, k)) == nil)
+		return nil;
+	lc = wq->clone;
+	if(lc == nil || wq->nqid != k){
+		if(lc != nil)
+			cclose(lc);
+		free(wq);
+		kstrcpy(up->errstr, Enonexist, ERRMAX);
+		return nil;
+	}
+	free(wq);
+	buf = smalloc(Linkbuf);
+	if(waserror()){
+		cclose(lc);
+		free(buf);
+		return nil;
+	}
+	n = h9_fs_chanreadlink(lc, buf, Linkbuf);
+	poperror();
+	cclose(lc);
+	if(n <= 0){
+		free(buf);
+		kstrcpy(up->errstr, Enonexist, ERRMAX);
+		return nil;
+	}
+	/* The names to walk: the link's directory's (if relative), the target's, and the rest. */
+	abs = buf[0] == '/';
+	nn = smalloc((k + n + nrest) * sizeof(char*));
+	nnn = 0;
+	if(!abs)
+		for(i = 0; i < k-1; i++)
+			nn[nnn++] = names[i];
+	for(t = buf; *t != '\0'; ){
+		while(*t == '/')
+			*t++ = '\0';
+		if(*t == '\0')
+			break;
+		nn[nnn++] = t;
+		while(*t != '\0' && *t != '/')
+			t++;
+	}
+	for(i = 0; i < nrest; i++)
+		nn[nnn++] = rest[i];
+	if(abs){
+		s = cclone(up->slash);
+		nomount = 0;
+	}else{
+		s = cclone(c);
+		pathclose(s->path);
+		s->path = path;
+		incref(&path->ref);
+	}
+	r = walkl(&s, nn, nnn, nomount, nil, follow, nlinks);
+	free(nn);
+	free(buf);
+	if(r < 0){
+		cclose(s);
+		return nil;
+	}
+	return s;
+}
+
+static int
+walkl(Chan **cp, char **names, int nnames, int nomount, int *nerror, int follow, int *nlinks)
+{
 	int dev, didmount, dotdot, i, n, nhave, ntry, type;
-	Chan *c, *nc, *mtpt;
+	Chan *c, *nc, *mtpt, *wc;
 	Path *path;
 	Mhead *mh, *nmh;
 	Mount *f;
@@ -936,6 +1039,7 @@ walk(Chan **cp, char **names, int nnames, int nomount, int *nerror)
 		
 		type = c->type;
 		dev = c->dev;
+		wc = c;	/* h9: the chan the names were walked from, for followlink */
 
 		if((wq = ewalk(c, nil, names+nhave, ntry)) == nil){
 			/* try a union mount, if any */
@@ -950,6 +1054,8 @@ walk(Chan **cp, char **names, int nnames, int nomount, int *nerror)
 					if((wq = ewalk(f->to, nil, names+nhave, ntry)) != nil){
 						type = f->to->type;
 						dev = f->to->dev;
+						wc = f->to;
+						incref(&wc->ref);
 						break;
 					}
 				runlock(&mh->lock);
@@ -963,6 +1069,52 @@ walk(Chan **cp, char **names, int nnames, int nomount, int *nerror)
 				return -1;
 			}
 		}
+
+		/*
+		 * h9: a Linux process's walk that stopped at a link, with names
+		 * left or at a last name it follows, starts again at the link's
+		 * target (design/linux-symlinks.md), unless a mount point comes
+		 * before the link: the walk crosses that first.
+		 */
+		if(!dotdot && wq->nqid > 0 && (wq->qid[wq->nqid-1].type & Qtsymlink) != 0
+		&& (nhave+wq->nqid < nnames || follow) && h9_fs_linkwalk()){
+			int k;
+
+			k = wq->nqid;
+			nc = nil;
+			nmh = nil;
+			if(!nomount)
+				for(i=0; i<k-1; i++)
+					if(findmount(&nc, &nmh, type, dev, wq->qid[i]))
+						break;
+			if(nc != nil){
+				cclose(nc);
+				putmhead(nmh);
+				nc = nil;
+			}else{
+				if(wq->clone != nil)
+					cclose(wq->clone);
+				free(wq);
+				nc = followlink(wc, path, names+nhave, k, names+nhave+k, nnames-nhave-k, nomount, follow, nlinks);
+				if(wc != c)
+					cclose(wc);
+				cclose(c);
+				pathclose(path);
+				putmhead(mh);
+				if(nc == nil){
+					if(nerror)
+						*nerror = nhave+k;
+					return -1;
+				}
+				cclose(*cp);
+				*cp = nc;
+				if(nerror)
+					*nerror = nnames;
+				return 0;
+			}
+		}
+		if(wc != c)
+			cclose(wc);
 
 		didmount = 0;
 		if(dotdot){
@@ -1195,7 +1347,7 @@ namelenerror(char *aname, int len, char *err)
 Chan*
 namec(char *aname, int amode, int omode, ulong perm)
 {
-	int len, n, t, nomount;
+	int len, n, t, nomount, nofollow, nlinks;
 	Chan *volatile c;
 	Chan *volatile cnew;
 	Path *volatile path;
@@ -1272,6 +1424,7 @@ namec(char *aname, int amode, int omode, ulong perm)
 	e.off = nil;
 	e.nelems = 0;
 	e.nerror = 0;
+	nlinks = 0;
 	if(waserror()){
 		cclose(c);
 		free(e.name);
@@ -1311,7 +1464,13 @@ namec(char *aname, int amode, int omode, ulong perm)
 		e.nelems--;
 	}
 
-	if(walk(&c, e.elems, e.nelems, nomount, &e.nerror) < 0){
+	/*
+	 * h9: a Linux process's lookup follows a link in its last name
+	 * unless it's a remove, or the call says not to (h9_fs_nofollow).
+	 * A create's walk here stops before its last name.
+	 */
+	nofollow = amode == Aremove || (amode != Acreate && h9_fs_linkwalk() && h9_fs_nofollowing());
+	if(walkl(&c, e.elems, e.nelems, nomount, &e.nerror, !nofollow, &nlinks) < 0){
 		if(e.nerror < 0 || e.nerror > e.nelems){
 			print("namec %s walk error nerror=%d\n", aname, e.nerror);
 			e.nerror = 0;
