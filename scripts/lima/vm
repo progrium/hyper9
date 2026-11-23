@@ -117,7 +117,7 @@ cmd_push_root() {
 	log "$os: h9/root ready"
 }
 
-# Runs the tests built by `zig build install install-tests -Demu=unicorn
+# Runs the tests built by `zig build install install-tests
 # --prefix zig-out/<os>` (plus -Dtarget, see README.md) in the guest, on
 # the emulator, against h9/root. The test binaries get no terminal from
 # ssh; the interactive cases make their own (tests/term.zig).

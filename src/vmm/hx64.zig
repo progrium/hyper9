@@ -1,5 +1,5 @@
 //! hx64: h9's own CPU for amd64 binaries, as a Guest of vmm/hcpu.zig
-//! (-Demu=hcpu), which has the interface. It's h86 in long mode
+//! (the emulator backend), which has the interface. It's h86 in long mode
 //! (design/hcpu.md, hx64): the same decoder, T0, and lifter in
 //! src/interp/x86/ and src/jit/x86/, instantiated with `.long`.
 //!
@@ -322,7 +322,7 @@ fn runWasmT1(c: *x86cpu.Cpu64, ctx: *Ctx, m: *tlb.TlbMem) vmm.Error!vmm.Exit {
 }
 
 /// 9front's VectorSYSCALL (pc/io.h), which its amd64 kernel puts in
-/// Ureg.type for a system call, as unicorn.zig does.
+/// Ureg.type for a system call.
 const vector_syscall = 64;
 
 /// The vmm exit for T0's, leaving Ureg.type and the registers as the real

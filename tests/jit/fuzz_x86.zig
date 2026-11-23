@@ -1,6 +1,6 @@
 //! zig build fuzz-x86 [-- options]: random 386 programs (src/jit/check/
-//! gen_x86.zig) run on h86's T0 and, with -Demu=unicorn, checked against
-//! Unicorn an instruction at a time: registers, EIP, the EFLAGS bits the
+//! gen_x86.zig) run on h86's T0 and, with Unicorn's prebuilt library
+//! fetched, checked against Unicorn an instruction at a time: registers, EIP, the EFLAGS bits the
 //! instruction defines, memory, and the exit; and, region by region, the
 //! lifter in ir_eval against T0 (check.zig's region check).
 //!
@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var args = try common.Args(gen.Class).parse("fuzz-x86", init);
     if (!options.unicorn) args.lockstep = false;
-    std.debug.print("fuzz-x86: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
+    std.debug.print("fuzz-x86: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs scripts/fetch.sh unicorn)" });
     if (!args.lockstep and !args.check) {
         std.debug.print("fuzz-x86: nothing to compare T0 with; running T0 alone for crashes\n", .{});
     }

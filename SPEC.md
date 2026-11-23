@@ -42,7 +42,7 @@ h9 is a small Zig library and CLI that runs native 9front executables directly o
 | Language | Zig 0.16.x (`minimum_zig_version` in `build.zig.zon`) | Change versions only when we hit a blocking bug. drawterm's C is compiled with `zig cc`. |
 | Terminal | Text mode on the host TTY; with `--gfx`, one host window drawn by drawterm's GUI backends ([gfx](design/epoch-0/gfx.md)) | consctl `rawon`; the interrupt key posts an `interrupt` note |
 | Guest exit mechanism | MMIO doorbell (`OUT` on x86) | Works the same on all three hypervisors |
-| Emulator | A user-mode emulator backend: Unicorn (`-Demu=unicorn`), or h9's own CPUs, ha64, h86, and hx64 (`-Demu=hcpu`, [hcpu](design/hcpu.md)) | For development and CI on hosts and VMs without a usable hypervisor |
+| Emulator | A user-mode emulator backend on h9's own CPUs, ha64, h86, and hx64 ([hcpu](design/hcpu.md)), built into every `h9` | For development and CI on hosts and VMs without a usable hypervisor |
 | No-hypervisor native | On Linux x86\_64, guest code runs on the host CPU in a stub process per address space, with Syscall User Dispatch and seccomp turning its syscalls into exits ([native-backend](design/epoch-0/native-backend.md)) | For containers and cloud VMs without KVM, at native speed; an explicit `--backend native`, since it shares h9's process and isn't a security boundary, so `auto` never selects it |
 | Browser host | h9 on wasm32-wasi, with coroutines on JSPI, and 386 binaries on h9's own CPU (h86) | One machine per Web Worker; the same build runs under Node for the tests |
 
@@ -58,7 +58,7 @@ This file is the overview. Each part of h9 is described, as built, in a file und
 
 | File | What it describes |
 | --- | --- |
-| [spec/engines.md](spec/engines.md) | The `vmm` interface; the hypervisor backends (HVF, KVM, and WHP), the native backend, and the emulator backend on Unicorn; and the guest shims |
+| [spec/engines.md](spec/engines.md) | The `vmm` interface; the hypervisor backends (HVF, KVM, and WHP), the native backend, and the emulator backend; and the guest shims |
 | [spec/jit.md](spec/jit.md), [spec/h86.md](spec/h86.md), [spec/hx64.md](spec/hx64.md), [spec/ha64.md](spec/ha64.md) | h9's own CPUs for the emulator: the layer they share, and each architecture |
 | [spec/kernel.md](spec/kernel.md) | The process model; and the kernel: drawterm's `kern/`, what h9 adds to it, and the Zig/C seam rules |
 | [spec/abi-plan9.md](spec/abi-plan9.md) | The 9front binary ABI, a.out loading, the syscall table, and Go programs |

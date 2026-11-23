@@ -11,7 +11,7 @@ Requires Zig 0.16.x and Xcode (for the macOS SDK and `codesign`).
 
 ```sh
 . scripts/env.sh               # Zig cache and tools live in .local/ (gitignored); puts zig-out/bin (h9) on PATH
-./scripts/fetch.sh             # 9front source at the pinned release, 9front arm64 image, prebuilt and patched-source Unicorn, and the Alpine roots into .local/ (or name parts: fetch.sh iso386, fetch.sh alpine-amd64)
+./scripts/fetch.sh             # 9front source at the pinned release, 9front arm64 image, prebuilt Unicorn (zig build lockstep's oracle), and the Alpine roots into .local/ (or name parts: fetch.sh iso386, fetch.sh alpine-amd64)
 zig build mkroot               # extracts the 9front root tree into .local/9front/root (~1 min, ~250 MB)
 ```
 
@@ -104,7 +104,7 @@ zig build web-test # the demo page, and the canvas cases (tests/web/gfx.mjs), in
 zig build hcpu-web # the wasm emitter's suite (tests/jit/suite.mjs) in Chromium
 zig build x86-jit  # h86's [hcpu] cases (tests/x86.zig) on T0 and T1; zig build hcpu runs them too
 zig build x64-jit  # hx64's [hcpu] cases (tests/x64.zig) on T0 and T1; zig build hcpu runs them too
-zig build -Demu=hcpu -Dhcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
+zig build -Dhcpu-debug  # src/interp and src/jit built Debug too (by default they're ReleaseFast in a Debug h9)
 zig build clean    # removes zig-out and .zig-cache (not the fetched .local tree)
 ```
 
@@ -127,7 +127,7 @@ without it.
 [built-in root](design/epoch-0/builtin-root.md), `#Hroot`, which h9 uses when it
 finds no root tree, so `h9 --rc 'ls'` works with nothing but the binary. It
 takes `slim-<release>-<arch>` for each architecture the build runs (the
-target's, and with `-Demu=unicorn` also `amd64` and `386`) from
+target's, `amd64`, and `386`) from
 `-Dbuiltin-root` (default `.local/9front`). An architecture without a tree
 for the pinned release gets the built-in root's directories only, and
 `zig build` warns; `-Drelease` fails instead.
@@ -142,9 +142,9 @@ integration cases; release builds don't (`-Dguest-test` overrides it).
 
 The emulator backend is hcpu, h9's own CPUs ([hcpu](design/hcpu.md)): ha64
 for arm64, h86 for 386, and hx64 for amd64, each with a JIT (T1) and an
-interpreter (T0). It's MIT, and `-Demu=hcpu` is the default on arm64 and
-x86-64 targets, so every `h9` has it; `-Demu=none` leaves it out, and
-`-Dno-jit` builds the interpreter alone. `H9_EMU_TIER=t0` or `t1` picks a
+interpreter (T0). It's MIT and always built in on arm64 and x86-64
+targets, so every `h9` has it, and `-Dno-jit` builds the interpreter
+alone. There's no other emulator to build ([retire-unicorn](design/retire-unicorn.md)). `H9_EMU_TIER=t0` or `t1` picks a
 tier at run time, for tests:
 
 ```sh
@@ -156,14 +156,13 @@ zig build integration -Dbackends=emu -Djit-check # every compiled region checked
 zig build bench                                  # compute and syscall speed, emu against the hypervisor
 ```
 
-`-Demu=unicorn` builds the Unicorn backend instead (GPLv2), for lockstep
-testing against hcpu (`zig build lockstep`, and the fuzzers' lockstep
-mode) and Go's own test suite (`zig build go-stdtest`); it's never
-released. It links the prebuilt Unicorn that `scripts/fetch.sh` fetches,
-or with `-Dunicorn=source`, the patched source
-([third_party/unicorn](third_party/unicorn/README.md)). The prebuilt
-libraries exist for macOS arm64 and Linux musl only, so Windows always
-builds it from source. kern builds for Windows with drawterm's win32 files, so h9.exe
+Unicorn is kept as a test oracle only: `zig build lockstep`
+([tools/lockstep.zig](tools/lockstep.zig)), and the fuzzers' lockstep
+mode, check T0 against it an instruction at a time. They link the
+prebuilt library that `scripts/fetch.sh unicorn` fetches, for macOS arm64
+and Linux arm64 and x86\_64 (built for musl there), and `zig build
+lockstep` fails with that hint without it. It's GPLv2, so nothing else
+links it. kern builds for Windows with drawterm's win32 files, so h9.exe
 runs programs on the emulator, and host paths are `/C:/...` in `#U`. On
 Windows x86\_64, h9.exe also has the WHP backend ([whp](design/epoch-0/whp.md)):
 it needs the Windows Hypervisor Platform feature (Settings >
@@ -224,8 +223,8 @@ the [ci workflow](.github/workflows/ci.yml) gets the amd64 root for the
 integration cases on KVM.
 
 The demo page runs over a WebSocket 9P server with `?root=ws://…/9p`. The
-integration run's WebSocket cases need `-Demu=unicorn` too (with
-`-Dtarget=x86_64-linux-musl` on Linux), since their 9P server is a native h9.
+integration run's WebSocket cases serve their roots from a native h9 on
+the emulator.
 
 The web host's only network is WebSockets: `#I` is masked, and `--net`
 (outbound by default) binds `/net/ws` alone at `/net`. The browser does the
@@ -270,11 +269,10 @@ The Go programs in [tests/fixtures/go](tests/fixtures/go) are built by
 `zig build go-fixtures` into `zig-out/fixtures/go`, as
 `GOOS=plan9 GOARCH=amd64` with `GOTOOLCHAIN=go$GO_VERSION` from
 [scripts/pins.sh](scripts/pins.sh), so any installed Go fetches the same
-toolchain. `zig build integration` builds them when `go` is on `PATH` and h9
-is built with `-Demu=unicorn` or the cases run on the native backend, and
+toolchain. `zig build integration` builds them when `go` is on `PATH`, and
 their cases run on native when it's in the list, else on the emulator;
 without Go they skip. They don't need the root tree.
-`zig build go-stdtest -Demu=unicorn` runs Go's own tests for `time`,
+`zig build go-stdtest` runs Go's own tests for `time`,
 `syscall`, `os`, and `runtime` on the emulator and prints pass, skip, and
 fail counts for each ([scripts/go-stdtest.sh](scripts/go-stdtest.sh), with
 the tests it skips in `scripts/go-stdtest.skip`; `zig build go-stdtest -- os`
@@ -331,13 +329,13 @@ Windows, plus emulated x86\_64 Linux) for testing the emu backend on hosts
 without a usable hypervisor:
 
 ```sh
-zig build -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
+zig build -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm up linux
 scripts/lima/vm push linux zig-out/linux/bin/h9 zig-out/fixtures/hello
 scripts/lima/vm shell linux ./h9/h9 --backend emu ./h9/hello
 scripts/lima/vm push-root linux             # the root tree, into ~/h9/root
 
-zig build install install-tests -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
+zig build install install-tests -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm test linux                  # backend and integration tests on the emulator
 ```
 
@@ -352,9 +350,9 @@ Each GitHub release has two sets of binaries, built by
 | `h9-web-<version>.tar.gz` | MIT | the browser host: `h9.wasm`, `h9-web.js`, `h9-node`, the demo page, and its root archive |
 | `SHA256SUMS` | | checksums |
 
-Releases used to include `h9-emu`, h9 built with Unicorn (GPLv2), for
-hosts without a usable hypervisor. hcpu replaced it, so it isn't released
-anymore. The script builds every binary from an unpacked `git archive` of
+Releases used to include `h9-emu`, a GPLv2 build of h9 for hosts without
+a usable hypervisor. hcpu replaced it, so it isn't released anymore, and
+every release asset is MIT. The script builds every binary from an unpacked `git archive` of
 the commit, so what ships is exactly what was committed, and runs on macOS,
 which cross-compiles the other targets.
 
@@ -377,12 +375,11 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `src/syscall.zig`, `src/guestmem.zig` | the 9front syscall table, and checked access to guest memory |
 | `src/loader.zig` | loads an a.out into an address space, builds the stack and Tos |
 | `src/aout.zig` | a.out parser and arch layouts |
-| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, and emu, on Unicorn or h9's own CPUs, which the browser host uses), with the guest-physical allocator and page tables the hypervisor backends share |
-| `src/hcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (`-Demu=hcpu`): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
+| `src/vmm.zig`, `src/vmm/` | hypervisor interface and backends (HVF, KVM, WHP, native, and emu, on h9's own CPUs, which the browser host uses too), with the guest-physical allocator and page tables the hypervisor backends share |
+| `src/hcpu.zig`, `src/jit/`, `src/interp/` | h9's own CPUs for the emulator (hcpu): the JIT's IR and its reference evaluator, the runtime ABI, the emitters (arm64, wasm), the front ends (`a64/`), and the interpreters and software TLB the two tiers share. `src/jit/README.md` has the contracts |
 | `src/web.zig`, `src/web/` | the browser host: coroutines on JSPI, its `std.Io` and console, the JS host (`h9-web.js`, `h9-node`, `worker.js`, `wasi-mem.js`, and `statictree.js` for static dotfs trees) and the demo page |
 | `src/arch/` | per-architecture Ureg/ABI and the guest shims |
 | `third_party/drawterm` | vendored drawterm (git subtree; kern and libraries). Local changes: the sandbox hooks in `kern/devfs-posix.c` and `kern/devfs-win32.c` |
-| `third_party/unicorn`, `build/unicorn.zig` | patches, per-host config headers, and the Zig build for Unicorn from source (GPLv2; source fetched, not vendored) |
 | `tests/backends.zig` | backend conformance tests |
 | `tests/integration.zig` | real 9front binaries through the h9 CLI |
 | `tests/term.zig` | a pty (ConPTY on Windows) for the interactive integration cases |
@@ -391,4 +388,4 @@ development builds report `git describe` (`-Dversion=V` overrides it).
 | `tests/jit/` | the wasm emitter's checks: a runtime module standing in for h9.wasm, a random region generator, the suite (`suite.mjs`) and its Node and Chromium drivers, and `bench.mjs`, which times installs and tier-up in V8 |
 | `tools/mkroot.zig` | `zig build mkroot`: builds the 9front root tree from the pinned image |
 | `scripts/release.sh` | builds the release assets (`h9` and `h9-web`) into `dist/` |
-| `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn (for `-Demu=unicorn`), test VMs |
+| `.local/` | gitignored: tools, caches, upstream clones, 9front images, prebuilt Unicorn (the lockstep oracle), test VMs |

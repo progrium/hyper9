@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [hcpu]
 areas: [vmm, build, tests]
-branch: []
+branch: [retire-unicorn]
 ---
 
 # Proposal: Retire Unicorn as an engine
@@ -31,7 +31,7 @@ Once [hcpu](hcpu.md) is implemented, h9's own CPUs run every guest on every host
 - **The source build goes.** `build/unicorn.zig`, `third_party/unicorn/`, and the patched-source fetch in `scripts/fetch.sh` are deleted.
 - **The release path goes.** `scripts/release.sh` no longer builds `h9-emu` or its source tarball, and README.md, LICENSE, and DEVELOPING.md no longer describe a GPLv2 build.
 - **The uses move to hcpu.** `mkroot` for another architecture, the WebSocket cases' server, `go-stdtest`, and `zig build bench`'s emulator rows run on hcpu.
-- **The oracle stays.** `zig build lockstep` keeps comparing T0 against Unicorn, instruction by instruction. `src/vmm/lockstep.zig` moves to `tools/`, links the prebuilt `libunicorn.a` when it's been fetched, and fails with a hint when it hasn't. Nothing else links it.
+- **The oracle stays.** `zig build lockstep` and the fuzzers' lockstep mode keep comparing T0 against Unicorn, instruction by instruction. `src/vmm/lockstep.zig` moves to `tools/`, links the prebuilt `libunicorn.a` when it's been fetched, and fails with a hint when it hasn't. The fuzzers link it when it's there and run without lockstep when it isn't. Nothing else links it.
 
 ## Rationale
 
@@ -56,12 +56,12 @@ None. Guests reach nothing new, and one engine's worth of code leaves the truste
 
 ## Done criteria
 
-- [ ] `git grep -il unicorn` finds only `tools/lockstep.zig`, its build step, `scripts/` lines that fetch the prebuilt library, `design/`, and the spec's one paragraph on the oracle.
-- [ ] `zig build -Demu=unicorn` fails with a message that hcpu is built in.
-- [ ] `zig build lockstep` passes for h86, ha64, and hx64 with the library fetched, and fails with a hint without it.
+- [x] `git grep -il unicorn` finds only `tools/lockstep.zig` and its aarch64 compat stub, its build step, the fuzzers that use it (`tests/jit/fuzz_*.zig` and `src/jit/check/fuzz_a64.zig`), `scripts/` lines that fetch the prebuilt library, `design/`, the spec's one paragraph on the oracle, and DEVELOPING.md's.
+- [x] `zig build -Demu=unicorn` fails with a message that hcpu is built in.
+- [x] `zig build lockstep` passes for h86, ha64, and hx64 with the library fetched, and fails with a hint without it.
 - [ ] `zig build mkroot` for amd64 on an arm64 host, the web integration run's WebSocket cases, and `zig build go-stdtest` pass on hcpu.
 - [ ] `scripts/release.sh` produces no `h9-emu` asset.
-- [ ] [spec/engines.md](../spec/engines.md) has no Unicorn engine section, and README.md, LICENSE, and DEVELOPING.md describe one licence.
+- [x] [spec/engines.md](../spec/engines.md) has no Unicorn engine section, and README.md, LICENSE, and DEVELOPING.md describe one licence.
 
 ## Implementation
 
@@ -75,3 +75,8 @@ None. Guests reach nothing new, and one engine's worth of code leaves the truste
 
 - Whether to remove the oracle too. It would take another independent 386 implementation to check h86 against, such as QEMU's user mode run as a separate process, and lockstep by instruction over a process boundary is slow. As written, the oracle stays.
 - Whether this lands before or after [renames](renames.md). Before is less work for renames.
+
+## Updates
+
+- 2026-11-23: Work started on the `retire-unicorn` branch. The fuzzers (`zig build fuzz-a64`, `fuzz-x86`, and `fuzz-x64`) were also users of Unicorn as an oracle, which Background didn't list, so they keep their lockstep mode: they link the prebuilt library when it's been fetched and run with the region check alone when it hasn't. The Proposal's oracle bullet and the first Done criteria item say so. On Linux the prebuilt library is for musl, so the tools that link it are built for the host architecture's musl target, whatever `-Dtarget` says. The emu demos, which ran only with `-Demu=unicorn`, now run on hcpu, and `tools/workloads/run.sh` takes T0 as its reference where there's no native run.
+- 2026-11-23: On an x86-64 Linux VM with no KVM: `zig build test` passes; `zig build lockstep` passes its four tests (arm64, i386, and amd64) with the library fetched and fails with the fetch hint without it; `fuzz-a64`, `fuzz-x86`, and `fuzz-x64` ran 300 programs each in lockstep with no divergence; `zig build mkroot` built `/amd64` on hcpu, the mirror of the arm64 host case; `zig build integration -Dweb -Darch=arm64` passes 28 of the 37 `[websocket-9p]` cases with the native h9 on hcpu as their server, skips 8, and fails `--net=outbound binds only /net/ws on the web host`, which doesn't use the server; and `zig build go-stdtest -- time` passes 177 of `time`'s tests on hcpu, with two failing because the guest can't see the host's GOROOT. mkroot on an arm64 host and `scripts/release.sh`, which runs on macOS, are still to check.

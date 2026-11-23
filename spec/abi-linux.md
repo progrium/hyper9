@@ -158,7 +158,7 @@ With `--arch 386` (the browser host's only architecture), i386 ELF32 programs ru
 
 Calls come through `int 0x80` and the i386 table; `ia32.serve` in `sys.zig` joins split 64-bit arguments, maps the `*_time64` calls and the `*32`/`*64` forms onto the generic calls, and serves the multiplexers (`socketcall`, `ipc`) and the old forms (`old_mmap`, `old_select`, the 64-byte `stat`), while the generic calls read `long`s, pointers, `iovec`s, `msghdr`s, `rusage`, and `siginfo` at the process's word size.
 
-TLS is `set_thread_area`'s GDT entry 6 (selector `0x33`), whose base is the vCPU's `X86Extra.tls`: the emulator keeps a read-only GDT page at `0xFFFFF000` per engine (with flat ring-0 code and data loaded at start, since any segment load otherwise makes QEMU drop Unicorn's 32-bit stack flag), and v86's shim GDT has the entry, rewritten when the base changes.
+TLS is `set_thread_area`'s GDT entry 6 (selector `0x33`), whose base is the vCPU's `X86Extra.tls`, which h86's selector table holds ([h86](h86.md)).
 
 Signals use i386's `rt_sigframe` and old `sigframe`; `sigreturn` keeps `%gs` only if it's the TLS selector.
 

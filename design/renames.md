@@ -20,9 +20,9 @@ Four of h9's names no longer say what they name. A personality becomes an ABI. T
 Each name was right when it was chosen, and h9 has since grown past it.
 
 - **Personality.** [linux-personality](epoch-0/linux-personality.md) added Linux as a guest inside a Plan 9 runner, and "personality" fit: one native system and a mask. Linux is now the larger consumer of the kernel, and what's picked at exec is a binary format, a system call table, a signal or note frame, and a default view of the namespace. That's an ABI, and the spec already says so: [spec/abi-plan9.md](../spec/abi-plan9.md) and [spec/abi-linux.md](../spec/abi-linux.md) are named for it, while their text, 124 identifiers and comments under `src/`, and the proposal checklist in [README.md](README.md) still say personality.
-- **`vmm` and backend.** `src/vmm.zig` began as a wrapper over three hypervisor APIs. Of the six implementations behind it now, three are hypervisors (HVF, KVM, and WHP). The others are stub processes on Syscall User Dispatch, Unicorn, and h9's own interpreter and JIT, and [spec/engines.md](../spec/engines.md) is already named for what they have in common. "Backend" also names drawterm's GUI backends (`--gfx`), so "the backend" needs a qualifier every time.
+- **`vmm` and backend.** `src/vmm.zig` began as a wrapper over three hypervisor APIs. Of the five implementations behind it now, three are hypervisors (HVF, KVM, and WHP). The others are stub processes on Syscall User Dispatch and h9's own interpreter and JIT, and [spec/engines.md](../spec/engines.md) is already named for what they have in common. "Backend" also names drawterm's GUI backends (`--gfx`), so "the backend" needs a qualifier every time.
 - **`native`.** [native-backend](epoch-0/native-backend.md) named it for running guest code on the host CPU. Every hypervisor does that too, so the name doesn't tell it apart, and `hvf`, `kvm`, and `whp` are each named for the host feature they're built on. This one is built on Syscall User Dispatch.
-- **`emu`, hcpu, and `v86`.** The CLI says `--backend emu`, the build says `-Demu=hcpu`, the code says hcpu, and `v86` is still accepted. Once [hcpu](hcpu.md) is implemented, `emu` in a release build means hcpu and nothing else.
+- **`emu`, hcpu, and `v86`.** The CLI says `--backend emu`, the code says hcpu, and `v86` is still accepted. Since [retire-unicorn](retire-unicorn.md), `emu` means hcpu and nothing else, in every build.
 
 The names appear in these places today:
 
@@ -30,7 +30,7 @@ The names appear in these places today:
 | --- | --- |
 | CLI | `--backend auto\|hvf\|kvm\|whp\|native\|emu`, with `v86` as an alias of `emu`; `--check` and `--version` list "backends" |
 | `Machine` API | `Machine.Options.backend`, `vmm.BackendKind`, `vmm.Backend`, and `error.BackendNotBuilt` |
-| Build | `-Dbackends` for `zig build integration`; `-Demu=unicorn\|hcpu` |
+| Build | `-Dbackends` for `zig build integration` |
 | Environment | `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, and `H9_EMU_NO_CODEGEN` |
 | Source | `src/vmm.zig` and `src/vmm/`; `src/vmm/native.zig`, `native_abi.zig`, and `native_stub.zig`; `src/hcpu.zig`, `src/interp/`, `src/jit/`, and the CPUs in `src/vmm/`; `src/linux/`; `src/aout.zig`, `src/loader.zig`, and `src/syscall.zig` |
 | Prose | SPEC.md, `spec/`, README.md, MANUAL.md, DEVELOPING.md, AGENTS.md, `docs/`, the site, and comments |
@@ -44,14 +44,14 @@ The names appear in these places today:
 | personality | ABI | "The Linux ABI" and "the 9front ABI". A process has one, picked at exec. |
 | `vmm`, backend | engine | What runs a process's code and turns its system calls and faults into exits. "Backend" is kept for the GUI backends. |
 | `native` | `sud` | For Syscall User Dispatch, as `kvm` is for KVM. Prose says "the sud engine". |
-| `emu`, `v86` | `hcpu` | h9's own CPUs. h86, ha64, hx64, T0, and T1 keep their names. A `-Demu=unicorn` build's emulator is the `unicorn` engine. |
+| `emu`, `v86` | `hcpu` | h9's own CPUs. h86, ha64, hx64, T0, and T1 keep their names. |
 | browser host, web host | web host | One term for the wasm32-wasi build, under Node or in a page. "Browser" is for what only a page has. |
 
 Machine, kernel, root, plan, policy, shim, and the device names don't change.
 
 ### CLI
 
-- `--engine auto|hvf|kvm|whp|sud|hcpu` replaces `--backend`. In a `-Demu=unicorn` build, `unicorn` is a value too.
+- `--engine auto|hvf|kvm|whp|sud|hcpu` replaces `--backend`.
 - `--backend` is accepted as an alias of `--engine`, and `native`, `emu`, and `v86` as aliases of `sud`, `hcpu`, and `hcpu`, for one release. The usage text and the manual don't mention them. After that release each is a usage error, as [hcpu](hcpu.md) already says of `v86`.
 - `--check` and `--version` say "engines" where they say "backends", and name them `sud` and `hcpu`.
 - `--print` and exit codes don't change.
@@ -59,7 +59,7 @@ Machine, kernel, root, plan, policy, shim, and the device names don't change.
 ### The `Machine` API, the build, and the environment
 
 - `Machine.Options.backend` becomes `Machine.Options.engine`. The `vmm` module becomes `engine`, with `engine.Choice` for `vmm.BackendKind`, `engine.Engine` for `vmm.Backend`, `engine.Kind`'s fields `sud` and `hcpu`, and `error.EngineNotBuilt`. There are no aliases: the Zig API isn't stable yet, and a compile error names the fix.
-- `-Dbackends` becomes `-Dengines`, with the new values. `-Demu=unicorn|hcpu` keeps its name, since it picks which emulator is built in.
+- `-Dbackends` becomes `-Dengines`, with the new values. There's no `-Demu` to rename: [retire-unicorn](retire-unicorn.md) removed it.
 - `H9_EMU_TIER`, `H9_EMU_DETERMINISTIC`, and `H9_EMU_NO_CODEGEN` become `H9_HCPU_TIER`, `H9_HCPU_DETERMINISTIC`, and `H9_HCPU_NO_CODEGEN`, with no aliases. They're for tests and debugging.
 - The page's `createMachine` doesn't take an engine, and doesn't change.
 
@@ -71,9 +71,9 @@ Only the directories whose names change move:
 src/
   engine.zig         was vmm.zig
   engine/            was vmm/
-    hvf.zig, kvm.zig, whp.zig, unicorn.zig, none.zig, ...
+    hvf.zig, kvm.zig, whp.zig, none.zig, ...
     sud.zig, sud_abi.zig, sud_stub.zig     were native*.zig
-    hcpu/            was src/hcpu.zig, src/interp/, src/jit/, and vmm/{hcpu,h86,ha64,hx64,x86,lockstep}.zig
+    hcpu/            was src/hcpu.zig, src/interp/, src/jit/, and vmm/{hcpu,h86,ha64,hx64,x86}.zig
   abi/
     plan9/           was src/aout.zig, src/loader.zig, and src/syscall.zig
     linux/           was src/linux/

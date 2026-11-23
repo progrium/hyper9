@@ -1,7 +1,7 @@
 //! fuzz-a64's checks on one program, without Unicorn: T1 against T0 a
 //! region at a time (check.zig), from the entry to the SVC. The driver
-//! (tests/jit/fuzz_a64.zig) adds lockstep against Unicorn when it's built
-//! with -Demu=unicorn.
+//! (tests/jit/fuzz_a64.zig) adds lockstep against Unicorn when its
+//! prebuilt library has been fetched.
 
 const std = @import("std");
 const check = @import("../check.zig");

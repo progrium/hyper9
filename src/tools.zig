@@ -282,7 +282,7 @@ pub fn explain(want: vmm.BackendKind, err: anyerror) []const u8 {
             else => "no usable hypervisor",
         },
         error.BackendNotBuilt => switch (want) {
-            .emu, .auto => "the emulator isn't built into this h9 (build it with -Demu=hcpu)",
+            .emu, .auto => "the emulator isn't built into this h9 (it's built for arm64 and x86-64 targets)",
             else => "not built into this h9",
         },
         error.WrongArch => "can't run this architecture",

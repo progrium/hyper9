@@ -8,7 +8,7 @@
 //! Then the compute benchmarks (tests/bench/*.c: fib, sieve, md5, qsort,
 //! and a double-precision loop), built as arm64 and 386 text by build.zig,
 //! on every backend that runs them, and on the emulator once per tier (T0
-//! and T1, through H9_EMU_TIER, with -Demu=hcpu). Each run's exit message is
+//! and T1, through H9_EMU_TIER). Each run's exit message is
 //! its checksum, which must match the same C run natively.
 
 const std = @import("std");
@@ -350,8 +350,8 @@ pub fn main(init: std.process.Init) !void {
     if (bad) std.process.exit(1);
 }
 
-/// The emulator once per tier (H9_EMU_TIER) where it has tiers
-/// (-Demu=hcpu); every other backend once.
+/// The emulator once per tier (H9_EMU_TIER) where it's built in; every
+/// other backend once.
 fn tiersOf(kind: vmm.BackendKind) []const ?[:0]const u8 {
     return if (kind == .emu and vmm.hcpu != null) &.{ "t0", "t1" } else &.{null};
 }

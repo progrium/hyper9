@@ -15,10 +15,7 @@ This describes, as built, the `vmm` interface, the hypervisor, native, and emula
   - [Speed](#speed)
 - [Emulator backend (`emu`)](#emulator-backend-emu)
   - [Scope](#scope)
-  - [How the Unicorn backend works](#how-the-unicorn-backend-works)
-  - [Atomics](#atomics)
   - [Memory](#memory)
-  - [Implementation](#implementation)
   - [What it's for](#what-its-for)
   - [Limits and selection](#limits-and-selection)
 - [Guest shims](#guest-shims)
@@ -172,73 +169,31 @@ On a 4-CPU cloud VM without KVM, an awk loop that takes 10.7 s on emu takes 0.24
 
 The emulator lets the system run anywhere, including VMs without nested virtualization, at reduced speed. It implements the same Backend, AddressSpace, Vcpu, and Exit contract, so everything above the vmm layer runs unchanged.
 
-`-Demu=hcpu`, the default on arm64 and x86-64 targets and what releases ship, builds it on h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, which [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), [spec/hx64.md](hx64.md), and [spec/jit.md](jit.md) describe ([hcpu](../design/hcpu.md)). `-Demu=unicorn` builds it on Unicorn instead, for lockstep testing against hcpu and for Go's own test suite; it isn't released. The rest of this section describes the Unicorn backend, apart from the hcpu numbers under Limits and selection.
+It's hcpu, h9's own CPUs: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the backend is created ([hcpu](../design/hcpu.md)). [spec/jit.md](jit.md) describes the backend and what the CPUs share, and [spec/ha64.md](ha64.md), [spec/h86.md](h86.md), and [spec/hx64.md](hx64.md) each CPU. It's MIT, and it's built into every `h9` for an arm64 or x86-64 target and into the web host; there's no build option to leave it out or to pick another emulator.
 
 ### Scope
 
 User-mode arm64, amd64, and 386 code only. On an `SVC`, `SYSCALL`, or `INT $64`, or on a fault, the emulator fills the Ureg and returns the exit itself, doing the shim's job. There's no guest kernel mode, no system registers, and no MMU. The shim is tested only on real hypervisors.
 
-### How the Unicorn backend works
-
-Each vCPU is one Unicorn engine, running arm64 at EL0, amd64 in flat 64-bit mode, or 386 in `UC_MODE_32`, whose segments are all based at 0 as 9front's are for user code; the 386 Ureg's selectors are the values 9front gives user mode, kept in the Ureg rather than the engine.
-
-Guest pages come from one reserved range of host memory, twice the memory cap in address space (`src/vmm/arena.zig`: first fit below a bump pointer; a freed range is given back to the host, mapped over with fresh zero pages on POSIX and decommitted on Windows, so neither allocation nor free touches the pages), and each engine maps that range once, with `uc_mem_map_ptr`, as its physical memory at 4 GiB. So the host and the guest share the pages and syscall arguments are read in place. An address space is a list of regions of that memory.
-
-Engines run in Unicorn's virtual-TLB mode (`UC_TLB_VIRTUAL`): a `UC_HOOK_TLB_FILL` hook finds a guest page's region by binary search in the engine's sorted copy of the list, taken when the vCPU runs after a change, so a change never touches Unicorn's memory map, whose every change rebuilds it.
-
-A region gone or changed flushes the engine's TLB, and only an executable one drops its translated blocks (`UC_CTL_TB_REMOVE_CACHE` over its range, while the old copy still translates it), since blocks are keyed by physical address.
-
-The fill hook sees only the page, so an access the guest may not make (unmapped, or without the permission) gets a trap entry instead: one of eight physical pages with nothing behind them, recorded with the guest page, which the access then reaches with its offset intact, through `UC_HOOK_MEM_INVALID`; the fault's address is the guest page plus that offset. A run after trap entries flushes the TLB first, so their slots can be reused.
-
-Hooks stop the engine: `UC_HOOK_INTR` for `SVC` and 386 `INT $64` (and other exceptions), `UC_HOOK_INSN` for amd64 `SYSCALL`, and `UC_HOOK_MEM_INVALID` for faults. After a syscall stop the PC is already past the instruction, as with a hypervisor; after a fault it's at the faulting instruction. `Ureg.type` (`trap` on 386) holds what the real kernel puts there for a syscall (the ESR on arm64, vector 64 on x86).
-
-Unicorn has no FXSAVE register, so `getExtra` and `setExtra` assemble the image on both x86 architectures from the x87 control, status, tag, and opcode registers, `ST0`–`ST7` (in stack order, as FXSAVE has them, with the status word and its TOP written first), MXCSR, and the XMM registers; XMM8–15 stay zero on 386.
-
-`kick` sets two flags: one the next run checks before it starts, and a stop request that a `UC_HOOK_BLOCK` hook sees at the engine's next block, on its own thread, where it calls `uc_emu_stop`.
-
-On arm64, `CNTKCTL_EL1` lets EL0 read the counter and its frequency, as Linux does.
-
-### Atomics
-
-Unicorn generates code for a single-threaded context (its `curr_cflags` never sets `CF_PARALLEL`), so guest atomics (x86 `LOCK` instructions, arm64 exclusives, and LSE atomics) become plain loads and stores, and engines running at once on shared memory would race through them; a Go program's runtime fails with "unlock of unlocked lock".
-
-So a backend runs guest code on one engine at a time, through a ticket lock held across each `uc_emu_start`; kernel calls run outside it, so processes still block in the kernel in parallel.
-
-The lock passes at exits, and is time-sliced: a waiter that has waited 1 ms for the same holder sets the holder's stop request, and the holder stops at its next block and returns `interrupted` ([linux-threads](../design/epoch-0/linux-threads.md)), so a guest spinning without syscalls (a spinlock waiting on another thread) doesn't hold the others off.
-
-The stop is made from the block hook, not by `uc_emu_stop` from the waiter's thread, since an engine stopped from another thread can report the PC of an earlier block than the one it stopped in, and resuming it would run instructions twice. A kick that arrives while an engine waits for the lock is seen once it has it.
-
-An engine copies the address space's regions (`sync`) only after taking the lock, mapping and unmapping just the regions that changed and flushing translated blocks only when one went away, so `AddressSpace.shootdown`, which takes and passes on the lock, guarantees no engine still runs with mappings from before a change.
-
 ### Memory
 
-Guest pages come from the reserved range above, whose pages are zero and stay unbacked until touched, and rfork's eager copy skips pages that are still zero (`src/segment.zig`), so the several hundred MB of `brk` a Go program reserves at start cost next to nothing until it uses them. They still count against `--memory`.
+Guest pages come from one reserved range of host memory, twice the memory cap in address space (`src/vmm/arena.zig`: first fit below a bump pointer; a freed range is given back to the host, mapped over with fresh zero pages on POSIX and decommitted on Windows, so neither allocation nor free touches the pages), and the host and the guest share the pages, so syscall arguments are read in place. An address space is a list of regions of that memory.
 
-### Implementation
-
-The backend uses Unicorn Engine. It's a C library built on QEMU's CPU core, covers arm64 and x86\_64, and has hooks for syscall instructions and invalid memory accesses.
-
-It's GPLv2, so it sits behind a build flag (`-Demu=unicorn`) and never goes into a release. Before hcpu, releases shipped it separately as `h9-emu`, a GPLv2 binary with its complete corresponding source; hcpu replaced it, and it isn't released anymore.
-
-We link the prebuilt static `libunicorn.a` from Unicorn's PyPI wheels (pinned in `scripts/pins.sh`, fetched by `scripts/fetch.sh`) rather than building its CMake tree: macOS arm64, and Linux arm64 and x86\_64 with musl, which is Zig's default Linux target.
-
-There are no Windows wheels, so emu on Windows (arm64 and x86\_64) is built from source with our own `build.zig` (`-Dunicorn=source`, `build/unicorn.zig`). amd64 binaries are tested on Linux x86\_64 only; there's no amd64 on Darwin.
+Its pages are zero and stay unbacked until touched, and rfork's eager copy skips pages that are still zero (`src/segment.zig`), so the several hundred MB of `brk` a Go program reserves at start cost next to nothing until it uses them. They still count against `--memory`.
 
 ### What it's for
 
-- Developing and testing on any host or VM: macOS, Linux, Windows, and hosted CI runners.
-- Cross-architecture runs, for testing only: amd64 binaries on an arm64 Mac, and the reverse.
+- Running on any host or VM without a usable hypervisor: macOS, Linux, Windows, hosted CI runners, and the browser.
+- Cross-architecture runs: amd64 and 386 binaries on an arm64 host, and arm64 binaries on an x86-64 one.
 - Conformance: the backend cases in `tests/backends.zig` run against every backend built in.
 
 ### Limits and selection
 
-Measured with `zig build bench -Demu=unicorn` ([tests/bench.zig](../tests/bench.zig)) on an M3 Max (macOS, release build of Unicorn 2.1.4): a 2-instruction loop of 10⁹ iterations takes 0.27 s on HVF, 1.4 s on emu for arm64 (about 1.5 G instructions/s; Unicorn's code generation, not our hooks) and 1.9 s on emu for amd64. A `pwrite` syscall round trip costs about 0.8 µs on emu, a little less than HVF's 1.1 µs: a bare exit and re-entry takes about 0.35 µs on emu, which never leaves the process, and about 0.8 µs on HVF, which goes through the shim, EL2, and the macOS kernel each way.
+Measured with `zig build bench` ([tests/bench.zig](../tests/bench.zig); [hcpu](../design/hcpu.md#updates) has the table): on GitHub's macOS runner, an Apple silicon VM, a 2-instruction loop of 10⁹ iterations takes 1.09 s for arm64, 2.17 s for amd64, and 2.29 s for 386 on T1; on an x86-64 Linux VM, 0.60, 3.39, and 3.88 s. T0 runs it in about 12 to 28 s. A `pwrite` round trip costs 0.5 to 1 µs, and a bare exit and re-entry 56 to 110 ns, since the emulator never leaves the process. Four busy amd64 threads run 3.3 to 4 times as fast as one on 4-core Linux hosts.
 
-On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loop takes 0.35 s for amd64, and a `pwrite` round trip about 28 µs, of which about 19 µs is the bare `OUT` exit and re-entry, each going through both hypervisors; KVM on bare metal is far cheaper.
+On HVF on an M3 Max, the same loop takes 0.27 s, a `pwrite` round trip about 1.1 µs, and a bare exit and re-entry about 0.8 µs, which goes through the shim, EL2, and the macOS kernel each way. On KVM in a nested x86\_64 VM (an exe.dev VM on Intel VT-x, Linux 6.12), the loop takes 0.35 s for amd64, and a `pwrite` round trip about 28 µs, of which about 19 µs is the bare `OUT` exit and re-entry, each going through both hypervisors; KVM on bare metal is far cheaper.
 
-So syscall-heavy work such as rc pipelines runs at close to hypervisor speed, arm64 compute runs about 5× slower, and amd64 compute about 7× slower; that's fine for tests, and tolerable for self-hosted builds.
-
-On hcpu, with `zig build bench -Demu=hcpu` ([hcpu](../design/hcpu.md#updates) has the table): on GitHub's macOS runner, an Apple silicon VM, the loop takes 1.09 s for arm64, 2.17 s for amd64, and 2.29 s for 386 on T1, against Unicorn's 3.14, 3.65, and 3.52 s there; on an x86-64 Linux VM, 0.60, 3.39, and 3.88 s, against 4.06, 6.37, and 5.59 s. T0 runs it in about 12 to 28 s. A `pwrite` round trip costs 0.5 to 1 µs, and a bare exit and re-entry 56 to 110 ns, since the emulator never leaves the process. Four busy amd64 threads run 3.3 to 4 times as fast as one on 4-core Linux hosts, where Unicorn's run no faster.
+So syscall-heavy work such as rc pipelines runs at hypervisor speed or better, and compute runs a few times slower; that's fine for tests, and tolerable for self-hosted builds.
 
 By default `h9` uses the host's hypervisor when it's available, and otherwise falls back to the emulator with a warning; it never selects the native backend, which shares h9's process and isn't a security boundary. `--backend emu|hvf|kvm|native|whp|v86` forces a choice, and `--backend native` warns that it isn't a security boundary; `v86`, the browser host's old backend, is an alias of `emu` ([browser-host](../design/epoch-0/browser-host.md)).
 

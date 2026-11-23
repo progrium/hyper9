@@ -32,7 +32,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [memory-model](memory-model.md) |  | draft | needs baseline-1 | One memory model under both ABIs |
 | [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
-| [retire-unicorn](retire-unicorn.md) |  | draft |  | Retire Unicorn as an engine |
+| [retire-unicorn](retire-unicorn.md) |  | draft | in progress on retire-unicorn | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 | [fd-mounts](fd-mounts.md) |  | draft |  | Mounting a 9P connection from a host descriptor |
 | [upper-layers](upper-layers.md) |  | draft |  | Writable layers on the host |

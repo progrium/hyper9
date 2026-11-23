@@ -7,8 +7,8 @@
 //! `.none`, its arithmetic bits (CF, PF, AF, ZF, SF, and OF) are stale and
 //! `lazy` says what they are; DF and the rest are always in `bits`.
 //!
-//! Undefined flags follow QEMU (and so Unicorn), so lockstep against it
-//! compares all six: AF is 0 after logic operations, shifts, and
+//! Undefined flags follow QEMU (and so lockstep's oracle), so lockstep
+//! against it compares all six: AF is 0 after logic operations, shifts, and
 //! multiplies; SF, ZF, and PF after a multiply come from the low half of
 //! the result; and OF after a shift of more than one bit is computed as
 //! for one bit.

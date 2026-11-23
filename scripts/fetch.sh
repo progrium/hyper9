@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Fetches the 9front source at the pinned release, the pinned 9front arm64
-# image, prebuilt Unicorn libraries, the patched Unicorn source, and the
+# image, prebuilt Unicorn libraries (zig build lockstep's oracle), and the
 # Alpine roots into .local, and on request the release's 386 or amd64 ISO,
 # one architecture's Alpine root, the browser host's Linux demo root, the
 # workloads' Linux root, diod, and ZeroFS.
 #
-#   scripts/fetch.sh [part...]   (parts: src image unicorn unicorn-src
+#   scripts/fetch.sh [part...]   (parts: src image unicorn
 #                                 alpine alpine-arm64 alpine-amd64
 #                                 alpine-386 iso386 isoamd64
 #                                 alpinearm64web workloads diod zerofs;
-#                                 default src, image, unicorn,
-#                                 unicorn-src, and alpine)
+#                                 default src, image, unicorn, and
+#                                 alpine)
 #
 # alpine is all three alpine-<arch> roots. alpinearm64web needs
 # alpine-arm64 and workloads needs alpine-amd64, so each fetches it.
@@ -20,9 +20,9 @@ set -euo pipefail
 
 mkdir -p "$H9_LOCAL"/{bin,src,cache,9front,unicorn}
 
-parts=" ${*:-src image unicorn unicorn-src alpine} "
+parts=" ${*:-src image unicorn alpine} "
 for p in $parts; do
-	case $p in src|image|unicorn|unicorn-src|alpine|alpine-arm64|alpine-amd64|alpine-386|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
+	case $p in src|image|unicorn|alpine|alpine-arm64|alpine-amd64|alpine-386|iso386|isoamd64|alpinearm64web|workloads|diod|zerofs) ;;
 	*) echo "fetch: unknown part '$p'" >&2; exit 2 ;; esac
 done
 want() { [[ $parts == *" $1 "* ]]; }
@@ -94,29 +94,6 @@ echo "$UNICORN_WHEELS" | while read -r name tag sha; do
 	fi
 	echo "unicorn/$name: $UNICORN_VERSION"
 done
-fi
-
-# Unicorn source: unpacked into .local/src/unicorn with our patches applied.
-# A stamp holds the tarball hash and the patches' hashes, so it's redone only
-# when either changes.
-if want unicorn-src; then
-src="$H9_LOCAL/src/unicorn"
-patches=("$H9_ROOT"/third_party/unicorn/patches/*.patch)
-stamp="$UNICORN_SRC_SHA256 $(cat "${patches[@]}" | shasum -a 256 | cut -d' ' -f1)"
-if [ "$(cat "$src/.h9-stamp" 2>/dev/null || true)" != "$stamp" ]; then
-	tgz="$H9_LOCAL/cache/unicorn-$UNICORN_VERSION.tar.gz"
-	curl -fsSL -o "$tgz" "$UNICORN_SRC_URL"
-	echo "$UNICORN_SRC_SHA256  $tgz" | shasum -a 256 -c --quiet
-	rm -rf "$src" "$src.tmp" && mkdir -p "$src.tmp"
-	tar -xzf "$tgz" -C "$src.tmp" --strip-components 1
-	for p in "${patches[@]}"; do
-		patch -s -p1 -d "$src.tmp" <"$p" || { echo "fetch: $p doesn't apply" >&2; exit 1; }
-	done
-	echo "$stamp" >"$src.tmp/.h9-stamp"
-	mv "$src.tmp" "$src"
-	rm -f "$tgz"
-fi
-echo "src/unicorn: $UNICORN_VERSION + ${#patches[@]} patches"
 fi
 
 # Alpine roots for the Linux personality's tests: each a layer blob from

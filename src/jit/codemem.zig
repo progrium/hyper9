@@ -12,7 +12,7 @@
 //!   as in a macOS VM, the mapping is RWX and `probe` checks that it works.
 //! - Linux: a memfd mapped twice, RW and RX, so no page is ever writable and
 //!   executable at the same address. arm64 cleans and invalidates the caches
-//!   by hand (`dc cvau` / `ic ivau`, as unicorn.zig's clearCache does).
+//!   by hand (`dc cvau` / `ic ivau`, then `dsb ish` and `isb`).
 //!   Under a binary translator that misses writes through the other view
 //!   (Rosetta or QEMU running x86_64 Linux on arm64), and only there, it
 //!   falls back to one RWX mapping, which those translators watch. Native
@@ -401,8 +401,8 @@ const linux = struct {
 
     /// Cleans the data cache by the written view and invalidates the
     /// instruction cache by the executed one (the I-cache may be indexed
-    /// by virtual address, so it has to be the address that runs). Same
-    /// sequence as unicorn.zig's clearCache, with its `dsb ish` after `ic ivau`.
+    /// by virtual address, so it has to be the address that runs), with a
+    /// `dsb ish` after `ic ivau`.
     fn clearCache(rw: usize, rx: usize, len: usize) void {
         const ctr = asm volatile ("mrs %[ctr], ctr_el0"
             : [ctr] "=r" (-> u64),

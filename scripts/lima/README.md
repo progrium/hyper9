@@ -10,11 +10,11 @@ installed for building: cross-compile h9 on the host and copy it in.
 
 | OS | Build |
 | --- | --- |
-| `linux` | `zig build -Demu=unicorn -Dtarget=aarch64-linux-musl` |
-| `linux-amd64` | `zig build -Demu=unicorn -Dtarget=x86_64-linux-musl` |
-| `linux-kvm` | `zig build -Demu=unicorn -Dtarget=aarch64-linux-musl` |
-| `macos` | `zig build -Demu=unicorn` |
-| `windows` | `zig build -Demu=unicorn -Dtarget=aarch64-windows` (Unicorn from source), or `x86_64-windows`, which runs under Windows' x64 emulation; add `H9_TEST_ARCH=arm64` for its integration tests |
+| `linux` | `zig build -Dtarget=aarch64-linux-musl` |
+| `linux-amd64` | `zig build -Dtarget=x86_64-linux-musl` |
+| `linux-kvm` | `zig build -Dtarget=aarch64-linux-musl` |
+| `macos` | `zig build` |
+| `windows` | `zig build -Dtarget=aarch64-windows`, or `x86_64-windows`; add `H9_TEST_ARCH=arm64` for its integration tests |
 
 Use `--prefix zig-out/<os>` to keep the builds apart.
 
@@ -36,7 +36,7 @@ export LIMA_HOME=$PWD/.local/lima
 ## Usage
 
 ```sh
-zig build -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
+zig build -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm up linux                    # create (first time), start, provision
 scripts/lima/vm push linux zig-out/linux/bin/h9 zig-out/fixtures/hello  # into ~/h9
 scripts/lima/vm shell linux ./h9/h9 --backend emu ./h9/hello
@@ -67,7 +67,7 @@ emulator. Build them first with the same target as the table above, adding
 `install-tests`:
 
 ```sh
-zig build install install-tests -Demu=unicorn -Dtarget=aarch64-linux-musl --prefix zig-out/linux
+zig build install install-tests -Dtarget=aarch64-linux-musl --prefix zig-out/linux
 scripts/lima/vm test linux                  # both sets
 scripts/lima/vm test windows integration    # just one
 H9_TEST_PENDING=1 scripts/lima/vm test macos integration  # include cases of proposals that aren't implemented

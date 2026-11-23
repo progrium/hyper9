@@ -2,11 +2,10 @@
 # tools/workloads/run.sh [-n] [FILTER]: the real-world workloads on each
 # tier, with their output checked against a reference and their wall time.
 #
-# Tiers (TIERS, space-separated; default "native unicorn t1 t0"):
+# Tiers (TIERS, space-separated; default "native t0 t1"):
 #   t1       h9 --backend emu, the zig emulator's default (JIT) tier
 #   t0       the same with H9_EMU_TIER=t0, the interpreter alone
-#   unicorn  h9 built with -Demu=unicorn
-#   nojit    h9 built with -Demu=hcpu -Dno-jit (in .local/workloads/h9-nojit),
+#   nojit    h9 built with -Dno-jit (in .local/workloads/h9-nojit),
 #            T0 with no code generator compiled in
 #   native   the host itself, chrooted (as root), for 386 Linux on an
 #            x86-64 Linux host; skipped elsewhere
@@ -14,16 +13,14 @@
 #            h9-zig's), for arm64 on an arm64 host
 #
 # The reference output is the first tier in TIERS to finish: native
-# where there is one, else Unicorn.
+# where there is one, else T0, the interpreter.
 # Workloads whose name doesn't contain FILTER are skipped; -n lists them.
-# Needs tools/workloads/roots.sh first, a ReleaseFast h9 for each
-# emulator, and .local/9front/root (NINE_ROOT) for the 9front ones:
+# Needs tools/workloads/roots.sh first, a ReleaseFast h9, and
+# .local/9front/root (NINE_ROOT) for the 9front ones:
 #
-#   zig build -Demu=hcpu -Doptimize=ReleaseFast -p .local/workloads/h9-zig
-#   zig build -Demu=unicorn -Doptimize=ReleaseFast -p .local/workloads/h9-unicorn
+#   zig build -Doptimize=ReleaseFast -p .local/workloads/h9-zig
 #
-# (on Linux, -Demu=unicorn also needs -Dtarget=<arch>-linux-musl). Outputs
-# and a results table go to .local/workloads/out/; TIMEOUT is each run's
+# Outputs and a results table go to .local/workloads/out/; TIMEOUT is each run's
 # limit in seconds, where the host has timeout(1) or gtimeout.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -32,7 +29,7 @@ W="$repo/.local/workloads"
 OUT="$W/out"
 NINE="${NINE_ROOT:-$repo/.local/9front/root}"
 TIMEOUT="${TIMEOUT:-3600}"
-TIERS="${TIERS:-native unicorn t1 t0}"
+TIERS="${TIERS:-native t0 t1}"
 mkdir -p "$OUT"
 
 list=0
@@ -72,7 +69,6 @@ h9() { # tier arch cwd cmd
 	local backend=emu te=""
 	case $tier in t0 | t1) te="H9_EMU_TIER=$tier" ;; esac
 	case $tier in
-	unicorn) bin="$W/h9-unicorn/bin/h9" ;;
 	nojit) bin="$W/h9-nojit/bin/h9" ;;
 	hvf | kvm) bin="${H9:-$W/h9-zig/bin/h9}" backend=$tier ;;
 	*) bin="$W/h9-zig/bin/h9" ;;
