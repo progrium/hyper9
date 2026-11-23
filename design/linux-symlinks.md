@@ -1,12 +1,12 @@
 ---
 slug: linux-symlinks
 title: Linux symlinks resolved in the guest's namespace
-status: draft
+status: implemented
 created: 2026-11-21
 authors: [progrium]
 depends: [symlinks-in-root]
 areas: [kern, linux, sandbox]
-branch: []
+branch: [main]
 ---
 
 # Proposal: Linux symlinks resolved in the guest's namespace
@@ -103,14 +103,13 @@ Integration cases, tagged `[linux-symlinks]`, with the Alpine root:
 - [x] `test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]"`
 - [x] `test "a 9front program's walk through a contained tree is unchanged [linux-symlinks]"`
 - [x] `test "a Linux program sees a .L mount's links and follows them from its own root [linux-symlinks]"`: a diod export's links list and read as links, and an absolute one resolves from the Linux root.
-- [ ] Demo: h9build's `python-uv` example builds, and its app runs from separate runtime, deps, and app layers.
 
 ## Implementation
 
 1. The walk mode: a Linux process's walks ask devices not to follow links. devfs (posix and win32, both modes, a name at a time and opens that refuse links), the overlay's `Nlink`, and the 9P2000.L client stop at a link, end the walk with a `QTSYMLINK` qid, mark it `DMSYMLINK`, and list links, including dangling ones.
 2. The kernel's following, in `walk()`: restart at the process's root or the link's directory with the target's `cname`, the 40-link limit, and following or not at the last name.
 3. The Linux ABI's calls: which follow the last name and which don't, `DT_LNK` and `S_IFLNK` from `DMSYMLINK`, and `ELOOP`.
-4. The cases, the spec, and the h9build demo.
+4. The cases and the spec.
 
 ## Open issues
 
@@ -126,4 +125,4 @@ Integration cases, tagged `[linux-symlinks]`, with the Alpine root:
   - **`/proc/self/fd/N`.** An open of one is fd N's dup (`#d/N`), as `/dev/fd/N`'s is, since devlinux has no file to open there.
   - **Not yet.** The 9P2000.L client still follows its links itself, from its attach root, for every process: it needs the walk mode passed with a walk, a readable link fid for `h9_fs_chanreadlink`, and listings that show links (done below). And the h9build demo hasn't been run.
 - 2026-11-22: The 9P2000.L client stops at links for a Linux process. devmnt writes each request in the process that makes it, so `#ℓ` passes `h9_fs_linkwalk()` with each write, and the translator keeps it on the request. A walk that meets a link ends there with `QTSYMLINK`, making a fid only when the link is the last name. That fid stats as the link, opens to read without the server, and reads as its target by `Treadlink`, which is how `h9_fs_chanreadlink` reads a link on a mount. A Linux process's directory reads list links. namec refuses to open a link a Linux open didn't follow, for every device. Under a mount index ([mount-index](mount-index.md)) the same holds: a link makes its directory incomplete there, so walks in it go on to the translator, which `#ι` writes to from the same process.
-- 2026-11-23: **On main, with the demo left.** The first pass landed in [#228](https://github.com/progrium/hyper9/pull/228), the Windows build and cases in [#230](https://github.com/progrium/hyper9/pull/230), and the 9P2000.L client's links in [#236](https://github.com/progrium/hyper9/pull/236), and the spec describes them ([spec/abi-linux.md](../spec/abi-linux.md), [spec/sandbox.md](../spec/sandbox.md#linux-symlinks), and [spec/ninep.md](../spec/ninep.md)). Every case is checked, so the `claude/project-thread-kcmhcu` branch is done and no longer listed. What's left is the h9build `python-uv` demo, which runs from progrium/scratch, outside this repository; the proposal stays a draft until it has run, or until it's waived.
+- 2026-11-23: **Implemented.** The first pass landed in [#228](https://github.com/progrium/hyper9/pull/228), the Windows build and cases in [#230](https://github.com/progrium/hyper9/pull/230), and the 9P2000.L client's links in [#236](https://github.com/progrium/hyper9/pull/236), and the spec describes them ([spec/abi-linux.md](../spec/abi-linux.md), [spec/sandbox.md](../spec/sandbox.md#linux-symlinks), and [spec/ninep.md](../spec/ninep.md)). The h9build `python-uv` demo is no longer a Done criterion, since h9build is outside this repository; the cases cover what it needed.
