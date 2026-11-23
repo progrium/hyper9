@@ -607,6 +607,93 @@ test "devfs checks the file it opened, not the path it was given [baseline]" {
     try std.testing.expectEqualStrings("secret\n", data);
 }
 
+test "a link through a directory, a .. in a link, or a chain of links can't reach outside the bound trees [baseline]" {
+    // devfs follows host links for a 9front program, so the check must
+    // resolve every element of the path, not only the last: each of these
+    // names a file outside every bound tree through a link earlier in it.
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    var other: Scratch = undefined;
+    try other.init();
+    defer other.deinit();
+    const io = std.testing.io;
+    try other.tmp.dir.createDirPath(io, "d");
+    try other.tmp.dir.writeFile(io, .{ .sub_path = "d/secret", .data = "secret\n" });
+    try s.tmp.dir.createDirPath(io, "sub");
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "sub/f", .data = "inside\n" });
+    var lp: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    // dl: an absolute link to the outside directory. up: a relative one
+    // that climbs out of the cwd with .., to the same place. c1: a chain
+    // of links ending in dl. in: a link that stays inside, which works.
+    try symLinkOrSkip(s.tmp.dir, io, try std.fmt.bufPrint(&lp, "{s}/d", .{other.path}), "dl", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, io, try std.fmt.bufPrint(&lp, "../{s}/d", .{std.fs.path.basename(other.path)}), "up", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, io, "dl", "c2", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, io, "c2", "c1", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, io, "sub", "in", .{ .is_directory = true });
+    const script =
+        \\for(f in dl/secret up/secret c1/secret sub/../dl/secret){
+        \\    ls $f >[2]/dev/null || echo no stat $f
+        \\    cat $f >[2]/dev/null || echo no read $f
+        \\}
+        \\@{echo x >dl/new} >[2]/dev/null || echo no create
+        \\cat in/f
+    ;
+    const r = try run(e, &.{ "--cwd", s.path, "--rc", script });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("no stat dl/secret\nno read dl/secret\nno stat up/secret\nno read up/secret\nno stat c1/secret\nno read c1/secret\nno stat sub/../dl/secret\nno read sub/../dl/secret\nno create\ninside\n", r.out);
+    try std.testing.expect(!other.exists("d/new"));
+
+    // dl itself is walked to as the link, not its target: its stat is
+    // the link's own, so the outside directory's length doesn't show.
+    // Give that directory entries enough to tell the two apart.
+    for (0..200) |i| {
+        var nb: [64]u8 = undefined;
+        try other.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&nb, "d/padding-name-to-grow-the-directory-{d}", .{i}), .data = "" });
+    }
+    const l = try run(e, &.{ "--cwd", s.path, "--rc", "ls -l dl" });
+    defer l.deinit();
+    var fields = std.mem.tokenizeAny(u8, l.out, " \n");
+    var length: []const u8 = "";
+    for (0..6) |_| length = fields.next() orelse "";
+    var want_buf: [32]u8 = undefined;
+    const target = try std.fmt.bufPrint(&lp, "{s}/d", .{other.path});
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{d}", .{target.len}), length);
+}
+
+test "--read-deny holds for a path reached through links and .. [baseline]" {
+    const e = try env(@src());
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const io = std.testing.io;
+    try s.tmp.dir.createDirPath(io, "priv");
+    try s.tmp.dir.createDirPath(io, "sub");
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "priv/.env", .data = "secret\n" });
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "ok", .data = "ok\n" });
+    // Links inside the cwd, which is allowed, to the denied directory and
+    // the file in it, and one to the cwd itself in a subdirectory.
+    try symLinkOrSkip(s.tmp.dir, io, "priv", "pl", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, io, "priv/.env", "el", .{});
+    try symLinkOrSkip(s.tmp.dir, io, "..", "sub/top", .{ .is_directory = true });
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&p, "{s}/priv", .{s.path});
+    const script =
+        \\for(f in priv/.env pl/.env sub/top/priv/.env sub/../priv/.env){
+        \\    ls $f >[2]/dev/null || echo no stat $f
+        \\    cat $f >[2]/dev/null || echo no read $f
+        \\}
+        \\cat el >[2]/dev/null || echo no read el
+        \\@{echo x >pl/new} >[2]/dev/null || echo no create
+        \\cat sub/top/ok
+    ;
+    const r = try run(e, &.{ "--cwd", s.path, "--read-deny", deny, "--rc", script });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("no stat priv/.env\nno read priv/.env\nno stat pl/.env\nno read pl/.env\nno stat sub/top/priv/.env\nno read sub/top/priv/.env\nno stat sub/../priv/.env\nno read sub/../priv/.env\nno read el\nno create\nok\n", r.out);
+    try std.testing.expect(!s.exists("priv/new"));
+}
+
 test "masked devices can't be attached [baseline]" {
     const e = try env(@src());
     const r = try run(e, &.{ "ls", "#U/" });
@@ -6818,6 +6905,37 @@ test "a link in the middle of a path in a host tree resolves from the Linux root
     var ab: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // mid -> /opt, which only the guest has as a directory with y in it.
     try linkCase(&le, &s, &.{ "--dir", try dirArg(&ob, &s, "opt", "#L/opt"), "--bind", try bindArg(&ab, "app", "#L/srv") }, "cat /srv/mid/y; cat app/mid/y", "y\ny\n");
+}
+
+test "--read-deny holds for a Linux program through links and .. [linux-symlinks]" {
+    // A Linux program's walk checks each name by its own path, which
+    // holds no links: those it meets are followed in the guest. A link,
+    // or a .., that lands in the denied directory is still denied there.
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    const io = std.testing.io;
+    try s.tmp.dir.createDirPath(io, "priv");
+    try s.tmp.dir.createDirPath(io, "sub");
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "priv/.env", .data = "secret\n" });
+    try s.tmp.dir.writeFile(io, .{ .sub_path = "ok", .data = "ok\n" });
+    try symLinkOrSkip(s.tmp.dir, io, "priv", "pl", .{ .is_directory = true });
+    try symLinkOrSkip(s.tmp.dir, io, "../priv/.env", "sub/el", .{});
+    var p: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const deny = try std.fmt.bufPrint(&p, "{s}/priv", .{s.path});
+    const script =
+        \\ln -s priv gl
+        \\for f in priv/.env pl/.env sub/el sub/../priv/.env /mnt/term/cwd/./sub/../priv/.env gl/.env; do
+        \\    stat -L $f >/dev/null 2>&1 || echo no stat $f
+        \\    cat $f 2>/dev/null || echo no read $f
+        \\done
+        \\echo x >pl/new 2>/dev/null || echo no create
+        \\ls | grep -c priv; cat sub/../ok
+    ;
+    try linkCase(&le, &s, &.{ "--read-deny", deny }, script, "no stat priv/.env\nno read priv/.env\nno stat pl/.env\nno read pl/.env\nno stat sub/el\nno read sub/el\nno stat sub/../priv/.env\nno read sub/../priv/.env\nno stat /mnt/term/cwd/./sub/../priv/.env\nno read /mnt/term/cwd/./sub/../priv/.env\nno stat gl/.env\nno read gl/.env\nno create\n0\nok\n");
+    try std.testing.expect(!s.exists("priv/new"));
 }
 
 test "/proc/self/fd/N of a deleted file still opens [linux-symlinks]" {

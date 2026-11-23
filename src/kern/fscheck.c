@@ -38,6 +38,144 @@ enum {
 
 #ifndef WINDOWS
 
+static int fdpath(int, char*);
+
+#ifdef __linux__
+#include <sys/syscall.h>
+#ifndef O_PATH
+#define O_PATH	010000000
+#endif
+#ifndef SYS_openat2
+#define SYS_openat2	437
+#endif
+struct openhow {
+	uvlong	flags;
+	uvlong	mode;
+	uvlong	resolve;
+};
+enum { ResolveNoSymlinks = 0x04 };
+
+/*
+ * realpath(3) reads every element of a path with a readlink of its own, so
+ * checking a name d elements deep cost d readlinks, and a walk down to it,
+ * which checks each step, about d²/2: copying a 13,000-file tree into the
+ * cwd made 14 million. The two calls below each take a constant number of
+ * calls instead, with the host's own lookup doing the walk.
+ */
+
+/* Whether path is absolute, with no "", "." or ".." element, nor a slash at the end. */
+static int
+lexclean(char *path)
+{
+	char *p;
+
+	if(path[0] != '/')
+		return 0;
+	if(path[1] == 0)
+		return 1;
+	for(p = path; *p; ){
+		/* p is at a slash: the element after it. */
+		p++;
+		if(*p == '/' || *p == 0)
+			return 0;
+		if(p[0] == '.' && (p[1] == '/' || p[1] == 0 || (p[1] == '.' && (p[2] == '/' || p[2] == 0))))
+			return 0;
+		while(*p && *p != '/')
+			p++;
+	}
+	return 1;
+}
+
+/*
+ * Whether path is already canonical: a clean absolute path with no link in
+ * it, the last element excepted with nofollow, as a resolver's result and
+ * every step of a walk down from one is. One openat2 with
+ * RESOLVE_NO_SYMLINKS looks the whole path up at once and fails if any
+ * element is a link, so a link swapped in anywhere along it is seen; that
+ * is what realpath's readlinks found one at a time. 1 if so; -1 if it
+ * doesn't exist, with errno set (a missing element comes before any link,
+ * so realpath would fail there too); 0 if there's a link in it, or if this
+ * can't tell (no openat2: Linux before 5.6, or a seccomp filter that
+ * refuses it), for kresolve to say.
+ */
+static int
+linkfree(char *path, int nofollow)
+{
+	static int noopenat2;
+	struct openhow how;
+	int fd;
+
+	if(noopenat2 || !lexclean(path))
+		return 0;
+	memset(&how, 0, sizeof how);
+	how.flags = O_PATH|O_CLOEXEC|(nofollow ? O_NOFOLLOW : 0);
+	how.resolve = ResolveNoSymlinks;
+	fd = syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof how);
+	if(fd < 0){
+		if(errno == ENOENT || errno == ENOTDIR)
+			return -1;
+		if(errno == ENOSYS || errno == EPERM)
+			noopenat2 = 1;
+		return 0;
+	}
+	close(fd);
+	return 1;
+}
+
+/*
+ * The canonical path of path as the host's own lookup resolves it, with
+ * the last element followed or not: an O_PATH open, which reads nothing
+ * and doesn't block on a FIFO, and its /proc/self/fd name. The open
+ * resolves the whole path at once. Returns 0; -1 if path doesn't resolve,
+ * with errno set; or -2 if this can't say (out of fds, /proc isn't
+ * mounted, or the file was removed under us and its name came back
+ * " (deleted)"), for the caller to resolve it the slow way.
+ */
+static int
+kresolve(char *path, char *buf, int nofollow)
+{
+	static char deleted[] = " (deleted)";
+	int fd, n, r;
+
+	if(strlen(path) >= PATH_MAX){
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	switch(linkfree(path, nofollow)){
+	case 1:
+		strcpy(buf, path);
+		return 0;
+	case -1:
+		return -1;
+	}
+	fd = open(path, O_PATH|O_CLOEXEC|(nofollow ? O_NOFOLLOW : 0));
+	if(fd < 0)
+		return errno == EMFILE || errno == ENFILE || errno == ENOMEM ? -2 : -1;
+	r = fdpath(fd, buf);
+	close(fd);
+	if(r < 0 || buf[0] != '/')
+		return -2;
+	n = strlen(buf);
+	if(n >= sizeof deleted-1 && strcmp(buf+n-(sizeof deleted-1), deleted) == 0)
+		return -2;
+	return 0;
+}
+#endif
+
+/* realpath(3), through kresolve where it can. */
+static int
+follow(char *path, char *buf)
+{
+#ifdef __linux__
+	int r;
+
+	r = kresolve(path, buf, 0);
+	if(r != -2)
+		return r;
+#endif
+	return realpath(path, buf) == nil ? -1 : 0;
+}
+
 /*
  * The canonical path of an existing entry without following it if it's a
  * symlink, so a differently cased name on a case-insensitive file system
@@ -48,6 +186,15 @@ canonical(char *path, char *buf)
 {
 	struct stat st;
 
+#ifdef __linux__
+	/* The link itself, if it's one: its own name, in its resolved directory. */
+	switch(kresolve(path, buf, 1)){
+	case 0:
+		return 0;
+	case -1:
+		return -1;
+	}
+#endif
 	if(lstat(path, &st) < 0)
 		return -1;
 #ifdef __APPLE__
@@ -86,7 +233,7 @@ resolve(char *path, char *buf, int nofollow)
 	int n;
 
 	if(!nofollow || strcmp(path, "/") == 0)
-		return realpath(path, buf) == nil ? -1 : 0;
+		return follow(path, buf);
 	if(canonical(path, buf) == 0)
 		return 0;
 	slash = strrchr(path, '/');
@@ -102,7 +249,7 @@ resolve(char *path, char *buf, int nofollow)
 		memmove(parent, path, n);
 		parent[n] = 0;
 	}
-	if(realpath(parent, buf) == nil)
+	if(follow(parent, buf) < 0)
 		return -1;
 	n = strlen(buf);
 	if(n + 1 + strlen(name) + 1 > PATH_MAX)
@@ -130,7 +277,7 @@ check(char *path, int op, int nofollow)
 	if(op == H9_FSCREATE && lstat(buf, &st) == 0 && S_ISLNK(st.st_mode)){
 		char target[PATH_MAX];
 
-		if(realpath(buf, target) == nil)
+		if(follow(buf, target) < 0)
 			return Hidden;
 		if(h9_policy_check(target, strlen(target), H9_FSWRITE) < 0)
 			return Hidden;
