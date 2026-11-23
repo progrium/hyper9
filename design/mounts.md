@@ -1,12 +1,12 @@
 ---
 slug: mounts
 title: Mounts, binds, and a Plan 9 root
-status: draft
+status: implemented
 created: 2026-11-20
 authors: [progrium]
 depends: [overlay, ninep-roots, websocket-9p, dotl, linux-personality, builtin-root, symlinks-in-root]
 areas: [cli, kern, sandbox, web, api]
-branch: [mounts]
+branch: [main]
 ---
 
 # Proposal: Mounts, binds, and a Plan 9 root
@@ -378,3 +378,4 @@ Browser host:
   - **`index=` off `/` replaced [mount-index](mount-index.md)'s usage error,** whose case is waived there, by `test "index= on a mount off / names its index [mounts]"`.
   - **An `http` URL's plan line keeps the `http` form,** so `--print` replays with the probe, and its note says "or a static tree".
   - **9box runs a script named for one of its commands with the script's interpreter.** h9's `bind` in `#H/over` is an rc script, and over a slim root, where `/bin/rc` is a hard link to 9box, the kernel's `#!` exec gave 9box `bind` as argv[0], so it ran its own `bind` with the script's path as an argument. When argv[1] is a script with the same name, 9box now takes the command its `#!` line names (src/9box/9box.c).
+- 2026-11-23: **Implemented.** The work landed on main in [#211](https://github.com/progrium/hyper9/pull/211), after the design in [#198](https://github.com/progrium/hyper9/pull/198) and [#200](https://github.com/progrium/hyper9/pull/200), with [#216](https://github.com/progrium/hyper9/pull/216) and [#217](https://github.com/progrium/hyper9/pull/217) fixing it on Windows. #211 left the status at draft until step 9's docs were done, and they are now: the spec describes mounts ([spec/ninep.md](../spec/ninep.md), [spec/kernel.md](../spec/kernel.md), [spec/machine.md](../spec/machine.md), [spec/cli.md](../spec/cli.md), and the decisions table in [SPEC.md](../SPEC.md)), docs/embedding.md's Options table lists `mounts`, and the h9reg and mkroot-9front READMEs use `--url` (progrium/h9reg#8 and progrium/mkroot-9front#3).

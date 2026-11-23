@@ -1,12 +1,12 @@
 ---
 slug: mount-index
 title: Metadata indexes for 9P roots and mounts
-status: draft
+status: implemented
 created: 2026-11-09
 authors: [progrium]
 depends: [ninep-roots, websocket-9p, guest-tools]
 areas: [cli, kern]
-branch: [mount-index]
+branch: [main]
 ---
 
 # Proposal: Metadata indexes for 9P roots and mounts
@@ -252,7 +252,7 @@ Integration cases tagged `[mount-index]`. The server is the second h9 serving th
 - [x] `test "a namespace-file mount of a server with .fs/index uses it [mount-index]"`
 - [x] `test "a file created through a writable indexed mount is found by the next walk [mount-index]"`
 - [x] `test "a rewritten .fs/index is fetched on the next mount [mount-index]"`
-- [x] ~~`test "index= without a 9P server on / is a usage error [mount-index]"`~~ (waived: [mounts](mounts.md) takes `index=` on any `--url`; see Updates)
+- [~] `test "index= without a 9P server on / is a usage error [mount-index]"`. Waived: [mounts](mounts.md) takes `index=` on any `--url`, so `test "index= on a mount off / names its index [mounts]"` replaces it (see Updates).
 - [x] `test "--print shows the index source and entry count [mount-index]"`
 
 Unit tests for `src/rootindex.zig` and the layer, with recorded conversations, since the test server has no `.fs/events`: the `fsindex 1` parser, its escaping, and its limits; walks, stats, and directory reads answered locally; virtual fids made real; flushes; demotion on a mismatched open; qids made up for an index without `9p.qid` and put in the server's replies; and, against a server with `.fs/events`, an index followed from its seq, records demoting what they change, and a stale index or a `reset` ending its use.
@@ -307,3 +307,4 @@ Demo: with the test root served over `ws://` behind a relay that adds 50 ms each
   - **Without `9p.qid`, a directory is validated by its mtime alone,** since its made-up qid can't be compared with the server's, and the layer rewrites the server's qid for an indexed path in `Rwalk`, `Ropen`, and `Rstat`, and keeps it for a demoted directory's children it still knows.
   - **`mkindex` reads `walk`'s warnings whole.** A warning about a name with a newline goes on to the next line, which `mkindex` once took for the rest of a record and dropped the entry before it with.
 - 2026-11-21: **`index=` works off `/`.** [mounts](mounts.md) lets any `--url` name an index hosted elsewhere, so `index=` on a mount that isn't on `/` is no longer a usage error, and its case is replaced by `test "index= on a mount off / names its index [mounts]"`.
+- 2026-11-23: **Implemented.** The work landed on main in [#203](https://github.com/progrium/hyper9/pull/203), and [#211](https://github.com/progrium/hyper9/pull/211) ([mounts](mounts.md)) moved `--root-index` to `index=` on any `--url`. The spec describes it in [spec/ninep.md](../spec/ninep.md#metadata-indexes) and [spec/kernel.md](../spec/kernel.md), and the `mount-index` branch is done. The status should have changed in #203; this records it.
