@@ -97,6 +97,10 @@ const Fid = struct {
     /// A link a Linux process's walk stopped at (design/linux-symlinks.md):
     /// it opens without the server, to read, and reads as its target.
     link: bool = false,
+    /// A link being made (a create with DMSYMLINK): the fid is still the
+    /// directory's on the server, and its first write is the target, which
+    /// makes the link by Tsymlink, named by the last of `path`.
+    mklink: bool = false,
 };
 
 /// A hidden server fid at an attach's root, which outlives the fid devmnt
@@ -151,7 +155,7 @@ const Bound = struct {
     open: ?u32 = null,
 };
 
-const Kind = enum { version, attach, walk, open, create, read, readlink, readdir, write, clunk, remove, stat, wstat };
+const Kind = enum { version, attach, walk, open, create, read, readlink, readdir, write, symlink, clunk, remove, stat, wstat };
 
 const Op = struct {
     arena: std.heap.ArenaAllocator,
@@ -821,6 +825,12 @@ pub const Client = struct {
                 op.mode = cr.mode;
                 op.perm = cr.perm;
                 op.name = try op.allocator().dupe(u8, cr.name);
+                // A link: made by the first write, which is its target,
+                // since a 9P2000 create can't carry one.
+                if (cr.perm & wire.DMSYMLINK != 0) {
+                    f.mklink = true;
+                    return c.created(op, f, .{ .type = wire.QTSYMLINK });
+                }
                 // The mode depends on the directory's (create(5)), from
                 // attributes held for it or a Tgetattr.
                 if (create_dir) |st| return c.createSend(op, f, st.mode);
@@ -830,6 +840,7 @@ pub const Client = struct {
                 const f = c.fids.get(r.fid) orelse return c.rerror(tag, "unknown fid");
                 if (!f.open) return c.rerror(tag, "fid not open");
                 if (f.qid.type & wire.QTDIR != 0) return c.readDir(tag, r.fid, f, r.offset, r.count);
+                if (f.mklink) return c.rerror(tag, "permission denied");
                 if (f.fifo) return c.sendMount(tag, wire.common.Rread{ .data = .{ .bytes = "" } });
                 if (f.link) {
                     const op = try c.newOp(tag, .readlink);
@@ -868,7 +879,16 @@ pub const Client = struct {
             .Twrite => |w| {
                 const f = c.fids.get(w.fid) orelse return c.rerror(tag, "unknown fid");
                 if (!f.open) return c.rerror(tag, "fid not open");
-                if (f.fifo) return c.rerror(tag, "permission denied");
+                if (f.fifo or f.link) return c.rerror(tag, "permission denied");
+                if (f.mklink) {
+                    if (w.offset != 0 or w.data.bytes.len == 0 or w.data.bytes.len > c.msize - wire.io_header) return c.rerror(tag, "bad link target");
+                    const op = try c.newOp(tag, .symlink);
+                    op.fid = w.fid;
+                    op.count = @intCast(w.data.bytes.len);
+                    const target = try op.allocator().dupe(u8, w.data.bytes);
+                    const gid = c.opts.users.number(c.opts.users.user);
+                    return c.send(op, l.Tsymlink{ .dfid = f.sfid, .name = f.path.items[f.path.items.len - 1], .symtgt = target, .gid = gid }, .{ .main = 0 });
+                }
                 const op = try c.newOp(tag, .write);
                 const n = @min(w.data.bytes.len, c.msize - wire.io_header);
                 try c.send(op, wire.common.Twrite{ .fid = f.sfid, .offset = w.offset, .data = .{ .bytes = w.data.bytes[0..n] } }, .{ .main = 0 });
@@ -1075,6 +1095,7 @@ pub const Client = struct {
                 if (msg != .Rwrite) return c.unexpected();
                 return c.finish(op, wire.common.Rwrite{ .count = msg.Rwrite.count });
             },
+            .symlink => return c.stepSymlink(op, n, msg),
             .clunk, .remove => return c.stepRemove(op, n, msg),
             .stat => {
                 if (lerror(msg)) |e| return c.finishErrno(op, e);
@@ -1305,6 +1326,33 @@ pub const Client = struct {
                 f.sfid = op.sfid;
                 c.cacheStat(f, msg.Rlcreateattr.stat);
                 return c.created(op, f, msg.Rlcreateattr.stat.qid);
+            },
+            else => unreachable,
+        }
+    }
+
+    /// A link's target written to a fid a create with DMSYMLINK made:
+    /// Tsymlink in the directory, then a walk to the link, which the fid
+    /// becomes.
+    fn stepSymlink(c: *Client, op: *Op, n: u32, msg: l.R) Allocator.Error!void {
+        if (lerror(msg)) |e| return c.finishErrno(op, e);
+        const f = c.fids.get(op.fid) orelse return c.finishErr(op, "unknown fid");
+        switch (n) {
+            0 => {
+                if (msg != .Rsymlink) return c.unexpected();
+                op.sfid = try c.tmpSfid(op);
+                try c.send(op, wire.common.Twalk{ .fid = f.sfid, .newfid = op.sfid, .wnames = .init(&.{f.path.items[f.path.items.len - 1]}) }, .{ .main = 1 });
+            },
+            1 => {
+                if (msg != .Rwalk) return c.unexpected();
+                if (msg.Rwalk.wqids.n != 1) return c.finishErrno(op, attr.E.NOENT);
+                keep(op, op.sfid);
+                try c.clunk(f.sfid);
+                f.sfid = op.sfid;
+                f.qid = msg.Rwalk.wqids.qids[0];
+                f.mklink = false;
+                f.link = true;
+                return c.finish(op, wire.common.Rwrite{ .count = op.count });
             },
             else => unreachable,
         }
@@ -2308,6 +2356,16 @@ test "directory reads" {
     _ = try h.ok(p9.Tcreate{ .fid = 5, .name = "made", .perm = wire.DMNAMEDPIPE | 0o600, .mode = wire.OREAD });
     _ = try h.ok(p9.Tclunk{ .fid = 5 });
     try testing.expect(h.s.lookup("d/made").?.kind == .fifo);
+    // A create with DMSYMLINK makes a link by Tsymlink, with the first
+    // write as its target; the fid is then the link.
+    _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 5, .wnames = .init(&.{"d"}) });
+    _ = try h.ok(p9.Tcreate{ .fid = 5, .name = "ln", .perm = wire.DMSYMLINK | 0o777, .mode = wire.OWRITE });
+    try testing.expect(h.s.lookup("d/ln") == null);
+    try testing.expectEqual(@as(u32, 3), (try h.ok(p9.Twrite{ .fid = 5, .offset = 0, .data = .{ .bytes = "sub" } })).Rwrite.count);
+    try testing.expectEqualStrings("permission denied", try h.err(p9.Twrite{ .fid = 5, .offset = 0, .data = .{ .bytes = "sub" } }));
+    _ = try h.ok(p9.Tclunk{ .fid = 5 });
+    try testing.expect(h.s.lookup("d/ln").?.kind == .link);
+    try testing.expectEqualStrings("sub", h.s.lookup("d/ln").?.target);
     // Nor does a directory for writing.
     _ = try h.ok(p9.Twalk{ .fid = 0, .newfid = 6, .wnames = .init(&.{"d"}) });
     try testing.expectEqualStrings("file is a directory", try h.err(p9.Topen{ .fid = 6, .mode = wire.OWRITE }));

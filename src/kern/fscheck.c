@@ -1133,8 +1133,9 @@ h9_fs_renamepath(char *old, char *new)
 
 /*
  * Makes path a symbolic link to target, for the Linux personality's
- * symlinkat: in memory in an overlay, or on the host in a devfs tree,
- * where the new name is checked like a create. Anywhere else it's
+ * symlinkat: in memory in an overlay, on the host in a devfs tree,
+ * where the new name is checked like a create, or on a 9P2000.L mount by
+ * Tsymlink. Anywhere else it's
  * "permission denied". Returns 0, or -1 with the error in errstr.
  */
 int
@@ -1178,6 +1179,9 @@ h9_fs_symlinkpath(char *path, char *target)
 	case 'U':
 		h9_fs_symlink(c, name, target);
 		break;
+	case 'M':
+		h9_fs_mntsymlink(c, name, target);
+		break;
 	default:
 		error(Eperm);
 	}
@@ -1188,11 +1192,47 @@ h9_fs_symlinkpath(char *path, char *target)
 	return 0;
 }
 
-/* Whether the mount chan c is a 9P2000.L server's, through devdotl (#ℓ). */
+extern int h9_hidx_dotl(Chan*);
+
+/*
+ * Whether the mount chan c is a 9P2000.L server's, through devdotl (#ℓ),
+ * directly or under a mount index (#ι, devhidx.c).
+ */
 static int
 dotlmount(Chan *c)
 {
-	return c->mchan != nil && devtab[c->mchan->type]->dc == 0x2113;
+	if(c->mchan == nil)
+		return 0;
+	return devtab[c->mchan->type]->dc == 0x2113 || h9_hidx_dotl(c->mchan);
+}
+
+/*
+ * Makes name in the 9P2000.L mount directory dir a link to target: a
+ * create with H9_DMSYMLINK, then a write of the target, which the
+ * translator makes a Tsymlink (src/dotl/client.zig). Anywhere else, such
+ * as a plain 9P mount, it's Eperm.
+ */
+void
+h9_fs_mntsymlink(Chan *dir, char *name, char *target)
+{
+	Chan *volatile nc;
+	long n;
+
+	if(devtab[dir->type]->dc != 'M' || !dotlmount(dir))
+		error(Eperm);
+	n = strlen(target);
+	if(n == 0)
+		error(Enonexist);
+	nc = cclone(dir);
+	if(waserror()){
+		cclose(nc);
+		nexterror();
+	}
+	nc = devtab[nc->type]->create(nc, name, OWRITE, 0777 | H9_DMSYMLINK);
+	if(devtab[nc->type]->write(nc, target, n, 0) != n)
+		error("short write");
+	poperror();
+	cclose(nc);
 }
 
 /*
