@@ -7486,6 +7486,36 @@ test "TCP echo between a Linux client and server, with getpeername [linux-net]" 
     try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "tcp_echo" }, "ok tcp_echo\n");
 }
 
+test "edge-triggered epoll in another thread reports a TCP socket's next data after a reader drains it [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    // The peer is on the host, as .NET's HTTPS proxy was: a peer in the
+    // guest wakes h9's pollers when it writes, which hides the bug.
+    const io = std.testing.io;
+    var srv = try listenLocal();
+    defer srv.deinit(io);
+    const Echo = struct {
+        fn serve(sv: *std.Io.net.Server) void {
+            const c = deadline.accept(sv, io) catch return;
+            defer c.close(io);
+            var rbuf: [16]u8 = undefined;
+            var r = c.reader(io, &rbuf);
+            var wbuf: [16]u8 = undefined;
+            var w = c.writer(io, &wbuf);
+            while (r.interface.takeByte()) |b| {
+                io.sleep(.fromMilliseconds(150), .awake) catch return;
+                w.interface.writeByte(b) catch return;
+                w.interface.flush() catch return;
+            } else |_| {}
+        }
+    };
+    const t = try std.Thread.spawn(.{}, Echo.serve, .{&srv});
+    defer t.join();
+    var port_buf: [64]u8 = undefined;
+    const port_env = try std.fmt.bufPrint(&port_buf, "ETD_PORT={d}", .{srv.socket.address.getPort()});
+    try netCase(&le, &.{ "--net=enable", "--env", port_env, "/mnt/term/cwd/net", "tcp_et_drain" }, "ok tcp_et_drain\n");
+}
+
 test "non-blocking connect is EINPROGRESS, then writable, then SO_ERROR 0 [linux-net]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

@@ -9,6 +9,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -233,6 +234,85 @@ static void tcp_et(void) {
 	waitpid(c, 0, 0);
 	close(l);
 	printf("ok tcp_et\n");
+}
+
+/* Edge-triggered epoll in its own thread, as .NET's socket engine waits:
+ * a report of IN that the reader takes up only after the wait has begun
+ * again, a drain to EAGAIN, and then the next data, which must be
+ * reported too. The peer answers each byte after a pause: the one at
+ * $ETD_PORT on the host if it's set, or else a child. */
+static int etd_ep, etd_in;
+static pthread_mutex_t etd_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t etd_cv = PTHREAD_COND_INITIALIZER;
+
+static void *etd_loop(void *a) {
+	struct epoll_event out[4];
+	for (;;) {
+		int n = epoll_wait(etd_ep, out, 4, -1);
+		for (int i = 0; i < n; i++)
+			if (out[i].events & EPOLLIN) {
+				pthread_mutex_lock(&etd_mu);
+				etd_in = 1;
+				pthread_cond_broadcast(&etd_cv);
+				pthread_mutex_unlock(&etd_mu);
+			}
+	}
+	return a;
+}
+
+static void tcp_et_drain(void) {
+	int port, l = -1;
+	pid_t c = -1;
+	if (getenv("ETD_PORT") != NULL)
+		port = atoi(getenv("ETD_PORT"));
+	else {
+		l = listener(&port);
+		CHECK("tcp_et_drain", l >= 0);
+		c = fork();
+		if (c == 0) {
+			int s = accept(l, 0, 0);
+			char b;
+			while (read(s, &b, 1) == 1) {
+				usleep(150000);
+				write(s, &b, 1);
+			}
+			_exit(0);
+		}
+	}
+	int s = dial(port, SOCK_NONBLOCK);
+	CHECK("tcp_et_drain", s >= 0);
+	etd_ep = epoll_create1(0);
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLOUT | EPOLLET, .data.u64 = 1};
+	CHECK("tcp_et_drain", epoll_ctl(etd_ep, EPOLL_CTL_ADD, s, &ev) == 0);
+	pthread_t t;
+	CHECK("tcp_et_drain", pthread_create(&t, 0, etd_loop, 0) == 0);
+	usleep(100000);
+	for (int round = 0; round < 3; round++) {
+		char b = 'a' + round, got;
+		CHECK("tcp_et_drain", send(s, &b, 1, MSG_NOSIGNAL) == 1);
+		int r;
+		while ((r = recv(s, &got, 1, MSG_DONTWAIT)) < 0) {
+			CHECK("tcp_et_drain", errno == EAGAIN);
+			struct timespec dl;
+			clock_gettime(CLOCK_REALTIME, &dl);
+			dl.tv_sec += 3;
+			pthread_mutex_lock(&etd_mu);
+			int to = 0;
+			while (!etd_in && !to) to = pthread_cond_timedwait(&etd_cv, &etd_mu, &dl);
+			etd_in = 0;
+			pthread_mutex_unlock(&etd_mu);
+			CHECK("tcp_et_drain", !to);
+			/* Read once the epoll thread is waiting again. */
+			usleep(50000);
+		}
+		CHECK("tcp_et_drain", r == 1 && got == b);
+	}
+	close(s);
+	if (c > 0) {
+		waitpid(c, 0, 0);
+		close(l);
+	}
+	printf("ok tcp_et_drain\n");
 }
 
 static void nb_connect(void) {
@@ -705,6 +785,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "tcp_echo") || !strcmp(n, "net")) tcp_echo();
 		if (!strcmp(n, "nb_connect") || !strcmp(n, "net")) nb_connect();
 		if (!strcmp(n, "tcp_et") || !strcmp(n, "net")) tcp_et();
+		if (!strcmp(n, "tcp_et_drain") || !strcmp(n, "net")) tcp_et_drain();
 		if (!strcmp(n, "half_close") || !strcmp(n, "net")) half_close();
 		if (!strcmp(n, "exit_eof") || !strcmp(n, "net")) exit_eof();
 		if (!strcmp(n, "dual_bind") || !strcmp(n, "net")) dual_bind();
