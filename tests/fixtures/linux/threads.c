@@ -524,6 +524,21 @@ static void meminfo_threads(void) {
 	printf("ok meminfo_threads\n");
 }
 
+/* A thread's scheduling parameters, read back and set, as .NET does before
+ * it sets a thread's priority. */
+static void sched_params(void) {
+	int policy = -1;
+	struct sched_param sp = {.sched_priority = -1};
+	CHECK("sched_params", pthread_getschedparam(pthread_self(), &policy, &sp) == 0);
+	CHECK("sched_params", policy == SCHED_OTHER && sp.sched_priority == 0);
+	CHECK("sched_params", sched_get_priority_min(SCHED_OTHER) == 0 && sched_get_priority_max(SCHED_OTHER) == 0);
+	CHECK("sched_params", sched_get_priority_min(SCHED_FIFO) == 1 && sched_get_priority_max(SCHED_FIFO) == 99);
+	errno = 0;
+	CHECK("sched_params", sched_get_priority_max(42) == -1 && errno == EINVAL);
+	CHECK("sched_params", pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp) == 0);
+	printf("ok sched_params\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -541,6 +556,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "fault_race")) fault_race();
 		if (all || !strcmp(n, "proc_threads")) proc_threads();
 		if (all || !strcmp(n, "meminfo_threads")) meminfo_threads();
+		if (all || !strcmp(n, "sched_params")) sched_params();
 		if (!strcmp(n, "exit_main")) exit_main();
 		if (!strcmp(n, "exit_thread")) exit_thread();
 		if (!strcmp(n, "exec_thread")) exec_thread(argv);
