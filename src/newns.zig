@@ -3,12 +3,12 @@
 //! the machine runs the operations through the kernel.
 //!
 //! Supported: `bind`, `mount`, `unmount`, `cd` and `clear`, with the flags
-//! `-a`, `-b`, `-c`, `-C`, and `-r` (a union merged at every depth,
-//! design/mounts.md), `#` comments, and `'` quoting (`''` is a literal
+//! `-a`, `-b`, `-c`, `-C`, `-r` (a union merged at every depth,
+//! design/mounts.md), and `-u` (a writable layer, design/upper-layers.md), `#` comments, and `'` quoting (`''` is a literal
 //! quote). A `;` outside quotes ends a line, as a newline does, so
 //! `--ns` takes a namespace inline, and a comment ends at either. As in
 //! newns, a failed operation doesn't stop the replay.
-//! `--print`'s trailing ro/rw/eph/9p/builtin column and `<id>` console placeholder
+//! `--print`'s trailing ro/rw/eph/up/9p/builtin column and `<id>` console placeholder
 //! are accepted, so its output replays as-is. A `bind` from a bare `#O` makes
 //! a fresh copy-on-write overlay over whatever its target is at that point
 //! in the replay (design/epoch-0/ephemeral-writes.md); the machine does that. `.` (include) and `chdev`, and
@@ -32,6 +32,8 @@ pub const Flag = struct {
     cache: bool = false,
     /// `-r`: a union merged at every depth (design/mounts.md).
     recursive: bool = false,
+    /// `-u`: `from` is a writable layer over `to` (design/upper-layers.md).
+    upper: bool = false,
 };
 
 pub const Error = error{ OutOfMemory, Syntax };
@@ -100,6 +102,7 @@ fn parseLine(argv: []const []const u8) Error!Op {
             'c' => flag.create = true,
             'C' => flag.cache = true,
             'r' => flag.recursive = true,
+            'u' => flag.upper = true,
             else => return error.Syntax,
         };
     }
@@ -140,7 +143,7 @@ fn isSetting(s: []const u8) bool {
 }
 
 fn isAccess(s: []const u8) bool {
-    for ([_][]const u8{ "ro", "rw", "eph", "9p", "builtin" }) |a| if (std.mem.eql(u8, s, a)) return true;
+    for ([_][]const u8{ "ro", "rw", "eph", "up", "9p", "builtin" }) |a| if (std.mem.eql(u8, s, a)) return true;
     return false;
 }
 

@@ -1398,6 +1398,16 @@ h9_overlay_lower(Chan *c)
 
 static Chan *ovcreate(Chan*, char*, int, ulong);
 static void removelocked(Chan*);
+static void unmknod(Chan*, char*, char*, ulong);
+int h9_overlay_move(Chan*, Chan*, char*);
+
+/* A Dir that a wstat leaves as it is, but for what's set in it. */
+static void
+ovnulldir(Dir *d)
+{
+	memset(d, ~0, sizeof(Dir));
+	d->name = d->uid = d->gid = d->muid = "";
+}
 
 /*
  * Makes name in the directory c a symbolic link to target, for the
@@ -1418,17 +1428,8 @@ h9_overlay_symlink(Chan *c, char *name, char *target)
 	if(strlen(target) >= 2048)
 		error(Etoolong);
 	if(isunion(c)){
-		/* On the first member that takes creates, if it's a host tree. */
-		Unc *u = c->aux;
-		int i;
-		for(i = 0; i < u->n; i++)
-			if(u->mcreate[i])
-				break;
-		if(i == u->n)
-			error(Enocreate);
-		if(devtab[u->mc[i]->type]->dc != 'U')
-			error(Eperm);
-		h9_fs_symlink(u->mc[i], name, target);
+		/* In the layer, or on the first member that takes creates. */
+		unmknod(c, name, target, 0);
 		poperror();
 		cclose(c);
 		return;
@@ -1504,6 +1505,12 @@ h9_overlay_mkfifo(Chan *c, char *name, ulong perm)
 		cclose(c);
 		nexterror();
 	}
+	if(isunion(c)){
+		unmknod(c, name, nil, perm & 0777);
+		poperror();
+		cclose(c);
+		return;
+	}
 	c = ovcreate(c, name, OREAD, perm & 0777);
 	poperror();
 	o = c->aux;
@@ -1527,6 +1534,13 @@ h9_overlay_isfifo(Chan *c)
 
 	if(devtab[c->type]->dc != 'O')
 		return 0;
+	if(isunion(c)){
+		/* The member's file that holds the name. */
+		Unc *u = c->aux;
+		if(u->n == 0 || u->mc[0] == nil)
+			return 0;
+		return h9_fs_chanisfifo(u->mc[0]);
+	}
 	o = c->aux;
 	qlock(&o->inst->ql);
 	l = nil;
@@ -2382,6 +2396,533 @@ unsnapshot(Chan *c)
 	unlist(c->aux, 0);
 }
 
+/*
+ * Up layers (design/upper-layers.md). A union's up member, always its
+ * first, is a writable tree over the others, as overlayfs's upperdir is:
+ * a file from below is copied into it on its first change, a removed
+ * name below gets a whiteout in it, and a directory made again over a
+ * whiteout is opaque, so the tree is an OCI image layer, unpacked. Its
+ * changes are made through its own device, so a host directory, an #O
+ * tree in memory, or a 9P server keeps them. A member rooted below the
+ * top takes the changes under its path only.
+ *
+ * upql serializes the layer's changes, so two chans copying one file up
+ * don't both make it. It's held across device calls; in->ql isn't.
+ */
+
+/* The up member's id, if in has one and path is under it; -1 otherwise. */
+static int
+upid(Inst *in, char *path)
+{
+	Member *m;
+	int n, id;
+
+	id = -1;
+	qlock(&in->ql);
+	if(in->nmem > 0 && in->mem[0].isup){
+		m = &in->mem[0];
+		n = strlen(m->at);
+		if(n == 0 || (strncmp(path, m->at, n) == 0 && (path[n] == '\0' || path[n] == '/')))
+			id = m->id;
+	}
+	qunlock(&in->ql);
+	return id;
+}
+
+/* Whether u's name is from below the layer, under an up member. */
+static int
+upbelow(Unc *u)
+{
+	int id;
+
+	id = upid(u->inst, u->path);
+	return id >= 0 && u->n > 0 && u->mid[0] != id;
+}
+
+/* The first n names of path, allocated. */
+static char*
+pathprefix(char *path, int n)
+{
+	char *p, *e;
+
+	e = path;
+	while(n-- > 0 && *e != '\0'){
+		e = strchr(e, '/');
+		if(e == nil){
+			e = path + strlen(path);
+			break;
+		}
+		if(n > 0)
+			e++;
+	}
+	p = malloc(e - path + 1);
+	if(p == nil)
+		error(Enomem);
+	memmove(p, path, e - path);
+	p[e - path] = '\0';
+	return p;
+}
+
+/*
+ * A fresh walk of in from its top along path, without the up member if
+ * noup: what's below the layer. nil if there's nothing there. The Unc
+ * holds a ref on in.
+ */
+static Unc*
+unlookup(Inst *in, char *path, int noup)
+{
+	Unc *volatile u;
+	Chan tmp;
+	char buf[Maxname];
+	int i, n;
+
+	lock(&instlock);
+	in->ref++;
+	unlock(&instlock);
+	u = nil;
+	if(waserror()){
+		if(u != nil)
+			uncfree(u);
+		else
+			instdecref(in);
+		nexterror();
+	}
+	u = uncnew(in, "");
+	u->noup = noup;
+	untop(u);
+	memset(&tmp, 0, sizeof tmp);
+	tmp.qid = unrootqid();
+	n = npathelem(path);
+	for(i = 0; i < n; i++){
+		pathelem(path, i, buf);
+		if(!unstep(u, &tmp, buf) || u->n == 0){
+			poperror();
+			uncfree(u);
+			return nil;
+		}
+	}
+	poperror();
+	if(u->n == 0){
+		uncfree(u);
+		return nil;
+	}
+	return u;
+}
+
+/* Whether path exists below the layer, and if so whether it's a directory. */
+static int
+upexists(Inst *in, char *path, int noup, int *isdir)
+{
+	Unc *t;
+
+	t = unlookup(in, path, noup);
+	if(t == nil)
+		return 0;
+	if(isdir != nil)
+		*isdir = (t->mc[0]->qid.type & QTDIR) != 0;
+	uncfree(t);
+	return 1;
+}
+
+/*
+ * Walks the up member to path, a union path under it. With make, a
+ * directory missing from the layer is made there, with the mode of the
+ * one below it; without, a missing name is nil.
+ */
+static Chan*
+upwalk(Inst *in, char *path, int make)
+{
+	Chan *volatile c, *volatile nc;
+	Unc *volatile t;
+	char *volatile pre;
+	char buf[Maxname];
+	Dir d;
+	uchar sbuf[1024+4*Maxname];
+	char strs[sizeof sbuf];
+	int i, n, nat;
+
+	qlock(&in->ql);
+	if(in->nmem == 0 || !in->mem[0].isup){
+		qunlock(&in->ql);
+		return nil;
+	}
+	c = cclone(in->mem[0].root);
+	nat = npathelem(in->mem[0].at);
+	qunlock(&in->ql);
+	t = nil;
+	nc = nil;
+	pre = nil;
+	if(waserror()){
+		cclose(c);
+		if(nc != nil)
+			cclose(nc);
+		if(t != nil)
+			uncfree(t);
+		free(pre);
+		nexterror();
+	}
+	n = npathelem(path);
+	for(i = nat; i < n; i++){
+		pathelem(path, i, buf);
+		nc = lowerwalk1(c, buf);
+		if(nc == nil){
+			if(!make){
+				poperror();
+				cclose(c);
+				return nil;
+			}
+			pre = pathprefix(path, i+1);
+			t = unlookup(in, pre, 0);
+			if(t == nil)
+				error(Enonexist);
+			lowerstat(t->mc[0], &d, sbuf, sizeof sbuf, strs);
+			uncfree(t);
+			t = nil;
+			free(pre);
+			pre = nil;
+			if((d.qid.type & QTDIR) == 0)
+				error(Enotdir);
+			nc = cclone(c);
+			nc = devtab[nc->type]->create(nc, buf, OREAD, DMDIR|(d.mode & 0777));
+			cclose(nc);
+			nc = lowerwalk1(c, buf);
+			if(nc == nil)
+				error(Enonexist);
+		}
+		cclose(c);
+		c = nc;
+		nc = nil;
+	}
+	poperror();
+	return c;
+}
+
+/* Makes name in the directory dir, on any device that has them, a symbolic link. */
+static void
+mklink(Chan *dir, char *name, char *target)
+{
+	switch(devtab[dir->type]->dc){
+	case 'U':
+		h9_fs_symlink(dir, name, target);
+		break;
+	case 'O':
+		h9_overlay_symlink(cclone(dir), name, target);
+		break;
+	default:
+		error(Eperm);
+	}
+}
+
+/* As mklink, a FIFO. */
+static void
+mkfifo1(Chan *dir, char *name, ulong perm)
+{
+	Chan *volatile nc;
+
+	switch(devtab[dir->type]->dc){
+	case 'U':
+		h9_fs_mkfifo(dir, name, perm);
+		break;
+	case 'O':
+		h9_overlay_mkfifo(cclone(dir), name, perm);
+		break;
+	case 'M':
+		/* A 9P2000.L server's makes a create with H9_DMFIFO a Tmknod. */
+		nc = cclone(dir);
+		if(waserror()){
+			cclose(nc);
+			nexterror();
+		}
+		nc = devtab[nc->type]->create(nc, name, OREAD, (perm & 0777)|H9_DMFIFO);
+		poperror();
+		cclose(nc);
+		break;
+	default:
+		error(Eperm);
+	}
+}
+
+/* Makes the empty file name in dir, for a whiteout or an opaque marker. */
+static void
+mkmark(Chan *dir, char *name)
+{
+	Chan *volatile nc;
+
+	nc = cclone(dir);
+	if(waserror()){
+		cclose(nc);
+		nexterror();
+	}
+	nc = devtab[nc->type]->create(nc, name, OREAD, 0444);
+	poperror();
+	cclose(nc);
+}
+
+/* Removes name from dir, if it's there. */
+static void
+rmname(Chan *dir, char *name)
+{
+	Chan *volatile c;
+
+	c = lowerwalk1(dir, name);
+	if(c == nil)
+		return;
+	if(waserror()){
+		c->type = 0;
+		cclose(c);
+		nexterror();
+	}
+	devtab[c->type]->remove(c);
+	c->type = 0;
+	cclose(c);
+	poperror();
+}
+
+/* Makes the whiteout for name in the layer directory dir. */
+static void
+mkwh(Chan *dir, char *name)
+{
+	char wh[Maxname];
+
+	if(strlen(name) + 4 >= Maxname)
+		error(Etoolong);
+	snprint(wh, sizeof wh, "%s%s", Whprefix, name);
+	mkmark(dir, wh);
+}
+
+/* Removes the whiteout for name from dir; whether there was one. */
+static int
+rmwh(Chan *dir, char *name)
+{
+	char wh[Maxname];
+
+	if(!haswh(dir, name))
+		return 0;
+	snprint(wh, sizeof wh, "%s%s", Whprefix, name);
+	rmname(dir, wh);
+	return 1;
+}
+
+/* Removes the whiteouts and opaque marker in the layer directory dir. */
+static void
+rmmarks(Chan *dir)
+{
+	Chan *volatile lc;
+	uchar *volatile buf;
+	char **volatile names;
+	volatile int nn;
+	Dir d;
+	char *strs;
+	uchar *p, *e;
+	long r, m;
+	vlong off;
+	int i, cap;
+
+	lc = nil;
+	buf = nil;
+	names = nil;
+	nn = 0;
+	cap = 0;
+	if(waserror()){
+		if(lc != nil)
+			cclose(lc);
+		free(buf);
+		for(i = 0; i < nn; i++)
+			free(names[i]);
+		free(names);
+		nexterror();
+	}
+	buf = smalloc(8192 + 8192);
+	strs = (char*)buf + 8192;
+	lc = cclone(dir);
+	lc = devtab[lc->type]->open(lc, OREAD);
+	for(off = 0;; off += r){
+		r = devtab[lc->type]->read(lc, buf, 8192, off);
+		if(r <= 0)
+			break;
+		e = buf + r;
+		for(p = buf; p + BIT16SZ <= e; p += m){
+			m = BIT16SZ + GBIT16(p);
+			if(p + m > e || convM2D(p, m, &d, strs) != m)
+				break;
+			if(!iswhname(d.name))
+				continue;
+			if(nn == cap){
+				char **nb;
+				cap = cap ? cap*2 : 16;
+				nb = realloc(names, cap*sizeof(char*));
+				if(nb == nil)
+					error(Enomem);
+				names = nb;
+			}
+			names[nn] = strdup(d.name);
+			if(names[nn] == nil)
+				error(Enomem);
+			nn++;
+		}
+	}
+	cclose(lc);
+	lc = nil;
+	for(i = 0; i < nn; i++)
+		rmname(dir, names[i]);
+	poperror();
+	free(buf);
+	for(i = 0; i < nn; i++)
+		free(names[i]);
+	free(names);
+}
+
+/* Points u at the layer's chan c for its name. */
+static void
+upset(Unc *u, Chan *c, int id)
+{
+	unclear(u);
+	u->mc[0] = c;
+	u->mid[0] = id;
+	u->mcreate[0] = 1;
+	u->n = 1;
+	u->lopen = 0;
+}
+
+/*
+ * Copies u's file from below into the layer, whole unless trunc, with
+ * its parent directories, and points the chan at the copy. A link is
+ * made again as a link, and a FIFO as a FIFO. Under upql.
+ */
+static void
+upcopy(Chan *c, int trunc)
+{
+	Unc *u;
+	Inst *in;
+	Chan *volatile pd, *volatile lc, *volatile nc;
+	Unc *volatile t;
+	char *volatile pcopy;
+	char *dir, *name, *s;
+	uchar *volatile data;
+	Dir d, nd;
+	uchar sbuf[1024+4*Maxname];
+	char strs[sizeof sbuf];
+	uchar wbuf[256];
+	vlong off;
+	long r;
+	int id, wasopen, n;
+
+	u = c->aux;
+	in = u->inst;
+	id = upid(in, u->path);
+	if(id < 0)
+		error(Eperm);
+	pcopy = strdup(u->path);
+	if(pcopy == nil)
+		error(Enomem);
+	s = strrchr(pcopy, '/');
+	if(s != nil){
+		*s = '\0';
+		dir = pcopy;
+		name = s+1;
+	}else{
+		dir = "";
+		name = pcopy;
+	}
+	pd = lc = nc = nil;
+	t = nil;
+	data = nil;
+	if(waserror()){
+		if(pd != nil)
+			cclose(pd);
+		if(lc != nil)
+			cclose(lc);
+		if(nc != nil)
+			cclose(nc);
+		if(t != nil)
+			uncfree(t);
+		free(data);
+		free(pcopy);
+		nexterror();
+	}
+	pd = upwalk(in, dir, 1);
+	if(pd == nil)
+		error(Eperm);
+	/* Another chan may have copied it up already. */
+	nc = lowerwalk1(pd, name);
+	if(nc == nil){
+		t = unlookup(in, u->path, 1);
+		if(t == nil)
+			error(Enonexist);
+		lc = cclone(t->mc[0]);
+		uncfree(t);
+		t = nil;
+		lowerstat(lc, &d, sbuf, sizeof sbuf, strs);
+		if(d.qid.type & QTDIR)
+			error(Eisdir);
+		if((d.qid.type & H9_QTSYMLINK) || (d.mode & H9_DMSYMLINK)){
+			char tgt[2048];
+			n = h9_fs_chanreadlink(lc, tgt, sizeof tgt);
+			if(n < 0)
+				error(Eperm);
+			mklink(pd, name, tgt);
+		}else if(d.mode & H9_DMFIFO)
+			mkfifo1(pd, name, d.mode & 0777);
+		else{
+			nc = cclone(pd);
+			nc = devtab[nc->type]->create(nc, name, OWRITE, d.mode & 0777);
+			if(!trunc){
+				lc = devtab[lc->type]->open(lc, OREAD);
+				data = smalloc(Copybuf);
+				for(off = 0; off < d.length; off += r){
+					r = devtab[lc->type]->read(lc, data, Copybuf, off);
+					if(r <= 0)
+						break;
+					devtab[nc->type]->write(nc, data, r, off);
+				}
+			}
+			cclose(nc);
+			nc = nil;
+			/* The mode and times, as the create may have masked the mode. */
+			nc = lowerwalk1(pd, name);
+			if(nc != nil && !waserror()){
+				ovnulldir(&nd);
+				nd.mode = d.mode & ~DMDIR;
+				nd.mtime = d.mtime;
+				n = convD2M(&nd, wbuf, sizeof wbuf);
+				devtab[nc->type]->wstat(nc, wbuf, n);
+				poperror();
+			}
+			if(nc != nil)
+				cclose(nc);
+			nc = nil;
+		}
+		cclose(lc);
+		lc = nil;
+		nc = lowerwalk1(pd, name);
+		if(nc == nil)
+			error(Enonexist);
+	}
+	cclose(pd);
+	pd = nil;
+	wasopen = u->lopen;
+	if(wasopen){
+		/* An open chan goes on reading and writing, now the copy. */
+		nc = devtab[nc->type]->open(nc, c->mode);
+	}
+	upset(u, nc, id);
+	u->lopen = wasopen;
+	nc = nil;
+	qlock(&in->ql);
+	if(waserror()){
+		qunlock(&in->ql);
+		nexterror();
+	}
+	if(!wasopen)
+		c->qid = unqid(in, u->mc[0]);
+	poperror();
+	qunlock(&in->ql);
+	poperror();
+	free(data);
+	free(pcopy);
+	changed(in, u->path);
+}
+
 static Chan*
 unopen(Chan *c, int omode)
 {
@@ -2401,6 +2942,17 @@ unopen(Chan *c, int omode)
 	}else{
 		if(u->n == 0)
 			error(Enonexist);
+		/* A file from below is copied into an up layer to be written. */
+		if(((mode != OREAD && mode != OEXEC) || (omode & OTRUNC)) && upbelow(u)){
+			qlock(&in->upql);
+			if(waserror()){
+				qunlock(&in->upql);
+				nexterror();
+			}
+			upcopy(c, (omode & OTRUNC) != 0);
+			poperror();
+			qunlock(&in->upql);
+		}
 		u->mc[0] = devtab[u->mc[0]->type]->open(u->mc[0], omode & ~(ORCLOSE|OCEXEC));
 		u->lopen = 1;
 		qlock(&in->ql);
@@ -2456,6 +3008,361 @@ unwrite(Chan *c, void *a, long n, vlong off)
 	return devtab[u->mc[0]->type]->write(u->mc[0], a, n, off);
 }
 
+/* Splits path into its directory (allocated) and last name (in path). */
+static char*
+pathsplit(char *path, char **name)
+{
+	char *s;
+
+	s = strrchr(path, '/');
+	if(s == nil){
+		*name = path;
+		return pathprefix(path, 0);
+	}
+	*name = s+1;
+	return pathprefix(path, npathelem(path)-1);
+}
+
+/*
+ * Makes name in u's directory in the layer, for uncreate: its parent
+ * directories are copied up, a whiteout for it is removed, and a
+ * directory made over one is opaque. Returns the new chan, as the
+ * device's create left it.
+ */
+static Chan*
+upcreate(Chan *c, char *name, char *np, int omode, ulong perm)
+{
+	Unc *u;
+	Inst *in;
+	Chan *volatile pd, *volatile nc, *volatile d;
+	int isdir, waswh;
+
+	u = c->aux;
+	in = u->inst;
+	if(iswhname(name))
+		error(Eperm);
+	qlock(&in->upql);
+	pd = nc = d = nil;
+	if(waserror()){
+		if(pd != nil)
+			cclose(pd);
+		if(nc != nil)
+			cclose(nc);
+		if(d != nil)
+			cclose(d);
+		qunlock(&in->upql);
+		nexterror();
+	}
+	if(upexists(in, np, 0, &isdir))
+		if(isdir || (perm & DMDIR) || (omode & OEXCL))
+			error(Eexist);
+	pd = upwalk(in, u->path, 1);
+	if(pd == nil)
+		error(Eperm);
+	waswh = rmwh(pd, name);
+	nc = cclone(pd);
+	nc = devtab[nc->type]->create(nc, name, omode, perm);
+	if((perm & DMDIR) && waswh){
+		d = lowerwalk1(pd, name);
+		if(d != nil)
+			mkmark(d, Whopaque);
+	}
+	poperror();
+	if(d != nil)
+		cclose(d);
+	cclose(pd);
+	qunlock(&in->upql);
+	changed(in, np);
+	return nc;
+}
+
+/*
+ * Removes u's name under the layer: from the layer if it's there, with
+ * a whiteout in its place if the name exists below.
+ */
+static void
+upremove(Unc *u)
+{
+	Inst *in;
+	Unc *volatile t;
+	Chan *volatile lc, *volatile pd;
+	char *volatile dir;
+	char *name;
+	int id, isdir, inlayer, below;
+
+	in = u->inst;
+	id = upid(in, u->path);
+	qlock(&in->upql);
+	t = nil;
+	lc = pd = nil;
+	dir = nil;
+	if(waserror()){
+		if(t != nil)
+			uncfree(t);
+		if(lc != nil)
+			cclose(lc);
+		if(pd != nil)
+			cclose(pd);
+		free(dir);
+		qunlock(&in->upql);
+		nexterror();
+	}
+	t = unlookup(in, u->path, 0);
+	if(t == nil)
+		error(Enonexist);
+	isdir = (t->mc[0]->qid.type & QTDIR) != 0;
+	if(isdir && unlist(t, 1))
+		error(Enotempty);
+	inlayer = t->mid[0] == id;
+	uncfree(t);
+	t = nil;
+	below = upexists(in, u->path, 1, nil);
+	dir = pathsplit(u->path, &name);
+	if(inlayer){
+		lc = upwalk(in, u->path, 0);
+		if(lc == nil)
+			error(Enonexist);
+		if(isdir)
+			rmmarks(lc);
+		devtab[lc->type]->remove(lc);
+		lc->type = 0;
+		cclose(lc);
+		lc = nil;
+	}
+	if(below){
+		pd = upwalk(in, dir, 1);
+		if(pd == nil)
+			error(Eperm);
+		mkwh(pd, name);
+		cclose(pd);
+		pd = nil;
+	}
+	poperror();
+	changed(in, u->path);
+	free(dir);
+	qunlock(&in->upql);
+}
+
+/*
+ * Makes name in the union directory c a link to target, or with target
+ * nil a FIFO: in the layer when it's under one, and otherwise in the
+ * first member that takes creates.
+ */
+static void
+unmknod(Chan *c, char *name, char *target, ulong perm)
+{
+	Unc *u;
+	Inst *in;
+	Chan *volatile pd;
+	char *volatile np;
+	int i;
+
+	u = c->aux;
+	in = u->inst;
+	if(!ovname(name))
+		error(strlen(name) >= Maxname ? Etoolong : Ebadchar);
+	np = pathjoin(u->path, name);
+	pd = nil;
+	if(waserror()){
+		free(np);
+		if(pd != nil)
+			cclose(pd);
+		nexterror();
+	}
+	if(upid(in, np) < 0){
+		if(u->path[0] == '\0')
+			untop(u);
+		for(i = 0; i < u->n; i++)
+			if(u->mcreate[i])
+				break;
+		if(i == u->n)
+			error(Enocreate);
+		if(target != nil)
+			mklink(u->mc[i], name, target);
+		else
+			mkfifo1(u->mc[i], name, perm);
+	}else{
+		if(iswhname(name))
+			error(Eperm);
+		qlock(&in->upql);
+		if(waserror()){
+			qunlock(&in->upql);
+			nexterror();
+		}
+		if(upexists(in, np, 0, nil))
+			error(Eexist);
+		pd = upwalk(in, u->path, 1);
+		if(pd == nil)
+			error(Eperm);
+		rmwh(pd, name);
+		if(target != nil)
+			mklink(pd, name, target);
+		else
+			mkfifo1(pd, name, perm);
+		poperror();
+		qunlock(&in->upql);
+		changed(in, np);
+	}
+	poperror();
+	if(pd != nil)
+		cclose(pd);
+	free(np);
+}
+
+static char Exdev[] = "cross-device link";	/* Linux's EXDEV (src/dotl/attr.zig) */
+
+/*
+ * Moves c's name to name in the directory dc, both union chans, for
+ * h9_overlay_move: within a layer, with the layer's own rename. A file
+ * from below is copied up first, and its old name whited out. Returns
+ * 1 if it can't (a directory from below, or a device that can't rename
+ * across directories), and 0 once moved.
+ */
+static int
+unmove(Chan *c, Chan *dc, char *name)
+{
+	Unc *u, *ud;
+	Inst *in;
+	Unc *volatile t;
+	Chan *volatile oc, *volatile pd, *volatile od, *volatile d;
+	char *volatile np, *volatile odir;
+	char *oname;
+	int id, isdir, tdir, inlayer, waswh, belowold, belownew, r;
+	uchar wbuf[Maxname+64];
+	Dir nd;
+
+	u = c->aux;
+	ud = dc->aux;
+	in = u->inst;
+	if(ud->inst != in)
+		return 1;
+	if(!ovname(name))
+		error(strlen(name) >= Maxname ? Etoolong : Ebadchar);
+	np = pathjoin(ud->path, name);
+	id = upid(in, u->path);
+	if(id < 0 || upid(in, np) < 0){
+		free(np);
+		return 1;
+	}
+	t = nil;
+	oc = pd = od = d = nil;
+	odir = nil;
+	qlock(&in->upql);
+	if(waserror()){
+		if(t != nil)
+			uncfree(t);
+		if(oc != nil)
+			cclose(oc);
+		if(pd != nil)
+			cclose(pd);
+		if(od != nil)
+			cclose(od);
+		if(d != nil)
+			cclose(d);
+		free(np);
+		free(odir);
+		qunlock(&in->upql);
+		nexterror();
+	}
+	if(iswhname(name))
+		error(Eperm);
+	if(u->path[0] == '\0')
+		error(Eperm);
+	if(strcmp(np, u->path) == 0){
+		poperror();
+		free(np);
+		qunlock(&in->upql);
+		return 0;
+	}
+	t = unlookup(in, u->path, 0);
+	if(t == nil)
+		error(Enonexist);
+	isdir = (t->mc[0]->qid.type & QTDIR) != 0;
+	inlayer = t->mid[0] == id;
+	uncfree(t);
+	t = nil;
+	belowold = upexists(in, u->path, 1, nil);
+	if(isdir && belowold){
+		/* overlayfs without redirect_dir: mv copies instead. */
+		poperror();
+		free(np);
+		qunlock(&in->upql);
+		return 1;
+	}
+	if(isdir && strncmp(np, u->path, strlen(u->path)) == 0 && np[strlen(u->path)] == '/')
+		error(Ebadarg);	/* into itself: EINVAL */
+	belownew = upexists(in, np, 1, nil);
+	if(upexists(in, np, 0, &tdir) && tdir){
+		t = unlookup(in, np, 0);
+		if(t != nil && unlist(t, 1))
+			error(Enotempty);
+		if(t != nil && t->mid[0] == id){
+			/* An empty directory in the layer: its markers would keep the host's rename from replacing it. */
+			d = upwalk(in, np, 0);
+			if(d != nil){
+				rmmarks(d);
+				devtab[d->type]->remove(d);
+				d->type = 0;
+				cclose(d);
+				d = nil;
+			}
+		}
+		if(t != nil)
+			uncfree(t);
+		t = nil;
+	}
+	if(!inlayer)
+		upcopy(c, 0);
+	odir = pathsplit(u->path, &oname);
+	oc = upwalk(in, u->path, 0);
+	pd = upwalk(in, ud->path, 1);
+	if(oc == nil || pd == nil)
+		error(Enonexist);
+	waswh = rmwh(pd, name);
+	r = 1;
+	if(devtab[oc->type]->dc == 'U' && devtab[pd->type]->dc == 'U')
+		r = h9_fs_rename(oc, pd, name);
+	else if(devtab[oc->type]->dc == 'O' && devtab[pd->type]->dc == 'O')
+		r = h9_overlay_move(oc, pd, name);
+	if(r != 0 && strcmp(odir, ud->path) == 0){
+		/* In one directory, any device renames with a wstat. */
+		ovnulldir(&nd);
+		nd.name = name;
+		devtab[oc->type]->wstat(oc, wbuf, convD2M(&nd, wbuf, sizeof wbuf));
+		r = 0;
+	}
+	if(r != 0){
+		if(waswh)
+			mkwh(pd, name);
+	}else{
+		if(belowold){
+			od = upwalk(in, odir, 1);
+			if(od != nil)
+				mkwh(od, oname);
+		}
+		if(isdir && (waswh || belownew)){
+			d = lowerwalk1(pd, name);
+			if(d != nil)
+				mkmark(d, Whopaque);
+		}
+		changed(in, u->path);
+		changed(in, np);
+	}
+	poperror();
+	if(oc != nil)
+		cclose(oc);
+	if(pd != nil)
+		cclose(pd);
+	if(od != nil)
+		cclose(od);
+	if(d != nil)
+		cclose(d);
+	free(np);
+	free(odir);
+	qunlock(&in->upql);
+	return r != 0;
+}
+
 static Chan*
 uncreate(Chan *c, char *name, int omode, ulong perm)
 {
@@ -2463,7 +3370,7 @@ uncreate(Chan *c, char *name, int omode, ulong perm)
 	Inst *in;
 	Chan *volatile nc;
 	char *np;
-	int i;
+	int i, id, cr;
 
 	u = c->aux;
 	in = u->inst;
@@ -2473,30 +3380,36 @@ uncreate(Chan *c, char *name, int omode, ulong perm)
 		error(strlen(name) >= Maxname ? Etoolong : Ebadchar);
 	if(u->path[0] == '\0')
 		untop(u);
-	for(i = 0; i < u->n; i++)
-		if(u->mcreate[i])
-			break;
-	if(i == u->n)
-		error(Enocreate);
 	np = pathjoin(u->path, name);
-	nc = cclone(u->mc[i]);
-	if(waserror()){
-		cclose(nc);
-		free(np);
-		nexterror();
-	}
-	nc = devtab[nc->type]->create(nc, name, omode & ~OCEXEC, perm);
-	poperror();
-	{
-		int id, cr;
+	if((id = upid(in, np)) >= 0){
+		if(waserror()){
+			free(np);
+			nexterror();
+		}
+		nc = upcreate(c, name, np, omode & ~OCEXEC, perm);
+		poperror();
+		cr = 1;
+	}else{
+		for(i = 0; i < u->n; i++)
+			if(u->mcreate[i])
+				break;
+		if(i == u->n){
+			free(np);
+			error(Enocreate);
+		}
+		nc = cclone(u->mc[i]);
+		if(waserror()){
+			cclose(nc);
+			free(np);
+			nexterror();
+		}
+		nc = devtab[nc->type]->create(nc, name, omode & ~OCEXEC, perm);
+		poperror();
 		id = u->mid[i];
 		cr = u->mcreate[i];
-		unclear(u);
-		u->mc[0] = nc;
-		u->mid[0] = id;
-		u->mcreate[0] = cr;
-		u->n = 1;
 	}
+	upset(u, nc, id);
+	u->mcreate[0] = cr;
 	free(u->path);
 	u->path = np;
 	u->lopen = (nc->qid.type & QTDIR) == 0;
@@ -2514,7 +3427,6 @@ uncreate(Chan *c, char *name, int omode, ulong perm)
 		u->mc[0] = nil;
 		u->n = 0;
 		unreroot(u, c, np);
-		c->qid = c->qid;
 	}
 	if(omode & ORCLOSE)
 		c->flag |= CRCLOSE;
@@ -2538,6 +3450,15 @@ unremove(Chan *c)
 	}
 	if(u->path[0] == '\0' || u->n == 0)
 		error(Eperm);
+	if(upid(u->inst, u->path) >= 0){
+		unclear(u);
+		u->lopen = 0;
+		upremove(u);
+		poperror();
+		c->aux = nil;
+		uncfree(u);
+		return;
+	}
 	mc = u->mc[0];
 	u->mc[0] = nil;
 	if(u->lopen){
@@ -2564,19 +3485,120 @@ unclose(Chan *c)
 	if(u == nil)
 		return;
 	if((c->flag & (COPEN|CRCLOSE)) == (COPEN|CRCLOSE) && u->n > 0 && !waserror()){
-		if(u->lopen){
-			cclose(u->mc[0]);
-			u->mc[0] = nil;
+		if(upid(u->inst, u->path) >= 0){
+			unclear(u);
 			u->lopen = 0;
-			unreroot(u, c, u->path);
+			upremove(u);
+		}else{
+			if(u->lopen){
+				cclose(u->mc[0]);
+				u->mc[0] = nil;
+				u->lopen = 0;
+				unreroot(u, c, u->path);
+			}
+			mc = u->mc[0];
+			u->mc[0] = nil;
+			devtab[mc->type]->remove(mc);
 		}
-		mc = u->mc[0];
-		u->mc[0] = nil;
-		devtab[mc->type]->remove(mc);
 		poperror();
 	}
 	c->aux = nil;
 	uncfree(u);
+}
+
+/*
+ * A wstat under the layer: a file from below is copied up, and a
+ * directory made in the layer, before it's changed there. A rename
+ * whites out the old name if it exists below, and a directory from
+ * below can't be renamed.
+ */
+static int
+upwstat(Chan *c, uchar *db, int n)
+{
+	Unc *u;
+	Inst *in;
+	Chan *volatile pd, *volatile d;
+	char *volatile dir, *volatile np;
+	char *name, *strs;
+	Dir dd;
+	int isdir, chname, change, waswh, belowold, r;
+
+	u = c->aux;
+	in = u->inst;
+	strs = smalloc(n);
+	pd = d = nil;
+	dir = np = nil;
+	qlock(&in->upql);
+	if(waserror()){
+		if(pd != nil)
+			cclose(pd);
+		if(d != nil)
+			cclose(d);
+		free(dir);
+		free(np);
+		free(strs);
+		qunlock(&in->upql);
+		nexterror();
+	}
+	if(convM2D(db, n, &dd, strs) != n)
+		error(Ebadstat);
+	dir = pathsplit(u->path, &name);
+	isdir = (u->mc[0]->qid.type & QTDIR) != 0;
+	chname = dd.name[0] != '\0' && strcmp(dd.name, name) != 0;
+	change = chname || dd.mode != (ulong)~0 || dd.mtime != (ulong)~0 || dd.length != ~0LL ||
+		dd.uid[0] != '\0' || dd.gid[0] != '\0';
+	if(chname && iswhname(dd.name))
+		error(Eperm);
+	belowold = upexists(in, u->path, 1, nil);
+	if(chname && isdir && belowold)
+		error(Exdev);
+	if(change && upbelow(u)){
+		if(isdir){
+			d = upwalk(in, u->path, 1);
+			cclose(d);
+			d = nil;
+			unreroot(u, c, u->path);
+			changed(in, u->path);
+		}else
+			upcopy(c, dd.length == 0);
+	}
+	waswh = 0;
+	if(chname){
+		np = pathjoin(dir, dd.name);
+		pd = upwalk(in, dir, 1);
+		if(pd == nil)
+			error(Enonexist);
+		waswh = rmwh(pd, dd.name);
+		if(waserror()){
+			if(waswh)
+				mkwh(pd, dd.name);
+			nexterror();
+		}
+		r = devtab[u->mc[0]->type]->wstat(u->mc[0], db, n);
+		poperror();
+		if(belowold)
+			mkwh(pd, name);
+		if(isdir && waswh){
+			d = lowerwalk1(pd, dd.name);
+			if(d != nil)
+				mkmark(d, Whopaque);
+		}
+		changed(in, u->path);
+		changed(in, np);
+		free(u->path);
+		u->path = np;
+		np = nil;
+	}else
+		r = devtab[u->mc[0]->type]->wstat(u->mc[0], db, n);
+	poperror();
+	if(pd != nil)
+		cclose(pd);
+	if(d != nil)
+		cclose(d);
+	free(dir);
+	free(strs);
+	qunlock(&in->upql);
+	return r;
 }
 
 static int
@@ -2587,6 +3609,8 @@ unwstat(Chan *c, uchar *db, int n)
 	u = c->aux;
 	if(u->n == 0 || u->path[0] == '\0')
 		error(Eperm);
+	if(upid(u->inst, u->path) >= 0)
+		return upwstat(c, db, n);
 	return devtab[u->mc[0]->type]->wstat(u->mc[0], db, n);
 }
 
@@ -2678,12 +3702,17 @@ unvalidname(char *s)
 	return n > 0 && n < 16;
 }
 
-/* Adds the directory c as a member of in, rooted at at, on top unless after. */
+/*
+ * Adds the directory c as a member of in, rooted at at, on top unless
+ * after. An up member goes on top whatever after says, and others go
+ * below it; a union has at most one.
+ */
 static void
-unaddmember(Inst *in, Chan *c, char *at, int after, int create)
+unaddmember(Inst *in, Chan *c, char *at, int after, int create, int isup)
 {
 	Member *m;
 	char *a;
+	int top;
 
 	if((c->qid.type & QTDIR) == 0)
 		error(Enotdir);
@@ -2696,16 +3725,23 @@ unaddmember(Inst *in, Chan *c, char *at, int after, int create)
 		free(a);
 		error("too many union members");
 	}
-	if(after)
+	top = in->nmem > 0 && in->mem[0].isup;
+	if(isup && top){
+		qunlock(&in->ql);
+		free(a);
+		error("a union has one up member");
+	}
+	if(after && !isup)
 		m = &in->mem[in->nmem];
 	else{
-		memmove(&in->mem[1], &in->mem[0], in->nmem*sizeof(Member));
-		m = &in->mem[0];
+		memmove(&in->mem[top+1], &in->mem[top], (in->nmem-top)*sizeof(Member));
+		m = &in->mem[top];
 	}
 	m->id = ++in->memgen;
 	m->root = cclone(c);
 	m->at = a;
-	m->create = create;
+	m->create = create || isup;
+	m->isup = isup;
 	in->nmem++;
 	qunlock(&in->ql);
 }
@@ -2742,6 +3778,7 @@ enum
 {
 	Uafter	= 1,	/* match h9_overlay_union's flags in src/kern.zig */
 	Ucreate	= 2,
+	Uup	= 4,	/* the union's up layer (design/upper-layers.md) */
 };
 
 static void
@@ -2799,7 +3836,7 @@ unionchan(char *spec, Chan *c, char *at, int flags)
 		if(in == nil)
 			error(Enonexist);
 	}
-	unaddmember(in, c, at, flags & Uafter, flags & Ucreate);
+	unaddmember(in, c, at, flags & Uafter, flags & Ucreate, (flags & Uup) != 0);
 	poperror();
 	return in->id;
 }
@@ -2891,7 +3928,11 @@ nsunion1(Inst *in, char *old, char *p, char *e, int depth)
 		p = nsunion1(sub, old, p, e, depth+1);
 	for(i = j-1; i >= 0 && p < e; i--){
 		m = &in->mem[i];
-		if(m->at[0] == '\0')
+		if(m->at[0] != '\0')
+			continue;
+		if(m->isup)
+			p = seprint(p, e, "bind -u %q %q\n", chanpath(m->root), old);
+		else
 			p = seprint(p, e, m->create ? "bind -rbc %q %q\n" : "bind -rb %q %q\n", chanpath(m->root), old);
 	}
 	for(i = j+1; i < in->nmem && p < e; i++){
@@ -3038,6 +4079,8 @@ h9_overlay_unpin(char *name)
  *
  *	add [-a|-b] [-c] PATH	PATH's directory as a member, on top (-b,
  *				the default) or at the bottom (-a); -c takes creates
+ *	upper PATH		PATH's directory as the union's up layer, on top
+ *				(design/upper-layers.md)
  *	del PATH		removes the member that is PATH's directory
  *	cow			a copy-on-write instance over the union, which
  *				attaching the union's number gives from then on
@@ -3197,7 +4240,13 @@ ctlwrite(Chan *c, void *a, long n, vlong)
 	}
 	if(cb->nf < 1)
 		error(Ebadctl);
-	if(strcmp(cb->f[0], "add") == 0){
+	if(strcmp(cb->f[0], "upper") == 0){
+		if(cb->nf != 2)
+			error(Ebadctl);
+		in = ctlinst(k);
+		mc = namec(cb->f[1], Aaccess, 0, 0);
+		unaddmember(in, mc, "", 0, 1, 1);
+	}else if(strcmp(cb->f[0], "add") == 0){
 		after = 0;
 		create = 0;
 		for(i = 1; i < cb->nf-1; i++){
@@ -3219,7 +4268,7 @@ ctlwrite(Chan *c, void *a, long n, vlong)
 		path = cb->f[cb->nf-1];
 		in = ctlinst(k);
 		mc = namec(path, Aaccess, 0, 0);
-		unaddmember(in, mc, "", after, create);
+		unaddmember(in, mc, "", after, create, 0);
 	}else if(strcmp(cb->f[0], "del") == 0){
 		if(cb->nf != 2)
 			error(Ebadctl);
@@ -4140,8 +5189,11 @@ h9_overlay_move(Chan *c, Chan *dc, char *name)
 	char *nm, *np, *oldpath;
 	int isdir, lowerex;
 
-	if(isunion(c) || isunion(dc))
-		return 1;
+	if(isunion(c) || isunion(dc)){
+		if(!isunion(c) || !isunion(dc))
+			return 1;
+		return unmove(c, dc, name);
+	}
 	o = c->aux;
 	od = dc->aux;
 	in = o->inst;
