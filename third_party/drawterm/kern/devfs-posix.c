@@ -587,8 +587,21 @@ fsstat(Chan *c, uchar *buf, int n)
 		/* h9: a link a Linux walk stopped at is itself, DMSYMLINK by its qid. */
 		if(lstat(uif->path, &stbuf) < 0)
 			error(strerror(errno));
-	}else if(stat(uif->path, &stbuf) < 0 && lstat(ownpath(uif), &stbuf) < 0)
-		error(strerror(errno));
+	}else if(lstat(uif->path, &stbuf) < 0){
+		if(lstat(ownpath(uif), &stbuf) < 0)
+			error(strerror(errno));
+	}else if(S_ISLNK(stbuf.st_mode)){
+		/*
+		 * h9: a link is stat'd as its target only if the policy shows
+		 * the target. A link walked to as itself because its target is
+		 * hidden (danglingwalk) keeps its own stat, so the size and
+		 * times of a file outside the policy don't show through it.
+		 */
+		struct stat t;
+
+		if(h9_fs_check(uif->path, H9_FSWALK) == 0 && stat(uif->path, &t) == 0)
+			stbuf = t;
+	}
 
 	d.name = lastelem(ownpath(uif));
 	d.uid = eve;

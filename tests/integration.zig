@@ -644,6 +644,22 @@ test "a link through a directory, a .. in a link, or a chain of links can't reac
     defer r.deinit();
     try std.testing.expectEqualStrings("no stat dl/secret\nno read dl/secret\nno stat up/secret\nno read up/secret\nno stat c1/secret\nno read c1/secret\nno stat sub/../dl/secret\nno read sub/../dl/secret\nno create\ninside\n", r.out);
     try std.testing.expect(!other.exists("d/new"));
+
+    // dl itself is walked to as the link, not its target: its stat is
+    // the link's own, so the outside directory's length doesn't show.
+    // Give that directory entries enough to tell the two apart.
+    for (0..200) |i| {
+        var nb: [64]u8 = undefined;
+        try other.tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&nb, "d/padding-name-to-grow-the-directory-{d}", .{i}), .data = "" });
+    }
+    const l = try run(e, &.{ "--cwd", s.path, "--rc", "ls -l dl" });
+    defer l.deinit();
+    var fields = std.mem.tokenizeAny(u8, l.out, " \n");
+    var length: []const u8 = "";
+    for (0..6) |_| length = fields.next() orelse "";
+    var want_buf: [32]u8 = undefined;
+    const target = try std.fmt.bufPrint(&lp, "{s}/d", .{other.path});
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{d}", .{target.len}), length);
 }
 
 test "--read-deny holds for a path reached through links and .. [baseline]" {
