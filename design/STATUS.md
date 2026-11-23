@@ -17,25 +17,25 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed | in progress on cow-fork; in progress on claude/project-thread-ipnqzx | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
-| [mount-index](mount-index.md) |  | draft | in progress on mount-index | Metadata indexes for 9P roots and mounts |
+| [mount-index](mount-index.md) |  | implemented |  | Metadata indexes for 9P roots and mounts |
 | [hcpu](hcpu.md) | [#174](../../../issues/174) | implemented |  | hcpu, h9's own CPUs for the emulator |
 | [kernel-serve](kernel-serve.md) |  | draft |  | A 9P server in the kernel |
 | [namespace-kernel](namespace-kernel.md) |  | draft | needs kernel-serve, port-streams | A namespace-only kernel build |
 | [port-streams](port-streams.md) |  | draft |  | 9P over a MessagePort |
 | [linux-fifo](linux-fifo.md) |  | implemented |  | Linux named pipes |
-| [mounts](mounts.md) |  | draft | in progress on mounts | Mounts, binds, and a Plan 9 root |
+| [mounts](mounts.md) |  | implemented |  | Mounts, binds, and a Plan 9 root |
 | [baseline-1](baseline-1.md) |  | draft | needs renames, cow-fork, retire-unicorn | Baseline 1 (h9 at the end of epoch 0) |
 | [file-interface](file-interface.md) |  | draft | needs kernel-port | A wider file interface inside the kernel, with 9P2000 as a view |
 | [host-handles](host-handles.md) |  | draft | needs kernel-port | Host access through handles |
 | [kernel-port](kernel-port.md) |  | draft | needs baseline-1, namespace-kernel, kernel-serve | Port the kernel core to Zig, as an instance |
-| [linux-symlinks](linux-symlinks.md) |  | draft | in progress on claude/project-thread-kcmhcu | Linux symlinks resolved in the guest's namespace |
+| [linux-symlinks](linux-symlinks.md) |  | implemented |  | Linux symlinks resolved in the guest's namespace |
 | [memory-model](memory-model.md) |  | draft | needs baseline-1, cow-fork | One memory model under both ABIs |
-| [plan-format](plan-format.md) |  | draft | needs baseline-1, mounts, child-machines | The plan as a file, and the one way in |
+| [plan-format](plan-format.md) |  | draft | needs baseline-1, child-machines | The plan as a file, and the one way in |
 | [renames](renames.md) |  | draft |  | Rename the parts, to ABI, engine, sud, and hcpu |
 | [retire-unicorn](retire-unicorn.md) |  | draft |  | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
-| [fd-mounts](fd-mounts.md) |  | draft | needs mounts | Mounting a 9P connection from a host descriptor |
-| [upper-layers](upper-layers.md) |  | draft | needs mounts, linux-symlinks | Writable layers on the host |
+| [fd-mounts](fd-mounts.md) |  | draft |  | Mounting a 9P connection from a host descriptor |
+| [upper-layers](upper-layers.md) |  | draft |  | Writable layers on the host |
 
 ```mermaid
 flowchart LR
@@ -54,18 +54,18 @@ flowchart LR
   p_child_machines["child-machines<br/>proposed"]:::draft
   p_cow_fork["cow-fork<br/>proposed"]:::draft
   p_wine_draw["wine-draw<br/>proposed"]:::draft
-  p_mount_index["mount-index<br/>draft"]:::draft
+  p_mount_index["mount-index<br/>implemented"]:::implemented
   p_hcpu["hcpu<br/>implemented"]:::implemented
   p_kernel_serve["kernel-serve<br/>draft"]:::draft
   p_namespace_kernel["namespace-kernel<br/>draft"]:::draft
   p_port_streams["port-streams<br/>draft"]:::draft
   p_linux_fifo["linux-fifo<br/>implemented"]:::implemented
-  p_mounts["mounts<br/>draft"]:::draft
+  p_mounts["mounts<br/>implemented"]:::implemented
   p_baseline_1["baseline-1<br/>draft"]:::draft
   p_file_interface["file-interface<br/>draft"]:::draft
   p_host_handles["host-handles<br/>draft"]:::draft
   p_kernel_port["kernel-port<br/>draft"]:::draft
-  p_linux_symlinks["linux-symlinks<br/>draft"]:::draft
+  p_linux_symlinks["linux-symlinks<br/>implemented"]:::implemented
   p_memory_model["memory-model<br/>draft"]:::draft
   p_plan_format["plan-format<br/>draft"]:::draft
   p_renames["renames<br/>draft"]:::draft
