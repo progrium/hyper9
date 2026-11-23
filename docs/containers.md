@@ -90,7 +90,7 @@ something the runtime does for you.
 | `docker build`, `RUN` | A host script running `h9 --dir IMAGE:/:rw ...` against a copy of the base ([section 9](#9-building-images)) | main |
 | Multi-stage builds | Compile with the full root tree, copy the binary into a slim one | main |
 | `docker commit` | Run with `--dir IMAGE:/:rw` on a copy of the image | main |
-| `docker diff`, keeping a container's changes as a layer | Proposed | *Not yet available ([upper-layers](../design/upper-layers.md), draft)* |
+| `docker diff`, keeping a container's changes as a layer | `--dir LAYER:/:up` over the image: changes, whiteouts included, land in LAYER | upper-layers |
 | `-v host:container`, `--mount type=bind` | `--cwd DIR`, `--readable PATH`, `--writable PATH` | main |
 | Hiding files from a bind mount | `--read-deny PATH` | main |
 | `--tmpfs /tmp` | Always: every machine has a private `/tmp` in memory | main |
@@ -272,7 +272,8 @@ Alpine is one layer. An image with several has whiteouts: a layer marks a
 deleted file with an empty `.wh.NAME` file, and a directory it replaces
 whole with `.wh..wh..opq`, which the plain `tar` above would leave behind as
 files. `h9box pull` ([section 18](#18-putting-it-together-h9box)) handles
-both. If you have Docker, `docker export $(docker create alpine) | tar -xf -
+both, and so does a stack of `--dir` mounts on `/`, which reads them as it
+merges (section 8, "Layers"). If you have Docker, `docker export $(docker create alpine) | tar -xf -
 -C images/alpine` gives the same tree flattened.
 
 Inside, it's that Linux system:
@@ -525,9 +526,25 @@ host$ h9 --dir ./images/base-with-ndb:/:rw \
 	--rc "echo 'sys=build ip=10.0.0.5' >> /lib/ndb/local"
 ```
 
-Saving a run's overlay changes afterwards, like `docker commit` of a stopped
-container or `docker diff`, isn't possible yet; writing them to a host
-directory as a layer is the [upper-layers](../design/upper-layers.md) draft.
+**Layers.** To keep only what a run changed, the way `docker diff` shows
+it, mount an empty host directory as the root's `up` member. It goes on top
+of the stack and takes every write: new and changed files, a `.wh.NAME`
+whiteout for each one removed, and `.wh..wh..opq` for a directory made over
+one removed. The image underneath isn't touched:
+
+```sh
+host$ mkdir layer
+host$ h9 --dir ./images/base --dir ./layer:/:up \
+	--rc "echo 'sys=build ip=10.0.0.5' >> /lib/ndb/local; rm /lib/ndb/common"
+host$ ls -a layer/lib/ndb
+.wh.common  local
+```
+
+The layer is an OCI layer as it stands: stack it as a plain member on a
+later run (`--dir ./images/base --dir ./layer:/`) to get the changed root
+back, or tar it up. Moving a directory that came from below fails with
+"cross-device link", as on Linux's overlayfs, and `mv` falls back to
+copying. `--tmp /:up` keeps the layer in memory instead.
 
 ## 9. Building images
 
@@ -832,8 +849,9 @@ where there is one:
 
 - **Exec, attach, and inspecting a running machine.** See section 16;
   [serve](../design/epoch-0/serve.md) is a draft.
-- **Saving a run's changes.** The root's overlay is thrown away; keeping it
-  as a layer on disk is [upper-layers](../design/upper-layers.md), a draft.
+- **Saving a run's changes after the fact.** The root's overlay is thrown
+  away when the run ends. Mount an `up` layer before the run to keep them
+  (section 8, "Layers"; on the upper-layers branch).
 - **Image files.** Images are directories or 9P servers. Attaching a
   single-file image read-only was proposed and declined
   ([image-roots](../design/epoch-0/image-roots.md)).

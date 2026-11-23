@@ -181,6 +181,21 @@ try {
     if (r.code !== 0 || r.out !== want) throw new Error(`mounts: ${JSON.stringify(r)}`);
   });
 
+  // design/upper-layers.md: up on a mount the page names, here a layer
+  // in memory over /n/l, which the machine makes.
+  await test('createMachine takes up: true as the up option [upper-layers]', async () => {
+    const r = await page.evaluate(async () => {
+      const { createMachine } = await import('./h9-web.js');
+      const out = [];
+      const terminal = { write: (b) => out.push(new TextDecoder().decode(b)), setRaw() {} };
+      const m = await createMachine({ mounts: [{ archive: 'root.h9a' }, { tmp: true, dst: '/n/l', up: true }], terminal });
+      const code = await m.run(['/bin/rc', '-c', "echo x >/n/l/f && cat /n/l/f; ns | grep -c 'bind -u'"]);
+      return { code, out: out.join('') };
+    });
+    r.out = r.out.replace(/^h9: warning: .*\n/m, '');
+    if (r.code !== 0 || r.out !== 'x\n1\n') throw new Error(`up: ${JSON.stringify(r)}`);
+  });
+
   await test('createMachine mounts a static tree over fetch [mounts]', async () => {
     const r = await page.evaluate(async (st) => {
       const { createMachine } = await import('./h9-web.js');
