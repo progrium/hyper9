@@ -2,7 +2,7 @@
 issue: 89
 slug: login-shell
 title: h9 as a login shell
-status: proposed
+status: declined
 created: 2026-11-08
 authors: [progrium]
 depends: [default-command, host-cmd]
@@ -155,3 +155,7 @@ Steps 1 and 2 don't need host-cmd and can land first; with default-command, they
 - **Windows.** There's no login shell in this sense, but Windows Terminal profiles can start `h9 --rc`. Does the terminal handoff work with ConPTY?
 - **`#C/bin` listing.** A host `PATH` holds thousands of names. Is listing them all useful, or should the directory list nothing and resolve only on walk?
 - **Plan 9's `$path`.** Should the shell profile set `path=(. /bin /mnt/term$HOME/bin)` or leave per-user binds to `$home/lib/profile`?
+
+## Declined
+
+- 2026-11-23: It's too far out of scope for the project, and too low a priority to take on now. Making h9 the shell a terminal opens means speaking the host's POSIX shell contract, handing the terminal to host programs, and falling back to the host's `PATH`, which is host integration h9 doesn't take on. `h9 --rc` already gives an interactive rc from any terminal. A need for rc as an everyday host shell that `h9 --rc` can't meet would reopen it, through a new proposal.
