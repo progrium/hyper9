@@ -13,7 +13,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [audio](audio.md) |  | draft |  | Audio (--audio) |
 | [host-cmd](host-cmd.md) |  | draft | in progress on host-cmd | Rethinking host commands |
 | [overlay-export](overlay-export.md) |  | superseded |  | Exporting a run's overlay changes |
-| [login-shell](login-shell.md) | [#89](../../../issues/89) | proposed | needs host-cmd | h9 as a login shell |
+| [login-shell](login-shell.md) | [#89](../../../issues/89) | declined |  | h9 as a login shell |
 | [child-machines](child-machines.md) | [#109](../../../issues/109) | proposed |  | Child machines |
 | [cow-fork](cow-fork.md) | [#121](../../../issues/121) | proposed | in progress on cow-fork; in progress on claude/project-thread-ipnqzx | Copy-on-write fork and demand-loaded file pages for Linux processes |
 | [wine-draw](wine-draw.md) | [#158](../../../issues/158) | proposed | in progress on wine-draw | Wine windows through draw |
@@ -50,7 +50,7 @@ flowchart LR
   p_audio["audio<br/>draft"]:::draft
   p_host_cmd["host-cmd<br/>draft"]:::draft
   p_overlay_export["overlay-export<br/>superseded"]:::closed
-  p_login_shell["login-shell<br/>proposed"]:::draft
+  p_login_shell["login-shell<br/>declined"]:::closed
   p_child_machines["child-machines<br/>proposed"]:::draft
   p_cow_fork["cow-fork<br/>proposed"]:::draft
   p_wine_draw["wine-draw<br/>proposed"]:::draft
