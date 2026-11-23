@@ -6,7 +6,7 @@ created: 2026-11-22
 authors: [progrium]
 depends: [ephemeral-writes, mounts, linux-symlinks, linux-fifo]
 areas: [sandbox, cli, kern, api, web]
-branch: []
+branch: [upper-layers]
 ---
 
 # Proposal: Writable layers on the host
