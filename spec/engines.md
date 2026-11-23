@@ -106,7 +106,7 @@ The hypervisor backends share:
 
 ### KVM
 
-The KVM backend (`src/vmm/kvm.zig`) runs on Linux on x86\_64, and on arm64, where it builds but hasn't yet run on a KVM host ([#92](https://github.com/progrium/hyper9/issues/92)). Its ioctls and structs are declared in `kvm_abi.zig`, so it needs no headers or library and static musl builds keep working. `/dev/kvm` missing, or not accessible, is `HypervisorUnavailable`, and the CLI says which.
+The KVM backend (`src/vmm/kvm.zig`) runs on Linux on x86\_64 and arm64. Its ioctls and structs are declared in `kvm_abi.zig`, so it needs no headers or library and static musl builds keep working. `/dev/kvm` missing, or not accessible, is `HypervisorUnavailable`, and the CLI says which.
 
 The VM has one memory slot, the RAM region at 2 GiB, and no in-kernel interrupt controller: h9 never injects interrupts. On arm64 the VM asks for HVF's 36-bit IPA size, and the host sets the same system registers HVF does with `KVM_SET_ONE_REG`, so the shim is unchanged; the doorbell store is an MMIO exit, which KVM completes and steps past itself. On x86\_64 the doorbell is an `OUT`.
 
