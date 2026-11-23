@@ -7673,6 +7673,12 @@ test "pthreads program with 8 threads and a mutex [linux-threads]" {
     try threadCase(&le, "condvar");
 }
 
+test "a signal breaks the read of a second thread blocked on the same pipe [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "pipe_intr");
+}
+
 test "a thread's scheduling parameters read back as SCHED_OTHER at priority 0 [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

@@ -11,6 +11,23 @@
  */
 typedef struct Queue	Queue;
 void	h9_qwake(Queue*);	/* h9: wakes Linux pollers (src/kern/linuxnet.c) */
+void	tsleep(Rendez*, int (*)(void*), void*, ulong);	/* h9: src/kern/tsleep.c */
+
+/*
+ * h9: qlock for a queue's reader or writer lock, which a note interrupts.
+ * A reader waiting behind another reader (one pipe that several processes
+ * read, as a jobserver's is) otherwise sleeps in qlock, which no note
+ * reaches, so a signal can't break its read: cargo's and rustc's
+ * jobserver helpers each read the jobserver pipe and are stopped with
+ * SIGUSR1, and wait forever. Waiting in tsleep instead, a note raises
+ * Eintr as it does for the reader that holds the lock.
+ */
+static void
+qlockintr(QLock *l)
+{
+	while(!canqlock(l))
+		tsleep(&up->sleep, return0, nil, 10);
+}
 
 struct Queue
 {
@@ -828,7 +845,7 @@ qbread(Queue *q, int len)
 
 	assert(len >= 0);
 
-	qlock(&q->rlock);
+	qlockintr(&q->rlock);
 	if(waserror()){
 		qunlock(&q->rlock);
 		nexterror();
@@ -880,7 +897,7 @@ qread(Queue *q, void *vp, int len)
 
 	assert(len >= 0);
 
-	qlock(&q->rlock);
+	qlockintr(&q->rlock);
 	if(waserror()){
 		qunlock(&q->rlock);
 		nexterror();
@@ -978,7 +995,7 @@ qflow(Flow *f)
 	Queue *q = f->q;
 
 	while(!unblocked(f)){
-		qlock(&q->wlock);
+		qlockintr(&q->wlock);
 		if(waserror()){
 			qunlock(&q->wlock);
 			nexterror();
