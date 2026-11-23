@@ -315,6 +315,34 @@ static void tcp_et_drain(void) {
 	printf("ok tcp_et_drain\n");
 }
 
+/* getsockname on an IPv4 TCP socket before bind, and between bind and
+ * listen, as Kestrel reads it: an AF_INET address, the bound port. */
+static void bound_name(void) {
+	int port;
+	int l = listener(&port);
+	CHECK("bound_name", l >= 0);
+	close(l);
+	int s = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in a;
+	socklen_t n = sizeof a;
+	memset(&a, 0xee, sizeof a);
+	CHECK("bound_name", getsockname(s, (void *)&a, &n) == 0);
+	CHECK("bound_name", n == sizeof a && a.sin_family == AF_INET && a.sin_port == 0 && a.sin_addr.s_addr == 0);
+	int one = 1;
+	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	struct sockaddr_in b = {.sin_family = AF_INET, .sin_port = htons(port)};
+	CHECK("bound_name", bind(s, (void *)&b, sizeof b) == 0);
+	n = sizeof a;
+	memset(&a, 0xee, sizeof a);
+	CHECK("bound_name", getsockname(s, (void *)&a, &n) == 0);
+	CHECK("bound_name", n == sizeof a && a.sin_family == AF_INET && ntohs(a.sin_port) == port && a.sin_addr.s_addr == 0);
+	CHECK("bound_name", listen(s, 8) == 0);
+	n = sizeof a;
+	CHECK("bound_name", getsockname(s, (void *)&a, &n) == 0 && a.sin_family == AF_INET && ntohs(a.sin_port) == port);
+	close(s);
+	printf("ok bound_name\n");
+}
+
 static void nb_connect(void) {
 	int port;
 	int l = listener(&port);
@@ -785,6 +813,7 @@ int main(int argc, char **argv) {
 		if (!strcmp(n, "tcp_echo") || !strcmp(n, "net")) tcp_echo();
 		if (!strcmp(n, "nb_connect") || !strcmp(n, "net")) nb_connect();
 		if (!strcmp(n, "tcp_et") || !strcmp(n, "net")) tcp_et();
+		if (!strcmp(n, "bound_name") || !strcmp(n, "net")) bound_name();
 		if (!strcmp(n, "tcp_et_drain") || !strcmp(n, "net")) tcp_et_drain();
 		if (!strcmp(n, "half_close") || !strcmp(n, "net")) half_close();
 		if (!strcmp(n, "exit_eof") || !strcmp(n, "net")) exit_eof();

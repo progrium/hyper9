@@ -7494,26 +7494,38 @@ test "edge-triggered epoll in another thread reports a TCP socket's next data af
     const io = std.testing.io;
     var srv = try listenLocal();
     defer srv.deinit(io);
+    // One connection for each backend netCase runs, in turn.
     const Echo = struct {
-        fn serve(sv: *std.Io.net.Server) void {
-            const c = deadline.accept(sv, io) catch return;
-            defer c.close(io);
-            var rbuf: [16]u8 = undefined;
-            var r = c.reader(io, &rbuf);
-            var wbuf: [16]u8 = undefined;
-            var w = c.writer(io, &wbuf);
-            while (r.interface.takeByte()) |b| {
-                io.sleep(.fromMilliseconds(150), .awake) catch return;
-                w.interface.writeByte(b) catch return;
-                w.interface.flush() catch return;
-            } else |_| {}
+        fn serve(sv: *std.Io.net.Server, n: usize) void {
+            for (0..n) |_| {
+                const c = deadline.accept(sv, io) catch return;
+                defer c.close(io);
+                var rbuf: [16]u8 = undefined;
+                var r = c.reader(io, &rbuf);
+                var wbuf: [16]u8 = undefined;
+                var w = c.writer(io, &wbuf);
+                while (r.interface.takeByte()) |b| {
+                    io.sleep(.fromMilliseconds(150), .awake) catch return;
+                    w.interface.writeByte(b) catch return;
+                    w.interface.flush() catch return;
+                } else |_| {}
+            }
         }
     };
-    const t = try std.Thread.spawn(.{}, Echo.serve, .{&srv});
+    var backends = std.mem.tokenizeScalar(u8, le.backends, ',');
+    var n: usize = 0;
+    while (backends.next()) |_| n += 1;
+    const t = try std.Thread.spawn(.{}, Echo.serve, .{ &srv, n });
     defer t.join();
     var port_buf: [64]u8 = undefined;
     const port_env = try std.fmt.bufPrint(&port_buf, "ETD_PORT={d}", .{srv.socket.address.getPort()});
     try netCase(&le, &.{ "--net=enable", "--env", port_env, "/mnt/term/cwd/net", "tcp_et_drain" }, "ok tcp_et_drain\n");
+}
+
+test "getsockname on an IPv4 TCP socket between bind and listen gives AF_INET and the bound port [linux-net]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "--net=enable", "/mnt/term/cwd/net", "bound_name" }, "ok bound_name\n");
 }
 
 test "non-blocking connect is EINPROGRESS, then writable, then SO_ERROR 0 [linux-net]" {
