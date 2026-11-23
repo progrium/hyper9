@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [symlinks-in-root]
 areas: [kern, linux, sandbox]
-branch: [claude/project-thread-kcmhcu]
+branch: []
 ---
 
 # Proposal: Linux symlinks resolved in the guest's namespace
@@ -126,3 +126,4 @@ Integration cases, tagged `[linux-symlinks]`, with the Alpine root:
   - **`/proc/self/fd/N`.** An open of one is fd N's dup (`#d/N`), as `/dev/fd/N`'s is, since devlinux has no file to open there.
   - **Not yet.** The 9P2000.L client still follows its links itself, from its attach root, for every process: it needs the walk mode passed with a walk, a readable link fid for `h9_fs_chanreadlink`, and listings that show links (done below). And the h9build demo hasn't been run.
 - 2026-11-22: The 9P2000.L client stops at links for a Linux process. devmnt writes each request in the process that makes it, so `#ℓ` passes `h9_fs_linkwalk()` with each write, and the translator keeps it on the request. A walk that meets a link ends there with `QTSYMLINK`, making a fid only when the link is the last name. That fid stats as the link, opens to read without the server, and reads as its target by `Treadlink`, which is how `h9_fs_chanreadlink` reads a link on a mount. A Linux process's directory reads list links. namec refuses to open a link a Linux open didn't follow, for every device. Under a mount index ([mount-index](mount-index.md)) the same holds: a link makes its directory incomplete there, so walks in it go on to the translator, which `#ι` writes to from the same process.
+- 2026-11-23: **On main, with the demo left.** The first pass landed in [#228](https://github.com/progrium/hyper9/pull/228), the Windows build and cases in [#230](https://github.com/progrium/hyper9/pull/230), and the 9P2000.L client's links in [#236](https://github.com/progrium/hyper9/pull/236), and the spec describes them ([spec/abi-linux.md](../spec/abi-linux.md), [spec/sandbox.md](../spec/sandbox.md#linux-symlinks), and [spec/ninep.md](../spec/ninep.md)). Every case is checked, so the `claude/project-thread-kcmhcu` branch is done and no longer listed. What's left is the h9build `python-uv` demo, which runs from progrium/scratch, outside this repository; the proposal stays a draft until it has run, or until it's waived.
