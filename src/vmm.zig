@@ -169,6 +169,14 @@ pub const Ureg = union(Arch) {
             inline else => |*r| r.setReturn(v),
         }
     }
+    /// Returns `v` from a 9front syscall, with the registers 9front's
+    /// syscall return doesn't preserve cleared as it clears them (the
+    /// architecture's `sysReturn`). Not for the Linux personality.
+    pub fn sysReturn(u: *Ureg, v: u64) void {
+        switch (u.*) {
+            inline else => |*r| r.sysReturn(v),
+        }
+    }
     pub fn stackPointer(u: *const Ureg) u64 {
         return switch (u.*) {
             inline else => |r| r.sp,

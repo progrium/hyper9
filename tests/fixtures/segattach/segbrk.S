@@ -17,9 +17,9 @@
 	add x2, x19, #0x3000
 	SYS 12
 	CHECK 1
-	add x5, x19, #0x2000
+	add x21, x19, #0x2000
 	mov x2, #5
-	str x2, [x5, #0xff8]
+	str x2, [x21, #0xff8]
 	mov x1, x19
 	add x2, x19, #0x1000
 	SYS 12
@@ -34,7 +34,7 @@
 	add x2, x19, #0x3000
 	SYS 12
 	CHECK 4
-	ldr x2, [x5, #0xff8]
+	ldr x2, [x21, #0xff8]
 	mov x28, #5
 	cbnz x2, die
 	mov x1, #0

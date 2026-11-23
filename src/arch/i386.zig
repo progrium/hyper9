@@ -37,6 +37,11 @@ pub const Ureg = extern struct {
     pub fn setReturn(u: *Ureg, v: u64) void {
         u.ax = @truncate(v);
     }
+    /// A syscall's return. 9front's 386 forkret (pc/l.s) reloads the whole
+    /// Ureg with POPAL, so every other register survives.
+    pub fn sysReturn(u: *Ureg, v: u64) void {
+        u.setReturn(v);
+    }
     /// Registers at process entry (execregs): AX holds the Tos pointer, as
     /// execregs returns it as the syscall's result, and SP points at argc.
     pub fn initExec(entry: u64, sp: u64, tos: u64) Ureg {

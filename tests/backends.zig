@@ -140,7 +140,8 @@ test "a guest syscall with any value in AX traps to h9 [native-backend]" {
     // 9front takes the number from BP and ignores AX, so a guest may leave
     // anything there; on native, the host kernel mustn't act on any of
     // them (a patched kernel ran 335 and 336 before seccomp saw them).
-    // Each value goes in AX for a pwrite of one byte.
+    // Each value goes in AX for a pwrite of one byte. The table pointer
+    // and the count live in R15 and R14, which a syscall preserves.
     const ax = [_]u64{ 0, 39, 60, 231, 335, 336, 0x4000_0027, 0x7fff_ffff, 0x1_0000_0027, std.math.maxInt(u64) };
     const code = [_]u8{
         0x48, 0x83, 0xec, 0x30, // subq  $0x30, %rsp
@@ -149,13 +150,13 @@ test "a guest syscall with any value in AX traps to h9 [native-backend]" {
         0x48, 0x89, 0x44, 0x24, 0x10, // movq  %rax, 16(%rsp)     buf
         0x48, 0xc7, 0x44, 0x24, 0x18, 0x01, 0x00, 0x00, 0x00, // movq  $1, 24(%rsp)      n
         0x48, 0xc7, 0x44, 0x24, 0x20, 0xff, 0xff, 0xff, 0xff, // movq  $-1, 32(%rsp)     offset
-        0x48, 0x8d, 0x1d, 0x36, 0x00, 0x00, 0x00, // leaq  table(%rip), %rbx
-        0x41, 0xbc, 0x0a, 0x00, 0x00, 0x00, // movl  $10, %r12d
-        0x48, 0x8b, 0x03, // 1: movq  (%rbx), %rax     AX from the table
+        0x4c, 0x8d, 0x3d, 0x36, 0x00, 0x00, 0x00, // leaq  table(%rip), %r15
+        0x41, 0xbe, 0x0a, 0x00, 0x00, 0x00, // movl  $10, %r14d
+        0x49, 0x8b, 0x07, // 1: movq  (%r15), %rax     AX from the table
         0xbd, 0x33, 0x00, 0x00, 0x00, // movl  $51, %ebp          PWRITE
         0x0f, 0x05, // syscall
-        0x48, 0x83, 0xc3, 0x08, // addq  $8, %rbx
-        0x41, 0xff, 0xcc, // decl  %r12d
+        0x49, 0x83, 0xc7, 0x08, // addq  $8, %r15
+        0x41, 0xff, 0xce, // decl  %r14d
         0x75, 0xed, // jnz   1b
         0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq  $0, 8(%rsp)       nil
         0xbd, 0x08, 0x00, 0x00, 0x00, // movl  $8, %ebp           EXITS
@@ -1099,6 +1100,116 @@ test "segments: releasing a process's segments frees its memory" {
     }.f);
 }
 
+// A syscall returns with the registers 9front's doesn't preserve zeroed,
+// as its forkret leaves them, so a program that wrongly keeps a value in
+// one fails here as it would on 9front, and not only there: sleep(0) is
+// made with each of them set to 1, and the ones that survive set to
+// markers. The program exits cleanly only if all of the first are 0 and
+// the markers are intact.
+const clobber_result: Result = .{ .status = "exited \"\"", .out = "", .trace = "1 sleep 0 = 0\n1 exits \"\"\n" };
+
+test "a syscall zeroes BX, DX, SI, DI, R8 to R10, R12, R13, and BP, and keeps R14 and R15 amd64" {
+    const code = [_]u8{
+        0x48, 0x83, 0xec, 0x20, // subq $0x20, %rsp
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq $0x0, 0x8(%rsp)
+        0xbb, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %ebx
+        0xba, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %edx
+        0xbe, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %esi
+        0xbf, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %edi
+        0x41, 0xb8, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %r8d
+        0x41, 0xb9, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %r9d
+        0x41, 0xba, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %r10d
+        0x41, 0xbc, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %r12d
+        0x41, 0xbd, 0x01, 0x00, 0x00, 0x00, // movl $0x1, %r13d
+        0x41, 0xbe, 0x4e, 0x00, 0x00, 0x00, // movl $0x4e, %r14d
+        0x41, 0xbf, 0x4f, 0x00, 0x00, 0x00, // movl $0x4f, %r15d
+        0xbd, 0x11, 0x00, 0x00, 0x00, // movl $0x11, %ebp
+        0x0f, 0x05, // syscall
+        0x48, 0x09, 0xd8, // orq %rbx, %rax
+        0x48, 0x09, 0xd0, // orq %rdx, %rax
+        0x48, 0x09, 0xf0, // orq %rsi, %rax
+        0x48, 0x09, 0xf8, // orq %rdi, %rax
+        0x4c, 0x09, 0xc0, // orq %r8, %rax
+        0x4c, 0x09, 0xc8, // orq %r9, %rax
+        0x4c, 0x09, 0xd0, // orq %r10, %rax
+        0x4c, 0x09, 0xe0, // orq %r12, %rax
+        0x4c, 0x09, 0xe8, // orq %r13, %rax
+        0x48, 0x09, 0xe8, // orq %rbp, %rax
+        0x75, 0x1c, // jne bad
+        0x49, 0x83, 0xfe, 0x4e, // cmpq $0x4e, %r14
+        0x75, 0x16, // jne bad
+        0x49, 0x83, 0xff, 0x4f, // cmpq $0x4f, %r15
+        0x75, 0x10, // jne bad
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // movq $0x0, 0x8(%rsp)
+        0xbd, 0x08, 0x00, 0x00, 0x00, // movl $0x8, %ebp
+        0x0f, 0x05, // syscall
+        // bad:
+        0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, // movq 0x0, %rax
+    };
+    const bytes = try image(std.testing.allocator, .amd64, &code);
+    defer std.testing.allocator.free(bytes);
+    try expectAll(.amd64, bytes, clobber_result);
+}
+
+test "a syscall zeroes X1 to X17 and keeps X18 to X25 arm64" {
+    const code = words(&.{
+        0xd10083ff, // sub sp, sp, #0x20
+        0xf90007ff, // str xzr, [sp, #0x8]
+        0xd2800021, // mov x1, #0x1
+        0xd2800022, // mov x2, #0x1
+        0xd2800023, // mov x3, #0x1
+        0xd2800024, // mov x4, #0x1
+        0xd2800025, // mov x5, #0x1
+        0xd2800026, // mov x6, #0x1
+        0xd2800027, // mov x7, #0x1
+        0xd2800028, // mov x8, #0x1
+        0xd2800029, // mov x9, #0x1
+        0xd280002a, // mov x10, #0x1
+        0xd280002b, // mov x11, #0x1
+        0xd280002c, // mov x12, #0x1
+        0xd280002d, // mov x13, #0x1
+        0xd280002e, // mov x14, #0x1
+        0xd280002f, // mov x15, #0x1
+        0xd2800030, // mov x16, #0x1
+        0xd2800031, // mov x17, #0x1
+        0xd2800a52, // mov x18, #0x52
+        0xd2800b39, // mov x25, #0x59
+        0xd2800220, // mov x0, #0x11
+        0xd4000001, // svc #0
+        0xaa010000, // orr x0, x0, x1
+        0xaa020000, // orr x0, x0, x2
+        0xaa030000, // orr x0, x0, x3
+        0xaa040000, // orr x0, x0, x4
+        0xaa050000, // orr x0, x0, x5
+        0xaa060000, // orr x0, x0, x6
+        0xaa070000, // orr x0, x0, x7
+        0xaa080000, // orr x0, x0, x8
+        0xaa090000, // orr x0, x0, x9
+        0xaa0a0000, // orr x0, x0, x10
+        0xaa0b0000, // orr x0, x0, x11
+        0xaa0c0000, // orr x0, x0, x12
+        0xaa0d0000, // orr x0, x0, x13
+        0xaa0e0000, // orr x0, x0, x14
+        0xaa0f0000, // orr x0, x0, x15
+        0xaa100000, // orr x0, x0, x16
+        0xaa110000, // orr x0, x0, x17
+        0xb5000100, // cbnz x0, bad
+        0xf1014a5f, // cmp x18, #0x52
+        0x540000c1, // b.ne bad
+        0xf101673f, // cmp x25, #0x59
+        0x54000081, // b.ne bad
+        0xf90007ff, // str xzr, [sp, #0x8]
+        0xd2800100, // mov x0, #0x8
+        0xd4000001, // svc #0
+        // bad:
+        0xaa1f03e0, // mov x0, xzr
+        0xf9400000, // ldr x0, [x0]
+    });
+    const bytes = try image(std.testing.allocator, .arm64, &code);
+    defer std.testing.allocator.free(bytes);
+    try expectAll(.arm64, bytes, clobber_result);
+}
+
 test "pooled vCPUs carry FP state, the thread pointer and fork across processes arm64" {
     // Forks four times (16 processes), then each sets d8 and TPIDR_EL0 from
     // its Tos pid and makes 2000 syscalls, each one a fresh trip through
@@ -1146,18 +1257,20 @@ test "pooled vCPUs carry FP state, the thread pointer and fork across processes 
 
 test "pooled vCPUs carry FP state and fork across processes amd64" {
     // As the arm64 test, with xmm8, MXCSR, the x87 control word and ST0
-    // (FS base isn't used by 9front binaries).
+    // (FS base isn't used by 9front binaries). A syscall zeroes RBX, RBP,
+    // R12 and R13, as 9front's does, so the Tos and the counters live in
+    // R14 and R15, and RBX is reloaded after the loop.
     const code = [_]u8{
-        0x49, 0x89, 0xc4, // movq  %rax, %r12          Tos
+        0x49, 0x89, 0xc7, // movq  %rax, %r15          Tos
         0x48, 0x83, 0xec, 0x20, // subq  $0x20, %rsp
-        0x49, 0xc7, 0xc5, 0x04, 0x00, 0x00, 0x00, // movq  $4, %r13
+        0x49, 0xc7, 0xc6, 0x04, 0x00, 0x00, 0x00, // movq  $4, %r14
         // fork:
         0x48, 0xc7, 0x44, 0x24, 0x08, 0x14, 0x00, 0x00, 0x00, // movq $0x14, 8(%rsp)  RFPROC|RFFDG
         0xbd, 0x13, 0x00, 0x00, 0x00, // movl  $19, %ebp          RFORK
         0x0f, 0x05, // syscall
-        0x49, 0xff, 0xcd, // decq  %r13
+        0x49, 0xff, 0xce, // decq  %r14
         0x75, 0xeb, // jne   fork
-        0x41, 0x8b, 0x5c, 0x24, 0x40, // movl  64(%r12), %ebx     Tos.pid
+        0x41, 0x8b, 0x5f, 0x40, // movl  64(%r15), %ebx     Tos.pid
         0x48, 0x83, 0xc3, 0x64, // addq  $100, %rbx
         0x66, 0x4c, 0x0f, 0x6e, 0xc3, // movq  %rbx, %xmm8
         0xc7, 0x44, 0x24, 0x10, 0x80, 0x7f, 0x00, 0x00, // movl $0x7f80, 16(%rsp)
@@ -1173,6 +1286,8 @@ test "pooled vCPUs carry FP state and fork across processes amd64" {
         0x0f, 0x05, // syscall
         0x49, 0xff, 0xce, // decq  %r14
         0x75, 0xeb, // jne   loop
+        0x41, 0x8b, 0x5f, 0x40, // movl  64(%r15), %ebx     Tos.pid again
+        0x48, 0x83, 0xc3, 0x64, // addq  $100, %rbx
         0x66, 0x4c, 0x0f, 0x7e, 0xc1, // movq  %xmm8, %rcx
         0x48, 0x39, 0xd9, // cmpq  %rbx, %rcx
         0x75, 0x32, // jne   bad
