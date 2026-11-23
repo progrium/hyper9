@@ -2423,7 +2423,9 @@ host$ ls -a deps/etc | grep wh
 ```
 
 A stack with a layer has no overlay in memory, and `./alpine` is never
-written. The layer is written as the program goes, so a step that fails
+written. It remembers what its lookups found for up to a second, so a
+change made on the host to one of its trees can take that long to show;
+the program's own changes show at once. The layer is written as the program goes, so a step that fails
 leaves a partial one: to keep only finished steps, use a fresh directory
 and rename it when the step succeeds (`--dir ./app.tmp:#L:up`, then `mv
 app.tmp app`). Files in a host layer are owned by the user h9 runs as.

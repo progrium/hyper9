@@ -71,6 +71,9 @@ extern void h9_overlay_free(void *pool, void *p, ulong n);
 extern void h9_overlay_changed(void *track, char *path);
 /* src/kern/fscheck.c */
 extern void h9_fs_symlink(Chan*, char*, char*);
+extern void *h9_plan_get(void);
+extern int h9_fs_linkwalk(void);
+extern vlong h9_clock_mono(void);
 
 enum
 {
@@ -108,6 +111,8 @@ typedef struct Chunk Chunk;
 typedef struct Member Member;
 typedef struct Qmap Qmap;
 typedef struct Unc Unc;
+typedef struct Wce Wce;
+typedef struct Wcache Wcache;
 
 enum
 {
@@ -201,6 +206,8 @@ struct Inst
 	ulong	qmem;		/* bytes of qid table and snapshots, counted against the pool */
 	QLock	upql;		/* serializes changes to an up member's tree (design/upper-layers.md) */
 	ulong	upgen;		/* counts directories made in the up member's tree; under ql */
+	QLock	wcl;		/* the walk cache's lock */
+	Wcache	*wc;		/* the walk cache (unstep), made on first use; under wcl */
 };
 
 /* A chan's state. */
@@ -963,9 +970,12 @@ ovperm(ulong mode, int omode)
 }
 
 /* Reports a change at path to the instance's tracker, if it has one. */
+static void wcdrop(Inst*, char*, int);
+
 static void
 changed(Inst *in, char *path)
 {
+	wcdrop(in, path, 0);
 	if(in->track != nil)
 		h9_overlay_changed(in->track, path);
 }
@@ -1226,6 +1236,8 @@ instlookup(int id)
 	return nil;
 }
 
+static void wcfree(Inst*);
+
 static void
 instfree(Inst *in)
 {
@@ -1243,6 +1255,7 @@ instfree(Inst *in)
 	qunlock(&in->ql);
 	if(in->lower != nil)
 		cclose(in->lower);
+	wcfree(in);
 	for(i = 0; i < in->nmem; i++){
 		cclose(in->mem[i].root);
 		free(in->mem[i].at);
@@ -1836,6 +1849,368 @@ isopaque(Chan *dir)
 	return 1;
 }
 
+/*
+ * The walk cache. A step of a union walk (unstep) asks each member for
+ * the name, and for whiteouts and opaque markers, which is a host stat
+ * or a 9P walk per member for every name of every walk. A stack with an
+ * up layer keeps what its steps found, keyed by the new path and by
+ * what decides the answer: the members the step started from, whether
+ * the walk leaves the layer out, whether it's a Linux process's walk,
+ * and the calling machine's access rules. An entry holds the members'
+ * chans, cloned for each use, or that the name doesn't exist.
+ *
+ * Changes through the instance drop what they change: changed() drops
+ * the path, and a change that moves or removes a directory, or the
+ * members themselves, drops everything. An entry is kept for at most a
+ * second, so a change made on the host to a tree in the stack is seen
+ * within that. A step that ran while its path was dropped doesn't keep
+ * what it found (the drop log).
+ */
+enum
+{
+	Wcbuckets	= 1024,	/* a power of 2 */
+	Wcmax	= 8192,		/* entries; more drops everything */
+	Wclog	= 64,		/* drops remembered, for steps in flight */
+};
+
+#define Wcttl	1000000000LL	/* ns */
+
+struct Wce
+{
+	Wce	*next;
+	char	*path;
+	int	noup;
+	int	lx;
+	void	*plan;
+	int	nkey;
+	int	*kmid;		/* the member ids the step started from */
+	int	ng;		/* 0: the name doesn't exist */
+	Chan	**mc;
+	int	*mid;
+	int	*mcreate;
+	vlong	born;
+};
+
+struct Wcache
+{
+	Wce	*tab[Wcbuckets];
+	int	n;
+	ulong	seq;		/* counts drops */
+	char	*log[Wclog];	/* the path of drop seq%Wclog; nil for everything */
+};
+
+static ulong
+wchash(char *s)
+{
+	ulong h;
+
+	h = 2166136261UL;
+	while(*s != '\0')
+		h = (h ^ (uchar)*s++) * 16777619UL;
+	return h & (Wcbuckets-1);
+}
+
+/* Whether in keeps a walk cache: a stack with an up layer. */
+static int
+wcon(Inst *in)
+{
+	int on;
+
+	qlock(&in->ql);
+	on = in->mode == Union && in->nmem > 0 && in->mem[0].isup;
+	qunlock(&in->ql);
+	return on;
+}
+
+/* Unlinks e onto *dead, for wcfreelist outside wcl. */
+static void
+wcunlink(Wcache *wc, Wce **l, Wce **dead)
+{
+	Wce *e;
+
+	e = *l;
+	*l = e->next;
+	e->next = *dead;
+	*dead = e;
+	wc->n--;
+}
+
+static void
+wcfreelist(Wce *e)
+{
+	Wce *next;
+	int i;
+
+	for(; e != nil; e = next){
+		next = e->next;
+		for(i = 0; i < e->ng; i++)
+			cclose(e->mc[i]);
+		free(e->mc);
+		free(e->mid);
+		free(e->mcreate);
+		free(e->kmid);
+		free(e->path);
+		free(e);
+	}
+}
+
+static void
+wclogadd(Wcache *wc, char *path)
+{
+	char **l;
+
+	wc->seq++;
+	l = &wc->log[wc->seq % Wclog];
+	free(*l);
+	*l = path != nil ? strdup(path) : nil;
+}
+
+/* Everything, under wcl. */
+static Wce*
+wcclear(Wcache *wc)
+{
+	Wce *dead;
+	int i;
+
+	dead = nil;
+	for(i = 0; i < Wcbuckets; i++)
+		while(wc->tab[i] != nil)
+			wcunlink(wc, &wc->tab[i], &dead);
+	return dead;
+}
+
+/*
+ * Drops what the cache has for path, or with all everything: a change
+ * at path, or one that moves or removes a directory.
+ */
+static void
+wcdrop(Inst *in, char *path, int all)
+{
+	Wcache *wc;
+	Wce **l, *dead;
+
+	dead = nil;
+	qlock(&in->wcl);
+	wc = in->wc;
+	if(wc == nil){
+		qunlock(&in->wcl);
+		return;
+	}
+	if(all || path == nil){
+		dead = wcclear(wc);
+		wclogadd(wc, nil);
+	}else{
+		for(l = &wc->tab[wchash(path)]; *l != nil;)
+			if(strcmp((*l)->path, path) == 0)
+				wcunlink(wc, l, &dead);
+			else
+				l = &(*l)->next;
+		wclogadd(wc, path);
+	}
+	qunlock(&in->wcl);
+	wcfreelist(dead);
+}
+
+static void
+wcfree(Inst *in)
+{
+	Wcache *wc;
+	Wce *dead;
+	int i;
+
+	qlock(&in->wcl);
+	wc = in->wc;
+	in->wc = nil;
+	qunlock(&in->wcl);
+	if(wc == nil)
+		return;
+	dead = wcclear(wc);
+	for(i = 0; i < Wclog; i++)
+		free(wc->log[i]);
+	free(wc);
+	wcfreelist(dead);
+}
+
+static int
+wcmatch(Wce *e, Unc *u, char *np, int lx, void *plan)
+{
+	int i;
+
+	if(e->noup != u->noup || e->lx != lx || e->plan != plan || e->nkey != u->n)
+		return 0;
+	for(i = 0; i < u->n; i++)
+		if(e->kmid[i] != u->mid[i])
+			return 0;
+	return strcmp(e->path, np) == 0;
+}
+
+/*
+ * Looks up u's step to np. Returns 1 with the members' chans cloned
+ * into got, gid, gcr and *ng, -1 if the name doesn't exist, and 0 if
+ * the cache has nothing for it. Also returns the drop count, for
+ * wcput.
+ */
+static int
+wcget(Inst *in, Unc *u, char *np, Chan **got, int *gid, int *gcr, int *ng, ulong *seq)
+{
+	Wcache *wc;
+	Wce *e, **l, *dead;
+	vlong now;
+	int volatile i;
+	int r, lx;
+	void *plan;
+
+	lx = h9_fs_linkwalk();
+	plan = h9_plan_get();
+	now = h9_clock_mono();
+	dead = nil;
+	r = 0;
+	qlock(&in->wcl);
+	if(in->wc == nil){
+		in->wc = mallocz(sizeof(Wcache), 1);
+		if(in->wc == nil){
+			qunlock(&in->wcl);
+			*seq = 0;
+			return 0;
+		}
+	}
+	wc = in->wc;
+	*seq = wc->seq;
+	for(l = &wc->tab[wchash(np)]; (e = *l) != nil; l = &e->next){
+		if(!wcmatch(e, u, np, lx, plan))
+			continue;
+		if(now - e->born > Wcttl){
+			wcunlink(wc, l, &dead);
+			break;
+		}
+		if(e->ng == 0){
+			r = -1;
+			break;
+		}
+		i = 0;
+		if(waserror()){
+			while(--i >= 0)
+				cclose(got[i]);
+			qunlock(&in->wcl);
+			wcfreelist(dead);
+			nexterror();
+		}
+		for(i = 0; i < e->ng; i++){
+			got[i] = cclone(e->mc[i]);
+			gid[i] = e->mid[i];
+			gcr[i] = e->mcreate[i];
+		}
+		poperror();
+		*ng = e->ng;
+		r = 1;
+		break;
+	}
+	qunlock(&in->wcl);
+	wcfreelist(dead);
+	return r;
+}
+
+/*
+ * Keeps u's step to np, found from the members in kmid (nkey of them)
+ * since drop count seq: ng members (none if the name doesn't exist),
+ * unless np was dropped meanwhile.
+ */
+static void
+wcput(Inst *in, int noup, int *kmid, int nkey, char *np, ulong seq, vlong born, Chan **got, int *gid, int *gcr, int ng)
+{
+	Wcache *wc;
+	Wce *e, *dead;
+	ulong s;
+	int volatile i;
+
+	e = mallocz(sizeof(Wce), 1);
+	if(e == nil)
+		return;
+	e->path = strdup(np);
+	e->kmid = malloc((nkey > 0 ? nkey : 1)*sizeof(int));
+	e->mc = malloc((ng > 0 ? ng : 1)*sizeof(Chan*));
+	e->mid = malloc((ng > 0 ? ng : 1)*sizeof(int));
+	e->mcreate = malloc((ng > 0 ? ng : 1)*sizeof(int));
+	if(e->path == nil || e->kmid == nil || e->mc == nil || e->mid == nil || e->mcreate == nil){
+		wcfreelist(e);
+		return;
+	}
+	e->noup = noup;
+	e->lx = h9_fs_linkwalk();
+	e->plan = h9_plan_get();
+	e->nkey = nkey;
+	memmove(e->kmid, kmid, nkey*sizeof(int));
+	e->born = born;
+	i = 0;
+	if(waserror()){
+		e->ng = i;
+		wcfreelist(e);
+		return;
+	}
+	for(i = 0; i < ng; i++){
+		e->mc[i] = cclone(got[i]);
+		e->mid[i] = gid[i];
+		e->mcreate[i] = gcr[i];
+	}
+	poperror();
+	e->ng = ng;
+	dead = nil;
+	qlock(&in->wcl);
+	wc = in->wc;
+	if(wc == nil || wc->seq - seq >= Wclog){
+		qunlock(&in->wcl);
+		wcfreelist(e);
+		return;
+	}
+	for(s = seq+1; s != wc->seq+1; s++)
+		if(wc->log[s % Wclog] == nil || strcmp(wc->log[s % Wclog], np) == 0){
+			qunlock(&in->wcl);
+			wcfreelist(e);
+			return;
+		}
+	if(wc->n >= Wcmax)
+		dead = wcclear(wc);
+	e->next = wc->tab[wchash(np)];
+	wc->tab[wchash(np)] = e;
+	wc->n++;
+	qunlock(&in->wcl);
+	wcfreelist(dead);
+}
+
+/*
+ * The up member's chan for path, if a step the cache keeps found the
+ * name there (upwalk's shortcut); nil otherwise.
+ */
+static Chan*
+wcup(Inst *in, char *path, int upmid)
+{
+	Wcache *wc;
+	Wce *e;
+	Chan *volatile c;
+	vlong now;
+	int lx;
+	void *plan;
+
+	lx = h9_fs_linkwalk();
+	plan = h9_plan_get();
+	now = h9_clock_mono();
+	c = nil;
+	qlock(&in->wcl);
+	wc = in->wc;
+	if(wc != nil)
+		for(e = wc->tab[wchash(path)]; e != nil; e = e->next)
+			if(e->ng > 0 && e->mid[0] == upmid && e->lx == lx && e->plan == plan &&
+			   now - e->born <= Wcttl && strcmp(e->path, path) == 0){
+				if(!waserror()){
+					c = cclone(e->mc[0]);
+					poperror();
+				}
+				break;
+			}
+	qunlock(&in->wcl);
+	return c;
+}
+
 static int unstep(Unc*, Chan*, char*);
 static void unfresh(Unc*);
 
@@ -1889,6 +2264,9 @@ unstep(Unc *u, Chan *nc, char *name)
 	Chan *got[Maxmembers];
 	int gid[Maxmembers], gcr[Maxmembers], ng;
 	char *np, *dir, *s, why[ERRMAX];
+	int kmid[Maxmembers], nkey, wc;
+	ulong wseq;
+	vlong born;
 
 	if(strcmp(name, ".") == 0)
 		return 1;
@@ -1923,6 +2301,26 @@ unstep(Unc *u, Chan *nc, char *name)
 	qunlock(&in->ql);
 	unfresh(u);
 	np = pathjoin(u->path, name);
+
+	/* The walk cache: what an earlier step from the same members found. */
+	wc = wcon(in);
+	nkey = 0;
+	wseq = 0;
+	born = 0;
+	ng = 0;
+	if(wc){
+		born = h9_clock_mono();
+		switch(wcget(in, u, np, got, gid, gcr, &ng, &wseq)){
+		case -1:
+			free(np);
+			kstrcpy(up->errstr, Enonexist, ERRMAX);
+			return 0;
+		case 1:
+			goto found;
+		}
+		nkey = u->n;
+		memmove(kmid, u->mid, nkey*sizeof(int));
+	}
 
 	/*
 	 * In member order: u's chans (at the top, every member rooted there,
@@ -2006,10 +2404,15 @@ unstep(Unc *u, Chan *nc, char *name)
 		if(have[k] != nil)
 			cclose(have[k]);
 	if(ng == 0){
+		if(wc && (why[0] == '\0' || strcmp(why, Enonexist) == 0))
+			wcput(in, u->noup, kmid, nkey, np, wseq, born, got, gid, gcr, 0);
 		free(np);
 		kstrcpy(up->errstr, why[0] != '\0' ? why : Enonexist, ERRMAX);
 		return 0;
 	}
+	if(wc)
+		wcput(in, u->noup, kmid, nkey, np, wseq, born, got, gid, gcr, ng);
+found:
 	unclear(u);
 	for(i = 0; i < ng; i++){
 		u->mc[i] = got[i];
@@ -2624,7 +3027,7 @@ upwalk(Inst *in, char *path, int make)
 	Dir d;
 	uchar sbuf[1024+4*Maxname];
 	char strs[sizeof sbuf];
-	int i, n, nat;
+	int i, n, nat, upmid;
 
 	qlock(&in->ql);
 	if(in->nmem == 0 || !in->mem[0].isup){
@@ -2633,7 +3036,12 @@ upwalk(Inst *in, char *path, int make)
 	}
 	c = cclone(in->mem[0].root);
 	nat = npathelem(in->mem[0].at);
+	upmid = in->mem[0].id;
 	qunlock(&in->ql);
+	if(path[0] != '\0' && (nc = wcup(in, path, upmid)) != nil){
+		cclose(c);
+		return nc;
+	}
 	t = nil;
 	nc = nil;
 	pre = nil;
@@ -2663,14 +3071,16 @@ upwalk(Inst *in, char *path, int make)
 			lowerstat(t->mc[0], &d, sbuf, sizeof sbuf, strs);
 			uncfree(t);
 			t = nil;
-			free(pre);
-			pre = nil;
 			if((d.qid.type & QTDIR) == 0)
 				error(Enotdir);
 			nc = cclone(c);
 			nc = devtab[nc->type]->create(nc, buf, OREAD, DMDIR|(d.mode & 0777));
 			cclose(nc);
 			upmade(in);
+			/* The directory has the layer among its members now. */
+			wcdrop(in, pre, 0);
+			free(pre);
+			pre = nil;
 			nc = lowerwalk1(c, buf);
 			if(nc == nil)
 				error(Enonexist);
@@ -3216,8 +3626,10 @@ upremove(Unc *u)
 		lc = upwalk(in, u->path, 0);
 		if(lc == nil)
 			error(Enonexist);
-		if(isdir)
+		if(isdir){
 			rmmarks(lc);
+			wcdrop(in, nil, 1);
+		}
 		devtab[lc->type]->remove(lc);
 		lc->type = 0;
 		cclose(lc);
@@ -3275,6 +3687,7 @@ unmknod(Chan *c, char *name, char *target, ulong perm)
 			mklink(u->mc[i], name, target);
 		else
 			mkfifo1(u->mc[i], name, perm);
+		wcdrop(in, np, 0);
 	}else{
 		if(iswhname(name))
 			error(Eperm);
@@ -3439,6 +3852,7 @@ unmove(Chan *c, Chan *dc, char *name)
 			if(d != nil)
 				mkmark(d, Whopaque);
 		}
+		wcdrop(in, nil, 1);
 		changed(in, u->path);
 		changed(in, np);
 	}
@@ -3501,6 +3915,7 @@ uncreate(Chan *c, char *name, int omode, ulong perm)
 		}
 		nc = devtab[nc->type]->create(nc, name, omode & ~OCEXEC, perm);
 		poperror();
+		wcdrop(in, np, 0);
 		id = u->mid[i];
 		cr = u->mcreate[i];
 	}
@@ -3537,6 +3952,7 @@ unremove(Chan *c)
 {
 	Unc *u;
 	Chan *mc;
+	int isdir;
 
 	u = c->aux;
 	if(waserror()){
@@ -3565,7 +3981,9 @@ unremove(Chan *c)
 		mc = u->mc[0];
 		u->mc[0] = nil;
 	}
+	isdir = (mc->qid.type & QTDIR) != 0;
 	devtab[mc->type]->remove(mc);
+	wcdrop(u->inst, u->path, isdir);
 	poperror();
 	c->aux = nil;
 	uncfree(u);
@@ -3595,6 +4013,7 @@ unclose(Chan *c)
 			mc = u->mc[0];
 			u->mc[0] = nil;
 			devtab[mc->type]->remove(mc);
+			wcdrop(u->inst, u->path, 1);
 		}
 		poperror();
 	}
@@ -3679,6 +4098,7 @@ upwstat(Chan *c, uchar *db, int n)
 			if(d != nil)
 				mkmark(d, Whopaque);
 		}
+		wcdrop(in, nil, 1);
 		changed(in, u->path);
 		changed(in, np);
 		free(u->path);
@@ -3701,13 +4121,17 @@ static int
 unwstat(Chan *c, uchar *db, int n)
 {
 	Unc *u;
+	int r;
 
 	u = c->aux;
 	if(u->n == 0 || u->path[0] == '\0')
 		error(Eperm);
 	if(upid(u->inst, u->path) >= 0)
 		return upwstat(c, db, n);
-	return devtab[u->mc[0]->type]->wstat(u->mc[0], db, n);
+	r = devtab[u->mc[0]->type]->wstat(u->mc[0], db, n);
+	/* A rename moves what's under it too. */
+	wcdrop(u->inst, u->path, (u->mc[0]->qid.type & QTDIR) != 0);
+	return r;
 }
 
 /* A union chan at the top of in. */
@@ -3840,6 +4264,7 @@ unaddmember(Inst *in, Chan *c, char *at, int after, int create, int isup)
 	m->isup = isup;
 	in->nmem++;
 	qunlock(&in->ql);
+	wcdrop(in, nil, 1);
 }
 
 /* Removes the member whose root is the same file as c; 0 if none is. */
@@ -3865,6 +4290,7 @@ undelmember(Inst *in, Chan *c)
 	memmove(&in->mem[i], &in->mem[i+1], (in->nmem-i-1)*sizeof(Member));
 	in->nmem--;
 	qunlock(&in->ql);
+	wcdrop(in, nil, 1);
 	cclose(r);
 	free(a);
 	return 1;

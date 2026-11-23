@@ -8678,6 +8678,34 @@ test "a working directory from below sees a directory made again over it as opaq
     try expectFile(&s, "up/etc/apk/new", "x\n");
 }
 
+test "names looked up again after a change in the layer see the change [upper-layers]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "up");
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    // A stack with a layer keeps what its walks found (the walk cache in
+    // devoverlay.c): each name is looked up before and after it changes,
+    // within the second an entry is kept, from the root and from a
+    // working directory, with a directory's names removed and renamed.
+    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c",
+        "cd /usr/share && test ! -e new/a/b && mkdir -p new/a/b && test -d new/a/b && echo made && " ++
+        "rm -rf new && test ! -e new/a && test ! -e /usr/share/new/a/b && echo gone && " ++
+        "mkdir -p new/a && test ! -e new/a/b && echo again && " ++
+        "test -e /etc/alpine-release && rm /etc/alpine-release && test ! -e /etc/alpine-release && echo whited && " ++
+        "echo x >/etc/alpine-release && test -s /etc/alpine-release && echo back && " ++
+        "mkdir /app && echo f >/app/f1 && mkdir /app/d && echo g >/app/d/f && mv /app/d /app/e && " ++
+        "test ! -e /app/d/f && cat /app/e/f && mv /app/f1 /app/f2 && test ! -e /app/f1 && cat /app/f2" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("made\ngone\nagain\nwhited\nback\ng\nf\n", r.out);
+    try std.testing.expect(s.exists("up/usr/share/new/a"));
+    try std.testing.expect(!s.exists("up/usr/share/new/a/b"));
+    try expectFile(&s, "up/app/e/f", "g\n");
+}
+
 test "Alpine builds in layers that stack again as directories and archives (demo) [upper-layers]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

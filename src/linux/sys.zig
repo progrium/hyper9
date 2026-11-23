@@ -2792,9 +2792,9 @@ fn mkdir(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
     // another thread or process makes the directory after the check; a
     // create without it opens the directory it finds with OTRUNC and
     // fails with EISDIR, which Node's recursive mkdir takes as done
-    // before it has made the rest of the path.
-    if (statExists(dirfd, path)) return -E.EXIST;
-    if (at(dirfd, path, []u8, kern.readlink, .{ path, &p.name2_buf })) |_| return -E.EXIST else |_| {}
+    // before it has made the rest of the path. One walk that stops at a
+    // link answers both.
+    if (lexists(dirfd, path)) return -E.EXIST;
     const OEXCL = 0x1000;
     const perm = DMDIR | (mode & 0o777 & ~p.umask);
     const fd = at(dirfd, path, u31, kern.create, .{ path, kern.OREAD | OEXCL, perm }) catch return kerr();
@@ -2805,10 +2805,15 @@ fn mkdir(p: *Process, dirfd: i32, path_va: u64, mode: u32) Err!i64 {
 fn unlink(p: *Process, dirfd: i32, path_va: u64, flags: u32) Err!i64 {
     const path = try pathArg(p, path_va, &p.name_buf);
     if (path.len == 0) return -E.NOENT;
-    // A link is removed itself, whatever it points at.
-    const is_link = if (at(dirfd, path, []u8, kern.readlink, .{ path, &p.name2_buf })) |_| true else |_| false;
-    const dir = !is_link and isDir(p, dirfd, path);
-    if (flags & AT_REMOVEDIR != 0 and !dir) return if (is_link) -E.NOTDIR else (if (statExists(dirfd, path)) -E.NOTDIR else -E.NOENT);
+    // A link is removed itself, whatever it points at: one walk that
+    // stops at a link says what's there, or that nothing is.
+    var b: [512]u8 = undefined;
+    const n = atNoFollow(dirfd, path, usize, kern.stat, .{ path, &b }) catch
+        return if (flags & AT_REMOVEDIR != 0) -E.NOENT else kerr();
+    const d, _ = attr.Dir.parse(b[0..n]) orelse return -E.IO;
+    const is_link = d.mode & DMSYMLINK != 0 and d.mode & DMDIR == 0;
+    const dir = !is_link and d.mode & DMDIR != 0;
+    if (flags & AT_REMOVEDIR != 0 and !dir) return -E.NOTDIR;
     if (flags & AT_REMOVEDIR == 0 and dir) return -E.ISDIR;
     at(dirfd, path, void, kern.remove, .{path}) catch return kerr();
     return 0;
