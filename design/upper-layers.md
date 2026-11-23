@@ -4,7 +4,7 @@ title: Writable layers on the host
 status: draft
 created: 2026-11-22
 authors: [progrium]
-depends: [ephemeral-writes, mounts, linux-symlinks, linux-fifo]
+depends: [ephemeral-writes, mounts, linux-symlinks, linux-fifo, port-streams]
 areas: [sandbox, cli, kern, api, web]
 branch: [upper-layers]
 ---
@@ -166,23 +166,23 @@ h9 --dir ./alpine:#L --archive deps.tar:#L --archive app.tar:#L sh -c 'cat /app/
 
 Integration cases:
 
-- [ ] `test "a new file lands in the up layer and nowhere else [upper-layers]"`
-- [ ] `test "writing a file from below copies it up with its parents [upper-layers]"`
-- [ ] `test "removing a name from below leaves a .wh. file [upper-layers]"`
-- [ ] `test "a directory removed and made again is opaque [upper-layers]"`
-- [ ] `test "a rename across directories copies up and renames in the layer [upper-layers]"`
-- [ ] `test "renaming a directory from below is EXDEV [upper-layers]"`
-- [ ] `test "links and FIFOs are made in the layer [upper-layers]"`
-- [ ] `test "a .wh. name can't be made in an up layer [upper-layers]"`
-- [ ] `test "an up member goes on top of its stack whatever its order [upper-layers]"`
-- [ ] `test "up off a stack layers over what's at DST [upper-layers]"`
-- [ ] `test "up conflicts, two up members, and up on a read-only source are usage errors [upper-layers]"`
-- [ ] `test "a stack member's .wh. file hides the name in the members below [upper-layers]"`
-- [ ] `test "a stack member's opaque directory hides the directory below [upper-layers]"`
-- [ ] `test "--archive on a stack reads whiteouts, and off a stack keeps them as files [upper-layers]"`
-- [ ] `test "--print writes bind -u, and it replays with --ns [upper-layers]"`
-- [ ] `test "ns prints an up instance as bind -u [upper-layers]"`
-- [ ] `test "up on a 9P2000.L mount keeps the layer on the server [upper-layers]"`
+- [x] `test "a new file lands in the up layer and nowhere else [upper-layers]"`
+- [x] `test "writing a file from below copies it up with its parents [upper-layers]"`
+- [x] `test "removing a name from below leaves a .wh. file [upper-layers]"`
+- [x] `test "a directory removed and made again is opaque [upper-layers]"`
+- [x] `test "a rename across directories copies up and renames in the layer [upper-layers]"`
+- [x] `test "renaming a directory from below is EXDEV [upper-layers]"`
+- [x] `test "links and FIFOs are made in the layer [upper-layers]"`
+- [x] `test "a .wh. name can't be made in an up layer [upper-layers]"`
+- [x] `test "an up member goes on top of its stack whatever its order [upper-layers]"`
+- [x] `test "up off a stack layers over what's at DST [upper-layers]"`
+- [x] `test "up conflicts, two up members, and up on a read-only source are usage errors [upper-layers]"`
+- [x] `test "a stack member's .wh. file hides the name in the members below [upper-layers]"`
+- [x] `test "a stack member's opaque directory hides the directory below [upper-layers]"`
+- [x] `test "--archive on a stack reads whiteouts, and off a stack keeps them as files [upper-layers]"`
+- [x] `test "--print writes bind -u, and it replays with --ns [upper-layers]"`
+- [x] `test "ns prints an up instance as bind -u [upper-layers]"`
+- [x] `test "up on a 9P2000.L mount keeps the layer on the server [upper-layers]"`
 
 Browser host:
 
@@ -202,3 +202,7 @@ Browser host:
 - **Owners in a Linux layer.** A host layer's files are owned by the user h9 runs as. If the guest's `chown` should survive, the layer would need to record owners somewhere, as rootless container tools do with an xattr.
 - **Copying up a large file** costs the whole file on the first write. Host filesystems with reflinks (APFS clones, Btrfs, XFS) could make it nearly free for `--dir` layers.
 - **Directory renames from below.** overlayfs's `redirect_dir` records a moved directory in an xattr; a portable form could follow if `EXDEV` turns out to matter.
+
+## Updates
+
+- 2026-11-23: Steps 1 to 4 and 6 are on the `upper-layers` branch, with step 5 in part. The layer is built as the top member of a `union` instance rather than as a `cow` instance's upper, as step 2 has it: the up member is a union member marked up (`Member.isup`), always first, and the union's lookups, reads, creates, removes, renames, and wstats copy up, white out, and make opaque directories through it. That reuses the whiteout handling step 1 adds for stacks, and leaves `cow` instances as they were. `bind -u NEW OLD` makes a union of OLD with NEW as its up member, and `clone`'s ctl takes `upper PATH`. `--archive` keeps whiteouts as files, which a stack then reads as whiteouts, so the archive case holds without a node kind for them. `--write=ephemeral` on a stack with an up member is a usage error, as it would throw the layer's writes away. Two limits: a symlink at the top of `#L` is refused there as it is on main, since `/` there is devlinux, and a symlink can't be made in a 9P layer yet (`EPERM`), though a FIFO can. `h9-web.js` takes `up: true` on a mount; a port mount with `up` waits on [port-streams](port-streams.md), so it's now in `depends`, and the browser case stays open. The 17 integration cases and the Alpine demo pass on the native backend (amd64). Not run on HVF, KVM, or the emulator, and the web case wasn't run.

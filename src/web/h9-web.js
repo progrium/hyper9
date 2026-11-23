@@ -589,7 +589,8 @@ export class GfxHost {
 // readable, writable, and readDeny (lists), and env (an object).
 /**
  * A mount for createMachine (design/mounts.md): { kind, src, dst, opts },
- * from a flag's string or an object.
+ * from a flag's string or an object. An object's `up: true` is the `up`
+ * option (design/upper-layers.md).
  */
 export function mountOf(m) {
   const kinds = ['archive', 'url', 'dir', 'builtin', 'tmp'];
@@ -611,8 +612,11 @@ export function mountOf(m) {
   const kind = kinds.find((k) => m[k] !== undefined && m[k] !== false);
   if (!kind) throw new Error(`mount ${JSON.stringify(m)}: no archive, url, dir, builtin, or tmp`);
   const src = kind === 'builtin' || kind === 'tmp' ? '' : String(m[kind]);
-  const opts = Array.isArray(m.opts) ? m.opts.join(',') : m.opts ?? '';
-  return { kind, src, dst: m.dst ?? '', opts };
+  const list = Array.isArray(m.opts) ? [...m.opts] : m.opts ? [m.opts] : [];
+  // `up: true` makes it the writable layer over what's beneath it
+  // (design/upper-layers.md), as the `up` option does.
+  if (m.up && !list.some((o) => /(^|,)(up|upper)(,|$)/.test(o))) list.push('up');
+  return { kind, src, dst: m.dst ?? '', opts: list.join(',') };
 }
 
 // Where DST starts in a mount flag's value: the last `:` before `/` or `#`,

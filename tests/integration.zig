@@ -1592,7 +1592,7 @@ test "the discarded-changes notice is printed on a terminal and not otherwise [o
         errdefer std.debug.print("backend {s}\n", .{backend});
         var t = try spawnTerm(e, backend, &.{ "--rc", script });
         defer t.deinit();
-        try t.expect(notice ++ "/lib, /sys were discarded (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)", slow(20_000));
+        try t.expect(notice ++ "/lib, /sys were discarded (--dir DIR:/:up keeps them in DIR)", slow(20_000));
         try std.testing.expectEqual(0, try t.wait(slow(10_000)));
     }
 }
