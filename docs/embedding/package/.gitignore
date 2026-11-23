@@ -1,0 +1,4 @@
+embed.zig
+zig-out/
+.zig-cache/
+zig-pkg/

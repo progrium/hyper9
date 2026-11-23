@@ -1,0 +1,8 @@
+.{
+    .name = .embed,
+    .fingerprint = 0x47ba0513351b1317,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{""},
+}

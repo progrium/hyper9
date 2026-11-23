@@ -8,9 +8,12 @@
         "build.zig",
         "build.zig.zon",
         "h9.entitlements",
+        "LICENSE",
+        "scripts/pins.sh",
         "design",
         "src",
         "tests",
+        "third_party",
         "tools",
     },
 }
