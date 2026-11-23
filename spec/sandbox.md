@@ -77,7 +77,7 @@ The plan's rules are the root, the cwd, each `--readable` and `--writable` path,
 
 For a 9front program, devfs-posix follows symlinks with `stat`, so a symlink inside a bound tree can point anywhere on the host. A Linux program's walks don't follow them ([Linux symlinks](#linux-symlinks)).
 
-Every devfs path is resolved (`realpath`; on Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths) and the resolved path is checked against the access rules, on every host.
+Every devfs path is resolved and the resolved path is checked against the access rules, on every host. On Linux a clean absolute path is first looked up with one `openat2` with `RESOLVE_NO_SYMLINKS`; if it holds no link it is already canonical, and otherwise it's resolved by an `O_PATH` open and its `/proc/self/fd` name, so a check costs a constant number of calls however deep the path is (`realpath` reads every element with a `readlink`, so a walk down a tree cost the square of its depth). Linux without `openat2` or `/proc`, macOS, and the web host use `realpath`, and Windows the final path of an opened handle, which follows symlinks and junctions and refuses UNC and device paths.
 
 Create, remove, and rename act on the name rather than a link's target, so an existing entry is checked by its own canonical name without following it. On macOS that's `F_GETPATH` on an `O_SYMLINK` open, and on Windows the final path of a reparse-point open, so another case, an 8.3 short name, or a trailing dot can't dodge a rule on a case-insensitive file system. A new name is appended to its resolved parent. A create over an existing symlink also checks the link's target for writing.
 
