@@ -175,8 +175,13 @@ jobs:
         with:
           name: hcpu-roots
       # Alpine's roots have symbolic links: on Windows, Git Bash's tar
-      # makes them native ones (the runner is an administrator).
-      - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
+      # makes them native ones (the runner is an administrator), but turns
+      # an absolute target such as /bin/sh's /bin/busybox into a path under
+      # Git's own install, so scripts/winlinks.py remakes those links.
+      - run: |
+          mkdir -p .local && tar -C .local -xf roots.tar
+          if [ "$RUNNER_OS" = Windows ]; then python scripts/winlinks.py roots.tar .local 2; fi
+          rm roots.tar
         env:
           MSYS: winsymlinks:nativestrict
       - name: test, T1 and T0
