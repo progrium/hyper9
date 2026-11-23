@@ -47,6 +47,25 @@ jobs:
           version: 0.16.0
       - run: zig build test
 
+  # docs/embedding/package built against h9 as a fetched package: what
+  # `zig fetch` of a URL would unpack (git archive, as GitHub's tarballs
+  # are), filtered by build.zig.zon's paths. A file the build reads that
+  # paths leaves out fails it.
+  package:
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: git archive --format=tar.gz --prefix=hyper9/ HEAD >"$RUNNER_TEMP/h9.tar.gz"
+      - working-directory: docs/embedding/package
+        run: |
+          cp ../embed.zig .
+          zig fetch --save=h9 "$RUNNER_TEMP/h9.tar.gz"
+          zig build
+
   # The integration cases on KVM, with the amd64 root unpacked from the
   # release's ISO (tools/isoroot.zig), as pages does for 386, instead of
   # mkroot's QEMU boot.

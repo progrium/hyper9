@@ -113,9 +113,17 @@ hcpu generates code in a `MAP_JIT` mapping, so a program signed with the
 hardened runtime, as notarization requires, also needs the
 `com.apple.security.cs.allow-jit` entitlement for the emulator to run.
 
-A fetched (URL or hash) dependency doesn't work yet: `build.zig.zon`'s
-`paths` leave out `third_party/` and `scripts/`, so drawterm's sources and
-the version pins aren't in the package.
+A fetched dependency works too, pinned to a commit:
+
+```sh
+zig fetch --save=h9 git+https://github.com/progrium/hyper9#COMMIT
+```
+
+[embedding/package](embedding/package) is a project set up that way, which
+CI builds against the package's contents. A fetched h9's built-in root is
+the skeleton only, since the slim roots are built in a checkout (`zig build
+slim`), so give machines a root tree with `.mounts`; the build prints a
+warning for each architecture saying so.
 
 ## Machine.Options
 
