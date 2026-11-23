@@ -1854,7 +1854,7 @@ pub const Machine = struct {
                     break :blk out;
                 }) {
                     .ret => |r| {
-                        u.setReturn(r);
+                        u.sysReturn(r);
                         vcpu.setUreg(&u);
                     },
                     .exits => |s| {
@@ -1865,7 +1865,7 @@ pub const Machine = struct {
                         try vcpu.getExtra(&p.extra);
                         const r: i64 = if (m.fork(p, flags, &u)) |pid| pid else |_| -1;
                         p.sys.traceRet("rfork", r);
-                        u.setReturn(@bitCast(r));
+                        u.sysReturn(@bitCast(r));
                         vcpu.setUreg(&u);
                     },
                     .exec => |e| {
@@ -1876,7 +1876,7 @@ pub const Machine = struct {
                             vcpu.setExtra(&p.extra);
                         } else |_| {
                             p.sys.traceRet("exec", -1);
-                            u.setReturn(@bitCast(@as(i64, -1)));
+                            u.sysReturn(@bitCast(@as(i64, -1)));
                         }
                         vcpu.setUreg(&u);
                     },
@@ -2010,7 +2010,7 @@ pub const Machine = struct {
         const how: kern.Noted = @enumFromInt(arg);
         switch (kern.noted(how, &msg) catch {
             p.sys.traceRet("noted", -1);
-            u.setReturn(@bitCast(@as(i64, -1)));
+            u.sysReturn(@bitCast(@as(i64, -1)));
             vcpu.setUreg(u);
             return null;
         }) {
@@ -3040,7 +3040,8 @@ pub const Machine = struct {
         loader.setTosPid(cas, m.arch, p.tos, c.pid);
         c.tos = p.tos;
         c.ureg = u.*;
-        c.ureg.setReturn(0);
+        // The child returns through forkret too.
+        c.ureg.sysReturn(0);
         c.extra = p.extra;
         if (p.image) |b| c.image = m.gpa.dupe(u8, b) catch null;
         c.initSys();

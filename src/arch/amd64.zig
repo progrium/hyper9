@@ -37,6 +37,14 @@ pub const Ureg = extern struct {
     pub fn setReturn(u: *Ureg, v: u64) void {
         u.ax = v;
     }
+    /// A syscall's return as 9front's forkret (pc64/l.s) makes it: AX holds
+    /// the result, and BX, DX, SI, DI, R8 to R10, R12, R13, and BP are
+    /// zeroed. CX and R11 hold the PC and flags (SYSRET); only R14 and R15
+    /// (up and m in the kernel, restored for the user) survive.
+    pub fn sysReturn(u: *Ureg, v: u64) void {
+        u.ax = v;
+        inline for (.{ "bx", "dx", "si", "di", "r8", "r9", "r10", "r12", "r13", "bp" }) |r| @field(u, r) = 0;
+    }
     /// Registers at process entry (execregs): AX holds the Tos pointer and
     /// R14/R15 (extern register variables) start at zero.
     pub fn initExec(entry: u64, sp: u64, tos: u64) Ureg {

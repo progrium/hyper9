@@ -23,8 +23,11 @@ The values below are checked against 9front source. They come from `sys/src/9/{a
 | Syscall number | R0 | BP (RARG) | AX, with `INT $64` |
 | Syscall arguments | user stack, from SP+8 | user stack, from SP+8 | user stack, from SP+4, in 4-byte words; a `vlong` takes two |
 | Syscall result | R0 | AX | AX |
+| Registers after a syscall | R1 to R17 zeroed (9front's `forkret` leaves the kernel's values there); the rest kept | BX, DX, SI, DI, R8 to R10, R12, R13, and BP zeroed, as `forkret` does; CX and R11 hold the PC and flags (`SYSRET`); R14 and R15 kept | all kept (`forkret` reloads the Ureg) |
 | Registers at entry | R0 = Tos pointer; SP points at argc, argv follows | AX = Tos pointer; SP points at argc; R14 and R15 zeroed | AX = Tos pointer; SP points at argc |
 | Note handler entry | R0 = Ureg pointer; SP+8 = Ureg, SP+16 = message | BP = Ureg pointer; same stack layout | no register; SP+4 = Ureg, SP+8 = message, in 4-byte words |
+
+The registers after a syscall apply to every return through the normal path, including `rfork`'s in the child and a failed `exec` or `noted`; a successful `exec` starts with the entry registers, and `noted` restores the handler's Ureg. A program that keeps a value in a zeroed register across a call fails in h9 as it would on 9front. The Linux personality keeps Linux's rules.
 
 Pointers, argv, the words of the note frame, and the Tos's pointers follow the architecture's word size, so 386's Tos is 56 bytes with `pid` at 48. `noted` on 386 keeps the segment selectors and the flags outside 0xCD5 (IF, IOPL, TF) from the kernel's copy, as 9front's `setregisters` does.
 

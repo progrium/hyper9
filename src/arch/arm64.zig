@@ -17,6 +17,16 @@ pub const Ureg = extern struct {
     pub fn setReturn(u: *Ureg, v: u64) void {
         u.r[0] = v;
     }
+    /// A syscall's return: R0 holds the result, and R1 to R17 are zeroed.
+    /// 9front's forkret (arm64/l.s) reloads only R0 and R26 to R30, and
+    /// R1 to R17 come back holding the kernel's values; zeroing them gives
+    /// a program the same lack of guarantees without leaking anything.
+    /// R18 to R25 aren't reloaded either, but on 9front they come back
+    /// unchanged, so they're kept here too.
+    pub fn sysReturn(u: *Ureg, v: u64) void {
+        u.r[0] = v;
+        @memset(u.r[1..18], 0);
+    }
     /// Registers at process entry: R0 holds the Tos pointer.
     pub fn initExec(entry: u64, sp: u64, tos: u64) Ureg {
         var u: Ureg = .{ .sp = sp, .pc = entry };
