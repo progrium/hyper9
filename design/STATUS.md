@@ -35,7 +35,7 @@ Every proposal at the top of [design/](README.md), in the order they were writte
 | [retire-unicorn](retire-unicorn.md) |  | draft | in progress on retire-unicorn | Retire Unicorn as an engine |
 | [scheduler](scheduler.md) |  | draft | needs kernel-port | A scheduler, with processes on per-core executors |
 | [fd-mounts](fd-mounts.md) |  | draft |  | Mounting a 9P connection from a host descriptor |
-| [upper-layers](upper-layers.md) |  | draft |  | Writable layers on the host |
+| [upper-layers](upper-layers.md) |  | draft | in progress on upper-layers; needs port-streams | Writable layers on the host |
 
 ```mermaid
 flowchart LR
@@ -96,6 +96,7 @@ flowchart LR
   p_mounts --> p_upper_layers
   p_linux_symlinks --> p_upper_layers
   p_linux_fifo --> p_upper_layers
+  p_port_streams --> p_upper_layers
 ```
 
 ## Epoch 0
