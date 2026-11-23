@@ -463,6 +463,13 @@ pub const Server = struct {
                 n.mode = m.mode & 0o777;
                 try s.send(tag, l.Rmknod{ .qid = n.qid() });
             },
+            .Tsymlink => |m| {
+                const f = s.fids.get(m.dfid) orelse return s.lerr(tag, E.BADF);
+                if (f.node.child(m.name) != null) return s.lerr(tag, E.EXIST);
+                const n = try s.newNode(f.node, m.name, .link);
+                n.target = try s.arena.allocator().dupe(u8, m.symtgt);
+                try s.send(tag, l.Rsymlink{ .qid = n.qid() });
+            },
             .Tremove => |rm| {
                 const f = s.fids.get(rm.fid) orelse return s.lerr(tag, E.BADF);
                 _ = s.fids.remove(rm.fid);

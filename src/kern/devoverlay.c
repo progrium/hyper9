@@ -2608,6 +2608,9 @@ mklink(Chan *dir, char *name, char *target)
 	case 'O':
 		h9_overlay_symlink(cclone(dir), name, target);
 		break;
+	case 'M':
+		h9_fs_mntsymlink(dir, name, target);
+		break;
 	default:
 		error(Eperm);
 	}

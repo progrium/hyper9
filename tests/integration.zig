@@ -8632,6 +8632,39 @@ test "up on a 9P2000.L mount keeps the layer on the server [upper-layers]" {
     try expectFile(&s, "n/f", "n\n");
 }
 
+test "links are made in a 9P2000.L layer, and on a .L mount, by Tsymlink [upper-layers]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var d: Diod = undefined;
+    try d.start("true");
+    defer d.stop();
+    var pu: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    // A new link, and one from below copied up by a rename.
+    const r = try runLinux(&le, false, &.{
+        "--url",   try std.fmt.bufPrint(&pu, "{s}:#L:up,spec={s}", .{ d.url(), d.s.path }),
+        "/bin/sh", "-c",
+        "mkdir -p /root && ln -s /etc/alpine-release /root/lnk && readlink /root/lnk && cmp /root/lnk /etc/alpine-release && mv /bin/ls /root/ls && readlink /root/ls && test ! -e /bin/ls && echo ok",
+    });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("/etc/alpine-release\n/bin/busybox\nok\n", r.out);
+    var lb: [64]u8 = undefined;
+    const n = try d.s.tmp.dir.readLink(std.testing.io, "root/lnk", &lb);
+    try std.testing.expectEqualStrings("/etc/alpine-release", lb[0..n]);
+    try std.testing.expect(d.s.exists("bin/.wh.ls"));
+    // A 9P2000.L mount that isn't a layer takes links the same way.
+    const m = try runLinux(&le, false, &.{
+        "--url",   try std.fmt.bufPrint(&pu, "{s}:/n/l:rw,spec={s}", .{ d.url(), d.s.path }),
+        "/bin/sh", "-c",
+        "ln -s lnk /9/n/l/two && readlink /9/n/l/two",
+    });
+    defer m.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{m.err});
+    try std.testing.expectEqualStrings("lnk\n", m.out);
+    const k = try d.s.tmp.dir.readLink(std.testing.io, "two", &lb);
+    try std.testing.expectEqualStrings("lnk", lb[0..k]);
+}
+
 test "--bind runs after every mount, in order [mounts]" {
     const e = try env(@src());
     var s: Scratch = undefined;
