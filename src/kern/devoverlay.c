@@ -200,6 +200,7 @@ struct Inst
 	Qmap	**qtab;		/* (device, dev, qid path) to the instance's qid path */
 	ulong	qmem;		/* bytes of qid table and snapshots, counted against the pool */
 	QLock	upql;		/* serializes changes to an up member's tree (design/upper-layers.md) */
+	ulong	upgen;		/* counts directories made in the up member's tree; under ql */
 };
 
 /* A chan's state. */
@@ -232,6 +233,7 @@ struct Unc
 	long	ndir;
 	long	dircap;
 	int	noup;		/* walks leave out the up member: what's below the layer */
+	ulong	upseen;		/* the instance's upgen when the members were found */
 };
 
 
@@ -1835,6 +1837,7 @@ isopaque(Chan *dir)
 }
 
 static int unstep(Unc*, Chan*, char*);
+static void unfresh(Unc*);
 
 /* Re-resolves u from the top along path, for "..". */
 static void
@@ -1882,6 +1885,7 @@ unstep(Unc *u, Chan *nc, char *name)
 	Inst *in;
 	Chan *have[Maxmembers], *c;
 	int hid[Maxmembers], hcr[Maxmembers], hroot[Maxmembers], nh, i, j, k, decided;
+	ulong gen;
 	Chan *got[Maxmembers];
 	int gid[Maxmembers], gcr[Maxmembers], ng;
 	char *np, *dir, *s, why[ERRMAX];
@@ -1913,6 +1917,10 @@ unstep(Unc *u, Chan *nc, char *name)
 		return 0;
 	}
 	in = u->inst;
+	unfresh(u);
+	qlock(&in->ql);
+	gen = in->upgen;
+	qunlock(&in->ql);
 	np = pathjoin(u->path, name);
 
 	/*
@@ -2008,6 +2016,7 @@ unstep(Unc *u, Chan *nc, char *name)
 		u->mcreate[i] = gcr[i];
 	}
 	u->n = ng;
+	u->upseen = gen;
 	free(u->path);
 	u->path = np;
 	qlock(&in->ql);
@@ -2056,6 +2065,10 @@ unwalk(Chan *c, Chan *nc, char **name, int nname)
 		nu->mcreate[i] = u->mcreate[i];
 		nu->n = i+1;
 	}
+	nu->noup = u->noup;
+	nu->upseen = u->upseen;
+	if(nname == 0)
+		unfresh(nu);
 	for(i = 0; i < nname; i++){
 		if(!unstep(nu, nc, name[i]))
 			break;
@@ -2524,6 +2537,77 @@ upexists(Inst *in, char *path, int noup, int *isdir)
 	return 1;
 }
 
+/* Notes a directory made in the up member's tree (unfresh). */
+static void
+upmade(Inst *in)
+{
+	qlock(&in->ql);
+	in->upgen++;
+	qunlock(&in->ql);
+}
+
+static Chan* upwalk(Inst*, char*, int);
+
+/*
+ * A directory named while the up layer didn't have it, such as a
+ * process's working directory, has only the members below the layer.
+ * Once the layer has made directories since u's members were found,
+ * look for u's in it again, so that walks, reads, and creates from u
+ * see what's changed there, as they would from a fresh walk.
+ */
+static void
+unfresh(Unc *u)
+{
+	Inst *in;
+	Chan *volatile c;
+	ulong gen;
+	int i, id, cr;
+
+	in = u->inst;
+	if(u->noup || u->n == 0 || u->dir != nil || (u->mc[0]->qid.type & QTDIR) == 0)
+		return;
+	qlock(&in->ql);
+	gen = in->upgen;
+	qunlock(&in->ql);
+	if(u->upseen == gen)
+		return;
+	u->upseen = gen;
+	if(!upbelow(u))
+		return;
+	c = upwalk(in, u->path, 0);
+	if(c == nil)
+		return;
+	if((c->qid.type & QTDIR) == 0){
+		cclose(c);
+		return;
+	}
+	qlock(&in->ql);
+	id = in->mem[0].id;
+	cr = in->mem[0].create;
+	qunlock(&in->ql);
+	if(waserror()){
+		cclose(c);
+		nexterror();
+	}
+	if(isopaque(c)){
+		for(i = 0; i < u->n; i++)
+			cclose(u->mc[i]);
+		u->n = 0;
+	}else if(u->n == Maxmembers){
+		cclose(u->mc[--u->n]);
+	}
+	poperror();
+	for(i = u->n; i > 0; i--){
+		u->mc[i] = u->mc[i-1];
+		u->mid[i] = u->mid[i-1];
+		u->mcreate[i] = u->mcreate[i-1];
+	}
+	u->mc[0] = c;
+	u->mid[0] = id;
+	u->mcreate[0] = cr;
+	u->n++;
+}
+
 /*
  * Walks the up member to path, a union path under it. With make, a
  * directory missing from the layer is made there, with the mode of the
@@ -2585,6 +2669,7 @@ upwalk(Inst *in, char *path, int make)
 			nc = cclone(c);
 			nc = devtab[nc->type]->create(nc, buf, OREAD, DMDIR|(d.mode & 0777));
 			cclose(nc);
+			upmade(in);
 			nc = lowerwalk1(c, buf);
 			if(nc == nil)
 				error(Enonexist);
@@ -2941,6 +3026,8 @@ unopen(Chan *c, int omode)
 			error(Eisdir);
 		if(u->path[0] == '\0')
 			untop(u);
+		else
+			unfresh(u);
 		unsnapshot(c);
 	}else{
 		if(u->n == 0)
@@ -3065,6 +3152,8 @@ upcreate(Chan *c, char *name, char *np, int omode, ulong perm)
 	waswh = rmwh(pd, name);
 	nc = cclone(pd);
 	nc = devtab[nc->type]->create(nc, name, omode, perm);
+	if(perm & DMDIR)
+		upmade(in);
 	if((perm & DMDIR) && waswh){
 		d = lowerwalk1(pd, name);
 		if(d != nil)
@@ -3383,6 +3472,8 @@ uncreate(Chan *c, char *name, int omode, ulong perm)
 		error(strlen(name) >= Maxname ? Etoolong : Ebadchar);
 	if(u->path[0] == '\0')
 		untop(u);
+	else
+		unfresh(u);
 	np = pathjoin(u->path, name);
 	if((id = upid(in, np)) >= 0){
 		if(waserror()){

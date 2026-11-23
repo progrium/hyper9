@@ -8573,6 +8573,26 @@ test "a rename across directories copies up and renames in the layer [upper-laye
     try std.testing.expect(s.exists("up/etc/.wh.alpine-release"));
 }
 
+test "a working directory from below sees what's changed in the layer since [upper-layers]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "up");
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    // /etc is only below when the shell cds there, as /app is when a build
+    // step's commands run in it: names relative to it are the layer's once
+    // the layer has the directory.
+    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "cd /etc && echo new >motd && cat motd && rm alpine-release && ls | grep -c alpine-release; set -C && echo again >alpine-release && cat alpine-release" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("new\n0\nagain\n", r.out);
+    try expectFile(&s, "up/etc/motd", "new\n");
+    try expectFile(&s, "up/etc/alpine-release", "again\n");
+    try std.testing.expect(!s.exists("up/etc/.wh.alpine-release"));
+}
+
 test "Alpine builds in layers that stack again as directories and archives (demo) [upper-layers]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
