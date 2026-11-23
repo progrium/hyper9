@@ -11170,10 +11170,13 @@ test "bind -r: removing an upper file uncovers the lower one [mounts]" {
 
 test "bind -c '#O' over a union copies up and whites out [mounts]" {
     const e = try env(@src());
+    // The union merges with the root tree's /n, whose mount points
+    // (/n/a, /n/dump, ...) depend on the tree, so only the names the
+    // trees here make are checked.
     var s: Scratch = undefined;
     try unionTrees(&s);
     defer s.deinit();
-    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns ++ "; bind -c '#O' /n", "--rc", "echo more >> /n/d/g; cat /n/d/g; rm /n/f; test -e /n/f || echo gone; mkdir /n/z; ls /n" });
+    const r = try run(e, &.{ "--cwd", s.path, "--ns", union_ns ++ "; bind -c '#O' /n", "--rc", "echo more >> /n/d/g; cat /n/d/g; rm /n/f; test -e /n/f || echo gone; mkdir /n/z; ls /n | grep '^/n/[dfz]$'" });
     defer r.deinit();
     errdefer std.debug.print("stderr: {s}\n", .{r.err});
     try std.testing.expectEqualStrings("bg\nmore\ngone\n/n/d\n/n/z\n", r.out);
