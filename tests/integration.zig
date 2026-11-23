@@ -7643,6 +7643,12 @@ test "pthreads program with 8 threads and a mutex [linux-threads]" {
     try threadCase(&le, "condvar");
 }
 
+test "a thread's scheduling parameters read back as SCHED_OTHER at priority 0 [linux-threads]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try threadCase(&le, "sched_params");
+}
+
 test "thread-local storage, timed waits and fork from a thread [linux-threads]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

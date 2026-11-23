@@ -1321,7 +1321,19 @@ fn serve(p: *Process, s: Sys, c: Call, u: *const vmm.Ureg) Err!Outcome {
             return ret(0);
         },
         .getpriority => return ret(20),
+        // Every thread is SCHED_OTHER at priority 0, whatever was set, as
+        // an unprivileged Linux thread is. .NET reads a thread's parameters
+        // back before it sets its priority, and throws if it can't.
         .sched_getscheduler => return ret(0),
+        .sched_getparam => {
+            try p.writeU32(c.a[1], 0);
+            return ret(0);
+        },
+        .sched_get_priority_max, .sched_get_priority_min => return ret(switch (c.int(0)) {
+            0, 3, 5 => 0, // SCHED_OTHER, SCHED_BATCH, SCHED_IDLE
+            1, 2 => if (s == .sched_get_priority_max) 99 else 1, // SCHED_FIFO, SCHED_RR
+            else => -E.INVAL,
+        }),
         .getcpu => {
             if (c.a[0] != 0) try p.writeU32(c.a[0], 0);
             if (c.a[1] != 0) try p.writeU32(c.a[1], 0);
