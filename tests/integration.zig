@@ -7244,6 +7244,18 @@ test "a path through /proc/self/fd/N walks on from the directory the fd names [l
     try netCase(&le, &.{ "/mnt/term/cwd/files", "proc_fd_dir" }, "ok proc_fd_dir\n");
 }
 
+test "lseek to the end of a file with a long name, as rustup resumes a download [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "seek_long_name" }, "ok seek_long_name\n");
+}
+
+test "mremap over two adjacent anonymous mappings sees one, and a blocked grow in place is ENOMEM [linux-personality]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    try netCase(&le, &.{ "/mnt/term/cwd/files", "mremap_span" }, "ok mremap_span\n");
+}
+
 test "System V shared memory: a keyed segment, shared across fork, its attach count, and removal [linux-personality]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);

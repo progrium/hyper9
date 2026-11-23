@@ -625,7 +625,16 @@ pub const Mm = struct {
             if (std.mem.indexOfScalar(*Src, m.srcs.items, s) == null) m.srcs.appendAssumeCapacity(s.get());
             // Chunks allocated already won't be filled by `populate`.
             m.fillAllocated(&m.vmas.items[at], v.start, v.end);
-        } else try m.vmas.insert(m.gpa, m.indexAfter(v.start), v);
+        } else {
+            const at = m.indexAfter(v.start);
+            try m.vmas.insert(m.gpa, at, v);
+            // Linux joins a new anonymous mapping to a compatible neighbour,
+            // so a later mremap over both, or over a range grown in place
+            // (whose new part comes here), sees one mapping. A program
+            // relies on that: zig's page allocator takes mremap's EFAULT
+            // for a range spanning two mappings as impossible.
+            m.mergeAt(at);
+        }
         try m.refreshRange(v.start, v.end);
     }
 
@@ -1134,13 +1143,29 @@ pub const Mm = struct {
     fn merge(m: *Mm) void {
         var i: usize = 1;
         while (i < m.vmas.items.len) {
-            const a = &m.vmas.items[i - 1];
-            const b = m.vmas.items[i];
-            if (a.end == b.start and a.prot.eql(b.prot) and a.kind == b.kind and a.kind != .file and a.kind != .shm and a.shared == b.shared and a.pad == b.pad) {
-                a.end = b.end;
+            if (mergeable(m.vmas.items[i - 1], m.vmas.items[i])) {
+                m.vmas.items[i - 1].end = m.vmas.items[i].end;
                 _ = m.vmas.orderedRemove(i);
             } else i += 1;
         }
+    }
+
+    /// Joins the VMA at index `i` to its neighbours where `mergeable`.
+    fn mergeAt(m: *Mm, i: usize) void {
+        if (i + 1 < m.vmas.items.len and mergeable(m.vmas.items[i], m.vmas.items[i + 1])) {
+            m.vmas.items[i].end = m.vmas.items[i + 1].end;
+            _ = m.vmas.orderedRemove(i + 1);
+        }
+        if (i > 0 and mergeable(m.vmas.items[i - 1], m.vmas.items[i])) {
+            m.vmas.items[i - 1].end = m.vmas.items[i].end;
+            _ = m.vmas.orderedRemove(i);
+        }
+    }
+
+    /// Whether anonymous VMAs `a` and `b` touch and are alike, so they
+    /// can be one.
+    fn mergeable(a: Vma, b: Vma) bool {
+        return a.end == b.start and a.prot.eql(b.prot) and a.kind == b.kind and a.kind != .file and a.kind != .shm and a.shared == b.shared and a.pad == b.pad;
     }
 
     /// Zeroes the allocated pages in [start, end), which the caller has

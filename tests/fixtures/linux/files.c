@@ -879,6 +879,44 @@ static void proc_fd_dir(void) {
 	printf("ok proc_fd_dir\n");
 }
 
+/* lseek(SEEK_END) on a file whose name is too long for the first stat
+ * buffer the kernel tries: rustup resumes a download of its
+ * <64-hex-char hash>.partial that way. */
+static void seek_long_name(void) {
+	char path[256];
+	int n = snprintf(path, sizeof path, "/tmp/seek.%d.", (int)getpid());
+	memset(path + n, 'a', 200);
+	path[n + 200] = 0;
+	int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+	CHECK("seek_long_name", fd >= 0 && write(fd, "hello", 5) == 5);
+	CHECK("seek_long_name", lseek(fd, 0, SEEK_END) == 5);
+	CHECK("seek_long_name", close(fd) == 0 && unlink(path) == 0);
+	printf("ok seek_long_name\n");
+}
+
+/* mremap over a range that two anonymous mappings make, from an earlier
+ * grow in place or from two mmaps side by side, sees one mapping, as on
+ * Linux, which joins them; a grow in place that can't be done is
+ * ENOMEM. Zig's page allocator takes EFAULT there as impossible. */
+static void mremap_span(void) {
+	long pg = 4096;
+	char *a = mmap(0, 64 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("mremap_span", a != MAP_FAILED && munmap(a + 4 * pg, 60 * pg) == 0);
+	a[0] = 'a';
+	CHECK("mremap_span", mremap(a, 4 * pg, 7 * pg, 0) == a);
+	a[6 * pg] = 'b';
+	CHECK("mremap_span", mremap(a, 7 * pg, 11 * pg, 0) == a && a[0] == 'a' && a[6 * pg] == 'b');
+	CHECK("mremap_span", munmap(a, 11 * pg) == 0);
+	char *b = mmap(0, 64 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK("mremap_span", b != MAP_FAILED && munmap(b + 4 * pg, 60 * pg) == 0);
+	CHECK("mremap_span", mmap(b + 4 * pg, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == b + 4 * pg);
+	/* The page after is taken, so growing in place can't be done. */
+	CHECK("mremap_span", mmap(b + 8 * pg, pg, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == b + 8 * pg);
+	CHECK("mremap_span", mremap(b, 8 * pg, 12 * pg, 0) == MAP_FAILED && errno == ENOMEM);
+	CHECK("mremap_span", munmap(b, 9 * pg) == 0);
+	printf("ok mremap_span\n");
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, 0, _IONBF, 0);
 	for (int i = 1; i < argc; i++) {
@@ -913,6 +951,8 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "lazy_map")) lazy_map();
 		if (all || !strcmp(n, "image_dontneed")) image_dontneed();
 		if (all || !strcmp(n, "proc_fd_dir")) proc_fd_dir();
+		if (all || !strcmp(n, "seek_long_name")) seek_long_name();
+		if (all || !strcmp(n, "mremap_span")) mremap_span();
 	}
 	return failed;
 }
