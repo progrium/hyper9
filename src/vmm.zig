@@ -354,6 +354,13 @@ fn hypervisor() ?Kind {
     return if (have_hvf) .hvf else if (have_kvm) .kvm else if (have_whp) .whp else null;
 }
 
+/// The native backend's spin budget count (`Sched.busy` in
+/// vmm/native_abi.zig), once a native backend has been created; null
+/// otherwise. For tests.
+pub fn nativeSpinBusy() ?i32 {
+    return if (comptime have_native) nat.spinBusy() else null;
+}
+
 /// Why a backend can't be used here, when the backend can
 /// tell more than "unavailable": KVM says whether /dev/kvm is missing or
 /// not accessible.

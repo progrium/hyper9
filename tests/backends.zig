@@ -224,6 +224,40 @@ test "a guest that jumps into the stub can't open a host file [native-backend]" 
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, path, .{}));
 }
 
+test "a stopped stub's threads leave the spin budget [native-backend]" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var b = vmm.create(gpa, io, .native, .{ .arch = .amd64 }) catch |e| switch (e) {
+        error.HypervisorUnavailable, error.BackendNotBuilt, error.WrongArch => return error.SkipZigTest,
+        else => return e,
+    };
+    defer b.destroy();
+    const before = vmm.nativeSpinBusy().?;
+    const code = [_]u8{
+        0x0f, 0x05, // 1: syscall
+        0xeb, 0xfc, // jmp   1b
+    };
+    const page = try b.allocPages(1);
+    defer b.freePages(page);
+    @memcpy(page[0..code.len], &code);
+    // Stopped right after a syscall, while its thread may still be
+    // spinning for h9, and so counted.
+    for (0..20) |_| {
+        const as = try b.newAddressSpace();
+        try as.map(0x200000, page, .{ .exec = true });
+        var v = try b.createVcpu();
+        try v.setAddressSpace(as);
+        const u: vmm.Ureg = .{ .amd64 = .{ .pc = 0x200000, .flags = 0x202 } };
+        v.setUreg(&u);
+        for (0..3) |_| try std.testing.expect(try v.run() == .syscall);
+        v.destroy();
+        as.unmap(0x200000);
+        as.destroy();
+    }
+    try std.testing.expectEqual(before, vmm.nativeSpinBusy().?);
+}
+
 test "two vCPUs run one address space at once, and a shootdown reaches both [native-backend]" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

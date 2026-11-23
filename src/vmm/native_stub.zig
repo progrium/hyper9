@@ -1,7 +1,8 @@
 //! The native backend's stub (design/epoch-0/native-backend.md): a tiny static
 //! x86_64 Linux program, linked at `abi.stub_base`, that hosts one guest
 //! address space. h9 starts one per address space, with the guest's RAM
-//! file and its control pages as file descriptors 3 and 4.
+//! file, its control pages, and the spin budget h9 and every stub share
+//! as file descriptors 3, 4, and 5.
 //!
 //! At startup the stub unmaps everything outside its own range (the
 //! kernel's stack, vDSO and vvar), so the whole of 9front's amd64 layout
@@ -32,6 +33,7 @@ const linux = std.os.linux;
 const abi = @import("native_abi.zig");
 
 const ctls: *volatile [abi.max_threads]abi.Ctl = @ptrFromInt(abi.ctl_addr);
+const sched: *volatile abi.Sched = @ptrFromInt(abi.sched_addr);
 
 comptime {
     if (@sizeOf(abi.Ctl) > abi.ctl_size) @compileError("Ctl doesn't fit");
@@ -116,6 +118,8 @@ export fn stubMain() callconv(.c) noreturn {
     const MAP_SHARED_FIXED = 0x01 | 0x10;
     check(sys(.mmap, abi.ctl_addr, abi.ctls_size, PROT_RW, MAP_SHARED_FIXED, abi.ctl_fd, 0), 12);
     _ = sys(.close, abi.ctl_fd, 0, 0, 0, 0, 0);
+    check(sys(.mmap, abi.sched_addr, abi.sched_size, PROT_RW, MAP_SHARED_FIXED, abi.sched_fd, 0), 20);
+    _ = sys(.close, abi.sched_fd, 0, 0, 0, 0, 0);
 
     altStack(0);
     const act: KSigaction = .{
@@ -138,6 +142,7 @@ export fn stubMain() callconv(.c) noreturn {
     // The control thread: requests on page 0, until h9 goes away.
     const c = &ctls[0];
     c.tid = @intCast(sys(.gettid, 0, 0, 0, 0, 0, 0));
+    setAwake(c, true);
     exited(c, .ready);
     while (true) {
         _ = waitHost(c);
@@ -185,6 +190,7 @@ export fn threadMain(k: usize) callconv(.c) noreturn {
     altStack(k);
     dispatchOn();
     ctls[k].tid = @intCast(sys(.gettid, 0, 0, 0, 0, 0, 0));
+    setAwake(&ctls[k], true);
     // Into the handler, which reports `ready` and enters the guest.
     asm volatile ("ud2");
     unreachable;
@@ -342,19 +348,43 @@ fn store(p: *volatile u32, v: u32) void {
     @atomicStore(u32, @volatileCast(p), v, .seq_cst);
 }
 
-/// Spins this many rounds for h9's answer before sleeping on the futex.
+/// Spins at most this many rounds for h9's answer before sleeping on the
+/// futex (about 50 µs on a 2 GHz Xeon).
 const spin_rounds = 4000;
+
+/// Counts the thread in `sched.busy` while it's awake: from when it
+/// starts, through running guest code and spinning, until it sleeps on
+/// its futex. The flag goes first and comes off last, so if the stub is
+/// killed in between, h9 takes out one too many rather than one too few.
+fn setAwake(ctl: *volatile abi.Ctl, on: bool) void {
+    if (on) {
+        store(&ctl.awake, 1);
+        _ = @atomicRmw(i32, @volatileCast(&sched.busy), .Add, 1, .seq_cst);
+    } else {
+        _ = @atomicRmw(i32, @volatileCast(&sched.busy), .Sub, 1, .seq_cst);
+        store(&ctl.awake, 0);
+    }
+}
+
+/// Whether this thread may keep spinning: only while the threads awake
+/// for guests, itself among them, leave a CPU for the h9 thread serving
+/// it. Past that, spinning takes a CPU from the guest or h9.
+fn maySpin() bool {
+    return @atomicLoad(i32, @volatileCast(&sched.busy), .monotonic) < @atomicLoad(i32, @volatileCast(&sched.ncpus), .monotonic);
+}
 
 /// Waits for h9 to hand the stub something other than `exited`. If h9
 /// goes away, the stub follows.
 fn waitHost(ctl: *volatile abi.Ctl) u32 {
     var i: usize = 0;
-    while (i < spin_rounds) : (i += 1) {
+    while (i < spin_rounds and maySpin()) : (i += 1) {
         const s = load(&ctl.state);
         if (s != @intFromEnum(abi.State.exited)) return s;
         std.atomic.spinLoopHint();
     }
     const ts: linux.timespec = .{ .sec = 1, .nsec = 0 };
+    setAwake(ctl, false);
+    defer setAwake(ctl, true);
     while (true) {
         store(&ctl.stub_waiting, 1);
         const s = load(&ctl.state);

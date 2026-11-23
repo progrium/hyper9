@@ -137,7 +137,7 @@ Every 9front process is linked at the same address with its stack at the same to
 
 It's linked at `0x6000_0000_0000` and keeps `[stub_base, stub_base + 4 GiB)` for itself, far above 9front's amd64 layout; at startup it unmaps everything else (the kernel's stack, vDSO, and vvar), so the guest's whole range is free.
 
-It runs in its own session, so the terminal's signals go to h9 alone, with only two file descriptors: the machine's guest RAM, one memfd that h9 maps once and hands out in pages through `gphys.Ram`, and its control pages (`src/vmm/native_abi.zig`).
+It runs in its own session, so the terminal's signals go to h9 alone, with only three file descriptors: the machine's guest RAM, one memfd that h9 maps once and hands out in pages through `gphys.Ram`; its control pages (`src/vmm/native_abi.zig`); and the spin budget every stub shares with h9 (see Threads and runs).
 
 `map` and `unmap` queue requests, and a stub thread carries them out (an `mmap` of the RAM file at the guest address, or a `munmap`) before it next runs guest code, so `translate` and `copy` read guest memory in place.
 
@@ -156,6 +156,8 @@ A stub's first thread is its control thread, which never runs guest code; it sta
 One signal handler, on a per-thread alternate stack, is the only way in or out of guest code: SIGSYS, a CPU exception (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP), or a kick's SIGURG writes the registers, the first 416 bytes of the FXSAVE image, and the FS and GS bases to the thread's control page, tells h9 through a futex (spinning first), and waits.
 
 `run` writes the Ureg back, hands the thread `run`, and waits for the next exit; a page fault's access comes from the error code.
+
+Each side spins briefly for the other before it sleeps on the futex, which saves a futex round trip per guest syscall, but only while there's a CPU to spare. h9 and every stub share one page (`abi.Sched`) that counts the threads on a CPU for guests: stub threads not asleep (running guest code, or spinning for h9) and h9 threads spinning for a stub. Either side spins only while that count, itself included, leaves one of h9's CPUs (its affinity, capped by a cgroup CPU quota) free for the h9 threads serving syscalls, which it doesn't count, since they may be blocked in the kernel. Otherwise both sleep at once, so a guest with more threads than there are CPUs doesn't have half of them taken by spinners. When h9 reaps a stub, it takes the stub's threads that were still counted back out.
 
 `kick` sets the page's kick flag and sends SIGURG with `tgkill`; the stub reports `interrupted` only while the flag is set, so a signal that arrives after the run it was meant for has ended just resumes the guest.
 
