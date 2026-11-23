@@ -144,6 +144,8 @@ pub fn errno(msg: []const u8) u16 {
         .{ "not a directory", E.NOTDIR },
         .{ "is a directory", E.ISDIR },
         .{ "directory not empty", E.NOTEMPTY },
+        // A directory from below an up layer (design/upper-layers.md).
+        .{ "cross-device link", E.XDEV },
         .{ "not empty", E.NOTEMPTY },
         .{ "write on closed pipe", E.PIPE },
         .{ "broken pipe", E.PIPE },

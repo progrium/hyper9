@@ -4253,7 +4253,17 @@ pub const Machine = struct {
         switch (op) {
             // A bare #O is a fresh overlay over what the target is now.
             .bind => |b| if (b.flag.upper) {
-                bindUpper(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id)) catch {};
+                // A bare #O is a fresh layer in memory, as --tmp DST:up makes.
+                var num: [16]u8 = undefined;
+                var fresh: ?u32 = null;
+                const from = if (std.mem.eql(u8, b.from, "#O")) blk: {
+                    const id = kern.overlayNew(null) catch return;
+                    fresh = id;
+                    break :blk std.fmt.bufPrintZ(&num, "#O{d}", .{id}) catch unreachable;
+                } else try m.nsPath(arena, b.from, con_id);
+                bindUpper(from, try m.nsPath(arena, b.to, con_id)) catch {
+                    if (fresh) |id| kern.overlayDrop(id);
+                };
             } else if (b.flag.recursive) {
                 bindRecursive(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), b.flag.order == .after, b.flag.create) catch {};
             } else if (std.mem.eql(u8, b.from, "#O")) {
