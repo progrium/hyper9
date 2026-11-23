@@ -92,6 +92,24 @@ h9_pollwake(void)
 	unlock(&plk);
 }
 
+/*
+ * A recv or send on a host socket that finds it not ready (EAGAIN). An
+ * edge-triggered epoll entry that was reported ready and is still ready
+ * isn't waited on (linux/sys.zig's epollWait), and nothing watches the
+ * host socket then, so when its reader drains it and the next data
+ * arrives, no wake comes: the wait sleeps on until something else wakes
+ * it. Wake the pollers here, so the entry is looked at again, found not
+ * ready, and waited on, as Linux reports the next arrival after a reader
+ * drains the socket.
+ */
+static long
+again(long r)
+{
+	if(r == -11)	/* EAGAIN */
+		h9_pollwake();
+	return r;
+}
+
 /* h9: called by qio after a queue changes (kern/qio.c). */
 void
 h9_qwake(Queue *q)
@@ -1241,7 +1259,7 @@ h9_linux_sockrecv(int fd, void *buf, long n, int peek, int dontwait, uchar *radd
 	poperror();
 	if(s < 0)
 		return -107;	/* ENOTCONN */
-	return h9so_recvfrom(s, buf, n, peek, dontwait, raddr, rport);
+	return again(h9so_recvfrom(s, buf, n, peek, dontwait, raddr, rport));
 }
 
 /*
@@ -1270,7 +1288,7 @@ h9_linux_socksend(int fd, void *buf, long n, int dontwait, uchar *raddr, ushort 
 		return raddr != nil ? -89 : -107;	/* EDESTADDRREQ, ENOTCONN */
 	if(raddr != nil && h9_net_check(H9_NETCONNECT, udp ? S_UDP : S_TCP, raddr, rport) < 0)
 		return -13;	/* EACCES */
-	return h9so_sendto(s, buf, n, dontwait, raddr, rport);
+	return again(h9so_sendto(s, buf, n, dontwait, raddr, rport));
 }
 
 /*
