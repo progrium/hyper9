@@ -3264,7 +3264,7 @@ pub const Machine = struct {
             };
             if (b.create) flag |= kern.MCREATE;
             const to = try std.fmt.bufPrintZ(&buf2, "{s}", .{b.to});
-            if (b.recursive or b.empty) {
+            if (b.recursive or b.empty or b.upper) {
                 m.bindMember(b, from, to, flag) catch {
                     if (b.optional) continue;
                     if (m.err_msg.len > 0) return error.NamespaceFailed;
@@ -3395,6 +3395,11 @@ pub const Machine = struct {
                 };
             }
         }
+        if (b.upper) {
+            try bindUpper(from, to);
+            fresh = null;
+            return;
+        }
         const flags: kern.UnionFlags = .{ .after = b.flag == .after, .create = b.create };
         if (b.recursive) {
             if (stackName(b.to)) |sn| {
@@ -3427,10 +3432,33 @@ pub const Machine = struct {
         } else &fixed;
         var name_buf: [std.fs.max_path_bytes]u8 = undefined;
         var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-        var it: std.tar.Iterator = .init(in, .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf });
+        // Entries std.tar has no kind for land in diag: a FIFO in a layer
+        // (design/upper-layers.md) is made as one, and a device skipped.
+        var diag: std.tar.Diagnostics = .{ .allocator = m.gpa };
+        defer {
+            for (diag.errors.items) |e| switch (e) {
+                .unsupported_file_type => |u| m.gpa.free(u.file_name),
+                else => {},
+            };
+            diag.errors.deinit(m.gpa);
+        }
+        var it: std.tar.Iterator = .init(in, .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf, .diagnostics = &diag });
         var pbuf: [std.fs.max_path_bytes + 8]u8 = undefined;
         var tbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
-        while (it.next() catch |e| return m.fail("--archive {s}: {t}", .{ path, e })) |f| {
+        var seen: usize = 0;
+        while (true) {
+            const next = it.next() catch |e| return m.fail("--archive {s}: {t}", .{ path, e });
+            for (diag.errors.items[seen..]) |e| switch (e) {
+                .unsupported_file_type => |u| if (u.file_type == .fifo) {
+                    const rel = archiveName(u.file_name) orelse continue;
+                    const dst = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ root, rel }) catch continue;
+                    mkdirUnder(root, std.fs.path.dirname(rel) orelse "") catch return m.fail("--archive {s}: {s}: {s}", .{ path, u.file_name, kern.errstr() });
+                    kern.mkfifo(dst, 0o644) catch return m.fail("--archive {s}: {s}: {s}", .{ path, u.file_name, kern.errstr() });
+                },
+                else => {},
+            };
+            seen = diag.errors.items.len;
+            const f = next orelse break;
             const rel = archiveName(f.name) orelse return m.fail("--archive {s}: {s}: a name outside the tree", .{ path, f.name });
             if (rel.len == 0) continue;
             const dst = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ root, rel }) catch return m.fail("--archive {s}: {s}: name too long", .{ path, f.name });
@@ -3640,6 +3668,22 @@ pub const Machine = struct {
         };
         var specb: [256]u8 = undefined;
         const spec = std.fmt.bufPrintZ(&specb, "{s}", .{b.spec}) catch return m.fail("{s} {f}: spec too long", .{ what, shown });
+        if (b.upper) {
+            // The server is the layer (design/upper-layers.md).
+            const up: kern.UnionFlags = .{ .up = true, .create = true };
+            if (stackName(b.to)) |sn| {
+                var at: [std.fs.max_path_bytes + 1]u8 = undefined;
+                _ = kern.unionMount(sn.name, fd, spec, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch unreachable, up) catch
+                    return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
+                return;
+            }
+            const to = try std.fmt.bufPrintZ(&buf, "{s}", .{b.to});
+            const id = kern.unionMount("", fd, spec, "", up) catch return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
+            var unum: [16]u8 = undefined;
+            upperOver(id, to, kern.unionAdd, .{ std.fmt.bufPrintZ(&unum, "{d}", .{id}) catch unreachable, to, "", kern.UnionFlags{ .after = true } }) catch
+                return m.fail("{s} {f}: {s}", .{ what, shown, kern.errstr() });
+            return;
+        }
         if (b.recursive) {
             if (stackName(b.to)) |sn| {
                 var at: [std.fs.max_path_bytes + 1]u8 = undefined;
@@ -4130,6 +4174,40 @@ pub const Machine = struct {
         };
     }
 
+    /// `bind -u from to` (design/upper-layers.md): `from` becomes the up
+    /// member of the stack `to` names, or anywhere else, a union of
+    /// `from` as the layer over what `to` is now, bound there.
+    fn bindUpper(from: [:0]const u8, to: [:0]const u8) kern.Error!void {
+        const up: kern.UnionFlags = .{ .up = true, .create = true };
+        if (stackName(to)) |sn| {
+            var at: [std.fs.max_path_bytes + 1]u8 = undefined;
+            _ = try kern.unionAdd(sn.name, from, std.fmt.bufPrintZ(&at, "{s}", .{sn.at}) catch return error.Kern, up);
+            return;
+        }
+        if (std.mem.startsWith(u8, to, "#O") and to.len > 2 and std.mem.indexOfScalar(u8, to, '/') == null) {
+            _ = try kern.unionAdd(to[2..], from, "", up);
+            return;
+        }
+        const id = try kern.unionAdd("", to, "", .{ .after = true });
+        var num: [16]u8 = undefined;
+        try upperOver(id, to, kern.unionAdd, .{ std.fmt.bufPrintZ(&num, "{d}", .{id}) catch unreachable, from, "", up });
+    }
+
+    /// Adds the layer to the fresh union `id` over `to`, with `add` and its
+    /// arguments, and binds the union over `to`; the union goes if either
+    /// fails.
+    fn upperOver(id: u32, to: [:0]const u8, comptime add: anytype, args: anytype) kern.Error!void {
+        _ = @call(.auto, add, args) catch |e| {
+            kern.overlayDrop(id);
+            return e;
+        };
+        var spec: [16]u8 = undefined;
+        kern.bind(std.fmt.bufPrintZ(&spec, "#O{d}", .{id}) catch unreachable, to, kern.MREPL | kern.MCREATE) catch |e| {
+            kern.overlayDrop(id);
+            return e;
+        };
+    }
+
     /// Runs a namespace file's operations, as newns does: a failed bind or
     /// mount is skipped, and only a syntax error fails the run. The device
     /// mask is already set, so it can't reach masked devices. Returns
@@ -4174,7 +4252,19 @@ pub const Machine = struct {
     fn replayOp(m: *Machine, arena: std.mem.Allocator, op: newns.Op, con_id: u32, cd: *bool) RunError!void {
         switch (op) {
             // A bare #O is a fresh overlay over what the target is now.
-            .bind => |b| if (b.flag.recursive) {
+            .bind => |b| if (b.flag.upper) {
+                // A bare #O is a fresh layer in memory, as --tmp DST:up makes.
+                var num: [16]u8 = undefined;
+                var fresh: ?u32 = null;
+                const from = if (std.mem.eql(u8, b.from, "#O")) blk: {
+                    const id = kern.overlayNew(null) catch return;
+                    fresh = id;
+                    break :blk std.fmt.bufPrintZ(&num, "#O{d}", .{id}) catch unreachable;
+                } else try m.nsPath(arena, b.from, con_id);
+                bindUpper(from, try m.nsPath(arena, b.to, con_id)) catch {
+                    if (fresh) |id| kern.overlayDrop(id);
+                };
+            } else if (b.flag.recursive) {
                 bindRecursive(try m.nsPath(arena, b.from, con_id), try m.nsPath(arena, b.to, con_id), b.flag.order == .after, b.flag.create) catch {};
             } else if (std.mem.eql(u8, b.from, "#O")) {
                 const to = try m.nsPath(arena, b.to, con_id);
@@ -4218,6 +4308,7 @@ pub const Machine = struct {
                     },
                     .create = mt.flag.create,
                     .recursive = mt.flag.recursive,
+                    .upper = mt.flag.upper,
                     .mount = true,
                     .spec = r.spec,
                     .url = r,

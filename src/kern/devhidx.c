@@ -103,6 +103,26 @@ struct Conv
 static Lock convlk;
 static Conv convs[Maxconv];
 
+/*
+ * Whether c, a conversation's data file that devmnt mounted, has a
+ * 9P2000.L server behind it, through #ℓ: fscheck.c makes links and FIFOs
+ * there with the translator's create forms.
+ */
+int
+h9_hidx_dotl(Chan *c)
+{
+	int n;
+	Chan *srv;
+
+	if(devtab[c->type]->dc != Hidxdc || TYPE(c->qid) != Qdata)
+		return 0;
+	n = CONV(c->qid);
+	if(n < 0 || n >= Maxconv)
+		return 0;
+	srv = convs[n].srv;
+	return srv != nil && devtab[srv->type]->dc == 0x2113;
+}
+
 static void*
 upmach(void)
 {

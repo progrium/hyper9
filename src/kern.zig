@@ -907,7 +907,9 @@ pub const UnionFlags = packed struct(c_int) {
     after: bool = false,
     /// Creates may go to it.
     create: bool = false,
-    _: u30 = 0,
+    /// The union's writable layer, on top (design/upper-layers.md).
+    up: bool = false,
+    _: u29 = 0,
 };
 
 /// Adds the directory `path` (in the caller's namespace) to a union,

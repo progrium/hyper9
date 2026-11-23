@@ -872,6 +872,11 @@ bind -rb /tmp/a /tmp/x
 bind -rb /tmp/b /tmp/x
 ```
 
+`bind -u new old` makes `new` the writable layer over `old`
+([upper-layers](design/upper-layers.md)): writes, creates, and removes go to
+`new` as an OCI layer, and `old` is only read (chapter 22). `#O/clone`
+takes it as `upper PATH`, and `ns` prints it as a `bind -u` line.
+
 **Try it**
 
 ```text
@@ -920,7 +925,7 @@ kernel has. `intro(3)` introduces them, and each has its own page in section
 | `#ℏ` | hstream | `/net`, after `#I` | WebSockets, as `/net/ws` (chapter 16), and the connection behind a WebSocket root. Masked under `--net=disable`. |
 | `#M` | mnt | | The 9P client behind every `mount` |
 | `#U` | fs | `/`, `/mnt/term/...` | The host's file system, through the sandbox's checks. Masked after startup. |
-| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22), and the unions `bind -r` makes (chapter 6) |
+| `#O` | overlay | `/tmp`, ephemeral paths | h9's copy-on-write overlay in memory (chapter 22), and the unions `bind -r` and `bind -u` make (chapter 6) |
 | `#C` | cmd | | Host commands. Not built: they live on the [`host-cmd`](https://github.com/progrium/hyper9/tree/host-cmd) branch while [host-cmd](design/host-cmd.md) rethinks them. The letter stays masked. |
 | `#H` | htools | `/bin`, after the root's | h9's own commands: small rc scripts built into h9 that wrap its devices, read-only. Masked under `--no-guest-tools`. |
 | `#L` | lfd | | Host file descriptors as channels; h9 uses it for unix-socket roots |
@@ -1900,10 +1905,11 @@ The compilers, linkers, and `mk` run, and rebuild 9front's userland from
   tree has, are enough.
 - The root is a copy-on-write overlay by default, so `mk install` works and
   the installed files are there for the rest of the run, then gone: try an
-  install that way first. To keep it, install with `--writable "$H9ROOT"`.
-  On a terminal, h9 tells you when a run's changes to the root were
-  discarded: `h9: changes to the root under /arm64, /sys were discarded
-  (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)`.
+  install that way first. To keep it, install with `--writable "$H9ROOT"`,
+  or keep the changes in a layer of their own with `--dir DIR:/:up`
+  (chapter 22). On a terminal, h9 tells you when a run's changes to the
+  root were discarded: `h9: changes to the root under /arm64, /sys were
+  discarded (--dir DIR:/:up keeps them in DIR)`.
 - `$objtype` is the machine's architecture; set it to cross-compile, as in
   `objtype=386 mk`. The arm64 root has no `/amd64/lib`, so run
   `objtype=amd64 mk libs` in `/sys/src` once, on a writable root, first.
@@ -2243,7 +2249,7 @@ around a value with commas.
 
 | Flag | Meaning |
 | --- | --- |
-| `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw`. `contained` resolves its symlinks inside it for 9front programs, as a tree on `#L` always does; a Linux program's links resolve from its own `/` (chapter 20). |
+| `--dir PATH[:DST[:OPTS]]` | A host directory or file, through `#U`. Its path joins the access rules: readable, or writable with `rw` or `up`. `contained` resolves its symlinks inside it for 9front programs, as a tree on `#L` always does; a Linux program's links resolve from its own `/` (chapter 20). |
 | `--url URL[:DST[:OPTS]]` | A 9P server: `tcp://HOST:PORT[/SPEC]`, `unix:///PATH`, `ws://...`, or `wss://...`. `http://...` and `https://...` are a WebSocket if the server upgrades, and otherwise a static tree (chapter 16). With no scheme, `http://` for a loopback host and `https://` for any other. A DST of `/srv/NAME` posts the connection there without mounting it. |
 | `--archive FILE[:DST[:OPTS]]` | A tar, a gzipped tar, or an `.h9a` (the browser host's root archive), unpacked into memory before the program runs. Its files count against `--memory`, and it takes writes in memory. Symbolic links are kept for Linux programs. |
 | `--builtin[=DST[:OPTS]]` | The built-in root. Bare, it's the bottom of `/`. |
@@ -2255,6 +2261,7 @@ around a value with commas.
 | `ro` | `readonly` | Read-only |
 | `rw` | `readwrite` | Writes go to the source |
 | `eph` | `ephemeral` | Writes go to memory and vanish when the machine ends: the default on `/` and `#L` |
+| `up` | `upper` | This mount is the writable layer over what's beneath it, kept as an OCI layer (chapter 22). On `--dir`, `--url`, and `--tmp`; one per stack, always on top. |
 | `b` | `before` | In front of what's at DST; on a stack, on top (the default there) |
 | `a` | `after` | Behind what's at DST; on a stack, at the bottom |
 | `c` | `create` | Creates go to this mount |
@@ -2379,6 +2386,51 @@ host$ h9 --read-deny .env --read-deny secrets ls
 
 **The whole host.** `--host-fs` shows the entire host file system read-only
 at `/mnt/term` (and unmasks `#U`). `--writable` paths are still writable.
+
+**Layers.** `up` on a `--dir` makes it the writable layer over what's
+beneath it, as an overlayfs upper directory is: on `/` or `#L`, every other
+member of the stack; on a path under one, such as `#L/etc`, the stack's tree
+there; anywhere else, what's at DST. The trees beneath are only read. The
+layer holds only what the program changed, written as it goes:
+
+- A new file, directory, link, or FIFO is made in the layer.
+- A file from below is copied in whole, with its parent directories, the
+  first time it's written, truncated, or has its mode or times changed.
+- A name removed from below leaves an empty `.wh.NAME` beside it, and a
+  directory removed and made again holds `.wh..wh..opq`, so nothing below
+  shows through it.
+- A rename copies a file from below up first, then renames it in the layer,
+  across directories too, so package managers that stage files and move them
+  into place work. Renaming a directory that exists below fails with
+  `EXDEV` (Plan 9's `cross-device link`), and `mv` copies it instead.
+- A name starting with `.wh.` can't be made in a layer: it would read as a
+  whiteout.
+
+So the layer is an [OCI image layer](https://github.com/opencontainers/image-spec/blob/main/layer.md),
+unpacked. Every member of a stack reads whiteouts, not only a layer: a
+`.wh.NAME` hides NAME in the members below it, and an opaque directory isn't
+merged with the ones below it. A layer mounts again without `up`, and `tar
+-C step1 -cf step1.tar .` makes it an archive that `--archive` stacks the
+same way. Off a stack, a `.wh.` file is a file. A build can go step by step,
+as a Dockerfile's does, each step's layer kept on disk:
+
+```sh
+host$ h9 --dir ./alpine:#L --dir ./deps:#L:up sh -c 'apk add python3 && rm /etc/motd'
+host$ h9 --dir ./alpine:#L --dir ./deps:#L --dir ./app:#L:up sh -c 'pip install -r /src/req.txt'
+host$ h9 --dir ./alpine:#L --dir ./deps:#L --dir ./app:#L python3 /app/main.py
+host$ ls -a deps/etc | grep wh
+.wh.motd
+```
+
+A stack with a layer has no overlay in memory, and `./alpine` is never
+written. The layer is written as the program goes, so a step that fails
+leaves a partial one: to keep only finished steps, use a fresh directory
+and rename it when the step succeeds (`--dir ./app.tmp:#L:up`, then `mv
+app.tmp app`). Files in a host layer are owned by the user h9 runs as.
+`--url URL:DST:up` keeps the layer on a 9P server, and `--tmp DST:up` in
+memory, gone when the machine ends. `up` with `ro`, `rw`, or `eph`, two on
+one stack, on `--archive` or `--builtin`, or under `--write=none` or
+`--write=ephemeral`, is exit 2.
 
 **Ephemeral writes.** `--write=ephemeral` makes every path that would be
 writable (the cwd, each `--writable` path) a copy-on-write overlay in memory
@@ -2540,7 +2592,7 @@ caveats:
 | `limits:` | The write and network modes, and any memory, timeout, process, and CPU caps |
 | `devmask:` | Devices a program can't attach by name after startup |
 | `net-allow:` | Shown only with `--net-allow`: the patterns |
-| `namespace:` | The namespace, in namespace-file syntax, with each host tree's access (`ro`, `rw`, `eph`, `9p`) at the end of its line; `<id>` stands for the machine's console number |
+| `namespace:` | The namespace, in namespace-file syntax, with each host tree's access (`ro`, `rw`, `eph`, `up`, `9p`) at the end of its line; `<id>` stands for the machine's console number |
 | `access:` | The rules the host file system device checks: allowed read-only, read-write, ephemeral, or denied, by host path |
 | `caveats:` | What the sandbox doesn't cover in this configuration |
 
@@ -2599,9 +2651,12 @@ file binds.
 | `# ...` | A comment, also at the end of a line |
 
 Quote with single quotes, doubling a quote inside one. `--print`'s extra
-column (`ro`, `rw`, `eph`, `9p`) and its `<id>` placeholder are accepted, so
+column (`ro`, `rw`, `eph`, `up`, `9p`) and its `<id>` placeholder are accepted, so
 its output replays unchanged. A bind from a bare `#O` creates a fresh
 copy-on-write overlay in memory over whatever its target is at that point.
+`bind -u NEW OLD` makes NEW the writable layer over OLD (chapter 22): the
+stack's on `'#Oroot'` or `'#Olinux'`, and a fresh layer in memory when NEW is
+a bare `#O`. `mount -u` does the same with a 9P server as the layer.
 `.` (include), `chdev`, and `$variable` expansion aren't supported.
 
 **Errors.** As in 9front's `newns`, a line that fails (a missing directory,

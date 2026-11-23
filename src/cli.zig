@@ -578,8 +578,8 @@ fn signalStatus(s: Signal) Exit {
 /// The line h9 prints on a terminal when a run's changes to the root's
 /// overlay are discarded (design/epoch-0/overlay.md): the changed top-level
 /// directories, and how to keep them. A 9P root keeps writes under
-/// `--write=scope`, since its server decides; a host tree takes
-/// `rw` on its --dir.
+/// `--write=scope`, since its server decides; otherwise a layer keeps
+/// them in a directory of the user's (design/upper-layers.md).
 pub fn discardNotice(buf: []u8, c: *const RootChanges, ninep: bool) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
     noticeTo(&w, c, ninep) catch {};
@@ -590,7 +590,8 @@ fn noticeTo(w: *std.Io.Writer, c: *const RootChanges, ninep: bool) std.Io.Writer
     try w.writeAll("h9: changes to the root under ");
     for (c.dirs(), 0..) |*n, i| try w.print("{s}/{s}", .{ if (i > 0) ", " else "", n.slice() });
     if (c.more) try w.writeAll(if (c.count > 0) ", ..." else "...");
-    try w.print(" were discarded (rerun with {s} to keep them)", .{if (ninep) "--write=scope" else "rw on the root, as in --dir PATH:/:rw,"});
+    if (ninep) return w.writeAll(" were discarded (rerun with --write=scope to keep them)");
+    try w.writeAll(" were discarded (--dir DIR:/:up keeps them in DIR)");
 }
 
 const t = std.testing;
@@ -1017,12 +1018,12 @@ test "the discarded-changes notice names the top-level directories" {
     rc.note("usr/glendax", "usr/glenda");
     try t.expect(rc.changed);
     var buf: [512]u8 = undefined;
-    try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)", discardNotice(&buf, &rc, false));
+    try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (--dir DIR:/:up keeps them in DIR)", discardNotice(&buf, &rc, false));
     try t.expectEqualStrings("h9: changes to the root under /386, /lib, /usr were discarded (rerun with --write=scope to keep them)", discardNotice(&buf, &rc, true));
     var many: RootChanges = .{};
     var nb: [8]u8 = undefined;
     for (0..RootChanges.max_names + 2) |i| many.note(try std.fmt.bufPrint(&nb, "d{d}/x", .{i}), "");
     try t.expect(many.more);
     try t.expectEqual(@as(usize, RootChanges.max_names), many.dirs().len);
-    try t.expect(std.mem.endsWith(u8, discardNotice(&buf, &many, false), "/d9, ... were discarded (rerun with rw on the root, as in --dir PATH:/:rw, to keep them)"));
+    try t.expect(std.mem.endsWith(u8, discardNotice(&buf, &many, false), "/d9, ... were discarded (--dir DIR:/:up keeps them in DIR)"));
 }

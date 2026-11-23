@@ -145,10 +145,13 @@ int	h9_fs_readlinkpath(char *path, char *buf, int nbuf);
 /*
  * h9_fs_symlink makes name in the devfs directory c a link to target.
  * h9_fs_symlinkpath does it by a path in the caller's namespace, in an
- * overlay or a devfs tree (fscheck.c); 0, or -1 with the error in errstr.
+ * overlay, a devfs tree, or a 9P2000.L mount (fscheck.c); 0, or -1 with
+ * the error in errstr. h9_fs_mntsymlink makes one in a 9P2000.L mount's
+ * directory dir, by Tsymlink, and is Eperm on any other.
  */
 void	h9_fs_symlink(Chan *c, char *name, char *target);
 int	h9_fs_symlinkpath(char *path, char *target);
+void	h9_fs_mntsymlink(Chan *dir, char *name, char *target);
 /*
  * h9_fs_rename moves the devfs file c to name in the devfs directory dir
  * with the host's rename, checked as a rename of c and a create of name;
