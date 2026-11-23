@@ -147,7 +147,7 @@ there isn't (chapter 27).
 | Host | Hypervisor | Without one |
 | --- | --- | --- |
 | macOS on Apple Silicon | ✓ (Hypervisor.framework) | The emulator, for amd64 and 386 programs |
-| Linux arm64 | ✓ (KVM; built, but not yet run on an arm64 KVM host, [#92](https://github.com/progrium/hyper9/issues/92)) | The emulator |
+| Linux arm64 | ✓ (KVM) | The emulator |
 | Linux x86\_64 | ✓ (KVM), with an amd64 root tree (`zig build mkroot` on x86\_64) | The emulator, or `--backend native` for a trusted guest |
 | Windows on ARM | *Not yet available ([whp](design/epoch-0/whp.md))* | The emulator |
 | Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | The emulator |
@@ -2761,7 +2761,7 @@ A **backend** is what runs guest code:
 | Backend | Host | Runs |
 | --- | --- | --- |
 | `hvf` | macOS on Apple Silicon (Hypervisor.framework) | arm64 |
-| `kvm` | Linux x86\_64 and arm64, with access to `/dev/kvm` | The host's architecture. The arm64 path is built but hasn't yet run on an arm64 KVM host ([#92](https://github.com/progrium/hyper9/issues/92)). |
+| `kvm` | Linux x86\_64 and arm64, with access to `/dev/kvm` | The host's architecture. |
 | `whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 |
 | `native` | Linux x86\_64, 5.11 or later, without a hypervisor | amd64 |
 | `emu` | Any (hcpu: ha64, h86, and hx64) | arm64, amd64, and 386 |
