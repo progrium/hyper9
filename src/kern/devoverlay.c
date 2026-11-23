@@ -125,6 +125,7 @@ struct Member
 	Chan	*root;
 	char	*at;		/* "" for the union's top, or a path such as "etc" */
 	int	create;		/* creates may go here (bind -c) */
+	int	isup;		/* the writable layer over the others (bind -u); only ever mem[0] */
 };
 
 struct Qmap
@@ -198,6 +199,7 @@ struct Inst
 	int	memgen;		/* the next member's id */
 	Qmap	**qtab;		/* (device, dev, qid path) to the instance's qid path */
 	ulong	qmem;		/* bytes of qid table and snapshots, counted against the pool */
+	QLock	upql;		/* serializes changes to an up member's tree (design/upper-layers.md) */
 };
 
 /* A chan's state. */
@@ -229,6 +231,7 @@ struct Unc
 	uchar	*dir;		/* directory snapshot, from the pool */
 	long	ndir;
 	long	dircap;
+	int	noup;		/* walks leave out the up member: what's below the layer */
 };
 
 
@@ -1761,9 +1764,60 @@ untop(Unc *u)
 	unclear(u);
 	qlock(&in->ql);
 	for(i = 0; i < in->nmem; i++)
-		if(in->mem[i].at[0] == '\0')
+		if(in->mem[i].at[0] == '\0' && !(u->noup && in->mem[i].isup))
 			unadd(u, cclone(in->mem[i].root), &in->mem[i]);
 	qunlock(&in->ql);
+}
+
+/*
+ * Whiteouts (design/upper-layers.md): in a union, a member's
+ * .wh.NAME hides NAME in the members below it, and a directory holding
+ * .wh..wh..opq isn't merged with the directories below it, as in an OCI
+ * image layer. Neither shows in a directory read. A walk asks for the
+ * whiteout only when a member misses a name, and only above the bottom.
+ */
+static char Whprefix[] = ".wh.";
+static char Whopaque[] = ".wh..wh..opq";
+
+static int
+iswhname(char *name)
+{
+	return strncmp(name, Whprefix, 4) == 0;
+}
+
+/* Whether the member directory dir has a whiteout for name. */
+static int
+haswh(Chan *dir, char *name)
+{
+	char wh[Maxname], err[ERRMAX];
+	Chan *w;
+
+	if(strlen(name) + 4 >= Maxname)
+		return 0;
+	snprint(wh, sizeof wh, "%s%s", Whprefix, name);
+	kstrcpy(err, up->errstr, ERRMAX);
+	w = lowerwalk1(dir, wh);
+	kstrcpy(up->errstr, err, ERRMAX);
+	if(w == nil)
+		return 0;
+	cclose(w);
+	return 1;
+}
+
+/* Whether the member directory dir is opaque. */
+static int
+isopaque(Chan *dir)
+{
+	char err[ERRMAX];
+	Chan *w;
+
+	kstrcpy(err, up->errstr, ERRMAX);
+	w = lowerwalk1(dir, Whopaque);
+	kstrcpy(up->errstr, err, ERRMAX);
+	if(w == nil)
+		return 0;
+	cclose(w);
+	return 1;
 }
 
 static int unstep(Unc*, Chan*, char*);
@@ -1855,6 +1909,8 @@ unstep(Unc *u, Chan *nc, char *name)
 	nh = 0;
 	qlock(&in->ql);
 	for(i = 0; i < in->nmem && nh < Maxmembers; i++){
+		if(u->noup && in->mem[i].isup)
+			continue;
 		c = nil;
 		hroot[nh] = 0;
 		for(j = 0; j < u->n; j++)
@@ -1888,19 +1944,30 @@ unstep(Unc *u, Chan *nc, char *name)
 			Chan *w;
 			up->errstr[0] = '\0';
 			w = lowerwalk1(c, name);
-			cclose(c);
 			if(w == nil){
 				/* The first member's reason, such as a link loop. */
 				if(why[0] == '\0')
 					utfecpy(why, why+sizeof why, up->errstr);
+				/* A whiteout hides the name in the members below. */
+				if(k < nh-1 && haswh(c, name)){
+					cclose(c);
+					if(!decided)
+						strecpy(why, why+sizeof why, Enonexist);
+					break;
+				}
+				cclose(c);
 				continue;
 			}
+			cclose(c);
 			c = w;
 		}
 		if(!decided){
 			decided = 1;
 			got[ng] = c; gid[ng] = hid[k]; gcr[ng] = hcr[k]; ng++;
 			if((c->qid.type & QTDIR) == 0)
+				break;
+			/* An opaque directory isn't merged with those below it. */
+			if(k < nh-1 && isopaque(c))
 				break;
 			continue;
 		}
@@ -1909,6 +1976,8 @@ unstep(Unc *u, Chan *nc, char *name)
 			continue;
 		}
 		got[ng] = c; gid[ng] = hid[k]; gcr[ng] = hcr[k]; ng++;
+		if(k < nh-1 && isopaque(c))
+			break;
 	}
 	for(; k < nh; k++)
 		if(have[k] != nil)
@@ -2094,11 +2163,84 @@ undirhas(Unc *u, char *name, ulong *htab, int hsize)
 	return 0;
 }
 
-/* Packs the merged directory into u's snapshot: each name once, the first member's entry. */
-static void
-unsnapshot(Chan *c)
+/* A set of names, for the names a member's whiteouts hide below it. */
+typedef struct Hide Hide;
+struct Hide
 {
-	Unc *u;
+	char	**tab;
+	int	size;
+	int	n;
+};
+
+static int
+hidehas(Hide *h, char *name)
+{
+	int k;
+
+	if(h->size == 0)
+		return 0;
+	for(k = namehash(name) % h->size; h->tab[k] != nil; k = (k+1) % h->size)
+		if(strcmp(h->tab[k], name) == 0)
+			return 1;
+	return 0;
+}
+
+static void
+hideput(Hide *h, char *name)
+{
+	char **ot;
+	int i, k, os;
+
+	if(hidehas(h, name))
+		return;
+	if((h->n+1)*2 > h->size){
+		ot = h->tab;
+		os = h->size;
+		h->size = os ? os*2 : 64;
+		h->tab = mallocz(h->size*sizeof(char*), 1);
+		if(h->tab == nil){
+			h->tab = ot;
+			h->size = os;
+			error(Enomem);
+		}
+		for(i = 0; i < os; i++)
+			if(ot[i] != nil){
+				for(k = namehash(ot[i]) % h->size; h->tab[k] != nil; k = (k+1) % h->size)
+					;
+				h->tab[k] = ot[i];
+			}
+		free(ot);
+	}
+	for(k = namehash(name) % h->size; h->tab[k] != nil; k = (k+1) % h->size)
+		;
+	h->tab[k] = strdup(name);
+	if(h->tab[k] == nil)
+		error(Enomem);
+	h->n++;
+}
+
+static void
+hidefree(Hide *h)
+{
+	int i;
+
+	for(i = 0; i < h->size; i++)
+		free(h->tab[i]);
+	free(h->tab);
+	h->tab = nil;
+	h->size = h->n = 0;
+}
+
+/*
+ * Packs the merged directory into u's snapshot: each name once, the
+ * first member's entry, leaving out whiteouts, the names they hide in
+ * the members below them, and the members below an opaque directory.
+ * With probe, stores nothing, and returns 1 at the first name it would
+ * list: whether the merged directory has any.
+ */
+static int
+unlist(Unc *u, int probe)
+{
 	Inst *in;
 	Chan *volatile lc;
 	Dir d;
@@ -2108,29 +2250,36 @@ unsnapshot(Chan *c)
 	char *strs;
 	long r, m;
 	vlong off;
-	int i, k, hsize, nent;
+	int i, k, hsize, nent, opaque, found;
+	Hide hide, pend;
 
-	u = c->aux;
 	in = u->inst;
-	undirfree(u);
+	if(!probe)
+		undirfree(u);
 	lc = nil;
 	buf = nil;
 	htab = nil;
 	hsize = 0;
 	nent = 0;
+	found = 0;
+	memset(&hide, 0, sizeof hide);
+	memset(&pend, 0, sizeof pend);
 	if(waserror()){
 		if(lc != nil)
 			cclose(lc);
 		free(buf);
 		free(htab);
+		hidefree(&hide);
+		hidefree(&pend);
 		nexterror();
 	}
 	buf = smalloc(8192 + 8192);
 	strs = (char*)buf + 8192;
-	for(i = 0; i < u->n; i++){
+	for(i = 0; i < u->n && !found; i++){
+		opaque = 0;
 		lc = cclone(u->mc[i]);
 		lc = devtab[lc->type]->open(lc, OREAD);
-		for(off = 0;; off += r){
+		for(off = 0; !found; off += r){
 			r = devtab[lc->type]->read(lc, buf, 8192, off);
 			if(r <= 0)
 				break;
@@ -2139,6 +2288,19 @@ unsnapshot(Chan *c)
 				m = BIT16SZ + GBIT16(p);
 				if(p + m > e || convM2D(p, m, &d, strs) != m)
 					break;
+				if(iswhname(d.name)){
+					if(strcmp(d.name, Whopaque) == 0)
+						opaque = 1;
+					else if(i < u->n-1)
+						hideput(&pend, d.name+4);
+					continue;
+				}
+				if(hidehas(&hide, d.name))
+					continue;
+				if(probe){
+					found = 1;
+					break;
+				}
 				if(nent*2 >= hsize){
 					/* Rebuild the name table, twice as big. */
 					ulong *nt;
@@ -2172,15 +2334,12 @@ unsnapshot(Chan *c)
 					nexterror();
 				}
 				{
-					/* The entry's qid, as a walk to it gives it. */
+					/* The entry's qid, as a walk to it gives it: the member chan's device. */
 					Chan tmp;
 					memset(&tmp, 0, sizeof tmp);
-					tmp.type = d.type;
-					tmp.dev = d.dev;
-					tmp.qid = d.qid;
-					/* d.type and d.dev are the server's view; use the member chan's device. */
 					tmp.type = lc->type;
 					tmp.dev = lc->dev;
+					tmp.qid = d.qid;
 					d.qid = unqid(in, &tmp);
 				}
 				poperror();
@@ -2201,10 +2360,26 @@ unsnapshot(Chan *c)
 		}
 		cclose(lc);
 		lc = nil;
+		/* This member's whiteouts apply to the members below it, not to itself. */
+		for(k = 0; k < pend.size; k++)
+			if(pend.tab[k] != nil)
+				hideput(&hide, pend.tab[k]);
+		hidefree(&pend);
+		if(opaque)
+			break;
 	}
 	poperror();
 	free(buf);
 	free(htab);
+	hidefree(&hide);
+	hidefree(&pend);
+	return found;
+}
+
+static void
+unsnapshot(Chan *c)
+{
+	unlist(c->aux, 0);
 }
 
 static Chan*
