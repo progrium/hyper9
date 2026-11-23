@@ -72,8 +72,10 @@ pub const Policy = struct {
 /// How a bound tree can be changed: not at all, on the host, in an
 /// overlay in memory (`eph`), which never writes the host, or as a 9P
 /// root's server decides (`9p`, design/epoch-0/ninep-roots.md), or never, as
-/// constant data in the h9 binary (`builtin`, design/epoch-0/builtin-root.md).
-pub const Access = enum { ro, rw, eph, @"9p", builtin };
+/// constant data in the h9 binary (`builtin`, design/epoch-0/builtin-root.md),
+/// or as the writable layer over what's beneath it, which is only read
+/// (`up`, design/upper-layers.md).
+pub const Access = enum { ro, rw, eph, up, @"9p", builtin };
 
 /// The built-in root's device path.
 pub const builtin_dev = "#Hroot";
@@ -120,6 +122,10 @@ pub const Bind = struct {
     /// `#Oroot` or `#Olinux`, optionally with a path below, it adds a
     /// member to that stack.
     recursive: bool = false,
+    /// `bind -u`: `from` is the writable layer over `to`
+    /// (design/upper-layers.md): the stack's up member on `#Oroot` or
+    /// `#Olinux`, and anywhere else a union of the two.
+    upper: bool = false,
     /// Make `to` as a directory in the root's overlay if it's missing;
     /// without an overlay, a missing `to` fails, or is skipped when
     /// `optional`.
@@ -350,7 +356,9 @@ pub const Plan = struct {
             defer line.deinit();
             const lw = &line.writer;
             lw.writeAll(if (b.mount) "  mount" else "  bind") catch return error.WriteFailed;
-            if (b.recursive or b.flag != .repl or b.create) {
+            if (b.upper) {
+                lw.writeAll(" -u") catch return error.WriteFailed;
+            } else if (b.recursive or b.flag != .repl or b.create) {
                 lw.writeAll(" -") catch return error.WriteFailed;
                 if (b.recursive) lw.writeAll("r") catch return error.WriteFailed;
                 switch (b.flag) {
@@ -555,6 +563,22 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
             err_msg.* = "contained needs a host directory";
             return error.Conflict;
         }
+        // A layer writes the host, which ephemeral never does.
+        if (write_req == .ephemeral and m.access == .up) {
+            err_msg.* = try std.fmt.allocPrint(arena, "--write=ephemeral conflicts with up: {f}", .{m});
+            return error.Conflict;
+        }
+    }
+    // A stack takes one layer (design/upper-layers.md).
+    for ([_]mount.Stack{ .root, .linux }) |st| {
+        var ups: usize = 0;
+        for (in.mounts) |m| if (m.stack()) |ms| if (ms[0] == st and m.access == .up) {
+            ups += 1;
+        };
+        if (ups > 1) {
+            err_msg.* = try std.fmt.allocPrint(arena, "{s} has more than one up member", .{if (st == .root) "/" else "#L"});
+            return error.Conflict;
+        }
     }
     if (write_req == .none and pol.writable.len > 0) {
         err_msg.* = "--write=none conflicts with --writable";
@@ -615,7 +639,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
     var stack_n = [2]usize{ 0, 0 };
     for (in.mounts) |m| if (m.stack()) |st| {
         stack_n[@intFromEnum(st[0])] += 1;
-        if (m.access == .rw and can_write and !eph) stack_rw[@intFromEnum(st[0])] = true;
+        if ((m.access == .rw or m.access == .up) and can_write and !eph) stack_rw[@intFromEnum(st[0])] = true;
         // A 9P server decides what's writable under --write=scope, as
         // before (design/epoch-0/ninep-roots.md).
         if ((m.kind == .url or m.kind == .fd) and write == .scope and m.access != .ro) stack_rw[@intFromEnum(st[0])] = true;
@@ -750,7 +774,7 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         if (m.stack() != null) continue;
         const flag: Bind.Flag = if (m.order) |o| (if (o == .before) .before else .after) else .repl;
         var b = try memberBind(arena, in, pol, m, m.dst, flag, false, false, false, can_write and !eph, &rules);
-        b.recursive = m.recursive;
+        b.recursive = m.recursive and !b.upper;
         b.make = m.srvName() == null;
         b.what = try std.fmt.allocPrint(arena, "{f}", .{m});
         try binds.append(arena, b);
@@ -841,6 +865,11 @@ pub fn compile(arena: std.mem.Allocator, in: Inputs, pol: Policy, err_msg: *[]co
         try caveats.append(arena, "hardlinks under writable paths can modify host files outside them");
         try caveats.append(arena, "writes to writable paths are not capped (no res.disk)");
     }
+    // Layers (design/upper-layers.md).
+    for (binds.items) |b| if (b.upper) {
+        const onto = if (std.mem.eql(u8, b.to, mount.Stack.root.dev())) "/" else if (std.mem.eql(u8, b.to, mount.Stack.linux.dev())) "#L" else b.to;
+        try caveats.append(arena, try std.fmt.allocPrint(arena, "changes to {s} are written to its layer as they're made, so a run that fails leaves a partial one", .{onto}));
+    };
     for (binds.items) |b| if (b.url) |r| {
         const is_root = std.mem.eql(u8, b.to, mount.Stack.root.dev());
         const what = if (is_root) "the 9P root" else try std.fmt.allocPrint(arena, "the 9P mount on {s}", .{b.to});
@@ -978,6 +1007,7 @@ pub fn ninePConn(arena: std.mem.Allocator, m: mount.Mount) error{OutOfMemory}!Ni
 /// `to` names (`#Oroot`, `#Olinux/etc`); `overlaid` says that stack is
 /// under an overlay; `host_rw_ok` that a host path may be written.
 fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount, to: []const u8, flag: Bind.Flag, on_stack: bool, linux: bool, overlaid: bool, host_rw_ok: bool, rules: *std.ArrayList(Rule)) CompileError!Bind {
+    if (m.access == .up) return upperBind(arena, m, to, linux, rules);
     switch (m.kind) {
         .dir => {
             const want_rw = m.access == .rw or hostWritable(pol.writable, m.src, true);
@@ -1019,6 +1049,38 @@ fn memberBind(arena: std.mem.Allocator, in: Inputs, pol: Policy, m: mount.Mount,
         .builtin => return .{ .from = builtin_dev, .to = to, .flag = flag, .recursive = on_stack, .access = .builtin, .note = in.builtin_note },
         .tmp => return .{ .from = "#O", .to = to, .flag = flag, .recursive = on_stack, .create = true, .access = .eph, .empty = true, .note = "an empty tree in memory" },
         .archive => return .{ .from = "#O", .to = to, .flag = flag, .recursive = on_stack, .create = !on_stack, .access = .eph, .empty = true, .archive = m.src, .note = try std.fmt.allocPrint(arena, "the archive {s}", .{m.src}) },
+    }
+}
+
+/// An `up` mount's line (design/upper-layers.md): `bind -u` of the
+/// layer onto `to`, which a host directory writes as `rw` does; what's
+/// beneath it is only read.
+fn upperBind(arena: std.mem.Allocator, m: mount.Mount, to: []const u8, linux: bool, rules: *std.ArrayList(Rule)) CompileError!Bind {
+    switch (m.kind) {
+        .dir => {
+            const contained = m.contained or linux;
+            try rules.append(arena, .{ .path = m.src, .kind = .allow_rw });
+            return .{ .from = try std.fmt.allocPrint(arena, "#U{s}{s}", .{ if (contained) "!c" else "", m.src }), .to = to, .upper = true, .create = true, .access = .up };
+        },
+        .url, .fd => {
+            var r = if (m.kind == .url) try ninePConn(arena, m) else NinePRoot{ .kind = .unix, .addr = "fd", .spec = m.spec orelse "", .user = m.user };
+            if (m.index) |ix| r.index = .{ .given = .{ .from = ix } };
+            return .{
+                .from = if (r.kind == .ws) r.http orelse r.addr else m.src,
+                .to = to,
+                .mount = true,
+                .upper = true,
+                .create = true,
+                .spec = r.spec,
+                .access = .up,
+                .url = r,
+                .fd = m.fd,
+                .note = try rootNoteOf(arena, r),
+            };
+        },
+        .tmp => return .{ .from = "#O", .to = to, .upper = true, .create = true, .access = .up, .empty = true, .note = "a layer in memory" },
+        // mount.zig refuses up on these.
+        .builtin, .archive => unreachable,
     }
 }
 
@@ -1496,6 +1558,45 @@ test "compile: default and tight profiles" {
         found = true;
     };
     try t.expect(found);
+}
+
+test "compile: an up member is bind -u on its stack, which then has no overlay [upper-layers]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var msg: []const u8 = "";
+    const ms = [_]mount.Mount{
+        .{ .kind = .dir, .src = "/r" },
+        .{ .kind = .dir, .src = "/alpine", .dst = "#L" },
+        .{ .kind = .dir, .src = "/app", .dst = "#L", .access = .up },
+        .{ .kind = .dir, .src = "/deps", .dst = "#L" },
+        .{ .kind = .tmp, .dst = "/n/x", .access = .up },
+    };
+    const p = try compile(a, .{ .mounts = &ms, .cwd = "/w", .arch = .amd64 }, .{}, &msg);
+    try t.expectEqual(Verdict.allow, p.check("/app/f", .create));
+    try t.expectEqual(Verdict.read_only, p.check("/deps/f", .create));
+    var up_line = false;
+    var tmp_line = false;
+    for (p.binds) |b| {
+        // The Linux stack has a layer, so no overlay in memory.
+        try t.expect(!(std.mem.eql(u8, b.from, "#O") and std.mem.eql(u8, b.to, "#Olinux")));
+        if (b.upper and std.mem.eql(u8, b.from, "#U!c/app")) up_line = true;
+        if (b.upper and b.empty and std.mem.eql(u8, b.to, "/n/x")) tmp_line = true;
+    }
+    try t.expect(up_line);
+    try t.expect(tmp_line);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try p.print(&out.writer);
+    try t.expect(std.mem.indexOf(u8, out.written(), "bind -u '#U!c/app' '#Olinux'") != null);
+
+    // Two layers on a stack, and a layer under --write=ephemeral, conflict.
+    const two = [_]mount.Mount{
+        .{ .kind = .dir, .src = "/a", .dst = "#L", .access = .up },
+        .{ .kind = .dir, .src = "/b", .dst = "#L", .access = .up },
+    };
+    try t.expectError(error.Conflict, compile(a, .{ .mounts = &two, .cwd = "/w", .arch = .amd64 }, .{}, &msg));
+    try t.expectError(error.Conflict, compile(a, .{ .mounts = two[0..1], .cwd = "/w", .arch = .amd64 }, .{ .write = .ephemeral }, &msg));
+    try t.expectError(error.Conflict, compile(a, .{ .mounts = two[0..1], .cwd = "/w", .arch = .amd64 }, .{ .write = .none }, &msg));
 }
 
 test "compile: --write=none conflicts with --writable" {

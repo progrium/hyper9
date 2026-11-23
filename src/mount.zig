@@ -34,8 +34,9 @@ pub const Kind = enum {
     }
 };
 
-/// How a mount can be changed.
-pub const Access = enum { ro, rw, eph };
+/// How a mount can be changed. `up` makes it the writable layer over
+/// what's beneath it (design/upper-layers.md).
+pub const Access = enum { ro, rw, eph, up };
 
 /// Where a mount goes relative to what's at DST.
 pub const Order = enum { before, after };
@@ -166,24 +167,24 @@ pub const Mount = struct {
         const Flagged = struct { []const u8, []const u8 };
         const words = [_]Flagged{
             .{ "ro", "readonly" },   .{ "rw", "readwrite" }, .{ "eph", "ephemeral" },
-            .{ "b", "before" },      .{ "a", "after" },      .{ "c", "create" },
-            .{ "r", "recursive" },   .{ "contained", "contained" },
+            .{ "up", "upper" },      .{ "b", "before" },     .{ "a", "after" },
+            .{ "c", "create" },      .{ "r", "recursive" },  .{ "contained", "contained" },
         };
         for (words, 0..) |wd, i| if (std.mem.eql(u8, o, wd[0]) or std.mem.eql(u8, o, wd[1])) {
             switch (i) {
-                0, 1, 2 => {
+                0, 1, 2, 3 => {
                     const a: Access = @enumFromInt(i);
-                    if (m.access != null and m.access.? != a) return conflict(why, "conflicting options ro, rw, and eph");
+                    if (m.access != null and m.access.? != a) return conflict(why, "conflicting options ro, rw, eph, and up");
                     m.access = a;
                 },
-                3, 4 => {
-                    const ord: Order = if (i == 3) .before else .after;
+                4, 5 => {
+                    const ord: Order = if (i == 4) .before else .after;
                     if (m.order != null and m.order.? != ord) return conflict(why, "conflicting options b and a");
                     m.order = ord;
                 },
-                5 => m.create = true,
-                6 => m.recursive = true,
-                7 => {
+                6 => m.create = true,
+                7 => m.recursive = true,
+                8 => {
                     if (m.kind != .dir) return conflict(why, "contained is for --dir only");
                     m.contained = true;
                 },
@@ -222,6 +223,8 @@ pub const Mount = struct {
         if (m.dst.len == 0 or (m.dst[0] != '/' and m.dst[0] != '#')) return conflict(why, "the destination must be a guest path or #L");
         if (m.dst[0] == '#' and m.stack() == null) return conflict(why, "the only device destination is #L");
         if ((m.kind == .dir or m.kind == .url or m.kind == .archive) and m.src.len == 0) return conflict(why, "no source");
+        // A layer has to be written: an archive and the built-in root never are.
+        if (m.access == .up and (m.kind == .archive or m.kind == .builtin)) return conflict(why, "up needs a tree that can be written: a --dir, --url, or --tmp");
         const url_only = m.spec != null or m.user != null or m.auth != null or m.index != null;
         if (url_only and m.kind != .url and m.kind != .fd) return conflict(why, "spec=, user=, auth=, and index= are for --url");
         if (m.headers.len > 0 or m.ca != null) {
@@ -420,6 +423,24 @@ test "conflicting options are a usage error [mounts]" {
         .{ .url, "ws://h/x:/:contained" },
     }) |c| try t.expectError(error.Usage, Mount.parse(a, c[0], c[1], &why));
     try t.expectEqual(Access.eph, (try Mount.parse(a, .dir, "./x:/:eph,ephemeral", &why)).access.?);
+}
+
+test "up and upper make a mount a writable layer, on a tree that can be written [upper-layers]" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: []const u8 = "";
+    try t.expectEqual(Access.up, (try Mount.parse(a, .dir, "./app:#L:up", &why)).access.?);
+    try t.expectEqual(Access.up, (try Mount.parse(a, .dir, "src=./app,dst=#L,upper", &why)).access.?);
+    try t.expectEqual(Access.up, (try Mount.parse(a, .tmp, "#L:up", &why)).access.?);
+    try t.expectEqual(Access.up, (try Mount.parse(a, .url, "tcp://h:564:/n/x:up", &why)).access.?);
+    for ([_]struct { Kind, []const u8 }{
+        .{ .dir, "./x:#L:up,ro" },
+        .{ .dir, "./x:#L:up,rw" },
+        .{ .dir, "./x:#L:eph,up" },
+        .{ .archive, "./x.tar:#L:up" },
+        .{ .builtin, "/:up" },
+    }) |c| try t.expectError(error.Usage, Mount.parse(a, c[0], c[1], &why));
     try t.expectEqualStrings("A: b", (try Mount.parse(a, .url, "wss://h/x:/:header=A: b,ca=c.pem", &why)).headers[0]);
 }
 
