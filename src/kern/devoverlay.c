@@ -1917,10 +1917,11 @@ unstep(Unc *u, Chan *nc, char *name)
 		return 0;
 	}
 	in = u->inst;
-	unfresh(u);
+	/* Before unfresh, so a directory the layer makes meanwhile is looked for again. */
 	qlock(&in->ql);
 	gen = in->upgen;
 	qunlock(&in->ql);
+	unfresh(u);
 	np = pathjoin(u->path, name);
 
 	/*
@@ -3152,13 +3153,14 @@ upcreate(Chan *c, char *name, char *np, int omode, ulong perm)
 	waswh = rmwh(pd, name);
 	nc = cclone(pd);
 	nc = devtab[nc->type]->create(nc, name, omode, perm);
-	if(perm & DMDIR)
-		upmade(in);
 	if((perm & DMDIR) && waswh){
 		d = lowerwalk1(pd, name);
 		if(d != nil)
 			mkmark(d, Whopaque);
 	}
+	/* After the opaque marker, so that unfresh never sees the directory without it. */
+	if(perm & DMDIR)
+		upmade(in);
 	poperror();
 	if(d != nil)
 		cclose(d);

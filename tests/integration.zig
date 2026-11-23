@@ -8593,6 +8593,25 @@ test "a working directory from below sees what's changed in the layer since [upp
     try std.testing.expect(!s.exists("up/etc/.wh.alpine-release"));
 }
 
+test "a working directory from below sees a directory made again over it as opaque [upper-layers]" {
+    var le: LinuxEnv = undefined;
+    try linuxEnv(@src(), &le);
+    var s: Scratch = undefined;
+    try s.init();
+    defer s.deinit();
+    try s.tmp.dir.createDirPath(std.testing.io, "up");
+    var p: [std.Io.Dir.max_path_bytes + 8]u8 = undefined;
+    // /etc/apk is only below when the shell cds there. Made again in the
+    // layer, it's opaque, so names from the old working directory are only
+    // what's new there, in a read or a walk.
+    const r = try runLinux(&le, false, &.{ "--dir", try std.fmt.bufPrint(&p, "{s}/up:#L:up", .{s.path}), "/bin/sh", "-c", "cd /etc/apk && rm -rf /etc/apk && mkdir /etc/apk && echo x >/etc/apk/new && ls && cat new && test ! -e arch && echo gone" });
+    defer r.deinit();
+    errdefer std.debug.print("stderr: {s}\n", .{r.err});
+    try std.testing.expectEqualStrings("new\nx\ngone\n", r.out);
+    try std.testing.expect(s.exists("up/etc/apk/.wh..wh..opq"));
+    try expectFile(&s, "up/etc/apk/new", "x\n");
+}
+
 test "Alpine builds in layers that stack again as directories and archives (demo) [upper-layers]" {
     var le: LinuxEnv = undefined;
     try linuxEnv(@src(), &le);
