@@ -36,6 +36,36 @@ const mount_points = [_][]const u8{
     "net", "net.alt", "proc", "root", "shr", "srv", "tmp",
 };
 
+/// The empty directories an install has under /mnt and /n, which the ISO
+/// leaves out: services mount on them (the plumber on /mnt/plumb, acme on
+/// /mnt/acme, consolefs on /mnt/consoles). From the release's
+/// sys/lib/sysconfig/proto/portproto, without /n's `a:`, `c:`, and `d:`,
+/// which aren't valid names on Windows hosts, and `termrc.tmp`. Then
+/// /mnt/factotum and /mnt/web, where factotum and webfs mount: 9front's
+/// mntgen makes those on demand, and h9 has no mntgen.
+const install_dirs = [_][]const u8{
+    "mnt/factotum",  "mnt/web",
+    "mnt/acme",      "mnt/apeselect",
+    "mnt/apm",       "mnt/cd",
+    "mnt/cons/cons", "mnt/cons/consctl",
+    "mnt/consoles",  "mnt/doc",
+    "mnt/exportfs",  "mnt/lp",
+    "mnt/plumb",     "mnt/rdb",
+    "mnt/vmware",    "n/9",
+    "n/9fat",        "n/a",
+    "n/c",           "n/d",
+    "n/boot",        "n/bootes",
+    "n/bootesother", "n/choline",
+    "n/dump",        "n/emelie",
+    "n/emelieother", "n/ftp",
+    "n/kfs",         "n/sid",
+    "n/tapefs",
+};
+
+/// Top-level ISO directories left out, as tools/mkroot.zig leaves them out:
+/// dist holds the installer's payload (a copy of the source repository).
+const exclude = [_][]const u8{"dist"};
+
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const io = init.io;
@@ -79,8 +109,14 @@ pub fn main(init: std.process.Init) !u8 {
     var n: usize = 0;
     try r.unpack(j, &meta, out, "", &n);
     for (mount_points) |d| try out.createDirPath(io, d);
+    for (install_dirs) |d| try out.createDirPath(io, d);
     std.debug.print("isoroot: {d} files into {s}\n", .{ n, argv[2] });
     return 0;
+}
+
+fn isExcluded(name: []const u8) bool {
+    for (exclude) |e| if (std.mem.eql(u8, name, e)) return true;
+    return false;
 }
 
 fn fail(comptime fmt: []const u8, args: anytype) u8 {
@@ -180,6 +216,7 @@ const Reader = struct {
                 name = mm.name;
             };
             if (name.len == 0 or std.mem.indexOfScalar(u8, name, '/') != null or std.mem.eql(u8, name, "..")) return error.BadName;
+            if (prefix.len == 0 and isExcluded(name)) continue;
             const path = if (prefix.len == 0) name else try std.fmt.allocPrint(r.arena, "{s}/{s}", .{ prefix, name });
             if (rec.flags() & flag_dir != 0) {
                 try out.createDirPath(r.io, path);
@@ -223,6 +260,11 @@ fn jolietName(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
     const s = out.items;
     if (std.mem.lastIndexOfScalar(u8, s, ';')) |k| return s[0..k];
     return s;
+}
+
+test "isExcluded" {
+    try std.testing.expect(isExcluded("dist"));
+    try std.testing.expect(!isExcluded("sys"));
 }
 
 test "jolietName" {

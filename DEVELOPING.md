@@ -214,6 +214,9 @@ A 386 root for the archive can also come straight from the release's 386 ISO,
 without cross-compiling: `scripts/fetch.sh iso386` fetches it, and
 `zig build isoroot -- .local/9front/9front-<release>.386.iso .local/9front/root386`
 ([tools/isoroot.zig](tools/isoroot.zig)) unpacks it in about 20 seconds.
+The tree works with `--dir` as it is: isoroot adds the kernel's mount points and
+the empty `/mnt` and `/n` directories an install has (so the plumber, factotum,
+and webfs can mount), and leaves out the installer's `dist/`.
 That's how the [pages workflow](.github/workflows/pages.yml) builds the demo
 and publishes it with the project page, [site/index.html](site/index.html),
 to GitHub Pages. It runs on pushes to main that change `site/`, `src/web/`,
