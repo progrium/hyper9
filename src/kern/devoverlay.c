@@ -2140,7 +2140,7 @@ unstat(Chan *c, uchar *db, int n)
 			d.length = 0;
 	}
 	r = convD2M(&d, db, n);
-	if(r <= BIT16SZ)
+	if(r == 0)
 		error(Eshortstat);
 	return r;
 }
@@ -4797,7 +4797,7 @@ ovstat(Chan *c, uchar *db, int n)
 	if(o->node != nil && !o->lopen){
 		node2dir(c, o->node, &d);
 		r = convD2M(&d, db, n);
-		if(r <= BIT16SZ)
+		if(r == 0)
 			error(Eshortstat);
 	}else
 		r = devtab[o->lower->type]->stat(o->lower, db, n);
