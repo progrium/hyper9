@@ -23,7 +23,7 @@ Borrowing drawterm's kernel was the fastest way to get exact Plan 9 namespace se
 - **Two process records.** drawterm's Proc has no parent, notes, segments, or environment group, because drawterm is a terminal. h9 keeps a second record (`src/kern/proc.c`, 1,800 lines) in step with it by hand, and notes live on h9's side because drawterm's `postnote` drops them.
 - **One kernel per host process.** Every machine in a process shares one booted kernel. devsrv, the console, the clock, and the locks table each needed a per-machine table hung off `Hmach` to keep machines apart, and [host-cmd](host-cmd.md) found devcmd's conversation table shared between them. [child-machines](child-machines.md) and [namespace-kernel](namespace-kernel.md) each design around it.
 - **No address checks, and a 32-bit `long`.** drawterm's `validaddr` does nothing, and offsets and counts pass through `long` in places where a guest's are 64 bits.
-- **Patches to vendored code.** h9's changes to `third_party/drawterm/kern/` (policy hooks, the `#λ` exemption in `chan.c`, the readiness hook in `qio.c`) have to be carried across every merge from upstream.
+- **Patches to vendored code.** h9's changes to `third_party/drawterm/kern/` (policy hooks, the `#λ` exemption in `chan.c`, the readiness hook and the interruptible reader and writer locks in `qio.c`) have to be carried across every merge from upstream.
 
 [namespace-kernel](namespace-kernel.md) and [kernel-serve](kernel-serve.md) come first because they make the kernel stand alone: a build with no engine, loaders, system call tables, or devproc, driven only over 9P. That build is the line this port works behind, and its suite is a second check on it.
 

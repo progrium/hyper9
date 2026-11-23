@@ -524,6 +524,50 @@ static void meminfo_threads(void) {
 	printf("ok meminfo_threads\n");
 }
 
+/* Two threads blocked reading one pipe, as cargo's and rustc's jobserver
+ * helpers are: a signal to the second, whose handler isn't SA_RESTART,
+ * breaks its read with EINTR, though the first still holds the read. */
+static int pr_fd[2];
+static volatile int pr_tid[2], pr_done[2], pr_err[2];
+
+static void pr_handler(int s) { (void)s; }
+
+static void *pr_reader(void *a) {
+	long k = (long)a;
+	pr_tid[k] = gettid();
+	char c;
+	int r = read(pr_fd[0], &c, 1);
+	pr_err[k] = r < 0 ? errno : 0;
+	pr_done[k] = 1;
+	return a;
+}
+
+static void pipe_intr(void) {
+	struct sigaction sa, old;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = pr_handler;
+	CHECK("pipe_intr", sigaction(SIGUSR1, &sa, &old) == 0);
+	CHECK("pipe_intr", pipe(pr_fd) == 0);
+	pthread_t t[2];
+	for (long k = 0; k < 2; k++) {
+		CHECK("pipe_intr", pthread_create(&t[k], 0, pr_reader, (void *)k) == 0);
+		while (!pr_tid[k]) usleep(1000);
+		usleep(100000);
+	}
+	for (int k = 1; k >= 0; k--) {
+		for (int i = 0; i < 20 && !pr_done[k]; i++) {
+			syscall(SYS_tgkill, getpid(), pr_tid[k], SIGUSR1);
+			usleep(50000);
+		}
+		CHECK("pipe_intr", pr_done[k] && pr_err[k] == EINTR);
+	}
+	for (int k = 0; k < 2; k++) pthread_join(t[k], 0);
+	sigaction(SIGUSR1, &old, 0);
+	close(pr_fd[0]);
+	close(pr_fd[1]);
+	printf("ok pipe_intr\n");
+}
+
 /* A thread's scheduling parameters, read back and set, as .NET does before
  * it sets a thread's priority. */
 static void sched_params(void) {
@@ -557,6 +601,7 @@ int main(int argc, char **argv) {
 		if (all || !strcmp(n, "proc_threads")) proc_threads();
 		if (all || !strcmp(n, "meminfo_threads")) meminfo_threads();
 		if (all || !strcmp(n, "sched_params")) sched_params();
+		if (all || !strcmp(n, "pipe_intr")) pipe_intr();
 		if (!strcmp(n, "exit_main")) exit_main();
 		if (!strcmp(n, "exit_thread")) exit_thread();
 		if (!strcmp(n, "exec_thread")) exec_thread(argv);

@@ -5079,7 +5079,9 @@ fn writeSockaddr(p: *Process, va: u64, lenp: u64, family: u16, a: kc.NetAddr) Er
     const have = std.mem.readInt(u32, &lb, .little);
     var b: [28]u8 = @splat(0);
     var n: u32 = 0;
-    if (family == AF_INET and isV4(&a.ip)) {
+    // An IPv4 socket's unspecified address (devip's "::") is 0.0.0.0.
+    const unspec = std.mem.allEqual(u8, &a.ip, 0);
+    if (family == AF_INET and (isV4(&a.ip) or unspec)) {
         std.mem.writeInt(u16, b[0..2], AF_INET, .little);
         std.mem.writeInt(u16, b[2..4], a.port, .big);
         @memcpy(b[4..8], a.ip[12..16]);
@@ -5244,8 +5246,20 @@ fn sockName(p: *Process, fd: i32, va: u64, lenp: u64, peer: bool) Err!i64 {
     if (peer and !so.s.connected) return -E.NOTCONN;
     var rb: [128]u8 = undefined;
     const t = convRead(so.conv, if (peer) "remote" else "local", &rb) orelse return -E.IO;
-    try writeSockaddr(p, va, lenp, so.s.family, parseAddrText(t));
+    var a = parseAddrText(t);
+    // A stream socket bound but not yet listening or connected hasn't
+    // announced, so its conversation has no local address: answer with
+    // the one bind kept, as Kestrel reads it back between bind and listen.
+    if (!peer and a.port == 0 and so.s.bound_len > 0) a = boundAddr(so.s.bound[0..so.s.bound_len]);
+    try writeSockaddr(p, va, lenp, so.s.family, a);
     return 0;
+}
+
+/// The address a bind kept, in announce's form: ADDR!PORT, or a bare
+/// port for the wildcard.
+fn boundAddr(t: []const u8) kc.NetAddr {
+    if (std.mem.lastIndexOfScalar(u8, t, '!') != null) return parseAddrText(t);
+    return .{ .port = std.fmt.parseInt(u16, t, 10) catch 0 };
 }
 
 fn shutdownCall(p: *Process, fd: i32, how: u32) Err!i64 {
