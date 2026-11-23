@@ -42,11 +42,87 @@ const SIGURG = 23;
 const SIGBUS = 7;
 const SIGSEGV = 11;
 
-/// Rounds h9 spins waiting for an exit before sleeping on the futex. A
-/// guest syscall's round trip is a few microseconds when neither side
-/// sleeps, and tens when a sleeping CPU has to be woken (see the
-/// proposal's spike results).
+/// Rounds h9 spins at most waiting for an exit before sleeping on the
+/// futex. A guest syscall's round trip is a few microseconds when neither
+/// side sleeps, and tens when a sleeping CPU has to be woken (see the
+/// proposal's spike results). Spinning is also subject to `abi.Sched`.
 const spin_rounds = 4000;
+
+/// The spin budget every stub shares with h9 (`abi.Sched`): one page,
+/// made on the first backend and kept for the life of h9.
+var sched_lock: std.atomic.Mutex = .unlocked;
+var sched_fd: i32 = -1;
+var sched: ?*abi.Sched = null;
+
+fn schedInit() vmm.Error!void {
+    while (!sched_lock.tryLock()) std.atomic.spinLoopHint();
+    defer sched_lock.unlock();
+    if (sched != null) return;
+    const rc = linux.memfd_create("h9-sched", linux.MFD.CLOEXEC);
+    if (failed(rc)) return error.HypervisorFailed;
+    const fd: i32 = @intCast(rc);
+    if (failed(linux.ftruncate(fd, abi.sched_size))) {
+        closeFd(fd);
+        return error.HypervisorFailed;
+    }
+    const map = std.posix.mmap(null, abi.sched_size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0) catch {
+        closeFd(fd);
+        return error.HypervisorFailed;
+    };
+    const sh: *abi.Sched = @ptrCast(@alignCast(map.ptr));
+    sh.* = .{ .ncpus = @intCast(hostCpus()) };
+    sched_fd = fd;
+    sched = sh;
+}
+
+/// The CPUs h9 may run on: its affinity, capped by a cgroup v2 CPU quota
+/// (a container's --cpus), which affinity doesn't show.
+fn hostCpus() u32 {
+    var n: u32 = @intCast(@min(std.Thread.getCpuCount() catch 1, 1 << 16));
+    var buf: [64]u8 = undefined;
+    const fd_rc = linux.open("/sys/fs/cgroup/cpu.max", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (!failed(fd_rc)) {
+        const fd: i32 = @intCast(fd_rc);
+        defer closeFd(fd);
+        const len = linux.read(fd, &buf, buf.len);
+        if (!failed(len)) {
+            // "max 100000", or "QUOTA PERIOD" in microseconds.
+            var it = std.mem.tokenizeAny(u8, buf[0..len], " \n");
+            const quota = std.fmt.parseInt(u64, it.next() orelse "", 10) catch 0;
+            const period = std.fmt.parseInt(u64, it.next() orelse "", 10) catch 0;
+            if (quota > 0 and period > 0) n = @min(n, @as(u32, @intCast(@max(1, @min((quota + period - 1) / period, 1 << 16)))));
+        }
+    }
+    return @max(n, 1);
+}
+
+/// Counts an h9 thread about to spin for a stub in `busy`, if that still
+/// leaves a CPU free for the h9 threads serving syscalls, which `busy`
+/// doesn't count (measured: keeping one free is about 10% faster with
+/// four guest threads on four CPUs, and the same with one). The caller
+/// calls `unspin` after.
+fn trySpin(sh: *abi.Sched) bool {
+    const was = @atomicRmw(i32, &sh.busy, .Add, 1, .seq_cst);
+    if (was + 1 < @atomicLoad(i32, &sh.ncpus, .monotonic)) return true;
+    _ = @atomicRmw(i32, &sh.busy, .Sub, 1, .seq_cst);
+    return false;
+}
+
+fn unspin(sh: *abi.Sched) void {
+    _ = @atomicRmw(i32, &sh.busy, .Sub, 1, .seq_cst);
+}
+
+/// Whether a spinning h9 thread, counted in `busy`, may go on: as
+/// `trySpin`.
+fn maySpin(sh: *abi.Sched) bool {
+    return @atomicLoad(i32, &sh.busy, .monotonic) < @atomicLoad(i32, &sh.ncpus, .monotonic);
+}
+
+/// `abi.Sched.busy`, once a backend has made the page.
+pub fn spinBusy() ?i32 {
+    const sh = sched orelse return null;
+    return @atomicLoad(i32, &sh.busy, .seq_cst);
+}
 
 fn failed(rc: usize) bool {
     return linux.errno(rc) != .SUCCESS;
@@ -122,6 +198,7 @@ pub const Backend = struct {
             return error.OutOfGuestMemory;
         errdefer std.posix.munmap(mem);
 
+        try schedInit();
         const stub_fd = try stubFile();
         errdefer closeFd(stub_fd);
 
@@ -239,10 +316,11 @@ const SpawnArgs = struct {
     stub: i32,
     ram: i32,
     ctl: i32,
+    sched: i32,
 };
 
 /// The child half of starting a stub, on a borrowed stack in h9's memory
-/// (CLONE_VM | CLONE_VFORK): sets up file descriptors 3 and 4 and execs
+/// (CLONE_VM | CLONE_VFORK): sets up file descriptors 3, 4, and 5 and execs
 /// the stub. Only raw syscalls here.
 fn spawnChild(arg: usize) callconv(.c) u8 {
     const a: *const SpawnArgs = @ptrFromInt(arg);
@@ -254,17 +332,20 @@ fn spawnChild(arg: usize) callconv(.c) u8 {
     // Above every fd involved first, so the dup2s below can't clobber one.
     const r: i32 = @intCast(@as(isize, @bitCast(linux.fcntl(a.ram, F_DUPFD, 16))));
     const c: i32 = @intCast(@as(isize, @bitCast(linux.fcntl(a.ctl, F_DUPFD, 16))));
+    const d: i32 = @intCast(@as(isize, @bitCast(linux.fcntl(a.sched, F_DUPFD, 16))));
     const s: i32 = @intCast(@as(isize, @bitCast(linux.fcntl(a.stub, F_DUPFD, 16))));
     _ = linux.dup2(r, abi.ram_fd);
     _ = linux.dup2(c, abi.ctl_fd);
-    _ = linux.dup2(s, 5);
-    _ = linux.fcntl(5, F_SETFD, 1); // FD_CLOEXEC: gone once the stub runs
+    _ = linux.dup2(d, abi.sched_fd);
+    const exe = abi.sched_fd + 1;
+    _ = linux.dup2(s, exe);
+    _ = linux.fcntl(exe, F_SETFD, 1); // FD_CLOEXEC: gone once the stub runs
     // Nothing else, not even h9's standard input and output.
     _ = linux.close_range(0, 2, .{ .UNSHARE = false, .CLOEXEC = false });
-    _ = linux.close_range(6, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false });
+    _ = linux.close_range(exe + 1, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false });
     const argv = [_:null]?[*:0]const u8{"h9-stub"};
     const envp = [_:null]?[*:0]const u8{};
-    _ = linux.execveat(5, "", &argv, &envp, .{ .SYMLINK_NOFOLLOW = false, .EMPTY_PATH = true });
+    _ = linux.execveat(exe, "", &argv, &envp, .{ .SYMLINK_NOFOLLOW = false, .EMPTY_PATH = true });
     _ = linux.syscall1(.exit_group, 127);
     return 127;
 }
@@ -286,7 +367,7 @@ const Stub = struct {
         const ctls: *[abi.max_threads]abi.Ctl = @ptrCast(map.ptr);
         @atomicStore(u32, &ctls[0].state, @intFromEnum(abi.State.guest), .release);
 
-        var args: SpawnArgs = .{ .stub = b.stub_fd, .ram = b.ram_fd, .ctl = ctl_fd };
+        var args: SpawnArgs = .{ .stub = b.stub_fd, .ram = b.ram_fd, .ctl = ctl_fd, .sched = sched_fd };
         var stack: [16 * 1024]u8 align(16) = undefined;
         const SIGCHLD = 17;
         // Every signal blocked until the exec, which resets the handlers:
@@ -326,6 +407,10 @@ const Stub = struct {
             const rc = linux.syscall5(.waitid, @intFromEnum(linux.P.PID), @intCast(s.pid), @intFromPtr(&info), linux.W.EXITED | __WALL, 0);
             if (linux.errno(rc) != .INTR) break;
         }
+        // Its threads that were awake count in `busy` no longer.
+        if (sched) |sh| for (s.ctls) |*c| {
+            if (@atomicLoad(u32, &c.awake, .seq_cst) != 0) _ = @atomicRmw(i32, &sh.busy, .Sub, 1, .seq_cst);
+        };
         std.posix.munmap(@as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(s.ctls)))[0..abi.ctls_size]);
     }
 
@@ -351,11 +436,17 @@ const Stub = struct {
     fn wait(s: *Stub, k: usize) vmm.Error!void {
         const ctl = &s.ctls[k];
         const exited = @intFromEnum(abi.State.exited);
-        var i: usize = 0;
-        while (i < spin_rounds) : (i += 1) {
-            if (@atomicLoad(u32, &ctl.state, .seq_cst) == exited) return;
-            std.atomic.spinLoopHint();
-        }
+        if (@atomicLoad(u32, &ctl.state, .seq_cst) == exited) return;
+        // Spin only while the stub's thread, this one, and the others
+        // awake for guests leave a CPU free (`abi.Sched`).
+        if (sched) |sh| if (trySpin(sh)) {
+            defer unspin(sh);
+            var i: usize = 0;
+            while (i < spin_rounds and maySpin(sh)) : (i += 1) {
+                if (@atomicLoad(u32, &ctl.state, .seq_cst) == exited) return;
+                std.atomic.spinLoopHint();
+            }
+        };
         const ts: linux.timespec = .{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
         while (true) {
             @atomicStore(u32, &ctl.host_waiting, 1, .seq_cst);

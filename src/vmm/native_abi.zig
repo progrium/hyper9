@@ -18,9 +18,31 @@ pub const ctl_addr: u64 = stub_base + 0xC000_0000;
 pub const user_top: u64 = 0x7FFF_FFFF_F000;
 
 /// The stub's file descriptors: the machine's guest RAM, which map
-/// requests name offsets in, and its control pages.
+/// requests name offsets in, its control pages, and the spin budget.
 pub const ram_fd = 3;
 pub const ctl_fd = 4;
+pub const sched_fd = 5;
+/// The spin budget's page in the stub, just below the control pages.
+pub const sched_addr: u64 = ctl_addr - sched_size;
+pub const sched_size = 4096;
+
+/// What every stub and h9 share to decide whether waiting for the other
+/// side may spin. A guest syscall is a handoff between a stub thread and
+/// an h9 thread, and spinning for the answer saves the futex round trip
+/// (tens of microseconds on a cloud VM) but holds a CPU. That pays only
+/// while there are CPUs to spare: with more guest threads than CPUs, the
+/// spinners take the CPUs the guest and h9 need, and a multithreaded
+/// guest gets slower the more threads it has.
+pub const Sched = extern struct {
+    /// Threads on a CPU for guests: stub threads not asleep (running
+    /// guest code, or spinning for h9) and h9 threads spinning for a
+    /// stub. h9 threads serving a syscall aren't counted, since they may
+    /// be blocked in the kernel. Signed, since a stub killed between
+    /// counting itself and setting `Ctl.awake` can leave it one short.
+    busy: i32 = 0,
+    /// The CPUs h9 may use: its affinity, capped by a cgroup CPU quota.
+    ncpus: i32 = 1,
+};
 
 /// `Ctl.state`: who has the stub. The host writes `run` or `ops`; the
 /// stub writes `guest` when it returns to guest code and `exited` when it
@@ -76,6 +98,10 @@ pub const Ctl = extern struct {
     stub_waiting: u32 = 0,
     why: Why = .ready,
     signo: u32 = 0,
+    /// Set while the thread counts itself in `Sched.busy`, so h9 can
+    /// take a killed stub's threads back out.
+    awake: u32 = 0,
+    _pad: u32 = 0,
     trapno: u64 = 0,
     err: u64 = 0,
     addr: u64 = 0,
@@ -122,10 +148,11 @@ pub const Regs = extern struct {
     flags: u64 = 0,
 };
 
-const ctl_head = 64 + @sizeOf(Regs) + 24 + fx_len;
+const ctl_head = 72 + @sizeOf(Regs) + 24 + fx_len;
 pub const max_ops = (ctl_size - ctl_head) / @sizeOf(Op);
 
 comptime {
     if (@sizeOf(Ctl) > ctl_size) @compileError("Ctl doesn't fit");
     if (ctl_addr + ctls_size > stub_end) @compileError("control pages outside the stub's range");
+    if (@sizeOf(Sched) > sched_size) @compileError("Sched doesn't fit");
 }
