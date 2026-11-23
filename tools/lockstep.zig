@@ -10,9 +10,11 @@
 //! caller serves it once, on T0's memory, then calls `sync` to copy T0's
 //! pages and state into the mirror.
 //!
-//! It needs Unicorn (GPLv2), so it's built only for the test tools, with
-//! -Demu=unicorn: `zig build fuzz-a64` and `fuzz-x86` use it, and so will
-//! a lockstep vmm backend once ha64 and h86 are vmm backends.
+//! Unicorn is the oracle here and nowhere else (design/retire-unicorn.md).
+//! It's GPLv2, so only the test tools link it, from the prebuilt
+//! libunicorn.a that `scripts/fetch.sh unicorn` unpacks: `zig build
+//! lockstep` runs this file's tests, and `zig build fuzz-a64`, `fuzz-x86`,
+//! and `fuzz-x64` use it. Nothing h9 ships links it.
 
 const std = @import("std");
 const uc = @import("unicorn");

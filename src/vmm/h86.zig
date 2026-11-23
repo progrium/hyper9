@@ -1,5 +1,5 @@
 //! h86: h9's own CPU for 386 binaries, as a Guest of vmm/hcpu.zig
-//! (-Demu=hcpu), which has the interface. Its CPU is in src/interp/x86/ and
+//! (the emulator backend), which has the interface. Its CPU is in src/interp/x86/ and
 //! src/jit/x86/, with the shared JIT layer in src/jit/ (src/hcpu.zig).
 //!
 //! T0, the interpreter (interp/x86/exec.zig), reaches guest memory through

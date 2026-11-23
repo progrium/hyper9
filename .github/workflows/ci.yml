@@ -162,20 +162,20 @@ jobs:
           MSYS: winsymlinks:nativestrict
       - name: test, T1 and T0
         if: always()
-        run: zig build test -Demu=hcpu
+        run: zig build test
       - name: integration, arm64 root
         if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Demu=hcpu -Darch=arm64 -Dbackends=emu -Droot="$PWD/.local/9front/root"
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=arm64 -Dbackends=emu -Droot="$PWD/.local/9front/root"
       - name: integration, 386
         if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Demu=hcpu -Darch=386 -Dbackends=emu -Droot="$PWD/.local/9front/root386"
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=386 -Dbackends=emu -Droot="$PWD/.local/9front/root386"
       - name: integration, amd64 root
         if: always()
-        run: zig build integration -Doptimize=ReleaseSafe -Demu=hcpu -Darch=amd64 -Dbackends=emu -Droot="$PWD/.local/9front/rootamd64"
+        run: zig build integration -Doptimize=ReleaseSafe -Darch=amd64 -Dbackends=emu -Droot="$PWD/.local/9front/rootamd64"
 
   # The rest of hcpu's Done criteria that a hosted runner can show: an
   # hour of fuzzing and the litmus tests on an arm64 and an x86-64 host,
-  # the bench against Unicorn, and the demos. A runner isn't an M3 Max,
+  # the bench, and the demos. A runner isn't an M3 Max,
   # and its macOS has no HVF, so those numbers and the hvf,emu comparison
   # are for a real Mac.
   hcpu-fuzz:
@@ -215,16 +215,10 @@ jobs:
         with:
           name: hcpu-roots
       - run: mkdir -p .local && tar -C .local -xf roots.tar && rm roots.tar
-      - run: scripts/fetch.sh unicorn
       - run: zig build -Doptimize=ReleaseSafe --prefix .local/h9-hcpu
-      # Unicorn's prebuilt Linux libraries are for musl.
-      - run: echo "UC_TARGET=$([ "$(uname)" = Linux ] && echo "-Dtarget=$(uname -m)-linux-musl")" >>"$GITHUB_ENV"
-      - run: zig build -Doptimize=ReleaseSafe -Demu=unicorn $UC_TARGET --prefix .local/h9-unicorn
-      - name: bench, hcpu and Unicorn
+      - name: bench
         if: always()
-        run: |
-          zig build bench -Demu=hcpu
-          zig build bench -Demu=unicorn $UC_TARGET
+        run: zig build bench
       - name: the demos
         if: always()
         run: |
@@ -232,7 +226,6 @@ jobs:
           loop='i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; echo $i'
           if [ "$(uname)" = Linux ]; then
             time .local/h9-hcpu/bin/h9 --backend emu --dir .local/linux/alpine-arm64:#L /bin/busybox sh -c "$loop"
-            time .local/h9-unicorn/bin/h9 --backend emu --dir .local/linux/alpine-arm64:#L /bin/busybox sh -c "$loop"
           else
             .local/h9-hcpu/bin/h9 --arch 386 --backend emu --dir .local/linux/alpine-386:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'
             .local/h9-hcpu/bin/h9 --arch amd64 --backend emu --dir .local/linux/alpine-amd64:#L /bin/busybox sh -c 'echo hello; ls /etc | wc -l'

@@ -1,6 +1,6 @@
 //! zig build fuzz-x64 [-- options]: random long-mode programs (src/jit/
-//! check/gen_x86.zig's `program64`) run on hx64's T0 and, with
-//! -Demu=unicorn, checked against Unicorn an instruction at a time:
+//! check/gen_x86.zig's `program64`) run on hx64's T0 and, with Unicorn's
+//! prebuilt library fetched, checked against Unicorn an instruction at a time:
 //! registers, RIP, the RFLAGS bits the instruction defines, the FS and GS
 //! bases, SSE's registers, memory, and the exit; and, region by region,
 //! the lifter in ir_eval (and with --native, this host's code) against T0
@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     var args = try common.Args(gen.Class64).parse("fuzz-x64", init);
     if (!options.unicorn) args.lockstep = false;
     const t0 = x86.longRuns();
-    std.debug.print("fuzz-x64: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check and t0) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
+    std.debug.print("fuzz-x64: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check and t0) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs scripts/fetch.sh unicorn)" });
     if (!t0) {
         if (!args.lockstep) {
             std.debug.print("fuzz-x64: long-mode T0 doesn't run yet, and without Unicorn there's nothing to run\n", .{});

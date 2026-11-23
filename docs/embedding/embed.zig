@@ -122,8 +122,8 @@ pub fn main(init: std.process.Init) !u8 {
     for (jobs, threads, 0..) |*j, *t, n| {
         var opts = base;
         // HVF allows one VM per host process, so machines after the first
-        // use the emulator; it fails with BackendNotBuilt in a build
-        // without -Demu=unicorn.
+        // use the emulator; it fails with BackendNotBuilt on a target
+        // without one (neither arm64 nor x86-64).
         if (n > 0) opts.backend = .emu;
         j.* = .{ .index = n, .opts = opts, .prog = prog, .argv = argv, .out = .init(gpa) };
         t.* = try std.Thread.spawn(.{}, Job.run, .{ j, gpa, io });

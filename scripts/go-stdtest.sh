@@ -2,7 +2,7 @@
 # Runs Go's standard library tests for time, syscall, os and runtime on the
 # emulator (design/epoch-0/go-compat.md), and prints pass, skip and fail
 # counts for each package. Not a gate: it finds gaps the go-compat cases
-# miss. `zig build go-stdtest -Demu=unicorn` runs it.
+# miss. `zig build go-stdtest` runs it on hcpu.
 #
 #   scripts/go-stdtest.sh H9 OUTDIR [PACKAGE...]
 #

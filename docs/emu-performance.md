@@ -150,9 +150,9 @@ show the emulator alone.
 - **Go is hx64's outlier.** On the Mac, hx64's T1 takes 2.96 s against
   ha64's 0.55 s, a far wider gap than on any other workload.
 - **Floating point is slow in ha64 on the x86-64 host.** In the compute
-  benchmarks (`zig build bench -Demu=hcpu -- compute`, measured at
+  benchmarks (`zig build bench -- compute`, measured at
   7838bf6), ha64's T1 ran the double-precision loop at 33 times native,
-  against 8 times for h86's and 18 times for Unicorn. ha64's other four
+  against 8 times for h86's. ha64's other four
   compute benchmarks ran at 3.5 to 20 times.
 - **Starting a process is expensive in the emulator.** On the x86-64 host,
   `python3 -c pass` took 0.7 s on ha64's T1, against 15 ms native. A
@@ -165,7 +165,7 @@ Build the roots and a ReleaseFast h9, as in
 [tools/workloads](../tools/workloads/README.md):
 
     tools/workloads/roots.sh
-    zig build -Demu=hcpu -Doptimize=ReleaseFast -p .local/workloads/h9-zig
+    zig build -Doptimize=ReleaseFast -p .local/workloads/h9-zig
     zig build web -Doptimize=ReleaseFast
 
 `tools/workloads/run.sh` runs the native tiers, with `TIERS="hvf t1 t0"` on

@@ -1,8 +1,8 @@
-//! zig build a64-jit (and test, with -Demu=hcpu): ha64's cases, tagged
+//! zig build a64-jit (and test): ha64's cases, tagged
 //! [hcpu], each run through the vmm interface on h9's own
 //! emulator (hcpu and ha64), on T0 and on T1 (H9_EMU_TIER at create).
 //! T1 is this host's emitter: the x86-64 one here, the arm64 one on an
-//! arm64 Mac. Without -Demu=hcpu they skip.
+//! arm64 Mac. On a target without the emulator they skip.
 //!
 //! The machine: code at 0x10000 (two pages, read, write, and execute), data
 //! at 0x20000 (a page), with x0 holding the data page's address, and

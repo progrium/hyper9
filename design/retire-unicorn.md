@@ -6,7 +6,7 @@ created: 2026-11-21
 authors: [progrium]
 depends: [hcpu]
 areas: [vmm, build, tests]
-branch: []
+branch: [retire-unicorn]
 ---
 
 # Proposal: Retire Unicorn as an engine

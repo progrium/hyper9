@@ -1,5 +1,4 @@
 const std = @import("std");
-const unicorn_src = @import("build/unicorn.zig");
 const frontmatter = @import("tools/frontmatter.zig");
 const guesttree = @import("tools/guesttree.zig");
 
@@ -359,14 +358,34 @@ fn addSdkPaths(b: *std.Build, m: *std.Build.Module) void {
     m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
 }
 
-/// none: no emulator. unicorn: Unicorn (GPLv2, src/vmm/unicorn.zig). hcpu:
-/// h9's own CPUs (src/vmm/hcpu.zig on src/hcpu.zig): ha64 for arm64 guests,
-/// h86 for 386, and hx64 for amd64.
-pub const Emu = enum { none, unicorn, hcpu };
+/// The emulator, h9's own CPUs (src/vmm/hcpu.zig on src/hcpu.zig): ha64
+/// for arm64 guests, h86 for 386, and hx64 for amd64. It's built in on
+/// every target that has a JIT for it (arm64 and x86-64, and the web
+/// host, which sets it itself) and left out elsewhere
+/// (design/retire-unicorn.md).
+pub const Emu = enum { none, hcpu };
 
-/// Where -Demu=unicorn gets Unicorn: the PyPI wheels' libunicorn.a, or a
-/// build from the patched source (build/unicorn.zig).
-pub const UnicornFrom = enum { prebuilt, source };
+/// The emulator a target gets: hcpu wherever it has a JIT.
+fn emuFor(t: std.Target) Emu {
+    return switch (t.cpu.arch) {
+        .aarch64, .x86_64 => .hcpu,
+        else => .none,
+    };
+}
+
+/// Unicorn as the lockstep oracle (tools/lockstep.zig): its translated
+/// header, the prebuilt libunicorn.a scripts/fetch.sh unpacks from the
+/// PyPI wheels, and the target the tools that link it are built for.
+/// Unicorn is GPLv2, so only the test tools link it, never h9.
+const Oracle = struct {
+    module: *std.Build.Module,
+    lib: std.Build.LazyPath,
+    /// On Linux arm64, a stand-in for symbols the musl wheel expects.
+    compat: ?*std.Build.Step.Compile,
+    /// The wheels' Linux libraries are for musl, so on Linux the tools
+    /// that link one are built for musl too.
+    target: std.Build.ResolvedTarget,
+};
 
 /// Directory under .local/unicorn (see UNICORN_WHEELS in scripts/pins.sh)
 /// with the prebuilt libunicorn.a for this target, if one exists.
@@ -382,76 +401,45 @@ fn unicornDir(t: std.Target) ?[]const u8 {
     };
 }
 
-/// Adds Unicorn: returns its translated header as a module and records the
-/// libraries for `linkUnicorn`.
-fn addUnicorn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, from: UnicornFrom) ?*std.Build.Module {
-    if (from == .source) return addUnicornSource(b, target, optimize);
-    const name = unicornDir(target.result) orelse {
-        b.getInstallStep().dependOn(&b.addFail("-Demu=unicorn: no prebuilt Unicorn for this target (macOS arm64 and linux-musl arm64/x86_64 only; try -Dunicorn=source)").step);
-        return null;
-    };
+/// The lockstep oracle for `target`, or why there isn't one: a hint for
+/// the steps that need it to fail with.
+fn addOracle(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) union(enum) { ok: Oracle, missing: []const u8 } {
+    const t = target.result;
+    const oracle_target = if (t.os.tag == .linux and !t.abi.isMusl())
+        b.resolveTargetQuery(.{ .cpu_arch = t.cpu.arch, .os_tag = .linux, .abi = .musl })
+    else
+        target;
+    const name = unicornDir(oracle_target.result) orelse
+        return .{ .missing = "Unicorn's prebuilt library is for macOS arm64 and Linux arm64 and x86_64 only" };
     const dir = b.pathJoin(&.{ ".local/unicorn", name });
     const lib = b.pathJoin(&.{ dir, "lib/libunicorn.a" });
-    if (b.build_root.handle.access(b.graph.io, lib, .{})) {} else |_| {
-        b.getInstallStep().dependOn(&b.addFail(b.fmt("{s} is missing; run scripts/fetch.sh", .{lib})).step);
-        return null;
-    }
+    b.build_root.handle.access(b.graph.io, lib, .{}) catch
+        return .{ .missing = b.fmt("{s} is missing; run scripts/fetch.sh unicorn", .{lib}) };
     const wf = b.addWriteFiles();
     const h = wf.add("unicorn.h", "#include <unicorn/unicorn.h>\n");
-    const tc = b.addTranslateC(.{ .root_source_file = h, .target = target, .optimize = optimize });
+    const tc = b.addTranslateC(.{ .root_source_file = h, .target = oracle_target, .optimize = optimize });
     tc.addIncludePath(b.path(b.pathJoin(&.{ dir, "include" })));
-    unicorn_lib = b.path(lib);
-    if (target.result.os.tag == .linux and target.result.cpu.arch == .aarch64) {
+    var compat: ?*std.Build.Step.Compile = null;
+    if (oracle_target.result.os.tag == .linux and oracle_target.result.cpu.arch == .aarch64) {
         // An archive, not a source file: the root module's objects can reach
         // the linker twice, and archive members don't clash.
-        const compat = b.addLibrary(.{
+        const c = b.addLibrary(.{
             .name = "unicorn_compat",
             .linkage = .static,
-            .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+            .root_module = b.createModule(.{ .target = oracle_target, .optimize = optimize }),
         });
-        compat.root_module.addAssemblyFile(b.path("src/vmm/unicorn_compat_aarch64.S"));
-        unicorn_compat = compat;
+        c.root_module.addAssemblyFile(b.path("tools/lockstep_compat_aarch64.S"));
+        compat = c;
     }
-    return tc.createModule();
+    return .{ .ok = .{ .module = tc.createModule(), .lib = b.path(lib), .compat = compat, .target = oracle_target } };
 }
 
-/// Unicorn from the source that scripts/fetch.sh unpacks and patches.
-fn addUnicornSource(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) ?*std.Build.Module {
-    if (unicorn_src.configName(target.result) == null) {
-        b.getInstallStep().dependOn(&b.addFail("-Dunicorn=source: no config for this target in third_party/unicorn/config").step);
-        return null;
-    }
-    if (b.build_root.handle.access(b.graph.io, unicorn_src.src_dir ++ "/.h9-stamp", .{})) {} else |_| {
-        b.getInstallStep().dependOn(&b.addFail(unicorn_src.src_dir ++ " is missing; run scripts/fetch.sh").step);
-        return null;
-    }
-    const uc = unicorn_src.build(b, target, optimize).?;
-    unicorn_libs = uc.libs;
-    const wf = b.addWriteFiles();
-    // translate-c can't handle mingw's fortified wcscat/wcscpy, which
-    // ReleaseSafe turns on; only Unicorn's declarations are needed here.
-    const h = wf.add("unicorn.h", "#undef _FORTIFY_SOURCE\n#include <unicorn/unicorn.h>\n");
-    const tc = b.addTranslateC(.{ .root_source_file = h, .target = target, .optimize = optimize });
-    tc.addIncludePath(uc.include);
-    return tc.createModule();
-}
-
-var unicorn_lib: ?std.Build.LazyPath = null;
-var unicorn_compat: ?*std.Build.Step.Compile = null;
-var unicorn_libs: ?[3]*std.Build.Step.Compile = null;
-
-/// Links Unicorn into the compile step's root module.
-fn linkUnicorn(c: *std.Build.Step.Compile) void {
+/// Links the oracle's Unicorn into the compile step's root module.
+fn linkOracle(c: *std.Build.Step.Compile, o: Oracle) void {
     const m = c.root_module;
-    if (unicorn_libs) |libs| {
-        m.link_libc = true;
-        for (libs) |l| m.linkLibrary(l);
-        return;
-    }
-    const lib = unicorn_lib orelse return;
     m.link_libc = true;
-    m.addObjectFile(lib);
-    if (unicorn_compat) |compat| m.linkLibrary(compat);
+    m.addObjectFile(o.lib);
+    if (o.compat) |compat| m.linkLibrary(compat);
 }
 
 /// `git describe --tags --always --dirty` for the source tree, or
@@ -583,9 +571,6 @@ fn builtinArches(target: std.Target, emu: Emu) []const []const u8 {
     };
     // hcpu runs all three on any host.
     if (emu == .hcpu) return &.{ "arm64", "amd64", "386" };
-    if (emu == .unicorn) {
-        return if (native != null and std.mem.eql(u8, native.?, "arm64")) &.{ "arm64", "amd64", "386" } else &.{ "amd64", "386" };
-    }
     if (native) |n| return if (std.mem.eql(u8, n, "arm64")) &.{"arm64"} else &.{"amd64"};
     return &.{};
 }
@@ -700,7 +685,6 @@ fn addWeb(b: *std.Build, optimize: std.builtin.OptimizeMode, parts: ModuleParts,
     // not the native code cache, which hcpu leaves out on the web.
     p.emu = .hcpu;
     p.jit = true;
-    p.unicorn = null;
     // The browser runs 386 only (design/epoch-0/builtin-root.md, Open issues: every
     // byte is downloaded per page load).
     p.builtin_root = builtinRoot(b, p.builtin_dir, pin(p.pins, "NINEFRONT_RELEASE"), &.{"386"}, .quiet);
@@ -825,17 +809,16 @@ const ModuleParts = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     emu: Emu,
-    /// With -Demu=hcpu: build the JIT tier, not just the interpreter.
+    /// With hcpu: build the JIT tier, not just the interpreter.
     jit: bool,
-    /// With -Demu=hcpu: run every region through the T1-against-T0 check
+    /// With hcpu: run every region through the T1-against-T0 check
     /// (src/jit/check/vmm.zig).
     jit_check: bool,
-    /// With -Demu=hcpu: ir.verify each region after lifting and after opt
+    /// With hcpu: ir.verify each region after lifting and after opt
     /// (opt.verify), even where the hcpu module has no runtime safety.
     jit_verify: bool,
     /// How src/interp/ and src/jit/ (the hcpu module) are optimized.
     hcpu_optimize: std.builtin.OptimizeMode,
-    unicorn: ?*std.Build.Module,
     shim: std.Build.LazyPath,
     shim_amd64: std.Build.LazyPath,
     /// The native backend's stub, for Linux x86_64 hosts.
@@ -870,7 +853,6 @@ fn addH9Module(b: *std.Build, p: ModuleParts, gfx: Gfx, exported: bool) H9Module
         .target = target,
         .optimize = p.hcpu_optimize,
     }));
-    if (p.unicorn) |uc| mod.addImport("unicorn", uc);
     mod.addAnonymousImport("shim_arm64", .{ .root_source_file = p.shim });
     mod.addAnonymousImport("shim_amd64", .{ .root_source_file = p.shim_amd64 });
     if (os == .linux and target.result.cpu.arch == .x86_64)
@@ -949,24 +931,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
-    // hcpu is the default where it has a JIT, arm64 and x86-64 hosts, so
-    // `auto` falls back to it without a hypervisor (design/hcpu.md).
-    var emu = b.option(Emu, "emu", "Emulator backend to build in: hcpu (h9's own CPUs, the default on arm64 and x86-64), unicorn (GPLv2: dev and lockstep testing only), or none") orelse
-        switch (target.result.cpu.arch) {
-            .aarch64, .x86_64 => Emu.hcpu,
-            else => Emu.none,
-        };
+    // hcpu is built in wherever it has a JIT, arm64 and x86-64 hosts, so
+    // `auto` falls back to it without a hypervisor (design/hcpu.md). There's
+    // no option to pick another emulator (design/retire-unicorn.md); -Demu
+    // and -Dunicorn are kept only to say so.
+    const emu = emuFor(target.result);
+    for ([_][]const u8{ "emu", "unicorn" }) |gone| {
+        if (b.option([]const u8, gone, "Removed: hcpu is always built in (design/retire-unicorn.md)") != null)
+            b.getInstallStep().dependOn(&b.addFail(b.fmt("-D{s} is gone: hcpu, h9's own emulator, is always built in, and Unicorn is only zig build lockstep's oracle (design/retire-unicorn.md)", .{gone})).step);
+    }
     // T0 in a Debug build runs several times slower than in a release one,
-    // enough for long integration cases to time out against Unicorn's JIT.
+    // enough for long integration cases to time out.
     const hcpu_debug = b.option(bool, "hcpu-debug", "Build src/interp and src/jit with -Doptimize too, not ReleaseFast, in Debug builds (for debugging the emulator's CPUs)") orelse false;
     const hcpu_optimize: std.builtin.OptimizeMode = if (optimize == .Debug and !hcpu_debug) .ReleaseFast else optimize;
-    const jit_check = b.option(bool, "jit-check", "With -Demu=hcpu: check every region against T0 as it runs (slow; for zig build integration)") orelse false;
-    const jit_verify = b.option(bool, "jit-verify", "With -Demu=hcpu: verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
+    const jit_check = b.option(bool, "jit-check", "Check every region against T0 as it runs (slow; for zig build integration)") orelse false;
+    const jit_verify = b.option(bool, "jit-verify", "Verify every region after lifting and after opt, panicking on a bad one (default: on in Debug and ReleaseSafe builds)") orelse
         (optimize == .Debug or optimize == .ReleaseSafe);
-    const no_jit = b.option(bool, "no-jit", "With -Demu=hcpu: the interpreter tier only, as on hosts that forbid generated code") orelse false;
-    // No wheel exists for Windows, so it always builds from source.
-    const unicorn_from = b.option(UnicornFrom, "unicorn", "With -Demu=unicorn: the prebuilt wheel library or a source build (default: prebuilt, source on Windows)") orelse
-        if (os == .windows) UnicornFrom.source else .prebuilt;
+    const no_jit = b.option(bool, "no-jit", "The emulator's interpreter tier only, as on hosts that forbid generated code") orelse false;
 
     const gfx_opt = b.option(Gfx, "gfx", "GUI backend for --gfx (design/epoch-0/gfx.md): cocoa, win32, x11, web, headless (tests) or none (default: cocoa on macOS, win32 on Windows, web for zig build web, none elsewhere)");
     const gfx = gfx_opt orelse Gfx.default(target.result);
@@ -975,12 +956,6 @@ pub fn build(b: *std.Build) void {
     const web_gfx: Gfx = if (gfx_opt == .none) .none else .web;
     if (gfx.unsupported(target.result)) |why| b.getInstallStep().dependOn(&b.addFail(b.fmt("-Dgfx={t}: {s}", .{ gfx, why })).step);
 
-    // Unicorn's translated header, shared by every h9 module.
-    var unicorn_mod: ?*std.Build.Module = null;
-    if (emu == .unicorn) {
-        // On failure addUnicorn has already made the install step fail.
-        if (addUnicorn(b, target, optimize, unicorn_from)) |uc| unicorn_mod = uc else emu = .none;
-    }
     // The arm64 guest shim, assembled freestanding and embedded as raw bytes.
     const shim_obj = b.addObject(.{
         .name = "shim_arm64",
@@ -1050,7 +1025,6 @@ pub fn build(b: *std.Build) void {
         .jit_check = jit_check,
         .jit_verify = jit_verify,
         .hcpu_optimize = hcpu_optimize,
-        .unicorn = unicorn_mod,
         .shim = shim_bin.getOutput(),
         .shim_amd64 = shim_amd64_bin.getOutput(),
         .native_stub = native_stub.getEmittedBin(),
@@ -1153,7 +1127,6 @@ pub fn build(b: *std.Build) void {
         addSdkPaths(b, exe.root_module);
         exe.root_module.linkFramework("Hypervisor", .{});
     }
-    linkUnicorn(exe);
 
     const install_exe = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install_exe.step);
@@ -1232,7 +1205,7 @@ pub fn build(b: *std.Build) void {
     hello_demo.expectStdOutEqual("hello\n");
     hello_demo.step.dependOn(signed_step);
     addDemo(b, &demos, "baseline", &hello_demo.step);
-    if (emu == .unicorn) {
+    if (emu != .none) {
         const emu_demo = b.addSystemCommand(&.{ b.getInstallPath(.bin, exe.out_filename), "--backend", "emu" });
         emu_demo.addFileArg(host_hello);
         emu_demo.expectStdOutEqual("hello\n");
@@ -1372,9 +1345,9 @@ pub fn build(b: *std.Build) void {
         .arch = test_arch orelse "386",
         .web = true,
         .step = web.install,
-        // With -Demu=unicorn, the native h9 serves the WebSocket cases'
-        // roots on the emulator.
-        .server = if (emu == .unicorn) h9_bin else null,
+        // The native h9 serves the WebSocket cases' roots on the
+        // emulator.
+        .server = if (emu != .none) h9_bin else null,
         .server_step = signed_step,
     } else .{ .bin = h9_bin, .arch = test_arch, .web = false, .step = signed_step };
 
@@ -1388,7 +1361,7 @@ pub fn build(b: *std.Build) void {
     const go_fixtures: ?GoFixtures = if (go_bin) |g| addGoFixtures(b, g, go_version) else null;
     const go_fixtures_step = b.step("go-fixtures", "Build the Go fixtures in tests/fixtures/go (plan9/amd64, GO_VERSION from scripts/pins.sh)");
     if (go_fixtures) |g| go_fixtures_step.dependOn(g.step) else go_fixtures_step.dependOn(&b.addFail("go-fixtures: no go on PATH").step);
-    const go_cases: ?GoFixtures = if (emu == .unicorn or std.mem.indexOf(u8, backend_list, "native") != null) go_fixtures else null;
+    const go_cases: ?GoFixtures = if (emu != .none or std.mem.indexOf(u8, backend_list, "native") != null) go_fixtures else null;
     // The Linux Go fixtures (design/epoch-0/linux-threads.md), with the same
     // toolchain, into fixtures/linux/<arch>/go.
     if (go_bin) |g| for ([_][]const u8{ "arm64", "amd64", "386" }) |arch| {
@@ -1403,9 +1376,9 @@ pub fn build(b: *std.Build) void {
     };
     // Go's own tests for time, syscall, os and runtime on the emulator, by
     // hand or on a schedule; nothing depends on it.
-    const go_stdtest = b.step("go-stdtest", "Run Go's time, syscall, os and runtime tests on the emulator (needs -Demu=unicorn and go)");
-    if (emu != .unicorn) {
-        go_stdtest.dependOn(&b.addFail("go-stdtest: needs -Demu=unicorn").step);
+    const go_stdtest = b.step("go-stdtest", "Run Go's time, syscall, os and runtime tests on the emulator (needs go)");
+    if (emu == .none) {
+        go_stdtest.dependOn(&b.addFail("go-stdtest: needs the emulator, which this target doesn't have").step);
     } else {
         const run_stdtest = b.addSystemCommand(&.{ "bash", "scripts/go-stdtest.sh", h9_bin, b.getInstallPath(.prefix, "go-stdtest") });
         run_stdtest.setCwd(b.path("."));
@@ -1621,7 +1594,6 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{ .root_module = test_mod.mod });
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
-    linkUnicorn(mod_tests); // exe_tests shares exe's root module, already linked
     // Runs the same programs on every backend built in and compares them.
     const backend_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/backends.zig"),
@@ -1636,7 +1608,6 @@ pub fn build(b: *std.Build) void {
         addSdkPaths(b, backend_tests.root_module);
         backend_tests.root_module.linkFramework("Hypervisor", .{});
     }
-    linkUnicorn(backend_tests);
     // The segattach, overlay, srv, htools, sema, net and gfx fixtures, assembled freestanding as the shim is, and
     // embedded as raw text for tests/backends.zig to wrap in an a.out.
     for ([_]struct { dir: []const u8, prefix: []const u8, names: []const []const u8 }{
@@ -1666,7 +1637,7 @@ pub fn build(b: *std.Build) void {
     // wasm32 (64-bit atomics, threads) is caught where it's made.
     test_step.dependOn(&web.exe.step);
     addHcpuTests(b, test_step, target, optimize);
-    addJitTestTools(b, test_step, target, optimize, unicorn_mod);
+    addJitTestTools(b, target, optimize);
     b.step("unit", "Run the h9 module's unit tests only").dependOn(&b.addRunArtifact(mod_tests).step);
     // The guest tree's rules (tools/guesttree.zig), which build.zig applies.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
@@ -1727,7 +1698,6 @@ pub fn build(b: *std.Build) void {
         addSdkPaths(b, embed_example.root_module);
         embed_example.root_module.linkFramework("Hypervisor", .{});
     }
-    linkUnicorn(embed_example);
     const install_embed = b.addInstallArtifact(embed_example, .{});
     b.step("embed", "Build docs/embedding/embed.zig, the embedding guide's example, as zig-out/bin/embed").dependOn(&install_embed.step);
     // zig build test runs it on the hello fixture where a backend can: the
@@ -1756,7 +1726,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // ha64's [hcpu] cases, through the vmm interface on
-    // T0 and T1; they skip without -Demu=hcpu.
+    // T0 and T1; they skip without the emulator.
     const a64_jit = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/a64.zig"),
         .target = target,
@@ -1768,10 +1738,9 @@ pub fn build(b: *std.Build) void {
         addSdkPaths(b, a64_jit.root_module);
         a64_jit.root_module.linkFramework("Hypervisor", .{});
     }
-    linkUnicorn(a64_jit);
     const a64_jit_run = b.addRunArtifact(a64_jit);
     test_step.dependOn(&a64_jit_run.step);
-    b.step("a64-jit", "Run ha64's [hcpu] cases on T0 and T1 (tests/a64.zig; needs -Demu=hcpu)").dependOn(&a64_jit_run.step);
+    b.step("a64-jit", "Run ha64's [hcpu] cases on T0 and T1 (tests/a64.zig)").dependOn(&a64_jit_run.step);
 
     // The speed numbers in SPEC.md's "Limits and selection". Always
     // ReleaseFast (the h9 module inherits it), whatever -Doptimize says.
@@ -1788,7 +1757,6 @@ pub fn build(b: *std.Build) void {
         addSdkPaths(b, bench.root_module);
         bench.root_module.linkFramework("Hypervisor", .{});
     }
-    linkUnicorn(bench);
     addComputeBenches(b, bench);
     const run_bench = b.addRunArtifact(bench);
     run_bench.has_side_effects = true;
@@ -1799,7 +1767,7 @@ pub fn build(b: *std.Build) void {
         sign.addFileArg(bench.getEmittedBin());
         run_bench.step.dependOn(&sign.step);
     }
-    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; -Demu=hcpu for T0 and T1)").dependOn(&run_bench.step);
+    b.step("bench", "Time a compute loop, pwrite round trips, and the compute benchmarks on every backend built in (-- compute: those only; the emulator on T0 and T1)").dependOn(&run_bench.step);
 
     // For running the tests in a VM (scripts/lima/vm test): the backend
     // tests and the integration tests, built for the target.
@@ -1870,37 +1838,44 @@ fn addX64check(b: *std.Build, hcpu: *std.Build.Module) void {
 }
 
 /// The JIT's test tools (src/jit/README.md, "Test tools"): lockstep against
-/// Unicorn (with -Demu=unicorn), the fuzzers, and the litmus tests.
-fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, unicorn: ?*std.Build.Module) void {
-    const hcpu = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig"), .target = target, .optimize = optimize });
-    const lockstep_step = b.step("lockstep", "Run the lockstep tests against Unicorn (needs -Demu=unicorn)");
-    const lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
-        .root_source_file = b.path("src/vmm/lockstep.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "unicorn", .module = uc }},
-    }) else null;
-    if (lockstep) |ls| {
-        const t = b.addTest(.{ .root_module = ls });
-        linkUnicorn(t);
-        lockstep_step.dependOn(&b.addRunArtifact(t).step);
-        test_step.dependOn(&b.addRunArtifact(t).step);
-    } else lockstep_step.dependOn(&b.addFail("lockstep: needs -Demu=unicorn").step);
-
-    // The fuzzers: the region check always, lockstep with -Demu=unicorn.
+/// Unicorn (tools/lockstep.zig, with the prebuilt library fetched), the
+/// fuzzers, and the litmus tests.
+fn addJitTestTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    // The fuzzers: the region check always, and lockstep against Unicorn
+    // when the oracle's library has been fetched.
     // ReleaseSafe unless -Doptimize says otherwise: fast, and still checked.
     const fuzz_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
+    const oracle: ?Oracle, const oracle_missing: []const u8 = switch (addOracle(b, target, fuzz_optimize)) {
+        .ok => |o| .{ o, "" },
+        .missing => |why| .{ null, why },
+    };
+    // The fuzzers that link the oracle are built for its target (musl on
+    // Linux), the rest for -Dtarget.
+    const fuzz_target = if (oracle) |o| o.target else target;
+    const lockstep_step = b.step("lockstep", "Run the lockstep tests against Unicorn, the oracle (needs scripts/fetch.sh unicorn)");
+    if (oracle) |o| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/lockstep.zig"),
+            .target = o.target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "unicorn", .module = o.module }},
+        }) });
+        linkOracle(t, o);
+        lockstep_step.dependOn(&b.addRunArtifact(t).step);
+    } else lockstep_step.dependOn(&b.addFail(b.fmt("lockstep: no oracle: {s}", .{oracle_missing})).step);
+
     const fuzz_hcpu = b.createModule(.{ .root_source_file = b.path("src/hcpu.zig"), .target = target, .optimize = fuzz_optimize });
-    const fuzz_lockstep: ?*std.Build.Module = if (unicorn) |uc| b.createModule(.{
-        .root_source_file = b.path("src/vmm/lockstep.zig"),
-        .target = target,
+    const fuzzer_hcpu = if (oracle) |o| b.createModule(.{ .root_source_file = b.path("src/hcpu.zig"), .target = o.target, .optimize = fuzz_optimize }) else fuzz_hcpu;
+    const fuzz_lockstep: ?*std.Build.Module = if (oracle) |o| b.createModule(.{
+        .root_source_file = b.path("tools/lockstep.zig"),
+        .target = o.target,
         .optimize = fuzz_optimize,
-        .imports = &.{.{ .name = "unicorn", .module = uc }},
+        .imports = &.{.{ .name = "unicorn", .module = o.module }},
     }) else null;
     const fuzz_options = b.addOptions();
-    fuzz_options.addOption(bool, "unicorn", unicorn != null);
+    fuzz_options.addOption(bool, "unicorn", oracle != null);
     // zig build fuzz-long: the three fuzzers with the region check, generated
-    // code (--native), and lockstep when Unicorn is built in, for
+    // code (--native), and lockstep when the oracle's library is fetched, for
     // -Dfuzz-minutes (default 60), -Dfuzz-jobs processes each (default 2),
     // tallying divergences instead of stopping. Each job starts its seeds
     // 2^40 apart from -Dfuzz-seed (default: from the clock).
@@ -1916,20 +1891,20 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
             .name = b.fmt("fuzz-{s}", .{arch}),
             .root_module = b.createModule(.{
                 .root_source_file = b.path(b.fmt("tests/jit/fuzz_{s}.zig", .{arch})),
-                .target = target,
+                .target = fuzz_target,
                 .optimize = fuzz_optimize,
-                .imports = &.{.{ .name = "hcpu", .module = fuzz_hcpu }},
+                .imports = &.{.{ .name = "hcpu", .module = fuzzer_hcpu }},
             }),
         });
         exe.root_module.addOptions("fuzz_options", fuzz_options);
         if (fuzz_lockstep) |ls| {
             exe.root_module.addImport("lockstep", ls);
-            linkUnicorn(exe);
+            linkOracle(exe, oracle.?);
         }
         const run = b.addRunArtifact(exe);
         run.has_side_effects = true;
         if (b.args) |a| run.addArgs(a);
-        b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs -Demu=unicorn)", .{arch})).dependOn(&run.step);
+        b.step(b.fmt("fuzz-{s}", .{arch}), b.fmt("Fuzz the {s} T0 and lifter with random programs (-- --help for options; lockstep needs scripts/fetch.sh unicorn)", .{arch})).dependOn(&run.step);
         fuzz_exes[fuzz_i] = exe;
         fuzz_i += 1;
     }
@@ -1946,7 +1921,6 @@ fn addJitTestTools(b: *std.Build, test_step: *std.Build.Step, target: std.Build.
     long.addArgs(&.{ "--minutes", b.fmt("{d}", .{fuzz_minutes}), "--jobs", b.fmt("{d}", .{fuzz_jobs}), "--seed", b.fmt("{d}", .{fuzz_seed}) });
     for (fuzz_exes) |e| long.addArtifactArg(e);
     fuzz_long.dependOn(&long.step);
-    _ = hcpu;
 
     addX64check(b, fuzz_hcpu);
 

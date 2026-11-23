@@ -1,6 +1,6 @@
 //! Random FP and AdvSIMD instruction words and register values, for
 //! simd_oracle_test.zig's check against the host CPU and for fuzz-a64's
-//! lockstep against Unicorn (src/jit/check/gen_a64.zig).
+//! lockstep against the oracle (src/jit/check/gen_a64.zig, tools/lockstep.zig).
 
 const std = @import("std");
 const dec = @import("decode.zig");

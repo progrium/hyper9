@@ -1,4 +1,4 @@
-//! The emulator backend on h9's own CPUs (-Demu=hcpu): ha64 for arm64
+//! The emulator backend on h9's own CPUs (hcpu): ha64 for arm64
 //! binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by
 //! architecture at create.
 //!
@@ -251,7 +251,7 @@ pub fn Emu(comptime A64: type, comptime X86: type, comptime X64: type) type {
                 if (build_options.jit_verify) @import("hcpu").opt.verify = true;
                 const limit = opts.memory orelse if (web) web_default_memory else vmm.default_memory;
                 if (limit > (if (web) web_max_memory else vmm.max_memory)) return error.OutOfGuestMemory;
-                // Twice the cap in address space, as unicorn.zig does, so freed
+                // Twice the cap in address space, so freed
                 // ranges scattered through it don't run allocations out. Not
                 // on the web, where the arena is real memory in a 4 GiB space.
                 var arena = Arena.init(std.mem.alignForward(usize, @intCast(if (web) limit else 2 * limit), vmm.page_size)) catch return error.OutOfGuestMemory;

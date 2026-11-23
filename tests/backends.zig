@@ -1146,8 +1146,7 @@ test "pooled vCPUs carry FP state, the thread pointer and fork across processes 
 
 test "pooled vCPUs carry FP state and fork across processes amd64" {
     // As the arm64 test, with xmm8, MXCSR, the x87 control word and ST0
-    // (FS base isn't used by 9front binaries, and Unicorn's user mode
-    // can't write it without a GDT).
+    // (FS base isn't used by 9front binaries).
     const code = [_]u8{
         0x49, 0x89, 0xc4, // movq  %rax, %r12          Tos
         0x48, 0x83, 0xec, 0x20, // subq  $0x20, %rsp

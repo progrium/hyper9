@@ -1,5 +1,5 @@
 //! A reserved range of host memory that the emulator hands out guest pages
-//! from, so one Unicorn region covers them all (design/0018-linux-
+//! from, so one reservation covers them all (design/epoch-0/linux-
 //! personality.md, "The emulator in virtual-TLB mode"). Pages are zero when
 //! handed out: never-used ones always are, and freed ones are given back
 //! to the host, which zeroes them on their next touch, so neither an

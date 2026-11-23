@@ -1,5 +1,5 @@
 //! ha64: h9's own CPU for arm64 binaries, as a Guest of vmm/hcpu.zig
-//! (-Demu=hcpu), which has the interface. Its CPU is in src/interp/a64/
+//! (the emulator backend), which has the interface. Its CPU is in src/interp/a64/
 //! (T0, the interpreter) and src/jit/a64/, with the shared JIT layer in
 //! src/jit/ (src/hcpu.zig). On the web host T1 is src/jit/wasm_t1.zig's,
 //! compiling hot blocks to wasm.

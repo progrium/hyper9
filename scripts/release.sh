@@ -9,8 +9,8 @@
 #   SHA256SUMS
 #
 # Every binary is built from an unpacked `git archive` of HEAD, not the
-# checkout, so what ships is exactly the commit. There's no GPL build:
-# hcpu (-Demu=hcpu, the default) replaced Unicorn and h9-emu
+# checkout, so what ships is exactly the commit. There's one licence:
+# hcpu, always built in, is the emulator and there is no h9-emu
 # (design/hcpu.md).
 #
 #   scripts/release.sh [version]    (default: git describe --tags --always)
@@ -61,7 +61,7 @@ exe() { case "$1" in *windows*) echo "$2.exe" ;; *) echo "$2" ;; esac; }
 
 for t in $H9_TARGETS; do
 	name="h9-$version-$t"
-	build "$work/build-$t" "$t" -Demu=hcpu
+	build "$work/build-$t" "$t"
 	mkdir -p "$work/$name"
 	cp "$work/build-$t/bin/$(exe "$t" h9)" "$work/$name/"
 	cp "$src/LICENSE" "$work/$name/LICENSE"

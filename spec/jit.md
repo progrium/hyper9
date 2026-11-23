@@ -1,6 +1,6 @@
 # The emulator's CPUs: the shared layer
 
-This describes, as built, what h9's own CPUs share: the emulator backend they run under (`hcpu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU, [hx64](hx64.md) the amd64 one (h86 in long mode), and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [hcpu](../design/hcpu.md) proposal says why the CPUs exist and how they replace Unicorn and v86. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
+This describes, as built, what h9's own CPUs share: the emulator backend they run under (`hcpu`), their two tiers, the software TLB, and the JIT layer under `src/jit/`. [h86](h86.md) is the 386 CPU, [hx64](hx64.md) the amd64 one (h86 in long mode), and [ha64](ha64.md) the arm64 one; each of those specs covers what's particular to its architecture. [SPEC.md](../SPEC.md) describes h9 as a whole, and the [hcpu](../design/hcpu.md) proposal says why the CPUs exist and what they replaced. [src/jit/README.md](../src/jit/README.md) has the rules every front end and emitter codes against.
 
 ## Contents
 
@@ -19,7 +19,7 @@ This describes, as built, what h9's own CPUs share: the emulator backend they ru
 
 ## Overview
 
-`-Demu=hcpu` builds the emulator backend on h9's own CPUs instead of Unicorn: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the backend is created. The web build has the same three CPUs, with T1 on wasm for all of them.
+The emulator backend runs on h9's own CPUs, built into every `h9` for an arm64 or x86-64 target: ha64 for arm64 binaries, h86 for 386 binaries, and hx64 for amd64 binaries, picked by the binary's architecture when the backend is created. The web build has the same three CPUs, with T1 on wasm for all of them.
 
 Both CPUs are user mode only. There's no guest kernel, MMU, interrupt delivery, or devices: a system call, a fault, a breakpoint, or an undefined instruction ends `run` with a vmm exit, as the shim does on a hypervisor, and the Ureg's trap fields are what the real kernel would put there.
 
@@ -29,7 +29,7 @@ Each CPU has two tiers. T0 is an interpreter. T1 is a JIT that lifts regions of 
 
 `src/vmm/hcpu.zig` implements the vmm Backend, AddressSpace, and Vcpu over two Guests, `src/vmm/ha64.zig` and `src/vmm/h86.zig`. A Guest is the architecture-specific part: its register file, Ureg and Extra conversions, and its `run`. Everything else is shared.
 
-**Memory.** Guest pages come from one arena (`src/vmm/arena.zig`), as Unicorn's do: natively a reserved range of twice the memory cap in address space, whose pages stay unbacked until touched, and on the web real memory grown with `memory.grow`, 256 MiB by default and 2 GiB at most. An address space is a list of regions of the arena. `freePages` drops whatever was decoded or compiled from the pages it frees, so new contents never run stale code.
+**Memory.** Guest pages come from one arena (`src/vmm/arena.zig`): natively a reserved range of twice the memory cap in address space, whose pages stay unbacked until touched, and on the web real memory grown with `memory.grow`, 256 MiB by default and 2 GiB at most. An address space is a list of regions of the arena. `freePages` drops whatever was decoded or compiled from the pages it frees, so new contents never run stale code.
 
 **Views.** Each vCPU keeps its own copy of its address space's mappings, a `mem.View`, which it brings up to date before it runs guest code whenever the space's generation has moved. The TLB is filled from the View.
 
@@ -172,13 +172,12 @@ h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_
 
 | Option | Does |
 | --- | --- |
-| `-Demu=hcpu` | Builds the emulator on ha64 and h86, with both tiers |
 | `-Dno-jit` | T0 only, as on hosts that forbid generated code; `src/jit/` is left out |
 | `-Djit-check` | Every region checked against T0 as it runs ([Testing](#testing)) |
 | `-Djit-verify` | Every region verified after lifting and after `opt` (on by default in Debug and ReleaseSafe builds) |
 | `-Dhcpu-debug` | `src/interp` and `src/jit` built Debug too; otherwise they're ReleaseFast in a Debug h9 |
 
-`zig build web` always builds `-Demu=hcpu` with the wasm JIT. `--backend emu`, and `--backend v86` (the browser host's old backend, an alias), select the emulator; `--version` and `--check` report it as `hcpu (jit)` or `hcpu (interpreter)`.
+The emulator is always built in, with both tiers, and there's no option to pick another; `zig build web` builds it with the wasm JIT. `--backend emu`, and `--backend v86` (the browser host's old backend, an alias), select the emulator; `--version` and `--check` report it as `hcpu (jit)` or `hcpu (interpreter)`.
 
 | Variable | Does |
 | --- | --- |
@@ -196,12 +195,14 @@ h9.wasm imports `jit_compile` and `jit_drop`, and exports `jit_eval`, `jit_slow_
 
 T0 is the oracle for T1, and Unicorn, Berkeley TestFloat, and the host CPU are the oracles for T0.
 
-- **Region check** (`src/jit/check.zig`). A lifted region, run by `ir_eval` or as host code, and T0 start from the same Cpu and memory, each on a copy-on-touch shadow of the pages, and must end with the same exit, exit PC, fault address and access, instructions retired, registers and flags, and memory. `-Djit-check` runs every region of every guest program through it, so `zig build integration -Demu=hcpu -Djit-check` checks the whole integration suite.
+Unicorn is an independent implementation of all three architectures that runs whole programs, which no hypervisor h9 uses does for 386. `tools/lockstep.zig` runs it on a mirror of T0's pages and compares the two an instruction at a time: `zig build lockstep` runs its own tests, and the fuzzers use it. It's GPLv2, so only those test tools link it, from the prebuilt `libunicorn.a` that `scripts/fetch.sh unicorn` unpacks from its PyPI wheels (macOS arm64, and Linux arm64 and x86\_64, for which the tools are built for musl), and `zig build lockstep` fails with that hint without it; nothing h9 ships links it ([retire-unicorn](../design/retire-unicorn.md)).
+
+- **Region check** (`src/jit/check.zig`). A lifted region, run by `ir_eval` or as host code, and T0 start from the same Cpu and memory, each on a copy-on-touch shadow of the pages, and must end with the same exit, exit PC, fault address and access, instructions retired, registers and flags, and memory. `-Djit-check` runs every region of every guest program through it, so `zig build integration -Djit-check` checks the whole integration suite.
 - **Emitters against `ir_eval`.** `src/jit/emit/cases.zig` has a case for each op at each width, flags, memory with the slow path and faults, loops, and polls, and `emit/fuzz.zig` generates random regions. Native emitters run them natively; the wasm emitter runs them under Node and in Chromium (`zig build hcpu-web`).
-- **Fuzzers.** `zig build fuzz-a64` and `fuzz-x86` run random valid programs on T0 and T1 a region at a time, and against Unicorn in lockstep with `-Demu=unicorn`; `zig build fuzz-long` runs both for an hour across seeds. `zig build lockstep` runs the lockstep tests.
+- **Fuzzers.** `zig build fuzz-a64`, `fuzz-x86`, and `fuzz-x64` run random valid programs on T0 and T1 a region at a time, and against Unicorn in lockstep when its library has been fetched; `zig build fuzz-long` runs them for an hour across seeds.
 - **Litmus tests.** `zig build litmus` runs store buffering, message passing, and atomic counters on host threads, on T0, on T1 in `ir_eval`, and on T1 as host code, and tallies the outcomes.
 - **Cases.** `zig build hcpu` runs the CPU and JIT unit tests natively and under Node; `zig build a64-jit` and `x86-jit` run each CPU's backend cases on T0 and T1.
-- **Benchmarks.** `zig build bench -Demu=hcpu` times the compute loop, system call round trips, and the compute benchmarks on T0 and T1, with T1's dispatch counts.
+- **Benchmarks.** `zig build bench` times the compute loop, system call round trips, and the compute benchmarks on T0 and T1, with T1's dispatch counts.
 
 ## Layout
 

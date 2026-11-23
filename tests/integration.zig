@@ -3288,7 +3288,7 @@ const RootServer = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
         // The web host can't listen, so on it a native h9 serves
-        // (H9_TEST_SERVER, from -Dweb -Demu=unicorn), or the case skips.
+        // (H9_TEST_SERVER, from -Dweb), or the case skips.
         if (onWeb()) {
             const server = getenv(6, "H9_TEST_SERVER") orelse return error.SkipZigTest;
             try argv.appendSlice(gpa, &.{ server, "--backend", "auto", "--dir", e.root, "--net=enable" });
@@ -5686,7 +5686,7 @@ fn wssUrl(buf: []u8) ![]const u8 {
 }
 
 // websocket-9p on the browser host: the cases above run there too, under
-// -Dweb with -Demu=unicorn for their servers; these check what's
+// -Dweb with a native h9 for their servers; these check what's
 // particular to it.
 
 test "a ws:// root runs /bin/ls on the web host [websocket-9p, browser-host]" {

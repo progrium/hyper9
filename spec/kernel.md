@@ -56,7 +56,7 @@ Because calls clear that flag as they return, a note posted while one call is fi
 
 Each process runs on one vCPU at a time, and hypervisors cap the live vCPUs per VM (`hv_vm_get_max_vcpu_count` on HVF, `KVM_CAP_MAX_VCPUS` on KVM). On HVF a vCPU is bound to its thread, so a process past the cap can't simply borrow one: it needs pool threads that run the guest on its behalf.
 
-Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. A Unicorn engine has no limit but costs about 1.3 MiB of host memory and 0.3 ms to create.
+Measured on an M3 Max (macOS 15.8.1, 14 cores): `hv_vm_get_max_vcpu_count` reports 64, and the 65th live `hv_vcpu_create` fails with `HV_NO_RESOURCES`. Destroyed vCPUs free their slots, and a create takes about 120 µs. The emulator's limit is its own, 64 ([jit.md](jit.md#the-emulator-backend-hcpu)).
 
 So on HVF 64 is a hard cap on *live* processes, not just running ones, and a pipeline of 65 stages or `mk -j` with many jobs reaches it.
 
@@ -231,7 +231,7 @@ A root that's in the binary, so h9 runs with no tree to find ([builtin-root](../
 
 Its contents are the directories h9 binds onto (`bin dev env fd mnt/term/cwd net proc srv tmp usr`) and, for each architecture the build can run, the tree `zig build slim` makes ([multicall](../design/epoch-0/multicall.md)): `$arch/bin/9box`, a name per command, `rc/lib/rcmain`, and `adm/timezone/local`.
 
-The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds its target's architecture, with `-Demu=hcpu` (the default) all three, with `-Demu=unicorn` also `amd64` and `386`, and the web host `386`.
+The build reads the trees from `-Dbuiltin-root` (default `.local/9front`) by the pinned release's name, `slim-<release>-<arch>`, so a stale tree is never embedded; `h9` embeds all three on arm64 and x86-64 targets, since the emulator runs every architecture, only its target's architecture elsewhere, and the web host `386`.
 
 Entries with the same bytes share them (`tools/guesttree.zig`), so the command names cost a table entry each rather than a copy of `9box`, and the bytes are embedded with `@embedFile`.
 

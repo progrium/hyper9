@@ -152,9 +152,8 @@ there isn't (chapter 27).
 | Windows on ARM | *Not yet available ([whp](design/epoch-0/whp.md))* | The emulator |
 | Windows x86\_64 | ✓ (WHP, with the Windows Hypervisor Platform feature), with an amd64 root tree | The emulator |
 
-(Before hcpu, the emulator was Unicorn, which is GPL-licensed, so it
-shipped as a separate program, `h9-emu`. It isn't released anymore: `h9`
-does everything it did.)
+(Earlier releases shipped a GPL-licensed emulator as a separate program,
+`h9-emu`. It isn't released anymore: `h9` does everything it did.)
 
 **Host requirements.** On macOS, h9 must be signed with the hypervisor
 entitlement in `h9.entitlements`; `zig build` does that, and release binaries
@@ -325,8 +324,6 @@ If this fails, the message says why:
 | `h9: --dir DIR: not found` | 125 | Check the path, or `H9ROOT`, or run `zig build mkroot` |
 | `h9: --root was removed: use --dir PATH ...` | 2 | `--root` and its `--root-*` flags are now mount flags (chapter 21) |
 | `h9: mk: not found (not in the built-in root; ...)` | 127 | The command is only in the full tree: pass `--dir` or set `H9ROOT` |
-| `h9: cannot create auto machine for arm64: no usable hypervisor (is h9 signed with h9.entitlements?)` | 125 | Only in an `h9` built with `-Demu=none`: build with `zig build`, which signs it and builds the emulator in |
-| `h9: cannot create emu machine for arm64: the emulator isn't built into this h9 (build it with -Demu=hcpu)` | 125 | The `h9` was built with `-Demu=none`; rebuild it without that |
 | `h9: warning: no usable hypervisor; using the emulator` | | Not an error: h9 fell back to the emulator |
 | `h9: cannot create kvm machine for amd64: no access to /dev/kvm (is your user in the kvm group?)` | 125 | Only with `--backend kvm`: add yourself to the `kvm` group, or leave `--backend` off |
 | `h9: warning: the native backend runs guest code in h9's own process and is not a security boundary` | | Not an error: `--backend native` was chosen; use a hypervisor or the emulator to contain an untrusted guest |
@@ -2718,9 +2715,8 @@ A **backend** is what runs guest code:
 usable, and can run the program's architecture, and otherwise the emulator,
 printing `h9: warning: no usable hypervisor; using the emulator`. It never
 chooses the native backend, which shares h9's process and isn't a security
-boundary; where only native could run (Linux x86\_64 without KVM, in an
-`h9` built with `-Demu=none`), `auto` fails and points you at `--backend
-native` as an explicit choice for a trusted guest. Naming a backend uses
+boundary, so on Linux x86\_64 without KVM it runs the emulator, and
+`--backend native` is an explicit choice for a trusted guest. Naming a backend uses
 that one or fails with exit 125, and `--backend native` warns that it isn't
 a security boundary. `h9 --check` lists each backend built in and whether it
 works here.
@@ -2821,7 +2817,7 @@ work too
 
 **Exit 125: h9 couldn't run anything.** The message says why: no root tree
 a root that isn't there (`h9: --dir DIR: not found`, chapter 2), no usable backend (`zig build` signs h9 on macOS; join the
-`kvm` group on Linux; or rebuild without `-Demu=none`; `h9 --check` says which backends
+`kvm` group on Linux; `h9 --check` says which backends
 work), a 9P root that refused the connection or wants authentication, or
 too little memory (`OutOfGuestMemory`: raise `--memory`).
 

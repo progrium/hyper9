@@ -429,7 +429,7 @@ fn h9Binary(c: Ctx) []const u8 {
     const h9 = if (c.env.get("H9")) |v| (if (v.len > 0) v else null) else null;
     const path = h9 orelse c.join(&.{ c.repo, "zig-out", "bin", "h9" ++ exe_suffix });
     Dir.cwd().access(c.io, path, .{ .execute = builtin.os.tag != .windows }) catch
-        die("no h9 at {s} (zig build, with -Demu=unicorn on hosts without an arm64 hypervisor, or set $H9)", .{path});
+        die("no h9 at {s} (zig build, or set $H9)", .{path});
     return path;
 }
 
@@ -440,15 +440,7 @@ fn checkH9(c: Ctx) void {
     if (archOf(builtin.cpu.arch) == arm64) return;
     const r = std.process.run(c.gpa, c.io, .{ .argv = &.{ h9, "--check" } }) catch |e| die("{s} --check: {t}", .{ h9, e });
     if (std.mem.indexOf(u8, r.stdout, "\nbackend emu: ok") != null) return;
-    die("{s} has no emulator, which building /{s} needs on this host to run the tree's arm64 compilers; build one with hcpu and pass it as $H9:\n" ++
-        "  zig build -Demu=hcpu -Dtarget={t}-{t}{s} --prefix .local/h9-hcpu\n" ++
-        "  H9=.local/h9-hcpu/bin/h9 zig build mkroot", .{
-        h9,
-        arches[archOf(builtin.cpu.arch)],
-        builtin.cpu.arch,
-        builtin.os.tag,
-        if (builtin.os.tag == .linux) "-musl" else "",
-    });
+    die("{s} has no emulator, which building /{s} needs on this host to run the tree's arm64 compilers; build h9 for this host with zig build (it has hcpu built in), or pass one as $H9", .{ h9, arches[archOf(builtin.cpu.arch)] });
 }
 
 /// Copies the tree at `src` to `dst`, keeping symbolic links as links.

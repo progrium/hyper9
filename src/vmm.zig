@@ -15,20 +15,16 @@ pub const ia32 = @import("arch/i386.zig"); // `i386` is a primitive type name
 const hvf = if (have_hvf) @import("vmm/hvf.zig") else @import("vmm/none.zig");
 const kvm = if (have_kvm) @import("vmm/kvm.zig") else @import("vmm/none.zig");
 const whp = if (have_whp) @import("vmm/whp.zig") else @import("vmm/none.zig");
-/// The emulator: Unicorn (-Demu=unicorn), or h9's own CPUs (-Demu=hcpu),
-/// which pick ha64, h86, or hx64 by the binary's architecture (vmm/hcpu.zig).
-const emu = if (!have_emu) @import("vmm/none.zig") else switch (build_options.emu) {
-    .unicorn => @import("vmm/unicorn.zig"),
-    .hcpu => @import("vmm/hcpu.zig"),
-    .none => unreachable,
-};
+/// The emulator: h9's own CPUs, which pick ha64, h86, or hx64 by the
+/// binary's architecture (vmm/hcpu.zig), on every target with a JIT.
+const emu = if (have_emu) @import("vmm/hcpu.zig") else @import("vmm/none.zig");
 const nat = if (have_native) @import("vmm/native.zig") else @import("vmm/none.zig");
 
 const have_hvf = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 const have_kvm = builtin.os.tag == .linux and (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64);
 const have_whp = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
-/// The web host has h9's own CPUs (-Demu=hcpu), but not Unicorn.
-const have_emu = build_options.emu != .none and !(web and build_options.emu == .unicorn);
+/// hcpu is built in on arm64 and x86-64 targets and the web host.
+const have_emu = build_options.emu == .hcpu;
 /// The native backend (design/epoch-0/native-backend.md): Linux x86_64 for now.
 const have_native = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
 /// The web host (design/epoch-0/browser-host.md), whose backend is hcpu.
@@ -324,22 +320,22 @@ pub const Fxsave = extern struct {
 
 /// h9's own emulator (vmm/hcpu.zig) when it's the one built in, for
 /// benchmarks: its `retired_total`. Null otherwise.
-pub const hcpu: ?type = if (have_emu and build_options.emu == .hcpu) emu else null;
+pub const hcpu: ?type = if (have_emu) emu else null;
 
 /// Guest instructions the emulator has retired so far, where it counts
-/// them (-Demu=hcpu); null otherwise.
+/// them; null otherwise.
 pub fn emuRetired() ?u64 {
     return if (comptime hcpu) |z| z.retired_total.load(.monotonic) else null;
 }
 
 /// T1's dispatch counts so far (compiled, entries, linked, t0), where
-/// the emulator has a T1 (-Demu=hcpu); null otherwise.
+/// the emulator is built in; null otherwise.
 pub fn emuT1Stats() ?[4]u64 {
     return if (comptime hcpu) |z| z.t1Stats() else null;
 }
 
 /// Host addresses of the emulator's last vCPU run (Cpu, guest arena,
-/// code region, stack), where it's built in (-Demu=hcpu); null otherwise.
+/// code region, stack), where it's built in; null otherwise.
 pub fn emuLayout() ?[4]usize {
     if (comptime hcpu) |z| {
         const l = z.layout;
@@ -348,7 +344,7 @@ pub fn emuLayout() ?[4]usize {
     return null;
 }
 
-/// The emulator's name and version ("hcpu (jit)", or "Unicorn 2.1"), or null if it isn't built in.
+/// The emulator's name and version ("hcpu (jit)" or "hcpu (interpreter)"), or null if it isn't built in.
 pub fn emuVersion(buf: []u8) ?[]const u8 {
     return if (have_emu) emu.version(buf) else null;
 }
@@ -438,11 +434,11 @@ pub const Backend = union(Kind) {
     /// The optional CPU features beyond `arch`'s baseline that this
     /// backend runs, as Linux's AT_HWCAP bits for that arch: on arm64, the
     /// emulator's Armv8.1 atomics, CRC32, AES with PMULL, SHA1, and
-    /// SHA256. Hardware backends, and Unicorn's, say none, and a program
+    /// SHA256. Hardware backends say none, and a program
     /// finds what the CPU has by trying.
     pub fn hwcaps(b: Backend, arch: Arch) u64 {
         return switch (b) {
-            .emu => if (build_options.emu != .hcpu) 0 else switch (arch) {
+            .emu => if (!have_emu) 0 else switch (arch) {
                 .arm64 => hwcap_arm64_aes | hwcap_arm64_pmull | hwcap_arm64_sha1 | hwcap_arm64_sha2 | hwcap_arm64_crc32 | hwcap_arm64_atomics,
                 else => 0,
             },

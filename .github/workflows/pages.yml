@@ -80,7 +80,7 @@ jobs:
       - name: arm64 9front layer for the Linux page
         if: steps.nine-arm64-web.outputs.cache-hit != 'true'
         run: |
-          zig build -Demu=hcpu -Doptimize=ReleaseSafe
+          zig build -Doptimize=ReleaseSafe
           scripts/nine-arm64-web.sh
       - run: zig build web -Doptimize=ReleaseSafe -Dweb-root=.local/9front/root386
       # The Wine page's demo, from the wine-draw branch, in wine-draw/.
@@ -102,7 +102,7 @@ jobs:
           scripts/fetch.sh wine
           scripts/wine-root.sh 386
           zig build wine
-          zig build -Demu=hcpu -Dgfx=headless -Doptimize=ReleaseSafe
+          zig build -Dgfx=headless -Doptimize=ReleaseSafe
           scripts/wine-web.sh
       - name: The Wine page's demo, from wine-draw
         id: wine-demo

@@ -75,11 +75,9 @@ adds the backend's own libraries.
 
 **In this repository.** The example is wired up this way in `build.zig`
 (`embed_example`): a `b.addExecutable` whose root module imports `mod`,
-then the same three things the `h9` executable does:
+then the same two things the `h9` executable does:
 
 - on macOS, `linkFramework("Hypervisor")` and the SDK paths (`addSdkPaths`);
-- `linkUnicorn(exe)`, which does nothing unless the build asks for the
-  Unicorn emulator with `-Demu=unicorn`, a development option;
 - on macOS, an ad-hoc `codesign` with [h9.entitlements](../h9.entitlements)
   before the program runs, because HVF refuses to create a VM without the
   hypervisor entitlement.
@@ -104,13 +102,10 @@ if (target.result.os.tag == .macos) exe.root_module.linkFramework("Hypervisor", 
 ```
 
 That builds in the host's hypervisor backend and h9's own emulator, hcpu,
-which is the default (`.emu = .hcpu`) and needs no other libraries. Pass
-`.emu = .none` to leave the emulator out. Everything that goes into the
-program is MIT licensed, apart from drawterm's kernel, which is under
-drawterm's own license
-([third_party/drawterm/LICENSE](../third_party/drawterm/LICENSE)). The
-`.unicorn` emulator is GPLv2 and only for h9's own lockstep testing, so
-don't ship it ([spec/engines.md](../spec/engines.md#emulator-backend-emu)).
+which is always built in on arm64 and x86-64 targets and needs no other
+libraries. Everything that goes into the program is MIT licensed, apart
+from drawterm's kernel, which is under drawterm's own license
+([third_party/drawterm/LICENSE](../third_party/drawterm/LICENSE)).
 
 On a Mac your build also has to sign the binary with the entitlement, as
 above, and set `SDKROOT` if Zig can't find the SDK (`scripts/env.sh` does).
@@ -307,7 +302,7 @@ such as `write = .none` with `writable` paths or `net = .disable` with
 | `.kvm` | Linux on arm64 or x86\_64, with access to `/dev/kvm` | the host's: arm64 or amd64 | always, on those hosts ([kvm](../design/epoch-0/kvm.md)) |
 | `.native` | Linux x86\_64, 5.11 or later | amd64 | always, on that host ([native-backend](../design/epoch-0/native-backend.md)) |
 | `.whp` | Windows x86\_64, with the Windows Hypervisor Platform feature | amd64 | always, on that host ([whp](../design/epoch-0/whp.md)) |
-| `.emu` | any | arm64, amd64, 386 | unless `-Demu=none` ([hcpu](../design/hcpu.md)) |
+| `.emu` | any | arm64, amd64, 386 | on arm64 and x86-64 targets ([hcpu](../design/hcpu.md)) |
 
 On KVM, h9 blocks `SIGRTMIN + 1` in the threads that run vCPUs and sends it
 to kick them out of the guest. Leave that signal to h9: don't unblock it or

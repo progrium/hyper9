@@ -292,7 +292,7 @@ pub const Op = enum(u16) {
     /// Flags of a left shift (SHL, SHLD): a is the source shifted by
     /// count - 1, b the result. CF = msb(a), OF = msb(a ^ b), AF = 0, and
     /// SF ZF PF from b. The undefined flags are QEMU's, so lockstep with
-    /// Unicorn matches. A count of 0 never gets here: it keeps the flags.
+    /// its oracle matches. A count of 0 never gets here: it keeps the flags.
     @"eflags.shl" = 106,
     /// Flags of a right shift (SHR, SAR, SHRD): a is the source shifted by
     /// count - 1, b the result. CF = a & 1, OF = msb(a ^ b), AF = 0, SF ZF

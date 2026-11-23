@@ -19,8 +19,9 @@ NINEFRONT_AMD64_ISO_SHA256=ee90b5e8a8d6b4ee8ad950322f91e338f698dae18c7f5e5800a65
 # GOTOOLCHAIN=go$GO_VERSION makes any installed Go fetch this exact release.
 GO_VERSION=1.27.3
 
-# Prebuilt static Unicorn for the emu backend (-Demu=unicorn), taken from the
-# PyPI wheels. GPLv2: dev and CI builds only. No Windows arm64 wheel exists.
+# Prebuilt static Unicorn, taken from the PyPI wheels: zig build lockstep's
+# oracle (tools/lockstep.zig), linked only into the test tools. GPLv2, so
+# never into h9 (design/retire-unicorn.md).
 UNICORN_VERSION=2.1.4
 UNICORN_WHEEL_URL=https://files.pythonhosted.org/packages/py2/u/unicorn
 # name  wheel-platform-tag  sha256
@@ -29,11 +30,6 @@ aarch64-macos macosx_11_0_arm64 8a7a94e67ce277c63112afa06640862b6c7395b8d42aec38
 aarch64-linux-musl musllinux_1_2_aarch64 35ac021ead8c992b15a511be73bf703429e5d346136ae38e6307c3d852655341
 x86_64-linux-musl musllinux_1_2_x86_64 73d2eb557cc0255f18c55b15951c46dff1c07f996588df4cea1b1bdc5d69b184
 "
-# Unicorn source, for building it with Zig (build/unicorn.zig): fetch.sh
-# unpacks it into .local/src/unicorn and applies third_party/unicorn/patches.
-# Same version as the wheels. GPLv2: dev and lockstep testing only.
-UNICORN_SRC_URL=https://github.com/unicorn-engine/unicorn/archive/refs/tags/$UNICORN_VERSION.tar.gz
-UNICORN_SRC_SHA256=ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4
 
 # An Alpine root for the Linux personality's tests (design/epoch-0/linux-personality.md):
 # the alpine:3.22.2 image's single layer from Docker Hub, by digest, unpacked

@@ -1,18 +1,17 @@
 # Real-world workloads
 
 Programs people run, on each of the emulator's tiers, with their output
-checked against a reference (native, or Unicorn) and their wall time.
+checked against a reference (native, or T0, the interpreter) and their
+wall time.
 
     tools/workloads/roots.sh     # the arm64 and 386 Alpine roots, once
-    zig build -Demu=hcpu -Doptimize=ReleaseFast -p .local/workloads/h9-zig
-    zig build -Demu=unicorn -Doptimize=ReleaseFast -p .local/workloads/h9-unicorn
+    zig build -Doptimize=ReleaseFast -p .local/workloads/h9-zig
     tools/workloads/run.sh       # every workload on every tier
     tools/workloads/run.sh a64-  # only those whose names contain a64-
     TIERS="hvf t1" tools/workloads/run.sh a64-   # on an arm64 Mac
     tools/workloads/run.sh -n    # list them
 
-On Linux, -Demu=unicorn also needs -Dtarget=x86_64-linux-musl (or
-aarch64-linux-musl). The workloads:
+The workloads:
 
 - arm64 Alpine 3.22: python3 (`sum(range(10**7))` and bench.py, a
   pure-Python benchmark), SQLite's speedtest1 (main test set, size 25, in

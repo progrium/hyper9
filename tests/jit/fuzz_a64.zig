@@ -1,6 +1,7 @@
 //! zig build fuzz-a64 [-- options]: random arm64 programs (src/jit/check/
-//! gen_a64.zig), each checked T1 against T0 a region at a time and, when
-//! built with -Demu=unicorn, T0 against Unicorn an instruction at a time.
+//! gen_a64.zig), each checked T1 against T0 a region at a time and, with
+//! Unicorn's prebuilt library fetched (scripts/fetch.sh unicorn), T0
+//! against Unicorn an instruction at a time (tools/lockstep.zig).
 //!
 //! Options: see fuzz_common.zig (`--without` takes gen_a64.Class names).
 //!
@@ -47,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     // H9_FUZZ_COPY=1: copy register-only instructions (copy.zig), checked
     // on ir_eval and, with --native, by the arm64 emitter's lowering.
     if (init.environ_map.get("H9_FUZZ_COPY")) |v| hcpu.a64.copy.enabled = v.len > 0 and v[0] == '1';
-    std.debug.print("fuzz-a64: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs -Demu=unicorn)" });
+    std.debug.print("fuzz-a64: seed {d}, {d} programs of {d}; region check {s}, lockstep {s}\n", .{ args.seed, args.iters, args.len, if (args.check) "on" else "off", if (args.lockstep) "on" else if (options.unicorn) "off" else "off (needs scripts/fetch.sh unicorn)" });
 
     const s = try gpa.create(fuzz.Space);
     defer gpa.destroy(s);
